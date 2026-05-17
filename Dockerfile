@@ -19,6 +19,11 @@ RUN apt-get update -qq && \
     rm -rf /var/lib/apt/lists/*
 
 ENV LIBCLANG_PATH=/usr/lib/llvm-18/lib
+# Serialise rustc invocations to limit peak memory usage in resource-constrained
+# environments (e.g. Docker Desktop with ≤2 GiB). CI runners with ≥4 GiB will
+# override via CARGO_BUILD_JOBS at build time if desired.
+ENV CARGO_BUILD_JOBS=1
+ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 
 WORKDIR /build
 
