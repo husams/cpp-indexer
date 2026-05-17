@@ -352,6 +352,9 @@ async fn phase5_schema_version_mismatch_is_refused() {
             // Return a version that will never match the current binary's tag.
             Ok(Some("cxg-schema-v0".to_owned()))
         }
+        async fn write_schema_version(&self, _tag: &str, _attrs_json: &str) -> CxgResult<()> {
+            Ok(())
+        }
         async fn health(&self) -> CxgResult<HealthInfo> {
             Ok(HealthInfo {
                 status: "ok".to_owned(),

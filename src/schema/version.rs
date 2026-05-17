@@ -24,6 +24,63 @@ pub const SCHEMA_VERSION_TAG: &str = "cxg-schema-v4";
 /// Magic key stored in Parquet KV metadata; Phase 3 refuses mismatched-version shards.
 pub const PARQUET_MAGIC: &str = "cxg_parquet_v4";
 
+/// Build the `attrs_json` payload for the `SchemaVersion` node written by Phase 4.
+///
+/// Per ADR-9: the node carries `version: u32`, `tag: String`, `indexer_commit: String`,
+/// `libclang_version: String`, and `wrote_at: ISO8601`.
+///
+/// `indexer_commit` is supplied by the caller (baked from `build.rs` via
+/// `env!("CXG_INDEXER_COMMIT")`); `wrote_at` is the current UTC timestamp.
+/// `libclang_version` is obtained from `clang::get_version()` and passed in.
+pub fn schema_version_attrs(indexer_commit: &str, libclang_version: &str) -> String {
+    let wrote_at = {
+        // RFC 3339 / ISO 8601: use SystemTime → seconds since epoch and format manually
+        // so we avoid pulling in `chrono` for a single timestamp.
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Format as YYYY-MM-DDTHH:MM:SSZ using integer arithmetic (UTC only).
+        let s = secs;
+        let sec = s % 60;
+        let min = (s / 60) % 60;
+        let hour = (s / 3600) % 24;
+        let days = s / 86400; // days since 1970-01-01
+
+        // Gregorian calendar conversion from days since epoch.
+        let (year, month, day) = days_to_ymd(days);
+
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+    };
+
+    serde_json::json!({
+        "version": SCHEMA_VERSION,
+        "tag": SCHEMA_VERSION_TAG,
+        "indexer_commit": indexer_commit,
+        "libclang_version": libclang_version,
+        "wrote_at": wrote_at,
+    })
+    .to_string()
+}
+
+/// Convert days since Unix epoch (1970-01-01) to `(year, month, day)` in UTC.
+///
+/// Uses the Gregorian calendar proleptic algorithm.
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Algorithm: http://howardhinnant.github.io/date_algorithms.html (civil_from_days)
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z % 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
 /// Verify at test-time that the tag string is consistent with the integer constant.
 ///
 /// This fires only in debug/test builds; not a runtime overhead.
@@ -55,5 +112,44 @@ mod tests {
             PARQUET_MAGIC.contains(&format!("v{SCHEMA_VERSION}")),
             "PARQUET_MAGIC must embed the version string"
         );
+    }
+
+    #[test]
+    fn schema_version_attrs_is_valid_json() {
+        let attrs = schema_version_attrs("abc123", "libclang 18.0");
+        let v: serde_json::Value =
+            serde_json::from_str(&attrs).expect("schema_version_attrs must produce valid JSON");
+        assert_eq!(v["version"], SCHEMA_VERSION);
+        assert_eq!(v["tag"], SCHEMA_VERSION_TAG);
+        assert_eq!(v["indexer_commit"], "abc123");
+        assert_eq!(v["libclang_version"], "libclang 18.0");
+        assert!(
+            v["wrote_at"].as_str().unwrap().contains('T'),
+            "wrote_at must be ISO8601"
+        );
+    }
+
+    #[test]
+    fn schema_version_attrs_embeds_current_version() {
+        let attrs = schema_version_attrs("deadbeef", "18.x");
+        let v: serde_json::Value = serde_json::from_str(&attrs).unwrap();
+        assert_eq!(
+            v["version"].as_u64().unwrap() as u32,
+            SCHEMA_VERSION,
+            "attrs version must match SCHEMA_VERSION constant"
+        );
+    }
+
+    #[test]
+    fn days_to_ymd_epoch_is_1970_01_01() {
+        let (y, m, d) = days_to_ymd(0);
+        assert_eq!((y, m, d), (1970, 1, 1));
+    }
+
+    #[test]
+    fn days_to_ymd_known_date() {
+        // 2024-01-01 = day 19723 since epoch.
+        let (y, m, d) = days_to_ymd(19_723);
+        assert_eq!((y, m, d), (2024, 1, 1));
     }
 }

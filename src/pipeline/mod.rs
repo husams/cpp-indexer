@@ -37,6 +37,7 @@ use crate::resolve::per_repo::resolve_per_repo;
 use crate::schema::arrow::{record_batch_to_edges, record_batch_to_nodes};
 use crate::schema::edges::EdgeKind;
 use crate::schema::nodes::NodeKind;
+use crate::schema::version::{schema_version_attrs, SCHEMA_VERSION_TAG};
 use crate::schema::{EdgeRecord, NodeRecord};
 use crate::sink::GraphSink;
 use crate::stage::manifest::{Manifest, ManifestEntry};
@@ -236,6 +237,18 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
     info!("Phase 4: writing to sink '{}'", sink.backend_name());
     sink.preflight().await?;
     sink.ensure_indexes().await?;
+
+    // Write the SchemaVersion singleton node (ADR-9, AC-M6-6).
+    // `CXG_INDEXER_COMMIT` is baked in by build.rs when available; falls back
+    // to "unknown" so tests and local builds without a git repo still compile.
+    let indexer_commit = option_env!("CXG_INDEXER_COMMIT").unwrap_or("unknown");
+    let sv_attrs = schema_version_attrs(indexer_commit, &libclang_version);
+    sink.write_schema_version(SCHEMA_VERSION_TAG, &sv_attrs)
+        .await?;
+    info!(
+        "Phase 4: SchemaVersion node written (tag={})",
+        SCHEMA_VERSION_TAG
+    );
 
     // Load staged nodes and edges produced by Phases 1–3.
     let mut node_records = load_nodes_from_stage(&stage_dir)?;

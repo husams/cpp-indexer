@@ -68,6 +68,16 @@ const PROP_LOCK_HOLDER: &str = "holder";
 const SCHEMA_VERSION_TYPE: &str = "cxg_schema_version";
 /// Schema-version property name.
 const PROP_SCHEMA_VERSION: &str = "version";
+/// Property name for the full attrs JSON blob on the schema-version vertex.
+const PROP_SCHEMA_ATTRS_JSON: &str = "attrs_json";
+/// Fixed UUID for the singleton schema-version vertex (upsert target).
+///
+/// Using a deterministic UUID means `write_schema_version` can MERGE
+/// (delete + re-insert) rather than scanning for an existing vertex.
+/// Value: UUIDv5 of namespace + "cxg_schema_version_singleton".
+const SCHEMA_VERSION_UUID: Uuid = Uuid::from_bytes([
+    0x3d, 0x1a, 0x2e, 0x5f, 0x8c, 0x4b, 0x57, 0x9a, 0xb1, 0x6e, 0xd2, 0xf3, 0xa4, 0x05, 0xc8, 0x1d,
+]);
 
 /// Total retry attempts (first attempt + up to 2 retries = 3 total).
 const MAX_ATTEMPTS: u32 = 3;
@@ -523,6 +533,33 @@ impl GraphSink for IndraDbSink {
             }
         }
         Ok(None)
+    }
+
+    async fn write_schema_version(&self, tag: &str, attrs_json: &str) -> Result<()> {
+        let mut c = self.client();
+        let vid = SCHEMA_VERSION_UUID;
+        let vtype = ident(SCHEMA_VERSION_TYPE)?;
+
+        // Delete any existing singleton vertex first, then re-insert.
+        // IndraDB lacks native upsert; delete-then-insert gives idempotency.
+        let del_q = indradb::SpecificVertexQuery::single(vid);
+        // Ignore "not found" — vertex may not exist on first write.
+        let _ = c.delete(del_q).await;
+
+        let items = vec![
+            BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)),
+            BulkInsertItem::VertexProperty(
+                vid,
+                ident(PROP_SCHEMA_VERSION)?,
+                Json::new(serde_json::Value::String(tag.to_owned())),
+            ),
+            BulkInsertItem::VertexProperty(
+                vid,
+                ident(PROP_SCHEMA_ATTRS_JSON)?,
+                json_str(attrs_json)?,
+            ),
+        ];
+        c.bulk_insert(items).await.map_err(wrap)
     }
 
     async fn health(&self) -> Result<HealthInfo> {
