@@ -15,6 +15,7 @@ use tracing::info;
 
 use cpp_indexer::pipeline::{run, RunOptions};
 use cpp_indexer::sink::factory;
+use cpp_indexer::visit::modules_cpp20;
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -22,11 +23,15 @@ use cpp_indexer::sink::factory;
 
 /// Index a C++ repository into a graph database.
 #[derive(Debug, Parser)]
-#[command(name = "cxg-index", version, about)]
+#[command(name = "cxg-index", about, disable_version_flag = true)]
 struct Cli {
+    /// Print version information (including C++20 module capability) and exit.
+    #[arg(short = 'V', long = "version", action = clap::ArgAction::SetTrue)]
+    print_version: bool,
+
     /// Path to the file, directory, or repository root to index.
-    #[arg(value_name = "PATH")]
-    input_path: PathBuf,
+    #[arg(value_name = "PATH", required = false)]
+    input_path: Option<PathBuf>,
 
     /// Path to `compile_commands.json`. Auto-detected when absent.
     #[arg(long, value_name = "PATH")]
@@ -90,20 +95,36 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Build a SinkConfig from CLI flags (config-file support is a later story).
+    // Handle --version: print version + C++20 module capability note, then exit.
+    if cli.print_version {
+        println!("cxg-index {}", env!("CARGO_PKG_VERSION"));
+        if let Some(note) = modules_cpp20::capability_version_note() {
+            println!("{note}");
+        }
+        return Ok(());
+    }
+
+    // Build a SinkConfig from CLI flags before moving fields out of cli.
     let sink_config = build_sink_config(&cli)?;
+    let backend_name_hint = cli.backend.clone();
+
+    // input_path is required when not printing version.
+    let input_path = cli
+        .input_path
+        .ok_or_else(|| anyhow::anyhow!("PATH argument is required; run with --help for usage"))?;
+
     let sink = factory::create(&sink_config)
         .await
-        .with_context(|| format!("failed to connect to {} sink", cli.backend))?;
+        .with_context(|| format!("failed to connect to {backend_name_hint} sink"))?;
 
     info!(
         "cxg-index: starting pipeline for {:?} → sink '{}'",
-        cli.input_path,
+        input_path,
         sink.backend_name()
     );
 
     let opts = RunOptions {
-        input_path: cli.input_path,
+        input_path,
         compile_commands: cli.compile_commands,
         repo_name: cli.repo_name,
         stage_dir: cli.stage_dir,
