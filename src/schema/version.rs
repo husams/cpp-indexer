@@ -11,17 +11,18 @@
 /// ENUM, HEADER node kinds and INCLUDES, OVERRIDES, INSTANTIATES, SPECIALIZES, FRIEND_OF,
 /// ADL_CANDIDATE edge kinds.
 /// Bumped in S22 (repo-nodes): added REPO node kind and BELONGS_TO_REPO edge kind.
+/// Bumped in S26 (macros): added MACRO node kind and EXPANDS_TO edge kind.
 /// Any further change to NodeKind/EdgeKind variants must bump again per ADR-9.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Human-readable schema tag derived from `SCHEMA_VERSION`.
 ///
 /// ADR-9 references `const_format::concatcp!` to derive this; since `const_format` is not in
 /// Cargo.toml, we use a hand-written string literal with a `debug_assert!` to keep them in sync.
-pub const SCHEMA_VERSION_TAG: &str = "cxg-schema-v3";
+pub const SCHEMA_VERSION_TAG: &str = "cxg-schema-v4";
 
 /// Magic key stored in Parquet KV metadata; Phase 3 refuses mismatched-version shards.
-pub const PARQUET_MAGIC: &str = "cxg_parquet_v3";
+pub const PARQUET_MAGIC: &str = "cxg_parquet_v4";
 
 /// Verify at test-time that the tag string is consistent with the integer constant.
 ///

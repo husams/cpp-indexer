@@ -1,9 +1,9 @@
-/// CodexGraph node kinds (AC-M1-2, AC-M2-1..AC-M2-6, AC-M4-1).
+/// CodexGraph node kinds (AC-M1-2, AC-M2-1..AC-M2-6, AC-M4-1, AC-M5-1).
 ///
 /// M1 base: `MODULE`, `CLASS`, `FUNCTION`, `METHOD`, `FIELD`, `GLOBAL_VARIABLE`.
 /// M2 extensions (S14): `NAMESPACE`, `TEMPLATE_DECL`, `SPECIALIZATION`, `TYPEDEF`, `ENUM`, `HEADER`.
 /// M4 additions (S22): `REPO`.
-/// `MACRO` is added in S26.
+/// M5 additions (S26): `MACRO`.
 ///
 /// Adding new variants bumps `SCHEMA_VERSION` per ADR-9 (bump policy: any change to
 /// `NodeKind` or `EdgeKind` variants requires a version bump in the same PR).
@@ -48,6 +48,19 @@ pub enum NodeKind {
     /// - `sink`: backend name (`"neo4j"` or `"indradb"`).  Used by Phase 5
     ///   to detect heterogeneous-sink configurations (AC-M4-3 enforcement in S23).
     Repo,
+
+    // ── M5 additions (S26) ──────────────────────────────────────────────────
+    /// A preprocessor macro definition (`#define`).  AC-M5-1.
+    ///
+    /// Attributes carried in `attrs_json`:
+    /// - `params`: JSON array of parameter name strings for function-like macros;
+    ///   `null` for object-like macros.
+    /// - `is_function_like`: `true` for function-like macros, `false` otherwise.
+    /// - `is_builtin`: `true` when libclang reports the macro as builtin.
+    ///
+    /// USR is synthesised as `"macro:<file>:<name>"` because libclang does not
+    /// assign USRs to `MacroDefinition` entities.
+    Macro,
 }
 
 impl NodeKind {
@@ -67,6 +80,7 @@ impl NodeKind {
             NodeKind::Enum => "ENUM",
             NodeKind::Header => "HEADER",
             NodeKind::Repo => "REPO",
+            NodeKind::Macro => "MACRO",
         }
     }
 
@@ -86,6 +100,7 @@ impl NodeKind {
             NodeKind::Enum,
             NodeKind::Header,
             NodeKind::Repo,
+            NodeKind::Macro,
         ]
     }
 
@@ -109,6 +124,7 @@ impl NodeKind {
             "ENUM" => Some(NodeKind::Enum),
             "HEADER" => Some(NodeKind::Header),
             "REPO" => Some(NodeKind::Repo),
+            "MACRO" => Some(NodeKind::Macro),
             _ => None,
         }
     }
