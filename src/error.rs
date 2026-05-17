@@ -11,6 +11,9 @@ pub enum Error {
     #[error("libclang error: {0}")]
     Clang(String),
 
+    #[error("config error at `{field}`: {detail}")]
+    Config { field: String, detail: String },
+
     #[error("compile_commands.json error in {path}: {message}")]
     CompileCommands { path: PathBuf, message: String },
 

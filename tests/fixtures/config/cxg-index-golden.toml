@@ -1,0 +1,19 @@
+# Golden fixture for cxg-index.toml — used by config unit tests.
+
+[repo]
+path = "/workspace/my-project"
+# compile_commands is auto-detected when absent
+
+[index]
+workers = 8
+skip_phase2 = false
+stage_dir = "/tmp/cxg-stage"
+
+[sink]
+backend = "neo4j"
+
+[sink.neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password_env = "NEO4J_PASSWORD"
+sessions = 16
