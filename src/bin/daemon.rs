@@ -117,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
         sink,
         listen: listen_addr,
         version: env!("CARGO_PKG_VERSION").to_owned(),
+        workspace_cfg: config.workspace.clone(),
     };
     let router = build_router(state, token);
 

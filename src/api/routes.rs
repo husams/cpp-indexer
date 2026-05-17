@@ -30,7 +30,7 @@ use super::{
     jobs::{IngestRequest, IngestSource, JobQueue, JobState, RepoInfo, RepoRegistry},
     problem::Problem,
 };
-use crate::sink::GraphSink;
+use crate::{config::WorkspaceConfig, sink::GraphSink};
 
 // ── AppState ───────────────────────────────────────────────────────────────────
 
@@ -42,6 +42,8 @@ pub struct AppState {
     pub sink: Arc<dyn GraphSink>,
     pub listen: SocketAddr,
     pub version: String,
+    /// Optional workspace config (required for git_url ingest).
+    pub workspace_cfg: Option<WorkspaceConfig>,
 }
 
 // ── Router builder ─────────────────────────────────────────────────────────────
@@ -77,15 +79,53 @@ async fn ingest(
     State(state): State<AppState>,
     Json(req): Json<IngestRequest>,
 ) -> Result<impl IntoResponse, Problem> {
-    // git_url source: validate shape but defer actual workspace integration to
-    // S36 (workspace:: git2 clone manager).  Return a clear 501 with
-    // RFC-7807 body so callers know this is intentional.
-    if let IngestSource::GitUrl { .. } = &req.source {
-        return Err(Problem::new(
-            StatusCode::NOT_IMPLEMENTED,
-            "git_url ingest not yet implemented",
-        )
-        .detail("git_url source support is implemented in S36; use path source for now"));
+    // git_url source: validate allowlist, clone/fetch, then enqueue as path job.
+    if let IngestSource::GitUrl {
+        ref git_url,
+        ref git_ref,
+    } = req.source
+    {
+        let ws_cfg = state.workspace_cfg.clone().ok_or_else(|| {
+            Problem::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "git_url ingest not configured",
+            )
+            .detail("no [workspace] section in daemon config; configure workspace.dir and allowed_hosts")
+        })?;
+
+        // Allowlist check is done inside workspace::ingest_git_url; on failure
+        // the error message contains "host not allowed" and we map it to 403.
+        let git_url = git_url.clone();
+        let git_ref_owned = git_ref.clone();
+        let clone_result = tokio::task::spawn_blocking(move || {
+            crate::workspace::ingest_git_url(&ws_cfg, &git_url, git_ref_owned.as_deref())
+        })
+        .await
+        .map_err(|e| {
+            Problem::new(StatusCode::INTERNAL_SERVER_ERROR, "workspace task panicked")
+                .detail(format!("{e}"))
+        })?;
+
+        let (_outcome, clone_path) = clone_result.map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("host not allowed") {
+                Problem::new(StatusCode::FORBIDDEN, "git host not in allowlist").detail(msg)
+            } else {
+                Problem::new(StatusCode::BAD_GATEWAY, "git operation failed").detail(msg)
+            }
+        })?;
+
+        // Enqueue the cloned path as a local path job.
+        let path_source = IngestSource::Path { path: clone_path };
+        return match state.queue.enqueue(path_source, req.options) {
+            Some(job_id) => {
+                Ok((StatusCode::ACCEPTED, Json(IngestAccepted { job_id })).into_response())
+            }
+            None => Err(
+                Problem::new(StatusCode::TOO_MANY_REQUESTS, "job queue full")
+                    .detail("retry after a running job completes"),
+            ),
+        };
     }
 
     match state.queue.enqueue(req.source, req.options) {
@@ -211,6 +251,7 @@ mod tests {
             sink,
             listen,
             version: "0.1.0-test".to_owned(),
+            workspace_cfg: None,
         };
         (build_router(state, BearerToken(token.to_owned())), rx)
     }
@@ -227,6 +268,7 @@ mod tests {
             sink,
             listen,
             version: "0.1.0-test".to_owned(),
+            workspace_cfg: None,
         };
         (build_router(state, BearerToken(token.to_owned())), rx)
     }
@@ -282,6 +324,7 @@ mod tests {
             sink,
             listen,
             version: "0.1.0-test".to_owned(),
+            workspace_cfg: None,
         };
         let app = build_router(state, BearerToken(TOKEN.to_owned()));
 
@@ -369,6 +412,7 @@ mod tests {
             sink,
             listen,
             version: "0.1.0-test".to_owned(),
+            workspace_cfg: None,
         };
         let app = build_router(state, BearerToken(TOKEN.to_owned()));
 
@@ -405,6 +449,7 @@ mod tests {
             sink,
             listen,
             version: "0.1.0".to_owned(),
+            workspace_cfg: None,
         };
         // The listen address is stored verbatim; real binding happens in daemon.rs.
         assert_eq!(state.listen.port(), 9999);

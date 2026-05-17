@@ -11,6 +11,6 @@ pub mod schema;
 pub mod sink;
 pub mod stage;
 pub mod visit;
-pub mod workspace {}
+pub mod workspace;
 
 pub use error::{Error, Result};
