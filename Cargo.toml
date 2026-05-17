@@ -42,6 +42,8 @@ toml = "0.8"
 thiserror = "1"
 anyhow = "1"
 blake3 = "1"
+sha2 = "0.10"
+hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 clap = { version = "4", features = ["derive"] }
