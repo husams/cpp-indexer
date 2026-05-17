@@ -103,3 +103,8 @@ required-features = []
 name = "parallel_phase1"
 path = "tests/integration/parallel_phase1.rs"
 required-features = []
+
+[[test]]
+name = "incremental_cache"
+path = "tests/integration/incremental_cache.rs"
+required-features = ["test-mock"]

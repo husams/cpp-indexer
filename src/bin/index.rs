@@ -109,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
         stage_dir: cli.stage_dir,
         skip_phase2: cli.skip_phase2,
         skip_system_headers: !cli.include_system_headers,
+        skip_cache: false,
     };
 
     let stats = run(Arc::clone(&sink), opts)

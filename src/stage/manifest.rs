@@ -72,6 +72,18 @@ pub struct Manifest {
     pub entries: Vec<ManifestEntry>,
 }
 
+/// Cache lookup key for a translation unit.
+///
+/// A cache hit requires all four components to match. When `libclang_version` or
+/// `schema_version` differ the entire manifest is invalidated (AC-M3-9, AC-M3-10).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CacheKey {
+    pub source_hash: String,
+    pub args_hash: String,
+    pub libclang_version: String,
+    pub schema_version: u32,
+}
+
 impl Manifest {
     /// Creates an empty manifest with the current magic and schema version.
     pub fn new() -> Self {
@@ -80,6 +92,52 @@ impl Manifest {
             schema_version: SCHEMA_VERSION,
             entries: Vec::new(),
         }
+    }
+
+    /// Deserialises a manifest from `path`, returning an empty manifest on any
+    /// version or magic mismatch (full-invalidation semantics, AC-M3-9, AC-M3-10).
+    ///
+    /// Use this in Phase 1 pre-pass so that a libclang or schema version bump
+    /// automatically triggers re-parsing of all TUs rather than erroring out.
+    /// I/O errors (file unreadable, disk failure) still propagate as `Error::Io`.
+    ///
+    /// # Errors
+    /// Returns `Error::Io` on filesystem errors; silently returns `Manifest::new()`
+    /// on JSON parse or version mismatches.
+    pub fn load_or_invalidate(path: &Path) -> Result<Self> {
+        match Self::load(path) {
+            Ok(m) => Ok(m),
+            Err(crate::Error::Schema(_)) => {
+                tracing::warn!(
+                    "manifest at {:?} is invalid or version-mismatched — treating as cache miss (full invalidation)",
+                    path
+                );
+                Ok(Self::new())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Returns the cached [`ManifestEntry`] for a TU whose `(source_hash, args_hash,
+    /// libclang_version)` all match **and** whose `schema_version` equals the
+    /// current compile-time constant.
+    ///
+    /// Returns `None` on any mismatch — the caller must (re-)parse the TU.
+    ///
+    /// Complexity: O(n) over `entries`; acceptable because n ≤ TU count and the
+    /// hot path for cache hits avoids all libclang I/O.
+    pub fn cache_hit(
+        &self,
+        source_hash: &str,
+        args_hash: &str,
+        libclang_version: &str,
+    ) -> Option<&ManifestEntry> {
+        self.entries.iter().find(|e| {
+            e.source_hash == source_hash
+                && e.args_hash == args_hash
+                && e.libclang_version == libclang_version
+                && e.schema_version == SCHEMA_VERSION
+        })
     }
 
     /// Deserialises a manifest from `path`. Returns `Ok(Manifest::new())` when the file does not
