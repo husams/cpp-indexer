@@ -103,3 +103,9 @@ required-features = []
 name = "parallel_phase1"
 path = "tests/integration/parallel_phase1.rs"
 required-features = []
+
+[[bench]]
+name = "sink_throughput"
+path = "benches/sink_throughput.rs"
+harness = false
+required-features = ["test-mock"]

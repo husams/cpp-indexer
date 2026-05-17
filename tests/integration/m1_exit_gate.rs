@@ -187,6 +187,7 @@ async fn m1_pipeline_neo4j_golden() {
 
     let sink_cfg = SinkConfig {
         backend: "neo4j".to_owned(),
+        batch_size: None,
         neo4j: Some(Neo4jSinkConfig {
             uri,
             user: std::env::var("NEO4J_USER").unwrap_or_else(|_| "neo4j".to_owned()),
@@ -240,10 +241,12 @@ async fn m1_pipeline_indradb_golden() {
 
     let sink_cfg = SinkConfig {
         backend: "indradb".to_owned(),
+        batch_size: None,
         neo4j: None,
         indradb: Some(IndraDbSinkConfig {
             endpoint,
             token_env: std::env::var("INDRADB_TOKEN_ENV").ok(),
+            sessions: None,
         }),
     };
 

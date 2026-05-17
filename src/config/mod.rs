@@ -168,6 +168,12 @@ pub struct IndraDbSinkConfig {
     /// **Env var name** whose value is the IndraDB auth token. Optional
     /// (public IndraDB instances may not require auth).
     pub token_env: Option<String>,
+
+    /// Maximum number of concurrent in-flight gRPC write calls (default 16).
+    ///
+    /// Each call sends one `batch_size` chunk. Setting this higher than the
+    /// IndraDB server's thread-pool size yields diminishing returns.
+    pub sessions: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -175,6 +181,7 @@ pub struct IndraDbSinkConfig {
 struct RawIndraDbSinkConfig {
     endpoint: String,
     token_env: Option<String>,
+    sessions: Option<usize>,
     /// Forbidden: must use `token_env` instead.
     token: Option<String>,
 }
@@ -185,15 +192,28 @@ impl RawIndraDbSinkConfig {
         Ok(IndraDbSinkConfig {
             endpoint: self.endpoint,
             token_env: self.token_env,
+            sessions: self.sessions,
         })
     }
 }
+
+/// Default batch size for chunked sink writes (S18: AC-M3-4, AC-M3-5).
+pub const DEFAULT_BATCH_SIZE: usize = 10_000;
+
+/// Default number of concurrent in-flight write sessions (S18: ADR-2 §Concurrency).
+pub const DEFAULT_SESSIONS: usize = 16;
 
 /// `[sink]` — top-level sink selector.
 #[derive(Debug, Clone)]
 pub struct SinkConfig {
     /// Which backend to use: `"neo4j"` or `"indradb"`.
     pub backend: String,
+
+    /// Maximum records per individual write call to the database.
+    ///
+    /// Larger batches amortise round-trip overhead; smaller batches reduce
+    /// peak memory per chunk. Default: [`DEFAULT_BATCH_SIZE`] (10 000).
+    pub batch_size: Option<usize>,
 
     /// Neo4j parameters (required when `backend = "neo4j"`).
     pub neo4j: Option<Neo4jSinkConfig>,
@@ -202,10 +222,18 @@ pub struct SinkConfig {
     pub indradb: Option<IndraDbSinkConfig>,
 }
 
+impl SinkConfig {
+    /// Resolved batch size, falling back to [`DEFAULT_BATCH_SIZE`].
+    pub fn resolved_batch_size(&self) -> usize {
+        self.batch_size.unwrap_or(DEFAULT_BATCH_SIZE)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSinkConfig {
     backend: String,
+    batch_size: Option<usize>,
     neo4j: Option<RawNeo4jSinkConfig>,
     indradb: Option<RawIndraDbSinkConfig>,
 }
@@ -216,6 +244,7 @@ impl RawSinkConfig {
         let indradb = self.indradb.map(|r| r.into_config()).transpose()?;
         Ok(SinkConfig {
             backend: self.backend,
+            batch_size: self.batch_size,
             neo4j,
             indradb,
         })

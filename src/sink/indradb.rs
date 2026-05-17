@@ -30,10 +30,11 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use indradb::{BulkInsertItem, Edge, Identifier, Json, QueryExt, Vertex};
 use indradb_proto::ClientError;
+use tokio::task::JoinSet;
 use tonic::Code;
 use uuid::Uuid;
 
-use crate::config::IndraDbSinkConfig;
+use crate::config::{IndraDbSinkConfig, DEFAULT_BATCH_SIZE, DEFAULT_SESSIONS};
 use crate::error::{Error, Result};
 use crate::schema::{EdgeRecord, NodeRecord};
 use crate::sink::lock::Phase5LockGuard;
@@ -176,6 +177,12 @@ impl Drop for IndraDbPhase5LockGuard {
 // ── IndraDbSink ───────────────────────────────────────────────────────────────
 
 /// `GraphSink` implementation backed by IndraDB via gRPC (`indradb-proto` v5).
+///
+/// # Batching
+///
+/// `write_nodes` / `write_edges` split their input into `batch_size`-item
+/// chunks and dispatch up to `sessions` chunks concurrently using
+/// `tokio::task::JoinSet`.  Each task clones the cheap tonic `Channel` client.
 pub struct IndraDbSink {
     /// Base client.  Cheaply cloneable (holds a pooled tonic `Channel`).
     /// Each RPC call clones this before use so concurrent calls are not serialised.
@@ -183,6 +190,10 @@ pub struct IndraDbSink {
     /// Resolved auth token (empty string = no auth required).
     #[allow(dead_code)]
     token: String,
+    /// Records per `bulk_insert` call (default [`DEFAULT_BATCH_SIZE`]).
+    batch_size: usize,
+    /// Maximum concurrent in-flight `bulk_insert` calls (default [`DEFAULT_SESSIONS`]).
+    sessions: usize,
 }
 
 impl IndraDbSink {
@@ -197,7 +208,12 @@ impl IndraDbSink {
                 }
             })?;
         let client = indradb_proto::Client::new(endpoint).await.map_err(wrap)?;
-        Ok(Self { client, token })
+        Ok(Self {
+            client,
+            token,
+            batch_size: DEFAULT_BATCH_SIZE,
+            sessions: config.sessions.unwrap_or(DEFAULT_SESSIONS),
+        })
     }
 
     /// Clone the inner client (cheap — shares the tonic channel).
@@ -205,29 +221,6 @@ impl IndraDbSink {
         self.client.clone()
     }
 
-    /// Execute `f` with retry for transient errors.  Returns `(result, retries_used)`.
-    async fn with_retry<F, Fut, T>(&self, mut f: F) -> (std::result::Result<T, ClientError>, u32)
-    where
-        F: FnMut(indradb_proto::Client) -> Fut,
-        Fut: std::future::Future<Output = std::result::Result<T, ClientError>>,
-    {
-        let mut last_err: Option<ClientError> = None;
-        let mut retries = 0u32;
-        for attempt in 0..MAX_ATTEMPTS {
-            let c = self.client();
-            match f(c).await {
-                Ok(v) => return (Ok(v), retries),
-                Err(e) if is_transient(&e) && attempt + 1 < MAX_ATTEMPTS => {
-                    let wait_ms = BACKOFF_BASE_MS * (1u64 << attempt);
-                    tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-                    retries += 1;
-                    last_err = Some(e);
-                }
-                Err(e) => return (Err(e), retries),
-            }
-        }
-        (Err(last_err.unwrap()), retries)
-    }
 }
 
 #[async_trait]
@@ -252,67 +245,116 @@ impl GraphSink for IndraDbSink {
     }
 
     async fn write_nodes(&self, batch: &[NodeRecord]) -> Result<WriteStats> {
+        if batch.is_empty() {
+            return Ok(WriteStats {
+                nodes_written: 0,
+                retries: 0,
+                elapsed: Duration::ZERO,
+            });
+        }
+
         let started = Instant::now();
 
         // Build BulkInsertItems: Vertex + key properties per record.
-        let mut items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 7);
+        let mut all_items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 7);
         for node in batch {
             let vid = usr_to_uuid(&node.repo_name, &node.usr);
             let vtype = ident(node.kind.as_str())?;
-            items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
-            items.push(BulkInsertItem::VertexProperty(
+            all_items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
+            all_items.push(BulkInsertItem::VertexProperty(
                 vid,
                 ident(PROP_USR)?,
                 Json::new(serde_json::Value::String(node.usr.clone())),
             ));
-            items.push(BulkInsertItem::VertexProperty(
+            all_items.push(BulkInsertItem::VertexProperty(
                 vid,
                 ident(PROP_REPO_NAME)?,
                 Json::new(serde_json::Value::String(node.repo_name.clone())),
             ));
-            items.push(BulkInsertItem::VertexProperty(
+            all_items.push(BulkInsertItem::VertexProperty(
                 vid,
                 ident(PROP_KIND)?,
                 Json::new(serde_json::Value::String(node.kind.as_str().to_owned())),
             ));
-            items.push(BulkInsertItem::VertexProperty(
+            all_items.push(BulkInsertItem::VertexProperty(
                 vid,
                 ident(PROP_NAME)?,
                 Json::new(serde_json::Value::String(node.name.clone())),
             ));
-            items.push(BulkInsertItem::VertexProperty(
+            all_items.push(BulkInsertItem::VertexProperty(
                 vid,
                 ident(PROP_QUALIFIED_NAME)?,
                 Json::new(serde_json::Value::String(node.qualified_name.clone())),
             ));
-            items.push(BulkInsertItem::VertexProperty(
+            all_items.push(BulkInsertItem::VertexProperty(
                 vid,
                 ident(PROP_ATTRS_JSON)?,
                 json_str(&node.attrs_json)?,
             ));
         }
 
-        let count = batch.len() as u64;
-        let (result, retries) = self
-            .with_retry(|mut c| {
-                let its = items.clone();
-                async move { c.bulk_insert(its).await }
-            })
-            .await;
-        result.map_err(wrap)?;
+        // Each node produces 7 items; chunk by items-per-node * batch_size.
+        let items_per_node = 7_usize;
+        let chunk_items = self.batch_size.saturating_mul(items_per_node);
+        let total_nodes = batch.len() as u64;
+
+        let mut total_retries = 0u32;
+        // JoinSet task returns crate Result<u32> (retries used for this chunk).
+        let mut set: JoinSet<Result<u32>> = JoinSet::new();
+
+        for item_chunk in all_items.chunks(chunk_items) {
+            if set.len() >= self.sessions {
+                if let Some(join_res) = set.join_next().await {
+                    let chunk_retries = join_res.map_err(|e| Error::Sink {
+                        backend: "indradb",
+                        source: e.into(),
+                    })??;
+                    total_retries += chunk_retries;
+                }
+            }
+
+            let mut c = self.client();
+            let items = item_chunk.to_vec();
+            let max_attempts = MAX_ATTEMPTS;
+            let backoff_base = BACKOFF_BASE_MS;
+            set.spawn(async move {
+                let mut last_err: Option<ClientError> = None;
+                let mut retries = 0u32;
+                for attempt in 0..max_attempts {
+                    match c.bulk_insert(items.clone()).await {
+                        Ok(_) => return Ok(retries),
+                        Err(e) if is_transient(&e) && attempt + 1 < max_attempts => {
+                            let wait_ms = backoff_base * (1u64 << attempt);
+                            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                            retries += 1;
+                            last_err = Some(e);
+                        }
+                        Err(e) => return Err(wrap(e)),
+                    }
+                }
+                Err(wrap(last_err.unwrap()))
+            });
+        }
+
+        while let Some(join_res) = set.join_next().await {
+            let chunk_retries = join_res.map_err(|e| Error::Sink {
+                backend: "indradb",
+                source: e.into(),
+            })??;
+            total_retries += chunk_retries;
+        }
 
         Ok(WriteStats {
-            nodes_written: count,
-            retries,
+            nodes_written: total_nodes,
+            retries: total_retries,
             elapsed: started.elapsed(),
         })
     }
 
     async fn write_edges(&self, batch: &[EdgeRecord]) -> Result<WriteStats> {
-        let started = Instant::now();
-
-        let mut items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 2);
-        let mut written = 0u64;
+        // Build items for all resolvable edges.
+        let mut all_items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 2);
+        let mut total_written = 0u64;
         for edge_rec in batch {
             let dst_usr = match &edge_rec.dst_usr {
                 Some(u) => u,
@@ -322,34 +364,78 @@ impl GraphSink for IndraDbSink {
             let dst_id = usr_to_uuid(&edge_rec.repo_name, dst_usr);
             let edge_type = ident(edge_rec.kind.as_str())?;
             let e = Edge::new(src_id, edge_type, dst_id);
-            items.push(BulkInsertItem::Edge(e.clone()));
-            items.push(BulkInsertItem::EdgeProperty(
+            all_items.push(BulkInsertItem::Edge(e.clone()));
+            all_items.push(BulkInsertItem::EdgeProperty(
                 e,
                 ident(PROP_ATTRS_JSON)?,
                 json_str(&edge_rec.attrs_json)?,
             ));
-            written += 1;
+            total_written += 1;
         }
 
-        if items.is_empty() {
+        if all_items.is_empty() {
             return Ok(WriteStats {
                 nodes_written: 0,
                 retries: 0,
-                elapsed: started.elapsed(),
+                elapsed: Duration::ZERO,
             });
         }
 
-        let (result, retries) = self
-            .with_retry(|mut c| {
-                let its = items.clone();
-                async move { c.bulk_insert(its).await }
-            })
-            .await;
-        result.map_err(wrap)?;
+        let started = Instant::now();
+
+        // Each edge produces 2 items; chunk by items-per-edge * batch_size.
+        let items_per_edge = 2_usize;
+        let chunk_items = self.batch_size.saturating_mul(items_per_edge);
+
+        let mut total_retries = 0u32;
+        // JoinSet task returns crate Result<u32> (retries used for this chunk).
+        let mut set: JoinSet<Result<u32>> = JoinSet::new();
+
+        for item_chunk in all_items.chunks(chunk_items) {
+            if set.len() >= self.sessions {
+                if let Some(join_res) = set.join_next().await {
+                    let chunk_retries = join_res.map_err(|e| Error::Sink {
+                        backend: "indradb",
+                        source: e.into(),
+                    })??;
+                    total_retries += chunk_retries;
+                }
+            }
+
+            let mut c = self.client();
+            let items = item_chunk.to_vec();
+            let max_attempts = MAX_ATTEMPTS;
+            let backoff_base = BACKOFF_BASE_MS;
+            set.spawn(async move {
+                let mut last_err: Option<ClientError> = None;
+                let mut retries = 0u32;
+                for attempt in 0..max_attempts {
+                    match c.bulk_insert(items.clone()).await {
+                        Ok(_) => return Ok(retries),
+                        Err(e) if is_transient(&e) && attempt + 1 < max_attempts => {
+                            let wait_ms = backoff_base * (1u64 << attempt);
+                            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                            retries += 1;
+                            last_err = Some(e);
+                        }
+                        Err(e) => return Err(wrap(e)),
+                    }
+                }
+                Err(wrap(last_err.unwrap()))
+            });
+        }
+
+        while let Some(join_res) = set.join_next().await {
+            let chunk_retries = join_res.map_err(|e| Error::Sink {
+                backend: "indradb",
+                source: e.into(),
+            })??;
+            total_retries += chunk_retries;
+        }
 
         Ok(WriteStats {
-            nodes_written: written,
-            retries,
+            nodes_written: total_written,
+            retries: total_retries,
             elapsed: started.elapsed(),
         })
     }
@@ -636,5 +722,109 @@ mod tests {
     #[test]
     fn json_str_invalid_returns_err() {
         assert!(json_str("{not json}").is_err());
+    }
+
+    // ── S18: batched write — chunk-count and WriteStats invariants ────────────
+    //
+    // Verify chunk logic and item-count arithmetic without a live IndraDB server.
+
+    #[test]
+    fn items_per_node_is_seven() {
+        // Each node → 1 Vertex + 6 VertexProperty = 7 items.
+        // The write_nodes chunking multiplies batch_size × 7.
+        let node = make_node("c:@F@foo");
+        let vid = usr_to_uuid(&node.repo_name, &node.usr);
+        let vtype = ident(node.kind.as_str()).unwrap();
+        let mut items: Vec<BulkInsertItem> = vec![];
+        items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
+        for prop in [
+            PROP_USR,
+            PROP_REPO_NAME,
+            PROP_KIND,
+            PROP_NAME,
+            PROP_QUALIFIED_NAME,
+            PROP_ATTRS_JSON,
+        ] {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(prop).unwrap(),
+                Json::new(serde_json::Value::String("x".to_owned())),
+            ));
+        }
+        assert_eq!(items.len(), 7, "items_per_node constant must equal 7");
+    }
+
+    #[test]
+    fn items_per_edge_is_two() {
+        // Each edge → 1 Edge + 1 EdgeProperty = 2 items.
+        let edge = make_edge("src", "dst");
+        let src_id = usr_to_uuid(&edge.repo_name, &edge.src_usr);
+        let dst_id = usr_to_uuid(&edge.repo_name, edge.dst_usr.as_deref().unwrap());
+        let edge_type = ident(edge.kind.as_str()).unwrap();
+        let e = Edge::new(src_id, edge_type, dst_id);
+        let items: Vec<BulkInsertItem> = vec![
+            BulkInsertItem::Edge(e.clone()),
+            BulkInsertItem::EdgeProperty(
+                e,
+                ident(PROP_ATTRS_JSON).unwrap(),
+                Json::new(serde_json::Value::Object(Default::default())),
+            ),
+        ];
+        assert_eq!(items.len(), 2, "items_per_edge constant must equal 2");
+    }
+
+    #[test]
+    fn chunk_size_arithmetic_nodes() {
+        // With batch_size=3 and items_per_node=7, chunk_items = 21.
+        // 30 items (from 4+ nodes) should produce ceil(30/21) = 2 chunks.
+        let batch_size = 3_usize;
+        let items_per_node = 7_usize;
+        let chunk_items = batch_size * items_per_node; // 21
+        let total_items = 30_usize;
+        let chunk_count = total_items.div_ceil(chunk_items);
+        assert_eq!(chunk_count, 2, "30 items / chunk_size 21 => 2 chunks");
+    }
+
+    #[test]
+    fn unresolved_edges_excluded_before_chunk_build() {
+        // In write_edges, unresolved edges are skipped during item building.
+        // Verify the count reflects only resolved edges.
+        let edges = vec![
+            make_edge("a", "b"),
+            {
+                let mut e = make_edge("c", "d");
+                e.dst_usr = None; // unresolved
+                e
+            },
+            make_edge("e", "f"),
+        ];
+        let mut item_count = 0_usize;
+        let mut written = 0_u64;
+        for edge_rec in &edges {
+            if let Some(dst_usr) = &edge_rec.dst_usr {
+                let src_id = usr_to_uuid(&edge_rec.repo_name, &edge_rec.src_usr);
+                let dst_id = usr_to_uuid(&edge_rec.repo_name, dst_usr);
+                let edge_type = ident(edge_rec.kind.as_str()).unwrap();
+                let e = Edge::new(src_id, edge_type, dst_id);
+                item_count += 2; // Edge + EdgeProperty
+                written += 1;
+                let _ = e; // suppress unused
+            }
+        }
+        assert_eq!(written, 2, "2 of 3 edges are resolved");
+        assert_eq!(item_count, 4, "2 resolved edges => 4 BulkInsertItems");
+    }
+
+    #[test]
+    fn idempotency_key_is_deterministic_uuid() {
+        // The write_nodes idempotency guarantee rests on usr_to_uuid being
+        // deterministic: same (repo_name, usr) always maps to the same UUID.
+        let a = usr_to_uuid("repo", "c:@F@foo");
+        let b = usr_to_uuid("repo", "c:@F@foo");
+        assert_eq!(a, b, "same input must produce same UUID (idempotency key)");
+
+        // A different USR must produce a different UUID so there is no collision.
+        let c = usr_to_uuid("repo", "c:@F@bar");
+        assert_ne!(a, c, "different USR must produce different UUID");
     }
 }

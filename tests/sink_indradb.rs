@@ -41,6 +41,7 @@ async fn live_sink() -> Arc<dyn GraphSink> {
     let config = IndraDbSinkConfig {
         endpoint: ep,
         token_env: None,
+        sessions: None,
     };
     let sink = IndraDbSink::new(&config, String::new())
         .await

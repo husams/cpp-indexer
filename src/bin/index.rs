@@ -138,6 +138,7 @@ fn build_sink_config(cli: &Cli) -> anyhow::Result<cpp_indexer::config::SinkConfi
                 .unwrap_or_else(|| "bolt://localhost:7687".to_owned());
             Ok(SinkConfig {
                 backend: "neo4j".to_owned(),
+                batch_size: None,
                 neo4j: Some(Neo4jSinkConfig {
                     uri,
                     user: cli.neo4j_user.clone(),
@@ -154,10 +155,12 @@ fn build_sink_config(cli: &Cli) -> anyhow::Result<cpp_indexer::config::SinkConfi
                 .unwrap_or_else(|| "http://localhost:27615".to_owned());
             Ok(SinkConfig {
                 backend: "indradb".to_owned(),
+                batch_size: None,
                 neo4j: None,
                 indradb: Some(IndraDbSinkConfig {
                     endpoint: uri,
                     token_env: cli.indradb_token_env.clone(),
+                    sessions: None,
                 }),
             })
         }
