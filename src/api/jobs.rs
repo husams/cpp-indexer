@@ -22,15 +22,19 @@ use uuid::Uuid;
 // ── IngestSource ───────────────────────────────────────────────────────────────
 
 /// Source specification for an ingest job.
+///
+/// Wire format (ADR-5 §Ingest):
+/// - local path: `{"path": "/abs/path"}`
+/// - remote git: `{"git_url": "https://…", "ref": "main"}`
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(untagged)]
 pub enum IngestSource {
     /// Index a local path.
     Path { path: PathBuf },
     /// Clone + index a remote git repository.
     GitUrl {
         git_url: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
         git_ref: Option<String>,
     },
 }
@@ -188,7 +192,7 @@ impl JobQueue {
             return None;
         }
 
-        let job_id = Uuid::new_v4().to_string();
+        let job_id = Uuid::now_v7().to_string();
         let record = JobRecord::new(job_id.clone(), source.clone(), options.clone());
 
         {

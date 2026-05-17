@@ -238,7 +238,7 @@ mod tests {
     async fn post_ingest_returns_202_with_job_id() {
         let (app, _rx) = make_app(TOKEN);
         let body = serde_json::json!({
-            "source": { "type": "path", "path": "/workspace/my-repo" }
+            "source": { "path": "/workspace/my-repo" }
         });
         let req = Request::builder()
             .method(http::Method::POST)
@@ -308,7 +308,7 @@ mod tests {
     async fn post_ingest_without_bearer_returns_401() {
         let (app, _rx) = make_app(TOKEN);
         let body = serde_json::json!({
-            "source": { "type": "path", "path": "/repo" }
+            "source": { "path": "/repo" }
         });
         let req = Request::builder()
             .method(http::Method::POST)
@@ -415,7 +415,7 @@ mod tests {
     #[tokio::test]
     async fn post_ingest_returns_429_when_queue_full() {
         let body = serde_json::json!({
-            "source": { "type": "path", "path": "/repo" }
+            "source": { "path": "/repo" }
         });
         let make_req = || {
             Request::builder()
