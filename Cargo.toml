@@ -108,4 +108,8 @@ required-features = []
 name = "sink_throughput"
 path = "benches/sink_throughput.rs"
 harness = false
+
+[[test]]
+name = "incremental_cache"
+path = "tests/integration/incremental_cache.rs"
 required-features = ["test-mock"]

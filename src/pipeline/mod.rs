@@ -33,6 +33,7 @@ use crate::resolve::per_repo::resolve_per_repo;
 use crate::schema::arrow::{record_batch_to_edges, record_batch_to_nodes};
 use crate::schema::{EdgeRecord, NodeRecord};
 use crate::sink::GraphSink;
+use crate::stage::manifest::{Manifest, ManifestEntry};
 use crate::stage::writer::StageWriter;
 use crate::visit::shallow::{visit_tu, VisitOptions};
 use crate::{Error, Result};
@@ -63,6 +64,10 @@ pub struct RunOptions {
     /// When `true`, nodes/edges whose spelling location is in a system header
     /// are excluded from Parquet output (AC-M2-14).  Default: `true`.
     pub skip_system_headers: bool,
+
+    /// When `true`, the incremental content-hash cache is disabled and all TUs
+    /// are re-parsed unconditionally.  Default: `false`.
+    pub skip_cache: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +134,19 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
         stage_dir
     );
     let clang = Clang::new().map_err(|e| Error::Clang(format!("Clang::new failed: {e}")))?;
+
+    // Retrieve libclang version once per run; used as a cache invalidation key
+    // (AC-M3-9: any libclang version change triggers full re-parse).
+    let libclang_version = clang::get_version();
+
+    // Load the incremental manifest (or start fresh if missing / version-mismatched).
+    let manifest_path = stage_dir.join("manifest.json");
+    let mut manifest = if opts.skip_cache {
+        Manifest::new()
+    } else {
+        Manifest::load_or_invalidate(&manifest_path)?
+    };
+
     let mut writer = StageWriter::new(&stage_dir, 0)?;
 
     for entry in &tu_entries {
@@ -138,6 +156,27 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
         // libclang receives the file to parse separately via `parser(file_path)`,
         // so including it again in the args causes `AstDeserialization` errors.
         let filtered_args: Vec<String> = filter_compiler_args(&entry.file, &entry.args);
+
+        // Compute content hashes for cache lookup (AC-M3-7, AC-M3-8).
+        // source_hash: blake3 of the source file bytes (detects file edits).
+        // args_hash: blake3 of the filtered arg list (detects flag changes).
+        let source_hash = hash_source_file(&entry.file)?;
+        let args_hash = hash_args(&filtered_args);
+
+        // Cache pre-pass (AC-M3-7): skip TU if all four cache keys match.
+        if !opts.skip_cache
+            && manifest
+                .cache_hit(&source_hash, &args_hash, &libclang_version)
+                .is_some()
+        {
+            info!(
+                "Phase 1: cache hit — skipping {:?}",
+                entry.file.file_name().unwrap_or_default()
+            );
+            stats.cache_hits += 1;
+            continue;
+        }
+
         let vo = VisitOptions {
             repo_name: &opts.repo_name,
             tu_hash: *entry.hash.as_bytes(),
@@ -150,11 +189,23 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
             stats.partial_tu_count += 1;
             warn!("Phase 1: partial parse for {:?}", entry.file);
         }
+
+        // Record a cache entry for this TU so the next run can skip it.
+        if !opts.skip_cache {
+            let shard_paths = writer.shards_written_since_last_cache_record();
+            let cache_entry = ManifestEntry::new(
+                source_hash,
+                args_hash,
+                libclang_version.clone(),
+                shard_paths,
+            );
+            manifest.append_and_save(&manifest_path, cache_entry)?;
+        }
     }
     writer.finish()?;
     info!(
-        "Phase 1: complete ({} partial TU(s))",
-        stats.partial_tu_count
+        "Phase 1: complete ({} partial TU(s), {} cache hit(s))",
+        stats.partial_tu_count, stats.cache_hits
     );
 
     // ── Phase 2: decoration (stub — deferred to later milestone) ─────────
@@ -194,6 +245,33 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
     );
 
     Ok(stats)
+}
+
+// ---------------------------------------------------------------------------
+// Content-hash helpers (AC-M3-7, AC-M3-8)
+// ---------------------------------------------------------------------------
+
+/// Compute a Blake3 hex digest of the source file bytes.
+///
+/// Reading the file at parse time is intentional: it captures the state of the
+/// file at the moment the TU is being considered, not the state recorded in
+/// `compile_commands.json`.
+fn hash_source_file(file: &Path) -> Result<String> {
+    let bytes = std::fs::read(file)?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+/// Compute a Blake3 hex digest of the (filtered) compiler argument list.
+///
+/// Arguments are joined with NUL bytes so that adjacent-arg boundary changes
+/// are captured (e.g. `["-I", "dir"]` vs `["-Idir"]`).
+fn hash_args(args: &[String]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for arg in args {
+        hasher.update(arg.as_bytes());
+        hasher.update(&[0u8]); // NUL separator
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -313,8 +391,10 @@ fn collect_shards(stage_dir: &Path, prefix: &str) -> Result<Vec<PathBuf>> {
 /// Counters produced by a successful pipeline run.
 #[derive(Debug, Default, Clone)]
 pub struct PipelineStats {
-    /// Total number of translation units parsed (after dedup).
+    /// Total number of translation units after dedup (parsed + skipped).
     pub tu_count: usize,
+    /// Number of TUs skipped because the content-hash cache matched (AC-M3-7).
+    pub cache_hits: u64,
     /// Number of TUs that had at least one libclang parse error.
     pub partial_tu_count: usize,
     /// Total nodes written to the sink.

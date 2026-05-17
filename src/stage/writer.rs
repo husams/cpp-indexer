@@ -46,6 +46,11 @@ pub struct StageWriter {
     edge_writer: Option<SharWriter<EdgeRecord>>,
     /// Paths of all shards written (nodes + edges, in creation order).
     shards_written: Vec<PathBuf>,
+    /// Index into `shards_written` marking where the last cache checkpoint was taken.
+    ///
+    /// Used by `shards_written_since_last_cache_record` to return only the shards
+    /// created for the most-recently-parsed TU.
+    cache_checkpoint: usize,
 }
 
 /// Internal state for one open shard file.
@@ -74,6 +79,7 @@ impl StageWriter {
             node_writer: None,
             edge_writer: None,
             shards_written: Vec::new(),
+            cache_checkpoint: 0,
         })
     }
 
@@ -143,6 +149,18 @@ impl StageWriter {
             self.rotate_edge_writer()?;
         }
         Ok(())
+    }
+
+    /// Returns shard paths written since the last call to this method (or since
+    /// construction if never called).
+    ///
+    /// Used by the cache layer to record which shards were produced for the
+    /// most-recently-parsed TU. Advances the internal checkpoint so consecutive
+    /// calls return non-overlapping slices.
+    pub fn shards_written_since_last_cache_record(&mut self) -> Vec<PathBuf> {
+        let result = self.shards_written[self.cache_checkpoint..].to_vec();
+        self.cache_checkpoint = self.shards_written.len();
+        result
     }
 
     /// Flushes and closes all open shards.
