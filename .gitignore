@@ -1,0 +1,25 @@
+# Rust / Cargo
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Indexer artifacts
+.cxg-cache/
+*.parquet
+/workspace/
+*.log
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
+*.token
+config.local.toml
