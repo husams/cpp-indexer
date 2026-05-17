@@ -1,0 +1,72 @@
+[
+  {
+    "id": "Q01",
+    "question": "What classes inherit from llvm::Value?",
+    "expected_fragments": ["User", "Argument", "BasicBlock", "InlineAsm", "MDNode"],
+    "edge_kind": "INHERITS",
+    "notes": "AC-M6-8 canonical question. llvm::Value is the base of almost everything in LLVM IR; the answer must include at least User or Argument."
+  },
+  {
+    "id": "Q02",
+    "question": "What classes does llvm::Instruction inherit from?",
+    "expected_fragments": ["User", "Value", "ilist_node"],
+    "edge_kind": "INHERITS",
+    "notes": "Reverse direction: ancestors of Instruction. Exercises INHERITS traversal in the opposite direction."
+  },
+  {
+    "id": "Q03",
+    "question": "Which functions in llvm::IRBuilder call llvm::BinaryOperator::Create?",
+    "expected_fragments": ["CreateAdd", "CreateSub", "CreateMul", "CreateFAdd", "BinaryOperator"],
+    "edge_kind": "CALLS",
+    "notes": "Exercises CALLS edges across template instantiations."
+  },
+  {
+    "id": "Q04",
+    "question": "Which headers does llvm/IR/Instruction.h include?",
+    "expected_fragments": ["Value.h", "User.h", "BasicBlock.h", "llvm/ADT"],
+    "edge_kind": "INCLUDES",
+    "notes": "Exercises INCLUDES edges from a well-known LLVM IR header."
+  },
+  {
+    "id": "Q05",
+    "question": "What virtual methods does llvm::Pass declare that subclasses override?",
+    "expected_fragments": ["runOnFunction", "runOnModule", "getAnalysisUsage", "print"],
+    "edge_kind": "OVERRIDES",
+    "notes": "Exercises OVERRIDES edges in the Pass hierarchy."
+  },
+  {
+    "id": "Q06",
+    "question": "Which classes specialise llvm::DenseMap?",
+    "expected_fragments": ["DenseMap", "SmallDenseMap", "DenseMapIterator"],
+    "edge_kind": "SPECIALIZES",
+    "notes": "Exercises SPECIALIZES edges for a common LLVM container template."
+  },
+  {
+    "id": "Q07",
+    "question": "What types does llvm::Type have as subclasses?",
+    "expected_fragments": ["IntegerType", "FunctionType", "StructType", "ArrayType", "PointerType"],
+    "edge_kind": "INHERITS",
+    "notes": "LLVM Type hierarchy; canonical for type-system questions."
+  },
+  {
+    "id": "Q08",
+    "question": "Which macros are expanded in llvm/IR/Instruction.cpp?",
+    "expected_fragments": ["LLVM_", "assert", "llvm_unreachable", "HANDLE_INST"],
+    "edge_kind": "EXPANDS_TO",
+    "notes": "Exercises EXPANDS_TO edges from M5 macro visitor."
+  },
+  {
+    "id": "Q09",
+    "question": "What is the repo that contains llvm::Value?",
+    "expected_fragments": ["llvm", "REPO", "llvm-project"],
+    "edge_kind": "BELONGS_TO_REPO",
+    "notes": "Exercises BELONGS_TO_REPO and REPO node from M4 repo-nodes story."
+  },
+  {
+    "id": "Q10",
+    "question": "Which functions in llvm/Analysis/ use llvm::ScalarEvolution?",
+    "expected_fragments": ["ScalarEvolution", "SE", "getSCEV", "getBackedgeTakenCount"],
+    "edge_kind": "USES",
+    "notes": "Exercises USES edges across a well-known analysis pass boundary."
+  }
+]
