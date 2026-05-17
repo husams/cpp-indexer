@@ -5,6 +5,9 @@ on:
     branches: ["main", "story/**"]
   pull_request:
     branches: ["main"]
+  schedule:
+    # Weekly benchmark run on main (Sunday 02:00 UTC).
+    - cron: "0 2 * * 0"
 
 env:
   CARGO_TERM_COLOR: always
@@ -39,9 +42,14 @@ jobs:
         if: runner.os == 'Linux'
         run: echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> "$GITHUB_ENV"
 
-      - name: Set LIBCLANG_PATH (macOS)
+      - name: Set LIBCLANG_PATH + DYLD_LIBRARY_PATH (macOS)
         if: runner.os == 'macOS'
-        run: echo "LIBCLANG_PATH=$(brew --prefix llvm@18)/lib" >> "$GITHUB_ENV"
+        run: |
+          LLVM_PREFIX="$(brew --prefix llvm@18)"
+          echo "LIBCLANG_PATH=${LLVM_PREFIX}/lib" >> "$GITHUB_ENV"
+          # DYLD_LIBRARY_PATH is required on macOS so dyld can locate
+          # libclang.dylib at test / binary run time (established in S15/S22/S26).
+          echo "DYLD_LIBRARY_PATH=${LLVM_PREFIX}/lib" >> "$GITHUB_ENV"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -71,7 +79,7 @@ jobs:
         run: cargo build --all-targets
 
       - name: Test
-        run: cargo nextest run
+        run: cargo nextest run --all-targets
 
       - name: Build release binaries
         run: cargo build --release --bin cxg-index --bin cxg-resolve-cross-repo --bin cxg-daemon
@@ -81,3 +89,129 @@ jobs:
           cargo build
           git diff --exit-code prompt/ || (echo "ERROR: prompt/graph_database/cpp/schema.txt drifted — run 'cargo build' and commit the result." && exit 1)
         if: always()
+
+  # ----------------------------------------------------------------
+  # Docker build + smoke test (Linux only — Docker unavailable on
+  # macOS GitHub-hosted runners without extra setup).
+  # ----------------------------------------------------------------
+  docker:
+    name: Docker build + smoke
+    runs-on: ubuntu-latest
+    needs: ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        run: docker build -t cpp-indexer:ci .
+
+      - name: Smoke — cxg-index --version exits 0
+        run: docker run --rm cpp-indexer:ci cxg-index --version
+
+      - name: Smoke — cxg-resolve-cross-repo on PATH
+        run: docker run --rm --entrypoint cxg-resolve-cross-repo cpp-indexer:ci --help 2>&1 | head -5
+
+      - name: Smoke — cxg-daemon on PATH
+        run: docker run --rm --entrypoint cxg-daemon cpp-indexer:ci --help 2>&1 | head -5
+
+  # ----------------------------------------------------------------
+  # Benchmark regression gate.
+  # Runs on: push to main OR weekly schedule.
+  # Fails if llvm_index bench regresses >20 % vs the committed
+  # baseline stored in benches/baseline.json.
+  # ----------------------------------------------------------------
+  bench:
+    name: Benchmark regression gate
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install libclang 18
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" | sudo tee /etc/apt/sources.list.d/llvm-18.list
+          sudo apt-get update -q
+          sudo apt-get install -y libclang-18-dev clang-18
+
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> "$GITHUB_ENV"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ubuntu-latest-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ubuntu-latest-cargo-bench-
+
+      - name: Run llvm_index benchmark (JSON output)
+        run: |
+          cargo bench --bench llvm_index -- --output-format bencher 2>&1 | tee /tmp/bench-current.txt
+
+      - name: Check regression vs baseline
+        run: |
+          if [ ! -f benches/baseline.json ]; then
+            echo "No benches/baseline.json found — skipping regression check (first run)."
+            exit 0
+          fi
+          python3 - <<'EOF'
+          import json, sys, re
+
+          baseline_path = "benches/baseline.json"
+          current_path  = "/tmp/bench-current.txt"
+
+          with open(baseline_path) as f:
+              baseline = json.load(f)
+
+          # Parse `cargo bench --output-format bencher` lines:
+          # test <name> ... bench: <ns> ns/iter (+/- <dev>)
+          pattern = re.compile(r"^test\s+(\S+)\s+\.\.\.\s+bench:\s+([\d,]+)\s+ns/iter")
+          current = {}
+          with open(current_path) as f:
+              for line in f:
+                  m = pattern.match(line)
+                  if m:
+                      name = m.group(1)
+                      ns   = int(m.group(2).replace(",", ""))
+                      current[name] = ns
+
+          failures = []
+          for name, base_ns in baseline.items():
+              if name not in current:
+                  print(f"WARN: benchmark '{name}' missing from current run — skipped.")
+                  continue
+              cur_ns = current[name]
+              pct    = (cur_ns - base_ns) / base_ns * 100
+              print(f"{name}: baseline={base_ns} ns  current={cur_ns} ns  delta={pct:+.1f}%")
+              if pct > 20:
+                  failures.append(f"{name}: +{pct:.1f}% (threshold 20%)")
+
+          if failures:
+              print("\nREGRESSION DETECTED:")
+              for f in failures:
+                  print(f"  {f}")
+              sys.exit(1)
+          else:
+              print("\nAll benchmarks within threshold.")
+          EOF
+
+      - name: Upload benchmark results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.sha }}
+          path: /tmp/bench-current.txt
+          retention-days: 90
