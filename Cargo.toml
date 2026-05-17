@@ -65,6 +65,7 @@ futures = "0.3"
 tower = { version = "0.5", features = ["util"] }
 walkdir = "2"
 libc = "0.2"
+reqwest = { version = "0.12", features = ["json"] }
 
 [[test]]
 name = "autodetect"
@@ -148,3 +149,7 @@ required-features = ["test-mock"]
 name = "schema_version"
 path = "tests/integration/schema_version.rs"
 required-features = ["test-mock"]
+
+[[test]]
+name = "m7_git_roundtrip"
+path = "tests/integration/m7_git_roundtrip.rs"
