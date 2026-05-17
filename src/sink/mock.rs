@@ -35,6 +35,7 @@ pub enum MockCall {
     Reset(ResetTarget),
     AcquirePhase5Lock { ttl: Duration },
     ReadSchemaVersion,
+    WriteSchemaVersion { tag: String },
     Health,
 }
 
@@ -74,9 +75,14 @@ impl Drop for MockPhase5LockGuard {
 /// An in-memory sink that records every call for assertion in unit tests.
 ///
 /// Thread-safe via an internal `Mutex<Vec<MockCall>>`.
+///
+/// `schema_version` stores the last value written by `write_schema_version`
+/// so that `read_schema_version` can return it (round-trip test support).
 #[derive(Debug, Default)]
 pub struct MockSink {
     log: Arc<Mutex<Vec<MockCall>>>,
+    /// Last schema version tag written via `write_schema_version`.
+    schema_version: Arc<Mutex<Option<String>>>,
 }
 
 impl MockSink {
@@ -146,7 +152,22 @@ impl GraphSink for MockSink {
 
     async fn read_schema_version(&self) -> Result<Option<String>> {
         self.push(MockCall::ReadSchemaVersion);
-        Ok(None)
+        Ok(self
+            .schema_version
+            .lock()
+            .expect("mock schema_version lock poisoned")
+            .clone())
+    }
+
+    async fn write_schema_version(&self, tag: &str, _attrs_json: &str) -> Result<()> {
+        self.push(MockCall::WriteSchemaVersion {
+            tag: tag.to_owned(),
+        });
+        *self
+            .schema_version
+            .lock()
+            .expect("mock schema_version lock poisoned") = Some(tag.to_owned());
+        Ok(())
     }
 
     async fn health(&self) -> Result<HealthInfo> {

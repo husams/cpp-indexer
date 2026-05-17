@@ -113,6 +113,16 @@ pub trait GraphSink: Send + Sync {
     /// cross-repo compatibility check.
     async fn read_schema_version(&self) -> Result<Option<String>>;
 
+    /// Write (upsert) the `SchemaVersion` singleton node.
+    ///
+    /// Called by Phase 4 at the start of every indexing run.  Implementations
+    /// MUST be idempotent — a second call in the same run overwrites the
+    /// previous value (MERGE / upsert semantics per ADR-9).
+    ///
+    /// `tag` is `SCHEMA_VERSION_TAG`; `attrs_json` is built by
+    /// [`crate::schema::version::schema_version_attrs`].
+    async fn write_schema_version(&self, tag: &str, attrs_json: &str) -> Result<()>;
+
     /// Lightweight connectivity probe for `GET /v1/status`.
     /// MUST NOT consume a write connection slot.
     async fn health(&self) -> Result<HealthInfo>;

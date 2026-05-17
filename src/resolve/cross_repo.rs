@@ -177,7 +177,7 @@ async fn do_phase5(sink: &Arc<dyn GraphSink>, opts: &Phase5Options) -> Result<Ph
 
 // ── 2. Schema-version check ────────────────────────────────────────────────────
 
-pub(crate) async fn check_schema_version(sink: &Arc<dyn GraphSink>) -> Result<()> {
+pub async fn check_schema_version(sink: &Arc<dyn GraphSink>) -> Result<()> {
     match sink.read_schema_version().await? {
         None => {
             // No SchemaVersion node yet (fresh DB or not yet written by Phase 4) → OK.

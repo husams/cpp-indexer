@@ -110,6 +110,16 @@ MATCH (v:SchemaVersion {id: 'singleton'})
 RETURN v.version AS version
 ";
 
+/// Upsert the SchemaVersion singleton node (idempotent).
+///
+/// Written by Phase 4 at the start of every indexing run (ADR-9).
+/// `tag` maps to `v.version`; `attrs_json` is stored as a JSON blob.
+const CQL_WRITE_SCHEMA_VERSION: &str = "
+MERGE (v:SchemaVersion {id: 'singleton'})
+SET v.version    = $tag,
+    v.attrs_json = $attrs_json
+";
+
 // ── Helper: build a lock holder id ────────────────────────────────────────────
 
 fn lock_holder_id() -> String {
@@ -546,6 +556,17 @@ impl GraphSink for Neo4jSink {
             return Ok(Some(version));
         }
         Ok(None)
+    }
+
+    async fn write_schema_version(&self, tag: &str, attrs_json: &str) -> Result<()> {
+        self.graph
+            .run(
+                query(CQL_WRITE_SCHEMA_VERSION)
+                    .param("tag", tag.to_owned())
+                    .param("attrs_json", attrs_json.to_owned()),
+            )
+            .await
+            .map_err(Self::map_neo4j_err)
     }
 
     async fn health(&self) -> Result<HealthInfo> {
