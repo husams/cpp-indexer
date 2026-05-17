@@ -15,9 +15,9 @@
 //! # Concurrency
 //!
 //! `indradb_proto::Client` requires `&mut self` but is cheaply `Clone` because it
-//! holds only an internally-pooled tonic `Channel`.  We store the base client
-//! behind a `Mutex` only for the clone operation; each async call clones the
-//! client before entering the RPC so that concurrent writes are not serialised.
+//! holds only an internally-pooled tonic `Channel`.  We store the client directly
+//! (no `Mutex`) and clone it before each RPC so that concurrent writes are not
+//! serialised on a shared lock.
 //!
 //! # Retry policy
 //!
@@ -25,13 +25,11 @@
 //! `RESOURCE_EXHAUSTED`) are retried up to 3 total attempts with exponential
 //! back-off (100 ms, 200 ms).  Non-transient errors are returned immediately.
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use indradb::{BulkInsertItem, Edge, Identifier, Json, QueryExt, Vertex};
 use indradb_proto::ClientError;
-use tokio::sync::Mutex;
 use tonic::Code;
 use uuid::Uuid;
 
@@ -132,7 +130,7 @@ fn json_str(s: &str) -> Result<Json> {
 /// The lock is released by deleting the sentinel vertex.  On drop, a
 /// best-effort fire-and-forget task is spawned if a tokio runtime is available.
 pub struct IndraDbPhase5LockGuard {
-    client: Arc<Mutex<indradb_proto::Client>>,
+    client: indradb_proto::Client,
     vertex_id: Uuid,
     released: bool,
 }
@@ -143,7 +141,7 @@ impl IndraDbPhase5LockGuard {
             return Ok(());
         }
         self.released = true;
-        let mut c = self.client.lock().await.clone();
+        let mut c = self.client.clone();
         let q = indradb::SpecificVertexQuery::single(self.vertex_id);
         c.delete(q).await.map_err(wrap)
     }
@@ -164,10 +162,9 @@ impl Drop for IndraDbPhase5LockGuard {
         }
         // Best-effort: fire-and-forget via tokio::spawn.  Do NOT block the executor.
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            let client = self.client.clone();
+            let mut c = self.client.clone();
             let vid = self.vertex_id;
             rt.spawn(async move {
-                let mut c = client.lock().await.clone();
                 let q = indradb::SpecificVertexQuery::single(vid);
                 let _ = c.delete(q).await;
             });
@@ -180,8 +177,9 @@ impl Drop for IndraDbPhase5LockGuard {
 
 /// `GraphSink` implementation backed by IndraDB via gRPC (`indradb-proto` v5).
 pub struct IndraDbSink {
-    /// Shared client.  We lock only to clone; each RPC uses its own clone.
-    client: Arc<Mutex<indradb_proto::Client>>,
+    /// Base client.  Cheaply cloneable (holds a pooled tonic `Channel`).
+    /// Each RPC call clones this before use so concurrent calls are not serialised.
+    client: indradb_proto::Client,
     /// Resolved auth token (empty string = no auth required).
     #[allow(dead_code)]
     token: String,
@@ -199,15 +197,12 @@ impl IndraDbSink {
                 }
             })?;
         let client = indradb_proto::Client::new(endpoint).await.map_err(wrap)?;
-        Ok(Self {
-            client: Arc::new(Mutex::new(client)),
-            token,
-        })
+        Ok(Self { client, token })
     }
 
     /// Clone the inner client (cheap — shares the tonic channel).
-    async fn client(&self) -> indradb_proto::Client {
-        self.client.lock().await.clone()
+    fn client(&self) -> indradb_proto::Client {
+        self.client.clone()
     }
 
     /// Execute `f` with retry for transient errors.  Returns `(result, retries_used)`.
@@ -219,7 +214,7 @@ impl IndraDbSink {
         let mut last_err: Option<ClientError> = None;
         let mut retries = 0u32;
         for attempt in 0..MAX_ATTEMPTS {
-            let c = self.client().await;
+            let c = self.client();
             match f(c).await {
                 Ok(v) => return (Ok(v), retries),
                 Err(e) if is_transient(&e) && attempt + 1 < MAX_ATTEMPTS => {
@@ -242,13 +237,13 @@ impl GraphSink for IndraDbSink {
     }
 
     async fn preflight(&self) -> Result<()> {
-        let mut c = self.client().await;
+        let mut c = self.client();
         c.ping().await.map_err(wrap)
     }
 
     async fn ensure_indexes(&self) -> Result<()> {
         // Index `usr` and `repo_name` properties for fast lookups and reset operations.
-        let mut c = self.client().await;
+        let mut c = self.client();
         c.index_property(ident(PROP_USR)?).await.map_err(wrap)?;
         c.index_property(ident(PROP_REPO_NAME)?)
             .await
@@ -360,7 +355,7 @@ impl GraphSink for IndraDbSink {
     }
 
     async fn reset(&self, target: ResetTarget) -> Result<()> {
-        let mut c = self.client().await;
+        let mut c = self.client();
         match target {
             ResetTarget::All => {
                 c.delete(indradb::AllVertexQuery).await.map_err(wrap)?;
@@ -379,7 +374,7 @@ impl GraphSink for IndraDbSink {
     }
 
     async fn acquire_phase5_lock(&self, _ttl: Duration) -> Result<Box<dyn Phase5LockGuard>> {
-        let mut c = self.client().await;
+        let mut c = self.client();
         let lock_type = ident(LOCK_VERTEX_TYPE)?;
         let vid = Vertex::new(lock_type);
         let id = vid.id;
@@ -404,7 +399,7 @@ impl GraphSink for IndraDbSink {
     }
 
     async fn read_schema_version(&self) -> Result<Option<String>> {
-        let mut c = self.client().await;
+        let mut c = self.client();
 
         // Find the first vertex of type `cxg_schema_version`.
         let q = indradb::RangeVertexQuery::new()
@@ -438,7 +433,7 @@ impl GraphSink for IndraDbSink {
 
     async fn health(&self) -> Result<HealthInfo> {
         let started = Instant::now();
-        let mut c = self.client().await;
+        let mut c = self.client();
         c.ping().await.map_err(wrap)?;
         Ok(HealthInfo {
             status: "ok".to_owned(),
