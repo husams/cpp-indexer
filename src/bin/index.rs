@@ -13,6 +13,7 @@ use anyhow::Context as _;
 use clap::Parser;
 use tracing::info;
 
+use cpp_indexer::config::Config;
 use cpp_indexer::pipeline::{run, RunOptions};
 use cpp_indexer::sink::factory;
 use cpp_indexer::visit::modules_cpp20;
@@ -54,20 +55,20 @@ struct Cli {
     include_system_headers: bool,
 
     /// Sink backend: `neo4j` or `indradb`.
-    #[arg(long, default_value = "neo4j")]
-    backend: String,
+    #[arg(long)]
+    backend: Option<String>,
 
     /// Neo4j/IndraDB URI (e.g. `bolt://localhost:7687` or `http://localhost:27615`).
     #[arg(long)]
     db_uri: Option<String>,
 
     /// Neo4j username (default `neo4j`).
-    #[arg(long, default_value = "neo4j")]
-    neo4j_user: String,
+    #[arg(long)]
+    neo4j_user: Option<String>,
 
     /// Env var whose value is the Neo4j password (default `NEO4J_PASSWORD`).
-    #[arg(long, default_value = "NEO4J_PASSWORD")]
-    neo4j_password_env: String,
+    #[arg(long)]
+    neo4j_password_env: Option<String>,
 
     /// Env var whose value is the IndraDB auth token (optional).
     #[arg(long)]
@@ -104,14 +105,49 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Build a SinkConfig from CLI flags before moving fields out of cli.
-    let sink_config = build_sink_config(&cli)?;
-    let backend_name_hint = cli.backend.clone();
+    let file_config = load_config(cli.config.as_ref())?;
 
-    // input_path is required when not printing version.
+    // Build a SinkConfig from config + CLI flags before moving fields out of cli.
+    let sink_config = build_sink_config(&cli, file_config.as_ref())?;
+    let backend_name_hint = sink_config.backend.clone();
+
     let input_path = cli
         .input_path
+        .clone()
+        .or_else(|| {
+            file_config
+                .as_ref()
+                .and_then(|cfg| cfg.repo.as_ref().map(|repo| repo.path.clone()))
+        })
         .ok_or_else(|| anyhow::anyhow!("PATH argument is required; run with --help for usage"))?;
+    let compile_commands = cli.compile_commands.clone().or_else(|| {
+        file_config.as_ref().and_then(|cfg| {
+            cfg.repo
+                .as_ref()
+                .and_then(|repo| repo.compile_commands.clone())
+        })
+    });
+    let stage_dir = cli.stage_dir.clone().or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|cfg| cfg.index.as_ref().and_then(|index| index.stage_dir.clone()))
+    });
+    let skip_phase2 = cli.skip_phase2
+        || file_config
+            .as_ref()
+            .and_then(|cfg| cfg.index.as_ref().map(|index| index.skip_phase2))
+            .unwrap_or(false);
+    let skip_system_headers = if cli.include_system_headers {
+        false
+    } else {
+        file_config
+            .as_ref()
+            .and_then(|cfg| cfg.index.as_ref().map(|index| index.skip_system_headers))
+            .unwrap_or(true)
+    };
+    let workers = file_config
+        .as_ref()
+        .and_then(|cfg| cfg.index.as_ref().and_then(|index| index.workers));
 
     let sink = factory::create(&sink_config)
         .await
@@ -125,11 +161,12 @@ async fn main() -> anyhow::Result<()> {
 
     let opts = RunOptions {
         input_path,
-        compile_commands: cli.compile_commands,
+        compile_commands,
         repo_name: cli.repo_name,
-        stage_dir: cli.stage_dir,
-        skip_phase2: cli.skip_phase2,
-        skip_system_headers: !cli.include_system_headers,
+        stage_dir,
+        skip_phase2,
+        skip_system_headers,
+        workers,
         skip_cache: false,
         skip_repo_node: false,
     };
@@ -150,43 +187,134 @@ async fn main() -> anyhow::Result<()> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn build_sink_config(cli: &Cli) -> anyhow::Result<cpp_indexer::config::SinkConfig> {
+fn load_config(path: Option<&PathBuf>) -> anyhow::Result<Option<Config>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading config file `{}`", path.display()))?;
+    let config = Config::parse(&text)
+        .with_context(|| format!("parsing config file `{}`", path.display()))?;
+    config
+        .validate()
+        .with_context(|| format!("validating config file `{}`", path.display()))?;
+    Ok(Some(config))
+}
+
+fn build_sink_config(
+    cli: &Cli,
+    file_config: Option<&Config>,
+) -> anyhow::Result<cpp_indexer::config::SinkConfig> {
     use cpp_indexer::config::{IndraDbSinkConfig, Neo4jSinkConfig, SinkConfig};
 
-    match cli.backend.as_str() {
+    let backend = cli
+        .backend
+        .clone()
+        .or_else(|| file_config.map(|cfg| cfg.sink.backend.clone()))
+        .unwrap_or_else(|| "neo4j".to_owned());
+    let batch_size = file_config.and_then(|cfg| cfg.sink.batch_size);
+
+    match backend.as_str() {
         "neo4j" => {
+            let configured = file_config.and_then(|cfg| cfg.sink.neo4j.as_ref());
             let uri = cli
                 .db_uri
                 .clone()
+                .or_else(|| configured.map(|cfg| cfg.uri.clone()))
                 .unwrap_or_else(|| "bolt://localhost:7687".to_owned());
             Ok(SinkConfig {
                 backend: "neo4j".to_owned(),
-                batch_size: None,
+                batch_size,
                 neo4j: Some(Neo4jSinkConfig {
                     uri,
-                    user: cli.neo4j_user.clone(),
-                    password_env: cli.neo4j_password_env.clone(),
-                    sessions: None,
+                    user: cli
+                        .neo4j_user
+                        .clone()
+                        .or_else(|| configured.map(|cfg| cfg.user.clone()))
+                        .unwrap_or_else(|| "neo4j".to_owned()),
+                    password_env: cli
+                        .neo4j_password_env
+                        .clone()
+                        .or_else(|| configured.map(|cfg| cfg.password_env.clone()))
+                        .unwrap_or_else(|| "NEO4J_PASSWORD".to_owned()),
+                    sessions: configured.and_then(|cfg| cfg.sessions),
                 }),
                 indradb: None,
             })
         }
         "indradb" => {
+            let configured = file_config.and_then(|cfg| cfg.sink.indradb.as_ref());
             let uri = cli
                 .db_uri
                 .clone()
+                .or_else(|| configured.map(|cfg| cfg.endpoint.clone()))
                 .unwrap_or_else(|| "http://localhost:27615".to_owned());
             Ok(SinkConfig {
                 backend: "indradb".to_owned(),
-                batch_size: None,
+                batch_size,
                 neo4j: None,
                 indradb: Some(IndraDbSinkConfig {
                     endpoint: uri,
-                    token_env: cli.indradb_token_env.clone(),
-                    sessions: None,
+                    token_env: cli
+                        .indradb_token_env
+                        .clone()
+                        .or_else(|| configured.and_then(|cfg| cfg.token_env.clone())),
+                    sessions: configured.and_then(|cfg| cfg.sessions),
                 }),
             })
         }
         other => anyhow::bail!("unknown backend `{other}`; expected \"neo4j\" or \"indradb\""),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli_defaults() -> Cli {
+        Cli {
+            print_version: false,
+            input_path: None,
+            compile_commands: None,
+            repo_name: "default".to_owned(),
+            stage_dir: None,
+            skip_phase2: false,
+            include_system_headers: false,
+            backend: None,
+            db_uri: None,
+            neo4j_user: None,
+            neo4j_password_env: None,
+            indradb_token_env: None,
+            config: None,
+        }
+    }
+
+    #[test]
+    fn config_file_values_feed_sink_config() {
+        let text = std::fs::read_to_string("tests/fixtures/config/cxg-index-golden.toml").unwrap();
+        let config = Config::parse(&text).unwrap();
+        let sink = build_sink_config(&cli_defaults(), Some(&config)).unwrap();
+        let neo4j = sink.neo4j.unwrap();
+        assert_eq!(sink.backend, "neo4j");
+        assert_eq!(neo4j.uri, "bolt://localhost:7687");
+        assert_eq!(neo4j.user, "neo4j");
+        assert_eq!(neo4j.password_env, "NEO4J_PASSWORD");
+        assert_eq!(neo4j.sessions, Some(16));
+    }
+
+    #[test]
+    fn cli_flags_override_config_sink_values() {
+        let text = std::fs::read_to_string("tests/fixtures/config/cxg-index-golden.toml").unwrap();
+        let config = Config::parse(&text).unwrap();
+        let mut cli = cli_defaults();
+        cli.db_uri = Some("bolt://override:7687".to_owned());
+        cli.neo4j_user = Some("override-user".to_owned());
+        cli.neo4j_password_env = Some("OVERRIDE_PASSWORD".to_owned());
+
+        let sink = build_sink_config(&cli, Some(&config)).unwrap();
+        let neo4j = sink.neo4j.unwrap();
+        assert_eq!(neo4j.uri, "bolt://override:7687");
+        assert_eq!(neo4j.user, "override-user");
+        assert_eq!(neo4j.password_env, "OVERRIDE_PASSWORD");
     }
 }

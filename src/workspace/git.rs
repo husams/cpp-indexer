@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use git2::{FetchOptions, RemoteCallbacks, Repository};
+use git2::{Direction, FetchOptions, RemoteCallbacks, Repository};
 use tracing::{debug, info, warn};
 
 use crate::error::{Error, Result};
@@ -62,15 +62,41 @@ fn scrub_credentials(s: &str) -> String {
 ///
 /// If `pat` is `Some`, uses `x-access-token` as the username (standard for
 /// GitHub/GitLab HTTPS PAT auth).  The PAT value is never logged.
-fn make_fetch_options(pat: Option<String>) -> FetchOptions<'static> {
+fn make_callbacks(pat: Option<String>) -> RemoteCallbacks<'static> {
     let mut callbacks = RemoteCallbacks::new();
     callbacks.credentials(move |_url, _username, _allowed| match &pat {
         Some(token) => git2::Cred::userpass_plaintext("x-access-token", token),
         None => Err(git2::Error::from_str("no credentials configured")),
     });
+    callbacks
+}
+
+fn make_fetch_options(pat: Option<String>) -> FetchOptions<'static> {
+    let callbacks = make_callbacks(pat);
     let mut opts = FetchOptions::new();
     opts.remote_callbacks(callbacks);
     opts
+}
+
+fn load_pat(pat_env_var: Option<&str>) -> Option<String> {
+    match pat_env_var {
+        Some(var) => match std::env::var(var) {
+            Ok(val) if !val.is_empty() => {
+                // Confirmed: do NOT log the value.
+                debug!(env_var = %var, "PAT loaded from env var");
+                Some(val)
+            }
+            Ok(_) => {
+                warn!(env_var = %var, "PAT env var is set but empty; proceeding without credentials");
+                None
+            }
+            Err(_) => {
+                debug!(env_var = %var, "PAT env var unset; treating as public repo");
+                None
+            }
+        },
+        None => None,
+    }
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────────
@@ -95,24 +121,7 @@ pub fn clone_or_fetch(
     let git_ref = git_ref.unwrap_or("HEAD");
 
     // Read PAT from env var at call time (not stored).
-    let pat: Option<String> = match pat_env_var {
-        Some(var) => match std::env::var(var) {
-            Ok(val) if !val.is_empty() => {
-                // Confirmed: do NOT log the value.
-                debug!(env_var = %var, "PAT loaded from env var");
-                Some(val)
-            }
-            Ok(_) => {
-                warn!(env_var = %var, "PAT env var is set but empty; proceeding without credentials");
-                None
-            }
-            Err(_) => {
-                debug!(env_var = %var, "PAT env var unset; treating as public repo");
-                None
-            }
-        },
-        None => None,
-    };
+    let pat = load_pat(pat_env_var);
 
     // Branch: re-ingest or fresh clone.
     if target_dir.join(".git").exists() {
@@ -120,6 +129,69 @@ pub fn clone_or_fetch(
     } else {
         clone_fresh(url, git_ref, pat, depth, target_dir)
     }
+}
+
+/// Resolve `git_ref` to a remote commit SHA using ls-remote-style discovery.
+pub fn resolve_remote_commit(
+    url: &str,
+    git_ref: Option<&str>,
+    pat_env_var: Option<&str>,
+) -> Result<String> {
+    let git_ref = git_ref.unwrap_or("HEAD");
+    let pat = load_pat(pat_env_var);
+    let mut remote = git2::Remote::create_detached(url).map_err(|e| {
+        Error::Workspace(format!(
+            "git remote setup failed for {}: {}",
+            scrub_credentials(url),
+            scrub_credentials(&e.to_string())
+        ))
+    })?;
+    remote
+        .connect_auth(Direction::Fetch, Some(make_callbacks(pat)), None)
+        .map_err(|e| {
+            Error::Workspace(format!(
+                "git remote connect failed for {}: {}",
+                scrub_credentials(url),
+                scrub_credentials(&e.to_string())
+            ))
+        })?;
+
+    let heads = remote.list().map_err(|e| {
+        Error::Workspace(format!(
+            "git ls-remote failed for {}: {}",
+            scrub_credentials(url),
+            scrub_credentials(&e.to_string())
+        ))
+    })?;
+
+    let branch_ref = format!("refs/heads/{git_ref}");
+    let tag_ref = format!("refs/tags/{git_ref}");
+    let oid = heads
+        .iter()
+        .find(|head| {
+            let name = head.name();
+            if git_ref.eq_ignore_ascii_case("HEAD") {
+                name == "HEAD"
+            } else {
+                name == git_ref || name == branch_ref || name == tag_ref
+            }
+        })
+        .map(|head| head.oid())
+        .ok_or_else(|| {
+            Error::Workspace(format!(
+                "git ref `{git_ref}` not found for {}",
+                scrub_credentials(url)
+            ))
+        })?;
+
+    remote.disconnect().map_err(|e| {
+        Error::Workspace(format!(
+            "git remote disconnect failed for {}: {}",
+            scrub_credentials(url),
+            scrub_credentials(&e.to_string())
+        ))
+    })?;
+    Ok(oid.to_string())
 }
 
 fn clone_fresh(

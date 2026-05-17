@@ -67,7 +67,8 @@ unsafe impl Sync for ClangSync {}
 /// re-triggering the libclang singleton guard in child processes / after fork).
 static GLOBAL_CLANG: OnceLock<ClangSync> = OnceLock::new();
 
-fn global_clang() -> &'static Clang {
+#[doc(hidden)]
+pub fn global_clang() -> &'static Clang {
     &GLOBAL_CLANG
         .get_or_init(|| ClangSync(Clang::new().expect("libclang global init")))
         .0
@@ -778,7 +779,7 @@ pub fn visit_all(
     repo_name: &str,
     skip_system_headers: bool,
 ) -> Result<(usize, usize)> {
-    let clang = Clang::new().map_err(Error::Clang)?;
+    let clang = global_clang();
     let mut total_nodes = 0usize;
     let mut error_count = 0usize;
 
@@ -794,7 +795,7 @@ pub fn visit_all(
             skip_system_headers,
         };
 
-        match visit_tu(&clang, &opts, &mut writer) {
+        match visit_tu(clang, &opts, &mut writer) {
             Ok(had_errors) => {
                 if had_errors {
                     error_count += 1;

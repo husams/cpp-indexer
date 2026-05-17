@@ -21,7 +21,7 @@ use tempfile::TempDir;
 
 use cpp_indexer::{
     stage::writer::StageWriter,
-    visit::shallow::{visit_tu, VisitOptions},
+    visit::shallow::{global_clang, visit_tu, VisitOptions},
 };
 
 // ---------------------------------------------------------------------------
@@ -96,12 +96,10 @@ async fn collect_nodes(stage_dir: &std::path::Path) -> HashMap<String, String> {
 /// Phase 1 visitor emits nodes for CLASS, FUNCTION, METHOD, FIELD, GLOBAL_VARIABLE.
 #[tokio::test]
 async fn phase1_emits_expected_node_kinds() {
-    use clang::Clang;
-
     let dir = TempDir::new().unwrap();
     let stage_dir = dir.path().join("stage");
 
-    let clang = Clang::new().expect("Clang::new() must succeed — libclang required");
+    let clang = global_clang();
     let fixture = fixture_dir();
 
     let shapes_cpp = fixture.join("shapes.cpp");
@@ -122,7 +120,7 @@ async fn phase1_emits_expected_node_kinds() {
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
-    let had_errors = visit_tu(&clang, &opts, &mut writer).unwrap();
+    let had_errors = visit_tu(clang, &opts, &mut writer).unwrap();
     writer.finish().unwrap();
 
     // shapes.cpp should parse cleanly.
@@ -167,13 +165,11 @@ async fn phase1_emits_expected_node_kinds() {
 /// Visitor must contain a MODULE node (the TU itself).
 #[tokio::test]
 async fn phase1_emits_module_node() {
-    use clang::Clang;
-
     let dir = TempDir::new().unwrap();
     let stage_dir = dir.path().join("stage");
     let fixture = fixture_dir();
 
-    let clang = Clang::new().expect("libclang required");
+    let clang = global_clang();
     let shapes_cpp = fixture
         .join("shapes.cpp")
         .canonicalize()
@@ -192,7 +188,7 @@ async fn phase1_emits_module_node() {
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
-    visit_tu(&clang, &opts, &mut writer).unwrap();
+    visit_tu(clang, &opts, &mut writer).unwrap();
     writer.finish().unwrap();
 
     let nodes = collect_nodes(&stage_dir).await;
@@ -208,13 +204,11 @@ async fn phase1_emits_module_node() {
 /// TU with intentional parse errors must produce partial=true and continue (AC-M1-16).
 #[tokio::test]
 async fn phase1_parse_error_produces_partial_and_continues() {
-    use clang::Clang;
-
     let dir = TempDir::new().unwrap();
     let stage_dir = dir.path().join("stage");
     let fixture = fixture_dir();
 
-    let clang = Clang::new().expect("libclang required");
+    let clang = global_clang();
     let broken_cpp = fixture
         .join("broken.cpp")
         .canonicalize()
@@ -233,7 +227,7 @@ async fn phase1_parse_error_produces_partial_and_continues() {
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
-    let had_errors = visit_tu(&clang, &opts, &mut writer).unwrap();
+    let had_errors = visit_tu(clang, &opts, &mut writer).unwrap();
     writer.finish().unwrap();
 
     // Must report parse errors.
@@ -278,13 +272,11 @@ fn phase1_api_does_not_accept_graph_sink() {
 /// utils.cpp fixture exercises GLOBAL_VARIABLE extraction.
 #[tokio::test]
 async fn phase1_emits_global_variable_from_utils() {
-    use clang::Clang;
-
     let dir = TempDir::new().unwrap();
     let stage_dir = dir.path().join("stage");
     let fixture = fixture_dir();
 
-    let clang = Clang::new().expect("libclang required");
+    let clang = global_clang();
     let utils_cpp = fixture
         .join("utils.cpp")
         .canonicalize()
@@ -303,7 +295,7 @@ async fn phase1_emits_global_variable_from_utils() {
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
-    let had_errors = visit_tu(&clang, &opts, &mut writer).unwrap();
+    let had_errors = visit_tu(clang, &opts, &mut writer).unwrap();
     writer.finish().unwrap();
 
     assert!(!had_errors, "utils.cpp must parse cleanly");
@@ -379,10 +371,8 @@ async fn collect_edges(stage_dir: &std::path::Path) -> Vec<(String, String, Stri
 async fn visit_m2_fixture(
     stage_dir: &std::path::Path,
 ) -> (HashMap<String, String>, Vec<(String, String, String)>) {
-    use clang::Clang;
-
     let fixture = m2_fixture_dir();
-    let clang = Clang::new().expect("libclang required");
+    let clang = global_clang();
     let main_cpp = fixture
         .join("ext_main.cpp")
         .canonicalize()
@@ -401,7 +391,7 @@ async fn visit_m2_fixture(
     };
 
     let mut writer = StageWriter::new(stage_dir, 0).unwrap();
-    let had_errors = visit_tu(&clang, &opts, &mut writer).unwrap();
+    let had_errors = visit_tu(clang, &opts, &mut writer).unwrap();
     writer.finish().unwrap();
 
     assert!(!had_errors, "ext_main.cpp must parse without errors");
@@ -534,11 +524,10 @@ async fn m2_emits_overrides_edge_with_vtable_slot() {
     use arrow::array::{Array, StringArray};
     use arrow::compute::cast;
     use arrow::datatypes::DataType;
-    use clang::Clang;
     use futures::TryStreamExt;
     use parquet::arrow::ParquetRecordBatchStreamBuilder;
 
-    let clang = Clang::new().expect("libclang required");
+    let clang = global_clang();
     let main_cpp = fixture
         .join("ext_main.cpp")
         .canonicalize()
@@ -557,7 +546,7 @@ async fn m2_emits_overrides_edge_with_vtable_slot() {
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
-    visit_tu(&clang, &opts, &mut writer).unwrap();
+    visit_tu(clang, &opts, &mut writer).unwrap();
     writer.finish().unwrap();
 
     // Check that at least one OVERRIDES edge exists AND that its attrs_json

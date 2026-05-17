@@ -403,9 +403,9 @@ mod tests {
     fn skip_phase2_returns_zero_immediately() {
         // When skip_phase2 is true, run() must be a no-op regardless of
         // stage_dir contents (AC-M5-6).
-        let clang = Clang::new().expect("libclang must be available in test env");
+        let clang = crate::visit::shallow::global_clang();
         let dir = tempfile::tempdir().expect("temp dir");
-        let result = run(&clang, &[], dir.path(), /* skip_phase2 */ true);
+        let result = run(clang, &[], dir.path(), /* skip_phase2 */ true);
         assert_eq!(
             result.unwrap(),
             0,
@@ -416,9 +416,9 @@ mod tests {
     #[test]
     fn empty_stage_dir_produces_zero_decorated() {
         // Phase 2 on an empty stage dir must succeed with 0 decorated nodes.
-        let clang = Clang::new().expect("libclang must be available in test env");
+        let clang = crate::visit::shallow::global_clang();
         let dir = tempfile::tempdir().expect("temp dir");
-        let result = run(&clang, &[], dir.path(), /* skip_phase2 */ false);
+        let result = run(clang, &[], dir.path(), /* skip_phase2 */ false);
         assert_eq!(result.unwrap(), 0);
     }
 
@@ -458,17 +458,14 @@ mod tests {
         // Smoke-test exception spec classification using an in-process parse.
         // We can only test the classifier against a real TU on machines that
         // have libclang — skip gracefully if libclang is unavailable.
-        let clang = match Clang::new() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
+        let clang = crate::visit::shallow::global_clang();
 
         // Write a tiny C++ file to a tempdir.
         let dir = tempfile::tempdir().expect("temp dir");
         let src = dir.path().join("test.cpp");
         std::fs::write(&src, "void foo() noexcept {}\nvoid bar() {}\n").expect("write test src");
 
-        let index = Index::new(&clang, true, false);
+        let index = Index::new(clang, true, false);
         let tu = index
             .parser(&src)
             .arguments(&[] as &[String])
@@ -500,16 +497,13 @@ mod tests {
 
     #[test]
     fn classify_control_flow_has_return() {
-        let clang = match Clang::new() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
+        let clang = crate::visit::shallow::global_clang();
 
         let dir = tempfile::tempdir().expect("temp dir");
         let src = dir.path().join("cf.cpp");
         std::fs::write(&src, "int foo() { return 42; }\nvoid bar() {}\n").expect("write cf.cpp");
 
-        let index = Index::new(&clang, true, false);
+        let index = Index::new(clang, true, false);
         let tu = index
             .parser(&src)
             .arguments(&[] as &[String])

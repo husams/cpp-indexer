@@ -49,6 +49,44 @@ fn init_git_repo_with_commit(dir: &Path, epoch_secs: i64) {
         .expect("commit");
 }
 
+fn copy_fixture_into_repo(fixture: &Path, repo_dir: &Path) {
+    for entry in std::fs::read_dir(fixture).expect("fixture read_dir") {
+        let entry = entry.expect("fixture entry");
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy();
+        if name == "compile_commands.json" || name == "golden_graph.json" {
+            continue;
+        }
+        std::fs::copy(&path, repo_dir.join(name.as_ref())).expect("copy fixture file");
+    }
+
+    let repo = repo_dir.canonicalize().expect("repo canonicalize");
+    let entries: Vec<_> = ["shapes.cpp", "utils.cpp", "broken.cpp"]
+        .into_iter()
+        .map(|name| {
+            let file = repo.join(name);
+            serde_json::json!({
+                "directory": repo,
+                "file": file,
+                "arguments": [
+                    "clang++",
+                    "-std=c++14",
+                    format!("-I{}", repo.display()),
+                    file.to_string_lossy()
+                ]
+            })
+        })
+        .collect();
+    std::fs::write(
+        repo_dir.join("compile_commands.json"),
+        serde_json::to_vec_pretty(&entries).unwrap(),
+    )
+    .expect("write compile_commands");
+}
+
 // ---------------------------------------------------------------------------
 // AC-M4-1: REPO node exists with required attributes
 // ---------------------------------------------------------------------------
@@ -62,6 +100,7 @@ async fn repo_node_has_required_attrs() {
     }
 
     let git_tmp = TempDir::new().expect("tempdir");
+    copy_fixture_into_repo(&fixture, git_tmp.path());
     // 2026-05-17 00:00:00 UTC
     init_git_repo_with_commit(git_tmp.path(), 1_747_440_000);
 
@@ -71,12 +110,12 @@ async fn repo_node_has_required_attrs() {
     let opts = RunOptions {
         // input_path points to the git repo so repo_meta::collect can discover it.
         input_path: git_tmp.path().to_path_buf(),
-        // compile_commands lives in the fixture; provide it explicitly.
-        compile_commands: Some(fixture.join("compile_commands.json")),
+        compile_commands: Some(git_tmp.path().join("compile_commands.json")),
         repo_name: "test-repo".to_owned(),
         stage_dir: Some(stage_tmp.path().to_path_buf()),
         skip_phase2: true,
         skip_system_headers: true,
+        workers: None,
         skip_cache: true,
         skip_repo_node: false,
     };
@@ -177,6 +216,7 @@ async fn every_node_has_belongs_to_repo_edge() {
     }
 
     let git_tmp = TempDir::new().expect("tempdir");
+    copy_fixture_into_repo(&fixture, git_tmp.path());
     init_git_repo_with_commit(git_tmp.path(), 1_747_440_000);
 
     let stage_tmp = TempDir::new().expect("tempdir");
@@ -184,11 +224,12 @@ async fn every_node_has_belongs_to_repo_edge() {
 
     let opts = RunOptions {
         input_path: git_tmp.path().to_path_buf(),
-        compile_commands: Some(fixture.join("compile_commands.json")),
+        compile_commands: Some(git_tmp.path().join("compile_commands.json")),
         repo_name: "test-repo".to_owned(),
         stage_dir: Some(stage_tmp.path().to_path_buf()),
         skip_phase2: true,
         skip_system_headers: true,
+        workers: None,
         skip_cache: true,
         skip_repo_node: false,
     };

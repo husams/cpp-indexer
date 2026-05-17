@@ -27,8 +27,8 @@ pub mod progress;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
-use clang::Clang;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tracing::{info, warn};
 
@@ -41,9 +41,7 @@ use crate::schema::version::{schema_version_attrs, SCHEMA_VERSION_TAG};
 use crate::schema::{EdgeRecord, NodeRecord};
 use crate::sink::GraphSink;
 use crate::stage::manifest::{Manifest, ManifestEntry};
-use crate::stage::writer::StageWriter;
 use crate::visit::decorate;
-use crate::visit::shallow::{visit_tu, VisitOptions};
 use crate::{Error, Result};
 
 // ---------------------------------------------------------------------------
@@ -73,6 +71,9 @@ pub struct RunOptions {
     /// are excluded from Parquet output (AC-M2-14).  Default: `true`.
     pub skip_system_headers: bool,
 
+    /// Number of Phase 1 worker threads. When `None`, rayon uses logical CPUs.
+    pub workers: Option<usize>,
+
     /// When `true`, the incremental content-hash cache is disabled and all TUs
     /// are re-parsed unconditionally.  Default: `false`.
     pub skip_cache: bool,
@@ -94,6 +95,7 @@ pub struct RunOptions {
 /// Propagates errors from any phase. Soft libclang parse errors (Phase 1)
 /// are NOT surfaced as `Err` — they are logged and counted.
 pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineStats> {
+    let run_started = Instant::now();
     let mut stats = PipelineStats::default();
 
     // ── Phase 0.5: auto-detect compile_commands.json ─────────────────────
@@ -111,7 +113,11 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
 
     // ── Phase 0: parse + dedup compile_commands.json ─────────────────────
     info!("Phase 0: parsing compile commands from {:?}", cc_path);
-    let tu_entries: Vec<TuEntry> = compile_commands::parse(&cc_path)?;
+    let tu_entries: Vec<TuEntry> = filter_entries_to_input_scope(
+        &cc_path,
+        &opts.input_path,
+        compile_commands::parse(&cc_path)?,
+    )?;
     stats.tu_count = tu_entries.len();
     info!(
         "Phase 0: {} translation unit(s) after dedup",
@@ -147,86 +153,84 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
         tu_entries.len(),
         stage_dir
     );
-    let clang = Clang::new().map_err(|e| Error::Clang(format!("Clang::new failed: {e}")))?;
+    let libclang_version = {
+        let clang = crate::visit::shallow::global_clang();
 
-    // Retrieve libclang version once per run; used as a cache invalidation key
-    // (AC-M3-9: any libclang version change triggers full re-parse).
-    let libclang_version = clang::get_version();
+        // Retrieve libclang version once per run; used as a cache invalidation key
+        // (AC-M3-9: any libclang version change triggers full re-parse).
+        let libclang_version = clang::get_version();
 
-    // Load the incremental manifest (or start fresh if missing / version-mismatched).
-    let manifest_path = stage_dir.join("manifest.json");
-    let mut manifest = if opts.skip_cache {
-        Manifest::new()
-    } else {
-        Manifest::load_or_invalidate(&manifest_path)?
-    };
-
-    let mut writer = StageWriter::new(&stage_dir, 0)?;
-
-    for entry in &tu_entries {
-        // Strip the source file path from the compiler args before passing to
-        // libclang. In compile_commands.json the source file often appears as
-        // the last positional argument (e.g. `clang++ -std=c++14 -I. foo.cpp`).
-        // libclang receives the file to parse separately via `parser(file_path)`,
-        // so including it again in the args causes `AstDeserialization` errors.
-        let filtered_args: Vec<String> = filter_compiler_args(&entry.file, &entry.args);
-
-        // Compute content hashes for cache lookup (AC-M3-7, AC-M3-8).
-        // source_hash: blake3 of the source file bytes (detects file edits).
-        // args_hash: blake3 of the filtered arg list (detects flag changes).
-        let source_hash = hash_source_file(&entry.file)?;
-        let args_hash = hash_args(&filtered_args);
-
-        // Cache pre-pass (AC-M3-7): skip TU if all four cache keys match.
-        if !opts.skip_cache
-            && manifest
-                .cache_hit(&source_hash, &args_hash, &libclang_version)
-                .is_some()
-        {
-            info!(
-                "Phase 1: cache hit — skipping {:?}",
-                entry.file.file_name().unwrap_or_default()
-            );
-            stats.cache_hits += 1;
-            continue;
-        }
-
-        let vo = VisitOptions {
-            repo_name: &opts.repo_name,
-            tu_hash: *entry.hash.as_bytes(),
-            file_path: &entry.file,
-            args: &filtered_args,
-            skip_system_headers: opts.skip_system_headers,
+        // Load the incremental manifest (or start fresh if missing / version-mismatched).
+        let manifest_path = stage_dir.join("manifest.json");
+        let mut manifest = if opts.skip_cache {
+            Manifest::new()
+        } else {
+            Manifest::load_or_invalidate(&manifest_path)?
         };
-        let partial = visit_tu(&clang, &vo, &mut writer)?;
-        if partial {
-            stats.partial_tu_count += 1;
-            warn!("Phase 1: partial parse for {:?}", entry.file);
+
+        let mut changed_entries = Vec::new();
+        let mut cache_entries = Vec::new();
+
+        for entry in &tu_entries {
+            let filtered_args: Vec<String> = filter_compiler_args(&entry.file, &entry.args);
+            let source_hash = hash_source_file(&entry.file)?;
+            let args_hash = hash_args(&filtered_args);
+
+            if !opts.skip_cache
+                && manifest
+                    .cache_hit(&source_hash, &args_hash, &libclang_version)
+                    .is_some()
+            {
+                info!(
+                    "Phase 1: cache hit — skipping {:?}",
+                    entry.file.file_name().unwrap_or_default()
+                );
+                stats.cache_hits += 1;
+                continue;
+            }
+
+            changed_entries.push(entry.clone());
+            cache_entries.push((source_hash, args_hash));
         }
 
-        // Record a cache entry for this TU so the next run can skip it.
-        if !opts.skip_cache {
-            let shard_paths = writer.shards_written_since_last_cache_record();
-            let cache_entry = ManifestEntry::new(
-                source_hash,
-                args_hash,
-                libclang_version.clone(),
-                shard_paths,
+        let parallel_stats = parallel::run_phase1_parallel(
+            &changed_entries,
+            &stage_dir,
+            &opts.repo_name,
+            opts.skip_system_headers,
+            opts.workers,
+        )?;
+        stats.partial_tu_count = parallel_stats.tu_partial.try_into().unwrap_or(usize::MAX);
+
+        if !opts.skip_cache && parallel_stats.tu_error == 0 {
+            for (source_hash, args_hash) in cache_entries {
+                let cache_entry = ManifestEntry::new(
+                    source_hash,
+                    args_hash,
+                    libclang_version.clone(),
+                    Vec::new(),
+                );
+                manifest.append_and_save(&manifest_path, cache_entry)?;
+            }
+        } else if !opts.skip_cache && parallel_stats.tu_error > 0 {
+            warn!(
+                errors = parallel_stats.tu_error,
+                "Phase 1: not updating cache manifest because one or more TUs failed"
             );
-            manifest.append_and_save(&manifest_path, cache_entry)?;
         }
-    }
-    writer.finish()?;
-    info!(
-        "Phase 1: complete ({} partial TU(s), {} cache hit(s))",
-        stats.partial_tu_count, stats.cache_hits
-    );
+        info!(
+            "Phase 1: complete ({} ok TU(s), {} partial TU(s), {} failed TU(s), {} cache hit(s))",
+            parallel_stats.tu_ok, stats.partial_tu_count, parallel_stats.tu_error, stats.cache_hits
+        );
 
-    // ── Phase 2: decoration (AC-M5-5, AC-M5-6) ───────────────────────────
-    let decorated_count = decorate::run(&clang, &tu_entries, &stage_dir, opts.skip_phase2)?;
-    if !opts.skip_phase2 {
-        info!("Phase 2: {} node(s) decorated", decorated_count);
-    }
+        // ── Phase 2: decoration (AC-M5-5, AC-M5-6) ───────────────────────────
+        let decorated_count = decorate::run(clang, &tu_entries, &stage_dir, opts.skip_phase2)?;
+        if !opts.skip_phase2 {
+            info!("Phase 2: {} node(s) decorated", decorated_count);
+        }
+
+        libclang_version
+    };
 
     // ── Phase 3: in-memory USR resolve → final-edges.parquet ─────────────
     info!("Phase 3: resolving edges in {:?}", stage_dir);
@@ -335,7 +339,62 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
         sink.backend_name()
     );
 
+    record_pipeline_metrics(&stats, run_started.elapsed().as_secs_f64());
+
     Ok(stats)
+}
+
+fn filter_entries_to_input_scope(
+    cc_path: &Path,
+    input_path: &Path,
+    entries: Vec<TuEntry>,
+) -> Result<Vec<TuEntry>> {
+    let input = normalize_path(input_path);
+    let filtered: Vec<TuEntry> = if input_path.is_file() {
+        entries
+            .into_iter()
+            .filter(|entry| normalize_path(&entry.file) == input)
+            .collect()
+    } else if input_path.is_dir() {
+        entries
+            .into_iter()
+            .filter(|entry| normalize_path(&entry.file).starts_with(&input))
+            .collect()
+    } else {
+        entries
+    };
+
+    if filtered.is_empty() {
+        return Err(Error::CompileCommands {
+            path: cc_path.to_owned(),
+            message: format!(
+                "no translation units matched input scope `{}`",
+                input_path.display()
+            ),
+        });
+    }
+
+    Ok(filtered)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn record_pipeline_metrics(stats: &PipelineStats, elapsed_secs: f64) {
+    crate::metrics::cxg_nodes_total().inc_by(stats.nodes_written);
+    crate::metrics::cxg_edges_total().inc_by(stats.edges_written);
+
+    let elapsed_secs = elapsed_secs.max(f64::EPSILON);
+    crate::metrics::cxg_nodes_per_second().set(stats.nodes_written as f64 / elapsed_secs);
+    crate::metrics::cxg_edges_per_second().set(stats.edges_written as f64 / elapsed_secs);
+
+    let cache_hit_ratio = if stats.tu_count == 0 {
+        0.0
+    } else {
+        stats.cache_hits as f64 / stats.tu_count as f64
+    };
+    crate::metrics::cxg_cache_hit_ratio().set(cache_hit_ratio);
 }
 
 // ---------------------------------------------------------------------------
@@ -568,4 +627,80 @@ pub struct PipelineStats {
     pub nodes_written: u64,
     /// Total edges written to the sink.
     pub edges_written: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tu_entry(file: PathBuf) -> TuEntry {
+        TuEntry {
+            hash: blake3::hash(file.as_os_str().as_encoded_bytes()),
+            file,
+            args: vec!["clang++".to_owned()],
+        }
+    }
+
+    #[test]
+    fn scope_filter_keeps_only_entries_under_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let kept = src.join("kept.cpp");
+        let skipped = other.join("skipped.cpp");
+        std::fs::write(&kept, "int kept;").unwrap();
+        std::fs::write(&skipped, "int skipped;").unwrap();
+
+        let filtered = filter_entries_to_input_scope(
+            &tmp.path().join("compile_commands.json"),
+            &src,
+            vec![tu_entry(kept.clone()), tu_entry(skipped)],
+        )
+        .unwrap();
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(normalize_path(&filtered[0].file), normalize_path(&kept));
+    }
+
+    #[test]
+    fn scope_filter_keeps_only_exact_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kept = tmp.path().join("kept.cpp");
+        let skipped = tmp.path().join("skipped.cpp");
+        std::fs::write(&kept, "int kept;").unwrap();
+        std::fs::write(&skipped, "int skipped;").unwrap();
+
+        let filtered = filter_entries_to_input_scope(
+            &tmp.path().join("compile_commands.json"),
+            &kept,
+            vec![tu_entry(kept.clone()), tu_entry(skipped)],
+        )
+        .unwrap();
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(normalize_path(&filtered[0].file), normalize_path(&kept));
+    }
+
+    #[test]
+    fn scope_filter_errors_when_no_entries_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let requested = tmp.path().join("requested.cpp");
+        let other = tmp.path().join("other.cpp");
+        std::fs::write(&requested, "int requested;").unwrap();
+        std::fs::write(&other, "int other;").unwrap();
+
+        let err = filter_entries_to_input_scope(
+            &tmp.path().join("compile_commands.json"),
+            &requested,
+            vec![tu_entry(other)],
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("no translation units matched"),
+            "unexpected error: {err}"
+        );
+    }
 }

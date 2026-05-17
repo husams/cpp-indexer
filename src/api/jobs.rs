@@ -9,6 +9,7 @@
 //! AC-M7-1, AC-M7-2, AC-M7-19.
 
 use std::{
+    cmp::Reverse,
     collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -99,6 +100,14 @@ pub struct JobRecord {
     pub phase: JobPhase,
     /// Progress fraction in `[0.0, 1.0]`.
     pub progress: f32,
+    /// Translation units completed by the indexing pipeline.
+    pub tus_done: u64,
+    /// Total translation units selected for this job.
+    pub tus_total: u64,
+    /// Nodes written by this job.
+    pub nodes: u64,
+    /// Edges written by this job.
+    pub edges: u64,
     pub source: IngestSource,
     pub options: IngestOptions,
     /// UNIX seconds at enqueue time.
@@ -114,6 +123,15 @@ pub struct JobRecord {
     pub error: Option<String>,
 }
 
+/// Concrete progress counters for a job.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct JobProgressCounters {
+    pub tus_done: u64,
+    pub tus_total: u64,
+    pub nodes: u64,
+    pub edges: u64,
+}
+
 impl JobRecord {
     fn new(job_id: String, source: IngestSource, options: IngestOptions) -> Self {
         let now = SystemTime::now()
@@ -125,6 +143,10 @@ impl JobRecord {
             state: JobState::Queued,
             phase: JobPhase::Bootstrap,
             progress: 0.0,
+            tus_done: 0,
+            tus_total: 0,
+            nodes: 0,
+            edges: 0,
             source,
             options,
             enqueued_at: now,
@@ -174,12 +196,17 @@ impl JobQueue {
             sender,
             max_depth: capacity,
         };
+        queue.update_queue_depth_metric();
         (queue, receiver)
     }
 
     /// Number of jobs currently in the channel (approximate).
     pub fn depth(&self) -> usize {
         self.max_depth - self.sender.capacity()
+    }
+
+    fn update_queue_depth_metric(&self) {
+        crate::api::metrics::CXG_QUEUE_DEPTH.set(self.depth().try_into().unwrap_or(i64::MAX));
     }
 
     /// Enqueue a new ingest request.
@@ -208,11 +235,16 @@ impl JobQueue {
 
         // Non-blocking try_send since we already checked capacity above.
         match self.sender.try_send(msg) {
-            Ok(()) => Some(job_id),
+            Ok(()) => {
+                self.update_queue_depth_metric();
+                Some(job_id)
+            }
             Err(_) => {
                 // Race: another enqueue stole the slot.
                 let mut jobs = self.jobs.lock().expect("jobs lock poisoned");
                 jobs.remove(&job_id);
+                drop(jobs);
+                self.update_queue_depth_metric();
                 None
             }
         }
@@ -234,8 +266,8 @@ impl JobQueue {
             Some(s) => jobs.values().filter(|r| r.state == s).cloned().collect(),
             None => jobs.values().cloned().collect(),
         };
-        // Stable ordering by enqueue time.
-        records.sort_by_key(|r| r.enqueued_at);
+        // Most recent first, matching the REST contract for `limit`.
+        records.sort_by_key(|r| Reverse(r.enqueued_at));
         records
     }
 
@@ -250,6 +282,8 @@ impl JobQueue {
             rec.state = JobState::Running;
             rec.started_at = Some(now);
         }
+        drop(jobs);
+        self.update_queue_depth_metric();
     }
 
     /// Update the current phase and progress fraction.  No-op if not found.
@@ -258,6 +292,25 @@ impl JobQueue {
         if let Some(rec) = jobs.get_mut(job_id) {
             rec.phase = phase;
             rec.progress = progress;
+        }
+    }
+
+    /// Update phase, fraction, and concrete progress counters. No-op if not found.
+    pub fn update_progress(
+        &self,
+        job_id: &str,
+        phase: JobPhase,
+        progress: f32,
+        counters: JobProgressCounters,
+    ) {
+        let mut jobs = self.jobs.lock().expect("jobs lock poisoned");
+        if let Some(rec) = jobs.get_mut(job_id) {
+            rec.phase = phase;
+            rec.progress = progress;
+            rec.tus_done = counters.tus_done;
+            rec.tus_total = counters.tus_total;
+            rec.nodes = counters.nodes;
+            rec.edges = counters.edges;
         }
     }
 
@@ -272,6 +325,26 @@ impl JobQueue {
             rec.state = JobState::Done;
             rec.phase = JobPhase::Done;
             rec.progress = 1.0;
+            rec.tus_done = rec.tus_total;
+            rec.finished_at = Some(now);
+        }
+    }
+
+    /// Mark a job as done and set final progress counters.
+    pub fn mark_done_with_counts(&self, job_id: &str, tus_total: u64, nodes: u64, edges: u64) {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut jobs = self.jobs.lock().expect("jobs lock poisoned");
+        if let Some(rec) = jobs.get_mut(job_id) {
+            rec.state = JobState::Done;
+            rec.phase = JobPhase::Done;
+            rec.progress = 1.0;
+            rec.tus_total = tus_total;
+            rec.tus_done = tus_total;
+            rec.nodes = nodes;
+            rec.edges = edges;
             rec.finished_at = Some(now);
         }
     }
@@ -374,10 +447,14 @@ mod tests {
             .enqueue(path_source("/repo"), IngestOptions::default())
             .unwrap();
         queue.mark_running(&id);
-        queue.mark_done(&id);
+        queue.mark_done_with_counts(&id, 3, 10, 20);
         let rec = queue.get(&id).unwrap();
         assert_eq!(rec.state, JobState::Done);
         assert_eq!(rec.progress, 1.0);
+        assert_eq!(rec.tus_done, 3);
+        assert_eq!(rec.tus_total, 3);
+        assert_eq!(rec.nodes, 10);
+        assert_eq!(rec.edges, 20);
         assert!(rec.finished_at.is_some());
     }
 
@@ -413,6 +490,52 @@ mod tests {
 
         let all = queue.list(None);
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn list_orders_newest_first() {
+        let (queue, _rx) = JobQueue::new(64);
+        let older = queue
+            .enqueue(path_source("/older"), IngestOptions::default())
+            .unwrap();
+        let newer = queue
+            .enqueue(path_source("/newer"), IngestOptions::default())
+            .unwrap();
+
+        {
+            let mut jobs = queue.jobs.lock().unwrap();
+            jobs.get_mut(&older).unwrap().enqueued_at = 1;
+            jobs.get_mut(&newer).unwrap().enqueued_at = 2;
+        }
+
+        let all = queue.list(None);
+        assert_eq!(all[0].job_id, newer);
+        assert_eq!(all[1].job_id, older);
+    }
+
+    #[test]
+    fn job_record_serializes_progress_counters() {
+        let (queue, _rx) = JobQueue::new(64);
+        let id = queue
+            .enqueue(path_source("/repo"), IngestOptions::default())
+            .unwrap();
+        queue.update_progress(
+            &id,
+            JobPhase::Phase1,
+            0.5,
+            JobProgressCounters {
+                tus_done: 2,
+                tus_total: 4,
+                nodes: 10,
+                edges: 20,
+            },
+        );
+        let rec = queue.get(&id).unwrap();
+        let json = serde_json::to_value(rec).unwrap();
+        assert_eq!(json["tus_done"], 2);
+        assert_eq!(json["tus_total"], 4);
+        assert_eq!(json["nodes"], 10);
+        assert_eq!(json["edges"], 20);
     }
 
     #[test]

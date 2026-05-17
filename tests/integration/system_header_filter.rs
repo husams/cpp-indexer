@@ -15,13 +15,12 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use clang::Clang;
 use tempfile::TempDir;
 
 use cpp_indexer::{
     schema::arrow::record_batch_to_nodes,
     stage::writer::StageWriter,
-    visit::shallow::{visit_tu, VisitOptions},
+    visit::shallow::{global_clang, visit_tu, VisitOptions},
 };
 
 // ---------------------------------------------------------------------------
@@ -44,7 +43,7 @@ fn collect_node_names(skip_system_headers: bool) -> HashSet<String> {
         .canonicalize()
         .unwrap_or_else(|_| fixture.join("user_code.cpp"));
 
-    let clang = Clang::new().expect("libclang must be available");
+    let clang = global_clang();
 
     let opts = VisitOptions {
         repo_name: "test-repo",
@@ -61,7 +60,7 @@ fn collect_node_names(skip_system_headers: bool) -> HashSet<String> {
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
-    visit_tu(&clang, &opts, &mut writer).unwrap();
+    visit_tu(clang, &opts, &mut writer).unwrap();
     writer.finish().unwrap();
 
     // Read back node names from all parquet shards.

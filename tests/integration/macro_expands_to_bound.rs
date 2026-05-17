@@ -91,6 +91,7 @@ async fn expands_to_count_bounded_by_10x_source_lines() {
         stage_dir: Some(stage_dir.path().to_path_buf()),
         skip_phase2: true,
         skip_system_headers: true,
+        workers: None,
         skip_cache: false,
         skip_repo_node: true,
     };
@@ -139,6 +140,7 @@ async fn expands_to_count_is_nonzero_for_xmacro_fixture() {
         stage_dir: Some(stage_dir.path().to_path_buf()),
         skip_phase2: true,
         skip_system_headers: true,
+        workers: None,
         skip_cache: false,
         skip_repo_node: true,
     };

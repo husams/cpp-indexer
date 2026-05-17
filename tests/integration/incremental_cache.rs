@@ -88,6 +88,7 @@ fn make_run_opts(fixture_dir: &Path, stage_dir: PathBuf, skip_cache: bool) -> Ru
         stage_dir: Some(stage_dir),
         skip_phase2: true,
         skip_system_headers: true,
+        workers: None,
         skip_cache,
         skip_repo_node: true,
     }

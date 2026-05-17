@@ -12,7 +12,11 @@
 //!
 //! ADR-5.
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::{Path as FsPath, PathBuf},
+    sync::Arc,
+};
 
 use axum::{
     extract::{Path, Query, State},
@@ -29,6 +33,7 @@ use super::{
     auth::{bearer_auth_writes_only, BearerToken},
     jobs::{IngestRequest, IngestSource, JobQueue, JobState, RepoInfo, RepoRegistry},
     problem::Problem,
+    reset::{self, ResetState},
 };
 use crate::{config::WorkspaceConfig, sink::GraphSink};
 
@@ -44,6 +49,18 @@ pub struct AppState {
     pub version: String,
     /// Optional workspace config (required for git_url ingest).
     pub workspace_cfg: Option<WorkspaceConfig>,
+    /// Root directory for staging cache cleanup.
+    pub stage_root: PathBuf,
+}
+
+impl ResetState for AppState {
+    fn sink(&self) -> Arc<dyn GraphSink> {
+        Arc::clone(&self.sink)
+    }
+
+    fn stage_root(&self) -> &FsPath {
+        &self.stage_root
+    }
 }
 
 // ── Router builder ─────────────────────────────────────────────────────────────
@@ -53,12 +70,15 @@ pub struct AppState {
 /// `token` is the bearer token loaded from the env var named in
 /// `[api].auth_token_env`.
 pub fn build_router(state: AppState, token: BearerToken) -> Router {
+    let state = Arc::new(state);
     Router::new()
         .route("/v1/ingest", post(ingest))
+        .route("/v1/reset", post(reset::handle_reset::<AppState>))
         .route("/v1/jobs", get(list_jobs))
         .route("/v1/jobs/:id", get(get_job))
         .route("/v1/repos", get(list_repos))
         .route("/v1/status", get(status))
+        .route("/metrics", get(super::metrics::handler))
         .layer(middleware::from_fn_with_state(
             token,
             bearer_auth_writes_only,
@@ -76,16 +96,17 @@ struct IngestAccepted {
 }
 
 async fn ingest(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<IngestRequest>,
 ) -> Result<impl IntoResponse, Problem> {
-    // git_url source: validate allowlist, clone/fetch, then enqueue as path job.
+    // git_url source: validate allowlist before enqueue. Clone/fetch happens
+    // in the worker so git failures become job failures.
     if let IngestSource::GitUrl {
         ref git_url,
-        ref git_ref,
+        git_ref: _,
     } = req.source
     {
-        let ws_cfg = state.workspace_cfg.clone().ok_or_else(|| {
+        let ws_cfg = state.workspace_cfg.as_ref().ok_or_else(|| {
             Problem::new(
                 StatusCode::NOT_IMPLEMENTED,
                 "git_url ingest not configured",
@@ -93,39 +114,12 @@ async fn ingest(
             .detail("no [workspace] section in daemon config; configure workspace.dir and allowed_hosts")
         })?;
 
-        // Allowlist check is done inside workspace::ingest_git_url; on failure
-        // the error message contains "host not allowed" and we map it to 403.
-        let git_url = git_url.clone();
-        let git_ref_owned = git_ref.clone();
-        let clone_result = tokio::task::spawn_blocking(move || {
-            crate::workspace::ingest_git_url(&ws_cfg, &git_url, git_ref_owned.as_deref())
-        })
-        .await
-        .map_err(|e| {
-            Problem::new(StatusCode::INTERNAL_SERVER_ERROR, "workspace task panicked")
-                .detail(format!("{e}"))
-        })?;
-
-        let (_outcome, clone_path) = clone_result.map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("host not allowed") {
-                Problem::new(StatusCode::FORBIDDEN, "git host not in allowlist").detail(msg)
-            } else {
-                Problem::new(StatusCode::BAD_GATEWAY, "git operation failed").detail(msg)
-            }
-        })?;
-
-        // Enqueue the cloned path as a local path job.
-        let path_source = IngestSource::Path { path: clone_path };
-        return match state.queue.enqueue(path_source, req.options) {
-            Some(job_id) => {
-                Ok((StatusCode::ACCEPTED, Json(IngestAccepted { job_id })).into_response())
-            }
-            None => Err(
-                Problem::new(StatusCode::TOO_MANY_REQUESTS, "job queue full")
-                    .detail("retry after a running job completes"),
-            ),
-        };
+        if !crate::workspace::allowlist::is_allowed(git_url, &ws_cfg.allowed_hosts) {
+            return Err(
+                Problem::new(StatusCode::FORBIDDEN, "git host not in allowlist")
+                    .detail("git_url host is not listed in [workspace].allowed_hosts"),
+            );
+        }
     }
 
     match state.queue.enqueue(req.source, req.options) {
@@ -151,7 +145,7 @@ struct ListJobsQuery {
 }
 
 async fn list_jobs(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Query(params): Query<ListJobsQuery>,
 ) -> Result<impl IntoResponse, Problem> {
     let state_filter = match params.state.as_deref() {
@@ -180,7 +174,7 @@ async fn list_jobs(
 // ── GET /v1/jobs/:id ───────────────────────────────────────────────────────────
 
 async fn get_job(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, Problem> {
     match state.queue.get(&id) {
@@ -192,7 +186,7 @@ async fn get_job(
 
 // ── GET /v1/repos ──────────────────────────────────────────────────────────────
 
-async fn list_repos(State(state): State<AppState>) -> impl IntoResponse {
+async fn list_repos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let repos: Vec<RepoInfo> = state.repos.list();
     Json(repos)
 }
@@ -208,7 +202,7 @@ struct StatusResponse {
     sink_health: String,
 }
 
-async fn status(State(state): State<AppState>) -> Result<impl IntoResponse, Problem> {
+async fn status(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, Problem> {
     let health = state.sink.health().await.map_err(Problem::from)?;
     Ok(Json(StatusResponse {
         status: health.status,
@@ -252,6 +246,7 @@ mod tests {
             listen,
             version: "0.1.0-test".to_owned(),
             workspace_cfg: None,
+            stage_root: std::env::temp_dir(),
         };
         (build_router(state, BearerToken(token.to_owned())), rx)
     }
@@ -269,6 +264,7 @@ mod tests {
             listen,
             version: "0.1.0-test".to_owned(),
             workspace_cfg: None,
+            stage_root: std::env::temp_dir(),
         };
         (build_router(state, BearerToken(token.to_owned())), rx)
     }
@@ -325,6 +321,7 @@ mod tests {
             listen,
             version: "0.1.0-test".to_owned(),
             workspace_cfg: None,
+            stage_root: std::env::temp_dir(),
         };
         let app = build_router(state, BearerToken(TOKEN.to_owned()));
 
@@ -344,6 +341,10 @@ mod tests {
         assert_eq!(json["state"], "queued");
         assert_eq!(json["phase"], "bootstrap");
         assert!(json["progress"].is_number());
+        assert_eq!(json["tus_done"], 0);
+        assert_eq!(json["tus_total"], 0);
+        assert_eq!(json["nodes"], 0);
+        assert_eq!(json["edges"], 0);
     }
 
     // (c) POST /v1/ingest without bearer → 401 with problem+json
@@ -413,6 +414,7 @@ mod tests {
             listen,
             version: "0.1.0-test".to_owned(),
             workspace_cfg: None,
+            stage_root: std::env::temp_dir(),
         };
         let app = build_router(state, BearerToken(TOKEN.to_owned()));
 
@@ -450,6 +452,7 @@ mod tests {
             listen,
             version: "0.1.0".to_owned(),
             workspace_cfg: None,
+            stage_root: std::env::temp_dir(),
         };
         // The listen address is stored verbatim; real binding happens in daemon.rs.
         assert_eq!(state.listen.port(), 9999);
@@ -481,5 +484,37 @@ mod tests {
         // Second request should get 429.
         let resp2 = app.oneshot(make_req()).await.unwrap();
         assert_eq!(resp2.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn build_router_exposes_reset_route() {
+        let (app, _rx) = make_app(TOKEN);
+        let body = serde_json::json!({
+            "target": "all",
+            "confirm_token": "wrong"
+        });
+        let req = Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/reset")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header(http::header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn build_router_exposes_metrics_without_auth() {
+        let (app, _rx) = make_app(TOKEN);
+        let req = Request::builder()
+            .method(http::Method::GET)
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

@@ -53,6 +53,7 @@ fn make_run_opts(fixture: PathBuf, cc_path: Option<PathBuf>, stage_dir: PathBuf)
         stage_dir: Some(stage_dir),
         skip_phase2: true,
         skip_system_headers: true,
+        workers: None,
         skip_cache: false,
         skip_repo_node: true,
     }
@@ -182,6 +183,7 @@ async fn m5_chromium_subset_gate() {
         stage_dir: Some(stage_dir.path().to_path_buf()),
         skip_phase2: true,
         skip_system_headers: true,
+        workers: None,
         skip_cache: false,
         skip_repo_node: true,
     };

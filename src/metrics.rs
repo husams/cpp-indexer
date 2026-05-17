@@ -6,7 +6,7 @@
 //! counters can still be incremented and read in unit tests without a running
 //! HTTP server.
 
-use prometheus::{IntCounter, Opts};
+use prometheus::{Gauge, IntCounter, Opts};
 use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
@@ -26,6 +26,66 @@ pub fn cxg_libclang_errors_total() -> &'static IntCounter {
             "Total TUs that failed or panicked in Phase 1 libclang parse",
         ))
         .expect("cxg_libclang_errors_total: invalid metric opts")
+    })
+}
+
+/// Total graph nodes written by completed pipeline runs.
+pub fn cxg_nodes_total() -> &'static IntCounter {
+    static COUNTER: OnceLock<IntCounter> = OnceLock::new();
+    COUNTER.get_or_init(|| {
+        IntCounter::with_opts(Opts::new(
+            "cxg_nodes_total",
+            "Total graph nodes written by completed pipeline runs",
+        ))
+        .expect("cxg_nodes_total: invalid metric opts")
+    })
+}
+
+/// Total graph edges written by completed pipeline runs.
+pub fn cxg_edges_total() -> &'static IntCounter {
+    static COUNTER: OnceLock<IntCounter> = OnceLock::new();
+    COUNTER.get_or_init(|| {
+        IntCounter::with_opts(Opts::new(
+            "cxg_edges_total",
+            "Total graph edges written by completed pipeline runs",
+        ))
+        .expect("cxg_edges_total: invalid metric opts")
+    })
+}
+
+/// Nodes per second for the most recent completed pipeline run.
+pub fn cxg_nodes_per_second() -> &'static Gauge {
+    static GAUGE: OnceLock<Gauge> = OnceLock::new();
+    GAUGE.get_or_init(|| {
+        Gauge::with_opts(Opts::new(
+            "cxg_nodes_per_second",
+            "Nodes written per second by the most recent completed pipeline run",
+        ))
+        .expect("cxg_nodes_per_second: invalid metric opts")
+    })
+}
+
+/// Edges per second for the most recent completed pipeline run.
+pub fn cxg_edges_per_second() -> &'static Gauge {
+    static GAUGE: OnceLock<Gauge> = OnceLock::new();
+    GAUGE.get_or_init(|| {
+        Gauge::with_opts(Opts::new(
+            "cxg_edges_per_second",
+            "Edges written per second by the most recent completed pipeline run",
+        ))
+        .expect("cxg_edges_per_second: invalid metric opts")
+    })
+}
+
+/// Cache-hit ratio for the most recent completed pipeline run.
+pub fn cxg_cache_hit_ratio() -> &'static Gauge {
+    static GAUGE: OnceLock<Gauge> = OnceLock::new();
+    GAUGE.get_or_init(|| {
+        Gauge::with_opts(Opts::new(
+            "cxg_cache_hit_ratio",
+            "Translation-unit cache hit ratio for the most recent completed pipeline run",
+        ))
+        .expect("cxg_cache_hit_ratio: invalid metric opts")
     })
 }
 

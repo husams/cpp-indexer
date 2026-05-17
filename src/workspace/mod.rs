@@ -64,31 +64,17 @@ pub fn ingest_git_url(
         return Err(Error::Workspace(format!("host not allowed: {host}")));
     }
 
-    // 2. Derive repo name and a stable clone path.
-    //    We use a placeholder SHA of zeros so we can call `clone_or_fetch`
-    //    immediately; the git2 clone sets the actual HEAD.  The ADR specifies
-    //    resolving the SHA via ls-remote first for path naming, but for
-    //    pragmatic integration (avoiding an extra round-trip in unit tests) we
-    //    use a "lazy" path: `<repo-name>-HEAD` resolved after clone.
-    //
-    //    Production note: the full ls-remote approach described in ADR-6
-    //    requires a live network call before the job is queued.  We implement
-    //    the simpler variant here (clone, then read HEAD SHA, then rename if
-    //    needed) to keep the happy path synchronous and testable.  The rename
-    //    step is a follow-up (see open items in implementation-notes.md).
+    // 2. Derive repo name and resolve the target commit before choosing the
+    //    clone path. This keeps re-ingest stable: the same URL/ref maps to the
+    //    same `<repo>-<shortsha>` directory and `clone_or_fetch` can fetch.
     let repo_name = layout::repo_name_from_url(git_url);
+    let commit_sha =
+        git::resolve_remote_commit(git_url, git_ref, cfg.git_credentials_env.as_deref())?;
 
     // Depth: 0 in config means full history; otherwise use the configured value.
-    let depth = match cfg.default_clone_depth {
-        Some(0) | None => None, // full history
-        Some(d) => Some(d),     // shallow
-    };
+    let depth = clone_depth(cfg.default_clone_depth);
 
-    // For path disambiguation we use "0000" as the short SHA placeholder and
-    // rename after the first clone.  For re-ingests the directory already
-    // exists so we use the same naming.
-    let placeholder_sha = "0000000000000000";
-    let target_dir = layout::clone_path(&cfg.dir, &repo_name, placeholder_sha);
+    let target_dir = layout::clone_path(&cfg.dir, &repo_name, &commit_sha);
 
     // 3. Clone or fetch.
     let outcome = git::clone_or_fetch(
@@ -99,42 +85,7 @@ pub fn ingest_git_url(
         &target_dir,
     )?;
 
-    // 4. After clone, rename the directory to the actual HEAD SHA.
-    //    This implements AC-M7-12 (path layout includes short SHA).
-    let final_dir = if let CloneOutcome::Cloned(_) = &outcome {
-        let repo = git2::Repository::open(&target_dir).map_err(|e| {
-            Error::Workspace(format!(
-                "could not open cloned repo for SHA resolution: {e}"
-            ))
-        })?;
-        let head_sha = repo
-            .head()
-            .and_then(|h| h.peel_to_commit())
-            .map(|c| c.id().to_string())
-            .unwrap_or_else(|_| placeholder_sha.to_owned());
-
-        let final_path = layout::clone_path(&cfg.dir, &repo_name, &head_sha);
-        if final_path != target_dir {
-            std::fs::rename(&target_dir, &final_path).map_err(|e| {
-                Error::Workspace(format!(
-                    "could not rename clone dir {} → {}: {e}",
-                    target_dir.display(),
-                    final_path.display()
-                ))
-            })?;
-        }
-        final_path
-    } else {
-        target_dir.clone()
-    };
-
-    // Return the outcome with the final path.
-    let final_outcome = match outcome {
-        CloneOutcome::Cloned(_) => CloneOutcome::Cloned(final_dir.clone()),
-        CloneOutcome::Fetched(_) => CloneOutcome::Fetched(final_dir.clone()),
-    };
-
-    Ok((final_outcome, final_dir))
+    Ok((outcome, target_dir))
 }
 
 /// Best-effort host extraction from a URL string for error messages.
@@ -142,6 +93,14 @@ fn extract_host(raw_url: &str) -> Option<String> {
     url::Url::parse(raw_url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_owned()))
+}
+
+fn clone_depth(configured: Option<u32>) -> Option<u32> {
+    match configured {
+        Some(0) => None,
+        Some(d) => Some(d),
+        None => Some(1),
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -178,5 +137,12 @@ mod tests {
             }
             other => panic!("expected Error::Workspace, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn missing_clone_depth_defaults_to_shallow_one() {
+        assert_eq!(clone_depth(None), Some(1));
+        assert_eq!(clone_depth(Some(1)), Some(1));
+        assert_eq!(clone_depth(Some(0)), None);
     }
 }

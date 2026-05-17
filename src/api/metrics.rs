@@ -6,6 +6,11 @@
 //! AC-M7-18.
 //!
 //! **Registered metrics**
+//! - `cxg_nodes_total` (Counter) — imported from `crate::metrics`.
+//! - `cxg_edges_total` (Counter) — imported from `crate::metrics`.
+//! - `cxg_nodes_per_second` (Gauge) — imported from `crate::metrics`.
+//! - `cxg_edges_per_second` (Gauge) — imported from `crate::metrics`.
+//! - `cxg_cache_hit_ratio` (Gauge) — imported from `crate::metrics`.
 //! - `cxg_libclang_errors_total` (Counter) — imported from `crate::metrics`.
 //! - `cxg_queue_depth` (Gauge) — current depth of the ingest job queue;
 //!   updated by `crate::api::jobs::JobQueue` on enqueue/dequeue.
@@ -29,7 +34,16 @@ pub fn registry() -> &'static Registry {
     static REG: OnceLock<Registry> = OnceLock::new();
     REG.get_or_init(|| {
         let r = Registry::new();
-        // Register cxg_libclang_errors_total (from crate::metrics).
+        r.register(Box::new(crate::metrics::cxg_nodes_total().clone()))
+            .expect("cxg_nodes_total: duplicate registration");
+        r.register(Box::new(crate::metrics::cxg_edges_total().clone()))
+            .expect("cxg_edges_total: duplicate registration");
+        r.register(Box::new(crate::metrics::cxg_nodes_per_second().clone()))
+            .expect("cxg_nodes_per_second: duplicate registration");
+        r.register(Box::new(crate::metrics::cxg_edges_per_second().clone()))
+            .expect("cxg_edges_per_second: duplicate registration");
+        r.register(Box::new(crate::metrics::cxg_cache_hit_ratio().clone()))
+            .expect("cxg_cache_hit_ratio: duplicate registration");
         r.register(Box::new(
             crate::metrics::cxg_libclang_errors_total().clone(),
         ))
@@ -124,14 +138,17 @@ mod tests {
         // Force registry initialisation.
         let _ = registry();
         let body = scrape().await;
-        assert!(
-            body.contains("cxg_libclang_errors_total"),
-            "missing cxg_libclang_errors_total in:\n{body}"
-        );
-        assert!(
-            body.contains("cxg_queue_depth"),
-            "missing cxg_queue_depth in:\n{body}"
-        );
+        for metric in [
+            "cxg_nodes_total",
+            "cxg_edges_total",
+            "cxg_nodes_per_second",
+            "cxg_edges_per_second",
+            "cxg_cache_hit_ratio",
+            "cxg_libclang_errors_total",
+            "cxg_queue_depth",
+        ] {
+            assert!(body.contains(metric), "missing {metric} in:\n{body}");
+        }
     }
 
     #[tokio::test]
