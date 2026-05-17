@@ -1,11 +1,15 @@
-/// Base CodexGraph node kinds (AC-M1-2).
+/// CodexGraph node kinds (AC-M1-2, AC-M2-1..AC-M2-6).
 ///
-/// M2 extensions (`NAMESPACE`, `TEMPLATE_DECL`, `SPECIALIZATION`, `TYPEDEF`, `ENUM`, `HEADER`,
-/// `MACRO`) and the `REPO` node (M4) are added in later stories (S14, S22) without bumping
-/// `SCHEMA_VERSION` for additive variants. Any structural change still requires a bump per ADR-9.
+/// M1 base: `MODULE`, `CLASS`, `FUNCTION`, `METHOD`, `FIELD`, `GLOBAL_VARIABLE`.
+/// M2 extensions (S14): `NAMESPACE`, `TEMPLATE_DECL`, `SPECIALIZATION`, `TYPEDEF`, `ENUM`, `HEADER`.
+/// `MACRO` (S22) and `REPO` (M4) are added in later stories.
+///
+/// Adding new variants bumps `SCHEMA_VERSION` per ADR-9 (bump policy: any change to
+/// `NodeKind` or `EdgeKind` variants requires a version bump in the same PR).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum NodeKind {
+    // ── M1 base ─────────────────────────────────────────────────────────────
     /// A C++ translation unit or header treated as a logical module boundary.
     Module,
     /// A `class` or `struct` declaration.
@@ -18,6 +22,20 @@ pub enum NodeKind {
     Field,
     /// A file-scope or namespace-scope variable (`extern`, `static`, plain).
     GlobalVariable,
+
+    // ── M2 extensions (S14) ─────────────────────────────────────────────────
+    /// A named C++ namespace (`namespace foo { … }`).  AC-M2-1.
+    Namespace,
+    /// A class or function template declaration (not yet specialised).  AC-M2-2.
+    TemplateDef,
+    /// A concrete template specialization or instantiation.  AC-M2-3.
+    Specialization,
+    /// A `typedef` or `using` type alias.  AC-M2-5.
+    Typedef,
+    /// An `enum` or `enum class` declaration.  AC-M2-6.
+    Enum,
+    /// A header file referenced via an `#include` directive.  AC-M2-4.
+    Header,
 }
 
 impl NodeKind {
@@ -30,6 +48,12 @@ impl NodeKind {
             NodeKind::Method => "METHOD",
             NodeKind::Field => "FIELD",
             NodeKind::GlobalVariable => "GLOBAL_VARIABLE",
+            NodeKind::Namespace => "NAMESPACE",
+            NodeKind::TemplateDef => "TEMPLATE_DECL",
+            NodeKind::Specialization => "SPECIALIZATION",
+            NodeKind::Typedef => "TYPEDEF",
+            NodeKind::Enum => "ENUM",
+            NodeKind::Header => "HEADER",
         }
     }
 
@@ -42,6 +66,12 @@ impl NodeKind {
             NodeKind::Method,
             NodeKind::Field,
             NodeKind::GlobalVariable,
+            NodeKind::Namespace,
+            NodeKind::TemplateDef,
+            NodeKind::Specialization,
+            NodeKind::Typedef,
+            NodeKind::Enum,
+            NodeKind::Header,
         ]
     }
 
@@ -58,6 +88,12 @@ impl NodeKind {
             "METHOD" => Some(NodeKind::Method),
             "FIELD" => Some(NodeKind::Field),
             "GLOBAL_VARIABLE" => Some(NodeKind::GlobalVariable),
+            "NAMESPACE" => Some(NodeKind::Namespace),
+            "TEMPLATE_DECL" => Some(NodeKind::TemplateDef),
+            "SPECIALIZATION" => Some(NodeKind::Specialization),
+            "TYPEDEF" => Some(NodeKind::Typedef),
+            "ENUM" => Some(NodeKind::Enum),
+            "HEADER" => Some(NodeKind::Header),
             _ => None,
         }
     }

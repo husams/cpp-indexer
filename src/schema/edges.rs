@@ -1,11 +1,15 @@
-/// Base CodexGraph edge kinds (AC-M1-3).
+/// CodexGraph edge kinds (AC-M1-3, AC-M2-7..AC-M2-12).
 ///
-/// M2 extensions (`INCLUDES`, `OVERRIDES`, `INSTANTIATES`, `SPECIALIZES`, `FRIEND_OF`,
-/// `ADL_CANDIDATE`) and M4 additions (`BELONGS_TO_REPO`, `EXTERNAL_REF`) are added in later
-/// stories without bumping `SCHEMA_VERSION` for additive variants.
+/// M1 base: `CONTAINS`, `HAS_METHOD`, `HAS_FIELD`, `INHERITS`, `USES`, `CALLS`.
+/// M2 extensions (S14): `INCLUDES`, `OVERRIDES`, `INSTANTIATES`, `SPECIALIZES`, `FRIEND_OF`,
+/// `ADL_CANDIDATE`.
+/// M4 additions (`BELONGS_TO_REPO`, `EXTERNAL_REF`) are added in later stories.
+///
+/// Adding new variants bumps `SCHEMA_VERSION` per ADR-9.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EdgeKind {
+    // ── M1 base ─────────────────────────────────────────────────────────────
     /// A lexical containment relationship (e.g., class contains method, namespace contains class).
     Contains,
     /// A class directly owns a method declaration.
@@ -18,6 +22,20 @@ pub enum EdgeKind {
     Uses,
     /// A direct call from one function/method to another.
     Calls,
+
+    // ── M2 extensions (S14) ─────────────────────────────────────────────────
+    /// A translation unit (MODULE) or header (HEADER) includes another header.  AC-M2-7.
+    Includes,
+    /// A virtual method overrides a base-class virtual method; `vtable_slot` in attrs.  AC-M2-8.
+    Overrides,
+    /// A call site or context that instantiates a template.  AC-M2-9.
+    Instantiates,
+    /// A template specialization refers to its primary template.  AC-M2-10.
+    Specializes,
+    /// A class grants friend access to another entity.  AC-M2-11.
+    FriendOf,
+    /// An unresolved name that is a candidate for Argument-Dependent Lookup.  AC-M2-12.
+    AdlCandidate,
 }
 
 impl EdgeKind {
@@ -30,6 +48,12 @@ impl EdgeKind {
             EdgeKind::Inherits => "INHERITS",
             EdgeKind::Uses => "USES",
             EdgeKind::Calls => "CALLS",
+            EdgeKind::Includes => "INCLUDES",
+            EdgeKind::Overrides => "OVERRIDES",
+            EdgeKind::Instantiates => "INSTANTIATES",
+            EdgeKind::Specializes => "SPECIALIZES",
+            EdgeKind::FriendOf => "FRIEND_OF",
+            EdgeKind::AdlCandidate => "ADL_CANDIDATE",
         }
     }
 
@@ -42,6 +66,12 @@ impl EdgeKind {
             EdgeKind::Inherits,
             EdgeKind::Uses,
             EdgeKind::Calls,
+            EdgeKind::Includes,
+            EdgeKind::Overrides,
+            EdgeKind::Instantiates,
+            EdgeKind::Specializes,
+            EdgeKind::FriendOf,
+            EdgeKind::AdlCandidate,
         ]
     }
 
@@ -58,6 +88,12 @@ impl EdgeKind {
             "INHERITS" => Some(EdgeKind::Inherits),
             "USES" => Some(EdgeKind::Uses),
             "CALLS" => Some(EdgeKind::Calls),
+            "INCLUDES" => Some(EdgeKind::Includes),
+            "OVERRIDES" => Some(EdgeKind::Overrides),
+            "INSTANTIATES" => Some(EdgeKind::Instantiates),
+            "SPECIALIZES" => Some(EdgeKind::Specializes),
+            "FRIEND_OF" => Some(EdgeKind::FriendOf),
+            "ADL_CANDIDATE" => Some(EdgeKind::AdlCandidate),
             _ => None,
         }
     }

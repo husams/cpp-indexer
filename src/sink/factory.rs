@@ -86,7 +86,10 @@ mod tests {
         match create(&bare_sink_config("neo4j")).await {
             Ok(_) => panic!("must error when [sink.neo4j] is absent"),
             Err(Error::Config { field, .. }) => {
-                assert!(field.contains("neo4j"), "field must name neo4j; got: {field}");
+                assert!(
+                    field.contains("neo4j"),
+                    "field must name neo4j; got: {field}"
+                );
             }
             Err(other) => panic!("expected Error::Config, got {other:?}"),
         }
@@ -118,8 +121,14 @@ mod tests {
         match create(&bare_sink_config("indradb")).await {
             Ok(_) => panic!("indradb without config section must error"),
             Err(Error::Config { field, detail }) => {
-                assert!(field.contains("indradb"), "field must name indradb; got: {field}");
-                assert!(detail.contains("indradb"), "detail must mention indradb; got: {detail}");
+                assert!(
+                    field.contains("indradb"),
+                    "field must name indradb; got: {field}"
+                );
+                assert!(
+                    detail.contains("indradb"),
+                    "detail must mention indradb; got: {detail}"
+                );
             }
             Err(other) => panic!("expected Error::Config, got {other:?}"),
         }
@@ -131,7 +140,10 @@ mod tests {
             Ok(_) => panic!("unknown backend must error"),
             Err(Error::Config { field, detail }) => {
                 assert_eq!(field, "sink.backend");
-                assert!(detail.contains("postgres"), "detail must name bad value; got: {detail}");
+                assert!(
+                    detail.contains("postgres"),
+                    "detail must name bad value; got: {detail}"
+                );
             }
             Err(other) => panic!("expected Error::Config, got {other:?}"),
         }

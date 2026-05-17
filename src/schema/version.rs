@@ -7,16 +7,20 @@
 /// Note: plan.md specified `SCHEMA_VERSION: &str = "1"` but ADR-9 (accepted, governs over plan)
 /// specifies `u32 = 1` plus a derived tag string. We follow ADR-9. Deviation recorded in
 /// implementation-notes.md.
-pub const SCHEMA_VERSION: u32 = 1;
+/// Bumped in S14 (cpp-extensions): added NAMESPACE, TEMPLATE_DECL, SPECIALIZATION, TYPEDEF,
+/// ENUM, HEADER node kinds and INCLUDES, OVERRIDES, INSTANTIATES, SPECIALIZES, FRIEND_OF,
+/// ADL_CANDIDATE edge kinds.  Any further change to NodeKind/EdgeKind variants must bump again
+/// per ADR-9.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Human-readable schema tag derived from `SCHEMA_VERSION`.
 ///
 /// ADR-9 references `const_format::concatcp!` to derive this; since `const_format` is not in
 /// Cargo.toml, we use a hand-written string literal with a `debug_assert!` to keep them in sync.
-pub const SCHEMA_VERSION_TAG: &str = "cxg-schema-v1";
+pub const SCHEMA_VERSION_TAG: &str = "cxg-schema-v2";
 
 /// Magic key stored in Parquet KV metadata; Phase 3 refuses mismatched-version shards.
-pub const PARQUET_MAGIC: &str = "cxg_parquet_v1";
+pub const PARQUET_MAGIC: &str = "cxg_parquet_v2";
 
 /// Verify at test-time that the tag string is consistent with the integer constant.
 ///
@@ -46,7 +50,7 @@ mod tests {
     #[test]
     fn parquet_magic_contains_version() {
         assert!(
-            PARQUET_MAGIC.contains("v1"),
+            PARQUET_MAGIC.contains(&format!("v{SCHEMA_VERSION}")),
             "PARQUET_MAGIC must embed the version string"
         );
     }
