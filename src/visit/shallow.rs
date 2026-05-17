@@ -25,6 +25,8 @@ use std::cell::OnceCell;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
+use std::collections::HashSet;
+
 use clang::{Clang, EntityKind, EntityVisitResult, Index};
 use tracing::{debug, warn};
 
@@ -103,7 +105,10 @@ pub fn with_thread_index<R>(f: impl FnOnce(&Index<'static>) -> R) -> R {
 use crate::{
     schema::{EdgeKind, EdgeRecord, NodeKind, NodeRecord},
     stage::writer::StageWriter,
-    visit::cursor_map::entity_kind_to_node_kind,
+    visit::{
+        cursor_map::entity_kind_to_node_kind,
+        macros::{collect_macro_definition, collect_macro_expansion},
+    },
     Error, Result,
 };
 
@@ -296,6 +301,10 @@ struct Collector<'a> {
     module_usr: Option<String>,
     /// Mirror of `VisitOptions::skip_system_headers`.
     skip_system_headers: bool,
+    /// Deduplication set for `MACRO` node USRs within this TU.
+    /// Multiple TUs may include the same header; Phase 3 deduplicates by USR.
+    /// Within a single TU we avoid emitting the same `MacroDefinition` twice.
+    seen_macro_usrs: HashSet<String>,
 }
 
 impl<'a> Collector<'a> {
@@ -315,6 +324,7 @@ impl<'a> Collector<'a> {
             tu_file_path,
             module_usr: None,
             skip_system_headers,
+            seen_macro_usrs: HashSet::new(),
         }
     }
 }
@@ -322,6 +332,17 @@ impl<'a> Collector<'a> {
 impl<'a> Collector<'a> {
     fn visit(&mut self, entity: clang::Entity<'_>, parent: clang::Entity<'_>) {
         let kind = entity.get_kind();
+
+        // ── Macro handling (S26, AC-M5-1..4) ────────────────────────────────
+        if kind == EntityKind::MacroDefinition {
+            self.visit_macro_definition(&entity);
+            return;
+        }
+        if kind == EntityKind::MacroExpansion {
+            self.visit_macro_expansion(&entity, &parent);
+            return;
+        }
+
         let node_kind = match entity_kind_to_node_kind(kind) {
             Some(k) if k != NodeKind::Module => k,
             _ => return,
@@ -397,6 +418,60 @@ impl<'a> Collector<'a> {
 
         // M2 extension edges.
         self.emit_m2_edges(&usr, node_kind, &entity);
+    }
+
+    /// Emit a MACRO node for a MacroDefinition entity (AC-M5-1).
+    ///
+    /// Deduplicates within this TU: the same macro (same synthesised USR) is only
+    /// emitted once even if the definition is visited multiple times.
+    fn visit_macro_definition(&mut self, entity: &clang::Entity<'_>) {
+        let record = match collect_macro_definition(
+            entity,
+            self.repo_name,
+            self.tu_hash,
+            self.partial,
+            &self.tu_file_path,
+            self.skip_system_headers,
+        ) {
+            Some(r) => r,
+            None => return,
+        };
+
+        // Dedup within this TU pass.
+        if !self.seen_macro_usrs.insert(record.usr.clone()) {
+            return;
+        }
+
+        self.nodes.push(record);
+    }
+
+    /// Emit an EXPANDS_TO edge for a MacroExpansion entity (AC-M5-2, AC-M5-3).
+    ///
+    /// The `src_usr` of the edge is:
+    /// - The closest enclosing function/method entity's USR if available.
+    /// - Otherwise the Module USR for the TU.
+    ///
+    /// Nested macro expansions (detected by `collect_macro_expansion`) are silently skipped.
+    fn visit_macro_expansion(&mut self, entity: &clang::Entity<'_>, _parent: &clang::Entity<'_>) {
+        let enclosing_usr = self.module_usr.as_deref().unwrap_or("").to_owned();
+
+        if enclosing_usr.is_empty() {
+            return;
+        }
+
+        let edge = match collect_macro_expansion(
+            entity,
+            &enclosing_usr,
+            self.repo_name,
+            self.tu_hash,
+            &self.tu_file_path,
+            self.skip_system_headers,
+        ) {
+            Some(e) => e,
+            None => return,
+        };
+
+        self.edges.push(edge);
     }
 
     /// Emit a HEADER node for an InclusionDirective and the INCLUDES edge from the module.

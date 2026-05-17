@@ -1,9 +1,10 @@
-/// CodexGraph edge kinds (AC-M1-3, AC-M2-7..AC-M2-12, AC-M4-2).
+/// CodexGraph edge kinds (AC-M1-3, AC-M2-7..AC-M2-12, AC-M4-2, AC-M5-2).
 ///
 /// M1 base: `CONTAINS`, `HAS_METHOD`, `HAS_FIELD`, `INHERITS`, `USES`, `CALLS`.
 /// M2 extensions (S14): `INCLUDES`, `OVERRIDES`, `INSTANTIATES`, `SPECIALIZES`, `FRIEND_OF`,
 /// `ADL_CANDIDATE`.
 /// M4 additions (S22): `BELONGS_TO_REPO`.  `EXTERNAL_REF` is added in S23.
+/// M5 additions (S26): `EXPANDS_TO`.
 ///
 /// Adding new variants bumps `SCHEMA_VERSION` per ADR-9.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -50,6 +51,16 @@ pub enum EdgeKind {
     /// `src_node` and `dst_node` live in different REPO nodes.
     /// `attrs_json` carries `{"via": "<ORIG_EDGE_KIND>"}`.
     ExternalRef,
+
+    // ── M5 additions (S26) ──────────────────────────────────────────────────
+    /// A top-level macro expansion at a call site.  AC-M5-2.
+    ///
+    /// Direction: `(call_site)-[:EXPANDS_TO]->(macro_def)`.
+    /// `call_site` is the enclosing function/method USR, or the Module USR for
+    /// file-scope expansions.  `macro_def` is a `MACRO` node.
+    /// Only top-level expansions are emitted; nested macro expansions inside
+    /// another macro's body are suppressed to prevent edge explosion (AC-M5-3).
+    ExpandsTo,
 }
 
 impl EdgeKind {
@@ -70,6 +81,7 @@ impl EdgeKind {
             EdgeKind::AdlCandidate => "ADL_CANDIDATE",
             EdgeKind::BelongsToRepo => "BELONGS_TO_REPO",
             EdgeKind::ExternalRef => "EXTERNAL_REF",
+            EdgeKind::ExpandsTo => "EXPANDS_TO",
         }
     }
 
@@ -90,6 +102,7 @@ impl EdgeKind {
             EdgeKind::AdlCandidate,
             EdgeKind::BelongsToRepo,
             EdgeKind::ExternalRef,
+            EdgeKind::ExpandsTo,
         ]
     }
 
@@ -114,6 +127,7 @@ impl EdgeKind {
             "ADL_CANDIDATE" => Some(EdgeKind::AdlCandidate),
             "BELONGS_TO_REPO" => Some(EdgeKind::BelongsToRepo),
             "EXTERNAL_REF" => Some(EdgeKind::ExternalRef),
+            "EXPANDS_TO" => Some(EdgeKind::ExpandsTo),
             _ => None,
         }
     }
