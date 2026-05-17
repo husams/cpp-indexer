@@ -152,6 +152,7 @@ async fn phase5_empty_stage_dirs_produces_zero_stats() {
         stage_dirs: vec![stage_dir],
         lock_ttl: Duration::from_secs(10),
         batch_size: 100,
+        ..Default::default()
     };
 
     let stats = phase5_run(sink, opts).await.expect("phase5 must succeed");
@@ -191,6 +192,7 @@ async fn phase5_no_candidates_writes_no_external_refs() {
         stage_dirs: vec![stage_dir],
         lock_ttl: Duration::from_secs(10),
         batch_size: 100,
+        ..Default::default()
     };
 
     let stats = phase5_run(sink, opts).await.expect("phase5 must succeed");
@@ -219,6 +221,7 @@ async fn phase5_unresolvable_candidates_counted_as_unresolved() {
         stage_dirs: vec![stage_dir],
         lock_ttl: Duration::from_secs(10),
         batch_size: 100,
+        ..Default::default()
     };
 
     let stats = phase5_run(sink, opts).await.expect("phase5 must succeed");
@@ -254,6 +257,7 @@ async fn phase5_two_repo_fixture_emits_external_ref() {
         stage_dirs: vec![stage_a, stage_b],
         lock_ttl: Duration::from_secs(10),
         batch_size: 100,
+        ..Default::default()
     };
 
     let stats = phase5_run(sink, opts).await.expect("phase5 must succeed");
@@ -365,6 +369,7 @@ async fn phase5_schema_version_mismatch_is_refused() {
         stage_dirs: vec![stage_dir],
         lock_ttl: Duration::from_secs(10),
         batch_size: 100,
+        ..Default::default()
     };
 
     let err = phase5_run(sink, opts)
@@ -435,6 +440,7 @@ async fn live_two_repo_external_ref_materialised() {
         stage_dirs: vec![stage_a, stage_b],
         lock_ttl: Duration::from_secs(60),
         batch_size: 100,
+        ..Default::default()
     };
 
     let stats = phase5_run(Arc::clone(&sink), opts)

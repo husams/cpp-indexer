@@ -30,10 +30,13 @@
 //! would affect all backends. Surfaced as a deviation from design.md §Phase 5's
 //! "querying the configured DB" phrasing; tagged `sr-dev` in implementation-notes.md.
 //!
-//! ## Canonicalisation (deferred)
+//! ## Canonicalisation (S24)
 //!
-//! System-header USR canonicalisation per ADR-4 is implemented in S24
-//! (`resolve::canonical`).  S23 emits `EXTERNAL_REF` edges using raw USRs.
+//! System-header USR canonicalisation per ADR-4 is implemented in `resolve::canonical`.
+//! The global USR map built in step 4 applies `canonical::canonical_repo` to each
+//! node's `file_path`; nodes whose path matches a system-header or vendored prefix
+//! are attributed to a synthetic `system:*` / `repo:vendored:*` REPO instead of the
+//! indexing repo.  Override rules can be passed via `Phase5Options::canonical_overrides`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -44,6 +47,7 @@ use parquet::file::reader::SerializedFileReader;
 use tracing::{info, warn};
 
 use crate::error::{Error, Result};
+use crate::resolve::canonical::{canonical_repo, CanonicalOverride};
 use crate::schema::version::SCHEMA_VERSION_TAG;
 use crate::schema::{
     arrow::{record_batch_to_edges, record_batch_to_nodes},
@@ -67,6 +71,12 @@ pub struct Phase5Options {
 
     /// Maximum records per `write_edges` call (default 10 000).
     pub batch_size: usize,
+
+    /// User-supplied canonical path-prefix overrides (ADR-4 §Rule set, rule 3).
+    ///
+    /// These are evaluated before the built-in system-header and vendored rules.
+    /// An empty list (the default) means only the static ADR-4 rule table is used.
+    pub canonical_overrides: Vec<CanonicalOverride>,
 }
 
 impl Default for Phase5Options {
@@ -75,6 +85,7 @@ impl Default for Phase5Options {
             stage_dirs: Vec::new(),
             lock_ttl: Duration::from_secs(600),
             batch_size: 10_000,
+            canonical_overrides: Vec::new(),
         }
     }
 }
@@ -104,6 +115,9 @@ impl std::fmt::Display for Phase5Stats {
 
 #[derive(Debug, Clone)]
 struct UsrEntry {
+    /// Canonical REPO name: may be a synthetic `system:*` / `repo:vendored:*` name
+    /// produced by ADR-4 canonicalisation, or the original `repo_name` from the node
+    /// record when no canonical rule matched.
     repo_name: String,
 }
 
@@ -147,7 +161,7 @@ async fn do_phase5(sink: &Arc<dyn GraphSink>, opts: &Phase5Options) -> Result<Ph
         "phase5: building global USR map from {} stage dir(s)",
         opts.stage_dirs.len()
     );
-    let global_map = build_global_usr_map(&opts.stage_dirs)?;
+    let global_map = build_global_usr_map(&opts.stage_dirs, &opts.canonical_overrides)?;
     info!("phase5: global USR map has {} entries", global_map.len());
 
     // ── 5. Materialise EXTERNAL_REF edges ─────────────────────────────────────
@@ -258,7 +272,10 @@ pub(crate) fn check_backend_homogeneity(live_backend: &str, detected: &[String])
 
 // ── 4. Build global USR map ────────────────────────────────────────────────────
 
-fn build_global_usr_map(stage_dirs: &[PathBuf]) -> Result<HashMap<String, UsrEntry>> {
+fn build_global_usr_map(
+    stage_dirs: &[PathBuf],
+    overrides: &[CanonicalOverride],
+) -> Result<HashMap<String, UsrEntry>> {
     let mut map: HashMap<String, UsrEntry> = HashMap::new();
 
     for stage_dir in stage_dirs {
@@ -276,9 +293,15 @@ fn build_global_usr_map(stage_dirs: &[PathBuf]) -> Result<HashMap<String, UsrEnt
                 let batch = batch_result.map_err(|e| Error::Schema(format!("batch read: {e}")))?;
                 let nodes = record_batch_to_nodes(&batch);
                 for node in nodes {
-                    // First-indexed-wins for duplicate USRs (canonicalisation in S24).
+                    // Apply ADR-4 canonicalisation: if the node's file_path matches a
+                    // system-header or vendored prefix, attribute it to the canonical
+                    // synthetic REPO rather than the indexing repo.
+                    let effective_repo =
+                        canonical_repo(&node.file_path, overrides).unwrap_or(node.repo_name);
+
+                    // First-indexed-wins for duplicate USRs within the same canonical repo.
                     map.entry(node.usr).or_insert_with(|| UsrEntry {
-                        repo_name: node.repo_name,
+                        repo_name: effective_repo,
                     });
                 }
             }

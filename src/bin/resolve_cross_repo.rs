@@ -113,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
         stage_dirs: cli.stage_dirs,
         lock_ttl: Duration::from_secs(cli.lock_ttl_secs),
         batch_size: cli.batch_size,
+        ..Default::default()
     };
 
     let stats = phase5_run(Arc::clone(&sink), opts)
