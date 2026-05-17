@@ -67,3 +67,8 @@ path = "tests/integration/autodetect.rs"
 name = "phase1_base"
 path = "tests/integration/phase1_base.rs"
 required-features = []
+
+[[test]]
+name = "phase3"
+path = "tests/integration/phase3.rs"
+required-features = []
