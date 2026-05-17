@@ -1,4 +1,4 @@
-//! Phase 1 — Shallow libclang visitor → Parquet (single-threaded, AC-M1-14..17).
+//! Phase 1 — Shallow libclang visitor → Parquet (AC-M1-14..17, AC-M3-1..3).
 //!
 //! `visit_tu` parses one translation unit, walks its AST recursively, and writes
 //! every recognised declaration as a [`NodeRecord`] / [`EdgeRecord`] to the
@@ -9,15 +9,96 @@
 //! and a diagnostic is logged, but the visitor continues with whatever AST
 //! libclang managed to produce.
 //!
-//! ## Single-threaded for M1
-//! Parallelism via `rayon` is deferred to S17 (AC-M3-1..3 / ADR-7).  This module
-//! exposes a plain synchronous `visit_tu` function.
+//! ## Thread-local libclang Index (S17 / ADR-7)
+//! `with_thread_index` initialises one `clang::Index` per rayon worker thread on
+//! first use.  A single `Clang` instance is created at process startup (stored in
+//! a `OnceLock`) and each worker thread creates its own `Index` from it.  `Index`
+//! is leaked to `'static`; the leak is bounded by worker count × process lifetime.
+//!
+//! # SAFETY
+//! `clang::Clang` is `!Sync` by design, but it is zero-sized (`PhantomData`-only).
+//! `Index::new` only uses the `&Clang` for lifetime anchoring; the underlying
+//! `clang_createIndex()` call is thread-safe.  We add `Sync` via a newtype wrapper
+//! after verifying that no mutable state is shared.  See `ClangSync` in the source.
 
+use std::cell::OnceCell;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
 use clang::{Clang, EntityKind, EntityVisitResult, Index};
 use tracing::{debug, warn};
+
+// ---------------------------------------------------------------------------
+// Thread-local Index (ADR-7)
+// ---------------------------------------------------------------------------
+//
+// `clang::Clang` is a Rust-level singleton that ensures libclang's shared
+// library is loaded. The crate enforces at most one live `Clang` instance per
+// process.  `Index::new` only uses the `&Clang` parameter for lifetime
+// anchoring — the underlying `clang_createIndex()` call is independent.
+//
+// Strategy: create exactly **one** `Clang` per process (stored in a `OnceLock`
+// and wrapped in a `ClangSync` newtype that adds the `Sync` marker), then give
+// each worker thread its **own** `Index` created from the shared `Clang` handle.
+//
+// # SAFETY
+// `Clang` is `!Sync` because it holds `PhantomData<*mut ()>` — a conservative
+// marker.  In practice `Clang` is zero-sized (pure PhantomData); there is no
+// mutable state or shared data behind the reference.  We create `Index` objects
+// on each thread by calling `Index::new(&GLOBAL_CLANG, ...)`, which solely
+// invokes `clang_createIndex()` — a thread-safe libclang entry point that
+// creates an independent opaque handle.  The `GLOBAL_CLANG` reference is never
+// mutated after initialisation.  Therefore adding `Sync` is sound.
+
+use std::sync::OnceLock;
+
+/// Newtype that makes `Clang` safe to share across threads (see module SAFETY).
+struct ClangSync(Clang);
+
+// SAFETY: see module-level comment above.
+// Send is needed so that OnceLock<ClangSync> qualifies as a static.
+// Clang is zero-sized (PhantomData only); there is no data to send.
+unsafe impl Send for ClangSync {}
+unsafe impl Sync for ClangSync {}
+
+/// Process-wide `Clang` instance.  Created once; never dropped (avoids
+/// re-triggering the libclang singleton guard in child processes / after fork).
+static GLOBAL_CLANG: OnceLock<ClangSync> = OnceLock::new();
+
+fn global_clang() -> &'static Clang {
+    &GLOBAL_CLANG
+        .get_or_init(|| ClangSync(Clang::new().expect("libclang global init")))
+        .0
+}
+
+thread_local! {
+    // Each worker thread keeps one Index for the lifetime of the pool.
+    static THREAD_INDEX: OnceCell<&'static Index<'static>> = const { OnceCell::new() };
+}
+
+/// Call `f` with the thread-local `clang::Index`, initialising it on first use.
+///
+/// Creates one `Index` per rayon worker thread on first call; subsequent calls
+/// on the same thread reuse the cached `Index`.  Thread-local initialisation
+/// uses the process-wide [`GLOBAL_CLANG`] handle (see module SAFETY comment).
+///
+/// # Panics
+/// Panics if libclang cannot be initialised (`Clang::new()` fails).
+pub fn with_thread_index<R>(f: impl FnOnce(&Index<'static>) -> R) -> R {
+    THREAD_INDEX.with(|cell| {
+        let idx = cell.get_or_init(|| {
+            // SAFETY: GLOBAL_CLANG lives for 'static; Index::new does not
+            // mutate Clang — it only calls clang_createIndex() which is
+            // thread-safe in libclang.  Box::leak bounds the leak to
+            // worker-count × process-lifetime (documented pattern).
+            let clang: &'static Clang = global_clang();
+            Box::leak(Box::new(Index::new(
+                clang, /* exclude_pch */ true, /* diagnostics */ false,
+            )))
+        });
+        f(idx)
+    })
+}
 
 use crate::{
     schema::{EdgeKind, EdgeRecord, NodeKind, NodeRecord},
@@ -27,10 +108,10 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
-// Public entry point
+// Public entry points
 // ---------------------------------------------------------------------------
 
-/// Options for [`visit_tu`].
+/// Options for [`visit_tu`] / [`visit_tu_with_index`].
 pub struct VisitOptions<'a> {
     /// Repository name (written into every node/edge record).
     pub repo_name: &'a str,
@@ -46,6 +127,28 @@ pub struct VisitOptions<'a> {
     /// compiler-internal headers) are silently skipped (AC-M2-14).
     /// When `false`, system-header entities are emitted like any other (AC-M2-15).
     pub skip_system_headers: bool,
+}
+
+/// Parse one translation unit using a caller-supplied `Index` and write Phase 1
+/// records to `writer`.
+///
+/// This is the low-level entry point used by the parallel pipeline (S17) so
+/// that each rayon worker can supply its own thread-local `Index` (ADR-7).
+/// For the sequential path, prefer [`visit_tu`] which manages the `Index`
+/// internally.
+///
+/// Returns `true` when libclang reported at least one error-severity diagnostic
+/// (the TU was parsed `partial`), `false` otherwise.
+///
+/// # Errors
+/// Returns [`Error::Clang`] only when libclang itself fails to produce any AST.
+/// Returns [`Error::Schema`] / [`Error::Io`] when writing to the Parquet shard fails.
+pub fn visit_tu_with_index(
+    index: &Index<'_>,
+    opts: &VisitOptions<'_>,
+    writer: &mut StageWriter,
+) -> Result<bool> {
+    visit_tu_inner(index, opts, writer)
 }
 
 /// Parse one translation unit and write Phase 1 records to `writer`.
@@ -64,7 +167,15 @@ pub fn visit_tu(clang: &Clang, opts: &VisitOptions<'_>, writer: &mut StageWriter
     let index = Index::new(
         clang, /* exclude_pch */ true, /* diagnostics */ false,
     );
+    visit_tu_inner(&index, opts, writer)
+}
 
+/// Shared body for [`visit_tu`] and [`visit_tu_with_index`].
+fn visit_tu_inner(
+    index: &Index<'_>,
+    opts: &VisitOptions<'_>,
+    writer: &mut StageWriter,
+) -> Result<bool> {
     // Parse the TU; wrap in catch_unwind to isolate libclang panics (AC-M1-16).
     // `detailed_preprocessing_record` is required to expose InclusionDirective
     // entities during the AST walk (AC-M2-4, AC-M2-7).

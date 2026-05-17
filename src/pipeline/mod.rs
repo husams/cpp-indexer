@@ -17,6 +17,7 @@
 //!
 //! AC covered: AC-M1-25, AC-M1-26, AC-M1-27.
 
+pub mod parallel;
 pub mod progress;
 
 use std::fs::File;
@@ -208,7 +209,7 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
 ///
 /// libclang receives the file to parse through `Index::parser(file_path)`;
 /// including the file path again in args causes `AstDeserialization` errors.
-fn filter_compiler_args(file: &Path, args: &[String]) -> Vec<String> {
+pub(crate) fn filter_compiler_args(file: &Path, args: &[String]) -> Vec<String> {
     let file_str = file.to_string_lossy();
     args.iter()
         .enumerate()
