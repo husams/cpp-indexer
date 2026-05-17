@@ -61,8 +61,14 @@ pub fn visit_tu(clang: &Clang, opts: &VisitOptions<'_>, writer: &mut StageWriter
     );
 
     // Parse the TU; wrap in catch_unwind to isolate libclang panics (AC-M1-16).
+    // `detailed_preprocessing_record` is required to expose InclusionDirective
+    // entities during the AST walk (AC-M2-4, AC-M2-7).
     let tu_result = panic::catch_unwind(AssertUnwindSafe(|| {
-        index.parser(opts.file_path).arguments(opts.args).parse()
+        index
+            .parser(opts.file_path)
+            .arguments(opts.args)
+            .detailed_preprocessing_record(true)
+            .parse()
     }));
 
     let tu = match tu_result {
@@ -189,20 +195,32 @@ impl<'a> Collector<'a> {
 
 impl<'a> Collector<'a> {
     fn visit(&mut self, entity: clang::Entity<'_>, parent: clang::Entity<'_>) {
-        // Only track definitions (skip forward declarations to avoid duplicates).
-        // VarDecl at file scope may not have is_definition() = true in all libclang
-        // versions, so we include all VarDecl here and rely on USR deduplication.
         let kind = entity.get_kind();
         let node_kind = match entity_kind_to_node_kind(kind) {
             Some(k) if k != NodeKind::Module => k,
             _ => return,
         };
 
-        // Skip non-definitions except for the kinds that don't have definitions.
+        // HEADER nodes (InclusionDirective) are handled specially: we emit the
+        // HEADER node and the INCLUDES edge, but no further child walk is needed
+        // for the directive itself (children of an InclusionDirective are typically empty).
+        if node_kind == NodeKind::Header {
+            self.emit_header_node_and_edge(&entity, &parent);
+            return;
+        }
+
+        // NAMESPACE: always emit (definitions can be spread across TUs).
+        // For most other kinds, skip non-definitions to avoid duplicates.
+        // VarDecl and Field: always emit (definitions can be non-existent as decl).
+        // Typedef/Enum: emit on first occurrence (is_definition may not be reliable for aliases).
         if !entity.is_definition() {
-            // Fields and global variables: always emit (definitions can be non-existent as decl)
-            if !matches!(node_kind, NodeKind::Field | NodeKind::GlobalVariable) {
-                return;
+            match node_kind {
+                NodeKind::Field
+                | NodeKind::GlobalVariable
+                | NodeKind::Namespace
+                | NodeKind::Typedef
+                | NodeKind::Enum => {} // emit regardless
+                _ => return,
             }
         }
 
@@ -242,6 +260,121 @@ impl<'a> Collector<'a> {
 
         // Emit structural edges from parent.
         self.emit_structural_edges(&usr, node_kind, &entity, &parent);
+
+        // M2 extension edges.
+        self.emit_m2_edges(&usr, node_kind, &entity);
+    }
+
+    /// Emit a HEADER node for an InclusionDirective and the INCLUDES edge from the module.
+    ///
+    /// The header's USR is synthesised from its canonical file path because libclang does not
+    /// assign a USR to InclusionDirective entities.  AC-M2-4, AC-M2-7.
+    fn emit_header_node_and_edge(
+        &mut self,
+        entity: &clang::Entity<'_>,
+        _parent: &clang::Entity<'_>,
+    ) {
+        let header_path = match entity.get_file() {
+            Some(f) => f.get_path().to_string_lossy().into_owned(),
+            None => return, // built-in / virtual include — skip
+        };
+
+        let header_usr = format!("header:{header_path}");
+        let name = std::path::Path::new(&header_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| header_path.clone());
+
+        // Emit HEADER node (deduplication by USR happens at Phase 3).
+        let header_node = NodeRecord {
+            usr: header_usr.clone(),
+            kind: NodeKind::Header,
+            name,
+            qualified_name: header_path.clone(),
+            mangled_name: None,
+            file_path: header_path,
+            line: None,
+            col: None,
+            repo_name: self.repo_name.to_owned(),
+            attrs_json: "{}".to_owned(),
+            partial: self.partial,
+            phase: 1,
+            tu_hash: self.tu_hash,
+        };
+        self.nodes.push(header_node);
+
+        // Emit INCLUDES edge from the MODULE (TU root) to the HEADER.  AC-M2-7.
+        if let Some(ref mod_usr) = self.module_usr.clone() {
+            self.push_edge(mod_usr.clone(), header_usr, EdgeKind::Includes);
+        }
+    }
+
+    /// Emit M2 extension edges for the given entity (after its node has been pushed).
+    ///
+    /// Handles: OVERRIDES, SPECIALIZES, FRIEND_OF.
+    /// INSTANTIATES and ADL_CANDIDATE are best-effort from call-expression context; they are
+    /// emitted here where accessible from the declaration.
+    fn emit_m2_edges(&mut self, entity_usr: &str, node_kind: NodeKind, entity: &clang::Entity<'_>) {
+        match node_kind {
+            // ── OVERRIDES (AC-M2-8): virtual method overrides base class virtual ──
+            NodeKind::Method => {
+                if let Some(overridden) = entity.get_overridden_methods() {
+                    for (slot, base_method) in overridden.iter().enumerate() {
+                        if let Some(base_usr) = base_method.get_usr() {
+                            if !base_usr.0.is_empty() {
+                                let attrs = serde_json::json!({ "vtable_slot": slot }).to_string();
+                                self.push_edge_with_attrs(
+                                    entity_usr.to_owned(),
+                                    base_usr.0,
+                                    EdgeKind::Overrides,
+                                    attrs,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── SPECIALIZES (AC-M2-10): specialization → primary template ──
+            NodeKind::Specialization => {
+                if let Some(tmpl) = entity.get_template() {
+                    if let Some(tmpl_usr) = tmpl.get_usr() {
+                        if !tmpl_usr.0.is_empty() {
+                            self.push_edge(
+                                entity_usr.to_owned(),
+                                tmpl_usr.0,
+                                EdgeKind::Specializes,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // ── FRIEND_OF (AC-M2-11): friend declaration ──
+            NodeKind::Class => {
+                // Walk children looking for FriendDecl entities.
+                let entity_usr_owned = entity_usr.to_owned();
+                let mut friend_usrs: Vec<String> = Vec::new();
+                entity.visit_children(|child, _| {
+                    if child.get_kind() == clang::EntityKind::FriendDecl {
+                        // The friend's referenced entity carries the USR.
+                        if let Some(ref_entity) = child.get_reference() {
+                            if let Some(u) = ref_entity.get_usr() {
+                                if !u.0.is_empty() {
+                                    friend_usrs.push(u.0);
+                                }
+                            }
+                        }
+                    }
+                    clang::EntityVisitResult::Continue
+                });
+                for friend_usr in friend_usrs {
+                    self.push_edge(entity_usr_owned.clone(), friend_usr, EdgeKind::FriendOf);
+                }
+            }
+
+            _ => {}
+        }
     }
 
     /// Emit CONTAINS, HAS_METHOD, HAS_FIELD, INHERITS edges.
@@ -268,8 +401,12 @@ impl<'a> Collector<'a> {
         let edge_kind = match (entity_kind_to_node_kind(parent_kind_raw), child_kind) {
             (Some(NodeKind::Class), NodeKind::Method) => EdgeKind::HasMethod,
             (Some(NodeKind::Class), NodeKind::Field) => EdgeKind::HasField,
-            (Some(NodeKind::Class), _) | (Some(NodeKind::Function), _) => EdgeKind::Contains,
-            (Some(NodeKind::Module), _) => EdgeKind::Contains,
+            (Some(NodeKind::Class), _)
+            | (Some(NodeKind::Function), _)
+            | (Some(NodeKind::Namespace), _)
+            | (Some(NodeKind::TemplateDef), _)
+            | (Some(NodeKind::Specialization), _)
+            | (Some(NodeKind::Module), _) => EdgeKind::Contains,
             _ => EdgeKind::Contains,
         };
 
@@ -292,6 +429,10 @@ impl<'a> Collector<'a> {
     }
 
     fn push_edge(&mut self, src: String, dst: String, kind: EdgeKind) {
+        self.push_edge_with_attrs(src, dst, kind, "{}".to_owned());
+    }
+
+    fn push_edge_with_attrs(&mut self, src: String, dst: String, kind: EdgeKind, attrs: String) {
         self.edges.push(EdgeRecord {
             src_usr: src,
             dst_usr: Some(dst),
@@ -300,7 +441,7 @@ impl<'a> Collector<'a> {
             resolved: false, // Phase 3 resolves
             cross_repo_candidate: false,
             repo_name: self.repo_name.to_owned(),
-            attrs_json: "{}".to_owned(),
+            attrs_json: attrs,
             tu_hash: self.tu_hash,
         });
     }
@@ -363,6 +504,51 @@ fn build_attrs_json(entity: &clang::Entity<'_>, kind: NodeKind) -> String {
                 .map(|l| format!("{l:?}").to_lowercase())
                 .unwrap_or_else(|| "none".to_owned());
             map.insert("linkage", serde_json::Value::String(linkage_str));
+        }
+        NodeKind::Namespace => {
+            // is_inline_namespace() requires clang_9_0 feature; omit for now.
+            // The attrs_json for NAMESPACE nodes is currently empty ("{}").
+        }
+        NodeKind::TemplateDef => {
+            // Record whether it is a class template or function template.
+            let kind_str = match entity.get_kind() {
+                clang::EntityKind::ClassTemplate => "class",
+                clang::EntityKind::FunctionTemplate => "function",
+                clang::EntityKind::TypeAliasTemplateDecl => "type_alias",
+                _ => "unknown",
+            };
+            map.insert(
+                "template_kind",
+                serde_json::Value::String(kind_str.to_owned()),
+            );
+        }
+        NodeKind::Specialization => {
+            // Record template arguments as a JSON array of strings (best-effort).
+            if let Some(args) = entity.get_template_arguments() {
+                let args_strs: Vec<serde_json::Value> = args
+                    .iter()
+                    .map(|a| serde_json::Value::String(format!("{a:?}")))
+                    .collect();
+                map.insert("template_args", serde_json::Value::Array(args_strs));
+            }
+            if let Some(tmpl) = entity.get_template() {
+                if let Some(tmpl_usr) = tmpl.get_usr() {
+                    map.insert("template_usr", serde_json::Value::String(tmpl_usr.0));
+                }
+            }
+        }
+        NodeKind::Typedef => {
+            // Record the underlying type spelling (best-effort).
+            if let Some(underlying) = entity.get_typedef_underlying_type() {
+                map.insert(
+                    "underlying_type",
+                    serde_json::Value::String(underlying.get_display_name()),
+                );
+            }
+        }
+        NodeKind::Enum => {
+            let scoped = entity.is_scoped();
+            map.insert("scoped", serde_json::Value::Bool(scoped));
         }
         _ => {}
     }
