@@ -129,3 +129,8 @@ required-features = ["test-mock"]
 name = "cross_repo"
 path = "tests/cross_repo.rs"
 required-features = ["test-mock"]
+
+[[test]]
+name = "m4_exit_gate"
+path = "tests/integration/m4_exit_gate.rs"
+required-features = ["test-mock"]

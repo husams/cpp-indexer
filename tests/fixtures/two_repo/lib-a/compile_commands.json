@@ -1,0 +1,11 @@
+[
+  {
+    "directory": "/Users/husam/workspace/cpp-indexer/tests/fixtures/two_repo/lib-a",
+    "file": "/Users/husam/workspace/cpp-indexer/tests/fixtures/two_repo/lib-a/src/main.cpp",
+    "arguments": [
+      "clang++",
+      "-std=c++14",
+      "/Users/husam/workspace/cpp-indexer/tests/fixtures/two_repo/lib-a/src/main.cpp"
+    ]
+  }
+]
