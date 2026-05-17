@@ -14,8 +14,11 @@ pub enum Error {
     #[error("compile_commands.json error in {path}: {message}")]
     CompileCommands { path: PathBuf, message: String },
 
-    #[error("could not auto-detect compile_commands.json; searched:\n{0}")]
-    Autodetect(AutodetectPaths),
+    #[error(
+        "could not auto-detect compile_commands.json; searched:\n{}",
+        DisplayPaths(searched)
+    )]
+    Autodetect { searched: Vec<PathBuf> },
 
     #[error("sink backend '{backend}': {source}")]
     Sink {
@@ -36,11 +39,10 @@ pub enum Error {
     Api(String),
 }
 
-/// Newtype for display of searched paths in `Autodetect`.
-#[derive(Debug)]
-pub struct AutodetectPaths(pub Vec<PathBuf>);
+/// Helper for formatting a path slice inside thiserror `#[error(...)]` expressions.
+struct DisplayPaths<'a>(&'a [PathBuf]);
 
-impl fmt::Display for AutodetectPaths {
+impl fmt::Display for DisplayPaths<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, p) in self.0.iter().enumerate() {
             if i > 0 {
@@ -67,7 +69,9 @@ mod tests {
             PathBuf::from("/some/project/out"),
             PathBuf::from("/some/project/cmake-build-debug"),
         ];
-        let err = Error::Autodetect(AutodetectPaths(paths.clone()));
+        let err = Error::Autodetect {
+            searched: paths.clone(),
+        };
         let rendered = err.to_string();
 
         for p in &paths {
