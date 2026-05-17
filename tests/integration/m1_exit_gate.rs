@@ -51,6 +51,7 @@ fn make_run_opts(stage_dir: PathBuf) -> RunOptions {
         repo_name: "m1_5file".to_owned(),
         stage_dir: Some(stage_dir),
         skip_phase2: true,
+        skip_system_headers: true,
     }
 }
 

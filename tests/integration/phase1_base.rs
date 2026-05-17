@@ -118,6 +118,7 @@ async fn phase1_emits_expected_node_kinds() {
             "-std=c++14".to_owned(),
             format!("-I{}", fixture.display()),
         ],
+        skip_system_headers: true,
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
@@ -187,6 +188,7 @@ async fn phase1_emits_module_node() {
             "-std=c++14".to_owned(),
             format!("-I{}", fixture.display()),
         ],
+        skip_system_headers: true,
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
@@ -227,6 +229,7 @@ async fn phase1_parse_error_produces_partial_and_continues() {
             "-std=c++14".to_owned(),
             format!("-I{}", fixture.display()),
         ],
+        skip_system_headers: true,
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
@@ -296,6 +299,7 @@ async fn phase1_emits_global_variable_from_utils() {
             "-std=c++14".to_owned(),
             format!("-I{}", fixture.display()),
         ],
+        skip_system_headers: true,
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();

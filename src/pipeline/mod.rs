@@ -58,6 +58,10 @@ pub struct RunOptions {
 
     /// When `true`, Phase 2 decoration is skipped (always true for M1).
     pub skip_phase2: bool,
+
+    /// When `true`, nodes/edges whose spelling location is in a system header
+    /// are excluded from Parquet output (AC-M2-14).  Default: `true`.
+    pub skip_system_headers: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +142,7 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
             tu_hash: *entry.hash.as_bytes(),
             file_path: &entry.file,
             args: &filtered_args,
+            skip_system_headers: opts.skip_system_headers,
         };
         let partial = visit_tu(&clang, &vo, &mut writer)?;
         if partial {
