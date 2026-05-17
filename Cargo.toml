@@ -18,6 +18,11 @@ path = "src/bin/resolve_cross_repo.rs"
 name = "cxg-daemon"
 path = "src/bin/daemon.rs"
 
+[features]
+## Expose MockSink to downstream crates (e.g. integration test helpers).
+## Always enabled in `cargo test`; do NOT enable in production builds.
+test-mock = []
+
 [dependencies]
 clang = "2"
 rayon = "1"
