@@ -1,3 +1,43 @@
+# Implementation Notes — S22: repo nodes
+
+## Files changed
+- `src/schema/nodes.rs` — added `NodeKind::Repo` variant with attrs_json documentation
+- `src/schema/edges.rs` — added `EdgeKind::BelongsToRepo` variant
+- `src/schema/version.rs` — bumped SCHEMA_VERSION 2 → 3, SCHEMA_VERSION_TAG, PARQUET_MAGIC
+- `src/error.rs` — added `Error::Bootstrap(String)` variant for git2/repo errors
+- `src/bootstrap/repo_meta.rs` — NEW: `RepoMeta` struct + `collect()` via git2
+- `src/bootstrap/mod.rs` — re-exports `repo_meta` module and `RepoMeta`
+- `src/pipeline/mod.rs` — added `skip_repo_node: bool` to `RunOptions`; emits REPO node + BELONGS_TO_REPO edges between Phase 3 and Phase 4
+- `src/bin/index.rs` — added `skip_repo_node: false` to the RunOptions literal
+- `tests/integration/m1_exit_gate.rs` — added `skip_repo_node: true`
+- `tests/integration/m2_exit_gate.rs` — added `skip_repo_node: true`
+- `tests/integration/incremental_cache.rs` — added `skip_repo_node: true`
+- `tests/integration/repo_meta.rs` — NEW: AC-M4-1 and AC-M4-2 integration tests
+- `Cargo.toml` — added `[[test]] name = "repo_meta"` entry
+
+## Tests added / run
+
+Exit gate commands (all exit 0):
+- `cargo fmt --all -- --check` — pass
+- `cargo clippy --all-targets --all-features -- -D warnings` — pass
+- `DYLD_LIBRARY_PATH=/Library/Developer/CommandLineTools/usr/lib cargo nextest run -p cpp_indexer --test repo_meta --features test-mock` — 2/2 pass
+- `DYLD_LIBRARY_PATH=/Library/Developer/CommandLineTools/usr/lib cargo nextest run -p cpp_indexer --lib --features test-mock` — 154/154 pass
+
+## Deviations from plan
+- `skip_repo_node` field added to `RunOptions` so existing integration tests (no git repo in fixture dirs) continue to pass without failing on `repo_meta::collect`. Production code always uses `false`.
+- REPO node is prepended to the node batch rather than emitted in a separate `write_nodes` call. Keeps Phase 4 as a single batch per run.
+- SchemaVersion node + WRITTEN_WITH_SCHEMA edge (ADR-9 §Phase 4 write) NOT implemented in S22 — deferred to S23 per ADR-9 scope boundaries.
+- plan.md exit criterion omits `DYLD_LIBRARY_PATH`; on macOS the libclang dylib must be on that path. Tests pass; env var is a local runner concern.
+
+## Follow-ups
+- tag:sr-dev — S23 must add `WRITTEN_WITH_SCHEMA` edge from each REPO node to its `SchemaVersion` node (ADR-9).
+- tag:sr-dev — S23 enforces AC-M4-3 (heterogeneous-sink refuse) using the `sink` field now stored in REPO `attrs_json`.
+
+## References
+- plan.md S22, scenarios.md §M4-S1, design.md §Phase 4, adr-9.md §bump policy, requirements.md AC-M4-1/AC-M4-2/AC-M4-3
+
+---
+
 # Implementation Notes — S21: M3 perf gate
 
 ## Files changed

@@ -42,6 +42,14 @@ pub enum EdgeKind {
     ///
     /// Direction: `(node)-[:BELONGS_TO_REPO]->(repo)`.
     BelongsToRepo,
+
+    // ── M4 additions (S23) ──────────────────────────────────────────────────
+    /// A cross-repository reference resolved during Phase 5.  AC-M4-4.
+    ///
+    /// Direction: `(src_node)-[:EXTERNAL_REF {via: <orig_edge_kind>}]->(dst_node)`.
+    /// `src_node` and `dst_node` live in different REPO nodes.
+    /// `attrs_json` carries `{"via": "<ORIG_EDGE_KIND>"}`.
+    ExternalRef,
 }
 
 impl EdgeKind {
@@ -61,6 +69,7 @@ impl EdgeKind {
             EdgeKind::FriendOf => "FRIEND_OF",
             EdgeKind::AdlCandidate => "ADL_CANDIDATE",
             EdgeKind::BelongsToRepo => "BELONGS_TO_REPO",
+            EdgeKind::ExternalRef => "EXTERNAL_REF",
         }
     }
 
@@ -80,6 +89,7 @@ impl EdgeKind {
             EdgeKind::FriendOf,
             EdgeKind::AdlCandidate,
             EdgeKind::BelongsToRepo,
+            EdgeKind::ExternalRef,
         ]
     }
 
@@ -103,6 +113,7 @@ impl EdgeKind {
             "FRIEND_OF" => Some(EdgeKind::FriendOf),
             "ADL_CANDIDATE" => Some(EdgeKind::AdlCandidate),
             "BELONGS_TO_REPO" => Some(EdgeKind::BelongsToRepo),
+            "EXTERNAL_REF" => Some(EdgeKind::ExternalRef),
             _ => None,
         }
     }
