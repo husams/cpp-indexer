@@ -73,6 +73,30 @@ pub fn resolve_indradb_token(config: &super::Config) -> Result<Option<String>> {
     }
 }
 
+/// Resolve the IndraDB token from a [`SinkConfig`][super::SinkConfig] directly.
+///
+/// Returns `Ok("")` (empty string) when no `token_env` is configured.
+/// Returns `Ok(token)` when the env var is set.
+///
+/// # Errors
+///
+/// Returns [`Error::Sink`] if `token_env` is configured but the env var is not set.
+pub fn resolve_indradb_token_opt(config: &super::SinkConfig) -> Result<String> {
+    let indradb = config.indradb.as_ref().ok_or_else(|| Error::Config {
+        field: "sink.indradb".to_owned(),
+        detail: "backend = \"indradb\" but [sink.indradb] section is missing".to_owned(),
+    })?;
+    match &indradb.token_env {
+        None => Ok(String::new()),
+        Some(var_name) => env::var(var_name).map_err(|_| Error::Sink {
+            backend: "indradb",
+            source: Box::new(EnvVarMissing {
+                var_name: var_name.clone(),
+            }),
+        }),
+    }
+}
+
 /// Read the API bearer token from the env var named in `config.api.auth_token_env`.
 ///
 /// # Errors

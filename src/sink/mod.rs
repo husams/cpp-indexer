@@ -13,6 +13,7 @@
 //! - [`mock`] — `MockSink` for unit tests (gated on `#[cfg(any(test, feature = "test-mock"))]`).
 
 pub mod factory;
+pub mod indradb;
 pub mod lock;
 #[cfg(any(test, feature = "test-mock"))]
 pub mod mock;
