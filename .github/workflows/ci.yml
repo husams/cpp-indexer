@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "story/**"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  ci:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install libclang 18 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" | sudo tee /etc/apt/sources.list.d/llvm-18.list
+          sudo apt-get update -q
+          sudo apt-get install -y libclang-18-dev clang-18
+
+      - name: Install libclang 18 (macOS)
+        if: runner.os == 'macOS'
+        run: brew install llvm@18
+
+      - name: Set LIBCLANG_PATH (Linux)
+        if: runner.os == 'Linux'
+        run: echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> "$GITHUB_ENV"
+
+      - name: Set LIBCLANG_PATH (macOS)
+        if: runner.os == 'macOS'
+        run: echo "LIBCLANG_PATH=$(brew --prefix llvm@18)/lib" >> "$GITHUB_ENV"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install cargo-nextest
+        run: cargo install cargo-nextest --locked
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build (all targets)
+        run: cargo build --all-targets
+
+      - name: Test
+        run: cargo nextest run
+
+      - name: Build release binaries
+        run: cargo build --release --bin cxg-index --bin cxg-resolve-cross-repo --bin cxg-daemon
+
+      - name: Check prompt schema drift
+        run: |
+          cargo build
+          git diff --exit-code prompt/ || (echo "ERROR: prompt/graph_database/cpp/schema.txt drifted — run 'cargo build' and commit the result." && exit 1)
+        if: always()
