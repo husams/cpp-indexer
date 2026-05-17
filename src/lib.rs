@@ -5,7 +5,7 @@ pub mod error;
 pub mod metrics;
 pub mod observability;
 pub mod pipeline;
-pub mod prompt {}
+pub mod prompt;
 pub mod resolve;
 pub mod schema;
 pub mod sink;
