@@ -44,6 +44,10 @@ struct Cli {
     #[arg(long)]
     skip_phase2: bool,
 
+    /// Include nodes and edges from system headers (default: excluded).
+    #[arg(long)]
+    include_system_headers: bool,
+
     /// Sink backend: `neo4j` or `indradb`.
     #[arg(long, default_value = "neo4j")]
     backend: String,
@@ -104,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
         repo_name: cli.repo_name,
         stage_dir: cli.stage_dir,
         skip_phase2: cli.skip_phase2,
+        skip_system_headers: !cli.include_system_headers,
     };
 
     let stats = run(Arc::clone(&sink), opts)

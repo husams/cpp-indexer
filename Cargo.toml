@@ -88,3 +88,8 @@ required-features = []
 name = "m1_exit_gate"
 path = "tests/integration/m1_exit_gate.rs"
 required-features = ["test-mock"]
+
+[[test]]
+name = "system_header"
+path = "tests/integration/system_header_filter.rs"
+required-features = []

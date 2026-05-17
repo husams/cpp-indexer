@@ -41,6 +41,11 @@ pub struct VisitOptions<'a> {
     pub file_path: &'a Path,
     /// Compiler arguments (passed to libclang).
     pub args: &'a [String],
+    /// When `true`, entities whose spelling location is inside a system header
+    /// (any path under an `-isystem` directory, `/usr/include/`, or
+    /// compiler-internal headers) are silently skipped (AC-M2-14).
+    /// When `false`, system-header entities are emitted like any other (AC-M2-15).
+    pub skip_system_headers: bool,
 }
 
 /// Parse one translation unit and write Phase 1 records to `writer`.
@@ -101,6 +106,7 @@ pub fn visit_tu(clang: &Clang, opts: &VisitOptions<'_>, writer: &mut StageWriter
         opts.tu_hash,
         has_errors,
         opts.file_path.to_string_lossy().into_owned(),
+        opts.skip_system_headers,
     );
 
     let root = tu.get_entity();
@@ -171,10 +177,18 @@ struct Collector<'a> {
     /// USR of the Module node for this TU (used as `src_usr` for CONTAINS edges).
     /// Set after the Module node is pushed in `visit_tu`, before `visit_children`.
     module_usr: Option<String>,
+    /// Mirror of `VisitOptions::skip_system_headers`.
+    skip_system_headers: bool,
 }
 
 impl<'a> Collector<'a> {
-    fn new(repo_name: &'a str, tu_hash: [u8; 32], partial: bool, tu_file_path: String) -> Self {
+    fn new(
+        repo_name: &'a str,
+        tu_hash: [u8; 32],
+        partial: bool,
+        tu_file_path: String,
+        skip_system_headers: bool,
+    ) -> Self {
         Self {
             repo_name,
             tu_hash,
@@ -183,6 +197,7 @@ impl<'a> Collector<'a> {
             edges: Vec::new(),
             tu_file_path,
             module_usr: None,
+            skip_system_headers,
         }
     }
 }
@@ -211,6 +226,14 @@ impl<'a> Collector<'a> {
             Some(u) if !u.0.is_empty() => u.0,
             _ => return,
         };
+
+        // System-header filter (AC-M2-14 / AC-M2-15).
+        // `entity.is_in_system_header()` returns true for any entity whose
+        // spelling location falls inside a header passed via `-isystem`,
+        // `/usr/include/`, or a compiler-built-in path.
+        if self.skip_system_headers && entity.is_in_system_header() {
+            return;
+        }
 
         let name = entity.get_name().unwrap_or_default();
         let display_name = entity.get_display_name().unwrap_or_default();
@@ -381,6 +404,7 @@ pub fn visit_all(
     entries: &[crate::bootstrap::TuEntry],
     stage_dir: &Path,
     repo_name: &str,
+    skip_system_headers: bool,
 ) -> Result<(usize, usize)> {
     let clang = Clang::new().map_err(Error::Clang)?;
     let mut total_nodes = 0usize;
@@ -395,6 +419,7 @@ pub fn visit_all(
             tu_hash: *entry.hash.as_bytes(),
             file_path: &entry.file,
             args: &entry.args,
+            skip_system_headers,
         };
 
         match visit_tu(&clang, &opts, &mut writer) {

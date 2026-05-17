@@ -82,6 +82,12 @@ pub struct IndexConfig {
     /// Skip Phase 2 decoration (default: false).
     pub skip_phase2: bool,
 
+    /// When `true`, nodes and edges whose source location falls inside a system
+    /// header (under `/usr/include/`, compiler-internal paths, or any path
+    /// passed via `-isystem`) are excluded from Parquet output (AC-M2-14).
+    /// Default: `true`.
+    pub skip_system_headers: bool,
+
     /// Directory for Parquet staging shards and manifest cache.
     pub stage_dir: Option<PathBuf>,
 }
@@ -92,7 +98,13 @@ struct RawIndexConfig {
     workers: Option<usize>,
     #[serde(default)]
     skip_phase2: bool,
+    #[serde(default = "default_true")]
+    skip_system_headers: bool,
     stage_dir: Option<PathBuf>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl From<RawIndexConfig> for IndexConfig {
@@ -100,6 +112,7 @@ impl From<RawIndexConfig> for IndexConfig {
         Self {
             workers: r.workers,
             skip_phase2: r.skip_phase2,
+            skip_system_headers: r.skip_system_headers,
             stage_dir: r.stage_dir,
         }
     }
