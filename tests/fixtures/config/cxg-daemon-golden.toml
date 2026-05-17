@@ -1,0 +1,27 @@
+# Golden fixture for cxg-daemon.toml — used by config unit tests.
+
+[repo]
+path = "/workspace/my-project"
+
+[index]
+workers = 4
+skip_phase2 = false
+
+[sink]
+backend = "neo4j"
+
+[sink.neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password_env = "NEO4J_PASSWORD"
+
+[api]
+listen = "127.0.0.1:7878"
+auth_token_env = "CXG_API_TOKEN"
+job_queue_max = 64
+
+[workspace]
+dir = "/var/lib/cxg/clones"
+allowed_hosts = ["github.com", "gitlab.com", "gitlab.senussi.me"]
+git_credentials_env = "CXG_GIT_PAT"
+default_clone_depth = 1
