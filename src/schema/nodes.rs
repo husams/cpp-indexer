@@ -1,8 +1,9 @@
-/// CodexGraph node kinds (AC-M1-2, AC-M2-1..AC-M2-6).
+/// CodexGraph node kinds (AC-M1-2, AC-M2-1..AC-M2-6, AC-M4-1).
 ///
 /// M1 base: `MODULE`, `CLASS`, `FUNCTION`, `METHOD`, `FIELD`, `GLOBAL_VARIABLE`.
 /// M2 extensions (S14): `NAMESPACE`, `TEMPLATE_DECL`, `SPECIALIZATION`, `TYPEDEF`, `ENUM`, `HEADER`.
-/// `MACRO` (S22) and `REPO` (M4) are added in later stories.
+/// M4 additions (S22): `REPO`.
+/// `MACRO` is added in S26.
 ///
 /// Adding new variants bumps `SCHEMA_VERSION` per ADR-9 (bump policy: any change to
 /// `NodeKind` or `EdgeKind` variants requires a version bump in the same PR).
@@ -36,6 +37,17 @@ pub enum NodeKind {
     Enum,
     /// A header file referenced via an `#include` directive.  AC-M2-4.
     Header,
+
+    // ── M4 additions (S22) ──────────────────────────────────────────────────
+    /// A source-code repository; one REPO node per indexed repo.  AC-M4-1.
+    ///
+    /// Attributes carried in `attrs_json`:
+    /// - `root_path`: absolute path to the repo root on disk.
+    /// - `commit_sha`: full Git commit SHA at index time.
+    /// - `commit_date`: ISO-8601 date of that commit.
+    /// - `sink`: backend name (`"neo4j"` or `"indradb"`).  Used by Phase 5
+    ///   to detect heterogeneous-sink configurations (AC-M4-3 enforcement in S23).
+    Repo,
 }
 
 impl NodeKind {
@@ -54,6 +66,7 @@ impl NodeKind {
             NodeKind::Typedef => "TYPEDEF",
             NodeKind::Enum => "ENUM",
             NodeKind::Header => "HEADER",
+            NodeKind::Repo => "REPO",
         }
     }
 
@@ -72,6 +85,7 @@ impl NodeKind {
             NodeKind::Typedef,
             NodeKind::Enum,
             NodeKind::Header,
+            NodeKind::Repo,
         ]
     }
 
@@ -94,6 +108,7 @@ impl NodeKind {
             "TYPEDEF" => Some(NodeKind::Typedef),
             "ENUM" => Some(NodeKind::Enum),
             "HEADER" => Some(NodeKind::Header),
+            "REPO" => Some(NodeKind::Repo),
             _ => None,
         }
     }

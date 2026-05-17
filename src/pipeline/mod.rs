@@ -1,21 +1,25 @@
-//! Pipeline orchestrator — wires Phase 0 → 0.5 → 1 → 3 → 4 (M1 scope).
+//! Pipeline orchestrator — wires Phase 0 → 0.5 → 1 → 3 → 4.
 //!
 //! `pipeline::run` is the single entry-point used by both `cxg-index` and
 //! `cxg-daemon`. Phase 2 (decorate) and Phase 5 (cross-repo) are deferred to
 //! later milestones; stubs are included so later stories can drop in without
 //! changing call sites.
 //!
-//! # Phase map (M1)
-//! | Phase | Module                         | Description                       |
-//! |-------|--------------------------------|-----------------------------------|
-//! | 0     | `bootstrap::compile_commands`  | Parse + dedup `compile_commands.json` |
-//! | 0.5   | `bootstrap::autodetect`        | Upward walk to find cc.json       |
-//! | 1     | `visit::shallow`               | libclang AST → Parquet shards     |
-//! | 2     | _(stub, skipped for M1)_       | Decoration pass                   |
-//! | 3     | `resolve::per_repo`            | In-mem USR map → `final-edges.parquet` |
-//! | 4     | `sink::*`                      | Bulk write to graph DB            |
+//! # Phase map
+//! | Phase | Module                         | Description                               |
+//! |-------|--------------------------------|-------------------------------------------|
+//! | 0     | `bootstrap::compile_commands`  | Parse + dedup `compile_commands.json`     |
+//! | 0.5   | `bootstrap::autodetect`        | Upward walk to find cc.json               |
+//! | 1     | `visit::shallow`               | libclang AST → Parquet shards             |
+//! | 2     | _(stub, skipped for M1)_       | Decoration pass                           |
+//! | 3     | `resolve::per_repo`            | In-mem USR map → `final-edges.parquet`   |
+//! | 4     | `sink::*`                      | Bulk write to graph DB                    |
 //!
-//! AC covered: AC-M1-25, AC-M1-26, AC-M1-27.
+//! S22 adds REPO node emission between Phase 3 and Phase 4: a single REPO node
+//! is prepended to the node batch and one BELONGS_TO_REPO edge is appended per
+//! non-REPO node in the edge batch (AC-M4-1, AC-M4-2).
+//!
+//! AC covered: AC-M1-25, AC-M1-26, AC-M1-27, AC-M4-1, AC-M4-2.
 
 pub mod parallel;
 pub mod progress;
@@ -28,9 +32,11 @@ use clang::Clang;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tracing::{info, warn};
 
-use crate::bootstrap::{compile_commands, TuEntry};
+use crate::bootstrap::{compile_commands, repo_meta, TuEntry};
 use crate::resolve::per_repo::resolve_per_repo;
 use crate::schema::arrow::{record_batch_to_edges, record_batch_to_nodes};
+use crate::schema::edges::EdgeKind;
+use crate::schema::nodes::NodeKind;
 use crate::schema::{EdgeRecord, NodeRecord};
 use crate::sink::GraphSink;
 use crate::stage::manifest::{Manifest, ManifestEntry};
@@ -68,6 +74,12 @@ pub struct RunOptions {
     /// When `true`, the incremental content-hash cache is disabled and all TUs
     /// are re-parsed unconditionally.  Default: `false`.
     pub skip_cache: bool,
+
+    /// When `true`, REPO node + BELONGS_TO_REPO edge emission is skipped.
+    ///
+    /// Set to `true` in tests that do not provide a git repository.  In
+    /// production this is always `false` (the default).
+    pub skip_repo_node: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -223,15 +235,79 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
     sink.preflight().await?;
     sink.ensure_indexes().await?;
 
-    // Write all node records from the staged shards.
-    let node_records = load_nodes_from_stage(&stage_dir)?;
+    // Load staged nodes and edges produced by Phases 1–3.
+    let mut node_records = load_nodes_from_stage(&stage_dir)?;
+    let mut edge_records = load_edges_from_stage(&stage_dir)?;
+
+    // ── REPO node + BELONGS_TO_REPO edges (S22, AC-M4-1, AC-M4-2) ────────
+    // Emit one REPO node for this repository and one BELONGS_TO_REPO edge for
+    // every other node, unless the caller has opted out (e.g. in tests that
+    // run without a git repository).
+    if !opts.skip_repo_node {
+        let meta = repo_meta::collect(&opts.repo_name, &opts.input_path)?;
+
+        let repo_usr = format!("repo:{}", meta.name);
+
+        // Build attrs_json for the REPO node.  These fields are not first-class
+        // columns on NodeRecord; they live in attrs_json so that the existing
+        // Parquet schema and sink MERGE queries remain stable.
+        let attrs = serde_json::json!({
+            "root_path": meta.root_path.to_string_lossy(),
+            "commit_sha": meta.commit_sha,
+            "commit_date": meta.commit_date,
+            "sink": sink.backend_name(),
+        });
+
+        let repo_node = NodeRecord {
+            usr: repo_usr.clone(),
+            kind: NodeKind::Repo,
+            name: meta.name.clone(),
+            qualified_name: meta.name.clone(),
+            mangled_name: None,
+            file_path: meta.root_path.to_string_lossy().into_owned(),
+            line: None,
+            col: None,
+            repo_name: meta.name.clone(),
+            attrs_json: attrs.to_string(),
+            partial: false,
+            phase: 0,
+            tu_hash: [0u8; 32],
+        };
+
+        // Prepend so the REPO node is written before the nodes that reference it.
+        node_records.insert(0, repo_node);
+
+        // One BELONGS_TO_REPO edge from every non-REPO node to the repo node.
+        // We emit edges for all nodes that were already in the batch (index >= 1
+        // after the insert above) so the REPO node itself is excluded.
+        let belongs_edges: Vec<EdgeRecord> = node_records[1..]
+            .iter()
+            .map(|n| EdgeRecord {
+                src_usr: n.usr.clone(),
+                dst_usr: Some(repo_usr.clone()),
+                dst_placeholder: None,
+                kind: EdgeKind::BelongsToRepo,
+                resolved: true,
+                cross_repo_candidate: false,
+                repo_name: meta.name.clone(),
+                attrs_json: "{}".to_owned(),
+                tu_hash: [0u8; 32],
+            })
+            .collect();
+
+        edge_records.extend(belongs_edges);
+        info!(
+            "Phase 4 (S22): emitted REPO node '{}' + {} BELONGS_TO_REPO edges",
+            repo_usr,
+            node_records.len().saturating_sub(1)
+        );
+    }
+
     stats.nodes_written = node_records.len() as u64;
     if !node_records.is_empty() {
         sink.write_nodes(&node_records).await?;
     }
 
-    // Write all resolved edge records from final-edges.parquet.
-    let edge_records = load_edges_from_stage(&stage_dir)?;
     stats.edges_written = edge_records.len() as u64;
     if !edge_records.is_empty() {
         sink.write_edges(&edge_records).await?;

@@ -53,6 +53,7 @@ fn make_run_opts(stage_dir: PathBuf) -> RunOptions {
         skip_phase2: true,
         skip_system_headers: true,
         skip_cache: false,
+        skip_repo_node: true,
     }
 }
 

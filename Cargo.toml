@@ -119,3 +119,8 @@ harness = false
 name = "incremental_cache"
 path = "tests/integration/incremental_cache.rs"
 required-features = ["test-mock"]
+
+[[test]]
+name = "repo_meta"
+path = "tests/integration/repo_meta.rs"
+required-features = ["test-mock"]

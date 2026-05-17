@@ -9,18 +9,19 @@
 /// implementation-notes.md.
 /// Bumped in S14 (cpp-extensions): added NAMESPACE, TEMPLATE_DECL, SPECIALIZATION, TYPEDEF,
 /// ENUM, HEADER node kinds and INCLUDES, OVERRIDES, INSTANTIATES, SPECIALIZES, FRIEND_OF,
-/// ADL_CANDIDATE edge kinds.  Any further change to NodeKind/EdgeKind variants must bump again
-/// per ADR-9.
-pub const SCHEMA_VERSION: u32 = 2;
+/// ADL_CANDIDATE edge kinds.
+/// Bumped in S22 (repo-nodes): added REPO node kind and BELONGS_TO_REPO edge kind.
+/// Any further change to NodeKind/EdgeKind variants must bump again per ADR-9.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Human-readable schema tag derived from `SCHEMA_VERSION`.
 ///
 /// ADR-9 references `const_format::concatcp!` to derive this; since `const_format` is not in
 /// Cargo.toml, we use a hand-written string literal with a `debug_assert!` to keep them in sync.
-pub const SCHEMA_VERSION_TAG: &str = "cxg-schema-v2";
+pub const SCHEMA_VERSION_TAG: &str = "cxg-schema-v3";
 
 /// Magic key stored in Parquet KV metadata; Phase 3 refuses mismatched-version shards.
-pub const PARQUET_MAGIC: &str = "cxg_parquet_v2";
+pub const PARQUET_MAGIC: &str = "cxg_parquet_v3";
 
 /// Verify at test-time that the tag string is consistent with the integer constant.
 ///

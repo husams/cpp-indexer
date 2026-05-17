@@ -110,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
         skip_phase2: cli.skip_phase2,
         skip_system_headers: !cli.include_system_headers,
         skip_cache: false,
+        skip_repo_node: false,
     };
 
     let stats = run(Arc::clone(&sink), opts)

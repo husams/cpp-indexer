@@ -48,6 +48,7 @@ fn make_run_opts(stage_dir: PathBuf) -> RunOptions {
         // Keep system-header filter ON so no system-header USRs leak in.
         skip_system_headers: true,
         skip_cache: false,
+        skip_repo_node: true,
     }
 }
 

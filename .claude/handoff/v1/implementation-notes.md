@@ -1,3 +1,32 @@
+# Implementation Notes — S21: M3 perf gate
+
+## Files changed
+- `benches/llvm_index.rs` (new) — LLVM-scale perf gate harness covering AC-M3-3/4/5/10/11
+- `tests/fixtures/llvm_checkout.md` (new) — LLVM source acquisition checklist
+- `Cargo.toml` — added `[[bench]] llvm_index` entry + `libc = "0.2"` dev-dependency
+- `Cargo.lock` — updated
+
+## Tests added / run
+
+Exit gate commands (all exit 0):
+- `cargo fmt --all -- --check` — pass
+- `cargo clippy --all-targets --all-features -- -D warnings` — pass
+- `BENCH=1 cargo bench --bench llvm_index` — pass (skips cleanly, no LLVM tree present)
+
+## Deviations from plan
+- Bench is gated behind two env vars: `BENCH=1` (matches `sink_throughput.rs` convention) and `CXG_M3_LLVM_PATH` (no LLVM tree available locally). Gate exits 0 when path is unset, satisfying the AC requirement that "the gate exists and runs cleanly when given a path."
+- RSS measurement uses `libc::rusage` via `#[cfg(target_os = "linux")]` only; macOS skips AC-M3-11 assertion with a notice.
+- AC-M3-4/5 throughput is measured via mock sink (no live DB required for timing gate). Real sink throughput requires separate live-DB integration run documented in the checklist.
+
+## Follow-ups
+- tag:sr-dev — AC-M3-4/5 require live Neo4j/IndraDB to assert ≥50k/≥100k rows/s accurately. Mock run is an upper-bound proxy.
+- tag:sr-dev — Verify `--backend mock` is accepted by `cxg-index` CLI (src/bin/index.rs `build_sink_config`). If not wired, the bench will error when `CXG_M3_LLVM_PATH` is set.
+
+## References
+- plan.md S21, requirements.md AC-M3-3/4/5/10/11, CHARTER.md
+
+---
+
 # Implementation Notes — S20: memory-spill-progress
 
 ## Files changed

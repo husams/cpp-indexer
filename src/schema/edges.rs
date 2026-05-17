@@ -1,9 +1,9 @@
-/// CodexGraph edge kinds (AC-M1-3, AC-M2-7..AC-M2-12).
+/// CodexGraph edge kinds (AC-M1-3, AC-M2-7..AC-M2-12, AC-M4-2).
 ///
 /// M1 base: `CONTAINS`, `HAS_METHOD`, `HAS_FIELD`, `INHERITS`, `USES`, `CALLS`.
 /// M2 extensions (S14): `INCLUDES`, `OVERRIDES`, `INSTANTIATES`, `SPECIALIZES`, `FRIEND_OF`,
 /// `ADL_CANDIDATE`.
-/// M4 additions (`BELONGS_TO_REPO`, `EXTERNAL_REF`) are added in later stories.
+/// M4 additions (S22): `BELONGS_TO_REPO`.  `EXTERNAL_REF` is added in S23.
 ///
 /// Adding new variants bumps `SCHEMA_VERSION` per ADR-9.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -36,6 +36,12 @@ pub enum EdgeKind {
     FriendOf,
     /// An unresolved name that is a candidate for Argument-Dependent Lookup.  AC-M2-12.
     AdlCandidate,
+
+    // ── M4 additions (S22) ──────────────────────────────────────────────────
+    /// Links every indexed node to its owning REPO node.  AC-M4-2.
+    ///
+    /// Direction: `(node)-[:BELONGS_TO_REPO]->(repo)`.
+    BelongsToRepo,
 }
 
 impl EdgeKind {
@@ -54,6 +60,7 @@ impl EdgeKind {
             EdgeKind::Specializes => "SPECIALIZES",
             EdgeKind::FriendOf => "FRIEND_OF",
             EdgeKind::AdlCandidate => "ADL_CANDIDATE",
+            EdgeKind::BelongsToRepo => "BELONGS_TO_REPO",
         }
     }
 
@@ -72,6 +79,7 @@ impl EdgeKind {
             EdgeKind::Specializes,
             EdgeKind::FriendOf,
             EdgeKind::AdlCandidate,
+            EdgeKind::BelongsToRepo,
         ]
     }
 
@@ -94,6 +102,7 @@ impl EdgeKind {
             "SPECIALIZES" => Some(EdgeKind::Specializes),
             "FRIEND_OF" => Some(EdgeKind::FriendOf),
             "ADL_CANDIDATE" => Some(EdgeKind::AdlCandidate),
+            "BELONGS_TO_REPO" => Some(EdgeKind::BelongsToRepo),
             _ => None,
         }
     }

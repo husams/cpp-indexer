@@ -32,6 +32,9 @@ pub enum Error {
     #[error("schema error: {0}")]
     Schema(String),
 
+    #[error("bootstrap error: {0}")]
+    Bootstrap(String),
+
     #[error("cache error: {0}")]
     Cache(String),
 
