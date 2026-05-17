@@ -41,6 +41,7 @@ use crate::schema::{EdgeRecord, NodeRecord};
 use crate::sink::GraphSink;
 use crate::stage::manifest::{Manifest, ManifestEntry};
 use crate::stage::writer::StageWriter;
+use crate::visit::decorate;
 use crate::visit::shallow::{visit_tu, VisitOptions};
 use crate::{Error, Result};
 
@@ -220,9 +221,10 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
         stats.partial_tu_count, stats.cache_hits
     );
 
-    // ── Phase 2: decoration (stub — deferred to later milestone) ─────────
+    // ── Phase 2: decoration (AC-M5-5, AC-M5-6) ───────────────────────────
+    let decorated_count = decorate::run(&clang, &tu_entries, &stage_dir, opts.skip_phase2)?;
     if !opts.skip_phase2 {
-        info!("Phase 2: decoration pass is not yet implemented; skipping");
+        info!("Phase 2: {} node(s) decorated", decorated_count);
     }
 
     // ── Phase 3: in-memory USR resolve → final-edges.parquet ─────────────
@@ -395,9 +397,21 @@ pub(crate) fn filter_compiler_args(file: &Path, args: &[String]) -> Vec<String> 
 // Stage-reader helpers
 // ---------------------------------------------------------------------------
 
-/// Load all node records from `worker-*/nodes-*.parquet` shards.
+/// Load all node records from Phase 1 and Phase 2 Parquet shards, deduplicating
+/// by USR and preferring `phase=2` records over `phase=1` records.
+///
+/// Phase 1 shards live in `worker-*/nodes-*.parquet`.
+/// Phase 2 shards live in `<stage_dir>/phase2-nodes-*.parquet`.
+///
+/// When both phases have a record for the same USR the `phase=2` record is kept
+/// so that decorated attrs_json is used in the sink write (AC-M5-5).
 fn load_nodes_from_stage(stage_dir: &Path) -> Result<Vec<NodeRecord>> {
-    let mut records = Vec::new();
+    use std::collections::HashMap;
+
+    // key: USR → (phase, NodeRecord); we track phase so we can upgrade phase=1 → phase=2.
+    let mut by_usr: HashMap<String, (u8, NodeRecord)> = HashMap::new();
+
+    // Load Phase 1 shards from worker-* directories.
     for shard_path in collect_shards(stage_dir, "nodes")? {
         let file = File::open(&shard_path)?;
         let reader = ParquetRecordBatchReaderBuilder::try_new(file)
@@ -408,10 +422,56 @@ fn load_nodes_from_stage(stage_dir: &Path) -> Result<Vec<NodeRecord>> {
             })?;
         for batch_result in reader {
             let batch = batch_result.map_err(|e| Error::Schema(format!("read node batch: {e}")))?;
-            records.extend(record_batch_to_nodes(&batch));
+            for record in record_batch_to_nodes(&batch) {
+                let phase = record.phase;
+                let usr = record.usr.clone();
+                by_usr
+                    .entry(usr)
+                    .and_modify(|(existing_phase, existing_record)| {
+                        if phase > *existing_phase {
+                            *existing_phase = phase;
+                            *existing_record = record.clone();
+                        }
+                    })
+                    .or_insert((phase, record));
+            }
         }
     }
-    Ok(records)
+
+    // Load Phase 2 shards from the stage_dir root (phase2-nodes-*.parquet).
+    for shard_path in collect_phase2_shards(stage_dir)? {
+        let file = File::open(&shard_path)?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .map_err(|e| {
+                Error::Schema(format!(
+                    "open phase2 node shard {}: {e}",
+                    shard_path.display()
+                ))
+            })?
+            .build()
+            .map_err(|e| {
+                Error::Schema(format!("build reader for {}: {e}", shard_path.display()))
+            })?;
+        for batch_result in reader {
+            let batch = batch_result.map_err(|e| Error::Schema(format!("read node batch: {e}")))?;
+            for record in record_batch_to_nodes(&batch) {
+                let phase = record.phase;
+                let usr = record.usr.clone();
+                // Phase 2 always wins over Phase 1 for the same USR.
+                by_usr
+                    .entry(usr)
+                    .and_modify(|(existing_phase, existing_record)| {
+                        if phase >= *existing_phase {
+                            *existing_phase = phase;
+                            *existing_record = record.clone();
+                        }
+                    })
+                    .or_insert((phase, record));
+            }
+        }
+    }
+
+    Ok(by_usr.into_values().map(|(_, r)| r).collect())
 }
 
 /// Load all resolved edge records from `<stage_dir>/final-edges.parquet`.
@@ -432,6 +492,24 @@ fn load_edges_from_stage(stage_dir: &Path) -> Result<Vec<EdgeRecord>> {
         records.extend(record_batch_to_edges(&batch));
     }
     Ok(records)
+}
+
+/// Collect Phase 2 node shard paths (`phase2-nodes-*.parquet`) from `stage_dir` root.
+fn collect_phase2_shards(stage_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    if !stage_dir.exists() {
+        return Ok(paths);
+    }
+    for entry in std::fs::read_dir(stage_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if path.is_file() && name.starts_with("phase2-nodes") && name.ends_with(".parquet") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
 }
 
 /// Collect shard paths for `prefix` (`"nodes"` or `"edges"`) from `worker-*/` dirs.
