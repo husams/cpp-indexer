@@ -8,7 +8,7 @@ pub mod prompt {}
 pub mod resolve {}
 pub mod schema;
 pub mod sink {}
-pub mod stage {}
+pub mod stage;
 pub mod visit {}
 pub mod workspace {}
 
