@@ -3,8 +3,9 @@
 /// ## Algorithm
 ///
 /// 1. Walk `<stage_dir>/worker-*/nodes-*.parquet` shards and load every node USR into a
-///    `HashMap<String, NodeMeta>`.  Only USRs are needed for the membership test; `NodeMeta`
-///    carries the minimum useful metadata to unblock Phase 4 without a second pass.
+///    [`crate::resolve::spill::UsrMap`].  When the map's estimated footprint exceeds the
+///    spill threshold (default 8 GiB, AC-M3-12) it transparently migrates to RocksDB under
+///    `<stage_dir>/.cxg-cache/usr_map.rocks`.
 ///
 /// 2. Walk `<stage_dir>/worker-*/edges-*.parquet` shards. For each edge record:
 ///    - `dst_usr = Some(u)`, `u` in the map  → write with `resolved=true`,
@@ -19,17 +20,15 @@
 ///
 /// ## Spill
 ///
-/// When the node USR map exceeds the 8 GiB threshold (AC-M3-12) the map must spill to
-/// RocksDB.  This is left as a `TODO` for a future story (`resolve::spill`).  The function
-/// interface here is stable; spill support drops in behind a policy enum without changing
-/// callers.
+/// The `UsrMap` wrapper in [`crate::resolve::spill`] manages the HashMap → RocksDB
+/// transition transparently.  Callers use `resolve_per_repo` (production default,
+/// 8 GiB threshold) or `resolve_per_repo_with_threshold` (tests, injectable threshold).
 ///
 /// ## Single-threaded contract
 ///
 /// Phase 3 is intentionally single-threaded per repo (per design.md §Phase 3).  No rayon
 /// or Tokio runtime is required; synchronous Parquet I/O is used throughout.
 use std::{
-    collections::HashMap,
     fs::{self, File},
     path::{Path, PathBuf},
     sync::Arc,
@@ -41,6 +40,7 @@ use parquet::{
 };
 
 use crate::{
+    resolve::spill::{UsrMap, DEFAULT_SPILL_THRESHOLD_BYTES},
     schema::{
         arrow::{edge_schema, edges_to_record_batch, record_batch_to_edges, record_batch_to_nodes},
         EdgeRecord, NodeKind,
@@ -69,7 +69,8 @@ pub struct NodeMeta {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Run Phase 3 resolution for a single repository.
+/// Run Phase 3 resolution for a single repository using the default 8 GiB
+/// spill threshold (AC-M3-12).
 ///
 /// # Parameters
 /// - `stage_dir`: The run-level staging directory containing `worker-NNN/` subdirectories
@@ -81,12 +82,25 @@ pub struct NodeMeta {
 /// # Errors
 /// - `Error::Schema` when a shard is missing the ADR-3 KV magic header (version mismatch)
 ///   or when Arrow/Parquet serialisation fails.
+/// - `Error::Cache` when RocksDB spill initialisation or I/O fails.
 /// - `Error::Io` on any file-system error.
 pub fn resolve_per_repo(stage_dir: &Path) -> Result<PathBuf> {
+    resolve_per_repo_with_threshold(stage_dir, DEFAULT_SPILL_THRESHOLD_BYTES)
+}
+
+/// Run Phase 3 resolution with an explicit spill threshold.
+///
+/// Prefer [`resolve_per_repo`] in production.  Use this variant in tests to
+/// inject a small threshold that triggers the RocksDB spill path without
+/// allocating gigabytes.
+pub fn resolve_per_repo_with_threshold(
+    stage_dir: &Path,
+    spill_threshold: usize,
+) -> Result<PathBuf> {
     let node_shards = collect_shards(stage_dir, "nodes")?;
     let edge_shards = collect_shards(stage_dir, "edges")?;
 
-    let usr_map = build_usr_map(&node_shards)?;
+    let usr_map = build_usr_map(&node_shards, stage_dir, spill_threshold)?;
     let output_path = stage_dir.join("final-edges.parquet");
     write_resolved_edges(&edge_shards, &usr_map, &output_path)?;
 
@@ -139,15 +153,21 @@ fn collect_shards(stage_dir: &Path, prefix: &str) -> Result<Vec<PathBuf>> {
     Ok(shards)
 }
 
-/// Build an in-memory `HashMap<usr, NodeMeta>` from a list of node shard paths.
+/// Build a [`UsrMap`] from a list of node shard paths.
 ///
 /// Each shard is verified to carry the ADR-3 KV magic before being read.
+/// When the map's estimated footprint exceeds `spill_threshold` it spills
+/// transparently to RocksDB (AC-M3-12).
 ///
 /// # Errors
 /// Returns `Error::Schema` when a shard is missing the magic key or when Parquet
-/// deserialisation fails.
-fn build_usr_map(node_shards: &[PathBuf]) -> Result<HashMap<String, NodeMeta>> {
-    let mut map: HashMap<String, NodeMeta> = HashMap::new();
+/// deserialisation fails.  Returns `Error::Cache` on RocksDB spill failures.
+fn build_usr_map(
+    node_shards: &[PathBuf],
+    stage_dir: &Path,
+    spill_threshold: usize,
+) -> Result<UsrMap> {
+    let mut map = UsrMap::new(stage_dir, spill_threshold);
 
     for shard_path in node_shards {
         let file = File::open(shard_path)?;
@@ -185,7 +205,7 @@ fn build_usr_map(node_shards: &[PathBuf]) -> Result<HashMap<String, NodeMeta>> {
                         kind: node.kind,
                         repo_name: node.repo_name,
                     },
-                );
+                )?;
             }
         }
     }
@@ -204,7 +224,7 @@ fn build_usr_map(node_shards: &[PathBuf]) -> Result<HashMap<String, NodeMeta>> {
 /// | `None` (placeholder)| unchanged  | unchanged              |
 fn write_resolved_edges(
     edge_shards: &[PathBuf],
-    usr_map: &HashMap<String, NodeMeta>,
+    usr_map: &UsrMap,
     output_path: &Path,
 ) -> Result<()> {
     let schema = Arc::new(edge_schema());
@@ -244,7 +264,7 @@ fn write_resolved_edges(
             let mut records = record_batch_to_edges(&batch);
 
             for edge in &mut records {
-                classify_edge(edge, usr_map);
+                classify_edge(edge, usr_map)?;
             }
 
             if records.is_empty() {
@@ -266,10 +286,10 @@ fn write_resolved_edges(
 
 /// Classify a single edge in place according to the Phase 3 contract.
 #[inline]
-fn classify_edge(edge: &mut EdgeRecord, usr_map: &HashMap<String, NodeMeta>) {
+fn classify_edge(edge: &mut EdgeRecord, usr_map: &UsrMap) -> Result<()> {
     // Placeholder edges (dst_usr = None): carry forward unchanged.
     if let Some(dst) = &edge.dst_usr {
-        if usr_map.contains_key(dst.as_str()) {
+        if usr_map.contains_key(dst.as_str())? {
             edge.resolved = true;
             edge.cross_repo_candidate = false;
         } else {
@@ -277,6 +297,7 @@ fn classify_edge(edge: &mut EdgeRecord, usr_map: &HashMap<String, NodeMeta>) {
             edge.cross_repo_candidate = true;
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -298,10 +319,12 @@ mod tests {
         }
     }
 
-    fn sample_usr_map() -> HashMap<String, NodeMeta> {
-        let mut m = HashMap::new();
-        m.insert("c:@F@fn_a".to_owned(), make_node_meta(NodeKind::Function));
-        m.insert("c:@S@ClassB".to_owned(), make_node_meta(NodeKind::Class));
+    fn sample_usr_map(stage_dir: &Path) -> UsrMap {
+        let mut m = UsrMap::new(stage_dir, DEFAULT_SPILL_THRESHOLD_BYTES);
+        m.insert("c:@F@fn_a".to_owned(), make_node_meta(NodeKind::Function))
+            .unwrap();
+        m.insert("c:@S@ClassB".to_owned(), make_node_meta(NodeKind::Class))
+            .unwrap();
         m
     }
 
@@ -321,29 +344,32 @@ mod tests {
 
     #[test]
     fn classify_resolved_when_dst_in_map() {
-        let map = sample_usr_map();
+        let dir = tempfile::tempdir().unwrap();
+        let map = sample_usr_map(dir.path());
         let mut edge = make_edge(Some("c:@F@fn_a"));
-        classify_edge(&mut edge, &map);
+        classify_edge(&mut edge, &map).unwrap();
         assert!(edge.resolved);
         assert!(!edge.cross_repo_candidate);
     }
 
     #[test]
     fn classify_cross_repo_when_dst_not_in_map() {
-        let map = sample_usr_map();
+        let dir = tempfile::tempdir().unwrap();
+        let map = sample_usr_map(dir.path());
         let mut edge = make_edge(Some("c:@F@unknown"));
-        classify_edge(&mut edge, &map);
+        classify_edge(&mut edge, &map).unwrap();
         assert!(!edge.resolved);
         assert!(edge.cross_repo_candidate);
     }
 
     #[test]
     fn classify_placeholder_unchanged() {
-        let map = sample_usr_map();
+        let dir = tempfile::tempdir().unwrap();
+        let map = sample_usr_map(dir.path());
         let mut edge = make_edge(None);
         edge.resolved = false;
         edge.cross_repo_candidate = false;
-        classify_edge(&mut edge, &map);
+        classify_edge(&mut edge, &map).unwrap();
         // Placeholder edges must not change.
         assert!(!edge.resolved);
         assert!(!edge.cross_repo_candidate);
