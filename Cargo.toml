@@ -134,3 +134,8 @@ required-features = ["test-mock"]
 name = "m4_exit_gate"
 path = "tests/integration/m4_exit_gate.rs"
 required-features = ["test-mock"]
+
+[[test]]
+name = "m5_exit_gate"
+path = "tests/integration/m5_exit_gate.rs"
+required-features = ["test-mock"]

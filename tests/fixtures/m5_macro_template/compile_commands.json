@@ -1,0 +1,12 @@
+[
+  {
+    "directory": "/Users/husam/workspace/cpp-indexer/tests/fixtures/m5_macro_template",
+    "file": "/Users/husam/workspace/cpp-indexer/tests/fixtures/m5_macro_template/main.cpp",
+    "arguments": [
+      "clang++",
+      "-std=c++14",
+      "-I/Users/husam/workspace/cpp-indexer/tests/fixtures/m5_macro_template",
+      "/Users/husam/workspace/cpp-indexer/tests/fixtures/m5_macro_template/main.cpp"
+    ]
+  }
+]
