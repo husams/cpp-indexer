@@ -18,6 +18,9 @@ Cargo.lock.bak
 /workspace/
 *.log
 
+# clangd cache (auto-generated, not committed)
+**/.cache/
+
 # Secrets / local config
 .env
 .env.*

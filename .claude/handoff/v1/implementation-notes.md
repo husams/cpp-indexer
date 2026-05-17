@@ -1,28 +1,48 @@
-story: S07-stage-parquet
+story: S09-visit-shallow-base
 date: 2026-05-17
 
 ## Files changed
-- src/stage/mod.rs (new) — module declarations for manifest, schema, writer submodules
-- src/stage/schema.rs (new) — shard filename conventions (nodes-NNNN/edges-NNNN), worker_dir(), WriterProperties with snappy+KV magic, has_magic() helper
-- src/stage/manifest.rs (new) — ManifestEntry + Manifest structs, fsync+atomic-rename save, load with magic+version validation
-- src/stage/writer.rs (new) — StageWriter: per-worker dual ArrowWriter (nodes + edges), 256 MiB rotation, finish() returns shard list
-- src/lib.rs — replaced `pub mod stage {}` with `pub mod stage;`
-- Cargo.toml — added `features = ["async"]` to parquet dep; added `futures = "0.3"` dev-dependency
+
+- `src/visit/mod.rs` — new, exposes `cursor_map` and `shallow` submodules
+- `src/visit/cursor_map.rs` — new, maps `clang::EntityKind` to `NodeKind` for M1 base set
+- `src/visit/shallow.rs` — new, Phase 1 visitor (`visit_tu`, `VisitOptions`, `Collector`, `visit_all`)
+- `src/lib.rs` — changed `pub mod visit {}` stub to `pub mod visit;`
+- `Cargo.toml` — added `clang_6_0` feature to clang dep; added `walkdir = "2"` dev dep; added `[[test]] name = "phase1_base"`
+- `tests/fixtures/m1_5file/` — new: `base.h`, `shapes.h`, `shapes.cpp`, `utils.h`, `utils.cpp`, `broken.cpp`, `compile_commands.json`
+- `tests/integration/phase1_base.rs` — new, 5 integration tests for AC-M1-14/15/16/17
 
 ## Tests added/run
-- `cargo nextest run -p cpp_indexer stage::` — 20 passed, 0 failed
-- `cargo fmt --all -- --check` — exit 0
-- `cargo clippy --all-targets --all-features -- -D warnings` — exit 0
+
+Command: `DYLD_LIBRARY_PATH=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib cargo nextest run -p cpp_indexer --test phase1_base`
+
+Result: 5/5 PASS
+- `phase1_api_does_not_accept_graph_sink` — AC-M1-15
+- `phase1_emits_expected_node_kinds` — AC-M1-14/17 (CLASS, METHOD, FIELD)
+- `phase1_emits_module_node` — AC-M1-14 (MODULE kind)
+- `phase1_parse_error_produces_partial_and_continues` — AC-M1-16
+- `phase1_emits_global_variable_from_utils` — AC-M1-14 (GLOBAL_VARIABLE)
+
+All exit gates clear:
+1. `cargo fmt --all -- --check` — exit 0
+2. `cargo clippy --all-targets --all-features -- -D warnings` — exit 0
+3. `cargo nextest run -p cpp_indexer --test phase1_base` — 5/5 PASS exit 0
 
 ## Deviations from plan
-- `parquet::arrow::async_reader::ParquetObjectReader` does not exist in parquet 53.4.1 — plan referenced it but the correct API for tokio::fs::File async reads is `ParquetRecordBatchStreamBuilder::new(tokio_file)` directly. Removed unused import.
-- Cargo.toml parquet dep now has `features = ["async"]` — parallel-merge risk with other worktrees (S08 etc.) editing Cargo.toml. Coordinator resolves on merge.
-- `futures = "0.3"` added to dev-dependencies for `TryStreamExt` in async reader test — same merge risk.
+
+1. `clang` crate features: plan specified `clang = "2"` without features. Added `features = ["clang_6_0"]` to unlock `get_mangled_name()`. Additive, non-breaking.
+2. Module USR synthesis: TU root entity does not return a USR from libclang. Synthesised as `tu:<file_path>` — stable and unique per TU.
+3. `walkdir` dev-dependency: added for integration test helper. Dev-only, no production impact.
+4. `DYLD_LIBRARY_PATH` on macOS: needed at test runtime. CI (Linux) uses system libclang path automatically.
+5. `mock` module gating: `#[cfg(any(test, feature = "test-mock"))]` does not fire for external test binaries. The zero-sink-calls assertion was redesigned as a structural/API-shape test.
 
 ## Follow-ups
-- [sr-dev] Cargo.toml merge: `parquet = { version = "53", features = ["async"] }` and `futures = "0.3"` dev-dep must survive merge from other worktrees.
-- [sr-dev] `StageWriter::bytes_written` tracks ArrowWriter in-memory buffered bytes, not final compressed on-disk bytes — rotation fires on buffer fill. Acceptable for M1; revisit in M3.
-- Incremental manifest append (per-TU, M3) is a skeleton here — struct + round-trip + fsync only; full incremental update logic deferred to M3.
+
+- `visit_all()` helper: `total_nodes` counter is a TU count placeholder; replace with actual node counts in S13. Tag: sr-dev.
+- `.cache/clangd/` committed with fixture; add to `.gitignore` before W5 merge. Tag: sr-dev.
+- S17 (parallel): `visit_all` creates one worker dir per TU; S17 will need to adapt per ADR-7 rayon design.
 
 ## References
-plan.md S07, ADR-3, src/schema/arrow.rs (reused node_schema/edge_schema/batch helpers), src/schema/version.rs (PARQUET_MAGIC/SCHEMA_VERSION)
+
+- plan.md §S09
+- design.md §Phase 1
+- ADR-7 (rayon deferred to S17)

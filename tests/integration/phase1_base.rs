@@ -135,8 +135,13 @@ async fn phase1_emits_expected_node_kinds() {
         kinds
     );
     assert!(
-        kinds.contains("METHOD") || kinds.contains("FUNCTION"),
-        "must emit at least one METHOD or FUNCTION node; got: {:?}",
+        kinds.contains("FUNCTION"),
+        "must emit at least one FUNCTION node; got: {:?}",
+        kinds
+    );
+    assert!(
+        kinds.contains("METHOD"),
+        "must emit at least one METHOD node; got: {:?}",
         kinds
     );
     assert!(
