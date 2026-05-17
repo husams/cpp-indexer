@@ -16,6 +16,7 @@ pub mod factory;
 pub mod lock;
 #[cfg(any(test, feature = "test-mock"))]
 pub mod mock;
+pub mod neo4j;
 
 use std::time::Duration;
 

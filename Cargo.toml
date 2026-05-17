@@ -67,3 +67,7 @@ path = "tests/integration/autodetect.rs"
 name = "phase1_base"
 path = "tests/integration/phase1_base.rs"
 required-features = []
+
+[[test]]
+name = "sink_neo4j"
+path = "tests/integration/sink_neo4j.rs"
