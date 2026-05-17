@@ -1,0 +1,7 @@
+[
+  {
+    "directory": "/Users/husam/workspace/cpp-indexer/tests/fixtures/boost_optional",
+    "file": "/Users/husam/workspace/cpp-indexer/tests/fixtures/boost_optional/optional_user.cpp",
+    "arguments": ["clang++", "-std=c++14", "-I/Users/husam/workspace/cpp-indexer/tests/fixtures/boost_optional", "/Users/husam/workspace/cpp-indexer/tests/fixtures/boost_optional/optional_user.cpp"]
+  }
+]

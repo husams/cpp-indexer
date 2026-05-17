@@ -397,6 +397,7 @@ async fn visit_m2_fixture(
             "-std=c++14".to_owned(),
             format!("-I{}", fixture.display()),
         ],
+        skip_system_headers: true,
     };
 
     let mut writer = StageWriter::new(stage_dir, 0).unwrap();
@@ -552,6 +553,7 @@ async fn m2_emits_overrides_edge_with_vtable_slot() {
             "-std=c++14".to_owned(),
             format!("-I{}", fixture.display()),
         ],
+        skip_system_headers: true,
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();

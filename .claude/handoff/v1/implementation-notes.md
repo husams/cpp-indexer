@@ -1,48 +1,56 @@
-story: S09-visit-shallow-base
-date: 2026-05-17
+## S14: cpp extensions — implementation notes
 
-## Files changed
+Files changed:
+- src/schema/nodes.rs — added Namespace, TemplateDef, Specialization, Typedef, Enum, Header variants to NodeKind
+- src/schema/edges.rs — added Includes, Overrides, Instantiates, Specializes, FriendOf, AdlCandidate variants to EdgeKind
+- src/schema/version.rs — bumped SCHEMA_VERSION 1→2, updated SCHEMA_VERSION_TAG and PARQUET_MAGIC strings
+- src/visit/cursor_map.rs — extended entity_kind_to_node_kind: Namespace, ClassTemplate→TemplateDef, FunctionTemplate→TemplateDef, TypeAliasTemplateDecl→TemplateDef, ClassTemplatePartialSpecialization→Specialization, TypedefDecl/TypeAliasDecl→Typedef, EnumDecl→Enum, InclusionDirective→Header; updated unit tests accordingly
+- src/visit/shallow.rs — extended visitor: Header node/INCLUDES edge via emit_header_node_and_edge; OVERRIDES edge with vtable_slot from get_overridden_methods(); SPECIALIZES edge from Specialization to primary template; FRIEND_OF edge via FriendDecl child walk; extended build_attrs_json for new kinds; added push_edge_with_attrs; enabled detailed_preprocessing_record flag on parser (required for InclusionDirective AST nodes)
+- tests/fixtures/m2_cpp_extensions/ — new fixture: ext_base.h, ext_shapes.h, ext_main.cpp, compile_commands.json
+- tests/integration/phase1_base.rs — added M2 tests: m2_emits_namespace_nodes, m2_emits_template_decl_nodes, m2_emits_specialization_nodes, m2_emits_header_nodes, m2_emits_typedef_nodes, m2_emits_enum_nodes, m2_emits_includes_edges, m2_emits_overrides_edge_with_vtable_slot, m2_emits_specializes_edge, m2_emits_friend_of_edge
 
-- `src/visit/mod.rs` — new, exposes `cursor_map` and `shallow` submodules
-- `src/visit/cursor_map.rs` — new, maps `clang::EntityKind` to `NodeKind` for M1 base set
-- `src/visit/shallow.rs` — new, Phase 1 visitor (`visit_tu`, `VisitOptions`, `Collector`, `visit_all`)
-- `src/lib.rs` — changed `pub mod visit {}` stub to `pub mod visit;`
-- `Cargo.toml` — added `clang_6_0` feature to clang dep; added `walkdir = "2"` dev dep; added `[[test]] name = "phase1_base"`
-- `tests/fixtures/m1_5file/` — new: `base.h`, `shapes.h`, `shapes.cpp`, `utils.h`, `utils.cpp`, `broken.cpp`, `compile_commands.json`
-- `tests/integration/phase1_base.rs` — new, 5 integration tests for AC-M1-14/15/16/17
+Tests added/run:
+- `cargo nextest run -p cpp_indexer --test phase1_base` → 15/15 passed
+- `cargo fmt --all -- --check` → exit 0
+- `cargo clippy --all-targets --all-features -- -D warnings` → exit 0
 
-## Tests added/run
+Deviations from plan:
+- ADR-9 bump policy: the existing nodes.rs/edges.rs comment stated additive M2 variants could be added "without bumping SCHEMA_VERSION". ADR-9 is authoritative (accepted, not proposed) and states "Any change to NodeKind or EdgeKind variants requires bumping SCHEMA_VERSION by 1". SCHEMA_VERSION bumped 1→2. The outdated comment in both files has been updated.
+- `detailed_preprocessing_record(true)` added to parser: required to expose InclusionDirective AST entities (for HEADER/INCLUDES). This is a correctness fix, not a plan deviation.
+- is_inline_namespace() is gated behind clang_9_0 feature (Cargo.toml only has clang_6_0). Namespace attrs_json is "{}" for now; inline flag omitted.
+- ADL_CANDIDATE (AC-M2-12) and INSTANTIATES (AC-M2-9) edges: EdgeKind variants defined in schema; visitor emission not implemented (requires call-expression context not in declaration walk). Tagged as follow-up.
 
-Command: `DYLD_LIBRARY_PATH=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib cargo nextest run -p cpp_indexer --test phase1_base`
+Follow-ups:
+- tag:sr-dev — ADL_CANDIDATE and INSTANTIATES edge emission requires call-expression context (Phase 2 visitor). Only the schema variants are defined here; visitor emission is a follow-up.
+- tag:sr-dev — enable clang_9_0 feature on the clang crate if inline namespace detection is needed.
+- S31 (SCHEMA_VERSION coordination): SCHEMA_VERSION is now 2; S31 must not independently bump it.
 
-Result: 5/5 PASS
-- `phase1_api_does_not_accept_graph_sink` — AC-M1-15
-- `phase1_emits_expected_node_kinds` — AC-M1-14/17 (CLASS, METHOD, FIELD)
-- `phase1_emits_module_node` — AC-M1-14 (MODULE kind)
-- `phase1_parse_error_produces_partial_and_continues` — AC-M1-16
-- `phase1_emits_global_variable_from_utils` — AC-M1-14 (GLOBAL_VARIABLE)
+References: plan.md S14, design.md §4 Phase 1, adr-9.md, requirements.md AC-M2-1..AC-M2-12
 
-All exit gates clear:
-1. `cargo fmt --all -- --check` — exit 0
-2. `cargo clippy --all-targets --all-features -- -D warnings` — exit 0
-3. `cargo nextest run -p cpp_indexer --test phase1_base` — 5/5 PASS exit 0
+---
 
-## Deviations from plan
+## S16: m2-boost-optional-gate — implementation notes
 
-1. `clang` crate features: plan specified `clang = "2"` without features. Added `features = ["clang_6_0"]` to unlock `get_mangled_name()`. Additive, non-breaking.
-2. Module USR synthesis: TU root entity does not return a USR from libclang. Synthesised as `tu:<file_path>` — stable and unique per TU.
-3. `walkdir` dev-dependency: added for integration test helper. Dev-only, no production impact.
-4. `DYLD_LIBRARY_PATH` on macOS: needed at test runtime. CI (Linux) uses system libclang path automatically.
-5. `mock` module gating: `#[cfg(any(test, feature = "test-mock"))]` does not fire for external test binaries. The zero-sink-calls assertion was redesigned as a structural/API-shape test.
+Files changed:
+- tests/fixtures/boost_optional/boost/optional.hpp (new) — minimal vendored fixture defining primary boost::optional<T> and partial specialization boost::optional<T*>
+- tests/fixtures/boost_optional/optional_user.cpp (new) — TU using both template forms; no system headers to avoid cross_repo_candidate edges
+- tests/fixtures/boost_optional/compile_commands.json (new) — absolute-path compile_commands.json matching m1_5file convention
+- tests/integration/m2_exit_gate.rs (new) — #[ignore = "requires boost-optional-checkout"] test asserting AC-M2-16 and AC-M2-17
+- Cargo.toml — added [[test]] m2_exit_gate with required-features = ["test-mock"]
+- tests/integration/phase1_base.rs — added skip_system_headers: true to two pre-existing VisitOptions initializers (pre-existing build failure, not introduced by S16)
 
-## Follow-ups
+Tests added/run:
+- `cargo fmt --all -- --check` → exit 0
+- `cargo clippy --all-targets --all-features -- -D warnings` → exit 0
+- `DYLD_LIBRARY_PATH=/Library/Developer/CommandLineTools/usr/lib cargo nextest run -p cpp_indexer --test m2_exit_gate --features test-mock -- --ignored` → 1 PASS
 
-- `visit_all()` helper: `total_nodes` counter is a TU count placeholder; replace with actual node counts in S13. Tag: sr-dev.
-- `.cache/clangd/` committed with fixture; add to `.gitignore` before W5 merge. Tag: sr-dev.
-- S17 (parallel): `visit_all` creates one worker dir per TU; S17 will need to adapt per ADR-7 rayon design.
+Deviations from plan:
+- --features test-mock required but absent from plan.md exit-criteria command. Tagged for sr-dev.
+- macOS requires DYLD_LIBRARY_PATH=/Library/Developer/CommandLineTools/usr/lib for libclang runtime discovery.
+- Fixed pre-existing phase1_base.rs compile failure as a required clippy gate prerequisite.
 
-## References
+Follow-ups:
+- tag:sr-dev — update plan.md S16 exit-criteria to include --features test-mock
+- tag:devops — set DYLD_LIBRARY_PATH in macOS CI runners for nextest
 
-- plan.md §S09
-- design.md §Phase 1
-- ADR-7 (rayon deferred to S17)
+References: plan.md S16, requirements.md AC-M2-16 AC-M2-17
