@@ -24,6 +24,7 @@
 pub mod parallel;
 pub mod progress;
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -322,15 +323,19 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
         );
     }
 
-    stats.nodes_written = node_records.len() as u64;
-    if !node_records.is_empty() {
-        sink.write_nodes(&node_records).await?;
-    }
+    dedupe_edges_for_sink(&mut edge_records);
 
-    stats.edges_written = edge_records.len() as u64;
-    if !edge_records.is_empty() {
-        sink.write_edges(&edge_records).await?;
-    }
+    stats.nodes_written = if node_records.is_empty() {
+        0
+    } else {
+        sink.write_nodes(&node_records).await?.nodes_written
+    };
+
+    stats.edges_written = if edge_records.is_empty() {
+        0
+    } else {
+        sink.write_edges(&edge_records).await?.nodes_written
+    };
 
     info!(
         "Phase 4: complete — {} nodes, {} edges written to '{}'",
@@ -342,6 +347,21 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
     record_pipeline_metrics(&stats, run_started.elapsed().as_secs_f64());
 
     Ok(stats)
+}
+
+fn dedupe_edges_for_sink(edges: &mut Vec<EdgeRecord>) {
+    let mut seen = HashSet::new();
+    edges.retain(|edge| {
+        let Some(dst_usr) = edge.dst_usr.as_ref() else {
+            return false;
+        };
+        seen.insert((
+            edge.src_usr.clone(),
+            dst_usr.clone(),
+            edge.kind.as_str().to_owned(),
+            edge.repo_name.clone(),
+        ))
+    });
 }
 
 fn filter_entries_to_input_scope(
@@ -639,6 +659,36 @@ mod tests {
             file,
             args: vec!["clang++".to_owned()],
         }
+    }
+
+    fn edge(src: &str, dst: Option<&str>, kind: EdgeKind) -> EdgeRecord {
+        EdgeRecord {
+            src_usr: src.to_owned(),
+            dst_usr: dst.map(str::to_owned),
+            dst_placeholder: None,
+            kind,
+            resolved: dst.is_some(),
+            cross_repo_candidate: false,
+            repo_name: "repo".to_owned(),
+            attrs_json: "{}".to_owned(),
+            tu_hash: [0u8; 32],
+        }
+    }
+
+    #[test]
+    fn dedupe_edges_removes_duplicate_sink_keys_and_unresolved_edges() {
+        let mut edges = vec![
+            edge("a", Some("b"), EdgeKind::Calls),
+            edge("a", Some("b"), EdgeKind::Calls),
+            edge("a", Some("b"), EdgeKind::Uses),
+            edge("c", None, EdgeKind::Calls),
+        ];
+
+        dedupe_edges_for_sink(&mut edges);
+
+        assert_eq!(edges.len(), 2);
+        assert!(edges.iter().any(|edge| edge.kind == EdgeKind::Calls));
+        assert!(edges.iter().any(|edge| edge.kind == EdgeKind::Uses));
     }
 
     #[test]

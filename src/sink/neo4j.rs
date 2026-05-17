@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use neo4rs::{query, BoltType, ConfigBuilder, Graph};
 use tokio::task::JoinSet;
+use tokio::time::sleep;
 
 use crate::config::{Neo4jSinkConfig, DEFAULT_BATCH_SIZE, DEFAULT_SESSIONS};
 use crate::error::{Error, Result};
@@ -69,13 +70,14 @@ SET n.kind          = row.kind,
 /// Skips rows where `dst_usr` is null — callers must pre-filter.
 const CQL_MERGE_EDGES: &str = "
 UNWIND $rows AS row
-MATCH (src:Node {usr: row.src_usr})
-MATCH (dst:Node {usr: row.dst_usr})
+MATCH (src:Node {usr: row.src_usr, repo_name: row.repo_name})
+MATCH (dst:Node {usr: row.dst_usr, repo_name: row.repo_name})
 MERGE (src)-[r:EDGE {kind: row.kind}]->(dst)
 SET r.resolved            = row.resolved,
     r.cross_repo_candidate = row.cross_repo_candidate,
     r.repo_name           = row.repo_name,
     r.attrs_json          = row.attrs_json
+RETURN count(r) AS written
 ";
 
 /// Reset all nodes + edges for a single repo.
@@ -119,6 +121,8 @@ MERGE (v:SchemaVersion {id: 'singleton'})
 SET v.version    = $tag,
     v.attrs_json = $attrs_json
 ";
+
+const MAX_TRANSIENT_RETRIES: u32 = 3;
 
 // ── Helper: build a lock holder id ────────────────────────────────────────────
 
@@ -269,34 +273,87 @@ impl Neo4jSink {
         }
     }
 
-    /// Send one UNWIND-MERGE chunk of nodes; returns `WriteStats` for that chunk.
-    async fn write_node_chunk(graph: Graph, rows: Vec<BoltType>) -> Result<WriteStats> {
+    fn is_retryable_error_text(text: &str) -> bool {
+        text.contains("Neo.TransientError")
+            || text.contains("DeadlockDetected")
+            || text.contains("LockClientStopped")
+    }
+
+    async fn run_chunk_with_retry(
+        graph: Graph,
+        cypher: &'static str,
+        rows: Vec<BoltType>,
+    ) -> Result<WriteStats> {
         let count = rows.len() as u64;
         let t0 = Instant::now();
-        graph
-            .run(query(CQL_MERGE_NODES).param("rows", rows))
-            .await
-            .map_err(Self::map_neo4j_err)?;
-        Ok(WriteStats {
-            nodes_written: count,
-            retries: 0,
-            elapsed: t0.elapsed(),
-        })
+        let mut retries = 0u32;
+
+        loop {
+            match graph.run(query(cypher).param("rows", rows.clone())).await {
+                Ok(()) => {
+                    return Ok(WriteStats {
+                        nodes_written: count,
+                        retries,
+                        elapsed: t0.elapsed(),
+                    });
+                }
+                Err(err) if retries < MAX_TRANSIENT_RETRIES => {
+                    let text = format!("{err:?}");
+                    if Self::is_retryable_error_text(&text) {
+                        retries += 1;
+                        sleep(Duration::from_millis(u64::from(50 * retries))).await;
+                        continue;
+                    }
+                    return Err(Self::map_neo4j_err(err));
+                }
+                Err(err) => return Err(Self::map_neo4j_err(err)),
+            }
+        }
+    }
+
+    /// Send one UNWIND-MERGE chunk of nodes; returns `WriteStats` for that chunk.
+    async fn write_node_chunk(graph: Graph, rows: Vec<BoltType>) -> Result<WriteStats> {
+        Self::run_chunk_with_retry(graph, CQL_MERGE_NODES, rows).await
     }
 
     /// Send one UNWIND-MERGE chunk of edges; returns `WriteStats` for that chunk.
     async fn write_edge_chunk(graph: Graph, rows: Vec<BoltType>) -> Result<WriteStats> {
-        let count = rows.len() as u64;
         let t0 = Instant::now();
-        graph
-            .run(query(CQL_MERGE_EDGES).param("rows", rows))
-            .await
-            .map_err(Self::map_neo4j_err)?;
-        Ok(WriteStats {
-            nodes_written: count,
-            retries: 0,
-            elapsed: t0.elapsed(),
-        })
+        let mut retries = 0u32;
+
+        loop {
+            match graph
+                .execute(query(CQL_MERGE_EDGES).param("rows", rows.clone()))
+                .await
+            {
+                Ok(mut stream) => {
+                    let written =
+                        if let Some(row) = stream.next().await.map_err(Self::map_neo4j_err)? {
+                            row.get::<i64>("written").map_err(|e| Error::Sink {
+                                backend: "neo4j",
+                                source: Box::new(e),
+                            })? as u64
+                        } else {
+                            0
+                        };
+                    return Ok(WriteStats {
+                        nodes_written: written,
+                        retries,
+                        elapsed: t0.elapsed(),
+                    });
+                }
+                Err(err) if retries < MAX_TRANSIENT_RETRIES => {
+                    let text = format!("{err:?}");
+                    if Self::is_retryable_error_text(&text) {
+                        retries += 1;
+                        sleep(Duration::from_millis(u64::from(50 * retries))).await;
+                        continue;
+                    }
+                    return Err(Self::map_neo4j_err(err));
+                }
+                Err(err) => return Err(Self::map_neo4j_err(err)),
+            }
+        }
     }
 }
 
@@ -401,6 +458,7 @@ impl GraphSink for Neo4jSink {
         // Chunk → bounded-concurrency dispatch.
         let t0 = Instant::now();
         let mut total_written = 0u64;
+        let mut total_retries = 0u32;
         let mut set: JoinSet<Result<WriteStats>> = JoinSet::new();
 
         for chunk in all_rows.chunks(self.batch_size) {
@@ -412,6 +470,7 @@ impl GraphSink for Neo4jSink {
                         source: e.into(),
                     })??;
                     total_written += stats.nodes_written;
+                    total_retries += stats.retries;
                 }
             }
 
@@ -427,11 +486,12 @@ impl GraphSink for Neo4jSink {
                 source: e.into(),
             })??;
             total_written += stats.nodes_written;
+            total_retries += stats.retries;
         }
 
         Ok(WriteStats {
             nodes_written: total_written,
-            retries: 0,
+            retries: total_retries,
             // elapsed is wall-clock of the entire concurrent write, not sum.
             elapsed: t0.elapsed(),
         })
@@ -454,36 +514,21 @@ impl GraphSink for Neo4jSink {
 
         let t0 = Instant::now();
         let mut total_written = 0u64;
-        let mut set: JoinSet<Result<WriteStats>> = JoinSet::new();
+        let mut total_retries = 0u32;
 
+        // Neo4j can deadlock concurrent relationship MERGE batches when several
+        // chunks touch the same high-degree nodes. Keep edge chunks serial and
+        // rely on chunk-level retry for transient lock conflicts.
         for chunk in all_rows.chunks(self.batch_size) {
-            if set.len() >= self.sessions {
-                if let Some(res) = set.join_next().await {
-                    let stats = res.map_err(|e| Error::Sink {
-                        backend: "neo4j",
-                        source: e.into(),
-                    })??;
-                    total_written += stats.nodes_written;
-                }
-            }
-
-            let graph = self.graph.clone();
-            let rows = chunk.to_vec();
-            set.spawn(Self::write_edge_chunk(graph, rows));
-        }
-
-        while let Some(res) = set.join_next().await {
-            let stats = res.map_err(|e| Error::Sink {
-                backend: "neo4j",
-                source: e.into(),
-            })??;
+            let stats = Self::write_edge_chunk(self.graph.clone(), chunk.to_vec()).await?;
             total_written += stats.nodes_written;
+            total_retries += stats.retries;
         }
 
         Ok(WriteStats {
             // `nodes_written` counts edges written (field name per ADR-2 convention).
             nodes_written: total_written,
-            retries: 0,
+            retries: total_retries,
             elapsed: t0.elapsed(),
         })
     }
@@ -650,6 +695,10 @@ mod tests {
             CQL_MERGE_EDGES.contains("kind"),
             "CQL_MERGE_EDGES must key on kind"
         );
+        assert!(
+            CQL_MERGE_EDGES.contains("RETURN count(r) AS written"),
+            "CQL_MERGE_EDGES must return the actual relationship count"
+        );
     }
 
     #[test]
@@ -663,6 +712,19 @@ mod tests {
         assert!(CQL_ACQUIRE_LOCK.contains("MERGE"));
         assert!(CQL_ACQUIRE_LOCK.contains("timestamp()"));
         assert!(CQL_ACQUIRE_LOCK.contains("expires_at"));
+    }
+
+    #[test]
+    fn retryable_error_detection_matches_neo4j_transients() {
+        assert!(Neo4jSink::is_retryable_error_text(
+            "Neo.TransientError.Transaction.DeadlockDetected"
+        ));
+        assert!(Neo4jSink::is_retryable_error_text(
+            "can't acquire ExclusiveLock because DeadlockDetected"
+        ));
+        assert!(!Neo4jSink::is_retryable_error_text(
+            "Neo.ClientError.Statement.SyntaxError"
+        ));
     }
 
     // ── node_to_bolt ──────────────────────────────────────────────────────────
