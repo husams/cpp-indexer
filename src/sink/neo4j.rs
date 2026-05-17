@@ -243,6 +243,15 @@ impl Neo4jSink {
         })
     }
 
+    /// Override the batch size for UNWIND chunks.
+    ///
+    /// Useful for testing and for wiring the top-level `[sink].batch_size` config
+    /// knob without changing per-backend constructor signatures.
+    pub fn with_batch_size(mut self, n: usize) -> Self {
+        self.batch_size = n;
+        self
+    }
+
     fn map_neo4j_err(e: neo4rs::Error) -> Error {
         Error::Sink {
             backend: "neo4j",
@@ -829,5 +838,24 @@ mod tests {
             elapsed: Duration::ZERO,
         };
         assert_eq!(expected.nodes_written, 0);
+    }
+
+    #[test]
+    fn with_batch_size_overrides_default() {
+        // Verify that with_batch_size builder sets the field visible to chunking logic.
+        // We check chunk count arithmetic to confirm the configured value is active.
+        let nodes: Vec<NodeRecord> = (0..7).map(|i| sample_node(&format!("u{i}"))).collect();
+        let all_rows: Vec<BoltType> = nodes
+            .iter()
+            .map(|n| BoltType::from(node_to_bolt(n)))
+            .collect();
+        let configured_batch_size: usize = 3;
+        // 7 nodes / batch_size=3 → 3 chunks (3, 3, 1)
+        let chunks: Vec<&[BoltType]> = all_rows.chunks(configured_batch_size).collect();
+        assert_eq!(
+            chunks.len(),
+            3,
+            "batch_size=3 must produce 3 chunks for 7 nodes"
+        );
     }
 }

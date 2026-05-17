@@ -36,7 +36,9 @@ pub async fn create(config: &SinkConfig) -> Result<Arc<dyn GraphSink>> {
                 workspace: None,
             };
             let password = config::env::resolve_neo4j_password(&temp_cfg)?;
-            let sink = Neo4jSink::connect(neo4j_cfg, &password).await?;
+            let sink = Neo4jSink::connect(neo4j_cfg, &password)
+                .await?
+                .with_batch_size(config.resolved_batch_size());
             Ok(Arc::new(sink))
         }
         "indradb" => {
@@ -45,7 +47,9 @@ pub async fn create(config: &SinkConfig) -> Result<Arc<dyn GraphSink>> {
                 detail: "backend = \"indradb\" requires a [sink.indradb] section".to_owned(),
             })?;
             let token = cfg_env::resolve_indradb_token_opt(config)?;
-            let sink = IndraDbSink::new(indradb_cfg, token).await?;
+            let sink = IndraDbSink::new(indradb_cfg, token)
+                .await?
+                .with_batch_size(config.resolved_batch_size());
             Ok(Arc::new(sink))
         }
         other => Err(Error::Config {

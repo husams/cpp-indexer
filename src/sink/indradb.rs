@@ -216,11 +216,19 @@ impl IndraDbSink {
         })
     }
 
+    /// Override the batch size for `bulk_insert` chunks.
+    ///
+    /// Useful for testing and for wiring the top-level `[sink].batch_size` config
+    /// knob without changing per-backend constructor signatures.
+    pub fn with_batch_size(mut self, n: usize) -> Self {
+        self.batch_size = n;
+        self
+    }
+
     /// Clone the inner client (cheap — shares the tonic channel).
     fn client(&self) -> indradb_proto::Client {
         self.client.clone()
     }
-
 }
 
 #[async_trait]
