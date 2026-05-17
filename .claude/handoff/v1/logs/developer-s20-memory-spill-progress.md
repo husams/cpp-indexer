@@ -31,7 +31,8 @@
 
 ## Exit gate passes
 - Pass 1: fmt fail (fixed); clippy fail (fixed)
-- Pass 2: all gates green
+- Pass 2: all gates green (15/15 for spill + progress modules)
+- Pass 3 (post-session): `resolve::per_repo` 5/5 PASS with `DYLD_LIBRARY_PATH=/Library/Developer/CommandLineTools/usr/lib` — confirms per_repo refactoring (classify_edge Result return, UsrMap API, sample_usr_map signature) does not break existing tests
 
 ## Deviations from plan
 - `NodeMeta` stays in `per_repo.rs` (not moved to `spill.rs`) to avoid circular imports; `spill.rs` imports it from `per_repo`.

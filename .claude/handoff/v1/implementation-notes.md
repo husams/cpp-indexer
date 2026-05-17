@@ -28,7 +28,8 @@ Tests in `pipeline::progress`:
 Exit criteria:
 - `cargo fmt --all -- --check` — pass
 - `cargo clippy --all-targets --all-features -- -D warnings` — pass
-- nextest filter — 15/15 pass
+- nextest filter (spill + progress modules) — 15/15 pass
+- nextest `resolve::per_repo` (existing tests, post-refactor) — 5/5 pass (`DYLD_LIBRARY_PATH=/Library/Developer/CommandLineTools/usr/lib`)
 
 ## Deviations from plan
 - `NodeMeta` kept in `per_repo.rs` (not duplicated in `spill.rs`) to avoid circular import; `spill.rs` imports it from `per_repo`.
