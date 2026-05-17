@@ -83,3 +83,8 @@ path = "tests/integration/sink_neo4j.rs"
 name = "sink_indradb"
 path = "tests/sink_indradb.rs"
 required-features = []
+
+[[test]]
+name = "m1_exit_gate"
+path = "tests/integration/m1_exit_gate.rs"
+required-features = ["test-mock"]

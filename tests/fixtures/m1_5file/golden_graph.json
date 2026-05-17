@@ -1,0 +1,14 @@
+{
+  "_comment": "Golden snapshot for the M1 exit gate test. Captures expected minimum node/edge counts and a subset of USR-keyed nodes from the m1_5file fixture (shapes.cpp + utils.cpp + broken.cpp). Counts are lower-bounds; the test asserts >= these values. USR strings are extracted by running Phase 1 against the fixture with a known libclang version; re-run generate_golden.sh when the fixture changes.",
+  "min_node_count": 10,
+  "min_edge_count": 2,
+  "expected_node_names": [
+    "Circle",
+    "Base",
+    "Point",
+    "distance",
+    "midpoint",
+    "pi_value",
+    "BrokenClass"
+  ]
+}
