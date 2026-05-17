@@ -60,6 +60,7 @@ predicates = "3"
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
 futures = "0.3"
 walkdir = "2"
+libc = "0.2"
 
 [[test]]
 name = "autodetect"
@@ -107,6 +108,11 @@ required-features = []
 [[bench]]
 name = "sink_throughput"
 path = "benches/sink_throughput.rs"
+harness = false
+
+[[bench]]
+name = "llvm_index"
+path = "benches/llvm_index.rs"
 harness = false
 
 [[test]]

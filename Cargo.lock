@@ -791,6 +791,7 @@ dependencies = [
  "glob",
  "indradb-lib",
  "indradb-proto",
+ "libc",
  "neo4rs",
  "num_cpus",
  "parquet",
