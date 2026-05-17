@@ -72,3 +72,7 @@ required-features = []
 name = "phase3"
 path = "tests/integration/phase3.rs"
 required-features = []
+
+[[test]]
+name = "sink_neo4j"
+path = "tests/integration/sink_neo4j.rs"
