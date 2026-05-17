@@ -405,6 +405,32 @@ References: plan.md S36; adr-6.md; design.md §3 workspace/; requirements.md AC-
 
 ---
 
+## S38-runbook
+
+Files changed:
+- docs/runbooks/staging-recovery.md (new) — primary AC-M7-23/24 file per plan.md
+- docs/runbooks/daemon-ops.md (new) — daemon start/stop, config, job lifecycle
+- docs/runbooks/sink-failover.md (new) — Neo4j to IndraDB failover procedure
+- docs/runbooks/observability.md (new) — Prometheus metrics, Grafana queries, alert thresholds
+- docs/runbooks/libclang-setup.md (new) — LIBCLANG_PATH setup on Linux and macOS
+
+Tests added/run:
+- `cargo fmt --all -- --check` — exit 0 (no Rust changes)
+- `npx --yes markdown-link-check docs/runbooks/staging-recovery.md` — 0 links, pass
+- `npx --yes markdown-link-check docs/runbooks/daemon-ops.md docs/runbooks/sink-failover.md docs/runbooks/observability.md docs/runbooks/libclang-setup.md` — all links pass
+
+Deviations from plan:
+- Plan.md names only staging-recovery.md; dispatch adds daemon-ops, sink-failover, observability, libclang-setup. Created all four as siblings per advisor recommendation. Link-check run on all files.
+
+Follow-ups:
+- reset token derivation verified against src/api/reset.rs sha256_hex() and sha256_hex("ALL") known test vector (b5c7aed7...). No drift.
+- stage_root layout verified against src/api/reset.rs clear_staging_cache() and src/resolve/spill.rs (RocksDB at <stage_dir>/.cxg-cache/usr_map.rocks).
+- `printf '%s'` note in confirm_token section guards against echo newline hash skew.
+
+References: plan.md S38, requirements.md AC-M7-23/24, design.md §5.4, src/api/reset.rs, src/resolve/spill.rs, src/bin/daemon.rs, src/sink/factory.rs
+
+---
+
 ## S33-daemon-rest
 
 Files changed:
@@ -437,3 +463,54 @@ Follow-ups:
 - @sr-dev CI: set DYLD_LIBRARY_PATH on macOS builders for libclang-linked tests
 
 References: plan.md S33, design.md §3 api/, adr-5.md
+
+---
+
+## S37-docker-ci
+
+Files changed:
+- `Dockerfile` (new) — multi-stage build: rust:1-bookworm builder with libclang-18-dev + clang-18 from apt.llvm.org; debian:bookworm-slim runtime with libclang-cpp18 + libllvm18; copies cxg-index, cxg-resolve-cross-repo, cxg-daemon to /usr/local/bin.
+- `.dockerignore` (new) — excludes target/, .git/, .worktrees/, .claude/, tests/compose/data/, IDE artefacts.
+- `.github/workflows/ci.yml` (extended) — macOS matrix leg now exports DYLD_LIBRARY_PATH from brew --prefix llvm@18 (per S15/S22/S26 pattern); added `docker` job (linux-only, needs: ci, docker/setup-buildx-action, build + three binary smoke tests); added `bench` job (push-to-main + weekly cron, >20% regression check via Python script); added weekly schedule trigger.
+- `benches/baseline.json` (new) — empty placeholder; regression script skips gracefully on first run.
+
+Tests added/run:
+- `cargo fmt --all -- --check` → PASS (exit 0)
+- `cargo clippy --all-targets --all-features -- -D warnings` → PASS (Finished dev profile)
+- `docker build -t cpp-indexer:ci .` → running (background at commit time; smoke pending)
+
+Deviations from plan:
+1. CMD not ENTRYPOINT — design §5.7 says "entrypoint: cxg-daemon". ENTRYPOINT breaks S37 exit-criteria smoke `docker run --rm cpp-indexer:ci cxg-index --version` (resolves to cxg-daemon cxg-index --version). Used CMD so docker run override works correctly.
+2. Committed baseline.json placeholder — plan says "compares to baseline json artifact". Chose committed file over GHA artifact pull for day-one simplicity. Maintainer must populate ns/iter values to activate AC-M7-22 gate.
+3. Benchmark format — used `--output-format bencher` (libtest ns/iter) + hand-rolled Python parser. Criterion JSON output path deferred until criterion is confirmed as the bench harness.
+
+Follow-ups:
+- [sr-dev] Populate benches/baseline.json with real ns/iter values to activate AC-M7-22 regression gate.
+- [devops] Add image push step (registry tag + push) in a future devops story.
+
+References: plan.md S37 (lines 612-626), design.md §5.6 §5.7, developer-s15/s22/s26 logs (DYLD_LIBRARY_PATH pattern)
+
+---
+
+## S39-m7-soak-gate
+
+Files changed:
+- `tests/integration/m7_git_roundtrip.rs` (created) — two `#[ignore]` tests: `m7_git_roundtrip` (AC-M7-26) and `m7_soak_status_check` (AC-M7-25, AC-M7-27)
+- `tests/integration/m7_soak_checklist.md` (created) — 7-day manual soak procedure for hermes-agent
+- `Cargo.toml` — added `[[test]] name = "m7_git_roundtrip"` entry; added `reqwest = { version = "0.12", features = ["json"] }` to `[dev-dependencies]`
+- `Cargo.lock` — updated (reqwest + transitive deps)
+
+Tests added/run:
+- `cargo fmt --all -- --check` → PASS
+- `cargo clippy --all-targets --all-features -- -D warnings` → PASS
+- `cargo nextest run -p cpp_indexer --test m7_git_roundtrip -- --ignored` → 2/2 PASS (both skip cleanly when env vars absent)
+
+Deviations from plan:
+- The daemon worker in `src/bin/daemon.rs` has a `TODO(S36/S37)` placeholder that marks jobs done without running `pipeline::run`. The `m7_git_roundtrip` test targets an external live daemon (not in-process) which is the correct GA gate for AC-M7-26. When the pipeline is wired, the test will exercise end-to-end git clone + indexing without modification.
+- `reqwest` added to dev-dependencies as the HTTP client for out-of-process HTTP tests. Standard choice; no production dependency impact.
+
+Follow-ups:
+- `[tag:sr-dev]` Daemon worker `TODO(S36/S37)` in `src/bin/daemon.rs` must be resolved before the real hermes-agent soak run — without it, the git round-trip test will produce `state=done` jobs with no graph content.
+- `[tag:devops]` Schedule 7-day soak on hermes-agent per `tests/integration/m7_soak_checklist.md` (cron schedule, pass-criteria table, QA_DEFECT tagging if any day fails). Results must be recorded in `test-report.md` per CHARTER I4.
+
+References: plan.md S39 (lines 641-654), requirements.md AC-M7-25/26/27, design.md §2, CHARTER.md §I4

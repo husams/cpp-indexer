@@ -1,0 +1,254 @@
+name: Release
+
+# Triggered exclusively by a semver tag push (e.g., git push origin v1.2.3).
+# Produces: GHCR Docker image + per-platform binary tarballs + GitHub Release.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"  # pre-release: v1.0.0-rc.1
+
+permissions:
+  contents: write    # create GitHub Release + upload assets
+  packages: write    # push to GHCR
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}   # husams/cpp-indexer (lowered by metadata-action)
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ----------------------------------------------------------------
+  # 1. Build native release binaries for Linux (x86_64) and macOS
+  #    (arm64 = macos-latest, Intel = macos-13).
+  # ----------------------------------------------------------------
+  binaries:
+    name: Build binaries (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            os: linux
+          - target: aarch64-apple-darwin
+            runner: macos-latest   # GitHub-hosted arm64 M1 runner
+            os: macos
+          # Intel macOS (uncomment for v1.1):
+          # - target: x86_64-apple-darwin
+          #   runner: macos-13
+          #   os: macos-intel
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install libclang 18 (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-18.list
+          sudo apt-get update -q
+          sudo apt-get install -y libclang-18-dev clang-18
+
+      - name: Install libclang 18 (macOS)
+        if: matrix.os == 'macos'
+        run: brew install llvm@18
+
+      - name: Set LIBCLANG_PATH (Linux)
+        if: matrix.os == 'linux'
+        run: echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> "$GITHUB_ENV"
+
+      - name: Set LIBCLANG_PATH + DYLD_LIBRARY_PATH (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          LLVM_PREFIX="$(brew --prefix llvm@18)"
+          echo "LIBCLANG_PATH=${LLVM_PREFIX}/lib" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=${LLVM_PREFIX}/lib" >> "$GITHUB_ENV"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.target }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.target }}-cargo-release-
+
+      - name: Build release binaries
+        run: |
+          cargo build --release \
+            --bin cxg-index \
+            --bin cxg-resolve-cross-repo \
+            --bin cxg-daemon
+
+      - name: Package tarball
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          TARGET="${{ matrix.target }}"
+          ARCHIVE="cpp-indexer-${TAG}-${TARGET}.tar.gz"
+
+          # Collect binaries (with .exe suffix on Windows if ever added)
+          BIN_DIR="target/release"
+          STAGE_DIR="dist/${TARGET}"
+          mkdir -p "$STAGE_DIR"
+
+          for bin in cxg-index cxg-resolve-cross-repo cxg-daemon; do
+            cp "${BIN_DIR}/${bin}" "$STAGE_DIR/"
+          done
+
+          # Include licence + readme
+          [ -f LICENSE ]    && cp LICENSE    "$STAGE_DIR/"
+          [ -f README.md ]  && cp README.md  "$STAGE_DIR/"
+
+          tar -C dist -czf "$ARCHIVE" "$TARGET"
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-indexer-${{ github.ref_name }}-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------
+  # 2. Build and push the Docker image to GHCR (Linux only).
+  #    Reuses the same Dockerfile that CI smoke-tests on every PR.
+  # ----------------------------------------------------------------
+  image:
+    name: Build + push GHCR image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Tag strategy:
+          #   v1.2.3 tag  → :v1.2.3 (verbatim ref), :1.2.3, :1.2, :1, :latest (stable)
+          #   v1.0.0-rc.1 → :v1.0.0-rc.1, :1.0.0-rc.1 only (no :latest)
+          # type=ref,event=tag preserves the leading "v" so "docker pull :v1.2.3" works.
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the pushed image
+        run: |
+          docker pull ghcr.io/${{ github.repository_owner }}/cpp-indexer:${{ github.ref_name }}
+          docker run --rm \
+            ghcr.io/${{ github.repository_owner }}/cpp-indexer:${{ github.ref_name }} \
+            cxg-index --version
+
+  # ----------------------------------------------------------------
+  # 3. Create the GitHub Release with binary tarballs attached.
+  #    Runs after both jobs succeed.
+  # ----------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [binaries, image]
+
+    steps:
+      - name: Checkout (for release notes context)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed for --generate-notes to walk history
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: "cpp-indexer-*"
+          merge-multiple: true
+
+      - name: List downloaded artifacts
+        run: ls -lh dist/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: cpp-indexer ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            ### Docker (recommended)
+
+            ```bash
+            docker pull ghcr.io/husams/cpp-indexer:${{ github.ref_name }}
+
+            # Run the daemon
+            docker run -d -p 7878:7878 \
+              -e CXG_API_TOKEN=<your-token> \
+              -v /var/lib/cxg-daemon:/var/lib/cxg-daemon \
+              ghcr.io/husams/cpp-indexer:${{ github.ref_name }}
+
+            # One-shot indexer
+            docker run --rm \
+              -v /path/to/repo:/repo \
+              ghcr.io/husams/cpp-indexer:${{ github.ref_name }} \
+              cxg-index /repo
+            ```
+
+            ### Binary tarballs
+
+            Download the tarball for your platform from the Assets section below,
+            then untar and place the binaries on your `PATH`.
+
+            **Requires libclang-18 installed on the host.** See
+            [docs/runbooks/libclang-setup.md](https://github.com/husams/cpp-indexer/blob/main/docs/runbooks/libclang-setup.md).
+
+            ```bash
+            tar -xzf cpp-indexer-${{ github.ref_name }}-<target>.tar.gz
+            export PATH="$PWD/<target>:$PATH"
+            cxg-index --version
+            ```
+
+            ### Note: GHCR image visibility
+
+            On first release, the GHCR package may default to private.
+            If you receive a 403 when pulling, toggle it to public at:
+            `https://github.com/users/husams/packages/container/cpp-indexer/settings`
+
+          files: dist/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

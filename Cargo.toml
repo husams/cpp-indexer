@@ -110,6 +110,11 @@ name = "parallel_phase1"
 path = "tests/integration/parallel_phase1.rs"
 required-features = []
 
+[[test]]
+name = "macro_expands_to_bound"
+path = "tests/integration/macro_expands_to_bound.rs"
+required-features = ["test-mock"]
+
 [[bench]]
 name = "sink_throughput"
 path = "benches/sink_throughput.rs"

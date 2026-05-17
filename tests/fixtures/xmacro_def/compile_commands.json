@@ -1,0 +1,12 @@
+[
+  {
+    "directory": "/Users/husam/workspace/cpp-indexer/tests/fixtures/xmacro_def",
+    "file": "/Users/husam/workspace/cpp-indexer/tests/fixtures/xmacro_def/main.cpp",
+    "arguments": [
+      "clang++",
+      "-std=c++14",
+      "-I/Users/husam/workspace/cpp-indexer/tests/fixtures/xmacro_def",
+      "/Users/husam/workspace/cpp-indexer/tests/fixtures/xmacro_def/main.cpp"
+    ]
+  }
+]
