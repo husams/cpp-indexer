@@ -24,7 +24,7 @@ path = "src/bin/daemon.rs"
 test-mock = []
 
 [dependencies]
-clang = { version = "2", features = ["clang_6_0"] }
+clang = { version = "2", features = ["clang_3_6", "clang_6_0"] }
 rayon = "1"
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
@@ -119,6 +119,7 @@ required-features = ["test-mock"]
 name = "sink_throughput"
 path = "benches/sink_throughput.rs"
 harness = false
+required-features = ["test-mock"]
 
 [[bench]]
 name = "llvm_index"
@@ -158,3 +159,52 @@ required-features = ["test-mock"]
 [[test]]
 name = "m7_git_roundtrip"
 path = "tests/integration/m7_git_roundtrip.rs"
+
+[[test]]
+name = "schema_version_bump"
+path = "tests/schema_version_bump.rs"
+required-features = ["test-mock"]
+
+[[test]]
+name = "arrow_roundtrip"
+path = "tests/integration/arrow_roundtrip.rs"
+
+[[test]]
+name = "callable_extraction"
+path = "tests/visit/callable_extraction.rs"
+required-features = []
+
+[[test]]
+name = "template_extraction"
+path = "tests/visit/template_extraction.rs"
+required-features = []
+
+[[test]]
+name = "access_classifier"
+path = "tests/visit/access_classifier.rs"
+required-features = []
+
+[[test]]
+name = "access_classifier_boundary"
+path = "tests/visit/access_classifier_boundary.rs"
+required-features = []
+
+[[test]]
+name = "cross_repo_access_mirror"
+path = "tests/integration/cross_repo_access_mirror.rs"
+required-features = ["test-mock"]
+
+[[test]]
+name = "neo4j_indexes"
+path = "tests/integration/neo4j_indexes.rs"
+required-features = []
+
+[[test]]
+name = "indradb_properties"
+path = "tests/integration/indradb_properties.rs"
+required-features = []
+
+[[test]]
+name = "sink_parity"
+path = "tests/integration/sink_parity.rs"
+required-features = []

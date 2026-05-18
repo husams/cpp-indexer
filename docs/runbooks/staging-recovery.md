@@ -294,3 +294,104 @@ If re-index fails after following this runbook:
 3. Verify the sink backend is reachable: for Neo4j, `bolt://host:7687`; for
    IndraDB, the gRPC endpoint configured in `[sink.indradb]`.
 4. Open an issue with the collected log and metrics snapshot.
+
+---
+
+## 6. Full Re-Index Against v5 Schema (M8 Upgrade Recipe)
+
+**When to use:** upgrading from any pre-v5 graph (schema-version `cxg-schema-v4`
+or earlier) to `cxg-schema-v5`. The v5 promotion of 10 node fields and 2 edge
+fields is incompatible with existing graphs — there is no automatic migration
+(ADR-11). Old data must be wiped and re-indexed.
+
+### 6.1 Confirm the current schema version
+
+```bash
+# Neo4j: check the SchemaVersion node
+NEO4J_URI="bolt://127.0.0.1:7687"
+cypher-shell -a "$NEO4J_URI" -u neo4j -p "$NEO4J_PASSWORD" \
+  "MATCH (v:SchemaVersion {id: 'singleton'}) RETURN v.version AS version"
+# Expected for v5: cxg-schema-v5
+```
+
+If the result is not `cxg-schema-v5`, proceed with this recipe.
+
+### 6.2 Stop the daemon and clear staging
+
+```bash
+sudo systemctl stop cxg-daemon
+
+STAGE=/var/lib/cxg-daemon/stage
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+```
+
+### 6.3 Wipe the old graph (all repos)
+
+```bash
+export CXG_TOKEN="<your-api-bearer-token>"
+export DAEMON_URL="http://127.0.0.1:7878"
+
+# Derive the confirm token for a full reset
+TOKEN=$(printf '%s' 'ALL' | sha256sum | awk '{print $1}')
+# On macOS: TOKEN=$(printf '%s' 'ALL' | shasum -a 256 | awk '{print $1}')
+
+curl -s -X POST "$DAEMON_URL/v1/reset" \
+  -H "Authorization: Bearer $CXG_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"target\": \"all\", \"confirm_token\": \"$TOKEN\"}" \
+  -w "\nHTTP %{http_code}\n"
+# Expected: HTTP 204
+```
+
+Alternatively, for Neo4j, wipe directly if the daemon is unreachable:
+
+```bash
+cypher-shell -a "$NEO4J_URI" -u neo4j -p "$NEO4J_PASSWORD" \
+  "MATCH (n) DETACH DELETE n"
+```
+
+### 6.4 Start the daemon and trigger re-index
+
+```bash
+sudo systemctl start cxg-daemon
+systemctl is-active cxg-daemon   # expected: active (running)
+
+# Submit an ingest for each repo (repeat per repo)
+REPO_PATH="/workspace/my-repo"
+curl -s -X POST "$DAEMON_URL/v1/ingest" \
+  -H "Authorization: Bearer $CXG_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"source\": {\"path\": \"$REPO_PATH\"}}" \
+  | jq .
+# Note the returned job_id and poll until state == "done" (see §4.1)
+```
+
+### 6.5 Verify v5 schema and promoted fields
+
+After the re-index completes, confirm that promoted properties are present:
+
+```bash
+# Check schema version node
+cypher-shell -a "$NEO4J_URI" -u neo4j -p "$NEO4J_PASSWORD" \
+  "MATCH (v:SchemaVersion {id: 'singleton'}) RETURN v.version"
+# Expected: cxg-schema-v5
+
+# Spot-check a promoted field (return_type on FUNCTION nodes)
+cypher-shell -a "$NEO4J_URI" -u neo4j -p "$NEO4J_PASSWORD" \
+  "MATCH (n:Node {kind: 'FUNCTION'}) WHERE n.return_type IS NOT NULL RETURN count(n) AS cnt"
+# Expected: cnt > 0 for repos with functions
+
+# Spot-check USES classifier field
+cypher-shell -a "$NEO4J_URI" -u neo4j -p "$NEO4J_PASSWORD" \
+  "MATCH ()-[r:EDGE {kind:'USES'}]->() WHERE r.source_association_type IS NOT NULL RETURN count(r) AS cnt"
+# Expected: cnt > 0 for repos with USES edges
+
+# Verify M8 covering indexes are present
+cypher-shell -a "$NEO4J_URI" -u neo4j -p "$NEO4J_PASSWORD" \
+  "SHOW INDEXES WHERE name IN ['node_return_type_idx','node_is_virtual_idx','node_is_static_idx','node_kind_return_type_idx'] RETURN name, state"
+# Expected: all 4 indexes in state ONLINE
+```
+
+See `docs/schema/SCHEMA.md` for the full promoted-field reference and example
+queries (Q1, Q5).

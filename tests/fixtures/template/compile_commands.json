@@ -1,0 +1,7 @@
+[
+  {
+    "directory": "/Users/husam/workspace/cpp-indexer/tests/fixtures/template",
+    "file": "/Users/husam/workspace/cpp-indexer/tests/fixtures/template/template.cpp",
+    "arguments": ["clang++", "-std=c++14", "-I/Users/husam/workspace/cpp-indexer/tests/fixtures/template", "/Users/husam/workspace/cpp-indexer/tests/fixtures/template/template.cpp"]
+  }
+]

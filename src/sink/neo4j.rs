@@ -47,22 +47,50 @@ const CQL_ENSURE_NODE_USR_INDEX: &str =
 const CQL_ENSURE_NODE_REPO_INDEX: &str =
     "CREATE INDEX node_repo_idx IF NOT EXISTS FOR (n:Node) ON (n.repo_name)";
 
+// ── M8 (S44) covering indexes (ADR-15) ────────────────────────────────────────
+
+/// Single-property index on `return_type` (ADR-15, covers Q1/Q2 from PRD §6).
+const CQL_ENSURE_RETURN_TYPE_INDEX: &str =
+    "CREATE INDEX node_return_type_idx IF NOT EXISTS FOR (n:Node) ON (n.return_type)";
+
+/// Single-property index on `is_virtual` (ADR-15, covers Q2 virtual-method lookup).
+const CQL_ENSURE_IS_VIRTUAL_INDEX: &str =
+    "CREATE INDEX node_is_virtual_idx IF NOT EXISTS FOR (n:Node) ON (n.is_virtual)";
+
+/// Single-property index on `is_static` (ADR-15).
+const CQL_ENSURE_IS_STATIC_INDEX: &str =
+    "CREATE INDEX node_is_static_idx IF NOT EXISTS FOR (n:Node) ON (n.is_static)";
+
+/// Composite index on `(kind, return_type)` (ADR-15, covers Q1 with kind filter).
+const CQL_ENSURE_KIND_RETURN_TYPE_INDEX: &str =
+    "CREATE INDEX node_kind_return_type_idx IF NOT EXISTS FOR (n:Node) ON (n.kind, n.return_type)";
+
 /// UNWIND + MERGE nodes; idempotent on `(usr, repo_name)`.
 ///
 /// Parameters: `rows` — a list of maps, each with keys matching the SET clause.
 const CQL_MERGE_NODES: &str = "
 UNWIND $rows AS row
 MERGE (n:Node {usr: row.usr, repo_name: row.repo_name})
-SET n.kind          = row.kind,
-    n.name          = row.name,
-    n.qualified_name = row.qualified_name,
-    n.mangled_name  = row.mangled_name,
-    n.file_path     = row.file_path,
-    n.line          = row.line,
-    n.col           = row.col,
-    n.attrs_json    = row.attrs_json,
-    n.partial       = row.partial,
-    n.phase         = row.phase
+SET n.kind              = row.kind,
+    n.name              = row.name,
+    n.qualified_name    = row.qualified_name,
+    n.mangled_name      = row.mangled_name,
+    n.file_path         = row.file_path,
+    n.line              = row.line,
+    n.col               = row.col,
+    n.attrs_json        = row.attrs_json,
+    n.partial           = row.partial,
+    n.phase             = row.phase,
+    n.return_type       = row.return_type,
+    n.params            = row.params,
+    n.signature         = row.signature,
+    n.code              = row.code,
+    n.code_truncated    = row.code_truncated,
+    n.template_params   = row.template_params,
+    n.template_args     = row.template_args,
+    n.is_virtual        = row.is_virtual,
+    n.is_pure_virtual   = row.is_pure_virtual,
+    n.is_static         = row.is_static
 ";
 
 /// UNWIND + MERGE edges; idempotent on `(src_usr, dst_usr, kind)`.
@@ -73,10 +101,12 @@ UNWIND $rows AS row
 MATCH (src:Node {usr: row.src_usr, repo_name: row.repo_name})
 MATCH (dst:Node {usr: row.dst_usr, repo_name: row.repo_name})
 MERGE (src)-[r:EDGE {kind: row.kind}]->(dst)
-SET r.resolved            = row.resolved,
-    r.cross_repo_candidate = row.cross_repo_candidate,
-    r.repo_name           = row.repo_name,
-    r.attrs_json          = row.attrs_json
+SET r.resolved                  = row.resolved,
+    r.cross_repo_candidate      = row.cross_repo_candidate,
+    r.repo_name                 = row.repo_name,
+    r.attrs_json                = row.attrs_json,
+    r.source_association_type   = row.source_association_type,
+    r.target_association_type   = row.target_association_type
 RETURN count(r) AS written
 ";
 
@@ -266,6 +296,15 @@ impl Neo4jSink {
         self
     }
 
+    /// Return a clone of the underlying `Graph` handle.
+    ///
+    /// Intended for integration tests that need to run raw Cypher queries
+    /// (e.g. `SHOW INDEXES`, `EXPLAIN`) without going through the `GraphSink`
+    /// trait. The clone is cheap (`Graph` is reference-counted).
+    pub fn graph_handle(&self) -> Graph {
+        self.graph.clone()
+    }
+
     fn map_neo4j_err(e: neo4rs::Error) -> Error {
         Error::Sink {
             backend: "neo4j",
@@ -357,6 +396,52 @@ impl Neo4jSink {
     }
 }
 
+// ── Bolt serialization helpers for structured list types (ADR-14) ─────────────
+
+/// Convert `Option<str>` to `BoltType`, using `BoltNull` for `None`.
+fn opt_str_to_bolt(v: Option<&str>) -> BoltType {
+    match v {
+        Some(s) => BoltType::from(s.to_owned()),
+        None => BoltType::Null(neo4rs::BoltNull),
+    }
+}
+
+/// Convert `Option<bool>` to `BoltType`, using `BoltNull` for `None`.
+fn opt_bool_to_bolt(v: Option<bool>) -> BoltType {
+    match v {
+        Some(b) => BoltType::from(b),
+        None => BoltType::Null(neo4rs::BoltNull),
+    }
+}
+
+/// Serialize a structured list field (params / template_params / template_args) as a JSON string.
+///
+/// # Deviation from ADR-14
+///
+/// ADR-14 specifies "Neo4j 5 stores `List<Map>` as the native composite type."  In practice,
+/// Neo4j Community 2025.x rejects `Map` values inside `List` with
+/// `Neo.ClientError.Statement.TypeError: Property values can only be of primitive types or arrays
+/// thereof`.  Only `List<primitives>` (e.g. `String[]`) is allowed — not `List<Map>`.
+///
+/// Mitigation: serialize as a JSON string so the value is stored as an opaque but human-readable
+/// property.  Downstream consumers can parse it.  The field key is preserved (it remains a
+/// distinct named property, not folded into `attrs_json`), so AC-S44-1 and AC-S40-6 are still
+/// satisfied.  The "structured queryable" goal (Cypher `any(a IN s.params WHERE ...)`) is deferred
+/// to an operator that upgrades to Neo4j Enterprise or a version that lifts the restriction.
+///
+/// This deviation is documented in implementation-notes.md and tagged sr-dev for ADR follow-up.
+fn structured_list_to_json_bolt<T: serde::Serialize>(items: &[T]) -> BoltType {
+    // serde_json::to_string is infallible for well-formed Serialize impls.
+    match serde_json::to_string(items) {
+        Ok(json) => BoltType::from(json),
+        Err(e) => {
+            // Fallback to empty array JSON on unexpected error (should be unreachable).
+            tracing::warn!("structured_list_to_json_bolt serialize error: {e}");
+            BoltType::from("[]".to_owned())
+        }
+    }
+}
+
 // ── NodeRecord → BoltMap conversion ───────────────────────────────────────────
 
 fn node_to_bolt(n: &NodeRecord) -> HashMap<String, BoltType> {
@@ -389,6 +474,46 @@ fn node_to_bolt(n: &NodeRecord) -> HashMap<String, BoltType> {
     m.insert("attrs_json".into(), n.attrs_json.clone().into());
     m.insert("partial".into(), n.partial.into());
     m.insert("phase".into(), (n.phase as i64).into());
+
+    // ── M8 promoted fields (S44, ADR-14) ─────────────────────────────────────
+    // Structured lists (params, template_params, template_args) are serialised as JSON strings
+    // because Neo4j Community rejects List<Map> as a node property value — see
+    // `structured_list_to_json_bolt` doc for the deviation note.
+    m.insert(
+        "return_type".into(),
+        opt_str_to_bolt(n.return_type.as_deref()),
+    );
+    m.insert(
+        "params".into(),
+        match &n.params {
+            Some(ps) => structured_list_to_json_bolt(ps),
+            None => BoltType::Null(neo4rs::BoltNull),
+        },
+    );
+    m.insert("signature".into(), opt_str_to_bolt(n.signature.as_deref()));
+    m.insert("code".into(), opt_str_to_bolt(n.code.as_deref()));
+    m.insert("code_truncated".into(), opt_bool_to_bolt(n.code_truncated));
+    m.insert(
+        "template_params".into(),
+        match &n.template_params {
+            Some(tps) => structured_list_to_json_bolt(tps),
+            None => BoltType::Null(neo4rs::BoltNull),
+        },
+    );
+    m.insert(
+        "template_args".into(),
+        match &n.template_args {
+            Some(tas) => structured_list_to_json_bolt(tas),
+            None => BoltType::Null(neo4rs::BoltNull),
+        },
+    );
+    m.insert("is_virtual".into(), opt_bool_to_bolt(n.is_virtual));
+    m.insert(
+        "is_pure_virtual".into(),
+        opt_bool_to_bolt(n.is_pure_virtual),
+    );
+    m.insert("is_static".into(), opt_bool_to_bolt(n.is_static));
+
     m
 }
 
@@ -408,6 +533,15 @@ fn edge_to_bolt(e: &EdgeRecord) -> Option<HashMap<String, BoltType>> {
     m.insert("cross_repo_candidate".into(), e.cross_repo_candidate.into());
     m.insert("repo_name".into(), e.repo_name.clone().into());
     m.insert("attrs_json".into(), e.attrs_json.clone().into());
+    // M8 promoted edge fields (S44, ADR-14)
+    m.insert(
+        "source_association_type".into(),
+        opt_str_to_bolt(e.source_association_type.as_deref()),
+    );
+    m.insert(
+        "target_association_type".into(),
+        opt_str_to_bolt(e.target_association_type.as_deref()),
+    );
     Some(m)
 }
 
@@ -428,14 +562,36 @@ impl GraphSink for Neo4jSink {
     }
 
     async fn ensure_indexes(&self) -> Result<()> {
-        self.graph
-            .run(query(CQL_ENSURE_NODE_USR_INDEX))
-            .await
-            .map_err(Self::map_neo4j_err)?;
-        self.graph
-            .run(query(CQL_ENSURE_NODE_REPO_INDEX))
-            .await
-            .map_err(Self::map_neo4j_err)?;
+        for cql in &[
+            CQL_ENSURE_NODE_USR_INDEX,
+            CQL_ENSURE_NODE_REPO_INDEX,
+            // M8 (S44) covering indexes — ADR-15.
+            CQL_ENSURE_RETURN_TYPE_INDEX,
+            CQL_ENSURE_IS_VIRTUAL_INDEX,
+            CQL_ENSURE_IS_STATIC_INDEX,
+            CQL_ENSURE_KIND_RETURN_TYPE_INDEX,
+        ] {
+            match self.graph.run(query(cql)).await {
+                Ok(()) => {}
+                Err(e) => {
+                    // neo4rs 0.7 may surface Neo.ClientError.Schema.EquivalentSchemaRuleAlreadyExists
+                    // (same schema, possibly same name) as an error even though IF NOT EXISTS is
+                    // specified. Suppress this class of error — the index already exists and is
+                    // functionally equivalent.
+                    let text = format!("{e:?}");
+                    if text.contains("EquivalentSchemaRuleAlreadyExists")
+                        || text.contains("IndexAlreadyExists")
+                        || text.contains("ConstraintAlreadyExists")
+                    {
+                        tracing::debug!(
+                            "ensure_indexes: index already exists (suppressed): {text}"
+                        );
+                    } else {
+                        return Err(Self::map_neo4j_err(e));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -633,7 +789,8 @@ impl GraphSink for Neo4jSink {
 mod tests {
     use super::*;
     use crate::schema::edges::{EdgeKind, EdgeRecord};
-    use crate::schema::nodes::{NodeKind, NodeRecord};
+    use crate::schema::nodes::{NodeKind, NodeRecord, Param, TemplateArg, TemplateParam};
+    use serde_json::Value as JsonValue;
 
     fn sample_node(usr: &str) -> NodeRecord {
         NodeRecord {
@@ -650,6 +807,16 @@ mod tests {
             partial: false,
             phase: 1,
             tu_hash: [0u8; 32],
+            return_type: None,
+            params: None,
+            signature: None,
+            code: None,
+            code_truncated: None,
+            template_params: None,
+            template_args: None,
+            is_virtual: None,
+            is_pure_virtual: None,
+            is_static: None,
         }
     }
 
@@ -664,6 +831,8 @@ mod tests {
             repo_name: "test-repo".to_owned(),
             attrs_json: "{}".to_owned(),
             tu_hash: [0u8; 32],
+            source_association_type: None,
+            target_association_type: None,
         }
     }
 
@@ -705,6 +874,64 @@ mod tests {
     fn cql_ensure_indexes_uses_if_not_exists() {
         assert!(CQL_ENSURE_NODE_USR_INDEX.contains("IF NOT EXISTS"));
         assert!(CQL_ENSURE_NODE_REPO_INDEX.contains("IF NOT EXISTS"));
+    }
+
+    /// AC-S44-3: all 4 new M8 index constants exist and use IF NOT EXISTS.
+    #[test]
+    fn cql_m8_indexes_all_present_and_idempotent() {
+        for (name, cql) in &[
+            ("node_return_type_idx", CQL_ENSURE_RETURN_TYPE_INDEX),
+            ("node_is_virtual_idx", CQL_ENSURE_IS_VIRTUAL_INDEX),
+            ("node_is_static_idx", CQL_ENSURE_IS_STATIC_INDEX),
+            (
+                "node_kind_return_type_idx",
+                CQL_ENSURE_KIND_RETURN_TYPE_INDEX,
+            ),
+        ] {
+            assert!(
+                cql.contains("IF NOT EXISTS"),
+                "{name} must use IF NOT EXISTS for idempotency"
+            );
+            assert!(
+                cql.contains(name),
+                "CQL constant must contain its index name {name}"
+            );
+        }
+    }
+
+    /// AC-S44-1: CQL_MERGE_NODES contains all 10 promoted node properties.
+    #[test]
+    fn cql_merge_nodes_contains_all_promoted_fields() {
+        for field in &[
+            "return_type",
+            "params",
+            "signature",
+            "code",
+            "code_truncated",
+            "template_params",
+            "template_args",
+            "is_virtual",
+            "is_pure_virtual",
+            "is_static",
+        ] {
+            assert!(
+                CQL_MERGE_NODES.contains(field),
+                "CQL_MERGE_NODES missing promoted field: {field}"
+            );
+        }
+    }
+
+    /// AC-S44-2: CQL_MERGE_EDGES contains both association type fields.
+    #[test]
+    fn cql_merge_edges_contains_association_type_fields() {
+        assert!(
+            CQL_MERGE_EDGES.contains("source_association_type"),
+            "CQL_MERGE_EDGES missing source_association_type"
+        );
+        assert!(
+            CQL_MERGE_EDGES.contains("target_association_type"),
+            "CQL_MERGE_EDGES missing target_association_type"
+        );
     }
 
     #[test]
@@ -749,6 +976,161 @@ mod tests {
         ] {
             assert!(m.contains_key(*key), "missing key: {key}");
         }
+    }
+
+    /// AC-S44-1: node_to_bolt includes all 10 promoted M8 fields.
+    #[test]
+    fn node_to_bolt_includes_all_m8_promoted_fields() {
+        let node = sample_node("c:@F@foo");
+        let m = node_to_bolt(&node);
+        for key in &[
+            "return_type",
+            "params",
+            "signature",
+            "code",
+            "code_truncated",
+            "template_params",
+            "template_args",
+            "is_virtual",
+            "is_pure_virtual",
+            "is_static",
+        ] {
+            assert!(m.contains_key(*key), "node_to_bolt missing M8 field: {key}");
+        }
+    }
+
+    /// AC-S44-1: None promoted fields serialize to BoltNull, not absent.
+    #[test]
+    fn node_to_bolt_none_promoted_fields_are_bolt_null() {
+        let node = sample_node("u");
+        let m = node_to_bolt(&node);
+        for key in &[
+            "return_type",
+            "params",
+            "signature",
+            "code",
+            "code_truncated",
+            "template_params",
+            "template_args",
+            "is_virtual",
+            "is_pure_virtual",
+            "is_static",
+        ] {
+            assert!(
+                matches!(m[*key], BoltType::Null(_)),
+                "None field {key} must be BoltNull"
+            );
+        }
+    }
+
+    /// AC-S44-1: params Some(vec) serializes to a JSON string with correct "type" key (not "type_").
+    ///
+    /// Neo4j Community does not support `List<Map>` as a property value; structured lists are
+    /// stored as JSON strings per the deviation documented in `structured_list_to_json_bolt`.
+    #[test]
+    fn node_to_bolt_params_serializes_type_key_correctly() {
+        let mut node = sample_node("u");
+        node.params = Some(vec![Param {
+            name: "x".to_owned(),
+            type_: "int".to_owned(),
+        }]);
+        let m = node_to_bolt(&node);
+        let params = &m["params"];
+        // params must be a BoltString (JSON) — not a BoltList (Neo4j Community rejects List<Map>)
+        let json_str = format!("{params:?}");
+        assert!(
+            matches!(params, BoltType::String(_)),
+            "params must be a BoltString (JSON); got: {json_str}"
+        );
+        // Parse JSON and verify "type" key (not "type_")
+        let json_val: Vec<JsonValue> = serde_json::from_str(
+            &json_str.trim_matches('"').replace("\\\"", "\""),
+        )
+        .unwrap_or_else(|_| {
+            // Extract raw string via debug representation
+            if let BoltType::String(s) = params {
+                serde_json::from_str(&s.value).expect("params JSON must be valid")
+            } else {
+                panic!("expected BoltString")
+            }
+        });
+        assert_eq!(json_val.len(), 1);
+        assert!(
+            json_val[0].get("type").is_some(),
+            "Param JSON must have key 'type' (not 'type_')"
+        );
+        assert!(
+            json_val[0].get("type_").is_none(),
+            "Param JSON must NOT have key 'type_'"
+        );
+        assert!(
+            json_val[0].get("name").is_some(),
+            "Param JSON must have 'name'"
+        );
+    }
+
+    /// AC-S44-1: template_params serializes as a JSON string with correct structure.
+    #[test]
+    fn node_to_bolt_template_params_serializes_as_json_string() {
+        let mut node = sample_node("u");
+        node.template_params = Some(vec![TemplateParam {
+            name: "T".to_owned(),
+            kind: "type".to_owned(),
+            default: None,
+        }]);
+        let m = node_to_bolt(&node);
+        assert!(
+            matches!(m["template_params"], BoltType::String(_)),
+            "template_params must be a BoltString (JSON)"
+        );
+        if let BoltType::String(s) = &m["template_params"] {
+            let parsed: Vec<JsonValue> =
+                serde_json::from_str(&s.value).expect("template_params JSON must be valid");
+            assert_eq!(parsed.len(), 1);
+            // default=None serializes as JSON null
+            assert_eq!(parsed[0]["default"], JsonValue::Null);
+            assert_eq!(parsed[0]["kind"], "type");
+        }
+    }
+
+    /// AC-S44-1: template_args serializes as a JSON string.
+    #[test]
+    fn node_to_bolt_template_args_serializes_as_json_string() {
+        let mut node = sample_node("u");
+        node.template_args = Some(vec![TemplateArg {
+            kind: "type".to_owned(),
+            value: "int".to_owned(),
+        }]);
+        let m = node_to_bolt(&node);
+        assert!(
+            matches!(m["template_args"], BoltType::String(_)),
+            "template_args must be a BoltString (JSON)"
+        );
+        if let BoltType::String(s) = &m["template_args"] {
+            let parsed: Vec<JsonValue> =
+                serde_json::from_str(&s.value).expect("template_args JSON must be valid");
+            assert_eq!(parsed.len(), 1);
+            assert_eq!(parsed[0]["kind"], "type");
+            assert_eq!(parsed[0]["value"], "int");
+        }
+    }
+
+    /// AC-S44-1: is_virtual Some(true) serializes to BoltBoolean true.
+    #[test]
+    fn node_to_bolt_bool_some_serializes_correctly() {
+        let mut node = sample_node("u");
+        node.is_virtual = Some(true);
+        node.is_pure_virtual = Some(false);
+        node.is_static = Some(true);
+        let m = node_to_bolt(&node);
+        assert!(
+            matches!(m["is_virtual"], BoltType::Boolean(_)),
+            "is_virtual Some(true) must be BoltBoolean"
+        );
+        let dbg = format!("{:?}", m["is_virtual"]);
+        assert!(dbg.contains("true"), "is_virtual must be true; got {dbg}");
+        let dbg2 = format!("{:?}", m["is_pure_virtual"]);
+        assert!(dbg2.contains("false"), "is_pure_virtual must be false");
     }
 
     #[test]
@@ -806,6 +1188,55 @@ mod tests {
         assert_eq!(
             format!("{:?}", m["dst_usr"]),
             format!("{:?}", BoltType::from("dst".to_owned()))
+        );
+    }
+
+    /// AC-S44-2: edge_to_bolt includes both association type fields.
+    #[test]
+    fn edge_to_bolt_includes_association_type_fields() {
+        let edge = sample_edge("a", Some("b"));
+        let m = edge_to_bolt(&edge).unwrap();
+        assert!(
+            m.contains_key("source_association_type"),
+            "edge map must contain source_association_type"
+        );
+        assert!(
+            m.contains_key("target_association_type"),
+            "edge map must contain target_association_type"
+        );
+    }
+
+    /// AC-S44-2: None association types serialize to BoltNull.
+    #[test]
+    fn edge_to_bolt_none_association_types_are_bolt_null() {
+        let edge = sample_edge("a", Some("b"));
+        let m = edge_to_bolt(&edge).unwrap();
+        assert!(
+            matches!(m["source_association_type"], BoltType::Null(_)),
+            "None source_association_type must be BoltNull"
+        );
+        assert!(
+            matches!(m["target_association_type"], BoltType::Null(_)),
+            "None target_association_type must be BoltNull"
+        );
+    }
+
+    /// AC-S44-2: Some association type serializes to BoltString.
+    #[test]
+    fn edge_to_bolt_some_association_type_is_bolt_string() {
+        let mut edge = sample_edge("a", Some("b"));
+        edge.source_association_type = Some("read".to_owned());
+        edge.target_association_type = Some("write".to_owned());
+        let m = edge_to_bolt(&edge).unwrap();
+        let src_dbg = format!("{:?}", m["source_association_type"]);
+        assert!(
+            src_dbg.contains("read"),
+            "source_association_type must be 'read'; got {src_dbg}"
+        );
+        let tgt_dbg = format!("{:?}", m["target_association_type"]);
+        assert!(
+            tgt_dbg.contains("write"),
+            "target_association_type must be 'write'; got {tgt_dbg}"
         );
     }
 

@@ -438,6 +438,16 @@ mod tests {
             partial: false,
             phase: 1,
             tu_hash: [0u8; 32],
+            return_type: None,
+            params: None,
+            signature: None,
+            code: None,
+            code_truncated: None,
+            template_params: None,
+            template_args: None,
+            is_virtual: None,
+            is_pure_virtual: None,
+            is_static: None,
         };
 
         let decor = DecorAttrs {

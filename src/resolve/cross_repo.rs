@@ -371,6 +371,10 @@ async fn materialise_external_refs(
                             repo_name: edge.repo_name.clone(),
                             attrs_json: via_json,
                             tu_hash: edge.tu_hash,
+                            // M8: Mirror USES classification onto EXTERNAL_REF (ADR-13, S43).
+                            // Populated by S43; None here until access classifier is wired.
+                            source_association_type: edge.source_association_type.clone(),
+                            target_association_type: edge.target_association_type.clone(),
                         });
                         stats.external_refs_written += 1;
                     }

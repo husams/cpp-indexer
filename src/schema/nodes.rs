@@ -136,9 +136,50 @@ impl std::fmt::Display for NodeKind {
     }
 }
 
+/// A function parameter extracted from a FUNCTION or METHOD node (ADR-14).
+///
+/// `type_` is renamed to `"type"` on the wire (JSON / Arrow / Bolt / IndraDB) because `type` is
+/// a Rust keyword; `#[serde(rename = "type")]` handles the JSON boundary.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Param {
+    /// Parameter name as it appears in source.
+    pub name: String,
+    /// Display type name as returned by libclang (e.g. `"int"`, `"const std::string &"`).
+    #[serde(rename = "type")]
+    pub type_: String,
+}
+
+/// A template parameter extracted from a TEMPLATE_DECL node (ADR-14).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TemplateParam {
+    /// Parameter name as it appears in source (e.g. `"T"`, `"N"`).
+    pub name: String,
+    /// Parameter kind: `"type"`, `"non_type"`, or `"template"`.
+    pub kind: String,
+    /// Default argument expression, if present (e.g. `"int"`, `"0"`).
+    pub default: Option<String>,
+}
+
+/// A template argument extracted from a SPECIALIZATION node (ADR-14).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TemplateArg {
+    /// Argument kind: `"type"`, `"integral"`, `"template"`, or `"expression"`.
+    pub kind: String,
+    /// Argument value as a display string (e.g. `"int"`, `"42"`).
+    pub value: String,
+}
+
 /// A single node record, matching the `nodes.parquet` schema from ADR-3.
 ///
 /// Optional fields use `Option<T>` to map to nullable Arrow columns.
+///
+/// M8 (S40): ten new optional columns promoted from `attrs_json` per ADR-11. None of these
+/// are dual-written into `attrs_json` (AC-S40-6). Applicable kinds per design.md §3.2:
+/// - `return_type`, `params`, `signature`, `code`, `code_truncated`: FUNCTION, METHOD
+/// - `is_static`: FUNCTION, METHOD
+/// - `template_params`: TEMPLATE_DECL
+/// - `template_args`: SPECIALIZATION
+/// - `is_virtual`, `is_pure_virtual`: METHOD only
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NodeRecord {
     /// Global primary key (from `clang_getCursorUSR`). Never empty.
@@ -159,7 +200,8 @@ pub struct NodeRecord {
     pub col: Option<u32>,
     /// Repository name from `[repo].name` in the config.
     pub repo_name: String,
-    /// Per-kind extra attributes serialised as canonical JSON (virtual, scoped, template_args…).
+    /// Per-kind extra attributes serialised as canonical JSON (long-tail bag; promoted fields
+    /// MUST NOT appear here — see AC-S40-6 and ADR-11 §3).
     pub attrs_json: String,
     /// `true` when the TU this node came from had libclang parse errors.
     pub partial: bool,
@@ -167,6 +209,32 @@ pub struct NodeRecord {
     pub phase: u8,
     /// Blake3 hash of `(source_bytes, args_string)` for the originating TU.
     pub tu_hash: [u8; 32],
+
+    // ── M8 promoted fields (S40) ─────────────────────────────────────────────
+    /// Return type display string; `Some` for FUNCTION/METHOD, `None` for all other kinds.
+    pub return_type: Option<String>,
+    /// Parameter list; `Some` for FUNCTION/METHOD, `None` for all other kinds.
+    /// An empty `Vec` means a function with no parameters (distinct from `None`).
+    pub params: Option<Vec<Param>>,
+    /// Function signature string (e.g. `"void(int, const char*) const"`);
+    /// `Some` for FUNCTION/METHOD, `None` otherwise.
+    pub signature: Option<String>,
+    /// Verbatim source snippet for the declaration body, capped at 32 KiB (ADR-12).
+    /// `None` when the body exceeds the cap or the kind is not FUNCTION/METHOD.
+    pub code: Option<String>,
+    /// `Some(true)` when the body was truncated; `Some(false)` when it fits within the cap.
+    /// `None` for kinds where `code` is not extracted.
+    pub code_truncated: Option<bool>,
+    /// Template parameter list; `Some` for TEMPLATE_DECL, `None` otherwise.
+    pub template_params: Option<Vec<TemplateParam>>,
+    /// Template argument list; `Some` for SPECIALIZATION, `None` otherwise.
+    pub template_args: Option<Vec<TemplateArg>>,
+    /// `true` when the method is declared `virtual`; `None` for non-METHOD kinds.
+    pub is_virtual: Option<bool>,
+    /// `true` when the method is pure virtual (`= 0`); `None` for non-METHOD kinds.
+    pub is_pure_virtual: Option<bool>,
+    /// `true` when the function/method is declared `static`; `None` for other kinds.
+    pub is_static: Option<bool>,
 }
 
 #[cfg(test)]

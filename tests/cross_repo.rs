@@ -117,6 +117,16 @@ fn make_node(usr: &str, repo: &str) -> NodeRecord {
         partial: false,
         phase: 1,
         tu_hash: [0u8; 32],
+        return_type: None,
+        params: None,
+        signature: None,
+        code: None,
+        code_truncated: None,
+        template_params: None,
+        template_args: None,
+        is_virtual: None,
+        is_pure_virtual: None,
+        is_static: None,
     }
 }
 
@@ -131,6 +141,8 @@ fn make_cross_edge(src_usr: &str, dst_usr: &str, src_repo: &str) -> EdgeRecord {
         repo_name: src_repo.to_owned(),
         attrs_json: "{}".to_owned(),
         tu_hash: [0u8; 32],
+        source_association_type: None,
+        target_association_type: None,
     }
 }
 
@@ -183,6 +195,8 @@ async fn phase5_no_candidates_writes_no_external_refs() {
         repo_name: "repo_a".to_owned(),
         attrs_json: "{}".to_owned(),
         tu_hash: [0u8; 32],
+        source_association_type: None,
+        target_association_type: None,
     }];
 
     write_fixture_shards(&stage_dir, &nodes, &edges).expect("write shards");

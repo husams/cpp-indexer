@@ -4,11 +4,13 @@
 /// ADRs governing this module: ADR-3 (column layout), ADR-9 (version const).
 pub mod arrow;
 pub mod edges;
+pub mod limits;
 pub mod nodes;
 pub mod version;
 
 // Re-export the most commonly used types for callers that `use cpp_indexer::schema::*`
 // or `use cpp_indexer::schema::{NodeKind, EdgeKind, …}`.
 pub use edges::{EdgeKind, EdgeRecord};
-pub use nodes::{NodeKind, NodeRecord};
+pub use limits::{clip_code, MAX_CODE_BYTES};
+pub use nodes::{NodeKind, NodeRecord, Param, TemplateArg, TemplateParam};
 pub use version::{PARQUET_MAGIC, SCHEMA_VERSION, SCHEMA_VERSION_TAG};

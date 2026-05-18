@@ -273,6 +273,16 @@ mod tests {
             partial: false,
             phase: 1,
             tu_hash: [u8::try_from(i % 256).unwrap_or(0); 32],
+            return_type: None,
+            params: None,
+            signature: None,
+            code: None,
+            code_truncated: None,
+            template_params: None,
+            template_args: None,
+            is_virtual: None,
+            is_pure_virtual: None,
+            is_static: None,
         }
     }
 
@@ -287,6 +297,8 @@ mod tests {
             repo_name: "test-repo".to_owned(),
             attrs_json: "{}".to_owned(),
             tu_hash: [u8::try_from(i % 256).unwrap_or(0); 32],
+            source_association_type: None,
+            target_association_type: None,
         }
     }
 
@@ -329,8 +341,8 @@ mod tests {
         let builder = ParquetRecordBatchStreamBuilder::new(node_file)
             .await
             .unwrap();
-        // Verify schema column count matches ADR-3 (13 columns for nodes).
-        assert_eq!(builder.schema().fields().len(), 13);
+        // Verify schema column count: 13 original + 10 M8 native fields = 23 (S40-S43).
+        assert_eq!(builder.schema().fields().len(), 23);
         let mut stream = builder.build().unwrap();
         let mut total_rows = 0usize;
         while let Some(batch) = stream.try_next().await.unwrap() {
@@ -353,8 +365,8 @@ mod tests {
         let builder = ParquetRecordBatchStreamBuilder::new(edge_file)
             .await
             .unwrap();
-        // Verify schema column count matches ADR-3 (9 columns for edges).
-        assert_eq!(builder.schema().fields().len(), 9);
+        // Verify schema column count: 9 original + 2 M8 association columns = 11 (S43).
+        assert_eq!(builder.schema().fields().len(), 11);
         let mut stream = builder.build().unwrap();
         let mut edge_rows = 0usize;
         while let Some(batch) = stream.try_next().await.unwrap() {

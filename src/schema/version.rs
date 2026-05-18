@@ -12,17 +12,20 @@
 /// ADL_CANDIDATE edge kinds.
 /// Bumped in S22 (repo-nodes): added REPO node kind and BELONGS_TO_REPO edge kind.
 /// Bumped in S26 (macros): added MACRO node kind and EXPANDS_TO edge kind.
+/// Bumped in S40 (structured-attrs, M8): promoted 10 node fields + 2 edge fields out of
+/// `attrs_json` into native columns on NodeRecord/EdgeRecord/Arrow. No dual-write; full promotion
+/// per ADR-11. Pre-v5 graphs are refused at handshake.
 /// Any further change to NodeKind/EdgeKind variants must bump again per ADR-9.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Human-readable schema tag derived from `SCHEMA_VERSION`.
 ///
 /// ADR-9 references `const_format::concatcp!` to derive this; since `const_format` is not in
 /// Cargo.toml, we use a hand-written string literal with a `debug_assert!` to keep them in sync.
-pub const SCHEMA_VERSION_TAG: &str = "cxg-schema-v4";
+pub const SCHEMA_VERSION_TAG: &str = "cxg-schema-v5";
 
 /// Magic key stored in Parquet KV metadata; Phase 3 refuses mismatched-version shards.
-pub const PARQUET_MAGIC: &str = "cxg_parquet_v4";
+pub const PARQUET_MAGIC: &str = "cxg_parquet_v5";
 
 /// Build the `attrs_json` payload for the `SchemaVersion` node written by Phase 4.
 ///

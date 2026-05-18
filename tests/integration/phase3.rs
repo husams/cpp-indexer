@@ -42,6 +42,16 @@ fn make_node(i: usize) -> NodeRecord {
         partial: false,
         phase: 1,
         tu_hash: [u8::try_from(i % 256).unwrap(); 32],
+        return_type: None,
+        params: None,
+        signature: None,
+        code: None,
+        code_truncated: None,
+        template_params: None,
+        template_args: None,
+        is_virtual: None,
+        is_pure_virtual: None,
+        is_static: None,
     }
 }
 
@@ -56,6 +66,8 @@ fn make_within_repo_edge(i: usize) -> EdgeRecord {
         repo_name: "test-repo".to_owned(),
         attrs_json: "{}".to_owned(),
         tu_hash: [0u8; 32],
+        source_association_type: None,
+        target_association_type: None,
     }
 }
 
@@ -70,6 +82,8 @@ fn make_unresolved_edge(i: usize) -> EdgeRecord {
         repo_name: "test-repo".to_owned(),
         attrs_json: "{}".to_owned(),
         tu_hash: [0u8; 32],
+        source_association_type: None,
+        target_association_type: None,
     }
 }
 
@@ -189,6 +203,8 @@ fn phase3_preserves_placeholder_edges_unchanged() {
         repo_name: "test-repo".to_owned(),
         attrs_json: "{}".to_owned(),
         tu_hash: [0u8; 32],
+        source_association_type: None,
+        target_association_type: None,
     };
 
     let batch = edges_to_record_batch(&[placeholder]).expect("batch");
@@ -206,6 +222,8 @@ fn phase3_preserves_placeholder_edges_unchanged() {
         repo_name: "test-repo".to_owned(),
         attrs_json: "{}".to_owned(),
         tu_hash: [0u8; 32],
+        source_association_type: None,
+        target_association_type: None,
     };
     drop(batch); // batch was only created to verify serialisability
     w2.write_edges(&[placeholder2]).unwrap();

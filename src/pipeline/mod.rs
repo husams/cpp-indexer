@@ -292,6 +292,17 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
             partial: false,
             phase: 0,
             tu_hash: [0u8; 32],
+            // M8 promoted fields — REPO nodes carry none of these
+            return_type: None,
+            params: None,
+            signature: None,
+            code: None,
+            code_truncated: None,
+            template_params: None,
+            template_args: None,
+            is_virtual: None,
+            is_pure_virtual: None,
+            is_static: None,
         };
 
         // Prepend so the REPO node is written before the nodes that reference it.
@@ -312,6 +323,9 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
                 repo_name: meta.name.clone(),
                 attrs_json: "{}".to_owned(),
                 tu_hash: [0u8; 32],
+                // M8 promoted fields — BELONGS_TO_REPO edges carry none of these
+                source_association_type: None,
+                target_association_type: None,
             })
             .collect();
 
@@ -672,6 +686,8 @@ mod tests {
             repo_name: "repo".to_owned(),
             attrs_json: "{}".to_owned(),
             tu_hash: [0u8; 32],
+            source_association_type: None,
+            target_association_type: None,
         }
     }
 

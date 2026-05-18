@@ -48,6 +48,16 @@ fn make_nodes(n: usize) -> Vec<NodeRecord> {
             partial: false,
             phase: 1,
             tu_hash: [0u8; 32],
+            return_type: None,
+            params: None,
+            signature: None,
+            code: None,
+            code_truncated: None,
+            template_params: None,
+            template_args: None,
+            is_virtual: None,
+            is_pure_virtual: None,
+            is_static: None,
         })
         .collect()
 }
@@ -64,6 +74,8 @@ fn make_edges(n: usize) -> Vec<EdgeRecord> {
             repo_name: "bench-repo".to_owned(),
             attrs_json: "{}".to_owned(),
             tu_hash: [0u8; 32],
+            source_association_type: None,
+            target_association_type: None,
         })
         .collect()
 }

@@ -140,6 +140,9 @@ impl std::fmt::Display for EdgeKind {
 }
 
 /// A single edge record, matching the `edges.parquet` schema from ADR-3.
+///
+/// M8 (S40): two new optional columns promoted for USES edges per ADR-11/ADR-13.
+/// Populated by the access classifier (S43); `None` for all non-USES edge kinds.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EdgeRecord {
     /// Source node USR.
@@ -161,6 +164,15 @@ pub struct EdgeRecord {
     pub attrs_json: String,
     /// Blake3 hash of the originating TU.
     pub tu_hash: [u8; 32],
+
+    // ── M8 promoted fields (S40) ─────────────────────────────────────────────
+    /// USES edge source access kind (e.g. `"read"`, `"write"`, `"call_arg"`).
+    /// `Some` for USES edges only; `None` for all other edge kinds.
+    /// Populated by `AccessKind::as_str()` from the access classifier (S43).
+    pub source_association_type: Option<String>,
+    /// USES edge target access kind.
+    /// `Some` for USES edges only; `None` for all other edge kinds.
+    pub target_association_type: Option<String>,
 }
 
 #[cfg(test)]

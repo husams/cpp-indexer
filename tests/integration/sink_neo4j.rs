@@ -65,6 +65,16 @@ fn sample_nodes(repo: &str) -> Vec<NodeRecord> {
             partial: false,
             phase: 1,
             tu_hash: [0u8; 32],
+            return_type: None,
+            params: None,
+            signature: None,
+            code: None,
+            code_truncated: None,
+            template_params: None,
+            template_args: None,
+            is_virtual: None,
+            is_pure_virtual: None,
+            is_static: None,
         },
         NodeRecord {
             usr: format!("c:@F@fn_b#{repo}"),
@@ -80,6 +90,16 @@ fn sample_nodes(repo: &str) -> Vec<NodeRecord> {
             partial: false,
             phase: 1,
             tu_hash: [0u8; 32],
+            return_type: None,
+            params: None,
+            signature: None,
+            code: None,
+            code_truncated: None,
+            template_params: None,
+            template_args: None,
+            is_virtual: None,
+            is_pure_virtual: None,
+            is_static: None,
         },
     ]
 }
@@ -95,6 +115,8 @@ fn sample_edges(repo: &str) -> Vec<EdgeRecord> {
         repo_name: repo.to_owned(),
         attrs_json: "{}".to_owned(),
         tu_hash: [0u8; 32],
+        source_association_type: None,
+        target_association_type: None,
     }]
 }
 
@@ -203,6 +225,8 @@ async fn neo4j_sink_skips_unresolved_edges() {
         repo_name: repo.to_owned(),
         attrs_json: "{}".to_owned(),
         tu_hash: [0u8; 32],
+        source_association_type: None,
+        target_association_type: None,
     };
 
     let stats = sink

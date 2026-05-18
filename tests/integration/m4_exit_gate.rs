@@ -93,6 +93,16 @@ fn make_node(usr: &str, repo: &str, file_path: &str) -> NodeRecord {
         partial: false,
         phase: 1,
         tu_hash: [0u8; 32],
+        return_type: None,
+        params: None,
+        signature: None,
+        code: None,
+        code_truncated: None,
+        template_params: None,
+        template_args: None,
+        is_virtual: None,
+        is_pure_virtual: None,
+        is_static: None,
     }
 }
 
@@ -107,6 +117,8 @@ fn make_cross_calls_edge(src_usr: &str, dst_usr: &str, repo: &str) -> EdgeRecord
         repo_name: repo.to_owned(),
         attrs_json: "{}".to_owned(),
         tu_hash: [0u8; 32],
+        source_association_type: None,
+        target_association_type: None,
     }
 }
 

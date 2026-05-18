@@ -104,9 +104,12 @@ pub fn with_thread_index<R>(f: impl FnOnce(&Index<'static>) -> R) -> R {
 }
 
 use crate::{
-    schema::{EdgeKind, EdgeRecord, NodeKind, NodeRecord},
+    schema::{
+        clip_code, EdgeKind, EdgeRecord, NodeKind, NodeRecord, Param, TemplateArg, TemplateParam,
+    },
     stage::writer::StageWriter,
     visit::{
+        access_classifier::{classify_use, AccessKind},
         cursor_map::entity_kind_to_node_kind,
         macros::{collect_macro_definition, collect_macro_expansion},
     },
@@ -261,6 +264,17 @@ fn visit_tu_inner(
         partial: has_errors,
         phase: 1,
         tu_hash: opts.tu_hash,
+        // M8 promoted fields — MODULE nodes carry none of these
+        return_type: None,
+        params: None,
+        signature: None,
+        code: None,
+        code_truncated: None,
+        template_params: None,
+        template_args: None,
+        is_virtual: None,
+        is_pure_virtual: None,
+        is_static: None,
     };
     collector.nodes.push(module_node);
     collector.module_usr = Some(module_usr);
@@ -290,6 +304,10 @@ fn visit_tu_inner(
 // Internal collector
 // ---------------------------------------------------------------------------
 
+/// Stable spelling location used as a map key for implicit-wrapper context tracking.
+/// Keyed by (line, column) within a single TU (file path is implicit — one Collector per TU).
+type SpellLoc = (u32, u32);
+
 struct Collector<'a> {
     repo_name: &'a str,
     tu_hash: [u8; 32],
@@ -306,6 +324,14 @@ struct Collector<'a> {
     /// Multiple TUs may include the same header; Phase 3 deduplicates by USR.
     /// Within a single TU we avoid emitting the same `MacroDefinition` twice.
     seen_macro_usrs: HashSet<String>,
+    /// Spelling locations of `UnexposedExpr` nodes whose visitor-callback `parent` is
+    /// `ReturnStmt`.  clang-rs exposes `ImplicitCastExpr` as `UnexposedExpr` and its
+    /// `get_lexical_parent()` returns `None`, so we capture context at visit time and
+    /// look it up when the nested `DeclRefExpr` is classified (QD-3 fix, S43).
+    return_wrappers: HashSet<SpellLoc>,
+    /// Spelling locations of `UnexposedExpr` nodes whose visitor-callback `parent` is
+    /// `VarDecl`, `FieldDecl`, or `ParmDecl` (initializer context → `decl_ref`).
+    decl_init_wrappers: HashSet<SpellLoc>,
 }
 
 impl<'a> Collector<'a> {
@@ -326,6 +352,8 @@ impl<'a> Collector<'a> {
             module_usr: None,
             skip_system_headers,
             seen_macro_usrs: HashSet::new(),
+            return_wrappers: HashSet::new(),
+            decl_init_wrappers: HashSet::new(),
         }
     }
 }
@@ -334,6 +362,31 @@ impl<'a> Collector<'a> {
     fn visit(&mut self, entity: clang::Entity<'_>, parent: clang::Entity<'_>) {
         let kind = entity.get_kind();
 
+        // ── Implicit-wrapper context capture (QD-3 fix, S43) ─────────────────
+        // clang-rs exposes ImplicitCastExpr as UnexposedExpr.  Its
+        // `get_lexical_parent()` returns None, so the parent chain built later
+        // in `emit_uses_edge` cannot reach `ReturnStmt` or `VarDecl`.  We
+        // capture the visitor-supplied `parent` here (pre-order DFS means
+        // the wrapper is always visited before its DeclRefExpr child) and
+        // record the wrapper's spelling location so `emit_uses_edge` can look
+        // it up when processing the nested DeclRefExpr.
+        if kind == EntityKind::UnexposedExpr {
+            if let Some(loc) = entity.get_location() {
+                let sl = loc.get_spelling_location();
+                let key = (sl.line, sl.column);
+                match parent.get_kind() {
+                    EntityKind::ReturnStmt => {
+                        self.return_wrappers.insert(key);
+                    }
+                    EntityKind::VarDecl | EntityKind::FieldDecl | EntityKind::ParmDecl => {
+                        self.decl_init_wrappers.insert(key);
+                    }
+                    _ => {}
+                }
+            }
+            // Do NOT return — let Recurse descend into the children.
+        }
+
         // ── Macro handling (S26, AC-M5-1..4) ────────────────────────────────
         if kind == EntityKind::MacroDefinition {
             self.visit_macro_definition(&entity);
@@ -341,6 +394,18 @@ impl<'a> Collector<'a> {
         }
         if kind == EntityKind::MacroExpansion {
             self.visit_macro_expansion(&entity, &parent);
+            return;
+        }
+
+        // ── USES edge emission (S43, AC-S43-1..4) ────────────────────────────
+        // DeclRefExpr / MemberRefExpr / TypeRef represent a reference to another
+        // entity at a use site.  Emit a USES edge from the enclosing node (parent
+        // USR) to the referenced entity's USR, annotated with the access classifier.
+        if matches!(
+            kind,
+            EntityKind::DeclRefExpr | EntityKind::MemberRefExpr | EntityKind::TypeRef
+        ) {
+            self.emit_uses_edge(&entity, &parent);
             return;
         }
 
@@ -396,6 +461,34 @@ impl<'a> Collector<'a> {
         // Per-kind attrs JSON.
         let attrs_json = build_attrs_json(&entity, node_kind);
 
+        // S41: extract callable attributes for FUNCTION / METHOD nodes.
+        let (return_type, params, signature, code, code_truncated) =
+            if matches!(node_kind, NodeKind::Function | NodeKind::Method) {
+                extract_callable_attrs(&entity, node_kind)
+            } else {
+                (None, None, None, None, None)
+            };
+
+        // S42: extract template attributes for TEMPLATE_DECL / SPECIALIZATION nodes.
+        let (template_params, template_args) = match node_kind {
+            NodeKind::TemplateDef => (Some(extract_template_params(&entity)), None),
+            NodeKind::Specialization => (None, Some(extract_template_args(&entity))),
+            _ => (None, None),
+        };
+
+        // S43 (AC-S40-6): promote is_virtual / is_pure_virtual / is_static to native
+        // NodeRecord fields.  These were previously written to attrs_json; they are
+        // now native-only per ADR-11 §3 (no dual-write).
+        let (is_virtual, is_pure_virtual, is_static) = match node_kind {
+            NodeKind::Method => (
+                Some(entity.is_virtual_method()),
+                Some(entity.is_pure_virtual_method()),
+                Some(entity.is_static_method()),
+            ),
+            NodeKind::Function => (None, None, Some(entity.is_static_method())),
+            _ => (None, None, None),
+        };
+
         let node = NodeRecord {
             usr: usr.clone(),
             kind: node_kind,
@@ -410,6 +503,19 @@ impl<'a> Collector<'a> {
             partial: self.partial,
             phase: 1,
             tu_hash: self.tu_hash,
+            // S41: callable fields populated above
+            return_type,
+            params,
+            signature,
+            code,
+            code_truncated,
+            // S42: template fields populated above
+            template_params,
+            template_args,
+            // S43: promoted native fields
+            is_virtual,
+            is_pure_virtual,
+            is_static,
         };
 
         self.nodes.push(node);
@@ -475,6 +581,122 @@ impl<'a> Collector<'a> {
         self.edges.push(edge);
     }
 
+    /// Emit a USES edge for a DeclRefExpr / MemberRefExpr / TypeRef entity (S43).
+    ///
+    /// The edge goes from the enclosing entity's USR (resolved via `parent`, then
+    /// falling back to the module USR) to the referenced entity's USR.  The access
+    /// classifier assigns `source_association_type`; `target_association_type` is a
+    /// symmetric copy of the same value per ADR-13.
+    ///
+    /// Skipped when:
+    /// - The parent has no USR (not a tracked declaration).
+    /// - The referenced entity has no USR.
+    /// - The reference points into a system header (when `skip_system_headers` is set).
+    fn emit_uses_edge(&mut self, entity: &clang::Entity<'_>, parent: &clang::Entity<'_>) {
+        // Resolve the source USR: walk up via get_semantic_parent() until we find
+        // an entity with a non-empty USR that maps to a tracked declaration kind
+        // (Function, Method, Class, etc.).  Expression-context parents (BinaryOperator,
+        // CallExpr, CompoundStmt, …) have no USR and must be skipped.
+        let src_usr = {
+            let mut candidate: Option<clang::Entity<'_>> = Some(*parent);
+            let mut found: Option<String> = None;
+            while let Some(cur) = candidate {
+                if let Some(u) = cur.get_usr() {
+                    if !u.0.is_empty() && entity_kind_to_node_kind(cur.get_kind()).is_some() {
+                        found = Some(u.0);
+                        break;
+                    }
+                }
+                candidate = cur.get_semantic_parent();
+            }
+            match found {
+                Some(u) => u,
+                None => match &self.module_usr {
+                    Some(m) => m.clone(),
+                    None => return,
+                },
+            }
+        };
+
+        // The referenced entity carries the destination USR.
+        let ref_entity = match entity.get_reference() {
+            Some(r) => r,
+            None => return,
+        };
+
+        let dst_usr = match ref_entity.get_usr() {
+            Some(u) if !u.0.is_empty() => u.0,
+            _ => return,
+        };
+
+        // Skip self-references (entity referencing its own declaration).
+        if src_usr == dst_usr {
+            return;
+        }
+
+        // System-header filter: skip if the referenced entity is in a system header.
+        if self.skip_system_headers && ref_entity.is_in_system_header() {
+            return;
+        }
+
+        // Build a parent chain by walking get_lexical_parent() up to 4 levels.
+        // This lets the classifier see through ImplicitCastExpr and other
+        // transparent wrappers to find the true semantic context.
+        let mut parent_chain: Vec<clang::Entity<'_>> = Vec::with_capacity(4);
+        parent_chain.push(*parent);
+        {
+            let mut cur = *parent;
+            for _ in 0..3 {
+                match cur.get_lexical_parent() {
+                    Some(p) => {
+                        parent_chain.push(p);
+                        cur = p;
+                    }
+                    None => break,
+                }
+            }
+        }
+        // QD-3 fix (S43): when `parent` is UnexposedExpr (clang-rs wraps
+        // ImplicitCastExpr as UnexposedExpr), the parent chain built above
+        // cannot reach ReturnStmt or VarDecl because get_lexical_parent()
+        // returns None on expression nodes.  We check whether the wrapper was
+        // recorded at visit time (pre-order DFS guarantees the wrapper is
+        // captured before the DeclRefExpr is processed here).
+        let kind = if parent.get_kind() == EntityKind::UnexposedExpr {
+            if let Some(loc) = parent.get_location() {
+                let sl = loc.get_spelling_location();
+                let key = (sl.line, sl.column);
+                if self.return_wrappers.contains(&key) {
+                    AccessKind::Return
+                } else if self.decl_init_wrappers.contains(&key) {
+                    AccessKind::DeclRef
+                } else {
+                    classify_use(entity, &parent_chain)
+                }
+            } else {
+                classify_use(entity, &parent_chain)
+            }
+        } else {
+            classify_use(entity, &parent_chain)
+        };
+        let assoc = kind.as_str().to_owned();
+
+        // target mirrors source (ADR-13 §target_association_type, AC-S43-2).
+        self.edges.push(EdgeRecord {
+            src_usr,
+            dst_usr: Some(dst_usr),
+            dst_placeholder: None,
+            kind: EdgeKind::Uses,
+            resolved: false,
+            cross_repo_candidate: false,
+            repo_name: self.repo_name.to_owned(),
+            attrs_json: "{}".to_owned(),
+            tu_hash: self.tu_hash,
+            source_association_type: Some(assoc.clone()),
+            target_association_type: Some(assoc),
+        });
+    }
+
     /// Emit a HEADER node for an InclusionDirective and the INCLUDES edge from the module.
     ///
     /// The header's USR is synthesised from its canonical file path because libclang does not
@@ -510,6 +732,17 @@ impl<'a> Collector<'a> {
             partial: self.partial,
             phase: 1,
             tu_hash: self.tu_hash,
+            // M8 promoted fields — HEADER nodes carry none of these
+            return_type: None,
+            params: None,
+            signature: None,
+            code: None,
+            code_truncated: None,
+            template_params: None,
+            template_args: None,
+            is_virtual: None,
+            is_pure_virtual: None,
+            is_static: None,
         };
         self.nodes.push(header_node);
 
@@ -653,6 +886,10 @@ impl<'a> Collector<'a> {
             repo_name: self.repo_name.to_owned(),
             attrs_json: attrs,
             tu_hash: self.tu_hash,
+            // M8 promoted fields — USES classifier (S43) populates these for USES edges;
+            // all other edge kinds stay None
+            source_association_type: None,
+            target_association_type: None,
         });
     }
 }
@@ -688,6 +925,119 @@ fn extract_location(
     }
 }
 
+/// Callable attribute bundle returned by [`extract_callable_attrs`].
+type CallableAttrs = (
+    Option<String>,     // return_type
+    Option<Vec<Param>>, // params
+    Option<String>,     // signature
+    Option<String>,     // code
+    Option<bool>,       // code_truncated
+);
+
+/// Extract callable attributes from a FUNCTION or METHOD entity (S41, AC-S41-1..6).
+///
+/// Returns `(return_type, params, signature, code, code_truncated)`.
+///
+/// - `return_type`: display name of the return type via `entity.get_result_type()`.
+/// - `params`: ordered list of `{name, type}` pairs via `entity.get_arguments()`.
+/// - `signature`: `"return_type(param_type, …)"` with ` const` suffix for METHOD when applicable.
+/// - `code` / `code_truncated`: verbatim source range read from disk; capped at 32 KiB
+///   per ADR-12.  On any I/O failure the code fields fall back to `None` (non-fatal).
+fn extract_callable_attrs(entity: &clang::Entity<'_>, node_kind: NodeKind) -> CallableAttrs {
+    // ── return_type ─────────────────────────────────────────────────────────
+    let return_type: Option<String> = entity.get_result_type().map(|t| t.get_display_name());
+
+    // ── params ───────────────────────────────────────────────────────────────
+    let params: Option<Vec<Param>> = {
+        let args = entity.get_arguments().unwrap_or_default();
+        let list: Vec<Param> = args
+            .iter()
+            .map(|arg| Param {
+                name: arg.get_name().unwrap_or_default(),
+                type_: arg
+                    .get_type()
+                    .map(|t| t.get_display_name())
+                    .unwrap_or_default(),
+            })
+            .collect();
+        Some(list)
+    };
+
+    // ── signature ────────────────────────────────────────────────────────────
+    let signature: Option<String> = {
+        let ret = return_type.as_deref().unwrap_or("void");
+        let csv = params
+            .as_ref()
+            .map(|ps| {
+                ps.iter()
+                    .map(|p| p.type_.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let mut sig = format!("{ret}({csv})");
+        // Note: clang-rs 2.0.0 does not expose is_volatile_method(); the volatile
+        // qualifier on methods is omitted from the signature (deferred to M9).
+        if node_kind == NodeKind::Method && entity.is_const_method() {
+            sig.push_str(" const");
+        }
+        Some(sig)
+    };
+
+    // ── code / code_truncated ────────────────────────────────────────────────
+    let (code, code_truncated) = extract_code_snippet(entity);
+
+    (return_type, params, signature, code, code_truncated)
+}
+
+/// Read the verbatim source bytes for `entity`'s range from disk and apply the
+/// 32 KiB cap (ADR-12).
+///
+/// Returns `(Some(snippet), Some(false))` when the body fits, `(None, Some(true))`
+/// when oversize, and `(None, None)` on any I/O error (non-fatal: code is best-effort).
+fn extract_code_snippet(entity: &clang::Entity<'_>) -> (Option<String>, Option<bool>) {
+    let range = match entity.get_range() {
+        Some(r) => r,
+        None => return (None, None),
+    };
+
+    let start_loc = range.get_start().get_file_location();
+    let end_loc = range.get_end().get_file_location();
+
+    // Both ends must be in the same file.
+    let file = match start_loc.file {
+        Some(ref f) => f.get_path(),
+        None => return (None, None),
+    };
+    if end_loc.file.as_ref().map(|f| f.get_path()) != Some(file.clone()) {
+        return (None, None);
+    }
+
+    let start_offset = start_loc.offset as usize;
+    let end_offset = end_loc.offset as usize;
+
+    if end_offset < start_offset {
+        return (None, None);
+    }
+
+    // Read the file bytes from disk.
+    let bytes = match std::fs::read(&file) {
+        Ok(b) => b,
+        Err(_) => return (None, None),
+    };
+
+    let snippet_bytes = match bytes.get(start_offset..end_offset) {
+        Some(s) => s,
+        None => return (None, None),
+    };
+
+    // Convert to UTF-8 (best-effort — replace invalid sequences).
+    let snippet = String::from_utf8_lossy(snippet_bytes).into_owned();
+
+    let (code, truncated) = clip_code(&snippet);
+    (code, Some(truncated))
+}
+
 /// Build per-kind `attrs_json` string.
 fn build_attrs_json(entity: &clang::Entity<'_>, kind: NodeKind) -> String {
     use std::collections::BTreeMap;
@@ -696,12 +1046,10 @@ fn build_attrs_json(entity: &clang::Entity<'_>, kind: NodeKind) -> String {
 
     match kind {
         NodeKind::Method => {
-            let is_virtual = entity.is_virtual_method();
-            let is_pure = entity.is_pure_virtual_method();
-            let is_static = entity.is_static_method();
-            map.insert("virtual", serde_json::Value::Bool(is_virtual));
-            map.insert("pure_virtual", serde_json::Value::Bool(is_pure));
-            map.insert("static", serde_json::Value::Bool(is_static));
+            // S43 (AC-S40-6): is_virtual / is_pure_virtual / is_static are promoted
+            // to native NodeRecord fields; MUST NOT be written into attrs_json (ADR-11 §3).
+            // attrs_json for METHOD nodes is now empty ("{}") unless future per-method
+            // attributes are added here.
         }
         NodeKind::Field => {
             let is_bit = entity.get_bit_field_width().is_some();
@@ -733,14 +1081,8 @@ fn build_attrs_json(entity: &clang::Entity<'_>, kind: NodeKind) -> String {
             );
         }
         NodeKind::Specialization => {
-            // Record template arguments as a JSON array of strings (best-effort).
-            if let Some(args) = entity.get_template_arguments() {
-                let args_strs: Vec<serde_json::Value> = args
-                    .iter()
-                    .map(|a| serde_json::Value::String(format!("{a:?}")))
-                    .collect();
-                map.insert("template_args", serde_json::Value::Array(args_strs));
-            }
+            // S42 (AC-S40-6): template_args is now a promoted structured field on NodeRecord;
+            // it MUST NOT be written into attrs_json. Only non-promoted ancillary data lives here.
             if let Some(tmpl) = entity.get_template() {
                 if let Some(tmpl_usr) = tmpl.get_usr() {
                     map.insert("template_usr", serde_json::Value::String(tmpl_usr.0));
@@ -764,6 +1106,110 @@ fn build_attrs_json(entity: &clang::Entity<'_>, kind: NodeKind) -> String {
     }
 
     serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_owned())
+}
+
+/// Extract template parameters from a TEMPLATE_DECL entity (S42, AC-S42-1).
+///
+/// Walks the immediate children of the entity and collects:
+/// - `TemplateTypeParameter` → kind `"type"`
+/// - `NonTypeTemplateParameter` → kind `"non_type"`
+/// - `TemplateTemplateParameter` → kind `"template"`
+///
+/// For each parameter the name and an optional default are extracted.  The
+/// default is inferred from the first child of the parameter that has a
+/// displayable name (covers simple type defaults like `= int`).
+fn extract_template_params(entity: &clang::Entity<'_>) -> Vec<TemplateParam> {
+    use clang::EntityKind as EK;
+
+    let mut params = Vec::new();
+
+    for child in entity.get_children() {
+        let kind_str = match child.get_kind() {
+            EK::TemplateTypeParameter => "type",
+            EK::NonTypeTemplateParameter => "non_type",
+            EK::TemplateTemplateParameter => "template",
+            _ => continue,
+        };
+
+        let name = child.get_name().unwrap_or_default();
+
+        // Best-effort default: look for the first child whose display name is
+        // non-empty.  Covers `typename T = int` (TypeRef child) and simple
+        // integral defaults.  Complex expression defaults are left as `None`.
+        let default = child
+            .get_children()
+            .into_iter()
+            .filter_map(|c| c.get_display_name())
+            .find(|s| !s.is_empty());
+
+        params.push(TemplateParam {
+            name,
+            kind: kind_str.to_owned(),
+            default,
+        });
+    }
+
+    params
+}
+
+/// Extract template arguments from a SPECIALIZATION entity (S42, AC-S42-2).
+///
+/// Uses `entity.get_template_arguments()` (requires `clang_3_6` feature, enabled
+/// in `Cargo.toml` for M8).  Each `TemplateArgument` variant is classified as:
+/// - `Type`        → kind `"type"`,  value = display name of the type
+/// - `Integral`    → kind `"integral"`, value = decimal string of the signed value
+/// - `Template` / `TemplateExpansion` → kind `"template"`, value = display name if available
+/// - `Declaration` → kind `"declaration"`, value = empty string
+/// - `Nullptr`     → kind `"nullptr"`, value = empty string
+/// - `Expression`  → kind `"expression"`, value = empty string
+/// - `Pack`        → kind `"pack"`, value = empty string
+/// - `Null`        → skipped (unresolved / not-yet-deduced argument)
+///
+/// Returns an empty `Vec` when `get_template_arguments()` returns `None` or the
+/// list is empty (e.g. implicit instantiations where libclang does not expose
+/// argument detail).
+fn extract_template_args(entity: &clang::Entity<'_>) -> Vec<TemplateArg> {
+    use clang::TemplateArgument;
+
+    let args = match entity.get_template_arguments() {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+
+    args.into_iter()
+        .filter_map(|arg| match arg {
+            TemplateArgument::Type(ty) => Some(TemplateArg {
+                kind: "type".to_owned(),
+                value: ty.get_display_name(),
+            }),
+            TemplateArgument::Integral(signed, _unsigned) => Some(TemplateArg {
+                kind: "integral".to_owned(),
+                value: signed.to_string(),
+            }),
+            TemplateArgument::Template | TemplateArgument::TemplateExpansion => Some(TemplateArg {
+                kind: "template".to_owned(),
+                value: String::new(),
+            }),
+            TemplateArgument::Declaration => Some(TemplateArg {
+                kind: "declaration".to_owned(),
+                value: String::new(),
+            }),
+            TemplateArgument::Nullptr => Some(TemplateArg {
+                kind: "nullptr".to_owned(),
+                value: String::new(),
+            }),
+            TemplateArgument::Expression => Some(TemplateArg {
+                kind: "expression".to_owned(),
+                value: String::new(),
+            }),
+            TemplateArgument::Pack => Some(TemplateArg {
+                kind: "pack".to_owned(),
+                value: String::new(),
+            }),
+            // Null = unresolved / not-yet-deduced — skip entirely
+            TemplateArgument::Null => None,
+        })
+        .collect()
 }
 
 /// Convenience: visit all TUs in `entries` using a freshly-created `Clang` instance.

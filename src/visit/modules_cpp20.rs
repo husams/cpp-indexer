@@ -279,6 +279,17 @@ pub fn parse_module_tu(
         partial: has_errors,
         phase: 1,
         tu_hash,
+        // M8 promoted fields — MODULE nodes carry none of these
+        return_type: None,
+        params: None,
+        signature: None,
+        code: None,
+        code_truncated: None,
+        template_params: None,
+        template_args: None,
+        is_virtual: None,
+        is_pure_virtual: None,
+        is_static: None,
     };
 
     let mut nodes = vec![module_node];
@@ -312,6 +323,17 @@ pub fn parse_module_tu(
                 partial: false,
                 phase: 1,
                 tu_hash,
+                // M8 promoted fields — MODULE nodes carry none of these
+                return_type: None,
+                params: None,
+                signature: None,
+                code: None,
+                code_truncated: None,
+                template_params: None,
+                template_args: None,
+                is_virtual: None,
+                is_pure_virtual: None,
+                is_static: None,
             };
             nodes.push(imported_node);
 
@@ -326,6 +348,9 @@ pub fn parse_module_tu(
                 repo_name: repo_name.to_owned(),
                 attrs_json: serde_json::json!({ "import": true }).to_string(),
                 tu_hash,
+                // M8 promoted fields — INCLUDES edges carry none of these
+                source_association_type: None,
+                target_association_type: None,
             });
 
             return EntityVisitResult::Continue;
@@ -382,6 +407,18 @@ pub fn parse_module_tu(
                 partial: has_errors,
                 phase: 1,
                 tu_hash,
+                // M8 promoted fields — populated by S41/S42 for applicable kinds;
+                // modules_cpp20 leaves them None (visitor for callable/template fields is shallow.rs)
+                return_type: None,
+                params: None,
+                signature: None,
+                code: None,
+                code_truncated: None,
+                template_params: None,
+                template_args: None,
+                is_virtual: None,
+                is_pure_virtual: None,
+                is_static: None,
             });
 
             // CONTAINS edge from module to exported decl.
@@ -395,6 +432,9 @@ pub fn parse_module_tu(
                 repo_name: repo_name.to_owned(),
                 attrs_json: "{}".to_owned(),
                 tu_hash,
+                // M8 promoted fields — CONTAINS edges carry none of these
+                source_association_type: None,
+                target_association_type: None,
             });
         }
 

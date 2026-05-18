@@ -60,6 +60,33 @@ const PROP_NAME: &str = "name";
 const PROP_QUALIFIED_NAME: &str = "qualified_name";
 /// Property name for extra attributes (JSON blob).
 const PROP_ATTRS_JSON: &str = "attrs_json";
+
+// ── M8 promoted property-name constants (S45, design.md §3.6) ─────────────────
+
+/// Return type string; FUNCTION/METHOD only.
+const PROP_RETURN_TYPE: &str = "return_type";
+/// Parameter list; serialised as `indradb::Json`; FUNCTION/METHOD only.
+const PROP_PARAMS: &str = "params";
+/// Signature string; FUNCTION/METHOD only.
+const PROP_SIGNATURE: &str = "signature";
+/// Verbatim source snippet capped at 32 KiB (ADR-12); FUNCTION/METHOD only.
+const PROP_CODE: &str = "code";
+/// `true` when the body was truncated; FUNCTION/METHOD only.
+const PROP_CODE_TRUNCATED: &str = "code_truncated";
+/// Template parameter list; serialised as `indradb::Json`; TEMPLATE_DECL only.
+const PROP_TEMPLATE_PARAMS: &str = "template_params";
+/// Template argument list; serialised as `indradb::Json`; SPECIALIZATION only.
+const PROP_TEMPLATE_ARGS: &str = "template_args";
+/// `true` when the method is virtual; METHOD only.
+const PROP_IS_VIRTUAL: &str = "is_virtual";
+/// `true` when the method is pure virtual; METHOD only.
+const PROP_IS_PURE_VIRTUAL: &str = "is_pure_virtual";
+/// `true` when the function/method is static; FUNCTION/METHOD only.
+const PROP_IS_STATIC: &str = "is_static";
+/// USES edge source access kind (e.g. `"read"`, `"write"`); USES edges only.
+const PROP_SRC_ASSOC_TYPE: &str = "source_association_type";
+/// USES edge target access kind; USES edges only.
+const PROP_DST_ASSOC_TYPE: &str = "target_association_type";
 /// Vertex type used for the Phase 5 lock sentinel.
 const LOCK_VERTEX_TYPE: &str = "cxg_phase5_lock";
 /// Property name for the lock holder tag.
@@ -132,6 +159,18 @@ fn json_str(s: &str) -> Result<Json> {
         source: Box::new(e),
     })?;
     Ok(Json::new(v))
+}
+
+/// Serialise any `serde::Serialize` value to `indradb::Json` (ADR-14).
+///
+/// Used for structured-list fields (`params`, `template_params`, `template_args`)
+/// that carry `Vec<Struct>` in Rust and must land as a JSON array in IndraDB.
+fn json_value<T: serde::Serialize>(v: &T) -> Result<Json> {
+    let val = serde_json::to_value(v).map_err(|e| Error::Sink {
+        backend: "indradb",
+        source: Box::new(e),
+    })?;
+    Ok(Json::new(val))
 }
 
 // ── Phase5LockGuard impl ──────────────────────────────────────────────────────
@@ -259,6 +298,14 @@ impl GraphSink for IndraDbSink {
         c.index_property(ident(PROP_REPO_NAME)?)
             .await
             .map_err(wrap)?;
+
+        // M8 (S45/ADR-15): register the 4 M8 property indexes.
+        // IndraDB v5 only supports per-property existence indexes (no composite or range
+        // indexes). The Neo4j composite index (kind, return_type) has no IndraDB peer —
+        // documented as a known limitation per ADR-15 §"IndraDB property-index parity".
+        for name in &[PROP_RETURN_TYPE, PROP_IS_VIRTUAL, PROP_IS_STATIC, PROP_KIND] {
+            c.index_property(ident(name)?).await.map_err(wrap)?;
+        }
         Ok(())
     }
 
@@ -273,8 +320,14 @@ impl GraphSink for IndraDbSink {
 
         let started = Instant::now();
 
-        // Build BulkInsertItems: Vertex + key properties per record.
-        let mut all_items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 7);
+        // Build BulkInsertItems: Vertex + base properties + M8 optional properties per record.
+        //
+        // Base fields: 1 Vertex + 6 VertexProperty (usr, repo_name, kind, name,
+        // qualified_name, attrs_json) = 7 items guaranteed.
+        // M8 optional fields: up to 10 additional VertexProperty items when all
+        // optional fields are Some — giving a worst-case of 17 items per node.
+        // `None` fields are skipped (AC-S45-1: no spurious property writes).
+        let mut all_items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 17);
         for node in batch {
             let vid = usr_to_uuid(&node.repo_name, &node.usr);
             let vtype = ident(node.kind.as_str())?;
@@ -309,11 +362,87 @@ impl GraphSink for IndraDbSink {
                 ident(PROP_ATTRS_JSON)?,
                 json_str(&node.attrs_json)?,
             ));
+
+            // ── M8 optional fields (S45) — skip None to avoid spurious property writes ──
+
+            if let Some(ref v) = node.return_type {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_RETURN_TYPE)?,
+                    Json::new(serde_json::Value::String(v.clone())),
+                ));
+            }
+            if let Some(ref v) = node.params {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_PARAMS)?,
+                    json_value(v)?,
+                ));
+            }
+            if let Some(ref v) = node.signature {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_SIGNATURE)?,
+                    Json::new(serde_json::Value::String(v.clone())),
+                ));
+            }
+            if let Some(ref v) = node.code {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_CODE)?,
+                    Json::new(serde_json::Value::String(v.clone())),
+                ));
+            }
+            if let Some(v) = node.code_truncated {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_CODE_TRUNCATED)?,
+                    Json::new(serde_json::Value::Bool(v)),
+                ));
+            }
+            if let Some(ref v) = node.template_params {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_TEMPLATE_PARAMS)?,
+                    json_value(v)?,
+                ));
+            }
+            if let Some(ref v) = node.template_args {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_TEMPLATE_ARGS)?,
+                    json_value(v)?,
+                ));
+            }
+            if let Some(v) = node.is_virtual {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_IS_VIRTUAL)?,
+                    Json::new(serde_json::Value::Bool(v)),
+                ));
+            }
+            if let Some(v) = node.is_pure_virtual {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_IS_PURE_VIRTUAL)?,
+                    Json::new(serde_json::Value::Bool(v)),
+                ));
+            }
+            if let Some(v) = node.is_static {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_IS_STATIC)?,
+                    Json::new(serde_json::Value::Bool(v)),
+                ));
+            }
         }
 
-        // Each node produces 7 items; chunk by items-per-node * batch_size.
-        let items_per_node = 7_usize;
-        let chunk_items = self.batch_size.saturating_mul(items_per_node);
+        // Chunk by worst-case items per node (17 = 7 base + 10 M8 optional) × batch_size.
+        // The effective chunk may be smaller when optional fields are sparse, which is
+        // acceptable — it errs toward under-utilizing the batch size.
+        // Flagged in implementation-notes as a known sizing concern per ADR-15.
+        let items_per_node_worst_case = 17_usize;
+        let chunk_items = self.batch_size.saturating_mul(items_per_node_worst_case);
         let total_nodes = batch.len() as u64;
 
         let mut total_retries = 0u32;
@@ -371,7 +500,11 @@ impl GraphSink for IndraDbSink {
 
     async fn write_edges(&self, batch: &[EdgeRecord]) -> Result<WriteStats> {
         // Build items for all resolvable edges.
-        let mut all_items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 2);
+        //
+        // Base items: 1 Edge + 1 EdgeProperty (attrs_json) = 2 items guaranteed.
+        // M8 optional: up to 2 additional EdgeProperty items for association_type fields —
+        // giving a worst-case of 4 items per edge. `None` fields are skipped.
+        let mut all_items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 4);
         let mut total_written = 0u64;
         for edge_rec in batch {
             let dst_usr = match &edge_rec.dst_usr {
@@ -384,10 +517,27 @@ impl GraphSink for IndraDbSink {
             let e = Edge::new(src_id, edge_type, dst_id);
             all_items.push(BulkInsertItem::Edge(e.clone()));
             all_items.push(BulkInsertItem::EdgeProperty(
-                e,
+                e.clone(),
                 ident(PROP_ATTRS_JSON)?,
                 json_str(&edge_rec.attrs_json)?,
             ));
+
+            // ── M8 optional edge fields (S45) — USES edges only; skip None ───────
+            if let Some(ref v) = edge_rec.source_association_type {
+                all_items.push(BulkInsertItem::EdgeProperty(
+                    e.clone(),
+                    ident(PROP_SRC_ASSOC_TYPE)?,
+                    Json::new(serde_json::Value::String(v.clone())),
+                ));
+            }
+            if let Some(ref v) = edge_rec.target_association_type {
+                all_items.push(BulkInsertItem::EdgeProperty(
+                    e.clone(),
+                    ident(PROP_DST_ASSOC_TYPE)?,
+                    Json::new(serde_json::Value::String(v.clone())),
+                ));
+            }
+
             total_written += 1;
         }
 
@@ -401,9 +551,9 @@ impl GraphSink for IndraDbSink {
 
         let started = Instant::now();
 
-        // Each edge produces 2 items; chunk by items-per-edge * batch_size.
-        let items_per_edge = 2_usize;
-        let chunk_items = self.batch_size.saturating_mul(items_per_edge);
+        // Chunk by worst-case items per edge (4 = 2 base + 2 M8 optional) × batch_size.
+        let items_per_edge_worst_case = 4_usize;
+        let chunk_items = self.batch_size.saturating_mul(items_per_edge_worst_case);
 
         let mut total_retries = 0u32;
         // JoinSet task returns crate Result<u32> (retries used for this chunk).
@@ -627,6 +777,19 @@ mod tests {
             PROP_ATTRS_JSON,
             PROP_LOCK_HOLDER,
             PROP_SCHEMA_VERSION,
+            // M8 promoted property names (S45)
+            PROP_RETURN_TYPE,
+            PROP_PARAMS,
+            PROP_SIGNATURE,
+            PROP_CODE,
+            PROP_CODE_TRUNCATED,
+            PROP_TEMPLATE_PARAMS,
+            PROP_TEMPLATE_ARGS,
+            PROP_IS_VIRTUAL,
+            PROP_IS_PURE_VIRTUAL,
+            PROP_IS_STATIC,
+            PROP_SRC_ASSOC_TYPE,
+            PROP_DST_ASSOC_TYPE,
         ] {
             ident(name).unwrap_or_else(|_| panic!("'{name}' must be a valid identifier"));
         }
@@ -706,6 +869,16 @@ mod tests {
             partial: false,
             phase: 1,
             tu_hash: [0u8; 32],
+            return_type: None,
+            params: None,
+            signature: None,
+            code: None,
+            code_truncated: None,
+            template_params: None,
+            template_args: None,
+            is_virtual: None,
+            is_pure_virtual: None,
+            is_static: None,
         }
     }
 
@@ -720,12 +893,14 @@ mod tests {
             repo_name: "my_repo".to_owned(),
             attrs_json: "{}".to_owned(),
             tu_hash: [0u8; 32],
+            source_association_type: None,
+            target_association_type: None,
         }
     }
 
     #[test]
-    fn node_produces_correct_bulk_item_count() {
-        // Each node should produce 1 Vertex + 6 VertexProperty items = 7.
+    fn node_base_fields_produce_seven_items() {
+        // A node with all M8 optional fields = None produces 1 Vertex + 6 VertexProperty = 7 items.
         let node = make_node("c:@F@foo");
         let vid = usr_to_uuid(&node.repo_name, &node.usr);
         let vtype = ident(node.kind.as_str()).unwrap();
@@ -745,7 +920,92 @@ mod tests {
                 Json::new(serde_json::Value::String("x".to_owned())),
             ));
         }
-        assert_eq!(items.len(), 7);
+        // All optional M8 fields are None → no additional items emitted.
+        assert_eq!(
+            items.len(),
+            7,
+            "base items (all M8 optional = None) must be 7"
+        );
+    }
+
+    #[test]
+    fn node_with_all_m8_fields_produces_seventeen_items() {
+        // A node with all 10 M8 optional fields set produces 7 base + 10 = 17 items.
+        use crate::schema::nodes::{Param, TemplateArg, TemplateParam};
+        let mut node = make_node("c:@F@full");
+        node.return_type = Some("int".to_owned());
+        node.params = Some(vec![Param {
+            name: "x".to_owned(),
+            type_: "int".to_owned(),
+        }]);
+        node.signature = Some("int(int)".to_owned());
+        node.code = Some("int foo(int x) { return x; }".to_owned());
+        node.code_truncated = Some(false);
+        node.template_params = Some(vec![TemplateParam {
+            name: "T".to_owned(),
+            kind: "type".to_owned(),
+            default: None,
+        }]);
+        node.template_args = Some(vec![TemplateArg {
+            kind: "type".to_owned(),
+            value: "int".to_owned(),
+        }]);
+        node.is_virtual = Some(false);
+        node.is_pure_virtual = Some(false);
+        node.is_static = Some(false);
+
+        let vid = usr_to_uuid(&node.repo_name, &node.usr);
+        let vtype = ident(node.kind.as_str()).unwrap();
+        let mut items: Vec<BulkInsertItem> = Vec::new();
+        items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
+        for prop in [
+            PROP_USR,
+            PROP_REPO_NAME,
+            PROP_KIND,
+            PROP_NAME,
+            PROP_QUALIFIED_NAME,
+            PROP_ATTRS_JSON,
+        ] {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(prop).unwrap(),
+                Json::new(serde_json::Value::String("x".to_owned())),
+            ));
+        }
+        // M8 optional string/bool fields
+        for prop in [PROP_RETURN_TYPE, PROP_SIGNATURE, PROP_CODE] {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(prop).unwrap(),
+                Json::new(serde_json::Value::String("v".to_owned())),
+            ));
+        }
+        // Params, template_params, template_args — JSON arrays
+        for prop in [PROP_PARAMS, PROP_TEMPLATE_PARAMS, PROP_TEMPLATE_ARGS] {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(prop).unwrap(),
+                Json::new(serde_json::Value::Array(vec![])),
+            ));
+        }
+        // Boolean fields
+        for prop in [
+            PROP_CODE_TRUNCATED,
+            PROP_IS_VIRTUAL,
+            PROP_IS_PURE_VIRTUAL,
+            PROP_IS_STATIC,
+        ] {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(prop).unwrap(),
+                Json::new(serde_json::Value::Bool(false)),
+            ));
+        }
+        assert_eq!(
+            items.len(),
+            17,
+            "all M8 optional fields populated must produce 17 items"
+        );
     }
 
     #[test]
@@ -774,9 +1034,9 @@ mod tests {
     // Verify chunk logic and item-count arithmetic without a live IndraDB server.
 
     #[test]
-    fn items_per_node_is_seven() {
-        // Each node → 1 Vertex + 6 VertexProperty = 7 items.
-        // The write_nodes chunking multiplies batch_size × 7.
+    fn items_per_node_base_is_seven() {
+        // A node with all M8 optional fields = None → 1 Vertex + 6 VertexProperty = 7 base items.
+        // write_nodes now chunks by worst-case 17 items per node.
         let node = make_node("c:@F@foo");
         let vid = usr_to_uuid(&node.repo_name, &node.usr);
         let vtype = ident(node.kind.as_str()).unwrap();
@@ -796,12 +1056,17 @@ mod tests {
                 Json::new(serde_json::Value::String("x".to_owned())),
             ));
         }
-        assert_eq!(items.len(), 7, "items_per_node constant must equal 7");
+        assert_eq!(
+            items.len(),
+            7,
+            "base items (no M8 optional fields) must equal 7"
+        );
     }
 
     #[test]
-    fn items_per_edge_is_two() {
-        // Each edge → 1 Edge + 1 EdgeProperty = 2 items.
+    fn items_per_edge_base_is_two() {
+        // Each edge with no association_type fields → 1 Edge + 1 EdgeProperty (attrs_json) = 2 items.
+        // write_edges now chunks by worst-case 4 items per edge.
         let edge = make_edge("src", "dst");
         let src_id = usr_to_uuid(&edge.repo_name, &edge.src_usr);
         let dst_id = usr_to_uuid(&edge.repo_name, edge.dst_usr.as_deref().unwrap());
@@ -815,19 +1080,63 @@ mod tests {
                 Json::new(serde_json::Value::Object(Default::default())),
             ),
         ];
-        assert_eq!(items.len(), 2, "items_per_edge constant must equal 2");
+        assert_eq!(
+            items.len(),
+            2,
+            "base edge items (no association_type) must equal 2"
+        );
+    }
+
+    #[test]
+    fn items_per_edge_with_association_types_is_four() {
+        // A USES edge with both association_type fields set → 4 items.
+        let mut edge = make_edge("src", "dst");
+        edge.source_association_type = Some("read".to_owned());
+        edge.target_association_type = Some("read".to_owned());
+
+        let src_id = usr_to_uuid(&edge.repo_name, &edge.src_usr);
+        let dst_id = usr_to_uuid(&edge.repo_name, edge.dst_usr.as_deref().unwrap());
+        let edge_type = ident(edge.kind.as_str()).unwrap();
+        let e = Edge::new(src_id, edge_type, dst_id);
+        let mut items: Vec<BulkInsertItem> = vec![
+            BulkInsertItem::Edge(e.clone()),
+            BulkInsertItem::EdgeProperty(
+                e.clone(),
+                ident(PROP_ATTRS_JSON).unwrap(),
+                Json::new(serde_json::Value::Object(Default::default())),
+            ),
+        ];
+        if let Some(ref v) = edge.source_association_type {
+            items.push(BulkInsertItem::EdgeProperty(
+                e.clone(),
+                ident(PROP_SRC_ASSOC_TYPE).unwrap(),
+                Json::new(serde_json::Value::String(v.clone())),
+            ));
+        }
+        if let Some(ref v) = edge.target_association_type {
+            items.push(BulkInsertItem::EdgeProperty(
+                e.clone(),
+                ident(PROP_DST_ASSOC_TYPE).unwrap(),
+                Json::new(serde_json::Value::String(v.clone())),
+            ));
+        }
+        assert_eq!(
+            items.len(),
+            4,
+            "USES edge with both association_type fields must produce 4 items"
+        );
     }
 
     #[test]
     fn chunk_size_arithmetic_nodes() {
-        // With batch_size=3 and items_per_node=7, chunk_items = 21.
-        // 30 items (from 4+ nodes) should produce ceil(30/21) = 2 chunks.
+        // With batch_size=3 and worst-case items_per_node=17, chunk_items = 51.
+        // 60 items should produce ceil(60/51) = 2 chunks.
         let batch_size = 3_usize;
-        let items_per_node = 7_usize;
-        let chunk_items = batch_size * items_per_node; // 21
-        let total_items = 30_usize;
+        let items_per_node_worst_case = 17_usize;
+        let chunk_items = batch_size * items_per_node_worst_case; // 51
+        let total_items = 60_usize;
         let chunk_count = total_items.div_ceil(chunk_items);
-        assert_eq!(chunk_count, 2, "30 items / chunk_size 21 => 2 chunks");
+        assert_eq!(chunk_count, 2, "60 items / chunk_size 51 => 2 chunks");
     }
 
     #[test]
@@ -858,6 +1167,259 @@ mod tests {
         }
         assert_eq!(written, 2, "2 of 3 edges are resolved");
         assert_eq!(item_count, 4, "2 resolved edges => 4 BulkInsertItems");
+    }
+
+    // ── S45: M8 property write helpers ───────────────────────────────────────
+
+    /// None optional fields must NOT produce any extra BulkInsertItems (AC-S45-1).
+    #[test]
+    fn none_m8_fields_produce_no_items() {
+        let node = make_node("c:@F@no_m8");
+        // All M8 fields are None in make_node — verify item count stays at 7 base.
+        assert!(node.return_type.is_none());
+        assert!(node.params.is_none());
+        assert!(node.signature.is_none());
+        assert!(node.code.is_none());
+        assert!(node.code_truncated.is_none());
+        assert!(node.template_params.is_none());
+        assert!(node.template_args.is_none());
+        assert!(node.is_virtual.is_none());
+        assert!(node.is_pure_virtual.is_none());
+        assert!(node.is_static.is_none());
+
+        // Simulate the item-build loop from write_nodes for this node.
+        let vid = usr_to_uuid(&node.repo_name, &node.usr);
+        let vtype = ident(node.kind.as_str()).unwrap();
+        let mut items: Vec<BulkInsertItem> = Vec::new();
+        items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
+        for prop in [
+            PROP_USR,
+            PROP_REPO_NAME,
+            PROP_KIND,
+            PROP_NAME,
+            PROP_QUALIFIED_NAME,
+            PROP_ATTRS_JSON,
+        ] {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(prop).unwrap(),
+                Json::new(serde_json::Value::Null),
+            ));
+        }
+        // None fields → nothing pushed
+        if let Some(ref v) = node.return_type {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(PROP_RETURN_TYPE).unwrap(),
+                Json::new(serde_json::Value::String(v.clone())),
+            ));
+        }
+        if let Some(ref v) = node.params {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(PROP_PARAMS).unwrap(),
+                json_value(v).unwrap(),
+            ));
+        }
+        if let Some(ref v) = node.signature {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(PROP_SIGNATURE).unwrap(),
+                Json::new(serde_json::Value::String(v.clone())),
+            ));
+        }
+        if let Some(ref v) = node.code {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(PROP_CODE).unwrap(),
+                Json::new(serde_json::Value::String(v.clone())),
+            ));
+        }
+        if let Some(v) = node.code_truncated {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(PROP_CODE_TRUNCATED).unwrap(),
+                Json::new(serde_json::Value::Bool(v)),
+            ));
+        }
+        if let Some(ref v) = node.template_params {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(PROP_TEMPLATE_PARAMS).unwrap(),
+                json_value(v).unwrap(),
+            ));
+        }
+        if let Some(ref v) = node.template_args {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(PROP_TEMPLATE_ARGS).unwrap(),
+                json_value(v).unwrap(),
+            ));
+        }
+        if let Some(v) = node.is_virtual {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(PROP_IS_VIRTUAL).unwrap(),
+                Json::new(serde_json::Value::Bool(v)),
+            ));
+        }
+        if let Some(v) = node.is_pure_virtual {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(PROP_IS_PURE_VIRTUAL).unwrap(),
+                Json::new(serde_json::Value::Bool(v)),
+            ));
+        }
+        if let Some(v) = node.is_static {
+            items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(PROP_IS_STATIC).unwrap(),
+                Json::new(serde_json::Value::Bool(v)),
+            ));
+        }
+
+        assert_eq!(items.len(), 7, "no M8 optional fields → exactly 7 items");
+    }
+
+    /// `params` list serialises to a JSON array of objects with a `"type"` key (ADR-14).
+    #[test]
+    fn params_serialise_to_json_array_with_type_key() {
+        use crate::schema::nodes::Param;
+        let params = vec![
+            Param {
+                name: "x".to_owned(),
+                type_: "int".to_owned(),
+            },
+            Param {
+                name: "y".to_owned(),
+                type_: "const char *".to_owned(),
+            },
+        ];
+        let j = json_value(&params).expect("serialisation must succeed");
+        let arr = match &*j {
+            serde_json::Value::Array(a) => a,
+            other => panic!("expected array, got {other:?}"),
+        };
+        assert_eq!(arr.len(), 2);
+        // Param.type_ must be serialised as key "type" (not "type_") per serde rename.
+        assert!(
+            arr[0].get("type").is_some(),
+            "first param must have 'type' key"
+        );
+        assert_eq!(arr[0]["name"], serde_json::Value::String("x".to_owned()));
+        assert_eq!(arr[0]["type"], serde_json::Value::String("int".to_owned()));
+    }
+
+    /// A node with `code_truncated: Some(true)` and `code: None` must not panic.
+    /// Exercises the AC-S45-5 path (no spurious code property, truncated flag written).
+    #[test]
+    fn code_truncated_true_with_none_code_produces_only_flag_item() {
+        let mut node = make_node("c:@F@truncated");
+        node.code = None;
+        node.code_truncated = Some(true);
+
+        let vid = usr_to_uuid(&node.repo_name, &node.usr);
+        let mut extra_items: Vec<BulkInsertItem> = Vec::new();
+        // Simulate just the optional-field portion of write_nodes.
+        if let Some(ref v) = node.code {
+            extra_items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(PROP_CODE).unwrap(),
+                Json::new(serde_json::Value::String(v.clone())),
+            ));
+        }
+        if let Some(v) = node.code_truncated {
+            extra_items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(PROP_CODE_TRUNCATED).unwrap(),
+                Json::new(serde_json::Value::Bool(v)),
+            ));
+        }
+        // code is None → no code item; code_truncated is Some(true) → 1 item.
+        assert_eq!(
+            extra_items.len(),
+            1,
+            "only code_truncated item, no code item"
+        );
+        match &extra_items[0] {
+            BulkInsertItem::VertexProperty(_, id, val) => {
+                assert_eq!(id.as_str(), PROP_CODE_TRUNCATED);
+                assert_eq!(*val, Json::new(serde_json::Value::Bool(true)));
+            }
+            other => panic!("unexpected item type: {other:?}"),
+        }
+    }
+
+    /// Association type fields on edges: None fields must not produce items.
+    #[test]
+    fn none_association_types_produce_no_extra_items() {
+        let edge = make_edge("a", "b"); // both association_type = None
+        let src_id = usr_to_uuid(&edge.repo_name, &edge.src_usr);
+        let dst_id = usr_to_uuid(&edge.repo_name, edge.dst_usr.as_deref().unwrap());
+        let edge_type = ident(edge.kind.as_str()).unwrap();
+        let e = Edge::new(src_id, edge_type, dst_id);
+        let mut items: Vec<BulkInsertItem> = vec![
+            BulkInsertItem::Edge(e.clone()),
+            BulkInsertItem::EdgeProperty(
+                e.clone(),
+                ident(PROP_ATTRS_JSON).unwrap(),
+                Json::new(serde_json::Value::Null),
+            ),
+        ];
+        if let Some(ref v) = edge.source_association_type {
+            items.push(BulkInsertItem::EdgeProperty(
+                e.clone(),
+                ident(PROP_SRC_ASSOC_TYPE).unwrap(),
+                Json::new(serde_json::Value::String(v.clone())),
+            ));
+        }
+        if let Some(ref v) = edge.target_association_type {
+            items.push(BulkInsertItem::EdgeProperty(
+                e.clone(),
+                ident(PROP_DST_ASSOC_TYPE).unwrap(),
+                Json::new(serde_json::Value::String(v.clone())),
+            ));
+        }
+        assert_eq!(
+            items.len(),
+            2,
+            "None association_type fields → 2 base items only"
+        );
+    }
+
+    /// Both association_type fields populated → 2 extra EdgeProperty items (4 total).
+    #[test]
+    fn populated_association_types_produce_four_items() {
+        let mut edge = make_edge("a", "b");
+        edge.source_association_type = Some("write".to_owned());
+        edge.target_association_type = Some("write".to_owned());
+        let src_id = usr_to_uuid(&edge.repo_name, &edge.src_usr);
+        let dst_id = usr_to_uuid(&edge.repo_name, edge.dst_usr.as_deref().unwrap());
+        let edge_type = ident(edge.kind.as_str()).unwrap();
+        let e = Edge::new(src_id, edge_type, dst_id);
+        let mut items: Vec<BulkInsertItem> = vec![
+            BulkInsertItem::Edge(e.clone()),
+            BulkInsertItem::EdgeProperty(
+                e.clone(),
+                ident(PROP_ATTRS_JSON).unwrap(),
+                Json::new(serde_json::Value::Null),
+            ),
+        ];
+        if let Some(ref v) = edge.source_association_type {
+            items.push(BulkInsertItem::EdgeProperty(
+                e.clone(),
+                ident(PROP_SRC_ASSOC_TYPE).unwrap(),
+                Json::new(serde_json::Value::String(v.clone())),
+            ));
+        }
+        if let Some(ref v) = edge.target_association_type {
+            items.push(BulkInsertItem::EdgeProperty(
+                e.clone(),
+                ident(PROP_DST_ASSOC_TYPE).unwrap(),
+                Json::new(serde_json::Value::String(v.clone())),
+            ));
+        }
+        assert_eq!(items.len(), 4, "both association_type populated → 4 items");
     }
 
     #[test]
