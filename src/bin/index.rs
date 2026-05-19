@@ -7,6 +7,7 @@
 //! `compile_commands.json` by walking upward from `PATH` (Phase 0.5).
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -17,6 +18,67 @@ use cpp_indexer::config::Config;
 use cpp_indexer::pipeline::{run, RunOptions};
 use cpp_indexer::sink::factory;
 use cpp_indexer::visit::modules_cpp20;
+
+// ---------------------------------------------------------------------------
+// --fail-on-tu-error flag type
+// ---------------------------------------------------------------------------
+
+/// Controls when a non-zero failed-TU fraction causes exit code 2.
+#[derive(Debug, Clone, Copy)]
+enum FailOnTuError {
+    /// Never exit 2 due to failed TUs; the flag is a no-op.
+    Never,
+    /// Exit 2 when `failed / total >= ratio`. Invariant: `0.0 <= ratio <= 1.0`.
+    Ratio(f64),
+}
+
+impl std::str::FromStr for FailOnTuError {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case("never") {
+            return Ok(Self::Never);
+        }
+        let r: f64 = s
+            .parse()
+            .map_err(|_| format!("expected a number in [0.0, 1.0] or `never`, got `{s}`"))?;
+        if r.is_nan() || !(0.0..=1.0).contains(&r) {
+            return Err(format!("ratio must be in [0.0, 1.0], got `{r}`"));
+        }
+        Ok(Self::Ratio(r))
+    }
+}
+
+impl Default for FailOnTuError {
+    fn default() -> Self {
+        Self::Ratio(1.0)
+    }
+}
+
+impl FailOnTuError {
+    /// Return the process exit code based on the failed / total TU counts.
+    ///
+    /// - `Never` → always `0`.
+    /// - `failed == 0` → `0` (no failures means success regardless of ratio).
+    /// - `failed / total >= ratio` → `2`; otherwise `0`.
+    fn exit_code(&self, failed: usize, total: usize) -> u8 {
+        match self {
+            FailOnTuError::Never => 0,
+            FailOnTuError::Ratio(r) => {
+                if failed == 0 {
+                    return 0;
+                }
+                // total >= 1 because failed >= 1 implies total >= 1
+                let ratio = failed as f64 / total as f64;
+                if ratio >= *r {
+                    2
+                } else {
+                    0
+                }
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -77,6 +139,16 @@ struct Cli {
     /// Path to a `cxg-index.toml` config file. CLI flags override file settings.
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
+
+    /// Exit with code 2 when the fraction of failed translation units meets or
+    /// exceeds RATIO. `never` disables the check. Default: 1.0 (exit 2 only
+    /// when every TU fails).
+    #[arg(
+        long = "fail-on-tu-error",
+        value_name = "RATIO|never",
+        default_value = "1.0"
+    )]
+    fail_on_tu_error: FailOnTuError,
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +156,7 @@ struct Cli {
 // ---------------------------------------------------------------------------
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> anyhow::Result<ExitCode> {
     // Initialise tracing with RUST_LOG env filter; default to INFO.
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -102,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
         if let Some(note) = modules_cpp20::capability_version_note() {
             println!("{note}");
         }
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     let file_config = load_config(cli.config.as_ref())?;
@@ -175,12 +247,12 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("pipeline failed")?;
 
-    eprintln!(
-        "cxg-index: done — {} TUs | {} partial | {} nodes | {} edges",
-        stats.tu_count, stats.partial_tu_count, stats.nodes_written, stats.edges_written
-    );
+    eprintln!("{}", stats.closing_summary());
 
-    Ok(())
+    let code = cli
+        .fail_on_tu_error
+        .exit_code(stats.failed_tu_count, stats.tu_count);
+    Ok(ExitCode::from(code))
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +358,143 @@ mod tests {
             neo4j_password_env: None,
             indradb_token_env: None,
             config: None,
+            fail_on_tu_error: FailOnTuError::default(),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // FailOnTuError::from_str round-trip and invalid-input cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn from_str_never_case_insensitive() {
+        let variants = ["never", "Never", "NEVER", "nEvEr"];
+        for v in variants {
+            let parsed: FailOnTuError = v
+                .parse()
+                .unwrap_or_else(|e| panic!("expected `never` to parse, got error for `{v}`: {e}"));
+            assert!(
+                matches!(parsed, FailOnTuError::Never),
+                "expected Never for `{v}`"
+            );
+        }
+    }
+
+    #[test]
+    fn from_str_ratio_valid_boundaries() {
+        for (s, expected) in [("0.0", 0.0_f64), ("1.0", 1.0), ("0.5", 0.5), ("0.25", 0.25)] {
+            match s.parse::<FailOnTuError>().unwrap() {
+                FailOnTuError::Ratio(r) => {
+                    assert!(
+                        (r - expected).abs() < f64::EPSILON,
+                        "ratio mismatch for `{s}`: got {r}"
+                    );
+                }
+                other => panic!("expected Ratio for `{s}`, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn from_str_invalid_above_1() {
+        let err = "1.5".parse::<FailOnTuError>().unwrap_err();
+        assert!(
+            err.contains("ratio must be in"),
+            "error should mention ratio range; got: {err}"
+        );
+    }
+
+    #[test]
+    fn from_str_invalid_below_0() {
+        let err = "-0.1".parse::<FailOnTuError>().unwrap_err();
+        assert!(
+            err.contains("ratio must be in"),
+            "error should mention ratio range; got: {err}"
+        );
+    }
+
+    #[test]
+    fn from_str_invalid_non_numeric() {
+        let err = "garbage".parse::<FailOnTuError>().unwrap_err();
+        assert!(
+            err.contains("expected a number"),
+            "error should describe expected format; got: {err}"
+        );
+    }
+
+    #[test]
+    fn from_str_invalid_nan() {
+        // "NaN" is a valid f64 parse target but must be rejected.
+        let err = "NaN".parse::<FailOnTuError>().unwrap_err();
+        assert!(
+            !err.is_empty(),
+            "NaN should produce a non-empty error; got: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // FailOnTuError::exit_code logic (unit table)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn exit_code_ratio_1_all_fail() {
+        // ratio 1.0, all fail → 5/5 = 1.0 >= 1.0 → exit 2
+        assert_eq!(FailOnTuError::Ratio(1.0).exit_code(5, 5), 2);
+    }
+
+    #[test]
+    fn exit_code_ratio_1_partial_fail() {
+        // ratio 1.0, partial fail → 2/5 = 0.4 < 1.0 → exit 0
+        assert_eq!(FailOnTuError::Ratio(1.0).exit_code(2, 5), 0);
+    }
+
+    #[test]
+    fn exit_code_ratio_0_any_fail() {
+        // ratio 0.0, 1 failure → 1/5 = 0.2 >= 0.0 → exit 2
+        assert_eq!(FailOnTuError::Ratio(0.0).exit_code(1, 5), 2);
+    }
+
+    #[test]
+    fn exit_code_ratio_0_no_fail() {
+        // ratio 0.0, 0 failures → failed == 0 short-circuit → exit 0
+        assert_eq!(FailOnTuError::Ratio(0.0).exit_code(0, 5), 0);
+    }
+
+    #[test]
+    fn exit_code_never_all_fail() {
+        // Never variant → always exit 0
+        assert_eq!(FailOnTuError::Never.exit_code(5, 5), 0);
+    }
+
+    #[test]
+    fn exit_code_never_no_fail() {
+        assert_eq!(FailOnTuError::Never.exit_code(0, 5), 0);
+    }
+
+    #[test]
+    fn exit_code_zero_tu_zero_fail() {
+        // 0 TUs, 0 failures → exit 0 (0/0 edge case; resolved by failed==0 short-circuit)
+        assert_eq!(FailOnTuError::Ratio(0.0).exit_code(0, 0), 0);
+        assert_eq!(FailOnTuError::Ratio(1.0).exit_code(0, 0), 0);
+    }
+
+    #[test]
+    fn exit_code_boundary_exactly_met() {
+        // ratio 0.5, 2 of 4 fail → 0.5 >= 0.5 → exit 2
+        assert_eq!(FailOnTuError::Ratio(0.5).exit_code(2, 4), 2);
+    }
+
+    #[test]
+    fn exit_code_boundary_just_below() {
+        // ratio 0.5, 1 of 4 fail → 0.25 < 0.5 → exit 0
+        assert_eq!(FailOnTuError::Ratio(0.5).exit_code(1, 4), 0);
+    }
+
+    #[test]
+    fn default_is_ratio_1() {
+        assert!(
+            matches!(FailOnTuError::default(), FailOnTuError::Ratio(r) if (r - 1.0).abs() < f64::EPSILON)
+        );
     }
 
     #[test]

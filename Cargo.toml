@@ -208,3 +208,22 @@ required-features = []
 name = "sink_parity"
 path = "tests/integration/sink_parity.rs"
 required-features = []
+
+[[test]]
+name = "api_jobs_status"
+path = "tests/integration/api_jobs_status.rs"
+required-features = []
+
+[[test]]
+name = "cli_fail_on_tu_error"
+path = "tests/integration/cli_fail_on_tu_error.rs"
+
+[[test]]
+name = "spdlog_smoke"
+path = "tests/integration/spdlog_smoke.rs"
+required-features = ["test-mock"]
+
+[[test]]
+name = "qa_boundary"
+path = "tests/integration/qa_boundary.rs"
+required-features = []

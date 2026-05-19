@@ -67,7 +67,7 @@ pub struct IngestRequest {
 // ── JobPhase ───────────────────────────────────────────────────────────────────
 
 /// Current pipeline phase for a running job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobPhase {
     Bootstrap,
@@ -81,7 +81,7 @@ pub enum JobPhase {
 // ── JobState ───────────────────────────────────────────────────────────────────
 
 /// Top-level lifecycle state for a job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
     Queued,
@@ -90,10 +90,28 @@ pub enum JobState {
     Failed,
 }
 
+// ── JobOutcome ─────────────────────────────────────────────────────────────────
+
+/// Result classification of a completed job (set once at completion, absent
+/// while queued or running).  Complements `JobState` which tracks lifecycle.
+///
+/// AC-6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobOutcome {
+    /// All TUs parsed successfully (`failed_tu_count == 0`).
+    Completed,
+    /// Some but not all TUs failed (`0 < failed_tu_count < tus_total`).
+    CompletedWithErrors,
+    /// All TUs failed, or only TUs were present and all failed
+    /// (`failed_tu_count >= tus_total && tus_total > 0`).
+    Failed,
+}
+
 // ── JobRecord ─────────────────────────────────────────────────────────────────
 
 /// Complete record for a job, returned by `GET /v1/jobs/{id}`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobRecord {
     pub job_id: String,
     pub state: JobState,
@@ -121,6 +139,15 @@ pub struct JobRecord {
     /// Error message if `state == failed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Number of TUs that failed to parse.  Defaults to 0 for back-compat
+    /// with legacy records that pre-date AC-6 (AC-7).
+    #[serde(default)]
+    pub failed_tu_count: u64,
+    /// Result classification of a completed job.  Absent (`None`) while the
+    /// job is queued or running; `skip_serializing_if` keeps the key out of
+    /// in-flight responses.  AC-6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<JobOutcome>,
 }
 
 /// Concrete progress counters for a job.
@@ -153,6 +180,8 @@ impl JobRecord {
             started_at: None,
             finished_at: None,
             error: None,
+            failed_tu_count: 0,
+            status: None,
         }
     }
 }
@@ -331,11 +360,29 @@ impl JobQueue {
     }
 
     /// Mark a job as done and set final progress counters.
-    pub fn mark_done_with_counts(&self, job_id: &str, tus_total: u64, nodes: u64, edges: u64) {
+    ///
+    /// `failed_tu_count` is the number of TUs that failed to parse; it is used
+    /// to derive `status` (AC-6).  `#[serde(default)]` on the field ensures
+    /// legacy records without it round-trip correctly (AC-7).
+    pub fn mark_done_with_counts(
+        &self,
+        job_id: &str,
+        tus_total: u64,
+        failed_tu_count: u64,
+        nodes: u64,
+        edges: u64,
+    ) {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        let outcome = if failed_tu_count == 0 {
+            JobOutcome::Completed
+        } else if failed_tu_count >= tus_total {
+            JobOutcome::Failed
+        } else {
+            JobOutcome::CompletedWithErrors
+        };
         let mut jobs = self.jobs.lock().expect("jobs lock poisoned");
         if let Some(rec) = jobs.get_mut(job_id) {
             rec.state = JobState::Done;
@@ -343,6 +390,8 @@ impl JobQueue {
             rec.progress = 1.0;
             rec.tus_total = tus_total;
             rec.tus_done = tus_total;
+            rec.failed_tu_count = failed_tu_count;
+            rec.status = Some(outcome);
             rec.nodes = nodes;
             rec.edges = edges;
             rec.finished_at = Some(now);
@@ -447,7 +496,7 @@ mod tests {
             .enqueue(path_source("/repo"), IngestOptions::default())
             .unwrap();
         queue.mark_running(&id);
-        queue.mark_done_with_counts(&id, 3, 10, 20);
+        queue.mark_done_with_counts(&id, 3, 0, 10, 20);
         let rec = queue.get(&id).unwrap();
         assert_eq!(rec.state, JobState::Done);
         assert_eq!(rec.progress, 1.0);
@@ -564,5 +613,138 @@ mod tests {
         let list = reg.list();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].path, "/new");
+    }
+
+    // ── S4 / AC-6 tests ────────────────────────────────────────────────────────
+
+    /// All TUs succeeded → `status = completed`.
+    #[test]
+    fn outcome_completed_when_no_failures() {
+        let (queue, _rx) = JobQueue::new(64);
+        let id = queue
+            .enqueue(path_source("/repo"), IngestOptions::default())
+            .unwrap();
+        queue.mark_running(&id);
+        queue.mark_done_with_counts(&id, 7, 0, 100, 50);
+        let rec = queue.get(&id).unwrap();
+        assert_eq!(rec.failed_tu_count, 0);
+        assert_eq!(rec.status, Some(JobOutcome::Completed));
+    }
+
+    /// Some TUs failed → `status = completed_with_errors`.
+    #[test]
+    fn outcome_completed_with_errors_when_partial_failures() {
+        let (queue, _rx) = JobQueue::new(64);
+        let id = queue
+            .enqueue(path_source("/repo"), IngestOptions::default())
+            .unwrap();
+        queue.mark_running(&id);
+        queue.mark_done_with_counts(&id, 7, 2, 80, 40);
+        let rec = queue.get(&id).unwrap();
+        assert_eq!(rec.failed_tu_count, 2);
+        assert_eq!(rec.status, Some(JobOutcome::CompletedWithErrors));
+    }
+
+    /// All TUs failed → `status = failed`.
+    #[test]
+    fn outcome_failed_when_all_failures() {
+        let (queue, _rx) = JobQueue::new(64);
+        let id = queue
+            .enqueue(path_source("/repo"), IngestOptions::default())
+            .unwrap();
+        queue.mark_running(&id);
+        queue.mark_done_with_counts(&id, 7, 7, 0, 0);
+        let rec = queue.get(&id).unwrap();
+        assert_eq!(rec.failed_tu_count, 7);
+        assert_eq!(rec.status, Some(JobOutcome::Failed));
+    }
+
+    /// Zero TUs, zero failures → treated as `completed` (consistent with ADR-3
+    /// / ADR-4: "no work done is not a failure").
+    #[test]
+    fn outcome_completed_when_zero_tus() {
+        let (queue, _rx) = JobQueue::new(64);
+        let id = queue
+            .enqueue(path_source("/repo"), IngestOptions::default())
+            .unwrap();
+        queue.mark_running(&id);
+        queue.mark_done_with_counts(&id, 0, 0, 0, 0);
+        let rec = queue.get(&id).unwrap();
+        assert_eq!(rec.failed_tu_count, 0);
+        assert_eq!(rec.status, Some(JobOutcome::Completed));
+    }
+
+    /// AC-7: a legacy JSON record without `failed_tu_count` and `status` keys
+    /// must deserialise successfully, defaulting both to zero / None.
+    #[test]
+    fn legacy_json_without_new_fields_deserialises() {
+        let json = r#"{
+            "job_id": "legacy-id-001",
+            "state": "done",
+            "phase": "done",
+            "progress": 1.0,
+            "tus_done": 5,
+            "tus_total": 5,
+            "nodes": 42,
+            "edges": 10,
+            "source": {"path": "/repo"},
+            "options": {},
+            "enqueued_at": 1716000000
+        }"#;
+        let rec: JobRecord = serde_json::from_str(json)
+            .expect("legacy JSON must deserialise without failed_tu_count/status keys (AC-7)");
+        assert_eq!(rec.failed_tu_count, 0, "should default to 0");
+        assert!(rec.status.is_none(), "should default to None");
+        assert_eq!(rec.job_id, "legacy-id-001");
+    }
+
+    /// Queued/running records serialise without `status` key present
+    /// (`skip_serializing_if = "Option::is_none"`).
+    #[test]
+    fn queued_record_serialises_without_status_key() {
+        let (queue, _rx) = JobQueue::new(64);
+        let id = queue
+            .enqueue(path_source("/repo"), IngestOptions::default())
+            .unwrap();
+        let rec = queue.get(&id).unwrap();
+        let json = serde_json::to_value(&rec).unwrap();
+        assert!(
+            json.get("status").is_none(),
+            "queued record must not contain `status` key"
+        );
+    }
+
+    /// Running record also serialises without `status` key.
+    #[test]
+    fn running_record_serialises_without_status_key() {
+        let (queue, _rx) = JobQueue::new(64);
+        let id = queue
+            .enqueue(path_source("/repo"), IngestOptions::default())
+            .unwrap();
+        queue.mark_running(&id);
+        let rec = queue.get(&id).unwrap();
+        let json = serde_json::to_value(&rec).unwrap();
+        assert!(
+            json.get("status").is_none(),
+            "running record must not contain `status` key"
+        );
+    }
+
+    /// Completed record serialises with `status` key set to snake_case value.
+    #[test]
+    fn completed_record_serialises_status_as_snake_case() {
+        let (queue, _rx) = JobQueue::new(64);
+        let id = queue
+            .enqueue(path_source("/repo"), IngestOptions::default())
+            .unwrap();
+        queue.mark_running(&id);
+        queue.mark_done_with_counts(&id, 7, 2, 100, 50);
+        let rec = queue.get(&id).unwrap();
+        let json = serde_json::to_value(&rec).unwrap();
+        assert_eq!(
+            json["status"],
+            serde_json::Value::String("completed_with_errors".to_owned())
+        );
+        assert_eq!(json["failed_tu_count"], 2);
     }
 }

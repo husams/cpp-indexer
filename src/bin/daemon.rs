@@ -135,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
                         queue_worker.mark_done_with_counts(
                             &job_id,
                             stats.tu_count.try_into().unwrap_or(u64::MAX),
+                            stats.failed_tu_count.try_into().unwrap_or(u64::MAX),
                             stats.nodes_written,
                             stats.edges_written,
                         );

@@ -202,6 +202,7 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
             opts.workers,
         )?;
         stats.partial_tu_count = parallel_stats.tu_partial.try_into().unwrap_or(usize::MAX);
+        stats.failed_tu_count = parallel_stats.tu_error.try_into().unwrap_or(usize::MAX);
 
         if !opts.skip_cache && parallel_stats.tu_error == 0 {
             for (source_hash, args_hash) in cache_entries {
@@ -657,15 +658,50 @@ pub struct PipelineStats {
     pub cache_hits: u64,
     /// Number of TUs that had at least one libclang parse error.
     pub partial_tu_count: usize,
+    /// Number of TUs with a hard libclang error (AC-4).
+    pub failed_tu_count: usize,
     /// Total nodes written to the sink.
     pub nodes_written: u64,
     /// Total edges written to the sink.
     pub edges_written: u64,
 }
 
+impl PipelineStats {
+    /// Return the canonical closing summary line for `cxg-index` stderr output.
+    ///
+    /// Format (stable — snapshot-tested in AC-4):
+    /// `cxg-index: done — <T> TUs | <P> partial | <F> failed | <N> nodes | <E> edges`
+    pub fn closing_summary(&self) -> String {
+        format!(
+            "cxg-index: done \u{2014} {} TUs | {} partial | {} failed | {} nodes | {} edges",
+            self.tu_count,
+            self.partial_tu_count,
+            self.failed_tu_count,
+            self.nodes_written,
+            self.edges_written,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_summary_format() {
+        let stats = PipelineStats {
+            tu_count: 10,
+            partial_tu_count: 2,
+            failed_tu_count: 1,
+            nodes_written: 100,
+            edges_written: 50,
+            ..Default::default()
+        };
+        assert_eq!(
+            stats.closing_summary(),
+            "cxg-index: done \u{2014} 10 TUs | 2 partial | 1 failed | 100 nodes | 50 edges"
+        );
+    }
 
     fn tu_entry(file: PathBuf) -> TuEntry {
         TuEntry {
