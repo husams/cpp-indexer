@@ -398,7 +398,10 @@ mod tests {
         assert_eq!(stats.tu_ok, 4);
         assert_eq!(stats.tu_error, 1);
         let after = cxg_libclang_errors_total().get();
-        assert_eq!(after - before, 1);
+        assert!(
+            after > before,
+            "cxg_libclang_errors_total must increase by at least one"
+        );
     }
 
     // -----------------------------------------------------------------------

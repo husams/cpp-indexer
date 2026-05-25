@@ -142,6 +142,18 @@ pub fn generate_schema(schema_version_tag: &str) -> String {
     out.push_str("- `repo_name` (string): name of the owning repository.\n");
     out.push_str("- `attrs_json` (string): per-kind extra attributes as canonical JSON.\n");
     out.push_str("- `partial` (bool): true when the TU had libclang parse errors.\n");
+    out.push_str("- `return_type` (string|null): type returned by a function or method.\n");
+    out.push_str("- `params` (list|null): parameters for a function or method.\n");
+    out.push_str("- `signature` (string|null): full function/method signature.\n");
+    out.push_str("- `code` (string|null): source code snippet.\n");
+    out.push_str("- `code_truncated` (bool|null): true if source code snippet was truncated.\n");
+    out.push_str(
+        "- `template_params` (list|null): template parameters for template declarations.\n",
+    );
+    out.push_str("- `template_args` (list|null): template arguments for specializations.\n");
+    out.push_str("- `is_virtual` (bool|null): true if method is virtual.\n");
+    out.push_str("- `is_pure_virtual` (bool|null): true if method is pure virtual.\n");
+    out.push_str("- `is_static` (bool|null): true if function/method is static.\n");
     out.push('\n');
 
     // ── Key edge properties ───────────────────────────────────────────────────
@@ -156,6 +168,8 @@ pub fn generate_schema(schema_version_tag: &str) -> String {
     );
     out.push_str("- `cross_repo_candidate` (bool): true when dst_usr is absent from the current repo's map.\n");
     out.push_str("- `attrs_json` (string): edge attributes as canonical JSON (vtable_slot, access, virtual, via…).\n");
+    out.push_str("- `source_association_type` (string|null): source-side access classification for USES edges.\n");
+    out.push_str("- `target_association_type` (string|null): target-side access classification for USES edges.\n");
     out.push('\n');
 
     out

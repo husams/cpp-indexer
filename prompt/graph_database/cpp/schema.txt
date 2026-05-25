@@ -110,6 +110,16 @@ A top-level macro expansion at a call site. Direction: (call_site)-[:EXPANDS_TO]
 - `repo_name` (string): name of the owning repository.
 - `attrs_json` (string): per-kind extra attributes as canonical JSON.
 - `partial` (bool): true when the TU had libclang parse errors.
+- `return_type` (string|null): type returned by a function or method.
+- `params` (list|null): parameters for a function or method.
+- `signature` (string|null): full function/method signature.
+- `code` (string|null): source code snippet.
+- `code_truncated` (bool|null): true if source code snippet was truncated.
+- `template_params` (list|null): template parameters for template declarations.
+- `template_args` (list|null): template arguments for specializations.
+- `is_virtual` (bool|null): true if method is virtual.
+- `is_pure_virtual` (bool|null): true if method is pure virtual.
+- `is_static` (bool|null): true if function/method is static.
 
 ## Key edge properties
 
@@ -119,4 +129,6 @@ A top-level macro expansion at a call site. Direction: (call_site)-[:EXPANDS_TO]
 - `resolved` (bool): true when dst_usr was found in the current repo's USR map.
 - `cross_repo_candidate` (bool): true when dst_usr is absent from the current repo's map.
 - `attrs_json` (string): edge attributes as canonical JSON (vtable_slot, access, virtual, via…).
+- `source_association_type` (string|null): source-side access classification for USES edges.
+- `target_association_type` (string|null): target-side access classification for USES edges.
 

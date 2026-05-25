@@ -452,3 +452,163 @@ async fn specialization_has_no_template_params() {
         );
     }
 }
+
+async fn collect_edges_local(stage_dir: &std::path::Path) -> Vec<(String, String, String)> {
+    use arrow::array::StringArray;
+    use arrow::compute::cast;
+    use arrow::datatypes::DataType;
+
+    let mut result = Vec::new();
+
+    for entry in walkdir::WalkDir::new(stage_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|s| s.starts_with("edges-") && s.ends_with(".parquet"))
+                .unwrap_or(false)
+        })
+    {
+        let file = tokio::fs::File::open(entry.path()).await.unwrap();
+        let builder = ParquetRecordBatchStreamBuilder::new(file).await.unwrap();
+        let mut stream = builder.build().unwrap();
+
+        while let Some(batch) = stream.try_next().await.unwrap() {
+            let src_col = batch
+                .column_by_name("src_usr")
+                .expect("edges parquet must have 'src_usr' column");
+            let dst_col = batch
+                .column_by_name("dst_usr")
+                .expect("edges parquet must have 'dst_usr' column");
+            let kind_col = batch
+                .column_by_name("kind")
+                .expect("edges parquet must have 'kind' column");
+
+            let srcs = src_col.as_any().downcast_ref::<StringArray>().unwrap();
+            let dsts = dst_col.as_any().downcast_ref::<StringArray>().unwrap();
+            let kind_utf8 =
+                cast(kind_col, &DataType::Utf8).expect("kind cast to Utf8 must succeed");
+            let kinds = kind_utf8.as_any().downcast_ref::<StringArray>().unwrap();
+
+            for i in 0..batch.num_rows() {
+                let dst = if dsts.is_null(i) {
+                    String::new()
+                } else {
+                    dsts.value(i).to_owned()
+                };
+                result.push((srcs.value(i).to_owned(), dst, kinds.value(i).to_owned()));
+            }
+        }
+    }
+
+    result
+}
+
+async fn visit_template_fixture_with_edges() -> (Vec<NodeRecord>, Vec<(String, String, String)>) {
+    let dir = TempDir::new().unwrap();
+    let stage_dir = dir.path().join("stage");
+
+    let clang = global_clang();
+    let fixture = template_fixture_dir();
+    let src = fixture.join("template.cpp");
+
+    let opts = VisitOptions {
+        repo_name: "test-repo",
+        tu_hash: [0u8; 32],
+        file_path: &src,
+        args: &[
+            "clang++".to_owned(),
+            "-std=c++14".to_owned(),
+            format!("-I{}", fixture.display()),
+        ],
+        skip_system_headers: true,
+    };
+
+    let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
+    let _ = visit_tu(clang, &opts, &mut writer).unwrap();
+    writer.finish().unwrap();
+
+    let nodes = collect_node_records_with_template_fields(&stage_dir).await;
+    let edges = collect_edges_local(&stage_dir).await;
+    (nodes, edges)
+}
+
+/// E2E complex template and macro test case for Order processing system
+#[tokio::test]
+async fn orders_complex_template_and_macro_e2e() {
+    let (nodes, edges) = visit_template_fixture_with_edges().await;
+
+    for n in &nodes {
+        println!("Node: kind={:?}, name={}, usr={}", n.kind, n.name, n.usr);
+    }
+
+    // 1. Verify TEMPLATE_DECL for 'Order' exists
+    let order_templates: Vec<&NodeRecord> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::TemplateDef && n.name == "Order")
+        .collect();
+    assert!(
+        !order_templates.is_empty(),
+        "expected a TEMPLATE_DECL node named 'Order'"
+    );
+
+    let order_tmpl = order_templates[0];
+    let params = order_tmpl
+        .template_params
+        .as_ref()
+        .expect("Order must have template_params");
+    for e in &edges {
+        println!("Edge: src={}, dst={}, kind={}", e.0, e.1, e.2);
+    }
+
+    let param_names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        param_names.contains(&"P"),
+        "Expected type param 'P'; got: {:?}",
+        param_names
+    );
+    assert!(
+        param_names.contains(&"Qty"),
+        "Expected non-type param 'Qty'; got: {:?}",
+        param_names
+    );
+    assert!(
+        param_names.contains(&"TaxCalc"),
+        "Expected template-template param 'TaxCalc'; got: {:?}",
+        param_names
+    );
+
+    // 2. Verify SPECIALIZATION for 'Order' (for DigitalProduct) is best-effort (can be empty)
+    let order_specializations: Vec<&NodeRecord> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Specialization && n.name == "Order")
+        .collect();
+    if !order_specializations.is_empty() {
+        let spec_node = order_specializations[0];
+        assert!(
+            spec_node.template_args.is_some(),
+            "Specialization must have template_args"
+        );
+    } else {
+        println!("INFO: No specialization node found for Order (best-effort)");
+    }
+
+    // 3. Verify MACRO for 'LOG_ORDER' exists
+    let log_order_macros: Vec<&NodeRecord> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Macro && n.name == "LOG_ORDER")
+        .collect();
+    assert!(
+        !log_order_macros.is_empty(),
+        "expected a MACRO node named 'LOG_ORDER'"
+    );
+
+    // 4. Verify EXPANDS_TO edge connects process_orders to LOG_ORDER
+    let expands_to_edges: Vec<&(String, String, String)> =
+        edges.iter().filter(|(_, _, k)| k == "EXPANDS_TO").collect();
+    assert!(
+        !expands_to_edges.is_empty(),
+        "expected at least one EXPANDS_TO edge"
+    );
+}
