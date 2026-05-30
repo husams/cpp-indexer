@@ -198,6 +198,41 @@ pub async fn check_schema_version(sink: &Arc<dyn GraphSink>) -> Result<()> {
     }
 }
 
+/// Write-path schema-version gate (ADR-4, adr-2, S6-SC-01/02).
+///
+/// Called at the start of Phase 4 before any data is written to the sink.
+/// If the existing graph carries a tag that does not match the current binary's
+/// `SCHEMA_VERSION_TAG`, the write is refused with an actionable error message
+/// that instructs the operator to stop writers, run `reset`, and re-index.
+///
+/// The `None` branch (fresh DB or post-reset state) is intentionally allowed so
+/// that a reset graph (which has no `SchemaVersion` node) and a completely fresh
+/// graph both proceed without error.  Auto-migration is explicitly NOT performed
+/// (ADR-4 decision pt 1).
+pub async fn check_schema_version_for_write(sink: &Arc<dyn GraphSink>) -> Result<()> {
+    match sink.read_schema_version().await? {
+        None => {
+            // Fresh DB or graph was reset — no stale version to block the write.
+            info!("write-path: no existing SchemaVersion node; proceeding");
+            Ok(())
+        }
+        Some(actual) => {
+            if actual != SCHEMA_VERSION_TAG {
+                Err(Error::Schema(format!(
+                    "write refused: existing graph has schema tag '{actual}' but this binary \
+                     writes '{SCHEMA_VERSION_TAG}'. To upgrade: (1) stop all writers, \
+                     (2) run `POST /v1/reset` (or `sink.reset(ResetTarget::All)`), \
+                     (3) re-index all repos with this binary. \
+                     Auto-migration is not supported (ADR-4)."
+                )))
+            } else {
+                info!("write-path: schema version OK ({actual})");
+                Ok(())
+            }
+        }
+    }
+}
+
 // ── 3. Mixed-backend detection ─────────────────────────────────────────────────
 
 /// Extract the set of distinct `sink` attribute values from REPO-kind node
@@ -313,12 +348,61 @@ fn build_global_usr_map(
 
 // ── 5. Materialise EXTERNAL_REF edges ─────────────────────────────────────────
 
+/// Build a `repo_name → stage_dir` index by reading one REPO-kind node from each stage dir.
+fn build_repo_stage_map(stage_dirs: &[PathBuf]) -> HashMap<String, PathBuf> {
+    use crate::schema::arrow::record_batch_to_nodes;
+    use crate::schema::NodeKind;
+
+    let mut map: HashMap<String, PathBuf> = HashMap::new();
+    for stage_dir in stage_dirs {
+        let shards = match collect_shards(stage_dir, "nodes") {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        'outer: for shard_path in &shards {
+            let arrow_reader =
+                match parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                    match std::fs::File::open(shard_path) {
+                        Ok(f) => f,
+                        Err(_) => continue,
+                    },
+                )
+                .and_then(|b| b.build())
+                {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+            for batch_result in arrow_reader.flatten() {
+                for node in record_batch_to_nodes(&batch_result) {
+                    if node.kind == NodeKind::Repo || !node.repo_name.is_empty() {
+                        map.entry(node.repo_name.clone())
+                            .or_insert_with(|| stage_dir.clone());
+                        if node.kind == NodeKind::Repo {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
 async fn materialise_external_refs(
     sink: &Arc<dyn GraphSink>,
     stage_dirs: &[PathBuf],
     global_map: &HashMap<String, UsrEntry>,
     batch_size: usize,
 ) -> Result<Phase5Stats> {
+    use crate::resolve::symbol_map::SymbolAllocator;
+    use std::collections::hash_map::Entry;
+
+    // Build repo_name → stage_dir index for ID resolution.
+    let repo_stage_map = build_repo_stage_map(stage_dirs);
+    // Cache of opened read-only handles: repo_name → ReadOnlyHandle.
+    let mut handle_cache: HashMap<String, crate::resolve::symbol_map::ReadOnlyHandle> =
+        HashMap::new();
+
     let mut stats = Phase5Stats::default();
     let mut pending: Vec<EdgeRecord> = Vec::with_capacity(batch_size);
 
@@ -360,6 +444,101 @@ async fn materialise_external_refs(
                 match global_map.get(dst_usr.as_str()) {
                     Some(entry) if entry.repo_name != edge.repo_name => {
                         // Found in a different repo — emit EXTERNAL_REF.
+                        let dst_repo = entry.repo_name.clone();
+
+                        // Resolve integer IDs via per-repo SQLite maps.
+                        // src_id: source repo (current stage_dir).
+                        // dst_id: destination repo (entry.repo_name's stage_dir).
+                        let src_id = {
+                            let src_repo = &edge.repo_name;
+                            let h = match handle_cache.entry(src_repo.clone()) {
+                                Entry::Occupied(o) => o.into_mut(),
+                                Entry::Vacant(v) => {
+                                    let db_path = repo_stage_map
+                                        .get(src_repo)
+                                        .map(|d| d.join("cxg-symbols.db"))
+                                        .unwrap_or_else(|| stage_dir.join("cxg-symbols.db"));
+                                    match SymbolAllocator::open_readonly(&db_path, 1000) {
+                                        Ok(h) => v.insert(h),
+                                        Err(_) => {
+                                            // SQLite unavailable for this repo — emit with src_id=0.
+                                            let via_json =
+                                                format!(r#"{{"via":"{}"}}"#, edge.kind.as_str());
+                                            pending.push(EdgeRecord {
+                                                src_usr: edge.src_usr.clone(),
+                                                dst_usr: Some(dst_usr.clone()),
+                                                dst_placeholder: None,
+                                                kind: EdgeKind::ExternalRef,
+                                                resolved: true,
+                                                cross_repo_candidate: false,
+                                                repo_name: edge.repo_name.clone(),
+                                                attrs_json: via_json,
+                                                tu_hash: edge.tu_hash,
+                                                source_association_type: edge
+                                                    .source_association_type
+                                                    .clone(),
+                                                target_association_type: edge
+                                                    .target_association_type
+                                                    .clone(),
+                                                src_id: 0,
+                                                dst_id: None,
+                                                dst_repo_name: dst_repo.clone(),
+                                            });
+                                            stats.external_refs_written += 1;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            };
+                            h.lookup_symbol(&edge.src_usr).unwrap_or(None).unwrap_or(0)
+                        };
+
+                        let dst_id = {
+                            let h = match handle_cache.entry(dst_repo.clone()) {
+                                Entry::Occupied(o) => o.into_mut(),
+                                Entry::Vacant(v) => {
+                                    let db_path = repo_stage_map
+                                        .get(&dst_repo)
+                                        .map(|d| d.join("cxg-symbols.db"))
+                                        .unwrap_or_else(|| {
+                                            // Synthetic repo (system:*) — no db.
+                                            PathBuf::from("/dev/null")
+                                        });
+                                    match SymbolAllocator::open_readonly(&db_path, 1000) {
+                                        Ok(h) => v.insert(h),
+                                        Err(_) => {
+                                            // Destination db unavailable — emit with dst_id=None.
+                                            let via_json =
+                                                format!(r#"{{"via":"{}"}}"#, edge.kind.as_str());
+                                            pending.push(EdgeRecord {
+                                                src_usr: edge.src_usr.clone(),
+                                                dst_usr: Some(dst_usr.clone()),
+                                                dst_placeholder: None,
+                                                kind: EdgeKind::ExternalRef,
+                                                resolved: true,
+                                                cross_repo_candidate: false,
+                                                repo_name: edge.repo_name.clone(),
+                                                attrs_json: via_json,
+                                                tu_hash: edge.tu_hash,
+                                                source_association_type: edge
+                                                    .source_association_type
+                                                    .clone(),
+                                                target_association_type: edge
+                                                    .target_association_type
+                                                    .clone(),
+                                                src_id,
+                                                dst_id: None,
+                                                dst_repo_name: dst_repo.clone(),
+                                            });
+                                            stats.external_refs_written += 1;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            };
+                            h.lookup_symbol(dst_usr).unwrap_or(None)
+                        };
+
                         let via_json = format!(r#"{{"via":"{}"}}"#, edge.kind.as_str());
                         pending.push(EdgeRecord {
                             src_usr: edge.src_usr.clone(),
@@ -372,9 +551,11 @@ async fn materialise_external_refs(
                             attrs_json: via_json,
                             tu_hash: edge.tu_hash,
                             // M8: Mirror USES classification onto EXTERNAL_REF (ADR-13, S43).
-                            // Populated by S43; None here until access classifier is wired.
                             source_association_type: edge.source_association_type.clone(),
                             target_association_type: edge.target_association_type.clone(),
+                            src_id,
+                            dst_id,
+                            dst_repo_name: dst_repo,
                         });
                         stats.external_refs_written += 1;
                     }
@@ -526,5 +707,187 @@ mod tests {
         let sink: Arc<dyn GraphSink> = Arc::new(MockSink::default());
         // MockSink returns None for read_schema_version → must be OK.
         assert!(check_schema_version(&sink).await.is_ok());
+    }
+
+    // ── Story 5: write-path version gate tests ────────────────────────────
+
+    /// S6-SC-01: write-path gate with a fresh DB (None) must succeed.
+    #[tokio::test]
+    async fn write_path_version_gate_none_is_ok() {
+        use crate::sink::mock::MockSink;
+        let sink: Arc<dyn GraphSink> = Arc::new(MockSink::default());
+        // MockSink returns None for read_schema_version (no version written yet).
+        assert!(
+            check_schema_version_for_write(&sink).await.is_ok(),
+            "fresh DB must pass the write-path gate"
+        );
+    }
+
+    /// S6-SC-01: write-path gate matching the current tag must succeed.
+    #[tokio::test]
+    async fn write_path_version_gate_matching_tag_is_ok() {
+        use crate::sink::mock::MockSink;
+        let sink = Arc::new(MockSink::default());
+        // Write the current tag so read_schema_version returns it.
+        sink.write_schema_version(SCHEMA_VERSION_TAG, "{}")
+            .await
+            .unwrap();
+        let sink: Arc<dyn GraphSink> = sink;
+        assert!(
+            check_schema_version_for_write(&sink).await.is_ok(),
+            "matching schema version must pass the write-path gate"
+        );
+    }
+
+    /// S6-SC-01: write-path gate with a stale tag must return Error::Schema
+    /// naming both the expected and actual tags.
+    #[tokio::test]
+    async fn write_path_version_gate_stale_tag_is_refused() {
+        use crate::error::Result as CxgResult;
+        use crate::schema::{EdgeRecord, NodeRecord};
+        use crate::sink::lock::Phase5LockGuard;
+        use crate::sink::{HealthInfo, ResetTarget, WriteStats};
+        use async_trait::async_trait;
+
+        struct StaleSink;
+
+        #[async_trait]
+        impl GraphSink for StaleSink {
+            fn backend_name(&self) -> &'static str {
+                "mock-stale"
+            }
+            async fn preflight(&self) -> CxgResult<()> {
+                Ok(())
+            }
+            async fn ensure_indexes(&self) -> CxgResult<()> {
+                Ok(())
+            }
+            async fn write_nodes(&self, _b: &[NodeRecord]) -> CxgResult<WriteStats> {
+                unimplemented!()
+            }
+            async fn write_edges(&self, _b: &[EdgeRecord]) -> CxgResult<WriteStats> {
+                unimplemented!()
+            }
+            async fn reset(&self, _t: ResetTarget) -> CxgResult<()> {
+                Ok(())
+            }
+            async fn acquire_phase5_lock(
+                &self,
+                _ttl: std::time::Duration,
+            ) -> CxgResult<Box<dyn Phase5LockGuard>> {
+                unimplemented!()
+            }
+            async fn read_schema_version(&self) -> CxgResult<Option<String>> {
+                // Simulates a v5 graph on disk.
+                Ok(Some("cxg-schema-v5".to_owned()))
+            }
+            async fn write_schema_version(&self, _tag: &str, _attrs: &str) -> CxgResult<()> {
+                Ok(())
+            }
+            async fn health(&self) -> CxgResult<HealthInfo> {
+                Ok(HealthInfo {
+                    status: "ok".to_owned(),
+                    latency: std::time::Duration::ZERO,
+                })
+            }
+        }
+
+        let sink: Arc<dyn GraphSink> = Arc::new(StaleSink);
+        let err = check_schema_version_for_write(&sink)
+            .await
+            .expect_err("stale tag must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cxg-schema-v5"),
+            "error must name the actual (stale) tag; got: {msg}"
+        );
+        assert!(
+            msg.contains(SCHEMA_VERSION_TAG),
+            "error must name the expected tag; got: {msg}"
+        );
+        assert!(
+            msg.contains("reset") || msg.contains("re-index"),
+            "error must instruct operator to reset/re-index; got: {msg}"
+        );
+    }
+
+    /// S6-SC-02: the write path errors rather than silently overwriting when no reset
+    /// has been performed (stale graph is not auto-migrated).
+    #[tokio::test]
+    async fn write_path_errors_without_reset_not_auto_migrated() {
+        use crate::error::Result as CxgResult;
+        use crate::schema::{EdgeRecord, NodeRecord};
+        use crate::sink::lock::Phase5LockGuard;
+        use crate::sink::{HealthInfo, ResetTarget, WriteStats};
+        use async_trait::async_trait;
+        use std::sync::{Arc as StdArc, Mutex};
+
+        struct TrackedSink {
+            write_called: Mutex<bool>,
+        }
+
+        #[async_trait]
+        impl GraphSink for TrackedSink {
+            fn backend_name(&self) -> &'static str {
+                "mock-tracked"
+            }
+            async fn preflight(&self) -> CxgResult<()> {
+                Ok(())
+            }
+            async fn ensure_indexes(&self) -> CxgResult<()> {
+                Ok(())
+            }
+            async fn write_nodes(&self, _b: &[NodeRecord]) -> CxgResult<WriteStats> {
+                *self.write_called.lock().unwrap() = true;
+                Ok(WriteStats {
+                    nodes_written: 0,
+                    retries: 0,
+                    elapsed: std::time::Duration::ZERO,
+                })
+            }
+            async fn write_edges(&self, _b: &[EdgeRecord]) -> CxgResult<WriteStats> {
+                *self.write_called.lock().unwrap() = true;
+                Ok(WriteStats {
+                    nodes_written: 0,
+                    retries: 0,
+                    elapsed: std::time::Duration::ZERO,
+                })
+            }
+            async fn reset(&self, _t: ResetTarget) -> CxgResult<()> {
+                Ok(())
+            }
+            async fn acquire_phase5_lock(
+                &self,
+                _ttl: std::time::Duration,
+            ) -> CxgResult<Box<dyn Phase5LockGuard>> {
+                unimplemented!()
+            }
+            async fn read_schema_version(&self) -> CxgResult<Option<String>> {
+                Ok(Some("cxg-schema-v5".to_owned()))
+            }
+            async fn write_schema_version(&self, _tag: &str, _attrs: &str) -> CxgResult<()> {
+                *self.write_called.lock().unwrap() = true;
+                Ok(())
+            }
+            async fn health(&self) -> CxgResult<HealthInfo> {
+                Ok(HealthInfo {
+                    status: "ok".to_owned(),
+                    latency: std::time::Duration::ZERO,
+                })
+            }
+        }
+
+        let inner = StdArc::new(TrackedSink {
+            write_called: Mutex::new(false),
+        });
+        let sink: Arc<dyn GraphSink> = inner.clone();
+
+        // The write-path gate must refuse before any write occurs.
+        let result = check_schema_version_for_write(&sink).await;
+        assert!(result.is_err(), "stale v5 graph must be refused");
+        assert!(
+            !*inner.write_called.lock().unwrap(),
+            "no write must have occurred before the gate is cleared"
+        );
     }
 }

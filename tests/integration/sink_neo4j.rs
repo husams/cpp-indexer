@@ -75,6 +75,8 @@ fn sample_nodes(repo: &str) -> Vec<NodeRecord> {
             is_virtual: None,
             is_pure_virtual: None,
             is_static: None,
+            symbol_id: 1,
+            file_id: 1,
         },
         NodeRecord {
             usr: format!("c:@F@fn_b#{repo}"),
@@ -100,6 +102,8 @@ fn sample_nodes(repo: &str) -> Vec<NodeRecord> {
             is_virtual: None,
             is_pure_virtual: None,
             is_static: None,
+            symbol_id: 2,
+            file_id: 2,
         },
     ]
 }
@@ -117,6 +121,9 @@ fn sample_edges(repo: &str) -> Vec<EdgeRecord> {
         tu_hash: [0u8; 32],
         source_association_type: None,
         target_association_type: None,
+        src_id: 1,
+        dst_id: Some(2),
+        dst_repo_name: repo.to_owned(),
     }]
 }
 
@@ -214,7 +221,7 @@ async fn neo4j_sink_skips_unresolved_edges() {
     let nodes = sample_nodes(repo);
     sink.write_nodes(&nodes).await.expect("write_nodes");
 
-    // Edge with dst_usr = None.
+    // Edge with dst_id = None (unresolved).
     let bad_edge = EdgeRecord {
         src_usr: format!("c:@F@fn_a#{repo}"),
         dst_usr: None,
@@ -227,6 +234,9 @@ async fn neo4j_sink_skips_unresolved_edges() {
         tu_hash: [0u8; 32],
         source_association_type: None,
         target_association_type: None,
+        src_id: 1,
+        dst_id: None,
+        dst_repo_name: repo.to_owned(),
     };
 
     let stats = sink

@@ -50,6 +50,8 @@ fn make_run_opts(stage_dir: PathBuf) -> RunOptions {
         workers: None,
         skip_cache: false,
         skip_repo_node: true,
+        symbol_db_path: None,
+        symbol_cache_size: 100_000,
     }
 }
 

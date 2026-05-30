@@ -73,6 +73,11 @@ impl From<RawRepoConfig> for RepoConfig {
 
 // ── Index section ─────────────────────────────────────────────────────────────
 
+/// Default LRU cache size for the symbol/file allocator (OQ-2, adr-3).
+///
+/// Set to `0` to disable the cache entirely.
+pub const DEFAULT_SYMBOL_CACHE_SIZE: usize = 100_000;
+
 /// `[index]` — Phase 1 / parallelism settings.
 #[derive(Debug, Clone)]
 pub struct IndexConfig {
@@ -90,6 +95,19 @@ pub struct IndexConfig {
 
     /// Directory for Parquet staging shards and manifest cache.
     pub stage_dir: Option<PathBuf>,
+
+    /// LRU cache capacity for the per-repo symbol/file allocator.
+    ///
+    /// Default: [`DEFAULT_SYMBOL_CACHE_SIZE`] (100 000).  Set to `0` to
+    /// disable the cache (every lookup hits SQLite).
+    pub symbol_cache_size: usize,
+
+    /// Explicit path for the per-repo SQLite symbol map (`cxg-symbols.db`).
+    ///
+    /// `None` means "resolve to `<stage_dir>/cxg-symbols.db` at the use
+    /// site".  Carrying it as `Option<PathBuf>` here preserves the
+    /// distinction between "operator supplied a path" and "use the default".
+    pub symbol_db_path: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -101,10 +119,17 @@ struct RawIndexConfig {
     #[serde(default = "default_true")]
     skip_system_headers: bool,
     stage_dir: Option<PathBuf>,
+    #[serde(default = "default_symbol_cache_size")]
+    symbol_cache_size: usize,
+    symbol_db_path: Option<PathBuf>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_symbol_cache_size() -> usize {
+    DEFAULT_SYMBOL_CACHE_SIZE
 }
 
 impl From<RawIndexConfig> for IndexConfig {
@@ -114,6 +139,8 @@ impl From<RawIndexConfig> for IndexConfig {
             skip_phase2: r.skip_phase2,
             skip_system_headers: r.skip_system_headers,
             stage_dir: r.stage_dir,
+            symbol_cache_size: r.symbol_cache_size,
+            symbol_db_path: r.symbol_db_path,
         }
     }
 }
@@ -443,6 +470,38 @@ impl Config {
     }
 }
 
+// ── Symbol config resolution helpers ─────────────────────────────────────────
+
+/// Resolve the effective `symbol_cache_size` from the precedence chain
+/// `cli_override > env_override > file_value > default`.
+///
+/// Callers pass `None` for any layer that is absent. The resolved value is
+/// always `Some`; it equals [`DEFAULT_SYMBOL_CACHE_SIZE`] when every layer is
+/// `None`.
+pub fn resolve_symbol_cache_size(
+    cli_override: Option<usize>,
+    env_override: Option<usize>,
+    file_value: Option<usize>,
+) -> usize {
+    cli_override
+        .or(env_override)
+        .or(file_value)
+        .unwrap_or(DEFAULT_SYMBOL_CACHE_SIZE)
+}
+
+/// Resolve the effective `symbol_db_path` from the precedence chain
+/// `cli_override > env_override > file_value`.
+///
+/// Returns `None` when all layers are absent; the caller is responsible for
+/// resolving `None` to `<stage_dir>/cxg-symbols.db` at the allocator use site.
+pub fn resolve_symbol_db_path(
+    cli_override: Option<PathBuf>,
+    env_override: Option<PathBuf>,
+    file_value: Option<PathBuf>,
+) -> Option<PathBuf> {
+    cli_override.or(env_override).or(file_value)
+}
+
 /// Extract a best-effort field path from a `toml::de::Error`.
 fn field_path_from_toml_error(e: &toml::de::Error) -> String {
     let msg = e.to_string();
@@ -643,6 +702,148 @@ token = "secret-token"
             }
             other => panic!("expected Error::Config, got {other:?}"),
         }
+    }
+
+    // ── (e) symbol_cache_size + symbol_db_path config surface ────────────────
+
+    // ── resolution helpers: precedence table ──────────────────────────────────
+
+    #[test]
+    fn resolve_cache_size_all_none_returns_default() {
+        assert_eq!(
+            resolve_symbol_cache_size(None, None, None),
+            DEFAULT_SYMBOL_CACHE_SIZE
+        );
+    }
+
+    #[test]
+    fn resolve_cache_size_file_value_used_when_no_override() {
+        assert_eq!(resolve_symbol_cache_size(None, None, Some(42)), 42);
+    }
+
+    #[test]
+    fn resolve_cache_size_env_overrides_file() {
+        assert_eq!(resolve_symbol_cache_size(None, Some(99), Some(42)), 99);
+    }
+
+    #[test]
+    fn resolve_cache_size_cli_overrides_env_and_file() {
+        assert_eq!(resolve_symbol_cache_size(Some(1), Some(99), Some(42)), 1);
+    }
+
+    #[test]
+    fn resolve_cache_size_zero_is_preserved() {
+        // S3-SC-05: cache_size=0 must survive every surface.
+        assert_eq!(resolve_symbol_cache_size(Some(0), None, None), 0);
+        assert_eq!(resolve_symbol_cache_size(None, Some(0), None), 0);
+        assert_eq!(resolve_symbol_cache_size(None, None, Some(0)), 0);
+    }
+
+    #[test]
+    fn resolve_db_path_all_none_returns_none() {
+        assert!(resolve_symbol_db_path(None, None, None).is_none());
+    }
+
+    #[test]
+    fn resolve_db_path_cli_overrides_all() {
+        let cli = Some(PathBuf::from("/cli/path.db"));
+        let env = Some(PathBuf::from("/env/path.db"));
+        let file = Some(PathBuf::from("/file/path.db"));
+        assert_eq!(
+            resolve_symbol_db_path(cli, env, file),
+            Some(PathBuf::from("/cli/path.db"))
+        );
+    }
+
+    #[test]
+    fn resolve_db_path_env_overrides_file() {
+        let env = Some(PathBuf::from("/env/path.db"));
+        let file = Some(PathBuf::from("/file/path.db"));
+        assert_eq!(
+            resolve_symbol_db_path(None, env, file),
+            Some(PathBuf::from("/env/path.db"))
+        );
+    }
+
+    #[test]
+    fn config_symbol_cache_size_default() {
+        let toml_str = r#"
+[sink]
+backend = "neo4j"
+
+[sink.neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password_env = "NEO4J_PASSWORD"
+"#;
+        let cfg = Config::parse(toml_str).expect("must parse");
+        // No [index] section → index is None; resolved default is DEFAULT_SYMBOL_CACHE_SIZE.
+        let cache_size = cfg
+            .index
+            .as_ref()
+            .map(|i| i.symbol_cache_size)
+            .unwrap_or(DEFAULT_SYMBOL_CACHE_SIZE);
+        assert_eq!(cache_size, DEFAULT_SYMBOL_CACHE_SIZE);
+    }
+
+    #[test]
+    fn config_symbol_cache_size_explicit() {
+        let toml_str = r#"
+[sink]
+backend = "neo4j"
+
+[sink.neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password_env = "NEO4J_PASSWORD"
+
+[index]
+symbol_cache_size = 0
+"#;
+        let cfg = Config::parse(toml_str).expect("must parse");
+        let idx = cfg.index.as_ref().expect("[index] present");
+        assert_eq!(idx.symbol_cache_size, 0, "0 must not be coerced to default");
+    }
+
+    #[test]
+    fn config_symbol_db_path_default_is_none() {
+        let toml_str = r#"
+[sink]
+backend = "neo4j"
+
+[sink.neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password_env = "NEO4J_PASSWORD"
+
+[index]
+symbol_cache_size = 500
+"#;
+        let cfg = Config::parse(toml_str).expect("must parse");
+        let idx = cfg.index.as_ref().expect("[index] present");
+        assert!(idx.symbol_db_path.is_none(), "no path set → None");
+    }
+
+    #[test]
+    fn config_symbol_db_path_explicit() {
+        let toml_str = r#"
+[sink]
+backend = "neo4j"
+
+[sink.neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password_env = "NEO4J_PASSWORD"
+
+[index]
+symbol_db_path = "/tmp/my-symbols.db"
+"#;
+        let cfg = Config::parse(toml_str).expect("must parse");
+        let idx = cfg.index.as_ref().expect("[index] present");
+        assert_eq!(
+            idx.symbol_db_path.as_ref().expect("path set"),
+            &PathBuf::from("/tmp/my-symbols.db")
+        );
     }
 
     #[test]

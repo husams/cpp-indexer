@@ -103,7 +103,10 @@ pub fn with_thread_index<R>(f: impl FnOnce(&Index<'static>) -> R) -> R {
     })
 }
 
+use std::sync::Arc;
+
 use crate::{
+    resolve::symbol_map::SymbolAllocator,
     schema::{
         clip_code, EdgeKind, EdgeRecord, NodeKind, NodeRecord, Param, TemplateArg, TemplateParam,
     },
@@ -136,6 +139,16 @@ pub struct VisitOptions<'a> {
     /// compiler-internal headers) are silently skipped (AC-M2-14).
     /// When `false`, system-header entities are emitted like any other (AC-M2-15).
     pub skip_system_headers: bool,
+    /// Optional `SymbolAllocator` for per-repo integer ID allocation (graph-symbol-ids, Story 3).
+    ///
+    /// When `Some`, `visit_tu_inner` will call `get_or_insert_symbol`/`get_or_insert_file`
+    /// for every emitted `NodeRecord` and `EdgeRecord` and populate `symbol_id`, `file_id`,
+    /// `src_id`, `dst_id` accordingly.
+    ///
+    /// When `None`, the integer ID fields remain zero (staging only; sinks must not write
+    /// integer ID fields in this mode). This is the default for tests that do not set up
+    /// a SQLite database.
+    pub allocator: Option<Arc<SymbolAllocator>>,
 }
 
 /// Parse one translation unit using a caller-supplied `Index` and write Phase 1
@@ -275,6 +288,9 @@ fn visit_tu_inner(
         is_virtual: None,
         is_pure_virtual: None,
         is_static: None,
+        // Integer IDs populated by post-processing pass below.
+        symbol_id: 0,
+        file_id: 0,
     };
     collector.nodes.push(module_node);
     collector.module_usr = Some(module_usr);
@@ -284,6 +300,24 @@ fn visit_tu_inner(
         collector.visit(entity, parent);
         EntityVisitResult::Recurse
     });
+
+    // graph-symbol-ids post-processing pass (Story 3, v6):
+    // If an allocator is provided, populate integer ID fields on every node and edge.
+    if let Some(ref alloc) = opts.allocator {
+        for node in &mut collector.nodes {
+            node.symbol_id = alloc.get_or_insert_symbol(&node.usr).unwrap_or(0);
+            node.file_id = alloc.get_or_insert_file(&node.file_path).unwrap_or(0);
+        }
+        for edge in &mut collector.edges {
+            edge.src_id = alloc.get_or_insert_symbol(&edge.src_usr).unwrap_or(0);
+            edge.dst_id = if let Some(ref dst) = edge.dst_usr {
+                alloc.get_or_insert_symbol(dst).ok()
+            } else {
+                None
+            };
+            // dst_repo_name is already set to repo_name for intra-repo edges at construction.
+        }
+    }
 
     // Write collected records.
     writer.write_nodes(&collector.nodes)?;
@@ -516,6 +550,9 @@ impl<'a> Collector<'a> {
             is_virtual,
             is_pure_virtual,
             is_static,
+            // Integer IDs populated by post-processing pass in visit_tu_inner.
+            symbol_id: 0,
+            file_id: 0,
         };
 
         self.nodes.push(node);
@@ -694,6 +731,10 @@ impl<'a> Collector<'a> {
             tu_hash: self.tu_hash,
             source_association_type: Some(assoc.clone()),
             target_association_type: Some(assoc),
+            // Integer IDs populated by post-processing pass in visit_tu_inner.
+            src_id: 0,
+            dst_id: None,
+            dst_repo_name: self.repo_name.to_owned(),
         });
     }
 
@@ -743,6 +784,9 @@ impl<'a> Collector<'a> {
             is_virtual: None,
             is_pure_virtual: None,
             is_static: None,
+            // Integer IDs populated by post-processing pass in visit_tu_inner.
+            symbol_id: 0,
+            file_id: 0,
         };
         self.nodes.push(header_node);
 
@@ -890,6 +934,10 @@ impl<'a> Collector<'a> {
             // all other edge kinds stay None
             source_association_type: None,
             target_association_type: None,
+            // Integer IDs populated by post-processing pass in visit_tu_inner.
+            src_id: 0,
+            dst_id: None,
+            dst_repo_name: self.repo_name.to_owned(),
         });
     }
 }
@@ -1239,6 +1287,7 @@ pub fn visit_all(
             file_path: &entry.file,
             args: &entry.args,
             skip_system_headers,
+            allocator: None,
         };
 
         match visit_tu(clang, &opts, &mut writer) {

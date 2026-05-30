@@ -68,6 +68,8 @@ fn method_node(usr: &str, repo: &str) -> NodeRecord {
         is_virtual: Some(false),
         is_pure_virtual: Some(false),
         is_static: Some(false),
+        symbol_id: 1,
+        file_id: 1,
     }
 }
 
@@ -97,6 +99,8 @@ fn truncated_node(usr: &str, repo: &str) -> NodeRecord {
         is_virtual: None,
         is_pure_virtual: None,
         is_static: Some(false),
+        symbol_id: 2,
+        file_id: 1,
     }
 }
 
@@ -113,6 +117,9 @@ fn uses_edge(src: &str, dst: &str, repo: &str) -> EdgeRecord {
         tu_hash: [0u8; 32],
         source_association_type: Some("read".to_owned()),
         target_association_type: Some("read".to_owned()),
+        src_id: 1,
+        dst_id: Some(2),
+        dst_repo_name: repo.to_owned(),
     }
 }
 

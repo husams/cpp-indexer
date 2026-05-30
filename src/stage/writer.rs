@@ -283,6 +283,8 @@ mod tests {
             is_virtual: None,
             is_pure_virtual: None,
             is_static: None,
+            symbol_id: i as i64 + 1,
+            file_id: i as i64 + 1,
         }
     }
 
@@ -299,6 +301,9 @@ mod tests {
             tu_hash: [u8::try_from(i % 256).unwrap_or(0); 32],
             source_association_type: None,
             target_association_type: None,
+            src_id: i as i64 + 1,
+            dst_id: Some(i as i64 + 2),
+            dst_repo_name: "test-repo".to_owned(),
         }
     }
 
@@ -341,8 +346,9 @@ mod tests {
         let builder = ParquetRecordBatchStreamBuilder::new(node_file)
             .await
             .unwrap();
-        // Verify schema column count: 13 original + 10 M8 native fields = 23 (S40-S43).
-        assert_eq!(builder.schema().fields().len(), 23);
+        // Verify schema column count: 13 original + 10 M8 native fields + 2 v6 integer ID fields
+        // (symbol_id, file_id) = 25 (S40-S43, graph-symbol-ids Story 3).
+        assert_eq!(builder.schema().fields().len(), 25);
         let mut stream = builder.build().unwrap();
         let mut total_rows = 0usize;
         while let Some(batch) = stream.try_next().await.unwrap() {
@@ -365,8 +371,9 @@ mod tests {
         let builder = ParquetRecordBatchStreamBuilder::new(edge_file)
             .await
             .unwrap();
-        // Verify schema column count: 9 original + 2 M8 association columns = 11 (S43).
-        assert_eq!(builder.schema().fields().len(), 11);
+        // Verify schema column count: 9 original + 2 M8 association columns + 3 v6 integer ID
+        // fields (src_id, dst_id, dst_repo_name) = 14 (S43, graph-symbol-ids Story 3).
+        assert_eq!(builder.schema().fields().len(), 14);
         let mut stream = builder.build().unwrap();
         let mut edge_rows = 0usize;
         while let Some(batch) = stream.try_next().await.unwrap() {

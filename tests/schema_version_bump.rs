@@ -17,12 +17,12 @@
 
 use cpp_indexer::schema::version::{SCHEMA_VERSION, SCHEMA_VERSION_TAG};
 
-/// AC-S40-1: The binary embeds schema v5 after the M8 bump.
+/// The binary embeds schema v6 after the graph-symbol-ids bump (Story 3).
 #[test]
-fn schema_version_is_v5() {
+fn schema_version_is_v6() {
     assert_eq!(
-        SCHEMA_VERSION, 5,
-        "SCHEMA_VERSION must be 5 after M8 S40 bump"
+        SCHEMA_VERSION, 6,
+        "SCHEMA_VERSION must be 6 after graph-symbol-ids Story 3 bump"
     );
 }
 

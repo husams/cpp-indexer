@@ -50,6 +50,7 @@ async fn visit_access_fixture() -> Vec<EdgeRecord> {
             format!("-I{}", fixture.display()),
         ],
         skip_system_headers: true,
+        allocator: None,
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
@@ -146,6 +147,9 @@ async fn collect_edge_records(stage_dir: &std::path::Path) -> Vec<EdgeRecord> {
                     tu_hash: [0u8; 32],
                     source_association_type: src_assoc_col[i].clone(),
                     target_association_type: dst_assoc_col[i].clone(),
+                    src_id: 0,
+                    dst_id: None,
+                    dst_repo_name: "test-repo".to_owned(),
                 });
             }
         }

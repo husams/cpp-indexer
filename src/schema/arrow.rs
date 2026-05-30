@@ -10,8 +10,9 @@ use std::sync::Arc;
 use arrow::{
     array::{
         Array, ArrayRef, BooleanArray, BooleanBuilder, FixedSizeBinaryArray,
-        FixedSizeBinaryBuilder, Int8Array, ListArray, ListBuilder, StringArray,
-        StringDictionaryBuilder, StructArray, UInt32Array, UInt32Builder, UInt8Array, UInt8Builder,
+        FixedSizeBinaryBuilder, Int64Array, Int64Builder, Int8Array, ListArray, ListBuilder,
+        StringArray, StringDictionaryBuilder, StructArray, UInt32Array, UInt32Builder, UInt8Array,
+        UInt8Builder,
     },
     datatypes::{DataType, Field, Fields, Int8Type, Schema},
     record_batch::RecordBatch,
@@ -58,6 +59,7 @@ fn template_arg_struct_fields() -> Fields {
 /// Returns the Arrow `Schema` for `nodes.parquet` (ADR-3).
 ///
 /// M8 (S40): ten new nullable columns appended after `tu_hash` per design.md §3.4.
+/// graph-symbol-ids (Story 3, v6): two new non-nullable Int64 columns at end.
 pub fn node_schema() -> Schema {
     Schema::new(vec![
         Field::new("usr", DataType::Utf8, false),
@@ -112,6 +114,9 @@ pub fn node_schema() -> Schema {
         Field::new("is_virtual", DataType::Boolean, true),
         Field::new("is_pure_virtual", DataType::Boolean, true),
         Field::new("is_static", DataType::Boolean, true),
+        // graph-symbol-ids columns (Story 3, v6):
+        Field::new("symbol_id", DataType::Int64, false),
+        Field::new("file_id", DataType::Int64, false),
     ])
 }
 
@@ -501,6 +506,19 @@ pub fn nodes_to_record_batch(
     }
     let is_static: ArrayRef = Arc::new(is_static_builder.finish());
 
+    // graph-symbol-ids columns (Story 3, v6)
+    let mut symbol_id_builder = Int64Builder::new();
+    for r in records {
+        symbol_id_builder.append_value(r.symbol_id);
+    }
+    let symbol_id: ArrayRef = Arc::new(symbol_id_builder.finish());
+
+    let mut file_id_builder = Int64Builder::new();
+    for r in records {
+        file_id_builder.append_value(r.file_id);
+    }
+    let file_id: ArrayRef = Arc::new(file_id_builder.finish());
+
     RecordBatch::try_new(
         schema,
         vec![
@@ -528,6 +546,9 @@ pub fn nodes_to_record_batch(
             is_virtual,
             is_pure_virtual,
             is_static,
+            // graph-symbol-ids columns:
+            symbol_id,
+            file_id,
         ],
     )
 }
@@ -686,6 +707,19 @@ pub fn record_batch_to_nodes(batch: &RecordBatch) -> Vec<NodeRecord> {
         .downcast_ref::<BooleanArray>()
         .expect("is_static column must be BooleanArray");
 
+    // graph-symbol-ids columns (23-24)
+    let symbol_id_col = batch
+        .column(23)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("symbol_id column must be Int64Array");
+
+    let file_id_col = batch
+        .column(24)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("file_id column must be Int64Array");
+
     (0..n)
         .map(|i| {
             // Dictionary lookup: keys are Int8 indices into the values array.
@@ -768,6 +802,9 @@ pub fn record_batch_to_nodes(batch: &RecordBatch) -> Vec<NodeRecord> {
                 } else {
                     Some(is_static_col.value(i))
                 },
+                // graph-symbol-ids columns (Story 3, v6):
+                symbol_id: symbol_id_col.value(i),
+                file_id: file_id_col.value(i),
             }
         })
         .collect()
@@ -780,6 +817,8 @@ pub fn record_batch_to_nodes(batch: &RecordBatch) -> Vec<NodeRecord> {
 /// Returns the Arrow `Schema` for `edges.parquet` (ADR-3).
 ///
 /// M8 (S40): two new nullable columns appended per design.md §3.4.
+/// graph-symbol-ids (Story 3, v6): three new columns appended: src_id (Int64, non-null),
+/// dst_id (Int64, nullable), dst_repo_name (Utf8, non-null).
 pub fn edge_schema() -> Schema {
     Schema::new(vec![
         Field::new("src_usr", DataType::Utf8, false),
@@ -798,6 +837,10 @@ pub fn edge_schema() -> Schema {
         // M8 columns:
         Field::new("source_association_type", DataType::Utf8, true),
         Field::new("target_association_type", DataType::Utf8, true),
+        // graph-symbol-ids columns (Story 3, v6):
+        Field::new("src_id", DataType::Int64, false),
+        Field::new("dst_id", DataType::Int64, true),
+        Field::new("dst_repo_name", DataType::Utf8, false),
     ])
 }
 
@@ -880,6 +923,29 @@ pub fn edges_to_record_batch(
             .collect::<Vec<_>>(),
     ));
 
+    // graph-symbol-ids columns (Story 3, v6)
+    let mut src_id_builder = Int64Builder::new();
+    for r in records {
+        src_id_builder.append_value(r.src_id);
+    }
+    let src_id: ArrayRef = Arc::new(src_id_builder.finish());
+
+    let mut dst_id_builder = Int64Builder::new();
+    for r in records {
+        match r.dst_id {
+            Some(v) => dst_id_builder.append_value(v),
+            None => dst_id_builder.append_null(),
+        }
+    }
+    let dst_id: ArrayRef = Arc::new(dst_id_builder.finish());
+
+    let dst_repo_name: ArrayRef = Arc::new(StringArray::from(
+        records
+            .iter()
+            .map(|r| r.dst_repo_name.as_str())
+            .collect::<Vec<_>>(),
+    ));
+
     RecordBatch::try_new(
         schema,
         vec![
@@ -895,6 +961,10 @@ pub fn edges_to_record_batch(
             // M8 columns:
             source_association_type,
             target_association_type,
+            // graph-symbol-ids columns:
+            src_id,
+            dst_id,
+            dst_repo_name,
         ],
     )
 }
@@ -978,6 +1048,25 @@ pub fn record_batch_to_edges(batch: &RecordBatch) -> Vec<EdgeRecord> {
         .downcast_ref::<StringArray>()
         .expect("target_association_type column must be StringArray");
 
+    // graph-symbol-ids columns (11-13)
+    let src_id_col = batch
+        .column(11)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("src_id column must be Int64Array");
+
+    let dst_id_col = batch
+        .column(12)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("dst_id column must be Int64Array");
+
+    let dst_repo_name_col = batch
+        .column(13)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("dst_repo_name column must be StringArray");
+
     (0..n)
         .map(|i| {
             let key = kind_col
@@ -1023,6 +1112,14 @@ pub fn record_batch_to_edges(batch: &RecordBatch) -> Vec<EdgeRecord> {
                 } else {
                     Some(target_assoc_col.value(i).to_owned())
                 },
+                // graph-symbol-ids columns (Story 3, v6):
+                src_id: src_id_col.value(i),
+                dst_id: if dst_id_col.is_null(i) {
+                    None
+                } else {
+                    Some(dst_id_col.value(i))
+                },
+                dst_repo_name: dst_repo_name_col.value(i).to_owned(),
             }
         })
         .collect()
@@ -1070,6 +1167,9 @@ mod tests {
             is_virtual: None,
             is_pure_virtual: None,
             is_static: None,
+            // v6 integer ID fields
+            symbol_id: 0,
+            file_id: 0,
         }
     }
 
@@ -1095,6 +1195,14 @@ mod tests {
             // M8 fields — None by default
             source_association_type: None,
             target_association_type: None,
+            // v6 integer ID fields
+            src_id: i as i64 + 1,
+            dst_id: if i.is_multiple_of(2) {
+                Some(i as i64 + 2)
+            } else {
+                None
+            },
+            dst_repo_name: "my-repo".to_owned(),
         }
     }
 
@@ -1106,8 +1214,8 @@ mod tests {
             let original = vec![sample_node(kind, &format!("{kind}"))];
             let batch = nodes_to_record_batch(&original).expect("serialisation must succeed");
 
-            // Verify schema shape — 13 base columns + 10 M8 node columns = 23
-            assert_eq!(batch.num_columns(), 23);
+            // Verify schema shape — 13 base columns + 10 M8 node columns + 2 v6 columns = 25
+            assert_eq!(batch.num_columns(), 25);
             assert_eq!(batch.num_rows(), 1);
 
             let recovered = record_batch_to_nodes(&batch);
@@ -1123,8 +1231,8 @@ mod tests {
             let original = vec![sample_edge(kind, i)];
             let batch = edges_to_record_batch(&original).expect("serialisation must succeed");
 
-            // 9 base columns + 2 M8 edge columns = 11
-            assert_eq!(batch.num_columns(), 11);
+            // 9 base columns + 2 M8 edge columns + 3 v6 columns = 14
+            assert_eq!(batch.num_columns(), 14);
             assert_eq!(batch.num_rows(), 1);
 
             let recovered = record_batch_to_edges(&batch);
@@ -1228,6 +1336,9 @@ mod tests {
         assert_eq!(recovered[0].is_virtual, None);
         assert_eq!(recovered[0].is_pure_virtual, None);
         assert_eq!(recovered[0].is_static, None);
+        // v6 fields round-trip
+        assert_eq!(recovered[0].symbol_id, 0);
+        assert_eq!(recovered[0].file_id, 0);
     }
 
     /// M8: simple scalar node fields round-trip with `Some(non-empty)` values.
@@ -1386,6 +1497,9 @@ mod tests {
                 "is_virtual",
                 "is_pure_virtual",
                 "is_static",
+                // graph-symbol-ids columns (Story 3, v6):
+                "symbol_id",
+                "file_id",
             ]
         );
         // Not-null columns
@@ -1400,6 +1514,8 @@ mod tests {
             "partial",
             "phase",
             "tu_hash",
+            "symbol_id",
+            "file_id",
         ];
         for name in not_null {
             let field = schema.field_with_name(name).expect("field must exist");
@@ -1447,6 +1563,10 @@ mod tests {
                 // M8 columns:
                 "source_association_type",
                 "target_association_type",
+                // graph-symbol-ids columns (Story 3, v6):
+                "src_id",
+                "dst_id",
+                "dst_repo_name",
             ]
         );
         // M8 edge columns are nullable
@@ -1454,5 +1574,21 @@ mod tests {
             let field = schema.field_with_name(name).expect("field must exist");
             assert!(field.is_nullable(), "field {name} must be nullable");
         }
+        // v6 columns: src_id and dst_repo_name non-null; dst_id nullable
+        assert!(
+            !schema.field_with_name("src_id").unwrap().is_nullable(),
+            "src_id must be non-nullable"
+        );
+        assert!(
+            schema.field_with_name("dst_id").unwrap().is_nullable(),
+            "dst_id must be nullable"
+        );
+        assert!(
+            !schema
+                .field_with_name("dst_repo_name")
+                .unwrap()
+                .is_nullable(),
+            "dst_repo_name must be non-nullable"
+        );
     }
 }

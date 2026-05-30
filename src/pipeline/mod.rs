@@ -84,6 +84,18 @@ pub struct RunOptions {
     /// Set to `true` in tests that do not provide a git repository.  In
     /// production this is always `false` (the default).
     pub skip_repo_node: bool,
+
+    /// Override path for the per-repo SQLite symbol/file database.
+    ///
+    /// When `None` (default), the database is opened at `<stage_dir>/cxg-symbols.db`.
+    /// Corresponds to the `CXG_SYMBOL_DB_PATH` env var / `--symbol-db-path` CLI flag.
+    pub symbol_db_path: Option<PathBuf>,
+
+    /// LRU cache size for the `SymbolAllocator` (number of entries).
+    ///
+    /// `0` disables the cache entirely; every allocation hits SQLite directly.
+    /// Default: 100_000. Corresponds to `CXG_SYMBOL_CACHE_SIZE` / `--symbol-cache-size`.
+    pub symbol_cache_size: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +160,18 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
         }
     };
 
+    // ── SymbolAllocator: construct before Phase 1 so Phase 4 can reuse it ──
+    // Default db path: <stage_dir>/cxg-symbols.db.
+    // Cache size from config (default 100_000); 0 disables cache.
+    let symbol_db_path = opts
+        .symbol_db_path
+        .clone()
+        .unwrap_or_else(|| stage_dir.join("cxg-symbols.db"));
+    let allocator: Option<std::sync::Arc<crate::resolve::symbol_map::SymbolAllocator>> =
+        crate::resolve::symbol_map::SymbolAllocator::open(&symbol_db_path, opts.symbol_cache_size)
+            .map(std::sync::Arc::new)
+            .ok(); // Non-fatal if SQLite fails; IDs will be 0.
+
     // ── Phase 1: libclang AST visitor → Parquet shards ───────────────────
     info!(
         "Phase 1: visiting {} TU(s) into {:?}",
@@ -200,6 +224,7 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
             &opts.repo_name,
             opts.skip_system_headers,
             opts.workers,
+            allocator.clone(),
         )?;
         stats.partial_tu_count = parallel_stats.tu_partial.try_into().unwrap_or(usize::MAX);
         stats.failed_tu_count = parallel_stats.tu_error.try_into().unwrap_or(usize::MAX);
@@ -243,6 +268,11 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
     info!("Phase 4: writing to sink '{}'", sink.backend_name());
     sink.preflight().await?;
     sink.ensure_indexes().await?;
+
+    // Write-path schema-version gate (Story 5, ADR-4, S6-SC-01/02).
+    // Refuse to append v6 data to a pre-v6 graph without an explicit reset.
+    // None (fresh DB / post-reset) → OK; matching tag → OK; stale tag → Error.
+    crate::resolve::cross_repo::check_schema_version_for_write(&sink).await?;
 
     // Write the SchemaVersion singleton node (ADR-9, AC-M6-6).
     // `CXG_INDEXER_COMMIT` is baked in by build.rs when available; falls back
@@ -304,10 +334,22 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
             is_virtual: None,
             is_pure_virtual: None,
             is_static: None,
+            // Allocate integer ID for the REPO node via the SymbolAllocator.
+            symbol_id: allocator
+                .as_ref()
+                .and_then(|a| a.get_or_insert_symbol(&repo_usr).ok())
+                .unwrap_or(0),
+            file_id: allocator
+                .as_ref()
+                .and_then(|a| a.get_or_insert_file(&meta.root_path.to_string_lossy()).ok())
+                .unwrap_or(0),
         };
 
         // Prepend so the REPO node is written before the nodes that reference it.
         node_records.insert(0, repo_node);
+
+        // Repo node is at index 0; get its symbol_id for BELONGS_TO_REPO dst_id.
+        let repo_symbol_id = node_records[0].symbol_id;
 
         // One BELONGS_TO_REPO edge from every non-REPO node to the repo node.
         // We emit edges for all nodes that were already in the batch (index >= 1
@@ -327,6 +369,14 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
                 // M8 promoted fields — BELONGS_TO_REPO edges carry none of these
                 source_association_type: None,
                 target_association_type: None,
+                // Integer IDs: src is each node's symbol_id; dst is the REPO's symbol_id.
+                src_id: n.symbol_id,
+                dst_id: if repo_symbol_id > 0 {
+                    Some(repo_symbol_id)
+                } else {
+                    None
+                },
+                dst_repo_name: meta.name.clone(),
             })
             .collect();
 
@@ -712,6 +762,7 @@ mod tests {
     }
 
     fn edge(src: &str, dst: Option<&str>, kind: EdgeKind) -> EdgeRecord {
+        let dst_id = dst.map(|_| 99_i64);
         EdgeRecord {
             src_usr: src.to_owned(),
             dst_usr: dst.map(str::to_owned),
@@ -724,6 +775,9 @@ mod tests {
             tu_hash: [0u8; 32],
             source_association_type: None,
             target_association_type: None,
+            src_id: 1,
+            dst_id,
+            dst_repo_name: "repo".to_owned(),
         }
     }
 

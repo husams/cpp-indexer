@@ -180,6 +180,14 @@ pub struct TemplateArg {
 /// - `template_params`: TEMPLATE_DECL
 /// - `template_args`: SPECIALIZATION
 /// - `is_virtual`, `is_pure_virtual`: METHOD only
+///
+/// graph-symbol-ids (Story 3, v6): two new integer ID columns.
+/// - `symbol_id`: per-repo integer from `SymbolAllocator::get_or_insert_symbol(usr)`.
+///   Retained `usr` for Phase-5 USR matching (D1).
+/// - `file_id`: per-repo integer from `SymbolAllocator::get_or_insert_file(file_path)`.
+///   Retained `file_path` for Phase-5 staging reads.
+///
+/// Sinks write `symbol_id`/`file_id` to the durable graph and drop the string fields.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NodeRecord {
     /// Global primary key (from `clang_getCursorUSR`). Never empty.
@@ -235,6 +243,14 @@ pub struct NodeRecord {
     pub is_pure_virtual: Option<bool>,
     /// `true` when the function/method is declared `static`; `None` for other kinds.
     pub is_static: Option<bool>,
+
+    // ── graph-symbol-ids integer ID fields (Story 3, v6) ─────────────────────
+    /// Per-repo integer ID for `usr`; from `SymbolAllocator::get_or_insert_symbol`.
+    /// Populated during Phase 1; sinks key the durable graph on this field (not `usr`).
+    pub symbol_id: i64,
+    /// Per-repo integer ID for `file_path`; from `SymbolAllocator::get_or_insert_file`.
+    /// Populated during Phase 1; sinks store this instead of the path string.
+    pub file_id: i64,
 }
 
 #[cfg(test)]

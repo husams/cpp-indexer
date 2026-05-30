@@ -91,6 +91,8 @@ fn make_run_opts(fixture_dir: &Path, stage_dir: PathBuf, skip_cache: bool) -> Ru
         workers: None,
         skip_cache,
         skip_repo_node: true,
+        symbol_db_path: None,
+        symbol_cache_size: 100_000,
     }
 }
 

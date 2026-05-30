@@ -1,0 +1,838 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 794fc77..5e012a6 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -812,6 +812,7 @@ dependencies = [
+  "indradb-lib",
+  "indradb-proto",
+  "libc",
++ "lru",
+  "neo4rs",
+  "num_cpus",
+  "parquet",
+@@ -820,6 +821,7 @@ dependencies = [
+  "rayon",
+  "reqwest",
+  "rocksdb",
++ "rusqlite",
+  "serde",
+  "serde_json",
+  "sha2",
+@@ -1015,6 +1017,18 @@ dependencies = [
+  "windows-sys 0.61.2",
+ ]
+ 
++[[package]]
++name = "fallible-iterator"
++version = "0.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
++
++[[package]]
++name = "fallible-streaming-iterator"
++version = "0.1.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
++
+ [[package]]
+ name = "fastrand"
+ version = "2.4.1"
+@@ -1290,6 +1304,15 @@ version = "0.12.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
+ 
++[[package]]
++name = "hashbrown"
++version = "0.14.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
++dependencies = [
++ "ahash",
++]
++
+ [[package]]
+ name = "hashbrown"
+ version = "0.15.5"
+@@ -1307,6 +1330,15 @@ version = "0.17.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+ 
++[[package]]
++name = "hashlink"
++version = "0.9.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
++dependencies = [
++ "hashbrown 0.14.5",
++]
++
+ [[package]]
+ name = "heck"
+ version = "0.5.0"
+@@ -1850,6 +1882,17 @@ dependencies = [
+  "zstd-sys",
+ ]
+ 
++[[package]]
++name = "libsqlite3-sys"
++version = "0.28.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0c10584274047cb335c23d3e61bcef8e323adae7c5c8c760540f73610177fc3f"
++dependencies = [
++ "cc",
++ "pkg-config",
++ "vcpkg",
++]
++
+ [[package]]
+ name = "libssh2-sys"
+ version = "0.3.1"
+@@ -1903,6 +1946,15 @@ version = "0.4.29"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+ 
++[[package]]
++name = "lru"
++version = "0.12.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
++dependencies = [
++ "hashbrown 0.15.5",
++]
++
+ [[package]]
+ name = "lz4-sys"
+ version = "1.11.1+lz4-1.10.0"
+@@ -2712,6 +2764,20 @@ dependencies = [
+  "librocksdb-sys",
+ ]
+ 
++[[package]]
++name = "rusqlite"
++version = "0.31.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b838eba278d213a8beaf485bd313fd580ca4505a00d5871caeb1457c55322cae"
++dependencies = [
++ "bitflags 2.11.1",
++ "fallible-iterator",
++ "fallible-streaming-iterator",
++ "hashlink",
++ "libsqlite3-sys",
++ "smallvec",
++]
++
+ [[package]]
+ name = "rustc-hash"
+ version = "1.1.0"
+diff --git a/Cargo.toml b/Cargo.toml
+index 813300a..a198a77 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -55,6 +55,8 @@ glob = "0.3"
+ uuid = { version = "1.23.1", features = ["v5", "v7"] }
+ tonic = "0.12"
+ url = "2"
++rusqlite = { version = "0.31", features = ["bundled"] }
++lru = "0.12"
+ 
+ [dev-dependencies]
+ tempfile = "3"
+diff --git a/src/error.rs b/src/error.rs
+index b100fe4..1644e91 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -43,6 +43,9 @@ pub enum Error {
+ 
+     #[error("API error: {0}")]
+     Api(String),
++
++    #[error("sqlite error: {0}")]
++    Sqlite(#[from] rusqlite::Error),
+ }
+ 
+ /// Helper for formatting a path slice inside thiserror `#[error(...)]` expressions.
+diff --git a/src/resolve/mod.rs b/src/resolve/mod.rs
+index 8c1dbf7..273d6db 100644
+--- a/src/resolve/mod.rs
++++ b/src/resolve/mod.rs
+@@ -9,3 +9,4 @@ pub mod canonical;
+ pub mod cross_repo;
+ pub mod per_repo;
+ pub mod spill;
++pub mod symbol_map;
+diff --git a/src/resolve/symbol_map.rs b/src/resolve/symbol_map.rs
+new file mode 100644
+index 0000000..e8c6365
+--- /dev/null
++++ b/src/resolve/symbol_map.rs
+@@ -0,0 +1,670 @@
++//! Per-repo SQLite symbol/file ID allocator with bidirectional write-through LRU cache.
++//!
++//! # Design
++//! - Two tables: `symbols(id INTEGER PRIMARY KEY, usr TEXT NOT NULL UNIQUE)` and
++//!   `files(id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE)`.
++//! - `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL` for write performance.
++//! - Single write `Connection` behind a `Mutex` → exactly-once allocation under concurrency.
++//! - Two independent bidirectional LRU caches (`BidiCache`), one per namespace (symbols/files).
++//!   Write-through: SQLite written first, then cache updated.
++//!   Eviction removes both forward (`text → id`) and reverse (`id → text`) entries.
++//! - `cache_size=0` → `Option<BidiCache>` is `None`; every lookup hits SQLite.
++//! - A `query_count` (`AtomicU64`) is incremented each time the SQLite `Connection` is accessed
++//!   for a lookup (not for writes). Used in tests to assert "SQLite was/was not queried".
++
++use std::collections::HashMap;
++use std::num::NonZeroUsize;
++use std::path::Path;
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::{Arc, Mutex};
++
++use lru::LruCache;
++use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
++
++use crate::error::{Error, Result};
++
++// ─── bidirectional LRU cache ────────────────────────────────────────────────
++
++/// A write-through bidirectional LRU: text → id and id → text.
++/// Eviction from the LRU drops the entry from the reverse map as well.
++struct BidiCache {
++    /// LRU policy: text key → id.  Eviction candidate is `pop_lru`.
++    forward: LruCache<String, i64>,
++    /// Reverse lookup: id → text.  Kept in sync with `forward`.
++    reverse: HashMap<i64, String>,
++}
++
++impl BidiCache {
++    fn new(cap: NonZeroUsize) -> Self {
++        Self {
++            forward: LruCache::new(cap),
++            reverse: HashMap::new(),
++        }
++    }
++
++    /// Insert a (text, id) pair.  Evicts the LRU entry when at capacity.
++    fn insert(&mut self, text: String, id: i64) {
++        // If we're about to evict, remove the evicted id from the reverse map.
++        if self.forward.len() == self.forward.cap().get() {
++            if let Some((evicted_text, evicted_id)) = self.forward.pop_lru() {
++                self.reverse.remove(&evicted_id);
++                // put the evicted entry back briefly so we can push the new one
++                // — actually we just need to drop it, which we already did above.
++                // The pop_lru already removed it from `forward`, so nothing else to do.
++                drop(evicted_text);
++            }
++        }
++        self.forward.put(text.clone(), id);
++        self.reverse.insert(id, text);
++    }
++
++    /// Forward lookup: text → id.  Promotes to MRU if found.
++    fn get_by_text(&mut self, text: &str) -> Option<i64> {
++        self.forward.get(text).copied()
++    }
++
++    /// Reverse lookup: id → text.  Does NOT promote (id→text is served from `HashMap`).
++    fn get_by_id(&self, id: i64) -> Option<&str> {
++        self.reverse.get(&id).map(|s| s.as_str())
++    }
++}
++
++// ─── SymbolAllocator ────────────────────────────────────────────────────────
++
++/// Thread-safe per-repo allocator.  Wraps a SQLite connection with a write mutex.
++///
++/// Clone is cheap (all state is `Arc`-wrapped).
++#[derive(Clone)]
++pub struct SymbolAllocator {
++    inner: Arc<AllocatorInner>,
++}
++
++struct AllocatorInner {
++    conn: Mutex<Connection>,
++    /// Cache for `symbols` table (usr ↔ id).  `None` when `cache_size == 0`.
++    sym_cache: Mutex<Option<BidiCache>>,
++    /// Cache for `files` table (path ↔ id).  `None` when `cache_size == 0`.
++    file_cache: Mutex<Option<BidiCache>>,
++    /// Number of times SQLite was queried for a **lookup** (not inserts/setup).
++    query_count: AtomicU64,
++}
++
++impl SymbolAllocator {
++    /// Open (or create) the allocator database at `path` with the given LRU `cache_size`.
++    /// Pass `cache_size = 0` to disable caching entirely.
++    pub fn open(path: impl AsRef<Path>, cache_size: usize) -> Result<Self> {
++        let conn = Connection::open(path.as_ref())?;
++        Self::setup_connection(&conn)?;
++        Self::ensure_schema(&conn)?;
++        let cache = NonZeroUsize::new(cache_size).map(BidiCache::new);
++        let file_cache = NonZeroUsize::new(cache_size).map(BidiCache::new);
++        Ok(Self {
++            inner: Arc::new(AllocatorInner {
++                conn: Mutex::new(conn),
++                sym_cache: Mutex::new(cache),
++                file_cache: Mutex::new(file_cache),
++                query_count: AtomicU64::new(0),
++            }),
++        })
++    }
++
++    /// Open the database at `path` **read-only** with a forward-only resolver (no inserts).
++    /// `cache_size` controls LRU capacity for reverse lookups (0 = no cache).
++    pub fn open_readonly(path: impl AsRef<Path>, cache_size: usize) -> Result<ReadonlyResolver> {
++        let conn = Connection::open_with_flags(path.as_ref(), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
++        Self::setup_connection(&conn)?;
++        let sym_cache = NonZeroUsize::new(cache_size).map(BidiCache::new);
++        let file_cache = NonZeroUsize::new(cache_size).map(BidiCache::new);
++        Ok(ReadonlyResolver {
++            inner: Arc::new(ReadonlyInner {
++                conn: Mutex::new(conn),
++                sym_cache: Mutex::new(sym_cache),
++                file_cache: Mutex::new(file_cache),
++                query_count: AtomicU64::new(0),
++            }),
++        })
++    }
++
++    /// Get or insert a symbol by `usr`.  Returns the stable integer id.
++    pub fn get_or_insert_symbol(&self, usr: &str) -> Result<i64> {
++        // 1. Check cache first.
++        {
++            let mut cache_guard = self.inner.sym_cache.lock().unwrap();
++            if let Some(ref mut cache) = *cache_guard {
++                if let Some(id) = cache.get_by_text(usr) {
++                    return Ok(id);
++                }
++            }
++        }
++        // 2. SQLite: INSERT OR IGNORE + SELECT.
++        self.inner.query_count.fetch_add(1, Ordering::Relaxed);
++        let id = {
++            let conn = self.inner.conn.lock().unwrap();
++            conn.execute(
++                "INSERT OR IGNORE INTO symbols(usr) VALUES (?1)",
++                params![usr],
++            )?;
++            conn.query_row(
++                "SELECT id FROM symbols WHERE usr = ?1",
++                params![usr],
++                |row| row.get::<_, i64>(0),
++            )?
++        };
++        // 3. Populate cache.
++        {
++            let mut cache_guard = self.inner.sym_cache.lock().unwrap();
++            if let Some(ref mut cache) = *cache_guard {
++                cache.insert(usr.to_owned(), id);
++            }
++        }
++        Ok(id)
++    }
++
++    /// Get or insert a file by `path`.  Returns the stable integer id.
++    pub fn get_or_insert_file(&self, path: &str) -> Result<i64> {
++        {
++            let mut cache_guard = self.inner.file_cache.lock().unwrap();
++            if let Some(ref mut cache) = *cache_guard {
++                if let Some(id) = cache.get_by_text(path) {
++                    return Ok(id);
++                }
++            }
++        }
++        self.inner.query_count.fetch_add(1, Ordering::Relaxed);
++        let id = {
++            let conn = self.inner.conn.lock().unwrap();
++            conn.execute(
++                "INSERT OR IGNORE INTO files(path) VALUES (?1)",
++                params![path],
++            )?;
++            conn.query_row(
++                "SELECT id FROM files WHERE path = ?1",
++                params![path],
++                |row| row.get::<_, i64>(0),
++            )?
++        };
++        {
++            let mut cache_guard = self.inner.file_cache.lock().unwrap();
++            if let Some(ref mut cache) = *cache_guard {
++                cache.insert(path.to_owned(), id);
++            }
++        }
++        Ok(id)
++    }
++
++    /// Resolve `id → usr` string (reverse lookup in symbols table).
++    pub fn resolve_symbol(&self, id: i64) -> Result<Option<String>> {
++        {
++            let cache_guard = self.inner.sym_cache.lock().unwrap();
++            if let Some(ref cache) = *cache_guard {
++                if let Some(s) = cache.get_by_id(id) {
++                    return Ok(Some(s.to_owned()));
++                }
++            }
++        }
++        self.inner.query_count.fetch_add(1, Ordering::Relaxed);
++        let conn = self.inner.conn.lock().unwrap();
++        let result = conn
++            .query_row(
++                "SELECT usr FROM symbols WHERE id = ?1",
++                params![id],
++                |row| row.get::<_, String>(0),
++            )
++            .optional()?;
++        Ok(result)
++    }
++
++    /// Resolve `id → path` string (reverse lookup in files table).
++    pub fn resolve_file(&self, id: i64) -> Result<Option<String>> {
++        {
++            let cache_guard = self.inner.file_cache.lock().unwrap();
++            if let Some(ref cache) = *cache_guard {
++                if let Some(s) = cache.get_by_id(id) {
++                    return Ok(Some(s.to_owned()));
++                }
++            }
++        }
++        self.inner.query_count.fetch_add(1, Ordering::Relaxed);
++        let conn = self.inner.conn.lock().unwrap();
++        let result = conn
++            .query_row("SELECT path FROM files WHERE id = ?1", params![id], |row| {
++                row.get::<_, String>(0)
++            })
++            .optional()?;
++        Ok(result)
++    }
++
++    /// Number of times the SQLite connection was used for a **lookup** query.
++    /// Exposed for white-box testing of cache behaviour.
++    #[cfg(test)]
++    pub fn query_count(&self) -> u64 {
++        self.inner.query_count.load(Ordering::Relaxed)
++    }
++
++    // ── private helpers ──────────────────────────────────────────────────────
++
++    fn setup_connection(conn: &Connection) -> Result<()> {
++        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
++        Ok(())
++    }
++
++    fn ensure_schema(conn: &Connection) -> Result<()> {
++        conn.execute_batch(
++            "CREATE TABLE IF NOT EXISTS symbols (
++                id  INTEGER PRIMARY KEY,
++                usr TEXT    NOT NULL UNIQUE
++            );
++            CREATE TABLE IF NOT EXISTS files (
++                id   INTEGER PRIMARY KEY,
++                path TEXT    NOT NULL UNIQUE
++            );",
++        )?;
++        Ok(())
++    }
++}
++
++// ─── ReadonlyResolver ───────────────────────────────────────────────────────
++
++/// A read-only handle for cross-repo / read-path id resolution.
++///
++/// Can be obtained via [`SymbolAllocator::open_readonly`].
++/// Supports forward (`usr → id`) and reverse (`id → usr`/`id → path`) lookups.
++#[derive(Clone)]
++pub struct ReadonlyResolver {
++    inner: Arc<ReadonlyInner>,
++}
++
++struct ReadonlyInner {
++    conn: Mutex<Connection>,
++    sym_cache: Mutex<Option<BidiCache>>,
++    file_cache: Mutex<Option<BidiCache>>,
++    query_count: AtomicU64,
++}
++
++impl ReadonlyResolver {
++    /// Resolve `usr → id` (forward lookup).  Returns `None` if the USR is unknown.
++    pub fn resolve_usr(&self, usr: &str) -> Result<Option<i64>> {
++        {
++            let mut cache_guard = self.inner.sym_cache.lock().unwrap();
++            if let Some(ref mut cache) = *cache_guard {
++                if let Some(id) = cache.get_by_text(usr) {
++                    return Ok(Some(id));
++                }
++            }
++        }
++        self.inner.query_count.fetch_add(1, Ordering::Relaxed);
++        let conn = self.inner.conn.lock().unwrap();
++        let result = conn
++            .query_row(
++                "SELECT id FROM symbols WHERE usr = ?1",
++                params![usr],
++                |row| row.get::<_, i64>(0),
++            )
++            .optional()?;
++        if let Some(id) = result {
++            let mut cache_guard = self.inner.sym_cache.lock().unwrap();
++            if let Some(ref mut cache) = *cache_guard {
++                cache.insert(usr.to_owned(), id);
++            }
++        }
++        Ok(result)
++    }
++
++    /// Resolve `id → usr` (reverse lookup).
++    pub fn resolve_symbol(&self, id: i64) -> Result<Option<String>> {
++        {
++            let cache_guard = self.inner.sym_cache.lock().unwrap();
++            if let Some(ref cache) = *cache_guard {
++                if let Some(s) = cache.get_by_id(id) {
++                    return Ok(Some(s.to_owned()));
++                }
++            }
++        }
++        self.inner.query_count.fetch_add(1, Ordering::Relaxed);
++        let conn = self.inner.conn.lock().unwrap();
++        conn.query_row(
++            "SELECT usr FROM symbols WHERE id = ?1",
++            params![id],
++            |row| row.get::<_, String>(0),
++        )
++        .optional()
++        .map_err(Error::from)
++    }
++
++    /// Resolve `path → id` (forward lookup for files).
++    pub fn resolve_path(&self, path: &str) -> Result<Option<i64>> {
++        {
++            let mut cache_guard = self.inner.file_cache.lock().unwrap();
++            if let Some(ref mut cache) = *cache_guard {
++                if let Some(id) = cache.get_by_text(path) {
++                    return Ok(Some(id));
++                }
++            }
++        }
++        self.inner.query_count.fetch_add(1, Ordering::Relaxed);
++        let conn = self.inner.conn.lock().unwrap();
++        let result = conn
++            .query_row(
++                "SELECT id FROM files WHERE path = ?1",
++                params![path],
++                |row| row.get::<_, i64>(0),
++            )
++            .optional()?;
++        if let Some(id) = result {
++            let mut cache_guard = self.inner.file_cache.lock().unwrap();
++            if let Some(ref mut cache) = *cache_guard {
++                cache.insert(path.to_owned(), id);
++            }
++        }
++        Ok(result)
++    }
++
++    /// Resolve `id → path` (reverse lookup for files).
++    pub fn resolve_file(&self, id: i64) -> Result<Option<String>> {
++        {
++            let cache_guard = self.inner.file_cache.lock().unwrap();
++            if let Some(ref cache) = *cache_guard {
++                if let Some(s) = cache.get_by_id(id) {
++                    return Ok(Some(s.to_owned()));
++                }
++            }
++        }
++        self.inner.query_count.fetch_add(1, Ordering::Relaxed);
++        let conn = self.inner.conn.lock().unwrap();
++        conn.query_row("SELECT path FROM files WHERE id = ?1", params![id], |row| {
++            row.get::<_, String>(0)
++        })
++        .optional()
++        .map_err(Error::from)
++    }
++
++    /// Number of SQLite lookup queries issued (test observability).
++    #[cfg(test)]
++    pub fn query_count(&self) -> u64 {
++        self.inner.query_count.load(Ordering::Relaxed)
++    }
++}
++
++// ─── Tests ──────────────────────────────────────────────────────────────────
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use tempfile::TempDir;
++
++    fn make_tmp() -> (TempDir, std::path::PathBuf) {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("test.db");
++        (dir, path)
++    }
++
++    // S7-SC-01 — insert new USR allocates a new id + row
++    #[test]
++    fn insert_new_usr() {
++        let (_dir, path) = make_tmp();
++        let alloc = SymbolAllocator::open(&path, 100).unwrap();
++        let id = alloc.get_or_insert_symbol("c:@F@foo").unwrap();
++        assert!(id > 0);
++        // Row exists in SQLite.
++        let conn = Connection::open(&path).unwrap();
++        let count: i64 = conn
++            .query_row(
++                "SELECT COUNT(*) FROM symbols WHERE usr='c:@F@foo'",
++                [],
++                |r| r.get(0),
++            )
++            .unwrap();
++        assert_eq!(count, 1);
++    }
++
++    // S7-SC-02 — duplicate USR returns same id, no new row
++    #[test]
++    fn dup_usr_returns_same_id() {
++        let (_dir, path) = make_tmp();
++        let alloc = SymbolAllocator::open(&path, 0).unwrap(); // cache off
++        let id1 = alloc.get_or_insert_symbol("c:@F@dup").unwrap();
++        let id2 = alloc.get_or_insert_symbol("c:@F@dup").unwrap();
++        assert_eq!(id1, id2);
++        let conn = Connection::open(&path).unwrap();
++        let count: i64 = conn
++            .query_row(
++                "SELECT COUNT(*) FROM symbols WHERE usr='c:@F@dup'",
++                [],
++                |r| r.get(0),
++            )
++            .unwrap();
++        assert_eq!(count, 1);
++    }
++
++    // S7-SC-03 — insert new path allocates a new id + row
++    #[test]
++    fn insert_new_path() {
++        let (_dir, path) = make_tmp();
++        let alloc = SymbolAllocator::open(&path, 100).unwrap();
++        let id = alloc.get_or_insert_file("/foo/bar.cpp").unwrap();
++        assert!(id > 0);
++        let conn = Connection::open(&path).unwrap();
++        let count: i64 = conn
++            .query_row(
++                "SELECT COUNT(*) FROM files WHERE path='/foo/bar.cpp'",
++                [],
++                |r| r.get(0),
++            )
++            .unwrap();
++        assert_eq!(count, 1);
++    }
++
++    // S7-SC-04 — duplicate path returns same id, no new row
++    #[test]
++    fn dup_path_returns_same_id() {
++        let (_dir, path) = make_tmp();
++        let alloc = SymbolAllocator::open(&path, 0).unwrap();
++        let id1 = alloc.get_or_insert_file("/foo/bar.cpp").unwrap();
++        let id2 = alloc.get_or_insert_file("/foo/bar.cpp").unwrap();
++        assert_eq!(id1, id2);
++        let conn = Connection::open(&path).unwrap();
++        let count: i64 = conn
++            .query_row(
++                "SELECT COUNT(*) FROM files WHERE path='/foo/bar.cpp'",
++                [],
++                |r| r.get(0),
++            )
++            .unwrap();
++        assert_eq!(count, 1);
++    }
++
++    // S7-SC-05 — persistence across reopen
++    #[test]
++    fn persistence_across_reopen() {
++        let (_dir, path) = make_tmp();
++        let id_sym;
++        let id_file;
++        {
++            let alloc = SymbolAllocator::open(&path, 0).unwrap();
++            id_sym = alloc.get_or_insert_symbol("c:@F@persist").unwrap();
++            id_file = alloc.get_or_insert_file("/persist.cpp").unwrap();
++        }
++        // Reopen fresh instance.
++        let alloc2 = SymbolAllocator::open(&path, 0).unwrap();
++        let id_sym2 = alloc2.get_or_insert_symbol("c:@F@persist").unwrap();
++        let id_file2 = alloc2.get_or_insert_file("/persist.cpp").unwrap();
++        assert_eq!(id_sym, id_sym2);
++        assert_eq!(id_file, id_file2);
++    }
++
++    // S7-SC-06 — cache hit does NOT query SQLite
++    #[test]
++    fn cache_hit_no_sqlite_query() {
++        let (_dir, path) = make_tmp();
++        let alloc = SymbolAllocator::open(&path, 100).unwrap();
++        // First call: cache miss → SQLite queried.
++        let _ = alloc.get_or_insert_symbol("c:@F@bar").unwrap();
++        let q_after_first = alloc.query_count();
++        // Second call: cache hit → SQLite NOT queried.
++        let _ = alloc.get_or_insert_symbol("c:@F@bar").unwrap();
++        let q_after_second = alloc.query_count();
++        assert_eq!(
++            q_after_first, q_after_second,
++            "SQLite should not be queried on cache hit"
++        );
++    }
++
++    // S7-SC-07 — cache miss queries SQLite and populates cache
++    #[test]
++    fn cache_miss_queries_sqlite() {
++        let (_dir, path) = make_tmp();
++        let alloc = SymbolAllocator::open(&path, 100).unwrap();
++        let q_before = alloc.query_count();
++        let _ = alloc.get_or_insert_symbol("c:@F@baz").unwrap();
++        let q_after = alloc.query_count();
++        assert!(q_after > q_before, "SQLite should be queried on cache miss");
++    }
++
++    // S7-SC-08 — LRU eviction removes least-recently-used entry
++    #[test]
++    fn lru_eviction() {
++        let (_dir, path) = make_tmp();
++        let alloc = SymbolAllocator::open(&path, 2).unwrap();
++        // Insert A and B (fills cache to capacity=2).
++        let _ = alloc.get_or_insert_symbol("c:@F@A").unwrap();
++        let _ = alloc.get_or_insert_symbol("c:@F@B").unwrap();
++        // Insert C → evicts A (LRU).
++        let _ = alloc.get_or_insert_symbol("c:@F@C").unwrap();
++        // Now accessing A should hit SQLite again (evicted from cache).
++        let q_before = alloc.query_count();
++        let _ = alloc.get_or_insert_symbol("c:@F@A").unwrap();
++        let q_after = alloc.query_count();
++        assert!(
++            q_after > q_before,
++            "A should have been evicted and require SQLite query"
++        );
++    }
++
++    // S7-SC-09 — cache_size=0 disables caching
++    #[test]
++    fn cache_size_zero_disables_cache() {
++        let (_dir, path) = make_tmp();
++        let alloc = SymbolAllocator::open(&path, 0).unwrap();
++        let _ = alloc.get_or_insert_symbol("c:@F@x").unwrap();
++        let q1 = alloc.query_count();
++        let _ = alloc.get_or_insert_symbol("c:@F@x").unwrap();
++        let q2 = alloc.query_count();
++        assert!(
++            q2 > q1,
++            "cache disabled: SQLite should be queried every time"
++        );
++    }
++
++    // S7-SC-10 — bidirectional symbol lookup (usr→id and id→usr)
++    #[test]
++    fn bidirectional_symbol_cache() {
++        let (_dir, path) = make_tmp();
++        let alloc = SymbolAllocator::open(&path, 100).unwrap();
++        let id = alloc.get_or_insert_symbol("c:@F@foo").unwrap();
++        let q_before = alloc.query_count();
++        let resolved = alloc.resolve_symbol(id).unwrap();
++        let q_after = alloc.query_count();
++        assert_eq!(resolved.as_deref(), Some("c:@F@foo"));
++        assert_eq!(
++            q_before, q_after,
++            "reverse lookup should hit cache, not SQLite"
++        );
++    }
++
++    // S7-SC-11 — bidirectional file lookup (path→id and id→path)
++    #[test]
++    fn bidirectional_file_cache() {
++        let (_dir, path) = make_tmp();
++        let alloc = SymbolAllocator::open(&path, 100).unwrap();
++        let id = alloc.get_or_insert_file("/src/main.cpp").unwrap();
++        let q_before = alloc.query_count();
++        let resolved = alloc.resolve_file(id).unwrap();
++        let q_after = alloc.query_count();
++        assert_eq!(resolved.as_deref(), Some("/src/main.cpp"));
++        assert_eq!(
++            q_before, q_after,
++            "reverse file lookup should hit cache, not SQLite"
++        );
++    }
++
++    // S2-SC-08 — concurrent get-or-insert of same USR → exactly one id, no dup rows
++    #[test]
++    fn concurrent_same_usr_exactly_one_id() {
++        let (_dir, path) = make_tmp();
++        let alloc = SymbolAllocator::open(&path, 0).unwrap();
++        let ids: Vec<i64> = std::thread::scope(|s| {
++            let mut handles = Vec::new();
++            for _ in 0..8 {
++                let alloc_ref = &alloc;
++                handles
++                    .push(s.spawn(move || alloc_ref.get_or_insert_symbol("c:@C@Widget").unwrap()));
++            }
++            handles.into_iter().map(|h| h.join().unwrap()).collect()
++        });
++        let first = ids[0];
++        assert!(
++            ids.iter().all(|&id| id == first),
++            "all threads must get the same id"
++        );
++        // No duplicate rows.
++        let conn = Connection::open(&path).unwrap();
++        let count: i64 = conn
++            .query_row(
++                "SELECT COUNT(*) FROM symbols WHERE usr='c:@C@Widget'",
++                [],
++                |r| r.get(0),
++            )
++            .unwrap();
++        assert_eq!(count, 1);
++    }
++
++    // S2-SC-09 — concurrent distinct USRs → distinct ids
++    #[test]
++    fn concurrent_distinct_usrs() {
++        let (_dir, path) = make_tmp();
++        let alloc = SymbolAllocator::open(&path, 0).unwrap();
++        let usrs = [
++            "c:@C@Foo", "c:@C@Bar", "c:@C@Baz", "c:@C@Qux", "c:@C@A", "c:@C@B", "c:@C@C", "c:@C@D",
++        ];
++        let ids: Vec<i64> = std::thread::scope(|s| {
++            let mut handles = Vec::new();
++            for &usr in &usrs {
++                let alloc_ref = &alloc;
++                handles.push(s.spawn(move || alloc_ref.get_or_insert_symbol(usr).unwrap()));
++            }
++            handles.into_iter().map(|h| h.join().unwrap()).collect()
++        });
++        let mut sorted = ids.clone();
++        sorted.sort_unstable();
++        sorted.dedup();
++        assert_eq!(
++            sorted.len(),
++            usrs.len(),
++            "all distinct USRs must get distinct ids"
++        );
++    }
++
++    // S2-SC-10 — N≥8 threads allocate concurrently, no deadlock/panic
++    #[test]
++    fn concurrent_no_deadlock() {
++        let (_dir, path) = make_tmp();
++        let alloc = SymbolAllocator::open(&path, 100).unwrap();
++        std::thread::scope(|s| {
++            let mut handles = Vec::new();
++            for i in 0..16_u32 {
++                let alloc_ref = &alloc;
++                handles.push(s.spawn(move || {
++                    for j in 0..10_u32 {
++                        let usr = format!("c:@C@T{i}_{j}");
++                        let file = format!("/src/{i}_{j}.cpp");
++                        alloc_ref.get_or_insert_symbol(&usr).unwrap();
++                        alloc_ref.get_or_insert_file(&file).unwrap();
++                    }
++                }));
++            }
++            for h in handles {
++                h.join().unwrap();
++            }
++        });
++    }
++}

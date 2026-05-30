@@ -119,6 +119,41 @@ pub fn resolve_api_token(config: &super::Config) -> Result<String> {
     })
 }
 
+/// Read `CXG_SYMBOL_CACHE_SIZE` from the environment, if set.
+///
+/// Returns `Ok(None)` when the variable is absent (caller keeps the file/default value).
+/// Returns `Ok(Some(n))` when the variable is present and parses as `usize`.
+///
+/// # Errors
+///
+/// Returns [`Error::Config`] when the variable is set but cannot be parsed as a non-negative
+/// integer.
+pub fn resolve_symbol_cache_size() -> crate::error::Result<Option<usize>> {
+    match env::var("CXG_SYMBOL_CACHE_SIZE") {
+        Err(_) => Ok(None),
+        Ok(val) => {
+            let n: usize = val.parse().map_err(|_| crate::error::Error::Config {
+                field: "CXG_SYMBOL_CACHE_SIZE".to_owned(),
+                detail: format!(
+                    "env var `CXG_SYMBOL_CACHE_SIZE` must be a non-negative integer, got `{val}`"
+                ),
+            })?;
+            Ok(Some(n))
+        }
+    }
+}
+
+/// Read `CXG_SYMBOL_DB_PATH` from the environment, if set.
+///
+/// Returns `Ok(None)` when the variable is absent (caller keeps the file/default value).
+/// Returns `Ok(Some(path))` when the variable is present (any non-empty string is accepted as a
+/// path — validation at use site).
+pub fn resolve_symbol_db_path() -> Option<std::path::PathBuf> {
+    env::var("CXG_SYMBOL_DB_PATH")
+        .ok()
+        .map(std::path::PathBuf::from)
+}
+
 /// Read the git PAT from the env var named in
 /// `config.workspace.git_credentials_env`, if present.
 ///
@@ -152,6 +187,78 @@ pub fn resolve_git_pat(config: &super::Config) -> Result<Option<String>> {
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    // ── Symbol env helpers ────────────────────────────────────────────────────
+    //
+    // CXG_SYMBOL_CACHE_SIZE / CXG_SYMBOL_DB_PATH are fixed env-var names, so
+    // concurrent tests that set/remove them race.  Guard each block with a
+    // process-wide mutex so they run serially even under `cargo test`'s default
+    // thread pool.
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn resolve_symbol_cache_size_unset_returns_none() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CXG_SYMBOL_CACHE_SIZE");
+        let result = resolve_symbol_cache_size().expect("unset → Ok(None)");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_symbol_cache_size_set_valid() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CXG_SYMBOL_CACHE_SIZE", "50000");
+        let result = resolve_symbol_cache_size().expect("valid integer must parse");
+        assert_eq!(result, Some(50_000usize));
+        std::env::remove_var("CXG_SYMBOL_CACHE_SIZE");
+    }
+
+    #[test]
+    fn resolve_symbol_cache_size_set_zero() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CXG_SYMBOL_CACHE_SIZE", "0");
+        let result = resolve_symbol_cache_size().expect("0 is valid");
+        assert_eq!(result, Some(0usize), "0 must survive (disables cache)");
+        std::env::remove_var("CXG_SYMBOL_CACHE_SIZE");
+    }
+
+    #[test]
+    fn resolve_symbol_cache_size_set_invalid() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CXG_SYMBOL_CACHE_SIZE", "not_a_number");
+        let err = resolve_symbol_cache_size().expect_err("bad value must error");
+        match err {
+            crate::error::Error::Config { field, detail } => {
+                assert!(
+                    field.contains("CXG_SYMBOL_CACHE_SIZE"),
+                    "field must name the env var; got: {field}"
+                );
+                assert!(
+                    detail.contains("not_a_number"),
+                    "detail must echo the bad value; got: {detail}"
+                );
+            }
+            other => panic!("expected Error::Config, got {other:?}"),
+        }
+        std::env::remove_var("CXG_SYMBOL_CACHE_SIZE");
+    }
+
+    #[test]
+    fn resolve_symbol_db_path_unset_returns_none() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CXG_SYMBOL_DB_PATH");
+        assert!(resolve_symbol_db_path().is_none());
+    }
+
+    #[test]
+    fn resolve_symbol_db_path_set() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CXG_SYMBOL_DB_PATH", "/tmp/override.db");
+        let path = resolve_symbol_db_path().expect("set var must return Some");
+        assert_eq!(path, std::path::PathBuf::from("/tmp/override.db"));
+        std::env::remove_var("CXG_SYMBOL_DB_PATH");
+    }
 
     fn neo4j_config_with_env(var_name: &str) -> Config {
         let toml_str = format!(

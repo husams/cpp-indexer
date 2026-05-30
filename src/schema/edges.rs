@@ -143,6 +143,15 @@ impl std::fmt::Display for EdgeKind {
 ///
 /// M8 (S40): two new optional columns promoted for USES edges per ADR-11/ADR-13.
 /// Populated by the access classifier (S43); `None` for all non-USES edge kinds.
+///
+/// graph-symbol-ids (Story 3, v6): three new integer ID / routing fields.
+/// - `src_id`: per-repo integer for `src_usr`; from source repo's `SymbolAllocator`.
+/// - `dst_id`: per-repo integer for `dst_usr`; `None` mirrors `dst_usr: None` skip rule.
+///   For intra-repo edges, source repo's map; for EXTERNAL_REF, destination repo's map.
+/// - `dst_repo_name`: destination endpoint's repo name; `== repo_name` for intra-repo edges;
+///   the cross-repo target for EXTERNAL_REF (ADR-1 point 5).
+///
+/// Sinks write `src_id`/`dst_id`/`dst_repo_name` and drop `src_usr`/`dst_usr`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EdgeRecord {
     /// Source node USR.
@@ -173,6 +182,17 @@ pub struct EdgeRecord {
     /// USES edge target access kind.
     /// `Some` for USES edges only; `None` for all other edge kinds.
     pub target_association_type: Option<String>,
+
+    // ── graph-symbol-ids integer ID fields (Story 3, v6) ─────────────────────
+    /// Per-repo integer ID for `src_usr`; from source repo's `SymbolAllocator`.
+    pub src_id: i64,
+    /// Per-repo integer ID for `dst_usr`; `None` mirrors `dst_usr: None` skip rule.
+    /// For intra-repo edges: source repo's `SymbolAllocator`.
+    /// For EXTERNAL_REF: destination repo's `SymbolAllocator`.
+    pub dst_id: Option<i64>,
+    /// Destination endpoint's repository name.
+    /// `== repo_name` for intra-repo edges; the cross-repo target repo for EXTERNAL_REF.
+    pub dst_repo_name: String,
 }
 
 #[cfg(test)]

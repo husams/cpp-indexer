@@ -57,6 +57,7 @@ fn collect_node_names(skip_system_headers: bool) -> HashSet<String> {
             format!("-isystem{}", sysinc_dir.display()),
         ],
         skip_system_headers,
+        allocator: None,
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();

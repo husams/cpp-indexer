@@ -7,5 +7,7 @@
 /// - `canonical`: system-header / vendored USR canonicalisation (S24, AC-M4-7, AC-M4-8, ADR-4).
 pub mod canonical;
 pub mod cross_repo;
+pub mod id_resolver;
 pub mod per_repo;
 pub mod spill;
+pub mod symbol_map;

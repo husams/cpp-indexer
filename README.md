@@ -73,6 +73,30 @@ Seven milestones (M1 → M7) targeting v1 GA in approximately 12 weeks (solo).
 See `docs/` once it's populated, or the project planning notes referenced in
 the development log.
 
+## PCM / C++20 module support
+
+The indexer supports translation units that consume Clang precompiled modules
+(`.pcm` files). **libclang 18** or later is required for module-capable parsing.
+
+Supported compile flags detected from `compile_commands.json`:
+
+- `-fmodules` — implicit module map support
+- `-fmodule-file=<name>=<path>` or `-fmodule-file=<path>` — named prebuilt `.pcm`
+- `-fprebuilt-module-path=<dir>` — directory of prebuilt `.pcm` files
+
+**Best-effort skip posture:** when libclang < 18 is detected at runtime, PCM
+TUs are **skipped** with a warning (`failed_tus > 0`) rather than partially
+parsed. Non-module TUs in the same run are unaffected.
+
+**Loud failure on missing/invalid `.pcm`:** a missing `.pcm` referenced by
+`-fmodule-file=` is detected **before** parse and logged at ERROR level; the TU
+is counted as a failure (`failed_tus > 0`, non-zero in the closing summary) and
+**no silent partial output** is written. Corrupt or out-of-date `.pcm` files
+that produce a `Fatal`-severity libclang diagnostic are caught by a post-parse
+gate with the same counted-failure behaviour.
+
+See [`docs/pcm.md`](docs/pcm.md) for the full reference.
+
 ## Requirements
 
 - Rust (edition 2021)

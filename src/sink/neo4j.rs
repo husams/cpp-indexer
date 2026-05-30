@@ -39,9 +39,10 @@ use crate::sink::{GraphSink, HealthInfo, ResetTarget, WriteStats};
 
 // ── Cypher constants ──────────────────────────────────────────────────────────
 
-/// Create an index on `:Node(usr)` — idempotent (IF NOT EXISTS).
-const CQL_ENSURE_NODE_USR_INDEX: &str =
-    "CREATE INDEX node_usr_idx IF NOT EXISTS FOR (n:Node) ON (n.usr)";
+/// Create an index on `:Node(symbol_id)` — idempotent (IF NOT EXISTS).
+/// Replaces the v5 `node_usr_idx`; v6 graphs key nodes on `(symbol_id, repo_name)`.
+const CQL_ENSURE_NODE_SYMBOL_ID_INDEX: &str =
+    "CREATE INDEX node_symbol_id_idx IF NOT EXISTS FOR (n:Node) ON (n.symbol_id)";
 
 /// Create an index on `:Node(repo_name)` — used by reset queries.
 const CQL_ENSURE_NODE_REPO_INDEX: &str =
@@ -65,17 +66,18 @@ const CQL_ENSURE_IS_STATIC_INDEX: &str =
 const CQL_ENSURE_KIND_RETURN_TYPE_INDEX: &str =
     "CREATE INDEX node_kind_return_type_idx IF NOT EXISTS FOR (n:Node) ON (n.kind, n.return_type)";
 
-/// UNWIND + MERGE nodes; idempotent on `(usr, repo_name)`.
+/// UNWIND + MERGE nodes; idempotent on `(symbol_id, repo_name)` (v6, graph-symbol-ids Story 3).
 ///
 /// Parameters: `rows` — a list of maps, each with keys matching the SET clause.
+/// USR and file_path strings are NOT written to the durable graph (S6-SC-03).
 const CQL_MERGE_NODES: &str = "
 UNWIND $rows AS row
-MERGE (n:Node {usr: row.usr, repo_name: row.repo_name})
+MERGE (n:Node {symbol_id: row.symbol_id, repo_name: row.repo_name})
 SET n.kind              = row.kind,
     n.name              = row.name,
     n.qualified_name    = row.qualified_name,
     n.mangled_name      = row.mangled_name,
-    n.file_path         = row.file_path,
+    n.file_id           = row.file_id,
     n.line              = row.line,
     n.col               = row.col,
     n.attrs_json        = row.attrs_json,
@@ -93,17 +95,20 @@ SET n.kind              = row.kind,
     n.is_static         = row.is_static
 ";
 
-/// UNWIND + MERGE edges; idempotent on `(src_usr, dst_usr, kind)`.
+/// UNWIND + MERGE edges; idempotent on `(src_id, dst_id, kind)` (v6, graph-symbol-ids Story 3).
 ///
-/// Skips rows where `dst_usr` is null — callers must pre-filter.
+/// Source endpoint keyed on `(src_id, repo_name)`, destination on `(dst_id, dst_repo_name)`.
+/// Skips rows where `dst_id` is null — callers must pre-filter.
+/// USR strings are NOT written to the durable graph (S6-SC-03).
 const CQL_MERGE_EDGES: &str = "
 UNWIND $rows AS row
-MATCH (src:Node {usr: row.src_usr, repo_name: row.repo_name})
-MATCH (dst:Node {usr: row.dst_usr, repo_name: row.repo_name})
+MATCH (src:Node {symbol_id: row.src_id, repo_name: row.repo_name})
+MATCH (dst:Node {symbol_id: row.dst_id, repo_name: row.dst_repo_name})
 MERGE (src)-[r:EDGE {kind: row.kind}]->(dst)
 SET r.resolved                  = row.resolved,
     r.cross_repo_candidate      = row.cross_repo_candidate,
     r.repo_name                 = row.repo_name,
+    r.dst_repo_name             = row.dst_repo_name,
     r.attrs_json                = row.attrs_json,
     r.source_association_type   = row.source_association_type,
     r.target_association_type   = row.target_association_type
@@ -446,7 +451,9 @@ fn structured_list_to_json_bolt<T: serde::Serialize>(items: &[T]) -> BoltType {
 
 fn node_to_bolt(n: &NodeRecord) -> HashMap<String, BoltType> {
     let mut m: HashMap<String, BoltType> = HashMap::new();
-    m.insert("usr".into(), n.usr.clone().into());
+    // v6: key on integer IDs, not USR strings (S6-SC-03)
+    m.insert("symbol_id".into(), BoltType::from(n.symbol_id));
+    m.insert("file_id".into(), BoltType::from(n.file_id));
     m.insert("kind".into(), n.kind.as_str().to_owned().into());
     m.insert("name".into(), n.name.clone().into());
     m.insert("qualified_name".into(), n.qualified_name.clone().into());
@@ -457,7 +464,7 @@ fn node_to_bolt(n: &NodeRecord) -> HashMap<String, BoltType> {
             .map(BoltType::from)
             .unwrap_or(BoltType::Null(neo4rs::BoltNull)),
     );
-    m.insert("file_path".into(), n.file_path.clone().into());
+    m.insert("repo_name".into(), n.repo_name.clone().into());
     m.insert(
         "line".into(),
         n.line
@@ -470,7 +477,6 @@ fn node_to_bolt(n: &NodeRecord) -> HashMap<String, BoltType> {
             .map(|v| BoltType::from(v as i64))
             .unwrap_or(BoltType::Null(neo4rs::BoltNull)),
     );
-    m.insert("repo_name".into(), n.repo_name.clone().into());
     m.insert("attrs_json".into(), n.attrs_json.clone().into());
     m.insert("partial".into(), n.partial.into());
     m.insert("phase".into(), (n.phase as i64).into());
@@ -521,17 +527,19 @@ fn node_to_bolt(n: &NodeRecord) -> HashMap<String, BoltType> {
 
 /// Convert an `EdgeRecord` to a Bolt parameter map.
 ///
-/// Returns `None` when `dst_usr` is absent — such edges cannot be MERGE'd
-/// because the idempotency key `(src_usr, dst_usr, kind)` is incomplete.
+/// Returns `None` when `dst_id` is absent — such edges cannot be MERGE'd
+/// because the idempotency key `(src_id, dst_id, kind)` is incomplete (v6).
 fn edge_to_bolt(e: &EdgeRecord) -> Option<HashMap<String, BoltType>> {
-    let dst_usr = e.dst_usr.as_ref()?;
+    let dst_id = e.dst_id?;
     let mut m: HashMap<String, BoltType> = HashMap::new();
-    m.insert("src_usr".into(), e.src_usr.clone().into());
-    m.insert("dst_usr".into(), dst_usr.clone().into());
+    // v6: key on integer IDs, not USR strings (S6-SC-03)
+    m.insert("src_id".into(), BoltType::from(e.src_id));
+    m.insert("dst_id".into(), BoltType::from(dst_id));
     m.insert("kind".into(), e.kind.as_str().to_owned().into());
     m.insert("resolved".into(), e.resolved.into());
     m.insert("cross_repo_candidate".into(), e.cross_repo_candidate.into());
     m.insert("repo_name".into(), e.repo_name.clone().into());
+    m.insert("dst_repo_name".into(), e.dst_repo_name.clone().into());
     m.insert("attrs_json".into(), e.attrs_json.clone().into());
     // M8 promoted edge fields (S44, ADR-14)
     m.insert(
@@ -563,7 +571,7 @@ impl GraphSink for Neo4jSink {
 
     async fn ensure_indexes(&self) -> Result<()> {
         for cql in &[
-            CQL_ENSURE_NODE_USR_INDEX,
+            CQL_ENSURE_NODE_SYMBOL_ID_INDEX,
             CQL_ENSURE_NODE_REPO_INDEX,
             // M8 (S44) covering indexes — ADR-15.
             CQL_ENSURE_RETURN_TYPE_INDEX,
@@ -817,10 +825,14 @@ mod tests {
             is_virtual: None,
             is_pure_virtual: None,
             is_static: None,
+            symbol_id: 42,
+            file_id: 7,
         }
     }
 
     fn sample_edge(src: &str, dst: Option<&str>) -> EdgeRecord {
+        // v6: dst_id set to Some when dst is provided; 0-based stub values.
+        let dst_id = dst.map(|_| 99_i64);
         EdgeRecord {
             src_usr: src.to_owned(),
             dst_usr: dst.map(str::to_owned),
@@ -833,6 +845,9 @@ mod tests {
             tu_hash: [0u8; 32],
             source_association_type: None,
             target_association_type: None,
+            src_id: 42,
+            dst_id,
+            dst_repo_name: "test-repo".to_owned(),
         }
     }
 
@@ -844,9 +859,10 @@ mod tests {
             CQL_MERGE_NODES.contains("MERGE"),
             "CQL_MERGE_NODES must use MERGE for idempotency"
         );
+        // v6: keyed on symbol_id, not usr
         assert!(
-            CQL_MERGE_NODES.contains("usr"),
-            "CQL_MERGE_NODES must key on usr"
+            CQL_MERGE_NODES.contains("symbol_id"),
+            "CQL_MERGE_NODES must key on symbol_id (v6)"
         );
         assert!(
             CQL_MERGE_NODES.contains("repo_name"),
@@ -872,7 +888,8 @@ mod tests {
 
     #[test]
     fn cql_ensure_indexes_uses_if_not_exists() {
-        assert!(CQL_ENSURE_NODE_USR_INDEX.contains("IF NOT EXISTS"));
+        // v6: CQL_ENSURE_NODE_SYMBOL_ID_INDEX replaces the v5 CQL_ENSURE_NODE_USR_INDEX.
+        assert!(CQL_ENSURE_NODE_SYMBOL_ID_INDEX.contains("IF NOT EXISTS"));
         assert!(CQL_ENSURE_NODE_REPO_INDEX.contains("IF NOT EXISTS"));
     }
 
@@ -960,13 +977,14 @@ mod tests {
     fn node_to_bolt_all_keys_present() {
         let node = sample_node("c:@F@foo");
         let m = node_to_bolt(&node);
+        // v6: usr and file_path dropped; symbol_id and file_id added
         for key in &[
-            "usr",
+            "symbol_id",
+            "file_id",
             "kind",
             "name",
             "qualified_name",
             "mangled_name",
-            "file_path",
             "line",
             "col",
             "repo_name",
@@ -976,6 +994,15 @@ mod tests {
         ] {
             assert!(m.contains_key(*key), "missing key: {key}");
         }
+        // v6: usr and file_path must NOT be in the bolt map (S6-SC-03)
+        assert!(
+            !m.contains_key("usr"),
+            "v6 node_to_bolt must NOT emit 'usr' (S6-SC-03)"
+        );
+        assert!(
+            !m.contains_key("file_path"),
+            "v6 node_to_bolt must NOT emit 'file_path' (S6-SC-03)"
+        );
     }
 
     /// AC-S44-1: node_to_bolt includes all 10 promoted M8 fields.
@@ -1169,25 +1196,30 @@ mod tests {
     // ── edge_to_bolt ──────────────────────────────────────────────────────────
 
     #[test]
-    fn edge_to_bolt_returns_none_when_dst_usr_absent() {
+    fn edge_to_bolt_returns_none_when_dst_id_absent() {
+        // v6: skip edges where dst_id is None (not dst_usr)
         let edge = sample_edge("src", None);
         assert!(
             edge_to_bolt(&edge).is_none(),
-            "edge with dst_usr=None must be skipped"
+            "edge with dst_id=None must be skipped (v6)"
         );
     }
 
     #[test]
     fn edge_to_bolt_returns_some_when_dst_usr_present() {
         let edge = sample_edge("src", Some("dst"));
-        let m = edge_to_bolt(&edge).expect("edge with dst_usr must convert");
-        assert_eq!(
-            format!("{:?}", m["src_usr"]),
-            format!("{:?}", BoltType::from("src".to_owned()))
+        let m = edge_to_bolt(&edge).expect("edge with dst_id must convert");
+        // v6: integer IDs, not USR strings
+        assert!(m.contains_key("src_id"), "v6 edge_to_bolt must emit src_id");
+        assert!(m.contains_key("dst_id"), "v6 edge_to_bolt must emit dst_id");
+        // v6: src_usr and dst_usr must NOT be in the bolt map (S6-SC-03)
+        assert!(
+            !m.contains_key("src_usr"),
+            "v6 edge_to_bolt must NOT emit 'src_usr' (S6-SC-03)"
         );
-        assert_eq!(
-            format!("{:?}", m["dst_usr"]),
-            format!("{:?}", BoltType::from("dst".to_owned()))
+        assert!(
+            !m.contains_key("dst_usr"),
+            "v6 edge_to_bolt must NOT emit 'dst_usr' (S6-SC-03)"
         );
     }
 
@@ -1305,17 +1337,16 @@ mod tests {
 
     #[test]
     fn edge_to_bolt_idempotency_key_present_for_resolved_edges() {
-        // Verify both src_usr and dst_usr are always set — these are the
-        // idempotency keys in CQL_MERGE_EDGES.
+        // v6: idempotency keys are src_id, dst_id, kind (not usr strings).
         let edge = sample_edge("src", Some("dst"));
         let m = edge_to_bolt(&edge).expect("resolved edge must convert");
         assert!(
-            m.contains_key("src_usr"),
-            "idempotency key src_usr must be in bolt map"
+            m.contains_key("src_id"),
+            "v6 idempotency key src_id must be in bolt map"
         );
         assert!(
-            m.contains_key("dst_usr"),
-            "idempotency key dst_usr must be in bolt map"
+            m.contains_key("dst_id"),
+            "v6 idempotency key dst_id must be in bolt map"
         );
         assert!(
             m.contains_key("kind"),

@@ -242,6 +242,8 @@ async fn run_job(
         workers,
         skip_cache: false,
         skip_repo_node: false,
+        symbol_db_path: None,
+        symbol_cache_size: 100_000,
     };
 
     let stats = run(sink, opts).await?;

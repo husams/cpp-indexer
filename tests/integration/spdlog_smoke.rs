@@ -139,6 +139,8 @@ async fn spdlog_smoke() {
         workers: None,
         skip_cache: true,
         skip_repo_node: true,
+        symbol_db_path: None,
+        symbol_cache_size: 100_000,
     };
 
     let stats = run(sink, opts)

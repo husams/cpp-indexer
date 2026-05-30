@@ -46,6 +46,7 @@ async fn visit_template_fixture() -> Vec<NodeRecord> {
             format!("-I{}", fixture.display()),
         ],
         skip_system_headers: true,
+        allocator: None,
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
@@ -157,6 +158,8 @@ async fn collect_node_records_with_template_fields(stage_dir: &std::path::Path) 
                     is_virtual: None,
                     is_pure_virtual: None,
                     is_static: None,
+                    symbol_id: 0,
+                    file_id: 0,
                 });
             }
         }
@@ -523,6 +526,7 @@ async fn visit_template_fixture_with_edges() -> (Vec<NodeRecord>, Vec<(String, S
             format!("-I{}", fixture.display()),
         ],
         skip_system_headers: true,
+        allocator: None,
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();

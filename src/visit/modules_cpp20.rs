@@ -27,7 +27,10 @@ use std::sync::OnceLock;
 use clang::{EntityKind, EntityVisitResult, Index};
 use tracing::{debug, info, warn};
 
+use std::sync::Arc;
+
 use crate::{
+    resolve::symbol_map::SymbolAllocator,
     schema::{EdgeKind, EdgeRecord, NodeKind, NodeRecord},
     stage::writer::StageWriter,
     visit::shallow::with_thread_index,
@@ -134,10 +137,7 @@ fn run_probe() -> bool {
     let _ = std::fs::remove_file(&probe_path);
 
     if !capable {
-        info!(
-            "C++20 modules: UNAVAILABLE — .cppm/.ixx TUs will be skipped \
-             (upgrade to a libclang build with module support to enable)"
-        );
+        warn!("C++20 modules: UNAVAILABLE — .cppm/.ixx TUs skipped (need libclang 18+ with module support)");
     }
 
     capable
@@ -159,8 +159,10 @@ pub fn warn_and_skip(file: &Path) {
 }
 
 /// Returns `true` when `file` has a C++20 module interface extension
-/// (`.cppm`, `.ixx`, `.mxx`) or when `args` contain `-fmodules` and `-std=c++20`.
+/// (`.cppm`, `.ixx`, `.mxx`) OR when `args` contain any PCM-related flag:
+/// `-fmodules`, `-fmodule-file=…`, or `-fprebuilt-module-path=…`.
 ///
+/// Detection is flag-presence only — no `-std=c++20` co-requirement (ADR-2).
 /// Used by the pipeline to route TUs to this module.
 pub fn is_module_tu(file: &Path, args: &[String]) -> bool {
     let ext = file
@@ -170,9 +172,11 @@ pub fn is_module_tu(file: &Path, args: &[String]) -> bool {
     if matches!(ext, "cppm" | "ixx" | "mxx") {
         return true;
     }
-    let has_fmodules = args.iter().any(|a| a == "-fmodules");
-    let has_std_cpp20 = args.iter().any(|a| a == "-std=c++20" || a == "--std=c++20");
-    has_fmodules && has_std_cpp20
+    args.iter().any(|a| {
+        a == "-fmodules"
+            || a.starts_with("-fmodule-file=")
+            || a.starts_with("-fprebuilt-module-path")
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +201,29 @@ pub fn is_module_tu(file: &Path, args: &[String]) -> bool {
 /// # Errors
 /// Returns [`Error::Clang`] when libclang fails to produce any AST at all.
 /// Returns [`Error::Schema`] / [`Error::Io`] on write failures.
+/// Check whether an explicit `-fmodule-file=[name=]path` argument references a
+/// `.pcm` file that does not exist on disk.  Returns the missing path if so.
+///
+/// Parses both Clang forms:
+/// - `name=path` (path is the substring after the second `=`)
+/// - bare `path` (whole remainder, no `=` after the prefix)
+fn check_explicit_pcm_files(args: &[String]) -> Option<std::path::PathBuf> {
+    for arg in args {
+        if let Some(rest) = arg.strip_prefix("-fmodule-file=") {
+            // rest is either "Name=/path/to/Foo.pcm" or "/path/to/Foo.pcm"
+            let pcm_path = if let Some((_name, path)) = rest.split_once('=') {
+                std::path::Path::new(path)
+            } else {
+                std::path::Path::new(rest)
+            };
+            if !pcm_path.exists() {
+                return Some(pcm_path.to_path_buf());
+            }
+        }
+    }
+    None
+}
+
 pub fn parse_module_tu(
     index: &Index<'_>,
     file: &Path,
@@ -204,14 +231,35 @@ pub fn parse_module_tu(
     repo_name: &str,
     tu_hash: [u8; 32],
     writer: &mut StageWriter,
+    allocator: Option<Arc<SymbolAllocator>>,
 ) -> Result<bool> {
+    // S3-AC1: pre-parse stat gate — detect missing explicit .pcm files before any write.
+    if let Some(missing) = check_explicit_pcm_files(args) {
+        tracing::error!(
+            pcm = %missing.display(),
+            tu = %file.display(),
+            "PCM load failure: explicit .pcm file is missing — no graph nodes emitted for this TU"
+        );
+        return Err(Error::Clang(format!(
+            "missing PCM file '{}' referenced by TU '{}'",
+            missing.display(),
+            file.display()
+        )));
+    }
+
     let parse_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut full_args: Vec<String> = args.to_vec();
-        // Ensure module-relevant flags are present.
-        if !full_args.iter().any(|a| a == "-std=c++20") {
+        // For module-interface extensions (.cppm/.ixx/.mxx) force c++20 semantics (ADR-1 §3).
+        // For PCM-consuming .cpp TUs, preserve the TU's original -std to avoid semantics change.
+        let ext = file
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
+        let is_interface_ext = matches!(ext, "cppm" | "ixx" | "mxx");
+        if is_interface_ext && !full_args.iter().any(|a| a == "-std=c++20") {
             full_args.push("-std=c++20".to_owned());
         }
-        if !full_args.iter().any(|a| a == "-fmodules") {
+        if is_interface_ext && !full_args.iter().any(|a| a == "-fmodules") {
             full_args.push("-fmodules".to_owned());
         }
         index
@@ -238,9 +286,27 @@ pub fn parse_module_tu(
         }
     };
 
+    // S3-AC2: post-parse Fatal gate — Fatal diagnostics indicate corrupt/invalid .pcm.
+    // Suppress all writes and return Err so the TU counts as tu_error (ADR-3 §B).
+    let has_fatal = tu.get_diagnostics().iter().any(|d| {
+        use clang::diagnostic::Severity;
+        matches!(d.get_severity(), Severity::Fatal)
+    });
+    if has_fatal {
+        tracing::error!(
+            tu = %file.display(),
+            "PCM load failure: Fatal diagnostic from libclang — corrupt or invalid .pcm; \
+             no graph nodes emitted for this TU"
+        );
+        return Err(Error::Clang(format!(
+            "Fatal libclang diagnostic while parsing module TU '{}'",
+            file.display()
+        )));
+    }
+
     let has_errors = tu.get_diagnostics().iter().any(|d| {
         use clang::diagnostic::Severity;
-        matches!(d.get_severity(), Severity::Error | Severity::Fatal)
+        matches!(d.get_severity(), Severity::Error)
     });
 
     if has_errors {
@@ -290,6 +356,9 @@ pub fn parse_module_tu(
         is_virtual: None,
         is_pure_virtual: None,
         is_static: None,
+        // Integer IDs populated by visit_tu_inner post-processing pass.
+        symbol_id: 0,
+        file_id: 0,
     };
 
     let mut nodes = vec![module_node];
@@ -334,6 +403,9 @@ pub fn parse_module_tu(
                 is_virtual: None,
                 is_pure_virtual: None,
                 is_static: None,
+                // Integer IDs populated by visit_tu_inner post-processing pass.
+                symbol_id: 0,
+                file_id: 0,
             };
             nodes.push(imported_node);
 
@@ -351,6 +423,10 @@ pub fn parse_module_tu(
                 // M8 promoted fields — INCLUDES edges carry none of these
                 source_association_type: None,
                 target_association_type: None,
+                // Integer IDs populated by visit_tu_inner post-processing pass.
+                src_id: 0,
+                dst_id: None,
+                dst_repo_name: repo_name.to_owned(),
             });
 
             return EntityVisitResult::Continue;
@@ -419,6 +495,9 @@ pub fn parse_module_tu(
                 is_virtual: None,
                 is_pure_virtual: None,
                 is_static: None,
+                // Integer IDs populated by visit_tu_inner post-processing pass.
+                symbol_id: 0,
+                file_id: 0,
             });
 
             // CONTAINS edge from module to exported decl.
@@ -435,11 +514,31 @@ pub fn parse_module_tu(
                 // M8 promoted fields — CONTAINS edges carry none of these
                 source_association_type: None,
                 target_association_type: None,
+                // Integer IDs populated by visit_tu_inner post-processing pass.
+                src_id: 0,
+                dst_id: None,
+                dst_repo_name: repo_name.to_owned(),
             });
         }
 
         EntityVisitResult::Recurse
     });
+
+    // graph-symbol-ids post-processing pass (Story 3, v6): populate integer IDs.
+    if let Some(ref alloc) = allocator {
+        for node in &mut nodes {
+            node.symbol_id = alloc.get_or_insert_symbol(&node.usr).unwrap_or(0);
+            node.file_id = alloc.get_or_insert_file(&node.file_path).unwrap_or(0);
+        }
+        for edge in &mut edges {
+            edge.src_id = alloc.get_or_insert_symbol(&edge.src_usr).unwrap_or(0);
+            edge.dst_id = if let Some(ref dst) = edge.dst_usr {
+                alloc.get_or_insert_symbol(dst).ok()
+            } else {
+                None
+            };
+        }
+    }
 
     writer.write_nodes(&nodes)?;
     writer.write_edges(&edges)?;
@@ -513,14 +612,34 @@ mod tests {
         assert!(!is_module_tu(Path::new("foo.h"), &[]));
     }
 
-    /// `is_module_tu` also detects via compile args.
+    /// `is_module_tu` detects via compile args — no `-std=c++20` co-requirement (ADR-2).
     #[test]
     fn is_module_tu_by_args() {
-        let args = vec!["-std=c++20".to_owned(), "-fmodules".to_owned()];
-        assert!(is_module_tu(Path::new("bar.cpp"), &args));
-        // Only one flag is not enough.
-        let args_partial = vec!["-std=c++20".to_owned()];
-        assert!(!is_module_tu(Path::new("bar.cpp"), &args_partial));
+        // -fmodules alone → true (S1 implied; ADR-2)
+        let args_fmodules = vec!["-fmodules".to_owned()];
+        assert!(is_module_tu(Path::new("bar.cpp"), &args_fmodules));
+
+        // -fmodule-file= alone → true (S1-AC2)
+        let args_modfile = vec!["-fmodule-file=Foo=/build/Foo.pcm".to_owned()];
+        assert!(is_module_tu(Path::new("bar.cpp"), &args_modfile));
+
+        // -fprebuilt-module-path= alone → true (S1-AC1)
+        let args_prebuilt = vec!["-fprebuilt-module-path=/build/modules".to_owned()];
+        assert!(is_module_tu(Path::new("bar.cpp"), &args_prebuilt));
+
+        // Both PCM flags present → still true, not double-counted (edge case)
+        let args_both = vec![
+            "-fmodule-file=Foo=/build/Foo.pcm".to_owned(),
+            "-fprebuilt-module-path=/build/modules".to_owned(),
+        ];
+        assert!(is_module_tu(Path::new("bar.cpp"), &args_both));
+
+        // No PCM flags → false (S1-AC3)
+        let args_no_pcm: Vec<String> = vec!["-std=c++17".to_owned()];
+        assert!(!is_module_tu(Path::new("bar.cpp"), &args_no_pcm));
+
+        // No flags at all → false
+        assert!(!is_module_tu(Path::new("bar.cpp"), &[]));
     }
 
     /// `warn_and_skip` must not panic (it just emits a warn! log).
@@ -540,6 +659,97 @@ mod tests {
             warn_and_skip(file);
         }
         // If we get here without panic, the skip path is safe.
+    }
+
+    /// S3-AC1: missing explicit .pcm file → Err, no write (hermetic, no libclang needed).
+    #[test]
+    fn missing_pcm_stat_check_returns_err() {
+        let missing =
+            check_explicit_pcm_files(&["-fmodule-file=Foo=/nonexistent/path/Foo.pcm".to_owned()]);
+        assert!(
+            missing.is_some(),
+            "check_explicit_pcm_files must detect a missing .pcm"
+        );
+        assert!(
+            missing.unwrap().ends_with("Foo.pcm"),
+            "returned path must be the .pcm file"
+        );
+    }
+
+    /// S3: present .pcm file → no error from stat check.
+    #[test]
+    fn present_pcm_stat_check_returns_none() {
+        // Use a file that is guaranteed to exist.
+        let present = check_explicit_pcm_files(&[format!(
+            "-fmodule-file=Foo={}",
+            std::env::current_exe()
+                .expect("current exe")
+                .to_str()
+                .expect("utf8")
+        )]);
+        assert!(
+            present.is_none(),
+            "check_explicit_pcm_files must not flag a present file"
+        );
+    }
+
+    /// S3: bare form (no name= prefix) is also stat-checked.
+    #[test]
+    fn missing_pcm_bare_form_detected() {
+        let missing =
+            check_explicit_pcm_files(&["-fmodule-file=/nonexistent/path/Bar.pcm".to_owned()]);
+        assert!(missing.is_some(), "bare form must also be detected");
+    }
+
+    /// Empirical test: what severity does libclang report for a corrupt .pcm?
+    /// Used to validate the S3-AC2 Fatal-severity assumption (ADR-3 §A).
+    /// This test prints findings and always passes; it is `#[ignore]`d in CI.
+    #[test]
+    #[ignore = "diagnostic-severity probe: run manually on libclang 18+ to validate ADR-3 Fatal assumption"]
+    fn corrupt_pcm_fatal_severity_probe() {
+        use clang::diagnostic::Severity;
+
+        let corrupt_pcm = std::env::temp_dir().join("corrupt_severity_probe.pcm");
+        std::fs::write(&corrupt_pcm, b"garbage not valid PCM content at all").unwrap();
+        let consumer = std::env::temp_dir().join("severity_consumer.cpp");
+        std::fs::write(&consumer, b"import Foo;\nint main() { return 0; }\n").unwrap();
+
+        with_thread_index(|index| {
+            let args = vec![
+                "-std=c++20".to_string(),
+                "-fmodules".to_string(),
+                format!("-fmodule-file=Foo={}", corrupt_pcm.display()),
+            ];
+            match index.parser(&consumer).arguments(&args).parse() {
+                Ok(tu) => {
+                    let diags = tu.get_diagnostics();
+                    eprintln!("corrupt-pcm diagnostic count: {}", diags.len());
+                    let mut has_fatal = false;
+                    let mut has_error = false;
+                    for d in &diags {
+                        let sev = d.get_severity();
+                        eprintln!("  severity={sev:?} msg={}", d.get_text());
+                        match sev {
+                            Severity::Fatal => has_fatal = true,
+                            Severity::Error => has_error = true,
+                            _ => {}
+                        }
+                    }
+                    eprintln!(
+                        "RESULT: has_fatal={has_fatal} has_error={has_error} -- \
+                         S3-AC2 Fatal gate is {} for corrupt .pcm",
+                        if has_fatal {
+                            "SUFFICIENT"
+                        } else {
+                            "NOT sufficient (Error only)"
+                        }
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Parse API failed (libclang returned error directly): {e:?}");
+                }
+            }
+        });
     }
 
     /// When the probe succeeds, `parse_module_tu` emits at least a MODULE node.
@@ -572,6 +782,7 @@ mod tests {
                 "test-repo",
                 [0u8; 32],
                 &mut writer,
+                None, // no allocator in test
             );
             assert!(
                 result.is_ok(),

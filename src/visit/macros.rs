@@ -135,6 +135,9 @@ pub(crate) fn collect_macro_definition(
         is_virtual: None,
         is_pure_virtual: None,
         is_static: None,
+        // Integer IDs populated by visit_tu_inner post-processing pass.
+        symbol_id: 0,
+        file_id: 0,
     })
 }
 
@@ -201,6 +204,10 @@ pub(crate) fn collect_macro_expansion(
         // M8 promoted fields — EXPANDS_TO edges carry none of these
         source_association_type: None,
         target_association_type: None,
+        // Integer IDs populated by visit_tu_inner post-processing pass.
+        src_id: 0,
+        dst_id: None,
+        dst_repo_name: repo_name.to_owned(),
     })
 }
 
@@ -344,11 +351,11 @@ pub(crate) mod tests {
     // ── Schema version bump ──────────────────────────────────────────────────
 
     #[test]
-    fn schema_version_bumped_to_5() {
+    fn schema_version_bumped_to_6() {
         use crate::schema::version::SCHEMA_VERSION;
         assert_eq!(
-            SCHEMA_VERSION, 5,
-            "SCHEMA_VERSION must be 5 after S40-S43 (M8 native fields)"
+            SCHEMA_VERSION, 6,
+            "SCHEMA_VERSION must be 6 after graph-symbol-ids Story 3"
         );
     }
 
@@ -369,6 +376,9 @@ pub(crate) mod tests {
             tu_hash: [0u8; 32],
             source_association_type: None,
             target_association_type: None,
+            src_id: 0,
+            dst_id: None,
+            dst_repo_name: "repo".to_owned(),
         };
         assert_eq!(edge.kind, EdgeKind::ExpandsTo);
         assert!(edge.dst_usr.as_deref().unwrap().starts_with("macro:"));

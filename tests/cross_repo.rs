@@ -21,7 +21,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cpp_indexer::resolve::cross_repo::{run as phase5_run, Phase5Options};
+use cpp_indexer::resolve::cross_repo::{
+    check_schema_version_for_write, run as phase5_run, Phase5Options,
+};
 use cpp_indexer::schema::{EdgeKind, EdgeRecord, NodeKind, NodeRecord};
 use cpp_indexer::sink::GraphSink;
 
@@ -127,6 +129,8 @@ fn make_node(usr: &str, repo: &str) -> NodeRecord {
         is_virtual: None,
         is_pure_virtual: None,
         is_static: None,
+        symbol_id: 0,
+        file_id: 0,
     }
 }
 
@@ -143,6 +147,9 @@ fn make_cross_edge(src_usr: &str, dst_usr: &str, src_repo: &str) -> EdgeRecord {
         tu_hash: [0u8; 32],
         source_association_type: None,
         target_association_type: None,
+        src_id: 0,
+        dst_id: None,
+        dst_repo_name: src_repo.to_owned(),
     }
 }
 
@@ -197,6 +204,9 @@ async fn phase5_no_candidates_writes_no_external_refs() {
         tu_hash: [0u8; 32],
         source_association_type: None,
         target_association_type: None,
+        src_id: 0,
+        dst_id: None,
+        dst_repo_name: "repo_a".to_owned(),
     }];
 
     write_fixture_shards(&stage_dir, &nodes, &edges).expect("write shards");
@@ -536,4 +546,163 @@ async fn live_schema_version_mismatch_refused() {
     // path indirectly — the unit test `phase5_schema_version_mismatch_is_refused`
     // above already covers the mismatch-error path fully.
     eprintln!("INFO: live schema-version-mismatch path covered by unit test; live test is a no-op");
+}
+
+// ── Story 5: migration handshake — write-path gate (S6-SC-01, S6-SC-02) ──────
+
+/// S6-SC-01 (integration): v6 binary reading a v5-tagged SchemaVersion on the
+/// write path → explicit Error::Schema naming both tags (mock sink, hard gate).
+#[tokio::test]
+async fn write_path_gate_v5_graph_is_refused() {
+    use async_trait::async_trait;
+    use cpp_indexer::error::Result as CxgResult;
+    use cpp_indexer::schema::version::SCHEMA_VERSION_TAG;
+    use cpp_indexer::sink::lock::Phase5LockGuard;
+    use cpp_indexer::sink::{HealthInfo, ResetTarget, WriteStats};
+
+    struct V5Sink;
+
+    #[async_trait]
+    impl GraphSink for V5Sink {
+        fn backend_name(&self) -> &'static str {
+            "mock-v5"
+        }
+        async fn preflight(&self) -> CxgResult<()> {
+            Ok(())
+        }
+        async fn ensure_indexes(&self) -> CxgResult<()> {
+            Ok(())
+        }
+        async fn write_nodes(&self, _b: &[NodeRecord]) -> CxgResult<WriteStats> {
+            unimplemented!()
+        }
+        async fn write_edges(&self, _b: &[EdgeRecord]) -> CxgResult<WriteStats> {
+            unimplemented!()
+        }
+        async fn reset(&self, _t: ResetTarget) -> CxgResult<()> {
+            Ok(())
+        }
+        async fn acquire_phase5_lock(&self, _ttl: Duration) -> CxgResult<Box<dyn Phase5LockGuard>> {
+            unimplemented!()
+        }
+        async fn read_schema_version(&self) -> CxgResult<Option<String>> {
+            Ok(Some("cxg-schema-v5".to_owned()))
+        }
+        async fn write_schema_version(&self, _tag: &str, _attrs: &str) -> CxgResult<()> {
+            Ok(())
+        }
+        async fn health(&self) -> CxgResult<HealthInfo> {
+            Ok(HealthInfo {
+                status: "ok".to_owned(),
+                latency: Duration::ZERO,
+            })
+        }
+    }
+
+    let sink: Arc<dyn GraphSink> = Arc::new(V5Sink);
+    let err = check_schema_version_for_write(&sink)
+        .await
+        .expect_err("v5 graph must be refused on the write path");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cxg-schema-v5"),
+        "error must name the actual (v5) tag; got: {msg}"
+    );
+    assert!(
+        msg.contains(SCHEMA_VERSION_TAG),
+        "error must name the expected (current) tag; got: {msg}"
+    );
+    assert!(
+        msg.contains("reset") || msg.contains("re-index"),
+        "error must instruct operator to reset/re-index; got: {msg}"
+    );
+}
+
+/// S6-SC-02 (integration): write path errors rather than silently overwriting
+/// a v5 graph when no --reset has been issued.
+#[tokio::test]
+async fn write_path_gate_no_reset_no_silent_overwrite() {
+    use async_trait::async_trait;
+    use cpp_indexer::error::Result as CxgResult;
+    use cpp_indexer::sink::lock::Phase5LockGuard;
+    use cpp_indexer::sink::{HealthInfo, ResetTarget, WriteStats};
+    use std::sync::Mutex;
+
+    struct WriteTrackerSink {
+        write_called: Mutex<bool>,
+    }
+
+    #[async_trait]
+    impl GraphSink for WriteTrackerSink {
+        fn backend_name(&self) -> &'static str {
+            "mock-tracker"
+        }
+        async fn preflight(&self) -> CxgResult<()> {
+            Ok(())
+        }
+        async fn ensure_indexes(&self) -> CxgResult<()> {
+            Ok(())
+        }
+        async fn write_nodes(&self, _b: &[NodeRecord]) -> CxgResult<WriteStats> {
+            *self.write_called.lock().unwrap() = true;
+            Ok(WriteStats {
+                nodes_written: 0,
+                retries: 0,
+                elapsed: Duration::ZERO,
+            })
+        }
+        async fn write_edges(&self, _b: &[EdgeRecord]) -> CxgResult<WriteStats> {
+            *self.write_called.lock().unwrap() = true;
+            Ok(WriteStats {
+                nodes_written: 0,
+                retries: 0,
+                elapsed: Duration::ZERO,
+            })
+        }
+        async fn reset(&self, _t: ResetTarget) -> CxgResult<()> {
+            Ok(())
+        }
+        async fn acquire_phase5_lock(&self, _ttl: Duration) -> CxgResult<Box<dyn Phase5LockGuard>> {
+            unimplemented!()
+        }
+        async fn read_schema_version(&self) -> CxgResult<Option<String>> {
+            Ok(Some("cxg-schema-v5".to_owned()))
+        }
+        async fn write_schema_version(&self, _tag: &str, _attrs: &str) -> CxgResult<()> {
+            *self.write_called.lock().unwrap() = true;
+            Ok(())
+        }
+        async fn health(&self) -> CxgResult<HealthInfo> {
+            Ok(HealthInfo {
+                status: "ok".to_owned(),
+                latency: Duration::ZERO,
+            })
+        }
+    }
+
+    let inner = std::sync::Arc::new(WriteTrackerSink {
+        write_called: Mutex::new(false),
+    });
+    let sink: Arc<dyn GraphSink> = inner.clone();
+
+    let result = check_schema_version_for_write(&sink).await;
+    assert!(
+        result.is_err(),
+        "v5 stale graph must be refused on write path"
+    );
+    assert!(
+        !*inner.write_called.lock().unwrap(),
+        "no write must have occurred before the version gate is cleared"
+    );
+}
+
+/// S6-SC-01 (fresh graph): write path accepts a fresh DB (None schema version).
+#[tokio::test]
+async fn write_path_gate_fresh_db_is_accepted() {
+    use cpp_indexer::sink::mock::MockSink;
+    let sink: Arc<dyn GraphSink> = Arc::new(MockSink::default());
+    assert!(
+        check_schema_version_for_write(&sink).await.is_ok(),
+        "fresh DB (no schema version) must be accepted on the write path"
+    );
 }

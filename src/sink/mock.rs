@@ -215,6 +215,8 @@ mod tests {
             is_virtual: None,
             is_pure_virtual: None,
             is_static: None,
+            symbol_id: 1,
+            file_id: 1,
         }
     }
 
@@ -231,6 +233,9 @@ mod tests {
             tu_hash: [0u8; 32],
             source_association_type: None,
             target_association_type: None,
+            src_id: 1,
+            dst_id: Some(2),
+            dst_repo_name: "my_repo".to_owned(),
         }
     }
 

@@ -77,6 +77,8 @@ async fn external_ref_mirrors_uses_classification() {
         is_virtual: None,
         is_pure_virtual: None,
         is_static: None,
+        symbol_id: 0,
+        file_id: 0,
     };
     let batch_na = nodes_to_record_batch(&[node_a]).unwrap();
     write_parquet_batch(&worker_a.join("nodes-0.parquet"), &batch_na);
@@ -94,6 +96,9 @@ async fn external_ref_mirrors_uses_classification() {
         tu_hash: [0u8; 32],
         source_association_type: Some("write".to_owned()),
         target_association_type: Some("write".to_owned()),
+        src_id: 0,
+        dst_id: None,
+        dst_repo_name: "repo-a".to_owned(),
     };
     let batch_ea = edges_to_record_batch(&[edge_a]).unwrap();
     write_parquet_batch(&worker_a.join("edges-0.parquet"), &batch_ea);
@@ -111,6 +116,9 @@ async fn external_ref_mirrors_uses_classification() {
         tu_hash: [0u8; 32],
         source_association_type: Some("write".to_owned()),
         target_association_type: Some("write".to_owned()),
+        src_id: 0,
+        dst_id: None,
+        dst_repo_name: "repo-a".to_owned(),
     };
     let batch_fe = edges_to_record_batch(&[final_edge]).unwrap();
     write_parquet_batch(&stage_a.join("final-edges.parquet"), &batch_fe);
@@ -145,6 +153,8 @@ async fn external_ref_mirrors_uses_classification() {
         is_virtual: None,
         is_pure_virtual: None,
         is_static: None,
+        symbol_id: 0,
+        file_id: 0,
     };
     let batch_nb = nodes_to_record_batch(&[node_b]).unwrap();
     write_parquet_batch(&worker_b.join("nodes-0.parquet"), &batch_nb);

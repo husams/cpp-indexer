@@ -85,6 +85,8 @@ fn fixture_function_node(repo: &str) -> NodeRecord {
         is_virtual: None,
         is_pure_virtual: None,
         is_static: Some(false),
+        symbol_id: 1,
+        file_id: 1,
     }
 }
 
@@ -101,6 +103,9 @@ fn fixture_uses_edge(repo: &str) -> EdgeRecord {
         tu_hash: [0u8; 32],
         source_association_type: Some("call_arg".to_owned()),
         target_association_type: Some("call_arg".to_owned()),
+        src_id: 1,
+        dst_id: Some(1),
+        dst_repo_name: repo.to_owned(),
     }
 }
 

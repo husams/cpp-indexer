@@ -43,6 +43,7 @@ async fn visit_callable_fixture() -> Vec<NodeRecord> {
             format!("-I{}", fixture.display()),
         ],
         skip_system_headers: true,
+        allocator: None,
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
@@ -173,6 +174,8 @@ async fn collect_node_records(stage_dir: &std::path::Path) -> Vec<NodeRecord> {
                     is_virtual: None,
                     is_pure_virtual: None,
                     is_static: None,
+                    symbol_id: 0,
+                    file_id: 0,
                 });
             }
         }

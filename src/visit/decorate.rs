@@ -448,6 +448,8 @@ mod tests {
             is_virtual: None,
             is_pure_virtual: None,
             is_static: None,
+            symbol_id: 0,
+            file_id: 0,
         };
 
         let decor = DecorAttrs {

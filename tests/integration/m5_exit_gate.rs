@@ -56,6 +56,8 @@ fn make_run_opts(fixture: PathBuf, cc_path: Option<PathBuf>, stage_dir: PathBuf)
         workers: None,
         skip_cache: false,
         skip_repo_node: true,
+        symbol_db_path: None,
+        symbol_cache_size: 100_000,
     }
 }
 
@@ -186,6 +188,8 @@ async fn m5_chromium_subset_gate() {
         workers: None,
         skip_cache: false,
         skip_repo_node: true,
+        symbol_db_path: None,
+        symbol_cache_size: 100_000,
     };
 
     // AC-M5-10: pipeline must complete without panic/segfault.

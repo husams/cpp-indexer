@@ -53,6 +53,7 @@ fn parallel_phase1_produces_parquet_shards() {
         "test-repo",
         /*skip_system_headers=*/ true,
         /*workers=*/ Some(2),
+        /*allocator=*/ None,
     )
     .expect("run_phase1_parallel must not return Err");
 
@@ -94,7 +95,7 @@ fn parallel_phase1_with_one_worker_completes() {
     let stage_dir = tmp.path().join("stage");
 
     let entries = load_m1_entries();
-    let stats = run_phase1_parallel(&entries, &stage_dir, "test-repo", true, Some(1))
+    let stats = run_phase1_parallel(&entries, &stage_dir, "test-repo", true, Some(1), None)
         .expect("single-worker run must succeed");
 
     assert_eq!(stats.tu_error, 0);
@@ -144,13 +145,14 @@ fn speedup_parallel_vs_sequential() {
 
     // Sequential: 1 worker.
     let t0 = Instant::now();
-    run_phase1_parallel(entries, tmp_seq.path(), "bench-repo", true, Some(1))
+    run_phase1_parallel(entries, tmp_seq.path(), "bench-repo", true, Some(1), None)
         .expect("sequential run");
     let sequential_dur = t0.elapsed();
 
     // Parallel: all CPUs.
     let t1 = Instant::now();
-    run_phase1_parallel(entries, tmp_par.path(), "bench-repo", true, None).expect("parallel run");
+    run_phase1_parallel(entries, tmp_par.path(), "bench-repo", true, None, None)
+        .expect("parallel run");
     let parallel_dur = t1.elapsed();
 
     eprintln!(

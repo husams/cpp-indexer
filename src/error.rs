@@ -43,6 +43,9 @@ pub enum Error {
 
     #[error("API error: {0}")]
     Api(String),
+
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
 }
 
 /// Helper for formatting a path slice inside thiserror `#[error(...)]` expressions.

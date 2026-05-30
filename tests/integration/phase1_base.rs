@@ -117,6 +117,7 @@ async fn phase1_emits_expected_node_kinds() {
             format!("-I{}", fixture.display()),
         ],
         skip_system_headers: true,
+        allocator: None,
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
@@ -185,6 +186,7 @@ async fn phase1_emits_module_node() {
             format!("-I{}", fixture.display()),
         ],
         skip_system_headers: true,
+        allocator: None,
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
@@ -224,6 +226,7 @@ async fn phase1_parse_error_produces_partial_and_continues() {
             format!("-I{}", fixture.display()),
         ],
         skip_system_headers: true,
+        allocator: None,
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
@@ -292,6 +295,7 @@ async fn phase1_emits_global_variable_from_utils() {
             format!("-I{}", fixture.display()),
         ],
         skip_system_headers: true,
+        allocator: None,
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
@@ -388,6 +392,7 @@ async fn visit_m2_fixture(
             format!("-I{}", fixture.display()),
         ],
         skip_system_headers: true,
+        allocator: None,
     };
 
     let mut writer = StageWriter::new(stage_dir, 0).unwrap();
@@ -543,6 +548,7 @@ async fn m2_emits_overrides_edge_with_vtable_slot() {
             format!("-I{}", fixture.display()),
         ],
         skip_system_headers: true,
+        allocator: None,
     };
 
     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();

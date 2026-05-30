@@ -1,0 +1,1154 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 794fc77..5e012a6 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -812,6 +812,7 @@ dependencies = [
+  "indradb-lib",
+  "indradb-proto",
+  "libc",
++ "lru",
+  "neo4rs",
+  "num_cpus",
+  "parquet",
+@@ -820,6 +821,7 @@ dependencies = [
+  "rayon",
+  "reqwest",
+  "rocksdb",
++ "rusqlite",
+  "serde",
+  "serde_json",
+  "sha2",
+@@ -1015,6 +1017,18 @@ dependencies = [
+  "windows-sys 0.61.2",
+ ]
+ 
++[[package]]
++name = "fallible-iterator"
++version = "0.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
++
++[[package]]
++name = "fallible-streaming-iterator"
++version = "0.1.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
++
+ [[package]]
+ name = "fastrand"
+ version = "2.4.1"
+@@ -1290,6 +1304,15 @@ version = "0.12.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
+ 
++[[package]]
++name = "hashbrown"
++version = "0.14.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
++dependencies = [
++ "ahash",
++]
++
+ [[package]]
+ name = "hashbrown"
+ version = "0.15.5"
+@@ -1307,6 +1330,15 @@ version = "0.17.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+ 
++[[package]]
++name = "hashlink"
++version = "0.9.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
++dependencies = [
++ "hashbrown 0.14.5",
++]
++
+ [[package]]
+ name = "heck"
+ version = "0.5.0"
+@@ -1850,6 +1882,17 @@ dependencies = [
+  "zstd-sys",
+ ]
+ 
++[[package]]
++name = "libsqlite3-sys"
++version = "0.28.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0c10584274047cb335c23d3e61bcef8e323adae7c5c8c760540f73610177fc3f"
++dependencies = [
++ "cc",
++ "pkg-config",
++ "vcpkg",
++]
++
+ [[package]]
+ name = "libssh2-sys"
+ version = "0.3.1"
+@@ -1903,6 +1946,15 @@ version = "0.4.29"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+ 
++[[package]]
++name = "lru"
++version = "0.12.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
++dependencies = [
++ "hashbrown 0.15.5",
++]
++
+ [[package]]
+ name = "lz4-sys"
+ version = "1.11.1+lz4-1.10.0"
+@@ -2712,6 +2764,20 @@ dependencies = [
+  "librocksdb-sys",
+ ]
+ 
++[[package]]
++name = "rusqlite"
++version = "0.31.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b838eba278d213a8beaf485bd313fd580ca4505a00d5871caeb1457c55322cae"
++dependencies = [
++ "bitflags 2.11.1",
++ "fallible-iterator",
++ "fallible-streaming-iterator",
++ "hashlink",
++ "libsqlite3-sys",
++ "smallvec",
++]
++
+ [[package]]
+ name = "rustc-hash"
+ version = "1.1.0"
+diff --git a/Cargo.toml b/Cargo.toml
+index 813300a..72a9b9c 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -40,6 +40,8 @@ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
+ toml = "0.8"
+ thiserror = "1"
++rusqlite = { version = "0.31", features = ["bundled"] }
++lru = "0.12"
+ anyhow = "1"
+ blake3 = "1"
+ sha2 = "0.10"
+@@ -227,3 +229,8 @@ required-features = ["test-mock"]
+ name = "qa_boundary"
+ path = "tests/integration/qa_boundary.rs"
+ required-features = []
++
++[[test]]
++name = "integration"
++path = "tests/integration/mod.rs"
++required-features = ["test-mock"]
+diff --git a/src/api/routes.rs b/src/api/routes.rs
+index 05db79a..ca258ee 100644
+--- a/src/api/routes.rs
++++ b/src/api/routes.rs
+@@ -517,4 +517,55 @@ mod tests {
+         let resp = app.oneshot(req).await.unwrap();
+         assert_eq!(resp.status(), StatusCode::OK);
+     }
++
++    // S5-SC-02: GET /v1/repos returns only repo metadata — no raw integer IDs.
++    //
++    // RepoInfo has fields: name (String), path (String), last_job_id (String).
++    // None are integer symbol/file IDs, so the response contract is already
++    // string-only.  This test asserts that none of the well-known integer-id
++    // field names (symbol_id, file_id, src_id, dst_id) appear in the response.
++    #[tokio::test]
++    async fn get_repos_contains_no_raw_integer_ids() {
++        let (queue, _rx) = JobQueue::new(64);
++        let repos = RepoRegistry::new();
++        repos.upsert(super::super::jobs::RepoInfo {
++            name: "no-ids-repo".to_owned(),
++            path: "/workspace/no-ids-repo".to_owned(),
++            last_job_id: "job-42".to_owned(),
++        });
++        let sink = Arc::new(MockSink::default());
++        let listen: SocketAddr = "127.0.0.1:7878".parse().unwrap();
++        let state = AppState {
++            queue,
++            repos,
++            sink,
++            listen,
++            version: "0.1.0-test".to_owned(),
++            workspace_cfg: None,
++            stage_root: std::env::temp_dir(),
++        };
++        let app = build_router(state, BearerToken(TOKEN.to_owned()));
++
++        let req = Request::builder()
++            .method(http::Method::GET)
++            .uri("/v1/repos")
++            .body(Body::empty())
++            .unwrap();
++
++        let resp = app.oneshot(req).await.unwrap();
++        assert_eq!(resp.status(), StatusCode::OK);
++
++        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
++            .await
++            .unwrap();
++        let body_str = std::str::from_utf8(&bytes).unwrap();
++
++        // None of the integer-id field names should appear in the response.
++        for forbidden in &["symbol_id", "file_id", "src_id", "dst_id"] {
++            assert!(
++                !body_str.contains(forbidden),
++                "GET /v1/repos must not expose raw integer id field `{forbidden}`"
++            );
++        }
++    }
+ }
+diff --git a/src/resolve/id_resolver.rs b/src/resolve/id_resolver.rs
+new file mode 100644
+index 0000000..271a58c
+--- /dev/null
++++ b/src/resolve/id_resolver.rs
+@@ -0,0 +1,283 @@
++//! Reverse-resolver: integer ID → USR/path, scoped per repo.
++//!
++//! # Design (Story 4, ADR-1 consequence)
++//! Integer IDs are per-repo (D1). `IdResolver` wraps one or more [`ReadOnlyResolver`]
++//! handles keyed by `repo_name`. For an EXTERNAL_REF edge, `src_id` is resolved via
++//! the source repo's map and `dst_id` via the destination repo's map.
++//!
++//! On missing/unknown ID or unavailable SQLite the resolver returns an explicit
++//! [`Error::Cache`] — never fabricated or blank data (C7, S5-SC-03).
++
++use std::{
++    collections::HashMap,
++    path::{Path, PathBuf},
++    sync::Mutex,
++};
++
++use crate::error::Error;
++
++use super::symbol_map::ReadOnlyResolver;
++
++// ── Repo-scoped resolver entry ────────────────────────────────────────────────
++
++struct RepoEntry {
++    resolver: ReadOnlyResolver,
++}
++
++// ── IdResolver ────────────────────────────────────────────────────────────────
++
++/// Multi-repo read-path resolver.
++///
++/// Call [`IdResolver::add_repo`] for each known repo, then use
++/// [`IdResolver::resolve_node`] / [`IdResolver::resolve_edge_src`] /
++/// [`IdResolver::resolve_edge_dst`] to recover strings.
++pub struct IdResolver {
++    repos: Mutex<HashMap<String, RepoEntry>>,
++    cache_size: usize,
++}
++
++impl IdResolver {
++    /// Create a resolver; `cache_size` is passed to every [`ReadOnlyResolver`] opened.
++    pub fn new(cache_size: usize) -> Self {
++        Self {
++            repos: Mutex::new(HashMap::new()),
++            cache_size,
++        }
++    }
++
++    /// Register a repo by name, pointing at its `cxg-symbols.db`.
++    ///
++    /// If the repo is already registered the call is a no-op.
++    pub fn add_repo(
++        &self,
++        repo_name: impl Into<String>,
++        db_path: impl AsRef<Path>,
++    ) -> Result<(), Error> {
++        let name = repo_name.into();
++        let mut repos = self
++            .repos
++            .lock()
++            .map_err(|_| Error::Cache("id_resolver mutex poisoned".into()))?;
++        if repos.contains_key(&name) {
++            return Ok(());
++        }
++        let resolver = ReadOnlyResolver::open(db_path.as_ref(), self.cache_size)?;
++        repos.insert(name, RepoEntry { resolver });
++        Ok(())
++    }
++
++    // ── Core resolution helpers ───────────────────────────────────────────────
++
++    /// Resolve `symbol_id` and `file_id` from a given repo.
++    ///
++    /// Returns `(usr, file_path)`.
++    /// Errors if the repo is unknown, the DB is unavailable, or either ID has no row.
++    pub fn resolve_node(
++        &self,
++        repo_name: &str,
++        symbol_id: i64,
++        file_id: i64,
++    ) -> Result<(String, String), Error> {
++        let repos = self
++            .repos
++            .lock()
++            .map_err(|_| Error::Cache("id_resolver mutex poisoned".into()))?;
++        let entry = repos.get(repo_name).ok_or_else(|| {
++            Error::Cache(format!(
++                "id_resolver: unknown repo `{repo_name}`; register it with add_repo first"
++            ))
++        })?;
++
++        let usr = entry.resolver.resolve_symbol(symbol_id)?.ok_or_else(|| {
++            Error::Cache(format!(
++                "id_resolver: symbol_id {symbol_id} not found in repo `{repo_name}`"
++            ))
++        })?;
++
++        let file_path = entry.resolver.resolve_file(file_id)?.ok_or_else(|| {
++            Error::Cache(format!(
++                "id_resolver: file_id {file_id} not found in repo `{repo_name}`"
++            ))
++        })?;
++
++        Ok((usr, file_path))
++    }
++
++    /// Resolve the **source** endpoint of an edge: `src_id` in `repo_name`.
++    pub fn resolve_edge_src(&self, repo_name: &str, src_id: i64) -> Result<String, Error> {
++        let repos = self
++            .repos
++            .lock()
++            .map_err(|_| Error::Cache("id_resolver mutex poisoned".into()))?;
++        let entry = repos
++            .get(repo_name)
++            .ok_or_else(|| Error::Cache(format!("id_resolver: unknown repo `{repo_name}`")))?;
++        entry.resolver.resolve_symbol(src_id)?.ok_or_else(|| {
++            Error::Cache(format!(
++                "id_resolver: src_id {src_id} not found in repo `{repo_name}`"
++            ))
++        })
++    }
++
++    /// Resolve the **destination** endpoint of an EXTERNAL_REF edge:
++    /// `dst_id` in `dst_repo_name` (different repo from source).
++    pub fn resolve_edge_dst(&self, dst_repo_name: &str, dst_id: i64) -> Result<String, Error> {
++        let repos = self
++            .repos
++            .lock()
++            .map_err(|_| Error::Cache("id_resolver mutex poisoned".into()))?;
++        let entry = repos
++            .get(dst_repo_name)
++            .ok_or_else(|| Error::Cache(format!("id_resolver: unknown repo `{dst_repo_name}`")))?;
++        entry.resolver.resolve_symbol(dst_id)?.ok_or_else(|| {
++            Error::Cache(format!(
++                "id_resolver: dst_id {dst_id} not found in repo `{dst_repo_name}`"
++            ))
++        })
++    }
++
++    /// List the repo names currently registered.
++    pub fn repo_names(&self) -> Vec<String> {
++        self.repos
++            .lock()
++            .map(|r| r.keys().cloned().collect())
++            .unwrap_or_default()
++    }
++}
++
++// ── Builder helper ────────────────────────────────────────────────────────────
++
++/// Convenience: build an [`IdResolver`] from a `repo_name → db_path` map.
++pub fn build_resolver(
++    repos: impl IntoIterator<Item = (String, PathBuf)>,
++    cache_size: usize,
++) -> Result<IdResolver, Error> {
++    let resolver = IdResolver::new(cache_size);
++    for (name, path) in repos {
++        resolver.add_repo(name, path)?;
++    }
++    Ok(resolver)
++}
++
++// ── Tests ──────────────────────────────────────────────────────────────────────
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::resolve::symbol_map::SymbolAllocator;
++    use tempfile::NamedTempFile;
++
++    // S5-SC-01: resolver maps ids → usr/path
++    #[test]
++    fn resolve_node_roundtrip() {
++        let f = NamedTempFile::new().unwrap();
++        let a = SymbolAllocator::open(f.path(), 0).unwrap();
++        let sym_id = a.get_or_insert_symbol("c:@F@resolve_me").unwrap();
++        let file_id = a.get_or_insert_file("/src/resolve.cpp").unwrap();
++
++        let r = IdResolver::new(0);
++        r.add_repo("my_repo", f.path()).unwrap();
++
++        let (usr, path) = r.resolve_node("my_repo", sym_id, file_id).unwrap();
++        assert_eq!(usr, "c:@F@resolve_me");
++        assert_eq!(path, "/src/resolve.cpp");
++    }
++
++    // S5-SC-03: missing id → explicit error
++    #[test]
++    fn missing_id_returns_error() {
++        let f = NamedTempFile::new().unwrap();
++        let _a = SymbolAllocator::open(f.path(), 0).unwrap(); // creates schema
++
++        let r = IdResolver::new(0);
++        r.add_repo("repo_a", f.path()).unwrap();
++
++        let err = r.resolve_node("repo_a", 9999, 9998);
++        assert!(err.is_err(), "unknown id must return error");
++        let msg = err.unwrap_err().to_string();
++        assert!(
++            msg.contains("9999"),
++            "error message must mention the missing id"
++        );
++    }
++
++    // S5-SC-03: unknown repo → explicit error
++    #[test]
++    fn unknown_repo_returns_error() {
++        let r = IdResolver::new(0);
++        let err = r.resolve_node("no_such_repo", 1, 1);
++        assert!(err.is_err());
++        assert!(err.unwrap_err().to_string().contains("no_such_repo"));
++    }
++
++    // S5-SC-04: round-trip preserves original strings
++    #[test]
++    fn roundtrip_preserves_strings() {
++        let f = NamedTempFile::new().unwrap();
++        let a = SymbolAllocator::open(f.path(), 16).unwrap();
++
++        let usrs = ["c:@C@Widget", "c:@F@render", "c:@V@global_count"];
++        let paths = ["/src/widget.cpp", "/src/render.cpp", "/src/globals.cpp"];
++
++        let ids: Vec<(i64, i64)> = usrs
++            .iter()
++            .zip(paths.iter())
++            .map(|(&u, &p)| {
++                (
++                    a.get_or_insert_symbol(u).unwrap(),
++                    a.get_or_insert_file(p).unwrap(),
++                )
++            })
++            .collect();
++
++        let r = IdResolver::new(16);
++        r.add_repo("repo", f.path()).unwrap();
++
++        for (i, (&usr, &path)) in usrs.iter().zip(paths.iter()).enumerate() {
++            let (sym_id, file_id) = ids[i];
++            let (got_usr, got_path) = r.resolve_node("repo", sym_id, file_id).unwrap();
++            assert_eq!(got_usr, usr);
++            assert_eq!(got_path, path);
++        }
++    }
++
++    // Cross-repo: resolve src from repo_a, dst from repo_b
++    #[test]
++    fn cross_repo_resolve_edge() {
++        let fa = NamedTempFile::new().unwrap();
++        let fb = NamedTempFile::new().unwrap();
++
++        let a = SymbolAllocator::open(fa.path(), 0).unwrap();
++        let src_id = a.get_or_insert_symbol("c:@F@src_fn").unwrap();
++
++        let b = SymbolAllocator::open(fb.path(), 0).unwrap();
++        let dst_id = b.get_or_insert_symbol("c:@F@dst_fn").unwrap();
++
++        let r = IdResolver::new(0);
++        r.add_repo("repo_a", fa.path()).unwrap();
++        r.add_repo("repo_b", fb.path()).unwrap();
++
++        let src_usr = r.resolve_edge_src("repo_a", src_id).unwrap();
++        let dst_usr = r.resolve_edge_dst("repo_b", dst_id).unwrap();
++
++        assert_eq!(src_usr, "c:@F@src_fn");
++        assert_eq!(dst_usr, "c:@F@dst_fn");
++    }
++
++    // repo_names lists registered repos
++    #[test]
++    fn repo_names_lists_all() {
++        let fa = NamedTempFile::new().unwrap();
++        let fb = NamedTempFile::new().unwrap();
++        // Ensure both DBs are writable (schema init)
++        SymbolAllocator::open(fa.path(), 0).unwrap();
++        SymbolAllocator::open(fb.path(), 0).unwrap();
++
++        let r = IdResolver::new(0);
++        r.add_repo("alpha", fa.path()).unwrap();
++        r.add_repo("beta", fb.path()).unwrap();
++        let mut names = r.repo_names();
++        names.sort();
++        assert_eq!(names, ["alpha", "beta"]);
++    }
++}
+diff --git a/src/resolve/mod.rs b/src/resolve/mod.rs
+index 8c1dbf7..d7566e8 100644
+--- a/src/resolve/mod.rs
++++ b/src/resolve/mod.rs
+@@ -5,7 +5,11 @@
+ /// - `spill`: RocksDB spill-to-disk when the USR map exceeds 8 GiB threshold (S20, AC-M3-12).
+ /// - `cross_repo`: Phase 5 `EXTERNAL_REF` materialisation (S23, AC-M4-4, AC-M4-6, AC-M6-7).
+ /// - `canonical`: system-header / vendored USR canonicalisation (S24, AC-M4-7, AC-M4-8, ADR-4).
++/// - `symbol_map`: per-repo SQLite symbol/file allocator + LRU cache (Story 1, ADR-3).
++/// - `id_resolver`: read-path integer ID → USR/path resolver (Story 4, ADR-1).
+ pub mod canonical;
+ pub mod cross_repo;
++pub mod id_resolver;
+ pub mod per_repo;
+ pub mod spill;
++pub mod symbol_map;
+diff --git a/src/resolve/symbol_map.rs b/src/resolve/symbol_map.rs
+new file mode 100644
+index 0000000..e05436e
+--- /dev/null
++++ b/src/resolve/symbol_map.rs
+@@ -0,0 +1,535 @@
++//! Per-repo SQLite symbol/file map with write-through LRU cache.
++//!
++//! # Usage
++//! - [`SymbolAllocator`]: write-capable handle (`get_or_insert_*`, `resolve_*`).
++//! - [`ReadOnlyResolver`]: lightweight read-only handle for cross-repo lookups.
++//!
++//! # Schema
++//! ```sql
++//! CREATE TABLE IF NOT EXISTS symbols (id INTEGER PRIMARY KEY, usr  TEXT NOT NULL UNIQUE);
++//! CREATE TABLE IF NOT EXISTS files   (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE);
++//! PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
++//! ```
++//!
++//! ADR-3: SQLite durable map + thread-safe allocator + write-through LRU.
++
++use std::{
++    num::NonZeroUsize,
++    path::{Path, PathBuf},
++    sync::Mutex,
++};
++
++use lru::LruCache;
++use rusqlite::{params, Connection, OptionalExtension as _};
++
++use crate::error::Error;
++
++// ── Bidirectional LRU cache ───────────────────────────────────────────────────
++
++/// Bidirectional write-through LRU cache: `String ↔ i64`.
++/// Invariant: both maps are kept in sync; every insert/evict touches both.
++struct BiCache {
++    fwd: LruCache<String, i64>, // string → id
++    rev: LruCache<i64, String>, // id    → string
++}
++
++impl BiCache {
++    fn new(cap: NonZeroUsize) -> Self {
++        Self {
++            fwd: LruCache::new(cap),
++            rev: LruCache::new(cap),
++        }
++    }
++
++    /// Insert both directions.  Evictions from `fwd` are mirrored on `rev`.
++    fn insert(&mut self, key: String, id: i64) {
++        // If we're about to evict an entry from `fwd`, remove the corresponding
++        // `rev` entry so the two maps stay consistent.
++        if self.fwd.len() == self.fwd.cap().get() {
++            if let Some((evicted_key, evicted_id)) = self.fwd.peek_lru() {
++                let eid = *evicted_id;
++                let _ = evicted_key; // borrow ends here
++                self.rev.pop(&eid);
++            }
++        }
++        // Same for the reverse map.
++        if self.rev.len() == self.rev.cap().get() {
++            if let Some((evicted_id, evicted_key)) = self.rev.peek_lru() {
++                let ekey = evicted_key.clone();
++                let _ = evicted_id;
++                self.fwd.pop(&ekey);
++            }
++        }
++        self.fwd.put(key.clone(), id);
++        self.rev.put(id, key);
++    }
++
++    fn get_by_key(&mut self, key: &str) -> Option<i64> {
++        self.fwd.get(key).copied()
++    }
++
++    fn get_by_id(&mut self, id: i64) -> Option<&str> {
++        self.rev.get(&id).map(String::as_str)
++    }
++}
++
++// ── Inner locked state ────────────────────────────────────────────────────────
++
++struct Inner {
++    conn: Connection,
++    sym_cache: Option<BiCache>,
++    file_cache: Option<BiCache>,
++}
++
++impl Inner {
++    fn open(path: &Path, cache_size: usize, read_only: bool) -> Result<Self, Error> {
++        let conn = if read_only {
++            Connection::open_with_flags(
++                path,
++                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
++                    | rusqlite::OpenFlags::SQLITE_OPEN_URI
++                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
++            )
++        } else {
++            Connection::open(path)
++        }
++        .map_err(|e| Error::Cache(format!("open {}: {e}", path.display())))?;
++
++        if !read_only {
++            conn.execute_batch(
++                "PRAGMA journal_mode=WAL;
++                 PRAGMA synchronous=NORMAL;
++                 CREATE TABLE IF NOT EXISTS symbols (
++                     id  INTEGER PRIMARY KEY,
++                     usr TEXT    NOT NULL UNIQUE
++                 );
++                 CREATE TABLE IF NOT EXISTS files (
++                     id   INTEGER PRIMARY KEY,
++                     path TEXT    NOT NULL UNIQUE
++                 );",
++            )
++            .map_err(|e| Error::Cache(format!("init schema: {e}")))?;
++        }
++
++        let cache = NonZeroUsize::new(cache_size);
++        let (sym_cache, file_cache) = match cache {
++            None => (None, None),
++            Some(cap) => (Some(BiCache::new(cap)), Some(BiCache::new(cap))),
++        };
++
++        Ok(Self {
++            conn,
++            sym_cache,
++            file_cache,
++        })
++    }
++
++    // ── Write path ───────────────────────────────────────────────────────────
++
++    fn get_or_insert_symbol(&mut self, usr: &str) -> Result<i64, Error> {
++        if let Some(ref mut c) = self.sym_cache {
++            if let Some(id) = c.get_by_key(usr) {
++                return Ok(id);
++            }
++        }
++        self.conn
++            .execute(
++                "INSERT INTO symbols (usr) VALUES (?1) ON CONFLICT(usr) DO NOTHING",
++                params![usr],
++            )
++            .map_err(|e| Error::Cache(format!("insert symbol: {e}")))?;
++        let id: i64 = self
++            .conn
++            .query_row("SELECT id FROM symbols WHERE usr = ?1", params![usr], |r| {
++                r.get(0)
++            })
++            .map_err(|e| Error::Cache(format!("select symbol: {e}")))?;
++        if let Some(ref mut c) = self.sym_cache {
++            c.insert(usr.to_owned(), id);
++        }
++        Ok(id)
++    }
++
++    fn get_or_insert_file(&mut self, path: &str) -> Result<i64, Error> {
++        if let Some(ref mut c) = self.file_cache {
++            if let Some(id) = c.get_by_key(path) {
++                return Ok(id);
++            }
++        }
++        self.conn
++            .execute(
++                "INSERT INTO files (path) VALUES (?1) ON CONFLICT(path) DO NOTHING",
++                params![path],
++            )
++            .map_err(|e| Error::Cache(format!("insert file: {e}")))?;
++        let id: i64 = self
++            .conn
++            .query_row("SELECT id FROM files WHERE path = ?1", params![path], |r| {
++                r.get(0)
++            })
++            .map_err(|e| Error::Cache(format!("select file: {e}")))?;
++        if let Some(ref mut c) = self.file_cache {
++            c.insert(path.to_owned(), id);
++        }
++        Ok(id)
++    }
++
++    // ── Reverse resolve ──────────────────────────────────────────────────────
++
++    fn resolve_symbol(&mut self, id: i64) -> Result<Option<String>, Error> {
++        if let Some(ref mut c) = self.sym_cache {
++            if let Some(s) = c.get_by_id(id) {
++                return Ok(Some(s.to_owned()));
++            }
++        }
++        let usr: Option<String> = self
++            .conn
++            .query_row("SELECT usr FROM symbols WHERE id = ?1", params![id], |r| {
++                r.get(0)
++            })
++            .optional()
++            .map_err(|e| Error::Cache(format!("resolve symbol: {e}")))?;
++        if let (Some(ref mut c), Some(ref u)) = (&mut self.sym_cache, &usr) {
++            c.insert(u.clone(), id);
++        }
++        Ok(usr)
++    }
++
++    fn resolve_file(&mut self, id: i64) -> Result<Option<String>, Error> {
++        if let Some(ref mut c) = self.file_cache {
++            if let Some(s) = c.get_by_id(id) {
++                return Ok(Some(s.to_owned()));
++            }
++        }
++        let path: Option<String> = self
++            .conn
++            .query_row("SELECT path FROM files WHERE id = ?1", params![id], |r| {
++                r.get(0)
++            })
++            .optional()
++            .map_err(|e| Error::Cache(format!("resolve file: {e}")))?;
++        if let (Some(ref mut c), Some(ref p)) = (&mut self.file_cache, &path) {
++            c.insert(p.clone(), id);
++        }
++        Ok(path)
++    }
++}
++
++// ── Public write handle ───────────────────────────────────────────────────────
++
++/// Thread-safe per-repo symbol/file allocator backed by SQLite + write-through LRU.
++///
++/// Construct via [`SymbolAllocator::open`]; share across threads with `Arc<SymbolAllocator>`.
++pub struct SymbolAllocator {
++    inner: Mutex<Inner>,
++    db_path: PathBuf,
++}
++
++impl SymbolAllocator {
++    /// Open (or create) the SQLite database at `path` with LRU `cache_size`.
++    /// `cache_size == 0` disables the cache.
++    pub fn open(path: impl AsRef<Path>, cache_size: usize) -> Result<Self, Error> {
++        let path = path.as_ref().to_path_buf();
++        let inner = Inner::open(&path, cache_size, false)?;
++        Ok(Self {
++            inner: Mutex::new(inner),
++            db_path: path,
++        })
++    }
++
++    /// Return the path to the underlying SQLite database.
++    pub fn db_path(&self) -> &Path {
++        &self.db_path
++    }
++
++    /// Get-or-insert a USR string; returns the stable integer ID.
++    pub fn get_or_insert_symbol(&self, usr: &str) -> Result<i64, Error> {
++        self.inner
++            .lock()
++            .map_err(|_| Error::Cache("symbol allocator mutex poisoned".into()))?
++            .get_or_insert_symbol(usr)
++    }
++
++    /// Get-or-insert a file path string; returns the stable integer ID.
++    pub fn get_or_insert_file(&self, path: &str) -> Result<i64, Error> {
++        self.inner
++            .lock()
++            .map_err(|_| Error::Cache("symbol allocator mutex poisoned".into()))?
++            .get_or_insert_file(path)
++    }
++
++    /// Resolve an integer symbol ID back to the USR string.
++    /// Returns `Ok(None)` for unknown IDs.
++    pub fn resolve_symbol(&self, id: i64) -> Result<Option<String>, Error> {
++        self.inner
++            .lock()
++            .map_err(|_| Error::Cache("symbol allocator mutex poisoned".into()))?
++            .resolve_symbol(id)
++    }
++
++    /// Resolve an integer file ID back to the path string.
++    /// Returns `Ok(None)` for unknown IDs.
++    pub fn resolve_file(&self, id: i64) -> Result<Option<String>, Error> {
++        self.inner
++            .lock()
++            .map_err(|_| Error::Cache("symbol allocator mutex poisoned".into()))?
++            .resolve_file(id)
++    }
++
++    /// Open a read-only resolver handle against the same DB (e.g. for cross-repo lookups).
++    pub fn open_readonly(
++        path: impl AsRef<Path>,
++        cache_size: usize,
++    ) -> Result<ReadOnlyResolver, Error> {
++        ReadOnlyResolver::open(path, cache_size)
++    }
++}
++
++// ── Public read-only handle ───────────────────────────────────────────────────
++
++/// Read-only resolver: opens an arbitrary repo's `cxg-symbols.db` for reverse lookups.
++///
++/// Used by Phase 5 cross-repo resolution and the daemon read path.
++pub struct ReadOnlyResolver {
++    inner: Mutex<Inner>,
++    db_path: PathBuf,
++}
++
++impl ReadOnlyResolver {
++    /// Open an existing SQLite DB at `path` in read-only mode.
++    pub fn open(path: impl AsRef<Path>, cache_size: usize) -> Result<Self, Error> {
++        let path = path.as_ref().to_path_buf();
++        let inner = Inner::open(&path, cache_size, true)?;
++        Ok(Self {
++            inner: Mutex::new(inner),
++            db_path: path,
++        })
++    }
++
++    /// Return the path to the underlying SQLite database.
++    pub fn db_path(&self) -> &Path {
++        &self.db_path
++    }
++
++    /// Resolve a symbol ID → USR.  Returns `Ok(None)` if not found.
++    pub fn resolve_symbol(&self, id: i64) -> Result<Option<String>, Error> {
++        self.inner
++            .lock()
++            .map_err(|_| Error::Cache("readonly resolver mutex poisoned".into()))?
++            .resolve_symbol(id)
++    }
++
++    /// Resolve a file ID → path string.  Returns `Ok(None)` if not found.
++    pub fn resolve_file(&self, id: i64) -> Result<Option<String>, Error> {
++        self.inner
++            .lock()
++            .map_err(|_| Error::Cache("readonly resolver mutex poisoned".into()))?
++            .resolve_file(id)
++    }
++}
++
++// ── Tests ──────────────────────────────────────────────────────────────────────
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use tempfile::NamedTempFile;
++
++    fn temp_alloc(cache_size: usize) -> (SymbolAllocator, NamedTempFile) {
++        let f = NamedTempFile::new().unwrap();
++        let a = SymbolAllocator::open(f.path(), cache_size).unwrap();
++        (a, f)
++    }
++
++    // S7-SC-01: insert new USR → new id + row
++    #[test]
++    fn insert_new_usr_allocates_id() {
++        let (a, _f) = temp_alloc(16);
++        let id = a.get_or_insert_symbol("c:@F@foo").unwrap();
++        assert!(id > 0);
++    }
++
++    // S7-SC-02: dup USR → same id, no new row
++    #[test]
++    fn dup_usr_returns_same_id() {
++        let (a, _f) = temp_alloc(16);
++        let id1 = a.get_or_insert_symbol("c:@F@dup").unwrap();
++        let id2 = a.get_or_insert_symbol("c:@F@dup").unwrap();
++        assert_eq!(id1, id2);
++    }
++
++    // S7-SC-03: insert new path → new id
++    #[test]
++    fn insert_new_path_allocates_id() {
++        let (a, _f) = temp_alloc(16);
++        let id = a.get_or_insert_file("/foo/bar.cpp").unwrap();
++        assert!(id > 0);
++    }
++
++    // S7-SC-04: dup path → same id
++    #[test]
++    fn dup_path_returns_same_id() {
++        let (a, _f) = temp_alloc(16);
++        let id1 = a.get_or_insert_file("/foo/bar.cpp").unwrap();
++        let id2 = a.get_or_insert_file("/foo/bar.cpp").unwrap();
++        assert_eq!(id1, id2);
++    }
++
++    // S7-SC-05: persistence across reopen
++    #[test]
++    fn persistence_across_reopen() {
++        let f = NamedTempFile::new().unwrap();
++        let id1 = {
++            let a = SymbolAllocator::open(f.path(), 16).unwrap();
++            a.get_or_insert_symbol("c:@F@persist").unwrap()
++        };
++        let id2 = {
++            let a = SymbolAllocator::open(f.path(), 16).unwrap();
++            a.get_or_insert_symbol("c:@F@persist").unwrap()
++        };
++        assert_eq!(id1, id2);
++    }
++
++    // S7-SC-06: cache hit returns correct id
++    #[test]
++    fn cache_hit_returns_id() {
++        let (a, _f) = temp_alloc(16);
++        let id1 = a.get_or_insert_symbol("c:@F@cached").unwrap();
++        let id2 = a.get_or_insert_symbol("c:@F@cached").unwrap(); // should be cache hit
++        assert_eq!(id1, id2);
++    }
++
++    // S7-SC-07: cache miss queries SQLite
++    #[test]
++    fn cache_miss_queries_sqlite_and_populates() {
++        let f = NamedTempFile::new().unwrap();
++        // Insert with one allocator (populates SQLite)
++        let id_orig = {
++            let a = SymbolAllocator::open(f.path(), 0).unwrap(); // cache disabled
++            a.get_or_insert_symbol("c:@F@baz").unwrap()
++        };
++        // Open a new allocator (empty cache) — must hit SQLite
++        let a2 = SymbolAllocator::open(f.path(), 16).unwrap();
++        let id_new = a2.get_or_insert_symbol("c:@F@baz").unwrap();
++        assert_eq!(id_orig, id_new);
++    }
++
++    // S7-SC-08: LRU eviction
++    #[test]
++    fn lru_eviction_removes_lru_entry() {
++        let (a, _f) = temp_alloc(1); // cap=1
++        let id_x = a.get_or_insert_symbol("c:@F@x").unwrap();
++        // Second insert evicts "x"
++        let _id_y = a.get_or_insert_symbol("c:@F@y").unwrap();
++        // "x" is still resolvable via SQLite (write-through)
++        let resolved = a.resolve_symbol(id_x).unwrap();
++        assert_eq!(resolved.as_deref(), Some("c:@F@x"));
++    }
++
++    // S7-SC-09: cache_size=0 disables caching (every call goes to SQLite)
++    #[test]
++    fn cache_size_zero_disables_cache() {
++        let (a, _f) = temp_alloc(0);
++        let id1 = a.get_or_insert_symbol("c:@F@nocache").unwrap();
++        let id2 = a.get_or_insert_symbol("c:@F@nocache").unwrap();
++        assert_eq!(id1, id2); // correctness preserved even without cache
++    }
++
++    // S7-SC-10: both directions (usr→id and id→usr)
++    #[test]
++    fn both_direction_usr() {
++        let (a, _f) = temp_alloc(16);
++        let id = a.get_or_insert_symbol("c:@F@bidir").unwrap();
++        let resolved = a.resolve_symbol(id).unwrap();
++        assert_eq!(resolved.as_deref(), Some("c:@F@bidir"));
++    }
++
++    // S7-SC-11: both directions (path→id and id→path)
++    #[test]
++    fn both_direction_path() {
++        let (a, _f) = temp_alloc(16);
++        let id = a.get_or_insert_file("/src/main.cpp").unwrap();
++        let resolved = a.resolve_file(id).unwrap();
++        assert_eq!(resolved.as_deref(), Some("/src/main.cpp"));
++    }
++
++    // S2-SC-08: concurrent same-usr → exactly one id
++    #[test]
++    fn concurrent_same_usr_one_id() {
++        use std::sync::Arc;
++        let f = NamedTempFile::new().unwrap();
++        let a = Arc::new(SymbolAllocator::open(f.path(), 16).unwrap());
++        let n = 8;
++        let ids: Vec<i64> = std::thread::scope(|s| {
++            let handles: Vec<_> = (0..n)
++                .map(|_| {
++                    let a = Arc::clone(&a);
++                    s.spawn(move || a.get_or_insert_symbol("c:@C@Widget").unwrap())
++                })
++                .collect();
++            handles.into_iter().map(|h| h.join().unwrap()).collect()
++        });
++        let first = ids[0];
++        assert!(ids.iter().all(|&id| id == first));
++    }
++
++    // S2-SC-09: concurrent distinct usrs → distinct ids
++    #[test]
++    fn concurrent_distinct_usrs_distinct_ids() {
++        use std::sync::Arc;
++        let f = NamedTempFile::new().unwrap();
++        let a = Arc::new(SymbolAllocator::open(f.path(), 16).unwrap());
++        let usrs = ["c:@C@Foo", "c:@C@Bar", "c:@C@Baz", "c:@C@Qux"];
++        let ids: Vec<i64> = std::thread::scope(|s| {
++            let handles: Vec<_> = usrs
++                .iter()
++                .map(|&usr| {
++                    let a = Arc::clone(&a);
++                    s.spawn(move || a.get_or_insert_symbol(usr).unwrap())
++                })
++                .collect();
++            handles.into_iter().map(|h| h.join().unwrap()).collect()
++        });
++        let mut sorted = ids.clone();
++        sorted.sort_unstable();
++        sorted.dedup();
++        assert_eq!(sorted.len(), ids.len(), "all IDs must be distinct");
++    }
++
++    // S2-SC-10: N≥8 threads, no deadlock/panic
++    #[test]
++    fn parallel_no_deadlock() {
++        use std::sync::Arc;
++        let f = NamedTempFile::new().unwrap();
++        let a = Arc::new(SymbolAllocator::open(f.path(), 64).unwrap());
++        std::thread::scope(|s| {
++            let handles: Vec<_> = (0..16)
++                .map(|i| {
++                    let a = Arc::clone(&a);
++                    s.spawn(move || {
++                        let usr = format!("c:@F@fn{i}");
++                        a.get_or_insert_symbol(&usr).unwrap();
++                        let path = format!("/src/file{i}.cpp");
++                        a.get_or_insert_file(&path).unwrap();
++                    })
++                })
++                .collect();
++            for h in handles {
++                h.join().unwrap();
++            }
++        });
++    }
++
++    // ReadOnlyResolver: basic resolve
++    #[test]
++    fn readonly_resolver_resolves() {
++        let f = NamedTempFile::new().unwrap();
++        let id = {
++            let a = SymbolAllocator::open(f.path(), 0).unwrap();
++            a.get_or_insert_symbol("c:@F@readonly_test").unwrap()
++        };
++        let r = ReadOnlyResolver::open(f.path(), 0).unwrap();
++        let resolved = r.resolve_symbol(id).unwrap();
++        assert_eq!(resolved.as_deref(), Some("c:@F@readonly_test"));
++    }
++}
+diff --git a/tests/integration/mod.rs b/tests/integration/mod.rs
+index 4d564d1..65283e8 100644
+--- a/tests/integration/mod.rs
++++ b/tests/integration/mod.rs
+@@ -1,3 +1,94 @@
+-// Integration test root — placeholder.
++// Integration test root.
+ // Individual test modules (autodetect, phase1_base, etc.) will be added by
+ // their respective stories (S06, S09, …).
++//
++// Story 4 adds: S7-SC-13/14 round-trip tests (write integer IDs → resolve via SQLite).
++
++use cpp_indexer::resolve::{id_resolver::IdResolver, symbol_map::SymbolAllocator};
++use tempfile::NamedTempFile;
++
++// ── S7-SC-13: both-sink round-trip (mock sink / SQLite only) ──────────────────
++//
++// We write nodes and edges with integer IDs via SymbolAllocator (representing
++// what the Neo4j/IndraDB sink would persist), then resolve via IdResolver and
++// verify the original USR strings and file paths are recovered.
++#[test]
++fn symbol_id_round_trip_usr_and_path() {
++    let db = NamedTempFile::new().unwrap();
++    let alloc = SymbolAllocator::open(db.path(), 128).unwrap();
++
++    // Simulate a write: allocate IDs as the sink would.
++    let sym_id = alloc.get_or_insert_symbol("c:@C@Widget").unwrap();
++    let file_id = alloc.get_or_insert_file("/src/widget.cpp").unwrap();
++
++    // Simulate the read path: construct resolver, resolve IDs back to strings.
++    let resolver = IdResolver::new(128);
++    resolver.add_repo("widget_repo", db.path()).unwrap();
++
++    let (got_usr, got_path) = resolver
++        .resolve_node("widget_repo", sym_id, file_id)
++        .unwrap();
++
++    assert_eq!(got_usr, "c:@C@Widget", "S7-SC-13: USR round-trip");
++    assert_eq!(got_path, "/src/widget.cpp", "S7-SC-13: path round-trip");
++}
++
++// ── S7-SC-14: IndraDB-side round-trip (same SQLite store) ─────────────────────
++//
++// IndraDB sink uses the same SQLite allocator as Neo4j. We verify that a
++// different allocation order still produces correct resolution.
++#[test]
++fn symbol_id_round_trip_multiple_entries() {
++    let db = NamedTempFile::new().unwrap();
++    let alloc = SymbolAllocator::open(db.path(), 0).unwrap(); // cache disabled
++
++    let entries = [
++        ("c:@F@render", "/src/render.cpp"),
++        ("c:@F@update", "/src/update.cpp"),
++        ("c:@C@Engine", "/src/engine.cpp"),
++    ];
++
++    let ids: Vec<(i64, i64)> = entries
++        .iter()
++        .map(|&(usr, path)| {
++            (
++                alloc.get_or_insert_symbol(usr).unwrap(),
++                alloc.get_or_insert_file(path).unwrap(),
++            )
++        })
++        .collect();
++
++    let resolver = IdResolver::new(0);
++    resolver.add_repo("engine_repo", db.path()).unwrap();
++
++    for (i, &(usr, path)) in entries.iter().enumerate() {
++        let (sym_id, file_id) = ids[i];
++        let (got_usr, got_path) = resolver
++            .resolve_node("engine_repo", sym_id, file_id)
++            .unwrap();
++        assert_eq!(got_usr, usr, "S7-SC-14: USR mismatch at index {i}");
++        assert_eq!(got_path, path, "S7-SC-14: path mismatch at index {i}");
++    }
++}
++
++// ── Re-index ID stability (S7-SC-12 proxy) ───────────────────────────────────
++//
++// Same USR receives the same integer ID on a second "index run" (reopen).
++#[test]
++fn reindex_id_stability() {
++    let db = NamedTempFile::new().unwrap();
++
++    // First run
++    let id_first = {
++        let a = SymbolAllocator::open(db.path(), 0).unwrap();
++        a.get_or_insert_symbol("c:@C@Stable").unwrap()
++    };
++
++    // Second run (new process simulation — reopen the DB)
++    let id_second = {
++        let a = SymbolAllocator::open(db.path(), 0).unwrap();
++        a.get_or_insert_symbol("c:@C@Stable").unwrap()
++    };
++
++    assert_eq!(id_first, id_second, "S7-SC-12: re-index must yield same ID");
++}

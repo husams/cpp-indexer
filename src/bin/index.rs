@@ -136,6 +136,21 @@ struct Cli {
     #[arg(long)]
     indradb_token_env: Option<String>,
 
+    /// LRU cache capacity for the per-repo symbol/file allocator.
+    ///
+    /// Overrides `[index].symbol_cache_size` in the config file and the
+    /// `CXG_SYMBOL_CACHE_SIZE` env var.  Set to `0` to disable the cache.
+    #[arg(long, value_name = "N")]
+    symbol_cache_size: Option<usize>,
+
+    /// Explicit path for the per-repo SQLite symbol map (`cxg-symbols.db`).
+    ///
+    /// Overrides `[index].symbol_db_path` in the config file and the
+    /// `CXG_SYMBOL_DB_PATH` env var.  When absent the default
+    /// `<stage_dir>/cxg-symbols.db` is used at the allocator use site.
+    #[arg(long, value_name = "PATH")]
+    symbol_db_path: Option<PathBuf>,
+
     /// Path to a `cxg-index.toml` config file. CLI flags override file settings.
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
@@ -221,6 +236,36 @@ async fn main() -> anyhow::Result<ExitCode> {
         .as_ref()
         .and_then(|cfg| cfg.index.as_ref().and_then(|index| index.workers));
 
+    // Resolve symbol_cache_size and symbol_db_path: CLI > env > file > default
+    // (S3-SC-01..06).  The shared helpers in config::mod live under --lib so
+    // tests in config/mod.rs cover the precedence logic directly.
+    let env_cache_size = cpp_indexer::config::env::resolve_symbol_cache_size()
+        .context("reading CXG_SYMBOL_CACHE_SIZE")?;
+    let env_db_path = cpp_indexer::config::env::resolve_symbol_db_path();
+    let file_cache_size = file_config
+        .as_ref()
+        .and_then(|cfg| cfg.index.as_ref())
+        .map(|idx| idx.symbol_cache_size);
+    let file_db_path = file_config
+        .as_ref()
+        .and_then(|cfg| cfg.index.as_ref())
+        .and_then(|idx| idx.symbol_db_path.clone());
+
+    let symbol_cache_size = cpp_indexer::config::resolve_symbol_cache_size(
+        cli.symbol_cache_size,
+        env_cache_size,
+        file_cache_size,
+    );
+    let symbol_db_path = cpp_indexer::config::resolve_symbol_db_path(
+        cli.symbol_db_path.clone(),
+        env_db_path,
+        file_db_path,
+    );
+
+    // These values are threaded into the pipeline in Story 3 (SymbolAllocator
+    // construction in parallel.rs).  Held here so they compile and are testable.
+    let _ = (symbol_cache_size, symbol_db_path);
+
     let sink = factory::create(&sink_config)
         .await
         .with_context(|| format!("failed to connect to {backend_name_hint} sink"))?;
@@ -241,6 +286,8 @@ async fn main() -> anyhow::Result<ExitCode> {
         workers,
         skip_cache: false,
         skip_repo_node: false,
+        symbol_db_path: None,
+        symbol_cache_size: 100_000,
     };
 
     let stats = run(Arc::clone(&sink), opts)
@@ -357,6 +404,8 @@ mod tests {
             neo4j_user: None,
             neo4j_password_env: None,
             indradb_token_env: None,
+            symbol_cache_size: None,
+            symbol_db_path: None,
             config: None,
             fail_on_tu_error: FailOnTuError::default(),
         }

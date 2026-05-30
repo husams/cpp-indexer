@@ -438,6 +438,64 @@ mod tests {
         assert!(arr[0].get("last_job_id").is_some());
     }
 
+    // S5-SC-02: GET /v1/repos contains no raw integer symbol/file IDs in response
+    //
+    // Currently `RepoInfo` carries only `name`, `path`, `last_job_id` — no
+    // symbol_id / file_id / src_id / dst_id fields.  This test asserts that
+    // invariant holds so a future schema change does not silently leak raw
+    // integer IDs to API consumers.
+    //
+    // Deferred consumers (cpp-mcp tools that read node/edge integer IDs directly
+    // from the graph) are out of scope for this story — see implementation-notes.md.
+    #[tokio::test]
+    async fn get_repos_response_has_no_raw_integer_symbol_ids() {
+        let (queue, _rx) = JobQueue::new(64);
+        let repos = RepoRegistry::new();
+        repos.upsert(super::super::jobs::RepoInfo {
+            name: "test-repo".to_owned(),
+            path: "/workspace/test-repo".to_owned(),
+            last_job_id: "job-1".to_owned(),
+        });
+        let sink = Arc::new(MockSink::default());
+        let listen: SocketAddr = "127.0.0.1:7878".parse().unwrap();
+        let state = AppState {
+            queue,
+            repos,
+            sink,
+            listen,
+            version: "0.1.0-test".to_owned(),
+            workspace_cfg: None,
+            stage_root: std::env::temp_dir(),
+        };
+        let app = build_router(state, BearerToken(TOKEN.to_owned()));
+
+        let req = Request::builder()
+            .method(http::Method::GET)
+            .uri("/v1/repos")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = json.as_array().expect("response must be array");
+
+        // Assert none of the raw integer id field names appear in the response objects.
+        let raw_id_fields = ["symbol_id", "file_id", "src_id", "dst_id"];
+        for item in arr {
+            for field in &raw_id_fields {
+                assert!(
+                    item.get(field).is_none(),
+                    "GET /v1/repos must not expose raw integer id field '{field}' (S5-SC-02)"
+                );
+            }
+        }
+    }
+
     // (f) [api].listen address is accessible from AppState
     #[test]
     fn listen_address_honoured_in_app_state() {

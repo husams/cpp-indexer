@@ -118,6 +118,8 @@ async fn repo_node_has_required_attrs() {
         workers: None,
         skip_cache: true,
         skip_repo_node: false,
+        symbol_db_path: None,
+        symbol_cache_size: 100_000,
     };
 
     run(
@@ -232,6 +234,8 @@ async fn every_node_has_belongs_to_repo_edge() {
         workers: None,
         skip_cache: true,
         skip_repo_node: false,
+        symbol_db_path: None,
+        symbol_cache_size: 100_000,
     };
 
     run(

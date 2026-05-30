@@ -42,14 +42,26 @@ use crate::sink::{GraphSink, HealthInfo, ResetTarget, WriteStats};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// UUIDv5 namespace for USR→Uuid derivation.  Fixed project-level constant.
+/// UUIDv5 namespace for symbol_id→Uuid derivation (v6).  Fixed project-level constant.
 /// Bytes: b5e5c18e-0f4a-5b2e-8e6e-c3a0d6e8f1b2.
 const USR_NAMESPACE: Uuid = Uuid::from_bytes([
     0xb5, 0xe5, 0xc1, 0x8e, 0x0f, 0x4a, 0x5b, 0x2e, 0x8e, 0x6e, 0xc3, 0xa0, 0xd6, 0xe8, 0xf1, 0xb2,
 ]);
 
-/// Property name for the USR string stored on each vertex.
+/// Property name for the USR string (v5 legacy; no longer written to the durable graph in v6).
+/// Retained for test fixtures and backward-compat property-name validation.
+#[cfg(test)]
 const PROP_USR: &str = "usr";
+/// Property name for the integer symbol ID (v6; replaces PROP_USR for durable graph keying).
+const PROP_SYMBOL_ID: &str = "symbol_id";
+/// Property name for the integer file ID (v6; replaces file_path string).
+const PROP_FILE_ID: &str = "file_id";
+/// Property name for the integer src_id on edges (v6).
+const PROP_SRC_ID: &str = "src_id";
+/// Property name for the integer dst_id on edges (v6).
+const PROP_DST_ID: &str = "dst_id";
+/// Property name for dst_repo_name on edges (v6).
+const PROP_DST_REPO_NAME: &str = "dst_repo_name";
 /// Property name for the repository name.
 const PROP_REPO_NAME: &str = "repo_name";
 /// Property name for the node kind string.
@@ -114,8 +126,19 @@ const BACKOFF_BASE_MS: u64 = 100;
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Derive a deterministic `Uuid` from a `(repo_name, usr)` pair using UUIDv5.
+/// Kept for reference; superseded by `symbol_id_to_uuid` in v6.
+#[allow(dead_code)]
 fn usr_to_uuid(repo_name: &str, usr: &str) -> Uuid {
     let key = format!("{repo_name}\x00{usr}");
+    Uuid::new_v5(&USR_NAMESPACE, key.as_bytes())
+}
+
+/// Derive a deterministic `Uuid` from `(repo_name, symbol_id)` using UUIDv5 (v6).
+///
+/// Uses the same namespace as `usr_to_uuid` but encodes the integer as a decimal string to
+/// keep the key compact and deterministic across architectures.
+fn symbol_id_to_uuid(repo_name: &str, symbol_id: i64) -> Uuid {
+    let key = format!("{repo_name}\x00{symbol_id}");
     Uuid::new_v5(&USR_NAMESPACE, key.as_bytes())
 }
 
@@ -292,9 +315,11 @@ impl GraphSink for IndraDbSink {
     }
 
     async fn ensure_indexes(&self) -> Result<()> {
-        // Index `usr` and `repo_name` properties for fast lookups and reset operations.
+        // v6: index `symbol_id` (replaces `usr`) and `repo_name` for fast lookups and reset.
         let mut c = self.client();
-        c.index_property(ident(PROP_USR)?).await.map_err(wrap)?;
+        c.index_property(ident(PROP_SYMBOL_ID)?)
+            .await
+            .map_err(wrap)?;
         c.index_property(ident(PROP_REPO_NAME)?)
             .await
             .map_err(wrap)?;
@@ -329,13 +354,20 @@ impl GraphSink for IndraDbSink {
         // `None` fields are skipped (AC-S45-1: no spurious property writes).
         let mut all_items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 17);
         for node in batch {
-            let vid = usr_to_uuid(&node.repo_name, &node.usr);
+            // v6: key UUID on (repo_name, symbol_id) instead of (repo_name, usr).
+            let vid = symbol_id_to_uuid(&node.repo_name, node.symbol_id);
             let vtype = ident(node.kind.as_str())?;
             all_items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
+            // v6: write symbol_id and file_id; drop usr string (S6-SC-03)
             all_items.push(BulkInsertItem::VertexProperty(
                 vid,
-                ident(PROP_USR)?,
-                Json::new(serde_json::Value::String(node.usr.clone())),
+                ident(PROP_SYMBOL_ID)?,
+                Json::new(serde_json::Value::Number(node.symbol_id.into())),
+            ));
+            all_items.push(BulkInsertItem::VertexProperty(
+                vid,
+                ident(PROP_FILE_ID)?,
+                Json::new(serde_json::Value::Number(node.file_id.into())),
             ));
             all_items.push(BulkInsertItem::VertexProperty(
                 vid,
@@ -507,19 +539,36 @@ impl GraphSink for IndraDbSink {
         let mut all_items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 4);
         let mut total_written = 0u64;
         for edge_rec in batch {
-            let dst_usr = match &edge_rec.dst_usr {
-                Some(u) => u,
+            // v6: key on integer src_id/dst_id; skip edges without dst_id.
+            let dst_int_id = match edge_rec.dst_id {
+                Some(id) => id,
                 None => continue, // unresolved edge; skip
             };
-            let src_id = usr_to_uuid(&edge_rec.repo_name, &edge_rec.src_usr);
-            let dst_id = usr_to_uuid(&edge_rec.repo_name, dst_usr);
+            let src_uuid = symbol_id_to_uuid(&edge_rec.repo_name, edge_rec.src_id);
+            let dst_uuid = symbol_id_to_uuid(&edge_rec.dst_repo_name, dst_int_id);
             let edge_type = ident(edge_rec.kind.as_str())?;
-            let e = Edge::new(src_id, edge_type, dst_id);
+            let e = Edge::new(src_uuid, edge_type, dst_uuid);
             all_items.push(BulkInsertItem::Edge(e.clone()));
             all_items.push(BulkInsertItem::EdgeProperty(
                 e.clone(),
                 ident(PROP_ATTRS_JSON)?,
                 json_str(&edge_rec.attrs_json)?,
+            ));
+            // v6: write src_id, dst_id, dst_repo_name
+            all_items.push(BulkInsertItem::EdgeProperty(
+                e.clone(),
+                ident(PROP_SRC_ID)?,
+                Json::new(serde_json::Value::Number(edge_rec.src_id.into())),
+            ));
+            all_items.push(BulkInsertItem::EdgeProperty(
+                e.clone(),
+                ident(PROP_DST_ID)?,
+                Json::new(serde_json::Value::Number(dst_int_id.into())),
+            ));
+            all_items.push(BulkInsertItem::EdgeProperty(
+                e.clone(),
+                ident(PROP_DST_REPO_NAME)?,
+                Json::new(serde_json::Value::String(edge_rec.dst_repo_name.clone())),
             ));
 
             // ── M8 optional edge fields (S45) — USES edges only; skip None ───────
@@ -879,6 +928,8 @@ mod tests {
             is_virtual: None,
             is_pure_virtual: None,
             is_static: None,
+            symbol_id: 42,
+            file_id: 7,
         }
     }
 
@@ -895,6 +946,9 @@ mod tests {
             tu_hash: [0u8; 32],
             source_association_type: None,
             target_association_type: None,
+            src_id: 42,
+            dst_id: Some(99),
+            dst_repo_name: "my_repo".to_owned(),
         }
     }
 

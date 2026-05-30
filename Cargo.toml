@@ -55,6 +55,8 @@ glob = "0.3"
 uuid = { version = "1.23.1", features = ["v5", "v7"] }
 tonic = "0.12"
 url = "2"
+rusqlite = { version = "0.31", features = ["bundled"] }
+lru = "0.12"
 
 [dev-dependencies]
 tempfile = "3"
@@ -227,3 +229,22 @@ required-features = ["test-mock"]
 name = "qa_boundary"
 path = "tests/integration/qa_boundary.rs"
 required-features = []
+
+[[test]]
+name = "integration"
+path = "tests/integration/symbol_id_integration.rs"
+required-features = ["test-mock"]
+
+[[test]]
+name = "symbol_id_size"
+path = "tests/symbol_id_size.rs"
+
+[[test]]
+name = "qa_symbol_id_boundary"
+path = "tests/qa_symbol_id_boundary.rs"
+required-features = []
+
+[[test]]
+name = "pcm_integration"
+path = "tests/integration/pcm_integration.rs"
+required-features = ["test-mock"]

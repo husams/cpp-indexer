@@ -33,7 +33,11 @@ use tracing::warn;
 use crate::bootstrap::TuEntry;
 use crate::metrics::cxg_libclang_errors_total;
 use crate::pipeline::filter_compiler_args;
+use crate::resolve::symbol_map::SymbolAllocator;
 use crate::stage::writer::StageWriter;
+use crate::visit::modules_cpp20::{
+    is_module_tu, parse_module_tu, probe_cpp20_support, warn_and_skip,
+};
 use crate::visit::shallow::{visit_tu_with_index, with_thread_index, VisitOptions};
 use crate::{Error, Result};
 
@@ -100,6 +104,7 @@ pub fn run_phase1_parallel(
     repo_name: &str,
     skip_system_headers: bool,
     workers: Option<usize>,
+    allocator: Option<Arc<SymbolAllocator>>,
 ) -> Result<ParallelStats> {
     std::fs::create_dir_all(stage_dir)?;
 
@@ -110,6 +115,7 @@ pub fn run_phase1_parallel(
         .map_err(|e| Error::Io(std::io::Error::other(format!("rayon pool build: {e}"))))?;
 
     let stage_dir = Arc::new(stage_dir.to_path_buf());
+    let allocator = Arc::new(allocator);
 
     // Atomic counters shared across workers.
     let ok = Arc::new(AtomicU64::new(0));
@@ -157,22 +163,56 @@ pub fn run_phase1_parallel(
                 let filtered_args = filter_compiler_args(&entry.file, &entry.args);
 
                 // Per-TU work: parse with the thread-local Index.
-                let parse_result = catch_unwind(AssertUnwindSafe(|| {
-                    with_thread_index(|index| {
-                        THREAD_WRITER.with(|cell| {
-                            let mut borrow = cell.borrow_mut();
-                            let writer = borrow.as_mut().expect("writer must be initialised above");
-                            let opts = VisitOptions {
-                                repo_name,
-                                tu_hash: *entry.hash.as_bytes(),
-                                file_path: &entry.file,
-                                args: &filtered_args,
-                                skip_system_headers,
-                            };
-                            visit_tu_with_index(index, &opts, writer)
+                // Branch on PCM/module detection (ADR-1, ADR-2, ADR-3).
+                let parse_result = if is_module_tu(&entry.file, &filtered_args) {
+                    if !probe_cpp20_support() {
+                        // Capability absent — loud skip counted as tu_error (ADR-3 §B).
+                        warn_and_skip(&entry.file);
+                        Ok(Err(Error::Clang(format!(
+                            "PCM TU skipped — libclang lacks C++20 module support: {}",
+                            entry.file.display()
+                        ))))
+                    } else {
+                        let alloc = allocator.as_ref().clone();
+                        catch_unwind(AssertUnwindSafe(|| {
+                            with_thread_index(|index| {
+                                THREAD_WRITER.with(|cell| {
+                                    let mut borrow = cell.borrow_mut();
+                                    let writer =
+                                        borrow.as_mut().expect("writer must be initialised above");
+                                    parse_module_tu(
+                                        index,
+                                        &entry.file,
+                                        &filtered_args,
+                                        repo_name,
+                                        *entry.hash.as_bytes(),
+                                        writer,
+                                        alloc,
+                                    )
+                                })
+                            })
+                        }))
+                    }
+                } else {
+                    catch_unwind(AssertUnwindSafe(|| {
+                        with_thread_index(|index| {
+                            THREAD_WRITER.with(|cell| {
+                                let mut borrow = cell.borrow_mut();
+                                let writer =
+                                    borrow.as_mut().expect("writer must be initialised above");
+                                let opts = VisitOptions {
+                                    repo_name,
+                                    tu_hash: *entry.hash.as_bytes(),
+                                    file_path: &entry.file,
+                                    args: &filtered_args,
+                                    skip_system_headers,
+                                    allocator: allocator.as_ref().clone(),
+                                };
+                                visit_tu_with_index(index, &opts, writer)
+                            })
                         })
-                    })
-                }));
+                    }))
+                };
 
                 match parse_result {
                     Ok(Ok(had_errors)) => {

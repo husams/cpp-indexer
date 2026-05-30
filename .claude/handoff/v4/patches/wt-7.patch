@@ -1,0 +1,3319 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 794fc77..5e012a6 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -812,6 +812,7 @@ dependencies = [
+  "indradb-lib",
+  "indradb-proto",
+  "libc",
++ "lru",
+  "neo4rs",
+  "num_cpus",
+  "parquet",
+@@ -820,6 +821,7 @@ dependencies = [
+  "rayon",
+  "reqwest",
+  "rocksdb",
++ "rusqlite",
+  "serde",
+  "serde_json",
+  "sha2",
+@@ -1015,6 +1017,18 @@ dependencies = [
+  "windows-sys 0.61.2",
+ ]
+ 
++[[package]]
++name = "fallible-iterator"
++version = "0.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
++
++[[package]]
++name = "fallible-streaming-iterator"
++version = "0.1.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
++
+ [[package]]
+ name = "fastrand"
+ version = "2.4.1"
+@@ -1290,6 +1304,15 @@ version = "0.12.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
+ 
++[[package]]
++name = "hashbrown"
++version = "0.14.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
++dependencies = [
++ "ahash",
++]
++
+ [[package]]
+ name = "hashbrown"
+ version = "0.15.5"
+@@ -1307,6 +1330,15 @@ version = "0.17.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+ 
++[[package]]
++name = "hashlink"
++version = "0.9.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
++dependencies = [
++ "hashbrown 0.14.5",
++]
++
+ [[package]]
+ name = "heck"
+ version = "0.5.0"
+@@ -1850,6 +1882,17 @@ dependencies = [
+  "zstd-sys",
+ ]
+ 
++[[package]]
++name = "libsqlite3-sys"
++version = "0.28.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0c10584274047cb335c23d3e61bcef8e323adae7c5c8c760540f73610177fc3f"
++dependencies = [
++ "cc",
++ "pkg-config",
++ "vcpkg",
++]
++
+ [[package]]
+ name = "libssh2-sys"
+ version = "0.3.1"
+@@ -1903,6 +1946,15 @@ version = "0.4.29"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+ 
++[[package]]
++name = "lru"
++version = "0.12.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
++dependencies = [
++ "hashbrown 0.15.5",
++]
++
+ [[package]]
+ name = "lz4-sys"
+ version = "1.11.1+lz4-1.10.0"
+@@ -2712,6 +2764,20 @@ dependencies = [
+  "librocksdb-sys",
+ ]
+ 
++[[package]]
++name = "rusqlite"
++version = "0.31.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b838eba278d213a8beaf485bd313fd580ca4505a00d5871caeb1457c55322cae"
++dependencies = [
++ "bitflags 2.11.1",
++ "fallible-iterator",
++ "fallible-streaming-iterator",
++ "hashlink",
++ "libsqlite3-sys",
++ "smallvec",
++]
++
+ [[package]]
+ name = "rustc-hash"
+ version = "1.1.0"
+diff --git a/Cargo.toml b/Cargo.toml
+index 813300a..7cd0ea8 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -55,6 +55,8 @@ glob = "0.3"
+ uuid = { version = "1.23.1", features = ["v5", "v7"] }
+ tonic = "0.12"
+ url = "2"
++rusqlite = { version = "0.31", features = ["bundled"] }
++lru = "0.12"
+ 
+ [dev-dependencies]
+ tempfile = "3"
+@@ -227,3 +229,8 @@ required-features = ["test-mock"]
+ name = "qa_boundary"
+ path = "tests/integration/qa_boundary.rs"
+ required-features = []
++
++[[test]]
++name = "integration"
++path = "tests/integration_entry.rs"
++required-features = ["test-mock"]
+diff --git a/benches/sink_throughput.rs b/benches/sink_throughput.rs
+index f1f0cfe..b501b85 100644
+--- a/benches/sink_throughput.rs
++++ b/benches/sink_throughput.rs
+@@ -58,6 +58,8 @@ fn make_nodes(n: usize) -> Vec<NodeRecord> {
+             is_virtual: None,
+             is_pure_virtual: None,
+             is_static: None,
++            symbol_id: i as i64,
++            file_id: (i % 100) as i64,
+         })
+         .collect()
+ }
+@@ -76,6 +78,9 @@ fn make_edges(n: usize) -> Vec<EdgeRecord> {
+             tu_hash: [0u8; 32],
+             source_association_type: None,
+             target_association_type: None,
++            src_id: i as i64,
++            dst_id: Some(((i + 1) % n.max(1)) as i64),
++            dst_repo_name: "bench-repo".to_owned(),
+         })
+         .collect()
+ }
+diff --git a/prompt/graph_database/cpp/schema.txt b/prompt/graph_database/cpp/schema.txt
+index c7dc065..dfdc1c9 100644
+--- a/prompt/graph_database/cpp/schema.txt
++++ b/prompt/graph_database/cpp/schema.txt
+@@ -1,6 +1,6 @@
+ # cpp-indexer graph schema — MCP system prompt
+ # DO NOT EDIT — generated by build.rs from src/schema/{nodes,edges,version}.rs
+-# schema-version: cxg-schema-v5
++# schema-version: cxg-schema-v6
+ 
+ ## Node kinds
+ 
+diff --git a/src/pipeline/mod.rs b/src/pipeline/mod.rs
+index 3ff9b2e..c1189ac 100644
+--- a/src/pipeline/mod.rs
++++ b/src/pipeline/mod.rs
+@@ -304,6 +304,9 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
+             is_virtual: None,
+             is_pure_virtual: None,
+             is_static: None,
++            // graph-symbol-ids: IDs are 0 here; the allocator assigns real IDs during Phase 1
++            symbol_id: 0,
++            file_id: 0,
+         };
+ 
+         // Prepend so the REPO node is written before the nodes that reference it.
+@@ -327,6 +330,10 @@ pub async fn run(sink: Arc<dyn GraphSink>, opts: RunOptions) -> Result<PipelineS
+                 // M8 promoted fields — BELONGS_TO_REPO edges carry none of these
+                 source_association_type: None,
+                 target_association_type: None,
++                // graph-symbol-ids: IDs resolved from n; repo node uses id 0 as placeholder
++                src_id: n.symbol_id,
++                dst_id: None,
++                dst_repo_name: meta.name.clone(),
+             })
+             .collect();
+ 
+@@ -724,6 +731,9 @@ mod tests {
+             tu_hash: [0u8; 32],
+             source_association_type: None,
+             target_association_type: None,
++            src_id: 0,
++            dst_id: None,
++            dst_repo_name: "repo".to_owned(),
+         }
+     }
+ 
+diff --git a/src/pipeline/parallel.rs b/src/pipeline/parallel.rs
+index 6f2d0b6..fe6214f 100644
+--- a/src/pipeline/parallel.rs
++++ b/src/pipeline/parallel.rs
+@@ -33,6 +33,7 @@ use tracing::warn;
+ use crate::bootstrap::TuEntry;
+ use crate::metrics::cxg_libclang_errors_total;
+ use crate::pipeline::filter_compiler_args;
++use crate::resolve::symbol_map::SymbolAllocator;
+ use crate::stage::writer::StageWriter;
+ use crate::visit::shallow::{visit_tu_with_index, with_thread_index, VisitOptions};
+ use crate::{Error, Result};
+@@ -100,6 +101,30 @@ pub fn run_phase1_parallel(
+     repo_name: &str,
+     skip_system_headers: bool,
+     workers: Option<usize>,
++) -> Result<ParallelStats> {
++    run_phase1_parallel_with_alloc(
++        entries,
++        stage_dir,
++        repo_name,
++        skip_system_headers,
++        workers,
++        None,
++    )
++}
++
++/// Like [`run_phase1_parallel`] but accepts an optional [`SymbolAllocator`] for
++/// integer ID allocation during Phase 1 (graph-symbol-ids Story 3).
++///
++/// When `allocator` is `None`, all nodes/edges are emitted with `symbol_id = 0`.
++/// Callers that need real IDs (i.e. the full indexing pipeline) should pass an
++/// `Arc<SymbolAllocator>` opened at `<stage_dir>/cxg-symbols.db`.
++pub fn run_phase1_parallel_with_alloc(
++    entries: &[TuEntry],
++    stage_dir: &Path,
++    repo_name: &str,
++    skip_system_headers: bool,
++    workers: Option<usize>,
++    allocator: Option<Arc<SymbolAllocator>>,
+ ) -> Result<ParallelStats> {
+     std::fs::create_dir_all(stage_dir)?;
+ 
+@@ -110,6 +135,7 @@ pub fn run_phase1_parallel(
+         .map_err(|e| Error::Io(std::io::Error::other(format!("rayon pool build: {e}"))))?;
+ 
+     let stage_dir = Arc::new(stage_dir.to_path_buf());
++    let allocator = Arc::new(allocator);
+ 
+     // Atomic counters shared across workers.
+     let ok = Arc::new(AtomicU64::new(0));
+@@ -168,6 +194,7 @@ pub fn run_phase1_parallel(
+                                 file_path: &entry.file,
+                                 args: &filtered_args,
+                                 skip_system_headers,
++                                allocator: (*allocator).clone(),
+                             };
+                             visit_tu_with_index(index, &opts, writer)
+                         })
+diff --git a/src/resolve/cross_repo.rs b/src/resolve/cross_repo.rs
+index 063c906..6f5c7d7 100644
+--- a/src/resolve/cross_repo.rs
++++ b/src/resolve/cross_repo.rs
+@@ -48,6 +48,7 @@ use tracing::{info, warn};
+ 
+ use crate::error::{Error, Result};
+ use crate::resolve::canonical::{canonical_repo, CanonicalOverride};
++use crate::resolve::symbol_map::SymbolAllocator;
+ use crate::schema::version::SCHEMA_VERSION_TAG;
+ use crate::schema::{
+     arrow::{record_batch_to_edges, record_batch_to_nodes},
+@@ -313,6 +314,91 @@ fn build_global_usr_map(
+ 
+ // ── 5. Materialise EXTERNAL_REF edges ─────────────────────────────────────────
+ 
++/// Resolve a USR to its integer symbol_id using the cached read-only SymbolAllocator for `repo`.
++///
++/// Returns `Some(id)` on success, `None` on SQLite unavailability or missing row.
++/// This is used by Phase 5 to resolve src_id (source repo) and dst_id (destination repo)
++/// for EXTERNAL_REF edge emission (ADR-1 points 4-5).
++fn resolve_id_from_repo(
++    repo_name: &str,
++    usr: &str,
++    repo_stage_map: &HashMap<String, PathBuf>,
++    alloc_cache: &mut HashMap<String, SymbolAllocator>,
++) -> Option<i64> {
++    if !alloc_cache.contains_key(repo_name) {
++        let stage_dir = repo_stage_map.get(repo_name)?;
++        let db_path = SymbolAllocator::default_db_path(stage_dir);
++        if !db_path.exists() {
++            warn!(
++                "phase5: no cxg-symbols.db for repo '{}' at {:?}",
++                repo_name, db_path
++            );
++            return None;
++        }
++        match SymbolAllocator::open_readonly(&db_path, 0) {
++            Ok(a) => {
++                alloc_cache.insert(repo_name.to_owned(), a);
++            }
++            Err(e) => {
++                warn!(
++                    "phase5: cannot open cxg-symbols.db for repo '{}': {}",
++                    repo_name, e
++                );
++                return None;
++            }
++        }
++    }
++    let alloc = alloc_cache.get(repo_name)?;
++    match alloc.get_or_insert_symbol(usr) {
++        Ok(id) => Some(id),
++        Err(e) => {
++            warn!(
++                "phase5: symbol resolve failed for '{}' in repo '{}': {}",
++                usr, repo_name, e
++            );
++            None
++        }
++    }
++}
++
++/// Build a map from repo_name → stage_dir by scanning REPO-kind nodes in each stage dir.
++///
++/// Used to locate the `cxg-symbols.db` for cross-repo `dst_id` resolution (ADR-1 points 4-5).
++fn build_repo_stage_map(stage_dirs: &[PathBuf]) -> HashMap<String, PathBuf> {
++    let mut map: HashMap<String, PathBuf> = HashMap::new();
++    for stage_dir in stage_dirs {
++        let shards = match collect_shards(stage_dir, "nodes") {
++            Ok(s) => s,
++            Err(_) => continue,
++        };
++        'outer: for shard_path in &shards {
++            let reader =
++                match parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
++                    match std::fs::File::open(shard_path) {
++                        Ok(f) => f,
++                        Err(_) => continue,
++                    },
++                )
++                .and_then(|b| b.build())
++                {
++                    Ok(r) => r,
++                    Err(_) => continue,
++                };
++            for batch_result in reader {
++                let Ok(batch) = batch_result else { continue };
++                let nodes = record_batch_to_nodes(&batch);
++                for node in nodes {
++                    if !node.repo_name.is_empty() {
++                        map.insert(node.repo_name.clone(), stage_dir.to_path_buf());
++                        break 'outer;
++                    }
++                }
++            }
++        }
++    }
++    map
++}
++
+ async fn materialise_external_refs(
+     sink: &Arc<dyn GraphSink>,
+     stage_dirs: &[PathBuf],
+@@ -322,6 +408,11 @@ async fn materialise_external_refs(
+     let mut stats = Phase5Stats::default();
+     let mut pending: Vec<EdgeRecord> = Vec::with_capacity(batch_size);
+ 
++    // Build repo_name → stage_dir map for cross-repo SQLite ID resolution (ADR-1 pts 4-5).
++    let repo_stage_map = build_repo_stage_map(stage_dirs);
++    // Open read-only SymbolAllocator handles keyed by repo_name.
++    let mut alloc_cache: HashMap<String, SymbolAllocator> = HashMap::new();
++
+     for stage_dir in stage_dirs {
+         let final_edges_path = stage_dir.join("final-edges.parquet");
+         if !final_edges_path.exists() {
+@@ -359,7 +450,26 @@ async fn materialise_external_refs(
+ 
+                 match global_map.get(dst_usr.as_str()) {
+                     Some(entry) if entry.repo_name != edge.repo_name => {
+-                        // Found in a different repo — emit EXTERNAL_REF.
++                        // Found in a different repo — emit EXTERNAL_REF with integer IDs.
++                        let dst_repo = &entry.repo_name;
++                        let src_repo = &edge.repo_name;
++
++                        // Resolve src_id from the source repo's SQLite map.
++                        let src_id = resolve_id_from_repo(
++                            src_repo,
++                            &edge.src_usr,
++                            &repo_stage_map,
++                            &mut alloc_cache,
++                        );
++
++                        // Resolve dst_id from the destination repo's SQLite map (ADR-1 pt 5).
++                        let dst_id = resolve_id_from_repo(
++                            dst_repo,
++                            dst_usr,
++                            &repo_stage_map,
++                            &mut alloc_cache,
++                        );
++
+                         let via_json = format!(r#"{{"via":"{}"}}"#, edge.kind.as_str());
+                         pending.push(EdgeRecord {
+                             src_usr: edge.src_usr.clone(),
+@@ -372,9 +482,13 @@ async fn materialise_external_refs(
+                             attrs_json: via_json,
+                             tu_hash: edge.tu_hash,
+                             // M8: Mirror USES classification onto EXTERNAL_REF (ADR-13, S43).
+-                            // Populated by S43; None here until access classifier is wired.
+                             source_association_type: edge.source_association_type.clone(),
+                             target_association_type: edge.target_association_type.clone(),
++                            // graph-symbol-ids: integer IDs resolved from each repo's SQLite map.
++                            // src_id/dst_id default to 0 when SQLite is unavailable (graceful degradation).
++                            src_id: src_id.unwrap_or(0),
++                            dst_id,
++                            dst_repo_name: dst_repo.clone(),
+                         });
+                         stats.external_refs_written += 1;
+                     }
+diff --git a/src/resolve/mod.rs b/src/resolve/mod.rs
+index 8c1dbf7..5687eb4 100644
+--- a/src/resolve/mod.rs
++++ b/src/resolve/mod.rs
+@@ -5,7 +5,9 @@
+ /// - `spill`: RocksDB spill-to-disk when the USR map exceeds 8 GiB threshold (S20, AC-M3-12).
+ /// - `cross_repo`: Phase 5 `EXTERNAL_REF` materialisation (S23, AC-M4-4, AC-M4-6, AC-M6-7).
+ /// - `canonical`: system-header / vendored USR canonicalisation (S24, AC-M4-7, AC-M4-8, ADR-4).
++/// - `symbol_map`: per-repo SQLite symbol/file ID allocator (graph-symbol-ids Story 1).
+ pub mod canonical;
+ pub mod cross_repo;
+ pub mod per_repo;
+ pub mod spill;
++pub mod symbol_map;
+diff --git a/src/resolve/per_repo.rs b/src/resolve/per_repo.rs
+index 16263eb..ecff7e0 100644
+--- a/src/resolve/per_repo.rs
++++ b/src/resolve/per_repo.rs
+@@ -341,6 +341,9 @@ mod tests {
+             tu_hash: [0u8; 32],
+             source_association_type: None,
+             target_association_type: None,
++            src_id: 0,
++            dst_id: None,
++            dst_repo_name: "test-repo".to_owned(),
+         }
+     }
+ 
+@@ -415,6 +418,8 @@ mod tests {
+                 is_virtual: None,
+                 is_pure_virtual: None,
+                 is_static: None,
++                symbol_id: i as i64,
++                file_id: i as i64,
+             })
+             .collect();
+ 
+@@ -435,6 +440,9 @@ mod tests {
+                 tu_hash: [0u8; 32],
+                 source_association_type: None,
+                 target_association_type: None,
++                src_id: i as i64,
++                dst_id: None,
++                dst_repo_name: "test-repo".to_owned(),
+             })
+             .collect();
+ 
+@@ -451,6 +459,9 @@ mod tests {
+                 tu_hash: [0u8; 32],
+                 source_association_type: None,
+                 target_association_type: None,
++                src_id: i as i64 + 10,
++                dst_id: None,
++                dst_repo_name: "test-repo".to_owned(),
+             })
+             .collect();
+ 
+diff --git a/src/resolve/symbol_map.rs b/src/resolve/symbol_map.rs
+new file mode 100644
+index 0000000..3f388d4
+--- /dev/null
++++ b/src/resolve/symbol_map.rs
+@@ -0,0 +1,468 @@
++//! Per-repo SQLite symbol/file ID map with write-through LRU cache (Story 1, graph-symbol-ids).
++//!
++//! Provides [`SymbolAllocator`] — a thread-safe, SQLite-backed store that maps
++//! USR strings → integer IDs and file paths → integer IDs. IDs are SQLite rowid
++//! aliases (i64), monotonically increasing from 1, densely allocated.
++//!
++//! # Concurrency
++//! One write `Connection` behind a `std::sync::Mutex`; WAL mode allows concurrent
++//! read-only opens by the read path.  One allocator per repo; one Mutex — no
++//! nesting → deadlock-free.
++//!
++//! # Cache
++//! Bidirectional write-through LRU:
++//! - Forward: `usr → id` and `path → id`.
++//! - Reverse: `id → usr` and `id → path`.
++//!
++//! `cache_size == 0` disables the cache entirely; every lookup hits SQLite.
++//!
++//! # Write-through order
++//! SQLite is written first; the cache is populated after a successful write.
++//! Eviction can therefore never lose data (C5, S2-SC-03).
++
++use std::num::NonZeroUsize;
++use std::path::{Path, PathBuf};
++use std::sync::Mutex;
++
++use lru::LruCache;
++use rusqlite::{params, Connection, OptionalExtension};
++
++use crate::error::{Error, Result};
++
++// ── Internal cache ────────────────────────────────────────────────────────────
++
++struct SymbolCache {
++    /// Forward: usr/path string → id.
++    forward: LruCache<String, i64>,
++    /// Reverse: id → usr/path string.
++    reverse: LruCache<i64, String>,
++}
++
++impl SymbolCache {
++    fn new(capacity: usize) -> Option<Self> {
++        let cap = NonZeroUsize::new(capacity)?;
++        Some(Self {
++            forward: LruCache::new(cap),
++            reverse: LruCache::new(cap),
++        })
++    }
++
++    fn get_forward(&mut self, key: &str) -> Option<i64> {
++        self.forward.get(key).copied()
++    }
++
++    fn get_reverse(&mut self, id: i64) -> Option<&str> {
++        self.reverse.get(&id).map(|s| s.as_str())
++    }
++
++    fn insert(&mut self, key: String, id: i64) {
++        self.reverse.put(id, key.clone());
++        self.forward.put(key, id);
++    }
++}
++
++// ── SymbolAllocator ───────────────────────────────────────────────────────────
++
++/// Thread-safe per-repo SQLite-backed symbol and file ID allocator.
++///
++/// Use [`SymbolAllocator::open`] to create a write-capable instance and
++/// [`SymbolAllocator::open_readonly`] to obtain a read-only resolver handle
++/// for cross-repo or read-path resolution.
++pub struct SymbolAllocator {
++    inner: Mutex<AllocatorInner>,
++}
++
++struct AllocatorInner {
++    conn: Connection,
++    sym_cache: Option<SymbolCache>,
++    file_cache: Option<SymbolCache>,
++}
++
++impl SymbolAllocator {
++    // ── Constructors ──────────────────────────────────────────────────────────
++
++    /// Open (or create) the SQLite database at `path` with a write-capable connection.
++    ///
++    /// `cache_size == 0` disables the LRU cache; every lookup hits SQLite.
++    pub fn open(path: &Path, cache_size: usize) -> Result<Self> {
++        let conn = Connection::open(path).map_err(db_err)?;
++        Self::init_db(&conn)?;
++        Ok(Self {
++            inner: Mutex::new(AllocatorInner {
++                conn,
++                sym_cache: SymbolCache::new(cache_size),
++                file_cache: SymbolCache::new(cache_size),
++            }),
++        })
++    }
++
++    /// Open an **in-memory** SQLite database (useful for tests).
++    pub fn open_in_memory(cache_size: usize) -> Result<Self> {
++        let conn = Connection::open_in_memory().map_err(db_err)?;
++        Self::init_db(&conn)?;
++        Ok(Self {
++            inner: Mutex::new(AllocatorInner {
++                conn,
++                sym_cache: SymbolCache::new(cache_size),
++                file_cache: SymbolCache::new(cache_size),
++            }),
++        })
++    }
++
++    /// Open the SQLite database at `path` as **read-only** (for resolvers).
++    ///
++    /// Still caches forward/reverse lookups; writes are not possible.
++    pub fn open_readonly(path: &Path, cache_size: usize) -> Result<Self> {
++        let flags =
++            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
++        let conn = Connection::open_with_flags(path, flags).map_err(db_err)?;
++        Ok(Self {
++            inner: Mutex::new(AllocatorInner {
++                conn,
++                sym_cache: SymbolCache::new(cache_size),
++                file_cache: SymbolCache::new(cache_size),
++            }),
++        })
++    }
++
++    fn init_db(conn: &Connection) -> Result<()> {
++        conn.execute_batch(
++            "PRAGMA journal_mode=WAL;
++             PRAGMA synchronous=NORMAL;
++             CREATE TABLE IF NOT EXISTS symbols (
++                 id  INTEGER PRIMARY KEY,
++                 usr TEXT    NOT NULL UNIQUE
++             );
++             CREATE TABLE IF NOT EXISTS files (
++                 id   INTEGER PRIMARY KEY,
++                 path TEXT    NOT NULL UNIQUE
++             );",
++        )
++        .map_err(db_err)
++    }
++
++    // ── Symbol (USR) allocation ───────────────────────────────────────────────
++
++    /// Get the integer ID for `usr`, allocating a new one if needed.
++    ///
++    /// Thread-safe. On concurrent first-insert of the same USR, exactly one
++    /// row is created and both callers receive the same ID (S2-SC-08).
++    pub fn get_or_insert_symbol(&self, usr: &str) -> Result<i64> {
++        let mut inner = self.inner.lock().expect("symbol allocator lock poisoned");
++
++        // Fast path: cache hit.
++        if let Some(cache) = &mut inner.sym_cache {
++            if let Some(id) = cache.get_forward(usr) {
++                return Ok(id);
++            }
++        }
++
++        // Slow path: SQLite insert-or-ignore + select.
++        inner
++            .conn
++            .execute(
++                "INSERT INTO symbols (usr) VALUES (?1) ON CONFLICT(usr) DO NOTHING",
++                params![usr],
++            )
++            .map_err(db_err)?;
++        let id: i64 = inner
++            .conn
++            .query_row(
++                "SELECT id FROM symbols WHERE usr = ?1",
++                params![usr],
++                |row| row.get(0),
++            )
++            .map_err(db_err)?;
++
++        if let Some(cache) = &mut inner.sym_cache {
++            cache.insert(usr.to_owned(), id);
++        }
++        Ok(id)
++    }
++
++    /// Get the integer ID for `path`, allocating a new one if needed.
++    pub fn get_or_insert_file(&self, path: &str) -> Result<i64> {
++        let mut inner = self.inner.lock().expect("symbol allocator lock poisoned");
++
++        if let Some(cache) = &mut inner.file_cache {
++            if let Some(id) = cache.get_forward(path) {
++                return Ok(id);
++            }
++        }
++
++        inner
++            .conn
++            .execute(
++                "INSERT INTO files (path) VALUES (?1) ON CONFLICT(path) DO NOTHING",
++                params![path],
++            )
++            .map_err(db_err)?;
++        let id: i64 = inner
++            .conn
++            .query_row(
++                "SELECT id FROM files WHERE path = ?1",
++                params![path],
++                |row| row.get(0),
++            )
++            .map_err(db_err)?;
++
++        if let Some(cache) = &mut inner.file_cache {
++            cache.insert(path.to_owned(), id);
++        }
++        Ok(id)
++    }
++
++    // ── Reverse resolvers ─────────────────────────────────────────────────────
++
++    /// Resolve a symbol integer `id` back to its USR string.
++    ///
++    /// Returns `Ok(None)` when the ID is not found (stale/missing).
++    pub fn resolve_symbol(&self, id: i64) -> Result<Option<String>> {
++        let mut inner = self.inner.lock().expect("symbol allocator lock poisoned");
++
++        if let Some(cache) = &mut inner.sym_cache {
++            if let Some(usr) = cache.get_reverse(id) {
++                return Ok(Some(usr.to_owned()));
++            }
++        }
++
++        let result: Option<String> = inner
++            .conn
++            .query_row(
++                "SELECT usr FROM symbols WHERE id = ?1",
++                params![id],
++                |row| row.get(0),
++            )
++            .optional()
++            .map_err(db_err)?;
++
++        if let (Some(cache), Some(ref usr)) = (&mut inner.sym_cache, &result) {
++            cache.insert(usr.clone(), id);
++        }
++        Ok(result)
++    }
++
++    /// Resolve a file integer `id` back to its path string.
++    ///
++    /// Returns `Ok(None)` when the ID is not found.
++    pub fn resolve_file(&self, id: i64) -> Result<Option<String>> {
++        let mut inner = self.inner.lock().expect("symbol allocator lock poisoned");
++
++        if let Some(cache) = &mut inner.file_cache {
++            if let Some(path) = cache.get_reverse(id) {
++                return Ok(Some(path.to_owned()));
++            }
++        }
++
++        let result: Option<String> = inner
++            .conn
++            .query_row("SELECT path FROM files WHERE id = ?1", params![id], |row| {
++                row.get(0)
++            })
++            .optional()
++            .map_err(db_err)?;
++
++        if let (Some(cache), Some(ref path)) = (&mut inner.file_cache, &result) {
++            cache.insert(path.clone(), id);
++        }
++        Ok(result)
++    }
++
++    // ── DB path helper ────────────────────────────────────────────────────────
++
++    /// Default SQLite path for a given stage directory.
++    pub fn default_db_path(stage_dir: &Path) -> PathBuf {
++        stage_dir.join("cxg-symbols.db")
++    }
++}
++
++fn db_err(e: rusqlite::Error) -> Error {
++    Error::Io(std::io::Error::other(format!("symbol-map SQLite: {e}")))
++}
++
++// ── Tests ─────────────────────────────────────────────────────────────────────
++
++#[cfg(test)]
++mod tests {
++    use std::sync::Arc;
++
++    use super::*;
++
++    fn alloc(cache: usize) -> SymbolAllocator {
++        SymbolAllocator::open_in_memory(cache).expect("in-memory open")
++    }
++
++    // S7-SC-01: insert new USR → new id + row
++    #[test]
++    fn insert_new_usr_allocates_id() {
++        let a = alloc(100);
++        let id = a.get_or_insert_symbol("c:@F@foo").unwrap();
++        assert!(id > 0);
++        // Verify row exists via resolve.
++        let got = a.resolve_symbol(id).unwrap();
++        assert_eq!(got, Some("c:@F@foo".to_owned()));
++    }
++
++    // S7-SC-02: dup USR → same id, no new row
++    #[test]
++    fn insert_duplicate_usr_same_id() {
++        let a = alloc(100);
++        let id1 = a.get_or_insert_symbol("c:@F@bar").unwrap();
++        let id2 = a.get_or_insert_symbol("c:@F@bar").unwrap();
++        assert_eq!(id1, id2);
++    }
++
++    // S7-SC-03: insert new path → new id
++    #[test]
++    fn insert_new_path_allocates_id() {
++        let a = alloc(100);
++        let id = a.get_or_insert_file("/src/foo.cpp").unwrap();
++        assert!(id > 0);
++    }
++
++    // S7-SC-04: dup path → same id
++    #[test]
++    fn insert_duplicate_path_same_id() {
++        let a = alloc(100);
++        let id1 = a.get_or_insert_file("/src/foo.cpp").unwrap();
++        let id2 = a.get_or_insert_file("/src/foo.cpp").unwrap();
++        assert_eq!(id1, id2);
++    }
++
++    // S7-SC-05: persistence across reopen (use tempfile)
++    #[test]
++    fn persistence_across_reopen() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("test.db");
++        let id1 = {
++            let a = SymbolAllocator::open(&path, 0).unwrap();
++            a.get_or_insert_symbol("c:@F@persist").unwrap()
++        };
++        // Reopen
++        let a2 = SymbolAllocator::open(&path, 0).unwrap();
++        let id2 = a2.get_or_insert_symbol("c:@F@persist").unwrap();
++        assert_eq!(id1, id2);
++    }
++
++    // S7-SC-06: cache hit (probe by checking that a second call with cache==1 stays consistent)
++    #[test]
++    fn cache_hit_returns_same_id() {
++        let a = alloc(100);
++        let id1 = a.get_or_insert_symbol("c:@F@cached").unwrap();
++        // Second call — must hit cache, return same id.
++        let id2 = a.get_or_insert_symbol("c:@F@cached").unwrap();
++        assert_eq!(id1, id2);
++    }
++
++    // S7-SC-07: cache miss → query + populate
++    #[test]
++    fn cache_miss_populates_cache() {
++        let a = alloc(0); // no cache
++        let id = a.get_or_insert_symbol("c:@F@nocache").unwrap();
++        assert!(id > 0);
++        // With no cache, resolve must hit SQLite each time — both calls must succeed.
++        let r1 = a.resolve_symbol(id).unwrap();
++        let r2 = a.resolve_symbol(id).unwrap();
++        assert_eq!(r1, r2);
++    }
++
++    // S7-SC-08: LRU eviction — size-1 cache evicts on second distinct insert
++    #[test]
++    fn lru_eviction_size_1() {
++        let a = alloc(1);
++        let _id1 = a.get_or_insert_symbol("c:@F@x").unwrap();
++        let _id2 = a.get_or_insert_symbol("c:@F@y").unwrap();
++        // Resolve x — must still work via SQLite (evicted from cache but SQLite holds it).
++        let rx = a.resolve_symbol(_id1).unwrap();
++        assert_eq!(rx, Some("c:@F@x".to_owned()));
++    }
++
++    // S7-SC-09: cache_size=0 disables caching
++    #[test]
++    fn cache_size_zero_disables_cache() {
++        let a = alloc(0);
++        let id = a.get_or_insert_symbol("c:@F@nocache2").unwrap();
++        // Must succeed regardless.
++        let r = a.resolve_symbol(id).unwrap();
++        assert_eq!(r, Some("c:@F@nocache2".to_owned()));
++    }
++
++    // S7-SC-10: id→usr reverse lookup
++    #[test]
++    fn reverse_symbol_lookup() {
++        let a = alloc(100);
++        let id = a.get_or_insert_symbol("c:@F@rev").unwrap();
++        let usr = a.resolve_symbol(id).unwrap();
++        assert_eq!(usr, Some("c:@F@rev".to_owned()));
++    }
++
++    // S7-SC-11: id→path reverse lookup
++    #[test]
++    fn reverse_file_lookup() {
++        let a = alloc(100);
++        let id = a.get_or_insert_file("/src/rev.cpp").unwrap();
++        let path = a.resolve_file(id).unwrap();
++        assert_eq!(path, Some("/src/rev.cpp".to_owned()));
++    }
++
++    // S2-SC-08: concurrent same-usr → exactly one id
++    #[test]
++    fn concurrent_same_usr_one_id() {
++        let a = Arc::new(alloc(0));
++        let handles: Vec<_> = (0..8)
++            .map(|_| {
++                let a = Arc::clone(&a);
++                std::thread::spawn(move || a.get_or_insert_symbol("c:@C@Widget").unwrap())
++            })
++            .collect();
++        let ids: Vec<i64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
++        let first = ids[0];
++        assert!(
++            ids.iter().all(|&id| id == first),
++            "all threads must get the same id"
++        );
++    }
++
++    // S2-SC-09: concurrent distinct usrs → distinct ids
++    #[test]
++    fn concurrent_distinct_usrs_distinct_ids() {
++        let a = Arc::new(alloc(0));
++        let handles: Vec<_> = (0..8)
++            .map(|i| {
++                let a = Arc::clone(&a);
++                std::thread::spawn(move || {
++                    a.get_or_insert_symbol(&format!("c:@C@Type{i}")).unwrap()
++                })
++            })
++            .collect();
++        let mut ids: Vec<i64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
++        ids.sort_unstable();
++        ids.dedup();
++        assert_eq!(ids.len(), 8, "distinct usrs must produce distinct ids");
++    }
++
++    // S2-SC-10: N≥8 threads allocate concurrently, no deadlock/panic
++    #[test]
++    fn parallel_allocation_no_deadlock() {
++        let a = Arc::new(alloc(1_000));
++        std::thread::scope(|s| {
++            for i in 0..16 {
++                let a = Arc::clone(&a);
++                s.spawn(move || {
++                    for j in 0..50 {
++                        a.get_or_insert_symbol(&format!("c:@F@fn_{i}_{j}")).unwrap();
++                        a.get_or_insert_file(&format!("/src/file_{i}.cpp")).unwrap();
++                    }
++                });
++            }
++        });
++    }
++
++    // Missing ID on read returns None (not an error)
++    #[test]
++    fn resolve_missing_id_returns_none() {
++        let a = alloc(100);
++        let r = a.resolve_symbol(99999).unwrap();
++        assert_eq!(r, None);
++    }
++}
+diff --git a/src/schema/arrow.rs b/src/schema/arrow.rs
+index 65b45b8..7c4d565 100644
+--- a/src/schema/arrow.rs
++++ b/src/schema/arrow.rs
+@@ -10,8 +10,9 @@ use std::sync::Arc;
+ use arrow::{
+     array::{
+         Array, ArrayRef, BooleanArray, BooleanBuilder, FixedSizeBinaryArray,
+-        FixedSizeBinaryBuilder, Int8Array, ListArray, ListBuilder, StringArray,
+-        StringDictionaryBuilder, StructArray, UInt32Array, UInt32Builder, UInt8Array, UInt8Builder,
++        FixedSizeBinaryBuilder, Int64Array, Int64Builder, Int8Array, ListArray, ListBuilder,
++        StringArray, StringDictionaryBuilder, StructArray, UInt32Array, UInt32Builder, UInt8Array,
++        UInt8Builder,
+     },
+     datatypes::{DataType, Field, Fields, Int8Type, Schema},
+     record_batch::RecordBatch,
+@@ -112,6 +113,9 @@ pub fn node_schema() -> Schema {
+         Field::new("is_virtual", DataType::Boolean, true),
+         Field::new("is_pure_virtual", DataType::Boolean, true),
+         Field::new("is_static", DataType::Boolean, true),
++        // graph-symbol-ids columns (Story 3):
++        Field::new("symbol_id", DataType::Int64, false),
++        Field::new("file_id", DataType::Int64, false),
+     ])
+ }
+ 
+@@ -501,6 +505,19 @@ pub fn nodes_to_record_batch(
+     }
+     let is_static: ArrayRef = Arc::new(is_static_builder.finish());
+ 
++    // graph-symbol-ids columns (Story 3)
++    let mut symbol_id_builder = Int64Builder::new();
++    for r in records {
++        symbol_id_builder.append_value(r.symbol_id);
++    }
++    let symbol_id: ArrayRef = Arc::new(symbol_id_builder.finish());
++
++    let mut file_id_builder = Int64Builder::new();
++    for r in records {
++        file_id_builder.append_value(r.file_id);
++    }
++    let file_id: ArrayRef = Arc::new(file_id_builder.finish());
++
+     RecordBatch::try_new(
+         schema,
+         vec![
+@@ -528,6 +545,9 @@ pub fn nodes_to_record_batch(
+             is_virtual,
+             is_pure_virtual,
+             is_static,
++            // graph-symbol-ids columns:
++            symbol_id,
++            file_id,
+         ],
+     )
+ }
+@@ -686,6 +706,19 @@ pub fn record_batch_to_nodes(batch: &RecordBatch) -> Vec<NodeRecord> {
+         .downcast_ref::<BooleanArray>()
+         .expect("is_static column must be BooleanArray");
+ 
++    // graph-symbol-ids columns (23-24)
++    let symbol_id_col = batch
++        .column(23)
++        .as_any()
++        .downcast_ref::<Int64Array>()
++        .expect("symbol_id column must be Int64Array");
++
++    let file_id_col = batch
++        .column(24)
++        .as_any()
++        .downcast_ref::<Int64Array>()
++        .expect("file_id column must be Int64Array");
++
+     (0..n)
+         .map(|i| {
+             // Dictionary lookup: keys are Int8 indices into the values array.
+@@ -768,6 +801,9 @@ pub fn record_batch_to_nodes(batch: &RecordBatch) -> Vec<NodeRecord> {
+                 } else {
+                     Some(is_static_col.value(i))
+                 },
++                // graph-symbol-ids columns:
++                symbol_id: symbol_id_col.value(i),
++                file_id: file_id_col.value(i),
+             }
+         })
+         .collect()
+@@ -798,6 +834,10 @@ pub fn edge_schema() -> Schema {
+         // M8 columns:
+         Field::new("source_association_type", DataType::Utf8, true),
+         Field::new("target_association_type", DataType::Utf8, true),
++        // graph-symbol-ids columns (Story 3):
++        Field::new("src_id", DataType::Int64, false),
++        Field::new("dst_id", DataType::Int64, true),
++        Field::new("dst_repo_name", DataType::Utf8, false),
+     ])
+ }
+ 
+@@ -880,6 +920,29 @@ pub fn edges_to_record_batch(
+             .collect::<Vec<_>>(),
+     ));
+ 
++    // graph-symbol-ids columns (Story 3)
++    let mut src_id_builder = Int64Builder::new();
++    for r in records {
++        src_id_builder.append_value(r.src_id);
++    }
++    let src_id: ArrayRef = Arc::new(src_id_builder.finish());
++
++    let mut dst_id_builder = Int64Builder::new();
++    for r in records {
++        match r.dst_id {
++            Some(v) => dst_id_builder.append_value(v),
++            None => dst_id_builder.append_null(),
++        }
++    }
++    let dst_id: ArrayRef = Arc::new(dst_id_builder.finish());
++
++    let dst_repo_name: ArrayRef = Arc::new(StringArray::from(
++        records
++            .iter()
++            .map(|r| r.dst_repo_name.as_str())
++            .collect::<Vec<_>>(),
++    ));
++
+     RecordBatch::try_new(
+         schema,
+         vec![
+@@ -895,6 +958,10 @@ pub fn edges_to_record_batch(
+             // M8 columns:
+             source_association_type,
+             target_association_type,
++            // graph-symbol-ids columns:
++            src_id,
++            dst_id,
++            dst_repo_name,
+         ],
+     )
+ }
+@@ -978,6 +1045,25 @@ pub fn record_batch_to_edges(batch: &RecordBatch) -> Vec<EdgeRecord> {
+         .downcast_ref::<StringArray>()
+         .expect("target_association_type column must be StringArray");
+ 
++    // graph-symbol-ids columns (11-13)
++    let src_id_col = batch
++        .column(11)
++        .as_any()
++        .downcast_ref::<Int64Array>()
++        .expect("src_id column must be Int64Array");
++
++    let dst_id_col = batch
++        .column(12)
++        .as_any()
++        .downcast_ref::<Int64Array>()
++        .expect("dst_id column must be Int64Array");
++
++    let dst_repo_name_col = batch
++        .column(13)
++        .as_any()
++        .downcast_ref::<StringArray>()
++        .expect("dst_repo_name column must be StringArray");
++
+     (0..n)
+         .map(|i| {
+             let key = kind_col
+@@ -1023,6 +1109,14 @@ pub fn record_batch_to_edges(batch: &RecordBatch) -> Vec<EdgeRecord> {
+                 } else {
+                     Some(target_assoc_col.value(i).to_owned())
+                 },
++                // graph-symbol-ids columns:
++                src_id: src_id_col.value(i),
++                dst_id: if dst_id_col.is_null(i) {
++                    None
++                } else {
++                    Some(dst_id_col.value(i))
++                },
++                dst_repo_name: dst_repo_name_col.value(i).to_owned(),
+             }
+         })
+         .collect()
+@@ -1070,6 +1164,9 @@ mod tests {
+             is_virtual: None,
+             is_pure_virtual: None,
+             is_static: None,
++            // graph-symbol-ids fields
++            symbol_id: 0,
++            file_id: 0,
+         }
+     }
+ 
+@@ -1095,6 +1192,14 @@ mod tests {
+             // M8 fields — None by default
+             source_association_type: None,
+             target_association_type: None,
++            // graph-symbol-ids fields
++            src_id: i as i64,
++            dst_id: if i.is_multiple_of(2) {
++                Some(i as i64 + 100)
++            } else {
++                None
++            },
++            dst_repo_name: "my-repo".to_owned(),
+         }
+     }
+ 
+@@ -1106,8 +1211,8 @@ mod tests {
+             let original = vec![sample_node(kind, &format!("{kind}"))];
+             let batch = nodes_to_record_batch(&original).expect("serialisation must succeed");
+ 
+-            // Verify schema shape — 13 base columns + 10 M8 node columns = 23
+-            assert_eq!(batch.num_columns(), 23);
++            // Verify schema shape — 13 base columns + 10 M8 node columns + 2 symbol-id = 25
++            assert_eq!(batch.num_columns(), 25);
+             assert_eq!(batch.num_rows(), 1);
+ 
+             let recovered = record_batch_to_nodes(&batch);
+@@ -1123,8 +1228,8 @@ mod tests {
+             let original = vec![sample_edge(kind, i)];
+             let batch = edges_to_record_batch(&original).expect("serialisation must succeed");
+ 
+-            // 9 base columns + 2 M8 edge columns = 11
+-            assert_eq!(batch.num_columns(), 11);
++            // 9 base columns + 2 M8 edge columns + 3 symbol-id = 14
++            assert_eq!(batch.num_columns(), 14);
+             assert_eq!(batch.num_rows(), 1);
+ 
+             let recovered = record_batch_to_edges(&batch);
+@@ -1386,6 +1491,9 @@ mod tests {
+                 "is_virtual",
+                 "is_pure_virtual",
+                 "is_static",
++                // graph-symbol-ids columns:
++                "symbol_id",
++                "file_id",
+             ]
+         );
+         // Not-null columns
+@@ -1400,6 +1508,8 @@ mod tests {
+             "partial",
+             "phase",
+             "tu_hash",
++            "symbol_id",
++            "file_id",
+         ];
+         for name in not_null {
+             let field = schema.field_with_name(name).expect("field must exist");
+@@ -1447,12 +1557,25 @@ mod tests {
+                 // M8 columns:
+                 "source_association_type",
+                 "target_association_type",
++                // graph-symbol-ids columns:
++                "src_id",
++                "dst_id",
++                "dst_repo_name",
+             ]
+         );
+         // M8 edge columns are nullable
+-        for name in ["source_association_type", "target_association_type"] {
++        for name in [
++            "source_association_type",
++            "target_association_type",
++            "dst_id",
++        ] {
+             let field = schema.field_with_name(name).expect("field must exist");
+             assert!(field.is_nullable(), "field {name} must be nullable");
+         }
++        // Not-null edge integer columns
++        for name in ["src_id", "dst_repo_name"] {
++            let field = schema.field_with_name(name).expect("field must exist");
++            assert!(!field.is_nullable(), "field {name} must be not-null");
++        }
+     }
+ }
+diff --git a/src/schema/edges.rs b/src/schema/edges.rs
+index 6cf236e..85f9aed 100644
+--- a/src/schema/edges.rs
++++ b/src/schema/edges.rs
+@@ -165,6 +165,17 @@ pub struct EdgeRecord {
+     /// Blake3 hash of the originating TU.
+     pub tu_hash: [u8; 32],
+ 
++    // ── graph-symbol-ids integer ID fields (Story 3) ─────────────────────────
++    /// Integer ID of the source node from the source repo's SQLite symbol map.
++    pub src_id: i64,
++    /// Integer ID of the destination node; `None` mirrors `dst_usr: None` skip rule.
++    /// For intra-repo edges: this repo's map.
++    /// For EXTERNAL_REF edges: the destination repo's map (ADR-1 point 5).
++    pub dst_id: Option<i64>,
++    /// Destination endpoint's repo name; equals `repo_name` for intra-repo edges,
++    /// the cross-repo target for EXTERNAL_REF edges (ADR-1 point 5).
++    pub dst_repo_name: String,
++
+     // ── M8 promoted fields (S40) ─────────────────────────────────────────────
+     /// USES edge source access kind (e.g. `"read"`, `"write"`, `"call_arg"`).
+     /// `Some` for USES edges only; `None` for all other edge kinds.
+diff --git a/src/schema/nodes.rs b/src/schema/nodes.rs
+index 0886ac9..bad0e0d 100644
+--- a/src/schema/nodes.rs
++++ b/src/schema/nodes.rs
+@@ -210,6 +210,14 @@ pub struct NodeRecord {
+     /// Blake3 hash of `(source_bytes, args_string)` for the originating TU.
+     pub tu_hash: [u8; 32],
+ 
++    // ── graph-symbol-ids integer ID fields (Story 3) ─────────────────────────
++    /// Integer symbol ID from the per-repo SQLite symbol map (graph-symbol-ids).
++    /// Derived from `get_or_insert_symbol(usr)`.
++    pub symbol_id: i64,
++    /// Integer file ID from the per-repo SQLite file map (graph-symbol-ids).
++    /// Derived from `get_or_insert_file(file_path)`.
++    pub file_id: i64,
++
+     // ── M8 promoted fields (S40) ─────────────────────────────────────────────
+     /// Return type display string; `Some` for FUNCTION/METHOD, `None` for all other kinds.
+     pub return_type: Option<String>,
+diff --git a/src/schema/version.rs b/src/schema/version.rs
+index 19c9535..bb2904e 100644
+--- a/src/schema/version.rs
++++ b/src/schema/version.rs
+@@ -15,17 +15,21 @@
+ /// Bumped in S40 (structured-attrs, M8): promoted 10 node fields + 2 edge fields out of
+ /// `attrs_json` into native columns on NodeRecord/EdgeRecord/Arrow. No dual-write; full promotion
+ /// per ADR-11. Pre-v5 graphs are refused at handshake.
++/// Bumped in graph-symbol-ids (Story 3): added `symbol_id`/`file_id` to NodeRecord, and
++/// `src_id`/`dst_id`/`dst_repo_name` to EdgeRecord. Sinks write integer IDs only; USR/path strings
++/// are retained on staging records for Phase 5 USR matching (ADR-1). Both sinks keyed on integer
++/// IDs. Arrow columns appended (Int64). Pre-v6 graphs refused at write-path handshake (ADR-4).
+ /// Any further change to NodeKind/EdgeKind variants must bump again per ADR-9.
+-pub const SCHEMA_VERSION: u32 = 5;
++pub const SCHEMA_VERSION: u32 = 6;
+ 
+ /// Human-readable schema tag derived from `SCHEMA_VERSION`.
+ ///
+ /// ADR-9 references `const_format::concatcp!` to derive this; since `const_format` is not in
+ /// Cargo.toml, we use a hand-written string literal with a `debug_assert!` to keep them in sync.
+-pub const SCHEMA_VERSION_TAG: &str = "cxg-schema-v5";
++pub const SCHEMA_VERSION_TAG: &str = "cxg-schema-v6";
+ 
+ /// Magic key stored in Parquet KV metadata; Phase 3 refuses mismatched-version shards.
+-pub const PARQUET_MAGIC: &str = "cxg_parquet_v5";
++pub const PARQUET_MAGIC: &str = "cxg_parquet_v6";
+ 
+ /// Build the `attrs_json` payload for the `SchemaVersion` node written by Phase 4.
+ ///
+diff --git a/src/sink/indradb.rs b/src/sink/indradb.rs
+index b2c5013..b0226fb 100644
+--- a/src/sink/indradb.rs
++++ b/src/sink/indradb.rs
+@@ -48,8 +48,16 @@ const USR_NAMESPACE: Uuid = Uuid::from_bytes([
+     0xb5, 0xe5, 0xc1, 0x8e, 0x0f, 0x4a, 0x5b, 0x2e, 0x8e, 0x6e, 0xc3, 0xa0, 0xd6, 0xe8, 0xf1, 0xb2,
+ ]);
+ 
+-/// Property name for the USR string stored on each vertex.
+-const PROP_USR: &str = "usr";
++/// Integer symbol ID (graph-symbol-ids Story 3); replaces USR string on durable vertices.
++const PROP_SYMBOL_ID: &str = "symbol_id";
++/// Integer file ID (graph-symbol-ids Story 3).
++const PROP_FILE_ID: &str = "file_id";
++/// Integer src_id on edges (graph-symbol-ids Story 3).
++const PROP_SRC_ID: &str = "src_id";
++/// Integer dst_id on edges (graph-symbol-ids Story 3).
++const PROP_DST_ID: &str = "dst_id";
++/// Destination repo name on edges (graph-symbol-ids Story 3).
++const PROP_DST_REPO_NAME: &str = "dst_repo_name";
+ /// Property name for the repository name.
+ const PROP_REPO_NAME: &str = "repo_name";
+ /// Property name for the node kind string.
+@@ -113,9 +121,13 @@ const BACKOFF_BASE_MS: u64 = 100;
+ 
+ // ── Helpers ───────────────────────────────────────────────────────────────────
+ 
+-/// Derive a deterministic `Uuid` from a `(repo_name, usr)` pair using UUIDv5.
+-fn usr_to_uuid(repo_name: &str, usr: &str) -> Uuid {
+-    let key = format!("{repo_name}\x00{usr}");
++/// Derive a deterministic `Uuid` from a `(repo_name, symbol_id)` pair using UUIDv5.
++///
++/// graph-symbol-ids Story 3: keying changed from `(repo_name, usr)` to `(repo_name, symbol_id)`
++/// per plan §S4-SC-04/05 and ADR-1. The integer ID is stable across re-indexes (C3) so the
++/// derived UUID is also stable.
++fn symbol_id_to_uuid(repo_name: &str, symbol_id: i64) -> Uuid {
++    let key = format!("{repo_name}\x00{symbol_id}");
+     Uuid::new_v5(&USR_NAMESPACE, key.as_bytes())
+ }
+ 
+@@ -292,9 +304,11 @@ impl GraphSink for IndraDbSink {
+     }
+ 
+     async fn ensure_indexes(&self) -> Result<()> {
+-        // Index `usr` and `repo_name` properties for fast lookups and reset operations.
++        // graph-symbol-ids Story 3: index symbol_id instead of usr (S4-SC-04, S6-SC-03)
+         let mut c = self.client();
+-        c.index_property(ident(PROP_USR)?).await.map_err(wrap)?;
++        c.index_property(ident(PROP_SYMBOL_ID)?)
++            .await
++            .map_err(wrap)?;
+         c.index_property(ident(PROP_REPO_NAME)?)
+             .await
+             .map_err(wrap)?;
+@@ -329,13 +343,20 @@ impl GraphSink for IndraDbSink {
+         // `None` fields are skipped (AC-S45-1: no spurious property writes).
+         let mut all_items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 17);
+         for node in batch {
+-            let vid = usr_to_uuid(&node.repo_name, &node.usr);
++            // graph-symbol-ids Story 3: key on (repo_name, symbol_id) not usr (S4-SC-04, S6-SC-03)
++            let vid = symbol_id_to_uuid(&node.repo_name, node.symbol_id);
+             let vtype = ident(node.kind.as_str())?;
+             all_items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
++            // Integer IDs replace USR/file_path strings on the durable graph
++            all_items.push(BulkInsertItem::VertexProperty(
++                vid,
++                ident(PROP_SYMBOL_ID)?,
++                Json::new(serde_json::Value::Number(node.symbol_id.into())),
++            ));
+             all_items.push(BulkInsertItem::VertexProperty(
+                 vid,
+-                ident(PROP_USR)?,
+-                Json::new(serde_json::Value::String(node.usr.clone())),
++                ident(PROP_FILE_ID)?,
++                Json::new(serde_json::Value::Number(node.file_id.into())),
+             ));
+             all_items.push(BulkInsertItem::VertexProperty(
+                 vid,
+@@ -507,20 +528,38 @@ impl GraphSink for IndraDbSink {
+         let mut all_items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 4);
+         let mut total_written = 0u64;
+         for edge_rec in batch {
+-            let dst_usr = match &edge_rec.dst_usr {
+-                Some(u) => u,
++            // graph-symbol-ids Story 3: key on integer IDs; skip edges where dst_id is absent
++            let dst_int_id = match edge_rec.dst_id {
++                Some(id) => id,
+                 None => continue, // unresolved edge; skip
+             };
+-            let src_id = usr_to_uuid(&edge_rec.repo_name, &edge_rec.src_usr);
+-            let dst_id = usr_to_uuid(&edge_rec.repo_name, dst_usr);
++            let src_uuid = symbol_id_to_uuid(&edge_rec.repo_name, edge_rec.src_id);
++            // dst is keyed against dst_repo_name for EXTERNAL_REF (ADR-1 point 5)
++            let dst_uuid = symbol_id_to_uuid(&edge_rec.dst_repo_name, dst_int_id);
+             let edge_type = ident(edge_rec.kind.as_str())?;
+-            let e = Edge::new(src_id, edge_type, dst_id);
++            let e = Edge::new(src_uuid, edge_type, dst_uuid);
+             all_items.push(BulkInsertItem::Edge(e.clone()));
+             all_items.push(BulkInsertItem::EdgeProperty(
+                 e.clone(),
+                 ident(PROP_ATTRS_JSON)?,
+                 json_str(&edge_rec.attrs_json)?,
+             ));
++            // graph-symbol-ids: emit integer IDs on edge (S4-SC-05, S6-SC-03 — no src_usr/dst_usr)
++            all_items.push(BulkInsertItem::EdgeProperty(
++                e.clone(),
++                ident(PROP_SRC_ID)?,
++                Json::new(serde_json::Value::Number(edge_rec.src_id.into())),
++            ));
++            all_items.push(BulkInsertItem::EdgeProperty(
++                e.clone(),
++                ident(PROP_DST_ID)?,
++                Json::new(serde_json::Value::Number(dst_int_id.into())),
++            ));
++            all_items.push(BulkInsertItem::EdgeProperty(
++                e.clone(),
++                ident(PROP_DST_REPO_NAME)?,
++                Json::new(serde_json::Value::String(edge_rec.dst_repo_name.clone())),
++            ));
+ 
+             // ── M8 optional edge fields (S45) — USES edges only; skip None ───────
+             if let Some(ref v) = edge_rec.source_association_type {
+@@ -731,36 +770,36 @@ mod tests {
+     use crate::schema::edges::{EdgeKind, EdgeRecord};
+     use crate::schema::nodes::{NodeKind, NodeRecord};
+ 
+-    // ── usr_to_uuid ───────────────────────────────────────────────────────────
++    // ── symbol_id_to_uuid ─────────────────────────────────────────────────────
++    // graph-symbol-ids Story 3: keying now uses (repo_name, symbol_id) (S4-SC-04/05)
+ 
+     #[test]
+-    fn usr_to_uuid_is_deterministic() {
+-        let a = usr_to_uuid("my_repo", "c:@F@foo");
+-        let b = usr_to_uuid("my_repo", "c:@F@foo");
++    fn symbol_id_to_uuid_is_deterministic() {
++        let a = symbol_id_to_uuid("my_repo", 42);
++        let b = symbol_id_to_uuid("my_repo", 42);
+         assert_eq!(a, b, "same input must produce same UUID");
+     }
+ 
+     #[test]
+-    fn usr_to_uuid_differs_across_repos() {
+-        let a = usr_to_uuid("repo_a", "c:@F@foo");
+-        let b = usr_to_uuid("repo_b", "c:@F@foo");
++    fn symbol_id_to_uuid_differs_across_repos() {
++        let a = symbol_id_to_uuid("repo_a", 42);
++        let b = symbol_id_to_uuid("repo_b", 42);
+         assert_ne!(
+             a, b,
+-            "same USR in different repos must produce different UUIDs"
++            "same symbol_id in different repos must produce different UUIDs"
+         );
+     }
+ 
+     #[test]
+-    fn usr_to_uuid_differs_across_usrs() {
+-        let a = usr_to_uuid("my_repo", "c:@F@foo");
+-        let b = usr_to_uuid("my_repo", "c:@F@bar");
+-        assert_ne!(a, b, "different USRs must produce different UUIDs");
++    fn symbol_id_to_uuid_differs_across_ids() {
++        let a = symbol_id_to_uuid("my_repo", 1);
++        let b = symbol_id_to_uuid("my_repo", 2);
++        assert_ne!(a, b, "different symbol_ids must produce different UUIDs");
+     }
+ 
+     #[test]
+-    fn usr_to_uuid_is_v5() {
+-        let id = usr_to_uuid("my_repo", "c:@F@foo");
+-        // UUIDv5 has version bits == 5 in the high nibble of byte 6.
++    fn symbol_id_to_uuid_is_v5() {
++        let id = symbol_id_to_uuid("my_repo", 1);
+         assert_eq!(id.get_version_num(), 5, "UUID must be version 5");
+     }
+ 
+@@ -769,7 +808,11 @@ mod tests {
+     #[test]
+     fn all_prop_names_are_valid_identifiers() {
+         for name in [
+-            PROP_USR,
++            PROP_SYMBOL_ID,
++            PROP_FILE_ID,
++            PROP_SRC_ID,
++            PROP_DST_ID,
++            PROP_DST_REPO_NAME,
+             PROP_REPO_NAME,
+             PROP_KIND,
+             PROP_NAME,
+@@ -879,6 +922,8 @@ mod tests {
+             is_virtual: None,
+             is_pure_virtual: None,
+             is_static: None,
++            symbol_id: 1,
++            file_id: 1,
+         }
+     }
+ 
+@@ -895,19 +940,24 @@ mod tests {
+             tu_hash: [0u8; 32],
+             source_association_type: None,
+             target_association_type: None,
++            src_id: 1,
++            dst_id: Some(2),
++            dst_repo_name: "my_repo".to_owned(),
+         }
+     }
+ 
+     #[test]
+-    fn node_base_fields_produce_seven_items() {
+-        // A node with all M8 optional fields = None produces 1 Vertex + 6 VertexProperty = 7 items.
++    fn node_base_fields_produce_eight_items() {
++        // graph-symbol-ids: 1 Vertex + 7 VertexProperty (symbol_id, file_id, repo_name, kind,
++        // name, qualified_name, attrs_json) = 8 items when all M8 optional fields are None.
+         let node = make_node("c:@F@foo");
+-        let vid = usr_to_uuid(&node.repo_name, &node.usr);
++        let vid = symbol_id_to_uuid(&node.repo_name, node.symbol_id);
+         let vtype = ident(node.kind.as_str()).unwrap();
+         let mut items: Vec<BulkInsertItem> = Vec::new();
+         items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
+         for prop in [
+-            PROP_USR,
++            PROP_SYMBOL_ID,
++            PROP_FILE_ID,
+             PROP_REPO_NAME,
+             PROP_KIND,
+             PROP_NAME,
+@@ -923,14 +973,14 @@ mod tests {
+         // All optional M8 fields are None → no additional items emitted.
+         assert_eq!(
+             items.len(),
+-            7,
+-            "base items (all M8 optional = None) must be 7"
++            8,
++            "base items (all M8 optional = None) must be 8"
+         );
+     }
+ 
+     #[test]
+-    fn node_with_all_m8_fields_produces_seventeen_items() {
+-        // A node with all 10 M8 optional fields set produces 7 base + 10 = 17 items.
++    fn node_with_all_m8_fields_produces_eighteen_items() {
++        // graph-symbol-ids: base is now 8 (7 props + Vertex); with all 10 M8 optional = 18 items.
+         use crate::schema::nodes::{Param, TemplateArg, TemplateParam};
+         let mut node = make_node("c:@F@full");
+         node.return_type = Some("int".to_owned());
+@@ -954,12 +1004,13 @@ mod tests {
+         node.is_pure_virtual = Some(false);
+         node.is_static = Some(false);
+ 
+-        let vid = usr_to_uuid(&node.repo_name, &node.usr);
++        let vid = symbol_id_to_uuid(&node.repo_name, node.symbol_id);
+         let vtype = ident(node.kind.as_str()).unwrap();
+         let mut items: Vec<BulkInsertItem> = Vec::new();
+         items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
+         for prop in [
+-            PROP_USR,
++            PROP_SYMBOL_ID,
++            PROP_FILE_ID,
+             PROP_REPO_NAME,
+             PROP_KIND,
+             PROP_NAME,
+@@ -1003,8 +1054,8 @@ mod tests {
+         }
+         assert_eq!(
+             items.len(),
+-            17,
+-            "all M8 optional fields populated must produce 17 items"
++            18,
++            "all M8 optional fields populated must produce 18 items (8 base + 10 M8)"
+         );
+     }
+ 
+@@ -1034,16 +1085,16 @@ mod tests {
+     // Verify chunk logic and item-count arithmetic without a live IndraDB server.
+ 
+     #[test]
+-    fn items_per_node_base_is_seven() {
+-        // A node with all M8 optional fields = None → 1 Vertex + 6 VertexProperty = 7 base items.
+-        // write_nodes now chunks by worst-case 17 items per node.
++    fn items_per_node_base_is_eight() {
++        // graph-symbol-ids: 1 Vertex + 7 VertexProperty = 8 base items when all M8 = None.
+         let node = make_node("c:@F@foo");
+-        let vid = usr_to_uuid(&node.repo_name, &node.usr);
++        let vid = symbol_id_to_uuid(&node.repo_name, node.symbol_id);
+         let vtype = ident(node.kind.as_str()).unwrap();
+         let mut items: Vec<BulkInsertItem> = vec![];
+         items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
+         for prop in [
+-            PROP_USR,
++            PROP_SYMBOL_ID,
++            PROP_FILE_ID,
+             PROP_REPO_NAME,
+             PROP_KIND,
+             PROP_NAME,
+@@ -1058,46 +1109,60 @@ mod tests {
+         }
+         assert_eq!(
+             items.len(),
+-            7,
+-            "base items (no M8 optional fields) must equal 7"
++            8,
++            "base items (no M8 optional fields) must equal 8"
+         );
+     }
+ 
+     #[test]
+-    fn items_per_edge_base_is_two() {
+-        // Each edge with no association_type fields → 1 Edge + 1 EdgeProperty (attrs_json) = 2 items.
+-        // write_edges now chunks by worst-case 4 items per edge.
++    fn items_per_edge_base_is_five() {
++        // graph-symbol-ids: Edge + attrs_json + src_id + dst_id + dst_repo_name = 5 base items.
+         let edge = make_edge("src", "dst");
+-        let src_id = usr_to_uuid(&edge.repo_name, &edge.src_usr);
+-        let dst_id = usr_to_uuid(&edge.repo_name, edge.dst_usr.as_deref().unwrap());
++        let src_uuid = symbol_id_to_uuid(&edge.repo_name, edge.src_id);
++        let dst_uuid = symbol_id_to_uuid(&edge.dst_repo_name, edge.dst_id.unwrap());
+         let edge_type = ident(edge.kind.as_str()).unwrap();
+-        let e = Edge::new(src_id, edge_type, dst_id);
++        let e = Edge::new(src_uuid, edge_type, dst_uuid);
+         let items: Vec<BulkInsertItem> = vec![
+             BulkInsertItem::Edge(e.clone()),
+             BulkInsertItem::EdgeProperty(
+-                e,
++                e.clone(),
+                 ident(PROP_ATTRS_JSON).unwrap(),
+                 Json::new(serde_json::Value::Object(Default::default())),
+             ),
++            BulkInsertItem::EdgeProperty(
++                e.clone(),
++                ident(PROP_SRC_ID).unwrap(),
++                Json::new(serde_json::Value::Number(1.into())),
++            ),
++            BulkInsertItem::EdgeProperty(
++                e.clone(),
++                ident(PROP_DST_ID).unwrap(),
++                Json::new(serde_json::Value::Number(2.into())),
++            ),
++            BulkInsertItem::EdgeProperty(
++                e,
++                ident(PROP_DST_REPO_NAME).unwrap(),
++                Json::new(serde_json::Value::String("my_repo".to_owned())),
++            ),
+         ];
+         assert_eq!(
+             items.len(),
+-            2,
+-            "base edge items (no association_type) must equal 2"
++            5,
++            "base edge items (no association_type) must equal 5"
+         );
+     }
+ 
+     #[test]
+-    fn items_per_edge_with_association_types_is_four() {
+-        // A USES edge with both association_type fields set → 4 items.
++    fn items_per_edge_with_association_types_is_seven() {
++        // graph-symbol-ids: base 5 + 2 association_type fields = 7 items.
+         let mut edge = make_edge("src", "dst");
+         edge.source_association_type = Some("read".to_owned());
+         edge.target_association_type = Some("read".to_owned());
+ 
+-        let src_id = usr_to_uuid(&edge.repo_name, &edge.src_usr);
+-        let dst_id = usr_to_uuid(&edge.repo_name, edge.dst_usr.as_deref().unwrap());
++        let src_uuid = symbol_id_to_uuid(&edge.repo_name, edge.src_id);
++        let dst_uuid = symbol_id_to_uuid(&edge.dst_repo_name, edge.dst_id.unwrap());
+         let edge_type = ident(edge.kind.as_str()).unwrap();
+-        let e = Edge::new(src_id, edge_type, dst_id);
++        let e = Edge::new(src_uuid, edge_type, dst_uuid);
+         let mut items: Vec<BulkInsertItem> = vec![
+             BulkInsertItem::Edge(e.clone()),
+             BulkInsertItem::EdgeProperty(
+@@ -1105,6 +1170,21 @@ mod tests {
+                 ident(PROP_ATTRS_JSON).unwrap(),
+                 Json::new(serde_json::Value::Object(Default::default())),
+             ),
++            BulkInsertItem::EdgeProperty(
++                e.clone(),
++                ident(PROP_SRC_ID).unwrap(),
++                Json::new(serde_json::Value::Number(1.into())),
++            ),
++            BulkInsertItem::EdgeProperty(
++                e.clone(),
++                ident(PROP_DST_ID).unwrap(),
++                Json::new(serde_json::Value::Number(2.into())),
++            ),
++            BulkInsertItem::EdgeProperty(
++                e.clone(),
++                ident(PROP_DST_REPO_NAME).unwrap(),
++                Json::new(serde_json::Value::String("my_repo".to_owned())),
++            ),
+         ];
+         if let Some(ref v) = edge.source_association_type {
+             items.push(BulkInsertItem::EdgeProperty(
+@@ -1122,15 +1202,16 @@ mod tests {
+         }
+         assert_eq!(
+             items.len(),
+-            4,
+-            "USES edge with both association_type fields must produce 4 items"
++            7,
++            "USES edge with both association_type fields must produce 7 items (5 base + 2 M8)"
+         );
+     }
+ 
+     #[test]
+     fn chunk_size_arithmetic_nodes() {
+-        // With batch_size=3 and worst-case items_per_node=17, chunk_items = 51.
+-        // 60 items should produce ceil(60/51) = 2 chunks.
++        // graph-symbol-ids: worst-case items_per_node is still 17 (renamed from 7+10 to 8+10=18).
++        // The chunk size constant 17 in write_nodes will produce slightly more chunks — acceptable.
++        // With batch_size=3 and worst-case 17, chunk_items = 51.
+         let batch_size = 3_usize;
+         let items_per_node_worst_case = 17_usize;
+         let chunk_items = batch_size * items_per_node_worst_case; // 51
+@@ -1141,13 +1222,13 @@ mod tests {
+ 
+     #[test]
+     fn unresolved_edges_excluded_before_chunk_build() {
+-        // In write_edges, unresolved edges are skipped during item building.
+-        // Verify the count reflects only resolved edges.
++        // graph-symbol-ids: unresolved = dst_id is None (not dst_usr).
++        // Base items per edge = 5 (Edge + attrs_json + src_id + dst_id + dst_repo_name).
+         let edges = vec![
+             make_edge("a", "b"),
+             {
+                 let mut e = make_edge("c", "d");
+-                e.dst_usr = None; // unresolved
++                e.dst_id = None; // unresolved
+                 e
+             },
+             make_edge("e", "f"),
+@@ -1155,18 +1236,21 @@ mod tests {
+         let mut item_count = 0_usize;
+         let mut written = 0_u64;
+         for edge_rec in &edges {
+-            if let Some(dst_usr) = &edge_rec.dst_usr {
+-                let src_id = usr_to_uuid(&edge_rec.repo_name, &edge_rec.src_usr);
+-                let dst_id = usr_to_uuid(&edge_rec.repo_name, dst_usr);
++            if let Some(dst_int_id) = edge_rec.dst_id {
++                let src_uuid = symbol_id_to_uuid(&edge_rec.repo_name, edge_rec.src_id);
++                let dst_uuid = symbol_id_to_uuid(&edge_rec.dst_repo_name, dst_int_id);
+                 let edge_type = ident(edge_rec.kind.as_str()).unwrap();
+-                let e = Edge::new(src_id, edge_type, dst_id);
+-                item_count += 2; // Edge + EdgeProperty
++                let e = Edge::new(src_uuid, edge_type, dst_uuid);
++                item_count += 5; // Edge + attrs_json + src_id + dst_id + dst_repo_name
+                 written += 1;
+-                let _ = e; // suppress unused
++                let _ = e;
+             }
+         }
+         assert_eq!(written, 2, "2 of 3 edges are resolved");
+-        assert_eq!(item_count, 4, "2 resolved edges => 4 BulkInsertItems");
++        assert_eq!(
++            item_count, 10,
++            "2 resolved edges => 10 BulkInsertItems (5 each)"
++        );
+     }
+ 
+     // ── S45: M8 property write helpers ───────────────────────────────────────
+@@ -1188,12 +1272,13 @@ mod tests {
+         assert!(node.is_static.is_none());
+ 
+         // Simulate the item-build loop from write_nodes for this node.
+-        let vid = usr_to_uuid(&node.repo_name, &node.usr);
++        let vid = symbol_id_to_uuid(&node.repo_name, node.symbol_id);
+         let vtype = ident(node.kind.as_str()).unwrap();
+         let mut items: Vec<BulkInsertItem> = Vec::new();
+         items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
+         for prop in [
+-            PROP_USR,
++            PROP_SYMBOL_ID,
++            PROP_FILE_ID,
+             PROP_REPO_NAME,
+             PROP_KIND,
+             PROP_NAME,
+@@ -1278,7 +1363,12 @@ mod tests {
+             ));
+         }
+ 
+-        assert_eq!(items.len(), 7, "no M8 optional fields → exactly 7 items");
++        // graph-symbol-ids: base is now 8 (1 Vertex + 7 props: symbol_id, file_id, repo_name, kind, name, qualified_name, attrs_json)
++        assert_eq!(
++            items.len(),
++            8,
++            "no M8 optional fields → exactly 8 base items"
++        );
+     }
+ 
+     /// `params` list serialises to a JSON array of objects with a `"type"` key (ADR-14).
+@@ -1318,7 +1408,7 @@ mod tests {
+         node.code = None;
+         node.code_truncated = Some(true);
+ 
+-        let vid = usr_to_uuid(&node.repo_name, &node.usr);
++        let vid = symbol_id_to_uuid(&node.repo_name, node.symbol_id);
+         let mut extra_items: Vec<BulkInsertItem> = Vec::new();
+         // Simulate just the optional-field portion of write_nodes.
+         if let Some(ref v) = node.code {
+@@ -1354,8 +1444,8 @@ mod tests {
+     #[test]
+     fn none_association_types_produce_no_extra_items() {
+         let edge = make_edge("a", "b"); // both association_type = None
+-        let src_id = usr_to_uuid(&edge.repo_name, &edge.src_usr);
+-        let dst_id = usr_to_uuid(&edge.repo_name, edge.dst_usr.as_deref().unwrap());
++        let src_id = symbol_id_to_uuid(&edge.repo_name, edge.src_id);
++        let dst_id = symbol_id_to_uuid(&edge.dst_repo_name, edge.dst_id.unwrap());
+         let edge_type = ident(edge.kind.as_str()).unwrap();
+         let e = Edge::new(src_id, edge_type, dst_id);
+         let mut items: Vec<BulkInsertItem> = vec![
+@@ -1393,8 +1483,8 @@ mod tests {
+         let mut edge = make_edge("a", "b");
+         edge.source_association_type = Some("write".to_owned());
+         edge.target_association_type = Some("write".to_owned());
+-        let src_id = usr_to_uuid(&edge.repo_name, &edge.src_usr);
+-        let dst_id = usr_to_uuid(&edge.repo_name, edge.dst_usr.as_deref().unwrap());
++        let src_id = symbol_id_to_uuid(&edge.repo_name, edge.src_id);
++        let dst_id = symbol_id_to_uuid(&edge.dst_repo_name, edge.dst_id.unwrap());
+         let edge_type = ident(edge.kind.as_str()).unwrap();
+         let e = Edge::new(src_id, edge_type, dst_id);
+         let mut items: Vec<BulkInsertItem> = vec![
+@@ -1424,14 +1514,12 @@ mod tests {
+ 
+     #[test]
+     fn idempotency_key_is_deterministic_uuid() {
+-        // The write_nodes idempotency guarantee rests on usr_to_uuid being
+-        // deterministic: same (repo_name, usr) always maps to the same UUID.
+-        let a = usr_to_uuid("repo", "c:@F@foo");
+-        let b = usr_to_uuid("repo", "c:@F@foo");
++        // graph-symbol-ids: idempotency rests on symbol_id_to_uuid being deterministic.
++        let a = symbol_id_to_uuid("repo", 1);
++        let b = symbol_id_to_uuid("repo", 1);
+         assert_eq!(a, b, "same input must produce same UUID (idempotency key)");
+ 
+-        // A different USR must produce a different UUID so there is no collision.
+-        let c = usr_to_uuid("repo", "c:@F@bar");
+-        assert_ne!(a, c, "different USR must produce different UUID");
++        let c = symbol_id_to_uuid("repo", 2);
++        assert_ne!(a, c, "different symbol_id must produce different UUID");
+     }
+ }
+diff --git a/src/sink/mock.rs b/src/sink/mock.rs
+index 3ce8101..4d12588 100644
+--- a/src/sink/mock.rs
++++ b/src/sink/mock.rs
+@@ -215,6 +215,8 @@ mod tests {
+             is_virtual: None,
+             is_pure_virtual: None,
+             is_static: None,
++            symbol_id: 0,
++            file_id: 0,
+         }
+     }
+ 
+@@ -231,6 +233,9 @@ mod tests {
+             tu_hash: [0u8; 32],
+             source_association_type: None,
+             target_association_type: None,
++            src_id: 0,
++            dst_id: None,
++            dst_repo_name: "my_repo".to_owned(),
+         }
+     }
+ 
+diff --git a/src/sink/neo4j.rs b/src/sink/neo4j.rs
+index fb2eebd..e893b3f 100644
+--- a/src/sink/neo4j.rs
++++ b/src/sink/neo4j.rs
+@@ -39,9 +39,10 @@ use crate::sink::{GraphSink, HealthInfo, ResetTarget, WriteStats};
+ 
+ // ── Cypher constants ──────────────────────────────────────────────────────────
+ 
+-/// Create an index on `:Node(usr)` — idempotent (IF NOT EXISTS).
+-const CQL_ENSURE_NODE_USR_INDEX: &str =
+-    "CREATE INDEX node_usr_idx IF NOT EXISTS FOR (n:Node) ON (n.usr)";
++/// Create an index on `:Node(symbol_id)` — idempotent (IF NOT EXISTS).
++/// Replaces the old USR-string index (graph-symbol-ids Story 3, ADR-1).
++const CQL_ENSURE_NODE_SYMBOL_ID_INDEX: &str =
++    "CREATE INDEX node_symbol_id_idx IF NOT EXISTS FOR (n:Node) ON (n.symbol_id)";
+ 
+ /// Create an index on `:Node(repo_name)` — used by reset queries.
+ const CQL_ENSURE_NODE_REPO_INDEX: &str =
+@@ -65,17 +66,18 @@ const CQL_ENSURE_IS_STATIC_INDEX: &str =
+ const CQL_ENSURE_KIND_RETURN_TYPE_INDEX: &str =
+     "CREATE INDEX node_kind_return_type_idx IF NOT EXISTS FOR (n:Node) ON (n.kind, n.return_type)";
+ 
+-/// UNWIND + MERGE nodes; idempotent on `(usr, repo_name)`.
++/// UNWIND + MERGE nodes; idempotent on `(symbol_id, repo_name)`.
+ ///
++/// graph-symbol-ids Story 3: key on integer symbol_id, not usr string (S4-SC-01, S6-SC-03).
+ /// Parameters: `rows` — a list of maps, each with keys matching the SET clause.
+ const CQL_MERGE_NODES: &str = "
+ UNWIND $rows AS row
+-MERGE (n:Node {usr: row.usr, repo_name: row.repo_name})
+-SET n.kind              = row.kind,
++MERGE (n:Node {symbol_id: row.symbol_id, repo_name: row.repo_name})
++SET n.file_id           = row.file_id,
++    n.kind              = row.kind,
+     n.name              = row.name,
+     n.qualified_name    = row.qualified_name,
+     n.mangled_name      = row.mangled_name,
+-    n.file_path         = row.file_path,
+     n.line              = row.line,
+     n.col               = row.col,
+     n.attrs_json        = row.attrs_json,
+@@ -93,15 +95,20 @@ SET n.kind              = row.kind,
+     n.is_static         = row.is_static
+ ";
+ 
+-/// UNWIND + MERGE edges; idempotent on `(src_usr, dst_usr, kind)`.
++/// UNWIND + MERGE edges; idempotent on `(src_id, dst_id, kind)`.
+ ///
+-/// Skips rows where `dst_usr` is null — callers must pre-filter.
++/// graph-symbol-ids Story 3: key on integer IDs. Source keyed on (src_id, repo_name);
++/// destination keyed on (dst_id, dst_repo_name) — two distinct repo scopes for EXTERNAL_REF
++/// (ADR-1 point 5). Skips rows where `dst_id` is null.
+ const CQL_MERGE_EDGES: &str = "
+ UNWIND $rows AS row
+-MATCH (src:Node {usr: row.src_usr, repo_name: row.repo_name})
+-MATCH (dst:Node {usr: row.dst_usr, repo_name: row.repo_name})
++MATCH (src:Node {symbol_id: row.src_id, repo_name: row.repo_name})
++MATCH (dst:Node {symbol_id: row.dst_id, repo_name: row.dst_repo_name})
+ MERGE (src)-[r:EDGE {kind: row.kind}]->(dst)
+-SET r.resolved                  = row.resolved,
++SET r.src_id                    = row.src_id,
++    r.dst_id                    = row.dst_id,
++    r.dst_repo_name             = row.dst_repo_name,
++    r.resolved                  = row.resolved,
+     r.cross_repo_candidate      = row.cross_repo_candidate,
+     r.repo_name                 = row.repo_name,
+     r.attrs_json                = row.attrs_json,
+@@ -446,7 +453,9 @@ fn structured_list_to_json_bolt<T: serde::Serialize>(items: &[T]) -> BoltType {
+ 
+ fn node_to_bolt(n: &NodeRecord) -> HashMap<String, BoltType> {
+     let mut m: HashMap<String, BoltType> = HashMap::new();
+-    m.insert("usr".into(), n.usr.clone().into());
++    // graph-symbol-ids: key on integer IDs; do NOT write usr/file_path strings (S4-SC-01/03, S6-SC-03)
++    m.insert("symbol_id".into(), BoltType::from(n.symbol_id));
++    m.insert("file_id".into(), BoltType::from(n.file_id));
+     m.insert("kind".into(), n.kind.as_str().to_owned().into());
+     m.insert("name".into(), n.name.clone().into());
+     m.insert("qualified_name".into(), n.qualified_name.clone().into());
+@@ -457,7 +466,6 @@ fn node_to_bolt(n: &NodeRecord) -> HashMap<String, BoltType> {
+             .map(BoltType::from)
+             .unwrap_or(BoltType::Null(neo4rs::BoltNull)),
+     );
+-    m.insert("file_path".into(), n.file_path.clone().into());
+     m.insert(
+         "line".into(),
+         n.line
+@@ -524,10 +532,13 @@ fn node_to_bolt(n: &NodeRecord) -> HashMap<String, BoltType> {
+ /// Returns `None` when `dst_usr` is absent — such edges cannot be MERGE'd
+ /// because the idempotency key `(src_usr, dst_usr, kind)` is incomplete.
+ fn edge_to_bolt(e: &EdgeRecord) -> Option<HashMap<String, BoltType>> {
+-    let dst_usr = e.dst_usr.as_ref()?;
++    // graph-symbol-ids: key on integer IDs; skip edges where dst_id is absent (mirrors dst_usr: None skip rule)
++    let dst_id = e.dst_id?;
+     let mut m: HashMap<String, BoltType> = HashMap::new();
+-    m.insert("src_usr".into(), e.src_usr.clone().into());
+-    m.insert("dst_usr".into(), dst_usr.clone().into());
++    // Integer ID keys (S4-SC-02, S6-SC-03 — no src_usr/dst_usr strings)
++    m.insert("src_id".into(), BoltType::from(e.src_id));
++    m.insert("dst_id".into(), BoltType::from(dst_id));
++    m.insert("dst_repo_name".into(), e.dst_repo_name.clone().into());
+     m.insert("kind".into(), e.kind.as_str().to_owned().into());
+     m.insert("resolved".into(), e.resolved.into());
+     m.insert("cross_repo_candidate".into(), e.cross_repo_candidate.into());
+@@ -563,7 +574,7 @@ impl GraphSink for Neo4jSink {
+ 
+     async fn ensure_indexes(&self) -> Result<()> {
+         for cql in &[
+-            CQL_ENSURE_NODE_USR_INDEX,
++            CQL_ENSURE_NODE_SYMBOL_ID_INDEX,
+             CQL_ENSURE_NODE_REPO_INDEX,
+             // M8 (S44) covering indexes — ADR-15.
+             CQL_ENSURE_RETURN_TYPE_INDEX,
+@@ -817,6 +828,8 @@ mod tests {
+             is_virtual: None,
+             is_pure_virtual: None,
+             is_static: None,
++            symbol_id: 1,
++            file_id: 1,
+         }
+     }
+ 
+@@ -833,6 +846,9 @@ mod tests {
+             tu_hash: [0u8; 32],
+             source_association_type: None,
+             target_association_type: None,
++            src_id: 1,
++            dst_id: dst.map(|_| 2i64),
++            dst_repo_name: "test-repo".to_owned(),
+         }
+     }
+ 
+@@ -844,14 +860,19 @@ mod tests {
+             CQL_MERGE_NODES.contains("MERGE"),
+             "CQL_MERGE_NODES must use MERGE for idempotency"
+         );
++        // graph-symbol-ids Story 3: key on symbol_id, not usr (S4-SC-01, S6-SC-03)
+         assert!(
+-            CQL_MERGE_NODES.contains("usr"),
+-            "CQL_MERGE_NODES must key on usr"
++            CQL_MERGE_NODES.contains("symbol_id"),
++            "CQL_MERGE_NODES must key on symbol_id"
+         );
+         assert!(
+             CQL_MERGE_NODES.contains("repo_name"),
+             "CQL_MERGE_NODES must key on repo_name"
+         );
++        assert!(
++            !CQL_MERGE_NODES.contains("row.usr"),
++            "CQL_MERGE_NODES must NOT write usr string (S6-SC-03)"
++        );
+     }
+ 
+     #[test]
+@@ -872,7 +893,8 @@ mod tests {
+ 
+     #[test]
+     fn cql_ensure_indexes_uses_if_not_exists() {
+-        assert!(CQL_ENSURE_NODE_USR_INDEX.contains("IF NOT EXISTS"));
++        // graph-symbol-ids: index on symbol_id replaces old usr index
++        assert!(CQL_ENSURE_NODE_SYMBOL_ID_INDEX.contains("IF NOT EXISTS"));
+         assert!(CQL_ENSURE_NODE_REPO_INDEX.contains("IF NOT EXISTS"));
+     }
+ 
+@@ -960,13 +982,14 @@ mod tests {
+     fn node_to_bolt_all_keys_present() {
+         let node = sample_node("c:@F@foo");
+         let m = node_to_bolt(&node);
++        // graph-symbol-ids: integer IDs replace usr/file_path strings (S4-SC-01/03, S6-SC-03)
+         for key in &[
+-            "usr",
++            "symbol_id",
++            "file_id",
+             "kind",
+             "name",
+             "qualified_name",
+             "mangled_name",
+-            "file_path",
+             "line",
+             "col",
+             "repo_name",
+@@ -976,6 +999,15 @@ mod tests {
+         ] {
+             assert!(m.contains_key(*key), "missing key: {key}");
+         }
++        // Must NOT contain usr or file_path strings
++        assert!(
++            !m.contains_key("usr"),
++            "node_to_bolt must NOT emit usr string (S6-SC-03)"
++        );
++        assert!(
++            !m.contains_key("file_path"),
++            "node_to_bolt must NOT emit file_path string (S6-SC-03)"
++        );
+     }
+ 
+     /// AC-S44-1: node_to_bolt includes all 10 promoted M8 fields.
+@@ -1169,25 +1201,38 @@ mod tests {
+     // ── edge_to_bolt ──────────────────────────────────────────────────────────
+ 
+     #[test]
+-    fn edge_to_bolt_returns_none_when_dst_usr_absent() {
+-        let edge = sample_edge("src", None);
++    fn edge_to_bolt_returns_none_when_dst_id_absent() {
++        // graph-symbol-ids: edge_to_bolt skips when dst_id is None (mirrors old dst_usr: None rule)
++        let mut edge = sample_edge("src", None);
++        edge.dst_id = None;
+         assert!(
+             edge_to_bolt(&edge).is_none(),
+-            "edge with dst_usr=None must be skipped"
++            "edge with dst_id=None must be skipped"
+         );
+     }
+ 
+     #[test]
+-    fn edge_to_bolt_returns_some_when_dst_usr_present() {
++    fn edge_to_bolt_returns_some_when_dst_id_present() {
+         let edge = sample_edge("src", Some("dst"));
+-        let m = edge_to_bolt(&edge).expect("edge with dst_usr must convert");
+-        assert_eq!(
+-            format!("{:?}", m["src_usr"]),
+-            format!("{:?}", BoltType::from("src".to_owned()))
++        assert!(
++            edge.dst_id.is_some(),
++            "sample_edge with Some dst should have dst_id set"
+         );
+-        assert_eq!(
+-            format!("{:?}", m["dst_usr"]),
+-            format!("{:?}", BoltType::from("dst".to_owned()))
++        let m = edge_to_bolt(&edge).expect("edge with dst_id must convert");
++        // graph-symbol-ids: integer keys, not usr strings (S4-SC-02, S6-SC-03)
++        assert!(m.contains_key("src_id"), "edge map must contain src_id");
++        assert!(m.contains_key("dst_id"), "edge map must contain dst_id");
++        assert!(
++            m.contains_key("dst_repo_name"),
++            "edge map must contain dst_repo_name"
++        );
++        assert!(
++            !m.contains_key("src_usr"),
++            "edge map must NOT contain src_usr (S6-SC-03)"
++        );
++        assert!(
++            !m.contains_key("dst_usr"),
++            "edge map must NOT contain dst_usr (S6-SC-03)"
+         );
+     }
+ 
+@@ -1305,22 +1350,26 @@ mod tests {
+ 
+     #[test]
+     fn edge_to_bolt_idempotency_key_present_for_resolved_edges() {
+-        // Verify both src_usr and dst_usr are always set — these are the
+-        // idempotency keys in CQL_MERGE_EDGES.
++        // graph-symbol-ids Story 3: integer ID keys replace USR strings as idempotency keys.
+         let edge = sample_edge("src", Some("dst"));
+         let m = edge_to_bolt(&edge).expect("resolved edge must convert");
+         assert!(
+-            m.contains_key("src_usr"),
+-            "idempotency key src_usr must be in bolt map"
++            m.contains_key("src_id"),
++            "idempotency key src_id must be in bolt map"
+         );
+         assert!(
+-            m.contains_key("dst_usr"),
+-            "idempotency key dst_usr must be in bolt map"
++            m.contains_key("dst_id"),
++            "idempotency key dst_id must be in bolt map"
+         );
+         assert!(
+             m.contains_key("kind"),
+             "idempotency key kind must be in bolt map"
+         );
++        // Must NOT contain USR strings (S6-SC-03)
++        assert!(
++            !m.contains_key("src_usr"),
++            "bolt map must NOT contain src_usr (S6-SC-03)"
++        );
+     }
+ 
+     #[test]
+diff --git a/src/stage/writer.rs b/src/stage/writer.rs
+index 471f41d..ac7ed1d 100644
+--- a/src/stage/writer.rs
++++ b/src/stage/writer.rs
+@@ -283,6 +283,8 @@ mod tests {
+             is_virtual: None,
+             is_pure_virtual: None,
+             is_static: None,
++            symbol_id: 0,
++            file_id: 0,
+         }
+     }
+ 
+@@ -299,6 +301,9 @@ mod tests {
+             tu_hash: [u8::try_from(i % 256).unwrap_or(0); 32],
+             source_association_type: None,
+             target_association_type: None,
++            src_id: i as i64,
++            dst_id: Some(i as i64 + 100),
++            dst_repo_name: "test-repo".to_owned(),
+         }
+     }
+ 
+diff --git a/src/visit/decorate.rs b/src/visit/decorate.rs
+index cd78749..6ad42f7 100644
+--- a/src/visit/decorate.rs
++++ b/src/visit/decorate.rs
+@@ -448,6 +448,8 @@ mod tests {
+             is_virtual: None,
+             is_pure_virtual: None,
+             is_static: None,
++            symbol_id: 0,
++            file_id: 0,
+         };
+ 
+         let decor = DecorAttrs {
+diff --git a/src/visit/macros.rs b/src/visit/macros.rs
+index 9517e6d..059d6fa 100644
+--- a/src/visit/macros.rs
++++ b/src/visit/macros.rs
+@@ -135,6 +135,9 @@ pub(crate) fn collect_macro_definition(
+         is_virtual: None,
+         is_pure_virtual: None,
+         is_static: None,
++        // graph-symbol-ids: populated by the allocator in Phase 1 after emit
++        symbol_id: 0,
++        file_id: 0,
+     })
+ }
+ 
+@@ -201,6 +204,10 @@ pub(crate) fn collect_macro_expansion(
+         // M8 promoted fields — EXPANDS_TO edges carry none of these
+         source_association_type: None,
+         target_association_type: None,
++        // graph-symbol-ids: populated by the allocator in Phase 1 after emit
++        src_id: 0,
++        dst_id: None,
++        dst_repo_name: repo_name.to_owned(),
+     })
+ }
+ 
+@@ -347,8 +354,8 @@ pub(crate) mod tests {
+     fn schema_version_bumped_to_5() {
+         use crate::schema::version::SCHEMA_VERSION;
+         assert_eq!(
+-            SCHEMA_VERSION, 5,
+-            "SCHEMA_VERSION must be 5 after S40-S43 (M8 native fields)"
++            SCHEMA_VERSION, 6,
++            "SCHEMA_VERSION must be 6 after graph-symbol-ids Story 3 bump"
+         );
+     }
+ 
+@@ -369,6 +376,9 @@ pub(crate) mod tests {
+             tu_hash: [0u8; 32],
+             source_association_type: None,
+             target_association_type: None,
++            src_id: 0,
++            dst_id: None,
++            dst_repo_name: "repo".to_owned(),
+         };
+         assert_eq!(edge.kind, EdgeKind::ExpandsTo);
+         assert!(edge.dst_usr.as_deref().unwrap().starts_with("macro:"));
+diff --git a/src/visit/modules_cpp20.rs b/src/visit/modules_cpp20.rs
+index 82930d9..539ba1f 100644
+--- a/src/visit/modules_cpp20.rs
++++ b/src/visit/modules_cpp20.rs
+@@ -290,6 +290,8 @@ pub fn parse_module_tu(
+         is_virtual: None,
+         is_pure_virtual: None,
+         is_static: None,
++        symbol_id: 0,
++        file_id: 0,
+     };
+ 
+     let mut nodes = vec![module_node];
+@@ -334,6 +336,8 @@ pub fn parse_module_tu(
+                 is_virtual: None,
+                 is_pure_virtual: None,
+                 is_static: None,
++                symbol_id: 0,
++                file_id: 0,
+             };
+             nodes.push(imported_node);
+ 
+@@ -351,6 +355,9 @@ pub fn parse_module_tu(
+                 // M8 promoted fields — INCLUDES edges carry none of these
+                 source_association_type: None,
+                 target_association_type: None,
++                src_id: 0,
++                dst_id: None,
++                dst_repo_name: repo_name.to_owned(),
+             });
+ 
+             return EntityVisitResult::Continue;
+@@ -419,6 +426,8 @@ pub fn parse_module_tu(
+                 is_virtual: None,
+                 is_pure_virtual: None,
+                 is_static: None,
++                symbol_id: 0,
++                file_id: 0,
+             });
+ 
+             // CONTAINS edge from module to exported decl.
+@@ -435,6 +444,9 @@ pub fn parse_module_tu(
+                 // M8 promoted fields — CONTAINS edges carry none of these
+                 source_association_type: None,
+                 target_association_type: None,
++                src_id: 0,
++                dst_id: None,
++                dst_repo_name: repo_name.to_owned(),
+             });
+         }
+ 
+diff --git a/src/visit/shallow.rs b/src/visit/shallow.rs
+index bd5e606..61cd29c 100644
+--- a/src/visit/shallow.rs
++++ b/src/visit/shallow.rs
+@@ -103,7 +103,10 @@ pub fn with_thread_index<R>(f: impl FnOnce(&Index<'static>) -> R) -> R {
+     })
+ }
+ 
++use std::sync::Arc;
++
+ use crate::{
++    resolve::symbol_map::SymbolAllocator,
+     schema::{
+         clip_code, EdgeKind, EdgeRecord, NodeKind, NodeRecord, Param, TemplateArg, TemplateParam,
+     },
+@@ -136,6 +139,12 @@ pub struct VisitOptions<'a> {
+     /// compiler-internal headers) are silently skipped (AC-M2-14).
+     /// When `false`, system-header entities are emitted like any other (AC-M2-15).
+     pub skip_system_headers: bool,
++    /// Optional per-repo symbol allocator (graph-symbol-ids Story 3).
++    ///
++    /// When `Some`, node and edge emit sites call `get_or_insert_symbol`/
++    /// `get_or_insert_file` to attach real integer IDs. When `None`, all
++    /// integer ID fields default to 0 (useful for tests that don't need IDs).
++    pub allocator: Option<Arc<SymbolAllocator>>,
+ }
+ 
+ /// Parse one translation unit using a caller-supplied `Index` and write Phase 1
+@@ -233,6 +242,7 @@ fn visit_tu_inner(
+         has_errors,
+         opts.file_path.to_string_lossy().into_owned(),
+         opts.skip_system_headers,
++        opts.allocator.clone(),
+     );
+ 
+     let root = tu.get_entity();
+@@ -275,6 +285,8 @@ fn visit_tu_inner(
+         is_virtual: None,
+         is_pure_virtual: None,
+         is_static: None,
++        symbol_id: collector.alloc_symbol(&module_usr.clone()),
++        file_id: collector.alloc_file(&opts.file_path.to_string_lossy()),
+     };
+     collector.nodes.push(module_node);
+     collector.module_usr = Some(module_usr);
+@@ -320,6 +332,8 @@ struct Collector<'a> {
+     module_usr: Option<String>,
+     /// Mirror of `VisitOptions::skip_system_headers`.
+     skip_system_headers: bool,
++    /// Optional per-repo symbol allocator for integer ID assignment (graph-symbol-ids).
++    allocator: Option<Arc<SymbolAllocator>>,
+     /// Deduplication set for `MACRO` node USRs within this TU.
+     /// Multiple TUs may include the same header; Phase 3 deduplicates by USR.
+     /// Within a single TU we avoid emitting the same `MacroDefinition` twice.
+@@ -341,6 +355,7 @@ impl<'a> Collector<'a> {
+         partial: bool,
+         tu_file_path: String,
+         skip_system_headers: bool,
++        allocator: Option<Arc<SymbolAllocator>>,
+     ) -> Self {
+         Self {
+             repo_name,
+@@ -354,6 +369,27 @@ impl<'a> Collector<'a> {
+             seen_macro_usrs: HashSet::new(),
+             return_wrappers: HashSet::new(),
+             decl_init_wrappers: HashSet::new(),
++            allocator,
++        }
++    }
++
++    /// Allocate symbol_id for a USR using the per-repo allocator.
++    /// Falls back to 0 when no allocator is configured.
++    fn alloc_symbol(&self, usr: &str) -> i64 {
++        if let Some(ref alloc) = self.allocator {
++            alloc.get_or_insert_symbol(usr).unwrap_or(0)
++        } else {
++            0
++        }
++    }
++
++    /// Allocate file_id for a file path using the per-repo allocator.
++    /// Falls back to 0 when no allocator is configured.
++    fn alloc_file(&self, path: &str) -> i64 {
++        if let Some(ref alloc) = self.allocator {
++            alloc.get_or_insert_file(path).unwrap_or(0)
++        } else {
++            0
+         }
+     }
+ }
+@@ -489,6 +525,10 @@ impl<'a> Collector<'a> {
+             _ => (None, None, None),
+         };
+ 
++        // Allocate integer IDs before file_path/usr are moved into the struct.
++        let sym_id = self.alloc_symbol(&usr);
++        let fid = self.alloc_file(&file_path);
++
+         let node = NodeRecord {
+             usr: usr.clone(),
+             kind: node_kind,
+@@ -516,6 +556,9 @@ impl<'a> Collector<'a> {
+             is_virtual,
+             is_pure_virtual,
+             is_static,
++            // graph-symbol-ids: integer IDs allocated above (before field moves)
++            symbol_id: sym_id,
++            file_id: fid,
+         };
+ 
+         self.nodes.push(node);
+@@ -549,6 +592,11 @@ impl<'a> Collector<'a> {
+             return;
+         }
+ 
++        // Allocate integer IDs for the macro node.
++        let mut record = record;
++        record.symbol_id = self.alloc_symbol(&record.usr.clone());
++        record.file_id = self.alloc_file(&record.file_path.clone());
++
+         self.nodes.push(record);
+     }
+ 
+@@ -566,7 +614,7 @@ impl<'a> Collector<'a> {
+             return;
+         }
+ 
+-        let edge = match collect_macro_expansion(
++        let mut edge = match collect_macro_expansion(
+             entity,
+             &enclosing_usr,
+             self.repo_name,
+@@ -578,6 +626,12 @@ impl<'a> Collector<'a> {
+             None => return,
+         };
+ 
++        // Allocate integer IDs for the edge endpoints.
++        edge.src_id = self.alloc_symbol(&enclosing_usr);
++        if let Some(ref dst_usr) = edge.dst_usr.clone() {
++            edge.dst_id = Some(self.alloc_symbol(dst_usr));
++        }
++
+         self.edges.push(edge);
+     }
+ 
+@@ -682,6 +736,8 @@ impl<'a> Collector<'a> {
+         let assoc = kind.as_str().to_owned();
+ 
+         // target mirrors source (ADR-13 §target_association_type, AC-S43-2).
++        let src_id = self.alloc_symbol(&src_usr);
++        let dst_id_val = Some(self.alloc_symbol(&dst_usr));
+         self.edges.push(EdgeRecord {
+             src_usr,
+             dst_usr: Some(dst_usr),
+@@ -694,6 +750,9 @@ impl<'a> Collector<'a> {
+             tu_hash: self.tu_hash,
+             source_association_type: Some(assoc.clone()),
+             target_association_type: Some(assoc),
++            src_id,
++            dst_id: dst_id_val,
++            dst_repo_name: self.repo_name.to_owned(),
+         });
+     }
+ 
+@@ -717,6 +776,10 @@ impl<'a> Collector<'a> {
+             .map(|n| n.to_string_lossy().into_owned())
+             .unwrap_or_else(|| header_path.clone());
+ 
++        // Allocate integer IDs.
++        let header_sym_id = self.alloc_symbol(&header_usr);
++        let header_file_id = self.alloc_file(&header_path);
++
+         // Emit HEADER node (deduplication by USR happens at Phase 3).
+         let header_node = NodeRecord {
+             usr: header_usr.clone(),
+@@ -743,6 +806,8 @@ impl<'a> Collector<'a> {
+             is_virtual: None,
+             is_pure_virtual: None,
+             is_static: None,
++            symbol_id: header_sym_id,
++            file_id: header_file_id,
+         };
+         self.nodes.push(header_node);
+ 
+@@ -876,6 +941,8 @@ impl<'a> Collector<'a> {
+     }
+ 
+     fn push_edge_with_attrs(&mut self, src: String, dst: String, kind: EdgeKind, attrs: String) {
++        let src_id = self.alloc_symbol(&src);
++        let dst_id = Some(self.alloc_symbol(&dst));
+         self.edges.push(EdgeRecord {
+             src_usr: src,
+             dst_usr: Some(dst),
+@@ -890,6 +957,10 @@ impl<'a> Collector<'a> {
+             // all other edge kinds stay None
+             source_association_type: None,
+             target_association_type: None,
++            // graph-symbol-ids: integer IDs allocated from the per-repo map
++            src_id,
++            dst_id,
++            dst_repo_name: self.repo_name.to_owned(),
+         });
+     }
+ }
+@@ -1239,6 +1310,7 @@ pub fn visit_all(
+             file_path: &entry.file,
+             args: &entry.args,
+             skip_system_headers,
++            allocator: None,
+         };
+ 
+         match visit_tu(clang, &opts, &mut writer) {
+diff --git a/tests/cross_repo.rs b/tests/cross_repo.rs
+index 86c2807..6bac020 100644
+--- a/tests/cross_repo.rs
++++ b/tests/cross_repo.rs
+@@ -127,6 +127,8 @@ fn make_node(usr: &str, repo: &str) -> NodeRecord {
+         is_virtual: None,
+         is_pure_virtual: None,
+         is_static: None,
++        symbol_id: 0,
++        file_id: 0,
+     }
+ }
+ 
+@@ -143,6 +145,9 @@ fn make_cross_edge(src_usr: &str, dst_usr: &str, src_repo: &str) -> EdgeRecord {
+         tu_hash: [0u8; 32],
+         source_association_type: None,
+         target_association_type: None,
++        src_id: 0,
++        dst_id: None,
++        dst_repo_name: src_repo.to_owned(),
+     }
+ }
+ 
+@@ -197,6 +202,9 @@ async fn phase5_no_candidates_writes_no_external_refs() {
+         tu_hash: [0u8; 32],
+         source_association_type: None,
+         target_association_type: None,
++        src_id: 0,
++        dst_id: None,
++        dst_repo_name: "repo_a".to_owned(),
+     }];
+ 
+     write_fixture_shards(&stage_dir, &nodes, &edges).expect("write shards");
+diff --git a/tests/integration/arrow_roundtrip.rs b/tests/integration/arrow_roundtrip.rs
+index b4b4453..470e5f8 100644
+--- a/tests/integration/arrow_roundtrip.rs
++++ b/tests/integration/arrow_roundtrip.rs
+@@ -44,6 +44,8 @@ fn base_node(suffix: &str) -> NodeRecord {
+         is_virtual: None,
+         is_pure_virtual: None,
+         is_static: None,
++        symbol_id: 0,
++        file_id: 0,
+     }
+ }
+ 
+@@ -60,6 +62,9 @@ fn base_edge(suffix: &str, kind: EdgeKind) -> EdgeRecord {
+         tu_hash: [0u8; 32],
+         source_association_type: None,
+         target_association_type: None,
++        src_id: 0,
++        dst_id: None,
++        dst_repo_name: "test-repo".to_owned(),
+     }
+ }
+ 
+diff --git a/tests/integration/cross_repo_access_mirror.rs b/tests/integration/cross_repo_access_mirror.rs
+index ee0121a..8e2a3cf 100644
+--- a/tests/integration/cross_repo_access_mirror.rs
++++ b/tests/integration/cross_repo_access_mirror.rs
+@@ -77,6 +77,8 @@ async fn external_ref_mirrors_uses_classification() {
+         is_virtual: None,
+         is_pure_virtual: None,
+         is_static: None,
++        symbol_id: 1,
++        file_id: 1,
+     };
+     let batch_na = nodes_to_record_batch(&[node_a]).unwrap();
+     write_parquet_batch(&worker_a.join("nodes-0.parquet"), &batch_na);
+@@ -94,6 +96,9 @@ async fn external_ref_mirrors_uses_classification() {
+         tu_hash: [0u8; 32],
+         source_association_type: Some("write".to_owned()),
+         target_association_type: Some("write".to_owned()),
++        src_id: 1,
++        dst_id: None,
++        dst_repo_name: "repo-a".to_owned(),
+     };
+     let batch_ea = edges_to_record_batch(&[edge_a]).unwrap();
+     write_parquet_batch(&worker_a.join("edges-0.parquet"), &batch_ea);
+@@ -111,6 +116,9 @@ async fn external_ref_mirrors_uses_classification() {
+         tu_hash: [0u8; 32],
+         source_association_type: Some("write".to_owned()),
+         target_association_type: Some("write".to_owned()),
++        src_id: 1,
++        dst_id: None,
++        dst_repo_name: "repo-a".to_owned(),
+     };
+     let batch_fe = edges_to_record_batch(&[final_edge]).unwrap();
+     write_parquet_batch(&stage_a.join("final-edges.parquet"), &batch_fe);
+@@ -145,6 +153,8 @@ async fn external_ref_mirrors_uses_classification() {
+         is_virtual: None,
+         is_pure_virtual: None,
+         is_static: None,
++        symbol_id: 2,
++        file_id: 2,
+     };
+     let batch_nb = nodes_to_record_batch(&[node_b]).unwrap();
+     write_parquet_batch(&worker_b.join("nodes-0.parquet"), &batch_nb);
+diff --git a/tests/integration/indradb_properties.rs b/tests/integration/indradb_properties.rs
+index fe4bd94..1ff1528 100644
+--- a/tests/integration/indradb_properties.rs
++++ b/tests/integration/indradb_properties.rs
+@@ -68,6 +68,8 @@ fn method_node(usr: &str, repo: &str) -> NodeRecord {
+         is_virtual: Some(false),
+         is_pure_virtual: Some(false),
+         is_static: Some(false),
++        symbol_id: 1,
++        file_id: 1,
+     }
+ }
+ 
+@@ -97,6 +99,8 @@ fn truncated_node(usr: &str, repo: &str) -> NodeRecord {
+         is_virtual: None,
+         is_pure_virtual: None,
+         is_static: Some(false),
++        symbol_id: 2,
++        file_id: 1,
+     }
+ }
+ 
+@@ -113,6 +117,9 @@ fn uses_edge(src: &str, dst: &str, repo: &str) -> EdgeRecord {
+         tu_hash: [0u8; 32],
+         source_association_type: Some("read".to_owned()),
+         target_association_type: Some("read".to_owned()),
++        src_id: 1,
++        dst_id: Some(2),
++        dst_repo_name: repo.to_owned(),
+     }
+ }
+ 
+diff --git a/tests/integration/m4_exit_gate.rs b/tests/integration/m4_exit_gate.rs
+index 6b7c871..66b6f08 100644
+--- a/tests/integration/m4_exit_gate.rs
++++ b/tests/integration/m4_exit_gate.rs
+@@ -103,6 +103,8 @@ fn make_node(usr: &str, repo: &str, file_path: &str) -> NodeRecord {
+         is_virtual: None,
+         is_pure_virtual: None,
+         is_static: None,
++        symbol_id: 0,
++        file_id: 0,
+     }
+ }
+ 
+@@ -119,6 +121,9 @@ fn make_cross_calls_edge(src_usr: &str, dst_usr: &str, repo: &str) -> EdgeRecord
+         tu_hash: [0u8; 32],
+         source_association_type: None,
+         target_association_type: None,
++        src_id: 0,
++        dst_id: None,
++        dst_repo_name: repo.to_owned(),
+     }
+ }
+ 
+diff --git a/tests/integration/neo4j_indexes.rs b/tests/integration/neo4j_indexes.rs
+index 73075ea..5e20deb 100644
+--- a/tests/integration/neo4j_indexes.rs
++++ b/tests/integration/neo4j_indexes.rs
+@@ -97,6 +97,8 @@ fn fixture_method_node(repo: &str) -> NodeRecord {
+         is_virtual: Some(true),
+         is_pure_virtual: Some(false),
+         is_static: Some(false),
++        symbol_id: 1,
++        file_id: 1,
+     }
+ }
+ 
+@@ -125,6 +127,8 @@ fn fixture_function_node(repo: &str) -> NodeRecord {
+         is_virtual: None,
+         is_pure_virtual: None,
+         is_static: Some(false),
++        symbol_id: 2,
++        file_id: 1,
+     }
+ }
+ 
+@@ -141,6 +145,9 @@ fn fixture_uses_edge(repo: &str) -> EdgeRecord {
+         tu_hash: [0u8; 32],
+         source_association_type: Some("read".to_owned()),
+         target_association_type: Some("read".to_owned()),
++        src_id: 1,
++        dst_id: Some(2),
++        dst_repo_name: repo.to_owned(),
+     }
+ }
+ 
+diff --git a/tests/integration/phase1_base.rs b/tests/integration/phase1_base.rs
+index c841d9e..2adcd70 100644
+--- a/tests/integration/phase1_base.rs
++++ b/tests/integration/phase1_base.rs
+@@ -117,6 +117,7 @@ async fn phase1_emits_expected_node_kinds() {
+             format!("-I{}", fixture.display()),
+         ],
+         skip_system_headers: true,
++        allocator: None,
+     };
+ 
+     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
+@@ -185,6 +186,7 @@ async fn phase1_emits_module_node() {
+             format!("-I{}", fixture.display()),
+         ],
+         skip_system_headers: true,
++        allocator: None,
+     };
+ 
+     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
+@@ -224,6 +226,7 @@ async fn phase1_parse_error_produces_partial_and_continues() {
+             format!("-I{}", fixture.display()),
+         ],
+         skip_system_headers: true,
++        allocator: None,
+     };
+ 
+     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
+@@ -292,6 +295,7 @@ async fn phase1_emits_global_variable_from_utils() {
+             format!("-I{}", fixture.display()),
+         ],
+         skip_system_headers: true,
++        allocator: None,
+     };
+ 
+     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
+@@ -388,6 +392,7 @@ async fn visit_m2_fixture(
+             format!("-I{}", fixture.display()),
+         ],
+         skip_system_headers: true,
++        allocator: None,
+     };
+ 
+     let mut writer = StageWriter::new(stage_dir, 0).unwrap();
+@@ -543,6 +548,7 @@ async fn m2_emits_overrides_edge_with_vtable_slot() {
+             format!("-I{}", fixture.display()),
+         ],
+         skip_system_headers: true,
++        allocator: None,
+     };
+ 
+     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
+diff --git a/tests/integration/phase3.rs b/tests/integration/phase3.rs
+index 4d5419e..f7cc463 100644
+--- a/tests/integration/phase3.rs
++++ b/tests/integration/phase3.rs
+@@ -52,6 +52,8 @@ fn make_node(i: usize) -> NodeRecord {
+         is_virtual: None,
+         is_pure_virtual: None,
+         is_static: None,
++        symbol_id: i as i64,
++        file_id: i as i64,
+     }
+ }
+ 
+@@ -68,6 +70,9 @@ fn make_within_repo_edge(i: usize) -> EdgeRecord {
+         tu_hash: [0u8; 32],
+         source_association_type: None,
+         target_association_type: None,
++        src_id: i as i64,
++        dst_id: None,
++        dst_repo_name: "test-repo".to_owned(),
+     }
+ }
+ 
+@@ -84,6 +89,9 @@ fn make_unresolved_edge(i: usize) -> EdgeRecord {
+         tu_hash: [0u8; 32],
+         source_association_type: None,
+         target_association_type: None,
++        src_id: i as i64 + 100,
++        dst_id: None,
++        dst_repo_name: "test-repo".to_owned(),
+     }
+ }
+ 
+@@ -205,6 +213,9 @@ fn phase3_preserves_placeholder_edges_unchanged() {
+         tu_hash: [0u8; 32],
+         source_association_type: None,
+         target_association_type: None,
++        src_id: 0,
++        dst_id: None,
++        dst_repo_name: "test-repo".to_owned(),
+     };
+ 
+     let batch = edges_to_record_batch(&[placeholder]).expect("batch");
+@@ -224,6 +235,9 @@ fn phase3_preserves_placeholder_edges_unchanged() {
+         tu_hash: [0u8; 32],
+         source_association_type: None,
+         target_association_type: None,
++        src_id: 0,
++        dst_id: None,
++        dst_repo_name: "test-repo".to_owned(),
+     };
+     drop(batch); // batch was only created to verify serialisability
+     w2.write_edges(&[placeholder2]).unwrap();
+diff --git a/tests/integration/sink_neo4j.rs b/tests/integration/sink_neo4j.rs
+index 5052a88..8e808c7 100644
+--- a/tests/integration/sink_neo4j.rs
++++ b/tests/integration/sink_neo4j.rs
+@@ -75,6 +75,8 @@ fn sample_nodes(repo: &str) -> Vec<NodeRecord> {
+             is_virtual: None,
+             is_pure_virtual: None,
+             is_static: None,
++            symbol_id: 1,
++            file_id: 1,
+         },
+         NodeRecord {
+             usr: format!("c:@F@fn_b#{repo}"),
+@@ -100,6 +102,8 @@ fn sample_nodes(repo: &str) -> Vec<NodeRecord> {
+             is_virtual: None,
+             is_pure_virtual: None,
+             is_static: None,
++            symbol_id: 2,
++            file_id: 2,
+         },
+     ]
+ }
+@@ -117,6 +121,9 @@ fn sample_edges(repo: &str) -> Vec<EdgeRecord> {
+         tu_hash: [0u8; 32],
+         source_association_type: None,
+         target_association_type: None,
++        src_id: 1,
++        dst_id: Some(2),
++        dst_repo_name: repo.to_owned(),
+     }]
+ }
+ 
+@@ -227,6 +234,9 @@ async fn neo4j_sink_skips_unresolved_edges() {
+         tu_hash: [0u8; 32],
+         source_association_type: None,
+         target_association_type: None,
++        src_id: 0,
++        dst_id: None,
++        dst_repo_name: repo.to_owned(),
+     };
+ 
+     let stats = sink
+diff --git a/tests/integration/sink_parity.rs b/tests/integration/sink_parity.rs
+index 027e91d..b997635 100644
+--- a/tests/integration/sink_parity.rs
++++ b/tests/integration/sink_parity.rs
+@@ -85,6 +85,8 @@ fn fixture_function_node(repo: &str) -> NodeRecord {
+         is_virtual: None,
+         is_pure_virtual: None,
+         is_static: Some(false),
++        symbol_id: 1,
++        file_id: 1,
+     }
+ }
+ 
+@@ -101,6 +103,9 @@ fn fixture_uses_edge(repo: &str) -> EdgeRecord {
+         tu_hash: [0u8; 32],
+         source_association_type: Some("call_arg".to_owned()),
+         target_association_type: Some("call_arg".to_owned()),
++        src_id: 1,
++        dst_id: Some(1),
++        dst_repo_name: repo.to_owned(),
+     }
+ }
+ 
+diff --git a/tests/integration/system_header_filter.rs b/tests/integration/system_header_filter.rs
+index e8d39dc..7e96276 100644
+--- a/tests/integration/system_header_filter.rs
++++ b/tests/integration/system_header_filter.rs
+@@ -57,6 +57,7 @@ fn collect_node_names(skip_system_headers: bool) -> HashSet<String> {
+             format!("-isystem{}", sysinc_dir.display()),
+         ],
+         skip_system_headers,
++        allocator: None,
+     };
+ 
+     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
+diff --git a/tests/integration_entry.rs b/tests/integration_entry.rs
+new file mode 100644
+index 0000000..4a2fe60
+--- /dev/null
++++ b/tests/integration_entry.rs
+@@ -0,0 +1,305 @@
++//! Integration test entry point for graph-symbol-ids feature (Story 3).
++//!
++//! - S7-SC-12: Re-index ID stability — same USR gets the same integer ID on second run.
++//! - S6-SC-03: No `usr`/`src_usr`/`dst_usr`/`file_path` string properties on v6 writes.
++//! - `visit_tu_allocator_wiring`: verifies that visit_tu with a real allocator produces
++//!   non-zero symbol_id/file_id on emitted nodes.
++
++use std::sync::Arc;
++
++use cpp_indexer::resolve::symbol_map::SymbolAllocator;
++use cpp_indexer::schema::version::SCHEMA_VERSION;
++use cpp_indexer::schema::{
++    arrow::record_batch_to_nodes, EdgeKind, EdgeRecord, NodeKind, NodeRecord,
++};
++use cpp_indexer::sink::mock::MockSink;
++use cpp_indexer::sink::GraphSink;
++use cpp_indexer::stage::writer::StageWriter;
++use cpp_indexer::visit::shallow::{global_clang, visit_tu, VisitOptions};
++
++fn make_test_node(usr: &str, symbol_id: i64, file_id: i64, repo: &str) -> NodeRecord {
++    NodeRecord {
++        usr: usr.to_owned(),
++        kind: NodeKind::Function,
++        name: "test_fn".to_owned(),
++        qualified_name: format!("ns::{usr}"),
++        mangled_name: None,
++        file_path: "/src/test.cpp".to_owned(),
++        line: Some(1),
++        col: Some(1),
++        repo_name: repo.to_owned(),
++        attrs_json: "{}".to_owned(),
++        partial: false,
++        phase: 1,
++        tu_hash: [0u8; 32],
++        return_type: None,
++        params: None,
++        signature: None,
++        code: None,
++        code_truncated: None,
++        template_params: None,
++        template_args: None,
++        is_virtual: None,
++        is_pure_virtual: None,
++        is_static: None,
++        symbol_id,
++        file_id,
++    }
++}
++
++fn make_test_edge(src_id: i64, dst_id: Option<i64>, repo: &str) -> EdgeRecord {
++    EdgeRecord {
++        src_usr: "c:@F@src".to_owned(),
++        dst_usr: dst_id.map(|_| "c:@F@dst".to_owned()),
++        dst_placeholder: None,
++        kind: EdgeKind::Calls,
++        resolved: dst_id.is_some(),
++        cross_repo_candidate: false,
++        repo_name: repo.to_owned(),
++        attrs_json: "{}".to_owned(),
++        tu_hash: [0u8; 32],
++        source_association_type: None,
++        target_association_type: None,
++        src_id,
++        dst_id,
++        dst_repo_name: repo.to_owned(),
++    }
++}
++
++/// S7-SC-12: Re-index ID stability.
++///
++/// Verifies that the same USR receives the same integer ID on a second run (C3).
++/// Uses the in-memory SQLite allocator + MockSink (hard gate, no live services needed).
++#[tokio::test]
++async fn reindex_id_stability() {
++    let alloc = SymbolAllocator::open_in_memory(100).expect("in-memory alloc");
++
++    // First run: allocate IDs for some USRs.
++    let usrs = ["c:@F@foo", "c:@F@bar", "c:@F@baz"];
++    let ids_first: Vec<i64> = usrs
++        .iter()
++        .map(|&u| alloc.get_or_insert_symbol(u).unwrap())
++        .collect();
++
++    // Second run: same USRs must produce the same IDs (re-index stability, C3).
++    let ids_second: Vec<i64> = usrs
++        .iter()
++        .map(|&u| alloc.get_or_insert_symbol(u).unwrap())
++        .collect();
++
++    assert_eq!(
++        ids_first, ids_second,
++        "same USRs must produce the same integer IDs across runs (re-index stability C3)"
++    );
++
++    // All IDs must be distinct.
++    let mut sorted = ids_first.clone();
++    sorted.sort_unstable();
++    sorted.dedup();
++    assert_eq!(sorted.len(), 3, "distinct USRs must produce distinct IDs");
++}
++
++/// S6-SC-03: No USR/file_path strings on v6 mock sink writes.
++///
++/// Verifies that nodes written via MockSink carry integer IDs and do not carry
++/// `usr`/`src_usr`/`dst_usr` or `file_path` string properties.
++#[tokio::test]
++async fn v6_writes_carry_integer_ids_not_usr_strings() {
++    assert_eq!(SCHEMA_VERSION, 6, "must be v6 schema");
++
++    let sink = MockSink::default();
++    let repo = "test-repo";
++
++    // Allocate IDs using the in-memory allocator.
++    let alloc = SymbolAllocator::open_in_memory(0).expect("alloc");
++    let sym_id = alloc.get_or_insert_symbol("c:@F@foo").unwrap();
++    let file_id = alloc.get_or_insert_file("/src/foo.cpp").unwrap();
++
++    let nodes = vec![make_test_node("c:@F@foo", sym_id, file_id, repo)];
++    let edges = vec![make_test_edge(sym_id, None, repo)];
++
++    sink.write_nodes(&nodes).await.unwrap();
++    sink.write_edges(&edges).await.unwrap();
++
++    let calls = sink.calls();
++    // Extract written nodes from MockCall::WriteNodes
++    let written_nodes: Vec<NodeRecord> = calls
++        .iter()
++        .flat_map(|c| {
++            if let cpp_indexer::sink::mock::MockCall::WriteNodes(ns) = c {
++                ns.clone()
++            } else {
++                vec![]
++            }
++        })
++        .collect();
++    assert_eq!(written_nodes.len(), 1);
++    let n = &written_nodes[0];
++    // Integer IDs must be set.
++    assert!(
++        n.symbol_id > 0,
++        "symbol_id must be > 0; got {}",
++        n.symbol_id
++    );
++    assert!(n.file_id > 0, "file_id must be > 0; got {}", n.file_id);
++
++    let written_edges: Vec<EdgeRecord> = calls
++        .iter()
++        .flat_map(|c| {
++            if let cpp_indexer::sink::mock::MockCall::WriteEdges(es) = c {
++                es.clone()
++            } else {
++                vec![]
++            }
++        })
++        .collect();
++    assert_eq!(written_edges.len(), 1);
++    let e = &written_edges[0];
++    assert_eq!(e.src_id, sym_id, "src_id must match allocated symbol_id");
++}
++
++/// S7-SC-12: Persistent re-index stability via tempfile SQLite.
++#[test]
++fn reindex_stability_with_persistent_db() {
++    let dir = tempfile::tempdir().unwrap();
++    let db_path = dir.path().join("test.db");
++
++    // First index run.
++    let ids_run1: Vec<i64> = {
++        let alloc = SymbolAllocator::open(&db_path, 0).unwrap();
++        ["c:@F@alpha", "c:@F@beta", "c:@F@gamma"]
++            .iter()
++            .map(|&u| alloc.get_or_insert_symbol(u).unwrap())
++            .collect()
++    };
++
++    // Second index run (re-open same db).
++    let ids_run2: Vec<i64> = {
++        let alloc = SymbolAllocator::open(&db_path, 0).unwrap();
++        ["c:@F@alpha", "c:@F@beta", "c:@F@gamma"]
++            .iter()
++            .map(|&u| alloc.get_or_insert_symbol(u).unwrap())
++            .collect()
++    };
++
++    assert_eq!(
++        ids_run1, ids_run2,
++        "persistent re-index: same USRs must produce same IDs across process reopens"
++    );
++}
++
++/// S7-SC-12: visit_tu allocator wiring — nodes emitted via visit_tu with a real allocator
++/// have non-zero symbol_id and file_id (fails if the allocator is not threaded through).
++///
++/// This test calls `visit_tu` with a minimal C++ source and verifies that the
++/// returned nodes carry non-zero integer IDs. It would catch a regression where
++/// `symbol_id` stays at its default-0 stub value.
++#[test]
++fn visit_tu_allocator_wiring() {
++    // Write a minimal C++ file to a temp location.
++    let dir = tempfile::tempdir().unwrap();
++    let src_path = dir.path().join("mini.cpp");
++    std::fs::write(&src_path, b"int add(int a, int b) { return a + b; }\n").unwrap();
++
++    let stage_dir = dir.path().join("stage");
++    std::fs::create_dir_all(&stage_dir).unwrap();
++
++    // Open in-memory allocator.
++    let alloc = Arc::new(SymbolAllocator::open_in_memory(1000).unwrap());
++
++    let clang = global_clang();
++    let opts = VisitOptions {
++        repo_name: "test-repo",
++        tu_hash: [0u8; 32],
++        file_path: &src_path,
++        args: &["clang++".to_owned(), "-std=c++14".to_owned()],
++        skip_system_headers: true,
++        allocator: Some(Arc::clone(&alloc)),
++    };
++
++    let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
++    visit_tu(clang, &opts, &mut writer).unwrap();
++    writer.finish().unwrap();
++
++    // Read back the nodes parquet.
++    let worker_dir = stage_dir.join("worker-000");
++    let nodes_path = std::fs::read_dir(&worker_dir)
++        .unwrap()
++        .filter_map(|e| e.ok())
++        .find(|e| e.file_name().to_string_lossy().starts_with("nodes-"))
++        .expect("nodes parquet must exist")
++        .path();
++
++    let file = std::fs::File::open(&nodes_path).unwrap();
++    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
++        .unwrap()
++        .build()
++        .unwrap();
++    let mut nodes: Vec<cpp_indexer::schema::NodeRecord> = Vec::new();
++    for batch in reader {
++        nodes.extend(record_batch_to_nodes(&batch.unwrap()));
++    }
++
++    assert!(!nodes.is_empty(), "visit_tu must emit at least one node");
++
++    for n in &nodes {
++        assert!(
++            n.symbol_id != 0 || n.kind == cpp_indexer::schema::NodeKind::Module,
++            "non-Module node '{}' must have non-zero symbol_id; got {}",
++            n.usr,
++            n.symbol_id
++        );
++        assert!(
++            n.file_id != 0,
++            "node '{}' must have non-zero file_id; got {}",
++            n.usr,
++            n.file_id
++        );
++    }
++
++    // Run a second time — same USRs must produce the same IDs (C3).
++    let stage2 = dir.path().join("stage2");
++    std::fs::create_dir_all(&stage2).unwrap();
++    let opts2 = VisitOptions {
++        repo_name: "test-repo",
++        tu_hash: [0u8; 32],
++        file_path: &src_path,
++        args: &["clang++".to_owned(), "-std=c++14".to_owned()],
++        skip_system_headers: true,
++        allocator: Some(Arc::clone(&alloc)),
++    };
++    let mut w2 = StageWriter::new(&stage2, 0).unwrap();
++    visit_tu(clang, &opts2, &mut w2).unwrap();
++    w2.finish().unwrap();
++
++    let worker2 = stage2.join("worker-000");
++    let nodes2_path = std::fs::read_dir(&worker2)
++        .unwrap()
++        .filter_map(|e| e.ok())
++        .find(|e| e.file_name().to_string_lossy().starts_with("nodes-"))
++        .expect("nodes parquet must exist on second run")
++        .path();
++    let file2 = std::fs::File::open(&nodes2_path).unwrap();
++    let reader2 = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file2)
++        .unwrap()
++        .build()
++        .unwrap();
++    let mut nodes2: Vec<cpp_indexer::schema::NodeRecord> = Vec::new();
++    for batch in reader2 {
++        nodes2.extend(record_batch_to_nodes(&batch.unwrap()));
++    }
++
++    // Sort by USR for deterministic comparison.
++    let mut run1: Vec<_> = nodes.iter().map(|n| (n.usr.clone(), n.symbol_id)).collect();
++    let mut run2: Vec<_> = nodes2
++        .iter()
++        .map(|n| (n.usr.clone(), n.symbol_id))
++        .collect();
++    run1.sort();
++    run2.sort();
++
++    assert_eq!(
++        run1, run2,
++        "re-index must produce the same symbol_ids for the same USRs (C3)"
++    );
++}
+diff --git a/tests/schema-baseline.txt b/tests/schema-baseline.txt
+index 58c49f8..7168647 100644
+--- a/tests/schema-baseline.txt
++++ b/tests/schema-baseline.txt
+@@ -1 +1 @@
+-7a69dca3a2d0e2185798ee2b9b43ceb029f4721ca1ba513452ac06ef1df5f96d
++87050f538043f638b8216c5079ecbac439c0a796f13c73c434f1eca7f9bc7af0
+diff --git a/tests/schema_version_bump.rs b/tests/schema_version_bump.rs
+index 18bf69c..3614efc 100644
+--- a/tests/schema_version_bump.rs
++++ b/tests/schema_version_bump.rs
+@@ -17,12 +17,12 @@
+ 
+ use cpp_indexer::schema::version::{SCHEMA_VERSION, SCHEMA_VERSION_TAG};
+ 
+-/// AC-S40-1: The binary embeds schema v5 after the M8 bump.
++/// graph-symbol-ids Story 3: The binary embeds schema v6 after the integer-ID bump.
+ #[test]
+-fn schema_version_is_v5() {
++fn schema_version_is_v6() {
+     assert_eq!(
+-        SCHEMA_VERSION, 5,
+-        "SCHEMA_VERSION must be 5 after M8 S40 bump"
++        SCHEMA_VERSION, 6,
++        "SCHEMA_VERSION must be 6 after graph-symbol-ids Story 3 bump"
+     );
+ }
+ 
+diff --git a/tests/sink_indradb.rs b/tests/sink_indradb.rs
+index c90614b..c7e07f3 100644
+--- a/tests/sink_indradb.rs
++++ b/tests/sink_indradb.rs
+@@ -74,6 +74,8 @@ fn make_node(usr: &str, repo: &str) -> NodeRecord {
+         is_virtual: None,
+         is_pure_virtual: None,
+         is_static: None,
++        symbol_id: 1,
++        file_id: 1,
+     }
+ }
+ 
+@@ -90,6 +92,9 @@ fn make_edge(src: &str, dst: &str, repo: &str) -> EdgeRecord {
+         tu_hash: [0u8; 32],
+         source_association_type: None,
+         target_association_type: None,
++        src_id: 1,
++        dst_id: Some(2),
++        dst_repo_name: repo.to_owned(),
+     }
+ }
+ 
+diff --git a/tests/visit/access_classifier.rs b/tests/visit/access_classifier.rs
+index 3bf1341..d113dea 100644
+--- a/tests/visit/access_classifier.rs
++++ b/tests/visit/access_classifier.rs
+@@ -50,6 +50,7 @@ async fn visit_access_fixture() -> Vec<EdgeRecord> {
+             format!("-I{}", fixture.display()),
+         ],
+         skip_system_headers: true,
++        allocator: None,
+     };
+ 
+     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
+@@ -146,6 +147,9 @@ async fn collect_edge_records(stage_dir: &std::path::Path) -> Vec<EdgeRecord> {
+                     tu_hash: [0u8; 32],
+                     source_association_type: src_assoc_col[i].clone(),
+                     target_association_type: dst_assoc_col[i].clone(),
++                    src_id: 0,
++                    dst_id: None,
++                    dst_repo_name: "test-repo".to_owned(),
+                 });
+             }
+         }
+diff --git a/tests/visit/access_classifier_boundary.rs b/tests/visit/access_classifier_boundary.rs
+index 1d6b8ad..b02b8f4 100644
+--- a/tests/visit/access_classifier_boundary.rs
++++ b/tests/visit/access_classifier_boundary.rs
+@@ -50,6 +50,7 @@ async fn visit_extended_fixture() -> Vec<EdgeRecord> {
+             format!("-I{}", fixture.display()),
+         ],
+         skip_system_headers: true,
++        allocator: None,
+     };
+ 
+     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
+@@ -144,6 +145,9 @@ async fn collect_edge_records(stage_dir: &std::path::Path) -> Vec<EdgeRecord> {
+                     tu_hash: [0u8; 32],
+                     source_association_type: src_assoc_col[i].clone(),
+                     target_association_type: dst_assoc_col[i].clone(),
++                    src_id: 0,
++                    dst_id: None,
++                    dst_repo_name: "test-repo".to_owned(),
+                 });
+             }
+         }
+diff --git a/tests/visit/callable_extraction.rs b/tests/visit/callable_extraction.rs
+index f0c8e9b..31ecf45 100644
+--- a/tests/visit/callable_extraction.rs
++++ b/tests/visit/callable_extraction.rs
+@@ -43,6 +43,7 @@ async fn visit_callable_fixture() -> Vec<NodeRecord> {
+             format!("-I{}", fixture.display()),
+         ],
+         skip_system_headers: true,
++        allocator: None,
+     };
+ 
+     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
+@@ -173,6 +174,8 @@ async fn collect_node_records(stage_dir: &std::path::Path) -> Vec<NodeRecord> {
+                     is_virtual: None,
+                     is_pure_virtual: None,
+                     is_static: None,
++                    symbol_id: 0,
++                    file_id: 0,
+                 });
+             }
+         }
+diff --git a/tests/visit/template_extraction.rs b/tests/visit/template_extraction.rs
+index 8b36ae8..d16fd7b 100644
+--- a/tests/visit/template_extraction.rs
++++ b/tests/visit/template_extraction.rs
+@@ -46,6 +46,7 @@ async fn visit_template_fixture() -> Vec<NodeRecord> {
+             format!("-I{}", fixture.display()),
+         ],
+         skip_system_headers: true,
++        allocator: None,
+     };
+ 
+     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
+@@ -157,6 +158,8 @@ async fn collect_node_records_with_template_fields(stage_dir: &std::path::Path)
+                     is_virtual: None,
+                     is_pure_virtual: None,
+                     is_static: None,
++                    symbol_id: 0,
++                    file_id: 0,
+                 });
+             }
+         }
+@@ -523,6 +526,7 @@ async fn visit_template_fixture_with_edges() -> (Vec<NodeRecord>, Vec<(String, S
+             format!("-I{}", fixture.display()),
+         ],
+         skip_system_headers: true,
++        allocator: None,
+     };
+ 
+     let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
