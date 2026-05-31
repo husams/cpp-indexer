@@ -49,6 +49,23 @@ fn fixture_node(usr: &str, symbol_id: i64, file_id: i64) -> NodeRecord {
         is_static: None,
         symbol_id,
         file_id,
+        is_const: None,
+        is_constexpr: None,
+        storage_class: None,
+        is_template: None,
+        is_noexcept: None,
+        is_override: None,
+        is_deleted: None,
+        is_defaulted: None,
+        cv_qualifiers: None,
+        ref_qualifier: None,
+        is_final: None,
+        is_abstract: None,
+        record_kind: None,
+        type_spelling: None,
+        param_index: None,
+        param_kind: None,
+        enum_value: None,
     }
 }
 
@@ -68,31 +85,36 @@ fn fixture_edge(src_usr: &str, dst_usr: &str, src_id: i64, dst_id: i64) -> EdgeR
         src_id,
         dst_id: Some(dst_id),
         dst_repo_name: "test-repo".to_owned(),
+        access: None,
+        edge_index: None,
+        inherits_is_virtual: None,
     }
 }
 
 // ── Schema field-presence tests (S6-SC-03 proxy) ─────────────────────────────
 
-/// v6 node schema must contain exactly 25 fields (23 M8 + 2 integer-ID fields).
+/// v7 node schema must contain exactly 42 fields
+/// (13 base + 10 M8 + 2 v6 + 3 v7-S1 + 14 v7-S2 + 1 v7-S5 = 43 minus overlap = 42).
 #[test]
 fn node_schema_has_expected_column_count() {
     let schema = node_schema();
     assert_eq!(
         schema.fields().len(),
-        25,
-        "expected 25 node schema fields (13 base + 10 M8 + 2 v6 integer IDs): got {}",
+        42,
+        "expected 42 node schema fields (v7 full-AST schema): got {}",
         schema.fields().len()
     );
 }
 
-/// v6 edge schema must contain exactly 14 fields (11 M8 + 3 integer-ID fields).
+/// v7 edge schema must contain exactly 17 fields
+/// (9 base + 2 M8 + 3 v6 + 1 v7-S1 + 1 v7-S2 + 1 v7-S4 = 17).
 #[test]
 fn edge_schema_has_expected_column_count() {
     let schema = edge_schema();
     assert_eq!(
         schema.fields().len(),
-        14,
-        "expected 14 edge schema fields (9 base + 2 M8 + 3 v6 integer IDs): got {}",
+        17,
+        "expected 17 edge schema fields (v7 full-AST schema): got {}",
         schema.fields().len()
     );
 }

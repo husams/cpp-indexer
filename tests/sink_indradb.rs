@@ -76,6 +76,23 @@ fn make_node(usr: &str, repo: &str) -> NodeRecord {
         is_static: None,
         symbol_id: 1,
         file_id: 1,
+        is_const: None,
+        is_constexpr: None,
+        storage_class: None,
+        is_template: None,
+        is_noexcept: None,
+        is_override: None,
+        is_deleted: None,
+        is_defaulted: None,
+        cv_qualifiers: None,
+        ref_qualifier: None,
+        is_final: None,
+        is_abstract: None,
+        record_kind: None,
+        type_spelling: None,
+        param_index: None,
+        param_kind: None,
+        enum_value: None,
     }
 }
 
@@ -95,6 +112,9 @@ fn make_edge(src: &str, dst: &str, repo: &str) -> EdgeRecord {
         src_id: 1,
         dst_id: Some(2),
         dst_repo_name: repo.to_owned(),
+        access: None,
+        edge_index: None,
+        inherits_is_virtual: None,
     }
 }
 
@@ -303,4 +323,114 @@ async fn read_schema_version_returns_none_when_absent() {
 async fn backend_name_is_indradb() {
     let sink = live_sink().await;
     assert_eq!(sink.backend_name(), "indradb");
+}
+
+// ── v7 S1: Field/GlobalVariable property + edge access tests ─────────────────
+
+/// v7 S1: write a Field node with is_const/is_constexpr/storage_class set; verify
+/// write_nodes succeeds (correctness of property values verified by read path
+/// in the live sink — read-back via property query is beyond current scope but
+/// the round-trip through the Arrow schema is covered by schema::arrow tests).
+#[tokio::test]
+#[ignore = "requires INDRADB_ENDPOINT"]
+async fn v7_s1_field_node_with_properties_writes_successfully() {
+    let sink = live_sink().await;
+    sink.ensure_indexes().await.unwrap();
+    sink.reset(ResetTarget::All).await.unwrap();
+
+    let mut node = make_node("c:@S@Foo@FI@x", "repo_v7s1");
+    node.kind = NodeKind::Field;
+    node.is_const = Some(true);
+    node.is_constexpr = Some(false);
+    node.storage_class = Some("static".to_owned());
+
+    let stats = sink
+        .write_nodes(&[node])
+        .await
+        .expect("write_nodes must succeed for Field with v7 S1 props");
+    assert_eq!(stats.nodes_written, 1);
+}
+
+/// v7 S1: write a HAS_FIELD edge with `access = Some("protected")`; verify write_edges
+/// succeeds.
+#[tokio::test]
+#[ignore = "requires INDRADB_ENDPOINT"]
+async fn v7_s1_has_field_edge_with_access_writes_successfully() {
+    let sink = live_sink().await;
+    sink.ensure_indexes().await.unwrap();
+    sink.reset(ResetTarget::All).await.unwrap();
+
+    let class_node = make_node("c:@S@Foo", "repo_v7s1_edge");
+    let field_node = {
+        let mut n = make_node("c:@S@Foo@FI@x", "repo_v7s1_edge");
+        n.kind = NodeKind::Field;
+        n
+    };
+    sink.write_nodes(&[class_node, field_node])
+        .await
+        .expect("write nodes");
+
+    let mut edge = make_edge("c:@S@Foo", "c:@S@Foo@FI@x", "repo_v7s1_edge");
+    edge.kind = EdgeKind::HasField;
+    edge.access = Some("protected".to_owned());
+
+    let stats = sink
+        .write_edges(&[edge])
+        .await
+        .expect("write_edges must succeed for HAS_FIELD with access");
+    assert_eq!(
+        stats.nodes_written, 1,
+        "write_edges nodes_written count must be 1"
+    );
+}
+
+/// v7 S4: write an INHERITS edge with `access = Some("protected")` and
+/// `inherits_is_virtual = Some(true)` (virtual protected base, S4-02);
+/// and one with `access = Some("public")` and `inherits_is_virtual = Some(false)`
+/// (non-virtual public base, S4-01).  Verifies `write_edges` succeeds for both.
+#[tokio::test]
+#[ignore = "requires INDRADB_ENDPOINT"]
+async fn v7_s4_inherits_edge_with_access_and_virtual_writes_successfully() {
+    let sink = live_sink().await;
+    sink.ensure_indexes().await.unwrap();
+    sink.reset(ResetTarget::All).await.unwrap();
+
+    let base_node = make_node("c:@S@Base", "repo_v7s4");
+    let derived_node = make_node("c:@S@Derived", "repo_v7s4");
+    let base2_node = {
+        let mut n = make_node("c:@S@VBase", "repo_v7s4");
+        n.symbol_id = 3;
+        n
+    };
+    let derived2_node = {
+        let mut n = make_node("c:@S@VDerived", "repo_v7s4");
+        n.symbol_id = 4;
+        n
+    };
+    sink.write_nodes(&[base_node, derived_node, base2_node, derived2_node])
+        .await
+        .expect("write nodes");
+
+    // S4-01: public non-virtual inheritance
+    let mut edge_nonvirtual = make_edge("c:@S@Derived", "c:@S@Base", "repo_v7s4");
+    edge_nonvirtual.kind = EdgeKind::Inherits;
+    edge_nonvirtual.access = Some("public".to_owned());
+    edge_nonvirtual.inherits_is_virtual = Some(false);
+
+    // S4-02: protected virtual inheritance
+    let mut edge_virtual = make_edge("c:@S@VDerived", "c:@S@VBase", "repo_v7s4");
+    edge_virtual.kind = EdgeKind::Inherits;
+    edge_virtual.src_id = 4;
+    edge_virtual.dst_id = Some(3);
+    edge_virtual.access = Some("protected".to_owned());
+    edge_virtual.inherits_is_virtual = Some(true);
+
+    let stats = sink
+        .write_edges(&[edge_nonvirtual, edge_virtual])
+        .await
+        .expect("write_edges must succeed for INHERITS with access and inherits_is_virtual");
+    assert_eq!(
+        stats.nodes_written, 2,
+        "write_edges nodes_written count must be 2"
+    );
 }

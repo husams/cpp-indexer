@@ -285,6 +285,23 @@ mod tests {
             is_static: None,
             symbol_id: i as i64 + 1,
             file_id: i as i64 + 1,
+            is_const: None,
+            is_constexpr: None,
+            storage_class: None,
+            is_template: None,
+            is_noexcept: None,
+            is_override: None,
+            is_deleted: None,
+            is_defaulted: None,
+            cv_qualifiers: None,
+            ref_qualifier: None,
+            is_final: None,
+            is_abstract: None,
+            record_kind: None,
+            type_spelling: None,
+            param_index: None,
+            param_kind: None,
+            enum_value: None,
         }
     }
 
@@ -304,6 +321,9 @@ mod tests {
             src_id: i as i64 + 1,
             dst_id: Some(i as i64 + 2),
             dst_repo_name: "test-repo".to_owned(),
+            access: None,
+            edge_index: None,
+            inherits_is_virtual: None,
         }
     }
 
@@ -347,8 +367,8 @@ mod tests {
             .await
             .unwrap();
         // Verify schema column count: 13 original + 10 M8 native fields + 2 v6 integer ID fields
-        // (symbol_id, file_id) = 25 (S40-S43, graph-symbol-ids Story 3).
-        assert_eq!(builder.schema().fields().len(), 25);
+        // (symbol_id, file_id) + 3 v7-S1 + 13 v7-S2 + 1 v7-S5 = 42.
+        assert_eq!(builder.schema().fields().len(), 42);
         let mut stream = builder.build().unwrap();
         let mut total_rows = 0usize;
         while let Some(batch) = stream.try_next().await.unwrap() {
@@ -372,8 +392,9 @@ mod tests {
             .await
             .unwrap();
         // Verify schema column count: 9 original + 2 M8 association columns + 3 v6 integer ID
-        // fields (src_id, dst_id, dst_repo_name) = 14 (S43, graph-symbol-ids Story 3).
-        assert_eq!(builder.schema().fields().len(), 14);
+        // fields (src_id, dst_id, dst_repo_name) + 1 v7-S1 (access) + 1 v7-S2 (edge_index)
+        // + 1 v7-S4 (inherits_is_virtual) = 17.
+        assert_eq!(builder.schema().fields().len(), 17);
         let mut stream = builder.build().unwrap();
         let mut edge_rows = 0usize;
         while let Some(batch) = stream.try_next().await.unwrap() {

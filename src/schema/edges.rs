@@ -5,6 +5,9 @@
 /// `ADL_CANDIDATE`.
 /// M4 additions (S22): `BELONGS_TO_REPO`.  `EXTERNAL_REF` is added in S23.
 /// M5 additions (S26): `EXPANDS_TO`.
+/// v7 S2 additions: `RETURNS`, `HAS_PARAM`, `OF_TYPE`, `POINTS_TO`, `REFERS_TO`.
+/// v7 S3 additions: `TEMPLATE_PARAM`, `TEMPLATE_ARG`, `CONSTRAINED_BY`.
+/// v7 S5 additions: `ENUMERATOR_OF`, `UNDERLYING_TYPE`, `ALIAS_OF`, `USES_NAMESPACE`, `USES_DECLARATION`.
 ///
 /// Adding new variants bumps `SCHEMA_VERSION` per ADR-9.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -61,6 +64,81 @@ pub enum EdgeKind {
     /// Only top-level expansions are emitted; nested macro expansions inside
     /// another macro's body are suppressed to prevent edge explosion (AC-M5-3).
     ExpandsTo,
+
+    // ── v7 S2 additions ─────────────────────────────────────────────────────
+    /// A function/method returns a type.
+    ///
+    /// Direction: `(Function|Method)-[:RETURNS]->(Type)`.
+    /// Always emitted, including void returns and 0-param functions (S2-03).
+    Returns,
+    /// A function/method has a parameter (ordered).
+    ///
+    /// Direction: `(Function|Method)-[:HAS_PARAM {edge_index}]->(Parameter)`.
+    /// `edge_index` mirrors target Parameter `param_index` (ADR-5).
+    HasParam,
+    /// A Parameter or Field has a type.
+    ///
+    /// Direction: `(Parameter|Field)-[:OF_TYPE]->(Type)`.
+    OfType,
+    /// A pointer type points to its pointee type.
+    ///
+    /// Direction: `(Type:ptr)-[:POINTS_TO]->(Type pointee)`.
+    /// One declarator level only (ADR-2).
+    PointsTo,
+    /// A reference type refers to its referent type.
+    ///
+    /// Direction: `(Type:ref)-[:REFERS_TO]->(Type referent)`.
+    /// One declarator level only (ADR-2).
+    RefersTo,
+
+    // ── v7 S3 additions ─────────────────────────────────────────────────────
+    /// A template definition has a template parameter (ordered by `edge_index`).
+    ///
+    /// Direction: `(TemplateDef)-[:TEMPLATE_PARAM {edge_index}]->(Parameter)`.
+    /// `Parameter.param_kind` is `"type"` | `"non_type"` | `"template"`.
+    /// `edge_index` mirrors the target Parameter's `param_index`.
+    TemplateParam,
+    /// A template specialization has a positional template argument (ADR-5).
+    ///
+    /// Direction: `(Specialization)-[:TEMPLATE_ARG {edge_index}]->(TemplateArg)`.
+    /// Each `TemplateArg` is a distinct positional node (distinct `in_id`) so
+    /// IndraDB edge-identity `(out,type,in)` never collapses duplicate-type args.
+    /// `edge_index` mirrors the target `TemplateArg.param_index`.
+    TemplateArg,
+    /// A template parameter or template definition is constrained by a concept
+    /// (C++20 only; ADR-7).
+    ///
+    /// Direction: `(template_or_param)-[:CONSTRAINED_BY]->(Concept)`.
+    /// Only emitted when the TU is parsed in C++20 mode and libclang exposes a
+    /// `ConceptDecl` cursor.  Pre-C++20 SFINAE constraints are NOT modelled.
+    ConstrainedBy,
+
+    // ── v7 S5 additions ─────────────────────────────────────────────────────
+    /// An enumerator constant belongs to its parent enum.
+    ///
+    /// Direction: `(Enumerator)-[:ENUMERATOR_OF]->(Enum)`.
+    EnumeratorOf,
+    /// An enum has an explicit underlying integer type.
+    ///
+    /// Direction: `(Enum)-[:UNDERLYING_TYPE]->(Type)`.
+    /// Only emitted when an explicit underlying type is present.
+    UnderlyingType,
+    /// A typedef/type-alias is an alias for another type.
+    ///
+    /// Direction: `(Typedef)-[:ALIAS_OF]->(Type)`.
+    /// Emitted per chain link (ADR-2 written-spelling); a chain `A→B→C→int`
+    /// produces three distinct ALIAS_OF edges, one per typedef node.
+    AliasOf,
+    /// A `using namespace` directive introduces a namespace into the current scope.
+    ///
+    /// Direction: `(scope)-[:USES_NAMESPACE]->(Namespace)`.
+    UsesNamespace,
+    /// A `using` declaration introduces a specific name from another scope.
+    ///
+    /// Direction: `(scope)-[:USES_DECLARATION]->(symbol)`.
+    /// Distinct from `UsesNamespace` (EC-04).  For `using Base::method`:
+    /// dual-emitted alongside the existing OVERRIDES/HAS_METHOD path (OQ-8).
+    UsesDeclaration,
 }
 
 impl EdgeKind {
@@ -82,6 +160,22 @@ impl EdgeKind {
             EdgeKind::BelongsToRepo => "BELONGS_TO_REPO",
             EdgeKind::ExternalRef => "EXTERNAL_REF",
             EdgeKind::ExpandsTo => "EXPANDS_TO",
+            // v7 S2:
+            EdgeKind::Returns => "RETURNS",
+            EdgeKind::HasParam => "HAS_PARAM",
+            EdgeKind::OfType => "OF_TYPE",
+            EdgeKind::PointsTo => "POINTS_TO",
+            EdgeKind::RefersTo => "REFERS_TO",
+            // v7 S3:
+            EdgeKind::TemplateParam => "TEMPLATE_PARAM",
+            EdgeKind::TemplateArg => "TEMPLATE_ARG",
+            EdgeKind::ConstrainedBy => "CONSTRAINED_BY",
+            // v7 S5:
+            EdgeKind::EnumeratorOf => "ENUMERATOR_OF",
+            EdgeKind::UnderlyingType => "UNDERLYING_TYPE",
+            EdgeKind::AliasOf => "ALIAS_OF",
+            EdgeKind::UsesNamespace => "USES_NAMESPACE",
+            EdgeKind::UsesDeclaration => "USES_DECLARATION",
         }
     }
 
@@ -103,6 +197,22 @@ impl EdgeKind {
             EdgeKind::BelongsToRepo,
             EdgeKind::ExternalRef,
             EdgeKind::ExpandsTo,
+            // v7 S2:
+            EdgeKind::Returns,
+            EdgeKind::HasParam,
+            EdgeKind::OfType,
+            EdgeKind::PointsTo,
+            EdgeKind::RefersTo,
+            // v7 S3:
+            EdgeKind::TemplateParam,
+            EdgeKind::TemplateArg,
+            EdgeKind::ConstrainedBy,
+            // v7 S5:
+            EdgeKind::EnumeratorOf,
+            EdgeKind::UnderlyingType,
+            EdgeKind::AliasOf,
+            EdgeKind::UsesNamespace,
+            EdgeKind::UsesDeclaration,
         ]
     }
 
@@ -128,6 +238,22 @@ impl EdgeKind {
             "BELONGS_TO_REPO" => Some(EdgeKind::BelongsToRepo),
             "EXTERNAL_REF" => Some(EdgeKind::ExternalRef),
             "EXPANDS_TO" => Some(EdgeKind::ExpandsTo),
+            // v7 S2:
+            "RETURNS" => Some(EdgeKind::Returns),
+            "HAS_PARAM" => Some(EdgeKind::HasParam),
+            "OF_TYPE" => Some(EdgeKind::OfType),
+            "POINTS_TO" => Some(EdgeKind::PointsTo),
+            "REFERS_TO" => Some(EdgeKind::RefersTo),
+            // v7 S3:
+            "TEMPLATE_PARAM" => Some(EdgeKind::TemplateParam),
+            "TEMPLATE_ARG" => Some(EdgeKind::TemplateArg),
+            "CONSTRAINED_BY" => Some(EdgeKind::ConstrainedBy),
+            // v7 S5:
+            "ENUMERATOR_OF" => Some(EdgeKind::EnumeratorOf),
+            "UNDERLYING_TYPE" => Some(EdgeKind::UnderlyingType),
+            "ALIAS_OF" => Some(EdgeKind::AliasOf),
+            "USES_NAMESPACE" => Some(EdgeKind::UsesNamespace),
+            "USES_DECLARATION" => Some(EdgeKind::UsesDeclaration),
             _ => None,
         }
     }
@@ -193,6 +319,32 @@ pub struct EdgeRecord {
     /// Destination endpoint's repository name.
     /// `== repo_name` for intra-repo edges; the cross-repo target repo for EXTERNAL_REF.
     pub dst_repo_name: String,
+
+    // ── v7 S1 promoted fields ─────────────────────────────────────────────────
+    /// C++ access specifier on `HasMethod`, `HasField`, and `Inherits` edges (ADR-3).
+    ///
+    /// Always emitted (including `"public"`) per OQ-9/ADR-3.
+    /// Values: `"public"` | `"protected"` | `"private"`.
+    /// `None` for all other edge kinds.
+    pub access: Option<String>,
+
+    // ── v7 S2 promoted fields ─────────────────────────────────────────────────
+    /// Ordering index for `HAS_PARAM`, `TEMPLATE_PARAM`, and `TEMPLATE_ARG` edges (ADR-5).
+    ///
+    /// Mirrors the target Parameter node's `param_index`; consumers sort on this field
+    /// for ordered traversal.  `None` for all other edge kinds.
+    pub edge_index: Option<i64>,
+
+    // ── v7 S4 promoted fields ─────────────────────────────────────────────────
+    /// Whether the `Inherits` edge represents virtual inheritance (ADR-3/design §3.4).
+    ///
+    /// `Some(true)` when the base class is virtually inherited (e.g. `virtual public Base`).
+    /// `Some(false)` for non-virtual inheritance.  `None` for all non-`Inherits` edge kinds.
+    ///
+    /// Pinned name `inherits_is_virtual` (NOT `is_virtual`) to prevent the schema_drift
+    /// word-boundary matcher from conflating it with the node-level method `is_virtual`
+    /// (design §3.4 / ADR-1).
+    pub inherits_is_virtual: Option<bool>,
 }
 
 #[cfg(test)]

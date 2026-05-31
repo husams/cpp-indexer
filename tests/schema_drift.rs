@@ -31,9 +31,9 @@ use std::path::Path;
 // Single source of truth for this test.  Names must match the `pub` field names
 // in `src/schema/nodes.rs` (NodeRecord) and `src/schema/edges.rs` (EdgeRecord).
 
-/// All 12 M8 promoted field names (10 node + 2 edge).
+/// All promoted field names: 12 M8 (10 node + 2 edge) + 20 v7 (17 node + 3 edge) = 32 total.
 const PROMOTED_FIELDS: &[&str] = &[
-    // Node fields (S40–S42)
+    // Node fields (S40–S42, M8)
     "return_type",
     "params",
     "signature",
@@ -44,9 +44,35 @@ const PROMOTED_FIELDS: &[&str] = &[
     "is_virtual",
     "is_pure_virtual",
     "is_static",
-    // Edge fields (S43)
+    // Edge fields (S43, M8)
     "source_association_type",
     "target_association_type",
+    // Node fields (v7 S1)
+    "is_const",
+    "is_constexpr",
+    "storage_class",
+    // Node fields (v7 S2)
+    "is_template",
+    "is_noexcept",
+    "is_override",
+    "is_deleted",
+    "is_defaulted",
+    "cv_qualifiers",
+    "ref_qualifier",
+    "is_final",
+    "is_abstract",
+    "record_kind",
+    "type_spelling",
+    "param_index",
+    "param_kind",
+    // Node fields (v7 S5)
+    "enum_value",
+    // Edge fields (v7 S1)
+    "access",
+    // Edge fields (v7 S2)
+    "edge_index",
+    // Edge fields (v7 S4)
+    "inherits_is_virtual",
 ];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

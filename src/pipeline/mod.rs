@@ -490,6 +490,23 @@ fn build_repo_node(
         file_id: allocator
             .and_then(|a| a.get_or_insert_file(&meta.root_path.to_string_lossy()).ok())
             .unwrap_or(0),
+        is_const: None,
+        is_constexpr: None,
+        storage_class: None,
+        is_template: None,
+        is_noexcept: None,
+        is_override: None,
+        is_deleted: None,
+        is_defaulted: None,
+        cv_qualifiers: None,
+        ref_qualifier: None,
+        is_final: None,
+        is_abstract: None,
+        record_kind: None,
+        type_spelling: None,
+        param_index: None,
+        param_kind: None,
+        enum_value: None,
     })
 }
 
@@ -514,6 +531,9 @@ fn belongs_to_repo_edge(node: &NodeRecord, repo: &NodeRecord) -> EdgeRecord {
             None
         },
         dst_repo_name: repo.repo_name.clone(),
+        access: None,
+        edge_index: None,
+        inherits_is_virtual: None,
     }
 }
 
@@ -1074,6 +1094,23 @@ mod tests {
             is_static: None,
             symbol_id,
             file_id: symbol_id,
+            is_const: None,
+            is_constexpr: None,
+            storage_class: None,
+            is_template: None,
+            is_noexcept: None,
+            is_override: None,
+            is_deleted: None,
+            is_defaulted: None,
+            cv_qualifiers: None,
+            ref_qualifier: None,
+            is_final: None,
+            is_abstract: None,
+            record_kind: None,
+            type_spelling: None,
+            param_index: None,
+            param_kind: None,
+            enum_value: None,
         }
     }
 

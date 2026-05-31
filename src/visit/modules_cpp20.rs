@@ -359,6 +359,24 @@ pub fn parse_module_tu(
         // Integer IDs populated by visit_tu_inner post-processing pass.
         symbol_id: 0,
         file_id: 0,
+        is_const: None,
+        is_constexpr: None,
+        storage_class: None,
+        // v7 S2 promoted fields — MODULE nodes carry none
+        is_template: None,
+        is_noexcept: None,
+        is_override: None,
+        is_deleted: None,
+        is_defaulted: None,
+        cv_qualifiers: None,
+        ref_qualifier: None,
+        is_final: None,
+        is_abstract: None,
+        record_kind: None,
+        type_spelling: None,
+        param_index: None,
+        param_kind: None,
+        enum_value: None,
     };
 
     let mut nodes = vec![module_node];
@@ -406,6 +424,24 @@ pub fn parse_module_tu(
                 // Integer IDs populated by visit_tu_inner post-processing pass.
                 symbol_id: 0,
                 file_id: 0,
+                is_const: None,
+                is_constexpr: None,
+                storage_class: None,
+                // v7 S2 promoted fields — MODULE nodes carry none
+                is_template: None,
+                is_noexcept: None,
+                is_override: None,
+                is_deleted: None,
+                is_defaulted: None,
+                cv_qualifiers: None,
+                ref_qualifier: None,
+                is_final: None,
+                is_abstract: None,
+                record_kind: None,
+                type_spelling: None,
+                param_index: None,
+                param_kind: None,
+                enum_value: None,
             };
             nodes.push(imported_node);
 
@@ -427,6 +463,11 @@ pub fn parse_module_tu(
                 src_id: 0,
                 dst_id: None,
                 dst_repo_name: repo_name.to_owned(),
+                // v7 S1: INCLUDES edges do not carry access
+                access: None,
+                // v7 S2: INCLUDES edges do not carry edge_index
+                edge_index: None,
+                inherits_is_virtual: None,
             });
 
             return EntityVisitResult::Continue;
@@ -498,6 +539,25 @@ pub fn parse_module_tu(
                 // Integer IDs populated by visit_tu_inner post-processing pass.
                 symbol_id: 0,
                 file_id: 0,
+                is_const: None,
+                is_constexpr: None,
+                storage_class: None,
+                // v7 S2 promoted fields — exported decl nodes carry none here
+                // (callable/template fields are populated by shallow.rs visitor)
+                is_template: None,
+                is_noexcept: None,
+                is_override: None,
+                is_deleted: None,
+                is_defaulted: None,
+                cv_qualifiers: None,
+                ref_qualifier: None,
+                is_final: None,
+                is_abstract: None,
+                record_kind: None,
+                type_spelling: None,
+                param_index: None,
+                param_kind: None,
+                enum_value: None,
             });
 
             // CONTAINS edge from module to exported decl.
@@ -518,6 +578,11 @@ pub fn parse_module_tu(
                 src_id: 0,
                 dst_id: None,
                 dst_repo_name: repo_name.to_owned(),
+                // v7 S1: CONTAINS edges do not carry access
+                access: None,
+                // v7 S2: CONTAINS edges do not carry edge_index
+                edge_index: None,
+                inherits_is_virtual: None,
             });
         }
 

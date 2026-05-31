@@ -66,6 +66,54 @@ const CQL_ENSURE_IS_STATIC_INDEX: &str =
 const CQL_ENSURE_KIND_RETURN_TYPE_INDEX: &str =
     "CREATE INDEX node_kind_return_type_idx IF NOT EXISTS FOR (n:Node) ON (n.kind, n.return_type)";
 
+// ── v7 S1 indexes ─────────────────────────────────────────────────────────────
+
+/// Index on `is_const` (v7 S1, covers field/gv const queries).
+const CQL_ENSURE_IS_CONST_INDEX: &str =
+    "CREATE INDEX node_is_const_idx IF NOT EXISTS FOR (n:Node) ON (n.is_const)";
+
+/// Index on `storage_class` (v7 S1, covers linkage queries).
+const CQL_ENSURE_STORAGE_CLASS_INDEX: &str =
+    "CREATE INDEX node_storage_class_idx IF NOT EXISTS FOR (n:Node) ON (n.storage_class)";
+
+/// Index on `access` edge property (v7 S1, covers Q6 access-filtered inheritance).
+const CQL_ENSURE_EDGE_ACCESS_INDEX: &str =
+    "CREATE INDEX edge_access_idx IF NOT EXISTS FOR ()-[r:EDGE]-() ON (r.access)";
+
+// ── v7 S2 indexes ─────────────────────────────────────────────────────────────
+
+/// Index on `is_template` (v7 S2).
+const CQL_ENSURE_IS_TEMPLATE_INDEX: &str =
+    "CREATE INDEX node_is_template_idx IF NOT EXISTS FOR (n:Node) ON (n.is_template)";
+
+/// Index on `is_abstract` (v7 S2, covers abstract-class queries).
+const CQL_ENSURE_IS_ABSTRACT_INDEX: &str =
+    "CREATE INDEX node_is_abstract_idx IF NOT EXISTS FOR (n:Node) ON (n.is_abstract)";
+
+/// Index on `type_spelling` (v7 S2, covers Type node lookup by spelling).
+const CQL_ENSURE_TYPE_SPELLING_INDEX: &str =
+    "CREATE INDEX node_type_spelling_idx IF NOT EXISTS FOR (n:Node) ON (n.type_spelling)";
+
+/// Index on `param_index` (v7 S2, covers ordered parameter queries).
+const CQL_ENSURE_PARAM_INDEX_INDEX: &str =
+    "CREATE INDEX node_param_index_idx IF NOT EXISTS FOR (n:Node) ON (n.param_index)";
+
+/// Index on `edge_index` edge property (v7 S2, covers ordered HAS_PARAM queries).
+const CQL_ENSURE_EDGE_INDEX_INDEX: &str =
+    "CREATE INDEX edge_edge_index_idx IF NOT EXISTS FOR ()-[r:EDGE]-() ON (r.edge_index)";
+
+// ── v7 S4 indexes ─────────────────────────────────────────────────────────────
+
+/// Index on `inherits_is_virtual` edge property (v7 S4, covers Q6 virtual-inheritance filter).
+const CQL_ENSURE_EDGE_INHERITS_IS_VIRTUAL_INDEX: &str =
+    "CREATE INDEX edge_inherits_is_virtual_idx IF NOT EXISTS FOR ()-[r:EDGE]-() ON (r.inherits_is_virtual)";
+
+// ── v7 S5 indexes ─────────────────────────────────────────────────────────────
+
+/// Index on `enum_value` (v7 S5, covers enumerator constant value queries).
+const CQL_ENSURE_ENUM_VALUE_INDEX: &str =
+    "CREATE INDEX node_enum_value_idx IF NOT EXISTS FOR (n:Node) ON (n.enum_value)";
+
 /// UNWIND + MERGE nodes; idempotent on `(symbol_id, repo_name)` (v6, graph-symbol-ids Story 3).
 ///
 /// Parameters: `rows` — a list of maps, each with keys matching the SET clause.
@@ -92,7 +140,24 @@ SET n.kind              = row.kind,
     n.template_args     = row.template_args,
     n.is_virtual        = row.is_virtual,
     n.is_pure_virtual   = row.is_pure_virtual,
-    n.is_static         = row.is_static
+    n.is_static         = row.is_static,
+    n.is_const          = row.is_const,
+    n.is_constexpr      = row.is_constexpr,
+    n.storage_class     = row.storage_class,
+    n.is_template       = row.is_template,
+    n.is_noexcept       = row.is_noexcept,
+    n.is_override       = row.is_override,
+    n.is_deleted        = row.is_deleted,
+    n.is_defaulted      = row.is_defaulted,
+    n.cv_qualifiers     = row.cv_qualifiers,
+    n.ref_qualifier     = row.ref_qualifier,
+    n.is_final          = row.is_final,
+    n.is_abstract       = row.is_abstract,
+    n.record_kind       = row.record_kind,
+    n.type_spelling     = row.type_spelling,
+    n.param_index       = row.param_index,
+    n.param_kind        = row.param_kind,
+    n.enum_value        = row.enum_value
 ";
 
 /// UNWIND + MERGE edges; idempotent on `(src_id, dst_id, kind)` (v6, graph-symbol-ids Story 3).
@@ -111,7 +176,10 @@ SET r.resolved                  = row.resolved,
     r.dst_repo_name             = row.dst_repo_name,
     r.attrs_json                = row.attrs_json,
     r.source_association_type   = row.source_association_type,
-    r.target_association_type   = row.target_association_type
+    r.target_association_type   = row.target_association_type,
+    r.access                    = row.access,
+    r.edge_index                = row.edge_index,
+    r.inherits_is_virtual       = row.inherits_is_virtual
 RETURN count(r) AS written
 ";
 
@@ -536,6 +604,59 @@ fn node_to_bolt(n: &NodeRecord) -> HashMap<String, BoltType> {
     );
     m.insert("is_static".into(), opt_bool_to_bolt(n.is_static));
 
+    // ── v7 S1 promoted fields ─────────────────────────────────────────────────
+    m.insert("is_const".into(), opt_bool_to_bolt(n.is_const));
+    m.insert("is_constexpr".into(), opt_bool_to_bolt(n.is_constexpr));
+    m.insert(
+        "storage_class".into(),
+        opt_str_to_bolt(n.storage_class.as_deref()),
+    );
+
+    // ── v7 S2 promoted fields ─────────────────────────────────────────────────
+    m.insert("is_template".into(), opt_bool_to_bolt(n.is_template));
+    m.insert("is_noexcept".into(), opt_bool_to_bolt(n.is_noexcept));
+    m.insert("is_override".into(), opt_bool_to_bolt(n.is_override));
+    m.insert("is_deleted".into(), opt_bool_to_bolt(n.is_deleted));
+    m.insert("is_defaulted".into(), opt_bool_to_bolt(n.is_defaulted));
+    m.insert(
+        "cv_qualifiers".into(),
+        opt_str_to_bolt(n.cv_qualifiers.as_deref()),
+    );
+    m.insert(
+        "ref_qualifier".into(),
+        opt_str_to_bolt(n.ref_qualifier.as_deref()),
+    );
+    m.insert("is_final".into(), opt_bool_to_bolt(n.is_final));
+    m.insert("is_abstract".into(), opt_bool_to_bolt(n.is_abstract));
+    m.insert(
+        "record_kind".into(),
+        opt_str_to_bolt(n.record_kind.as_deref()),
+    );
+    m.insert(
+        "type_spelling".into(),
+        opt_str_to_bolt(n.type_spelling.as_deref()),
+    );
+    m.insert(
+        "param_index".into(),
+        match n.param_index {
+            Some(v) => BoltType::from(v),
+            None => BoltType::Null(neo4rs::BoltNull),
+        },
+    );
+    m.insert(
+        "param_kind".into(),
+        opt_str_to_bolt(n.param_kind.as_deref()),
+    );
+
+    // ── v7 S5 promoted fields ─────────────────────────────────────────────────
+    m.insert(
+        "enum_value".into(),
+        match n.enum_value {
+            Some(v) => BoltType::from(v),
+            None => BoltType::Null(neo4rs::BoltNull),
+        },
+    );
+
     m
 }
 
@@ -566,6 +687,24 @@ fn edge_to_bolt(e: &EdgeRecord) -> Option<HashMap<String, BoltType>> {
         "target_association_type".into(),
         opt_str_to_bolt(e.target_association_type.as_deref()),
     );
+    // v7 S1 promoted edge field
+    m.insert("access".into(), opt_str_to_bolt(e.access.as_deref()));
+    // v7 S2 promoted edge field
+    m.insert(
+        "edge_index".into(),
+        match e.edge_index {
+            Some(v) => BoltType::from(v),
+            None => BoltType::Null(neo4rs::BoltNull),
+        },
+    );
+    // v7 S4 promoted edge field
+    m.insert(
+        "inherits_is_virtual".into(),
+        match e.inherits_is_virtual {
+            Some(v) => BoltType::from(v),
+            None => BoltType::Null(neo4rs::BoltNull),
+        },
+    );
     Some(m)
 }
 
@@ -594,6 +733,20 @@ impl GraphSink for Neo4jSink {
             CQL_ENSURE_IS_VIRTUAL_INDEX,
             CQL_ENSURE_IS_STATIC_INDEX,
             CQL_ENSURE_KIND_RETURN_TYPE_INDEX,
+            // v7 S1 indexes.
+            CQL_ENSURE_IS_CONST_INDEX,
+            CQL_ENSURE_STORAGE_CLASS_INDEX,
+            CQL_ENSURE_EDGE_ACCESS_INDEX,
+            // v7 S2 indexes.
+            CQL_ENSURE_IS_TEMPLATE_INDEX,
+            CQL_ENSURE_IS_ABSTRACT_INDEX,
+            CQL_ENSURE_TYPE_SPELLING_INDEX,
+            CQL_ENSURE_PARAM_INDEX_INDEX,
+            CQL_ENSURE_EDGE_INDEX_INDEX,
+            // v7 S4 indexes.
+            CQL_ENSURE_EDGE_INHERITS_IS_VIRTUAL_INDEX,
+            // v7 S5 indexes.
+            CQL_ENSURE_ENUM_VALUE_INDEX,
         ] {
             match self.graph.run(query(cql)).await {
                 Ok(()) => {}
@@ -843,6 +996,23 @@ mod tests {
             is_static: None,
             symbol_id: 42,
             file_id: 7,
+            is_const: None,
+            is_constexpr: None,
+            storage_class: None,
+            is_template: None,
+            is_noexcept: None,
+            is_override: None,
+            is_deleted: None,
+            is_defaulted: None,
+            cv_qualifiers: None,
+            ref_qualifier: None,
+            is_final: None,
+            is_abstract: None,
+            record_kind: None,
+            type_spelling: None,
+            param_index: None,
+            param_kind: None,
+            enum_value: None,
         }
     }
 
@@ -864,6 +1034,9 @@ mod tests {
             src_id: 42,
             dst_id,
             dst_repo_name: "test-repo".to_owned(),
+            access: None,
+            edge_index: None,
+            inherits_is_virtual: None,
         }
     }
 
@@ -932,7 +1105,7 @@ mod tests {
         }
     }
 
-    /// AC-S44-1: CQL_MERGE_NODES contains all 10 promoted node properties.
+    /// AC-S44-1: CQL_MERGE_NODES contains all promoted node properties (M8 + v7 S1).
     #[test]
     fn cql_merge_nodes_contains_all_promoted_fields() {
         for field in &[
@@ -946,6 +1119,12 @@ mod tests {
             "is_virtual",
             "is_pure_virtual",
             "is_static",
+            // v7 S1:
+            "is_const",
+            "is_constexpr",
+            "storage_class",
+            // v7 S5:
+            "enum_value",
         ] {
             assert!(
                 CQL_MERGE_NODES.contains(field),
@@ -954,7 +1133,7 @@ mod tests {
         }
     }
 
-    /// AC-S44-2: CQL_MERGE_EDGES contains both association type fields.
+    /// AC-S44-2: CQL_MERGE_EDGES contains all promoted edge fields (M8 + v7 S1).
     #[test]
     fn cql_merge_edges_contains_association_type_fields() {
         assert!(
@@ -964,6 +1143,14 @@ mod tests {
         assert!(
             CQL_MERGE_EDGES.contains("target_association_type"),
             "CQL_MERGE_EDGES missing target_association_type"
+        );
+        assert!(
+            CQL_MERGE_EDGES.contains("access"),
+            "CQL_MERGE_EDGES missing v7 S1 access field"
+        );
+        assert!(
+            CQL_MERGE_EDGES.contains("inherits_is_virtual"),
+            "CQL_MERGE_EDGES missing v7 S4 inherits_is_virtual field"
         );
     }
 
@@ -1021,7 +1208,7 @@ mod tests {
         );
     }
 
-    /// AC-S44-1: node_to_bolt includes all 10 promoted M8 fields.
+    /// AC-S44-1: node_to_bolt includes all promoted fields (M8 + v7 S1).
     #[test]
     fn node_to_bolt_includes_all_m8_promoted_fields() {
         let node = sample_node("c:@F@foo");
@@ -1037,8 +1224,14 @@ mod tests {
             "is_virtual",
             "is_pure_virtual",
             "is_static",
+            // v7 S1:
+            "is_const",
+            "is_constexpr",
+            "storage_class",
+            // v7 S5:
+            "enum_value",
         ] {
-            assert!(m.contains_key(*key), "node_to_bolt missing M8 field: {key}");
+            assert!(m.contains_key(*key), "node_to_bolt missing field: {key}");
         }
     }
 
@@ -1058,6 +1251,12 @@ mod tests {
             "is_virtual",
             "is_pure_virtual",
             "is_static",
+            // v7 S1:
+            "is_const",
+            "is_constexpr",
+            "storage_class",
+            // v7 S5:
+            "enum_value",
         ] {
             assert!(
                 matches!(m[*key], BoltType::Null(_)),
@@ -1285,6 +1484,91 @@ mod tests {
         assert!(
             tgt_dbg.contains("write"),
             "target_association_type must be 'write'; got {tgt_dbg}"
+        );
+    }
+
+    /// v7 S1: edge_to_bolt includes access field; None → BoltNull.
+    #[test]
+    fn edge_to_bolt_includes_access_field() {
+        let edge = sample_edge("a", Some("b"));
+        let m = edge_to_bolt(&edge).unwrap();
+        assert!(
+            m.contains_key("access"),
+            "edge map must contain access (v7 S1)"
+        );
+        assert!(
+            matches!(m["access"], BoltType::Null(_)),
+            "None access must be BoltNull"
+        );
+    }
+
+    /// v7 S1: access Some("protected") serializes to BoltString.
+    #[test]
+    fn edge_to_bolt_some_access_is_bolt_string() {
+        let mut edge = sample_edge("a", Some("b"));
+        edge.access = Some("protected".to_owned());
+        let m = edge_to_bolt(&edge).unwrap();
+        let dbg = format!("{:?}", m["access"]);
+        assert!(
+            dbg.contains("protected"),
+            "access must be 'protected'; got {dbg}"
+        );
+    }
+
+    /// v7 S4: edge_to_bolt includes inherits_is_virtual field; None → BoltNull.
+    #[test]
+    fn edge_to_bolt_includes_inherits_is_virtual_field() {
+        let edge = sample_edge("a", Some("b"));
+        let m = edge_to_bolt(&edge).unwrap();
+        assert!(
+            m.contains_key("inherits_is_virtual"),
+            "edge map must contain inherits_is_virtual (v7 S4)"
+        );
+        assert!(
+            matches!(m["inherits_is_virtual"], BoltType::Null(_)),
+            "None inherits_is_virtual must be BoltNull"
+        );
+    }
+
+    /// v7 S4: inherits_is_virtual Some(true) serializes to BoltBoolean.
+    #[test]
+    fn edge_to_bolt_some_inherits_is_virtual_true_is_bolt_boolean() {
+        let mut edge = sample_edge("a", Some("b"));
+        edge.kind = EdgeKind::Inherits;
+        edge.inherits_is_virtual = Some(true);
+        let m = edge_to_bolt(&edge).unwrap();
+        let dbg = format!("{:?}", m["inherits_is_virtual"]);
+        assert!(
+            dbg.contains("true"),
+            "inherits_is_virtual Some(true) must be BoltBoolean(true); got {dbg}"
+        );
+    }
+
+    /// v7 S5: node_to_bolt includes enum_value field; None → BoltNull.
+    #[test]
+    fn node_to_bolt_includes_enum_value_field() {
+        let node = sample_node("c:@E@Color@Red");
+        let m = node_to_bolt(&node);
+        assert!(
+            m.contains_key("enum_value"),
+            "node map must contain enum_value (v7 S5)"
+        );
+        assert!(
+            matches!(m["enum_value"], BoltType::Null(_)),
+            "None enum_value must be BoltNull"
+        );
+    }
+
+    /// v7 S5: enum_value Some(42) serializes to BoltInteger.
+    #[test]
+    fn node_to_bolt_some_enum_value_is_bolt_integer() {
+        let mut node = sample_node("c:@E@Color@Red");
+        node.enum_value = Some(42);
+        let m = node_to_bolt(&node);
+        let dbg = format!("{:?}", m["enum_value"]);
+        assert!(
+            dbg.contains("42"),
+            "enum_value Some(42) must be BoltInteger(42); got {dbg}"
         );
     }
 

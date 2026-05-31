@@ -19,17 +19,23 @@
 /// NodeRecord and `src_id`, `dst_id`, `dst_repo_name` on EdgeRecord. Both sinks write integer IDs
 /// only (no `usr`/`src_usr`/`dst_usr` strings in the durable graph). Pre-v6 graphs are refused at
 /// handshake (adr-2, adr-4).
+/// Bumped in v7 full-AST schema (S1–S6): added Type/Parameter/TemplateArg/Enumerator/Concept
+/// nodes; Returns/HasParam/OfType/PointsTo/RefersTo/TemplateParam/TemplateArg/ConstrainedBy/
+/// EnumeratorOf/UnderlyingType/AliasOf/UsesNamespace/UsesDeclaration edges; new native columns
+/// is_const/is_constexpr/storage_class/is_template/is_noexcept/is_override/is_deleted/
+/// is_defaulted/cv_qualifiers/ref_qualifier/is_final/is_abstract/record_kind/type_spelling/
+/// param_index/param_kind/enum_value on nodes; access/inherits_is_virtual/edge_index on edges.
 /// Any further change to NodeKind/EdgeKind variants must bump again per ADR-9.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// Human-readable schema tag derived from `SCHEMA_VERSION`.
 ///
 /// ADR-9 references `const_format::concatcp!` to derive this; since `const_format` is not in
 /// Cargo.toml, we use a hand-written string literal with a `debug_assert!` to keep them in sync.
-pub const SCHEMA_VERSION_TAG: &str = "cxg-schema-v6";
+pub const SCHEMA_VERSION_TAG: &str = "cxg-schema-v7";
 
 /// Magic key stored in Parquet KV metadata; Phase 3 refuses mismatched-version shards.
-pub const PARQUET_MAGIC: &str = "cxg_parquet_v6";
+pub const PARQUET_MAGIC: &str = "cxg_parquet_v7";
 
 /// Build the `attrs_json` payload for the `SchemaVersion` node written by Phase 4.
 ///

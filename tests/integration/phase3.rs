@@ -54,6 +54,23 @@ fn make_node(i: usize) -> NodeRecord {
         is_static: None,
         symbol_id: i as i64 + 1,
         file_id: i as i64 + 1,
+        is_const: None,
+        is_constexpr: None,
+        storage_class: None,
+        is_template: None,
+        is_noexcept: None,
+        is_override: None,
+        is_deleted: None,
+        is_defaulted: None,
+        cv_qualifiers: None,
+        ref_qualifier: None,
+        is_final: None,
+        is_abstract: None,
+        record_kind: None,
+        type_spelling: None,
+        param_index: None,
+        param_kind: None,
+        enum_value: None,
     }
 }
 
@@ -73,6 +90,9 @@ fn make_within_repo_edge(i: usize) -> EdgeRecord {
         src_id: 0,
         dst_id: None,
         dst_repo_name: "test-repo".to_owned(),
+        access: None,
+        edge_index: None,
+        inherits_is_virtual: None,
     }
 }
 
@@ -92,6 +112,9 @@ fn make_unresolved_edge(i: usize) -> EdgeRecord {
         src_id: 0,
         dst_id: None,
         dst_repo_name: "test-repo".to_owned(),
+        access: None,
+        edge_index: None,
+        inherits_is_virtual: None,
     }
 }
 
@@ -216,6 +239,9 @@ fn phase3_preserves_placeholder_edges_unchanged() {
         src_id: 0,
         dst_id: None,
         dst_repo_name: "test-repo".to_owned(),
+        access: None,
+        edge_index: None,
+        inherits_is_virtual: None,
     };
 
     let batch = edges_to_record_batch(&[placeholder]).expect("batch");
@@ -238,6 +264,9 @@ fn phase3_preserves_placeholder_edges_unchanged() {
         src_id: 0,
         dst_id: None,
         dst_repo_name: "test-repo".to_owned(),
+        access: None,
+        edge_index: None,
+        inherits_is_virtual: None,
     };
     drop(batch); // batch was only created to verify serialisability
     w2.write_edges(&[placeholder2]).unwrap();

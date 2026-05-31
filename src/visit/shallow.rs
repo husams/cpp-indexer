@@ -380,6 +380,25 @@ fn visit_tu_inner(
         // Integer IDs populated by post-processing pass below.
         symbol_id: 0,
         file_id: 0,
+        // v7 S1 promoted fields — MODULE nodes carry none
+        is_const: None,
+        is_constexpr: None,
+        storage_class: None,
+        // v7 S2 promoted fields — MODULE nodes carry none
+        is_template: None,
+        is_noexcept: None,
+        is_override: None,
+        is_deleted: None,
+        is_defaulted: None,
+        cv_qualifiers: None,
+        ref_qualifier: None,
+        is_final: None,
+        is_abstract: None,
+        record_kind: None,
+        type_spelling: None,
+        param_index: None,
+        param_kind: None,
+        enum_value: None,
     };
     collector.nodes.push(module_node);
     collector.module_usr = Some(module_usr);
@@ -558,6 +577,19 @@ impl<'a> Collector<'a> {
             return;
         }
 
+        // ── v7 S5: USES_NAMESPACE (using-directive) / USES_DECLARATION (using-decl) ──
+        // These entity kinds are not tracked as nodes (no USR-keyed node needed),
+        // so they are intercepted before the `entity_kind_to_node_kind` filter and
+        // returned early after emitting the appropriate edge.
+        if kind == EntityKind::UsingDirective {
+            self.emit_uses_namespace_edge(&entity, &parent);
+            return;
+        }
+        if kind == EntityKind::UsingDeclaration {
+            self.emit_uses_declaration_edge(&entity, &parent);
+            return;
+        }
+
         let node_kind = match entity_kind_to_node_kind(kind) {
             Some(k) if k != NodeKind::Module => k,
             _ => return,
@@ -587,9 +619,22 @@ impl<'a> Collector<'a> {
         }
 
         // USR is the primary key; skip entities without one.
+        // v7 S5 (OQ-7): anonymous Enum nodes get a synthetic USR derived from their
+        // source location (`enum:<file>:<line>:<col>`) so they are not silently dropped.
         let usr = match entity.get_usr() {
             Some(u) if !u.0.is_empty() => u.0,
-            _ => return,
+            _ => {
+                // Synthesize USR for anonymous enums only; other kinds are dropped.
+                if node_kind == NodeKind::Enum {
+                    let (file_path_loc, line_loc, col_loc) =
+                        extract_location(&entity, &self.tu_file_path);
+                    let line_val = line_loc.unwrap_or(0);
+                    let col_val = col_loc.unwrap_or(0);
+                    format!("enum:{file_path_loc}:{line_val}:{col_val}")
+                } else {
+                    return;
+                }
+            }
         };
 
         // System-header filter (AC-M2-14 / AC-M2-15).
@@ -638,6 +683,126 @@ impl<'a> Collector<'a> {
             _ => (None, None, None),
         };
 
+        // v7 S1: extract is_const / is_constexpr / storage_class for Field and GlobalVariable.
+        // - is_const: type-level const qualifier via clang_isConstQualifiedType.
+        // - is_constexpr: not directly exposed by libclang 18 — always emitted as Some(false);
+        //   tracked as a follow-up limitation in implementation-notes.md.
+        // - storage_class: mapped from clang StorageClass enum.
+        // - is_static on Field/GlobalVariable is also mapped from StorageClass.
+        let (is_const, is_constexpr, storage_class) =
+            if matches!(node_kind, NodeKind::Field | NodeKind::GlobalVariable) {
+                let const_qualified = entity
+                    .get_type()
+                    .map(|t| t.is_const_qualified())
+                    .unwrap_or(false);
+                let sc_str = entity
+                    .get_storage_class()
+                    .map(|sc| match sc {
+                        clang::StorageClass::None => "none",
+                        clang::StorageClass::Auto => "auto",
+                        clang::StorageClass::Static => "static",
+                        clang::StorageClass::Extern => "extern",
+                        clang::StorageClass::Register => "register",
+                        _ => "none",
+                    })
+                    .unwrap_or("none");
+                (
+                    Some(const_qualified),
+                    Some(false), // libclang 18 does not expose is_constexpr for variables
+                    Some(sc_str.to_owned()),
+                )
+            } else {
+                (None, None, None)
+            };
+
+        // v7 S2: extract extended Function/Method props.
+        // NOTE: several fields are not yet exposed by clang-rs 2.0.0 and are
+        // always emitted as Some(false) until the binding is available.
+        // Tracked as follow-ups in implementation-notes.md.
+        //
+        // NOTE on is_template: ClassTemplate/FunctionTemplate map to NodeKind::TemplateDef
+        // (not Class/Function/Method), so the is_template field on those TemplateDef nodes
+        // is set in the TemplateDef branch below.  Function/Method nodes that are
+        // non-template specialisations have is_template derived from get_template().
+        let (
+            is_template_node,
+            is_noexcept,
+            is_override,
+            is_deleted,
+            is_defaulted,
+            cv_qualifiers,
+            ref_qualifier,
+        ) = if matches!(node_kind, NodeKind::Function | NodeKind::Method) {
+            // A Function/Method can be a specialisation of a function template.
+            // get_template() returns Some when this entity is a specialisation.
+            let tmpl = entity.get_template().is_some();
+
+            // cv_qualifiers: derived from is_const_method (volatile not exposed)
+            let cv = if node_kind == NodeKind::Method && entity.is_const_method() {
+                "const".to_owned()
+            } else {
+                String::new()
+            };
+            // ref_qualifier: from the type's ref qualifier
+            let rq = entity
+                .get_type()
+                .and_then(|t| t.get_ref_qualifier())
+                .map(|rq| match rq {
+                    clang::RefQualifier::LValue => "&",
+                    clang::RefQualifier::RValue => "&&",
+                })
+                .unwrap_or("")
+                .to_owned();
+
+            (
+                Some(tmpl),
+                Some(false), // is_noexcept: not exposed by clang-rs 2.0.0
+                Some(false), // is_override: not exposed by clang-rs 2.0.0
+                Some(false), // is_deleted: not exposed by clang-rs 2.0.0
+                Some(false), // is_defaulted: requires clang_3_9 feature (not enabled)
+                Some(cv),
+                Some(rq),
+            )
+        } else {
+            (None, None, None, None, None, None, None)
+        };
+
+        // v7 S2: extract Class props.  Note: ClassDecl/StructDecl → NodeKind::Class.
+        // ClassTemplate → NodeKind::TemplateDef (handled below); it never enters this branch.
+        let (is_template_class, is_final, is_abstract, record_kind) =
+            if matches!(node_kind, NodeKind::Class | NodeKind::Specialization) {
+                // A Class node that is a concrete specialisation of a class template
+                // has get_template() → Some.  Pure ClassDecl has None.
+                let tmpl = entity.get_template().is_some();
+                // is_abstract: requires clang_6_0 feature (enabled in Cargo.toml)
+                let abstract_val = entity.is_abstract_record();
+                // record_kind: derived from entity kind
+                let rk = match entity.get_kind() {
+                    clang::EntityKind::StructDecl => "struct",
+                    clang::EntityKind::UnionDecl => "union",
+                    _ => "class",
+                };
+                (
+                    Some(tmpl),
+                    Some(false), // is_final: not exposed by clang-rs 2.0.0
+                    Some(abstract_val),
+                    Some(rk.to_owned()),
+                )
+            } else {
+                (None, None, None, None)
+            };
+
+        // TemplateDef nodes (ClassTemplate, FunctionTemplate, TypeAliasTemplateDecl)
+        // ARE templates by definition.
+        let is_template_def = if node_kind == NodeKind::TemplateDef {
+            Some(true)
+        } else {
+            None
+        };
+
+        // Merge is_template from all paths (one column shared).
+        let is_template = is_template_node.or(is_template_class).or(is_template_def);
+
         let node = NodeRecord {
             usr: usr.clone(),
             kind: node_kind,
@@ -668,15 +833,79 @@ impl<'a> Collector<'a> {
             // Integer IDs populated by post-processing pass in visit_tu_inner.
             symbol_id: 0,
             file_id: 0,
+            // v7 S1: field/gv props populated above
+            is_const,
+            is_constexpr,
+            storage_class,
+            // v7 S2: extended fn/class props
+            is_template,
+            is_noexcept,
+            is_override,
+            is_deleted,
+            is_defaulted,
+            cv_qualifiers,
+            ref_qualifier,
+            is_final,
+            is_abstract,
+            record_kind,
+            // Type/Parameter nodes carry type_spelling/param_index/param_kind,
+            // but these are populated by dedicated emit helpers (not this path).
+            type_spelling: None,
+            param_index: None,
+            param_kind: None,
+            // Enumerator nodes carry enum_value, populated by emit_enum_enumerators.
+            enum_value: None,
         };
 
-        self.nodes.push(node);
+        self.nodes.push(node.clone());
 
         // Emit structural edges from parent.
         self.emit_structural_edges(&usr, node_kind, &entity, &parent);
 
         // M2 extension edges.
         self.emit_m2_edges(&usr, node_kind, &entity);
+
+        // v7 S2: emit RETURNS + HAS_PARAM + OF_TYPE type-graph edges for fn/method.
+        self.emit_type_graph_edges(&usr, node_kind, &entity, &node);
+
+        // v7 S2: emit OF_TYPE for Field nodes (design §3.5: "(Parameter|Field)-[:OF_TYPE]->(Type)").
+        if node_kind == NodeKind::Field {
+            if let Some(field_type) = entity.get_type() {
+                let spelling = field_type.get_display_name();
+                if !spelling.is_empty() {
+                    let type_usr = self.get_or_create_type_node(&spelling);
+                    self.push_edge_full(
+                        usr.clone(),
+                        type_usr,
+                        EdgeKind::OfType,
+                        "{}".to_owned(),
+                        None,
+                        None,
+                        None,
+                    );
+                }
+            }
+        }
+
+        // v7 S3: emit TEMPLATE_PARAM edges for TemplateDef nodes.
+        if node_kind == NodeKind::TemplateDef {
+            self.emit_template_param_edges(&usr, &entity);
+        }
+
+        // v7 S3: emit TEMPLATE_ARG positional nodes + edges for Specialization nodes (ADR-5).
+        if node_kind == NodeKind::Specialization {
+            self.emit_template_arg_nodes(&usr, &entity);
+        }
+
+        // v7 S5: emit Enumerator nodes + ENUMERATOR_OF edges + UNDERLYING_TYPE for Enum nodes.
+        if node_kind == NodeKind::Enum {
+            self.emit_enum_enumerators(&usr, &entity);
+        }
+
+        // v7 S5: emit ALIAS_OF edge for Typedef nodes (one link per typedef in the chain).
+        if node_kind == NodeKind::Typedef {
+            self.emit_typedef_alias_of(&usr, &entity);
+        }
     }
 
     /// Emit a MACRO node for a MacroDefinition entity (AC-M5-1).
@@ -860,6 +1089,12 @@ impl<'a> Collector<'a> {
             src_id: 0,
             dst_id: None,
             dst_repo_name: self.repo_name.to_owned(),
+            // v7 S1: USES edges do not carry access
+            access: None,
+            // v7 S2: USES edges do not carry edge_index
+            edge_index: None,
+            // v7 S4: USES edges do not carry inherits_is_virtual
+            inherits_is_virtual: None,
         });
     }
 
@@ -912,6 +1147,25 @@ impl<'a> Collector<'a> {
             // Integer IDs populated by post-processing pass in visit_tu_inner.
             symbol_id: 0,
             file_id: 0,
+            // v7 S1 promoted fields — HEADER nodes carry none
+            is_const: None,
+            is_constexpr: None,
+            storage_class: None,
+            // v7 S2 promoted fields — HEADER nodes carry none
+            is_template: None,
+            is_noexcept: None,
+            is_override: None,
+            is_deleted: None,
+            is_defaulted: None,
+            cv_qualifiers: None,
+            ref_qualifier: None,
+            is_final: None,
+            is_abstract: None,
+            record_kind: None,
+            type_spelling: None,
+            param_index: None,
+            param_kind: None,
+            enum_value: None,
         };
         self.nodes.push(header_node);
 
@@ -1038,7 +1292,30 @@ impl<'a> Collector<'a> {
             Some(u) if !u.0.is_empty() && u.0 != derived_usr => u.0,
             _ => return,
         };
-        self.push_edge(derived_usr.clone(), target_usr.clone(), EdgeKind::Inherits);
+        // v7 S1 (ADR-3/OQ-9): always emit `access` on INHERITS edges (default "public").
+        let access = entity
+            .get_accessibility()
+            .map(|a| match a {
+                clang::Accessibility::Public => "public",
+                clang::Accessibility::Protected => "protected",
+                clang::Accessibility::Private => "private",
+            })
+            .unwrap_or("public");
+
+        // v7 S4: emit `inherits_is_virtual` on INHERITS edges (ADR-3/design §3.4).
+        // Pinned name `inherits_is_virtual` (not `is_virtual`) to avoid schema_drift collision
+        // with the method-level `is_virtual` node property (design §3.4 / ADR-1).
+        let inherits_is_virtual = entity.is_virtual_base();
+
+        self.push_edge_full(
+            derived_usr.clone(),
+            target_usr.clone(),
+            EdgeKind::Inherits,
+            "{}".to_owned(),
+            Some(access.to_owned()),
+            None, // INHERITS edges do not carry edge_index
+            Some(inherits_is_virtual),
+        );
         // When the base is a template instantiation (`Box<double>`), the derived
         // class also instantiates the primary template.  A `BaseSpecifier` reports
         // no semantic/lexical parent, so the `TemplateRef` handler cannot reach the
@@ -1124,7 +1401,7 @@ impl<'a> Collector<'a> {
         &mut self,
         child_usr: &str,
         child_kind: NodeKind,
-        _entity: &clang::Entity<'_>,
+        entity: &clang::Entity<'_>,
         parent: &clang::Entity<'_>,
     ) {
         let parent_kind_raw = parent.get_kind();
@@ -1152,7 +1429,31 @@ impl<'a> Collector<'a> {
             _ => EdgeKind::Contains,
         };
 
-        self.push_edge(parent_usr, child_usr.to_owned(), edge_kind);
+        // v7 S1 (ADR-3/OQ-9): always emit `access` on HAS_METHOD and HAS_FIELD edges,
+        // including "public".  CONTAINS and other edges get `None`.
+        let access = if matches!(edge_kind, EdgeKind::HasMethod | EdgeKind::HasField) {
+            let acc_str = entity
+                .get_accessibility()
+                .map(|a| match a {
+                    clang::Accessibility::Public => "public",
+                    clang::Accessibility::Protected => "protected",
+                    clang::Accessibility::Private => "private",
+                })
+                .unwrap_or("public"); // default per design §3.4
+            Some(acc_str.to_owned())
+        } else {
+            None
+        };
+
+        self.push_edge_full(
+            parent_usr,
+            child_usr.to_owned(),
+            edge_kind,
+            "{}".to_owned(),
+            access,
+            None, // HAS_METHOD/HAS_FIELD/CONTAINS do not carry edge_index
+            None, // HAS_METHOD/HAS_FIELD/CONTAINS do not carry inherits_is_virtual
+        );
     }
 
     fn push_edge(&mut self, src: String, dst: String, kind: EdgeKind) {
@@ -1160,6 +1461,28 @@ impl<'a> Collector<'a> {
     }
 
     fn push_edge_with_attrs(&mut self, src: String, dst: String, kind: EdgeKind, attrs: String) {
+        self.push_edge_full(src, dst, kind, attrs, None, None, None);
+    }
+
+    /// Core edge builder; called by all emit helpers.
+    ///
+    /// `access` is `Some("public"|"protected"|"private")` for HAS_METHOD, HAS_FIELD, and
+    /// INHERITS edges; `None` for all other edge kinds (ADR-3/OQ-9).
+    ///
+    /// `edge_index` is `Some(i)` for HAS_PARAM edges (ADR-5); `None` for all other kinds.
+    ///
+    /// `inherits_is_virtual` is `Some(bool)` for INHERITS edges only (v7 S4); `None` for all others.
+    #[allow(clippy::too_many_arguments)] // 8 params: private internal builder, not public API
+    fn push_edge_full(
+        &mut self,
+        src: String,
+        dst: String,
+        kind: EdgeKind,
+        attrs: String,
+        access: Option<String>,
+        edge_index: Option<i64>,
+        inherits_is_virtual: Option<bool>,
+    ) {
         self.edges.push(EdgeRecord {
             src_usr: src,
             dst_usr: Some(dst),
@@ -1178,7 +1501,713 @@ impl<'a> Collector<'a> {
             src_id: 0,
             dst_id: None,
             dst_repo_name: self.repo_name.to_owned(),
+            // v7 S1: access column (always emitted on HAS_METHOD/HAS_FIELD/INHERITS)
+            access,
+            // v7 S2: edge_index column (Some on HAS_PARAM, None otherwise)
+            edge_index,
+            // v7 S4: inherits_is_virtual column (Some on INHERITS, None otherwise)
+            inherits_is_virtual,
         });
+    }
+
+    // ── v7 S2: Type node get-or-create + type-graph edge emission ────────────
+
+    /// Get-or-create a `Type` node for the given written spelling (ADR-2).
+    ///
+    /// The synthetic USR `type:<spelling>` uniquely identifies the type globally
+    /// within a run.  If a node with that USR was already pushed in this TU,
+    /// this is a no-op; dedup across TUs happens at the symbol allocator level.
+    ///
+    /// Returns the synthetic USR so the caller can push edges to it.
+    fn get_or_create_type_node(&mut self, spelling: &str) -> String {
+        let usr = format!("type:{spelling}");
+        // Avoid re-pushing the same Type node within one TU by checking if we
+        // already have a node with this USR.  Phase 3 deduplicates across TUs.
+        let already_present = self.nodes.iter().any(|n| n.usr == usr);
+        if !already_present {
+            let node = NodeRecord {
+                usr: usr.clone(),
+                kind: NodeKind::Type,
+                name: spelling.to_owned(),
+                qualified_name: spelling.to_owned(),
+                mangled_name: None,
+                file_path: self.tu_file_path.clone(),
+                line: None,
+                col: None,
+                repo_name: self.repo_name.to_owned(),
+                attrs_json: "{}".to_owned(),
+                partial: self.partial,
+                phase: 1,
+                tu_hash: self.tu_hash,
+                // M8 promoted fields — Type nodes carry none
+                return_type: None,
+                params: None,
+                signature: None,
+                code: None,
+                code_truncated: None,
+                template_params: None,
+                template_args: None,
+                is_virtual: None,
+                is_pure_virtual: None,
+                is_static: None,
+                // Integer IDs populated by post-processing pass.
+                symbol_id: 0,
+                file_id: 0,
+                // v7 S1: Type nodes carry none
+                is_const: None,
+                is_constexpr: None,
+                storage_class: None,
+                // v7 S2: Type node carries type_spelling
+                is_template: None,
+                is_noexcept: None,
+                is_override: None,
+                is_deleted: None,
+                is_defaulted: None,
+                cv_qualifiers: None,
+                ref_qualifier: None,
+                is_final: None,
+                is_abstract: None,
+                record_kind: None,
+                type_spelling: Some(spelling.to_owned()),
+                param_index: None,
+                param_kind: None,
+                enum_value: None,
+            };
+            self.nodes.push(node);
+
+            // Recurse one declarator level: pointer → POINTS_TO, reference → REFERS_TO.
+            // We check the SPELLING to detect `*` or `&` declarators (written form, ADR-2).
+            // This avoids chasing canonical types which would collapse cv-qualified chains.
+            if spelling.ends_with('*') {
+                // Strip trailing `*` (and possible spaces) to get the pointee spelling.
+                let pointee = spelling.trim_end_matches('*').trim_end();
+                if !pointee.is_empty() && pointee != spelling {
+                    let pointee_usr = self.get_or_create_type_node(pointee);
+                    self.push_edge(usr.clone(), pointee_usr, EdgeKind::PointsTo);
+                }
+            } else if spelling.ends_with('&') {
+                // Strip trailing `&` (handles both `&` and `&&` via the written spelling).
+                let referent = spelling.trim_end_matches('&').trim_end();
+                if !referent.is_empty() && referent != spelling {
+                    let referent_usr = self.get_or_create_type_node(referent);
+                    self.push_edge(usr.clone(), referent_usr, EdgeKind::RefersTo);
+                }
+            }
+        }
+        usr
+    }
+
+    /// Emit RETURNS, HAS_PARAM, and OF_TYPE edges for Function/Method nodes (S2).
+    ///
+    /// Called after the Function/Method node has been pushed.
+    /// Graceful degradation: failures on individual params skip that param but
+    /// do not fail the TU (C5 / Issue-0001 guard).
+    fn emit_type_graph_edges(
+        &mut self,
+        fn_usr: &str,
+        node_kind: NodeKind,
+        entity: &clang::Entity<'_>,
+        _node: &NodeRecord,
+    ) {
+        if !matches!(node_kind, NodeKind::Function | NodeKind::Method) {
+            return;
+        }
+
+        // ── RETURNS edge ─────────────────────────────────────────────────────
+        if let Some(ret_type) = entity.get_result_type() {
+            let spelling = ret_type.get_display_name();
+            let type_usr = self.get_or_create_type_node(&spelling);
+            self.push_edge_full(
+                fn_usr.to_owned(),
+                type_usr,
+                EdgeKind::Returns,
+                "{}".to_owned(),
+                None,
+                None,
+                None,
+            );
+        }
+
+        // ── HAS_PARAM edges (one per parameter) ──────────────────────────────
+        let args = entity.get_arguments().unwrap_or_default();
+        for (idx, arg) in args.iter().enumerate() {
+            let param_index = idx as i64;
+            let param_name = arg.get_name().unwrap_or_default();
+            let param_type_spelling = arg
+                .get_type()
+                .map(|t| t.get_display_name())
+                .unwrap_or_default();
+
+            // Synthetic USR for the Parameter node.
+            let param_usr = format!("param:{fn_usr}:{idx}");
+
+            // Emit Parameter node if not already present.
+            let already_present = self.nodes.iter().any(|n| n.usr == param_usr);
+            if !already_present {
+                let param_node = NodeRecord {
+                    usr: param_usr.clone(),
+                    kind: NodeKind::Parameter,
+                    name: param_name,
+                    qualified_name: format!("{fn_usr}::{param_index}"),
+                    mangled_name: None,
+                    file_path: self.tu_file_path.clone(),
+                    line: None,
+                    col: None,
+                    repo_name: self.repo_name.to_owned(),
+                    attrs_json: "{}".to_owned(),
+                    partial: self.partial,
+                    phase: 1,
+                    tu_hash: self.tu_hash,
+                    // M8: Parameter nodes carry none
+                    return_type: None,
+                    params: None,
+                    signature: None,
+                    code: None,
+                    code_truncated: None,
+                    template_params: None,
+                    template_args: None,
+                    is_virtual: None,
+                    is_pure_virtual: None,
+                    is_static: None,
+                    symbol_id: 0,
+                    file_id: 0,
+                    // v7 S1: Parameter nodes carry none
+                    is_const: None,
+                    is_constexpr: None,
+                    storage_class: None,
+                    // v7 S2: Parameter node carries type_spelling + param_index
+                    is_template: None,
+                    is_noexcept: None,
+                    is_override: None,
+                    is_deleted: None,
+                    is_defaulted: None,
+                    cv_qualifiers: None,
+                    ref_qualifier: None,
+                    is_final: None,
+                    is_abstract: None,
+                    record_kind: None,
+                    type_spelling: Some(param_type_spelling.clone()),
+                    param_index: Some(param_index),
+                    param_kind: Some("value".to_owned()),
+                    enum_value: None,
+                };
+                self.nodes.push(param_node);
+            }
+
+            // HAS_PARAM edge with edge_index = param_index (ADR-5).
+            self.push_edge_full(
+                fn_usr.to_owned(),
+                param_usr.clone(),
+                EdgeKind::HasParam,
+                "{}".to_owned(),
+                None,
+                Some(param_index),
+                None,
+            );
+
+            // OF_TYPE edge from Parameter to Type node.
+            if !param_type_spelling.is_empty() {
+                let type_usr = self.get_or_create_type_node(&param_type_spelling);
+                self.push_edge_full(
+                    param_usr,
+                    type_usr,
+                    EdgeKind::OfType,
+                    "{}".to_owned(),
+                    None,
+                    None,
+                    None,
+                );
+            }
+        }
+    }
+
+    // ── v7 S3: Template-param edge emission ──────────────────────────────────
+
+    /// Emit TEMPLATE_PARAM edges from a `TemplateDef` node to its `Parameter` nodes (S3).
+    ///
+    /// Walks the immediate children of the template entity and emits one
+    /// `NodeKind::Parameter` node (synthetic USR `tparam:<template-usr>:<index>`) and
+    /// one `TEMPLATE_PARAM` edge per template parameter.
+    ///
+    /// Graceful degradation: any per-parameter failure logs and skips that position
+    /// without failing the TU (C5 / Issue-0001 guard).
+    fn emit_template_param_edges(&mut self, tmpl_usr: &str, entity: &clang::Entity<'_>) {
+        use clang::EntityKind as EK;
+
+        let mut param_index: i64 = 0;
+        for child in entity.get_children() {
+            let param_kind_str = match child.get_kind() {
+                EK::TemplateTypeParameter => "type",
+                EK::NonTypeTemplateParameter => "non_type",
+                EK::TemplateTemplateParameter => "template",
+                _ => continue,
+            };
+
+            let param_name = child.get_name().unwrap_or_default();
+            let tparam_usr = format!("tparam:{tmpl_usr}:{param_index}");
+
+            // Emit Parameter node if not already present.
+            let already_present = self.nodes.iter().any(|n| n.usr == tparam_usr);
+            if !already_present {
+                let tparam_node = NodeRecord {
+                    usr: tparam_usr.clone(),
+                    kind: NodeKind::Parameter,
+                    name: param_name,
+                    qualified_name: format!("{tmpl_usr}::{param_index}"),
+                    mangled_name: None,
+                    file_path: self.tu_file_path.clone(),
+                    line: None,
+                    col: None,
+                    repo_name: self.repo_name.to_owned(),
+                    attrs_json: "{}".to_owned(),
+                    partial: self.partial,
+                    phase: 1,
+                    tu_hash: self.tu_hash,
+                    return_type: None,
+                    params: None,
+                    signature: None,
+                    code: None,
+                    code_truncated: None,
+                    template_params: None,
+                    template_args: None,
+                    is_virtual: None,
+                    is_pure_virtual: None,
+                    is_static: None,
+                    symbol_id: 0,
+                    file_id: 0,
+                    is_const: None,
+                    is_constexpr: None,
+                    storage_class: None,
+                    is_template: None,
+                    is_noexcept: None,
+                    is_override: None,
+                    is_deleted: None,
+                    is_defaulted: None,
+                    cv_qualifiers: None,
+                    ref_qualifier: None,
+                    is_final: None,
+                    is_abstract: None,
+                    record_kind: None,
+                    type_spelling: None,
+                    param_index: Some(param_index),
+                    param_kind: Some(param_kind_str.to_owned()),
+                    enum_value: None,
+                };
+                self.nodes.push(tparam_node);
+            }
+
+            // TEMPLATE_PARAM edge with edge_index = param_index (ADR-5).
+            self.push_edge_full(
+                tmpl_usr.to_owned(),
+                tparam_usr,
+                EdgeKind::TemplateParam,
+                "{}".to_owned(),
+                None,
+                Some(param_index),
+                None,
+            );
+
+            param_index += 1;
+        }
+    }
+
+    // ── v7 S3: Template-arg positional node emission (ADR-5) ─────────────────
+
+    /// Emit positional `TemplateArg` nodes and `TEMPLATE_ARG` edges for a
+    /// `Specialization` node (ADR-5).
+    ///
+    /// Each template argument becomes a distinct `NodeKind::TemplateArg` positional
+    /// node with synthetic USR `targ:<specialization-usr>:<index>`.  For type-kind
+    /// arguments the node additionally emits an `OF_TYPE` edge to the deduped `Type`
+    /// node (ADR-2).  Non-type/expression arguments carry their value in
+    /// `type_spelling` and emit no `OF_TYPE`.
+    ///
+    /// Ordering is via `param_index` on the positional node (ADR-5); consumers must
+    /// sort on `param_index` for ordered traversal (IndraDB returns unordered).
+    ///
+    /// Graceful degradation: `Null` (unresolved/dependent) args are skipped; the TU
+    /// is never marked as a total failure (C5 / Issue-0001 guard).
+    fn emit_template_arg_nodes(&mut self, spec_usr: &str, entity: &clang::Entity<'_>) {
+        use clang::TemplateArgument;
+
+        let args = match entity.get_template_arguments() {
+            Some(a) => a,
+            None => return, // no args exposed (e.g. implicit instantiation)
+        };
+
+        for (idx, arg) in args.iter().enumerate() {
+            let (param_kind_str, spelling, is_type_arg) = match arg {
+                TemplateArgument::Type(ty) => {
+                    let sp = ty.get_display_name();
+                    ("type", sp, true)
+                }
+                TemplateArgument::Integral(signed, _unsigned) => {
+                    ("non_type", signed.to_string(), false)
+                }
+                TemplateArgument::Template | TemplateArgument::TemplateExpansion => {
+                    ("template", String::new(), false)
+                }
+                TemplateArgument::Expression => ("expression", String::new(), false),
+                TemplateArgument::Declaration => ("non_type", String::new(), false),
+                TemplateArgument::Nullptr => ("non_type", String::new(), false),
+                TemplateArgument::Pack => ("expression", String::new(), false),
+                // Null = unresolved / dependent — skip this position gracefully (C5).
+                TemplateArgument::Null => {
+                    debug!(
+                        spec_usr = %spec_usr,
+                        idx = idx,
+                        "S3: skipping unresolvable template arg (Null/dependent)"
+                    );
+                    continue;
+                }
+            };
+
+            let targ_usr = format!("targ:{spec_usr}:{idx}");
+            let param_index = idx as i64;
+
+            // Emit TemplateArg positional node if not already present.
+            let already_present = self.nodes.iter().any(|n| n.usr == targ_usr);
+            if !already_present {
+                let targ_node = NodeRecord {
+                    usr: targ_usr.clone(),
+                    kind: NodeKind::TemplateArg,
+                    name: spelling.clone(),
+                    qualified_name: targ_usr.clone(),
+                    mangled_name: None,
+                    file_path: self.tu_file_path.clone(),
+                    line: None,
+                    col: None,
+                    repo_name: self.repo_name.to_owned(),
+                    attrs_json: "{}".to_owned(),
+                    partial: self.partial,
+                    phase: 1,
+                    tu_hash: self.tu_hash,
+                    return_type: None,
+                    params: None,
+                    signature: None,
+                    code: None,
+                    code_truncated: None,
+                    template_params: None,
+                    template_args: None,
+                    is_virtual: None,
+                    is_pure_virtual: None,
+                    is_static: None,
+                    symbol_id: 0,
+                    file_id: 0,
+                    is_const: None,
+                    is_constexpr: None,
+                    storage_class: None,
+                    is_template: None,
+                    is_noexcept: None,
+                    is_override: None,
+                    is_deleted: None,
+                    is_defaulted: None,
+                    cv_qualifiers: None,
+                    ref_qualifier: None,
+                    is_final: None,
+                    is_abstract: None,
+                    record_kind: None,
+                    type_spelling: if spelling.is_empty() {
+                        None
+                    } else {
+                        Some(spelling.clone())
+                    },
+                    param_index: Some(param_index),
+                    param_kind: Some(param_kind_str.to_owned()),
+                    enum_value: None,
+                };
+                self.nodes.push(targ_node);
+            }
+
+            // TEMPLATE_ARG edge from Specialization to positional TemplateArg node.
+            self.push_edge_full(
+                spec_usr.to_owned(),
+                targ_usr.clone(),
+                EdgeKind::TemplateArg,
+                "{}".to_owned(),
+                None,
+                Some(param_index),
+                None,
+            );
+
+            // For type-kind args: additionally emit OF_TYPE → deduped Type node (ADR-5).
+            if is_type_arg && !spelling.is_empty() {
+                let type_usr = self.get_or_create_type_node(&spelling);
+                self.push_edge_full(
+                    targ_usr,
+                    type_usr,
+                    EdgeKind::OfType,
+                    "{}".to_owned(),
+                    None,
+                    None,
+                    None,
+                );
+            }
+        }
+    }
+
+    // ── v7 S3: Concept node emission (ADR-7) ─────────────────────────────────
+
+    /// Emit a `Concept` node for a `CXCursor_ConceptDecl` entity (ADR-7, C++20 only).
+    ///
+    /// NOTE: clang-rs 2.0.0 does not expose `EntityKind::ConceptDecl`.  This method
+    /// is a placeholder stub that never emits, following the established pattern for
+    /// libclang-binding gaps (see `is_final`, `is_deleted`, etc. in nodes.rs).
+    /// A follow-up is required once clang-rs exposes the `ConceptDecl` entity kind.
+    ///
+    /// Pre-C++20 SFINAE constraints are intentionally NOT modelled (ADR-7 §skip+document).
+    #[allow(dead_code)]
+    fn emit_concept_node(&mut self, _entity: &clang::Entity<'_>, _constrained_usr: &str) {
+        // clang-rs 2.0.0 does not expose EntityKind::ConceptDecl — stub only.
+        // Follow-up: add ConceptDecl handling once the binding is available.
+    }
+
+    // ── v7 S5: Enumerator + enum edge emission ───────────────────────────────
+
+    /// Emit `Enumerator` nodes + `ENUMERATOR_OF` edges for all enumeration constants
+    /// in an `Enum` node, and an `UNDERLYING_TYPE` edge when an explicit underlying
+    /// type is present (v7 S5 / scenarios S5-01, S5-02).
+    ///
+    /// Anonymous enums are assigned a synthetic USR `enum:<file>:<line>:<col>` in the
+    /// outer node path (OQ-7); here `enum_usr` is whatever USR was used for the Enum.
+    ///
+    /// Graceful degradation: any per-enumerator extraction failure is logged + skipped;
+    /// the parent Enum and other enumerators are unaffected (C5 / Issue-0001 guard).
+    fn emit_enum_enumerators(&mut self, enum_usr: &str, entity: &clang::Entity<'_>) {
+        // UNDERLYING_TYPE: emit if an explicit underlying type is present (S5-02).
+        // `get_enum_underlying_type()` returns `Some` only when the enum has an explicit
+        // underlying type annotation (e.g. `enum class Status : uint8_t`).
+        if let Some(underlying_type) = entity.get_enum_underlying_type() {
+            let spelling = underlying_type.get_display_name();
+            if !spelling.is_empty() {
+                let type_usr = self.get_or_create_type_node(&spelling);
+                self.push_edge_full(
+                    enum_usr.to_owned(),
+                    type_usr,
+                    EdgeKind::UnderlyingType,
+                    "{}".to_owned(),
+                    None,
+                    None,
+                    None,
+                );
+            }
+        }
+
+        // Walk immediate children looking for EnumConstantDecl entities.
+        let mut enumerator_data: Vec<(String, String, Option<i64>)> = Vec::new();
+        entity.visit_children(|child, _| {
+            if child.get_kind() != clang::EntityKind::EnumConstantDecl {
+                return clang::EntityVisitResult::Continue;
+            }
+
+            // Real USR from libclang (enumerators always have USRs).
+            let child_usr = match child.get_usr() {
+                Some(u) if !u.0.is_empty() => u.0,
+                _ => return clang::EntityVisitResult::Continue,
+            };
+
+            if self.skip_system_headers && child.is_in_system_header() {
+                return clang::EntityVisitResult::Continue;
+            }
+
+            let name = child.get_name().unwrap_or_default();
+            // Signed integer value from clang_getEnumConstantDeclValue.
+            let enum_value = child.get_enum_constant_value().map(|(signed, _)| signed);
+
+            enumerator_data.push((child_usr, name, enum_value));
+            clang::EntityVisitResult::Continue
+        });
+
+        for (child_usr, name, enum_value) in enumerator_data {
+            let node = NodeRecord {
+                usr: child_usr.clone(),
+                kind: NodeKind::Enumerator,
+                name: name.clone(),
+                qualified_name: name,
+                mangled_name: None,
+                file_path: self.tu_file_path.clone(),
+                line: None,
+                col: None,
+                repo_name: self.repo_name.to_owned(),
+                attrs_json: "{}".to_owned(),
+                partial: self.partial,
+                phase: 1,
+                tu_hash: self.tu_hash,
+                return_type: None,
+                params: None,
+                signature: None,
+                code: None,
+                code_truncated: None,
+                template_params: None,
+                template_args: None,
+                is_virtual: None,
+                is_pure_virtual: None,
+                is_static: None,
+                symbol_id: 0,
+                file_id: 0,
+                is_const: None,
+                is_constexpr: None,
+                storage_class: None,
+                is_template: None,
+                is_noexcept: None,
+                is_override: None,
+                is_deleted: None,
+                is_defaulted: None,
+                cv_qualifiers: None,
+                ref_qualifier: None,
+                is_final: None,
+                is_abstract: None,
+                record_kind: None,
+                type_spelling: None,
+                param_index: None,
+                param_kind: None,
+                // v7 S5: enumerator value
+                enum_value,
+            };
+            self.nodes.push(node);
+
+            // ENUMERATOR_OF: Enumerator → Enum
+            self.push_edge_full(
+                child_usr,
+                enum_usr.to_owned(),
+                EdgeKind::EnumeratorOf,
+                "{}".to_owned(),
+                None,
+                None,
+                None,
+            );
+        }
+    }
+
+    /// Emit an `ALIAS_OF` edge from a `Typedef` node to its written underlying type
+    /// (v7 S5 / scenarios S5-04, EC-03).
+    ///
+    /// Uses the WRITTEN spelling (not canonical) so that a chain like
+    /// `typedef int Base; typedef Base Mid; typedef Mid Top;`
+    /// produces three distinct ALIAS_OF edges (Top→Mid, Mid→Base, Base→int) rather
+    /// than collapsing to the canonical type (int).  This relies on ADR-2.
+    fn emit_typedef_alias_of(&mut self, typedef_usr: &str, entity: &clang::Entity<'_>) {
+        if let Some(underlying) = entity.get_typedef_underlying_type() {
+            let spelling = underlying.get_display_name();
+            if !spelling.is_empty() {
+                let type_usr = self.get_or_create_type_node(&spelling);
+                self.push_edge_full(
+                    typedef_usr.to_owned(),
+                    type_usr,
+                    EdgeKind::AliasOf,
+                    "{}".to_owned(),
+                    None,
+                    None,
+                    None,
+                );
+            }
+        }
+    }
+
+    /// Emit a `USES_NAMESPACE` edge for a `using namespace X;` directive (v7 S5 / S5-05, EC-04).
+    ///
+    /// Source scope: resolved via `resolve_enclosing`, falling back to the module USR.
+    /// Target: the referenced Namespace node's USR (from `get_reference()`).
+    fn emit_uses_namespace_edge(&mut self, entity: &clang::Entity<'_>, parent: &clang::Entity<'_>) {
+        // Resolve the enclosing scope (function, class, namespace, or module).
+        let src_usr = Self::resolve_enclosing(*parent)
+            .map(|(u, _)| u)
+            .or_else(|| self.module_usr.clone());
+        let src_usr = match src_usr {
+            Some(u) if !u.is_empty() => u,
+            _ => return,
+        };
+
+        // The referenced namespace.
+        let target = match entity.get_reference() {
+            Some(r) => r,
+            None => return,
+        };
+        // libclang does not populate the USR on the reference cursor for
+        // UsingDirective; fall back to the referenced definition's USR (QD-1).
+        let dst_usr = match target.get_usr() {
+            Some(u) if !u.0.is_empty() => u.0,
+            _ => match target.get_definition().and_then(|d| d.get_usr()) {
+                Some(u) if !u.0.is_empty() => u.0,
+                _ => return,
+            },
+        };
+        if self.skip_system_headers && target.is_in_system_header() {
+            return;
+        }
+
+        self.push_edge_full(
+            src_usr,
+            dst_usr,
+            EdgeKind::UsesNamespace,
+            "{}".to_owned(),
+            None,
+            None,
+            None,
+        );
+    }
+
+    /// Emit a `USES_DECLARATION` edge for a `using X::y;` declaration (v7 S5 / S5-06, EC-04).
+    ///
+    /// For `using Base::method` in a derived class, this is DUAL-EMITTED: the
+    /// existing OVERRIDES/HAS_METHOD path is NOT replaced (OQ-8/additive).
+    ///
+    /// Source scope: resolved via `resolve_enclosing`, falling back to the module USR.
+    /// Target: the referenced entity's USR (from `get_reference()`).
+    fn emit_uses_declaration_edge(
+        &mut self,
+        entity: &clang::Entity<'_>,
+        parent: &clang::Entity<'_>,
+    ) {
+        // Resolve the enclosing scope.
+        let src_usr = Self::resolve_enclosing(*parent)
+            .map(|(u, _)| u)
+            .or_else(|| self.module_usr.clone());
+        let src_usr = match src_usr {
+            Some(u) if !u.is_empty() => u,
+            _ => return,
+        };
+
+        // The referenced declaration.
+        let target = match entity.get_reference() {
+            Some(r) => r,
+            None => return,
+        };
+
+        // libclang resolves `using ns::name;` to an OverloadedDeclRef cursor whose
+        // own USR is empty (QD-2). The actual targets live in its overload set —
+        // this also covers the single-decl (variable) case, which is likewise
+        // surfaced as a one-element OverloadedDeclRef. Fall back to the direct USR
+        // / definition USR for any non-overloaded reference.
+        let targets: Vec<clang::Entity<'_>> = match target.get_usr() {
+            Some(u) if !u.0.is_empty() => vec![target],
+            _ => match target.get_overloaded_declarations() {
+                Some(decls) if !decls.is_empty() => decls,
+                _ => match target.get_definition() {
+                    Some(d) => vec![d],
+                    None => return,
+                },
+            },
+        };
+
+        for decl in targets {
+            let dst_usr = match decl.get_usr() {
+                Some(u) if !u.0.is_empty() => u.0,
+                _ => continue,
+            };
+            if self.skip_system_headers && decl.is_in_system_header() {
+                continue;
+            }
+            self.push_edge_full(
+                src_usr.clone(),
+                dst_usr,
+                EdgeKind::UsesDeclaration,
+                "{}".to_owned(),
+                None,
+                None,
+                None,
+            );
+        }
     }
 }
 

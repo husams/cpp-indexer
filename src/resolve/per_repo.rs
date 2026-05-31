@@ -381,6 +381,9 @@ mod tests {
             src_id: 0,
             dst_id: None,
             dst_repo_name: "test-repo".to_owned(),
+            access: None,
+            edge_index: None,
+            inherits_is_virtual: None,
         }
     }
 
@@ -457,6 +460,23 @@ mod tests {
                 is_static: None,
                 symbol_id: i as i64 + 1,
                 file_id: i as i64 + 1,
+                is_const: None,
+                is_constexpr: None,
+                storage_class: None,
+                is_template: None,
+                is_noexcept: None,
+                is_override: None,
+                is_deleted: None,
+                is_defaulted: None,
+                cv_qualifiers: None,
+                ref_qualifier: None,
+                is_final: None,
+                is_abstract: None,
+                record_kind: None,
+                type_spelling: None,
+                param_index: None,
+                param_kind: None,
+                enum_value: None,
             })
             .collect();
 
@@ -480,6 +500,9 @@ mod tests {
                 src_id: 0,
                 dst_id: None,
                 dst_repo_name: "test-repo".to_owned(),
+                access: None,
+                edge_index: None,
+                inherits_is_virtual: None,
             })
             .collect();
 
@@ -499,6 +522,9 @@ mod tests {
                 src_id: 0,
                 dst_id: None,
                 dst_repo_name: "test-repo".to_owned(),
+                access: None,
+                edge_index: None,
+                inherits_is_virtual: None,
             })
             .collect();
 
@@ -590,6 +616,23 @@ mod tests {
             is_static: None,
             symbol_id: 1,
             file_id: 1,
+            is_const: None,
+            is_constexpr: None,
+            storage_class: None,
+            is_template: None,
+            is_noexcept: None,
+            is_override: None,
+            is_deleted: None,
+            is_defaulted: None,
+            cv_qualifiers: None,
+            ref_qualifier: None,
+            is_final: None,
+            is_abstract: None,
+            record_kind: None,
+            type_spelling: None,
+            param_index: None,
+            param_kind: None,
+            enum_value: None,
         };
 
         let dup_edge = |kind: EdgeKind| EdgeRecord {
@@ -607,6 +650,9 @@ mod tests {
             src_id: 2,
             dst_id: None,
             dst_repo_name: "repo".to_owned(),
+            access: None,
+            edge_index: None,
+            inherits_is_virtual: None,
         };
         // An edge to an external (not-in-map) symbol → cross_repo_candidate.
         let external_edge = EdgeRecord {
@@ -624,6 +670,9 @@ mod tests {
             src_id: 2,
             dst_id: None,
             dst_repo_name: "repo".to_owned(),
+            access: None,
+            edge_index: None,
+            inherits_is_virtual: None,
         };
 
         // Two worker shards, each emitting the SAME (caller→target, Calls) edge

@@ -138,6 +138,25 @@ pub(crate) fn collect_macro_definition(
         // Integer IDs populated by visit_tu_inner post-processing pass.
         symbol_id: 0,
         file_id: 0,
+        // v7 S1 promoted fields — MACRO nodes carry none
+        is_const: None,
+        is_constexpr: None,
+        storage_class: None,
+        // v7 S2 promoted fields — MACRO nodes carry none
+        is_template: None,
+        is_noexcept: None,
+        is_override: None,
+        is_deleted: None,
+        is_defaulted: None,
+        cv_qualifiers: None,
+        ref_qualifier: None,
+        is_final: None,
+        is_abstract: None,
+        record_kind: None,
+        type_spelling: None,
+        param_index: None,
+        param_kind: None,
+        enum_value: None,
     })
 }
 
@@ -208,6 +227,11 @@ pub(crate) fn collect_macro_expansion(
         src_id: 0,
         dst_id: None,
         dst_repo_name: repo_name.to_owned(),
+        // v7 S1: EXPANDS_TO edges do not carry access
+        access: None,
+        // v7 S2: EXPANDS_TO edges do not carry edge_index
+        edge_index: None,
+        inherits_is_virtual: None,
     })
 }
 
@@ -351,11 +375,11 @@ pub(crate) mod tests {
     // ── Schema version bump ──────────────────────────────────────────────────
 
     #[test]
-    fn schema_version_bumped_to_6() {
+    fn schema_version_bumped_to_7() {
         use crate::schema::version::SCHEMA_VERSION;
         assert_eq!(
-            SCHEMA_VERSION, 6,
-            "SCHEMA_VERSION must be 6 after graph-symbol-ids Story 3"
+            SCHEMA_VERSION, 7,
+            "SCHEMA_VERSION must be 7 after v7 full-AST schema bump (S1–S6)"
         );
     }
 
@@ -379,6 +403,9 @@ pub(crate) mod tests {
             src_id: 0,
             dst_id: None,
             dst_repo_name: "repo".to_owned(),
+            access: None,
+            edge_index: None,
+            inherits_is_virtual: None,
         };
         assert_eq!(edge.kind, EdgeKind::ExpandsTo);
         assert!(edge.dst_usr.as_deref().unwrap().starts_with("macro:"));

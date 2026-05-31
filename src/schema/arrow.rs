@@ -117,6 +117,26 @@ pub fn node_schema() -> Schema {
         // graph-symbol-ids columns (Story 3, v6):
         Field::new("symbol_id", DataType::Int64, false),
         Field::new("file_id", DataType::Int64, false),
+        // v7 S1 columns:
+        Field::new("is_const", DataType::Boolean, true),
+        Field::new("is_constexpr", DataType::Boolean, true),
+        Field::new("storage_class", DataType::Utf8, true),
+        // v7 S2 columns:
+        Field::new("is_template", DataType::Boolean, true),
+        Field::new("is_noexcept", DataType::Boolean, true),
+        Field::new("is_override", DataType::Boolean, true),
+        Field::new("is_deleted", DataType::Boolean, true),
+        Field::new("is_defaulted", DataType::Boolean, true),
+        Field::new("cv_qualifiers", DataType::Utf8, true),
+        Field::new("ref_qualifier", DataType::Utf8, true),
+        Field::new("is_final", DataType::Boolean, true),
+        Field::new("is_abstract", DataType::Boolean, true),
+        Field::new("record_kind", DataType::Utf8, true),
+        Field::new("type_spelling", DataType::Utf8, true),
+        Field::new("param_index", DataType::Int64, true),
+        Field::new("param_kind", DataType::Utf8, true),
+        // v7 S5 columns:
+        Field::new("enum_value", DataType::Int64, true),
     ])
 }
 
@@ -519,6 +539,152 @@ pub fn nodes_to_record_batch(
     }
     let file_id: ArrayRef = Arc::new(file_id_builder.finish());
 
+    // v7 S1 node columns ──────────────────────────────────────────────────────
+
+    let mut is_const_builder = BooleanBuilder::new();
+    for r in records {
+        match r.is_const {
+            Some(v) => is_const_builder.append_value(v),
+            None => is_const_builder.append_null(),
+        }
+    }
+    let is_const: ArrayRef = Arc::new(is_const_builder.finish());
+
+    let mut is_constexpr_builder = BooleanBuilder::new();
+    for r in records {
+        match r.is_constexpr {
+            Some(v) => is_constexpr_builder.append_value(v),
+            None => is_constexpr_builder.append_null(),
+        }
+    }
+    let is_constexpr: ArrayRef = Arc::new(is_constexpr_builder.finish());
+
+    let storage_class: ArrayRef = Arc::new(StringArray::from(
+        records
+            .iter()
+            .map(|r| r.storage_class.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+
+    // v7 S2 node columns ──────────────────────────────────────────────────────
+
+    let mut is_template_builder = BooleanBuilder::new();
+    for r in records {
+        match r.is_template {
+            Some(v) => is_template_builder.append_value(v),
+            None => is_template_builder.append_null(),
+        }
+    }
+    let is_template: ArrayRef = Arc::new(is_template_builder.finish());
+
+    let mut is_noexcept_builder = BooleanBuilder::new();
+    for r in records {
+        match r.is_noexcept {
+            Some(v) => is_noexcept_builder.append_value(v),
+            None => is_noexcept_builder.append_null(),
+        }
+    }
+    let is_noexcept: ArrayRef = Arc::new(is_noexcept_builder.finish());
+
+    let mut is_override_builder = BooleanBuilder::new();
+    for r in records {
+        match r.is_override {
+            Some(v) => is_override_builder.append_value(v),
+            None => is_override_builder.append_null(),
+        }
+    }
+    let is_override: ArrayRef = Arc::new(is_override_builder.finish());
+
+    let mut is_deleted_builder = BooleanBuilder::new();
+    for r in records {
+        match r.is_deleted {
+            Some(v) => is_deleted_builder.append_value(v),
+            None => is_deleted_builder.append_null(),
+        }
+    }
+    let is_deleted: ArrayRef = Arc::new(is_deleted_builder.finish());
+
+    let mut is_defaulted_builder = BooleanBuilder::new();
+    for r in records {
+        match r.is_defaulted {
+            Some(v) => is_defaulted_builder.append_value(v),
+            None => is_defaulted_builder.append_null(),
+        }
+    }
+    let is_defaulted: ArrayRef = Arc::new(is_defaulted_builder.finish());
+
+    let cv_qualifiers: ArrayRef = Arc::new(StringArray::from(
+        records
+            .iter()
+            .map(|r| r.cv_qualifiers.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+
+    let ref_qualifier: ArrayRef = Arc::new(StringArray::from(
+        records
+            .iter()
+            .map(|r| r.ref_qualifier.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+
+    let mut is_final_builder = BooleanBuilder::new();
+    for r in records {
+        match r.is_final {
+            Some(v) => is_final_builder.append_value(v),
+            None => is_final_builder.append_null(),
+        }
+    }
+    let is_final: ArrayRef = Arc::new(is_final_builder.finish());
+
+    let mut is_abstract_builder = BooleanBuilder::new();
+    for r in records {
+        match r.is_abstract {
+            Some(v) => is_abstract_builder.append_value(v),
+            None => is_abstract_builder.append_null(),
+        }
+    }
+    let is_abstract: ArrayRef = Arc::new(is_abstract_builder.finish());
+
+    let record_kind: ArrayRef = Arc::new(StringArray::from(
+        records
+            .iter()
+            .map(|r| r.record_kind.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+
+    let type_spelling: ArrayRef = Arc::new(StringArray::from(
+        records
+            .iter()
+            .map(|r| r.type_spelling.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+
+    let mut param_index_builder = Int64Builder::new();
+    for r in records {
+        match r.param_index {
+            Some(v) => param_index_builder.append_value(v),
+            None => param_index_builder.append_null(),
+        }
+    }
+    let param_index: ArrayRef = Arc::new(param_index_builder.finish());
+
+    let param_kind: ArrayRef = Arc::new(StringArray::from(
+        records
+            .iter()
+            .map(|r| r.param_kind.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+
+    // v7 S5 node column
+    let mut enum_value_builder = Int64Builder::new();
+    for r in records {
+        match r.enum_value {
+            Some(v) => enum_value_builder.append_value(v),
+            None => enum_value_builder.append_null(),
+        }
+    }
+    let enum_value: ArrayRef = Arc::new(enum_value_builder.finish());
+
     RecordBatch::try_new(
         schema,
         vec![
@@ -549,6 +715,26 @@ pub fn nodes_to_record_batch(
             // graph-symbol-ids columns:
             symbol_id,
             file_id,
+            // v7 S1 columns:
+            is_const,
+            is_constexpr,
+            storage_class,
+            // v7 S2 columns:
+            is_template,
+            is_noexcept,
+            is_override,
+            is_deleted,
+            is_defaulted,
+            cv_qualifiers,
+            ref_qualifier,
+            is_final,
+            is_abstract,
+            record_kind,
+            type_spelling,
+            param_index,
+            param_kind,
+            // v7 S5 columns:
+            enum_value,
         ],
     )
 }
@@ -720,6 +906,111 @@ pub fn record_batch_to_nodes(batch: &RecordBatch) -> Vec<NodeRecord> {
         .downcast_ref::<Int64Array>()
         .expect("file_id column must be Int64Array");
 
+    // v7 S1 columns (25-27)
+    let is_const_col = batch
+        .column(25)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("is_const column must be BooleanArray");
+
+    let is_constexpr_col = batch
+        .column(26)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("is_constexpr column must be BooleanArray");
+
+    let storage_class_col = batch
+        .column(27)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("storage_class column must be StringArray");
+
+    // v7 S2 columns (28-40)
+    let is_template_col = batch
+        .column(28)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("is_template column must be BooleanArray");
+
+    let is_noexcept_col = batch
+        .column(29)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("is_noexcept column must be BooleanArray");
+
+    let is_override_col = batch
+        .column(30)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("is_override column must be BooleanArray");
+
+    let is_deleted_col = batch
+        .column(31)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("is_deleted column must be BooleanArray");
+
+    let is_defaulted_col = batch
+        .column(32)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("is_defaulted column must be BooleanArray");
+
+    let cv_qualifiers_col = batch
+        .column(33)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("cv_qualifiers column must be StringArray");
+
+    let ref_qualifier_col = batch
+        .column(34)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("ref_qualifier column must be StringArray");
+
+    let is_final_col = batch
+        .column(35)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("is_final column must be BooleanArray");
+
+    let is_abstract_col = batch
+        .column(36)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("is_abstract column must be BooleanArray");
+
+    let record_kind_col = batch
+        .column(37)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("record_kind column must be StringArray");
+
+    let type_spelling_col = batch
+        .column(38)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("type_spelling column must be StringArray");
+
+    let param_index_col = batch
+        .column(39)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("param_index column must be Int64Array");
+
+    let param_kind_col = batch
+        .column(40)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("param_kind column must be StringArray");
+
+    // v7 S5 column (41)
+    let enum_value_col = batch
+        .column(41)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("enum_value column must be Int64Array");
+
     (0..n)
         .map(|i| {
             // Dictionary lookup: keys are Int8 indices into the values array.
@@ -805,6 +1096,94 @@ pub fn record_batch_to_nodes(batch: &RecordBatch) -> Vec<NodeRecord> {
                 // graph-symbol-ids columns (Story 3, v6):
                 symbol_id: symbol_id_col.value(i),
                 file_id: file_id_col.value(i),
+                // v7 S1 columns:
+                is_const: if is_const_col.is_null(i) {
+                    None
+                } else {
+                    Some(is_const_col.value(i))
+                },
+                is_constexpr: if is_constexpr_col.is_null(i) {
+                    None
+                } else {
+                    Some(is_constexpr_col.value(i))
+                },
+                storage_class: if storage_class_col.is_null(i) {
+                    None
+                } else {
+                    Some(storage_class_col.value(i).to_owned())
+                },
+                // v7 S2 columns:
+                is_template: if is_template_col.is_null(i) {
+                    None
+                } else {
+                    Some(is_template_col.value(i))
+                },
+                is_noexcept: if is_noexcept_col.is_null(i) {
+                    None
+                } else {
+                    Some(is_noexcept_col.value(i))
+                },
+                is_override: if is_override_col.is_null(i) {
+                    None
+                } else {
+                    Some(is_override_col.value(i))
+                },
+                is_deleted: if is_deleted_col.is_null(i) {
+                    None
+                } else {
+                    Some(is_deleted_col.value(i))
+                },
+                is_defaulted: if is_defaulted_col.is_null(i) {
+                    None
+                } else {
+                    Some(is_defaulted_col.value(i))
+                },
+                cv_qualifiers: if cv_qualifiers_col.is_null(i) {
+                    None
+                } else {
+                    Some(cv_qualifiers_col.value(i).to_owned())
+                },
+                ref_qualifier: if ref_qualifier_col.is_null(i) {
+                    None
+                } else {
+                    Some(ref_qualifier_col.value(i).to_owned())
+                },
+                is_final: if is_final_col.is_null(i) {
+                    None
+                } else {
+                    Some(is_final_col.value(i))
+                },
+                is_abstract: if is_abstract_col.is_null(i) {
+                    None
+                } else {
+                    Some(is_abstract_col.value(i))
+                },
+                record_kind: if record_kind_col.is_null(i) {
+                    None
+                } else {
+                    Some(record_kind_col.value(i).to_owned())
+                },
+                type_spelling: if type_spelling_col.is_null(i) {
+                    None
+                } else {
+                    Some(type_spelling_col.value(i).to_owned())
+                },
+                param_index: if param_index_col.is_null(i) {
+                    None
+                } else {
+                    Some(param_index_col.value(i))
+                },
+                param_kind: if param_kind_col.is_null(i) {
+                    None
+                } else {
+                    Some(param_kind_col.value(i).to_owned())
+                },
+                // v7 S5 columns:
+                enum_value: if enum_value_col.is_null(i) {
+                    None
+                } else {
+                    Some(enum_value_col.value(i))
+                },
             }
         })
         .collect()
@@ -841,6 +1220,12 @@ pub fn edge_schema() -> Schema {
         Field::new("src_id", DataType::Int64, false),
         Field::new("dst_id", DataType::Int64, true),
         Field::new("dst_repo_name", DataType::Utf8, false),
+        // v7 S1 columns:
+        Field::new("access", DataType::Utf8, true),
+        // v7 S2 columns:
+        Field::new("edge_index", DataType::Int64, true),
+        // v7 S4 columns:
+        Field::new("inherits_is_virtual", DataType::Boolean, true),
     ])
 }
 
@@ -946,6 +1331,34 @@ pub fn edges_to_record_batch(
             .collect::<Vec<_>>(),
     ));
 
+    // v7 S1 edge column
+    let access: ArrayRef = Arc::new(StringArray::from(
+        records
+            .iter()
+            .map(|r| r.access.as_deref())
+            .collect::<Vec<_>>(),
+    ));
+
+    // v7 S2 edge column
+    let mut edge_index_builder = Int64Builder::new();
+    for r in records {
+        match r.edge_index {
+            Some(v) => edge_index_builder.append_value(v),
+            None => edge_index_builder.append_null(),
+        }
+    }
+    let edge_index: ArrayRef = Arc::new(edge_index_builder.finish());
+
+    // v7 S4 edge column
+    let mut inherits_is_virtual_builder = BooleanBuilder::new();
+    for r in records {
+        match r.inherits_is_virtual {
+            Some(v) => inherits_is_virtual_builder.append_value(v),
+            None => inherits_is_virtual_builder.append_null(),
+        }
+    }
+    let inherits_is_virtual: ArrayRef = Arc::new(inherits_is_virtual_builder.finish());
+
     RecordBatch::try_new(
         schema,
         vec![
@@ -965,6 +1378,12 @@ pub fn edges_to_record_batch(
             src_id,
             dst_id,
             dst_repo_name,
+            // v7 S1 columns:
+            access,
+            // v7 S2 columns:
+            edge_index,
+            // v7 S4 columns:
+            inherits_is_virtual,
         ],
     )
 }
@@ -1067,6 +1486,27 @@ pub fn record_batch_to_edges(batch: &RecordBatch) -> Vec<EdgeRecord> {
         .downcast_ref::<StringArray>()
         .expect("dst_repo_name column must be StringArray");
 
+    // v7 S1 edge column (14)
+    let access_col = batch
+        .column(14)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("access column must be StringArray");
+
+    // v7 S2 edge column (15)
+    let edge_index_col = batch
+        .column(15)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("edge_index column must be Int64Array");
+
+    // v7 S4 edge column (16)
+    let inherits_is_virtual_col = batch
+        .column(16)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("inherits_is_virtual column must be BooleanArray");
+
     (0..n)
         .map(|i| {
             let key = kind_col
@@ -1120,6 +1560,24 @@ pub fn record_batch_to_edges(batch: &RecordBatch) -> Vec<EdgeRecord> {
                     Some(dst_id_col.value(i))
                 },
                 dst_repo_name: dst_repo_name_col.value(i).to_owned(),
+                // v7 S1 columns:
+                access: if access_col.is_null(i) {
+                    None
+                } else {
+                    Some(access_col.value(i).to_owned())
+                },
+                // v7 S2 columns:
+                edge_index: if edge_index_col.is_null(i) {
+                    None
+                } else {
+                    Some(edge_index_col.value(i))
+                },
+                // v7 S4 columns:
+                inherits_is_virtual: if inherits_is_virtual_col.is_null(i) {
+                    None
+                } else {
+                    Some(inherits_is_virtual_col.value(i))
+                },
             }
         })
         .collect()
@@ -1170,6 +1628,26 @@ mod tests {
             // v6 integer ID fields
             symbol_id: 0,
             file_id: 0,
+            // v7 S1 fields — None by default
+            is_const: None,
+            is_constexpr: None,
+            storage_class: None,
+            // v7 S2 fields — None by default
+            is_template: None,
+            is_noexcept: None,
+            is_override: None,
+            is_deleted: None,
+            is_defaulted: None,
+            cv_qualifiers: None,
+            ref_qualifier: None,
+            is_final: None,
+            is_abstract: None,
+            record_kind: None,
+            type_spelling: None,
+            param_index: None,
+            param_kind: None,
+            // v7 S5 fields — None by default
+            enum_value: None,
         }
     }
 
@@ -1203,6 +1681,12 @@ mod tests {
                 None
             },
             dst_repo_name: "my-repo".to_owned(),
+            // v7 S1 fields — None by default
+            access: None,
+            // v7 S2 fields — None by default
+            edge_index: None,
+            // v7 S4 fields — None by default
+            inherits_is_virtual: None,
         }
     }
 
@@ -1214,8 +1698,8 @@ mod tests {
             let original = vec![sample_node(kind, &format!("{kind}"))];
             let batch = nodes_to_record_batch(&original).expect("serialisation must succeed");
 
-            // Verify schema shape — 13 base columns + 10 M8 node columns + 2 v6 columns = 25
-            assert_eq!(batch.num_columns(), 25);
+            // Verify schema shape — 13 base + 10 M8 + 2 v6 + 3 v7-S1 + 13 v7-S2 + 1 v7-S5 = 42
+            assert_eq!(batch.num_columns(), 42);
             assert_eq!(batch.num_rows(), 1);
 
             let recovered = record_batch_to_nodes(&batch);
@@ -1231,8 +1715,8 @@ mod tests {
             let original = vec![sample_edge(kind, i)];
             let batch = edges_to_record_batch(&original).expect("serialisation must succeed");
 
-            // 9 base columns + 2 M8 edge columns + 3 v6 columns = 14
-            assert_eq!(batch.num_columns(), 14);
+            // 9 base + 2 M8 + 3 v6 + 1 v7-S1 + 1 v7-S2 + 1 v7-S4 = 17
+            assert_eq!(batch.num_columns(), 17);
             assert_eq!(batch.num_rows(), 1);
 
             let recovered = record_batch_to_edges(&batch);
@@ -1339,6 +1823,26 @@ mod tests {
         // v6 fields round-trip
         assert_eq!(recovered[0].symbol_id, 0);
         assert_eq!(recovered[0].file_id, 0);
+        // v7 S1 nullable fields
+        assert_eq!(recovered[0].is_const, None);
+        assert_eq!(recovered[0].is_constexpr, None);
+        assert_eq!(recovered[0].storage_class, None);
+        // v7 S2 nullable fields
+        assert_eq!(recovered[0].is_template, None);
+        assert_eq!(recovered[0].is_noexcept, None);
+        assert_eq!(recovered[0].is_override, None);
+        assert_eq!(recovered[0].is_deleted, None);
+        assert_eq!(recovered[0].is_defaulted, None);
+        assert_eq!(recovered[0].cv_qualifiers, None);
+        assert_eq!(recovered[0].ref_qualifier, None);
+        assert_eq!(recovered[0].is_final, None);
+        assert_eq!(recovered[0].is_abstract, None);
+        assert_eq!(recovered[0].record_kind, None);
+        assert_eq!(recovered[0].type_spelling, None);
+        assert_eq!(recovered[0].param_index, None);
+        assert_eq!(recovered[0].param_kind, None);
+        // v7 S5 nullable field
+        assert_eq!(recovered[0].enum_value, None);
     }
 
     /// M8: simple scalar node fields round-trip with `Some(non-empty)` values.
@@ -1500,6 +2004,26 @@ mod tests {
                 // graph-symbol-ids columns (Story 3, v6):
                 "symbol_id",
                 "file_id",
+                // v7 S1 columns:
+                "is_const",
+                "is_constexpr",
+                "storage_class",
+                // v7 S2 columns:
+                "is_template",
+                "is_noexcept",
+                "is_override",
+                "is_deleted",
+                "is_defaulted",
+                "cv_qualifiers",
+                "ref_qualifier",
+                "is_final",
+                "is_abstract",
+                "record_kind",
+                "type_spelling",
+                "param_index",
+                "param_kind",
+                // v7 S5 columns:
+                "enum_value",
             ]
         );
         // Not-null columns
@@ -1521,7 +2045,7 @@ mod tests {
             let field = schema.field_with_name(name).expect("field must exist");
             assert!(!field.is_nullable(), "field {name} must be not-null");
         }
-        // Nullable columns (base + M8)
+        // Nullable columns (base + M8 + v7 S1 + v7 S2)
         let nullable = [
             "mangled_name",
             "line",
@@ -1536,6 +2060,24 @@ mod tests {
             "is_virtual",
             "is_pure_virtual",
             "is_static",
+            "is_const",
+            "is_constexpr",
+            "storage_class",
+            "is_template",
+            "is_noexcept",
+            "is_override",
+            "is_deleted",
+            "is_defaulted",
+            "cv_qualifiers",
+            "ref_qualifier",
+            "is_final",
+            "is_abstract",
+            "record_kind",
+            "type_spelling",
+            "param_index",
+            "param_kind",
+            // v7 S5:
+            "enum_value",
         ];
         for name in nullable {
             let field = schema.field_with_name(name).expect("field must exist");
@@ -1567,6 +2109,12 @@ mod tests {
                 "src_id",
                 "dst_id",
                 "dst_repo_name",
+                // v7 S1 columns:
+                "access",
+                // v7 S2 columns:
+                "edge_index",
+                // v7 S4 columns:
+                "inherits_is_virtual",
             ]
         );
         // M8 edge columns are nullable
@@ -1590,5 +2138,325 @@ mod tests {
                 .is_nullable(),
             "dst_repo_name must be non-nullable"
         );
+        // v7 S1: access is nullable
+        assert!(
+            schema.field_with_name("access").unwrap().is_nullable(),
+            "access must be nullable"
+        );
+        // v7 S2: edge_index is nullable
+        assert!(
+            schema.field_with_name("edge_index").unwrap().is_nullable(),
+            "edge_index must be nullable"
+        );
+        // v7 S4: inherits_is_virtual is nullable
+        assert!(
+            schema
+                .field_with_name("inherits_is_virtual")
+                .unwrap()
+                .is_nullable(),
+            "inherits_is_virtual must be nullable"
+        );
+    }
+
+    // ── v7 S1 round-trip tests ────────────────────────────────────────────────
+
+    /// v7 S1: `is_const`, `is_constexpr`, `storage_class` round-trip with `Some` values.
+    #[test]
+    fn v7_s1_node_scalar_fields_some_round_trip() {
+        let mut r = sample_node(NodeKind::Field, "v7s1_field");
+        r.is_const = Some(true);
+        r.is_constexpr = Some(false);
+        r.storage_class = Some("static".to_owned());
+        let batch = nodes_to_record_batch(&[r.clone()]).expect("batch");
+        let recovered = record_batch_to_nodes(&batch);
+        assert_eq!(
+            recovered[0].is_const,
+            Some(true),
+            "is_const Some(true) round-trip failed"
+        );
+        assert_eq!(
+            recovered[0].is_constexpr,
+            Some(false),
+            "is_constexpr Some(false) round-trip failed"
+        );
+        assert_eq!(
+            recovered[0].storage_class,
+            Some("static".to_owned()),
+            "storage_class round-trip failed"
+        );
+    }
+
+    /// v7 S1: node new fields round-trip as `None` for non-Field/GV kinds.
+    #[test]
+    fn v7_s1_node_fields_none_for_other_kinds() {
+        for &kind in &[NodeKind::Function, NodeKind::Method, NodeKind::Class] {
+            let r = sample_node(kind, "v7s1_none");
+            let batch = nodes_to_record_batch(std::slice::from_ref(&r)).expect("batch");
+            let recovered = record_batch_to_nodes(&batch);
+            assert_eq!(
+                recovered[0].is_const, None,
+                "{kind:?}: is_const must be None"
+            );
+            assert_eq!(
+                recovered[0].is_constexpr, None,
+                "{kind:?}: is_constexpr must be None"
+            );
+            assert_eq!(
+                recovered[0].storage_class, None,
+                "{kind:?}: storage_class must be None"
+            );
+        }
+    }
+
+    /// v7 S1: edge `access` round-trips with `Some` and `None`.
+    #[test]
+    fn v7_s1_edge_access_round_trip() {
+        // Some — simulates HAS_FIELD edge with access set
+        let mut e = sample_edge(EdgeKind::HasField, 0);
+        e.access = Some("protected".to_owned());
+        let batch = edges_to_record_batch(&[e.clone()]).expect("batch");
+        let recovered = record_batch_to_edges(&batch);
+        assert_eq!(
+            recovered[0].access,
+            Some("protected".to_owned()),
+            "access Some round-trip failed"
+        );
+
+        // None — simulates CALLS edge with no access
+        let e_none = sample_edge(EdgeKind::Calls, 1);
+        let batch2 = edges_to_record_batch(&[e_none]).expect("batch");
+        let recovered2 = record_batch_to_edges(&batch2);
+        assert_eq!(recovered2[0].access, None, "access None round-trip failed");
+    }
+
+    /// v7 S1: `access` field not in `attrs_json` (promoted column, not double-written).
+    #[test]
+    fn v7_s1_access_not_in_attrs_json() {
+        let e = sample_edge(EdgeKind::HasMethod, 0);
+        assert!(
+            !e.attrs_json.contains("access"),
+            "promoted field 'access' must NOT appear in attrs_json"
+        );
+    }
+
+    // ── v7 S2 round-trip tests ────────────────────────────────────────────────
+
+    /// v7 S2: Function node extended props round-trip with `Some` values.
+    #[test]
+    fn v7_s2_function_extended_props_round_trip() {
+        let mut r = sample_node(NodeKind::Function, "v7s2_fn");
+        r.is_template = Some(true);
+        r.is_noexcept = Some(false);
+        r.is_override = Some(false);
+        r.is_deleted = Some(false);
+        r.is_defaulted = Some(false);
+        r.cv_qualifiers = Some("const".to_owned());
+        r.ref_qualifier = Some("&".to_owned());
+        let batch = nodes_to_record_batch(&[r.clone()]).expect("batch");
+        let recovered = record_batch_to_nodes(&batch);
+        assert_eq!(recovered[0].is_template, Some(true));
+        assert_eq!(recovered[0].is_noexcept, Some(false));
+        assert_eq!(recovered[0].cv_qualifiers, Some("const".to_owned()));
+        assert_eq!(recovered[0].ref_qualifier, Some("&".to_owned()));
+    }
+
+    /// v7 S2: Class node extended props round-trip with `Some` values.
+    #[test]
+    fn v7_s2_class_extended_props_round_trip() {
+        let mut r = sample_node(NodeKind::Class, "v7s2_class");
+        r.is_template = Some(false);
+        r.is_final = Some(true);
+        r.is_abstract = Some(true);
+        r.record_kind = Some("struct".to_owned());
+        let batch = nodes_to_record_batch(&[r.clone()]).expect("batch");
+        let recovered = record_batch_to_nodes(&batch);
+        assert_eq!(recovered[0].is_final, Some(true));
+        assert_eq!(recovered[0].is_abstract, Some(true));
+        assert_eq!(recovered[0].record_kind, Some("struct".to_owned()));
+    }
+
+    /// v7 S2: Type node props round-trip with `Some` values.
+    #[test]
+    fn v7_s2_type_node_props_round_trip() {
+        let mut r = sample_node(NodeKind::Type, "v7s2_type");
+        r.type_spelling = Some("const std::string &".to_owned());
+        let batch = nodes_to_record_batch(&[r.clone()]).expect("batch");
+        let recovered = record_batch_to_nodes(&batch);
+        assert_eq!(
+            recovered[0].type_spelling,
+            Some("const std::string &".to_owned())
+        );
+    }
+
+    /// v7 S2: Parameter node props round-trip with `Some` values.
+    #[test]
+    fn v7_s2_parameter_node_props_round_trip() {
+        let mut r = sample_node(NodeKind::Parameter, "v7s2_param");
+        r.type_spelling = Some("int".to_owned());
+        r.param_index = Some(0);
+        r.param_kind = Some("value".to_owned());
+        let batch = nodes_to_record_batch(&[r.clone()]).expect("batch");
+        let recovered = record_batch_to_nodes(&batch);
+        assert_eq!(recovered[0].type_spelling, Some("int".to_owned()));
+        assert_eq!(recovered[0].param_index, Some(0));
+        assert_eq!(recovered[0].param_kind, Some("value".to_owned()));
+    }
+
+    /// v7 S2: `edge_index` round-trips with `Some` and `None`.
+    #[test]
+    fn v7_s2_edge_index_round_trip() {
+        // Some — simulates HAS_PARAM edge with index
+        let mut e = sample_edge(EdgeKind::HasParam, 0);
+        e.edge_index = Some(2);
+        let batch = edges_to_record_batch(&[e.clone()]).expect("batch");
+        let recovered = record_batch_to_edges(&batch);
+        assert_eq!(
+            recovered[0].edge_index,
+            Some(2),
+            "edge_index Some(2) round-trip failed"
+        );
+
+        // None — simulates CALLS edge with no index
+        let e_none = sample_edge(EdgeKind::Calls, 1);
+        let batch2 = edges_to_record_batch(&[e_none]).expect("batch");
+        let recovered2 = record_batch_to_edges(&batch2);
+        assert_eq!(
+            recovered2[0].edge_index, None,
+            "edge_index None round-trip failed"
+        );
+    }
+
+    /// v7 S2: v7 S2 node fields are None for non-Type/Parameter/Function/Class kinds.
+    #[test]
+    fn v7_s2_node_fields_none_for_unrelated_kinds() {
+        for &kind in &[NodeKind::Field, NodeKind::GlobalVariable, NodeKind::Enum] {
+            let r = sample_node(kind, "v7s2_none");
+            let batch = nodes_to_record_batch(std::slice::from_ref(&r)).expect("batch");
+            let recovered = record_batch_to_nodes(&batch);
+            assert_eq!(
+                recovered[0].is_template, None,
+                "{kind:?}: is_template must be None"
+            );
+            assert_eq!(
+                recovered[0].type_spelling, None,
+                "{kind:?}: type_spelling must be None"
+            );
+            assert_eq!(
+                recovered[0].param_index, None,
+                "{kind:?}: param_index must be None"
+            );
+        }
+    }
+
+    // ── v7 S4 round-trip tests ────────────────────────────────────────────────
+
+    /// v7 S4: `inherits_is_virtual` round-trips with `Some(true)`, `Some(false)`, and `None`.
+    ///
+    /// Covers S4-01 (non-virtual → false) and S4-02 (virtual → true) scenarios.
+    #[test]
+    fn v7_s4_inherits_is_virtual_round_trip() {
+        // Some(true) — protected virtual inheritance (S4-02)
+        let mut e_virtual = sample_edge(EdgeKind::Inherits, 0);
+        e_virtual.access = Some("protected".to_owned());
+        e_virtual.inherits_is_virtual = Some(true);
+        let batch = edges_to_record_batch(&[e_virtual.clone()]).expect("batch");
+        let recovered = record_batch_to_edges(&batch);
+        assert_eq!(
+            recovered[0].inherits_is_virtual,
+            Some(true),
+            "inherits_is_virtual Some(true) round-trip failed"
+        );
+        assert_eq!(
+            recovered[0].access,
+            Some("protected".to_owned()),
+            "access round-trip alongside inherits_is_virtual failed"
+        );
+
+        // Some(false) — public non-virtual inheritance (S4-01)
+        let mut e_nonvirtual = sample_edge(EdgeKind::Inherits, 2);
+        e_nonvirtual.access = Some("public".to_owned());
+        e_nonvirtual.inherits_is_virtual = Some(false);
+        let batch2 = edges_to_record_batch(&[e_nonvirtual.clone()]).expect("batch");
+        let recovered2 = record_batch_to_edges(&batch2);
+        assert_eq!(
+            recovered2[0].inherits_is_virtual,
+            Some(false),
+            "inherits_is_virtual Some(false) round-trip failed"
+        );
+
+        // None — non-INHERITS edge
+        let e_none = sample_edge(EdgeKind::Calls, 1);
+        let batch3 = edges_to_record_batch(&[e_none]).expect("batch");
+        let recovered3 = record_batch_to_edges(&batch3);
+        assert_eq!(
+            recovered3[0].inherits_is_virtual, None,
+            "inherits_is_virtual None round-trip failed"
+        );
+    }
+
+    /// v7 S4: `inherits_is_virtual` field not in `attrs_json` (promoted column).
+    #[test]
+    fn v7_s4_inherits_is_virtual_not_in_attrs_json() {
+        let e = sample_edge(EdgeKind::Inherits, 0);
+        assert!(
+            !e.attrs_json.contains("inherits_is_virtual"),
+            "promoted field 'inherits_is_virtual' must NOT appear in attrs_json"
+        );
+    }
+
+    // ── v7 S5 round-trip tests ────────────────────────────────────────────────
+
+    /// v7 S5: `enum_value` round-trips with `Some(i64)` values including negative.
+    #[test]
+    fn v7_s5_enumerator_node_props_round_trip() {
+        // Positive value
+        let mut r = sample_node(NodeKind::Enumerator, "v7s5_enum_pos");
+        r.enum_value = Some(42);
+        let batch = nodes_to_record_batch(&[r.clone()]).expect("batch");
+        let recovered = record_batch_to_nodes(&batch);
+        assert_eq!(
+            recovered[0].enum_value,
+            Some(42),
+            "enum_value Some(42) round-trip failed"
+        );
+
+        // Negative value (e.g. -1 for sentinel)
+        let mut r_neg = sample_node(NodeKind::Enumerator, "v7s5_enum_neg");
+        r_neg.enum_value = Some(-1);
+        let batch2 = nodes_to_record_batch(&[r_neg.clone()]).expect("batch");
+        let recovered2 = record_batch_to_nodes(&batch2);
+        assert_eq!(
+            recovered2[0].enum_value,
+            Some(-1),
+            "enum_value Some(-1) round-trip failed"
+        );
+
+        // None — non-Enumerator kind
+        let r_none = sample_node(NodeKind::Enum, "v7s5_none");
+        let batch3 = nodes_to_record_batch(&[r_none]).expect("batch");
+        let recovered3 = record_batch_to_nodes(&batch3);
+        assert_eq!(
+            recovered3[0].enum_value, None,
+            "enum_value must be None for non-Enumerator kinds"
+        );
+    }
+
+    /// v7 S5: `enum_value` not in `attrs_json` (promoted column, not double-written).
+    #[test]
+    fn v7_s5_enum_value_not_in_attrs_json() {
+        let r = sample_node(NodeKind::Enumerator, "v7s5_no_double_write");
+        assert!(
+            !r.attrs_json.contains("enum_value"),
+            "promoted field 'enum_value' must NOT appear in attrs_json"
+        );
+    }
+
+    /// v7 S5: Enumerator NodeKind round-trips through Arrow.
+    #[test]
+    fn v7_s5_enumerator_node_kind_round_trip() {
+        let r = sample_node(NodeKind::Enumerator, "v7s5_kind");
+        let batch = nodes_to_record_batch(std::slice::from_ref(&r)).expect("batch");
+        let recovered = record_batch_to_nodes(&batch);
+        assert_eq!(recovered[0].kind, NodeKind::Enumerator);
     }
 }

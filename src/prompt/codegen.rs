@@ -62,6 +62,29 @@ const NODE_KINDS: &[(&str, &str)] = &[
     ),
     // M5 additions
     ("MACRO", "A preprocessor macro definition (`#define`)."),
+    // v7 S2 additions
+    (
+        "TYPE",
+        "A C++ type node (written-spelling deduped; ADR-2). USR: `type:<written-spelling>`.",
+    ),
+    (
+        "PARAMETER",
+        "A function/method parameter or template parameter. USR: `param:<owner-usr>:<index>`.",
+    ),
+    // v7 S3 additions
+    (
+        "TEMPLATE_ARG",
+        "A positional template argument node (ADR-5). USR: `targ:<specialization-usr>:<index>`. Carries param_index, param_kind, type_spelling; type-kind args also emit OF_TYPE to a Type node.",
+    ),
+    (
+        "CONCEPT",
+        "A C++20 concept declaration. USR: real libclang USR. Only emitted in C++20 mode (ADR-7).",
+    ),
+    // v7 S5 additions
+    (
+        "ENUMERATOR",
+        "A single enumeration constant within an enum or enum class. USR: real libclang USR. Carries enum_value (signed i64).",
+    ),
 ];
 
 // ── Edge kind table ──────────────────────────────────────────────────────────
@@ -89,6 +112,22 @@ const EDGE_KINDS: &[(&str, &str)] = &[
     ("EXTERNAL_REF", "A cross-repository reference resolved during Phase 5. Direction: (src)-[:EXTERNAL_REF {via: <orig_edge_kind>}]->(dst)."),
     // M5 additions
     ("EXPANDS_TO", "A top-level macro expansion at a call site. Direction: (call_site)-[:EXPANDS_TO]->(macro_def)."),
+    // v7 S2 additions
+    ("RETURNS", "A function/method returns a type. Direction: (Function|Method)-[:RETURNS]->(Type)."),
+    ("HAS_PARAM", "A function/method has a parameter (ordered by edge_index). Direction: (Function|Method)-[:HAS_PARAM {edge_index}]->(Parameter)."),
+    ("OF_TYPE", "A Parameter or Field has a type. Direction: (Parameter|Field)-[:OF_TYPE]->(Type)."),
+    ("POINTS_TO", "A pointer type points to its pointee type. Direction: (Type:ptr)-[:POINTS_TO]->(Type)."),
+    ("REFERS_TO", "A reference type refers to its referent type. Direction: (Type:ref)-[:REFERS_TO]->(Type)."),
+    // v7 S3 additions
+    ("TEMPLATE_PARAM", "A template definition has a template parameter (ordered). Direction: (TemplateDef)-[:TEMPLATE_PARAM {edge_index}]->(Parameter)."),
+    ("TEMPLATE_ARG", "A template specialization has a positional template argument (ADR-5). Direction: (Specialization)-[:TEMPLATE_ARG {edge_index}]->(TemplateArg)."),
+    ("CONSTRAINED_BY", "A template or parameter is constrained by a concept (C++20 only; ADR-7). Direction: (template_or_param)-[:CONSTRAINED_BY]->(Concept)."),
+    // v7 S5 additions
+    ("ENUMERATOR_OF", "An enumerator constant belongs to its parent enum. Direction: (Enumerator)-[:ENUMERATOR_OF]->(Enum)."),
+    ("UNDERLYING_TYPE", "An enum has an underlying integer type. Direction: (Enum)-[:UNDERLYING_TYPE]->(Type)."),
+    ("ALIAS_OF", "A typedef/type-alias is an alias for another type (one link per chain; ADR-2). Direction: (Typedef)-[:ALIAS_OF]->(Type)."),
+    ("USES_NAMESPACE", "A using-directive introduces a namespace into scope. Direction: (scope)-[:USES_NAMESPACE]->(Namespace)."),
+    ("USES_DECLARATION", "A using-declaration introduces a specific name from another scope. Direction: (scope)-[:USES_DECLARATION]->(symbol)."),
 ];
 
 /// Emit the MCP system-prompt schema text.
@@ -154,6 +193,34 @@ pub fn generate_schema(schema_version_tag: &str) -> String {
     out.push_str("- `is_virtual` (bool|null): true if method is virtual.\n");
     out.push_str("- `is_pure_virtual` (bool|null): true if method is pure virtual.\n");
     out.push_str("- `is_static` (bool|null): true if function/method is static.\n");
+    // v7 S1 node fields
+    out.push_str(
+        "- `is_const` (bool|null): true if Field/GlobalVariable is const; null for other kinds.\n",
+    );
+    out.push_str("- `is_constexpr` (bool|null): true if Field/GlobalVariable is constexpr; null for other kinds.\n");
+    out.push_str("- `storage_class` (string|null): storage class of Field/GlobalVariable (\"auto\"|\"static\"|\"extern\"|\"thread_local\"|\"register\"|\"none\"); null for other kinds.\n");
+    // v7 S2 node fields
+    out.push_str("- `is_template` (bool|null): true if Function/Method/Class/TemplateDef is a template; null for other kinds.\n");
+    out.push_str(
+        "- `is_noexcept` (bool|null): true if Function/Method is noexcept; null for other kinds.\n",
+    );
+    out.push_str(
+        "- `is_override` (bool|null): true if Method is override; null for other kinds.\n",
+    );
+    out.push_str(
+        "- `is_deleted` (bool|null): true if Function/Method is deleted; null for other kinds.\n",
+    );
+    out.push_str("- `is_defaulted` (bool|null): true if Function/Method is defaulted; null for other kinds.\n");
+    out.push_str("- `cv_qualifiers` (string|null): CV-qualifiers of Method (\"const\"|\"volatile\"|\"const volatile\"|empty); null for other kinds.\n");
+    out.push_str("- `ref_qualifier` (string|null): ref-qualifier of Method (\"&\"|\"&&\"|empty); null for other kinds.\n");
+    out.push_str("- `is_final` (bool|null): true if Class is final; null for other kinds.\n");
+    out.push_str("- `is_abstract` (bool|null): true if Class is abstract; null for other kinds.\n");
+    out.push_str("- `record_kind` (string|null): record kind of Class (\"class\"|\"struct\"|\"union\"); null for other kinds.\n");
+    out.push_str("- `type_spelling` (string|null): written-spelling of the type for Type/Parameter/TemplateArg nodes; null for other kinds.\n");
+    out.push_str("- `param_index` (int|null): 0-based parameter index for Parameter/TemplateArg nodes; null for other kinds.\n");
+    out.push_str("- `param_kind` (string|null): parameter kind for Parameter/TemplateArg nodes (\"type\"|\"non_type\"|\"template\"|\"value\"); null for other kinds.\n");
+    // v7 S5 node fields
+    out.push_str("- `enum_value` (int|null): signed integer constant value for Enumerator nodes; null for other kinds.\n");
     out.push('\n');
 
     // ── Key edge properties ───────────────────────────────────────────────────
@@ -170,6 +237,12 @@ pub fn generate_schema(schema_version_tag: &str) -> String {
     out.push_str("- `attrs_json` (string): edge attributes as canonical JSON (vtable_slot, access, virtual, via…).\n");
     out.push_str("- `source_association_type` (string|null): source-side access classification for USES edges.\n");
     out.push_str("- `target_association_type` (string|null): target-side access classification for USES edges.\n");
+    // v7 S1 edge fields
+    out.push_str("- `access` (string|null): C++ access specifier on HasMethod/HasField/Inherits edges (\"public\"|\"protected\"|\"private\"); null for other kinds.\n");
+    // v7 S2 edge fields
+    out.push_str("- `edge_index` (int|null): ordering index for HAS_PARAM/TEMPLATE_PARAM/TEMPLATE_ARG edges; null for other kinds.\n");
+    // v7 S4 edge fields
+    out.push_str("- `inherits_is_virtual` (bool|null): true when Inherits edge is virtual inheritance; null for other kinds.\n");
     out.push('\n');
 
     out

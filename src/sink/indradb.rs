@@ -99,6 +99,62 @@ const PROP_IS_STATIC: &str = "is_static";
 const PROP_SRC_ASSOC_TYPE: &str = "source_association_type";
 /// USES edge target access kind; USES edges only.
 const PROP_DST_ASSOC_TYPE: &str = "target_association_type";
+
+// ── v7 S1 property-name constants ─────────────────────────────────────────────
+
+/// `true` when Field/GlobalVariable is const-qualified.
+const PROP_IS_CONST: &str = "is_const";
+/// `true` when Field/GlobalVariable is constexpr-qualified (placeholder: always false in v7).
+const PROP_IS_CONSTEXPR: &str = "is_constexpr";
+/// Storage class of Field/GlobalVariable (e.g. `"static"`, `"extern"`, `"none"`).
+const PROP_STORAGE_CLASS: &str = "storage_class";
+/// C++ access specifier on HAS_METHOD, HAS_FIELD, and INHERITS edges.
+const PROP_ACCESS: &str = "access";
+
+// ── v7 S2 property-name constants ─────────────────────────────────────────────
+
+/// `true` when the Function/Method/Class/TemplateDef is a template.
+const PROP_IS_TEMPLATE: &str = "is_template";
+/// `true` when the Function/Method is noexcept (placeholder: always false in v7).
+const PROP_IS_NOEXCEPT: &str = "is_noexcept";
+/// `true` when the Method is declared `override` (placeholder: always false in v7).
+const PROP_IS_OVERRIDE: &str = "is_override";
+/// `true` when the Function/Method is deleted (placeholder: always false in v7).
+const PROP_IS_DELETED: &str = "is_deleted";
+/// `true` when the Function/Method is defaulted (placeholder: always false in v7).
+const PROP_IS_DEFAULTED: &str = "is_defaulted";
+/// CV-qualifiers of a Method (e.g. `"const"`, `"volatile"`).
+const PROP_CV_QUALIFIERS: &str = "cv_qualifiers";
+/// Ref-qualifier of a Method (e.g. `"&"`, `"&&"`, `""`).
+const PROP_REF_QUALIFIER: &str = "ref_qualifier";
+/// `true` when the Class is declared `final` (placeholder: always false in v7).
+const PROP_IS_FINAL: &str = "is_final";
+/// `true` when the Class is abstract (has pure-virtual methods).
+const PROP_IS_ABSTRACT: &str = "is_abstract";
+/// Record kind for Class nodes (`"class"` | `"struct"` | `"union"`).
+const PROP_RECORD_KIND: &str = "record_kind";
+/// Written spelling of the type for Type/Parameter nodes.
+const PROP_TYPE_SPELLING: &str = "type_spelling";
+/// 0-based parameter index for Parameter nodes.
+const PROP_PARAM_INDEX: &str = "param_index";
+/// Parameter kind for Parameter nodes (`"type"` | `"non_type"` | `"template"` | `"value"`).
+const PROP_PARAM_KIND: &str = "param_kind";
+/// Ordering index for HAS_PARAM / TEMPLATE_PARAM / TEMPLATE_ARG edges (ADR-5).
+/// Registered in S2; reused by S3 TEMPLATE_PARAM and TEMPLATE_ARG edge kinds.
+const PROP_EDGE_INDEX: &str = "edge_index";
+
+// ── v7 S4 property-name constants ─────────────────────────────────────────────
+
+/// Whether the INHERITS edge represents virtual inheritance (v7 S4, ADR-3/design §3.4).
+/// Pinned name `inherits_is_virtual` (not `is_virtual`) to avoid colliding with the
+/// node-level PROP_IS_VIRTUAL index (design §3.4 / ADR-1).
+const PROP_INHERITS_IS_VIRTUAL: &str = "inherits_is_virtual";
+
+// ── v7 S5 property-name constants ─────────────────────────────────────────────
+
+/// Signed integer constant value for Enumerator nodes (v7 S5).
+const PROP_ENUM_VALUE: &str = "enum_value";
+
 /// Vertex type used for the Phase 5 lock sentinel.
 const LOCK_VERTEX_TYPE: &str = "cxg_phase5_lock";
 /// Property name for the lock holder tag.
@@ -331,6 +387,40 @@ impl GraphSink for IndraDbSink {
         for name in &[PROP_RETURN_TYPE, PROP_IS_VIRTUAL, PROP_IS_STATIC, PROP_KIND] {
             c.index_property(ident(name)?).await.map_err(wrap)?;
         }
+
+        // v7 S1: register new queryable property indexes.
+        for name in &[
+            PROP_IS_CONST,
+            PROP_IS_CONSTEXPR,
+            PROP_STORAGE_CLASS,
+            PROP_ACCESS,
+        ] {
+            c.index_property(ident(name)?).await.map_err(wrap)?;
+        }
+
+        // v7 S2: register new queryable property indexes.
+        for name in &[
+            PROP_IS_TEMPLATE,
+            PROP_IS_ABSTRACT,
+            PROP_RECORD_KIND,
+            PROP_TYPE_SPELLING,
+            PROP_PARAM_INDEX,
+            PROP_PARAM_KIND,
+            PROP_EDGE_INDEX,
+        ] {
+            c.index_property(ident(name)?).await.map_err(wrap)?;
+        }
+
+        // v7 S4: register new queryable property index.
+        c.index_property(ident(PROP_INHERITS_IS_VIRTUAL)?)
+            .await
+            .map_err(wrap)?;
+
+        // v7 S5: register new queryable property index.
+        c.index_property(ident(PROP_ENUM_VALUE)?)
+            .await
+            .map_err(wrap)?;
+
         Ok(())
     }
 
@@ -467,13 +557,139 @@ impl GraphSink for IndraDbSink {
                     Json::new(serde_json::Value::Bool(v)),
                 ));
             }
+
+            // ── v7 S1 optional fields (skip None to avoid spurious property writes) ──
+
+            if let Some(v) = node.is_const {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_IS_CONST)?,
+                    Json::new(serde_json::Value::Bool(v)),
+                ));
+            }
+            if let Some(v) = node.is_constexpr {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_IS_CONSTEXPR)?,
+                    Json::new(serde_json::Value::Bool(v)),
+                ));
+            }
+            if let Some(ref v) = node.storage_class {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_STORAGE_CLASS)?,
+                    Json::new(serde_json::Value::String(v.clone())),
+                ));
+            }
+
+            // ── v7 S2 optional fields (skip None to avoid spurious property writes) ──
+
+            if let Some(v) = node.is_template {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_IS_TEMPLATE)?,
+                    Json::new(serde_json::Value::Bool(v)),
+                ));
+            }
+            if let Some(v) = node.is_noexcept {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_IS_NOEXCEPT)?,
+                    Json::new(serde_json::Value::Bool(v)),
+                ));
+            }
+            if let Some(v) = node.is_override {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_IS_OVERRIDE)?,
+                    Json::new(serde_json::Value::Bool(v)),
+                ));
+            }
+            if let Some(v) = node.is_deleted {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_IS_DELETED)?,
+                    Json::new(serde_json::Value::Bool(v)),
+                ));
+            }
+            if let Some(v) = node.is_defaulted {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_IS_DEFAULTED)?,
+                    Json::new(serde_json::Value::Bool(v)),
+                ));
+            }
+            if let Some(ref v) = node.cv_qualifiers {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_CV_QUALIFIERS)?,
+                    Json::new(serde_json::Value::String(v.clone())),
+                ));
+            }
+            if let Some(ref v) = node.ref_qualifier {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_REF_QUALIFIER)?,
+                    Json::new(serde_json::Value::String(v.clone())),
+                ));
+            }
+            if let Some(v) = node.is_final {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_IS_FINAL)?,
+                    Json::new(serde_json::Value::Bool(v)),
+                ));
+            }
+            if let Some(v) = node.is_abstract {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_IS_ABSTRACT)?,
+                    Json::new(serde_json::Value::Bool(v)),
+                ));
+            }
+            if let Some(ref v) = node.record_kind {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_RECORD_KIND)?,
+                    Json::new(serde_json::Value::String(v.clone())),
+                ));
+            }
+            if let Some(ref v) = node.type_spelling {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_TYPE_SPELLING)?,
+                    Json::new(serde_json::Value::String(v.clone())),
+                ));
+            }
+            if let Some(v) = node.param_index {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_PARAM_INDEX)?,
+                    Json::new(serde_json::Value::Number(v.into())),
+                ));
+            }
+            if let Some(ref v) = node.param_kind {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_PARAM_KIND)?,
+                    Json::new(serde_json::Value::String(v.clone())),
+                ));
+            }
+
+            // ── v7 S5 optional fields (skip None to avoid spurious property writes) ──
+
+            if let Some(v) = node.enum_value {
+                all_items.push(BulkInsertItem::VertexProperty(
+                    vid,
+                    ident(PROP_ENUM_VALUE)?,
+                    Json::new(serde_json::Value::Number(v.into())),
+                ));
+            }
         }
 
-        // Chunk by worst-case items per node (17 = 7 base + 10 M8 optional) × batch_size.
-        // The effective chunk may be smaller when optional fields are sparse, which is
-        // acceptable — it errs toward under-utilizing the batch size.
-        // Flagged in implementation-notes as a known sizing concern per ADR-15.
-        let items_per_node_worst_case = 17_usize;
+        // Chunk by worst-case items per node (34 = 7 base + 10 M8 + 3 v7-S1 + 13 v7-S2 + 1 v7-S5) × batch_size.
+        // The effective chunk may be smaller when optional fields are sparse.
+        let items_per_node_worst_case = 34_usize;
         let chunk_items = self.batch_size.saturating_mul(items_per_node_worst_case);
         let total_nodes = batch.len() as u64;
 
@@ -543,9 +759,10 @@ impl GraphSink for IndraDbSink {
         // Build items for all resolvable edges.
         //
         // Base items: 1 Edge + 1 EdgeProperty (attrs_json) = 2 items guaranteed.
-        // M8 optional: up to 2 additional EdgeProperty items for association_type fields —
-        // giving a worst-case of 4 items per edge. `None` fields are skipped.
-        let mut all_items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 4);
+        // Optional: up to 8 additional EdgeProperty items (v6: src_id/dst_id/dst_repo_name +
+        // M8: assoc x2 + v7-S1: access + v7-S2: edge_index + v7-S4: inherits_is_virtual) —
+        // giving a worst-case of 10 items per edge. `None` fields are skipped.
+        let mut all_items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 10);
         let mut total_written = 0u64;
         for edge_rec in batch {
             // v6: key on integer src_id/dst_id; skip edges without dst_id.
@@ -596,6 +813,33 @@ impl GraphSink for IndraDbSink {
                 ));
             }
 
+            // ── v7 S1 optional edge field — HAS_METHOD/HAS_FIELD/INHERITS; skip None ──
+            if let Some(ref v) = edge_rec.access {
+                all_items.push(BulkInsertItem::EdgeProperty(
+                    e.clone(),
+                    ident(PROP_ACCESS)?,
+                    Json::new(serde_json::Value::String(v.clone())),
+                ));
+            }
+
+            // ── v7 S2 optional edge field — HAS_PARAM/TEMPLATE_PARAM/TEMPLATE_ARG; skip None ──
+            if let Some(v) = edge_rec.edge_index {
+                all_items.push(BulkInsertItem::EdgeProperty(
+                    e.clone(),
+                    ident(PROP_EDGE_INDEX)?,
+                    Json::new(serde_json::Value::Number(v.into())),
+                ));
+            }
+
+            // ── v7 S4 optional edge field — INHERITS only; skip None ──────────────────
+            if let Some(v) = edge_rec.inherits_is_virtual {
+                all_items.push(BulkInsertItem::EdgeProperty(
+                    e.clone(),
+                    ident(PROP_INHERITS_IS_VIRTUAL)?,
+                    Json::new(serde_json::Value::Bool(v)),
+                ));
+            }
+
             total_written += 1;
         }
 
@@ -609,8 +853,8 @@ impl GraphSink for IndraDbSink {
 
         let started = Instant::now();
 
-        // Chunk by worst-case items per edge (4 = 2 base + 2 M8 optional) × batch_size.
-        let items_per_edge_worst_case = 4_usize;
+        // Chunk by worst-case items per edge (10 = 2 base + 3 v6 + 2 M8 optional + 1 v7-S1 + 1 v7-S2 + 1 v7-S4) × batch_size.
+        let items_per_edge_worst_case = 10_usize;
         let chunk_items = self.batch_size.saturating_mul(items_per_edge_worst_case);
 
         let mut total_retries = 0u32;
@@ -946,6 +1190,23 @@ mod tests {
             is_static: None,
             symbol_id: 42,
             file_id: 7,
+            is_const: None,
+            is_constexpr: None,
+            storage_class: None,
+            is_template: None,
+            is_noexcept: None,
+            is_override: None,
+            is_deleted: None,
+            is_defaulted: None,
+            cv_qualifiers: None,
+            ref_qualifier: None,
+            is_final: None,
+            is_abstract: None,
+            record_kind: None,
+            type_spelling: None,
+            param_index: None,
+            param_kind: None,
+            enum_value: None,
         }
     }
 
@@ -965,6 +1226,9 @@ mod tests {
             src_id: 42,
             dst_id: Some(99),
             dst_repo_name: "my_repo".to_owned(),
+            access: None,
+            edge_index: None,
+            inherits_is_virtual: None,
         }
     }
 

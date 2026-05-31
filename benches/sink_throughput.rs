@@ -60,6 +60,24 @@ fn make_nodes(n: usize) -> Vec<NodeRecord> {
             is_static: None,
             symbol_id: i as i64 + 1,
             file_id: (i % 100) as i64 + 1,
+            is_const: None,
+            is_constexpr: None,
+            storage_class: None,
+            // v7 S2 fields
+            is_template: None,
+            is_noexcept: None,
+            is_override: None,
+            is_deleted: None,
+            is_defaulted: None,
+            cv_qualifiers: None,
+            ref_qualifier: None,
+            is_final: None,
+            is_abstract: None,
+            record_kind: None,
+            type_spelling: None,
+            param_index: None,
+            param_kind: None,
+            enum_value: None,
         })
         .collect()
 }
@@ -81,6 +99,9 @@ fn make_edges(n: usize) -> Vec<EdgeRecord> {
             src_id: i as i64 + 1,
             dst_id: Some((i + 1) as i64 % n.max(1) as i64 + 1),
             dst_repo_name: "bench-repo".to_owned(),
+            access: None,
+            edge_index: None,
+            inherits_is_virtual: None,
         })
         .collect()
 }

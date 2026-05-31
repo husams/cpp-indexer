@@ -4,6 +4,9 @@
 /// M2 extensions (S14): `NAMESPACE`, `TEMPLATE_DECL`, `SPECIALIZATION`, `TYPEDEF`, `ENUM`, `HEADER`.
 /// M4 additions (S22): `REPO`.
 /// M5 additions (S26): `MACRO`.
+/// v7 S2 additions: `TYPE`, `PARAMETER`.
+/// v7 S3 additions: `TEMPLATE_ARG`, `CONCEPT`.
+/// v7 S5 additions: `ENUMERATOR`.
 ///
 /// Adding new variants bumps `SCHEMA_VERSION` per ADR-9 (bump policy: any change to
 /// `NodeKind` or `EdgeKind` variants requires a version bump in the same PR).
@@ -61,6 +64,47 @@ pub enum NodeKind {
     /// USR is synthesised as `"macro:<file>:<name>"` because libclang does not
     /// assign USRs to `MacroDefinition` entities.
     Macro,
+
+    // ── v7 S2 additions ─────────────────────────────────────────────────────
+    /// A C++ type (canonical or written-spelling deduped; ADR-2).
+    ///
+    /// USR is synthesised as `"type:<written-spelling>"` (ADR-2).
+    /// cv-qualifiers participate: `const int` and `int` are distinct nodes.
+    Type,
+    /// A function/method parameter or template parameter.
+    ///
+    /// USR: `"param:<owner-usr>:<index>"` for function params,
+    ///      `"tparam:<template-usr>:<index>"` for template params (S3).
+    Parameter,
+
+    // ── v7 S3 additions ─────────────────────────────────────────────────────
+    /// A positional template argument node (ADR-5).
+    ///
+    /// Each template argument at a specialization becomes ONE positional node
+    /// (distinct from S2's `Parameter`) to avoid IndraDB edge-identity collapse
+    /// (see ADR-5 for the correctness argument).
+    ///
+    /// USR: `"targ:<specialization-usr>:<index>"`.
+    /// Native columns: `param_index` (0-based position), `param_kind`
+    /// (`"type"` | `"non_type"` | `"template"` | `"expression"`), `type_spelling`
+    /// (written value; type-kind args also emit OF_TYPE → Type node).
+    TemplateArg,
+    /// A C++20 concept declaration (`concept Printable = …`; ADR-7).
+    ///
+    /// Only emitted when the TU is parsed in C++20 mode and libclang exposes a
+    /// `ConceptDecl` cursor.  Pre-C++20 SFINAE constraints are NOT modelled
+    /// (documented fidelity gap; see SCHEMA.md §Fidelity).
+    ///
+    /// USR: real libclang USR from the `CXCursor_ConceptDecl` entity.
+    Concept,
+
+    // ── v7 S5 additions ─────────────────────────────────────────────────────
+    /// A single enumeration constant (enumerator) within an `enum` or `enum class`.
+    ///
+    /// USR: real libclang USR (enumerators always receive USRs).
+    /// Native column: `enum_value: Option<i64>` — the signed integer constant value.
+    /// Emits ENUMERATOR_OF → parent Enum node.
+    Enumerator,
 }
 
 impl NodeKind {
@@ -81,6 +125,14 @@ impl NodeKind {
             NodeKind::Header => "HEADER",
             NodeKind::Repo => "REPO",
             NodeKind::Macro => "MACRO",
+            // v7 S2:
+            NodeKind::Type => "TYPE",
+            NodeKind::Parameter => "PARAMETER",
+            // v7 S3:
+            NodeKind::TemplateArg => "TEMPLATE_ARG",
+            NodeKind::Concept => "CONCEPT",
+            // v7 S5:
+            NodeKind::Enumerator => "ENUMERATOR",
         }
     }
 
@@ -101,6 +153,14 @@ impl NodeKind {
             NodeKind::Header,
             NodeKind::Repo,
             NodeKind::Macro,
+            // v7 S2:
+            NodeKind::Type,
+            NodeKind::Parameter,
+            // v7 S3:
+            NodeKind::TemplateArg,
+            NodeKind::Concept,
+            // v7 S5:
+            NodeKind::Enumerator,
         ]
     }
 
@@ -125,6 +185,14 @@ impl NodeKind {
             "HEADER" => Some(NodeKind::Header),
             "REPO" => Some(NodeKind::Repo),
             "MACRO" => Some(NodeKind::Macro),
+            // v7 S2:
+            "TYPE" => Some(NodeKind::Type),
+            "PARAMETER" => Some(NodeKind::Parameter),
+            // v7 S3:
+            "TEMPLATE_ARG" => Some(NodeKind::TemplateArg),
+            "CONCEPT" => Some(NodeKind::Concept),
+            // v7 S5:
+            "ENUMERATOR" => Some(NodeKind::Enumerator),
             _ => None,
         }
     }
@@ -251,6 +319,83 @@ pub struct NodeRecord {
     /// Per-repo integer ID for `file_path`; from `SymbolAllocator::get_or_insert_file`.
     /// Populated during Phase 1; sinks store this instead of the path string.
     pub file_id: i64,
+
+    // ── v7 S1 promoted fields ─────────────────────────────────────────────────
+    /// `true` when the Field/GlobalVariable is declared `const`; `None` for other kinds.
+    pub is_const: Option<bool>,
+    /// `true` when the Field/GlobalVariable is declared `constexpr`; `None` for other kinds.
+    ///
+    /// NOTE: libclang 18 does not expose a direct `is_constexpr` API for variable cursors.
+    /// This field is always emitted as `Some(false)` until a future libclang upgrade
+    /// provides the CXCursor_isConstexpr flag.  See follow-up task in implementation-notes.
+    pub is_constexpr: Option<bool>,
+    /// Storage class of a Field or GlobalVariable declaration; `None` for other kinds.
+    ///
+    /// Values: `"auto"` | `"static"` | `"extern"` | `"thread_local"` | `"register"` | `"none"`.
+    pub storage_class: Option<String>,
+
+    // ── v7 S2 promoted fields ─────────────────────────────────────────────────
+    /// `true` when the Function/Method/Class/TemplateDef node is a template;
+    /// `None` for other kinds.
+    pub is_template: Option<bool>,
+    /// `true` when the Function/Method is declared `noexcept`; `None` for other kinds.
+    ///
+    /// NOTE: clang-rs 2.0.0 does not expose a direct `is_noexcept` API for cursors.
+    /// This field is always emitted as `Some(false)` for Functions/Methods until a
+    /// future libclang/clang-rs upgrade exposes CXCursor_isNoexcept.
+    /// See follow-up in implementation-notes.
+    pub is_noexcept: Option<bool>,
+    /// `true` when the Method is declared `override`; `None` for non-Method kinds.
+    ///
+    /// NOTE: clang-rs 2.0.0 does not expose a direct `is_override` API.
+    /// This field is always emitted as `Some(false)` for Methods until libclang exposes it.
+    /// See follow-up in implementation-notes.
+    pub is_override: Option<bool>,
+    /// `true` when the Function/Method is declared `= delete`; `None` for other kinds.
+    ///
+    /// NOTE: clang-rs 2.0.0 does not expose `is_deleted()` (no `clang_CXXMethod_isDeleted`
+    /// binding).  This field is always emitted as `Some(false)` until the binding is added.
+    /// See follow-up in implementation-notes.
+    pub is_deleted: Option<bool>,
+    /// `true` when the Function/Method is declared `= default`; `None` for other kinds.
+    ///
+    /// NOTE: requires the `clang_3_9` feature which is not currently enabled in Cargo.toml.
+    /// This field is always emitted as `Some(false)` until `clang_3_9` is enabled.
+    /// See follow-up in implementation-notes.
+    pub is_defaulted: Option<bool>,
+    /// CV-qualifiers string for a Method; `None` for other kinds.
+    ///
+    /// Values: `"const"`, `"volatile"`, `"const volatile"`, or `""` (empty = unqualified).
+    pub cv_qualifiers: Option<String>,
+    /// Ref-qualifier string for a Method; `None` for other kinds.
+    ///
+    /// Values: `"&"` (lvalue), `"&&"` (rvalue), or `""` (empty = none).
+    pub ref_qualifier: Option<String>,
+    /// `true` when the Class is declared `final`; `None` for other kinds.
+    ///
+    /// NOTE: clang-rs 2.0.0 does not expose `is_final()`. This field is always emitted
+    /// as `Some(false)` until the binding is available.  See follow-up in implementation-notes.
+    pub is_final: Option<bool>,
+    /// `true` when the Class contains at least one pure-virtual method; `None` for other kinds.
+    pub is_abstract: Option<bool>,
+    /// Record kind for Class nodes; `None` for other kinds.
+    ///
+    /// Values: `"class"` | `"struct"` | `"union"`.
+    pub record_kind: Option<String>,
+    /// Written-spelling of the type for Type/Parameter nodes; `None` for other kinds.
+    pub type_spelling: Option<String>,
+    /// 0-based parameter index for Parameter nodes; `None` for other kinds.
+    pub param_index: Option<i64>,
+    /// Parameter kind for Parameter nodes; `None` for other kinds.
+    ///
+    /// Values: `"type"` | `"non_type"` | `"template"` | `"value"`.
+    pub param_kind: Option<String>,
+
+    // ── v7 S5 promoted fields ─────────────────────────────────────────────────
+    /// Signed integer constant value for Enumerator nodes; `None` for other kinds.
+    ///
+    /// Populated from `clang_getEnumConstantDeclValue` (signed i64).
+    pub enum_value: Option<i64>,
 }
 
 #[cfg(test)]

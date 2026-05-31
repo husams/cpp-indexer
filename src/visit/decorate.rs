@@ -450,6 +450,24 @@ mod tests {
             is_static: None,
             symbol_id: 0,
             file_id: 0,
+            is_const: None,
+            is_constexpr: None,
+            storage_class: None,
+            // v7 S2 promoted fields — test node carries none
+            is_template: None,
+            is_noexcept: None,
+            is_override: None,
+            is_deleted: None,
+            is_defaulted: None,
+            cv_qualifiers: None,
+            ref_qualifier: None,
+            is_final: None,
+            is_abstract: None,
+            record_kind: None,
+            type_spelling: None,
+            param_index: None,
+            param_kind: None,
+            enum_value: None,
         };
 
         let decor = DecorAttrs {

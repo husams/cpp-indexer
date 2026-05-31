@@ -105,6 +105,23 @@ fn make_node(usr: &str, repo: &str, file_path: &str) -> NodeRecord {
         is_static: None,
         symbol_id: 0,
         file_id: 0,
+        is_const: None,
+        is_constexpr: None,
+        storage_class: None,
+        is_template: None,
+        is_noexcept: None,
+        is_override: None,
+        is_deleted: None,
+        is_defaulted: None,
+        cv_qualifiers: None,
+        ref_qualifier: None,
+        is_final: None,
+        is_abstract: None,
+        record_kind: None,
+        type_spelling: None,
+        param_index: None,
+        param_kind: None,
+        enum_value: None,
     }
 }
 
@@ -124,6 +141,9 @@ fn make_cross_calls_edge(src_usr: &str, dst_usr: &str, repo: &str) -> EdgeRecord
         src_id: 0,
         dst_id: None,
         dst_repo_name: repo.to_owned(),
+        access: None,
+        edge_index: None,
+        inherits_is_virtual: None,
     }
 }
 

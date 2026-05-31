@@ -150,6 +150,9 @@ async fn collect_edge_records(stage_dir: &std::path::Path) -> Vec<EdgeRecord> {
                     src_id: 0,
                     dst_id: None,
                     dst_repo_name: "test-repo".to_owned(),
+                    access: None,
+                    edge_index: None,
+                    inherits_is_virtual: None,
                 });
             }
         }

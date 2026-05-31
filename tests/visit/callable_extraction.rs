@@ -176,6 +176,23 @@ async fn collect_node_records(stage_dir: &std::path::Path) -> Vec<NodeRecord> {
                     is_static: None,
                     symbol_id: 0,
                     file_id: 0,
+                    is_const: None,
+                    is_constexpr: None,
+                    storage_class: None,
+                    is_template: None,
+                    is_noexcept: None,
+                    is_override: None,
+                    is_deleted: None,
+                    is_defaulted: None,
+                    cv_qualifiers: None,
+                    ref_qualifier: None,
+                    is_final: None,
+                    is_abstract: None,
+                    record_kind: None,
+                    type_spelling: None,
+                    param_index: None,
+                    param_kind: None,
+                    enum_value: None,
                 });
             }
         }

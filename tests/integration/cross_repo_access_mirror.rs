@@ -79,6 +79,23 @@ async fn external_ref_mirrors_uses_classification() {
         is_static: None,
         symbol_id: 0,
         file_id: 0,
+        is_const: None,
+        is_constexpr: None,
+        storage_class: None,
+        is_template: None,
+        is_noexcept: None,
+        is_override: None,
+        is_deleted: None,
+        is_defaulted: None,
+        cv_qualifiers: None,
+        ref_qualifier: None,
+        is_final: None,
+        is_abstract: None,
+        record_kind: None,
+        type_spelling: None,
+        param_index: None,
+        param_kind: None,
+        enum_value: None,
     };
     let batch_na = nodes_to_record_batch(&[node_a]).unwrap();
     write_parquet_batch(&worker_a.join("nodes-0.parquet"), &batch_na);
@@ -99,6 +116,9 @@ async fn external_ref_mirrors_uses_classification() {
         src_id: 0,
         dst_id: None,
         dst_repo_name: "repo-a".to_owned(),
+        access: None,
+        edge_index: None,
+        inherits_is_virtual: None,
     };
     let batch_ea = edges_to_record_batch(&[edge_a]).unwrap();
     write_parquet_batch(&worker_a.join("edges-0.parquet"), &batch_ea);
@@ -119,6 +139,9 @@ async fn external_ref_mirrors_uses_classification() {
         src_id: 0,
         dst_id: None,
         dst_repo_name: "repo-a".to_owned(),
+        access: None,
+        edge_index: None,
+        inherits_is_virtual: None,
     };
     let batch_fe = edges_to_record_batch(&[final_edge]).unwrap();
     write_parquet_batch(&stage_a.join("final-edges.parquet"), &batch_fe);
@@ -155,6 +178,23 @@ async fn external_ref_mirrors_uses_classification() {
         is_static: None,
         symbol_id: 0,
         file_id: 0,
+        is_const: None,
+        is_constexpr: None,
+        storage_class: None,
+        is_template: None,
+        is_noexcept: None,
+        is_override: None,
+        is_deleted: None,
+        is_defaulted: None,
+        cv_qualifiers: None,
+        ref_qualifier: None,
+        is_final: None,
+        is_abstract: None,
+        record_kind: None,
+        type_spelling: None,
+        param_index: None,
+        param_kind: None,
+        enum_value: None,
     };
     let batch_nb = nodes_to_record_batch(&[node_b]).unwrap();
     write_parquet_batch(&worker_b.join("nodes-0.parquet"), &batch_nb);

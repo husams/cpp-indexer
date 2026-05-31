@@ -483,6 +483,9 @@ async fn materialise_external_refs(
                                                 src_id: 0,
                                                 dst_id: None,
                                                 dst_repo_name: dst_repo.clone(),
+                                                access: None,
+                                                edge_index: None,
+                                                inherits_is_virtual: None,
                                             });
                                             stats.external_refs_written += 1;
                                             continue;
@@ -529,6 +532,9 @@ async fn materialise_external_refs(
                                                 src_id,
                                                 dst_id: None,
                                                 dst_repo_name: dst_repo.clone(),
+                                                access: None,
+                                                edge_index: None,
+                                                inherits_is_virtual: None,
                                             });
                                             stats.external_refs_written += 1;
                                             continue;
@@ -556,6 +562,9 @@ async fn materialise_external_refs(
                             src_id,
                             dst_id,
                             dst_repo_name: dst_repo,
+                            access: None,
+                            edge_index: None,
+                            inherits_is_virtual: None,
                         });
                         stats.external_refs_written += 1;
                     }

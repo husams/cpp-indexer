@@ -192,6 +192,16 @@ path = "tests/visit/access_classifier_boundary.rs"
 required-features = []
 
 [[test]]
+name = "type_graph_emission"
+path = "tests/visit/type_graph_emission.rs"
+required-features = []
+
+[[test]]
+name = "v7_schema_emission"
+path = "tests/visit/v7_schema_emission.rs"
+required-features = []
+
+[[test]]
 name = "cross_repo_access_mirror"
 path = "tests/integration/cross_repo_access_mirror.rs"
 required-features = ["test-mock"]
