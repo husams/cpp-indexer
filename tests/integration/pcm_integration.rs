@@ -133,6 +133,7 @@ fn pcm_integration_missing_pcm_causes_tu_error_not_silent_partial() {
         true,
         Some(1),
         None, // no allocator required for this test
+        Default::default(),
     )
     .expect("run_phase1_parallel must not return top-level Err");
 
@@ -225,6 +226,7 @@ fn pcm_integration_corrupt_pcm_causes_tu_error_not_silent_partial() {
         true,
         Some(1),
         None,
+        Default::default(),
     )
     .expect("run_phase1_parallel must not return top-level Err");
 
@@ -342,8 +344,16 @@ fn pcm_integration_valid_pcm_both_tus_indexed_no_error() {
     assert_eq!(entries.len(), 2, "fixture must have exactly 2 TUs");
 
     let stage = tmp.path().join("stage");
-    let stats = run_phase1_parallel(&entries, &stage, "test-repo-pcm", true, Some(1), None)
-        .expect("run_phase1_parallel must succeed");
+    let stats = run_phase1_parallel(
+        &entries,
+        &stage,
+        "test-repo-pcm",
+        true,
+        Some(1),
+        None,
+        Default::default(),
+    )
+    .expect("run_phase1_parallel must succeed");
 
     // S4-AC1: zero errors, both TUs must have been processed.
     assert_eq!(

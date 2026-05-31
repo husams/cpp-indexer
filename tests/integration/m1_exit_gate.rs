@@ -57,6 +57,9 @@ fn make_run_opts(stage_dir: PathBuf) -> RunOptions {
         skip_repo_node: true,
         symbol_db_path: None,
         symbol_cache_size: 100_000,
+        phase1_tuning: Default::default(),
+        write_buffer_bytes: cpp_indexer::config::DEFAULT_WRITE_BUFFER_BYTES,
+        write_only: false,
     }
 }
 
@@ -193,6 +196,7 @@ async fn m1_pipeline_neo4j_golden() {
     let sink_cfg = SinkConfig {
         backend: "neo4j".to_owned(),
         batch_size: None,
+        write_buffer_bytes: None,
         neo4j: Some(Neo4jSinkConfig {
             uri,
             user: std::env::var("NEO4J_USER").unwrap_or_else(|_| "neo4j".to_owned()),
@@ -247,6 +251,7 @@ async fn m1_pipeline_indradb_golden() {
     let sink_cfg = SinkConfig {
         backend: "indradb".to_owned(),
         batch_size: None,
+        write_buffer_bytes: None,
         neo4j: None,
         indradb: Some(IndraDbSinkConfig {
             endpoint,

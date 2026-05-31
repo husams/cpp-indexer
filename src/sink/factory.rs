@@ -68,6 +68,7 @@ mod tests {
         SinkConfig {
             backend: "neo4j".to_owned(),
             batch_size: None,
+            write_buffer_bytes: None,
             neo4j: Some(Neo4jSinkConfig {
                 uri: "bolt://localhost:7687".to_owned(),
                 user: "neo4j".to_owned(),
@@ -82,6 +83,7 @@ mod tests {
         SinkConfig {
             backend: backend.to_owned(),
             batch_size: None,
+            write_buffer_bytes: None,
             neo4j: None,
             indradb: None,
         }

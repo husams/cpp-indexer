@@ -213,7 +213,8 @@ fn build_usr_map(
     Ok(map)
 }
 
-/// Walk edge shards, classify each edge, and write to `output_path`.
+/// Walk edge shards, classify each edge, deduplicate duplicate sink keys, and
+/// write to `output_path`.
 ///
 /// Edge classification rules (§Phase 3 contract):
 ///
@@ -222,16 +223,40 @@ fn build_usr_map(
 /// | `Some(u)` — in map  | `true`     | `false`                |
 /// | `Some(u)` — not in  | `false`    | `true`                 |
 /// | `None` (placeholder)| unchanged  | unchanged              |
+///
+/// # Sink-key dedup (Issue 0002 Bug 2a)
+///
+/// The same edge is emitted in every TU shard that observed it, so without dedup
+/// the persisted file (and the downstream sink write) would carry millions of
+/// duplicate rows.  We collapse rows with the same sink key
+/// `(src_usr, dst_usr, kind, repo_name)` to a single row here, so Phase 4 needs
+/// zero in-memory edge dedup.  This replaces the old `dedupe_edges_for_sink`
+/// pass that ran in Phase 4.
+///
+/// Unresolved rows are **kept**: rows with `dst_usr == None` (placeholders) are
+/// passed through unchanged, and `cross_repo_candidate=true` rows (which still
+/// carry a `dst_usr`) survive dedup like any other keyed row.  Phase 5
+/// cross-repo resolution reads exactly those unresolved rows from
+/// `final-edges.parquet`, so stripping them here would silently break it.  The
+/// sink drops unresolved rows at write time, so keeping them in the file costs
+/// nothing for Phase 4.
 fn write_resolved_edges(
     edge_shards: &[PathBuf],
     usr_map: &UsrMap,
     output_path: &Path,
 ) -> Result<()> {
+    use std::collections::HashSet;
+
     let schema = Arc::new(edge_schema());
     let props = writer_properties();
     let out_file = File::create(output_path)?;
     let mut writer = ArrowWriter::try_new(out_file, schema, Some(props))
         .map_err(|e| Error::Schema(format!("create final-edges ArrowWriter: {e}")))?;
+
+    // Sink-key dedup set, spanning all shards.  Holds one entry per distinct
+    // keyed edge — bounded by the deduped edge count (what the sink would hold
+    // anyway), not by the raw cross-shard duplicate count.
+    let mut seen: HashSet<(String, String, &'static str, String)> = HashSet::new();
 
     for shard_path in edge_shards {
         let file = File::open(shard_path)?;
@@ -266,6 +291,18 @@ fn write_resolved_edges(
             for edge in &mut records {
                 classify_edge(edge, usr_map)?;
             }
+
+            // Collapse duplicate sink keys.  Keyed rows (dst_usr = Some) are
+            // deduped; placeholder rows (dst_usr = None) are kept as-is.
+            records.retain(|edge| match edge.dst_usr.as_ref() {
+                Some(dst) => seen.insert((
+                    edge.src_usr.clone(),
+                    dst.clone(),
+                    edge.kind.as_str(),
+                    edge.repo_name.clone(),
+                )),
+                None => true,
+            });
 
             if records.is_empty() {
                 continue;
@@ -511,6 +548,137 @@ mod tests {
         assert_eq!(
             cross_repo_count, 2,
             "2 external edges must be cross_repo_candidate=true"
+        );
+    }
+
+    /// Phase 3 sink-key dedup (Issue 0002 Bug 2a): the same edge emitted in
+    /// multiple TU shards collapses to one row in `final-edges.parquet`, while
+    /// unresolved/cross-repo rows are retained for Phase 5.
+    ///
+    /// This replaces the old Phase-4 `dedupe_edges_for_sink` assertions.
+    #[test]
+    fn dedup_collapses_duplicate_sink_keys_and_keeps_unresolved() {
+        use crate::schema::{EdgeKind, EdgeRecord, NodeRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let stage_dir = dir.path().join("stage");
+
+        // One in-repo target node.
+        let node = NodeRecord {
+            usr: "c:@F@target".to_owned(),
+            kind: NodeKind::Function,
+            name: "target".to_owned(),
+            qualified_name: "target".to_owned(),
+            mangled_name: None,
+            file_path: "/repo/src/t.cpp".to_owned(),
+            line: Some(1),
+            col: Some(1),
+            repo_name: "repo".to_owned(),
+            attrs_json: "{}".to_owned(),
+            partial: false,
+            phase: 1,
+            tu_hash: [0u8; 32],
+            return_type: None,
+            params: None,
+            signature: None,
+            code: None,
+            code_truncated: None,
+            template_params: None,
+            template_args: None,
+            is_virtual: None,
+            is_pure_virtual: None,
+            is_static: None,
+            symbol_id: 1,
+            file_id: 1,
+        };
+
+        let dup_edge = |kind: EdgeKind| EdgeRecord {
+            src_usr: "c:@F@caller".to_owned(),
+            dst_usr: Some("c:@F@target".to_owned()),
+            dst_placeholder: None,
+            kind,
+            resolved: false,
+            cross_repo_candidate: false,
+            repo_name: "repo".to_owned(),
+            attrs_json: "{}".to_owned(),
+            tu_hash: [0u8; 32],
+            source_association_type: None,
+            target_association_type: None,
+            src_id: 2,
+            dst_id: None,
+            dst_repo_name: "repo".to_owned(),
+        };
+        // An edge to an external (not-in-map) symbol → cross_repo_candidate.
+        let external_edge = EdgeRecord {
+            src_usr: "c:@F@caller".to_owned(),
+            dst_usr: Some("c:@F@external".to_owned()),
+            dst_placeholder: None,
+            kind: EdgeKind::Calls,
+            resolved: false,
+            cross_repo_candidate: false,
+            repo_name: "repo".to_owned(),
+            attrs_json: "{}".to_owned(),
+            tu_hash: [0u8; 32],
+            source_association_type: None,
+            target_association_type: None,
+            src_id: 2,
+            dst_id: None,
+            dst_repo_name: "repo".to_owned(),
+        };
+
+        // Two worker shards, each emitting the SAME (caller→target, Calls) edge
+        // plus one distinct (caller→target, Uses) edge; shard 0 also carries the
+        // external edge.
+        let mut w0 = StageWriter::new(&stage_dir, 0).unwrap();
+        w0.write_nodes(std::slice::from_ref(&node)).unwrap();
+        w0.write_edges(&[
+            dup_edge(EdgeKind::Calls),
+            dup_edge(EdgeKind::Uses),
+            external_edge.clone(),
+        ])
+        .unwrap();
+        w0.finish().unwrap();
+
+        let mut w1 = StageWriter::new(&stage_dir, 1).unwrap();
+        w1.write_nodes(&[node]).unwrap();
+        w1.write_edges(&[dup_edge(EdgeKind::Calls)]).unwrap();
+        w1.finish().unwrap();
+
+        let output = resolve_per_repo(&stage_dir).unwrap();
+
+        // Read back and tally.
+        let file = File::open(&output).unwrap();
+        let arrow_reader =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+                .unwrap()
+                .build()
+                .unwrap();
+        let mut seen: std::collections::HashSet<(String, String, &'static str)> =
+            std::collections::HashSet::new();
+        let mut total = 0usize;
+        let mut cross_repo = 0usize;
+        for batch in arrow_reader {
+            let batch = batch.unwrap();
+            for r in &record_batch_to_edges(&batch) {
+                total += 1;
+                if r.cross_repo_candidate {
+                    cross_repo += 1;
+                }
+                if let Some(dst) = r.dst_usr.as_ref() {
+                    let key = (r.src_usr.clone(), dst.clone(), r.kind.as_str());
+                    assert!(
+                        seen.insert(key.clone()),
+                        "duplicate sink key survived Phase 3 dedup: {key:?}"
+                    );
+                }
+            }
+        }
+        // Three distinct keyed rows: (caller→target, Calls), (caller→target,
+        // Uses), (caller→external, Calls).  The duplicate Calls edge collapsed.
+        assert_eq!(total, 3, "expected 3 deduped rows, got {total}");
+        assert_eq!(
+            cross_repo, 1,
+            "the unresolved external edge must be retained for Phase 5"
         );
     }
 

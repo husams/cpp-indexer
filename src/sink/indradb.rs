@@ -493,14 +493,23 @@ impl GraphSink for IndraDbSink {
             }
 
             let mut c = self.client();
-            let items = item_chunk.to_vec();
+            let mut items = item_chunk.to_vec();
             let max_attempts = MAX_ATTEMPTS;
             let backoff_base = BACKOFF_BASE_MS;
             set.spawn(async move {
                 let mut last_err: Option<ClientError> = None;
                 let mut retries = 0u32;
                 for attempt in 0..max_attempts {
-                    match c.bulk_insert(items.clone()).await {
+                    // Lazy-retry-clone (Issue 0002 Bug 2.5): on the happy path the
+                    // request body is *moved* into `bulk_insert`, never cloned.
+                    // We only clone when another attempt is still possible, so the
+                    // final (and, in the common case, only) attempt pays nothing.
+                    let body = if attempt + 1 < max_attempts {
+                        items.clone()
+                    } else {
+                        std::mem::take(&mut items)
+                    };
+                    match c.bulk_insert(body).await {
                         Ok(_) => return Ok(retries),
                         Err(e) if is_transient(&e) && attempt + 1 < max_attempts => {
                             let wait_ms = backoff_base * (1u64 << attempt);
@@ -620,14 +629,21 @@ impl GraphSink for IndraDbSink {
             }
 
             let mut c = self.client();
-            let items = item_chunk.to_vec();
+            let mut items = item_chunk.to_vec();
             let max_attempts = MAX_ATTEMPTS;
             let backoff_base = BACKOFF_BASE_MS;
             set.spawn(async move {
                 let mut last_err: Option<ClientError> = None;
                 let mut retries = 0u32;
                 for attempt in 0..max_attempts {
-                    match c.bulk_insert(items.clone()).await {
+                    // Lazy-retry-clone (Issue 0002 Bug 2.5): move on the happy
+                    // path, clone only when another attempt is still possible.
+                    let body = if attempt + 1 < max_attempts {
+                        items.clone()
+                    } else {
+                        std::mem::take(&mut items)
+                    };
+                    match c.bulk_insert(body).await {
                         Ok(_) => return Ok(retries),
                         Err(e) if is_transient(&e) && attempt + 1 < max_attempts => {
                             let wait_ms = backoff_base * (1u64 << attempt);

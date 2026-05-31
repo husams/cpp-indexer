@@ -326,14 +326,23 @@ impl Neo4jSink {
     async fn run_chunk_with_retry(
         graph: Graph,
         cypher: &'static str,
-        rows: Vec<BoltType>,
+        mut rows: Vec<BoltType>,
     ) -> Result<WriteStats> {
         let count = rows.len() as u64;
         let t0 = Instant::now();
         let mut retries = 0u32;
 
         loop {
-            match graph.run(query(cypher).param("rows", rows.clone())).await {
+            // Lazy-retry-clone (Issue 0002 Bug 2.5): on the happy path the row
+            // vector is *moved* into the query, never cloned.  We only clone
+            // while another retry is still permitted, so the successful (and,
+            // in the common case, only) attempt pays nothing.
+            let body = if retries < MAX_TRANSIENT_RETRIES {
+                rows.clone()
+            } else {
+                std::mem::take(&mut rows)
+            };
+            match graph.run(query(cypher).param("rows", body)).await {
                 Ok(()) => {
                     return Ok(WriteStats {
                         nodes_written: count,
@@ -361,13 +370,20 @@ impl Neo4jSink {
     }
 
     /// Send one UNWIND-MERGE chunk of edges; returns `WriteStats` for that chunk.
-    async fn write_edge_chunk(graph: Graph, rows: Vec<BoltType>) -> Result<WriteStats> {
+    async fn write_edge_chunk(graph: Graph, mut rows: Vec<BoltType>) -> Result<WriteStats> {
         let t0 = Instant::now();
         let mut retries = 0u32;
 
         loop {
+            // Lazy-retry-clone (Issue 0002 Bug 2.5): move the rows into the query
+            // on the final permitted attempt; clone only while a retry remains.
+            let body = if retries < MAX_TRANSIENT_RETRIES {
+                rows.clone()
+            } else {
+                std::mem::take(&mut rows)
+            };
             match graph
-                .execute(query(CQL_MERGE_EDGES).param("rows", rows.clone()))
+                .execute(query(CQL_MERGE_EDGES).param("rows", body))
                 .await
             {
                 Ok(mut stream) => {

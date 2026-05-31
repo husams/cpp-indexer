@@ -141,6 +141,7 @@ fn build_sink_config(cli: &Cli) -> anyhow::Result<cpp_indexer::config::SinkConfi
             Ok(SinkConfig {
                 backend: "neo4j".to_owned(),
                 batch_size: None,
+                write_buffer_bytes: None,
                 neo4j: Some(Neo4jSinkConfig {
                     uri,
                     user: cli.neo4j_user.clone(),
@@ -158,6 +159,7 @@ fn build_sink_config(cli: &Cli) -> anyhow::Result<cpp_indexer::config::SinkConfi
             Ok(SinkConfig {
                 backend: "indradb".to_owned(),
                 batch_size: None,
+                write_buffer_bytes: None,
                 neo4j: None,
                 indradb: Some(IndraDbSinkConfig {
                     endpoint: uri,

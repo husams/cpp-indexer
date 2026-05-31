@@ -96,6 +96,9 @@ async fn expands_to_count_bounded_by_10x_source_lines() {
         skip_repo_node: true,
         symbol_db_path: None,
         symbol_cache_size: 100_000,
+        phase1_tuning: Default::default(),
+        write_buffer_bytes: cpp_indexer::config::DEFAULT_WRITE_BUFFER_BYTES,
+        write_only: false,
     };
 
     let stats = run(Arc::clone(&sink) as Arc<dyn GraphSink>, opts)
@@ -147,6 +150,9 @@ async fn expands_to_count_is_nonzero_for_xmacro_fixture() {
         skip_repo_node: true,
         symbol_db_path: None,
         symbol_cache_size: 100_000,
+        phase1_tuning: Default::default(),
+        write_buffer_bytes: cpp_indexer::config::DEFAULT_WRITE_BUFFER_BYTES,
+        write_only: false,
     };
 
     let stats = run(Arc::clone(&sink) as Arc<dyn GraphSink>, opts)

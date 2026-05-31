@@ -38,7 +38,7 @@ use crate::stage::writer::StageWriter;
 use crate::visit::modules_cpp20::{
     is_module_tu, parse_module_tu, probe_cpp20_support, warn_and_skip,
 };
-use crate::visit::shallow::{visit_tu_with_index, with_thread_index, VisitOptions};
+use crate::visit::shallow::{visit_tu_with_index, with_thread_index_recycle, VisitOptions};
 use crate::{Error, Result};
 
 // ---------------------------------------------------------------------------
@@ -50,6 +50,30 @@ thread_local! {
     /// the first TU assigned to this thread and flushed by the broadcast after
     /// `par_iter` completes.
     static THREAD_WRITER: RefCell<Option<StageWriter>> = const { RefCell::new(None) };
+
+    /// Per-worker parse counter driving the `malloc_trim` cadence (Bug 1c).
+    /// Independent of the Index-recycle counter so the two cadences can differ.
+    static THREAD_TRIM_COUNTER: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Advance this worker's trim counter and, when `trim_interval` is reached,
+/// call `glibc::trim()` to return freed arena pages to the OS (Bug 1c).
+///
+/// `trim_interval == 0` disables periodic trimming.  On non-Linux platforms
+/// `glibc::trim()` is a no-op, so this only costs the counter bump.
+fn maybe_trim(trim_interval: u32) {
+    if trim_interval == 0 {
+        return;
+    }
+    THREAD_TRIM_COUNTER.with(|c| {
+        let next = c.get().saturating_add(1);
+        if next >= trim_interval {
+            crate::mem::glibc::trim();
+            c.set(0);
+        } else {
+            c.set(next);
+        }
+    });
 }
 
 /// Flush and close the thread-local `StageWriter`.  Called via
@@ -87,9 +111,34 @@ pub struct ParallelStats {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Memory-tuning knobs for Phase 1 (Issue 0002 Bug 1).
+///
+/// All are Linux-relevant; on macOS the `trim` calls are no-ops and only
+/// `index_recycle_interval` (portable) has any effect.
+#[derive(Debug, Clone, Copy)]
+pub struct Phase1Tuning {
+    /// Call `glibc::trim()` once every this many parses *per worker*, returning
+    /// freed top-of-arena pages to the OS.  `0` disables periodic trimming.
+    pub trim_interval: u32,
+    /// Recreate the per-thread `clang::Index` every this many parses to bound
+    /// libclang's per-`Index` state accumulation.  `0` disables recycling.
+    pub index_recycle_interval: u32,
+}
+
+impl Default for Phase1Tuning {
+    fn default() -> Self {
+        Self {
+            trim_interval: crate::config::DEFAULT_TRIM_INTERVAL,
+            index_recycle_interval: crate::config::DEFAULT_INDEX_RECYCLE_INTERVAL,
+        }
+    }
+}
+
 /// Run Phase 1 (libclang → Parquet) in parallel using rayon.
 ///
 /// `workers` controls the rayon thread-pool size; `None` uses `num_cpus::get()`.
+/// `tuning` carries the Bug-1 memory knobs (arena trim cadence + Index recycle
+/// interval).
 ///
 /// Returns aggregate stats after all workers have flushed.
 ///
@@ -105,6 +154,7 @@ pub fn run_phase1_parallel(
     skip_system_headers: bool,
     workers: Option<usize>,
     allocator: Option<Arc<SymbolAllocator>>,
+    tuning: Phase1Tuning,
 ) -> Result<ParallelStats> {
     std::fs::create_dir_all(stage_dir)?;
 
@@ -175,7 +225,7 @@ pub fn run_phase1_parallel(
                     } else {
                         let alloc = allocator.as_ref().clone();
                         catch_unwind(AssertUnwindSafe(|| {
-                            with_thread_index(|index| {
+                            with_thread_index_recycle(tuning.index_recycle_interval, |index| {
                                 THREAD_WRITER.with(|cell| {
                                     let mut borrow = cell.borrow_mut();
                                     let writer =
@@ -195,7 +245,7 @@ pub fn run_phase1_parallel(
                     }
                 } else {
                     catch_unwind(AssertUnwindSafe(|| {
-                        with_thread_index(|index| {
+                        with_thread_index_recycle(tuning.index_recycle_interval, |index| {
                             THREAD_WRITER.with(|cell| {
                                 let mut borrow = cell.borrow_mut();
                                 let writer =
@@ -213,6 +263,9 @@ pub fn run_phase1_parallel(
                         })
                     }))
                 };
+
+                // Bug 1c: periodically return freed arena pages to the OS.
+                maybe_trim(tuning.trim_interval);
 
                 match parse_result {
                     Ok(Ok(had_errors)) => {

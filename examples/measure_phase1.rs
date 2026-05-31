@@ -45,8 +45,16 @@ fn main() {
     };
 
     let t0 = Instant::now();
-    let stats = run_phase1_parallel(&entries, &stage, "bench-repo", skip_system, workers, alloc)
-        .expect("phase 1 must succeed");
+    let stats = run_phase1_parallel(
+        &entries,
+        &stage,
+        "bench-repo",
+        skip_system,
+        workers,
+        alloc,
+        Default::default(),
+    )
+    .expect("phase 1 must succeed");
     let elapsed = t0.elapsed();
 
     let total = stats.tu_ok + stats.tu_partial + stats.tu_error;
@@ -57,8 +65,15 @@ fn main() {
     println!("compile_commands   : {}", cc_path.display());
     println!(
         "workers            : {}    symbol-id allocator: {}    skip_system_headers: {}",
-        workers.map_or_else(|| format!("{} (num_cpus)", num_cpus_get()), |w| w.to_string()),
-        if use_alloc { "ON (v6)" } else { "OFF (baseline)" },
+        workers.map_or_else(
+            || format!("{} (num_cpus)", num_cpus_get()),
+            |w| w.to_string()
+        ),
+        if use_alloc {
+            "ON (v6)"
+        } else {
+            "OFF (baseline)"
+        },
         skip_system,
     );
     println!("──────────────────────────────────────────────────────");
@@ -67,7 +82,10 @@ fn main() {
         stats.tu_ok, stats.tu_partial, stats.tu_error
     );
     println!("wall-clock         : {secs:.3} s");
-    println!("throughput         : {:.1} TU/s", total as f64 / secs.max(1e-9));
+    println!(
+        "throughput         : {:.1} TU/s",
+        total as f64 / secs.max(1e-9)
+    );
     println!(
         "mean latency / TU  : {:.1} ms",
         1000.0 * secs / total.max(1) as f64

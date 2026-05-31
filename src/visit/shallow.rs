@@ -9,11 +9,19 @@
 //! and a diagnostic is logged, but the visitor continues with whatever AST
 //! libclang managed to produce.
 //!
-//! ## Thread-local libclang Index (S17 / ADR-7)
+//! ## Thread-local libclang Index (S17 / ADR-7, Issue 0002 Bug 1d)
 //! `with_thread_index` initialises one `clang::Index` per rayon worker thread on
 //! first use.  A single `Clang` instance is created at process startup (stored in
-//! a `OnceLock`) and each worker thread creates its own `Index` from it.  `Index`
-//! is leaked to `'static`; the leak is bounded by worker count × process lifetime.
+//! a `OnceLock`) and each worker thread creates its own `Index` from it.
+//!
+//! The per-thread `Index` is **owned** in a `thread_local!` `RefCell` (not
+//! `Box::leak`'d) so it can be recycled.  libclang `Index` objects accumulate
+//! internal state across thousands of parses; [`with_thread_index_recycle`]
+//! tracks a per-thread parse counter and drops + recreates the `Index` every N
+//! parses to bound that accumulation (the residual RSS creep in Issue 0002).
+//! Recreation happens only **between** parses — never while a `TranslationUnit`
+//! borrowed from the `Index` is alive — because each parse is fully consumed
+//! inside the `with_thread_index*` closure.
 //!
 //! # SAFETY
 //! `clang::Clang` is `!Sync` by design, but it is zero-sized (`PhantomData`-only).
@@ -21,7 +29,7 @@
 //! `clang_createIndex()` call is thread-safe.  We add `Sync` via a newtype wrapper
 //! after verifying that no mutable state is shared.  See `ClangSync` in the source.
 
-use std::cell::OnceCell;
+use std::cell::RefCell;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
@@ -74,32 +82,113 @@ pub fn global_clang() -> &'static Clang {
         .0
 }
 
+/// Per-thread libclang `Index` plus a parse counter for recycling (Bug 1d).
+struct ThreadIndex {
+    /// The owned `Index`.  Owned (not `Box::leak`'d) so it can be dropped and
+    /// recreated to bound libclang's per-`Index` state accumulation.
+    index: Box<Index<'static>>,
+    /// Number of parses serviced by `index` since it was (re)created.
+    parses: u32,
+}
+
 thread_local! {
-    // Each worker thread keeps one Index for the lifetime of the pool.
-    static THREAD_INDEX: OnceCell<&'static Index<'static>> = const { OnceCell::new() };
+    // Each worker thread owns one Index, recreated every N parses.
+    static THREAD_INDEX: RefCell<Option<ThreadIndex>> = const { RefCell::new(None) };
+}
+
+/// Whether the per-thread `Index` should be recycled before a parse.
+///
+/// `interval == 0` disables recycling.  Otherwise recycle once the count of
+/// parses serviced by the current `Index` has reached `interval`.  Extracted as
+/// a pure function so the recycle cadence is unit-testable without libclang.
+#[inline]
+fn should_recycle(parses: u32, interval: u32) -> bool {
+    interval != 0 && parses >= interval
+}
+
+/// Create a fresh per-thread `Index` from the process-wide [`GLOBAL_CLANG`].
+fn new_thread_index() -> Box<Index<'static>> {
+    // SAFETY: GLOBAL_CLANG lives for 'static; Index::new does not mutate Clang
+    // — it only calls clang_createIndex(), a thread-safe libclang entry point
+    // that returns an independent opaque handle (see module SAFETY comment).
+    let clang: &'static Clang = global_clang();
+    Box::new(Index::new(
+        clang, /* exclude_pch */ true, /* diagnostics */ false,
+    ))
 }
 
 /// Call `f` with the thread-local `clang::Index`, initialising it on first use.
 ///
-/// Creates one `Index` per rayon worker thread on first call; subsequent calls
-/// on the same thread reuse the cached `Index`.  Thread-local initialisation
-/// uses the process-wide [`GLOBAL_CLANG`] handle (see module SAFETY comment).
+/// Equivalent to [`with_thread_index_recycle`] with recycling disabled — the
+/// `Index` is created once per worker thread and reused.  Use this for cheap
+/// one-off probes (e.g. capability detection) where recycling is irrelevant.
 ///
 /// # Panics
 /// Panics if libclang cannot be initialised (`Clang::new()` fails).
 pub fn with_thread_index<R>(f: impl FnOnce(&Index<'static>) -> R) -> R {
+    with_thread_index_recycle(0, f)
+}
+
+/// Call `f` with the thread-local `clang::Index`, recycling it every
+/// `recycle_interval` parses (Issue 0002 Bug 1d).
+///
+/// On entry, if the per-thread parse counter has reached `recycle_interval`
+/// (and the interval is non-zero), the existing `Index` is **dropped and
+/// recreated** before `f` runs, bounding libclang's per-`Index` state
+/// accumulation.  `recycle_interval == 0` disables recycling (reuse forever).
+///
+/// # Safety contract
+/// Recreation happens only here, *between* parses, while no `TranslationUnit`
+/// borrowed from the `Index` is alive: each parse is fully consumed inside `f`
+/// and no `Index` reference escapes the closure.  Recreating the `Index` while
+/// a borrowed `TranslationUnit` were alive would be UB — the closure boundary
+/// is what makes this sound.
+///
+/// # Panics
+/// Panics if libclang cannot be initialised (`Clang::new()` fails).
+pub fn with_thread_index_recycle<R>(
+    recycle_interval: u32,
+    f: impl FnOnce(&Index<'static>) -> R,
+) -> R {
     THREAD_INDEX.with(|cell| {
-        let idx = cell.get_or_init(|| {
-            // SAFETY: GLOBAL_CLANG lives for 'static; Index::new does not
-            // mutate Clang — it only calls clang_createIndex() which is
-            // thread-safe in libclang.  Box::leak bounds the leak to
-            // worker-count × process-lifetime (documented pattern).
-            let clang: &'static Clang = global_clang();
-            Box::leak(Box::new(Index::new(
-                clang, /* exclude_pch */ true, /* diagnostics */ false,
-            )))
-        });
-        f(idx)
+        {
+            let mut slot = cell.borrow_mut();
+            match slot.as_mut() {
+                None => {
+                    *slot = Some(ThreadIndex {
+                        index: new_thread_index(),
+                        parses: 0,
+                    });
+                }
+                Some(ti) => {
+                    if should_recycle(ti.parses, recycle_interval) {
+                        // Drop the old Index (no live TranslationUnit borrow —
+                        // see the safety contract above) and recreate it.
+                        ti.index = new_thread_index();
+                        ti.parses = 0;
+                    }
+                }
+            }
+        }
+
+        // Borrow immutably for the duration of the parse closure.  The closure
+        // takes `&Index<'static>`; the `'static` is the Index *type* parameter
+        // (anchored to GLOBAL_CLANG), not the reference lifetime, so a
+        // short-lived borrow satisfies it.
+        let result = {
+            let slot = cell.borrow();
+            let ti = slot
+                .as_ref()
+                .expect("thread Index initialised immediately above");
+            f(&ti.index)
+        };
+
+        // Count this parse after `f` returns (so the borrow has ended).
+        if let Some(ti) = cell.borrow_mut().as_mut() {
+            ti.parses = ti.parses.saturating_add(1);
+        }
+
+        result
     })
 }
 
@@ -1310,4 +1399,61 @@ pub fn visit_all(
     }
 
     Ok((total_nodes, error_count))
+}
+
+// ---------------------------------------------------------------------------
+// Tests (Issue 0002 Bug 1d — Index recycle cadence)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod recycle_tests {
+    use super::should_recycle;
+
+    #[test]
+    fn recycle_disabled_when_interval_zero() {
+        // interval 0 means "never recycle", regardless of parse count.
+        assert!(!should_recycle(0, 0));
+        assert!(!should_recycle(1_000_000, 0));
+    }
+
+    #[test]
+    fn recycle_fires_exactly_at_interval() {
+        let interval = 256;
+        // Below the interval: keep the Index.
+        for parses in [0u32, 1, 100, 255] {
+            assert!(
+                !should_recycle(parses, interval),
+                "must not recycle before reaching interval (parses={parses})"
+            );
+        }
+        // At and beyond the interval: recycle.
+        assert!(
+            should_recycle(256, interval),
+            "must recycle at the interval"
+        );
+        assert!(
+            should_recycle(257, interval),
+            "must recycle past the interval"
+        );
+    }
+
+    #[test]
+    fn recycle_every_n_in_a_simulated_run() {
+        // Simulate the per-thread counter: increment after each parse, reset to
+        // 0 when a recycle fires.  Assert a recreate fires exactly every N.
+        let interval = 4u32;
+        let mut parses = 0u32;
+        let mut recreate_at = Vec::new();
+        for tu in 0..20u32 {
+            if should_recycle(parses, interval) {
+                recreate_at.push(tu);
+                parses = 0;
+            }
+            // (parse happens here)
+            parses += 1;
+        }
+        // With interval 4, recreate fires before TUs 4, 8, 12, 16 (the counter
+        // reaches 4 after 4 parses, triggering on the next entry).
+        assert_eq!(recreate_at, vec![4, 8, 12, 16]);
+    }
 }

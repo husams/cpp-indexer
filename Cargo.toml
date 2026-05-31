@@ -57,6 +57,7 @@ tonic = "0.12"
 url = "2"
 rusqlite = { version = "0.31", features = ["bundled"] }
 lru = "0.12"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
@@ -66,7 +67,6 @@ tracing-test = { version = "0.2", features = ["no-env-filter"] }
 futures = "0.3"
 tower = { version = "0.5", features = ["util"] }
 walkdir = "2"
-libc = "0.2"
 reqwest = { version = "0.12", features = ["json"] }
 
 [[test]]
@@ -248,3 +248,8 @@ required-features = []
 name = "pcm_integration"
 path = "tests/integration/pcm_integration.rs"
 required-features = ["test-mock"]
+
+[[test]]
+name = "memory_scaling_0002"
+path = "tests/integration/memory_scaling_0002.rs"
+required-features = []

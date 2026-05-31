@@ -58,6 +58,9 @@ fn make_run_opts(fixture: PathBuf, cc_path: Option<PathBuf>, stage_dir: PathBuf)
         skip_repo_node: true,
         symbol_db_path: None,
         symbol_cache_size: 100_000,
+        phase1_tuning: Default::default(),
+        write_buffer_bytes: cpp_indexer::config::DEFAULT_WRITE_BUFFER_BYTES,
+        write_only: false,
     }
 }
 
@@ -190,6 +193,9 @@ async fn m5_chromium_subset_gate() {
         skip_repo_node: true,
         symbol_db_path: None,
         symbol_cache_size: 100_000,
+        phase1_tuning: Default::default(),
+        write_buffer_bytes: cpp_indexer::config::DEFAULT_WRITE_BUFFER_BYTES,
+        write_only: false,
     };
 
     // AC-M5-10: pipeline must complete without panic/segfault.

@@ -78,6 +78,23 @@ impl From<RawRepoConfig> for RepoConfig {
 /// Set to `0` to disable the cache entirely.
 pub const DEFAULT_SYMBOL_CACHE_SIZE: usize = 100_000;
 
+/// Default glibc `M_ARENA_MAX` cap applied at process start (Issue 0002 Bug 1b).
+///
+/// Caps glibc malloc arenas process-wide (including libclang's transient AST
+/// heap) so per-thread arena retention does not balloon RSS during Phase 1.
+/// `0` leaves the glibc default untouched (the A/B escape hatch).
+pub const DEFAULT_MALLOC_ARENA_MAX: usize = 2;
+
+/// Default `malloc_trim` cadence in parses-per-worker (Issue 0002 Bug 1c).
+///
+/// `0` disables periodic trimming.
+pub const DEFAULT_TRIM_INTERVAL: u32 = 64;
+
+/// Default per-thread `clang::Index` recycle interval in parses (Bug 1d).
+///
+/// `0` disables recycling (the `Index` is reused for the whole run).
+pub const DEFAULT_INDEX_RECYCLE_INTERVAL: u32 = 256;
+
 /// `[index]` — Phase 1 / parallelism settings.
 #[derive(Debug, Clone)]
 pub struct IndexConfig {
@@ -108,6 +125,26 @@ pub struct IndexConfig {
     /// site".  Carrying it as `Option<PathBuf>` here preserves the
     /// distinction between "operator supplied a path" and "use the default".
     pub symbol_db_path: Option<PathBuf>,
+
+    /// glibc `M_ARENA_MAX` cap applied at process start (Issue 0002 Bug 1b).
+    ///
+    /// Default [`DEFAULT_MALLOC_ARENA_MAX`] (2).  `0` leaves the glibc default
+    /// untouched (A/B escape hatch).  No effect off Linux.
+    pub malloc_arena_max: usize,
+
+    /// `malloc_trim` cadence in parses-per-worker (Issue 0002 Bug 1c).
+    ///
+    /// Default [`DEFAULT_TRIM_INTERVAL`] (64).  `0` disables periodic trimming.
+    pub trim_interval: u32,
+
+    /// Per-thread `clang::Index` recycle interval in parses (Bug 1d).
+    ///
+    /// Default [`DEFAULT_INDEX_RECYCLE_INTERVAL`] (256).  `0` disables recycling.
+    pub index_recycle_interval: u32,
+
+    /// When `true`, skip Phases 0–3 and run Phase 4 against an existing
+    /// `--stage-dir` (Issue 0002 Bug 2 resume).  Default `false`.
+    pub write_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -122,6 +159,14 @@ struct RawIndexConfig {
     #[serde(default = "default_symbol_cache_size")]
     symbol_cache_size: usize,
     symbol_db_path: Option<PathBuf>,
+    #[serde(default = "default_malloc_arena_max")]
+    malloc_arena_max: usize,
+    #[serde(default = "default_trim_interval")]
+    trim_interval: u32,
+    #[serde(default = "default_index_recycle_interval")]
+    index_recycle_interval: u32,
+    #[serde(default)]
+    write_only: bool,
 }
 
 fn default_true() -> bool {
@@ -130,6 +175,18 @@ fn default_true() -> bool {
 
 fn default_symbol_cache_size() -> usize {
     DEFAULT_SYMBOL_CACHE_SIZE
+}
+
+fn default_malloc_arena_max() -> usize {
+    DEFAULT_MALLOC_ARENA_MAX
+}
+
+fn default_trim_interval() -> u32 {
+    DEFAULT_TRIM_INTERVAL
+}
+
+fn default_index_recycle_interval() -> u32 {
+    DEFAULT_INDEX_RECYCLE_INTERVAL
 }
 
 impl From<RawIndexConfig> for IndexConfig {
@@ -141,6 +198,10 @@ impl From<RawIndexConfig> for IndexConfig {
             stage_dir: r.stage_dir,
             symbol_cache_size: r.symbol_cache_size,
             symbol_db_path: r.symbol_db_path,
+            malloc_arena_max: r.malloc_arena_max,
+            trim_interval: r.trim_interval,
+            index_recycle_interval: r.index_recycle_interval,
+            write_only: r.write_only,
         }
     }
 }
@@ -230,6 +291,15 @@ pub const DEFAULT_BATCH_SIZE: usize = 10_000;
 /// Default number of concurrent in-flight write sessions (S18: ADR-2 §Concurrency).
 pub const DEFAULT_SESSIONS: usize = 16;
 
+/// Default byte budget for the Phase 4 streaming write buffer (Issue 0002 Bug 2).
+///
+/// Phase 4 flushes the in-flight node/edge buffer to the sink when *either* the
+/// row count reaches `batch_size` *or* the accumulated record bytes reach this
+/// budget — bounding peak RSS even when a buffer is full of large `code`
+/// snippets (≤32 KiB each).  `0` disables the byte budget (row-only flushing,
+/// restoring pre-Issue-0002 behaviour for A/B).
+pub const DEFAULT_WRITE_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+
 /// `[sink]` — top-level sink selector.
 #[derive(Debug, Clone)]
 pub struct SinkConfig {
@@ -241,6 +311,12 @@ pub struct SinkConfig {
     /// Larger batches amortise round-trip overhead; smaller batches reduce
     /// peak memory per chunk. Default: [`DEFAULT_BATCH_SIZE`] (10 000).
     pub batch_size: Option<usize>,
+
+    /// Byte budget for the Phase 4 streaming write buffer (Issue 0002 Bug 2).
+    ///
+    /// `None` falls back to [`DEFAULT_WRITE_BUFFER_BYTES`] (~64 MiB).  `Some(0)`
+    /// disables the byte budget (row-only flushing).
+    pub write_buffer_bytes: Option<usize>,
 
     /// Neo4j parameters (required when `backend = "neo4j"`).
     pub neo4j: Option<Neo4jSinkConfig>,
@@ -254,6 +330,13 @@ impl SinkConfig {
     pub fn resolved_batch_size(&self) -> usize {
         self.batch_size.unwrap_or(DEFAULT_BATCH_SIZE)
     }
+
+    /// Resolved write-buffer byte budget, falling back to
+    /// [`DEFAULT_WRITE_BUFFER_BYTES`].  `0` means "no byte budget".
+    pub fn resolved_write_buffer_bytes(&self) -> usize {
+        self.write_buffer_bytes
+            .unwrap_or(DEFAULT_WRITE_BUFFER_BYTES)
+    }
 }
 
 #[derive(Deserialize)]
@@ -261,6 +344,7 @@ impl SinkConfig {
 struct RawSinkConfig {
     backend: String,
     batch_size: Option<usize>,
+    write_buffer_bytes: Option<usize>,
     neo4j: Option<RawNeo4jSinkConfig>,
     indradb: Option<RawIndraDbSinkConfig>,
 }
@@ -272,6 +356,7 @@ impl RawSinkConfig {
         Ok(SinkConfig {
             backend: self.backend,
             batch_size: self.batch_size,
+            write_buffer_bytes: self.write_buffer_bytes,
             neo4j,
             indradb,
         })
@@ -844,6 +929,109 @@ symbol_db_path = "/tmp/my-symbols.db"
             idx.symbol_db_path.as_ref().expect("path set"),
             &PathBuf::from("/tmp/my-symbols.db")
         );
+    }
+
+    // ── Issue 0002 config knobs ───────────────────────────────────────────
+
+    #[test]
+    fn config_memory_knobs_default_when_index_section_omitted() {
+        let toml_str = r#"
+[sink]
+backend = "neo4j"
+
+[sink.neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password_env = "NEO4J_PASSWORD"
+"#;
+        let cfg = Config::parse(toml_str).expect("must parse");
+        // No [index] section → the caller falls back to the DEFAULT_* consts.
+        assert!(cfg.index.is_none());
+        assert_eq!(DEFAULT_MALLOC_ARENA_MAX, 2);
+        assert_eq!(DEFAULT_TRIM_INTERVAL, 64);
+        assert_eq!(DEFAULT_INDEX_RECYCLE_INTERVAL, 256);
+    }
+
+    #[test]
+    fn config_memory_knobs_default_within_index_section() {
+        // An [index] section that omits the knobs must still default them.
+        let toml_str = r#"
+[sink]
+backend = "neo4j"
+
+[sink.neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password_env = "NEO4J_PASSWORD"
+
+[index]
+workers = 4
+"#;
+        let cfg = Config::parse(toml_str).expect("must parse");
+        let idx = cfg.index.as_ref().expect("[index] present");
+        assert_eq!(idx.malloc_arena_max, DEFAULT_MALLOC_ARENA_MAX);
+        assert_eq!(idx.trim_interval, DEFAULT_TRIM_INTERVAL);
+        assert_eq!(idx.index_recycle_interval, DEFAULT_INDEX_RECYCLE_INTERVAL);
+        assert!(!idx.write_only, "write_only defaults to false");
+    }
+
+    #[test]
+    fn config_memory_knobs_explicit_override() {
+        let toml_str = r#"
+[sink]
+backend = "neo4j"
+
+[sink.neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password_env = "NEO4J_PASSWORD"
+
+[index]
+malloc_arena_max = 0
+trim_interval = 16
+index_recycle_interval = 1024
+write_only = true
+"#;
+        let cfg = Config::parse(toml_str).expect("must parse");
+        let idx = cfg.index.as_ref().expect("[index] present");
+        assert_eq!(idx.malloc_arena_max, 0, "0 (uncapped) must survive");
+        assert_eq!(idx.trim_interval, 16);
+        assert_eq!(idx.index_recycle_interval, 1024);
+        assert!(idx.write_only);
+    }
+
+    #[test]
+    fn config_write_buffer_bytes_default_and_override() {
+        let base = r#"
+[sink]
+backend = "neo4j"
+
+[sink.neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password_env = "NEO4J_PASSWORD"
+"#;
+        let cfg = Config::parse(base).expect("must parse");
+        assert!(cfg.sink.write_buffer_bytes.is_none());
+        assert_eq!(
+            cfg.sink.resolved_write_buffer_bytes(),
+            DEFAULT_WRITE_BUFFER_BYTES
+        );
+
+        // `write_buffer_bytes` lives under [sink] (above the [sink.neo4j] table).
+        let with_value = r#"
+[sink]
+backend = "neo4j"
+write_buffer_bytes = 1048576
+
+[sink.neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password_env = "NEO4J_PASSWORD"
+"#;
+        let cfg = Config::parse(with_value).expect("must parse");
+        assert_eq!(cfg.sink.write_buffer_bytes, Some(1_048_576));
+        assert_eq!(cfg.sink.resolved_write_buffer_bytes(), 1_048_576);
     }
 
     #[test]

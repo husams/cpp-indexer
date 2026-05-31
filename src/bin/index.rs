@@ -155,6 +155,22 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
 
+    /// Cap glibc malloc arenas at N (Issue 0002 Bug 1; Linux-only).
+    ///
+    /// Replicates `MALLOC_ARENA_MAX=N` in-process to bound Phase 1 RSS. `0`
+    /// leaves the glibc default untouched (A/B escape hatch). Default 2.
+    /// Overrides `[index].malloc_arena_max`.
+    #[arg(long, value_name = "N")]
+    malloc_arena_max: Option<usize>,
+
+    /// Run only Phase 4 (sink write) against an existing `--stage-dir`,
+    /// skipping Phases 0–3 (Issue 0002 Bug 2 resume).
+    ///
+    /// Requires a populated `--stage-dir` containing `cxg-symbols.db` and the
+    /// Phase 1–3 Parquet shards. Idempotent on re-run.
+    #[arg(long)]
+    write_only: bool,
+
     /// Exit with code 2 when the fraction of failed translation units meets or
     /// exceeds RATIO. `never` disables the check. Default: 1.0 (exit 2 only
     /// when every TU fails).
@@ -193,6 +209,21 @@ async fn main() -> anyhow::Result<ExitCode> {
     }
 
     let file_config = load_config(cli.config.as_ref())?;
+
+    // ── Issue 0002 Bug 1b: cap glibc malloc arenas as early as possible ──
+    // Resolve from CLI > file > default, then apply via mallopt before any
+    // libclang load or rayon worker spawn (both happen later in `run`).  This
+    // is the load-bearing fix for Phase 1 RSS growth; on non-Linux it is a
+    // no-op.  `0` leaves the glibc default untouched (A/B escape hatch).
+    let malloc_arena_max = cli
+        .malloc_arena_max
+        .or_else(|| {
+            file_config
+                .as_ref()
+                .and_then(|cfg| cfg.index.as_ref().map(|idx| idx.malloc_arena_max))
+        })
+        .unwrap_or(cpp_indexer::config::DEFAULT_MALLOC_ARENA_MAX);
+    cpp_indexer::mem::glibc::set_arena_max(malloc_arena_max);
 
     // Build a SinkConfig from config + CLI flags before moving fields out of cli.
     let sink_config = build_sink_config(&cli, file_config.as_ref())?;
@@ -262,10 +293,6 @@ async fn main() -> anyhow::Result<ExitCode> {
         file_db_path,
     );
 
-    // These values are threaded into the pipeline in Story 3 (SymbolAllocator
-    // construction in parallel.rs).  Held here so they compile and are testable.
-    let _ = (symbol_cache_size, symbol_db_path);
-
     let sink = factory::create(&sink_config)
         .await
         .with_context(|| format!("failed to connect to {backend_name_hint} sink"))?;
@@ -275,6 +302,23 @@ async fn main() -> anyhow::Result<ExitCode> {
         input_path,
         sink.backend_name()
     );
+
+    // Resolve the remaining Phase-1 memory knobs (file > default) and the
+    // Phase-4 write-buffer budget / write-only resume flag.
+    let trim_interval = file_config
+        .as_ref()
+        .and_then(|cfg| cfg.index.as_ref().map(|idx| idx.trim_interval))
+        .unwrap_or(cpp_indexer::config::DEFAULT_TRIM_INTERVAL);
+    let index_recycle_interval = file_config
+        .as_ref()
+        .and_then(|cfg| cfg.index.as_ref().map(|idx| idx.index_recycle_interval))
+        .unwrap_or(cpp_indexer::config::DEFAULT_INDEX_RECYCLE_INTERVAL);
+    let write_buffer_bytes = sink_config.resolved_write_buffer_bytes();
+    let write_only = cli.write_only
+        || file_config
+            .as_ref()
+            .and_then(|cfg| cfg.index.as_ref().map(|idx| idx.write_only))
+            .unwrap_or(false);
 
     let opts = RunOptions {
         input_path,
@@ -286,8 +330,14 @@ async fn main() -> anyhow::Result<ExitCode> {
         workers,
         skip_cache: false,
         skip_repo_node: false,
-        symbol_db_path: None,
-        symbol_cache_size: 100_000,
+        symbol_db_path,
+        symbol_cache_size,
+        phase1_tuning: cpp_indexer::pipeline::parallel::Phase1Tuning {
+            trim_interval,
+            index_recycle_interval,
+        },
+        write_buffer_bytes,
+        write_only,
     };
 
     let stats = run(Arc::clone(&sink), opts)
@@ -332,6 +382,7 @@ fn build_sink_config(
         .or_else(|| file_config.map(|cfg| cfg.sink.backend.clone()))
         .unwrap_or_else(|| "neo4j".to_owned());
     let batch_size = file_config.and_then(|cfg| cfg.sink.batch_size);
+    let write_buffer_bytes = file_config.and_then(|cfg| cfg.sink.write_buffer_bytes);
 
     match backend.as_str() {
         "neo4j" => {
@@ -344,6 +395,7 @@ fn build_sink_config(
             Ok(SinkConfig {
                 backend: "neo4j".to_owned(),
                 batch_size,
+                write_buffer_bytes,
                 neo4j: Some(Neo4jSinkConfig {
                     uri,
                     user: cli
@@ -371,6 +423,7 @@ fn build_sink_config(
             Ok(SinkConfig {
                 backend: "indradb".to_owned(),
                 batch_size,
+                write_buffer_bytes,
                 neo4j: None,
                 indradb: Some(IndraDbSinkConfig {
                     endpoint: uri,
@@ -407,6 +460,8 @@ mod tests {
             symbol_cache_size: None,
             symbol_db_path: None,
             config: None,
+            malloc_arena_max: None,
+            write_only: false,
             fail_on_tu_error: FailOnTuError::default(),
         }
     }

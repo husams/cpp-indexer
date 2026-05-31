@@ -56,6 +56,7 @@ fn reindex_symbol_id_stability() {
         true,
         Some(1),
         Some(Arc::clone(&alloc1)),
+        Default::default(),
     )
     .expect("run 1 must succeed");
 
@@ -77,6 +78,7 @@ fn reindex_symbol_id_stability() {
         true,
         Some(1),
         Some(Arc::clone(&alloc2)),
+        Default::default(),
     )
     .expect("run 2 must succeed");
 
@@ -112,8 +114,16 @@ fn integer_ids_populated_when_allocator_present() {
     assert!(!entries.is_empty(), "fixture must have at least one TU");
 
     let alloc = Arc::new(SymbolAllocator::open(&db_path, 10_000).expect("open allocator"));
-    run_phase1_parallel(&entries, &stage, "test-repo", true, Some(1), Some(alloc))
-        .expect("run must succeed");
+    run_phase1_parallel(
+        &entries,
+        &stage,
+        "test-repo",
+        true,
+        Some(1),
+        Some(alloc),
+        Default::default(),
+    )
+    .expect("run must succeed");
 
     let nodes = collect_all_nodes(&stage);
     assert!(!nodes.is_empty(), "must have emitted at least one node");
@@ -196,6 +206,7 @@ fn symbol_id_roundtrip_via_id_resolver() {
         true,
         Some(1),
         Some(Arc::clone(&alloc)),
+        Default::default(),
     )
     .expect("phase1 must succeed");
 

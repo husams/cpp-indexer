@@ -120,6 +120,9 @@ async fn repo_node_has_required_attrs() {
         skip_repo_node: false,
         symbol_db_path: None,
         symbol_cache_size: 100_000,
+        phase1_tuning: Default::default(),
+        write_buffer_bytes: cpp_indexer::config::DEFAULT_WRITE_BUFFER_BYTES,
+        write_only: false,
     };
 
     run(
@@ -236,6 +239,9 @@ async fn every_node_has_belongs_to_repo_edge() {
         skip_repo_node: false,
         symbol_db_path: None,
         symbol_cache_size: 100_000,
+        phase1_tuning: Default::default(),
+        write_buffer_bytes: cpp_indexer::config::DEFAULT_WRITE_BUFFER_BYTES,
+        write_only: false,
     };
 
     run(

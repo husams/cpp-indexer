@@ -2,6 +2,7 @@ pub mod api;
 pub mod bootstrap;
 pub mod config;
 pub mod error;
+pub mod mem;
 pub mod metrics;
 pub mod observability;
 pub mod pipeline;
