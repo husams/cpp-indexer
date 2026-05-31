@@ -455,6 +455,11 @@ struct Collector<'a> {
     /// Spelling locations of `UnexposedExpr` nodes whose visitor-callback `parent` is
     /// `VarDecl`, `FieldDecl`, or `ParmDecl` (initializer context → `decl_ref`).
     decl_init_wrappers: HashSet<SpellLoc>,
+    /// `(src_usr, dst_usr)` pairs already emitted as `CALLS` edges from a `CallExpr`.
+    /// Pre-order DFS visits the `CallExpr` before its callee `DeclRefExpr`, so the
+    /// pair is recorded first; `emit_uses_edge` consults this set to suppress the
+    /// redundant `USES` edge that the callee reference would otherwise produce.
+    call_pairs: HashSet<(String, String)>,
 }
 
 impl<'a> Collector<'a> {
@@ -477,6 +482,7 @@ impl<'a> Collector<'a> {
             seen_macro_usrs: HashSet::new(),
             return_wrappers: HashSet::new(),
             decl_init_wrappers: HashSet::new(),
+            call_pairs: HashSet::new(),
         }
     }
 }
@@ -529,6 +535,26 @@ impl<'a> Collector<'a> {
             EntityKind::DeclRefExpr | EntityKind::MemberRefExpr | EntityKind::TypeRef
         ) {
             self.emit_uses_edge(&entity, &parent);
+            return;
+        }
+
+        // ── INHERITS edge (M2): a CXXBaseSpecifier names a base class ────────
+        // `entity_kind_to_node_kind(BaseSpecifier)` is `None`, so base specifiers
+        // never reach the node-emission path below; INHERITS is emitted here.
+        if kind == EntityKind::BaseSpecifier {
+            self.emit_inherits_edge(&entity, &parent);
+            return;
+        }
+
+        // ── CALLS edge: the callee of a call expression ──────────────────────
+        if kind == EntityKind::CallExpr {
+            self.emit_calls_edge(&entity, &parent);
+            return;
+        }
+
+        // ── INSTANTIATES edge: a template referenced at a concrete use site ──
+        if kind == EntityKind::TemplateRef {
+            self.emit_instantiates_edge(&entity, &parent);
             return;
         }
 
@@ -760,6 +786,16 @@ impl<'a> Collector<'a> {
             return;
         }
 
+        // Suppress the redundant USES that a callee `DeclRefExpr` produces: the
+        // `CALLS` edge emitted from the enclosing `CallExpr` (visited first in
+        // pre-order DFS) already captures this `(caller, callee)` pair.
+        if self
+            .call_pairs
+            .contains(&(src_usr.clone(), dst_usr.clone()))
+        {
+            return;
+        }
+
         // System-header filter: skip if the referenced entity is in a system header.
         if self.skip_system_headers && ref_entity.is_in_system_header() {
             return;
@@ -891,6 +927,25 @@ impl<'a> Collector<'a> {
     /// INSTANTIATES and ADL_CANDIDATE are best-effort from call-expression context; they are
     /// emitted here where accessible from the declaration.
     fn emit_m2_edges(&mut self, entity_usr: &str, node_kind: NodeKind, entity: &clang::Entity<'_>) {
+        // ── SPECIALIZES (AC-M2-10): a specialization → its primary template ──
+        // Partial class specializations map to `NodeKind::Specialization`; full
+        // explicit specializations map to `NodeKind::Class` (class spec) or
+        // `NodeKind::Function` (function spec).  `get_template()` is `Some` only
+        // for specializations/instantiations, so ordinary classes/functions are
+        // unaffected; instantiations are never emitted as nodes (see `visit`).
+        if matches!(
+            node_kind,
+            NodeKind::Specialization | NodeKind::Class | NodeKind::Function
+        ) {
+            if let Some(tmpl) = entity.get_template() {
+                if let Some(tmpl_usr) = tmpl.get_usr() {
+                    if !tmpl_usr.0.is_empty() && tmpl_usr.0 != entity_usr {
+                        self.push_edge(entity_usr.to_owned(), tmpl_usr.0, EdgeKind::Specializes);
+                    }
+                }
+            }
+        }
+
         match node_kind {
             // ── OVERRIDES (AC-M2-8): virtual method overrides base class virtual ──
             NodeKind::Method => {
@@ -906,21 +961,6 @@ impl<'a> Collector<'a> {
                                     attrs,
                                 );
                             }
-                        }
-                    }
-                }
-            }
-
-            // ── SPECIALIZES (AC-M2-10): specialization → primary template ──
-            NodeKind::Specialization => {
-                if let Some(tmpl) = entity.get_template() {
-                    if let Some(tmpl_usr) = tmpl.get_usr() {
-                        if !tmpl_usr.0.is_empty() {
-                            self.push_edge(
-                                entity_usr.to_owned(),
-                                tmpl_usr.0,
-                                EdgeKind::Specializes,
-                            );
                         }
                     }
                 }
@@ -953,12 +993,138 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// Emit CONTAINS, HAS_METHOD, HAS_FIELD, INHERITS edges.
+    /// Walk `start` and its semantic ancestors until an entity with a non-empty
+    /// USR that maps to a tracked [`NodeKind`] is found.  Returns `(usr, kind)`,
+    /// or `None` (callers decide whether to fall back to the module USR).
+    fn resolve_enclosing(start: clang::Entity<'_>) -> Option<(String, EntityKind)> {
+        let mut cur = Some(start);
+        while let Some(e) = cur {
+            if let Some(u) = e.get_usr() {
+                if !u.0.is_empty() && entity_kind_to_node_kind(e.get_kind()).is_some() {
+                    return Some((u.0, e.get_kind()));
+                }
+            }
+            // Reference cursors (e.g. `BaseSpecifier`) report no semantic parent;
+            // fall back to the lexical parent to reach the enclosing declaration.
+            cur = e.get_semantic_parent().or_else(|| e.get_lexical_parent());
+        }
+        None
+    }
+
+    /// Emit an INHERITS edge from the derived class (the base specifier's parent)
+    /// to the base class.  A base that is a template instantiation (`Box<double>`)
+    /// is resolved to its primary template so the edge lands on an existing
+    /// `TEMPLATE_DECL` node rather than dangling.
+    fn emit_inherits_edge(&mut self, entity: &clang::Entity<'_>, parent: &clang::Entity<'_>) {
+        let derived_usr = match parent.get_usr() {
+            Some(u) if !u.0.is_empty() => u.0,
+            _ => return,
+        };
+        let base = match entity
+            .get_definition()
+            .or_else(|| entity.get_type().and_then(|t| t.get_declaration()))
+        {
+            Some(b) => b,
+            None => return,
+        };
+        // A specialization/instantiation base resolves to its primary template;
+        // a plain base resolves to itself.
+        let base_template = base.get_template();
+        let target = base_template.unwrap_or(base);
+        if self.skip_system_headers && target.is_in_system_header() {
+            return;
+        }
+        let target_usr = match target.get_usr() {
+            Some(u) if !u.0.is_empty() && u.0 != derived_usr => u.0,
+            _ => return,
+        };
+        self.push_edge(derived_usr.clone(), target_usr.clone(), EdgeKind::Inherits);
+        // When the base is a template instantiation (`Box<double>`), the derived
+        // class also instantiates the primary template.  A `BaseSpecifier` reports
+        // no semantic/lexical parent, so the `TemplateRef` handler cannot reach the
+        // enclosing class — emit the INSTANTIATES edge here, where it is known.
+        if base_template.is_some() {
+            self.push_edge(derived_usr, target_usr, EdgeKind::Instantiates);
+        }
+    }
+
+    /// Emit a CALLS edge from the enclosing function/method to the callee of a
+    /// `CallExpr`.  Records the `(caller, callee)` pair so `emit_uses_edge`
+    /// suppresses the redundant callee `USES` edge.
+    fn emit_calls_edge(&mut self, entity: &clang::Entity<'_>, parent: &clang::Entity<'_>) {
+        let callee = match entity.get_reference() {
+            Some(c) => c,
+            // A type-dependent call inside an uninstantiated template (e.g.
+            // `call<T>(a)`) has no resolved callee — libclang's two-phase lookup
+            // leaves the callee cursor referent-less, so no CALLS edge is possible.
+            None => return,
+        };
+        let callee_usr = match callee.get_usr() {
+            Some(u) if !u.0.is_empty() => u.0,
+            _ => return,
+        };
+        if self.skip_system_headers && callee.is_in_system_header() {
+            return;
+        }
+        let src_usr = match Self::resolve_enclosing(*parent) {
+            Some((u, _)) => u,
+            None => match &self.module_usr {
+                Some(m) => m.clone(),
+                None => return,
+            },
+        };
+        if src_usr == callee_usr {
+            return;
+        }
+        self.call_pairs
+            .insert((src_usr.clone(), callee_usr.clone()));
+        self.push_edge(src_usr, callee_usr, EdgeKind::Calls);
+    }
+
+    /// Emit an INSTANTIATES edge from a concrete use site to the template named
+    /// by a `TemplateRef` (e.g. `Box<double>` as a base, `id<int>(...)`).  Refs
+    /// inside a template/specialization *declaration* (the `Box` in the header of
+    /// `Box<T*>`) are skipped — that relationship is SPECIALIZES, not an instance.
+    fn emit_instantiates_edge(&mut self, entity: &clang::Entity<'_>, parent: &clang::Entity<'_>) {
+        let tmpl = match entity.get_reference() {
+            Some(t) => t,
+            None => return,
+        };
+        let tmpl_usr = match tmpl.get_usr() {
+            Some(u) if !u.0.is_empty() => u.0,
+            _ => return,
+        };
+        if self.skip_system_headers && tmpl.is_in_system_header() {
+            return;
+        }
+        let (src_usr, src_kind) = match Self::resolve_enclosing(*parent) {
+            Some(pair) => pair,
+            None => return,
+        };
+        // Skip references that occur within a template/specialization header
+        // (declaration context) rather than at a concrete instantiation site.
+        if matches!(
+            src_kind,
+            EntityKind::ClassTemplate
+                | EntityKind::FunctionTemplate
+                | EntityKind::ClassTemplatePartialSpecialization
+                | EntityKind::TypeAliasTemplateDecl
+        ) {
+            return;
+        }
+        if src_usr == tmpl_usr {
+            return;
+        }
+        self.push_edge(src_usr, tmpl_usr, EdgeKind::Instantiates);
+    }
+
+    /// Emit CONTAINS, HAS_METHOD, HAS_FIELD edges. (INHERITS is emitted
+    /// separately from `visit` on the `BaseSpecifier` cursor.)
     fn emit_structural_edges(
         &mut self,
         child_usr: &str,
         child_kind: NodeKind,
-        entity: &clang::Entity<'_>,
+        _entity: &clang::Entity<'_>,
         parent: &clang::Entity<'_>,
     ) {
         let parent_kind_raw = parent.get_kind();
@@ -986,22 +1152,7 @@ impl<'a> Collector<'a> {
             _ => EdgeKind::Contains,
         };
 
-        self.push_edge(parent_usr.clone(), child_usr.to_owned(), edge_kind);
-
-        // Emit INHERITS edges for base class specifiers.
-        if entity.get_kind() == EntityKind::BaseSpecifier {
-            if let Some(base_entity) = entity.get_definition() {
-                if let Some(base_usr) = base_entity.get_usr() {
-                    if !base_usr.0.is_empty() {
-                        self.push_edge(parent_usr, base_usr.0, EdgeKind::Inherits);
-                    }
-                }
-            }
-        }
-
-        // If this entity has base specifiers, walk them directly now.
-        // (BaseSpecifier nodes are visited via the normal child walk.)
-        let _ = entity; // silence unused-variable warning
+        self.push_edge(parent_usr, child_usr.to_owned(), edge_kind);
     }
 
     fn push_edge(&mut self, src: String, dst: String, kind: EdgeKind) {

@@ -612,6 +612,113 @@ async fn m2_emits_specializes_edge() {
     );
 }
 
+/// Regression: caller/callee (CALLS), base-class (INHERITS, incl. a
+/// template-instantiation base), template instance (INSTANTIATES), and
+/// SPECIALIZES for *full* explicit class **and** function specializations — not
+/// just partial class specs.  Also verifies the redundant callee `USES` edge is
+/// suppressed once a `CALLS` edge covers the same `(caller, callee)` pair.
+///
+/// Uses a self-contained snippet so it does not depend on the shared m2 fixture.
+#[tokio::test]
+async fn emits_calls_inherits_instantiates_and_full_specializes() {
+    let dir = TempDir::new().unwrap();
+    let stage_dir = dir.path().join("stage");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    let cpp_path = src_dir.join("relationships.cpp");
+    std::fs::write(
+        &cpp_path,
+        r#"
+int helper(int x) { return x + 1; }
+int caller() { return helper(41); }            // concrete call -> CALLS
+
+struct Base { virtual void run() {} };
+struct Derived : public Base { void run() override {} };  // INHERITS + OVERRIDES
+
+template<typename T> struct Box { T v; };
+template<typename T> struct Box<T*> { T* p; };  // partial spec -> SPECIALIZES
+template<> struct Box<bool> { bool b; };        // full class spec -> SPECIALIZES
+
+template<typename T> T id(T a) { return a; }
+template<> int id<int>(int a) { return a; }     // full fn spec -> SPECIALIZES
+
+struct UsesBox : public Box<double> {};         // template base -> INHERITS + INSTANTIATES
+
+void use_box() { Box<int> local; (void)local; } // non-base instantiation -> INSTANTIATES (TemplateRef path)
+"#,
+    )
+    .unwrap();
+
+    let clang = global_clang();
+    let cpp_path = cpp_path.canonicalize().unwrap_or(cpp_path);
+    let opts = VisitOptions {
+        repo_name: "rel-test-repo",
+        tu_hash: [42u8; 32],
+        file_path: &cpp_path,
+        args: &["clang++".to_owned(), "-std=c++17".to_owned()],
+        skip_system_headers: true,
+        allocator: None,
+    };
+
+    let mut writer = StageWriter::new(&stage_dir, 0).unwrap();
+    let had_errors = visit_tu(clang, &opts, &mut writer).unwrap();
+    writer.finish().unwrap();
+    assert!(!had_errors, "relationships.cpp must parse cleanly");
+
+    let edges = collect_edges(&stage_dir).await;
+    let kinds: std::collections::HashSet<&str> = edges.iter().map(|(_, _, k)| k.as_str()).collect();
+
+    for expected in [
+        "CALLS",
+        "INHERITS",
+        "INSTANTIATES",
+        "SPECIALIZES",
+        "OVERRIDES",
+    ] {
+        assert!(
+            kinds.contains(expected),
+            "must emit {expected} edge; got kinds: {kinds:?}"
+        );
+    }
+
+    // SPECIALIZES must cover all three: the partial class spec (Box<T*>), the full
+    // class spec (Box<bool>), and the full function spec (id<int>).
+    let specializes = edges.iter().filter(|(_, _, k)| k == "SPECIALIZES").count();
+    assert!(
+        specializes >= 3,
+        "expected >=3 SPECIALIZES edges (Box<T*>, Box<bool>, id<int>); got {specializes}"
+    );
+
+    // INSTANTIATES must come from BOTH code paths: the inheritance-base branch
+    // (`UsesBox`) and the `TemplateRef` handler (`Box<int> local;` in use_box).
+    // Require >=2 distinct sources so a regression in either path is caught.
+    let instantiate_srcs: std::collections::HashSet<&str> = edges
+        .iter()
+        .filter(|(_, _, k)| k == "INSTANTIATES")
+        .map(|(s, _, _)| s.as_str())
+        .collect();
+    assert!(
+        instantiate_srcs.len() >= 2,
+        "expected INSTANTIATES from >=2 distinct sites (UsesBox base + local var); got {instantiate_srcs:?}"
+    );
+
+    // The callee reference must not be double-counted: no USES edge shares a
+    // (src, dst) pair with a CALLS edge.
+    let call_pairs: std::collections::HashSet<(&str, &str)> = edges
+        .iter()
+        .filter(|(_, _, k)| k == "CALLS")
+        .map(|(s, d, _)| (s.as_str(), d.as_str()))
+        .collect();
+    let dup_uses = edges
+        .iter()
+        .filter(|(s, d, k)| k == "USES" && call_pairs.contains(&(s.as_str(), d.as_str())))
+        .count();
+    assert_eq!(
+        dup_uses, 0,
+        "callee USES must be suppressed when a CALLS edge covers the same pair"
+    );
+}
+
 /// AC-M2-11: FRIEND_OF edge emitted for friend declaration.
 #[tokio::test]
 async fn m2_emits_friend_of_edge() {
