@@ -1,0 +1,4 @@
+interface:
+  display_name: "C++ Functional Analysis"
+  short_description: "Functional analysis for C++ methods."
+  default_prompt: "Explain this C++ function or method from the functional specification perspective."

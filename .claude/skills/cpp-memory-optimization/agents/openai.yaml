@@ -1,0 +1,4 @@
+interface:
+  display_name: "C++ Memory Optimization"
+  short_description: "Analyze C++ memory profiles with libclang and GraphDB context."
+  default_prompt: "Analyze this C++ memory profile and find concrete optimization opportunities."
