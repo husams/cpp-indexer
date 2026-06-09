@@ -20,6 +20,10 @@
 //!   mirroring scope.
 //! - `src/visit/shallow.rs` — call sites wired in S43.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use clang::{Entity, EntityKind};
 use tracing::debug;
 
@@ -103,7 +107,11 @@ impl std::fmt::Display for AccessKind {
 ///
 /// `parent_chain` should be built from immediate-parent to grandparent order.
 /// An empty or length-1 chain (just the direct parent) is fully supported.
-pub fn classify_use(cursor: &Entity<'_>, parent_chain: &[Entity<'_>]) -> AccessKind {
+pub fn classify_use(
+    cursor: &Entity<'_>,
+    parent_chain: &[Entity<'_>],
+    file_cache: &mut HashMap<PathBuf, Arc<[u8]>>,
+) -> AccessKind {
     // Walk up to 4 parents, in order from immediate parent outward.
     let parents: Vec<&Entity<'_>> = parent_chain.iter().take(4).collect();
 
@@ -137,7 +145,7 @@ pub fn classify_use(cursor: &Entity<'_>, parent_chain: &[Entity<'_>]) -> AccessK
                 // Entity API; we use the spelling of the operator's range start
                 // to distinguish them.  On failure we fall back to AddrOf for
                 // safety (addr_of is the first unary token character `&`).
-                let op = unary_op_spelling(parent);
+                let op = unary_op_spelling(parent, file_cache);
                 match op.as_deref() {
                     Some("&") => return AccessKind::AddrOf,
                     Some("++") | Some("--") => return AccessKind::Write,
@@ -174,32 +182,36 @@ pub fn classify_use(cursor: &Entity<'_>, parent_chain: &[Entity<'_>]) -> AccessK
     }
 
     // Fallback: unknown.  Log at debug level per ADR-13 §Log level.
-    let parent_kinds: Vec<String> = parent_chain
-        .iter()
-        .take(4)
-        .map(|p| format!("{:?}", p.get_kind()))
-        .collect();
-    debug!(
-        usr = cursor
-            .get_usr()
-            .map(|u| u.0)
-            .unwrap_or_default()
-            .as_str(),
-        file = cursor
-            .get_location()
-            .and_then(|loc| {
-                let spell = loc.get_spelling_location();
-                spell.file.map(|f| f.get_path().to_string_lossy().into_owned())
-            })
-            .unwrap_or_default()
-            .as_str(),
-        line = cursor
-            .get_location()
-            .map(|loc| loc.get_spelling_location().line)
-            .unwrap_or(0),
-        parent_kinds = ?parent_kinds,
-        "access_classifier: unknown context"
-    );
+    // Gate the Vec allocation behind tracing::enabled! to avoid O(n) work on
+    // non-debug builds (fix 5).
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let parent_kinds: Vec<String> = parent_chain
+            .iter()
+            .take(4)
+            .map(|p| format!("{:?}", p.get_kind()))
+            .collect();
+        debug!(
+            usr = cursor
+                .get_usr()
+                .map(|u| u.0)
+                .unwrap_or_default()
+                .as_str(),
+            file = cursor
+                .get_location()
+                .and_then(|loc| {
+                    let spell = loc.get_spelling_location();
+                    spell.file.map(|f| f.get_path().to_string_lossy().into_owned())
+                })
+                .unwrap_or_default()
+                .as_str(),
+            line = cursor
+                .get_location()
+                .map(|loc| loc.get_spelling_location().line)
+                .unwrap_or(0),
+            parent_kinds = ?parent_kinds,
+            "access_classifier: unknown context"
+        );
+    }
     AccessKind::Unknown
 }
 
@@ -246,7 +258,14 @@ fn is_lhs_of_binary_op(
 /// libclang does not expose a structured "operator kind" from `Entity` in the
 /// clang-rs 2.0.0 API.  We fall back to comparing the range extent with the
 /// first child to find the operator prefix.  Returns `None` on any failure.
-fn unary_op_spelling(unary: &Entity<'_>) -> Option<String> {
+///
+/// `file_cache` is the per-TU byte-slice cache from the `Collector`.  On the
+/// first access for a given path within a TU the file is read from disk and
+/// cached; subsequent calls re-use the cached bytes (fix 4).
+fn unary_op_spelling(
+    unary: &Entity<'_>,
+    file_cache: &mut HashMap<PathBuf, Arc<[u8]>>,
+) -> Option<String> {
     let range = unary.get_range()?;
     let start = range.get_start().get_file_location();
     let child_start = unary
@@ -258,8 +277,9 @@ fn unary_op_spelling(unary: &Entity<'_>) -> Option<String> {
         .get_file_location();
 
     let file = start.file?;
+    let file_path = file.get_path();
     // Only handle same-file operators.
-    if child_start.file.as_ref()?.get_path() != file.get_path() {
+    if child_start.file.as_ref()?.get_path() != file_path {
         return None;
     }
 
@@ -271,7 +291,16 @@ fn unary_op_spelling(unary: &Entity<'_>) -> Option<String> {
         return Some("++".to_owned());
     }
 
-    let bytes = std::fs::read(file.get_path()).ok()?;
+    // Fetch from cache or read from disk.
+    let bytes: Arc<[u8]> = match file_cache.get(&file_path) {
+        Some(cached) => cached.clone(),
+        None => {
+            let raw = std::fs::read(&file_path).ok()?;
+            let arc: Arc<[u8]> = raw.into();
+            file_cache.insert(file_path.clone(), arc.clone());
+            arc
+        }
+    };
     let op_bytes = bytes.get(op_start..op_end)?;
     let op = String::from_utf8_lossy(op_bytes).trim().to_owned();
     if op.is_empty() {

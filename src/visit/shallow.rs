@@ -30,10 +30,9 @@
 //! after verifying that no mutable state is shared.  See `ClangSync` in the source.
 
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::panic::{self, AssertUnwindSafe};
-use std::path::Path;
-
-use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use clang::{Clang, EntityKind, EntityVisitResult, Index};
 use tracing::{debug, warn};
@@ -357,49 +356,13 @@ fn visit_tu_inner(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default(),
         qualified_name: opts.file_path.to_string_lossy().into_owned(),
-        mangled_name: None,
         file_path: opts.file_path.to_string_lossy().into_owned(),
-        line: None,
-        col: None,
         repo_name: opts.repo_name.to_owned(),
-        attrs_json: "{}".to_owned(),
         partial: has_errors,
-        phase: 1,
         tu_hash: opts.tu_hash,
-        // M8 promoted fields — MODULE nodes carry none of these
-        return_type: None,
-        params: None,
-        signature: None,
-        code: None,
-        code_truncated: None,
-        template_params: None,
-        template_args: None,
-        is_virtual: None,
-        is_pure_virtual: None,
-        is_static: None,
-        // Integer IDs populated by post-processing pass below.
-        symbol_id: 0,
-        file_id: 0,
-        // v7 S1 promoted fields — MODULE nodes carry none
-        is_const: None,
-        is_constexpr: None,
-        storage_class: None,
-        // v7 S2 promoted fields — MODULE nodes carry none
-        is_template: None,
-        is_noexcept: None,
-        is_override: None,
-        is_deleted: None,
-        is_defaulted: None,
-        cv_qualifiers: None,
-        ref_qualifier: None,
-        is_final: None,
-        is_abstract: None,
-        record_kind: None,
-        type_spelling: None,
-        param_index: None,
-        param_kind: None,
-        enum_value: None,
+        ..Default::default()
     };
+    collector.seen_node_usrs.insert(module_usr.clone());
     collector.nodes.push(module_node);
     collector.module_usr = Some(module_usr);
 
@@ -466,6 +429,24 @@ struct Collector<'a> {
     /// Multiple TUs may include the same header; Phase 3 deduplicates by USR.
     /// Within a single TU we avoid emitting the same `MacroDefinition` twice.
     seen_macro_usrs: HashSet<String>,
+    /// Deduplication set for ALL pushed node USRs within this TU (O(1) lookup).
+    ///
+    /// Covers all synthetic node kinds (Type, Parameter, TemplateArg) and also
+    /// every regular node pushed via `self.nodes.push(...)` — inserted in the
+    /// same call that pushes the node.  This replaces the four `O(n²)` linear
+    /// scans in `get_or_create_type_node`, `emit_type_graph_edges`,
+    /// `emit_template_param_edges`, and `emit_template_arg_nodes`.
+    ///
+    /// Why a single universe: synthetic USR prefixes (`type:`, `param:`,
+    /// `tparam:`, `targ:`) are disjoint from libclang USRs (which start with
+    /// `c:`) so collision is impossible.  Using one set is therefore equivalent
+    /// to the old `self.nodes.iter().any(|n| n.usr == usr)` scans.
+    seen_node_usrs: HashSet<String>,
+    /// Per-TU file-content cache for code-snippet extraction (Fix-3).
+    ///
+    /// Populated on first access per file path; entries live only as long as
+    /// this Collector (= one TU parse), so memory is bounded per TU.
+    file_cache: HashMap<PathBuf, std::sync::Arc<[u8]>>,
     /// Spelling locations of `UnexposedExpr` nodes whose visitor-callback `parent` is
     /// `ReturnStmt`.  clang-rs exposes `ImplicitCastExpr` as `UnexposedExpr` and its
     /// `get_lexical_parent()` returns `None`, so we capture context at visit time and
@@ -499,6 +480,8 @@ impl<'a> Collector<'a> {
             module_usr: None,
             skip_system_headers,
             seen_macro_usrs: HashSet::new(),
+            seen_node_usrs: HashSet::new(),
+            file_cache: HashMap::new(),
             return_wrappers: HashSet::new(),
             decl_init_wrappers: HashSet::new(),
             call_pairs: HashSet::new(),
@@ -658,7 +641,7 @@ impl<'a> Collector<'a> {
         // S41: extract callable attributes for FUNCTION / METHOD nodes.
         let (return_type, params, signature, code, code_truncated) =
             if matches!(node_kind, NodeKind::Function | NodeKind::Method) {
-                extract_callable_attrs(&entity, node_kind)
+                extract_callable_attrs(&entity, node_kind, &mut self.file_cache)
             } else {
                 (None, None, None, None, None)
             };
@@ -815,7 +798,6 @@ impl<'a> Collector<'a> {
             repo_name: self.repo_name.to_owned(),
             attrs_json,
             partial: self.partial,
-            phase: 1,
             tu_hash: self.tu_hash,
             // S41: callable fields populated above
             return_type,
@@ -830,9 +812,6 @@ impl<'a> Collector<'a> {
             is_virtual,
             is_pure_virtual,
             is_static,
-            // Integer IDs populated by post-processing pass in visit_tu_inner.
-            symbol_id: 0,
-            file_id: 0,
             // v7 S1: field/gv props populated above
             is_const,
             is_constexpr,
@@ -848,16 +827,11 @@ impl<'a> Collector<'a> {
             is_final,
             is_abstract,
             record_kind,
-            // Type/Parameter nodes carry type_spelling/param_index/param_kind,
-            // but these are populated by dedicated emit helpers (not this path).
-            type_spelling: None,
-            param_index: None,
-            param_kind: None,
-            // Enumerator nodes carry enum_value, populated by emit_enum_enumerators.
-            enum_value: None,
+            ..Default::default()
         };
 
-        self.nodes.push(node.clone());
+        // Register USR before emitters (O(1) dedup for any downstream get-or-create).
+        self.seen_node_usrs.insert(usr.clone());
 
         // Emit structural edges from parent.
         self.emit_structural_edges(&usr, node_kind, &entity, &parent);
@@ -866,7 +840,11 @@ impl<'a> Collector<'a> {
         self.emit_m2_edges(&usr, node_kind, &entity);
 
         // v7 S2: emit RETURNS + HAS_PARAM + OF_TYPE type-graph edges for fn/method.
-        self.emit_type_graph_edges(&usr, node_kind, &entity, &node);
+        self.emit_type_graph_edges(&usr, node_kind, &entity);
+
+        // Push the node by move — no clone needed (emit_type_graph_edges no longer
+        // takes a &NodeRecord parameter).
+        self.nodes.push(node);
 
         // v7 S2: emit OF_TYPE for Field nodes (design §3.5: "(Parameter|Field)-[:OF_TYPE]->(Type)").
         if node_kind == NodeKind::Field {
@@ -930,6 +908,7 @@ impl<'a> Collector<'a> {
             return;
         }
 
+        self.seen_node_usrs.insert(record.usr.clone());
         self.nodes.push(record);
     }
 
@@ -1062,13 +1041,13 @@ impl<'a> Collector<'a> {
                 } else if self.decl_init_wrappers.contains(&key) {
                     AccessKind::DeclRef
                 } else {
-                    classify_use(entity, &parent_chain)
+                    classify_use(entity, &parent_chain, &mut self.file_cache)
                 }
             } else {
-                classify_use(entity, &parent_chain)
+                classify_use(entity, &parent_chain, &mut self.file_cache)
             }
         } else {
-            classify_use(entity, &parent_chain)
+            classify_use(entity, &parent_chain, &mut self.file_cache)
         };
         let assoc = kind.as_str().to_owned();
 
@@ -1076,25 +1055,13 @@ impl<'a> Collector<'a> {
         self.edges.push(EdgeRecord {
             src_usr,
             dst_usr: Some(dst_usr),
-            dst_placeholder: None,
             kind: EdgeKind::Uses,
-            resolved: false,
-            cross_repo_candidate: false,
             repo_name: self.repo_name.to_owned(),
-            attrs_json: "{}".to_owned(),
             tu_hash: self.tu_hash,
             source_association_type: Some(assoc.clone()),
             target_association_type: Some(assoc),
-            // Integer IDs populated by post-processing pass in visit_tu_inner.
-            src_id: 0,
-            dst_id: None,
             dst_repo_name: self.repo_name.to_owned(),
-            // v7 S1: USES edges do not carry access
-            access: None,
-            // v7 S2: USES edges do not carry edge_index
-            edge_index: None,
-            // v7 S4: USES edges do not carry inherits_is_virtual
-            inherits_is_virtual: None,
+            ..Default::default()
         });
     }
 
@@ -1118,54 +1085,19 @@ impl<'a> Collector<'a> {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| header_path.clone());
 
-        // Emit HEADER node (deduplication by USR happens at Phase 3).
+        // Emit HEADER node (Phase-3 deduplicates across TUs; seen_node_usrs tracks
+        // within-TU for O(1) correctness of the synthetic-USR universe).
+        self.seen_node_usrs.insert(header_usr.clone());
         let header_node = NodeRecord {
             usr: header_usr.clone(),
             kind: NodeKind::Header,
             name,
             qualified_name: header_path.clone(),
-            mangled_name: None,
             file_path: header_path,
-            line: None,
-            col: None,
             repo_name: self.repo_name.to_owned(),
-            attrs_json: "{}".to_owned(),
             partial: self.partial,
-            phase: 1,
             tu_hash: self.tu_hash,
-            // M8 promoted fields — HEADER nodes carry none of these
-            return_type: None,
-            params: None,
-            signature: None,
-            code: None,
-            code_truncated: None,
-            template_params: None,
-            template_args: None,
-            is_virtual: None,
-            is_pure_virtual: None,
-            is_static: None,
-            // Integer IDs populated by post-processing pass in visit_tu_inner.
-            symbol_id: 0,
-            file_id: 0,
-            // v7 S1 promoted fields — HEADER nodes carry none
-            is_const: None,
-            is_constexpr: None,
-            storage_class: None,
-            // v7 S2 promoted fields — HEADER nodes carry none
-            is_template: None,
-            is_noexcept: None,
-            is_override: None,
-            is_deleted: None,
-            is_defaulted: None,
-            cv_qualifiers: None,
-            ref_qualifier: None,
-            is_final: None,
-            is_abstract: None,
-            record_kind: None,
-            type_spelling: None,
-            param_index: None,
-            param_kind: None,
-            enum_value: None,
+            ..Default::default()
         };
         self.nodes.push(header_node);
 
@@ -1486,27 +1418,15 @@ impl<'a> Collector<'a> {
         self.edges.push(EdgeRecord {
             src_usr: src,
             dst_usr: Some(dst),
-            dst_placeholder: None,
             kind,
-            resolved: false, // Phase 3 resolves
-            cross_repo_candidate: false,
             repo_name: self.repo_name.to_owned(),
             attrs_json: attrs,
             tu_hash: self.tu_hash,
-            // M8 promoted fields — USES classifier (S43) populates these for USES edges;
-            // all other edge kinds stay None
-            source_association_type: None,
-            target_association_type: None,
-            // Integer IDs populated by post-processing pass in visit_tu_inner.
-            src_id: 0,
-            dst_id: None,
             dst_repo_name: self.repo_name.to_owned(),
-            // v7 S1: access column (always emitted on HAS_METHOD/HAS_FIELD/INHERITS)
             access,
-            // v7 S2: edge_index column (Some on HAS_PARAM, None otherwise)
             edge_index,
-            // v7 S4: inherits_is_virtual column (Some on INHERITS, None otherwise)
             inherits_is_virtual,
+            ..Default::default()
         });
     }
 
@@ -1521,57 +1441,20 @@ impl<'a> Collector<'a> {
     /// Returns the synthetic USR so the caller can push edges to it.
     fn get_or_create_type_node(&mut self, spelling: &str) -> String {
         let usr = format!("type:{spelling}");
-        // Avoid re-pushing the same Type node within one TU by checking if we
-        // already have a node with this USR.  Phase 3 deduplicates across TUs.
-        let already_present = self.nodes.iter().any(|n| n.usr == usr);
-        if !already_present {
+        // Avoid re-pushing the same Type node within one TU.  O(1) via
+        // seen_node_usrs; Phase 3 deduplicates across TUs.
+        if self.seen_node_usrs.insert(usr.clone()) {
             let node = NodeRecord {
                 usr: usr.clone(),
                 kind: NodeKind::Type,
                 name: spelling.to_owned(),
                 qualified_name: spelling.to_owned(),
-                mangled_name: None,
                 file_path: self.tu_file_path.clone(),
-                line: None,
-                col: None,
                 repo_name: self.repo_name.to_owned(),
-                attrs_json: "{}".to_owned(),
                 partial: self.partial,
-                phase: 1,
                 tu_hash: self.tu_hash,
-                // M8 promoted fields — Type nodes carry none
-                return_type: None,
-                params: None,
-                signature: None,
-                code: None,
-                code_truncated: None,
-                template_params: None,
-                template_args: None,
-                is_virtual: None,
-                is_pure_virtual: None,
-                is_static: None,
-                // Integer IDs populated by post-processing pass.
-                symbol_id: 0,
-                file_id: 0,
-                // v7 S1: Type nodes carry none
-                is_const: None,
-                is_constexpr: None,
-                storage_class: None,
-                // v7 S2: Type node carries type_spelling
-                is_template: None,
-                is_noexcept: None,
-                is_override: None,
-                is_deleted: None,
-                is_defaulted: None,
-                cv_qualifiers: None,
-                ref_qualifier: None,
-                is_final: None,
-                is_abstract: None,
-                record_kind: None,
                 type_spelling: Some(spelling.to_owned()),
-                param_index: None,
-                param_kind: None,
-                enum_value: None,
+                ..Default::default()
             };
             self.nodes.push(node);
 
@@ -1607,7 +1490,6 @@ impl<'a> Collector<'a> {
         fn_usr: &str,
         node_kind: NodeKind,
         entity: &clang::Entity<'_>,
-        _node: &NodeRecord,
     ) {
         if !matches!(node_kind, NodeKind::Function | NodeKind::Method) {
             return;
@@ -1641,55 +1523,21 @@ impl<'a> Collector<'a> {
             // Synthetic USR for the Parameter node.
             let param_usr = format!("param:{fn_usr}:{idx}");
 
-            // Emit Parameter node if not already present.
-            let already_present = self.nodes.iter().any(|n| n.usr == param_usr);
-            if !already_present {
+            // Emit Parameter node if not already present (O(1) via seen_node_usrs).
+            if self.seen_node_usrs.insert(param_usr.clone()) {
                 let param_node = NodeRecord {
                     usr: param_usr.clone(),
                     kind: NodeKind::Parameter,
                     name: param_name,
                     qualified_name: format!("{fn_usr}::{param_index}"),
-                    mangled_name: None,
                     file_path: self.tu_file_path.clone(),
-                    line: None,
-                    col: None,
                     repo_name: self.repo_name.to_owned(),
-                    attrs_json: "{}".to_owned(),
                     partial: self.partial,
-                    phase: 1,
                     tu_hash: self.tu_hash,
-                    // M8: Parameter nodes carry none
-                    return_type: None,
-                    params: None,
-                    signature: None,
-                    code: None,
-                    code_truncated: None,
-                    template_params: None,
-                    template_args: None,
-                    is_virtual: None,
-                    is_pure_virtual: None,
-                    is_static: None,
-                    symbol_id: 0,
-                    file_id: 0,
-                    // v7 S1: Parameter nodes carry none
-                    is_const: None,
-                    is_constexpr: None,
-                    storage_class: None,
-                    // v7 S2: Parameter node carries type_spelling + param_index
-                    is_template: None,
-                    is_noexcept: None,
-                    is_override: None,
-                    is_deleted: None,
-                    is_defaulted: None,
-                    cv_qualifiers: None,
-                    ref_qualifier: None,
-                    is_final: None,
-                    is_abstract: None,
-                    record_kind: None,
                     type_spelling: Some(param_type_spelling.clone()),
                     param_index: Some(param_index),
                     param_kind: Some("value".to_owned()),
-                    enum_value: None,
+                    ..Default::default()
                 };
                 self.nodes.push(param_node);
             }
@@ -1746,52 +1594,20 @@ impl<'a> Collector<'a> {
             let param_name = child.get_name().unwrap_or_default();
             let tparam_usr = format!("tparam:{tmpl_usr}:{param_index}");
 
-            // Emit Parameter node if not already present.
-            let already_present = self.nodes.iter().any(|n| n.usr == tparam_usr);
-            if !already_present {
+            // Emit Parameter node if not already present (O(1) via seen_node_usrs).
+            if self.seen_node_usrs.insert(tparam_usr.clone()) {
                 let tparam_node = NodeRecord {
                     usr: tparam_usr.clone(),
                     kind: NodeKind::Parameter,
                     name: param_name,
                     qualified_name: format!("{tmpl_usr}::{param_index}"),
-                    mangled_name: None,
                     file_path: self.tu_file_path.clone(),
-                    line: None,
-                    col: None,
                     repo_name: self.repo_name.to_owned(),
-                    attrs_json: "{}".to_owned(),
                     partial: self.partial,
-                    phase: 1,
                     tu_hash: self.tu_hash,
-                    return_type: None,
-                    params: None,
-                    signature: None,
-                    code: None,
-                    code_truncated: None,
-                    template_params: None,
-                    template_args: None,
-                    is_virtual: None,
-                    is_pure_virtual: None,
-                    is_static: None,
-                    symbol_id: 0,
-                    file_id: 0,
-                    is_const: None,
-                    is_constexpr: None,
-                    storage_class: None,
-                    is_template: None,
-                    is_noexcept: None,
-                    is_override: None,
-                    is_deleted: None,
-                    is_defaulted: None,
-                    cv_qualifiers: None,
-                    ref_qualifier: None,
-                    is_final: None,
-                    is_abstract: None,
-                    record_kind: None,
-                    type_spelling: None,
                     param_index: Some(param_index),
                     param_kind: Some(param_kind_str.to_owned()),
-                    enum_value: None,
+                    ..Default::default()
                 };
                 self.nodes.push(tparam_node);
             }
@@ -1865,48 +1681,17 @@ impl<'a> Collector<'a> {
             let targ_usr = format!("targ:{spec_usr}:{idx}");
             let param_index = idx as i64;
 
-            // Emit TemplateArg positional node if not already present.
-            let already_present = self.nodes.iter().any(|n| n.usr == targ_usr);
-            if !already_present {
+            // Emit TemplateArg positional node if not already present (O(1) via seen_node_usrs).
+            if self.seen_node_usrs.insert(targ_usr.clone()) {
                 let targ_node = NodeRecord {
                     usr: targ_usr.clone(),
                     kind: NodeKind::TemplateArg,
                     name: spelling.clone(),
                     qualified_name: targ_usr.clone(),
-                    mangled_name: None,
                     file_path: self.tu_file_path.clone(),
-                    line: None,
-                    col: None,
                     repo_name: self.repo_name.to_owned(),
-                    attrs_json: "{}".to_owned(),
                     partial: self.partial,
-                    phase: 1,
                     tu_hash: self.tu_hash,
-                    return_type: None,
-                    params: None,
-                    signature: None,
-                    code: None,
-                    code_truncated: None,
-                    template_params: None,
-                    template_args: None,
-                    is_virtual: None,
-                    is_pure_virtual: None,
-                    is_static: None,
-                    symbol_id: 0,
-                    file_id: 0,
-                    is_const: None,
-                    is_constexpr: None,
-                    storage_class: None,
-                    is_template: None,
-                    is_noexcept: None,
-                    is_override: None,
-                    is_deleted: None,
-                    is_defaulted: None,
-                    cv_qualifiers: None,
-                    ref_qualifier: None,
-                    is_final: None,
-                    is_abstract: None,
-                    record_kind: None,
                     type_spelling: if spelling.is_empty() {
                         None
                     } else {
@@ -1914,7 +1699,7 @@ impl<'a> Collector<'a> {
                     },
                     param_index: Some(param_index),
                     param_kind: Some(param_kind_str.to_owned()),
-                    enum_value: None,
+                    ..Default::default()
                 };
                 self.nodes.push(targ_node);
             }
@@ -2024,46 +1809,14 @@ impl<'a> Collector<'a> {
                 kind: NodeKind::Enumerator,
                 name: name.clone(),
                 qualified_name: name,
-                mangled_name: None,
                 file_path: self.tu_file_path.clone(),
-                line: None,
-                col: None,
                 repo_name: self.repo_name.to_owned(),
-                attrs_json: "{}".to_owned(),
                 partial: self.partial,
-                phase: 1,
                 tu_hash: self.tu_hash,
-                return_type: None,
-                params: None,
-                signature: None,
-                code: None,
-                code_truncated: None,
-                template_params: None,
-                template_args: None,
-                is_virtual: None,
-                is_pure_virtual: None,
-                is_static: None,
-                symbol_id: 0,
-                file_id: 0,
-                is_const: None,
-                is_constexpr: None,
-                storage_class: None,
-                is_template: None,
-                is_noexcept: None,
-                is_override: None,
-                is_deleted: None,
-                is_defaulted: None,
-                cv_qualifiers: None,
-                ref_qualifier: None,
-                is_final: None,
-                is_abstract: None,
-                record_kind: None,
-                type_spelling: None,
-                param_index: None,
-                param_kind: None,
-                // v7 S5: enumerator value
                 enum_value,
+                ..Default::default()
             };
+            self.seen_node_usrs.insert(child_usr.clone());
             self.nodes.push(node);
 
             // ENUMERATOR_OF: Enumerator → Enum
@@ -2260,7 +2013,11 @@ type CallableAttrs = (
 /// - `signature`: `"return_type(param_type, …)"` with ` const` suffix for METHOD when applicable.
 /// - `code` / `code_truncated`: verbatim source range read from disk; capped at 32 KiB
 ///   per ADR-12.  On any I/O failure the code fields fall back to `None` (non-fatal).
-fn extract_callable_attrs(entity: &clang::Entity<'_>, node_kind: NodeKind) -> CallableAttrs {
+fn extract_callable_attrs(
+    entity: &clang::Entity<'_>,
+    node_kind: NodeKind,
+    file_cache: &mut HashMap<PathBuf, std::sync::Arc<[u8]>>,
+) -> CallableAttrs {
     // ── return_type ─────────────────────────────────────────────────────────
     let return_type: Option<String> = entity.get_result_type().map(|t| t.get_display_name());
 
@@ -2302,17 +2059,25 @@ fn extract_callable_attrs(entity: &clang::Entity<'_>, node_kind: NodeKind) -> Ca
     };
 
     // ── code / code_truncated ────────────────────────────────────────────────
-    let (code, code_truncated) = extract_code_snippet(entity);
+    let (code, code_truncated) = extract_code_snippet(entity, file_cache);
 
     (return_type, params, signature, code, code_truncated)
 }
 
-/// Read the verbatim source bytes for `entity`'s range from disk and apply the
-/// 32 KiB cap (ADR-12).
+/// Read the verbatim source bytes for `entity`'s range and apply the 32 KiB cap
+/// (ADR-12).
+///
+/// `file_cache` is a per-TU map from path → arc'd byte slice.  On the first call
+/// for a given path the file is read from disk and stored; subsequent calls for
+/// the same path re-use the cached bytes.  The cache is owned by the `Collector`
+/// and drops with it, so memory is bounded per TU.
 ///
 /// Returns `(Some(snippet), Some(false))` when the body fits, `(None, Some(true))`
 /// when oversize, and `(None, None)` on any I/O error (non-fatal: code is best-effort).
-fn extract_code_snippet(entity: &clang::Entity<'_>) -> (Option<String>, Option<bool>) {
+fn extract_code_snippet(
+    entity: &clang::Entity<'_>,
+    file_cache: &mut HashMap<PathBuf, std::sync::Arc<[u8]>>,
+) -> (Option<String>, Option<bool>) {
     let range = match entity.get_range() {
         Some(r) => r,
         None => return (None, None),
@@ -2337,10 +2102,18 @@ fn extract_code_snippet(entity: &clang::Entity<'_>) -> (Option<String>, Option<b
         return (None, None);
     }
 
-    // Read the file bytes from disk.
-    let bytes = match std::fs::read(&file) {
-        Ok(b) => b,
-        Err(_) => return (None, None),
+    // Fetch from cache or read from disk (first access per path within this TU).
+    let bytes: std::sync::Arc<[u8]> = match file_cache.get(&file) {
+        Some(cached) => cached.clone(),
+        None => {
+            let raw = match std::fs::read(&file) {
+                Ok(b) => b,
+                Err(_) => return (None, None),
+            };
+            let arc: std::sync::Arc<[u8]> = raw.into();
+            file_cache.insert(file.clone(), arc.clone());
+            arc
+        }
     };
 
     let snippet_bytes = match bytes.get(start_offset..end_offset) {

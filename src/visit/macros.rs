@@ -115,48 +115,14 @@ pub(crate) fn collect_macro_definition(
         kind: NodeKind::Macro,
         name,
         qualified_name: file_path.clone(),
-        mangled_name: None,
         file_path,
         line,
         col,
         repo_name: repo_name.to_owned(),
         attrs_json,
         partial,
-        phase: 1,
         tu_hash,
-        // M8 promoted fields — MACRO nodes carry none of these
-        return_type: None,
-        params: None,
-        signature: None,
-        code: None,
-        code_truncated: None,
-        template_params: None,
-        template_args: None,
-        is_virtual: None,
-        is_pure_virtual: None,
-        is_static: None,
-        // Integer IDs populated by visit_tu_inner post-processing pass.
-        symbol_id: 0,
-        file_id: 0,
-        // v7 S1 promoted fields — MACRO nodes carry none
-        is_const: None,
-        is_constexpr: None,
-        storage_class: None,
-        // v7 S2 promoted fields — MACRO nodes carry none
-        is_template: None,
-        is_noexcept: None,
-        is_override: None,
-        is_deleted: None,
-        is_defaulted: None,
-        cv_qualifiers: None,
-        ref_qualifier: None,
-        is_final: None,
-        is_abstract: None,
-        record_kind: None,
-        type_spelling: None,
-        param_index: None,
-        param_kind: None,
-        enum_value: None,
+        ..Default::default()
     })
 }
 
@@ -213,25 +179,11 @@ pub(crate) fn collect_macro_expansion(
     Some(EdgeRecord {
         src_usr: enclosing_usr.to_owned(),
         dst_usr: Some(macro_usr),
-        dst_placeholder: None,
         kind: EdgeKind::ExpandsTo,
-        resolved: false,
-        cross_repo_candidate: false,
         repo_name: repo_name.to_owned(),
-        attrs_json: "{}".to_owned(),
         tu_hash,
-        // M8 promoted fields — EXPANDS_TO edges carry none of these
-        source_association_type: None,
-        target_association_type: None,
-        // Integer IDs populated by visit_tu_inner post-processing pass.
-        src_id: 0,
-        dst_id: None,
         dst_repo_name: repo_name.to_owned(),
-        // v7 S1: EXPANDS_TO edges do not carry access
-        access: None,
-        // v7 S2: EXPANDS_TO edges do not carry edge_index
-        edge_index: None,
-        inherits_is_virtual: None,
+        ..Default::default()
     })
 }
 
@@ -326,14 +278,6 @@ pub(crate) mod tests {
         let u1 = macro_usr("/a/b.h", "FOO");
         let u2 = macro_usr("/a/b.h", "BAR");
         assert_ne!(u1, u2);
-    }
-
-    // ── attrs_json content ───────────────────────────────────────────────────
-
-    /// Integration-level attrs parsing helper (used by integration fixture tests).
-    #[allow(dead_code)]
-    pub fn parse_macro_attrs(attrs: &str) -> serde_json::Value {
-        serde_json::from_str(attrs).expect("attrs_json must be valid JSON")
     }
 
     // ── NodeKind / EdgeKind round-trip ───────────────────────────────────────

@@ -77,7 +77,10 @@ fn extract_bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
 ///
 /// Returns `true` iff `a` and `b` have the same length and the same contents.
 /// This prevents timing attacks that could reveal token length.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+///
+/// Exposed as `pub(crate)` so that other API modules (e.g. `reset`) can reuse
+/// this helper without duplicating the XOR-fold logic.
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

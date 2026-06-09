@@ -203,6 +203,12 @@ pub type JobReceiver = mpsc::Receiver<JobMessage>;
 
 // ── JobQueue ───────────────────────────────────────────────────────────────────
 
+/// Maximum number of terminal (`Done` or `Failed`) job records retained in the
+/// in-memory map.  When a job is marked terminal and this cap is exceeded, the
+/// oldest terminal records (by `finished_at`, ascending) are evicted first.
+/// Queued and running jobs are never evicted.
+const MAX_TERMINAL_JOBS: usize = 256;
+
 /// Shared job registry + bounded channel.
 ///
 /// Clone-able; all clones share the same internal state.
@@ -343,6 +349,32 @@ impl JobQueue {
         }
     }
 
+    /// Evict the oldest terminal records beyond `MAX_TERMINAL_JOBS`.
+    ///
+    /// Must be called **while holding `jobs`** (i.e. pass the locked guard).
+    /// Eviction order: ascending `finished_at` (oldest first).  Jobs without
+    /// `finished_at` sort before those with one (treated as `0`).
+    /// Queued / Running jobs are never touched.
+    fn evict_terminal_overflow(jobs: &mut HashMap<String, JobRecord>) {
+        // Collect IDs of terminal records.
+        let mut terminal: Vec<(u64, String)> = jobs
+            .values()
+            .filter(|r| matches!(r.state, JobState::Done | JobState::Failed))
+            .map(|r| (r.finished_at.unwrap_or(0), r.job_id.clone()))
+            .collect();
+
+        let excess = terminal.len().saturating_sub(MAX_TERMINAL_JOBS);
+        if excess == 0 {
+            return;
+        }
+
+        // Sort ascending by finished_at so oldest entries come first.
+        terminal.sort_unstable_by_key(|(ts, _)| *ts);
+        for (_, id) in terminal.into_iter().take(excess) {
+            jobs.remove(&id);
+        }
+    }
+
     /// Mark a job as done.  No-op if not found.
     pub fn mark_done(&self, job_id: &str) {
         let now = SystemTime::now()
@@ -357,6 +389,7 @@ impl JobQueue {
             rec.tus_done = rec.tus_total;
             rec.finished_at = Some(now);
         }
+        Self::evict_terminal_overflow(&mut jobs);
     }
 
     /// Mark a job as done and set final progress counters.
@@ -396,6 +429,7 @@ impl JobQueue {
             rec.edges = edges;
             rec.finished_at = Some(now);
         }
+        Self::evict_terminal_overflow(&mut jobs);
     }
 
     /// Mark a job as failed with an error message.  No-op if not found.
@@ -410,6 +444,7 @@ impl JobQueue {
             rec.finished_at = Some(now);
             rec.error = Some(error);
         }
+        Self::evict_terminal_overflow(&mut jobs);
     }
 }
 
@@ -746,5 +781,90 @@ mod tests {
             serde_json::Value::String("completed_with_errors".to_owned())
         );
         assert_eq!(json["failed_tu_count"], 2);
+    }
+
+    // ── Terminal-job eviction tests ────────────────────────────────────────────
+
+    /// Inserting more than MAX_TERMINAL_JOBS terminal records causes the oldest
+    /// to be evicted; active (queued/running) jobs are never evicted.
+    #[test]
+    fn terminal_eviction_removes_oldest_beyond_cap() {
+        // Use a large capacity so the channel never blocks the enqueue.
+        let (queue, _rx) = JobQueue::new(MAX_TERMINAL_JOBS + 64);
+
+        // Enqueue and mark done MAX_TERMINAL_JOBS + 1 jobs.
+        let mut ids: Vec<String> = Vec::new();
+        for i in 0..=(MAX_TERMINAL_JOBS as u64) {
+            let id = queue
+                .enqueue(path_source("/repo"), IngestOptions::default())
+                .unwrap_or_else(|| panic!("enqueue failed at i={i}"));
+            queue.mark_done_with_counts(&id, 1, 0, 0, 0);
+            ids.push(id);
+        }
+
+        // mark_done stamps finished_at with wall-clock seconds, which ties for
+        // jobs completed within the same second, so end-to-end we can only
+        // assert the cap — eviction order among ties is unspecified.
+        let total = queue.list(None).len();
+        assert!(
+            total <= MAX_TERMINAL_JOBS,
+            "expected at most {MAX_TERMINAL_JOBS} records after eviction, got {total}"
+        );
+
+        // Deterministic ordering check against the eviction function itself:
+        // distinct finished_at values, oldest must go, newest must stay.
+        {
+            let mut jobs = queue.jobs.lock().unwrap();
+            jobs.clear();
+            for i in 0..=(MAX_TERMINAL_JOBS as u64) {
+                let id = format!("job-{i:05}");
+                let mut rec =
+                    JobRecord::new(id.clone(), path_source("/repo"), IngestOptions::default());
+                rec.state = JobState::Done;
+                rec.finished_at = Some(i + 1);
+                jobs.insert(id, rec);
+            }
+            JobQueue::evict_terminal_overflow(&mut jobs);
+            assert_eq!(jobs.len(), MAX_TERMINAL_JOBS);
+            assert!(
+                !jobs.contains_key("job-00000"),
+                "oldest terminal job should have been evicted"
+            );
+            let newest = format!("job-{:05}", MAX_TERMINAL_JOBS);
+            assert!(
+                jobs.contains_key(&newest),
+                "newest terminal job must not be evicted"
+            );
+        }
+    }
+
+    /// Active (queued/running) jobs are never evicted even when the terminal
+    /// job count exceeds the cap.
+    #[test]
+    fn terminal_eviction_never_removes_active_jobs() {
+        let cap = MAX_TERMINAL_JOBS + 32;
+        let (queue, _rx) = JobQueue::new(cap + 10);
+
+        // Enqueue one job and keep it running (active).
+        let active_id = queue
+            .enqueue(path_source("/active"), IngestOptions::default())
+            .expect("enqueue active job");
+        queue.mark_running(&active_id);
+
+        // Fill terminal jobs beyond the cap.
+        for i in 0..=(MAX_TERMINAL_JOBS as u64) {
+            let id = queue
+                .enqueue(path_source("/repo"), IngestOptions::default())
+                .unwrap_or_else(|| panic!("enqueue failed at i={i}"));
+            queue.mark_failed(&id, format!("err-{i}"));
+        }
+
+        // The running job must survive eviction.
+        assert!(
+            queue.get(&active_id).is_some(),
+            "running job must not be evicted by terminal overflow"
+        );
+        let rec = queue.get(&active_id).unwrap();
+        assert_eq!(rec.state, JobState::Running);
     }
 }

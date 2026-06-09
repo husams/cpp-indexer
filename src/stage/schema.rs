@@ -6,7 +6,11 @@
 /// ADR-3.
 use std::path::{Path, PathBuf};
 
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
+use parquet::file::reader::FileReader;
+
+use crate::error::{Error, Result};
 
 use crate::schema::version::PARQUET_MAGIC;
 
@@ -43,6 +47,112 @@ pub fn worker_dir(stage_dir: &Path, worker_id: u32) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
+// Shard reader
+// ---------------------------------------------------------------------------
+
+/// Open a Parquet shard for Arrow record-batch reading.
+///
+/// When `require_magic` is `true` the file's KV metadata is checked for the
+/// ADR-3 `cxg_parquet_vN` header before returning the reader; an absent or
+/// mismatched header is an `Error::Schema`.  Only `resolve::per_repo` (Phase 3)
+/// requires the magic check; other callers pass `false` so that pre-existing
+/// stage dirs written without the header (e.g. Phase 5 `final-edges.parquet`)
+/// can still be read.
+///
+/// Preserving the per-site magic-check policy is load-bearing: adding the check
+/// to sites that previously did not have it would silently break reading stage
+/// dirs produced by older binaries.
+pub fn open_shard_reader(path: &Path, require_magic: bool) -> Result<ParquetRecordBatchReader> {
+    let file = std::fs::File::open(path)?;
+    if require_magic {
+        let reader_for_meta =
+            parquet::file::reader::SerializedFileReader::new(std::fs::File::open(path)?)
+                .map_err(|e| Error::Schema(format!("Parquet open {}: {e}", path.display())))?;
+        let meta = reader_for_meta.metadata().file_metadata().clone();
+        if !has_magic(&meta) {
+            return Err(Error::Schema(format!(
+                "shard {:?} is missing the ADR-3 magic key '{}'; \
+                 re-index with a compatible binary",
+                path,
+                crate::schema::version::PARQUET_MAGIC
+            )));
+        }
+    }
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| Error::Schema(format!("build reader {}: {e}", path.display())))?
+        .build()
+        .map_err(|e| Error::Schema(format!("build batch reader {}: {e}", path.display())))?;
+    Ok(reader)
+}
+
+// ---------------------------------------------------------------------------
+// Shard collection
+// ---------------------------------------------------------------------------
+
+/// Policy for what `collect_shards` does when `stage_dir` does not exist or is
+/// not a directory.
+///
+/// - `ErrorOnMissing` — propagate the OS error from `fs::read_dir` (used by
+///   `resolve::per_repo`, which requires the stage dir to exist).
+/// - `EmptyOnMissing` — return an empty list without error (used by
+///   `pipeline::mod` which tolerates an absent dir, and `resolve::cross_repo`
+///   which checks `is_dir()` first).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingDirPolicy {
+    /// Return `Err` when the directory is absent or not a directory.
+    ErrorOnMissing,
+    /// Return `Ok([])` when the directory is absent or not a directory.
+    EmptyOnMissing,
+}
+
+/// Collect all `<prefix>-*.parquet` shard paths from every `worker-*/`
+/// subdirectory inside `stage_dir`, sorted lexicographically.
+///
+/// `policy` controls what happens when `stage_dir` is absent:
+/// - [`MissingDirPolicy::ErrorOnMissing`] — propagates the IO error.
+/// - [`MissingDirPolicy::EmptyOnMissing`] — returns `Ok(vec![])`.
+///
+/// Shards are collected in deterministic, sorted order so that multiple callers
+/// reading the same stage dir produce identical iteration sequences.
+pub fn collect_shards(
+    stage_dir: &Path,
+    prefix: &str,
+    policy: MissingDirPolicy,
+) -> Result<Vec<PathBuf>> {
+    let mut shards = Vec::new();
+
+    if policy == MissingDirPolicy::EmptyOnMissing && !stage_dir.is_dir() {
+        return Ok(shards);
+    }
+
+    for entry in std::fs::read_dir(stage_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let dir_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if !path.is_dir() || !dir_name.starts_with("worker-") {
+            continue;
+        }
+        for w_entry in std::fs::read_dir(&path)? {
+            let w_entry = w_entry?;
+            let shard_path = w_entry.path();
+            let file_name = shard_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if file_name.starts_with(prefix) && file_name.ends_with(".parquet") {
+                shards.push(shard_path);
+            }
+        }
+    }
+
+    shards.sort();
+    Ok(shards)
+}
+
+// ---------------------------------------------------------------------------
 // Writer properties (snappy + KV magic)
 // ---------------------------------------------------------------------------
 
@@ -58,6 +168,13 @@ pub fn writer_properties() -> WriterProperties {
 pub fn writer_properties_builder() -> WriterPropertiesBuilder {
     WriterProperties::builder()
         .set_compression(parquet::basic::Compression::SNAPPY)
+        // Cap row-group buffering at 64 KiB rows so each per-worker StageWriter
+        // flushes frequently rather than accumulating hundreds of MiB of node rows
+        // (each node carries up to 32 KiB of `code`) before the first flush.
+        // parquet-53 defaults to 1,048,576 rows, which is far too large for
+        // code-heavy schemas.  64 K rows keeps the in-memory buffer well under
+        // 2 GiB even at max code-snippet size.
+        .set_max_row_group_size(64 * 1024)
         .set_key_value_metadata(Some(vec![parquet::format::KeyValue {
             key: PARQUET_MAGIC.to_owned(),
             value: Some("1".to_owned()),
@@ -118,6 +235,56 @@ mod tests {
         // Snappy is the default column compression; just verify the properties build without panic.
         // We cannot introspect `compression` in the public API; trust the builder.
         let _ = props;
+    }
+
+    /// writer_properties() must cap row-group size at 64 KiB rows.
+    ///
+    /// Verified by writing enough rows to force two row groups, then reading
+    /// back Parquet file metadata to confirm more than one row group was flushed.
+    /// Without `set_max_row_group_size(64 * 1024)` a single row group would hold
+    /// all rows regardless of count.
+    #[test]
+    fn writer_properties_caps_row_group_size() {
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+        use std::fs::File;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rg_cap_test.parquet");
+
+        // Build a record batch with 64*1024 + 1 rows to exceed one row group.
+        // We use minimal NodeRecords (no code payload) to keep the test fast.
+        let n_rows: usize = 64 * 1024 + 1;
+        let records: Vec<crate::schema::NodeRecord> = (0..n_rows)
+            .map(|i| crate::schema::NodeRecord {
+                usr: format!("c:@F@fn_{i}"),
+                name: format!("fn_{i}"),
+                qualified_name: format!("ns::fn_{i}"),
+                file_path: "/repo/src/f.cpp".to_owned(),
+                line: Some(1),
+                col: Some(1),
+                repo_name: "test".to_owned(),
+                symbol_id: i as i64 + 1,
+                file_id: 1,
+                ..Default::default()
+            })
+            .collect();
+
+        let schema = Arc::new(crate::schema::arrow::node_schema());
+        let props = writer_properties();
+        let file = File::create(&path).unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, Some(props)).unwrap();
+        let batch = crate::schema::arrow::nodes_to_record_batch(&records).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let file = File::open(&path).unwrap();
+        let reader = SerializedFileReader::new(file).unwrap();
+        let n_rg = reader.metadata().num_row_groups();
+        assert!(
+            n_rg >= 2,
+            "expected ≥2 row groups when writing 64 KiB+1 rows with a 64 KiB cap, got {n_rg}"
+        );
     }
 
     #[test]

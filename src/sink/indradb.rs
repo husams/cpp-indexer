@@ -25,6 +25,7 @@
 //! `RESOURCE_EXHAUSTED`) are retried up to 3 total attempts with exponential
 //! back-off (100 ms, 200 ms).  Non-transient errors are returned immediately.
 
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -55,22 +56,36 @@ const PROP_USR: &str = "usr";
 /// Property name for the integer symbol ID (v6; replaces PROP_USR for durable graph keying).
 const PROP_SYMBOL_ID: &str = "symbol_id";
 /// Property name for the integer file ID (v6; replaces file_path string).
+/// Used in tests and cached-ident assertions; base property emitted via `ident_file_id()`.
+#[cfg(test)]
 const PROP_FILE_ID: &str = "file_id";
 /// Property name for the integer src_id on edges (v6).
+/// Used in tests and cached-ident assertions; base property emitted via `ident_src_id()`.
+#[cfg(test)]
 const PROP_SRC_ID: &str = "src_id";
 /// Property name for the integer dst_id on edges (v6).
+/// Used in tests and cached-ident assertions; base property emitted via `ident_dst_id()`.
+#[cfg(test)]
 const PROP_DST_ID: &str = "dst_id";
 /// Property name for dst_repo_name on edges (v6).
+/// Used in tests and cached-ident assertions; base property emitted via `ident_dst_repo_name()`.
+#[cfg(test)]
 const PROP_DST_REPO_NAME: &str = "dst_repo_name";
 /// Property name for the repository name.
 const PROP_REPO_NAME: &str = "repo_name";
 /// Property name for the node kind string.
 const PROP_KIND: &str = "kind";
 /// Property name for the display name.
+/// Used in tests and cached-ident assertions; base property emitted via `ident_name()`.
+#[cfg(test)]
 const PROP_NAME: &str = "name";
 /// Property name for the fully-qualified name.
+/// Used in tests and cached-ident assertions; base property emitted via `ident_qualified_name()`.
+#[cfg(test)]
 const PROP_QUALIFIED_NAME: &str = "qualified_name";
 /// Property name for extra attributes (JSON blob).
+/// Used in tests and cached-ident assertions; base property emitted via `ident_attrs_json()`.
+#[cfg(test)]
 const PROP_ATTRS_JSON: &str = "attrs_json";
 
 // ── M8 promoted property-name constants (S45, design.md §3.6) ─────────────────
@@ -181,18 +196,10 @@ const BACKOFF_BASE_MS: u64 = 100;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Derive a deterministic `Uuid` from a `(repo_name, usr)` pair using UUIDv5.
-/// Kept for reference; superseded by `symbol_id_to_uuid` in v6.
-#[allow(dead_code)]
-fn usr_to_uuid(repo_name: &str, usr: &str) -> Uuid {
-    let key = format!("{repo_name}\x00{usr}");
-    Uuid::new_v5(&USR_NAMESPACE, key.as_bytes())
-}
-
 /// Derive a deterministic `Uuid` from `(repo_name, symbol_id)` using UUIDv5 (v6).
 ///
-/// Uses the same namespace as `usr_to_uuid` but encodes the integer as a decimal string to
-/// keep the key compact and deterministic across architectures.
+/// Encodes the integer as a decimal string to keep the key compact and deterministic
+/// across architectures.
 fn symbol_id_to_uuid(repo_name: &str, symbol_id: i64) -> Uuid {
     let key = format!("{repo_name}\x00{symbol_id}");
     Uuid::new_v5(&USR_NAMESPACE, key.as_bytes())
@@ -229,6 +236,459 @@ fn wrap_validation(e: indradb::ValidationError) -> Error {
 /// Build a validated `Identifier`, mapping validation errors to `Error::Sink`.
 fn ident(s: &str) -> Result<Identifier> {
     Identifier::new(s).map_err(wrap_validation)
+}
+
+// ── OnceLock-cached Identifiers for high-frequency property names ─────────────
+//
+// `ident()` allocates and validates a new `Identifier` on every call.  For the
+// base properties that are written for *every* node or edge, we pay that cost
+// once at first use and then return a cheap clone of the cached value.
+//
+// String literals are used directly (not PROP_* constants) because `concat!`
+// requires literals, not const identifiers; the string values are pinned by
+// the const definitions above so any mismatch is immediately visible.
+
+fn ident_symbol_id() -> &'static Identifier {
+    static CELL: OnceLock<Identifier> = OnceLock::new();
+    CELL.get_or_init(|| Identifier::new("symbol_id").expect("invalid ident: symbol_id"))
+}
+fn ident_file_id() -> &'static Identifier {
+    static CELL: OnceLock<Identifier> = OnceLock::new();
+    CELL.get_or_init(|| Identifier::new("file_id").expect("invalid ident: file_id"))
+}
+fn ident_repo_name() -> &'static Identifier {
+    static CELL: OnceLock<Identifier> = OnceLock::new();
+    CELL.get_or_init(|| Identifier::new("repo_name").expect("invalid ident: repo_name"))
+}
+fn ident_kind() -> &'static Identifier {
+    static CELL: OnceLock<Identifier> = OnceLock::new();
+    CELL.get_or_init(|| Identifier::new("kind").expect("invalid ident: kind"))
+}
+fn ident_name() -> &'static Identifier {
+    static CELL: OnceLock<Identifier> = OnceLock::new();
+    CELL.get_or_init(|| Identifier::new("name").expect("invalid ident: name"))
+}
+fn ident_qualified_name() -> &'static Identifier {
+    static CELL: OnceLock<Identifier> = OnceLock::new();
+    CELL.get_or_init(|| Identifier::new("qualified_name").expect("invalid ident: qualified_name"))
+}
+fn ident_attrs_json() -> &'static Identifier {
+    static CELL: OnceLock<Identifier> = OnceLock::new();
+    CELL.get_or_init(|| Identifier::new("attrs_json").expect("invalid ident: attrs_json"))
+}
+fn ident_src_id() -> &'static Identifier {
+    static CELL: OnceLock<Identifier> = OnceLock::new();
+    CELL.get_or_init(|| Identifier::new("src_id").expect("invalid ident: src_id"))
+}
+fn ident_dst_id() -> &'static Identifier {
+    static CELL: OnceLock<Identifier> = OnceLock::new();
+    CELL.get_or_init(|| Identifier::new("dst_id").expect("invalid ident: dst_id"))
+}
+fn ident_dst_repo_name() -> &'static Identifier {
+    static CELL: OnceLock<Identifier> = OnceLock::new();
+    CELL.get_or_init(|| Identifier::new("dst_repo_name").expect("invalid ident: dst_repo_name"))
+}
+
+/// Execute one `bulk_insert` call with retry/back-off.
+///
+/// `make_body` is called once per attempt to produce the items Vec.
+/// On attempt 0 (the common path) this IS the actual serialization work —
+/// no pre-existing Vec to clone, zero extra copies.  On a transient retry,
+/// `make_body` is re-invoked (re-serialize from the source held by the
+/// closure) — clone cost is paid only on the rare failure path.
+///
+/// Returns the retry count for this chunk on success.
+async fn bulk_insert_with_retry<B>(
+    mut client: indradb_proto::Client,
+    mut make_body: B,
+) -> Result<u32>
+where
+    B: FnMut() -> Result<Vec<BulkInsertItem>>,
+{
+    let mut retries = 0u32;
+    for attempt in 0..MAX_ATTEMPTS {
+        // Build the payload for this attempt by re-serializing from the
+        // source records held by `make_body`.  Attempt 0: first and only
+        // serialization on the happy path — zero clone.
+        // Attempts 1+: re-serialize only because a transient error fired.
+        let body = make_body()?;
+        match client.bulk_insert(body).await {
+            Ok(_) => return Ok(retries),
+            Err(e) if is_transient(&e) && attempt + 1 < MAX_ATTEMPTS => {
+                let wait_ms = BACKOFF_BASE_MS * (1u64 << attempt);
+                tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                retries += 1;
+            }
+            Err(e) => return Err(wrap(e)),
+        }
+    }
+    // Unreachable: the loop always returns on the last attempt.
+    unreachable!("bulk_insert_with_retry loop exhausted without returning")
+}
+
+/// Drive a `JoinSet<Result<u32>>` with bounded concurrency (`max_concurrent`).
+///
+/// For each `chunk` in `chunks`, waits for a slot (draining one task when the
+/// set is full), then spawns the future returned by `task_fn(chunk)`.  After
+/// all tasks are spawned, drains the remainder.  Returns the sum of per-chunk
+/// retry counts.
+async fn bounded_dispatch<T, F, Fut>(
+    chunks: Vec<Arc<[T]>>,
+    max_concurrent: usize,
+    task_fn: F,
+) -> Result<u32>
+where
+    F: Fn(Arc<[T]>) -> Fut,
+    Fut: std::future::Future<Output = Result<u32>> + Send + 'static,
+{
+    let mut set: JoinSet<Result<u32>> = JoinSet::new();
+    let mut total_retries = 0u32;
+
+    for chunk in chunks {
+        if set.len() >= max_concurrent {
+            if let Some(join_res) = set.join_next().await {
+                let chunk_retries = join_res.map_err(|e| Error::Sink {
+                    backend: "indradb",
+                    source: e.into(),
+                })??;
+                total_retries += chunk_retries;
+            }
+        }
+        set.spawn(task_fn(chunk));
+    }
+
+    while let Some(join_res) = set.join_next().await {
+        let chunk_retries = join_res.map_err(|e| Error::Sink {
+            backend: "indradb",
+            source: e.into(),
+        })??;
+        total_retries += chunk_retries;
+    }
+
+    Ok(total_retries)
+}
+
+/// Split `batch` into record-level chunks and return each as an `Arc<[T]>`.
+///
+/// Tasks hold `Arc<[T]>` so they can re-serialize on every retry attempt
+/// without pre-building a cloned `Vec` upfront.
+fn record_arc_chunks<T: Clone>(batch: &[T], chunk_size: usize) -> Vec<Arc<[T]>> {
+    if chunk_size == 0 || batch.is_empty() {
+        return if batch.is_empty() {
+            vec![]
+        } else {
+            vec![Arc::from(batch)]
+        };
+    }
+    batch.chunks(chunk_size).map(Arc::from).collect()
+}
+
+/// Serialize one `NodeRecord` into `BulkInsertItem`s, appending to `out`.
+///
+/// Called by the `make_body` closure inside `bulk_insert_with_retry` on every
+/// attempt.  On attempt 0 this is the first (and in the common case only)
+/// serialization — zero extra copies.
+fn push_node_items(node: &NodeRecord, out: &mut Vec<BulkInsertItem>) -> Result<()> {
+    let vid = symbol_id_to_uuid(&node.repo_name, node.symbol_id);
+    let vtype = ident(node.kind.as_str())?;
+    out.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
+    out.push(BulkInsertItem::VertexProperty(
+        vid,
+        *ident_symbol_id(),
+        Json::new(serde_json::Value::Number(node.symbol_id.into())),
+    ));
+    out.push(BulkInsertItem::VertexProperty(
+        vid,
+        *ident_file_id(),
+        Json::new(serde_json::Value::Number(node.file_id.into())),
+    ));
+    out.push(BulkInsertItem::VertexProperty(
+        vid,
+        *ident_repo_name(),
+        Json::new(serde_json::Value::String(node.repo_name.clone())),
+    ));
+    out.push(BulkInsertItem::VertexProperty(
+        vid,
+        *ident_kind(),
+        Json::new(serde_json::Value::String(node.kind.as_str().to_owned())),
+    ));
+    out.push(BulkInsertItem::VertexProperty(
+        vid,
+        *ident_name(),
+        Json::new(serde_json::Value::String(node.name.clone())),
+    ));
+    out.push(BulkInsertItem::VertexProperty(
+        vid,
+        *ident_qualified_name(),
+        Json::new(serde_json::Value::String(node.qualified_name.clone())),
+    ));
+    out.push(BulkInsertItem::VertexProperty(
+        vid,
+        *ident_attrs_json(),
+        json_str(&node.attrs_json)?,
+    ));
+
+    if let Some(ref v) = node.return_type {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_RETURN_TYPE)?,
+            Json::new(serde_json::Value::String(v.clone())),
+        ));
+    }
+    if let Some(ref v) = node.params {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_PARAMS)?,
+            json_value(v)?,
+        ));
+    }
+    if let Some(ref v) = node.signature {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_SIGNATURE)?,
+            Json::new(serde_json::Value::String(v.clone())),
+        ));
+    }
+    if let Some(ref v) = node.code {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_CODE)?,
+            Json::new(serde_json::Value::String(v.clone())),
+        ));
+    }
+    if let Some(v) = node.code_truncated {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_CODE_TRUNCATED)?,
+            Json::new(serde_json::Value::Bool(v)),
+        ));
+    }
+    if let Some(ref v) = node.template_params {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_TEMPLATE_PARAMS)?,
+            json_value(v)?,
+        ));
+    }
+    if let Some(ref v) = node.template_args {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_TEMPLATE_ARGS)?,
+            json_value(v)?,
+        ));
+    }
+    if let Some(v) = node.is_virtual {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_IS_VIRTUAL)?,
+            Json::new(serde_json::Value::Bool(v)),
+        ));
+    }
+    if let Some(v) = node.is_pure_virtual {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_IS_PURE_VIRTUAL)?,
+            Json::new(serde_json::Value::Bool(v)),
+        ));
+    }
+    if let Some(v) = node.is_static {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_IS_STATIC)?,
+            Json::new(serde_json::Value::Bool(v)),
+        ));
+    }
+    if let Some(v) = node.is_const {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_IS_CONST)?,
+            Json::new(serde_json::Value::Bool(v)),
+        ));
+    }
+    if let Some(v) = node.is_constexpr {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_IS_CONSTEXPR)?,
+            Json::new(serde_json::Value::Bool(v)),
+        ));
+    }
+    if let Some(ref v) = node.storage_class {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_STORAGE_CLASS)?,
+            Json::new(serde_json::Value::String(v.clone())),
+        ));
+    }
+    if let Some(v) = node.is_template {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_IS_TEMPLATE)?,
+            Json::new(serde_json::Value::Bool(v)),
+        ));
+    }
+    if let Some(v) = node.is_noexcept {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_IS_NOEXCEPT)?,
+            Json::new(serde_json::Value::Bool(v)),
+        ));
+    }
+    if let Some(v) = node.is_override {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_IS_OVERRIDE)?,
+            Json::new(serde_json::Value::Bool(v)),
+        ));
+    }
+    if let Some(v) = node.is_deleted {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_IS_DELETED)?,
+            Json::new(serde_json::Value::Bool(v)),
+        ));
+    }
+    if let Some(v) = node.is_defaulted {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_IS_DEFAULTED)?,
+            Json::new(serde_json::Value::Bool(v)),
+        ));
+    }
+    if let Some(ref v) = node.cv_qualifiers {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_CV_QUALIFIERS)?,
+            Json::new(serde_json::Value::String(v.clone())),
+        ));
+    }
+    if let Some(ref v) = node.ref_qualifier {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_REF_QUALIFIER)?,
+            Json::new(serde_json::Value::String(v.clone())),
+        ));
+    }
+    if let Some(v) = node.is_final {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_IS_FINAL)?,
+            Json::new(serde_json::Value::Bool(v)),
+        ));
+    }
+    if let Some(v) = node.is_abstract {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_IS_ABSTRACT)?,
+            Json::new(serde_json::Value::Bool(v)),
+        ));
+    }
+    if let Some(ref v) = node.record_kind {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_RECORD_KIND)?,
+            Json::new(serde_json::Value::String(v.clone())),
+        ));
+    }
+    if let Some(ref v) = node.type_spelling {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_TYPE_SPELLING)?,
+            Json::new(serde_json::Value::String(v.clone())),
+        ));
+    }
+    if let Some(v) = node.param_index {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_PARAM_INDEX)?,
+            Json::new(serde_json::Value::Number(v.into())),
+        ));
+    }
+    if let Some(ref v) = node.param_kind {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_PARAM_KIND)?,
+            Json::new(serde_json::Value::String(v.clone())),
+        ));
+    }
+    if let Some(v) = node.enum_value {
+        out.push(BulkInsertItem::VertexProperty(
+            vid,
+            ident(PROP_ENUM_VALUE)?,
+            Json::new(serde_json::Value::Number(v.into())),
+        ));
+    }
+    Ok(())
+}
+
+/// Serialize one `EdgeRecord` into `BulkInsertItem`s, appending to `out`.
+///
+/// Skips edges with `dst_id = None`.  Returns the number of edges written (0 or 1).
+fn push_edge_items(edge_rec: &EdgeRecord, out: &mut Vec<BulkInsertItem>) -> Result<u64> {
+    let dst_int_id = match edge_rec.dst_id {
+        Some(id) => id,
+        None => return Ok(0),
+    };
+    let src_uuid = symbol_id_to_uuid(&edge_rec.repo_name, edge_rec.src_id);
+    let dst_uuid = symbol_id_to_uuid(&edge_rec.dst_repo_name, dst_int_id);
+    let edge_type = ident(edge_rec.kind.as_str())?;
+    let e = Edge::new(src_uuid, edge_type, dst_uuid);
+    out.push(BulkInsertItem::Edge(e.clone()));
+    out.push(BulkInsertItem::EdgeProperty(
+        e.clone(),
+        *ident_attrs_json(),
+        json_str(&edge_rec.attrs_json)?,
+    ));
+    out.push(BulkInsertItem::EdgeProperty(
+        e.clone(),
+        *ident_src_id(),
+        Json::new(serde_json::Value::Number(edge_rec.src_id.into())),
+    ));
+    out.push(BulkInsertItem::EdgeProperty(
+        e.clone(),
+        *ident_dst_id(),
+        Json::new(serde_json::Value::Number(dst_int_id.into())),
+    ));
+    out.push(BulkInsertItem::EdgeProperty(
+        e.clone(),
+        *ident_dst_repo_name(),
+        Json::new(serde_json::Value::String(edge_rec.dst_repo_name.clone())),
+    ));
+    if let Some(ref v) = edge_rec.source_association_type {
+        out.push(BulkInsertItem::EdgeProperty(
+            e.clone(),
+            ident(PROP_SRC_ASSOC_TYPE)?,
+            Json::new(serde_json::Value::String(v.clone())),
+        ));
+    }
+    if let Some(ref v) = edge_rec.target_association_type {
+        out.push(BulkInsertItem::EdgeProperty(
+            e.clone(),
+            ident(PROP_DST_ASSOC_TYPE)?,
+            Json::new(serde_json::Value::String(v.clone())),
+        ));
+    }
+    if let Some(ref v) = edge_rec.access {
+        out.push(BulkInsertItem::EdgeProperty(
+            e.clone(),
+            ident(PROP_ACCESS)?,
+            Json::new(serde_json::Value::String(v.clone())),
+        ));
+    }
+    if let Some(v) = edge_rec.edge_index {
+        out.push(BulkInsertItem::EdgeProperty(
+            e.clone(),
+            ident(PROP_EDGE_INDEX)?,
+            Json::new(serde_json::Value::Number(v.into())),
+        ));
+    }
+    if let Some(v) = edge_rec.inherits_is_virtual {
+        out.push(BulkInsertItem::EdgeProperty(
+            e.clone(),
+            ident(PROP_INHERITS_IS_VIRTUAL)?,
+            Json::new(serde_json::Value::Bool(v)),
+        ));
+    }
+    Ok(1)
 }
 
 /// Build a `Json` value from a JSON string.
@@ -434,319 +894,31 @@ impl GraphSink for IndraDbSink {
         }
 
         let started = Instant::now();
-
-        // Build BulkInsertItems: Vertex + base properties + M8 optional properties per record.
-        //
-        // Base fields: 1 Vertex + 6 VertexProperty (usr, repo_name, kind, name,
-        // qualified_name, attrs_json) = 7 items guaranteed.
-        // M8 optional fields: up to 10 additional VertexProperty items when all
-        // optional fields are Some — giving a worst-case of 17 items per node.
-        // `None` fields are skipped (AC-S45-1: no spurious property writes).
-        let mut all_items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 17);
-        for node in batch {
-            // v6: key UUID on (repo_name, symbol_id) instead of (repo_name, usr).
-            let vid = symbol_id_to_uuid(&node.repo_name, node.symbol_id);
-            let vtype = ident(node.kind.as_str())?;
-            all_items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
-            // v6: write symbol_id and file_id; drop usr string (S6-SC-03)
-            all_items.push(BulkInsertItem::VertexProperty(
-                vid,
-                ident(PROP_SYMBOL_ID)?,
-                Json::new(serde_json::Value::Number(node.symbol_id.into())),
-            ));
-            all_items.push(BulkInsertItem::VertexProperty(
-                vid,
-                ident(PROP_FILE_ID)?,
-                Json::new(serde_json::Value::Number(node.file_id.into())),
-            ));
-            all_items.push(BulkInsertItem::VertexProperty(
-                vid,
-                ident(PROP_REPO_NAME)?,
-                Json::new(serde_json::Value::String(node.repo_name.clone())),
-            ));
-            all_items.push(BulkInsertItem::VertexProperty(
-                vid,
-                ident(PROP_KIND)?,
-                Json::new(serde_json::Value::String(node.kind.as_str().to_owned())),
-            ));
-            all_items.push(BulkInsertItem::VertexProperty(
-                vid,
-                ident(PROP_NAME)?,
-                Json::new(serde_json::Value::String(node.name.clone())),
-            ));
-            all_items.push(BulkInsertItem::VertexProperty(
-                vid,
-                ident(PROP_QUALIFIED_NAME)?,
-                Json::new(serde_json::Value::String(node.qualified_name.clone())),
-            ));
-            all_items.push(BulkInsertItem::VertexProperty(
-                vid,
-                ident(PROP_ATTRS_JSON)?,
-                json_str(&node.attrs_json)?,
-            ));
-
-            // ── M8 optional fields (S45) — skip None to avoid spurious property writes ──
-
-            if let Some(ref v) = node.return_type {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_RETURN_TYPE)?,
-                    Json::new(serde_json::Value::String(v.clone())),
-                ));
-            }
-            if let Some(ref v) = node.params {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_PARAMS)?,
-                    json_value(v)?,
-                ));
-            }
-            if let Some(ref v) = node.signature {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_SIGNATURE)?,
-                    Json::new(serde_json::Value::String(v.clone())),
-                ));
-            }
-            if let Some(ref v) = node.code {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_CODE)?,
-                    Json::new(serde_json::Value::String(v.clone())),
-                ));
-            }
-            if let Some(v) = node.code_truncated {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_CODE_TRUNCATED)?,
-                    Json::new(serde_json::Value::Bool(v)),
-                ));
-            }
-            if let Some(ref v) = node.template_params {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_TEMPLATE_PARAMS)?,
-                    json_value(v)?,
-                ));
-            }
-            if let Some(ref v) = node.template_args {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_TEMPLATE_ARGS)?,
-                    json_value(v)?,
-                ));
-            }
-            if let Some(v) = node.is_virtual {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_IS_VIRTUAL)?,
-                    Json::new(serde_json::Value::Bool(v)),
-                ));
-            }
-            if let Some(v) = node.is_pure_virtual {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_IS_PURE_VIRTUAL)?,
-                    Json::new(serde_json::Value::Bool(v)),
-                ));
-            }
-            if let Some(v) = node.is_static {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_IS_STATIC)?,
-                    Json::new(serde_json::Value::Bool(v)),
-                ));
-            }
-
-            // ── v7 S1 optional fields (skip None to avoid spurious property writes) ──
-
-            if let Some(v) = node.is_const {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_IS_CONST)?,
-                    Json::new(serde_json::Value::Bool(v)),
-                ));
-            }
-            if let Some(v) = node.is_constexpr {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_IS_CONSTEXPR)?,
-                    Json::new(serde_json::Value::Bool(v)),
-                ));
-            }
-            if let Some(ref v) = node.storage_class {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_STORAGE_CLASS)?,
-                    Json::new(serde_json::Value::String(v.clone())),
-                ));
-            }
-
-            // ── v7 S2 optional fields (skip None to avoid spurious property writes) ──
-
-            if let Some(v) = node.is_template {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_IS_TEMPLATE)?,
-                    Json::new(serde_json::Value::Bool(v)),
-                ));
-            }
-            if let Some(v) = node.is_noexcept {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_IS_NOEXCEPT)?,
-                    Json::new(serde_json::Value::Bool(v)),
-                ));
-            }
-            if let Some(v) = node.is_override {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_IS_OVERRIDE)?,
-                    Json::new(serde_json::Value::Bool(v)),
-                ));
-            }
-            if let Some(v) = node.is_deleted {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_IS_DELETED)?,
-                    Json::new(serde_json::Value::Bool(v)),
-                ));
-            }
-            if let Some(v) = node.is_defaulted {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_IS_DEFAULTED)?,
-                    Json::new(serde_json::Value::Bool(v)),
-                ));
-            }
-            if let Some(ref v) = node.cv_qualifiers {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_CV_QUALIFIERS)?,
-                    Json::new(serde_json::Value::String(v.clone())),
-                ));
-            }
-            if let Some(ref v) = node.ref_qualifier {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_REF_QUALIFIER)?,
-                    Json::new(serde_json::Value::String(v.clone())),
-                ));
-            }
-            if let Some(v) = node.is_final {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_IS_FINAL)?,
-                    Json::new(serde_json::Value::Bool(v)),
-                ));
-            }
-            if let Some(v) = node.is_abstract {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_IS_ABSTRACT)?,
-                    Json::new(serde_json::Value::Bool(v)),
-                ));
-            }
-            if let Some(ref v) = node.record_kind {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_RECORD_KIND)?,
-                    Json::new(serde_json::Value::String(v.clone())),
-                ));
-            }
-            if let Some(ref v) = node.type_spelling {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_TYPE_SPELLING)?,
-                    Json::new(serde_json::Value::String(v.clone())),
-                ));
-            }
-            if let Some(v) = node.param_index {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_PARAM_INDEX)?,
-                    Json::new(serde_json::Value::Number(v.into())),
-                ));
-            }
-            if let Some(ref v) = node.param_kind {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_PARAM_KIND)?,
-                    Json::new(serde_json::Value::String(v.clone())),
-                ));
-            }
-
-            // ── v7 S5 optional fields (skip None to avoid spurious property writes) ──
-
-            if let Some(v) = node.enum_value {
-                all_items.push(BulkInsertItem::VertexProperty(
-                    vid,
-                    ident(PROP_ENUM_VALUE)?,
-                    Json::new(serde_json::Value::Number(v.into())),
-                ));
-            }
-        }
-
-        // Chunk by worst-case items per node (34 = 7 base + 10 M8 + 3 v7-S1 + 13 v7-S2 + 1 v7-S5) × batch_size.
-        // The effective chunk may be smaller when optional fields are sparse.
-        let items_per_node_worst_case = 34_usize;
-        let chunk_items = self.batch_size.saturating_mul(items_per_node_worst_case);
         let total_nodes = batch.len() as u64;
 
-        let mut total_retries = 0u32;
-        // JoinSet task returns crate Result<u32> (retries used for this chunk).
-        let mut set: JoinSet<Result<u32>> = JoinSet::new();
+        // Chunk the raw NodeRecords (not pre-serialised items) so each task
+        // serialises inside its retry closure via push_node_items.
+        // Attempt 0: first and only serialisation on the happy path — zero clone.
+        // Transient retry: re-serialises from the Arc<[NodeRecord]> held by the closure.
+        let chunks = record_arc_chunks(batch, self.batch_size);
+        let sessions = self.sessions;
+        let client = self.client.clone();
 
-        for item_chunk in all_items.chunks(chunk_items) {
-            if set.len() >= self.sessions {
-                if let Some(join_res) = set.join_next().await {
-                    let chunk_retries = join_res.map_err(|e| Error::Sink {
-                        backend: "indradb",
-                        source: e.into(),
-                    })??;
-                    total_retries += chunk_retries;
-                }
-            }
-
-            let mut c = self.client();
-            let mut items = item_chunk.to_vec();
-            let max_attempts = MAX_ATTEMPTS;
-            let backoff_base = BACKOFF_BASE_MS;
-            set.spawn(async move {
-                let mut last_err: Option<ClientError> = None;
-                let mut retries = 0u32;
-                for attempt in 0..max_attempts {
-                    // Lazy-retry-clone (Issue 0002 Bug 2.5): on the happy path the
-                    // request body is *moved* into `bulk_insert`, never cloned.
-                    // We only clone when another attempt is still possible, so the
-                    // final (and, in the common case, only) attempt pays nothing.
-                    let body = if attempt + 1 < max_attempts {
-                        items.clone()
-                    } else {
-                        std::mem::take(&mut items)
-                    };
-                    match c.bulk_insert(body).await {
-                        Ok(_) => return Ok(retries),
-                        Err(e) if is_transient(&e) && attempt + 1 < max_attempts => {
-                            let wait_ms = backoff_base * (1u64 << attempt);
-                            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-                            retries += 1;
-                            last_err = Some(e);
-                        }
-                        Err(e) => return Err(wrap(e)),
+        let total_retries = bounded_dispatch(chunks, sessions, move |chunk| {
+            let c = client.clone();
+            async move {
+                bulk_insert_with_retry(c, move || {
+                    // Worst-case 34 items per node (7 base + 27 optional).
+                    let mut out = Vec::with_capacity(chunk.len() * 34);
+                    for node in chunk.iter() {
+                        push_node_items(node, &mut out)?;
                     }
-                }
-                Err(wrap(last_err.unwrap()))
-            });
-        }
-
-        while let Some(join_res) = set.join_next().await {
-            let chunk_retries = join_res.map_err(|e| Error::Sink {
-                backend: "indradb",
-                source: e.into(),
-            })??;
-            total_retries += chunk_retries;
-        }
+                    Ok(out)
+                })
+                .await
+            }
+        })
+        .await?;
 
         Ok(WriteStats {
             nodes_written: total_nodes,
@@ -756,94 +928,18 @@ impl GraphSink for IndraDbSink {
     }
 
     async fn write_edges(&self, batch: &[EdgeRecord]) -> Result<WriteStats> {
-        // Build items for all resolvable edges.
-        //
-        // Base items: 1 Edge + 1 EdgeProperty (attrs_json) = 2 items guaranteed.
-        // Optional: up to 8 additional EdgeProperty items (v6: src_id/dst_id/dst_repo_name +
-        // M8: assoc x2 + v7-S1: access + v7-S2: edge_index + v7-S4: inherits_is_virtual) —
-        // giving a worst-case of 10 items per edge. `None` fields are skipped.
-        let mut all_items: Vec<BulkInsertItem> = Vec::with_capacity(batch.len() * 10);
-        let mut total_written = 0u64;
-        for edge_rec in batch {
-            // v6: key on integer src_id/dst_id; skip edges without dst_id.
-            let dst_int_id = match edge_rec.dst_id {
-                Some(id) => id,
-                None => continue, // unresolved edge; skip
-            };
-            let src_uuid = symbol_id_to_uuid(&edge_rec.repo_name, edge_rec.src_id);
-            let dst_uuid = symbol_id_to_uuid(&edge_rec.dst_repo_name, dst_int_id);
-            let edge_type = ident(edge_rec.kind.as_str())?;
-            let e = Edge::new(src_uuid, edge_type, dst_uuid);
-            all_items.push(BulkInsertItem::Edge(e.clone()));
-            all_items.push(BulkInsertItem::EdgeProperty(
-                e.clone(),
-                ident(PROP_ATTRS_JSON)?,
-                json_str(&edge_rec.attrs_json)?,
-            ));
-            // v6: write src_id, dst_id, dst_repo_name
-            all_items.push(BulkInsertItem::EdgeProperty(
-                e.clone(),
-                ident(PROP_SRC_ID)?,
-                Json::new(serde_json::Value::Number(edge_rec.src_id.into())),
-            ));
-            all_items.push(BulkInsertItem::EdgeProperty(
-                e.clone(),
-                ident(PROP_DST_ID)?,
-                Json::new(serde_json::Value::Number(dst_int_id.into())),
-            ));
-            all_items.push(BulkInsertItem::EdgeProperty(
-                e.clone(),
-                ident(PROP_DST_REPO_NAME)?,
-                Json::new(serde_json::Value::String(edge_rec.dst_repo_name.clone())),
-            ));
-
-            // ── M8 optional edge fields (S45) — USES edges only; skip None ───────
-            if let Some(ref v) = edge_rec.source_association_type {
-                all_items.push(BulkInsertItem::EdgeProperty(
-                    e.clone(),
-                    ident(PROP_SRC_ASSOC_TYPE)?,
-                    Json::new(serde_json::Value::String(v.clone())),
-                ));
-            }
-            if let Some(ref v) = edge_rec.target_association_type {
-                all_items.push(BulkInsertItem::EdgeProperty(
-                    e.clone(),
-                    ident(PROP_DST_ASSOC_TYPE)?,
-                    Json::new(serde_json::Value::String(v.clone())),
-                ));
-            }
-
-            // ── v7 S1 optional edge field — HAS_METHOD/HAS_FIELD/INHERITS; skip None ──
-            if let Some(ref v) = edge_rec.access {
-                all_items.push(BulkInsertItem::EdgeProperty(
-                    e.clone(),
-                    ident(PROP_ACCESS)?,
-                    Json::new(serde_json::Value::String(v.clone())),
-                ));
-            }
-
-            // ── v7 S2 optional edge field — HAS_PARAM/TEMPLATE_PARAM/TEMPLATE_ARG; skip None ──
-            if let Some(v) = edge_rec.edge_index {
-                all_items.push(BulkInsertItem::EdgeProperty(
-                    e.clone(),
-                    ident(PROP_EDGE_INDEX)?,
-                    Json::new(serde_json::Value::Number(v.into())),
-                ));
-            }
-
-            // ── v7 S4 optional edge field — INHERITS only; skip None ──────────────────
-            if let Some(v) = edge_rec.inherits_is_virtual {
-                all_items.push(BulkInsertItem::EdgeProperty(
-                    e.clone(),
-                    ident(PROP_INHERITS_IS_VIRTUAL)?,
-                    Json::new(serde_json::Value::Bool(v)),
-                ));
-            }
-
-            total_written += 1;
+        if batch.is_empty() {
+            return Ok(WriteStats {
+                nodes_written: 0,
+                retries: 0,
+                elapsed: Duration::ZERO,
+            });
         }
 
-        if all_items.is_empty() {
+        // Count resolvable edges upfront so we can return the correct total even
+        // when all items in a chunk are skipped (dst_id == None).
+        let total_written = batch.iter().filter(|e| e.dst_id.is_some()).count() as u64;
+        if total_written == 0 {
             return Ok(WriteStats {
                 nodes_written: 0,
                 retries: 0,
@@ -853,62 +949,29 @@ impl GraphSink for IndraDbSink {
 
         let started = Instant::now();
 
-        // Chunk by worst-case items per edge (10 = 2 base + 3 v6 + 2 M8 optional + 1 v7-S1 + 1 v7-S2 + 1 v7-S4) × batch_size.
-        let items_per_edge_worst_case = 10_usize;
-        let chunk_items = self.batch_size.saturating_mul(items_per_edge_worst_case);
+        // Chunk the raw EdgeRecords so each task serialises inside its retry
+        // closure via push_edge_items.
+        // Attempt 0: first and only serialisation on the happy path — zero clone.
+        // Transient retry: re-serialises from the Arc<[EdgeRecord]> held by the closure.
+        let chunks = record_arc_chunks(batch, self.batch_size);
+        let sessions = self.sessions;
+        let client = self.client.clone();
 
-        let mut total_retries = 0u32;
-        // JoinSet task returns crate Result<u32> (retries used for this chunk).
-        let mut set: JoinSet<Result<u32>> = JoinSet::new();
-
-        for item_chunk in all_items.chunks(chunk_items) {
-            if set.len() >= self.sessions {
-                if let Some(join_res) = set.join_next().await {
-                    let chunk_retries = join_res.map_err(|e| Error::Sink {
-                        backend: "indradb",
-                        source: e.into(),
-                    })??;
-                    total_retries += chunk_retries;
-                }
-            }
-
-            let mut c = self.client();
-            let mut items = item_chunk.to_vec();
-            let max_attempts = MAX_ATTEMPTS;
-            let backoff_base = BACKOFF_BASE_MS;
-            set.spawn(async move {
-                let mut last_err: Option<ClientError> = None;
-                let mut retries = 0u32;
-                for attempt in 0..max_attempts {
-                    // Lazy-retry-clone (Issue 0002 Bug 2.5): move on the happy
-                    // path, clone only when another attempt is still possible.
-                    let body = if attempt + 1 < max_attempts {
-                        items.clone()
-                    } else {
-                        std::mem::take(&mut items)
-                    };
-                    match c.bulk_insert(body).await {
-                        Ok(_) => return Ok(retries),
-                        Err(e) if is_transient(&e) && attempt + 1 < max_attempts => {
-                            let wait_ms = backoff_base * (1u64 << attempt);
-                            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-                            retries += 1;
-                            last_err = Some(e);
-                        }
-                        Err(e) => return Err(wrap(e)),
+        let total_retries = bounded_dispatch(chunks, sessions, move |chunk| {
+            let c = client.clone();
+            async move {
+                bulk_insert_with_retry(c, move || {
+                    // Worst-case 10 items per edge (2 base + 3 v6 + 5 optional).
+                    let mut out = Vec::with_capacity(chunk.len() * 10);
+                    for edge_rec in chunk.iter() {
+                        push_edge_items(edge_rec, &mut out)?;
                     }
-                }
-                Err(wrap(last_err.unwrap()))
-            });
-        }
-
-        while let Some(join_res) = set.join_next().await {
-            let chunk_retries = join_res.map_err(|e| Error::Sink {
-                backend: "indradb",
-                source: e.into(),
-            })??;
-            total_retries += chunk_retries;
-        }
+                    Ok(out)
+                })
+                .await
+            }
+        })
+        .await?;
 
         Ok(WriteStats {
             nodes_written: total_written,
@@ -1040,35 +1103,35 @@ mod tests {
     use crate::schema::edges::{EdgeKind, EdgeRecord};
     use crate::schema::nodes::{NodeKind, NodeRecord};
 
-    // ── usr_to_uuid ───────────────────────────────────────────────────────────
+    // ── symbol_id_to_uuid ─────────────────────────────────────────────────────
 
     #[test]
-    fn usr_to_uuid_is_deterministic() {
-        let a = usr_to_uuid("my_repo", "c:@F@foo");
-        let b = usr_to_uuid("my_repo", "c:@F@foo");
+    fn symbol_id_to_uuid_is_deterministic() {
+        let a = symbol_id_to_uuid("my_repo", 42);
+        let b = symbol_id_to_uuid("my_repo", 42);
         assert_eq!(a, b, "same input must produce same UUID");
     }
 
     #[test]
-    fn usr_to_uuid_differs_across_repos() {
-        let a = usr_to_uuid("repo_a", "c:@F@foo");
-        let b = usr_to_uuid("repo_b", "c:@F@foo");
+    fn symbol_id_to_uuid_differs_across_repos() {
+        let a = symbol_id_to_uuid("repo_a", 42);
+        let b = symbol_id_to_uuid("repo_b", 42);
         assert_ne!(
             a, b,
-            "same USR in different repos must produce different UUIDs"
+            "same symbol_id in different repos must produce different UUIDs"
         );
     }
 
     #[test]
-    fn usr_to_uuid_differs_across_usrs() {
-        let a = usr_to_uuid("my_repo", "c:@F@foo");
-        let b = usr_to_uuid("my_repo", "c:@F@bar");
-        assert_ne!(a, b, "different USRs must produce different UUIDs");
+    fn symbol_id_to_uuid_differs_across_ids() {
+        let a = symbol_id_to_uuid("my_repo", 42);
+        let b = symbol_id_to_uuid("my_repo", 99);
+        assert_ne!(a, b, "different symbol_ids must produce different UUIDs");
     }
 
     #[test]
-    fn usr_to_uuid_is_v5() {
-        let id = usr_to_uuid("my_repo", "c:@F@foo");
+    fn symbol_id_to_uuid_is_v5() {
+        let id = symbol_id_to_uuid("my_repo", 42);
         // UUIDv5 has version bits == 5 in the high nibble of byte 6.
         assert_eq!(id.get_version_num(), 5, "UUID must be version 5");
     }
@@ -1169,44 +1232,13 @@ mod tests {
             kind: NodeKind::Function,
             name: "foo".to_owned(),
             qualified_name: "ns::foo".to_owned(),
-            mangled_name: None,
             file_path: "/src/foo.cpp".to_owned(),
             line: Some(10),
             col: Some(1),
             repo_name: "my_repo".to_owned(),
-            attrs_json: "{}".to_owned(),
-            partial: false,
-            phase: 1,
-            tu_hash: [0u8; 32],
-            return_type: None,
-            params: None,
-            signature: None,
-            code: None,
-            code_truncated: None,
-            template_params: None,
-            template_args: None,
-            is_virtual: None,
-            is_pure_virtual: None,
-            is_static: None,
             symbol_id: 42,
             file_id: 7,
-            is_const: None,
-            is_constexpr: None,
-            storage_class: None,
-            is_template: None,
-            is_noexcept: None,
-            is_override: None,
-            is_deleted: None,
-            is_defaulted: None,
-            cv_qualifiers: None,
-            ref_qualifier: None,
-            is_final: None,
-            is_abstract: None,
-            record_kind: None,
-            type_spelling: None,
-            param_index: None,
-            param_kind: None,
-            enum_value: None,
+            ..Default::default()
         }
     }
 
@@ -1214,21 +1246,13 @@ mod tests {
         EdgeRecord {
             src_usr: src.to_owned(),
             dst_usr: Some(dst.to_owned()),
-            dst_placeholder: None,
             kind: EdgeKind::Calls,
             resolved: true,
-            cross_repo_candidate: false,
             repo_name: "my_repo".to_owned(),
-            attrs_json: "{}".to_owned(),
-            tu_hash: [0u8; 32],
-            source_association_type: None,
-            target_association_type: None,
             src_id: 42,
             dst_id: Some(99),
             dst_repo_name: "my_repo".to_owned(),
-            access: None,
-            edge_index: None,
-            inherits_is_virtual: None,
+            ..Default::default()
         }
     }
 
@@ -1236,7 +1260,7 @@ mod tests {
     fn node_base_fields_produce_seven_items() {
         // A node with all M8 optional fields = None produces 1 Vertex + 6 VertexProperty = 7 items.
         let node = make_node("c:@F@foo");
-        let vid = usr_to_uuid(&node.repo_name, &node.usr);
+        let vid = symbol_id_to_uuid(&node.repo_name, node.symbol_id);
         let vtype = ident(node.kind.as_str()).unwrap();
         let mut items: Vec<BulkInsertItem> = Vec::new();
         items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
@@ -1288,7 +1312,7 @@ mod tests {
         node.is_pure_virtual = Some(false);
         node.is_static = Some(false);
 
-        let vid = usr_to_uuid(&node.repo_name, &node.usr);
+        let vid = symbol_id_to_uuid(&node.repo_name, node.symbol_id);
         let vtype = ident(node.kind.as_str()).unwrap();
         let mut items: Vec<BulkInsertItem> = Vec::new();
         items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
@@ -1372,7 +1396,7 @@ mod tests {
         // A node with all M8 optional fields = None → 1 Vertex + 6 VertexProperty = 7 base items.
         // write_nodes now chunks by worst-case 17 items per node.
         let node = make_node("c:@F@foo");
-        let vid = usr_to_uuid(&node.repo_name, &node.usr);
+        let vid = symbol_id_to_uuid(&node.repo_name, node.symbol_id);
         let vtype = ident(node.kind.as_str()).unwrap();
         let mut items: Vec<BulkInsertItem> = vec![];
         items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
@@ -1402,8 +1426,8 @@ mod tests {
         // Each edge with no association_type fields → 1 Edge + 1 EdgeProperty (attrs_json) = 2 items.
         // write_edges now chunks by worst-case 4 items per edge.
         let edge = make_edge("src", "dst");
-        let src_id = usr_to_uuid(&edge.repo_name, &edge.src_usr);
-        let dst_id = usr_to_uuid(&edge.repo_name, edge.dst_usr.as_deref().unwrap());
+        let src_id = symbol_id_to_uuid(&edge.repo_name, edge.src_id);
+        let dst_id = symbol_id_to_uuid(&edge.repo_name, edge.dst_id.unwrap());
         let edge_type = ident(edge.kind.as_str()).unwrap();
         let e = Edge::new(src_id, edge_type, dst_id);
         let items: Vec<BulkInsertItem> = vec![
@@ -1428,8 +1452,8 @@ mod tests {
         edge.source_association_type = Some("read".to_owned());
         edge.target_association_type = Some("read".to_owned());
 
-        let src_id = usr_to_uuid(&edge.repo_name, &edge.src_usr);
-        let dst_id = usr_to_uuid(&edge.repo_name, edge.dst_usr.as_deref().unwrap());
+        let src_id = symbol_id_to_uuid(&edge.repo_name, edge.src_id);
+        let dst_id = symbol_id_to_uuid(&edge.repo_name, edge.dst_id.unwrap());
         let edge_type = ident(edge.kind.as_str()).unwrap();
         let e = Edge::new(src_id, edge_type, dst_id);
         let mut items: Vec<BulkInsertItem> = vec![
@@ -1489,9 +1513,10 @@ mod tests {
         let mut item_count = 0_usize;
         let mut written = 0_u64;
         for edge_rec in &edges {
-            if let Some(dst_usr) = &edge_rec.dst_usr {
-                let src_id = usr_to_uuid(&edge_rec.repo_name, &edge_rec.src_usr);
-                let dst_id = usr_to_uuid(&edge_rec.repo_name, dst_usr);
+            if edge_rec.dst_usr.is_some() {
+                let src_id = symbol_id_to_uuid(&edge_rec.repo_name, edge_rec.src_id);
+                let dst_id =
+                    symbol_id_to_uuid(&edge_rec.dst_repo_name, edge_rec.dst_id.unwrap_or(0));
                 let edge_type = ident(edge_rec.kind.as_str()).unwrap();
                 let e = Edge::new(src_id, edge_type, dst_id);
                 item_count += 2; // Edge + EdgeProperty
@@ -1522,7 +1547,7 @@ mod tests {
         assert!(node.is_static.is_none());
 
         // Simulate the item-build loop from write_nodes for this node.
-        let vid = usr_to_uuid(&node.repo_name, &node.usr);
+        let vid = symbol_id_to_uuid(&node.repo_name, node.symbol_id);
         let vtype = ident(node.kind.as_str()).unwrap();
         let mut items: Vec<BulkInsertItem> = Vec::new();
         items.push(BulkInsertItem::Vertex(Vertex::with_id(vid, vtype)));
@@ -1652,7 +1677,7 @@ mod tests {
         node.code = None;
         node.code_truncated = Some(true);
 
-        let vid = usr_to_uuid(&node.repo_name, &node.usr);
+        let vid = symbol_id_to_uuid(&node.repo_name, node.symbol_id);
         let mut extra_items: Vec<BulkInsertItem> = Vec::new();
         // Simulate just the optional-field portion of write_nodes.
         if let Some(ref v) = node.code {
@@ -1688,8 +1713,8 @@ mod tests {
     #[test]
     fn none_association_types_produce_no_extra_items() {
         let edge = make_edge("a", "b"); // both association_type = None
-        let src_id = usr_to_uuid(&edge.repo_name, &edge.src_usr);
-        let dst_id = usr_to_uuid(&edge.repo_name, edge.dst_usr.as_deref().unwrap());
+        let src_id = symbol_id_to_uuid(&edge.repo_name, edge.src_id);
+        let dst_id = symbol_id_to_uuid(&edge.repo_name, edge.dst_id.unwrap());
         let edge_type = ident(edge.kind.as_str()).unwrap();
         let e = Edge::new(src_id, edge_type, dst_id);
         let mut items: Vec<BulkInsertItem> = vec![
@@ -1727,8 +1752,8 @@ mod tests {
         let mut edge = make_edge("a", "b");
         edge.source_association_type = Some("write".to_owned());
         edge.target_association_type = Some("write".to_owned());
-        let src_id = usr_to_uuid(&edge.repo_name, &edge.src_usr);
-        let dst_id = usr_to_uuid(&edge.repo_name, edge.dst_usr.as_deref().unwrap());
+        let src_id = symbol_id_to_uuid(&edge.repo_name, edge.src_id);
+        let dst_id = symbol_id_to_uuid(&edge.repo_name, edge.dst_id.unwrap());
         let edge_type = ident(edge.kind.as_str()).unwrap();
         let e = Edge::new(src_id, edge_type, dst_id);
         let mut items: Vec<BulkInsertItem> = vec![
@@ -1758,14 +1783,161 @@ mod tests {
 
     #[test]
     fn idempotency_key_is_deterministic_uuid() {
-        // The write_nodes idempotency guarantee rests on usr_to_uuid being
-        // deterministic: same (repo_name, usr) always maps to the same UUID.
-        let a = usr_to_uuid("repo", "c:@F@foo");
-        let b = usr_to_uuid("repo", "c:@F@foo");
+        // The write_nodes idempotency guarantee rests on symbol_id_to_uuid being
+        // deterministic: same (repo_name, symbol_id) always maps to the same UUID.
+        let a = symbol_id_to_uuid("repo", 42);
+        let b = symbol_id_to_uuid("repo", 42);
         assert_eq!(a, b, "same input must produce same UUID (idempotency key)");
 
-        // A different USR must produce a different UUID so there is no collision.
-        let c = usr_to_uuid("repo", "c:@F@bar");
-        assert_ne!(a, c, "different USR must produce different UUID");
+        // A different symbol_id must produce a different UUID so there is no collision.
+        let c = symbol_id_to_uuid("repo", 99);
+        assert_ne!(a, c, "different symbol_id must produce different UUID");
+    }
+
+    // ── record_arc_chunks ─────────────────────────────────────────────────────
+
+    #[test]
+    fn record_arc_chunks_sizes_match_slice_chunks() {
+        let items: Vec<u32> = (0..10).collect();
+        let expected: Vec<usize> = items.chunks(3).map(|c| c.len()).collect();
+        let arcs = record_arc_chunks(&items, 3);
+        let actual: Vec<usize> = arcs.iter().map(|c| c.len()).collect();
+        assert_eq!(
+            actual, expected,
+            "record_arc_chunks sizes must match slice::chunks"
+        );
+    }
+
+    #[test]
+    fn record_arc_chunks_total_count_preserved() {
+        let items: Vec<u32> = (0..13).collect();
+        let chunks = record_arc_chunks(&items, 4);
+        let total: usize = chunks.iter().map(|c| c.len()).sum();
+        assert_eq!(total, 13, "total items across all chunks must be 13");
+    }
+
+    #[test]
+    fn record_arc_chunks_empty_input_no_chunks() {
+        let chunks = record_arc_chunks::<u32>(&[], 10);
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn record_arc_chunks_single_chunk_when_size_ge_len() {
+        let items: Vec<u32> = (0..5).collect();
+        let chunks = record_arc_chunks(&items, 1000);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 5);
+    }
+
+    // ── cached Identifiers (OnceLock) ─────────────────────────────────────────
+
+    #[test]
+    fn cached_ident_returns_correct_prop_name() {
+        assert_eq!(ident_symbol_id().as_str(), PROP_SYMBOL_ID);
+        assert_eq!(ident_file_id().as_str(), PROP_FILE_ID);
+        assert_eq!(ident_repo_name().as_str(), PROP_REPO_NAME);
+        assert_eq!(ident_kind().as_str(), PROP_KIND);
+        assert_eq!(ident_name().as_str(), PROP_NAME);
+        assert_eq!(ident_qualified_name().as_str(), PROP_QUALIFIED_NAME);
+        assert_eq!(ident_attrs_json().as_str(), PROP_ATTRS_JSON);
+        assert_eq!(ident_src_id().as_str(), PROP_SRC_ID);
+        assert_eq!(ident_dst_id().as_str(), PROP_DST_ID);
+        assert_eq!(ident_dst_repo_name().as_str(), PROP_DST_REPO_NAME);
+    }
+
+    #[test]
+    fn cached_ident_is_idempotent() {
+        // Two calls must return pointers to the same static value.
+        assert!(std::ptr::eq(ident_symbol_id(), ident_symbol_id()));
+        assert!(std::ptr::eq(ident_repo_name(), ident_repo_name()));
+    }
+
+    #[test]
+    fn cached_ident_clone_equals_ident() {
+        // A clone of the cached ident must compare equal to one produced by ident().
+        let cached = *ident_symbol_id();
+        let fresh = ident(PROP_SYMBOL_ID).unwrap();
+        assert_eq!(cached, fresh, "cached and fresh Identifier must be equal");
+    }
+
+    // ── retry-path: make_body invoked per attempt, payload identical ──────────
+
+    /// Validates that the `make_body` closure pattern used by `bulk_insert_with_retry`
+    /// can be called multiple times (i.e., is truly `FnMut`) and produces an identical
+    /// payload on every invocation.
+    ///
+    /// This exercises the zero-clone design: on attempt 0 the first call IS the
+    /// serialization; a retry re-calls the same closure from the same source Arc —
+    /// no pre-built Vec is cloned.
+    #[test]
+    fn retry_path_make_body_closure_fnmut_payload_identical() {
+        let node = NodeRecord {
+            symbol_id: 42,
+            file_id: 7,
+            repo_name: "test-repo".to_owned(),
+            kind: NodeKind::Function,
+            name: "foo".to_owned(),
+            qualified_name: "ns::foo".to_owned(),
+            attrs_json: "{}".to_owned(),
+            ..Default::default()
+        };
+
+        let chunk: Arc<[NodeRecord]> = Arc::from(vec![node].as_slice());
+        let chunk_clone = chunk.clone();
+
+        // Build the same make_body closure shape as write_nodes uses inside bounded_dispatch.
+        let make_body = move || -> Result<Vec<BulkInsertItem>> {
+            let mut out = Vec::with_capacity(chunk_clone.len() * 34);
+            for n in chunk_clone.iter() {
+                push_node_items(n, &mut out)?;
+            }
+            Ok(out)
+        };
+
+        // Invoke twice — simulating attempt 0 and a transient retry.
+        let payload_attempt0 = make_body().expect("attempt 0 must succeed");
+        let payload_attempt1 = make_body().expect("attempt 1 must succeed");
+
+        // Both payloads must be non-empty and of the same length.
+        assert!(
+            !payload_attempt0.is_empty(),
+            "attempt 0 payload must be non-empty"
+        );
+        assert_eq!(
+            payload_attempt0.len(),
+            payload_attempt1.len(),
+            "retry attempt must produce the same number of BulkInsertItems"
+        );
+
+        // The symbol_id VertexProperty value must be identical on both attempts.
+        // Find it by scanning for VertexProperty items (skip the Vertex item).
+        let sym_ids_attempt0: Vec<_> = payload_attempt0
+            .iter()
+            .filter_map(|item| {
+                if let BulkInsertItem::VertexProperty(_, key, val) = item {
+                    if key.as_str() == PROP_SYMBOL_ID {
+                        return Some(val.0.clone());
+                    }
+                }
+                None
+            })
+            .collect();
+        let sym_ids_attempt1: Vec<_> = payload_attempt1
+            .iter()
+            .filter_map(|item| {
+                if let BulkInsertItem::VertexProperty(_, key, val) = item {
+                    if key.as_str() == PROP_SYMBOL_ID {
+                        return Some(val.0.clone());
+                    }
+                }
+                None
+            })
+            .collect();
+
+        assert_eq!(
+            sym_ids_attempt0, sym_ids_attempt1,
+            "symbol_id payload must be identical on retry"
+        );
     }
 }

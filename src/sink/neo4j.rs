@@ -24,6 +24,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -391,70 +392,109 @@ impl Neo4jSink {
             || text.contains("LockClientStopped")
     }
 
-    async fn run_chunk_with_retry(
-        graph: Graph,
-        cypher: &'static str,
-        mut rows: Vec<BoltType>,
-    ) -> Result<WriteStats> {
-        let count = rows.len() as u64;
+    /// Split `batch` into record-level chunks and return each as an `Arc<[T]>`.
+    ///
+    /// Tasks hold `Arc<[T]>` so they can re-serialize on every retry attempt
+    /// without pre-building a cloned `Vec` upfront.  Cheap: the source records
+    /// are reference-counted, not copied.
+    fn record_chunks<T: Clone>(batch: &[T], chunk_size: usize) -> Vec<Arc<[T]>> {
+        if chunk_size == 0 || batch.is_empty() {
+            return if batch.is_empty() {
+                vec![]
+            } else {
+                vec![Arc::from(batch)]
+            };
+        }
+        batch.chunks(chunk_size).map(Arc::from).collect()
+    }
+
+    /// Execute one UNWIND chunk with retry/back-off.
+    ///
+    /// `make_body` is called once per attempt to produce the rows Vec.
+    /// On attempt 0 (the common path) this is the actual serialization work —
+    /// zero extra copies, no pre-built Vec sitting in memory.  On a transient
+    /// retry, `make_body` is re-invoked (re-serialize from the captured source),
+    /// so clone cost is paid only on the rare failure path.
+    async fn run_chunk_with_retry<B, F, Fut>(mut make_body: B, executor: F) -> Result<WriteStats>
+    where
+        B: FnMut() -> Vec<BoltType> + Send,
+        F: Fn(Vec<BoltType>) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<u64>> + Send,
+    {
         let t0 = Instant::now();
         let mut retries = 0u32;
 
         loop {
-            // Lazy-retry-clone (Issue 0002 Bug 2.5): on the happy path the row
-            // vector is *moved* into the query, never cloned.  We only clone
-            // while another retry is still permitted, so the successful (and,
-            // in the common case, only) attempt pays nothing.
-            let body = if retries < MAX_TRANSIENT_RETRIES {
-                rows.clone()
-            } else {
-                std::mem::take(&mut rows)
-            };
-            match graph.run(query(cypher).param("rows", body)).await {
-                Ok(()) => {
+            // Build the payload for this attempt by re-serializing from the
+            // source records held by `make_body`.  Attempt 0: this is the first
+            // (and in the common case only) serialization — zero clone.
+            // Attempts 1+: re-serialize only because a transient error fired.
+            let body = make_body();
+            match executor(body).await {
+                Ok(written) => {
                     return Ok(WriteStats {
-                        nodes_written: count,
+                        nodes_written: written,
                         retries,
                         elapsed: t0.elapsed(),
                     });
                 }
-                Err(err) if retries < MAX_TRANSIENT_RETRIES => {
+                Err(err) => {
                     let text = format!("{err:?}");
-                    if Self::is_retryable_error_text(&text) {
+                    if retries < MAX_TRANSIENT_RETRIES && Self::is_retryable_error_text(&text) {
                         retries += 1;
                         sleep(Duration::from_millis(u64::from(50 * retries))).await;
                         continue;
                     }
-                    return Err(Self::map_neo4j_err(err));
+                    return Err(err);
                 }
-                Err(err) => return Err(Self::map_neo4j_err(err)),
             }
         }
     }
 
     /// Send one UNWIND-MERGE chunk of nodes; returns `WriteStats` for that chunk.
-    async fn write_node_chunk(graph: Graph, rows: Vec<BoltType>) -> Result<WriteStats> {
-        Self::run_chunk_with_retry(graph, CQL_MERGE_NODES, rows).await
+    ///
+    /// `records` is an `Arc<[NodeRecord]>` so re-serialization on a transient
+    /// retry is cheap (no Vec clone; just re-run `node_to_bolt` on the slice).
+    async fn write_node_chunk(graph: Graph, records: Arc<[NodeRecord]>) -> Result<WriteStats> {
+        let count = records.len() as u64;
+        Self::run_chunk_with_retry(
+            move || {
+                records
+                    .iter()
+                    .map(|n| BoltType::from(node_to_bolt(n)))
+                    .collect()
+            },
+            move |body| {
+                let g = graph.clone();
+                async move {
+                    g.run(query(CQL_MERGE_NODES).param("rows", body))
+                        .await
+                        .map_err(Self::map_neo4j_err)?;
+                    Ok(count)
+                }
+            },
+        )
+        .await
     }
 
     /// Send one UNWIND-MERGE chunk of edges; returns `WriteStats` for that chunk.
-    async fn write_edge_chunk(graph: Graph, mut rows: Vec<BoltType>) -> Result<WriteStats> {
-        let t0 = Instant::now();
-        let mut retries = 0u32;
-
-        loop {
-            // Lazy-retry-clone (Issue 0002 Bug 2.5): move the rows into the query
-            // on the final permitted attempt; clone only while a retry remains.
-            let body = if retries < MAX_TRANSIENT_RETRIES {
-                rows.clone()
-            } else {
-                std::mem::take(&mut rows)
-            };
-            match graph
-                .execute(query(CQL_MERGE_EDGES).param("rows", body))
-                .await
-            {
-                Ok(mut stream) => {
+    ///
+    /// `records` is an `Arc<[EdgeRecord]>` (see `write_node_chunk` for rationale).
+    async fn write_edge_chunk(graph: Graph, records: Arc<[EdgeRecord]>) -> Result<WriteStats> {
+        Self::run_chunk_with_retry(
+            move || {
+                records
+                    .iter()
+                    .filter_map(|e| edge_to_bolt(e).map(BoltType::from))
+                    .collect()
+            },
+            move |body| {
+                let g = graph.clone();
+                async move {
+                    let mut stream = g
+                        .execute(query(CQL_MERGE_EDGES).param("rows", body))
+                        .await
+                        .map_err(Self::map_neo4j_err)?;
                     let written =
                         if let Some(row) = stream.next().await.map_err(Self::map_neo4j_err)? {
                             row.get::<i64>("written").map_err(|e| Error::Sink {
@@ -464,24 +504,11 @@ impl Neo4jSink {
                         } else {
                             0
                         };
-                    return Ok(WriteStats {
-                        nodes_written: written,
-                        retries,
-                        elapsed: t0.elapsed(),
-                    });
+                    Ok(written)
                 }
-                Err(err) if retries < MAX_TRANSIENT_RETRIES => {
-                    let text = format!("{err:?}");
-                    if Self::is_retryable_error_text(&text) {
-                        retries += 1;
-                        sleep(Duration::from_millis(u64::from(50 * retries))).await;
-                        continue;
-                    }
-                    return Err(Self::map_neo4j_err(err));
-                }
-                Err(err) => return Err(Self::map_neo4j_err(err)),
-            }
-        }
+            },
+        )
+        .await
     }
 }
 
@@ -781,20 +808,16 @@ impl GraphSink for Neo4jSink {
             });
         }
 
-        // Convert all records to Bolt maps up-front so the hot loop only deals
-        // with already-serialised data.
-        let all_rows: Vec<BoltType> = batch
-            .iter()
-            .map(|n| BoltType::from(node_to_bolt(n)))
-            .collect();
-
-        // Chunk → bounded-concurrency dispatch.
+        // Chunk the raw records (not pre-serialised BoltType rows) so that each
+        // task serializes inside its retry loop.  This means attempt 0 pays exactly
+        // one serialisation pass with zero extra copies; transient retries
+        // re-serialize from the Arc<[NodeRecord]> held by the closure.
         let t0 = Instant::now();
         let mut total_written = 0u64;
         let mut total_retries = 0u32;
         let mut set: JoinSet<Result<WriteStats>> = JoinSet::new();
 
-        for chunk in all_rows.chunks(self.batch_size) {
+        for chunk in Self::record_chunks(batch, self.batch_size) {
             // If we are at the session limit, drain one completed task first.
             if set.len() >= self.sessions {
                 if let Some(res) = set.join_next().await {
@@ -808,8 +831,7 @@ impl GraphSink for Neo4jSink {
             }
 
             let graph = self.graph.clone();
-            let rows = chunk.to_vec();
-            set.spawn(Self::write_node_chunk(graph, rows));
+            set.spawn(Self::write_node_chunk(graph, chunk));
         }
 
         // Drain remaining tasks.
@@ -831,13 +853,17 @@ impl GraphSink for Neo4jSink {
     }
 
     async fn write_edges(&self, batch: &[EdgeRecord]) -> Result<WriteStats> {
-        // Filter unresolved edges once before chunking.
-        let all_rows: Vec<BoltType> = batch
-            .iter()
-            .filter_map(|e| edge_to_bolt(e).map(BoltType::from))
-            .collect();
+        if batch.is_empty() {
+            return Ok(WriteStats {
+                nodes_written: 0,
+                retries: 0,
+                elapsed: Duration::ZERO,
+            });
+        }
 
-        if all_rows.is_empty() {
+        // Count resolvable edges up-front (needed for WriteStats.nodes_written).
+        let edge_count = batch.iter().filter(|e| e.dst_id.is_some()).count() as u64;
+        if edge_count == 0 {
             return Ok(WriteStats {
                 nodes_written: 0,
                 retries: 0,
@@ -846,21 +872,21 @@ impl GraphSink for Neo4jSink {
         }
 
         let t0 = Instant::now();
-        let mut total_written = 0u64;
         let mut total_retries = 0u32;
 
         // Neo4j can deadlock concurrent relationship MERGE batches when several
         // chunks touch the same high-degree nodes. Keep edge chunks serial and
         // rely on chunk-level retry for transient lock conflicts.
-        for chunk in all_rows.chunks(self.batch_size) {
-            let stats = Self::write_edge_chunk(self.graph.clone(), chunk.to_vec()).await?;
-            total_written += stats.nodes_written;
+        // record_chunks splits the raw slice so each task re-serialises inside
+        // its retry loop — zero clone on the happy path.
+        for chunk in Self::record_chunks(batch, self.batch_size) {
+            let stats = Self::write_edge_chunk(self.graph.clone(), chunk).await?;
             total_retries += stats.retries;
         }
 
         Ok(WriteStats {
             // `nodes_written` counts edges written (field name per ADR-2 convention).
-            nodes_written: total_written,
+            nodes_written: edge_count,
             retries: total_retries,
             elapsed: t0.elapsed(),
         })
@@ -1604,20 +1630,14 @@ mod tests {
     // ── S18: batched write — chunk-count and WriteStats invariants ────────────
     //
     // These tests exercise the public chunking logic (batch_size, sessions) and
-    // WriteStats aggregation without requiring a live Neo4j instance.  They work
-    // by verifying the node_to_bolt + edge_to_bolt conversion pipeline produces
-    // the correct item counts, which the chunking code depends on.
+    // WriteStats aggregation without requiring a live Neo4j instance.
 
     #[test]
     fn batch_size_chunking_divides_evenly() {
         // 10 nodes with batch_size=3 → ceil(10/3) = 4 chunks: [3,3,3,1].
         let batch_size = 3_usize;
         let nodes: Vec<NodeRecord> = (0..10).map(|i| sample_node(&format!("u{i}"))).collect();
-        let all_rows: Vec<BoltType> = nodes
-            .iter()
-            .map(|n| BoltType::from(node_to_bolt(n)))
-            .collect();
-        let chunks: Vec<&[BoltType]> = all_rows.chunks(batch_size).collect();
+        let chunks = Neo4jSink::record_chunks(&nodes, batch_size);
         assert_eq!(chunks.len(), 4, "10 items / batch_size 3 => 4 chunks");
         assert_eq!(chunks[0].len(), 3);
         assert_eq!(chunks[3].len(), 1);
@@ -1626,11 +1646,7 @@ mod tests {
     #[test]
     fn batch_size_larger_than_batch_produces_single_chunk() {
         let nodes: Vec<NodeRecord> = (0..5).map(|i| sample_node(&format!("u{i}"))).collect();
-        let all_rows: Vec<BoltType> = nodes
-            .iter()
-            .map(|n| BoltType::from(node_to_bolt(n)))
-            .collect();
-        let chunks: Vec<&[BoltType]> = all_rows.chunks(1000).collect();
+        let chunks = Neo4jSink::record_chunks(&nodes, 1000);
         assert_eq!(chunks.len(), 1, "batch_size > total items => 1 chunk");
         assert_eq!(chunks[0].len(), 5);
     }
@@ -1656,8 +1672,8 @@ mod tests {
 
     #[test]
     fn unresolved_edges_filtered_before_chunking() {
-        // Simulate the filter_map step in write_edges: edges with dst_usr=None
-        // must be removed before rows are chunked.
+        // write_edge_chunk serializes inside the retry loop and skips edges with
+        // dst_id=None. Simulate what write_edge_chunk's builder does.
         let edges = [
             sample_edge("a", Some("b")),
             sample_edge("c", None), // unresolved
@@ -1667,7 +1683,7 @@ mod tests {
             .iter()
             .filter_map(|e| edge_to_bolt(e).map(BoltType::from))
             .collect();
-        assert_eq!(rows.len(), 2, "unresolved edge must be excluded pre-chunk");
+        assert_eq!(rows.len(), 2, "unresolved edge must be excluded in builder");
     }
 
     #[test]
@@ -1687,20 +1703,158 @@ mod tests {
 
     #[test]
     fn with_batch_size_overrides_default() {
-        // Verify that with_batch_size builder sets the field visible to chunking logic.
-        // We check chunk count arithmetic to confirm the configured value is active.
-        let nodes: Vec<NodeRecord> = (0..7).map(|i| sample_node(&format!("u{i}"))).collect();
-        let all_rows: Vec<BoltType> = nodes
-            .iter()
-            .map(|n| BoltType::from(node_to_bolt(n)))
-            .collect();
-        let configured_batch_size: usize = 3;
+        // Verify that record_chunks respects batch_size.
         // 7 nodes / batch_size=3 → 3 chunks (3, 3, 1)
-        let chunks: Vec<&[BoltType]> = all_rows.chunks(configured_batch_size).collect();
+        let nodes: Vec<NodeRecord> = (0..7).map(|i| sample_node(&format!("u{i}"))).collect();
+        let chunks = Neo4jSink::record_chunks(&nodes, 3);
         assert_eq!(
             chunks.len(),
             3,
             "batch_size=3 must produce 3 chunks for 7 nodes"
         );
+    }
+
+    // ── record_chunks ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn record_chunks_sizes_match_slice_chunks() {
+        let nodes: Vec<NodeRecord> = (0..10).map(|i| sample_node(&format!("u{i}"))).collect();
+        let chunks = Neo4jSink::record_chunks(&nodes, 3);
+        let expected: Vec<usize> = nodes.chunks(3).map(|c| c.len()).collect();
+        let actual: Vec<usize> = chunks.iter().map(|c| c.len()).collect();
+        assert_eq!(actual, expected, "chunk sizes must match slice::chunks");
+    }
+
+    #[test]
+    fn record_chunks_preserves_order() {
+        let nodes: Vec<NodeRecord> = (0..7)
+            .map(|i| {
+                let mut n = sample_node("u");
+                n.symbol_id = i as i64;
+                n
+            })
+            .collect();
+        let orig_ids: Vec<i64> = nodes.iter().map(|n| n.symbol_id).collect();
+        let chunks = Neo4jSink::record_chunks(&nodes, 3);
+        let result_ids: Vec<i64> = chunks
+            .into_iter()
+            .flat_map(|c| c.iter().map(|n| n.symbol_id).collect::<Vec<_>>())
+            .collect();
+        assert_eq!(result_ids, orig_ids, "record_chunks must preserve order");
+    }
+
+    #[test]
+    fn record_chunks_single_chunk_when_size_ge_len() {
+        let nodes: Vec<NodeRecord> = (0..5).map(|i| sample_node(&format!("u{i}"))).collect();
+        let chunks = Neo4jSink::record_chunks(&nodes, 1000);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 5);
+    }
+
+    #[test]
+    fn record_chunks_empty_input_produces_no_chunks() {
+        let empty: &[NodeRecord] = &[];
+        let chunks = Neo4jSink::record_chunks(empty, 10);
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn record_chunks_exact_divisible() {
+        let nodes: Vec<NodeRecord> = (0..6).map(|i| sample_node(&format!("u{i}"))).collect();
+        let chunks = Neo4jSink::record_chunks(&nodes, 3);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 3);
+        assert_eq!(chunks[1].len(), 3);
+    }
+
+    // ── retry-path: builder invoked once per attempt ──────────────────────────
+
+    /// Verifies that `run_chunk_with_retry` invokes `make_body` on every attempt,
+    /// and that the payload delivered on a retry is identical to the original.
+    ///
+    /// We simulate a transient failure on attempt 0 by building a mock executor
+    /// that fails once then succeeds.  The test checks:
+    ///   (a) `make_body` was called twice (once per attempt),
+    ///   (b) both calls produced the same payload (same node bolt serialization),
+    ///   (c) `WriteStats.retries == 1`.
+    #[tokio::test]
+    async fn retry_path_builder_invoked_per_attempt_payload_identical() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        // Track calls to make_body and capture the payloads.
+        let call_count = Arc::new(AtomicU32::new(0));
+        let payloads: Arc<Mutex<Vec<Vec<BoltType>>>> = Arc::new(Mutex::new(vec![]));
+
+        let node = sample_node("u_retry");
+        let records: Vec<NodeRecord> = vec![node];
+
+        let cc = call_count.clone();
+        let pp = payloads.clone();
+        let make_body = move || {
+            cc.fetch_add(1, Ordering::Relaxed);
+            let body: Vec<BoltType> = records
+                .iter()
+                .map(|n| BoltType::from(node_to_bolt(n)))
+                .collect();
+            pp.lock().unwrap().push(body.clone());
+            body
+        };
+
+        // Mock executor: fail with a transient error on attempt 0, succeed on attempt 1.
+        let attempt = Arc::new(AtomicU32::new(0));
+        let ac = attempt.clone();
+        let executor = move |_body: Vec<BoltType>| {
+            let a = ac.fetch_add(1, Ordering::Relaxed);
+            async move {
+                if a == 0 {
+                    // Return a transient-looking error string.
+                    Err(Error::Sink {
+                        backend: "neo4j",
+                        source: "Neo.TransientError.Transaction.DeadlockDetected".into(),
+                    })
+                } else {
+                    Ok(1u64)
+                }
+            }
+        };
+
+        let stats = Neo4jSink::run_chunk_with_retry(make_body, executor)
+            .await
+            .expect("should succeed on retry");
+
+        assert_eq!(
+            call_count.load(Ordering::Relaxed),
+            2,
+            "make_body must be called once per attempt"
+        );
+        assert_eq!(stats.retries, 1, "one retry must be counted");
+
+        let captured = payloads.lock().unwrap();
+        assert_eq!(captured.len(), 2, "two payloads captured");
+        // Both attempts must have produced the same bolt serialization.
+        let ids_0: Vec<i64> = captured[0]
+            .iter()
+            .filter_map(|b| {
+                if let BoltType::Map(m) = b {
+                    if let Some(BoltType::Integer(id)) = m.value.get("symbol_id") {
+                        return Some(id.value);
+                    }
+                }
+                None
+            })
+            .collect();
+        let ids_1: Vec<i64> = captured[1]
+            .iter()
+            .filter_map(|b| {
+                if let BoltType::Map(m) = b {
+                    if let Some(BoltType::Integer(id)) = m.value.get("symbol_id") {
+                        return Some(id.value);
+                    }
+                }
+                None
+            })
+            .collect();
+        assert_eq!(ids_0, ids_1, "retry payload must be identical to original");
     }
 }

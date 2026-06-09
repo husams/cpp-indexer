@@ -336,47 +336,12 @@ pub fn parse_module_tu(
         kind: NodeKind::Module,
         name: module_name.clone(),
         qualified_name: file.to_string_lossy().into_owned(),
-        mangled_name: None,
         file_path: file.to_string_lossy().into_owned(),
-        line: None,
-        col: None,
         repo_name: repo_name.to_owned(),
         attrs_json: module_attrs,
         partial: has_errors,
-        phase: 1,
         tu_hash,
-        // M8 promoted fields — MODULE nodes carry none of these
-        return_type: None,
-        params: None,
-        signature: None,
-        code: None,
-        code_truncated: None,
-        template_params: None,
-        template_args: None,
-        is_virtual: None,
-        is_pure_virtual: None,
-        is_static: None,
-        // Integer IDs populated by visit_tu_inner post-processing pass.
-        symbol_id: 0,
-        file_id: 0,
-        is_const: None,
-        is_constexpr: None,
-        storage_class: None,
-        // v7 S2 promoted fields — MODULE nodes carry none
-        is_template: None,
-        is_noexcept: None,
-        is_override: None,
-        is_deleted: None,
-        is_defaulted: None,
-        cv_qualifiers: None,
-        ref_qualifier: None,
-        is_final: None,
-        is_abstract: None,
-        record_kind: None,
-        type_spelling: None,
-        param_index: None,
-        param_kind: None,
-        enum_value: None,
+        ..Default::default()
     };
 
     let mut nodes = vec![module_node];
@@ -401,47 +366,10 @@ pub fn parse_module_tu(
                 kind: NodeKind::Module,
                 name: imported_name.clone(),
                 qualified_name: imported_name,
-                mangled_name: None,
-                file_path: String::new(),
-                line: None,
-                col: None,
                 repo_name: repo_name.to_owned(),
                 attrs_json: serde_json::json!({ "module_interface": true }).to_string(),
-                partial: false,
-                phase: 1,
                 tu_hash,
-                // M8 promoted fields — MODULE nodes carry none of these
-                return_type: None,
-                params: None,
-                signature: None,
-                code: None,
-                code_truncated: None,
-                template_params: None,
-                template_args: None,
-                is_virtual: None,
-                is_pure_virtual: None,
-                is_static: None,
-                // Integer IDs populated by visit_tu_inner post-processing pass.
-                symbol_id: 0,
-                file_id: 0,
-                is_const: None,
-                is_constexpr: None,
-                storage_class: None,
-                // v7 S2 promoted fields — MODULE nodes carry none
-                is_template: None,
-                is_noexcept: None,
-                is_override: None,
-                is_deleted: None,
-                is_defaulted: None,
-                cv_qualifiers: None,
-                ref_qualifier: None,
-                is_final: None,
-                is_abstract: None,
-                record_kind: None,
-                type_spelling: None,
-                param_index: None,
-                param_kind: None,
-                enum_value: None,
+                ..Default::default()
             };
             nodes.push(imported_node);
 
@@ -449,25 +377,12 @@ pub fn parse_module_tu(
             edges.push(EdgeRecord {
                 src_usr: module_usr.clone(),
                 dst_usr: Some(imported_usr),
-                dst_placeholder: None,
                 kind: EdgeKind::Includes,
-                resolved: false,
-                cross_repo_candidate: false,
                 repo_name: repo_name.to_owned(),
                 attrs_json: serde_json::json!({ "import": true }).to_string(),
                 tu_hash,
-                // M8 promoted fields — INCLUDES edges carry none of these
-                source_association_type: None,
-                target_association_type: None,
-                // Integer IDs populated by visit_tu_inner post-processing pass.
-                src_id: 0,
-                dst_id: None,
                 dst_repo_name: repo_name.to_owned(),
-                // v7 S1: INCLUDES edges do not carry access
-                access: None,
-                // v7 S2: INCLUDES edges do not carry edge_index
-                edge_index: None,
-                inherits_is_virtual: None,
+                ..Default::default()
             });
 
             return EntityVisitResult::Continue;
@@ -520,69 +435,20 @@ pub fn parse_module_tu(
                 line,
                 col,
                 repo_name: repo_name.to_owned(),
-                attrs_json: "{}".to_owned(),
                 partial: has_errors,
-                phase: 1,
                 tu_hash,
-                // M8 promoted fields — populated by S41/S42 for applicable kinds;
-                // modules_cpp20 leaves them None (visitor for callable/template fields is shallow.rs)
-                return_type: None,
-                params: None,
-                signature: None,
-                code: None,
-                code_truncated: None,
-                template_params: None,
-                template_args: None,
-                is_virtual: None,
-                is_pure_virtual: None,
-                is_static: None,
-                // Integer IDs populated by visit_tu_inner post-processing pass.
-                symbol_id: 0,
-                file_id: 0,
-                is_const: None,
-                is_constexpr: None,
-                storage_class: None,
-                // v7 S2 promoted fields — exported decl nodes carry none here
-                // (callable/template fields are populated by shallow.rs visitor)
-                is_template: None,
-                is_noexcept: None,
-                is_override: None,
-                is_deleted: None,
-                is_defaulted: None,
-                cv_qualifiers: None,
-                ref_qualifier: None,
-                is_final: None,
-                is_abstract: None,
-                record_kind: None,
-                type_spelling: None,
-                param_index: None,
-                param_kind: None,
-                enum_value: None,
+                ..Default::default()
             });
 
             // CONTAINS edge from module to exported decl.
             edges.push(EdgeRecord {
                 src_usr: module_usr.clone(),
                 dst_usr: Some(usr),
-                dst_placeholder: None,
                 kind: EdgeKind::Contains,
-                resolved: false,
-                cross_repo_candidate: false,
                 repo_name: repo_name.to_owned(),
-                attrs_json: "{}".to_owned(),
                 tu_hash,
-                // M8 promoted fields — CONTAINS edges carry none of these
-                source_association_type: None,
-                target_association_type: None,
-                // Integer IDs populated by visit_tu_inner post-processing pass.
-                src_id: 0,
-                dst_id: None,
                 dst_repo_name: repo_name.to_owned(),
-                // v7 S1: CONTAINS edges do not carry access
-                access: None,
-                // v7 S2: CONTAINS edges do not carry edge_index
-                edge_index: None,
-                inherits_is_virtual: None,
+                ..Default::default()
             });
         }
 

@@ -232,6 +232,32 @@ int f2() { return 2; }
     );
 }
 
+/// Dedup fix verification: same type referenced as parameter from two distinct
+/// functions emits exactly one Type node (O(1) seen_node_usrs path, fix 2).
+///
+/// This confirms that the O(1) HashSet dedup path in `get_or_create_type_node`
+/// behaves identically to the former O(n²) linear scan.
+#[tokio::test]
+async fn type_node_dedup_across_two_functions() {
+    let src = r#"
+void foo(int x) {}
+void bar(int y) {}
+"#;
+    let (nodes, _) = visit_snippet(src, "c++14").await;
+
+    // Exactly one "int" Type node, even though both foo and bar reference it.
+    let int_type_nodes: Vec<_> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Type && n.type_spelling == Some("int".to_owned()))
+        .collect();
+
+    assert_eq!(
+        int_type_nodes.len(),
+        1,
+        "same type 'int' referenced from two functions must emit exactly one Type node"
+    );
+}
+
 /// is_template = true for TemplateDef nodes.
 #[tokio::test]
 async fn is_template_true_for_template_def() {

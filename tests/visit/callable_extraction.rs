@@ -323,6 +323,54 @@ fn clip_code_one_over_limit_truncated() {
 // AC-S41-5: code field populated for small fixture functions
 // ---------------------------------------------------------------------------
 
+/// Snippet-cache fix verification: multiple functions in the same source file
+/// each extract their own correct verbatim snippet via the per-TU file cache
+/// (fix 3 — `extract_code_snippet` now caches the file bytes per path).
+///
+/// If the cache incorrectly served stale bytes or wrong offsets, snippets
+/// would be absent or contain wrong text.
+#[tokio::test]
+async fn multiple_functions_in_one_file_have_correct_snippets() {
+    // The callable fixture has 3 functions (add, Calc::multiply, Calc::area)
+    // all in a single .cpp file — a natural multi-function, same-file case.
+    let nodes = visit_callable_fixture().await;
+
+    let fn_nodes: Vec<&NodeRecord> = nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .collect();
+
+    // At least 3 callable nodes must have code extracted.
+    let with_code: Vec<&NodeRecord> = fn_nodes
+        .iter()
+        .filter(|n| n.code.is_some())
+        .copied()
+        .collect();
+
+    assert!(
+        with_code.len() >= 3,
+        "all 3 callables in callable.cpp must have code snippets (got {} with code)",
+        with_code.len()
+    );
+
+    // Each snippet must be non-empty and contain the function name as evidence
+    // that the per-TU cache returned correct bytes for each function's offset range.
+    for node in &with_code {
+        let code = node.code.as_deref().unwrap();
+        assert!(
+            !code.is_empty(),
+            "code snippet for '{}' must be non-empty",
+            node.name
+        );
+        assert!(
+            code.contains(&node.name),
+            "code snippet for '{}' must contain the function name; got: {:?}",
+            node.name,
+            code
+        );
+    }
+}
+
 /// AC-S41-5: FUNCTION `add` source is well within limit → code=Some.
 #[tokio::test]
 async fn small_function_code_is_some() {

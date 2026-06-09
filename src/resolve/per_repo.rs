@@ -29,15 +29,12 @@
 /// Phase 3 is intentionally single-threaded per repo (per design.md §Phase 3).  No rayon
 /// or Tokio runtime is required; synchronous Parquet I/O is used throughout.
 use std::{
-    fs::{self, File},
+    fs::File,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use parquet::{
-    arrow::ArrowWriter,
-    file::reader::{FileReader, SerializedFileReader},
-};
+use parquet::arrow::ArrowWriter;
 
 use crate::{
     resolve::spill::{UsrMap, DEFAULT_SPILL_THRESHOLD_BYTES},
@@ -45,7 +42,7 @@ use crate::{
         arrow::{edge_schema, edges_to_record_batch, record_batch_to_edges, record_batch_to_nodes},
         EdgeRecord, NodeKind,
     },
-    stage::schema::{has_magic, writer_properties},
+    stage::schema::{collect_shards, open_shard_reader, writer_properties, MissingDirPolicy},
     Error, Result,
 };
 
@@ -97,8 +94,8 @@ pub fn resolve_per_repo_with_threshold(
     stage_dir: &Path,
     spill_threshold: usize,
 ) -> Result<PathBuf> {
-    let node_shards = collect_shards(stage_dir, "nodes")?;
-    let edge_shards = collect_shards(stage_dir, "edges")?;
+    let node_shards = collect_shards(stage_dir, "nodes", MissingDirPolicy::ErrorOnMissing)?;
+    let edge_shards = collect_shards(stage_dir, "edges", MissingDirPolicy::ErrorOnMissing)?;
 
     let usr_map = build_usr_map(&node_shards, stage_dir, spill_threshold)?;
     let output_path = stage_dir.join("final-edges.parquet");
@@ -110,48 +107,6 @@ pub fn resolve_per_repo_with_threshold(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-/// Collect all `<prefix>-*.parquet` shard paths from every `worker-*/` subdirectory
-/// inside `stage_dir`, sorted lexicographically for deterministic ordering.
-fn collect_shards(stage_dir: &Path, prefix: &str) -> Result<Vec<PathBuf>> {
-    let mut shards = Vec::new();
-
-    let dir_entries = fs::read_dir(stage_dir)?;
-    for entry in dir_entries {
-        let entry = entry?;
-        let path = entry.path();
-
-        // Skip anything that is not a `worker-NNN/` directory.
-        if !path.is_dir() {
-            continue;
-        }
-        let dir_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        if !dir_name.starts_with("worker-") {
-            continue;
-        }
-
-        // Enumerate shard files inside the worker directory.
-        let worker_entries = fs::read_dir(&path)?;
-        for w_entry in worker_entries {
-            let w_entry = w_entry?;
-            let shard_path = w_entry.path();
-            let file_name = shard_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
-
-            if file_name.starts_with(prefix) && file_name.ends_with(".parquet") {
-                shards.push(shard_path);
-            }
-        }
-    }
-
-    shards.sort();
-    Ok(shards)
-}
 
 /// Build a [`UsrMap`] from a list of node shard paths.
 ///
@@ -170,30 +125,7 @@ fn build_usr_map(
     let mut map = UsrMap::new(stage_dir, spill_threshold);
 
     for shard_path in node_shards {
-        let file = File::open(shard_path)?;
-        let reader = SerializedFileReader::new(file)
-            .map_err(|e| Error::Schema(format!("open node shard {}: {e}", shard_path.display())))?;
-
-        let meta = reader.metadata().file_metadata().clone();
-        if !has_magic(&meta) {
-            return Err(Error::Schema(format!(
-                "node shard {} is missing the ADR-3 KV magic header (cxg_parquet_v1); \
-                 refusing to read a potentially mismatched-version shard",
-                shard_path.display()
-            )));
-        }
-
-        let arrow_reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            File::open(shard_path)?,
-        )
-        .map_err(|e| Error::Schema(format!("build reader for {}: {e}", shard_path.display())))?
-        .build()
-        .map_err(|e| {
-            Error::Schema(format!(
-                "build batch reader for {}: {e}",
-                shard_path.display()
-            ))
-        })?;
+        let arrow_reader = open_shard_reader(shard_path, true)?;
 
         for batch_result in arrow_reader {
             let batch = batch_result.map_err(|e| Error::Schema(format!("read node batch: {e}")))?;
@@ -228,10 +160,22 @@ fn build_usr_map(
 ///
 /// The same edge is emitted in every TU shard that observed it, so without dedup
 /// the persisted file (and the downstream sink write) would carry millions of
-/// duplicate rows.  We collapse rows with the same sink key
-/// `(src_usr, dst_usr, kind, repo_name)` to a single row here, so Phase 4 needs
-/// zero in-memory edge dedup.  This replaces the old `dedupe_edges_for_sink`
-/// pass that ran in Phase 4.
+/// duplicate rows.  We collapse rows with the same sink key to a single row here,
+/// so Phase 4 needs zero in-memory edge dedup.  This replaces the old
+/// `dedupe_edges_for_sink` pass that ran in Phase 4.
+///
+/// Phase 3 processes a **single repo** (see `resolve_per_repo` API contract and
+/// `build_usr_map`); all edges share the same `repo_name`, so it is excluded
+/// from the dedup key — including it added per-row heap allocation with zero
+/// additional selectivity.
+///
+/// # Dedup key strategy
+///
+/// - **ID path** (`src_id != 0 && dst_id != None && dst_id != 0`): use
+///   `(src_id, dst_id, kind)` — three integer copies, no String allocation.
+/// - **Fallback path** (either ID is zero / unresolved): use
+///   `(src_usr, dst_usr, kind)` as owned strings.  This path fires only for
+///   edges where symbol-ID assignment has not yet been performed.
 ///
 /// Unresolved rows are **kept**: rows with `dst_usr == None` (placeholders) are
 /// passed through unchanged, and `cross_repo_candidate=true` rows (which still
@@ -245,6 +189,7 @@ fn write_resolved_edges(
     usr_map: &UsrMap,
     output_path: &Path,
 ) -> Result<()> {
+    use crate::schema::EdgeKind;
     use std::collections::HashSet;
 
     let schema = Arc::new(edge_schema());
@@ -253,36 +198,14 @@ fn write_resolved_edges(
     let mut writer = ArrowWriter::try_new(out_file, schema, Some(props))
         .map_err(|e| Error::Schema(format!("create final-edges ArrowWriter: {e}")))?;
 
-    // Sink-key dedup set, spanning all shards.  Holds one entry per distinct
-    // keyed edge — bounded by the deduped edge count (what the sink would hold
-    // anyway), not by the raw cross-shard duplicate count.
-    let mut seen: HashSet<(String, String, &'static str, String)> = HashSet::new();
+    // Integer-keyed dedup: covers the common case where both IDs are assigned.
+    // `EdgeKind` is `Copy + Hash + Eq` so it serves as a zero-cost discriminant.
+    let mut seen_ids: HashSet<(i64, i64, EdgeKind)> = HashSet::new();
+    // String-keyed fallback: only used when src_id == 0 or dst_id is None/0.
+    let mut seen_str: HashSet<(String, String, EdgeKind)> = HashSet::new();
 
     for shard_path in edge_shards {
-        let file = File::open(shard_path)?;
-        let reader = SerializedFileReader::new(file)
-            .map_err(|e| Error::Schema(format!("open edge shard {}: {e}", shard_path.display())))?;
-
-        let meta = reader.metadata().file_metadata().clone();
-        if !has_magic(&meta) {
-            return Err(Error::Schema(format!(
-                "edge shard {} is missing the ADR-3 KV magic header (cxg_parquet_v1); \
-                 refusing to read a potentially mismatched-version shard",
-                shard_path.display()
-            )));
-        }
-
-        let arrow_reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            File::open(shard_path)?,
-        )
-        .map_err(|e| Error::Schema(format!("build reader for {}: {e}", shard_path.display())))?
-        .build()
-        .map_err(|e| {
-            Error::Schema(format!(
-                "build batch reader for {}: {e}",
-                shard_path.display()
-            ))
-        })?;
+        let arrow_reader = open_shard_reader(shard_path, true)?;
 
         for batch_result in arrow_reader {
             let batch = batch_result.map_err(|e| Error::Schema(format!("read edge batch: {e}")))?;
@@ -293,15 +216,22 @@ fn write_resolved_edges(
             }
 
             // Collapse duplicate sink keys.  Keyed rows (dst_usr = Some) are
-            // deduped; placeholder rows (dst_usr = None) are kept as-is.
-            records.retain(|edge| match edge.dst_usr.as_ref() {
-                Some(dst) => seen.insert((
-                    edge.src_usr.clone(),
-                    dst.clone(),
-                    edge.kind.as_str(),
-                    edge.repo_name.clone(),
-                )),
-                None => true,
+            // deduped using the integer-ID path when both IDs are present, or
+            // the string-USR fallback otherwise.  Placeholder rows (dst_usr =
+            // None) are passed through unchanged.
+            records.retain(|edge| {
+                let Some(_dst_usr) = edge.dst_usr.as_ref() else {
+                    // Placeholder edge — always keep.
+                    return true;
+                };
+                let dst_id_nonzero = edge.dst_id.map(|id| id != 0).unwrap_or(false);
+                if edge.src_id != 0 && dst_id_nonzero {
+                    // Fast path: dedup on integer IDs.
+                    seen_ids.insert((edge.src_id, edge.dst_id.unwrap(), edge.kind))
+                } else {
+                    // Fallback: dedup on USR strings (no repo_name — single-repo phase).
+                    seen_str.insert((edge.src_usr.clone(), _dst_usr.clone(), edge.kind))
+                }
             });
 
             if records.is_empty() {
@@ -345,7 +275,7 @@ fn classify_edge(edge: &mut EdgeRecord, usr_map: &UsrMap) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{
-        schema::{EdgeKind, NodeKind},
+        schema::{EdgeKind, EdgeRecord, NodeKind},
         stage::writer::StageWriter,
     };
 
@@ -740,7 +670,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let stage_dir = dir.path().join("stage");
         let worker_dir = stage_dir.join("worker-000");
-        fs::create_dir_all(&worker_dir).unwrap();
+        std::fs::create_dir_all(&worker_dir).unwrap();
 
         // Write a node shard WITHOUT the magic KV metadata.
         let schema = Arc::new(crate::schema::arrow::node_schema());
@@ -754,6 +684,208 @@ mod tests {
         assert!(
             matches!(result, Err(Error::Schema(_))),
             "expected Error::Schema for missing magic, got: {result:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // New dedup-strategy tests (integer-ID path + string-fallback path)
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a minimal NodeRecord for test shards.
+    fn make_node_record(i: usize, usr: &str) -> crate::schema::NodeRecord {
+        crate::schema::NodeRecord {
+            usr: usr.to_owned(),
+            kind: NodeKind::Function,
+            name: format!("fn_{i}"),
+            qualified_name: format!("fn_{i}"),
+            mangled_name: None,
+            file_path: "/repo/src/f.cpp".to_owned(),
+            line: Some(1),
+            col: Some(1),
+            repo_name: "repo".to_owned(),
+            attrs_json: "{}".to_owned(),
+            partial: false,
+            phase: 1,
+            tu_hash: [0u8; 32],
+            return_type: None,
+            params: None,
+            signature: None,
+            code: None,
+            code_truncated: None,
+            template_params: None,
+            template_args: None,
+            is_virtual: None,
+            is_pure_virtual: None,
+            is_static: None,
+            symbol_id: i as i64 + 1,
+            file_id: 1,
+            is_const: None,
+            is_constexpr: None,
+            storage_class: None,
+            is_template: None,
+            is_noexcept: None,
+            is_override: None,
+            is_deleted: None,
+            is_defaulted: None,
+            cv_qualifiers: None,
+            ref_qualifier: None,
+            is_final: None,
+            is_abstract: None,
+            record_kind: None,
+            type_spelling: None,
+            param_index: None,
+            param_kind: None,
+            enum_value: None,
+        }
+    }
+
+    /// Helper: edge with both IDs set (integer-path).
+    fn make_edge_with_ids(
+        src_usr: &str,
+        dst_usr: &str,
+        kind: EdgeKind,
+        src_id: i64,
+        dst_id: i64,
+    ) -> EdgeRecord {
+        EdgeRecord {
+            src_usr: src_usr.to_owned(),
+            dst_usr: Some(dst_usr.to_owned()),
+            dst_placeholder: None,
+            kind,
+            resolved: false,
+            cross_repo_candidate: false,
+            repo_name: "repo".to_owned(),
+            attrs_json: "{}".to_owned(),
+            tu_hash: [0u8; 32],
+            source_association_type: None,
+            target_association_type: None,
+            src_id,
+            dst_id: Some(dst_id),
+            dst_repo_name: "repo".to_owned(),
+            access: None,
+            edge_index: None,
+            inherits_is_virtual: None,
+        }
+    }
+
+    /// Helper: edge with IDs zeroed (string-fallback path).
+    fn make_edge_no_ids(src_usr: &str, dst_usr: &str, kind: EdgeKind) -> EdgeRecord {
+        make_edge_with_ids(src_usr, dst_usr, kind, 0, 0)
+    }
+
+    /// Duplicate edges (integer-ID path) must collapse to one row in final-edges.
+    #[test]
+    fn dedup_integer_id_path_collapses_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage_dir = dir.path().join("stage");
+
+        // One target node.
+        let node = make_node_record(0, "c:@F@target");
+
+        // Same (src, dst, kind) edge with IDs set — emit from two workers.
+        let edge_a = make_edge_with_ids("c:@F@src", "c:@F@target", EdgeKind::Calls, 10, 1);
+        let edge_b = make_edge_with_ids("c:@F@src", "c:@F@target", EdgeKind::Calls, 10, 1);
+        // A different kind — must NOT be merged.
+        let edge_c = make_edge_with_ids("c:@F@src", "c:@F@target", EdgeKind::Uses, 10, 1);
+
+        let mut w0 = StageWriter::new(&stage_dir, 0).unwrap();
+        w0.write_nodes(std::slice::from_ref(&node)).unwrap();
+        w0.write_edges(&[edge_a, edge_c]).unwrap();
+        w0.finish().unwrap();
+
+        let mut w1 = StageWriter::new(&stage_dir, 1).unwrap();
+        w1.write_nodes(std::slice::from_ref(&node)).unwrap();
+        w1.write_edges(&[edge_b]).unwrap();
+        w1.finish().unwrap();
+
+        let output = resolve_per_repo(&stage_dir).unwrap();
+        let file = File::open(&output).unwrap();
+        let arrow_reader =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+                .unwrap()
+                .build()
+                .unwrap();
+
+        let rows: Vec<EdgeRecord> = arrow_reader
+            .flat_map(|b| record_batch_to_edges(&b.unwrap()))
+            .collect();
+
+        // (src→target, Calls) deduped to 1; (src→target, Uses) is distinct → 2 total.
+        assert_eq!(
+            rows.len(),
+            2,
+            "expected 2 distinct rows, got {}",
+            rows.len()
+        );
+        let kinds: std::collections::HashSet<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
+        assert!(kinds.contains("CALLS"), "CALLS edge must survive");
+        assert!(kinds.contains("USES"), "USES edge must survive");
+    }
+
+    /// Duplicate edges (string-fallback path, both IDs == 0) must also collapse.
+    #[test]
+    fn dedup_string_fallback_path_collapses_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage_dir = dir.path().join("stage");
+
+        let node = make_node_record(0, "c:@F@tgt");
+
+        // IDs are 0 → forces string-fallback path.
+        let dup_a = make_edge_no_ids("c:@F@src", "c:@F@tgt", EdgeKind::Calls);
+        let dup_b = make_edge_no_ids("c:@F@src", "c:@F@tgt", EdgeKind::Calls);
+        let distinct = make_edge_no_ids("c:@F@src", "c:@F@tgt", EdgeKind::Uses);
+
+        let mut w = StageWriter::new(&stage_dir, 0).unwrap();
+        w.write_nodes(std::slice::from_ref(&node)).unwrap();
+        w.write_edges(&[dup_a, dup_b, distinct]).unwrap();
+        w.finish().unwrap();
+
+        let output = resolve_per_repo(&stage_dir).unwrap();
+        let file = File::open(&output).unwrap();
+        let rows: Vec<EdgeRecord> =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+                .unwrap()
+                .build()
+                .unwrap()
+                .flat_map(|b| record_batch_to_edges(&b.unwrap()))
+                .collect();
+
+        assert_eq!(rows.len(), 2, "expected 2 deduped rows, got {}", rows.len());
+    }
+
+    /// Two edges that differ only in kind must NOT be collapsed.
+    #[test]
+    fn dedup_different_kind_not_merged() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage_dir = dir.path().join("stage");
+
+        let node = make_node_record(0, "c:@F@tgt2");
+
+        let calls_edge = make_edge_with_ids("c:@F@src2", "c:@F@tgt2", EdgeKind::Calls, 20, 1);
+        let uses_edge = make_edge_with_ids("c:@F@src2", "c:@F@tgt2", EdgeKind::Uses, 20, 1);
+        // Duplicate of Calls — must collapse.
+        let calls_dup = make_edge_with_ids("c:@F@src2", "c:@F@tgt2", EdgeKind::Calls, 20, 1);
+
+        let mut w = StageWriter::new(&stage_dir, 0).unwrap();
+        w.write_nodes(std::slice::from_ref(&node)).unwrap();
+        w.write_edges(&[calls_edge, uses_edge, calls_dup]).unwrap();
+        w.finish().unwrap();
+
+        let output = resolve_per_repo(&stage_dir).unwrap();
+        let file = File::open(&output).unwrap();
+        let rows: Vec<EdgeRecord> =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+                .unwrap()
+                .build()
+                .unwrap()
+                .flat_map(|b| record_batch_to_edges(&b.unwrap()))
+                .collect();
+
+        assert_eq!(
+            rows.len(),
+            2,
+            "Calls+Uses must survive; duplicate Calls must collapse → 2 rows, got {}",
+            rows.len()
         );
     }
 }

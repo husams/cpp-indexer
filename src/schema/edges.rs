@@ -347,6 +347,34 @@ pub struct EdgeRecord {
     pub inherits_is_virtual: Option<bool>,
 }
 
+impl Default for EdgeRecord {
+    /// Zero-value base for struct-update construction (`..Default::default()`).
+    ///
+    /// Callers MUST explicitly set `src_usr`, `kind`, `repo_name`, and any
+    /// fields that differ from the zero-values listed here.
+    fn default() -> Self {
+        Self {
+            src_usr: String::new(),
+            dst_usr: None,
+            dst_placeholder: None,
+            kind: EdgeKind::Contains,
+            resolved: false,
+            cross_repo_candidate: false,
+            repo_name: String::new(),
+            attrs_json: "{}".to_owned(),
+            tu_hash: [0u8; 32],
+            source_association_type: None,
+            target_association_type: None,
+            src_id: 0,
+            dst_id: None,
+            dst_repo_name: String::new(),
+            access: None,
+            edge_index: None,
+            inherits_is_virtual: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

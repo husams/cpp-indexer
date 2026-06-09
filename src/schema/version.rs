@@ -94,18 +94,6 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     (y, m, d)
 }
 
-/// Verify at test-time that the tag string is consistent with the integer constant.
-///
-/// This fires only in debug/test builds; not a runtime overhead.
-#[allow(dead_code)]
-fn assert_version_tag_consistent() {
-    debug_assert_eq!(
-        SCHEMA_VERSION_TAG,
-        &format!("cxg-schema-v{SCHEMA_VERSION}"),
-        "SCHEMA_VERSION_TAG is out of sync with SCHEMA_VERSION — update both together"
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

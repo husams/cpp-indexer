@@ -398,6 +398,60 @@ pub struct NodeRecord {
     pub enum_value: Option<i64>,
 }
 
+impl Default for NodeRecord {
+    /// Zero-value base for struct-update construction (`..Default::default()`).
+    ///
+    /// Callers MUST explicitly set `usr`, `kind`, `name`, `qualified_name`,
+    /// `file_path`, `repo_name`, and any non-None optional fields that are
+    /// meaningful for the node being constructed.
+    fn default() -> Self {
+        Self {
+            usr: String::new(),
+            kind: NodeKind::Function,
+            name: String::new(),
+            qualified_name: String::new(),
+            mangled_name: None,
+            file_path: String::new(),
+            line: None,
+            col: None,
+            repo_name: String::new(),
+            attrs_json: "{}".to_owned(),
+            partial: false,
+            phase: 1,
+            tu_hash: [0u8; 32],
+            return_type: None,
+            params: None,
+            signature: None,
+            code: None,
+            code_truncated: None,
+            template_params: None,
+            template_args: None,
+            is_virtual: None,
+            is_pure_virtual: None,
+            is_static: None,
+            symbol_id: 0,
+            file_id: 0,
+            is_const: None,
+            is_constexpr: None,
+            storage_class: None,
+            is_template: None,
+            is_noexcept: None,
+            is_override: None,
+            is_deleted: None,
+            is_defaulted: None,
+            cv_qualifiers: None,
+            ref_qualifier: None,
+            is_final: None,
+            is_abstract: None,
+            record_kind: None,
+            type_spelling: None,
+            param_index: None,
+            param_kind: None,
+            enum_value: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

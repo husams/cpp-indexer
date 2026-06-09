@@ -107,12 +107,16 @@ impl StageWriter {
         sw.writer
             .write(&batch)
             .map_err(|e| Error::Schema(format!("node ArrowWriter::write: {e}")))?;
-        // Estimate bytes written from the writer's in-progress byte count.
-        sw.bytes_written = sw
+        // `bytes_written()` counts only flushed (closed) row groups and stays ~0
+        // until the first row-group flush.  Add `in_progress_size()` so the
+        // rotation check accounts for buffered-but-not-yet-flushed data.
+        let flushed: u64 = sw
             .writer
             .bytes_written()
             .try_into()
             .unwrap_or(sw.bytes_written);
+        let in_progress: u64 = sw.writer.in_progress_size().try_into().unwrap_or(0);
+        sw.bytes_written = flushed.saturating_add(in_progress);
 
         if sw.bytes_written >= SHARD_ROTATE_BYTES {
             self.rotate_node_writer()?;
@@ -139,11 +143,15 @@ impl StageWriter {
         sw.writer
             .write(&batch)
             .map_err(|e| Error::Schema(format!("edge ArrowWriter::write: {e}")))?;
-        sw.bytes_written = sw
+        // Same logic as for nodes: combine flushed + buffered bytes so rotation
+        // fires before the in-progress buffer also exceeds the threshold.
+        let flushed: u64 = sw
             .writer
             .bytes_written()
             .try_into()
             .unwrap_or(sw.bytes_written);
+        let in_progress: u64 = sw.writer.in_progress_size().try_into().unwrap_or(0);
+        sw.bytes_written = flushed.saturating_add(in_progress);
 
         if sw.bytes_written >= SHARD_ROTATE_BYTES {
             self.rotate_edge_writer()?;

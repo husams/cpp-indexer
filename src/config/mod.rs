@@ -339,6 +339,107 @@ impl SinkConfig {
     }
 }
 
+/// CLI-level sink parameters shared by all binaries.
+///
+/// Each binary populates this from its own `Cli` struct and passes it to
+/// [`build_sink_config`] together with an optional file-based [`SinkConfig`].
+#[derive(Debug, Default)]
+pub struct SinkCliArgs {
+    /// Backend selector: `"neo4j"` or `"indradb"`. Defaults to `"neo4j"`.
+    pub backend: Option<String>,
+    /// Database URI (Neo4j bolt URI or IndraDB HTTP endpoint).
+    pub db_uri: Option<String>,
+    /// Neo4j username (overrides file config).
+    pub neo4j_user: Option<String>,
+    /// Name of the env-var holding the Neo4j password (overrides file config).
+    pub neo4j_password_env: Option<String>,
+    /// Name of the env-var holding the IndraDB auth token (overrides file config).
+    pub indradb_token_env: Option<String>,
+    /// Batch size override (file config wins when `None`).
+    pub batch_size: Option<usize>,
+    /// Write-buffer byte budget override (file config wins when `None`).
+    pub write_buffer_bytes: Option<usize>,
+}
+
+/// Build a [`SinkConfig`] from CLI args and an optional file-config `[sink]` section.
+///
+/// Precedence: CLI > file-config > hard-coded defaults.
+///
+/// # Errors
+///
+/// Returns an error when the backend name is not `"neo4j"` or `"indradb"`.
+pub fn build_sink_config(
+    cli: &SinkCliArgs,
+    file_sink: Option<&SinkConfig>,
+) -> anyhow::Result<SinkConfig> {
+    let backend = cli
+        .backend
+        .clone()
+        .or_else(|| file_sink.map(|s| s.backend.clone()))
+        .unwrap_or_else(|| "neo4j".to_owned());
+
+    let batch_size = cli
+        .batch_size
+        .or_else(|| file_sink.and_then(|s| s.batch_size));
+    let write_buffer_bytes = cli
+        .write_buffer_bytes
+        .or_else(|| file_sink.and_then(|s| s.write_buffer_bytes));
+
+    match backend.as_str() {
+        "neo4j" => {
+            let file_neo4j = file_sink.and_then(|s| s.neo4j.as_ref());
+            let uri = cli
+                .db_uri
+                .clone()
+                .or_else(|| file_neo4j.map(|c| c.uri.clone()))
+                .unwrap_or_else(|| "bolt://localhost:7687".to_owned());
+            Ok(SinkConfig {
+                backend: "neo4j".to_owned(),
+                batch_size,
+                write_buffer_bytes,
+                neo4j: Some(Neo4jSinkConfig {
+                    uri,
+                    user: cli
+                        .neo4j_user
+                        .clone()
+                        .or_else(|| file_neo4j.map(|c| c.user.clone()))
+                        .unwrap_or_else(|| "neo4j".to_owned()),
+                    password_env: cli
+                        .neo4j_password_env
+                        .clone()
+                        .or_else(|| file_neo4j.map(|c| c.password_env.clone()))
+                        .unwrap_or_else(|| "NEO4J_PASSWORD".to_owned()),
+                    sessions: file_neo4j.and_then(|c| c.sessions),
+                }),
+                indradb: None,
+            })
+        }
+        "indradb" => {
+            let file_indradb = file_sink.and_then(|s| s.indradb.as_ref());
+            let uri = cli
+                .db_uri
+                .clone()
+                .or_else(|| file_indradb.map(|c| c.endpoint.clone()))
+                .unwrap_or_else(|| "http://localhost:27615".to_owned());
+            Ok(SinkConfig {
+                backend: "indradb".to_owned(),
+                batch_size,
+                write_buffer_bytes,
+                neo4j: None,
+                indradb: Some(IndraDbSinkConfig {
+                    endpoint: uri,
+                    token_env: cli
+                        .indradb_token_env
+                        .clone()
+                        .or_else(|| file_indradb.and_then(|c| c.token_env.clone())),
+                    sessions: file_indradb.and_then(|c| c.sessions),
+                }),
+            })
+        }
+        other => anyhow::bail!("unknown backend `{other}`; expected \"neo4j\" or \"indradb\""),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSinkConfig {

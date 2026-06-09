@@ -25,12 +25,10 @@ pub mod parallel;
 pub mod progress;
 
 use std::collections::HashSet;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tracing::{info, warn};
 
 use crate::bootstrap::{compile_commands, repo_meta, TuEntry};
@@ -42,6 +40,7 @@ use crate::schema::version::{schema_version_attrs, SCHEMA_VERSION_TAG};
 use crate::schema::{EdgeRecord, NodeRecord};
 use crate::sink::GraphSink;
 use crate::stage::manifest::{Manifest, ManifestEntry};
+use crate::stage::schema::{collect_shards, open_shard_reader, MissingDirPolicy};
 use crate::visit::decorate;
 use crate::{Error, Result};
 
@@ -465,48 +464,17 @@ fn build_repo_node(
         kind: NodeKind::Repo,
         name: meta.name.clone(),
         qualified_name: meta.name.clone(),
-        mangled_name: None,
         file_path: meta.root_path.to_string_lossy().into_owned(),
-        line: None,
-        col: None,
         repo_name: meta.name.clone(),
         attrs_json: attrs.to_string(),
-        partial: false,
         phase: 0,
-        tu_hash: [0u8; 32],
-        return_type: None,
-        params: None,
-        signature: None,
-        code: None,
-        code_truncated: None,
-        template_params: None,
-        template_args: None,
-        is_virtual: None,
-        is_pure_virtual: None,
-        is_static: None,
         symbol_id: allocator
             .and_then(|a| a.get_or_insert_symbol(&repo_usr).ok())
             .unwrap_or(0),
         file_id: allocator
             .and_then(|a| a.get_or_insert_file(&meta.root_path.to_string_lossy()).ok())
             .unwrap_or(0),
-        is_const: None,
-        is_constexpr: None,
-        storage_class: None,
-        is_template: None,
-        is_noexcept: None,
-        is_override: None,
-        is_deleted: None,
-        is_defaulted: None,
-        cv_qualifiers: None,
-        ref_qualifier: None,
-        is_final: None,
-        is_abstract: None,
-        record_kind: None,
-        type_spelling: None,
-        param_index: None,
-        param_kind: None,
-        enum_value: None,
+        ..Default::default()
     })
 }
 
@@ -515,15 +483,9 @@ fn belongs_to_repo_edge(node: &NodeRecord, repo: &NodeRecord) -> EdgeRecord {
     EdgeRecord {
         src_usr: node.usr.clone(),
         dst_usr: Some(repo.usr.clone()),
-        dst_placeholder: None,
         kind: EdgeKind::BelongsToRepo,
         resolved: true,
-        cross_repo_candidate: false,
         repo_name: repo.repo_name.clone(),
-        attrs_json: "{}".to_owned(),
-        tu_hash: [0u8; 32],
-        source_association_type: None,
-        target_association_type: None,
         src_id: node.symbol_id,
         dst_id: if repo.symbol_id > 0 {
             Some(repo.symbol_id)
@@ -531,9 +493,7 @@ fn belongs_to_repo_edge(node: &NodeRecord, repo: &NodeRecord) -> EdgeRecord {
             None
         },
         dst_repo_name: repo.repo_name.clone(),
-        access: None,
-        edge_index: None,
-        inherits_is_virtual: None,
+        ..Default::default()
     }
 }
 
@@ -572,11 +532,7 @@ fn build_node_winner_index(stage_dir: &Path) -> Result<std::collections::HashMap
     let mut winner: HashMap<i64, u8> = HashMap::new();
 
     let mut record_winners = |path: &Path| -> Result<()> {
-        let file = File::open(path)?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(|e| Error::Schema(format!("open node shard {}: {e}", path.display())))?
-            .build()
-            .map_err(|e| Error::Schema(format!("build reader for {}: {e}", path.display())))?;
+        let reader = open_shard_reader(path, false)?;
         for batch_result in reader {
             let batch = batch_result.map_err(|e| Error::Schema(format!("read node batch: {e}")))?;
             // Read full records but keep only (symbol_id, phase); the batch is
@@ -595,7 +551,7 @@ fn build_node_winner_index(stage_dir: &Path) -> Result<std::collections::HashMap
         Ok(())
     };
 
-    for shard_path in collect_shards(stage_dir, "nodes")? {
+    for shard_path in collect_shards(stage_dir, "nodes", MissingDirPolicy::EmptyOnMissing)? {
         record_winners(&shard_path)?;
     }
     for shard_path in collect_phase2_shards(stage_dir)? {
@@ -642,19 +598,13 @@ async fn write_graph_streaming(
     }
 
     // ── Pass 2: stream nodes, emit inline BELONGS_TO_REPO edges ──
-    let node_shards = collect_shards(stage_dir, "nodes")?
+    let node_shards = collect_shards(stage_dir, "nodes", MissingDirPolicy::EmptyOnMissing)?
         .into_iter()
         .chain(collect_phase2_shards(stage_dir)?)
         .collect::<Vec<_>>();
 
     for shard_path in node_shards {
-        let file = File::open(&shard_path)?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(|e| Error::Schema(format!("open node shard {}: {e}", shard_path.display())))?
-            .build()
-            .map_err(|e| {
-                Error::Schema(format!("build reader for {}: {e}", shard_path.display()))
-            })?;
+        let reader = open_shard_reader(&shard_path, false)?;
         for batch_result in reader {
             let batch = batch_result.map_err(|e| Error::Schema(format!("read node batch: {e}")))?;
             for record in record_batch_to_nodes(&batch) {
@@ -697,11 +647,7 @@ async fn write_graph_streaming(
     // Already deduped in Phase 3; the sink drops unresolved rows at write time.
     let final_path = stage_dir.join("final-edges.parquet");
     if final_path.exists() {
-        let file = File::open(&final_path)?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(|e| Error::Schema(format!("open final-edges: {e}")))?
-            .build()
-            .map_err(|e| Error::Schema(format!("build reader for final-edges: {e}")))?;
+        let reader = open_shard_reader(&final_path, false)?;
         for batch_result in reader {
             let batch = batch_result.map_err(|e| Error::Schema(format!("read edge batch: {e}")))?;
             for edge in record_batch_to_edges(&batch) {
@@ -895,32 +841,6 @@ fn collect_phase2_shards(stage_dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// Collect shard paths for `prefix` (`"nodes"` or `"edges"`) from `worker-*/` dirs.
-fn collect_shards(stage_dir: &Path, prefix: &str) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    if !stage_dir.exists() {
-        return Ok(paths);
-    }
-    for entry in std::fs::read_dir(stage_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !path.is_dir() || !name.starts_with("worker-") {
-            continue;
-        }
-        for shard in std::fs::read_dir(&path)? {
-            let shard = shard?;
-            let sp = shard.path();
-            let sn = sp.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if sn.starts_with(prefix) && sn.ends_with(".parquet") {
-                paths.push(sp);
-            }
-        }
-    }
-    paths.sort();
-    Ok(paths)
-}
-
 // ---------------------------------------------------------------------------
 // Pipeline statistics
 // ---------------------------------------------------------------------------
@@ -1068,7 +988,6 @@ mod tests {
             kind: NodeKind::Function,
             name: format!("sym{symbol_id}"),
             qualified_name: format!("ns::sym{symbol_id}"),
-            mangled_name: None,
             file_path: "/repo/src/f.cpp".to_owned(),
             line: Some(1),
             col: Some(1),
@@ -1079,38 +998,11 @@ mod tests {
                 "{}"
             }
             .to_owned(),
-            partial: false,
             phase,
-            tu_hash: [0u8; 32],
-            return_type: None,
-            params: None,
-            signature: None,
             code,
-            code_truncated: None,
-            template_params: None,
-            template_args: None,
-            is_virtual: None,
-            is_pure_virtual: None,
-            is_static: None,
             symbol_id,
             file_id: symbol_id,
-            is_const: None,
-            is_constexpr: None,
-            storage_class: None,
-            is_template: None,
-            is_noexcept: None,
-            is_override: None,
-            is_deleted: None,
-            is_defaulted: None,
-            cv_qualifiers: None,
-            ref_qualifier: None,
-            is_final: None,
-            is_abstract: None,
-            record_kind: None,
-            type_spelling: None,
-            param_index: None,
-            param_kind: None,
-            enum_value: None,
+            ..Default::default()
         }
     }
 
@@ -1119,7 +1011,7 @@ mod tests {
         let schema = std::sync::Arc::new(crate::schema::arrow::node_schema());
         let batch = nodes_to_record_batch(records).expect("nodes_to_record_batch");
         let path = stage_dir.join("phase2-nodes-0.parquet");
-        let file = File::create(&path).unwrap();
+        let file = std::fs::File::create(&path).unwrap();
         let mut writer =
             parquet::arrow::ArrowWriter::try_new(file, schema, Some(writer_properties())).unwrap();
         writer.write(&batch).unwrap();

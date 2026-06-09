@@ -27,6 +27,7 @@ use anyhow::Context as _;
 use clap::Parser;
 use tracing::info;
 
+use cpp_indexer::config::{build_sink_config, SinkCliArgs};
 use cpp_indexer::resolve::cross_repo::{run as phase5_run, Phase5Options};
 use cpp_indexer::sink::factory;
 
@@ -80,13 +81,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    cpp_indexer::observability::init_tracing();
 
     let cli = Cli::parse();
 
@@ -98,7 +93,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Build sink config from CLI flags.
-    let sink_config = build_sink_config(&cli)?;
+    let sink_cli = SinkCliArgs {
+        backend: Some(cli.backend.clone()),
+        db_uri: cli.db_uri.clone(),
+        neo4j_user: Some(cli.neo4j_user.clone()),
+        neo4j_password_env: Some(cli.neo4j_password_env.clone()),
+        indradb_token_env: cli.indradb_token_env.clone(),
+        batch_size: None,
+        write_buffer_bytes: None,
+    };
+    let sink_config = build_sink_config(&sink_cli, None)?;
     let sink = factory::create(&sink_config)
         .await
         .with_context(|| format!("failed to connect to {} sink", cli.backend))?;
@@ -123,51 +127,4 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("cxg-resolve-cross-repo: done — {stats}");
 
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn build_sink_config(cli: &Cli) -> anyhow::Result<cpp_indexer::config::SinkConfig> {
-    use cpp_indexer::config::{IndraDbSinkConfig, Neo4jSinkConfig, SinkConfig};
-
-    match cli.backend.as_str() {
-        "neo4j" => {
-            let uri = cli
-                .db_uri
-                .clone()
-                .unwrap_or_else(|| "bolt://localhost:7687".to_owned());
-            Ok(SinkConfig {
-                backend: "neo4j".to_owned(),
-                batch_size: None,
-                write_buffer_bytes: None,
-                neo4j: Some(Neo4jSinkConfig {
-                    uri,
-                    user: cli.neo4j_user.clone(),
-                    password_env: cli.neo4j_password_env.clone(),
-                    sessions: None,
-                }),
-                indradb: None,
-            })
-        }
-        "indradb" => {
-            let uri = cli
-                .db_uri
-                .clone()
-                .unwrap_or_else(|| "http://localhost:27615".to_owned());
-            Ok(SinkConfig {
-                backend: "indradb".to_owned(),
-                batch_size: None,
-                write_buffer_bytes: None,
-                neo4j: None,
-                indradb: Some(IndraDbSinkConfig {
-                    endpoint: uri,
-                    token_env: cli.indradb_token_env.clone(),
-                    sessions: None,
-                }),
-            })
-        }
-        other => anyhow::bail!("unknown backend `{other}`; expected \"neo4j\" or \"indradb\""),
-    }
 }

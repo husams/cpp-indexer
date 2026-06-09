@@ -14,7 +14,7 @@ use anyhow::Context as _;
 use clap::Parser;
 use tracing::info;
 
-use cpp_indexer::config::Config;
+use cpp_indexer::config::{build_sink_config, Config, SinkCliArgs};
 use cpp_indexer::pipeline::{run, RunOptions};
 use cpp_indexer::sink::factory;
 use cpp_indexer::visit::modules_cpp20;
@@ -188,14 +188,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<ExitCode> {
-    // Initialise tracing with RUST_LOG env filter; default to INFO.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    cpp_indexer::observability::init_tracing();
 
     let cli = Cli::parse();
 
@@ -226,7 +219,16 @@ async fn main() -> anyhow::Result<ExitCode> {
     cpp_indexer::mem::glibc::set_arena_max(malloc_arena_max);
 
     // Build a SinkConfig from config + CLI flags before moving fields out of cli.
-    let sink_config = build_sink_config(&cli, file_config.as_ref())?;
+    let sink_cli = SinkCliArgs {
+        backend: cli.backend.clone(),
+        db_uri: cli.db_uri.clone(),
+        neo4j_user: cli.neo4j_user.clone(),
+        neo4j_password_env: cli.neo4j_password_env.clone(),
+        indradb_token_env: cli.indradb_token_env.clone(),
+        batch_size: None,
+        write_buffer_bytes: None,
+    };
+    let sink_config = build_sink_config(&sink_cli, file_config.as_ref().map(|c| &c.sink))?;
     let backend_name_hint = sink_config.backend.clone();
 
     let input_path = cli
@@ -368,75 +370,6 @@ fn load_config(path: Option<&PathBuf>) -> anyhow::Result<Option<Config>> {
         .validate()
         .with_context(|| format!("validating config file `{}`", path.display()))?;
     Ok(Some(config))
-}
-
-fn build_sink_config(
-    cli: &Cli,
-    file_config: Option<&Config>,
-) -> anyhow::Result<cpp_indexer::config::SinkConfig> {
-    use cpp_indexer::config::{IndraDbSinkConfig, Neo4jSinkConfig, SinkConfig};
-
-    let backend = cli
-        .backend
-        .clone()
-        .or_else(|| file_config.map(|cfg| cfg.sink.backend.clone()))
-        .unwrap_or_else(|| "neo4j".to_owned());
-    let batch_size = file_config.and_then(|cfg| cfg.sink.batch_size);
-    let write_buffer_bytes = file_config.and_then(|cfg| cfg.sink.write_buffer_bytes);
-
-    match backend.as_str() {
-        "neo4j" => {
-            let configured = file_config.and_then(|cfg| cfg.sink.neo4j.as_ref());
-            let uri = cli
-                .db_uri
-                .clone()
-                .or_else(|| configured.map(|cfg| cfg.uri.clone()))
-                .unwrap_or_else(|| "bolt://localhost:7687".to_owned());
-            Ok(SinkConfig {
-                backend: "neo4j".to_owned(),
-                batch_size,
-                write_buffer_bytes,
-                neo4j: Some(Neo4jSinkConfig {
-                    uri,
-                    user: cli
-                        .neo4j_user
-                        .clone()
-                        .or_else(|| configured.map(|cfg| cfg.user.clone()))
-                        .unwrap_or_else(|| "neo4j".to_owned()),
-                    password_env: cli
-                        .neo4j_password_env
-                        .clone()
-                        .or_else(|| configured.map(|cfg| cfg.password_env.clone()))
-                        .unwrap_or_else(|| "NEO4J_PASSWORD".to_owned()),
-                    sessions: configured.and_then(|cfg| cfg.sessions),
-                }),
-                indradb: None,
-            })
-        }
-        "indradb" => {
-            let configured = file_config.and_then(|cfg| cfg.sink.indradb.as_ref());
-            let uri = cli
-                .db_uri
-                .clone()
-                .or_else(|| configured.map(|cfg| cfg.endpoint.clone()))
-                .unwrap_or_else(|| "http://localhost:27615".to_owned());
-            Ok(SinkConfig {
-                backend: "indradb".to_owned(),
-                batch_size,
-                write_buffer_bytes,
-                neo4j: None,
-                indradb: Some(IndraDbSinkConfig {
-                    endpoint: uri,
-                    token_env: cli
-                        .indradb_token_env
-                        .clone()
-                        .or_else(|| configured.and_then(|cfg| cfg.token_env.clone())),
-                    sessions: configured.and_then(|cfg| cfg.sessions),
-                }),
-            })
-        }
-        other => anyhow::bail!("unknown backend `{other}`; expected \"neo4j\" or \"indradb\""),
-    }
 }
 
 #[cfg(test)]
@@ -601,11 +534,24 @@ mod tests {
         );
     }
 
+    fn cli_to_sink_args(cli: &Cli) -> SinkCliArgs {
+        SinkCliArgs {
+            backend: cli.backend.clone(),
+            db_uri: cli.db_uri.clone(),
+            neo4j_user: cli.neo4j_user.clone(),
+            neo4j_password_env: cli.neo4j_password_env.clone(),
+            indradb_token_env: cli.indradb_token_env.clone(),
+            batch_size: None,
+            write_buffer_bytes: None,
+        }
+    }
+
     #[test]
     fn config_file_values_feed_sink_config() {
         let text = std::fs::read_to_string("tests/fixtures/config/cxg-index-golden.toml").unwrap();
         let config = Config::parse(&text).unwrap();
-        let sink = build_sink_config(&cli_defaults(), Some(&config)).unwrap();
+        let sink =
+            build_sink_config(&cli_to_sink_args(&cli_defaults()), Some(&config.sink)).unwrap();
         let neo4j = sink.neo4j.unwrap();
         assert_eq!(sink.backend, "neo4j");
         assert_eq!(neo4j.uri, "bolt://localhost:7687");
@@ -623,7 +569,7 @@ mod tests {
         cli.neo4j_user = Some("override-user".to_owned());
         cli.neo4j_password_env = Some("OVERRIDE_PASSWORD".to_owned());
 
-        let sink = build_sink_config(&cli, Some(&config)).unwrap();
+        let sink = build_sink_config(&cli_to_sink_args(&cli), Some(&config.sink)).unwrap();
         let neo4j = sink.neo4j.unwrap();
         assert_eq!(neo4j.uri, "bolt://override:7687");
         assert_eq!(neo4j.user, "override-user");

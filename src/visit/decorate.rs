@@ -29,14 +29,15 @@ use std::fs::File;
 use std::path::Path;
 
 use clang::{Clang, EntityKind, Index};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 use tracing::{debug, info};
 
 use crate::bootstrap::TuEntry;
 use crate::schema::arrow::{node_schema, nodes_to_record_batch, record_batch_to_nodes};
 use crate::schema::nodes::{NodeKind, NodeRecord};
+use crate::stage::schema::{
+    collect_shards, open_shard_reader, writer_properties, MissingDirPolicy,
+};
 use crate::{Error, Result};
 
 // ---------------------------------------------------------------------------
@@ -163,38 +164,14 @@ impl DecorAttrs {
 fn load_function_nodes(stage_dir: &Path) -> Result<HashMap<String, NodeRecord>> {
     let mut map = HashMap::new();
 
-    if !stage_dir.exists() {
-        return Ok(map);
-    }
-
-    for entry in std::fs::read_dir(stage_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !path.is_dir() || !name.starts_with("worker-") {
-            continue;
-        }
-        for shard in std::fs::read_dir(&path)? {
-            let shard = shard?;
-            let sp = shard.path();
-            let sn = sp.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !sn.starts_with("nodes") || !sn.ends_with(".parquet") {
-                continue;
-            }
-            let file = File::open(&sp)?;
-            let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-                .map_err(|e| Error::Schema(format!("phase2: open shard {}: {e}", sp.display())))?
-                .build()
-                .map_err(|e| {
-                    Error::Schema(format!("phase2: build reader {}: {e}", sp.display()))
-                })?;
-            for batch_result in reader {
-                let batch =
-                    batch_result.map_err(|e| Error::Schema(format!("phase2: read batch: {e}")))?;
-                for node in record_batch_to_nodes(&batch) {
-                    if matches!(node.kind, NodeKind::Function | NodeKind::Method) {
-                        map.insert(node.usr.clone(), node);
-                    }
+    for shard_path in collect_shards(stage_dir, "nodes", MissingDirPolicy::EmptyOnMissing)? {
+        let reader = open_shard_reader(&shard_path, false)?;
+        for batch_result in reader {
+            let batch =
+                batch_result.map_err(|e| Error::Schema(format!("phase2: read batch: {e}")))?;
+            for node in record_batch_to_nodes(&batch) {
+                if matches!(node.kind, NodeKind::Function | NodeKind::Method) {
+                    map.insert(node.usr.clone(), node);
                 }
             }
         }
@@ -369,7 +346,11 @@ fn write_phase2_shard(stage_dir: &Path, records: &[NodeRecord]) -> Result<()> {
     let file = File::create(&shard_path)?;
 
     let schema = std::sync::Arc::new(node_schema());
-    let props = WriterProperties::builder().build();
+    // Use the shared writer_properties() so Phase 2 shards carry the same
+    // snappy compression, cxg_parquet_v1 KV magic, and row-group size cap as
+    // Phase 1 shards.  Previously this used a bare WriterProperties::builder()
+    // which produced shards without the magic header and without compression.
+    let props = writer_properties();
     let mut writer = ArrowWriter::try_new(file, schema, Some(props))
         .map_err(|e| Error::Schema(format!("phase2: create parquet writer: {e}")))?;
 
@@ -398,6 +379,79 @@ fn write_phase2_shard(stage_dir: &Path, records: &[NodeRecord]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase 2 shards must carry the cxg_parquet_v1 KV magic (fix for bare
+    /// WriterProperties::builder() in write_phase2_shard).
+    #[test]
+    fn phase2_shard_carries_cxg_magic() {
+        use crate::stage::schema::has_magic;
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+        use std::fs::File;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let stage_dir = dir.path();
+
+        let records = vec![NodeRecord {
+            usr: "c:@F@foo".to_owned(),
+            kind: NodeKind::Function,
+            name: "foo".to_owned(),
+            qualified_name: "foo".to_owned(),
+            mangled_name: None,
+            file_path: "/tmp/foo.cpp".to_owned(),
+            line: Some(1),
+            col: Some(1),
+            repo_name: "test".to_owned(),
+            attrs_json: "{}".to_owned(),
+            partial: false,
+            phase: 2,
+            tu_hash: [0u8; 32],
+            return_type: None,
+            params: None,
+            signature: None,
+            code: None,
+            code_truncated: None,
+            template_params: None,
+            template_args: None,
+            is_virtual: None,
+            is_pure_virtual: None,
+            is_static: None,
+            symbol_id: 1,
+            file_id: 1,
+            is_const: None,
+            is_constexpr: None,
+            storage_class: None,
+            is_template: None,
+            is_noexcept: None,
+            is_override: None,
+            is_deleted: None,
+            is_defaulted: None,
+            cv_qualifiers: None,
+            ref_qualifier: None,
+            is_final: None,
+            is_abstract: None,
+            record_kind: None,
+            type_spelling: None,
+            param_index: None,
+            param_kind: None,
+            enum_value: None,
+        }];
+
+        write_phase2_shard(stage_dir, &records).expect("write_phase2_shard must succeed");
+
+        let shard_path = stage_dir.join("phase2-nodes-0.parquet");
+        assert!(
+            shard_path.exists(),
+            "phase2-nodes-0.parquet must be created"
+        );
+
+        let file = File::open(&shard_path).unwrap();
+        let reader = SerializedFileReader::new(file).unwrap();
+        let meta = reader.metadata().file_metadata().clone();
+        assert!(
+            has_magic(&meta),
+            "Phase 2 shard must carry cxg_parquet_v1 KV magic"
+        );
+    }
 
     #[test]
     fn skip_phase2_returns_zero_immediately() {

@@ -39,11 +39,10 @@
 //! indexing repo.  Override rules can be passed via `Phase5Options::canonical_overrides`.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use parquet::file::reader::SerializedFileReader;
 use tracing::{info, warn};
 
 use crate::error::{Error, Result};
@@ -54,6 +53,7 @@ use crate::schema::{
     EdgeKind, EdgeRecord, NodeKind,
 };
 use crate::sink::GraphSink;
+use crate::stage::schema::{collect_shards, open_shard_reader, MissingDirPolicy};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -178,24 +178,18 @@ async fn do_phase5(sink: &Arc<dyn GraphSink>, opts: &Phase5Options) -> Result<Ph
 // ── 2. Schema-version check ────────────────────────────────────────────────────
 
 pub async fn check_schema_version(sink: &Arc<dyn GraphSink>) -> Result<()> {
-    match sink.read_schema_version().await? {
-        None => {
-            // No SchemaVersion node yet (fresh DB or not yet written by Phase 4) → OK.
-            info!("phase5: no SchemaVersion node found; skipping version check");
-            Ok(())
-        }
-        Some(actual) => {
-            if actual != SCHEMA_VERSION_TAG {
-                Err(Error::Schema(format!(
-                    "schema version mismatch: binary expects '{SCHEMA_VERSION_TAG}', \
-                     DB reports '{actual}'; re-index with a matching binary"
-                )))
-            } else {
-                info!("phase5: schema version OK ({actual})");
-                Ok(())
-            }
-        }
-    }
+    check_schema_version_inner(
+        sink,
+        "phase5: no SchemaVersion node found; skipping version check",
+        "phase5: schema version OK",
+        |actual| {
+            Error::Schema(format!(
+                "schema version mismatch: binary expects '{SCHEMA_VERSION_TAG}', \
+                 DB reports '{actual}'; re-index with a matching binary"
+            ))
+        },
+    )
+    .await
 }
 
 /// Write-path schema-version gate (ADR-4, adr-2, S6-SC-01/02).
@@ -210,23 +204,44 @@ pub async fn check_schema_version(sink: &Arc<dyn GraphSink>) -> Result<()> {
 /// graph both proceed without error.  Auto-migration is explicitly NOT performed
 /// (ADR-4 decision pt 1).
 pub async fn check_schema_version_for_write(sink: &Arc<dyn GraphSink>) -> Result<()> {
+    check_schema_version_inner(
+        sink,
+        "write-path: no existing SchemaVersion node; proceeding",
+        "write-path: schema version OK",
+        |actual| {
+            Error::Schema(format!(
+                "write refused: existing graph has schema tag '{actual}' but this binary \
+                 writes '{SCHEMA_VERSION_TAG}'. To upgrade: (1) stop all writers, \
+                 (2) run `POST /v1/reset` (or `sink.reset(ResetTarget::All)`), \
+                 (3) re-index all repos with this binary. \
+                 Auto-migration is not supported (ADR-4)."
+            ))
+        },
+    )
+    .await
+}
+
+/// Shared implementation for both schema-version gates.
+///
+/// Reads the schema version from the sink and compares it against
+/// `SCHEMA_VERSION_TAG`.  On mismatch, the `make_err` closure is called to
+/// build a context-appropriate error message.
+async fn check_schema_version_inner(
+    sink: &Arc<dyn GraphSink>,
+    none_msg: &str,
+    ok_msg: &str,
+    make_err: impl Fn(&str) -> Error,
+) -> Result<()> {
     match sink.read_schema_version().await? {
         None => {
-            // Fresh DB or graph was reset — no stale version to block the write.
-            info!("write-path: no existing SchemaVersion node; proceeding");
+            info!("{none_msg}");
             Ok(())
         }
         Some(actual) => {
             if actual != SCHEMA_VERSION_TAG {
-                Err(Error::Schema(format!(
-                    "write refused: existing graph has schema tag '{actual}' but this binary \
-                     writes '{SCHEMA_VERSION_TAG}'. To upgrade: (1) stop all writers, \
-                     (2) run `POST /v1/reset` (or `sink.reset(ResetTarget::All)`), \
-                     (3) re-index all repos with this binary. \
-                     Auto-migration is not supported (ADR-4)."
-                )))
+                Err(make_err(&actual))
             } else {
-                info!("write-path: schema version OK ({actual})");
+                info!("{ok_msg} ({actual})");
                 Ok(())
             }
         }
@@ -241,22 +256,9 @@ fn detect_repo_backends(stage_dirs: &[PathBuf]) -> Result<Vec<String>> {
     let mut backends: Vec<String> = Vec::new();
 
     for stage_dir in stage_dirs {
-        let node_shards = collect_shards(stage_dir, "nodes")?;
+        let node_shards = collect_shards(stage_dir, "nodes", MissingDirPolicy::EmptyOnMissing)?;
         for shard_path in &node_shards {
-            let file = std::fs::File::open(shard_path)?;
-            let reader = SerializedFileReader::new(file)
-                .map_err(|e| Error::Schema(format!("Parquet open: {e}")))?;
-
-            let arrow_reader =
-                parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-                    std::fs::File::open(shard_path)?,
-                )
-                .map_err(|e| Error::Schema(format!("build reader: {e}")))?
-                .build()
-                .map_err(|e| Error::Schema(format!("build batch reader: {e}")))?;
-
-            drop(reader);
-
+            let arrow_reader = open_shard_reader(shard_path, false)?;
             for batch_result in arrow_reader {
                 let batch =
                     batch_result.map_err(|e| Error::Schema(format!("record batch read: {e}")))?;
@@ -314,16 +316,9 @@ fn build_global_usr_map(
     let mut map: HashMap<String, UsrEntry> = HashMap::new();
 
     for stage_dir in stage_dirs {
-        let node_shards = collect_shards(stage_dir, "nodes")?;
+        let node_shards = collect_shards(stage_dir, "nodes", MissingDirPolicy::EmptyOnMissing)?;
         for shard_path in &node_shards {
-            let arrow_reader =
-                parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-                    std::fs::File::open(shard_path)?,
-                )
-                .map_err(|e| Error::Schema(format!("build reader: {e}")))?
-                .build()
-                .map_err(|e| Error::Schema(format!("build batch reader: {e}")))?;
-
+            let arrow_reader = open_shard_reader(shard_path, false)?;
             for batch_result in arrow_reader {
                 let batch = batch_result.map_err(|e| Error::Schema(format!("batch read: {e}")))?;
                 let nodes = record_batch_to_nodes(&batch);
@@ -355,23 +350,15 @@ fn build_repo_stage_map(stage_dirs: &[PathBuf]) -> HashMap<String, PathBuf> {
 
     let mut map: HashMap<String, PathBuf> = HashMap::new();
     for stage_dir in stage_dirs {
-        let shards = match collect_shards(stage_dir, "nodes") {
+        let shards = match collect_shards(stage_dir, "nodes", MissingDirPolicy::EmptyOnMissing) {
             Ok(s) => s,
             Err(_) => continue,
         };
         'outer: for shard_path in &shards {
-            let arrow_reader =
-                match parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-                    match std::fs::File::open(shard_path) {
-                        Ok(f) => f,
-                        Err(_) => continue,
-                    },
-                )
-                .and_then(|b| b.build())
-                {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
+            let arrow_reader = match open_shard_reader(shard_path, false) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
             for batch_result in arrow_reader.flatten() {
                 for node in record_batch_to_nodes(&batch_result) {
                     if node.kind == NodeKind::Repo || !node.repo_name.is_empty() {
@@ -416,12 +403,7 @@ async fn materialise_external_refs(
             continue;
         }
 
-        let arrow_reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            std::fs::File::open(&final_edges_path)?,
-        )
-        .map_err(|e| Error::Schema(format!("build reader: {e}")))?
-        .build()
-        .map_err(|e| Error::Schema(format!("build batch reader: {e}")))?;
+        let arrow_reader = open_shard_reader(&final_edges_path, false)?;
 
         for batch_result in arrow_reader {
             let batch = batch_result.map_err(|e| Error::Schema(format!("batch read: {e}")))?;
@@ -438,6 +420,30 @@ async fn materialise_external_refs(
                     None => {
                         stats.unresolved += 1;
                         continue;
+                    }
+                };
+
+                // Closure to build an EXTERNAL_REF EdgeRecord for this candidate.
+                // M8: Mirrors USES classification onto EXTERNAL_REF (ADR-13, S43).
+                let make_ref = |src_id: i64,
+                                dst_id: Option<i64>,
+                                dst_repo_name: String,
+                                dst_usr: &str,
+                                via_json: String| {
+                    EdgeRecord {
+                        src_usr: edge.src_usr.clone(),
+                        dst_usr: Some(dst_usr.to_owned()),
+                        kind: EdgeKind::ExternalRef,
+                        resolved: true,
+                        repo_name: edge.repo_name.clone(),
+                        attrs_json: via_json,
+                        tu_hash: edge.tu_hash,
+                        source_association_type: edge.source_association_type.clone(),
+                        target_association_type: edge.target_association_type.clone(),
+                        src_id,
+                        dst_id,
+                        dst_repo_name,
+                        ..Default::default()
                     }
                 };
 
@@ -464,29 +470,13 @@ async fn materialise_external_refs(
                                             // SQLite unavailable for this repo — emit with src_id=0.
                                             let via_json =
                                                 format!(r#"{{"via":"{}"}}"#, edge.kind.as_str());
-                                            pending.push(EdgeRecord {
-                                                src_usr: edge.src_usr.clone(),
-                                                dst_usr: Some(dst_usr.clone()),
-                                                dst_placeholder: None,
-                                                kind: EdgeKind::ExternalRef,
-                                                resolved: true,
-                                                cross_repo_candidate: false,
-                                                repo_name: edge.repo_name.clone(),
-                                                attrs_json: via_json,
-                                                tu_hash: edge.tu_hash,
-                                                source_association_type: edge
-                                                    .source_association_type
-                                                    .clone(),
-                                                target_association_type: edge
-                                                    .target_association_type
-                                                    .clone(),
-                                                src_id: 0,
-                                                dst_id: None,
-                                                dst_repo_name: dst_repo.clone(),
-                                                access: None,
-                                                edge_index: None,
-                                                inherits_is_virtual: None,
-                                            });
+                                            pending.push(make_ref(
+                                                0,
+                                                None,
+                                                dst_repo.clone(),
+                                                dst_usr,
+                                                via_json,
+                                            ));
                                             stats.external_refs_written += 1;
                                             continue;
                                         }
@@ -513,29 +503,13 @@ async fn materialise_external_refs(
                                             // Destination db unavailable — emit with dst_id=None.
                                             let via_json =
                                                 format!(r#"{{"via":"{}"}}"#, edge.kind.as_str());
-                                            pending.push(EdgeRecord {
-                                                src_usr: edge.src_usr.clone(),
-                                                dst_usr: Some(dst_usr.clone()),
-                                                dst_placeholder: None,
-                                                kind: EdgeKind::ExternalRef,
-                                                resolved: true,
-                                                cross_repo_candidate: false,
-                                                repo_name: edge.repo_name.clone(),
-                                                attrs_json: via_json,
-                                                tu_hash: edge.tu_hash,
-                                                source_association_type: edge
-                                                    .source_association_type
-                                                    .clone(),
-                                                target_association_type: edge
-                                                    .target_association_type
-                                                    .clone(),
+                                            pending.push(make_ref(
                                                 src_id,
-                                                dst_id: None,
-                                                dst_repo_name: dst_repo.clone(),
-                                                access: None,
-                                                edge_index: None,
-                                                inherits_is_virtual: None,
-                                            });
+                                                None,
+                                                dst_repo.clone(),
+                                                dst_usr,
+                                                via_json,
+                                            ));
                                             stats.external_refs_written += 1;
                                             continue;
                                         }
@@ -546,26 +520,7 @@ async fn materialise_external_refs(
                         };
 
                         let via_json = format!(r#"{{"via":"{}"}}"#, edge.kind.as_str());
-                        pending.push(EdgeRecord {
-                            src_usr: edge.src_usr.clone(),
-                            dst_usr: Some(dst_usr.clone()),
-                            dst_placeholder: None,
-                            kind: EdgeKind::ExternalRef,
-                            resolved: true,
-                            cross_repo_candidate: false,
-                            repo_name: edge.repo_name.clone(),
-                            attrs_json: via_json,
-                            tu_hash: edge.tu_hash,
-                            // M8: Mirror USES classification onto EXTERNAL_REF (ADR-13, S43).
-                            source_association_type: edge.source_association_type.clone(),
-                            target_association_type: edge.target_association_type.clone(),
-                            src_id,
-                            dst_id,
-                            dst_repo_name: dst_repo,
-                            access: None,
-                            edge_index: None,
-                            inherits_is_virtual: None,
-                        });
+                        pending.push(make_ref(src_id, dst_id, dst_repo, dst_usr, via_json));
                         stats.external_refs_written += 1;
                     }
                     Some(_) => {
@@ -593,46 +548,6 @@ async fn materialise_external_refs(
     Ok(stats)
 }
 
-// ── Shard collection helpers ───────────────────────────────────────────────────
-
-/// Collect `worker-*/nodes-*.parquet` or `worker-*/edges-*.parquet` shards.
-pub(crate) fn collect_shards(stage_dir: &Path, prefix: &str) -> Result<Vec<PathBuf>> {
-    let mut shards = Vec::new();
-
-    if !stage_dir.is_dir() {
-        return Ok(shards);
-    }
-
-    for entry in std::fs::read_dir(stage_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let dir_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        if !dir_name.starts_with("worker-") {
-            continue;
-        }
-        for w_entry in std::fs::read_dir(&path)? {
-            let w_entry = w_entry?;
-            let shard_path = w_entry.path();
-            let file_name = shard_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
-            if file_name.starts_with(prefix) && file_name.ends_with(".parquet") {
-                shards.push(shard_path);
-            }
-        }
-    }
-
-    shards.sort();
-    Ok(shards)
-}
-
 // ── Unit tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -655,7 +570,8 @@ mod tests {
     #[test]
     fn collect_shards_empty_dir_returns_empty() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let result = collect_shards(tmp.path(), "nodes").expect("no error on empty dir");
+        let result = collect_shards(tmp.path(), "nodes", MissingDirPolicy::EmptyOnMissing)
+            .expect("no error on empty dir");
         assert!(result.is_empty());
     }
 
@@ -665,7 +581,8 @@ mod tests {
         let other = tmp.path().join("output");
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("nodes-0.parquet"), b"x").unwrap();
-        let result = collect_shards(tmp.path(), "nodes").expect("no error");
+        let result = collect_shards(tmp.path(), "nodes", MissingDirPolicy::EmptyOnMissing)
+            .expect("no error");
         assert!(result.is_empty(), "non-worker dirs must be ignored");
     }
 
@@ -677,7 +594,8 @@ mod tests {
         std::fs::write(worker.join("nodes-0.parquet"), b"x").unwrap();
         std::fs::write(worker.join("edges-0.parquet"), b"y").unwrap();
         std::fs::write(worker.join("other.txt"), b"z").unwrap();
-        let nodes = collect_shards(tmp.path(), "nodes").expect("ok");
+        let nodes =
+            collect_shards(tmp.path(), "nodes", MissingDirPolicy::EmptyOnMissing).expect("ok");
         assert_eq!(nodes.len(), 1);
         assert!(nodes[0].to_str().unwrap().contains("nodes-0.parquet"));
     }

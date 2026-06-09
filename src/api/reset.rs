@@ -20,7 +20,7 @@
 //! On match, [`GraphSink::reset`] is invoked and the staging cache for the
 //! target repo (or all repos) is cleared.  Returns `204 No Content`.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -109,20 +109,42 @@ fn sha256_hex(s: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Constant-time comparison to resist timing side-channels.
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    // Use byte-level XOR fold; both must be exactly the same length for the
-    // comparison to mean anything.  sha256_hex always returns 64 hex chars,
-    // so a length mismatch is already an early-out (not secret-dependent).
-    let a = a.as_bytes();
-    let b = b.as_bytes();
-    if a.len() != b.len() {
-        return false;
+/// Validate that `name` is a safe, single-component repository name.
+///
+/// Rejects:
+/// - empty strings
+/// - strings containing NUL bytes
+/// - strings that are or contain path separators (`/`, `\`)
+/// - strings that parse to anything other than exactly one
+///   [`Component::Normal`] (blocks `..`, `.`, absolute paths, Windows
+///   device paths, etc.)
+///
+/// Returns `Ok(())` on success or an `Err(Problem)` with a `400` body.
+fn validate_repo_name(name: &str) -> Result<(), Problem> {
+    if name.is_empty() {
+        return Err(Problem::bad_request("`repo_name` must not be empty"));
     }
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
+    // Reject NUL bytes early (std::path may silently truncate them).
+    if name.contains('\0') {
+        return Err(Problem::bad_request(
+            "`repo_name` must not contain NUL bytes",
+        ));
+    }
+    // Reject explicit separators before path parsing (Windows backslash).
+    if name.contains('/') || name.contains('\\') {
+        return Err(Problem::bad_request(
+            "`repo_name` must not contain path separators",
+        ));
+    }
+    // Use std::path to verify exactly one Normal component (blocks `..`, `.`,
+    // absolute roots, Windows prefix components, etc.).
+    let mut components = std::path::Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(()),
+        _ => Err(Problem::bad_request(
+            "`repo_name` must be a plain directory name with no path traversal",
+        )),
+    }
 }
 
 // ── Staging-cache clear ───────────────────────────────────────────────────────
@@ -134,10 +156,27 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 /// re-created.  On `target = Repo(name)`, only `stage_root/<name>/` is removed.
 ///
 /// Errors are logged but do not fail the reset (best-effort cleanup).
+///
+/// # Defense in depth
+///
+/// `name` is re-validated here even though it should have been checked at the
+/// API boundary, so that `clear_staging_cache` is safe to call from any future
+/// code path.  An invalid name logs a warning and returns without touching the
+/// filesystem.
 fn clear_staging_cache(stage_root: &Path, target: &ResetTarget) {
     let path: PathBuf = match target {
         ResetTarget::All => stage_root.to_owned(),
-        ResetTarget::Repo(name) => stage_root.join(name),
+        ResetTarget::Repo(name) => {
+            if let Err(e) = validate_repo_name(name) {
+                tracing::warn!(
+                    repo_name = %name,
+                    error = %e.detail,
+                    "refusing to clear staging cache for unsafe repo_name"
+                );
+                return;
+            }
+            stage_root.join(name)
+        }
     };
 
     if path.exists() {
@@ -179,9 +218,7 @@ where
             let name = body.repo_name.clone().ok_or_else(|| {
                 Problem::bad_request("`repo_name` is required when `target` is \"repo\"")
             })?;
-            if name.is_empty() {
-                return Err(Problem::bad_request("`repo_name` must not be empty"));
-            }
+            validate_repo_name(&name)?;
             let target = ResetTarget::Repo(name.clone());
             (name, target)
         }
@@ -189,7 +226,7 @@ where
 
     // ── Validate confirmation token ───────────────────────────────────────────
     let expected = sha256_hex(&target_name);
-    if !constant_time_eq(&expected, &body.confirm_token) {
+    if !super::auth::constant_time_eq(expected.as_bytes(), body.confirm_token.as_bytes()) {
         return Err(Problem::bad_request(
             "confirm_token does not match sha256(target_name); recompute and retry",
         ));
@@ -245,7 +282,7 @@ mod tests {
         sha256_hex(name)
     }
 
-    // ── sha256_hex / constant_time_eq unit tests ──────────────────────────────
+    // ── sha256_hex unit tests ─────────────────────────────────────────────────
 
     #[test]
     fn sha256_hex_known_vector() {
@@ -256,19 +293,62 @@ mod tests {
         );
     }
 
+    // ── validate_repo_name unit tests ─────────────────────────────────────────
+
     #[test]
-    fn constant_time_eq_same() {
-        assert!(constant_time_eq("abc", "abc"));
+    fn validate_repo_name_accepts_plain_name() {
+        assert!(validate_repo_name("ok-name").is_ok());
+        assert!(validate_repo_name("my_repo").is_ok());
+        assert!(validate_repo_name("repo123").is_ok());
+        assert!(validate_repo_name("CamelCase").is_ok());
     }
 
     #[test]
-    fn constant_time_eq_different() {
-        assert!(!constant_time_eq("abc", "xyz"));
+    fn validate_repo_name_rejects_empty() {
+        let err = validate_repo_name("").unwrap_err();
+        assert_eq!(err.status, 400);
     }
 
     #[test]
-    fn constant_time_eq_length_mismatch() {
-        assert!(!constant_time_eq("ab", "abc"));
+    fn validate_repo_name_rejects_dot_dot() {
+        let err = validate_repo_name("..").unwrap_err();
+        assert_eq!(err.status, 400);
+    }
+
+    #[test]
+    fn validate_repo_name_rejects_dot_dot_slash() {
+        let err = validate_repo_name("../x").unwrap_err();
+        assert_eq!(err.status, 400);
+    }
+
+    #[test]
+    fn validate_repo_name_rejects_single_dot() {
+        let err = validate_repo_name(".").unwrap_err();
+        assert_eq!(err.status, 400);
+    }
+
+    #[test]
+    fn validate_repo_name_rejects_absolute_path() {
+        let err = validate_repo_name("/abs").unwrap_err();
+        assert_eq!(err.status, 400);
+    }
+
+    #[test]
+    fn validate_repo_name_rejects_slash_in_name() {
+        let err = validate_repo_name("a/b").unwrap_err();
+        assert_eq!(err.status, 400);
+    }
+
+    #[test]
+    fn validate_repo_name_rejects_backslash_in_name() {
+        let err = validate_repo_name("a\\b").unwrap_err();
+        assert_eq!(err.status, 400);
+    }
+
+    #[test]
+    fn validate_repo_name_rejects_nul_byte() {
+        let err = validate_repo_name("a\0b").unwrap_err();
+        assert_eq!(err.status, 400);
     }
 
     // ── handle_reset: correct token + target=all ──────────────────────────────
