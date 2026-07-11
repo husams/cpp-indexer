@@ -9,7 +9,7 @@ different compile flags gets separate entries.
 
 KNOWN LIMITATION (M1): only the main file's mtime is tracked.  Editing an
 ``#include``d header does NOT invalidate the cache; the stale AST is served.
-Escape hatches: ``--no-cache`` (one-shot bypass) or ``cidx ast cache clear``
+Escape hatches: ``--no-cache`` (one-shot bypass) or ``cidx cache ast clear``
 (force refresh).  Transitive-include hashing is out of scope for M1.
 
 Circular-import note: this module does NOT import ``cli``.  The two cache
@@ -262,7 +262,7 @@ def _resolve_target_for_cache(args):
 
 
 def cmd_build(args) -> int:
-    """``cidx ast cache build <target>``: force-reparse and write the cache."""
+    """``cidx cache ast build <target>``: force-reparse and write the cache."""
     t, rc = _resolve_target_for_cache(args)
     if t is None:
         return rc
@@ -286,7 +286,7 @@ def cmd_build(args) -> int:
 
 
 def cmd_status(args) -> int:
-    """``cidx ast cache status [target]``: list entries with size + validity."""
+    """``cidx cache ast status [target]``: list entries with size + validity."""
     fd = files_dir()
     if not os.path.isdir(fd):
         if getattr(args, "json", False):
@@ -433,7 +433,7 @@ def cmd_status(args) -> int:
 
 
 def cmd_clear(args) -> int:
-    """``cidx ast cache clear [target]``: remove cache entry/entries."""
+    """``cidx cache ast clear [target]``: remove cache entry/entries."""
     fd = files_dir()
 
     target = getattr(args, "target", None)

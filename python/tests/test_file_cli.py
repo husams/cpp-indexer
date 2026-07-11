@@ -24,7 +24,7 @@ def run(argv, capsys):
 
 def file_cmd(db_path, target, *op):
     """`cidx file --db DB TARGET OP...` — --db before the REMAINDER target."""
-    return ["file", "--db", db_path, target, *op]
+    return ["file", "flags", "--db", db_path, target, *op]
 
 
 def _file(db_path, basename):
@@ -152,14 +152,14 @@ def test_unknown_op(index_db, capsys):
 
 def test_dump_compile_commands_empty(index_db, capsys):
     # Seeded files have no stored flags -> empty array.
-    rc, out, _ = run(["dump-compile-commands", "lab", "--db", index_db], capsys)
+    rc, out, _ = run(["component", "compile-commands", "lab", "--db", index_db], capsys)
     assert rc == 0
     assert json.loads(out) == []
 
 
 def test_dump_compile_commands_after_edits(index_db, capsys):
     run(file_cmd(index_db, "lab://main.c", "-set-flag", "-I/inc"), capsys)
-    rc, out, _ = run(["dump-compile-commands", "lab", "--db", index_db], capsys)
+    rc, out, _ = run(["component", "compile-commands", "lab", "--db", index_db], capsys)
     assert rc == 0
     entries = json.loads(out)
     assert len(entries) == 1
@@ -171,6 +171,6 @@ def test_dump_compile_commands_after_edits(index_db, capsys):
 
 
 def test_dump_compile_commands_unknown_component(index_db, capsys):
-    rc, _, err = run(["dump-compile-commands", "nope", "--db", index_db], capsys)
+    rc, _, err = run(["component", "compile-commands", "nope", "--db", index_db], capsys)
     assert rc == 1
     assert "no component named" in err

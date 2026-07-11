@@ -24,7 +24,7 @@ def commands_from_text(text: str):
     Accepts either a single entry object ('{...}') or a full array ('[...]');
     a lone object is wrapped in an array. The text is written to a throwaway
     compile_commands.json and loaded through the same CompilationDatabase path
-    `import` uses, so `cidx file -import-args` strips args identically. Each
+    `import` uses, so `cidx file flags -import-args` strips args identically. Each
     entry needs `directory`, `file`, and `arguments` (or `command`)."""
     body = text.lstrip()
     if body.startswith("{"):

@@ -53,7 +53,7 @@ def test_migrate_upgrades_v15_in_place(tmp_path, capsys):
     _build_v15(db)
     assert _ver(db) == 15
 
-    rc = main(["migrate", "--db", db])
+    rc = main(["db", "migrate", "--db", db])
     out = capsys.readouterr().out
     assert rc == 0
     assert f"v15 -> v{SCHEMA_VERSION}" in out
@@ -73,16 +73,16 @@ def test_migrate_upgrades_v15_in_place(tmp_path, capsys):
 def test_migrate_is_idempotent(tmp_path, capsys):
     db = str(tmp_path / "v15.db")
     _build_v15(db)
-    main(["migrate", "--db", db])
+    main(["db", "migrate", "--db", db])
     capsys.readouterr()
-    rc = main(["migrate", "--db", db])
+    rc = main(["db", "migrate", "--db", db])
     out = capsys.readouterr().out
     assert rc == 0
     assert "already at schema" in out
 
 
 def test_migrate_missing_db_errors(tmp_path, capsys):
-    rc = main(["migrate", "--db", str(tmp_path / "nope.db")])
+    rc = main(["db", "migrate", "--db", str(tmp_path / "nope.db")])
     err = capsys.readouterr().err
     assert rc == 1
     assert "no index database" in err
