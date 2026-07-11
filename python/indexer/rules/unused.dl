@@ -1,0 +1,34 @@
+// Built-in rule: defined functions/methods with no incoming `calls` or
+// `dispatch_calls` edge and no override relationship, excluding `main`.
+// A heuristic dead-code signal: entry points, callbacks bound outside the
+// index, and code reached only through templates may still appear here.
+// Fact relations come from the cidx analyze prelude.
+
+.decl callable(id:number)
+callable(s) :- symbol(s, _, _, _, k, 1, _, _), symbol_kind(k, "function").
+callable(s) :- symbol(s, _, _, _, k, 1, _, _), symbol_kind(k, "method").
+callable(s) :- symbol(s, _, _, _, k, 1, _, _), symbol_kind(k, "constructor").
+callable(s) :- symbol(s, _, _, _, k, 1, _, _), symbol_kind(k, "destructor").
+callable(s) :- symbol(s, _, _, _, k, 1, _, _), symbol_kind(k, "function-template").
+
+.decl called(id:number)
+called(d) :- edge(_, _, d, k, _), edge_kind(k, "calls").
+called(d) :- edge(_, _, d, k, _), edge_kind(k, "dispatch_calls").
+
+// Either side of an `overrides` edge can be reached via dynamic dispatch.
+.decl in_override(id:number)
+in_override(s) :- edge(_, s, _, k, _), edge_kind(k, "overrides").
+in_override(d) :- edge(_, _, d, k, _), edge_kind(k, "overrides").
+
+.decl dead(id:number)
+dead(s) :- callable(s), !called(s), !in_override(s).
+
+.decl has_file(id:number)
+has_file(f) :- file(f, _).
+
+.decl unused(usr:symbol, name:symbol, file:symbol, line:number)
+unused(u, n, p, l) :-
+    dead(s), symbol(s, u, n, _, _, _, fid, l), n != "main", file(fid, p).
+unused(u, n, "", l) :-
+    dead(s), symbol(s, u, n, _, _, _, fid, l), n != "main", !has_file(fid).
+.output unused

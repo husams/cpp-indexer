@@ -272,6 +272,7 @@ add_library(cidx_core STATIC
   src/cli/json_out.cpp
   src/cli/kind_names.cpp
   src/cli/commands.cpp
+  src/cli/analyze.cpp
   src/graph/query.cpp
   src/graph/emit.cpp
   src/astgraph/astgraph.cpp
@@ -296,6 +297,28 @@ target_compile_options(cidx_core PRIVATE
 # returns it without a dladdr() call. PUBLIC so all linked test exes inherit it.
 target_compile_definitions(cidx_core PUBLIC
   "CIDX_LIBCLANG_PATH=\"${CIDX_LIBCLANG_LIB}\"")
+
+# `cidx analyze` embeds the canonical Souffle rule files from
+# python/indexer/rules so both implementations ship byte-identical Datalog.
+set(_cidx_dl_rules_dir "${CMAKE_CURRENT_SOURCE_DIR}/python/indexer/rules")
+set(_cidx_dl_header
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/cli/souffle_rules.hpp")
+add_custom_command(
+  OUTPUT "${_cidx_dl_header}"
+  COMMAND "${CMAKE_COMMAND}"
+          "-DRULES_DIR=${_cidx_dl_rules_dir}"
+          "-DOUT=${_cidx_dl_header}"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_dl.cmake"
+  DEPENDS "${_cidx_dl_rules_dir}/prelude.dl"
+          "${_cidx_dl_rules_dir}/callgraph.dl"
+          "${_cidx_dl_rules_dir}/cycles.dl"
+          "${_cidx_dl_rules_dir}/unused.dl"
+          "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_dl.cmake"
+  VERBATIM)
+add_custom_target(cidx_dl_rules DEPENDS "${_cidx_dl_header}")
+add_dependencies(cidx_core cidx_dl_rules)
+target_include_directories(cidx_core PRIVATE
+  "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 # Optional native Souffle support for maintained astgraph analyses.  Each rule
 # is generated at build time and embedded as an object, while user-authored

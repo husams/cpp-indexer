@@ -120,7 +120,7 @@ EOF
 # Pre-warm the uv environment so resolver/sync noise never lands in the
 # transcript (first `uv run` of a session may print to stderr).
 INDEXER_CACHE="$WORK/warm-cache" CIDX_LIBCLANG="$PY_LIBCLANG" \
-  "$PY_CIDX" list components >/dev/null 2>&1 || true
+  "$PY_CIDX" component list >/dev/null 2>&1 || true
 rm -rf "$WORK/warm-cache"
 
 # --- transcript runner --------------------------------------------------------
@@ -224,33 +224,33 @@ run_script() {
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- search a --limit 2
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- search zz
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- search square --kind function
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- show symbol 1
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- show symbol 'c:@F@multiply'
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- show file "$PROJECT_DIR/mathlib.c"
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- show file 1
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- show file 99
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list components
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ls components
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list components --kind external
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list dirs
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list dirs -c parityproj
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list files
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list files --indexed
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list files --pending
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list files app
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list symbols
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list symbols --limit 2
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list symbols sq
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list symbols --kind function
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list symbols -f "$PROJECT_DIR/mathlib.h"
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- symbol show 1
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- symbol show 'c:@F@multiply'
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file show "$PROJECT_DIR/mathlib.c"
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file show 1
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file show 99
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- component list
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- component ls
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- component list --kind external
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- dir list
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- dir list -c parityproj
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file list
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file list --indexed
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file list --pending
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file list app
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- symbol list
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- symbol list --limit 2
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- symbol list sq
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- symbol list --kind function
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- symbol list -f "$PROJECT_DIR/mathlib.h"
   # import --force: delete the existing component (its files + indexed symbols)
   # and rebuild from the same DB, then re-index. Both tools must emit the same
   # force/component/counts lines and produce an identical rebuilt index.db.
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- import --force --db "$FIXTURE_DB" --name parityproj
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list files --pending
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file list --pending
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- index
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- resolve
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list symbols --limit 2
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- symbol list --limit 2
   # M2: geometry fixture (C++ graph edges: inherits/field_of/method_of/
   # template_param/instantiates/template_arg). Import + index + resolve so the
   # DB dump covers all graph tables and diffs are byte-strict across both tools.
@@ -269,6 +269,19 @@ run_script() {
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- graph definitions --name Context::run --json
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- graph definitions --name Context::reg --direct-only
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- graph definitions --name Context::reg --json
+
+  # v28 analyze (Souffle Datalog over the index): --list and the validation
+  # errors are golden-locked byte-for-byte. The souffle-backed rules run only
+  # when the interpreter is installed — the same gate for both tools, so the
+  # transcripts stay in lockstep either way.
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- analyze --list
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- analyze
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- analyze --rule nope
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- analyze --rule cycles --jobs 0
+  if command -v souffle >/dev/null 2>&1; then
+    run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- analyze --rule cycles
+    run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- analyze --rule unused
+  fi
 
   # M3: graphlab fixture — includes chain.cpp (value-typed local B passed as
   # argument to top_rank) which exercises call_arg/edge_site provenance with
@@ -289,22 +302,22 @@ run_script() {
   GROOT="$(cd "$PROJECT_DIR" && git rev-parse --show-toplevel 2>/dev/null || echo "$LAB_ROOT")"
   REL="${PROJECT_DIR#"$GROOT"/}"
   APPADDR="parityproj://$REL/app.c"
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -dump-args
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -set-flag -DPARITY_FILE=1
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -set-flag -DPARITY_FILE=1
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -dump-args
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -import-args "{\"directory\": \"$PROJECT_DIR\", \"file\": \"app.c\", \"arguments\": [\"cc\", \"-I.\", \"-DPARITY_IMP=2\", \"-c\", \"app.c\", \"-o\", \"app.o\"]}"
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -dump-args
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -unset-flag -DPARITY_IMP=2
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR"
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "parityproj://does/not/exist.c" -dump-args
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "bogustarget" -dump-args
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "nocomp://x.c" -dump-args
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file "$APPADDR" -bogus-op
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file -h
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- dump-compile-commands parityproj
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- dump-compile-commands nosuchcomp
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- dump-compile-commands -h
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file flags "$APPADDR" -dump-args
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file flags "$APPADDR" -set-flag -DPARITY_FILE=1
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file flags "$APPADDR" -set-flag -DPARITY_FILE=1
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file flags "$APPADDR" -dump-args
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file flags "$APPADDR" -import-args "{\"directory\": \"$PROJECT_DIR\", \"file\": \"app.c\", \"arguments\": [\"cc\", \"-I.\", \"-DPARITY_IMP=2\", \"-c\", \"app.c\", \"-o\", \"app.o\"]}"
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file flags "$APPADDR" -dump-args
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file flags "$APPADDR" -unset-flag -DPARITY_IMP=2
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file flags "$APPADDR"
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file flags "parityproj://does/not/exist.c" -dump-args
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file flags "bogustarget" -dump-args
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file flags "nocomp://x.c" -dump-args
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file flags "$APPADDR" -bogus-op
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file flags -h
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- component compile-commands parityproj
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- component compile-commands nosuchcomp
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- component compile-commands -h
 
   # repo (v23): grouping + switchable clones. parityproj (imported above) is
   # grouped under repository 'parityproj'. Exercise list/show, register a second
@@ -323,7 +336,7 @@ run_script() {
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo switch parityproj bogusclone
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo switch parityproj alt
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo show parityproj
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list components
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- component list
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- repo -h
 
   # delete subcommand: help, nested-choice errors, per-leaf help, the
@@ -331,23 +344,23 @@ run_script() {
   # then REAL deletes exercising cascade + orphan-symbol purge. Placed last so
   # the golden assertions above are undisturbed; the final DB dump reflects the
   # post-delete state and must still match byte-for-byte across both tools.
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete bogus
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete component -h
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete dir -h
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete file -h
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete symbol -h
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete symbol
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete symbol --id 1 --name x
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete dir --id 1 --path /x
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete file --id notanint
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete symbol --name nope
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete symbol --name multiply --dry-run
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete symbol --name multiply
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete file --name app.c
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- delete component --name parityproj
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list components
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- list symbols
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- dir
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- dir bogus
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- component rm -h
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- dir rm -h
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file rm -h
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- symbol rm -h
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- symbol rm
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- symbol rm --id 1 --name x
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- dir rm --id 1 --path /x
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file rm --id notanint
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- symbol rm --name nope
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- symbol rm --name multiply --dry-run
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- symbol rm --name multiply
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- file rm --name app.c
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- component rm --name parityproj
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- component list
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- symbol list
 
   # --- M5: ast dump / locals / conditions (text + --json + --tokens + --ast) --
   # All ad-hoc targets (FILE + -- -std=c11) so this block is independent of the
@@ -382,16 +395,16 @@ run_script() {
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast dump --kind notakind "$MAN/calls.c" -- -std=c11
   # help text for dump / cache group (exit 0; exact text pinned by diff)
   run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast dump -h
-  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- ast cache -h
+  run_one "$transcript" "$cache" "$is_py" "${T[@]}" -- cache ast -h
   # --- M5: ast cache lifecycle (build / status / clear) ----------------------
   # .ast sizes differ between Python and C++ (56-byte delta observed: different
   # sidecar mtime float formatting → different TU save header bytes). Sizes are
   # masked with {SZ} by run_one_ast.  Keys (sha1 of abspath+flags) are identical.
-  run_one_ast "$transcript" "$cache" "$is_py" "${T[@]}" -- ast cache status
-  run_one_ast "$transcript" "$cache" "$is_py" "${T[@]}" -- ast cache build "$MAN/calls.c" -- -std=c11
-  run_one_ast "$transcript" "$cache" "$is_py" "${T[@]}" -- ast cache status "$MAN/calls.c" -- -std=c11
-  run_one_ast "$transcript" "$cache" "$is_py" "${T[@]}" -- ast cache clear "$MAN/calls.c" -- -std=c11
-  run_one_ast "$transcript" "$cache" "$is_py" "${T[@]}" -- ast cache status
+  run_one_ast "$transcript" "$cache" "$is_py" "${T[@]}" -- cache ast status
+  run_one_ast "$transcript" "$cache" "$is_py" "${T[@]}" -- cache ast build "$MAN/calls.c" -- -std=c11
+  run_one_ast "$transcript" "$cache" "$is_py" "${T[@]}" -- cache ast status "$MAN/calls.c" -- -std=c11
+  run_one_ast "$transcript" "$cache" "$is_py" "${T[@]}" -- cache ast clear "$MAN/calls.c" -- -std=c11
+  run_one_ast "$transcript" "$cache" "$is_py" "${T[@]}" -- cache ast status
 }
 
 echo "parity_check: running Python cidx (cache: $PY_CACHE)"

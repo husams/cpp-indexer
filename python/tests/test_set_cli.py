@@ -30,7 +30,7 @@ def _symbol_count(db_path):
 def test_set_pending_true_marks_all_files(index_db, capsys):
     before = _symbol_count(index_db)
     rc, out, _ = run(
-        ["set", "pending=True", "--component", "lab", "--db", index_db], capsys
+        ["file", "set", "pending=True", "--component", "lab", "--db", index_db], capsys
     )
     assert rc == 0
     assert all(v is False for v in _indexed(index_db).values())
@@ -41,9 +41,10 @@ def test_set_pending_true_marks_all_files(index_db, capsys):
 
 def test_set_pending_false_one_file(index_db, capsys):
     # First mark everything pending, then clear just one file.
-    run(["set", "pending=True", "--component", "lab", "--db", index_db], capsys)
+    run(["file", "set", "pending=True", "--component", "lab", "--db", index_db], capsys)
     rc, _, _ = run(
         [
+            "file",
             "set",
             "pending=False",
             "--component",
@@ -63,7 +64,7 @@ def test_set_pending_false_one_file(index_db, capsys):
 
 def test_set_indexed_alias(index_db, capsys):
     rc, _, _ = run(
-        ["set", "indexed=true", "--component", "lab", "--db", index_db], capsys
+        ["file", "set", "indexed=true", "--component", "lab", "--db", index_db], capsys
     )
     assert rc == 0
     assert all(v is True for v in _indexed(index_db).values())
@@ -72,7 +73,7 @@ def test_set_indexed_alias(index_db, capsys):
 def test_set_spaced_assignment(index_db, capsys):
     # 'pending = True' as three argv tokens must parse identically.
     rc, _, _ = run(
-        ["set", "pending", "=", "True", "--component", "lab", "--db", index_db], capsys
+        ["file", "set", "pending", "=", "True", "--component", "lab", "--db", index_db], capsys
     )
     assert rc == 0
     assert all(v is False for v in _indexed(index_db).values())
@@ -81,7 +82,7 @@ def test_set_spaced_assignment(index_db, capsys):
 def test_set_dry_run_changes_nothing(index_db, capsys):
     before = _indexed(index_db)
     rc, out, _ = run(
-        ["set", "indexed=True", "--component", "lab", "--dry-run", "--db", index_db],
+        ["file", "set", "indexed=True", "--component", "lab", "--dry-run", "--db", index_db],
         capsys,
     )
     assert rc == 0
@@ -91,7 +92,7 @@ def test_set_dry_run_changes_nothing(index_db, capsys):
 
 def test_set_unknown_field(index_db, capsys):
     rc, _, err = run(
-        ["set", "frobnicate=True", "--component", "lab", "--db", index_db], capsys
+        ["file", "set", "frobnicate=True", "--component", "lab", "--db", index_db], capsys
     )
     assert rc == 1
     assert "unknown field" in err
@@ -99,7 +100,7 @@ def test_set_unknown_field(index_db, capsys):
 
 def test_set_bad_bool(index_db, capsys):
     rc, _, err = run(
-        ["set", "pending=maybe", "--component", "lab", "--db", index_db], capsys
+        ["file", "set", "pending=maybe", "--component", "lab", "--db", index_db], capsys
     )
     assert rc == 1
     assert "boolean" in err
@@ -107,7 +108,7 @@ def test_set_bad_bool(index_db, capsys):
 
 def test_set_unknown_component(index_db, capsys):
     rc, _, err = run(
-        ["set", "pending=True", "--component", "nope", "--db", index_db], capsys
+        ["file", "set", "pending=True", "--component", "nope", "--db", index_db], capsys
     )
     assert rc == 1
     assert "no component named" in err
@@ -116,6 +117,7 @@ def test_set_unknown_component(index_db, capsys):
 def test_set_no_file_match(index_db, capsys):
     rc, _, err = run(
         [
+            "file",
             "set",
             "pending=True",
             "--component",

@@ -486,7 +486,7 @@ def _guarded_by(
 
 
 def cmd_cache(args) -> int:
-    """Dispatch ``cidx ast cache build|status|clear`` to the astcache helpers."""
+    """Dispatch ``cidx cache ast build|status|clear`` to the astcache helpers."""
     from . import astcache  # lazy import (same pattern as _parse_target)
 
     action = args.cache_action

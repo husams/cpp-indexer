@@ -391,7 +391,6 @@ TEST_CASE("argparse: ast -h returns help_text") {
   CHECK(pa.help_text->find("dump") != std::string::npos);
   CHECK(pa.help_text->find("locals") != std::string::npos);
   CHECK(pa.help_text->find("conditions") != std::string::npos);
-  CHECK(pa.help_text->find("cache") != std::string::npos);
 }
 
 TEST_CASE("argparse: ast dump -h returns help_text") {
@@ -417,7 +416,7 @@ TEST_CASE("argparse: ast conditions -h returns help_text") {
 }
 
 TEST_CASE("argparse: ast cache -h returns help_text") {
-  auto pa = cli::parse_args({"ast", "cache", "-h"});
+  auto pa = cli::parse_args({"cache", "ast", "-h"});
   REQUIRE(pa.help_text.has_value());
   CHECK(pa.help_text->find("build") != std::string::npos);
   CHECK(pa.help_text->find("status") != std::string::npos);
@@ -425,7 +424,7 @@ TEST_CASE("argparse: ast cache -h returns help_text") {
 }
 
 TEST_CASE("argparse: ast cache build -h returns help_text") {
-  auto pa = cli::parse_args({"ast", "cache", "build", "-h"});
+  auto pa = cli::parse_args({"cache", "ast", "build", "-h"});
   REQUIRE(pa.help_text.has_value());
   CHECK(pa.help_text->find("--name") != std::string::npos);
 }
@@ -529,7 +528,7 @@ TEST_CASE("argparse: ast dump --db option routes to index_db") {
 }
 
 TEST_CASE("argparse: ast cache subcommand options bind correctly") {
-  auto pa = cli::parse_args({"ast", "cache", "build", "--name", "fn", "foo.c",
+  auto pa = cli::parse_args({"cache", "ast", "build", "--name", "fn", "foo.c",
                               "--", "-std=c11"});
   CHECK(pa.command == "ast");
   CHECK(pa.what == "cache");
@@ -540,7 +539,7 @@ TEST_CASE("argparse: ast cache subcommand options bind correctly") {
 }
 
 TEST_CASE("argparse: ast cache status no target") {
-  auto pa = cli::parse_args({"ast", "cache", "status"});
+  auto pa = cli::parse_args({"cache", "ast", "status"});
   CHECK(pa.command == "ast");
   CHECK(pa.what == "cache");
   CHECK(pa.cache_action == "status");
@@ -548,7 +547,7 @@ TEST_CASE("argparse: ast cache status no target") {
 }
 
 TEST_CASE("argparse: ast cache bad action → exit 2") {
-  auto f = parse_fail({"ast", "cache", "bogus"});
+  auto f = parse_fail({"cache", "ast", "bogus"});
   CHECK(f.code == 2);
   CHECK(f.msg.find("invalid choice") != std::string::npos);
 }
