@@ -1,4 +1,0 @@
-interface:
-  display_name: "C++ Graph Code Reasoning"
-  short_description: "Graph-backed C++ code reasoning."
-  default_prompt: "Use libclang and the code graph to answer this C++ codebase question."

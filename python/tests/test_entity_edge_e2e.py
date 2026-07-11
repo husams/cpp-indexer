@@ -1,0 +1,671 @@
+"""End-to-end entity_edge test: REAL libclang parse -> Layer-0 extraction ->
+materialize_entity_edges -> assert the rolled-up Layer-1 rows.
+
+Unlike test_entity_edge_pr2.py (which injects synthetic Layer-0 edges), this
+test drives the ACTUAL ast.py extraction path on a real C++ TU, so it locks the
+full pipeline: the PR1 construct/destroy/friend handlers in clang/ast.py must
+emit the Layer-0 form edges (10-16 + friend 17) that the roll-up reads. It is
+the regression guard for the failure mode where the schema + roll-up exist but
+the extraction is not wired (entity_edge would then stay empty for these kinds).
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
+
+from indexer.storage import Storage  # noqa: E402
+from indexer.clang import ast as A  # noqa: E402
+from indexer.clang import util as U  # noqa: E402
+
+try:
+    from indexer.entity_rollup import materialize_entity_edges
+    _HAS_ROLLUP = True
+except Exception:  # pragma: no cover
+    _HAS_ROLLUP = False
+
+# All construction/destruction forms inside class methods (so they roll up to
+# the enclosing record), plus a method-scoped factory (make_owned ->
+# make_unique<Widget>, create_form=6), a nested record and a friend declaration.
+SOURCE = """
+#include <memory>
+
+namespace gl {
+
+struct Widget {
+    int value;
+    Widget() = default;
+    explicit Widget(int v) : value(v) {}
+    Widget(const Widget &) = default;
+    Widget(Widget &&) = default;
+    ~Widget() = default;
+};
+
+struct Pool {
+    void make_value(int x)  { Widget w(x); (void)w; }
+    void make_temp(int x)   { (void)Widget(x); }
+    void make_copy(const Widget &s) { Widget c(s); (void)c; }
+    void make_move(Widget s) { Widget m(static_cast<Widget &&>(s)); (void)m; }
+    void make_and_destroy(int x) { Widget *p = new Widget(x); delete p; }
+    std::unique_ptr<Widget> make_owned(int x) { return std::make_unique<Widget>(x); }
+};
+
+struct Outer {
+    struct Inner { int depth; };
+    Inner inner;
+};
+
+class Vault {
+    friend class Pool;
+    int secret;
+};
+
+}  // namespace gl
+"""
+
+
+@pytest.fixture
+def edges() -> dict:
+    """Index the inline TU for real, materialize, and return {(kind): rows}."""
+    if not _HAS_ROLLUP:
+        pytest.skip("entity_rollup not present")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "fixture.cpp")
+        with open(path, "w") as fh:
+            fh.write(SOURCE)
+        # Use the indexer's own parse (C++-correct -isystem ordering) so the
+        # std::make_unique factory site in <memory> resolves cleanly -- the lab's
+        # simple clang_args() puts the clang builtin -I before libc++ and trips the
+        # <cstddef> ordering gotcha for C++ TUs.
+        tu = U.parse(path, args=["-std=c++17"], check=False)
+        assert not [d for d in tu.diagnostics if d.severity >= 3], (
+            "fixture source must parse cleanly: "
+            + "; ".join(d.spelling for d in tu.diagnostics if d.severity >= 3)
+        )
+
+        db = Storage(os.path.join(tmp, "i.db"))
+        db.add_component("t", tmp)
+        file_id = db.add_file_path(path)
+        with db.transaction():
+            A.index_symbols(db, tu, file_id)
+        with db.transaction():
+            db.delete_edges_for_file(file_id)
+            A._index_edges_notxn(db, tu, path, file_id)
+        materialize_entity_edges(db)
+
+        conn = db._conn
+
+        def by_kind(kind: int):
+            return conn.execute(
+                "SELECT s1.spelling AS src, s2.spelling AS dst, "
+                "       ee.create_form, ee.partial "
+                "FROM entity_edge ee "
+                "JOIN symbol s1 ON s1.id = ee.src_id "
+                "JOIN symbol s2 ON s2.id = ee.dst_id "
+                "WHERE ee.kind = ? ORDER BY ee.create_form",
+                (kind,),
+            ).fetchall()
+
+        return {
+            "creates": by_kind(7),
+            "destroys": by_kind(9),
+            "befriends": by_kind(10),
+        }
+
+
+def test_creates_all_forms_from_methods(edges):
+    """Pool methods construct Widget by value/temp/heap/copy/move/factory -> creates(7)."""
+    rows = edges["creates"]
+    assert rows, "no creates(7) rows materialized -- PR1 extraction not wired?"
+    assert all(r["src"] == "Pool" and r["dst"] == "Widget" for r in rows)
+    forms = {r["create_form"] for r in rows}
+    # value=3, temp=4, heap=5, factory=6, copy=7, move=8
+    for f in (3, 4, 5, 6, 7, 8):
+        assert f in forms, f"create_form {f} missing (got {sorted(forms)})"
+
+
+def test_creates_factory_form_from_method(edges):
+    """Pool::make_owned -> make_unique<Widget> rolls up creates(7, form=6, partial=1).
+
+    BUG 2 regression guard: the factory form (15 -> create_form 6) is only
+    rolled up from a METHOD owner. graphlab's free-function make_unique/make_shared
+    sites have no owner record, so without a method-scoped factory site this path
+    was never exercised end-to-end.
+    """
+    rows = [r for r in edges["creates"] if r["create_form"] == 6]
+    assert rows, "creates(7, create_form=6) factory roll-up missing from a method"
+    assert all(r["src"] == "Pool" and r["dst"] == "Widget" for r in rows)
+    assert all(r["partial"] == 1 for r in rows), "factory creates must be partial=1"
+
+
+def test_destroys_from_method(edges):
+    """Pool::make_and_destroy `delete p` -> destroys(9) Pool->Widget."""
+    rows = edges["destroys"]
+    assert any(r["src"] == "Pool" and r["dst"] == "Widget" for r in rows), (
+        "destroys(9) Pool->Widget missing"
+    )
+
+
+def test_befriends_friend_decl(edges):
+    """`class Vault { friend class Pool; }` -> befriends(10) Vault->Pool."""
+    rows = edges["befriends"]
+    assert any(r["src"] == "Vault" and r["dst"] == "Pool" for r in rows), (
+        "befriends(10) Vault->Pool missing -- FRIEND_DECL extraction not wired?"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage 1: instantiates(11) vs specializes(3) on a REAL parse
+# ---------------------------------------------------------------------------
+
+# An explicit instantiation (`template class X<int>;`) is an INSTANCE that
+# `instantiates` its primary; an explicit specialization (`template<> class
+# X<bool>{...}`) is a separate body that `specializes` its primary. The two are
+# mutually exclusive and BOTH keep the instance/spec as its own design entity
+# (the source is never collapsed onto the primary).
+_TMPL_SOURCE = """
+namespace tg {
+
+template <typename T>
+class Box {
+    T value_;
+public:
+    explicit Box(T v) : value_(v) {}
+    const T& get() const { return value_; }
+};
+
+// EXPLICIT SPECIALIZATION: a separate body -> specializes(3) Box<bool> -> Box.
+template <>
+class Box<bool> {
+    bool flag_;
+public:
+    explicit Box(bool v) : flag_(v) {}
+    bool get() const { return flag_; }
+};
+
+// EXPLICIT INSTANTIATION: a concrete instance -> instantiates(11) Box<int> -> Box.
+template class Box<int>;
+
+}  // namespace tg
+"""
+
+
+@pytest.fixture
+def tmpl_edges() -> dict:
+    """Index the template TU for real, materialize, and return rows by kind."""
+    if not _HAS_ROLLUP:
+        pytest.skip("entity_rollup not present")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "tmpl.cpp")
+        with open(path, "w") as fh:
+            fh.write(_TMPL_SOURCE)
+        tu = U.parse(path, args=["-std=c++17"], check=False)
+        assert not [d for d in tu.diagnostics if d.severity >= 3], (
+            "fixture must parse cleanly: "
+            + "; ".join(d.spelling for d in tu.diagnostics if d.severity >= 3)
+        )
+        db = Storage(os.path.join(tmp, "i.db"))
+        db.add_component("t", tmp)
+        file_id = db.add_file_path(path)
+        with db.transaction():
+            A.index_symbols(db, tu, file_id)
+        with db.transaction():
+            db.delete_edges_for_file(file_id)
+            A._index_edges_notxn(db, tu, path, file_id)
+        materialize_entity_edges(db)
+
+        conn = db._conn
+
+        def by_kind(kind: int):
+            return conn.execute(
+                "SELECT s1.display_name AS src, s2.display_name AS dst "
+                "FROM entity_edge ee "
+                "JOIN symbol s1 ON s1.id = ee.src_id "
+                "JOIN symbol s2 ON s2.id = ee.dst_id "
+                "WHERE ee.kind = ? ORDER BY src",
+                (kind,),
+            ).fetchall()
+
+        return {"specializes": by_kind(3), "instantiates": by_kind(11)}
+
+
+def test_instantiates_fires_for_explicit_instantiation(tmpl_edges):
+    """`template class Box<int>;` -> instantiates(11) Box<int> -> Box<T>."""
+    rows = tmpl_edges["instantiates"]
+    assert any(r["src"] == "Box<int>" and r["dst"] == "Box<T>" for r in rows), (
+        f"instantiates(11) Box<int> -> Box<T> missing; got {[(r['src'], r['dst']) for r in rows]}"
+    )
+    # An instantiation is NEVER recorded as a specialization.
+    assert not any(r["src"] == "Box<int>" for r in tmpl_edges["specializes"]), (
+        "Box<int> must NOT appear as a specializes(3) source"
+    )
+
+
+def test_specializes_fires_for_explicit_specialization(tmpl_edges):
+    """`template<> class Box<bool>{...}` -> specializes(3) Box<bool> -> Box<T>."""
+    rows = tmpl_edges["specializes"]
+    assert any(r["src"] == "Box<bool>" and r["dst"] == "Box<T>" for r in rows), (
+        f"specializes(3) Box<bool> -> Box<T> missing; got {[(r['src'], r['dst']) for r in rows]}"
+    )
+    # A specialization is NEVER recorded as an instantiation.
+    assert not any(r["src"] == "Box<bool>" for r in tmpl_edges["instantiates"]), (
+        "Box<bool> must NOT appear as an instantiates(11) source"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: a NAMED instance `X<B>` composes/aggregates the bound type B
+# ---------------------------------------------------------------------------
+
+# `using Y = X<B>;` mints no `X<B>` symbol on a plain parse, so Stage 2 mints
+# the instance from the alias and SUBSTITUTES the bound type into the primary's
+# members: a by-value member `T value` -> composes B (mult 1); a `vector<T>`
+# member -> composes B (mult 0..*); a `T* ptr` member -> associates B.
+_NAMED_INST_SOURCE = """
+#include <memory>
+#include <vector>
+
+namespace ni {
+
+struct Widget { int v; };
+
+template <typename T>
+struct Box {
+    T value;          // bare T   -> composes B, multiplicity 1
+    T *ptr;           // T*       -> associates B, multiplicity 0..1
+};
+
+template <typename T>
+struct Bag {
+    std::vector<T> items;         // vector<T>     -> composes B, 0..*
+    std::shared_ptr<T> shared;    // shared_ptr<T> -> aggregates B, 0..1
+};
+
+// NAMED instances via `using` / typedef: each must carry its OWN relations.
+using BoxW = Box<Widget>;
+typedef Bag<Widget> BagW;
+
+}  // namespace ni
+"""
+
+
+@pytest.fixture
+def named_inst_edges() -> dict:
+    """Index the named-instance TU for real, materialize, return rows by kind."""
+    if not _HAS_ROLLUP:
+        pytest.skip("entity_rollup not present")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "named.cpp")
+        with open(path, "w") as fh:
+            fh.write(_NAMED_INST_SOURCE)
+        tu = U.parse(path, args=["-std=c++17"], check=False)
+        assert not [d for d in tu.diagnostics if d.severity >= 3], (
+            "fixture must parse cleanly: "
+            + "; ".join(d.spelling for d in tu.diagnostics if d.severity >= 3)
+        )
+        db = Storage(os.path.join(tmp, "i.db"))
+        db.add_component("t", tmp)
+        file_id = db.add_file_path(path)
+        with db.transaction():
+            A.index_symbols(db, tu, file_id)
+        with db.transaction():
+            db.delete_edges_for_file(file_id)
+            A._index_edges_notxn(db, tu, path, file_id)
+        materialize_entity_edges(db)
+
+        conn = db._conn
+
+        def by_kind(kind: int):
+            return conn.execute(
+                "SELECT s1.display_name AS src, s2.display_name AS dst, "
+                "       ee.multiplicity "
+                "FROM entity_edge ee "
+                "JOIN symbol s1 ON s1.id = ee.src_id "
+                "JOIN symbol s2 ON s2.id = ee.dst_id "
+                "WHERE ee.kind = ? ORDER BY src",
+                (kind,),
+            ).fetchall()
+
+        return {
+            "composes": by_kind(4),
+            "aggregates": by_kind(5),
+            "associates": by_kind(6),
+        }
+
+
+def test_named_instance_composes_value_member(named_inst_edges):
+    """`using BoxW = Box<Widget>` -> Box<Widget> composes Widget (value, mult 1)."""
+    rows = named_inst_edges["composes"]
+    match = [
+        r for r in rows
+        if r["src"] == "Box<Widget>" and r["dst"] == "Widget"
+        and r["multiplicity"] == 1
+    ]
+    assert match, (
+        "composes(4) Box<Widget> -> Widget (mult 1) missing; got "
+        f"{[(r['src'], r['dst'], r['multiplicity']) for r in rows]}"
+    )
+
+
+def test_named_instance_composes_container_multiplicity(named_inst_edges):
+    """`typedef Bag<Widget>` with `vector<T>` -> composes Widget, mult 0..* (3)."""
+    rows = named_inst_edges["composes"]
+    match = [
+        r for r in rows
+        if r["src"] == "Bag<Widget>" and r["dst"] == "Widget"
+        and r["multiplicity"] == 3
+    ]
+    assert match, (
+        "composes(4) Bag<Widget> -> Widget (mult 0..* = 3) missing; got "
+        f"{[(r['src'], r['dst'], r['multiplicity']) for r in rows]}"
+    )
+
+
+def test_named_instance_aggregates_shared_ptr(named_inst_edges):
+    """`shared_ptr<T>` member of Bag<Widget> -> aggregates Widget (mult 0..1)."""
+    rows = named_inst_edges["aggregates"]
+    assert any(
+        r["src"] == "Bag<Widget>" and r["dst"] == "Widget" for r in rows
+    ), (
+        "aggregates(5) Bag<Widget> -> Widget missing; got "
+        f"{[(r['src'], r['dst']) for r in rows]}"
+    )
+
+
+def test_named_instance_associates_raw_ptr(named_inst_edges):
+    """`T* ptr` member of Box<Widget> -> associates Widget (borrowed ptr)."""
+    rows = named_inst_edges["associates"]
+    assert any(
+        r["src"] == "Box<Widget>" and r["dst"] == "Widget" for r in rows
+    ), (
+        "associates(6) Box<Widget> -> Widget missing; got "
+        f"{[(r['src'], r['dst']) for r in rows]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: mint named instances from PLAIN declarations (member / var / local)
+# and carry CONCRETE primary members onto the instance.
+# ---------------------------------------------------------------------------
+
+# No `using`/typedef here -- the `Box<B>` instance must be minted purely from a
+# plain member (`Box<B> m;`), a file-scope variable (`Box<B> g;`) and a local
+# (`Box<B> v;`). The primary `Box` mixes a parameterised member (`T value`) with
+# a CONCRETE member (`Widget w`), so the instance must carry BOTH `Box<B>
+# composes B` and `Box<B> composes Widget`. `Reg<7>` exercises a non-type
+# (value) template arg: minted, but no TYPE-arg relation (documented no-op).
+_PLAIN_INST_SOURCE = """
+namespace s3 {
+
+struct Widget { int v; };
+struct B { int y; };
+
+template <typename T>
+struct Box {
+    T value;          // parameterised -> composes B (mult 1)
+    T *ptr;           // T*            -> associates B
+    Widget w;         // CONCRETE      -> composes Widget (Stage 3 #2)
+};
+
+template <int N>
+struct Reg { int slot; };   // non-type arg (Stage 3 #3)
+
+struct Holder { Box<B> m; };                 // plain member  -> mints Box<B>
+Box<B> g_box;                                // file-scope var -> mints Box<B>
+Reg<7> g_reg;                                // non-type arg   -> mints Reg<7>
+void use() { Box<B> local; (void)local; }    // local var     -> mints Box<B>
+
+}  // namespace s3
+"""
+
+
+@pytest.fixture
+def plain_inst():
+    """Index the plain-declaration TU for real; return symbols + edges-by-kind."""
+    if not _HAS_ROLLUP:
+        pytest.skip("entity_rollup not present")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "plain.cpp")
+        with open(path, "w") as fh:
+            fh.write(_PLAIN_INST_SOURCE)
+        tu = U.parse(path, args=["-std=c++17"], check=False)
+        assert not [d for d in tu.diagnostics if d.severity >= 3], (
+            "fixture must parse cleanly: "
+            + "; ".join(d.spelling for d in tu.diagnostics if d.severity >= 3)
+        )
+        db = Storage(os.path.join(tmp, "i.db"))
+        db.add_component("t", tmp)
+        file_id = db.add_file_path(path)
+        with db.transaction():
+            A.index_symbols(db, tu, file_id)
+        with db.transaction():
+            db.delete_edges_for_file(file_id)
+            A._index_edges_notxn(db, tu, path, file_id)
+        materialize_entity_edges(db)
+
+        conn = db._conn
+
+        def by_kind(kind: int):
+            return conn.execute(
+                "SELECT s1.display_name AS src, s2.display_name AS dst, "
+                "       ee.multiplicity "
+                "FROM entity_edge ee "
+                "JOIN symbol s1 ON s1.id = ee.src_id "
+                "JOIN symbol s2 ON s2.id = ee.dst_id "
+                "WHERE ee.kind = ? ORDER BY src, dst",
+                (kind,),
+            ).fetchall()
+
+        named = [
+            r["display_name"]
+            for r in conn.execute(
+                "SELECT display_name FROM symbol WHERE is_named_instance = 1 "
+                "ORDER BY display_name"
+            ).fetchall()
+        ]
+        return {
+            "named": named,
+            "composes": by_kind(4),
+            "aggregates": by_kind(5),
+            "associates": by_kind(6),
+            "instantiates": by_kind(11),
+        }
+
+
+def test_plain_member_mints_named_instance(plain_inst):
+    """A plain `Box<B> m;` member (no alias) mints the Box<B> instance."""
+    assert "Box<B>" in plain_inst["named"], (
+        f"Box<B> not minted from plain declarations; got {plain_inst['named']}"
+    )
+
+
+def test_plain_instance_instantiates_primary(plain_inst):
+    """The minted Box<B> -> instantiates(11) Box<T> (Stage 1 edge holds)."""
+    assert any(
+        r["src"] == "Box<B>" and r["dst"] == "Box<T>"
+        for r in plain_inst["instantiates"]
+    ), f"instantiates Box<B> -> Box<T> missing; got {plain_inst['instantiates']}"
+
+
+def test_plain_instance_composes_parameterised_member(plain_inst):
+    """Box<B> composes B (mult 1) from the parameterised `T value` member."""
+    assert any(
+        r["src"] == "Box<B>" and r["dst"] == "B" and r["multiplicity"] == 1
+        for r in plain_inst["composes"]
+    ), f"Box<B> composes B (mult 1) missing; got {plain_inst['composes']}"
+
+
+def test_plain_instance_associates_parameterised_ptr(plain_inst):
+    """Box<B> associates B from the parameterised `T* ptr` member."""
+    assert any(
+        r["src"] == "Box<B>" and r["dst"] == "B"
+        for r in plain_inst["associates"]
+    ), f"Box<B> associates B missing; got {plain_inst['associates']}"
+
+
+def test_instance_carries_concrete_member(plain_inst):
+    """Stage 3 #2: the CONCRETE `Widget w` member surfaces on the instance too."""
+    assert any(
+        r["src"] == "Box<B>" and r["dst"] == "Widget"
+        for r in plain_inst["composes"]
+    ), (
+        "Box<B> composes Widget (concrete member) missing; got "
+        f"{plain_inst['composes']}"
+    )
+
+
+def test_nontype_arg_instance_minted_without_type_relation(plain_inst):
+    """Stage 3 #3: a non-type-arg instance Reg<7> is minted but carries no
+    TYPE-arg relation (documented no-op -- the Type API exposes TYPE args only).
+    Reg's only member is a builtin `int slot`, so no composes/aggregates row."""
+    assert "Reg<7>" in plain_inst["named"], (
+        f"Reg<7> not minted; got {plain_inst['named']}"
+    )
+    assert not any(
+        r["src"] == "Reg<7>" for r in plain_inst["composes"]
+    ), f"Reg<7> must carry no composes relation; got {plain_inst['composes']}"
+    # It still instantiates its primary.
+    assert any(
+        r["src"] == "Reg<7>" and r["dst"] == "Reg<N>"
+        for r in plain_inst["instantiates"]
+    ), f"instantiates Reg<7> -> Reg<N> missing; got {plain_inst['instantiates']}"
+
+
+# ---------------------------------------------------------------------------
+# Stage 4: connect the OWNING RECORD to the named instance.
+# A record holding `X<B>` by value / ptr / ref surfaces `A composes/associates
+# X<B>` (the UN-collapsed instance), completing the chain A -> X<B> -> B. A
+# `std::vector<X<B>>` member is the documented DEFERRED case (no owner edge).
+# ---------------------------------------------------------------------------
+
+_OWNER_INST_SOURCE = """
+#include <vector>
+namespace s4 {
+
+struct B { int y; };
+
+template <typename T>
+struct Box { T value; };          // -> Box<B> composes B (mult 1)
+
+struct Holder {
+    Box<B> by_value;              // Stage 4: Holder composes Box<B> (mult 1)
+    Box<B>* by_ptr;               // Stage 4: Holder associates Box<B> (ptr peel)
+    Box<B>& by_ref;               // Stage 4: Holder associates Box<B> (ref peel)
+};
+
+struct VecHolder {
+    std::vector<Box<B>> boxes;    // DEFERRED: no VecHolder -> Box<B> edge
+};
+
+}  // namespace s4
+"""
+
+
+@pytest.fixture
+def owner_inst():
+    """Index the owning-record TU for real; return composes/associates/etc."""
+    if not _HAS_ROLLUP:
+        pytest.skip("entity_rollup not present")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "owner.cpp")
+        with open(path, "w") as fh:
+            fh.write(_OWNER_INST_SOURCE)
+        tu = U.parse(path, args=["-std=c++17"], check=False)
+        assert not [d for d in tu.diagnostics if d.severity >= 3], (
+            "fixture must parse cleanly: "
+            + "; ".join(d.spelling for d in tu.diagnostics if d.severity >= 3)
+        )
+        db = Storage(os.path.join(tmp, "i.db"))
+        db.add_component("t", tmp)
+        file_id = db.add_file_path(path)
+        with db.transaction():
+            A.index_symbols(db, tu, file_id)
+        with db.transaction():
+            db.delete_edges_for_file(file_id)
+            A._index_edges_notxn(db, tu, path, file_id)
+        materialize_entity_edges(db)
+
+        conn = db._conn
+
+        def by_kind(kind: int):
+            return conn.execute(
+                "SELECT s1.display_name AS src, s2.display_name AS dst, "
+                "       ee.multiplicity, ee.via_member_id "
+                "FROM entity_edge ee "
+                "JOIN symbol s1 ON s1.id = ee.src_id "
+                "JOIN symbol s2 ON s2.id = ee.dst_id "
+                "WHERE ee.kind = ? ORDER BY src, dst, ee.via_member_id",
+                (kind,),
+            ).fetchall()
+
+        return {
+            "composes": by_kind(4),
+            "aggregates": by_kind(5),
+            "associates": by_kind(6),
+            "instantiates": by_kind(11),
+        }
+
+
+def test_owner_composes_named_instance_by_value(owner_inst):
+    """Stage 4: `Box<B> by_value;` -> Holder composes Box<B> (the instance, mult 1)."""
+    assert any(
+        r["src"] == "Holder" and r["dst"] == "Box<B>" and r["multiplicity"] == 1
+        for r in owner_inst["composes"]
+    ), (
+        "Holder composes Box<B> (mult 1) missing; got "
+        f"{[(r['src'], r['dst'], r['multiplicity']) for r in owner_inst['composes']]}"
+    )
+
+
+def test_owner_associates_named_instance_by_pointer_and_reference(owner_inst):
+    """Stage 4: `Box<B>*`/`Box<B>&` members -> Holder associates Box<B> (peel)."""
+    matches = [
+        r for r in owner_inst["associates"]
+        if r["src"] == "Holder" and r["dst"] == "Box<B>"
+    ]
+    # One associates row per indirect member (ptr + ref), distinct via_member_id.
+    assert len(matches) == 2, (
+        "expected 2 associates Holder -> Box<B> rows (ptr + ref); got "
+        f"{[(r['src'], r['dst'], r['via_member_id']) for r in owner_inst['associates']]}"
+    )
+    assert len({r["via_member_id"] for r in matches}) == 2
+
+
+def test_owner_edge_points_at_uncollapsed_instance(owner_inst):
+    """The Stage-4 edge targets the INSTANCE Box<B>, never the primary Box<T>."""
+    assert not any(
+        r["src"] == "Holder" and r["dst"] == "Box<T>"
+        for r in owner_inst["composes"] + owner_inst["associates"]
+    ), "owner edge collapsed onto the primary Box<T> -- must stay on Box<B>"
+
+
+def test_owner_chain_to_bound_type_preserved(owner_inst):
+    """The chain stays two edges: Box<B> instantiates Box<T> AND composes B."""
+    assert any(
+        r["src"] == "Box<B>" and r["dst"] == "Box<T>"
+        for r in owner_inst["instantiates"]
+    ), f"Box<B> instantiates Box<T> missing; got {owner_inst['instantiates']}"
+    assert any(
+        r["src"] == "Box<B>" and r["dst"] == "B" and r["multiplicity"] == 1
+        for r in owner_inst["composes"]
+    ), f"Box<B> composes B (mult 1) missing; got {owner_inst['composes']}"
+
+
+def test_vector_member_owner_edge_deferred(owner_inst):
+    """DEFERRED: a `std::vector<Box<B>>` member yields NO VecHolder -> Box<B>
+    edge (the vector instance is system / never minted; the inner Box<B> is not
+    peeled out of the container). Documents the current Stage-4 boundary."""
+    assert not any(
+        r["src"] == "VecHolder"
+        for r in owner_inst["composes"] + owner_inst["associates"]
+        + owner_inst["aggregates"]
+    ), (
+        "VecHolder must not get an entity_edge for its vector<Box<B>> member; got "
+        f"composes={[(r['src'], r['dst']) for r in owner_inst['composes']]} "
+        f"associates={[(r['src'], r['dst']) for r in owner_inst['associates']]}"
+    )

@@ -1,29 +1,17 @@
-# Rust / Cargo
-/target
-**/*.rs.bk
-Cargo.lock.bak
+# Build trees live under cidx-cpp/build*/ (design §3 — git-ignored).
+build*/
 
-# Editor / OS
-.idea/
-.vscode/
-.DS_Store
-*.swp
-*.swo
-*~
+# clangd index cache (machine-local).
+.cache/
 
-# Indexer artifacts
-.cxg-cache/
-.worktrees/
-*.parquet
-/workspace/
-*.log
+# clangd compile DB symlink -> build/compile_commands.json (machine-local; build/ is ignored).
+/compile_commands.json
 
-# clangd cache (auto-generated, not committed)
-**/.cache/
-
-# Secrets / local config
-.env
-.env.*
-!.env.example
-*.token
-config.local.toml
+# Python package environments, caches, and build artifacts.
+python/.venv/
+python/.pytest_cache/
+python/.ruff_cache/
+python/**/__pycache__/
+python/dist/
+python/build/
+python/*.egg-info/

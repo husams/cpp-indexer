@@ -1,7 +1,0 @@
-[
-  {
-    "directory": ".",
-    "file": "ext_main.cpp",
-    "command": "clang++ -std=c++14 -Itests/fixtures/m2_cpp_extensions ext_main.cpp"
-  }
-]

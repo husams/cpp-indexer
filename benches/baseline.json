@@ -1,3 +1,0 @@
-{
-  "_comment": "Benchmark baseline for regression gate (AC-M7-22). Values are ns/iter from cargo bench --output-format bencher. Update this file when intentionally improving performance by running: cargo bench --bench llvm_index -- --output-format bencher and recording the new values."
-}
