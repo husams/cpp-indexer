@@ -466,3 +466,25 @@ endif()
 
 enable_testing()
 add_subdirectory(tests)
+
+# ---------------------------------------------------------------------------
+# Experimental LibTooling AST probe (Phase-0 de-risk for the clangx-LT redesign,
+# see wiki pages/planning/cidx-libtooling-ast-layer). OFF by default; links the
+# full Clang C++ API (clang-cpp), unlike the rest of cidx which uses only the
+# libclang C API. Compiled -fno-rtti to match a Homebrew/no-RTTI LLVM.
+# ---------------------------------------------------------------------------
+option(CIDX_CLANGX_LIBTOOLING "Build the experimental LibTooling AST probe" OFF)
+if(CIDX_CLANGX_LIBTOOLING)
+  find_package(LLVM REQUIRED CONFIG)
+  find_package(Clang REQUIRED CONFIG)
+  message(STATUS "cidx[lt]: LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
+  add_executable(cidx_lt_probe src/clangx_lt/probe.cpp)
+  target_include_directories(cidx_lt_probe SYSTEM PRIVATE
+    ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+  target_compile_definitions(cidx_lt_probe PRIVATE ${LLVM_DEFINITIONS})
+  target_compile_features(cidx_lt_probe PRIVATE cxx_std_17)
+  if(NOT LLVM_ENABLE_RTTI)
+    target_compile_options(cidx_lt_probe PRIVATE -fno-rtti)
+  endif()
+  target_link_libraries(cidx_lt_probe PRIVATE clang-cpp LLVM)
+endif()
