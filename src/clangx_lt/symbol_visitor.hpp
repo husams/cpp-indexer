@@ -33,7 +33,11 @@ class SymbolEmitter;
 
 class SymbolVisitor : public clang::RecursiveASTVisitor<SymbolVisitor> {
 public:
-  SymbolVisitor(clang::ASTContext &context, SymbolEmitter &out);
+  // target_file empty: emit every non-system file's decls (the TSV probe's
+  // whole-TU mode). Non-empty: emit ONLY decls of that file — the per-file
+  // walk the interleaved indexer uses (index_file_notxn analogue).
+  SymbolVisitor(clang::ASTContext &context, SymbolEmitter &out,
+                std::string target_file = std::string());
 
   bool VisitNamedDecl(clang::NamedDecl *decl);
 
@@ -44,6 +48,7 @@ private:
   clang::SourceManager &source_manager_;
   SymbolExtractor extractor_;
   SymbolEmitter &out_;
+  std::string target_file_;
 };
 
 } // namespace cidx::lt

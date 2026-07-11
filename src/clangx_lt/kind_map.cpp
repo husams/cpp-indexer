@@ -38,4 +38,37 @@ int cidx_symbol_kind(const clang::Decl *decl) {
   }
 }
 
+const char *cidx_kind_name_from_int(int kind) {
+  switch (kind) {
+  case 2:  return "struct";
+  case 3:  return "union";
+  case 4:  return "class";
+  case 5:  return "enum";
+  case 6:  return "member";
+  case 7:  return "enum-constant";
+  case 8:  return "function";
+  case 9:  return "variable";
+  case 20: return "typedef";
+  case 21: return "method";
+  case 22: return "namespace";
+  case 24: return "constructor";
+  case 25: return "destructor";
+  case 30: return "function-template";
+  case 31: return "class-template";
+  case 36: return "type-alias";
+  default: return nullptr;
+  }
+}
+
+const char *cidx_symbol_kind_name(const clang::Decl *decl) {
+  // Same mapping as cidx_symbol_kind, by storage NAME (kind_name in
+  // ast_cursor.cpp; symbol_kind seed in storage.cpp).
+  return cidx_kind_name_from_int(cidx_symbol_kind(decl));
+}
+
+const char *cidx_stub_kind_name(const clang::Decl *decl) {
+  const char *name = cidx_symbol_kind_name(decl);
+  return name != nullptr ? name : "function";
+}
+
 } // namespace cidx::lt

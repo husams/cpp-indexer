@@ -1,5 +1,6 @@
 #include "clangx_lt/symbol_visitor.hpp"
 
+#include "clangx_lt/location.hpp"
 #include "clangx_lt/symbol_emitter.hpp"
 
 #include "clang/AST/ASTContext.h"
@@ -50,20 +51,25 @@ bool is_local_symbol_decl(const clang::NamedDecl *decl) {
 
 } // namespace
 
-SymbolVisitor::SymbolVisitor(clang::ASTContext &context, SymbolEmitter &out)
+SymbolVisitor::SymbolVisitor(clang::ASTContext &context, SymbolEmitter &out,
+                             std::string target_file)
     : context_(context), source_manager_(context.getSourceManager()),
-      extractor_(context), out_(out) {}
+      extractor_(context), out_(out), target_file_(std::move(target_file)) {}
 
 bool SymbolVisitor::should_emit(const clang::NamedDecl *decl) const {
   // cidx's symbol phase covers the main file AND owned (non-system) headers,
   // each under its own file_id; system headers are skipped entirely
-  // (_ignore_system_headers). Records carry their file; the parity merger
-  // replays cidx's main-file-first ordering and ownership filtering.
+  // (_ignore_system_headers). In per-file mode only the target file's decls
+  // are emitted (for_file_cursors' pruning); in whole-TU mode records carry
+  // their file and the parity merger replays cidx's ordering.
   const clang::SourceLocation loc =
       source_manager_.getExpansionLoc(decl->getLocation());
   if (loc.isInvalid() || source_manager_.isInSystemHeader(loc))
     return false;
   if (source_manager_.getFilename(loc).empty())
+    return false;
+  if (!target_file_.empty() &&
+      expansion_loc(context_, decl->getLocation()).file != target_file_)
     return false;
 
   if (is_template_pattern(decl))
