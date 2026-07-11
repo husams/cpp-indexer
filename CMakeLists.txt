@@ -478,7 +478,16 @@ if(CIDX_CLANGX_LIBTOOLING)
   find_package(LLVM REQUIRED CONFIG)
   find_package(Clang REQUIRED CONFIG)
   message(STATUS "cidx[lt]: LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
-  add_executable(cidx_lt_probe src/clangx_lt/probe.cpp)
+  add_executable(cidx_lt_probe
+    src/clangx_lt/main.cpp
+    src/clangx_lt/kind_map.cpp
+    src/clangx_lt/usr.cpp
+    src/clangx_lt/tsv_symbol_emitter.cpp
+    src/clangx_lt/symbol_visitor.cpp
+    src/clangx_lt/symbol_consumer.cpp
+    src/clangx_lt/symbol_action.cpp
+  )
+  target_include_directories(cidx_lt_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_include_directories(cidx_lt_probe SYSTEM PRIVATE
     ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
   target_compile_definitions(cidx_lt_probe PRIVATE ${LLVM_DEFINITIONS})
