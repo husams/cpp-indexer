@@ -37,7 +37,6 @@
 #include <vector>
 
 #include "astcache/astcache.hpp"
-#include "clangx/libclang.hpp"
 #include "clangx/parse.hpp"
 #include "util/errors.hpp"
 #include "util/hashing.hpp"
@@ -45,7 +44,6 @@
 
 namespace fs = std::filesystem;
 using cidx::AstTarget;
-using cidx::LibClang;
 using cidx::ParsedTu;
 
 namespace {
@@ -65,17 +63,6 @@ bool require_manifests() {
   return true;
 }
 
-LibClang *require_libclang() {
-  LibClang &lib = LibClang::instance();
-  try {
-    lib.load();
-  } catch (const cidx::CidxError &e) {
-    g_clang_skipped = true;
-    MESSAGE("SKIP: no loadable libclang: " << std::string(e.what()));
-    return nullptr;
-  }
-  return &lib;
-}
 
 std::string make_temp_dir() {
   char tmpl[] = "/tmp/cidx_actest_XXXXXX";
@@ -214,7 +201,7 @@ TEST_CASE("cache key frozen Python value (interchange contract)") {
 }
 
 TEST_CASE("astcache::flags_hash and cache_key match frozen Python values") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -237,7 +224,7 @@ TEST_CASE("astcache::flags_hash and cache_key match frozen Python values") {
 // --- 1. Cold miss / warm hit ------------------------------------------------
 
 TEST_CASE("cold miss parses once: .ast + sidecar created, counter==1") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -261,7 +248,7 @@ TEST_CASE("cold miss parses once: .ast + sidecar created, counter==1") {
 }
 
 TEST_CASE("warm hit avoids reparse: parse counter unchanged on second call") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -284,7 +271,7 @@ TEST_CASE("warm hit avoids reparse: parse counter unchanged on second call") {
 // --- 3. --no-cache (use_cache=false) ----------------------------------------
 
 TEST_CASE("use_cache=false reparses on every call") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -305,7 +292,7 @@ TEST_CASE("use_cache=false reparses on every call") {
 }
 
 TEST_CASE("use_cache=false does not write cache files") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -327,7 +314,7 @@ TEST_CASE("use_cache=false does not write cache files") {
 // --- 4. src-mtime invalidation ----------------------------------------------
 
 TEST_CASE("src-mtime bump invalidates cache: reparse and sidecar updated") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -364,7 +351,7 @@ TEST_CASE("src-mtime bump invalidates cache: reparse and sidecar updated") {
 // --- 5. Different flags → different key ------------------------------------
 
 TEST_CASE("different flags produce different cache keys and entries") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -399,7 +386,7 @@ TEST_CASE("different flags produce different cache keys and entries") {
 // --- 6. libclang-version mismatch (poke sidecar) ---------------------------
 
 TEST_CASE("libclang-version mismatch → reparse, no crash") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -443,7 +430,7 @@ TEST_CASE("libclang-version mismatch → reparse, no crash") {
 // --- 7. Corrupt .ast + valid sidecar ----------------------------------------
 
 TEST_CASE("corrupt .ast + valid sidecar → _load_ast fails → reparse") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -478,7 +465,7 @@ TEST_CASE("corrupt .ast + valid sidecar → _load_ast fails → reparse") {
 // --- 8. Interchange round-trip (C++-written .ast loads back) ----------------
 
 TEST_CASE("interchange round-trip: C++-written .ast reloads successfully") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -512,7 +499,7 @@ TEST_CASE("interchange round-trip: C++-written .ast reloads successfully") {
 // --- Additional boundary tests (parametrised-style) -------------------------
 
 TEST_CASE("sidecar fields are complete after cold miss") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -539,7 +526,7 @@ TEST_CASE("sidecar fields are complete after cold miss") {
 }
 
 TEST_CASE("files_dir is inside the hermetic cache, not ~/.cache/cidx") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -552,7 +539,7 @@ TEST_CASE("files_dir is inside the hermetic cache, not ~/.cache/cidx") {
 }
 
 TEST_CASE("load_or_parse returns valid TU with use_cache=true") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -567,7 +554,7 @@ TEST_CASE("load_or_parse returns valid TU with use_cache=true") {
 }
 
 TEST_CASE("load_or_parse returns valid TU with use_cache=false") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -582,7 +569,7 @@ TEST_CASE("load_or_parse returns valid TU with use_cache=false") {
 }
 
 TEST_CASE("cold miss then warm hit on messy.c (C file boundary)") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();

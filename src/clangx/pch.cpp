@@ -17,7 +17,7 @@
 #include <thread>
 
 #include "astcache/astcache.hpp"
-#include "clangx/libclang.hpp"
+#include "clangx/clang_runtime.hpp"
 #include "clangx/parse.hpp"
 #include "util/env.hpp"
 #include "util/errors.hpp"
@@ -406,8 +406,7 @@ int build_pch(Parser &parser, const std::vector<std::string> &flags,
               const std::optional<std::string> &driver, int n_cpp_tus,
               std::ostream &out, std::ostream &err, bool quoted, bool corpus,
               double coverage) {
-  LibClang &lib = LibClang::instance();
-  lib.load();
+  warn_if_runtime_libclang_ignored();
 
   // Write the umbrella header.
   ::mkdir(astcache::cache_dir().c_str(), 0755);
@@ -446,25 +445,25 @@ int build_pch(Parser &parser, const std::vector<std::string> &flags,
     argv.push_back(a.c_str());
   }
 
-  CXIndex index = lib.clang_createIndex(0, 0);
+  CXIndex index = ::clang_createIndex(0, 0);
   CXTranslationUnit tu = nullptr;
-  const CXErrorCode rc = lib.clang_parseTranslationUnit2(
+  const CXErrorCode rc = ::clang_parseTranslationUnit2(
       index, umbrella_path().c_str(), argv.data(),
       static_cast<int>(argv.size()), nullptr, 0,
       CXTranslationUnit_Incomplete, &tu);
   if (rc != CXError_Success || tu == nullptr) {
     if (tu != nullptr) {
-      lib.clang_disposeTranslationUnit(tu);
+      ::clang_disposeTranslationUnit(tu);
     }
-    lib.clang_disposeIndex(index);
+    ::clang_disposeIndex(index);
     err << "error: failed to parse the umbrella header\n";
     return 1;
   }
 
   const int save_rc =
-      lib.clang_saveTranslationUnit(tu, pch_path().c_str(), 0);
-  lib.clang_disposeTranslationUnit(tu);
-  lib.clang_disposeIndex(index);
+      ::clang_saveTranslationUnit(tu, pch_path().c_str(), 0);
+  ::clang_disposeTranslationUnit(tu);
+  ::clang_disposeIndex(index);
   if (save_rc != CXSaveError_None) {
     err << "error: failed to save the PCH (code " << save_rc << ")\n";
     return 1;

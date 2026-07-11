@@ -29,12 +29,10 @@
 #include "cli/format.hpp"
 #include "cli/json_out.hpp"
 #include "cli/kind_names.hpp"
-#include "clangx/libclang.hpp"
 #include "util/errors.hpp"
 #include "util/logger.hpp"
 
 namespace fs = std::filesystem;
-using cidx::LibClang;
 using cidx::UsageError;
 namespace cli = cidx::cli;
 namespace json_out = cidx::json_out;
@@ -54,17 +52,6 @@ bool require_manifests() {
   return true;
 }
 
-LibClang *require_libclang() {
-  LibClang &lib = LibClang::instance();
-  try {
-    lib.load();
-  } catch (const cidx::CidxError &e) {
-    g_clang_skipped = true;
-    MESSAGE("SKIP: no loadable libclang: " << std::string(e.what()));
-    return nullptr;
-  }
-  return &lib;
-}
 
 std::string make_temp_dir() {
   char tmpl[] = "/tmp/cidx_astq_XXXXXX";
@@ -604,7 +591,7 @@ TEST_CASE("argparse: ast dump --kind invalid choice → exit 2") {
 TEST_SUITE("clang") {
 
 TEST_CASE("cmd_ast_dump: leaf_a --depth 2 --types --json matches golden") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -670,7 +657,7 @@ TEST_CASE("cmd_ast_dump: leaf_a --depth 2 --types --json matches golden") {
 }
 
 TEST_CASE("cmd_ast_locals: BadlyNamedFunction --params --json matches golden") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -731,7 +718,7 @@ TEST_CASE("cmd_ast_locals: BadlyNamedFunction --params --json matches golden") {
 }
 
 TEST_CASE("cmd_ast_conditions: shape_area --json matches golden") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -791,7 +778,7 @@ TEST_CASE("cmd_ast_conditions: shape_area --json matches golden") {
 }
 
 TEST_CASE("cmd_ast_dump: whole calls.c text has known functions") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();
@@ -843,7 +830,7 @@ TEST_CASE("cmd_ast_dump: whole calls.c text has known functions") {
 }
 
 TEST_CASE("cmd_ast_conditions: recurse() returns empty list") {
-  if (!require_manifests() || !require_libclang())
+  if (!require_manifests())
     return;
 
   const std::string cache = make_temp_dir();

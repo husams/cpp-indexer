@@ -11,7 +11,10 @@ build*/
 python/.venv/
 python/.pytest_cache/
 python/.ruff_cache/
-python/**/__pycache__/
+**/__pycache__/
 python/dist/
 python/build/
 python/*.egg-info/
+
+# Machine-local semantic index.
+/index.db

@@ -24,7 +24,7 @@
 #include <unistd.h>
 
 #include "clangx/ast.hpp"
-#include "clangx/libclang.hpp"
+#include "clangx/clang_runtime.hpp"
 #include "clangx/parse.hpp"
 #include "clangx/toolchain.hpp"
 #include "storage/records.hpp"
@@ -36,7 +36,6 @@ namespace fs = std::filesystem;
 using cidx::AstIndexer;
 using cidx::ClangParseError;
 using cidx::HeaderStats;
-using cidx::LibClang;
 using cidx::Logger;
 using cidx::ParsedTu;
 using cidx::Parser;
@@ -60,17 +59,6 @@ bool require_manifests() {
   return true;
 }
 
-LibClang *require_libclang() {
-  LibClang &lib = LibClang::instance();
-  try {
-    lib.load();
-  } catch (const cidx::CidxError &e) {
-    g_clang_skipped = true;
-    MESSAGE("SKIP: no loadable libclang: " << std::string(e.what()));
-    return nullptr;
-  }
-  return &lib;
-}
 
 std::string make_temp_dir() {
   char tmpl[] = "/tmp/cidx_ast_XXXXXX";
@@ -239,9 +227,6 @@ TEST_SUITE("clang") {
 
   TEST_CASE("clean parse: TU produced, spelling = path as passed, no log "
             "records at all") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     ParseFixture f;
     const std::string path = f.tmp + "/ok.c";
     write_file(path, "int the_answer(void) { return 42; }\n");
@@ -257,9 +242,6 @@ TEST_SUITE("clang") {
   }
 
   TEST_CASE("CIDX_MEM=1: a successful parse logs one per-TU memory line") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     ScopedEnv mem("CIDX_MEM", "1");
     ParseFixture f;
     const std::string path = f.tmp + "/mem.c";
@@ -281,9 +263,6 @@ TEST_SUITE("clang") {
 
   TEST_CASE(
       "CIDX_MEM unset: a clean parse still writes nothing (default off)") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     ScopedEnv mem("CIDX_MEM", nullptr);
     ParseFixture f;
     const std::string path = f.tmp + "/nomem.c";
@@ -294,9 +273,6 @@ TEST_SUITE("clang") {
   }
 
   TEST_CASE("nonexistent source -> ClangParseError(\"cannot parse <file>\")") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     ParseFixture f;
     const std::string path = f.tmp + "/does-not-exist.c";
     CHECK_THROWS_WITH_AS(f.parser.parse(path, {}, std::nullopt),
@@ -305,9 +281,6 @@ TEST_SUITE("clang") {
 
   TEST_CASE("semantic errors, default mode: parse succeeds, ONE warning, "
             "exact summary + INFO diag lines in the log") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     ParseFixture f;
     const std::string path = write_error_source(f.tmp, 3);
 
@@ -336,9 +309,6 @@ TEST_SUITE("clang") {
 
   TEST_CASE("CIDX_STRICT=1: same errors abort; message = first 3 "
             "';'-joined") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     ParseFixture f;
     ScopedEnv strict("CIDX_STRICT", "1");
     const std::string path = write_error_source(f.tmp, 5);
@@ -361,10 +331,6 @@ TEST_SUITE("clang") {
 
   TEST_CASE("fatal diagnostic: throw; flag dump + libclang major in the LOG "
             "only, nothing on stdout/stderr (G28)") {
-    LibClang *lib = require_libclang();
-    if (lib == nullptr) {
-      return;
-    }
     ParseFixture f;
     const std::string path = f.tmp + "/bad.c";
     write_file(path, "#include \"no-such-header.h\"\nint x;\n");
@@ -405,7 +371,8 @@ TEST_SUITE("clang") {
     CHECK(logged.find("ERROR cidx.clang: " + path + ": failed parse flags: ") !=
           std::string::npos);
     CHECK(logged.find("-ferror-limit=0; libclang: " +
-                      std::to_string(lib->major())) != std::string::npos);
+                      std::to_string(cidx::linked_libclang_major())) !=
+          std::string::npos);
     CHECK(logged.find(
               "INFO cidx.clang: " +
               diag_line(path, path, 1, "'no-such-header.h' file not found")) !=
@@ -415,9 +382,6 @@ TEST_SUITE("clang") {
 
   TEST_CASE("30 errors: -ferror-limit=0 lifts the 20-cap (G5); exactly 25 "
             "INFO lines + the suppressed line") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     ParseFixture f;
     const std::string path = write_error_source(f.tmp, 30);
 
@@ -486,9 +450,6 @@ TEST_SUITE("clang") {
 
   TEST_CASE("kind map: all 16 reachable kinds map to the exact stored kind "
             "strings; unmapped kinds are ignored") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     IndexFixture f;
     const std::string path = f.tmp + "/kinds.cpp";
     write_file(path, "namespace the_ns {\n"
@@ -555,9 +516,6 @@ TEST_SUITE("clang") {
 
   TEST_CASE("is_static: static member function flagged; instance methods and "
             "free functions are not (v12)") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     IndexFixture f;
     const std::string path = f.tmp + "/statics.cpp";
     write_file(path, "namespace ns {\n"
@@ -597,9 +555,6 @@ TEST_SUITE("clang") {
   TEST_CASE("templates: explicit instantiation -> instantiates (kind 5), "
             "explicit specialization -> specializes (kind 4); TYPE template_arg "
             "rows record the type spelling so Box<bool> != Box<int>") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     IndexFixture f;
     const std::string path = f.tmp + "/tmpl.cpp";
     write_file(path,
@@ -678,9 +633,6 @@ TEST_SUITE("clang") {
 
   TEST_CASE("project flow: header decls first, definition wins file/line/col "
             "with decl_* preserved; counters across two TUs (G15, G20, G24)") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     if (!require_manifests()) {
       return;
     }
@@ -752,9 +704,6 @@ TEST_SUITE("clang") {
       "the leading struct/union/enum keyword or a function's return type "
       "(mirrors test_symbol_extent_end.py::"
       "test_source_includes_leading_keyword_or_return_type)") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     if (!require_manifests()) {
       return;
     }
@@ -784,9 +733,6 @@ TEST_SUITE("clang") {
   TEST_CASE("shapes.c then shapes.h: resolved rows skipped but decl-patched "
             "(G15); subtree/body pruning (G21); `macro` unreachable (G22); "
             "linkage spellings (D13)") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     if (!require_manifests()) {
       return;
     }
@@ -855,9 +801,6 @@ TEST_SUITE("clang") {
 
   TEST_CASE("geometry: ns::Class::method qual names from semantic parents; "
             "access + pure-virtual via the D13 tables") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     if (!require_manifests()) {
       return;
     }
@@ -940,9 +883,6 @@ TEST_SUITE("clang") {
 
   TEST_CASE("anonymous entities: indexed when they carry a USR; qual_name "
             "skips empty-spelling levels (G25)") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     IndexFixture f;
     // C++: an anonymous NAMESPACE has an empty spelling but a USR ('...@aN')
     const std::string path = f.tmp + "/anonns.cpp";
@@ -997,9 +937,6 @@ TEST_SUITE("clang") {
   TEST_CASE("system headers: skipped by default, indexed when "
             "$INDEXER_IGNORE_SYSTEM_HEADERS spells false (G26); header row "
             "carries NULL options/driver (G20); md5 'already' skip") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     IndexFixture f;
     const std::string sys_dir = f.tmp + "/sys";
     const std::string sys_hdr = sys_dir + "/syshdr.h";
@@ -1061,9 +998,6 @@ TEST_SUITE("clang") {
   TEST_CASE("include spelling vs abspath: cursors matched against the "
             "SPELLING, rows stored under the abspath (G23); unowned headers "
             "counted") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     IndexFixture f;
     write_file(f.tmp + "/out/hdr.h", "int owned_fn(void);\n");
     const std::string main_c = f.tmp + "/comp/main.c";
@@ -1106,9 +1040,6 @@ TEST_SUITE("clang") {
   TEST_CASE("geometry: graph edges — inherits/field_of/method_of/"
             "template_param/uses extracted from geometry.cpp + geometry.hpp "
             "(M1 functional graph tests)") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     if (!require_manifests()) {
       return;
     }
@@ -1265,9 +1196,6 @@ TEST_SUITE("clang") {
   TEST_CASE("type uses: a class named only as a parameter / return / field / "
             "local / typedef type earns an inbound `uses` edge "
             "(_emit_type_use parity)") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     IndexFixture f;
     const std::string path = f.tmp + "/types.cpp";
     write_file(path,
@@ -1319,9 +1247,6 @@ TEST_SUITE("clang") {
   TEST_CASE("typeref uses: a bare type NAME in expression position "
             "(static-call receiver, scoped-enum access) earns an inbound "
             "`uses` edge; self-owner is skipped (TYPE_REF branch parity)") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     IndexFixture f;
     const std::string path = f.tmp + "/tr.cpp";
     // Mirrors project/tests/test_type_uses.py TYPEREF_SOURCE byte-for-byte
@@ -1380,9 +1305,6 @@ TEST_SUITE("clang") {
   TEST_CASE("dependent calls inside a template body are recovered: a template "
             "method calling a function template earns a calls edge to the "
             "primary; ambiguous overload sets link to ALL indexed candidates") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     IndexFixture f;
     const std::string path = f.tmp + "/tmplcalls.cpp";
     write_file(path,
@@ -1437,9 +1359,6 @@ TEST_SUITE("clang") {
   TEST_CASE("overloaded member function template called from another template "
             "body links to the member template (regression for the "
             "BzRuleValueCache::set/get no-references report)") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     IndexFixture f;
     const std::string path = f.tmp + "/membovl.cpp";
     write_file(path,
@@ -1483,9 +1402,6 @@ TEST_SUITE("clang") {
 
   TEST_CASE("function and method template specializations store template args "
             "without marking ordinary owners as instantiations") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     IndexFixture f;
     const std::string path = f.tmp + "/callable_specs.cpp";
     write_file(path,
@@ -1631,9 +1547,6 @@ TEST_SUITE("clang") {
   TEST_CASE("cross-TU wrong order: the consuming TU indexed BEFORE the cache TU "
             "mints USR-keyed stubs that backfill on a later index + resolve "
             "(order independence; regression for v0.14.2)") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     IndexFixture f;
     const std::string use_dir = f.tmp + "/use";
     const std::string lib_dir = f.tmp + "/lib";
@@ -1754,9 +1667,6 @@ TEST_SUITE("clang") {
   TEST_CASE("system-header gating: a dependent call to a std overload set "
             "(std::swap) mints no stub and adds no edge (regression for "
             "v0.14.2 gating)") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     IndexFixture f;
     const std::string path = f.tmp + "/swapstd.cpp";
     write_file(path, "#include <utility>\n"

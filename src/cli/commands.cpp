@@ -25,7 +25,7 @@
 #include "astcache/astcache.hpp"
 #include "clangx/ast.hpp"
 #include "clangx/ast_query.hpp"
-#include "clangx/libclang.hpp"
+#include "clangx/clang_runtime.hpp"
 #include "clangx/parse.hpp"
 #include "clangx/pch.hpp"
 #include "clangx/toolchain.hpp"
@@ -595,7 +595,7 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
   // A missing/unloadable libclang is NOT a compilation-database failure:
   // let it propagate to main()'s generic CidxError handler (exit 1 with the
   // real dlopen message). Python's analogue fails at clang.cindex import.
-  LibClang::instance().load();
+  warn_if_runtime_libclang_ignored();
 
   std::vector<CompileCommand> commands;
   try {

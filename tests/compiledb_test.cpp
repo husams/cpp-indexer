@@ -1,5 +1,5 @@
 // S03 tests — compiledb strip/sanitize/driver (hermetic, label "default")
-// and CompileDb::load / LibClang over the real manifests compile DBs
+// and CompileDb::load / linked libclang over the real manifests compile DBs
 // (suite "clang", label "clang").
 //
 // Skip policy (A1 amendment): libclang is now linked, so "no libclang" cannot
@@ -12,18 +12,23 @@
 #include <sys/stat.h>
 
 #include <cstdlib>
+#include <fstream>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <vector>
 
-#include "clangx/libclang.hpp"
+#include <unistd.h>
+
+#include "clangx/clang_raii.hpp"
+#include "clangx/clang_runtime.hpp"
 #include "compiledb/compiledb.hpp"
 #include "util/errors.hpp"
+#include "util/logger.hpp"
 #include "util/pathutil.hpp"
 
 using cidx::CompileCommand;
 using cidx::CompileDb;
-using cidx::LibClang;
 
 namespace {
 
@@ -44,11 +49,6 @@ bool require_manifests() {
 
 // A1: libclang is linked — load() is a no-op, always succeeds.
 // Returns the singleton; never returns nullptr.
-LibClang *require_libclang() {
-  LibClang &lib = LibClang::instance();
-  lib.load(); // no-op; kept for call-site compatibility
-  return &lib;
-}
 
 // setenv/unsetenv with restore-on-destruction (the clang-labelled ctest
 // registration may inject CIDX_LIBCLANG; don't clobber it for later cases).
@@ -280,31 +280,21 @@ TEST_CASE("db_dir_from_arg: trailing compile_commands.json stripped") {
 }
 
 TEST_CASE("parse_clang_major: regex + 0 fallback (P12)") {
-  CHECK(LibClang::parse_clang_major("clang version 18.1.8 "
-                                    "(https://github.com/llvm/llvm-project)") ==
+  CHECK(cidx::parse_libclang_major("clang version 18.1.8 "
+                                   "(https://github.com/llvm/llvm-project)") ==
         18);
-  CHECK(LibClang::parse_clang_major("Ubuntu clang version 21.1.1") == 21);
-  CHECK(LibClang::parse_clang_major("clang version 7") == 7);
-  CHECK(LibClang::parse_clang_major("garbage with no version") == 0);
-  CHECK(LibClang::parse_clang_major("") == 0);
-  CHECK(LibClang::parse_clang_major("version x.y") == 0);
+  CHECK(cidx::parse_libclang_major("Ubuntu clang version 21.1.1") == 21);
+  CHECK(cidx::parse_libclang_major("clang version 7") == 7);
+  CHECK(cidx::parse_libclang_major("garbage with no version") == 0);
+  CHECK(cidx::parse_libclang_major("") == 0);
+  CHECK(cidx::parse_libclang_major("version x.y") == 0);
 }
 
-// A1 facade contract tests — replaces the former dlopen/R3/R4 cases.
-
-TEST_CASE("A1: LibClang facade is always loaded (no-dlopen build)") {
-  // A1: loaded() must return true unconditionally — the binary cannot link
-  // without libclang, so there is no "not loaded" state.
-  cidx::LibClang lib;
-  CHECK(lib.loaded());
-}
-
-TEST_CASE("A1: library_path() returns the non-empty build-time path") {
+TEST_CASE("configured_libclang_library_path returns the build-time path") {
   // A1.3: library_path() returns the CIDX_LIBCLANG_PATH compile definition.
   // It must be a non-empty absolute path (not a bare name like "libclang.so")
   // so that Toolchain (S04) can derive the resource-dir from its dirname.
-  cidx::LibClang lib;
-  const std::string path = lib.library_path();
+  const std::string path = cidx::configured_libclang_library_path();
   REQUIRE_FALSE(path.empty());
   // Compile-definition check: must equal the macro exactly.
   CHECK(path == std::string(CIDX_LIBCLANG_PATH));
@@ -312,26 +302,28 @@ TEST_CASE("A1: library_path() returns the non-empty build-time path") {
   CHECK(path[0] == '/');
 }
 
-TEST_CASE("A1: load() is a no-op when CIDX_LIBCLANG env is unset") {
-  // When the env var is absent, load() must be callable without side-effects.
+TEST_CASE("ignored runtime libclang warning is absent when the env is unset") {
   ScopedEnv clear_env("CIDX_LIBCLANG", "");
-  cidx::LibClang lib;
-  CHECK_NOTHROW(lib.load());
-  CHECK(lib.loaded());
+  CHECK_NOTHROW(cidx::warn_if_runtime_libclang_ignored());
 }
 
-TEST_CASE("A1: load() emits a one-shot warning when CIDX_LIBCLANG is set") {
-  // A1.3: a stale CIDX_LIBCLANG export must not fail — we warn once and
-  // continue.  Verify: (a) no exception, (b) the instance stays loaded,
-  // (c) a second call is truly idempotent (static flag, fires once per process
-  // image — we verify non-throwing; the warning-counter path is covered by
-  // env_logger_test).
+TEST_CASE("ignored runtime libclang warning is emitted exactly once") {
   ScopedEnv env("CIDX_LIBCLANG", "/some/stale/libclang.so");
-  cidx::LibClang lib;
-  CHECK_NOTHROW(lib.load());
-  CHECK(lib.loaded());
-  // Second call: also no-op, no throw.
-  CHECK_NOTHROW(lib.load());
+  const std::string log_path =
+      "/tmp/cidx-libclang-warning-" + std::to_string(::getpid()) + ".log";
+  cidx::Logger &log = cidx::Logger::root();
+  log.set_file(log_path);
+  const int before = log.warning_count();
+  CHECK_NOTHROW(cidx::warn_if_runtime_libclang_ignored());
+  CHECK_NOTHROW(cidx::warn_if_runtime_libclang_ignored());
+  CHECK(log.warning_count() == before + 1);
+  std::ifstream in(log_path);
+  const std::string text((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+  const std::string expected =
+      "CIDX_LIBCLANG is set but ignored: this build links libclang at " +
+      cidx::configured_libclang_library_path() + " (set at build time)";
+  CHECK(text.find(expected) != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
@@ -424,18 +416,25 @@ TEST_CASE("split_base_version: dot-separated version") {
 
 TEST_SUITE("clang") {
 
-  TEST_CASE("LibClang facade: loaded, major() in range, library_path set") {
-    LibClang *lib = require_libclang(); // always non-null (A1)
-    MESSAGE("build-time libclang path: " << lib->library_path());
-    CHECK(lib->loaded());
-    CHECK_FALSE(lib->library_path().empty());
-    CHECK(lib->library_path()[0] == '/'); // must be absolute
-    CHECK(lib->major() > 0);   // linked libclang must parse to a real version
-    CHECK(lib->major() < 100); // sanity upper bound
+  TEST_CASE("libclang RAII wrappers are exclusive owners") {
+    static_assert(!std::is_copy_constructible_v<cidx::CxString>);
+    static_assert(!std::is_move_constructible_v<cidx::CxString>);
+    static_assert(!std::is_copy_constructible_v<cidx::CxOverriddenCursors>);
+    static_assert(!std::is_move_constructible_v<cidx::CxOverriddenCursors>);
+    const cidx::CxString version(::clang_getClangVersion());
+    CHECK_FALSE(version.str().empty());
+  }
+
+  TEST_CASE("linked libclang major and configured path are valid") {
+    const std::string path = cidx::configured_libclang_library_path();
+    MESSAGE("build-time libclang path: " << path);
+    CHECK_FALSE(path.empty());
+    CHECK(path[0] == '/');
+    CHECK(cidx::linked_libclang_major() > 0);
+    CHECK(cidx::linked_libclang_major() < 100);
   }
 
   TEST_CASE("CompileDb::load over manifests/compile_commands.json") {
-    require_libclang(); // ensure load() called (no-op, A1)
     if (!require_manifests()) {
       return;
     }
@@ -458,7 +457,6 @@ TEST_SUITE("clang") {
   }
 
   TEST_CASE("CompileDb::load accepts the directory form of --db") {
-    require_libclang();
     if (!require_manifests()) {
       return;
     }
@@ -479,7 +477,6 @@ TEST_SUITE("clang") {
   }
 
   TEST_CASE("CompileDb::load throws CidxError on a database-less directory") {
-    require_libclang();
     CHECK_THROWS_AS(CompileDb::load("/nonexistent-cidx-db-dir"),
                     cidx::CidxError);
   }
