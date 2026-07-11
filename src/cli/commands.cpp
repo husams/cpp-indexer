@@ -644,9 +644,9 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
   Storage db(ctx.index_path);
 
   // Encode include paths against the alias registry unless --no-alias. The
-  // registry is explicit labels PLUS uniquely-named components, so an -I under
-  // a component root auto-aliases to <component-name> with no `cidx label add`
-  // needed; decode (get_alias) mirrors this same registry.
+  // registry is uniquely-named components (plus any stored labels), so an -I
+  // under a component root auto-aliases to <component-name>. Decode
+  // (get_alias) mirrors this same registry.
   // Mirrors Python cmd_import: build_label_map(db.list_alias_pairs(), db.get_alias).
   std::vector<AliasEntry> label_map;
   if (!args.no_alias) {
@@ -2781,7 +2781,7 @@ open_graph(const ParsedArgs & /*args*/, Context &ctx) {
       const std::string repr = format::py_repr(ctx.index_path);
       *ctx.err << "error: no cidx index at " << repr
                << ". Build one with:\n"
-               << "    cd <repo> && cidx add-source --path . && cidx import "
+               << "    cd <repo> && cidx component add --path . && cidx import "
                   "--db <build> && cidx index && cidx resolve\n"
                << "or pass --db PATH / set $INDEXER_CACHE.\n";
       return std::nullopt;
@@ -3087,8 +3087,7 @@ int cmd_graph_definitions(const ParsedArgs &args, Context &ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// Portable-paths commands (v14): component show/set-version,
-//                               label add/rm/list/resolve
+// Portable-paths commands (v14): component show/set-version
 // ---------------------------------------------------------------------------
 
 int cmd_component_show(const ParsedArgs &args, Context &ctx) {
@@ -3386,86 +3385,6 @@ int cmd_verify(const ParsedArgs &args, Context &ctx) {
   return (c_missing == 0 && c_vermiss == 0 && f_missing == 0) ? 0 : 1;
 }
 
-int cmd_label_add(const ParsedArgs &args, Context &ctx) {
-  const std::string lname = args.label_token ? *args.label_token : std::string();
-  const std::string lpath = args.label_path ? *args.label_path : std::string();
-  if (lname.empty() || lpath.empty()) {
-    *ctx.err << "error: NAME and PATH are required\n";
-    return 1;
-  }
-  Storage db(ctx.index_path);
-  // Check existence before upsert so we can print "added" vs "updated".
-  // Mirrors Python: existing = db.get_label(args.name)
-  const std::optional<std::string> existing = db.get_label(lname);
-  db.add_label(lname, lpath);
-  if (!existing) {
-    *ctx.out << "added label " << lname << " -> " << lpath << "\n";
-  } else {
-    *ctx.out << "updated label " << lname << " -> " << lpath << "\n";
-  }
-  return 0;
-}
-
-int cmd_label_rm(const ParsedArgs &args, Context &ctx) {
-  const std::string lname = args.label_token ? *args.label_token : std::string();
-  Storage db(ctx.index_path);
-  const bool removed = db.remove_label(lname);
-  if (!removed) {
-    *ctx.err << "error: no label named '" << lname << "'\n";
-    return 1;
-  }
-  // Python: f"removed label {args.name}" (no quotes around name)
-  *ctx.out << "removed label " << lname << "\n";
-  return 0;
-}
-
-int cmd_label_list(const ParsedArgs &args, Context &ctx) {
-  (void)args;
-  Storage db(ctx.index_path);
-  const auto labels = db.list_labels();
-  if (labels.empty()) {
-    *ctx.out << "0 label(s)\n";
-    return 0;
-  }
-  // Dynamic column width: max(len(name)) + 2-space separator.
-  // Python: width = max(len(name) for name, _ in labels)
-  //         f"{name:<{width}}  {path}"
-  std::size_t width = 0;
-  for (const auto &[lname, lpath] : labels) {
-    (void)lpath;
-    if (lname.size() > width) width = lname.size();
-  }
-  for (const auto &[lname, lpath] : labels) {
-    *ctx.out << fmt::ljust(lname, static_cast<int>(width)) << "  " << lpath
-             << "\n";
-  }
-  *ctx.out << labels.size() << " label(s)\n";
-  return 0;
-}
-
-int cmd_label_resolve(const ParsedArgs &args, Context &ctx) {
-  std::string token = args.label_path ? *args.label_path : std::string();
-  // Parity with Python: if no '<' or '$' in the token, treat it as a bare
-  // label name and wrap it: f"<{token}>".
-  if (token.find('<') == std::string::npos &&
-      token.find('$') == std::string::npos) {
-    token = "<" + token + ">";
-  }
-  Storage db(ctx.index_path);
-  // Build a LabelResolver backed by the DB. get_alias resolves explicit labels
-  // and uniquely-named components, matching parse-time decode (v0.8.0).
-  const bool autoderive = !args.no_autoderive_labels;
-  pathutil::LabelResolver resolver(
-      [&db](const std::string &n) { return db.get_alias(n); }, autoderive);
-  const std::string raw = pathutil::resolve_fs_path(token, resolver);
-  // Apply abspath only for bare paths (not compound tokens like -I<...>).
-  // resolve_fs_path contract: abspath is the caller's responsibility.
-  const std::string resolved =
-      (!raw.empty() && raw[0] == '-') ? raw : pathutil::abspath(raw);
-  *ctx.out << resolved << "\n";
-  return 0;
-}
-
 // cmd_realias (cli.py cmd_realias): rewrite stored include paths to <label>
 // tokens via the registry. Optional COMPONENT restricts to one component.
 // Port of Python cmd_realias, byte-identical output strings.
@@ -3475,8 +3394,7 @@ int cmd_realias(const ParsedArgs &args, Context &ctx) {
   const auto label_map = CompileDb::build_label_map(
       pairs, [&db](const std::string &n) { return db.get_alias(n); });
   if (label_map.empty()) {
-    *ctx.err << "error: no aliases available (register a label with "
-                "'cidx label add', or add a component)\n";
+    *ctx.err << "error: no aliases available (add a component first)\n";
     return 1;
   }
   std::optional<int64_t> cid;
@@ -3606,11 +3524,8 @@ int run_command(const ParsedArgs &args, Context &ctx) {
   if (args.command == "verify") {
     return cmd_verify(args, ctx);
   }
-  if (args.command == "label") {
-    if (args.what == "add") return cmd_label_add(args, ctx);
-    if (args.what == "rm") return cmd_label_rm(args, ctx);
-    if (args.what == "list") return cmd_label_list(args, ctx);
-    return cmd_label_resolve(args, ctx);
+  if (args.command == "analyze") {
+    return cmd_analyze(args, ctx);
   }
   // list
   if (args.what == "components") {

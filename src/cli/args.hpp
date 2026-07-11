@@ -24,7 +24,7 @@ namespace cli {
 
 // Tool version. Keep in sync with pyproject.toml [project].version and the
 // Python tool (cli.py VERSION). `cidx --version` prints "cidx <kVersion>".
-inline constexpr const char *kVersion = "0.52.0";
+inline constexpr const char *kVersion = "0.53.0";
 
 struct ParsedArgs {
   std::string command; // add-source | import | index | search | show | list
@@ -101,8 +101,6 @@ struct ParsedArgs {
   std::optional<std::string> version_str; // --version VER (add-source)
   bool no_detect_version = false;          // --no-detect-version (add-source)
   bool no_autoderive_labels = false;       // --no-autoderive-labels (index)
-  std::optional<std::string> label_token; // label add/rm/resolve NAME
-  std::optional<std::string> label_path;  // label add PATH
 
   // -- aliasing (v0.6.0) fields ----------------------------------------------
   bool no_alias = false; // import --no-alias (skip alias_options encoding)
@@ -114,6 +112,14 @@ struct ParsedArgs {
   std::optional<std::string> repo;       // import/add-source --repo (group name)
   std::optional<std::string> repo_label; // repo add-clone --label
   bool delete_components = false;         // repo rm --delete-components
+
+  // -- analyze (Souffle) fields ------------------------------------------------
+  // --db is carried in index_db.
+  std::optional<std::string> analyze_rule;       // --rule NAME
+  std::optional<std::string> analyze_rules_file; // --rules-file FILE
+  bool analyze_list = false;                     // --list
+  std::optional<std::string> analyze_export;     // --export-facts DIR
+  int analyze_jobs = 1;                          // --jobs N (default 1)
 
   // -- pch sub-command fields (cidx pch build|status|clear, v0.17.0) ----------
   // build|status|clear is carried in `what`; --db in index_db; --force in force.

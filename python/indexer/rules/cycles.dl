@@ -1,0 +1,22 @@
+// Built-in rule: call cycles (direct or mutual recursion) over `calls` and
+// `dispatch_calls` edges.  Fact relations come from the cidx analyze prelude.
+
+.decl direct_call(caller:number, callee:number)
+direct_call(s, d) :- edge(_, s, d, k, _), edge_kind(k, "calls").
+direct_call(s, d) :- edge(_, s, d, k, _), edge_kind(k, "dispatch_calls").
+
+.decl reach(src:number, dst:number)
+reach(s, d) :- direct_call(s, d).
+reach(s, d) :- reach(s, m), direct_call(m, d).
+
+.decl cycle_member(usr:symbol, name:symbol)
+cycle_member(u, n) :- reach(s, s), symbol(s, u, n, _, _, _, _, _).
+.output cycle_member
+
+.decl cycle_edge(caller_usr:symbol, caller:symbol,
+                 callee_usr:symbol, callee:symbol)
+cycle_edge(su, sn, du, dn) :-
+    direct_call(s, d), reach(d, s),
+    symbol(s, su, sn, _, _, _, _, _),
+    symbol(d, du, dn, _, _, _, _, _).
+.output cycle_edge

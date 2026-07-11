@@ -1,0 +1,25 @@
+// Built-in rule: direct and transitive call graph over `calls` and
+// `dispatch_calls` edges.  Fact relations come from the cidx analyze prelude.
+
+.decl direct_call(caller:number, callee:number)
+direct_call(s, d) :- edge(_, s, d, k, _), edge_kind(k, "calls").
+direct_call(s, d) :- edge(_, s, d, k, _), edge_kind(k, "dispatch_calls").
+
+.decl call(caller_usr:symbol, caller:symbol, callee_usr:symbol, callee:symbol)
+call(su, sn, du, dn) :-
+    direct_call(s, d),
+    symbol(s, su, sn, _, _, _, _, _),
+    symbol(d, du, dn, _, _, _, _, _).
+.output call
+
+.decl reach(src:number, dst:number)
+reach(s, d) :- direct_call(s, d).
+reach(s, d) :- reach(s, m), direct_call(m, d).
+
+.decl call_transitive(caller_usr:symbol, caller:symbol,
+                      callee_usr:symbol, callee:symbol)
+call_transitive(su, sn, du, dn) :-
+    reach(s, d),
+    symbol(s, su, sn, _, _, _, _, _),
+    symbol(d, du, dn, _, _, _, _, _).
+.output call_transitive

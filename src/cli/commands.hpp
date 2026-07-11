@@ -76,6 +76,9 @@ int cmd_repo_rm(const ParsedArgs &args, Context &ctx);
 // verify: check that component roots (incl. version) and files exist on disk.
 int cmd_verify(const ParsedArgs &args, Context &ctx);
 
+// analyze: Souffle Datalog analyses over the semantic index (src/cli/analyze.cpp).
+int cmd_analyze(const ParsedArgs &args, Context &ctx);
+
 // Graph query commands (cidx graph callers|callees|refs|neighbors|walk|path|
 //                            hierarchy|dispatch)
 int cmd_graph_callers(const ParsedArgs &args, Context &ctx);
