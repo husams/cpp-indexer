@@ -6,15 +6,9 @@
 // abstraction is what lets the visitor stay decoupled from I/O and storage.
 #pragma once
 
-#include <string>
+#include "clangx_lt/symbol_record.hpp"
 
 namespace cidx::lt {
-
-struct SymbolRecord {
-  std::string usr;
-  int kind;                    // CXCursorKind integer (see kind_map.hpp)
-  std::string qualified_name;
-};
 
 class SymbolEmitter {
 public:

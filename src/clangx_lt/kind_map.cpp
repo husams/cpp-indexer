@@ -8,6 +8,10 @@ namespace cidx::lt {
 int cidx_symbol_kind(const clang::Decl *decl) {
   using clang::Decl;
   switch (decl->getKind()) {
+  // Explicit full specializations surface as plain record cursors in libclang;
+  // partial specializations map to a cursor kind outside the frozen 17-entry
+  // map and are therefore not symbols.
+  case Decl::ClassTemplateSpecialization:
   case Decl::CXXRecord:
   case Decl::Record: {
     const auto *rd = llvm::cast<clang::RecordDecl>(decl);

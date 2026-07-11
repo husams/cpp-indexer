@@ -482,11 +482,18 @@ if(CIDX_CLANGX_LIBTOOLING)
     src/clangx_lt/main.cpp
     src/clangx_lt/kind_map.cpp
     src/clangx_lt/usr.cpp
+    src/clangx_lt/location.cpp
+    src/clangx_lt/names.cpp
+    src/clangx_lt/decl_flags.cpp
+    src/clangx_lt/symbol_extractor.cpp
     src/clangx_lt/tsv_symbol_emitter.cpp
     src/clangx_lt/symbol_visitor.cpp
     src/clangx_lt/symbol_consumer.cpp
     src/clangx_lt/symbol_action.cpp
   )
+  # Builtin-header resource dir of the LLVM we compile against (gotcha 8b).
+  target_compile_definitions(cidx_lt_probe PRIVATE
+    "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
   target_include_directories(cidx_lt_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_include_directories(cidx_lt_probe SYSTEM PRIVATE
     ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})

@@ -27,6 +27,14 @@ int main(int argc, const char **argv) {
   }
   clang::tooling::ClangTool tool(parser->getCompilations(),
                                  parser->getSourcePathList());
+#ifdef CIDX_LT_RESOURCE_DIR
+  // ClangTool resolves builtin headers relative to the tool binary, which is
+  // not co-located with a clang install — point it at the build-time LLVM's
+  // resource dir instead (the real layer will reuse toolchain.cpp for this).
+  tool.appendArgumentsAdjuster(clang::tooling::getInsertArgumentAdjuster(
+      {"-resource-dir", CIDX_LT_RESOURCE_DIR},
+      clang::tooling::ArgumentInsertPosition::BEGIN));
+#endif
   return tool.run(
       clang::tooling::newFrontendActionFactory<cidx::lt::SymbolAction>().get());
 }
