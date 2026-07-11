@@ -1,0 +1,8 @@
+// Whole-index inventory aggregated by symbol kind (no per-symbol stdout flood).
+#include "cidx_base.dl"
+
+.decl symbols_by_kind(kind:symbol, total:number)
+symbols_by_kind(k, n) :- symbol_fact(_, _, k, _, _, _, _, _, _, _, _, _, _),
+                         n = count : { symbol_fact(_, _, k, _, _, _, _, _, _, _, _, _, _) }.
+
+.output symbols_by_kind(IO=stdout)

@@ -1,0 +1,17 @@
+// Incoming cross-TU calls/uses for one selected symbol.
+#include "cidx_base.dl"
+
+.decl query_seed(name:Sym)
+.input query_seed(IO=sqlite, dbname="index.db")
+
+.decl incoming_reference(kind:symbol, source:Sym, target:Sym)
+incoming_reference("calls", s, d) :- query_seed(d), calls(s, d).
+incoming_reference("uses", s, d) :- query_seed(d), uses(s, d).
+
+.decl unreferenced_definition(name:Sym)
+unreferenced_definition(n) :- query_seed(n),
+    symbol_fact(_, n, _, _, _, _, 1, _, _, _, _, _, _),
+    !incoming_reference(_, _, n).
+
+.output incoming_reference(IO=stdout)
+.output unreferenced_definition(IO=stdout)
