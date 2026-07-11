@@ -9,7 +9,7 @@
 // are written into temp trees; the libclang major is injected through the
 // Toolchain test seam (set_libclang_major_for_test covers the major()==0
 // cap-when-undeterminable path even though A1 guarantees a real major).
-// The "clang" doctest suite touches a real LibClang::major() — it always
+// The "clang" doctest suite touches the real linked libclang major — it always
 // runs under A1 (binary cannot link without libclang; no-dylib skip removed).
 #define DOCTEST_CONFIG_IMPLEMENT
 #include "doctest/doctest.h"
@@ -24,12 +24,11 @@
 
 #include <unistd.h>
 
-#include "clangx/libclang.hpp"
+#include "clangx/clang_runtime.hpp"
 #include "clangx/toolchain.hpp"
 #include "util/logger.hpp"
 
 namespace fs = std::filesystem;
-using cidx::LibClang;
 using cidx::Logger;
 using cidx::Toolchain;
 
@@ -38,11 +37,6 @@ namespace {
 // A1: load() is a no-op (binary links libclang at build time); it never
 // throws. require_libclang() now always succeeds — kept as a named helper so
 // the clang test suite reads naturally.
-LibClang *require_libclang() {
-  LibClang &lib = LibClang::instance();
-  lib.load(); // no-op under A1; emits one-shot warning if CIDX_LIBCLANG is set
-  return &lib;
-}
 
 std::string make_temp_dir() {
   char tmpl[] = "/tmp/cidx_toolchain_XXXXXX";
@@ -708,16 +702,14 @@ TEST_CASE("pick_best_resource: best NUMERIC version wins across glob "
 
 TEST_SUITE("clang") {
 
-  TEST_CASE("gnuc cap follows the REAL LibClang::major()") {
-    // A1: require_libclang() always succeeds (binary links libclang).
-    LibClang *lib = require_libclang();
+  TEST_CASE("gnuc cap follows the real linked libclang major") {
     EnvGuard env;
     GnucCase c("gcc-11");
     ::setenv("FAKE_DUMPFULLVERSION", "11.4.1", 1);
     c.add_attr_dealloc_cdefs();
-    // No major override: Toolchain consults LibClang::instance().major().
+    // No major override: Toolchain consults linked_libclang_major().
     const std::optional<std::string> ver = gnuc_value(c.flags(false));
-    if (lib->major() < 21) {
+    if (cidx::linked_libclang_major() < 21) {
       CHECK(ver == std::string("10.9"));
     } else {
       CHECK(ver == std::string("11.4.1"));

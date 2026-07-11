@@ -254,7 +254,7 @@ add_library(cidx_core STATIC
   src/util/files.cpp
   src/storage/sqlite.cpp
   src/storage/storage.cpp
-  src/clangx/libclang.cpp
+  src/clangx/clang_runtime.cpp
   src/clangx/toolchain.cpp
   src/clangx/parse.cpp
   src/clangx/pch.cpp

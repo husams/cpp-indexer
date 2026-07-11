@@ -1,7 +1,7 @@
 // astgraph_test — the per-TU AST->SQLite graph dumper (src/astgraph/).
 // All cases perform real parses on temp-dir sources, live in doctest suite
-// "clang", and runtime-SKIP (exit 77) when no libclang loads — the same
-// pattern as ast_test. Assertions run plain SQL over the produced <TU>.db,
+// "clang" and require the directly linked libclang. Assertions run plain SQL
+// over the produced <TU>.db,
 // i.e. exactly what a Soufflé program would read.
 #define DOCTEST_CONFIG_IMPLEMENT
 #include "doctest/doctest.h"
@@ -15,14 +15,12 @@
 
 #include "astgraph/astgraph.hpp"
 #include "astgraph/souffle_runner.hpp"
-#include "clangx/libclang.hpp"
 #include "clangx/parse.hpp"
 #include "clangx/toolchain.hpp"
 #include "storage/sqlite.hpp"
 #include "util/errors.hpp"
 
 namespace fs = std::filesystem;
-using cidx::LibClang;
 using cidx::ParsedTu;
 using cidx::Parser;
 using cidx::SqliteDb;
@@ -34,17 +32,6 @@ namespace {
 
 bool g_clang_skipped = false;
 
-LibClang *require_libclang() {
-  LibClang &lib = LibClang::instance();
-  try {
-    lib.load();
-  } catch (const cidx::CidxError &e) {
-    g_clang_skipped = true;
-    MESSAGE("SKIP: no loadable libclang: " << std::string(e.what()));
-    return nullptr;
-  }
-  return &lib;
-}
 
 std::string make_temp_dir() {
   char tmpl[] = "/tmp/cidx_astgraph_XXXXXX";
@@ -117,8 +104,6 @@ int main() { zoo::Derived d; return zoo::probe(d); }
 TEST_SUITE("clang") {
 
 TEST_CASE("astgraph: schema, catalogs and no-NULL sentinels") {
-  if (require_libclang() == nullptr)
-    return;
   const Dumped d =
       dump_source("sample.cpp", kCppSample, {"-std=c++17"}, false);
   CHECK(d.stats.cursor_nodes > 0);
@@ -157,8 +142,6 @@ TEST_CASE("astgraph: schema, catalogs and no-NULL sentinels") {
 }
 
 TEST_CASE("astgraph: semantic cross-reference edges are present") {
-  if (require_libclang() == nullptr)
-    return;
   const Dumped d =
       dump_source("sample.cpp", kCppSample, {"-std=c++17"}, false);
   SqliteDb db(d.db_path);
@@ -212,8 +195,6 @@ TEST_CASE("astgraph: semantic cross-reference edges are present") {
 }
 
 TEST_CASE("astgraph: native Souffle callgraph preserves USR identity") {
-  if (require_libclang() == nullptr)
-    return;
   if (!ag::native_souffle_available()) {
     MESSAGE("SKIP: cidx built without native Souffle support");
     return;
@@ -252,8 +233,6 @@ TEST_CASE("astgraph: artifact key changes for semantic inputs") {
 
 TEST_CASE("astgraph: --main-only prunes header subtrees, keeps referenced "
           "decls shallow") {
-  if (require_libclang() == nullptr)
-    return;
   const std::string dir = make_temp_dir();
   write_file(dir + "/helper.hpp",
              "#pragma once\nint helper_fn(int x);\ninline int unused_fn(int "

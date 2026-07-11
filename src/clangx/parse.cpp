@@ -6,7 +6,8 @@
 #include <cctype>
 #include <cstddef>
 
-#include "clangx/libclang.hpp"
+#include "clangx/clang_raii.hpp"
+#include "clangx/clang_runtime.hpp"
 #include "clangx/pch.hpp"
 #include "util/env.hpp"
 #include "util/errors.hpp"
@@ -69,9 +70,9 @@ bool mem_reporting_enabled() {
 // category from clang_getCXTUResourceUsage. All kinds 1..14 are
 // MEMORY_IN_BYTES, so `amount` is bytes. The CX-owned buffer is disposed
 // before returning -- nothing libclang-owned is retained.
-void report_resource_usage(Logger &log, LibClang &lib, CXTranslationUnit tu,
+void report_resource_usage(Logger &log, CXTranslationUnit tu,
                            const std::string &path) {
-  CXTUResourceUsage usage = lib.clang_getCXTUResourceUsage(tu);
+  CXTUResourceUsage usage = ::clang_getCXTUResourceUsage(tu);
   unsigned long total = 0;
   std::string breakdown;
   for (unsigned i = 0; i < usage.numEntries; ++i) {
@@ -80,14 +81,14 @@ void report_resource_usage(Logger &log, LibClang &lib, CXTranslationUnit tu,
     if (e.amount == 0) {
       continue;
     }
-    const char *name = lib.clang_getTUResourceUsageName(e.kind);
+    const char *name = ::clang_getTUResourceUsageName(e.kind);
     if (!breakdown.empty()) {
       breakdown += ", ";
     }
     breakdown += std::string(name != nullptr ? name : "?") + "=" +
                  std::to_string(e.amount);
   }
-  lib.clang_disposeCXTUResourceUsage(usage);
+  ::clang_disposeCXTUResourceUsage(usage);
   log.info(kLogName, path + ": TU memory total=" + std::to_string(total) +
                          " bytes (" + std::to_string(total / 1024) +
                          " KiB); " + breakdown);
@@ -95,12 +96,12 @@ void report_resource_usage(Logger &log, LibClang &lib, CXTranslationUnit tu,
 
 // util.py:380-385 with level=Error -- every diagnostic at severity >= ERROR,
 // in TU order. Fatals are a subset (severity >= Fatal).
-std::vector<DiagInfo> error_diagnostics(LibClang &lib, CXTranslationUnit tu) {
+std::vector<DiagInfo> error_diagnostics(CXTranslationUnit tu) {
   std::vector<DiagInfo> out;
-  const unsigned n = lib.clang_getNumDiagnostics(tu);
+  const unsigned n = ::clang_getNumDiagnostics(tu);
   for (unsigned i = 0; i < n; ++i) {
-    CXDiagnostic d = lib.clang_getDiagnostic(tu, i);
-    const int severity = static_cast<int>(lib.clang_getDiagnosticSeverity(d));
+    CXDiagnostic d = ::clang_getDiagnostic(tu, i);
+    const int severity = static_cast<int>(::clang_getDiagnosticSeverity(d));
     if (severity >= CXDiagnostic_Error) {
       DiagInfo info;
       info.severity = severity;
@@ -108,16 +109,16 @@ std::vector<DiagInfo> error_diagnostics(LibClang &lib, CXTranslationUnit tu) {
       unsigned line = 0;
       unsigned column = 0;
       unsigned offset = 0;
-      lib.clang_getExpansionLocation(lib.clang_getDiagnosticLocation(d), &file,
-                                     &line, &column, &offset);
+      ::clang_getExpansionLocation(::clang_getDiagnosticLocation(d), &file,
+                                   &line, &column, &offset);
       info.line = line;
       info.file = file != nullptr
-                      ? CxString(lib, lib.clang_getFileName(file)).str()
+                      ? CxString(::clang_getFileName(file)).str()
                       : std::string("None");
-      info.spelling = CxString(lib, lib.clang_getDiagnosticSpelling(d)).str();
+      info.spelling = CxString(::clang_getDiagnosticSpelling(d)).str();
       out.push_back(std::move(info));
     }
-    lib.clang_disposeDiagnostic(d);
+    ::clang_disposeDiagnostic(d);
   }
   return out;
 }
@@ -125,34 +126,33 @@ std::vector<DiagInfo> error_diagnostics(LibClang &lib, CXTranslationUnit tu) {
 // util.py collect_diagnostics -- plain-data diagnostics at/above WARNING, in
 // TU order, for persistence in the index. A locationless diagnostic leaves
 // file_path/line/col unset (NULL), matching the Python binding byte-for-byte.
-std::vector<Diagnostic> warning_diagnostics(LibClang &lib,
-                                            CXTranslationUnit tu) {
+std::vector<Diagnostic> warning_diagnostics(CXTranslationUnit tu) {
   std::vector<Diagnostic> out;
   if (tu == nullptr) {
     return out;
   }
-  const unsigned n = lib.clang_getNumDiagnostics(tu);
+  const unsigned n = ::clang_getNumDiagnostics(tu);
   for (unsigned i = 0; i < n; ++i) {
-    CXDiagnostic d = lib.clang_getDiagnostic(tu, i);
-    const int severity = static_cast<int>(lib.clang_getDiagnosticSeverity(d));
+    CXDiagnostic d = ::clang_getDiagnostic(tu, i);
+    const int severity = static_cast<int>(::clang_getDiagnosticSeverity(d));
     if (severity >= CXDiagnostic_Warning) {
       Diagnostic info;
       info.severity = severity;
-      info.spelling = CxString(lib, lib.clang_getDiagnosticSpelling(d)).str();
+      info.spelling = CxString(::clang_getDiagnosticSpelling(d)).str();
       CXFile file = nullptr;
       unsigned line = 0;
       unsigned column = 0;
       unsigned offset = 0;
-      lib.clang_getExpansionLocation(lib.clang_getDiagnosticLocation(d), &file,
-                                     &line, &column, &offset);
+      ::clang_getExpansionLocation(::clang_getDiagnosticLocation(d), &file,
+                                   &line, &column, &offset);
       if (file != nullptr) {
-        info.file_path = CxString(lib, lib.clang_getFileName(file)).str();
+        info.file_path = CxString(::clang_getFileName(file)).str();
         info.line = static_cast<int64_t>(line);
         info.col = static_cast<int64_t>(column);
       }
       out.push_back(std::move(info));
     }
-    lib.clang_disposeDiagnostic(d);
+    ::clang_disposeDiagnostic(d);
   }
   return out;
 }
@@ -189,14 +189,13 @@ std::string join(const std::vector<std::string> &parts, const char *sep) {
 } // namespace
 
 ParsedTu::~ParsedTu() {
-  LibClang &lib = LibClang::instance();
   // disposeTranslationUnit first, then the Index that produced it (§5.7).
   // A1: facade methods are always callable; guards are on the handle values.
   if (tu != nullptr) {
-    lib.clang_disposeTranslationUnit(tu);
+    ::clang_disposeTranslationUnit(tu);
   }
   if (index != nullptr) {
-    lib.clang_disposeIndex(index);
+    ::clang_disposeIndex(index);
   }
 }
 
@@ -224,16 +223,15 @@ Parser::final_args(const std::string &path,
 }
 
 std::vector<Diagnostic> Parser::collect_diagnostics(const ParsedTu &tu) {
-  return warning_diagnostics(LibClang::instance(), tu.tu);
+  return warning_diagnostics(tu.tu);
 }
 
 ParsedTu Parser::parse(const std::string &abs_path,
                        const std::vector<std::string> &args,
                        const std::optional<std::string> &driver) {
-  LibClang &lib = LibClang::instance();
   // Idempotent; MUST precede toolchain_flags so the gnuc cap consults the
   // real libclang major instead of the unloaded-0 fallback (S04 handoff).
-  lib.load();
+  warn_if_runtime_libclang_ignored();
 
   const bool cpp = Toolchain::is_cpp(abs_path, args);
   const std::vector<std::string> base = final_args(abs_path, args, driver);
@@ -257,7 +255,6 @@ ParsedTu Parser::parse(const std::string &abs_path,
 
 ParsedTu Parser::run_parse(const std::string &abs_path,
                            const std::vector<std::string> &flags) {
-  LibClang &lib = LibClang::instance();
   std::vector<const char *> argv;
   argv.reserve(flags.size());
   for (const std::string &f : flags) {
@@ -266,10 +263,10 @@ ParsedTu Parser::run_parse(const std::string &abs_path,
 
   // Fresh Index per parse (util.py:427, analysis §2.2); ParsedTu owns it
   // from here so every exit path below disposes deterministically.
-  ParsedTu result(lib.clang_createIndex(0, 0), abs_path);
+  ParsedTu result(::clang_createIndex(0, 0), abs_path);
 
   CXTranslationUnit tu = nullptr;
-  const CXErrorCode err = lib.clang_parseTranslationUnit2(
+  const CXErrorCode err = ::clang_parseTranslationUnit2(
       result.index, abs_path.c_str(), argv.data(),
       static_cast<int>(argv.size()), nullptr, 0,
       /*options=*/0, // D19: no DETAILED_PREPROCESSING_RECORD, no skip-bodies
@@ -282,7 +279,7 @@ ParsedTu Parser::run_parse(const std::string &abs_path,
 
   apply_diagnostic_policy(result.tu, abs_path, flags); // may throw; RAII frees
   if (mem_reporting_enabled()) {
-    report_resource_usage(log_, lib, result.tu, abs_path);
+    report_resource_usage(log_, result.tu, abs_path);
   }
   return result;
 }
@@ -290,9 +287,8 @@ ParsedTu Parser::run_parse(const std::string &abs_path,
 void Parser::apply_diagnostic_policy(
     CXTranslationUnit tu, const std::string &path,
     const std::vector<std::string> &final_args) {
-  LibClang &lib = LibClang::instance();
   const int level = abort_level();
-  const std::vector<DiagInfo> errors = error_diagnostics(lib, tu);
+  const std::vector<DiagInfo> errors = error_diagnostics(tu);
 
   std::size_t fatal_count = 0;
   std::vector<std::string> summary_parts; // first 3 at/above the abort level
@@ -309,7 +305,7 @@ void Parser::apply_diagnostic_policy(
   if (fatal_count > 0) {
     // util.py:440-448 -- the flag dump is debugging detail: log it, keep it
     // out of the exception message the CLI shows on screen (G28).
-    const int major = lib.major();
+    const int major = linked_libclang_major();
     log_.error(kLogName,
                path + ": failed parse flags: " + join(final_args, " ") +
                    "; libclang: " +
@@ -319,7 +315,7 @@ void Parser::apply_diagnostic_policy(
     // can still record WHY the file failed even though no AST was indexed.
     throw ClangParseError(path + ": " + std::to_string(fatal_count) +
                               " fatal diagnostic(s): " + join(summary_parts, "; "),
-                          warning_diagnostics(lib, tu));
+                          warning_diagnostics(tu));
   }
 
   // util.py:449-455 -- tolerated errors (default, non-strict mode): exactly

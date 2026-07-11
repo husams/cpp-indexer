@@ -15,7 +15,7 @@
 
 #include <sys/stat.h>
 
-#include "clangx/libclang.hpp"
+#include "clangx/clang_raii.hpp"
 #include "util/env.hpp"
 #include "util/hashing.hpp"
 #include "util/pathutil.hpp"
@@ -72,8 +72,8 @@ const char *kind_name(CXCursorKind kind) {
 // Symbol kind for a minted stub, taken from its reference cursor so a defaulted
 // ctor stub is 'constructor', not the bare 'function' fallback (used when the
 // cursor maps to no storage kind). Mirrors ast.py's _KIND_MAP.get(k,"function").
-std::string stub_kind(LibClang &lib, CXCursor c) {
-  const char *k = kind_name(lib.clang_getCursorKind(c));
+std::string stub_kind(CXCursor c) {
+  const char *k = kind_name(::clang_getCursorKind(c));
   return k != nullptr ? std::string(k) : std::string("function");
 }
 
@@ -115,10 +115,10 @@ struct ExpansionLoc {
   unsigned col = 0;
 };
 
-ExpansionLoc cursor_location(LibClang &lib, CXCursor cursor) {
+ExpansionLoc cursor_location(CXCursor cursor) {
   ExpansionLoc loc;
   unsigned offset = 0;
-  lib.clang_getExpansionLocation(lib.clang_getCursorLocation(cursor), &loc.file,
+  ::clang_getExpansionLocation(::clang_getCursorLocation(cursor), &loc.file,
                                  &loc.line, &loc.col, &offset);
   return loc;
 }
@@ -127,11 +127,11 @@ ExpansionLoc cursor_location(LibClang &lib, CXCursor cursor) {
 // method definition, or the full extent of a class/struct/union/typedef decl.
 // Uses clang_getExpansionLocation to match clang.cindex's extent.end.line/column
 // (cindex resolves SourceLocation line/column via the expansion location).
-ExpansionLoc cursor_extent_end(LibClang &lib, CXCursor cursor) {
+ExpansionLoc cursor_extent_end(CXCursor cursor) {
   ExpansionLoc loc;
   unsigned offset = 0;
-  lib.clang_getExpansionLocation(
-      lib.clang_getRangeEnd(lib.clang_getCursorExtent(cursor)), &loc.file,
+  ::clang_getExpansionLocation(
+      ::clang_getRangeEnd(::clang_getCursorExtent(cursor)), &loc.file,
       &loc.line, &loc.col, &offset);
   return loc;
 }
@@ -141,11 +141,11 @@ ExpansionLoc cursor_extent_end(LibClang &lib, CXCursor cursor) {
 // includes the leading class/struct/union/enum keyword and, for a function/
 // method, its return type (and out-of-line qualifier, e.g. `Circle::`), so
 // (line, col)..(end_line, end_col) slices the WHOLE declaration (ast.py mirror).
-ExpansionLoc cursor_extent_start(LibClang &lib, CXCursor cursor) {
+ExpansionLoc cursor_extent_start(CXCursor cursor) {
   ExpansionLoc loc;
   unsigned offset = 0;
-  lib.clang_getExpansionLocation(
-      lib.clang_getRangeStart(lib.clang_getCursorExtent(cursor)), &loc.file,
+  ::clang_getExpansionLocation(
+      ::clang_getRangeStart(::clang_getCursorExtent(cursor)), &loc.file,
       &loc.line, &loc.col, &offset);
   return loc;
 }
@@ -171,13 +171,13 @@ struct RefDeclLoc {
   std::optional<std::string> path; // raw path when file_id is unregistered
 };
 
-RefDeclLoc ref_decl_loc(LibClang &lib, Storage &db, CXCursor ref) {
+RefDeclLoc ref_decl_loc(Storage &db, CXCursor ref) {
   RefDeclLoc out;
-  const ExpansionLoc loc = cursor_location(lib, ref);
+  const ExpansionLoc loc = cursor_location(ref);
   if (loc.file == nullptr) {
     return out;
   }
-  const std::string fname = CxString(lib, lib.clang_getFileName(loc.file)).str();
+  const std::string fname = CxString(::clang_getFileName(loc.file)).str();
   if (fname.empty()) {
     return out;
   }
@@ -197,23 +197,23 @@ RefDeclLoc ref_decl_loc(LibClang &lib, Storage &db, CXCursor ref) {
 // user declaration (builtins like int, function pointers, …). Single-level by
 // design: resolves the type as WRITTEN (a typedef alias stays the alias),
 // mirroring ast.py:_named_type_decl.
-CXCursor named_type_decl(LibClang &lib, CXType t) {
+CXCursor named_type_decl(CXType t) {
   for (int i = 0; i < 32; ++i) {            // guard against pathological nesting
     const CXTypeKind tk = t.kind;
     if (tk == CXType_Pointer || tk == CXType_LValueReference ||
         tk == CXType_RValueReference) {
-      t = lib.clang_getPointeeType(t);
+      t = ::clang_getPointeeType(t);
     } else if (tk == CXType_ConstantArray || tk == CXType_IncompleteArray ||
                tk == CXType_VariableArray || tk == CXType_DependentSizedArray) {
-      t = lib.clang_getArrayElementType(t);
+      t = ::clang_getArrayElementType(t);
     } else {
       break;
     }
   }
-  const CXCursor decl = lib.clang_getTypeDeclaration(t);
-  if (lib.clang_Cursor_isNull(decl) ||
-      is_invalid_kind(lib.clang_getCursorKind(decl))) {
-    return lib.clang_getNullCursor();
+  const CXCursor decl = ::clang_getTypeDeclaration(t);
+  if (::clang_Cursor_isNull(decl) ||
+      is_invalid_kind(::clang_getCursorKind(decl))) {
+    return ::clang_getNullCursor();
   }
   return decl;
 }
@@ -223,13 +223,13 @@ CXCursor named_type_decl(LibClang &lib, CXType t) {
 // at `loc_cursor`'s location. Lookup-only like body descent (the type's symbol
 // must already be indexed, so builtins/unindexed stdlib types create neither
 // edges nor stubs); no self-edge. Mirrors ast.py:_emit_type_use.
-void emit_type_use(LibClang &lib, Storage &db, int64_t src_id, CXType ctype,
+void emit_type_use(Storage &db, int64_t src_id, CXType ctype,
                    int64_t file_id, CXCursor loc_cursor, int conditional) {
-  const CXCursor decl = named_type_decl(lib, ctype);
-  if (lib.clang_Cursor_isNull(decl)) {
+  const CXCursor decl = named_type_decl(ctype);
+  if (::clang_Cursor_isNull(decl)) {
     return;
   }
-  const std::string usr = CxString(lib, lib.clang_getCursorUSR(decl)).str();
+  const std::string usr = CxString(::clang_getCursorUSR(decl)).str();
   if (usr.empty()) {
     return;
   }
@@ -244,7 +244,7 @@ void emit_type_use(LibClang &lib, Storage &db, int64_t src_id, CXType ctype,
   e.count = 1;
   const int64_t edge_id = db.add_edge(e);
 
-  const ExpansionLoc loc = cursor_location(lib, loc_cursor);
+  const ExpansionLoc loc = cursor_location(loc_cursor);
   if (loc.line != 0) {
     EdgeSite site;
     site.edge_id = edge_id;
@@ -301,31 +301,31 @@ CXChildVisitResult ns_collect_visitor(CXCursor c, CXCursor /*parent*/,
 // function body is attributed to that function. Only main-file refs to an
 // INDEXED namespace are recorded (bare `std::` -> unindexed c:@N@std -> lookup
 // miss -> skipped), mirroring the lookup-only discipline of the other passes.
-void ns_uses_descend(LibClang &lib, Storage &db, CXCursor cursor,
+void ns_uses_descend(Storage &db, CXCursor cursor,
                      int64_t enclosing_id, const std::string &filename,
                      int64_t file_id) {
   std::vector<CXCursor> children;
   NsChildCollector cc;
   cc.out = &children;
-  lib.clang_visitChildren(cursor, &ns_collect_visitor, &cc);
+  ::clang_visitChildren(cursor, &ns_collect_visitor, &cc);
   for (const CXCursor &child : children) {
-    const ExpansionLoc loc = cursor_location(lib, child);
+    const ExpansionLoc loc = cursor_location(child);
     if (loc.file == nullptr) {
       continue; // from no file: skip subtree
     }
-    CXString fname_cx = lib.clang_getFileName(loc.file);
-    CxString fname_raii(lib, fname_cx);
-    const char *raw = lib.clang_getCString(fname_cx);
+    CXString fname_cx = ::clang_getFileName(loc.file);
+    CxString fname_raii(fname_cx);
+    const char *raw = ::clang_getCString(fname_cx);
     if (raw == nullptr || std::strcmp(raw, filename.c_str()) != 0) {
       continue; // from another file: skip subtree
     }
-    const CXCursorKind ck = lib.clang_getCursorKind(child);
+    const CXCursorKind ck = ::clang_getCursorKind(child);
     if (ck == CXCursor_NamespaceRef) {
       if (enclosing_id >= 0) {
-        const CXCursor ref = lib.clang_getCursorReferenced(child);
-        if (!lib.clang_Cursor_isNull(ref)) {
+        const CXCursor ref = ::clang_getCursorReferenced(child);
+        if (!::clang_Cursor_isNull(ref)) {
           const std::string nusr =
-              CxString(lib, lib.clang_getCursorUSR(ref)).str();
+              CxString(::clang_getCursorUSR(ref)).str();
           if (!nusr.empty()) {
             const auto nsym = db.lookup_symbol(nusr);
             if (nsym && nsym->id != enclosing_id) {
@@ -352,7 +352,7 @@ void ns_uses_descend(LibClang &lib, Storage &db, CXCursor cursor,
     }
     int64_t new_enclosing = enclosing_id;
     if (is_scope_kind(ck)) {
-      const std::string usr = CxString(lib, lib.clang_getCursorUSR(child)).str();
+      const std::string usr = CxString(::clang_getCursorUSR(child)).str();
       if (!usr.empty()) {
         const auto s = db.lookup_symbol(usr);
         if (s) {
@@ -360,14 +360,14 @@ void ns_uses_descend(LibClang &lib, Storage &db, CXCursor cursor,
         }
       }
     }
-    ns_uses_descend(lib, db, child, new_enclosing, filename, file_id);
+    ns_uses_descend(db, child, new_enclosing, filename, file_id);
   }
 }
 
 // B3 driver: mirror ast.py _emit_namespace_uses(db, tu, filename, file_id).
-void emit_namespace_uses(LibClang &lib, Storage &db, const ParsedTu &tu,
+void emit_namespace_uses(Storage &db, const ParsedTu &tu,
                          const std::string &filename, int64_t file_id) {
-  ns_uses_descend(lib, db, lib.clang_getTranslationUnitCursor(tu.tu), -1,
+  ns_uses_descend(db, ::clang_getTranslationUnitCursor(tu.tu), -1,
                   filename, file_id);
 }
 
@@ -407,19 +407,19 @@ std::optional<std::string> access_name(CX_CXXAccessSpecifier access) {
 // parents, so an out-of-line method definition is qualified by its class,
 // not the file scope it sits in. Anonymous levels (empty spelling) are
 // skipped (G25).
-std::string qualified_name(LibClang &lib, CXCursor cursor) {
+std::string qualified_name(CXCursor cursor) {
   std::vector<std::string> parts;
   CXCursor c = cursor;
   while (true) {
-    const CXCursorKind kind = lib.clang_getCursorKind(c);
+    const CXCursorKind kind = ::clang_getCursorKind(c);
     if (is_invalid_kind(kind) || kind == CXCursor_TranslationUnit) {
       break;
     }
-    std::string spelling = CxString(lib, lib.clang_getCursorSpelling(c)).str();
+    std::string spelling = CxString(::clang_getCursorSpelling(c)).str();
     if (!spelling.empty()) {
       parts.push_back(std::move(spelling));
     }
-    c = lib.clang_getCursorSemanticParent(c);
+    c = ::clang_getCursorSemanticParent(c);
   }
   std::string out;
   for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
@@ -435,7 +435,6 @@ std::string qualified_name(LibClang &lib, CXCursor cursor) {
 // (D23): a C++ exception thrown by fn is stashed here, the walk is Break-ed,
 // and the exception is rethrown after clang_visitChildren returns.
 struct WalkCtx {
-  LibClang *lib = nullptr;
   const std::string *filename = nullptr;
   const std::function<void(CXCursor)> *fn = nullptr;
   std::exception_ptr error;
@@ -445,22 +444,21 @@ CXChildVisitResult walk_visitor(CXCursor cursor, CXCursor /*parent*/,
                                 CXClientData data) noexcept {
   auto *ctx = static_cast<WalkCtx *>(data);
   try {
-    LibClang &lib = *ctx->lib;
-    const ExpansionLoc loc = cursor_location(lib, cursor);
+    const ExpansionLoc loc = cursor_location(cursor);
     if (loc.file == nullptr) {
       return CXChildVisit_Continue; // cursor from no file: skip subtree
     }
     // R11: compare the raw C string BEFORE constructing any std::string to
     // avoid a heap allocation per visited cursor (including pruned ones).
     // CxString RAII ensures clang_disposeString is called in all paths.
-    CXString fname_cx = lib.clang_getFileName(loc.file);
-    CxString fname_raii(lib, fname_cx);
-    const char *raw = lib.clang_getCString(fname_cx);
+    CXString fname_cx = ::clang_getFileName(loc.file);
+    CxString fname_raii(fname_cx);
+    const char *raw = ::clang_getCString(fname_cx);
     if (raw == nullptr || std::strcmp(raw, ctx->filename->c_str()) != 0) {
       return CXChildVisit_Continue; // cursor from another file: skip subtree
     }
     (*ctx->fn)(cursor);
-    return is_function_like(lib.clang_getCursorKind(cursor))
+    return is_function_like(::clang_getCursorKind(cursor))
                ? CXChildVisit_Continue // body not walked
                : CXChildVisit_Recurse;
   } catch (...) {
@@ -473,7 +471,6 @@ CXChildVisitResult walk_visitor(CXCursor cursor, CXCursor /*parent*/,
 // Used by index_edges so CXX_BASE_SPECIFIER handlers can get the enclosing
 // record from the walk parent (spec §1.4 gotcha: semantic_parent is NULL).
 struct WalkCtxP {
-  LibClang *lib = nullptr;
   const std::string *filename = nullptr;
   const std::function<void(CXCursor, CXCursor)> *fn = nullptr;
   std::exception_ptr error;
@@ -483,19 +480,18 @@ CXChildVisitResult walk_visitor_p(CXCursor cursor, CXCursor parent,
                                   CXClientData data) noexcept {
   auto *ctx = static_cast<WalkCtxP *>(data);
   try {
-    LibClang &lib = *ctx->lib;
-    const ExpansionLoc loc = cursor_location(lib, cursor);
+    const ExpansionLoc loc = cursor_location(cursor);
     if (loc.file == nullptr) {
       return CXChildVisit_Continue;
     }
-    CXString fname_cx = lib.clang_getFileName(loc.file);
-    CxString fname_raii(lib, fname_cx);
-    const char *raw = lib.clang_getCString(fname_cx);
+    CXString fname_cx = ::clang_getFileName(loc.file);
+    CxString fname_raii(fname_cx);
+    const char *raw = ::clang_getCString(fname_cx);
     if (raw == nullptr || std::strcmp(raw, ctx->filename->c_str()) != 0) {
       return CXChildVisit_Continue;
     }
     (*ctx->fn)(cursor, parent);
-    return is_function_like(lib.clang_getCursorKind(cursor))
+    return is_function_like(::clang_getCursorKind(cursor))
                ? CXChildVisit_Continue
                : CXChildVisit_Recurse;
   } catch (...) {
@@ -509,7 +505,6 @@ CXChildVisitResult walk_visitor_p(CXCursor cursor, CXCursor parent,
 // only body-scoped named type declarations. Callbacks into libclang are
 // noexcept (D23); the exception is stashed and rethrown by the caller.
 struct BodyLocalCtx {
-  LibClang *lib = nullptr;
   const std::string *filename = nullptr;
   const std::function<void(CXCursor)> *fn = nullptr;
   std::exception_ptr error;
@@ -519,18 +514,17 @@ CXChildVisitResult body_local_visitor(CXCursor cursor, CXCursor /*parent*/,
                                       CXClientData data) noexcept {
   auto *ctx = static_cast<BodyLocalCtx *>(data);
   try {
-    LibClang &lib = *ctx->lib;
-    const ExpansionLoc loc = cursor_location(lib, cursor);
+    const ExpansionLoc loc = cursor_location(cursor);
     if (loc.file == nullptr) {
       return CXChildVisit_Continue;
     }
-    CXString fname_cx = lib.clang_getFileName(loc.file);
-    CxString fname_raii(lib, fname_cx);
-    const char *raw = lib.clang_getCString(fname_cx);
+    CXString fname_cx = ::clang_getFileName(loc.file);
+    CxString fname_raii(fname_cx);
+    const char *raw = ::clang_getCString(fname_cx);
     if (raw == nullptr || std::strcmp(raw, ctx->filename->c_str()) != 0) {
       return CXChildVisit_Continue; // cursor from another file: skip subtree
     }
-    if (is_local_symbol_kind(lib.clang_getCursorKind(cursor))) {
+    if (is_local_symbol_kind(::clang_getCursorKind(cursor))) {
       (*ctx->fn)(cursor);
     }
     // Descend through EVERYTHING (mirrors ast.py's unconditional recursion), so
@@ -548,12 +542,10 @@ CXChildVisitResult body_local_visitor(CXCursor cursor, CXCursor /*parent*/,
 // by the noexcept visitor.
 void for_body_local_symbols(CXCursor fn_cursor, const std::string &filename,
                             const std::function<void(CXCursor)> &fn) {
-  LibClang &lib = LibClang::instance();
   BodyLocalCtx ctx;
-  ctx.lib = &lib;
   ctx.filename = &filename;
   ctx.fn = &fn;
-  lib.clang_visitChildren(fn_cursor, &body_local_visitor, &ctx);
+  ::clang_visitChildren(fn_cursor, &body_local_visitor, &ctx);
   if (ctx.error) {
     std::rethrow_exception(ctx.error);
   }
@@ -568,7 +560,6 @@ struct InclusionRec {
 };
 
 struct InclusionCtx {
-  LibClang *lib = nullptr;
   std::vector<InclusionRec> inclusions;
   std::exception_ptr error;
 };
@@ -582,8 +573,7 @@ void inclusion_visitor(CXFile included_file, CXSourceLocation * /*stack*/,
   try {
     InclusionRec rec;
     rec.file = included_file;
-    rec.name =
-        CxString(*ctx->lib, ctx->lib->clang_getFileName(included_file)).str();
+    rec.name = CxString(::clang_getFileName(included_file)).str();
     ctx->inclusions.push_back(std::move(rec));
   } catch (...) {
     ctx->error = std::current_exception();
@@ -599,9 +589,9 @@ bool default_ignore_system_headers() {
 
 // _is_system_header (ast.py:177-180): per-TU via clang_getLocation(tu, file,
 // 1, 1) — honors the -isystem/sysroot of THIS parse (G26).
-bool is_system_header(LibClang &lib, CXTranslationUnit tu, CXFile file) {
-  const CXSourceLocation loc = lib.clang_getLocation(tu, file, 1, 1);
-  return lib.clang_Location_isInSystemHeader(loc) != 0;
+bool is_system_header(CXTranslationUnit tu, CXFile file) {
+  const CXSourceLocation loc = ::clang_getLocation(tu, file, 1, 1);
+  return ::clang_Location_isInSystemHeader(loc) != 0;
 }
 
 // os.path.getmtime(path) if os.path.exists(path) else None (ast.py:220):
@@ -625,12 +615,10 @@ std::optional<double> file_mtime(const std::string &path) {
 void AstIndexer::for_file_cursors(const ParsedTu &tu,
                                   const std::string &filename,
                                   const std::function<void(CXCursor)> &fn) {
-  LibClang &lib = LibClang::instance();
   WalkCtx ctx;
-  ctx.lib = &lib;
   ctx.filename = &filename;
   ctx.fn = &fn;
-  lib.clang_visitChildren(lib.clang_getTranslationUnitCursor(tu.tu),
+  ::clang_visitChildren(::clang_getTranslationUnitCursor(tu.tu),
                           &walk_visitor, &ctx);
   if (ctx.error) {
     std::rethrow_exception(ctx.error);
@@ -640,12 +628,10 @@ void AstIndexer::for_file_cursors(const ParsedTu &tu,
 void AstIndexer::for_file_cursors_p(
     const ParsedTu &tu, const std::string &filename,
     const std::function<void(CXCursor, CXCursor)> &fn) {
-  LibClang &lib = LibClang::instance();
   WalkCtxP ctx;
-  ctx.lib = &lib;
   ctx.filename = &filename;
   ctx.fn = &fn;
-  lib.clang_visitChildren(lib.clang_getTranslationUnitCursor(tu.tu),
+  ::clang_visitChildren(::clang_getTranslationUnitCursor(tu.tu),
                           &walk_visitor_p, &ctx);
   if (ctx.error) {
     std::rethrow_exception(ctx.error);
@@ -653,50 +639,49 @@ void AstIndexer::for_file_cursors_p(
 }
 
 std::optional<Symbol> AstIndexer::to_symbol(CXCursor cursor, int64_t file_id) {
-  LibClang &lib = LibClang::instance();
-  const char *kind = kind_name(lib.clang_getCursorKind(cursor));
+  const char *kind = kind_name(::clang_getCursorKind(cursor));
   if (kind == nullptr) {
     return std::nullopt;
   }
-  std::string usr = CxString(lib, lib.clang_getCursorUSR(cursor)).str();
+  std::string usr = CxString(::clang_getCursorUSR(cursor)).str();
   if (usr.empty()) {
     return std::nullopt; // no USR -> not indexable (ast.py:99-101)
   }
 
   // Parent USR: the semantic parent unless it is the TU (ast.py:102-105).
   std::optional<std::string> parent_usr;
-  const CXCursor parent = lib.clang_getCursorSemanticParent(cursor);
-  const CXCursorKind parent_kind = lib.clang_getCursorKind(parent);
+  const CXCursor parent = ::clang_getCursorSemanticParent(cursor);
+  const CXCursorKind parent_kind = ::clang_getCursorKind(parent);
   if (!is_invalid_kind(parent_kind) &&
       parent_kind != CXCursor_TranslationUnit) {
-    std::string pu = CxString(lib, lib.clang_getCursorUSR(parent)).str();
+    std::string pu = CxString(::clang_getCursorUSR(parent)).str();
     if (!pu.empty()) {
       parent_usr = std::move(pu);
     }
   }
 
-  const bool is_def = lib.clang_isCursorDefinition(cursor) != 0;
-  const ExpansionLoc loc = cursor_location(lib, cursor);
+  const bool is_def = ::clang_isCursorDefinition(cursor) != 0;
+  const ExpansionLoc loc = cursor_location(cursor);
 
   Symbol sym;
   sym.usr = std::move(usr);
-  sym.spelling = CxString(lib, lib.clang_getCursorSpelling(cursor)).str();
+  sym.spelling = CxString(::clang_getCursorSpelling(cursor)).str();
   sym.kind = kind;
-  std::string qual = qualified_name(lib, cursor);
+  std::string qual = qualified_name(cursor);
   if (!qual.empty()) {
     sym.qual_name = std::move(qual);
   }
   std::string display =
-      CxString(lib, lib.clang_getCursorDisplayName(cursor)).str();
+      CxString(::clang_getCursorDisplayName(cursor)).str();
   if (!display.empty()) {
     sym.display_name = std::move(display);
   }
-  const CXCursorKind ck = lib.clang_getCursorKind(cursor);
+  const CXCursorKind ck = ::clang_getCursorKind(cursor);
   const CXType info_type =
       (ck == CXCursor_TypedefDecl || ck == CXCursor_TypeAliasDecl)
-          ? lib.clang_getTypedefDeclUnderlyingType(cursor)
-          : lib.clang_getCursorType(cursor);
-  std::string type_info = CxString(lib, lib.clang_getTypeSpelling(info_type)).str();
+          ? ::clang_getTypedefDeclUnderlyingType(cursor)
+          : ::clang_getCursorType(cursor);
+  std::string type_info = CxString(::clang_getTypeSpelling(info_type)).str();
   if (!type_info.empty()) {
     sym.type_info = std::move(type_info);
   }
@@ -704,13 +689,13 @@ std::optional<Symbol> AstIndexer::to_symbol(CXCursor cursor, int64_t file_id) {
   // Start of this cursor's own extent -- NOT `loc` (cursor.location, the
   // identifying spelling location) -- so (line, col)..(end_line, end_col)
   // slices the WHOLE declaration (ast.py:_to_symbol).
-  const ExpansionLoc start = cursor_extent_start(lib, cursor);
+  const ExpansionLoc start = cursor_extent_start(cursor);
   sym.line = static_cast<int64_t>(start.line);
   sym.col = static_cast<int64_t>(start.col);
   // End of this cursor's own extent, paired with (line, col) so
   // (line..end_line) slices the whole entity (ast.py:_to_symbol). The upsert
   // moves end_line/end_col in lockstep with line/col.
-  const ExpansionLoc end = cursor_extent_end(lib, cursor);
+  const ExpansionLoc end = cursor_extent_end(cursor);
   sym.end_line = static_cast<int64_t>(end.line);
   sym.end_col = static_cast<int64_t>(end.col);
   // A declaration cursor records itself as the decl site too; the upsert
@@ -721,12 +706,12 @@ std::optional<Symbol> AstIndexer::to_symbol(CXCursor cursor, int64_t file_id) {
     sym.decl_col = static_cast<int64_t>(loc.col);
   }
   sym.is_definition = is_def;
-  sym.is_pure = lib.clang_CXXMethod_isPureVirtual(cursor) != 0;
+  sym.is_pure = ::clang_CXXMethod_isPureVirtual(cursor) != 0;
   // C++ static member function. False for free functions and non-methods; a
   // file-scope `static` free function is captured by linkage='internal'.
-  sym.is_static = lib.clang_CXXMethod_isStatic(cursor) != 0;
-  sym.linkage = linkage_name(lib.clang_getCursorLinkage(cursor));
-  sym.access = access_name(lib.clang_getCXXAccessSpecifier(cursor));
+  sym.is_static = ::clang_CXXMethod_isStatic(cursor) != 0;
+  sym.linkage = linkage_name(::clang_getCursorLinkage(cursor));
+  sym.access = access_name(::clang_getCXXAccessSpecifier(cursor));
   sym.parent_usr = std::move(parent_usr);
   // A definition resolves the symbol; a bare declaration leaves it
   // unresolved until some TU provides the definition (ast.py:127-129).
@@ -768,9 +753,8 @@ std::pair<int, int> AstIndexer::index_file_notxn(const ParsedTu &tu,
     // pick them up (ast.py:_index_file_notxn). Definitions only -- a bare
     // prototype has no body. Local variables are NOT emitted (they feed
     // reference sites via index_edges, not the symbol table).
-    LibClang &lib = LibClang::instance();
-    const CXCursorKind ck = lib.clang_getCursorKind(cursor);
-    if (is_function_like(ck) && lib.clang_isCursorDefinition(cursor) != 0) {
+    const CXCursorKind ck = ::clang_getCursorKind(cursor);
+    if (is_function_like(ck) && ::clang_isCursorDefinition(cursor) != 0) {
       for_body_local_symbols(cursor, filename, [&](CXCursor local) {
         const std::optional<Symbol> lsym = to_symbol(local, file_id);
         if (!lsym) {
@@ -807,7 +791,6 @@ HeaderStats AstIndexer::index_headers(
     const ParsedTu &tu, const std::optional<bool> &ignore_system,
     const std::optional<std::vector<std::string>> &header_options,
     const std::optional<std::string> &header_driver) {
-  LibClang &lib = LibClang::instance();
   const bool ignore =
       ignore_system ? *ignore_system : default_ignore_system_headers();
 
@@ -815,8 +798,7 @@ HeaderStats AstIndexer::index_headers(
   // data first (cindex does the same), then do all DB work outside the C
   // callback. A header included twice appears twice; dedupe below.
   InclusionCtx ctx;
-  ctx.lib = &lib;
-  lib.clang_getInclusions(tu.tu, &inclusion_visitor, &ctx);
+  ::clang_getInclusions(tu.tu, &inclusion_visitor, &ctx);
   if (ctx.error) {
     std::rethrow_exception(ctx.error);
   }
@@ -845,7 +827,7 @@ HeaderStats AstIndexer::index_headers(
     if (!seen.insert(path).second) {
       continue;
     }
-    if (ignore && is_system_header(lib, tu.tu, inc.file)) {
+    if (ignore && is_system_header(tu.tu, inc.file)) {
       ++counts.system;
       continue;
     }
@@ -915,26 +897,26 @@ bool is_cond_cursor(CXCursorKind kind) {
 // can. We tokenize the cursor's extent: the token immediately after the
 // `template` keyword is `class`/`struct` for an instantiation (optionally after
 // `extern`) and `<` for a specialization.
-bool is_explicit_instantiation(LibClang &lib, CXCursor cursor) {
-  CXTranslationUnit tu = lib.clang_Cursor_getTranslationUnit(cursor);
+bool is_explicit_instantiation(CXCursor cursor) {
+  CXTranslationUnit tu = ::clang_Cursor_getTranslationUnit(cursor);
   if (tu == nullptr) {
     return false;
   }
-  const CXSourceRange extent = lib.clang_getCursorExtent(cursor);
+  const CXSourceRange extent = ::clang_getCursorExtent(cursor);
   CXToken *tokens = nullptr;
   unsigned n = 0;
-  lib.clang_tokenize(tu, extent, &tokens, &n);
+  ::clang_tokenize(tu, extent, &tokens, &n);
   if (tokens == nullptr) {
     return false;
   }
   bool result = false;
   for (unsigned i = 0; i < n; ++i) {
     const std::string s =
-        CxString(lib, lib.clang_getTokenSpelling(tu, tokens[i])).str();
+        CxString(::clang_getTokenSpelling(tu, tokens[i])).str();
     if (s == "template") {
       if (i + 1 < n) {
         const std::string nxt =
-            CxString(lib, lib.clang_getTokenSpelling(tu, tokens[i + 1])).str();
+            CxString(::clang_getTokenSpelling(tu, tokens[i + 1])).str();
         result = (nxt == "class" || nxt == "struct");
       }
       break;
@@ -943,7 +925,7 @@ bool is_explicit_instantiation(LibClang &lib, CXCursor cursor) {
       break;
     }
   }
-  lib.clang_disposeTokens(tu, tokens, n);
+  ::clang_disposeTokens(tu, tokens, n);
   return result;
 }
 
@@ -954,7 +936,7 @@ bool is_explicit_instantiation(LibClang &lib, CXCursor cursor) {
 // Mirrors ast.py:_index_cursor_template_args and the explicit-instantiation
 // handler's TYPE/INTEGRAL branch.
 std::optional<int64_t>
-resolve_template_arg_ref_id(LibClang &lib, Storage &db,
+resolve_template_arg_ref_id(Storage &db,
                             const std::optional<std::string> &literal,
                             CXCursor scope_cursor);
 
@@ -1021,34 +1003,34 @@ void update_callable_template_display_name(
   }
 }
 
-int index_cursor_template_args(LibClang &lib, Storage &db, int64_t owner_id,
+int index_cursor_template_args(Storage &db, int64_t owner_id,
                                CXCursor cursor) {
-  const int nargs = lib.clang_Cursor_getNumTemplateArguments(cursor);
+  const int nargs = ::clang_Cursor_getNumTemplateArguments(cursor);
   if (nargs <= 0) {
     return 0;
   }
   std::vector<std::string> display_args;
   for (int ai = 0; ai < nargs; ++ai) {
     const enum CXTemplateArgumentKind tak =
-        lib.clang_Cursor_getTemplateArgumentKind(cursor,
+        ::clang_Cursor_getTemplateArgumentKind(cursor,
                                                  static_cast<unsigned>(ai));
     TemplateArg ta;
     ta.owner_id = owner_id;
     ta.position = static_cast<int64_t>(ai);
     if (tak == CXTemplateArgumentKind_Type) {
       ta.arg_kind = 1;
-      const CXType arg_type = lib.clang_Cursor_getTemplateArgumentType(
+      const CXType arg_type = ::clang_Cursor_getTemplateArgumentType(
           cursor, static_cast<unsigned>(ai));
       const std::string spelling =
-          CxString(lib, lib.clang_getTypeSpelling(arg_type)).str();
+          CxString(::clang_getTypeSpelling(arg_type)).str();
       if (!spelling.empty()) {
         ta.literal = spelling;
       }
-      const CXCursor arg_decl = lib.clang_getTypeDeclaration(arg_type);
-      if (!lib.clang_Cursor_isNull(arg_decl) &&
-          !is_invalid_kind(lib.clang_getCursorKind(arg_decl))) {
+      const CXCursor arg_decl = ::clang_getTypeDeclaration(arg_type);
+      if (!::clang_Cursor_isNull(arg_decl) &&
+          !is_invalid_kind(::clang_getCursorKind(arg_decl))) {
         const std::string ref_usr =
-            CxString(lib, lib.clang_getCursorUSR(arg_decl)).str();
+            CxString(::clang_getCursorUSR(arg_decl)).str();
         if (!ref_usr.empty()) {
           if (const auto rsym = db.lookup_symbol(ref_usr)) {
             ta.ref_id = rsym->id;
@@ -1056,12 +1038,12 @@ int index_cursor_template_args(LibClang &lib, Storage &db, int64_t owner_id,
         }
       }
       if (!ta.ref_id) {
-        ta.ref_id = resolve_template_arg_ref_id(lib, db, ta.literal, cursor);
+        ta.ref_id = resolve_template_arg_ref_id(db, ta.literal, cursor);
       }
       display_args.push_back(ta.literal.value_or("?"));
     } else if (tak == CXTemplateArgumentKind_Integral) {
       ta.arg_kind = 2;
-      ta.literal = std::to_string(lib.clang_Cursor_getTemplateArgumentValue(
+      ta.literal = std::to_string(::clang_Cursor_getTemplateArgumentValue(
           cursor, static_cast<unsigned>(ai)));
       display_args.push_back(*ta.literal);
     } else if (tak == CXTemplateArgumentKind_Declaration ||
@@ -1189,24 +1171,24 @@ bool type_arg_symbol_kind(const std::string &kind) {
          kind == "class-template";
 }
 
-std::vector<std::string> cursor_scope_qual_names(LibClang &lib,
+std::vector<std::string> cursor_scope_qual_names(
                                                  CXCursor cursor) {
   std::vector<std::string> out;
   std::set<std::string> seen;
-  if (lib.clang_Cursor_isNull(cursor)) {
+  if (::clang_Cursor_isNull(cursor)) {
     return out;
   }
-  CXCursor c = lib.clang_getCursorSemanticParent(cursor);
-  while (!lib.clang_Cursor_isNull(c)) {
-    const CXCursorKind kind = lib.clang_getCursorKind(c);
+  CXCursor c = ::clang_getCursorSemanticParent(cursor);
+  while (!::clang_Cursor_isNull(c)) {
+    const CXCursorKind kind = ::clang_getCursorKind(c);
     if (is_invalid_kind(kind) || kind == CXCursor_TranslationUnit) {
       break;
     }
-    const std::string qn = qualified_name(lib, c);
+    const std::string qn = qualified_name(c);
     if (!qn.empty() && seen.insert(qn).second) {
       out.push_back(qn);
     }
-    c = lib.clang_getCursorSemanticParent(c);
+    c = ::clang_getCursorSemanticParent(c);
   }
   return out;
 }
@@ -1247,7 +1229,7 @@ std::optional<int64_t> pick_template_arg_symbol(
 }
 
 std::optional<int64_t>
-resolve_template_arg_ref_id(LibClang &lib, Storage &db,
+resolve_template_arg_ref_id(Storage &db,
                             const std::optional<std::string> &literal,
                             CXCursor scope_cursor) {
   if (!literal || literal->empty()) {
@@ -1261,7 +1243,7 @@ resolve_template_arg_ref_id(LibClang &lib, Storage &db,
   if (base.find("::") != std::string::npos) {
     names.push_back(base);
   }
-  for (const std::string &scope : cursor_scope_qual_names(lib, scope_cursor)) {
+  for (const std::string &scope : cursor_scope_qual_names(scope_cursor)) {
     names.push_back(scope + "::" + base);
   }
   names.push_back(base);
@@ -1289,27 +1271,27 @@ resolve_template_arg_ref_id(LibClang &lib, Storage &db,
 // depth tracking (incl. `>>` closers) keeps nested args whole. Deduced calls
 // (no explicit `<...>`) yield nothing. Mirrors
 // ast.py:_index_method_template_args_from_tokens.
-void index_method_template_args_from_tokens(LibClang &lib, Storage &db,
+void index_method_template_args_from_tokens(Storage &db,
                                             int64_t owner_id,
                                             CXCursor call_cursor,
                                             const std::string &method_name) {
-  CXTranslationUnit tu = lib.clang_Cursor_getTranslationUnit(call_cursor);
+  CXTranslationUnit tu = ::clang_Cursor_getTranslationUnit(call_cursor);
   if (tu == nullptr) {
     return;
   }
-  const CXSourceRange extent = lib.clang_getCursorExtent(call_cursor);
+  const CXSourceRange extent = ::clang_getCursorExtent(call_cursor);
   CXToken *tokens = nullptr;
   unsigned n = 0;
-  lib.clang_tokenize(tu, extent, &tokens, &n);
+  ::clang_tokenize(tu, extent, &tokens, &n);
   if (tokens == nullptr) {
     return;
   }
   std::vector<std::string> toks;
   toks.reserve(n);
   for (unsigned i = 0; i < n; ++i) {
-    toks.push_back(CxString(lib, lib.clang_getTokenSpelling(tu, tokens[i])).str());
+    toks.push_back(CxString(::clang_getTokenSpelling(tu, tokens[i])).str());
   }
-  lib.clang_disposeTokens(tu, tokens, n);
+  ::clang_disposeTokens(tu, tokens, n);
 
   size_t ni = toks.size();
   for (size_t i = 0; i < toks.size(); ++i) {
@@ -1386,7 +1368,7 @@ void index_method_template_args_from_tokens(LibClang &lib, Storage &db,
     ta.arg_kind = method_targ_kind_from_literal(literal);
     ta.literal = literal;
     if (ta.arg_kind == 1) {
-      ta.ref_id = resolve_template_arg_ref_id(lib, db, ta.literal, call_cursor);
+      ta.ref_id = resolve_template_arg_ref_id(db, ta.literal, call_cursor);
     }
     db.add_template_arg(ta);
     display_args.push_back(literal);
@@ -1407,7 +1389,7 @@ void index_method_template_args_from_tokens(LibClang &lib, Storage &db,
 //   - a variable/local `X<B> v;`            (VarDecl type)           [Stage 3]
 // Gated to a NON-system primary (a `std::vector<F>` member/alias/local is left
 // to collapse onto the primary). Mirrors ast.py:_mint_instance_from_type.
-void mint_instance_from_type(LibClang &lib, Storage &db, CXType type_obj) {
+void mint_instance_from_type(Storage &db, CXType type_obj) {
   // Stage 4: peel pointer / reference / array wrappers so an `X<B>* m_;` /
   // `X<B>& m_;` member mints the SAME instance as a by-value `X<B> m_;`. Mirrors
   // named_type_decl's stripping so emit_type_use (which peels the same way) and
@@ -1419,59 +1401,59 @@ void mint_instance_from_type(LibClang &lib, Storage &db, CXType type_obj) {
     const CXTypeKind tk = type_obj.kind;
     if (tk == CXType_Pointer || tk == CXType_LValueReference ||
         tk == CXType_RValueReference) {
-      type_obj = lib.clang_getPointeeType(type_obj);
+      type_obj = ::clang_getPointeeType(type_obj);
     } else if (tk == CXType_ConstantArray || tk == CXType_IncompleteArray ||
                tk == CXType_VariableArray || tk == CXType_DependentSizedArray) {
-      type_obj = lib.clang_getArrayElementType(type_obj);
+      type_obj = ::clang_getArrayElementType(type_obj);
     } else {
       break;
     }
   }
-  const CXCursor decl = lib.clang_getTypeDeclaration(type_obj);
-  if (lib.clang_Cursor_isNull(decl) ||
-      is_invalid_kind(lib.clang_getCursorKind(decl))) {
+  const CXCursor decl = ::clang_getTypeDeclaration(type_obj);
+  if (::clang_Cursor_isNull(decl) ||
+      is_invalid_kind(::clang_getCursorKind(decl))) {
     return;
   }
-  const CXCursor primary = lib.clang_getSpecializedCursorTemplate(decl);
-  if (lib.clang_Cursor_isNull(primary) ||
-      is_invalid_kind(lib.clang_getCursorKind(primary))) {
+  const CXCursor primary = ::clang_getSpecializedCursorTemplate(decl);
+  if (::clang_Cursor_isNull(primary) ||
+      is_invalid_kind(::clang_getCursorKind(primary))) {
     return; // type is not a class-template specialization
   }
   // Skip std:: / system templates -- keep them collapsed onto the primary.
-  if (lib.clang_Location_isInSystemHeader(
-          lib.clang_getCursorLocation(primary)) != 0) {
+  if (::clang_Location_isInSystemHeader(
+          ::clang_getCursorLocation(primary)) != 0) {
     return;
   }
   const std::string inst_usr =
-      CxString(lib, lib.clang_getCursorUSR(decl)).str();
+      CxString(::clang_getCursorUSR(decl)).str();
   const std::string prim_usr =
-      CxString(lib, lib.clang_getCursorUSR(primary)).str();
+      CxString(::clang_getCursorUSR(primary)).str();
   if (inst_usr.empty() || prim_usr.empty() || inst_usr == prim_usr) {
     return;
   }
 
-  const RefDeclLoc inst_dl = ref_decl_loc(lib, db, decl);
+  const RefDeclLoc inst_dl = ref_decl_loc(db, decl);
   const int64_t inst_id = db.mint_symbol_id(
-      inst_usr, CxString(lib, lib.clang_getCursorSpelling(decl)).str(),
-      qualified_name(lib, decl),
-      CxString(lib, lib.clang_getTypeSpelling(type_obj)).str(),  // 'X<B>'
-      stub_kind(lib, decl), inst_dl.file_id, inst_dl.line, inst_dl.col,
+      inst_usr, CxString(::clang_getCursorSpelling(decl)).str(),
+      qualified_name(decl),
+      CxString(::clang_getTypeSpelling(type_obj)).str(),  // 'X<B>'
+      stub_kind(decl), inst_dl.file_id, inst_dl.line, inst_dl.col,
       inst_dl.path, /*is_instantiation=*/true, /*is_named_instance=*/true);
 
-  const RefDeclLoc prim_dl = ref_decl_loc(lib, db, primary);
+  const RefDeclLoc prim_dl = ref_decl_loc(db, primary);
   // Mirror ast.py:2096 -- `_KIND_MAP.get(primary.kind, "class-template")`: the
   // primary of a class-template instantiation defaults to "class-template", NOT
   // stub_kind()'s generic "function" fallback.  This matters when `primary` is a
   // CLASS_TEMPLATE_PARTIAL_SPECIALIZATION cursor (an instantiation that matches a
   // partial spec), whose kind has no kind_name() entry -- otherwise C++ stored
   // the stub as "function" while Python stored "class-template" (parity break).
-  const char *prim_kn = kind_name(lib.clang_getCursorKind(primary));
+  const char *prim_kn = kind_name(::clang_getCursorKind(primary));
   const std::string prim_kind =
       prim_kn != nullptr ? std::string(prim_kn) : std::string("class-template");
   const int64_t prim_id = db.mint_symbol_id(
-      prim_usr, CxString(lib, lib.clang_getCursorSpelling(primary)).str(),
-      qualified_name(lib, primary),
-      CxString(lib, lib.clang_getCursorDisplayName(primary)).str(), prim_kind,
+      prim_usr, CxString(::clang_getCursorSpelling(primary)).str(),
+      qualified_name(primary),
+      CxString(::clang_getCursorDisplayName(primary)).str(), prim_kind,
       prim_dl.file_id, prim_dl.line, prim_dl.col, prim_dl.path);
   Edge e;
   e.src_id = inst_id;
@@ -1482,24 +1464,24 @@ void mint_instance_from_type(LibClang &lib, Storage &db, CXType type_obj) {
 
   // template_arg rows on the instance. The Type API exposes TYPE args only,
   // which is all the roll-up needs (T->B); non-type args are skipped.
-  const int nargs = lib.clang_Type_getNumTemplateArguments(type_obj);
+  const int nargs = ::clang_Type_getNumTemplateArguments(type_obj);
   for (int ai = 0; ai < nargs; ++ai) {
-    const CXType arg_type = lib.clang_Type_getTemplateArgumentAsType(
+    const CXType arg_type = ::clang_Type_getTemplateArgumentAsType(
         type_obj, static_cast<unsigned>(ai));
     TemplateArg ta;
     ta.owner_id = inst_id;
     ta.position = static_cast<int64_t>(ai);
     ta.arg_kind = 1;
     const std::string spelling =
-        CxString(lib, lib.clang_getTypeSpelling(arg_type)).str();
+        CxString(::clang_getTypeSpelling(arg_type)).str();
     if (!spelling.empty()) {
       ta.literal = spelling;
     }
-    const CXCursor arg_decl = lib.clang_getTypeDeclaration(arg_type);
-    if (!lib.clang_Cursor_isNull(arg_decl) &&
-        !is_invalid_kind(lib.clang_getCursorKind(arg_decl))) {
+    const CXCursor arg_decl = ::clang_getTypeDeclaration(arg_type);
+    if (!::clang_Cursor_isNull(arg_decl) &&
+        !is_invalid_kind(::clang_getCursorKind(arg_decl))) {
       const std::string ref_usr =
-          CxString(lib, lib.clang_getCursorUSR(arg_decl)).str();
+          CxString(::clang_getCursorUSR(arg_decl)).str();
       if (!ref_usr.empty()) {
         if (const auto rsym = db.lookup_symbol(ref_usr)) {
           ta.ref_id = rsym->id;
@@ -1507,8 +1489,8 @@ void mint_instance_from_type(LibClang &lib, Storage &db, CXType type_obj) {
       }
     }
     if (!ta.ref_id) {
-      ta.ref_id = resolve_template_arg_ref_id(lib, db, ta.literal,
-                                              lib.clang_getNullCursor());
+      ta.ref_id = resolve_template_arg_ref_id(db, ta.literal,
+                                              ::clang_getNullCursor());
     }
     db.add_template_arg(ta);
   }
@@ -1517,14 +1499,13 @@ void mint_instance_from_type(LibClang &lib, Storage &db, CXType type_obj) {
 // Stage 2: mint the `X<B>` instance named by a `using`/typedef alias. Thin
 // wrapper over mint_instance_from_type using the alias's underlying type.
 // Mirrors ast.py:_mint_named_instance.
-void mint_named_instance(LibClang &lib, Storage &db, CXCursor cursor) {
-  mint_instance_from_type(lib, db,
-                          lib.clang_getTypedefDeclUnderlyingType(cursor));
+void mint_named_instance(Storage &db, CXCursor cursor) {
+  mint_instance_from_type(db,
+                          ::clang_getTypedefDeclUnderlyingType(cursor));
 }
 
 // Context for the recursive body descent (calls + uses).
 struct BodyDescentCtx {
-  LibClang *lib = nullptr;
   Storage *db = nullptr;
   int64_t src_id = -1;
   int64_t file_id = -1;
@@ -1555,16 +1536,16 @@ CXChildVisitResult first_child_visitor(CXCursor c, CXCursor /*parent*/,
 // Peel implicit casts, parentheses, and address-of/dereference from `expr`
 // to the underlying named sub-expression. At most 16 layers.
 // Mirrors ast.py:_peel_expr.
-CXCursor peel_expr(LibClang &lib, CXCursor expr) {
+CXCursor peel_expr(CXCursor expr) {
   for (int i = 0; i < 16; ++i) {
-    const CXCursorKind k = lib.clang_getCursorKind(expr);
+    const CXCursorKind k = ::clang_getCursorKind(expr);
     // PAREN_EXPR (111), UNARY_OPERATOR (112), CSTYLE_CAST_EXPR (117)
     // UNEXPOSED_EXPR (0/1) covers implicit casts
     if (k == CXCursor_ParenExpr || k == CXCursor_UnaryOperator ||
         k == (CXCursorKind)117 /*CStyleCast*/ ||
         k == CXCursor_UnexposedExpr || k == (CXCursorKind)1) {
       FirstChildCtx fc{};
-      lib.clang_visitChildren(expr, &first_child_visitor, &fc);
+      ::clang_visitChildren(expr, &first_child_visitor, &fc);
       if (fc.found) {
         expr = fc.out;
         continue;
@@ -1578,40 +1559,40 @@ CXCursor peel_expr(LibClang &lib, CXCursor expr) {
 // Strip pointer/reference/cv-qualifiers from `t` and return the USR of the
 // record declaration, or "" when there is none (builtins).
 // Mirrors ast.py:_record_usr_of_type.
-std::string record_usr_of_type(LibClang &lib, CXType t) {
+std::string record_usr_of_type(CXType t) {
   // clang_getCanonicalType is not wrapped in LibClang; call the C API directly.
   CXType canonical = ::clang_getCanonicalType(t);
   for (int i = 0; i < 8; ++i) {
     const CXTypeKind tk = canonical.kind;
     if (tk == CXType_Pointer || tk == CXType_LValueReference ||
         tk == CXType_RValueReference) {
-      canonical = ::clang_getCanonicalType(lib.clang_getPointeeType(canonical));
+      canonical = ::clang_getCanonicalType(::clang_getPointeeType(canonical));
     } else {
       break;
     }
   }
-  const CXCursor decl = lib.clang_getTypeDeclaration(canonical);
-  if (lib.clang_Cursor_isNull(decl) ||
-      is_invalid_kind(lib.clang_getCursorKind(decl))) {
+  const CXCursor decl = ::clang_getTypeDeclaration(canonical);
+  if (::clang_Cursor_isNull(decl) ||
+      is_invalid_kind(::clang_getCursorKind(decl))) {
     return "";
   }
-  return CxString(lib, lib.clang_getCursorUSR(decl)).str();
+  return CxString(::clang_getCursorUSR(decl)).str();
 }
 
 // Mirrors ast.py:_type_is_value. True iff `loc_type` holds `dispatch_record_usr`
 // by value (exact, non-erased). Sound: pointer/ref fail the RECORD kind gate;
 // a handle's wrapper USR never equals the dispatch USR.
-bool type_is_value(LibClang &lib, CXType loc_type,
+bool type_is_value(CXType loc_type,
                    const std::string &dispatch_record_usr) {
   if (dispatch_record_usr.empty()) return false;
   CXType c = ::clang_getCanonicalType(loc_type);
   if (c.kind != CXType_Record) return false;
-  const CXCursor decl = lib.clang_getTypeDeclaration(c);
-  if (lib.clang_Cursor_isNull(decl) ||
-      is_invalid_kind(lib.clang_getCursorKind(decl))) {
+  const CXCursor decl = ::clang_getTypeDeclaration(c);
+  if (::clang_Cursor_isNull(decl) ||
+      is_invalid_kind(::clang_getCursorKind(decl))) {
     return false;
   }
-  return CxString(lib, lib.clang_getCursorUSR(decl)).str() == dispatch_record_usr;
+  return CxString(::clang_getCursorUSR(decl)).str() == dispatch_record_usr;
 }
 
 // Mirrors ast.py:_decl_type_for_expr.
@@ -1621,23 +1602,23 @@ bool type_is_value(LibClang &lib, CXType loc_type,
 // getCursorType(getCursorReferenced(peeled)) which preserves the reference.
 // For CALL_EXPR (call_result) we use getCursorResultType of the callee.
 // Falls back to getCursorType(peeled) for anything else (safe).
-static CXType decl_type_for_expr(LibClang &lib, CXCursor peeled) {
-  const CXCursorKind k = lib.clang_getCursorKind(peeled);
+static CXType decl_type_for_expr(CXCursor peeled) {
+  const CXCursorKind k = ::clang_getCursorKind(peeled);
   if (k == CXCursor_DeclRefExpr || k == CXCursor_MemberRefExpr) {
-    const CXCursor ref = lib.clang_getCursorReferenced(peeled);
-    if (lib.clang_Cursor_isNull(ref)) {
-      return lib.clang_getCursorType(peeled);
+    const CXCursor ref = ::clang_getCursorReferenced(peeled);
+    if (::clang_Cursor_isNull(ref)) {
+      return ::clang_getCursorType(peeled);
     }
-    return lib.clang_getCursorType(ref);
+    return ::clang_getCursorType(ref);
   }
   if (k == CXCursor_CallExpr || k == (CXCursorKind)128 /*CXXFunctionalCast*/) {
-    const CXCursor ref = lib.clang_getCursorReferenced(peeled);
-    if (lib.clang_Cursor_isNull(ref)) {
-      return lib.clang_getCursorType(peeled);
+    const CXCursor ref = ::clang_getCursorReferenced(peeled);
+    if (::clang_Cursor_isNull(ref)) {
+      return ::clang_getCursorType(peeled);
     }
-    return lib.clang_getCursorResultType(ref);
+    return ::clang_getCursorResultType(ref);
   }
-  return lib.clang_getCursorType(peeled);
+  return ::clang_getCursorType(peeled);
 }
 
 // Result of classify_value_source — mirrors the Python tuple.
@@ -1650,31 +1631,31 @@ struct ValueSource {
 
 // Classify the provenance of a value expression.
 // Mirrors ast.py:_classify_value_source.
-ValueSource classify_value_source(LibClang &lib, CXCursor expr) {
-  const CXCursor peeled = peel_expr(lib, expr);
-  const CXCursorKind k = lib.clang_getCursorKind(peeled);
+ValueSource classify_value_source(CXCursor expr) {
+  const CXCursor peeled = peel_expr(expr);
+  const CXCursorKind k = ::clang_getCursorKind(peeled);
 
   // CXXThisExpr (132)
   if (k == CXCursor_CXXThisExpr) {
-    const std::string tu = record_usr_of_type(lib, lib.clang_getCursorType(peeled));
+    const std::string tu = record_usr_of_type(::clang_getCursorType(peeled));
     return {"this", tu, tu, ""};
   }
 
   // DECL_REF_EXPR (101)
   if (k == CXCursor_DeclRefExpr) {
-    const CXCursor ref = lib.clang_getCursorReferenced(peeled);
-    if (lib.clang_Cursor_isNull(ref)) {
+    const CXCursor ref = ::clang_getCursorReferenced(peeled);
+    if (::clang_Cursor_isNull(ref)) {
       return {"unknown", "", "", ""};
     }
-    const CXCursorKind ref_kind = lib.clang_getCursorKind(ref);
-    const std::string decl_usr = CxString(lib, lib.clang_getCursorUSR(ref)).str();
-    const std::string type_usr = record_usr_of_type(lib, lib.clang_getCursorType(peeled));
+    const CXCursorKind ref_kind = ::clang_getCursorKind(ref);
+    const std::string decl_usr = CxString(::clang_getCursorUSR(ref)).str();
+    const std::string type_usr = record_usr_of_type(::clang_getCursorType(peeled));
     if (ref_kind == CXCursor_ParmDecl) {
       return {"local", type_usr, decl_usr, ""};
     }
     if (ref_kind == CXCursor_VarDecl) {
-      const CXCursor parent = lib.clang_getCursorSemanticParent(ref);
-      const CXCursorKind pk = lib.clang_getCursorKind(parent);
+      const CXCursor parent = ::clang_getCursorSemanticParent(ref);
+      const CXCursorKind pk = ::clang_getCursorKind(parent);
       if (pk == CXCursor_FunctionDecl || pk == CXCursor_CXXMethod ||
           pk == CXCursor_Constructor || pk == CXCursor_Destructor ||
           pk == (CXCursorKind)144 /*LambdaExpr*/) {
@@ -1687,33 +1668,33 @@ ValueSource classify_value_source(LibClang &lib, CXCursor expr) {
 
   // MEMBER_REF_EXPR (102)
   if (k == CXCursor_MemberRefExpr) {
-    const CXCursor ref = lib.clang_getCursorReferenced(peeled);
-    const std::string decl_usr = lib.clang_Cursor_isNull(ref) ? "" :
-        CxString(lib, lib.clang_getCursorUSR(ref)).str();
-    const std::string type_usr = record_usr_of_type(lib, lib.clang_getCursorType(peeled));
+    const CXCursor ref = ::clang_getCursorReferenced(peeled);
+    const std::string decl_usr = ::clang_Cursor_isNull(ref) ? "" :
+        CxString(::clang_getCursorUSR(ref)).str();
+    const std::string type_usr = record_usr_of_type(::clang_getCursorType(peeled));
     return {"member", type_usr, decl_usr, ""};
   }
 
   // CALL_EXPR (103) or CXXFunctionalCastExpr (128)
   if (k == CXCursor_CallExpr || k == (CXCursorKind)128 /*CXXFunctionalCast*/) {
-    const CXCursor ref = lib.clang_getCursorReferenced(peeled);
-    if (!lib.clang_Cursor_isNull(ref)) {
-      const CXCursorKind ref_kind = lib.clang_getCursorKind(ref);
+    const CXCursor ref = ::clang_getCursorReferenced(peeled);
+    if (!::clang_Cursor_isNull(ref)) {
+      const CXCursorKind ref_kind = ::clang_getCursorKind(ref);
       if (ref_kind == CXCursor_Constructor ||
           ref_kind == (CXCursorKind)26 /*ConversionFunction*/) {
-        const std::string type_usr = record_usr_of_type(lib, lib.clang_getCursorType(peeled));
+        const std::string type_usr = record_usr_of_type(::clang_getCursorType(peeled));
         return {"construct", type_usr, "", ""};
       }
     }
-    const std::string type_usr = record_usr_of_type(lib, lib.clang_getCursorType(peeled));
-    const std::string callee_usr = lib.clang_Cursor_isNull(ref) ? "" :
-        CxString(lib, lib.clang_getCursorUSR(ref)).str();
+    const std::string type_usr = record_usr_of_type(::clang_getCursorType(peeled));
+    const std::string callee_usr = ::clang_Cursor_isNull(ref) ? "" :
+        CxString(::clang_getCursorUSR(ref)).str();
     return {"call_result", type_usr, "", callee_usr};
   }
 
   // CXXNewExpr (134)
   if (k == (CXCursorKind)134) {
-    const std::string type_usr = record_usr_of_type(lib, lib.clang_getCursorType(peeled));
+    const std::string type_usr = record_usr_of_type(::clang_getCursorType(peeled));
     return {"construct", type_usr, "", ""};
   }
 
@@ -1735,25 +1716,21 @@ ValueSource classify_value_source(LibClang &lib, CXCursor expr) {
 // Mirrors ast.py:_ctor_form_kind.
 // Inspects the ctor declaration's single parameter type spelling:
 //   "&&"  -> move (14); "&" alone -> copy (13); else -> value (10).
-static int ctor_form_kind(LibClang &lib, CXCursor ctor_cursor) {
+static int ctor_form_kind(CXCursor ctor_cursor) {
   // Collect PARM_DECL children of the ctor declaration.
   struct ParmCtx {
-    LibClang *lib;
     std::string first_param_type;
     int count = 0;
   } pctx;
-  pctx.lib = &lib;
-  lib.clang_visitChildren(
+  ::clang_visitChildren(
       ctor_cursor,
       [](CXCursor c, CXCursor /*parent*/, CXClientData data) {
         auto *ctx = static_cast<ParmCtx *>(data);
-        if (ctx->lib->clang_getCursorKind(c) == CXCursor_ParmDecl) {
+        if (::clang_getCursorKind(c) == CXCursor_ParmDecl) {
           ++ctx->count;
           if (ctx->count == 1) {
             ctx->first_param_type =
-                CxString(*ctx->lib,
-                         ctx->lib->clang_getTypeSpelling(
-                             ctx->lib->clang_getCursorType(c)))
+                CxString(::clang_getTypeSpelling(::clang_getCursorType(c)))
                     .str();
           }
         }
@@ -1775,24 +1752,24 @@ static int ctor_form_kind(LibClang &lib, CXCursor ctor_cursor) {
 // Return the receiver sub-expression of a C++ member call (the base object),
 // or a null cursor for free-function calls or no-receiver implicit-this calls.
 // Mirrors ast.py:_receiver_subexpr.
-CXCursor receiver_subexpr(LibClang &lib, CXCursor call) {
+CXCursor receiver_subexpr(CXCursor call) {
   FirstChildCtx fc{};
-  lib.clang_visitChildren(call, &first_child_visitor, &fc);
+  ::clang_visitChildren(call, &first_child_visitor, &fc);
   if (!fc.found) {
-    return lib.clang_getNullCursor();
+    return ::clang_getNullCursor();
   }
-  const CXCursor peeled_first = peel_expr(lib, fc.out);
-  if (lib.clang_getCursorKind(peeled_first) == CXCursor_MemberRefExpr) {
+  const CXCursor peeled_first = peel_expr(fc.out);
+  if (::clang_getCursorKind(peeled_first) == CXCursor_MemberRefExpr) {
     // The receiver is the MEMBER_REF_EXPR's first child
     FirstChildCtx mc{};
-    lib.clang_visitChildren(peeled_first, &first_child_visitor, &mc);
+    ::clang_visitChildren(peeled_first, &first_child_visitor, &mc);
     if (mc.found) {
       return mc.out;
     }
     // Implicit this — no explicit child
-    return lib.clang_getNullCursor();
+    return ::clang_getNullCursor();
   }
-  return lib.clang_getNullCursor();
+  return ::clang_getNullCursor();
 }
 
 // ---------------------------------------------------------------------------
@@ -1801,7 +1778,7 @@ CXCursor receiver_subexpr(LibClang &lib, CXCursor call) {
 // kind_id: 1=calls, 7=uses. The edge is upserted (ON CONFLICT increments
 // count); the site is OR IGNORE (same site visited twice is one row).
 // Returns the stable edge.id for further linkage (call_arg rows).
-int64_t emit_body_edge(BodyDescentCtx *ctx, LibClang &lib, CXCursor cursor,
+int64_t emit_body_edge(BodyDescentCtx *ctx, CXCursor cursor,
                        int64_t dst_id, int kind_id) {
   Edge e;
   e.src_id = ctx->src_id;
@@ -1814,7 +1791,7 @@ int64_t emit_body_edge(BodyDescentCtx *ctx, LibClang &lib, CXCursor cursor,
   unsigned col = 0;
   unsigned offset = 0;
   CXFile file_handle = nullptr;
-  lib.clang_getExpansionLocation(lib.clang_getCursorLocation(cursor),
+  ::clang_getExpansionLocation(::clang_getCursorLocation(cursor),
                                  &file_handle, &line, &col, &offset);
   EdgeSite site;
   site.edge_id = edge_id;
@@ -1828,7 +1805,7 @@ int64_t emit_body_edge(BodyDescentCtx *ctx, LibClang &lib, CXCursor cursor,
 
 // Emit a calls edge with Phase 2/3 receiver provenance on the edge_site.
 // Returns the edge.id (needed for add_call_arg).
-int64_t emit_call_edge(BodyDescentCtx *ctx, LibClang &lib, CXCursor cursor,
+int64_t emit_call_edge(BodyDescentCtx *ctx, CXCursor cursor,
                        int64_t dst_id,
                        const std::string &recv_src_kind,
                        const std::string &recv_type_usr,
@@ -1846,7 +1823,7 @@ int64_t emit_call_edge(BodyDescentCtx *ctx, LibClang &lib, CXCursor cursor,
   unsigned col = 0;
   unsigned offset = 0;
   CXFile file_handle = nullptr;
-  lib.clang_getExpansionLocation(lib.clang_getCursorLocation(cursor),
+  ::clang_getExpansionLocation(::clang_getCursorLocation(cursor),
                                  &file_handle, &line, &col, &offset);
   EdgeSite site;
   site.edge_id = edge_id;
@@ -1875,15 +1852,15 @@ int64_t emit_call_edge(BodyDescentCtx *ctx, LibClang &lib, CXCursor cursor,
 
 // Emit call_arg rows for all non-literal positional args of a CALL_EXPR.
 // Mirrors the Phase 2 loop in ast.py:_body_descent.
-void emit_call_args(BodyDescentCtx *ctx, LibClang &lib, CXCursor call,
+void emit_call_args(BodyDescentCtx *ctx, CXCursor call,
                     int64_t edge_id, unsigned line, unsigned col) {
-  const int nargs = lib.clang_Cursor_getNumArguments(call);
+  const int nargs = ::clang_Cursor_getNumArguments(call);
   for (int pos = 0; pos < nargs; ++pos) {
-    const CXCursor arg = lib.clang_Cursor_getArgument(call, static_cast<unsigned>(pos));
-    if (lib.clang_Cursor_isNull(arg)) {
+    const CXCursor arg = ::clang_Cursor_getArgument(call, static_cast<unsigned>(pos));
+    if (::clang_Cursor_isNull(arg)) {
       continue;
     }
-    const ValueSource vs = classify_value_source(lib, arg);
+    const ValueSource vs = classify_value_source(arg);
     if (vs.src_kind == "literal") {
       continue;
     }
@@ -1909,8 +1886,8 @@ void emit_call_args(BodyDescentCtx *ctx, LibClang &lib, CXCursor call,
     // which auto-derefs lvalue-references in libclang).
     if ((vs.src_kind == "member" || vs.src_kind == "global" ||
          vs.src_kind == "call_result" || vs.src_kind == "local") && !vs.type_usr.empty()) {
-      const CXCursor peeled_arg = peel_expr(lib, arg);
-      ca.type_is_value = type_is_value(lib, decl_type_for_expr(lib, peeled_arg),
+      const CXCursor peeled_arg = peel_expr(arg);
+      ca.type_is_value = type_is_value(decl_type_for_expr(peeled_arg),
                                        vs.type_usr) ? 1 : 0;
     }
     ctx->db->add_call_arg(ca);
@@ -1926,14 +1903,13 @@ void emit_call_args(BodyDescentCtx *ctx, LibClang &lib, CXCursor call,
 // to_string, etc.) are left unresolved so we never guess a wrong target.
 // Note: FirstChildCtx + first_child_visitor defined earlier (above Phase 2 helpers).
 struct OverloadRefCtx {
-  LibClang *lib;
   CXCursor out;
   bool found = false;
 };
 CXChildVisitResult overload_ref_visitor(CXCursor c, CXCursor /*parent*/,
                                         CXClientData d) noexcept {
   auto *x = static_cast<OverloadRefCtx *>(d);
-  if (x->lib->clang_getCursorKind(c) == CXCursor_OverloadedDeclRef) {
+  if (::clang_getCursorKind(c) == CXCursor_OverloadedDeclRef) {
     x->out = c;
     x->found = true;
     return CXChildVisit_Break;
@@ -1946,30 +1922,30 @@ CXChildVisitResult overload_ref_visitor(CXCursor c, CXCursor /*parent*/,
 // (the callee position) is searched, so an argument that is itself an overloaded
 // name is not mistaken for the callee. Mirror of Python
 // _overload_set_candidates().
-std::vector<CXCursor> overload_set_candidates(LibClang &lib, CXCursor call) {
+std::vector<CXCursor> overload_set_candidates(CXCursor call) {
   FirstChildCtx fc{};
-  lib.clang_visitChildren(call, &first_child_visitor, &fc);
+  ::clang_visitChildren(call, &first_child_visitor, &fc);
   if (!fc.found) {
     return {};
   }
-  CXCursor odr = lib.clang_getNullCursor();
-  if (lib.clang_getCursorKind(fc.out) == CXCursor_OverloadedDeclRef) {
+  CXCursor odr = ::clang_getNullCursor();
+  if (::clang_getCursorKind(fc.out) == CXCursor_OverloadedDeclRef) {
     odr = fc.out;
   } else {
-    OverloadRefCtx oc{&lib, {}, false};
-    lib.clang_visitChildren(fc.out, &overload_ref_visitor, &oc);
+    OverloadRefCtx oc{{}, false};
+    ::clang_visitChildren(fc.out, &overload_ref_visitor, &oc);
     if (oc.found) {
       odr = oc.out;
     }
   }
-  if (lib.clang_Cursor_isNull(odr)) {
+  if (::clang_Cursor_isNull(odr)) {
     return {};
   }
-  const unsigned n = lib.clang_getNumOverloadedDecls(odr);
+  const unsigned n = ::clang_getNumOverloadedDecls(odr);
   std::vector<CXCursor> out;
   out.reserve(n);
   for (unsigned i = 0; i < n; ++i) {
-    out.push_back(lib.clang_getOverloadedDecl(odr, i));
+    out.push_back(::clang_getOverloadedDecl(odr, i));
   }
   return out;
 }
@@ -1977,9 +1953,9 @@ std::vector<CXCursor> overload_set_candidates(LibClang &lib, CXCursor call) {
 // Returns the unique overloaded declaration, or a null cursor when the callee
 // cannot be unambiguously recovered (ambiguous sets are handled by
 // emit_overloaded_calls instead). Mirror of Python _recover_overloaded_callee().
-CXCursor recover_overloaded_callee(LibClang &lib, CXCursor call) {
-  const auto cands = overload_set_candidates(lib, call);
-  return cands.size() == 1 ? cands[0] : lib.clang_getNullCursor();
+CXCursor recover_overloaded_callee(CXCursor call) {
+  const auto cands = overload_set_candidates(call);
+  return cands.size() == 1 ? cands[0] : ::clang_getNullCursor();
 }
 
 // Emit `calls` edges for a dependent call whose overload set has MORE THAN one
@@ -1994,14 +1970,14 @@ CXCursor recover_overloaded_callee(LibClang &lib, CXCursor call) {
 // externals. No receiver/argument provenance is recorded: that feeds
 // virtual-dispatch devirt, and a function-template call is never a virtual
 // dispatch. Mirror of Python _emit_overloaded_calls().
-void emit_overloaded_calls(BodyDescentCtx *ctx, LibClang &lib, CXCursor call) {
-  const auto cands = overload_set_candidates(lib, call);
+void emit_overloaded_calls(BodyDescentCtx *ctx, CXCursor call) {
+  const auto cands = overload_set_candidates(call);
   if (cands.size() < 2) {
     return;
   }
   std::set<int64_t> dst_ids; // ordered + deduped
   for (const CXCursor &cand : cands) {
-    const std::string usr = CxString(lib, lib.clang_getCursorUSR(cand)).str();
+    const std::string usr = CxString(::clang_getCursorUSR(cand)).str();
     if (usr.empty()) {
       continue;
     }
@@ -2011,24 +1987,24 @@ void emit_overloaded_calls(BodyDescentCtx *ctx, LibClang &lib, CXCursor call) {
     }
     // Not yet indexed: mint a USR-keyed stub so a later index backfills it,
     // but skip true system/stdlib overloads.
-    if (lib.clang_Location_isInSystemHeader(
-            lib.clang_getCursorLocation(cand)) != 0) {
+    if (::clang_Location_isInSystemHeader(
+            ::clang_getCursorLocation(cand)) != 0) {
       continue;
     }
-    const RefDeclLoc dl = ref_decl_loc(lib, *ctx->db, cand);
+    const RefDeclLoc dl = ref_decl_loc(*ctx->db, cand);
     dst_ids.insert(ctx->db->mint_symbol_id(
-        usr, CxString(lib, lib.clang_getCursorSpelling(cand)).str(),
-        qualified_name(lib, cand),
-        CxString(lib, lib.clang_getCursorDisplayName(cand)).str(),
-        stub_kind(lib, cand), dl.file_id, dl.line, dl.col, dl.path));
+        usr, CxString(::clang_getCursorSpelling(cand)).str(),
+        qualified_name(cand),
+        CxString(::clang_getCursorDisplayName(cand)).str(),
+        stub_kind(cand), dl.file_id, dl.line, dl.col, dl.path));
   }
   if (dst_ids.empty()) {
     // Nothing resolved or minted (e.g. all candidates system/USR-less): fall
     // back to the shared qualified name + kind over indexed symbols.
     const CXCursor first = cands[0];
-    const std::string qn = qualified_name(lib, first);
+    const std::string qn = qualified_name(first);
     if (!qn.empty()) {
-      const std::string sk = stub_kind(lib, first);
+      const std::string sk = stub_kind(first);
       for (const auto &s : ctx->db->lookup_symbols_by_qual_name(qn, sk)) {
         dst_ids.insert(s.id);
       }
@@ -2041,7 +2017,7 @@ void emit_overloaded_calls(BodyDescentCtx *ctx, LibClang &lib, CXCursor call) {
   unsigned col = 0;
   unsigned offset = 0;
   CXFile file_handle = nullptr;
-  lib.clang_getExpansionLocation(lib.clang_getCursorLocation(call), &file_handle,
+  ::clang_getExpansionLocation(::clang_getCursorLocation(call), &file_handle,
                                  &line, &col, &offset);
   for (const int64_t dst_id : dst_ids) {
     Edge e;
@@ -2069,7 +2045,7 @@ void emit_overloaded_calls(BodyDescentCtx *ctx, LibClang &lib, CXCursor call) {
 // specialization on a non-template class (Context::register<MyType>), attaches
 // method_of to the existing owner class without marking that class as an
 // instantiation. Free-function specializations have no method_of edge.
-void mint_instantiation_nodes(LibClang &lib, Storage &db,
+void mint_instantiation_nodes(Storage &db,
                               const CXCursor &ref,
                               int64_t member_id,
                               int64_t prim_member_id) {
@@ -2081,7 +2057,7 @@ void mint_instantiation_nodes(LibClang &lib, Storage &db,
   inst_b.count = 1;
   db.add_edge(inst_b);
 
-  const CXCursorKind ref_kind = lib.clang_getCursorKind(ref);
+  const CXCursorKind ref_kind = ::clang_getCursorKind(ref);
   if (ref_kind != CXCursor_CXXMethod &&
       ref_kind != CXCursor_Constructor &&
       ref_kind != CXCursor_Destructor &&
@@ -2089,12 +2065,12 @@ void mint_instantiation_nodes(LibClang &lib, Storage &db,
     return;
   }
 
-  const CXCursor parent = lib.clang_getCursorSemanticParent(ref);
-  if (lib.clang_Cursor_isNull(parent) ||
-      is_invalid_kind(lib.clang_getCursorKind(parent))) {
+  const CXCursor parent = ::clang_getCursorSemanticParent(ref);
+  if (::clang_Cursor_isNull(parent) ||
+      is_invalid_kind(::clang_getCursorKind(parent))) {
     return;
   }
-  const CXCursorKind parent_cursor_kind = lib.clang_getCursorKind(parent);
+  const CXCursorKind parent_cursor_kind = ::clang_getCursorKind(parent);
   if (parent_cursor_kind != CXCursor_ClassDecl &&
       parent_cursor_kind != CXCursor_StructDecl &&
       parent_cursor_kind != CXCursor_UnionDecl &&
@@ -2103,15 +2079,15 @@ void mint_instantiation_nodes(LibClang &lib, Storage &db,
     return;
   }
   const std::string type_usr =
-      CxString(lib, lib.clang_getCursorUSR(parent)).str();
+      CxString(::clang_getCursorUSR(parent)).str();
   if (type_usr.empty()) {
     return;
   }
 
   const CXCursor class_primary =
-      lib.clang_getSpecializedCursorTemplate(parent);
-  if (lib.clang_Cursor_isNull(class_primary) ||
-      is_invalid_kind(lib.clang_getCursorKind(class_primary))) {
+      ::clang_getSpecializedCursorTemplate(parent);
+  if (::clang_Cursor_isNull(class_primary) ||
+      is_invalid_kind(::clang_getCursorKind(class_primary))) {
     if (const auto owner_sym = db.lookup_symbol(type_usr)) {
       Edge mo;
       mo.src_id = member_id;
@@ -2123,7 +2099,7 @@ void mint_instantiation_nodes(LibClang &lib, Storage &db,
     return;
   }
   const std::string class_prim_usr =
-      CxString(lib, lib.clang_getCursorUSR(class_primary)).str();
+      CxString(::clang_getCursorUSR(class_primary)).str();
   if (class_prim_usr.empty() || class_prim_usr == type_usr) {
     if (const auto owner_sym = db.lookup_symbol(type_usr)) {
       Edge mo;
@@ -2137,12 +2113,12 @@ void mint_instantiation_nodes(LibClang &lib, Storage &db,
   }
 
   const std::string parent_spelling =
-      CxString(lib, lib.clang_getCursorSpelling(parent)).str();
-  const std::string parent_qual = qualified_name(lib, parent);
+      CxString(::clang_getCursorSpelling(parent)).str();
+  const std::string parent_qual = qualified_name(parent);
   const std::string parent_display =
-      CxString(lib, lib.clang_getCursorDisplayName(parent)).str();
-  const std::string parent_kind = stub_kind(lib, parent);
-  const RefDeclLoc tdl = ref_decl_loc(lib, db, parent);
+      CxString(::clang_getCursorDisplayName(parent)).str();
+  const std::string parent_kind = stub_kind(parent);
+  const RefDeclLoc tdl = ref_decl_loc(db, parent);
   const int64_t type_id = db.mint_symbol_id(
       type_usr, parent_spelling, parent_qual, parent_display,
       parent_kind, tdl.file_id, tdl.line, tdl.col, tdl.path,
@@ -2171,29 +2147,29 @@ void mint_instantiation_nodes(LibClang &lib, Storage &db,
   // (TYPE args only -- same as VAR_DECL B3 pattern at ast.cpp:1280).
   // For a method template on a non-template owner we returned above; its explicit
   // args are stored on the callable specialization itself.
-  const CXType parent_type = lib.clang_getCursorType(parent);
-  const int nargs = lib.clang_Type_getNumTemplateArguments(parent_type);
+  const CXType parent_type = ::clang_getCursorType(parent);
+  const int nargs = ::clang_Type_getNumTemplateArguments(parent_type);
   if (nargs <= 0) {
     return;
   }
   for (int ai = 0; ai < nargs; ++ai) {
-    const CXType arg_type = lib.clang_Type_getTemplateArgumentAsType(
+    const CXType arg_type = ::clang_Type_getTemplateArgumentAsType(
         parent_type, static_cast<unsigned>(ai));
     TemplateArg ta;
     ta.owner_id = type_id;
     ta.position = static_cast<int64_t>(ai);
     ta.arg_kind = 1; // TYPE (only kind available via type API)
     const std::string spelling =
-        CxString(lib, lib.clang_getTypeSpelling(arg_type)).str();
+        CxString(::clang_getTypeSpelling(arg_type)).str();
     if (!spelling.empty()) {
       ta.literal = spelling;
     }
     // Try to resolve the arg type to an indexed symbol (ref_id FK).
-    const CXCursor arg_decl = lib.clang_getTypeDeclaration(arg_type);
-    if (!lib.clang_Cursor_isNull(arg_decl) &&
-        !is_invalid_kind(lib.clang_getCursorKind(arg_decl))) {
+    const CXCursor arg_decl = ::clang_getTypeDeclaration(arg_type);
+    if (!::clang_Cursor_isNull(arg_decl) &&
+        !is_invalid_kind(::clang_getCursorKind(arg_decl))) {
       const std::string ref_usr =
-          CxString(lib, lib.clang_getCursorUSR(arg_decl)).str();
+          CxString(::clang_getCursorUSR(arg_decl)).str();
       if (!ref_usr.empty()) {
         if (const auto rsym = db.lookup_symbol(ref_usr)) {
           ta.ref_id = rsym->id;
@@ -2201,7 +2177,7 @@ void mint_instantiation_nodes(LibClang &lib, Storage &db,
       }
     }
     if (!ta.ref_id) {
-      ta.ref_id = resolve_template_arg_ref_id(lib, db, ta.literal, parent);
+      ta.ref_id = resolve_template_arg_ref_id(db, ta.literal, parent);
     }
     db.add_template_arg(ta);
   }
@@ -2214,30 +2190,29 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
                                         CXClientData data) noexcept {
   auto *ctx = static_cast<BodyDescentCtx *>(data);
   try {
-    LibClang &lib = *ctx->lib;
-    const CXCursorKind kind = lib.clang_getCursorKind(cursor);
+    const CXCursorKind kind = ::clang_getCursorKind(cursor);
 
     if (kind == CXCursor_CallExpr) {
       // Get callee USR via getCursorReferenced. Mint-stub if not yet indexed.
-      CXCursor ref = lib.clang_getCursorReferenced(cursor);
+      CXCursor ref = ::clang_getCursorReferenced(cursor);
       bool recovered = false;
-      if (lib.clang_Cursor_isNull(ref)) {
+      if (::clang_Cursor_isNull(ref)) {
         // Dependent/overloaded callee inside a template body (e.g.
         // `combine(a, b)` in Stack<T>::summary): recover it from the callee's
         // single-overload OverloadedDeclRef. See recover_overloaded_callee.
-        ref = recover_overloaded_callee(lib, cursor);
-        recovered = !lib.clang_Cursor_isNull(ref);
-        if (lib.clang_Cursor_isNull(ref)) {
+        ref = recover_overloaded_callee(cursor);
+        recovered = !::clang_Cursor_isNull(ref);
+        if (::clang_Cursor_isNull(ref)) {
           // Multi-candidate dependent overload set (e.g. an overloaded member
           // function template `cache.set(...)` called from another template
           // body): the single-overload recovery above declines it. Link the
           // site to every indexed overload. See emit_overloaded_calls.
-          emit_overloaded_calls(ctx, lib, cursor);
+          emit_overloaded_calls(ctx, cursor);
         }
       }
-      if (!lib.clang_Cursor_isNull(ref)) {
+      if (!::clang_Cursor_isNull(ref)) {
         const std::string callee_usr =
-            CxString(lib, lib.clang_getCursorUSR(ref)).str();
+            CxString(::clang_getCursorUSR(ref)).str();
         if (!callee_usr.empty()) {
           // Resolved calls mint a stub for an unindexed target. A RECOVERED
           // (dependent) call does the same -- a USR is TU-invariant by
@@ -2256,9 +2231,9 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
             // (links to an already-present symbol when unambiguous), else mint a
             // USR-keyed stub for a later index to backfill.
             if (dst_id < 0) {
-              const std::string qn = qualified_name(lib, ref);
+              const std::string qn = qualified_name(ref);
               if (!qn.empty()) {
-                const std::string sk = stub_kind(lib, ref);
+                const std::string sk = stub_kind(ref);
                 const auto cands =
                     ctx->db->lookup_symbols_by_qual_name(qn, sk);
                 if (cands.size() == 1) {
@@ -2266,39 +2241,39 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
                 }
               }
             }
-            if (dst_id < 0 && lib.clang_Location_isInSystemHeader(
-                                  lib.clang_getCursorLocation(ref)) == 0) {
+            if (dst_id < 0 && ::clang_Location_isInSystemHeader(
+                                  ::clang_getCursorLocation(ref)) == 0) {
               // Skip true system/stdlib targets (e.g. one-arg std::move) -- they
               // are never separately indexed, so a stub would be a permanent
               // unresolved external.
-              const RefDeclLoc dl = ref_decl_loc(lib, *ctx->db, ref);
+              const RefDeclLoc dl = ref_decl_loc(*ctx->db, ref);
               dst_id = ctx->db->mint_symbol_id(
                   callee_usr,
-                  CxString(lib, lib.clang_getCursorSpelling(ref)).str(),
-                  qualified_name(lib, ref),
-                  CxString(lib, lib.clang_getCursorDisplayName(ref)).str(),
-                  stub_kind(lib, ref), dl.file_id, dl.line, dl.col, dl.path);
+                  CxString(::clang_getCursorSpelling(ref)).str(),
+                  qualified_name(ref),
+                  CxString(::clang_getCursorDisplayName(ref)).str(),
+                  stub_kind(ref), dl.file_id, dl.line, dl.col, dl.path);
             }
           } else {
-            const RefDeclLoc dl = ref_decl_loc(lib, *ctx->db, ref);
+            const RefDeclLoc dl = ref_decl_loc(*ctx->db, ref);
             // Pre-check: is this an instantiation member? Set is_instantiation=1
             // on the mint if the callee has a specialized parent.
             const CXCursor pre_primary =
-                lib.clang_getSpecializedCursorTemplate(ref);
+                ::clang_getSpecializedCursorTemplate(ref);
             const bool is_inst_member =
-                !lib.clang_Cursor_isNull(pre_primary) &&
-                !is_invalid_kind(lib.clang_getCursorKind(pre_primary)) &&
+                !::clang_Cursor_isNull(pre_primary) &&
+                !is_invalid_kind(::clang_getCursorKind(pre_primary)) &&
                 [&]() {
                   const std::string pp_usr =
-                      CxString(lib, lib.clang_getCursorUSR(pre_primary)).str();
+                      CxString(::clang_getCursorUSR(pre_primary)).str();
                   return !pp_usr.empty() && pp_usr != callee_usr;
                 }();
             dst_id = ctx->db->mint_symbol_id(
                 callee_usr,
-                CxString(lib, lib.clang_getCursorSpelling(ref)).str(),
-                qualified_name(lib, ref),
-                CxString(lib, lib.clang_getCursorDisplayName(ref)).str(),
-                stub_kind(lib, ref), dl.file_id, dl.line, dl.col, dl.path,
+                CxString(::clang_getCursorSpelling(ref)).str(),
+                qualified_name(ref),
+                CxString(::clang_getCursorDisplayName(ref)).str(),
+                stub_kind(ref), dl.file_id, dl.line, dl.col, dl.path,
                 /*is_instantiation=*/is_inst_member);
             // Function/method template specialization: capture the concrete
               // template arguments. Free-function specs expose them via the cursor
@@ -2307,12 +2282,12 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
               // stored as-written with best-effort type ref_id linking.
             if (is_inst_member && dst_id >= 0) {
               const int wrote =
-                  index_cursor_template_args(lib, *ctx->db, dst_id, ref);
+                  index_cursor_template_args(*ctx->db, dst_id, ref);
               if (wrote == 0 &&
-                  lib.clang_getCursorKind(ref) == CXCursor_CXXMethod) {
+                  ::clang_getCursorKind(ref) == CXCursor_CXXMethod) {
                 index_method_template_args_from_tokens(
-                    lib, *ctx->db, dst_id, cursor,
-                    CxString(lib, lib.clang_getCursorSpelling(ref)).str());
+                    *ctx->db, dst_id, cursor,
+                    CxString(::clang_getCursorSpelling(ref)).str());
               }
             }
           }
@@ -2322,9 +2297,9 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
             std::string recv_type_usr;
             std::string recv_decl_usr;
             std::optional<int64_t> recv_param_pos;
-            const CXCursor recv_expr = receiver_subexpr(lib, cursor);
-            if (!lib.clang_Cursor_isNull(recv_expr)) {
-              const ValueSource rv = classify_value_source(lib, recv_expr);
+            const CXCursor recv_expr = receiver_subexpr(cursor);
+            if (!::clang_Cursor_isNull(recv_expr)) {
+              const ValueSource rv = classify_value_source(recv_expr);
               recv_src_kind = rv.src_kind;
               recv_type_usr = rv.type_usr;
               recv_decl_usr = rv.decl_usr;
@@ -2332,28 +2307,28 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
               // position so the Gamma engine can do position-indexed binding.
               if (recv_src_kind == "local" && !recv_decl_usr.empty()) {
                 // Peel to the DECL_REF_EXPR to get the referenced ParmDecl.
-                CXCursor peeled_recv = lib.clang_getCursorReferenced(recv_expr);
+                CXCursor peeled_recv = ::clang_getCursorReferenced(recv_expr);
                 // Handle nested peeling (implicit casts etc.)
-                while (!lib.clang_Cursor_isNull(peeled_recv) &&
-                       lib.clang_getCursorKind(peeled_recv) != CXCursor_ParmDecl &&
-                       lib.clang_getCursorKind(peeled_recv) != CXCursor_VarDecl) {
-                  peeled_recv = lib.clang_getCursorReferenced(peeled_recv);
+                while (!::clang_Cursor_isNull(peeled_recv) &&
+                       ::clang_getCursorKind(peeled_recv) != CXCursor_ParmDecl &&
+                       ::clang_getCursorKind(peeled_recv) != CXCursor_VarDecl) {
+                  peeled_recv = ::clang_getCursorReferenced(peeled_recv);
                 }
-                if (!lib.clang_Cursor_isNull(peeled_recv) &&
-                    lib.clang_getCursorKind(peeled_recv) == CXCursor_ParmDecl) {
+                if (!::clang_Cursor_isNull(peeled_recv) &&
+                    ::clang_getCursorKind(peeled_recv) == CXCursor_ParmDecl) {
                   // Find position by iterating parent function's parameters.
                   const CXCursor fn_parent =
-                      lib.clang_getCursorSemanticParent(peeled_recv);
-                  if (!lib.clang_Cursor_isNull(fn_parent)) {
+                      ::clang_getCursorSemanticParent(peeled_recv);
+                  if (!::clang_Cursor_isNull(fn_parent)) {
                     const int nparams =
-                        lib.clang_Cursor_getNumArguments(fn_parent);
+                        ::clang_Cursor_getNumArguments(fn_parent);
                     const std::string parm_usr = recv_decl_usr; // already set
                     for (int pi = 0; pi < nparams; ++pi) {
                       const CXCursor p =
-                          lib.clang_Cursor_getArgument(fn_parent,
+                          ::clang_Cursor_getArgument(fn_parent,
                                                        static_cast<unsigned>(pi));
                       const std::string p_usr =
-                          CxString(lib, lib.clang_getCursorUSR(p)).str();
+                          CxString(::clang_getCursorUSR(p)).str();
                       if (p_usr == parm_usr) {
                         recv_param_pos = static_cast<int64_t>(pi);
                         break;
@@ -2364,14 +2339,14 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
               }
             } else {
               // Implicit this (no explicit receiver child)
-              const CXCursorKind ref_kind = lib.clang_getCursorKind(ref);
+              const CXCursorKind ref_kind = ::clang_getCursorKind(ref);
               if (ref_kind == CXCursor_CXXMethod ||
                   ref_kind == CXCursor_Constructor ||
                   ref_kind == CXCursor_Destructor) {
-                const CXCursor owner = lib.clang_getCursorSemanticParent(ref);
-                if (!lib.clang_Cursor_isNull(owner)) {
+                const CXCursor owner = ::clang_getCursorSemanticParent(ref);
+                if (!::clang_Cursor_isNull(owner)) {
                   const std::string owner_usr =
-                      CxString(lib, lib.clang_getCursorUSR(owner)).str();
+                      CxString(::clang_getCursorUSR(owner)).str();
                   recv_src_kind = "this";
                   recv_type_usr = owner_usr;
                   recv_decl_usr = owner_usr;
@@ -2382,36 +2357,36 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
             std::optional<int64_t> recv_type_is_value_opt;
             if ((recv_src_kind == "member" || recv_src_kind == "global" ||
                  recv_src_kind == "call_result") &&
-                !lib.clang_Cursor_isNull(recv_expr)) {
+                !::clang_Cursor_isNull(recv_expr)) {
               // dispatch_usr = USR of the class owning the virtual method.
               std::string dispatch_usr;
-              const CXCursorKind ref_kind2 = lib.clang_getCursorKind(ref);
+              const CXCursorKind ref_kind2 = ::clang_getCursorKind(ref);
               if (ref_kind2 == CXCursor_CXXMethod ||
                   ref_kind2 == CXCursor_Constructor ||
                   ref_kind2 == CXCursor_Destructor ||
                   ref_kind2 == CXCursor_ConversionFunction) {
-                const CXCursor owner2 = lib.clang_getCursorSemanticParent(ref);
-                if (!lib.clang_Cursor_isNull(owner2)) {
+                const CXCursor owner2 = ::clang_getCursorSemanticParent(ref);
+                if (!::clang_Cursor_isNull(owner2)) {
                   dispatch_usr =
-                      CxString(lib, lib.clang_getCursorUSR(owner2)).str();
+                      CxString(::clang_getCursorUSR(owner2)).str();
                 }
               }
               // Use the DECLARED type of the underlying decl (not the use-site
               // expression type, which auto-derefs references in libclang).
-              const CXCursor peeled_recv = peel_expr(lib, recv_expr);
+              const CXCursor peeled_recv = peel_expr(recv_expr);
               recv_type_is_value_opt =
-                  type_is_value(lib, decl_type_for_expr(lib, peeled_recv),
+                  type_is_value(decl_type_for_expr(peeled_recv),
                                 dispatch_usr) ? 1 : 0;
             }
             unsigned call_line = 0, call_col = 0, call_off = 0;
             CXFile call_fh = nullptr;
-            lib.clang_getExpansionLocation(lib.clang_getCursorLocation(cursor),
+            ::clang_getExpansionLocation(::clang_getCursorLocation(cursor),
                                            &call_fh, &call_line, &call_col, &call_off);
             const int64_t edge_id = emit_call_edge(
-                ctx, lib, cursor, dst_id,
+                ctx, cursor, dst_id,
                 recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,
                 recv_type_is_value_opt);
-            emit_call_args(ctx, lib, cursor, edge_id, call_line, call_col);
+            emit_call_args(ctx, cursor, edge_id, call_line, call_col);
 
             // B3 instantiates (kind=5): when the callee is a template
             // specialization, emit an edge to the primary template symbol.
@@ -2419,11 +2394,11 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
             // partial specialization) for both function and class templates.
             // For a recovered primary template this is a no-op (no parent).
             const CXCursor primary =
-                lib.clang_getSpecializedCursorTemplate(ref);
-            if (!lib.clang_Cursor_isNull(primary) &&
-                !is_invalid_kind(lib.clang_getCursorKind(primary))) {
+                ::clang_getSpecializedCursorTemplate(ref);
+            if (!::clang_Cursor_isNull(primary) &&
+                !is_invalid_kind(::clang_getCursorKind(primary))) {
               const std::string prim_usr =
-                  CxString(lib, lib.clang_getCursorUSR(primary)).str();
+                  CxString(::clang_getCursorUSR(primary)).str();
               if (!prim_usr.empty() && prim_usr != callee_usr) {
                 // Only emit when primary is already indexed (no stubs for
                 // stdlib templates — prevents inflating the stub count for
@@ -2438,7 +2413,7 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
                   ctx->db->add_edge(inst);
                   // ADR-004 instantiation-member promotion block.
                   // Runs alongside the existing caller->primary edge above.
-                  mint_instantiation_nodes(lib, *ctx->db, ref, dst_id,
+                  mint_instantiation_nodes(*ctx->db, ref, dst_id,
                                            prim_sym->id);
                 }
               }
@@ -2450,23 +2425,23 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
       // factory-construct (15) when the callee is a known constructor or a
       // make_unique / make_shared factory. Lookup-only: only when B is indexed.
       // parent-kind context: `parent` (the cursor arg) is the parent of cursor.
-      if (!lib.clang_Cursor_isNull(ref)) {
-        const CXCursorKind ref_kind = lib.clang_getCursorKind(ref);
+      if (!::clang_Cursor_isNull(ref)) {
+        const CXCursorKind ref_kind = ::clang_getCursorKind(ref);
         if (ref_kind == CXCursor_Constructor) {
           // Skip if the immediate parent is CXXNewExpr (134): the construct-heap
           // branch below handles that case so we avoid emitting both 12 and 10.
-          const CXCursorKind parent_kind = lib.clang_getCursorKind(parent);
+          const CXCursorKind parent_kind = ::clang_getCursorKind(parent);
           if (parent_kind != (CXCursorKind)134 /* CXXNewExpr */) {
             const std::string type_usr =
-                record_usr_of_type(lib, lib.clang_getCursorType(cursor));
+                record_usr_of_type(::clang_getCursorType(cursor));
             if (!type_usr.empty()) {
               if (const auto dst_sym = ctx->db->lookup_symbol(type_usr)) {
                 int form;
                 if (parent_kind == CXCursor_VarDecl) {
-                  form = ctor_form_kind(lib, ref);
+                  form = ctor_form_kind(ref);
                 } else {
                   // Standalone temporary (Widget{} / Widget(x) not in a var).
-                  int sig = ctor_form_kind(lib, ref);
+                  int sig = ctor_form_kind(ref);
                   form = (sig == 13 || sig == 14) ? sig : 11; // construct-temp
                 }
                 Edge fe;
@@ -2481,18 +2456,18 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
         } else if (ref_kind == CXCursor_FunctionDecl) {
           // Factory: make_unique<B> / make_shared<B> from system headers.
           const std::string callee_sp =
-              CxString(lib, lib.clang_getCursorSpelling(ref)).str();
+              CxString(::clang_getCursorSpelling(ref)).str();
           if ((callee_sp == "make_unique" || callee_sp == "make_shared") &&
-              lib.clang_Location_isInSystemHeader(
-                  lib.clang_getCursorLocation(ref)) != 0) {
+              ::clang_Location_isInSystemHeader(
+                  ::clang_getCursorLocation(ref)) != 0) {
             const CXType result_canonical =
-                ::clang_getCanonicalType(lib.clang_getCursorType(cursor));
+                ::clang_getCanonicalType(::clang_getCursorType(cursor));
             const int nargs =
-                lib.clang_Type_getNumTemplateArguments(result_canonical);
+                ::clang_Type_getNumTemplateArguments(result_canonical);
             if (nargs > 0) {
               const CXType arg0 =
-                  lib.clang_Type_getTemplateArgumentAsType(result_canonical, 0);
-              const std::string fact_usr = record_usr_of_type(lib, arg0);
+                  ::clang_Type_getTemplateArgumentAsType(result_canonical, 0);
+              const std::string fact_usr = record_usr_of_type(arg0);
               if (!fact_usr.empty()) {
                 if (const auto fact_sym = ctx->db->lookup_symbol(fact_usr)) {
                   Edge fe;
@@ -2511,7 +2486,7 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
       // PR1 Layer-0: construct-heap (12). The new expression type is the
       // pointer to the allocated record (e.g. Widget*).
       const std::string heap_usr =
-          record_usr_of_type(lib, lib.clang_getCursorType(cursor));
+          record_usr_of_type(::clang_getCursorType(cursor));
       if (!heap_usr.empty()) {
         if (const auto heap_sym = ctx->db->lookup_symbol(heap_usr)) {
           Edge fe;
@@ -2526,16 +2501,14 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
       // PR1 Layer-0: destroy (16). First child's type pointee names the
       // destroyed record.
       struct FirstDelCtx {
-        LibClang *lib;
         std::string usr;
       } fdc;
-      fdc.lib = &lib;
-      lib.clang_visitChildren(
+      ::clang_visitChildren(
           cursor,
           [](CXCursor c, CXCursor /*p*/, CXClientData data) {
             auto *ctx2 = static_cast<FirstDelCtx *>(data);
-            const CXType ct = ctx2->lib->clang_getCursorType(c);
-            ctx2->usr = record_usr_of_type(*ctx2->lib, ct);
+            const CXType ct = ::clang_getCursorType(c);
+            ctx2->usr = record_usr_of_type(ct);
             return CXChildVisit_Break; // first child only
           },
           &fdc);
@@ -2554,20 +2527,20 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
       // (variable, field, enum-constant, etc.).  Only emit for symbols
       // already in the DB (lookup, no stub) — prevents creating stubs for
       // every standard-library constant touched in the body.
-      const CXCursor ref = lib.clang_getCursorReferenced(cursor);
-      if (!lib.clang_Cursor_isNull(ref)) {
-        const CXCursorKind ref_kind = lib.clang_getCursorKind(ref);
+      const CXCursor ref = ::clang_getCursorReferenced(cursor);
+      if (!::clang_Cursor_isNull(ref)) {
+        const CXCursorKind ref_kind = ::clang_getCursorKind(ref);
         // Exclude function-like (those produce calls edges above); include
         // member fields, variables, enum-constants, etc.
         if (!is_function_like(ref_kind) && ref_kind != CXCursor_CXXMethod &&
             ref_kind != CXCursor_Constructor &&
             ref_kind != CXCursor_Destructor) {
           const std::string ref_usr =
-              CxString(lib, lib.clang_getCursorUSR(ref)).str();
+              CxString(::clang_getCursorUSR(ref)).str();
           if (!ref_usr.empty()) {
             const auto dst_sym = ctx->db->lookup_symbol(ref_usr);
             if (dst_sym) {
-              emit_body_edge(ctx, lib, cursor, dst_sym->id, 7 /* uses */);
+              emit_body_edge(ctx, cursor, dst_sym->id, 7 /* uses */);
             }
           }
         }
@@ -2580,7 +2553,7 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
       // paths (emit_type_use, template_arg rows) and have a *declaration*
       // parent, so skip those. Only type-names under expression/statement
       // nodes survive. Mirrors ast.py:_body_descent TYPE_REF branch.
-      const CXCursorKind pk = lib.clang_getCursorKind(parent);
+      const CXCursorKind pk = ::clang_getCursorKind(parent);
       const bool parent_is_decl =
           pk == CXCursor_VarDecl || pk == CXCursor_ParmDecl ||
           pk == CXCursor_FieldDecl || pk == CXCursor_FunctionDecl ||
@@ -2588,16 +2561,16 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
           pk == CXCursor_Destructor || pk == CXCursor_FunctionTemplate ||
           pk == CXCursor_TypedefDecl || pk == CXCursor_TypeAliasDecl;
       if (!parent_is_decl) {
-        const CXCursor ref = lib.clang_getCursorReferenced(cursor);
-        if (!lib.clang_Cursor_isNull(ref)) {
+        const CXCursor ref = ::clang_getCursorReferenced(cursor);
+        if (!::clang_Cursor_isNull(ref)) {
           const std::string usr =
-              CxString(lib, lib.clang_getCursorUSR(ref)).str();
+              CxString(::clang_getCursorUSR(ref)).str();
           // Lookup-only, NO stubs; skip self-edge and the enclosing method's
           // own owning record (redundant with method_of).
           if (!usr.empty() && usr != ctx->owner_usr) {
             const auto dst = ctx->db->lookup_symbol(usr);
             if (dst && dst->id != ctx->src_id) {
-              emit_body_edge(ctx, lib, cursor, dst->id, 7 /* uses */);
+              emit_body_edge(ctx, cursor, dst->id, 7 /* uses */);
             }
           }
         }
@@ -2606,7 +2579,7 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
       // B2 uses: a LOCAL variable's declared type names a record/enum/typedef
       // -> uses edge (src=enclosing fn). `Conf local;` counts as the function
       // using Conf even when no method is called on it.
-      emit_type_use(lib, *ctx->db, ctx->src_id, lib.clang_getCursorType(cursor),
+      emit_type_use(*ctx->db, ctx->src_id, ::clang_getCursorType(cursor),
                     ctx->file_id, cursor, ctx->cond_depth > 0 ? 1 : 0);
       // Stage 3: a LOCAL `X<B> v;` mints the X<B> instance entity (its own
       // composes/aggregates/associates via T->B). The file-cursor walk in
@@ -2614,24 +2587,24 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
       // file-scope vars + members are minted there. (Order matches the Python
       // body-descent arm: emit_type_use THEN mint -- locals have no owning
       // record, so the FIELD_DECL/VAR_DECL ordering fix is not needed here.)
-      mint_instance_from_type(lib, *ctx->db, lib.clang_getCursorType(cursor));
+      mint_instance_from_type(*ctx->db, ::clang_getCursorType(cursor));
       // B3 class-template instantiates (kind=5): when a variable's type is a
       // class-template instantiation, emit instantiates (src=enclosing fn,
       // dst=primary template) + template_arg rows.
       // Only emit when the primary is already indexed (no stubs for stdlib
       // types — prevents inflating stub count for std::string, std::vector).
-      const CXType var_type = lib.clang_getCursorType(cursor);
-      const int nargs = lib.clang_Type_getNumTemplateArguments(var_type);
+      const CXType var_type = ::clang_getCursorType(cursor);
+      const int nargs = ::clang_Type_getNumTemplateArguments(var_type);
       if (nargs > 0) {
-        const CXCursor type_decl = lib.clang_getTypeDeclaration(var_type);
-        if (!lib.clang_Cursor_isNull(type_decl) &&
-            !is_invalid_kind(lib.clang_getCursorKind(type_decl))) {
+        const CXCursor type_decl = ::clang_getTypeDeclaration(var_type);
+        if (!::clang_Cursor_isNull(type_decl) &&
+            !is_invalid_kind(::clang_getCursorKind(type_decl))) {
           const CXCursor primary =
-              lib.clang_getSpecializedCursorTemplate(type_decl);
-          if (!lib.clang_Cursor_isNull(primary) &&
-              !is_invalid_kind(lib.clang_getCursorKind(primary))) {
+              ::clang_getSpecializedCursorTemplate(type_decl);
+          if (!::clang_Cursor_isNull(primary) &&
+              !is_invalid_kind(::clang_getCursorKind(primary))) {
             const std::string prim_usr =
-                CxString(lib, lib.clang_getCursorUSR(primary)).str();
+                CxString(::clang_getCursorUSR(primary)).str();
             if (!prim_usr.empty()) {
               const auto prim_sym = ctx->db->lookup_symbol(prim_usr);
               if (prim_sym) {
@@ -2647,7 +2620,7 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
                 // recording which types this instantiation uses.
                 for (int ai = 0; ai < nargs; ++ai) {
                   const CXType arg_type =
-                      lib.clang_Type_getTemplateArgumentAsType(
+                      ::clang_Type_getTemplateArgumentAsType(
                           var_type, static_cast<unsigned>(ai));
                   TemplateArg ta;
                   ta.owner_id = ctx->src_id;
@@ -2656,17 +2629,17 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
                   // Always store the type spelling so the binding is
                   // distinguishable even for builtins with no declaration.
                   const std::string spelling =
-                      CxString(lib, lib.clang_getTypeSpelling(arg_type)).str();
+                      CxString(::clang_getTypeSpelling(arg_type)).str();
                   if (!spelling.empty()) {
                     ta.literal = spelling;
                   }
                   // Try to resolve the arg type to an indexed symbol.
                   const CXCursor arg_decl =
-                      lib.clang_getTypeDeclaration(arg_type);
-                  if (!lib.clang_Cursor_isNull(arg_decl) &&
-                      !is_invalid_kind(lib.clang_getCursorKind(arg_decl))) {
+                      ::clang_getTypeDeclaration(arg_type);
+                  if (!::clang_Cursor_isNull(arg_decl) &&
+                      !is_invalid_kind(::clang_getCursorKind(arg_decl))) {
                     const std::string ref_usr =
-                        CxString(lib, lib.clang_getCursorUSR(arg_decl)).str();
+                        CxString(::clang_getCursorUSR(arg_decl)).str();
                     if (!ref_usr.empty()) {
                       if (const auto rsym = ctx->db->lookup_symbol(ref_usr)) {
                         ta.ref_id = rsym->id;
@@ -2675,7 +2648,7 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
                   }
                   if (!ta.ref_id) {
                     ta.ref_id = resolve_template_arg_ref_id(
-                        lib, *ctx->db, ta.literal, cursor);
+                        *ctx->db, ta.literal, cursor);
                   }
                   ctx->db->add_template_arg(ta);
                 }
@@ -2691,7 +2664,7 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
     if (is_cond) {
       ++ctx->cond_depth;
     }
-    lib.clang_visitChildren(cursor, &body_descent_visitor, ctx);
+    ::clang_visitChildren(cursor, &body_descent_visitor, ctx);
     if (is_cond) {
       --ctx->cond_depth;
     }
@@ -2707,7 +2680,6 @@ CXChildVisitResult body_descent_visitor(CXCursor cursor, CXCursor parent,
 // ast.py:_emit_static_init_def_edges. A variable has no body descent, so
 // `int C::x = seed();` would otherwise drop the `seed` dependency.
 struct StaticInitCtx {
-  LibClang *lib;
   Storage *db;
   int64_t def_id;
 };
@@ -2716,12 +2688,11 @@ CXChildVisitResult static_init_visitor(CXCursor cursor, CXCursor /*parent*/,
                                        CXClientData data) noexcept {
   auto *ctx = static_cast<StaticInitCtx *>(data);
   try {
-    LibClang &lib = *ctx->lib;
-    if (lib.clang_getCursorKind(cursor) == CXCursor_CallExpr) {
-      const CXCursor ref = lib.clang_getCursorReferenced(cursor);
-      if (!lib.clang_Cursor_isNull(ref)) {
+    if (::clang_getCursorKind(cursor) == CXCursor_CallExpr) {
+      const CXCursor ref = ::clang_getCursorReferenced(cursor);
+      if (!::clang_Cursor_isNull(ref)) {
         const std::string usr =
-            CxString(lib, lib.clang_getCursorUSR(ref)).str();
+            CxString(::clang_getCursorUSR(ref)).str();
         if (!usr.empty()) {
           const auto sym = ctx->db->lookup_symbol(usr);
           if (sym) {
@@ -2738,10 +2709,10 @@ CXChildVisitResult static_init_visitor(CXCursor cursor, CXCursor /*parent*/,
   return CXChildVisit_Recurse;
 }
 
-void emit_static_init_def_edges(LibClang &lib, Storage &db, CXCursor var_cursor,
+void emit_static_init_def_edges(Storage &db, CXCursor var_cursor,
                                 int64_t def_id) {
-  StaticInitCtx ctx{&lib, &db, def_id};
-  lib.clang_visitChildren(var_cursor, &static_init_visitor, &ctx);
+  StaticInitCtx ctx{&db, def_id};
+  ::clang_visitChildren(var_cursor, &static_init_visitor, &ctx);
 }
 
 // v28: the initializer source text of a variable definition, per backend:
@@ -2749,20 +2720,20 @@ void emit_static_init_def_edges(LibClang &lib, Storage &db, CXCursor var_cursor,
 // source extent from the file and returns the text after the first '=', stripped
 // with a trailing ';' removed (no '=' -> nullopt). Exact source slice so Python
 // and C++ agree byte-for-byte. Mirrors _static_var_init_text.
-std::optional<std::string> static_var_init_text(LibClang &lib, CXCursor cursor) {
-  const CXSourceRange ext = lib.clang_getCursorExtent(cursor);
+std::optional<std::string> static_var_init_text(CXCursor cursor) {
+  const CXSourceRange ext = ::clang_getCursorExtent(cursor);
   CXFile sfile = nullptr;
   unsigned soff = 0, u = 0;
-  lib.clang_getExpansionLocation(lib.clang_getRangeStart(ext), &sfile, &u, &u,
+  ::clang_getExpansionLocation(::clang_getRangeStart(ext), &sfile, &u, &u,
                                  &soff);
   CXFile efile = nullptr;
   unsigned eoff = 0;
-  lib.clang_getExpansionLocation(lib.clang_getRangeEnd(ext), &efile, &u, &u,
+  ::clang_getExpansionLocation(::clang_getRangeEnd(ext), &efile, &u, &u,
                                  &eoff);
   if (sfile == nullptr || eoff <= soff) {
     return std::nullopt;
   }
-  const std::string path = CxString(lib, lib.clang_getFileName(sfile)).str();
+  const std::string path = CxString(::clang_getFileName(sfile)).str();
   if (path.empty()) {
     return std::nullopt;
   }
@@ -2802,9 +2773,7 @@ std::optional<std::string> static_var_init_text(LibClang &lib, CXCursor cursor) 
 
 void AstIndexer::body_descent(CXCursor fn_cursor, int64_t src_id,
                               int64_t file_id) {
-  LibClang &lib = LibClang::instance();
   BodyDescentCtx ctx;
-  ctx.lib = &lib;
   ctx.db = &db_;
   ctx.src_id = src_id;
   ctx.file_id = file_id;
@@ -2812,16 +2781,16 @@ void AstIndexer::body_descent(CXCursor fn_cursor, int64_t src_id,
   // Owner USR for the self-owner skip in the TYPE_REF branch: when fn_cursor is
   // a method, its semantic parent is the owning record; record that USR so a
   // method naming its own class does not emit a redundant uses edge.
-  const CXCursor owner = lib.clang_getCursorSemanticParent(fn_cursor);
-  if (!lib.clang_Cursor_isNull(owner)) {
-    const CXCursorKind ok = lib.clang_getCursorKind(owner);
+  const CXCursor owner = ::clang_getCursorSemanticParent(fn_cursor);
+  if (!::clang_Cursor_isNull(owner)) {
+    const CXCursorKind ok = ::clang_getCursorKind(owner);
     if (ok == CXCursor_ClassDecl || ok == CXCursor_StructDecl ||
         ok == CXCursor_UnionDecl || ok == CXCursor_ClassTemplate ||
         ok == CXCursor_ClassTemplatePartialSpecialization) {
-      ctx.owner_usr = CxString(lib, lib.clang_getCursorUSR(owner)).str();
+      ctx.owner_usr = CxString(::clang_getCursorUSR(owner)).str();
     }
   }
-  lib.clang_visitChildren(fn_cursor, &body_descent_visitor, &ctx);
+  ::clang_visitChildren(fn_cursor, &body_descent_visitor, &ctx);
   if (ctx.error) {
     std::rethrow_exception(ctx.error);
   }
@@ -2832,14 +2801,13 @@ void AstIndexer::body_descent(CXCursor fn_cursor, int64_t src_id,
 void AstIndexer::index_edges_notxn(const ParsedTu &tu,
                                    const std::string &filename,
                                    int64_t file_id) {
-  LibClang &lib = LibClang::instance();
 
   // B1: declaration-level edges. Use the parent-aware walk so that
   // CXX_BASE_SPECIFIER handlers can get the enclosing record from the walk
   // parent (spec §1.4: semantic_parent and lexical_parent are both NULL on
   // that cursor kind — probed in geometry.hpp Circle:Shape).
   for_file_cursors_p(tu, filename, [&](CXCursor cursor, CXCursor walk_parent) {
-    const CXCursorKind ck = lib.clang_getCursorKind(cursor);
+    const CXCursorKind ck = ::clang_getCursorKind(cursor);
 
     // -- contains (kind=3): namespace/record → child symbol ---------------
     // Emitted FIRST so it fires regardless of which specific handler runs
@@ -2850,7 +2818,7 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
     // Does NOT duplicate field_of (members) or method_of (methods) —
     // those emit child→parent, while contains emits parent→child.
     {
-      const CXCursorKind pk = lib.clang_getCursorKind(walk_parent);
+      const CXCursorKind pk = ::clang_getCursorKind(walk_parent);
       const bool parent_is_ns = (pk == CXCursor_Namespace);
       const bool parent_is_record =
           (pk == CXCursor_ClassDecl || pk == CXCursor_StructDecl ||
@@ -2866,9 +2834,9 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
       const bool emit = parent_is_ns || (parent_is_record && child_is_nested_type);
       if (emit) {
         const std::string child_usr =
-            CxString(lib, lib.clang_getCursorUSR(cursor)).str();
+            CxString(::clang_getCursorUSR(cursor)).str();
         const std::string parent_usr =
-            CxString(lib, lib.clang_getCursorUSR(walk_parent)).str();
+            CxString(::clang_getCursorUSR(walk_parent)).str();
         if (!child_usr.empty() && !parent_usr.empty()) {
           const auto child_sym = db_.lookup_symbol(child_usr);
           const auto parent_sym = db_.lookup_symbol(parent_usr);
@@ -2893,21 +2861,21 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
     // the walk here does not descend into bodies.
     if (is_function_like(ck)) {
       const std::string fn_usr =
-          CxString(lib, lib.clang_getCursorUSR(cursor)).str();
+          CxString(::clang_getCursorUSR(cursor)).str();
       if (!fn_usr.empty()) {
         const auto fn_sym = db_.lookup_symbol(fn_usr);
         if (fn_sym) {
           // return type (constructors/destructors have none worth recording)
           if (ck != CXCursor_Constructor && ck != CXCursor_Destructor) {
-            emit_type_use(lib, db_, fn_sym->id,
-                          lib.clang_getCursorResultType(cursor), file_id,
+            emit_type_use(db_, fn_sym->id,
+                          ::clang_getCursorResultType(cursor), file_id,
                           cursor, 0);
           }
-          const int nargs = lib.clang_Cursor_getNumArguments(cursor);
+          const int nargs = ::clang_Cursor_getNumArguments(cursor);
           for (int ai = 0; ai < nargs; ++ai) {
             const CXCursor arg =
-                lib.clang_Cursor_getArgument(cursor, static_cast<unsigned>(ai));
-            emit_type_use(lib, db_, fn_sym->id, lib.clang_getCursorType(arg),
+                ::clang_Cursor_getArgument(cursor, static_cast<unsigned>(ai));
+            emit_type_use(db_, fn_sym->id, ::clang_getCursorType(arg),
                           file_id, arg, 0);
           }
         }
@@ -2923,33 +2891,33 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
       // the spec USR), order-independent within the TU. Stage 4's
       // cpp_materialise_field_relations reads that edge to give the owning
       // record `A composes/associates X<B>` (the un-collapsed instance).
-      mint_instance_from_type(lib, db_, lib.clang_getCursorType(cursor));
+      mint_instance_from_type(db_, ::clang_getCursorType(cursor));
       const std::string sym_usr =
-          CxString(lib, lib.clang_getCursorUSR(cursor)).str();
+          CxString(::clang_getCursorUSR(cursor)).str();
       if (!sym_usr.empty()) {
         const auto sym = db_.lookup_symbol(sym_usr);
         if (sym) {
-          emit_type_use(lib, db_, sym->id, lib.clang_getCursorType(cursor),
+          emit_type_use(db_, sym->id, ::clang_getCursorType(cursor),
                         file_id, cursor, 0);
           // v27: an out-of-line static DATA MEMBER definition
           // (`int C::x = ...;`) is a per-backend body -- redefined in each
           // backend. Record its `definition` row (so it counts toward
           // multi_def / "list redefined") and its initializer's calls.
           if (ck == CXCursor_VarDecl &&
-              lib.clang_isCursorDefinition(cursor) != 0) {
-            const CXCursor sp = lib.clang_getCursorSemanticParent(cursor);
-            const CXCursorKind spk = lib.clang_getCursorKind(sp);
+              ::clang_isCursorDefinition(cursor) != 0) {
+            const CXCursor sp = ::clang_getCursorSemanticParent(cursor);
+            const CXCursorKind spk = ::clang_getCursorKind(sp);
             if (spk == CXCursor_ClassDecl || spk == CXCursor_StructDecl ||
                 spk == CXCursor_UnionDecl || spk == CXCursor_ClassTemplate) {
-              const ExpansionLoc vstart = cursor_extent_start(lib, cursor);
-              const ExpansionLoc vend = cursor_extent_end(lib, cursor);
+              const ExpansionLoc vstart = cursor_extent_start(cursor);
+              const ExpansionLoc vend = cursor_extent_end(cursor);
               const int64_t vdef_id = db_.get_or_create_definition(
                   sym->id, file_id, static_cast<int64_t>(vstart.line),
                   static_cast<int64_t>(vstart.col),
                   static_cast<int64_t>(vend.line),
                   static_cast<int64_t>(vend.col),
-                  static_var_init_text(lib, cursor));
-              emit_static_init_def_edges(lib, db_, cursor, vdef_id);
+                  static_var_init_text(cursor));
+              emit_static_init_def_edges(db_, cursor, vdef_id);
             }
           }
         }
@@ -2963,14 +2931,14 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
       // `Box<int> field;` member (FIELD_DECL, above). Without this order the
       // instance is not yet minted when emit runs, so the alias would resolve to
       // no underlying target at all.
-      mint_named_instance(lib, db_, cursor);
+      mint_named_instance(db_, cursor);
       const std::string td_usr =
-          CxString(lib, lib.clang_getCursorUSR(cursor)).str();
+          CxString(::clang_getCursorUSR(cursor)).str();
       if (!td_usr.empty()) {
         const auto td_sym = db_.lookup_symbol(td_usr);
         if (td_sym) {
-          emit_type_use(lib, db_, td_sym->id,
-                        lib.clang_getTypedefDeclUnderlyingType(cursor),
+          emit_type_use(db_, td_sym->id,
+                        ::clang_getTypedefDeclUnderlyingType(cursor),
                         file_id, cursor, 0);
         }
       }
@@ -2987,23 +2955,23 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
       // Missing the template kinds here dropped `inherits` edges for every
       // class template with a concrete (non-dependent) base
       // (e.g. `template <class T> class D : public Base`).
-      const CXCursorKind pk = lib.clang_getCursorKind(walk_parent);
+      const CXCursorKind pk = ::clang_getCursorKind(walk_parent);
       if (pk != CXCursor_ClassDecl && pk != CXCursor_StructDecl &&
           pk != CXCursor_ClassTemplate &&
           pk != CXCursor_ClassTemplatePartialSpecialization) {
         return; // unexpected parent; skip
       }
       const std::string derived_usr =
-          CxString(lib, lib.clang_getCursorUSR(walk_parent)).str();
+          CxString(::clang_getCursorUSR(walk_parent)).str();
       if (derived_usr.empty()) {
         return;
       }
-      const CXCursor base_ref = lib.clang_getCursorReferenced(cursor);
-      if (lib.clang_Cursor_isNull(base_ref)) {
+      const CXCursor base_ref = ::clang_getCursorReferenced(cursor);
+      if (::clang_Cursor_isNull(base_ref)) {
         return;
       }
       const std::string base_usr =
-          CxString(lib, lib.clang_getCursorUSR(base_ref)).str();
+          CxString(::clang_getCursorUSR(base_ref)).str();
       if (base_usr.empty()) {
         return;
       }
@@ -3020,33 +2988,33 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
       if (src_sym) {
         src_id = src_sym->id;
       } else {
-        const RefDeclLoc derived_dl = ref_decl_loc(lib, db_, walk_parent);
-        const char *derived_kn = kind_name(lib.clang_getCursorKind(walk_parent));
+        const RefDeclLoc derived_dl = ref_decl_loc(db_, walk_parent);
+        const char *derived_kn = kind_name(::clang_getCursorKind(walk_parent));
         const std::string derived_kind = derived_kn != nullptr
                                              ? std::string(derived_kn)
                                              : std::string("class-template");
         src_id = db_.mint_symbol_id(
             derived_usr,
-            CxString(lib, lib.clang_getCursorSpelling(walk_parent)).str(),
-            qualified_name(lib, walk_parent),
-            CxString(lib, lib.clang_getCursorDisplayName(walk_parent)).str(),
+            CxString(::clang_getCursorSpelling(walk_parent)).str(),
+            qualified_name(walk_parent),
+            CxString(::clang_getCursorDisplayName(walk_parent)).str(),
             derived_kind, derived_dl.file_id, derived_dl.line, derived_dl.col,
             derived_dl.path);
       }
-      const RefDeclLoc base_dl = ref_decl_loc(lib, db_, base_ref);
+      const RefDeclLoc base_dl = ref_decl_loc(db_, base_ref);
       const int64_t dst_id = db_.mint_symbol_id(
           base_usr,
-          CxString(lib, lib.clang_getCursorSpelling(base_ref)).str(),
-          qualified_name(lib, base_ref),
-          CxString(lib, lib.clang_getCursorDisplayName(base_ref)).str(),
-          stub_kind(lib, base_ref), base_dl.file_id, base_dl.line, base_dl.col,
+          CxString(::clang_getCursorSpelling(base_ref)).str(),
+          qualified_name(base_ref),
+          CxString(::clang_getCursorDisplayName(base_ref)).str(),
+          stub_kind(base_ref), base_dl.file_id, base_dl.line, base_dl.col,
           base_dl.path);
       Edge e;
       e.src_id = src_id;
       e.dst_id = dst_id;
       e.kind = 2; // inherits
       e.count = 1;
-      const CX_CXXAccessSpecifier acc = lib.clang_getCXXAccessSpecifier(cursor);
+      const CX_CXXAccessSpecifier acc = ::clang_getCXXAccessSpecifier(cursor);
       if (acc == CX_CXXPublic) {
         e.base_access = 1;
       } else if (acc == CX_CXXProtected) {
@@ -3054,7 +3022,7 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
       } else if (acc == CX_CXXPrivate) {
         e.base_access = 3;
       }
-      e.is_virtual = static_cast<int64_t>(lib.clang_isVirtualBase(cursor));
+      e.is_virtual = static_cast<int64_t>(::clang_isVirtualBase(cursor));
       db_.add_edge(e);
       // CRTP / template base: also link the specialization instance to its
       // primary template via instantiates(5).  A template used AS A BASE CLASS
@@ -3062,11 +3030,11 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
       // not covered by the variable/member/call/using paths, so without this
       // the entity roll-up never sees `Singleton<Cache> instantiates Singleton`.
       const CXCursor base_primary =
-          lib.clang_getSpecializedCursorTemplate(base_ref);
-      if (!lib.clang_Cursor_isNull(base_primary) &&
-          !is_invalid_kind(lib.clang_getCursorKind(base_primary))) {
+          ::clang_getSpecializedCursorTemplate(base_ref);
+      if (!::clang_Cursor_isNull(base_primary) &&
+          !is_invalid_kind(::clang_getCursorKind(base_primary))) {
         const std::string base_prim_usr =
-            CxString(lib, lib.clang_getCursorUSR(base_primary)).str();
+            CxString(::clang_getCursorUSR(base_primary)).str();
         if (!base_prim_usr.empty() && base_prim_usr != base_usr) {
           const auto base_prim_sym = db_.lookup_symbol(base_prim_usr);
           if (base_prim_sym) {
@@ -3085,17 +3053,17 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
     // -- FIELD_DECL: field_of ------------------------------------------
     if (ck == CXCursor_FieldDecl) {
       const std::string member_usr =
-          CxString(lib, lib.clang_getCursorUSR(cursor)).str();
+          CxString(::clang_getCursorUSR(cursor)).str();
       if (member_usr.empty()) {
         return;
       }
-      const CXCursor owner = lib.clang_getCursorSemanticParent(cursor);
-      if (lib.clang_Cursor_isNull(owner) ||
-          is_invalid_kind(lib.clang_getCursorKind(owner))) {
+      const CXCursor owner = ::clang_getCursorSemanticParent(cursor);
+      if (::clang_Cursor_isNull(owner) ||
+          is_invalid_kind(::clang_getCursorKind(owner))) {
         return;
       }
       const std::string owner_usr =
-          CxString(lib, lib.clang_getCursorUSR(owner)).str();
+          CxString(::clang_getCursorUSR(owner)).str();
       if (owner_usr.empty()) {
         return;
       }
@@ -3117,17 +3085,17 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
     if (ck == CXCursor_CXXMethod || ck == CXCursor_Constructor ||
         ck == CXCursor_Destructor) {
       const std::string method_usr =
-          CxString(lib, lib.clang_getCursorUSR(cursor)).str();
+          CxString(::clang_getCursorUSR(cursor)).str();
       if (method_usr.empty()) {
         return;
       }
-      const CXCursor owner = lib.clang_getCursorSemanticParent(cursor);
-      if (lib.clang_Cursor_isNull(owner) ||
-          is_invalid_kind(lib.clang_getCursorKind(owner))) {
+      const CXCursor owner = ::clang_getCursorSemanticParent(cursor);
+      if (::clang_Cursor_isNull(owner) ||
+          is_invalid_kind(::clang_getCursorKind(owner))) {
         return;
       }
       const std::string owner_usr =
-          CxString(lib, lib.clang_getCursorUSR(owner)).str();
+          CxString(::clang_getCursorUSR(owner)).str();
       if (owner_usr.empty()) {
         return;
       }
@@ -3145,20 +3113,20 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
 
       // -- overrides (CXX_METHOD only): emit for each overridden method --
       if (ck == CXCursor_CXXMethod) {
-        CxOverriddenCursors overridden(lib, cursor);
+        CxOverriddenCursors overridden(cursor);
         for (unsigned oi = 0; oi < overridden.size(); ++oi) {
           const std::string ov_usr =
-              CxString(lib, lib.clang_getCursorUSR(overridden[oi])).str();
+              CxString(::clang_getCursorUSR(overridden[oi])).str();
           if (ov_usr.empty()) {
             continue;
           }
-          const RefDeclLoc ov_dl = ref_decl_loc(lib, db_, overridden[oi]);
+          const RefDeclLoc ov_dl = ref_decl_loc(db_, overridden[oi]);
           const int64_t dst_ov = db_.mint_symbol_id(
               ov_usr,
-              CxString(lib, lib.clang_getCursorSpelling(overridden[oi])).str(),
-              qualified_name(lib, overridden[oi]),
-              CxString(lib, lib.clang_getCursorDisplayName(overridden[oi])).str(),
-              stub_kind(lib, overridden[oi]), ov_dl.file_id, ov_dl.line,
+              CxString(::clang_getCursorSpelling(overridden[oi])).str(),
+              qualified_name(overridden[oi]),
+              CxString(::clang_getCursorDisplayName(overridden[oi])).str(),
+              stub_kind(overridden[oi]), ov_dl.file_id, ov_dl.line,
               ov_dl.col, ov_dl.path);
           Edge oe;
           oe.src_id = src_sym->id;
@@ -3176,17 +3144,17 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
     // the friend target B is a child TYPE_REF whose referenced declaration is
     // the friended record. Lookup-only (no stub), record-friends only.
     if (ck == CXCursor_FriendDecl) {
-      const CXCursor owner = lib.clang_getCursorSemanticParent(cursor);
-      if (lib.clang_Cursor_isNull(owner)) {
+      const CXCursor owner = ::clang_getCursorSemanticParent(cursor);
+      if (::clang_Cursor_isNull(owner)) {
         return;
       }
-      const CXCursorKind owner_kind = lib.clang_getCursorKind(owner);
+      const CXCursorKind owner_kind = ::clang_getCursorKind(owner);
       if (owner_kind != CXCursor_ClassDecl &&
           owner_kind != CXCursor_StructDecl) {
         return;
       }
       const std::string owner_usr =
-          CxString(lib, lib.clang_getCursorUSR(owner)).str();
+          CxString(::clang_getCursorUSR(owner)).str();
       if (owner_usr.empty()) {
         return;
       }
@@ -3196,32 +3164,30 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
       }
       // Collect direct TYPE_REF children (the friended type references).
       struct FriendCtx {
-        LibClang *lib;
         std::vector<CXCursor> type_refs;
       } fctx;
-      fctx.lib = &lib;
-      lib.clang_visitChildren(
+      ::clang_visitChildren(
           cursor,
           [](CXCursor c, CXCursor /*parent*/, CXClientData data) {
             auto *ctx = static_cast<FriendCtx *>(data);
-            if (ctx->lib->clang_getCursorKind(c) == CXCursor_TypeRef) {
+            if (::clang_getCursorKind(c) == CXCursor_TypeRef) {
               ctx->type_refs.push_back(c);
             }
             return CXChildVisit_Continue;
           },
           &fctx);
       for (const CXCursor &tref : fctx.type_refs) {
-        const CXCursor friend_decl = lib.clang_getCursorReferenced(tref);
-        if (lib.clang_Cursor_isNull(friend_decl)) {
+        const CXCursor friend_decl = ::clang_getCursorReferenced(tref);
+        if (::clang_Cursor_isNull(friend_decl)) {
           continue;
         }
-        const CXCursorKind fk = lib.clang_getCursorKind(friend_decl);
+        const CXCursorKind fk = ::clang_getCursorKind(friend_decl);
         if (fk != CXCursor_ClassDecl && fk != CXCursor_StructDecl &&
             fk != CXCursor_ClassTemplate) {
           continue;
         }
         const std::string friend_usr =
-            CxString(lib, lib.clang_getCursorUSR(friend_decl)).str();
+            CxString(::clang_getCursorUSR(friend_decl)).str();
         if (friend_usr.empty()) {
           continue;
         }
@@ -3242,7 +3208,7 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
     // -- CLASS_TEMPLATE/FUNCTION_TEMPLATE: template_param --
     if (ck == CXCursor_ClassTemplate || ck == CXCursor_FunctionTemplate) {
       const std::string tmpl_usr =
-          CxString(lib, lib.clang_getCursorUSR(cursor)).str();
+          CxString(::clang_getCursorUSR(cursor)).str();
       if (tmpl_usr.empty()) {
         return;
       }
@@ -3255,15 +3221,15 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
       // block above never sees it (its cursor kind is FUNCTION_TEMPLATE), so it
       // would lack a method_of edge. Emit method_of here for this case.
       if (ck == CXCursor_FunctionTemplate) {
-        const CXCursor owner = lib.clang_getCursorSemanticParent(cursor);
-        if (!lib.clang_Cursor_isNull(owner) &&
-            !is_invalid_kind(lib.clang_getCursorKind(owner))) {
-          const CXCursorKind ok = lib.clang_getCursorKind(owner);
+        const CXCursor owner = ::clang_getCursorSemanticParent(cursor);
+        if (!::clang_Cursor_isNull(owner) &&
+            !is_invalid_kind(::clang_getCursorKind(owner))) {
+          const CXCursorKind ok = ::clang_getCursorKind(owner);
           if (ok == CXCursor_ClassDecl || ok == CXCursor_StructDecl ||
               ok == CXCursor_ClassTemplate ||
               ok == CXCursor_ClassTemplatePartialSpecialization) {
             const std::string owner_usr =
-                CxString(lib, lib.clang_getCursorUSR(owner)).str();
+                CxString(::clang_getCursorUSR(owner)).str();
             if (!owner_usr.empty()) {
               const auto owner_sym = db_.lookup_symbol(owner_usr);
               if (owner_sym) {
@@ -3281,23 +3247,20 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
       // Enumerate template parameters (TEMPLATE_TYPE_PARAMETER,
       // TEMPLATE_NON_TYPE_PARAMETER, TEMPLATE_TEMPLATE_PARAMETER children).
       struct ParamCtx {
-        LibClang *lib = nullptr;
         Storage *db = nullptr;
         int64_t owner_id = -1;
         int64_t pos = 0;
       };
       ParamCtx pctx;
-      pctx.lib = &lib;
       pctx.db = &db_;
       pctx.owner_id = tmpl_sym->id;
       pctx.pos = 0;
-      lib.clang_visitChildren(
+      ::clang_visitChildren(
           cursor,
           [](CXCursor c, CXCursor /*parent*/,
              CXClientData d) noexcept -> CXChildVisitResult {
             auto *pc = static_cast<ParamCtx *>(d);
-            LibClang &l = *pc->lib;
-            const CXCursorKind pk = l.clang_getCursorKind(c);
+            const CXCursorKind pk = ::clang_getCursorKind(c);
             int64_t param_kind = 0;
             if (pk == CXCursor_TemplateTypeParameter) {
               param_kind = 1;
@@ -3313,7 +3276,7 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
             p.position = pc->pos++;
             p.param_kind = param_kind;
             const std::string nm =
-                CxString(l, l.clang_getCursorSpelling(c)).str();
+                CxString(::clang_getCursorSpelling(c)).str();
             if (!nm.empty()) {
               p.name = nm;
             }
@@ -3326,24 +3289,24 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
 
     // -- STRUCT_DECL/CLASS_DECL: specializes (when it is a specialization) --
     if ((ck == CXCursor_StructDecl || ck == CXCursor_ClassDecl) &&
-        lib.clang_isCursorDefinition(cursor)) {
-      const CXCursor primary = lib.clang_getSpecializedCursorTemplate(cursor);
-      if (!lib.clang_Cursor_isNull(primary) &&
-          !is_invalid_kind(lib.clang_getCursorKind(primary))) {
+        ::clang_isCursorDefinition(cursor)) {
+      const CXCursor primary = ::clang_getSpecializedCursorTemplate(cursor);
+      if (!::clang_Cursor_isNull(primary) &&
+          !is_invalid_kind(::clang_getCursorKind(primary))) {
         const std::string spec_usr =
-            CxString(lib, lib.clang_getCursorUSR(cursor)).str();
+            CxString(::clang_getCursorUSR(cursor)).str();
         const std::string prim_usr =
-            CxString(lib, lib.clang_getCursorUSR(primary)).str();
+            CxString(::clang_getCursorUSR(primary)).str();
         if (!spec_usr.empty() && !prim_usr.empty() && spec_usr != prim_usr) {
           const auto spec_sym = db_.lookup_symbol(spec_usr);
           if (spec_sym) {
-            const RefDeclLoc prim_dl = ref_decl_loc(lib, db_, primary);
+            const RefDeclLoc prim_dl = ref_decl_loc(db_, primary);
             const int64_t prim_id = db_.mint_symbol_id(
                 prim_usr,
-                CxString(lib, lib.clang_getCursorSpelling(primary)).str(),
-                qualified_name(lib, primary),
-                CxString(lib, lib.clang_getCursorDisplayName(primary)).str(),
-                stub_kind(lib, primary), prim_dl.file_id, prim_dl.line,
+                CxString(::clang_getCursorSpelling(primary)).str(),
+                qualified_name(primary),
+                CxString(::clang_getCursorDisplayName(primary)).str(),
+                stub_kind(primary), prim_dl.file_id, prim_dl.line,
                 prim_dl.col, prim_dl.path);
             // An explicit instantiation (`template class Foo<int>;`) is a
             // concrete INSTANCE of the template, not a specialization of it:
@@ -3354,7 +3317,7 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
             Edge e;
             e.src_id = spec_sym->id;
             e.dst_id = prim_id;
-            e.kind = is_explicit_instantiation(lib, cursor) ? 5 : 4;
+            e.kind = is_explicit_instantiation(cursor) ? 5 : 4;
             e.count = 1;
             db_.add_edge(e);
 
@@ -3362,10 +3325,10 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
             // args we always store the type spelling in `literal` (e.g. 'bool',
             // 'int') so the binding is distinguishable even when the arg is a
             // builtin with no declaration to resolve a ref_id from.
-            const int nargs = lib.clang_Cursor_getNumTemplateArguments(cursor);
+            const int nargs = ::clang_Cursor_getNumTemplateArguments(cursor);
             for (int ai = 0; ai < nargs; ++ai) {
               const enum CXTemplateArgumentKind tak =
-                  lib.clang_Cursor_getTemplateArgumentKind(
+                  ::clang_Cursor_getTemplateArgumentKind(
                       cursor, static_cast<unsigned>(ai));
               TemplateArg ta;
               ta.owner_id = spec_sym->id;
@@ -3373,19 +3336,19 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
               if (tak == CXTemplateArgumentKind_Type) {
                 ta.arg_kind = 1;
                 const CXType arg_type =
-                    lib.clang_Cursor_getTemplateArgumentType(
+                    ::clang_Cursor_getTemplateArgumentType(
                         cursor, static_cast<unsigned>(ai));
                 const std::string spelling =
-                    CxString(lib, lib.clang_getTypeSpelling(arg_type)).str();
+                    CxString(::clang_getTypeSpelling(arg_type)).str();
                 if (!spelling.empty()) {
                   ta.literal = spelling;
                 }
                 const CXCursor arg_decl =
-                    lib.clang_getTypeDeclaration(arg_type);
-                if (!lib.clang_Cursor_isNull(arg_decl) &&
-                    !is_invalid_kind(lib.clang_getCursorKind(arg_decl))) {
+                    ::clang_getTypeDeclaration(arg_type);
+                if (!::clang_Cursor_isNull(arg_decl) &&
+                    !is_invalid_kind(::clang_getCursorKind(arg_decl))) {
                   const std::string ref_usr =
-                      CxString(lib, lib.clang_getCursorUSR(arg_decl)).str();
+                      CxString(::clang_getCursorUSR(arg_decl)).str();
                   if (!ref_usr.empty()) {
                     if (const auto rsym = db_.lookup_symbol(ref_usr)) {
                       ta.ref_id = rsym->id;
@@ -3394,12 +3357,12 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
                 }
                 if (!ta.ref_id) {
                   ta.ref_id =
-                      resolve_template_arg_ref_id(lib, db_, ta.literal, cursor);
+                      resolve_template_arg_ref_id(db_, ta.literal, cursor);
                 }
               } else if (tak == CXTemplateArgumentKind_Integral) {
                 ta.arg_kind = 2;
                 ta.literal =
-                    std::to_string(lib.clang_Cursor_getTemplateArgumentValue(
+                    std::to_string(::clang_Cursor_getTemplateArgumentValue(
                         cursor, static_cast<unsigned>(ai)));
               } else {
                 ta.arg_kind = static_cast<int64_t>(tak);
@@ -3417,14 +3380,14 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
   // B2: body descent for calls + uses — recurse into each function-like
   // definition whose enclosing file matches filename.
   for_file_cursors(tu, filename, [&](CXCursor cursor) {
-    if (!is_function_like(lib.clang_getCursorKind(cursor))) {
+    if (!is_function_like(::clang_getCursorKind(cursor))) {
       return;
     }
-    if (!lib.clang_isCursorDefinition(cursor)) {
+    if (!::clang_isCursorDefinition(cursor)) {
       return;
     }
     const std::string fn_usr =
-        CxString(lib, lib.clang_getCursorUSR(cursor)).str();
+        CxString(::clang_getCursorUSR(cursor)).str();
     if (fn_usr.empty()) {
       return;
     }
@@ -3435,8 +3398,8 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
     // v27: this function's body in THIS file is a per-backend definition.
     // Create its `definition` row, descend, then snapshot the calls/uses it just
     // emitted into `def_edge` -- immune to a later TU wiping `edge`.
-    const ExpansionLoc dstart = cursor_extent_start(lib, cursor);
-    const ExpansionLoc dend = cursor_extent_end(lib, cursor);
+    const ExpansionLoc dstart = cursor_extent_start(cursor);
+    const ExpansionLoc dend = cursor_extent_end(cursor);
     const int64_t def_id = db_.get_or_create_definition(
         fn_sym->id, file_id, static_cast<int64_t>(dstart.line),
         static_cast<int64_t>(dstart.col), static_cast<int64_t>(dend.line),
@@ -3446,7 +3409,7 @@ void AstIndexer::index_edges_notxn(const ParsedTu &tu,
   });
 
   // B3: namespace uses -- qualifiers / using-directives / using-declarations.
-  emit_namespace_uses(lib, db_, tu, filename, file_id);
+  emit_namespace_uses(db_, tu, filename, file_id);
 }
 
 void AstIndexer::index_edges(const ParsedTu &tu, const std::string &filename,

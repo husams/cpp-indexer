@@ -1,5 +1,7 @@
 #include "compiledb/compiledb.hpp"
 
+#include <clang-c/CXCompilationDatabase.h>
+
 #include <algorithm>
 #include <cstring>
 #include <functional>
@@ -9,7 +11,8 @@
 #include <string>
 #include <utility>
 
-#include "clangx/libclang.hpp"
+#include "clangx/clang_raii.hpp"
+#include "clangx/clang_runtime.hpp"
 #include "util/errors.hpp"
 #include "util/pathutil.hpp"
 
@@ -88,8 +91,8 @@ std::string abs_against(const std::string &p, const std::string &base) {
   return pathutil::normpath(pathutil::join(base, p));
 }
 
-std::string to_string(const LibClang &lib, CXString s) {
-  return CxString(lib, s).str();
+std::string to_string(CXString value) {
+  return CxString(value).str();
 }
 
 } // namespace
@@ -105,16 +108,15 @@ std::string CompileDb::db_dir_from_arg(const std::string &db_arg) {
 }
 
 std::vector<CompileCommand> CompileDb::load(const std::string &db_arg) {
-  LibClang &lib = LibClang::instance();
-  lib.load();
+  warn_if_runtime_libclang_ignored();
 
   const std::string abs_dir = pathutil::abspath(db_dir_from_arg(db_arg));
   CXCompilationDatabase_Error error = CXCompilationDatabase_NoError;
   CXCompilationDatabase db =
-      lib.clang_CompilationDatabase_fromDirectory(abs_dir.c_str(), &error);
+      ::clang_CompilationDatabase_fromDirectory(abs_dir.c_str(), &error);
   if (error != CXCompilationDatabase_NoError || db == nullptr) {
     if (db != nullptr) {
-      lib.clang_CompilationDatabase_dispose(db);
+      ::clang_CompilationDatabase_dispose(db);
     }
     throw CidxError("could not load compilation database from '" + abs_dir +
                     "'");
@@ -122,28 +124,28 @@ std::vector<CompileCommand> CompileDb::load(const std::string &db_arg) {
 
   std::vector<CompileCommand> out;
   CXCompileCommands cmds =
-      lib.clang_CompilationDatabase_getAllCompileCommands(db);
+      ::clang_CompilationDatabase_getAllCompileCommands(db);
   if (cmds != nullptr) {
-    const unsigned n = lib.clang_CompileCommands_getSize(cmds);
+    const unsigned n = ::clang_CompileCommands_getSize(cmds);
     for (unsigned i = 0; i < n; ++i) {
-      CXCompileCommand cmd = lib.clang_CompileCommands_getCommand(cmds, i);
+      CXCompileCommand cmd = ::clang_CompileCommands_getCommand(cmds, i);
       CompileCommand cc;
       cc.directory =
-          to_string(lib, lib.clang_CompileCommand_getDirectory(cmd));
-      cc.filename = to_string(lib, lib.clang_CompileCommand_getFilename(cmd));
+          to_string(::clang_CompileCommand_getDirectory(cmd));
+      cc.filename = to_string(::clang_CompileCommand_getFilename(cmd));
       std::vector<std::string> raw;
-      const unsigned argc = lib.clang_CompileCommand_getNumArgs(cmd);
+      const unsigned argc = ::clang_CompileCommand_getNumArgs(cmd);
       raw.reserve(argc);
       for (unsigned j = 0; j < argc; ++j) {
-        raw.push_back(to_string(lib, lib.clang_CompileCommand_getArg(cmd, j)));
+        raw.push_back(to_string(::clang_CompileCommand_getArg(cmd, j)));
       }
       cc.driver = driver(raw, cc.directory);
       cc.args = strip_for_libclang(raw, cc.filename, cc.directory);
       out.push_back(std::move(cc));
     }
-    lib.clang_CompileCommands_dispose(cmds);
+    ::clang_CompileCommands_dispose(cmds);
   }
-  lib.clang_CompilationDatabase_dispose(db);
+  ::clang_CompilationDatabase_dispose(db);
   return out;
 }
 

@@ -12,7 +12,7 @@
 #include <ostream>
 #include <sstream>
 
-#include "clangx/libclang.hpp"
+#include "clangx/clang_raii.hpp"
 #include "clangx/parse.hpp"
 #include "clangx/toolchain.hpp"
 #include "util/env.hpp"
@@ -109,8 +109,7 @@ const std::string &libclang_version() {
   static std::string ver;
   static bool loaded = false;
   if (!loaded) {
-    LibClang &lib = LibClang::instance();
-    CxString cs(lib, lib.clang_getClangVersion());
+    CxString cs(::clang_getClangVersion());
     ver = cs.str();
     loaded = true;
   }
@@ -212,14 +211,13 @@ bool is_valid(const AstTarget &t, const Sidecar &side) {
 // --- low-level TU helpers ----------------------------------------------------
 
 std::optional<ParsedTu> load_ast(const std::string &path) {
-  LibClang &lib = LibClang::instance();
-  CXIndex idx = lib.clang_createIndex(0, 0);
+  CXIndex idx = ::clang_createIndex(0, 0);
   if (idx == nullptr) {
     return std::nullopt;
   }
-  CXTranslationUnit tu = lib.clang_createTranslationUnit(idx, path.c_str());
+  CXTranslationUnit tu = ::clang_createTranslationUnit(idx, path.c_str());
   if (tu == nullptr) {
-    lib.clang_disposeIndex(idx);
+    ::clang_disposeIndex(idx);
     return std::nullopt;
   }
   ParsedTu pt;
@@ -245,9 +243,8 @@ std::optional<ParsedTu> reparse(const AstTarget &t, std::ostream *err) {
 
 void try_save(CXTranslationUnit tu, const std::string &ast_path,
               const std::string &side_path, const AstTarget &t) {
-  LibClang &lib = LibClang::instance();
   const int save_rc =
-      lib.clang_saveTranslationUnit(tu, ast_path.c_str(), /*options=*/0);
+      ::clang_saveTranslationUnit(tu, ast_path.c_str(), /*options=*/0);
   if (save_rc != 0) {
     std::remove(ast_path.c_str());
     return;

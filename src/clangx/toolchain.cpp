@@ -13,7 +13,7 @@
 #include <regex>
 #include <sstream>
 
-#include "clangx/libclang.hpp"
+#include "clangx/clang_runtime.hpp"
 #include "util/env.hpp"
 #include "util/pathutil.hpp"
 #include "util/subprocess.hpp"
@@ -265,14 +265,10 @@ int Toolchain::libclang_major() const {
                              // the cap-when-undeterminable path (G4)
   }
   // Python _libclang_major(): 0 when undeterminable.
-  // Under A1: loaded() is always true and major() never throws, so the guards
-  // below are dead in production.  Kept for safety and seam completeness.
+  // The linked library is required at build time; retain the exception-to-zero
+  // fallback for allocation/formatting failures and test-seam completeness.
   try {
-    LibClang &lib = LibClang::instance();
-    if (!lib.loaded()) {
-      return 0;
-    }
-    return lib.major();
+    return linked_libclang_major();
   } catch (...) {
     return 0;
   }
@@ -368,7 +364,7 @@ std::optional<std::string> Toolchain::resource_include() {
   // verify that step 2 does not run relative globs against cwd).
   const std::string lib = libclang_path_override_
                               ? *libclang_path_override_
-                              : LibClang::instance().library_path();
+                              : configured_libclang_library_path();
   if (!lib.empty()) {
     const std::string libdir = pathutil::dirname(lib);
     if (!libdir.empty()) {

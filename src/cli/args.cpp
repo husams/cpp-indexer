@@ -2536,6 +2536,464 @@ const Spec kVerifySpec = {
 
 } // namespace
 
+namespace {
+
+bool parse_graph_command(const std::vector<std::string> &argv, std::size_t i,
+                         std::vector<std::string> &extras, ParsedArgs &pa) {
+  auto fill_selector = [&](const ParseState &st) {
+    pa.usr = opt_value(st, "--usr");
+    if (const auto v = opt_value(st, "--id")) {
+      long parsed = 0;
+      parse_py_int(*v, parsed);
+      pa.graph_id = static_cast<int64_t>(parsed);
+    }
+    pa.name = opt_value(st, "--name");
+    pa.kind = opt_value(st, "--kind");
+    pa.first = st.flags.count("--first") != 0;
+    pa.index_db = opt_value(st, "--db");
+    pa.graph_json = st.flags.count("--json") != 0;
+    pa.graph_limit = int_value(st, "--limit", 50);
+  };
+
+  CommandScan what = scan_command(argv, i, extras);
+  if (what.help) {
+    pa.help_text = kGraphHelp;
+    return true;
+  }
+  if (!what.command) {
+    fail(kGraphUsage, "cidx graph",
+         "the following arguments are required: what");
+  }
+  if (!contains(kGraphWhats, *what.command)) {
+    fail(kGraphUsage, "cidx graph",
+         "argument what: invalid choice: '" + *what.command +
+             "' (choose from " + join(kGraphWhats, ", ") + ")");
+  }
+  pa.what = *what.command;
+
+  if (pa.what == "callers") {
+    ParseState st = parse_leaf(kGraphCallersSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kGraphCallersHelp;
+      return true;
+    }
+    fill_selector(st);
+    pa.direct_only = st.flags.count("--direct-only") != 0;
+  } else if (pa.what == "callees") {
+    ParseState st = parse_leaf(kGraphCalleesSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kGraphCalleesHelp;
+      return true;
+    }
+    fill_selector(st);
+    pa.direct_only = st.flags.count("--direct-only") != 0;
+  } else if (pa.what == "refs") {
+    ParseState st = parse_leaf(kGraphRefsSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kGraphRefsHelp;
+      return true;
+    }
+    fill_selector(st);
+  } else if (pa.what == "neighbors") {
+    ParseState st = parse_leaf(kGraphNeighborsSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kGraphNeighborsHelp;
+      return true;
+    }
+    fill_selector(st);
+    pa.edge = opt_value(st, "--edge");
+    pa.direction = opt_value(st, "--direction").value_or("out");
+  } else if (pa.what == "walk") {
+    ParseState st = parse_leaf(kGraphWalkSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kGraphWalkHelp;
+      return true;
+    }
+    fill_selector(st);
+    pa.edge = opt_value(st, "--edge");
+    pa.direction = opt_value(st, "--direction").value_or("out");
+    pa.graph_depth = int_value(st, "--depth", 3);
+  } else if (pa.what == "path") {
+    ParseState st = parse_leaf(kGraphPathSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kGraphPathHelp;
+      return true;
+    }
+    fill_selector(st);
+    pa.to_usr = opt_value(st, "--to-usr");
+    if (const auto v = opt_value(st, "--to-id")) {
+      long parsed = 0;
+      parse_py_int(*v, parsed);
+      pa.to_id = static_cast<int64_t>(parsed);
+    }
+    pa.to_name = opt_value(st, "--to-name");
+    pa.to_kind = opt_value(st, "--to-kind");
+    pa.edge = opt_value(st, "--edge");
+    pa.direction = opt_value(st, "--direction").value_or("out");
+    pa.graph_depth = int_value(st, "--depth", 8);
+  } else if (pa.what == "hierarchy") {
+    ParseState st = parse_leaf(kGraphHierarchySpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kGraphHierarchyHelp;
+      return true;
+    }
+    fill_selector(st);
+    pa.transitive = st.flags.count("--transitive") != 0;
+    pa.access = opt_value(st, "--access").value_or("all");
+  } else if (pa.what == "dispatch") {
+    ParseState st = parse_leaf(kGraphDispatchSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kGraphDispatchHelp;
+      return true;
+    }
+    fill_selector(st);
+  } else if (pa.what == "definitions") {
+    ParseState st = parse_leaf(kGraphDefinitionsSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kGraphDefinitionsHelp;
+      return true;
+    }
+    fill_selector(st);
+    pa.direct_only = st.flags.count("--direct-only") != 0;
+  } else {
+    ParseState st = parse_leaf(kGraphRedefinedSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kGraphRedefinedHelp;
+      return true;
+    }
+    pa.index_db = opt_value(st, "--db");
+    pa.graph_json = st.flags.count("--json") != 0;
+    pa.graph_limit = int_value(st, "--limit", 200);
+  }
+
+  if (pa.index_db) {
+    pa.index_db = pathutil::abspath(pathutil::expanduser(*pa.index_db));
+  }
+  return false;
+}
+
+bool parse_ast_command(const std::vector<std::string> &argv, std::size_t i,
+                       std::vector<std::string> &extras, ParsedArgs &pa) {
+  CommandScan what = scan_command(argv, i, extras);
+  if (what.help) {
+    pa.help_text = kAstHelp;
+    return true;
+  }
+  if (!what.command) {
+    fail(kAstUsage, "cidx ast", "the following arguments are required: what");
+  }
+  if (!contains(kAstWhats, *what.command)) {
+    fail(kAstUsage, "cidx ast",
+         "argument what: invalid choice: '" + *what.command +
+             "' (choose from " + join(kAstWhats, ", ") + ")");
+  }
+  pa.what = *what.command;
+
+  auto fill_common = [&](const ParseState &st) {
+    pa.ast_usr = opt_value(st, "--usr");
+    if (const auto v = opt_value(st, "--id")) {
+      long parsed = 0;
+      parse_py_int(*v, parsed);
+      pa.ast_id = static_cast<int64_t>(parsed);
+    }
+    pa.name = opt_value(st, "--name");
+    pa.kind = opt_value(st, "--kind");
+    pa.first = st.flags.count("--first") != 0;
+    pa.index_db = opt_value(st, "--db");
+    pa.ast_json = st.flags.count("--json") != 0;
+    if (!st.positionals.empty()) {
+      pa.target = st.positionals[0];
+    }
+    pa.rest = st.rest;
+  };
+
+  if (pa.what == "dump") {
+    ParseState st = parse_leaf(kAstDumpSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kAstDumpHelp;
+      return true;
+    }
+    fill_common(st);
+    pa.depth = int_value(st, "--depth", 0);
+    pa.tokens = st.flags.count("--tokens") != 0;
+    pa.types = st.flags.count("--types") != 0;
+    pa.use_cache = st.flags.count("--no-cache") == 0;
+  } else if (pa.what == "locals") {
+    ParseState st = parse_leaf(kAstLocalsSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kAstLocalsHelp;
+      return true;
+    }
+    fill_common(st);
+    pa.params = st.flags.count("--params") != 0;
+    pa.use_cache = st.flags.count("--no-cache") == 0;
+  } else if (pa.what == "conditions") {
+    ParseState st = parse_leaf(kAstConditionsSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kAstConditionsHelp;
+      return true;
+    }
+    fill_common(st);
+    pa.cond_ast = st.flags.count("--ast") != 0;
+    pa.use_cache = st.flags.count("--no-cache") == 0;
+  } else {
+    CommandScan csub = scan_command(argv, what.next, extras);
+    if (csub.help) {
+      pa.help_text = kAstCacheHelp;
+      return true;
+    }
+    if (!csub.command) {
+      fail(kAstCacheUsage, "cidx ast cache",
+           "the following arguments are required: cache_action");
+    }
+    if (!contains(kAstCacheWhats, *csub.command)) {
+      fail(kAstCacheUsage, "cidx ast cache",
+           "argument cache_action: invalid choice: '" + *csub.command +
+               "' (choose from " + join(kAstCacheWhats, ", ") + ")");
+    }
+    pa.cache_action = *csub.command;
+    const Spec &spec = (pa.cache_action == "build")    ? kAstCacheBuildSpec
+                       : (pa.cache_action == "status") ? kAstCacheStatusSpec
+                                                       : kAstCacheClearSpec;
+    ParseState st = parse_leaf(spec, argv, csub.next, extras);
+    if (st.help) {
+      if (pa.cache_action == "status") {
+        pa.help_text = kAstCacheStatusHelp;
+      } else if (pa.cache_action == "clear") {
+        pa.help_text = kAstCacheClearHelp;
+      } else {
+        pa.help_text = kAstCacheBuildHelp;
+      }
+      return true;
+    }
+    fill_common(st);
+  }
+  return false;
+}
+
+bool parse_pch_command(const std::vector<std::string> &argv, std::size_t i,
+                       std::vector<std::string> &extras, ParsedArgs &pa) {
+  CommandScan what = scan_command(argv, i, extras);
+  if (what.help) {
+    pa.help_text = kPchHelp;
+    return true;
+  }
+  if (!what.command) {
+    fail(kPchUsage, "cidx pch",
+         "the following arguments are required: pch_action");
+  }
+  if (!contains(kPchWhats, *what.command)) {
+    fail(kPchUsage, "cidx pch",
+         "argument pch_action: invalid choice: '" + *what.command +
+             "' (choose from " + join(kPchWhats, ", ") + ")");
+  }
+  pa.what = *what.command;
+  if (pa.what == "build") {
+    ParseState st = parse_leaf(kPchBuildSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kPchBuildHelp;
+      return true;
+    }
+    pa.index_db = opt_value(st, "--db");
+    pa.pch_add_flags = opt_values(st, "--add");
+    pa.pch_add_headers = opt_values(st, "--include");
+    pa.pch_driver = opt_value(st, "--driver");
+    pa.pch_std = opt_value(st, "--std");
+    pa.force = st.flags.count("--force") != 0;
+    pa.pch_from_corpus = st.flags.count("--from-corpus") != 0;
+    if (const std::optional<std::string> cov = opt_value(st, "--coverage")) {
+      pa.pch_coverage = std::stod(*cov);
+    }
+    if (const std::optional<std::string> mt = opt_value(st, "--min-tus")) {
+      pa.pch_min_tus = std::stoi(*mt);
+    }
+    if (const std::optional<std::string> jb = opt_value(st, "--jobs")) {
+      pa.pch_jobs = std::stoi(*jb);
+    }
+  } else if (pa.what == "status") {
+    ParseState st = parse_leaf(kPchStatusSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kPchStatusHelp;
+      return true;
+    }
+  } else {
+    ParseState st = parse_leaf(kPchClearSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kPchClearHelp;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool parse_component_command(const std::vector<std::string> &argv,
+                             std::size_t i,
+                             std::vector<std::string> &extras,
+                             ParsedArgs &pa) {
+  CommandScan what = scan_command(argv, i, extras);
+  if (what.help) {
+    pa.help_text = kComponentHelp;
+    return true;
+  }
+  if (!what.command) {
+    fail(kComponentUsage, "cidx component",
+         "the following arguments are required: what");
+  }
+  if (!contains(kComponentWhats, *what.command)) {
+    fail(kComponentUsage, "cidx component",
+         "argument what: invalid choice: '" + *what.command +
+             "' (choose from " + join(kComponentWhats, ", ") + ")");
+  }
+  pa.what = *what.command;
+  if (pa.what == "show") {
+    ParseState st = parse_leaf(kComponentShowSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kComponentShowHelp;
+      return true;
+    }
+    pa.name = st.positionals[0];
+    pa.index_db = opt_value(st, "--db");
+  } else {
+    ParseState st = parse_leaf(kComponentSetVersionSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kComponentSetVersionHelp;
+      return true;
+    }
+    pa.name = st.positionals[0];
+    if (st.positionals.size() >= 2) {
+      pa.version_str = st.positionals[1];
+    } else if (!st.rest.empty()) {
+      pa.version_str = st.rest[0];
+    }
+    pa.index_db = opt_value(st, "--db");
+  }
+  return false;
+}
+
+bool parse_repo_command(const std::vector<std::string> &argv, std::size_t i,
+                        std::vector<std::string> &extras, ParsedArgs &pa) {
+  CommandScan what = scan_command(argv, i, extras);
+  if (what.help) {
+    pa.help_text = kRepoHelp;
+    return true;
+  }
+  if (!what.command) {
+    fail(kRepoUsage, "cidx repo", "the following arguments are required: what");
+  }
+  if (!contains(kRepoWhats, *what.command)) {
+    fail(kRepoUsage, "cidx repo",
+         "argument what: invalid choice: '" + *what.command +
+             "' (choose from " + join(kRepoWhats, ", ") + ")");
+  }
+  pa.what = *what.command;
+  if (pa.what == "list" || pa.what == "ls") {
+    ParseState st = parse_leaf(kRepoListSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kRepoListHelp;
+      return true;
+    }
+    if (!st.positionals.empty()) {
+      pa.pattern = st.positionals[0];
+    }
+    pa.kind = opt_value(st, "--kind");
+    pa.index_db = opt_value(st, "--db");
+  } else if (pa.what == "show") {
+    ParseState st = parse_leaf(kRepoShowSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kRepoShowHelp;
+      return true;
+    }
+    pa.name = st.positionals[0];
+    pa.index_db = opt_value(st, "--db");
+  } else if (pa.what == "add-clone") {
+    ParseState st = parse_leaf(kRepoAddCloneSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kRepoAddCloneHelp;
+      return true;
+    }
+    pa.name = st.positionals[0];
+    pa.path = st.positionals[1];
+    pa.repo_label = opt_value(st, "--label");
+    pa.index_db = opt_value(st, "--db");
+  } else if (pa.what == "switch") {
+    ParseState st = parse_leaf(kRepoSwitchSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kRepoSwitchHelp;
+      return true;
+    }
+    pa.name = st.positionals[0];
+    pa.target = st.positionals[1];
+    pa.index_db = opt_value(st, "--db");
+  } else {
+    ParseState st = parse_leaf(kRepoRmSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kRepoRmHelp;
+      return true;
+    }
+    pa.name = st.positionals[0];
+    pa.delete_components = st.flags.count("--delete-components") != 0;
+    pa.index_db = opt_value(st, "--db");
+  }
+  return false;
+}
+
+bool parse_label_command(const std::vector<std::string> &argv, std::size_t i,
+                         std::vector<std::string> &extras, ParsedArgs &pa) {
+  CommandScan what = scan_command(argv, i, extras);
+  if (what.help) {
+    pa.help_text = kLabelHelp;
+    return true;
+  }
+  if (!what.command) {
+    fail(kLabelUsage, "cidx label",
+         "the following arguments are required: what");
+  }
+  if (!contains(kLabelWhats, *what.command)) {
+    fail(kLabelUsage, "cidx label",
+         "argument what: invalid choice: '" + *what.command +
+             "' (choose from " + join(kLabelWhats, ", ") + ")");
+  }
+  pa.what = *what.command;
+  if (pa.what == "add") {
+    ParseState st = parse_leaf(kLabelAddSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kLabelAddHelp;
+      return true;
+    }
+    pa.label_token = st.positionals[0];
+    pa.label_path = st.positionals[1];
+    pa.index_db = opt_value(st, "--db");
+  } else if (pa.what == "rm") {
+    ParseState st = parse_leaf(kLabelRmSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kLabelRmHelp;
+      return true;
+    }
+    pa.label_token = st.positionals[0];
+    pa.index_db = opt_value(st, "--db");
+  } else if (pa.what == "list") {
+    ParseState st = parse_leaf(kLabelListSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kLabelListHelp;
+      return true;
+    }
+    pa.index_db = opt_value(st, "--db");
+  } else {
+    ParseState st = parse_leaf(kLabelResolveSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kLabelResolveHelp;
+      return true;
+    }
+    pa.label_path = st.positionals[0];
+    pa.no_autoderive_labels =
+        st.flags.count("--no-autoderive-labels") != 0;
+    pa.index_db = opt_value(st, "--db");
+  }
+  return false;
+}
+
+} // namespace
+
 ParsedArgs parse_args(const std::vector<std::string> &argv) {
   std::vector<std::string> extras;
   ParsedArgs pa;
@@ -2638,56 +3096,8 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       return pa;
     }
   } else if (pa.command == "pch") {
-    // -- pch sub-command (v0.17.0): build|status|clear ------------------------
-    CommandScan what = scan_command(argv, i, extras);
-    if (what.help) {
-      pa.help_text = kPchHelp;
+    if (parse_pch_command(argv, i, extras, pa)) {
       return pa;
-    }
-    if (!what.command) {
-      fail(kPchUsage, "cidx pch",
-           "the following arguments are required: pch_action");
-    }
-    if (!contains(kPchWhats, *what.command)) {
-      fail(kPchUsage, "cidx pch",
-           "argument pch_action: invalid choice: '" + *what.command +
-               "' (choose from " + join(kPchWhats, ", ") + ")");
-    }
-    pa.what = *what.command;
-    if (pa.what == "build") {
-      ParseState st = parse_leaf(kPchBuildSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kPchBuildHelp;
-        return pa;
-      }
-      pa.index_db = opt_value(st, "--db");
-      pa.pch_add_flags = opt_values(st, "--add");
-      pa.pch_add_headers = opt_values(st, "--include");
-      pa.pch_driver = opt_value(st, "--driver");
-      pa.pch_std = opt_value(st, "--std");
-      pa.force = st.flags.count("--force") != 0;
-      pa.pch_from_corpus = st.flags.count("--from-corpus") != 0;
-      if (const std::optional<std::string> cov = opt_value(st, "--coverage")) {
-        pa.pch_coverage = std::stod(*cov);
-      }
-      if (const std::optional<std::string> mt = opt_value(st, "--min-tus")) {
-        pa.pch_min_tus = std::stoi(*mt);
-      }
-      if (const std::optional<std::string> jb = opt_value(st, "--jobs")) {
-        pa.pch_jobs = std::stoi(*jb);
-      }
-    } else if (pa.what == "status") {
-      ParseState st = parse_leaf(kPchStatusSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kPchStatusHelp;
-        return pa;
-      }
-    } else { // clear
-      ParseState st = parse_leaf(kPchClearSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kPchClearHelp;
-        return pa;
-      }
     }
   } else if (pa.command == "set") {
     ParseState st = parse_leaf(kSetSpec, argv, i, extras);
@@ -2873,408 +3283,24 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     pa.component = opt_value(st, "--component");
     pa.dry_run = st.flags.count("--dry-run") != 0;
   } else if (pa.command == "graph") {
-    // -- graph sub-command (M6) -----------------------------------------------
-    // Shared helper to fill graph selector fields from a ParseState.
-    auto fill_graph_selector = [&](const ParseState &st) {
-      pa.usr = opt_value(st, "--usr");
-      if (const auto v = opt_value(st, "--id")) {
-        long parsed = 0;
-        parse_py_int(*v, parsed);
-        pa.graph_id = static_cast<int64_t>(parsed);
-      }
-      pa.name = opt_value(st, "--name");
-      pa.kind = opt_value(st, "--kind");
-      pa.first = st.flags.count("--first") != 0;
-      pa.index_db = opt_value(st, "--db");
-      pa.graph_json = st.flags.count("--json") != 0;
-      pa.graph_limit = int_value(st, "--limit", 50);
-    };
-
-    CommandScan what = scan_command(argv, i, extras);
-    if (what.help) {
-      pa.help_text = kGraphHelp;
+    if (parse_graph_command(argv, i, extras, pa)) {
       return pa;
-    }
-    if (!what.command) {
-      fail(kGraphUsage, "cidx graph",
-           "the following arguments are required: what");
-    }
-    if (!contains(kGraphWhats, *what.command)) {
-      fail(kGraphUsage, "cidx graph",
-           "argument what: invalid choice: '" + *what.command +
-               "' (choose from " + join(kGraphWhats, ", ") + ")");
-    }
-    pa.what = *what.command;
-
-    if (pa.what == "callers") {
-      ParseState st = parse_leaf(kGraphCallersSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kGraphCallersHelp;
-        return pa;
-      }
-      fill_graph_selector(st);
-      pa.direct_only = st.flags.count("--direct-only") != 0;
-    } else if (pa.what == "callees") {
-      ParseState st = parse_leaf(kGraphCalleesSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kGraphCalleesHelp;
-        return pa;
-      }
-      fill_graph_selector(st);
-      pa.direct_only = st.flags.count("--direct-only") != 0;
-    } else if (pa.what == "refs") {
-      ParseState st = parse_leaf(kGraphRefsSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kGraphRefsHelp;
-        return pa;
-      }
-      fill_graph_selector(st);
-    } else if (pa.what == "neighbors") {
-      ParseState st =
-          parse_leaf(kGraphNeighborsSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kGraphNeighborsHelp;
-        return pa;
-      }
-      fill_graph_selector(st);
-      pa.edge = opt_value(st, "--edge");
-      pa.direction = opt_value(st, "--direction").value_or("out");
-    } else if (pa.what == "walk") {
-      ParseState st = parse_leaf(kGraphWalkSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kGraphWalkHelp;
-        return pa;
-      }
-      fill_graph_selector(st);
-      pa.edge = opt_value(st, "--edge");
-      pa.direction = opt_value(st, "--direction").value_or("out");
-      pa.graph_depth = int_value(st, "--depth", 3);
-    } else if (pa.what == "path") {
-      ParseState st = parse_leaf(kGraphPathSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kGraphPathHelp;
-        return pa;
-      }
-      fill_graph_selector(st);
-      pa.to_usr = opt_value(st, "--to-usr");
-      if (const auto v = opt_value(st, "--to-id")) {
-        long parsed = 0;
-        parse_py_int(*v, parsed);
-        pa.to_id = static_cast<int64_t>(parsed);
-      }
-      pa.to_name = opt_value(st, "--to-name");
-      pa.to_kind = opt_value(st, "--to-kind");
-      pa.edge = opt_value(st, "--edge");
-      pa.direction = opt_value(st, "--direction").value_or("out");
-      pa.graph_depth = int_value(st, "--depth", 8);
-    } else if (pa.what == "hierarchy") {
-      ParseState st =
-          parse_leaf(kGraphHierarchySpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kGraphHierarchyHelp;
-        return pa;
-      }
-      fill_graph_selector(st);
-      pa.transitive = st.flags.count("--transitive") != 0;
-      pa.access = opt_value(st, "--access").value_or("all");
-    } else if (pa.what == "dispatch") {
-      ParseState st =
-          parse_leaf(kGraphDispatchSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kGraphDispatchHelp;
-        return pa;
-      }
-      fill_graph_selector(st);
-    } else if (pa.what == "definitions") {
-      ParseState st =
-          parse_leaf(kGraphDefinitionsSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kGraphDefinitionsHelp;
-        return pa;
-      }
-      fill_graph_selector(st);
-      pa.direct_only = st.flags.count("--direct-only") != 0;
-    } else { // redefined (no symbol selector; --limit defaults to 200)
-      ParseState st =
-          parse_leaf(kGraphRedefinedSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kGraphRedefinedHelp;
-        return pa;
-      }
-      pa.index_db = opt_value(st, "--db");
-      pa.graph_json = st.flags.count("--json") != 0;
-      pa.graph_limit = int_value(st, "--limit", 200);
-    }
-    // Apply abspath+expanduser to --db for graph (cli.py:1819)
-    if (pa.index_db) {
-      pa.index_db =
-          pathutil::abspath(pathutil::expanduser(*pa.index_db));
     }
   } else if (pa.command == "ast") {
-    // -- ast sub-command -------------------------------------------------------
-    CommandScan what = scan_command(argv, i, extras);
-    if (what.help) {
-      pa.help_text = kAstHelp;
+    if (parse_ast_command(argv, i, extras, pa)) {
       return pa;
-    }
-    if (!what.command) {
-      fail(kAstUsage, "cidx ast",
-           "the following arguments are required: what");
-    }
-    if (!contains(kAstWhats, *what.command)) {
-      fail(kAstUsage, "cidx ast",
-           "argument what: invalid choice: '" + *what.command +
-               "' (choose from " + join(kAstWhats, ", ") + ")");
-    }
-    pa.what = *what.command;
-
-    // Shared lambda to populate the common ast fields from a ParseState.
-    auto fill_ast_common = [&](const ParseState &st) {
-      pa.ast_usr = opt_value(st, "--usr");
-      if (const auto v = opt_value(st, "--id")) {
-        long parsed = 0;
-        parse_py_int(*v, parsed);
-        pa.ast_id = static_cast<int64_t>(parsed);
-      }
-      pa.name = opt_value(st, "--name");
-      pa.kind = opt_value(st, "--kind");
-      pa.first = st.flags.count("--first") != 0;
-      pa.index_db = opt_value(st, "--db");
-      pa.ast_json = st.flags.count("--json") != 0;
-      // target: first positional (optional).
-      if (!st.positionals.empty()) {
-        pa.target = st.positionals[0];
-      }
-      // rest: REMAINDER captures "-- flags..." verbatim.
-      pa.rest = st.rest;
-    };
-
-    if (pa.what == "dump") {
-      ParseState st = parse_leaf(kAstDumpSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kAstDumpHelp;
-        return pa;
-      }
-      fill_ast_common(st);
-      pa.depth = int_value(st, "--depth", 0);
-      pa.tokens = st.flags.count("--tokens") != 0;
-      pa.types = st.flags.count("--types") != 0;
-      // --cache/--no-cache: default true; --no-cache overrides.
-      pa.use_cache = st.flags.count("--no-cache") == 0;
-    } else if (pa.what == "locals") {
-      ParseState st = parse_leaf(kAstLocalsSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kAstLocalsHelp;
-        return pa;
-      }
-      fill_ast_common(st);
-      pa.params = st.flags.count("--params") != 0;
-      pa.use_cache = st.flags.count("--no-cache") == 0;
-    } else if (pa.what == "conditions") {
-      ParseState st = parse_leaf(kAstConditionsSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kAstConditionsHelp;
-        return pa;
-      }
-      fill_ast_common(st);
-      pa.cond_ast = st.flags.count("--ast") != 0;
-      pa.use_cache = st.flags.count("--no-cache") == 0;
-    } else { // cache
-      CommandScan csub = scan_command(argv, what.next, extras);
-      if (csub.help) {
-        pa.help_text = kAstCacheHelp;
-        return pa;
-      }
-      if (!csub.command) {
-        // B5: Python dest="cache_action" so the required-arg error says
-        // "cache_action", not "what".
-        fail(kAstCacheUsage, "cidx ast cache",
-             "the following arguments are required: cache_action");
-      }
-      if (!contains(kAstCacheWhats, *csub.command)) {
-        // B5: same dest name in the invalid-choice message.
-        fail(kAstCacheUsage, "cidx ast cache",
-             "argument cache_action: invalid choice: '" + *csub.command +
-                 "' (choose from " + join(kAstCacheWhats, ", ") + ")");
-      }
-      pa.cache_action = *csub.command;
-      const Spec &spec = (pa.cache_action == "build")    ? kAstCacheBuildSpec
-                         : (pa.cache_action == "status") ? kAstCacheStatusSpec
-                                                         : kAstCacheClearSpec;
-      ParseState st = parse_leaf(spec, argv, csub.next, extras);
-      if (st.help) {
-        // B6: route help by action so `-h` shows the correct subcommand's usage.
-        if (pa.cache_action == "status") {
-          pa.help_text = kAstCacheStatusHelp;
-        } else if (pa.cache_action == "clear") {
-          pa.help_text = kAstCacheClearHelp;
-        } else {
-          pa.help_text = kAstCacheBuildHelp;
-        }
-        return pa;
-      }
-      fill_ast_common(st);
-      // cache sub-commands have no --cache/--no-cache toggle (Python design).
     }
   } else if (pa.command == "component") {
-    // -- component sub-command (v14) ------------------------------------------
-    CommandScan what = scan_command(argv, i, extras);
-    if (what.help) {
-      pa.help_text = kComponentHelp;
+    if (parse_component_command(argv, i, extras, pa)) {
       return pa;
-    }
-    if (!what.command) {
-      fail(kComponentUsage, "cidx component",
-           "the following arguments are required: what");
-    }
-    if (!contains(kComponentWhats, *what.command)) {
-      fail(kComponentUsage, "cidx component",
-           "argument what: invalid choice: '" + *what.command +
-               "' (choose from " + join(kComponentWhats, ", ") + ")");
-    }
-    pa.what = *what.command;
-    if (pa.what == "show") {
-      ParseState st =
-          parse_leaf(kComponentShowSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kComponentShowHelp;
-        return pa;
-      }
-      pa.name = st.positionals[0];
-      pa.index_db = opt_value(st, "--db");
-    } else { // set-version
-      ParseState st =
-          parse_leaf(kComponentSetVersionSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kComponentSetVersionHelp;
-        return pa;
-      }
-      pa.name = st.positionals[0];
-      // VERSION is optional: captured in st.rest (we used rest=true + 2 positionals
-      // but only required NAME, so VERSION either lands in st.positionals[1] or st.rest).
-      if (st.positionals.size() >= 2) {
-        pa.version_str = st.positionals[1];
-      } else if (!st.rest.empty()) {
-        pa.version_str = st.rest[0];
-      }
-      pa.index_db = opt_value(st, "--db");
     }
   } else if (pa.command == "repo") {
-    // -- repo sub-command (v23) ------------------------------------------------
-    CommandScan what = scan_command(argv, i, extras);
-    if (what.help) {
-      pa.help_text = kRepoHelp;
+    if (parse_repo_command(argv, i, extras, pa)) {
       return pa;
-    }
-    if (!what.command) {
-      fail(kRepoUsage, "cidx repo",
-           "the following arguments are required: what");
-    }
-    if (!contains(kRepoWhats, *what.command)) {
-      fail(kRepoUsage, "cidx repo",
-           "argument what: invalid choice: '" + *what.command +
-               "' (choose from " + join(kRepoWhats, ", ") + ")");
-    }
-    pa.what = *what.command;
-    if (pa.what == "list" || pa.what == "ls") {
-      ParseState st = parse_leaf(kRepoListSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kRepoListHelp;
-        return pa;
-      }
-      if (!st.positionals.empty()) {
-        pa.pattern = st.positionals[0];
-      }
-      pa.kind = opt_value(st, "--kind");
-      pa.index_db = opt_value(st, "--db");
-    } else if (pa.what == "show") {
-      ParseState st = parse_leaf(kRepoShowSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kRepoShowHelp;
-        return pa;
-      }
-      pa.name = st.positionals[0];
-      pa.index_db = opt_value(st, "--db");
-    } else if (pa.what == "add-clone") {
-      ParseState st = parse_leaf(kRepoAddCloneSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kRepoAddCloneHelp;
-        return pa;
-      }
-      pa.name = st.positionals[0];
-      pa.path = st.positionals[1];
-      pa.repo_label = opt_value(st, "--label");
-      pa.index_db = opt_value(st, "--db");
-    } else if (pa.what == "switch") {
-      ParseState st = parse_leaf(kRepoSwitchSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kRepoSwitchHelp;
-        return pa;
-      }
-      pa.name = st.positionals[0];
-      pa.target = st.positionals[1];
-      pa.index_db = opt_value(st, "--db");
-    } else { // rm
-      ParseState st = parse_leaf(kRepoRmSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kRepoRmHelp;
-        return pa;
-      }
-      pa.name = st.positionals[0];
-      pa.delete_components = st.flags.count("--delete-components") != 0;
-      pa.index_db = opt_value(st, "--db");
     }
   } else if (pa.command == "label") {
-    // -- label sub-command (v14) -----------------------------------------------
-    CommandScan what = scan_command(argv, i, extras);
-    if (what.help) {
-      pa.help_text = kLabelHelp;
+    if (parse_label_command(argv, i, extras, pa)) {
       return pa;
-    }
-    if (!what.command) {
-      fail(kLabelUsage, "cidx label",
-           "the following arguments are required: what");
-    }
-    if (!contains(kLabelWhats, *what.command)) {
-      fail(kLabelUsage, "cidx label",
-           "argument what: invalid choice: '" + *what.command +
-               "' (choose from " + join(kLabelWhats, ", ") + ")");
-    }
-    pa.what = *what.command;
-    if (pa.what == "add") {
-      ParseState st = parse_leaf(kLabelAddSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kLabelAddHelp;
-        return pa;
-      }
-      pa.label_token = st.positionals[0];
-      pa.label_path = st.positionals[1];
-      pa.index_db = opt_value(st, "--db");
-    } else if (pa.what == "rm") {
-      ParseState st = parse_leaf(kLabelRmSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kLabelRmHelp;
-        return pa;
-      }
-      pa.label_token = st.positionals[0];
-      pa.index_db = opt_value(st, "--db");
-    } else if (pa.what == "list") {
-      ParseState st = parse_leaf(kLabelListSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kLabelListHelp;
-        return pa;
-      }
-      pa.index_db = opt_value(st, "--db");
-    } else { // resolve
-      ParseState st = parse_leaf(kLabelResolveSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kLabelResolveHelp;
-        return pa;
-      }
-      pa.label_path = st.positionals[0];
-      pa.no_autoderive_labels =
-          st.flags.count("--no-autoderive-labels") != 0;
-      pa.index_db = opt_value(st, "--db");
     }
   }
 

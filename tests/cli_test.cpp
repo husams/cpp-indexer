@@ -1,8 +1,8 @@
 // S07 tests — args grammar (argparse parity, D6 no-abbreviation delta),
 // cli/format, add-source, and the query commands' golden outputs (hermetic,
 // label "default"); cmd_import needs CompileDb::load (CXCompilationDatabase)
-// and lives in doctest suite "clang" (label "clang", runtime SKIP exit 77
-// when no libclang is loadable — same policy as compiledb_test).
+// and lives in doctest suite "clang" (label "clang") using the directly
+// linked libclang.
 //
 // Every expected output string below was captured from the Python tool
 // (python3 -m indexer ..., Python 3.14, COLUMNS=80) run against a DB seeded
@@ -24,7 +24,6 @@
 #include <string>
 #include <vector>
 
-#include "clangx/libclang.hpp"
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
 #include "cli/format.hpp"
@@ -56,17 +55,6 @@ bool require_manifests() {
   return true;
 }
 
-cidx::LibClang *require_libclang() {
-  cidx::LibClang &lib = cidx::LibClang::instance();
-  try {
-    lib.load();
-  } catch (const cidx::CidxError &e) {
-    g_clang_skipped = true;
-    MESSAGE("SKIP: no loadable libclang: " << std::string(e.what()));
-    return nullptr;
-  }
-  return &lib;
-}
 
 std::string make_temp_dir() {
   char tmpl[] = "/tmp/cidx_cli_XXXXXX";
@@ -1964,9 +1952,6 @@ TEST_CASE("query-only invocations never create cidx.log (G27/D7)") {
 TEST_SUITE("clang") {
 
   TEST_CASE("import: synthetic compile DB — strip, driver, skip counter") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     const std::string t = make_temp_dir();
     makedirs(t + "/proj/sub");
     makedirs(t + "/other");
@@ -2030,9 +2015,6 @@ TEST_SUITE("clang") {
 
   TEST_CASE("import: --db accepts the directory; git root wins as the "
             "component root") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     const std::string t = make_temp_dir();
     makedirs(t + "/proj/.git");
     makedirs(t + "/proj/src");
@@ -2057,9 +2039,6 @@ TEST_SUITE("clang") {
   }
 
   TEST_CASE("import: manifests unified compile DB (READ-ONLY fixture)") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     if (!require_manifests()) {
       return;
     }
@@ -2093,9 +2072,6 @@ TEST_SUITE("clang") {
   }
 
   TEST_CASE("import: load failure -> exit 1 with the Python-parity message") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     const std::string t = make_temp_dir();
     // $ python3 -m indexer import --db <t>/nope
     // error: cannot load compilation database from <t>/nope: Error 1:
@@ -2111,9 +2087,6 @@ TEST_SUITE("clang") {
   }
 
   TEST_CASE("import: empty compilation database -> exit 1") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     const std::string t = make_temp_dir();
     makedirs(t + "/empty");
     write_file(t + "/empty/compile_commands.json", "[]\n");
@@ -2168,9 +2141,6 @@ TEST_SUITE("clang") {
 
   TEST_CASE("index: two-TU pending flow — header counters, md5 skip, "
             "content change re-indexes") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     const TwoTuProject p;
     const std::string &t = p.cache;
     const std::string &proj = p.proj;
@@ -2251,9 +2221,6 @@ TEST_SUITE("clang") {
 
   TEST_CASE("index: fatal include error — exit 1, rest indexed, flag dump "
             "only in cidx.log") {
-    if (require_libclang() == nullptr) {
-      return;
-    }
     const TwoTuProject p(/*with_bad_tu=*/true);
     const std::string &t = p.cache;
     const std::string &proj = p.proj;
