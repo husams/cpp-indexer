@@ -3,6 +3,8 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Lex/Lexer.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 
 namespace cidx::lt {
 
@@ -19,11 +21,12 @@ ExpansionLoc to_expansion(const clang::SourceManager &sm,
   // canonicalized so absolute-path consumers can match it.
   out.file = sm.getFilename(exp).str();
   if (!out.file.empty() && out.file[0] != '/') {
-    if (auto fe = sm.getFileEntryRefForID(sm.getFileID(exp))) {
-      llvm::StringRef real = fe->getFileEntry().tryGetRealPathName();
-      if (!real.empty())
-        out.file = real.str();
-    }
+    // Absolutize a relative spelling against the CWD WITHOUT resolving
+    // symlinks (os.path.abspath parity; /var must not become /private/var).
+    llvm::SmallString<256> abs(out.file);
+    llvm::sys::fs::make_absolute(abs);
+    llvm::sys::path::remove_dots(abs, /*remove_dot_dot=*/true);
+    out.file = std::string(abs);
   }
   out.line = sm.getExpansionLineNumber(exp);
   out.col = sm.getExpansionColumnNumber(exp);

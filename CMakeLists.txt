@@ -329,13 +329,58 @@ add_library(cidx_core STATIC
   src/graph/query.cpp
   src/graph/emit.cpp
   src/astgraph/astgraph.cpp
+  src/clangx_lt/kind_map.cpp
+  src/clangx_lt/usr.cpp
+  src/clangx_lt/location.cpp
+  src/clangx_lt/names.cpp
+  src/clangx_lt/decl_flags.cpp
+  src/clangx_lt/symbol_extractor.cpp
+  src/clangx_lt/symbol_visitor.cpp
+  src/clangx_lt/storage_symbol_sink.cpp
+  src/clangx_lt/mint_builder.cpp
+  src/clangx_lt/template_arg_resolver.cpp
+  src/clangx_lt/storage_edge_sink.cpp
+  src/clangx_lt/edge_visitor.cpp
+  src/clangx_lt/type_use.cpp
+  src/clangx_lt/value_source.cpp
+  src/clangx_lt/instance_minter.cpp
+  src/clangx_lt/body_walker.cpp
+  src/clangx_lt/body_pass_visitor.cpp
+  src/clangx_lt/ns_uses_visitor.cpp
+  src/clangx_lt/lt_engine.cpp
   third_party/md5/md5.c
   third_party/sha1/sha1.c
 )
 
+# The LT engine links the Clang C++ API. Its TUs compile -fno-rtti to match
+# a no-RTTI LLVM; the rest of cidx_core keeps default RTTI (no clang types
+# cross the lt_engine.hpp boundary).
+find_package(LLVM REQUIRED CONFIG)
+find_package(Clang REQUIRED CONFIG)
+set(_cidx_lt_sources
+  src/clangx_lt/kind_map.cpp src/clangx_lt/usr.cpp src/clangx_lt/location.cpp
+  src/clangx_lt/names.cpp src/clangx_lt/decl_flags.cpp
+  src/clangx_lt/symbol_extractor.cpp src/clangx_lt/symbol_visitor.cpp
+  src/clangx_lt/storage_symbol_sink.cpp src/clangx_lt/mint_builder.cpp
+  src/clangx_lt/template_arg_resolver.cpp src/clangx_lt/storage_edge_sink.cpp
+  src/clangx_lt/edge_visitor.cpp src/clangx_lt/type_use.cpp
+  src/clangx_lt/value_source.cpp src/clangx_lt/instance_minter.cpp
+  src/clangx_lt/body_walker.cpp src/clangx_lt/body_pass_visitor.cpp
+  src/clangx_lt/ns_uses_visitor.cpp src/clangx_lt/lt_engine.cpp)
+if(NOT LLVM_ENABLE_RTTI)
+  set_source_files_properties(${_cidx_lt_sources} PROPERTIES
+    COMPILE_OPTIONS "-fno-rtti")
+endif()
+set_source_files_properties(${_cidx_lt_sources} PROPERTIES
+  INCLUDE_DIRECTORIES "${LLVM_INCLUDE_DIRS};${CLANG_INCLUDE_DIRS}"
+  COMPILE_DEFINITIONS
+  "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
+
 # A1.1: link libclang (shared by default; a static archive group under
 # CIDX_STATIC on Linux — see the resolution block above).
 target_link_libraries(cidx_core PUBLIC ${_cidx_libclang_link})
+# LT engine: the Clang C++ API (monolithic dylibs).
+target_link_libraries(cidx_core PUBLIC clang-cpp LLVM)
 # S02: storage layer links SQLite3 (shared, or the static archive under
 # CIDX_STATIC).
 target_link_libraries(cidx_core PUBLIC ${_cidx_sqlite_link})

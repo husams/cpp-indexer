@@ -27,6 +27,7 @@
 #include "clangx/ast_query.hpp"
 #include "clangx/clang_runtime.hpp"
 #include "clangx/parse.hpp"
+#include "clangx_lt/lt_engine.hpp"
 #include "clangx/pch.hpp"
 #include "clangx/toolchain.hpp"
 #include "cli/format.hpp"
@@ -188,6 +189,60 @@ int index_one(Storage &db, Parser &parser, AstIndexer &indexer, const File &rec,
   int stored = 0;
   HeaderStats hs;
   std::vector<Diagnostic> diags;
+  // CIDX_INDEX_ENGINE=lt: route this TU through the LibTooling engine
+  // (parity-proven visitors over the Clang C++ API) instead of the libclang
+  // cursor walk. Same DB effects, same counters, same output line.
+  if (const auto engine = get_env("CIDX_INDEX_ENGINE");
+      engine && *engine == "lt") {
+    lt::IndexOneOutcome out =
+        lt::run_index_one(db, rec, path, indexer.graph_enabled());
+    if (out.parse_failed) {
+      if (ctx.logger != nullptr && !out.failed_flags.empty()) {
+        std::string flags;
+        for (std::size_t i = 0; i < out.failed_flags.size(); ++i) {
+          if (i != 0)
+            flags += " ";
+          flags += out.failed_flags[i];
+        }
+        ctx.logger->error("cidx.clang",
+                          path + ": failed parse flags: " + flags +
+                              "; libclang: " +
+                              std::to_string(linked_libclang_major()));
+        // log_diagnostics parity: the ERROR-severity diagnostics as INFO
+        // lines (capped at 20; classic logs error_diagnostics()).
+        std::size_t shown = 0;
+        for (const Diagnostic &d : out.diagnostics) {
+          if (d.severity < 3)
+            continue;
+          if (shown++ >= 25)
+            break;
+          ctx.logger->info("cidx.clang",
+                           path + ": diag " + d.file_path.value_or("") + ":" +
+                               std::to_string(d.line.value_or(0)) + ": " +
+                               d.spelling);
+        }
+      }
+      std::vector<Diagnostic> failed = out.diagnostics;
+      if (failed.empty()) {
+        Diagnostic d;
+        d.severity = 4;
+        d.spelling = out.error;
+        d.file_path = path;
+        failed.push_back(std::move(d));
+      }
+      db.replace_diagnostics(rec.id, failed);
+      *ctx.err << "error: " << out.error << "\n";
+      return 1;
+    }
+    db.replace_diagnostics(rec.id, out.diagnostics);
+    db.mark_file_indexed(rec.id, file_mtime(path));
+    *ctx.out << "  -> " << out.stored << " symbols; headers: "
+             << out.headers.indexed << " indexed (+" << out.headers.symbols
+             << " symbols), " << out.headers.already << " already, "
+             << out.headers.system << " system, " << out.headers.unowned
+             << " unowned\n";
+    return 0;
+  }
   try {
     // Stored options are re-sanitize()d at index time (G11) — heals DBs
     // imported by an older cidx whose drop list was shorter.

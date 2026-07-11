@@ -20,11 +20,17 @@ public:
 
   void set_current_file_id(int64_t file_id);
 
+  // index_file_notxn counters: a cursor whose symbol already exists RESOLVED
+  // counts as skipped (AstIndexer::store semantics).
+  void reset_counters();
+  int stored_count() const;
+
   void emit(const SymbolRecord &symbol) override;
 
 private:
   cidx::Storage &db_;
   int64_t current_file_id_ = -1;
+  int stored_ = 0;
 };
 
 } // namespace cidx::lt

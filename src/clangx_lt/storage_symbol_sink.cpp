@@ -12,6 +12,10 @@ void StorageSymbolSink::set_current_file_id(int64_t file_id) {
   current_file_id_ = file_id;
 }
 
+void StorageSymbolSink::reset_counters() { stored_ = 0; }
+
+int StorageSymbolSink::stored_count() const { return stored_; }
+
 void StorageSymbolSink::emit(const SymbolRecord &s) {
   const char *kind_name = cidx_kind_name_from_int(s.kind);
   if (kind_name == nullptr)
@@ -41,7 +45,10 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
   sym.access = s.access;
   sym.parent_usr = s.parent_usr;
   sym.resolved = s.resolved;
+  const std::optional<cidx::Symbol> existing = db_.lookup_symbol(sym.usr);
   db_.add_symbol(sym);
+  if (!(existing && existing->resolved))
+    ++stored_; // AstIndexer::store: true = counted as "stored"
 }
 
 } // namespace cidx::lt
