@@ -108,8 +108,13 @@ if(CIDX_LIBCLANG)
 endif()
 
 if(NOT CIDX_LIBCLANG_LIB)
-  # 2. llvm-config --libdir (quiet on failure).
-  find_program(_llvm_config llvm-config)
+  # 2. llvm-config --libdir (quiet on failure). Prefer a Homebrew keg-only LLVM
+  #    (macOS): it is NOT symlinked onto PATH, so hint its bin/ explicitly. This
+  #    is how macOS builds pick up the installed LLVM (e.g. 22) headers+library
+  #    instead of the pip `libclang` wheel (which caps at 18 and ships no headers).
+  find_program(_llvm_config
+    NAMES llvm-config
+    HINTS /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin)
   if(_llvm_config)
     execute_process(
       COMMAND "${_llvm_config}" --libdir
@@ -168,6 +173,54 @@ endif()
 get_filename_component(_cidx_libclang_dir "${CIDX_LIBCLANG_LIB}" DIRECTORY)
 message(STATUS "libclang: ${CIDX_LIBCLANG_LIB}")
 message(STATUS "libclang dir (RPATH): ${_cidx_libclang_dir}")
+
+# A1.4: locate the libclang C-API headers (clang-c/Index.h). These used to be
+# vendored under third_party/clang-c (pinned to LLVM 18); they now come from the
+# SAME LLVM install as the linked library, so header and runtime versions can no
+# longer drift. Resolution mirrors the library search above.
+#   1. CIDX_LIBCLANG_INCLUDE cache var, if set.
+#   2. llvm-config --includedir.
+#   3. Sibling include/ of the resolved libclang directory.
+#   4. Homebrew / /opt/llvm* / /usr/lib/llvm-* / /usr/include globs.
+set(CIDX_LIBCLANG_INCLUDE "" CACHE PATH "Directory containing clang-c/Index.h")
+set(_cidx_clang_inc_hints "")
+if(CIDX_LIBCLANG_INCLUDE)
+  list(APPEND _cidx_clang_inc_hints "${CIDX_LIBCLANG_INCLUDE}")
+endif()
+if(_llvm_config)
+  execute_process(
+    COMMAND "${_llvm_config}" --includedir
+    OUTPUT_VARIABLE _llvm_incdir
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE _llvm_inc_result)
+  if(_llvm_inc_result EQUAL 0 AND _llvm_incdir)
+    list(APPEND _cidx_clang_inc_hints "${_llvm_incdir}")
+  endif()
+endif()
+list(APPEND _cidx_clang_inc_hints
+  "${_cidx_libclang_dir}/../include"
+  "${_cidx_libclang_dir}/../../include")
+foreach(_inc_glob
+    "/opt/homebrew/opt/llvm/include" "/usr/local/opt/llvm/include"
+    "/opt/llvm*/include" "/usr/lib/llvm-*/include" "/usr/include")
+  file(GLOB _inc_dirs "${_inc_glob}")
+  if(_inc_dirs)
+    list(SORT _inc_dirs)
+    list(APPEND _cidx_clang_inc_hints ${_inc_dirs})
+  endif()
+endforeach()
+find_path(CIDX_CLANG_C_INCLUDE_DIR
+  NAMES clang-c/Index.h
+  HINTS ${_cidx_clang_inc_hints}
+  DOC "Directory containing the libclang C-API headers (clang-c/Index.h)")
+if(NOT CIDX_CLANG_C_INCLUDE_DIR)
+  message(FATAL_ERROR
+    "clang-c/Index.h not found. Install an LLVM development package "
+    "(clang-devel / llvm-toolset on RHEL, `brew install llvm` on macOS) or pass "
+    "-DCIDX_LIBCLANG_INCLUDE=<dir containing clang-c/>.")
+endif()
+message(STATUS "libclang headers: ${CIDX_CLANG_C_INCLUDE_DIR}")
 
 # How libclang is linked into cidx_core. Default: the resolved shared library
 # (RPATH-located at runtime). Under CIDX_STATIC on a non-Apple host, try to
@@ -289,6 +342,7 @@ target_link_libraries(cidx_core PUBLIC ${_cidx_sqlite_link})
 target_include_directories(cidx_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+  ${CIDX_CLANG_C_INCLUDE_DIR}
 )
 target_compile_options(cidx_core PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra>
