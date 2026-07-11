@@ -37,6 +37,7 @@ if __package__ in (None, ""):  # direct execution
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     from indexer.storage import SCHEMA_VERSION, SYMBOL_KINDS, File, Storage  # noqa: E402
     from indexer import compiledb  # noqa: E402
+    from indexer import souffle  # noqa: E402
     from indexer import pathx  # noqa: E402
     from indexer.clang import ClangParseError, index_source  # noqa: E402
     from indexer.query import (  # noqa: E402
@@ -55,7 +56,7 @@ if __package__ in (None, ""):  # direct execution
     )
 else:
     from .storage import SCHEMA_VERSION, SYMBOL_KINDS, File, Storage
-    from . import astcmd, compiledb, pathx
+    from . import astcmd, compiledb, pathx, souffle
     from .clang import ClangParseError, index_source
     from .query import EDGE_KINDS, GraphQuery, NoEdgesError, NoIndexError
     from .utils import (
@@ -74,7 +75,7 @@ LOG_NAME = "cidx.log"
 
 # Keep in sync with pyproject.toml [project].version and the C++ tool
 # (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.52.0"
+VERSION = "0.53.0"
 
 # Header extensions: a pending file with one of these (or no extension, e.g. a
 # bare libstdc++ header) is indexed via its including TU's index_headers() pass,
@@ -394,10 +395,9 @@ def cmd_import(args) -> int:
     imported, skipped = 0, 0
     with Storage(args.index) as db:
         # Encode include paths against the alias registry unless --no-alias.
-        # The registry is explicit labels PLUS uniquely-named components, so
-        # an -I under a component root auto-aliases to <component-name> with no
-        # `cidx label add` needed; labels cover non-component (toolchain/system)
-        # prefixes. Decode (get_alias) mirrors this same registry.
+        # The registry is uniquely-named components (plus any stored labels),
+        # so an -I under a component root auto-aliases to <component-name>.
+        # Decode (get_alias) mirrors this same registry.
         label_map = (
             []
             if getattr(args, "no_alias", False)
@@ -491,7 +491,7 @@ def cmd_import(args) -> int:
 
 
 def cmd_realias(args) -> int:
-    """cidx realias [COMPONENT] -- rewrite stored include paths to <label> tokens.
+    """cidx repo realias [COMPONENT] -- rewrite stored include paths to <label> tokens.
 
     Applies the alias registry (explicit labels + uniquely-named components,
     longest match) to every file's stored compile_options, in place, so an
@@ -503,8 +503,7 @@ def cmd_realias(args) -> int:
         )
         if not label_map:
             print(
-                "error: no aliases available (register a label with "
-                "'cidx label add', or add a component)",
+                "error: no aliases available (add a component first)",
                 file=sys.stderr,
             )
             return 1
@@ -670,7 +669,7 @@ def cmd_resolve(args) -> int:
 
 
 def cmd_pch_build(args) -> int:
-    """`cidx pch build`: build & cache the shared system/C++ PCH."""
+    """`cidx cache pch build`: build & cache the shared system/C++ PCH."""
     from indexer import pch
 
     return pch.cmd_build(
@@ -688,14 +687,14 @@ def cmd_pch_build(args) -> int:
 
 
 def cmd_pch_status(args) -> int:
-    """`cidx pch status`: show the cached system PCH (size, flags, validity)."""
+    """`cidx cache pch status`: show the cached system PCH (size, flags, validity)."""
     from indexer import pch
 
     return pch.cmd_status()
 
 
 def cmd_pch_clear(args) -> int:
-    """`cidx pch clear`: remove the cached system PCH + sidecar + umbrella."""
+    """`cidx cache pch clear`: remove the cached system PCH + sidecar + umbrella."""
     from indexer import pch
 
     return pch.cmd_clear()
@@ -1924,69 +1923,8 @@ def cmd_repo_rm(args) -> int:
     return 0
 
 
-# -- label add / rm / list / resolve -----------------------------------------
-
-
-def cmd_label_add(args) -> int:
-    """cidx label add NAME PATH -- upsert a label."""
-    with Storage(args.index) as db:
-        existing = db.get_label(args.name)
-        db.add_label(args.name, args.path)
-    if existing is None:
-        print(f"added label {args.name} -> {args.path}")
-    else:
-        print(f"updated label {args.name} -> {args.path}")
-    return 0
-
-
-def cmd_label_rm(args) -> int:
-    """cidx label rm NAME -- remove a label."""
-    with Storage(args.index) as db:
-        removed = db.remove_label(args.name)
-    if not removed:
-        print(f"error: no label named '{args.name}'", file=sys.stderr)
-        return 1
-    print(f"removed label {args.name}")
-    return 0
-
-
-def cmd_label_list(args) -> int:
-    """cidx label list -- print all labels sorted by name."""
-    with Storage(args.index) as db:
-        labels = db.list_labels()
-    if not labels:
-        print("0 label(s)")
-        return 0
-    width = max(len(name) for name, _ in labels)
-    for name, path in labels:
-        print(f"{name:<{width}}  {path}")
-    print(f"{len(labels)} label(s)")
-    return 0
-
-
-def cmd_label_resolve(args) -> int:
-    """cidx label resolve TOKEN -- resolve a label/component name or <...>/$... token.
-
-    Uses the same alias lookup as parse-time decode (get_alias): explicit
-    labels first, then uniquely-named components."""
-    with Storage(args.index) as db:
-        lookup = db.get_alias
-        autoderive = not getattr(args, "no_autoderive_labels", False)
-        token = args.token
-        # If no < or $ in the token, treat it as a bare label name.
-        if "<" not in token and "$" not in token:
-            token = f"<{token}>"
-        result = pathx.resolve_fs_path(token, lookup=lookup, autoderive=autoderive)
-        # Apply abspath only for bare paths (not compound tokens like -I<...>).
-        # resolve_fs_path docstring: abspath is the caller's responsibility.
-        if not result.startswith("-"):
-            result = os.path.abspath(result)
-    print(result)
-    return 0
-
-
 def cmd_verify(args) -> int:
-    """cidx verify -- check that component roots and files exist on disk.
+    """cidx db verify -- check that component roots and files exist on disk.
 
     For each component the effective root (base path joined with its version) is
     resolved through the portable-path chain and confirmed to be a directory. A
@@ -2040,53 +1978,109 @@ def cmd_verify(args) -> int:
     return 0 if (c_missing == 0 and c_vermiss == 0 and f_missing == 0) else 1
 
 
+def cmd_analyze(args) -> int:
+    """cidx analyze -- run Souffle Datalog analyses over the semantic index.
+
+    Exports fact relations from the index as TSV, prepends the shared prelude
+    declarations (indexer/rules/prelude.dl), and runs the standalone `souffle`
+    interpreter on a built-in rule (--rule) or a user program (--rules-file),
+    printing every .output relation as JSON with deterministically sorted
+    rows. --export-facts instead writes the fact files plus cidx_facts.dl for
+    standalone `souffle -F DIR` runs.
+    """
+    modes = [bool(args.list_rules), bool(args.export_facts),
+             bool(args.rule), bool(args.rules_file)]
+    if sum(modes) != 1:
+        print(
+            "error: exactly one of --list, --export-facts, --rule, or "
+            "--rules-file is required",
+            file=sys.stderr,
+        )
+        return 2
+    if args.jobs < 1:
+        print("error: --jobs must be at least 1", file=sys.stderr)
+        return 2
+    if args.list_rules:
+        rules = [{"name": n, "description": d} for n, d in souffle.BUILTIN_RULES]
+        print(json.dumps({"rules": rules}, indent=2))
+        return 0
+    if not os.path.isfile(args.index):
+        print(
+            f"error: index not found at {args.index} "
+            "(run 'cidx import' first, or pass --db)",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        if args.export_facts:
+            out_dir = os.path.abspath(os.path.expanduser(args.export_facts))
+            nfiles, nrows = souffle.export_facts(args.index, out_dir)
+            print(f"{out_dir}: {nfiles} fact files, {nrows} rows")
+            return 0
+        if args.rule:
+            if args.rule not in [n for n, _ in souffle.BUILTIN_RULES]:
+                print(
+                    f"error: unknown rule: {args.rule} "
+                    "(see cidx analyze --list)",
+                    file=sys.stderr,
+                )
+                return 1
+            label = args.rule
+            with open(souffle.builtin_rule_path(args.rule),
+                      encoding="utf-8") as fh:
+                program = fh.read()
+        else:
+            path = os.path.abspath(os.path.expanduser(args.rules_file))
+            if not os.path.isfile(path):
+                print(f"error: rules file not found: {path}", file=sys.stderr)
+                return 1
+            label = path
+            with open(path, encoding="utf-8") as fh:
+                program = fh.read()
+        relations = souffle.run_program(args.index, program, args.jobs)
+        out = {
+            "rule": label,
+            "db": os.path.abspath(args.index),
+            "relations": {k: relations[k] for k in sorted(relations)},
+        }
+        print(json.dumps(out, indent=2))
+        return 0
+    except souffle.SouffleError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="cidx", description="cidx command-line skeleton")
     ap.add_argument("--version", action="version", version=f"cidx {VERSION}")
     sub = ap.add_subparsers(dest="command", required=True)
+
+    def _db_arg(q):
+        """Add a standard --db (index database override) argument."""
+        q.add_argument(
+            "--db",
+            dest="graph_db",
+            metavar="PATH",
+            help="index database (default: the standard cache index)",
+        )
+
+    def _dry_run(q):
+        q.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="preview the matches without deleting anything",
+        )
+
+    fuzzy = (
+        "optional free-text fuzzy filter: characters must appear "
+        "in order, e.g. 'shp' matches shapes.c"
+    )
 
     p = sub.add_parser("init", help="create a blank index database")
     p.add_argument(
         "--force", action="store_true", help="overwrite an existing index database"
     )
     p.set_defaults(fn=cmd_init)
-
-    p = sub.add_parser(
-        "migrate",
-        help="upgrade an existing index to the current schema (in place, no re-index)",
-    )
-    p.add_argument(
-        "--db",
-        dest="graph_db",
-        metavar="PATH",
-        help="index database (default: the standard cache index)",
-    )
-    p.set_defaults(fn=cmd_migrate)
-
-    p = sub.add_parser("add-source", help="register a component")
-    p.add_argument("--path", required=True, help="repo root or library header dir")
-    p.add_argument("--name", help="component name (default: from .git/config)")
-    p.add_argument(
-        "--repo", help="repository name to group under (default: component name)"
-    )
-    p.add_argument("--kind", choices=("repo", "external"), default="repo")
-    p.add_argument(
-        "--no-git",
-        action="store_true",
-        help="use --path as-is; do not promote to the enclosing git root",
-    )
-    p.add_argument(
-        "--version",
-        metavar="V",
-        default=None,
-        help="set component version to V (overrides auto-detection; '' clears)",
-    )
-    p.add_argument(
-        "--no-detect-version",
-        action="store_true",
-        help="disable trailing-segment version detection",
-    )
-    p.set_defaults(fn=cmd_add_source)
 
     p = sub.add_parser("import", help="import a compile_commands.json")
     p.add_argument(
@@ -2113,24 +2107,6 @@ def main(argv=None) -> int:
         help="do not rewrite include paths to <label> tokens via the registry",
     )
     p.set_defaults(fn=cmd_import)
-
-    p = sub.add_parser(
-        "realias",
-        help="rewrite stored include paths to <label> tokens via the registry",
-    )
-    p.add_argument(
-        "component",
-        nargs="?",
-        metavar="COMPONENT",
-        help="restrict to one component (default: all files)",
-    )
-    p.add_argument(
-        "--db",
-        dest="graph_db",
-        metavar="PATH",
-        help="index database (default: the standard cache index)",
-    )
-    p.set_defaults(fn=cmd_realias)
 
     p = sub.add_parser("index", help="index imported C/C++ files")
     p.add_argument(
@@ -2160,100 +2136,128 @@ def main(argv=None) -> int:
     )
     p.set_defaults(fn=cmd_resolve)
 
-    # -- pch: build / status / clear ------------------------------------------
-    p = sub.add_parser(
-        "pch",
-        help="build & cache one shared system/C++ PCH to speed up indexing",
+    p = sub.add_parser("search", help="fuzzy-search symbols by qualified name")
+    p.add_argument(
+        "pattern",
+        help="'::'-separated substrings matched in order, "
+        "e.g. 'conf::set' hits RdKafka::Conf::set",
     )
-    psub = p.add_subparsers(dest="pch_action", required=True)
-
-    q = psub.add_parser(
-        "build", help="compile a system/C++ umbrella header into a cached PCH"
+    p.add_argument(
+        "--kind", choices=sorted(SYMBOL_KINDS), help="restrict to one symbol kind"
     )
-    q.add_argument(
-        "--db",
-        dest="graph_db",
-        metavar="PATH",
-        help="index database to derive the common C++ flags from "
-        "(default: the standard cache index)",
-    )
-    q.add_argument(
-        "--add",
-        dest="add_flags",
-        action="append",
-        default=[],
-        metavar="FLAG",
-        help="extra compile flag to bake into the PCH (repeatable)",
-    )
-    q.add_argument(
-        "--include",
-        dest="add_headers",
-        action="append",
-        default=[],
-        metavar="HEADER",
-        help="extra header to add to the umbrella, e.g. boost/optional.hpp "
-        "(repeatable)",
-    )
-    q.add_argument(
-        "--driver",
-        help="compiler driver to replicate search paths from "
-        "(default: the index's dominant C++ driver)",
-    )
-    q.add_argument("--std", help="override the C++ standard, e.g. c++17")
-    q.add_argument(
-        "--force", action="store_true", help="rebuild even if a PCH already exists"
-    )
-    q.add_argument(
-        "--from-corpus",
-        action="store_true",
-        help="build the umbrella from the headers actually shared by the index's "
-        "C++ TUs (a `clang -M` survey), retaining -I so project headers are "
-        "included -- the lever for parse-bound cold indexing",
-    )
-    q.add_argument(
-        "--coverage",
-        type=float,
-        default=0.7,
-        metavar="FRAC",
-        help="with --from-corpus: include a header if shared by >= this fraction "
-        "of C++ TUs (default: 0.7)",
-    )
-    q.add_argument(
-        "--min-tus",
+    p.add_argument(
+        "--limit",
         type=int,
-        default=0,
+        default=25,
         metavar="N",
-        help="with --from-corpus: also require a header in >= N TUs (default: 0)",
+        help="show at most N matches (0 = all; default 25)",
     )
-    q.add_argument(
+    p.set_defaults(fn=cmd_search)
+
+    p = sub.add_parser(
+        "analyze", help="run Souffle Datalog analyses over the index"
+    )
+    p.add_argument(
+        "--rule", metavar="NAME", help="built-in rule to run (see --list)"
+    )
+    p.add_argument(
+        "--rules-file",
+        dest="rules_file",
+        metavar="FILE",
+        help="user Souffle .dl program; the fact declarations are "
+        "prepended automatically",
+    )
+    p.add_argument(
+        "--list",
+        action="store_true",
+        dest="list_rules",
+        help="list the built-in rules as JSON",
+    )
+    p.add_argument(
+        "--export-facts",
+        dest="export_facts",
+        metavar="DIR",
+        help="write TSV fact files and the cidx_facts.dl prelude to DIR",
+    )
+    p.add_argument(
         "--jobs",
         type=int,
-        default=None,
+        default=1,
         metavar="N",
-        help="with --from-corpus: parallel `clang -M` scans (default: CPU count)",
+        help="Souffle worker count (default 1)",
     )
-    q.set_defaults(fn=cmd_pch_build)
+    _db_arg(p)
+    p.set_defaults(fn=cmd_analyze)
 
-    q = psub.add_parser(
-        "status", help="show the cached system PCH (size, flags, validity)"
+    # -- db: migrate / verify --------------------------------------------------
+    p = sub.add_parser("db", help="database maintenance (migrate, verify)")
+    dbsub = p.add_subparsers(dest="what", required=True)
+
+    q = dbsub.add_parser(
+        "migrate",
+        help="upgrade an existing index to the current schema (in place, no re-index)",
     )
-    q.set_defaults(fn=cmd_pch_status)
+    _db_arg(q)
+    q.set_defaults(fn=cmd_migrate)
 
-    q = psub.add_parser("clear", help="remove the cached system PCH")
-    q.set_defaults(fn=cmd_pch_clear)
+    q = dbsub.add_parser(
+        "verify", help="check that component roots and files exist on disk"
+    )
+    q.add_argument(
+        "--component",
+        "-c",
+        metavar="NAME",
+        help="restrict to one component (default: all)",
+    )
+    q.add_argument(
+        "--all",
+        action="store_true",
+        help="also list files that exist (default: only failures)",
+    )
+    _db_arg(q)
+    q.set_defaults(fn=cmd_verify)
 
-    # -- component: show / set-version ----------------------------------------
-    p = sub.add_parser("component", help="inspect or modify a component")
-    csub = p.add_subparsers(dest="comp_action", required=True)
+    # -- component: add / list / show / set-version / compile-commands / rm ----
+    p = sub.add_parser(
+        "component",
+        help="manage components (add, list, show, set-version, "
+        "compile-commands, rm)",
+    )
+    csub = p.add_subparsers(dest="what", required=True)
 
-    def _db_arg(q):
-        """Add a standard --db (index database override) argument."""
-        q.add_argument(
-            "--db",
-            dest="graph_db",
-            metavar="PATH",
-            help="index database (default: the standard cache index)",
-        )
+    q = csub.add_parser("add", help="register a component")
+    q.add_argument("--path", required=True, help="repo root or library header dir")
+    q.add_argument("--name", help="component name (default: from .git/config)")
+    q.add_argument(
+        "--repo", help="repository name to group under (default: component name)"
+    )
+    q.add_argument("--kind", choices=("repo", "external"), default="repo")
+    q.add_argument(
+        "--no-git",
+        action="store_true",
+        help="use --path as-is; do not promote to the enclosing git root",
+    )
+    q.add_argument(
+        "--version",
+        metavar="V",
+        default=None,
+        help="set component version to V (overrides auto-detection; '' clears)",
+    )
+    q.add_argument(
+        "--no-detect-version",
+        action="store_true",
+        help="disable trailing-segment version detection",
+    )
+    q.set_defaults(fn=cmd_add_source)
+
+    q = csub.add_parser(
+        "list", aliases=["ls"], help="list registered components"
+    )
+    q.add_argument("pattern", nargs="?", help=fuzzy)
+    q.add_argument(
+        "--kind", choices=("repo", "external"), help="restrict to one component kind"
+    )
+    q.set_defaults(fn=cmd_list_components)
 
     q = csub.add_parser("show", help="show details for a component")
     q.add_argument("name", metavar="NAME", help="component name")
@@ -2272,11 +2276,35 @@ def main(argv=None) -> int:
     _db_arg(q)
     q.set_defaults(fn=cmd_component_set_version)
 
-    # -- repo: list / show / add-clone / switch / rm (v23) --------------------
+    q = csub.add_parser(
+        "compile-commands", help="emit a compile_commands.json for the component"
+    )
+    q.add_argument(
+        "component", metavar="COMPONENT", help="component whose files to emit"
+    )
+    q.add_argument(
+        "--db",
+        dest="graph_db",
+        metavar="PATH",
+        help="operate on this index DB (default: the standard index)",
+    )
+    q.set_defaults(fn=cmd_dump_compile_commands)
+
+    q = csub.add_parser(
+        "rm", help="delete a component and everything indexed from it"
+    )
+    g = q.add_mutually_exclusive_group(required=True)
+    g.add_argument("--id", type=int, metavar="ID", help="component id")
+    g.add_argument("--name", metavar="NAME", help="component name")
+    g.add_argument("--path", metavar="PATH", help="component root path")
+    _dry_run(q)
+    q.set_defaults(fn=cmd_delete_component)
+
+    # -- repo: list / show / add-clone / switch / realias / rm -----------------
     p = sub.add_parser(
         "repo", help="group components into repositories; switch clones"
     )
-    rsub = p.add_subparsers(dest="repo_action", required=True)
+    rsub = p.add_subparsers(dest="what", required=True)
 
     q = rsub.add_parser("list", help="list repositories", aliases=["ls"])
     q.add_argument(
@@ -2308,6 +2336,19 @@ def main(argv=None) -> int:
     _db_arg(q)
     q.set_defaults(fn=cmd_repo_switch)
 
+    q = rsub.add_parser(
+        "realias",
+        help="rewrite stored include paths to <label> tokens via the registry",
+    )
+    q.add_argument(
+        "component",
+        nargs="?",
+        metavar="COMPONENT",
+        help="restrict to one component (default: all files)",
+    )
+    _db_arg(q)
+    q.set_defaults(fn=cmd_realias)
+
     q = rsub.add_parser("rm", help="remove a repository")
     q.add_argument("name", metavar="NAME", help="repository name")
     q.add_argument(
@@ -2318,191 +2359,42 @@ def main(argv=None) -> int:
     _db_arg(q)
     q.set_defaults(fn=cmd_repo_rm)
 
-    # -- label: add / rm / list / resolve -------------------------------------
-    p = sub.add_parser("label", help="manage include/arg label registry")
-    lsub = p.add_subparsers(dest="label_action", required=True)
+    # -- dir: list / rm ---------------------------------------------------------
+    p = sub.add_parser("dir", help="browse or delete indexed directories")
+    dirsub = p.add_subparsers(dest="what", required=True)
 
-    q = lsub.add_parser("add", help="add or update a label")
-    q.add_argument("name", metavar="NAME", help="label name (e.g. libfoo-include)")
-    q.add_argument("path", metavar="PATH", help="stored path (may contain $VAR)")
-    _db_arg(q)
-    q.set_defaults(fn=cmd_label_add)
-
-    q = lsub.add_parser("rm", help="remove a label")
-    q.add_argument("name", metavar="NAME", help="label name")
-    _db_arg(q)
-    q.set_defaults(fn=cmd_label_rm)
-
-    q = lsub.add_parser("list", help="list all labels")
-    _db_arg(q)
-    q.set_defaults(fn=cmd_label_list)
-
-    q = lsub.add_parser("resolve", help="resolve a label name or <...>/$... token")
-    q.add_argument(
-        "token",
-        metavar="TOKEN",
-        help="bare label name or a token containing <...> / $...",
+    q = dirsub.add_parser(
+        "list", aliases=["ls"], help="list directories (all, or one component's)"
     )
-    q.add_argument(
-        "--no-autoderive-labels",
-        dest="no_autoderive_labels",
-        action="store_true",
-        help="disable the /name/replace-dash autoderive fallback",
-    )
-    _db_arg(q)
-    q.set_defaults(fn=cmd_label_resolve)
-
-    # -- verify: check component roots and files exist on disk -----------------
-    p = sub.add_parser(
-        "verify", help="check that component roots and files exist on disk"
-    )
-    p.add_argument(
-        "--component",
-        "-c",
-        metavar="NAME",
-        help="restrict to one component (default: all)",
-    )
-    p.add_argument(
-        "--all",
-        action="store_true",
-        help="also list files that exist (default: only failures)",
-    )
-    _db_arg(p)
-    p.set_defaults(fn=cmd_verify)
-
-    p = sub.add_parser("set", help="set a mutable file attribute (e.g. pending status)")
-    p.add_argument(
-        "assignment",
-        nargs="+",
-        metavar="FIELD=VALUE",
-        help="attribute assignment, e.g. 'pending=False' (fields: pending, indexed)",
-    )
-    p.add_argument(
-        "--component", "-c", metavar="NAME", help="restrict to this component's files"
-    )
-    p.add_argument(
-        "--file",
-        metavar="REL_PATH",
-        help="restrict to one file (path relative to component root)",
-    )
-    p.add_argument(
-        "--db",
-        dest="graph_db",
-        metavar="PATH",
-        help="operate on this index DB (default: the standard index)",
-    )
-    p.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="preview the matches without changing anything",
-    )
-    p.set_defaults(fn=cmd_set)
-
-    p = sub.add_parser("file", help="inspect or edit one file's stored compile flags")
-    p.add_argument(
-        "target",
-        metavar="COMPONENT://PATH",
-        help="file address, e.g. 'mylib://src/foo.c'",
-    )
-    p.add_argument(
-        "op",
-        nargs=argparse.REMAINDER,
-        metavar="OP",
-        help="-set-flag FLAG | -unset-flag FLAG | -import-args JSON "
-        "| -dump-args (default when omitted)",
-    )
-    p.add_argument(
-        "--db",
-        dest="graph_db",
-        metavar="PATH",
-        help="operate on this index DB (default: the standard index)",
-    )
-    p.set_defaults(fn=cmd_file)
-
-    p = sub.add_parser(
-        "dump-compile-commands", help="emit a compile_commands.json for a component"
-    )
-    p.add_argument(
-        "component", metavar="COMPONENT", help="component whose files to emit"
-    )
-    p.add_argument(
-        "--db",
-        dest="graph_db",
-        metavar="PATH",
-        help="operate on this index DB (default: the standard index)",
-    )
-    p.set_defaults(fn=cmd_dump_compile_commands)
-
-    p = sub.add_parser("search", help="fuzzy-search symbols by qualified name")
-    p.add_argument(
-        "pattern",
-        help="'::'-separated substrings matched in order, "
-        "e.g. 'conf::set' hits RdKafka::Conf::set",
-    )
-    p.add_argument(
-        "--kind", choices=sorted(SYMBOL_KINDS), help="restrict to one symbol kind"
-    )
-    p.add_argument(
-        "--limit",
-        type=int,
-        default=25,
-        metavar="N",
-        help="show at most N matches (0 = all; default 25)",
-    )
-    p.set_defaults(fn=cmd_search)
-
-    p = sub.add_parser("show", help="show full details of one symbol or file")
-    ssub = p.add_subparsers(dest="what", required=True)
-
-    q = ssub.add_parser("symbol", help="one symbol, by id or USR")
-    q.add_argument(
-        "symbol",
-        help="numeric id (first column of 'search') or a clang USR; "
-        "USRs contain $ and * so single-quote them in the shell",
-    )
-    q.set_defaults(fn=cmd_show_symbol)
-
-    q = ssub.add_parser("file", help="one file, by id or path")
-    q.add_argument(
-        "file",
-        help="numeric id (first column of 'list files') or a path; "
-        "relative paths resolve against the --component root "
-        "(else the current directory)",
-    )
-    q.add_argument(
-        "--component",
-        "-c",
-        metavar="NAME",
-        help="component root for resolving a relative path",
-    )
-    q.set_defaults(fn=cmd_show_file)
-
-    p = sub.add_parser(
-        "list",
-        aliases=["ls"],
-        help="browse the index: components, dirs, files, symbols",
-    )
-    lsub = p.add_subparsers(dest="what", required=True)
-    fuzzy = (
-        "optional free-text fuzzy filter: characters must appear "
-        "in order, e.g. 'shp' matches shapes.c"
-    )
-
-    q = lsub.add_parser("components", help="list registered components")
-    q.add_argument("pattern", nargs="?", help=fuzzy)
-    q.add_argument(
-        "--kind", choices=("repo", "external"), help="restrict to one component kind"
-    )
-    q.set_defaults(fn=cmd_list_components)
-
-    q = lsub.add_parser("dirs", help="list directories (all, or one component's)")
     q.add_argument("pattern", nargs="?", help=fuzzy)
     q.add_argument(
         "--component", "-c", metavar="NAME", help="restrict to this component"
     )
     q.set_defaults(fn=cmd_list_dirs)
 
-    q = lsub.add_parser("files", help="list files for a component or a directory in it")
+    q = dirsub.add_parser(
+        "rm", help="delete a directory, its files, and their symbols"
+    )
+    g = q.add_mutually_exclusive_group(required=True)
+    g.add_argument("--id", type=int, metavar="ID", help="directory id")
+    g.add_argument("--path", metavar="PATH", help="directory path")
+    q.add_argument(
+        "--component", "-c", metavar="NAME", help="restrict the match to this component"
+    )
+    _dry_run(q)
+    q.set_defaults(fn=cmd_delete_dir)
+
+    # -- file: list / show / flags / set / rm -----------------------------------
+    p = sub.add_parser(
+        "file", help="manage indexed files (list, show, flags, set, rm)"
+    )
+    fsub = p.add_subparsers(dest="what", required=True)
+
+    q = fsub.add_parser(
+        "list",
+        aliases=["ls"],
+        help="list files for a component or a directory in it",
+    )
     q.add_argument("pattern", nargs="?", help=fuzzy)
     q.add_argument(
         "--component", "-c", metavar="NAME", help="restrict to this component"
@@ -2519,8 +2411,93 @@ def main(argv=None) -> int:
     g.add_argument("--pending", action="store_true", help="only files not yet indexed")
     q.set_defaults(fn=cmd_list_files)
 
-    q = lsub.add_parser(
-        "symbols", help="list symbols for a component, directory, or file"
+    q = fsub.add_parser("show", help="show full details of one file")
+    q.add_argument(
+        "file",
+        help="numeric id (first column of 'file list') or a path; "
+        "relative paths resolve against the --component root "
+        "(else the current directory)",
+    )
+    q.add_argument(
+        "--component",
+        "-c",
+        metavar="NAME",
+        help="component root for resolving a relative path",
+    )
+    q.set_defaults(fn=cmd_show_file)
+
+    q = fsub.add_parser(
+        "flags", help="inspect or edit one file's stored compile flags"
+    )
+    q.add_argument(
+        "target",
+        metavar="COMPONENT://PATH",
+        help="file address, e.g. 'mylib://src/foo.c'",
+    )
+    q.add_argument(
+        "op",
+        nargs=argparse.REMAINDER,
+        metavar="OP",
+        help="-set-flag FLAG | -unset-flag FLAG | -import-args JSON "
+        "| -dump-args (default when omitted)",
+    )
+    q.add_argument(
+        "--db",
+        dest="graph_db",
+        metavar="PATH",
+        help="operate on this index DB (default: the standard index)",
+    )
+    q.set_defaults(fn=cmd_file)
+
+    q = fsub.add_parser(
+        "set", help="set a mutable file attribute (e.g. pending status)"
+    )
+    q.add_argument(
+        "assignment",
+        nargs="+",
+        metavar="FIELD=VALUE",
+        help="attribute assignment, e.g. 'pending=False' (fields: pending, indexed)",
+    )
+    q.add_argument(
+        "--component", "-c", metavar="NAME", help="restrict to this component's files"
+    )
+    q.add_argument(
+        "--file",
+        metavar="REL_PATH",
+        help="restrict to one file (path relative to component root)",
+    )
+    q.add_argument(
+        "--db",
+        dest="graph_db",
+        metavar="PATH",
+        help="operate on this index DB (default: the standard index)",
+    )
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="preview the matches without changing anything",
+    )
+    q.set_defaults(fn=cmd_set)
+
+    q = fsub.add_parser("rm", help="delete a file and its symbols")
+    g = q.add_mutually_exclusive_group(required=True)
+    g.add_argument("--id", type=int, metavar="ID", help="file id")
+    g.add_argument("--name", metavar="NAME", help="file basename")
+    g.add_argument("--path", metavar="PATH", help="file path")
+    q.add_argument(
+        "--component", "-c", metavar="NAME", help="restrict the match to this component"
+    )
+    _dry_run(q)
+    q.set_defaults(fn=cmd_delete_file)
+
+    # -- symbol: list / show / rm -----------------------------------------------
+    p = sub.add_parser("symbol", help="inspect indexed symbols (list, show, rm)")
+    ssub = p.add_subparsers(dest="what", required=True)
+
+    q = ssub.add_parser(
+        "list",
+        aliases=["ls"],
+        help="list symbols for a component, directory, or file",
     )
     q.add_argument(
         "pattern", nargs="?", help=fuzzy + " (matched against the qualified name)"
@@ -2554,48 +2531,15 @@ def main(argv=None) -> int:
     )
     q.set_defaults(fn=cmd_list_symbols)
 
-    p = sub.add_parser("delete", help="delete a component, directory, file, or symbol")
-    dsub = p.add_subparsers(dest="what", required=True)
-
-    def _dry_run(q):
-        q.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="preview the matches without deleting anything",
-        )
-
-    q = dsub.add_parser(
-        "component", help="delete a component and everything indexed from it"
-    )
-    g = q.add_mutually_exclusive_group(required=True)
-    g.add_argument("--id", type=int, metavar="ID", help="component id")
-    g.add_argument("--name", metavar="NAME", help="component name")
-    g.add_argument("--path", metavar="PATH", help="component root path")
-    _dry_run(q)
-    q.set_defaults(fn=cmd_delete_component)
-
-    q = dsub.add_parser("dir", help="delete a directory, its files, and their symbols")
-    g = q.add_mutually_exclusive_group(required=True)
-    g.add_argument("--id", type=int, metavar="ID", help="directory id")
-    g.add_argument("--path", metavar="PATH", help="directory path")
+    q = ssub.add_parser("show", help="show full details of one symbol")
     q.add_argument(
-        "--component", "-c", metavar="NAME", help="restrict the match to this component"
+        "symbol",
+        help="numeric id (first column of 'search') or a clang USR; "
+        "USRs contain $ and * so single-quote them in the shell",
     )
-    _dry_run(q)
-    q.set_defaults(fn=cmd_delete_dir)
+    q.set_defaults(fn=cmd_show_symbol)
 
-    q = dsub.add_parser("file", help="delete a file and its symbols")
-    g = q.add_mutually_exclusive_group(required=True)
-    g.add_argument("--id", type=int, metavar="ID", help="file id")
-    g.add_argument("--name", metavar="NAME", help="file basename")
-    g.add_argument("--path", metavar="PATH", help="file path")
-    q.add_argument(
-        "--component", "-c", metavar="NAME", help="restrict the match to this component"
-    )
-    _dry_run(q)
-    q.set_defaults(fn=cmd_delete_file)
-
-    q = dsub.add_parser("symbol", help="delete a symbol")
+    q = ssub.add_parser("rm", help="delete a symbol")
     g = q.add_mutually_exclusive_group(required=True)
     g.add_argument("--id", type=int, metavar="ID", help="symbol id")
     g.add_argument("--name", metavar="NAME", help="symbol spelling")
@@ -2778,7 +2722,7 @@ def main(argv=None) -> int:
 
     def _ast_common(q):
         """Shared target/selector flags. Put options BEFORE the target; ad-hoc
-        compile flags go after '--' (like the `file` subcommand)."""
+        compile flags go after '--' (like the `file flags` subcommand)."""
         q.add_argument("--usr", metavar="USR", help="exact clang USR")
         q.add_argument("--id", type=int, metavar="N", help="numeric symbol id")
         q.add_argument(
@@ -2821,8 +2765,9 @@ def main(argv=None) -> int:
     def _cache_toggle(q):
         """Add mutually-exclusive --cache / --no-cache (default: cache ON).
 
-        Added to dump/locals/conditions only -- NOT to ``cache build|status|clear``
-        (those operate on the cache itself and do not carry the toggle).
+        Added to dump/locals/conditions only -- NOT to ``cache ast
+        build|status|clear`` (those operate on the cache itself and do not
+        carry the toggle).
         """
         g = q.add_mutually_exclusive_group()
         g.add_argument(
@@ -2871,19 +2816,103 @@ def main(argv=None) -> int:
     _cache_toggle(q)
     q.set_defaults(fn=astcmd.cmd_conditions)
 
-    # -- ast cache subcommands -------------------------------------------------
-    qc = asub.add_parser("cache", help="manage the on-disk AST cache")
-    csub = qc.add_subparsers(dest="cache_action", required=True)
+    # -- cache: pch / ast --------------------------------------------------------
+    p = sub.add_parser("cache", help="manage the PCH and AST caches")
+    cachesub = p.add_subparsers(dest="what", required=True)
 
-    cb = csub.add_parser("build", help="parse + cache the target's AST (force-reparse)")
+    qp = cachesub.add_parser(
+        "pch",
+        help="build & cache one shared system/C++ PCH to speed up indexing",
+    )
+    psub = qp.add_subparsers(dest="pch_action", required=True)
+
+    q = psub.add_parser(
+        "build", help="compile a system/C++ umbrella header into a cached PCH"
+    )
+    q.add_argument(
+        "--db",
+        dest="graph_db",
+        metavar="PATH",
+        help="index database to derive the common C++ flags from "
+        "(default: the standard cache index)",
+    )
+    q.add_argument(
+        "--add",
+        dest="add_flags",
+        action="append",
+        default=[],
+        metavar="FLAG",
+        help="extra compile flag to bake into the PCH (repeatable)",
+    )
+    q.add_argument(
+        "--include",
+        dest="add_headers",
+        action="append",
+        default=[],
+        metavar="HEADER",
+        help="extra header to add to the umbrella, e.g. boost/optional.hpp "
+        "(repeatable)",
+    )
+    q.add_argument(
+        "--driver",
+        help="compiler driver to replicate search paths from "
+        "(default: the index's dominant C++ driver)",
+    )
+    q.add_argument("--std", help="override the C++ standard, e.g. c++17")
+    q.add_argument(
+        "--force", action="store_true", help="rebuild even if a PCH already exists"
+    )
+    q.add_argument(
+        "--from-corpus",
+        action="store_true",
+        help="build the umbrella from the headers actually shared by the index's "
+        "C++ TUs (a `clang -M` survey), retaining -I so project headers are "
+        "included -- the lever for parse-bound cold indexing",
+    )
+    q.add_argument(
+        "--coverage",
+        type=float,
+        default=0.7,
+        metavar="FRAC",
+        help="with --from-corpus: include a header if shared by >= this fraction "
+        "of C++ TUs (default: 0.7)",
+    )
+    q.add_argument(
+        "--min-tus",
+        type=int,
+        default=0,
+        metavar="N",
+        help="with --from-corpus: also require a header in >= N TUs (default: 0)",
+    )
+    q.add_argument(
+        "--jobs",
+        type=int,
+        default=None,
+        metavar="N",
+        help="with --from-corpus: parallel `clang -M` scans (default: CPU count)",
+    )
+    q.set_defaults(fn=cmd_pch_build)
+
+    q = psub.add_parser(
+        "status", help="show the cached system PCH (size, flags, validity)"
+    )
+    q.set_defaults(fn=cmd_pch_status)
+
+    q = psub.add_parser("clear", help="remove the cached system PCH")
+    q.set_defaults(fn=cmd_pch_clear)
+
+    qa = cachesub.add_parser("ast", help="manage the on-disk AST cache")
+    acsub = qa.add_subparsers(dest="cache_action", required=True)
+
+    cb = acsub.add_parser("build", help="parse + cache the target's AST (force-reparse)")
     _ast_common(cb)
     cb.set_defaults(fn=astcmd.cmd_cache)
 
-    cstat = csub.add_parser("status", help="list cache entries, sizes, validity")
+    cstat = acsub.add_parser("status", help="list cache entries, sizes, validity")
     _ast_common(cstat)
     cstat.set_defaults(fn=astcmd.cmd_cache)
 
-    cclr = csub.add_parser("clear", help="remove cached AST(s) for a target, or all")
+    cclr = acsub.add_parser("clear", help="remove cached AST(s) for a target, or all")
     _ast_common(cclr)
     cclr.set_defaults(fn=astcmd.cmd_cache)
 

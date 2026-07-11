@@ -140,7 +140,7 @@ def test_list_files_shows_indicator(index_db, capsys, monkeypatch):
               "line": None, "col": None}],
         )
     _use_cache(monkeypatch, index_db)
-    rc, out, _ = run(["list", "files"], capsys)
+    rc, out, _ = run(["file", "list"], capsys)
     assert rc == 0
     # The flagged file shows '1W'; clean files show '-'.
     flagged = [ln for ln in out.splitlines() if f"{fid:>4}  " in ln]
@@ -161,7 +161,7 @@ def test_show_file_lists_diagnostics(index_db, capsys, monkeypatch):
             ],
         )
     _use_cache(monkeypatch, index_db)
-    rc, out, _ = run(["show", "file", str(fid)], capsys)
+    rc, out, _ = run(["file", "show", str(fid)], capsys)
     assert rc == 0
     assert "diagnostics  1 error(s), 1 warning(s)" in out
     assert "  error   /r/a.c:10:2: bad thing" in out
@@ -171,7 +171,7 @@ def test_show_file_lists_diagnostics(index_db, capsys, monkeypatch):
 def test_show_file_clean_has_no_diagnostics_line(index_db, capsys, monkeypatch):
     fid = _first_file_id(index_db)
     _use_cache(monkeypatch, index_db)
-    rc, out, _ = run(["show", "file", str(fid)], capsys)
+    rc, out, _ = run(["file", "show", str(fid)], capsys)
     assert rc == 0
     assert "diagnostics" not in out
 

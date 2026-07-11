@@ -22,61 +22,42 @@ namespace {
 
 const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
-    "            "
-    "{init,migrate,add-source,import,realias,index,resolve,pch,component,repo,label,verify,set,file,"
-    "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
-    "...\n";
+    "            {init,import,index,resolve,search,analyze,db,component,repo,dir,file,symbol,graph,ast,cache}\n"
+    "            ...\n";
 
 const char kTopHelp[] =
     "usage: cidx [-h] [--version]\n"
-    "            "
-    "{init,migrate,add-source,import,realias,index,resolve,pch,component,repo,label,verify,set,file,"
-    "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
-    "...\n"
+    "            {init,import,index,resolve,search,analyze,db,component,repo,dir,file,symbol,graph,ast,cache}\n"
+    "            ...\n"
     "\n"
     "cidx command-line skeleton\n"
     "\n"
     "positional arguments:\n"
-    "  {init,migrate,add-source,import,realias,index,resolve,pch,component,repo,label,verify,set,"
-    "file,"
-    "dump-compile-commands,search,show,list,ls,delete,graph,ast}\n"
+    "  {init,import,index,resolve,search,analyze,db,component,repo,dir,file,symbol,graph,ast,cache}\n"
     "    init                create a blank index database\n"
-    "    migrate             upgrade an existing index to the current schema "
-    "(in\n"
-    "                        place, no re-index)\n"
-    "    add-source          register a component\n"
     "    import              import a compile_commands.json\n"
-    "    realias             rewrite stored include paths to <label> tokens via "
-    "the registry\n"
     "    index               index imported C/C++ files\n"
     "    resolve             finalize cross-repo edges and roll up edge counts\n"
-    "    pch                 build & cache one shared system/C++ PCH to speed up\n"
-    "                        indexing\n"
-    "    component           inspect or modify a component\n"
-    "    repo                group components into repositories; switch clones\n"
-    "    label               manage include/arg label registry\n"
-    "    verify              check that component roots and files exist on "
-    "disk\n"
-    "    set                 set a mutable file attribute (e.g. pending "
-    "status)\n"
-    "    file                inspect or edit one file's stored compile flags\n"
-    "    dump-compile-commands\n"
-    "                        emit a compile_commands.json for a component\n"
     "    search              fuzzy-search symbols by qualified name\n"
-    "    show                show full details of one symbol or file\n"
-    "    list (ls)           browse the index: components, dirs, files, "
-    "symbols\n"
-    "    delete              delete a component, directory, file, or symbol\n"
-    "    graph               query the relationship graph (callers, callees, "
-    "refs, neighbors, walk, path, hierarchy, dispatch)\n"
-    "    ast                 on-demand AST analysis (dump, locals, conditions, "
-    "cache)\n"
+    "    analyze             run Souffle Datalog analyses over the index\n"
+    "    db                  database maintenance (migrate, verify)\n"
+    "    component           manage components (add, list, show, set-version,\n"
+    "                        compile-commands, rm)\n"
+    "    repo                group components into repositories; switch clones\n"
+    "    dir                 browse or delete indexed directories\n"
+    "    file                manage indexed files (list, show, flags, set, rm)\n"
+    "    symbol              inspect indexed symbols (list, show, rm)\n"
+    "    graph               query the relationship graph (callers, callees, refs,\n"
+    "                        neighbors, walk, path, hierarchy, dispatch)\n"
+    "    ast                 on-demand AST analysis (dump, locals, conditions)\n"
+    "    cache               manage the PCH and AST caches\n"
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n"
     "  --version             show program's version number and exit\n";
 
-const char kInitUsage[] = "usage: cidx init [-h] [--force]\n";
+const char kInitUsage[] =
+    "usage: cidx init [-h] [--force]\n";
 
 const char kInitHelp[] =
     "usage: cidx init [-h] [--force]\n"
@@ -85,82 +66,45 @@ const char kInitHelp[] =
     "  -h, --help  show this help message and exit\n"
     "  --force     overwrite an existing index database\n";
 
-const char kMigrateUsage[] = "usage: cidx migrate [-h] [--db PATH]\n";
-
-const char kMigrateHelp[] =
-    "usage: cidx migrate [-h] [--db PATH]\n"
-    "\n"
-    "options:\n"
-    "  -h, --help  show this help message and exit\n"
-    "  --db PATH   index database (default: the standard cache index)\n";
-
-const char kAddSourceUsage[] =
-    "usage: cidx add-source [-h] --path PATH [--name NAME] [--kind "
-    "{repo,external}]\n"
-    "                       [--no-git] [--version V] [--no-detect-version]\n";
-
-const char kAddSourceHelp[] =
-    "usage: cidx add-source [-h] --path PATH [--name NAME] [--kind "
-    "{repo,external}]\n"
-    "                       [--no-git] [--version V] [--no-detect-version]\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --path PATH           repo root or library header dir\n"
-    "  --name NAME           component name (default: from .git/config)\n"
-    "  --kind {repo,external}\n"
-    "  --no-git              use --path as-is; do not promote to the enclosing "
-    "git\n"
-    "                        root\n"
-    "  --version V           set component version to V (overrides "
-    "auto-detection;\n"
-    "                        '' clears)\n"
-    "  --no-detect-version   disable trailing-segment version detection\n";
-
 const char kImportUsage[] =
-    "usage: cidx import [-h] --db DB [--name NAME] [--force] [--no-alias]\n";
+    "usage: cidx import [-h] --db DB [--name NAME] [--repo REPO] [--force]\n"
+    "                   [--no-alias]\n";
 
 const char kImportHelp[] =
-    "usage: cidx import [-h] --db DB [--name NAME] [--force] [--no-alias]\n"
+    "usage: cidx import [-h] --db DB [--name NAME] [--repo REPO] [--force]\n"
+    "                   [--no-alias]\n"
     "\n"
     "options:\n"
     "  -h, --help   show this help message and exit\n"
     "  --db DB      compile_commands.json (or the directory holding it)\n"
     "  --name NAME  component name override\n"
-    "  --force      reimport: delete the existing component (its files and "
-    "indexed\n"
+    "  --repo REPO  repository name to group the imported components under\n"
+    "               (default: the git/dir-derived name)\n"
+    "  --force      reimport: delete the existing component (its files and indexed\n"
     "               symbols) before importing\n"
-    "  --no-alias   do not rewrite include paths to <label> tokens via the "
-    "registry\n";
-
-const char kRealiasUsage[] =
-    "usage: cidx realias [-h] [--db PATH] [COMPONENT]\n";
-
-const char kRealiasHelp[] =
-    "usage: cidx realias [-h] [--db PATH] [COMPONENT]\n"
-    "\n"
-    "positional arguments:\n"
-    "  COMPONENT   restrict to one component (default: all files)\n"
-    "\n"
-    "options:\n"
-    "  -h, --help  show this help message and exit\n"
-    "  --db PATH   index database (default: the standard cache index)\n";
+    "  --no-alias   do not rewrite include paths to <label> tokens via the registry\n";
 
 const char kIndexUsage[] =
-    "usage: cidx index [-h] [--source COMPONENT] [--no-graph] [files ...]\n";
+    "usage: cidx index [-h] [--source COMPONENT] [--no-graph]\n"
+    "                  [--no-autoderive-labels]\n"
+    "                  [files ...]\n";
 
 const char kIndexHelp[] =
-    "usage: cidx index [-h] [--source COMPONENT] [--no-graph] [files ...]\n"
+    "usage: cidx index [-h] [--source COMPONENT] [--no-graph]\n"
+    "                  [--no-autoderive-labels]\n"
+    "                  [files ...]\n"
     "\n"
     "positional arguments:\n"
-    "  files               restrict to these files (default: all pending)\n"
+    "  files                 restrict to these files (default: all pending)\n"
     "\n"
     "options:\n"
-    "  -h, --help          show this help message and exit\n"
-    "  --source COMPONENT  resolve relative FILE paths against this "
-    "component's\n"
-    "                      root\n"
-    "  --no-graph          skip relationship-graph extraction (calls, inherits, …)\n";
+    "  -h, --help            show this help message and exit\n"
+    "  --source COMPONENT    resolve relative FILE paths against this component's\n"
+    "                        root\n"
+    "  --no-graph            skip relationship-graph extraction (calls, inherits,\n"
+    "                        …)\n"
+    "  --no-autoderive-labels\n"
+    "                        disable label autoderive fallback at parse time\n";
 
 const char kResolveUsage[] =
     "usage: cidx resolve [-h]\n";
@@ -171,965 +115,142 @@ const char kResolveHelp[] =
     "options:\n"
     "  -h, --help  show this help message and exit\n";
 
-// -- pch (v0.17.0) -----------------------------------------------------------
-const char kPchUsage[] = "usage: cidx pch [-h] {build,status,clear} ...\n";
-
-const char kPchHelp[] =
-    "usage: cidx pch [-h] {build,status,clear} ...\n"
-    "\n"
-    "positional arguments:\n"
-    "  {build,status,clear}\n"
-    "    build               compile a system/C++ umbrella header into a cached "
-    "PCH\n"
-    "    status              show the cached system PCH (size, flags, validity)\n"
-    "    clear               remove the cached system PCH\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n";
-
-const char kPchBuildUsage[] =
-    "usage: cidx pch build [-h] [--db PATH] [--add FLAG] [--include HEADER]\n"
-    "                      [--driver DRIVER] [--std STD] [--force]\n"
-    "                      [--from-corpus] [--coverage FRAC] [--min-tus N]\n"
-    "                      [--jobs N]\n";
-
-const char kPchBuildHelp[] =
-    "usage: cidx pch build [-h] [--db PATH] [--add FLAG] [--include HEADER]\n"
-    "                      [--driver DRIVER] [--std STD] [--force]\n"
-    "                      [--from-corpus] [--coverage FRAC] [--min-tus N]\n"
-    "                      [--jobs N]\n"
-    "\n"
-    "options:\n"
-    "  -h, --help        show this help message and exit\n"
-    "  --db PATH         index database to derive the common C++ flags from\n"
-    "                    (default: the standard cache index)\n"
-    "  --add FLAG        extra compile flag to bake into the PCH (repeatable)\n"
-    "  --include HEADER  extra header to add to the umbrella, e.g.\n"
-    "                    boost/optional.hpp (repeatable)\n"
-    "  --driver DRIVER   compiler driver to replicate search paths from "
-    "(default:\n"
-    "                    the index's dominant C++ driver)\n"
-    "  --std STD         override the C++ standard, e.g. c++17\n"
-    "  --force           rebuild even if a PCH already exists\n"
-    "  --from-corpus     build the umbrella from the headers actually shared by\n"
-    "                    the index's C++ TUs (a `clang -E -H` survey), "
-    "retaining\n"
-    "                    -I so project headers are included\n"
-    "  --coverage FRAC   with --from-corpus: include a header if shared by >= "
-    "this\n"
-    "                    fraction of C++ TUs (default: 0.7)\n"
-    "  --min-tus N       with --from-corpus: also require a header in >= N TUs\n"
-    "  --jobs N          with --from-corpus: parallel `clang -E -H` scans "
-    "(default:\n"
-    "                    CPU count)\n";
-
-const char kPchStatusUsage[] = "usage: cidx pch status [-h]\n";
-
-const char kPchStatusHelp[] =
-    "usage: cidx pch status [-h]\n"
-    "\n"
-    "options:\n"
-    "  -h, --help  show this help message and exit\n";
-
-const char kPchClearUsage[] = "usage: cidx pch clear [-h]\n";
-
-const char kPchClearHelp[] =
-    "usage: cidx pch clear [-h]\n"
-    "\n"
-    "options:\n"
-    "  -h, --help  show this help message and exit\n";
-
-const char kSetUsage[] =
-    "usage: cidx set [-h] [--component NAME] [--file REL_PATH] [--db PATH]\n"
-    "                [--dry-run]\n"
-    "                FIELD=VALUE [FIELD=VALUE ...]\n";
-
-const char kSetHelp[] =
-    "usage: cidx set [-h] [--component NAME] [--file REL_PATH] [--db PATH]\n"
-    "                [--dry-run]\n"
-    "                FIELD=VALUE [FIELD=VALUE ...]\n"
-    "\n"
-    "positional arguments:\n"
-    "  FIELD=VALUE           attribute assignment, e.g. 'pending=False' "
-    "(fields:\n"
-    "                        pending, indexed)\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --component, -c NAME  restrict to this component's files\n"
-    "  --file REL_PATH       restrict to one file (path relative to component "
-    "root)\n"
-    "  --db PATH             operate on this index DB (default: the standard "
-    "index)\n"
-    "  --dry-run             preview the matches without changing anything\n";
-
-const char kFileUsage[] =
-    "usage: cidx file [-h] [--db PATH] COMPONENT://PATH ...\n";
-
-const char kFileHelp[] =
-    "usage: cidx file [-h] [--db PATH] COMPONENT://PATH ...\n"
-    "\n"
-    "positional arguments:\n"
-    "  COMPONENT://PATH  file address, e.g. 'mylib://src/foo.c'\n"
-    "  OP                -set-flag FLAG | -unset-flag FLAG | -import-args JSON "
-    "|\n"
-    "                    -dump-args (default when omitted)\n"
-    "\n"
-    "options:\n"
-    "  -h, --help        show this help message and exit\n"
-    "  --db PATH         operate on this index DB (default: the standard "
-    "index)\n";
-
-const char kDumpCcUsage[] =
-    "usage: cidx dump-compile-commands [-h] [--db PATH] COMPONENT\n";
-
-const char kDumpCcHelp[] =
-    "usage: cidx dump-compile-commands [-h] [--db PATH] COMPONENT\n"
-    "\n"
-    "positional arguments:\n"
-    "  COMPONENT   component whose files to emit\n"
-    "\n"
-    "options:\n"
-    "  -h, --help  show this help message and exit\n"
-    "  --db PATH   operate on this index DB (default: the standard index)\n";
-
-// ---- graph help texts -------------------------------------------------------
-
-const char kGraphUsage[] =
-    "usage: cidx graph [-h]\n"
-    "                  "
-    "{callers,callees,refs,neighbors,walk,path,hierarchy,dispatch,redefined,definitions} ...\n";
-
-const char kGraphHelp[] =
-    "usage: cidx graph [-h]\n"
-    "                  "
-    "{callers,callees,refs,neighbors,walk,path,hierarchy,dispatch,redefined,definitions} ...\n"
-    "\n"
-    "positional arguments:\n"
-    "  {callers,callees,refs,neighbors,walk,path,hierarchy,dispatch,redefined,definitions}\n"
-    "    callers             functions that call the symbol\n"
-    "    callees             functions the symbol calls\n"
-    "    refs                incoming references (calls + uses) to the symbol\n"
-    "    neighbors           one-hop typed neighbors\n"
-    "    walk                bounded BFS over typed edges\n"
-    "    path                shortest path between two symbols, or none\n"
-    "    hierarchy           class bases, subclasses, and members\n"
-    "    dispatch            run-time targets of a virtual-method call\n"
-    "    redefined           symbols defined in more than one backend\n"
-    "    definitions         each backend body of a symbol + possible-call fan-out\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n";
-
-// The shared selector block (--usr/--id/--name/--kind/--first/--db/--json/
-// --limit) appears in every graph subcommand's usage.
-#define GRAPH_SELECTOR_USAGE_ARGS                                              \
-  "(--usr USR | --id N | --name FUZZY)\n"                                     \
-  "                          [--kind {class,class-template,constructor,"       \
-  "destructor,enum,enum-constant,function,function-template,macro,member,"     \
-  "method,namespace,struct,type-alias,typedef,union,variable}]\n"             \
-  "                          [--first] [--db PATH] [--json] [--limit N]"
-
-// Shared options block (printed identically in every graph subcommand's help).
-#define GRAPH_SELECTOR_OPTIONS                                                 \
-  "  -h, --help            show this help message and exit\n"                  \
-  "  --usr USR             exact clang USR\n"                                  \
-  "  --id N                numeric symbol id\n"                                \
-  "  --name FUZZY          fuzzy qualified-name match ('conf::set')\n"         \
-  "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"  \
-  "function,function-template,macro,member,method,namespace,struct,type-alias,"\
-  "typedef,union,variable}\n"                                                  \
-  "                        restrict a --name match to one symbol kind\n"       \
-  "  --first               if --name is ambiguous, take the closest match\n"   \
-  "  --db PATH             index database to query (default: the standard cache\n"\
-  "                        index)\n"                                           \
-  "  --json                emit stable machine-readable JSON\n"                \
-  "  --limit N             cap the number of results (default 50)\n"
-
-const char kGraphCallersUsage[] =
-    "usage: cidx graph callers [-h] " GRAPH_SELECTOR_USAGE_ARGS "\n";
-
-const char kGraphCallersHelp[] =
-    "usage: cidx graph callers [-h] " GRAPH_SELECTOR_USAGE_ARGS "\n"
-    "                          [--direct-only]\n"
-    "\n"
-    "options:\n"
-    GRAPH_SELECTOR_OPTIONS
-    "\n"
-    "  --direct-only         only literal incoming calls; exclude virtual-\n"
-    "                        dispatch callers (materialised dispatch_calls edges,\n"
-    "                        which are included by default)";
-
-const char kGraphCalleesUsage[] =
-    "usage: cidx graph callees [-h] " GRAPH_SELECTOR_USAGE_ARGS "\n";
-
-const char kGraphCalleesHelp[] =
-    "usage: cidx graph callees [-h] " GRAPH_SELECTOR_USAGE_ARGS "\n"
-    "                          [--direct-only]\n"
-    "\n"
-    "options:\n"
-    GRAPH_SELECTOR_OPTIONS
-    "\n"
-    "  --direct-only         only literal outgoing calls; exclude virtual-\n"
-    "                        dispatch targets (materialised dispatch_calls edges,\n"
-    "                        which are included by default)";
-
-// "usage: cidx graph refs [-h] " is 28 chars → continuation indent = 28 spaces
-// (different from callers/callees which are 31 chars wide).
-const char kGraphRefsUsage[] =
-    "usage: cidx graph refs [-h] "
-    "(--usr USR | --id N | --name FUZZY)\n"
-    "                       [--kind {class,class-template,constructor,"
-    "destructor,enum,enum-constant,function,function-template,macro,member,"
-    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
-    "                       [--first] [--db PATH] [--json] [--limit N]\n";
-
-const char kGraphRefsHelp[] =
-    "usage: cidx graph refs [-h] "
-    "(--usr USR | --id N | --name FUZZY)\n"
-    "                       [--kind {class,class-template,constructor,"
-    "destructor,enum,enum-constant,function,function-template,macro,member,"
-    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
-    "                       [--first] [--db PATH] [--json] [--limit N]\n"
-    "\n"
-    "options:\n"
-    GRAPH_SELECTOR_OPTIONS;
-
-const char kGraphNeighborsUsage[] =
-    "usage: cidx graph neighbors [-h] "
-    "(--usr USR | --id N | --name FUZZY)\n"
-    "                            "
-    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,type-alias,"
-    "typedef,union,variable}]\n"
-    "                            [--first] [--db PATH] [--json] [--limit N]\n"
-    "                            [--edge KINDS] [--direction {in,out}]\n";
-
-const char kGraphNeighborsHelp[] =
-    "usage: cidx graph neighbors [-h] "
-    "(--usr USR | --id N | --name FUZZY)\n"
-    "                            "
-    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,type-alias,"
-    "typedef,union,variable}]\n"
-    "                            [--first] [--db PATH] [--json] [--limit N]\n"
-    "                            [--edge KINDS] [--direction {in,out}]\n"
-    "\n"
-    "options:\n"
-    GRAPH_SELECTOR_OPTIONS
-    "  --edge KINDS          comma-separated edge kinds (calls, contains, "
-    "field_of,\n"
-    "                        inherits, instantiates, method_of, overrides,\n"
-    "                        specializes, uses) (default: all)\n"
-    "  --direction {in,out}  edge direction (default out)\n";
-
-const char kGraphWalkUsage[] =
-    "usage: cidx graph walk [-h] "
-    "(--usr USR | --id N | --name FUZZY)\n"
-    "                       "
-    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,type-alias,"
-    "typedef,union,variable}]\n"
-    "                       [--first] [--db PATH] [--json] [--limit N]\n"
-    "                       [--edge KINDS] [--direction {in,out}] [--depth N]\n";
-
-const char kGraphWalkHelp[] =
-    "usage: cidx graph walk [-h] "
-    "(--usr USR | --id N | --name FUZZY)\n"
-    "                       "
-    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,type-alias,"
-    "typedef,union,variable}]\n"
-    "                       [--first] [--db PATH] [--json] [--limit N]\n"
-    "                       [--edge KINDS] [--direction {in,out}] [--depth N]\n"
-    "\n"
-    "options:\n"
-    GRAPH_SELECTOR_OPTIONS
-    "  --edge KINDS          comma-separated edge kinds (calls, contains, "
-    "field_of,\n"
-    "                        inherits, instantiates, method_of, overrides,\n"
-    "                        specializes, uses) (default: calls)\n"
-    "  --direction {in,out}  edge direction (default out)\n"
-    "  --depth N             max BFS depth (default 3)\n";
-
-const char kGraphPathUsage[] =
-    "usage: cidx graph path [-h] "
-    "(--usr USR | --id N | --name FUZZY)\n"
-    "                       "
-    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,type-alias,"
-    "typedef,union,variable}]\n"
-    "                       [--first] [--db PATH] [--json] [--limit N]\n"
-    "                       (--to-usr USR | --to-id N | --to-name FUZZY)\n"
-    "                       [--to-kind {class,class-template,constructor,"
-    "destructor,enum,enum-constant,function,function-template,macro,member,"
-    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
-    "                       [--edge KINDS] [--direction {in,out}] [--depth N]\n";
-
-const char kGraphPathHelp[] =
-    "usage: cidx graph path [-h] "
-    "(--usr USR | --id N | --name FUZZY)\n"
-    "                       "
-    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,type-alias,"
-    "typedef,union,variable}]\n"
-    "                       [--first] [--db PATH] [--json] [--limit N]\n"
-    "                       (--to-usr USR | --to-id N | --to-name FUZZY)\n"
-    "                       [--to-kind {class,class-template,constructor,"
-    "destructor,enum,enum-constant,function,function-template,macro,member,"
-    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
-    "                       [--edge KINDS] [--direction {in,out}] [--depth N]\n"
-    "\n"
-    "options:\n"
-    GRAPH_SELECTOR_OPTIONS
-    "  --to-usr USR          destination by USR\n"
-    "  --to-id N             destination by id\n"
-    "  --to-name FUZZY       destination by name\n"
-    "  --to-kind {class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,type-alias,"
-    "typedef,union,variable}\n"
-    "                        restrict a --to-name match to one symbol kind\n"
-    "  --edge KINDS          comma-separated edge kinds (calls, contains, "
-    "field_of,\n"
-    "                        inherits, instantiates, method_of, overrides,\n"
-    "                        specializes, uses) (default: calls)\n"
-    "  --direction {in,out}  edge direction (default out)\n"
-    "  --depth N             max search depth (default 8)\n";
-
-const char kGraphHierarchyUsage[] =
-    "usage: cidx graph hierarchy [-h] "
-    "(--usr USR | --id N | --name FUZZY)\n"
-    "                            "
-    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,type-alias,"
-    "typedef,union,variable}]\n"
-    "                            [--first] [--db PATH] [--json] [--limit N]\n"
-    "                            [--transitive]\n"
-    "                            [--access {public,protected,private,all}]\n";
-
-const char kGraphHierarchyHelp[] =
-    "usage: cidx graph hierarchy [-h] "
-    "(--usr USR | --id N | --name FUZZY)\n"
-    "                            "
-    "[--kind {class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,type-alias,"
-    "typedef,union,variable}]\n"
-    "                            [--first] [--db PATH] [--json] [--limit N]\n"
-    "                            [--transitive]\n"
-    "                            [--access {public,protected,private,all}]\n"
-    "\n"
-    "options:\n"
-    GRAPH_SELECTOR_OPTIONS
-    "  --transitive          walk the whole inheritance tree, not just direct "
-    "edges\n"
-    "  --access {public,protected,private,all}\n"
-    "                        filter members by C++ access specifier (default "
-    "all)\n";
-
-// "usage: cidx graph dispatch [-h] " is 32 chars → continuation indent = 27
-// spaces (argparse aligns continuation under the first arg after the prog+opts).
-const char kGraphDispatchUsage[] =
-    "usage: cidx graph dispatch [-h] "
-    "(--usr USR | --id N | --name FUZZY)\n"
-    "                           [--kind {class,class-template,constructor,"
-    "destructor,enum,enum-constant,function,function-template,macro,member,"
-    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
-    "                           [--first] [--db PATH] [--json] [--limit N]\n";
-
-const char kGraphDispatchHelp[] =
-    "usage: cidx graph dispatch [-h] "
-    "(--usr USR | --id N | --name FUZZY)\n"
-    "                           [--kind {class,class-template,constructor,"
-    "destructor,enum,enum-constant,function,function-template,macro,member,"
-    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
-    "                           [--first] [--db PATH] [--json] [--limit N]\n"
-    "\n"
-    "options:\n"
-    GRAPH_SELECTOR_OPTIONS;
-
-// v27: definitions / redefined (per-backend multi-definition).
-const char kGraphDefinitionsUsage[] =
-    "usage: cidx graph definitions [-h] "
-    "(--usr USR | --id N | --name FUZZY)\n"
-    "                              [--kind {class,class-template,constructor,"
-    "destructor,enum,enum-constant,function,function-template,macro,member,"
-    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
-    "                              [--first] [--db PATH] [--json] [--limit N]\n"
-    "                              [--direct-only]\n";
-
-const char kGraphDefinitionsHelp[] =
-    "usage: cidx graph definitions [-h] "
-    "(--usr USR | --id N | --name FUZZY)\n"
-    "                              [--first] [--db PATH] [--json] [--limit N]\n"
-    "                              [--direct-only]\n"
-    "\n"
-    "each backend body of a symbol + its possible-call fan-out\n"
-    "\n"
-    "options:\n"
-    GRAPH_SELECTOR_OPTIONS
-    "  --direct-only         list the backend bodies only (omit the "
-    "possible-call fan-out)\n";
-
-const char kGraphRedefinedUsage[] =
-    "usage: cidx graph redefined [-h] [--db PATH] [--json] [--limit N]\n";
-
-const char kGraphRedefinedHelp[] =
-    "usage: cidx graph redefined [-h] [--db PATH] [--json] [--limit N]\n"
-    "\n"
-    "symbols defined in more than one backend (multi_def>1)\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --db PATH             index database to query\n"
-    "  --json                emit stable machine-readable JSON\n"
-    "  --limit N             cap the number of results (default 200)\n";
-
-// The 17 symbol kinds, sorted — sorted(SYMBOL_KINDS) in cli.py.
-#define CIDX_KIND_BRACE                                                        \
-  "{class,class-template,constructor,destructor,enum,enum-constant,function,"  \
-  "function-template,macro,member,method,namespace,struct,type-alias,"         \
-  "typedef,union,variable}"
-
-const char kSearchUsage[] = "usage: cidx search [-h]\n"
-                            "                   [--kind " CIDX_KIND_BRACE "]\n"
-                            "                   [--limit N]\n"
-                            "                   pattern\n";
+const char kSearchUsage[] =
+    "usage: cidx search [-h]\n"
+    "                   [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                   [--limit N]\n"
+    "                   pattern\n";
 
 const char kSearchHelp[] =
     "usage: cidx search [-h]\n"
-    "                   [--kind " CIDX_KIND_BRACE "]\n"
+    "                   [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
     "                   [--limit N]\n"
     "                   pattern\n"
     "\n"
     "positional arguments:\n"
-    "  pattern               '::'-separated substrings matched in order, "
-    "e.g.\n"
+    "  pattern               '::'-separated substrings matched in order, e.g.\n"
     "                        'conf::set' hits RdKafka::Conf::set\n"
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n"
-    "  --kind " CIDX_KIND_BRACE "\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
     "                        restrict to one symbol kind\n"
     "  --limit N             show at most N matches (0 = all; default 25)\n";
 
-const char kShowUsage[] = "usage: cidx show [-h] {symbol,file} ...\n";
+const char kAnalyzeUsage[] =
+    "usage: cidx analyze [-h] [--rule NAME] [--rules-file FILE] [--list]\n"
+    "                    [--export-facts DIR] [--jobs N] [--db PATH]\n";
 
-const char kShowHelp[] = "usage: cidx show [-h] {symbol,file} ...\n"
-                         "\n"
-                         "positional arguments:\n"
-                         "  {symbol,file}\n"
-                         "    symbol       one symbol, by id or USR\n"
-                         "    file         one file, by id or path\n"
-                         "\n"
-                         "options:\n"
-                         "  -h, --help     show this help message and exit\n";
-
-const char kShowSymbolUsage[] = "usage: cidx show symbol [-h] symbol\n";
-
-const char kShowSymbolHelp[] =
-    "usage: cidx show symbol [-h] symbol\n"
-    "\n"
-    "positional arguments:\n"
-    "  symbol      numeric id (first column of 'search') or a clang USR; "
-    "USRs\n"
-    "              contain $ and * so single-quote them in the shell\n"
+const char kAnalyzeHelp[] =
+    "usage: cidx analyze [-h] [--rule NAME] [--rules-file FILE] [--list]\n"
+    "                    [--export-facts DIR] [--jobs N] [--db PATH]\n"
     "\n"
     "options:\n"
-    "  -h, --help  show this help message and exit\n";
+    "  -h, --help          show this help message and exit\n"
+    "  --rule NAME         built-in rule to run (see --list)\n"
+    "  --rules-file FILE   user Souffle .dl program; the fact declarations are\n"
+    "                      prepended automatically\n"
+    "  --list              list the built-in rules as JSON\n"
+    "  --export-facts DIR  write TSV fact files and the cidx_facts.dl prelude to\n"
+    "                      DIR\n"
+    "  --jobs N            Souffle worker count (default 1)\n"
+    "  --db PATH           index database (default: the standard cache index)\n";
 
-const char kShowFileUsage[] =
-    "usage: cidx show file [-h] [--component NAME] file\n";
+const char kDbUsage[] =
+    "usage: cidx db [-h] {migrate,verify} ...\n";
 
-const char kShowFileHelp[] =
-    "usage: cidx show file [-h] [--component NAME] file\n"
+const char kDbHelp[] =
+    "usage: cidx db [-h] {migrate,verify} ...\n"
     "\n"
     "positional arguments:\n"
-    "  file                  numeric id (first column of 'list files') or a "
-    "path;\n"
-    "                        relative paths resolve against the --component "
-    "root\n"
-    "                        (else the current directory)\n"
+    "  {migrate,verify}\n"
+    "    migrate         upgrade an existing index to the current schema (in place,\n"
+    "                    no re-index)\n"
+    "    verify          check that component roots and files exist on disk\n"
+    "\n"
+    "options:\n"
+    "  -h, --help        show this help message and exit\n";
+
+const char kDbMigrateUsage[] =
+    "usage: cidx db migrate [-h] [--db PATH]\n";
+
+const char kDbMigrateHelp[] =
+    "usage: cidx db migrate [-h] [--db PATH]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n"
+    "  --db PATH   index database (default: the standard cache index)\n";
+
+const char kDbVerifyUsage[] =
+    "usage: cidx db verify [-h] [--component NAME] [--all] [--db PATH]\n";
+
+const char kDbVerifyHelp[] =
+    "usage: cidx db verify [-h] [--component NAME] [--all] [--db PATH]\n"
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n"
-    "  --component, -c NAME  component root for resolving a relative path\n";
+    "  --component NAME, -c NAME\n"
+    "                        restrict to one component (default: all)\n"
+    "  --all                 also list files that exist (default: only failures)\n"
+    "  --db PATH             index database (default: the standard cache index)\n";
 
-const char kListUsage[] =
-    "usage: cidx list [-h] {components,dirs,files,symbols} ...\n";
+const char kComponentUsage[] =
+    "usage: cidx component [-h]\n"
+    "                      {add,list,ls,show,set-version,compile-commands,rm} ...\n";
 
-const char kListHelp[] =
-    "usage: cidx list [-h] {components,dirs,files,symbols} ...\n"
+const char kComponentHelp[] =
+    "usage: cidx component [-h]\n"
+    "                      {add,list,ls,show,set-version,compile-commands,rm} ...\n"
     "\n"
     "positional arguments:\n"
-    "  {components,dirs,files,symbols}\n"
-    "    components          list registered components\n"
-    "    dirs                list directories (all, or one component's)\n"
-    "    files               list files for a component or a directory in "
-    "it\n"
-    "    symbols             list symbols for a component, directory, or "
-    "file\n"
+    "  {add,list,ls,show,set-version,compile-commands,rm}\n"
+    "    add                 register a component\n"
+    "    list (ls)           list registered components\n"
+    "    show                show details for a component\n"
+    "    set-version         set or clear a component's version\n"
+    "    compile-commands    emit a compile_commands.json for the component\n"
+    "    rm                  delete a component and everything indexed from it\n"
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n";
 
-const char kListComponentsUsage[] =
-    "usage: cidx list components [-h] [--kind {repo,external}] [pattern]\n";
+const char kComponentAddUsage[] =
+    "usage: cidx component add [-h] --path PATH [--name NAME] [--repo REPO]\n"
+    "                          [--kind {repo,external}] [--no-git] [--version V]\n"
+    "                          [--no-detect-version]\n";
 
-const char kListComponentsHelp[] =
-    "usage: cidx list components [-h] [--kind {repo,external}] [pattern]\n"
+const char kComponentAddHelp[] =
+    "usage: cidx component add [-h] --path PATH [--name NAME] [--repo REPO]\n"
+    "                          [--kind {repo,external}] [--no-git] [--version V]\n"
+    "                          [--no-detect-version]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --path PATH           repo root or library header dir\n"
+    "  --name NAME           component name (default: from .git/config)\n"
+    "  --repo REPO           repository name to group under (default: component\n"
+    "                        name)\n"
+    "  --kind {repo,external}\n"
+    "  --no-git              use --path as-is; do not promote to the enclosing git\n"
+    "                        root\n"
+    "  --version V           set component version to V (overrides auto-detection;\n"
+    "                        '' clears)\n"
+    "  --no-detect-version   disable trailing-segment version detection\n";
+
+const char kComponentListUsage[] =
+    "usage: cidx component list [-h] [--kind {repo,external}] [pattern]\n";
+
+const char kComponentListHelp[] =
+    "usage: cidx component list [-h] [--kind {repo,external}] [pattern]\n"
     "\n"
     "positional arguments:\n"
-    "  pattern               optional free-text fuzzy filter: characters "
-    "must\n"
+    "  pattern               optional free-text fuzzy filter: characters must\n"
     "                        appear in order, e.g. 'shp' matches shapes.c\n"
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n"
     "  --kind {repo,external}\n"
     "                        restrict to one component kind\n";
-
-const char kListDirsUsage[] =
-    "usage: cidx list dirs [-h] [--component NAME] [pattern]\n";
-
-const char kListDirsHelp[] =
-    "usage: cidx list dirs [-h] [--component NAME] [pattern]\n"
-    "\n"
-    "positional arguments:\n"
-    "  pattern               optional free-text fuzzy filter: characters "
-    "must\n"
-    "                        appear in order, e.g. 'shp' matches shapes.c\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --component, -c NAME  restrict to this component\n";
-
-const char kListFilesUsage[] =
-    "usage: cidx list files [-h] [--component NAME] [--dir PATH] [--indexed "
-    "|\n"
-    "                       --pending]\n"
-    "                       [pattern]\n";
-
-const char kListFilesHelp[] =
-    "usage: cidx list files [-h] [--component NAME] [--dir PATH] [--indexed "
-    "|\n"
-    "                       --pending]\n"
-    "                       [pattern]\n"
-    "\n"
-    "positional arguments:\n"
-    "  pattern               optional free-text fuzzy filter: characters "
-    "must\n"
-    "                        appear in order, e.g. 'shp' matches shapes.c\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --component, -c NAME  restrict to this component\n"
-    "  --dir, -d PATH        directory (relative to the component root) "
-    "including\n"
-    "                        its subtree; needs --component\n"
-    "  --indexed             only files already indexed\n"
-    "  --pending             only files not yet indexed\n";
-
-const char kListSymbolsUsage[] =
-    "usage: cidx list symbols [-h] [--component NAME] [--dir PATH] [--file "
-    "FILE]\n"
-    "                         [--kind " CIDX_KIND_BRACE "]\n"
-    "                         [--limit N]\n"
-    "                         [pattern]\n";
-
-const char kListSymbolsHelp[] =
-    "usage: cidx list symbols [-h] [--component NAME] [--dir PATH] [--file "
-    "FILE]\n"
-    "                         [--kind " CIDX_KIND_BRACE "]\n"
-    "                         [--limit N]\n"
-    "                         [pattern]\n"
-    "\n"
-    "positional arguments:\n"
-    "  pattern               optional free-text fuzzy filter: characters "
-    "must\n"
-    "                        appear in order, e.g. 'shp' matches shapes.c "
-    "(matched\n"
-    "                        against the qualified name)\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --component, -c NAME  restrict to this component\n"
-    "  --dir, -d PATH        directory (relative to the component root) "
-    "including\n"
-    "                        its subtree; needs --component\n"
-    "  --file, -f FILE       one file; relative paths resolve against the\n"
-    "                        --component root (else the current directory)\n"
-    "  --kind " CIDX_KIND_BRACE "\n"
-    "                        restrict to one symbol kind\n"
-    "  --limit N             show at most N matches (0 = all; default 50)\n";
-
-const char kDeleteUsage[] =
-    "usage: cidx delete [-h] {component,dir,file,symbol} ...\n";
-
-const char kDeleteHelp[] =
-    "usage: cidx delete [-h] {component,dir,file,symbol} ...\n"
-    "\n"
-    "positional arguments:\n"
-    "  {component,dir,file,symbol}\n"
-    "    component           delete a component and everything indexed from it\n"
-    "    dir                 delete a directory, its files, and their symbols\n"
-    "    file                delete a file and its symbols\n"
-    "    symbol              delete a symbol\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n";
-
-const char kDeleteComponentUsage[] =
-    "usage: cidx delete component [-h] (--id ID | --name NAME | --path PATH)\n"
-    "                             [--dry-run]\n";
-
-const char kDeleteComponentHelp[] =
-    "usage: cidx delete component [-h] (--id ID | --name NAME | --path PATH)\n"
-    "                             [--dry-run]\n"
-    "\n"
-    "options:\n"
-    "  -h, --help   show this help message and exit\n"
-    "  --id ID      component id\n"
-    "  --name NAME  component name\n"
-    "  --path PATH  component root path\n"
-    "  --dry-run    preview the matches without deleting anything\n";
-
-const char kDeleteDirUsage[] =
-    "usage: cidx delete dir [-h] (--id ID | --path PATH) [--component NAME]\n"
-    "                       [--dry-run]\n";
-
-const char kDeleteDirHelp[] =
-    "usage: cidx delete dir [-h] (--id ID | --path PATH) [--component NAME]\n"
-    "                       [--dry-run]\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --id ID               directory id\n"
-    "  --path PATH           directory path\n"
-    "  --component, -c NAME  restrict the match to this component\n"
-    "  --dry-run             preview the matches without deleting anything\n";
-
-const char kDeleteFileUsage[] =
-    "usage: cidx delete file [-h] (--id ID | --name NAME | --path PATH)\n"
-    "                        [--component NAME] [--dry-run]\n";
-
-const char kDeleteFileHelp[] =
-    "usage: cidx delete file [-h] (--id ID | --name NAME | --path PATH)\n"
-    "                        [--component NAME] [--dry-run]\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --id ID               file id\n"
-    "  --name NAME           file basename\n"
-    "  --path PATH           file path\n"
-    "  --component, -c NAME  restrict the match to this component\n"
-    "  --dry-run             preview the matches without deleting anything\n";
-
-const char kDeleteSymbolUsage[] =
-    "usage: cidx delete symbol [-h] (--id ID | --name NAME | --usr USR)\n"
-    "                          [--component NAME] [--dry-run]\n";
-
-const char kDeleteSymbolHelp[] =
-    "usage: cidx delete symbol [-h] (--id ID | --name NAME | --usr USR)\n"
-    "                          [--component NAME] [--dry-run]\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --id ID               symbol id\n"
-    "  --name NAME           symbol spelling\n"
-    "  --usr USR             clang USR\n"
-    "  --component, -c NAME  restrict the match to this component\n"
-    "  --dry-run             preview the matches without deleting anything\n";
-
-// ---------------------------------------------------------------------------
-// ast sub-command usage / help (ADR-006 M5)
-// ---------------------------------------------------------------------------
-
-const char kAstUsage[] =
-    "usage: cidx ast [-h] {dump,locals,conditions,cache} ...\n";
-
-const char kAstHelp[] =
-    "usage: cidx ast [-h] {dump,locals,conditions,cache} ...\n"
-    "\n"
-    "positional arguments:\n"
-    "  {dump,locals,conditions,cache}\n"
-    "    dump        dump the AST subtree of a symbol or file\n"
-    "    locals      list a function's local variables\n"
-    "    conditions  conditionals guarding a call, with their condition\n"
-    "    cache       manage the on-disk AST cache\n"
-    "\n"
-    "options:\n"
-    "  -h, --help   show this help message and exit\n";
-
-const char kAstDumpUsage[] =
-    "usage: cidx ast dump [-h] [--depth N] [--tokens] [--types] [--usr USR]\n"
-    "                     [--id N] [--name FUZZY]\n"
-    "                     [--kind {class,class-template,constructor,destructor,"
-    "enum,enum-constant,function,function-template,macro,member,method,"
-    "namespace,struct,type-alias,typedef,union,variable}]\n"
-    "                     [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
-    "                     [FILE|COMPONENT://PATH] ...\n";
-
-const char kAstDumpHelp[] =
-    "usage: cidx ast dump [-h] [--depth N] [--tokens] [--types] [--usr USR]\n"
-    "                     [--id N] [--name FUZZY]\n"
-    "                     [--kind {class,class-template,constructor,destructor,"
-    "enum,enum-constant,function,function-template,macro,member,method,"
-    "namespace,struct,type-alias,typedef,union,variable}]\n"
-    "                     [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
-    "                     [FILE|COMPONENT://PATH] ...\n"
-    "\n"
-    "positional arguments:\n"
-    "  FILE|COMPONENT://PATH\n"
-    "                        a source file, an indexed COMPONENT://PATH, or "
-    "(with\n"
-    "                        '-- <flags>') an ad-hoc file\n"
-    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
-    "files\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --depth N             limit the dump to N levels (0 = unlimited)\n"
-    "  --tokens              show each node's tokens\n"
-    "  --types               annotate cursor types\n"
-    "  --usr USR             exact clang USR\n"
-    "  --id N                numeric symbol id\n"
-    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
-    "                        spelling to find in an ad-hoc file\n"
-    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,type-alias,"
-    "typedef,union,variable}\n"
-    "                        restrict a --name match to one symbol kind\n"
-    "  --first               if --name is ambiguous, take the closest match\n"
-    "  --db PATH             index database to read (default: the standard "
-    "index)\n"
-    "  --json                emit machine-readable JSON\n"
-    "  --cache               use the on-disk AST cache (default)\n"
-    "  --no-cache            ignore the cache: always reparse (no cache read or\n"
-    "                        write)\n";
-
-const char kAstLocalsUsage[] =
-    "usage: cidx ast locals [-h] [--params] [--usr USR] [--id N] [--name FUZZY]\n"
-    "                       [--kind {class,class-template,constructor,destructor,"
-    "enum,enum-constant,function,function-template,macro,member,method,namespace,"
-    "struct,type-alias,typedef,union,variable}]\n"
-    "                       [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
-    "                       [FILE|COMPONENT://PATH] ...\n";
-
-const char kAstLocalsHelp[] =
-    "usage: cidx ast locals [-h] [--params] [--usr USR] [--id N] [--name FUZZY]\n"
-    "                       [--kind {class,class-template,constructor,destructor,"
-    "enum,enum-constant,function,function-template,macro,member,method,namespace,"
-    "struct,type-alias,typedef,union,variable}]\n"
-    "                       [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
-    "                       [FILE|COMPONENT://PATH] ...\n"
-    "\n"
-    "positional arguments:\n"
-    "  FILE|COMPONENT://PATH\n"
-    "                        a source file, an indexed COMPONENT://PATH, or "
-    "(with\n"
-    "                        '-- <flags>') an ad-hoc file\n"
-    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
-    "files\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --params              include parameters, not just body locals\n"
-    "  --usr USR             exact clang USR\n"
-    "  --id N                numeric symbol id\n"
-    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
-    "                        spelling to find in an ad-hoc file\n"
-    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,type-alias,"
-    "typedef,union,variable}\n"
-    "                        restrict a --name match to one symbol kind\n"
-    "  --first               if --name is ambiguous, take the closest match\n"
-    "  --db PATH             index database to read (default: the standard "
-    "index)\n"
-    "  --json                emit machine-readable JSON\n"
-    "  --cache               use the on-disk AST cache (default)\n"
-    "  --no-cache            ignore the cache: always reparse (no cache read or\n"
-    "                        write)\n";
-
-const char kAstConditionsUsage[] =
-    "usage: cidx ast conditions [-h] [--ast] [--usr USR] [--id N] [--name FUZZY]\n"
-    "                           [--kind {class,class-template,constructor,"
-    "destructor,enum,enum-constant,function,function-template,macro,member,"
-    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
-    "                           [--first] [--db PATH] [--json] [--cache |\n"
-    "                           --no-cache]\n"
-    "                           [FILE|COMPONENT://PATH] ...\n";
-
-const char kAstConditionsHelp[] =
-    "usage: cidx ast conditions [-h] [--ast] [--usr USR] [--id N] [--name FUZZY]\n"
-    "                           [--kind {class,class-template,constructor,"
-    "destructor,enum,enum-constant,function,function-template,macro,member,"
-    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
-    "                           [--first] [--db PATH] [--json] [--cache |\n"
-    "                           --no-cache]\n"
-    "                           [FILE|COMPONENT://PATH] ...\n"
-    "\n"
-    "positional arguments:\n"
-    "  FILE|COMPONENT://PATH\n"
-    "                        a source file, an indexed COMPONENT://PATH, or "
-    "(with\n"
-    "                        '-- <flags>') an ad-hoc file\n"
-    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
-    "files\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --ast                 also emit the condition's AST subtree\n"
-    "  --usr USR             exact clang USR\n"
-    "  --id N                numeric symbol id\n"
-    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
-    "                        spelling to find in an ad-hoc file\n"
-    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,type-alias,"
-    "typedef,union,variable}\n"
-    "                        restrict a --name match to one symbol kind\n"
-    "  --first               if --name is ambiguous, take the closest match\n"
-    "  --db PATH             index database to read (default: the standard "
-    "index)\n"
-    "  --json                emit machine-readable JSON\n"
-    "  --cache               use the on-disk AST cache (default)\n"
-    "  --no-cache            ignore the cache: always reparse (no cache read or\n"
-    "                        write)\n";
-
-const char kAstCacheUsage[] =
-    "usage: cidx ast cache [-h] {build,status,clear} ...\n";
-
-const char kAstCacheHelp[] =
-    "usage: cidx ast cache [-h] {build,status,clear} ...\n"
-    "\n"
-    "positional arguments:\n"
-    "  {build,status,clear}\n"
-    "    build               parse + cache the target's AST (force-reparse)\n"
-    "    status              list cache entries, sizes, validity\n"
-    "    clear               remove cached AST(s) for a target, or all\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n";
-
-const char kAstCacheBuildUsage[] =
-    "usage: cidx ast cache build [-h] [--usr USR] [--id N] [--name FUZZY]\n"
-    "                            [--kind {class,class-template,constructor,"
-    "destructor,enum,enum-constant,function,function-template,macro,member,"
-    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
-    "                            [--first] [--db PATH] [--json]\n"
-    "                            [FILE|COMPONENT://PATH] ...\n";
-
-const char kAstCacheBuildHelp[] =
-    "usage: cidx ast cache build [-h] [--usr USR] [--id N] [--name FUZZY]\n"
-    "                            [--kind {class,class-template,constructor,"
-    "destructor,enum,enum-constant,function,function-template,macro,member,"
-    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
-    "                            [--first] [--db PATH] [--json]\n"
-    "                            [FILE|COMPONENT://PATH] ...\n"
-    "\n"
-    "positional arguments:\n"
-    "  FILE|COMPONENT://PATH\n"
-    "                        a source file, an indexed COMPONENT://PATH, or "
-    "(with\n"
-    "                        '-- <flags>') an ad-hoc file\n"
-    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
-    "files\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --usr USR             exact clang USR\n"
-    "  --id N                numeric symbol id\n"
-    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
-    "                        spelling to find in an ad-hoc file\n"
-    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,type-alias,"
-    "typedef,union,variable}\n"
-    "                        restrict a --name match to one symbol kind\n"
-    "  --first               if --name is ambiguous, take the closest match\n"
-    "  --db PATH             index database to read (default: the standard "
-    "index)\n"
-    "  --json                emit machine-readable JSON\n";
-
-// B6: per-action help constants so -h shows the correct subcommand name.
-const char kAstCacheStatusHelp[] =
-    "usage: cidx ast cache status [-h] [--usr USR] [--id N] [--name FUZZY]\n"
-    "                             [--kind {class,class-template,constructor,"
-    "destructor,enum,enum-constant,function,function-template,macro,member,"
-    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
-    "                             [--first] [--db PATH] [--json]\n"
-    "                             [FILE|COMPONENT://PATH] ...\n"
-    "\n"
-    "positional arguments:\n"
-    "  FILE|COMPONENT://PATH\n"
-    "                        a source file, an indexed COMPONENT://PATH, or "
-    "(with\n"
-    "                        '-- <flags>') an ad-hoc file\n"
-    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
-    "files\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --usr USR             exact clang USR\n"
-    "  --id N                numeric symbol id\n"
-    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
-    "                        spelling to find in an ad-hoc file\n"
-    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,type-alias,"
-    "typedef,union,variable}\n"
-    "                        restrict a --name match to one symbol kind\n"
-    "  --first               if --name is ambiguous, take the closest match\n"
-    "  --db PATH             index database to read (default: the standard "
-    "index)\n"
-    "  --json                emit machine-readable JSON\n";
-
-const char kAstCacheClearHelp[] =
-    "usage: cidx ast cache clear [-h] [--usr USR] [--id N] [--name FUZZY]\n"
-    "                            [--kind {class,class-template,constructor,"
-    "destructor,enum,enum-constant,function,function-template,macro,member,"
-    "method,namespace,struct,type-alias,typedef,union,variable}]\n"
-    "                            [--first] [--db PATH] [--json]\n"
-    "                            [FILE|COMPONENT://PATH] ...\n"
-    "\n"
-    "positional arguments:\n"
-    "  FILE|COMPONENT://PATH\n"
-    "                        a source file, an indexed COMPONENT://PATH, or "
-    "(with\n"
-    "                        '-- <flags>') an ad-hoc file\n"
-    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported "
-    "files\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --usr USR             exact clang USR\n"
-    "  --id N                numeric symbol id\n"
-    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
-    "                        spelling to find in an ad-hoc file\n"
-    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,type-alias,"
-    "typedef,union,variable}\n"
-    "                        restrict a --name match to one symbol kind\n"
-    "  --first               if --name is ambiguous, take the closest match\n"
-    "  --db PATH             index database to read (default: the standard "
-    "index)\n"
-    "  --json                emit machine-readable JSON\n";
-
-// ---------------------------------------------------------------------------
-// component / label help texts (portable-paths v14)
-// ---------------------------------------------------------------------------
-
-const char kComponentUsage[] =
-    "usage: cidx component [-h] {show,set-version} ...\n";
-
-const char kComponentHelp[] =
-    "usage: cidx component [-h] {show,set-version} ...\n"
-    "\n"
-    "positional arguments:\n"
-    "  {show,set-version}\n"
-    "    show                show component details (path, version, effective "
-    "root)\n"
-    "    set-version         set or clear the stored version for a component\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n";
 
 const char kComponentShowUsage[] =
     "usage: cidx component show [-h] [--db PATH] NAME\n";
@@ -1142,47 +263,75 @@ const char kComponentShowHelp[] =
     "\n"
     "options:\n"
     "  -h, --help  show this help message and exit\n"
-    "  --db PATH   operate on this index DB (default: the standard index)\n";
+    "  --db PATH   index database (default: the standard cache index)\n";
 
 const char kComponentSetVersionUsage[] =
-    "usage: cidx component set-version [-h] [--db PATH] NAME [VERSION]\n";
+    "usage: cidx component set-version [-h] [--db PATH] NAME [V]\n";
 
 const char kComponentSetVersionHelp[] =
-    "usage: cidx component set-version [-h] [--db PATH] NAME [VERSION]\n"
+    "usage: cidx component set-version [-h] [--db PATH] NAME [V]\n"
     "\n"
     "positional arguments:\n"
     "  NAME        component name\n"
-    "  VERSION     version string to set (omit to clear)\n"
+    "  V           version string; omit or pass '' to clear\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n"
+    "  --db PATH   index database (default: the standard cache index)\n";
+
+const char kComponentCcUsage[] =
+    "usage: cidx component compile-commands [-h] [--db PATH] COMPONENT\n";
+
+const char kComponentCcHelp[] =
+    "usage: cidx component compile-commands [-h] [--db PATH] COMPONENT\n"
+    "\n"
+    "positional arguments:\n"
+    "  COMPONENT   component whose files to emit\n"
     "\n"
     "options:\n"
     "  -h, --help  show this help message and exit\n"
     "  --db PATH   operate on this index DB (default: the standard index)\n";
 
-// repo help texts (v23) — byte-identical with Python argparse output.
+const char kComponentRmUsage[] =
+    "usage: cidx component rm [-h] (--id ID | --name NAME | --path PATH)\n"
+    "                         [--dry-run]\n";
+
+const char kComponentRmHelp[] =
+    "usage: cidx component rm [-h] (--id ID | --name NAME | --path PATH)\n"
+    "                         [--dry-run]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help   show this help message and exit\n"
+    "  --id ID      component id\n"
+    "  --name NAME  component name\n"
+    "  --path PATH  component root path\n"
+    "  --dry-run    preview the matches without deleting anything\n";
+
 const char kRepoUsage[] =
-    "usage: cidx repo [-h] {list,ls,show,add-clone,switch,rm} ...\n";
+    "usage: cidx repo [-h] {list,ls,show,add-clone,switch,realias,rm} ...\n";
 
 const char kRepoHelp[] =
-    "usage: cidx repo [-h] {list,ls,show,add-clone,switch,rm} ...\n"
+    "usage: cidx repo [-h] {list,ls,show,add-clone,switch,realias,rm} ...\n"
     "\n"
     "positional arguments:\n"
-    "  {list,ls,show,add-clone,switch,rm}\n"
+    "  {list,ls,show,add-clone,switch,realias,rm}\n"
     "    list (ls)           list repositories\n"
     "    show                show a repository's clones and components\n"
     "    add-clone           register another checkout directory\n"
     "    switch              rebase the repository onto another clone (by\n"
     "                        path/label)\n"
+    "    realias             rewrite stored include paths to <label> tokens via the\n"
+    "                        registry\n"
     "    rm                  remove a repository\n"
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n";
 
 const char kRepoListUsage[] =
-    "usage: cidx repo list [-h] [--kind {repo,external}] [--db PATH] "
-    "[pattern]\n";
+    "usage: cidx repo list [-h] [--kind {repo,external}] [--db PATH] [pattern]\n";
+
 const char kRepoListHelp[] =
-    "usage: cidx repo list [-h] [--kind {repo,external}] [--db PATH] "
-    "[pattern]\n"
+    "usage: cidx repo list [-h] [--kind {repo,external}] [--db PATH] [pattern]\n"
     "\n"
     "positional arguments:\n"
     "  pattern               fuzzy-filter by repository name\n"
@@ -1191,10 +340,11 @@ const char kRepoListHelp[] =
     "  -h, --help            show this help message and exit\n"
     "  --kind {repo,external}\n"
     "                        filter by repository kind\n"
-    "  --db PATH             index database (default: the standard cache "
-    "index)\n";
+    "  --db PATH             index database (default: the standard cache index)\n";
 
-const char kRepoShowUsage[] = "usage: cidx repo show [-h] [--db PATH] NAME\n";
+const char kRepoShowUsage[] =
+    "usage: cidx repo show [-h] [--db PATH] NAME\n";
+
 const char kRepoShowHelp[] =
     "usage: cidx repo show [-h] [--db PATH] NAME\n"
     "\n"
@@ -1207,6 +357,7 @@ const char kRepoShowHelp[] =
 
 const char kRepoAddCloneUsage[] =
     "usage: cidx repo add-clone [-h] [--label LABEL] [--db PATH] NAME PATH\n";
+
 const char kRepoAddCloneHelp[] =
     "usage: cidx repo add-clone [-h] [--label LABEL] [--db PATH] NAME PATH\n"
     "\n"
@@ -1221,6 +372,7 @@ const char kRepoAddCloneHelp[] =
 
 const char kRepoSwitchUsage[] =
     "usage: cidx repo switch [-h] [--db PATH] NAME TARGET\n";
+
 const char kRepoSwitchHelp[] =
     "usage: cidx repo switch [-h] [--db PATH] NAME TARGET\n"
     "\n"
@@ -1232,8 +384,22 @@ const char kRepoSwitchHelp[] =
     "  -h, --help  show this help message and exit\n"
     "  --db PATH   index database (default: the standard cache index)\n";
 
+const char kRepoRealiasUsage[] =
+    "usage: cidx repo realias [-h] [--db PATH] [COMPONENT]\n";
+
+const char kRepoRealiasHelp[] =
+    "usage: cidx repo realias [-h] [--db PATH] [COMPONENT]\n"
+    "\n"
+    "positional arguments:\n"
+    "  COMPONENT   restrict to one component (default: all files)\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n"
+    "  --db PATH   index database (default: the standard cache index)\n";
+
 const char kRepoRmUsage[] =
     "usage: cidx repo rm [-h] [--delete-components] [--db PATH] NAME\n";
+
 const char kRepoRmHelp[] =
     "usage: cidx repo rm [-h] [--delete-components] [--db PATH] NAME\n"
     "\n"
@@ -1242,94 +408,850 @@ const char kRepoRmHelp[] =
     "\n"
     "options:\n"
     "  -h, --help           show this help message and exit\n"
-    "  --delete-components  also delete the grouped components and their "
-    "indexed\n"
+    "  --delete-components  also delete the grouped components and their indexed\n"
     "                       symbols\n"
-    "  --db PATH            index database (default: the standard cache "
-    "index)\n";
+    "  --db PATH            index database (default: the standard cache index)\n";
 
-const char kLabelUsage[] =
-    "usage: cidx label [-h] {add,rm,list,resolve} ...\n";
+const char kDirUsage[] =
+    "usage: cidx dir [-h] {list,ls,rm} ...\n";
 
-const char kLabelHelp[] =
-    "usage: cidx label [-h] {add,rm,list,resolve} ...\n"
+const char kDirHelp[] =
+    "usage: cidx dir [-h] {list,ls,rm} ...\n"
     "\n"
     "positional arguments:\n"
-    "  {add,rm,list,resolve}\n"
-    "    add                 register a label mapping <name> -> stored-path\n"
-    "    rm                  remove a label\n"
-    "    list                list all labels\n"
-    "    resolve             resolve a stored path through the label registry\n"
+    "  {list,ls,rm}\n"
+    "    list (ls)   list directories (all, or one component's)\n"
+    "    rm          delete a directory, its files, and their symbols\n"
+    "\n"
+    "options:\n"
+    "  -h, --help    show this help message and exit\n";
+
+const char kDirListUsage[] =
+    "usage: cidx dir list [-h] [--component NAME] [pattern]\n";
+
+const char kDirListHelp[] =
+    "usage: cidx dir list [-h] [--component NAME] [pattern]\n"
+    "\n"
+    "positional arguments:\n"
+    "  pattern               optional free-text fuzzy filter: characters must\n"
+    "                        appear in order, e.g. 'shp' matches shapes.c\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --component NAME, -c NAME\n"
+    "                        restrict to this component\n";
+
+const char kDirRmUsage[] =
+    "usage: cidx dir rm [-h] (--id ID | --path PATH) [--component NAME] [--dry-run]\n";
+
+const char kDirRmHelp[] =
+    "usage: cidx dir rm [-h] (--id ID | --path PATH) [--component NAME] [--dry-run]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --id ID               directory id\n"
+    "  --path PATH           directory path\n"
+    "  --component NAME, -c NAME\n"
+    "                        restrict the match to this component\n"
+    "  --dry-run             preview the matches without deleting anything\n";
+
+const char kFileUsage[] =
+    "usage: cidx file [-h] {list,ls,show,flags,set,rm} ...\n";
+
+const char kFileHelp[] =
+    "usage: cidx file [-h] {list,ls,show,flags,set,rm} ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  {list,ls,show,flags,set,rm}\n"
+    "    list (ls)           list files for a component or a directory in it\n"
+    "    show                show full details of one file\n"
+    "    flags               inspect or edit one file's stored compile flags\n"
+    "    set                 set a mutable file attribute (e.g. pending status)\n"
+    "    rm                  delete a file and its symbols\n"
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n";
 
-const char kLabelAddUsage[] =
-    "usage: cidx label add [-h] [--db PATH] NAME PATH\n";
+const char kFileListUsage[] =
+    "usage: cidx file list [-h] [--component NAME] [--dir PATH]\n"
+    "                      [--indexed | --pending]\n"
+    "                      [pattern]\n";
 
-const char kLabelAddHelp[] =
-    "usage: cidx label add [-h] [--db PATH] NAME PATH\n"
+const char kFileListHelp[] =
+    "usage: cidx file list [-h] [--component NAME] [--dir PATH]\n"
+    "                      [--indexed | --pending]\n"
+    "                      [pattern]\n"
     "\n"
     "positional arguments:\n"
-    "  NAME        label key (e.g. 'libfoo-include')\n"
-    "  PATH        stored path (may contain $VAR)\n"
-    "\n"
-    "options:\n"
-    "  -h, --help  show this help message and exit\n"
-    "  --db PATH   operate on this index DB (default: the standard index)\n";
-
-const char kLabelRmUsage[] =
-    "usage: cidx label rm [-h] [--db PATH] NAME\n";
-
-const char kLabelRmHelp[] =
-    "usage: cidx label rm [-h] [--db PATH] NAME\n"
-    "\n"
-    "positional arguments:\n"
-    "  NAME        label key to remove\n"
-    "\n"
-    "options:\n"
-    "  -h, --help  show this help message and exit\n"
-    "  --db PATH   operate on this index DB (default: the standard index)\n";
-
-const char kLabelListUsage[] =
-    "usage: cidx label list [-h] [--db PATH]\n";
-
-const char kLabelListHelp[] =
-    "usage: cidx label list [-h] [--db PATH]\n"
-    "\n"
-    "options:\n"
-    "  -h, --help  show this help message and exit\n"
-    "  --db PATH   operate on this index DB (default: the standard index)\n";
-
-const char kLabelResolveUsage[] =
-    "usage: cidx label resolve [-h] [--db PATH] [--no-autoderive-labels] PATH\n";
-
-const char kLabelResolveHelp[] =
-    "usage: cidx label resolve [-h] [--db PATH] [--no-autoderive-labels] PATH\n"
-    "\n"
-    "positional arguments:\n"
-    "  PATH                stored path to resolve\n"
-    "\n"
-    "options:\n"
-    "  -h, --help              show this help message and exit\n"
-    "  --db PATH               operate on this index DB (default: the standard "
-    "index)\n"
-    "  --no-autoderive-labels  disable autoderive fallback (registry-only "
-    "lookup)\n";
-
-const char kVerifyUsage[] =
-    "usage: cidx verify [-h] [--component NAME] [--all] [--db PATH]\n";
-
-const char kVerifyHelp[] =
-    "usage: cidx verify [-h] [--component NAME] [--all] [--db PATH]\n"
+    "  pattern               optional free-text fuzzy filter: characters must\n"
+    "                        appear in order, e.g. 'shp' matches shapes.c\n"
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n"
-    "  --component, -c NAME  restrict to one component (default: all)\n"
-    "  --all                 also list files that exist (default: only "
-    "failures)\n"
-    "  --db PATH             index database (default: the standard cache "
-    "index)\n";
+    "  --component NAME, -c NAME\n"
+    "                        restrict to this component\n"
+    "  --dir PATH, -d PATH   directory (relative to the component root) including\n"
+    "                        its subtree; needs --component\n"
+    "  --indexed             only files already indexed\n"
+    "  --pending             only files not yet indexed\n";
+
+const char kFileShowUsage[] =
+    "usage: cidx file show [-h] [--component NAME] file\n";
+
+const char kFileShowHelp[] =
+    "usage: cidx file show [-h] [--component NAME] file\n"
+    "\n"
+    "positional arguments:\n"
+    "  file                  numeric id (first column of 'file list') or a path;\n"
+    "                        relative paths resolve against the --component root\n"
+    "                        (else the current directory)\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --component NAME, -c NAME\n"
+    "                        component root for resolving a relative path\n";
+
+const char kFileFlagsUsage[] =
+    "usage: cidx file flags [-h] [--db PATH] COMPONENT://PATH ...\n";
+
+const char kFileFlagsHelp[] =
+    "usage: cidx file flags [-h] [--db PATH] COMPONENT://PATH ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  COMPONENT://PATH  file address, e.g. 'mylib://src/foo.c'\n"
+    "  OP                -set-flag FLAG | -unset-flag FLAG | -import-args JSON |\n"
+    "                    -dump-args (default when omitted)\n"
+    "\n"
+    "options:\n"
+    "  -h, --help        show this help message and exit\n"
+    "  --db PATH         operate on this index DB (default: the standard index)\n";
+
+const char kFileSetUsage[] =
+    "usage: cidx file set [-h] [--component NAME] [--file REL_PATH] [--db PATH]\n"
+    "                     [--dry-run]\n"
+    "                     FIELD=VALUE [FIELD=VALUE ...]\n";
+
+const char kFileSetHelp[] =
+    "usage: cidx file set [-h] [--component NAME] [--file REL_PATH] [--db PATH]\n"
+    "                     [--dry-run]\n"
+    "                     FIELD=VALUE [FIELD=VALUE ...]\n"
+    "\n"
+    "positional arguments:\n"
+    "  FIELD=VALUE           attribute assignment, e.g. 'pending=False' (fields:\n"
+    "                        pending, indexed)\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --component NAME, -c NAME\n"
+    "                        restrict to this component's files\n"
+    "  --file REL_PATH       restrict to one file (path relative to component root)\n"
+    "  --db PATH             operate on this index DB (default: the standard index)\n"
+    "  --dry-run             preview the matches without changing anything\n";
+
+const char kFileRmUsage[] =
+    "usage: cidx file rm [-h] (--id ID | --name NAME | --path PATH)\n"
+    "                    [--component NAME] [--dry-run]\n";
+
+const char kFileRmHelp[] =
+    "usage: cidx file rm [-h] (--id ID | --name NAME | --path PATH)\n"
+    "                    [--component NAME] [--dry-run]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --id ID               file id\n"
+    "  --name NAME           file basename\n"
+    "  --path PATH           file path\n"
+    "  --component NAME, -c NAME\n"
+    "                        restrict the match to this component\n"
+    "  --dry-run             preview the matches without deleting anything\n";
+
+const char kSymbolUsage[] =
+    "usage: cidx symbol [-h] {list,ls,show,rm} ...\n";
+
+const char kSymbolHelp[] =
+    "usage: cidx symbol [-h] {list,ls,show,rm} ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  {list,ls,show,rm}\n"
+    "    list (ls)        list symbols for a component, directory, or file\n"
+    "    show             show full details of one symbol\n"
+    "    rm               delete a symbol\n"
+    "\n"
+    "options:\n"
+    "  -h, --help         show this help message and exit\n";
+
+const char kSymbolListUsage[] =
+    "usage: cidx symbol list [-h] [--component NAME] [--dir PATH] [--file FILE]\n"
+    "                        [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                        [--limit N]\n"
+    "                        [pattern]\n";
+
+const char kSymbolListHelp[] =
+    "usage: cidx symbol list [-h] [--component NAME] [--dir PATH] [--file FILE]\n"
+    "                        [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                        [--limit N]\n"
+    "                        [pattern]\n"
+    "\n"
+    "positional arguments:\n"
+    "  pattern               optional free-text fuzzy filter: characters must\n"
+    "                        appear in order, e.g. 'shp' matches shapes.c (matched\n"
+    "                        against the qualified name)\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --component NAME, -c NAME\n"
+    "                        restrict to this component\n"
+    "  --dir PATH, -d PATH   directory (relative to the component root) including\n"
+    "                        its subtree; needs --component\n"
+    "  --file FILE, -f FILE  one file; relative paths resolve against the\n"
+    "                        --component root (else the current directory)\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict to one symbol kind\n"
+    "  --limit N             show at most N matches (0 = all; default 50)\n";
+
+const char kSymbolShowUsage[] =
+    "usage: cidx symbol show [-h] symbol\n";
+
+const char kSymbolShowHelp[] =
+    "usage: cidx symbol show [-h] symbol\n"
+    "\n"
+    "positional arguments:\n"
+    "  symbol      numeric id (first column of 'search') or a clang USR; USRs\n"
+    "              contain $ and * so single-quote them in the shell\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n";
+
+const char kSymbolRmUsage[] =
+    "usage: cidx symbol rm [-h] (--id ID | --name NAME | --usr USR)\n"
+    "                      [--component NAME] [--dry-run]\n";
+
+const char kSymbolRmHelp[] =
+    "usage: cidx symbol rm [-h] (--id ID | --name NAME | --usr USR)\n"
+    "                      [--component NAME] [--dry-run]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --id ID               symbol id\n"
+    "  --name NAME           symbol spelling\n"
+    "  --usr USR             clang USR\n"
+    "  --component NAME, -c NAME\n"
+    "                        restrict the match to this component\n"
+    "  --dry-run             preview the matches without deleting anything\n";
+
+const char kGraphUsage[] =
+    "usage: cidx graph [-h]\n"
+    "                  {callers,callees,refs,neighbors,walk,path,hierarchy,dispatch,redefined,definitions}\n"
+    "                  ...\n";
+
+const char kGraphHelp[] =
+    "usage: cidx graph [-h]\n"
+    "                  {callers,callees,refs,neighbors,walk,path,hierarchy,dispatch,redefined,definitions}\n"
+    "                  ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  {callers,callees,refs,neighbors,walk,path,hierarchy,dispatch,redefined,definitions}\n"
+    "    callers             functions that call the symbol\n"
+    "    callees             functions the symbol calls\n"
+    "    refs                incoming references (calls + uses) to the symbol\n"
+    "    neighbors           one-hop typed neighbors\n"
+    "    walk                bounded BFS over typed edges\n"
+    "    path                shortest path between two symbols, or none\n"
+    "    hierarchy           class bases, subclasses, and members\n"
+    "    dispatch            run-time targets of a virtual-method call\n"
+    "    redefined           symbols defined in more than one backend (multi_def>1)\n"
+    "    definitions         each backend body of a symbol + its possible-call fan-\n"
+    "                        out\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n";
+
+const char kGraphCallersUsage[] =
+    "usage: cidx graph callers [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                          [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                          [--first] [--db PATH] [--json] [--limit N]\n"
+    "                          [--direct-only]\n";
+
+const char kGraphCallersHelp[] =
+    "usage: cidx graph callers [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                          [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                          [--first] [--db PATH] [--json] [--limit N]\n"
+    "                          [--direct-only]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match ('conf::set')\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to query (default: the standard cache\n"
+    "                        index)\n"
+    "  --json                emit stable machine-readable JSON\n"
+    "  --limit N             cap the number of results (default 50)\n"
+    "  --direct-only         only literal incoming calls (exclude virtual-dispatch\n"
+    "                        callers reached via materialised dispatch_calls edges,\n"
+    "                        which are on by default)\n";
+
+const char kGraphCalleesUsage[] =
+    "usage: cidx graph callees [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                          [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                          [--first] [--db PATH] [--json] [--limit N]\n"
+    "                          [--direct-only]\n";
+
+const char kGraphCalleesHelp[] =
+    "usage: cidx graph callees [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                          [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                          [--first] [--db PATH] [--json] [--limit N]\n"
+    "                          [--direct-only]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match ('conf::set')\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to query (default: the standard cache\n"
+    "                        index)\n"
+    "  --json                emit stable machine-readable JSON\n"
+    "  --limit N             cap the number of results (default 50)\n"
+    "  --direct-only         only literal outgoing calls (exclude virtual-dispatch\n"
+    "                        targets reached via materialised dispatch_calls edges,\n"
+    "                        which are on by default)\n";
+
+const char kGraphRefsUsage[] =
+    "usage: cidx graph refs [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                       [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--limit N]\n";
+
+const char kGraphRefsHelp[] =
+    "usage: cidx graph refs [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                       [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--limit N]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match ('conf::set')\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to query (default: the standard cache\n"
+    "                        index)\n"
+    "  --json                emit stable machine-readable JSON\n"
+    "  --limit N             cap the number of results (default 50)\n";
+
+const char kGraphNeighborsUsage[] =
+    "usage: cidx graph neighbors [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                            [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json] [--limit N]\n"
+    "                            [--edge KINDS] [--direction {in,out}]\n";
+
+const char kGraphNeighborsHelp[] =
+    "usage: cidx graph neighbors [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                            [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json] [--limit N]\n"
+    "                            [--edge KINDS] [--direction {in,out}]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match ('conf::set')\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to query (default: the standard cache\n"
+    "                        index)\n"
+    "  --json                emit stable machine-readable JSON\n"
+    "  --limit N             cap the number of results (default 50)\n"
+    "  --edge KINDS          comma-separated edge kinds (calls, construct-copy,\n"
+    "                        construct-heap, construct-move, construct-temp,\n"
+    "                        construct-value, contains, destroy, dispatch_calls,\n"
+    "                        factory-construct, field_of, friend, inherits,\n"
+    "                        instantiates, method_of, overrides, specializes, uses)\n"
+    "                        (default: all)\n"
+    "  --direction {in,out}  edge direction (default out)\n";
+
+const char kGraphWalkUsage[] =
+    "usage: cidx graph walk [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                       [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--limit N]\n"
+    "                       [--edge KINDS] [--direction {in,out}] [--depth N]\n";
+
+const char kGraphWalkHelp[] =
+    "usage: cidx graph walk [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                       [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--limit N]\n"
+    "                       [--edge KINDS] [--direction {in,out}] [--depth N]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match ('conf::set')\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to query (default: the standard cache\n"
+    "                        index)\n"
+    "  --json                emit stable machine-readable JSON\n"
+    "  --limit N             cap the number of results (default 50)\n"
+    "  --edge KINDS          comma-separated edge kinds (calls, construct-copy,\n"
+    "                        construct-heap, construct-move, construct-temp,\n"
+    "                        construct-value, contains, destroy, dispatch_calls,\n"
+    "                        factory-construct, field_of, friend, inherits,\n"
+    "                        instantiates, method_of, overrides, specializes, uses)\n"
+    "                        (default: calls)\n"
+    "  --direction {in,out}  edge direction (default out)\n"
+    "  --depth N             max BFS depth (default 3)\n";
+
+const char kGraphPathUsage[] =
+    "usage: cidx graph path [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                       [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--limit N]\n"
+    "                       (--to-usr USR | --to-id N | --to-name FUZZY)\n"
+    "                       [--to-kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--edge KINDS] [--direction {in,out}] [--depth N]\n";
+
+const char kGraphPathHelp[] =
+    "usage: cidx graph path [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                       [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--limit N]\n"
+    "                       (--to-usr USR | --to-id N | --to-name FUZZY)\n"
+    "                       [--to-kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--edge KINDS] [--direction {in,out}] [--depth N]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match ('conf::set')\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to query (default: the standard cache\n"
+    "                        index)\n"
+    "  --json                emit stable machine-readable JSON\n"
+    "  --limit N             cap the number of results (default 50)\n"
+    "  --to-usr USR          destination by USR\n"
+    "  --to-id N             destination by id\n"
+    "  --to-name FUZZY       destination by name\n"
+    "  --to-kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --to-name match to one symbol kind\n"
+    "  --edge KINDS          comma-separated edge kinds (calls, construct-copy,\n"
+    "                        construct-heap, construct-move, construct-temp,\n"
+    "                        construct-value, contains, destroy, dispatch_calls,\n"
+    "                        factory-construct, field_of, friend, inherits,\n"
+    "                        instantiates, method_of, overrides, specializes, uses)\n"
+    "                        (default: calls)\n"
+    "  --direction {in,out}  edge direction (default out)\n"
+    "  --depth N             max search depth (default 8)\n";
+
+const char kGraphHierarchyUsage[] =
+    "usage: cidx graph hierarchy [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                            [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json] [--limit N]\n"
+    "                            [--transitive]\n"
+    "                            [--access {public,protected,private,all}]\n";
+
+const char kGraphHierarchyHelp[] =
+    "usage: cidx graph hierarchy [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                            [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json] [--limit N]\n"
+    "                            [--transitive]\n"
+    "                            [--access {public,protected,private,all}]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match ('conf::set')\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to query (default: the standard cache\n"
+    "                        index)\n"
+    "  --json                emit stable machine-readable JSON\n"
+    "  --limit N             cap the number of results (default 50)\n"
+    "  --transitive          walk the whole inheritance tree, not just direct edges\n"
+    "  --access {public,protected,private,all}\n"
+    "                        filter members by C++ access specifier (default all)\n";
+
+const char kGraphDispatchUsage[] =
+    "usage: cidx graph dispatch [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                           [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                           [--first] [--db PATH] [--json] [--limit N]\n";
+
+const char kGraphDispatchHelp[] =
+    "usage: cidx graph dispatch [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                           [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                           [--first] [--db PATH] [--json] [--limit N]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match ('conf::set')\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to query (default: the standard cache\n"
+    "                        index)\n"
+    "  --json                emit stable machine-readable JSON\n"
+    "  --limit N             cap the number of results (default 50)\n";
+
+const char kGraphRedefinedUsage[] =
+    "usage: cidx graph redefined [-h] [--db PATH] [--json] [--limit N]\n";
+
+const char kGraphRedefinedHelp[] =
+    "usage: cidx graph redefined [-h] [--db PATH] [--json] [--limit N]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n"
+    "  --db PATH   index database to query (default: the standard cache index)\n"
+    "  --json      emit stable machine-readable JSON\n"
+    "  --limit N   cap the number of results (default 200)\n";
+
+const char kGraphDefinitionsUsage[] =
+    "usage: cidx graph definitions [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                              [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                              [--first] [--db PATH] [--json] [--limit N]\n"
+    "                              [--direct-only]\n";
+
+const char kGraphDefinitionsHelp[] =
+    "usage: cidx graph definitions [-h] (--usr USR | --id N | --name FUZZY)\n"
+    "                              [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                              [--first] [--db PATH] [--json] [--limit N]\n"
+    "                              [--direct-only]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match ('conf::set')\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to query (default: the standard cache\n"
+    "                        index)\n"
+    "  --json                emit stable machine-readable JSON\n"
+    "  --limit N             cap the number of results (default 50)\n"
+    "  --direct-only         list the backend bodies only (omit the possible-call\n"
+    "                        fan-out, which is shown by default)\n";
+
+const char kAstUsage[] =
+    "usage: cidx ast [-h] {dump,locals,conditions} ...\n";
+
+const char kAstHelp[] =
+    "usage: cidx ast [-h] {dump,locals,conditions} ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  {dump,locals,conditions}\n"
+    "    dump                dump the AST subtree of a symbol or file\n"
+    "    locals              list a function's local variables\n"
+    "    conditions          conditionals guarding a call, with their condition\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n";
+
+const char kAstDumpUsage[] =
+    "usage: cidx ast dump [-h] [--depth N] [--tokens] [--types] [--usr USR]\n"
+    "                     [--id N] [--name FUZZY]\n"
+    "                     [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                     [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
+    "                     [FILE|COMPONENT://PATH] ...\n";
+
+const char kAstDumpHelp[] =
+    "usage: cidx ast dump [-h] [--depth N] [--tokens] [--types] [--usr USR]\n"
+    "                     [--id N] [--name FUZZY]\n"
+    "                     [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                     [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
+    "                     [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or (with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported files\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --depth N             limit the dump to N levels (0 = unlimited)\n"
+    "  --tokens              show each node's tokens\n"
+    "  --types               annotate cursor types\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard index)\n"
+    "  --json                emit machine-readable JSON\n"
+    "  --cache               use the on-disk AST cache (default)\n"
+    "  --no-cache            ignore the cache: always reparse (no cache read or\n"
+    "                        write)\n";
+
+const char kAstLocalsUsage[] =
+    "usage: cidx ast locals [-h] [--params] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                       [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
+    "                       [FILE|COMPONENT://PATH] ...\n";
+
+const char kAstLocalsHelp[] =
+    "usage: cidx ast locals [-h] [--params] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                       [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                       [--first] [--db PATH] [--json] [--cache | --no-cache]\n"
+    "                       [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or (with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported files\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --params              include parameters, not just body locals\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard index)\n"
+    "  --json                emit machine-readable JSON\n"
+    "  --cache               use the on-disk AST cache (default)\n"
+    "  --no-cache            ignore the cache: always reparse (no cache read or\n"
+    "                        write)\n";
+
+const char kAstConditionsUsage[] =
+    "usage: cidx ast conditions [-h] [--ast] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                           [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                           [--first] [--db PATH] [--json]\n"
+    "                           [--cache | --no-cache]\n"
+    "                           [FILE|COMPONENT://PATH] ...\n";
+
+const char kAstConditionsHelp[] =
+    "usage: cidx ast conditions [-h] [--ast] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                           [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                           [--first] [--db PATH] [--json]\n"
+    "                           [--cache | --no-cache]\n"
+    "                           [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or (with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported files\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --ast                 also emit the condition's AST subtree\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard index)\n"
+    "  --json                emit machine-readable JSON\n"
+    "  --cache               use the on-disk AST cache (default)\n"
+    "  --no-cache            ignore the cache: always reparse (no cache read or\n"
+    "                        write)\n";
+
+const char kCacheUsage[] =
+    "usage: cidx cache [-h] {pch,ast} ...\n";
+
+const char kCacheHelp[] =
+    "usage: cidx cache [-h] {pch,ast} ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  {pch,ast}\n"
+    "    pch       build & cache one shared system/C++ PCH to speed up indexing\n"
+    "    ast       manage the on-disk AST cache\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n";
+
+const char kCachePchUsage[] =
+    "usage: cidx cache pch [-h] {build,status,clear} ...\n";
+
+const char kCachePchHelp[] =
+    "usage: cidx cache pch [-h] {build,status,clear} ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  {build,status,clear}\n"
+    "    build               compile a system/C++ umbrella header into a cached PCH\n"
+    "    status              show the cached system PCH (size, flags, validity)\n"
+    "    clear               remove the cached system PCH\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n";
+
+const char kCachePchBuildUsage[] =
+    "usage: cidx cache pch build [-h] [--db PATH] [--add FLAG] [--include HEADER]\n"
+    "                            [--driver DRIVER] [--std STD] [--force]\n"
+    "                            [--from-corpus] [--coverage FRAC] [--min-tus N]\n"
+    "                            [--jobs N]\n";
+
+const char kCachePchBuildHelp[] =
+    "usage: cidx cache pch build [-h] [--db PATH] [--add FLAG] [--include HEADER]\n"
+    "                            [--driver DRIVER] [--std STD] [--force]\n"
+    "                            [--from-corpus] [--coverage FRAC] [--min-tus N]\n"
+    "                            [--jobs N]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help        show this help message and exit\n"
+    "  --db PATH         index database to derive the common C++ flags from\n"
+    "                    (default: the standard cache index)\n"
+    "  --add FLAG        extra compile flag to bake into the PCH (repeatable)\n"
+    "  --include HEADER  extra header to add to the umbrella, e.g.\n"
+    "                    boost/optional.hpp (repeatable)\n"
+    "  --driver DRIVER   compiler driver to replicate search paths from (default:\n"
+    "                    the index's dominant C++ driver)\n"
+    "  --std STD         override the C++ standard, e.g. c++17\n"
+    "  --force           rebuild even if a PCH already exists\n"
+    "  --from-corpus     build the umbrella from the headers actually shared by the\n"
+    "                    index's C++ TUs (a `clang -M` survey), retaining -I so\n"
+    "                    project headers are included -- the lever for parse-bound\n"
+    "                    cold indexing\n"
+    "  --coverage FRAC   with --from-corpus: include a header if shared by >= this\n"
+    "                    fraction of C++ TUs (default: 0.7)\n"
+    "  --min-tus N       with --from-corpus: also require a header in >= N TUs\n"
+    "                    (default: 0)\n"
+    "  --jobs N          with --from-corpus: parallel `clang -M` scans (default:\n"
+    "                    CPU count)\n";
+
+const char kCachePchStatusUsage[] =
+    "usage: cidx cache pch status [-h]\n";
+
+const char kCachePchStatusHelp[] =
+    "usage: cidx cache pch status [-h]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n";
+
+const char kCachePchClearUsage[] =
+    "usage: cidx cache pch clear [-h]\n";
+
+const char kCachePchClearHelp[] =
+    "usage: cidx cache pch clear [-h]\n"
+    "\n"
+    "options:\n"
+    "  -h, --help  show this help message and exit\n";
+
+const char kCacheAstUsage[] =
+    "usage: cidx cache ast [-h] {build,status,clear} ...\n";
+
+const char kCacheAstHelp[] =
+    "usage: cidx cache ast [-h] {build,status,clear} ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  {build,status,clear}\n"
+    "    build               parse + cache the target's AST (force-reparse)\n"
+    "    status              list cache entries, sizes, validity\n"
+    "    clear               remove cached AST(s) for a target, or all\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n";
+
+const char kCacheAstBuildUsage[] =
+    "usage: cidx cache ast build [-h] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                            [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json]\n"
+    "                            [FILE|COMPONENT://PATH] ...\n";
+
+const char kCacheAstBuildHelp[] =
+    "usage: cidx cache ast build [-h] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                            [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json]\n"
+    "                            [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or (with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported files\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard index)\n"
+    "  --json                emit machine-readable JSON\n";
+
+const char kCacheAstStatusUsage[] =
+    "usage: cidx cache ast status [-h] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                             [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                             [--first] [--db PATH] [--json]\n"
+    "                             [FILE|COMPONENT://PATH] ...\n";
+
+const char kCacheAstStatusHelp[] =
+    "usage: cidx cache ast status [-h] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                             [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                             [--first] [--db PATH] [--json]\n"
+    "                             [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or (with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported files\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard index)\n"
+    "  --json                emit machine-readable JSON\n";
+
+const char kCacheAstClearUsage[] =
+    "usage: cidx cache ast clear [-h] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                            [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json]\n"
+    "                            [FILE|COMPONENT://PATH] ...\n";
+
+const char kCacheAstClearHelp[] =
+    "usage: cidx cache ast clear [-h] [--usr USR] [--id N] [--name FUZZY]\n"
+    "                            [--kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}]\n"
+    "                            [--first] [--db PATH] [--json]\n"
+    "                            [FILE|COMPONENT://PATH] ...\n"
+    "\n"
+    "positional arguments:\n"
+    "  FILE|COMPONENT://PATH\n"
+    "                        a source file, an indexed COMPONENT://PATH, or (with\n"
+    "                        '-- <flags>') an ad-hoc file\n"
+    "  -- FLAGS              ad-hoc compile flags after '--' for un-imported files\n"
+    "\n"
+    "options:\n"
+    "  -h, --help            show this help message and exit\n"
+    "  --usr USR             exact clang USR\n"
+    "  --id N                numeric symbol id\n"
+    "  --name FUZZY          fuzzy qualified-name match (indexed), or an exact\n"
+    "                        spelling to find in an ad-hoc file\n"
+    "  --kind {class,class-template,constructor,destructor,enum,enum-constant,function,function-template,macro,member,method,namespace,struct,type-alias,typedef,union,variable}\n"
+    "                        restrict a --name match to one symbol kind\n"
+    "  --first               if --name is ambiguous, take the closest match\n"
+    "  --db PATH             index database to read (default: the standard index)\n"
+    "  --json                emit machine-readable JSON\n";
 
 // ---------------------------------------------------------------------------
 // Choice sets
@@ -1343,25 +1265,25 @@ const std::vector<std::string> kSymbolKinds = {
     "struct",  "type-alias",     "typedef",     "union",
     "variable"};
 const std::vector<std::string> kCommands = {
-    "init",      "migrate",    "add-source",            "import",
-    "realias",   "index",      "resolve",               "pch",
-    "component", "repo",       "label",                 "verify",
-    "set",       "file",       "dump-compile-commands", "search",
-    "show",      "list",       "ls",                    "delete",
-    "graph",     "ast"};
-const std::vector<std::string> kRepoWhats = {"list", "ls", "show", "add-clone",
-                                             "switch", "rm"};
+    "init",      "import", "index", "resolve", "search",
+    "analyze",   "db",     "component", "repo", "dir",
+    "file",      "symbol", "graph", "ast",     "cache"};
+const std::vector<std::string> kDbWhats = {"migrate", "verify"};
+const std::vector<std::string> kComponentWhats = {
+    "add", "list", "ls", "show", "set-version", "compile-commands", "rm"};
+const std::vector<std::string> kRepoWhats = {
+    "list", "ls", "show", "add-clone", "switch", "realias", "rm"};
+const std::vector<std::string> kDirWhats = {"list", "ls", "rm"};
+const std::vector<std::string> kFileWhats = {"list", "ls", "show",
+                                             "flags", "set", "rm"};
+const std::vector<std::string> kSymbolWhats = {"list", "ls", "show", "rm"};
 const std::vector<std::string> kGraphWhats = {
     "callers",   "callees",  "refs",      "neighbors",   "walk",
     "path",      "hierarchy", "dispatch", "redefined",   "definitions"};
-const std::vector<std::string> kAstWhats = {"dump", "locals", "conditions",
-                                            "cache"};
+const std::vector<std::string> kAstWhats = {"dump", "locals", "conditions"};
+const std::vector<std::string> kCacheWhats = {"pch", "ast"};
 const std::vector<std::string> kAstCacheWhats = {"build", "status", "clear"};
-const std::vector<std::string> kShowWhats = {"symbol", "file"};
-const std::vector<std::string> kListWhats = {"components", "dirs", "files",
-                                             "symbols"};
-const std::vector<std::string> kDeleteWhats = {"component", "dir", "file",
-                                               "symbol"};
+const std::vector<std::string> kPchWhats = {"build", "status", "clear"};
 
 // ---------------------------------------------------------------------------
 // Engine
@@ -1789,6 +1711,7 @@ bool contains(const std::vector<std::string> &v, const std::string &s) {
   return false;
 }
 
+
 // -- leaf specs --------------------------------------------------------------
 
 const Spec kInitSpec = {
@@ -1801,38 +1724,6 @@ const Spec kInitSpec = {
     {},
     false,
     {},
-};
-
-const Spec kMigrateSpec = {
-    "cidx migrate",
-    kMigrateUsage,
-    kMigrateHelp,
-    {
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-    },
-    {},
-    false, // no positional
-    {},
-};
-
-const Spec kAddSourceSpec = {
-    "cidx add-source",
-    kAddSourceUsage,
-    kAddSourceHelp,
-    {
-        {"--path", '\0', ValueKind::kString, "--path", nullptr, 0},
-        {"--name", '\0', ValueKind::kString, "--name", nullptr, 0},
-        {"--repo", '\0', ValueKind::kString, "--repo", nullptr, 0},
-        {"--kind", '\0', ValueKind::kString, "--kind", &kComponentKinds, 0},
-        {"--no-git", '\0', ValueKind::kNone, "--no-git", nullptr, 0},
-        // v14: portable-paths
-        {"--version", '\0', ValueKind::kString, "--version", nullptr, 0},
-        {"--no-detect-version", '\0', ValueKind::kNone, "--no-detect-version",
-         nullptr, 0},
-    },
-    {},
-    false,
-    {"--path"},
 };
 
 const Spec kImportSpec = {
@@ -1850,18 +1741,6 @@ const Spec kImportSpec = {
     {},
     false,
     {"--db"},
-};
-
-const Spec kRealiasSpec = {
-    "cidx realias",
-    kRealiasUsage,
-    kRealiasHelp,
-    {
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-    },
-    {}, // COMPONENT is optional, collected as rest
-    true,  // rest=true: nargs="?" — collect surplus tokens as optional positional
-    {},    // nothing required
 };
 
 const Spec kIndexSpec = {
@@ -1890,79 +1769,6 @@ const Spec kResolveSpec = {
     {},
 };
 
-// pch (v0.17.0): build|status|clear is a sub-action carried in `what`.
-const std::vector<std::string> kPchWhats = {"build", "status", "clear"};
-
-const Spec kPchBuildSpec = {
-    "cidx pch build",
-    kPchBuildUsage,
-    kPchBuildHelp,
-    {
-        {"--db", '\0', ValueKind::kString, "--db"},
-        {"--add", '\0', ValueKind::kString, "--add", nullptr, 0, true},
-        {"--include", '\0', ValueKind::kString, "--include", nullptr, 0, true},
-        {"--driver", '\0', ValueKind::kString, "--driver"},
-        {"--std", '\0', ValueKind::kString, "--std"},
-        {"--force", '\0', ValueKind::kNone, "--force"},
-        {"--from-corpus", '\0', ValueKind::kNone, "--from-corpus"},
-        {"--coverage", '\0', ValueKind::kString, "--coverage"},
-        {"--min-tus", '\0', ValueKind::kString, "--min-tus"},
-        {"--jobs", '\0', ValueKind::kString, "--jobs"},
-    },
-    {},
-    false,
-    {},
-};
-
-const Spec kPchStatusSpec = {
-    "cidx pch status", kPchStatusUsage, kPchStatusHelp, {}, {}, false, {},
-};
-
-const Spec kPchClearSpec = {
-    "cidx pch clear", kPchClearUsage, kPchClearHelp, {}, {}, false, {},
-};
-
-const Spec kSetSpec = {
-    "cidx set",
-    kSetUsage,
-    kSetHelp,
-    {
-        {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
-        {"--file", '\0', ValueKind::kString, "--file", nullptr, 0},
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-        {"--dry-run", '\0', ValueKind::kNone, "--dry-run", nullptr, 0},
-    },
-    {"FIELD=VALUE"}, // first positional; name reported by the required check
-    true,            // nargs="+": collect surplus FIELD=VALUE tokens
-    {"FIELD=VALUE"}, // required
-};
-
-const Spec kFileSpec = {
-    "cidx file",
-    kFileUsage,
-    kFileHelp,
-    {
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-    },
-    {"COMPONENT://PATH"}, // the required target positional
-    false,                // surplus is captured by the REMAINDER tail, not rest
-    {"COMPONENT://PATH"}, // required
-    {},                   // no required-mutex groups
-    true,                 // nargs=REMAINDER: capture OP ... verbatim
-};
-
-const Spec kDumpCcSpec = {
-    "cidx dump-compile-commands",
-    kDumpCcUsage,
-    kDumpCcHelp,
-    {
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-    },
-    {"COMPONENT"}, // the required component positional
-    false,
-    {"COMPONENT"}, // required
-};
-
 const Spec kSearchSpec = {
     "cidx search",
     kSearchUsage,
@@ -1976,29 +1782,78 @@ const Spec kSearchSpec = {
     {"pattern"},
 };
 
-const Spec kShowSymbolSpec = {
-    "cidx show symbol", kShowSymbolUsage,
-    kShowSymbolHelp,    {},
-    {"symbol"},         false,
-    {"symbol"},
+const Spec kAnalyzeSpec = {
+    "cidx analyze",
+    kAnalyzeUsage,
+    kAnalyzeHelp,
+    {
+        {"--rule", '\0', ValueKind::kString, "--rule", nullptr, 0},
+        {"--rules-file", '\0', ValueKind::kString, "--rules-file", nullptr, 0},
+        {"--list", '\0', ValueKind::kNone, "--list", nullptr, 0},
+        {"--export-facts", '\0', ValueKind::kString, "--export-facts", nullptr,
+         0},
+        {"--jobs", '\0', ValueKind::kInt, "--jobs", nullptr, 0},
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {}, // no positionals
+    false,
+    {}, // nothing required (the handler enforces exactly-one-mode)
 };
 
-const Spec kShowFileSpec = {
-    "cidx show file",
-    kShowFileUsage,
-    kShowFileHelp,
+// -- db leaf specs (v0.53.0 regrouping) ---------------------------------------
+
+const Spec kDbMigrateSpec = {
+    "cidx db migrate",
+    kDbMigrateUsage,
+    kDbMigrateHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {},
+    false, // no positional
+    {},
+};
+
+const Spec kDbVerifySpec = {
+    "cidx db verify",
+    kDbVerifyUsage,
+    kDbVerifyHelp,
     {
         {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
+        {"--all", '\0', ValueKind::kNone, "--all", nullptr, 0},
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
     },
-    {"file"},
+    {}, // no positionals
     false,
-    {"file"},
+    {}, // nothing required
 };
 
-const Spec kListComponentsSpec = {
-    "cidx list components",
-    kListComponentsUsage,
-    kListComponentsHelp,
+// -- component leaf specs ------------------------------------------------------
+
+const Spec kComponentAddSpec = {
+    "cidx component add",
+    kComponentAddUsage,
+    kComponentAddHelp,
+    {
+        {"--path", '\0', ValueKind::kString, "--path", nullptr, 0},
+        {"--name", '\0', ValueKind::kString, "--name", nullptr, 0},
+        {"--repo", '\0', ValueKind::kString, "--repo", nullptr, 0},
+        {"--kind", '\0', ValueKind::kString, "--kind", &kComponentKinds, 0},
+        {"--no-git", '\0', ValueKind::kNone, "--no-git", nullptr, 0},
+        // v14: portable-paths
+        {"--version", '\0', ValueKind::kString, "--version", nullptr, 0},
+        {"--no-detect-version", '\0', ValueKind::kNone, "--no-detect-version",
+         nullptr, 0},
+    },
+    {},
+    false,
+    {"--path"},
+};
+
+const Spec kComponentListSpec = {
+    "cidx component list",
+    kComponentListUsage,
+    kComponentListHelp,
     {
         {"--kind", '\0', ValueKind::kString, "--kind", &kComponentKinds, 0},
     },
@@ -2007,10 +1862,142 @@ const Spec kListComponentsSpec = {
     {},
 };
 
-const Spec kListDirsSpec = {
-    "cidx list dirs",
-    kListDirsUsage,
-    kListDirsHelp,
+const Spec kComponentShowSpec = {
+    "cidx component show",
+    kComponentShowUsage,
+    kComponentShowHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"NAME"},
+    false,
+    {"NAME"},
+};
+
+const Spec kComponentSetVersionSpec = {
+    "cidx component set-version",
+    kComponentSetVersionUsage,
+    kComponentSetVersionHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"NAME", "VERSION"}, // VERSION is optional (nargs=?)
+    true,                // rest: captures any surplus (including the optional VERSION)
+    {"NAME"},
+};
+
+const Spec kComponentCcSpec = {
+    "cidx component compile-commands",
+    kComponentCcUsage,
+    kComponentCcHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"COMPONENT"}, // the required component positional
+    false,
+    {"COMPONENT"}, // required
+};
+
+const Spec kComponentRmSpec = {
+    "cidx component rm",
+    kComponentRmUsage,
+    kComponentRmHelp,
+    {
+        {"--id", '\0', ValueKind::kInt, "--id", nullptr, 1},
+        {"--name", '\0', ValueKind::kString, "--name", nullptr, 1},
+        {"--path", '\0', ValueKind::kString, "--path", nullptr, 1},
+        {"--dry-run", '\0', ValueKind::kNone, "--dry-run", nullptr, 0},
+    },
+    {},
+    false,
+    {},
+    {1},
+};
+
+// -- repo leaf specs (v23) ---------------------------------------------------
+
+const Spec kRepoListSpec = {
+    "cidx repo list",
+    kRepoListUsage,
+    kRepoListHelp,
+    {
+        {"--kind", '\0', ValueKind::kString, "--kind", &kComponentKinds, 0},
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"pattern"}, // optional (not in required set)
+    false,
+    {},
+};
+
+const Spec kRepoShowSpec = {
+    "cidx repo show",
+    kRepoShowUsage,
+    kRepoShowHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"NAME"},
+    false,
+    {"NAME"},
+};
+
+const Spec kRepoAddCloneSpec = {
+    "cidx repo add-clone",
+    kRepoAddCloneUsage,
+    kRepoAddCloneHelp,
+    {
+        {"--label", '\0', ValueKind::kString, "--label", nullptr, 0},
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"NAME", "PATH"},
+    false,
+    {"NAME", "PATH"},
+};
+
+const Spec kRepoSwitchSpec = {
+    "cidx repo switch",
+    kRepoSwitchUsage,
+    kRepoSwitchHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"NAME", "TARGET"},
+    false,
+    {"NAME", "TARGET"},
+};
+
+const Spec kRepoRealiasSpec = {
+    "cidx repo realias",
+    kRepoRealiasUsage,
+    kRepoRealiasHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {}, // COMPONENT is optional, collected as rest
+    true,  // rest=true: nargs="?" — collect surplus tokens as optional positional
+    {},    // nothing required
+};
+
+const Spec kRepoRmSpec = {
+    "cidx repo rm",
+    kRepoRmUsage,
+    kRepoRmHelp,
+    {
+        {"--delete-components", '\0', ValueKind::kNone, "--delete-components",
+         nullptr, 0},
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"NAME"},
+    false,
+    {"NAME"},
+};
+
+// -- dir leaf specs ------------------------------------------------------------
+
+const Spec kDirListSpec = {
+    "cidx dir list",
+    kDirListUsage,
+    kDirListHelp,
     {
         {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
     },
@@ -2019,10 +2006,28 @@ const Spec kListDirsSpec = {
     {},
 };
 
-const Spec kListFilesSpec = {
-    "cidx list files",
-    kListFilesUsage,
-    kListFilesHelp,
+const Spec kDirRmSpec = {
+    "cidx dir rm",
+    kDirRmUsage,
+    kDirRmHelp,
+    {
+        {"--id", '\0', ValueKind::kInt, "--id", nullptr, 1},
+        {"--path", '\0', ValueKind::kString, "--path", nullptr, 1},
+        {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
+        {"--dry-run", '\0', ValueKind::kNone, "--dry-run", nullptr, 0},
+    },
+    {},
+    false,
+    {},
+    {1},
+};
+
+// -- file leaf specs -----------------------------------------------------------
+
+const Spec kFileListSpec = {
+    "cidx file list",
+    kFileListUsage,
+    kFileListHelp,
     {
         {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
         {"--dir", 'd', ValueKind::kString, "--dir/-d", nullptr, 0},
@@ -2034,10 +2039,70 @@ const Spec kListFilesSpec = {
     {},
 };
 
-const Spec kListSymbolsSpec = {
-    "cidx list symbols",
-    kListSymbolsUsage,
-    kListSymbolsHelp,
+const Spec kFileShowSpec = {
+    "cidx file show",
+    kFileShowUsage,
+    kFileShowHelp,
+    {
+        {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
+    },
+    {"file"},
+    false,
+    {"file"},
+};
+
+const Spec kFileFlagsSpec = {
+    "cidx file flags",
+    kFileFlagsUsage,
+    kFileFlagsHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+    },
+    {"COMPONENT://PATH"}, // the required target positional
+    false,                // surplus is captured by the REMAINDER tail, not rest
+    {"COMPONENT://PATH"}, // required
+    {},                   // no required-mutex groups
+    true,                 // nargs=REMAINDER: capture OP ... verbatim
+};
+
+const Spec kFileSetSpec = {
+    "cidx file set",
+    kFileSetUsage,
+    kFileSetHelp,
+    {
+        {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
+        {"--file", '\0', ValueKind::kString, "--file", nullptr, 0},
+        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
+        {"--dry-run", '\0', ValueKind::kNone, "--dry-run", nullptr, 0},
+    },
+    {"FIELD=VALUE"}, // first positional; name reported by the required check
+    true,            // nargs="+": collect surplus FIELD=VALUE tokens
+    {"FIELD=VALUE"}, // required
+};
+
+const Spec kFileRmSpec = {
+    "cidx file rm",
+    kFileRmUsage,
+    kFileRmHelp,
+    {
+        {"--id", '\0', ValueKind::kInt, "--id", nullptr, 1},
+        {"--name", '\0', ValueKind::kString, "--name", nullptr, 1},
+        {"--path", '\0', ValueKind::kString, "--path", nullptr, 1},
+        {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
+        {"--dry-run", '\0', ValueKind::kNone, "--dry-run", nullptr, 0},
+    },
+    {},
+    false,
+    {},
+    {1},
+};
+
+// -- symbol leaf specs ---------------------------------------------------------
+
+const Spec kSymbolListSpec = {
+    "cidx symbol list",
+    kSymbolListUsage,
+    kSymbolListHelp,
     {
         {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
         {"--dir", 'd', ValueKind::kString, "--dir/-d", nullptr, 0},
@@ -2050,59 +2115,17 @@ const Spec kListSymbolsSpec = {
     {},
 };
 
-const Spec kDeleteComponentSpec = {
-    "cidx delete component",
-    kDeleteComponentUsage,
-    kDeleteComponentHelp,
-    {
-        {"--id", '\0', ValueKind::kInt, "--id", nullptr, 1},
-        {"--name", '\0', ValueKind::kString, "--name", nullptr, 1},
-        {"--path", '\0', ValueKind::kString, "--path", nullptr, 1},
-        {"--dry-run", '\0', ValueKind::kNone, "--dry-run", nullptr, 0},
-    },
-    {},
-    false,
-    {},
-    {1},
+const Spec kSymbolShowSpec = {
+    "cidx symbol show", kSymbolShowUsage,
+    kSymbolShowHelp,    {},
+    {"symbol"},         false,
+    {"symbol"},
 };
 
-const Spec kDeleteDirSpec = {
-    "cidx delete dir",
-    kDeleteDirUsage,
-    kDeleteDirHelp,
-    {
-        {"--id", '\0', ValueKind::kInt, "--id", nullptr, 1},
-        {"--path", '\0', ValueKind::kString, "--path", nullptr, 1},
-        {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
-        {"--dry-run", '\0', ValueKind::kNone, "--dry-run", nullptr, 0},
-    },
-    {},
-    false,
-    {},
-    {1},
-};
-
-const Spec kDeleteFileSpec = {
-    "cidx delete file",
-    kDeleteFileUsage,
-    kDeleteFileHelp,
-    {
-        {"--id", '\0', ValueKind::kInt, "--id", nullptr, 1},
-        {"--name", '\0', ValueKind::kString, "--name", nullptr, 1},
-        {"--path", '\0', ValueKind::kString, "--path", nullptr, 1},
-        {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
-        {"--dry-run", '\0', ValueKind::kNone, "--dry-run", nullptr, 0},
-    },
-    {},
-    false,
-    {},
-    {1},
-};
-
-const Spec kDeleteSymbolSpec = {
-    "cidx delete symbol",
-    kDeleteSymbolUsage,
-    kDeleteSymbolHelp,
+const Spec kSymbolRmSpec = {
+    "cidx symbol rm",
+    kSymbolRmUsage,
+    kSymbolRmHelp,
     {
         {"--id", '\0', ValueKind::kInt, "--id", nullptr, 1},
         {"--name", '\0', ValueKind::kString, "--name", nullptr, 1},
@@ -2345,10 +2368,45 @@ const Spec kAstConditionsSpec = {
     true,
 };
 
-const Spec kAstCacheBuildSpec = {
-    "cidx ast cache build",
-    kAstCacheBuildUsage,
-    kAstCacheBuildHelp,
+// -- cache leaf specs (v0.53.0 regrouping: `cache pch ...` + `cache ast ...`) --
+
+const Spec kCachePchBuildSpec = {
+    "cidx cache pch build",
+    kCachePchBuildUsage,
+    kCachePchBuildHelp,
+    {
+        {"--db", '\0', ValueKind::kString, "--db"},
+        {"--add", '\0', ValueKind::kString, "--add", nullptr, 0, true},
+        {"--include", '\0', ValueKind::kString, "--include", nullptr, 0, true},
+        {"--driver", '\0', ValueKind::kString, "--driver"},
+        {"--std", '\0', ValueKind::kString, "--std"},
+        {"--force", '\0', ValueKind::kNone, "--force"},
+        {"--from-corpus", '\0', ValueKind::kNone, "--from-corpus"},
+        {"--coverage", '\0', ValueKind::kString, "--coverage"},
+        {"--min-tus", '\0', ValueKind::kString, "--min-tus"},
+        {"--jobs", '\0', ValueKind::kString, "--jobs"},
+    },
+    {},
+    false,
+    {},
+};
+
+const Spec kCachePchStatusSpec = {
+    "cidx cache pch status", kCachePchStatusUsage, kCachePchStatusHelp,
+    {},                      {},                   false,
+    {},
+};
+
+const Spec kCachePchClearSpec = {
+    "cidx cache pch clear", kCachePchClearUsage, kCachePchClearHelp,
+    {},                     {},                  false,
+    {},
+};
+
+const Spec kCacheAstBuildSpec = {
+    "cidx cache ast build",
+    kCacheAstBuildUsage,
+    kCacheAstBuildHelp,
     {AST_COMMON_OPTS},
     {"target"},
     false,
@@ -2357,14 +2415,13 @@ const Spec kAstCacheBuildSpec = {
     true,
 };
 
-// status and clear have identical shape to build.
-const Spec kAstCacheStatusSpec = {
-    "cidx ast cache status", kAstCacheBuildUsage, kAstCacheBuildHelp,
-    {AST_COMMON_OPTS},       {"target"},          false,
-    {},                      {},                  true,
+const Spec kCacheAstStatusSpec = {
+    "cidx cache ast status", kCacheAstStatusUsage, kCacheAstStatusHelp,
+    {AST_COMMON_OPTS},       {"target"},           false,
+    {},                      {},                   true,
 };
-const Spec kAstCacheClearSpec = {
-    "cidx ast cache clear", kAstCacheBuildUsage, kAstCacheBuildHelp,
+const Spec kCacheAstClearSpec = {
+    "cidx cache ast clear", kCacheAstClearUsage, kCacheAstClearHelp,
     {AST_COMMON_OPTS},      {"target"},          false,
     {},                     {},                  true,
 };
@@ -2372,171 +2429,29 @@ const Spec kAstCacheClearSpec = {
 #undef AST_COMMON_OPTS
 #undef AST_CACHE_OPTS
 
-// -- component leaf specs (v14) ----------------------------------------------
-
-const std::vector<std::string> kComponentWhats = {"show", "set-version"};
-
-const Spec kComponentShowSpec = {
-    "cidx component show",
-    kComponentShowUsage,
-    kComponentShowHelp,
-    {
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-    },
-    {"NAME"},
-    false,
-    {"NAME"},
-};
-
-const Spec kComponentSetVersionSpec = {
-    "cidx component set-version",
-    kComponentSetVersionUsage,
-    kComponentSetVersionHelp,
-    {
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-    },
-    {"NAME", "VERSION"}, // VERSION is optional (nargs=?)
-    true,                // rest: captures any surplus (including the optional VERSION)
-    {"NAME"},
-};
-
-// -- repo leaf specs (v23) ---------------------------------------------------
-
-const Spec kRepoListSpec = {
-    "cidx repo list",
-    kRepoListUsage,
-    kRepoListHelp,
-    {
-        {"--kind", '\0', ValueKind::kString, "--kind", &kComponentKinds, 0},
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-    },
-    {"pattern"}, // optional (not in required set)
-    false,
-    {},
-};
-
-const Spec kRepoShowSpec = {
-    "cidx repo show",
-    kRepoShowUsage,
-    kRepoShowHelp,
-    {
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-    },
-    {"NAME"},
-    false,
-    {"NAME"},
-};
-
-const Spec kRepoAddCloneSpec = {
-    "cidx repo add-clone",
-    kRepoAddCloneUsage,
-    kRepoAddCloneHelp,
-    {
-        {"--label", '\0', ValueKind::kString, "--label", nullptr, 0},
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-    },
-    {"NAME", "PATH"},
-    false,
-    {"NAME", "PATH"},
-};
-
-const Spec kRepoSwitchSpec = {
-    "cidx repo switch",
-    kRepoSwitchUsage,
-    kRepoSwitchHelp,
-    {
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-    },
-    {"NAME", "TARGET"},
-    false,
-    {"NAME", "TARGET"},
-};
-
-const Spec kRepoRmSpec = {
-    "cidx repo rm",
-    kRepoRmUsage,
-    kRepoRmHelp,
-    {
-        {"--delete-components", '\0', ValueKind::kNone, "--delete-components",
-         nullptr, 0},
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-    },
-    {"NAME"},
-    false,
-    {"NAME"},
-};
-
-// -- label leaf specs (v14) --------------------------------------------------
-
-const std::vector<std::string> kLabelWhats = {"add", "rm", "list", "resolve"};
-
-const Spec kLabelAddSpec = {
-    "cidx label add",
-    kLabelAddUsage,
-    kLabelAddHelp,
-    {
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-    },
-    {"NAME", "PATH"},
-    false,
-    {"NAME", "PATH"},
-};
-
-const Spec kLabelRmSpec = {
-    "cidx label rm",
-    kLabelRmUsage,
-    kLabelRmHelp,
-    {
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-    },
-    {"NAME"},
-    false,
-    {"NAME"},
-};
-
-const Spec kLabelListSpec = {
-    "cidx label list",
-    kLabelListUsage,
-    kLabelListHelp,
-    {
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-    },
-    {},
-    false,
-    {},
-};
-
-const Spec kLabelResolveSpec = {
-    "cidx label resolve",
-    kLabelResolveUsage,
-    kLabelResolveHelp,
-    {
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-        {"--no-autoderive-labels", '\0', ValueKind::kNone,
-         "--no-autoderive-labels", nullptr, 0},
-    },
-    {"PATH"},
-    false,
-    {"PATH"},
-};
-
-const Spec kVerifySpec = {
-    "cidx verify",
-    kVerifyUsage,
-    kVerifyHelp,
-    {
-        {"--component", 'c', ValueKind::kString, "--component/-c", nullptr, 0},
-        {"--all", '\0', ValueKind::kNone, "--all", nullptr, 0},
-        {"--db", '\0', ValueKind::kString, "--db", nullptr, 0},
-    },
-    {}, // no positionals
-    false,
-    {}, // nothing required
-};
-
 } // namespace
 
 namespace {
+
+// Shared filler for the ast-common option block (ast dump/locals/conditions
+// and cache ast build/status/clear).
+void fill_ast_common(const ParseState &st, ParsedArgs &pa) {
+  pa.ast_usr = opt_value(st, "--usr");
+  if (const auto v = opt_value(st, "--id")) {
+    long parsed = 0;
+    parse_py_int(*v, parsed);
+    pa.ast_id = static_cast<int64_t>(parsed);
+  }
+  pa.name = opt_value(st, "--name");
+  pa.kind = opt_value(st, "--kind");
+  pa.first = st.flags.count("--first") != 0;
+  pa.index_db = opt_value(st, "--db");
+  pa.ast_json = st.flags.count("--json") != 0;
+  if (!st.positionals.empty()) {
+    pa.target = st.positionals[0];
+  }
+  pa.rest = st.rest;
+}
 
 bool parse_graph_command(const std::vector<std::string> &argv, std::size_t i,
                          std::vector<std::string> &extras, ParsedArgs &pa) {
@@ -2689,31 +2604,13 @@ bool parse_ast_command(const std::vector<std::string> &argv, std::size_t i,
   }
   pa.what = *what.command;
 
-  auto fill_common = [&](const ParseState &st) {
-    pa.ast_usr = opt_value(st, "--usr");
-    if (const auto v = opt_value(st, "--id")) {
-      long parsed = 0;
-      parse_py_int(*v, parsed);
-      pa.ast_id = static_cast<int64_t>(parsed);
-    }
-    pa.name = opt_value(st, "--name");
-    pa.kind = opt_value(st, "--kind");
-    pa.first = st.flags.count("--first") != 0;
-    pa.index_db = opt_value(st, "--db");
-    pa.ast_json = st.flags.count("--json") != 0;
-    if (!st.positionals.empty()) {
-      pa.target = st.positionals[0];
-    }
-    pa.rest = st.rest;
-  };
-
   if (pa.what == "dump") {
     ParseState st = parse_leaf(kAstDumpSpec, argv, what.next, extras);
     if (st.help) {
       pa.help_text = kAstDumpHelp;
       return true;
     }
-    fill_common(st);
+    fill_ast_common(st, pa);
     pa.depth = int_value(st, "--depth", 0);
     pa.tokens = st.flags.count("--tokens") != 0;
     pa.types = st.flags.count("--types") != 0;
@@ -2724,74 +2621,47 @@ bool parse_ast_command(const std::vector<std::string> &argv, std::size_t i,
       pa.help_text = kAstLocalsHelp;
       return true;
     }
-    fill_common(st);
+    fill_ast_common(st, pa);
     pa.params = st.flags.count("--params") != 0;
     pa.use_cache = st.flags.count("--no-cache") == 0;
-  } else if (pa.what == "conditions") {
+  } else {
     ParseState st = parse_leaf(kAstConditionsSpec, argv, what.next, extras);
     if (st.help) {
       pa.help_text = kAstConditionsHelp;
       return true;
     }
-    fill_common(st);
+    fill_ast_common(st, pa);
     pa.cond_ast = st.flags.count("--ast") != 0;
     pa.use_cache = st.flags.count("--no-cache") == 0;
-  } else {
-    CommandScan csub = scan_command(argv, what.next, extras);
-    if (csub.help) {
-      pa.help_text = kAstCacheHelp;
-      return true;
-    }
-    if (!csub.command) {
-      fail(kAstCacheUsage, "cidx ast cache",
-           "the following arguments are required: cache_action");
-    }
-    if (!contains(kAstCacheWhats, *csub.command)) {
-      fail(kAstCacheUsage, "cidx ast cache",
-           "argument cache_action: invalid choice: '" + *csub.command +
-               "' (choose from " + join(kAstCacheWhats, ", ") + ")");
-    }
-    pa.cache_action = *csub.command;
-    const Spec &spec = (pa.cache_action == "build")    ? kAstCacheBuildSpec
-                       : (pa.cache_action == "status") ? kAstCacheStatusSpec
-                                                       : kAstCacheClearSpec;
-    ParseState st = parse_leaf(spec, argv, csub.next, extras);
-    if (st.help) {
-      if (pa.cache_action == "status") {
-        pa.help_text = kAstCacheStatusHelp;
-      } else if (pa.cache_action == "clear") {
-        pa.help_text = kAstCacheClearHelp;
-      } else {
-        pa.help_text = kAstCacheBuildHelp;
-      }
-      return true;
-    }
-    fill_common(st);
   }
   return false;
 }
 
-bool parse_pch_command(const std::vector<std::string> &argv, std::size_t i,
-                       std::vector<std::string> &extras, ParsedArgs &pa) {
+// `cidx cache pch build|status|clear` — internally command="pch" (the
+// handler dispatch in commands.cpp is unchanged by the v0.53.0 regrouping).
+bool parse_cache_pch_command(const std::vector<std::string> &argv,
+                             std::size_t i, std::vector<std::string> &extras,
+                             ParsedArgs &pa) {
+  pa.command = "pch";
   CommandScan what = scan_command(argv, i, extras);
   if (what.help) {
-    pa.help_text = kPchHelp;
+    pa.help_text = kCachePchHelp;
     return true;
   }
   if (!what.command) {
-    fail(kPchUsage, "cidx pch",
+    fail(kCachePchUsage, "cidx cache pch",
          "the following arguments are required: pch_action");
   }
   if (!contains(kPchWhats, *what.command)) {
-    fail(kPchUsage, "cidx pch",
+    fail(kCachePchUsage, "cidx cache pch",
          "argument pch_action: invalid choice: '" + *what.command +
              "' (choose from " + join(kPchWhats, ", ") + ")");
   }
   pa.what = *what.command;
   if (pa.what == "build") {
-    ParseState st = parse_leaf(kPchBuildSpec, argv, what.next, extras);
+    ParseState st = parse_leaf(kCachePchBuildSpec, argv, what.next, extras);
     if (st.help) {
-      pa.help_text = kPchBuildHelp;
+      pa.help_text = kCachePchBuildHelp;
       return true;
     }
     pa.index_db = opt_value(st, "--db");
@@ -2811,17 +2681,116 @@ bool parse_pch_command(const std::vector<std::string> &argv, std::size_t i,
       pa.pch_jobs = std::stoi(*jb);
     }
   } else if (pa.what == "status") {
-    ParseState st = parse_leaf(kPchStatusSpec, argv, what.next, extras);
+    ParseState st = parse_leaf(kCachePchStatusSpec, argv, what.next, extras);
     if (st.help) {
-      pa.help_text = kPchStatusHelp;
+      pa.help_text = kCachePchStatusHelp;
       return true;
     }
   } else {
-    ParseState st = parse_leaf(kPchClearSpec, argv, what.next, extras);
+    ParseState st = parse_leaf(kCachePchClearSpec, argv, what.next, extras);
     if (st.help) {
-      pa.help_text = kPchClearHelp;
+      pa.help_text = kCachePchClearHelp;
       return true;
     }
+  }
+  return false;
+}
+
+// `cidx cache ast build|status|clear` — internally command="ast", what="cache"
+// with cache_action, matching the pre-regrouping dispatch.
+bool parse_cache_ast_command(const std::vector<std::string> &argv,
+                             std::size_t i, std::vector<std::string> &extras,
+                             ParsedArgs &pa) {
+  pa.command = "ast";
+  pa.what = "cache";
+  CommandScan csub = scan_command(argv, i, extras);
+  if (csub.help) {
+    pa.help_text = kCacheAstHelp;
+    return true;
+  }
+  if (!csub.command) {
+    fail(kCacheAstUsage, "cidx cache ast",
+         "the following arguments are required: cache_action");
+  }
+  if (!contains(kAstCacheWhats, *csub.command)) {
+    fail(kCacheAstUsage, "cidx cache ast",
+         "argument cache_action: invalid choice: '" + *csub.command +
+             "' (choose from " + join(kAstCacheWhats, ", ") + ")");
+  }
+  pa.cache_action = *csub.command;
+  const Spec &spec = (pa.cache_action == "build")    ? kCacheAstBuildSpec
+                     : (pa.cache_action == "status") ? kCacheAstStatusSpec
+                                                     : kCacheAstClearSpec;
+  ParseState st = parse_leaf(spec, argv, csub.next, extras);
+  if (st.help) {
+    if (pa.cache_action == "status") {
+      pa.help_text = kCacheAstStatusHelp;
+    } else if (pa.cache_action == "clear") {
+      pa.help_text = kCacheAstClearHelp;
+    } else {
+      pa.help_text = kCacheAstBuildHelp;
+    }
+    return true;
+  }
+  fill_ast_common(st, pa);
+  return false;
+}
+
+bool parse_cache_command(const std::vector<std::string> &argv, std::size_t i,
+                         std::vector<std::string> &extras, ParsedArgs &pa) {
+  CommandScan what = scan_command(argv, i, extras);
+  if (what.help) {
+    pa.help_text = kCacheHelp;
+    return true;
+  }
+  if (!what.command) {
+    fail(kCacheUsage, "cidx cache",
+         "the following arguments are required: what");
+  }
+  if (!contains(kCacheWhats, *what.command)) {
+    fail(kCacheUsage, "cidx cache",
+         "argument what: invalid choice: '" + *what.command +
+             "' (choose from " + join(kCacheWhats, ", ") + ")");
+  }
+  if (*what.command == "pch") {
+    return parse_cache_pch_command(argv, what.next, extras, pa);
+  }
+  return parse_cache_ast_command(argv, what.next, extras, pa);
+}
+
+bool parse_db_command(const std::vector<std::string> &argv, std::size_t i,
+                      std::vector<std::string> &extras, ParsedArgs &pa) {
+  CommandScan what = scan_command(argv, i, extras);
+  if (what.help) {
+    pa.help_text = kDbHelp;
+    return true;
+  }
+  if (!what.command) {
+    fail(kDbUsage, "cidx db", "the following arguments are required: what");
+  }
+  if (!contains(kDbWhats, *what.command)) {
+    fail(kDbUsage, "cidx db",
+         "argument what: invalid choice: '" + *what.command +
+             "' (choose from " + join(kDbWhats, ", ") + ")");
+  }
+  if (*what.command == "migrate") {
+    pa.command = "migrate";
+    ParseState st = parse_leaf(kDbMigrateSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kDbMigrateHelp;
+      return true;
+    }
+    pa.index_db = opt_value(st, "--db");
+  } else {
+    pa.command = "verify";
+    ParseState st = parse_leaf(kDbVerifySpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kDbVerifyHelp;
+      return true;
+    }
+    pa.component = opt_value(st, "--component");
+    pa.all = st.flags.count("--all") != 0;
+    pa.index_db = opt_value(st, "--db");
   }
   return false;
 }
@@ -2844,8 +2813,39 @@ bool parse_component_command(const std::vector<std::string> &argv,
          "argument what: invalid choice: '" + *what.command +
              "' (choose from " + join(kComponentWhats, ", ") + ")");
   }
-  pa.what = *what.command;
-  if (pa.what == "show") {
+  const std::string &sub = *what.command;
+  if (sub == "add") {
+    pa.command = "add-source";
+    ParseState st = parse_leaf(kComponentAddSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kComponentAddHelp;
+      return true;
+    }
+    pa.path = st.values["--path"];
+    pa.name = opt_value(st, "--name");
+    pa.repo = opt_value(st, "--repo");
+    pa.kind = opt_value(st, "--kind");
+    if (!pa.kind) {
+      pa.kind = "repo"; // argparse default
+    }
+    pa.no_git = st.flags.count("--no-git") != 0;
+    pa.version_str = opt_value(st, "--version");
+    pa.no_detect_version = st.flags.count("--no-detect-version") != 0;
+  } else if (sub == "list" || sub == "ls") {
+    pa.command = "list";
+    pa.what = "components";
+    ParseState st = parse_leaf(kComponentListSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kComponentListHelp;
+      return true;
+    }
+    if (!st.positionals.empty()) {
+      pa.pattern = st.positionals[0];
+    }
+    pa.kind = opt_value(st, "--kind");
+  } else if (sub == "show") {
+    pa.command = "component";
+    pa.what = "show";
     ParseState st = parse_leaf(kComponentShowSpec, argv, what.next, extras);
     if (st.help) {
       pa.help_text = kComponentShowHelp;
@@ -2853,8 +2853,11 @@ bool parse_component_command(const std::vector<std::string> &argv,
     }
     pa.name = st.positionals[0];
     pa.index_db = opt_value(st, "--db");
-  } else {
-    ParseState st = parse_leaf(kComponentSetVersionSpec, argv, what.next, extras);
+  } else if (sub == "set-version") {
+    pa.command = "component";
+    pa.what = "set-version";
+    ParseState st =
+        parse_leaf(kComponentSetVersionSpec, argv, what.next, extras);
     if (st.help) {
       pa.help_text = kComponentSetVersionHelp;
       return true;
@@ -2866,6 +2869,31 @@ bool parse_component_command(const std::vector<std::string> &argv,
       pa.version_str = st.rest[0];
     }
     pa.index_db = opt_value(st, "--db");
+  } else if (sub == "compile-commands") {
+    pa.command = "dump-compile-commands";
+    ParseState st = parse_leaf(kComponentCcSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kComponentCcHelp;
+      return true;
+    }
+    pa.component = st.positionals[0];
+    pa.index_db = opt_value(st, "--db");
+  } else { // rm
+    pa.command = "delete";
+    pa.what = "component";
+    ParseState st = parse_leaf(kComponentRmSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kComponentRmHelp;
+      return true;
+    }
+    if (const std::optional<std::string> id = opt_value(st, "--id")) {
+      long parsed = 0;
+      parse_py_int(*id, parsed); // validated at encounter time
+      pa.del_id = static_cast<int64_t>(parsed);
+    }
+    pa.name = opt_value(st, "--name");
+    pa.del_path = opt_value(st, "--path");
+    pa.dry_run = st.flags.count("--dry-run") != 0;
   }
   return false;
 }
@@ -2924,6 +2952,18 @@ bool parse_repo_command(const std::vector<std::string> &argv, std::size_t i,
     pa.name = st.positionals[0];
     pa.target = st.positionals[1];
     pa.index_db = opt_value(st, "--db");
+  } else if (pa.what == "realias") {
+    pa.command = "realias";
+    ParseState st = parse_leaf(kRepoRealiasSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kRepoRealiasHelp;
+      return true;
+    }
+    // Optional COMPONENT positional collected via rest.
+    if (!st.rest.empty()) {
+      pa.component = st.rest[0];
+    }
+    pa.index_db = opt_value(st, "--db");
   } else {
     ParseState st = parse_leaf(kRepoRmSpec, argv, what.next, extras);
     if (st.help) {
@@ -2937,57 +2977,201 @@ bool parse_repo_command(const std::vector<std::string> &argv, std::size_t i,
   return false;
 }
 
-bool parse_label_command(const std::vector<std::string> &argv, std::size_t i,
-                         std::vector<std::string> &extras, ParsedArgs &pa) {
+bool parse_dir_command(const std::vector<std::string> &argv, std::size_t i,
+                       std::vector<std::string> &extras, ParsedArgs &pa) {
   CommandScan what = scan_command(argv, i, extras);
   if (what.help) {
-    pa.help_text = kLabelHelp;
+    pa.help_text = kDirHelp;
     return true;
   }
   if (!what.command) {
-    fail(kLabelUsage, "cidx label",
+    fail(kDirUsage, "cidx dir", "the following arguments are required: what");
+  }
+  if (!contains(kDirWhats, *what.command)) {
+    fail(kDirUsage, "cidx dir",
+         "argument what: invalid choice: '" + *what.command +
+             "' (choose from " + join(kDirWhats, ", ") + ")");
+  }
+  const std::string &sub = *what.command;
+  if (sub == "list" || sub == "ls") {
+    pa.command = "list";
+    pa.what = "dirs";
+    ParseState st = parse_leaf(kDirListSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kDirListHelp;
+      return true;
+    }
+    if (!st.positionals.empty()) {
+      pa.pattern = st.positionals[0];
+    }
+    pa.component = opt_value(st, "--component");
+  } else { // rm
+    pa.command = "delete";
+    pa.what = "dir";
+    ParseState st = parse_leaf(kDirRmSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kDirRmHelp;
+      return true;
+    }
+    if (const std::optional<std::string> id = opt_value(st, "--id")) {
+      long parsed = 0;
+      parse_py_int(*id, parsed);
+      pa.del_id = static_cast<int64_t>(parsed);
+    }
+    pa.del_path = opt_value(st, "--path");
+    pa.component = opt_value(st, "--component");
+    pa.dry_run = st.flags.count("--dry-run") != 0;
+  }
+  return false;
+}
+
+bool parse_file_command(const std::vector<std::string> &argv, std::size_t i,
+                        std::vector<std::string> &extras, ParsedArgs &pa) {
+  CommandScan what = scan_command(argv, i, extras);
+  if (what.help) {
+    pa.help_text = kFileHelp;
+    return true;
+  }
+  if (!what.command) {
+    fail(kFileUsage, "cidx file", "the following arguments are required: what");
+  }
+  if (!contains(kFileWhats, *what.command)) {
+    fail(kFileUsage, "cidx file",
+         "argument what: invalid choice: '" + *what.command +
+             "' (choose from " + join(kFileWhats, ", ") + ")");
+  }
+  const std::string &sub = *what.command;
+  if (sub == "list" || sub == "ls") {
+    pa.command = "list";
+    pa.what = "files";
+    ParseState st = parse_leaf(kFileListSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kFileListHelp;
+      return true;
+    }
+    if (!st.positionals.empty()) {
+      pa.pattern = st.positionals[0];
+    }
+    pa.component = opt_value(st, "--component");
+    pa.dir = opt_value(st, "--dir");
+    pa.indexed = st.flags.count("--indexed") != 0;
+    pa.pending = st.flags.count("--pending") != 0;
+  } else if (sub == "show") {
+    pa.command = "show";
+    pa.what = "file";
+    ParseState st = parse_leaf(kFileShowSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kFileShowHelp;
+      return true;
+    }
+    pa.file = st.positionals[0];
+    pa.component = opt_value(st, "--component");
+  } else if (sub == "flags") {
+    pa.command = "file";
+    ParseState st = parse_leaf(kFileFlagsSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kFileFlagsHelp;
+      return true;
+    }
+    pa.target = st.positionals[0];
+    pa.op = st.rest; // REMAINDER tail: the operation + its args, verbatim
+    pa.index_db = opt_value(st, "--db");
+  } else if (sub == "set") {
+    pa.command = "set";
+    ParseState st = parse_leaf(kFileSetSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kFileSetHelp;
+      return true;
+    }
+    // assignment = the fixed positional plus any surplus (nargs="+").
+    pa.assignment.push_back(st.positionals[0]);
+    for (const std::string &tok : st.rest) {
+      pa.assignment.push_back(tok);
+    }
+    pa.component = opt_value(st, "--component");
+    pa.file_filter = opt_value(st, "--file");
+    pa.index_db = opt_value(st, "--db");
+    pa.dry_run = st.flags.count("--dry-run") != 0;
+  } else { // rm
+    pa.command = "delete";
+    pa.what = "file";
+    ParseState st = parse_leaf(kFileRmSpec, argv, what.next, extras);
+    if (st.help) {
+      pa.help_text = kFileRmHelp;
+      return true;
+    }
+    if (const std::optional<std::string> id = opt_value(st, "--id")) {
+      long parsed = 0;
+      parse_py_int(*id, parsed);
+      pa.del_id = static_cast<int64_t>(parsed);
+    }
+    pa.name = opt_value(st, "--name");
+    pa.del_path = opt_value(st, "--path");
+    pa.component = opt_value(st, "--component");
+    pa.dry_run = st.flags.count("--dry-run") != 0;
+  }
+  return false;
+}
+
+bool parse_symbol_command(const std::vector<std::string> &argv, std::size_t i,
+                          std::vector<std::string> &extras, ParsedArgs &pa) {
+  CommandScan what = scan_command(argv, i, extras);
+  if (what.help) {
+    pa.help_text = kSymbolHelp;
+    return true;
+  }
+  if (!what.command) {
+    fail(kSymbolUsage, "cidx symbol",
          "the following arguments are required: what");
   }
-  if (!contains(kLabelWhats, *what.command)) {
-    fail(kLabelUsage, "cidx label",
+  if (!contains(kSymbolWhats, *what.command)) {
+    fail(kSymbolUsage, "cidx symbol",
          "argument what: invalid choice: '" + *what.command +
-             "' (choose from " + join(kLabelWhats, ", ") + ")");
+             "' (choose from " + join(kSymbolWhats, ", ") + ")");
   }
-  pa.what = *what.command;
-  if (pa.what == "add") {
-    ParseState st = parse_leaf(kLabelAddSpec, argv, what.next, extras);
+  const std::string &sub = *what.command;
+  if (sub == "list" || sub == "ls") {
+    pa.command = "list";
+    pa.what = "symbols";
+    ParseState st = parse_leaf(kSymbolListSpec, argv, what.next, extras);
     if (st.help) {
-      pa.help_text = kLabelAddHelp;
+      pa.help_text = kSymbolListHelp;
       return true;
     }
-    pa.label_token = st.positionals[0];
-    pa.label_path = st.positionals[1];
-    pa.index_db = opt_value(st, "--db");
-  } else if (pa.what == "rm") {
-    ParseState st = parse_leaf(kLabelRmSpec, argv, what.next, extras);
+    if (!st.positionals.empty()) {
+      pa.pattern = st.positionals[0];
+    }
+    pa.component = opt_value(st, "--component");
+    pa.dir = opt_value(st, "--dir");
+    pa.file_filter = opt_value(st, "--file");
+    pa.kind = opt_value(st, "--kind");
+    pa.limit = int_value(st, "--limit", 50);
+  } else if (sub == "show") {
+    pa.command = "show";
+    pa.what = "symbol";
+    ParseState st = parse_leaf(kSymbolShowSpec, argv, what.next, extras);
     if (st.help) {
-      pa.help_text = kLabelRmHelp;
+      pa.help_text = kSymbolShowHelp;
       return true;
     }
-    pa.label_token = st.positionals[0];
-    pa.index_db = opt_value(st, "--db");
-  } else if (pa.what == "list") {
-    ParseState st = parse_leaf(kLabelListSpec, argv, what.next, extras);
+    pa.symbol = st.positionals[0];
+  } else { // rm
+    pa.command = "delete";
+    pa.what = "symbol";
+    ParseState st = parse_leaf(kSymbolRmSpec, argv, what.next, extras);
     if (st.help) {
-      pa.help_text = kLabelListHelp;
+      pa.help_text = kSymbolRmHelp;
       return true;
     }
-    pa.index_db = opt_value(st, "--db");
-  } else {
-    ParseState st = parse_leaf(kLabelResolveSpec, argv, what.next, extras);
-    if (st.help) {
-      pa.help_text = kLabelResolveHelp;
-      return true;
+    if (const std::optional<std::string> id = opt_value(st, "--id")) {
+      long parsed = 0;
+      parse_py_int(*id, parsed);
+      pa.del_id = static_cast<int64_t>(parsed);
     }
-    pa.label_path = st.positionals[0];
-    pa.no_autoderive_labels =
-        st.flags.count("--no-autoderive-labels") != 0;
-    pa.index_db = opt_value(st, "--db");
+    pa.name = opt_value(st, "--name");
+    pa.usr = opt_value(st, "--usr");
+    pa.component = opt_value(st, "--component");
+    pa.dry_run = st.flags.count("--dry-run") != 0;
   }
   return false;
 }
@@ -3015,7 +3199,7 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
          "argument command: invalid choice: '" + *top.command +
              "' (choose from " + join(kCommands, ", ") + ")");
   }
-  pa.command = *top.command == "ls" ? "list" : *top.command;
+  pa.command = *top.command;
   std::size_t i = top.next;
 
   if (pa.command == "init") {
@@ -3025,29 +3209,6 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       return pa;
     }
     pa.force = st.flags.count("--force") != 0;
-  } else if (pa.command == "migrate") {
-    ParseState st = parse_leaf(kMigrateSpec, argv, i, extras);
-    if (st.help) {
-      pa.help_text = kMigrateHelp;
-      return pa;
-    }
-    pa.index_db = opt_value(st, "--db");
-  } else if (pa.command == "add-source") {
-    ParseState st = parse_leaf(kAddSourceSpec, argv, i, extras);
-    if (st.help) {
-      pa.help_text = kAddSourceHelp;
-      return pa;
-    }
-    pa.path = st.values["--path"];
-    pa.name = opt_value(st, "--name");
-    pa.repo = opt_value(st, "--repo");
-    pa.kind = opt_value(st, "--kind");
-    if (!pa.kind) {
-      pa.kind = "repo"; // argparse default
-    }
-    pa.no_git = st.flags.count("--no-git") != 0;
-    pa.version_str = opt_value(st, "--version");
-    pa.no_detect_version = st.flags.count("--no-detect-version") != 0;
   } else if (pa.command == "import") {
     ParseState st = parse_leaf(kImportSpec, argv, i, extras);
     if (st.help) {
@@ -3059,26 +3220,6 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     pa.repo = opt_value(st, "--repo");
     pa.force = st.flags.count("--force") != 0;
     pa.no_alias = st.flags.count("--no-alias") != 0;
-  } else if (pa.command == "realias") {
-    ParseState st = parse_leaf(kRealiasSpec, argv, i, extras);
-    if (st.help) {
-      pa.help_text = kRealiasHelp;
-      return pa;
-    }
-    // Optional COMPONENT positional collected via rest.
-    if (!st.rest.empty()) {
-      pa.component = st.rest[0];
-    }
-    pa.index_db = opt_value(st, "--db");
-  } else if (pa.command == "verify") {
-    ParseState st = parse_leaf(kVerifySpec, argv, i, extras);
-    if (st.help) {
-      pa.help_text = kVerifyHelp;
-      return pa;
-    }
-    pa.component = opt_value(st, "--component");
-    pa.all = st.flags.count("--all") != 0;
-    pa.index_db = opt_value(st, "--db");
   } else if (pa.command == "index") {
     ParseState st = parse_leaf(kIndexSpec, argv, i, extras);
     if (st.help) {
@@ -3095,42 +3236,6 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
       pa.help_text = kResolveHelp;
       return pa;
     }
-  } else if (pa.command == "pch") {
-    if (parse_pch_command(argv, i, extras, pa)) {
-      return pa;
-    }
-  } else if (pa.command == "set") {
-    ParseState st = parse_leaf(kSetSpec, argv, i, extras);
-    if (st.help) {
-      pa.help_text = kSetHelp;
-      return pa;
-    }
-    // assignment = the fixed positional plus any surplus (nargs="+").
-    pa.assignment.push_back(st.positionals[0]);
-    for (const std::string &tok : st.rest) {
-      pa.assignment.push_back(tok);
-    }
-    pa.component = opt_value(st, "--component");
-    pa.file_filter = opt_value(st, "--file");
-    pa.index_db = opt_value(st, "--db");
-    pa.dry_run = st.flags.count("--dry-run") != 0;
-  } else if (pa.command == "file") {
-    ParseState st = parse_leaf(kFileSpec, argv, i, extras);
-    if (st.help) {
-      pa.help_text = kFileHelp;
-      return pa;
-    }
-    pa.target = st.positionals[0];
-    pa.op = st.rest; // REMAINDER tail: the operation + its args, verbatim
-    pa.index_db = opt_value(st, "--db");
-  } else if (pa.command == "dump-compile-commands") {
-    ParseState st = parse_leaf(kDumpCcSpec, argv, i, extras);
-    if (st.help) {
-      pa.help_text = kDumpCcHelp;
-      return pa;
-    }
-    pa.component = st.positionals[0];
-    pa.index_db = opt_value(st, "--db");
   } else if (pa.command == "search") {
     ParseState st = parse_leaf(kSearchSpec, argv, i, extras);
     if (st.help) {
@@ -3140,154 +3245,20 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     pa.pattern = st.positionals[0];
     pa.kind = opt_value(st, "--kind");
     pa.limit = int_value(st, "--limit", 25);
-  } else if (pa.command == "show") {
-    CommandScan what = scan_command(argv, i, extras);
-    if (what.help) {
-      pa.help_text = kShowHelp;
-      return pa;
-    }
-    if (!what.command) {
-      fail(kShowUsage, "cidx show",
-           "the following arguments are required: what");
-    }
-    if (!contains(kShowWhats, *what.command)) {
-      fail(kShowUsage, "cidx show",
-           "argument what: invalid choice: '" + *what.command +
-               "' (choose from " + join(kShowWhats, ", ") + ")");
-    }
-    pa.what = *what.command;
-    if (pa.what == "symbol") {
-      ParseState st = parse_leaf(kShowSymbolSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kShowSymbolHelp;
-        return pa;
-      }
-      pa.symbol = st.positionals[0];
-    } else {
-      ParseState st = parse_leaf(kShowFileSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kShowFileHelp;
-        return pa;
-      }
-      pa.file = st.positionals[0];
-      pa.component = opt_value(st, "--component");
-    }
-  } else if (pa.command == "list") { // list / ls
-    CommandScan what = scan_command(argv, i, extras);
-    if (what.help) {
-      pa.help_text = kListHelp;
-      return pa;
-    }
-    if (!what.command) {
-      fail(kListUsage, "cidx list",
-           "the following arguments are required: what");
-    }
-    if (!contains(kListWhats, *what.command)) {
-      fail(kListUsage, "cidx list",
-           "argument what: invalid choice: '" + *what.command +
-               "' (choose from " + join(kListWhats, ", ") + ")");
-    }
-    pa.what = *what.command;
-    if (pa.what == "components") {
-      ParseState st = parse_leaf(kListComponentsSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kListComponentsHelp;
-        return pa;
-      }
-      if (!st.positionals.empty()) {
-        pa.pattern = st.positionals[0];
-      }
-      pa.kind = opt_value(st, "--kind");
-    } else if (pa.what == "dirs") {
-      ParseState st = parse_leaf(kListDirsSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kListDirsHelp;
-        return pa;
-      }
-      if (!st.positionals.empty()) {
-        pa.pattern = st.positionals[0];
-      }
-      pa.component = opt_value(st, "--component");
-    } else if (pa.what == "files") {
-      ParseState st = parse_leaf(kListFilesSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kListFilesHelp;
-        return pa;
-      }
-      if (!st.positionals.empty()) {
-        pa.pattern = st.positionals[0];
-      }
-      pa.component = opt_value(st, "--component");
-      pa.dir = opt_value(st, "--dir");
-      pa.indexed = st.flags.count("--indexed") != 0;
-      pa.pending = st.flags.count("--pending") != 0;
-    } else { // symbols
-      ParseState st = parse_leaf(kListSymbolsSpec, argv, what.next, extras);
-      if (st.help) {
-        pa.help_text = kListSymbolsHelp;
-        return pa;
-      }
-      if (!st.positionals.empty()) {
-        pa.pattern = st.positionals[0];
-      }
-      pa.component = opt_value(st, "--component");
-      pa.dir = opt_value(st, "--dir");
-      pa.file_filter = opt_value(st, "--file");
-      pa.kind = opt_value(st, "--kind");
-      pa.limit = int_value(st, "--limit", 50);
-    }
-  } else if (pa.command == "delete") {
-    CommandScan what = scan_command(argv, i, extras);
-    if (what.help) {
-      pa.help_text = kDeleteHelp;
-      return pa;
-    }
-    if (!what.command) {
-      fail(kDeleteUsage, "cidx delete",
-           "the following arguments are required: what");
-    }
-    if (!contains(kDeleteWhats, *what.command)) {
-      fail(kDeleteUsage, "cidx delete",
-           "argument what: invalid choice: '" + *what.command +
-               "' (choose from " + join(kDeleteWhats, ", ") + ")");
-    }
-    pa.what = *what.command;
-    const Spec *spec = nullptr;
-    const char *leaf_help = nullptr;
-    if (pa.what == "component") {
-      spec = &kDeleteComponentSpec;
-      leaf_help = kDeleteComponentHelp;
-    } else if (pa.what == "dir") {
-      spec = &kDeleteDirSpec;
-      leaf_help = kDeleteDirHelp;
-    } else if (pa.what == "file") {
-      spec = &kDeleteFileSpec;
-      leaf_help = kDeleteFileHelp;
-    } else {
-      spec = &kDeleteSymbolSpec;
-      leaf_help = kDeleteSymbolHelp;
-    }
-    ParseState st = parse_leaf(*spec, argv, what.next, extras);
+  } else if (pa.command == "analyze") {
+    ParseState st = parse_leaf(kAnalyzeSpec, argv, i, extras);
     if (st.help) {
-      pa.help_text = leaf_help;
+      pa.help_text = kAnalyzeHelp;
       return pa;
     }
-    if (const std::optional<std::string> id = opt_value(st, "--id")) {
-      long parsed = 0;
-      parse_py_int(*id, parsed); // validated at encounter time
-      pa.del_id = static_cast<int64_t>(parsed);
-    }
-    pa.name = opt_value(st, "--name");
-    pa.del_path = opt_value(st, "--path");
-    pa.usr = opt_value(st, "--usr");
-    pa.component = opt_value(st, "--component");
-    pa.dry_run = st.flags.count("--dry-run") != 0;
-  } else if (pa.command == "graph") {
-    if (parse_graph_command(argv, i, extras, pa)) {
-      return pa;
-    }
-  } else if (pa.command == "ast") {
-    if (parse_ast_command(argv, i, extras, pa)) {
+    pa.analyze_rule = opt_value(st, "--rule");
+    pa.analyze_rules_file = opt_value(st, "--rules-file");
+    pa.analyze_list = st.flags.count("--list") != 0;
+    pa.analyze_export = opt_value(st, "--export-facts");
+    pa.analyze_jobs = int_value(st, "--jobs", 1);
+    pa.index_db = opt_value(st, "--db");
+  } else if (pa.command == "db") {
+    if (parse_db_command(argv, i, extras, pa)) {
       return pa;
     }
   } else if (pa.command == "component") {
@@ -3298,8 +3269,28 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     if (parse_repo_command(argv, i, extras, pa)) {
       return pa;
     }
-  } else if (pa.command == "label") {
-    if (parse_label_command(argv, i, extras, pa)) {
+  } else if (pa.command == "dir") {
+    if (parse_dir_command(argv, i, extras, pa)) {
+      return pa;
+    }
+  } else if (pa.command == "file") {
+    if (parse_file_command(argv, i, extras, pa)) {
+      return pa;
+    }
+  } else if (pa.command == "symbol") {
+    if (parse_symbol_command(argv, i, extras, pa)) {
+      return pa;
+    }
+  } else if (pa.command == "graph") {
+    if (parse_graph_command(argv, i, extras, pa)) {
+      return pa;
+    }
+  } else if (pa.command == "ast") {
+    if (parse_ast_command(argv, i, extras, pa)) {
+      return pa;
+    }
+  } else if (pa.command == "cache") {
+    if (parse_cache_command(argv, i, extras, pa)) {
       return pa;
     }
   }

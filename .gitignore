@@ -15,6 +15,3 @@ python/.ruff_cache/
 python/dist/
 python/build/
 python/*.egg-info/
-
-# Machine-local semantic index.
-/index.db

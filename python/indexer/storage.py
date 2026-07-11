@@ -2716,7 +2716,7 @@ class Storage:
     ) -> None:
         """Replace a file's stored compile flags (and optionally its driver) and
         mark it args_overridden=1 so a later `import` (without --force) keeps the
-        edit. Used by `cidx file -set-flag/-unset-flag/-import-args`."""
+        edit. Used by `cidx file flags -set-flag/-unset-flag/-import-args`."""
         opts = json.dumps(options)
         if update_driver:
             self._conn.execute(
@@ -2734,7 +2734,7 @@ class Storage:
     def update_file_compile_options(self, file_id: int, options: list[str]) -> None:
         """Replace a file's stored compile flags WITHOUT marking args_overridden.
 
-        Used by `cidx realias`, which rewrites include paths to <label> tokens as
+        Used by `cidx repo realias`, which rewrites include paths to <label> tokens as
         a portability transform (not a manual edit) -- a later `import` should be
         free to re-strip + re-alias these files."""
         self._conn.execute(

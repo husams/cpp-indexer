@@ -359,7 +359,7 @@ def test_cli_import_groups_and_switch_rebases(tmp_path):
     assert "repository '" in out.stdout
 
     # list components carries a repository column (id name kind ver repo path).
-    lc = _cidx(cache, "list", "components")
+    lc = _cidx(cache, "component", "list")
     assert lc.returncode == 0, lc.stderr
     assert repo_name in lc.stdout
 
@@ -406,7 +406,7 @@ def test_cli_import_groups_and_switch_rebases(tmp_path):
     con.close()
     assert stored_after == stored_before  # not one component.path row changed
 
-    lc2 = _cidx(cache, "list", "components")
+    lc2 = _cidx(cache, "component", "list")
     assert str(wt) in lc2.stdout
 
     # switch back by exact path.

@@ -834,7 +834,7 @@ class GraphQuery:
         if not os.path.exists(db_path):
             raise NoIndexError(
                 f"no cidx index at {db_path!r}. Build one with:\n"
-                "    cd <repo> && cidx add-source --path . && cidx import "
+                "    cd <repo> && cidx component add --path . && cidx import "
                 "--db <build> && cidx index && cidx resolve\n"
                 "or pass --db PATH / set $INDEXER_CACHE."
             )

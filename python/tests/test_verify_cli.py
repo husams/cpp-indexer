@@ -53,7 +53,7 @@ def tree(tmp_path):
 
 def test_verify_reports_each_status(tree, capsys):
     db_path, good = tree
-    rc, out, err = run(["verify", "--db", db_path], capsys)
+    rc, out, err = run(["db", "verify", "--db", db_path], capsys)
     assert rc == 1  # at least one component missing
     assert f"component  ok        good  {good}" in out
     assert "component  MISSING   gone  " in out
@@ -66,20 +66,20 @@ def test_verify_reports_each_status(tree, capsys):
 
 def test_verify_ok_file_hidden_without_all(tree, capsys):
     db_path, _ = tree
-    _, out, _ = run(["verify", "--db", db_path], capsys)
+    _, out, _ = run(["db", "verify", "--db", db_path], capsys)
     assert "file  ok" not in out  # OK files suppressed by default
 
 
 def test_verify_all_lists_ok_files(tree, capsys):
     db_path, good = tree
-    _, out, _ = run(["verify", "--db", db_path, "--all"], capsys)
+    _, out, _ = run(["db", "verify", "--db", db_path, "--all"], capsys)
     assert f"file  ok        {os.path.join(good, 'a.c')}" in out
 
 
 def test_verify_missing_file_listed_and_nonzero(tree, capsys):
     db_path, good = tree
     os.remove(os.path.join(good, "a.c"))  # the indexed file now vanishes
-    rc, out, _ = run(["verify", "--db", db_path], capsys)
+    rc, out, _ = run(["db", "verify", "--db", db_path], capsys)
     assert rc == 1
     assert f"file  MISSING   {os.path.join(good, 'a.c')}" in out
     assert "files: 0 ok, 1 missing" in out
@@ -87,7 +87,7 @@ def test_verify_missing_file_listed_and_nonzero(tree, capsys):
 
 def test_verify_scoped_clean_component_exits_zero(tree, capsys):
     db_path, _ = tree
-    rc, out, _ = run(["verify", "--db", db_path, "-c", "good"], capsys)
+    rc, out, _ = run(["db", "verify", "--db", db_path, "-c", "good"], capsys)
     assert rc == 0
     assert "components: 1 ok, 0 missing, 0 version-mismatch" in out
     assert "files: 1 ok, 0 missing" in out
@@ -97,6 +97,6 @@ def test_verify_scoped_clean_component_exits_zero(tree, capsys):
 
 def test_verify_unknown_component_errors(tree, capsys):
     db_path, _ = tree
-    rc, _, err = run(["verify", "--db", db_path, "-c", "nope"], capsys)
+    rc, _, err = run(["db", "verify", "--db", db_path, "-c", "nope"], capsys)
     assert rc == 1
     assert "error: no component named 'nope'" in err

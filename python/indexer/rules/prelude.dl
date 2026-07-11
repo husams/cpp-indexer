@@ -1,0 +1,39 @@
+// Fact relations exported from the cidx semantic index by `cidx analyze`.
+//
+// `cidx analyze --export-facts DIR` writes one TSV file per relation plus a
+// copy of this prelude (cidx_facts.dl) into DIR for standalone `souffle -F
+// DIR -D OUT prog.dl` runs.  `cidx analyze --rule/--rules-file` prepends this
+// prelude automatically, so rule programs must not re-declare these
+// relations.  NULL numbers are exported as 0 and NULL strings as "".
+
+.decl symbol(id:number, usr:symbol, name:symbol, qual_name:symbol,
+             kind:number, is_definition:number, file_id:number, line:number)
+.input symbol
+
+.decl symbol_kind(id:number, name:symbol)
+.input symbol_kind
+
+.decl edge(id:number, src:number, dst:number, kind:number, cnt:number)
+.input edge
+
+.decl edge_kind(id:number, name:symbol)
+.input edge_kind
+
+.decl edge_site(edge_id:number, file_id:number, line:number, col:number)
+.input edge_site
+
+.decl entity_node(id:number, kind:number)
+.input entity_node
+
+.decl entity_kind(id:number, name:symbol)
+.input entity_kind
+
+.decl entity_edge(src:number, dst:number, kind:number, via_member_id:number,
+                  access:number, is_virtual:number)
+.input entity_edge
+
+.decl entity_edge_kind(id:number, name:symbol)
+.input entity_edge_kind
+
+.decl file(id:number, path:symbol)
+.input file

@@ -310,25 +310,21 @@ struct GoldFixture {
 const char kTopUsage[] =
     "usage: cidx [-h] [--version]\n"
     "            "
-    "{init,migrate,add-source,import,realias,index,resolve,pch,component,repo,"
-    "label,"
-    "verify,"
-    "set,"
-    "file,"
-    "dump-compile-commands,search,show,list,ls,delete,graph,ast} "
-    "...\n";
+    "{init,import,index,resolve,search,analyze,db,component,repo,dir,file,"
+    "symbol,graph,ast,cache}\n"
+    "            ...\n";
 
 // Independent golden transcription of `cidx set -h` (Python 3.14 argparse,
 // COLUMNS=80) — catches drift if the production help_text ever changes.
 const char kSetUsage[] =
-    "usage: cidx set [-h] [--component NAME] [--file REL_PATH] [--db PATH]\n"
-    "                [--dry-run]\n"
-    "                FIELD=VALUE [FIELD=VALUE ...]\n";
+    "usage: cidx file set [-h] [--component NAME] [--file REL_PATH] [--db PATH]\n"
+    "                     [--dry-run]\n"
+    "                     FIELD=VALUE [FIELD=VALUE ...]\n";
 
 const char kSetHelp[] =
-    "usage: cidx set [-h] [--component NAME] [--file REL_PATH] [--db PATH]\n"
-    "                [--dry-run]\n"
-    "                FIELD=VALUE [FIELD=VALUE ...]\n"
+    "usage: cidx file set [-h] [--component NAME] [--file REL_PATH] [--db PATH]\n"
+    "                     [--dry-run]\n"
+    "                     FIELD=VALUE [FIELD=VALUE ...]\n"
     "\n"
     "positional arguments:\n"
     "  FIELD=VALUE           attribute assignment, e.g. 'pending=False' "
@@ -337,7 +333,8 @@ const char kSetHelp[] =
     "\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n"
-    "  --component, -c NAME  restrict to this component's files\n"
+    "  --component NAME, -c NAME\n"
+    "                        restrict to this component's files\n"
     "  --file REL_PATH       restrict to one file (path relative to component "
     "root)\n"
     "  --db PATH             operate on this index DB (default: the standard "
@@ -354,12 +351,12 @@ const char kSearchUsage[] =
     "                   pattern\n";
 
 const char kListFilesUsage[] =
-    "usage: cidx list files [-h] [--component NAME] [--dir PATH] [--indexed "
-    "|\n"
-    "                       --pending]\n"
-    "                       [pattern]\n";
+    "usage: cidx file list [-h] [--component NAME] [--dir PATH]\n"
+    "                      [--indexed | --pending]\n"
+    "                      [pattern]\n";
 
-const char kPchUsage[] = "usage: cidx pch [-h] {build,status,clear} ...\n";
+const char kPchUsage[] =
+    "usage: cidx cache pch [-h] {build,status,clear} ...\n";
 
 } // namespace
 
@@ -383,12 +380,8 @@ TEST_CASE("args: unknown command -> exit 2, invalid choice") {
   CHECK(f.msg ==
         std::string(kTopUsage) +
             "cidx: error: argument command: invalid choice: 'bogus' (choose "
-            "from init, migrate, add-source, import, realias, index, resolve, "
-            "pch, component, repo, label, verify, set, file, "
-            "dump-compile-commands, "
-            "search, "
-            "show, "
-            "list, ls, delete, graph, ast)\n");
+            "from init, import, index, resolve, search, analyze, db, "
+            "component, repo, dir, file, symbol, graph, ast, cache)\n");
 }
 
 TEST_CASE("args: pch build/status/clear parse + help (v0.17.0)") {
@@ -396,7 +389,7 @@ TEST_CASE("args: pch build/status/clear parse + help (v0.17.0)") {
   // option-looking values (-DA) need the inline = form -- argparse rejects
   // `--add -DA` as "expected one argument" (Python and C++ alike).
   cli::ParsedArgs pa = cli::parse_args(
-      {"pch", "build", "--db", "/x.db", "--add=-DA", "--add=-DB",
+      {"cache", "pch", "build", "--db", "/x.db", "--add=-DA", "--add=-DB",
        "--include=boost/optional.hpp", "--driver", "g++", "--std", "c++20",
        "--force"});
   CHECK(pa.command == "pch");
@@ -409,66 +402,66 @@ TEST_CASE("args: pch build/status/clear parse + help (v0.17.0)") {
   CHECK(pa.pch_std == std::optional<std::string>("c++20"));
   CHECK(pa.force);
 
-  CHECK(cli::parse_args({"pch", "status"}).what == "status");
-  CHECK(cli::parse_args({"pch", "clear"}).what == "clear");
+  CHECK(cli::parse_args({"cache", "pch", "status"}).what == "status");
+  CHECK(cli::parse_args({"cache", "pch", "clear"}).what == "clear");
 
   // help text on each leaf
-  pa = cli::parse_args({"pch", "--help"});
+  pa = cli::parse_args({"cache", "pch", "--help"});
   REQUIRE(pa.help_text);
   CHECK(pa.help_text->find("{build,status,clear}") != std::string::npos);
-  pa = cli::parse_args({"pch", "build", "-h"});
+  pa = cli::parse_args({"cache", "pch", "build", "-h"});
   REQUIRE(pa.help_text);
   CHECK(pa.help_text->find("extra header to add to the umbrella") !=
         std::string::npos);
 
   // missing / invalid sub-action -> exit 2 with argparse parity
-  ParseFail mf = parse_fail({"pch"});
+  ParseFail mf = parse_fail({"cache", "pch"});
   CHECK(mf.code == 2);
   CHECK(mf.msg ==
         std::string(kPchUsage) +
-            "cidx pch: error: the following arguments are required: "
+            "cidx cache pch: error: the following arguments are required: "
             "pch_action\n");
-  ParseFail bf = parse_fail({"pch", "bogus"});
+  ParseFail bf = parse_fail({"cache", "pch", "bogus"});
   CHECK(bf.code == 2);
   CHECK(bf.msg == std::string(kPchUsage) +
-                      "cidx pch: error: argument pch_action: invalid choice: "
-                      "'bogus' (choose from build, status, clear)\n");
+                      "cidx cache pch: error: argument pch_action: invalid "
+                      "choice: 'bogus' (choose from build, status, clear)\n");
 }
 
 TEST_CASE("args: file — REMAINDER captures the op tail verbatim") {
   // $ cidx file demo://src/a.c -set-flag -I/x -DFOO
   cli::ParsedArgs pa =
-      cli::parse_args({"file", "demo://src/a.c", "-set-flag", "-I/x", "-DFOO"});
+      cli::parse_args({"file", "flags", "demo://src/a.c", "-set-flag", "-I/x", "-DFOO"});
   CHECK(pa.command == "file");
   CHECK(pa.target == "demo://src/a.c");
   CHECK(pa.op == std::vector<std::string>{"-set-flag", "-I/x", "-DFOO"});
 
   // No op -> empty REMAINDER (the handler defaults to -dump-args).
-  pa = cli::parse_args({"file", "demo://src/a.c"});
+  pa = cli::parse_args({"file", "flags", "demo://src/a.c"});
   CHECK(pa.target == "demo://src/a.c");
   CHECK(pa.op.empty());
 
   // --db before the target is parsed as an option; the rest is the tail.
-  pa = cli::parse_args({"file", "--db", "/tmp/x.db", "demo://a.c", "-dump-args"});
+  pa = cli::parse_args({"file", "flags", "--db", "/tmp/x.db", "demo://a.c", "-dump-args"});
   CHECK(pa.index_db == "/tmp/x.db");
   CHECK(pa.target == "demo://a.c");
   CHECK(pa.op == std::vector<std::string>{"-dump-args"});
 }
 
 TEST_CASE("args: file — missing target -> exit 2, required positional") {
-  const ParseFail f = parse_fail({"file"});
+  const ParseFail f = parse_fail({"file", "flags"});
   CHECK(f.code == 2);
   CHECK(f.msg ==
-        "usage: cidx file [-h] [--db PATH] COMPONENT://PATH ...\n"
-        "cidx file: error: the following arguments are required: "
+        "usage: cidx file flags [-h] [--db PATH] COMPONENT://PATH ...\n"
+        "cidx file flags: error: the following arguments are required: "
         "COMPONENT://PATH\n");
 }
 
 TEST_CASE("args: file -h returns help text") {
-  const cli::ParsedArgs pa = cli::parse_args({"file", "-h"});
+  const cli::ParsedArgs pa = cli::parse_args({"file", "flags", "-h"});
   REQUIRE(pa.help_text);
   CHECK(*pa.help_text ==
-        "usage: cidx file [-h] [--db PATH] COMPONENT://PATH ...\n"
+        "usage: cidx file flags [-h] [--db PATH] COMPONENT://PATH ...\n"
         "\n"
         "positional arguments:\n"
         "  COMPONENT://PATH  file address, e.g. 'mylib://src/foo.c'\n"
@@ -484,16 +477,16 @@ TEST_CASE("args: file -h returns help text") {
 
 TEST_CASE("args: dump-compile-commands parses the component positional") {
   cli::ParsedArgs pa =
-      cli::parse_args({"dump-compile-commands", "--db", "/tmp/x.db", "demo"});
+      cli::parse_args({"component", "compile-commands", "--db", "/tmp/x.db", "demo"});
   CHECK(pa.command == "dump-compile-commands");
   CHECK(pa.component == "demo");
   CHECK(pa.index_db == "/tmp/x.db");
 
-  const ParseFail f = parse_fail({"dump-compile-commands"});
+  const ParseFail f = parse_fail({"component", "compile-commands"});
   CHECK(f.code == 2);
   CHECK(f.msg ==
-        "usage: cidx dump-compile-commands [-h] [--db PATH] COMPONENT\n"
-        "cidx dump-compile-commands: error: the following arguments are "
+        "usage: cidx component compile-commands [-h] [--db PATH] COMPONENT\n"
+        "cidx component compile-commands: error: the following arguments are "
         "required: COMPONENT\n");
 }
 
@@ -507,7 +500,7 @@ TEST_CASE("args: unknown flag -> exit 2, TOP-level unrecognized arguments") {
 
 TEST_CASE("args: extra positional -> exit 2, unrecognized arguments") {
   // $ python3 -m indexer show symbol 5 extra
-  const ParseFail f = parse_fail({"show", "symbol", "5", "extra"});
+  const ParseFail f = parse_fail({"symbol", "show", "5", "extra"});
   CHECK(f.code == 2);
   CHECK(f.msg == std::string(kTopUsage) +
                      "cidx: error: unrecognized arguments: extra\n");
@@ -543,19 +536,21 @@ TEST_CASE("args: subparser required check fires BEFORE top unrecognized") {
 
 TEST_CASE("args: missing required option -> exit 2 (add-source, import)") {
   // $ python3 -m indexer add-source
-  ParseFail f = parse_fail({"add-source"});
+  ParseFail f = parse_fail({"component", "add"});
   CHECK(f.code == 2);
   CHECK(f.msg ==
-        "usage: cidx add-source [-h] --path PATH [--name NAME] [--kind "
-        "{repo,external}]\n"
-        "                       [--no-git] [--version V] [--no-detect-version]\n"
-        "cidx add-source: error: the following arguments are required: "
+        "usage: cidx component add [-h] --path PATH [--name NAME] [--repo REPO]\n"
+        "                          [--kind {repo,external}] [--no-git] "
+        "[--version V]\n"
+        "                          [--no-detect-version]\n"
+        "cidx component add: error: the following arguments are required: "
         "--path\n");
   // $ python3 -m indexer import
   f = parse_fail({"import"});
   CHECK(f.code == 2);
   CHECK(f.msg ==
-        "usage: cidx import [-h] --db DB [--name NAME] [--force] [--no-alias]\n"
+        "usage: cidx import [-h] --db DB [--name NAME] [--repo REPO] [--force]\n"
+        "                   [--no-alias]\n"
         "cidx import: error: the following arguments are required: "
         "--db\n");
 }
@@ -568,10 +563,10 @@ TEST_CASE("args: option missing its value -> expected one argument") {
                      "cidx search: error: argument --limit: expected one "
                      "argument\n");
   // $ python3 -m indexer list dirs --component   (short-alias error name)
-  f = parse_fail({"list", "dirs", "--component"});
+  f = parse_fail({"dir", "list", "--component"});
   CHECK(f.code == 2);
-  CHECK(f.msg == "usage: cidx list dirs [-h] [--component NAME] [pattern]\n"
-                 "cidx list dirs: error: argument --component/-c: expected "
+  CHECK(f.msg == "usage: cidx dir list [-h] [--component NAME] [pattern]\n"
+                 "cidx dir list: error: argument --component/-c: expected "
                  "one argument\n");
 }
 
@@ -596,114 +591,113 @@ TEST_CASE("args: invalid choice -> exit 2 (both kind sets)") {
             "member, method, namespace, struct, type-alias, typedef, union, "
             "variable)\n");
   // $ python3 -m indexer add-source --path /tmp --kind bogus
-  f = parse_fail({"add-source", "--path", "/tmp", "--kind", "bogus"});
+  f = parse_fail({"component", "add", "--path", "/tmp", "--kind", "bogus"});
   CHECK(f.code == 2);
   CHECK(f.msg ==
-        "usage: cidx add-source [-h] --path PATH [--name NAME] [--kind "
-        "{repo,external}]\n"
-        "                       [--no-git] [--version V] [--no-detect-version]\n"
-        "cidx add-source: error: argument --kind: invalid choice: 'bogus' "
+        "usage: cidx component add [-h] --path PATH [--name NAME] [--repo REPO]\n"
+        "                          [--kind {repo,external}] [--no-git] "
+        "[--version V]\n"
+        "                          [--no-detect-version]\n"
+        "cidx component add: error: argument --kind: invalid choice: 'bogus' "
         "(choose from repo, external)\n");
 }
 
-TEST_CASE("args: show/list need a sub-command; invalid what -> exit 2") {
-  // $ python3 -m indexer show
-  ParseFail f = parse_fail({"show"});
+TEST_CASE("args: symbol/file need a sub-command; invalid what -> exit 2") {
+  // $ python3 -m indexer symbol
+  ParseFail f = parse_fail({"symbol"});
   CHECK(f.code == 2);
-  CHECK(f.msg == "usage: cidx show [-h] {symbol,file} ...\n"
-                 "cidx show: error: the following arguments are required: "
+  CHECK(f.msg == "usage: cidx symbol [-h] {list,ls,show,rm} ...\n"
+                 "cidx symbol: error: the following arguments are required: "
                  "what\n");
-  // $ python3 -m indexer show bogus
-  f = parse_fail({"show", "bogus"});
-  CHECK(f.msg == "usage: cidx show [-h] {symbol,file} ...\n"
-                 "cidx show: error: argument what: invalid choice: 'bogus' "
-                 "(choose from symbol, file)\n");
-  // $ python3 -m indexer ls bogus    (alias reports as `cidx list`)
-  f = parse_fail({"ls", "bogus"});
-  CHECK(f.msg == "usage: cidx list [-h] {components,dirs,files,symbols} ...\n"
-                 "cidx list: error: argument what: invalid choice: 'bogus' "
-                 "(choose from components, dirs, files, symbols)\n");
+  // $ python3 -m indexer symbol bogus
+  f = parse_fail({"symbol", "bogus"});
+  CHECK(f.msg == "usage: cidx symbol [-h] {list,ls,show,rm} ...\n"
+                 "cidx symbol: error: argument what: invalid choice: 'bogus' "
+                 "(choose from list, ls, show, rm)\n");
+  // $ python3 -m indexer file bogus
+  f = parse_fail({"file", "bogus"});
+  CHECK(f.msg == "usage: cidx file [-h] {list,ls,show,flags,set,rm} ...\n"
+                 "cidx file: error: argument what: invalid choice: 'bogus' "
+                 "(choose from list, ls, show, flags, set, rm)\n");
 }
 
 TEST_CASE("args: --indexed and --pending are mutually exclusive (exit 2)") {
   // $ python3 -m indexer list files --indexed --pending
-  ParseFail f = parse_fail({"list", "files", "--indexed", "--pending"});
+  ParseFail f = parse_fail({"file", "list", "--indexed", "--pending"});
   CHECK(f.code == 2);
   CHECK(f.msg == std::string(kListFilesUsage) +
-                     "cidx list files: error: argument --pending: not "
+                     "cidx file list: error: argument --pending: not "
                      "allowed with argument --indexed\n");
   // $ python3 -m indexer list files --pending --indexed   (order swaps)
-  f = parse_fail({"list", "files", "--pending", "--indexed"});
+  f = parse_fail({"file", "list", "--pending", "--indexed"});
   CHECK(f.msg == std::string(kListFilesUsage) +
-                     "cidx list files: error: argument --indexed: not "
+                     "cidx file list: error: argument --indexed: not "
                      "allowed with argument --pending\n");
 }
 
-TEST_CASE("args: delete needs a sub-command; invalid what -> exit 2") {
-  // $ python3 -m indexer delete
-  ParseFail f = parse_fail({"delete"});
+TEST_CASE("args: dir needs a sub-command; invalid what -> exit 2") {
+  // $ python3 -m indexer dir
+  ParseFail f = parse_fail({"dir"});
   CHECK(f.code == 2);
-  CHECK(f.msg == "usage: cidx delete [-h] {component,dir,file,symbol} ...\n"
-                 "cidx delete: error: the following arguments are required: "
+  CHECK(f.msg == "usage: cidx dir [-h] {list,ls,rm} ...\n"
+                 "cidx dir: error: the following arguments are required: "
                  "what\n");
-  // $ python3 -m indexer delete bogus
-  f = parse_fail({"delete", "bogus"});
-  CHECK(f.msg == "usage: cidx delete [-h] {component,dir,file,symbol} ...\n"
-                 "cidx delete: error: argument what: invalid choice: 'bogus' "
-                 "(choose from component, dir, file, symbol)\n");
+  // $ python3 -m indexer dir bogus
+  f = parse_fail({"dir", "bogus"});
+  CHECK(f.msg == "usage: cidx dir [-h] {list,ls,rm} ...\n"
+                 "cidx dir: error: argument what: invalid choice: 'bogus' "
+                 "(choose from list, ls, rm)\n");
 }
 
 TEST_CASE("args: delete requires one selector (required mutex group)") {
   // $ python3 -m indexer delete symbol   -> one of --id --name --usr required
-  ParseFail f = parse_fail({"delete", "symbol"});
+  ParseFail f = parse_fail({"symbol", "rm"});
   CHECK(f.code == 2);
   CHECK(f.msg ==
-        "usage: cidx delete symbol [-h] (--id ID | --name NAME | --usr USR)\n"
-        "                          [--component NAME] [--dry-run]\n"
-        "cidx delete symbol: error: one of the arguments --id --name --usr is "
+        "usage: cidx symbol rm [-h] (--id ID | --name NAME | --usr USR)\n"
+        "                      [--component NAME] [--dry-run]\n"
+        "cidx symbol rm: error: one of the arguments --id --name --usr is "
         "required\n");
   // dir's group is just --id | --path
-  f = parse_fail({"delete", "dir"});
+  f = parse_fail({"dir", "rm"});
   CHECK(f.msg ==
-        "usage: cidx delete dir [-h] (--id ID | --path PATH) [--component "
-        "NAME]\n"
-        "                       [--dry-run]\n"
-        "cidx delete dir: error: one of the arguments --id --path is "
+        "usage: cidx dir rm [-h] (--id ID | --path PATH) [--component NAME] "
+        "[--dry-run]\n"
+        "cidx dir rm: error: one of the arguments --id --path is "
         "required\n");
 }
 
 TEST_CASE("args: delete selectors are mutually exclusive (exit 2)") {
   // $ python3 -m indexer delete component --id 1 --name x
-  ParseFail f = parse_fail({"delete", "component", "--id", "1", "--name", "x"});
+  ParseFail f = parse_fail({"component", "rm", "--id", "1", "--name", "x"});
   CHECK(f.code == 2);
   CHECK(f.msg ==
-        "usage: cidx delete component [-h] (--id ID | --name NAME | --path "
-        "PATH)\n"
-        "                             [--dry-run]\n"
-        "cidx delete component: error: argument --name: not allowed with "
+        "usage: cidx component rm [-h] (--id ID | --name NAME | --path PATH)\n"
+        "                         [--dry-run]\n"
+        "cidx component rm: error: argument --name: not allowed with "
         "argument --id\n");
 }
 
 TEST_CASE("args: delete --id is int-typed (exit 2 on non-int)") {
   // $ python3 -m indexer delete file --id notanint
-  const ParseFail f = parse_fail({"delete", "file", "--id", "notanint"});
+  const ParseFail f = parse_fail({"file", "rm", "--id", "notanint"});
   CHECK(f.code == 2);
   CHECK(f.msg ==
-        "usage: cidx delete file [-h] (--id ID | --name NAME | --path PATH)\n"
-        "                        [--component NAME] [--dry-run]\n"
-        "cidx delete file: error: argument --id: invalid int value: "
+        "usage: cidx file rm [-h] (--id ID | --name NAME | --path PATH)\n"
+        "                    [--component NAME] [--dry-run]\n"
+        "cidx file rm: error: argument --id: invalid int value: "
         "'notanint'\n");
 }
 
 TEST_CASE("args: delete parses each selector + --component + --dry-run") {
-  cli::ParsedArgs pa = cli::parse_args({"delete", "symbol", "--id", "7"});
+  cli::ParsedArgs pa = cli::parse_args({"symbol", "rm", "--id", "7"});
   CHECK(pa.command == "delete");
   CHECK(pa.what == "symbol");
   REQUIRE(pa.del_id.has_value());
   CHECK(*pa.del_id == 7);
   CHECK_FALSE(pa.dry_run);
 
-  pa = cli::parse_args({"delete", "symbol", "--usr", "c:@F@multiply", "-c",
+  pa = cli::parse_args({"symbol", "rm", "--usr", "c:@F@multiply", "-c",
                         "proj", "--dry-run"});
   REQUIRE(pa.usr.has_value());
   CHECK(*pa.usr == "c:@F@multiply");
@@ -711,11 +705,11 @@ TEST_CASE("args: delete parses each selector + --component + --dry-run") {
   CHECK(*pa.component == "proj");
   CHECK(pa.dry_run);
 
-  pa = cli::parse_args({"delete", "component", "--path", "/tmp/repo"});
+  pa = cli::parse_args({"component", "rm", "--path", "/tmp/repo"});
   REQUIRE(pa.del_path.has_value());
   CHECK(*pa.del_path == "/tmp/repo");
 
-  pa = cli::parse_args({"delete", "file", "--name", "a.c"});
+  pa = cli::parse_args({"file", "rm", "--name", "a.c"});
   REQUIRE(pa.name.has_value());
   CHECK(*pa.name == "a.c");
 }
@@ -724,33 +718,33 @@ TEST_CASE("delete: functional — multi-match list+delete, dry-run, cascade") {
   GoldFixture g; // seeded: component 'gold' (id 1), files a.c/a.h, 6 symbols
   // dry-run previews without mutating
   CmdResult r =
-      run_cli({"delete", "symbol", "--name", "multiply", "--dry-run"}, g.cache);
+      run_cli({"symbol", "rm", "--name", "multiply", "--dry-run"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == "  #1  function  multiply\n"
                  "would delete 1 symbol\n");
   // symbol still present after dry-run
-  r = run_cli({"delete", "symbol", "--name", "multiply", "--dry-run"}, g.cache);
+  r = run_cli({"symbol", "rm", "--name", "multiply", "--dry-run"}, g.cache);
   CHECK(r.out == "  #1  function  multiply\n"
                  "would delete 1 symbol\n");
   // real delete by name
-  r = run_cli({"delete", "symbol", "--name", "multiply"}, g.cache);
+  r = run_cli({"symbol", "rm", "--name", "multiply"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == "  #1  function  multiply\n"
                  "deleted 1 symbol\n");
   // gone now -> 0 match -> exit 1, stderr
-  r = run_cli({"delete", "symbol", "--name", "multiply"}, g.cache);
+  r = run_cli({"symbol", "rm", "--name", "multiply"}, g.cache);
   CHECK(r.rc == 1);
   CHECK(r.err == "error: no symbol matches --name multiply\n");
   // delete file by basename cascades to its symbols (FK SET NULL -> purged)
-  r = run_cli({"delete", "file", "--name", "a.h"}, g.cache);
+  r = run_cli({"file", "rm", "--name", "a.h"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("  #2  {ROOT}/include/a.h\n") + "deleted 1 file\n");
   // delete the whole component (full cascade)
-  r = run_cli({"delete", "component", "--name", "gold"}, g.cache);
+  r = run_cli({"component", "rm", "--name", "gold"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out ==
         g.expect("  #1  gold (repo)  {ROOT}\n") + "deleted 1 component\n");
-  r = run_cli({"list", "components"}, g.cache);
+  r = run_cli({"component", "list"}, g.cache);
   CHECK(r.out == "0 component(s)\n");
 }
 
@@ -761,17 +755,17 @@ TEST_CASE("args: defaults — search 25, list symbols 50, add-source repo") {
   CHECK(!pa.kind);
   CHECK(*pa.pattern == "foo");
 
-  pa = cli::parse_args({"list", "symbols"});
+  pa = cli::parse_args({"symbol", "list"});
   CHECK(pa.what == "symbols");
   CHECK(pa.limit == 50);
   CHECK(!pa.pattern);
 
-  pa = cli::parse_args({"add-source", "--path", "/x"});
+  pa = cli::parse_args({"component", "add", "--path", "/x"});
   CHECK(*pa.kind == "repo");
 }
 
 TEST_CASE("args: ls aliases list") {
-  const cli::ParsedArgs pa = cli::parse_args({"ls", "components"});
+  const cli::ParsedArgs pa = cli::parse_args({"component", "ls"});
   CHECK(pa.command == "list");
   CHECK(pa.what == "components");
 }
@@ -781,7 +775,7 @@ TEST_CASE("args: --flag=value, glued -cVALUE, negative limit value") {
   cli::ParsedArgs pa = cli::parse_args({"search", "--kind=function", "foo"});
   CHECK(*pa.kind == "function");
   // $ python3 -m indexer list dirs -cmycomp           (accepted)
-  pa = cli::parse_args({"list", "dirs", "-cmycomp"});
+  pa = cli::parse_args({"dir", "list", "-cmycomp"});
   CHECK(*pa.component == "mycomp");
   // $ python3 -m indexer search foo --limit -5        (negative number OK)
   pa = cli::parse_args({"search", "foo", "--limit", "-5"});
@@ -825,7 +819,7 @@ TEST_CASE("args: --version sets the version flag (top level only)") {
   CHECK(pa.version);
   CHECK(!pa.help_text);
   CHECK(pa.command.empty()); // fires before the required-subcommand check
-  CHECK(std::string(cli::kVersion) == "0.52.0");
+  CHECK(std::string(cli::kVersion) == "0.53.0");
 
   // --version wins over a following (would-be) command, like argparse.
   pa = cli::parse_args({"--version", "search", "foo"});
@@ -849,50 +843,33 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "\n"
           "positional arguments:\n"
           "  "
-          "{init,migrate,add-source,import,realias,index,resolve,pch,component,"
-          "repo,"
-          "label,verify,"
-          "set,file,"
-          "dump-compile-commands,search,show,list,ls,delete,graph,ast}"
-          "\n"
+          "{init,import,index,resolve,search,analyze,db,component,repo,dir,"
+          "file,symbol,graph,ast,cache}\n"
           "    init                create a blank index database\n"
-          "    migrate             upgrade an existing index to the current "
-          "schema (in\n"
-          "                        place, no re-index)\n"
-          "    add-source          register a component\n"
           "    import              import a compile_commands.json\n"
-          "    realias             rewrite stored include paths to <label> tokens via "
-          "the registry\n"
           "    index               index imported C/C++ files\n"
           "    resolve             finalize cross-repo edges and roll up edge "
           "counts\n"
-          "    pch                 build & cache one shared system/C++ PCH to "
-          "speed up\n"
-          "                        indexing\n"
-          "    component           inspect or modify a component\n"
+          "    search              fuzzy-search symbols by qualified name\n"
+          "    analyze             run Souffle Datalog analyses over the "
+          "index\n"
+          "    db                  database maintenance (migrate, verify)\n"
+          "    component           manage components (add, list, show, "
+          "set-version,\n"
+          "                        compile-commands, rm)\n"
           "    repo                group components into repositories; switch "
           "clones\n"
-          "    label               manage include/arg label registry\n"
-          "    verify              check that component roots and files exist on "
-          "disk\n"
-          "    set                 set a mutable file attribute (e.g. pending "
-          "status)\n"
-          "    file                inspect or edit one file's stored compile "
-          "flags\n"
-          "    dump-compile-commands\n"
-          "                        emit a compile_commands.json for a "
-          "component\n"
-          "    search              fuzzy-search symbols by qualified name\n"
-          "    show                show full details of one symbol or "
-          "file\n"
-          "    list (ls)           browse the index: components, dirs, "
-          "files, symbols\n"
-          "    delete              delete a component, directory, file, or "
-          "symbol\n"
+          "    dir                 browse or delete indexed directories\n"
+          "    file                manage indexed files (list, show, flags, "
+          "set, rm)\n"
+          "    symbol              inspect indexed symbols (list, show, rm)\n"
           "    graph               query the relationship graph (callers, "
-          "callees, refs, neighbors, walk, path, hierarchy, dispatch)\n"
+          "callees, refs,\n"
+          "                        neighbors, walk, path, hierarchy, "
+          "dispatch)\n"
           "    ast                 on-demand AST analysis (dump, locals, "
-          "conditions, cache)\n"
+          "conditions)\n"
+          "    cache               manage the PCH and AST caches\n"
           "\n"
           "options:\n"
           "  -h, --help            show this help message and exit\n"
@@ -921,7 +898,7 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
 
   // $ python3 -m indexer list files -h                (first usage line
   // matches the wrapped [--indexed | --pending] block)
-  pa = cli::parse_args({"list", "files", "-h"});
+  pa = cli::parse_args({"file", "list", "-h"});
   REQUIRE(pa.help_text);
   CHECK(pa.help_text->compare(0, std::string(kListFilesUsage).size(),
                               kListFilesUsage) == 0);
@@ -934,7 +911,7 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
 TEST_CASE("args: set grammar — assignment positional + component/file/db") {
   // $ cidx set pending=False --component demo --file sub/b.c
   cli::ParsedArgs pa = cli::parse_args(
-      {"set", "pending=False", "--component", "demo", "--file", "sub/b.c"});
+      {"file", "set", "pending=False", "--component", "demo", "--file", "sub/b.c"});
   CHECK(pa.command == "set");
   REQUIRE(pa.assignment.size() == 1);
   CHECK(pa.assignment[0] == "pending=False");
@@ -945,7 +922,7 @@ TEST_CASE("args: set grammar — assignment positional + component/file/db") {
   CHECK_FALSE(pa.dry_run);
 
   // spaced form 'pending = True' -> three positional tokens (nargs="+")
-  pa = cli::parse_args({"set", "pending", "=", "True", "-c", "demo",
+  pa = cli::parse_args({"file", "set", "pending", "=", "True", "-c", "demo",
                         "--db", "/tmp/i.db", "--dry-run"});
   REQUIRE(pa.assignment.size() == 3);
   CHECK(pa.assignment[0] == "pending");
@@ -956,15 +933,15 @@ TEST_CASE("args: set grammar — assignment positional + component/file/db") {
   CHECK(pa.dry_run);
 
   // missing positional -> exit 2, required FIELD=VALUE
-  const ParseFail f = parse_fail({"set", "--component", "demo"});
+  const ParseFail f = parse_fail({"file", "set", "--component", "demo"});
   CHECK(f.code == 2);
   CHECK(f.msg == std::string(kSetUsage) +
-                     "cidx set: error: the following arguments are required: "
-                     "FIELD=VALUE\n");
+                     "cidx file set: error: the following arguments are "
+                     "required: FIELD=VALUE\n");
 }
 
 TEST_CASE("args: set -h is byte-identical to Python argparse") {
-  cli::ParsedArgs pa = cli::parse_args({"set", "-h"});
+  cli::ParsedArgs pa = cli::parse_args({"file", "set", "-h"});
   REQUIRE(pa.help_text);
   CHECK(*pa.help_text == std::string(kSetHelp));
 }
@@ -972,7 +949,7 @@ TEST_CASE("args: set -h is byte-identical to Python argparse") {
 TEST_CASE("args: verify grammar — --component/-c, --all, --db") {
   // $ cidx verify --component demo --all --db /tmp/i.db
   cli::ParsedArgs pa =
-      cli::parse_args({"verify", "--component", "demo", "--all", "--db",
+      cli::parse_args({"db", "verify", "--component", "demo", "--all", "--db",
                        "/tmp/i.db"});
   CHECK(pa.command == "verify");
   REQUIRE(pa.component);
@@ -982,17 +959,17 @@ TEST_CASE("args: verify grammar — --component/-c, --all, --db") {
   CHECK(*pa.index_db == "/tmp/i.db");
 
   // bare verify: no component, --all off
-  pa = cli::parse_args({"verify"});
+  pa = cli::parse_args({"db", "verify"});
   CHECK_FALSE(pa.component);
   CHECK_FALSE(pa.all);
 
   // glued short option -cNAME
-  pa = cli::parse_args({"verify", "-cgraphlab"});
+  pa = cli::parse_args({"db", "verify", "-cgraphlab"});
   REQUIRE(pa.component);
   CHECK(*pa.component == "graphlab");
 
   // unknown flag -> exit 2
-  const ParseFail f = parse_fail({"verify", "--bogus"});
+  const ParseFail f = parse_fail({"db", "verify", "--bogus"});
   CHECK(f.code == 2);
 }
 
@@ -1000,16 +977,17 @@ TEST_CASE("args: verify -h is byte-identical to Python argparse") {
   // Independent golden transcription of `cidx verify -h`
   // (Python 3.14 argparse, COLUMNS=80).
   const char kVerifyHelpGolden[] =
-      "usage: cidx verify [-h] [--component NAME] [--all] [--db PATH]\n"
+      "usage: cidx db verify [-h] [--component NAME] [--all] [--db PATH]\n"
       "\n"
       "options:\n"
       "  -h, --help            show this help message and exit\n"
-      "  --component, -c NAME  restrict to one component (default: all)\n"
+      "  --component NAME, -c NAME\n"
+      "                        restrict to one component (default: all)\n"
       "  --all                 also list files that exist (default: only "
       "failures)\n"
       "  --db PATH             index database (default: the standard cache "
       "index)\n";
-  cli::ParsedArgs pa = cli::parse_args({"verify", "-h"});
+  cli::ParsedArgs pa = cli::parse_args({"db", "verify", "-h"});
   REQUIRE(pa.help_text);
   CHECK(*pa.help_text == std::string(kVerifyHelpGolden));
 }
@@ -1105,7 +1083,7 @@ TEST_CASE("main: CidxError propagation shape (R9 proxy) + "
     std::ostringstream out, err;
     ctx.out = &out;
     ctx.err = &err;
-    cidx::cli::ParsedArgs pa = cidx::cli::parse_args({"list", "components"});
+    cidx::cli::ParsedArgs pa = cidx::cli::parse_args({"component", "list"});
     // run_command opens Storage; opening /dev/null/cidx-r9-test.db must throw.
     cidx::cli::run_command(pa, ctx);
   } catch (const cidx::CidxError &e) {
@@ -1129,7 +1107,7 @@ TEST_CASE("add-source: repo walks to git root, name from .git/config") {
       "[remote \"origin\"]\n\turl = https://example.com/gold-repo.git\n");
   // $ python3 -m indexer add-source --path <t>/repo/sub
   // component #1: gold-repo (repo) at <t>/repo
-  CmdResult r = run_cli({"add-source", "--path", t + "/repo/sub"}, t);
+  CmdResult r = run_cli({"component", "add", "--path", t + "/repo/sub"}, t);
   CHECK(r.rc == 0);
   CHECK(r.out == "component #1: gold-repo (repo) at " + t + "/repo\n");
   CHECK(r.err.empty());
@@ -1137,12 +1115,12 @@ TEST_CASE("add-source: repo walks to git root, name from .git/config") {
   // external: path as-is, name = basename; no git walk
   makedirs(t + "/ext");
   // $ python3 -m indexer add-source --path <t>/ext --kind external
-  r = run_cli({"add-source", "--path", t + "/ext", "--kind", "external"}, t);
+  r = run_cli({"component", "add", "--path", t + "/ext", "--kind", "external"}, t);
   CHECK(r.rc == 0);
   CHECK(r.out == "component #2: ext (external) at " + t + "/ext\n");
 
   // --name override; same path upserts to the same id
-  r = run_cli({"add-source", "--path", t + "/ext", "--kind", "external",
+  r = run_cli({"component", "add", "--path", t + "/ext", "--kind", "external",
                "--name", "mylib"},
               t);
   CHECK(r.rc == 0);
@@ -1150,7 +1128,7 @@ TEST_CASE("add-source: repo walks to git root, name from .git/config") {
 
   // repo kind without any .git up the tree: name = basename via repo_name
   makedirs(t + "/norepo");
-  r = run_cli({"add-source", "--path", t + "/norepo"}, t);
+  r = run_cli({"component", "add", "--path", t + "/norepo"}, t);
   CHECK(r.rc == 0);
   CHECK(r.out == "component #3: norepo (repo) at " + t + "/norepo\n");
 }
@@ -1158,7 +1136,7 @@ TEST_CASE("add-source: repo walks to git root, name from .git/config") {
 TEST_CASE("add-source: --path not a directory -> exit 1") {
   const std::string t = make_temp_dir();
   // $ python3 -m indexer add-source --path <t>/missing
-  const CmdResult r = run_cli({"add-source", "--path", t + "/missing"}, t);
+  const CmdResult r = run_cli({"component", "add", "--path", t + "/missing"}, t);
   CHECK(r.rc == 1);
   CHECK(r.out.empty());
   CHECK(r.err == "error: " + t + "/missing is not a directory\n");
@@ -1230,7 +1208,7 @@ TEST_CASE("search: --limit slicing, 0 = all, --kind filter") {
 TEST_CASE("show symbol: by id and USR; None fields omitted; glosses") {
   const GoldFixture g;
   // $ python3 -m indexer show symbol 1
-  CmdResult r = run_cli({"show", "symbol", "1"}, g.cache);
+  CmdResult r = run_cli({"symbol", "show", "1"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("id           1\n"
                           "usr          c:@F@multiply\n"
@@ -1245,7 +1223,7 @@ TEST_CASE("show symbol: by id and USR; None fields omitted; glosses") {
                           "resolved     yes\n"));
 
   // $ python3 -m indexer show symbol 'c:@F@square'   (USR lookup)
-  r = run_cli({"show", "symbol", "c:@F@square"}, g.cache);
+  r = run_cli({"symbol", "show", "c:@F@square"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("id           2\n"
                           "usr          c:@F@square\n"
@@ -1259,7 +1237,7 @@ TEST_CASE("show symbol: by id and USR; None fields omitted; glosses") {
                           "resolved     no (definition not seen)\n"));
 
   // $ python3 -m indexer show symbol 5   (pure virtual + parent + access)
-  r = run_cli({"show", "symbol", "5"}, g.cache);
+  r = run_cli({"symbol", "show", "5"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("id           5\n"
                           "usr          c:@N@NS@S@Shape@F@area#\n"
@@ -1276,7 +1254,7 @@ TEST_CASE("show symbol: by id and USR; None fields omitted; glosses") {
                           "resolved     n/a (pure virtual)\n"));
 
   // $ python3 -m indexer show symbol 6   (internal linkage gloss)
-  r = run_cli({"show", "symbol", "6"}, g.cache);
+  r = run_cli({"symbol", "show", "6"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out ==
         g.expect("id           6\n"
@@ -1292,7 +1270,7 @@ TEST_CASE("show symbol: by id and USR; None fields omitted; glosses") {
 
   // $ python3 -m indexer show symbol 3   (no linkage stored: visibility,
   // type, parent all omitted)
-  r = run_cli({"show", "symbol", "3"}, g.cache);
+  r = run_cli({"symbol", "show", "3"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("id           3\n"
                           "usr          c:@N@NS\n"
@@ -1304,7 +1282,7 @@ TEST_CASE("show symbol: by id and USR; None fields omitted; glosses") {
                           "resolved     yes\n"));
 
   // $ python3 -m indexer show symbol 99
-  r = run_cli({"show", "symbol", "99"}, g.cache);
+  r = run_cli({"symbol", "show", "99"}, g.cache);
   CHECK(r.rc == 1);
   CHECK(r.err == "error: no symbol with id/USR '99'\n");
 }
@@ -1315,7 +1293,7 @@ TEST_CASE("show file: by path and id; G31 time formats; G20 placeholder") {
   ::tzset();
 
   // $ TZ=UTC python3 -m indexer show file <root>/src/a.c
-  CmdResult r = run_cli({"show", "file", g.root + "/src/a.c"}, g.cache);
+  CmdResult r = run_cli({"file", "show", g.root + "/src/a.c"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("id           1\n"
                           "path         {ROOT}/src/a.c\n"
@@ -1331,7 +1309,7 @@ TEST_CASE("show file: by path and id; G31 time formats; G20 placeholder") {
                           "by kind      function: 1, variable: 1\n"));
 
   // $ python3 -m indexer show file 2   (header row: NULL options/driver)
-  r = run_cli({"show", "file", "2"}, g.cache);
+  r = run_cli({"file", "show", "2"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out ==
         g.expect("id           2\n"
@@ -1346,12 +1324,12 @@ TEST_CASE("show file: by path and id; G31 time formats; G20 placeholder") {
                  "namespace: 1\n"));
 
   // $ python3 -m indexer show file bogus.c -c gold   (error names the REF)
-  r = run_cli({"show", "file", "bogus.c", "-c", "gold"}, g.cache);
+  r = run_cli({"file", "show", "bogus.c", "-c", "gold"}, g.cache);
   CHECK(r.rc == 1);
   CHECK(r.err == "error: not in index database: bogus.c\n");
 
   // $ python3 -m indexer show file 99
-  r = run_cli({"show", "file", "99"}, g.cache);
+  r = run_cli({"file", "show", "99"}, g.cache);
   CHECK(r.rc == 1);
   CHECK(r.err == "error: not in index database: 99\n");
   ::tzset();
@@ -1381,13 +1359,13 @@ TEST_CASE("diagnostics: list-files indicator + show-file section (v15)") {
   }
 
   // list files: a.c shows the '1E1W' indicator; the clean header shows '-'.
-  CmdResult r = run_cli({"list", "files"}, g.cache);
+  CmdResult r = run_cli({"file", "list"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out.find("1E1W") != std::string::npos);
   CHECK(r.out.find(g.expect("{ROOT}/src/a.c")) != std::string::npos);
 
   // show file 1: summary field + one line per diagnostic, in TU order.
-  r = run_cli({"show", "file", "1"}, g.cache);
+  r = run_cli({"file", "show", "1"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out.find("diagnostics  1 error(s), 1 warning(s)\n") !=
         std::string::npos);
@@ -1397,7 +1375,7 @@ TEST_CASE("diagnostics: list-files indicator + show-file section (v15)") {
         std::string::npos);
 
   // A clean file shows no diagnostics field.
-  r = run_cli({"show", "file", "2"}, g.cache);
+  r = run_cli({"file", "show", "2"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out.find("diagnostics") == std::string::npos);
 }
@@ -1405,22 +1383,22 @@ TEST_CASE("diagnostics: list-files indicator + show-file section (v15)") {
 TEST_CASE("list components: table, kind filter, fuzzy pattern, ls alias") {
   const GoldFixture g;
   // $ python3 -m indexer list components
-  CmdResult r = run_cli({"list", "components"}, g.cache);
+  CmdResult r = run_cli({"component", "list"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("   1  gold  repo      -  -  {ROOT}\n1 component(s)\n"));
 
   // $ python3 -m indexer ls components   (alias, same output)
-  r = run_cli({"ls", "components"}, g.cache);
+  r = run_cli({"component", "ls"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("   1  gold  repo      -  -  {ROOT}\n1 component(s)\n"));
 
   // $ python3 -m indexer list components --kind external   (0 rows, exit 1)
-  r = run_cli({"list", "components", "--kind", "external"}, g.cache);
+  r = run_cli({"component", "list", "--kind", "external"}, g.cache);
   CHECK(r.rc == 1);
   CHECK(r.out == "0 component(s)\n");
 
   // $ python3 -m indexer list components gld   (char-in-order fuzzy)
-  r = run_cli({"list", "components", "gld"}, g.cache);
+  r = run_cli({"component", "list", "gld"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("   1  gold  repo      -  -  {ROOT}\n1 component(s)\n"));
 }
@@ -1428,21 +1406,21 @@ TEST_CASE("list components: table, kind filter, fuzzy pattern, ls alias") {
 TEST_CASE("list dirs: table + unknown component error") {
   const GoldFixture g;
   // $ python3 -m indexer list dirs
-  CmdResult r = run_cli({"list", "dirs"}, g.cache);
+  CmdResult r = run_cli({"dir", "list"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == "   2  gold  include\n"
                  "   1  gold  src\n"
                  "2 directory(ies)\n");
 
   // $ python3 -m indexer list dirs -c gold
-  r = run_cli({"list", "dirs", "-c", "gold"}, g.cache);
+  r = run_cli({"dir", "list", "-c", "gold"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == "   2  gold  include\n"
                  "   1  gold  src\n"
                  "2 directory(ies)\n");
 
   // $ python3 -m indexer list dirs -c nope
-  r = run_cli({"list", "dirs", "-c", "nope"}, g.cache);
+  r = run_cli({"dir", "list", "-c", "nope"}, g.cache);
   CHECK(r.rc == 1);
   CHECK(r.out.empty());
   CHECK(r.err == "error: no component named 'nope'\n");
@@ -1451,24 +1429,24 @@ TEST_CASE("list dirs: table + unknown component error") {
 TEST_CASE("list files: idx/pend marks, --indexed/--pending, --dir scope") {
   const GoldFixture g;
   // $ python3 -m indexer list files
-  CmdResult r = run_cli({"list", "files"}, g.cache);
+  CmdResult r = run_cli({"file", "list"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("   2  pend  -  -  {ROOT}/include/a.h\n"
                           "   1  idx   -  -  {ROOT}/src/a.c\n"
                           "2 file(s)\n"));
 
   // $ python3 -m indexer list files --pending
-  r = run_cli({"list", "files", "--pending"}, g.cache);
+  r = run_cli({"file", "list", "--pending"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("   2  pend  -  -  {ROOT}/include/a.h\n1 file(s)\n"));
 
   // $ python3 -m indexer list files --indexed
-  r = run_cli({"list", "files", "--indexed"}, g.cache);
+  r = run_cli({"file", "list", "--indexed"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("   1  idx   -  -  {ROOT}/src/a.c\n1 file(s)\n"));
 
   // $ python3 -m indexer list files -c gold -d src
-  r = run_cli({"list", "files", "-c", "gold", "-d", "src"}, g.cache);
+  r = run_cli({"file", "list", "-c", "gold", "-d", "src"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("   1  idx   -  -  {ROOT}/src/a.c\n1 file(s)\n"));
 }
@@ -1478,12 +1456,12 @@ TEST_CASE("list files/symbols: --dir without --component -> exit 1") {
   const char kMsg[] = "error: --dir requires --component (directory paths "
                       "are relative to a component root)\n";
   // $ python3 -m indexer list files -d src
-  CmdResult r = run_cli({"list", "files", "-d", "src"}, g.cache);
+  CmdResult r = run_cli({"file", "list", "-d", "src"}, g.cache);
   CHECK(r.rc == 1);
   CHECK(r.out.empty());
   CHECK(r.err == kMsg);
   // $ python3 -m indexer list symbols -d src
-  r = run_cli({"list", "symbols", "-d", "src"}, g.cache);
+  r = run_cli({"symbol", "list", "-d", "src"}, g.cache);
   CHECK(r.rc == 1);
   CHECK(r.err == kMsg);
 }
@@ -1507,12 +1485,12 @@ TEST_CASE("list symbols: full table, limit, fuzzy, scopes, kind, file") {
                "{ROOT}/include/a.h:12\n"
                "6 match(es)\n");
   // $ python3 -m indexer list symbols
-  CmdResult r = run_cli({"list", "symbols"}, g.cache);
+  CmdResult r = run_cli({"symbol", "list"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == full_table);
 
   // $ python3 -m indexer list symbols --limit 2
-  r = run_cli({"list", "symbols", "--limit", "2"}, g.cache);
+  r = run_cli({"symbol", "list", "--limit", "2"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("     3  NS      namespace         def   "
                           "{ROOT}/include/a.h:8\n"
@@ -1521,7 +1499,7 @@ TEST_CASE("list symbols: full table, limit, fuzzy, scopes, kind, file") {
                           "6 match(es) (showing 2)\n"));
 
   // $ python3 -m indexer list symbols ar   (char-in-order fuzzy, G18)
-  r = run_cli({"list", "symbols", "ar"}, g.cache);
+  r = run_cli({"symbol", "list", "ar"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("     2  square           function          decl  "
                           "{ROOT}/include/a.h:4\n"
@@ -1545,17 +1523,17 @@ TEST_CASE("list symbols: full table, limit, fuzzy, scopes, kind, file") {
                "5 match(es)\n");
   // $ python3 -m indexer list symbols -c gold -d include   (decl OR def
   // site in scope — multiply's def lives in src/ but its decl is here)
-  r = run_cli({"list", "symbols", "-c", "gold", "-d", "include"}, g.cache);
+  r = run_cli({"symbol", "list", "-c", "gold", "-d", "include"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == include_scope);
 
   // $ python3 -m indexer list symbols -f <root>/include/a.h  (same rows)
-  r = run_cli({"list", "symbols", "-f", g.root + "/include/a.h"}, g.cache);
+  r = run_cli({"symbol", "list", "-f", g.root + "/include/a.h"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == include_scope);
 
   // $ python3 -m indexer list symbols --kind method
-  r = run_cli({"list", "symbols", "--kind", "method"}, g.cache);
+  r = run_cli({"symbol", "list", "--kind", "method"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(r.out == g.expect("     5  NS::Shape::area  method            pure  "
                           "{ROOT}/include/a.h:12\n"
@@ -1563,12 +1541,12 @@ TEST_CASE("list symbols: full table, limit, fuzzy, scopes, kind, file") {
 
   // $ python3 -m indexer list symbols -f a.h -c gold   (resolved against
   // the component root; error names the resolved path)
-  r = run_cli({"list", "symbols", "-f", "a.h", "-c", "gold"}, g.cache);
+  r = run_cli({"symbol", "list", "-f", "a.h", "-c", "gold"}, g.cache);
   CHECK(r.rc == 1);
   CHECK(r.err == g.expect("error: not in index database: {ROOT}/a.h\n"));
 
   // $ python3 -m indexer list symbols zz
-  r = run_cli({"list", "symbols", "zz"}, g.cache);
+  r = run_cli({"symbol", "list", "zz"}, g.cache);
   CHECK(r.rc == 1);
   CHECK(r.out == "0 match(es)\n");
 }
@@ -1684,7 +1662,7 @@ TEST_CASE("migrate: missing DB errors; already-current is a no-op (hermetic)") {
   const std::string db = t + "/index.db";
 
   // No index yet -> error, exit 1.
-  CmdResult r = run_cli({"migrate"}, t);
+  CmdResult r = run_cli({"db", "migrate"}, t);
   CHECK(r.rc == 1);
   CHECK(r.out.empty());
   CHECK(r.err == "error: no index database at " + db +
@@ -1692,7 +1670,7 @@ TEST_CASE("migrate: missing DB errors; already-current is a no-op (hermetic)") {
 
   // Fresh init is already current -> no-op message, exit 0.
   run_cli({"init"}, t);
-  r = run_cli({"migrate"}, t);
+  r = run_cli({"db", "migrate"}, t);
   CHECK(r.rc == 0);
   CHECK(r.err.empty());
   CHECK(r.out == db + " already at schema v" +
@@ -1735,7 +1713,7 @@ TEST_CASE("migrate: upgrades a v15 DB in place (kind TEXT->int), no re-index") {
         "('c:@F@f','f','function'),('c:@S@S','S','struct');");
   }
 
-  CmdResult r = run_cli({"migrate"}, t);
+  CmdResult r = run_cli({"db", "migrate"}, t);
   CHECK(r.rc == 0);
   CHECK(r.err.empty());
   CHECK(r.out == "migrated " + db + ": schema v15 -> v" +
@@ -1755,7 +1733,7 @@ TEST_CASE("migrate: upgrades a v15 DB in place (kind TEXT->int), no re-index") {
   }
 
   // Idempotent: a second migrate is a no-op.
-  r = run_cli({"migrate"}, t);
+  r = run_cli({"db", "migrate"}, t);
   CHECK(r.rc == 0);
   CHECK(r.out == db + " already at schema v" +
                      std::to_string(cidx::kSchemaVersion) +
@@ -1789,7 +1767,7 @@ TEST_CASE("migrate: v17 -> v19 drops nests edges and renumbers befriends") {
   }
 
   // migrate via the CLI: reports the in-place upgrade.
-  CmdResult r = run_cli({"migrate"}, t);
+  CmdResult r = run_cli({"db", "migrate"}, t);
   CHECK(r.rc == 0);
   CHECK(r.err.empty());
   CHECK(r.out == "migrated " + db + ": schema v17 -> v" +
@@ -1848,7 +1826,7 @@ TEST_CASE("migrate: v17 -> v19 drops nests edges and renumbers befriends") {
   }
 
   // Idempotent: a second migrate is a no-op.
-  r = run_cli({"migrate"}, t);
+  r = run_cli({"db", "migrate"}, t);
   CHECK(r.rc == 0);
   CHECK(r.out == db + " already at schema v" +
                      std::to_string(cidx::kSchemaVersion) +
@@ -1882,7 +1860,7 @@ TEST_CASE("migrate: cleans a DB already stamped current but still carrying nests
   }
 
   // migrate reports the cleanup even though the version does not change.
-  CmdResult r = run_cli({"migrate"}, t);
+  CmdResult r = run_cli({"db", "migrate"}, t);
   CHECK(r.rc == 0);
   CHECK(r.err.empty());
   CHECK(r.out == "migrated " + db +
@@ -1905,7 +1883,7 @@ TEST_CASE("migrate: cleans a DB already stamped current but still carrying nests
   }
 
   // Now clean -> second migrate is a true no-op.
-  r = run_cli({"migrate"}, t);
+  r = run_cli({"db", "migrate"}, t);
   CHECK(r.rc == 0);
   CHECK(r.out == db + " already at schema v" +
                      std::to_string(cidx::kSchemaVersion) +
@@ -1913,19 +1891,19 @@ TEST_CASE("migrate: cleans a DB already stamped current but still carrying nests
 }
 
 TEST_CASE("args: migrate grammar — --db option, -h help") {
-  cli::ParsedArgs pa = cli::parse_args({"migrate"});
+  cli::ParsedArgs pa = cli::parse_args({"db", "migrate"});
   CHECK(pa.command == "migrate");
   CHECK(!pa.index_db.has_value());
 
-  pa = cli::parse_args({"migrate", "--db", "/tmp/x.db"});
+  pa = cli::parse_args({"db", "migrate", "--db", "/tmp/x.db"});
   CHECK(pa.command == "migrate");
   REQUIRE(pa.index_db.has_value());
   CHECK(*pa.index_db == "/tmp/x.db");
 
-  pa = cli::parse_args({"migrate", "-h"});
+  pa = cli::parse_args({"db", "migrate", "-h"});
   REQUIRE(pa.help_text.has_value());
   CHECK(*pa.help_text ==
-        "usage: cidx migrate [-h] [--db PATH]\n"
+        "usage: cidx db migrate [-h] [--db PATH]\n"
         "\n"
         "options:\n"
         "  -h, --help  show this help message and exit\n"
@@ -1938,9 +1916,9 @@ TEST_CASE("query-only invocations never create cidx.log (G27/D7)") {
   cidx::Logger::root().set_file(log); // what main() does — lazy open
   CmdResult r = run_cli({"search", "multiply"}, g.cache);
   CHECK(r.rc == 0);
-  r = run_cli({"list", "files"}, g.cache);
+  r = run_cli({"file", "list"}, g.cache);
   CHECK(r.rc == 0);
-  r = run_cli({"show", "file", "2"}, g.cache);
+  r = run_cli({"file", "show", "2"}, g.cache);
   CHECK(r.rc == 0);
   CHECK(!path_exists(log));
 }
@@ -2281,6 +2259,268 @@ TEST_SUITE("clang") {
   }
 
 } // TEST_SUITE("clang")
+
+// -- analyze (Souffle Datalog) -------------------------------------------------
+
+namespace {
+
+// True when the standalone souffle interpreter is reachable the same way
+// cmd_analyze resolves it (CIDX_SOUFFLE, else PATH).
+bool souffle_available() {
+  const char *env = std::getenv("CIDX_SOUFFLE");
+  if (env != nullptr && *env != '\0') {
+    return ::access(env, X_OK) == 0;
+  }
+  return std::system("command -v souffle >/dev/null 2>&1") == 0;
+}
+
+// Minimal call graph: alpha -> beta -> alpha (cycle) and beta -> gamma.
+void seed_analyze(const std::string &cache) {
+  Storage db(cache + "/index.db");
+  db.add_component("lab", "/nonexistent/lab", "repo");
+  const int64_t f1 = db.add_file_path("/nonexistent/lab/a.c");
+  Symbol s;
+  s.kind = "function";
+  s.is_definition = true;
+  s.file_id = f1;
+  s.col = 1;
+  s.usr = "c:@F@alpha";
+  s.spelling = "alpha";
+  s.qual_name = "alpha";
+  s.line = 1;
+  const int64_t a = db.add_symbol(s);
+  s.usr = "c:@F@beta";
+  s.spelling = "beta";
+  s.qual_name = "beta";
+  s.line = 10;
+  const int64_t b = db.add_symbol(s);
+  s.usr = "c:@F@gamma";
+  s.spelling = "gamma";
+  s.qual_name = "gamma";
+  s.line = 20;
+  const int64_t c = db.add_symbol(s);
+  cidx::Edge e;
+  e.kind = 1; // calls
+  e.src_id = a;
+  e.dst_id = b;
+  db.add_edge(e);
+  e.src_id = b;
+  e.dst_id = a;
+  db.add_edge(e);
+  e.src_id = b;
+  e.dst_id = c;
+  db.add_edge(e);
+}
+
+} // namespace
+
+TEST_CASE("args: analyze grammar — flags, defaults, -h help") {
+  cli::ParsedArgs pa = cli::parse_args(
+      {"analyze", "--rule", "cycles", "--jobs", "2", "--db", "/x/i.db"});
+  CHECK(pa.command == "analyze");
+  CHECK(pa.analyze_rule == "cycles");
+  CHECK(pa.analyze_jobs == 2);
+  CHECK(pa.index_db == "/x/i.db");
+  CHECK(!pa.analyze_list);
+
+  pa = cli::parse_args({"analyze", "--list"});
+  CHECK(pa.analyze_list);
+  CHECK(pa.analyze_jobs == 1); // default
+  CHECK(!pa.analyze_rule);
+
+  pa = cli::parse_args({"analyze", "--export-facts", "/tmp/f"});
+  CHECK(pa.analyze_export == "/tmp/f");
+
+  pa = cli::parse_args({"analyze", "--rules-file", "prog.dl"});
+  CHECK(pa.analyze_rules_file == "prog.dl");
+
+  pa = cli::parse_args({"analyze", "-h"});
+  REQUIRE(pa.help_text);
+  CHECK(pa.help_text->find("usage: cidx analyze") == 0);
+
+  const ParseFail f1 = parse_fail({"analyze", "--jobs"});
+  CHECK(f1.code == 2);
+  const ParseFail f2 = parse_fail({"analyze", "--jobs", "x"});
+  CHECK(f2.code == 2);
+}
+
+// python3 -m indexer analyze --list
+TEST_CASE("analyze: --list prints the built-in rules as JSON") {
+  const std::string t = make_temp_dir();
+  const CmdResult r = run_cli({"analyze", "--list"}, t);
+  CHECK(r.rc == 0);
+  CHECK(r.err.empty());
+  CHECK(r.out ==
+        "{\n"
+        "  \"rules\": [\n"
+        "    {\n"
+        "      \"name\": \"callgraph\",\n"
+        "      \"description\": \"direct and transitive call graph (outputs: "
+        "call, call_transitive)\"\n"
+        "    },\n"
+        "    {\n"
+        "      \"name\": \"cycles\",\n"
+        "      \"description\": \"call cycles over calls/dispatch_calls edges "
+        "(outputs: cycle_member, cycle_edge)\"\n"
+        "    },\n"
+        "    {\n"
+        "      \"name\": \"unused\",\n"
+        "      \"description\": \"defined functions with no incoming call or "
+        "override edge (outputs: unused)\"\n"
+        "    }\n"
+        "  ]\n"
+        "}\n");
+}
+
+TEST_CASE("analyze: mode and jobs validation (exit 2), unknown rule and "
+          "missing index (exit 1)") {
+  const std::string t = make_temp_dir();
+  seed_analyze(t);
+
+  CmdResult r = run_cli({"analyze"}, t);
+  CHECK(r.rc == 2);
+  CHECK(r.err == "error: exactly one of --list, --export-facts, --rule, or "
+                 "--rules-file is required\n");
+
+  r = run_cli({"analyze", "--list", "--rule", "cycles"}, t);
+  CHECK(r.rc == 2);
+
+  r = run_cli({"analyze", "--rule", "cycles", "--jobs", "0"}, t);
+  CHECK(r.rc == 2);
+  CHECK(r.err == "error: --jobs must be at least 1\n");
+
+  r = run_cli({"analyze", "--rule", "nope"}, t);
+  CHECK(r.rc == 1);
+  CHECK(r.err == "error: unknown rule: nope (see cidx analyze --list)\n");
+
+  r = run_cli({"analyze", "--rules-file", t + "/absent.dl"}, t);
+  CHECK(r.rc == 1);
+  CHECK(r.err == "error: rules file not found: " + t + "/absent.dl\n");
+
+  const std::string empty = make_temp_dir();
+  r = run_cli({"analyze", "--rule", "cycles"}, empty);
+  CHECK(r.rc == 1);
+  CHECK(r.err == "error: index not found at " + empty +
+                     "/index.db (run 'cidx import' first, or pass --db)\n");
+}
+
+TEST_CASE("analyze: --export-facts writes TSV facts plus the prelude") {
+  const std::string t = make_temp_dir();
+  seed_analyze(t);
+  const std::string out_dir = t + "/facts";
+  const CmdResult r = run_cli({"analyze", "--export-facts", out_dir}, t);
+  CHECK(r.rc == 0);
+  CHECK(r.err.empty());
+  // 10 relations; the exact row total depends only on the seeded rows.
+  CHECK(r.out.find(out_dir + ": 10 fact files, ") == 0);
+
+  const std::string symbols = read_file(out_dir + "/symbol.facts");
+  CHECK(symbols ==
+        "1\tc:@F@alpha\talpha\talpha\t8\t1\t1\t1\n"
+        "2\tc:@F@beta\tbeta\tbeta\t8\t1\t1\t10\n"
+        "3\tc:@F@gamma\tgamma\tgamma\t8\t1\t1\t20\n");
+  const std::string edges = read_file(out_dir + "/edge.facts");
+  CHECK(edges == "1\t1\t2\t1\t1\n"
+                 "2\t2\t1\t1\t1\n"
+                 "3\t2\t3\t1\t1\n");
+  const std::string prelude = read_file(out_dir + "/cidx_facts.dl");
+  CHECK(prelude.find(".decl symbol(") != std::string::npos);
+  CHECK(prelude.find(".input file") != std::string::npos);
+}
+
+// python3 -m indexer analyze --rule cycles --db <seeded>: alpha and beta form
+// the only call cycle; gamma stays out.
+TEST_CASE("analyze: --rule cycles finds the seeded recursion (needs souffle)") {
+  if (!souffle_available()) {
+    MESSAGE("SKIP: souffle interpreter not installed");
+    return;
+  }
+  const std::string t = make_temp_dir();
+  seed_analyze(t);
+  const CmdResult r = run_cli({"analyze", "--rule", "cycles"}, t);
+  CHECK(r.rc == 0);
+  CHECK(r.err.empty());
+  CHECK(r.out ==
+        "{\n"
+        "  \"rule\": \"cycles\",\n"
+        "  \"db\": \"" + t + "/index.db\",\n"
+        "  \"relations\": {\n"
+        "    \"cycle_edge\": [\n"
+        "      [\n"
+        "        \"c:@F@alpha\",\n"
+        "        \"alpha\",\n"
+        "        \"c:@F@beta\",\n"
+        "        \"beta\"\n"
+        "      ],\n"
+        "      [\n"
+        "        \"c:@F@beta\",\n"
+        "        \"beta\",\n"
+        "        \"c:@F@alpha\",\n"
+        "        \"alpha\"\n"
+        "      ]\n"
+        "    ],\n"
+        "    \"cycle_member\": [\n"
+        "      [\n"
+        "        \"c:@F@alpha\",\n"
+        "        \"alpha\"\n"
+        "      ],\n"
+        "      [\n"
+        "        \"c:@F@beta\",\n"
+        "        \"beta\"\n"
+        "      ]\n"
+        "    ]\n"
+        "  }\n"
+        "}\n");
+}
+
+TEST_CASE("analyze: --rules-file runs user Datalog against the exported facts "
+          "(needs souffle)") {
+  if (!souffle_available()) {
+    MESSAGE("SKIP: souffle interpreter not installed");
+    return;
+  }
+  const std::string t = make_temp_dir();
+  seed_analyze(t);
+  const std::string prog = t + "/leaves.dl";
+  {
+    std::ofstream f(prog);
+    f << ".decl leaf(usr:symbol, name:symbol)\n"
+         "leaf(u, n) :- symbol(s, u, n, _, _, _, _, _), !edge(_, s, _, _, _).\n"
+         ".output leaf\n";
+  }
+  const CmdResult r = run_cli({"analyze", "--rules-file", prog}, t);
+  CHECK(r.rc == 0);
+  CHECK(r.out == "{\n"
+                 "  \"rule\": \"" + prog + "\",\n"
+                 "  \"db\": \"" + t + "/index.db\",\n"
+                 "  \"relations\": {\n"
+                 "    \"leaf\": [\n"
+                 "      [\n"
+                 "        \"c:@F@gamma\",\n"
+                 "        \"gamma\"\n"
+                 "      ]\n"
+                 "    ]\n"
+                 "  }\n"
+                 "}\n");
+}
+
+TEST_CASE("analyze: broken user Datalog surfaces the souffle error (needs "
+          "souffle)") {
+  if (!souffle_available()) {
+    MESSAGE("SKIP: souffle interpreter not installed");
+    return;
+  }
+  const std::string t = make_temp_dir();
+  seed_analyze(t);
+  const std::string prog = t + "/broken.dl";
+  {
+    std::ofstream f(prog);
+    f << ".decl broken(\n";
+  }
+  const CmdResult r = run_cli({"analyze", "--rules-file", prog}, t);
+  CHECK(r.rc == 1);
+  CHECK(r.err.find("error: souffle failed (exit ") == 0);
+}
 
 int main(int argc, char **argv) {
   doctest::Context ctx(argc, argv);
