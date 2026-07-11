@@ -259,6 +259,11 @@ add_library(cidx_core STATIC
   src/clangx/parse.cpp
   src/clangx/pch.cpp
   src/clangx/ast.cpp
+  src/clangx/ast_cursor.cpp
+  src/clangx/ast_symbols.cpp
+  src/clangx/ast_templates.cpp
+  src/clangx/ast_body.cpp
+  src/clangx/ast_edges.cpp
   src/clangx/ast_query.cpp
   src/astcache/astcache.cpp
   src/compiledb/compiledb.cpp
