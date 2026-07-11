@@ -3,7 +3,10 @@
 #include "clangx_lt/edge_sink.hpp"
 #include "clangx_lt/kind_map.hpp"
 #include "clangx_lt/location.hpp"
+#include "clangx_lt/type_use.hpp"
 #include "clangx_lt/usr.hpp"
+
+#include "clang/Lex/Lexer.h"
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
@@ -75,10 +78,34 @@ std::string usr_of(const clang::Decl *decl) {
 } // namespace
 
 EdgeVisitor::EdgeVisitor(clang::ASTContext &context, EdgeSink &sink,
-                         std::string target_file)
+                         std::string target_file, int64_t file_id)
     : context_(context), source_manager_(context.getSourceManager()),
       sink_(sink), mint_(context, sink), arg_resolver_(context, sink),
-      target_file_(std::move(target_file)) {}
+      minter_(context, sink, mint_, arg_resolver_),
+      target_file_(std::move(target_file)), file_id_(file_id) {}
+
+// Signature-level uses(7): return + parameter types (emit_type_use in the
+// function-like B1 branch). Constructors/destructors record no return type.
+void EdgeVisitor::emit_signature_uses(const clang::FunctionDecl *fn) {
+  const clang::NamedDecl *keyed = fn;
+  if (const clang::FunctionTemplateDecl *ft =
+          fn->getDescribedFunctionTemplate())
+    keyed = ft;
+  const std::string usr = usr_for_decl(keyed);
+  if (usr.empty())
+    return;
+  const auto fn_sym = sink_.lookup_symbol_id(usr);
+  if (!fn_sym)
+    return;
+  if (!llvm::isa<clang::CXXConstructorDecl>(fn) &&
+      !llvm::isa<clang::CXXDestructorDecl>(fn)) {
+    emit_type_use(sink_, *fn_sym, fn->getReturnType(), file_id_,
+                  expansion_loc(context_, fn->getLocation()), 0);
+  }
+  for (const clang::ParmVarDecl *p : fn->parameters())
+    emit_type_use(sink_, *fn_sym, p->getType(), file_id_,
+                  expansion_loc(context_, p->getLocation()), 0);
+}
 
 bool EdgeVisitor::in_walk(const clang::Decl *decl) const {
   // for_file_cursors_p: expansion location in the target file...
@@ -93,10 +120,14 @@ bool EdgeVisitor::in_walk(const clang::Decl *decl) const {
   return true;
 }
 
-// -- contains (kind=3) --------------------------------------------------------
+// -- contains (kind=3) + signature-level uses ---------------------------------
 bool EdgeVisitor::VisitNamedDecl(clang::NamedDecl *decl) {
   if (!in_walk(decl) || is_template_pattern(decl))
     return true;
+  // Function templates get NO signature uses: the cursor API's result-type
+  // and argument accessors return invalid/-1 on FUNCTION_TEMPLATE cursors.
+  if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(decl))
+    emit_signature_uses(fn);
   const clang::DeclContext *ldc = decl->getLexicalDeclContext();
   const auto *parent = ldc != nullptr ? llvm::dyn_cast<clang::Decl>(ldc) : nullptr;
   if (parent == nullptr)
@@ -227,13 +258,19 @@ bool EdgeVisitor::VisitCXXRecordDecl(clang::CXXRecordDecl *decl) {
   return true;
 }
 
-// -- field_of (kind=8) --------------------------------------------------------
+// -- field_of (kind=8) + field type use/mint -----------------------------------
 bool EdgeVisitor::VisitFieldDecl(clang::FieldDecl *decl) {
   if (!in_walk(decl))
     return true;
   const std::string member_usr = usr_for_decl(decl);
   if (member_usr.empty())
     return true;
+  // FIELD_DECL branch: mint the X<B> instance FIRST, then the structural
+  // uses(7) field -> its declared type.
+  minter_.mint_instance_from_type(decl->getType());
+  if (const auto self = sink_.lookup_symbol_id(member_usr))
+    emit_type_use(sink_, *self, decl->getType(), file_id_,
+                  expansion_loc(context_, decl->getLocation()), 0);
   const std::string owner_usr = usr_of(decl->getParent());
   if (owner_usr.empty())
     return true;
@@ -246,6 +283,100 @@ bool EdgeVisitor::VisitFieldDecl(clang::FieldDecl *decl) {
   e.dst_id = *dst;
   e.kind = 8;
   sink_.add_edge(e);
+  return true;
+}
+
+// -- VAR_DECL: type use/mint + out-of-line static member definitions ----------
+bool EdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
+  if (!in_walk(decl) || llvm::isa<clang::ParmVarDecl>(decl))
+    return true;
+  const std::string usr = usr_for_decl(decl);
+  if (usr.empty())
+    return true;
+  minter_.mint_instance_from_type(decl->getType());
+  const auto self = sink_.lookup_symbol_id(usr);
+  if (!self)
+    return true;
+  emit_type_use(sink_, *self, decl->getType(), file_id_,
+                expansion_loc(context_, decl->getLocation()), 0);
+  // v27: out-of-line static DATA MEMBER definition — a per-backend body.
+  if (decl->isThisDeclarationADefinition() == clang::VarDecl::Definition &&
+      decl->isStaticDataMember()) {
+    const clang::SourceRange range = decl->getSourceRange();
+    const ExpansionLoc start = extent_start(context_, range);
+    const ExpansionLoc end = extent_end(context_, range);
+    // Initializer source text after '=' (static_var_init_text): exact slice.
+    std::optional<std::string> init_text;
+    {
+      const clang::SourceManager &sm = context_.getSourceManager();
+      const clang::SourceLocation b = sm.getExpansionLoc(range.getBegin());
+      const clang::SourceLocation e = clang::Lexer::getLocForEndOfToken(
+          sm.getExpansionLoc(range.getEnd()), 0, sm, context_.getLangOpts());
+      bool invalid = false;
+      const char *bp = sm.getCharacterData(b, &invalid);
+      const char *ep = invalid ? nullptr : sm.getCharacterData(e, &invalid);
+      if (!invalid && bp != nullptr && ep != nullptr && ep > bp) {
+        std::string raw(bp, static_cast<size_t>(ep - bp));
+        const auto eq = raw.find('=');
+        if (eq != std::string::npos) {
+          const auto strip = [](std::string s) {
+            const char *ws = " \t\r\n\f\v";
+            const auto b2 = s.find_first_not_of(ws);
+            if (b2 == std::string::npos)
+              return std::string();
+            const auto e2 = s.find_last_not_of(ws);
+            return s.substr(b2, e2 - b2 + 1);
+          };
+          std::string val = strip(raw.substr(eq + 1));
+          while (!val.empty() && val.back() == ';')
+            val.pop_back();
+          val = strip(val);
+          if (!val.empty())
+            init_text = val;
+        }
+      }
+    }
+    const int64_t def_id = sink_.get_or_create_definition(
+        *self, file_id_, start.line, start.col, end.line, end.col, init_text);
+    // Initializer calls become def_edge USES (emit_static_init_def_edges).
+    if (const clang::Expr *init = decl->getInit()) {
+      std::vector<const clang::Stmt *> stack{init};
+      while (!stack.empty()) {
+        const clang::Stmt *s = stack.back();
+        stack.pop_back();
+        if (s == nullptr)
+          continue;
+        if (const auto *call = llvm::dyn_cast<clang::CallExpr>(s)) {
+          if (const auto *fd = llvm::dyn_cast_or_null<clang::FunctionDecl>(
+                  call->getCalleeDecl())) {
+            const std::string cu = usr_for_decl(fd);
+            if (!cu.empty())
+              if (const auto cid = sink_.lookup_symbol_id(cu))
+                sink_.add_def_edge(def_id, *cid, 7);
+          }
+        }
+        for (const clang::Stmt *c : s->children())
+          stack.push_back(c);
+      }
+    }
+  }
+  return true;
+}
+
+// -- TYPEDEF/TYPE_ALIAS: named-instance mint + underlying type use ------------
+bool EdgeVisitor::VisitTypedefNameDecl(clang::TypedefNameDecl *decl) {
+  if (!in_walk(decl))
+    return true;
+  if (const auto *alias = llvm::dyn_cast<clang::TypeAliasDecl>(decl))
+    if (alias->getDescribedAliasTemplate() != nullptr)
+      return true; // pattern of an alias template — not a symbol
+  const std::string usr = usr_for_decl(decl);
+  if (usr.empty())
+    return true;
+  minter_.mint_named_instance(decl); // minted FIRST (order-dependent)
+  if (const auto self = sink_.lookup_symbol_id(usr))
+    emit_type_use(sink_, *self, decl->getUnderlyingType(), file_id_,
+                  expansion_loc(context_, decl->getLocation()), 0);
   return true;
 }
 

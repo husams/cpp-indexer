@@ -49,22 +49,22 @@ for e in json.load(open(sys.argv[1])):
 EOF
 }
 
-# decl_line/decl_col are EXCLUDED here: the unported body pass backfills decl
-# sites onto definitions (callee-stub ensures, instance mints). Symbol-pass
-# decl sites are separately proven byte-identical by lt_symbol_diff.sh.
-# USRs flagged is_instantiation / is_named_instance in the REFERENCE db are
-# excluded from both sides (ref.symbol via ATTACH): those flags are set by the
-# unported template/minting passes, so the same symbol legitimately differs.
+# FULL Layer-0 projections: every row the clangx passes write, joined to USRs
+# so ids cancel out. Stubs (file_id NULL) are included via LEFT JOIN.
 SY_SQL="
   SELECT s.usr, s.spelling, s.kind, COALESCE(s.qual_name,'N'),
          COALESCE(s.display_name,'N'), COALESCE(s.type_info,'N'),
-         fl.name, s.line, s.col, s.end_line, s.end_col,
-         s.is_definition, s.is_pure, s.is_static,
+         COALESCE(fl.name,'N'), COALESCE(s.line,'N'), COALESCE(s.col,'N'),
+         COALESCE(s.end_line,'N'), COALESCE(s.end_col,'N'),
+         COALESCE(dfl.name,'N'), COALESCE(s.decl_line,'N'),
+         COALESCE(s.decl_col,'N'), COALESCE(s.decl_path,'N'),
+         s.is_definition, s.is_pure, s.is_static, s.is_instantiation,
+         s.is_named_instance,
          COALESCE(s.linkage,'N'), COALESCE(s.access,'N'),
          COALESCE(s.parent_usr,'N'), s.resolved
-  FROM symbol s JOIN file fl ON fl.id = s.file_id
-  WHERE s.usr NOT IN (SELECT usr FROM ref.symbol
-                      WHERE is_instantiation = 1 OR is_named_instance = 1)
+  FROM symbol s
+  LEFT JOIN file fl ON fl.id = s.file_id
+  LEFT JOIN file dfl ON dfl.id = s.decl_file_id
   ORDER BY s.usr, fl.name;"
 
 EDGE_SQL="
@@ -73,24 +73,67 @@ EDGE_SQL="
   FROM edge e
   JOIN symbol ssrc ON ssrc.id = e.src_id
   JOIN symbol sdst ON sdst.id = e.dst_id
-  WHERE e.kind IN (2,3,6,8,9,17)
-    AND ssrc.usr NOT IN (SELECT usr FROM ref.symbol
-                         WHERE is_instantiation = 1 OR is_named_instance = 1)
-    AND sdst.usr NOT IN (SELECT usr FROM ref.symbol
-                         WHERE is_instantiation = 1 OR is_named_instance = 1)
   ORDER BY ssrc.usr, sdst.usr, e.kind;"
+
+SITE_SQL="
+  SELECT ssrc.usr, sdst.usr, e.kind, es.line, es.col, es.conditional,
+         COALESCE(es.recv_src_kind,'N'), COALESCE(es.recv_type_usr,'N'),
+         COALESCE(es.recv_decl_usr,'N'), COALESCE(es.recv_param_pos,'N'),
+         COALESCE(es.recv_type_is_value,'N')
+  FROM edge_site es
+  JOIN edge e ON e.id = es.edge_id
+  JOIN symbol ssrc ON ssrc.id = e.src_id
+  JOIN symbol sdst ON sdst.id = e.dst_id
+  ORDER BY ssrc.usr, sdst.usr, e.kind, es.line, es.col;"
+
+ARG_SQL="
+  SELECT ssrc.usr, sdst.usr, ca.line, ca.col, ca.position, ca.src_kind,
+         COALESCE(ca.type_usr,'N'), COALESCE(ca.decl_usr,'N'),
+         COALESCE(ca.callee_usr,'N'), COALESCE(ca.type_is_value,'N')
+  FROM call_arg ca
+  JOIN edge e ON e.id = ca.edge_id
+  JOIN symbol ssrc ON ssrc.id = e.src_id
+  JOIN symbol sdst ON sdst.id = e.dst_id
+  ORDER BY ssrc.usr, sdst.usr, ca.line, ca.col, ca.position;"
 
 PARM_SQL="
   SELECT s.usr, p.position, p.param_kind, COALESCE(p.name,'N')
   FROM template_param p JOIN symbol s ON s.id = p.owner_id
   ORDER BY s.usr, p.position;"
 
+TARG_SQL="
+  SELECT s.usr, ta.position, ta.arg_kind, COALESCE(ta.literal,'N'),
+         COALESCE(r.usr,'N')
+  FROM template_arg ta
+  JOIN symbol s ON s.id = ta.owner_id
+  LEFT JOIN symbol r ON r.id = ta.ref_id
+  ORDER BY s.usr, ta.position, COALESCE(ta.literal,'N');"
+
+DEF_SQL="
+  SELECT s.usr, fl.name, d.line, d.col, d.end_line, d.end_col,
+         COALESCE(d.init_text,'N')
+  FROM definition d
+  JOIN symbol s ON s.id = d.symbol_id
+  JOIN file fl ON fl.id = d.file_id
+  ORDER BY s.usr, fl.name, d.line;"
+
+DEDGE_SQL="
+  SELECT s.usr, sdst.usr, de.kind, de.count
+  FROM def_edge de
+  JOIN definition d ON d.id = de.src_def_id
+  JOIN symbol s ON s.id = d.symbol_id
+  JOIN symbol sdst ON sdst.id = de.dst_id
+  ORDER BY s.usr, sdst.usr, de.kind;"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 SYSROOT_ARGS=()
 if [ "$(uname)" = "Darwin" ]; then
-  SYSROOT_ARGS=(--extra-arg="-isysroot$(xcrun --show-sdk-path)")
+  # Use the versionless MacOSX.sdk symlink spelling — cidx's driver probe
+  # reports that form, and stub decl_path strings must match byte-for-byte.
+  SDK="$(xcrun --show-sdk-path | sed 's/MacOSX[0-9.]*\.sdk/MacOSX.sdk/')"
+  SYSROOT_ARGS=(--extra-arg="-isysroot$SDK")
 fi
 
 fail=0
@@ -124,12 +167,10 @@ for f in "${FILES[@]}"; do
     -p "$MANIFESTS" "${SYSROOT_ARGS[@]}" "$ABS" >"$WORK/lt.out" 2>&1 || true
 
   ok=1
-  for proj in SY EDGE PARM; do
+  for proj in SY EDGE SITE ARG PARM TARG DEF DEDGE; do
     sql_var="${proj}_SQL"
-    sqlite3 -noheader -separator $'\t' "$DB_CAPI" \
-      "ATTACH '$DB_CAPI' AS ref; ${!sql_var}" > "$WORK/a.tsv"
-    sqlite3 -noheader -separator $'\t' "$DB_LT" \
-      "ATTACH '$DB_CAPI' AS ref; ${!sql_var}" > "$WORK/b.tsv"
+    sqlite3 -noheader -separator $'\t' "$DB_CAPI" "${!sql_var}" > "$WORK/a.tsv"
+    sqlite3 -noheader -separator $'\t' "$DB_LT"   "${!sql_var}" > "$WORK/b.tsv"
     if ! diff -u "$WORK/a.tsv" "$WORK/b.tsv" > "$WORK/diff-$proj.txt"; then
       echo "FAIL  $f [$proj]"
       head -20 "$WORK/diff-$proj.txt"

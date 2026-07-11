@@ -30,6 +30,8 @@ struct MintRequest {
   std::optional<int64_t> decl_line;
   std::optional<int64_t> decl_col;
   std::optional<std::string> decl_path; // unregistered (system) header path
+  bool is_instantiation = false;        // implicit template-instantiation node
+  bool is_named_instance = false;       // X<B> minted from alias/member/local
 };
 
 struct TemplateParamRecord {

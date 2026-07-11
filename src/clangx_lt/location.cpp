@@ -14,13 +14,16 @@ ExpansionLoc to_expansion(const clang::SourceManager &sm,
   if (loc.isInvalid())
     return out;
   const clang::SourceLocation exp = sm.getExpansionLoc(loc);
-  // Canonical absolute path: the invocation may spell the file relatively
-  // (compile-db "file" entries), but consumers compare absolute paths.
-  if (auto fe = sm.getFileEntryRefForID(sm.getFileID(exp))) {
-    llvm::StringRef real = fe->getFileEntry().tryGetRealPathName();
-    out.file = real.empty() ? fe->getName().str() : real.str();
-  } else {
-    out.file = sm.getFilename(exp).str();
+  // libclang reports the file SPELLING (symlinks like MacOSX.sdk stay
+  // unresolved). Only a RELATIVE spelling (compile-db "file" entries) is
+  // canonicalized so absolute-path consumers can match it.
+  out.file = sm.getFilename(exp).str();
+  if (!out.file.empty() && out.file[0] != '/') {
+    if (auto fe = sm.getFileEntryRefForID(sm.getFileID(exp))) {
+      llvm::StringRef real = fe->getFileEntry().tryGetRealPathName();
+      if (!real.empty())
+        out.file = real.str();
+    }
   }
   out.line = sm.getExpansionLineNumber(exp);
   out.col = sm.getExpansionColumnNumber(exp);

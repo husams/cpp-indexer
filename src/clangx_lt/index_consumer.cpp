@@ -1,6 +1,9 @@
 #include "clangx_lt/index_consumer.hpp"
 
+#include "clangx_lt/body_pass_visitor.hpp"
+#include "clangx_lt/edge_sink.hpp"
 #include "clangx_lt/edge_visitor.hpp"
+#include "clangx_lt/ns_uses_visitor.hpp"
 #include "clangx_lt/storage_symbol_sink.hpp"
 #include "clangx_lt/symbol_visitor.hpp"
 
@@ -24,18 +27,29 @@ void IndexConsumer::HandleTranslationUnit(clang::ASTContext &context) {
     visitor.TraverseDecl(tu);
   };
   const auto run_edges = [&](const std::pair<std::string, int64_t> &t) {
-    EdgeVisitor visitor(context, edges_, t.first);
-    visitor.TraverseDecl(tu);
+    // index_edges (ast.cpp): drop the file's stale edges/definitions, then
+    // B1 declaration walk, B2 body walk, B3 namespace uses.
+    edges_.delete_edges_for_file(t.second);
+    edges_.delete_definitions_for_file(t.second);
+    EdgeVisitor decls(context, edges_, t.first, t.second);
+    decls.TraverseDecl(tu);
+    BodyPassVisitor bodies(context, edges_, t.first, t.second);
+    bodies.TraverseDecl(tu);
+    NsUsesVisitor ns(context, edges_, t.first, t.second);
+    ns.TraverseDecl(tu);
   };
 
-  // Main file: symbols then edges immediately.
+  // commands.cpp sequence: symbols(main) -> index_headers (all header
+  // symbols, then per-header edges) -> edges(main) LAST. The per-file edge
+  // deletes make this idempotent AND collapse cross-file double emissions
+  // (a header-walk edge whose src symbol belongs to the main file is deleted
+  // before the main walk re-emits it once).
   run_symbols(targets_[0]);
-  run_edges(targets_[0]);
-  // Headers: all symbols first (pass 1), then all edges (pass 2).
   for (size_t i = 1; i < targets_.size(); ++i)
     run_symbols(targets_[i]);
   for (size_t i = 1; i < targets_.size(); ++i)
     run_edges(targets_[i]);
+  run_edges(targets_[0]);
 }
 
 } // namespace cidx::lt

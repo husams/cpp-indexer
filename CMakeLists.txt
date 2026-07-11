@@ -504,33 +504,6 @@ if(CIDX_CLANGX_LIBTOOLING)
   endif()
   target_link_libraries(cidx_lt_probe PRIVATE clang-cpp LLVM)
 
-  # Phase-2a: DB-backed edge-pass tool (decl-level edges via the real Storage).
-  add_executable(cidx_lt_edges
-    src/clangx_lt/edges_main.cpp
-    src/clangx_lt/kind_map.cpp
-    src/clangx_lt/usr.cpp
-    src/clangx_lt/location.cpp
-    src/clangx_lt/names.cpp
-    src/clangx_lt/mint_builder.cpp
-    src/clangx_lt/template_arg_resolver.cpp
-    src/clangx_lt/storage_edge_sink.cpp
-    src/clangx_lt/edge_visitor.cpp
-    src/clangx_lt/edge_consumer.cpp
-    src/clangx_lt/edge_action.cpp
-  )
-  target_compile_definitions(cidx_lt_edges PRIVATE
-    "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
-  target_include_directories(cidx_lt_edges PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-  target_include_directories(cidx_lt_edges SYSTEM PRIVATE
-    ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
-  target_compile_definitions(cidx_lt_edges PRIVATE ${LLVM_DEFINITIONS})
-  # cidx_core is C++23; these TUs must match (probe stays C++17-minimal).
-  target_compile_features(cidx_lt_edges PRIVATE cxx_std_23)
-  if(NOT LLVM_ENABLE_RTTI)
-    target_compile_options(cidx_lt_edges PRIVATE -fno-rtti)
-  endif()
-  target_link_libraries(cidx_lt_edges PRIVATE cidx_core clang-cpp LLVM)
-
   # Phase-2 gate tool: full interleaved LT indexer (symbols + edges per file).
   add_executable(cidx_lt_index
     src/clangx_lt/index_main.cpp
@@ -547,6 +520,12 @@ if(CIDX_CLANGX_LIBTOOLING)
     src/clangx_lt/template_arg_resolver.cpp
     src/clangx_lt/storage_edge_sink.cpp
     src/clangx_lt/edge_visitor.cpp
+    src/clangx_lt/type_use.cpp
+    src/clangx_lt/value_source.cpp
+    src/clangx_lt/instance_minter.cpp
+    src/clangx_lt/body_walker.cpp
+    src/clangx_lt/body_pass_visitor.cpp
+    src/clangx_lt/ns_uses_visitor.cpp
   )
   target_compile_definitions(cidx_lt_index PRIVATE
     "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")

@@ -81,10 +81,22 @@ std::optional<std::string> display_name(const clang::ASTContext &context,
   }
   if (const auto *fd = llvm::dyn_cast<clang::FunctionDecl>(decl)) {
     fd->getDeclName().print(os, policy);
-    if (const clang::TemplateArgumentList *args =
-            fd->getTemplateSpecializationArgs()) {
-      // printTemplateArgumentList prints the enclosing <> itself.
-      clang::printTemplateArgumentList(os, args->asArray(), policy);
+    if (fd->getTemplateSpecializationArgs() != nullptr) {
+      // libclang prints the AS-WRITTEN spec args: an implicit instantiation
+      // shows empty <> (make_shared<>), an explicit specialization its
+      // written args (describe<bool>).
+      os << '<';
+      if (const clang::ASTTemplateArgumentListInfo *written =
+              fd->getTemplateSpecializationArgsAsWritten()) {
+        bool first_arg = true;
+        for (const clang::TemplateArgumentLoc &tal : written->arguments()) {
+          if (!first_arg)
+            os << ", ";
+          first_arg = false;
+          tal.getArgument().print(policy, os, /*IncludeType=*/false);
+        }
+      }
+      os << '>';
     }
     os << '(';
     bool first = true;
@@ -103,6 +115,25 @@ std::optional<std::string> display_name(const clang::ASTContext &context,
   } else if (const auto *spec =
                  llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(decl)) {
     spec->getDeclName().print(os, policy);
+    // Partial specializations print their args AS WRITTEN (libclang shows
+    // 'RuleTemplate<int, NameType>', not canonical type-parameter-0-0).
+    if (const auto *partial =
+            llvm::dyn_cast<clang::ClassTemplatePartialSpecializationDecl>(
+                decl)) {
+      if (const clang::ASTTemplateArgumentListInfo *written =
+              partial->getTemplateArgsAsWritten()) {
+        os << '<';
+        bool first = true;
+        for (const clang::TemplateArgumentLoc &tal : written->arguments()) {
+          if (!first)
+            os << ", ";
+          first = false;
+          tal.getArgument().print(policy, os, /*IncludeType=*/false);
+        }
+        os << '>';
+        return out;
+      }
+    }
     clang::printTemplateArgumentList(os, spec->getTemplateArgs().asArray(),
                                      policy);
   } else {

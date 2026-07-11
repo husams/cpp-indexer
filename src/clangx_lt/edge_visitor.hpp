@@ -22,6 +22,7 @@
 // Emission goes through EdgeSink only; no storage or I/O here.
 #pragma once
 
+#include "clangx_lt/instance_minter.hpp"
 #include "clangx_lt/mint_builder.hpp"
 #include "clangx_lt/template_arg_resolver.hpp"
 
@@ -32,6 +33,8 @@
 namespace clang {
 class ASTContext;
 class SourceManager;
+class VarDecl;
+class TypedefNameDecl;
 } // namespace clang
 
 namespace cidx::lt {
@@ -41,7 +44,7 @@ class EdgeSink;
 class EdgeVisitor : public clang::RecursiveASTVisitor<EdgeVisitor> {
 public:
   EdgeVisitor(clang::ASTContext &context, EdgeSink &sink,
-              std::string target_file);
+              std::string target_file, int64_t file_id);
 
   bool VisitNamedDecl(clang::NamedDecl *decl);           // contains
   bool TraverseTypedefDecl(clang::TypedefDecl *decl);    // libclang dup quirk
@@ -53,6 +56,8 @@ public:
   bool VisitFunctionTemplateDecl(clang::FunctionTemplateDecl *decl);
   bool VisitClassTemplateSpecializationDecl(
       clang::ClassTemplateSpecializationDecl *decl); // specializes/instantiates
+  bool VisitVarDecl(clang::VarDecl *decl);           // type uses + static defs
+  bool VisitTypedefNameDecl(clang::TypedefNameDecl *decl); // alias uses/mint
 
 private:
   // The decl-level walk prunes at function bodies and only covers cursors of
@@ -61,13 +66,16 @@ private:
 
   void emit_template_params(const clang::TemplateDecl *tmpl,
                             int64_t owner_id);
+  void emit_signature_uses(const clang::FunctionDecl *fn);
 
   clang::ASTContext &context_;
   clang::SourceManager &source_manager_;
   EdgeSink &sink_;
   MintBuilder mint_;
   TemplateArgResolver arg_resolver_;
+  InstanceMinter minter_;
   std::string target_file_;
+  int64_t file_id_;
 };
 
 } // namespace cidx::lt
