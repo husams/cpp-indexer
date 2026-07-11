@@ -12,8 +12,11 @@ endif()
 
 # CIDX_STATIC: prefer static archives for the third-party dependencies so the
 # binary carries fewer runtime requirements. Platform reality differs:
-#   * Linux: SQLite3 from its static archive + -static-libstdc++ -static-libgcc
-#     so the binary needs neither libstdc++ nor libsqlite3 at runtime. glibc
+#   * Linux: SQLite3 from its static archive so the binary needs no libsqlite3
+#     at runtime. libstdc++ stays DYNAMIC (system libstdc++.so.6): cidx_core
+#     links the Clang C++ API (dynamic libLLVM) which uses the system libstdc++,
+#     so a second static libstdc++ would corrupt the ABI across that boundary.
+#     glibc
 #     stays dynamic (a fully static glibc binary is discouraged and breaks
 #     NSS/dlopen). libclang is ALSO linked statically when a C-API wrapper
 #     archive is supplied via -DCIDX_LIBCLANG_STATIC=<libclang.a> (build it once
@@ -329,35 +332,19 @@ add_library(cidx_core STATIC
   src/graph/query.cpp
   src/graph/emit.cpp
   src/astgraph/astgraph.cpp
-  src/clangx_lt/kind_map.cpp
-  src/clangx_lt/usr.cpp
-  src/clangx_lt/location.cpp
-  src/clangx_lt/names.cpp
-  src/clangx_lt/decl_flags.cpp
-  src/clangx_lt/symbol_extractor.cpp
-  src/clangx_lt/symbol_visitor.cpp
-  src/clangx_lt/storage_symbol_sink.cpp
-  src/clangx_lt/mint_builder.cpp
-  src/clangx_lt/template_arg_resolver.cpp
-  src/clangx_lt/storage_edge_sink.cpp
-  src/clangx_lt/edge_visitor.cpp
-  src/clangx_lt/type_use.cpp
-  src/clangx_lt/value_source.cpp
-  src/clangx_lt/instance_minter.cpp
-  src/clangx_lt/body_walker.cpp
-  src/clangx_lt/body_pass_visitor.cpp
-  src/clangx_lt/ns_uses_visitor.cpp
-  src/clangx_lt/lt_engine.cpp
   third_party/md5/md5.c
   third_party/sha1/sha1.c
 )
 
-# The LT engine links the Clang C++ API. Its TUs compile -fno-rtti to match
-# a no-RTTI LLVM; the rest of cidx_core keeps default RTTI (no clang types
-# cross the lt_engine.hpp boundary).
+# --- LibTooling indexing engine (cidx_lt) ------------------------------------
+# The LT engine uses the Clang C++ API. Compiled as its own object library so
+# its LLVM/Clang headers are added with -isystem (a plain -I would break
+# gcc's #include_next <stdlib.h> in <cstdlib>) and it can carry -fno-rtti
+# independently. lt_engine.hpp is clang-free, so cidx_core links the objects
+# but never sees the Clang C++ headers.
 find_package(LLVM REQUIRED CONFIG)
 find_package(Clang REQUIRED CONFIG)
-set(_cidx_lt_sources
+add_library(cidx_lt OBJECT
   src/clangx_lt/kind_map.cpp src/clangx_lt/usr.cpp src/clangx_lt/location.cpp
   src/clangx_lt/names.cpp src/clangx_lt/decl_flags.cpp
   src/clangx_lt/symbol_extractor.cpp src/clangx_lt/symbol_visitor.cpp
@@ -367,19 +354,22 @@ set(_cidx_lt_sources
   src/clangx_lt/value_source.cpp src/clangx_lt/instance_minter.cpp
   src/clangx_lt/body_walker.cpp src/clangx_lt/body_pass_visitor.cpp
   src/clangx_lt/ns_uses_visitor.cpp src/clangx_lt/lt_engine.cpp)
-if(NOT LLVM_ENABLE_RTTI)
-  set_source_files_properties(${_cidx_lt_sources} PROPERTIES
-    COMPILE_OPTIONS "-fno-rtti")
-endif()
-set_source_files_properties(${_cidx_lt_sources} PROPERTIES
-  INCLUDE_DIRECTORIES "${LLVM_INCLUDE_DIRS};${CLANG_INCLUDE_DIRS}"
-  COMPILE_DEFINITIONS
+target_include_directories(cidx_lt PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_include_directories(cidx_lt SYSTEM PRIVATE
+  ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+target_compile_definitions(cidx_lt PRIVATE ${LLVM_DEFINITIONS}
   "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
+target_compile_features(cidx_lt PRIVATE cxx_std_23)
+if(NOT LLVM_ENABLE_RTTI)
+  target_compile_options(cidx_lt PRIVATE -fno-rtti)
+endif()
+target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_lt>)
 
 # A1.1: link libclang (shared by default; a static archive group under
 # CIDX_STATIC on Linux — see the resolution block above).
 target_link_libraries(cidx_core PUBLIC ${_cidx_libclang_link})
-# LT engine: the Clang C++ API (monolithic dylibs).
+# LT engine: the Clang C++ API (monolithic shared libs: clang-cpp + libLLVM).
 target_link_libraries(cidx_core PUBLIC clang-cpp LLVM)
 # S02: storage layer links SQLite3 (shared, or the static archive under
 # CIDX_STATIC).
@@ -472,10 +462,12 @@ add_executable(cidx src/main.cpp)
 target_compile_options(cidx PRIVATE -Wall -Wextra)
 target_link_libraries(cidx PRIVATE cidx_core)
 
-# Static C++ runtime on Linux (AppleClang/libc++ has no static-libstdc++).
-if(CIDX_STATIC AND NOT APPLE)
-  target_link_options(cidx PRIVATE -static-libstdc++ -static-libgcc)
-endif()
+# NOTE: -static-libstdc++/-static-libgcc is intentionally NOT applied. cidx_core
+# now links the Clang C++ API (clang-cpp + the shared libLLVM), which uses the
+# SYSTEM libstdc++; statically embedding a second libstdc++ would put two C++
+# runtimes in one process and corrupt std::string/exceptions crossing the LLVM
+# boundary. A gcc-toolset-built binary runs on base RHEL 9 via system
+# libstdc++.so.6 + the nonshared static bits, matching libLLVM.so.
 
 # RPATH is only needed while libclang is dynamic. With a static libclang there
 # is no shared dependency to locate, so skip it (a leftover RPATH is harmless
@@ -498,9 +490,7 @@ if(CIDX_ASTGRAPH_SOUFFLE_ENABLED)
   target_sources(cidx-astgraph PRIVATE
     $<TARGET_OBJECTS:cidx_astgraph_souffle_rules>)
 endif()
-if(CIDX_STATIC AND NOT APPLE)
-  target_link_options(cidx-astgraph PRIVATE -static-libstdc++ -static-libgcc)
-endif()
+# -static-libstdc++ omitted: see the note on the cidx target (dynamic libLLVM).
 if(NOT _cidx_libclang_static)
   set_target_properties(cidx-astgraph PROPERTIES
     BUILD_RPATH "${_cidx_libclang_dir}"

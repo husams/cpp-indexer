@@ -4,6 +4,7 @@
 #include "clangx_lt/kind_map.hpp"
 #include "clangx_lt/location.hpp"
 #include "clangx_lt/type_use.hpp"
+#include "clangx_lt/llvm_compat.hpp"
 #include "clangx_lt/usr.hpp"
 
 #include "clang/Lex/Lexer.h"
@@ -606,7 +607,7 @@ bool EdgeVisitor::VisitClassTemplateSpecializationDecl(
     }
     case clang::TemplateArgument::Integral:
       ta.arg_kind = 2;
-      ta.literal = llvm::toString(arg.getAsIntegral(), 10);
+      ta.literal = cidx::lt::compat::integral_to_string(arg.getAsIntegral());
       break;
     default:
       // Raw CXTemplateArgumentKind values (Null=0, Declaration=2, NullPtr=3,

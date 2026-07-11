@@ -9,6 +9,7 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/NestedNameSpecifier.h"
+#include "llvm/Config/llvm-config.h"
 
 namespace cidx::lt {
 
@@ -90,11 +91,14 @@ void NsUsesVisitor::emit_ns_use(const clang::NamedDecl *ns_decl,
 
 bool NsUsesVisitor::TraverseNestedNameSpecifierLoc(
     clang::NestedNameSpecifierLoc nns) {
-  // LLVM 22 NNS: namespace levels chain through NamespaceAndPrefixLoc; a
-  // NamespaceBaseDecl is either a NamespaceDecl or a NamespaceAliasDecl.
-  clang::NestedNameSpecifierLoc level = nns;
-  while (level && level.getNestedNameSpecifier().getKind() ==
-                      clang::NestedNameSpecifier::Kind::Namespace) {
+  // Walk namespace qualifier levels. LLVM 22 chains through
+  // NamespaceAndPrefixLoc off a value NNS; LLVM 21 chains through getPrefix()
+  // off a pointer NNS with getAsNamespace()/getAsNamespaceAlias().
+  for (clang::NestedNameSpecifierLoc level = nns; level;) {
+#if LLVM_VERSION_MAJOR >= 22
+    if (level.getNestedNameSpecifier().getKind() !=
+        clang::NestedNameSpecifier::Kind::Namespace)
+      break;
     const clang::NamespaceAndPrefixLoc np = level.getAsNamespaceAndPrefix();
     if (np.Namespace != nullptr) {
       if (const auto *alias =
@@ -105,11 +109,28 @@ bool NsUsesVisitor::TraverseNestedNameSpecifierLoc(
         emit_ns_use(ns, level.getLocalBeginLoc());
     }
     level = np.Prefix;
+#else
+    const clang::NestedNameSpecifier *spec = level.getNestedNameSpecifier();
+    if (spec == nullptr)
+      break;
+    if (const clang::NamespaceDecl *ns = spec->getAsNamespace())
+      emit_ns_use(ns, level.getLocalBeginLoc());
+    else if (const clang::NamespaceAliasDecl *alias =
+                 spec->getAsNamespaceAlias())
+      emit_ns_use(alias->getNamespace(), level.getLocalBeginLoc());
+    level = level.getPrefix();
+#endif
   }
   return RecursiveASTVisitor::TraverseNestedNameSpecifierLoc(nns);
 }
 
+#if LLVM_VERSION_MAJOR >= 22
 bool NsUsesVisitor::VisitTypeLoc(clang::TypeLoc tl) {
+  // LLVM 22 folds elaboration into tag/typedef TypeLocs, so their qualifier
+  // never reaches TraverseNestedNameSpecifierLoc — visit it explicitly. On
+  // LLVM 21 the qualifier arrives via ElaboratedTypeLoc through the normal
+  // RAV traversal, so this shim is unnecessary (and TagTypeLoc has no
+  // getQualifierLoc).
   clang::NestedNameSpecifierLoc qual;
   if (auto tt = tl.getAs<clang::TagTypeLoc>())
     qual = tt.getQualifierLoc();
@@ -119,6 +140,9 @@ bool NsUsesVisitor::VisitTypeLoc(clang::TypeLoc tl) {
     TraverseNestedNameSpecifierLoc(qual);
   return true;
 }
+#else
+bool NsUsesVisitor::VisitTypeLoc(clang::TypeLoc /*tl*/) { return true; }
+#endif
 
 bool NsUsesVisitor::VisitUsingDirectiveDecl(clang::UsingDirectiveDecl *decl) {
   if (in_target_file(decl))

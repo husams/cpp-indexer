@@ -5,6 +5,7 @@
 #include "clangx_lt/location.hpp"
 #include "clangx_lt/names.hpp"
 #include "clangx_lt/type_use.hpp"
+#include "clangx_lt/llvm_compat.hpp"
 #include "clangx_lt/usr.hpp"
 #include "clangx_lt/value_source.hpp"
 
@@ -18,6 +19,7 @@
 #include "clang/AST/PrettyPrinter.h"
 #include "clang/AST/Stmt.h"
 #include "clang/Basic/SourceManager.h"
+#include "llvm/Config/llvm-config.h"
 
 #include <algorithm>
 #include <set>
@@ -43,6 +45,12 @@ bool is_function_like_decl(const clang::Decl *d) {
 // libclang locates TYPE_REF cursors at the type NAME token (after any
 // qualifier); TEMPLATE_REF at the template name.
 clang::SourceLocation type_name_loc(clang::TypeLoc tl) {
+#if LLVM_VERSION_MAJOR < 22
+  // Pre-22 an elaborated (qualified) type wraps the tag/typedef loc; peel to
+  // the named type so getNameLoc lands on the type NAME, not the qualifier.
+  if (auto etl = tl.getAs<clang::ElaboratedTypeLoc>())
+    tl = etl.getNamedTypeLoc();
+#endif
   tl = tl.getUnqualifiedLoc();
   if (auto ts = tl.getAs<clang::TemplateSpecializationTypeLoc>())
     return ts.getTemplateNameLoc();
@@ -174,21 +182,26 @@ void BodyWalker::handle_stmt(const clang::Stmt *stmt,
       }
     }
     // Bare type name in the qualifier (Color::Red): TYPE_REF under an
-    // expression parent. (LLVM 22 NNS: a type qualifier is a single
-    // Kind::Type level.)
+    // expression parent. NNS is a value type with a Kind enum in LLVM 22, a
+    // pointer with a SpecifierKind in LLVM 21.
     {
+      const clang::Type *t = nullptr;
+#if LLVM_VERSION_MAJOR >= 22
       const clang::NestedNameSpecifier nns = dre->getQualifier();
-      if (nns.getKind() == clang::NestedNameSpecifier::Kind::Type) {
-        const clang::Type *t = nns.getAsType();
-        if (t != nullptr) {
-          if (const clang::NamedDecl *td =
-                  named_type_decl(clang::QualType(t, 0))) {
-            const std::string usr = usr_for_decl(td);
-            if (!usr.empty() && usr != owner_usr_) {
-              if (const auto dst = sink_.lookup_symbol_id(usr))
-                if (*dst != src_id_)
-                  emit_site_edge(dre, *dst, 7);
-            }
+      if (nns.getKind() == clang::NestedNameSpecifier::Kind::Type)
+        t = nns.getAsType();
+#else
+      if (const clang::NestedNameSpecifier *nns = dre->getQualifier())
+        t = nns->getAsType();
+#endif
+      if (t != nullptr) {
+        if (const clang::NamedDecl *td =
+                named_type_decl(clang::QualType(t, 0))) {
+          const std::string usr = usr_for_decl(td);
+          if (!usr.empty() && usr != owner_usr_) {
+            if (const auto dst = sink_.lookup_symbol_id(usr))
+              if (*dst != src_id_)
+                emit_site_edge(dre, *dst, 7);
           }
         }
       }
@@ -581,7 +594,7 @@ void BodyWalker::emit_resolved_call(const clang::Expr *site,
             ta.ref_id = resolver_.resolve(ta.literal, callee);
         } else if (arg.getKind() == clang::TemplateArgument::Integral) {
           ta.arg_kind = 2;
-          ta.literal = llvm::toString(arg.getAsIntegral(), 10);
+          ta.literal = cidx::lt::compat::integral_to_string(arg.getAsIntegral());
         } else if (arg.getKind() == clang::TemplateArgument::Pack) {
           // Observed C-API behavior on LLVM 22: a pack argument reports raw
           // kind 4 with no literal (empirically verified on make_shared /
@@ -622,7 +635,7 @@ void BodyWalker::emit_resolved_call(const clang::Expr *site,
             }
             case clang::TemplateArgument::Integral:
               ta.arg_kind = 2;
-              ta.literal = llvm::toString(arg.getAsIntegral(), 10);
+              ta.literal = cidx::lt::compat::integral_to_string(arg.getAsIntegral());
               display_args.push_back(*ta.literal);
               break;
             case clang::TemplateArgument::Declaration:
@@ -935,8 +948,12 @@ void BodyWalker::emit_call_args(const clang::Expr *site,
   for (unsigned pos = 0; pos < nargs; ++pos) {
     const clang::Expr *arg =
         call != nullptr ? call->getArg(pos) : ctor->getArg(pos);
-    if (arg == nullptr || llvm::isa<clang::CXXDefaultArgExpr>(arg))
+    if (arg == nullptr)
       continue;
+    // A defaulted argument (e.g. std::string's allocator on libstdc++) counts
+    // in clang_getNumArguments and libclang emits a call_arg for it; peel_expr
+    // does not descend into CXXDefaultArgExpr, so it classifies "unknown" —
+    // matching the reference. (On libc++ the same call takes no such arg.)
     const ValueSource vs = classify_value_source(context_, arg);
     if (vs.src_kind == "literal")
       continue;

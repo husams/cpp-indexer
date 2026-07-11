@@ -2,12 +2,15 @@
 # build-rhel9.sh — install dependencies (incl. a static SQLite) and build cidx on
 # RHEL 9.x / AlmaLinux 9 / Rocky 9. Run it from anywhere; it locates the repo.
 #
-#   ./scripts/build-rhel9.sh
+#   ./scripts/build-rhel9.sh              # deps (+ package update) then build
+#   DEPS_ONLY=1 ./scripts/build-rhel9.sh  # install/update dependencies, no build
 #
-# Produces: <repo>/build-static/cidx — SQLite3 + the C++ runtime linked
-# STATICALLY, libclang linked DYNAMICALLY (RHEL ships no static clang libs; a
-# static libclang would require building clang from source). To RUN the binary,
-# the host needs libclang.so:   dnf install -y clang-libs
+# Produces: <repo>/build-static/cidx — SQLite3 linked STATICALLY; libclang AND
+# the Clang C++ API (libclang-cpp + libLLVM, used by the LibTooling indexing
+# engine) linked DYNAMICALLY. libstdc++ stays dynamic (system libstdc++.so.6)
+# because libLLVM uses it — a static libstdc++ would corrupt the ABI across the
+# LLVM boundary. To RUN the binary the host needs the shared Clang/LLVM libs:
+#   dnf install -y clang-libs llvm-libs
 #
 # Knobs (env vars):
 #   GCC_TOOLSET             gcc-toolset major for C++23 (default 13; RHEL 9's
@@ -24,6 +27,8 @@
 #   BUILD_DIR               cmake build dir (default <repo>/build-static).
 #   JOBS                    parallel build jobs (default: nproc).
 #   SKIP_DEPS=1             skip dnf installs (deps already present).
+#   DEPS_ONLY=1             install/update dependencies, then exit (no build).
+#   SKIP_UPDATE=1           do not attempt `dnf upgrade` in the deps step.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,10 +56,24 @@ if [ "${SKIP_DEPS:-0}" != "1" ]; then
     || $SUDO subscription-manager repos --enable "codeready-builder-for-rhel-9-$(arch)-rpms" 2>/dev/null \
     || $SUDO crb enable 2>/dev/null \
     || echo "   (could not enable CRB automatically — continuing)"
+  # clang-devel + llvm-devel supply BOTH the libclang C API and the Clang C++
+  # API (libclang-cpp, libLLVM, and the ClangConfig.cmake/LLVMConfig.cmake the
+  # build's find_package(Clang) needs).
   $SUDO dnf -y install \
     "gcc-toolset-${GCC_TOOLSET}" "gcc-toolset-${GCC_TOOLSET}-libstdc++-devel" \
     cmake make git tar xz unzip which \
-    clang-devel llvm-devel
+    clang-devel llvm-devel clang-libs llvm-libs
+  # Try to update installed packages to the latest (non-fatal — an offline or
+  # pinned host still builds with what it has).
+  if [ "${SKIP_UPDATE:-0}" != "1" ]; then
+    echo "==> updating packages (dnf upgrade)"
+    $SUDO dnf -y upgrade || echo "   (dnf upgrade skipped/failed — continuing)"
+  fi
+fi
+
+if [ "${DEPS_ONLY:-0}" = "1" ]; then
+  echo "==> DEPS_ONLY: dependencies installed/updated; skipping build"
+  exit 0
 fi
 
 TOOLSET_ENABLE="/opt/rh/gcc-toolset-${GCC_TOOLSET}/enable"
@@ -103,15 +122,20 @@ else
 fi
 
 # --- build cidx --------------------------------------------------------------
-echo "==> building cidx (gcc-toolset-${GCC_TOOLSET}; static SQLite + libstdc++, dynamic libclang)"
+echo "==> building cidx (gcc-toolset-${GCC_TOOLSET}; static SQLite, dynamic Clang/LLVM)"
 # shellcheck disable=SC1090
 source "$TOOLSET_ENABLE"
 LLVM_LIBDIR="$(llvm-config --libdir)"
+# find_package(Clang) discovery: point cmake at this LLVM's config packages so
+# the LibTooling engine (clang-cpp + LLVM targets) resolves.
+LLVM_CMAKEDIR="$(llvm-config --cmakedir)"
+CLANG_CMAKEDIR="$(dirname "$LLVM_CMAKEDIR")/clang"
 cmake -S "$CIDX_ROOT" -B "$BUILD_DIR" -DCIDX_STATIC=ON \
-  -DCIDX_LIBCLANG="$LLVM_LIBDIR/libclang.so"
+  -DCIDX_LIBCLANG="$LLVM_LIBDIR/libclang.so" \
+  -DLLVM_DIR="$LLVM_CMAKEDIR" -DClang_DIR="$CLANG_CMAKEDIR"
 cmake --build "$BUILD_DIR" -j"$JOBS" --target cidx
 
 echo
 echo "==> built: $BUILD_DIR/cidx"
 "$BUILD_DIR/cidx" --help >/dev/null 2>&1 && echo "    cidx runs OK"
-echo "    to run on another RHEL 9.6 host: copy the binary + 'dnf install -y clang-libs'"
+echo "    to run on another RHEL 9 host: copy the binary + 'dnf install -y clang-libs llvm-libs'"
