@@ -1,9 +1,12 @@
 #include "clangx_lt/body_walker.hpp"
 
+#include "clangx_lt/call_template_args.hpp"
 #include "clangx_lt/edge_sink.hpp"
+#include "clangx_lt/instantiation_edges.hpp"
 #include "clangx_lt/kind_map.hpp"
 #include "clangx_lt/location.hpp"
 #include "clangx_lt/names.hpp"
+#include "clangx_lt/receiver_provenance.hpp"
 #include "clangx_lt/type_use.hpp"
 #include "clangx_lt/llvm_compat.hpp"
 #include "clangx_lt/usr.hpp"
@@ -529,269 +532,67 @@ void BodyWalker::handle_var_decl(const clang::VarDecl *var) {
   }
 }
 
+// Resolve a recovered (dependent/overloaded, single-candidate) callee to a
+// destination symbol id: lookup by USR, else by (qual_name, kind), else mint a
+// stub for a non-system decl. Returns -1 when unresolved.
+int64_t
+BodyWalker::resolve_recovered_target(const clang::NamedDecl *keyed,
+                                     const std::string &callee_usr) {
+  int64_t dst_id = -1;
+  if (const auto dst = sink_.lookup_symbol_id(callee_usr))
+    dst_id = *dst;
+  if (dst_id < 0) {
+    const std::string qn = qualified_name(context_, keyed);
+    if (!qn.empty()) {
+      const auto ids =
+          sink_.symbol_ids_by_qual_name_kind(qn, cidx_stub_kind_name(keyed));
+      if (ids.size() == 1)
+        dst_id = ids[0];
+    }
+  }
+  if (dst_id < 0 &&
+      !context_.getSourceManager().isInSystemHeader(keyed->getLocation())) {
+    if (auto req = mint_.build(keyed))
+      dst_id = sink_.mint_symbol(*req);
+  }
+  return dst_id;
+}
+
+// Shared tail for a resolved/recovered callee. Orchestration only: resolve the
+// destination id, then delegate each concern to its own translation unit —
+// call_template_args (spec arg rows + display name), receiver_provenance (the
+// edge_site recv_* fields), and instantiation_edges (the B3 family).
 void BodyWalker::emit_resolved_call(const clang::Expr *site,
                                     const clang::FunctionDecl *callee,
                                     bool recovered,
                                     const clang::NamedDecl *mint_as) {
   const clang::NamedDecl *keyed =
-      mint_as != nullptr ? mint_as
-                         : llvm::cast<clang::NamedDecl>(callee);
+      mint_as != nullptr ? mint_as : llvm::cast<clang::NamedDecl>(callee);
   const std::string callee_usr = usr_for_decl(keyed);
   if (callee_usr.empty())
     return;
+
   int64_t dst_id = -1;
   if (recovered) {
-    if (const auto dst = sink_.lookup_symbol_id(callee_usr))
-      dst_id = *dst;
-    if (dst_id < 0) {
-      const std::string qn = qualified_name(context_, keyed);
-      if (!qn.empty()) {
-        const auto ids = sink_.symbol_ids_by_qual_name_kind(
-            qn, cidx_stub_kind_name(keyed));
-        if (ids.size() == 1)
-          dst_id = ids[0];
-      }
-    }
-    if (dst_id < 0 &&
-        !context_.getSourceManager().isInSystemHeader(keyed->getLocation())) {
-      if (auto req = mint_.build(keyed))
-        dst_id = sink_.mint_symbol(*req);
-    }
+    dst_id = resolve_recovered_target(keyed, callee_usr);
   } else {
-    // Instantiation member? flag the mint.
-    const clang::FunctionDecl *primary = callee->getPrimaryTemplate() != nullptr
-                                             ? callee->getTemplateInstantiationPattern()
-                                             : nullptr;
-    const bool is_inst_member = callee->getPrimaryTemplate() != nullptr ||
-                                callee->getMemberSpecializationInfo() != nullptr;
-    auto req = mint_.build(callee);
-    if (!req)
-      return;
-    req->is_instantiation = is_inst_member;
-    dst_id = sink_.mint_symbol(*req);
-    // Template args of a callable specialization. libclang's cursor API
-    // exposes them for FREE-FUNCTION specs only (methods return -1); METHOD
-    // specs fall back to the explicit `<...>` args written at the call site.
-    if (is_inst_member && dst_id >= 0) {
-      const clang::PrintingPolicy &policy = context_.getPrintingPolicy();
-      const auto emit_arg = [&](int64_t pos, const clang::TemplateArgument &arg,
-                                clang::QualType written) {
-        TemplateArgRecord ta;
-        ta.owner_id = dst_id;
-        ta.position = pos;
-        if (arg.getKind() == clang::TemplateArgument::Type) {
-          ta.arg_kind = 1;
-          const clang::QualType t = written.isNull() ? arg.getAsType() : written;
-          const std::string sp = t.getAsString(policy);
-          if (!sp.empty())
-            ta.literal = sp;
-          if (const clang::TagDecl *td = t->getAsTagDecl()) {
-            const std::string ref_usr = usr_for_decl(td);
-            if (!ref_usr.empty())
-              ta.ref_id = sink_.lookup_symbol_id(ref_usr);
-          }
-          if (!ta.ref_id)
-            ta.ref_id = resolver_.resolve(ta.literal, callee);
-        } else if (arg.getKind() == clang::TemplateArgument::Integral) {
-          ta.arg_kind = 2;
-          ta.literal = cidx::lt::compat::integral_to_string(arg.getAsIntegral());
-        } else if (arg.getKind() == clang::TemplateArgument::Pack) {
-          // Observed C-API behavior on LLVM 22: a pack argument reports raw
-          // kind 4 with no literal (empirically verified on make_shared /
-          // make_unique specs); cidx stores that verbatim.
-          ta.arg_kind = 4;
-        } else {
-          return;
-        }
-        sink_.add_template_arg(ta);
-      };
-      if (!llvm::isa<clang::CXXMethodDecl>(callee)) {
-        // Full cursor-API mirror (index_cursor_template_args): every arg gets
-        // a row; non-Type/Integral kinds map to 2/3/4 with no literal and a
-        // '?' display placeholder that suppresses the display rewrite.
-        std::vector<std::string> display_args;
-        if (const clang::TemplateArgumentList *args =
-                callee->getTemplateSpecializationArgs()) {
-          for (unsigned ai = 0; ai < args->size(); ++ai) {
-            const clang::TemplateArgument &arg = args->get(ai);
-            TemplateArgRecord ta;
-            ta.owner_id = dst_id;
-            ta.position = static_cast<int64_t>(ai);
-            switch (arg.getKind()) {
-            case clang::TemplateArgument::Type: {
-              ta.arg_kind = 1;
-              const std::string sp = arg.getAsType().getAsString(policy);
-              if (!sp.empty())
-                ta.literal = sp;
-              if (const clang::TagDecl *td = arg.getAsType()->getAsTagDecl()) {
-                const std::string ref_usr = usr_for_decl(td);
-                if (!ref_usr.empty())
-                  ta.ref_id = sink_.lookup_symbol_id(ref_usr);
-              }
-              if (!ta.ref_id)
-                ta.ref_id = resolver_.resolve(ta.literal, callee);
-              display_args.push_back(ta.literal.value_or("?"));
-              break;
-            }
-            case clang::TemplateArgument::Integral:
-              ta.arg_kind = 2;
-              ta.literal = cidx::lt::compat::integral_to_string(arg.getAsIntegral());
-              display_args.push_back(*ta.literal);
-              break;
-            case clang::TemplateArgument::Declaration:
-            case clang::TemplateArgument::NullPtr:
-            case clang::TemplateArgument::Expression:
-              ta.arg_kind = 2;
-              display_args.push_back("?");
-              break;
-            case clang::TemplateArgument::Template:
-            case clang::TemplateArgument::TemplateExpansion:
-              ta.arg_kind = 3;
-              display_args.push_back("?");
-              break;
-            case clang::TemplateArgument::Pack:
-              ta.arg_kind = 4;
-              display_args.push_back("?");
-              break;
-            default:
-              continue;
-            }
-            sink_.add_template_arg(ta);
-          }
-        }
-        // update_callable_template_display_name: skip on empty or any '?'.
-        if (!display_args.empty() &&
-            std::find(display_args.begin(), display_args.end(), "?") ==
-                display_args.end()) {
-          if (const auto disp = sink_.lookup_display_name(dst_id)) {
-            if (!disp->empty()) {
-              std::string rendered = "<";
-              for (size_t i = 0; i < display_args.size(); ++i) {
-                if (i != 0)
-                  rendered += ", ";
-                rendered += display_args[i];
-              }
-              rendered += ">";
-              std::string out = *disp;
-              const size_t start = out.find('<');
-              const size_t params = out.find('(');
-              bool replaced = false;
-              if (start != std::string::npos &&
-                  (params == std::string::npos || start < params)) {
-                int depth = 0;
-                for (size_t i = start; i < out.size(); ++i) {
-                  if (out[i] == '<') ++depth;
-                  else if (out[i] == '>' && --depth == 0) {
-                    out = out.substr(0, start) + rendered + out.substr(i + 1);
-                    replaced = true;
-                    break;
-                  }
-                }
-              }
-              if (!replaced) {
-                if (params != std::string::npos)
-                  out = out.substr(0, params) + rendered + out.substr(params);
-                else
-                  out += rendered;
-              }
-              if (out != *disp)
-                sink_.update_display_name(dst_id, out);
-            }
-          }
-        }
-      } else if (const auto *call = llvm::dyn_cast<clang::CallExpr>(site)) {
-        const clang::Expr *callee_expr = peel_expr(call->getCallee());
-        if (const auto *me =
-                llvm::dyn_cast_or_null<clang::MemberExpr>(callee_expr)) {
-          if (me->hasExplicitTemplateArgs()) {
-            int64_t pos = 0;
-            for (const clang::TemplateArgumentLoc &tal :
-                 me->template_arguments()) {
-              const clang::TypeSourceInfo *tsi = tal.getTypeSourceInfo();
-              emit_arg(pos++, tal.getArgument(),
-                       tsi != nullptr ? tsi->getType() : clang::QualType());
-            }
-          }
-        }
-      }
+    // Non-recovered target: mint the callee (flagging instantiation members)
+    // and emit its template-arg rows.
+    const bool is_inst_member =
+        callee->getPrimaryTemplate() != nullptr ||
+        callee->getMemberSpecializationInfo() != nullptr;
+    if (auto req = mint_.build(callee)) {
+      req->is_instantiation = is_inst_member;
+      dst_id = sink_.mint_symbol(*req);
+      emit_callable_template_args(context_, sink_, resolver_, callee, site,
+                                  dst_id);
     }
-    (void)primary;
   }
   if (dst_id < 0)
     return;
 
-  // Receiver provenance (member calls only).
-  std::string recv_src_kind, recv_type_usr, recv_decl_usr;
-  std::optional<int64_t> recv_param_pos;
-  std::optional<int64_t> recv_type_is_value;
-  const clang::Expr *recv_expr = nullptr;
-  if (const auto *mc = llvm::dyn_cast<clang::CXXMemberCallExpr>(site)) {
-    const auto *me =
-        llvm::dyn_cast_or_null<clang::MemberExpr>(peel_expr(mc->getCallee()));
-    if (me != nullptr && !me->isImplicitAccess())
-      recv_expr = me->getBase();
-  } else if (const auto *anycall = llvm::dyn_cast<clang::CallExpr>(site)) {
-    // Recovered dependent member calls (cache.get<std::string>(...)): the
-    // callee is a CXXDependentScopeMemberExpr / UnresolvedMemberExpr whose
-    // base is the receiver (libclang MEMBER_REF_EXPR first child).
-    const clang::Expr *callee_expr = peel_expr(anycall->getCallee());
-    if (const auto *dep = llvm::dyn_cast_or_null<
-            clang::CXXDependentScopeMemberExpr>(callee_expr)) {
-      if (!dep->isImplicitAccess())
-        recv_expr = dep->getBase();
-    } else if (const auto *unres = llvm::dyn_cast_or_null<
-                   clang::UnresolvedMemberExpr>(callee_expr)) {
-      if (!unres->isImplicitAccess())
-        recv_expr = unres->getBase();
-    }
-  }
-  if (recv_expr != nullptr) {
-    const ValueSource rv = classify_value_source(context_, recv_expr);
-    recv_src_kind = rv.src_kind;
-    recv_type_usr = rv.type_usr;
-    recv_decl_usr = rv.decl_usr;
-    if (recv_src_kind == "local" && !recv_decl_usr.empty()) {
-      if (const auto *dre = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
-              peel_expr(recv_expr))) {
-        if (const auto *parm =
-                llvm::dyn_cast<clang::ParmVarDecl>(dre->getDecl())) {
-          // The cursor API's param iteration returns -1 on FUNCTION_TEMPLATE
-          // parents, so cidx never resolves the position there.
-          const auto *pfn = llvm::dyn_cast_or_null<clang::FunctionDecl>(
-              llvm::dyn_cast_or_null<clang::Decl>(parm->getDeclContext()));
-          if (pfn != nullptr && pfn->getDescribedFunctionTemplate() == nullptr)
-            recv_param_pos =
-                static_cast<int64_t>(parm->getFunctionScopeIndex());
-        }
-      }
-    }
-    if (recv_src_kind == "member" || recv_src_kind == "global" ||
-        recv_src_kind == "call_result") {
-      std::string dispatch_usr;
-      if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(callee)) {
-        if (const clang::CXXRecordDecl *owner = m->getParent())
-          dispatch_usr = usr_for_decl(owner);
-      }
-      recv_type_is_value =
-          type_is_value(decl_type_for_expr(peel_expr(recv_expr)),
-                        dispatch_usr)
-              ? 1
-              : 0;
-    }
-  } else if (llvm::isa<clang::CXXMethodDecl>(callee)) {
-    // Implicit this: no explicit receiver child and a method/ctor/dtor callee
-    // (libclang applies this to operator calls and statics alike).
-    if (const clang::CXXRecordDecl *owner =
-            llvm::cast<clang::CXXMethodDecl>(callee)->getParent()) {
-      const clang::NamedDecl *o = owner;
-      if (const clang::ClassTemplateDecl *ct = owner->getDescribedClassTemplate())
-        o = ct;
-      const std::string ou = usr_for_decl(o);
-      recv_src_kind = "this";
-      recv_type_usr = ou;
-      recv_decl_usr = ou;
-    }
-  }
+  const ReceiverProvenance recv =
+      classify_call_receiver(context_, site, callee);
 
   EdgeRecord e;
   e.src_id = src_id_;
@@ -805,113 +606,22 @@ void BodyWalker::emit_resolved_call(const clang::Expr *site,
   siter.line = loc.line;
   siter.col = loc.col;
   siter.conditional = cond_depth_ > 0 ? 1 : 0;
-  if (!recv_src_kind.empty())
-    siter.recv_src_kind = recv_src_kind;
-  if (!recv_type_usr.empty())
-    siter.recv_type_usr = recv_type_usr;
-  if (!recv_decl_usr.empty())
-    siter.recv_decl_usr = recv_decl_usr;
-  siter.recv_param_pos = recv_param_pos;
-  siter.recv_type_is_value = recv_type_is_value;
+  if (!recv.src_kind.empty())
+    siter.recv_src_kind = recv.src_kind;
+  if (!recv.type_usr.empty())
+    siter.recv_type_usr = recv.type_usr;
+  if (!recv.decl_usr.empty())
+    siter.recv_decl_usr = recv.decl_usr;
+  siter.recv_param_pos = recv.param_pos;
+  siter.recv_type_is_value = recv.type_is_value;
   sink_.add_edge_site(siter);
   emit_call_args(site, llvm::dyn_cast<clang::CallExpr>(site),
                  llvm::dyn_cast<clang::CXXConstructExpr>(site), edge_id);
 
-  // B3 instantiates: callee is a template specialization -> caller ->
-  // primary template (lookup-only) + instantiation-member promotion.
-  if (!recovered) {
-    const clang::NamedDecl *primary = nullptr;
-    if (const clang::FunctionTemplateDecl *ft = callee->getPrimaryTemplate())
-      primary = ft;
-    else if (callee->getMemberSpecializationInfo() != nullptr)
-      primary = llvm::dyn_cast_or_null<clang::NamedDecl>(
-          callee->getMemberSpecializationInfo()->getInstantiatedFrom());
-    if (primary != nullptr) {
-      const std::string prim_usr = usr_for_decl(primary);
-      if (!prim_usr.empty() && prim_usr != callee_usr) {
-        if (const auto prim = sink_.lookup_symbol_id(prim_usr)) {
-          EdgeRecord inst;
-          inst.src_id = src_id_;
-          inst.dst_id = *prim;
-          inst.kind = 5;
-          sink_.add_edge(inst);
-
-          // mint_instantiation_nodes: callable spec -> primary; owner type
-          // promotion for instantiated members.
-          EdgeRecord ib;
-          ib.src_id = dst_id;
-          ib.dst_id = *prim;
-          ib.kind = 5;
-          sink_.add_edge(ib);
-          if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(callee)) {
-            const clang::CXXRecordDecl *owner = m->getParent();
-            if (owner != nullptr) {
-              const auto *ospec = llvm::dyn_cast<
-                  clang::ClassTemplateSpecializationDecl>(owner);
-              if (ospec == nullptr) {
-                const std::string ou = usr_for_decl(owner);
-                if (!ou.empty())
-                  if (const auto oid = sink_.lookup_symbol_id(ou)) {
-                    EdgeRecord mo;
-                    mo.src_id = dst_id;
-                    mo.dst_id = *oid;
-                    mo.kind = 9;
-                    sink_.add_edge(mo);
-                  }
-              } else {
-                const clang::ClassTemplateDecl *cls_prim =
-                    ospec->getSpecializedTemplate();
-                auto oreq = mint_.build(ospec);
-                if (oreq && cls_prim != nullptr) {
-                  oreq->is_instantiation = true;
-                  const int64_t type_id = sink_.mint_symbol(*oreq);
-                  EdgeRecord mo;
-                  mo.src_id = dst_id;
-                  mo.dst_id = type_id;
-                  mo.kind = 9;
-                  sink_.add_edge(mo);
-                  const std::string cp = usr_for_decl(cls_prim);
-                  if (!cp.empty())
-                    if (const auto cpid = sink_.lookup_symbol_id(cp)) {
-                      EdgeRecord ie;
-                      ie.src_id = type_id;
-                      ie.dst_id = *cpid;
-                      ie.kind = 5;
-                      sink_.add_edge(ie);
-                    }
-                  const clang::TemplateArgumentList &args =
-                      ospec->getTemplateArgs();
-                  const clang::PrintingPolicy &policy =
-                      context_.getPrintingPolicy();
-                  for (unsigned ai = 0; ai < args.size(); ++ai) {
-                    if (args[ai].getKind() != clang::TemplateArgument::Type)
-                      continue;
-                    TemplateArgRecord ta;
-                    ta.owner_id = type_id;
-                    ta.position = static_cast<int64_t>(ai);
-                    ta.arg_kind = 1;
-                    const std::string sp =
-                        args[ai].getAsType().getAsString(policy);
-                    if (!sp.empty())
-                      ta.literal = sp;
-                    if (const clang::TagDecl *td =
-                            args[ai].getAsType()->getAsTagDecl()) {
-                      const std::string ru = usr_for_decl(td);
-                      if (!ru.empty())
-                        ta.ref_id = sink_.lookup_symbol_id(ru);
-                    }
-                    if (!ta.ref_id)
-                      ta.ref_id = resolver_.resolve(ta.literal, ospec);
-                    sink_.add_template_arg(ta);
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
+  // B3 instantiates edges for a non-recovered template specialization.
+  if (!recovered)
+    emit_instantiation_edges(context_, sink_, mint_, resolver_, src_id_, dst_id,
+                             callee, callee_usr);
 }
 
 int64_t BodyWalker::emit_site_edge(const clang::Expr *site, int64_t dst_id,

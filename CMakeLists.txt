@@ -169,6 +169,8 @@ add_library(cidx_lt OBJECT
   src/clangx_lt/edge_visitor.cpp src/clangx_lt/type_use.cpp
   src/clangx_lt/value_source.cpp src/clangx_lt/instance_minter.cpp
   src/clangx_lt/body_walker.cpp src/clangx_lt/body_pass_visitor.cpp
+  src/clangx_lt/call_template_args.cpp src/clangx_lt/display_name_rewrite.cpp
+  src/clangx_lt/receiver_provenance.cpp src/clangx_lt/instantiation_edges.cpp
   src/clangx_lt/ns_uses_visitor.cpp src/clangx_lt/lt_engine.cpp
   src/clangx_lt/clang_version.cpp)
 target_include_directories(cidx_lt PRIVATE
@@ -403,6 +405,10 @@ if(CIDX_CLANGX_LIBTOOLING)
     src/clangx_lt/instance_minter.cpp
     src/clangx_lt/body_walker.cpp
     src/clangx_lt/body_pass_visitor.cpp
+    src/clangx_lt/call_template_args.cpp
+    src/clangx_lt/display_name_rewrite.cpp
+    src/clangx_lt/receiver_provenance.cpp
+    src/clangx_lt/instantiation_edges.cpp
     src/clangx_lt/ns_uses_visitor.cpp
   )
   target_compile_definitions(cidx_lt_index PRIVATE
