@@ -7,6 +7,9 @@ build*/
 # clangd compile DB symlink -> build/compile_commands.json (machine-local; build/ is ignored).
 /compile_commands.json
 
+# Local LLVM checkout used for large-scale index testing.
+test-repo/
+
 # Python package environments, caches, and build artifacts.
 python/.venv/
 python/.pytest_cache/

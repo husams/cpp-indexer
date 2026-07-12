@@ -314,8 +314,16 @@ bool EdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
       const clang::SourceLocation e = clang::Lexer::getLocForEndOfToken(
           sm.getExpansionLoc(range.getEnd()), 0, sm, context_.getLangOpts());
       bool invalid = false;
-      const char *bp = sm.getCharacterData(b, &invalid);
-      const char *ep = invalid ? nullptr : sm.getCharacterData(e, &invalid);
+      // Both ends must sit in the same file buffer: a range whose begin and
+      // end expand into different buffers (macro spellings, PCH prefix
+      // buffers) yields pointers into unrelated allocations, and ep - bp is
+      // garbage.
+      const bool same_buffer = b.isValid() && e.isValid() &&
+                               sm.getFileID(b) == sm.getFileID(e);
+      const char *bp = same_buffer ? sm.getCharacterData(b, &invalid) : nullptr;
+      const char *ep = (same_buffer && !invalid)
+                           ? sm.getCharacterData(e, &invalid)
+                           : nullptr;
       if (!invalid && bp != nullptr && ep != nullptr && ep > bp) {
         std::string raw(bp, static_cast<size_t>(ep - bp));
         const auto eq = raw.find('=');
