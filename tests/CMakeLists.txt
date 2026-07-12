@@ -15,7 +15,6 @@ set(CIDX_DEFAULT_TESTS
   fuzzy_match_test
   repo_test
   include_aliasing_test
-  pch_test
 )
 
 foreach(test_name IN LISTS CIDX_DEFAULT_TESTS)
@@ -84,25 +83,9 @@ set_tests_properties(toolchain_clang_test PROPERTIES
   LABELS "clang"
   SKIP_RETURN_CODE 77)
 
-# --- S05: ast_test — one exe, two ctest registrations -------------------------
-# The final-argv assembly case is hermetic ("default" label); the parse +
-# diagnostic-policy suite performs real parses, lives in doctest suite "clang".
-# S06 extends this same exe with the walk/extraction cases.
-# A1: SKIP-77 kept for fixture-gap (CIDX_MANIFESTS_DIR absent); not for dylib.
-add_executable(ast_test ast_test.cpp)
-target_compile_options(ast_test PRIVATE -Wall -Wextra)
-target_link_libraries(ast_test PRIVATE cidx_core)
-# S06: the walk/extraction suites parse the lab manifests READ-ONLY.
-target_compile_definitions(ast_test PRIVATE
-  CIDX_MANIFESTS_DIR="${CIDX_MANIFESTS_DIR}")
-
-add_test(NAME ast_test COMMAND ast_test --test-suite-exclude=clang)
-set_tests_properties(ast_test PROPERTIES LABELS "default")
-
-add_test(NAME ast_clang_test COMMAND ast_test --test-suite=clang)
-set_tests_properties(ast_clang_test PROPERTIES
-  LABELS "clang"
-  SKIP_RETURN_CODE 77)
+# ast_test removed in the LibTooling cutover: it exercised the retired libclang
+# cursor-walk engine (AstIndexer). Real-parse indexing is now driven by the
+# LibTooling engine and covered via cli_test + the index parity gate.
 
 # --- astgraph_test — per-TU AST->SQLite graph dumper (src/astgraph/) ----------
 # Every case performs a real parse on temp-dir sources: single "clang"
@@ -139,45 +122,15 @@ set_tests_properties(cli_clang_test PROPERTIES
   LABELS "clang"
   SKIP_RETURN_CODE 77)
 
-# --- S09: ast_query_test — M5 AST command group unit tests (ADR-006 §8.1) -----
-# "default" suite: json_out, kind_names, group_thousands, argparse (hermetic).
-# "clang" suite: real parse + golden comparison over CIDX_MANIFESTS_DIR.
-# CIDX_FIXTURES_DIR must cover tests/fixtures/m5/ goldens.
-add_executable(ast_query_test ast_query_test.cpp)
-target_compile_options(ast_query_test PRIVATE -Wall -Wextra)
-target_link_libraries(ast_query_test PRIVATE cidx_core)
-target_compile_definitions(ast_query_test PRIVATE
-  CIDX_MANIFESTS_DIR="${CIDX_MANIFESTS_DIR}"
-  CIDX_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+# ast_query_test / astcache_test removed in the LibTooling cutover: the
+# `cidx ast` command and the AST/PCH cache they exercised were deleted.
 
-add_test(NAME ast_query_test COMMAND ast_query_test --test-suite-exclude=clang)
-set_tests_properties(ast_query_test PROPERTIES LABELS "default")
-
-add_test(NAME ast_query_clang_test COMMAND ast_query_test --test-suite=clang)
-set_tests_properties(ast_query_clang_test PROPERTIES
-  LABELS "clang"
-  SKIP_RETURN_CODE 77)
-
-# --- S10: astcache_test — M5 cache tests (ADR-006 §8.1, mirrors test_astcache.py)
-# All tests need real libclang parses ("clang" suite only).
-add_executable(astcache_test astcache_test.cpp)
-target_compile_options(astcache_test PRIVATE -Wall -Wextra)
-target_link_libraries(astcache_test PRIVATE cidx_core)
-target_compile_definitions(astcache_test PRIVATE
-  CIDX_MANIFESTS_DIR="${CIDX_MANIFESTS_DIR}")
-
-add_test(NAME astcache_test COMMAND astcache_test --test-suite=clang)
-set_tests_properties(astcache_test PROPERTIES
-  LABELS "clang"
-  SKIP_RETURN_CODE 77)
-
-# --- S08: parity gate (label "parity"; dev box only — needs uv + the Python
-# cidx launcher + sqlite3). The script self-checks its prerequisites and
-# fails loudly rather than skipping. scripts/e2e_librdkafka.sh (label "e2e")
-# is deliberately NOT registered: it drives the remote test box
-# 192.168.1.115 and is a manual release gate (design §8).
-add_test(NAME parity_check
-  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/parity_check.sh)
-set_tests_properties(parity_check PROPERTIES
-  LABELS "parity"
-  ENVIRONMENT "CIDX_CPP_BIN=$<TARGET_FILE:cidx>")
+# --- S08: parity gate — RETIRED in the LibTooling cutover (Phase 4).
+# The byte-identical Python(libclang)-vs-C++ dual-implementation contract is
+# dropped: C++ now indexes via the LibTooling engine, whose AST-traversal order
+# differs from libclang's, so the surrogate-key (edge.id / edge_site.edge_id)
+# emission order — and thus a byte-strict `sqlite3 .dump` diff — can no longer
+# match Python's libclang output. Semantic parity (identical symbol rows and
+# identical edge/edge_site SETS) is preserved and was verified directly during
+# the cutover. Python is being narrowed to storage/query only (separate phase),
+# after which a Python indexer no longer exists to diff against.

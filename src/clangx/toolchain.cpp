@@ -13,7 +13,7 @@
 #include <regex>
 #include <sstream>
 
-#include "clangx/clang_runtime.hpp"
+#include "clangx_lt/clang_version.hpp"
 #include "util/env.hpp"
 #include "util/pathutil.hpp"
 #include "util/subprocess.hpp"
@@ -264,14 +264,9 @@ int Toolchain::libclang_major() const {
     return *major_override_; // test seam: set_libclang_major_for_test(0) covers
                              // the cap-when-undeterminable path (G4)
   }
-  // Python _libclang_major(): 0 when undeterminable.
-  // The linked library is required at build time; retain the exception-to-zero
-  // fallback for allocation/formatting failures and test-seam completeness.
-  try {
-    return linked_libclang_major();
-  } catch (...) {
-    return 0;
-  }
+  // The Clang major the LibTooling engine is built against (compile-time
+  // constant; the old runtime libclang query is gone).
+  return clang_version_major();
 }
 
 // ---------------------------------------------------------------------------
@@ -354,19 +349,13 @@ std::optional<std::string> Toolchain::resource_include() {
     }
   }
 
-  // 2. lib/clang/<v>/include next to the linked libclang (a full LLVM install
-  // ships both side by side).
-  //
-  // Under A1, library_path() returns the build-time absolute path baked in via
-  // CIDX_LIBCLANG_PATH — its dirname is always a non-empty absolute directory.
-  // The empty-dirname guard below is dead in production but remains for the
-  // test-seam path (set_libclang_path_for_test can inject a bare name to
-  // verify that step 2 does not run relative globs against cwd).
-  const std::string lib = libclang_path_override_
-                              ? *libclang_path_override_
-                              : configured_libclang_library_path();
-  if (!lib.empty()) {
-    const std::string libdir = pathutil::dirname(lib);
+  // 2. The builtin-header include dir of the Clang we link. In production that
+  // is CIDX_LT_RESOURCE_DIR/include (baked at build time from the LLVM the
+  // LibTooling engine compiles against). Under the test seam a fake library
+  // path is injected and we glob lib/clang/*/include next to it (parity with
+  // the old libclang-adjacent layout; verifies no relative globs against cwd).
+  if (libclang_path_override_) {
+    const std::string libdir = pathutil::dirname(*libclang_path_override_);
     if (!libdir.empty()) {
       std::vector<std::string> cands =
           glob_paths(pathutil::join(libdir, std::string("clang"),
@@ -380,6 +369,15 @@ std::optional<std::string> Toolchain::resource_include() {
         }
       }
     }
+  } else {
+#ifdef CIDX_LT_RESOURCE_DIR
+    const std::string inc = pathutil::join(std::string(CIDX_LT_RESOURCE_DIR),
+                                           std::string("include"));
+    if (resource_check(inc)) {
+      resource_memo_ = inc;
+      return resource_memo_;
+    }
+#endif
   }
 
   // 3. a PATH clang's -print-resource-dir (the pip wheel ships no headers).

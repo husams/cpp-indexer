@@ -9,7 +9,7 @@
 // commands.cpp can include it without the Clang C++ API.
 #pragma once
 
-#include "clangx/ast.hpp" // HeaderStats
+#include "clangx_lt/header_stats.hpp" // HeaderStats
 #include "storage/records.hpp"
 
 #include <string>
