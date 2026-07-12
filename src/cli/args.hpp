@@ -61,22 +61,11 @@ struct ParsedArgs {
   bool no_graph = false;                  // index --no-graph
   std::vector<std::string> assignment;    // set FIELD=VALUE [FIELD=VALUE ...]
   std::optional<std::string> index_db;    // set/file/dump-cc --db (index override)
-  std::string target;                     // file/ast: target path or COMPONENT://PATH
+  std::string target;                     // file: target path or COMPONENT://PATH
   std::vector<std::string> op;            // file OP ... (REMAINDER tail)
-  std::vector<std::string> rest;          // ast -- FLAGS... (REMAINDER tail)
 
-  // -- ast sub-command fields (cidx ast dump|locals|conditions|cache) --------
-  std::optional<std::string> ast_usr;    // --usr  (ast: exact clang USR)
-  std::optional<int64_t> ast_id;         // --id   (ast: numeric symbol id)
+  // Shared selector flag (graph): --first takes the closest --name match.
   bool first = false;                    // --first (take closest --name match)
-  bool ast_json = false;                 // --json  (emit machine-readable JSON)
-  bool use_cache = true;                 // --cache/--no-cache (default: on)
-  int depth = 0;                         // dump --depth N (0 = unlimited)
-  bool tokens = false;                   // dump --tokens
-  bool types = false;                    // dump --types
-  bool params = false;                   // locals --params
-  bool cond_ast = false;                 // conditions --ast
-  std::string cache_action;              // ast cache build|status|clear
 
   // -- graph sub-command fields (cidx graph callers|callees|…) ---------------
   // Shared selector: reuse usr (above), kind (above), first (above), index_db.
@@ -120,17 +109,6 @@ struct ParsedArgs {
   bool analyze_list = false;                     // --list
   std::optional<std::string> analyze_export;     // --export-facts DIR
   int analyze_jobs = 1;                          // --jobs N (default 1)
-
-  // -- pch sub-command fields (cidx pch build|status|clear, v0.17.0) ----------
-  // build|status|clear is carried in `what`; --db in index_db; --force in force.
-  std::vector<std::string> pch_add_flags;   // pch build --add FLAG (repeatable)
-  std::vector<std::string> pch_add_headers; // pch build --include HEADER (repeat)
-  std::optional<std::string> pch_driver;    // pch build --driver DRIVER
-  std::optional<std::string> pch_std;       // pch build --std STD
-  bool pch_from_corpus = false;             // pch build --from-corpus
-  double pch_coverage = 0.7;                // pch build --coverage FRAC
-  int pch_min_tus = 0;                      // pch build --min-tus N
-  int pch_jobs = 0;                         // pch build --jobs N (0 = auto)
 };
 
 // argv WITHOUT the program name. Throws UsageError on misuse.

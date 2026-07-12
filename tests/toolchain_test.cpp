@@ -24,7 +24,7 @@
 
 #include <unistd.h>
 
-#include "clangx/clang_runtime.hpp"
+#include "clangx_lt/clang_version.hpp"
 #include "clangx/toolchain.hpp"
 #include "util/logger.hpp"
 
@@ -707,9 +707,9 @@ TEST_SUITE("clang") {
     GnucCase c("gcc-11");
     ::setenv("FAKE_DUMPFULLVERSION", "11.4.1", 1);
     c.add_attr_dealloc_cdefs();
-    // No major override: Toolchain consults linked_libclang_major().
+    // No major override: Toolchain consults the compile-time clang major.
     const std::optional<std::string> ver = gnuc_value(c.flags(false));
-    if (cidx::linked_libclang_major() < 21) {
+    if (cidx::clang_version_major() < 21) {
       CHECK(ver == std::string("10.9"));
     } else {
       CHECK(ver == std::string("11.4.1"));

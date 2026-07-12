@@ -1,4 +1,4 @@
-// cidx-astgraph entry point — dump one TU's libclang AST into <TU name>.db
+// cidx-astgraph entry point — dump one TU's Clang AST into <TU name>.db
 // for Soufflé/Datalog reasoning (see astgraph.hpp for the schema contract).
 //
 // Configuration is SHARED with cidx: the source file's compile args + driver
@@ -18,8 +18,6 @@
 #include "cli/args.hpp"     // kVersion
 #include "cli/commands.hpp" // resolve_cache_dir()
 #include "cli/json_out.hpp"
-#include "clangx/parse.hpp"
-#include "clangx/toolchain.hpp"
 #include "compiledb/compiledb.hpp"
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
@@ -35,7 +33,7 @@ constexpr const char *kUsage =
     "[--out DIR] [--output PATH] [--main-only] SOURCE\n";
 
 constexpr const char *kHelp =
-    "Dump one translation unit's libclang AST into a per-TU SQLite graph DB\n"
+    "Dump one translation unit's Clang AST into a per-TU SQLite graph DB\n"
     "(<basename(SOURCE)>.<identity>.db) for Datalog/Souffle reasoning.\n"
     "\n"
     "positional arguments:\n"
@@ -212,10 +210,6 @@ int main(int argc, char **argv) {
                                       : std::vector<std::string>{}),
         [&db](const std::string &n) { return db.get_alias(n); });
 
-    cidx::Toolchain toolchain;
-    cidx::Parser parser(toolchain);
-    const cidx::ParsedTu tu = parser.parse(source, opts, rec->driver);
-
     cidx::astgraph::Options dump_opts;
     dump_opts.main_only = cli.main_only;
     const std::string default_name =
@@ -229,7 +223,7 @@ int main(int argc, char **argv) {
             : cidx::pathutil::join(cli.out_dir ? *cli.out_dir : ".",
                                    default_name);
     const cidx::astgraph::DumpStats stats = cidx::astgraph::dump_tu(
-        tu, out_path, dump_opts, source, opts, rec->driver);
+        source, opts, rec->driver, out_path, dump_opts);
 
     if (cli.analyze) {
       if (*cli.rule != "callgraph")

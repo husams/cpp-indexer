@@ -355,9 +355,6 @@ const char kListFilesUsage[] =
     "                      [--indexed | --pending]\n"
     "                      [pattern]\n";
 
-const char kPchUsage[] =
-    "usage: cidx cache pch [-h] {build,status,clear} ...\n";
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -381,51 +378,7 @@ TEST_CASE("args: unknown command -> exit 2, invalid choice") {
         std::string(kTopUsage) +
             "cidx: error: argument command: invalid choice: 'bogus' (choose "
             "from init, import, index, resolve, search, analyze, db, "
-            "component, repo, dir, file, symbol, graph, ast, cache)\n");
-}
-
-TEST_CASE("args: pch build/status/clear parse + help (v0.17.0)") {
-  // build: --db, repeatable --add/--include, --driver, --std, --force
-  // option-looking values (-DA) need the inline = form -- argparse rejects
-  // `--add -DA` as "expected one argument" (Python and C++ alike).
-  cli::ParsedArgs pa = cli::parse_args(
-      {"cache", "pch", "build", "--db", "/x.db", "--add=-DA", "--add=-DB",
-       "--include=boost/optional.hpp", "--driver", "g++", "--std", "c++20",
-       "--force"});
-  CHECK(pa.command == "pch");
-  CHECK(pa.what == "build");
-  CHECK(pa.index_db == std::optional<std::string>("/x.db"));
-  CHECK(pa.pch_add_flags == std::vector<std::string>{"-DA", "-DB"});
-  CHECK(pa.pch_add_headers ==
-        std::vector<std::string>{"boost/optional.hpp"});
-  CHECK(pa.pch_driver == std::optional<std::string>("g++"));
-  CHECK(pa.pch_std == std::optional<std::string>("c++20"));
-  CHECK(pa.force);
-
-  CHECK(cli::parse_args({"cache", "pch", "status"}).what == "status");
-  CHECK(cli::parse_args({"cache", "pch", "clear"}).what == "clear");
-
-  // help text on each leaf
-  pa = cli::parse_args({"cache", "pch", "--help"});
-  REQUIRE(pa.help_text);
-  CHECK(pa.help_text->find("{build,status,clear}") != std::string::npos);
-  pa = cli::parse_args({"cache", "pch", "build", "-h"});
-  REQUIRE(pa.help_text);
-  CHECK(pa.help_text->find("extra header to add to the umbrella") !=
-        std::string::npos);
-
-  // missing / invalid sub-action -> exit 2 with argparse parity
-  ParseFail mf = parse_fail({"cache", "pch"});
-  CHECK(mf.code == 2);
-  CHECK(mf.msg ==
-        std::string(kPchUsage) +
-            "cidx cache pch: error: the following arguments are required: "
-            "pch_action\n");
-  ParseFail bf = parse_fail({"cache", "pch", "bogus"});
-  CHECK(bf.code == 2);
-  CHECK(bf.msg == std::string(kPchUsage) +
-                      "cidx cache pch: error: argument pch_action: invalid "
-                      "choice: 'bogus' (choose from build, status, clear)\n");
+            "component, repo, dir, file, symbol, graph)\n");
 }
 
 TEST_CASE("args: file — REMAINDER captures the op tail verbatim") {
@@ -867,9 +820,6 @@ TEST_CASE("args: -h returns help text; encounter order vs errors") {
           "callees, refs,\n"
           "                        neighbors, walk, path, hierarchy, "
           "dispatch)\n"
-          "    ast                 on-demand AST analysis (dump, locals, "
-          "conditions)\n"
-          "    cache               manage the PCH and AST caches\n"
           "\n"
           "options:\n"
           "  -h, --help            show this help message and exit\n"

@@ -15,17 +15,12 @@
 
 #include "astgraph/astgraph.hpp"
 #include "astgraph/souffle_runner.hpp"
-#include "clangx/parse.hpp"
-#include "clangx/toolchain.hpp"
 #include "storage/sqlite.hpp"
 #include "util/errors.hpp"
 
 namespace fs = std::filesystem;
-using cidx::ParsedTu;
-using cidx::Parser;
 using cidx::SqliteDb;
 using cidx::SqliteStmt;
-using cidx::Toolchain;
 namespace ag = cidx::astgraph;
 
 namespace {
@@ -73,13 +68,10 @@ Dumped dump_source(const std::string &name, const std::string &content,
   out.dir = make_temp_dir();
   const std::string src = out.dir + "/" + name;
   write_file(src, content);
-  Toolchain toolchain;
-  Parser parser(toolchain);
-  const ParsedTu tu = parser.parse(src, args, std::nullopt);
   out.db_path = out.dir + "/" + name + ".db";
   ag::Options opts;
   opts.main_only = main_only;
-  out.stats = ag::dump_tu(tu, out.db_path, opts, src, args, std::nullopt);
+  out.stats = ag::dump_tu(src, args, std::nullopt, out.db_path, opts);
   return out;
 }
 
@@ -122,10 +114,10 @@ TEST_CASE("astgraph: schema, catalogs and no-NULL sentinels") {
   CHECK(q_int(db, "SELECT MAX(id) FROM relation_kind") == ag::kRelClassType);
   CHECK(q_int(db, "SELECT COUNT(*) FROM relation_kind WHERE id=9") == 0);
   CHECK(q_text(db, "SELECT name FROM relation_kind WHERE id=1") == "child");
-  // node_kind namespacing: cursor kinds < 1000, type kinds >= 1000
-  CHECK(q_int(db, "SELECT COUNT(*) FROM node_kind WHERE id < 1000") > 0);
+  // node_kind namespacing: decl/stmt kinds < 3000, type kinds >= 3000
+  CHECK(q_int(db, "SELECT COUNT(*) FROM node_kind WHERE id < 3000") > 0);
   CHECK(q_int(db,
-              "SELECT COUNT(*) FROM node_kind WHERE id >= 1000 AND "
+              "SELECT COUNT(*) FROM node_kind WHERE id >= 3000 AND "
               "category != 'type'") == 0);
   // Soufflé contract: no NULL anywhere edges point at real nodes
   CHECK(q_int(db,
@@ -163,22 +155,33 @@ TEST_CASE("astgraph: semantic cross-reference edges are present") {
   // type-space node (clang_getCursorType is a cursor property, schema v2)
   CHECK(q_int(db,
               "SELECT COUNT(*) FROM node v "
-              "WHERE v.kind_id=9 AND NOT EXISTS (" // 9 = VAR_DECL
+              "WHERE v.kind_id=" +
+              std::to_string(ag::kNodeVar) +
+              " AND NOT EXISTS ("
               "  SELECT 1 FROM node t WHERE t.id=v.type_id AND "
-              "        t.kind_id >= 1000)") == 0);
+              "        t.kind_id >= 3000)") == 0);
   // ...and type nodes themselves have no type_id
-  CHECK(q_int(db, "SELECT COUNT(*) FROM node WHERE kind_id >= 1000 AND "
+  CHECK(q_int(db, "SELECT COUNT(*) FROM node WHERE kind_id >= 3000 AND "
                   "type_id != 0") == 0);
   // underlying_type: the BasePtr typedef points at a pointer type node
   CHECK(q_int(db,
               "SELECT COUNT(*) FROM edge e "
               "JOIN node s ON s.id=e.src_id JOIN node t ON t.id=e.dst_id "
               "WHERE e.rel_id=17 AND s.spelling='BasePtr' AND "
-              "t.kind_id >= 1000") == 1);
-  // symbols dedupe by USR: exactly one STRUCT_DECL symbol named Derived
-  // (a second 'Derived' symbol exists — the implicit constructor's USR)
+              "t.kind_id >= 3000") == 1);
+  // symbols dedupe by USR: exactly one CXXRecordDecl symbol named Derived
+  // (a second 'Derived' symbol may exist — the implicit constructor's USR)
   CHECK(q_int(db, "SELECT COUNT(*) FROM symbol WHERE name='Derived' AND "
-                  "kind_id=2") == 1); // 2 = STRUCT_DECL
+                  "kind_id=" +
+                  std::to_string(ag::kNodeCXXRecord)) == 1);
+  // drift guard: the emitted FunctionDecl kind_id MUST equal the Souffle rule's
+  // FunctionDecl literal (schema.hpp kNodeFunction == ast_callgraph.dl 1001) so
+  // a renumber that desyncs the rule from the dumper fails loudly here.
+  CHECK(ag::kNodeFunction == 1001);
+  CHECK(q_int(db, "SELECT COUNT(*) FROM node WHERE spelling='probe' AND "
+                  "kind_id=" +
+                  std::to_string(ag::kNodeFunction) +
+                  " AND is_definition=1") >= 1);
 
   // Datalog shape check: the recursive child-closure from the TU root (the
   // exact query a Soufflé `ancestor` rule computes) reaches every node that

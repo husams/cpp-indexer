@@ -85,218 +85,9 @@ if(CIDX_STATIC)
   endif()
 endif()
 
-# ---------------------------------------------------------------------------
-# A1 (Amendment A1 — spec §12): link libclang at build time.
-# Search order (A1.1):
-#   1. CIDX_LIBCLANG cache var (configure-time FILEPATH), if set.
-#   2. llvm-config --libdir output directory.
-#   3. /opt/llvm*/lib64, /opt/llvm*/lib, /usr/lib/llvm-*/lib,
-#      /usr/local/llvm*/lib globs.
-#   4. macOS pip-wheel native/ directory (python3 probe, OPTIONAL).
-#   5. System default (no PATHS — CMake's normal library search).
-# FATAL_ERROR if not resolved.
-# ---------------------------------------------------------------------------
-
-set(CIDX_LIBCLANG "" CACHE FILEPATH "Path to libclang shared library (.so/.dylib)")
-
-set(_cidx_libclang_hints "")
-
-# 1. User-provided path (full file → use directly; directory → add as hint).
-if(CIDX_LIBCLANG)
-  if(EXISTS "${CIDX_LIBCLANG}" AND NOT IS_DIRECTORY "${CIDX_LIBCLANG}")
-    set(CIDX_LIBCLANG_LIB "${CIDX_LIBCLANG}")
-  else()
-    list(APPEND _cidx_libclang_hints "${CIDX_LIBCLANG}")
-  endif()
-endif()
-
-if(NOT CIDX_LIBCLANG_LIB)
-  # 2. llvm-config --libdir (quiet on failure). Prefer a Homebrew keg-only LLVM
-  #    (macOS): it is NOT symlinked onto PATH, so hint its bin/ explicitly. This
-  #    is how macOS builds pick up the installed LLVM (e.g. 22) headers+library
-  #    instead of the pip `libclang` wheel (which caps at 18 and ships no headers).
-  find_program(_llvm_config
-    NAMES llvm-config
-    HINTS /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin)
-  if(_llvm_config)
-    execute_process(
-      COMMAND "${_llvm_config}" --libdir
-      OUTPUT_VARIABLE _llvm_libdir
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-      ERROR_QUIET
-      RESULT_VARIABLE _llvm_config_result
-    )
-    if(_llvm_config_result EQUAL 0 AND _llvm_libdir)
-      list(APPEND _cidx_libclang_hints "${_llvm_libdir}")
-    endif()
-  endif()
-
-  # 3. Glob-based /opt/llvm* and /usr/lib/llvm-* candidates.
-  foreach(_glob_pat
-      "/opt/llvm*/lib64" "/opt/llvm*/lib"
-      "/usr/lib/llvm-*/lib"
-      "/usr/local/llvm*/lib")
-    file(GLOB _glob_dirs "${_glob_pat}")
-    if(_glob_dirs)
-      list(SORT _glob_dirs)
-      list(APPEND _cidx_libclang_hints ${_glob_dirs})
-    endif()
-  endforeach()
-
-  # 4. macOS pip-wheel native/ directory (python3 probe, OPTIONAL).
-  find_program(_python3 python3)
-  if(_python3)
-    execute_process(
-      COMMAND "${_python3}" -c
-        "import clang.cindex, os; print(os.path.dirname(clang.cindex.__file__)+'/native')"
-      OUTPUT_VARIABLE _wheel_native_dir
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-      ERROR_QUIET
-      RESULT_VARIABLE _wheel_probe_result
-    )
-    if(_wheel_probe_result EQUAL 0 AND _wheel_native_dir AND IS_DIRECTORY "${_wheel_native_dir}")
-      list(APPEND _cidx_libclang_hints "${_wheel_native_dir}")
-    endif()
-  endif()
-
-  # 5. find_library with accumulated hints (+ CMake system default).
-  find_library(CIDX_LIBCLANG_LIB
-    NAMES clang libclang
-    HINTS ${_cidx_libclang_hints}
-    DOC "Path to libclang shared library"
-  )
-endif()
-
-if(NOT CIDX_LIBCLANG_LIB)
-  message(FATAL_ERROR
-    "libclang not found. Pass -DCIDX_LIBCLANG=/path/to/libclang.{so,dylib} "
-    "or install an LLVM development package.")
-endif()
-
-get_filename_component(_cidx_libclang_dir "${CIDX_LIBCLANG_LIB}" DIRECTORY)
-message(STATUS "libclang: ${CIDX_LIBCLANG_LIB}")
-message(STATUS "libclang dir (RPATH): ${_cidx_libclang_dir}")
-
-# A1.4: locate the libclang C-API headers (clang-c/Index.h). These used to be
-# vendored under third_party/clang-c (pinned to LLVM 18); they now come from the
-# SAME LLVM install as the linked library, so header and runtime versions can no
-# longer drift. Resolution mirrors the library search above.
-#   1. CIDX_LIBCLANG_INCLUDE cache var, if set.
-#   2. llvm-config --includedir.
-#   3. Sibling include/ of the resolved libclang directory.
-#   4. Homebrew / /opt/llvm* / /usr/lib/llvm-* / /usr/include globs.
-set(CIDX_LIBCLANG_INCLUDE "" CACHE PATH "Directory containing clang-c/Index.h")
-set(_cidx_clang_inc_hints "")
-if(CIDX_LIBCLANG_INCLUDE)
-  list(APPEND _cidx_clang_inc_hints "${CIDX_LIBCLANG_INCLUDE}")
-endif()
-if(_llvm_config)
-  execute_process(
-    COMMAND "${_llvm_config}" --includedir
-    OUTPUT_VARIABLE _llvm_incdir
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-    RESULT_VARIABLE _llvm_inc_result)
-  if(_llvm_inc_result EQUAL 0 AND _llvm_incdir)
-    list(APPEND _cidx_clang_inc_hints "${_llvm_incdir}")
-  endif()
-endif()
-list(APPEND _cidx_clang_inc_hints
-  "${_cidx_libclang_dir}/../include"
-  "${_cidx_libclang_dir}/../../include")
-foreach(_inc_glob
-    "/opt/homebrew/opt/llvm/include" "/usr/local/opt/llvm/include"
-    "/opt/llvm*/include" "/usr/lib/llvm-*/include" "/usr/include")
-  file(GLOB _inc_dirs "${_inc_glob}")
-  if(_inc_dirs)
-    list(SORT _inc_dirs)
-    list(APPEND _cidx_clang_inc_hints ${_inc_dirs})
-  endif()
-endforeach()
-find_path(CIDX_CLANG_C_INCLUDE_DIR
-  NAMES clang-c/Index.h
-  HINTS ${_cidx_clang_inc_hints}
-  DOC "Directory containing the libclang C-API headers (clang-c/Index.h)")
-if(NOT CIDX_CLANG_C_INCLUDE_DIR)
-  message(FATAL_ERROR
-    "clang-c/Index.h not found. Install an LLVM development package "
-    "(clang-devel / llvm-toolset on RHEL, `brew install llvm` on macOS) or pass "
-    "-DCIDX_LIBCLANG_INCLUDE=<dir containing clang-c/>.")
-endif()
-message(STATUS "libclang headers: ${CIDX_CLANG_C_INCLUDE_DIR}")
-
-# How libclang is linked into cidx_core. Default: the resolved shared library
-# (RPATH-located at runtime). Under CIDX_STATIC on a non-Apple host, try to
-# build a static link line instead.
-set(_cidx_libclang_link "${CIDX_LIBCLANG_LIB}")
-set(_cidx_libclang_static OFF)
-
-if(CIDX_STATIC AND APPLE)
-  message(STATUS "cidx[static]: macOS — libclang stays dynamic "
-                 "(no static archive ships; libSystem has no static form)")
-elseif(CIDX_STATIC)
-  # Linux: link a static libclang. The libclang C API itself ships only as a
-  # shared lib everywhere, so a wrapper libclang.a (the clang/tools/libclang
-  # C-API objects) must be built first with scripts/build-static-libclang.sh and
-  # pointed at via -DCIDX_LIBCLANG_STATIC. We then add the distro's clang/LLVM
-  # *component* static archives (regular ELF, libstdc++ — ABI-matched to a g++
-  # build of cidx; an LTO/bitcode LLVM will NOT link) and the llvm-config LLVM +
-  # system libs, all in one --start-group so the circular refs resolve.
-  #   Validated 2026-06-13 on Ubuntu 24.04 apt llvm-18 (18.1.3): the resulting
-  #   cidx has NO libclang.so dependency (only libc/libm/libz/libzstd/libtinfo).
-  # CIDX_LIBCLANG_STATIC: path to the C-API wrapper archive. Usually passed via
-  # -D (printed by build-static-libclang.sh); else try to find one on disk.
-  if(NOT CIDX_LIBCLANG_STATIC)
-    find_library(CIDX_LIBCLANG_STATIC NAMES libclang.a
-      HINTS "${_cidx_libclang_dir}" ${_cidx_libclang_hints}
-      DOC "Static libclang.a (C-API wrapper) for CIDX_STATIC")
-  endif()
-  # llvm-config MUST come from the SAME prefix as the libclang we are linking
-  # (its --libdir/--libs select the component archives). Pin it to the resolved
-  # libclang's sibling bin/ rather than trusting PATH (which may point at an
-  # unrelated/LTO LLVM, e.g. /opt/llvm-*). -DCIDX_LLVM_CONFIG overrides.
-  if(CIDX_LLVM_CONFIG)
-    set(_cidx_llvm_config "${CIDX_LLVM_CONFIG}")
-  elseif(EXISTS "${_cidx_libclang_dir}/../bin/llvm-config")
-    set(_cidx_llvm_config "${_cidx_libclang_dir}/../bin/llvm-config")
-  else()
-    find_program(_cidx_llvm_config NAMES llvm-config llvm-config-18)
-  endif()
-  if(CIDX_LIBCLANG_STATIC AND EXISTS "${CIDX_LIBCLANG_STATIC}" AND _cidx_llvm_config)
-    execute_process(COMMAND "${_cidx_llvm_config}" --libdir
-      OUTPUT_VARIABLE _ll_libdir OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    execute_process(COMMAND "${_cidx_llvm_config}" --ldflags
-      OUTPUT_VARIABLE _ll_ldflags OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    execute_process(COMMAND "${_cidx_llvm_config}" --link-static --libs
-      OUTPUT_VARIABLE _ll_libs OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    execute_process(COMMAND "${_cidx_llvm_config}" --link-static --system-libs
-      OUTPUT_VARIABLE _ll_syslibs OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    separate_arguments(_ll_ldflags)
-    separate_arguments(_ll_libs)
-    separate_arguments(_ll_syslibs)
-    # Drop components llvm-config lists but the distro ships no static .a for
-    # (e.g. Polly on apt LLVM) — they would fail with 'cannot find -lPolly'.
-    list(FILTER _ll_libs EXCLUDE REGEX "Polly")
-    # Clang component archives (libclangAST.a, ...) live beside the LLVM ones.
-    file(GLOB _cidx_clang_static_libs "${_ll_libdir}/libclang*.a")
-    list(SORT _cidx_clang_static_libs)
-    set(_cidx_libclang_link
-      ${_ll_ldflags}
-      "-Wl,--start-group"
-      "${CIDX_LIBCLANG_STATIC}"          # the C-API wrapper archive
-      ${_cidx_clang_static_libs}          # clang component archives
-      ${_ll_libs}                         # LLVM component archives
-      "-Wl,--end-group"
-      ${_ll_syslibs})
-    set(_cidx_libclang_static ON)
-    message(STATUS "cidx[static]: libclang (static) = ${CIDX_LIBCLANG_STATIC}")
-    message(STATUS "cidx[static]: LLVM libdir = ${_ll_libdir}")
-  else()
-    message(WARNING "cidx[static]: no static libclang -> libclang stays dynamic. "
-      "Build the C-API wrapper with scripts/build-static-libclang.sh and pass "
-      "-DCIDX_LIBCLANG_STATIC=<libclang.a> (needs a non-LTO LLVM + llvm-config).")
-  endif()
-endif()
+# libclang (clang-c C API) REMOVED in the LibTooling cutover: cidx indexes via
+# the Clang C++ API (clang-cpp + libLLVM, found by find_package below). No
+# libclang discovery/link remains.
 
 # Core library: util + storage + clangx + compiledb + cli + vendored MD5/SHA1.
 add_library(cidx_core STATIC
@@ -310,19 +101,7 @@ add_library(cidx_core STATIC
   src/util/files.cpp
   src/storage/sqlite.cpp
   src/storage/storage.cpp
-  src/clangx/clang_runtime.cpp
   src/clangx/toolchain.cpp
-  src/clangx/parse.cpp
-  src/clangx/pch.cpp
-  src/clangx/ast.cpp
-  src/clangx/ast_cursor.cpp
-  src/clangx/ast_symbols.cpp
-  src/clangx/ast_templates.cpp
-  src/clangx/ast_body.cpp
-  src/clangx/ast_edges.cpp
-  src/clangx/ast_query.cpp
-  src/astcache/astcache.cpp
-  src/compiledb/compiledb.cpp
   src/cli/args.cpp
   src/cli/format.cpp
   src/cli/json_out.cpp
@@ -331,7 +110,6 @@ add_library(cidx_core STATIC
   src/cli/analyze.cpp
   src/graph/query.cpp
   src/graph/emit.cpp
-  src/astgraph/astgraph.cpp
   third_party/md5/md5.c
   third_party/sha1/sha1.c
 )
@@ -353,7 +131,8 @@ add_library(cidx_lt OBJECT
   src/clangx_lt/edge_visitor.cpp src/clangx_lt/type_use.cpp
   src/clangx_lt/value_source.cpp src/clangx_lt/instance_minter.cpp
   src/clangx_lt/body_walker.cpp src/clangx_lt/body_pass_visitor.cpp
-  src/clangx_lt/ns_uses_visitor.cpp src/clangx_lt/lt_engine.cpp)
+  src/clangx_lt/ns_uses_visitor.cpp src/clangx_lt/lt_engine.cpp
+  src/clangx_lt/clang_version.cpp)
 target_include_directories(cidx_lt PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 target_include_directories(cidx_lt SYSTEM PRIVATE
@@ -366,10 +145,43 @@ if(NOT LLVM_ENABLE_RTTI)
 endif()
 target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_lt>)
 
-# A1.1: link libclang (shared by default; a static archive group under
-# CIDX_STATIC on Linux — see the resolution block above).
-target_link_libraries(cidx_core PUBLIC ${_cidx_libclang_link})
-# LT engine: the Clang C++ API (monolithic shared libs: clang-cpp + libLLVM).
+# --- astgraph AST dumper (cidx_astgraph_ast) ---------------------------------
+# astgraph.cpp uses the Clang C++ AST (RecursiveASTVisitor + ClangTool), so like
+# cidx_lt it compiles in its own object library with -isystem LLVM headers and
+# -fno-rtti. astgraph.hpp is clang-free, so cidx_core links the objects without
+# ever seeing the Clang C++ headers.
+add_library(cidx_astgraph_ast OBJECT src/astgraph/astgraph.cpp)
+target_include_directories(cidx_astgraph_ast PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_include_directories(cidx_astgraph_ast SYSTEM PRIVATE
+  ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+target_compile_definitions(cidx_astgraph_ast PRIVATE ${LLVM_DEFINITIONS}
+  "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
+target_compile_features(cidx_astgraph_ast PRIVATE cxx_std_23)
+if(NOT LLVM_ENABLE_RTTI)
+  target_compile_options(cidx_astgraph_ast PRIVATE -fno-rtti)
+endif()
+target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_astgraph_ast>)
+
+# --- compiledb (cidx_compiledb) ----------------------------------------------
+# compiledb.cpp loads compile_commands.json via clang::tooling::JSONCompilationDatabase
+# (Clang C++ API), so like cidx_lt it compiles in its own -fno-rtti object library.
+# compiledb.hpp is clang-free, so cidx_core links the objects without seeing the
+# Clang C++ headers.
+add_library(cidx_compiledb OBJECT src/compiledb/compiledb.cpp)
+target_include_directories(cidx_compiledb PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_include_directories(cidx_compiledb SYSTEM PRIVATE
+  ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+target_compile_definitions(cidx_compiledb PRIVATE ${LLVM_DEFINITIONS})
+target_compile_features(cidx_compiledb PRIVATE cxx_std_23)
+if(NOT LLVM_ENABLE_RTTI)
+  target_compile_options(cidx_compiledb PRIVATE -fno-rtti)
+endif()
+target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_compiledb>)
+
+# cidx indexes via the Clang C++ API only (monolithic shared libs:
+# clang-cpp + libLLVM). No libclang.
 target_link_libraries(cidx_core PUBLIC clang-cpp LLVM)
 # S02: storage layer links SQLite3 (shared, or the static archive under
 # CIDX_STATIC).
@@ -377,15 +189,14 @@ target_link_libraries(cidx_core PUBLIC ${_cidx_sqlite_link})
 target_include_directories(cidx_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party
-  ${CIDX_CLANG_C_INCLUDE_DIR}
 )
 target_compile_options(cidx_core PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra>
 )
-# A1.3: bake the resolved libclang path into the binary so library_path()
-# returns it without a dladdr() call. PUBLIC so all linked test exes inherit it.
+# Builtin-header resource dir of the Clang we compile against, for
+# Toolchain::resource_include() (toolchain.cpp). PUBLIC so test exes inherit it.
 target_compile_definitions(cidx_core PUBLIC
-  "CIDX_LIBCLANG_PATH=\"${CIDX_LIBCLANG_LIB}\"")
+  "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
 
 # `cidx analyze` embeds the canonical Souffle rule files from
 # python/indexer/rules so both implementations ship byte-identical Datalog.
@@ -469,16 +280,12 @@ target_link_libraries(cidx PRIVATE cidx_core)
 # boundary. A gcc-toolset-built binary runs on base RHEL 9 via system
 # libstdc++.so.6 + the nonshared static bits, matching libLLVM.so.
 
-# RPATH is only needed while libclang is dynamic. With a static libclang there
-# is no shared dependency to locate, so skip it (a leftover RPATH is harmless
-# but misleading).
-if(NOT _cidx_libclang_static)
-  set_target_properties(cidx PROPERTIES
-    BUILD_RPATH "${_cidx_libclang_dir}"
-    INSTALL_RPATH "${_cidx_libclang_dir}"
-    INSTALL_RPATH_USE_LINK_PATH ON
-  )
-endif()
+# RPATH so the dynamic Clang C++ libs (clang-cpp + libLLVM) resolve at runtime.
+set_target_properties(cidx PROPERTIES
+  BUILD_RPATH "${LLVM_LIBRARY_DIR}"
+  INSTALL_RPATH "${LLVM_LIBRARY_DIR}"
+  INSTALL_RPATH_USE_LINK_PATH ON
+)
 
 # cidx-astgraph: dump one TU's AST into <TU>.db for Soufflé/Datalog reasoning
 # (src/astgraph/). Shares cidx configuration: compile args come from the same
@@ -491,13 +298,11 @@ if(CIDX_ASTGRAPH_SOUFFLE_ENABLED)
     $<TARGET_OBJECTS:cidx_astgraph_souffle_rules>)
 endif()
 # -static-libstdc++ omitted: see the note on the cidx target (dynamic libLLVM).
-if(NOT _cidx_libclang_static)
-  set_target_properties(cidx-astgraph PROPERTIES
-    BUILD_RPATH "${_cidx_libclang_dir}"
-    INSTALL_RPATH "${_cidx_libclang_dir}"
-    INSTALL_RPATH_USE_LINK_PATH ON
-  )
-endif()
+set_target_properties(cidx-astgraph PROPERTIES
+  BUILD_RPATH "${LLVM_LIBRARY_DIR}"
+  INSTALL_RPATH "${LLVM_LIBRARY_DIR}"
+  INSTALL_RPATH_USE_LINK_PATH ON
+)
 
 enable_testing()
 add_subdirectory(tests)

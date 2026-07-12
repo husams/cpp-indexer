@@ -22,13 +22,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "astcache/astcache.hpp"
-#include "clangx/ast.hpp"
-#include "clangx/ast_query.hpp"
-#include "clangx/clang_runtime.hpp"
-#include "clangx/parse.hpp"
+#include "clangx_lt/clang_version.hpp"
 #include "clangx_lt/lt_engine.hpp"
-#include "clangx/pch.hpp"
 #include "clangx/toolchain.hpp"
 #include "cli/format.hpp"
 #include "cli/json_out.hpp"
@@ -184,18 +179,13 @@ const char kDirNeedsComponent[] =
 // main() (D23). The ParsedTu lives only inside the try block: its destructor
 // frees the TU + Index BEFORE mark_file_indexed runs — Python's
 // `del tu` in index_source's finally (one-AST peak memory, design §7).
-int index_one(Storage &db, Parser &parser, AstIndexer &indexer, const File &rec,
-              const std::string &path, Context &ctx) {
-  int stored = 0;
-  HeaderStats hs;
-  std::vector<Diagnostic> diags;
-  // CIDX_INDEX_ENGINE=lt: route this TU through the LibTooling engine
-  // (parity-proven visitors over the Clang C++ API) instead of the libclang
-  // cursor walk. Same DB effects, same counters, same output line.
-  if (const auto engine = get_env("CIDX_INDEX_ENGINE");
-      engine && *engine == "lt") {
-    lt::IndexOneOutcome out =
-        lt::run_index_one(db, rec, path, indexer.graph_enabled());
+int index_one(Storage &db, const File &rec, const std::string &path,
+              bool graph_enabled, Context &ctx) {
+  // All indexing runs through the LibTooling engine (parity-proven visitors
+  // over the Clang C++ API): same DB effects, counters, and per-file output
+  // line as the retired libclang cursor walk.
+  {
+    lt::IndexOneOutcome out = lt::run_index_one(db, rec, path, graph_enabled);
     if (out.parse_failed) {
       if (ctx.logger != nullptr && !out.failed_flags.empty()) {
         std::string flags;
@@ -206,8 +196,8 @@ int index_one(Storage &db, Parser &parser, AstIndexer &indexer, const File &rec,
         }
         ctx.logger->error("cidx.clang",
                           path + ": failed parse flags: " + flags +
-                              "; libclang: " +
-                              std::to_string(linked_libclang_major()));
+                              "; clang: " +
+                              std::to_string(clang_version_major()));
         // log_diagnostics parity: the ERROR-severity diagnostics as INFO
         // lines (capped at 20; classic logs error_diagnostics()).
         std::size_t shown = 0;
@@ -243,64 +233,13 @@ int index_one(Storage &db, Parser &parser, AstIndexer &indexer, const File &rec,
              << " unowned\n";
     return 0;
   }
-  try {
-    // Stored options are re-sanitize()d at index time (G11) — heals DBs
-    // imported by an older cidx whose drop list was shorter.
-    // Then decode <label>/$VAR tokens via resolve_options (v0.6.0). get_alias
-    // resolves both explicit labels and uniquely-named components (v0.8.0).
-    const std::vector<std::string> opts =
-        CompileDb::resolve_options(
-            CompileDb::sanitize(rec.compile_options ? *rec.compile_options
-                                                    : std::vector<std::string>{}),
-            [&db](const std::string &n) { return db.get_alias(n); });
-    // parse() receives the reconstructed absolute path (G24) and assembles
-    // opts + toolchain_flags(is_cpp, driver) + -ferror-limit=0 itself.
-    const ParsedTu tu = parser.parse(path, opts, rec.driver);
-    // Capture parse diagnostics (warnings + tolerated errors) while the TU is
-    // live; persisted against this file's row after the AST is freed.
-    diags = Parser::collect_diagnostics(tu);
-    stored = indexer.index_symbols(tu, path, rec.id);
-    // Stamp each indexed header with this TU's (encoded) options + driver so
-    // the header is standalone-reparseable (e.g. `cidx ast dump <header>`).
-    hs = indexer.index_headers(tu, std::nullopt, rec.compile_options,
-                               rec.driver);
-    // v7: extract graph edges AFTER symbols so src_id lookups hit real rows.
-    // index_edges opens its own transaction; it's a no-op when graph_enabled_
-    // is false (--no-graph was passed).
-    indexer.index_edges(tu, path, rec.id);
-  } catch (const ClangParseError &e) {
-    // The file failed to parse (e.g. a fatal header-not-found): record the
-    // diagnostics so `show file` / `list files` explain why, even though no
-    // AST was indexed and the file stays pending. A hard load failure carries
-    // no per-diagnostic detail -- synthesize one fatal row from the error so
-    // the failure is never silently dropped.
-    std::vector<Diagnostic> failed = e.diagnostics();
-    if (failed.empty()) {
-      Diagnostic d;
-      d.severity = 4; // clang fatal
-      d.spelling = e.what();
-      d.file_path = path;
-      failed.push_back(std::move(d));
-    }
-    db.replace_diagnostics(rec.id, failed);
-    *ctx.err << "error: " << e.what() << "\n";
-    return 1;
-  }
-  db.replace_diagnostics(rec.id, diags);
-  db.mark_file_indexed(rec.id, file_mtime(path));
-  // cli.py:194-196 — byte-frozen per-file line (analysis §1.2).
-  *ctx.out << "  -> " << stored << " symbols; headers: " << hs.indexed
-           << " indexed (+" << hs.symbols << " symbols), " << hs.already
-           << " already, " << hs.system << " system, " << hs.unowned
-           << " unowned\n";
-  return 0;
 }
 
 // _index_files (cli.py:200-215): index FILE...; unknown files set the fail
 // flag but the loop continues.
-int index_files(Storage &db, Parser &parser, AstIndexer &indexer,
-                const std::vector<std::string> &file_args,
-                const std::optional<std::string> &root, Context &ctx) {
+int index_files(Storage &db, const std::vector<std::string> &file_args,
+                const std::optional<std::string> &root, bool graph_enabled,
+                Context &ctx) {
   int rc = 0;
   for (const std::string &f : file_args) {
     const std::string path = files::resolve_file_arg(f, root);
@@ -315,7 +254,7 @@ int index_files(Storage &db, Parser &parser, AstIndexer &indexer,
       *ctx.out << "  already indexed\n";
       continue;
     }
-    rc |= index_one(db, parser, indexer, *rec, path, ctx);
+    rc |= index_one(db, *rec, path, graph_enabled, ctx);
   }
   return rc;
 }
@@ -325,8 +264,7 @@ int index_files(Storage &db, Parser &parser, AstIndexer &indexer,
 // skip (analysis §4); list_files() with no filters is the same query/order
 // (ORDER BY c.path, d.path, f.name), snapshotted before the loop so header
 // rows added while indexing are not re-visited this run.
-int index_pending(Storage &db, Parser &parser, AstIndexer &indexer,
-                  Context &ctx) {
+int index_pending(Storage &db, bool graph_enabled, Context &ctx) {
   int done = 0;
   int skipped = 0;
   int failed = 0;
@@ -349,7 +287,7 @@ int index_pending(Storage &db, Parser &parser, AstIndexer &indexer,
       continue;
     }
     *ctx.out << "indexing " << path << "\n";
-    if (index_one(db, parser, indexer, rec, path, ctx) == 0) {
+    if (index_one(db, rec, path, graph_enabled, ctx) == 0) {
       ++done;
     } else {
       ++failed;
@@ -647,11 +585,6 @@ void bump_component_versions(Storage &db,
 }
 
 int cmd_import(const ParsedArgs &args, Context &ctx) {
-  // A missing/unloadable libclang is NOT a compilation-database failure:
-  // let it propagate to main()'s generic CidxError handler (exit 1 with the
-  // real dlopen message). Python's analogue fails at clang.cindex import.
-  warn_if_runtime_libclang_ignored();
-
   std::vector<CompileCommand> commands;
   try {
     commands = CompileDb::load(args.db);
@@ -835,15 +768,13 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
     }
     const std::optional<std::string> root =
         comp ? std::optional<std::string>(db.component_abs_base(*comp)) : std::nullopt;
-    // One Toolchain/Parser per run (S04/S05: memoized, single-threaded D15).
-    Toolchain toolchain(log);
-    Parser parser(toolchain, log);
-    AstIndexer indexer(db, log);
-    // v7: --no-graph disables edge extraction for this run.
-    indexer.set_graph_enabled(!args.no_graph);
+    // v7: --no-graph disables edge extraction for this run. Indexing runs
+    // through the LibTooling engine (lt::run_index_one), which builds its own
+    // toolchain + parse internally — no Parser/AstIndexer needed here.
+    const bool graph_enabled = !args.no_graph;
     rc = !args.files.empty()
-             ? index_files(db, parser, indexer, args.files, root, ctx)
-             : index_pending(db, parser, indexer, ctx);
+             ? index_files(db, args.files, root, graph_enabled, ctx)
+             : index_pending(db, graph_enabled, ctx);
   }
   // cli.py:243-244 — only when the file-sink warning counter is > 0 (G27).
   if (log.warning_count() > 0) {
@@ -1431,142 +1362,6 @@ int cmd_resolve(const ParsedArgs &args, Context &ctx) {
   return 0;
 }
 
-// cmd_pch_build (pch.py cmd_build) -- derive the common C++ flags + dominant
-// driver from the index, then compile the umbrella into a cached PCH.
-int cmd_pch_build(const ParsedArgs &args, Context &ctx) {
-  Logger &log = ctx.logger != nullptr ? *ctx.logger : Logger::root();
-  {
-    struct stat st {};
-    if (::stat(pch::pch_path().c_str(), &st) == 0 && !args.force) {
-      *ctx.err << "system PCH already exists: " << pch::pch_path()
-               << " (use --force to rebuild)\n";
-      return 1;
-    }
-  }
-
-  std::optional<std::set<std::string>> common;
-  std::map<std::optional<std::string>, int> driver_counts;
-  int n_cpp = 0;
-  std::vector<pch::TuFlags> tus;             // for --from-corpus survey
-  std::vector<std::pair<std::string, std::string>> idirs; // union, order-stable
-  std::set<std::pair<std::string, std::string>> seen_idirs;
-  {
-    Storage db(ctx.index_path);
-    for (const std::pair<File, std::string> &pr : db.list_files()) {
-      const File &rec = pr.first;
-      const std::string &path = pr.second;
-      if (!rec.compile_options || rec.compile_options->empty()) {
-        continue;
-      }
-      const std::vector<std::string> opts = CompileDb::resolve_options(
-          CompileDb::sanitize(*rec.compile_options),
-          [&db](const std::string &n) { return db.get_alias(n); });
-      if (!Toolchain::is_cpp(path, opts)) {
-        continue;
-      }
-      ++n_cpp;
-      const std::vector<std::string> rel = pch::pch_relevant(opts);
-      std::set<std::string> s(rel.begin(), rel.end());
-      if (!common) {
-        common = std::move(s);
-      } else {
-        std::set<std::string> inter;
-        std::set_intersection(common->begin(), common->end(), s.begin(),
-                              s.end(),
-                              std::inserter(inter, inter.begin()));
-        common = std::move(inter);
-      }
-      ++driver_counts[rec.driver];
-      if (args.pch_from_corpus) {
-        tus.push_back({rec.driver, opts, path});
-        for (const std::pair<std::string, std::string> &p :
-             pch::include_dirs(opts)) {
-          if (seen_idirs.insert(p).second) {
-            idirs.push_back(p);
-          }
-        }
-      }
-    }
-  }
-  if (n_cpp == 0) {
-    *ctx.err << "error: no C++ translation units in the index; nothing to "
-                "build a C++ PCH from\n";
-    return 1;
-  }
-
-  std::optional<std::string> dom_driver;
-  int best = -1;
-  for (const auto &kv : driver_counts) {
-    if (kv.second > best) {
-      best = kv.second;
-      dom_driver = kv.first;
-    }
-  }
-  const std::optional<std::string> driver =
-      args.pch_driver ? args.pch_driver : dom_driver;
-
-  std::vector<std::string> flags(common->begin(), common->end()); // sorted set
-  if (args.pch_std) {
-    std::vector<std::string> kept;
-    for (const std::string &f : flags) {
-      if (f.rfind("-std=", 0) != 0) {
-        kept.push_back(f);
-      }
-    }
-    kept.push_back("-std=" + *args.pch_std);
-    flags = std::move(kept);
-  }
-
-  std::vector<std::string> headers;
-  bool quoted = false;
-  if (args.pch_from_corpus) {
-    const pch::HeaderSurvey survey = pch::survey_headers(tus, args.pch_jobs);
-    headers = pch::select_shared_headers(survey, n_cpp, args.pch_coverage,
-                                         args.pch_min_tus);
-    if (headers.empty()) {
-      *ctx.err << "error: no header is shared by >= " << args.pch_coverage
-               << " of " << n_cpp
-               << " C++ TUs (lower --coverage / --min-tus, or this corpus is "
-                  "too heterogeneous for a single shared PCH)\n";
-      return 1;
-    }
-    // Retain the union of include-search dirs so project headers + their
-    // transitive #includes resolve while building the umbrella.
-    for (const std::pair<std::string, std::string> &p : idirs) {
-      flags.push_back(p.first);
-      flags.push_back(p.second);
-    }
-    quoted = true;
-    *ctx.err << "corpus survey: " << survey.freq.size() << " headers across "
-             << n_cpp << " C++ TUs; " << headers.size()
-             << " shared by >= " << args.pch_coverage << "\n";
-  } else {
-    headers = pch::default_headers();
-  }
-  for (const std::string &f : args.pch_add_flags) {
-    flags.push_back(f);
-  }
-  for (const std::string &h : args.pch_add_headers) {
-    headers.push_back(h);
-  }
-
-  Toolchain toolchain(log);
-  Parser parser(toolchain, log);
-  return pch::build_pch(parser, flags, headers, driver, n_cpp, *ctx.out,
-                        *ctx.err, quoted, args.pch_from_corpus,
-                        args.pch_coverage);
-}
-
-int cmd_pch_status(const ParsedArgs &args, Context &ctx) {
-  (void)args;
-  return pch::status_pch(*ctx.out);
-}
-
-int cmd_pch_clear(const ParsedArgs &args, Context &ctx) {
-  (void)args;
-  return pch::clear_pch(*ctx.out);
-}
-
 namespace {
 
 std::string str_trim(const std::string &s) {
@@ -2025,691 +1820,6 @@ int cmd_dump_compile_commands(const ParsedArgs &args, Context &ctx) {
     entries.push_back(std::move(e));
   }
   *ctx.out << dump_cc_json(entries) << "\n";
-  return 0;
-}
-
-// ---------------------------------------------------------------------------
-// AST sub-command handlers (ADR-006 M5)
-// Mirrors Python astcmd.cmd_dump / cmd_locals / cmd_conditions / cmd_cache.
-// ---------------------------------------------------------------------------
-
-// Helper: find the focus cursor in the TU's main-file top-level cursors.
-static CXCursor find_focus(CXTranslationUnit tu,
-                           const std::string &filename,
-                           const AstTarget &t) {
-  CXCursor found = clang_getNullCursor();
-  for_file_cursors(tu, filename, [&](CXCursor c) {
-    if (clang_Cursor_isNull(found)) {
-      if (t.focus_usr) {
-        CXString usr = clang_getCursorUSR(c);
-        const char *s = clang_getCString(usr);
-        if (s && *t.focus_usr == s) {
-          found = c;
-        }
-        clang_disposeString(usr);
-      } else if (t.focus_name) {
-        CXString sp = clang_getCursorSpelling(c);
-        const char *s = clang_getCString(sp);
-        if (s && *t.focus_name == s) {
-          found = c;
-        }
-        clang_disposeString(sp);
-      }
-    }
-  });
-  return found;
-}
-
-int cmd_ast_dump(const ParsedArgs &args, Context &ctx) {
-  auto [t_opt, rc] = resolve_target(args, ctx);
-  if (!t_opt) {
-    return rc;
-  }
-  const AstTarget &t = *t_opt;
-
-  auto tu_opt = astcache::load_or_parse(t, args.use_cache, ctx.err);
-  if (!tu_opt) {
-    return 1;
-  }
-
-  std::optional<int> max_depth;
-  if (args.depth > 0) {
-    max_depth = args.depth;
-  }
-
-  if (t.whole_file()) {
-    // Collect top-level cursors in main file.
-    std::vector<CXCursor> roots;
-    for_file_cursors(tu_opt->tu, t.abspath, [&](CXCursor c) {
-      roots.push_back(c);
-    });
-
-    if (args.ast_json) {
-      json_out::Array arr;
-      for (const CXCursor &c : roots) {
-        arr.push_back(cursor_json(c, 0, max_depth, args.tokens, args.types));
-      }
-      *ctx.out << json_out::dumps_indent2(json_out::Value::arr(std::move(arr)))
-               << "\n";
-    } else {
-      for (const CXCursor &c : roots) {
-        dump_text(*ctx.out, c, 0, max_depth, args.tokens, args.types);
-      }
-    }
-  } else {
-    CXCursor focus = find_focus(tu_opt->tu, t.abspath, t);
-    if (clang_Cursor_isNull(focus)) {
-      const std::string sel =
-          t.focus_usr ? *t.focus_usr : t.focus_name ? *t.focus_name : "?";
-      *ctx.err << "error: could not locate '" << sel << "' in "
-               << pathutil::basename(t.abspath) << "\n";
-      return 1;
-    }
-    if (args.ast_json) {
-      json_out::Array arr;
-      arr.push_back(cursor_json(focus, 0, max_depth, args.tokens, args.types));
-      *ctx.out << json_out::dumps_indent2(json_out::Value::arr(std::move(arr)))
-               << "\n";
-    } else {
-      dump_text(*ctx.out, focus, 0, max_depth, args.tokens, args.types);
-    }
-  }
-  return 0;
-}
-
-// Helper: resolve target and find the focus function cursor, printing errors.
-static std::pair<std::optional<CXCursor>, int>
-focus_function(const ParsedArgs & /*args*/, Context &ctx,
-               const AstTarget &t, CXTranslationUnit tu) {
-  if (t.whole_file()) {
-    *ctx.err << "error: this command needs a function "
-                "(use --name/--usr/--id, or 'COMPONENT://path --name fn')\n";
-    return {std::nullopt, 1};
-  }
-  CXCursor focus = find_focus(tu, t.abspath, t);
-  if (clang_Cursor_isNull(focus)) {
-    const std::string sel =
-        t.focus_usr ? *t.focus_usr : t.focus_name ? *t.focus_name : "?";
-    *ctx.err << "error: could not locate '" << sel << "' in "
-             << pathutil::basename(t.abspath) << "\n";
-    return {std::nullopt, 1};
-  }
-  if (!is_function_kind(clang_getCursorKind(focus))) {
-    CXString sp = clang_getCursorSpelling(focus);
-    const char *name = clang_getCString(sp);
-    // B2: Python uses kind.name (e.g. "STRUCT_DECL"), not clang_getCursorKindSpelling
-    // (which returns "StructDecl"). Use cli::kind_name for byte-identical output.
-    const char *ks = cli::kind_name(static_cast<unsigned>(clang_getCursorKind(focus)));
-    *ctx.err << "error: '" << (name ? name : "?") << "' is a "
-             << ks << ", not a function\n";
-    clang_disposeString(sp);
-    return {std::nullopt, 1};
-  }
-  return {focus, 0};
-}
-
-int cmd_ast_locals(const ParsedArgs &args, Context &ctx) {
-  auto [t_opt, rc] = resolve_target(args, ctx);
-  if (!t_opt) {
-    return rc;
-  }
-  const AstTarget &t = *t_opt;
-
-  auto tu_opt = astcache::load_or_parse(t, args.use_cache, ctx.err);
-  if (!tu_opt) {
-    return 1;
-  }
-
-  auto [focus_opt, frc] = focus_function(args, ctx, t, tu_opt->tu);
-  if (!focus_opt) {
-    return frc;
-  }
-  const CXCursor &focus = *focus_opt;
-
-  struct Row {
-    std::string name;
-    std::string type;
-    std::string kind; // "param" or "local"
-    std::string loc;
-  };
-  std::vector<Row> rows;
-  for (const SubtreeNode &node : subtree(focus)) {
-    const CXCursorKind k = clang_getCursorKind(node.cursor);
-    const bool is_var = (k == CXCursor_VarDecl);
-    const bool is_param = (k == CXCursor_ParmDecl);
-    if (!is_var && (!args.params || !is_param)) {
-      continue;
-    }
-    Row r;
-    CXString sp = clang_getCursorSpelling(node.cursor);
-    r.name = clang_getCString(sp) ? clang_getCString(sp) : "";
-    clang_disposeString(sp);
-    CXType ty = clang_getCursorType(node.cursor);
-    CXString tsp = clang_getTypeSpelling(ty);
-    r.type = clang_getCString(tsp) ? clang_getCString(tsp) : "";
-    clang_disposeString(tsp);
-    r.kind = is_param ? "param" : "local";
-    r.loc = cursor_loc(node.cursor);
-    rows.push_back(std::move(r));
-  }
-
-  if (args.ast_json) {
-    json_out::Array arr;
-    for (const Row &r : rows) {
-      json_out::Object obj;
-      obj.push_back({"name", json_out::Value::of(r.name)});
-      obj.push_back({"type", r.type.empty() ? json_out::Value::null()
-                                            : json_out::Value::of(r.type)});
-      obj.push_back({"kind", json_out::Value::of(r.kind)});
-      obj.push_back({"loc", json_out::Value::of(r.loc)});
-      arr.push_back(json_out::Value::obj(std::move(obj)));
-    }
-    *ctx.out << json_out::dumps_indent2(json_out::Value::arr(std::move(arr)))
-             << "\n";
-  } else {
-    CXString fsp = clang_getCursorSpelling(focus);
-    const char *fname = clang_getCString(fsp);
-    *ctx.out << (fname ? fname : "?") << ": " << rows.size()
-             << " variable(s)\n";
-    clang_disposeString(fsp);
-    for (const Row &r : rows) {
-      const std::string tag = (r.kind == "param") ? "param" : "local";
-      // Python: f"  {tag:<6} {r['type'] or '?':<24} {r['name']}  @ {r['loc']}"
-      *ctx.out << "  " << format::ljust(tag, 6) << " "
-               << format::ljust(r.type.empty() ? "?" : r.type, 24) << " "
-               << r.name << "  @ " << r.loc << "\n";
-    }
-  }
-  return 0;
-}
-
-int cmd_ast_conditions(const ParsedArgs &args, Context &ctx) {
-  auto [t_opt, rc] = resolve_target(args, ctx);
-  if (!t_opt) {
-    return rc;
-  }
-  const AstTarget &t = *t_opt;
-
-  auto tu_opt = astcache::load_or_parse(t, args.use_cache, ctx.err);
-  if (!tu_opt) {
-    return 1;
-  }
-
-  auto [focus_opt, frc] = focus_function(args, ctx, t, tu_opt->tu);
-  if (!focus_opt) {
-    return frc;
-  }
-  const CXCursor &focus = *focus_opt;
-
-  // Build parent_of map and collect calls via subtree walk.
-  std::unordered_map<unsigned, CXCursor> parent_of;
-  std::vector<CXCursor> calls;
-  for (const SubtreeNode &node : subtree(focus)) {
-    parent_of[clang_hashCursor(node.cursor)] = node.parent;
-    if (clang_getCursorKind(node.cursor) == CXCursor_CallExpr) {
-      CXString sp = clang_getCursorSpelling(node.cursor);
-      const char *s = clang_getCString(sp);
-      if (s && *s) {
-        calls.push_back(node.cursor);
-      }
-      clang_disposeString(sp);
-    }
-  }
-
-  // For each call, climb parents to find a conditional guard.
-  // Python _guarded_by: walks up parent_of until hitting focus or finding guard.
-  auto guarded_by = [&](CXCursor call, CXCursor guard) -> bool {
-    unsigned node_hash = clang_hashCursor(call);
-    auto it = parent_of.find(node_hash);
-    while (it != parent_of.end() &&
-           clang_hashCursor(it->second) != clang_hashCursor(focus)) {
-      if (clang_hashCursor(it->second) == clang_hashCursor(guard)) {
-        return true;
-      }
-      it = parent_of.find(clang_hashCursor(it->second));
-    }
-    return false;
-  };
-
-  // Python _condition_child: first expression-kind child.
-  auto condition_child = [](CXCursor stmt) -> CXCursor {
-    CXCursor found = clang_getNullCursor();
-    clang_visitChildren(
-        stmt,
-        [](CXCursor c, CXCursor /*p*/, CXClientData d) {
-          auto *f = static_cast<CXCursor *>(d);
-          if (clang_Cursor_isNull(*f) &&
-              clang_isExpression(clang_getCursorKind(c))) {
-            *f = c;
-          }
-          return CXChildVisit_Continue;
-        },
-        &found);
-    return found;
-  };
-
-  struct CondRow {
-    std::string control; // kind name of guard
-    std::string loc;
-    std::string condition; // token string of condition expression
-    std::vector<std::string> call_names;
-    std::optional<json_out::Value> condition_ast;
-  };
-
-  std::unordered_map<unsigned, bool> seen;
-  std::vector<CondRow> rows;
-
-  for (const CXCursor &call : calls) {
-    unsigned node_hash = clang_hashCursor(call);
-    auto it = parent_of.find(node_hash);
-    CXCursor guard = clang_getNullCursor();
-    while (it != parent_of.end() &&
-           clang_hashCursor(it->second) != clang_hashCursor(focus)) {
-      if (is_cond_kind(clang_getCursorKind(it->second))) {
-        guard = it->second;
-        break;
-      }
-      it = parent_of.find(clang_hashCursor(it->second));
-    }
-    if (clang_Cursor_isNull(guard)) {
-      continue;
-    }
-    const unsigned guard_hash = clang_hashCursor(guard);
-    if (seen.count(guard_hash)) {
-      continue;
-    }
-    seen[guard_hash] = true;
-
-    CXCursor cond_c = condition_child(guard);
-
-    // Tokens of condition expression.
-    std::string cond_toks;
-    if (!clang_Cursor_isNull(cond_c)) {
-      CXTranslationUnit tu = clang_Cursor_getTranslationUnit(cond_c);
-      CXSourceRange extent = clang_getCursorExtent(cond_c);
-      CXToken *toks = nullptr;
-      unsigned ntok = 0;
-      clang_tokenize(tu, extent, &toks, &ntok);
-      for (unsigned ti = 0; ti < ntok; ++ti) {
-        if (!cond_toks.empty()) {
-          cond_toks += ' ';
-        }
-        CXString ts = clang_getTokenSpelling(tu, toks[ti]);
-        const char *raw = clang_getCString(ts);
-        if (raw) {
-          cond_toks += raw;
-        }
-        clang_disposeString(ts);
-      }
-      if (toks) {
-        clang_disposeTokens(tu, toks, ntok);
-      }
-    }
-
-    // Guarded calls (sorted by spelling).
-    std::vector<std::string> guarded;
-    for (const CXCursor &c : calls) {
-      if (guarded_by(c, guard)) {
-        CXString sp = clang_getCursorSpelling(c);
-        const char *s = clang_getCString(sp);
-        if (s && *s) {
-          guarded.push_back(std::string(s));
-        }
-        clang_disposeString(sp);
-      }
-    }
-    std::sort(guarded.begin(), guarded.end());
-    guarded.erase(std::unique(guarded.begin(), guarded.end()), guarded.end());
-
-    CondRow row;
-    row.control = kind_name(static_cast<unsigned>(clang_getCursorKind(guard)));
-    row.loc = cursor_loc(guard);
-    row.condition = cond_toks;
-    row.call_names = std::move(guarded);
-    if (args.cond_ast && !clang_Cursor_isNull(cond_c)) {
-      row.condition_ast = cursor_json(cond_c, 0, std::nullopt, false, true);
-    }
-    rows.push_back(std::move(row));
-  }
-
-  if (args.ast_json) {
-    json_out::Array arr;
-    for (const CondRow &r : rows) {
-      json_out::Object obj;
-      obj.push_back({"control", json_out::Value::of(r.control)});
-      obj.push_back({"loc", json_out::Value::of(r.loc)});
-      obj.push_back({"condition", json_out::Value::of(r.condition)});
-      json_out::Array calls_arr;
-      for (const std::string &cn : r.call_names) {
-        calls_arr.push_back(json_out::Value::of(cn));
-      }
-      obj.push_back({"calls", json_out::Value::arr(std::move(calls_arr))});
-      if (r.condition_ast) {
-        obj.push_back({"condition_ast", *r.condition_ast});
-      }
-      arr.push_back(json_out::Value::obj(std::move(obj)));
-    }
-    *ctx.out << json_out::dumps_indent2(json_out::Value::arr(std::move(arr)))
-             << "\n";
-  } else {
-    CXString fsp = clang_getCursorSpelling(focus);
-    const char *fname = clang_getCString(fsp);
-    *ctx.out << (fname ? fname : "?") << ": " << rows.size()
-             << " conditional(s) guarding calls\n";
-    clang_disposeString(fsp);
-    for (const CondRow &r : rows) {
-      // Python:
-      //   f"  {r['control']:<20} @ {r['loc']}"
-      //   f"    cond: {r['condition']}"
-      //   f"    -> calls: {', '.join(r['calls'])}"
-      *ctx.out << "  " << format::ljust(r.control, 20) << " @ " << r.loc
-               << "\n";
-      *ctx.out << "    cond: " << r.condition << "\n";
-      std::string calls_str;
-      for (std::size_t ci = 0; ci < r.call_names.size(); ++ci) {
-        if (ci > 0) {
-          calls_str += ", ";
-        }
-        calls_str += r.call_names[ci];
-      }
-      *ctx.out << "    -> calls: " << calls_str << "\n";
-    }
-  }
-  return 0;
-}
-
-// Cache subcommand handlers. Resolution reuses resolve_target() from
-// ast_query.cpp; the cache primitives come from astcache.hpp.
-
-int cmd_ast_cache(const ParsedArgs &args, Context &ctx) {
-  const std::string &action = args.cache_action;
-  if (action == "build") {
-    return cmd_ast_cache_build(args, ctx);
-  }
-  if (action == "status") {
-    return cmd_ast_cache_status(args, ctx);
-  }
-  if (action == "clear") {
-    return cmd_ast_cache_clear(args, ctx);
-  }
-  *ctx.err << "error: unknown cache action '" << action << "'\n";
-  return 2;
-}
-
-int cmd_ast_cache_build(const ParsedArgs &args, Context &ctx) {
-  auto [t_opt, rc] = resolve_target(args, ctx);
-  if (!t_opt) {
-    return rc;
-  }
-  const AstTarget &t = *t_opt;
-
-  namespace fs = std::filesystem;
-  const std::string fd = astcache::files_dir();
-  std::error_code ec;
-  fs::create_directories(fd, ec);
-
-  const std::string key = astcache::cache_key(t);
-  const std::string ast_path = pathutil::join(fd, key + ".ast");
-  const std::string side_path = pathutil::join(fd, key + ".json");
-
-  auto tu_opt = astcache::reparse(t, ctx.err);
-  if (!tu_opt) {
-    return 1;
-  }
-  astcache::try_save(tu_opt->tu, ast_path, side_path, t);
-
-  struct stat st{};
-  if (::stat(ast_path.c_str(), &st) == 0) {
-    const int64_t size = static_cast<int64_t>(st.st_size);
-    *ctx.out << "cached: " << ast_path << "  ("
-             << format::group_thousands(size) << " bytes)\n";
-  } else {
-    *ctx.err << "warning: AST save failed for " << t.abspath << "\n";
-  }
-  return 0;
-}
-
-int cmd_ast_cache_status(const ParsedArgs &args, Context &ctx) {
-  namespace fs = std::filesystem;
-  const std::string fd = astcache::files_dir();
-  struct stat fdst{};
-  const bool dir_exists =
-      (::stat(fd.c_str(), &fdst) == 0 && S_ISDIR(fdst.st_mode));
-
-  // B4: Python keys on args.target only (not --usr/--id/--name) for per-target
-  // mode; selectors are not a cache address — they need an index lookup that is
-  // out of scope for the cache sub-commands.  Also: dir-exists check must run
-  // first so "no cache dir" prints before any target resolution attempt.
-  const bool has_target = !args.target.empty();
-
-  if (has_target) {
-    auto [t_opt, rc] = resolve_target(args, ctx);
-    if (!t_opt) {
-      return rc;
-    }
-    const AstTarget &t = *t_opt;
-    const std::string key = astcache::cache_key(t);
-    const std::string ast_path = pathutil::join(fd, key + ".ast");
-    const std::string side_path = pathutil::join(fd, key + ".json");
-
-    struct stat ast_st{};
-    const bool ast_exists = (::stat(ast_path.c_str(), &ast_st) == 0);
-    const std::string short_key = key.substr(0, 12);
-
-    if (!ast_exists) {
-      if (args.ast_json) {
-        // S1: route through json_out to properly escape abspath (backslashes,
-        // quotes, etc.) — matches Python json.dumps default.
-        json_out::Object absent;
-        absent.push_back({"key", json_out::Value::of(short_key)});
-        absent.push_back({"present", json_out::Value::of(false)});
-        absent.push_back({"abspath", json_out::Value::of(t.abspath)});
-        *ctx.out << json_out::dumps_indent2(json_out::Value::obj(std::move(absent)))
-                 << "\n";
-      } else {
-        *ctx.out << short_key << "  ABSENT  " << t.abspath << "\n";
-      }
-      return 0;
-    }
-
-    auto side = astcache::read_sidecar(side_path);
-    const bool valid = side && astcache::is_valid(t, *side);
-    const int64_t size = static_cast<int64_t>(ast_st.st_size);
-    const std::string abspath_str = side ? side->abspath : t.abspath;
-    const std::string status_str = valid ? "valid" : "STALE";
-
-    if (args.ast_json) {
-      // S1: route through json_out to properly escape abspath.
-      json_out::Object present;
-      present.push_back({"key", json_out::Value::of(short_key)});
-      present.push_back({"present", json_out::Value::of(true)});
-      present.push_back({"valid", json_out::Value::of(valid)});
-      present.push_back({"size", json_out::Value::of(size)});
-      present.push_back({"abspath", json_out::Value::of(abspath_str)});
-      *ctx.out << json_out::dumps_indent2(json_out::Value::obj(std::move(present)))
-               << "\n";
-    } else {
-      *ctx.out << short_key << "  "
-               << format::rjust(format::group_thousands(size), 10) << "  "
-               << format::ljust(status_str, 8) << "  " << abspath_str << "\n";
-    }
-    return 0;
-  }
-
-  // Bulk: enumerate all *.json sidecars.
-  if (!dir_exists) {
-    if (args.ast_json) {
-      *ctx.out
-          << "{\"entries\": [], \"total_entries\": 0, \"total_bytes\": 0}\n";
-    } else {
-      *ctx.out << "cache dir does not exist: " << fd << "\n";
-    }
-    return 0;
-  }
-
-  struct Entry {
-    std::string key;
-    std::string status;
-    int64_t size = 0;
-    std::string abspath;
-  };
-  std::vector<Entry> entries;
-  int64_t total_bytes = 0;
-
-  std::vector<std::string> names;
-  try {
-    for (const auto &de : fs::directory_iterator(fd)) {
-      if (de.path().extension() == ".json") {
-        names.push_back(de.path().filename().string());
-      }
-    }
-  } catch (...) {
-  }
-  std::sort(names.begin(), names.end());
-
-  for (const std::string &name : names) {
-    const std::string key = name.substr(0, name.size() - 5);
-    const std::string ast_path = pathutil::join(fd, key + ".ast");
-    const std::string side_path = pathutil::join(fd, name);
-
-    auto side = astcache::read_sidecar(side_path);
-    if (!side) {
-      entries.push_back({key.substr(0, 12), "orphan-sidecar", 0, "?"});
-      continue;
-    }
-    struct stat ast_st{};
-    if (::stat(ast_path.c_str(), &ast_st) != 0) {
-      entries.push_back(
-          {key.substr(0, 12), "orphan-sidecar", 0, side->abspath});
-      continue;
-    }
-    const int64_t size = static_cast<int64_t>(ast_st.st_size);
-    total_bytes += size;
-    const std::string &absp = side->abspath;
-
-    struct stat src_st{};
-    bool mtime_ok = false;
-    if (::stat(absp.c_str(), &src_st) == 0) {
-      mtime_ok = (side->src_mtime == astcache::src_mtime_of(src_st));
-    }
-    const bool version_ok =
-        (side->libclang_version == astcache::libclang_version());
-    std::string st_str;
-    if (!mtime_ok) {
-      st_str = "STALE";
-    } else if (!version_ok) {
-      st_str = "STALE(ver)";
-    } else {
-      st_str = "valid(flags?)";
-    }
-    entries.push_back({key.substr(0, 12), st_str, size, absp});
-  }
-
-  const int64_t total_entries = static_cast<int64_t>(entries.size());
-  if (args.ast_json) {
-    // S1: route bulk status through json_out to properly escape abspath strings.
-    json_out::Array entries_arr;
-    for (const auto &e : entries) {
-      json_out::Object entry;
-      entry.push_back({"key", json_out::Value::of(e.key)});
-      entry.push_back({"status", json_out::Value::of(e.status)});
-      entry.push_back({"size", json_out::Value::of(e.size)});
-      entry.push_back({"abspath", json_out::Value::of(e.abspath)});
-      entries_arr.push_back(json_out::Value::obj(std::move(entry)));
-    }
-    json_out::Object root;
-    root.push_back({"entries", json_out::Value::arr(std::move(entries_arr))});
-    root.push_back({"total_entries", json_out::Value::of(total_entries)});
-    root.push_back({"total_bytes", json_out::Value::of(total_bytes)});
-    *ctx.out << json_out::dumps_indent2(json_out::Value::obj(std::move(root)))
-             << "\n";
-  } else {
-    if (entries.empty()) {
-      *ctx.out << "cache is empty\n";
-    } else {
-      *ctx.out << format::ljust("key", 14) << "  "
-               << format::rjust("size", 10) << "  "
-               << format::ljust("status", 16) << "  abspath\n";
-      *ctx.out << std::string(72, '-') << "\n";
-      for (const auto &e : entries) {
-        *ctx.out << format::ljust(e.key, 14) << "  "
-                 << format::rjust(format::group_thousands(e.size), 10) << "  "
-                 << format::ljust(e.status, 16) << "  " << e.abspath << "\n";
-      }
-    }
-    const std::string ies = (total_entries == 1) ? "y" : "ies";
-    *ctx.out << "\n"
-             << total_entries << " entr" << ies << ", "
-             << format::group_thousands(total_bytes) << " bytes total\n";
-    if (!entries.empty()) {
-      *ctx.out << "note: bulk status cannot re-verify compile flags "
-                  "(one-way hash); pass a target for full validation\n";
-    }
-  }
-  return 0;
-}
-
-int cmd_ast_cache_clear(const ParsedArgs &args, Context &ctx) {
-  namespace fs = std::filesystem;
-  const std::string fd = astcache::files_dir();
-  // B4: same as cmd_ast_cache_status — only args.target drives per-target mode.
-  const bool has_target = !args.target.empty();
-
-  if (has_target) {
-    auto [t_opt, rc] = resolve_target(args, ctx);
-    if (!t_opt) {
-      return rc;
-    }
-    const AstTarget &t = *t_opt;
-    const std::string key = astcache::cache_key(t);
-    const std::string ast_path = pathutil::join(fd, key + ".ast");
-    const std::string side_path = pathutil::join(fd, key + ".json");
-    int removed = 0;
-    int64_t freed = 0;
-    for (const std::string &p : {ast_path, side_path}) {
-      struct stat st{};
-      if (::stat(p.c_str(), &st) == 0) {
-        freed += static_cast<int64_t>(st.st_size);
-        if (std::remove(p.c_str()) == 0) {
-          ++removed;
-        }
-      }
-    }
-    if (removed > 0) {
-      *ctx.out << "removed " << removed << " file(s), "
-               << format::group_thousands(freed) << " bytes freed\n";
-    } else {
-      *ctx.out << "no cache entry for " << t.abspath << "\n";
-    }
-    return 0;
-  }
-
-  struct stat fdst{};
-  if (::stat(fd.c_str(), &fdst) != 0 || !S_ISDIR(fdst.st_mode)) {
-    *ctx.out << "cache dir does not exist; nothing to clear\n";
-    return 0;
-  }
-  int removed = 0;
-  int64_t freed = 0;
-  try {
-    for (const auto &de : fs::directory_iterator(fd)) {
-      const auto ext = de.path().extension().string();
-      if (ext == ".ast" || ext == ".json") {
-        struct stat st{};
-        if (::stat(de.path().c_str(), &st) == 0) {
-          freed += static_cast<int64_t>(st.st_size);
-          if (std::remove(de.path().c_str()) == 0) {
-            ++removed;
-          }
-        }
-      }
-    }
-  } catch (const std::exception &e) {
-    *ctx.err << "error listing cache dir: " << e.what() << "\n";
-    return 1;
-  }
-  *ctx.out << "cleared " << removed << " file(s), "
-           << format::group_thousands(freed) << " bytes freed\n";
   return 0;
 }
 
@@ -3504,15 +2614,6 @@ int run_command(const ParsedArgs &args, Context &ctx) {
   if (args.command == "resolve") {
     return cmd_resolve(args, ctx);
   }
-  if (args.command == "pch") {
-    if (args.what == "build") {
-      return cmd_pch_build(args, ctx);
-    }
-    if (args.what == "status") {
-      return cmd_pch_status(args, ctx);
-    }
-    return cmd_pch_clear(args, ctx);
-  }
   if (args.command == "set") {
     return cmd_set(args, ctx);
   }
@@ -3540,18 +2641,6 @@ int run_command(const ParsedArgs &args, Context &ctx) {
       return cmd_delete_file(args, ctx);
     }
     return cmd_delete_symbol(args, ctx);
-  }
-  if (args.command == "ast") {
-    if (args.what == "dump") {
-      return cmd_ast_dump(args, ctx);
-    }
-    if (args.what == "locals") {
-      return cmd_ast_locals(args, ctx);
-    }
-    if (args.what == "conditions") {
-      return cmd_ast_conditions(args, ctx);
-    }
-    return cmd_ast_cache(args, ctx);
   }
   if (args.command == "graph") {
     if (args.what == "callers")   return cmd_graph_callers(args, ctx);

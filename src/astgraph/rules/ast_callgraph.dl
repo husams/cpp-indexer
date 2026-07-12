@@ -16,12 +16,15 @@
 .input ast_edge
 .input ast_symbol
 
-// CXCursorKind values, fixed by libclang's C API.
-#define FunctionDecl 8
-#define CXXMethod 21
-#define Constructor 24
-#define Destructor 25
-#define CallExpr 103
+// CIDX-STABLE astgraph node_kind ids (src/astgraph/schema.hpp). These are
+// version-independent constants (mapped from clang's Decl::Kind / Stmt::StmtClass
+// by the dumper), so this generated rule stays valid across LLVM majors. All
+// call-expression classes (plain/member/operator) are emitted as CallExpr(2001).
+#define FunctionDecl 1001
+#define CXXMethod 1002
+#define Constructor 1003
+#define Destructor 1004
+#define CallExpr 2001
 
 // astgraph relation_kind values.
 #define Child 1

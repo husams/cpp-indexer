@@ -20,8 +20,6 @@
 
 #include <unistd.h>
 
-#include "clangx/clang_raii.hpp"
-#include "clangx/clang_runtime.hpp"
 #include "compiledb/compiledb.hpp"
 #include "util/errors.hpp"
 #include "util/logger.hpp"
@@ -279,52 +277,9 @@ TEST_CASE("db_dir_from_arg: trailing compile_commands.json stripped") {
   CHECK(CompileDb::db_dir_from_arg("some/dir") == "some/dir");
 }
 
-TEST_CASE("parse_clang_major: regex + 0 fallback (P12)") {
-  CHECK(cidx::parse_libclang_major("clang version 18.1.8 "
-                                   "(https://github.com/llvm/llvm-project)") ==
-        18);
-  CHECK(cidx::parse_libclang_major("Ubuntu clang version 21.1.1") == 21);
-  CHECK(cidx::parse_libclang_major("clang version 7") == 7);
-  CHECK(cidx::parse_libclang_major("garbage with no version") == 0);
-  CHECK(cidx::parse_libclang_major("") == 0);
-  CHECK(cidx::parse_libclang_major("version x.y") == 0);
-}
-
-TEST_CASE("configured_libclang_library_path returns the build-time path") {
-  // A1.3: library_path() returns the CIDX_LIBCLANG_PATH compile definition.
-  // It must be a non-empty absolute path (not a bare name like "libclang.so")
-  // so that Toolchain (S04) can derive the resource-dir from its dirname.
-  const std::string path = cidx::configured_libclang_library_path();
-  REQUIRE_FALSE(path.empty());
-  // Compile-definition check: must equal the macro exactly.
-  CHECK(path == std::string(CIDX_LIBCLANG_PATH));
-  // Must be absolute (Toolchain resource-dir derivation requires dirname).
-  CHECK(path[0] == '/');
-}
-
-TEST_CASE("ignored runtime libclang warning is absent when the env is unset") {
-  ScopedEnv clear_env("CIDX_LIBCLANG", "");
-  CHECK_NOTHROW(cidx::warn_if_runtime_libclang_ignored());
-}
-
-TEST_CASE("ignored runtime libclang warning is emitted exactly once") {
-  ScopedEnv env("CIDX_LIBCLANG", "/some/stale/libclang.so");
-  const std::string log_path =
-      "/tmp/cidx-libclang-warning-" + std::to_string(::getpid()) + ".log";
-  cidx::Logger &log = cidx::Logger::root();
-  log.set_file(log_path);
-  const int before = log.warning_count();
-  CHECK_NOTHROW(cidx::warn_if_runtime_libclang_ignored());
-  CHECK_NOTHROW(cidx::warn_if_runtime_libclang_ignored());
-  CHECK(log.warning_count() == before + 1);
-  std::ifstream in(log_path);
-  const std::string text((std::istreambuf_iterator<char>(in)),
-                         std::istreambuf_iterator<char>());
-  const std::string expected =
-      "CIDX_LIBCLANG is set but ignored: this build links libclang at " +
-      cidx::configured_libclang_library_path() + " (set at build time)";
-  CHECK(text.find(expected) != std::string::npos);
-}
+// parse_libclang_major / configured_libclang_library_path /
+// warn_if_runtime_libclang_ignored tests removed with the libclang drop: those
+// libclang-runtime helpers no longer exist (indexing is Clang C++ only).
 
 // ---------------------------------------------------------------------------
 // Portable-paths preserve rule (v14): strip_for_libclang with <label>/$VAR.
@@ -416,23 +371,9 @@ TEST_CASE("split_base_version: dot-separated version") {
 
 TEST_SUITE("clang") {
 
-  TEST_CASE("libclang RAII wrappers are exclusive owners") {
-    static_assert(!std::is_copy_constructible_v<cidx::CxString>);
-    static_assert(!std::is_move_constructible_v<cidx::CxString>);
-    static_assert(!std::is_copy_constructible_v<cidx::CxOverriddenCursors>);
-    static_assert(!std::is_move_constructible_v<cidx::CxOverriddenCursors>);
-    const cidx::CxString version(::clang_getClangVersion());
-    CHECK_FALSE(version.str().empty());
-  }
-
-  TEST_CASE("linked libclang major and configured path are valid") {
-    const std::string path = cidx::configured_libclang_library_path();
-    MESSAGE("build-time libclang path: " << path);
-    CHECK_FALSE(path.empty());
-    CHECK(path[0] == '/');
-    CHECK(cidx::linked_libclang_major() > 0);
-    CHECK(cidx::linked_libclang_major() < 100);
-  }
+  // The libclang RAII-wrapper and linked-libclang-version tests were removed
+  // with the libclang drop (CxString/CxOverriddenCursors and the runtime
+  // version query no longer exist).
 
   TEST_CASE("CompileDb::load over manifests/compile_commands.json") {
     if (!require_manifests()) {

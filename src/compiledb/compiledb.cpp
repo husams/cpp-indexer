@@ -1,18 +1,18 @@
 #include "compiledb/compiledb.hpp"
 
-#include <clang-c/CXCompilationDatabase.h>
+#include "clang/Tooling/CompilationDatabase.h"
+#include "clang/Tooling/JSONCompilationDatabase.h"
 
 #include <algorithm>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <regex>
 #include <set>
 #include <string>
 #include <utility>
 
-#include "clangx/clang_raii.hpp"
-#include "clangx/clang_runtime.hpp"
 #include "util/errors.hpp"
 #include "util/pathutil.hpp"
 
@@ -91,10 +91,6 @@ std::string abs_against(const std::string &p, const std::string &base) {
   return pathutil::normpath(pathutil::join(base, p));
 }
 
-std::string to_string(CXString value) {
-  return CxString(value).str();
-}
-
 } // namespace
 
 std::string CompileDb::db_dir_from_arg(const std::string &db_arg) {
@@ -108,44 +104,32 @@ std::string CompileDb::db_dir_from_arg(const std::string &db_arg) {
 }
 
 std::vector<CompileCommand> CompileDb::load(const std::string &db_arg) {
-  warn_if_runtime_libclang_ignored();
-
+  // Load compile_commands.json through the Clang C++ tooling API
+  // (JSONCompilationDatabase) — the same parser libclang's CXCompilationDatabase
+  // wrapped, minus the C API. AutoDetect tokenizes a `command` string or takes
+  // an `arguments` array, matching the previous libclang behavior.
   const std::string abs_dir = pathutil::abspath(db_dir_from_arg(db_arg));
-  CXCompilationDatabase_Error error = CXCompilationDatabase_NoError;
-  CXCompilationDatabase db =
-      ::clang_CompilationDatabase_fromDirectory(abs_dir.c_str(), &error);
-  if (error != CXCompilationDatabase_NoError || db == nullptr) {
-    if (db != nullptr) {
-      ::clang_CompilationDatabase_dispose(db);
-    }
+  std::string err;
+  // loadFromDirectory reads compile_commands.json from the directory and
+  // auto-detects `command`-string vs `arguments`-array syntax internally.
+  std::unique_ptr<clang::tooling::CompilationDatabase> db =
+      clang::tooling::JSONCompilationDatabase::loadFromDirectory(abs_dir, err);
+  if (!db) {
     throw CidxError("could not load compilation database from '" + abs_dir +
-                    "'");
+                    "'" + (err.empty() ? std::string() : ": " + err));
   }
 
   std::vector<CompileCommand> out;
-  CXCompileCommands cmds =
-      ::clang_CompilationDatabase_getAllCompileCommands(db);
-  if (cmds != nullptr) {
-    const unsigned n = ::clang_CompileCommands_getSize(cmds);
-    for (unsigned i = 0; i < n; ++i) {
-      CXCompileCommand cmd = ::clang_CompileCommands_getCommand(cmds, i);
-      CompileCommand cc;
-      cc.directory =
-          to_string(::clang_CompileCommand_getDirectory(cmd));
-      cc.filename = to_string(::clang_CompileCommand_getFilename(cmd));
-      std::vector<std::string> raw;
-      const unsigned argc = ::clang_CompileCommand_getNumArgs(cmd);
-      raw.reserve(argc);
-      for (unsigned j = 0; j < argc; ++j) {
-        raw.push_back(to_string(::clang_CompileCommand_getArg(cmd, j)));
-      }
-      cc.driver = driver(raw, cc.directory);
-      cc.args = strip_for_libclang(raw, cc.filename, cc.directory);
-      out.push_back(std::move(cc));
-    }
-    ::clang_CompileCommands_dispose(cmds);
+  for (const clang::tooling::CompileCommand &cmd : db->getAllCompileCommands()) {
+    CompileCommand cc;
+    cc.directory = cmd.Directory;
+    cc.filename = cmd.Filename;
+    const std::vector<std::string> raw(cmd.CommandLine.begin(),
+                                       cmd.CommandLine.end());
+    cc.driver = driver(raw, cc.directory);
+    cc.args = strip_for_libclang(raw, cc.filename, cc.directory);
+    out.push_back(std::move(cc));
   }
-  ::clang_CompilationDatabase_dispose(db);
   return out;
 }
 

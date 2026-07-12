@@ -1,9 +1,12 @@
 # Contributor guide for coding agents
 
-`cidx` is one semantic indexer with two implementations that must stay
-behaviorally compatible: **Python** (`python/indexer/`, canonical) and **C++23**
-(`src/`, built by CMake). Detailed guidance lives in project skills — load the
-one that fits the task:
+`cidx` is a semantic C/C++ indexer. **Indexing is C++23 only** (`src/`, built by
+CMake) on the **Clang C++ / LibTooling API — libclang (the C API) has been fully
+removed** (no `clang-c/*`, no libclang link). The **Python** tree
+(`python/indexer/`) is being narrowed to storage + graph read/query; its
+libclang-based indexer is legacy pending removal in a **separate phase** — do not
+extend it. Detailed guidance lives in project skills — load the one that fits the
+task:
 
 - **cidx-dual-implementation** — the shared contract and change discipline;
   landing a behavioral change in both languages.
@@ -14,10 +17,11 @@ one that fits the task:
 
 - **Respond with a summary only — never a long, detailed explanation. Give
   details only when the user explicitly asks for them.**
-- Any change to the observable contract (schema/migrations, indexing/query
-  semantics, CLI flags and text output, JSON shapes, path handling, exit
-  behavior) must land in **both** languages in the **same** change, with tests
-  in both suites. Python is the reference; do not defer C++ parity.
+- The byte-identical dual-implementation contract is **retired**: C++ (LibTooling)
+  is the sole indexer, and its AST-traversal order legitimately differs from the
+  old libclang/Python output, so `index.db` is no longer byte-comparable to
+  Python's. Land indexing/query/CLI/schema changes in **C++ with C++ tests**; only
+  touch the Python tree for storage/read-query parity until its indexer is retired.
 - Bump the schema version in `python/indexer/storage.py` and
   `src/storage/storage.cpp` together, with migrations and old-database tests.
 - Do not reintroduce the removed Rust/Cargo, Neo4j, IndraDB, or daemon code.
