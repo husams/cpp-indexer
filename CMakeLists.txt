@@ -12,8 +12,11 @@ endif()
 
 # CIDX_STATIC: prefer static archives for the third-party dependencies so the
 # binary carries fewer runtime requirements. Platform reality differs:
-#   * Linux: SQLite3 from its static archive + -static-libstdc++ -static-libgcc
-#     so the binary needs neither libstdc++ nor libsqlite3 at runtime. glibc
+#   * Linux: SQLite3 from its static archive so the binary needs no libsqlite3
+#     at runtime. libstdc++ stays DYNAMIC (system libstdc++.so.6): cidx_core
+#     links the Clang C++ API (dynamic libLLVM) which uses the system libstdc++,
+#     so a second static libstdc++ would corrupt the ABI across that boundary.
+#     glibc
 #     stays dynamic (a fully static glibc binary is discouraged and breaks
 #     NSS/dlopen). libclang is ALSO linked statically when a C-API wrapper
 #     archive is supplied via -DCIDX_LIBCLANG_STATIC=<libclang.a> (build it once
@@ -333,9 +336,41 @@ add_library(cidx_core STATIC
   third_party/sha1/sha1.c
 )
 
+# --- LibTooling indexing engine (cidx_lt) ------------------------------------
+# The LT engine uses the Clang C++ API. Compiled as its own object library so
+# its LLVM/Clang headers are added with -isystem (a plain -I would break
+# gcc's #include_next <stdlib.h> in <cstdlib>) and it can carry -fno-rtti
+# independently. lt_engine.hpp is clang-free, so cidx_core links the objects
+# but never sees the Clang C++ headers.
+find_package(LLVM REQUIRED CONFIG)
+find_package(Clang REQUIRED CONFIG)
+add_library(cidx_lt OBJECT
+  src/clangx_lt/kind_map.cpp src/clangx_lt/usr.cpp src/clangx_lt/location.cpp
+  src/clangx_lt/names.cpp src/clangx_lt/decl_flags.cpp
+  src/clangx_lt/symbol_extractor.cpp src/clangx_lt/symbol_visitor.cpp
+  src/clangx_lt/storage_symbol_sink.cpp src/clangx_lt/mint_builder.cpp
+  src/clangx_lt/template_arg_resolver.cpp src/clangx_lt/storage_edge_sink.cpp
+  src/clangx_lt/edge_visitor.cpp src/clangx_lt/type_use.cpp
+  src/clangx_lt/value_source.cpp src/clangx_lt/instance_minter.cpp
+  src/clangx_lt/body_walker.cpp src/clangx_lt/body_pass_visitor.cpp
+  src/clangx_lt/ns_uses_visitor.cpp src/clangx_lt/lt_engine.cpp)
+target_include_directories(cidx_lt PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_include_directories(cidx_lt SYSTEM PRIVATE
+  ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+target_compile_definitions(cidx_lt PRIVATE ${LLVM_DEFINITIONS}
+  "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
+target_compile_features(cidx_lt PRIVATE cxx_std_23)
+if(NOT LLVM_ENABLE_RTTI)
+  target_compile_options(cidx_lt PRIVATE -fno-rtti)
+endif()
+target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_lt>)
+
 # A1.1: link libclang (shared by default; a static archive group under
 # CIDX_STATIC on Linux — see the resolution block above).
 target_link_libraries(cidx_core PUBLIC ${_cidx_libclang_link})
+# LT engine: the Clang C++ API (monolithic shared libs: clang-cpp + libLLVM).
+target_link_libraries(cidx_core PUBLIC clang-cpp LLVM)
 # S02: storage layer links SQLite3 (shared, or the static archive under
 # CIDX_STATIC).
 target_link_libraries(cidx_core PUBLIC ${_cidx_sqlite_link})
@@ -427,10 +462,12 @@ add_executable(cidx src/main.cpp)
 target_compile_options(cidx PRIVATE -Wall -Wextra)
 target_link_libraries(cidx PRIVATE cidx_core)
 
-# Static C++ runtime on Linux (AppleClang/libc++ has no static-libstdc++).
-if(CIDX_STATIC AND NOT APPLE)
-  target_link_options(cidx PRIVATE -static-libstdc++ -static-libgcc)
-endif()
+# NOTE: -static-libstdc++/-static-libgcc is intentionally NOT applied. cidx_core
+# now links the Clang C++ API (clang-cpp + the shared libLLVM), which uses the
+# SYSTEM libstdc++; statically embedding a second libstdc++ would put two C++
+# runtimes in one process and corrupt std::string/exceptions crossing the LLVM
+# boundary. A gcc-toolset-built binary runs on base RHEL 9 via system
+# libstdc++.so.6 + the nonshared static bits, matching libLLVM.so.
 
 # RPATH is only needed while libclang is dynamic. With a static libclang there
 # is no shared dependency to locate, so skip it (a leftover RPATH is harmless
@@ -453,9 +490,7 @@ if(CIDX_ASTGRAPH_SOUFFLE_ENABLED)
   target_sources(cidx-astgraph PRIVATE
     $<TARGET_OBJECTS:cidx_astgraph_souffle_rules>)
 endif()
-if(CIDX_STATIC AND NOT APPLE)
-  target_link_options(cidx-astgraph PRIVATE -static-libstdc++ -static-libgcc)
-endif()
+# -static-libstdc++ omitted: see the note on the cidx target (dynamic libLLVM).
 if(NOT _cidx_libclang_static)
   set_target_properties(cidx-astgraph PROPERTIES
     BUILD_RPATH "${_cidx_libclang_dir}"
@@ -466,3 +501,76 @@ endif()
 
 enable_testing()
 add_subdirectory(tests)
+
+# ---------------------------------------------------------------------------
+# Experimental LibTooling AST probe (Phase-0 de-risk for the clangx-LT redesign,
+# see wiki pages/planning/cidx-libtooling-ast-layer). OFF by default; links the
+# full Clang C++ API (clang-cpp), unlike the rest of cidx which uses only the
+# libclang C API. Compiled -fno-rtti to match a Homebrew/no-RTTI LLVM.
+# ---------------------------------------------------------------------------
+option(CIDX_CLANGX_LIBTOOLING "Build the experimental LibTooling AST probe" OFF)
+if(CIDX_CLANGX_LIBTOOLING)
+  find_package(LLVM REQUIRED CONFIG)
+  find_package(Clang REQUIRED CONFIG)
+  message(STATUS "cidx[lt]: LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
+  add_executable(cidx_lt_probe
+    src/clangx_lt/main.cpp
+    src/clangx_lt/kind_map.cpp
+    src/clangx_lt/usr.cpp
+    src/clangx_lt/location.cpp
+    src/clangx_lt/names.cpp
+    src/clangx_lt/decl_flags.cpp
+    src/clangx_lt/symbol_extractor.cpp
+    src/clangx_lt/tsv_symbol_emitter.cpp
+    src/clangx_lt/symbol_visitor.cpp
+    src/clangx_lt/symbol_consumer.cpp
+    src/clangx_lt/symbol_action.cpp
+  )
+  # Builtin-header resource dir of the LLVM we compile against (gotcha 8b).
+  target_compile_definitions(cidx_lt_probe PRIVATE
+    "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
+  target_include_directories(cidx_lt_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_include_directories(cidx_lt_probe SYSTEM PRIVATE
+    ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+  target_compile_definitions(cidx_lt_probe PRIVATE ${LLVM_DEFINITIONS})
+  target_compile_features(cidx_lt_probe PRIVATE cxx_std_17)
+  if(NOT LLVM_ENABLE_RTTI)
+    target_compile_options(cidx_lt_probe PRIVATE -fno-rtti)
+  endif()
+  target_link_libraries(cidx_lt_probe PRIVATE clang-cpp LLVM)
+
+  # Phase-2 gate tool: full interleaved LT indexer (symbols + edges per file).
+  add_executable(cidx_lt_index
+    src/clangx_lt/index_main.cpp
+    src/clangx_lt/index_consumer.cpp
+    src/clangx_lt/kind_map.cpp
+    src/clangx_lt/usr.cpp
+    src/clangx_lt/location.cpp
+    src/clangx_lt/names.cpp
+    src/clangx_lt/decl_flags.cpp
+    src/clangx_lt/symbol_extractor.cpp
+    src/clangx_lt/symbol_visitor.cpp
+    src/clangx_lt/storage_symbol_sink.cpp
+    src/clangx_lt/mint_builder.cpp
+    src/clangx_lt/template_arg_resolver.cpp
+    src/clangx_lt/storage_edge_sink.cpp
+    src/clangx_lt/edge_visitor.cpp
+    src/clangx_lt/type_use.cpp
+    src/clangx_lt/value_source.cpp
+    src/clangx_lt/instance_minter.cpp
+    src/clangx_lt/body_walker.cpp
+    src/clangx_lt/body_pass_visitor.cpp
+    src/clangx_lt/ns_uses_visitor.cpp
+  )
+  target_compile_definitions(cidx_lt_index PRIVATE
+    "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
+  target_include_directories(cidx_lt_index PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_include_directories(cidx_lt_index SYSTEM PRIVATE
+    ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+  target_compile_definitions(cidx_lt_index PRIVATE ${LLVM_DEFINITIONS})
+  target_compile_features(cidx_lt_index PRIVATE cxx_std_23)
+  if(NOT LLVM_ENABLE_RTTI)
+    target_compile_options(cidx_lt_index PRIVATE -fno-rtti)
+  endif()
+  target_link_libraries(cidx_lt_index PRIVATE cidx_core clang-cpp LLVM)
+endif()
