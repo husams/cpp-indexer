@@ -5,9 +5,12 @@ description: Build and test the cidx indexer's Python and C++ suites, and pick t
 
 # Building and testing cidx
 
-Prerequisites: Python 3.12+, SQLite 3, CMake, and a C++23 compiler
-(AppleClang 15+, Clang 16+, or GCC 13+). If CMake cannot find libclang, pass
-`-DCIDX_LIBCLANG=/path/to/libclang`. Souffle is optional (stub fallback).
+Prerequisites: Python 3.12+, SQLite 3, CMake, a C++23 compiler
+(AppleClang 15+, Clang 16+, or GCC 13+), and an LLVM/Clang dev install (the
+LibTooling engine links clang-cpp + libLLVM). CMake auto-discovers LLVM/Clang
+via `llvm-config --cmakedir`; if that fails pass
+`-DLLVM_DIR=.../lib/cmake/llvm -DClang_DIR=.../lib/cmake/clang`. Souffle is
+optional (stub fallback).
 
 Canonical Python suite:
 ```bash

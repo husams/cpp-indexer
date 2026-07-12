@@ -1,10 +1,10 @@
 // S03 tests — compiledb strip/sanitize/driver (hermetic, label "default")
-// and CompileDb::load / linked libclang over the real manifests compile DBs
+// and CompileDb::load (Clang C++ API) over the real manifests compile DBs
 // (suite "clang", label "clang").
 //
-// Skip policy (A1 amendment): libclang is now linked, so "no libclang" cannot
-// occur — the binary wouldn't link.  SKIP-77 is retained ONLY for the
-// fixture-gap case: when CIDX_MANIFESTS_DIR is absent (e.g. the e2e box that
+// Skip policy: the Clang C++ API is linked into the binary, so a missing-Clang
+// skip cannot occur — the binary wouldn't link.  SKIP-77 is retained ONLY for
+// the fixture-gap case: when CIDX_MANIFESTS_DIR is absent (e.g. the e2e box that
 // rsyncs only cidx-cpp/).  The custom main() exits 77 in that case.
 #define DOCTEST_CONFIG_IMPLEMENT
 #include "doctest/doctest.h"
@@ -45,8 +45,8 @@ bool require_manifests() {
   return true;
 }
 
-// A1: libclang is linked — load() is a no-op, always succeeds.
-// Returns the singleton; never returns nullptr.
+// load() is a no-op (the Clang C++ API is linked at build time), always
+// succeeds. Returns the singleton; never returns nullptr.
 
 // setenv/unsetenv with restore-on-destruction (the clang-labelled ctest
 // registration may inject CIDX_LIBCLANG; don't clobber it for later cases).
@@ -366,7 +366,7 @@ TEST_CASE("split_base_version: dot-separated version") {
 }
 
 // ---------------------------------------------------------------------------
-// libclang-dependent cases (label "clang"; runtime SKIP -> exit 77).
+// Clang-dependent cases (real CompileDb::load; label "clang", SKIP -> exit 77).
 // ---------------------------------------------------------------------------
 
 TEST_SUITE("clang") {
@@ -380,6 +380,9 @@ TEST_SUITE("clang") {
       return;
     }
     const std::string manifests = CIDX_MANIFESTS_DIR;
+    // compile_commands.json is generated per-checkout from the committed
+    // .in template (CMake configure), so directory/-I match the fixtures on
+    // THIS machine — see tests/CMakeLists.txt.
     const auto cmds = CompileDb::load(manifests + "/compile_commands.json");
     // Unified DB: every manifests TU lives here, so match by name rather than
     // a fixed count (fixtures are added over time — see CLAUDE.md).
@@ -430,7 +433,7 @@ int main(int argc, char **argv) {
   if (ctx.shouldExit()) {
     return res;
   }
-  // SKIP-77 only for fixture-gap (A1: libclang-absence can no longer occur).
+  // SKIP-77 only for fixture-gap (a missing Clang runtime can no longer occur).
   if (res == 0 && g_fixture_skipped) {
     return 77; // CTest SKIP_RETURN_CODE
   }

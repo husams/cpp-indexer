@@ -1,8 +1,8 @@
 // S07 tests — args grammar (argparse parity, D6 no-abbreviation delta),
 // cli/format, add-source, and the query commands' golden outputs (hermetic,
-// label "default"); cmd_import needs CompileDb::load (CXCompilationDatabase)
-// and lives in doctest suite "clang" (label "clang") using the directly
-// linked libclang.
+// label "default"); cmd_import needs CompileDb::load
+// (clang::tooling::JSONCompilationDatabase) and lives in doctest suite "clang"
+// (label "clang") using the linked Clang C++ API.
 //
 // Every expected output string below was captured from the Python tool
 // (python3 -m indexer ..., Python 3.14, COLUMNS=80) run against a DB seeded
@@ -1502,7 +1502,7 @@ TEST_CASE("list symbols: full table, limit, fuzzy, scopes, kind, file") {
 }
 
 // ---------------------------------------------------------------------------
-// index — hermetic paths (default label; no parse happens, so no libclang)
+// index — hermetic paths (default label; no parse happens, so no Clang runtime)
 // ---------------------------------------------------------------------------
 
 TEST_CASE("index: empty DB, unknown --source, unknown FILE — hermetic") {
@@ -1972,6 +1972,9 @@ TEST_SUITE("clang") {
     }
     const std::string t = make_temp_dir();
     // Single unified DB at manifests/ (sub-project DBs were consolidated).
+    // compile_commands.json is generated per-checkout from the committed .in
+    // template (CMake configure), so imported file paths match the fixtures on
+    // THIS machine — see tests/CMakeLists.txt.
     const std::string db_path =
         std::string(CIDX_MANIFESTS_DIR) + "/compile_commands.json";
     const std::string project = std::string(CIDX_MANIFESTS_DIR) + "/project";
@@ -2518,7 +2521,7 @@ int main(int argc, char **argv) {
     return res;
   }
   if (res == 0 && g_clang_skipped) {
-    return 77; // CTest SKIP_RETURN_CODE — "no libclang loadable" is a skip
+    return 77; // CTest SKIP_RETURN_CODE — missing lab fixtures is a skip
   }
   return res;
 }

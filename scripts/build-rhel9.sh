@@ -5,11 +5,12 @@
 #   ./scripts/build-rhel9.sh              # deps (+ package update) then build
 #   DEPS_ONLY=1 ./scripts/build-rhel9.sh  # install/update dependencies, no build
 #
-# Produces: <repo>/build-static/cidx — SQLite3 linked STATICALLY; libclang AND
-# the Clang C++ API (libclang-cpp + libLLVM, used by the LibTooling indexing
-# engine) linked DYNAMICALLY. libstdc++ stays dynamic (system libstdc++.so.6)
-# because libLLVM uses it — a static libstdc++ would corrupt the ABI across the
-# LLVM boundary. To RUN the binary the host needs the shared Clang/LLVM libs:
+# Produces: <repo>/build-static/cidx — SQLite3 linked STATICALLY (CIDX_STATIC =
+# static SQLite only); the Clang C++ API (libclang-cpp + libLLVM, used by the
+# LibTooling indexing engine) is linked DYNAMICALLY. libstdc++ stays dynamic
+# (system libstdc++.so.6) because libLLVM uses it — a static libstdc++ would
+# corrupt the ABI across the LLVM boundary. To RUN the binary the host needs the
+# shared Clang/LLVM libs:
 #   dnf install -y clang-libs llvm-libs
 #
 # Knobs (env vars):
@@ -125,13 +126,11 @@ fi
 echo "==> building cidx (gcc-toolset-${GCC_TOOLSET}; static SQLite, dynamic Clang/LLVM)"
 # shellcheck disable=SC1090
 source "$TOOLSET_ENABLE"
-LLVM_LIBDIR="$(llvm-config --libdir)"
 # find_package(Clang) discovery: point cmake at this LLVM's config packages so
 # the LibTooling engine (clang-cpp + LLVM targets) resolves.
 LLVM_CMAKEDIR="$(llvm-config --cmakedir)"
 CLANG_CMAKEDIR="$(dirname "$LLVM_CMAKEDIR")/clang"
 cmake -S "$CIDX_ROOT" -B "$BUILD_DIR" -DCIDX_STATIC=ON \
-  -DCIDX_LIBCLANG="$LLVM_LIBDIR/libclang.so" \
   -DLLVM_DIR="$LLVM_CMAKEDIR" -DClang_DIR="$CLANG_CMAKEDIR"
 cmake --build "$BUILD_DIR" -j"$JOBS" --target cidx
 

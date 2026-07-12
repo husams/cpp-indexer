@@ -10,26 +10,22 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   message(STATUS "cidx: CMAKE_BUILD_TYPE defaulted to Release")
 endif()
 
-# CIDX_STATIC: prefer static archives for the third-party dependencies so the
-# binary carries fewer runtime requirements. Platform reality differs:
-#   * Linux: SQLite3 from its static archive so the binary needs no libsqlite3
-#     at runtime. libstdc++ stays DYNAMIC (system libstdc++.so.6): cidx_core
-#     links the Clang C++ API (dynamic libLLVM) which uses the system libstdc++,
-#     so a second static libstdc++ would corrupt the ABI across that boundary.
-#     glibc
-#     stays dynamic (a fully static glibc binary is discouraged and breaks
-#     NSS/dlopen). libclang is ALSO linked statically when a C-API wrapper
-#     archive is supplied via -DCIDX_LIBCLANG_STATIC=<libclang.a> (build it once
-#     with scripts/build-static-libclang.sh against a NON-LTO distro LLVM, e.g.
-#     apt llvm-18 — validated 2026-06-13 on Ubuntu 24.04 -> the binary has no
-#     libclang.so dependency). Without it, libclang falls back to dynamic: no
-#     distribution ships a linkable static libclang C API (release tarballs are
-#     LTO bitcode; -dev packages ship only libclang.so), hence the wrapper.
-#   * macOS: only SQLite3 has a static archive; libclang ships shared-only and
-#     Apple provides no static libSystem, so libclang stays dynamic (RPATH).
-# Each dependency falls back to its shared form (with a STATUS/WARNING) when no
-# static archive is found, so a static configure never hard-fails.
-option(CIDX_STATIC "Statically link dependencies where the platform allows" OFF)
+# CIDX_STATIC: static-link SQLite3 ONLY, so the binary needs no libsqlite3 at
+# runtime. Scope is deliberately narrow after the libclang cutover:
+#   * SQLite3 is linked from its static archive (libsqlite3.a) when one is found;
+#     it falls back to the shared form (with a WARNING) so a static configure
+#     never hard-fails.
+#   * The Clang C++ API (clang-cpp + libLLVM) stays DYNAMIC on every platform:
+#     cidx_core links it and it uses the system libstdc++, so a second static
+#     libstdc++ would put two C++ runtimes in one process and corrupt
+#     std::string/exceptions across the LLVM boundary. glibc likewise stays
+#     dynamic (a fully static glibc binary breaks NSS/dlopen).
+#   * The old static-libclang (C API) contract is GONE: the libclang C API was
+#     removed in the LibTooling cutover, so there is no libclang.a to build or
+#     link and no CIDX_LIBCLANG_STATIC knob.
+# To run a CIDX_STATIC binary the host still needs the shared Clang/LLVM libs
+# (e.g. RHEL: `dnf install clang-libs llvm-libs`).
+option(CIDX_STATIC "Static-link SQLite3 (Clang/LLVM stay dynamic)" OFF)
 
 # A2.1: C++23 standard; minimum compilers (A2.1 guard).
 # Build hosts: macOS AppleClang (dev) and Ubuntu 24.04 gcc 13 (e2e).
@@ -114,6 +110,48 @@ add_library(cidx_core STATIC
   third_party/sha1/sha1.c
 )
 
+# --- LLVM/Clang discovery ----------------------------------------------------
+# find_package(... CONFIG) only searches CMake's default prefixes, which do NOT
+# include a keg-only Homebrew LLVM (/opt/homebrew/opt/llvm) or a distro that
+# hides LLVM under a versioned prefix -- so a plain `cmake -S . -B build` fails
+# to find LLVMConfig.cmake even when clang is installed. Seed LLVM_DIR/Clang_DIR
+# from `llvm-config --cmakedir` (with Homebrew hints) UNLESS the caller already
+# set them: an explicit -DLLVM_DIR=/-DClang_DIR= always wins and short-circuits
+# this probe.
+if(NOT LLVM_DIR OR NOT Clang_DIR)
+  find_program(CIDX_LLVM_CONFIG
+    NAMES llvm-config
+          llvm-config-22 llvm-config-21 llvm-config-20
+          llvm-config-19 llvm-config-18
+    HINTS /opt/homebrew/opt/llvm/bin /opt/homebrew/opt/llvm@22/bin
+          /usr/local/opt/llvm/bin /opt/homebrew/bin /usr/local/bin
+    DOC "llvm-config used to locate LLVMConfig.cmake / ClangConfig.cmake")
+  if(CIDX_LLVM_CONFIG)
+    execute_process(
+      COMMAND "${CIDX_LLVM_CONFIG}" --cmakedir
+      OUTPUT_VARIABLE _cidx_llvm_cmakedir
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE _cidx_llvm_config_rc
+      ERROR_QUIET)
+    if(_cidx_llvm_config_rc EQUAL 0 AND IS_DIRECTORY "${_cidx_llvm_cmakedir}")
+      if(NOT LLVM_DIR)
+        set(LLVM_DIR "${_cidx_llvm_cmakedir}" CACHE PATH
+            "LLVMConfig.cmake dir (from llvm-config --cmakedir)" FORCE)
+      endif()
+      # ClangConfig.cmake sits beside LLVMConfig.cmake: <cmakedir>/../clang.
+      if(NOT Clang_DIR)
+        get_filename_component(_cidx_cmake_root "${_cidx_llvm_cmakedir}" DIRECTORY)
+        if(IS_DIRECTORY "${_cidx_cmake_root}/clang")
+          set(Clang_DIR "${_cidx_cmake_root}/clang" CACHE PATH
+              "ClangConfig.cmake dir (beside LLVMConfig.cmake)" FORCE)
+        endif()
+      endif()
+      message(STATUS
+        "cidx: LLVM/Clang discovered via ${CIDX_LLVM_CONFIG} (LLVM_DIR=${LLVM_DIR})")
+    endif()
+  endif()
+endif()
+
 # --- LibTooling indexing engine (cidx_lt) ------------------------------------
 # The LT engine uses the Clang C++ API. Compiled as its own object library so
 # its LLVM/Clang headers are added with -isystem (a plain -I would break
@@ -131,6 +169,8 @@ add_library(cidx_lt OBJECT
   src/clangx_lt/edge_visitor.cpp src/clangx_lt/type_use.cpp
   src/clangx_lt/value_source.cpp src/clangx_lt/instance_minter.cpp
   src/clangx_lt/body_walker.cpp src/clangx_lt/body_pass_visitor.cpp
+  src/clangx_lt/call_template_args.cpp src/clangx_lt/display_name_rewrite.cpp
+  src/clangx_lt/receiver_provenance.cpp src/clangx_lt/instantiation_edges.cpp
   src/clangx_lt/ns_uses_visitor.cpp src/clangx_lt/lt_engine.cpp
   src/clangx_lt/clang_version.cpp)
 target_include_directories(cidx_lt PRIVATE
@@ -365,6 +405,10 @@ if(CIDX_CLANGX_LIBTOOLING)
     src/clangx_lt/instance_minter.cpp
     src/clangx_lt/body_walker.cpp
     src/clangx_lt/body_pass_visitor.cpp
+    src/clangx_lt/call_template_args.cpp
+    src/clangx_lt/display_name_rewrite.cpp
+    src/clangx_lt/receiver_provenance.cpp
+    src/clangx_lt/instantiation_edges.cpp
     src/clangx_lt/ns_uses_visitor.cpp
   )
   target_compile_definitions(cidx_lt_index PRIVATE
