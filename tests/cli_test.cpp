@@ -2208,6 +2208,45 @@ TEST_SUITE("clang") {
                        t + "/cidx.log\n");
   }
 
+  TEST_CASE("index: static member definition spanning an X-macro .def include "
+            "indexes without crashing (cross-buffer init-slice guard)") {
+    // Regression (found indexing llvm-project: clang::FPOptions::TotalWidth).
+    // The out-of-line static data member's initializer is assembled by an
+    // #include inside the declarator, so the definition's source range BEGINS
+    // in the .cpp and ENDS inside the .def file — two different file buffers.
+    // Slicing raw text between getCharacterData() pointers from those two
+    // buffers computed a garbage length and crashed (SIGSEGV) pre-guard; the
+    // TU must index cleanly, merely without a static_var_init_text.
+    const std::string t = make_temp_dir();
+    const std::string proj = t + "/proj";
+    makedirs(proj);
+    write_file(proj + "/widths.def", "+ 1\n+ 2\n");
+    write_file(proj + "/s.h", "struct S { static const int total; };\n");
+    write_file(proj + "/s.cpp", "#include \"s.h\"\n"
+                                "const int S::total = 0\n"
+                                "#include \"widths.def\"\n"
+                                "    ;\n");
+    write_file(proj + "/compile_commands.json",
+               "[{\"directory\": \"" + proj +
+                   "\", \"command\": \"c++ -I. -c s.cpp -o s.o\", "
+                   "\"file\": \"s.cpp\"}]\n");
+    CmdResult r = run_cli({"import", "--db", proj}, t);
+    REQUIRE(r.rc == 0);
+
+    cidx::Logger log;
+    log.set_file(t + "/cidx.log");
+    r = run_cli({"index"}, t, &log);
+    CHECK(r.rc == 0);
+    CHECK(r.err.empty());
+    CHECK(r.out.find("index: 1 indexed, 0 failed") != std::string::npos);
+
+    // The symbol landed as a definition despite the skipped init slice.
+    Storage db(t + "/index.db");
+    const std::vector<cidx::Symbol> hits = db.find_symbols("S::total", {}, 10);
+    REQUIRE(hits.size() == 1);
+    CHECK(hits[0].is_definition);
+  }
+
 } // TEST_SUITE("clang")
 
 // -- analyze (Souffle Datalog) -------------------------------------------------
