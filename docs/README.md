@@ -19,6 +19,7 @@ the [overview](overview.md), then read the module you care about.
 | [Indexing engines](indexing-engines.md) | the two interchangeable engines (libclang vs LibTooling) |
 | [Build & platforms](build.md) | CMake, macOS/RHEL, the LT engine link model, parity scripts |
 | [Glossary](glossary.md) | USR, Layer-0/1, driver introspection, stub, multi_def |
+| [Improvement roadmap](improvements/README.md) | prioritized follow-on work enabled by LibTooling, with adoption gates |
 
 ## Modules (`src/`)
 

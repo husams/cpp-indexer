@@ -1,115 +1,47 @@
 # Contributor guide for coding agents
 
-## Project shape
+`cidx` is a semantic C/C++ indexer. **Indexing is C++23 only** (`src/`, built by
+CMake) on the **Clang C++ / LibTooling API — libclang (the C API) has been fully
+removed** (no `clang-c/*`, no libclang link). The **Python** tree
+(`python/indexer/`) is being narrowed to storage + graph read/query; its
+libclang-based indexer is legacy pending removal in a **separate phase** — do not
+extend it. Detailed guidance lives in project skills — load the one that fits the
+task:
 
-This repository contains two implementations of the same `cidx` semantic
-indexer. Keep them behaviorally compatible.
+- **cidx-dual-implementation** — the shared contract and change discipline;
+  landing a behavioral change in both languages.
+- **cidx-build-and-test** — build/test both suites and pick the right gate.
+- **cidx-codebase-map** — where each concern lives across the two trees.
 
-| Implementation | Location | Purpose |
-|---|---|---|
-| Python | `python/indexer/` | Canonical behavior and public Python API |
-| C++23 | `src/` | Performance implementation built by CMake |
+## Rules and constraints
 
-The implementations share an observable contract: SQLite schema and
-migrations, indexing and query semantics, CLI flags and text output, JSON
-shapes, path handling, and exit behavior. Any change to that contract must be
-implemented and tested in both languages in the same change. The current main
-database schema version appears in `python/indexer/storage.py` and
-`src/storage/storage.cpp`; update both together.
-
-Do not reintroduce the removed Rust/Cargo, Neo4j, IndraDB, or daemon code.
-
-## Where to work
-
-- `python/indexer/storage.py` and `src/storage/`: SQLite schema, migrations,
-  persistence records, and storage operations.
-- `python/indexer/cli.py` and `src/cli/`: command parsing, command behavior,
-  formatting, and JSON output.
-- `python/indexer/query.py`, `python/indexer/entity_graph.py`, and `src/graph/`:
-  graph queries and graph records.
-- `python/indexer/clang/`, `python/indexer/compiledb.py`, and `src/clangx/` plus
-  `src/compiledb/`: libclang parsing, toolchain handling, and compilation DBs.
-- `python/indexer/astcache.py`, `python/indexer/astcmd.py`, `src/astcache/`, and
-  `src/astgraph/`: on-demand AST analysis and caching.
-- `python/tests/` and `tests/`: Python and C++ coverage. `manifests/` contains
-  small indexing fixtures. Keep tests hermetic unless they are deliberately
-  labeled as libclang integration tests.
-- `docs/adr/`, `python/docs/`, and `spec/`: design history and contracts. Check
-  the relevant ADR before changing an established data model or graph rule.
-
-## Build and test
-
-Prerequisites are Python 3.12+, SQLite 3, CMake, and a supported C++23 compiler
-(AppleClang 15+, Clang 16+, or GCC 13+). CMake must be able to find libclang;
-pass `-DCIDX_LIBCLANG=/path/to/libclang` if discovery fails. Souffle support is
-optional and falls back to a stub when unavailable.
-
-Set up and run the canonical Python suite:
-
-```bash
-python -m pip install -e './python[dev]'
-pytest python/tests
-```
-
-`uv` is also supported from `python/`:
-
-```bash
-uv sync --dev
-uv run pytest
-```
-
-Build and run the hermetic C++ suite:
-
-```bash
-cmake -S . -B build
-cmake --build build -j
-ctest --test-dir build -L default --output-on-failure
-```
-
-Useful targeted gates:
-
-```bash
-ctest --test-dir build -L clang --output-on-failure
-ctest --test-dir build -L parity --output-on-failure
-```
-
-The `clang` tests perform real parses. The `parity` test needs `uv`, SQLite,
-the Python launcher, and the built C++ executable. `make`, `make test`, and
-`make static` are convenience wrappers; CMake remains the source of truth.
-
-Before committing a behavioral change, run both full Python tests and the C++
-`default` tests. Run the `clang` and `parity` gates when the change touches
-parsing, indexing, storage interchange, CLI behavior, or graph results.
-
-## Git workflow
-
-- Agents may create Git worktrees and feature branches when starting new work.
-- Keep each worktree and branch scoped to a single task, and do not remove a
-  worktree or branch that may contain another contributor's work.
-
-## Change discipline
-
-- Treat Python behavior as the reference, but do not leave C++ parity for a
-  later change.
-- Add focused regression coverage in both suites for shared behavior. Match
-  existing nearby test structure and fixtures.
-- Preserve database compatibility. Schema changes need matching version bumps,
-  migrations, and tests for opening older databases in both implementations.
-- Keep text and JSON output deterministic. Do not casually change ordering,
+- **Respond with a summary only — never a long, detailed explanation. Give
+  details only when the user explicitly asks for them.**
+- The byte-identical dual-implementation contract is **retired**: C++ (LibTooling)
+  is the sole indexer, and its AST-traversal order legitimately differs from the
+  old libclang/Python output, so `index.db` is no longer byte-comparable to
+  Python's. Land indexing/query/CLI/schema changes in **C++ with C++ tests**; only
+  touch the Python tree for storage/read-query parity until its indexer is retired.
+- Bump the schema version in `python/indexer/storage.py` and
+  `src/storage/storage.cpp` together, with migrations and old-database tests.
+- Do not reintroduce the removed Rust/Cargo, Neo4j, IndraDB, or daemon code.
+- Do not add a new dependency when the standard library or an existing utility
+  already covers the need. Prefer small changes within existing module
+  boundaries.
+- Keep text and JSON output deterministic — do not casually change ordering,
   field names, null handling, or formatting.
-- Keep fixtures read-only during tests; copy database fixtures to a temporary
-  directory before migration.
-- Avoid generated artifacts in commits: build directories, caches,
-  `__pycache__`, temporary databases, and local virtual environments.
-- Create agent-only temporary files exclusively under `/tmp`; never place
-  scratch files in the repository working tree.
-- Prefer small changes in the existing module boundaries. Do not add a new
-  dependency when the standard library or an existing utility already covers
-  the need.
-
-## Validation expectations
-
-Report exactly which checks were run and whether any were skipped because of a
-missing optional tool or fixture. Do not claim parity from only one language's
-tests. When a full suite is impractical during iteration, run the narrow test
-first, then the required gates before handoff.
+- Report exactly which checks ran and which were skipped. Never claim parity
+  from only one language's tests.
+- Git: agents may create worktrees and feature branches; keep each scoped to a
+  single task and never remove a worktree or branch that may hold another
+  contributor's work.
+- Keep agent scratch files under `/tmp` only — never in the repository tree.
+  Do not commit generated artifacts (build dirs, caches, `__pycache__`, temp
+  databases, local virtualenvs). The one exception is the checked-in semantic
+  index `index.db` (see below).
+- The semantic index `index.db` is committed to the repo. Keep it current: after
+  any change that alters what the index would contain (source under `src/` or
+  `python/indexer/`, schema version, or indexing/query semantics), re-run the
+  indexer to regenerate `index.db` and commit the refreshed database in the same
+  change. Verify with `sqlite3 index.db "SELECT value FROM meta WHERE
+  key='schema_version';"` — it must match the current schema version.
