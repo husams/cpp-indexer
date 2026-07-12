@@ -4,8 +4,9 @@
 
 - Python 3.12+, SQLite 3, CMake, and a supported C++23 compiler
   (AppleClang 15+, Clang 16+, or GCC 13+).
-- CMake must be able to find libclang; pass `-DCIDX_LIBCLANG=/path/to/libclang`
-  if discovery fails.
+- An LLVM/Clang dev install (the LibTooling engine links clang-cpp + libLLVM).
+  CMake auto-discovers it via `llvm-config --cmakedir`; if discovery fails pass
+  `-DLLVM_DIR=.../lib/cmake/llvm -DClang_DIR=.../lib/cmake/clang`.
 - Souffle support is optional and falls back to a stub when unavailable.
 
 ## Python suite (canonical)

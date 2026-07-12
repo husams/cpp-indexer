@@ -47,7 +47,6 @@ WORKDIR /src/cidx-cpp
 RUN source /opt/rh/gcc-toolset-13/enable \
  && rm -rf build-static \
  && cmake -S . -B build-static -DCIDX_STATIC=ON \
-      -DCIDX_LIBCLANG="$(llvm-config --libdir)/libclang.so" \
  && cmake --build build-static -j"$(nproc)" --target cidx \
  && ./build-static/cidx --help >/dev/null && echo "cidx built OK"
 

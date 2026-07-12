@@ -44,12 +44,27 @@ if(NOT DEFINED CIDX_MANIFESTS_DIR)
   set(CIDX_MANIFESTS_DIR "${_cidx_repo_root}/manifests")
 endif()
 
+# A compile_commands.json cannot be committed portably: its `directory` fields
+# must be ABSOLUTE, so a checked-in copy is frozen to whatever checkout generated
+# it and is unusable from any other worktree / CI / clone. So the FIXTURE is a
+# portable template (manifests/compile_commands.json.in, @CIDX_MANIFESTS@ token)
+# and the real compile_commands.json is generated per-checkout right here, next
+# to the source files it references. Every consumer (the C++ clang tests AND the
+# Python suite's test_repository) reads the natural manifests/compile_commands.json
+# path; the generated file is gitignored (never committed).
+set(_cidx_cdb_template "${CIDX_MANIFESTS_DIR}/compile_commands.json.in")
+if(EXISTS "${_cidx_cdb_template}")
+  set(CIDX_MANIFESTS "${CIDX_MANIFESTS_DIR}")  # substituted for @CIDX_MANIFESTS@
+  configure_file("${_cidx_cdb_template}"
+    "${CIDX_MANIFESTS_DIR}/compile_commands.json" @ONLY)
+endif()
+
 # --- S03: compiledb_test — one exe, two ctest registrations -----------------
 # Hermetic strip/sanitize/driver/major-regex cases run under the "default"
-# label; the CompileDb::load cases live in doctest suite "clang" and are
-# registered separately under the "clang" label.
-# A1 (Amendment A1): libclang is linked at build time — SKIP-77 is kept here
-# only for the fixture-gap case (CIDX_MANIFESTS_DIR absent), not for "no dylib".
+# label; the CompileDb::load cases (clang::tooling::JSONCompilationDatabase, the
+# Clang C++ API) live in doctest suite "clang" and are registered separately
+# under the "clang" label. The Clang C++ API is linked into the binary, so
+# SKIP-77 is kept here only for the fixture-gap case (CIDX_MANIFESTS_DIR absent).
 add_executable(compiledb_test compiledb_test.cpp)
 target_compile_options(compiledb_test PRIVATE -Wall -Wextra)
 target_link_libraries(compiledb_test PRIVATE cidx_core)
@@ -66,9 +81,9 @@ set_tests_properties(compiledb_clang_test PROPERTIES
 
 # --- S04: toolchain_test — one exe, two ctest registrations ------------------
 # Hermetic cases (fake-driver fixture + env injection + Toolchain test seams)
-# run under "default"; the real-LibClang::major() gnuc-cap smoke lives in
+# run under "default"; the real clang major-version gnuc-cap smoke lives in
 # doctest suite "clang".
-# A1: SKIP-77 kept for fixture-gap only (no "no dylib" path anymore).
+# SKIP-77 is kept for the fixture-gap case only.
 add_executable(toolchain_test toolchain_test.cpp)
 target_compile_options(toolchain_test PRIVATE -Wall -Wextra)
 target_link_libraries(toolchain_test PRIVATE cidx_core)
@@ -85,11 +100,12 @@ set_tests_properties(toolchain_clang_test PROPERTIES
 
 # ast_test removed in the LibTooling cutover: it exercised the retired libclang
 # cursor-walk engine (AstIndexer). Real-parse indexing is now driven by the
-# LibTooling engine and covered via cli_test + the index parity gate.
+# LibTooling engine and covered via cli_test + the index golden gate
+# (index_golden_test, below).
 
 # --- astgraph_test — per-TU AST->SQLite graph dumper (src/astgraph/) ----------
-# Every case performs a real parse on temp-dir sources: single "clang"
-# registration, SKIP-77 when no libclang loads.
+# Every case performs a real parse (via the Clang C++ API) on temp-dir sources:
+# single "clang" registration, SKIP-77 when the parse environment is unavailable.
 add_executable(astgraph_test astgraph_test.cpp)
 target_compile_options(astgraph_test PRIVATE -Wall -Wextra)
 target_link_libraries(astgraph_test PRIVATE cidx_core)
@@ -106,8 +122,8 @@ set_tests_properties(astgraph_clang_test PROPERTIES
 # --- S07: cli_test — one exe, two ctest registrations -------------------------
 # Args-grammar, format, add-source, and query-golden cases are hermetic
 # ("default" label); the cmd_import cases need CompileDb::load
-# (CXCompilationDatabase), live in doctest suite "clang".
-# A1: SKIP-77 kept for fixture-gap only.
+# (clang::tooling::JSONCompilationDatabase) and live in doctest suite "clang".
+# SKIP-77 kept for fixture-gap only.
 add_executable(cli_test cli_test.cpp)
 target_compile_options(cli_test PRIVATE -Wall -Wextra)
 target_link_libraries(cli_test PRIVATE cidx_core)
@@ -125,12 +141,27 @@ set_tests_properties(cli_clang_test PROPERTIES
 # ast_query_test / astcache_test removed in the LibTooling cutover: the
 # `cidx ast` command and the AST/PCH cache they exercised were deleted.
 
-# --- S08: parity gate — RETIRED in the LibTooling cutover (Phase 4).
-# The byte-identical Python(libclang)-vs-C++ dual-implementation contract is
-# dropped: C++ now indexes via the LibTooling engine, whose AST-traversal order
-# differs from libclang's, so the surrogate-key (edge.id / edge_site.edge_id)
-# emission order — and thus a byte-strict `sqlite3 .dump` diff — can no longer
-# match Python's libclang output. Semantic parity (identical symbol rows and
-# identical edge/edge_site SETS) is preserved and was verified directly during
-# the cutover. Python is being narrowed to storage/query only (separate phase),
-# after which a Python indexer no longer exists to diff against.
+# --- S08: index golden gate — the repository-wide indexing oracle -------------
+# Replaces the RETIRED byte-identical Python(libclang)-vs-C++ parity gate. The
+# old gate diffed a full `sqlite3 .dump`, which the LibTooling engine can no
+# longer match: its AST-traversal order differs from libclang's, so the
+# surrogate-key (edge.id / edge_site.edge_id) emission order — and thus a
+# byte-strict dump — diverges even when the SEMANTIC content is identical.
+#
+# index_golden_test indexes a fixed fixture and compares NORMALIZED, ORDERED
+# projections of the seven Layer-0 tables (file, symbol, decl_site, edge,
+# edge_site, call_arg, template_arg) against tests/golden/index_layer0.txt.
+# Resolving surrogate keys to USR/edge-kind/basename and ORDERing by them makes
+# the oracle invariant to traversal order while still catching any semantic
+# regression. Real parse -> label "clang" (SKIP-77 reserved; regenerate the
+# golden with CIDX_UPDATE_GOLDEN=1 after an intentional change or Clang bump).
+add_executable(index_golden_test index_golden_test.cpp)
+target_compile_options(index_golden_test PRIVATE -Wall -Wextra)
+target_link_libraries(index_golden_test PRIVATE cidx_core)
+target_compile_definitions(index_golden_test PRIVATE
+  CIDX_GOLDEN_FILE="${CMAKE_CURRENT_SOURCE_DIR}/golden/index_layer0.txt")
+
+add_test(NAME index_golden_test COMMAND index_golden_test --test-suite=clang)
+set_tests_properties(index_golden_test PROPERTIES
+  LABELS "clang"
+  SKIP_RETURN_CODE 77)

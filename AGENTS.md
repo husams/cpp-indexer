@@ -39,10 +39,13 @@ Do not reintroduce the removed Rust/Cargo, Neo4j, IndraDB, or daemon code.
 
 ## Build and test
 
-Prerequisites are Python 3.12+, SQLite 3, CMake, and a supported C++23 compiler
-(AppleClang 15+, Clang 16+, or GCC 13+). CMake must be able to find libclang;
-pass `-DCIDX_LIBCLANG=/path/to/libclang` if discovery fails. Souffle support is
-optional and falls back to a stub when unavailable.
+Prerequisites are Python 3.12+, SQLite 3, CMake, a supported C++23 compiler
+(AppleClang 15+, Clang 16+, or GCC 13+), and an LLVM/Clang development install
+(the LibTooling engine links `clang-cpp` + `libLLVM`). CMake discovers LLVM/Clang
+automatically via `llvm-config --cmakedir` (with Homebrew hints); pass
+`-DLLVM_DIR=/path/to/lib/cmake/llvm -DClang_DIR=/path/to/lib/cmake/clang` if
+discovery fails. Souffle support is optional and falls back to a stub when
+unavailable.
 
 Set up and run the canonical Python suite:
 

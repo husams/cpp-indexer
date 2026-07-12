@@ -6,11 +6,11 @@
 // Hermetic by construction: every driver is the tests/fixtures/fake-driver
 // shell script symlinked under a driver-shaped name in a temp dir and
 // configured through FAKE_* env vars; glibc header trees and resource dirs
-// are written into temp trees; the libclang major is injected through the
+// are written into temp trees; the clang major is injected through the
 // Toolchain test seam (set_libclang_major_for_test covers the major()==0
-// cap-when-undeterminable path even though A1 guarantees a real major).
-// The "clang" doctest suite touches the real linked libclang major — it always
-// runs under A1 (binary cannot link without libclang; no-dylib skip removed).
+// cap-when-undeterminable path even though a real major is always available).
+// The "clang" doctest suite touches the real clang major from the linked Clang
+// C++ API — the binary cannot link without it, so the no-runtime skip is gone.
 #define DOCTEST_CONFIG_IMPLEMENT
 #include "doctest/doctest.h"
 
@@ -34,7 +34,7 @@ using cidx::Toolchain;
 
 namespace {
 
-// A1: load() is a no-op (binary links libclang at build time); it never
+// load() is a no-op (binary links the Clang C++ API at build time); it never
 // throws. require_libclang() now always succeeds — kept as a named helper so
 // the clang test suite reads naturally.
 
@@ -698,7 +698,7 @@ TEST_CASE("pick_best_resource: best NUMERIC version wins across glob "
 }
 
 // ---------------------------------------------------------------------------
-// clang-labelled suite: the only major()-dependent smoke (real libclang)
+// clang-labelled suite: the only major()-dependent smoke (real clang major)
 
 TEST_SUITE("clang") {
 
@@ -721,7 +721,7 @@ TEST_SUITE("clang") {
 int main(int argc, char **argv) {
   doctest::Context ctx(argc, argv);
   const int res = ctx.run();
-  // A1: no-dylib skip path removed (binary always links libclang).
+  // no-runtime skip path removed (binary always links the Clang C++ API).
   // Exit 77 (CTest SKIP_RETURN_CODE) is no longer emitted by this test.
   return ctx.shouldExit() ? res : res;
 }
