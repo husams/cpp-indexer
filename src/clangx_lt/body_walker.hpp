@@ -65,6 +65,11 @@ private:
                           const clang::FunctionDecl *callee, bool recovered,
                           const clang::NamedDecl *mint_as = nullptr);
 
+  // Resolve a recovered (single-candidate dependent/overloaded) callee USR to a
+  // symbol id (lookup, else qual_name+kind, else mint); -1 when unresolved.
+  int64_t resolve_recovered_target(const clang::NamedDecl *keyed,
+                                   const std::string &callee_usr);
+
   int64_t emit_site_edge(const clang::Expr *site, int64_t dst_id, int kind);
   int64_t emit_site_edge_at(clang::SourceLocation loc, int64_t dst_id,
                             int kind);
