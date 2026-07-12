@@ -32,6 +32,17 @@ task:
   field names, null handling, or formatting.
 - Report exactly which checks ran and which were skipped. Never claim parity
   from only one language's tests.
+- **Baseline before you build.** Run the relevant test gates (default, and
+  `clang`/parity as the change warrants) and record their green/red state
+  **before** starting work on any feature or fix. Do not begin coding until the
+  starting state is known; if the baseline is already red, surface it and
+  investigate first.
+- **Investigate EVERY failing test — related to your change or not.** Never
+  dismiss a red as "pre-existing." Run it, read the exact assertion, root-cause
+  it, and either fix it or prove factually that it is not a regression (e.g. show
+  the diff is comment-only, or compare against the pre-work baseline) and state
+  exactly how to make it pass. No hand-waving. Applies to your own runs and any
+  delegated ones.
 - Git: agents may create worktrees and feature branches; keep each scoped to a
   single task and never remove a worktree or branch that may hold another
   contributor's work.

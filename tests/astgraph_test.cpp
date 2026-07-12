@@ -1,6 +1,6 @@
 // astgraph_test — the per-TU AST->SQLite graph dumper (src/astgraph/).
 // All cases perform real parses on temp-dir sources, live in doctest suite
-// "clang" and require the directly linked libclang. Assertions run plain SQL
+// "clang" and require the linked Clang C++ API. Assertions run plain SQL
 // over the produced <TU>.db,
 // i.e. exactly what a Soufflé program would read.
 #define DOCTEST_CONFIG_IMPLEMENT
@@ -277,7 +277,7 @@ int main(int argc, char **argv) {
     return res;
   }
   if (res == 0 && g_clang_skipped) {
-    return 77; // CTest SKIP_RETURN_CODE — "no libclang loadable" is a skip
+    return 77; // CTest SKIP_RETURN_CODE — parse environment unavailable is a skip
   }
   return res;
 }

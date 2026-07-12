@@ -18,3 +18,7 @@ python/.ruff_cache/
 python/dist/
 python/build/
 python/*.egg-info/
+
+# Generated per-checkout from compile_commands.json.in (absolute paths
+# cannot be committed portably). See tests/CMakeLists.txt.
+manifests/compile_commands.json
