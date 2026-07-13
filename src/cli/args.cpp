@@ -1320,15 +1320,6 @@ std::optional<std::string> opt_value(const ParseState &st, const char *name) {
   return it->second;
 }
 
-// Every value of an append-action option (`--add`, `--include`), in order.
-std::vector<std::string> opt_values(const ParseState &st, const char *name) {
-  auto it = st.multi.find(name);
-  if (it == st.multi.end()) {
-    return {};
-  }
-  return it->second;
-}
-
 int int_value(const ParseState &st, const char *name, int def) {
   auto it = st.values.find(name);
   if (it == st.values.end()) {
