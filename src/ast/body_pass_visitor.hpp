@@ -1,7 +1,6 @@
 // Body-pass driver (B2): finds each function-like DEFINITION in the target
-// file, creates its per-backend `definition` row, runs the BodyWalker over its
-// body, then snapshots the just-emitted calls/uses into def_edge — the
-// LibTooling analogue of ast_edges.cpp's second for_file_cursors walk.
+// file, creates its per-backend `definition` row, runs the BodyVisitor over
+// its body, then snapshots the just-emitted calls/uses into def_edge.
 #pragma once
 
 #include "clang/AST/RecursiveASTVisitor.h"
