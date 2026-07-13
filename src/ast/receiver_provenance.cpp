@@ -1,7 +1,7 @@
 #include "ast/receiver_provenance.hpp"
 
 #include "ast/usr.hpp"
-#include "ast/value_source.hpp"
+#include "ast/value_provenance.hpp"
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
@@ -21,15 +21,16 @@ ReceiverProvenance classify_call_receiver(const clang::ASTContext &context,
 
   const clang::Expr *recv_expr = nullptr;
   if (const auto *mc = llvm::dyn_cast<clang::CXXMemberCallExpr>(site)) {
-    const auto *me =
-        llvm::dyn_cast_or_null<clang::MemberExpr>(peel_expr(mc->getCallee()));
+    // The receiver is the member callee's base (implicit-object argument).
+    const auto *me = llvm::dyn_cast_or_null<clang::MemberExpr>(
+        normalize_value_expr(mc->getCallee()));
     if (me != nullptr && !me->isImplicitAccess())
-      recv_expr = me->getBase();
+      recv_expr = mc->getImplicitObjectArgument();
   } else if (const auto *anycall = llvm::dyn_cast<clang::CallExpr>(site)) {
     // Recovered dependent member calls (cache.get<std::string>(...)): the
     // callee is a CXXDependentScopeMemberExpr / UnresolvedMemberExpr whose base
-    // is the receiver (libclang MEMBER_REF_EXPR first child).
-    const clang::Expr *callee_expr = peel_expr(anycall->getCallee());
+    // is the receiver.
+    const clang::Expr *callee_expr = normalize_value_expr(anycall->getCallee());
     if (const auto *dep = llvm::dyn_cast_or_null<
             clang::CXXDependentScopeMemberExpr>(callee_expr)) {
       if (!dep->isImplicitAccess())
@@ -48,17 +49,10 @@ ReceiverProvenance classify_call_receiver(const clang::ASTContext &context,
     recv.decl_usr = rv.decl_usr;
     if (recv.src_kind == "local" && !recv.decl_usr.empty()) {
       if (const auto *dre = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
-              peel_expr(recv_expr))) {
+              normalize_value_expr(recv_expr))) {
         if (const auto *parm =
-                llvm::dyn_cast<clang::ParmVarDecl>(dre->getDecl())) {
-          // The cursor API's param iteration returns -1 on FUNCTION_TEMPLATE
-          // parents, so cidx never resolves the position there.
-          const auto *pfn = llvm::dyn_cast_or_null<clang::FunctionDecl>(
-              llvm::dyn_cast_or_null<clang::Decl>(parm->getDeclContext()));
-          if (pfn != nullptr && pfn->getDescribedFunctionTemplate() == nullptr)
-            recv.param_pos =
-                static_cast<int64_t>(parm->getFunctionScopeIndex());
-        }
+                llvm::dyn_cast<clang::ParmVarDecl>(dre->getDecl()))
+          recv.param_pos = static_cast<int64_t>(parm->getFunctionScopeIndex());
       }
     }
     if (recv.src_kind == "member" || recv.src_kind == "global" ||
@@ -69,7 +63,8 @@ ReceiverProvenance classify_call_receiver(const clang::ASTContext &context,
           dispatch_usr = usr_for_decl(owner);
       }
       recv.type_is_value =
-          type_is_value(decl_type_for_expr(peel_expr(recv_expr)), dispatch_usr)
+          type_is_value(decl_type_for_expr(normalize_value_expr(recv_expr)),
+                        dispatch_usr)
               ? 1
               : 0;
     }

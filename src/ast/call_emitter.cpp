@@ -9,7 +9,7 @@
 #include "ast/names.hpp"
 #include "ast/receiver_provenance.hpp"
 #include "ast/usr.hpp"
-#include "ast/value_source.hpp"
+#include "ast/value_provenance.hpp"
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
@@ -118,10 +118,9 @@ void CallEmitter::emit_call_args(const clang::Expr *site,
     if (arg == nullptr)
       continue;
     // A defaulted argument (e.g. std::string's allocator on libstdc++) counts
-    // in the argument list and the reference emits a call_arg for it;
-    // peel_expr does not descend into CXXDefaultArgExpr, so it classifies
-    // "unknown" — matching the reference. (On libc++ the same call takes no
-    // such arg.)
+    // in the argument list; its value comes from the callee's default, not
+    // caller source, so CXXDefaultArgExpr classifies "unknown". (On libc++
+    // the same call takes no such arg.)
     const ValueSource vs = classify_value_source(ctx_.context(), arg);
     if (vs.src_kind == "literal")
       continue;
@@ -142,8 +141,10 @@ void CallEmitter::emit_call_args(const clang::Expr *site,
          vs.src_kind == "call_result" || vs.src_kind == "local") &&
         !vs.type_usr.empty()) {
       ca.type_is_value =
-          type_is_value(decl_type_for_expr(peel_expr(arg)), vs.type_usr) ? 1
-                                                                         : 0;
+          type_is_value(decl_type_for_expr(normalize_value_expr(arg)),
+                        vs.type_usr)
+              ? 1
+              : 0;
     }
     ctx_.sink().add_call_arg(ca);
   }

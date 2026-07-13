@@ -1,4 +1,4 @@
-#include "ast/value_source.hpp"
+#include "ast/value_provenance.hpp"
 
 #include "ast/usr.hpp"
 
@@ -12,27 +12,6 @@ namespace cidx::lt {
 
 namespace {
 
-// libclang's UNEXPOSED_EXPR wraps implicit casts and the invisible C++
-// temporary plumbing; peel those the way clang_visitChildren steps through
-// them (first child).
-const clang::Expr *unwrap_once(const clang::Expr *e) {
-  if (const auto *pe = llvm::dyn_cast<clang::ParenExpr>(e))
-    return pe->getSubExpr();
-  if (const auto *uo = llvm::dyn_cast<clang::UnaryOperator>(e))
-    return uo->getSubExpr();
-  if (const auto *cc = llvm::dyn_cast<clang::CStyleCastExpr>(e))
-    return cc->getSubExpr();
-  if (const auto *ic = llvm::dyn_cast<clang::ImplicitCastExpr>(e))
-    return ic->getSubExpr();
-  if (const auto *ec = llvm::dyn_cast<clang::ExprWithCleanups>(e))
-    return ec->getSubExpr();
-  if (const auto *mt = llvm::dyn_cast<clang::MaterializeTemporaryExpr>(e))
-    return mt->getSubExpr();
-  if (const auto *bt = llvm::dyn_cast<clang::CXXBindTemporaryExpr>(e))
-    return bt->getSubExpr();
-  return nullptr;
-}
-
 const clang::FunctionDecl *callee_of(const clang::Expr *e) {
   if (const auto *call = llvm::dyn_cast<clang::CallExpr>(e)) {
     const clang::Decl *callee = call->getCalleeDecl();
@@ -45,26 +24,52 @@ const clang::FunctionDecl *callee_of(const clang::Expr *e) {
 
 } // namespace
 
-const clang::Expr *peel_expr(const clang::Expr *expr) {
-  for (int i = 0; i < 16 && expr != nullptr; ++i) {
-    const clang::Expr *inner = unwrap_once(expr);
-    if (inner == nullptr)
-      break;
-    expr = inner;
+const clang::Expr *normalize_value_expr(const clang::Expr *expr) {
+  const clang::Expr *e = expr;
+  while (e != nullptr) {
+    // Parentheses and implicit casts carry no provenance of their own.
+    const clang::Expr *stripped = e->IgnoreParenImpCasts();
+    // Invisible C++ temporary plumbing.
+    if (const auto *ec = llvm::dyn_cast<clang::ExprWithCleanups>(stripped)) {
+      e = ec->getSubExpr();
+      continue;
+    }
+    if (const auto *mt =
+            llvm::dyn_cast<clang::MaterializeTemporaryExpr>(stripped)) {
+      e = mt->getSubExpr();
+      continue;
+    }
+    if (const auto *bt =
+            llvm::dyn_cast<clang::CXXBindTemporaryExpr>(stripped)) {
+      e = bt->getSubExpr();
+      continue;
+    }
+    // A C-style cast of a value still denotes the operand's storage.
+    if (const auto *cc = llvm::dyn_cast<clang::CStyleCastExpr>(stripped)) {
+      e = cc->getSubExpr();
+      continue;
+    }
+    // Explicitly handled unary operators: &x and *p preserve the operand's
+    // provenance. Every other unary operator produces a derived value and
+    // stays visible (the classifier answers 'unknown').
+    if (const auto *uo = llvm::dyn_cast<clang::UnaryOperator>(stripped)) {
+      if (uo->getOpcode() == clang::UO_AddrOf ||
+          uo->getOpcode() == clang::UO_Deref) {
+        e = uo->getSubExpr();
+        continue;
+      }
+    }
+    return stripped;
   }
-  return expr;
+  return e;
 }
 
 std::string record_usr_of_type(clang::QualType type) {
   if (type.isNull())
     return {};
   clang::QualType canonical = type.getCanonicalType();
-  for (int i = 0; i < 8; ++i) {
-    if (canonical->isPointerType() || canonical->isReferenceType())
-      canonical = canonical->getPointeeType().getCanonicalType();
-    else
-      break;
-  }
+  while (canonical->isPointerType() || canonical->isReferenceType())
+    canonical = canonical->getPointeeType().getCanonicalType();
   const clang::TagDecl *decl = canonical->getAsTagDecl();
   if (decl == nullptr)
     return {};
@@ -84,21 +89,21 @@ bool type_is_value(clang::QualType loc_type,
   return usr_for_decl(decl) == dispatch_record_usr;
 }
 
-clang::QualType decl_type_for_expr(const clang::Expr *peeled) {
-  if (peeled == nullptr)
+clang::QualType decl_type_for_expr(const clang::Expr *normalized) {
+  if (normalized == nullptr)
     return {};
-  if (const auto *dre = llvm::dyn_cast<clang::DeclRefExpr>(peeled))
+  if (const auto *dre = llvm::dyn_cast<clang::DeclRefExpr>(normalized))
     return dre->getDecl()->getType();
-  if (const auto *me = llvm::dyn_cast<clang::MemberExpr>(peeled))
+  if (const auto *me = llvm::dyn_cast<clang::MemberExpr>(normalized))
     return me->getMemberDecl()->getType();
-  if (const clang::FunctionDecl *fd = callee_of(peeled))
+  if (const clang::FunctionDecl *fd = callee_of(normalized))
     return fd->getReturnType();
-  return peeled->getType();
+  return normalized->getType();
 }
 
 ValueSource classify_value_source(const clang::ASTContext & /*context*/,
                                   const clang::Expr *expr) {
-  const clang::Expr *peeled = peel_expr(expr);
+  const clang::Expr *peeled = normalize_value_expr(expr);
   if (peeled == nullptr)
     return {"unknown", "", "", ""};
 
@@ -114,17 +119,13 @@ ValueSource classify_value_source(const clang::ASTContext & /*context*/,
     if (llvm::isa<clang::ParmVarDecl>(ref))
       return {"local", type_usr, decl_usr, ""};
     if (const auto *var = llvm::dyn_cast<clang::VarDecl>(ref)) {
-      // The cursor-kind check (FunctionDecl/CXXMethod/Ctor/Dtor/Lambda) does
-      // NOT include FUNCTION_TEMPLATE: a local inside a function-template
-      // pattern classifies as 'global' (bug-compatible with the reference).
-      const clang::DeclContext *dc = var->getDeclContext();
-      bool local_ctx = false;
-      if (dc != nullptr) {
-        if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(dc))
-          local_ctx = fn->getDescribedFunctionTemplate() == nullptr;
-        else if (const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(dc))
-          local_ctx = rec->isLambda();
-      }
+      // Local variables — including static locals and locals inside
+      // function/method-template patterns — plus lambda captures (whose
+      // declaration context is the closure record).
+      const auto *rec =
+          llvm::dyn_cast_or_null<clang::CXXRecordDecl>(var->getDeclContext());
+      const bool local_ctx =
+          var->isLocalVarDecl() || (rec != nullptr && rec->isLambda());
       if (local_ctx)
         return {"local", type_usr, decl_usr, ""};
       return {"global", type_usr, decl_usr, ""};
@@ -138,10 +139,9 @@ ValueSource classify_value_source(const clang::ASTContext & /*context*/,
     return {"member", type_usr, decl_usr, ""};
   }
 
-  // Single-arg functional cast `std::string("x")` is CURSOR kind 128 whose
-  // libclang reference is null -> call_result with no callee. Temporary-object
-  // syntax `Widget(7)` / construct exprs are CALL_EXPR cursors referencing the
-  // ctor -> construct.
+  // Single-arg functional cast `std::string("x")` is a converted value ->
+  // call_result with no callee. Temporary-object syntax `Widget(7)` /
+  // construct exprs -> construct.
   if (llvm::isa<clang::CXXFunctionalCastExpr>(peeled)) {
     const std::string type_usr = record_usr_of_type(peeled->getType());
     return {"call_result", type_usr, "", ""};
@@ -165,7 +165,7 @@ ValueSource classify_value_source(const clang::ASTContext & /*context*/,
   }
 
   // Dependent construct in a template pattern (any(value) materialized for
-  // `store_[key] = value`): libclang shows a CALL_EXPR with a null reference.
+  // `store_[key] = value`): a call-shaped value with no resolvable callee.
   if (const auto *uc =
           llvm::dyn_cast<clang::CXXUnresolvedConstructExpr>(peeled)) {
     const std::string type_usr = record_usr_of_type(uc->getTypeAsWritten());

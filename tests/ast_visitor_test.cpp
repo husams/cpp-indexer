@@ -262,26 +262,23 @@ TEST_SUITE("clang") {
     CHECK(addr.has_decl_usr);
   }
 
-  // ---- provenance: corrections (target behavior; fail until Phase 2) -------
+  // ---- provenance: corrections landed in Phase 2 ---------------------------
 
-  TEST_CASE("correction: function-template local is 'local'" *
-            doctest::should_fail()) {
+  TEST_CASE("correction: function-template local is 'local'") {
     const IndexedTu tu(kProvenanceTu);
     const ArgProbe p = probe_arg0(tu.db_path(), "ftlocal", "sink");
     CHECK(p.src_kind == "local");
     CHECK(p.has_decl_usr);
   }
 
-  TEST_CASE("correction: method-template local is 'local'" *
-            doctest::should_fail()) {
+  TEST_CASE("correction: method-template local is 'local'") {
     const IndexedTu tu(kProvenanceTu);
     const ArgProbe p = probe_arg0(tu.db_path(), "mtlocal", "sink");
     CHECK(p.src_kind == "local");
     CHECK(p.has_decl_usr);
   }
 
-  TEST_CASE("correction: receiver param_pos resolves in function templates" *
-            doctest::should_fail()) {
+  TEST_CASE("correction: receiver param_pos resolves in function templates") {
     const IndexedTu tu(kProvenanceTu);
     CHECK(query_col(tu.db_path(),
                     "SELECT COALESCE(es.recv_param_pos, '<null>') "
@@ -294,8 +291,7 @@ TEST_SUITE("clang") {
           std::vector<std::string>{"0"});
   }
 
-  TEST_CASE("correction: !x and -x are derived values, not the operand" *
-            doctest::should_fail()) {
+  TEST_CASE("correction: !x and -x are derived values, not the operand") {
     const IndexedTu tu(kProvenanceTu);
     const ArgProbe negp = probe_arg0(tu.db_path(), "unary", "neg");
     CHECK(negp.src_kind == "unknown");

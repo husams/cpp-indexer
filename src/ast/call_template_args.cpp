@@ -6,7 +6,7 @@
 #include "ast/llvm_compat.hpp"
 #include "ast/template_arg_resolver.hpp"
 #include "ast/usr.hpp"
-#include "ast/value_source.hpp"
+#include "ast/value_provenance.hpp"
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
@@ -128,7 +128,7 @@ void emit_callable_template_args(clang::ASTContext &context, EdgeSink &sink,
         sink.update_display_name(dst_id, *rewritten);
     }
   } else if (const auto *call = llvm::dyn_cast<clang::CallExpr>(site)) {
-    const clang::Expr *callee_expr = peel_expr(call->getCallee());
+    const clang::Expr *callee_expr = normalize_value_expr(call->getCallee());
     if (const auto *me =
             llvm::dyn_cast_or_null<clang::MemberExpr>(callee_expr)) {
       if (me->hasExplicitTemplateArgs()) {

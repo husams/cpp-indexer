@@ -167,7 +167,7 @@ add_library(cidx_lt OBJECT
   src/ast/storage_symbol_sink.cpp src/ast/mint_builder.cpp
   src/ast/template_arg_resolver.cpp src/ast/storage_edge_sink.cpp
   src/ast/edge_visitor.cpp src/ast/type_use.cpp
-  src/ast/value_source.cpp src/ast/instance_minter.cpp
+  src/ast/value_provenance.cpp src/ast/instance_minter.cpp
   src/ast/body_emit_context.cpp src/ast/call_emitter.cpp
   src/ast/body_visitor.cpp src/ast/body_pass_visitor.cpp
   src/ast/call_template_args.cpp src/ast/display_name_rewrite.cpp
@@ -402,7 +402,7 @@ if(CIDX_CLANGX_LIBTOOLING)
     src/ast/storage_edge_sink.cpp
     src/ast/edge_visitor.cpp
     src/ast/type_use.cpp
-    src/ast/value_source.cpp
+    src/ast/value_provenance.cpp
     src/ast/instance_minter.cpp
     src/ast/body_emit_context.cpp
     src/ast/call_emitter.cpp

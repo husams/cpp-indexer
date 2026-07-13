@@ -6,7 +6,7 @@
 #include "ast/names.hpp"
 #include "ast/type_use.hpp"
 #include "ast/usr.hpp"
-#include "ast/value_source.hpp"
+#include "ast/value_provenance.hpp"
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
@@ -42,7 +42,7 @@ const clang::OverloadExpr *callee_overload_expr(const clang::CallExpr *call) {
   const clang::Expr *callee = call->getCallee();
   if (callee == nullptr)
     return nullptr;
-  callee = peel_expr(callee);
+  callee = normalize_value_expr(callee);
   return llvm::dyn_cast_or_null<clang::OverloadExpr>(callee);
 }
 
