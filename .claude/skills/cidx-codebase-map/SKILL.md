@@ -14,7 +14,9 @@ Quick index:
 - **Storage / schema / migrations** → `python/indexer/storage.py`, `src/storage/`
 - **CLI / formatting / JSON** → `python/indexer/cli.py`, `src/cli/`
 - **Graph queries** → `python/indexer/query.py`, `python/indexer/entity_graph.py`, `src/graph/`
-- **libclang / compilation DBs** → `python/indexer/clang/`, `python/indexer/compiledb.py`, `src/clangx/`, `src/compiledb/`
-- **AST cache** → `python/indexer/astcache.py`, `python/indexer/astcmd.py`, `src/astcache/`, `src/astgraph/`
+- **Indexing engine (C++ only)** → `src/ast/` (Clang C++ API visitors), `src/toolchain/` (driver introspection)
+- **Compilation DBs** → `python/indexer/compiledb.py`, `src/compiledb/`
+- **AST graph tool** → `src/astgraph/` (`cidx-astgraph` + Souffle)
+- **Legacy (pending removal, do not extend)** → `python/indexer/clang/` (libclang indexer), `python/indexer/astcache.py`
 - **Tests / fixtures** → `python/tests/`, `tests/`, `manifests/`
 - **Design history** → `docs/adr/`, `python/docs/`, `spec/`

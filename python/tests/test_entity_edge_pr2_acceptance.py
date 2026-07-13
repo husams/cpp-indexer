@@ -26,7 +26,7 @@ Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
   version-3     C++ kSchemaVersion == 29
   rollup-1      resolve_pass() calls materialize_entity_edges()
   rollup-2      entity_rollup.py module exists
-  parity-1      parity_check.sh includes at least one entity_edge CLI command
+  parity-1      RETIRED (parity_check.sh removed with the byte-parity gate)
 """
 
 from __future__ import annotations
@@ -53,7 +53,6 @@ _STORAGE_HPP = os.path.join(_WORKTREE, "src", "storage", "storage.hpp")
 _STORAGE_CPP = os.path.join(_WORKTREE, "src", "storage", "storage.cpp")
 _PIPELINE_HPP = os.path.join(_WORKTREE, "manifests", "graphlab", "pipeline.hpp")
 _PIPELINE_CPP = os.path.join(_WORKTREE, "manifests", "graphlab", "pipeline.cpp")
-_PARITY_SH = os.path.join(_WORKTREE, "scripts", "parity_check.sh")
 _ENTITY_ROLLUP_PY = os.path.join(_WORKTREE, "python", "indexer", "entity_rollup.py")
 
 
@@ -376,20 +375,8 @@ def test_entity_rollup_module_exists():
 
 
 # ---------------------------------------------------------------------------
-# scenario-id: parity-1  — parity_check.sh covers entity_edge
-# ---------------------------------------------------------------------------
-
-
-def test_parity_check_covers_entity_edge():
-    """parity_check.sh must include at least one entity_edge CLI invocation."""
-    parity_src = _read(_PARITY_SH)
-    assert "entity" in parity_src or "entity_edge" in parity_src, (
-        "parity_check.sh does not cover entity_edge. "
-        "P2-T11: add `cidx entity` (or equivalent) command(s) to parity_check.sh "
-        "so the DB-dump diff locks entity_edge INSERT rows."
-    )
-
-
+# scenario-id: parity-1 — RETIRED with scripts/parity_check.sh (the byte-parity
+# gate was replaced by the normalized-row-set index golden gate).
 # ---------------------------------------------------------------------------
 # Live DB tests — open a fresh Storage and verify the schema is applied.
 # These test that migration + seed work correctly.

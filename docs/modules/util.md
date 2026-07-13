@@ -21,7 +21,7 @@ the [overview](../overview.md#design-invariants)). ~1.7k LOC.
 
 ## Notable consumers
 
-- `subprocess` + `env` power [`clangx/toolchain`](clangx.md)'s driver
+- `subprocess` + `env` power [`toolchain/`](toolchain.md)'s driver
   introspection (`<driver> -E -v`).
 - `hashing` + `files` drive the incremental-index skip decision (see the
   [per-file interleave](../data-flow.md#the-per-file-interleave)).

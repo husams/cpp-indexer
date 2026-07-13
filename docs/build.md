@@ -1,14 +1,15 @@
 # Build & Platforms
 
-[← docs index](README.md) · related: [indexing engines](indexing-engines.md)
+[← docs index](README.md) · related: [ast module](modules/ast.md)
 
 ## Toolchain
 
 - **CMake, C++23.** Build hosts: macOS AppleClang 15+ / Linux gcc 13+
   (gcc-toolset-13 on RHEL 9). SQLite **≥ 3.35** required (for `RETURNING`).
-- **libclang headers** come from the *installed* LLVM (a `find_path` for
-  `clang-c/Index.h`), from the same prefix as the linked `libclang` — no
-  vendored headers.
+- **LLVM/Clang dev install** — the engine links the Clang C++ API
+  (`clang-cpp` + shared `libLLVM`). CMake auto-discovers it via
+  `llvm-config --cmakedir`; pass `-DLLVM_DIR=…/lib/cmake/llvm
+  -DClang_DIR=…/lib/cmake/clang` when that probe fails.
 
 ## macOS
 
@@ -18,8 +19,7 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH="$(brew --prefix llvm)" -DCMAKE_BUILD_TY
 cmake --build build -j
 ```
 
-The Homebrew keg-only LLVM is auto-detected for both the libclang library and
-the LibTooling engine's `clang-cpp`/`libLLVM`.
+The Homebrew keg-only LLVM is auto-detected for `clang-cpp`/`libLLVM`.
 
 ## RHEL 9 / Rocky 9
 
@@ -38,11 +38,11 @@ The script:
 
 Runtime needs `clang-libs` + `llvm-libs`.
 
-## The LibTooling engine's link model
+## The Clang C++ API link model
 
 `cidx_core` links the shared Clang C++ API (`clang-cpp` + `libLLVM`). The
-[`clangx_lt`](modules/clangx_lt.md) sources compile in a `cidx_lt` **OBJECT
-library** with:
+[`src/ast`](modules/ast.md) sources compile in a `cidx_ast` **OBJECT library**
+with:
 
 - **`-isystem`** LLVM/Clang headers — a plain `-I` breaks gcc's
   `#include_next <stdlib.h>` in `<cstdlib>`;
@@ -56,18 +56,16 @@ on base RHEL 9 via the system `libstdc++.so.6` + nonshared static bits.
 ## Version portability (LLVM 21 vs 22)
 
 The C++ API is not source-stable across majors. Divergences are localized in
-`src/clangx_lt/llvm_compat.hpp` and a few `#if LLVM_VERSION_MAJOR >= 22` guards
-(NestedNameSpecifier, `VisitTypeLoc` qualifier, `ElaboratedTypeLoc` peeling,
-`APSInt` formatting). The libclang engine is unaffected (the C API is stable).
+`src/ast/clang_compat.hpp` and a few `#if LLVM_VERSION_MAJOR >= 22` guards
+(NestedNameSpecifier, `TypeLoc` qualifier handling, `APSInt` formatting).
+Validated on macOS (LLVM 22) and RHEL 9 (LLVM 21).
 
-## Verification scripts
+## Verification
 
-| Script | Checks |
+| Gate | Checks |
 |---|---|
-| `scripts/lt_symbol_diff.sh` | symbol-pass parity (LT vs libclang) |
-| `scripts/lt_index_diff.sh` | full-database dual-engine parity (all 7 Layer-0 tables) |
-| `scripts/e2e_lt_gcc_driver.sh` | GCC-driver replication (`-nostdinc++`) + dual-engine parity |
-| `ctest` | the unit/integration suite |
-
-Verified byte-identical on macOS (LLVM 22) and RHEL 9.8 / Rocky (LLVM 21),
-including base g++ 11.5 and gcc-toolset-13 as compile-command drivers.
+| `ctest --test-dir build -L default` | hermetic unit/integration suite |
+| `ctest --test-dir build -L clang` | real-parse suites incl. the index golden gate and the focused visitor fixtures |
+| `scripts/check_ast_complexity.sh` | the scoped clang-tidy complexity gate for `src/ast` |
+| `scripts/dump_layer0.sh <db>` | normalized Layer-0 projection for reviewing semantic deltas |
+| `pytest python/tests` | the Python storage/read-query suite |

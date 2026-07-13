@@ -33,7 +33,7 @@ task:
 - Report exactly which checks ran and which were skipped. Never claim parity
   from only one language's tests.
 - **Baseline before you build.** Run the relevant test gates (default, and
-  `clang`/parity as the change warrants) and record their green/red state
+  `clang` as the change warrants) and record their green/red state
   **before** starting work on any feature or fix. Do not begin coding until the
   starting state is known; if the baseline is already red, surface it and
   investigate first.

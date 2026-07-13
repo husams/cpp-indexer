@@ -27,7 +27,7 @@ is a row of `edge(src, dst, rel, ord)`. No NULLs (0/'' sentinels). `RelKind`
 
 `main.cpp` reads the source file's compile args + driver from the cidx `index.db`
 `file` row (`main.cpp:201`), re-runs [`sanitize` + `resolve_options`](compiledb.md)
-(`main.cpp:209`), parses through the same [`Toolchain`/`Parser`](clangx.md)
+(`main.cpp:209`), parses through the same [`Toolchain`/`Parser`](ast.md)
 (`main.cpp:215`), then `dump_tu` (`main.cpp:231`). Its `analyze --rule callgraph`
 subcommand runs an embedded native Souffle rule (`souffle_runner.hpp:27`) over
 that per-TU artifact and emits JSON.

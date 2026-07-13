@@ -1,4 +1,4 @@
-# Data Model (schema 28)
+# Data Model (schema 29)
 
 [← docs index](README.md)
 
@@ -78,7 +78,7 @@ erDiagram
 
 | Table | Purpose |
 |---|---|
-| `meta` | key/value; holds `schema_version` (28) and `graph_resolved_at` |
+| `meta` | key/value; holds `schema_version` (29) and `graph_resolved_at` |
 | `repository`, `clone` | group components; track git clones / active clone |
 | `component` | a source root (repo/dir): name, path, kind, version |
 | `directory` | a directory under a component |
@@ -129,8 +129,8 @@ erDiagram
 ## The three graph layers
 
 1. **Layer-0** — what the AST literally contains (symbols + edges). Written by
-   [`clangx`](modules/clangx.md) or [`clangx_lt`](modules/clangx_lt.md); the two
-   engines must agree byte-for-byte here.
+   the [`ast`](modules/ast.md) engine; the contract is the normalized row
+   set (see [record ordering](modules/ast.md#record-ordering)).
 2. **Definition layer** — `definition` / `def_edge` capture per-body call/use
    sets so a symbol defined differently across TUs keeps each body's edges.
 3. **Layer-1** — the *design* graph (`entity_node`/`entity_edge`) plus the

@@ -48,14 +48,14 @@ grammar branches; `kVersion = "0.53.0"`). Throws `UsageError` (exit 2) on misuse
 | listings | `cmd_list_components/dirs/files/symbols` `:865/:908/:931/:1002` | tabular listings |
 | show / delete | `cmd_show_*`, `cmd_delete_*` `:1031…:1363` | detail dumps / deletions |
 | `pch` | `cmd_pch_build/status/clear` `:1436/:1560/:1565` | system PCH lifecycle |
-| `ast` | `cmd_ast_dump/locals/conditions` `:2063/:2151/:2226`, `cmd_ast_cache` `:2424` | on-demand AST (see [astcache](astcache.md)) |
+| `ast` | `cmd_ast_dump/locals/conditions` `:2063/:2151/:2226`, `cmd_ast_cache` `:2424` | on-demand AST (retired with the libclang cutover) |
 | `graph` | `cmd_graph_callers/callees/refs/neighbors/walk/path/hierarchy/dispatch` `:2865…:3061`, `redefined/definitions` `:3088/:3099` | graph queries (see [graph](graph.md)) |
 | `repo` / `component` | `cmd_repo_*` `:3212…:3349`, `cmd_component_show/set_version` `:3148/:3173` | repo/component management |
 | `db verify` | `cmd_verify` `:3374` | check component roots + files exist |
 | `analyze` | `cmd_analyze` (analyze.cpp) | Souffle Datalog (below) |
 
 `index_one` is the seam where **the engine is selected**
-(`CIDX_INDEX_ENGINE=lt`) — see [indexing engines](../indexing-engines.md).
+— see [ast](ast.md).
 
 ## Output formatting
 
