@@ -2,8 +2,8 @@
 # build-rhel9.sh — install dependencies (incl. a static SQLite) and build cidx on
 # RHEL 9.x / AlmaLinux 9 / Rocky 9. Run it from anywhere; it locates the repo.
 #
-#   ./scripts/build-rhel9.sh              # deps (+ package update) then build
-#   DEPS_ONLY=1 ./scripts/build-rhel9.sh  # install/update dependencies, no build
+#   ./scripts/build-rhel9.sh              # install deps, then build
+#   DEPS_ONLY=1 ./scripts/build-rhel9.sh  # install dependencies, no build
 #
 # Produces: <repo>/build-static/cidx — SQLite3 linked STATICALLY (CIDX_STATIC =
 # static SQLite only); the Clang C++ API (libclang-cpp + libLLVM, used by the
@@ -28,8 +28,7 @@
 #   BUILD_DIR               cmake build dir (default <repo>/build-static).
 #   JOBS                    parallel build jobs (default: nproc).
 #   SKIP_DEPS=1             skip dnf installs (deps already present).
-#   DEPS_ONLY=1             install/update dependencies, then exit (no build).
-#   SKIP_UPDATE=1           do not attempt `dnf upgrade` in the deps step.
+#   DEPS_ONLY=1             install dependencies, then exit (no build).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,16 +63,10 @@ if [ "${SKIP_DEPS:-0}" != "1" ]; then
     "gcc-toolset-${GCC_TOOLSET}" "gcc-toolset-${GCC_TOOLSET}-libstdc++-devel" \
     cmake make git tar xz unzip which \
     clang-devel llvm-devel clang-libs llvm-libs
-  # Try to update installed packages to the latest (non-fatal — an offline or
-  # pinned host still builds with what it has).
-  if [ "${SKIP_UPDATE:-0}" != "1" ]; then
-    echo "==> updating packages (dnf upgrade)"
-    $SUDO dnf -y upgrade || echo "   (dnf upgrade skipped/failed — continuing)"
-  fi
 fi
 
 if [ "${DEPS_ONLY:-0}" = "1" ]; then
-  echo "==> DEPS_ONLY: dependencies installed/updated; skipping build"
+  echo "==> DEPS_ONLY: dependencies installed; skipping build"
   exit 0
 fi
 

@@ -30,8 +30,7 @@ the LibTooling engine's `clang-cpp`/`libLLVM`.
 The script:
 
 - installs deps (`gcc-toolset-13`, `cmake`, `clang-devel`, `llvm-devel`,
-  `clang-libs`, `llvm-libs`); `DEPS_ONLY=1` stops after deps; `dnf upgrade`
-  runs unless `SKIP_UPDATE=1`;
+  `clang-libs`, `llvm-libs`); `DEPS_ONLY=1` stops after deps;
 - builds a **static SQLite** from the amalgamation (RHEL ships 3.34.1, below the
   3.35 floor);
 - configures with `LLVM_DIR`/`Clang_DIR` from `llvm-config --cmakedir` so
