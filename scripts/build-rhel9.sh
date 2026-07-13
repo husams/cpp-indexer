@@ -48,7 +48,6 @@ SUDO=""
 # --- dependencies ------------------------------------------------------------
 if [ "${SKIP_DEPS:-0}" != "1" ]; then
   echo "==> installing build dependencies (dnf)"
-  $SUDO dnf -y install dnf-plugins-core
   # CRB / CodeReady Builder (some deps live there). Repo id differs by distro;
   # try each, never fail the run if it cannot be toggled.
   $SUDO dnf config-manager --set-enabled crb 2>/dev/null \
