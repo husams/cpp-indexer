@@ -161,18 +161,18 @@ endif()
 find_package(LLVM REQUIRED CONFIG)
 find_package(Clang REQUIRED CONFIG)
 add_library(cidx_lt OBJECT
-  src/clangx_lt/kind_map.cpp src/clangx_lt/usr.cpp src/clangx_lt/location.cpp
-  src/clangx_lt/names.cpp src/clangx_lt/decl_flags.cpp
-  src/clangx_lt/symbol_extractor.cpp src/clangx_lt/symbol_visitor.cpp
-  src/clangx_lt/storage_symbol_sink.cpp src/clangx_lt/mint_builder.cpp
-  src/clangx_lt/template_arg_resolver.cpp src/clangx_lt/storage_edge_sink.cpp
-  src/clangx_lt/edge_visitor.cpp src/clangx_lt/type_use.cpp
-  src/clangx_lt/value_source.cpp src/clangx_lt/instance_minter.cpp
-  src/clangx_lt/body_walker.cpp src/clangx_lt/body_pass_visitor.cpp
-  src/clangx_lt/call_template_args.cpp src/clangx_lt/display_name_rewrite.cpp
-  src/clangx_lt/receiver_provenance.cpp src/clangx_lt/instantiation_edges.cpp
-  src/clangx_lt/ns_uses_visitor.cpp src/clangx_lt/lt_engine.cpp
-  src/clangx_lt/clang_version.cpp)
+  src/ast/kind_map.cpp src/ast/usr.cpp src/ast/location.cpp
+  src/ast/names.cpp src/ast/decl_flags.cpp
+  src/ast/symbol_extractor.cpp src/ast/symbol_visitor.cpp
+  src/ast/storage_symbol_sink.cpp src/ast/mint_builder.cpp
+  src/ast/template_arg_resolver.cpp src/ast/storage_edge_sink.cpp
+  src/ast/edge_visitor.cpp src/ast/type_use.cpp
+  src/ast/value_source.cpp src/ast/instance_minter.cpp
+  src/ast/body_walker.cpp src/ast/body_pass_visitor.cpp
+  src/ast/call_template_args.cpp src/ast/display_name_rewrite.cpp
+  src/ast/receiver_provenance.cpp src/ast/instantiation_edges.cpp
+  src/ast/ns_uses_visitor.cpp src/ast/lt_engine.cpp
+  src/ast/clang_version.cpp)
 target_include_directories(cidx_lt PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 target_include_directories(cidx_lt SYSTEM PRIVATE
@@ -359,17 +359,17 @@ if(CIDX_CLANGX_LIBTOOLING)
   find_package(Clang REQUIRED CONFIG)
   message(STATUS "cidx[lt]: LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
   add_executable(cidx_lt_probe
-    src/clangx_lt/main.cpp
-    src/clangx_lt/kind_map.cpp
-    src/clangx_lt/usr.cpp
-    src/clangx_lt/location.cpp
-    src/clangx_lt/names.cpp
-    src/clangx_lt/decl_flags.cpp
-    src/clangx_lt/symbol_extractor.cpp
-    src/clangx_lt/tsv_symbol_emitter.cpp
-    src/clangx_lt/symbol_visitor.cpp
-    src/clangx_lt/symbol_consumer.cpp
-    src/clangx_lt/symbol_action.cpp
+    src/ast/main.cpp
+    src/ast/kind_map.cpp
+    src/ast/usr.cpp
+    src/ast/location.cpp
+    src/ast/names.cpp
+    src/ast/decl_flags.cpp
+    src/ast/symbol_extractor.cpp
+    src/ast/tsv_symbol_emitter.cpp
+    src/ast/symbol_visitor.cpp
+    src/ast/symbol_consumer.cpp
+    src/ast/symbol_action.cpp
   )
   # Builtin-header resource dir of the LLVM we compile against (gotcha 8b).
   target_compile_definitions(cidx_lt_probe PRIVATE
@@ -386,30 +386,30 @@ if(CIDX_CLANGX_LIBTOOLING)
 
   # Phase-2 gate tool: full interleaved LT indexer (symbols + edges per file).
   add_executable(cidx_lt_index
-    src/clangx_lt/index_main.cpp
-    src/clangx_lt/index_consumer.cpp
-    src/clangx_lt/kind_map.cpp
-    src/clangx_lt/usr.cpp
-    src/clangx_lt/location.cpp
-    src/clangx_lt/names.cpp
-    src/clangx_lt/decl_flags.cpp
-    src/clangx_lt/symbol_extractor.cpp
-    src/clangx_lt/symbol_visitor.cpp
-    src/clangx_lt/storage_symbol_sink.cpp
-    src/clangx_lt/mint_builder.cpp
-    src/clangx_lt/template_arg_resolver.cpp
-    src/clangx_lt/storage_edge_sink.cpp
-    src/clangx_lt/edge_visitor.cpp
-    src/clangx_lt/type_use.cpp
-    src/clangx_lt/value_source.cpp
-    src/clangx_lt/instance_minter.cpp
-    src/clangx_lt/body_walker.cpp
-    src/clangx_lt/body_pass_visitor.cpp
-    src/clangx_lt/call_template_args.cpp
-    src/clangx_lt/display_name_rewrite.cpp
-    src/clangx_lt/receiver_provenance.cpp
-    src/clangx_lt/instantiation_edges.cpp
-    src/clangx_lt/ns_uses_visitor.cpp
+    src/ast/index_main.cpp
+    src/ast/index_consumer.cpp
+    src/ast/kind_map.cpp
+    src/ast/usr.cpp
+    src/ast/location.cpp
+    src/ast/names.cpp
+    src/ast/decl_flags.cpp
+    src/ast/symbol_extractor.cpp
+    src/ast/symbol_visitor.cpp
+    src/ast/storage_symbol_sink.cpp
+    src/ast/mint_builder.cpp
+    src/ast/template_arg_resolver.cpp
+    src/ast/storage_edge_sink.cpp
+    src/ast/edge_visitor.cpp
+    src/ast/type_use.cpp
+    src/ast/value_source.cpp
+    src/ast/instance_minter.cpp
+    src/ast/body_walker.cpp
+    src/ast/body_pass_visitor.cpp
+    src/ast/call_template_args.cpp
+    src/ast/display_name_rewrite.cpp
+    src/ast/receiver_provenance.cpp
+    src/ast/instantiation_edges.cpp
+    src/ast/ns_uses_visitor.cpp
   )
   target_compile_definitions(cidx_lt_index PRIVATE
     "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")

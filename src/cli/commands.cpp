@@ -22,8 +22,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "clangx_lt/clang_version.hpp"
-#include "clangx_lt/lt_engine.hpp"
+#include "ast/clang_version.hpp"
+#include "ast/lt_engine.hpp"
 #include "clangx/toolchain.hpp"
 #include "cli/format.hpp"
 #include "cli/json_out.hpp"

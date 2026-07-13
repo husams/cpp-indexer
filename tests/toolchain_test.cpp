@@ -24,7 +24,7 @@
 
 #include <unistd.h>
 
-#include "clangx_lt/clang_version.hpp"
+#include "ast/clang_version.hpp"
 #include "clangx/toolchain.hpp"
 #include "util/logger.hpp"
 

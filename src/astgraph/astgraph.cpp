@@ -46,7 +46,7 @@
 
 #include "astgraph/schema.hpp"
 #include "clangx/toolchain.hpp"
-#include "clangx_lt/usr.hpp"
+#include "ast/usr.hpp"
 #include "cli/args.hpp" // kVersion (meta.generator provenance)
 #include "storage/sqlite.hpp"
 #include "util/errors.hpp"

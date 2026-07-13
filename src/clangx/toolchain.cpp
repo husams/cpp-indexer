@@ -13,7 +13,7 @@
 #include <regex>
 #include <sstream>
 
-#include "clangx_lt/clang_version.hpp"
+#include "ast/clang_version.hpp"
 #include "util/env.hpp"
 #include "util/pathutil.hpp"
 #include "util/subprocess.hpp"
