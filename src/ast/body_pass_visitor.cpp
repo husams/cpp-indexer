@@ -1,6 +1,6 @@
 #include "ast/body_pass_visitor.hpp"
 
-#include "ast/body_walker.hpp"
+#include "ast/body_visitor.hpp"
 #include "ast/edge_sink.hpp"
 #include "ast/location.hpp"
 #include "ast/usr.hpp"
@@ -48,8 +48,8 @@ bool BodyPassVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
   const int64_t def_id = sink_.get_or_create_definition(
       *fn_sym, file_id_, start.line, start.col, end.line, end.col,
       std::nullopt);
-  BodyWalker walker(context_, sink_, *fn_sym, file_id_);
-  walker.walk(decl);
+  BodyVisitor body(context_, sink_, *fn_sym, file_id_);
+  body.walk(decl);
   sink_.copy_body_edges_to_def_edge(def_id, *fn_sym);
   return true;
 }

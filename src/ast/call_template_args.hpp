@@ -7,7 +7,7 @@
 //     rewrite the callable's display name;
 //   - method specializations fall back to the explicit `<...>` args written at
 //     the call site.
-// Split out of BodyWalker::emit_resolved_call so that call orchestration stays
+// Split out of CallEmitter::emit_resolved_call so that call orchestration stays
 // separate from the argument-record shaping.
 #pragma once
 

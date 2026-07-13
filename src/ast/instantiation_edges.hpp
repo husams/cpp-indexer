@@ -5,7 +5,7 @@
 // emit: caller -> primary template (instantiates, lookup-only), the
 // specialization -> primary promotion, and for instantiated members the owning
 // type's method_of / instantiates / template_arg rows. Split out of
-// BodyWalker::emit_resolved_call so the CALLS-edge path stays readable.
+// CallEmitter::emit_resolved_call so the CALLS-edge path stays readable.
 #pragma once
 
 #include <cstdint>

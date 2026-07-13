@@ -4,7 +4,7 @@
 // value source (this/local/member/global/call_result), the parameter position
 // when the receiver is a parameter, and whether it holds the dispatch type by
 // value. Pure over the AST — emits nothing; the caller writes the fields onto
-// the edge_site record. Split out of BodyWalker::emit_resolved_call.
+// the edge_site record. Split out of CallEmitter::emit_resolved_call.
 #pragma once
 
 #include <cstdint>
