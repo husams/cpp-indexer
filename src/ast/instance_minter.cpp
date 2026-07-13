@@ -13,7 +13,7 @@
 #include "clang/AST/PrettyPrinter.h"
 #include "clang/Basic/SourceManager.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 InstanceMinter::InstanceMinter(const clang::ASTContext &context,
                                EdgeSink &sink, const MintBuilder &mint,
@@ -119,4 +119,4 @@ void InstanceMinter::mint_named_instance(
   mint_instance_from_type(alias->getUnderlyingType());
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

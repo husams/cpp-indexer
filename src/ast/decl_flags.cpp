@@ -5,7 +5,7 @@
 #include "clang/AST/DeclTemplate.h"
 #include "clang/Basic/Linkage.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 bool is_definition(const clang::Decl *decl) {
   // Mirror clang_isCursorDefinition (CIndex.cpp isDeclADefinition): tag,
@@ -77,4 +77,4 @@ std::optional<std::string> access_name(const clang::Decl *decl) {
   return std::nullopt;
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

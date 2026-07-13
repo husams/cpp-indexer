@@ -1,4 +1,4 @@
-#include "ast/ns_uses_visitor.hpp"
+#include "ast/namespace_use_visitor.hpp"
 
 #include "ast/edge_sink.hpp"
 #include "ast/location.hpp"
@@ -11,7 +11,7 @@
 #include "clang/AST/NestedNameSpecifier.h"
 #include "llvm/Config/llvm-config.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 namespace {
 
@@ -28,19 +28,19 @@ bool is_scope_decl(const clang::Decl *d) {
 
 } // namespace
 
-NsUsesVisitor::NsUsesVisitor(clang::ASTContext &context, EdgeSink &sink,
+NamespaceUseVisitor::NamespaceUseVisitor(clang::ASTContext &context, EdgeSink &sink,
                              std::string target_file, int64_t file_id)
     : context_(context), sink_(sink), target_file_(std::move(target_file)),
       file_id_(file_id) {}
 
-bool NsUsesVisitor::in_target_file(const clang::Decl *decl) const {
+bool NamespaceUseVisitor::in_target_file(const clang::Decl *decl) const {
   return expansion_loc(context_, decl->getLocation()).file == target_file_;
 }
 
 // The indexed symbol id a scope-establishing decl contributes to the
 // enclosing-source stack (nullopt when not a scope, unnamed, or unindexed).
 std::optional<int64_t>
-NsUsesVisitor::scope_symbol_id(const clang::Decl *decl) const {
+NamespaceUseVisitor::scope_symbol_id(const clang::Decl *decl) const {
   if (!is_scope_decl(decl))
     return std::nullopt;
   const auto *nd = llvm::dyn_cast<clang::NamedDecl>(decl);
@@ -52,7 +52,7 @@ NsUsesVisitor::scope_symbol_id(const clang::Decl *decl) const {
   return sink_.lookup_symbol_id(usr);
 }
 
-bool NsUsesVisitor::TraverseDecl(clang::Decl *decl) {
+bool NamespaceUseVisitor::TraverseDecl(clang::Decl *decl) {
   if (decl == nullptr)
     return true;
   const std::optional<int64_t> scope_id = scope_symbol_id(decl);
@@ -64,7 +64,7 @@ bool NsUsesVisitor::TraverseDecl(clang::Decl *decl) {
   return result;
 }
 
-void NsUsesVisitor::emit_ns_use(const clang::NamedDecl *ns_decl,
+void NamespaceUseVisitor::emit_ns_use(const clang::NamedDecl *ns_decl,
                                 clang::SourceLocation loc) {
   if (scope_stack_.empty())
     return; // no enclosing indexed symbol (-1 root)
@@ -95,7 +95,7 @@ void NsUsesVisitor::emit_ns_use(const clang::NamedDecl *ns_decl,
   }
 }
 
-bool NsUsesVisitor::TraverseNestedNameSpecifierLoc(
+bool NamespaceUseVisitor::TraverseNestedNameSpecifierLoc(
     clang::NestedNameSpecifierLoc nns) {
   // Walk namespace qualifier levels. LLVM 22 chains through
   // NamespaceAndPrefixLoc off a value NNS; LLVM 21 chains through getPrefix()
@@ -131,7 +131,7 @@ bool NsUsesVisitor::TraverseNestedNameSpecifierLoc(
 }
 
 #if LLVM_VERSION_MAJOR >= 22
-bool NsUsesVisitor::VisitTypeLoc(clang::TypeLoc tl) {
+bool NamespaceUseVisitor::VisitTypeLoc(clang::TypeLoc tl) {
   // LLVM 22 folds elaboration into tag/typedef TypeLocs, so their qualifier
   // never reaches TraverseNestedNameSpecifierLoc — visit it explicitly. On
   // LLVM 21 the qualifier arrives via ElaboratedTypeLoc through the normal
@@ -147,14 +147,14 @@ bool NsUsesVisitor::VisitTypeLoc(clang::TypeLoc tl) {
   return true;
 }
 #else
-bool NsUsesVisitor::VisitTypeLoc(clang::TypeLoc /*tl*/) { return true; }
+bool NamespaceUseVisitor::VisitTypeLoc(clang::TypeLoc /*tl*/) { return true; }
 #endif
 
-bool NsUsesVisitor::VisitUsingDirectiveDecl(clang::UsingDirectiveDecl *decl) {
+bool NamespaceUseVisitor::VisitUsingDirectiveDecl(clang::UsingDirectiveDecl *decl) {
   if (in_target_file(decl))
     emit_ns_use(decl->getNominatedNamespaceAsWritten(),
                 decl->getIdentLocation());
   return true;
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 namespace {
 
@@ -55,4 +55,4 @@ rewrite_template_display_name(const std::string &display,
   return out;
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

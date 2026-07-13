@@ -23,13 +23,13 @@ class NestedNameSpecifierLoc;
 class UsingDirectiveDecl;
 } // namespace clang
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class EdgeSink;
 
-class NsUsesVisitor : public clang::RecursiveASTVisitor<NsUsesVisitor> {
+class NamespaceUseVisitor : public clang::RecursiveASTVisitor<NamespaceUseVisitor> {
 public:
-  NsUsesVisitor(clang::ASTContext &context, EdgeSink &sink,
+  NamespaceUseVisitor(clang::ASTContext &context, EdgeSink &sink,
                 std::string target_file, int64_t file_id);
 
   // Scope tracking: the nearest enclosing INDEXED symbol is the edge source.
@@ -58,4 +58,4 @@ private:
   std::set<std::tuple<int64_t, int64_t, int64_t, int64_t>> seen_;
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast

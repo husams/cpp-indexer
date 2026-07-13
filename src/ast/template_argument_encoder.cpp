@@ -1,7 +1,7 @@
 #include "ast/template_argument_encoder.hpp"
 
 #include "ast/edge_sink.hpp"
-#include "ast/llvm_compat.hpp"
+#include "ast/clang_compat.hpp"
 #include "ast/names.hpp"
 #include "ast/usr.hpp"
 
@@ -9,7 +9,7 @@
 #include "clang/AST/Decl.h"
 #include "clang/AST/TemplateBase.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 TemplateArgumentEncoder::TemplateArgumentEncoder(
     const clang::ASTContext &context, EdgeSink &sink)
@@ -78,4 +78,4 @@ std::string TemplateArgumentEncoder::display_text(
   return "?";
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

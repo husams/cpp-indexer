@@ -16,7 +16,7 @@ class QualType;
 
 #include "clang/AST/Type.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 // Strip the wrappers that do not change a value's provenance: parentheses,
 // implicit casts, cleanups, temporary materialization/binding, C-style casts
@@ -41,4 +41,4 @@ clang::QualType decl_type_for_expr(const clang::Expr *normalized);
 ValueSource classify_value_source(const clang::ASTContext &context,
                                   const clang::Expr *expr);
 
-} // namespace cidx::lt
+} // namespace cidx::ast

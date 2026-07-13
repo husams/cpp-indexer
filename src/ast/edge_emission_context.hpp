@@ -1,6 +1,6 @@
-// BodyEmitContext: shared per-definition state for the body-pass visitor —
+// EdgeEmissionContext: shared per-definition state for the body-pass visitor —
 // the enclosing definition's identity (src_id/file_id/owner_usr), the
-// mint/resolve utilities, the conditional depth (maintained by BodyVisitor's
+// mint/resolve utilities, the conditional depth (maintained by StatementEdgeVisitor's
 // scoped traversal overrides), and the edge+site emission helpers the
 // callbacks use. Emission goes through EdgeSink only.
 #pragma once
@@ -20,13 +20,13 @@ class Expr;
 class TypeSourceInfo;
 } // namespace clang
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class EdgeSink;
 
-class BodyEmitContext {
+class EdgeEmissionContext {
 public:
-  BodyEmitContext(clang::ASTContext &context, EdgeSink &sink, int64_t src_id,
+  EdgeEmissionContext(clang::ASTContext &context, EdgeSink &sink, int64_t src_id,
                   int64_t file_id);
 
   clang::ASTContext &context() const { return context_; }
@@ -41,7 +41,7 @@ public:
   const std::string &owner_usr() const { return owner_usr_; }
   void set_owner_usr(std::string usr) { owner_usr_ = std::move(usr); }
 
-  // Conditional depth — driven by BodyVisitor's scoped traversal overrides
+  // Conditional depth — driven by StatementEdgeVisitor's scoped traversal overrides
   // (If/For/While/Do/Switch/?:); edge sites emitted inside mark conditional.
   void enter_cond() { ++cond_depth_; }
   void exit_cond() { --cond_depth_; }
@@ -75,4 +75,4 @@ private:
   std::string owner_usr_;
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast

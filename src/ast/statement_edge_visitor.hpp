@@ -1,7 +1,7 @@
-// BodyVisitor: the body-pass walker over a function-like definition's body —
+// StatementEdgeVisitor: the body-pass walker over a function-like definition's body —
 // a direct RecursiveASTVisitor. Clang owns the traversal; this class owns the
 // nine Visit callbacks that map expression/declaration facts to edge records
-// through the shared BodyEmitContext/CallEmitter, plus a small set of narrow,
+// through the shared EdgeEmissionContext/CallEdgeEmitter, plus a small set of narrow,
 // base-delegating Traverse overrides that carry scoped cidx context:
 //
 //   - conditional depth: If/For/While/Do/Switch/?: subtrees mark their edge
@@ -16,8 +16,8 @@
 // body only (params and return type are not part of the surface).
 #pragma once
 
-#include "ast/body_emit_context.hpp"
-#include "ast/call_emitter.hpp"
+#include "ast/edge_emission_context.hpp"
+#include "ast/call_edge_emitter.hpp"
 
 #include "clang/AST/RecursiveASTVisitor.h"
 
@@ -25,13 +25,13 @@
 #include <set>
 #include <vector>
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class EdgeSink;
 
-class BodyVisitor : public clang::RecursiveASTVisitor<BodyVisitor> {
+class StatementEdgeVisitor : public clang::RecursiveASTVisitor<StatementEdgeVisitor> {
 public:
-  BodyVisitor(clang::ASTContext &context, EdgeSink &sink, int64_t src_id,
+  StatementEdgeVisitor(clang::ASTContext &context, EdgeSink &sink, int64_t src_id,
               int64_t file_id);
 
   // Walk fn's body (written ctor member initializers included).
@@ -72,13 +72,13 @@ private:
   // Scoped conditional-depth guard for the Traverse overrides above.
   class CondScope {
   public:
-    explicit CondScope(BodyEmitContext &ctx) : ctx_(ctx) { ctx_.enter_cond(); }
+    explicit CondScope(EdgeEmissionContext &ctx) : ctx_(ctx) { ctx_.enter_cond(); }
     ~CondScope() { ctx_.exit_cond(); }
     CondScope(const CondScope &) = delete;
     CondScope &operator=(const CondScope &) = delete;
 
   private:
-    BodyEmitContext &ctx_;
+    EdgeEmissionContext &ctx_;
   };
 
   // Scoped save/restore for the direct-initializer pointers.
@@ -115,8 +115,8 @@ private:
       const clang::VarDecl *var,
       const clang::ClassTemplateSpecializationDecl *spec);
 
-  BodyEmitContext ctx_;
-  CallEmitter emitter_;
+  EdgeEmissionContext ctx_;
+  CallEdgeEmitter emitter_;
   // The expression that is the direct initializer of the variable / ctor
   // member initializer currently being traversed (construct-form var-init
   // position), and the initializer of the enclosing new-expression (form
@@ -125,4 +125,4 @@ private:
   const clang::Expr *new_init_ = nullptr;
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast

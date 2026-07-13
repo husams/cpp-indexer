@@ -19,7 +19,7 @@ namespace cidx {
 class Storage;
 }
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 struct IndexOneOutcome {
   int stored = 0;             // main-file symbols stored (index_symbols)
@@ -33,4 +33,4 @@ struct IndexOneOutcome {
 IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
                               const std::string &path, bool graph_enabled);
 
-} // namespace cidx::lt
+} // namespace cidx::ast

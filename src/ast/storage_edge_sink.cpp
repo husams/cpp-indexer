@@ -2,7 +2,7 @@
 
 #include "storage/storage.hpp"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 StorageEdgeSink::StorageEdgeSink(cidx::Storage &db) : db_(db) {}
 
@@ -160,4 +160,4 @@ StorageEdgeSink::type_arg_candidates(const std::string &name, bool qualified) {
   return out;
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

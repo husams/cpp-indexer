@@ -1,4 +1,4 @@
-#include "ast/body_visitor.hpp"
+#include "ast/statement_edge_visitor.hpp"
 
 #include "ast/edge_sink.hpp"
 #include "ast/kind_map.hpp"
@@ -27,7 +27,7 @@
 #include <string>
 #include <vector>
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 namespace {
 
@@ -54,12 +54,12 @@ bool is_function_like_decl(const clang::Decl *d) {
 
 } // namespace
 
-BodyVisitor::BodyVisitor(clang::ASTContext &context, EdgeSink &sink,
+StatementEdgeVisitor::StatementEdgeVisitor(clang::ASTContext &context, EdgeSink &sink,
                          int64_t src_id, int64_t file_id)
     : ctx_(context, sink, src_id, file_id), emitter_(ctx_) {}
 
 // Owner USR for the self-owner skip in the type-name branches.
-void BodyVisitor::record_owner_usr(const clang::FunctionDecl *fn) {
+void StatementEdgeVisitor::record_owner_usr(const clang::FunctionDecl *fn) {
   const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn);
   if (method == nullptr)
     return;
@@ -72,7 +72,7 @@ void BodyVisitor::record_owner_usr(const clang::FunctionDecl *fn) {
   ctx_.set_owner_usr(usr_for_decl(o));
 }
 
-void BodyVisitor::walk(const clang::FunctionDecl *fn) {
+void StatementEdgeVisitor::walk(const clang::FunctionDecl *fn) {
   record_owner_usr(fn);
   // Constructor member initializers carry calls/uses too; their init
   // expression is a var-init position for the construction form.
@@ -90,55 +90,55 @@ void BodyVisitor::walk(const clang::FunctionDecl *fn) {
 
 // ---- narrow scoped traversal overrides -------------------------------------
 
-bool BodyVisitor::TraverseIfStmt(clang::IfStmt *stmt) {
+bool StatementEdgeVisitor::TraverseIfStmt(clang::IfStmt *stmt) {
   const CondScope guard(ctx_);
   return RecursiveASTVisitor::TraverseIfStmt(stmt);
 }
 
-bool BodyVisitor::TraverseForStmt(clang::ForStmt *stmt) {
+bool StatementEdgeVisitor::TraverseForStmt(clang::ForStmt *stmt) {
   const CondScope guard(ctx_);
   return RecursiveASTVisitor::TraverseForStmt(stmt);
 }
 
-bool BodyVisitor::TraverseWhileStmt(clang::WhileStmt *stmt) {
+bool StatementEdgeVisitor::TraverseWhileStmt(clang::WhileStmt *stmt) {
   const CondScope guard(ctx_);
   return RecursiveASTVisitor::TraverseWhileStmt(stmt);
 }
 
-bool BodyVisitor::TraverseDoStmt(clang::DoStmt *stmt) {
+bool StatementEdgeVisitor::TraverseDoStmt(clang::DoStmt *stmt) {
   const CondScope guard(ctx_);
   return RecursiveASTVisitor::TraverseDoStmt(stmt);
 }
 
-bool BodyVisitor::TraverseSwitchStmt(clang::SwitchStmt *stmt) {
+bool StatementEdgeVisitor::TraverseSwitchStmt(clang::SwitchStmt *stmt) {
   const CondScope guard(ctx_);
   return RecursiveASTVisitor::TraverseSwitchStmt(stmt);
 }
 
-bool BodyVisitor::TraverseConditionalOperator(
+bool StatementEdgeVisitor::TraverseConditionalOperator(
     clang::ConditionalOperator *stmt) {
   const CondScope guard(ctx_);
   return RecursiveASTVisitor::TraverseConditionalOperator(stmt);
 }
 
-bool BodyVisitor::TraverseVarDecl(clang::VarDecl *var) {
+bool StatementEdgeVisitor::TraverseVarDecl(clang::VarDecl *var) {
   const InitScope scope(direct_init_, var->getInit());
   return RecursiveASTVisitor::TraverseVarDecl(var);
 }
 
-bool BodyVisitor::TraverseCXXNewExpr(clang::CXXNewExpr *expr) {
+bool StatementEdgeVisitor::TraverseCXXNewExpr(clang::CXXNewExpr *expr) {
   const InitScope scope(new_init_, expr->getInitializer());
   return RecursiveASTVisitor::TraverseCXXNewExpr(expr);
 }
 
 // ---- calls ------------------------------------------------------------------
 
-bool BodyVisitor::VisitCallExpr(clang::CallExpr *call) {
+bool StatementEdgeVisitor::VisitCallExpr(clang::CallExpr *call) {
   emit_call(call);
   return true;
 }
 
-void BodyVisitor::emit_call(const clang::CallExpr *call) {
+void StatementEdgeVisitor::emit_call(const clang::CallExpr *call) {
   const clang::FunctionDecl *ref = callee_decl(call);
   if (ref == nullptr) {
     // Dependent/overloaded callee: single-candidate recovery, else link every
@@ -151,7 +151,7 @@ void BodyVisitor::emit_call(const clang::CallExpr *call) {
   emit_factory_edge(call, ref);
 }
 
-void BodyVisitor::emit_overloaded_call(const clang::CallExpr *call,
+void StatementEdgeVisitor::emit_overloaded_call(const clang::CallExpr *call,
                                        const clang::OverloadExpr *ovl) {
   const std::vector<const clang::NamedDecl *> cands(ovl->decls_begin(),
                                                     ovl->decls_end());
@@ -179,7 +179,7 @@ void BodyVisitor::emit_overloaded_call(const clang::CallExpr *call,
     ctx_.emit_site_edge(call, dst_id, 1);
 }
 
-std::set<int64_t> BodyVisitor::overload_candidate_ids(
+std::set<int64_t> StatementEdgeVisitor::overload_candidate_ids(
     const std::vector<const clang::NamedDecl *> &cands) {
   std::set<int64_t> dst_ids;
   for (const clang::NamedDecl *cand : cands) {
@@ -208,7 +208,7 @@ std::set<int64_t> BodyVisitor::overload_candidate_ids(
 
 // Factory: make_unique<B> / make_shared<B> from system headers emits a
 // factory-construct(15) edge to B.
-void BodyVisitor::emit_factory_edge(const clang::CallExpr *call,
+void StatementEdgeVisitor::emit_factory_edge(const clang::CallExpr *call,
                                     const clang::FunctionDecl *ref) {
   if (llvm::isa<clang::CXXMethodDecl>(ref))
     return;
@@ -240,12 +240,12 @@ void BodyVisitor::emit_factory_edge(const clang::CallExpr *call,
 
 // ---- construction -----------------------------------------------------------
 
-bool BodyVisitor::VisitCXXConstructExpr(clang::CXXConstructExpr *ctor) {
+bool StatementEdgeVisitor::VisitCXXConstructExpr(clang::CXXConstructExpr *ctor) {
   emit_construct(ctor);
   return true;
 }
 
-void BodyVisitor::emit_construct(const clang::CXXConstructExpr *ctor) {
+void StatementEdgeVisitor::emit_construct(const clang::CXXConstructExpr *ctor) {
   const clang::CXXConstructorDecl *ref = ctor->getConstructor();
   if (ref == nullptr)
     return;
@@ -266,7 +266,7 @@ void BodyVisitor::emit_construct(const clang::CXXConstructExpr *ctor) {
 // ctor signature and the initializer position: a construct expression that IS
 // the direct initializer of a variable or of a constructor member initializer
 // sits in the var-init position.
-void BodyVisitor::emit_construction_form(const clang::CXXConstructExpr *ctor,
+void StatementEdgeVisitor::emit_construction_form(const clang::CXXConstructExpr *ctor,
                                          const clang::CXXConstructorDecl *ref) {
   const std::string type_usr = record_usr_of_type(ctor->getType());
   if (type_usr.empty())
@@ -295,7 +295,7 @@ void BodyVisitor::emit_construction_form(const clang::CXXConstructExpr *ctor,
 
 // ---- heap -------------------------------------------------------------------
 
-bool BodyVisitor::VisitCXXNewExpr(clang::CXXNewExpr *expr) {
+bool StatementEdgeVisitor::VisitCXXNewExpr(clang::CXXNewExpr *expr) {
   const std::string heap_usr = record_usr_of_type(expr->getType());
   if (!heap_usr.empty()) {
     if (const auto dst = ctx_.sink().lookup_symbol_id(heap_usr)) {
@@ -312,7 +312,7 @@ bool BodyVisitor::VisitCXXNewExpr(clang::CXXNewExpr *expr) {
   return true;
 }
 
-bool BodyVisitor::VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
+bool StatementEdgeVisitor::VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
   const clang::Expr *arg = expr->getArgument();
   if (arg == nullptr)
     return true;
@@ -331,7 +331,7 @@ bool BodyVisitor::VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
 
 // ---- references -------------------------------------------------------------
 
-bool BodyVisitor::VisitDeclRefExpr(clang::DeclRefExpr *dre) {
+bool StatementEdgeVisitor::VisitDeclRefExpr(clang::DeclRefExpr *dre) {
   // uses(7): non-function references, lookup-only.
   const clang::ValueDecl *ref = dre->getDecl();
   if (ref != nullptr && !is_function_like_decl(ref)) {
@@ -350,7 +350,7 @@ bool BodyVisitor::VisitDeclRefExpr(clang::DeclRefExpr *dre) {
 // Bare type name in the qualifier (Color::Red): a type use under an
 // expression parent. NNS is a value type with a Kind enum in LLVM 22, a
 // pointer with a SpecifierKind in LLVM 21.
-void BodyVisitor::emit_qualifier_type_use(const clang::DeclRefExpr *dre) {
+void StatementEdgeVisitor::emit_qualifier_type_use(const clang::DeclRefExpr *dre) {
   const clang::Type *t = nullptr;
 #if LLVM_VERSION_MAJOR >= 22
   const clang::NestedNameSpecifier nns = dre->getQualifier();
@@ -375,7 +375,7 @@ void BodyVisitor::emit_qualifier_type_use(const clang::DeclRefExpr *dre) {
 
 // Explicit template arguments (make_unique<Widget>(...)): each named TYPE
 // argument is spelled at the expression — emit uses.
-void BodyVisitor::emit_explicit_template_arg_uses(
+void StatementEdgeVisitor::emit_explicit_template_arg_uses(
     const clang::DeclRefExpr *dre) {
   if (!dre->hasExplicitTemplateArgs())
     return;
@@ -387,7 +387,7 @@ void BodyVisitor::emit_explicit_template_arg_uses(
   }
 }
 
-bool BodyVisitor::VisitMemberExpr(clang::MemberExpr *me) {
+bool StatementEdgeVisitor::VisitMemberExpr(clang::MemberExpr *me) {
   const clang::ValueDecl *ref = me->getMemberDecl();
   if (ref != nullptr && !is_function_like_decl(ref)) {
     const std::string usr = usr_for_decl(ref);
@@ -402,7 +402,7 @@ bool BodyVisitor::VisitMemberExpr(clang::MemberExpr *me) {
 
 // ---- spelled type names -----------------------------------------------------
 
-bool BodyVisitor::VisitUnaryExprOrTypeTraitExpr(
+bool StatementEdgeVisitor::VisitUnaryExprOrTypeTraitExpr(
     clang::UnaryExprOrTypeTraitExpr *expr) {
   if (expr->isArgumentType())
     ctx_.emit_type_name_use(expr->getArgumentTypeInfo(),
@@ -410,7 +410,7 @@ bool BodyVisitor::VisitUnaryExprOrTypeTraitExpr(
   return true;
 }
 
-bool BodyVisitor::VisitExplicitCastExpr(clang::ExplicitCastExpr *cast) {
+bool StatementEdgeVisitor::VisitExplicitCastExpr(clang::ExplicitCastExpr *cast) {
   ctx_.emit_type_name_use(cast->getTypeInfoAsWritten(),
                           /*promote_described_template=*/true);
   return true;
@@ -418,7 +418,7 @@ bool BodyVisitor::VisitExplicitCastExpr(clang::ExplicitCastExpr *cast) {
 
 // ---- local variables ---------------------------------------------------------
 
-bool BodyVisitor::VisitVarDecl(clang::VarDecl *var) {
+bool StatementEdgeVisitor::VisitVarDecl(clang::VarDecl *var) {
   // Reference scope: variables a DeclStmt declares. Typed predicates replace
   // the retired walk-parent gate: a local variable (excludes local-class
   // static members) that is not a parameter, catch variable, lambda
@@ -430,7 +430,7 @@ bool BodyVisitor::VisitVarDecl(clang::VarDecl *var) {
   return true;
 }
 
-void BodyVisitor::emit_local_var(const clang::VarDecl *var) {
+void StatementEdgeVisitor::emit_local_var(const clang::VarDecl *var) {
   // Declared type -> uses edge + instance mint + class template
   // instantiates/template_arg rows.
   const ExpansionLoc loc = expansion_loc(ctx_.context(), var->getLocation());
@@ -474,4 +474,4 @@ void BodyVisitor::emit_local_var(const clang::VarDecl *var) {
   }
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

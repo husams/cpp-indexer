@@ -13,7 +13,7 @@
 
 #include <string>
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 namespace {
 
@@ -118,4 +118,4 @@ void emit_instantiation_edges(const clang::ASTContext &context, EdgeSink &sink,
     emit_owner_promotion(sink, mint, targ_encoder, dst_id, m);
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

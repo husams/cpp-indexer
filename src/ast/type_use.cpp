@@ -9,7 +9,7 @@
 #include "clang/AST/TemplateName.h"
 #include "clang/AST/Type.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 const clang::NamedDecl *named_type_decl(clang::QualType type) {
   for (int i = 0; i < 32; ++i) {
@@ -70,4 +70,4 @@ void emit_type_use(EdgeSink &sink, int64_t src_id, clang::QualType type,
   }
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

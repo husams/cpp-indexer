@@ -1,4 +1,4 @@
-// CallEmitter: the shared resolved-call tail used by the call and construct
+// CallEdgeEmitter: the shared resolved-call tail used by the call and construct
 // visitor mixins — resolve the destination symbol id (mint, recovered lookup,
 // or qual-name fallback), then delegate each concern to its own translation
 // unit: call_template_args (spec arg rows + display name), receiver_provenance
@@ -16,13 +16,13 @@ class FunctionDecl;
 class NamedDecl;
 } // namespace clang
 
-namespace cidx::lt {
+namespace cidx::ast {
 
-class BodyEmitContext;
+class EdgeEmissionContext;
 
-class CallEmitter {
+class CallEdgeEmitter {
 public:
-  explicit CallEmitter(BodyEmitContext &ctx) : ctx_(ctx) {}
+  explicit CallEdgeEmitter(EdgeEmissionContext &ctx) : ctx_(ctx) {}
 
   // Shared tail for a resolved/recovered callee decl. mint_as overrides the
   // decl used for USR/minting (a recovered FunctionTemplateDecl candidate).
@@ -43,7 +43,7 @@ public:
                       const clang::CXXConstructExpr *ctor, int64_t edge_id);
 
 private:
-  BodyEmitContext &ctx_;
+  EdgeEmissionContext &ctx_;
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast

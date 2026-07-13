@@ -12,7 +12,7 @@ class ASTContext;
 class NamedDecl;
 } // namespace clang
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class SymbolExtractor {
 public:
@@ -25,4 +25,4 @@ private:
   const clang::ASTContext &context_;
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast

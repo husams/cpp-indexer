@@ -13,7 +13,7 @@ class ASTContext;
 class NamedDecl;
 } // namespace clang
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class EdgeSink;
 struct ExpansionLoc;
@@ -27,4 +27,4 @@ const clang::NamedDecl *named_type_decl(clang::QualType type);
 void emit_type_use(EdgeSink &sink, int64_t src_id, clang::QualType type,
                    int64_t file_id, const ExpansionLoc &loc, int conditional);
 
-} // namespace cidx::lt
+} // namespace cidx::ast

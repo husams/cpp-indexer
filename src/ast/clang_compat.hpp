@@ -10,7 +10,7 @@
 
 #include <string>
 
-namespace cidx::lt::compat {
+namespace cidx::ast::compat {
 
 // llvm::toString(APSInt, radix) is an LLVM 22 addition; APSInt::toString is
 // present in both.
@@ -20,4 +20,4 @@ inline std::string integral_to_string(const llvm::APSInt &value) {
   return std::string(buf);
 }
 
-} // namespace cidx::lt::compat
+} // namespace cidx::ast::compat

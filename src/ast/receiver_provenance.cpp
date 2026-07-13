@@ -12,7 +12,7 @@
 
 #include <string>
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 namespace {
 
@@ -107,4 +107,4 @@ ReceiverProvenance classify_call_receiver(const clang::ASTContext &context,
   return {};
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

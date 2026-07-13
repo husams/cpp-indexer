@@ -23,8 +23,8 @@
 #include <vector>
 
 #include "ast/clang_version.hpp"
-#include "ast/lt_engine.hpp"
-#include "clangx/toolchain.hpp"
+#include "ast/index_engine.hpp"
+#include "toolchain/toolchain.hpp"
 #include "cli/format.hpp"
 #include "cli/json_out.hpp"
 #include "cli/kind_names.hpp"
@@ -185,7 +185,7 @@ int index_one(Storage &db, const File &rec, const std::string &path,
   // over the Clang C++ API): same DB effects, counters, and per-file output
   // line as the retired libclang cursor walk.
   {
-    lt::IndexOneOutcome out = lt::run_index_one(db, rec, path, graph_enabled);
+    ast::IndexOneOutcome out = ast::run_index_one(db, rec, path, graph_enabled);
     if (out.parse_failed) {
       if (ctx.logger != nullptr && !out.failed_flags.empty()) {
         std::string flags;
@@ -769,7 +769,7 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
     const std::optional<std::string> root =
         comp ? std::optional<std::string>(db.component_abs_base(*comp)) : std::nullopt;
     // v7: --no-graph disables edge extraction for this run. Indexing runs
-    // through the LibTooling engine (lt::run_index_one), which builds its own
+    // through the LibTooling engine (ast::run_index_one), which builds its own
     // toolchain + parse internally — no Parser/AstIndexer needed here.
     const bool graph_enabled = !args.no_graph;
     rc = !args.files.empty()

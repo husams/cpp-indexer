@@ -19,7 +19,7 @@ class NamedDecl;
 class PrintingPolicy;
 } // namespace clang
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 // The single PrintingPolicy for every stored type spelling (template-argument
 // literals, display text, type_info). Configure printing here and nowhere
@@ -39,4 +39,4 @@ std::optional<std::string> display_name(const clang::ASTContext &context,
 std::optional<std::string> type_info(const clang::ASTContext &context,
                                      const clang::NamedDecl *decl);
 
-} // namespace cidx::lt
+} // namespace cidx::ast

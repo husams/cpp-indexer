@@ -10,7 +10,7 @@ namespace clang {
 class Decl;
 }
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 bool is_definition(const clang::Decl *decl);
 bool is_pure_virtual_method(const clang::Decl *decl);
@@ -22,4 +22,4 @@ std::optional<std::string> linkage_name(const clang::Decl *decl);
 // "public" | "protected" | "private" | nullopt.
 std::optional<std::string> access_name(const clang::Decl *decl);
 
-} // namespace cidx::lt
+} // namespace cidx::ast

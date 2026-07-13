@@ -4,7 +4,7 @@
 // value source (this/local/member/global/call_result), the parameter position
 // when the receiver is a parameter, and whether it holds the dispatch type by
 // value. Pure over the AST — emits nothing; the caller writes the fields onto
-// the edge_site record. Split out of CallEmitter::emit_resolved_call.
+// the edge_site record. Split out of CallEdgeEmitter::emit_resolved_call.
 #pragma once
 
 #include <cstdint>
@@ -17,7 +17,7 @@ class Expr;
 class FunctionDecl;
 } // namespace clang
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 // Receiver fields for an edge_site row (empty/nullopt when not a member call or
 // the receiver could not be classified).
@@ -36,4 +36,4 @@ ReceiverProvenance classify_call_receiver(const clang::ASTContext &context,
                                           const clang::Expr *site,
                                           const clang::FunctionDecl *callee);
 
-} // namespace cidx::lt
+} // namespace cidx::ast

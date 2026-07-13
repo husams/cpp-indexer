@@ -43,13 +43,13 @@ class VarDecl;
 class TypedefNameDecl;
 } // namespace clang
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class EdgeSink;
 
-class EdgeVisitor : public clang::RecursiveASTVisitor<EdgeVisitor> {
+class DeclarationEdgeVisitor : public clang::RecursiveASTVisitor<DeclarationEdgeVisitor> {
 public:
-  EdgeVisitor(clang::ASTContext &context, EdgeSink &sink,
+  DeclarationEdgeVisitor(clang::ASTContext &context, EdgeSink &sink,
               std::string target_file, int64_t file_id);
 
   bool VisitNamedDecl(clang::NamedDecl *decl);           // contains
@@ -97,4 +97,4 @@ private:
   int64_t file_id_;
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast

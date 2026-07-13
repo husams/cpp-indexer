@@ -3,7 +3,7 @@
 #include "clang/Index/USRGeneration.h"
 #include "llvm/ADT/SmallString.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 std::string usr_for_decl(const clang::Decl *decl) {
   llvm::SmallString<128> buf;
@@ -12,4 +12,4 @@ std::string usr_for_decl(const clang::Decl *decl) {
   return std::string(buf);
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

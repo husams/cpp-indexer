@@ -1,6 +1,6 @@
-#include "ast/call_emitter.hpp"
+#include "ast/call_edge_emitter.hpp"
 
-#include "ast/body_emit_context.hpp"
+#include "ast/edge_emission_context.hpp"
 #include "ast/call_template_args.hpp"
 #include "ast/edge_sink.hpp"
 #include "ast/instantiation_edges.hpp"
@@ -17,9 +17,9 @@
 #include "clang/AST/ExprCXX.h"
 #include "clang/Basic/SourceManager.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
-int64_t CallEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
+int64_t CallEdgeEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
                                               const std::string &callee_usr) {
   int64_t dst_id = -1;
   if (const auto dst = ctx_.sink().lookup_symbol_id(callee_usr))
@@ -43,7 +43,7 @@ int64_t CallEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
 
 // Non-recovered target: mint the callee (flagging instantiation members) and
 // emit its template-arg rows.
-int64_t CallEmitter::mint_resolved_target(const clang::Expr *site,
+int64_t CallEdgeEmitter::mint_resolved_target(const clang::Expr *site,
                                           const clang::FunctionDecl *callee) {
   const bool is_inst_member =
       callee->getPrimaryTemplate() != nullptr ||
@@ -59,7 +59,7 @@ int64_t CallEmitter::mint_resolved_target(const clang::Expr *site,
 }
 
 // calls(1) edge + its edge_site row carrying the receiver provenance.
-int64_t CallEmitter::emit_call_site(const clang::Expr *site, int64_t dst_id,
+int64_t CallEdgeEmitter::emit_call_site(const clang::Expr *site, int64_t dst_id,
                                     const clang::FunctionDecl *callee) {
   const ReceiverProvenance recv =
       classify_call_receiver(ctx_.context(), site, callee);
@@ -87,7 +87,7 @@ int64_t CallEmitter::emit_call_site(const clang::Expr *site, int64_t dst_id,
   return edge_id;
 }
 
-void CallEmitter::emit_resolved_call(const clang::Expr *site,
+void CallEdgeEmitter::emit_resolved_call(const clang::Expr *site,
                                      const clang::FunctionDecl *callee,
                                      bool recovered,
                                      const clang::NamedDecl *mint_as) {
@@ -111,7 +111,7 @@ void CallEmitter::emit_resolved_call(const clang::Expr *site,
                              callee, callee_usr);
 }
 
-void CallEmitter::emit_call_args(const clang::Expr *site,
+void CallEdgeEmitter::emit_call_args(const clang::Expr *site,
                                  const clang::CallExpr *call,
                                  const clang::CXXConstructExpr *ctor,
                                  int64_t edge_id) {
@@ -157,4 +157,4 @@ void CallEmitter::emit_call_args(const clang::Expr *site,
   }
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

@@ -1,6 +1,6 @@
 // Toolchain resolution + gnuc masquerade -- see toolchain.hpp. Line-level
 // behavior is pinned to project/indexer/clang/util.py (cited per function).
-#include "clangx/toolchain.hpp"
+#include "toolchain/toolchain.hpp"
 
 #include <glob.h>
 #include <sys/stat.h>
@@ -350,7 +350,7 @@ std::optional<std::string> Toolchain::resource_include() {
   }
 
   // 2. The builtin-header include dir of the Clang we link. In production that
-  // is CIDX_LT_RESOURCE_DIR/include (baked at build time from the LLVM the
+  // is CIDX_CLANG_RESOURCE_DIR/include (baked at build time from the LLVM the
   // LibTooling engine compiles against). Under the test seam a fake library
   // path is injected and we glob lib/clang/*/include next to it (parity with
   // the old libclang-adjacent layout; verifies no relative globs against cwd).
@@ -370,8 +370,8 @@ std::optional<std::string> Toolchain::resource_include() {
       }
     }
   } else {
-#ifdef CIDX_LT_RESOURCE_DIR
-    const std::string inc = pathutil::join(std::string(CIDX_LT_RESOURCE_DIR),
+#ifdef CIDX_CLANG_RESOURCE_DIR
+    const std::string inc = pathutil::join(std::string(CIDX_CLANG_RESOURCE_DIR),
                                            std::string("include"));
     if (resource_check(inc)) {
       resource_memo_ = inc;

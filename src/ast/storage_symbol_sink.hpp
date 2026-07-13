@@ -12,7 +12,7 @@ namespace cidx {
 class Storage;
 }
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class StorageSymbolSink : public SymbolEmitter {
 public:
@@ -33,4 +33,4 @@ private:
   int stored_ = 0;
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast

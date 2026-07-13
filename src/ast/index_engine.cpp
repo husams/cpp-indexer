@@ -1,14 +1,14 @@
-#include "ast/lt_engine.hpp"
+#include "ast/index_engine.hpp"
 
-#include "ast/body_pass_visitor.hpp"
-#include "ast/edge_visitor.hpp"
+#include "ast/function_definition_visitor.hpp"
+#include "ast/declaration_edge_visitor.hpp"
 #include "ast/location.hpp"
-#include "ast/ns_uses_visitor.hpp"
+#include "ast/namespace_use_visitor.hpp"
 #include "ast/storage_edge_sink.hpp"
 #include "ast/storage_symbol_sink.hpp"
 #include "ast/symbol_visitor.hpp"
 
-#include "clangx/toolchain.hpp"
+#include "toolchain/toolchain.hpp"
 #include "compiledb/compiledb.hpp"
 #include "storage/storage.hpp"
 #include "util/env.hpp"
@@ -33,7 +33,7 @@
 #include <memory>
 #include <unordered_set>
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 namespace {
 
@@ -170,11 +170,11 @@ private:
     edges_.delete_edges_for_file(file_id);
     edges_.delete_definitions_for_file(file_id);
     auto txn = db_.transaction();
-    EdgeVisitor decls(context_, edges_, file, file_id);
+    DeclarationEdgeVisitor decls(context_, edges_, file, file_id);
     decls.TraverseDecl(tu_);
-    BodyPassVisitor bodies(context_, edges_, file, file_id);
+    FunctionDefinitionVisitor bodies(context_, edges_, file, file_id);
     bodies.TraverseDecl(tu_);
-    NsUsesVisitor ns(context_, edges_, file, file_id);
+    NamespaceUseVisitor ns(context_, edges_, file, file_id);
     ns.TraverseDecl(tu_);
     txn.commit();
   }
@@ -247,9 +247,9 @@ private:
   clang::Decl *tu_;
 };
 
-class EngineConsumer : public clang::ASTConsumer {
+class IndexASTConsumer : public clang::ASTConsumer {
 public:
-  explicit EngineConsumer(EngineState &state) : state_(state) {}
+  explicit IndexASTConsumer(EngineState &state) : state_(state) {}
 
   void HandleTranslationUnit(clang::ASTContext &context) override {
     state_.tu_handled = true;
@@ -271,9 +271,9 @@ private:
   EngineState &state_;
 };
 
-class EngineAction : public clang::ASTFrontendAction {
+class IndexFrontendAction : public clang::ASTFrontendAction {
 public:
-  explicit EngineAction(EngineState &state) : state_(state) {}
+  explicit IndexFrontendAction(EngineState &state) : state_(state) {}
 
   bool BeginSourceFileAction(clang::CompilerInstance &ci) override {
     ci.getPreprocessor().addPPCallbacks(
@@ -284,18 +284,18 @@ public:
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance & /*ci*/,
                     llvm::StringRef /*file*/) override {
-    return std::make_unique<EngineConsumer>(state_);
+    return std::make_unique<IndexASTConsumer>(state_);
   }
 
 private:
   EngineState &state_;
 };
 
-class EngineActionFactory : public clang::tooling::FrontendActionFactory {
+class IndexFrontendActionFactory : public clang::tooling::FrontendActionFactory {
 public:
-  explicit EngineActionFactory(EngineState &state) : state_(state) {}
+  explicit IndexFrontendActionFactory(EngineState &state) : state_(state) {}
   std::unique_ptr<clang::FrontendAction> create() override {
-    return std::make_unique<EngineAction>(state_);
+    return std::make_unique<IndexFrontendAction>(state_);
   }
 
 private:
@@ -329,9 +329,9 @@ struct CompilationSetup {
   CompilationSetup(const std::vector<std::string> &args,
                    const std::string &path)
       : cdb(".", args), tool(cdb, {path}) {
-#ifdef CIDX_LT_RESOURCE_DIR
+#ifdef CIDX_CLANG_RESOURCE_DIR
     tool.appendArgumentsAdjuster(clang::tooling::getInsertArgumentAdjuster(
-        {"-resource-dir", CIDX_LT_RESOURCE_DIR},
+        {"-resource-dir", CIDX_CLANG_RESOURCE_DIR},
         clang::tooling::ArgumentInsertPosition::BEGIN));
 #endif
   }
@@ -395,7 +395,7 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   state.strict = read_strict_mode();
   state.out = &out;
 
-  EngineActionFactory factory(state);
+  IndexFrontendActionFactory factory(state);
   (void)setup.tool.run(&factory);
   if (!state.tu_handled) {
     out.parse_failed = true;
@@ -406,4 +406,4 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   return out;
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

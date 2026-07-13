@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class EdgeSink {
 public:
@@ -68,4 +68,4 @@ public:
                                const std::string &kind_name) = 0;
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast

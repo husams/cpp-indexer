@@ -1,7 +1,7 @@
-#include "ast/body_emit_context.hpp"
+#include "ast/edge_emission_context.hpp"
 
 #include "ast/edge_sink.hpp"
-#include "ast/llvm_compat.hpp"
+#include "ast/clang_compat.hpp"
 #include "ast/location.hpp"
 #include "ast/type_use.hpp"
 #include "ast/usr.hpp"
@@ -14,7 +14,7 @@
 #include "clang/AST/TypeLoc.h"
 #include "llvm/Config/llvm-config.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 namespace {
 
@@ -42,19 +42,19 @@ clang::SourceLocation type_name_loc(clang::TypeLoc tl) {
 
 } // namespace
 
-BodyEmitContext::BodyEmitContext(clang::ASTContext &context, EdgeSink &sink,
+EdgeEmissionContext::EdgeEmissionContext(clang::ASTContext &context, EdgeSink &sink,
                                  int64_t src_id, int64_t file_id)
     : context_(context), sink_(sink), mint_(context, sink),
       targ_encoder_(context, sink),
       minter_(context, sink, mint_, targ_encoder_), src_id_(src_id),
       file_id_(file_id) {}
 
-int64_t BodyEmitContext::emit_site_edge(const clang::Expr *site, int64_t dst_id,
+int64_t EdgeEmissionContext::emit_site_edge(const clang::Expr *site, int64_t dst_id,
                                         int kind) {
   return emit_site_edge_at(site->getBeginLoc(), dst_id, kind);
 }
 
-int64_t BodyEmitContext::emit_site_edge_at(clang::SourceLocation loc_in,
+int64_t EdgeEmissionContext::emit_site_edge_at(clang::SourceLocation loc_in,
                                            int64_t dst_id, int kind) {
   EdgeRecord e;
   e.src_id = src_id_;
@@ -72,7 +72,7 @@ int64_t BodyEmitContext::emit_site_edge_at(clang::SourceLocation loc_in,
   return edge_id;
 }
 
-void BodyEmitContext::emit_type_name_use(const clang::TypeSourceInfo *tsi,
+void EdgeEmissionContext::emit_type_name_use(const clang::TypeSourceInfo *tsi,
                                          bool promote_described_template) {
   if (tsi == nullptr)
     return;
@@ -92,4 +92,4 @@ void BodyEmitContext::emit_type_name_use(const clang::TypeSourceInfo *tsi,
       emit_site_edge_at(type_name_loc(tsi->getTypeLoc()), *dst, 7);
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

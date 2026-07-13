@@ -9,7 +9,7 @@
 #include "clang/AST/PrettyPrinter.h"
 #include "llvm/Support/raw_ostream.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 const clang::PrintingPolicy &
 printing_policy(const clang::ASTContext &context) {
@@ -195,4 +195,4 @@ std::optional<std::string> type_info(const clang::ASTContext &context,
   return s;
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

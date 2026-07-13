@@ -1,5 +1,5 @@
 // Body-pass driver (B2): finds each function-like DEFINITION in the target
-// file, creates its per-backend `definition` row, runs the BodyVisitor over
+// file, creates its per-backend `definition` row, runs the StatementEdgeVisitor over
 // its body, then snapshots the just-emitted calls/uses into def_edge.
 #pragma once
 
@@ -13,13 +13,13 @@ class ASTContext;
 class FunctionDecl;
 } // namespace clang
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class EdgeSink;
 
-class BodyPassVisitor : public clang::RecursiveASTVisitor<BodyPassVisitor> {
+class FunctionDefinitionVisitor : public clang::RecursiveASTVisitor<FunctionDefinitionVisitor> {
 public:
-  BodyPassVisitor(clang::ASTContext &context, EdgeSink &sink,
+  FunctionDefinitionVisitor(clang::ASTContext &context, EdgeSink &sink,
                   std::string target_file, int64_t file_id);
 
   bool VisitFunctionDecl(clang::FunctionDecl *decl);
@@ -31,4 +31,4 @@ private:
   int64_t file_id_;
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast

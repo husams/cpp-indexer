@@ -8,7 +8,7 @@
 
 #include "ast/symbol_record.hpp"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class SymbolEmitter {
 public:
@@ -16,4 +16,4 @@ public:
   virtual void emit(const SymbolRecord &symbol) = 0;
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast

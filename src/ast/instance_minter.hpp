@@ -14,7 +14,7 @@ class NamedDecl;
 class TypedefNameDecl;
 } // namespace clang
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class EdgeSink;
 class MintBuilder;
@@ -47,4 +47,4 @@ private:
   const TemplateArgumentEncoder &targ_encoder_;
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast

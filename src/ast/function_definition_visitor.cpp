@@ -1,6 +1,6 @@
-#include "ast/body_pass_visitor.hpp"
+#include "ast/function_definition_visitor.hpp"
 
-#include "ast/body_visitor.hpp"
+#include "ast/statement_edge_visitor.hpp"
 #include "ast/edge_sink.hpp"
 #include "ast/location.hpp"
 #include "ast/usr.hpp"
@@ -11,14 +11,14 @@
 #include "clang/AST/DeclTemplate.h"
 #include "clang/Basic/SourceManager.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
-BodyPassVisitor::BodyPassVisitor(clang::ASTContext &context, EdgeSink &sink,
+FunctionDefinitionVisitor::FunctionDefinitionVisitor(clang::ASTContext &context, EdgeSink &sink,
                                  std::string target_file, int64_t file_id)
     : context_(context), sink_(sink), target_file_(std::move(target_file)),
       file_id_(file_id) {}
 
-bool BodyPassVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
+bool FunctionDefinitionVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
   // Definitions with an actual body, in the target file. The symbol row keyed
   // by this decl's USR: a templated pattern's body belongs to its
   // FUNCTION_TEMPLATE cursor (same USR either way).
@@ -48,10 +48,10 @@ bool BodyPassVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
   const int64_t def_id = sink_.get_or_create_definition(
       *fn_sym, file_id_, start.line, start.col, end.line, end.col,
       std::nullopt);
-  BodyVisitor body(context_, sink_, *fn_sym, file_id_);
+  StatementEdgeVisitor body(context_, sink_, *fn_sym, file_id_);
   body.walk(decl);
   sink_.copy_body_edges_to_def_edge(def_id, *fn_sym);
   return true;
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

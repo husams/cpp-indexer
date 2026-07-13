@@ -8,7 +8,7 @@
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 namespace {
 
@@ -196,4 +196,4 @@ ValueSource classify_value_source(const clang::ASTContext & /*context*/,
   return {"unknown", "", "", ""};
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

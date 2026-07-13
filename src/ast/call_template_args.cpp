@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 namespace {
 
@@ -85,4 +85,4 @@ void emit_callable_template_args(clang::ASTContext & /*context*/,
     emit_method_call_site_args(targ_encoder, site, dst_id);
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

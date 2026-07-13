@@ -8,7 +8,7 @@
 #include <optional>
 #include <string>
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 struct EdgeRecord {
   int64_t src_id = 0;
@@ -94,4 +94,4 @@ struct ValueSource {
   std::string callee_usr; // call_result only
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast
