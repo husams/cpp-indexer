@@ -141,6 +141,19 @@ set_tests_properties(cli_clang_test PROPERTIES
 # ast_query_test / astcache_test removed in the LibTooling cutover: the
 # `cidx ast` command and the AST/PCH cache they exercised were deleted.
 
+# --- ast_visitor_test — focused visitor fixtures (refactoring.md Phase 0) -----
+# Pins provenance/template-arg semantics for the src/ast refactor and carries
+# the correction fixtures (doctest should_fail) that Phases 2-3 make true.
+# Every case is a real parse via the CLI -> label "clang".
+add_executable(ast_visitor_test ast_visitor_test.cpp)
+target_compile_options(ast_visitor_test PRIVATE -Wall -Wextra)
+target_link_libraries(ast_visitor_test PRIVATE cidx_core)
+
+add_test(NAME ast_visitor_test COMMAND ast_visitor_test --test-suite=clang)
+set_tests_properties(ast_visitor_test PROPERTIES
+  LABELS "clang"
+  SKIP_RETURN_CODE 77)
+
 # --- S08: index golden gate — the repository-wide indexing oracle -------------
 # Replaces the RETIRED byte-identical Python(libclang)-vs-C++ parity gate. The
 # old gate diffed a full `sqlite3 .dump`, which the LibTooling engine can no
