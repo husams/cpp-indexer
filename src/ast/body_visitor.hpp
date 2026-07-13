@@ -22,6 +22,8 @@
 #include "clang/AST/RecursiveASTVisitor.h"
 
 #include <cstdint>
+#include <set>
+#include <vector>
 
 namespace cidx::lt {
 
@@ -95,9 +97,23 @@ private:
     const clang::Expr *saved_;
   };
 
+  void record_owner_usr(const clang::FunctionDecl *fn);
   void emit_call(const clang::CallExpr *call);
+  void emit_overloaded_call(const clang::CallExpr *call,
+                            const clang::OverloadExpr *ovl);
+  std::set<int64_t>
+  overload_candidate_ids(const std::vector<const clang::NamedDecl *> &cands);
+  void emit_factory_edge(const clang::CallExpr *call,
+                         const clang::FunctionDecl *ref);
   void emit_construct(const clang::CXXConstructExpr *ctor);
+  void emit_construction_form(const clang::CXXConstructExpr *ctor,
+                              const clang::CXXConstructorDecl *ref);
+  void emit_qualifier_type_use(const clang::DeclRefExpr *dre);
+  void emit_explicit_template_arg_uses(const clang::DeclRefExpr *dre);
   void emit_local_var(const clang::VarDecl *var);
+  void emit_local_var_template_args(
+      const clang::VarDecl *var,
+      const clang::ClassTemplateSpecializationDecl *spec);
 
   BodyEmitContext ctx_;
   CallEmitter emitter_;

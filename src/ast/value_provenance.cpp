@@ -101,6 +101,52 @@ clang::QualType decl_type_for_expr(const clang::Expr *normalized) {
   return normalized->getType();
 }
 
+namespace {
+
+// DeclRefExpr provenance: parameters and local variables — including static
+// locals and locals inside function/method-template patterns — plus lambda
+// captures (whose declaration context is the closure record) are 'local';
+// every other variable is 'global'.
+ValueSource classify_decl_ref(const clang::DeclRefExpr *dre) {
+  const clang::ValueDecl *ref = dre->getDecl();
+  const std::string decl_usr = usr_for_decl(ref);
+  const std::string type_usr =
+      record_usr_of_type(llvm::cast<clang::Expr>(dre)->getType());
+  if (llvm::isa<clang::ParmVarDecl>(ref))
+    return {"local", type_usr, decl_usr, ""};
+  if (const auto *var = llvm::dyn_cast<clang::VarDecl>(ref)) {
+    const auto *rec =
+        llvm::dyn_cast_or_null<clang::CXXRecordDecl>(var->getDeclContext());
+    const bool local_ctx =
+        var->isLocalVarDecl() || (rec != nullptr && rec->isLambda());
+    if (local_ctx)
+      return {"local", type_usr, decl_usr, ""};
+    return {"global", type_usr, decl_usr, ""};
+  }
+  return {"unknown", type_usr, decl_usr, ""};
+}
+
+// Call-shaped values. Single-arg functional cast `std::string("x")` is a
+// converted value -> call_result with no callee. Temporary-object syntax
+// `Widget(7)` / construct exprs (and calls resolving to a ctor/conversion)
+// -> construct.
+ValueSource classify_call_shaped(const clang::Expr *peeled) {
+  const std::string type_usr = record_usr_of_type(peeled->getType());
+  if (llvm::isa<clang::CXXFunctionalCastExpr>(peeled))
+    return {"call_result", type_usr, "", ""};
+  if (llvm::isa<clang::CXXConstructExpr>(peeled))
+    return {"construct", type_usr, "", ""};
+  if (const clang::FunctionDecl *fd = callee_of(peeled)) {
+    if (llvm::isa<clang::CXXConstructorDecl>(fd) ||
+        llvm::isa<clang::CXXConversionDecl>(fd))
+      return {"construct", type_usr, "", ""};
+    return {"call_result", type_usr, "", usr_for_decl(fd)};
+  }
+  return {"call_result", type_usr, "", ""};
+}
+
+} // namespace
+
 ValueSource classify_value_source(const clang::ASTContext & /*context*/,
                                   const clang::Expr *expr) {
   const clang::Expr *peeled = normalize_value_expr(expr);
@@ -112,26 +158,8 @@ ValueSource classify_value_source(const clang::ASTContext & /*context*/,
     return {"this", tu, tu, ""};
   }
 
-  if (const auto *dre = llvm::dyn_cast<clang::DeclRefExpr>(peeled)) {
-    const clang::ValueDecl *ref = dre->getDecl();
-    const std::string decl_usr = usr_for_decl(ref);
-    const std::string type_usr = record_usr_of_type(peeled->getType());
-    if (llvm::isa<clang::ParmVarDecl>(ref))
-      return {"local", type_usr, decl_usr, ""};
-    if (const auto *var = llvm::dyn_cast<clang::VarDecl>(ref)) {
-      // Local variables — including static locals and locals inside
-      // function/method-template patterns — plus lambda captures (whose
-      // declaration context is the closure record).
-      const auto *rec =
-          llvm::dyn_cast_or_null<clang::CXXRecordDecl>(var->getDeclContext());
-      const bool local_ctx =
-          var->isLocalVarDecl() || (rec != nullptr && rec->isLambda());
-      if (local_ctx)
-        return {"local", type_usr, decl_usr, ""};
-      return {"global", type_usr, decl_usr, ""};
-    }
-    return {"unknown", type_usr, decl_usr, ""};
-  }
+  if (const auto *dre = llvm::dyn_cast<clang::DeclRefExpr>(peeled))
+    return classify_decl_ref(dre);
 
   if (const auto *me = llvm::dyn_cast<clang::MemberExpr>(peeled)) {
     const std::string decl_usr = usr_for_decl(me->getMemberDecl());
@@ -139,30 +167,10 @@ ValueSource classify_value_source(const clang::ASTContext & /*context*/,
     return {"member", type_usr, decl_usr, ""};
   }
 
-  // Single-arg functional cast `std::string("x")` is a converted value ->
-  // call_result with no callee. Temporary-object syntax `Widget(7)` /
-  // construct exprs -> construct.
-  if (llvm::isa<clang::CXXFunctionalCastExpr>(peeled)) {
-    const std::string type_usr = record_usr_of_type(peeled->getType());
-    return {"call_result", type_usr, "", ""};
-  }
-  if (llvm::isa<clang::CXXConstructExpr>(peeled)) {
-    const std::string type_usr = record_usr_of_type(peeled->getType());
-    return {"construct", type_usr, "", ""};
-  }
-  if (llvm::isa<clang::CallExpr>(peeled)) {
-    if (const clang::FunctionDecl *fd = callee_of(peeled)) {
-      if (llvm::isa<clang::CXXConstructorDecl>(fd) ||
-          llvm::isa<clang::CXXConversionDecl>(fd)) {
-        const std::string type_usr = record_usr_of_type(peeled->getType());
-        return {"construct", type_usr, "", ""};
-      }
-      const std::string type_usr = record_usr_of_type(peeled->getType());
-      return {"call_result", type_usr, "", usr_for_decl(fd)};
-    }
-    const std::string type_usr = record_usr_of_type(peeled->getType());
-    return {"call_result", type_usr, "", ""};
-  }
+  if (llvm::isa<clang::CXXFunctionalCastExpr>(peeled) ||
+      llvm::isa<clang::CXXConstructExpr>(peeled) ||
+      llvm::isa<clang::CallExpr>(peeled))
+    return classify_call_shaped(peeled);
 
   // Dependent construct in a template pattern (any(value) materialized for
   // `store_[key] = value`): a call-shaped value with no resolvable callee.

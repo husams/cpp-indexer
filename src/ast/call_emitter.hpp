@@ -32,6 +32,10 @@ public:
 
   // Resolve a recovered (single-candidate dependent/overloaded) callee USR to a
   // symbol id (lookup, else qual_name+kind, else mint); -1 when unresolved.
+  int64_t mint_resolved_target(const clang::Expr *site,
+                               const clang::FunctionDecl *callee);
+  int64_t emit_call_site(const clang::Expr *site, int64_t dst_id,
+                         const clang::FunctionDecl *callee);
   int64_t resolve_recovered_target(const clang::NamedDecl *keyed,
                                    const std::string &callee_usr);
 

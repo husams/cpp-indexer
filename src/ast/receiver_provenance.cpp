@@ -14,76 +14,97 @@
 
 namespace cidx::lt {
 
-ReceiverProvenance classify_call_receiver(const clang::ASTContext &context,
-                                          const clang::Expr *site,
-                                          const clang::FunctionDecl *callee) {
-  ReceiverProvenance recv;
+namespace {
 
-  const clang::Expr *recv_expr = nullptr;
+// The explicit receiver expression of a call site: the member callee's base
+// (implicit-object argument), or the base of a recovered dependent member
+// callee (cache.get<std::string>(...)). Null for free calls / implicit this.
+const clang::Expr *receiver_expression(const clang::Expr *site) {
   if (const auto *mc = llvm::dyn_cast<clang::CXXMemberCallExpr>(site)) {
-    // The receiver is the member callee's base (implicit-object argument).
     const auto *me = llvm::dyn_cast_or_null<clang::MemberExpr>(
         normalize_value_expr(mc->getCallee()));
     if (me != nullptr && !me->isImplicitAccess())
-      recv_expr = mc->getImplicitObjectArgument();
-  } else if (const auto *anycall = llvm::dyn_cast<clang::CallExpr>(site)) {
-    // Recovered dependent member calls (cache.get<std::string>(...)): the
-    // callee is a CXXDependentScopeMemberExpr / UnresolvedMemberExpr whose base
-    // is the receiver.
-    const clang::Expr *callee_expr = normalize_value_expr(anycall->getCallee());
-    if (const auto *dep = llvm::dyn_cast_or_null<
-            clang::CXXDependentScopeMemberExpr>(callee_expr)) {
-      if (!dep->isImplicitAccess())
-        recv_expr = dep->getBase();
-    } else if (const auto *unres = llvm::dyn_cast_or_null<
-                   clang::UnresolvedMemberExpr>(callee_expr)) {
-      if (!unres->isImplicitAccess())
-        recv_expr = unres->getBase();
+      return mc->getImplicitObjectArgument();
+    return nullptr;
+  }
+  const auto *anycall = llvm::dyn_cast<clang::CallExpr>(site);
+  if (anycall == nullptr)
+    return nullptr;
+  const clang::Expr *callee_expr = normalize_value_expr(anycall->getCallee());
+  if (const auto *dep = llvm::dyn_cast_or_null<
+          clang::CXXDependentScopeMemberExpr>(callee_expr)) {
+    if (!dep->isImplicitAccess())
+      return dep->getBase();
+  } else if (const auto *unres = llvm::dyn_cast_or_null<
+                 clang::UnresolvedMemberExpr>(callee_expr)) {
+    if (!unres->isImplicitAccess())
+      return unres->getBase();
+  }
+  return nullptr;
+}
+
+// Provenance of an EXPLICIT receiver: value classification, parameter
+// position for parameter receivers, and by-value dispatch for the categories
+// devirtualization narrows on.
+ReceiverProvenance classify_explicit_receiver(const clang::ASTContext &context,
+                                              const clang::Expr *recv_expr,
+                                              const clang::FunctionDecl *callee) {
+  ReceiverProvenance recv;
+  const ValueSource rv = classify_value_source(context, recv_expr);
+  recv.src_kind = rv.src_kind;
+  recv.type_usr = rv.type_usr;
+  recv.decl_usr = rv.decl_usr;
+  if (recv.src_kind == "local" && !recv.decl_usr.empty()) {
+    if (const auto *dre = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
+            normalize_value_expr(recv_expr))) {
+      if (const auto *parm = llvm::dyn_cast<clang::ParmVarDecl>(dre->getDecl()))
+        recv.param_pos = static_cast<int64_t>(parm->getFunctionScopeIndex());
     }
   }
-
-  if (recv_expr != nullptr) {
-    const ValueSource rv = classify_value_source(context, recv_expr);
-    recv.src_kind = rv.src_kind;
-    recv.type_usr = rv.type_usr;
-    recv.decl_usr = rv.decl_usr;
-    if (recv.src_kind == "local" && !recv.decl_usr.empty()) {
-      if (const auto *dre = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
-              normalize_value_expr(recv_expr))) {
-        if (const auto *parm =
-                llvm::dyn_cast<clang::ParmVarDecl>(dre->getDecl()))
-          recv.param_pos = static_cast<int64_t>(parm->getFunctionScopeIndex());
-      }
+  if (recv.src_kind == "member" || recv.src_kind == "global" ||
+      recv.src_kind == "call_result") {
+    std::string dispatch_usr;
+    if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(callee)) {
+      if (const clang::CXXRecordDecl *owner = m->getParent())
+        dispatch_usr = usr_for_decl(owner);
     }
-    if (recv.src_kind == "member" || recv.src_kind == "global" ||
-        recv.src_kind == "call_result") {
-      std::string dispatch_usr;
-      if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(callee)) {
-        if (const clang::CXXRecordDecl *owner = m->getParent())
-          dispatch_usr = usr_for_decl(owner);
-      }
-      recv.type_is_value =
-          type_is_value(decl_type_for_expr(normalize_value_expr(recv_expr)),
-                        dispatch_usr)
-              ? 1
-              : 0;
-    }
-  } else if (llvm::isa<clang::CXXMethodDecl>(callee)) {
-    // Implicit this: no explicit receiver child and a method/ctor/dtor callee
-    // (libclang applies this to operator calls and statics alike).
-    if (const clang::CXXRecordDecl *owner =
-            llvm::cast<clang::CXXMethodDecl>(callee)->getParent()) {
-      const clang::NamedDecl *o = owner;
-      if (const clang::ClassTemplateDecl *ct = owner->getDescribedClassTemplate())
-        o = ct;
-      const std::string ou = usr_for_decl(o);
-      recv.src_kind = "this";
-      recv.type_usr = ou;
-      recv.decl_usr = ou;
-    }
+    recv.type_is_value =
+        type_is_value(decl_type_for_expr(normalize_value_expr(recv_expr)),
+                      dispatch_usr)
+            ? 1
+            : 0;
   }
-
   return recv;
+}
+
+// Implicit this: no explicit receiver child and a method/ctor/dtor callee
+// (applies to operator calls and statics alike).
+ReceiverProvenance classify_implicit_this(const clang::FunctionDecl *callee) {
+  ReceiverProvenance recv;
+  const clang::CXXRecordDecl *owner =
+      llvm::cast<clang::CXXMethodDecl>(callee)->getParent();
+  if (owner == nullptr)
+    return recv;
+  const clang::NamedDecl *o = owner;
+  if (const clang::ClassTemplateDecl *ct = owner->getDescribedClassTemplate())
+    o = ct;
+  const std::string ou = usr_for_decl(o);
+  recv.src_kind = "this";
+  recv.type_usr = ou;
+  recv.decl_usr = ou;
+  return recv;
+}
+
+} // namespace
+
+ReceiverProvenance classify_call_receiver(const clang::ASTContext &context,
+                                          const clang::Expr *site,
+                                          const clang::FunctionDecl *callee) {
+  if (const clang::Expr *recv_expr = receiver_expression(site))
+    return classify_explicit_receiver(context, recv_expr, callee);
+  if (llvm::isa<clang::CXXMethodDecl>(callee))
+    return classify_implicit_this(callee);
+  return {};
 }
 
 } // namespace cidx::lt

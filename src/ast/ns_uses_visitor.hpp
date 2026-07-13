@@ -9,6 +9,7 @@
 #include "clang/AST/RecursiveASTVisitor.h"
 
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <string>
 #include <tuple>
@@ -33,6 +34,8 @@ public:
 
   // Scope tracking: the nearest enclosing INDEXED symbol is the edge source.
   bool TraverseDecl(clang::Decl *decl);
+
+  std::optional<int64_t> scope_symbol_id(const clang::Decl *decl) const;
 
   bool TraverseNestedNameSpecifierLoc(clang::NestedNameSpecifierLoc nns);
   bool VisitUsingDirectiveDecl(clang::UsingDirectiveDecl *decl);

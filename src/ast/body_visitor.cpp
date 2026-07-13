@@ -58,17 +58,22 @@ BodyVisitor::BodyVisitor(clang::ASTContext &context, EdgeSink &sink,
                          int64_t src_id, int64_t file_id)
     : ctx_(context, sink, src_id, file_id), emitter_(ctx_) {}
 
+// Owner USR for the self-owner skip in the type-name branches.
+void BodyVisitor::record_owner_usr(const clang::FunctionDecl *fn) {
+  const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn);
+  if (method == nullptr)
+    return;
+  const clang::CXXRecordDecl *owner = method->getParent();
+  if (owner == nullptr)
+    return;
+  const clang::NamedDecl *o = owner;
+  if (const clang::ClassTemplateDecl *ct = owner->getDescribedClassTemplate())
+    o = ct;
+  ctx_.set_owner_usr(usr_for_decl(o));
+}
+
 void BodyVisitor::walk(const clang::FunctionDecl *fn) {
-  // Owner USR for the self-owner skip in the type-name branches.
-  if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn)) {
-    if (const clang::CXXRecordDecl *owner = method->getParent()) {
-      const clang::NamedDecl *o = owner;
-      if (const clang::ClassTemplateDecl *ct =
-              owner->getDescribedClassTemplate())
-        o = ct;
-      ctx_.set_owner_usr(usr_for_decl(o));
-    }
-  }
+  record_owner_usr(fn);
   // Constructor member initializers carry calls/uses too; their init
   // expression is a var-init position for the construction form.
   if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fn)) {
@@ -135,84 +140,101 @@ bool BodyVisitor::VisitCallExpr(clang::CallExpr *call) {
 
 void BodyVisitor::emit_call(const clang::CallExpr *call) {
   const clang::FunctionDecl *ref = callee_decl(call);
-  bool recovered = false;
   if (ref == nullptr) {
     // Dependent/overloaded callee: single-candidate recovery, else link every
     // indexed overload.
-    if (const clang::OverloadExpr *ovl = callee_overload_expr(call)) {
-      std::vector<const clang::NamedDecl *> cands(ovl->decls_begin(),
-                                                  ovl->decls_end());
-      if (cands.size() == 1) {
-        const clang::NamedDecl *cand = cands[0];
-        const clang::NamedDecl *mint_as = nullptr;
-        if (const auto *ftd =
-                llvm::dyn_cast<clang::FunctionTemplateDecl>(cand)) {
-          ref = ftd->getTemplatedDecl();
-          mint_as = ftd;
-        } else {
-          ref = llvm::dyn_cast<clang::FunctionDecl>(cand);
-        }
-        if (ref != nullptr) {
-          emitter_.emit_resolved_call(call, ref, /*recovered=*/true, mint_as);
-          return;
-        }
-      } else if (cands.size() >= 2) {
-        std::set<int64_t> dst_ids;
-        for (const clang::NamedDecl *cand : cands) {
-          const std::string usr = usr_for_decl(cand);
-          if (usr.empty())
-            continue;
-          if (const auto s = ctx_.sink().lookup_symbol_id(usr)) {
-            dst_ids.insert(*s);
-            continue;
-          }
-          if (ctx_.context().getSourceManager().isInSystemHeader(
-                  cand->getLocation()))
-            continue;
-          if (auto req = ctx_.mint().build(cand))
-            dst_ids.insert(ctx_.sink().mint_symbol(*req));
-        }
-        if (dst_ids.empty() && !cands.empty()) {
-          const std::string qn = qualified_name(ctx_.context(), cands[0]);
-          if (!qn.empty())
-            for (const int64_t id : ctx_.sink().symbol_ids_by_qual_name_kind(
-                     qn, cidx_stub_kind_name(cands[0])))
-              dst_ids.insert(id);
-        }
-        for (const int64_t dst_id : dst_ids)
-          ctx_.emit_site_edge(call, dst_id, 1);
-      }
-    }
+    if (const clang::OverloadExpr *ovl = callee_overload_expr(call))
+      emit_overloaded_call(call, ovl);
+    return;
   }
-  if (ref != nullptr)
-    emitter_.emit_resolved_call(call, ref, recovered);
+  emitter_.emit_resolved_call(call, ref, /*recovered=*/false);
+  emit_factory_edge(call, ref);
+}
 
-  // Factory: make_unique<B> / make_shared<B> from system headers.
-  if (ref != nullptr && !llvm::isa<clang::CXXMethodDecl>(ref)) {
-    const std::string sp = spelling(ref);
-    if ((sp == "make_unique" || sp == "make_shared") &&
-        ctx_.context().getSourceManager().isInSystemHeader(
-            ref->getLocation())) {
-      const clang::QualType result = call->getType().getCanonicalType();
-      if (const auto *spec =
-              llvm::dyn_cast_or_null<clang::ClassTemplateSpecializationDecl>(
-                  result->getAsCXXRecordDecl())) {
-        const clang::TemplateArgumentList &args = spec->getTemplateArgs();
-        if (args.size() > 0 &&
-            args[0].getKind() == clang::TemplateArgument::Type) {
-          const std::string fact_usr = record_usr_of_type(args[0].getAsType());
-          if (!fact_usr.empty()) {
-            if (const auto fact = ctx_.sink().lookup_symbol_id(fact_usr)) {
-              EdgeRecord fe;
-              fe.src_id = ctx_.src_id();
-              fe.dst_id = *fact;
-              fe.kind = 15; // factory-construct
-              ctx_.sink().add_edge(fe);
-            }
-          }
-        }
-      }
+void BodyVisitor::emit_overloaded_call(const clang::CallExpr *call,
+                                       const clang::OverloadExpr *ovl) {
+  const std::vector<const clang::NamedDecl *> cands(ovl->decls_begin(),
+                                                    ovl->decls_end());
+  if (cands.size() == 1) {
+    // Single candidate: recover the concrete callee (template pattern for a
+    // FunctionTemplateDecl, minted under the template itself).
+    const clang::NamedDecl *cand = cands[0];
+    const clang::NamedDecl *mint_as = nullptr;
+    const clang::FunctionDecl *ref = nullptr;
+    if (const auto *ftd = llvm::dyn_cast<clang::FunctionTemplateDecl>(cand)) {
+      ref = ftd->getTemplatedDecl();
+      mint_as = ftd;
+    } else {
+      ref = llvm::dyn_cast<clang::FunctionDecl>(cand);
     }
+    if (ref != nullptr)
+      emitter_.emit_resolved_call(call, ref, /*recovered=*/true, mint_as);
+    return;
+  }
+  if (cands.size() < 2)
+    return;
+  // Overload set: fan out to every indexed candidate (minting non-system
+  // ones), falling back to qual-name lookup when none resolved.
+  for (const int64_t dst_id : overload_candidate_ids(cands))
+    ctx_.emit_site_edge(call, dst_id, 1);
+}
+
+std::set<int64_t> BodyVisitor::overload_candidate_ids(
+    const std::vector<const clang::NamedDecl *> &cands) {
+  std::set<int64_t> dst_ids;
+  for (const clang::NamedDecl *cand : cands) {
+    const std::string usr = usr_for_decl(cand);
+    if (usr.empty())
+      continue;
+    if (const auto s = ctx_.sink().lookup_symbol_id(usr)) {
+      dst_ids.insert(*s);
+      continue;
+    }
+    if (ctx_.context().getSourceManager().isInSystemHeader(
+            cand->getLocation()))
+      continue;
+    if (auto req = ctx_.mint().build(cand))
+      dst_ids.insert(ctx_.sink().mint_symbol(*req));
+  }
+  if (dst_ids.empty() && !cands.empty()) {
+    const std::string qn = qualified_name(ctx_.context(), cands[0]);
+    if (!qn.empty())
+      for (const int64_t id : ctx_.sink().symbol_ids_by_qual_name_kind(
+               qn, cidx_stub_kind_name(cands[0])))
+        dst_ids.insert(id);
+  }
+  return dst_ids;
+}
+
+// Factory: make_unique<B> / make_shared<B> from system headers emits a
+// factory-construct(15) edge to B.
+void BodyVisitor::emit_factory_edge(const clang::CallExpr *call,
+                                    const clang::FunctionDecl *ref) {
+  if (llvm::isa<clang::CXXMethodDecl>(ref))
+    return;
+  const std::string sp = spelling(ref);
+  if (sp != "make_unique" && sp != "make_shared")
+    return;
+  if (!ctx_.context().getSourceManager().isInSystemHeader(ref->getLocation()))
+    return;
+  const clang::QualType result = call->getType().getCanonicalType();
+  const auto *spec =
+      llvm::dyn_cast_or_null<clang::ClassTemplateSpecializationDecl>(
+          result->getAsCXXRecordDecl());
+  if (spec == nullptr)
+    return;
+  const clang::TemplateArgumentList &args = spec->getTemplateArgs();
+  if (args.size() == 0 || args[0].getKind() != clang::TemplateArgument::Type)
+    return;
+  const std::string fact_usr = record_usr_of_type(args[0].getAsType());
+  if (fact_usr.empty())
+    return;
+  if (const auto fact = ctx_.sink().lookup_symbol_id(fact_usr)) {
+    EdgeRecord fe;
+    fe.src_id = ctx_.src_id();
+    fe.dst_id = *fact;
+    fe.kind = 15; // factory-construct
+    ctx_.sink().add_edge(fe);
   }
 }
 
@@ -234,38 +256,36 @@ void BodyVisitor::emit_construct(const clang::CXXConstructExpr *ctor) {
   if (const auto *tmp = llvm::dyn_cast<clang::CXXTemporaryObjectExpr>(ctor))
     ctx_.emit_type_name_use(tmp->getTypeSourceInfo(),
                             /*promote_described_template=*/false);
+  // A ctor that is a new-expression's initializer emits no form —
+  // construct-heap(12) covers it.
+  if (ctor != new_init_)
+    emit_construction_form(ctor, ref);
+}
 
-  // Construction form (10/11/13/14). A ctor that is a new-expression's
-  // initializer emits no form — construct-heap(12) covers it.
-  if (ctor == new_init_)
-    return;
+// Construction form (10 value / 11 temp / 13 copy / 14 move), chosen by the
+// ctor signature and the initializer position: a construct expression that IS
+// the direct initializer of a variable or of a constructor member initializer
+// sits in the var-init position.
+void BodyVisitor::emit_construction_form(const clang::CXXConstructExpr *ctor,
+                                         const clang::CXXConstructorDecl *ref) {
   const std::string type_usr = record_usr_of_type(ctor->getType());
   if (type_usr.empty())
     return;
   const auto dst = ctx_.sink().lookup_symbol_id(type_usr);
   if (!dst)
     return;
-  const auto ctor_form = [&]() -> int {
-    if (ref->getNumParams() == 1) {
-      const std::string pt = ref->getParamDecl(0)->getType().getAsString(
-          ctx_.context().getPrintingPolicy());
-      if (pt.find("&&") != std::string::npos)
-        return 14; // construct-move
-      if (pt.find('&') != std::string::npos)
-        return 13; // construct-copy
-    }
-    return 10; // construct-value
-  };
-  // A construct expression that IS the direct initializer of a variable or of
-  // a constructor member initializer sits in the var-init position.
-  const bool var_init = ctor == direct_init_;
-  int form;
-  if (var_init) {
-    form = ctor_form();
-  } else {
-    const int sig = ctor_form();
-    form = (sig == 13 || sig == 14) ? sig : 11; // construct-temp
+  int form = 10; // construct-value
+  if (ref->getNumParams() == 1) {
+    const std::string pt = ref->getParamDecl(0)->getType().getAsString(
+        printing_policy(ctx_.context()));
+    if (pt.find("&&") != std::string::npos)
+      form = 14; // construct-move
+    else if (pt.find('&') != std::string::npos)
+      form = 13; // construct-copy
   }
+  const bool var_init = ctor == direct_init_;
+  if (!var_init && form != 13 && form != 14)
+    form = 11; // construct-temp
   EdgeRecord fe;
   fe.src_id = ctx_.src_id();
   fe.dst_id = *dst;
@@ -322,41 +342,49 @@ bool BodyVisitor::VisitDeclRefExpr(clang::DeclRefExpr *dre) {
         ctx_.emit_site_edge_at(dre->getLocation(), *dst, 7);
     }
   }
-  // Bare type name in the qualifier (Color::Red): a type use under an
-  // expression parent. NNS is a value type with a Kind enum in LLVM 22, a
-  // pointer with a SpecifierKind in LLVM 21.
-  {
-    const clang::Type *t = nullptr;
-#if LLVM_VERSION_MAJOR >= 22
-    const clang::NestedNameSpecifier nns = dre->getQualifier();
-    if (nns.getKind() == clang::NestedNameSpecifier::Kind::Type)
-      t = nns.getAsType();
-#else
-    if (const clang::NestedNameSpecifier *nns = dre->getQualifier())
-      t = nns->getAsType();
-#endif
-    if (t != nullptr) {
-      if (const clang::NamedDecl *td = named_type_decl(clang::QualType(t, 0))) {
-        const std::string usr = usr_for_decl(td);
-        if (!usr.empty() && usr != ctx_.owner_usr()) {
-          if (const auto dst = ctx_.sink().lookup_symbol_id(usr))
-            if (*dst != ctx_.src_id())
-              ctx_.emit_site_edge(dre, *dst, 7);
-        }
-      }
-    }
-  }
-  // Explicit template arguments (make_unique<Widget>(...)): each named
-  // TYPE argument is spelled at the expression — emit uses.
-  if (dre->hasExplicitTemplateArgs()) {
-    for (const clang::TemplateArgumentLoc &tal : dre->template_arguments()) {
-      if (tal.getArgument().getKind() != clang::TemplateArgument::Type)
-        continue;
-      ctx_.emit_type_name_use(tal.getTypeSourceInfo(),
-                              /*promote_described_template=*/false);
-    }
-  }
+  emit_qualifier_type_use(dre);
+  emit_explicit_template_arg_uses(dre);
   return true;
+}
+
+// Bare type name in the qualifier (Color::Red): a type use under an
+// expression parent. NNS is a value type with a Kind enum in LLVM 22, a
+// pointer with a SpecifierKind in LLVM 21.
+void BodyVisitor::emit_qualifier_type_use(const clang::DeclRefExpr *dre) {
+  const clang::Type *t = nullptr;
+#if LLVM_VERSION_MAJOR >= 22
+  const clang::NestedNameSpecifier nns = dre->getQualifier();
+  if (nns.getKind() == clang::NestedNameSpecifier::Kind::Type)
+    t = nns.getAsType();
+#else
+  if (const clang::NestedNameSpecifier *nns = dre->getQualifier())
+    t = nns->getAsType();
+#endif
+  if (t == nullptr)
+    return;
+  const clang::NamedDecl *td = named_type_decl(clang::QualType(t, 0));
+  if (td == nullptr)
+    return;
+  const std::string usr = usr_for_decl(td);
+  if (usr.empty() || usr == ctx_.owner_usr())
+    return;
+  if (const auto dst = ctx_.sink().lookup_symbol_id(usr))
+    if (*dst != ctx_.src_id())
+      ctx_.emit_site_edge(dre, *dst, 7);
+}
+
+// Explicit template arguments (make_unique<Widget>(...)): each named TYPE
+// argument is spelled at the expression — emit uses.
+void BodyVisitor::emit_explicit_template_arg_uses(
+    const clang::DeclRefExpr *dre) {
+  if (!dre->hasExplicitTemplateArgs())
+    return;
+  for (const clang::TemplateArgumentLoc &tal : dre->template_arguments()) {
+    if (tal.getArgument().getKind() != clang::TemplateArgument::Type)
+      continue;
+    ctx_.emit_type_name_use(tal.getTypeSourceInfo(),
+                            /*promote_described_template=*/false);
+  }
 }
 
 bool BodyVisitor::VisitMemberExpr(clang::MemberExpr *me) {

@@ -28,11 +28,17 @@
 
 #include "clang/AST/RecursiveASTVisitor.h"
 
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace clang {
 class ASTContext;
+class CXXBaseSpecifier;
+class Expr;
 class SourceManager;
+class SourceRange;
+class TypeSourceInfo;
 class VarDecl;
 class TypedefNameDecl;
 } // namespace clang
@@ -64,6 +70,19 @@ private:
   // the target file (for_file_cursors_p).
   bool in_walk(const clang::Decl *decl) const;
 
+  void emit_base_specifier(const clang::NamedDecl *derived,
+                           const std::string &derived_usr,
+                           const clang::CXXBaseSpecifier &base);
+  int64_t inherits_src_id(const clang::NamedDecl *derived,
+                          const std::string &derived_usr);
+  void emit_crtp_instantiates(const clang::CXXRecordDecl *base_rec,
+                              const std::string &base_usr, int64_t dst_id);
+  void emit_static_member_definition(const clang::VarDecl *decl,
+                                     int64_t symbol_id);
+  std::optional<std::string> static_var_init_text(clang::SourceRange range) const;
+  void emit_static_init_def_edges(int64_t def_id, const clang::Expr *init);
+  std::vector<const clang::NamedDecl *>
+  friend_targets(const clang::TypeSourceInfo *tsi) const;
   void emit_template_params(const clang::TemplateDecl *tmpl,
                             int64_t owner_id);
   void emit_signature_uses(const clang::FunctionDecl *fn);

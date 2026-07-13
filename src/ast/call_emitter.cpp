@@ -41,38 +41,28 @@ int64_t CallEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
   return dst_id;
 }
 
-void CallEmitter::emit_resolved_call(const clang::Expr *site,
-                                     const clang::FunctionDecl *callee,
-                                     bool recovered,
-                                     const clang::NamedDecl *mint_as) {
-  const clang::NamedDecl *keyed =
-      mint_as != nullptr ? mint_as : llvm::cast<clang::NamedDecl>(callee);
-  const std::string callee_usr = usr_for_decl(keyed);
-  if (callee_usr.empty())
-    return;
+// Non-recovered target: mint the callee (flagging instantiation members) and
+// emit its template-arg rows.
+int64_t CallEmitter::mint_resolved_target(const clang::Expr *site,
+                                          const clang::FunctionDecl *callee) {
+  const bool is_inst_member =
+      callee->getPrimaryTemplate() != nullptr ||
+      callee->getMemberSpecializationInfo() != nullptr;
+  auto req = ctx_.mint().build(callee);
+  if (!req)
+    return -1;
+  req->is_instantiation = is_inst_member;
+  const int64_t dst_id = ctx_.sink().mint_symbol(*req);
+  emit_callable_template_args(ctx_.context(), ctx_.sink(),
+                              ctx_.targ_encoder(), callee, site, dst_id);
+  return dst_id;
+}
 
-  int64_t dst_id = -1;
-  if (recovered) {
-    dst_id = resolve_recovered_target(keyed, callee_usr);
-  } else {
-    // Non-recovered target: mint the callee (flagging instantiation members)
-    // and emit its template-arg rows.
-    const bool is_inst_member =
-        callee->getPrimaryTemplate() != nullptr ||
-        callee->getMemberSpecializationInfo() != nullptr;
-    if (auto req = ctx_.mint().build(callee)) {
-      req->is_instantiation = is_inst_member;
-      dst_id = ctx_.sink().mint_symbol(*req);
-      emit_callable_template_args(ctx_.context(), ctx_.sink(),
-                                  ctx_.targ_encoder(), callee, site, dst_id);
-    }
-  }
-  if (dst_id < 0)
-    return;
-
+// calls(1) edge + its edge_site row carrying the receiver provenance.
+int64_t CallEmitter::emit_call_site(const clang::Expr *site, int64_t dst_id,
+                                    const clang::FunctionDecl *callee) {
   const ReceiverProvenance recv =
       classify_call_receiver(ctx_.context(), site, callee);
-
   EdgeRecord e;
   e.src_id = ctx_.src_id();
   e.dst_id = dst_id;
@@ -94,9 +84,26 @@ void CallEmitter::emit_resolved_call(const clang::Expr *site,
   siter.recv_param_pos = recv.param_pos;
   siter.recv_type_is_value = recv.type_is_value;
   ctx_.sink().add_edge_site(siter);
+  return edge_id;
+}
+
+void CallEmitter::emit_resolved_call(const clang::Expr *site,
+                                     const clang::FunctionDecl *callee,
+                                     bool recovered,
+                                     const clang::NamedDecl *mint_as) {
+  const clang::NamedDecl *keyed =
+      mint_as != nullptr ? mint_as : llvm::cast<clang::NamedDecl>(callee);
+  const std::string callee_usr = usr_for_decl(keyed);
+  if (callee_usr.empty())
+    return;
+  const int64_t dst_id = recovered
+                             ? resolve_recovered_target(keyed, callee_usr)
+                             : mint_resolved_target(site, callee);
+  if (dst_id < 0)
+    return;
+  const int64_t edge_id = emit_call_site(site, dst_id, callee);
   emit_call_args(site, llvm::dyn_cast<clang::CallExpr>(site),
                  llvm::dyn_cast<clang::CXXConstructExpr>(site), edge_id);
-
   // B3 instantiates edges for a non-recovered template specialization.
   if (!recovered)
     emit_instantiation_edges(ctx_.context(), ctx_.sink(), ctx_.mint(),

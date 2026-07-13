@@ -7,7 +7,6 @@
 #pragma once
 
 #include "ast/edge_records.hpp"
-#include "ast/edge_records2.hpp"
 
 #include <optional>
 #include <string>

@@ -191,72 +191,82 @@ bool EdgeVisitor::VisitCXXRecordDecl(clang::CXXRecordDecl *decl) {
   if (derived_usr.empty())
     return true;
 
-  for (const clang::CXXBaseSpecifier &base : decl->bases()) {
-    // clang_getCursorReferenced(base) -> the base record decl; dependent
-    // bases (Base<T> in a template) resolve to their template pattern via
-    // the type's declaration when available.
-    const clang::CXXRecordDecl *base_rec =
-        base.getType()->getAsCXXRecordDecl();
-    if (base_rec == nullptr)
-      continue;
-    const std::string base_usr = usr_for_decl(base_rec);
-    if (base_usr.empty())
-      continue;
-
-    // src: lookup, else mint (partial specs are not indexed as symbols).
-    int64_t src_id = 0;
-    if (const auto sid = sink_.lookup_symbol_id(derived_usr)) {
-      src_id = *sid;
-    } else if (auto req = mint_.build(llvm::cast<clang::NamedDecl>(
-                   const_cast<clang::NamedDecl *>(derived)))) {
-      // kind: mapped kinds cover every accepted parent except the partial
-      // spec, which defaults to "class-template" (ast_edges.cpp comment).
-      if (cidx_symbol_kind_name(derived) == nullptr)
-        req->kind_name = "class-template";
-      src_id = sink_.mint_symbol(*req);
-    } else {
-      continue;
-    }
-
-    int64_t dst_id = 0;
-    if (auto req = mint_.build(base_rec)) {
-      dst_id = sink_.mint_symbol(*req);
-    } else {
-      continue;
-    }
-
-    EdgeRecord e;
-    e.src_id = src_id;
-    e.dst_id = dst_id;
-    e.kind = 2;
-    switch (base.getAccessSpecifier()) {
-    case clang::AS_public:    e.base_access = 1; break;
-    case clang::AS_protected: e.base_access = 2; break;
-    case clang::AS_private:   e.base_access = 3; break;
-    case clang::AS_none:      break;
-    }
-    e.is_virtual = base.isVirtual() ? 1 : 0;
-    sink_.add_edge(e);
-
-    // CRTP/template base: specialization instance -> primary template.
-    if (const auto *spec =
-            llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(base_rec)) {
-      const clang::ClassTemplateDecl *primary = spec->getSpecializedTemplate();
-      if (primary != nullptr) {
-        const std::string prim_usr = usr_for_decl(primary);
-        if (!prim_usr.empty() && prim_usr != base_usr) {
-          if (const auto prim_id = sink_.lookup_symbol_id(prim_usr)) {
-            EdgeRecord inst;
-            inst.src_id = dst_id;
-            inst.dst_id = *prim_id;
-            inst.kind = 5;
-            sink_.add_edge(inst);
-          }
-        }
-      }
-    }
-  }
+  for (const clang::CXXBaseSpecifier &base : decl->bases())
+    emit_base_specifier(derived, derived_usr, base);
   return true;
+}
+
+// One inherits(2) edge for a base specifier, plus the CRTP instantiates(5)
+// edge when the base is a class-template specialization.
+void EdgeVisitor::emit_base_specifier(const clang::NamedDecl *derived,
+                                      const std::string &derived_usr,
+                                      const clang::CXXBaseSpecifier &base) {
+  // The base record decl; dependent bases (Base<T> in a template) resolve to
+  // their template pattern via the type's declaration when available.
+  const clang::CXXRecordDecl *base_rec = base.getType()->getAsCXXRecordDecl();
+  if (base_rec == nullptr)
+    return;
+  const std::string base_usr = usr_for_decl(base_rec);
+  if (base_usr.empty())
+    return;
+  const int64_t src_id = inherits_src_id(derived, derived_usr);
+  if (src_id < 0)
+    return;
+  auto req = mint_.build(base_rec);
+  if (!req)
+    return;
+  const int64_t dst_id = sink_.mint_symbol(*req);
+
+  EdgeRecord e;
+  e.src_id = src_id;
+  e.dst_id = dst_id;
+  e.kind = 2;
+  switch (base.getAccessSpecifier()) {
+  case clang::AS_public:    e.base_access = 1; break;
+  case clang::AS_protected: e.base_access = 2; break;
+  case clang::AS_private:   e.base_access = 3; break;
+  case clang::AS_none:      break;
+  }
+  e.is_virtual = base.isVirtual() ? 1 : 0;
+  sink_.add_edge(e);
+  emit_crtp_instantiates(base_rec, base_usr, dst_id);
+}
+
+// src of an inherits edge: lookup, else mint (partial specs are not indexed
+// as symbols; unmapped kinds default to "class-template").
+int64_t EdgeVisitor::inherits_src_id(const clang::NamedDecl *derived,
+                                     const std::string &derived_usr) {
+  if (const auto sid = sink_.lookup_symbol_id(derived_usr))
+    return *sid;
+  auto req = mint_.build(derived);
+  if (!req)
+    return -1;
+  if (cidx_symbol_kind_name(derived) == nullptr)
+    req->kind_name = "class-template";
+  return sink_.mint_symbol(*req);
+}
+
+// CRTP/template base: specialization instance -> primary template.
+void EdgeVisitor::emit_crtp_instantiates(const clang::CXXRecordDecl *base_rec,
+                                         const std::string &base_usr,
+                                         int64_t dst_id) {
+  const auto *spec =
+      llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(base_rec);
+  if (spec == nullptr)
+    return;
+  const clang::ClassTemplateDecl *primary = spec->getSpecializedTemplate();
+  if (primary == nullptr)
+    return;
+  const std::string prim_usr = usr_for_decl(primary);
+  if (prim_usr.empty() || prim_usr == base_usr)
+    return;
+  if (const auto prim_id = sink_.lookup_symbol_id(prim_usr)) {
+    EdgeRecord inst;
+    inst.src_id = dst_id;
+    inst.dst_id = *prim_id;
+    inst.kind = 5;
+    sink_.add_edge(inst);
+  }
 }
 
 // -- field_of (kind=8) + field type use/mint -----------------------------------
@@ -302,74 +312,84 @@ bool EdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
                 expansion_loc(context_, decl->getLocation()), 0);
   // v27: out-of-line static DATA MEMBER definition — a per-backend body.
   if (decl->isThisDeclarationADefinition() == clang::VarDecl::Definition &&
-      decl->isStaticDataMember()) {
-    const clang::SourceRange range = decl->getSourceRange();
-    const ExpansionLoc start = extent_start(context_, range);
-    const ExpansionLoc end = extent_end(context_, range);
-    // Initializer source text after '=' (static_var_init_text): exact slice.
-    std::optional<std::string> init_text;
-    {
-      const clang::SourceManager &sm = context_.getSourceManager();
-      const clang::SourceLocation b = sm.getExpansionLoc(range.getBegin());
-      const clang::SourceLocation e = clang::Lexer::getLocForEndOfToken(
-          sm.getExpansionLoc(range.getEnd()), 0, sm, context_.getLangOpts());
-      bool invalid = false;
-      // Both ends must sit in the same file buffer: a range whose begin and
-      // end expand into different buffers (macro spellings, PCH prefix
-      // buffers) yields pointers into unrelated allocations, and ep - bp is
-      // garbage.
-      const bool same_buffer = b.isValid() && e.isValid() &&
-                               sm.getFileID(b) == sm.getFileID(e);
-      const char *bp = same_buffer ? sm.getCharacterData(b, &invalid) : nullptr;
-      const char *ep = (same_buffer && !invalid)
-                           ? sm.getCharacterData(e, &invalid)
-                           : nullptr;
-      if (!invalid && bp != nullptr && ep != nullptr && ep > bp) {
-        std::string raw(bp, static_cast<size_t>(ep - bp));
-        const auto eq = raw.find('=');
-        if (eq != std::string::npos) {
-          const auto strip = [](std::string s) {
-            const char *ws = " \t\r\n\f\v";
-            const auto b2 = s.find_first_not_of(ws);
-            if (b2 == std::string::npos)
-              return std::string();
-            const auto e2 = s.find_last_not_of(ws);
-            return s.substr(b2, e2 - b2 + 1);
-          };
-          std::string val = strip(raw.substr(eq + 1));
-          while (!val.empty() && val.back() == ';')
-            val.pop_back();
-          val = strip(val);
-          if (!val.empty())
-            init_text = val;
-        }
-      }
-    }
-    const int64_t def_id = sink_.get_or_create_definition(
-        *self, file_id_, start.line, start.col, end.line, end.col, init_text);
-    // Initializer calls become def_edge USES (emit_static_init_def_edges).
-    if (const clang::Expr *init = decl->getInit()) {
-      std::vector<const clang::Stmt *> stack{init};
-      while (!stack.empty()) {
-        const clang::Stmt *s = stack.back();
-        stack.pop_back();
-        if (s == nullptr)
-          continue;
-        if (const auto *call = llvm::dyn_cast<clang::CallExpr>(s)) {
-          if (const auto *fd = llvm::dyn_cast_or_null<clang::FunctionDecl>(
-                  call->getCalleeDecl())) {
-            const std::string cu = usr_for_decl(fd);
-            if (!cu.empty())
-              if (const auto cid = sink_.lookup_symbol_id(cu))
-                sink_.add_def_edge(def_id, *cid, 7);
-          }
-        }
-        for (const clang::Stmt *c : s->children())
-          stack.push_back(c);
-      }
-    }
-  }
+      decl->isStaticDataMember())
+    emit_static_member_definition(decl, *self);
   return true;
+}
+
+void EdgeVisitor::emit_static_member_definition(const clang::VarDecl *decl,
+                                                int64_t symbol_id) {
+  const clang::SourceRange range = decl->getSourceRange();
+  const ExpansionLoc start = extent_start(context_, range);
+  const ExpansionLoc end = extent_end(context_, range);
+  const int64_t def_id = sink_.get_or_create_definition(
+      symbol_id, file_id_, start.line, start.col, end.line, end.col,
+      static_var_init_text(range));
+  // Initializer calls become def_edge USES (emit_static_init_def_edges).
+  if (const clang::Expr *init = decl->getInit())
+    emit_static_init_def_edges(def_id, init);
+}
+
+// Initializer source text after '=' (static_var_init_text): exact slice.
+std::optional<std::string>
+EdgeVisitor::static_var_init_text(clang::SourceRange range) const {
+  const clang::SourceManager &sm = context_.getSourceManager();
+  const clang::SourceLocation b = sm.getExpansionLoc(range.getBegin());
+  const clang::SourceLocation e = clang::Lexer::getLocForEndOfToken(
+      sm.getExpansionLoc(range.getEnd()), 0, sm, context_.getLangOpts());
+  bool invalid = false;
+  // Both ends must sit in the same file buffer: a range whose begin and end
+  // expand into different buffers (macro spellings, PCH prefix buffers)
+  // yields pointers into unrelated allocations, and ep - bp is garbage.
+  const bool same_buffer =
+      b.isValid() && e.isValid() && sm.getFileID(b) == sm.getFileID(e);
+  const char *bp = same_buffer ? sm.getCharacterData(b, &invalid) : nullptr;
+  const char *ep =
+      (same_buffer && !invalid) ? sm.getCharacterData(e, &invalid) : nullptr;
+  if (invalid || bp == nullptr || ep == nullptr || ep <= bp)
+    return std::nullopt;
+  const std::string raw(bp, static_cast<size_t>(ep - bp));
+  const auto eq = raw.find('=');
+  if (eq == std::string::npos)
+    return std::nullopt;
+  const auto strip = [](std::string s) {
+    const char *ws = " \t\r\n\f\v";
+    const auto b2 = s.find_first_not_of(ws);
+    if (b2 == std::string::npos)
+      return std::string();
+    const auto e2 = s.find_last_not_of(ws);
+    return s.substr(b2, e2 - b2 + 1);
+  };
+  std::string val = strip(raw.substr(eq + 1));
+  while (!val.empty() && val.back() == ';')
+    val.pop_back();
+  val = strip(val);
+  if (val.empty())
+    return std::nullopt;
+  return val;
+}
+
+// Call targets anywhere in the initializer become def_edge USES rows.
+void EdgeVisitor::emit_static_init_def_edges(int64_t def_id,
+                                             const clang::Expr *init) {
+  std::vector<const clang::Stmt *> stack{init};
+  while (!stack.empty()) {
+    const clang::Stmt *s = stack.back();
+    stack.pop_back();
+    if (s == nullptr)
+      continue;
+    if (const auto *call = llvm::dyn_cast<clang::CallExpr>(s)) {
+      if (const auto *fd = llvm::dyn_cast_or_null<clang::FunctionDecl>(
+              call->getCalleeDecl())) {
+        const std::string cu = usr_for_decl(fd);
+        if (!cu.empty())
+          if (const auto cid = sink_.lookup_symbol_id(cu))
+            sink_.add_def_edge(def_id, *cid, 7);
+      }
+    }
+    for (const clang::Stmt *c : s->children())
+      stack.push_back(c);
+  }
 }
 
 // -- TYPEDEF/TYPE_ALIAS: named-instance mint + underlying type use ------------
@@ -426,6 +446,33 @@ bool EdgeVisitor::VisitCXXMethodDecl(clang::CXXMethodDecl *decl) {
   return true;
 }
 
+
+// The record decls a `friend` type declaration references. For
+// `friend class B;` that is B itself; for `friend class Singleton<Cache>;`
+// the named records are the template ARGUMENT types (yielding the quirky
+// self-friend edge the retired reference emitted). Mirror both shapes.
+std::vector<const clang::NamedDecl *>
+EdgeVisitor::friend_targets(const clang::TypeSourceInfo *tsi) const {
+  std::vector<const clang::NamedDecl *> refs;
+  const clang::Type *type = tsi->getType().getTypePtrOrNull();
+  if (type == nullptr)
+    return refs;
+  if (const auto *tst = type->getAs<clang::TemplateSpecializationType>()) {
+    for (const clang::TemplateArgument &arg : tst->template_arguments()) {
+      if (arg.getKind() != clang::TemplateArgument::Type)
+        continue;
+      if (const clang::TagDecl *td = arg.getAsType()->getAsTagDecl())
+        refs.push_back(td);
+    }
+  } else if (const clang::CXXRecordDecl *rec = type->getAsCXXRecordDecl()) {
+    const clang::NamedDecl *target = rec;
+    if (const clang::ClassTemplateDecl *ct = rec->getDescribedClassTemplate())
+      target = ct;
+    refs.push_back(target);
+  }
+  return refs;
+}
+
 // -- friend (kind=17) ---------------------------------------------------------
 bool EdgeVisitor::VisitFriendDecl(clang::FriendDecl *decl) {
   if (!in_walk(decl))
@@ -440,33 +487,10 @@ bool EdgeVisitor::VisitFriendDecl(clang::FriendDecl *decl) {
   const auto src = sink_.lookup_symbol_id(owner_usr);
   if (!src)
     return true;
-  // libclang collects the FriendDecl's direct TYPE_REF children. For
-  // `friend class B;` that is B itself; for `friend class Singleton<Cache>;`
-  // the TEMPLATE_REF (Singleton) is NOT a TYPE_REF, so the collected refs are
-  // the template ARGUMENT records (yielding the quirky self-friend edge the
-  // reference emits). Mirror both shapes.
   const clang::TypeSourceInfo *tsi = decl->getFriendType();
   if (tsi == nullptr)
     return true; // friend functions are not recorded
-  std::vector<const clang::NamedDecl *> refs;
-  const clang::Type *type = tsi->getType().getTypePtrOrNull();
-  if (type != nullptr) {
-    if (const auto *tst = type->getAs<clang::TemplateSpecializationType>()) {
-      for (const clang::TemplateArgument &arg : tst->template_arguments()) {
-        if (arg.getKind() != clang::TemplateArgument::Type)
-          continue;
-        if (const clang::TagDecl *td = arg.getAsType()->getAsTagDecl())
-          refs.push_back(td);
-      }
-    } else if (const clang::CXXRecordDecl *rec = type->getAsCXXRecordDecl()) {
-      const clang::NamedDecl *target = rec;
-      if (const clang::ClassTemplateDecl *ct =
-              rec->getDescribedClassTemplate())
-        target = ct;
-      refs.push_back(target);
-    }
-  }
-  for (const clang::NamedDecl *target : refs) {
+  for (const clang::NamedDecl *target : friend_targets(tsi)) {
     const std::string friend_usr = usr_for_decl(target);
     if (friend_usr.empty())
       continue;

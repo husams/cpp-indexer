@@ -37,23 +37,29 @@ bool NsUsesVisitor::in_target_file(const clang::Decl *decl) const {
   return expansion_loc(context_, decl->getLocation()).file == target_file_;
 }
 
+// The indexed symbol id a scope-establishing decl contributes to the
+// enclosing-source stack (nullopt when not a scope, unnamed, or unindexed).
+std::optional<int64_t>
+NsUsesVisitor::scope_symbol_id(const clang::Decl *decl) const {
+  if (!is_scope_decl(decl))
+    return std::nullopt;
+  const auto *nd = llvm::dyn_cast<clang::NamedDecl>(decl);
+  if (nd == nullptr)
+    return std::nullopt;
+  const std::string usr = usr_for_decl(nd);
+  if (usr.empty())
+    return std::nullopt;
+  return sink_.lookup_symbol_id(usr);
+}
+
 bool NsUsesVisitor::TraverseDecl(clang::Decl *decl) {
   if (decl == nullptr)
     return true;
-  bool pushed = false;
-  if (is_scope_decl(decl)) {
-    if (const auto *nd = llvm::dyn_cast<clang::NamedDecl>(decl)) {
-      const std::string usr = usr_for_decl(nd);
-      if (!usr.empty()) {
-        if (const auto id = sink_.lookup_symbol_id(usr)) {
-          scope_stack_.push_back(*id);
-          pushed = true;
-        }
-      }
-    }
-  }
+  const std::optional<int64_t> scope_id = scope_symbol_id(decl);
+  if (scope_id)
+    scope_stack_.push_back(*scope_id);
   const bool result = RecursiveASTVisitor::TraverseDecl(decl);
-  if (pushed)
+  if (scope_id)
     scope_stack_.pop_back();
   return result;
 }

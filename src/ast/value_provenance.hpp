@@ -4,7 +4,7 @@
 // call_arg rows.
 #pragma once
 
-#include "ast/edge_records2.hpp"
+#include "ast/edge_records.hpp"
 
 #include <string>
 

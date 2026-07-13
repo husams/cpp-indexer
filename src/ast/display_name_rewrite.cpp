@@ -4,6 +4,32 @@
 
 namespace cidx::lt {
 
+namespace {
+
+// Replace the display name's existing balanced <...> block (before the
+// parameter list) with `rendered`, or insert it before the parameter list /
+// append when none exists.
+std::string splice_template_args(const std::string &display,
+                                 const std::string &rendered) {
+  const size_t start = display.find('<');
+  const size_t params = display.find('(');
+  if (start != std::string::npos &&
+      (params == std::string::npos || start < params)) {
+    int depth = 0;
+    for (size_t i = start; i < display.size(); ++i) {
+      if (display[i] == '<')
+        ++depth;
+      else if (display[i] == '>' && --depth == 0)
+        return display.substr(0, start) + rendered + display.substr(i + 1);
+    }
+  }
+  if (params != std::string::npos)
+    return display.substr(0, params) + rendered + display.substr(params);
+  return display + rendered;
+}
+
+} // namespace
+
 std::optional<std::string>
 rewrite_template_display_name(const std::string &display,
                               const std::vector<std::string> &display_args) {
@@ -23,29 +49,7 @@ rewrite_template_display_name(const std::string &display,
   }
   rendered += ">";
 
-  std::string out = display;
-  const size_t start = out.find('<');
-  const size_t params = out.find('(');
-  bool replaced = false;
-  if (start != std::string::npos &&
-      (params == std::string::npos || start < params)) {
-    int depth = 0;
-    for (size_t i = start; i < out.size(); ++i) {
-      if (out[i] == '<')
-        ++depth;
-      else if (out[i] == '>' && --depth == 0) {
-        out = out.substr(0, start) + rendered + out.substr(i + 1);
-        replaced = true;
-        break;
-      }
-    }
-  }
-  if (!replaced) {
-    if (params != std::string::npos)
-      out = out.substr(0, params) + rendered + out.substr(params);
-    else
-      out += rendered;
-  }
+  const std::string out = splice_template_args(display, rendered);
   if (out == display)
     return std::nullopt;
   return out;

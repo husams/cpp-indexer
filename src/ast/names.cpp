@@ -55,6 +55,72 @@ std::string qualified_name(const clang::ASTContext &context,
   return out;
 }
 
+namespace {
+
+// The AS-WRITTEN template argument list, comma-joined inside <>.
+void print_written_args(llvm::raw_string_ostream &os,
+                        const clang::PrintingPolicy &policy,
+                        const clang::ASTTemplateArgumentListInfo *written) {
+  os << '<';
+  if (written != nullptr) {
+    bool first = true;
+    for (const clang::TemplateArgumentLoc &tal : written->arguments()) {
+      if (!first)
+        os << ", ";
+      first = false;
+      tal.getArgument().print(policy, os, /*IncludeType=*/false);
+    }
+  }
+  os << '>';
+}
+
+// Function display: name, as-written spec args (an implicit instantiation
+// shows empty <>, an explicit specialization its written args), and the
+// parameter TYPE list.
+void print_function_display(llvm::raw_string_ostream &os,
+                            const clang::PrintingPolicy &policy,
+                            const clang::FunctionDecl *fd) {
+  fd->getDeclName().print(os, policy);
+  if (fd->getTemplateSpecializationArgs() != nullptr)
+    print_written_args(os, policy,
+                       fd->getTemplateSpecializationArgsAsWritten());
+  os << '(';
+  bool first = true;
+  for (const clang::ParmVarDecl *p : fd->parameters()) {
+    if (!first)
+      os << ", ";
+    first = false;
+    os << p->getType().getAsString(policy);
+  }
+  if (fd->isVariadic()) {
+    if (!first)
+      os << ", ";
+    os << "...";
+  }
+  os << ')';
+}
+
+// Class-template specialization display: partial specializations print their
+// args AS WRITTEN ('RuleTemplate<int, NameType>', not canonical
+// type-parameter-0-0); full specializations print the deduced list.
+void print_class_spec_display(
+    llvm::raw_string_ostream &os, const clang::PrintingPolicy &policy,
+    const clang::ClassTemplateSpecializationDecl *spec) {
+  spec->getDeclName().print(os, policy);
+  if (const auto *partial =
+          llvm::dyn_cast<clang::ClassTemplatePartialSpecializationDecl>(spec)) {
+    if (const clang::ASTTemplateArgumentListInfo *written =
+            partial->getTemplateArgsAsWritten()) {
+      print_written_args(os, policy, written);
+      return;
+    }
+  }
+  clang::printTemplateArgumentList(os, spec->getTemplateArgs().asArray(),
+                                   policy);
+}
+
+} // namespace
+
 std::optional<std::string> display_name(const clang::ASTContext &context,
                                         const clang::NamedDecl *decl) {
   // Mirror clang_getCursorDisplayName (CIndex.cpp): functions get their
@@ -85,62 +151,10 @@ std::optional<std::string> display_name(const clang::ASTContext &context,
     return out;
   }
   if (const auto *fd = llvm::dyn_cast<clang::FunctionDecl>(decl)) {
-    fd->getDeclName().print(os, policy);
-    if (fd->getTemplateSpecializationArgs() != nullptr) {
-      // libclang prints the AS-WRITTEN spec args: an implicit instantiation
-      // shows empty <> (make_shared<>), an explicit specialization its
-      // written args (describe<bool>).
-      os << '<';
-      if (const clang::ASTTemplateArgumentListInfo *written =
-              fd->getTemplateSpecializationArgsAsWritten()) {
-        bool first_arg = true;
-        for (const clang::TemplateArgumentLoc &tal : written->arguments()) {
-          if (!first_arg)
-            os << ", ";
-          first_arg = false;
-          tal.getArgument().print(policy, os, /*IncludeType=*/false);
-        }
-      }
-      os << '>';
-    }
-    os << '(';
-    bool first = true;
-    for (const clang::ParmVarDecl *p : fd->parameters()) {
-      if (!first)
-        os << ", ";
-      first = false;
-      os << p->getType().getAsString(policy);
-    }
-    if (fd->isVariadic()) {
-      if (!first)
-        os << ", ";
-      os << "...";
-    }
-    os << ')';
+    print_function_display(os, policy, fd);
   } else if (const auto *spec =
                  llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(decl)) {
-    spec->getDeclName().print(os, policy);
-    // Partial specializations print their args AS WRITTEN (libclang shows
-    // 'RuleTemplate<int, NameType>', not canonical type-parameter-0-0).
-    if (const auto *partial =
-            llvm::dyn_cast<clang::ClassTemplatePartialSpecializationDecl>(
-                decl)) {
-      if (const clang::ASTTemplateArgumentListInfo *written =
-              partial->getTemplateArgsAsWritten()) {
-        os << '<';
-        bool first = true;
-        for (const clang::TemplateArgumentLoc &tal : written->arguments()) {
-          if (!first)
-            os << ", ";
-          first = false;
-          tal.getArgument().print(policy, os, /*IncludeType=*/false);
-        }
-        os << '>';
-        return out;
-      }
-    }
-    clang::printTemplateArgumentList(os, spec->getTemplateArgs().asArray(),
-                                     policy);
+    print_class_spec_display(os, policy, spec);
   } else {
     std::string s = spelling(decl);
     if (s.empty())

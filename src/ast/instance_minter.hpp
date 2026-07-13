@@ -5,8 +5,12 @@
 
 #include "clang/AST/Type.h"
 
+#include <cstdint>
+
 namespace clang {
 class ASTContext;
+class ClassTemplateSpecializationDecl;
+class NamedDecl;
 class TypedefNameDecl;
 } // namespace clang
 
@@ -30,6 +34,13 @@ public:
   void mint_named_instance(const clang::TypedefNameDecl *alias) const;
 
 private:
+  const clang::NamedDecl *mintable_primary(
+      const clang::ClassTemplateSpecializationDecl *spec) const;
+  int64_t
+  mint_instance_pair(const clang::ClassTemplateSpecializationDecl *spec,
+                     const clang::NamedDecl *primary,
+                     clang::QualType written_type) const;
+
   const clang::ASTContext &context_;
   EdgeSink &sink_;
   const MintBuilder &mint_;

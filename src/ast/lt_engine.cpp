@@ -128,110 +128,146 @@ private:
   std::vector<cidx::Diagnostic> &out_;
 };
 
-class EngineConsumer : public clang::ASTConsumer {
+// Per-TU indexing stages: symbols(main) -> owned-header two-pass ->
+// edges(main). One instance per HandleTranslationUnit call.
+class TranslationUnitIndexer {
 public:
-  explicit EngineConsumer(EngineState &state) : state_(state) {}
+  TranslationUnitIndexer(clang::ASTContext &context, EngineState &state)
+      : context_(context), state_(state), db_(*state.db), symbols_(db_),
+        edges_(db_), tu_(context.getTranslationUnitDecl()) {}
 
-  void HandleTranslationUnit(clang::ASTContext &context) override {
-    state_.tu_handled = true;
-    // Parity with classic parse(): a diagnostic at/above the abort level
-    // makes the file fail with NO rows written (the classic path throws
-    // ClangParseError before index_symbols). Gate before touching the DB.
-    const clang::DiagnosticsEngine &de = context.getDiagnostics();
-    if (de.hasFatalErrorOccurred() ||
-        (state_.strict && de.getClient()->getNumErrors() > 0)) {
+  void run() {
+    state_.out->stored = run_symbol_pass(state_.path, state_.rec->id);
+    const std::vector<PendingHeader> plan = plan_owned_headers();
+    run_header_passes(plan);
+    // edges(main) LAST (commands.cpp ordering).
+    run_edge_pass(state_.path, state_.rec->id);
+  }
+
+private:
+  // A not-yet-indexed OWNED non-system header discovered by the include
+  // recorder, with its freshly minted file row.
+  struct PendingHeader {
+    std::string path;
+    int64_t file_id;
+    std::optional<double> mtime;
+    int stored = 0;
+  };
+
+  int run_symbol_pass(const std::string &file, int64_t file_id) {
+    symbols_.set_current_file_id(file_id);
+    symbols_.reset_counters();
+    auto txn = db_.transaction();
+    SymbolVisitor visitor(context_, symbols_, file);
+    visitor.TraverseDecl(tu_);
+    txn.commit();
+    return symbols_.stored_count();
+  }
+
+  void run_edge_pass(const std::string &file, int64_t file_id) {
+    if (!state_.graph_enabled)
       return;
-    }
-    cidx::Storage &db = *state_.db;
-    StorageSymbolSink symbols(db);
-    StorageEdgeSink edges(db);
-    clang::Decl *tu = context.getTranslationUnitDecl();
+    edges_.delete_edges_for_file(file_id);
+    edges_.delete_definitions_for_file(file_id);
+    auto txn = db_.transaction();
+    EdgeVisitor decls(context_, edges_, file, file_id);
+    decls.TraverseDecl(tu_);
+    BodyPassVisitor bodies(context_, edges_, file, file_id);
+    bodies.TraverseDecl(tu_);
+    NsUsesVisitor ns(context_, edges_, file, file_id);
+    ns.TraverseDecl(tu_);
+    txn.commit();
+  }
 
-    const auto run_symbols = [&](const std::string &file, int64_t file_id) {
-      symbols.set_current_file_id(file_id);
-      symbols.reset_counters();
-      auto txn = db.transaction();
-      SymbolVisitor visitor(context, symbols, file);
-      visitor.TraverseDecl(tu);
-      txn.commit();
-      return symbols.stored_count();
-    };
-    const auto run_edges = [&](const std::string &file, int64_t file_id) {
-      if (!state_.graph_enabled)
-        return;
-      edges.delete_edges_for_file(file_id);
-      edges.delete_definitions_for_file(file_id);
-      auto txn = db.transaction();
-      EdgeVisitor decls(context, edges, file, file_id);
-      decls.TraverseDecl(tu);
-      BodyPassVisitor bodies(context, edges, file, file_id);
-      bodies.TraverseDecl(tu);
-      NsUsesVisitor ns(context, edges, file, file_id);
-      ns.TraverseDecl(tu);
-      txn.commit();
-    };
-
-    // 1. symbols(main).
-    state_.out->stored = run_symbols(state_.path, state_.rec->id);
-
-    // 2. header two-pass (index_headers): pass 1 mints symbols for every
-    //    not-yet-indexed OWNED non-system header, pass 2 extracts edges.
-    const clang::SourceManager &sm = context.getSourceManager();
-    struct Pending {
-      std::string path;
-      int64_t file_id;
-      std::optional<double> mtime;
-      int stored;
-    };
-    std::vector<Pending> pending;
+  // Classify every recorded inclusion (system / unowned / already indexed)
+  // and mint file rows for the headers this TU must index.
+  std::vector<PendingHeader> plan_owned_headers() {
+    std::vector<PendingHeader> plan;
     std::unordered_set<std::string> seen;
     cidx::HeaderStats &counts = state_.out->headers;
     for (const std::string &inc : state_.inclusions) {
       const std::string abs = cidx::pathutil::abspath(inc);
       if (!seen.insert(abs).second)
         continue;
-      // System check: characteristic of the header's own content (parity
-      // with clang_Location_isInSystemHeader at (file,1,1)).
-      bool is_system = false;
-      if (auto fe = sm.getFileManager().getFileRef(inc)) {
-        const clang::FileID fid = sm.translateFile(*fe);
-        if (fid.isValid())
-          is_system = sm.getFileCharacteristic(
-                          sm.getLocForStartOfFile(fid)) !=
-                      clang::SrcMgr::C_User;
-      }
-      if (is_system) {
+      if (is_system_header(inc)) {
         ++counts.system;
         continue;
       }
-      if (!db.component_for_path(abs)) {
+      if (!db_.component_for_path(abs)) {
         ++counts.unowned;
         continue;
       }
       const std::optional<std::string> md5 = cidx::md5_of(abs);
-      if (db.is_file_indexed(abs, std::nullopt, md5)) {
+      if (db_.is_file_indexed(abs, std::nullopt, md5)) {
         ++counts.already;
         continue;
       }
       const std::optional<double> mtime = file_mtime(abs);
-      const int64_t hid = db.add_file_path(abs, mtime, md5,
-                                           state_.rec->compile_options,
-                                           state_.rec->driver);
-      const int stored = run_symbols(abs, hid);
-      pending.push_back({abs, hid, mtime, stored});
+      const int64_t hid =
+          db_.add_file_path(abs, mtime, md5, state_.rec->compile_options,
+                            state_.rec->driver);
+      plan.push_back({abs, hid, mtime, 0});
     }
-    for (const Pending &ph : pending) {
-      run_edges(ph.path, ph.file_id);
-      db.mark_file_indexed(ph.file_id, ph.mtime);
+    return plan;
+  }
+
+  // Header two-pass (index_headers): pass 1 mints symbols for every planned
+  // header, pass 2 extracts its edges and marks it indexed.
+  void run_header_passes(std::vector<PendingHeader> plan) {
+    cidx::HeaderStats &counts = state_.out->headers;
+    for (PendingHeader &ph : plan)
+      ph.stored = run_symbol_pass(ph.path, ph.file_id);
+    for (const PendingHeader &ph : plan) {
+      run_edge_pass(ph.path, ph.file_id);
+      db_.mark_file_indexed(ph.file_id, ph.mtime);
       ++counts.indexed;
       counts.symbols += ph.stored;
     }
+  }
 
-    // 3. edges(main) LAST (commands.cpp ordering).
-    run_edges(state_.path, state_.rec->id);
+  // System check: characteristic of the header's own content (parity with
+  // clang_Location_isInSystemHeader at (file,1,1)).
+  bool is_system_header(const std::string &inc) const {
+    const clang::SourceManager &sm = context_.getSourceManager();
+    auto fe = sm.getFileManager().getFileRef(inc);
+    if (!fe)
+      return false;
+    const clang::FileID fid = sm.translateFile(*fe);
+    if (!fid.isValid())
+      return false;
+    return sm.getFileCharacteristic(sm.getLocForStartOfFile(fid)) !=
+           clang::SrcMgr::C_User;
+  }
+
+  clang::ASTContext &context_;
+  EngineState &state_;
+  cidx::Storage &db_;
+  StorageSymbolSink symbols_;
+  StorageEdgeSink edges_;
+  clang::Decl *tu_;
+};
+
+class EngineConsumer : public clang::ASTConsumer {
+public:
+  explicit EngineConsumer(EngineState &state) : state_(state) {}
+
+  void HandleTranslationUnit(clang::ASTContext &context) override {
+    state_.tu_handled = true;
+    if (!diagnostics_allow_indexing(context))
+      return;
+    TranslationUnitIndexer(context, state_).run();
   }
 
 private:
+  // Parity with classic parse(): a diagnostic at/above the abort level makes
+  // the file fail with NO rows written (the classic path threw before
+  // index_symbols). Gate before touching the DB.
+  bool diagnostics_allow_indexing(const clang::ASTContext &context) const {
+    const clang::DiagnosticsEngine &de = context.getDiagnostics();
+    return !de.hasFatalErrorOccurred() &&
+           !(state_.strict && de.getClient()->getNumErrors() > 0);
+  }
+
   EngineState &state_;
 };
 
@@ -268,12 +304,11 @@ private:
 
 } // namespace
 
-IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
-                              const std::string &path, bool graph_enabled) {
-  IndexOneOutcome out;
-
-  // Flag assembly identical to Parser::parse: re-sanitized stored options,
-  // <label>/$VAR resolution, toolchain search paths, -ferror-limit=0.
+// Flag assembly identical to Parser::parse: re-sanitized stored options,
+// <label>/$VAR resolution, toolchain search paths, -ferror-limit=0.
+static std::vector<std::string> build_clang_arguments(cidx::Storage &db,
+                                                      const cidx::File &rec,
+                                                      const std::string &path) {
   const std::vector<std::string> opts = cidx::CompileDb::resolve_options(
       cidx::CompileDb::sanitize(rec.compile_options
                                     ? *rec.compile_options
@@ -285,71 +320,89 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   for (std::string &f : toolchain.toolchain_flags(cpp, rec.driver))
     args.push_back(std::move(f));
   args.push_back("-ferror-limit=0");
+  return args;
+}
 
-  clang::tooling::FixedCompilationDatabase cdb(".", args);
-  clang::tooling::ClangTool tool(cdb, {path});
+// create_compilation_database + tool: the fixed database must outlive the
+// tool, so both live in one holder.
+struct CompilationSetup {
+  CompilationSetup(const std::vector<std::string> &args,
+                   const std::string &path)
+      : cdb(".", args), tool(cdb, {path}) {
 #ifdef CIDX_LT_RESOURCE_DIR
-  tool.appendArgumentsAdjuster(clang::tooling::getInsertArgumentAdjuster(
-      {"-resource-dir", CIDX_LT_RESOURCE_DIR},
-      clang::tooling::ArgumentInsertPosition::BEGIN));
+    tool.appendArgumentsAdjuster(clang::tooling::getInsertArgumentAdjuster(
+        {"-resource-dir", CIDX_LT_RESOURCE_DIR},
+        clang::tooling::ArgumentInsertPosition::BEGIN));
 #endif
-  DiagCollector collector(out.diagnostics);
-  tool.setDiagnosticConsumer(&collector);
+  }
+  clang::tooling::FixedCompilationDatabase cdb;
+  clang::tooling::ClangTool tool;
+};
 
-  const std::string strict_raw = [] {
-    auto v = cidx::get_env("CIDX_STRICT").value_or("");
-    for (char &c : v) c = static_cast<char>(std::tolower(c));
-    return v;
-  }();
-  const bool strict = !(strict_raw.empty() || strict_raw == "0" ||
-                        strict_raw == "off" || strict_raw == "none" ||
-                        strict_raw == "false");
+// CIDX_STRICT: abort on Error (not just Fatal) when set truthy.
+static bool read_strict_mode() {
+  std::string v = cidx::get_env("CIDX_STRICT").value_or("");
+  for (char &c : v)
+    c = static_cast<char>(std::tolower(c));
+  return !(v.empty() || v == "0" || v == "off" || v == "none" || v == "false");
+}
+
+// Diagnostics at/above the abort level (CIDX_STRICT: default Fatal, strict
+// Error) fail the TU with the "<path>: N fatal diagnostic(s): file:line:
+// msg[; ...]" summary (first 3).
+static void apply_diagnostic_policy(const std::string &path, bool strict,
+                                    const std::vector<std::string> &args,
+                                    IndexOneOutcome &out) {
+  const int64_t level = strict ? 3 : 4;
+  std::size_t fatal_count = 0;
+  std::vector<std::string> summary;
+  for (const cidx::Diagnostic &d : out.diagnostics) {
+    if (d.severity < level)
+      continue;
+    ++fatal_count;
+    if (summary.size() < 3)
+      summary.push_back(d.file_path.value_or("") + ":" +
+                        std::to_string(d.line.value_or(0)) + ": " +
+                        d.spelling);
+  }
+  if (fatal_count == 0)
+    return;
+  out.parse_failed = true;
+  std::string joined;
+  for (std::size_t i = 0; i < summary.size(); ++i) {
+    if (i != 0)
+      joined += "; ";
+    joined += summary[i];
+  }
+  out.error = path + ": " + std::to_string(fatal_count) +
+              " fatal diagnostic(s): " + joined;
+  out.failed_flags = args;
+}
+
+IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
+                              const std::string &path, bool graph_enabled) {
+  IndexOneOutcome out;
+  const std::vector<std::string> args = build_clang_arguments(db, rec, path);
+  CompilationSetup setup(args, path);
+  DiagCollector collector(out.diagnostics);
+  setup.tool.setDiagnosticConsumer(&collector);
 
   EngineState state;
   state.db = &db;
   state.rec = &rec;
   state.path = path;
   state.graph_enabled = graph_enabled;
-  state.strict = strict;
+  state.strict = read_strict_mode();
   state.out = &out;
 
   EngineActionFactory factory(state);
-  const int rc = tool.run(&factory);
+  (void)setup.tool.run(&factory);
   if (!state.tu_handled) {
     out.parse_failed = true;
     out.error = "cannot parse " + path;
     return out;
   }
-  // apply_diagnostic_policy parity: diagnostics at/above the abort level
-  // (CIDX_STRICT: default Fatal, strict Error) fail the TU with the
-  // "<path>: N fatal diagnostic(s): file:line: msg[; ...]" summary (first 3).
-  {
-    const int64_t level = strict ? 3 : 4;
-    std::size_t fatal_count = 0;
-    std::vector<std::string> summary;
-    for (const cidx::Diagnostic &d : out.diagnostics) {
-      if (d.severity >= level) {
-        ++fatal_count;
-        if (summary.size() < 3)
-          summary.push_back(d.file_path.value_or("") + ":" +
-                            std::to_string(d.line.value_or(0)) + ": " +
-                            d.spelling);
-      }
-    }
-    if (fatal_count > 0) {
-      out.parse_failed = true;
-      std::string joined;
-      for (std::size_t i = 0; i < summary.size(); ++i) {
-        if (i != 0)
-          joined += "; ";
-        joined += summary[i];
-      }
-      out.error = path + ": " + std::to_string(fatal_count) +
-                  " fatal diagnostic(s): " + joined;
-      out.failed_flags = args;
-    }
-  }
-  (void)rc;
+  apply_diagnostic_policy(path, state.strict, args, out);
   return out;
 }
 
