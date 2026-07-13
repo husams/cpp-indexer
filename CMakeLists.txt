@@ -169,9 +169,6 @@ add_library(cidx_lt OBJECT
   src/ast/edge_visitor.cpp src/ast/type_use.cpp
   src/ast/value_source.cpp src/ast/instance_minter.cpp
   src/ast/body_emit_context.cpp src/ast/call_emitter.cpp
-  src/ast/call_visitor_mixin.cpp src/ast/construct_visitor_mixin.cpp
-  src/ast/heap_visitor_mixin.cpp src/ast/ref_visitor_mixin.cpp
-  src/ast/type_name_visitor_mixin.cpp src/ast/local_var_visitor_mixin.cpp
   src/ast/body_visitor.cpp src/ast/body_pass_visitor.cpp
   src/ast/call_template_args.cpp src/ast/display_name_rewrite.cpp
   src/ast/receiver_provenance.cpp src/ast/instantiation_edges.cpp
@@ -409,12 +406,6 @@ if(CIDX_CLANGX_LIBTOOLING)
     src/ast/instance_minter.cpp
     src/ast/body_emit_context.cpp
     src/ast/call_emitter.cpp
-    src/ast/call_visitor_mixin.cpp
-    src/ast/construct_visitor_mixin.cpp
-    src/ast/heap_visitor_mixin.cpp
-    src/ast/ref_visitor_mixin.cpp
-    src/ast/type_name_visitor_mixin.cpp
-    src/ast/local_var_visitor_mixin.cpp
     src/ast/body_visitor.cpp
     src/ast/body_pass_visitor.cpp
     src/ast/call_template_args.cpp

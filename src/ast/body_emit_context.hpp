@@ -1,8 +1,8 @@
-// BodyEmitContext: shared per-definition state for the body-pass visitor
-// mixins — the enclosing definition's identity (src_id/file_id/owner_usr),
-// the mint/resolve utilities, the traversal parent stack and conditional
-// depth (maintained by BodyVisitor), and the edge+site emission helpers
-// every mixin uses. Emission goes through EdgeSink only.
+// BodyEmitContext: shared per-definition state for the body-pass visitor —
+// the enclosing definition's identity (src_id/file_id/owner_usr), the
+// mint/resolve utilities, the conditional depth (maintained by BodyVisitor's
+// scoped traversal overrides), and the edge+site emission helpers the
+// callbacks use. Emission goes through EdgeSink only.
 #pragma once
 
 #include "ast/instance_minter.hpp"
@@ -10,7 +10,6 @@
 #include "ast/template_arg_resolver.hpp"
 
 #include "clang/Basic/SourceLocation.h"
-#include "llvm/ADT/SmallVector.h"
 
 #include <cstdint>
 #include <string>
@@ -18,7 +17,6 @@
 namespace clang {
 class ASTContext;
 class Expr;
-class Stmt;
 class TypeSourceInfo;
 } // namespace clang
 
@@ -43,24 +41,11 @@ public:
   const std::string &owner_usr() const { return owner_usr_; }
   void set_owner_usr(std::string usr) { owner_usr_ = std::move(usr); }
 
-  // Traversal bookkeeping — driven by BodyVisitor's dataTraverseStmtPre/Post,
-  // which bracket each statement's whole subtree.
-  void push_stmt(const clang::Stmt *stmt) { stmt_stack_.push_back(stmt); }
-  void pop_stmt() { stmt_stack_.pop_back(); }
+  // Conditional depth — driven by BodyVisitor's scoped traversal overrides
+  // (If/For/While/Do/Switch/?:); edge sites emitted inside mark conditional.
   void enter_cond() { ++cond_depth_; }
   void exit_cond() { --cond_depth_; }
   bool in_conditional() const { return cond_depth_ > 0; }
-
-  // The walk-parent of the statement currently being visited (the stack top
-  // is that statement itself). Null at a traversal root (function body or a
-  // constructor member initializer).
-  const clang::Stmt *parent() const {
-    return stmt_stack_.size() >= 2 ? stmt_stack_[stmt_stack_.size() - 2]
-                                   : nullptr;
-  }
-  const clang::Stmt *current_stmt() const {
-    return stmt_stack_.empty() ? nullptr : stmt_stack_.back();
-  }
 
   // Edge + edge_site pair. emit_site_edge anchors at the expression start;
   // emit_site_edge_at at an explicit token (reference semantics anchor
@@ -88,7 +73,6 @@ private:
   int64_t file_id_;
   int cond_depth_ = 0;
   std::string owner_usr_;
-  llvm::SmallVector<const clang::Stmt *, 32> stmt_stack_;
 };
 
 } // namespace cidx::lt
