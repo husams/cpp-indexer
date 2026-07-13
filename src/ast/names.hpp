@@ -16,9 +16,15 @@
 namespace clang {
 class ASTContext;
 class NamedDecl;
+class PrintingPolicy;
 } // namespace clang
 
 namespace cidx::lt {
+
+// The single PrintingPolicy for every stored type spelling (template-argument
+// literals, display text, type_info). Configure printing here and nowhere
+// else.
+const clang::PrintingPolicy &printing_policy(const clang::ASTContext &context);
 
 std::string spelling(const clang::NamedDecl *decl);
 

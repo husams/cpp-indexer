@@ -11,6 +11,11 @@
 
 namespace cidx::lt {
 
+const clang::PrintingPolicy &
+printing_policy(const clang::ASTContext &context) {
+  return context.getPrintingPolicy();
+}
+
 std::string spelling(const clang::NamedDecl *decl) {
   return decl->getDeclName().getAsString();
 }

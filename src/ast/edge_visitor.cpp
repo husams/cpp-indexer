@@ -81,8 +81,8 @@ std::string usr_of(const clang::Decl *decl) {
 EdgeVisitor::EdgeVisitor(clang::ASTContext &context, EdgeSink &sink,
                          std::string target_file, int64_t file_id)
     : context_(context), source_manager_(context.getSourceManager()),
-      sink_(sink), mint_(context, sink), arg_resolver_(context, sink),
-      minter_(context, sink, mint_, arg_resolver_),
+      sink_(sink), mint_(context, sink), targ_encoder_(context, sink),
+      minter_(context, sink, mint_, targ_encoder_),
       target_file_(std::move(target_file)), file_id_(file_id) {}
 
 // Signature-level uses(7): return + parameter types (emit_type_use in the
@@ -589,51 +589,11 @@ bool EdgeVisitor::VisitClassTemplateSpecializationDecl(
   e.kind = explicit_inst ? 5 : 4;
   sink_.add_edge(e);
 
-  // template_arg rows. TYPE args always carry the type spelling in `literal`.
+  // template_arg rows through the one canonical encoder
+  // (docs/improvements/template-arg-contract.md).
   const clang::TemplateArgumentList &args = decl->getTemplateArgs();
-  const clang::PrintingPolicy &policy = context_.getPrintingPolicy();
-  for (unsigned ai = 0; ai < args.size(); ++ai) {
-    const clang::TemplateArgument &arg = args[ai];
-    TemplateArgRecord ta;
-    ta.owner_id = *spec_id;
-    ta.position = static_cast<int64_t>(ai);
-    switch (arg.getKind()) {
-    case clang::TemplateArgument::Type: {
-      ta.arg_kind = 1;
-      const clang::QualType type = arg.getAsType();
-      const std::string spelling = type.getAsString(policy);
-      if (!spelling.empty())
-        ta.literal = spelling;
-      if (const clang::TagDecl *td = type->getAsTagDecl()) {
-        const std::string ref_usr = usr_for_decl(td);
-        if (!ref_usr.empty())
-          ta.ref_id = sink_.lookup_symbol_id(ref_usr);
-      }
-      if (!ta.ref_id)
-        ta.ref_id = arg_resolver_.resolve(ta.literal, decl);
-      break;
-    }
-    case clang::TemplateArgument::Integral:
-      ta.arg_kind = 2;
-      ta.literal = cidx::lt::compat::integral_to_string(arg.getAsIntegral());
-      break;
-    default:
-      // Raw CXTemplateArgumentKind values (Null=0, Declaration=2, NullPtr=3,
-      // Template=5, TemplateExpansion=6, Expression=7, Pack=8).
-      switch (arg.getKind()) {
-      case clang::TemplateArgument::Null:       ta.arg_kind = 0; break;
-      case clang::TemplateArgument::Declaration: ta.arg_kind = 2; break;
-      case clang::TemplateArgument::NullPtr:    ta.arg_kind = 3; break;
-      case clang::TemplateArgument::Template:   ta.arg_kind = 5; break;
-      case clang::TemplateArgument::TemplateExpansion: ta.arg_kind = 6; break;
-      case clang::TemplateArgument::Expression: ta.arg_kind = 7; break;
-      case clang::TemplateArgument::Pack:       ta.arg_kind = 8; break;
-      default:                                  ta.arg_kind = 0; break;
-      }
-      break;
-    }
-    sink_.add_template_arg(ta);
-  }
+  for (unsigned ai = 0; ai < args.size(); ++ai)
+    targ_encoder_.emit(*spec_id, static_cast<int64_t>(ai), args[ai]);
   return true;
 }
 

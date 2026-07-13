@@ -45,8 +45,9 @@ clang::SourceLocation type_name_loc(clang::TypeLoc tl) {
 BodyEmitContext::BodyEmitContext(clang::ASTContext &context, EdgeSink &sink,
                                  int64_t src_id, int64_t file_id)
     : context_(context), sink_(sink), mint_(context, sink),
-      resolver_(context, sink), minter_(context, sink, mint_, resolver_),
-      src_id_(src_id), file_id_(file_id) {}
+      targ_encoder_(context, sink),
+      minter_(context, sink, mint_, targ_encoder_), src_id_(src_id),
+      file_id_(file_id) {}
 
 int64_t BodyEmitContext::emit_site_edge(const clang::Expr *site, int64_t dst_id,
                                         int kind) {

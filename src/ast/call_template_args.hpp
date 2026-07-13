@@ -22,14 +22,14 @@ class FunctionDecl;
 namespace cidx::lt {
 
 class EdgeSink;
-class TemplateArgResolver;
+class TemplateArgumentEncoder;
 
 // Emit template_arg rows for `callee` (the resolved call target, minted as
 // `dst_id`) when it is an instantiation member. `site` is the call/construct
 // expression, used to recover explicit method template arguments. A no-op when
 // `dst_id` is negative or `callee` is not an instantiation member.
 void emit_callable_template_args(clang::ASTContext &context, EdgeSink &sink,
-                                 const TemplateArgResolver &resolver,
+                                 const TemplateArgumentEncoder &targ_encoder,
                                  const clang::FunctionDecl *callee,
                                  const clang::Expr *site, int64_t dst_id);
 

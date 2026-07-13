@@ -313,32 +313,28 @@ TEST_SUITE("clang") {
           std::vector<std::string>{"4"});
   }
 
-  // ---- template arg_kind: corrections (fail until Phase 3) -----------------
+  // ---- template arg_kind: corrections landed in Phase 3 --------------------
 
-  TEST_CASE("correction: class-spec pack arg uses contract kind 4" *
-            doctest::should_fail()) {
+  TEST_CASE("correction: class-spec pack arg uses contract kind 4") {
     const IndexedTu tu(kTemplateArgsTu);
     // PackS<int, char> stores raw CX kind 8 today.
     CHECK(arg_kinds_of(tu.db_path(), "PackS") ==
           std::vector<std::string>{"4"});
   }
 
-  TEST_CASE("correction: pack arg_kind agrees across extraction paths" *
-            doctest::should_fail()) {
+  TEST_CASE("correction: pack arg_kind agrees across extraction paths") {
     const IndexedTu tu(kTemplateArgsTu);
     CHECK(arg_kinds_of(tu.db_path(), "PackS") ==
           arg_kinds_of(tu.db_path(), "count"));
   }
 
-  TEST_CASE("correction: template-template spec arg uses contract kind 3" *
-            doctest::should_fail()) {
+  TEST_CASE("correction: template-template spec arg uses contract kind 3") {
     const IndexedTu tu(kTemplateArgsTu);
     // TT<Vec> stores raw CX kind 5 today.
     CHECK(arg_kinds_of(tu.db_path(), "TT") == std::vector<std::string>{"3"});
   }
 
-  TEST_CASE("correction: nullptr spec arg uses contract kind 2" *
-            doctest::should_fail()) {
+  TEST_CASE("correction: nullptr spec arg uses contract kind 2") {
     const IndexedTu tu(kTemplateArgsTu);
     // PtrS<nullptr> stores raw CX kind 3 (NullPtr) today, colliding with the
     // contract's template-template code.

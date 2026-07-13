@@ -431,41 +431,18 @@ void BodyVisitor::emit_local_var(const clang::VarDecl *var) {
   ctx_.sink().add_edge(inst);
 
   // Args print AS WRITTEN (`Box<Color> bc;` inside geo stores 'Color', not
-  // 'geo::Color'): prefer the sugared args off the declared type.
-  llvm::SmallVector<clang::QualType, 4> arg_types;
+  // 'geo::Color'): prefer the sugared args off the declared type. Every kind
+  // encodes through the one canonical encoder.
   if (const auto *tst =
           var->getType()->getAs<clang::TemplateSpecializationType>()) {
+    int64_t pos = 0;
     for (const clang::TemplateArgument &a : tst->template_arguments())
-      arg_types.push_back(a.getKind() == clang::TemplateArgument::Type
-                              ? a.getAsType()
-                              : clang::QualType());
+      ctx_.targ_encoder().emit(ctx_.src_id(), pos++, a);
   } else {
     const clang::TemplateArgumentList &args = spec->getTemplateArgs();
     for (unsigned ai = 0; ai < args.size(); ++ai)
-      arg_types.push_back(args[ai].getKind() == clang::TemplateArgument::Type
-                              ? args[ai].getAsType()
-                              : clang::QualType());
-  }
-  const clang::PrintingPolicy &policy = ctx_.context().getPrintingPolicy();
-  for (unsigned ai = 0; ai < arg_types.size(); ++ai) {
-    const clang::QualType at = arg_types[ai];
-    if (at.isNull())
-      continue;
-    TemplateArgRecord ta;
-    ta.owner_id = ctx_.src_id();
-    ta.position = static_cast<int64_t>(ai);
-    ta.arg_kind = 1;
-    const std::string spelling = at.getAsString(policy);
-    if (!spelling.empty())
-      ta.literal = spelling;
-    if (const clang::TagDecl *td = at->getAsTagDecl()) {
-      const std::string ref_usr = usr_for_decl(td);
-      if (!ref_usr.empty())
-        ta.ref_id = ctx_.sink().lookup_symbol_id(ref_usr);
-    }
-    if (!ta.ref_id)
-      ta.ref_id = ctx_.resolver().resolve(ta.literal, var);
-    ctx_.sink().add_template_arg(ta);
+      ctx_.targ_encoder().emit(ctx_.src_id(), static_cast<int64_t>(ai),
+                               args[ai]);
   }
 }
 

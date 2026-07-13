@@ -3,7 +3,7 @@
 #include "ast/edge_records.hpp"
 #include "ast/edge_sink.hpp"
 #include "ast/mint_builder.hpp"
-#include "ast/template_arg_resolver.hpp"
+#include "ast/template_argument_encoder.hpp"
 #include "ast/usr.hpp"
 
 #include "clang/AST/ASTContext.h"
@@ -17,7 +17,7 @@ namespace cidx::lt {
 
 void emit_instantiation_edges(const clang::ASTContext &context, EdgeSink &sink,
                               MintBuilder &mint,
-                              const TemplateArgResolver &resolver,
+                              const TemplateArgumentEncoder &targ_encoder,
                               int64_t src_id, int64_t dst_id,
                               const clang::FunctionDecl *callee,
                               const std::string &callee_usr) {
@@ -92,27 +92,11 @@ void emit_instantiation_edges(const clang::ASTContext &context, EdgeSink &sink,
       ie.kind = 5;
       sink.add_edge(ie);
     }
+  // template_arg rows on the instantiated owner through the one canonical
+  // encoder (all argument kinds).
   const clang::TemplateArgumentList &args = ospec->getTemplateArgs();
-  const clang::PrintingPolicy &policy = context.getPrintingPolicy();
-  for (unsigned ai = 0; ai < args.size(); ++ai) {
-    if (args[ai].getKind() != clang::TemplateArgument::Type)
-      continue;
-    TemplateArgRecord ta;
-    ta.owner_id = type_id;
-    ta.position = static_cast<int64_t>(ai);
-    ta.arg_kind = 1;
-    const std::string sp = args[ai].getAsType().getAsString(policy);
-    if (!sp.empty())
-      ta.literal = sp;
-    if (const clang::TagDecl *td = args[ai].getAsType()->getAsTagDecl()) {
-      const std::string ru = usr_for_decl(td);
-      if (!ru.empty())
-        ta.ref_id = sink.lookup_symbol_id(ru);
-    }
-    if (!ta.ref_id)
-      ta.ref_id = resolver.resolve(ta.literal, ospec);
-    sink.add_template_arg(ta);
-  }
+  for (unsigned ai = 0; ai < args.size(); ++ai)
+    targ_encoder.emit(type_id, static_cast<int64_t>(ai), args[ai]);
 }
 
 } // namespace cidx::lt

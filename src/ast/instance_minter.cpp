@@ -4,7 +4,7 @@
 #include "ast/kind_map.hpp"
 #include "ast/mint_builder.hpp"
 #include "ast/names.hpp"
-#include "ast/template_arg_resolver.hpp"
+#include "ast/template_argument_encoder.hpp"
 #include "ast/usr.hpp"
 
 #include "clang/AST/ASTContext.h"
@@ -17,8 +17,9 @@ namespace cidx::lt {
 
 InstanceMinter::InstanceMinter(const clang::ASTContext &context,
                                EdgeSink &sink, const MintBuilder &mint,
-                               const TemplateArgResolver &resolver)
-    : context_(context), sink_(sink), mint_(mint), resolver_(resolver) {}
+                               const TemplateArgumentEncoder &targ_encoder)
+    : context_(context), sink_(sink), mint_(mint),
+      targ_encoder_(targ_encoder) {}
 
 void InstanceMinter::mint_instance_from_type(clang::QualType type) const {
   // Peel pointer/reference/array wrappers so `X<B>*` mints the same instance
@@ -84,30 +85,11 @@ void InstanceMinter::mint_instance_from_type(clang::QualType type) const {
   e.kind = 5; // instantiates: X<B> -> X
   sink_.add_edge(e);
 
-  // TYPE template_arg rows on the instance (Type API parity: TYPE args only).
+  // template_arg rows on the instance through the one canonical encoder
+  // (all argument kinds, per docs/improvements/template-arg-contract.md).
   const clang::TemplateArgumentList &args = spec->getTemplateArgs();
-  const clang::PrintingPolicy &policy = context_.getPrintingPolicy();
-  int64_t pos = 0;
-  for (unsigned ai = 0; ai < args.size(); ++ai, ++pos) {
-    const clang::TemplateArgument &arg = args[ai];
-    if (arg.getKind() != clang::TemplateArgument::Type)
-      continue;
-    TemplateArgRecord ta;
-    ta.owner_id = inst_id;
-    ta.position = pos;
-    ta.arg_kind = 1;
-    const std::string spelling = arg.getAsType().getAsString(policy);
-    if (!spelling.empty())
-      ta.literal = spelling;
-    if (const clang::TagDecl *td = arg.getAsType()->getAsTagDecl()) {
-      const std::string ref_usr = usr_for_decl(td);
-      if (!ref_usr.empty())
-        ta.ref_id = sink_.lookup_symbol_id(ref_usr);
-    }
-    if (!ta.ref_id)
-      ta.ref_id = resolver_.resolve(ta.literal, nullptr);
-    sink_.add_template_arg(ta);
-  }
+  for (unsigned ai = 0; ai < args.size(); ++ai)
+    targ_encoder_.emit(inst_id, static_cast<int64_t>(ai), args[ai]);
 }
 
 void InstanceMinter::mint_named_instance(

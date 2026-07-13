@@ -24,7 +24,7 @@
 
 #include "ast/instance_minter.hpp"
 #include "ast/mint_builder.hpp"
-#include "ast/template_arg_resolver.hpp"
+#include "ast/template_argument_encoder.hpp"
 
 #include "clang/AST/RecursiveASTVisitor.h"
 
@@ -72,7 +72,7 @@ private:
   clang::SourceManager &source_manager_;
   EdgeSink &sink_;
   MintBuilder mint_;
-  TemplateArgResolver arg_resolver_;
+  TemplateArgumentEncoder targ_encoder_;
   InstanceMinter minter_;
   std::string target_file_;
   int64_t file_id_;

@@ -63,8 +63,8 @@ void CallEmitter::emit_resolved_call(const clang::Expr *site,
     if (auto req = ctx_.mint().build(callee)) {
       req->is_instantiation = is_inst_member;
       dst_id = ctx_.sink().mint_symbol(*req);
-      emit_callable_template_args(ctx_.context(), ctx_.sink(), ctx_.resolver(),
-                                  callee, site, dst_id);
+      emit_callable_template_args(ctx_.context(), ctx_.sink(),
+                                  ctx_.targ_encoder(), callee, site, dst_id);
     }
   }
   if (dst_id < 0)
@@ -100,8 +100,8 @@ void CallEmitter::emit_resolved_call(const clang::Expr *site,
   // B3 instantiates edges for a non-recovered template specialization.
   if (!recovered)
     emit_instantiation_edges(ctx_.context(), ctx_.sink(), ctx_.mint(),
-                             ctx_.resolver(), ctx_.src_id(), dst_id, callee,
-                             callee_usr);
+                             ctx_.targ_encoder(), ctx_.src_id(), dst_id,
+                             callee, callee_usr);
 }
 
 void CallEmitter::emit_call_args(const clang::Expr *site,

@@ -1,7 +1,6 @@
 // InstanceMinter: mints concrete `X<B>` class-template-specialization instance
-// entities (Stage 2-4) — the LibTooling analogue of mint_instance_from_type /
-// mint_named_instance (ast_templates.cpp:524). Gated to non-system primaries;
-// emits instance -> primary instantiates(5) plus TYPE template_arg rows.
+// entities. Gated to non-system primaries; emits instance -> primary
+// instantiates(5) plus template_arg rows through the canonical encoder.
 #pragma once
 
 #include "clang/AST/Type.h"
@@ -15,12 +14,13 @@ namespace cidx::lt {
 
 class EdgeSink;
 class MintBuilder;
-class TemplateArgResolver;
+class TemplateArgumentEncoder;
 
 class InstanceMinter {
 public:
   InstanceMinter(const clang::ASTContext &context, EdgeSink &sink,
-                 const MintBuilder &mint, const TemplateArgResolver &resolver);
+                 const MintBuilder &mint,
+                 const TemplateArgumentEncoder &targ_encoder);
 
   // `X<B> field;` / `X<B> v;` / alias-underlying types (pointer/ref/array
   // layers peeled).
@@ -33,7 +33,7 @@ private:
   const clang::ASTContext &context_;
   EdgeSink &sink_;
   const MintBuilder &mint_;
-  const TemplateArgResolver &resolver_;
+  const TemplateArgumentEncoder &targ_encoder_;
 };
 
 } // namespace cidx::lt

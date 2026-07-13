@@ -20,7 +20,7 @@ namespace cidx::lt {
 
 class EdgeSink;
 class MintBuilder;
-class TemplateArgResolver;
+class TemplateArgumentEncoder;
 
 // Emit the instantiation edge family for a call from `src_id` to the resolved
 // target `dst_id` / `callee` (USR `callee_usr`). Only meaningful for a
@@ -28,7 +28,7 @@ class TemplateArgResolver;
 // otherwise.
 void emit_instantiation_edges(const clang::ASTContext &context, EdgeSink &sink,
                               MintBuilder &mint,
-                              const TemplateArgResolver &resolver,
+                              const TemplateArgumentEncoder &targ_encoder,
                               int64_t src_id, int64_t dst_id,
                               const clang::FunctionDecl *callee,
                               const std::string &callee_usr);

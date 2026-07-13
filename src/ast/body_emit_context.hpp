@@ -7,7 +7,7 @@
 
 #include "ast/instance_minter.hpp"
 #include "ast/mint_builder.hpp"
-#include "ast/template_arg_resolver.hpp"
+#include "ast/template_argument_encoder.hpp"
 
 #include "clang/Basic/SourceLocation.h"
 
@@ -32,7 +32,7 @@ public:
   clang::ASTContext &context() const { return context_; }
   EdgeSink &sink() const { return sink_; }
   MintBuilder &mint() { return mint_; }
-  const TemplateArgResolver &resolver() const { return resolver_; }
+  const TemplateArgumentEncoder &targ_encoder() const { return targ_encoder_; }
   const InstanceMinter &minter() const { return minter_; }
   int64_t src_id() const { return src_id_; }
   int64_t file_id() const { return file_id_; }
@@ -67,7 +67,7 @@ private:
   clang::ASTContext &context_;
   EdgeSink &sink_;
   MintBuilder mint_;
-  TemplateArgResolver resolver_;
+  TemplateArgumentEncoder targ_encoder_;
   InstanceMinter minter_;
   int64_t src_id_;
   int64_t file_id_;

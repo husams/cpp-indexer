@@ -3,9 +3,7 @@
 #include "ast/display_name_rewrite.hpp"
 #include "ast/edge_records.hpp"
 #include "ast/edge_sink.hpp"
-#include "ast/llvm_compat.hpp"
-#include "ast/template_arg_resolver.hpp"
-#include "ast/usr.hpp"
+#include "ast/template_argument_encoder.hpp"
 #include "ast/value_provenance.hpp"
 
 #include "clang/AST/ASTContext.h"
@@ -20,105 +18,33 @@
 
 namespace cidx::lt {
 
-void emit_callable_template_args(clang::ASTContext &context, EdgeSink &sink,
-                                 const TemplateArgResolver &resolver,
+void emit_callable_template_args(clang::ASTContext & /*context*/,
+                                 EdgeSink &sink,
+                                 const TemplateArgumentEncoder &targ_encoder,
                                  const clang::FunctionDecl *callee,
                                  const clang::Expr *site, int64_t dst_id) {
   if (dst_id < 0)
     return;
-  // Template args of a callable specialization. libclang's cursor API exposes
-  // them for FREE-FUNCTION specs only (methods return -1); METHOD specs fall
-  // back to the explicit `<...>` args written at the call site.
+  // Template args of a callable specialization: free-function specs read the
+  // full specialization arg list; method specs fall back to the explicit
+  // `<...>` args written at the call site.
   const bool is_inst_member = callee->getPrimaryTemplate() != nullptr ||
                               callee->getMemberSpecializationInfo() != nullptr;
   if (!is_inst_member)
     return;
 
-  const clang::PrintingPolicy &policy = context.getPrintingPolicy();
-  const auto emit_arg = [&](int64_t pos, const clang::TemplateArgument &arg,
-                            clang::QualType written) {
-    TemplateArgRecord ta;
-    ta.owner_id = dst_id;
-    ta.position = pos;
-    if (arg.getKind() == clang::TemplateArgument::Type) {
-      ta.arg_kind = 1;
-      const clang::QualType t = written.isNull() ? arg.getAsType() : written;
-      const std::string sp = t.getAsString(policy);
-      if (!sp.empty())
-        ta.literal = sp;
-      if (const clang::TagDecl *td = t->getAsTagDecl()) {
-        const std::string ref_usr = usr_for_decl(td);
-        if (!ref_usr.empty())
-          ta.ref_id = sink.lookup_symbol_id(ref_usr);
-      }
-      if (!ta.ref_id)
-        ta.ref_id = resolver.resolve(ta.literal, callee);
-    } else if (arg.getKind() == clang::TemplateArgument::Integral) {
-      ta.arg_kind = 2;
-      ta.literal = cidx::lt::compat::integral_to_string(arg.getAsIntegral());
-    } else if (arg.getKind() == clang::TemplateArgument::Pack) {
-      // Observed C-API behavior on LLVM 22: a pack argument reports raw kind 4
-      // with no literal (empirically verified on make_shared / make_unique
-      // specs); cidx stores that verbatim.
-      ta.arg_kind = 4;
-    } else {
-      return;
-    }
-    sink.add_template_arg(ta);
-  };
-
   if (!llvm::isa<clang::CXXMethodDecl>(callee)) {
-    // Full cursor-API mirror (index_cursor_template_args): every arg gets a
-    // row; non-Type/Integral kinds map to 2/3/4 with no literal and a '?'
-    // display placeholder that suppresses the display rewrite.
+    // Every argument encodes through the canonical encoder; display uses the
+    // encoded literal with a '?' placeholder that suppresses the rewrite.
     std::vector<std::string> display_args;
     if (const clang::TemplateArgumentList *args =
             callee->getTemplateSpecializationArgs()) {
       for (unsigned ai = 0; ai < args->size(); ++ai) {
-        const clang::TemplateArgument &arg = args->get(ai);
-        TemplateArgRecord ta;
-        ta.owner_id = dst_id;
-        ta.position = static_cast<int64_t>(ai);
-        switch (arg.getKind()) {
-        case clang::TemplateArgument::Type: {
-          ta.arg_kind = 1;
-          const std::string sp = arg.getAsType().getAsString(policy);
-          if (!sp.empty())
-            ta.literal = sp;
-          if (const clang::TagDecl *td = arg.getAsType()->getAsTagDecl()) {
-            const std::string ref_usr = usr_for_decl(td);
-            if (!ref_usr.empty())
-              ta.ref_id = sink.lookup_symbol_id(ref_usr);
-          }
-          if (!ta.ref_id)
-            ta.ref_id = resolver.resolve(ta.literal, callee);
-          display_args.push_back(ta.literal.value_or("?"));
-          break;
-        }
-        case clang::TemplateArgument::Integral:
-          ta.arg_kind = 2;
-          ta.literal = cidx::lt::compat::integral_to_string(arg.getAsIntegral());
-          display_args.push_back(*ta.literal);
-          break;
-        case clang::TemplateArgument::Declaration:
-        case clang::TemplateArgument::NullPtr:
-        case clang::TemplateArgument::Expression:
-          ta.arg_kind = 2;
-          display_args.push_back("?");
-          break;
-        case clang::TemplateArgument::Template:
-        case clang::TemplateArgument::TemplateExpansion:
-          ta.arg_kind = 3;
-          display_args.push_back("?");
-          break;
-        case clang::TemplateArgument::Pack:
-          ta.arg_kind = 4;
-          display_args.push_back("?");
-          break;
-        default:
-          continue;
-        }
-        sink.add_template_arg(ta);
+        const auto record =
+            targ_encoder.emit(dst_id, static_cast<int64_t>(ai), args->get(ai));
+        if (record)
+          display_args.push_back(
+              TemplateArgumentEncoder::display_text(*record));
       }
     }
     // update_callable_template_display_name: skip on empty or any '?'.
@@ -135,8 +61,9 @@ void emit_callable_template_args(clang::ASTContext &context, EdgeSink &sink,
         int64_t pos = 0;
         for (const clang::TemplateArgumentLoc &tal : me->template_arguments()) {
           const clang::TypeSourceInfo *tsi = tal.getTypeSourceInfo();
-          emit_arg(pos++, tal.getArgument(),
-                   tsi != nullptr ? tsi->getType() : clang::QualType());
+          targ_encoder.emit(dst_id, pos++, tal.getArgument(),
+                            tsi != nullptr ? tsi->getType()
+                                           : clang::QualType());
         }
       }
     }
