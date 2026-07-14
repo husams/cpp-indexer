@@ -225,6 +225,15 @@ struct VDerived : VBase {
 void recv_value_cast(VDerived &d) { static_cast<VBase>(d).act(); }
 void recv_ref_cast(VDerived &d) { static_cast<VBase &>(d).act(); }
 void recv_ptr_cast(VDerived *d) { static_cast<VBase *>(d)->act(); }
+void recv_intptr_cast(long raw) { reinterpret_cast<VBase *>(raw)->act(); }
+
+void sink_ref(int &);
+using IntRef = int &;
+
+void alias_ref_cast() {
+  int x = 1;
+  sink_ref(IntRef(x));
+}
 )cpp";
 
 const char *kTemplateArgsTu = R"cpp(
@@ -403,6 +412,29 @@ TEST_SUITE("clang") {
                     "WHERE ss.spelling = 'recv_value_cast' "
                     "AND ds.spelling = 'act'") ==
           std::vector<std::string>{"call_result//1"});
+  }
+
+  TEST_CASE("review fix: identity comes from the cast, not its syntax") {
+    const IndexedTu tu(kProvenanceTu);
+    // reinterpret_cast<VBase *>(raw) fabricates a pointer from an integer
+    // (CK_IntegralToPointer) — the int parameter is NOT the receiver's
+    // identity, and a pointer receiver is not held by value.
+    CHECK(query_col(tu.db_path(),
+                    "SELECT es.recv_src_kind || '/' || "
+                    "COALESCE(es.recv_decl_usr, '') || '/' || "
+                    "es.recv_type_is_value "
+                    "FROM edge_site es "
+                    "JOIN edge e ON e.id = es.edge_id "
+                    "JOIN symbol ss ON ss.id = e.src_id "
+                    "JOIN symbol ds ON ds.id = e.dst_id "
+                    "WHERE ss.spelling = 'recv_intptr_cast' "
+                    "AND ds.spelling = 'act'") ==
+          std::vector<std::string>{"call_result//0"});
+    // IntRef(x) — functional notation through a reference alias — is a
+    // glvalue NoOp that still denotes x's storage.
+    const ArgProbe p = probe_arg0(tu.db_path(), "alias_ref_cast", "sink_ref");
+    CHECK(p.src_kind == "local");
+    CHECK(p.has_decl_usr);
   }
 
   TEST_CASE("provenance pin: identity-preserving receiver casts keep d") {

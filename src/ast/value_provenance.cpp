@@ -45,17 +45,20 @@ const clang::Expr *normalize_value_expr(const clang::Expr *expr) {
       continue;
     }
     // An explicit cast is unwrapped only when it preserves the operand's
-    // storage identity: glvalue casts (`static_cast<T &>`, `const_cast`,
-    // C-style reference casts) still denote the operand, and pointer casts
-    // still denote the pointee. Value-producing casts — functional
-    // (`std::string("x")`), `static_cast<int>(x)`, `(Base)derived` —
-    // construct a new value and stay visible so the classifier answers
-    // call_result instead of claiming the operand.
+    // storage identity, judged from the cast itself — never from its syntax:
+    // a glvalue result denotes the operand (`static_cast<T &>`, `const_cast`,
+    // C-style reference casts, and functional notation through a reference
+    // alias `Ref(x)` alike), and a pointer produced FROM a pointer denotes
+    // the same pointee. A pointer fabricated from an integer
+    // (`reinterpret_cast<T *>(raw)`) and value-producing casts —
+    // `std::string("x")`, `static_cast<int>(x)`, `(Base)derived` — stay
+    // visible so the classifier answers call_result instead of claiming the
+    // operand.
     if (const auto *cast = llvm::dyn_cast<clang::ExplicitCastExpr>(stripped)) {
-      const bool preserves_storage =
-          cast->isGLValue() || cast->getType()->isPointerType();
-      if (preserves_storage &&
-          !llvm::isa<clang::CXXFunctionalCastExpr>(cast)) {
+      const bool pointer_from_pointer =
+          cast->getType()->isPointerType() &&
+          cast->getSubExpr()->getType()->isPointerType();
+      if (cast->isGLValue() || pointer_from_pointer) {
         e = cast->getSubExpr();
         continue;
       }
