@@ -8,9 +8,12 @@ namespace cidx::ast {
 int cidx_symbol_kind(const clang::Decl *decl) {
   using clang::Decl;
   switch (decl->getKind()) {
-  // Explicit full specializations surface as plain record cursors in libclang;
-  // partial specializations map to a cursor kind outside the frozen 17-entry
-  // map and are therefore not symbols.
+  // Explicit full specializations surface as plain record cursors; a partial
+  // specialization is a first-class template symbol of its own (it carries
+  // template parameters and a pattern), so it maps to class-template — the
+  // same kind its minted stubs always used.
+  case Decl::ClassTemplatePartialSpecialization:
+    return 31; // class-template
   case Decl::ClassTemplateSpecialization:
   case Decl::CXXRecord:
   case Decl::Record: {

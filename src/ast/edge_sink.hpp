@@ -27,6 +27,11 @@ public:
 
   // Upsert; returns the stable edge.id (ON CONFLICT increments count).
   virtual int64_t add_edge(const EdgeRecord &edge) = 0;
+
+  // Idempotent structural upsert: a relationship already recorded (e.g. a
+  // specializes/instantiates edge emitted at declaration time) is never
+  // re-counted by later emissions. Returns the stable edge.id.
+  virtual int64_t ensure_edge(const EdgeRecord &edge) = 0;
   virtual void add_edge_site(const EdgeSiteRecord &site) = 0;
   virtual void add_call_arg(const CallArgRecord &arg) = 0;
   virtual void add_template_param(const TemplateParamRecord &param) = 0;

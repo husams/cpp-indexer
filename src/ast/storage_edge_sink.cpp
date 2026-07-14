@@ -34,6 +34,19 @@ int64_t StorageEdgeSink::add_edge(const EdgeRecord &edge) {
   return db_.add_edge(e);
 }
 
+int64_t StorageEdgeSink::ensure_edge(const EdgeRecord &edge) {
+  cidx::Edge e;
+  e.src_id = edge.src_id;
+  e.dst_id = edge.dst_id;
+  e.kind = edge.kind;
+  e.count = edge.count;
+  if (edge.base_access)
+    e.base_access = *edge.base_access;
+  if (edge.is_virtual)
+    e.is_virtual = *edge.is_virtual;
+  return db_.ensure_edge(e);
+}
+
 void StorageEdgeSink::add_edge_site(const EdgeSiteRecord &site) {
   cidx::EdgeSite s;
   s.edge_id = site.edge_id;

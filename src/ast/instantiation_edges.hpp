@@ -1,19 +1,28 @@
-// Instantiation edges for a called template specialization (the "B3
-// instantiates" family).
+// Callable template-specialization identity, shared by the declaration pass
+// and the call path (the "B3 instantiates" family grown into the one canonical
+// handler).
 //
-// When a resolved, non-recovered call target is a template specialization,
-// emit: caller -> primary template (instantiates, lookup-only), the
-// specialization -> primary promotion, and for instantiated members the owning
-// type's method_of / instantiates / template_arg rows. Split out of
-// CallEdgeEmitter::emit_resolved_call so the CALLS-edge path stays readable.
+// A FunctionDecl that specializes or instantiates a template has ONE identity
+// regardless of where it is first seen: symbol flags come from its
+// TemplateSpecializationKind, template arguments from
+// getTemplateSpecializationArgs(), the structural edge to its primary is
+// specializes(4) for explicit specializations and instantiates(5) for
+// instantiations, and emission is idempotent so a later call site never
+// duplicates or re-counts what the declaration already recorded.
 #pragma once
 
+#include "clang/AST/Type.h"
+#include "clang/Basic/Specifiers.h"
+
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace clang {
 class ASTContext;
 class FunctionDecl;
+class NamedDecl;
 } // namespace clang
 
 namespace cidx::ast {
@@ -22,15 +31,39 @@ class EdgeSink;
 class MintBuilder;
 class TemplateArgumentEncoder;
 
-// Emit the instantiation edge family for a call from `src_id` to the resolved
-// target `dst_id` / `callee` (USR `callee_usr`). Only meaningful for a
-// non-recovered call whose callee is a template specialization; a no-op
-// otherwise.
-void emit_instantiation_edges(const clang::ASTContext &context, EdgeSink &sink,
-                              MintBuilder &mint,
-                              const TemplateArgumentEncoder &targ_encoder,
-                              int64_t src_id, int64_t dst_id,
-                              const clang::FunctionDecl *callee,
+// Identity of a callable that specializes/instantiates a template: the primary
+// it relates to (its function template, or the instantiated-from declaration
+// for member specializations) and how, from getTemplateSpecializationKind().
+// nullopt for ordinary callables.
+struct CallableTemplateInfo {
+  const clang::NamedDecl *primary = nullptr;
+  clang::TemplateSpecializationKind tsk = clang::TSK_Undeclared;
+  bool is_instantiation = false; // implicit or explicit instantiation
+};
+std::optional<CallableTemplateInfo>
+callable_template_info(const clang::FunctionDecl *fd);
+
+// Emit the declaration-owned identity of callable `fd` (minted as `dst_id`):
+//   - fd -> primary structural edge, specializes(4) or instantiates(5),
+//     idempotent (lookup-only: the primary must already be indexed);
+//   - template_arg rows from the FULL specialization argument list, optionally
+//     overlaid with the as-written types `written` where positions align;
+//   - the display-name rewrite from the encoded argument literals;
+//   - method_of(9) owner promotion for methods, including the minted
+//     class-template-specialization owner with its own identity.
+// Safe to call from both the declaration pass and every call site.
+void emit_callable_template_identity(EdgeSink &sink, MintBuilder &mint,
+                                     const TemplateArgumentEncoder &targ_encoder,
+                                     int64_t dst_id,
+                                     const clang::FunctionDecl *fd,
+                                     const CallableTemplateInfo &info,
+                                     const std::vector<clang::QualType> &written);
+
+// Call-site-owned companion: caller `src_id` -> primary instantiates(5),
+// counted per call (lookup-only). A no-op when the primary is not indexed or
+// shares the callee's USR.
+void emit_caller_instantiates(EdgeSink &sink, int64_t src_id,
+                              const CallableTemplateInfo &info,
                               const std::string &callee_usr);
 
 } // namespace cidx::ast

@@ -19,6 +19,7 @@ public:
   std::optional<int64_t> lookup_symbol_id(const std::string &usr) override;
   int64_t mint_symbol(const MintRequest &req) override;
   int64_t add_edge(const EdgeRecord &edge) override;
+  int64_t ensure_edge(const EdgeRecord &edge) override;
   void add_edge_site(const EdgeSiteRecord &site) override;
   void add_call_arg(const CallArgRecord &arg) override;
   void add_template_param(const TemplateParamRecord &param) override;

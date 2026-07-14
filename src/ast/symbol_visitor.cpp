@@ -15,7 +15,9 @@ namespace {
 
 // The decl is a template's PATTERN (templated decl); libclang represents the
 // pair as one FunctionTemplate/ClassTemplate cursor, so the pattern itself is
-// not a symbol.
+// not a symbol. A ClassTemplatePartialSpecializationDecl is NOT a pattern
+// (getDescribedClassTemplate() is null on it): it is retained as a
+// first-class template symbol.
 bool is_template_pattern(const clang::NamedDecl *decl) {
   if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(decl))
     return fn->getDescribedFunctionTemplate() != nullptr;
@@ -90,6 +92,27 @@ bool SymbolVisitor::VisitNamedDecl(clang::NamedDecl *decl) {
     return true;
   if (std::optional<SymbolRecord> sym = extractor_.extract(decl))
     out_.emit(*sym);
+  return true;
+}
+
+// Explicit instantiations (`template double twice<double>(double);`) are
+// never lexical decls — they exist only in the template's specializations()
+// list, which the default traversal skips. Emit them here so an uncalled
+// explicit instantiation is still a symbol. should_emit gates each one on the
+// pattern's location, matching where the instantiated declaration points.
+bool SymbolVisitor::VisitFunctionTemplateDecl(
+    clang::FunctionTemplateDecl *decl) {
+  for (const clang::FunctionDecl *fd : decl->specializations()) {
+    const clang::TemplateSpecializationKind tsk =
+        fd->getTemplateSpecializationKind();
+    if (tsk != clang::TSK_ExplicitInstantiationDeclaration &&
+        tsk != clang::TSK_ExplicitInstantiationDefinition)
+      continue;
+    if (!should_emit(fd))
+      continue;
+    if (std::optional<SymbolRecord> sym = extractor_.extract(fd))
+      out_.emit(*sym);
+  }
   return true;
 }
 

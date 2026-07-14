@@ -41,6 +41,32 @@ bool is_static_method(const clang::Decl *decl) {
   return method != nullptr && method->isStatic();
 }
 
+bool is_template_instantiation(const clang::Decl *decl) {
+  // TemplateSpecializationKind is the single source of truth: implicit and
+  // explicit instantiations are instantiations; explicit (full) and partial
+  // specializations are authored declarations. ClassTemplatePartialSpec
+  // derives from ClassTemplateSpecialization and answers TSK_Undeclared /
+  // TSK_ExplicitSpecialization, so it falls out false naturally.
+  clang::TemplateSpecializationKind tsk = clang::TSK_Undeclared;
+  if (const auto *spec =
+          llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(decl))
+    tsk = spec->getSpecializationKind();
+  else if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(decl))
+    tsk = fn->getTemplateSpecializationKind();
+  else if (const auto *var = llvm::dyn_cast<clang::VarDecl>(decl))
+    tsk = var->getTemplateSpecializationKind();
+  switch (tsk) {
+  case clang::TSK_ImplicitInstantiation:
+  case clang::TSK_ExplicitInstantiationDeclaration:
+  case clang::TSK_ExplicitInstantiationDefinition:
+    return true;
+  case clang::TSK_Undeclared:
+  case clang::TSK_ExplicitSpecialization:
+    return false;
+  }
+  return false;
+}
+
 std::optional<std::string> linkage_name(const clang::Decl *decl) {
   const auto *nd = llvm::dyn_cast<clang::NamedDecl>(decl);
   if (nd == nullptr)

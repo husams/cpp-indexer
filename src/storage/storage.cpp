@@ -2768,6 +2768,35 @@ int64_t Storage::add_edge(const Edge &e) {
   return eid;
 }
 
+int64_t Storage::ensure_edge(const Edge &e) {
+  // Structural upsert: presence matters, count does not accumulate. The
+  // DO UPDATE keeps count as-is (attributes still COALESCE-fill) so the
+  // statement can RETURN the stable id on both paths.
+  auto st = db_.prepare(
+      "INSERT INTO edge (src_id, dst_id, kind, count, base_access, is_virtual, "
+      "                  vtable_slot) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?) "
+      "ON CONFLICT(src_id, dst_id, kind) DO UPDATE SET "
+      "  count       = edge.count, "
+      "  base_access = COALESCE(excluded.base_access, edge.base_access), "
+      "  is_virtual  = COALESCE(excluded.is_virtual,  edge.is_virtual), "
+      "  vtable_slot = COALESCE(excluded.vtable_slot, edge.vtable_slot) "
+      "RETURNING id");
+  st.bind(1, e.src_id);
+  st.bind(2, e.dst_id);
+  st.bind(3, e.kind);
+  st.bind(4, e.count);
+  bind_opt(st, 5, e.base_access);
+  bind_opt(st, 6, e.is_virtual);
+  bind_opt(st, 7, e.vtable_slot);
+  if (!st.step()) {
+    throw StorageError("ensure_edge: upsert returned no id");
+  }
+  const int64_t eid = st.col_int64(0);
+  st.step_done();
+  return eid;
+}
+
 void Storage::add_edge_site(const EdgeSite &s) {
   auto st = db_.prepare(
       "INSERT OR IGNORE INTO edge_site "

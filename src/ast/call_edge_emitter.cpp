@@ -41,20 +41,23 @@ int64_t CallEdgeEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
   return dst_id;
 }
 
-// Non-recovered target: mint the callee (flagging instantiation members) and
-// emit its template-arg rows.
+// Non-recovered target: mint the callee (the instantiation flag comes from
+// its TemplateSpecializationKind, so explicit specializations stay false) and
+// re-assert its declaration-owned template identity — idempotent, so a target
+// already handled by the declaration pass gains nothing twice. The call site
+// contributes only the as-written `<...>` type spellings.
 int64_t CallEdgeEmitter::mint_resolved_target(const clang::Expr *site,
                                           const clang::FunctionDecl *callee) {
-  const bool is_inst_member =
-      callee->getPrimaryTemplate() != nullptr ||
-      callee->getMemberSpecializationInfo() != nullptr;
+  const auto info = callable_template_info(callee);
   auto req = ctx_.mint().build(callee);
   if (!req)
     return -1;
-  req->is_instantiation = is_inst_member;
+  req->is_instantiation = info && info->is_instantiation;
   const int64_t dst_id = ctx_.sink().mint_symbol(*req);
-  emit_callable_template_args(ctx_.context(), ctx_.sink(),
-                              ctx_.targ_encoder(), callee, site, dst_id);
+  if (info)
+    emit_callable_template_identity(ctx_.sink(), ctx_.mint(),
+                                    ctx_.targ_encoder(), dst_id, callee, *info,
+                                    written_template_args(site));
   return dst_id;
 }
 
@@ -104,11 +107,11 @@ void CallEdgeEmitter::emit_resolved_call(const clang::Expr *site,
   const int64_t edge_id = emit_call_site(site, dst_id, callee);
   emit_call_args(site, llvm::dyn_cast<clang::CallExpr>(site),
                  llvm::dyn_cast<clang::CXXConstructExpr>(site), edge_id);
-  // B3 instantiates edges for a non-recovered template specialization.
+  // B3: caller -> primary instantiates for a non-recovered template
+  // specialization (the callee's own identity was emitted at mint time).
   if (!recovered)
-    emit_instantiation_edges(ctx_.context(), ctx_.sink(), ctx_.mint(),
-                             ctx_.targ_encoder(), ctx_.src_id(), dst_id,
-                             callee, callee_usr);
+    if (const auto info = callable_template_info(callee))
+      emit_caller_instantiates(ctx_.sink(), ctx_.src_id(), *info, callee_usr);
 }
 
 void CallEdgeEmitter::emit_call_args(const clang::Expr *site,

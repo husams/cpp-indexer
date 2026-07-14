@@ -1,6 +1,7 @@
 #include "ast/declaration_edge_visitor.hpp"
 
 #include "ast/edge_sink.hpp"
+#include "ast/instantiation_edges.hpp"
 #include "ast/kind_map.hpp"
 #include "ast/location.hpp"
 #include "ast/type_use.hpp"
@@ -57,6 +58,7 @@ bool is_nested_type_child(const clang::Decl *decl) {
   case clang::Decl::Record:
   case clang::Decl::CXXRecord:
   case clang::Decl::ClassTemplateSpecialization:
+  case clang::Decl::ClassTemplatePartialSpecialization:
   case clang::Decl::Enum:
   case clang::Decl::Typedef:
   case clang::Decl::TypeAlias:
@@ -224,8 +226,8 @@ void DeclarationEdgeVisitor::emit_base_specifier(const clang::NamedDecl *derived
   emit_crtp_instantiates(base_rec, base_usr, dst_id);
 }
 
-// src of an inherits edge: lookup, else mint (partial specs are not indexed
-// as symbols; unmapped kinds default to "class-template").
+// src of an inherits edge: lookup, else mint (unmapped kinds default to
+// "class-template").
 int64_t DeclarationEdgeVisitor::inherits_src_id(const clang::NamedDecl *derived,
                                      const std::string &derived_usr) {
   if (const auto sid = sink_.lookup_symbol_id(derived_usr))
@@ -394,8 +396,13 @@ bool DeclarationEdgeVisitor::VisitTypedefNameDecl(clang::TypedefNameDecl *decl) 
 bool DeclarationEdgeVisitor::VisitCXXMethodDecl(clang::CXXMethodDecl *decl) {
   if (!in_walk(decl) || is_template_pattern(decl))
     return true;
-  const auto src =
-      emit_lookup_edge(usr_for_decl(decl), usr_of(decl->getParent()), 9);
+  // Method specializations get method_of from the shared identity helper
+  // (idempotent); a second counted emission here would duplicate it.
+  std::optional<int64_t> src;
+  if (callable_template_info(decl))
+    src = sink_.lookup_symbol_id(usr_for_decl(decl));
+  else
+    src = emit_lookup_edge(usr_for_decl(decl), usr_of(decl->getParent()), 9);
   if (!src)
     return true;
   // overrides: plain methods only (not ctors/dtors).
@@ -464,11 +471,11 @@ bool DeclarationEdgeVisitor::VisitFriendDecl(clang::FriendDecl *decl) {
   return true;
 }
 
-// -- template_param rows (class/function templates) ----------------------------
-void DeclarationEdgeVisitor::emit_template_params(const clang::TemplateDecl *tmpl,
-                                       int64_t owner_id) {
+// -- template_param rows (templates + class partial specializations) ----------
+void DeclarationEdgeVisitor::emit_template_params(
+    const clang::TemplateParameterList *params, int64_t owner_id) {
   int64_t pos = 0;
-  for (const clang::NamedDecl *p : *tmpl->getTemplateParameters()) {
+  for (const clang::NamedDecl *p : *params) {
     TemplateParamRecord rec;
     rec.owner_id = owner_id;
     rec.position = pos++;
@@ -496,7 +503,7 @@ bool DeclarationEdgeVisitor::VisitClassTemplateDecl(clang::ClassTemplateDecl *de
   const auto id = sink_.lookup_symbol_id(usr);
   if (!id)
     return true;
-  emit_template_params(decl, *id);
+  emit_template_params(decl->getTemplateParameters(), *id);
   return true;
 }
 
@@ -504,6 +511,9 @@ bool DeclarationEdgeVisitor::VisitFunctionTemplateDecl(
     clang::FunctionTemplateDecl *decl) {
   if (!in_walk(decl))
     return true;
+  // Explicit instantiations of this template are reachable only through its
+  // specializations() list — handle them here, call sites or none.
+  emit_explicit_instantiations(decl);
   const std::string usr = usr_for_decl(decl);
   if (usr.empty())
     return true;
@@ -517,8 +527,46 @@ bool DeclarationEdgeVisitor::VisitFunctionTemplateDecl(
       dc != nullptr ? llvm::dyn_cast<clang::Decl>(dc) : nullptr);
   if (owner_rec != nullptr)
     emit_lookup_edge(usr, usr_of(owner_rec), 9);
-  emit_template_params(decl, *id);
+  emit_template_params(decl->getTemplateParameters(), *id);
   return true;
+}
+
+// -- callable explicit specializations / instantiations -----------------------
+// One shared helper (emit_callable_template_identity) covers flags, arguments,
+// display names, and structural edges for BOTH this declaration pass and the
+// call path, so the two cannot diverge; every emission in it is idempotent.
+void DeclarationEdgeVisitor::emit_callable_identity(
+    const clang::FunctionDecl *fd) {
+  const auto info = callable_template_info(fd);
+  if (!info)
+    return;
+  auto req = mint_.build(fd);
+  if (!req)
+    return;
+  req->is_instantiation = info->is_instantiation;
+  const int64_t dst_id = sink_.mint_symbol(*req);
+  emit_callable_template_identity(sink_, mint_, targ_encoder_, dst_id, fd,
+                                  *info, {});
+}
+
+// Lexically written explicit specializations (free and member) land here.
+bool DeclarationEdgeVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
+  if (!in_walk(decl) || is_template_pattern(decl))
+    return true;
+  emit_callable_identity(decl);
+  return true;
+}
+
+void DeclarationEdgeVisitor::emit_explicit_instantiations(
+    const clang::FunctionTemplateDecl *tmpl) {
+  for (const clang::FunctionDecl *fd : tmpl->specializations()) {
+    const clang::TemplateSpecializationKind tsk =
+        fd->getTemplateSpecializationKind();
+    if (tsk != clang::TSK_ExplicitInstantiationDeclaration &&
+        tsk != clang::TSK_ExplicitInstantiationDefinition)
+      continue;
+    emit_callable_identity(fd);
+  }
 }
 
 // The indexed symbol id of a class-template specialization whose identity is
@@ -536,11 +584,17 @@ std::optional<int64_t> DeclarationEdgeVisitor::specialization_symbol_id(
 // -- specializes (4) / explicit-instantiation instantiates (5) + template_arg --
 bool DeclarationEdgeVisitor::VisitClassTemplateSpecializationDecl(
     clang::ClassTemplateSpecializationDecl *decl) {
-  // Mirrors the STRUCT/CLASS_DECL specializes handler: definitions only;
-  // partial specializations are a different cursor kind and skipped.
+  // Partial specializations have their own callback below.
   if (llvm::isa<clang::ClassTemplatePartialSpecializationDecl>(decl))
     return true;
-  if (!in_walk(decl) || !decl->isThisDeclarationADefinition())
+  // Definitions — plus explicit-instantiation DECLARATIONS (`extern template
+  // struct Box<long>;`), whose relationship and flag hold without a body.
+  const clang::TemplateSpecializationKind tsk = decl->getSpecializationKind();
+  const bool explicit_inst =
+      tsk == clang::TSK_ExplicitInstantiationDeclaration ||
+      tsk == clang::TSK_ExplicitInstantiationDefinition;
+  if (!in_walk(decl) ||
+      (!decl->isThisDeclarationADefinition() && !explicit_inst))
     return true;
   const clang::ClassTemplateDecl *primary = decl->getSpecializedTemplate();
   if (primary == nullptr)
@@ -560,7 +614,8 @@ bool DeclarationEdgeVisitor::VisitClassTemplateSpecializationDecl(
 
 // specializes(4) — or instantiates(5) for `template class Foo<int>;` explicit
 // instantiations, which the specialization-kind API answers directly. Mints
-// the primary's stub.
+// the primary's stub. Idempotent: a later concrete use of the same
+// specialization must not re-count the relationship.
 bool DeclarationEdgeVisitor::emit_specializes_edge(
     const clang::ClassTemplateSpecializationDecl *decl,
     const clang::ClassTemplateDecl *primary, int64_t spec_id) {
@@ -576,7 +631,48 @@ bool DeclarationEdgeVisitor::emit_specializes_edge(
   e.src_id = spec_id;
   e.dst_id = prim_id;
   e.kind = explicit_inst ? 5 : 4;
-  sink_.add_edge(e);
+  sink_.ensure_edge(e);
+  return true;
+}
+
+// -- partial specialization: first-class template symbol ----------------------
+// Indexed with its own USR, its own parameter list (canonical path), its
+// PATTERN arguments (`Box<T*>`'s `T*`), and specializes(4) -> primary.
+bool DeclarationEdgeVisitor::VisitClassTemplatePartialSpecializationDecl(
+    clang::ClassTemplatePartialSpecializationDecl *decl) {
+  if (!in_walk(decl) || !decl->isThisDeclarationADefinition())
+    return true;
+  const clang::ClassTemplateDecl *primary = decl->getSpecializedTemplate();
+  if (primary == nullptr)
+    return true;
+  const auto spec_id = specialization_symbol_id(decl, primary);
+  if (!spec_id)
+    return true;
+  auto req = mint_.build(primary);
+  if (!req)
+    return true;
+  const int64_t prim_id = sink_.mint_symbol(*req);
+  EdgeRecord e;
+  e.src_id = *spec_id;
+  e.dst_id = prim_id;
+  e.kind = 4; // specializes: a partial specialization is authored code
+  sink_.ensure_edge(e);
+  emit_template_params(decl->getTemplateParameters(), *spec_id);
+  // Pattern arguments: the canonical list encodes, the as-written list keeps
+  // the authored spelling (`T *`, not `type-parameter-0-0 *`).
+  const clang::TemplateArgumentList &args = decl->getTemplateArgs();
+  const clang::ASTTemplateArgumentListInfo *written =
+      decl->getTemplateArgsAsWritten();
+  for (unsigned ai = 0; ai < args.size(); ++ai) {
+    clang::QualType w;
+    if (written != nullptr && ai < written->NumTemplateArgs) {
+      const clang::TemplateArgumentLoc &tal = (*written)[ai];
+      if (tal.getArgument().getKind() == clang::TemplateArgument::Type)
+        if (const clang::TypeSourceInfo *tsi = tal.getTypeSourceInfo())
+          w = tsi->getType();
+    }
+    targ_encoder_.emit(*spec_id, static_cast<int64_t>(ai), args[ai], w);
+  }
   return true;
 }
 

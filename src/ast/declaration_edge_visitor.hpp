@@ -12,8 +12,12 @@
 //   overrides(6)   method -> each directly overridden method (minted)
 //   friend(17)     record -> befriended record (lookup-only)
 //   specializes(4)/instantiates(5) + template_arg rows for class-template
-//                  full specializations / explicit instantiations
-//   template_param rows for class/function templates
+//                  full/partial specializations / explicit instantiations
+//   specializes(4)/instantiates(5) + template_arg rows for function/method
+//                  explicit specializations and explicit instantiations
+//                  (declaration-driven, independent of call sites)
+//   template_param rows for class/function templates and class-template
+//                  partial specializations
 //
 // DEFERRED to the body/uses phase: signature-level uses(7) (emit_type_use),
 // template-instance minting, static-member init definitions, body descent
@@ -61,6 +65,9 @@ public:
   bool VisitFunctionTemplateDecl(clang::FunctionTemplateDecl *decl);
   bool VisitClassTemplateSpecializationDecl(
       clang::ClassTemplateSpecializationDecl *decl); // specializes/instantiates
+  bool VisitClassTemplatePartialSpecializationDecl(
+      clang::ClassTemplatePartialSpecializationDecl *decl); // specializes+params
+  bool VisitFunctionDecl(clang::FunctionDecl *decl); // callable explicit specs
   bool VisitVarDecl(clang::VarDecl *decl);           // type uses + static defs
   bool VisitTypedefNameDecl(clang::TypedefNameDecl *decl); // alias uses/mint
 
@@ -93,8 +100,13 @@ private:
   void emit_static_init_def_edges(int64_t def_id, const clang::Expr *init);
   std::vector<const clang::NamedDecl *>
   friend_targets(const clang::TypeSourceInfo *tsi) const;
-  void emit_template_params(const clang::TemplateDecl *tmpl,
+  void emit_template_params(const clang::TemplateParameterList *params,
                             int64_t owner_id);
+  // Explicit function/method instantiations live only in the template's
+  // specializations() list (never as lexical decls), so the template callback
+  // walks them.
+  void emit_explicit_instantiations(const clang::FunctionTemplateDecl *tmpl);
+  void emit_callable_identity(const clang::FunctionDecl *fd);
   void emit_signature_uses(const clang::FunctionDecl *fn);
 
   clang::ASTContext &context_;
