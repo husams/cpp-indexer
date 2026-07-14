@@ -972,6 +972,12 @@ TEST_SUITE("clang") {
           std::vector<std::string>{"method_of/1"});
     CHECK(sym_probe(tu.db_path(), "c:@S@Outer>#I@S@Inner") ==
           std::vector<std::string>{"struct/1"});
+    // PR #16 review round 4: the minted owner must not be structurally
+    // orphaned — it instantiates its member-class pattern Outer<T>::Inner
+    // (CXXRecordDecl::getInstantiatedFromMemberClass).
+    CHECK(structural_edges(tu.db_path(), "c:@S@Outer>#I@S@Inner",
+                           "c:@ST>1#T@Outer@S@Inner") ==
+          std::vector<std::string>{"instantiates/1"});
   }
 
   TEST_CASE("template spec: instantiation -> specialization downgrades") {

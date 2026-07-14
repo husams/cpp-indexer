@@ -58,6 +58,28 @@ void emit_spec_owner(EdgeSink &sink, MintBuilder &mint,
     targ_encoder.emit(type_id, static_cast<int64_t>(ai), args[ai]);
 }
 
+// A minted member-class instantiation (`Outer<int>::Inner`) is tied back to
+// its pattern (`Outer<T>::Inner`) so the owner is not structurally orphaned:
+// owner -> pattern with the TSK-derived kind (instantiates, or specializes
+// for an authored member specialization).
+void emit_member_class_pattern_edge(EdgeSink &sink, int64_t owner_id,
+                                    const clang::CXXRecordDecl *owner) {
+  const clang::CXXRecordDecl *pattern = owner->getInstantiatedFromMemberClass();
+  if (pattern == nullptr)
+    return;
+  const std::string pat_usr = usr_for_decl(pattern);
+  if (pat_usr.empty())
+    return;
+  const auto pid = sink.lookup_symbol_id(pat_usr);
+  if (!pid)
+    return;
+  EdgeRecord ie;
+  ie.src_id = owner_id;
+  ie.dst_id = *pid;
+  ie.kind = structural_edge_kind(owner->getTemplateSpecializationKind());
+  sink.ensure_edge(ie);
+}
+
 // Owner-type promotion for a concrete method specialization/instantiation:
 // method_of(9) to the owning record, and — when the owner is itself a
 // class-template specialization — the minted owner with its own identity.
@@ -82,6 +104,7 @@ void emit_owner_promotion(EdgeSink &sink, MintBuilder &mint,
       mo.dst_id = oid;
       mo.kind = 9;
       sink.ensure_edge(mo);
+      emit_member_class_pattern_edge(sink, oid, owner);
     }
     return;
   }
