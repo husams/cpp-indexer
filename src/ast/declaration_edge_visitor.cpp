@@ -495,6 +495,14 @@ void DeclarationEdgeVisitor::emit_template_params(
 }
 
 bool DeclarationEdgeVisitor::VisitClassTemplateDecl(clang::ClassTemplateDecl *decl) {
+  // Explicitly instantiated ordinary members of this class template's
+  // specializations (`template void PlainMember<int>::run();`) — POI-gated,
+  // like the function-template path.
+  for_each_explicit_callable_instantiation(
+      decl, [this](const clang::FunctionDecl *fd) {
+        if (owns_instantiation(fd))
+          emit_callable_identity(fd);
+      });
   if (!in_walk(decl))
     return true;
   const std::string usr = usr_for_decl(decl);
@@ -509,11 +517,17 @@ bool DeclarationEdgeVisitor::VisitClassTemplateDecl(clang::ClassTemplateDecl *de
 
 bool DeclarationEdgeVisitor::VisitFunctionTemplateDecl(
     clang::FunctionTemplateDecl *decl) {
+  // Explicit instantiations of this template are reachable only through its
+  // specializations() list — handle them here, call sites or none. They are
+  // gated by their OWN point of instantiation, not by the template's file
+  // (the template may live in a header, the `template ...;` in this TU).
+  for_each_explicit_callable_instantiation(
+      decl, [this](const clang::FunctionDecl *fd) {
+        if (owns_instantiation(fd))
+          emit_callable_identity(fd);
+      });
   if (!in_walk(decl))
     return true;
-  // Explicit instantiations of this template are reachable only through its
-  // specializations() list — handle them here, call sites or none.
-  emit_explicit_instantiations(decl);
   const std::string usr = usr_for_decl(decl);
   if (usr.empty())
     return true;
@@ -532,9 +546,22 @@ bool DeclarationEdgeVisitor::VisitFunctionTemplateDecl(
 }
 
 // -- callable explicit specializations / instantiations -----------------------
+// This file owns an explicit instantiation when the `template ...;` statement
+// (the point of instantiation) is written here — the decl itself points at
+// the template pattern, possibly in another file.
+bool DeclarationEdgeVisitor::owns_instantiation(
+    const clang::FunctionDecl *fd) const {
+  const clang::SourceLocation poi = fd->getPointOfInstantiation();
+  if (poi.isInvalid())
+    return false;
+  return expansion_loc(context_, poi).file == target_file_;
+}
+
 // One shared helper (emit_callable_template_identity) covers flags, arguments,
 // display names, and structural edges for BOTH this declaration pass and the
 // call path, so the two cannot diverge; every emission in it is idempotent.
+// Explicit instantiations anchor their mint provenance at the point of
+// instantiation, matching the symbol pass.
 void DeclarationEdgeVisitor::emit_callable_identity(
     const clang::FunctionDecl *fd) {
   const auto info = callable_template_info(fd);
@@ -544,6 +571,22 @@ void DeclarationEdgeVisitor::emit_callable_identity(
   if (!req)
     return;
   req->is_instantiation = info->is_instantiation;
+  if (is_explicit_instantiation_kind(info->tsk) &&
+      fd->getPointOfInstantiation().isValid()) {
+    const ExpansionLoc poi =
+        expansion_loc(context_, fd->getPointOfInstantiation());
+    if (!poi.file.empty()) {
+      req->decl_line = poi.line;
+      req->decl_col = poi.col;
+      if (const auto fid = sink_.file_id_for_path(poi.file)) {
+        req->decl_file_id = fid;
+        req->decl_path.reset();
+      } else {
+        req->decl_file_id.reset();
+        req->decl_path = poi.file;
+      }
+    }
+  }
   const int64_t dst_id = sink_.mint_symbol(*req);
   emit_callable_template_identity(sink_, mint_, targ_encoder_, dst_id, fd,
                                   *info, {});
@@ -555,18 +598,6 @@ bool DeclarationEdgeVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
     return true;
   emit_callable_identity(decl);
   return true;
-}
-
-void DeclarationEdgeVisitor::emit_explicit_instantiations(
-    const clang::FunctionTemplateDecl *tmpl) {
-  for (const clang::FunctionDecl *fd : tmpl->specializations()) {
-    const clang::TemplateSpecializationKind tsk =
-        fd->getTemplateSpecializationKind();
-    if (tsk != clang::TSK_ExplicitInstantiationDeclaration &&
-        tsk != clang::TSK_ExplicitInstantiationDefinition)
-      continue;
-    emit_callable_identity(fd);
-  }
 }
 
 // The indexed symbol id of a class-template specialization whose identity is

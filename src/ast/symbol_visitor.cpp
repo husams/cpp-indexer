@@ -1,5 +1,6 @@
 #include "ast/symbol_visitor.hpp"
 
+#include "ast/instantiation_edges.hpp"
 #include "ast/location.hpp"
 #include "ast/symbol_emitter.hpp"
 
@@ -95,24 +96,52 @@ bool SymbolVisitor::VisitNamedDecl(clang::NamedDecl *decl) {
   return true;
 }
 
-// Explicit instantiations (`template double twice<double>(double);`) are
-// never lexical decls — they exist only in the template's specializations()
-// list, which the default traversal skips. Emit them here so an uncalled
-// explicit instantiation is still a symbol. should_emit gates each one on the
-// pattern's location, matching where the instantiated declaration points.
+// Explicit instantiations (`template double twice<double>(double);`,
+// `template void PlainMember<int>::run();`) are never lexical decls — they
+// exist only in specialization lists, which the default traversal skips. The
+// decl they create points at the template PATTERN, so ownership, location,
+// and cleanup are anchored to getPointOfInstantiation(): the file holding
+// the `template ...;` statement owns the symbol, and reindexing that file
+// (with the statement removed) drops its edges.
+void SymbolVisitor::emit_explicit_instantiation(const clang::FunctionDecl *fd) {
+  const clang::SourceLocation poi = fd->getPointOfInstantiation();
+  if (poi.isInvalid() || source_manager_.isInSystemHeader(
+                             source_manager_.getExpansionLoc(poi)))
+    return;
+  const ExpansionLoc loc = expansion_loc(context_, poi);
+  if (loc.file.empty())
+    return;
+  if (!target_file_.empty() && loc.file != target_file_)
+    return;
+  std::optional<SymbolRecord> sym = extractor_.extract(fd);
+  if (!sym)
+    return;
+  sym->file = loc.file;
+  sym->line = loc.line;
+  sym->col = loc.col;
+  sym->end_line = loc.line;
+  sym->end_col = loc.col;
+  if (sym->decl_line) { // declaration-only instantiations record the POI too
+    sym->decl_line = loc.line;
+    sym->decl_col = loc.col;
+  }
+  out_.emit(*sym);
+}
+
 bool SymbolVisitor::VisitFunctionTemplateDecl(
     clang::FunctionTemplateDecl *decl) {
-  for (const clang::FunctionDecl *fd : decl->specializations()) {
-    const clang::TemplateSpecializationKind tsk =
-        fd->getTemplateSpecializationKind();
-    if (tsk != clang::TSK_ExplicitInstantiationDeclaration &&
-        tsk != clang::TSK_ExplicitInstantiationDefinition)
-      continue;
-    if (!should_emit(fd))
-      continue;
-    if (std::optional<SymbolRecord> sym = extractor_.extract(fd))
-      out_.emit(*sym);
-  }
+  for_each_explicit_callable_instantiation(
+      decl, [this](const clang::FunctionDecl *fd) {
+        emit_explicit_instantiation(fd);
+      });
+  return true;
+}
+
+bool SymbolVisitor::VisitClassTemplateDecl(clang::ClassTemplateDecl *decl) {
+  for_each_explicit_callable_instantiation(
+      decl, [this](const clang::FunctionDecl *fd) {
+        emit_explicit_instantiation(fd);
+      });
   return true;
 }
 

@@ -102,10 +102,10 @@ private:
   friend_targets(const clang::TypeSourceInfo *tsi) const;
   void emit_template_params(const clang::TemplateParameterList *params,
                             int64_t owner_id);
-  // Explicit function/method instantiations live only in the template's
-  // specializations() list (never as lexical decls), so the template callback
-  // walks them.
-  void emit_explicit_instantiations(const clang::FunctionTemplateDecl *tmpl);
+  // Explicit function/method instantiations live only in specialization
+  // lists (never as lexical decls); ownership follows the point of
+  // instantiation, not the template's file.
+  bool owns_instantiation(const clang::FunctionDecl *fd) const;
   void emit_callable_identity(const clang::FunctionDecl *fd);
   void emit_signature_uses(const clang::FunctionDecl *fn);
 

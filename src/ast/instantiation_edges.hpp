@@ -13,6 +13,7 @@
 
 #include "clang/AST/Type.h"
 #include "clang/Basic/Specifiers.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 
 #include <cstdint>
 #include <optional>
@@ -21,7 +22,9 @@
 
 namespace clang {
 class ASTContext;
+class ClassTemplateDecl;
 class FunctionDecl;
+class FunctionTemplateDecl;
 class NamedDecl;
 } // namespace clang
 
@@ -65,5 +68,24 @@ void emit_callable_template_identity(EdgeSink &sink, MintBuilder &mint,
 void emit_caller_instantiates(EdgeSink &sink, int64_t src_id,
                               const CallableTemplateInfo &info,
                               const std::string &callee_usr);
+
+// The TSK names an explicit instantiation (`template ...;` / `extern
+// template ...;`).
+bool is_explicit_instantiation_kind(clang::TemplateSpecializationKind tsk);
+
+// Explicit callable instantiations never appear as lexical decls; they live
+// only in specialization lists. Enumerate them for one template:
+//   - a function template's explicitly instantiated specializations;
+//   - for a class template, the explicitly instantiated ORDINARY members of
+//     each of its specializations, plus explicit instantiations of member
+//     function templates (`template int Gadget<char>::conv<long>(long);`).
+// Callers gate each decl by its getPointOfInstantiation() — the statement
+// that owns it — not by the template's own location.
+void for_each_explicit_callable_instantiation(
+    const clang::FunctionTemplateDecl *tmpl,
+    llvm::function_ref<void(const clang::FunctionDecl *)> fn);
+void for_each_explicit_callable_instantiation(
+    const clang::ClassTemplateDecl *tmpl,
+    llvm::function_ref<void(const clang::FunctionDecl *)> fn);
 
 } // namespace cidx::ast

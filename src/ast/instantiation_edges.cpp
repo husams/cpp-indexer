@@ -152,6 +152,40 @@ void emit_callable_template_identity(
     emit_owner_promotion(sink, mint, targ_encoder, dst_id, m);
 }
 
+bool is_explicit_instantiation_kind(clang::TemplateSpecializationKind tsk) {
+  return tsk == clang::TSK_ExplicitInstantiationDeclaration ||
+         tsk == clang::TSK_ExplicitInstantiationDefinition;
+}
+
+void for_each_explicit_callable_instantiation(
+    const clang::FunctionTemplateDecl *tmpl,
+    llvm::function_ref<void(const clang::FunctionDecl *)> fn) {
+  for (const clang::FunctionDecl *fd : tmpl->specializations())
+    if (is_explicit_instantiation_kind(fd->getTemplateSpecializationKind()))
+      fn(fd);
+}
+
+void for_each_explicit_callable_instantiation(
+    const clang::ClassTemplateDecl *tmpl,
+    llvm::function_ref<void(const clang::FunctionDecl *)> fn) {
+  // `template void PlainMember<int>::run();` creates the member inside the
+  // (implicit) ClassTemplateSpecializationDecl — reachable only through the
+  // class template's specialization list. decls() holds just the members the
+  // TU actually instantiated. (Members of nested classes are not walked.)
+  for (const clang::ClassTemplateSpecializationDecl *spec :
+       tmpl->specializations()) {
+    for (const clang::Decl *d : spec->decls()) {
+      if (const auto *m = llvm::dyn_cast<clang::FunctionDecl>(d)) {
+        if (!m->isImplicit() &&
+            is_explicit_instantiation_kind(m->getTemplateSpecializationKind()))
+          fn(m);
+      } else if (const auto *ft = llvm::dyn_cast<clang::FunctionTemplateDecl>(d)) {
+        for_each_explicit_callable_instantiation(ft, fn);
+      }
+    }
+  }
+}
+
 void emit_caller_instantiates(EdgeSink &sink, int64_t src_id,
                               const CallableTemplateInfo &info,
                               const std::string &callee_usr) {

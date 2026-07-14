@@ -296,6 +296,47 @@ template <template <typename> class C> int pick() { return 0; }
 template <> int pick<Vec>() { return 1; }
 )cpp";
 
+// Explicit instantiations of members of class templates — never lexical
+// decls, reachable only through specialization lists (PR #16 review).
+const char *kMemberInstantiationTu = R"cpp(
+template <class T> struct PlainMember { void run(); };
+template <class T> void PlainMember<T>::run() {}
+template void PlainMember<int>::run();
+
+template <class T> struct Gadget {
+  template <class U> int conv(U u) { return static_cast<int>(u); }
+};
+template int Gadget<char>::conv<long>(long);
+)cpp";
+
+// Two-file fixture: a template header plus the TU holding the explicit
+// instantiation statements. reindex_with_source() rewrites the TU and re-runs
+// `index` — only the changed TU is reparsed (md5 skip keeps the header).
+struct IndexedProject {
+  std::string cache;
+  std::string proj;
+  cidx::Logger log;
+  IndexedProject(const std::string &header, const std::string &source)
+      : cache(make_temp_dir()), proj(cache + "/proj") {
+    ::mkdir(proj.c_str(), 0755);
+    write_file(proj + "/templates.hpp", header);
+    write_file(proj + "/instantiate.cpp", source);
+    write_file(proj + "/compile_commands.json",
+               "[{\"directory\": \"" + proj +
+                   "\", \"command\": \"cc -I. -c instantiate.cpp -o "
+                   "instantiate.o\", \"file\": \"instantiate.cpp\"}]\n");
+    log.set_file(cache + "/cidx.log");
+    REQUIRE(run_cidx({"import", "--db", proj, "--name", "fixture"}, cache,
+                     log) == 0);
+    REQUIRE(run_cidx({"index"}, cache, log) == 0);
+  }
+  void reindex_with_source(const std::string &source) {
+    write_file(proj + "/instantiate.cpp", source);
+    REQUIRE(run_cidx({"index"}, cache, log) == 0);
+  }
+  std::string db_path() const { return cache + "/index.db"; }
+};
+
 // "<kind-name>/<is_instantiation>" of the unique symbol with this USR.
 std::vector<std::string> sym_probe(const std::string &db_path,
                                    const std::string &usr) {
@@ -762,6 +803,74 @@ TEST_SUITE("clang") {
                     "WHERE e.kind = 5 AND ss.usr = 'c:@F@use#&$@S@Worker#f#' "
                     "AND ds.usr = 'c:@S@Worker@FT@>1#Tconvert#t0.0#I#'") ==
           std::vector<std::string>{"2"});
+  }
+
+  TEST_CASE("template spec: explicit instantiation is owned by its POI file") {
+    // PR #16 review: the created FunctionDecl points at the template PATTERN
+    // (templates.hpp); ownership must follow the point of instantiation.
+    IndexedProject prj("#pragma once\n"
+                       "template <class T> T twice(T x) { return x + x; }\n",
+                       "#include \"templates.hpp\"\n"
+                       "template double twice<double>(double);\n");
+    // Owned by instantiate.cpp at the statement's line — so it IS a symbol of
+    // that file — with declaration provenance anchored there too.
+    CHECK(query_col(prj.db_path(),
+                    "SELECT f.name || ':' || s.line || '/' || df.name FROM "
+                    "symbol s JOIN file f ON f.id = s.file_id "
+                    "JOIN file df ON df.id = s.decl_file_id "
+                    "WHERE s.usr = 'c:@F@twice<#d>#d#'") ==
+          std::vector<std::string>{"instantiate.cpp:2/instantiate.cpp"});
+    CHECK(sym_probe(prj.db_path(), "c:@F@twice<#d>#d#") ==
+          std::vector<std::string>{"function/1"});
+    CHECK(structural_edges(prj.db_path(), "c:@F@twice<#d>#d#",
+                           "c:@FT@>1#Ttwice#t0.0#S0_#") ==
+          std::vector<std::string>{"instantiates/1"});
+    // Deleting the statement and reindexing ONLY the TU (the header stays
+    // md5-skipped) drops the relationship: per-file edge cleanup now applies
+    // because the instantiation symbol belongs to instantiate.cpp.
+    prj.reindex_with_source("#include \"templates.hpp\"\n");
+    CHECK(structural_edges(prj.db_path(), "c:@F@twice<#d>#d#",
+                           "c:@FT@>1#Ttwice#t0.0#S0_#") ==
+          std::vector<std::string>{});
+  }
+
+  TEST_CASE("template spec: uncalled explicit member instantiation") {
+    // PR #16 review: `template void PlainMember<int>::run();` lives only in
+    // the class template's specialization list, not in any lexical position.
+    const IndexedTu tu(kMemberInstantiationTu);
+    // The ordinary member: symbol at the POI line, instantiation flag, its
+    // instantiates edge to the member PATTERN, and method_of to the owner.
+    CHECK(sym_probe(tu.db_path(), "c:@S@PlainMember>#I@F@run#") ==
+          std::vector<std::string>{"method/1"});
+    CHECK(query_col(tu.db_path(),
+                    "SELECT s.line FROM symbol s "
+                    "WHERE s.usr = 'c:@S@PlainMember>#I@F@run#'") ==
+          std::vector<std::string>{"4"});
+    CHECK(structural_edges(tu.db_path(), "c:@S@PlainMember>#I@F@run#",
+                           "c:@ST>1#T@PlainMember@F@run#") ==
+          std::vector<std::string>{"instantiates/1"});
+    CHECK(structural_edges(tu.db_path(), "c:@S@PlainMember>#I@F@run#",
+                           "c:@S@PlainMember>#I") ==
+          std::vector<std::string>{"method_of/1"});
+    // The promoted owner: PlainMember<int> instantiates PlainMember with its
+    // argument recorded.
+    CHECK(structural_edges(tu.db_path(), "c:@S@PlainMember>#I",
+                           "c:@ST>1#T@PlainMember") ==
+          std::vector<std::string>{"instantiates/1"});
+    CHECK(args_probe(tu.db_path(), "c:@S@PlainMember>#I") ==
+          std::vector<std::string>{"0:1:int"});
+    // A member FUNCTION TEMPLATE explicit instantiation is found the same
+    // way (Gadget<char>::conv<long>), with its deduced argument and owner.
+    CHECK(sym_probe(tu.db_path(), "c:@S@Gadget>#C@F@conv<#L>#L#") ==
+          std::vector<std::string>{"method/1"});
+    CHECK(args_probe(tu.db_path(), "c:@S@Gadget>#C@F@conv<#L>#L#") ==
+          std::vector<std::string>{"0:1:long"});
+    CHECK(structural_edges(tu.db_path(), "c:@S@Gadget>#C@F@conv<#L>#L#",
+                           "c:@S@Gadget>#C") ==
+          std::vector<std::string>{"method_of/1"});
+    CHECK(structural_edges(tu.db_path(), "c:@S@Gadget>#C",
+                           "c:@ST>1#T@Gadget") ==
+          std::vector<std::string>{"instantiates/1"});
   }
 
 } // TEST_SUITE("clang")
