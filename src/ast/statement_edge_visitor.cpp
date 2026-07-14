@@ -274,15 +274,13 @@ void StatementEdgeVisitor::emit_construction_form(const clang::CXXConstructExpr 
   const auto dst = ctx_.sink().lookup_symbol_id(type_usr);
   if (!dst)
     return;
+  // The constructor CATEGORY decides copy/move — not the parameter's printed
+  // spelling, which can contain '&' inside nested types (Holder<void(int &)>).
   int form = 10; // construct-value
-  if (ref->getNumParams() == 1) {
-    const std::string pt = ref->getParamDecl(0)->getType().getAsString(
-        printing_policy(ctx_.context()));
-    if (pt.find("&&") != std::string::npos)
-      form = 14; // construct-move
-    else if (pt.find('&') != std::string::npos)
-      form = 13; // construct-copy
-  }
+  if (ref->isMoveConstructor())
+    form = 14; // construct-move
+  else if (ref->isCopyConstructor())
+    form = 13; // construct-copy
   const bool var_init = ctor == direct_init_;
   if (!var_init && form != 13 && form != 14)
     form = 11; // construct-temp

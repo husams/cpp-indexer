@@ -211,7 +211,52 @@ template <> struct NumS<3> {};
 
 template <typename... Ts> int count() { return 42; }
 int use_count() { return count<int, char>(); }
+
+struct Foo {};
+template <typename T> struct Box {};
+typedef Box<Foo *> FooPtrBox;
+typedef Box<Foo &> FooRefBox;
 )cpp";
+
+const char *kConstructFormTu = R"cpp(
+template <typename T> struct Holder {};
+
+struct Taker {
+  Taker(Holder<void(int &)> h);
+};
+
+struct Copyable {
+  Copyable();
+  Copyable(const Copyable &other);
+  Copyable(Copyable &&other);
+};
+
+void use_taker() {
+  Holder<void(int &)> h;
+  Taker t(h);
+}
+
+void use_copyable() {
+  Copyable a;
+  Copyable b(a);
+  Copyable c(static_cast<Copyable &&>(b));
+}
+)cpp";
+
+// Construction-form edge kinds (10 construct-value / 11 construct-temp /
+// 13 construct-copy / 14 construct-move) from `src` to the record `dst`.
+std::vector<std::string> construct_forms(const std::string &db_path,
+                                         const std::string &src,
+                                         const std::string &dst) {
+  return query_col(db_path,
+                   "SELECT DISTINCT ek.name FROM edge e "
+                   "JOIN symbol ss ON ss.id = e.src_id "
+                   "JOIN symbol ds ON ds.id = e.dst_id "
+                   "JOIN edge_kind ek ON ek.id = e.kind "
+                   "WHERE ss.spelling = '" +
+                       src + "' AND ds.spelling = '" + dst +
+                       "' AND e.kind IN (10, 11, 13, 14)");
+}
 
 // arg_kinds recorded for every template_arg row owned by a symbol spelled
 // `owner` (primaries carry template_param rows, not template_arg, so this
@@ -339,6 +384,43 @@ TEST_SUITE("clang") {
     // PtrS<nullptr> stores raw CX kind 3 (NullPtr) today, colliding with the
     // contract's template-template code.
     CHECK(arg_kinds_of(tu.db_path(), "PtrS") == std::vector<std::string>{"2"});
+  }
+
+  // ---- review 2026-07-14 blocking finding 1: pointer/reference ref_id ------
+
+  TEST_CASE("review fix: pointer and reference type args keep their ref_id") {
+    const IndexedTu tu(kTemplateArgsTu);
+    // Box<Foo *> / Box<Foo &> instances: the type argument's underlying
+    // record must resolve to Foo even through pointer/reference wrappers.
+    CHECK(query_col(tu.db_path(),
+                    "SELECT DISTINCT COALESCE(rs.usr, '<null>') "
+                    "FROM template_arg ta "
+                    "JOIN symbol os ON os.id = ta.owner_id "
+                    "LEFT JOIN symbol rs ON rs.id = ta.ref_id "
+                    "WHERE os.spelling = 'Box'") ==
+          std::vector<std::string>{"c:@S@Foo"});
+    // The literal stays the written spelling.
+    CHECK(query_col(tu.db_path(),
+                    "SELECT DISTINCT COALESCE(ta.literal, '') "
+                    "FROM template_arg ta "
+                    "JOIN symbol os ON os.id = ta.owner_id "
+                    "WHERE os.spelling = 'Box'") ==
+          (std::vector<std::string>{"Foo &", "Foo *"}));
+  }
+
+  // ---- review 2026-07-14 blocking finding 2: construction form -------------
+
+  TEST_CASE("review fix: construction form uses the constructor category") {
+    const IndexedTu tu(kConstructFormTu);
+    // Taker's single-argument ctor takes Holder<void(int &)> BY VALUE: the
+    // '&' inside the nested type spelling must not classify it copy.
+    CHECK(construct_forms(tu.db_path(), "use_taker", "Taker") ==
+          std::vector<std::string>{"construct-value"});
+    // Real copy and move constructors still classify 13/14 (a's default
+    // construction contributes the construct-value row).
+    CHECK(construct_forms(tu.db_path(), "use_copyable", "Copyable") ==
+          (std::vector<std::string>{"construct-copy", "construct-move",
+                                    "construct-value"}));
   }
 
 } // TEST_SUITE("clang")

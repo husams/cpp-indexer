@@ -1,9 +1,9 @@
 # Clang visitor indexing refactoring plan
 
-Status: proposed  
-Scope: C++ Layer-0 indexing under `src/ast/`  
-Primary goal: make Clang's typed AST and `RecursiveASTVisitor` the design,
-rather than reproducing the retired libclang walk inside visitor-shaped code.
+- Status: implemented (phases 0–6); 2026-07-14 review findings addressed
+- Scope: C++ Layer-0 indexing under `src/ast/`
+- Primary goal: make Clang's typed AST and `RecursiveASTVisitor` the design,
+  rather than reproducing the retired libclang walk inside visitor-shaped code.
 
 ## Executive decision
 
@@ -435,6 +435,76 @@ required when storage schema or reader semantics change.
 - Default and Clang suites pass, intentional semantic deltas are reviewed, and
   `index.db` is regenerated and schema-verified.
 
+## Implementation review — 2026-07-14
+
+**Outcome: changes requested. Do not merge until the two blocking semantic
+findings below are fixed and covered by regression tests.**
+
+### Blocking findings
+
+1. **Template type arguments can lose their semantic `ref_id`.**
+   `TemplateArgumentEncoder::encode()` calls `getAsTagDecl()` directly on the
+   outer `QualType`. Pointer and reference arguments therefore do not resolve
+   their underlying record declaration. A reproduced `Box<Foo *>` row retained
+   `literal = "Foo *"` but stored a NULL `ref_id`; the removed resolver linked
+   that argument to `Foo`. Resolve pointer/reference wrappers with typed Clang
+   APIs before looking up the declaration, and add pointer/reference fixtures.
+   Location: `src/ast/template_argument_encoder.cpp`.
+
+2. **Construction edges can be assigned the wrong copy/move kind.**
+   `StatementEdgeVisitor::emit_construction_form()` searches the rendered
+   parameter type for `&` or `&&`. This examines nested type spelling, not the
+   constructor category. A reproduced constructor taking
+   `Holder<void(int &)>` by value emitted `construct-copy`. Use
+   `CXXConstructorDecl::isCopyConstructor()` and `isMoveConstructor()` and add
+   a non-copy single-argument constructor fixture.
+   Location: `src/ast/statement_edge_visitor.cpp`.
+
+### Repository cleanup
+
+- Remove unrelated local Obsidian state and empty `Untitled*` files from the
+  branch before merge. These files are not part of the refactoring.
+- Fix the trailing whitespace and extra end-of-file blank lines reported by
+  `git diff --check` in `CMakeLists.txt` and this document.
+
+### Verification performed
+
+- C++ default gate: **15/15 passed**.
+- Clang gate: **6/6 passed**.
+- Python storage/read-query suite: **998 passed, 2 skipped**.
+- AST complexity gate: **passed**.
+- Refreshed semantic index: schema v29, 132 indexed files, zero missing,
+  5 diagnostics, and 2,059 unresolved stubs.
+- Normalized Layer-0 output from the refreshed index matched the committed
+  index.
+- LLVM 21/RHEL validation was not run during this review.
+
+The green suites do not cover the two reproduced semantic failures above, so
+they are not sufficient for approval.
+
+### Resolution — 2026-07-14
+
+Both blocking findings are fixed, each with a regression fixture that failed
+before the fix (`tests/ast_visitor_test.cpp`):
+
+1. `TemplateArgumentEncoder::encode()` resolves the referenced record through
+   `record_usr_of_type()`, which strips pointer/reference wrappers typedly, so
+   `Box<Foo *>` / `Box<Foo &>` link `ref_id` to `Foo` while keeping the
+   written literal. Fixture: "pointer and reference type args keep their
+   ref_id".
+2. `StatementEdgeVisitor::emit_construction_form()` classifies by constructor
+   category (`isMoveConstructor()` / `isCopyConstructor()`), not by searching
+   the printed parameter type. A by-value `Holder<void(int &)>` parameter now
+   emits construct-value; real copy/move constructors still emit 13/14.
+   Fixture: "construction form uses the constructor category".
+
+Repository cleanup applied in the same change: Obsidian/agent state and empty
+`Untitled*` files untracked and gitignored; `git diff --check` whitespace in
+`CMakeLists.txt` and this document fixed. Manifests Layer-0 row set is
+unchanged by the fixes (the corpus contains neither pattern); the committed
+`index.db` was re-selfindexed and gains the corrected pointer/reference
+`ref_id` links.
+
 ## Source anchors
 
 - `src/ast/body_visitor.hpp` — mixin-composed RAV and traversal overrides.
@@ -449,4 +519,3 @@ required when storage schema or reader semantics change.
   `docs/modules/clangx*.md`, `docs/build.md` — stale two-engine documentation.
 - `tests/index_golden_test.cpp` and `tests/golden/index_layer0.txt` — current
   behavior baseline.
-

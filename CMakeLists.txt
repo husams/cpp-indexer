@@ -347,4 +347,3 @@ set_target_properties(cidx-astgraph PROPERTIES
 
 enable_testing()
 add_subdirectory(tests)
-

@@ -1,9 +1,9 @@
 #include "ast/template_argument_encoder.hpp"
 
-#include "ast/edge_sink.hpp"
 #include "ast/clang_compat.hpp"
+#include "ast/edge_sink.hpp"
 #include "ast/names.hpp"
-#include "ast/usr.hpp"
+#include "ast/value_provenance.hpp"
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
@@ -33,11 +33,11 @@ TemplateArgumentEncoder::encode(int64_t owner_id, int64_t position,
     const std::string sp = t.getAsString(printing_policy(context_));
     if (!sp.empty())
       ta.literal = sp;
-    if (const clang::TagDecl *td = t->getAsTagDecl()) {
-      const std::string ref_usr = usr_for_decl(td);
-      if (!ref_usr.empty())
-        ta.ref_id = sink_.lookup_symbol_id(ref_usr);
-    }
+    // The referenced record resolves through pointer/reference wrappers
+    // (Box<Foo *> links to Foo); record_usr_of_type strips them typedly.
+    const std::string ref_usr = record_usr_of_type(t);
+    if (!ref_usr.empty())
+      ta.ref_id = sink_.lookup_symbol_id(ref_usr);
     break;
   }
   case clang::TemplateArgument::Integral:
