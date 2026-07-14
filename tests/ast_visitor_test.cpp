@@ -205,6 +205,26 @@ void named_casts() {
   ccast(const_cast<int &>(cx));
   rcast(reinterpret_cast<long &>(x));
 }
+
+void vcast(int);
+void cvalue(long);
+
+void value_casts() {
+  int x = 1;
+  vcast(static_cast<int>(x));
+  cvalue((long)x);
+}
+
+struct VBase {
+  virtual void act();
+};
+struct VDerived : VBase {
+  void act() override;
+};
+
+void recv_value_cast(VDerived &d) { static_cast<VBase>(d).act(); }
+void recv_ref_cast(VDerived &d) { static_cast<VBase &>(d).act(); }
+void recv_ptr_cast(VDerived *d) { static_cast<VBase *>(d)->act(); }
 )cpp";
 
 const char *kTemplateArgsTu = R"cpp(
@@ -357,6 +377,53 @@ TEST_SUITE("clang") {
       const ArgProbe p = probe_arg0(tu.db_path(), "named_casts", callee);
       CHECK_MESSAGE(p.src_kind == "local", callee);
       CHECK_MESSAGE(p.has_decl_usr, callee);
+    }
+  }
+
+  TEST_CASE("review fix: value-producing casts do not claim the operand") {
+    const IndexedTu tu(kProvenanceTu);
+    // static_cast<int>(x) and (long)x construct a new value — like the
+    // functional-cast equivalent they classify call_result, not local x.
+    for (const char *callee : {"vcast", "cvalue"}) {
+      const ArgProbe p = probe_arg0(tu.db_path(), "value_casts", callee);
+      CHECK_MESSAGE(p.src_kind == "call_result", callee);
+      CHECK_MESSAGE(!p.has_decl_usr, callee);
+    }
+    // Receiver path: static_cast<VBase>(d) slices — dispatch is exactly
+    // VBase, so the receiver must not carry d's identity. It is a by-value
+    // VBase (recv_type_is_value = 1), which devirtualization narrows on.
+    CHECK(query_col(tu.db_path(),
+                    "SELECT es.recv_src_kind || '/' || "
+                    "COALESCE(es.recv_decl_usr, '') || '/' || "
+                    "es.recv_type_is_value "
+                    "FROM edge_site es "
+                    "JOIN edge e ON e.id = es.edge_id "
+                    "JOIN symbol ss ON ss.id = e.src_id "
+                    "JOIN symbol ds ON ds.id = e.dst_id "
+                    "WHERE ss.spelling = 'recv_value_cast' "
+                    "AND ds.spelling = 'act'") ==
+          std::vector<std::string>{"call_result//1"});
+  }
+
+  TEST_CASE("provenance pin: identity-preserving receiver casts keep d") {
+    const IndexedTu tu(kProvenanceTu);
+    // static_cast<VBase &>(d) and static_cast<VBase *>(d) still denote d's
+    // storage — the receiver keeps the parameter's identity for
+    // devirtualization.
+    for (const char *src : {"recv_ref_cast", "recv_ptr_cast"}) {
+      CHECK_MESSAGE(
+          query_col(tu.db_path(),
+                    std::string("SELECT es.recv_src_kind || '/' || "
+                                "es.recv_param_pos "
+                                "FROM edge_site es "
+                                "JOIN edge e ON e.id = es.edge_id "
+                                "JOIN symbol ss ON ss.id = e.src_id "
+                                "JOIN symbol ds ON ds.id = e.dst_id "
+                                "WHERE ss.spelling = '") +
+                        src +
+                        "' AND ds.spelling = 'act'") ==
+              std::vector<std::string>{"local/0"},
+          src);
     }
   }
 

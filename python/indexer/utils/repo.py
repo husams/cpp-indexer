@@ -73,7 +73,9 @@ def git_remote_url(root: str) -> str | None:
     common = _git_common_dir(root)
     if common is None:
         return None
-    cfg = configparser.ConfigParser()
+    # git permits repeated keys in its config (multivalued entries; PR tooling
+    # appends duplicates), so the reader must not be strict about them.
+    cfg = configparser.ConfigParser(strict=False)
     try:
         cfg.read(os.path.join(common, "config"))
         return cfg.get('remote "origin"', "url")

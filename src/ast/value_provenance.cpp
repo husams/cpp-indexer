@@ -44,12 +44,18 @@ const clang::Expr *normalize_value_expr(const clang::Expr *expr) {
       e = bt->getSubExpr();
       continue;
     }
-    // An explicit cast of a value — C-style, static_cast, const_cast,
-    // reinterpret_cast, dynamic_cast — still denotes the operand's storage.
-    // FUNCTIONAL casts (`std::string("x")`) construct a new value and stay
-    // visible so the classifier can answer call_result.
+    // An explicit cast is unwrapped only when it preserves the operand's
+    // storage identity: glvalue casts (`static_cast<T &>`, `const_cast`,
+    // C-style reference casts) still denote the operand, and pointer casts
+    // still denote the pointee. Value-producing casts — functional
+    // (`std::string("x")`), `static_cast<int>(x)`, `(Base)derived` —
+    // construct a new value and stay visible so the classifier answers
+    // call_result instead of claiming the operand.
     if (const auto *cast = llvm::dyn_cast<clang::ExplicitCastExpr>(stripped)) {
-      if (!llvm::isa<clang::CXXFunctionalCastExpr>(cast)) {
+      const bool preserves_storage =
+          cast->isGLValue() || cast->getType()->isPointerType();
+      if (preserves_storage &&
+          !llvm::isa<clang::CXXFunctionalCastExpr>(cast)) {
         e = cast->getSubExpr();
         continue;
       }
@@ -131,13 +137,13 @@ ValueSource classify_decl_ref(const clang::DeclRefExpr *dre) {
   return {"unknown", type_usr, decl_usr, ""};
 }
 
-// Call-shaped values. Single-arg functional cast `std::string("x")` is a
-// converted value -> call_result with no callee. Temporary-object syntax
-// `Widget(7)` / construct exprs (and calls resolving to a ctor/conversion)
-// -> construct.
+// Call-shaped values. A converted value — functional cast `std::string("x")`
+// or a value-producing explicit cast normalize kept visible — is call_result
+// with no callee. Temporary-object syntax `Widget(7)` / construct exprs (and
+// calls resolving to a ctor/conversion) -> construct.
 ValueSource classify_call_shaped(const clang::Expr *peeled) {
   const std::string type_usr = record_usr_of_type(peeled->getType());
-  if (llvm::isa<clang::CXXFunctionalCastExpr>(peeled))
+  if (llvm::isa<clang::ExplicitCastExpr>(peeled))
     return {"call_result", type_usr, "", ""};
   if (llvm::isa<clang::CXXConstructExpr>(peeled))
     return {"construct", type_usr, "", ""};
@@ -172,7 +178,7 @@ ValueSource classify_value_source(const clang::ASTContext & /*context*/,
     return {"member", type_usr, decl_usr, ""};
   }
 
-  if (llvm::isa<clang::CXXFunctionalCastExpr>(peeled) ||
+  if (llvm::isa<clang::ExplicitCastExpr>(peeled) ||
       llvm::isa<clang::CXXConstructExpr>(peeled) ||
       llvm::isa<clang::CallExpr>(peeled))
     return classify_call_shaped(peeled);

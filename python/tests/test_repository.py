@@ -251,6 +251,21 @@ def test_worktree_resolves_to_main_repo_name_and_remote(tmp_path):
     assert repo_name(str(main)) == repo_name(str(wt))
 
 
+def test_remote_url_tolerates_duplicate_config_keys(tmp_path):
+    from indexer.utils import git_remote_url, repo_name
+
+    main = tmp_path / "main"
+    main.mkdir()
+    _git(main, "init", "-q")
+    _git(main, "remote", "add", "origin", "https://github.com/acme/coolproj.git")
+    # git allows the SAME key repeatedly (multivalued entries; PR tooling
+    # appends duplicates on every run), so the config reader must too.
+    _git(main, "config", "--add", "branch.feat.github-pr-owner-number", "a#c#1")
+    _git(main, "config", "--add", "branch.feat.github-pr-owner-number", "a#c#1")
+    assert git_remote_url(str(main)) == "https://github.com/acme/coolproj.git"
+    assert repo_name(str(main)) == "coolproj"
+
+
 # -- backfill migration script -----------------------------------------------
 
 _LAB_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
