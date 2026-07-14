@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 // Splice the template-argument clause built from `display_args` into `display`,
 // replacing an existing top-level `<...>` that precedes the parameter list, or
@@ -22,4 +22,4 @@ std::optional<std::string>
 rewrite_template_display_name(const std::string &display,
                               const std::vector<std::string> &display_args);
 
-} // namespace cidx::lt
+} // namespace cidx::ast

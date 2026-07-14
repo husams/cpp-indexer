@@ -439,7 +439,7 @@ CREATE TABLE IF NOT EXISTS possible_call (
 CREATE INDEX IF NOT EXISTS idx_possible_call_src ON possible_call(src_def_id);
 CREATE INDEX IF NOT EXISTS idx_possible_call_dst ON possible_call(dst_def_id);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '28');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '29');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -1234,6 +1234,39 @@ void Storage::migrate() {
   // storage.py.
   if (!has_table("decl_site")) {
     changed = true;
+  }
+  // v28 -> v29: canonical template_arg.arg_kind
+  // (docs/improvements/template-arg-contract.md). The class-spec extraction
+  // path used to store raw CXTemplateArgumentKind values; the contract codes
+  // are 1=type 2=non-type 3=template-template 4=pack. VERSION-gated, not
+  // data-gated: after the remap a legitimate template-template row (3) on a
+  // record-like owner is indistinguishable from a legacy NullPtr row, so this
+  // must run exactly once. Legacy 3 (NullPtr) only ever occurred on
+  // record-like owners — the callable paths always wrote in-contract codes —
+  // and the ambiguous 3 must remap BEFORE 5/6 -> 3 mints new, valid 3s.
+  // Mirrors storage.py.
+  if (has_table("template_arg")) {
+    int stored = 0;
+    {
+      auto st =
+          db_.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
+      if (st.step()) {
+        const std::string v = st.col_text(0);
+        if (!v.empty()) {
+          stored = std::stoi(v);
+        }
+      }
+    }
+    if (stored > 0 && stored < 29) {
+      db_.exec("UPDATE template_arg SET arg_kind = 2 WHERE arg_kind = 3 "
+               "AND owner_id IN (SELECT id FROM symbol "
+               "                 WHERE kind IN (2, 3, 4, 31))");
+      db_.exec("UPDATE template_arg SET arg_kind = 3 WHERE arg_kind IN (5, 6)");
+      db_.exec("UPDATE template_arg SET arg_kind = 2 WHERE arg_kind = 7");
+      db_.exec("UPDATE template_arg SET arg_kind = 4 WHERE arg_kind = 8");
+      db_.exec("DELETE FROM template_arg WHERE arg_kind = 0");
+      changed = true;
+    }
   }
   if (changed) {
     auto st =

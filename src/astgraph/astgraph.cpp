@@ -45,7 +45,7 @@
 #include "llvm/Support/Casting.h"
 
 #include "astgraph/schema.hpp"
-#include "clangx/toolchain.hpp"
+#include "toolchain/toolchain.hpp"
 #include "ast/usr.hpp"
 #include "cli/args.hpp" // kVersion (meta.generator provenance)
 #include "storage/sqlite.hpp"
@@ -284,7 +284,7 @@ public:
 
     const std::string spelling = decl_name(d);
     int64_t symbol_id = 0;
-    std::string usr = cidx::lt::usr_for_decl(d);
+    std::string usr = cidx::ast::usr_for_decl(d);
     if (!usr.empty())
       symbol_id = intern_symbol(std::move(usr), spelling, d, kind);
 
@@ -783,9 +783,9 @@ DumpStats dump_tu(const std::string &source_path,
 
     clang::tooling::FixedCompilationDatabase cdb(".", full);
     clang::tooling::ClangTool tool(cdb, {source_path});
-#ifdef CIDX_LT_RESOURCE_DIR
+#ifdef CIDX_CLANG_RESOURCE_DIR
     tool.appendArgumentsAdjuster(clang::tooling::getInsertArgumentAdjuster(
-        {"-resource-dir", CIDX_LT_RESOURCE_DIR},
+        {"-resource-dir", CIDX_CLANG_RESOURCE_DIR},
         clang::tooling::ArgumentInsertPosition::BEGIN));
 #endif
     AstGraphActionFactory factory(temp_path, opts, source_path, args, driver,

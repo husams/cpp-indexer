@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -1582,6 +1582,37 @@ class Storage:
             # DB is stamped v26; references() on a namespace stays empty until
             # reindex (documented).
             changed = True
+        if "template_arg" in tables:
+            # v28 -> v29: canonical template_arg.arg_kind (the C++ indexer's
+            # class-spec path used to store raw CXTemplateArgumentKind values;
+            # contract codes are 1=type 2=non-type 3=template-template 4=pack).
+            # VERSION-gated, not data-gated: after the remap a legitimate
+            # template-template row (3) on a record-like owner is
+            # indistinguishable from a legacy NullPtr row, so this must run
+            # exactly once. Legacy 3 (NullPtr) only ever occurred on
+            # record-like owners, and the ambiguous 3 must remap BEFORE
+            # 5/6 -> 3 mints new, valid 3s. Mirrors storage.cpp.
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key = 'schema_version'"
+            ).fetchone()
+            stored = int(row[0]) if row is not None and row[0] else 0
+            if 0 < stored < 29:
+                self._conn.execute(
+                    "UPDATE template_arg SET arg_kind = 2 WHERE arg_kind = 3 "
+                    "AND owner_id IN (SELECT id FROM symbol "
+                    "                 WHERE kind IN (2, 3, 4, 31))"
+                )
+                self._conn.execute(
+                    "UPDATE template_arg SET arg_kind = 3 WHERE arg_kind IN (5, 6)"
+                )
+                self._conn.execute(
+                    "UPDATE template_arg SET arg_kind = 2 WHERE arg_kind = 7"
+                )
+                self._conn.execute(
+                    "UPDATE template_arg SET arg_kind = 4 WHERE arg_kind = 8"
+                )
+                self._conn.execute("DELETE FROM template_arg WHERE arg_kind = 0")
+                changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates
             # the tables + indexes + seeds edge_kind; nothing to backfill from

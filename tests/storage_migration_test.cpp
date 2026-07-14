@@ -355,3 +355,65 @@ TEST_CASE("newer DB opens without refusal (no downgrade path)") {
   CHECK(meta_version(raw) == "99"); // future schema left untouched, not bumped
   CHECK(has_col(table_columns(raw, "symbol"), "future_col"));
 }
+
+TEST_CASE("v28 -> v29: template_arg arg_kind remapped to the canonical codes") {
+  // Simulate a v28 database: a fresh (v29) DB whose version is wound back to
+  // 28 with the legacy raw-CX arg_kind values the retired class-spec path
+  // stored (docs/improvements/template-arg-contract.md). Reopening must remap
+  // by owner kind exactly once.
+  const std::string tmp = make_temp_dir();
+  const std::string path = tmp + "/v28.db";
+  {
+    cidx::Storage db(path);
+  }
+  {
+    cidx::SqliteDb raw(path);
+    raw.exec("INSERT INTO symbol (id, usr, spelling, kind) VALUES "
+             "(1, 'c:@S@Spec', 'Spec', 2),"    // struct owner (class-spec path)
+             "(2, 'c:@F@fn', 'fn', 8)");       // function owner (callable path)
+    raw.exec("INSERT INTO template_arg (owner_id, position, arg_kind) VALUES "
+             "(1, 0, 8)," // legacy Pack           -> 4
+             "(1, 1, 5)," // legacy Template       -> 3
+             "(1, 2, 6)," // legacy TmplExpansion  -> 3
+             "(1, 3, 7)," // legacy Expression     -> 2
+             "(1, 4, 3)," // legacy NullPtr        -> 2 (record owner)
+             "(1, 5, 0)," // legacy Null           -> row deleted
+             "(1, 6, 1)," // in-contract type      -> unchanged
+             "(2, 0, 4)," // callable pack         -> unchanged
+             "(2, 1, 3)");// callable tmpl-tmpl    -> unchanged (NOT NullPtr)
+    raw.exec("UPDATE meta SET value = '28' WHERE key = 'schema_version'");
+  }
+  {
+    cidx::Storage db(path); // migration runs here
+  }
+  cidx::SqliteDb raw(path);
+  CHECK(meta_version(raw) == "29");
+  auto q = [&](int owner, int pos) -> std::string {
+    auto st = raw.prepare("SELECT arg_kind FROM template_arg WHERE owner_id = " +
+                          std::to_string(owner) + " AND position = " +
+                          std::to_string(pos));
+    if (!st.step()) {
+      return "<gone>";
+    }
+    return st.col_text(0);
+  };
+  CHECK(q(1, 0) == "4");
+  CHECK(q(1, 1) == "3");
+  CHECK(q(1, 2) == "3");
+  CHECK(q(1, 3) == "2");
+  CHECK(q(1, 4) == "2");
+  CHECK(q(1, 5) == "<gone>");
+  CHECK(q(1, 6) == "1");
+  CHECK(q(2, 0) == "4");
+  CHECK(q(2, 1) == "3");
+
+  { // idempotence: a second open (now stamped 29) must not remap the valid
+    // template-template rows the first pass produced.
+    cidx::Storage again(path);
+  }
+  cidx::SqliteDb raw2(path);
+  auto st = raw2.prepare("SELECT arg_kind FROM template_arg "
+                         "WHERE owner_id = 1 AND position = 1");
+  REQUIRE(st.step());
+  CHECK(st.col_text(0) == std::string("3")); // stayed template-template
+}

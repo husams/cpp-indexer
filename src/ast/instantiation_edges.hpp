@@ -5,7 +5,7 @@
 // emit: caller -> primary template (instantiates, lookup-only), the
 // specialization -> primary promotion, and for instantiated members the owning
 // type's method_of / instantiates / template_arg rows. Split out of
-// CallEmitter::emit_resolved_call so the CALLS-edge path stays readable.
+// CallEdgeEmitter::emit_resolved_call so the CALLS-edge path stays readable.
 #pragma once
 
 #include <cstdint>
@@ -16,11 +16,11 @@ class ASTContext;
 class FunctionDecl;
 } // namespace clang
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class EdgeSink;
 class MintBuilder;
-class TemplateArgResolver;
+class TemplateArgumentEncoder;
 
 // Emit the instantiation edge family for a call from `src_id` to the resolved
 // target `dst_id` / `callee` (USR `callee_usr`). Only meaningful for a
@@ -28,9 +28,9 @@ class TemplateArgResolver;
 // otherwise.
 void emit_instantiation_edges(const clang::ASTContext &context, EdgeSink &sink,
                               MintBuilder &mint,
-                              const TemplateArgResolver &resolver,
+                              const TemplateArgumentEncoder &targ_encoder,
                               int64_t src_id, int64_t dst_id,
                               const clang::FunctionDecl *callee,
                               const std::string &callee_usr);
 
-} // namespace cidx::lt
+} // namespace cidx::ast

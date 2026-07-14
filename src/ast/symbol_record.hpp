@@ -7,7 +7,7 @@
 #include <optional>
 #include <string>
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 struct SymbolRecord {
   std::string file; // expansion-loc file owning this cursor (file_id analogue)
@@ -32,4 +32,4 @@ struct SymbolRecord {
   bool resolved = false; // definition resolves the symbol
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast

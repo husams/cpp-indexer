@@ -12,7 +12,7 @@ because PR2 has not been implemented in this worktree.  Do NOT xfail or skip the
 flag failures as blockers so the developer can act on each one.
 
 Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
-  schema-1      SCHEMA_VERSION == 28
+  schema-1      SCHEMA_VERSION == 29
   schema-2      entity_edge table present in _SCHEMA
   schema-3      entity_edge_kind seed has exactly 11 rows (ids 1-11)
   schema-4      entity_edge columns: id,src_id,dst_id,kind,count,via_member_id,
@@ -23,10 +23,10 @@ Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
   pr1-fixture-2 Dashboard::refresh() method exists in pipeline.cpp (P1-FX)
   version-1     Python VERSION == "0.53.0"  (cidx-astgraph per-TU AST graph dumper)
   version-2     C++ kVersion == "0.53.0"
-  version-3     C++ kSchemaVersion == 28
+  version-3     C++ kSchemaVersion == 29
   rollup-1      resolve_pass() calls materialize_entity_edges()
   rollup-2      entity_rollup.py module exists
-  parity-1      parity_check.sh includes at least one entity_edge CLI command
+  parity-1      RETIRED (parity_check.sh removed with the byte-parity gate)
 """
 
 from __future__ import annotations
@@ -53,7 +53,6 @@ _STORAGE_HPP = os.path.join(_WORKTREE, "src", "storage", "storage.hpp")
 _STORAGE_CPP = os.path.join(_WORKTREE, "src", "storage", "storage.cpp")
 _PIPELINE_HPP = os.path.join(_WORKTREE, "manifests", "graphlab", "pipeline.hpp")
 _PIPELINE_CPP = os.path.join(_WORKTREE, "manifests", "graphlab", "pipeline.cpp")
-_PARITY_SH = os.path.join(_WORKTREE, "scripts", "parity_check.sh")
 _ENTITY_ROLLUP_PY = os.path.join(_WORKTREE, "python", "indexer", "entity_rollup.py")
 
 
@@ -87,10 +86,10 @@ def _import_query():
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_28():
+def test_schema_version_is_29():
     """SCHEMA_VERSION must be 27 after the v26→v27 multi-definition tables."""
     storage = _import_storage()
-    assert storage.SCHEMA_VERSION == 28, (
+    assert storage.SCHEMA_VERSION == 29, (
         f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 27. "
         "storage.py SCHEMA_VERSION must be bumped to 27 (definition/def_edge/possible_call)."
     )
@@ -320,13 +319,13 @@ def test_cpp_version_is_0501():
     )
 
 
-def test_cpp_schema_version_is_28():
+def test_cpp_schema_version_is_29():
     """C++ kSchemaVersion must be 27 after the v26->v27 multi-definition tables."""
     hpp_src = _read(_STORAGE_HPP)
     match = re.search(r'kSchemaVersion\s*=\s*(\d+)', hpp_src)
     assert match is not None, "kSchemaVersion not found in storage.hpp."
     version = int(match.group(1))
-    assert version == 28, (
+    assert version == 29, (
         f"C++ kSchemaVersion is {version}; expected 27. "
         "Bump kSchemaVersion 26 -> 27 in storage.hpp (definition/def_edge/possible_call)."
     )
@@ -376,20 +375,8 @@ def test_entity_rollup_module_exists():
 
 
 # ---------------------------------------------------------------------------
-# scenario-id: parity-1  — parity_check.sh covers entity_edge
-# ---------------------------------------------------------------------------
-
-
-def test_parity_check_covers_entity_edge():
-    """parity_check.sh must include at least one entity_edge CLI invocation."""
-    parity_src = _read(_PARITY_SH)
-    assert "entity" in parity_src or "entity_edge" in parity_src, (
-        "parity_check.sh does not cover entity_edge. "
-        "P2-T11: add `cidx entity` (or equivalent) command(s) to parity_check.sh "
-        "so the DB-dump diff locks entity_edge INSERT rows."
-    )
-
-
+# scenario-id: parity-1 — RETIRED with scripts/parity_check.sh (the byte-parity
+# gate was replaced by the normalized-row-set index golden gate).
 # ---------------------------------------------------------------------------
 # Live DB tests — open a fresh Storage and verify the schema is applied.
 # These test that migration + seed work correctly.

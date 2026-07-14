@@ -25,7 +25,7 @@
 #include <unistd.h>
 
 #include "ast/clang_version.hpp"
-#include "clangx/toolchain.hpp"
+#include "toolchain/toolchain.hpp"
 #include "util/logger.hpp"
 
 namespace fs = std::filesystem;

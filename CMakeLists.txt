@@ -85,7 +85,7 @@ endif()
 # the Clang C++ API (clang-cpp + libLLVM, found by find_package below). No
 # libclang discovery/link remains.
 
-# Core library: util + storage + clangx + compiledb + cli + vendored MD5/SHA1.
+# Core library: util + storage + toolchain + compiledb + cli + vendored MD5/SHA1.
 add_library(cidx_core STATIC
   src/util/logger.cpp
   src/util/env.cpp
@@ -97,7 +97,7 @@ add_library(cidx_core STATIC
   src/util/files.cpp
   src/storage/sqlite.cpp
   src/storage/storage.cpp
-  src/clangx/toolchain.cpp
+  src/toolchain/toolchain.cpp
   src/cli/args.cpp
   src/cli/format.cpp
   src/cli/json_out.cpp
@@ -152,7 +152,7 @@ if(NOT LLVM_DIR OR NOT Clang_DIR)
   endif()
 endif()
 
-# --- LibTooling indexing engine (cidx_lt) ------------------------------------
+# --- LibTooling indexing engine (cidx_ast) ------------------------------------
 # The LT engine uses the Clang C++ API. Compiled as its own object library so
 # its LLVM/Clang headers are added with -isystem (a plain -I would break
 # gcc's #include_next <stdlib.h> in <cstdlib>) and it can carry -fno-rtti
@@ -160,38 +160,35 @@ endif()
 # but never sees the Clang C++ headers.
 find_package(LLVM REQUIRED CONFIG)
 find_package(Clang REQUIRED CONFIG)
-add_library(cidx_lt OBJECT
+add_library(cidx_ast OBJECT
   src/ast/kind_map.cpp src/ast/usr.cpp src/ast/location.cpp
   src/ast/names.cpp src/ast/decl_flags.cpp
   src/ast/symbol_extractor.cpp src/ast/symbol_visitor.cpp
   src/ast/storage_symbol_sink.cpp src/ast/mint_builder.cpp
-  src/ast/template_arg_resolver.cpp src/ast/storage_edge_sink.cpp
-  src/ast/edge_visitor.cpp src/ast/type_use.cpp
-  src/ast/value_source.cpp src/ast/instance_minter.cpp
-  src/ast/body_emit_context.cpp src/ast/call_emitter.cpp
-  src/ast/call_visitor_mixin.cpp src/ast/construct_visitor_mixin.cpp
-  src/ast/heap_visitor_mixin.cpp src/ast/ref_visitor_mixin.cpp
-  src/ast/type_name_visitor_mixin.cpp src/ast/local_var_visitor_mixin.cpp
-  src/ast/body_visitor.cpp src/ast/body_pass_visitor.cpp
+  src/ast/template_argument_encoder.cpp src/ast/storage_edge_sink.cpp
+  src/ast/declaration_edge_visitor.cpp src/ast/type_use.cpp
+  src/ast/value_provenance.cpp src/ast/instance_minter.cpp
+  src/ast/edge_emission_context.cpp src/ast/call_edge_emitter.cpp
+  src/ast/statement_edge_visitor.cpp src/ast/function_definition_visitor.cpp
   src/ast/call_template_args.cpp src/ast/display_name_rewrite.cpp
   src/ast/receiver_provenance.cpp src/ast/instantiation_edges.cpp
-  src/ast/ns_uses_visitor.cpp src/ast/lt_engine.cpp
+  src/ast/namespace_use_visitor.cpp src/ast/index_engine.cpp
   src/ast/clang_version.cpp)
-target_include_directories(cidx_lt PRIVATE
+target_include_directories(cidx_ast PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
-target_include_directories(cidx_lt SYSTEM PRIVATE
+target_include_directories(cidx_ast SYSTEM PRIVATE
   ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
-target_compile_definitions(cidx_lt PRIVATE ${LLVM_DEFINITIONS}
-  "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
-target_compile_features(cidx_lt PRIVATE cxx_std_23)
+target_compile_definitions(cidx_ast PRIVATE ${LLVM_DEFINITIONS}
+  "CIDX_CLANG_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
+target_compile_features(cidx_ast PRIVATE cxx_std_23)
 if(NOT LLVM_ENABLE_RTTI)
-  target_compile_options(cidx_lt PRIVATE -fno-rtti)
+  target_compile_options(cidx_ast PRIVATE -fno-rtti)
 endif()
-target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_lt>)
+target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_ast>)
 
 # --- astgraph AST dumper (cidx_astgraph_ast) ---------------------------------
 # astgraph.cpp uses the Clang C++ AST (RecursiveASTVisitor + ClangTool), so like
-# cidx_lt it compiles in its own object library with -isystem LLVM headers and
+# cidx_ast it compiles in its own object library with -isystem LLVM headers and
 # -fno-rtti. astgraph.hpp is clang-free, so cidx_core links the objects without
 # ever seeing the Clang C++ headers.
 add_library(cidx_astgraph_ast OBJECT src/astgraph/astgraph.cpp)
@@ -200,7 +197,7 @@ target_include_directories(cidx_astgraph_ast PRIVATE
 target_include_directories(cidx_astgraph_ast SYSTEM PRIVATE
   ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 target_compile_definitions(cidx_astgraph_ast PRIVATE ${LLVM_DEFINITIONS}
-  "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
+  "CIDX_CLANG_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
 target_compile_features(cidx_astgraph_ast PRIVATE cxx_std_23)
 if(NOT LLVM_ENABLE_RTTI)
   target_compile_options(cidx_astgraph_ast PRIVATE -fno-rtti)
@@ -209,7 +206,7 @@ target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_astgraph_ast>)
 
 # --- compiledb (cidx_compiledb) ----------------------------------------------
 # compiledb.cpp loads compile_commands.json via clang::tooling::JSONCompilationDatabase
-# (Clang C++ API), so like cidx_lt it compiles in its own -fno-rtti object library.
+# (Clang C++ API), so like cidx_ast it compiles in its own -fno-rtti object library.
 # compiledb.hpp is clang-free, so cidx_core links the objects without seeing the
 # Clang C++ headers.
 add_library(cidx_compiledb OBJECT src/compiledb/compiledb.cpp)
@@ -240,7 +237,7 @@ target_compile_options(cidx_core PRIVATE
 # Builtin-header resource dir of the Clang we compile against, for
 # Toolchain::resource_include() (toolchain.cpp). PUBLIC so test exes inherit it.
 target_compile_definitions(cidx_core PUBLIC
-  "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
+  "CIDX_CLANG_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
 
 # `cidx analyze` embeds the canonical Souffle rule files from
 # python/indexer/rules so both implementations ship byte-identical Datalog.
@@ -350,88 +347,3 @@ set_target_properties(cidx-astgraph PROPERTIES
 
 enable_testing()
 add_subdirectory(tests)
-
-# ---------------------------------------------------------------------------
-# Experimental LibTooling AST probe (Phase-0 de-risk for the clangx-LT redesign,
-# see wiki pages/planning/cidx-libtooling-ast-layer). OFF by default; links the
-# full Clang C++ API (clang-cpp), unlike the rest of cidx which uses only the
-# libclang C API. Compiled -fno-rtti to match a Homebrew/no-RTTI LLVM.
-# ---------------------------------------------------------------------------
-option(CIDX_CLANGX_LIBTOOLING "Build the experimental LibTooling AST probe" OFF)
-if(CIDX_CLANGX_LIBTOOLING)
-  find_package(LLVM REQUIRED CONFIG)
-  find_package(Clang REQUIRED CONFIG)
-  message(STATUS "cidx[lt]: LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
-  add_executable(cidx_lt_probe
-    src/ast/main.cpp
-    src/ast/kind_map.cpp
-    src/ast/usr.cpp
-    src/ast/location.cpp
-    src/ast/names.cpp
-    src/ast/decl_flags.cpp
-    src/ast/symbol_extractor.cpp
-    src/ast/tsv_symbol_emitter.cpp
-    src/ast/symbol_visitor.cpp
-    src/ast/symbol_consumer.cpp
-    src/ast/symbol_action.cpp
-  )
-  # Builtin-header resource dir of the LLVM we compile against (gotcha 8b).
-  target_compile_definitions(cidx_lt_probe PRIVATE
-    "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
-  target_include_directories(cidx_lt_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-  target_include_directories(cidx_lt_probe SYSTEM PRIVATE
-    ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
-  target_compile_definitions(cidx_lt_probe PRIVATE ${LLVM_DEFINITIONS})
-  target_compile_features(cidx_lt_probe PRIVATE cxx_std_17)
-  if(NOT LLVM_ENABLE_RTTI)
-    target_compile_options(cidx_lt_probe PRIVATE -fno-rtti)
-  endif()
-  target_link_libraries(cidx_lt_probe PRIVATE clang-cpp LLVM)
-
-  # Phase-2 gate tool: full interleaved LT indexer (symbols + edges per file).
-  add_executable(cidx_lt_index
-    src/ast/index_main.cpp
-    src/ast/index_consumer.cpp
-    src/ast/kind_map.cpp
-    src/ast/usr.cpp
-    src/ast/location.cpp
-    src/ast/names.cpp
-    src/ast/decl_flags.cpp
-    src/ast/symbol_extractor.cpp
-    src/ast/symbol_visitor.cpp
-    src/ast/storage_symbol_sink.cpp
-    src/ast/mint_builder.cpp
-    src/ast/template_arg_resolver.cpp
-    src/ast/storage_edge_sink.cpp
-    src/ast/edge_visitor.cpp
-    src/ast/type_use.cpp
-    src/ast/value_source.cpp
-    src/ast/instance_minter.cpp
-    src/ast/body_emit_context.cpp
-    src/ast/call_emitter.cpp
-    src/ast/call_visitor_mixin.cpp
-    src/ast/construct_visitor_mixin.cpp
-    src/ast/heap_visitor_mixin.cpp
-    src/ast/ref_visitor_mixin.cpp
-    src/ast/type_name_visitor_mixin.cpp
-    src/ast/local_var_visitor_mixin.cpp
-    src/ast/body_visitor.cpp
-    src/ast/body_pass_visitor.cpp
-    src/ast/call_template_args.cpp
-    src/ast/display_name_rewrite.cpp
-    src/ast/receiver_provenance.cpp
-    src/ast/instantiation_edges.cpp
-    src/ast/ns_uses_visitor.cpp
-  )
-  target_compile_definitions(cidx_lt_index PRIVATE
-    "CIDX_LT_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
-  target_include_directories(cidx_lt_index PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-  target_include_directories(cidx_lt_index SYSTEM PRIVATE
-    ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
-  target_compile_definitions(cidx_lt_index PRIVATE ${LLVM_DEFINITIONS})
-  target_compile_features(cidx_lt_index PRIVATE cxx_std_23)
-  if(NOT LLVM_ENABLE_RTTI)
-    target_compile_options(cidx_lt_index PRIVATE -fno-rtti)
-  endif()
-  target_link_libraries(cidx_lt_index PRIVATE cidx_core clang-cpp LLVM)
-endif()

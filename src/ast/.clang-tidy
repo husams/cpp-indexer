@@ -1,0 +1,12 @@
+# Complexity gate for the AST indexing engine (refactoring.md §Complexity
+# limits). The limits are on LOGICAL lines, so the statement threshold (not a
+# raw line count, which would punish comments) enforces the general <=40
+# rule; NestingThreshold 4 corresponds to the "three nested blocks inside a
+# function body" rule. The tighter per-family callback limits (Visit* <= 25,
+# Traverse* <= 20 statements) are enforced by scripts/check_ast_complexity.sh
+# via extra clang-tidy passes filtered by function name. Scoped to src/ast.
+Checks: '-*,readability-function-size,readability-function-cognitive-complexity'
+CheckOptions:
+  readability-function-size.StatementThreshold: '40'
+  readability-function-size.NestingThreshold: '4'
+  readability-function-cognitive-complexity.Threshold: '25'

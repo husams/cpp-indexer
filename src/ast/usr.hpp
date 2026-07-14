@@ -12,9 +12,9 @@ namespace clang {
 class Decl;
 }
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 // Empty string on generation failure.
 std::string usr_for_decl(const clang::Decl *decl);
 
-} // namespace cidx::lt
+} // namespace cidx::ast

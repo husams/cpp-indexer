@@ -4,7 +4,7 @@
 
 #include "storage/storage.hpp"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 StorageSymbolSink::StorageSymbolSink(cidx::Storage &db) : db_(db) {}
 
@@ -51,4 +51,4 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
     ++stored_; // AstIndexer::store: true = counted as "stored"
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

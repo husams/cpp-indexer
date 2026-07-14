@@ -6,7 +6,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 namespace {
 
@@ -58,4 +58,4 @@ ExpansionLoc extent_end(const clang::ASTContext &context,
   return to_expansion(sm, past.isValid() ? past : end);
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

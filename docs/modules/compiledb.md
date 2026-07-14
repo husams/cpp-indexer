@@ -1,6 +1,6 @@
 # `src/compiledb` — compile-command handling
 
-[← docs index](../README.md) · related: [clangx/toolchain](clangx.md) · [data flow](../data-flow.md)
+[← docs index](../README.md) · related: [toolchain](toolchain.md) · [data flow](../data-flow.md)
 
 Loads `compile_commands.json`, strips/sanitizes flags for the parser, locates
 the real compiler driver, and encodes/decodes portable include-path aliases.
@@ -37,4 +37,4 @@ At **import**, options are stored (optionally aliased). At **index** time,
 `index_one` re-runs `sanitize` + `resolve_options` on the stored options before
 handing them to the engine — see the [data flow sequence](../data-flow.md#indexing-one-translation-unit).
 The include *search paths* (as opposed to the explicit `-I` flags kept here) are
-added separately by [`clangx/toolchain`](clangx.md) via driver introspection.
+added separately by [`toolchain/`](toolchain.md) via driver introspection.

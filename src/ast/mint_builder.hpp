@@ -13,7 +13,7 @@ class ASTContext;
 class NamedDecl;
 } // namespace clang
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class EdgeSink;
 
@@ -29,4 +29,4 @@ private:
   EdgeSink &sink_;
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast

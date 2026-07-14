@@ -28,7 +28,7 @@ def test_fresh_schema_has_repository_clone_and_column():
         ver = db._conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()[0]
-        assert ver == str(SCHEMA_VERSION) == "28"
+        assert ver == str(SCHEMA_VERSION) == "29"
         tables = {
             r[0]
             for r in db._conn.execute(
@@ -206,7 +206,7 @@ def test_migration_recreates_dropped_repository_tables():
             ver = db._conn.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()[0]
-            assert ver == "28"
+            assert ver == "29"
             tables = {
                 r[0]
                 for r in db._conn.execute(
@@ -249,6 +249,21 @@ def test_worktree_resolves_to_main_repo_name_and_remote(tmp_path):
     assert repo_name(str(wt)) == "coolproj"
     assert git_remote_url(str(wt)) == "https://github.com/acme/coolproj.git"
     assert repo_name(str(main)) == repo_name(str(wt))
+
+
+def test_remote_url_tolerates_duplicate_config_keys(tmp_path):
+    from indexer.utils import git_remote_url, repo_name
+
+    main = tmp_path / "main"
+    main.mkdir()
+    _git(main, "init", "-q")
+    _git(main, "remote", "add", "origin", "https://github.com/acme/coolproj.git")
+    # git allows the SAME key repeatedly (multivalued entries; PR tooling
+    # appends duplicates on every run), so the config reader must too.
+    _git(main, "config", "--add", "branch.feat.github-pr-owner-number", "a#c#1")
+    _git(main, "config", "--add", "branch.feat.github-pr-owner-number", "a#c#1")
+    assert git_remote_url(str(main)) == "https://github.com/acme/coolproj.git"
+    assert repo_name(str(main)) == "coolproj"
 
 
 # -- backfill migration script -----------------------------------------------

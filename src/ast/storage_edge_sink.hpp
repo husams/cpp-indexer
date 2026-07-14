@@ -10,7 +10,7 @@ namespace cidx {
 class Storage;
 }
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class StorageEdgeSink : public EdgeSink {
 public:
@@ -44,4 +44,4 @@ private:
   cidx::Storage &db_;
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast

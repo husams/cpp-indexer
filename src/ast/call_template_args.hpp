@@ -7,7 +7,7 @@
 //     rewrite the callable's display name;
 //   - method specializations fall back to the explicit `<...>` args written at
 //     the call site.
-// Split out of CallEmitter::emit_resolved_call so that call orchestration stays
+// Split out of CallEdgeEmitter::emit_resolved_call so that call orchestration stays
 // separate from the argument-record shaping.
 #pragma once
 
@@ -19,18 +19,18 @@ class Expr;
 class FunctionDecl;
 } // namespace clang
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class EdgeSink;
-class TemplateArgResolver;
+class TemplateArgumentEncoder;
 
 // Emit template_arg rows for `callee` (the resolved call target, minted as
 // `dst_id`) when it is an instantiation member. `site` is the call/construct
 // expression, used to recover explicit method template arguments. A no-op when
 // `dst_id` is negative or `callee` is not an instantiation member.
 void emit_callable_template_args(clang::ASTContext &context, EdgeSink &sink,
-                                 const TemplateArgResolver &resolver,
+                                 const TemplateArgumentEncoder &targ_encoder,
                                  const clang::FunctionDecl *callee,
                                  const clang::Expr *site, int64_t dst_id);
 
-} // namespace cidx::lt
+} // namespace cidx::ast

@@ -1,7 +1,7 @@
 """PR2: v17 entity_edge materialisation tests.
 
 Covers:
-  * schema/version invariants (SCHEMA_VERSION=28, VERSION='0.53.0')
+  * schema/version invariants (SCHEMA_VERSION=29, VERSION='0.53.0')
   * entity_rollup module importable
   * entity_edge + entity_edge_kind tables present in schema
   * PR1 edge_kind seed rows 10-16 present
@@ -95,8 +95,8 @@ def _sym(db, file_id, key, usr, spelling, kind, line, *, qual=None, is_pure=Fals
 # Version / schema invariants
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_28():
-    assert SCHEMA_VERSION == 28, f"Expected 28, got {SCHEMA_VERSION}"
+def test_schema_version_is_29():
+    assert SCHEMA_VERSION == 29, f"Expected 29, got {SCHEMA_VERSION}"
 
 
 def test_product_version_is_0501():

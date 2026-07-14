@@ -6,10 +6,13 @@
   formatting, and JSON output.
 - `python/indexer/query.py`, `python/indexer/entity_graph.py`, and `src/graph/`:
   graph queries and graph records.
-- `python/indexer/clang/`, `python/indexer/compiledb.py`, and `src/clangx/` plus
-  `src/compiledb/`: libclang parsing, toolchain handling, and compilation DBs.
-- `python/indexer/astcache.py`, `python/indexer/astcmd.py`, `src/astcache/`, and
-  `src/astgraph/`: on-demand AST analysis and caching.
+- `src/ast/` and `src/toolchain/`: the indexing engine (Clang C++ API
+  visitors) and driver introspection — C++ only, the sole indexer.
+- `python/indexer/compiledb.py` and `src/compiledb/`: compilation DBs.
+- `src/astgraph/`: the `cidx-astgraph` per-TU AST graph tool + Souffle.
+- `python/indexer/clang/`, `python/indexer/astcache.py`,
+  `python/indexer/astcmd.py`: LEGACY libclang indexer/AST cache, pending
+  removal — do not extend.
 - `python/tests/` and `tests/`: Python and C++ coverage. `manifests/` contains
   small indexing fixtures. Keep tests hermetic unless they are deliberately
   labeled as libclang integration tests.

@@ -3,7 +3,7 @@
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 int cidx_symbol_kind(const clang::Decl *decl) {
   using clang::Decl;
@@ -71,4 +71,4 @@ const char *cidx_stub_kind_name(const clang::Decl *decl) {
   return name != nullptr ? name : "function";
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

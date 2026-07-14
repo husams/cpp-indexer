@@ -1,22 +1,22 @@
 ---
 name: cidx-dual-implementation
-description: Keep the Python and C++ implementations of cidx behaviorally compatible. Use when changing indexing, query, storage, CLI, JSON output, schema, or migrations — any observable behavior — to ensure the change lands in both languages in the same change, and to know what the shared contract and change discipline require.
+description: The C++/Python split of cidx and its change discipline. Use when changing storage schema, migrations, or read-query behavior — the areas still shared with the Python tree — to know what must land in both languages and what is C++-only since the indexer cutover.
 ---
 
-# cidx dual-implementation parity
+# cidx dual-implementation discipline
 
-`cidx` has two implementations of the same indexer:
+The byte-identical dual-implementation contract is **retired**. The split
+today:
 
 | Implementation | Location | Role |
 |---|---|---|
-| Python | `python/indexer/` | Canonical behavior and public Python API |
-| C++23 | `src/` | Performance implementation built by CMake |
+| C++23 | `src/` | The SOLE indexer (Clang C++ API) + CLI |
+| Python | `python/indexer/` | Storage + graph read-query API (its libclang indexer is legacy pending removal — do not extend it) |
 
-Treat **Python behavior as the reference**, but do not leave C++ parity for a
-later change. Any change to the observable contract (SQLite schema/migrations,
-indexing and query semantics, CLI flags and text output, JSON shapes, path
-handling, exit behavior) must be implemented and tested in **both** languages in
-the **same** change.
+Indexing/query/CLI/schema changes land in **C++ with C++ tests**. Only the
+still-shared surface must land in both languages in the same change: SQLite
+schema + migrations (with old-database tests) and storage/read-query
+semantics the Python API exposes.
 
 The main database schema version lives in `python/indexer/storage.py` and
 `src/storage/storage.cpp` — update both together.

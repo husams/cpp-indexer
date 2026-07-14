@@ -10,7 +10,7 @@
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 namespace {
 
@@ -84,4 +84,4 @@ SymbolExtractor::extract(const clang::NamedDecl *decl) const {
   return sym;
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

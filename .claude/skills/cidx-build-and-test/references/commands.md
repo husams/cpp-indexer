@@ -35,12 +35,9 @@ ctest --test-dir build -L default --output-on-failure
 
 ```bash
 ctest --test-dir build -L clang --output-on-failure
-ctest --test-dir build -L parity --output-on-failure
 ```
 
 - The `clang` tests perform real parses.
-- The `parity` test needs `uv`, SQLite, the Python launcher, and the built C++
-  executable.
 - `make`, `make test`, and `make static` are convenience wrappers; CMake remains
   the source of truth.
 
@@ -48,7 +45,7 @@ ctest --test-dir build -L parity --output-on-failure
 
 - Before committing a behavioral change: both full Python tests and the C++
   `default` tests.
-- Add the `clang` and `parity` gates when the change touches parsing, indexing,
+- Add the `clang` gate when the change touches parsing, indexing,
   storage interchange, CLI behavior, or graph results.
 - When a full suite is impractical during iteration, run the narrow test first,
   then the required gates before handoff.

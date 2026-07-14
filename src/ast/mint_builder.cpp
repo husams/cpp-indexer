@@ -8,7 +8,7 @@
 
 #include "clang/AST/Decl.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 MintBuilder::MintBuilder(const clang::ASTContext &context, EdgeSink &sink)
     : context_(context), sink_(sink) {}
@@ -41,4 +41,4 @@ MintBuilder::build(const clang::NamedDecl *decl) const {
   return req;
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

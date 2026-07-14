@@ -1,13 +1,14 @@
-// Plain-data payloads exchanged between the edge visitors and the EdgeSink.
-// Mirrors the `edge` / `template_param` / `template_arg` rows and the
-// mint_symbol_id() parameters (storage.cpp) — no clang types leak out.
+// Plain-data payloads exchanged between the edge visitors and the EdgeSink:
+// the decl-pass records (edge / template_param / template_arg rows and the
+// mint_symbol_id() parameters) and the body-pass records (edge_site /
+// call_arg rows and value provenance). No clang types leak out.
 #pragma once
 
 #include <cstdint>
 #include <optional>
 #include <string>
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 struct EdgeRecord {
   int64_t src_id = 0;
@@ -56,4 +57,41 @@ struct TypeArgCandidate {
   bool is_instantiation = false;
 };
 
-} // namespace cidx::lt
+// ---- body-pass records ------------------------------------------------------
+
+
+struct EdgeSiteRecord {
+  int64_t edge_id = 0;
+  int64_t file_id = 0;
+  int64_t line = 0;
+  int64_t col = 0;
+  int64_t conditional = 0;
+  std::optional<std::string> recv_src_kind;
+  std::optional<std::string> recv_type_usr;
+  std::optional<std::string> recv_decl_usr;
+  std::optional<int64_t> recv_param_pos;
+  std::optional<int64_t> recv_type_is_value;
+};
+
+struct CallArgRecord {
+  int64_t edge_id = 0;
+  int64_t file_id = 0;
+  int64_t line = 0;
+  int64_t col = 0;
+  int64_t position = 0;
+  std::string src_kind;
+  std::optional<std::string> type_usr;
+  std::optional<std::string> decl_usr;
+  std::optional<std::string> callee_usr;
+  std::optional<int64_t> type_is_value;
+};
+
+// classify_value_source result (ast_body.cpp ValueSource).
+struct ValueSource {
+  std::string src_kind; // local|construct|member|global|call_result|literal|this|unknown
+  std::string type_usr;
+  std::string decl_usr;
+  std::string callee_usr; // call_result only
+};
+
+} // namespace cidx::ast

@@ -10,7 +10,7 @@ namespace clang {
 class Decl;
 }
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 int cidx_symbol_kind(const clang::Decl *decl);
 
@@ -23,4 +23,4 @@ const char *cidx_stub_kind_name(const clang::Decl *decl);
 // Storage kind name for a CXCursorKind integer, nullptr if unmapped.
 const char *cidx_kind_name_from_int(int kind);
 
-} // namespace cidx::lt
+} // namespace cidx::ast

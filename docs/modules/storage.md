@@ -53,7 +53,7 @@ amalgamation (see [build](../build.md)).
 Row structs crossing module boundaries: `Symbol`, `Edge`, `EdgeSite`,
 `CallArg`, `TemplateParam`, `TemplateArg`, `File`, `Component`, `Directory`,
 `Diagnostic`, `Definition`. Both engines populate these; no libclang/LLVM types
-appear here (the [`clangx_lt`](clangx_lt.md) sinks translate their own records
+appear here (the [`ast`](ast.md) sinks translate their own records
 into these).
 
 ## The schema

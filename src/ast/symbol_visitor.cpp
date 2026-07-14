@@ -9,7 +9,7 @@
 #include "clang/AST/DeclTemplate.h"
 #include "clang/Basic/SourceManager.h"
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 namespace {
 
@@ -93,4 +93,4 @@ bool SymbolVisitor::VisitNamedDecl(clang::NamedDecl *decl) {
   return true;
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

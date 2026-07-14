@@ -9,7 +9,7 @@ flowchart LR
     CC[compile_commands.json] -->|cidx import| DB[(index.db)]
     SRC[C/C++ sources] --> IDX
     DB -->|cidx index| IDX{{indexing engine}}
-    IDX -->|libclang or LibTooling| L0["Layer-0: symbol, edge,<br/>edge_site, call_arg,<br/>template_*, definition, def_edge"]
+    IDX -->|Clang C++ API| L0["Layer-0: symbol, edge,<br/>edge_site, call_arg,<br/>template_*, definition, def_edge"]
     L0 --> DB
     DB -->|cidx resolve| RES["Layer-1: entity_node/edge,<br/>dispatch_calls, possible_call,<br/>multi_def, count roll-ups"]
     RES --> DB
@@ -21,11 +21,11 @@ flowchart LR
 - **Import** — `cmd_import` ([cli](modules/cli.md)) loads `compile_commands.json`
   through [`CompileDb`](modules/compiledb.md) into `component`/`directory`/`file`
   rows with per-file `compile_options` + `driver`.
-- **Index** — `cmd_index` walks pending files and runs the selected
-  [indexing engine](indexing-engines.md) per TU (below).
+- **Index** — `cmd_index` walks pending files and runs the
+  [indexing engine](modules/ast.md) per TU (below).
 - **Resolve** — `cmd_resolve` → `Storage::resolve_pass()` (below).
-- **Query** — [`graph`](modules/graph.md), `search`, [`analyze`](modules/astgraph.md#cidx-astgraph-vs-cidx-analyze),
-  [`ast`](modules/astcache.md).
+- **Query** — [`graph`](modules/graph.md), `search`,
+  [`analyze`](modules/astgraph.md#cidx-astgraph-vs-cidx-analyze).
 
 ## Indexing one translation unit
 
@@ -38,7 +38,7 @@ sequenceDiagram
     participant CMD as cmd_index / index_one
     participant CDB as CompileDb
     participant TC as Toolchain (driver probe)
-    participant ENG as Engine (libclang | LibTooling)
+    participant ENG as ast/ (run_index_one)
     participant DB as Storage (index.db)
 
     CMD->>CDB: sanitize(stored opts) + resolve_options(labels)
@@ -58,8 +58,8 @@ sequenceDiagram
     Note over CMD,DB: `cidx resolve` runs afterward (see below)
 ```
 
-The two engines implement steps 6–10 identically; `CIDX_INDEX_ENGINE=lt` swaps
-the implementation, not the sequence.
+`ast::run_index_one` implements steps 4–10; the per-TU stages are the named
+methods of `TranslationUnitIndexer` ([ast](modules/ast.md)).
 
 ## The per-file interleave
 
@@ -77,8 +77,8 @@ The ordering in steps 6–10 is **load-bearing**, not incidental:
 - A header included by many TUs is indexed once (md5-gated) and stamped with the
   including TU's options so it stays standalone-reparseable.
 
-The [`clangx`](modules/clangx.md) and [`clangx_lt`](modules/clangx_lt.md) pages
-describe how each engine implements this sequence.
+The [`ast`](modules/ast.md) page describes how the engine implements this
+sequence.
 
 ## The resolve pass
 

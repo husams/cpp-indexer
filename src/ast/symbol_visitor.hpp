@@ -27,7 +27,7 @@ class SourceManager;
 class NamedDecl;
 } // namespace clang
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class SymbolEmitter;
 
@@ -51,4 +51,4 @@ private:
   std::string target_file_;
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast

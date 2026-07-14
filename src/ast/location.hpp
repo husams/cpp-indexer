@@ -15,7 +15,7 @@ class SourceLocation;
 class SourceRange;
 } // namespace clang
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 struct ExpansionLoc {
   std::string file; // empty = no file (built-in / invalid)
@@ -36,4 +36,4 @@ ExpansionLoc extent_start(const clang::ASTContext &context,
 ExpansionLoc extent_end(const clang::ASTContext &context,
                         clang::SourceRange range);
 
-} // namespace cidx::lt
+} // namespace cidx::ast

@@ -3,7 +3,7 @@
 #include "ast/edge_records.hpp"
 #include "ast/edge_sink.hpp"
 #include "ast/mint_builder.hpp"
-#include "ast/template_arg_resolver.hpp"
+#include "ast/template_argument_encoder.hpp"
 #include "ast/usr.hpp"
 
 #include "clang/AST/ASTContext.h"
@@ -13,11 +13,74 @@
 
 #include <string>
 
-namespace cidx::lt {
+namespace cidx::ast {
+
+namespace {
+
+// Class-template-specialization owner: mint the instantiation owner, its
+// method_of(9) edge, the owner -> primary instantiates(5) edge, and the
+// owner's template_arg rows through the one canonical encoder.
+void emit_spec_owner(EdgeSink &sink, MintBuilder &mint,
+                     const TemplateArgumentEncoder &targ_encoder,
+                     int64_t dst_id,
+                     const clang::ClassTemplateSpecializationDecl *ospec) {
+  const clang::ClassTemplateDecl *cls_prim = ospec->getSpecializedTemplate();
+  auto oreq = mint.build(ospec);
+  if (!oreq || cls_prim == nullptr)
+    return;
+  oreq->is_instantiation = true;
+  const int64_t type_id = sink.mint_symbol(*oreq);
+  EdgeRecord mo;
+  mo.src_id = dst_id;
+  mo.dst_id = type_id;
+  mo.kind = 9;
+  sink.add_edge(mo);
+  const std::string cp = usr_for_decl(cls_prim);
+  if (!cp.empty())
+    if (const auto cpid = sink.lookup_symbol_id(cp)) {
+      EdgeRecord ie;
+      ie.src_id = type_id;
+      ie.dst_id = *cpid;
+      ie.kind = 5;
+      sink.add_edge(ie);
+    }
+  const clang::TemplateArgumentList &args = ospec->getTemplateArgs();
+  for (unsigned ai = 0; ai < args.size(); ++ai)
+    targ_encoder.emit(type_id, static_cast<int64_t>(ai), args[ai]);
+}
+
+// Owner-type promotion for an instantiated member: method_of(9) to the owning
+// record, and — when the owner is itself a class-template specialization — a
+// minted instantiation owner with its instantiates(5) edge and template_arg
+// rows through the one canonical encoder (all argument kinds).
+void emit_owner_promotion(EdgeSink &sink, MintBuilder &mint,
+                          const TemplateArgumentEncoder &targ_encoder,
+                          int64_t dst_id, const clang::CXXMethodDecl *m) {
+  const clang::CXXRecordDecl *owner = m->getParent();
+  if (owner == nullptr)
+    return;
+  const auto *ospec =
+      llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(owner);
+  if (ospec == nullptr) {
+    const std::string ou = usr_for_decl(owner);
+    if (!ou.empty())
+      if (const auto oid = sink.lookup_symbol_id(ou)) {
+        EdgeRecord mo;
+        mo.src_id = dst_id;
+        mo.dst_id = *oid;
+        mo.kind = 9;
+        sink.add_edge(mo);
+      }
+    return;
+  }
+  emit_spec_owner(sink, mint, targ_encoder, dst_id, ospec);
+}
+
+} // namespace
 
 void emit_instantiation_edges(const clang::ASTContext &context, EdgeSink &sink,
                               MintBuilder &mint,
-                              const TemplateArgResolver &resolver,
+                              const TemplateArgumentEncoder &targ_encoder,
                               int64_t src_id, int64_t dst_id,
                               const clang::FunctionDecl *callee,
                               const std::string &callee_usr) {
@@ -51,68 +114,8 @@ void emit_instantiation_edges(const clang::ASTContext &context, EdgeSink &sink,
   ib.dst_id = *prim;
   ib.kind = 5;
   sink.add_edge(ib);
-  const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(callee);
-  if (m == nullptr)
-    return;
-  const clang::CXXRecordDecl *owner = m->getParent();
-  if (owner == nullptr)
-    return;
-  const auto *ospec =
-      llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(owner);
-  if (ospec == nullptr) {
-    const std::string ou = usr_for_decl(owner);
-    if (!ou.empty())
-      if (const auto oid = sink.lookup_symbol_id(ou)) {
-        EdgeRecord mo;
-        mo.src_id = dst_id;
-        mo.dst_id = *oid;
-        mo.kind = 9;
-        sink.add_edge(mo);
-      }
-    return;
-  }
-
-  const clang::ClassTemplateDecl *cls_prim = ospec->getSpecializedTemplate();
-  auto oreq = mint.build(ospec);
-  if (!oreq || cls_prim == nullptr)
-    return;
-  oreq->is_instantiation = true;
-  const int64_t type_id = sink.mint_symbol(*oreq);
-  EdgeRecord mo;
-  mo.src_id = dst_id;
-  mo.dst_id = type_id;
-  mo.kind = 9;
-  sink.add_edge(mo);
-  const std::string cp = usr_for_decl(cls_prim);
-  if (!cp.empty())
-    if (const auto cpid = sink.lookup_symbol_id(cp)) {
-      EdgeRecord ie;
-      ie.src_id = type_id;
-      ie.dst_id = *cpid;
-      ie.kind = 5;
-      sink.add_edge(ie);
-    }
-  const clang::TemplateArgumentList &args = ospec->getTemplateArgs();
-  const clang::PrintingPolicy &policy = context.getPrintingPolicy();
-  for (unsigned ai = 0; ai < args.size(); ++ai) {
-    if (args[ai].getKind() != clang::TemplateArgument::Type)
-      continue;
-    TemplateArgRecord ta;
-    ta.owner_id = type_id;
-    ta.position = static_cast<int64_t>(ai);
-    ta.arg_kind = 1;
-    const std::string sp = args[ai].getAsType().getAsString(policy);
-    if (!sp.empty())
-      ta.literal = sp;
-    if (const clang::TagDecl *td = args[ai].getAsType()->getAsTagDecl()) {
-      const std::string ru = usr_for_decl(td);
-      if (!ru.empty())
-        ta.ref_id = sink.lookup_symbol_id(ru);
-    }
-    if (!ta.ref_id)
-      ta.ref_id = resolver.resolve(ta.literal, ospec);
-    sink.add_template_arg(ta);
-  }
+  if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(callee))
+    emit_owner_promotion(sink, mint, targ_encoder, dst_id, m);
 }
 
-} // namespace cidx::lt
+} // namespace cidx::ast

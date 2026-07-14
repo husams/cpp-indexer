@@ -1,6 +1,6 @@
 ---
 name: cidx-build-and-test
-description: Build and test the cidx indexer's Python and C++ suites, and pick the right test gate. Use when building the project, running pytest or ctest, setting up the toolchain, or deciding which gates (default, clang, parity) a change requires before commit or handoff.
+description: Build and test the cidx indexer's Python and C++ suites, and pick the right test gate. Use when building the project, running pytest or ctest, setting up the toolchain, or deciding which gates (default, clang) a change requires before commit or handoff.
 ---
 
 # Building and testing cidx
@@ -24,8 +24,10 @@ ctest --test-dir build -L default --output-on-failure
 ```
 
 Before committing a behavioral change: run **both** full Python tests and the
-C++ `default` tests. Run the `clang` and `parity` gates when the change touches
-parsing, indexing, storage interchange, CLI behavior, or graph results.
+C++ `default` tests. Run the `clang` gate when the change touches parsing,
+indexing, storage interchange, CLI behavior, or graph results. Compare
+normalized Layer-0 row sets (`scripts/dump_layer0.sh`) when indexing semantics
+change; there is no byte-parity gate.
 
 For the `uv` workflow, the targeted gates, and exactly what each gate needs, see
 [references/commands.md](references/commands.md).

@@ -7,13 +7,12 @@
 #pragma once
 
 #include "ast/edge_records.hpp"
-#include "ast/edge_records2.hpp"
 
 #include <optional>
 #include <string>
 #include <vector>
 
-namespace cidx::lt {
+namespace cidx::ast {
 
 class EdgeSink {
 public:
@@ -69,4 +68,4 @@ public:
                                const std::string &kind_name) = 0;
 };
 
-} // namespace cidx::lt
+} // namespace cidx::ast
