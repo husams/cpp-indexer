@@ -334,8 +334,24 @@ struct IndexedProject {
     write_file(proj + "/instantiate.cpp", source);
     REQUIRE(run_cidx({"index"}, cache, log) == 0);
   }
+  // Rewrite BOTH files (a header-only edit never reparses the unchanged TU,
+  // and headers are indexed only through their including TU).
+  void reindex_with(const std::string &header, const std::string &source) {
+    write_file(proj + "/templates.hpp", header);
+    reindex_with_source(source);
+  }
   std::string db_path() const { return cache + "/index.db"; }
 };
+
+// "<file-basename>:<line>" owning the symbol with this USR.
+std::vector<std::string> owner_probe(const std::string &db_path,
+                                     const std::string &usr) {
+  return query_col(db_path,
+                   "SELECT f.name || ':' || s.line FROM symbol s "
+                   "JOIN file f ON f.id = s.file_id "
+                   "WHERE s.usr = '" +
+                       usr + "'");
+}
 
 // "<kind-name>/<is_instantiation>" of the unique symbol with this USR.
 std::vector<std::string> sym_probe(const std::string &db_path,
@@ -826,12 +842,75 @@ TEST_SUITE("clang") {
                            "c:@FT@>1#Ttwice#t0.0#S0_#") ==
           std::vector<std::string>{"instantiates/1"});
     // Deleting the statement and reindexing ONLY the TU (the header stays
-    // md5-skipped) drops the relationship: per-file edge cleanup now applies
+    // md5-skipped) drops the RELATIONSHIP: per-file edge cleanup applies
     // because the instantiation symbol belongs to instantiate.cpp.
     prj.reindex_with_source("#include \"templates.hpp\"\n");
     CHECK(structural_edges(prj.db_path(), "c:@F@twice<#d>#d#",
                            "c:@FT@>1#Ttwice#t0.0#S0_#") ==
           std::vector<std::string>{});
+    // Pinned repo-wide storage semantic, NOT a claim of this fix: reindexing
+    // never garbage-collects the symbol row or its template_arg rows for a
+    // removed declaration — a deleted plain function lingers identically.
+    // Only the file's edges and definitions are dropped.
+    CHECK(sym_probe(prj.db_path(), "c:@F@twice<#d>#d#") ==
+          std::vector<std::string>{"function/1"});
+    CHECK(args_probe(prj.db_path(), "c:@F@twice<#d>#d#") ==
+          std::vector<std::string>{"0:1:double"});
+  }
+
+  TEST_CASE("template spec: POI anchor is the first materialization point") {
+    // PR #16 review round 2. Clang gives a function explicit-instantiation
+    // statement NO node of its own and the specialization ONE first-wins
+    // PointOfInstantiation slot, so the statement's own line is not
+    // recoverable when an earlier materialization exists. These cases pin
+    // the achievable contract: ownership follows the FIRST point.
+    // (a) A prior implicit use in the same file: ownership and cleanup stay
+    // in tu.cpp; the recorded line is the use on line 3, not the statement
+    // on line 4.
+    const IndexedTu tu("template <class T> T twice(T x) { return x + x; }\n"
+                       "\n"
+                       "double use() { return twice(1.0); }\n"
+                       "template double twice<double>(double);\n");
+    CHECK(query_col(tu.db_path(),
+                    "SELECT s.line || '/' || s.is_instantiation FROM symbol s "
+                    "WHERE s.usr = 'c:@F@twice<#d>#d#'") ==
+          std::vector<std::string>{"3/1"});
+    CHECK(structural_edges(tu.db_path(), "c:@F@twice<#d>#d#",
+                           "c:@FT@>1#Ttwice#t0.0#S0_#") ==
+          std::vector<std::string>{"instantiates/1"});
+  }
+
+  TEST_CASE("template spec: extern declaration owns first, then re-anchors") {
+    // PR #16 review round 2, two-file form: `extern template` in the header
+    // followed by the explicit-instantiation DEFINITION in the TU. The
+    // header's extern statement is the specialization's first (and only
+    // recorded) point of instantiation, so it owns the symbol; the
+    // definition-directive's own location is not modeled by Clang's AST.
+    IndexedProject prj("#pragma once\n"
+                       "template <class T> T twice(T x) { return x + x; }\n"
+                       "extern template double twice<double>(double);\n",
+                       "#include \"templates.hpp\"\n"
+                       "template double twice<double>(double);\n");
+    CHECK(owner_probe(prj.db_path(), "c:@F@twice<#d>#d#") ==
+          std::vector<std::string>{"templates.hpp:3"});
+    CHECK(sym_probe(prj.db_path(), "c:@F@twice<#d>#d#") ==
+          std::vector<std::string>{"function/1"});
+    CHECK(structural_edges(prj.db_path(), "c:@F@twice<#d>#d#",
+                           "c:@FT@>1#Ttwice#t0.0#S0_#") ==
+          std::vector<std::string>{"instantiates/1"});
+    // Removing the extern statement re-anchors ownership to the next
+    // remaining point — the definition statement in instantiate.cpp — on
+    // reindex, with the relationship intact and still un-duplicated.
+    prj.reindex_with("#pragma once\n"
+                     "template <class T> T twice(T x) { return x + x; }\n",
+                     "#include \"templates.hpp\"\n"
+                     "template double twice<double>(double);\n"
+                     "// reanchor\n");
+    CHECK(owner_probe(prj.db_path(), "c:@F@twice<#d>#d#") ==
+          std::vector<std::string>{"instantiate.cpp:2"});
+    CHECK(structural_edges(prj.db_path(), "c:@F@twice<#d>#d#",
+                           "c:@FT@>1#Ttwice#t0.0#S0_#") ==
+          std::vector<std::string>{"instantiates/1"});
   }
 
   TEST_CASE("template spec: uncalled explicit member instantiation") {

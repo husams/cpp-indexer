@@ -158,6 +158,24 @@ Required gates:
 - `tests/ast_visitor_test.cpp`
 - `tests/index_golden_test.cpp`
 
+## Representation limits (as implemented)
+
+Two bounds come from Clang's data model and repo-wide storage semantics, and
+are pinned by tests rather than worked around:
+
+- A function explicit-instantiation statement produces no AST node of its
+  own, and the specialization keeps a single, first-write-wins
+  `PointOfInstantiation`. Ownership/location therefore anchor at the
+  specialization's FIRST materialization point in the TU (a preceding
+  implicit use, or a preceding `extern template` declaration). Removing the
+  statement holding that point re-anchors the symbol to the next remaining
+  point on reindex. The definition-directive's own location is unrecoverable
+  when an earlier point exists.
+- Reindexing a file never garbage-collects symbol or `template_arg` rows of
+  removed declarations (true for every declaration kind, not just
+  instantiations); per-file cleanup covers edges and definitions. The
+  guarantee here is relationship cleanup from the owning file.
+
 ## Non-goals
 
 - extending the retired Python/libclang indexer;

@@ -546,9 +546,12 @@ bool DeclarationEdgeVisitor::VisitFunctionTemplateDecl(
 }
 
 // -- callable explicit specializations / instantiations -----------------------
-// This file owns an explicit instantiation when the `template ...;` statement
-// (the point of instantiation) is written here — the decl itself points at
-// the template pattern, possibly in another file.
+// This file owns an explicit instantiation when the specialization's point
+// of instantiation is written here — the decl itself points at the template
+// pattern, possibly in another file. Clang keeps ONE first-write-wins POI
+// per specialization and no node for the statement itself (see the contract
+// note in symbol_visitor.cpp), so ownership follows the specialization's
+// first materialization point in the TU.
 bool DeclarationEdgeVisitor::owns_instantiation(
     const clang::FunctionDecl *fd) const {
   const clang::SourceLocation poi = fd->getPointOfInstantiation();

@@ -100,9 +100,19 @@ bool SymbolVisitor::VisitNamedDecl(clang::NamedDecl *decl) {
 // `template void PlainMember<int>::run();`) are never lexical decls — they
 // exist only in specialization lists, which the default traversal skips. The
 // decl they create points at the template PATTERN, so ownership, location,
-// and cleanup are anchored to getPointOfInstantiation(): the file holding
-// the `template ...;` statement owns the symbol, and reindexing that file
-// (with the statement removed) drops its edges.
+// and cleanup are anchored to getPointOfInstantiation().
+//
+// Precision of that anchor is bounded by Clang's data model: a function
+// explicit-instantiation statement produces NO node of its own (the
+// RecursiveASTVisitor FIXME "once they are represented as dedicated nodes"
+// is still open in LLVM 22) and the specialization carries a SINGLE,
+// first-write-wins PointOfInstantiation slot. The anchor is therefore the
+// specialization's FIRST materialization point in the TU: a preceding
+// implicit use, or the `extern template` declaration when one precedes the
+// definition. That first point is where ownership and cleanup live; when
+// the statement holding it is removed, reindexing re-anchors the symbol to
+// the next remaining point. The definition-directive's own location is not
+// recoverable from the AST when an earlier point exists.
 void SymbolVisitor::emit_explicit_instantiation(const clang::FunctionDecl *fd) {
   const clang::SourceLocation poi = fd->getPointOfInstantiation();
   if (poi.isInvalid() || source_manager_.isInSystemHeader(
