@@ -61,6 +61,10 @@ void emit_spec_owner(EdgeSink &sink, MintBuilder &mint,
 // Owner-type promotion for a concrete method specialization/instantiation:
 // method_of(9) to the owning record, and — when the owner is itself a
 // class-template specialization — the minted owner with its own identity.
+// A plain-record owner is MINTED, not merely looked up: a nested record
+// inside an instantiation (`Outer<int>::Inner`) is never a lexical decl, so
+// its concrete member would otherwise lose method_of. Indexed owners
+// resolve to their existing row (mint upserts by USR).
 void emit_owner_promotion(EdgeSink &sink, MintBuilder &mint,
                           const TemplateArgumentEncoder &targ_encoder,
                           int64_t dst_id, const clang::CXXMethodDecl *m) {
@@ -70,15 +74,15 @@ void emit_owner_promotion(EdgeSink &sink, MintBuilder &mint,
   const auto *ospec =
       llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(owner);
   if (ospec == nullptr) {
-    const std::string ou = usr_for_decl(owner);
-    if (!ou.empty())
-      if (const auto oid = sink.lookup_symbol_id(ou)) {
-        EdgeRecord mo;
-        mo.src_id = dst_id;
-        mo.dst_id = *oid;
-        mo.kind = 9;
-        sink.ensure_edge(mo);
-      }
+    if (auto oreq = mint.build(owner)) {
+      oreq->is_instantiation = is_template_instantiation(owner);
+      const int64_t oid = sink.mint_symbol(*oreq);
+      EdgeRecord mo;
+      mo.src_id = dst_id;
+      mo.dst_id = oid;
+      mo.kind = 9;
+      sink.ensure_edge(mo);
+    }
     return;
   }
   emit_spec_owner(sink, mint, targ_encoder, dst_id, ospec);
@@ -165,25 +169,44 @@ void for_each_explicit_callable_instantiation(
       fn(fd);
 }
 
+namespace {
+
+// Recursive walk of one instantiated context: callable members at this
+// level, member function templates, and NESTED record/template contexts
+// (`template void Outer<int>::Inner::run();` puts run inside the Inner
+// record inside the specialization). decls() holds just what the TU
+// actually instantiated.
+void walk_instantiated_context(
+    const clang::DeclContext *dc,
+    llvm::function_ref<void(const clang::FunctionDecl *)> fn) {
+  for (const clang::Decl *d : dc->decls()) {
+    if (const auto *m = llvm::dyn_cast<clang::FunctionDecl>(d)) {
+      if (!m->isImplicit() &&
+          is_explicit_instantiation_kind(m->getTemplateSpecializationKind()))
+        fn(m);
+    } else if (const auto *ft =
+                   llvm::dyn_cast<clang::FunctionTemplateDecl>(d)) {
+      for_each_explicit_callable_instantiation(ft, fn);
+    } else if (const auto *ct = llvm::dyn_cast<clang::ClassTemplateDecl>(d)) {
+      for_each_explicit_callable_instantiation(ct, fn);
+    } else if (const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(d)) {
+      if (!rec->isImplicit()) // skip the injected-class-name
+        walk_instantiated_context(rec, fn);
+    }
+  }
+}
+
+} // namespace
+
 void for_each_explicit_callable_instantiation(
     const clang::ClassTemplateDecl *tmpl,
     llvm::function_ref<void(const clang::FunctionDecl *)> fn) {
   // `template void PlainMember<int>::run();` creates the member inside the
   // (implicit) ClassTemplateSpecializationDecl — reachable only through the
-  // class template's specialization list. decls() holds just the members the
-  // TU actually instantiated. (Members of nested classes are not walked.)
+  // class template's specialization list.
   for (const clang::ClassTemplateSpecializationDecl *spec :
-       tmpl->specializations()) {
-    for (const clang::Decl *d : spec->decls()) {
-      if (const auto *m = llvm::dyn_cast<clang::FunctionDecl>(d)) {
-        if (!m->isImplicit() &&
-            is_explicit_instantiation_kind(m->getTemplateSpecializationKind()))
-          fn(m);
-      } else if (const auto *ft = llvm::dyn_cast<clang::FunctionTemplateDecl>(d)) {
-        for_each_explicit_callable_instantiation(ft, fn);
-      }
-    }
-  }
+       tmpl->specializations())
+    walk_instantiated_context(spec, fn);
 }
 
 void emit_caller_instantiates(EdgeSink &sink, int64_t src_id,

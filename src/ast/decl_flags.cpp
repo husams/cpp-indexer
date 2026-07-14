@@ -48,9 +48,10 @@ bool is_template_instantiation(const clang::Decl *decl) {
   // derives from ClassTemplateSpecialization and answers TSK_Undeclared /
   // TSK_ExplicitSpecialization, so it falls out false naturally.
   clang::TemplateSpecializationKind tsk = clang::TSK_Undeclared;
-  if (const auto *spec =
-          llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(decl))
-    tsk = spec->getSpecializationKind();
+  // CXXRecordDecl::getTemplateSpecializationKind covers class-template
+  // specializations AND instantiated member classes (Outer<int>::Inner).
+  if (const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(decl))
+    tsk = rec->getTemplateSpecializationKind();
   else if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(decl))
     tsk = fn->getTemplateSpecializationKind();
   else if (const auto *var = llvm::dyn_cast<clang::VarDecl>(decl))

@@ -307,6 +307,10 @@ template <class T> struct Gadget {
   template <class U> int conv(U u) { return static_cast<int>(u); }
 };
 template int Gadget<char>::conv<long>(long);
+
+template <class T> struct Outer { struct Inner { void run(); }; };
+template <class T> void Outer<T>::Inner::run() {}
+template void Outer<int>::Inner::run();
 )cpp";
 
 // Two-file fixture: a template header plus the TU holding the explicit
@@ -950,6 +954,49 @@ TEST_SUITE("clang") {
     CHECK(structural_edges(tu.db_path(), "c:@S@Gadget>#C",
                            "c:@ST>1#T@Gadget") ==
           std::vector<std::string>{"instantiates/1"});
+    // PR #16 review round 3: a member of a NESTED record inside the
+    // specialization (`template void Outer<int>::Inner::run();`) is reached
+    // by recursing through instantiated contexts. Its owner Outer<int>::Inner
+    // is never a lexical decl, so method_of relies on the minted owner.
+    CHECK(sym_probe(tu.db_path(), "c:@S@Outer>#I@S@Inner@F@run#") ==
+          std::vector<std::string>{"method/1"});
+    CHECK(query_col(tu.db_path(),
+                    "SELECT s.line FROM symbol s "
+                    "WHERE s.usr = 'c:@S@Outer>#I@S@Inner@F@run#'") ==
+          std::vector<std::string>{"13"});
+    CHECK(structural_edges(tu.db_path(), "c:@S@Outer>#I@S@Inner@F@run#",
+                           "c:@ST>1#T@Outer@S@Inner@F@run#") ==
+          std::vector<std::string>{"instantiates/1"});
+    CHECK(structural_edges(tu.db_path(), "c:@S@Outer>#I@S@Inner@F@run#",
+                           "c:@S@Outer>#I@S@Inner") ==
+          std::vector<std::string>{"method_of/1"});
+    CHECK(sym_probe(tu.db_path(), "c:@S@Outer>#I@S@Inner") ==
+          std::vector<std::string>{"struct/1"});
+  }
+
+  TEST_CASE("template spec: instantiation -> specialization downgrades") {
+    // PR #16 review round 3: add_symbol previously merged is_instantiation
+    // with MAX, so a `template double twice<double>(double);` replaced by an
+    // authored `template<>` specialization (same USR) kept flag 1 forever.
+    // A real decl row now states its TemplateSpecializationKind
+    // authoritatively; stub promotion (mint_symbol_id) stays monotonic.
+    IndexedProject prj("#pragma once\n"
+                       "template <class T> T twice(T x) { return x + x; }\n",
+                       "#include \"templates.hpp\"\n"
+                       "template double twice<double>(double);\n");
+    CHECK(sym_probe(prj.db_path(), "c:@F@twice<#d>#d#") ==
+          std::vector<std::string>{"function/1"});
+    CHECK(structural_edges(prj.db_path(), "c:@F@twice<#d>#d#",
+                           "c:@FT@>1#Ttwice#t0.0#S0_#") ==
+          std::vector<std::string>{"instantiates/1"});
+    prj.reindex_with_source(
+        "#include \"templates.hpp\"\n"
+        "template <> double twice<double>(double v) { return v * 3; }\n");
+    CHECK(sym_probe(prj.db_path(), "c:@F@twice<#d>#d#") ==
+          std::vector<std::string>{"function/0"});
+    CHECK(structural_edges(prj.db_path(), "c:@F@twice<#d>#d#",
+                           "c:@FT@>1#Ttwice#t0.0#S0_#") ==
+          std::vector<std::string>{"specializes/1"});
   }
 
 } // TEST_SUITE("clang")
