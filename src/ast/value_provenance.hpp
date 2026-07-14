@@ -19,10 +19,11 @@ class QualType;
 namespace cidx::ast {
 
 // Strip the wrappers that do not change a value's provenance: parentheses,
-// implicit casts, cleanups, temporary materialization/binding, C-style casts
-// of a value, and the provenance-preserving unary operators & and * (which
-// still denote their operand's storage). Every other spelled operator stays
-// visible and classifies as a derived value.
+// implicit casts, cleanups, temporary materialization/binding, explicit
+// non-functional casts of a value (C-style and the named casts), and the
+// provenance-preserving unary operators & and * (which still denote their
+// operand's storage). Functional casts and every other spelled operator stay
+// visible and classify as derived values.
 const clang::Expr *normalize_value_expr(const clang::Expr *expr);
 
 // USR of the record decl after stripping pointers/references/cv from the

@@ -44,10 +44,15 @@ const clang::Expr *normalize_value_expr(const clang::Expr *expr) {
       e = bt->getSubExpr();
       continue;
     }
-    // A C-style cast of a value still denotes the operand's storage.
-    if (const auto *cc = llvm::dyn_cast<clang::CStyleCastExpr>(stripped)) {
-      e = cc->getSubExpr();
-      continue;
+    // An explicit cast of a value — C-style, static_cast, const_cast,
+    // reinterpret_cast, dynamic_cast — still denotes the operand's storage.
+    // FUNCTIONAL casts (`std::string("x")`) construct a new value and stay
+    // visible so the classifier can answer call_result.
+    if (const auto *cast = llvm::dyn_cast<clang::ExplicitCastExpr>(stripped)) {
+      if (!llvm::isa<clang::CXXFunctionalCastExpr>(cast)) {
+        e = cast->getSubExpr();
+        continue;
+      }
     }
     // Explicitly handled unary operators: &x and *p preserve the operand's
     // provenance. Every other unary operator produces a derived value and

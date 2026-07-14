@@ -29,5 +29,29 @@ for f in src/ast/*.cpp; do
     files="$files $f"
   fi
 done
+
+# Pass 1 — general limits from src/ast/.clang-tidy (statements <= 40,
+# nesting <= 4, cognitive complexity <= 25) over every function.
 # shellcheck disable=SC2086
-exec "$tidy" -p "$build" --quiet --warnings-as-errors='*' $extra $files
+"$tidy" -p "$build" --quiet --warnings-as-errors='*' $extra $files
+
+# Pass 2 — the tighter visitor-callback limits (refactoring.md §Complexity
+# limits): Visit* <= 25 statements, Traverse* <= 20 statements. clang-tidy has
+# no per-name thresholds, so re-run at each tighter threshold and fail only on
+# findings whose function name matches the callback family.
+callback_gate() {
+  threshold="$1"
+  pattern="$2"
+  # shellcheck disable=SC2086
+  hits=$("$tidy" -p "$build" --quiet \
+      --config="{Checks: '-*,readability-function-size', CheckOptions: {readability-function-size.StatementThreshold: '$threshold'}}" \
+      $extra $files 2>/dev/null \
+    | grep -E "function '$pattern[A-Za-z]*'" || true)
+  if [ -n "$hits" ]; then
+    echo "callback over the $threshold-statement limit ($pattern*):" >&2
+    echo "$hits" >&2
+    return 1
+  fi
+}
+callback_gate 25 Visit
+callback_gate 20 Traverse

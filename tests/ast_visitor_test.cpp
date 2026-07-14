@@ -193,6 +193,18 @@ void unary() {
   deref(*p);
   addr(&x);
 }
+
+void scast(int);
+void ccast(int);
+void rcast(long);
+
+void named_casts() {
+  int x = 1;
+  const int cx = 2;
+  scast(static_cast<int &>(x));
+  ccast(const_cast<int &>(cx));
+  rcast(reinterpret_cast<long &>(x));
+}
 )cpp";
 
 const char *kTemplateArgsTu = R"cpp(
@@ -334,6 +346,18 @@ TEST_SUITE("clang") {
                     "WHERE ss.spelling = 'call_via' "
                     "AND ds.spelling = 'go'") ==
           std::vector<std::string>{"0"});
+  }
+
+  TEST_CASE("review fix: named casts preserve the operand's provenance") {
+    const IndexedTu tu(kProvenanceTu);
+    // static_cast / const_cast / reinterpret_cast of a local still denote its
+    // storage — like the implicit and C-style equivalents (functional casts
+    // stay call_result).
+    for (const char *callee : {"scast", "ccast", "rcast"}) {
+      const ArgProbe p = probe_arg0(tu.db_path(), "named_casts", callee);
+      CHECK_MESSAGE(p.src_kind == "local", callee);
+      CHECK_MESSAGE(p.has_decl_usr, callee);
+    }
   }
 
   TEST_CASE("correction: !x and -x are derived values, not the operand") {

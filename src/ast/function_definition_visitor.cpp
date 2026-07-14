@@ -18,19 +18,39 @@ FunctionDefinitionVisitor::FunctionDefinitionVisitor(clang::ASTContext &context,
     : context_(context), sink_(sink), target_file_(std::move(target_file)),
       file_id_(file_id) {}
 
-bool FunctionDefinitionVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
-  // Definitions with an actual body, in the target file. The symbol row keyed
-  // by this decl's USR: a templated pattern's body belongs to its
-  // FUNCTION_TEMPLATE cursor (same USR either way).
+// An indexable function definition: has an actual body, is not nested in
+// another function (a LOCAL class's methods are covered by the enclosing
+// function's descent), and sits in the target file.
+bool FunctionDefinitionVisitor::is_indexable_definition(
+    const clang::FunctionDecl *decl) const {
   if (!decl->doesThisDeclarationHaveABody())
-    return true;
-  // for_file_cursors stops at bodies: a LOCAL class's methods never get their
-  // own body walk (they are covered by the enclosing function's descent).
+    return false;
   if (decl->getParentFunctionOrMethod() != nullptr)
+    return false;
+  return expansion_loc(context_, decl->getLocation()).file == target_file_;
+}
+
+// The definition row over keyed's extent, then a StatementEdgeVisitor walk of
+// the body, snapshotted into def_edge rows.
+void FunctionDefinitionVisitor::index_definition(clang::FunctionDecl *decl,
+                                                 const clang::NamedDecl *keyed,
+                                                 int64_t fn_sym) {
+  const clang::SourceRange range = keyed->getSourceRange();
+  const ExpansionLoc start = extent_start(context_, range);
+  const ExpansionLoc end = extent_end(context_, range);
+  const int64_t def_id = sink_.get_or_create_definition(
+      fn_sym, file_id_, start.line, start.col, end.line, end.col,
+      std::nullopt);
+  StatementEdgeVisitor body(context_, sink_, fn_sym, file_id_);
+  body.walk(decl);
+  sink_.copy_body_edges_to_def_edge(def_id, fn_sym);
+}
+
+bool FunctionDefinitionVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
+  if (!is_indexable_definition(decl))
     return true;
-  const ExpansionLoc loc = expansion_loc(context_, decl->getLocation());
-  if (loc.file != target_file_)
-    return true;
+  // The symbol row keyed by this decl's USR: a templated pattern's body
+  // belongs to its function template (same USR either way).
   const clang::NamedDecl *keyed = decl;
   if (const clang::FunctionTemplateDecl *ft =
           decl->getDescribedFunctionTemplate())
@@ -38,19 +58,8 @@ bool FunctionDefinitionVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
   const std::string usr = usr_for_decl(keyed);
   if (usr.empty())
     return true;
-  const auto fn_sym = sink_.lookup_symbol_id(usr);
-  if (!fn_sym)
-    return true;
-
-  const clang::SourceRange range = keyed->getSourceRange();
-  const ExpansionLoc start = extent_start(context_, range);
-  const ExpansionLoc end = extent_end(context_, range);
-  const int64_t def_id = sink_.get_or_create_definition(
-      *fn_sym, file_id_, start.line, start.col, end.line, end.col,
-      std::nullopt);
-  StatementEdgeVisitor body(context_, sink_, *fn_sym, file_id_);
-  body.walk(decl);
-  sink_.copy_body_edges_to_def_edge(def_id, *fn_sym);
+  if (const auto fn_sym = sink_.lookup_symbol_id(usr))
+    index_definition(decl, keyed, *fn_sym);
   return true;
 }
 

@@ -121,60 +121,52 @@ bool DeclarationEdgeVisitor::in_walk(const clang::Decl *decl) const {
   return true;
 }
 
+// Lookup-only edge between two already-indexed symbols (no stubs minted).
+// Returns the src symbol id when the edge was emitted.
+std::optional<int64_t>
+DeclarationEdgeVisitor::emit_lookup_edge(const std::string &src_usr,
+                                         const std::string &dst_usr,
+                                         int kind) {
+  if (src_usr.empty() || dst_usr.empty())
+    return std::nullopt;
+  const auto src = sink_.lookup_symbol_id(src_usr);
+  const auto dst = sink_.lookup_symbol_id(dst_usr);
+  if (!src || !dst)
+    return std::nullopt;
+  EdgeRecord e;
+  e.src_id = *src;
+  e.dst_id = *dst;
+  e.kind = kind;
+  sink_.add_edge(e);
+  return src;
+}
+
 // -- contains (kind=3) + signature-level uses ---------------------------------
 bool DeclarationEdgeVisitor::VisitNamedDecl(clang::NamedDecl *decl) {
   if (!in_walk(decl) || is_template_pattern(decl))
     return true;
-  // Function templates get NO signature uses: the cursor API's result-type
-  // and argument accessors return invalid/-1 on FUNCTION_TEMPLATE cursors.
+  // Function templates get NO signature uses: the retired reference's
+  // result-type and argument accessors were undefined on templates.
   if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(decl))
     emit_signature_uses(fn);
+  emit_contains_edge(decl);
+  return true;
+}
+
+// contains(3): lexical namespace -> any indexed child; record/class-template
+// -> nested type children only.
+void DeclarationEdgeVisitor::emit_contains_edge(const clang::NamedDecl *decl) {
   const clang::DeclContext *ldc = decl->getLexicalDeclContext();
   const auto *parent = ldc != nullptr ? llvm::dyn_cast<clang::Decl>(ldc) : nullptr;
   if (parent == nullptr)
-    return true;
+    return;
   const ParentKind pk = parent_kind_of(parent);
   const bool emit =
       pk == ParentKind::Namespace ||
       ((pk == ParentKind::Record || pk == ParentKind::ClassTemplate) &&
        is_nested_type_child(decl));
-  if (!emit)
-    return true;
-  const std::string child_usr = usr_of(decl);
-  const std::string parent_usr = usr_of(parent);
-  if (child_usr.empty() || parent_usr.empty())
-    return true;
-  const auto child_id = sink_.lookup_symbol_id(child_usr);
-  const auto parent_id = sink_.lookup_symbol_id(parent_usr);
-  if (!child_id || !parent_id)
-    return true;
-  EdgeRecord e;
-  e.src_id = *parent_id;
-  e.dst_id = *child_id;
-  e.kind = 3;
-  sink_.add_edge(e);
-  return true;
-}
-
-// -- libclang duplicate-cursor quirk for `typedef struct X {...} Y;` ----------
-// libclang shows an inline-defined tag BOTH as its own top-level cursor AND as
-// a child of the TYPEDEF_DECL, so every member edge under it is emitted twice
-// (field_of count=2 on the corpus C structs). RAV visits the tag once; re-walk
-// its subtree from the typedef to mirror the doubled emissions.
-bool DeclarationEdgeVisitor::TraverseTypedefDecl(clang::TypedefDecl *decl) {
-  if (!RecursiveASTVisitor::TraverseTypedefDecl(decl))
-    return false;
-  if (!in_walk(decl))
-    return true;
-  const clang::Type *type = decl->getUnderlyingType().getTypePtrOrNull();
-  if (type == nullptr)
-    return true;
-  if (const clang::TagDecl *tag = type->getAsTagDecl()) {
-    if (tag->isThisDeclarationADefinition() && tag->isEmbeddedInDeclarator())
-      RecursiveASTVisitor::TraverseDecl(
-          const_cast<clang::TagDecl *>(tag));
-  }
-  return true;
+  if (emit)
+    emit_lookup_edge(usr_of(parent), usr_of(decl), 3);
 }
 
 // -- inherits (kind=2) + CRTP instantiates (kind=5) ---------------------------
@@ -282,18 +274,7 @@ bool DeclarationEdgeVisitor::VisitFieldDecl(clang::FieldDecl *decl) {
   if (const auto self = sink_.lookup_symbol_id(member_usr))
     emit_type_use(sink_, *self, decl->getType(), file_id_,
                   expansion_loc(context_, decl->getLocation()), 0);
-  const std::string owner_usr = usr_of(decl->getParent());
-  if (owner_usr.empty())
-    return true;
-  const auto src = sink_.lookup_symbol_id(member_usr);
-  const auto dst = sink_.lookup_symbol_id(owner_usr);
-  if (!src || !dst)
-    return true;
-  EdgeRecord e;
-  e.src_id = *src;
-  e.dst_id = *dst;
-  e.kind = 8;
-  sink_.add_edge(e);
+  emit_lookup_edge(member_usr, usr_of(decl->getParent()), 8);
   return true;
 }
 
@@ -413,37 +394,30 @@ bool DeclarationEdgeVisitor::VisitTypedefNameDecl(clang::TypedefNameDecl *decl) 
 bool DeclarationEdgeVisitor::VisitCXXMethodDecl(clang::CXXMethodDecl *decl) {
   if (!in_walk(decl) || is_template_pattern(decl))
     return true;
-  const std::string method_usr = usr_for_decl(decl);
-  if (method_usr.empty())
+  const auto src =
+      emit_lookup_edge(usr_for_decl(decl), usr_of(decl->getParent()), 9);
+  if (!src)
     return true;
-  const std::string owner_usr = usr_of(decl->getParent());
-  if (owner_usr.empty())
-    return true;
-  const auto src = sink_.lookup_symbol_id(method_usr);
-  const auto dst = sink_.lookup_symbol_id(owner_usr);
-  if (!src || !dst)
-    return true;
-  EdgeRecord e;
-  e.src_id = *src;
-  e.dst_id = *dst;
-  e.kind = 9;
-  sink_.add_edge(e);
-
-  // overrides: plain CXX_METHOD cursors only (not ctors/dtors).
+  // overrides: plain methods only (not ctors/dtors).
   if (!llvm::isa<clang::CXXConstructorDecl>(decl) &&
-      !llvm::isa<clang::CXXDestructorDecl>(decl)) {
-    for (const clang::CXXMethodDecl *overridden : decl->overridden_methods()) {
-      if (auto req = mint_.build(overridden)) {
-        const int64_t dst_ov = sink_.mint_symbol(*req);
-        EdgeRecord oe;
-        oe.src_id = *src;
-        oe.dst_id = dst_ov;
-        oe.kind = 6;
-        sink_.add_edge(oe);
-      }
+      !llvm::isa<clang::CXXDestructorDecl>(decl))
+    emit_override_edges(decl, *src);
+  return true;
+}
+
+// overrides(6): method -> each directly overridden method (minted).
+void DeclarationEdgeVisitor::emit_override_edges(
+    const clang::CXXMethodDecl *decl, int64_t src_id) {
+  for (const clang::CXXMethodDecl *overridden : decl->overridden_methods()) {
+    if (auto req = mint_.build(overridden)) {
+      const int64_t dst_ov = sink_.mint_symbol(*req);
+      EdgeRecord oe;
+      oe.src_id = src_id;
+      oe.dst_id = dst_ov;
+      oe.kind = 6;
+      sink_.add_edge(oe);
     }
   }
-  return true;
 }
 
 
@@ -481,28 +455,12 @@ bool DeclarationEdgeVisitor::VisitFriendDecl(clang::FriendDecl *decl) {
       llvm::dyn_cast<clang::CXXRecordDecl>(decl->getDeclContext());
   if (owner == nullptr || owner->isUnion())
     return true; // record-friends of class/struct owners only
-  const std::string owner_usr = usr_of(owner);
-  if (owner_usr.empty())
-    return true;
-  const auto src = sink_.lookup_symbol_id(owner_usr);
-  if (!src)
-    return true;
   const clang::TypeSourceInfo *tsi = decl->getFriendType();
   if (tsi == nullptr)
     return true; // friend functions are not recorded
-  for (const clang::NamedDecl *target : friend_targets(tsi)) {
-    const std::string friend_usr = usr_for_decl(target);
-    if (friend_usr.empty())
-      continue;
-    const auto dst = sink_.lookup_symbol_id(friend_usr);
-    if (!dst)
-      continue; // lookup-only (no stub)
-    EdgeRecord e;
-    e.src_id = *src;
-    e.dst_id = *dst;
-    e.kind = 17;
-    sink_.add_edge(e);
-  }
+  const std::string owner_usr = usr_of(owner);
+  for (const clang::NamedDecl *target : friend_targets(tsi))
+    emit_lookup_edge(owner_usr, usr_for_decl(target), 17);
   return true;
 }
 
@@ -552,25 +510,27 @@ bool DeclarationEdgeVisitor::VisitFunctionTemplateDecl(
   const auto id = sink_.lookup_symbol_id(usr);
   if (!id)
     return true;
-  // A member function template is a method too, but the CXX_METHOD handler
-  // never sees it (cursor kind FUNCTION_TEMPLATE) — emit method_of here.
+  // A member function template is a method too, but the CXXMethodDecl
+  // callback never sees it — emit method_of here.
   const clang::DeclContext *dc = decl->getDeclContext();
-  if (const auto *owner_rec =
-          llvm::dyn_cast_or_null<clang::CXXRecordDecl>(
-              dc != nullptr ? llvm::dyn_cast<clang::Decl>(dc) : nullptr)) {
-    const std::string owner_usr = usr_of(owner_rec);
-    if (!owner_usr.empty()) {
-      if (const auto owner_id = sink_.lookup_symbol_id(owner_usr)) {
-        EdgeRecord mo;
-        mo.src_id = *id;
-        mo.dst_id = *owner_id;
-        mo.kind = 9;
-        sink_.add_edge(mo);
-      }
-    }
-  }
+  const auto *owner_rec = llvm::dyn_cast_or_null<clang::CXXRecordDecl>(
+      dc != nullptr ? llvm::dyn_cast<clang::Decl>(dc) : nullptr);
+  if (owner_rec != nullptr)
+    emit_lookup_edge(usr, usr_of(owner_rec), 9);
   emit_template_params(decl, *id);
   return true;
+}
+
+// The indexed symbol id of a class-template specialization whose identity is
+// distinct from its primary (nullopt when either USR is missing or equal).
+std::optional<int64_t> DeclarationEdgeVisitor::specialization_symbol_id(
+    const clang::ClassTemplateSpecializationDecl *decl,
+    const clang::ClassTemplateDecl *primary) {
+  const std::string spec_usr = usr_for_decl(decl);
+  const std::string prim_usr = usr_for_decl(primary);
+  if (spec_usr.empty() || prim_usr.empty() || spec_usr == prim_usr)
+    return std::nullopt;
+  return sink_.lookup_symbol_id(spec_usr);
 }
 
 // -- specializes (4) / explicit-instantiation instantiates (5) + template_arg --
@@ -585,39 +545,38 @@ bool DeclarationEdgeVisitor::VisitClassTemplateSpecializationDecl(
   const clang::ClassTemplateDecl *primary = decl->getSpecializedTemplate();
   if (primary == nullptr)
     return true;
-  const std::string spec_usr = usr_for_decl(decl);
-  const std::string prim_usr = usr_for_decl(primary);
-  if (spec_usr.empty() || prim_usr.empty() || spec_usr == prim_usr)
-    return true;
-  const auto spec_id = sink_.lookup_symbol_id(spec_usr);
+  const auto spec_id = specialization_symbol_id(decl, primary);
   if (!spec_id)
     return true;
-  int64_t prim_id = 0;
-  if (auto req = mint_.build(primary)) {
-    prim_id = sink_.mint_symbol(*req);
-  } else {
+  if (!emit_specializes_edge(decl, primary, *spec_id))
     return true;
-  }
-
-  // `template class Foo<int>;` (explicit instantiation) is an INSTANCE of the
-  // template (kind 5); `template <> class Foo<bool> {...}` stays a
-  // specialization (kind 4). The C++ API answers directly what the libclang
-  // pass had to recover from source tokens (is_explicit_instantiation).
-  const clang::TemplateSpecializationKind tsk = decl->getSpecializationKind();
-  const bool explicit_inst =
-      tsk == clang::TSK_ExplicitInstantiationDeclaration ||
-      tsk == clang::TSK_ExplicitInstantiationDefinition;
-  EdgeRecord e;
-  e.src_id = *spec_id;
-  e.dst_id = prim_id;
-  e.kind = explicit_inst ? 5 : 4;
-  sink_.add_edge(e);
-
   // template_arg rows through the one canonical encoder
   // (docs/improvements/template-arg-contract.md).
   const clang::TemplateArgumentList &args = decl->getTemplateArgs();
   for (unsigned ai = 0; ai < args.size(); ++ai)
     targ_encoder_.emit(*spec_id, static_cast<int64_t>(ai), args[ai]);
+  return true;
+}
+
+// specializes(4) — or instantiates(5) for `template class Foo<int>;` explicit
+// instantiations, which the specialization-kind API answers directly. Mints
+// the primary's stub.
+bool DeclarationEdgeVisitor::emit_specializes_edge(
+    const clang::ClassTemplateSpecializationDecl *decl,
+    const clang::ClassTemplateDecl *primary, int64_t spec_id) {
+  auto req = mint_.build(primary);
+  if (!req)
+    return false;
+  const int64_t prim_id = sink_.mint_symbol(*req);
+  const clang::TemplateSpecializationKind tsk = decl->getSpecializationKind();
+  const bool explicit_inst =
+      tsk == clang::TSK_ExplicitInstantiationDeclaration ||
+      tsk == clang::TSK_ExplicitInstantiationDefinition;
+  EdgeRecord e;
+  e.src_id = spec_id;
+  e.dst_id = prim_id;
+  e.kind = explicit_inst ? 5 : 4;
+  sink_.add_edge(e);
   return true;
 }
 

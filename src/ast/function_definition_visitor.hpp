@@ -11,6 +11,7 @@
 namespace clang {
 class ASTContext;
 class FunctionDecl;
+class NamedDecl;
 } // namespace clang
 
 namespace cidx::ast {
@@ -25,6 +26,10 @@ public:
   bool VisitFunctionDecl(clang::FunctionDecl *decl);
 
 private:
+  bool is_indexable_definition(const clang::FunctionDecl *decl) const;
+  void index_definition(clang::FunctionDecl *decl,
+                        const clang::NamedDecl *keyed, int64_t fn_sym);
+
   clang::ASTContext &context_;
   EdgeSink &sink_;
   std::string target_file_;

@@ -53,7 +53,6 @@ public:
               std::string target_file, int64_t file_id);
 
   bool VisitNamedDecl(clang::NamedDecl *decl);           // contains
-  bool TraverseTypedefDecl(clang::TypedefDecl *decl);    // libclang dup quirk
   bool VisitCXXRecordDecl(clang::CXXRecordDecl *decl);   // inherits (+CRTP)
   bool VisitFieldDecl(clang::FieldDecl *decl);           // field_of
   bool VisitCXXMethodDecl(clang::CXXMethodDecl *decl);   // method_of+overrides
@@ -70,6 +69,17 @@ private:
   // the target file (for_file_cursors_p).
   bool in_walk(const clang::Decl *decl) const;
 
+  std::optional<int64_t> emit_lookup_edge(const std::string &src_usr,
+                                          const std::string &dst_usr,
+                                          int kind);
+  void emit_contains_edge(const clang::NamedDecl *decl);
+  void emit_override_edges(const clang::CXXMethodDecl *decl, int64_t src_id);
+  std::optional<int64_t> specialization_symbol_id(
+      const clang::ClassTemplateSpecializationDecl *decl,
+      const clang::ClassTemplateDecl *primary);
+  bool emit_specializes_edge(
+      const clang::ClassTemplateSpecializationDecl *decl,
+      const clang::ClassTemplateDecl *primary, int64_t spec_id);
   void emit_base_specifier(const clang::NamedDecl *derived,
                            const std::string &derived_usr,
                            const clang::CXXBaseSpecifier &base);
