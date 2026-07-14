@@ -1,36 +1,26 @@
-// Template-argument emission for a called template specialization.
+// As-written template arguments at a call site.
 //
-// When a resolved call target is an instantiation member (function-template
-// specialization or member of a class-template instantiation), libclang's
-// cursor API exposes its template arguments. This reproduces that emission:
-//   - free-function specializations mirror the full cursor-API arg list and
-//     rewrite the callable's display name;
-//   - method specializations fall back to the explicit `<...>` args written at
-//     the call site.
-// Split out of CallEdgeEmitter::emit_resolved_call so that call orchestration stays
-// separate from the argument-record shaping.
+// The call site is never the source of truth for WHICH template arguments a
+// callable specialization has — that is getTemplateSpecializationArgs() on the
+// callee, handled by emit_callable_template_identity. The explicit `<...>`
+// written at the site only contributes the as-written TYPE spellings, overlaid
+// positionally onto the full argument list.
 #pragma once
 
-#include <cstdint>
+#include "clang/AST/Type.h"
+
+#include <vector>
 
 namespace clang {
-class ASTContext;
 class Expr;
-class FunctionDecl;
 } // namespace clang
 
 namespace cidx::ast {
 
-class EdgeSink;
-class TemplateArgumentEncoder;
-
-// Emit template_arg rows for `callee` (the resolved call target, minted as
-// `dst_id`) when it is an instantiation member. `site` is the call/construct
-// expression, used to recover explicit method template arguments. A no-op when
-// `dst_id` is negative or `callee` is not an instantiation member.
-void emit_callable_template_args(clang::ASTContext &context, EdgeSink &sink,
-                                 const TemplateArgumentEncoder &targ_encoder,
-                                 const clang::FunctionDecl *callee,
-                                 const clang::Expr *site, int64_t dst_id);
+// The types written inside the callee's explicit `<...>` (DeclRefExpr or
+// MemberExpr), position-aligned with the leading specialization arguments.
+// Non-type positions and sites without explicit arguments yield null entries /
+// an empty vector.
+std::vector<clang::QualType> written_template_args(const clang::Expr *site);
 
 } // namespace cidx::ast

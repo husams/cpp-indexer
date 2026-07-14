@@ -1,5 +1,6 @@
 #include "ast/instance_minter.hpp"
 
+#include "ast/decl_flags.hpp"
 #include "ast/edge_sink.hpp"
 #include "ast/kind_map.hpp"
 #include "ast/mint_builder.hpp"
@@ -83,10 +84,12 @@ void InstanceMinter::mint_instance_from_type(clang::QualType type) const {
     targ_encoder_.emit(inst_id, static_cast<int64_t>(ai), args[ai]);
 }
 
-// Instance node + primary stub + the instantiates(5) edge between them.
-// The instance's display_name is the WRITTEN type spelling ('X<B>'); the
-// primary's kind defaults to "class-template" when unmapped (partial
-// specialization patterns). Returns the instance id, -1 when unmintable.
+// Instance node + primary stub + the structural edge between them:
+// instantiates(5) for implicit/explicit instantiations, specializes(4) when
+// the concrete type IS an explicit full specialization (using it instantiates
+// nothing, so the flag stays false too). The instance's display_name is the
+// WRITTEN type spelling ('X<B>'); the primary's kind defaults to
+// "class-template" when unmapped. Returns the instance id, -1 when unmintable.
 int64_t InstanceMinter::mint_instance_pair(
     const clang::ClassTemplateSpecializationDecl *spec,
     const clang::NamedDecl *primary, clang::QualType written_type) const {
@@ -95,7 +98,7 @@ int64_t InstanceMinter::mint_instance_pair(
     return -1;
   inst_req->display_name =
       clang::QualType(written_type).getAsString(printing_policy(context_));
-  inst_req->is_instantiation = true;
+  inst_req->is_instantiation = is_template_instantiation(spec);
   inst_req->is_named_instance = true;
   const int64_t inst_id = sink_.mint_symbol(*inst_req);
 
@@ -109,8 +112,10 @@ int64_t InstanceMinter::mint_instance_pair(
   EdgeRecord e;
   e.src_id = inst_id;
   e.dst_id = prim_id;
-  e.kind = 5; // instantiates: X<B> -> X
-  sink_.add_edge(e);
+  e.kind = spec->getSpecializationKind() == clang::TSK_ExplicitSpecialization
+               ? 4   // specializes: authored full specialization
+               : 5;  // instantiates: X<B> -> X (or its partial)
+  sink_.ensure_edge(e);
   return inst_id;
 }
 

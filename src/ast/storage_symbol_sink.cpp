@@ -41,6 +41,7 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
   sym.is_definition = s.is_definition;
   sym.is_pure = s.is_pure;
   sym.is_static = s.is_static;
+  sym.is_instantiation = s.is_instantiation;
   sym.linkage = s.linkage;
   sym.access = s.access;
   sym.parent_usr = s.parent_usr;

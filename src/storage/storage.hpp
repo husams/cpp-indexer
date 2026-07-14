@@ -301,6 +301,12 @@ public:
   // Returns the edge.id for edge_site linkage.
   int64_t add_edge(const Edge &e);
 
+  // Idempotent variant for STRUCTURAL relationships (specializes/instantiates):
+  // inserts the edge if absent, but a conflict leaves count untouched, so a
+  // relationship already recorded from the declaration is never re-counted by
+  // later call sites. Returns the stable edge.id.
+  int64_t ensure_edge(const Edge &e);
+
   // INSERT OR IGNORE: same site visited twice (e.g. re-parse) = no-op.
   void add_edge_site(const EdgeSite &s);
 

@@ -1,5 +1,6 @@
 #include "ast/symbol_visitor.hpp"
 
+#include "ast/instantiation_edges.hpp"
 #include "ast/location.hpp"
 #include "ast/symbol_emitter.hpp"
 
@@ -15,7 +16,9 @@ namespace {
 
 // The decl is a template's PATTERN (templated decl); libclang represents the
 // pair as one FunctionTemplate/ClassTemplate cursor, so the pattern itself is
-// not a symbol.
+// not a symbol. A ClassTemplatePartialSpecializationDecl is NOT a pattern
+// (getDescribedClassTemplate() is null on it): it is retained as a
+// first-class template symbol.
 bool is_template_pattern(const clang::NamedDecl *decl) {
   if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(decl))
     return fn->getDescribedFunctionTemplate() != nullptr;
@@ -90,6 +93,65 @@ bool SymbolVisitor::VisitNamedDecl(clang::NamedDecl *decl) {
     return true;
   if (std::optional<SymbolRecord> sym = extractor_.extract(decl))
     out_.emit(*sym);
+  return true;
+}
+
+// Explicit instantiations (`template double twice<double>(double);`,
+// `template void PlainMember<int>::run();`) are never lexical decls — they
+// exist only in specialization lists, which the default traversal skips. The
+// decl they create points at the template PATTERN, so ownership, location,
+// and cleanup are anchored to getPointOfInstantiation().
+//
+// Precision of that anchor is bounded by Clang's data model: a function
+// explicit-instantiation statement produces NO node of its own (the
+// RecursiveASTVisitor FIXME "once they are represented as dedicated nodes"
+// is still open in LLVM 22) and the specialization carries a SINGLE,
+// first-write-wins PointOfInstantiation slot. The anchor is therefore the
+// specialization's FIRST materialization point in the TU: a preceding
+// implicit use, or the `extern template` declaration when one precedes the
+// definition. That first point is where ownership and cleanup live; when
+// the statement holding it is removed, reindexing re-anchors the symbol to
+// the next remaining point. The definition-directive's own location is not
+// recoverable from the AST when an earlier point exists.
+void SymbolVisitor::emit_explicit_instantiation(const clang::FunctionDecl *fd) {
+  const clang::SourceLocation poi = fd->getPointOfInstantiation();
+  if (poi.isInvalid() || source_manager_.isInSystemHeader(
+                             source_manager_.getExpansionLoc(poi)))
+    return;
+  const ExpansionLoc loc = expansion_loc(context_, poi);
+  if (loc.file.empty())
+    return;
+  if (!target_file_.empty() && loc.file != target_file_)
+    return;
+  std::optional<SymbolRecord> sym = extractor_.extract(fd);
+  if (!sym)
+    return;
+  sym->file = loc.file;
+  sym->line = loc.line;
+  sym->col = loc.col;
+  sym->end_line = loc.line;
+  sym->end_col = loc.col;
+  if (sym->decl_line) { // declaration-only instantiations record the POI too
+    sym->decl_line = loc.line;
+    sym->decl_col = loc.col;
+  }
+  out_.emit(*sym);
+}
+
+bool SymbolVisitor::VisitFunctionTemplateDecl(
+    clang::FunctionTemplateDecl *decl) {
+  for_each_explicit_callable_instantiation(
+      decl, [this](const clang::FunctionDecl *fd) {
+        emit_explicit_instantiation(fd);
+      });
+  return true;
+}
+
+bool SymbolVisitor::VisitClassTemplateDecl(clang::ClassTemplateDecl *decl) {
+  for_each_explicit_callable_instantiation(
+      decl, [this](const clang::FunctionDecl *fd) {
+        emit_explicit_instantiation(fd);
+      });
   return true;
 }
 

@@ -2366,7 +2366,11 @@ int64_t Storage::add_symbol(const Symbol &sym) {
       "  is_definition    = MAX(excluded.is_definition, symbol.is_definition), "
       "  is_pure          = MAX(excluded.is_pure, symbol.is_pure), "
       "  is_static        = MAX(excluded.is_static, symbol.is_static), "
-      "  is_instantiation = MAX(excluded.is_instantiation, symbol.is_instantiation), "
+      // A real decl row states its TemplateSpecializationKind authoritatively,
+      // so reindexing an instantiation-turned-explicit-specialization (same
+      // USR) must DOWNGRADE the flag. Stub promotion stays monotonic in
+      // mint_symbol_id, which keeps its MAX.
+      "  is_instantiation = excluded.is_instantiation, "
       "  linkage          = COALESCE(excluded.linkage, symbol.linkage), "
       "  access           = COALESCE(excluded.access, symbol.access), "
       "  parent_usr       = COALESCE(excluded.parent_usr, symbol.parent_usr), "
@@ -2762,6 +2766,35 @@ int64_t Storage::add_edge(const Edge &e) {
   bind_opt(st, 7, e.vtable_slot);
   if (!st.step()) {
     throw StorageError("add_edge: upsert returned no id");
+  }
+  const int64_t eid = st.col_int64(0);
+  st.step_done();
+  return eid;
+}
+
+int64_t Storage::ensure_edge(const Edge &e) {
+  // Structural upsert: presence matters, count does not accumulate. The
+  // DO UPDATE keeps count as-is (attributes still COALESCE-fill) so the
+  // statement can RETURN the stable id on both paths.
+  auto st = db_.prepare(
+      "INSERT INTO edge (src_id, dst_id, kind, count, base_access, is_virtual, "
+      "                  vtable_slot) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?) "
+      "ON CONFLICT(src_id, dst_id, kind) DO UPDATE SET "
+      "  count       = edge.count, "
+      "  base_access = COALESCE(excluded.base_access, edge.base_access), "
+      "  is_virtual  = COALESCE(excluded.is_virtual,  edge.is_virtual), "
+      "  vtable_slot = COALESCE(excluded.vtable_slot, edge.vtable_slot) "
+      "RETURNING id");
+  st.bind(1, e.src_id);
+  st.bind(2, e.dst_id);
+  st.bind(3, e.kind);
+  st.bind(4, e.count);
+  bind_opt(st, 5, e.base_access);
+  bind_opt(st, 6, e.is_virtual);
+  bind_opt(st, 7, e.vtable_slot);
+  if (!st.step()) {
+    throw StorageError("ensure_edge: upsert returned no id");
   }
   const int64_t eid = st.col_int64(0);
   st.step_done();

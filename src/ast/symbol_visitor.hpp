@@ -11,7 +11,12 @@
 //    cursor);
 //  - inside function/method bodies only named-type locals are emitted
 //    (typedef/alias/enum/enum-constant/record/field/method/ctor/dtor) — local
-//    VARIABLES and local function declarations are not symbols.
+//    VARIABLES and local function declarations are not symbols;
+//  - class-template PARTIAL specializations are first-class symbols (they are
+//    lexical decls, retained while the templated pattern stays suppressed);
+//  - explicit function/method INSTANTIATIONS never appear as lexical decls,
+//    so the Function/ClassTemplateDecl callbacks emit them from the
+//    specialization lists, anchored at their point of instantiation.
 //
 // Edge/body extraction lives in separate visitors (later phases) — this file
 // holds the symbol visitor only.
@@ -23,6 +28,9 @@
 
 namespace clang {
 class ASTContext;
+class ClassTemplateDecl;
+class FunctionDecl;
+class FunctionTemplateDecl;
 class SourceManager;
 class NamedDecl;
 } // namespace clang
@@ -40,9 +48,12 @@ public:
                 std::string target_file = std::string());
 
   bool VisitNamedDecl(clang::NamedDecl *decl);
+  bool VisitFunctionTemplateDecl(clang::FunctionTemplateDecl *decl);
+  bool VisitClassTemplateDecl(clang::ClassTemplateDecl *decl);
 
 private:
   bool should_emit(const clang::NamedDecl *decl) const;
+  void emit_explicit_instantiation(const clang::FunctionDecl *fd);
 
   clang::ASTContext &context_;
   clang::SourceManager &source_manager_;
