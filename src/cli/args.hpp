@@ -1,17 +1,12 @@
-// argv grammar (design D6) — hand-rolled parser reproducing the Python
-// argparse tree of cli.py:452-557: exact flags, defaults (limits 25/50,
-// --kind repo), choices, the `ls` alias, mutually-exclusive
-// --indexed/--pending, and argparse's exit-2 usage policy (G29). Usage,
-// help, and error text are transcribed verbatim from the Python tool
-// (python3 -m indexer ... captured with COLUMNS=80, Python 3.14 argparse).
+// argv grammar, parsed with the vendored CLI11 library (see args.cpp).
+// The command tree, flags, defaults (limits 25/50, --kind repo), choices,
+// the `ls` aliases, and the mutually-exclusive/required option groups match
+// the historical grammar; help, usage, and error text are CLI11's native
+// formatting (the byte-for-byte Python argparse transcription is retired).
 //
-// Documented delta (D6): NO prefix-abbreviation — `--lim` is NOT accepted
-// for `--limit`; it is reported as an unrecognized argument. Golden tests
-// never use abbreviations.
-//
-// Misuse throws UsageError whose what() is the full argparse-formatted
-// message (usage block + "<prog>: error: <msg>\n") and whose exit code is 2;
-// main() is the only catch-site (D23).
+// Misuse throws UsageError whose what() is
+// "<Usage line>\n<prog>: error: <detail>\n" with exit code 2; main() is the
+// only catch-site (D23). -h/--help fills help_text; --version sets version.
 #pragma once
 
 #include <cstdint>
