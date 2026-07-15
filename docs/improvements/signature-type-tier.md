@@ -85,6 +85,14 @@ typedef/alias decls). Function templates are skipped, matching
   encoded in function USRs) — the old symbol row and its parameter rows
   linger exactly like every other stale-USR symbol; that is the pre-existing
   symbol lifecycle, not a tier property.
+- **Deterministic spelling (round 2)**: the conflict update is narrowed to
+  `canonical_id` only. Every other column is derived from the key —
+  structurally (kind/flags/decl_usr) or by first-writer-wins (`spelling`,
+  which a key deliberately collapses across canonically equivalent written
+  forms: `Box<Foo>` vs `Box<Alias>` share one node). A partial reindex can
+  therefore never rewrite a shared node's display form; the first writer is
+  always the canonical instance (emit_node interns the canonical target
+  before the node itself), so the stored spelling is the canonical print.
 - **Function type shape**: `FunctionProtoType` keys now encode variadicness
   (`,...`), method cv-quals, ref-qualifier, and throwability
   (`canThrow()` — spelling-insensitive), so `void(int)`, `void(int, ...)`

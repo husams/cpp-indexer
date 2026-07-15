@@ -2972,22 +2972,21 @@ void Storage::add_template_arg(const TemplateArg &a) {
 // -- v30 signature/type tier ---------------------------------------------------
 
 int64_t Storage::intern_type_node(const TypeNode &n) {
-  // Interned dictionary row keyed by type_key. The key encodes the structural
-  // shape, so for most nodes a re-intern carries identical content -- but an
-  // ALIAS node is keyed by its declaration USR while its target is a mutable
-  // attribute (`using Alias = Foo;` can become `= Bar;`). The upsert is
-  // therefore authoritative: a re-intern refreshes canonical_id (and the
-  // display columns) in place so a retargeted alias never keeps pointing at
-  // its old canonical shape.
+  // Interned dictionary row keyed by type_key. Every attribute EXCEPT
+  // canonical_id is derived from the key (kind, qualifier flags and decl_usr
+  // are structural; spelling keeps the FIRST writer's form, since a key
+  // deliberately collapses canonically equivalent written forms -- Box<Foo>
+  // vs Box<Alias> -- and refreshing it would let an unrelated partial
+  // reindex rewrite existing signature output). canonical_id alone is
+  // authoritative on conflict: an ALIAS node is keyed by its declaration USR
+  // while its target is mutable (`using Alias = Foo;` can become `= Bar;`),
+  // so a re-intern must retarget it in place.
   {
     auto ins = db_.prepare(
         "INSERT INTO type_node "
         "(type_key, spelling, kind, is_const, is_volatile, is_restrict, "
         " decl_usr, canonical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(type_key) DO UPDATE SET "
-        "spelling = excluded.spelling, kind = excluded.kind, "
-        "is_const = excluded.is_const, is_volatile = excluded.is_volatile, "
-        "is_restrict = excluded.is_restrict, decl_usr = excluded.decl_usr, "
         "canonical_id = excluded.canonical_id");
     ins.bind(1, std::string_view(n.type_key));
     ins.bind(2, std::string_view(n.spelling));

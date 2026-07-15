@@ -319,9 +319,11 @@ public:
 
   // -- v30 signature/type tier ------------------------------------------------
   // Upsert a normalized type-shape row keyed by type_key; returns the stable
-  // type_node.id. A conflict REFRESHES the row's attributes in place: alias
-  // nodes are keyed by declaration USR while their target (canonical_id) is
-  // mutable across reindexes (`using Alias = Foo;` -> `= Bar;`).
+  // type_node.id. A conflict refreshes ONLY canonical_id (alias nodes are
+  // keyed by declaration USR while their target is mutable across reindexes:
+  // `using Alias = Foo;` -> `= Bar;`); spelling and the structural columns
+  // keep the first writer's values so a partial reindex can never rewrite a
+  // shared node's display form.
   int64_t intern_type_node(const TypeNode &n);
   std::optional<TypeNode> type_node_by_id(int64_t type_id);
   // INSERT OR REPLACE keyed on (src_id, kind, position) -- a retargeted

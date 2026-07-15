@@ -1059,8 +1059,7 @@ TEST_SUITE("clang") {
                     "JOIN type_node src ON src.id = te.src_id "
                     "JOIN type_node dst ON dst.id = te.dst_id "
                     "WHERE te.kind IN (3, 6)") ==
-          std::vector<std::string>{"Box<FooAlias>/6/0/Foo",
-                                   "FooAlias/3/0/Foo"});
+          std::vector<std::string>{"Box<Foo>/6/0/Foo", "FooAlias/3/0/Foo"});
     // Closure: parameters reaching Foo cover both the direct alias param and
     // the template-argument route (take's b and a).
     Storage store(tu.db_path());
@@ -1158,6 +1157,57 @@ TEST_SUITE("clang") {
     CHECK(alias_state() == std::vector<std::string>{"Bar/Bar"});
     CHECK(reaching_owners("c:@S@Foo") == 0);
     CHECK(reaching_owners("c:@S@Bar") == 3);
+  }
+
+  TEST_CASE("signature tier: spelling stable across partial reindexes") {
+    // PR #18 review round 2: Box<Foo> and Box<Alias> deliberately collapse
+    // to ONE node (same specialization USR). Its display spelling must not
+    // flap with whichever TU was reindexed last -- the first writer's form
+    // (the canonical print) is kept, and only canonical_id refreshes on
+    // conflict.
+    const std::string cache = make_temp_dir();
+    const std::string proj = cache + "/proj";
+    ::mkdir(proj.c_str(), 0755);
+    write_file(proj + "/types.hpp",
+               "#pragma once\nstruct Foo {};\nusing Alias = Foo;\n"
+               "template <class T> struct Box { T item; };\n");
+    const char *kPlain = "#include \"types.hpp\"\nBox<Foo> plain;\n";
+    const char *kAliased = "#include \"types.hpp\"\nBox<Alias> aliased;\n";
+    write_file(proj + "/plain.cpp", kPlain);
+    write_file(proj + "/aliased.cpp", kAliased);
+    write_file(proj + "/compile_commands.json",
+               "[{\"directory\": \"" + proj +
+                   "\", \"command\": \"cc -I. -c plain.cpp -o plain.o\", "
+                   "\"file\": \"plain.cpp\"},\n"
+                   " {\"directory\": \"" + proj +
+                   "\", \"command\": \"cc -I. -c aliased.cpp -o aliased.o\", "
+                   "\"file\": \"aliased.cpp\"}]\n");
+    cidx::Logger log;
+    log.set_file(cache + "/cidx.log");
+    REQUIRE(run_cidx({"import", "--db", proj, "--name", "fixture"}, cache,
+                     log) == 0);
+    REQUIRE(run_cidx({"index"}, cache, log) == 0);
+    const std::string db = cache + "/index.db";
+    const auto var_types = [&] {
+      return query_col(db,
+                       "SELECT s.spelling || '/' || tn.spelling "
+                       "FROM symbol_type st "
+                       "JOIN symbol s ON s.id = st.symbol_id "
+                       "JOIN type_node tn ON tn.id = st.type_id "
+                       "WHERE st.kind = 2 AND s.spelling IN "
+                       "('plain', 'aliased')");
+    };
+    const std::vector<std::string> stable{"aliased/Box<Foo>",
+                                          "plain/Box<Foo>"};
+    CHECK(var_types() == stable);
+    // Reindex ONLY aliased.cpp: the shared node must keep its spelling.
+    write_file(proj + "/aliased.cpp", std::string(kAliased) + "// touch\n");
+    REQUIRE(run_cidx({"index"}, cache, log) == 0);
+    CHECK(var_types() == stable);
+    // Reindex ONLY plain.cpp: still unchanged.
+    write_file(proj + "/plain.cpp", std::string(kPlain) + "// touch\n");
+    REQUIRE(run_cidx({"index"}, cache, log) == 0);
+    CHECK(var_types() == stable);
   }
 
   TEST_CASE("signature tier: function type shapes stay distinct (PR #18)") {
