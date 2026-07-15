@@ -106,6 +106,8 @@ add_library(cidx_core STATIC
   src/cli/analyze.cpp
   src/graph/query.cpp
   src/graph/emit.cpp
+  src/query/plan.cpp
+  src/query/exec.cpp
   third_party/md5/md5.c
   third_party/sha1/sha1.c
 )

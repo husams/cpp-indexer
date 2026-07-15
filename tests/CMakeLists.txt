@@ -12,6 +12,7 @@ set(CIDX_DEFAULT_TESTS
   graph_storage_test
   graph_query_test
   graph_parity_boundary_test
+  query_plan_test
   fuzzy_match_test
   repo_test
   include_aliasing_test
@@ -24,6 +25,12 @@ foreach(test_name IN LISTS CIDX_DEFAULT_TESTS)
   add_test(NAME ${test_name} COMMAND ${test_name})
   set_tests_properties(${test_name} PROPERTIES LABELS "default")
 endforeach()
+
+# query_plan_test pins canonical CXQ plan JSON against the cross-language
+# golden shared with python/tests/test_queryplan.py (regenerate with
+# CIDX_UPDATE_GOLDEN=1 -- keep both suites in sync).
+target_compile_definitions(query_plan_test PRIVATE
+  CIDX_CXQ_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/golden/cxq_plans.txt")
 
 # S02: the migration suite opens committed Python-generated fixture DBs
 # (copied to a temp dir first — the fixtures themselves stay read-only).
