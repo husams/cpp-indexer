@@ -1928,13 +1928,17 @@ graph_select_one(graph::GraphQuery &g,
 
 // Open graph + enforce edges. Returns (nullptr, 1) on failure.
 // `storage_out` receives the opened Storage (must outlive GraphQuery).
+// `require_edges = false` skips the empty-edge-table rejection: the v30
+// signature/type queries read parameter/type/symbol_type facts that a valid
+// declaration-only index can carry with ZERO symbol edges.
 struct GraphHandle {
   std::unique_ptr<Storage> storage;
   std::unique_ptr<graph::GraphQuery> g;
 };
 
 std::optional<GraphHandle>
-open_graph(const ParsedArgs & /*args*/, Context &ctx) {
+open_graph(const ParsedArgs & /*args*/, Context &ctx,
+           bool require_edges = true) {
   GraphHandle h;
 
   // Check file exists BEFORE opening Storage (Storage constructor uses
@@ -1955,7 +1959,7 @@ open_graph(const ParsedArgs & /*args*/, Context &ctx) {
 
   h.storage = std::make_unique<Storage>(ctx.index_path);
   h.g = std::make_unique<graph::GraphQuery>(*h.storage, ctx.index_path);
-  if (h.g->edge_count() == 0) {
+  if (require_edges && h.g->edge_count() == 0) {
     const std::string repr = format::py_repr(ctx.index_path);
     *ctx.err << "error: index " << repr
              << " has no graph edges -- it was built with "
@@ -2248,6 +2252,111 @@ int cmd_graph_definitions(const ParsedArgs &args, Context &ctx) {
                << "\n";
     }
   }
+  return 0;
+}
+
+// v30: signature/type facts of one symbol (returns/params for callables,
+// of_type for variables/fields, underlying for typedef/alias symbols).
+int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
+  auto h = open_graph(args, ctx, /*require_edges=*/false);
+  if (!h) return 1;
+  auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
+                                    args.kind, args.first, *ctx.err);
+  if (!sym) return rc;
+  const graph::GraphQuery::SignatureInfo sig = h->g->signature(sym->id);
+  if (args.graph_json) {
+    using namespace json_out;
+    const auto type_dict =
+        [](const std::optional<graph::GraphQuery::TypeInfo> &t) {
+          if (!t) return Value::null();
+          Object o;
+          o.push_back({"id", Value::of(t->id)});
+          o.push_back({"spelling", Value::of(t->spelling)});
+          o.push_back({"kind", Value::of(t->kind)});
+          o.push_back({"canonical",
+                       t->canonical ? Value::of(*t->canonical) : Value::null()});
+          return Value::obj(std::move(o));
+        };
+    Object o;
+    o.push_back({"symbol", sym->to_dict()});
+    o.push_back({"returns", type_dict(sig.returns)});
+    Array parr;
+    for (const auto &p : sig.params) {
+      Object po;
+      po.push_back({"position", Value::of(p.position)});
+      po.push_back({"name", p.name ? Value::of(*p.name) : Value::null()});
+      po.push_back({"type", type_dict(p.type)});
+      parr.push_back(Value::obj(std::move(po)));
+    }
+    o.push_back({"params", Value::arr(std::move(parr))});
+    o.push_back({"of_type", type_dict(sig.of_type)});
+    o.push_back({"underlying_type", type_dict(sig.underlying)});
+    *ctx.out << dumps_indent2(Value::obj(std::move(o))) << "\n";
+    return 0;
+  }
+  *ctx.out << "signature of " << sym->name << " (@" << sym->loc() << "):\n";
+  const auto type_str = [](const graph::GraphQuery::TypeInfo &t) {
+    std::string s = t.spelling;
+    if (t.canonical) s += "  [canonical " + *t.canonical + "]";
+    return s;
+  };
+  if (sig.empty()) {
+    *ctx.out << "  (no signature/type facts)\n";
+    return 0;
+  }
+  if (sig.returns)
+    *ctx.out << "  returns: " << type_str(*sig.returns) << "\n";
+  for (const auto &p : sig.params)
+    *ctx.out << "  param " << p.position << ": "
+             << (p.name ? *p.name : "_") << ": "
+             << (p.type ? type_str(*p.type) : "<unknown>") << "\n";
+  if (sig.of_type)
+    *ctx.out << "  type: " << type_str(*sig.of_type) << "\n";
+  if (sig.underlying)
+    *ctx.out << "  underlying: " << type_str(*sig.underlying) << "\n";
+  return 0;
+}
+
+// v30: callables accepting/returning the type + variables/fields/aliases of
+// it, through pointer/reference/array/alias/template-argument layers.
+int cmd_graph_typeusers(const ParsedArgs &args, Context &ctx) {
+  auto h = open_graph(args, ctx, /*require_edges=*/false);
+  if (!h) return 1;
+  auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
+                                    args.kind, args.first, *ctx.err);
+  if (!sym) return rc;
+  const auto users = h->g->type_users(sym->usr, args.graph_limit);
+  if (args.graph_json) {
+    using namespace json_out;
+    Array uarr;
+    for (const auto &u : users) {
+      Value v = u.sym.to_dict();
+      v.o.push_back({"role", Value::of(u.role)});
+      v.o.push_back({"position",
+                     u.position ? Value::of(*u.position) : Value::null()});
+      uarr.push_back(std::move(v));
+    }
+    Object o;
+    o.push_back({"symbol", sym->to_dict()});
+    o.push_back({"users", Value::arr(std::move(uarr))});
+    *ctx.out << dumps_indent2(Value::obj(std::move(o))) << "\n";
+    return 0;
+  }
+  *ctx.out << "users of type " << sym->name << " (@" << sym->loc() << "):\n";
+  std::size_t width = 0;
+  for (const auto &u : users) {
+    const std::string &nm = u.sym.name.empty() ? u.sym.usr : u.sym.name;
+    if (nm.size() > width) width = nm.size();
+  }
+  for (const auto &u : users) {
+    const std::string &nm = u.sym.name.empty() ? u.sym.usr : u.sym.name;
+    std::string role = u.role;
+    if (u.position) role += " " + std::to_string(*u.position);
+    *ctx.out << "  " << fmt::ljust(u.sym.kind, 14) << " "
+             << fmt::ljust(nm, static_cast<int>(width)) << "  " << role
+             << "  @" << u.sym.loc() << "\n";
+  }
+  *ctx.out << users.size() << " result(s)\n";
   return 0;
 }
 
@@ -2653,6 +2762,8 @@ int run_command(const ParsedArgs &args, Context &ctx) {
     if (args.what == "dispatch")  return cmd_graph_dispatch(args, ctx);
     if (args.what == "redefined")   return cmd_graph_redefined(args, ctx);
     if (args.what == "definitions") return cmd_graph_definitions(args, ctx);
+    if (args.what == "signature")   return cmd_graph_signature(args, ctx);
+    if (args.what == "typeusers")   return cmd_graph_typeusers(args, ctx);
   }
   if (args.command == "component") {
     if (args.what == "show") return cmd_component_show(args, ctx);

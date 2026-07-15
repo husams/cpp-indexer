@@ -50,6 +50,32 @@ struct TemplateArgRecord {
   std::optional<std::string> literal;
 };
 
+// -- v30 signature/type tier records -------------------------------------------
+
+// intern_type_node() payload: one normalized type shape (mirrors
+// cidx::TypeNode minus the id). Identity is type_key; kind/edge-kind codes are
+// the kTypeKind*/kTypeEdge*/kSymbolType* constants (storage/records.hpp).
+struct TypeNodeRecord {
+  std::string type_key;
+  std::string spelling;
+  int64_t kind = 0;
+  bool is_const = false;
+  bool is_volatile = false;
+  bool is_restrict = false;
+  std::optional<std::string> decl_usr;
+  std::optional<int64_t> canonical_id;
+};
+
+// One parameter of a callable (replace_parameters payload).
+struct ParameterRecord {
+  int64_t position = 0;
+  std::optional<std::string> name;
+  std::optional<int64_t> type_id;
+  std::optional<int64_t> file_id;
+  std::optional<int64_t> line;
+  std::optional<int64_t> col;
+};
+
 // Candidate row for template-arg reference resolution (subset of Symbol).
 struct TypeArgCandidate {
   int64_t id = 0;

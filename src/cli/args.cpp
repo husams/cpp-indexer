@@ -614,6 +614,18 @@ void build_graph(CLI::App &app, ParsedArgs &pa) {
   definitions->add_flag("--direct-only", pa.direct_only,
                         "list the backend bodies only (omit the "
                         "possible-call fan-out, which is shown by default)");
+
+  CLI::App *signature = leaf(
+      "signature",
+      "signature/type facts of a symbol (return + parameter types, "
+      "variable/field type, alias target)");
+  add_graph_selector(signature, pa);
+
+  CLI::App *typeusers = leaf(
+      "typeusers",
+      "callables accepting/returning the type + variables/fields/aliases "
+      "of it (through pointer/reference/array/alias layers)");
+  add_graph_selector(typeusers, pa);
 }
 
 } // namespace

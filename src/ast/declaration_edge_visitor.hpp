@@ -29,6 +29,7 @@
 #include "ast/instance_minter.hpp"
 #include "ast/mint_builder.hpp"
 #include "ast/template_argument_encoder.hpp"
+#include "ast/type_graph.hpp"
 
 #include "clang/AST/RecursiveASTVisitor.h"
 
@@ -108,6 +109,9 @@ private:
   bool owns_instantiation(const clang::FunctionDecl *fd) const;
   void emit_callable_identity(const clang::FunctionDecl *fd);
   void emit_signature_uses(const clang::FunctionDecl *fn);
+  // v30 signature/type tier: parameter rows + returns relation for a callable
+  // (called alongside emit_signature_uses with the same keyed symbol).
+  void emit_signature_types(const clang::FunctionDecl *fn, int64_t fn_sym);
 
   clang::ASTContext &context_;
   clang::SourceManager &source_manager_;
@@ -115,6 +119,7 @@ private:
   MintBuilder mint_;
   TemplateArgumentEncoder targ_encoder_;
   InstanceMinter minter_;
+  TypeInterner types_;
   std::string target_file_;
   int64_t file_id_;
 };

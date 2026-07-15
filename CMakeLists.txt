@@ -167,6 +167,7 @@ add_library(cidx_ast OBJECT
   src/ast/storage_symbol_sink.cpp src/ast/mint_builder.cpp
   src/ast/template_argument_encoder.cpp src/ast/storage_edge_sink.cpp
   src/ast/declaration_edge_visitor.cpp src/ast/type_use.cpp
+  src/ast/type_graph.cpp
   src/ast/value_provenance.cpp src/ast/instance_minter.cpp
   src/ast/edge_emission_context.cpp src/ast/call_edge_emitter.cpp
   src/ast/statement_edge_visitor.cpp src/ast/function_definition_visitor.cpp

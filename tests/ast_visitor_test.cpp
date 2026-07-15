@@ -1005,6 +1005,274 @@ TEST_SUITE("clang") {
           std::vector<std::string>{"specializes/1"});
   }
 
+  // ---- v30 signature/type tier ---------------------------------------------
+
+  TEST_CASE("signature tier: params, returns, of_type, underlying") {
+    IndexedTu tu(R"cpp(
+      struct Foo { int x; };
+      using FooAlias = Foo;
+      typedef Foo *FooPtr;
+      Foo make_foo(int seed, const Foo &proto) { return proto; }
+      int consume(const Foo *items, int) { return items->x; }
+      double weights[4];
+    )cpp");
+    // Parameter rows: (owner spelling, position, name-or-'', type spelling).
+    CHECK(query_col(tu.db_path(),
+                    "SELECT s.spelling || '/' || p.position || '/' || "
+                    "COALESCE(p.name,'') || '/' || tn.spelling "
+                    "FROM parameter p JOIN symbol s ON s.id = p.owner_id "
+                    "LEFT JOIN type_node tn ON tn.id = p.type_id") ==
+          std::vector<std::string>{
+              "consume/0/items/const Foo *", "consume/1//int",
+              "make_foo/0/seed/int", "make_foo/1/proto/const Foo &"});
+    // symbol_type rows: returns(1) / of_type(2) / underlying_type(3).
+    CHECK(query_col(tu.db_path(),
+                    "SELECT s.spelling || '/' || st.kind || '/' || tn.spelling "
+                    "FROM symbol_type st JOIN symbol s ON s.id = st.symbol_id "
+                    "JOIN type_node tn ON tn.id = st.type_id") ==
+          std::vector<std::string>{
+              "FooAlias/3/Foo", "FooPtr/3/Foo *", "consume/1/int",
+              "make_foo/1/Foo", "weights/2/double[4]", "x/2/int"});
+  }
+
+  TEST_CASE("signature tier: type shapes, alias canonical, template args") {
+    IndexedTu tu(R"cpp(
+      struct Foo {};
+      using FooAlias = Foo;
+      template <class T> struct Box { T item; };
+      void take(Box<FooAlias> b, FooAlias a);
+      void made() { Box<FooAlias> b; take(b, Foo{}); }
+    )cpp");
+    // The alias node links to its canonical record node.
+    CHECK(query_col(tu.db_path(),
+                    "SELECT tn.spelling || '->' || c.spelling FROM type_node tn "
+                    "JOIN type_node c ON c.id = tn.canonical_id "
+                    "WHERE tn.type_key = 'a:c:@FooAlias'") ==
+          std::vector<std::string>{"FooAlias->Foo"});
+    // alias_of(3) edge: FooAlias -> Foo; template_argument_type(6) edge: the
+    // Box specialization's arg 0 reaches Foo (a spec decl's stored args are
+    // CANONICAL, so the arg edge lands on the record, not the alias).
+    CHECK(query_col(tu.db_path(),
+                    "SELECT src.spelling || '/' || te.kind || '/' || "
+                    "te.position || '/' || dst.spelling "
+                    "FROM type_edge te "
+                    "JOIN type_node src ON src.id = te.src_id "
+                    "JOIN type_node dst ON dst.id = te.dst_id "
+                    "WHERE te.kind IN (3, 6)") ==
+          std::vector<std::string>{"Box<Foo>/6/0/Foo", "FooAlias/3/0/Foo"});
+    // Closure: parameters reaching Foo cover both the direct alias param and
+    // the template-argument route (take's b and a).
+    Storage store(tu.db_path());
+    const auto tids = store.type_ids_reaching("c:@S@Foo");
+    CHECK(!tids.empty());
+    const auto owners = store.param_owners_of_types(tids);
+    REQUIRE(owners.size() == 2);
+    CHECK(owners[0].second == 0); // Box<FooAlias> b
+    CHECK(owners[1].second == 1); // FooAlias a
+    CHECK(owners[0].first == owners[1].first); // both on take()
+  }
+
+  TEST_CASE("signature tier: no facts for template patterns") {
+    // Walk policy parity with signature uses: function templates are skipped
+    // (the retired reference's accessors were undefined on templates), and
+    // parameterless use() records nothing -- the table stays empty.
+    IndexedTu tu(R"cpp(
+      template <class T> T ident(T v) { return v; }
+      int use() { return ident(2); }
+    )cpp");
+    CHECK(query_col(tu.db_path(),
+                    "SELECT s.spelling FROM parameter p "
+                    "JOIN symbol s ON s.id = p.owner_id")
+              .empty());
+    // use() still records its return type; ident (the template) records none.
+    CHECK(query_col(tu.db_path(),
+                    "SELECT s.spelling FROM symbol_type st "
+                    "JOIN symbol s ON s.id = st.symbol_id WHERE st.kind = 1") ==
+          std::vector<std::string>{"use"});
+  }
+
+  TEST_CASE("signature tier: reindex refreshes arity wholesale") {
+    IndexedProject prj("#pragma once\n",
+                       "#include \"templates.hpp\"\n"
+                       "void f(int a, int b, int c) {}\n");
+    CHECK(query_col(prj.db_path(),
+                    "SELECT p.position || ':' || COALESCE(p.name,'') "
+                    "FROM parameter p JOIN symbol s ON s.id = p.owner_id "
+                    "WHERE s.spelling = 'f'") ==
+          std::vector<std::string>{"0:a", "1:b", "2:c"});
+    // Same USR would keep stale high positions under a positional upsert;
+    // replace_parameters must drop them. (int,int,int) -> (int) keeps the USR
+    // only for extern "C"-style names, so use a new spelling-compatible
+    // signature via default args instead: drop to a single parameter.
+    prj.reindex_with_source("#include \"templates.hpp\"\n"
+                            "void f(int a, int b, int c) {}\n"
+                            "void g(int only) {}\n");
+    prj.reindex_with_source("#include \"templates.hpp\"\n"
+                            "void g(int renamed) {}\n");
+    CHECK(query_col(prj.db_path(),
+                    "SELECT p.position || ':' || COALESCE(p.name,'') "
+                    "FROM parameter p JOIN symbol s ON s.id = p.owner_id "
+                    "WHERE s.spelling = 'g'") ==
+          std::vector<std::string>{"0:renamed"});
+  }
+
+  TEST_CASE("signature tier: alias retarget follows reindex (PR #18 review)") {
+    // `using Alias = Foo;` -> `= Bar;`: the alias node is keyed by its
+    // declaration USR, so the re-intern must authoritatively refresh
+    // canonical_id and replace the alias_of edge -- first-writer-wins left
+    // both pointing at Foo forever. Owners are asserted through USR-stable
+    // relations (returns / of_type / the alias's own underlying_type): a
+    // callable with the alias in its PARAMETER list legitimately changes USR
+    // on retarget (the canonical type is encoded in function USRs), which is
+    // the pre-existing symbol lifecycle, not part of this contract.
+    const char *kSrc1 = "#include \"templates.hpp\"\n"
+                        "Alias make_alias() { return {}; }\n"
+                        "Alias stored;\n";
+    IndexedProject prj(
+        "#pragma once\nstruct Foo {};\nstruct Bar {};\nusing Alias = Foo;\n",
+        kSrc1);
+    const auto alias_state = [&] {
+      return query_col(prj.db_path(),
+                       "SELECT c.spelling || '/' || dst.spelling "
+                       "FROM type_node tn "
+                       "JOIN type_node c ON c.id = tn.canonical_id "
+                       "JOIN type_edge te ON te.src_id = tn.id AND te.kind = 3 "
+                       "JOIN type_node dst ON dst.id = te.dst_id "
+                       "WHERE tn.kind = 4");
+    };
+    // symbol_type owners (returns/of_type/underlying_type) whose type reaches
+    // the record named by `usr`.
+    const auto reaching_owners = [&](const char *usr) {
+      Storage store(prj.db_path());
+      return store
+          .symbol_type_owners_of_types(store.type_ids_reaching(usr))
+          .size();
+    };
+    CHECK(alias_state() == std::vector<std::string>{"Foo/Foo"});
+    CHECK(reaching_owners("c:@S@Foo") == 3); // underlying + returns + of_type
+    CHECK(reaching_owners("c:@S@Bar") == 0);
+    prj.reindex_with(
+        "#pragma once\nstruct Foo {};\nstruct Bar {};\nusing Alias = Bar;\n",
+        std::string(kSrc1) + "// retargeted\n");
+    CHECK(alias_state() == std::vector<std::string>{"Bar/Bar"});
+    CHECK(reaching_owners("c:@S@Foo") == 0);
+    CHECK(reaching_owners("c:@S@Bar") == 3);
+  }
+
+  TEST_CASE("signature tier: spelling stable across partial reindexes") {
+    // PR #18 review round 2: Box<Foo> and Box<Alias> deliberately collapse
+    // to ONE node (same specialization USR). Its display spelling must not
+    // flap with whichever TU was reindexed last -- the first writer's form
+    // (the canonical print) is kept, and only canonical_id refreshes on
+    // conflict.
+    const std::string cache = make_temp_dir();
+    const std::string proj = cache + "/proj";
+    ::mkdir(proj.c_str(), 0755);
+    write_file(proj + "/types.hpp",
+               "#pragma once\nstruct Foo {};\nusing Alias = Foo;\n"
+               "template <class T> struct Box { T item; };\n");
+    const char *kPlain = "#include \"types.hpp\"\nBox<Foo> plain;\n";
+    const char *kAliased = "#include \"types.hpp\"\nBox<Alias> aliased;\n";
+    write_file(proj + "/plain.cpp", kPlain);
+    write_file(proj + "/aliased.cpp", kAliased);
+    write_file(proj + "/compile_commands.json",
+               "[{\"directory\": \"" + proj +
+                   "\", \"command\": \"cc -I. -c plain.cpp -o plain.o\", "
+                   "\"file\": \"plain.cpp\"},\n"
+                   " {\"directory\": \"" + proj +
+                   "\", \"command\": \"cc -I. -c aliased.cpp -o aliased.o\", "
+                   "\"file\": \"aliased.cpp\"}]\n");
+    cidx::Logger log;
+    log.set_file(cache + "/cidx.log");
+    REQUIRE(run_cidx({"import", "--db", proj, "--name", "fixture"}, cache,
+                     log) == 0);
+    REQUIRE(run_cidx({"index"}, cache, log) == 0);
+    const std::string db = cache + "/index.db";
+    const auto var_types = [&] {
+      return query_col(db,
+                       "SELECT s.spelling || '/' || tn.spelling "
+                       "FROM symbol_type st "
+                       "JOIN symbol s ON s.id = st.symbol_id "
+                       "JOIN type_node tn ON tn.id = st.type_id "
+                       "WHERE st.kind = 2 AND s.spelling IN "
+                       "('plain', 'aliased')");
+    };
+    const std::vector<std::string> stable{"aliased/Box<Foo>",
+                                          "plain/Box<Foo>"};
+    CHECK(var_types() == stable);
+    // Reindex ONLY aliased.cpp: the shared node must keep its spelling.
+    write_file(proj + "/aliased.cpp", std::string(kAliased) + "// touch\n");
+    REQUIRE(run_cidx({"index"}, cache, log) == 0);
+    CHECK(var_types() == stable);
+    // Reindex ONLY plain.cpp: still unchanged.
+    write_file(proj + "/plain.cpp", std::string(kPlain) + "// touch\n");
+    REQUIRE(run_cidx({"index"}, cache, log) == 0);
+    CHECK(var_types() == stable);
+  }
+
+  TEST_CASE("signature tier: function type shapes stay distinct (PR #18)") {
+    // Variadicness and throwability are part of the shape: void(int),
+    // void(int, ...) and void(int) noexcept must each intern their own node;
+    // two spellings of the SAME shape (fixed / may_throw) share one.
+    IndexedTu tu(R"cpp(
+      void (*fixed)(int);
+      void (*variadic)(int, ...);
+      void (*may_throw)(int);
+      void (*no_throw)(int) noexcept;
+    )cpp");
+    CHECK(query_col(tu.db_path(),
+                    "SELECT s.spelling || '/' || fn.type_key "
+                    "FROM symbol_type st "
+                    "JOIN symbol s ON s.id = st.symbol_id "
+                    "JOIN type_edge te ON te.src_id = st.type_id "
+                    "  AND te.kind = 1 "
+                    "JOIN type_node fn ON fn.id = te.dst_id "
+                    "WHERE st.kind = 2") ==
+          std::vector<std::string>{
+              "fixed/f(b:void;b:int)", "may_throw/f(b:void;b:int)",
+              "no_throw/f(b:void;b:int)#n", "variadic/f(b:void;b:int,...)"});
+  }
+
+  TEST_CASE("signature tier: type queries work with zero symbol edges") {
+    // A valid declaration-only TU carries type facts but no symbol edges;
+    // `graph signature`/`typeusers` must not be rejected by the empty-edge
+    // guard (PR #18 review), while edge queries still are.
+    IndexedTu tu(R"cpp(
+      typedef int MyInt;
+      void (*handler)(int);
+    )cpp");
+    CHECK(query_col(tu.db_path(), "SELECT COUNT(*) FROM edge") ==
+          std::vector<std::string>{"0"});
+    CHECK(query_col(tu.db_path(),
+                    "SELECT COUNT(*) FROM symbol_type").front() != "0");
+    CHECK(run_cidx({"graph", "signature", "--name", "MyInt"}, tu.cache,
+                   tu.log) == 0);
+    CHECK(run_cidx({"graph", "typeusers", "--name", "MyInt"}, tu.cache,
+                   tu.log) == 0);
+    CHECK(run_cidx({"graph", "callers", "--name", "MyInt"}, tu.cache,
+                   tu.log) == 1); // edge queries keep the guard
+  }
+
+  TEST_CASE("signature tier: ctors get params but no return") {
+    IndexedTu tu(R"cpp(
+      struct Gadget {
+        Gadget(int size) {}
+        ~Gadget() {}
+      };
+    )cpp");
+    CHECK(query_col(tu.db_path(),
+                    "SELECT sk.name || '/' || p.position || ':' || "
+                    "COALESCE(p.name,'') FROM parameter p "
+                    "JOIN symbol s ON s.id = p.owner_id "
+                    "JOIN symbol_kind sk ON sk.id = s.kind") ==
+          std::vector<std::string>{"constructor/0:size"});
+    // No returns(1) rows at all: the ctor/dtor record none.
+    CHECK(query_col(tu.db_path(),
+                    "SELECT s.spelling FROM symbol_type st "
+                    "JOIN symbol s ON s.id = st.symbol_id WHERE st.kind = 1")
+              .empty());
+  }
+
 } // TEST_SUITE("clang")
 
 int main(int argc, char **argv) {

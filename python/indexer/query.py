@@ -500,6 +500,78 @@ class Definition:
         }
 
 
+#: type_node.kind id -> display name (same seed values as the `type_kind`
+#: table / src/graph/query.cpp type_kind_names).
+TYPE_KIND_NAMES = {
+    1: "builtin", 2: "record", 3: "enum", 4: "alias",
+    5: "pointer", 6: "lvalue-reference", 7: "rvalue-reference",
+    8: "array", 9: "function", 10: "template-param", 11: "other",
+}
+
+
+@dataclass(frozen=True)
+class TypeInfo:
+    """Display info for one `type_node` row (v30 signature/type tier).
+
+    `canonical` is the canonical shape's spelling when this node is sugared
+    (an alias layer anywhere inside), else None."""
+
+    id: int
+    spelling: str
+    kind: str
+    canonical: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "spelling": self.spelling,
+            "kind": self.kind,
+            "canonical": self.canonical,
+        }
+
+
+@dataclass(frozen=True)
+class ParamInfo:
+    """One parameter of a callable (a `parameter` row)."""
+
+    position: int
+    name: Optional[str]
+    type: Optional[TypeInfo]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "position": self.position,
+            "name": self.name,
+            "type": self.type.to_dict() if self.type else None,
+        }
+
+
+@dataclass(frozen=True)
+class SignatureInfo:
+    """Everything the v30 tier knows about one symbol: returns/params for
+    callables, of_type for variables/fields, underlying for typedef/alias."""
+
+    returns: Optional[TypeInfo] = None
+    params: tuple[ParamInfo, ...] = ()
+    of_type: Optional[TypeInfo] = None
+    underlying: Optional[TypeInfo] = None
+
+    @property
+    def empty(self) -> bool:
+        return (self.returns is None and not self.params
+                and self.of_type is None and self.underlying is None)
+
+
+@dataclass(frozen=True)
+class TypeUser:
+    """One symbol whose signature/type facts reach a queried type: role is
+    'param' (with position), 'returns', 'of_type', or 'underlying_type'."""
+
+    sym: Sym
+    role: str
+    position: Optional[int] = None
+
+
 @dataclass(frozen=True)
 class Edge:
     """A typed relationship. `peer` is the symbol at the other end."""
@@ -2009,6 +2081,121 @@ class GraphQuery:
             "WHERE de.dst_id = ? ORDER BY d.symbol_id, d.file_id LIMIT ?",
             (sid, limit),
         )
+
+    # ===================================================================== #
+    # 3c. SIGNATURE/TYPE TIER (v30 -- read parity with src/graph/query.cpp)
+    # ===================================================================== #
+
+    def _type_info(self, type_id: int) -> Optional[TypeInfo]:
+        """Display info for one type_node id (kind resolved to its name;
+        canonical spelling attached when the node is sugared)."""
+        r = self._c.execute(
+            "SELECT id, spelling, kind, canonical_id FROM type_node "
+            "WHERE id = ?",
+            (type_id,),
+        ).fetchone()
+        if r is None:
+            return None
+        canonical = None
+        if r["canonical_id"] is not None:
+            c = self._c.execute(
+                "SELECT spelling FROM type_node WHERE id = ?",
+                (r["canonical_id"],),
+            ).fetchone()
+            if c is not None:
+                canonical = c["spelling"]
+        return TypeInfo(
+            id=r["id"],
+            spelling=r["spelling"],
+            kind=TYPE_KIND_NAMES.get(r["kind"], str(r["kind"])),
+            canonical=canonical,
+        )
+
+    def signature(self, sym) -> SignatureInfo:
+        """Signature/type facts of one symbol: returns/params for callables,
+        of_type for variables/fields, underlying for typedef/alias symbols."""
+        sid = self._resolve_id(sym)
+        kinds = {
+            r["kind"]: r["type_id"]
+            for r in self._c.execute(
+                "SELECT kind, type_id FROM symbol_type WHERE symbol_id = ?",
+                (sid,),
+            )
+        }
+        params = []
+        for r in self._c.execute(
+            "SELECT position, name, type_id FROM parameter "
+            "WHERE owner_id = ? ORDER BY position",
+            (sid,),
+        ):
+            params.append(
+                ParamInfo(
+                    position=r["position"],
+                    name=r["name"],
+                    type=self._type_info(r["type_id"])
+                    if r["type_id"] is not None
+                    else None,
+                )
+            )
+        def info(k: int) -> Optional[TypeInfo]:
+            return self._type_info(kinds[k]) if k in kinds else None
+
+        return SignatureInfo(
+            returns=info(1),
+            params=tuple(params),
+            of_type=info(2),
+            underlying=info(3),
+        )
+
+    def type_users(self, sym, limit: int = 500) -> list[TypeUser]:
+        """Symbols whose signature/type facts reach the type named by `sym`,
+        through pointer/reference/array/alias/template-argument layers.
+        Ordered parameter rows first then symbol_type rows (each by symbol
+        id) -- byte-identical to the C++ GraphQuery.type_users."""
+        target = self.get(sym) if not isinstance(sym, Sym) else sym
+        if target is None:
+            return []
+        tids = [
+            r["id"]
+            for r in self._c.execute(
+                "WITH RECURSIVE reach(id) AS ("
+                "  SELECT id FROM type_node WHERE decl_usr = ?"
+                "  UNION"
+                "  SELECT te.src_id FROM type_edge te "
+                "    JOIN reach r ON te.dst_id = r.id"
+                "  UNION"
+                "  SELECT tn.id FROM type_node tn "
+                "    JOIN reach r ON tn.canonical_id = r.id"
+                ") SELECT id FROM reach ORDER BY id",
+                (target.usr,),
+            )
+        ]
+        if not tids:
+            return []
+        marks = ", ".join("?" for _ in tids)
+        out: list[TypeUser] = []
+        for r in self._c.execute(
+            f"SELECT owner_id, position FROM parameter WHERE type_id IN ({marks}) "
+            "ORDER BY owner_id, position",
+            tids,
+        ).fetchall():
+            if len(out) >= limit:
+                return out
+            s = self.get(r["owner_id"])
+            if s is not None:
+                out.append(TypeUser(sym=s, role="param", position=r["position"]))
+        roles = {1: "returns", 2: "of_type", 3: "underlying_type"}
+        for r in self._c.execute(
+            f"SELECT symbol_id, kind FROM symbol_type WHERE type_id IN ({marks}) "
+            "ORDER BY symbol_id, kind",
+            tids,
+        ).fetchall():
+            if len(out) >= limit:
+                return out
+            s = self.get(r["symbol_id"])
+            if s is not None:
+                out.append(TypeUser(sym=s, role=roles.get(r["kind"], "?")))
+        return out
 
     # ===================================================================== #
     # 4. DYNAMIC DISPATCH

@@ -80,6 +80,9 @@ int cmd_graph_walk(const ParsedArgs &args, Context &ctx);
 int cmd_graph_path(const ParsedArgs &args, Context &ctx);
 int cmd_graph_hierarchy(const ParsedArgs &args, Context &ctx);
 int cmd_graph_dispatch(const ParsedArgs &args, Context &ctx);
+// v30 signature/type tier
+int cmd_graph_signature(const ParsedArgs &args, Context &ctx);
+int cmd_graph_typeusers(const ParsedArgs &args, Context &ctx);
 
 // Dispatch on args.command/args.what (args.help_text handled by the caller).
 int run_command(const ParsedArgs &args, Context &ctx);

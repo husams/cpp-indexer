@@ -402,7 +402,9 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
     }
   }
   // v14 adds label; v15 adds diagnostic; v17 adds entity_edge + entity_edge_kind;
-  // v23 adds repository + clone; v26 adds decl_site
+  // v23 adds repository + clone; v26 adds decl_site; v30 adds the signature/
+  // type tier (type_kind/type_node/type_edge_kind/type_edge/parameter/
+  // symbol_type_kind/symbol_type)
   CHECK(tables == std::set<std::string>{"meta", "component", "directory",
                                         "file", "symbol", "symbol_kind",
                                         "edge_kind", "edge", "edge_site",
@@ -410,7 +412,11 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                         "call_arg", "label", "diagnostic",
                                         "entity_edge_kind", "entity_edge",
                                         "entity_kind", "entity_node",
-                                        "repository", "clone", "decl_site", "definition", "def_edge", "possible_call"});
+                                        "repository", "clone", "decl_site", "definition", "def_edge", "possible_call",
+                                        "type_kind", "type_node",
+                                        "type_edge_kind", "type_edge",
+                                        "parameter", "symbol_type_kind",
+                                        "symbol_type"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {
@@ -463,7 +469,12 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_diagnostic_file",
                                          "idx_entity_edge_identity",
                                          "idx_entity_edge_src",
-                                         "idx_entity_edge_dst", "idx_decl_site_symbol", "idx_definition_symbol", "idx_def_edge_src", "idx_def_edge_dst", "idx_possible_call_src", "idx_possible_call_dst"});
+                                         "idx_entity_edge_dst", "idx_decl_site_symbol", "idx_definition_symbol", "idx_def_edge_src", "idx_def_edge_dst", "idx_possible_call_src", "idx_possible_call_dst",
+                                         "idx_type_node_decl_usr",
+                                         "idx_type_node_canonical",
+                                         "idx_type_edge_dst",
+                                         "idx_parameter_type",
+                                         "idx_symbol_type_type"});
 
   // meta row + pragma parity (D25: foreign_keys ON, default journal mode)
   {

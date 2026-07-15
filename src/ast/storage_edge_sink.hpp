@@ -24,6 +24,13 @@ public:
   void add_call_arg(const CallArgRecord &arg) override;
   void add_template_param(const TemplateParamRecord &param) override;
   void add_template_arg(const TemplateArgRecord &arg) override;
+  int64_t intern_type_node(const TypeNodeRecord &node) override;
+  void add_type_edge(int64_t src_id, int64_t kind, int64_t position,
+                     int64_t dst_id) override;
+  void replace_parameters(int64_t owner_id,
+                          const std::vector<ParameterRecord> &params) override;
+  void add_symbol_type(int64_t symbol_id, int64_t kind,
+                       int64_t type_id) override;
   void delete_edges_for_file(int64_t file_id) override;
   void delete_definitions_for_file(int64_t file_id) override;
   int64_t

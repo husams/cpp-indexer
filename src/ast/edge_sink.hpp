@@ -37,6 +37,17 @@ public:
   virtual void add_template_param(const TemplateParamRecord &param) = 0;
   virtual void add_template_arg(const TemplateArgRecord &arg) = 0;
 
+  // v30 signature/type tier: interned type shapes (returns the stable
+  // type_node.id), structural type_edge rows, wholesale per-owner parameter
+  // refresh, and symbol->type relations (returns/of_type/underlying_type).
+  virtual int64_t intern_type_node(const TypeNodeRecord &node) = 0;
+  virtual void add_type_edge(int64_t src_id, int64_t kind, int64_t position,
+                             int64_t dst_id) = 0;
+  virtual void replace_parameters(int64_t owner_id,
+                                  const std::vector<ParameterRecord> &params) = 0;
+  virtual void add_symbol_type(int64_t symbol_id, int64_t kind,
+                               int64_t type_id) = 0;
+
   // Pre-walk cleanup (index_edges/ast.cpp): drop this file's non-contains
   // edges (keyed by the SRC symbol's file_id) and its definition rows.
   virtual void delete_edges_for_file(int64_t file_id) = 0;
