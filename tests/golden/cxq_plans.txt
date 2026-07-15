@@ -1,0 +1,228 @@
+== boolean_normalization ==
+{
+  "cxq": 1,
+  "source": {
+    "kind": "codebase"
+  },
+  "stages": [
+    {
+      "op": "nodes",
+      "pred": {
+        "op": "all_of",
+        "preds": [
+          {
+            "op": "eq",
+            "field": "kind",
+            "value": "class"
+          },
+          {
+            "op": "eq",
+            "field": "is_static",
+            "value": 0
+          },
+          {
+            "op": "ne",
+            "field": "spelling",
+            "value": "x"
+          }
+        ]
+      }
+    },
+    {
+      "op": "count"
+    }
+  ]
+}
+== codebase_abstract ==
+{
+  "cxq": 1,
+  "source": {
+    "kind": "codebase"
+  },
+  "stages": [
+    {
+      "op": "view",
+      "level": "entity"
+    },
+    {
+      "op": "nodes",
+      "pred": {
+        "op": "eq",
+        "field": "entity_type",
+        "value": "abstract_class"
+      }
+    },
+    {
+      "op": "where",
+      "pred": {
+        "op": "all_of",
+        "preds": [
+          {
+            "op": "eq",
+            "field": "is_definition",
+            "value": 1
+          },
+          {
+            "op": "not",
+            "pred": {
+              "op": "glob",
+              "field": "name",
+              "value": "*Legacy*"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "op": "select",
+      "fields": [
+        "name",
+        "kind"
+      ]
+    },
+    {
+      "op": "order_by",
+      "fields": [
+        "name"
+      ]
+    },
+    {
+      "op": "limit",
+      "n": 50
+    }
+  ]
+}
+== entity_uses ==
+{
+  "cxq": 1,
+  "source": {
+    "kind": "entity",
+    "ref": "PaymentService"
+  },
+  "stages": [
+    {
+      "op": "out",
+      "relation": "entity.uses",
+      "min_depth": 1,
+      "max_depth": 1
+    },
+    {
+      "op": "where",
+      "pred": {
+        "op": "in",
+        "field": "entity_type",
+        "values": [
+          "class",
+          "interface"
+        ]
+      }
+    },
+    {
+      "op": "select",
+      "fields": [
+        "name",
+        "usr"
+      ]
+    },
+    {
+      "op": "limit",
+      "n": 100
+    }
+  ]
+}
+== qualified_relation ==
+{
+  "cxq": 1,
+  "source": {
+    "kind": "symbol",
+    "ref": "Widget"
+  },
+  "stages": [
+    {
+      "op": "out",
+      "relation": "entity.uses",
+      "min_depth": 1,
+      "max_depth": 1
+    },
+    {
+      "op": "view",
+      "level": "entity"
+    },
+    {
+      "op": "in",
+      "relation": "entity.generalizes",
+      "min_depth": 1,
+      "max_depth": 4
+    }
+  ]
+}
+== symbol_callers ==
+{
+  "cxq": 1,
+  "source": {
+    "kind": "symbol",
+    "ref": "c:@F@normalize#"
+  },
+  "stages": [
+    {
+      "op": "in",
+      "relation": "symbol.calls",
+      "min_depth": 1,
+      "max_depth": 1
+    },
+    {
+      "op": "select",
+      "fields": [
+        "name",
+        "file",
+        "line"
+      ]
+    },
+    {
+      "op": "order_by",
+      "fields": [
+        "name"
+      ]
+    }
+  ]
+}
+== union_count ==
+{
+  "cxq": 1,
+  "source": {
+    "kind": "symbol",
+    "ref": "A"
+  },
+  "stages": [
+    {
+      "op": "out",
+      "relation": "symbol.calls",
+      "min_depth": 1,
+      "max_depth": 3
+    },
+    {
+      "op": "union",
+      "plan": {
+        "cxq": 1,
+        "source": {
+          "kind": "symbol",
+          "ref": "A"
+        },
+        "stages": [
+          {
+            "op": "out",
+            "relation": "symbol.uses",
+            "min_depth": 1,
+            "max_depth": 1
+          }
+        ]
+      }
+    },
+    {
+      "op": "distinct"
+    },
+    {
+      "op": "count"
+    }
+  ]
+}
