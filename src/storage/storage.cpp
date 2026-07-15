@@ -2972,15 +2972,23 @@ void Storage::add_template_arg(const TemplateArg &a) {
 // -- v30 signature/type tier ---------------------------------------------------
 
 int64_t Storage::intern_type_node(const TypeNode &n) {
-  // Interned dictionary row: first writer wins; the key encodes everything
-  // that defines the shape, so a later INSERT with the same key is the same
-  // logical type and OR IGNORE is correct (canonical_id is derived from the
-  // key deterministically by the interner).
+  // Interned dictionary row keyed by type_key. The key encodes the structural
+  // shape, so for most nodes a re-intern carries identical content -- but an
+  // ALIAS node is keyed by its declaration USR while its target is a mutable
+  // attribute (`using Alias = Foo;` can become `= Bar;`). The upsert is
+  // therefore authoritative: a re-intern refreshes canonical_id (and the
+  // display columns) in place so a retargeted alias never keeps pointing at
+  // its old canonical shape.
   {
     auto ins = db_.prepare(
-        "INSERT OR IGNORE INTO type_node "
+        "INSERT INTO type_node "
         "(type_key, spelling, kind, is_const, is_volatile, is_restrict, "
-        " decl_usr, canonical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+        " decl_usr, canonical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(type_key) DO UPDATE SET "
+        "spelling = excluded.spelling, kind = excluded.kind, "
+        "is_const = excluded.is_const, is_volatile = excluded.is_volatile, "
+        "is_restrict = excluded.is_restrict, decl_usr = excluded.decl_usr, "
+        "canonical_id = excluded.canonical_id");
     ins.bind(1, std::string_view(n.type_key));
     ins.bind(2, std::string_view(n.spelling));
     ins.bind(3, n.kind);
@@ -3022,9 +3030,11 @@ std::optional<TypeNode> Storage::type_node_by_id(int64_t type_id) {
 
 void Storage::add_type_edge(int64_t src_id, int64_t kind, int64_t position,
                             int64_t dst_id) {
-  // Same (src, kind, position) re-derived on a later intern = same fact.
+  // OR REPLACE on the (src, kind, position) key: for structural nodes the
+  // re-derived dst is identical, and for a retargeted alias (see
+  // intern_type_node) the alias_of edge must follow the new target.
   auto st = db_.prepare(
-      "INSERT OR IGNORE INTO type_edge (src_id, kind, position, dst_id) "
+      "INSERT OR REPLACE INTO type_edge (src_id, kind, position, dst_id) "
       "VALUES (?, ?, ?, ?)");
   st.bind(1, src_id);
   st.bind(2, kind);

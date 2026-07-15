@@ -30,7 +30,12 @@ constexpr int kMaxDepth = 48;
 //           | 'p(' node ')'                    -- pointer
 //           | 'l(' node ')' | 'r(' node ')'    -- lvalue / rvalue reference
 //           | 'A' [size] '(' node ')'          -- array
-//           | 'f(' node ';' node,* ')'         -- function proto (ret; params)
+//           | 'f(' node ';' node,* [',...'] ')' ['#' flags]
+//                                              -- function proto: ret; params;
+//                                                 '...' = variadic; flags:
+//                                                 c/v method quals, l/r ref-
+//                                                 qualifier, n = cannot throw,
+//                                                 d = dependent throw
 //           | 'fnp(' node ')'                  -- function without prototype
 //           | 'o:' canonical-spelling          -- anything else
 // USRs make named layers unique (a specialization USR encodes its arguments);
@@ -85,10 +90,15 @@ TypeInterner::Result TypeInterner::emit_node(clang::QualType qt,
   }
   rec.spelling = qt.getAsString(context_.getPrintingPolicy());
   // Canonical link: a sugared shape (alias layers anywhere inside) points at
-  // its canonical shape so alias-insensitive queries can unify them.
+  // its canonical shape so alias-insensitive queries can unify them. A
+  // distinct sugared QualType can still encode to the SAME key (e.g. an
+  // elaborated TagType vs its canonical TagType both key on the decl USR);
+  // comparing keys keeps such self-canonical rows at NULL instead of writing
+  // a self-loop.
   const clang::QualType canon = context_.getCanonicalType(qt);
   if (canon.getAsOpaquePtr() != qt.getAsOpaquePtr() && depth < kMaxDepth) {
-    if (const std::optional<Result> c = build(canon, depth + 1)) {
+    if (const std::optional<Result> c = build(canon, depth + 1);
+        c && c->key != rec.type_key) {
       rec.canonical_id = c->id;
     }
   }
@@ -271,7 +281,38 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
       key += r ? r->key : "?";
       params.emplace_back(i, std::move(r));
     }
+    if (fp->isVariadic()) {
+      key += fp->getNumParams() != 0 ? ",..." : "...";
+    }
     key += ")";
+    // Return + parameters alone under-identify a function type: variadicness,
+    // whether the type can throw, method cv-qualifiers, and the ref-qualifier
+    // are all part of the shape (`void(int)` != `void(int, ...)` !=
+    // `void(int) noexcept`). Encode them as a '#'-suffixed flag string so
+    // distinct shapes never intern to one node. canThrow() is used instead of
+    // the written exception-spec kind so `noexcept(false)`/`throw(...)`
+    // spellings unify with their semantic equivalents.
+    std::string flags;
+    const clang::Qualifiers mq = fp->getMethodQuals();
+    if (mq.hasConst()) {
+      flags += 'c';
+    }
+    if (mq.hasVolatile()) {
+      flags += 'v';
+    }
+    if (fp->getRefQualifier() == clang::RQ_LValue) {
+      flags += 'l';
+    } else if (fp->getRefQualifier() == clang::RQ_RValue) {
+      flags += 'r';
+    }
+    if (fp->canThrow() == clang::CT_Cannot) {
+      flags += 'n';
+    } else if (fp->canThrow() == clang::CT_Dependent) {
+      flags += 'd';
+    }
+    if (!flags.empty()) {
+      key += "#" + flags;
+    }
     rec.kind = kTypeFunction;
     rec.type_key = std::move(key);
     const Result self = emit_node(qt, std::move(rec), depth);

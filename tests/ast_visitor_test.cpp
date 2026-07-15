@@ -1059,7 +1059,8 @@ TEST_SUITE("clang") {
                     "JOIN type_node src ON src.id = te.src_id "
                     "JOIN type_node dst ON dst.id = te.dst_id "
                     "WHERE te.kind IN (3, 6)") ==
-          std::vector<std::string>{"Box<Foo>/6/0/Foo", "FooAlias/3/0/Foo"});
+          std::vector<std::string>{"Box<FooAlias>/6/0/Foo",
+                                   "FooAlias/3/0/Foo"});
     // Closure: parameters reaching Foo cover both the direct alias param and
     // the template-argument route (take's b and a).
     Storage store(tu.db_path());
@@ -1114,6 +1115,92 @@ TEST_SUITE("clang") {
                     "FROM parameter p JOIN symbol s ON s.id = p.owner_id "
                     "WHERE s.spelling = 'g'") ==
           std::vector<std::string>{"0:renamed"});
+  }
+
+  TEST_CASE("signature tier: alias retarget follows reindex (PR #18 review)") {
+    // `using Alias = Foo;` -> `= Bar;`: the alias node is keyed by its
+    // declaration USR, so the re-intern must authoritatively refresh
+    // canonical_id and replace the alias_of edge -- first-writer-wins left
+    // both pointing at Foo forever. Owners are asserted through USR-stable
+    // relations (returns / of_type / the alias's own underlying_type): a
+    // callable with the alias in its PARAMETER list legitimately changes USR
+    // on retarget (the canonical type is encoded in function USRs), which is
+    // the pre-existing symbol lifecycle, not part of this contract.
+    const char *kSrc1 = "#include \"templates.hpp\"\n"
+                        "Alias make_alias() { return {}; }\n"
+                        "Alias stored;\n";
+    IndexedProject prj(
+        "#pragma once\nstruct Foo {};\nstruct Bar {};\nusing Alias = Foo;\n",
+        kSrc1);
+    const auto alias_state = [&] {
+      return query_col(prj.db_path(),
+                       "SELECT c.spelling || '/' || dst.spelling "
+                       "FROM type_node tn "
+                       "JOIN type_node c ON c.id = tn.canonical_id "
+                       "JOIN type_edge te ON te.src_id = tn.id AND te.kind = 3 "
+                       "JOIN type_node dst ON dst.id = te.dst_id "
+                       "WHERE tn.kind = 4");
+    };
+    // symbol_type owners (returns/of_type/underlying_type) whose type reaches
+    // the record named by `usr`.
+    const auto reaching_owners = [&](const char *usr) {
+      Storage store(prj.db_path());
+      return store
+          .symbol_type_owners_of_types(store.type_ids_reaching(usr))
+          .size();
+    };
+    CHECK(alias_state() == std::vector<std::string>{"Foo/Foo"});
+    CHECK(reaching_owners("c:@S@Foo") == 3); // underlying + returns + of_type
+    CHECK(reaching_owners("c:@S@Bar") == 0);
+    prj.reindex_with(
+        "#pragma once\nstruct Foo {};\nstruct Bar {};\nusing Alias = Bar;\n",
+        std::string(kSrc1) + "// retargeted\n");
+    CHECK(alias_state() == std::vector<std::string>{"Bar/Bar"});
+    CHECK(reaching_owners("c:@S@Foo") == 0);
+    CHECK(reaching_owners("c:@S@Bar") == 3);
+  }
+
+  TEST_CASE("signature tier: function type shapes stay distinct (PR #18)") {
+    // Variadicness and throwability are part of the shape: void(int),
+    // void(int, ...) and void(int) noexcept must each intern their own node;
+    // two spellings of the SAME shape (fixed / may_throw) share one.
+    IndexedTu tu(R"cpp(
+      void (*fixed)(int);
+      void (*variadic)(int, ...);
+      void (*may_throw)(int);
+      void (*no_throw)(int) noexcept;
+    )cpp");
+    CHECK(query_col(tu.db_path(),
+                    "SELECT s.spelling || '/' || fn.type_key "
+                    "FROM symbol_type st "
+                    "JOIN symbol s ON s.id = st.symbol_id "
+                    "JOIN type_edge te ON te.src_id = st.type_id "
+                    "  AND te.kind = 1 "
+                    "JOIN type_node fn ON fn.id = te.dst_id "
+                    "WHERE st.kind = 2") ==
+          std::vector<std::string>{
+              "fixed/f(b:void;b:int)", "may_throw/f(b:void;b:int)",
+              "no_throw/f(b:void;b:int)#n", "variadic/f(b:void;b:int,...)"});
+  }
+
+  TEST_CASE("signature tier: type queries work with zero symbol edges") {
+    // A valid declaration-only TU carries type facts but no symbol edges;
+    // `graph signature`/`typeusers` must not be rejected by the empty-edge
+    // guard (PR #18 review), while edge queries still are.
+    IndexedTu tu(R"cpp(
+      typedef int MyInt;
+      void (*handler)(int);
+    )cpp");
+    CHECK(query_col(tu.db_path(), "SELECT COUNT(*) FROM edge") ==
+          std::vector<std::string>{"0"});
+    CHECK(query_col(tu.db_path(),
+                    "SELECT COUNT(*) FROM symbol_type").front() != "0");
+    CHECK(run_cidx({"graph", "signature", "--name", "MyInt"}, tu.cache,
+                   tu.log) == 0);
+    CHECK(run_cidx({"graph", "typeusers", "--name", "MyInt"}, tu.cache,
+                   tu.log) == 0);
+    CHECK(run_cidx({"graph", "callers", "--name", "MyInt"}, tu.cache,
+                   tu.log) == 1); // edge queries keep the guard
   }
 
   TEST_CASE("signature tier: ctors get params but no return") {

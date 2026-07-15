@@ -1928,13 +1928,17 @@ graph_select_one(graph::GraphQuery &g,
 
 // Open graph + enforce edges. Returns (nullptr, 1) on failure.
 // `storage_out` receives the opened Storage (must outlive GraphQuery).
+// `require_edges = false` skips the empty-edge-table rejection: the v30
+// signature/type queries read parameter/type/symbol_type facts that a valid
+// declaration-only index can carry with ZERO symbol edges.
 struct GraphHandle {
   std::unique_ptr<Storage> storage;
   std::unique_ptr<graph::GraphQuery> g;
 };
 
 std::optional<GraphHandle>
-open_graph(const ParsedArgs & /*args*/, Context &ctx) {
+open_graph(const ParsedArgs & /*args*/, Context &ctx,
+           bool require_edges = true) {
   GraphHandle h;
 
   // Check file exists BEFORE opening Storage (Storage constructor uses
@@ -1955,7 +1959,7 @@ open_graph(const ParsedArgs & /*args*/, Context &ctx) {
 
   h.storage = std::make_unique<Storage>(ctx.index_path);
   h.g = std::make_unique<graph::GraphQuery>(*h.storage, ctx.index_path);
-  if (h.g->edge_count() == 0) {
+  if (require_edges && h.g->edge_count() == 0) {
     const std::string repr = format::py_repr(ctx.index_path);
     *ctx.err << "error: index " << repr
              << " has no graph edges -- it was built with "
@@ -2254,7 +2258,7 @@ int cmd_graph_definitions(const ParsedArgs &args, Context &ctx) {
 // v30: signature/type facts of one symbol (returns/params for callables,
 // of_type for variables/fields, underlying for typedef/alias symbols).
 int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
-  auto h = open_graph(args, ctx);
+  auto h = open_graph(args, ctx, /*require_edges=*/false);
   if (!h) return 1;
   auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
                                     args.kind, args.first, *ctx.err);
@@ -2316,7 +2320,7 @@ int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
 // v30: callables accepting/returning the type + variables/fields/aliases of
 // it, through pointer/reference/array/alias/template-argument layers.
 int cmd_graph_typeusers(const ParsedArgs &args, Context &ctx) {
-  auto h = open_graph(args, ctx);
+  auto h = open_graph(args, ctx, /*require_edges=*/false);
   if (!h) return 1;
   auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
                                     args.kind, args.first, *ctx.err);

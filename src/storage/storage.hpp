@@ -319,10 +319,13 @@ public:
 
   // -- v30 signature/type tier ------------------------------------------------
   // Upsert a normalized type-shape row keyed by type_key; returns the stable
-  // type_node.id (existing row wins -- the key encodes the whole shape).
+  // type_node.id. A conflict REFRESHES the row's attributes in place: alias
+  // nodes are keyed by declaration USR while their target (canonical_id) is
+  // mutable across reindexes (`using Alias = Foo;` -> `= Bar;`).
   int64_t intern_type_node(const TypeNode &n);
   std::optional<TypeNode> type_node_by_id(int64_t type_id);
-  // INSERT OR IGNORE keyed on (src_id, kind, position).
+  // INSERT OR REPLACE keyed on (src_id, kind, position) -- a retargeted
+  // alias's alias_of edge follows the new target.
   void add_type_edge(int64_t src_id, int64_t kind, int64_t position,
                      int64_t dst_id);
   // Wholesale per-owner refresh (DELETE + INSERT): re-index with a changed

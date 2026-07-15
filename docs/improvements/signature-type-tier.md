@@ -73,6 +73,26 @@ typedef/alias decls). Function templates are skipped, matching
 - `python/tests/test_migrate_v30.py` — migration + `signature`/`type_users`
   read parity on hand-inserted rows.
 
+## Review fixes (PR #18, round 1)
+
+- **Alias retarget**: `intern_type_node` is now an authoritative upsert
+  (`ON CONFLICT DO UPDATE`) and `add_type_edge` an `OR REPLACE`, so
+  `using Alias = Foo;` → `= Bar;` refreshes the alias node's
+  `canonical_id`/`alias_of` in place on reindex. Sugared/canonical instances
+  that encode to the same key keep `canonical_id` NULL (no self-loops); the
+  display spelling is now the as-written form. Note: a callable with the
+  alias in its *parameter list* changes USR on retarget (canonical types are
+  encoded in function USRs) — the old symbol row and its parameter rows
+  linger exactly like every other stale-USR symbol; that is the pre-existing
+  symbol lifecycle, not a tier property.
+- **Function type shape**: `FunctionProtoType` keys now encode variadicness
+  (`,...`), method cv-quals, ref-qualifier, and throwability
+  (`canThrow()` — spelling-insensitive), so `void(int)`, `void(int, ...)`
+  and `void(int) noexcept` intern distinct nodes.
+- **Edge-empty indexes**: `cidx graph signature`/`typeusers` open the index
+  without the empty-`edge`-table rejection — a valid declaration-only TU has
+  type facts but zero symbol edges. Edge queries keep the guard.
+
 ## Deliberate limits (deferred, per roadmap)
 
 - No parameter facts for function templates (matches the signature-uses walk
