@@ -38,12 +38,12 @@ def _golden_plans():
     return {
         "entity_uses": (
             start(entity("PaymentService")) | out("uses")
-            | where(in_list("kind", ["class", "interface"]))
+            | where(in_list("entity_type", ["class", "interface"]))
             | select(["name", "usr"]) | limit(100)
         ).plan,
         "codebase_abstract": (
             start(codebase()) | view(qp.ENTITY_VIEW)
-            | nodes(eq("kind", "abstract_class"))
+            | nodes(eq("entity_type", "abstract_class"))
             | where(all_of([eq("is_definition", True),
                             not_(glob("name", "*Legacy*"))]))
             | select(["name", "kind"]) | order_by(["name"]) | limit(50)
@@ -81,13 +81,16 @@ def seeded():
     ids["C"] = db.add_symbol(_make_sym("USR::C", "funcC"))
     ids["D"] = db.add_symbol(_make_sym("USR::D", "ClassD", "class"))
     ids["E"] = db.add_symbol(_make_sym("USR::E", "ClassE", "class"))
+    # AbsS: declaration kind `struct`, classification `abstract_class` --
+    # the two must stay separate fields (PR #20 review).
+    ids["S"] = db.add_symbol(_make_sym("USR::S", "AbsS", "struct"))
     db.add_edge(ids["A"], ids["B"], 1)  # calls
     db.add_edge(ids["B"], ids["C"], 1)  # calls
     db.add_edge(ids["A"], ids["C"], 7)  # uses
     db.add_edge(ids["E"], ids["D"], 2)  # inherits
     db._conn.execute(
-        "INSERT INTO entity_node (id, kind) VALUES (?, 1), (?, 1)",
-        (ids["D"], ids["E"]))
+        "INSERT INTO entity_node (id, kind) VALUES (?, 1), (?, 1), (?, 2)",
+        (ids["D"], ids["E"], ids["S"]))
     db.add_entity_edge(ids["D"], ids["E"], 8)  # entity uses
     db.add_entity_edge(ids["E"], ids["D"], 1)  # generalizes
     return db, ids
@@ -123,6 +126,12 @@ def test_normalization_qualifies_and_flattens():
     assert len(np.kids) == 3
     assert np.kids[2].op == "eq"
 
+    # The stream view follows a traversal's layer: after a qualified entity
+    # hop, a bare relation resolves in the entity namespace.
+    nq = validate((start(symbol("Widget")) | out("entity.uses")
+                   | in_("generalizes")).plan)
+    assert nq.stages[1].relation == "entity.generalizes"
+
 
 # ---------------------------------------------------------------------------
 # Q3: validation errors -- stable E_* codes
@@ -145,8 +154,12 @@ def test_validation_error_codes():
     assert _code((start(symbol("A")) | where(eq("file", "x"))).plan) == "E_FIELD"
     assert _code((start(symbol("A"))
                   | where(eq("kind", "bogus_kind"))).plan) == "E_KIND"
+    assert _code((start(symbol("A"))
+                  | where(eq("kind", "abstract_class"))).plan) == "E_KIND"
     assert _code((start(codebase()) | view(qp.ENTITY_VIEW)
-                  | nodes(eq("kind", "struct"))).plan) == "E_KIND"
+                  | nodes(eq("entity_type", "struct"))).plan) == "E_KIND"
+    assert _code((start(codebase()) | view(qp.ENTITY_VIEW)
+                  | nodes(eq("kind", "struct"))).plan) == "<no-error>"
     assert _code((start(symbol("A")) | limit(0)).plan) == "E_LIMIT"
     assert _code((start(symbol("A"))
                   | union_(start(entity("B")) | out("uses"))).plan) == "E_SETOP"
@@ -206,8 +219,12 @@ def test_set_operations_distinct_count(seeded):
     db, ids = seeded
     ex = Executor(db)
     base = start(symbol("USR::A")) | out("calls", 1, 2)
+    # union is a SET union -- the shared C must not double-count (PR #20).
     u = ex.run((base | union_(start(symbol("USR::A")) | out("uses"))).plan)
-    assert len(u.rows) == 3  # multiplicity preserved
+    assert len(u.rows) == 2
+    uc = ex.run((base | union_(start(symbol("USR::A")) | out("uses"))
+                 | count()).plan)
+    assert uc.scalar == 2
     ud = ex.run((base | union_(start(symbol("USR::A")) | out("uses"))
                  | distinct()).plan)
     assert len(ud.rows) == 2
@@ -263,3 +280,66 @@ def test_default_result_cap_reports_truncation():
     lim = ex.run((start(codebase()) | nodes() | limit(1100)).plan)
     assert len(lim.rows) == 1100
     assert not lim.truncated
+
+
+# ---------------------------------------------------------------------------
+# PR #20 review regressions (mirrors of the C++ cases)
+# ---------------------------------------------------------------------------
+def test_view_entity_drops_non_entities(seeded):
+    db, _ids = seeded
+    ex = Executor(db)
+    fn = ex.run((start(symbol("funcA")) | view(qp.ENTITY_VIEW)).plan)
+    assert fn.rows == []
+    assert fn.view == "entity"
+    cls = ex.run((start(symbol("ClassD")) | view(qp.ENTITY_VIEW)).plan)
+    assert len(cls.rows) == 1
+    back = ex.run((start(entity("ClassD")) | view(qp.SYMBOL_VIEW)).plan)
+    assert len(back.rows) == 1
+
+
+def test_min_depth_uses_path_length_not_first_discovery():
+    # Diamond: P -> Q, P -> R -> Q. out(calls, 2, 2) must emit Q.
+    db = Storage(":memory:")
+    p = db.add_symbol(_make_sym("USR::P", "p"))
+    q = db.add_symbol(_make_sym("USR::Q", "q"))
+    r = db.add_symbol(_make_sym("USR::R", "r"))
+    db.add_edge(p, q, 1)
+    db.add_edge(p, r, 1)
+    db.add_edge(r, q, 1)
+    ex = Executor(db)
+    d2 = ex.run((start(symbol("USR::P")) | out("calls", 2, 2)).plan)
+    assert [row[0] for row in d2.rows] == [q]
+    d12 = ex.run((start(symbol("USR::P")) | out("calls", 1, 2)).plan)
+    assert len(d12.rows) == 2
+
+
+def test_default_cap_reapplies_after_expanding_stage():
+    db = Storage(":memory:")
+    hub = db.add_symbol(_make_sym("USR::hub", "hub"))
+    for i in range(1200):
+        t = db.add_symbol(_make_sym(f"USR::t{i}", f"t{i}"))
+        db.add_edge(hub, t, 1)
+    ex = Executor(db)
+    r = ex.run((start(symbol("USR::hub")) | limit(1) | out("calls")).plan)
+    assert len(r.rows) == 1000
+    assert r.truncated
+
+
+def test_kind_vs_entity_type_separation(seeded):
+    db, _ids = seeded
+    ex = Executor(db)
+    decl = ex.run((start(codebase())
+                   | nodes(in_list("kind", ["class", "struct"]))
+                   | select(["spelling", "kind", "entity_type"])
+                   | order_by(["spelling"])).plan)
+    assert [row[0] for row in decl.rows] == ["AbsS", "ClassD", "ClassE"]
+    assert decl.rows[0][1] == "struct"
+    assert decl.rows[0][2] == "abstract_class"
+
+    cls = ex.run((start(codebase()) | view(qp.ENTITY_VIEW)
+                  | nodes(eq("entity_type", "abstract_class"))
+                  | select(["spelling", "kind"])).plan)
+    assert [tuple(row) for row in cls.rows] == [("AbsS", "struct")]
+
+    fn = ex.run((start(symbol("funcA")) | select(["entity_type"])).plan)
+    assert [row[0] for row in fn.rows] == [None]

@@ -117,7 +117,8 @@ const std::vector<FieldDesc> &field_catalog() {
       {"name", true, true},
       {"spelling", true, true},
       {"qual_name", true, true},
-      {"kind", true, true},
+      {"kind", true, true},        // C++ declaration kind (symbol_kind names)
+      {"entity_type", true, true}, // entity classification (entity_kind names)
       {"is_definition", true, false},
       {"is_pure", true, false},
       {"is_static", true, false},
@@ -333,9 +334,12 @@ Stage limit(int64_t n) {
 
 namespace {
 
-// Validate one comparison leaf against the field catalog and the active view's
-// kind vocabulary. Throws PlanError.
-void check_cmp(const Pred &p, View active) {
+// Validate one comparison leaf against the field catalog. `kind` always takes
+// C++ declaration-kind names (symbol_kind) and `entity_type` always takes
+// entity-classification names (entity_kind) -- view-independent, so an
+// `abstract struct` is `kind = struct` AND `entity_type = abstract_class`.
+// Throws PlanError.
+void check_cmp(const Pred &p) {
   const FieldDesc *f = field_desc(p.field);
   if (f == nullptr) {
     fail("E_FIELD", "unknown field '" + p.field + "'");
@@ -358,16 +362,21 @@ void check_cmp(const Pred &p, View active) {
       fail("E_FIELD", "field '" + p.field + "' takes an integer value");
     }
   }
-  if (p.field == "kind" && p.op == PredOp::Glob) {
-    fail("E_FIELD", "field 'kind' does not support glob");
+  if ((p.field == "kind" || p.field == "entity_type") &&
+      p.op == PredOp::Glob) {
+    fail("E_FIELD", "field '" + p.field + "' does not support glob");
   }
   if (p.field == "kind") {
     for (const auto &v : p.str_values) {
-      const bool ok = active == View::Symbol ? is_symbol_kind(v)
-                                             : is_entity_kind(v);
-      if (!ok) {
-        fail("E_KIND", "unknown " + std::string(view_name(active)) +
-                           " kind '" + v + "'");
+      if (!is_symbol_kind(v)) {
+        fail("E_KIND", "unknown symbol kind '" + v + "'");
+      }
+    }
+  }
+  if (p.field == "entity_type") {
+    for (const auto &v : p.str_values) {
+      if (!is_entity_kind(v)) {
+        fail("E_KIND", "unknown entity_type '" + v + "'");
       }
     }
   }
@@ -375,7 +384,7 @@ void check_cmp(const Pred &p, View active) {
 
 // Validate + normalize a predicate tree: flatten nested AllOf/AnyOf, reduce
 // not(not(p)).
-Pred norm_pred(const Pred &p, View active) {
+Pred norm_pred(const Pred &p) {
   switch (p.op) {
   case PredOp::AllOf:
   case PredOp::AnyOf: {
@@ -385,7 +394,7 @@ Pred norm_pred(const Pred &p, View active) {
     Pred out;
     out.op = p.op;
     for (const auto &k : p.kids) {
-      Pred nk = norm_pred(k, active);
+      Pred nk = norm_pred(k);
       if (nk.op == p.op) {
         for (auto &g : nk.kids) {
           out.kids.push_back(std::move(g));
@@ -403,7 +412,7 @@ Pred norm_pred(const Pred &p, View active) {
     if (p.kids.size() != 1) {
       fail("E_FIELD", "not() takes exactly one predicate");
     }
-    Pred nk = norm_pred(p.kids[0], active);
+    Pred nk = norm_pred(p.kids[0]);
     if (nk.op == PredOp::Not) {
       return nk.kids[0]; // not(not(p)) -> p
     }
@@ -416,7 +425,7 @@ Pred norm_pred(const Pred &p, View active) {
   case PredOp::Ne:
   case PredOp::Glob:
   case PredOp::In:
-    check_cmp(p, active);
+    check_cmp(p);
     return p;
   }
   fail("E_FIELD", "bad predicate");
@@ -472,7 +481,7 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
         fail("E_STAGE", "nodes() requires an unenumerated codebase() source");
       }
       if (stage.pred) {
-        ns.pred = norm_pred(*stage.pred, st.active);
+        ns.pred = norm_pred(*stage.pred);
       }
       st.codebase_unenumerated = false;
       break;
@@ -490,7 +499,7 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
         fail("E_FIELD", "where() requires a predicate");
       }
       consume();
-      ns.pred = norm_pred(*stage.pred, st.active);
+      ns.pred = norm_pred(*stage.pred);
       break;
     case StageOp::Out:
     case StageOp::In: {
@@ -508,6 +517,9 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
         fail("E_DEPTH", "depth bounds must satisfy 1 <= min <= max <= 32");
       }
       ns.relation = std::string(view_name(r->layer)) + "." + r->name;
+      // Traversal targets live in the relation's layer: the stream view (and
+      // therefore later bare-relation resolution) follows it.
+      st.active = r->layer;
       break;
     }
     case StageOp::Union:

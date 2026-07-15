@@ -16,11 +16,15 @@ same plan and semantically identical, deterministic results.
 | `symbol` | `symbol` rows | `edge` kinds (`symbol.calls`, `symbol.uses`, ...) |
 | `entity` | `entity_node` rows (ids are symbol ids) | `entity_edge` kinds (`entity.uses`, ...) |
 
-`view(entity)` / `view(symbol)` mid-pipeline changes only the relation namespace
-(ids are shared — `entity_node.id` references `symbol.id`); it never filters or
-maps the current node set. From a `codebase()` source, `nodes(...)` enumerates
-the **current view's** domain. Reserved for later slices: `codebase`, `edge`,
-`site`, `template_parameter`, `template_argument`, `type`, `concept`, `path`.
+Views are typed: an id may appear in an entity-view stream only when it has an
+`entity_node` row. `view(entity)` therefore **drops** ids without one (it never
+maps them — moving from a method to its record still traverses `method_of`);
+`view(symbol)` is a pure relabel (every entity id is a symbol id). A traversal
+retargets the stream view to **its relation's layer** (`out(entity.uses)` from
+a symbol stream yields an entity-view stream, and later bare relation names
+resolve there). From a `codebase()` source, `nodes(...)` enumerates the current
+view's domain. Reserved for later slices: `codebase`, `edge`, `site`,
+`template_parameter`, `template_argument`, `type`, `concept`, `path`.
 
 ## Relation catalog
 
@@ -46,12 +50,15 @@ Pred   := all_of([p...]) | any_of([p...]) | not(p)
 ```
 
 Fields (v1): `id`, `usr`, `name` (COALESCE(qual_name, spelling)), `spelling`,
-`qual_name`, `kind`, `file`, `line`, `col`, `is_definition`, `is_pure`,
-`is_static`. `file`/`line`/`col` are select-only; the rest are also filterable.
-`kind` values are symbol-kind names in the symbol view and `entity_kind` names
-(`class`, `abstract_class`, `interface`, `union`, `enum`, `class_template`,
-`abstract_class_template`, `interface_template`, `namespace`, `other`) in the
-entity view.
+`qual_name`, `kind`, `entity_type`, `file`, `line`, `col`, `is_definition`,
+`is_pure`, `is_static`. `file`/`line`/`col` are select-only; the rest are also
+filterable. Declaration kind and entity classification are SEPARATE fields in
+every view: `kind` is always the C++ declaration kind (symbol-kind names, so
+`kind in [class, struct]` keeps its current-API meaning) and `entity_type` is
+always the Layer-1 classification (`class`, `abstract_class`, `interface`,
+`union`, `enum`, `class_template`, `abstract_class_template`,
+`interface_template`, `namespace`, `other`; `null` for non-entity ids — an
+abstract struct is `kind = struct` AND `entity_type = abstract_class`).
 
 `symbol(ref)` / `entity(ref)` resolve `ref` against `usr`, then `qual_name`,
 then `spelling` (exact matches, all hits, ordered by id); `entity(ref)`
@@ -80,7 +87,7 @@ Normalization: relation names become layer-qualified; nested `all_of` within
   required (`1..*` is rejected — resolves wiki open question 2 conservatively)
 - `E_FIELD` unknown field, filter on a select-only field, or `order_by` on a
   field not in the active `select`
-- `E_KIND` unknown kind name for the active view
+- `E_KIND` unknown `kind` (symbol-kind) or `entity_type` (entity-kind) name
 - `E_LIMIT` limit < 1
 - `E_SETOP` operand plan does not yield a node stream in the same view
 - `E_STAGE` stage illegal for the current stream shape (nodes → rows → scalar;
@@ -91,19 +98,28 @@ Normalization: relation names become layer-qualified; nested `all_of` within
 ## Execution semantics
 
 - Read-only, parameterized SQL only; no arbitrary SQL, no mutation.
-- The node stream is kept **ordered ascending by id** after every stage.
+- The node stream is kept **ordered ascending by id, deduped** after every
+  stage.
 - `out`/`in`: level-by-level frontier expansion (`SELECT DISTINCT ... WHERE
-  src_id IN (chunk) AND kind = ?`, chunk size 400), visited-set semantics; a
-  node is emitted iff its first-discovery depth ∈ [min, max]. Self (depth 0)
-  is never emitted.
-- `union` preserves multiplicity (sorted merge); `intersect`/`except` are set
-  semantics (deduped).
-- `distinct()` dedups (ids, or full row tuples after `select`).
+  src_id IN (chunk) AND kind = ?`, chunk size 400) with **path-length-window
+  semantics**: a node is emitted iff SOME path of length d ∈ [min, max]
+  reaches it — not only its shortest first-discovery depth (in a diamond
+  `A→B`, `A→C→B`, `out(r, 2..2)` emits `B`). There is no cross-level visited
+  set; termination comes from the finite max depth (≤ 32) and the state
+  budget. Self (depth 0) is never emitted, but a start node reached again
+  through a cycle of length ≥ 1 is.
+- `union`, `intersect`, and `except` are all SET operations over deduped id
+  sets — `union` never double-counts an id reached by both operands.
+- `distinct()` dedups row tuples after `select` (node streams are already
+  deduped).
 - `order_by` sorts rows by the named fields (nulls last, ties by id); default
   ordering is by id.
-- Budgets: per-traversal node budget 10 000; enumeration (`codebase` +
-  `nodes`) budget 10 000; default result cap 1 000 when no `limit` stage is
-  present. Hitting any budget sets `truncated: true` in the result — never
+- Budgets: per-traversal state budget 10 000 (cumulative level sizes);
+  enumeration (`codebase` + `nodes`) budget 10 000; default result cap 1 000.
+  The cap is skipped only when a `limit` stage is still in effect at the end
+  of the plan — any later cardinality-expanding stage (`nodes`, `out`, `in`,
+  `union`) re-arms it, so an early `limit` can never disable the final safety
+  cap. Hitting any budget sets `truncated: true` in the result — never
   silently treated as complete.
 - `count()` counts the full (budget-bounded) stream; the default result cap
   does not apply to it.

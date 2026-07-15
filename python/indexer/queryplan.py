@@ -13,7 +13,9 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Any, NoReturn, Optional, Sequence
 
-from .storage import SYMBOL_KIND_IDS, SYMBOL_KIND_NAMES, SYMBOL_KINDS, Storage
+from .storage import (
+    SYMBOL_KIND_IDS, SYMBOL_KIND_NAMES, SYMBOL_KINDS, Storage,
+)
 
 __all__ = [
     "PlanError", "Pred", "Stage", "Source", "Plan", "Query", "Result",
@@ -109,7 +111,10 @@ def resolve_relation(name: str, active: str) -> Optional[tuple[str, str, int]]:
 
 
 # ---- Field catalog ---------------------------------------------------------------
-# name -> (filterable, is_string)
+# name -> (filterable, is_string). `kind` is ALWAYS the C++ declaration kind
+# (symbol_kind names); `entity_type` is ALWAYS the Layer-1 classification
+# (entity_kind names, null for non-entities) -- separate fields so
+# `kind in [class, struct]` keeps its declaration-kind meaning (PR #20 review).
 
 _FIELDS: dict[str, tuple[bool, bool]] = {
     "id": (True, False),
@@ -118,6 +123,7 @@ _FIELDS: dict[str, tuple[bool, bool]] = {
     "spelling": (True, True),
     "qual_name": (True, True),
     "kind": (True, True),
+    "entity_type": (True, True),
     "is_definition": (True, False),
     "is_pure": (True, False),
     "is_static": (True, False),
@@ -286,7 +292,7 @@ def limit(n: int) -> Stage:
 # ---- Validation / normalization -----------------------------------------------------
 
 
-def _check_cmp(p: Pred, active: str) -> None:
+def _check_cmp(p: Pred) -> None:
     desc = _FIELDS.get(p.field)
     if desc is None:
         _fail("E_FIELD", f"unknown field '{p.field}'")
@@ -305,23 +311,25 @@ def _check_cmp(p: Pred, active: str) -> None:
             _fail("E_FIELD", f"field '{p.field}' supports eq/ne only")
         if p.int_value is None:
             _fail("E_FIELD", f"field '{p.field}' takes an integer value")
-    if p.field == "kind" and p.op == "glob":
-        _fail("E_FIELD", "field 'kind' does not support glob")
+    if p.field in ("kind", "entity_type") and p.op == "glob":
+        _fail("E_FIELD", f"field '{p.field}' does not support glob")
     if p.field == "kind":
         for v in p.str_values:
-            ok = (v in SYMBOL_KINDS) if active == SYMBOL_VIEW \
-                else (v in ENTITY_KIND_NAMES)
-            if not ok:
-                _fail("E_KIND", f"unknown {active} kind '{v}'")
+            if v not in SYMBOL_KINDS:
+                _fail("E_KIND", f"unknown symbol kind '{v}'")
+    if p.field == "entity_type":
+        for v in p.str_values:
+            if v not in ENTITY_KIND_NAMES:
+                _fail("E_KIND", f"unknown entity_type '{v}'")
 
 
-def _norm_pred(p: Pred, active: str) -> Pred:
+def _norm_pred(p: Pred) -> Pred:
     if p.op in ("all_of", "any_of"):
         if not p.kids:
             _fail("E_FIELD", "empty boolean combinator")
         kids: list[Pred] = []
         for k in p.kids:
-            nk = _norm_pred(k, active)
+            nk = _norm_pred(k)
             if nk.op == p.op:
                 kids.extend(nk.kids)
             else:
@@ -332,12 +340,12 @@ def _norm_pred(p: Pred, active: str) -> Pred:
     if p.op == "not":
         if len(p.kids) != 1:
             _fail("E_FIELD", "not() takes exactly one predicate")
-        nk = _norm_pred(p.kids[0], active)
+        nk = _norm_pred(p.kids[0])
         if nk.op == "not":
             return nk.kids[0]  # not(not(p)) -> p
         return Pred(op="not", kids=(nk,))
     if p.op in ("eq", "ne", "glob", "in"):
-        _check_cmp(p, active)
+        _check_cmp(p)
         return p
     _fail("E_FIELD", "bad predicate")
 
@@ -371,7 +379,7 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
                 _fail("E_STAGE",
                       "nodes() requires an unenumerated codebase() source")
             if stage.pred is not None:
-                ns = replace(stage, pred=_norm_pred(stage.pred, st.active))
+                ns = replace(stage, pred=_norm_pred(stage.pred))
             st.codebase_unenumerated = False
         elif stage.op == "view":
             if st.shape != "nodes":
@@ -385,7 +393,7 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
             if stage.pred is None:
                 _fail("E_FIELD", "where() requires a predicate")
             consume()
-            ns = replace(stage, pred=_norm_pred(stage.pred, st.active))
+            ns = replace(stage, pred=_norm_pred(stage.pred))
         elif stage.op in ("out", "in"):
             consume()
             if st.shape != "nodes":
@@ -398,6 +406,9 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
             if not 1 <= stage.min_depth <= stage.max_depth <= 32:
                 _fail("E_DEPTH", "depth bounds must satisfy 1 <= min <= max <= 32")
             ns = replace(stage, relation=f"{rel[1]}.{rel[0]}")
+            # Traversal targets live in the relation's layer: the stream view
+            # (and later bare-relation resolution) follows it.
+            st.active = rel[1]
         elif stage.op in ("union", "intersect", "except"):
             consume()
             if st.shape != "nodes":
@@ -527,7 +538,7 @@ class Result:
         }
 
 
-def _col_expr(field_name: str, active: str) -> str:
+def _col_expr(field_name: str) -> str:
     if field_name == "id":
         return "s.id"
     if field_name == "usr":
@@ -539,7 +550,9 @@ def _col_expr(field_name: str, active: str) -> str:
     if field_name == "qual_name":
         return "s.qual_name"
     if field_name == "kind":
-        return "en.kind" if active == ENTITY_VIEW else "s.kind"
+        return "s.kind"
+    if field_name == "entity_type":
+        return "en.kind"
     if field_name == "is_definition":
         return "s.is_definition"
     if field_name == "is_pure":
@@ -555,8 +568,8 @@ def _col_expr(field_name: str, active: str) -> str:
     raise PlanError(f"E_FIELD: unknown field '{field_name}'")
 
 
-def _kind_value_id(active: str, name: str) -> int:
-    if active == ENTITY_VIEW:
+def _kind_value_id(field_name: str, name: str) -> int:
+    if field_name == "entity_type":
         try:
             return ENTITY_KIND_NAMES.index(name)
         except ValueError:
@@ -564,34 +577,33 @@ def _kind_value_id(active: str, name: str) -> int:
     return SYMBOL_KIND_IDS.get(name, -1)
 
 
-def _kind_name(active: str, raw: int) -> Optional[str]:
-    if active == ENTITY_VIEW:
-        return ENTITY_KIND_NAMES[raw] if 0 <= raw <= 9 else None
-    return SYMBOL_KIND_NAMES.get(raw, str(raw))
+def _entity_type_name(raw: int) -> Optional[str]:
+    return ENTITY_KIND_NAMES[raw] if 0 <= raw <= 9 else None
 
 
-def _pred_sql(p: Pred, active: str, sql: list[str], args: list[Any]) -> None:
+def _pred_sql(p: Pred, sql: list[str], args: list[Any]) -> None:
     if p.op in ("all_of", "any_of"):
         joiner = " AND " if p.op == "all_of" else " OR "
         sql.append("(")
         for i, k in enumerate(p.kids):
             if i:
                 sql.append(joiner)
-            _pred_sql(k, active, sql, args)
+            _pred_sql(k, sql, args)
         sql.append(")")
         return
     if p.op == "not":
         sql.append("NOT (")
-        _pred_sql(p.kids[0], active, sql, args)
+        _pred_sql(p.kids[0], sql, args)
         sql.append(")")
         return
-    col = _col_expr(p.field, active)
+    col = _col_expr(p.field)
+    is_kind = p.field in ("kind", "entity_type")
     if p.op in ("eq", "ne"):
         sql.append(col + (" = ?" if p.op == "eq" else " != ?"))
         if p.int_value is not None:
             args.append(p.int_value)
-        elif p.field == "kind":
-            args.append(_kind_value_id(active, p.str_values[0]))
+        elif is_kind:
+            args.append(_kind_value_id(p.field, p.str_values[0]))
         else:
             args.append(p.str_values[0])
         return
@@ -602,13 +614,13 @@ def _pred_sql(p: Pred, active: str, sql: list[str], args: list[Any]) -> None:
     # in
     sql.append(col + " IN (" + ",".join("?" * len(p.str_values)) + ")")
     for v in p.str_values:
-        args.append(_kind_value_id(active, v) if p.field == "kind" else v)
+        args.append(_kind_value_id(p.field, v) if is_kind else v)
 
 
-def _pred_uses_kind(p: Pred) -> bool:
-    if p.field == "kind":
+def _pred_uses_entity_type(p: Pred) -> bool:
+    if p.field == "entity_type":
         return True
-    return any(_pred_uses_kind(k) for k in p.kids)
+    return any(_pred_uses_entity_type(k) for k in p.kids)
 
 
 def _cell_key(c: Any) -> tuple:
@@ -629,7 +641,10 @@ class _Stream:
         self.rows: list[tuple[Any, ...]] = []
         self.row_ids: list[int] = []
         self.truncated = False
-        self.limit_seen = False
+        # True only while a limit() is in effect with NO cardinality-expanding
+        # stage (nodes/out/in/union) after it -- otherwise _finish()
+        # re-applies the default result cap (PR #20 review).
+        self.limit_in_effect = False
 
 
 class Executor:
@@ -657,14 +672,18 @@ class Executor:
         for stage in plan.stages:
             if stage.op == "nodes":
                 self._enumerate(st, stage.pred)
+                st.limit_in_effect = False
             elif stage.op == "view":
-                st.view = stage.level
+                self._change_view(st, stage.level)
             elif stage.op == "where":
                 self._filter(st, stage.pred)  # type: ignore[arg-type]
             elif stage.op in ("out", "in"):
                 self._traverse(st, stage)
+                st.limit_in_effect = False
             elif stage.op in ("union", "intersect", "except"):
                 self._set_op(st, stage)
+                if stage.op == "union":
+                    st.limit_in_effect = False
             elif stage.op == "select":
                 self._materialize(st, stage.fields)
                 st.shape = "rows"
@@ -683,10 +702,9 @@ class Executor:
     # -- stages ----------------------------------------------------------------
 
     @staticmethod
-    def _join_clause(active: str, need_entity: bool) -> str:
-        if active == ENTITY_VIEW and need_entity:
-            return " LEFT JOIN entity_node en ON en.id = s.id"
-        return ""
+    def _join_clause(need_entity: bool) -> str:
+        return " LEFT JOIN entity_node en ON en.id = s.id" if need_entity \
+            else ""
 
     def _resolve_source(self, src: Source) -> list[int]:
         join = (" JOIN entity_node en ON en.id = s.id"
@@ -701,14 +719,30 @@ class Executor:
                 return [r["id"] for r in rows]
         return []
 
+    def _change_view(self, st: _Stream, level: str) -> None:
+        """view(entity) enforces the typed-view invariant: ids without an
+        entity_node row are DROPPED, never surfaced as entity rows (PR #20
+        review). view(symbol) is a pure relabel."""
+        if level == ENTITY_VIEW and st.view != ENTITY_VIEW:
+            kept: list[int] = []
+            for at in range(0, len(st.ids), ID_CHUNK):
+                chunk = st.ids[at:at + ID_CHUNK]
+                sql = ("SELECT id FROM entity_node WHERE id IN ("
+                       + ",".join("?" * len(chunk)) + ") ORDER BY id")
+                kept.extend(r["id"] for r in self._conn.execute(sql, chunk))
+            st.ids = sorted(set(kept))
+        st.view = level
+
     def _enumerate(self, st: _Stream, pred: Optional[Pred]) -> None:
         sql = ["SELECT s.id FROM symbol s"]
         if st.view == ENTITY_VIEW:
             sql.append(" JOIN entity_node en ON en.id = s.id")
+        elif pred is not None and _pred_uses_entity_type(pred):
+            sql.append(self._join_clause(True))
         args: list[Any] = []
         if pred is not None:
             sql.append(" WHERE ")
-            _pred_sql(pred, st.view, sql, args)
+            _pred_sql(pred, sql, args)
         sql.append(" ORDER BY s.id LIMIT ?")
         args.append(ENUMERATE_BUDGET + 1)
         st.ids = [r["id"] for r in self._conn.execute("".join(sql), args)]
@@ -718,7 +752,7 @@ class Executor:
 
     def _filter(self, st: _Stream, pred: Pred) -> None:
         out_ids: list[int] = []
-        join = self._join_clause(st.view, _pred_uses_kind(pred))
+        join = self._join_clause(_pred_uses_entity_type(pred))
         for at in range(0, len(st.ids), ID_CHUNK):
             chunk = st.ids[at:at + ID_CHUNK]
             sql = [
@@ -726,13 +760,19 @@ class Executor:
                 + ",".join("?" * len(chunk)) + ") AND ("
             ]
             args: list[Any] = list(chunk)
-            _pred_sql(pred, st.view, sql, args)
+            _pred_sql(pred, sql, args)
             sql.append(") ORDER BY s.id")
             out_ids.extend(
                 r["id"] for r in self._conn.execute("".join(sql), args))
         st.ids = sorted(set(out_ids))
 
     def _traverse(self, st: _Stream, stage: Stage) -> None:
+        """Path-length-window BFS (PR #20 review): a node is emitted iff SOME
+        path of length d in [min_depth, max_depth] reaches it -- not only its
+        shortest first-discovery depth. No cross-level visited set;
+        termination comes from the finite max_depth (<= 32) and the state
+        budget (cumulative level sizes). The stream view follows the
+        relation's layer."""
         rel = resolve_relation(stage.relation, st.view)
         assert rel is not None  # validated
         entity_layer = rel[1] == ENTITY_VIEW
@@ -742,8 +782,8 @@ class Executor:
         to_col = "dst_id" if outward else "src_id"
 
         frontier = sorted(set(st.ids))
-        visited = set(frontier)
-        results: list[int] = []
+        emitted: set[int] = set()
+        states = 0  # cumulative level sizes, bounded by the budget
         depth = 1
         while depth <= stage.max_depth and frontier:
             level: list[int] = []
@@ -756,30 +796,29 @@ class Executor:
                 )
                 level.extend(
                     r[0] for r in self._conn.execute(sql, [rel[2], *chunk]))
-            fresh: list[int] = []
-            for nid in sorted(set(level)):
-                if nid not in visited:
-                    visited.add(nid)
-                    fresh.append(nid)
-                    if len(visited) > TRAVERSE_NODE_BUDGET:
-                        st.truncated = True
-                        break
+            level = sorted(set(level))
+            if states + len(level) > TRAVERSE_NODE_BUDGET:
+                del level[TRAVERSE_NODE_BUDGET - states:]
+                st.truncated = True
+            states += len(level)
             if depth >= stage.min_depth:
-                results.extend(fresh)
+                emitted.update(level)
             if st.truncated:
                 break
-            frontier = fresh
+            frontier = level
             depth += 1
-        st.ids = sorted(results)
+        st.ids = sorted(emitted)
+        st.view = rel[1]
 
     def _set_op(self, st: _Stream, stage: Stage) -> None:
         sub = self._run_plan(stage.operand)  # type: ignore[arg-type]
         st.truncated = st.truncated or sub.truncated
-        if stage.op == "union":
-            st.ids = sorted(st.ids + sub.ids)  # multiplicity preserved
-            return
         a, b = set(st.ids), set(sub.ids)
-        if stage.op == "intersect":
+        # All three are SET operations (PR #20 review: union must not
+        # double-count overlapping ids).
+        if stage.op == "union":
+            st.ids = sorted(a | b)
+        elif stage.op == "intersect":
             st.ids = sorted(a & b)
         else:
             st.ids = sorted(a - b)
@@ -792,9 +831,9 @@ class Executor:
     def _fetch_cells(
         self, st: _Stream, fields: Sequence[str]
     ) -> dict[int, tuple[Any, ...]]:
-        join = self._join_clause(st.view, "kind" in fields)
+        join = self._join_clause("entity_type" in fields)
         uniq = sorted(set(st.ids))
-        cols = "".join(", " + _col_expr(f, st.view) for f in fields)
+        cols = "".join(", " + _col_expr(f) for f in fields)
         by_id: dict[int, tuple[Any, ...]] = {}
         for at in range(0, len(uniq), ID_CHUNK):
             chunk = uniq[at:at + ID_CHUNK]
@@ -809,7 +848,9 @@ class Executor:
                     if raw is None:
                         cells.append(None)
                     elif f == "kind":
-                        cells.append(_kind_name(st.view, raw))
+                        cells.append(SYMBOL_KIND_NAMES.get(raw, str(raw)))
+                    elif f == "entity_type":
+                        cells.append(_entity_type_name(raw))
                     elif f == "file":
                         cells.append(self._file_path(raw))
                     else:
@@ -861,7 +902,7 @@ class Executor:
 
     @staticmethod
     def _apply_limit(st: _Stream, n: int) -> None:
-        st.limit_seen = True
+        st.limit_in_effect = True
         if st.shape == "nodes":
             del st.ids[n:]
         else:
@@ -877,7 +918,7 @@ class Executor:
                 scalar=len(st.rows) if st.rows else len(st.ids))
         if st.shape == "nodes":
             self._materialize(st, ("id", "usr", "name", "kind"))
-        if not st.limit_seen and len(st.rows) > DEFAULT_RESULT_CAP:
+        if not st.limit_in_effect and len(st.rows) > DEFAULT_RESULT_CAP:
             del st.rows[DEFAULT_RESULT_CAP:]
             del st.row_ids[DEFAULT_RESULT_CAP:]
             st.truncated = True

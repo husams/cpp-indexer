@@ -48,7 +48,7 @@
       "op": "nodes",
       "pred": {
         "op": "eq",
-        "field": "kind",
+        "field": "entity_type",
         "value": "abstract_class"
       }
     },
@@ -110,7 +110,7 @@
       "op": "where",
       "pred": {
         "op": "in",
-        "field": "kind",
+        "field": "entity_type",
         "values": [
           "class",
           "interface"

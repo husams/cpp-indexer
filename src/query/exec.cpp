@@ -16,14 +16,20 @@ namespace query {
 namespace {
 
 // ---- field -> SQL column expression -----------------------------------------
+// `kind` is ALWAYS the C++ declaration kind (symbol.kind); `entity_type` is
+// ALWAYS the Layer-1 classification (entity_node.kind, NULL for non-entities).
+// The two are separate fields so `kind in [class, struct]` keeps its
+// declaration-kind meaning while `entity_type = abstract_class` filters on
+// classification (PR #20 review).
 
-std::string col_expr(const std::string &field, View view) {
+std::string col_expr(const std::string &field) {
   if (field == "id") return "s.id";
   if (field == "usr") return "s.usr";
   if (field == "name") return "COALESCE(s.qual_name, s.spelling)";
   if (field == "spelling") return "s.spelling";
   if (field == "qual_name") return "s.qual_name";
-  if (field == "kind") return view == View::Entity ? "en.kind" : "s.kind";
+  if (field == "kind") return "s.kind";
+  if (field == "entity_type") return "en.kind";
   if (field == "is_definition") return "s.is_definition";
   if (field == "is_pure") return "s.is_pure";
   if (field == "is_static") return "s.is_static";
@@ -33,33 +39,33 @@ std::string col_expr(const std::string &field, View view) {
   throw PlanError("E_FIELD: unknown field '" + field + "'");
 }
 
-// kind display name for the raw stored int, per view.
-Cell kind_name_cell(View view, int64_t raw) {
-  if (view == View::Entity) {
-    static const char *names[] = {
-        "other",          "class",
-        "abstract_class", "interface",
-        "union",          "enum",
-        "class_template", "abstract_class_template",
-        "interface_template", "namespace",
-    };
-    if (raw >= 0 && raw <= 9) {
-      return Cell(std::string(names[raw]));
-    }
-    return Cell(nullptr);
+// entity_node.kind -> display name (entity_kind seed), null when out of range.
+Cell entity_type_name_cell(int64_t raw) {
+  static const char *names[] = {
+      "other",          "class",
+      "abstract_class", "interface",
+      "union",          "enum",
+      "class_template", "abstract_class_template",
+      "interface_template", "namespace",
+  };
+  if (raw >= 0 && raw <= 9) {
+    return Cell(std::string(names[raw]));
   }
-  return Cell(symbol_kind_name(raw));
+  return Cell(nullptr);
 }
 
-// kind predicate value: name -> stored int for the active view.
-int64_t kind_value_id(View view, const std::string &name) {
-  return view == View::Entity ? entity_kind_id(name) : symbol_kind_id(name);
+// kind/entity_type predicate value: name -> stored int, by FIELD (not view).
+int64_t kind_value_id(const std::string &field, const std::string &name) {
+  return field == "entity_type" ? entity_kind_id(name) : symbol_kind_id(name);
 }
 
 // ---- predicate -> SQL ---------------------------------------------------------
 
-void pred_sql(const Pred &p, View view, std::string &sql,
-              std::vector<SqlValue> &args) {
+bool is_kind_field(const std::string &field) {
+  return field == "kind" || field == "entity_type";
+}
+
+void pred_sql(const Pred &p, std::string &sql, std::vector<SqlValue> &args) {
   switch (p.op) {
   case PredOp::AllOf:
   case PredOp::AnyOf: {
@@ -69,41 +75,41 @@ void pred_sql(const Pred &p, View view, std::string &sql,
       if (i != 0) {
         sql += joiner;
       }
-      pred_sql(p.kids[i], view, sql, args);
+      pred_sql(p.kids[i], sql, args);
     }
     sql += ")";
     return;
   }
   case PredOp::Not:
     sql += "NOT (";
-    pred_sql(p.kids[0], view, sql, args);
+    pred_sql(p.kids[0], sql, args);
     sql += ")";
     return;
   case PredOp::Eq:
   case PredOp::Ne: {
-    sql += col_expr(p.field, view);
+    sql += col_expr(p.field);
     sql += p.op == PredOp::Eq ? " = ?" : " != ?";
     if (p.int_value.has_value()) {
       args.emplace_back(*p.int_value);
-    } else if (p.field == "kind") {
-      args.emplace_back(kind_value_id(view, p.str_values[0]));
+    } else if (is_kind_field(p.field)) {
+      args.emplace_back(kind_value_id(p.field, p.str_values[0]));
     } else {
       args.emplace_back(p.str_values[0]);
     }
     return;
   }
   case PredOp::Glob:
-    sql += col_expr(p.field, view);
+    sql += col_expr(p.field);
     sql += " GLOB ?";
     args.emplace_back(p.str_values[0]);
     return;
   case PredOp::In: {
-    sql += col_expr(p.field, view);
+    sql += col_expr(p.field);
     sql += " IN (";
     for (size_t i = 0; i < p.str_values.size(); ++i) {
       sql += i == 0 ? "?" : ",?";
-      if (p.field == "kind") {
-        args.emplace_back(kind_value_id(view, p.str_values[i]));
+      if (is_kind_field(p.field)) {
+        args.emplace_back(kind_value_id(p.field, p.str_values[i]));
       } else {
         args.emplace_back(p.str_values[i]);
       }
@@ -142,15 +148,19 @@ std::vector<int64_t> fetch_ids(Storage &db, const std::string &sql,
 struct Stream {
   View view = View::Symbol;
   Shape shape = Shape::Nodes;
-  std::vector<int64_t> ids;      // nodes shape; ascending (dups after union)
+  std::vector<int64_t> ids; // nodes shape; ascending, deduped
   std::vector<std::string> fields;
   std::vector<std::vector<Cell>> rows; // rows shape
   std::vector<int64_t> row_ids;        // per-row id (order_by tie-break)
   bool truncated = false;
-  bool limit_seen = false;
+  // True only while a limit() is in effect with NO cardinality-expanding
+  // stage (nodes/out/in/union) after it -- otherwise finish() re-applies the
+  // default result cap (PR #20 review: an early limit must not disable the
+  // final safety cap).
+  bool limit_in_effect = false;
 };
 
-// Deterministic Cell ordering: null sorts LAST; ints before strings.
+// Deterministic Cell ordering: ints < strings < null.
 int cell_rank(const Cell &c) {
   if (std::holds_alternative<std::nullptr_t>(c)) return 2;
   if (std::holds_alternative<int64_t>(c)) return 0;
@@ -183,8 +193,7 @@ public:
     Stream st;
     st.view = plan.source.kind == SourceKind::Entity ? View::Entity
                                                      : View::Symbol;
-    bool pending_codebase = plan.source.kind == SourceKind::Codebase;
-    if (!pending_codebase) {
+    if (plan.source.kind != SourceKind::Codebase) {
       st.ids = resolve_source(plan.source);
     }
 
@@ -192,10 +201,10 @@ public:
       switch (stage.op) {
       case StageOp::Nodes:
         enumerate(st, stage.pred);
-        pending_codebase = false;
+        st.limit_in_effect = false;
         break;
       case StageOp::ChangeView:
-        st.view = stage.level;
+        change_view(st, stage.level);
         break;
       case StageOp::Where:
         filter(st, *stage.pred);
@@ -203,11 +212,15 @@ public:
       case StageOp::Out:
       case StageOp::In:
         traverse(st, stage);
+        st.limit_in_effect = false;
         break;
       case StageOp::Union:
       case StageOp::Intersect:
       case StageOp::Except:
         set_op(st, stage);
+        if (stage.op == StageOp::Union) {
+          st.limit_in_effect = false;
+        }
         break;
       case StageOp::Select:
         materialize(st, stage.fields);
@@ -237,19 +250,19 @@ private:
   Storage &db_;
   std::map<int64_t, std::optional<std::string>> file_paths_;
 
-  const std::string &join_clause(View view, bool need_entity) {
+  static const std::string &join_clause(bool need_entity) {
     static const std::string entity_join =
         " LEFT JOIN entity_node en ON en.id = s.id";
     static const std::string none;
-    return (view == View::Entity && need_entity) ? entity_join : none;
+    return need_entity ? entity_join : none;
   }
 
-  static bool pred_uses_kind(const Pred &p) {
-    if (p.field == "kind") {
+  static bool pred_uses_entity_type(const Pred &p) {
+    if (p.field == "entity_type") {
       return true;
     }
     for (const auto &k : p.kids) {
-      if (pred_uses_kind(k)) {
+      if (pred_uses_entity_type(k)) {
         return true;
       }
     }
@@ -271,15 +284,42 @@ private:
     return {};
   }
 
+  // view(entity) enforces the typed-view invariant: ids without an
+  // entity_node row are DROPPED, never surfaced as entity rows (PR #20
+  // review). view(symbol) is a pure relabel (every entity id is a symbol id).
+  void change_view(Stream &st, View level) {
+    if (level == View::Entity && st.view != View::Entity) {
+      std::vector<int64_t> kept;
+      for (size_t at = 0; at < st.ids.size(); at += kIdChunk) {
+        const size_t n = std::min(kIdChunk, st.ids.size() - at);
+        std::string sql = "SELECT id FROM entity_node WHERE id IN (" +
+                          placeholders(n) + ") ORDER BY id";
+        std::vector<SqlValue> args;
+        args.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+          args.emplace_back(st.ids[at + i]);
+        }
+        auto part = fetch_ids(db_, sql, args);
+        kept.insert(kept.end(), part.begin(), part.end());
+      }
+      std::sort(kept.begin(), kept.end());
+      kept.erase(std::unique(kept.begin(), kept.end()), kept.end());
+      st.ids = std::move(kept);
+    }
+    st.view = level;
+  }
+
   void enumerate(Stream &st, const std::optional<Pred> &pred) {
     std::string sql = "SELECT s.id FROM symbol s";
     if (st.view == View::Entity) {
       sql += " JOIN entity_node en ON en.id = s.id";
+    } else if (pred && pred_uses_entity_type(*pred)) {
+      sql += join_clause(true);
     }
     std::vector<SqlValue> args;
     if (pred) {
       sql += " WHERE ";
-      pred_sql(*pred, st.view, sql, args);
+      pred_sql(*pred, sql, args);
     }
     sql += " ORDER BY s.id LIMIT ?";
     args.emplace_back(kEnumerateBudget + 1);
@@ -292,8 +332,7 @@ private:
 
   void filter(Stream &st, const Pred &pred) {
     std::vector<int64_t> out;
-    const std::string join =
-        join_clause(st.view, pred_uses_kind(pred));
+    const std::string join = join_clause(pred_uses_entity_type(pred));
     for (size_t at = 0; at < st.ids.size(); at += kIdChunk) {
       const size_t n = std::min(kIdChunk, st.ids.size() - at);
       std::string sql = "SELECT s.id FROM symbol s" + join +
@@ -303,7 +342,7 @@ private:
       for (size_t i = 0; i < n; ++i) {
         args.emplace_back(st.ids[at + i]);
       }
-      pred_sql(pred, st.view, sql, args);
+      pred_sql(pred, sql, args);
       sql += ") ORDER BY s.id";
       auto part = fetch_ids(db_, sql, args);
       out.insert(out.end(), part.begin(), part.end());
@@ -313,6 +352,12 @@ private:
     st.ids = std::move(out);
   }
 
+  // Path-length-window BFS (PR #20 review): a node is emitted iff SOME path
+  // of length d in [min_depth, max_depth] reaches it -- NOT only its shortest
+  // first-discovery depth. There is no cross-level visited set; termination
+  // is guaranteed by the finite max_depth (<= 32) and the state budget
+  // (cumulative level sizes). In a diamond A->B, A->C->B, out(r, 2, 2)
+  // therefore DOES emit B. The stream view follows the relation's layer.
   void traverse(Stream &st, const Stage &stage) {
     const RelationDesc *rel = resolve_relation(stage.relation, st.view);
     const bool entity_layer = rel->layer == View::Entity;
@@ -325,8 +370,8 @@ private:
     std::sort(frontier.begin(), frontier.end());
     frontier.erase(std::unique(frontier.begin(), frontier.end()),
                    frontier.end());
-    std::set<int64_t> visited(frontier.begin(), frontier.end());
-    std::vector<int64_t> results;
+    std::set<int64_t> emitted;
+    int64_t states = 0; // cumulative level sizes, bounded by the budget
 
     for (int64_t depth = 1; depth <= stage.max_depth && !frontier.empty();
          ++depth) {
@@ -346,40 +391,27 @@ private:
       }
       std::sort(level.begin(), level.end());
       level.erase(std::unique(level.begin(), level.end()), level.end());
-      std::vector<int64_t> fresh;
-      for (int64_t id : level) {
-        if (visited.insert(id).second) {
-          fresh.push_back(id);
-          if (static_cast<int64_t>(visited.size()) >
-              kTraverseNodeBudget) {
-            st.truncated = true;
-            break;
-          }
-        }
+      if (states + static_cast<int64_t>(level.size()) >
+          kTraverseNodeBudget) {
+        level.resize(static_cast<size_t>(kTraverseNodeBudget - states));
+        st.truncated = true;
       }
+      states += static_cast<int64_t>(level.size());
       if (depth >= stage.min_depth) {
-        results.insert(results.end(), fresh.begin(), fresh.end());
+        emitted.insert(level.begin(), level.end());
       }
       if (st.truncated) {
         break;
       }
-      frontier = std::move(fresh);
+      frontier = std::move(level);
     }
-    std::sort(results.begin(), results.end());
-    st.ids = std::move(results);
+    st.ids.assign(emitted.begin(), emitted.end());
+    st.view = rel->layer;
   }
 
   void set_op(Stream &st, const Stage &stage) {
     Stream sub = run_plan(*stage.operand);
     st.truncated = st.truncated || sub.truncated;
-    if (stage.op == StageOp::Union) {
-      std::vector<int64_t> merged;
-      merged.reserve(st.ids.size() + sub.ids.size());
-      std::merge(st.ids.begin(), st.ids.end(), sub.ids.begin(), sub.ids.end(),
-                 std::back_inserter(merged));
-      st.ids = std::move(merged);
-      return;
-    }
     auto dedup = [](std::vector<int64_t> v) {
       std::sort(v.begin(), v.end());
       v.erase(std::unique(v.begin(), v.end()), v.end());
@@ -388,7 +420,12 @@ private:
     const std::vector<int64_t> a = dedup(st.ids);
     const std::vector<int64_t> b = dedup(sub.ids);
     std::vector<int64_t> out;
-    if (stage.op == StageOp::Intersect) {
+    // All three are SET operations (PR #20 review: union must not
+    // double-count overlapping ids).
+    if (stage.op == StageOp::Union) {
+      std::set_union(a.begin(), a.end(), b.begin(), b.end(),
+                     std::back_inserter(out));
+    } else if (stage.op == StageOp::Intersect) {
       std::set_intersection(a.begin(), a.end(), b.begin(), b.end(),
                             std::back_inserter(out));
     } else {
@@ -409,9 +446,10 @@ private:
   // Fetch the cells for `fields` for every unique id in st.ids.
   std::map<int64_t, std::vector<Cell>>
   fetch_cells(Stream &st, const std::vector<std::string> &fields) {
-    const bool need_kind =
-        std::find(fields.begin(), fields.end(), "kind") != fields.end();
-    const std::string join = join_clause(st.view, need_kind);
+    const bool need_entity =
+        std::find(fields.begin(), fields.end(), "entity_type") !=
+        fields.end();
+    const std::string join = join_clause(need_entity);
 
     std::vector<int64_t> uniq = st.ids;
     std::sort(uniq.begin(), uniq.end());
@@ -419,7 +457,7 @@ private:
 
     std::string cols;
     for (const auto &f : fields) {
-      cols += ", " + col_expr(f, st.view);
+      cols += ", " + col_expr(f);
     }
 
     std::map<int64_t, std::vector<Cell>> by_id;
@@ -428,6 +466,7 @@ private:
       std::string sql = "SELECT s.id" + cols + " FROM symbol s" + join +
                         " WHERE s.id IN (" + placeholders(n) + ")";
       std::vector<SqlValue> args;
+      args.reserve(n);
       for (size_t i = 0; i < n; ++i) {
         args.emplace_back(uniq[at + i]);
       }
@@ -445,7 +484,9 @@ private:
           if (stq.col_is_null(col)) {
             cells.emplace_back(nullptr);
           } else if (f == "kind") {
-            cells.push_back(kind_name_cell(st.view, stq.col_int64(col)));
+            cells.emplace_back(symbol_kind_name(stq.col_int64(col)));
+          } else if (f == "entity_type") {
+            cells.push_back(entity_type_name_cell(stq.col_int64(col)));
           } else if (f == "file") {
             auto p = file_path(stq.col_int64(col));
             cells.emplace_back(p ? Cell(*p) : Cell(nullptr));
@@ -528,6 +569,7 @@ private:
       return;
     }
     std::vector<size_t> pos;
+    pos.reserve(fields.size());
     for (const auto &f : fields) {
       pos.push_back(static_cast<size_t>(
           std::find(st.fields.begin(), st.fields.end(), f) -
@@ -548,6 +590,7 @@ private:
     std::vector<std::vector<Cell>> rows;
     std::vector<int64_t> row_ids;
     rows.reserve(idx.size());
+    row_ids.reserve(idx.size());
     for (size_t i : idx) {
       rows.push_back(std::move(st.rows[i]));
       row_ids.push_back(st.row_ids[i]);
@@ -556,8 +599,8 @@ private:
     st.row_ids = std::move(row_ids);
   }
 
-  void apply_limit(Stream &st, int64_t n) {
-    st.limit_seen = true;
+  static void apply_limit(Stream &st, int64_t n) {
+    st.limit_in_effect = true;
     if (st.shape == Shape::Nodes) {
       if (static_cast<int64_t>(st.ids.size()) > n) {
         st.ids.resize(n);
@@ -576,6 +619,7 @@ public:
     res.truncated = st.truncated;
     if (st.shape == Shape::Scalar) {
       res.shape = Shape::Scalar;
+      // count() after select carries rows; otherwise ids hold the stream.
       res.scalar = static_cast<int64_t>(st.rows.empty() ? st.ids.size()
                                                         : st.rows.size());
       return res;
@@ -583,7 +627,7 @@ public:
     if (st.shape == Shape::Nodes) {
       materialize(st, {"id", "usr", "name", "kind"});
     }
-    if (!st.limit_seen &&
+    if (!st.limit_in_effect &&
         static_cast<int64_t>(st.rows.size()) > kDefaultResultCap) {
       st.rows.resize(kDefaultResultCap);
       st.row_ids.resize(kDefaultResultCap);
@@ -637,8 +681,6 @@ Result Executor::run(const Plan &plan) {
   const Plan normalized = validate(plan);
   Exec exec(db_);
   Stream st = exec.run_plan(normalized);
-  // A count() plan may have carried rows (count after select is rejected by
-  // validate, so ids/rows hold the countable stream either way).
   Result res = exec.finish(std::move(st));
   return res;
 }
