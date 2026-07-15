@@ -1,15 +1,16 @@
-// S07 tests — args grammar (argparse parity, D6 no-abbreviation delta),
+// S07 tests — args grammar (CLI11-based parser: usage/help/error text is
+// CLI11's native formatting; the Python-argparse transcription is retired),
 // cli/format, add-source, and the query commands' golden outputs (hermetic,
 // label "default"); cmd_import needs CompileDb::load
 // (clang::tooling::JSONCompilationDatabase) and lives in doctest suite "clang"
 // (label "clang") using the linked Clang C++ API.
 //
-// Every expected output string below was captured from the Python tool
-// (python3 -m indexer ..., Python 3.14, COLUMNS=80) run against a DB seeded
-// with EXACTLY the rows seed_gold() writes; the command is cited next to
-// each expectation. {ROOT}/{T} placeholders are substituted with the
-// runtime temp paths — the formats (widths, marks, counts) are what is
-// golden-locked.
+// Args-grammar expectations were captured from the CLI11-based cidx binary
+// (vendored third_party/CLI11.hpp). Command-OUTPUT expectations (tables,
+// show/list formats) are still the Python-tool goldens: captured from
+// python3 -m indexer (Python 3.14, COLUMNS=80) against a DB seeded with
+// EXACTLY the rows seed_gold() writes; {ROOT}/{T} placeholders are
+// substituted with the runtime temp paths.
 #define DOCTEST_CONFIG_IMPLEMENT
 #include "doctest/doctest.h"
 
@@ -305,55 +306,16 @@ struct GoldFixture {
   }
 };
 
-// Usage blocks shared by several expected error messages (transcribed from
-// the captured Python argparse output, COLUMNS=80).
-const char kTopUsage[] =
-    "usage: cidx [-h] [--version]\n"
-    "            "
-    "{init,import,index,resolve,search,analyze,db,component,repo,dir,file,"
-    "symbol,graph,ast,cache}\n"
-    "            ...\n";
+// Usage lines shared by several expected error messages (captured from the
+// CLI11-based parser; UsageError messages are "<Usage line>\n<prog>: error:
+// <detail>\n").
+const char kTopUsage[] = "Usage: cidx [OPTIONS] SUBCOMMAND\n";
 
-// Independent golden transcription of `cidx set -h` (Python 3.14 argparse,
-// COLUMNS=80) — catches drift if the production help_text ever changes.
-const char kSetUsage[] =
-    "usage: cidx file set [-h] [--component NAME] [--file REL_PATH] [--db PATH]\n"
-    "                     [--dry-run]\n"
-    "                     FIELD=VALUE [FIELD=VALUE ...]\n";
+const char kSetUsage[] = "Usage: cidx file set [OPTIONS] ASSIGNMENT...\n";
 
-const char kSetHelp[] =
-    "usage: cidx file set [-h] [--component NAME] [--file REL_PATH] [--db PATH]\n"
-    "                     [--dry-run]\n"
-    "                     FIELD=VALUE [FIELD=VALUE ...]\n"
-    "\n"
-    "positional arguments:\n"
-    "  FIELD=VALUE           attribute assignment, e.g. 'pending=False' "
-    "(fields:\n"
-    "                        pending, indexed)\n"
-    "\n"
-    "options:\n"
-    "  -h, --help            show this help message and exit\n"
-    "  --component NAME, -c NAME\n"
-    "                        restrict to this component's files\n"
-    "  --file REL_PATH       restrict to one file (path relative to component "
-    "root)\n"
-    "  --db PATH             operate on this index DB (default: the standard "
-    "index)\n"
-    "  --dry-run             preview the matches without changing anything\n";
+const char kSearchUsage[] = "Usage: cidx search [OPTIONS] pattern\n";
 
-const char kSearchUsage[] =
-    "usage: cidx search [-h]\n"
-    "                   [--kind "
-    "{class,class-template,constructor,destructor,enum,enum-constant,"
-    "function,function-template,macro,member,method,namespace,struct,"
-    "type-alias,typedef,union,variable}]\n"
-    "                   [--limit N]\n"
-    "                   pattern\n";
-
-const char kListFilesUsage[] =
-    "usage: cidx file list [-h] [--component NAME] [--dir PATH]\n"
-    "                      [--indexed | --pending]\n"
-    "                      [pattern]\n";
+const char kListFilesUsage[] = "Usage: cidx file list [OPTIONS] [pattern]\n";
 
 } // namespace
 
@@ -361,24 +323,19 @@ const char kListFilesUsage[] =
 // Args grammar (default label)
 // ---------------------------------------------------------------------------
 
-TEST_CASE("args: no command -> exit 2, required: command") {
-  // $ python3 -m indexer
+TEST_CASE("args: no command -> exit 2, subcommand required") {
   const ParseFail f = parse_fail({});
   CHECK(f.code == 2);
   CHECK(f.msg == std::string(kTopUsage) +
-                     "cidx: error: the following arguments are required: "
-                     "command\n");
+                     "cidx: error: A subcommand is required\n");
 }
 
-TEST_CASE("args: unknown command -> exit 2, invalid choice") {
-  // $ python3 -m indexer bogus
+TEST_CASE("args: unknown command -> exit 2, named as unrecognized") {
   const ParseFail f = parse_fail({"bogus"});
   CHECK(f.code == 2);
-  CHECK(f.msg ==
-        std::string(kTopUsage) +
-            "cidx: error: argument command: invalid choice: 'bogus' (choose "
-            "from init, import, index, resolve, search, analyze, db, "
-            "component, repo, dir, file, symbol, graph)\n");
+  CHECK(f.msg == std::string(kTopUsage) +
+                     "cidx: error: A subcommand is required "
+                     "(unrecognized: bogus)\n");
 }
 
 TEST_CASE("args: file — REMAINDER captures the op tail verbatim") {
@@ -404,28 +361,18 @@ TEST_CASE("args: file — REMAINDER captures the op tail verbatim") {
 TEST_CASE("args: file — missing target -> exit 2, required positional") {
   const ParseFail f = parse_fail({"file", "flags"});
   CHECK(f.code == 2);
-  CHECK(f.msg ==
-        "usage: cidx file flags [-h] [--db PATH] COMPONENT://PATH ...\n"
-        "cidx file flags: error: the following arguments are required: "
-        "COMPONENT://PATH\n");
+  CHECK(f.msg == "Usage: cidx file flags [OPTIONS] TARGET\n"
+                 "cidx file flags: error: TARGET is required\n");
 }
 
 TEST_CASE("args: file -h returns help text") {
   const cli::ParsedArgs pa = cli::parse_args({"file", "flags", "-h"});
   REQUIRE(pa.help_text);
-  CHECK(*pa.help_text ==
-        "usage: cidx file flags [-h] [--db PATH] COMPONENT://PATH ...\n"
-        "\n"
-        "positional arguments:\n"
-        "  COMPONENT://PATH  file address, e.g. 'mylib://src/foo.c'\n"
-        "  OP                -set-flag FLAG | -unset-flag FLAG | -import-args "
-        "JSON |\n"
-        "                    -dump-args (default when omitted)\n"
-        "\n"
-        "options:\n"
-        "  -h, --help        show this help message and exit\n"
-        "  --db PATH         operate on this index DB (default: the standard "
-        "index)\n");
+  CHECK(pa.help_text->find("Usage: cidx file flags [OPTIONS] TARGET") !=
+        std::string::npos);
+  CHECK(pa.help_text->find("file address, e.g. 'mylib://src/foo.c'") !=
+        std::string::npos);
+  CHECK(pa.help_text->find("--db TEXT") != std::string::npos);
 }
 
 TEST_CASE("args: dump-compile-commands parses the component positional") {
@@ -438,208 +385,157 @@ TEST_CASE("args: dump-compile-commands parses the component positional") {
   const ParseFail f = parse_fail({"component", "compile-commands"});
   CHECK(f.code == 2);
   CHECK(f.msg ==
-        "usage: cidx component compile-commands [-h] [--db PATH] COMPONENT\n"
-        "cidx component compile-commands: error: the following arguments are "
-        "required: COMPONENT\n");
+        "Usage: cidx component compile-commands [OPTIONS] COMPONENT\n"
+        "cidx component compile-commands: error: COMPONENT is required\n");
 }
 
-TEST_CASE("args: unknown flag -> exit 2, TOP-level unrecognized arguments") {
-  // $ python3 -m indexer search foo --bogus
+TEST_CASE("args: unknown flag -> exit 2, unexpected argument") {
   const ParseFail f = parse_fail({"search", "foo", "--bogus"});
   CHECK(f.code == 2);
-  CHECK(f.msg == std::string(kTopUsage) +
-                     "cidx: error: unrecognized arguments: --bogus\n");
+  CHECK(f.msg == std::string(kSearchUsage) +
+                     "cidx search: error: The following argument was not "
+                     "expected: --bogus\n");
 }
 
-TEST_CASE("args: extra positional -> exit 2, unrecognized arguments") {
-  // $ python3 -m indexer show symbol 5 extra
+TEST_CASE("args: extra positional -> exit 2, unexpected argument") {
   const ParseFail f = parse_fail({"symbol", "show", "5", "extra"});
   CHECK(f.code == 2);
-  CHECK(f.msg == std::string(kTopUsage) +
-                     "cidx: error: unrecognized arguments: extra\n");
+  CHECK(f.msg == "Usage: cidx symbol show [OPTIONS] symbol\n"
+                 "cidx symbol show: error: The following argument was not "
+                 "expected: extra\n");
 }
 
-TEST_CASE("args: prefix abbreviation — --lim expands to --limit (allow_abbrev parity)") {
-  // Python argparse (allow_abbrev=True) accepts `--lim` as an unambiguous
-  // prefix of `--limit`. The C++ parser now mirrors this for byte-identical
-  // parity (QD-2 fix, formerly D6 delta). --lim 5 sets limit=5 and does not
-  // raise a UsageError.
-  const auto pa = cli::parse_args({"search", "--lim", "5", "foo"});
-  REQUIRE(!pa.help_text.has_value());
-  CHECK(pa.limit == 5);
+TEST_CASE("args: no prefix abbreviation — --lim is rejected") {
+  // CLI11 matches option names exactly; the argparse allow_abbrev behavior
+  // (--lim expanding to --limit) is retired with the hand-rolled parser.
+  const ParseFail f = parse_fail({"search", "--lim", "5", "foo"});
+  CHECK(f.code == 2);
+  CHECK(f.msg.find("--lim") != std::string::npos);
 }
 
 TEST_CASE("args: missing required positional -> subparser exit 2") {
-  // $ python3 -m indexer search
   const ParseFail f = parse_fail({"search"});
   CHECK(f.code == 2);
   CHECK(f.msg == std::string(kSearchUsage) +
-                     "cidx search: error: the following arguments are "
-                     "required: pattern\n");
+                     "cidx search: error: pattern is required\n");
 }
 
-TEST_CASE("args: subparser required check fires BEFORE top unrecognized") {
-  // $ python3 -m indexer search --bogus
+TEST_CASE("args: unknown flag with missing positional -> both reported") {
   const ParseFail f = parse_fail({"search", "--bogus"});
   CHECK(f.code == 2);
   CHECK(f.msg == std::string(kSearchUsage) +
-                     "cidx search: error: the following arguments are "
-                     "required: pattern\n");
+                     "cidx search: error: pattern is required "
+                     "(unrecognized: --bogus)\n");
 }
 
 TEST_CASE("args: missing required option -> exit 2 (add-source, import)") {
-  // $ python3 -m indexer add-source
   ParseFail f = parse_fail({"component", "add"});
   CHECK(f.code == 2);
-  CHECK(f.msg ==
-        "usage: cidx component add [-h] --path PATH [--name NAME] [--repo REPO]\n"
-        "                          [--kind {repo,external}] [--no-git] "
-        "[--version V]\n"
-        "                          [--no-detect-version]\n"
-        "cidx component add: error: the following arguments are required: "
-        "--path\n");
-  // $ python3 -m indexer import
+  CHECK(f.msg == "Usage: cidx component add [OPTIONS]\n"
+                 "cidx component add: error: --path is required\n");
   f = parse_fail({"import"});
   CHECK(f.code == 2);
-  CHECK(f.msg ==
-        "usage: cidx import [-h] --db DB [--name NAME] [--repo REPO] [--force]\n"
-        "                   [--no-alias]\n"
-        "cidx import: error: the following arguments are required: "
-        "--db\n");
+  CHECK(f.msg == "Usage: cidx import [OPTIONS]\n"
+                 "cidx import: error: --db is required\n");
 }
 
-TEST_CASE("args: option missing its value -> expected one argument") {
-  // $ python3 -m indexer search foo --limit
+TEST_CASE("args: option missing its value -> exit 2") {
   ParseFail f = parse_fail({"search", "foo", "--limit"});
   CHECK(f.code == 2);
   CHECK(f.msg == std::string(kSearchUsage) +
-                     "cidx search: error: argument --limit: expected one "
-                     "argument\n");
-  // $ python3 -m indexer list dirs --component   (short-alias error name)
+                     "cidx search: error: --limit: 1 required INT missing\n");
   f = parse_fail({"dir", "list", "--component"});
   CHECK(f.code == 2);
-  CHECK(f.msg == "usage: cidx dir list [-h] [--component NAME] [pattern]\n"
-                 "cidx dir list: error: argument --component/-c: expected "
-                 "one argument\n");
+  CHECK(f.msg == "Usage: cidx dir list [OPTIONS] [pattern]\n"
+                 "cidx dir list: error: --component: 1 required TEXT "
+                 "missing\n");
 }
 
 TEST_CASE("args: invalid int -> exit 2") {
-  // $ python3 -m indexer search foo --limit xx
   const ParseFail f = parse_fail({"search", "foo", "--limit", "xx"});
   CHECK(f.code == 2);
   CHECK(f.msg == std::string(kSearchUsage) +
-                     "cidx search: error: argument --limit: invalid int "
-                     "value: 'xx'\n");
+                     "cidx search: error: Could not convert: --limit = xx\n");
 }
 
 TEST_CASE("args: invalid choice -> exit 2 (both kind sets)") {
-  // $ python3 -m indexer search foo --kind bogus
   ParseFail f = parse_fail({"search", "foo", "--kind", "bogus"});
   CHECK(f.code == 2);
   CHECK(f.msg ==
         std::string(kSearchUsage) +
-            "cidx search: error: argument --kind: invalid choice: 'bogus' "
-            "(choose from class, class-template, constructor, destructor, "
-            "enum, enum-constant, function, function-template, macro, "
-            "member, method, namespace, struct, type-alias, typedef, union, "
-            "variable)\n");
-  // $ python3 -m indexer add-source --path /tmp --kind bogus
+            "cidx search: error: --kind: bogus not in "
+            "{class,class-template,constructor,destructor,enum,enum-constant,"
+            "function,function-template,macro,member,method,namespace,struct,"
+            "type-alias,typedef,union,variable}\n");
   f = parse_fail({"component", "add", "--path", "/tmp", "--kind", "bogus"});
   CHECK(f.code == 2);
-  CHECK(f.msg ==
-        "usage: cidx component add [-h] --path PATH [--name NAME] [--repo REPO]\n"
-        "                          [--kind {repo,external}] [--no-git] "
-        "[--version V]\n"
-        "                          [--no-detect-version]\n"
-        "cidx component add: error: argument --kind: invalid choice: 'bogus' "
-        "(choose from repo, external)\n");
+  CHECK(f.msg == "Usage: cidx component add [OPTIONS]\n"
+                 "cidx component add: error: --kind: bogus not in "
+                 "{repo,external}\n");
 }
 
 TEST_CASE("args: symbol/file need a sub-command; invalid what -> exit 2") {
-  // $ python3 -m indexer symbol
   ParseFail f = parse_fail({"symbol"});
   CHECK(f.code == 2);
-  CHECK(f.msg == "usage: cidx symbol [-h] {list,ls,show,rm} ...\n"
-                 "cidx symbol: error: the following arguments are required: "
-                 "what\n");
-  // $ python3 -m indexer symbol bogus
+  CHECK(f.msg == "Usage: cidx symbol [OPTIONS] SUBCOMMAND\n"
+                 "cidx symbol: error: A subcommand is required\n");
   f = parse_fail({"symbol", "bogus"});
-  CHECK(f.msg == "usage: cidx symbol [-h] {list,ls,show,rm} ...\n"
-                 "cidx symbol: error: argument what: invalid choice: 'bogus' "
-                 "(choose from list, ls, show, rm)\n");
-  // $ python3 -m indexer file bogus
+  CHECK(f.msg == "Usage: cidx symbol [OPTIONS] SUBCOMMAND\n"
+                 "cidx symbol: error: A subcommand is required "
+                 "(unrecognized: bogus)\n");
   f = parse_fail({"file", "bogus"});
-  CHECK(f.msg == "usage: cidx file [-h] {list,ls,show,flags,set,rm} ...\n"
-                 "cidx file: error: argument what: invalid choice: 'bogus' "
-                 "(choose from list, ls, show, flags, set, rm)\n");
+  CHECK(f.msg == "Usage: cidx file [OPTIONS] SUBCOMMAND\n"
+                 "cidx file: error: A subcommand is required "
+                 "(unrecognized: bogus)\n");
 }
 
 TEST_CASE("args: --indexed and --pending are mutually exclusive (exit 2)") {
-  // $ python3 -m indexer list files --indexed --pending
   ParseFail f = parse_fail({"file", "list", "--indexed", "--pending"});
   CHECK(f.code == 2);
   CHECK(f.msg == std::string(kListFilesUsage) +
-                     "cidx file list: error: argument --pending: not "
-                     "allowed with argument --indexed\n");
-  // $ python3 -m indexer list files --pending --indexed   (order swaps)
+                     "cidx file list: error: --indexed excludes --pending\n");
   f = parse_fail({"file", "list", "--pending", "--indexed"});
   CHECK(f.msg == std::string(kListFilesUsage) +
-                     "cidx file list: error: argument --indexed: not "
-                     "allowed with argument --pending\n");
+                     "cidx file list: error: --indexed excludes --pending\n");
 }
 
 TEST_CASE("args: dir needs a sub-command; invalid what -> exit 2") {
-  // $ python3 -m indexer dir
   ParseFail f = parse_fail({"dir"});
   CHECK(f.code == 2);
-  CHECK(f.msg == "usage: cidx dir [-h] {list,ls,rm} ...\n"
-                 "cidx dir: error: the following arguments are required: "
-                 "what\n");
-  // $ python3 -m indexer dir bogus
+  CHECK(f.msg == "Usage: cidx dir [OPTIONS] SUBCOMMAND\n"
+                 "cidx dir: error: A subcommand is required\n");
   f = parse_fail({"dir", "bogus"});
-  CHECK(f.msg == "usage: cidx dir [-h] {list,ls,rm} ...\n"
-                 "cidx dir: error: argument what: invalid choice: 'bogus' "
-                 "(choose from list, ls, rm)\n");
+  CHECK(f.msg == "Usage: cidx dir [OPTIONS] SUBCOMMAND\n"
+                 "cidx dir: error: A subcommand is required "
+                 "(unrecognized: bogus)\n");
 }
 
-TEST_CASE("args: delete requires one selector (required mutex group)") {
-  // $ python3 -m indexer delete symbol   -> one of --id --name --usr required
+TEST_CASE("args: delete requires one selector (required option group)") {
   ParseFail f = parse_fail({"symbol", "rm"});
   CHECK(f.code == 2);
-  CHECK(f.msg ==
-        "usage: cidx symbol rm [-h] (--id ID | --name NAME | --usr USR)\n"
-        "                      [--component NAME] [--dry-run]\n"
-        "cidx symbol rm: error: one of the arguments --id --name --usr is "
-        "required\n");
+  CHECK(f.msg == "Usage: cidx symbol rm [OPTIONS]\n"
+                 "cidx symbol rm: error: Exactly 1 option from "
+                 "[--id,--name,--usr] is required\n");
   // dir's group is just --id | --path
   f = parse_fail({"dir", "rm"});
-  CHECK(f.msg ==
-        "usage: cidx dir rm [-h] (--id ID | --path PATH) [--component NAME] "
-        "[--dry-run]\n"
-        "cidx dir rm: error: one of the arguments --id --path is "
-        "required\n");
+  CHECK(f.msg == "Usage: cidx dir rm [OPTIONS]\n"
+                 "cidx dir rm: error: Exactly 1 option from "
+                 "[--id,--path] is required\n");
 }
 
 TEST_CASE("args: delete selectors are mutually exclusive (exit 2)") {
-  // $ python3 -m indexer delete component --id 1 --name x
   ParseFail f = parse_fail({"component", "rm", "--id", "1", "--name", "x"});
   CHECK(f.code == 2);
-  CHECK(f.msg ==
-        "usage: cidx component rm [-h] (--id ID | --name NAME | --path PATH)\n"
-        "                         [--dry-run]\n"
-        "cidx component rm: error: argument --name: not allowed with "
-        "argument --id\n");
+  CHECK(f.msg == "Usage: cidx component rm [OPTIONS]\n"
+                 "cidx component rm: error: Exactly 1 option from "
+                 "[--id,--name,--path] is required but 2 were given\n");
 }
 
 TEST_CASE("args: delete --id is int-typed (exit 2 on non-int)") {
-  // $ python3 -m indexer delete file --id notanint
   const ParseFail f = parse_fail({"file", "rm", "--id", "notanint"});
   CHECK(f.code == 2);
-  CHECK(f.msg ==
-        "usage: cidx file rm [-h] (--id ID | --name NAME | --path PATH)\n"
-        "                    [--component NAME] [--dry-run]\n"
-        "cidx file rm: error: argument --id: invalid int value: "
-        "'notanint'\n");
+  CHECK(f.msg == "Usage: cidx file rm [OPTIONS]\n"
+                 "cidx file rm: error: Could not convert: --id = notanint\n");
 }
 
 TEST_CASE("args: delete parses each selector + --component + --dry-run") {
@@ -724,34 +620,29 @@ TEST_CASE("args: ls aliases list") {
 }
 
 TEST_CASE("args: --flag=value, glued -cVALUE, negative limit value") {
-  // $ python3 -m indexer search --kind=function foo   (accepted)
   cli::ParsedArgs pa = cli::parse_args({"search", "--kind=function", "foo"});
   CHECK(*pa.kind == "function");
-  // $ python3 -m indexer list dirs -cmycomp           (accepted)
   pa = cli::parse_args({"dir", "list", "-cmycomp"});
   CHECK(*pa.component == "mycomp");
-  // $ python3 -m indexer search foo --limit -5        (negative number OK)
   pa = cli::parse_args({"search", "foo", "--limit", "-5"});
   CHECK(pa.limit == -5);
-  // Python int() strips whitespace: --limit ' 12 '
-  pa = cli::parse_args({"search", "foo", "--limit", " 12 "});
-  CHECK(pa.limit == 12);
+  // Python int()'s whitespace stripping is retired with the hand-rolled
+  // parser: --limit ' 12 ' is now a conversion error.
+  const ParseFail f = parse_fail({"search", "foo", "--limit", " 12 "});
+  CHECK(f.code == 2);
 }
 
-TEST_CASE(
-    "args: parse_py_int saturates huge positive --limit at INT_MAX (R5)") {
-  // 30-digit limit → saturates to INT_MAX → treated as "show all" (> any
-  // realistic result count).
-  cli::ParsedArgs pa = cli::parse_args(
+TEST_CASE("args: --limit is range-checked, not saturated") {
+  // The hand-rolled parser saturated over-INT_MAX limits; CLI11 rejects
+  // them as conversion errors (exit 2).
+  ParseFail f = parse_fail(
       {"search", "foo", "--limit", "999999999999999999999999999999"});
-  CHECK(pa.limit == std::numeric_limits<int>::max());
+  CHECK(f.code == 2);
+  CHECK(f.msg.find("Could not convert") != std::string::npos);
 
-  // INT_MAX exactly (2^31 - 1) — no saturation needed.
-  pa = cli::parse_args({"search", "foo", "--limit", "2147483647"});
-  CHECK(pa.limit == 2147483647);
-
-  // INT_MAX + 1 (2^31) — saturates to INT_MAX.
-  pa = cli::parse_args({"search", "foo", "--limit", "2147483648"});
+  // INT_MAX exactly (2^31 - 1) still parses.
+  cli::ParsedArgs pa =
+      cli::parse_args({"search", "foo", "--limit", "2147483647"});
   CHECK(pa.limit == 2147483647);
 
   // Negative limits are preserved unchanged (existing negative-slice path).
@@ -784,74 +675,48 @@ TEST_CASE("args: --version sets the version flag (top level only)") {
   CHECK(!pa.version);
 }
 
-TEST_CASE("args: -h returns help text; encounter order vs errors") {
-  // $ python3 -m indexer -h    (full top help, exit 0)
+TEST_CASE("args: -h returns help text; validation beats help") {
+  // $ cidx -h    (full top help, exit 0)
   cli::ParsedArgs pa = cli::parse_args({"-h"});
   REQUIRE(pa.help_text);
-  CHECK(
-      *pa.help_text ==
-      std::string(kTopUsage) +
-          "\n"
-          "cidx command-line skeleton\n"
-          "\n"
-          "positional arguments:\n"
-          "  "
-          "{init,import,index,resolve,search,analyze,db,component,repo,dir,"
-          "file,symbol,graph,ast,cache}\n"
-          "    init                create a blank index database\n"
-          "    import              import a compile_commands.json\n"
-          "    index               index imported C/C++ files\n"
-          "    resolve             finalize cross-repo edges and roll up edge "
-          "counts\n"
-          "    search              fuzzy-search symbols by qualified name\n"
-          "    analyze             run Souffle Datalog analyses over the "
-          "index\n"
-          "    db                  database maintenance (migrate, verify)\n"
-          "    component           manage components (add, list, show, "
-          "set-version,\n"
-          "                        compile-commands, rm)\n"
-          "    repo                group components into repositories; switch "
-          "clones\n"
-          "    dir                 browse or delete indexed directories\n"
-          "    file                manage indexed files (list, show, flags, "
-          "set, rm)\n"
-          "    symbol              inspect indexed symbols (list, show, rm)\n"
-          "    graph               query the relationship graph (callers, "
-          "callees, refs,\n"
-          "                        neighbors, walk, path, hierarchy, "
-          "dispatch)\n"
-          "\n"
-          "options:\n"
-          "  -h, --help            show this help message and exit\n"
-          "  --version             show program's version number and exit\n");
+  CHECK(pa.help_text->find("cidx command-line skeleton") != std::string::npos);
+  CHECK(pa.help_text->find(kTopUsage) != std::string::npos);
+  for (const char *sub :
+       {"init", "import", "index", "resolve", "search", "analyze", "db",
+        "component", "repo", "dir", "file", "symbol", "graph"}) {
+    CHECK(pa.help_text->find(std::string("\n  ") + sub + " ") !=
+          std::string::npos);
+  }
+  CHECK(pa.help_text->find("--version") != std::string::npos);
 
-  // $ python3 -m indexer search -h --kind bogus foo   -> help wins (exit 0)
-  pa = cli::parse_args({"search", "-h", "--kind", "bogus", "foo"});
+  // An invalid option value errors even when -h is present (CLI11 validates
+  // before processing help), regardless of encounter order.
+  ParseFail f = parse_fail({"search", "-h", "--kind", "bogus", "foo"});
+  CHECK(f.code == 2);
+  f = parse_fail({"search", "--kind", "bogus", "-h"});
+  CHECK(f.code == 2);
+
+  // A well-formed invocation with -h yields the subcommand's help.
+  pa = cli::parse_args({"search", "-h"});
   REQUIRE(pa.help_text);
   CHECK(pa.help_text->find("show at most N matches (0 = all; default 25)") !=
         std::string::npos);
 
-  // $ python3 -m indexer search --kind bogus -h       -> error wins (exit 2)
-  const ParseFail f = parse_fail({"search", "--kind", "bogus", "-h"});
-  CHECK(f.code == 2);
-
-  // $ cidx resolve -h: byte-identical to Python's argparse text. resolve takes
-  // no options other than -h (the destructive --rebuild flag was removed in
-  // v0.4.1 — it cleared all edges with no re-extract path).
+  // resolve takes no options other than -h (the destructive --rebuild flag
+  // was removed in v0.4.1 — it cleared all edges with no re-extract path).
   pa = cli::parse_args({"resolve", "-h"});
   REQUIRE(pa.help_text);
   CHECK(*pa.help_text ==
-        "usage: cidx resolve [-h]\n"
+        "finalize cross-repo edges and roll up edge counts\n"
+        "Usage: cidx resolve [OPTIONS]\n"
         "\n"
-        "options:\n"
-        "  -h, --help  show this help message and exit\n");
+        "Options:\n"
+        "  -h,--help                   Print this help message and exit\n");
 
-  // $ python3 -m indexer list files -h                (first usage line
-  // matches the wrapped [--indexed | --pending] block)
+  // Subcommand help carries the full "cidx file list" usage line.
   pa = cli::parse_args({"file", "list", "-h"});
   REQUIRE(pa.help_text);
-  CHECK(pa.help_text->compare(0, std::string(kListFilesUsage).size(),
-                              kListFilesUsage) == 0);
+  CHECK(pa.help_text->find(kListFilesUsage) != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
@@ -882,18 +747,22 @@ TEST_CASE("args: set grammar — assignment positional + component/file/db") {
   CHECK(*pa.index_db == "/tmp/i.db");
   CHECK(pa.dry_run);
 
-  // missing positional -> exit 2, required FIELD=VALUE
+  // missing positional -> exit 2, required ASSIGNMENT
   const ParseFail f = parse_fail({"file", "set", "--component", "demo"});
   CHECK(f.code == 2);
   CHECK(f.msg == std::string(kSetUsage) +
-                     "cidx file set: error: the following arguments are "
-                     "required: FIELD=VALUE\n");
+                     "cidx file set: error: ASSIGNMENT is required\n");
 }
 
-TEST_CASE("args: set -h is byte-identical to Python argparse") {
+TEST_CASE("args: set -h lists the assignment positional and options") {
   cli::ParsedArgs pa = cli::parse_args({"file", "set", "-h"});
   REQUIRE(pa.help_text);
-  CHECK(*pa.help_text == std::string(kSetHelp));
+  CHECK(pa.help_text->find(kSetUsage) != std::string::npos);
+  CHECK(pa.help_text->find("attribute assignment, e.g. 'pending=False' "
+                           "(fields: pending, indexed)") != std::string::npos);
+  for (const char *opt : {"-c,--component", "--file", "--db", "--dry-run"}) {
+    CHECK(pa.help_text->find(opt) != std::string::npos);
+  }
 }
 
 TEST_CASE("args: verify grammar — --component/-c, --all, --db") {
@@ -923,23 +792,14 @@ TEST_CASE("args: verify grammar — --component/-c, --all, --db") {
   CHECK(f.code == 2);
 }
 
-TEST_CASE("args: verify -h is byte-identical to Python argparse") {
-  // Independent golden transcription of `cidx verify -h`
-  // (Python 3.14 argparse, COLUMNS=80).
-  const char kVerifyHelpGolden[] =
-      "usage: cidx db verify [-h] [--component NAME] [--all] [--db PATH]\n"
-      "\n"
-      "options:\n"
-      "  -h, --help            show this help message and exit\n"
-      "  --component NAME, -c NAME\n"
-      "                        restrict to one component (default: all)\n"
-      "  --all                 also list files that exist (default: only "
-      "failures)\n"
-      "  --db PATH             index database (default: the standard cache "
-      "index)\n";
+TEST_CASE("args: verify -h lists its options") {
   cli::ParsedArgs pa = cli::parse_args({"db", "verify", "-h"});
   REQUIRE(pa.help_text);
-  CHECK(*pa.help_text == std::string(kVerifyHelpGolden));
+  CHECK(pa.help_text->find("Usage: cidx db verify [OPTIONS]") !=
+        std::string::npos);
+  CHECK(pa.help_text->find("-c,--component") != std::string::npos);
+  CHECK(pa.help_text->find("--all") != std::string::npos);
+  CHECK(pa.help_text->find("--db") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
@@ -1584,27 +1444,30 @@ TEST_CASE("args: init grammar — --force flag, no positionals") {
   CHECK(pa.command == "init");
   CHECK(pa.force == true);
 
-  // -h returns help text (argparse exit 0 path)
+  // -h returns help text (exit 0 path)
   pa = cli::parse_args({"init", "-h"});
   REQUIRE(pa.help_text.has_value());
   CHECK(*pa.help_text ==
-        "usage: cidx init [-h] [--force]\n"
+        "create a blank index database\n"
+        "Usage: cidx init [OPTIONS]\n"
         "\n"
-        "options:\n"
-        "  -h, --help  show this help message and exit\n"
-        "  --force     overwrite an existing index database\n");
+        "Options:\n"
+        "  -h,--help                   Print this help message and exit\n"
+        "  --force                     overwrite an existing index database\n");
 
-  // unknown flag -> TOP-level unrecognized arguments, exit 2
+  // unknown flag -> unexpected argument, exit 2
   ParseFail f = parse_fail({"init", "--bogus"});
   CHECK(f.code == 2);
-  CHECK(f.msg == std::string(kTopUsage) +
-                     "cidx: error: unrecognized arguments: --bogus\n");
+  CHECK(f.msg == "Usage: cidx init [OPTIONS]\n"
+                 "cidx init: error: The following argument was not expected: "
+                 "--bogus\n");
 
-  // stray positional -> unrecognized arguments, exit 2
+  // stray positional -> unexpected argument, exit 2
   f = parse_fail({"init", "extra"});
   CHECK(f.code == 2);
-  CHECK(f.msg == std::string(kTopUsage) +
-                     "cidx: error: unrecognized arguments: extra\n");
+  CHECK(f.msg == "Usage: cidx init [OPTIONS]\n"
+                 "cidx init: error: The following argument was not expected: "
+                 "extra\n");
 }
 
 TEST_CASE("migrate: missing DB errors; already-current is a no-op (hermetic)") {
@@ -1852,12 +1715,10 @@ TEST_CASE("args: migrate grammar — --db option, -h help") {
 
   pa = cli::parse_args({"db", "migrate", "-h"});
   REQUIRE(pa.help_text.has_value());
-  CHECK(*pa.help_text ==
-        "usage: cidx db migrate [-h] [--db PATH]\n"
-        "\n"
-        "options:\n"
-        "  -h, --help  show this help message and exit\n"
-        "  --db PATH   index database (default: the standard cache index)\n");
+  CHECK(pa.help_text->find("Usage: cidx db migrate [OPTIONS]") !=
+        std::string::npos);
+  CHECK(pa.help_text->find("index database (default: the standard cache "
+                           "index)") != std::string::npos);
 }
 
 TEST_CASE("query-only invocations never create cidx.log (G27/D7)") {
@@ -2328,7 +2189,8 @@ TEST_CASE("args: analyze grammar — flags, defaults, -h help") {
 
   pa = cli::parse_args({"analyze", "-h"});
   REQUIRE(pa.help_text);
-  CHECK(pa.help_text->find("usage: cidx analyze") == 0);
+  CHECK(pa.help_text->find("Usage: cidx analyze [OPTIONS]") !=
+        std::string::npos);
 
   const ParseFail f1 = parse_fail({"analyze", "--jobs"});
   CHECK(f1.code == 2);

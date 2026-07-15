@@ -4,11 +4,10 @@
 //
 // Covers FIVE categories of QA additions (beyond the developer's G1-G13):
 //
-//   GB1  Help-text usage-line continuation indent — each of the 8 subcommands
-//        must align continuation at len("usage: cidx graph <sub> ") spaces.
-//        Catches the `GRAPH_SELECTOR_USAGE_ARGS` macro using a fixed 26-space
-//        indent that is wrong for `refs` (needs 23) and `dispatch` (needs 27).
-//        (Defect: args.cpp:214-219 — file-scoped macro)
+//   GB1  Help text — each graph subcommand's -h output carries its own
+//        "Usage: cidx graph <sub> [OPTIONS]" line plus the shared selector
+//        options (CLI11-generated; the argparse continuation-indent pins are
+//        retired).
 //
 //   GB2  open_graph stat-before-Storage ordering — when index.db does NOT
 //        exist, the C++ tool must emit the NoIndexError message, NOT the
@@ -30,12 +29,9 @@
 //        produces non-deterministic ties.
 //        (QA_DEFECT QD-1; cpp_location: graph/records.hpp:209)
 //
-//   GB5  argparse prefix-abbreviation parity — Python argparse allows unambiguous
-//        abbreviations of long options by default (allow_abbrev=True).  The C++
-//        parser rejects them with exit 2.  For byte-identical parity every
-//        unambiguous prefix (--na, --li, --dep, --tra, --us) must be accepted.
-//        CURRENTLY FAILING: find_long() uses exact-match only (args.cpp:1204).
-//        (QA_DEFECT QD-2; cpp_location: cidx-cpp/src/cli/args.cpp:1204)
+//   GB5  Prefix abbreviations (--na, --li, --dep) are REJECTED with exit 2:
+//        CLI11 matches option names exactly; the argparse allow_abbrev
+//        parity (former QD-2) is retired with the hand-rolled parser.
 //
 // Category: mutation/boundary (role charter §mandatory-test-additions option 3)
 // Framework: doctest (same as all other cidx-cpp tests)
@@ -74,24 +70,6 @@ namespace cli = cidx::cli;
 // ===========================================================================
 
 namespace {
-
-// Count leading spaces in s.
-std::size_t leading_spaces(const std::string &s) {
-  std::size_t n = 0;
-  while (n < s.size() && s[n] == ' ')
-    ++n;
-  return n;
-}
-
-// Return the second line of s (the first continuation line of a usage block).
-std::string second_line(const std::string &s) {
-  auto nl = s.find('\n');
-  if (nl == std::string::npos)
-    return "";
-  auto nl2 = s.find('\n', nl + 1);
-  return s.substr(nl + 1, nl2 == std::string::npos ? std::string::npos
-                                                    : nl2 - nl - 1);
-}
 
 // Seed a minimal graph (A --calls--> B --calls--> C) in an in-memory Storage.
 // Returns the Storage and ids.
@@ -151,60 +129,25 @@ void rm_rf(const std::string &path) {
 //   "refs"     → "usage: cidx graph refs " = 23 chars (macro: 26 — WRONG)
 //   "dispatch" → "usage: cidx graph dispatch " = 27 chars (macro: 26 — WRONG)
 //
-// These tests pin the exact expected leading-space count per subcommand and
-// will FAIL until the macro is fixed with per-subcommand usage strings.
+// CLI11 rewrite: usage lines no longer wrap, so the argparse continuation-
+// indent pins are retired. Instead pin that each subcommand's help carries
+// its own full "Usage: cidx graph <sub> [OPTIONS]" line and the shared
+// selector options.
 
-TEST_CASE("GB1: refs -h continuation indent = 23 spaces") {
-  const auto pa = cli::parse_args({"graph", "refs", "-h"});
-  REQUIRE(pa.help_text);
-  // Second line of help text is the continuation of the usage line.
-  const std::string line2 = second_line(*pa.help_text);
-  // Must align at position 23 (len("usage: cidx graph refs ") = 23).
-  const std::size_t sp = leading_spaces(line2);
-  CHECK_MESSAGE(sp == 23,
-      "refs continuation has " << sp << " spaces but expected 23; "
-      "fix GRAPH_SELECTOR_USAGE_ARGS in args.cpp to use per-subcommand indent");
-}
-
-TEST_CASE("GB1: dispatch -h continuation indent = 27 spaces") {
-  const auto pa = cli::parse_args({"graph", "dispatch", "-h"});
-  REQUIRE(pa.help_text);
-  const std::string line2 = second_line(*pa.help_text);
-  // Must align at position 27 (len("usage: cidx graph dispatch ") = 27).
-  const std::size_t sp = leading_spaces(line2);
-  CHECK_MESSAGE(sp == 27,
-      "dispatch continuation has " << sp << " spaces but expected 27; "
-      "fix GRAPH_SELECTOR_USAGE_ARGS in args.cpp to use per-subcommand indent");
-}
-
-// Regression guard for the already-correct subcommands — must stay correct.
-TEST_CASE("GB1: callers/callees -h continuation indent = 26 spaces") {
-  for (const auto *sub : {"callers", "callees"}) {
+TEST_CASE("GB1: every graph subcommand help has its own usage line") {
+  for (const auto *sub :
+       {"callers", "callees", "refs", "neighbors", "walk", "path",
+        "hierarchy", "dispatch", "definitions"}) {
     INFO("subcommand = " << sub);
     const auto pa = cli::parse_args({"graph", std::string(sub), "-h"});
     REQUIRE(pa.help_text);
-    const std::string line2 = second_line(*pa.help_text);
-    CHECK(leading_spaces(line2) == 26);
-  }
-}
-
-TEST_CASE("GB1: neighbors/hierarchy -h continuation indent = 28 spaces") {
-  for (const auto *sub : {"neighbors", "hierarchy"}) {
-    INFO("subcommand = " << sub);
-    const auto pa = cli::parse_args({"graph", std::string(sub), "-h"});
-    REQUIRE(pa.help_text);
-    const std::string line2 = second_line(*pa.help_text);
-    CHECK(leading_spaces(line2) == 28);
-  }
-}
-
-TEST_CASE("GB1: walk/path -h continuation indent = 23 spaces") {
-  for (const auto *sub : {"walk", "path"}) {
-    INFO("subcommand = " << sub);
-    const auto pa = cli::parse_args({"graph", std::string(sub), "-h"});
-    REQUIRE(pa.help_text);
-    const std::string line2 = second_line(*pa.help_text);
-    CHECK(leading_spaces(line2) == 23);
+    CHECK(pa.help_text->find(std::string("Usage: cidx graph ") + sub +
+                             " [OPTIONS]") != std::string::npos);
+    for (const auto *opt : {"--usr", "--id", "--name", "--db", "--json",
+                            "--limit"}) {
+      INFO("option = " << opt);
+      CHECK(pa.help_text->find(opt) != std::string::npos);
+    }
   }
 }
 
@@ -471,59 +414,25 @@ TEST_CASE("GB4 [QD-1]: Traversal::nodes() preserves BFS insertion order for "
 }
 
 // ===========================================================================
-// GB5: argparse prefix-abbreviation parity (QA_DEFECT QD-2)
-// EXPECTED TO FAIL until args.cpp:1204 find_long() supports abbreviations.
+// GB5: prefix abbreviations are rejected (CLI11 exact-name matching)
 // ===========================================================================
 //
-// Python argparse allows unambiguous prefix abbreviations by default
-// (allow_abbrev=True). For byte-identical parity the C++ parser must accept
-// the same abbreviations with the same semantics. Currently find_long() uses
-// exact-match only (args.cpp comment "exact match only -- no abbreviation (D6)")
-// which causes exit 2 on abbreviated args while Python succeeds (exit 0/1).
-//
-// Confirmed affected:
-//   --na  → --name    (graph callers --na zzznotexist  → py exit=1, cpp exit=2)
-//   --li  → --limit   (graph callees --li 1 --id 6     → py exit=0, cpp exit=2)
-//   --dep → --depth   (graph walk --dep 1 --id N       → py exit=0, cpp exit=2)
-//   --tra → --transitive (graph hierarchy --tra --id N → py exit=0, cpp exit=2)
-//   --us  → --usr     (graph callers --us c:@bogus     → py exit=1, cpp exit=2)
-//
-// Fix required (args.cpp:1204): replace exact find_long() with prefix-match
-// find_long() that returns the option iff exactly one long option starts with
-// the given name (ambiguous = multiple matches → treat as unrecognized, same
-// as Python argparse behaviour).
-TEST_CASE("GB5 [QD-2]: --na is an unambiguous prefix of --name and must parse") {
-  // "graph callers --na foo" — --na uniquely prefixes --name; no other graph
-  // callers option starts with --na. Must parse with name="foo", not fail.
-  const auto pa = cli::parse_args({"graph", "callers", "--na", "foo"});
-  CHECK_MESSAGE(!pa.help_text.has_value(),
-      "QD-2: --na treated as unrecognized (exit 2 in CLI) but Python accepts it "
-      "as --name abbreviation. Fix find_long() in args.cpp:1204.");
-  bool name_set = pa.name.has_value();
-  CHECK_MESSAGE(name_set,
-      "QD-2: pa.name not set from --na abbreviation. Fix find_long() in args.cpp:1204.");
-  if (name_set) {
-    CHECK_MESSAGE(*pa.name == "foo",
-        "QD-2: expected pa.name='foo', got '" << *pa.name << "'");
+// The former argparse allow_abbrev parity (QD-2) is retired with the CLI11
+// rewrite: option names match exactly, so `--na`, `--li`, `--dep` are
+// unrecognized and fail with exit 2.
+TEST_CASE("GB5: prefix abbreviations are rejected with exit 2") {
+  const std::vector<std::vector<std::string>> cases = {
+      {"graph", "callers", "--na", "foo"},
+      {"graph", "callees", "--id", "6", "--li", "1"},
+      {"graph", "walk", "--id", "6", "--dep", "1"},
+  };
+  for (const auto &argv : cases) {
+    INFO("argv[2] = " << argv[2]);
+    try {
+      cli::parse_args(argv);
+      FAIL_CHECK("expected UsageError for abbreviated option");
+    } catch (const cidx::UsageError &e) {
+      CHECK(e.exit_code() == 2);
+    }
   }
-}
-
-TEST_CASE("GB5 [QD-2]: --li is an unambiguous prefix of --limit and must parse") {
-  // "graph callees --id 6 --li 1" — must set graph_limit=1.
-  const auto pa = cli::parse_args({"graph", "callees", "--id", "6", "--li", "1"});
-  CHECK_MESSAGE(!pa.help_text.has_value(),
-      "QD-2: --li treated as unrecognized (exit 2 in CLI) but Python accepts it "
-      "as --limit abbreviation. Fix find_long() in args.cpp:1204.");
-  CHECK_MESSAGE(pa.graph_limit == 1,
-      "QD-2: expected graph_limit=1 from --li 1 abbreviation, got " << pa.graph_limit);
-}
-
-TEST_CASE("GB5 [QD-2]: --dep is an unambiguous prefix of --depth and must parse") {
-  // "graph walk --id 6 --dep 1" — must set graph_depth=1.
-  const auto pa = cli::parse_args({"graph", "walk", "--id", "6", "--dep", "1"});
-  CHECK_MESSAGE(!pa.help_text.has_value(),
-      "QD-2: --dep treated as unrecognized (exit 2 in CLI) but Python accepts it "
-      "as --depth abbreviation. Fix find_long() in args.cpp:1204.");
-  CHECK_MESSAGE(pa.graph_depth == 1,
-      "QD-2: expected graph_depth=1 from --dep 1 abbreviation, got " << pa.graph_depth);
 }
