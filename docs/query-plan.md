@@ -2,6 +2,7 @@
 
 Status: implemented (v1 slice) — C++ `src/query/`, Python `python/indexer/queryplan.py`.
 Design source: wiki `pages/planning/cidx-query-language` (Lang-2 unified declarative query API).
+Usage guide with runnable samples: [query-dsl.md](query-dsl.md), `examples/queryplan/`.
 
 The stable product is the normalized **QueryPlan IR** plus its relation catalog and
 result shapes. The C++ builder, the Python builder, and (later) the textual CXQ

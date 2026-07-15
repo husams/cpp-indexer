@@ -348,5 +348,20 @@ set_target_properties(cidx-astgraph PROPERTIES
   INSTALL_RPATH_USE_LINK_PATH ON
 )
 
+# Example programs (examples/). OFF by default: they are documentation-grade
+# samples, not part of the product build.
+option(CIDX_BUILD_EXAMPLES "Build example programs under examples/" OFF)
+if(CIDX_BUILD_EXAMPLES)
+  add_executable(cidx-queryplan-example examples/queryplan/queryplan_example.cpp)
+  target_compile_options(cidx-queryplan-example PRIVATE -Wall -Wextra)
+  target_link_libraries(cidx-queryplan-example PRIVATE cidx_core)
+  # Same dynamic Clang/LLVM link model as the cidx target (see its note).
+  set_target_properties(cidx-queryplan-example PROPERTIES
+    BUILD_RPATH "${LLVM_LIBRARY_DIR}"
+    INSTALL_RPATH "${LLVM_LIBRARY_DIR}"
+    INSTALL_RPATH_USE_LINK_PATH ON
+  )
+endif()
+
 enable_testing()
 add_subdirectory(tests)

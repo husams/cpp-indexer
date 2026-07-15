@@ -21,6 +21,8 @@ per component plus a few cross-cutting pages. Start with the
 | [Data flow](data-flow.md) | end-to-end pipeline, the index sequence, the per-file interleave, the resolve pass |
 | [Build & platforms](build.md) | CMake, macOS/RHEL, the Clang C++ API link model |
 | [Glossary](glossary.md) | USR, Layer-0/1, driver introspection, stub, multi_def |
+| [Query DSL guide](query-dsl.md) | using the CXQ QueryPlan pipeline DSL from C++ and Python, with runnable samples |
+| [QueryPlan contract](query-plan.md) | the normative CXQ spec: IR grammar, canonical JSON, validation codes, execution semantics |
 | [Improvement roadmap](improvements/README.md) | prioritized follow-on work, with adoption gates |
 
 ## Modules (`src/`)

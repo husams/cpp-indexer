@@ -43,6 +43,14 @@ subcommands. Anything the CLI prints, you can compute (and post-process) here.
 | `05_json_export.py`       | `.to_dict()` → stable JSON for piping into other tools / languages |
 | `06_model_layer.py`       | the high-level model: typed entities (`Function`/`Method`/`Class`/…) with semantic properties instead of graph verbs |
 | `07_devirtualization.py`  | two-phase devirtualized callgraph: `Method.dispatch_selection()` selection map + `Callable.devirtualized_callgraph(prune=True)` Γ type-pruning |
+| `08_queryplan_basics.py`  | the CXQ QueryPlan DSL (`indexer.queryplan`): build a `start(...) \| stage \| ...` pipeline, canonical JSON IR, run it, `where()` filters, stable `E_*` validation errors |
+| `09_queryplan_advanced.py`| QueryPlan continued: `codebase()` enumeration, the entity view + `entity_type`, depth windows, `union_`/`intersect`/`except_` set algebra, budgets & `truncated` |
+
+The QueryPlan scripts (08–09) target the repo's checked-in self-index
+(`<repo>/index.db`) by default so they run out of the box; set `CIDX_DB` to
+point them at another index. Guide: [`docs/query-dsl.md`](../../docs/query-dsl.md);
+contract: [`docs/query-plan.md`](../../docs/query-plan.md); the C++ twin lives in
+[`examples/queryplan/`](../../examples/queryplan/README.md).
 
 ## The data model in one paragraph
 
