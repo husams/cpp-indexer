@@ -166,6 +166,65 @@ struct TemplateArg {
   std::optional<std::string> literal;
 };
 
+// -- v30 signature/type tier records -------------------------------------------
+
+// One normalized type shape (type_node row). Identity is `type_key`, a
+// deterministic structural encoding of the Clang type (see ast/type_graph.cpp
+// for the grammar); `spelling` is display-only. `decl_usr` names the
+// record/enum/alias declaration this layer resolves to (NULL for builtins,
+// pointers, ...). `canonical_id` links a sugared node to its canonical shape
+// (NULL when the node is itself canonical).
+struct TypeNode {
+  int64_t id = -1;
+  std::string type_key;
+  std::string spelling;
+  int64_t kind = 0; // type_kind.id (1=builtin .. 11=other)
+  bool is_const = false;
+  bool is_volatile = false;
+  bool is_restrict = false;
+  std::optional<std::string> decl_usr;
+  std::optional<int64_t> canonical_id;
+};
+
+// type_kind ids (seeded in the type_kind table; mirrored in storage.py)
+inline constexpr int64_t kTypeKindBuiltin = 1;
+inline constexpr int64_t kTypeKindRecord = 2;
+inline constexpr int64_t kTypeKindEnum = 3;
+inline constexpr int64_t kTypeKindAlias = 4;
+inline constexpr int64_t kTypeKindPointer = 5;
+inline constexpr int64_t kTypeKindLValueRef = 6;
+inline constexpr int64_t kTypeKindRValueRef = 7;
+inline constexpr int64_t kTypeKindArray = 8;
+inline constexpr int64_t kTypeKindFunction = 9;
+inline constexpr int64_t kTypeKindTemplateParam = 10;
+inline constexpr int64_t kTypeKindOther = 11;
+
+// type_edge kinds (seeded in type_edge_kind; mirrored in storage.py)
+inline constexpr int64_t kTypeEdgePointee = 1;      // pointer/reference -> inner
+inline constexpr int64_t kTypeEdgeElement = 2;      // array -> element
+inline constexpr int64_t kTypeEdgeAliasOf = 3;      // alias -> one-step target
+inline constexpr int64_t kTypeEdgeReturnType = 4;   // function type -> return
+inline constexpr int64_t kTypeEdgeParamType = 5;    // function type -> param i
+inline constexpr int64_t kTypeEdgeTemplateArg = 6;  // specialization -> arg i
+
+// symbol_type kinds (seeded in symbol_type_kind; mirrored in storage.py)
+inline constexpr int64_t kSymbolTypeReturns = 1;    // callable -> return type
+inline constexpr int64_t kSymbolTypeOfType = 2;     // variable/field -> type
+inline constexpr int64_t kSymbolTypeUnderlying = 3; // typedef/alias -> target
+
+// One parameter of a callable symbol. Identity is (owner_id, position); the
+// name and source site are optional attributes (unnamed parameters, built
+// declarations). type_id points into type_node.
+struct Parameter {
+  int64_t owner_id = -1;
+  int64_t position = 0;
+  std::optional<std::string> name;
+  std::optional<int64_t> type_id;
+  std::optional<int64_t> file_id;
+  std::optional<int64_t> line;
+  std::optional<int64_t> col;
+};
+
 struct Stats {
   int64_t components = 0;
   int64_t directories = 0;

@@ -85,6 +85,7 @@ DeclarationEdgeVisitor::DeclarationEdgeVisitor(clang::ASTContext &context, EdgeS
     : context_(context), source_manager_(context.getSourceManager()),
       sink_(sink), mint_(context, sink), targ_encoder_(context, sink),
       minter_(context, sink, mint_, targ_encoder_),
+      types_(context, sink),
       target_file_(std::move(target_file)), file_id_(file_id) {}
 
 // Signature-level uses(7): return + parameter types (emit_type_use in the
@@ -108,6 +109,37 @@ void DeclarationEdgeVisitor::emit_signature_uses(const clang::FunctionDecl *fn) 
   for (const clang::ParmVarDecl *p : fn->parameters())
     emit_type_use(sink_, *fn_sym, p->getType(), file_id_,
                   expansion_loc(context_, p->getLocation()), 0);
+  emit_signature_types(fn, *fn_sym);
+}
+
+// v30 signature/type tier: returns relation + one parameter row per position
+// (wholesale refresh, so a signature change never leaves stale rows).
+// Constructors/destructors record parameters but no return type.
+void DeclarationEdgeVisitor::emit_signature_types(const clang::FunctionDecl *fn,
+                                                  int64_t fn_sym) {
+  if (!llvm::isa<clang::CXXConstructorDecl>(fn) &&
+      !llvm::isa<clang::CXXDestructorDecl>(fn)) {
+    if (const auto ret = types_.intern(fn->getReturnType()))
+      sink_.add_symbol_type(fn_sym, kSymTypeReturnsK, *ret);
+  }
+  std::vector<ParameterRecord> params;
+  params.reserve(fn->getNumParams());
+  for (unsigned i = 0; i < fn->getNumParams(); ++i) {
+    const clang::ParmVarDecl *p = fn->getParamDecl(i);
+    ParameterRecord rec;
+    rec.position = i;
+    if (!p->getName().empty())
+      rec.name = p->getNameAsString();
+    rec.type_id = types_.intern(p->getType());
+    const ExpansionLoc loc = expansion_loc(context_, p->getLocation());
+    if (loc.file == target_file_) {
+      rec.file_id = file_id_;
+      rec.line = loc.line;
+      rec.col = loc.col;
+    }
+    params.push_back(std::move(rec));
+  }
+  sink_.replace_parameters(fn_sym, params);
 }
 
 bool DeclarationEdgeVisitor::in_walk(const clang::Decl *decl) const {
@@ -273,9 +305,12 @@ bool DeclarationEdgeVisitor::VisitFieldDecl(clang::FieldDecl *decl) {
   // FIELD_DECL branch: mint the X<B> instance FIRST, then the structural
   // uses(7) field -> its declared type.
   minter_.mint_instance_from_type(decl->getType());
-  if (const auto self = sink_.lookup_symbol_id(member_usr))
+  if (const auto self = sink_.lookup_symbol_id(member_usr)) {
     emit_type_use(sink_, *self, decl->getType(), file_id_,
                   expansion_loc(context_, decl->getLocation()), 0);
+    if (const auto tid = types_.intern(decl->getType()))
+      sink_.add_symbol_type(*self, kSymTypeOfTypeK, *tid);
+  }
   emit_lookup_edge(member_usr, usr_of(decl->getParent()), 8);
   return true;
 }
@@ -293,6 +328,8 @@ bool DeclarationEdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
     return true;
   emit_type_use(sink_, *self, decl->getType(), file_id_,
                 expansion_loc(context_, decl->getLocation()), 0);
+  if (const auto tid = types_.intern(decl->getType()))
+    sink_.add_symbol_type(*self, kSymTypeOfTypeK, *tid);
   // v27: out-of-line static DATA MEMBER definition — a per-backend body.
   if (decl->isThisDeclarationADefinition() == clang::VarDecl::Definition &&
       decl->isStaticDataMember())
@@ -386,9 +423,12 @@ bool DeclarationEdgeVisitor::VisitTypedefNameDecl(clang::TypedefNameDecl *decl) 
   if (usr.empty())
     return true;
   minter_.mint_named_instance(decl); // minted FIRST (order-dependent)
-  if (const auto self = sink_.lookup_symbol_id(usr))
+  if (const auto self = sink_.lookup_symbol_id(usr)) {
     emit_type_use(sink_, *self, decl->getUnderlyingType(), file_id_,
                   expansion_loc(context_, decl->getLocation()), 0);
+    if (const auto tid = types_.intern(decl->getUnderlyingType()))
+      sink_.add_symbol_type(*self, kSymTypeUnderlyingK, *tid);
+  }
   return true;
 }
 

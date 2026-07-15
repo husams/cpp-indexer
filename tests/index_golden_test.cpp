@@ -129,7 +129,8 @@ std::string dump(SqliteDb &db, const char *name, const char *sql, int ncols) {
   return out;
 }
 
-// Normalized, ordered projection of the seven Layer-0 tables. Every surrogate
+// Normalized, ordered projection of the Layer-0 tables (the original seven
+// plus the v30 type_node/type_edge/parameter/symbol_type tier). Every surrogate
 // key is resolved to a stable semantic key and every row set is ORDERed so the
 // output is independent of AST-traversal insertion order.
 std::string project_layer0(const std::string &index_path) {
@@ -213,6 +214,47 @@ std::string project_layer0(const std::string &index_path) {
               "LEFT JOIN symbol rs ON rs.id = ta.ref_id "
               "ORDER BY os.usr, ta.position",
               5);
+
+  // v30 signature/type tier: type_node ids resolve to type_key (the stable
+  // structural identity), symbols to USR, kinds to their seed names.
+  out += dump(db, "type_node",
+              "SELECT tn.type_key, tn.spelling, "
+              "COALESCE(tk.name, CAST(tn.kind AS TEXT)), "
+              "tn.is_const, tn.is_volatile, tn.is_restrict, "
+              "COALESCE(tn.decl_usr,''), COALESCE(cn.type_key,'') "
+              "FROM type_node tn LEFT JOIN type_kind tk ON tk.id = tn.kind "
+              "LEFT JOIN type_node cn ON cn.id = tn.canonical_id "
+              "ORDER BY tn.type_key",
+              8);
+
+  out += dump(db, "type_edge",
+              "SELECT sn.type_key, "
+              "COALESCE(tek.name, CAST(te.kind AS TEXT)), te.position, "
+              "dn.type_key "
+              "FROM type_edge te JOIN type_node sn ON sn.id = te.src_id "
+              "JOIN type_node dn ON dn.id = te.dst_id "
+              "LEFT JOIN type_edge_kind tek ON tek.id = te.kind "
+              "ORDER BY sn.type_key, te.kind, te.position, dn.type_key",
+              4);
+
+  out += dump(db, "parameter",
+              "SELECT s.usr, p.position, COALESCE(p.name,''), "
+              "COALESCE(tn.type_key,''), COALESCE(f.name,''), "
+              "COALESCE(p.line,''), COALESCE(p.col,'') "
+              "FROM parameter p JOIN symbol s ON s.id = p.owner_id "
+              "LEFT JOIN type_node tn ON tn.id = p.type_id "
+              "LEFT JOIN file f ON f.id = p.file_id "
+              "ORDER BY s.usr, p.position",
+              7);
+
+  out += dump(db, "symbol_type",
+              "SELECT s.usr, COALESCE(stk.name, CAST(st.kind AS TEXT)), "
+              "tn.type_key "
+              "FROM symbol_type st JOIN symbol s ON s.id = st.symbol_id "
+              "JOIN type_node tn ON tn.id = st.type_id "
+              "LEFT JOIN symbol_type_kind stk ON stk.id = st.kind "
+              "ORDER BY s.usr, st.kind",
+              3);
 
   return out;
 }

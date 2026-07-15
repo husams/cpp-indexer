@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -490,6 +490,77 @@ CREATE TABLE IF NOT EXISTS possible_call (
 );
 CREATE INDEX IF NOT EXISTS idx_possible_call_src ON possible_call(src_def_id);
 CREATE INDEX IF NOT EXISTS idx_possible_call_dst ON possible_call(dst_def_id);
+
+-- ---- v30: signature/type tier (parameters + normalized types) ---------------
+-- Written ONLY by the C++ LibTooling indexer; Python is read/storage parity.
+-- Mirrors src/storage/storage.cpp byte-for-byte.
+
+CREATE TABLE IF NOT EXISTS type_kind (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO type_kind (id, name) VALUES
+  (1,'builtin'), (2,'record'), (3,'enum'), (4,'alias'),
+  (5,'pointer'), (6,'lvalue-reference'), (7,'rvalue-reference'),
+  (8,'array'), (9,'function'), (10,'template-param'), (11,'other');
+
+CREATE TABLE IF NOT EXISTS type_node (
+    id           INTEGER PRIMARY KEY,
+    type_key     TEXT NOT NULL UNIQUE,
+    spelling     TEXT NOT NULL,
+    kind         INTEGER NOT NULL,   -- type_kind.id (no FK: seed-only)
+    is_const     INTEGER NOT NULL DEFAULT 0,
+    is_volatile  INTEGER NOT NULL DEFAULT 0,
+    is_restrict  INTEGER NOT NULL DEFAULT 0,
+    decl_usr     TEXT,
+    canonical_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_type_node_decl_usr ON type_node(decl_usr);
+CREATE INDEX IF NOT EXISTS idx_type_node_canonical ON type_node(canonical_id);
+
+CREATE TABLE IF NOT EXISTS type_edge_kind (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO type_edge_kind (id, name) VALUES
+  (1,'pointee'), (2,'element_type'), (3,'alias_of'),
+  (4,'return_type'), (5,'param_type'), (6,'template_argument_type');
+
+CREATE TABLE IF NOT EXISTS type_edge (
+    src_id   INTEGER NOT NULL REFERENCES type_node(id) ON DELETE CASCADE,
+    kind     INTEGER NOT NULL,   -- type_edge_kind.id (no FK: seed-only)
+    position INTEGER NOT NULL DEFAULT 0,
+    dst_id   INTEGER NOT NULL REFERENCES type_node(id) ON DELETE CASCADE,
+    PRIMARY KEY (src_id, kind, position)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_type_edge_dst ON type_edge(dst_id);
+
+CREATE TABLE IF NOT EXISTS parameter (
+    owner_id INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    name     TEXT,
+    type_id  INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    file_id  INTEGER REFERENCES file(id) ON DELETE SET NULL,
+    line     INTEGER,
+    col      INTEGER,
+    PRIMARY KEY (owner_id, position)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_parameter_type ON parameter(type_id);
+
+CREATE TABLE IF NOT EXISTS symbol_type_kind (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO symbol_type_kind (id, name) VALUES
+  (1,'returns'), (2,'of_type'), (3,'underlying_type');
+
+CREATE TABLE IF NOT EXISTS symbol_type (
+    symbol_id INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+    kind      INTEGER NOT NULL,   -- symbol_type_kind.id (no FK: seed-only)
+    type_id   INTEGER NOT NULL REFERENCES type_node(id) ON DELETE CASCADE,
+    PRIMARY KEY (symbol_id, kind)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_symbol_type_type ON symbol_type(type_id);
 
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');
 """
@@ -1613,6 +1684,12 @@ class Storage:
                 )
                 self._conn.execute("DELETE FROM template_arg WHERE arg_kind = 0")
                 changed = True
+        if "type_node" not in tables:
+            # v29 -> v30: signature/type tier (type_node/type_edge/parameter/
+            # symbol_type + seed tables). All created by the schema script
+            # (CREATE TABLE IF NOT EXISTS); no backfill is possible from stored
+            # rows -- a C++ reindex populates them. Mirrors storage.cpp.
+            changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates
             # the tables + indexes + seeds edge_kind; nothing to backfill from

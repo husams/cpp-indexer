@@ -9,7 +9,7 @@ canonical codes exactly once, disambiguating the overloaded 3 by owner kind.
 
 import sqlite3
 
-from indexer.storage import Storage
+from indexer.storage import SCHEMA_VERSION, Storage
 
 
 def _make_v28(path: str) -> None:
@@ -58,7 +58,7 @@ def test_v28_to_v29_remaps_arg_kind(tmp_path):
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
     conn.close()
-    assert ver == "29"
+    assert ver == str(SCHEMA_VERSION)  # migrated DB is stamped current
 
     kinds = _kinds(path)
     assert kinds[(1, 0)] == 4

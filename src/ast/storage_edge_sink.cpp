@@ -148,6 +148,47 @@ void StorageEdgeSink::add_template_arg(const TemplateArgRecord &arg) {
   db_.add_template_arg(a);
 }
 
+int64_t StorageEdgeSink::intern_type_node(const TypeNodeRecord &node) {
+  cidx::TypeNode n;
+  n.type_key = node.type_key;
+  n.spelling = node.spelling;
+  n.kind = node.kind;
+  n.is_const = node.is_const;
+  n.is_volatile = node.is_volatile;
+  n.is_restrict = node.is_restrict;
+  n.decl_usr = node.decl_usr;
+  n.canonical_id = node.canonical_id;
+  return db_.intern_type_node(n);
+}
+
+void StorageEdgeSink::add_type_edge(int64_t src_id, int64_t kind,
+                                    int64_t position, int64_t dst_id) {
+  db_.add_type_edge(src_id, kind, position, dst_id);
+}
+
+void StorageEdgeSink::replace_parameters(
+    int64_t owner_id, const std::vector<ParameterRecord> &params) {
+  std::vector<cidx::Parameter> rows;
+  rows.reserve(params.size());
+  for (const ParameterRecord &p : params) {
+    cidx::Parameter row;
+    row.owner_id = owner_id;
+    row.position = p.position;
+    row.name = p.name;
+    row.type_id = p.type_id;
+    row.file_id = p.file_id;
+    row.line = p.line;
+    row.col = p.col;
+    rows.push_back(std::move(row));
+  }
+  db_.replace_parameters(owner_id, rows);
+}
+
+void StorageEdgeSink::add_symbol_type(int64_t symbol_id, int64_t kind,
+                                      int64_t type_id) {
+  db_.add_symbol_type(symbol_id, kind, type_id);
+}
+
 std::optional<int64_t>
 StorageEdgeSink::file_id_for_path(const std::string &path) {
   const auto row = db_.get_file(path);

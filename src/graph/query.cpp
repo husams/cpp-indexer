@@ -719,6 +719,95 @@ std::vector<Definition> GraphQuery::possible_callees(int64_t sym_id) {
   return defs_from_rows(*this, db_.possible_callees_of(sym_id), files());
 }
 
+// ---- v30 signature/type tier ------------------------------------------------
+
+namespace {
+// type_kind.id -> name; hard-coded like edge_kinds_map (same seed values as
+// the storage type_kind table / storage.py).
+const std::map<int64_t, std::string> &type_kind_names() {
+  static const std::map<int64_t, std::string> m = {
+      {1, "builtin"}, {2, "record"}, {3, "enum"},
+      {4, "alias"},   {5, "pointer"}, {6, "lvalue-reference"},
+      {7, "rvalue-reference"}, {8, "array"}, {9, "function"},
+      {10, "template-param"}, {11, "other"},
+  };
+  return m;
+}
+} // namespace
+
+std::optional<GraphQuery::TypeInfo> GraphQuery::type_info(int64_t type_id) {
+  const std::optional<TypeNode> n = db_.type_node_by_id(type_id);
+  if (!n) {
+    return std::nullopt;
+  }
+  TypeInfo t;
+  t.id = n->id;
+  t.spelling = n->spelling;
+  const auto &names = type_kind_names();
+  const auto it = names.find(n->kind);
+  t.kind = it != names.end() ? it->second : std::to_string(n->kind);
+  if (n->canonical_id) {
+    if (const auto c = db_.type_node_by_id(*n->canonical_id)) {
+      t.canonical = c->spelling;
+    }
+  }
+  return t;
+}
+
+GraphQuery::SignatureInfo GraphQuery::signature(int64_t sym_id) {
+  SignatureInfo out;
+  if (const auto tid = db_.symbol_type_of(sym_id, kSymbolTypeReturns)) {
+    out.returns = type_info(*tid);
+  }
+  for (const Parameter &p : db_.parameters_of(sym_id)) {
+    ParamInfo pi;
+    pi.position = p.position;
+    pi.name = p.name;
+    if (p.type_id) {
+      pi.type = type_info(*p.type_id);
+    }
+    out.params.push_back(std::move(pi));
+  }
+  if (const auto tid = db_.symbol_type_of(sym_id, kSymbolTypeOfType)) {
+    out.of_type = type_info(*tid);
+  }
+  if (const auto tid = db_.symbol_type_of(sym_id, kSymbolTypeUnderlying)) {
+    out.underlying = type_info(*tid);
+  }
+  return out;
+}
+
+std::vector<GraphQuery::TypeUser> GraphQuery::type_users(const std::string &usr,
+                                                         int limit) {
+  std::vector<TypeUser> out;
+  const std::vector<int64_t> tids = db_.type_ids_reaching(usr);
+  if (tids.empty()) {
+    return out;
+  }
+  for (const auto &[owner_id, position] : db_.param_owners_of_types(tids)) {
+    if (static_cast<int>(out.size()) >= limit) {
+      return out;
+    }
+    if (auto s = get_by_id(owner_id)) {
+      out.push_back({std::move(*s), "param", position});
+    }
+  }
+  for (const auto &[sym_id, kind] : db_.symbol_type_owners_of_types(tids)) {
+    if (static_cast<int>(out.size()) >= limit) {
+      return out;
+    }
+    auto s = get_by_id(sym_id);
+    if (!s) {
+      continue;
+    }
+    const std::string role = kind == kSymbolTypeReturns   ? "returns"
+                             : kind == kSymbolTypeOfType  ? "of_type"
+                                                          : "underlying_type";
+    out.push_back({std::move(*s), role, std::nullopt});
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Internal namespace helpers (py_repr_simple for error messages)
 // ---------------------------------------------------------------------------

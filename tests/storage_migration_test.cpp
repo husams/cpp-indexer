@@ -130,7 +130,12 @@ void check_migrated(const std::string &db_path) {
                                          "idx_diagnostic_file",
                                          "idx_entity_edge_identity",
                                          "idx_entity_edge_src",
-                                         "idx_entity_edge_dst", "idx_decl_site_symbol", "idx_definition_symbol", "idx_def_edge_src", "idx_def_edge_dst", "idx_possible_call_src", "idx_possible_call_dst"});
+                                         "idx_entity_edge_dst", "idx_decl_site_symbol", "idx_definition_symbol", "idx_def_edge_src", "idx_def_edge_dst", "idx_possible_call_src", "idx_possible_call_dst",
+                                         "idx_type_node_decl_usr",
+                                         "idx_type_node_canonical",
+                                         "idx_type_edge_dst",
+                                         "idx_parameter_type",
+                                         "idx_symbol_type_type"});
 }
 
 } // namespace
@@ -387,7 +392,7 @@ TEST_CASE("v28 -> v29: template_arg arg_kind remapped to the canonical codes") {
     cidx::Storage db(path); // migration runs here
   }
   cidx::SqliteDb raw(path);
-  CHECK(meta_version(raw) == "29");
+  CHECK(meta_version(raw) == std::to_string(cidx::kSchemaVersion));
   auto q = [&](int owner, int pos) -> std::string {
     auto st = raw.prepare("SELECT arg_kind FROM template_arg WHERE owner_id = " +
                           std::to_string(owner) + " AND position = " +
@@ -416,4 +421,43 @@ TEST_CASE("v28 -> v29: template_arg arg_kind remapped to the canonical codes") {
                          "WHERE owner_id = 1 AND position = 1");
   REQUIRE(st.step());
   CHECK(st.col_text(0) == std::string("3")); // stayed template-template
+}
+
+TEST_CASE("v29 -> v30: signature/type tier tables created, version stamped") {
+  // Simulate a v29 database: a fresh DB with the v30 tables dropped and the
+  // version wound back. Reopening must create the tables (schema script),
+  // stamp v30, and leave existing rows untouched.
+  const std::string tmp = make_temp_dir();
+  const std::string path = tmp + "/v29.db";
+  {
+    cidx::Storage db(path);
+    db.add_component("c", "/data/c");
+  }
+  {
+    cidx::SqliteDb raw(path);
+    raw.exec("DROP TABLE symbol_type");
+    raw.exec("DROP TABLE symbol_type_kind");
+    raw.exec("DROP TABLE parameter");
+    raw.exec("DROP TABLE type_edge");
+    raw.exec("DROP TABLE type_edge_kind");
+    raw.exec("DROP TABLE type_node");
+    raw.exec("DROP TABLE type_kind");
+    raw.exec("UPDATE meta SET value = '29' WHERE key = 'schema_version'");
+  }
+  {
+    cidx::Storage db(path); // migration runs here
+    CHECK(db.get_component_by_name("c").has_value()); // old data intact
+    // The migrated DB accepts the new tier end-to-end.
+    cidx::TypeNode n;
+    n.type_key = "b:int";
+    n.spelling = "int";
+    n.kind = cidx::kTypeKindBuiltin;
+    const int64_t tid = db.intern_type_node(n);
+    CHECK(db.intern_type_node(n) == tid); // interned, not duplicated
+  }
+  cidx::SqliteDb raw(path);
+  CHECK(meta_version(raw) == "30");
+  auto st = raw.prepare("SELECT COUNT(*) FROM type_kind");
+  REQUIRE(st.step());
+  CHECK(st.col_int64(0) == 11); // seed rows present
 }

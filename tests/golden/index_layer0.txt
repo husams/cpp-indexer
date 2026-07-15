@@ -34,3 +34,22 @@ c:@F@square	c:@F@add	calls	math.c	3	28	0	local		c:math.c@69@F@square@x
 c:@F@square	c:@F@add	calls	math.c	3	28	1	local		c:math.c@69@F@square@x		
 == template_arg ==
 c:@S@Box>#I	0	1		int
+== type_node ==
+T:0.0	type-parameter-0-0	template-param	0	0	0		
+a:c:box.cpp@T@IntBox	IntBox	alias	0	0	0	c:box.cpp@T@IntBox	t:c:@S@Box>#I
+b:int	int	builtin	0	0	0		
+t:c:@S@Box>#I	Box<int>	record	0	0	0	c:@S@Box>#I	
+== type_edge ==
+a:c:box.cpp@T@IntBox	alias_of	0	t:c:@S@Box>#I
+t:c:@S@Box>#I	template_argument_type	0	b:int
+== parameter ==
+c:@F@add	0	a	b:int	math.c	2	13
+c:@F@add	1	b	b:int	math.c	2	20
+c:@F@square	0	x	b:int	math.c	3	16
+c:@F@unbox#$@S@Box>#I#	0	b	a:c:box.cpp@T@IntBox	box.cpp	3	18
+== symbol_type ==
+c:@F@add	returns	b:int
+c:@F@square	returns	b:int
+c:@F@unbox#$@S@Box>#I#	returns	b:int
+c:@ST>1#T@Box@FI@item	of_type	T:0.0
+c:box.cpp@T@IntBox	underlying_type	t:c:@S@Box>#I

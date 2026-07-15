@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 29;
+constexpr int kSchemaVersion = 30;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -316,6 +316,35 @@ public:
   // INSERT OR REPLACE keyed on (owner_id, position).
   void add_template_param(const TemplateParam &p);
   void add_template_arg(const TemplateArg &a);
+
+  // -- v30 signature/type tier ------------------------------------------------
+  // Upsert a normalized type-shape row keyed by type_key; returns the stable
+  // type_node.id (existing row wins -- the key encodes the whole shape).
+  int64_t intern_type_node(const TypeNode &n);
+  std::optional<TypeNode> type_node_by_id(int64_t type_id);
+  // INSERT OR IGNORE keyed on (src_id, kind, position).
+  void add_type_edge(int64_t src_id, int64_t kind, int64_t position,
+                     int64_t dst_id);
+  // Wholesale per-owner refresh (DELETE + INSERT): re-index with a changed
+  // arity leaves no stale positions.
+  void replace_parameters(int64_t owner_id,
+                          const std::vector<Parameter> &params);
+  std::vector<Parameter> parameters_of(int64_t symbol_id);
+  // INSERT OR REPLACE keyed on (symbol_id, kind); kind is kSymbolType*.
+  void add_symbol_type(int64_t symbol_id, int64_t kind, int64_t type_id);
+  std::optional<int64_t> symbol_type_of(int64_t symbol_id, int64_t kind);
+  // All type_node ids from which a node naming `decl_usr` is reachable via
+  // type_edge (reverse) or canonical_id links -- the "accepts/returns T
+  // (including const T&, T*, aliases of T, ...)" closure. Ordered by id.
+  std::vector<int64_t> type_ids_reaching(const std::string &decl_usr);
+  // (owner_id, position) of parameters whose type is one of type_ids,
+  // ordered by (owner_id, position).
+  std::vector<std::pair<int64_t, int64_t>>
+  param_owners_of_types(const std::vector<int64_t> &type_ids);
+  // (symbol_id, symbol_type.kind) rows whose type is one of type_ids,
+  // ordered by (symbol_id, kind).
+  std::vector<std::pair<int64_t, int64_t>>
+  symbol_type_owners_of_types(const std::vector<int64_t> &type_ids);
 
   // Delete edges whose src is a symbol defined in this file (idempotent
   // re-index: edges cascade-delete their edge_site rows).

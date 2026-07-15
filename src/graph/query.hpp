@@ -179,6 +179,48 @@ public:
   std::vector<Definition> definitions(int64_t sym_id);
   std::vector<Definition> possible_callees(int64_t sym_id);
 
+  // ---- v30 signature/type tier ----------------------------------------------
+
+  // Display info for one type_node (kind resolved to its name; canonical
+  // spelling attached when the node is sugared).
+  struct TypeInfo {
+    int64_t id = -1;
+    std::string spelling;
+    std::string kind; // type_kind name ("builtin", "record", "alias", ...)
+    std::optional<std::string> canonical; // canonical spelling when sugared
+  };
+  struct ParamInfo {
+    int64_t position = 0;
+    std::optional<std::string> name;
+    std::optional<TypeInfo> type;
+  };
+  // Everything the signature/type tier knows about one symbol. Callables get
+  // returns/params; variables/fields get of_type; typedef/alias symbols get
+  // underlying. Absent facts stay nullopt/empty.
+  struct SignatureInfo {
+    std::optional<TypeInfo> returns;
+    std::vector<ParamInfo> params;
+    std::optional<TypeInfo> of_type;
+    std::optional<TypeInfo> underlying;
+    bool empty() const {
+      return !returns && params.empty() && !of_type && !underlying;
+    }
+  };
+  SignatureInfo signature(int64_t sym_id);
+
+  // One symbol whose signature/type facts reach the queried type: a callable
+  // parameter ("param", with position), a return type ("returns"), a
+  // variable/field type ("of_type"), or an alias target ("underlying_type").
+  struct TypeUser {
+    Sym sym;
+    std::string role;
+    std::optional<int64_t> position; // param role only
+  };
+  // Users of the type named by `usr`, through any number of pointer/
+  // reference/array/alias/template-argument layers. Ordered param rows first
+  // then symbol_type rows (each by symbol id).
+  std::vector<TypeUser> type_users(const std::string &usr, int limit = 500);
+
   // ---- Accessors -----------------------------------------------------------
 
   const std::string &db_path() const { return db_path_; }
@@ -196,6 +238,8 @@ private:
 
   Sym make_sym_from_row(const Storage::GraphEdgeRow &row);
   Sym make_sym_from_symbol(const Symbol &sym);
+  // v30: display info for a type_node id (nullopt when absent).
+  std::optional<TypeInfo> type_info(int64_t type_id);
 
   // Batch-load sites for edge_ids.
   std::map<int64_t, std::vector<Site>>
