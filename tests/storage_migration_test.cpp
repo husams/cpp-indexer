@@ -135,7 +135,12 @@ void check_migrated(const std::string &db_path) {
                                          "idx_type_node_canonical",
                                          "idx_type_edge_dst",
                                          "idx_parameter_type",
-                                         "idx_symbol_type_type"});
+                                         "idx_symbol_type_type",
+                                         "idx_include_config_digest",
+                                         "idx_include_edge_dst",
+                                         "idx_include_edge_config",
+                                         "idx_include_site_edge",
+                                         "idx_include_macro_use_path"});
 }
 
 } // namespace
@@ -456,8 +461,61 @@ TEST_CASE("v29 -> v30: signature/type tier tables created, version stamped") {
     CHECK(db.intern_type_node(n) == tid); // interned, not duplicated
   }
   cidx::SqliteDb raw(path);
-  CHECK(meta_version(raw) == "30");
+  // migrate() stamps kSchemaVersion, not the version of the block that fired:
+  // a v29 DB reopened by a v31 build lands on 31 in one step.
+  CHECK(meta_version(raw) == "31");
   auto st = raw.prepare("SELECT COUNT(*) FROM type_kind");
   REQUIRE(st.step());
   CHECK(st.col_int64(0) == 11); // seed rows present
+}
+
+TEST_CASE("v30 -> v31: include tier tables created, version stamped") {
+  // Simulate a v30 database: a fresh DB with the v31 tables dropped and the
+  // version wound back. Reopening must create the tables (schema script),
+  // stamp v31, and leave existing rows untouched. Include facts are NOT
+  // backfillable -- only a reindex populates them -- so the migrated DB starts
+  // with an empty include graph.
+  const std::string tmp = make_temp_dir();
+  const std::string path = tmp + "/v30.db";
+  int64_t file_id = -1;
+  {
+    cidx::Storage db(path);
+    db.add_component("c", "/data/c");
+    file_id = db.add_file_path("/data/c/main.cpp");
+  }
+  {
+    cidx::SqliteDb raw(path);
+    raw.exec("DROP TABLE include_macro_use");
+    raw.exec("DROP TABLE include_site");
+    raw.exec("DROP TABLE include_directive_kind");
+    raw.exec("DROP TABLE include_edge");
+    raw.exec("DROP TABLE include_config");
+    raw.exec("UPDATE meta SET value = '30' WHERE key = 'schema_version'");
+  }
+  {
+    cidx::Storage db(path); // migration runs here
+    CHECK(db.get_component_by_name("c").has_value()); // old data intact
+    CHECK_FALSE(db.include_graph_populated()); // no backfill is possible
+
+    // The migrated DB accepts the new tier end-to-end.
+    cidx::IncludeConfig cfg;
+    cfg.tu_file_id = file_id;
+    cfg.digest = "deadbeef";
+    cfg.arguments = {"-std=c++23"};
+    const int64_t cid = db.add_include_config(cfg);
+    CHECK(db.add_include_config(cfg) == cid); // upsert, not duplicated
+
+    cidx::IncludeEdge e;
+    e.src_file_id = file_id;
+    e.dst_path = "/data/c/util.hpp";
+    e.config_id = cid;
+    const int64_t eid = db.add_include_edge(e);
+    CHECK(db.add_include_edge(e) == eid); // collapsed onto one row
+    CHECK(db.include_graph_populated());
+  }
+  cidx::SqliteDb raw(path);
+  CHECK(meta_version(raw) == "31");
+  auto st = raw.prepare("SELECT COUNT(*) FROM include_directive_kind");
+  REQUIRE(st.step());
+  CHECK(st.col_int64(0) == 5); // seed rows present
 }

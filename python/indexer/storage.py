@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -561,6 +561,73 @@ CREATE TABLE IF NOT EXISTS symbol_type (
     PRIMARY KEY (symbol_id, kind)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_symbol_type_type ON symbol_type(type_id);
+
+-- ===================== v31: include tier =====================
+-- Preprocessing facts live in their own file domain: `edge` is symbol->symbol
+-- and cannot hold a file->file relation. Extraction is C++-only (LibTooling
+-- PPCallbacks); Python owns storage + read queries only.
+
+CREATE TABLE IF NOT EXISTS include_config (
+    id           INTEGER PRIMARY KEY,
+    tu_file_id   INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    digest       TEXT NOT NULL,
+    driver       TEXT,
+    working_dir  TEXT,
+    arguments    TEXT,   -- JSON list of normalized parse args
+    lang_mode    TEXT,   -- 'c' | 'c++'
+    resource_dir TEXT,
+    UNIQUE (tu_file_id, digest)
+);
+CREATE INDEX IF NOT EXISTS idx_include_config_digest ON include_config(digest);
+
+CREATE TABLE IF NOT EXISTS include_edge (
+    id           INTEGER PRIMARY KEY,
+    src_file_id  INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    dst_file_id  INTEGER REFERENCES file(id) ON DELETE SET NULL,
+    dst_path     TEXT NOT NULL,
+    config_id    INTEGER NOT NULL REFERENCES include_config(id) ON DELETE CASCADE,
+    is_system    INTEGER NOT NULL DEFAULT 0,
+    is_generated INTEGER NOT NULL DEFAULT 0,
+    count        INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (src_file_id, dst_path, config_id)
+);
+CREATE INDEX IF NOT EXISTS idx_include_edge_dst ON include_edge(dst_file_id);
+CREATE INDEX IF NOT EXISTS idx_include_edge_config ON include_edge(config_id);
+
+CREATE TABLE IF NOT EXISTS include_directive_kind (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO include_directive_kind (id, name) VALUES
+  (1,'include'), (2,'include_next'), (3,'import'), (4,'include_macros'),
+  (5,'unknown');
+
+CREATE TABLE IF NOT EXISTS include_site (
+    id               INTEGER PRIMARY KEY,
+    edge_id          INTEGER NOT NULL REFERENCES include_edge(id) ON DELETE CASCADE,
+    line             INTEGER NOT NULL,
+    col              INTEGER NOT NULL,
+    begin_offset     INTEGER NOT NULL,
+    end_offset       INTEGER NOT NULL,
+    spelling         TEXT NOT NULL,   -- as written, without <> or ""
+    is_angled        INTEGER NOT NULL DEFAULT 0,
+    directive        INTEGER NOT NULL DEFAULT 1, -- include_directive_kind.id
+    cond_fingerprint TEXT NOT NULL DEFAULT '',
+    resolved         INTEGER NOT NULL DEFAULT 1,
+    guarded          INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (edge_id, begin_offset)
+);
+CREATE INDEX IF NOT EXISTS idx_include_site_edge ON include_site(edge_id);
+
+CREATE TABLE IF NOT EXISTS include_macro_use (
+    src_file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    def_path    TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    config_id   INTEGER NOT NULL REFERENCES include_config(id) ON DELETE CASCADE,
+    count       INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (src_file_id, def_path, name, config_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_include_macro_use_path ON include_macro_use(def_path);
 
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');
 """
@@ -1689,6 +1756,14 @@ class Storage:
             # symbol_type + seed tables). All created by the schema script
             # (CREATE TABLE IF NOT EXISTS); no backfill is possible from stored
             # rows -- a C++ reindex populates them. Mirrors storage.cpp.
+            changed = True
+        if "include_edge" not in tables:
+            # v30 -> v31: include tier (include_config/include_edge/
+            # include_site/include_macro_use + the directive seed table). All
+            # created by the schema script (CREATE TABLE IF NOT EXISTS).
+            # Preprocessing facts cannot be recovered from stored rows -- only a
+            # C++ reindex populates them, so an upgraded DB has an EMPTY include
+            # graph until `cidx index` reruns. Mirrors storage.cpp.
             changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates

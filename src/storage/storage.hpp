@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 30;
+constexpr int kSchemaVersion = 31;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -350,6 +350,51 @@ public:
   // ordered by (symbol_id, kind).
   std::vector<std::pair<int64_t, int64_t>>
   symbol_type_owners_of_types(const std::vector<int64_t> &type_ids);
+
+  // -- v31 include tier -------------------------------------------------------
+  // Upsert keyed by (tu_file_id, digest); returns the stable include_config.id.
+  // A repeat call refreshes the descriptive columns so a changed driver or
+  // resource dir under an unchanged digest cannot go stale.
+  int64_t add_include_config(const IncludeConfig &c);
+  std::optional<IncludeConfig> include_config_by_id(int64_t config_id);
+  // Configurations whose TU is `tu_file_id`, ordered by digest.
+  std::vector<IncludeConfig> include_configs_for_tu(int64_t tu_file_id);
+
+  // UNIQUE upsert on (src_file_id, dst_path, config_id); ACCUMULATES count on
+  // conflict (a header included twice in one file is two occurrences of one
+  // collapsed edge). dst_file_id is refreshed when the caller now knows it.
+  // Returns the include_edge.id for include_site linkage.
+  int64_t add_include_edge(const IncludeEdge &e);
+  // INSERT OR REPLACE keyed on (edge_id, begin_offset): re-indexing the same
+  // directive rewrites its site rather than duplicating it.
+  int64_t add_include_site(const IncludeSite &s);
+  // INSERT ... ON CONFLICT: accumulates count.
+  void add_include_macro_use(const IncludeMacroUse &m);
+
+  // Drop every include fact recorded FROM this file under every configuration
+  // (edges cascade to their sites). Called before re-recording a file's
+  // directives so a deleted #include leaves no stale row.
+  void delete_include_facts_for_file(int64_t src_file_id);
+  // Drop the configurations owned by this TU (cascades to that TU's edges).
+  void delete_include_configs_for_tu(int64_t tu_file_id);
+
+  // Direct include edges out of / into a file. `include_system` keeps
+  // system-classified targets; otherwise they are filtered. Ordered by
+  // (dst_path, config digest) / (src path, config digest) for determinism.
+  std::vector<IncludeEdge> include_edges_from(int64_t src_file_id,
+                                              bool include_system);
+  std::vector<IncludeEdge> include_edges_to(int64_t dst_file_id);
+  // Every edge whose dst_path resolves to this path (covers targets that are
+  // not owned by a component, which therefore have no dst_file_id).
+  std::vector<IncludeEdge> include_edges_to_path(const std::string &dst_path);
+  // Sites of one collapsed edge, ordered by begin_offset.
+  std::vector<IncludeSite> include_sites_for(int64_t edge_id);
+  // Macros expanded in `src_file_id` that are defined in `def_path`.
+  std::vector<IncludeMacroUse> include_macro_uses(int64_t src_file_id,
+                                                  const std::string &def_path);
+  // True once any include fact exists -- distinguishes "this DB predates the
+  // v31 tier / has not been reindexed" from "this file includes nothing".
+  bool include_graph_populated();
 
   // Delete edges whose src is a symbol defined in this file (idempotent
   // re-index: edges cascade-delete their edge_site rows).

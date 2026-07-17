@@ -176,6 +176,7 @@ add_library(cidx_ast OBJECT
   src/ast/call_template_args.cpp src/ast/display_name_rewrite.cpp
   src/ast/receiver_provenance.cpp src/ast/instantiation_edges.cpp
   src/ast/namespace_use_visitor.cpp src/ast/index_engine.cpp
+  src/ast/include_facts.cpp
   src/ast/clang_version.cpp)
 target_include_directories(cidx_ast PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)

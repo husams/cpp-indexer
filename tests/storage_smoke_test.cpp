@@ -416,7 +416,10 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                         "type_kind", "type_node",
                                         "type_edge_kind", "type_edge",
                                         "parameter", "symbol_type_kind",
-                                        "symbol_type"});
+                                        "symbol_type",
+                                        "include_config", "include_edge",
+                                        "include_directive_kind",
+                                        "include_site", "include_macro_use"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {
@@ -474,7 +477,12 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_type_node_canonical",
                                          "idx_type_edge_dst",
                                          "idx_parameter_type",
-                                         "idx_symbol_type_type"});
+                                         "idx_symbol_type_type",
+                                         "idx_include_config_digest",
+                                         "idx_include_edge_dst",
+                                         "idx_include_edge_config",
+                                         "idx_include_site_edge",
+                                         "idx_include_macro_use_path"});
 
   // meta row + pragma parity (D25: foreign_keys ON, default journal mode)
   {
