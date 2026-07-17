@@ -148,6 +148,21 @@ set_tests_properties(cli_clang_test PROPERTIES
 # ast_query_test / astcache_test removed in the LibTooling cutover: the
 # `cidx ast` command and the AST/PCH cache they exercised were deleted.
 
+# --- include_hygiene_test — the `cidx include` safety bar --------------------
+# The executable spec for planning/cidx-include-hygiene. Mostly asserts that
+# removals do NOT happen (X-macros, macro-only providers, transitive providers,
+# conditional branches): confidently deleting a working #include is this
+# feature's dangerous failure, not a crash. Real parses -> label "clang".
+add_executable(include_hygiene_test include_hygiene_test.cpp)
+target_compile_options(include_hygiene_test PRIVATE -Wall -Wextra)
+target_link_libraries(include_hygiene_test PRIVATE cidx_core)
+
+add_test(NAME include_hygiene_test
+         COMMAND include_hygiene_test --test-suite=clang)
+set_tests_properties(include_hygiene_test PROPERTIES
+  LABELS "clang"
+  SKIP_RETURN_CODE 77)
+
 # --- ast_visitor_test — focused visitor fixtures (refactoring.md Phase 0) -----
 # Pins provenance/template-arg semantics for the src/ast refactor and carries
 # the correction fixtures (doctest should_fail) that Phases 2-3 make true.

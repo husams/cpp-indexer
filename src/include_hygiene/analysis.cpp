@@ -168,18 +168,31 @@ void classify(cidx::Storage &db, const IncludeGraph &graph,
     c.caveats.push_back("source expands macro(s) defined in this header");
   }
 
+  // --- repeated UNGUARDED header: the X-macro pattern -----------------------
+  // e.count is this header's occurrence count in THIS file under THIS
+  // configuration. When an unguarded header is included more than once, every
+  // one of its directives is load-bearing -- the file is deliberately re-read
+  // to expand a redefined macro -- so none of them is ever automatic.
+  //
+  // This must be checked BEFORE the reference rule, and it must cover the FIRST
+  // occurrence too, not just the repeats. The first include of an X-macro
+  // header declares symbols nothing references and compiles fine without it, so
+  // both the reference rule and the compile gate would wave it through while
+  // silently deleting declarations. Guardedness, not compilation, is the only
+  // sound gate here.
+  if (!s.guarded && e.count > 1) {
+    c.cls = Classification::ManualReview;
+    c.caveats.push_back(
+        "UNGUARDED header included " + std::to_string(e.count) +
+        " times in this file: re-inclusion is intentional (X-macro), so no "
+        "occurrence can be removed automatically");
+    return;
+  }
+
   // --- duplicate ------------------------------------------------------------
   if (is_repeat) {
-    if (s.guarded) {
-      c.cls = Classification::Duplicate;
-    } else {
-      // An unguarded header re-read on purpose is the X-macro pattern: the
-      // second include is the whole point. Never automatic.
-      c.cls = Classification::ManualReview;
-      c.caveats.push_back(
-          "repeated include of an UNGUARDED header: re-inclusion is "
-          "intentional (X-macro), removal would change the program");
-    }
+    // Guarded by construction: the unguarded case returned above.
+    c.cls = Classification::Duplicate;
     return;
   }
 
