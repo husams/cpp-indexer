@@ -1,7 +1,6 @@
 #include "include_hygiene/plan.hpp"
 
 #include "cli/json_out.hpp"
-#include "storage/storage.hpp"
 #include "util/errors.hpp"
 #include "util/hashing.hpp"
 #include "util/json_read.hpp"

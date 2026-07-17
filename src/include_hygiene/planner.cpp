@@ -7,7 +7,6 @@
 #include "include_hygiene/validator.hpp"
 #include "storage/storage.hpp"
 #include "util/pathutil.hpp"
-#include "util/repo.hpp"
 
 #include <algorithm>
 #include <ctime>

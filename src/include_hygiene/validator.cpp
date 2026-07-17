@@ -2,7 +2,6 @@
 
 #include "include_hygiene/graph.hpp"
 #include "storage/storage.hpp"
-#include "util/pathutil.hpp"
 
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/DiagnosticOptions.h"
