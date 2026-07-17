@@ -516,6 +516,84 @@ void build_symbol(CLI::App &app, ParsedArgs &pa) {
   });
 }
 
+// Scope selector shared by every include verb: PATH... and/or --files-from.
+// A list file keeps a large or scripted scope off the command line, which
+// matters once a cleanup spans hundreds of files.
+void add_include_scope(CLI::App *sub, ParsedArgs &pa) {
+  sub->add_option("paths", pa.inc_paths,
+                  "files to scope to (default: every indexed file)");
+  sub->add_option("--files-from", pa.files_from,
+                  "read scope paths from FILE, one per line (absolute or "
+                  "relative to the current directory); '-' reads stdin. "
+                  "Blank lines and #-comments are ignored. Combined with any "
+                  "PATH arguments.")
+      ->type_name("FILE");
+  sub->add_option("--db", pa.index_db, "index database (default: the cache)");
+}
+
+void build_include(CLI::App &app, ParsedArgs &pa) {
+  CLI::App *inc = app.add_subcommand(
+      "include", "inspect and clean up #include directives (graph, check, "
+                 "plan, apply)");
+  inc->require_subcommand(1);
+
+  const auto leaf = [&pa, inc](const std::string &name,
+                               const std::string &desc) {
+    CLI::App *sub = inc->add_subcommand(name, desc);
+    sub->callback([&pa, name] {
+      pa.command = "include";
+      pa.what = name;
+    });
+    return sub;
+  };
+
+  CLI::App *graph = leaf("graph", "show the include dependency graph");
+  add_include_scope(graph, pa);
+  graph->add_flag("--reverse", pa.inc_reverse,
+                  "show files that include the target, not what it includes");
+  graph->add_flag("--transitive", pa.inc_transitive,
+                  "follow the graph transitively, not just direct edges");
+  graph->add_option("--depth", pa.inc_depth,
+                    "bound --transitive to N hops (0 = unbounded)");
+  graph->add_flag("--cycles", pa.inc_cycles,
+                  "report include cycles (strongly connected components) "
+                  "instead of edges");
+  graph->add_flag("--system", pa.inc_system,
+                  "keep direct system-header targets (their internals are "
+                  "never indexed, so they are always leaves)");
+  graph->add_option("--format", pa.inc_format, "text|json|dot")
+      ->check(CLI::IsMember({"text", "json", "dot"}));
+
+  CLI::App *check = leaf("check", "report duplicate and unused includes");
+  add_include_scope(check, pa);
+  check->add_flag("--duplicates", pa.inc_duplicates,
+                  "report duplicate includes (default: both)");
+  check->add_flag("--unused", pa.inc_unused,
+                  "report includes with zero symbol references (default: both)");
+  check->add_flag("--json", pa.inc_json, "emit machine-readable JSON");
+
+  CLI::App *plan = leaf("plan", "write a reviewable cleanup plan (no edits)");
+  add_include_scope(plan, pa);
+  plan->add_option("--output", pa.inc_output, "write the plan to FILE")
+      ->required()
+      ->type_name("FILE");
+  plan->add_flag("--duplicates", pa.inc_duplicates, "plan duplicate removals");
+  plan->add_flag("--unused", pa.inc_unused, "plan unused removals");
+
+  CLI::App *apply = leaf("apply", "apply an approved cleanup plan (EDITS SOURCE)");
+  apply->add_option("plan", pa.inc_plan, "the cleanup plan to apply")
+      ->required()
+      ->type_name("PLAN");
+  apply->add_option("--db", pa.index_db, "index database (default: the cache)");
+  apply->add_flag("--dry-run", pa.dry_run,
+                  "validate and report, but write nothing");
+  apply->add_option("--only", pa.inc_only,
+                    "apply only these candidate ids (comma-separated); the "
+                    "final combined validation still covers every applied edit")
+      ->delimiter(',')
+      ->type_name("ID");
+}
+
 void build_graph(CLI::App &app, ParsedArgs &pa) {
   CLI::App *graph = app.add_subcommand(
       "graph",
@@ -645,6 +723,7 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
   build_file(app, pa);
   build_symbol(app, pa);
   build_graph(app, pa);
+  build_include(app, pa);
 
   // CLI11's vector-parse consumes tokens from the back.
   std::vector<std::string> tokens(argv.rbegin(), argv.rend());
@@ -667,8 +746,20 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     usage_fail(app, e);
   }
 
-  if (pa.command == "graph" && pa.index_db) {
+  if ((pa.command == "graph" || pa.command == "include") && pa.index_db) {
     pa.index_db = pathutil::abspath(pathutil::expanduser(*pa.index_db));
+  }
+  if (pa.command == "include") {
+    // Scope paths are matched against the index's absolute paths, so resolve
+    // them once here rather than in each verb.
+    for (std::string &p : pa.inc_paths) {
+      p = pathutil::abspath(pathutil::expanduser(p));
+    }
+    // Neither --duplicates nor --unused means BOTH: the useful default for a
+    // report is everything, and asking for one must not silently widen to two.
+    if (!pa.inc_duplicates && !pa.inc_unused) {
+      pa.inc_duplicates = pa.inc_unused = true;
+    }
   }
   return pa;
 }

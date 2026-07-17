@@ -387,6 +387,11 @@ public:
   // Every edge whose dst_path resolves to this path (covers targets that are
   // not owned by a component, which therefore have no dst_file_id).
   std::vector<IncludeEdge> include_edges_to_path(const std::string &dst_path);
+  // Every include edge in the database, ordered by (src_file_id, dst_path,
+  // config digest). Whole-graph queries (cycles, transitive closure, hotspots)
+  // need the full relation, and it is far cheaper to sort once here than to
+  // walk per-file.
+  std::vector<IncludeEdge> all_include_edges(bool include_system);
   // Sites of one collapsed edge, ordered by begin_offset.
   std::vector<IncludeSite> include_sites_for(int64_t edge_id);
   // Macros expanded in `src_file_id` that are defined in `def_path`.
@@ -395,6 +400,35 @@ public:
   // True once any include fact exists -- distinguishes "this DB predates the
   // v31 tier / has not been reindexed" from "this file includes nothing".
   bool include_graph_populated();
+
+  // -- v31 reference-set analysis ---------------------------------------------
+  // These four back the unused(S, H) definition:
+  //   unused(S, H) := Refs(Owners(S)) INTERSECT Symbols(H) = {}
+  // (see docs/include-hygiene.md). They are deliberately set-oriented: one
+  // query per file, not one per symbol.
+
+  // Owners(F) / Symbols(F): every symbol DECLARED or DEFINED directly in this
+  // file. A symbol from a header this file includes is NOT owned by it -- that
+  // separation is what makes "a reference to a transitive header's symbol does
+  // not use the direct header" hold. Ordered by id.
+  std::vector<int64_t> symbol_ids_for_file(int64_t file_id);
+
+  // Targets of every persisted semantic edge out of `src_ids`, across ALL edge
+  // kinds (calls, uses, inherits, overrides, construct-*, destroy, friend,
+  // specializes, instantiates, field_of, method_of, ...). Sorted, unique.
+  std::vector<int64_t> edge_targets_from(const std::vector<int64_t> &src_ids);
+
+  // Type nodes these symbols name through the signature tier: their return
+  // type, declared type, underlying type (symbol_type) and every parameter type
+  // (parameter). Sorted, unique.
+  std::vector<int64_t> type_ids_used_by(const std::vector<int64_t> &symbol_ids);
+
+  // Every symbol id named by the transitive structural closure of `type_ids`:
+  // follows type_edge (pointee, element, alias_of, return, param, template
+  // argument) and canonical_id, then maps each node's decl_usr back to its
+  // symbol. This is what makes `const Foo&`, `Foo*`, `vector<Foo>`, and an
+  // alias of Foo all count as references to Foo. Sorted, unique.
+  std::vector<int64_t> symbols_named_by_types(const std::vector<int64_t> &type_ids);
 
   // Delete edges whose src is a symbol defined in this file (idempotent
   // re-index: edges cascade-delete their edge_site rows).

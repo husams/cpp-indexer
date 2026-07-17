@@ -2765,6 +2765,12 @@ int run_command(const ParsedArgs &args, Context &ctx) {
     if (args.what == "signature")   return cmd_graph_signature(args, ctx);
     if (args.what == "typeusers")   return cmd_graph_typeusers(args, ctx);
   }
+  if (args.command == "include") {
+    if (args.what == "graph") return cmd_include_graph(args, ctx);
+    if (args.what == "check") return cmd_include_check(args, ctx);
+    if (args.what == "plan")  return cmd_include_plan(args, ctx);
+    if (args.what == "apply") return cmd_include_apply(args, ctx);
+  }
   if (args.command == "component") {
     if (args.what == "show") return cmd_component_show(args, ctx);
     return cmd_component_set_version(args, ctx);

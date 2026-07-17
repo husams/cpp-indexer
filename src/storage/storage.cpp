@@ -3509,6 +3509,22 @@ Storage::include_edges_to_path(const std::string &dst_path) {
   return out;
 }
 
+std::vector<IncludeEdge> Storage::all_include_edges(bool include_system) {
+  std::string sql = std::string("SELECT ") + kIncludeEdgeCols +
+                    " FROM include_edge e "
+                    "JOIN include_config c ON c.id = e.config_id";
+  if (!include_system) {
+    sql += " WHERE e.is_system = 0";
+  }
+  sql += " ORDER BY e.src_file_id, e.dst_path, c.digest";
+  auto st = db_.prepare(sql);
+  std::vector<IncludeEdge> out;
+  while (st.step()) {
+    out.push_back(include_edge_from(st));
+  }
+  return out;
+}
+
 std::vector<IncludeSite> Storage::include_sites_for(int64_t edge_id) {
   auto st = db_.prepare(
       "SELECT id, edge_id, line, col, begin_offset, end_offset, spelling, "
@@ -3559,6 +3575,119 @@ Storage::include_macro_uses(int64_t src_file_id, const std::string &def_path) {
 bool Storage::include_graph_populated() {
   auto st = db_.prepare("SELECT 1 FROM include_edge LIMIT 1");
   return st.step();
+}
+
+namespace {
+
+// "?, ?, ?" for an IN clause of n binds.
+std::string in_placeholders(std::size_t n) {
+  std::string s;
+  for (std::size_t i = 0; i < n; ++i) {
+    s += i == 0 ? "?" : ", ?";
+  }
+  return s;
+}
+
+} // namespace
+
+std::vector<int64_t> Storage::symbol_ids_for_file(int64_t file_id) {
+  // Definition site OR declaration site: a class declared in a header and
+  // defined in a source file is owned by both, which is what the unused rule
+  // needs (either site makes the header the provider).
+  auto st = db_.prepare("SELECT id FROM symbol "
+                        "WHERE file_id = ? OR decl_file_id = ? "
+                        "ORDER BY id");
+  st.bind(1, file_id);
+  st.bind(2, file_id);
+  std::vector<int64_t> out;
+  while (st.step()) {
+    out.push_back(st.col_int64(0));
+  }
+  return out;
+}
+
+std::vector<int64_t>
+Storage::edge_targets_from(const std::vector<int64_t> &src_ids) {
+  std::vector<int64_t> out;
+  if (src_ids.empty()) {
+    return out;
+  }
+  // No kind filter: EVERY persisted relation counts as a reference. A new
+  // edge_kind is therefore covered automatically, which is the point -- the
+  // rule must not silently miss a relation the indexer learns later.
+  const std::string sql = "SELECT DISTINCT dst_id FROM edge WHERE src_id IN (" +
+                          in_placeholders(src_ids.size()) + ") ORDER BY dst_id";
+  auto st = db_.prepare(sql);
+  for (std::size_t i = 0; i < src_ids.size(); ++i) {
+    st.bind(static_cast<int>(i + 1), src_ids[i]);
+  }
+  while (st.step()) {
+    out.push_back(st.col_int64(0));
+  }
+  return out;
+}
+
+std::vector<int64_t>
+Storage::type_ids_used_by(const std::vector<int64_t> &symbol_ids) {
+  std::vector<int64_t> out;
+  if (symbol_ids.empty()) {
+    return out;
+  }
+  const std::string ph = in_placeholders(symbol_ids.size());
+  const std::string sql = "SELECT DISTINCT type_id FROM symbol_type "
+                          "WHERE symbol_id IN (" + ph + ") "
+                          "UNION "
+                          "SELECT DISTINCT type_id FROM parameter "
+                          "WHERE owner_id IN (" + ph + ") AND type_id IS NOT NULL "
+                          "ORDER BY type_id";
+  auto st = db_.prepare(sql);
+  int idx = 1;
+  for (int pass = 0; pass < 2; ++pass) {
+    for (const int64_t id : symbol_ids) {
+      st.bind(idx++, id);
+    }
+  }
+  while (st.step()) {
+    out.push_back(st.col_int64(0));
+  }
+  return out;
+}
+
+std::vector<int64_t>
+Storage::symbols_named_by_types(const std::vector<int64_t> &type_ids) {
+  std::vector<int64_t> out;
+  if (type_ids.empty()) {
+    return out;
+  }
+  // Forward structural closure: from each seed node follow type_edge (pointee,
+  // element_type, alias_of, return_type, param_type, template_argument_type)
+  // and canonical_id. `const Foo&` is a reference node whose pointee is a
+  // const-qualified Foo; vector<Foo> names Foo as a template argument; an alias
+  // reaches Foo through alias_of. All three must count as naming Foo.
+  const std::string sql =
+      "WITH RECURSIVE reach(id) AS ("
+      "  SELECT id FROM type_node WHERE id IN (" +
+      in_placeholders(type_ids.size()) +
+      ") "
+      "  UNION "
+      "  SELECT te.dst_id FROM type_edge te JOIN reach r ON te.src_id = r.id "
+      "  UNION "
+      "  SELECT tn.canonical_id FROM type_node tn JOIN reach r ON tn.id = r.id "
+      "   WHERE tn.canonical_id IS NOT NULL"
+      ") "
+      "SELECT DISTINCT s.id FROM reach "
+      "JOIN type_node t ON t.id = reach.id "
+      "JOIN symbol s ON s.usr = t.decl_usr "
+      "WHERE t.decl_usr IS NOT NULL "
+      "ORDER BY s.id";
+  auto st = db_.prepare(sql);
+  for (std::size_t i = 0; i < type_ids.size(); ++i) {
+    st.bind(static_cast<int>(i + 1), type_ids[i]);
+  }
+  while (st.step()) {
+    out.push_back(st.col_int64(0));
+  }
+  return out;
 }
 
 void Storage::delete_edges_for_file(int64_t file_id) {
