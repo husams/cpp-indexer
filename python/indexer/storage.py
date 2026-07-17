@@ -1263,6 +1263,51 @@ class Diagnostic:
     id: Optional[int] = None
 
 
+# -- v31 include tier ---------------------------------------------------------
+# Read-only mirrors of the C++ records (src/storage/records.hpp). Extraction is
+# C++-only -- these are never written from Python.
+
+
+@dataclass
+class IncludeConfig:
+    tu_file_id: int
+    digest: str
+    driver: Optional[str] = None
+    working_dir: Optional[str] = None
+    arguments: Optional[str] = None  # JSON list, as stored
+    lang_mode: Optional[str] = None
+    resource_dir: Optional[str] = None
+    id: Optional[int] = None
+
+
+@dataclass
+class IncludeEdge:
+    src_file_id: int
+    dst_path: str
+    config_id: int
+    dst_file_id: Optional[int] = None  # None: system, unowned, or unresolved
+    is_system: int = 0
+    is_generated: int = 0
+    count: int = 1
+    id: Optional[int] = None
+
+
+@dataclass
+class IncludeSite:
+    edge_id: int
+    line: int
+    col: int
+    begin_offset: int
+    end_offset: int
+    spelling: str
+    is_angled: int = 0
+    directive: int = 1  # include_directive_kind.id
+    cond_fingerprint: str = ""  # "" = unconditional top level
+    resolved: int = 1
+    guarded: int = 0
+    id: Optional[int] = None
+
+
 @dataclass
 class Symbol:
     usr: str
@@ -2872,6 +2917,90 @@ class Storage:
                 ),
             )
         self._commit()
+
+    # -- v31 include tier (read-only) -------------------------------------
+    # Extraction lives in the C++ LibTooling engine; Python owns the schema,
+    # the migration, and these read queries. Nothing here writes.
+
+    def include_graph_populated(self) -> bool:
+        """True once any include fact exists.
+
+        Distinguishes "this DB predates v31 / has not been reindexed" from
+        "this file includes nothing". Callers must refuse rather than report
+        zero findings on an empty tier -- a vacuous "no unused includes" reads
+        exactly like a clean bill of health.
+        """
+        return (
+            self._conn.execute("SELECT 1 FROM include_edge LIMIT 1").fetchone()
+            is not None
+        )
+
+    def include_edges_from(
+        self, src_file_id: int, include_system: bool = False
+    ) -> list[IncludeEdge]:
+        """Direct include edges out of a file, ordered by (target, config)."""
+        sql = (
+            "SELECT e.* FROM include_edge e "
+            "JOIN include_config c ON c.id = e.config_id "
+            "WHERE e.src_file_id = ?"
+        )
+        if not include_system:
+            sql += " AND e.is_system = 0"
+        sql += " ORDER BY e.dst_path, c.digest"
+        return [
+            _row_to(IncludeEdge, r)
+            for r in self._conn.execute(sql, (src_file_id,)).fetchall()
+        ]
+
+    def include_edges_to(self, dst_file_id: int) -> list[IncludeEdge]:
+        """Direct include edges INTO a file -- who includes it."""
+        return [
+            _row_to(IncludeEdge, r)
+            for r in self._conn.execute(
+                "SELECT e.* FROM include_edge e "
+                "JOIN include_config c ON c.id = e.config_id "
+                "WHERE e.dst_file_id = ? ORDER BY e.src_file_id, c.digest",
+                (dst_file_id,),
+            ).fetchall()
+        ]
+
+    def include_sites_for(self, edge_id: int) -> list[IncludeSite]:
+        """Directive occurrences of one collapsed edge, by byte offset."""
+        return [
+            _row_to(IncludeSite, r)
+            for r in self._conn.execute(
+                "SELECT * FROM include_site WHERE edge_id = ? "
+                "ORDER BY begin_offset",
+                (edge_id,),
+            ).fetchall()
+        ]
+
+    def include_configs_for_tu(self, tu_file_id: int) -> list[IncludeConfig]:
+        """Compile configurations recorded for a translation unit."""
+        return [
+            _row_to(IncludeConfig, r)
+            for r in self._conn.execute(
+                "SELECT * FROM include_config WHERE tu_file_id = ? "
+                "ORDER BY digest",
+                (tu_file_id,),
+            ).fetchall()
+        ]
+
+    def include_macro_uses(self, src_file_id: int, def_path: str) -> list[str]:
+        """Macros `src_file_id` expands that are defined in `def_path`.
+
+        The dependency the symbol-reference graph structurally cannot see: a
+        header supplying only a macro has zero symbol references and is still
+        required.
+        """
+        return [
+            r[0]
+            for r in self._conn.execute(
+                "SELECT name FROM include_macro_use "
+                "WHERE src_file_id = ? AND def_path = ? ORDER BY name",
+                (src_file_id, def_path),
+            ).fetchall()
+        ]
 
     def get_diagnostics(self, file_id: int) -> list[Diagnostic]:
         """Stored parse diagnostics for a file, in insertion (TU) order."""

@@ -3594,11 +3594,24 @@ std::vector<int64_t> Storage::symbol_ids_for_file(int64_t file_id) {
   // Definition site OR declaration site: a class declared in a header and
   // defined in a source file is owned by both, which is what the unused rule
   // needs (either site makes the header the provider).
+  //
+  // The `definition` UNION is not redundant. symbol.usr is UNIQUE, so symbols
+  // that share a USR across translation units collapse into ONE row whose
+  // file_id is a single arbitrary winner -- `int main(int, char**)` is
+  // `c:@F@main#I#**C#` in every TU that defines it, so seven of cidx's own
+  // eight mains would otherwise have no owner at all. A file with no owners
+  // makes every one of its includes look unreferenced, which is exactly the
+  // silent false positive this rule must not produce. The v27 `definition`
+  // table keeps the per-file bodies the collapse loses, so it is the
+  // authoritative record of what a file actually defines.
   auto st = db_.prepare("SELECT id FROM symbol "
                         "WHERE file_id = ? OR decl_file_id = ? "
+                        "UNION "
+                        "SELECT symbol_id FROM definition WHERE file_id = ? "
                         "ORDER BY id");
   st.bind(1, file_id);
   st.bind(2, file_id);
+  st.bind(3, file_id);
   std::vector<int64_t> out;
   while (st.step()) {
     out.push_back(st.col_int64(0));
@@ -3621,6 +3634,18 @@ Storage::edge_targets_from(const std::vector<int64_t> &src_ids) {
   for (std::size_t i = 0; i < src_ids.size(); ++i) {
     st.bind(static_cast<int>(i + 1), src_ids[i]);
   }
+  while (st.step()) {
+    out.push_back(st.col_int64(0));
+  }
+  return out;
+}
+
+std::vector<int64_t> Storage::def_edge_targets_for_file(int64_t file_id) {
+  auto st = db_.prepare("SELECT DISTINCT de.dst_id FROM def_edge de "
+                        "JOIN definition d ON d.id = de.src_def_id "
+                        "WHERE d.file_id = ? ORDER BY de.dst_id");
+  st.bind(1, file_id);
+  std::vector<int64_t> out;
   while (st.step()) {
     out.push_back(st.col_int64(0));
   }

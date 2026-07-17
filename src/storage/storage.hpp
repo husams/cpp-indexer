@@ -418,6 +418,23 @@ public:
   // specializes, instantiates, field_of, method_of, ...). Sorted, unique.
   std::vector<int64_t> edge_targets_from(const std::vector<int64_t> &src_ids);
 
+  // Targets of every def_edge out of a body DEFINED IN this file -- the
+  // per-file half of Refs.
+  //
+  // `edge` is keyed by symbol, and symbol.usr is UNIQUE, so bodies that share a
+  // USR across translation units collapse onto one row: re-indexing each TU
+  // deletes the previous TU's edges and writes its own, last writer wins. Every
+  // `int main(int, char**)` in a project is the same USR, so all but one lose
+  // their call graph entirely -- and a file whose calls vanished has no
+  // references, which makes every one of its includes look unused. The v27
+  // `def_edge` table records calls/uses per BODY rather than per symbol, so it
+  // survives the collapse and is the only accurate source for such a file.
+  //
+  // This does not replace edge_targets_from: def_edge only carries body
+  // calls/uses (kinds 1/7). Declaration relations -- inherits, method_of,
+  // field_of, friend, specializes -- exist only on `edge`. Refs needs both.
+  std::vector<int64_t> def_edge_targets_for_file(int64_t file_id);
+
   // Type nodes these symbols name through the signature tier: their return
   // type, declared type, underlying type (symbol_type) and every parameter type
   // (parameter). Sorted, unique.

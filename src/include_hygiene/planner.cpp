@@ -32,29 +32,56 @@ std::string iso_now() {
   return buf;
 }
 
-// Longest common directory of every touched file: the plan's paths are stored
+std::vector<std::string> split_components(const std::string &path) {
+  std::vector<std::string> out;
+  std::string cur;
+  for (const char c : path) {
+    if (c == '/') {
+      if (!cur.empty()) {
+        out.push_back(cur);
+        cur.clear();
+      }
+      continue;
+    }
+    cur += c;
+  }
+  if (!cur.empty()) {
+    out.push_back(cur);
+  }
+  return out;
+}
+
+// Longest common DIRECTORY of every touched file: the plan's paths are stored
 // relative to this, so the artifact stays reviewable in a diff and portable
 // between clones of the same tree.
+//
+// Compared component-wise, not byte-wise. A byte-wise common prefix can stop
+// mid-name ("/a/foo" vs "/a/foobar" share "/a/foo", which is not a shared
+// directory), and backing off to the previous '/' to compensate over-corrects
+// when the prefix already IS one of the paths -- "/w" and "/w/src" would
+// collapse to "/", making every path in the plan absolute-minus-slash.
 std::string common_root(const std::vector<std::string> &paths) {
   if (paths.empty()) {
     return "/";
   }
-  std::string root = pathutil::dirname(paths.front());
+  std::vector<std::string> root = split_components(pathutil::dirname(paths.front()));
   for (const std::string &p : paths) {
-    const std::string dir = pathutil::dirname(p);
+    const std::vector<std::string> dir = split_components(pathutil::dirname(p));
     std::size_t i = 0;
     while (i < root.size() && i < dir.size() && root[i] == dir[i]) {
       ++i;
     }
-    root = root.substr(0, i);
-    // Back off to a directory boundary: a byte-wise prefix can land mid-name
-    // ("/a/foo" vs "/a/foobar" -> "/a/foo", which is not a shared directory).
-    const std::size_t slash = root.rfind('/');
-    if (slash != std::string::npos && root.size() != dir.size()) {
-      root = root.substr(0, slash == 0 ? 1 : slash);
+    root.resize(i);
+    if (root.empty()) {
+      return "/"; // nothing in common beyond the filesystem root
     }
   }
-  return root.empty() ? "/" : root;
+  std::string out;
+  for (const std::string &c : root) {
+    out += "/";
+    out += c;
+  }
+  return out;
 }
 
 std::string relative_to(const std::string &root, const std::string &abs) {

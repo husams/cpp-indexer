@@ -2,12 +2,20 @@
 //
 // The authoritative rule, for a direct include edge S -> H:
 //
-//   unused(S, H) := Refs(Owners(S)) INTERSECT Symbols(H) = {}
+//   unused(S, H) := (Refs(Owners(S)) INTERSECT Symbols(H) = {})
+//              AND (Owners(S)       INTERSECT Symbols(H) = {})
 //
 // where Owners(S) is every symbol declared or defined in S, Symbols(H) is every
 // symbol declared or defined DIRECTLY in H (never in a header H itself
 // includes), and Refs is the target set of every persisted semantic edge and
 // type relation out of those owners.
+//
+// The second clause is not decoration. A function declared in H and defined in
+// S is ONE symbol, in both sets, and it never references itself -- so the Refs
+// clause alone reports the most common include in C++ (a .cpp including its own
+// header) as unused. Removing it usually still compiles, because a definition
+// does not need its declaration, so the validation gate does not catch it
+// either. The declaration/definition overlap IS the dependency.
 //
 // Two things this layer deliberately does NOT do:
 //

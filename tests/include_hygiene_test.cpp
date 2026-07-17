@@ -204,6 +204,39 @@ TEST_CASE("unused: a reference through a TRANSITIVE header does not use the "
   CHECK(found);
 }
 
+TEST_CASE("unused: a .cpp including its OWN header is used, not unused") {
+  // The most common include in C++, and the one the reference rule alone gets
+  // wrong: `int f();` in u.hpp and `int f() { ... }` in u.cpp are ONE symbol,
+  // in both Owners(u.cpp) and Symbols(u.hpp), and it never references itself.
+  // Removing the directive also still COMPILES -- a definition does not need
+  // its declaration -- so the validation gate cannot catch it either. Both
+  // safety nets have a hole in the same shape; the declaration/definition
+  // overlap is what closes it.
+  Project p;
+  p.add("u.hpp", "#pragma once\nint helper(int x);\n");
+  p.add("u.cpp", "#include \"u.hpp\"\nint helper(int x) { return x + 1; }\n");
+  p.index({"u.cpp"});
+
+  cidx::Storage db(p.cache + "/index.db");
+  const hyg::AnalysisResult r = p.analyze(db);
+  const std::optional<hyg::IncludeCandidate> c = find_at(r, p.path("u.cpp"), 1);
+  REQUIRE(c.has_value());
+  CHECK(c->cls == hyg::Classification::Used);
+  CHECK(c->intersection_count > 0);
+  const bool declares =
+      std::any_of(c->evidence.begin(), c->evidence.end(),
+                  [](const hyg::Evidence &e) { return e.relation == "declares"; });
+  CHECK(declares); // and it says WHY: the header declares what this file defines
+
+  // Belt and braces: it must never reach a plan as executable.
+  for (const hyg::PlanItem &it :
+       hyg::build_plan(db, r, p.cache + "/index.db").items) {
+    const bool self_header_accepted =
+        it.line == 1 && it.state == hyg::PlanState::Accepted;
+    CHECK_FALSE(self_header_accepted);
+  }
+}
+
 TEST_CASE("unused: a signature-only reference (const Foo&) uses the include") {
   // No body, no call -- Foo appears only in a parameter type. The signature
   // tier's type closure is what makes this a reference.
@@ -473,6 +506,33 @@ TEST_CASE("apply: an unknown --only id is refused, not ignored") {
   CHECK(run_cidx({"include", "apply", plan_path, "--only", "deadbeef"},
                  p.cache) == 1);
   CHECK(read_file(p.path("main.cpp")) == before);
+}
+
+TEST_CASE("plan paths are repo-relative under a real common root") {
+  // repo_root must be the directory the sources actually share, not "/". An
+  // earlier byte-wise prefix walk collapsed it to "/", which still *worked* --
+  // join("/", "Users/...") round-trips -- while quietly making every path in
+  // the artifact absolute-minus-slash, so the plan was neither reviewable in a
+  // diff nor portable between clones. Both are the point of storing it
+  // relative.
+  Project p;
+  p.add("a.hpp", "#pragma once\nstruct A {};\n");
+  p.add("main.cpp", "#include \"a.hpp\"\nint main() { return 0; }\n");
+  p.index({"main.cpp"});
+
+  cidx::Storage db(p.cache + "/index.db");
+  const hyg::CleanupPlan plan =
+      hyg::build_plan(db, p.analyze(db), p.cache + "/index.db");
+
+  CHECK(plan.repo_root == p.proj);
+  REQUIRE_FALSE(plan.items.empty());
+  for (const hyg::PlanItem &it : plan.items) {
+    CHECK(it.file.find('/') == std::string::npos); // "main.cpp", not a path
+    CHECK(it.file.front() != '/');
+  }
+  for (const auto &[file, _] : plan.file_hashes) {
+    CHECK(file.front() != '/');
+  }
 }
 
 TEST_CASE("plan JSON is deterministic and round-trips") {

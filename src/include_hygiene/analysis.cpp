@@ -82,11 +82,27 @@ SourceContext build_source_context(cidx::Storage &db, int64_t src_file_id) {
       std::unique(ctx.owner_names.begin(), ctx.owner_names.end()),
       ctx.owner_names.end());
 
-  // Refs = every semantic edge target, PLUS every symbol named by the types
-  // these owners mention (return/declared/underlying types and parameter
-  // types, through the structural closure). The second half is what makes
-  // `void f(const Foo&);` -- a signature with no body -- count as using Foo.
+  // Refs has three parts:
+  //
+  //  1. every semantic edge target out of the owners -- this carries the
+  //     declaration relations (inherits, method_of, field_of, friend,
+  //     specializes) that exist nowhere else;
+  //  2. every def_edge target for a body defined in THIS file -- `edge` is
+  //     keyed by symbol and symbol.usr is UNIQUE, so bodies sharing a USR
+  //     across TUs (every `int main`) collapse to one last-writer-wins row and
+  //     lose their call graph; def_edge is per-body and survives that;
+  //  3. every symbol named by the types the owners mention (return, declared,
+  //     underlying, and parameter types, through the structural closure),
+  //     which is what makes `void f(const Foo&);` -- a signature with no body
+  //     -- count as using Foo.
+  //
+  // Part 1 can over-approximate for a collapsed symbol (it may carry another
+  // TU's edges). That direction is safe: it reports FEWER unused includes, so
+  // a cleanup is missed rather than a working include deleted.
   for (const int64_t id : db.edge_targets_from(ctx.owners)) {
+    ctx.refs.insert(id);
+  }
+  for (const int64_t id : db.def_edge_targets_for_file(src_file_id)) {
     ctx.refs.insert(id);
   }
   const std::vector<int64_t> types = db.type_ids_used_by(ctx.owners);
@@ -214,10 +230,24 @@ void classify(cidx::Storage &db, const IncludeGraph &graph,
       std::unique(c.header_symbols.begin(), c.header_symbols.end()),
       c.header_symbols.end());
 
+  // A symbol DECLARED in H and DEFINED in S is one symbol in both sets, and it
+  // never references itself -- so Refs alone misses the most common include in
+  // C++: a .cpp including its own header. Removing that directive usually still
+  // compiles (a definition does not need its declaration), so the validation
+  // gate cannot catch it either. The declaration/definition overlap is itself
+  // the dependency, and it must be part of the used test.
+  std::set<int64_t> owner_set(ctx.owners.begin(), ctx.owners.end());
+
   std::vector<int64_t> hit;
+  std::set<int64_t> declares; // the overlap subset, for evidence
   for (const int64_t id : header_symbols) {
-    if (ctx.refs.count(id) != 0) {
+    const bool referenced = ctx.refs.count(id) != 0;
+    const bool declared_here = owner_set.count(id) != 0;
+    if (referenced || declared_here) {
       hit.push_back(id);
+    }
+    if (declared_here && !referenced) {
+      declares.insert(id);
     }
   }
   c.intersection_count = static_cast<int64_t>(hit.size());
@@ -231,7 +261,12 @@ void classify(cidx::Storage &db, const IncludeGraph &graph,
       }
       Evidence ev;
       ev.target = display_name_of(*sym);
-      ev.relation = relation_for(db, ctx.owners, id, ev.owner);
+      if (declares.count(id) != 0) {
+        ev.owner = display_name_of(*sym);
+        ev.relation = "declares"; // this header declares what this file defines
+      } else {
+        ev.relation = relation_for(db, ctx.owners, id, ev.owner);
+      }
       c.evidence.push_back(std::move(ev));
     }
     std::sort(c.evidence.begin(), c.evidence.end(),
