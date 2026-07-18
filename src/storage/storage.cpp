@@ -982,7 +982,38 @@ void Transaction::rollback() {
 // the v21->v22 entity_node backfill right after the schema is created.
 static void cpp_materialise_entity_nodes(cidx::SqliteDb &db);
 
-Storage::Storage(const std::string &path) : db_(prepare_db_path(path)) {
+Storage::Storage(const std::string &path, OpenMode mode)
+    : db_(mode == OpenMode::read_only ? path : prepare_db_path(path),
+          mode == OpenMode::read_only) {
+  if (mode == OpenMode::read_only) {
+    // A concurrent writer must produce BUSY-with-retry, not an instant error.
+    db_.exec("PRAGMA busy_timeout = 5000");
+    // Version gate before anything else: a read-only connection cannot
+    // migrate, so any other stored version is unusable.
+    std::string stored;
+    try {
+      auto st =
+          db_.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
+      if (st.step()) {
+        stored = st.col_text(0);
+      }
+    } catch (const StorageError &e) {
+      // Only a missing meta table means "not a cidx index"; any other
+      // SQLite failure (not a database, BUSY, I/O) keeps its real message.
+      if (std::string(e.what()).find("no such table") == std::string::npos) {
+        throw;
+      }
+    }
+    if (stored != std::to_string(kSchemaVersion)) {
+      throw CidxError("cannot open " + path + " read-only: schema_version " +
+                      (stored.empty() ? std::string("missing") : stored) +
+                      " does not match the required " +
+                      std::to_string(kSchemaVersion) +
+                      " (a read-only open cannot migrate)");
+    }
+    db_.exec("PRAGMA foreign_keys = ON");
+    return;
+  }
   db_.exec("PRAGMA foreign_keys = ON");
   migrate(); // BEFORE the schema script: its indexes need migrated columns
              // (G19)

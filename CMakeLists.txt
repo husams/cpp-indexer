@@ -113,6 +113,10 @@ add_library(cidx_core STATIC
   src/include_hygiene/plan.cpp
   src/util/json_read.cpp
   src/cli/include_cmd.cpp
+  src/diff/target.cpp
+  src/diff/compare.cpp
+  src/diff/report.cpp
+  src/diff/driver.cpp
   third_party/md5/md5.c
   third_party/sha1/sha1.c
 )
@@ -234,6 +238,24 @@ if(NOT LLVM_ENABLE_RTTI)
   target_compile_options(cidx_astgraph_ast PRIVATE -fno-rtti)
 endif()
 target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_astgraph_ast>)
+
+# --- diff analyzer (cidx_diff_ast) --------------------------------------------
+# analyze.cpp is the only clang-including diff TU (docs/diff.md module
+# boundary), so like cidx_ast it compiles in its own object library with
+# -isystem LLVM headers and -fno-rtti. analyze.hpp is clang-free, so cidx_core
+# links the objects without ever seeing the Clang C++ headers.
+add_library(cidx_diff_ast OBJECT src/diff/analyze.cpp)
+target_include_directories(cidx_diff_ast PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_include_directories(cidx_diff_ast SYSTEM PRIVATE
+  ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+target_compile_definitions(cidx_diff_ast PRIVATE ${LLVM_DEFINITIONS}
+  "CIDX_CLANG_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
+target_compile_features(cidx_diff_ast PRIVATE cxx_std_23)
+if(NOT LLVM_ENABLE_RTTI)
+  target_compile_options(cidx_diff_ast PRIVATE -fno-rtti)
+endif()
+target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_diff_ast>)
 
 # --- compiledb (cidx_compiledb) ----------------------------------------------
 # compiledb.cpp loads compile_commands.json via clang::tooling::JSONCompilationDatabase
@@ -371,6 +393,20 @@ if(CIDX_ASTGRAPH_SOUFFLE_ENABLED)
 endif()
 # -static-libstdc++ omitted: see the note on the cidx target (dynamic libLLVM).
 set_target_properties(cidx-astgraph PROPERTIES
+  BUILD_RPATH "${LLVM_LIBRARY_DIR}"
+  INSTALL_RPATH "${LLVM_LIBRARY_DIR}"
+  INSTALL_RPATH_USE_LINK_PATH ON
+)
+
+# cidx-diff: syntax-aware and semantic source diff over the cidx index
+# (src/diff/, docs/diff.md). Shares cidx configuration: compile args come from
+# the same index.db (opened read-only), the parse goes through the same
+# Toolchain as `cidx index`.
+add_executable(cidx-diff src/diff/main.cpp)
+target_compile_options(cidx-diff PRIVATE -Wall -Wextra)
+target_link_libraries(cidx-diff PRIVATE cidx_core)
+# -static-libstdc++ omitted: see the note on the cidx target (dynamic libLLVM).
+set_target_properties(cidx-diff PROPERTIES
   BUILD_RPATH "${LLVM_LIBRARY_DIR}"
   INSTALL_RPATH "${LLVM_LIBRARY_DIR}"
   INSTALL_RPATH_USE_LINK_PATH ON

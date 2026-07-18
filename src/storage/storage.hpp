@@ -60,7 +60,14 @@ private:
 
 class Storage {
 public:
-  explicit Storage(const std::string &path = ":memory:");
+  // read_only opens with SQLITE_OPEN_READONLY and performs NO mutation on
+  // connect: no directory creation, no migrate(), no schema script, no
+  // backfill. The stored schema_version must equal kSchemaVersion (a
+  // read-only open cannot migrate) or the constructor throws CidxError.
+  enum class OpenMode { read_write, read_only };
+
+  explicit Storage(const std::string &path = ":memory:",
+                   OpenMode mode = OpenMode::read_write);
 
   // Batch many mutations into one commit (the documented 100x win):
   //   { auto txn = db.transaction(); ...; }   // commits at scope end
