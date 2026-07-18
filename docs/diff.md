@@ -126,7 +126,11 @@ spellings drop the file path everywhere a type is printed (labels,
 signatures, profile rows): `(unnamed struct at <path>:<l>:<c>)` becomes
 `(unnamed struct at <l>:<c>)`, so identical declarations in differently
 named files compare equal. Hidden friends lower to their wrapped
-declaration's subtree (never an empty `Friend` node).
+declaration's subtree (never an empty `Friend` node). A method's node label
+carries its API state — member access (`public`/`protected`/`private`),
+`explicit`, `= delete`, `= default`, `final`, pure-virtual, `override` — so a
+directly selected method whose extent excludes the surrounding access specifier
+still fingerprints those changes (matching the semantic API-state comparison).
 
 Edit operations (`op` values): `added`, `removed`, `replaced`, `changed`
 (same node kind, differing label — e.g. callee `reserve` → `resize`, literal
@@ -248,6 +252,12 @@ and remaining options (left-only / right-only after normalization).
 same multiset of definitions but in a different order (e.g. `-DX=1 -UX` vs
 `-UX -DX=1`, which leave `X` defined vs undefined) are **not** identical —
 `definitions_reordered` is set and the configuration is treated as differing.
+The remaining ("other") options are likewise order-sensitive: paired flags such
+as `-include a.h -include b.h` or `-Xclang` sequences can leave the parser in a
+different state when reversed, so two sides that share the same `other` multiset
+but in a different order set `options_reordered` and are treated as differing
+(a genuine set difference still surfaces through `options_left_only` /
+`options_right_only`).
 Identical source under different configurations is not automatically
 identical behavior: any configuration delta downgrades a whole-file or
 class `equivalent` to `unknown` with the delta as the reason (callable
@@ -279,7 +289,8 @@ LF line endings, `json_out::dumps_indent2` + trailing newline. No floats.
                     "definitions_added": [..], "definitions_removed": [..],
                     "definitions_reordered": true|false,
                     "includes_changed": true|false,
-                    "options_left_only": [..], "options_right_only": [..] },
+                    "options_left_only": [..], "options_right_only": [..],
+                    "options_reordered": true|false },
   "entities": [
     { "kind": "function"|"method"|"class"|"struct"|"union"|"enum"|"variable"|"namespace"|"typedef"|"other",
       "name": "<qualified name>",
