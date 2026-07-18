@@ -789,6 +789,18 @@ struct ClangFixture {
         // the callable itself is unchanged.
         {"cfgi_left.cpp", "int fi() { return 0; }\n"},
         {"cfgi_right.cpp", "int fi() { return 0; }\n"},
+        // written `override` keyword removed: D::f still overrides B::f, so
+        // size_overridden_methods() stays non-zero and only the written
+        // OverrideAttr distinguishes the two in the syntax fingerprint.
+        {"ovr_left.cpp", "struct B { virtual void f() {} };\n"
+                         "struct D : B { void f() override {} };\n"},
+        {"ovr_right.cpp", "struct B { virtual void f() {} };\n"
+                          "struct D : B { void f() {} };\n"},
+        // written `explicit(false)` vs a plain constructor: both are implicitly
+        // convertible (isExplicit() is false for each), so only the written
+        // explicit-specifier distinguishes them. Needs C++20 for explicit(bool).
+        {"exp_left.cpp", "struct E { explicit(false) E(int) {} };\n"},
+        {"exp_right.cpp", "struct E { E(int) {} };\n"},
     };
     // The headers are registered by `cidx index` through their TUs; they are
     // not compile_commands entries themselves.
@@ -819,6 +831,11 @@ struct ClangFixture {
         extra = inc_a + " " + inc_b + " ";
       else if (sources[i].first == "cfgi_right.cpp")
         extra = inc_b + " " + inc_a + " ";
+      // explicit(bool) is C++20; the trailing -std overrides the -std=c++17 in
+      // the base command (clang takes the last -std).
+      else if (sources[i].first == "exp_left.cpp" ||
+               sources[i].first == "exp_right.cpp")
+        extra = "-std=c++20 ";
       cc += "{\"directory\": \"" + proj +
             "\", \"command\": \"c++ -std=c++17 " + extra + "-c " +
             sources[i].first + " -o " + sources[i].first +
@@ -1026,6 +1043,38 @@ TEST_CASE("method access change (public -> private): different") {
                             "syntax", "--json"},
                            &json, &err);
   CHECK(rcj == 0);
+  CHECK(json.find("\"status\": \"changed\"") != std::string::npos);
+  CHECK(json.find("\"edit_count\": 0") == std::string::npos);
+}
+
+TEST_CASE("removed override keyword: syntax changed") {
+  // D::f overrides B::f in both revisions, so size_overridden_methods() stays
+  // non-zero; only the written `override` keyword (OverrideAttr) differs. The
+  // syntax fingerprint must still register the edit.
+  std::string json;
+  std::string err;
+  const int rc = run_diff({"symbol", fx().path("ovr_left.cpp"),
+                           fx().path("ovr_right.cpp"), "--db", fx().db, "--left",
+                           "D::f", "--right", "D::f", "--mode", "syntax",
+                           "--json"},
+                          &json, &err);
+  CHECK(rc == 0);
+  CHECK(json.find("\"status\": \"changed\"") != std::string::npos);
+  CHECK(json.find("\"edit_count\": 0") == std::string::npos);
+}
+
+TEST_CASE("explicit(false) vs plain constructor: syntax changed") {
+  // Both constructors are implicitly convertible -- isExplicit() is false for
+  // each -- so only the written explicit-specifier distinguishes them. The
+  // syntax fingerprint must preserve the written explicit(false).
+  std::string json;
+  std::string err;
+  const int rc = run_diff({"symbol", fx().path("exp_left.cpp"),
+                           fx().path("exp_right.cpp"), "--db", fx().db, "--left",
+                           "E::E", "--right", "E::E", "--mode", "syntax",
+                           "--json"},
+                          &json, &err);
+  CHECK(rc == 0);
   CHECK(json.find("\"status\": \"changed\"") != std::string::npos);
   CHECK(json.find("\"edit_count\": 0") == std::string::npos);
 }

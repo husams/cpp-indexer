@@ -52,7 +52,15 @@ task:
   index `index.db` (see below).
 - The semantic index `index.db` is committed to the repo. Keep it current: after
   any change that alters what the index would contain (source under `src/` or
-  `python/indexer/`, schema version, or indexing/query semantics), re-run the
-  indexer to regenerate `index.db` and commit the refreshed database in the same
-  change. Verify with `sqlite3 index.db "SELECT value FROM meta WHERE
-  key='schema_version';"` — it must match the current schema version.
+  `python/indexer/`, schema version, or indexing/query semantics), regenerate
+  `index.db` and commit the refreshed database in the same change. Regenerate
+  from the **canonical checkout** (`/Users/husam/workspace/cpp-indexer`, never a
+  feature worktree — absolute paths get baked into the DB), running the **full
+  three-pass pipeline**: `rm index.db` then `INDEXER_CACHE=$(pwd) ./build/cidx
+  import --db "$(pwd)/build" --name cpp-indexer` → `./build/cidx index` →
+  `./build/cidx resolve`. Skipping `resolve` leaves Layer-1 empty (`entity_node`
+  / `entity_edge` / `dispatch_calls` = 0, no `meta.graph_resolved_at`). Verify:
+  `sqlite3 index.db "SELECT value FROM meta WHERE key='schema_version';"` matches
+  the current schema version; `SELECT COUNT(*) FROM entity_edge;` is non-zero;
+  `meta.graph_resolved_at` is set; and no worktree paths leaked
+  (`strings index.db | grep -c cpp-indexer- ` → 0).
