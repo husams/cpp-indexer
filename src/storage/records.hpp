@@ -225,6 +225,72 @@ struct Parameter {
   std::optional<int64_t> col;
 };
 
+// -- v31 include tier records --------------------------------------------------
+
+// One normalized compilation configuration. `digest` is the stable identity
+// used by plan-freshness checks; it is computed by include_config_digest()
+// over the same fields stored here, so a plan can be revalidated without the
+// original compile database.
+struct IncludeConfig {
+  int64_t id = -1;
+  int64_t tu_file_id = -1;
+  std::string digest;
+  std::optional<std::string> driver;
+  std::optional<std::string> working_dir;
+  std::vector<std::string> arguments;
+  std::optional<std::string> lang_mode;   // "c" | "c++"
+  std::optional<std::string> resource_dir;
+};
+
+// A collapsed file->file include relation under one configuration.
+// dst_file_id is nullopt when the target is a system header, unowned by any
+// component, or unresolved; dst_path always carries the path as opened (or the
+// written spelling for an unresolved directive).
+struct IncludeEdge {
+  int64_t id = -1;
+  int64_t src_file_id = -1;
+  std::optional<int64_t> dst_file_id;
+  std::string dst_path;
+  int64_t config_id = -1;
+  bool is_system = false;
+  bool is_generated = false;
+  int64_t count = 1;
+};
+
+// include_directive_kind ids (seeded in the table; mirrored in storage.py)
+inline constexpr int64_t kIncludeDirectiveInclude = 1;
+inline constexpr int64_t kIncludeDirectiveIncludeNext = 2;
+inline constexpr int64_t kIncludeDirectiveImport = 3;
+inline constexpr int64_t kIncludeDirectiveIncludeMacros = 4;
+inline constexpr int64_t kIncludeDirectiveUnknown = 5;
+
+// One directive occurrence. [begin_offset, end_offset) is the exact removal
+// range in the source buffer, measured in bytes from the start of the file so
+// replacements never depend on line renumbering.
+struct IncludeSite {
+  int64_t id = -1;
+  int64_t edge_id = -1;
+  int64_t line = 0;
+  int64_t col = 0;
+  int64_t begin_offset = 0;
+  int64_t end_offset = 0;
+  std::string spelling;             // as written, without <> or ""
+  bool is_angled = false;
+  int64_t directive = kIncludeDirectiveInclude;
+  std::string cond_fingerprint;     // "" = unconditional top level
+  bool resolved = true;
+  bool guarded = false;
+};
+
+// A macro expanded in `src_file_id` whose definition lives in `def_path`.
+struct IncludeMacroUse {
+  int64_t src_file_id = -1;
+  std::string def_path;
+  std::string name;
+  int64_t config_id = -1;
+  int64_t count = 1;
+};
+
 struct Stats {
   int64_t components = 0;
   int64_t directories = 0;

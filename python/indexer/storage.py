@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -561,6 +561,73 @@ CREATE TABLE IF NOT EXISTS symbol_type (
     PRIMARY KEY (symbol_id, kind)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_symbol_type_type ON symbol_type(type_id);
+
+-- ===================== v31: include tier =====================
+-- Preprocessing facts live in their own file domain: `edge` is symbol->symbol
+-- and cannot hold a file->file relation. Extraction is C++-only (LibTooling
+-- PPCallbacks); Python owns storage + read queries only.
+
+CREATE TABLE IF NOT EXISTS include_config (
+    id           INTEGER PRIMARY KEY,
+    tu_file_id   INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    digest       TEXT NOT NULL,
+    driver       TEXT,
+    working_dir  TEXT,
+    arguments    TEXT,   -- JSON list of normalized parse args
+    lang_mode    TEXT,   -- 'c' | 'c++'
+    resource_dir TEXT,
+    UNIQUE (tu_file_id, digest)
+);
+CREATE INDEX IF NOT EXISTS idx_include_config_digest ON include_config(digest);
+
+CREATE TABLE IF NOT EXISTS include_edge (
+    id           INTEGER PRIMARY KEY,
+    src_file_id  INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    dst_file_id  INTEGER REFERENCES file(id) ON DELETE SET NULL,
+    dst_path     TEXT NOT NULL,
+    config_id    INTEGER NOT NULL REFERENCES include_config(id) ON DELETE CASCADE,
+    is_system    INTEGER NOT NULL DEFAULT 0,
+    is_generated INTEGER NOT NULL DEFAULT 0,
+    count        INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (src_file_id, dst_path, config_id)
+);
+CREATE INDEX IF NOT EXISTS idx_include_edge_dst ON include_edge(dst_file_id);
+CREATE INDEX IF NOT EXISTS idx_include_edge_config ON include_edge(config_id);
+
+CREATE TABLE IF NOT EXISTS include_directive_kind (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO include_directive_kind (id, name) VALUES
+  (1,'include'), (2,'include_next'), (3,'import'), (4,'include_macros'),
+  (5,'unknown');
+
+CREATE TABLE IF NOT EXISTS include_site (
+    id               INTEGER PRIMARY KEY,
+    edge_id          INTEGER NOT NULL REFERENCES include_edge(id) ON DELETE CASCADE,
+    line             INTEGER NOT NULL,
+    col              INTEGER NOT NULL,
+    begin_offset     INTEGER NOT NULL,
+    end_offset       INTEGER NOT NULL,
+    spelling         TEXT NOT NULL,   -- as written, without <> or ""
+    is_angled        INTEGER NOT NULL DEFAULT 0,
+    directive        INTEGER NOT NULL DEFAULT 1, -- include_directive_kind.id
+    cond_fingerprint TEXT NOT NULL DEFAULT '',
+    resolved         INTEGER NOT NULL DEFAULT 1,
+    guarded          INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (edge_id, begin_offset)
+);
+CREATE INDEX IF NOT EXISTS idx_include_site_edge ON include_site(edge_id);
+
+CREATE TABLE IF NOT EXISTS include_macro_use (
+    src_file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    def_path    TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    config_id   INTEGER NOT NULL REFERENCES include_config(id) ON DELETE CASCADE,
+    count       INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (src_file_id, def_path, name, config_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_include_macro_use_path ON include_macro_use(def_path);
 
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');
 """
@@ -1196,6 +1263,51 @@ class Diagnostic:
     id: Optional[int] = None
 
 
+# -- v31 include tier ---------------------------------------------------------
+# Read-only mirrors of the C++ records (src/storage/records.hpp). Extraction is
+# C++-only -- these are never written from Python.
+
+
+@dataclass
+class IncludeConfig:
+    tu_file_id: int
+    digest: str
+    driver: Optional[str] = None
+    working_dir: Optional[str] = None
+    arguments: Optional[str] = None  # JSON list, as stored
+    lang_mode: Optional[str] = None
+    resource_dir: Optional[str] = None
+    id: Optional[int] = None
+
+
+@dataclass
+class IncludeEdge:
+    src_file_id: int
+    dst_path: str
+    config_id: int
+    dst_file_id: Optional[int] = None  # None: system, unowned, or unresolved
+    is_system: int = 0
+    is_generated: int = 0
+    count: int = 1
+    id: Optional[int] = None
+
+
+@dataclass
+class IncludeSite:
+    edge_id: int
+    line: int
+    col: int
+    begin_offset: int
+    end_offset: int
+    spelling: str
+    is_angled: int = 0
+    directive: int = 1  # include_directive_kind.id
+    cond_fingerprint: str = ""  # "" = unconditional top level
+    resolved: int = 1
+    guarded: int = 0
+    id: Optional[int] = None
+
+
 @dataclass
 class Symbol:
     usr: str
@@ -1689,6 +1801,14 @@ class Storage:
             # symbol_type + seed tables). All created by the schema script
             # (CREATE TABLE IF NOT EXISTS); no backfill is possible from stored
             # rows -- a C++ reindex populates them. Mirrors storage.cpp.
+            changed = True
+        if "include_edge" not in tables:
+            # v30 -> v31: include tier (include_config/include_edge/
+            # include_site/include_macro_use + the directive seed table). All
+            # created by the schema script (CREATE TABLE IF NOT EXISTS).
+            # Preprocessing facts cannot be recovered from stored rows -- only a
+            # C++ reindex populates them, so an upgraded DB has an EMPTY include
+            # graph until `cidx index` reruns. Mirrors storage.cpp.
             changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates
@@ -2797,6 +2917,90 @@ class Storage:
                 ),
             )
         self._commit()
+
+    # -- v31 include tier (read-only) -------------------------------------
+    # Extraction lives in the C++ LibTooling engine; Python owns the schema,
+    # the migration, and these read queries. Nothing here writes.
+
+    def include_graph_populated(self) -> bool:
+        """True once any include fact exists.
+
+        Distinguishes "this DB predates v31 / has not been reindexed" from
+        "this file includes nothing". Callers must refuse rather than report
+        zero findings on an empty tier -- a vacuous "no unused includes" reads
+        exactly like a clean bill of health.
+        """
+        return (
+            self._conn.execute("SELECT 1 FROM include_edge LIMIT 1").fetchone()
+            is not None
+        )
+
+    def include_edges_from(
+        self, src_file_id: int, include_system: bool = False
+    ) -> list[IncludeEdge]:
+        """Direct include edges out of a file, ordered by (target, config)."""
+        sql = (
+            "SELECT e.* FROM include_edge e "
+            "JOIN include_config c ON c.id = e.config_id "
+            "WHERE e.src_file_id = ?"
+        )
+        if not include_system:
+            sql += " AND e.is_system = 0"
+        sql += " ORDER BY e.dst_path, c.digest"
+        return [
+            _row_to(IncludeEdge, r)
+            for r in self._conn.execute(sql, (src_file_id,)).fetchall()
+        ]
+
+    def include_edges_to(self, dst_file_id: int) -> list[IncludeEdge]:
+        """Direct include edges INTO a file -- who includes it."""
+        return [
+            _row_to(IncludeEdge, r)
+            for r in self._conn.execute(
+                "SELECT e.* FROM include_edge e "
+                "JOIN include_config c ON c.id = e.config_id "
+                "WHERE e.dst_file_id = ? ORDER BY e.src_file_id, c.digest",
+                (dst_file_id,),
+            ).fetchall()
+        ]
+
+    def include_sites_for(self, edge_id: int) -> list[IncludeSite]:
+        """Directive occurrences of one collapsed edge, by byte offset."""
+        return [
+            _row_to(IncludeSite, r)
+            for r in self._conn.execute(
+                "SELECT * FROM include_site WHERE edge_id = ? "
+                "ORDER BY begin_offset",
+                (edge_id,),
+            ).fetchall()
+        ]
+
+    def include_configs_for_tu(self, tu_file_id: int) -> list[IncludeConfig]:
+        """Compile configurations recorded for a translation unit."""
+        return [
+            _row_to(IncludeConfig, r)
+            for r in self._conn.execute(
+                "SELECT * FROM include_config WHERE tu_file_id = ? "
+                "ORDER BY digest",
+                (tu_file_id,),
+            ).fetchall()
+        ]
+
+    def include_macro_uses(self, src_file_id: int, def_path: str) -> list[str]:
+        """Macros `src_file_id` expands that are defined in `def_path`.
+
+        The dependency the symbol-reference graph structurally cannot see: a
+        header supplying only a macro has zero symbol references and is still
+        required.
+        """
+        return [
+            r[0]
+            for r in self._conn.execute(
+                "SELECT name FROM include_macro_use "
+                "WHERE src_file_id = ? AND def_path = ? ORDER BY name",
+                (src_file_id, def_path),
+            ).fetchall()
+        ]
 
     def get_diagnostics(self, file_id: int) -> list[Diagnostic]:
         """Stored parse diagnostics for a file, in insertion (TU) order."""

@@ -108,6 +108,11 @@ add_library(cidx_core STATIC
   src/graph/emit.cpp
   src/query/plan.cpp
   src/query/exec.cpp
+  src/include_hygiene/graph.cpp
+  src/include_hygiene/analysis.cpp
+  src/include_hygiene/plan.cpp
+  src/util/json_read.cpp
+  src/cli/include_cmd.cpp
   src/diff/target.cpp
   src/diff/compare.cpp
   src/diff/report.cpp
@@ -180,6 +185,7 @@ add_library(cidx_ast OBJECT
   src/ast/call_template_args.cpp src/ast/display_name_rewrite.cpp
   src/ast/receiver_provenance.cpp src/ast/instantiation_edges.cpp
   src/ast/namespace_use_visitor.cpp src/ast/index_engine.cpp
+  src/ast/include_facts.cpp
   src/ast/clang_version.cpp)
 target_include_directories(cidx_ast PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
@@ -192,6 +198,28 @@ if(NOT LLVM_ENABLE_RTTI)
   target_compile_options(cidx_ast PRIVATE -fno-rtti)
 endif()
 target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_ast>)
+
+# --- include-hygiene validator/executor (cidx_hygiene) -----------------------
+# validator.cpp drives a SyntaxOnlyAction over an in-memory VFS overlay and
+# executor.cpp uses clang-format, so both need the Clang C++ API. Same object-
+# library treatment as cidx_ast: -isystem LLVM headers and its own -fno-rtti.
+# The rest of src/include_hygiene/ (graph, analysis, plan) is pure storage and
+# lives in cidx_core.
+add_library(cidx_hygiene OBJECT
+  src/include_hygiene/validator.cpp
+  src/include_hygiene/executor.cpp
+  src/include_hygiene/planner.cpp)
+target_include_directories(cidx_hygiene PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_include_directories(cidx_hygiene SYSTEM PRIVATE
+  ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+target_compile_definitions(cidx_hygiene PRIVATE ${LLVM_DEFINITIONS}
+  "CIDX_CLANG_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
+target_compile_features(cidx_hygiene PRIVATE cxx_std_23)
+if(NOT LLVM_ENABLE_RTTI)
+  target_compile_options(cidx_hygiene PRIVATE -fno-rtti)
+endif()
+target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_hygiene>)
 
 # --- astgraph AST dumper (cidx_astgraph_ast) ---------------------------------
 # astgraph.cpp uses the Clang C++ AST (RecursiveASTVisitor + ClangTool), so like
