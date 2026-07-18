@@ -61,7 +61,8 @@ std::string read_file(const std::string &path) {
 }
 
 int run_cidx(const std::vector<std::string> &argv, const std::string &cache,
-             std::string *stdout_text = nullptr) {
+             std::string *stdout_text = nullptr,
+             std::string *stderr_text = nullptr) {
   cli::ParsedArgs pa = cli::parse_args(argv);
   REQUIRE(!pa.help_text);
   std::ostringstream out, err;
@@ -76,6 +77,9 @@ int run_cidx(const std::vector<std::string> &argv, const std::string &cache,
   const int rc = cli::run_command(pa, ctx);
   if (stdout_text != nullptr) {
     *stdout_text = out.str();
+  }
+  if (stderr_text != nullptr) {
+    *stderr_text = err.str();
   }
   return rc;
 }
@@ -646,6 +650,33 @@ TEST_CASE("aggregate: one physical directive under two configs is one candidate"
   }
   CHECK(count == 1);      // exactly one candidate for the one directive
   CHECK(configs == 2);    // both TU configurations, unioned onto it
+}
+
+TEST_CASE("coverage: an unindexed TU is reported by the unscoped check") {
+  // Partial reindex: two TUs imported, only one indexed. One include_config
+  // makes the global populated check pass, so the still-PENDING TU must be
+  // named by the whole-repo coverage warning -- otherwise the unscoped check
+  // presents a partial tree as complete.
+  Project p;
+  p.add("a.hpp", "#pragma once\nstruct A {};\n");
+  p.add("done.cpp", "#include \"a.hpp\"\nint fd() { A a; (void)a; return 0; }\n");
+  p.add("pending.cpp", "#include \"a.hpp\"\nint fp() { A a; (void)a; return 0; }\n");
+  write_file(p.proj + "/compile_commands.json",
+             "[\n  {\"directory\": \"" + p.proj +
+                 "\", \"command\": \"c++ -std=c++17 -I. -c done.cpp\", "
+                 "\"file\": \"" + p.proj + "/done.cpp\"},\n"
+                 "  {\"directory\": \"" + p.proj +
+                 "\", \"command\": \"c++ -std=c++17 -I. -c pending.cpp\", "
+                 "\"file\": \"" + p.proj + "/pending.cpp\"}\n]\n");
+  REQUIRE(run_cidx({"import", "--db", p.proj, "--name", "fx"}, p.cache) == 0);
+  // Index only done.cpp; pending.cpp stays unindexed.
+  REQUIRE(run_cidx({"index", p.path("done.cpp")}, p.cache) == 0);
+
+  std::string err;
+  REQUIRE(run_cidx({"include", "check"}, p.cache, nullptr, &err) == 0);
+  CHECK(err.find("pending.cpp") != std::string::npos);      // named as uncovered
+  CHECK(err.find("not yet indexed") != std::string::npos);  // as PENDING
+  CHECK(err.find("done.cpp") == std::string::npos);         // covered, not warned
 }
 
 TEST_CASE("a TU that includes nothing still reports the tier as populated") {

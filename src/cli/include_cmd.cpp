@@ -106,30 +106,38 @@ void warn_uncovered(const hygiene::AnalysisResult &res, std::ostream &err) {
 // covered and report them (bounded), so "no findings" cannot masquerade as
 // "fully analyzed". Only for the unscoped case; scoped paths use warn_uncovered.
 void warn_unscoped_coverage(cidx::Storage &db, std::ostream &err) {
-  std::vector<std::string> uncovered;
+  // A TU is uncovered if the tier never observed it -- whether it is still
+  // PENDING (never indexed) or was indexed before the tier existed. The pending
+  // case is the whole point: one processed TU makes the global populated check
+  // pass, so every not-yet-indexed TU would otherwise be silently omitted and a
+  // partial tree would read as fully analyzed. Pending and indexed-but-uncovered
+  // are reported separately so a fresh import is distinguishable from stale data.
+  std::vector<std::string> pending;
+  std::vector<std::string> stale;
   for (const auto &[row, abs] : db.list_files()) {
-    // A TU is a non-header source; headers are covered via their including TU.
-    if (files::is_header(abs) || !row.indexed) {
+    // Headers are covered via their including TU, never analyzed standalone.
+    if (files::is_header(abs) || db.include_tier_covers_file(row.id)) {
       continue;
     }
-    if (!db.include_tier_covers_file(row.id)) {
-      uncovered.push_back(abs);
+    (row.indexed ? stale : pending).push_back(abs);
+  }
+  const auto report = [&](std::vector<std::string> &tus, const char *what) {
+    if (tus.empty()) {
+      return;
     }
-  }
-  if (uncovered.empty()) {
-    return;
-  }
-  std::sort(uncovered.begin(), uncovered.end());
-  err << "warning: " << uncovered.size()
-      << " indexed translation unit(s) have no include-tier coverage "
-         "(reindex to analyze them); findings below cover only the rest:\n";
-  const std::size_t cap = 10;
-  for (std::size_t i = 0; i < uncovered.size() && i < cap; ++i) {
-    err << "  " << uncovered[i] << "\n";
-  }
-  if (uncovered.size() > cap) {
-    err << "  ... and " << (uncovered.size() - cap) << " more\n";
-  }
+    std::sort(tus.begin(), tus.end());
+    err << "warning: " << tus.size() << " " << what
+        << " (reindex to analyze them); findings cover only the rest:\n";
+    const std::size_t cap = 10;
+    for (std::size_t i = 0; i < tus.size() && i < cap; ++i) {
+      err << "  " << tus[i] << "\n";
+    }
+    if (tus.size() > cap) {
+      err << "  ... and " << (tus.size() - cap) << " more\n";
+    }
+  };
+  report(pending, "translation unit(s) not yet indexed for includes");
+  report(stale, "indexed translation unit(s) with no include-tier coverage");
 }
 
 // -- graph -------------------------------------------------------------------
