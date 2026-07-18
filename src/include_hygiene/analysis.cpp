@@ -295,6 +295,92 @@ void classify(cidx::Storage &db, const IncludeGraph &graph,
   }
 }
 
+// The conservative combined verdict for ONE physical directive seen under
+// several configurations. Removal is only offered when every configuration
+// agrees it is removable, in the same way:
+//   * any `used`            -> used (the directive is doing work somewhere);
+//   * else any manual_review-> manual_review (a caveat somewhere);
+//   * else all duplicate    -> duplicate;
+//   * else all unused       -> unused_by_reference;
+//   * else (mixed removable kinds) -> manual_review (configs disagree).
+Classification combine_class(Classification a, Classification b) {
+  if (a == Classification::Used || b == Classification::Used) {
+    return Classification::Used;
+  }
+  if (a == Classification::ManualReview || b == Classification::ManualReview) {
+    return Classification::ManualReview;
+  }
+  if (a == b) {
+    return a; // both Duplicate, or both UnusedByReference
+  }
+  return Classification::ManualReview; // one Duplicate, one UnusedByReference
+}
+
+void sort_unique(std::vector<std::string> &v) {
+  std::sort(v.begin(), v.end());
+  v.erase(std::unique(v.begin(), v.end()), v.end());
+}
+
+// Fold one per-(edge, config) candidate into the merged set keyed by physical
+// directive (candidate_id == src_path + begin_offset). candidate_id identifies
+// one directive; without this fold, restored per-config facts would emit a
+// separate item per configuration for the very same source bytes.
+void merge_candidate(std::map<std::string, IncludeCandidate> &into,
+                     IncludeCandidate &&c) {
+  const auto it = into.find(c.id);
+  if (it == into.end()) {
+    into.emplace(c.id, std::move(c));
+    return;
+  }
+  IncludeCandidate &d = it->second;
+  d.cls = combine_class(d.cls, c.cls);
+  d.intersection_count = std::max(d.intersection_count, c.intersection_count);
+  d.guarded = d.guarded && c.guarded; // unguarded under ANY config is unguarded
+  for (auto &s : c.configs) {
+    d.configs.push_back(std::move(s));
+  }
+  for (auto &s : c.caveats) {
+    d.caveats.push_back(std::move(s));
+  }
+  for (auto &s : c.macro_uses) {
+    d.macro_uses.push_back(std::move(s));
+  }
+  for (auto &s : c.owners) {
+    d.owners.push_back(std::move(s));
+  }
+  for (auto &s : c.header_symbols) {
+    d.header_symbols.push_back(std::move(s));
+  }
+  for (auto &s : c.reverse_dependants) {
+    d.reverse_dependants.push_back(std::move(s));
+  }
+  for (auto &e : c.evidence) {
+    d.evidence.push_back(std::move(e));
+  }
+}
+
+// Deduplicate the unioned evidence/string sets of a merged candidate.
+void finalize_merged(IncludeCandidate &c) {
+  sort_unique(c.configs);
+  sort_unique(c.caveats);
+  sort_unique(c.macro_uses);
+  sort_unique(c.owners);
+  sort_unique(c.header_symbols);
+  sort_unique(c.reverse_dependants);
+  std::sort(c.evidence.begin(), c.evidence.end(),
+            [](const Evidence &a, const Evidence &b) {
+              return std::tie(a.owner, a.target, a.relation) <
+                     std::tie(b.owner, b.target, b.relation);
+            });
+  c.evidence.erase(
+      std::unique(c.evidence.begin(), c.evidence.end(),
+                  [](const Evidence &a, const Evidence &b) {
+                    return std::tie(a.owner, a.target, a.relation) ==
+                           std::tie(b.owner, b.target, b.relation);
+                  }),
+      c.evidence.end());
+}
+
 } // namespace
 
 AnalysisResult analyze(cidx::Storage &db, const AnalysisOptions &opts) {
@@ -354,6 +440,11 @@ AnalysisResult analyze(cidx::Storage &db, const AnalysisOptions &opts) {
     // different #if branch is a different program, never a duplicate.
     std::set<std::tuple<std::string, int64_t, std::string>> seen_sites;
 
+    // One physical directive can appear under several configurations (a header
+    // included by many TUs). Classify each occurrence, then fold them into one
+    // candidate per source-byte range so the report is not config-multiplied.
+    std::map<std::string, IncludeCandidate> merged;
+
     for (const IncludeEdge &e : edges) {
       const std::optional<IncludeConfig> cfg =
           db.include_config_by_id(e.config_id);
@@ -382,13 +473,17 @@ AnalysisResult analyze(cidx::Storage &db, const AnalysisOptions &opts) {
                  .second;
 
         classify(db, graph, ctx, e, s, is_dup, c);
+        merge_candidate(merged, std::move(c));
+      }
+    }
 
-        const bool keep = (c.cls == Classification::Duplicate)
-                              ? opts.want_duplicates
-                              : opts.want_unused;
-        if (keep || c.cls == Classification::Used) {
-          result.candidates.push_back(std::move(c));
-        }
+    for (auto &[id, c] : merged) {
+      finalize_merged(c);
+      const bool keep = (c.cls == Classification::Duplicate)
+                            ? opts.want_duplicates
+                            : opts.want_unused;
+      if (keep || c.cls == Classification::Used) {
+        result.candidates.push_back(std::move(c));
       }
     }
   }

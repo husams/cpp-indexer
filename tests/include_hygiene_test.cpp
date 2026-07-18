@@ -611,6 +611,113 @@ TEST_CASE("a header included by two TUs is validated through both") {
         dependants.end());
 }
 
+TEST_CASE("aggregate: one physical directive under two configs is one candidate") {
+  // shared.hpp -> unused.hpp is a single physical directive, but shared.hpp is
+  // parsed by two TUs under two DISTINCT configurations (different -D flags,
+  // hence different digests). With per-config facts restored, that must surface
+  // as ONE candidate whose config set is the union -- not one item per config.
+  Project p;
+  p.add("unused.hpp", "#pragma once\nstruct Unused {};\n");
+  p.add("shared.hpp", "#pragma once\n#include \"unused.hpp\"\n"
+                      "struct Shared { int f() const; };\n");
+  p.add("a.cpp", "#include \"shared.hpp\"\nint fa() { Shared s; return s.f(); }\n");
+  p.add("b.cpp", "#include \"shared.hpp\"\nint fb() { Shared s; return s.f(); }\n");
+  // Hand-write compile_commands with a different -D per TU so the two
+  // configurations do not collapse to one digest.
+  write_file(p.proj + "/compile_commands.json",
+             "[\n  {\"directory\": \"" + p.proj +
+                 "\", \"command\": \"c++ -std=c++17 -DA=1 -I. -c a.cpp\", "
+                 "\"file\": \"" + p.proj + "/a.cpp\"},\n"
+                 "  {\"directory\": \"" + p.proj +
+                 "\", \"command\": \"c++ -std=c++17 -DB=1 -I. -c b.cpp\", "
+                 "\"file\": \"" + p.proj + "/b.cpp\"}\n]\n");
+  REQUIRE(run_cidx({"import", "--db", p.proj, "--name", "fx"}, p.cache) == 0);
+  REQUIRE(run_cidx({"index"}, p.cache) == 0);
+
+  cidx::Storage db(p.cache + "/index.db");
+  const hyg::AnalysisResult r = p.analyze(db);
+  int count = 0;
+  std::size_t configs = 0;
+  for (const hyg::IncludeCandidate &c : r.candidates) {
+    if (c.src_path == p.path("shared.hpp") && c.line == 2) {
+      ++count;
+      configs = c.configs.size();
+    }
+  }
+  CHECK(count == 1);      // exactly one candidate for the one directive
+  CHECK(configs == 2);    // both TU configurations, unioned onto it
+}
+
+TEST_CASE("a TU that includes nothing still reports the tier as populated") {
+  // A config row is written for every TU processed, so a project that happens to
+  // include nothing has configs but zero edges -- and must NOT be mistaken for
+  // a DB that predates the tier (the vacuous "nothing to report" refusal).
+  Project p;
+  p.add("main.cpp", "int main() { return 0; }\n");
+  p.index({"main.cpp"});
+
+  cidx::Storage db(p.cache + "/index.db");
+  CHECK(db.include_graph_populated());
+  const hyg::AnalysisResult r = hyg::analyze(db, hyg::AnalysisOptions{});
+  CHECK_FALSE(r.include_graph_empty);
+}
+
+TEST_CASE("include facts: retiring a TU's configuration spares other TUs") {
+  // delete_include_configs_for_tu removes only the named TU's configuration(s)
+  // and their edges (a changed compile command's obsolete digest), while a
+  // shared header's facts recorded under another TU survive.
+  const std::string tmp = make_temp_dir();
+  cidx::Storage db(tmp + "/i.db");
+  const int64_t comp = db.add_component("c", tmp);
+  const int64_t dir = db.add_directory(comp, tmp);
+  const int64_t tu_a = db.add_file(dir, "a.cpp");
+  const int64_t tu_b = db.add_file(dir, "b.cpp");
+  const int64_t hdr = db.add_file(dir, "shared.hpp");
+
+  cidx::IncludeConfig ca;
+  ca.tu_file_id = tu_a;
+  ca.digest = "AAAA";
+  const int64_t cid_a = db.add_include_config(ca);
+  cidx::IncludeConfig cb;
+  cb.tu_file_id = tu_b;
+  cb.digest = "BBBB";
+  const int64_t cid_b = db.add_include_config(cb);
+
+  cidx::IncludeEdge ea;
+  ea.src_file_id = hdr;
+  ea.dst_path = tmp + "/leaf.hpp";
+  ea.config_id = cid_a;
+  db.add_include_edge(ea);
+  cidx::IncludeEdge eb;
+  eb.src_file_id = hdr;
+  eb.dst_path = tmp + "/leaf.hpp";
+  eb.config_id = cid_b;
+  db.add_include_edge(eb);
+  REQUIRE(db.include_edges_from(hdr, true).size() == 2);
+
+  db.delete_include_configs_for_tu(tu_a);
+  const std::vector<cidx::IncludeEdge> after = db.include_edges_from(hdr, true);
+  REQUIRE(after.size() == 1);         // A's edge retired via config cascade
+  CHECK(after.front().config_id == cid_b); // B's edge survives
+}
+
+TEST_CASE("apply: refuses a hard-linked source") {
+  // rename(2) would give the edit a new inode and leave the file's other name
+  // pointing at the old content -- a silent divergence no per-inode copy fixes.
+  Project p;
+  p.add("unused.hpp", "#pragma once\nstruct Unused {};\n");
+  p.add("main.cpp", "#include \"unused.hpp\"\nint main() { return 0; }\n");
+  REQUIRE(::link((p.proj + "/main.cpp").c_str(),
+                 (p.proj + "/twin.cpp").c_str()) == 0);
+  p.index({"main.cpp"});
+
+  const std::string plan_path = p.cache + "/plan.json";
+  REQUIRE(run_cidx({"include", "plan", "--output", plan_path}, p.cache) == 0);
+  const std::string before = read_file(p.path("main.cpp"));
+  CHECK(run_cidx({"include", "apply", plan_path}, p.cache) == 1);
+  CHECK(read_file(p.path("main.cpp")) == before);
+}
+
 TEST_CASE("an index with no include facts refuses rather than reporting zero") {
   // A v30 database upgraded to v31 has an EMPTY include graph until a reindex.
   // "No unused includes" would be a vacuous truth that reads exactly like a

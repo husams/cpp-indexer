@@ -352,15 +352,17 @@ void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
                            const IncludeConfig &config) {
   auto txn = db.transaction();
 
-  // Configuration first: every edge references it. Re-recording a TU refreshes
-  // exactly its own (tu, digest) configuration -- clearing this config's prior
-  // edges/sites/macro uses and no others -- so a shared header's facts under a
-  // different TU's configuration are never wiped (last-TU-wins would otherwise
-  // collapse the include graph for every multiply-included header).
+  // Retire every configuration previously recorded for THIS TU, then write the
+  // current one. A TU is imported once per file, so exactly one configuration is
+  // current; a changed compile command produces a new digest, and the old
+  // config -- with its edges, sites, and macro uses -- would otherwise linger
+  // indefinitely and feed a stale build world into validation. The delete is
+  // scoped to this tu_file_id (cascading to its own rows only), so a shared
+  // header's facts recorded under a DIFFERENT TU's configuration are untouched.
   IncludeConfig cfg = config;
   cfg.digest = include_config_digest(cfg);
+  db.delete_include_configs_for_tu(cfg.tu_file_id);
   const int64_t config_id = db.add_include_config(cfg);
-  db.delete_include_facts_for_config(config_id);
 
   // Resolve each source file to its row once. A directive in a file no
   // component owns has nothing to hang off (and could never be edited), so it

@@ -371,12 +371,11 @@ public:
   // INSERT ... ON CONFLICT: accumulates count.
   void add_include_macro_use(const IncludeMacroUse &m);
 
-  // Drop every include fact (edges + sites + macro uses) recorded under ONE
-  // configuration. Called before re-recording a TU's directives so a deleted
-  // #include leaves no stale row, while a shared header's facts under other
-  // TUs' configurations are untouched.
-  void delete_include_facts_for_config(int64_t config_id);
-  // Drop the configurations owned by this TU (cascades to that TU's edges).
+  // Drop every configuration owned by this TU (cascades to that TU's edges,
+  // sites, and macro uses). Called before re-recording a TU's directives so a
+  // deleted #include -- or a whole configuration retired by a changed compile
+  // command -- leaves no stale row, while a shared header's facts recorded
+  // under OTHER TUs' configurations are untouched.
   void delete_include_configs_for_tu(int64_t tu_file_id);
 
   // Direct include edges out of / into a file. `include_system` keeps

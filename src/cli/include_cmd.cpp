@@ -16,6 +16,7 @@
 #include "include_hygiene/plan.hpp"
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
+#include "util/files.hpp"
 #include "util/pathutil.hpp"
 
 #include <algorithm>
@@ -96,6 +97,38 @@ void warn_uncovered(const hygiene::AnalysisResult &res, std::ostream &err) {
   for (const std::string &p : res.uncovered_scope) {
     err << "warning: no include-tier coverage for " << p
         << " (not indexed for includes; findings for it are not reported)\n";
+  }
+}
+
+// The default (whole-repo) command has no scope_paths to check, so a partially
+// reindexed tree -- some TUs carry include facts, the rest are stale/pending --
+// would silently look clean. Enumerate the translation units the tier never
+// covered and report them (bounded), so "no findings" cannot masquerade as
+// "fully analyzed". Only for the unscoped case; scoped paths use warn_uncovered.
+void warn_unscoped_coverage(cidx::Storage &db, std::ostream &err) {
+  std::vector<std::string> uncovered;
+  for (const auto &[row, abs] : db.list_files()) {
+    // A TU is a non-header source; headers are covered via their including TU.
+    if (files::is_header(abs) || !row.indexed) {
+      continue;
+    }
+    if (!db.include_tier_covers_file(row.id)) {
+      uncovered.push_back(abs);
+    }
+  }
+  if (uncovered.empty()) {
+    return;
+  }
+  std::sort(uncovered.begin(), uncovered.end());
+  err << "warning: " << uncovered.size()
+      << " indexed translation unit(s) have no include-tier coverage "
+         "(reindex to analyze them); findings below cover only the rest:\n";
+  const std::size_t cap = 10;
+  for (std::size_t i = 0; i < uncovered.size() && i < cap; ++i) {
+    err << "  " << uncovered[i] << "\n";
+  }
+  if (uncovered.size() > cap) {
+    err << "  ... and " << (uncovered.size() - cap) << " more\n";
   }
 }
 
@@ -234,6 +267,9 @@ int cmd_include_check(const ParsedArgs &args, Context &ctx) {
 
   const hygiene::AnalysisResult res = hygiene::analyze(db, opts);
   warn_uncovered(res, *ctx.err);
+  if (opts.scope_paths.empty()) {
+    warn_unscoped_coverage(db, *ctx.err);
+  }
 
   // `used` findings are the analyzer's internal state, not a report: a user
   // asking what is wrong does not want a line per working include.
@@ -315,6 +351,9 @@ int cmd_include_plan(const ParsedArgs &args, Context &ctx) {
 
   const hygiene::AnalysisResult res = hygiene::analyze(db, opts);
   warn_uncovered(res, *ctx.err);
+  if (opts.scope_paths.empty()) {
+    warn_unscoped_coverage(db, *ctx.err);
+  }
   hygiene::CleanupPlan plan =
       hygiene::build_plan(db, res, args.index_db.value_or(ctx.index_path));
 

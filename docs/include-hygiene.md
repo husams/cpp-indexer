@@ -183,14 +183,22 @@ rather than guesses.
 2. The whole accepted set is then proven **together**. If the combined proof
    fails, every accepted item is demoted rather than shipping a plan whose
    combined proof failed.
-3. At `apply` time everything is revalidated from scratch. The plan's recorded
-   validations are evidence of what *was* true, never a substitute for proving
-   it now.
+3. At `apply` time everything is revalidated from scratch, and the plan's own
+   evidence is never trusted: each selected item's **classification is
+   re-derived from the current index** (a plan cannot promote a `used` or
+   `manual_review` include to removable), every selected file must carry a
+   content hash, its path must stay inside the repository root, and the build
+   configurations reaching it must match the ones the plan was reviewed against.
+   The recorded validations are evidence of what *was* true, never a substitute
+   for proving it now.
 4. `apply` proves the **exact post-format bytes** it is about to write, not the
    pre-format bytes it planned — a proof of different bytes is not a proof.
 5. Nothing is written until every buffer has passed. Writes are then staged
-   through a temporary sibling and renamed, so a crash mid-run cannot leave a
-   half-written source file.
+   through a uniquely-named temporary sibling and renamed, so a crash mid-run
+   cannot leave a half-written source file. The replacement inode inherits the
+   original's owner, mode (chown before chmod, so setuid/setgid survive),
+   extended attributes, and ACLs; a **symlinked or hard-linked** source is
+   refused rather than silently detached from its target or its other names.
 
 ### Formatting
 

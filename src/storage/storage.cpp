@@ -3446,25 +3446,6 @@ void Storage::add_include_macro_use(const IncludeMacroUse &m) {
   st.step_done();
 }
 
-void Storage::delete_include_facts_for_config(int64_t config_id) {
-  // Scope the refresh to ONE configuration. Deleting by src_file_id instead
-  // would wipe a shared header's edges recorded under every OTHER TU's
-  // configuration, making the include graph last-TU-wins for any header more
-  // than one TU includes. include_site cascades from include_edge, but the
-  // sites are dropped explicitly so the result does not depend on the
-  // foreign_keys pragma being on.
-  auto s0 = db_.prepare("DELETE FROM include_site WHERE edge_id IN "
-                        "(SELECT id FROM include_edge WHERE config_id = ?)");
-  s0.bind(1, config_id);
-  s0.step_done();
-  auto st = db_.prepare("DELETE FROM include_edge WHERE config_id = ?");
-  st.bind(1, config_id);
-  st.step_done();
-  auto st2 = db_.prepare("DELETE FROM include_macro_use WHERE config_id = ?");
-  st2.bind(1, config_id);
-  st2.step_done();
-}
-
 void Storage::delete_include_configs_for_tu(int64_t tu_file_id) {
   auto st = db_.prepare("DELETE FROM include_config WHERE tu_file_id = ?");
   st.bind(1, tu_file_id);
@@ -3583,7 +3564,13 @@ Storage::include_macro_uses(int64_t src_file_id, const std::string &def_path) {
 }
 
 bool Storage::include_graph_populated() {
-  auto st = db_.prepare("SELECT 1 FROM include_edge LIMIT 1");
+  // A configuration row is written for EVERY translation unit the include tier
+  // processed, even one with no #includes at all -- so an existing config is
+  // the true "the tier has run" marker, where an edge is not. A fully indexed
+  // project that happens to include nothing has configs but zero edges and must
+  // read as populated; a DB that predates v31 or was never reindexed has
+  // neither, and only that case is the vacuous "nothing to report".
+  auto st = db_.prepare("SELECT 1 FROM include_config LIMIT 1");
   return st.step();
 }
 
