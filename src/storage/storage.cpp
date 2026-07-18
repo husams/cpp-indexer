@@ -533,7 +533,94 @@ CREATE TABLE IF NOT EXISTS symbol_type (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_symbol_type_type ON symbol_type(type_id);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '30');
+-- ===================== v31: include tier =====================
+-- Preprocessing facts live in their OWN file domain: `edge` is symbol->symbol
+-- and cannot hold a file->file relation. Collapsed edge + per-directive site,
+-- mirroring the edge/edge_site pattern.
+
+-- Stable identity for one normalized compilation configuration. A TU has one
+-- compile command, so in practice this is one row per indexed TU; the digest
+-- makes plan freshness checkable without re-reading the compile database.
+-- digest = sha1 over driver \n working_dir \n lang_mode \n resource_dir \n
+-- each argument, in order (see include_config_digest in include_facts.cpp).
+CREATE TABLE IF NOT EXISTS include_config (
+    id           INTEGER PRIMARY KEY,
+    tu_file_id   INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    digest       TEXT NOT NULL,
+    driver       TEXT,
+    working_dir  TEXT,
+    arguments    TEXT,   -- JSON list of normalized parse args
+    lang_mode    TEXT,   -- 'c' | 'c++'
+    resource_dir TEXT,
+    UNIQUE (tu_file_id, digest)
+);
+CREATE INDEX IF NOT EXISTS idx_include_config_digest ON include_config(digest);
+
+-- One collapsed row per (source file, resolved target, configuration).
+-- dst_file_id is NULL for system/unowned/unresolved targets; dst_path is the
+-- path AS OPENED (never symlink-resolved), or the written spelling when the
+-- directive did not resolve.
+CREATE TABLE IF NOT EXISTS include_edge (
+    id           INTEGER PRIMARY KEY,
+    src_file_id  INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    dst_file_id  INTEGER REFERENCES file(id) ON DELETE SET NULL,
+    dst_path     TEXT NOT NULL,
+    config_id    INTEGER NOT NULL REFERENCES include_config(id) ON DELETE CASCADE,
+    is_system    INTEGER NOT NULL DEFAULT 0,
+    is_generated INTEGER NOT NULL DEFAULT 0,
+    count        INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (src_file_id, dst_path, config_id)
+);
+CREATE INDEX IF NOT EXISTS idx_include_edge_dst ON include_edge(dst_file_id);
+CREATE INDEX IF NOT EXISTS idx_include_edge_config ON include_edge(config_id);
+
+CREATE TABLE IF NOT EXISTS include_directive_kind (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+INSERT OR IGNORE INTO include_directive_kind (id, name) VALUES
+  (1,'include'), (2,'include_next'), (3,'import'), (4,'include_macros'),
+  (5,'unknown');
+
+-- One row per directive occurrence. begin_offset/end_offset bound the exact
+-- removal range (hash through end-of-line) in the source file's buffer;
+-- replacements are applied by ORIGINAL offsets, never by line renumbering.
+-- cond_fingerprint is '' at unconditional top level, else a digest of the
+-- enclosing #if/#elif/#else region stack (see ConditionalTracker).
+-- guarded=1 only when the target carries #pragma once or a recognized include
+-- guard -- the precondition for automatic duplicate classification.
+CREATE TABLE IF NOT EXISTS include_site (
+    id               INTEGER PRIMARY KEY,
+    edge_id          INTEGER NOT NULL REFERENCES include_edge(id) ON DELETE CASCADE,
+    line             INTEGER NOT NULL,
+    col              INTEGER NOT NULL,
+    begin_offset     INTEGER NOT NULL,
+    end_offset       INTEGER NOT NULL,
+    spelling         TEXT NOT NULL,   -- as written, without <> or ""
+    is_angled        INTEGER NOT NULL DEFAULT 0,
+    directive        INTEGER NOT NULL DEFAULT 1, -- include_directive_kind.id
+    cond_fingerprint TEXT NOT NULL DEFAULT '',
+    resolved         INTEGER NOT NULL DEFAULT 1,
+    guarded          INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (edge_id, begin_offset)
+);
+CREATE INDEX IF NOT EXISTS idx_include_site_edge ON include_site(edge_id);
+
+-- Non-symbol dependency: `src_file_id` expanded macro `name`, whose definition
+-- lives in `def_path`. A symbol-unused include that supplies a macro the source
+-- expands is real usage the reference graph cannot see -- it downgrades the
+-- candidate to manual_review and is never auto-removed.
+CREATE TABLE IF NOT EXISTS include_macro_use (
+    src_file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    def_path    TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    config_id   INTEGER NOT NULL REFERENCES include_config(id) ON DELETE CASCADE,
+    count       INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (src_file_id, def_path, name, config_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_include_macro_use_path ON include_macro_use(def_path);
+
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '31');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
@@ -1399,6 +1486,16 @@ void Storage::migrate() {
   // populates them. Bump the version so the DB is stamped v30. Mirrors
   // storage.py.
   if (!has_table("type_node")) {
+    changed = true; // tables will be created by the schema script
+  }
+  // v30 -> v31: include tier (include_config/include_edge/include_site/
+  // include_macro_use + the directive seed table). All created by the schema
+  // script (CREATE TABLE IF NOT EXISTS). Preprocessing facts cannot be
+  // recovered from stored rows -- only a reindex populates them, so an
+  // upgraded DB has an EMPTY include graph until `cidx index` reruns, and
+  // `cidx include` reports that rather than treating empty as "no includes".
+  // Mirrors storage.py.
+  if (!has_table("include_edge")) {
     changed = true; // tables will be created by the schema script
   }
   if (changed) {
@@ -3203,6 +3300,459 @@ Storage::symbol_type_owners_of_types(const std::vector<int64_t> &type_ids) {
   }
   while (st.step()) {
     out.emplace_back(st.col_int64(0), st.col_int64(1));
+  }
+  return out;
+}
+
+// -- v31 include tier ---------------------------------------------------------
+
+namespace {
+
+// Decode one include_config row starting at column `base`:
+//   id, tu_file_id, digest, driver, working_dir, arguments, lang_mode,
+//   resource_dir
+IncludeConfig include_config_from(const SqliteStmt &st) {
+  IncludeConfig c;
+  c.id = st.col_int64(0);
+  c.tu_file_id = st.col_int64(1);
+  c.digest = st.col_text(2);
+  c.driver = opt_text(st, 3);
+  c.working_dir = opt_text(st, 4);
+  if (!st.col_is_null(5)) {
+    c.arguments = json_min::decode_string_array(st.col_text(5));
+  }
+  c.lang_mode = opt_text(st, 6);
+  c.resource_dir = opt_text(st, 7);
+  return c;
+}
+
+constexpr char kIncludeConfigCols[] =
+    "id, tu_file_id, digest, driver, working_dir, arguments, lang_mode, "
+    "resource_dir";
+
+// Decode one include_edge row: id, src_file_id, dst_file_id, dst_path,
+// config_id, is_system, is_generated, count
+IncludeEdge include_edge_from(const SqliteStmt &st) {
+  IncludeEdge e;
+  e.id = st.col_int64(0);
+  e.src_file_id = st.col_int64(1);
+  e.dst_file_id = opt_int64(st, 2);
+  e.dst_path = st.col_text(3);
+  e.config_id = st.col_int64(4);
+  e.is_system = st.col_int64(5) != 0;
+  e.is_generated = st.col_int64(6) != 0;
+  e.count = st.col_int64(7);
+  return e;
+}
+
+constexpr char kIncludeEdgeCols[] =
+    "e.id, e.src_file_id, e.dst_file_id, e.dst_path, e.config_id, e.is_system, "
+    "e.is_generated, e.count";
+
+} // namespace
+
+int64_t Storage::add_include_config(const IncludeConfig &c) {
+  auto st = db_.prepare(
+      "INSERT INTO include_config (tu_file_id, digest, driver, working_dir, "
+      "                            arguments, lang_mode, resource_dir) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?) "
+      "ON CONFLICT(tu_file_id, digest) DO UPDATE SET "
+      "  driver       = excluded.driver, "
+      "  working_dir  = excluded.working_dir, "
+      "  arguments    = excluded.arguments, "
+      "  lang_mode    = excluded.lang_mode, "
+      "  resource_dir = excluded.resource_dir "
+      "RETURNING id");
+  st.bind(1, c.tu_file_id);
+  st.bind(2, std::string_view(c.digest));
+  bind_opt(st, 3, c.driver);
+  bind_opt(st, 4, c.working_dir);
+  st.bind(5, std::string_view(json_min::encode_string_array(c.arguments)));
+  bind_opt(st, 6, c.lang_mode);
+  bind_opt(st, 7, c.resource_dir);
+  if (!st.step()) {
+    throw StorageError("add_include_config: upsert returned no id");
+  }
+  const int64_t id = st.col_int64(0);
+  st.step_done();
+  return id;
+}
+
+std::optional<IncludeConfig> Storage::include_config_by_id(int64_t config_id) {
+  auto st = db_.prepare(std::string("SELECT ") + kIncludeConfigCols +
+                        " FROM include_config WHERE id = ?");
+  st.bind(1, config_id);
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return include_config_from(st);
+}
+
+std::vector<IncludeConfig> Storage::include_configs_for_tu(int64_t tu_file_id) {
+  auto st = db_.prepare(std::string("SELECT ") + kIncludeConfigCols +
+                        " FROM include_config WHERE tu_file_id = ? "
+                        "ORDER BY digest");
+  st.bind(1, tu_file_id);
+  std::vector<IncludeConfig> out;
+  while (st.step()) {
+    out.push_back(include_config_from(st));
+  }
+  return out;
+}
+
+int64_t Storage::add_include_edge(const IncludeEdge &e) {
+  // count ACCUMULATES: the same header included twice in one file under one
+  // configuration is two occurrences of one collapsed edge (each gets its own
+  // include_site row). dst_file_id COALESCEs so a later caller that has
+  // resolved the target can fill it in, but a known id is never nulled.
+  auto st = db_.prepare(
+      "INSERT INTO include_edge (src_file_id, dst_file_id, dst_path, "
+      "                          config_id, is_system, is_generated, count) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?) "
+      "ON CONFLICT(src_file_id, dst_path, config_id) DO UPDATE SET "
+      "  count       = include_edge.count + excluded.count, "
+      "  dst_file_id = COALESCE(excluded.dst_file_id, include_edge.dst_file_id), "
+      "  is_system   = excluded.is_system, "
+      "  is_generated = excluded.is_generated "
+      "RETURNING id");
+  st.bind(1, e.src_file_id);
+  bind_opt(st, 2, e.dst_file_id);
+  st.bind(3, std::string_view(e.dst_path));
+  st.bind(4, e.config_id);
+  st.bind(5, static_cast<int64_t>(e.is_system ? 1 : 0));
+  st.bind(6, static_cast<int64_t>(e.is_generated ? 1 : 0));
+  st.bind(7, e.count);
+  if (!st.step()) {
+    throw StorageError("add_include_edge: upsert returned no id");
+  }
+  const int64_t id = st.col_int64(0);
+  st.step_done();
+  return id;
+}
+
+int64_t Storage::add_include_site(const IncludeSite &s) {
+  auto st = db_.prepare(
+      "INSERT INTO include_site (edge_id, line, col, begin_offset, end_offset, "
+      "                          spelling, is_angled, directive, "
+      "                          cond_fingerprint, resolved, guarded) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+      "ON CONFLICT(edge_id, begin_offset) DO UPDATE SET "
+      "  line = excluded.line, col = excluded.col, "
+      "  end_offset = excluded.end_offset, spelling = excluded.spelling, "
+      "  is_angled = excluded.is_angled, directive = excluded.directive, "
+      "  cond_fingerprint = excluded.cond_fingerprint, "
+      "  resolved = excluded.resolved, guarded = excluded.guarded "
+      "RETURNING id");
+  st.bind(1, s.edge_id);
+  st.bind(2, s.line);
+  st.bind(3, s.col);
+  st.bind(4, s.begin_offset);
+  st.bind(5, s.end_offset);
+  st.bind(6, std::string_view(s.spelling));
+  st.bind(7, static_cast<int64_t>(s.is_angled ? 1 : 0));
+  st.bind(8, s.directive);
+  st.bind(9, std::string_view(s.cond_fingerprint));
+  st.bind(10, static_cast<int64_t>(s.resolved ? 1 : 0));
+  st.bind(11, static_cast<int64_t>(s.guarded ? 1 : 0));
+  if (!st.step()) {
+    throw StorageError("add_include_site: upsert returned no id");
+  }
+  const int64_t id = st.col_int64(0);
+  st.step_done();
+  return id;
+}
+
+void Storage::add_include_macro_use(const IncludeMacroUse &m) {
+  auto st = db_.prepare(
+      "INSERT INTO include_macro_use (src_file_id, def_path, name, config_id, "
+      "                               count) "
+      "VALUES (?, ?, ?, ?, ?) "
+      "ON CONFLICT(src_file_id, def_path, name, config_id) DO UPDATE SET "
+      "  count = include_macro_use.count + excluded.count");
+  st.bind(1, m.src_file_id);
+  st.bind(2, std::string_view(m.def_path));
+  st.bind(3, std::string_view(m.name));
+  st.bind(4, m.config_id);
+  st.bind(5, m.count);
+  st.step_done();
+}
+
+void Storage::delete_include_configs_for_tu(int64_t tu_file_id) {
+  auto st = db_.prepare("DELETE FROM include_config WHERE tu_file_id = ?");
+  st.bind(1, tu_file_id);
+  st.step_done();
+}
+
+std::vector<IncludeEdge> Storage::include_edges_from(int64_t src_file_id,
+                                                     bool include_system) {
+  std::string sql = std::string("SELECT ") + kIncludeEdgeCols +
+                    " FROM include_edge e "
+                    "JOIN include_config c ON c.id = e.config_id "
+                    "WHERE e.src_file_id = ?";
+  if (!include_system) {
+    sql += " AND e.is_system = 0";
+  }
+  sql += " ORDER BY e.dst_path, c.digest";
+  auto st = db_.prepare(sql);
+  st.bind(1, src_file_id);
+  std::vector<IncludeEdge> out;
+  while (st.step()) {
+    out.push_back(include_edge_from(st));
+  }
+  return out;
+}
+
+std::vector<IncludeEdge> Storage::include_edges_to(int64_t dst_file_id) {
+  auto st = db_.prepare(std::string("SELECT ") + kIncludeEdgeCols +
+                        " FROM include_edge e "
+                        "JOIN include_config c ON c.id = e.config_id "
+                        "WHERE e.dst_file_id = ? "
+                        "ORDER BY e.src_file_id, c.digest");
+  st.bind(1, dst_file_id);
+  std::vector<IncludeEdge> out;
+  while (st.step()) {
+    out.push_back(include_edge_from(st));
+  }
+  return out;
+}
+
+std::vector<IncludeEdge>
+Storage::include_edges_to_path(const std::string &dst_path) {
+  auto st = db_.prepare(std::string("SELECT ") + kIncludeEdgeCols +
+                        " FROM include_edge e "
+                        "JOIN include_config c ON c.id = e.config_id "
+                        "WHERE e.dst_path = ? "
+                        "ORDER BY e.src_file_id, c.digest");
+  st.bind(1, std::string_view(dst_path));
+  std::vector<IncludeEdge> out;
+  while (st.step()) {
+    out.push_back(include_edge_from(st));
+  }
+  return out;
+}
+
+std::vector<IncludeEdge> Storage::all_include_edges(bool include_system) {
+  std::string sql = std::string("SELECT ") + kIncludeEdgeCols +
+                    " FROM include_edge e "
+                    "JOIN include_config c ON c.id = e.config_id";
+  if (!include_system) {
+    sql += " WHERE e.is_system = 0";
+  }
+  sql += " ORDER BY e.src_file_id, e.dst_path, c.digest";
+  auto st = db_.prepare(sql);
+  std::vector<IncludeEdge> out;
+  while (st.step()) {
+    out.push_back(include_edge_from(st));
+  }
+  return out;
+}
+
+std::vector<IncludeSite> Storage::include_sites_for(int64_t edge_id) {
+  auto st = db_.prepare(
+      "SELECT id, edge_id, line, col, begin_offset, end_offset, spelling, "
+      "       is_angled, directive, cond_fingerprint, resolved, guarded "
+      "FROM include_site WHERE edge_id = ? ORDER BY begin_offset");
+  st.bind(1, edge_id);
+  std::vector<IncludeSite> out;
+  while (st.step()) {
+    IncludeSite s;
+    s.id = st.col_int64(0);
+    s.edge_id = st.col_int64(1);
+    s.line = st.col_int64(2);
+    s.col = st.col_int64(3);
+    s.begin_offset = st.col_int64(4);
+    s.end_offset = st.col_int64(5);
+    s.spelling = st.col_text(6);
+    s.is_angled = st.col_int64(7) != 0;
+    s.directive = st.col_int64(8);
+    s.cond_fingerprint = st.col_text(9);
+    s.resolved = st.col_int64(10) != 0;
+    s.guarded = st.col_int64(11) != 0;
+    out.push_back(std::move(s));
+  }
+  return out;
+}
+
+std::vector<IncludeMacroUse>
+Storage::include_macro_uses(int64_t src_file_id, const std::string &def_path) {
+  auto st = db_.prepare(
+      "SELECT src_file_id, def_path, name, config_id, count "
+      "FROM include_macro_use WHERE src_file_id = ? AND def_path = ? "
+      "ORDER BY name, config_id");
+  st.bind(1, src_file_id);
+  st.bind(2, std::string_view(def_path));
+  std::vector<IncludeMacroUse> out;
+  while (st.step()) {
+    IncludeMacroUse m;
+    m.src_file_id = st.col_int64(0);
+    m.def_path = st.col_text(1);
+    m.name = st.col_text(2);
+    m.config_id = st.col_int64(3);
+    m.count = st.col_int64(4);
+    out.push_back(std::move(m));
+  }
+  return out;
+}
+
+bool Storage::include_graph_populated() {
+  // A configuration row is written for EVERY translation unit the include tier
+  // processed, even one with no #includes at all -- so an existing config is
+  // the true "the tier has run" marker, where an edge is not. A fully indexed
+  // project that happens to include nothing has configs but zero edges and must
+  // read as populated; a DB that predates v31 or was never reindexed has
+  // neither, and only that case is the vacuous "nothing to report".
+  auto st = db_.prepare("SELECT 1 FROM include_config LIMIT 1");
+  return st.step();
+}
+
+bool Storage::include_tier_covers_file(int64_t file_id) {
+  // A configuration row is written for every TU the tier processed (even one
+  // with no #includes), so it -- together with either direction of an include
+  // edge -- is the completion marker for "this file was seen".
+  auto st = db_.prepare(
+      "SELECT 1 FROM include_config WHERE tu_file_id = ? "
+      "UNION ALL SELECT 1 FROM include_edge WHERE src_file_id = ? "
+      "UNION ALL SELECT 1 FROM include_edge WHERE dst_file_id = ? LIMIT 1");
+  st.bind(1, file_id);
+  st.bind(2, file_id);
+  st.bind(3, file_id);
+  return st.step();
+}
+
+namespace {
+
+// "?, ?, ?" for an IN clause of n binds.
+std::string in_placeholders(std::size_t n) {
+  std::string s;
+  for (std::size_t i = 0; i < n; ++i) {
+    s += i == 0 ? "?" : ", ?";
+  }
+  return s;
+}
+
+} // namespace
+
+std::vector<int64_t> Storage::symbol_ids_for_file(int64_t file_id) {
+  // Definition site OR declaration site: a class declared in a header and
+  // defined in a source file is owned by both, which is what the unused rule
+  // needs (either site makes the header the provider).
+  //
+  // The `definition` UNION is not redundant. symbol.usr is UNIQUE, so symbols
+  // that share a USR across translation units collapse into ONE row whose
+  // file_id is a single arbitrary winner -- `int main(int, char**)` is
+  // `c:@F@main#I#**C#` in every TU that defines it, so seven of cidx's own
+  // eight mains would otherwise have no owner at all. A file with no owners
+  // makes every one of its includes look unreferenced, which is exactly the
+  // silent false positive this rule must not produce. The v27 `definition`
+  // table keeps the per-file bodies the collapse loses, so it is the
+  // authoritative record of what a file actually defines.
+  auto st = db_.prepare("SELECT id FROM symbol "
+                        "WHERE file_id = ? OR decl_file_id = ? "
+                        "UNION "
+                        "SELECT symbol_id FROM definition WHERE file_id = ? "
+                        "ORDER BY id");
+  st.bind(1, file_id);
+  st.bind(2, file_id);
+  st.bind(3, file_id);
+  std::vector<int64_t> out;
+  while (st.step()) {
+    out.push_back(st.col_int64(0));
+  }
+  return out;
+}
+
+std::vector<int64_t>
+Storage::edge_targets_from(const std::vector<int64_t> &src_ids) {
+  std::vector<int64_t> out;
+  if (src_ids.empty()) {
+    return out;
+  }
+  // No kind filter: EVERY persisted relation counts as a reference. A new
+  // edge_kind is therefore covered automatically, which is the point -- the
+  // rule must not silently miss a relation the indexer learns later.
+  const std::string sql = "SELECT DISTINCT dst_id FROM edge WHERE src_id IN (" +
+                          in_placeholders(src_ids.size()) + ") ORDER BY dst_id";
+  auto st = db_.prepare(sql);
+  for (std::size_t i = 0; i < src_ids.size(); ++i) {
+    st.bind(static_cast<int>(i + 1), src_ids[i]);
+  }
+  while (st.step()) {
+    out.push_back(st.col_int64(0));
+  }
+  return out;
+}
+
+std::vector<int64_t> Storage::def_edge_targets_for_file(int64_t file_id) {
+  auto st = db_.prepare("SELECT DISTINCT de.dst_id FROM def_edge de "
+                        "JOIN definition d ON d.id = de.src_def_id "
+                        "WHERE d.file_id = ? ORDER BY de.dst_id");
+  st.bind(1, file_id);
+  std::vector<int64_t> out;
+  while (st.step()) {
+    out.push_back(st.col_int64(0));
+  }
+  return out;
+}
+
+std::vector<int64_t>
+Storage::type_ids_used_by(const std::vector<int64_t> &symbol_ids) {
+  std::vector<int64_t> out;
+  if (symbol_ids.empty()) {
+    return out;
+  }
+  const std::string ph = in_placeholders(symbol_ids.size());
+  const std::string sql = "SELECT DISTINCT type_id FROM symbol_type "
+                          "WHERE symbol_id IN (" + ph + ") "
+                          "UNION "
+                          "SELECT DISTINCT type_id FROM parameter "
+                          "WHERE owner_id IN (" + ph + ") AND type_id IS NOT NULL "
+                          "ORDER BY type_id";
+  auto st = db_.prepare(sql);
+  int idx = 1;
+  for (int pass = 0; pass < 2; ++pass) {
+    for (const int64_t id : symbol_ids) {
+      st.bind(idx++, id);
+    }
+  }
+  while (st.step()) {
+    out.push_back(st.col_int64(0));
+  }
+  return out;
+}
+
+std::vector<int64_t>
+Storage::symbols_named_by_types(const std::vector<int64_t> &type_ids) {
+  std::vector<int64_t> out;
+  if (type_ids.empty()) {
+    return out;
+  }
+  // Forward structural closure: from each seed node follow type_edge (pointee,
+  // element_type, alias_of, return_type, param_type, template_argument_type)
+  // and canonical_id. `const Foo&` is a reference node whose pointee is a
+  // const-qualified Foo; vector<Foo> names Foo as a template argument; an alias
+  // reaches Foo through alias_of. All three must count as naming Foo.
+  const std::string sql =
+      "WITH RECURSIVE reach(id) AS ("
+      "  SELECT id FROM type_node WHERE id IN (" +
+      in_placeholders(type_ids.size()) +
+      ") "
+      "  UNION "
+      "  SELECT te.dst_id FROM type_edge te JOIN reach r ON te.src_id = r.id "
+      "  UNION "
+      "  SELECT tn.canonical_id FROM type_node tn JOIN reach r ON tn.id = r.id "
+      "   WHERE tn.canonical_id IS NOT NULL"
+      ") "
+      "SELECT DISTINCT s.id FROM reach "
+      "JOIN type_node t ON t.id = reach.id "
+      "JOIN symbol s ON s.usr = t.decl_usr "
+      "WHERE t.decl_usr IS NOT NULL "
+      "ORDER BY s.id";
+  auto st = db_.prepare(sql);
+  for (std::size_t i = 0; i < type_ids.size(); ++i) {
+    st.bind(static_cast<int>(i + 1), type_ids[i]);
+  }
+  while (st.step()) {
+    out.push_back(st.col_int64(0));
   }
   return out;
 }

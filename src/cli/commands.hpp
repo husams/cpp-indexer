@@ -84,6 +84,13 @@ int cmd_graph_dispatch(const ParsedArgs &args, Context &ctx);
 int cmd_graph_signature(const ParsedArgs &args, Context &ctx);
 int cmd_graph_typeusers(const ParsedArgs &args, Context &ctx);
 
+// v31 include hygiene (cli/include_cmd.cpp). graph/check/plan are read-only;
+// apply is the only command in cidx that edits source.
+int cmd_include_graph(const ParsedArgs &args, Context &ctx);
+int cmd_include_check(const ParsedArgs &args, Context &ctx);
+int cmd_include_plan(const ParsedArgs &args, Context &ctx);
+int cmd_include_apply(const ParsedArgs &args, Context &ctx);
+
 // Dispatch on args.command/args.what (args.help_text handled by the caller).
 int run_command(const ParsedArgs &args, Context &ctx);
 

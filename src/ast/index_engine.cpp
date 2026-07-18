@@ -2,6 +2,7 @@
 
 #include "ast/function_definition_visitor.hpp"
 #include "ast/declaration_edge_visitor.hpp"
+#include "ast/include_facts.hpp"
 #include "ast/location.hpp"
 #include "ast/namespace_use_visitor.hpp"
 #include "ast/storage_edge_sink.hpp"
@@ -50,8 +51,6 @@ std::optional<double> file_mtime(const std::string &path) {
 #endif
 }
 
-// One transitive inclusion (clang_getInclusions parity): recorded in
-// include-directive order, depth > 0 only.
 struct EngineState {
   cidx::Storage *db = nullptr;
   const cidx::File *rec = nullptr;
@@ -59,32 +58,14 @@ struct EngineState {
   bool graph_enabled = true;
   bool strict = false; // CIDX_STRICT: abort on Error, not just Fatal
   IndexOneOutcome *out = nullptr;
-  std::vector<std::string> inclusions; // canonical absolute header paths
+  // v31: the full preprocessing record (ast/include_facts.hpp). The header
+  // two-pass consumes its resolved targets in directive order
+  // (clang_getInclusions parity, depth > 0 only); `cidx include` consumes the
+  // rest.
+  IncludeFacts includes;
+  const cidx::IncludeConfig *config = nullptr; // v31: this TU's normalized args
+  clang::Preprocessor *pp = nullptr;           // v31: for include-guard status
   bool tu_handled = false;
-};
-
-class IncludeRecorder : public clang::PPCallbacks {
-public:
-  IncludeRecorder(EngineState &state, clang::SourceManager &sm)
-      : state_(state), sm_(sm) {}
-
-  void InclusionDirective(clang::SourceLocation, const clang::Token &,
-                          llvm::StringRef, bool, clang::CharSourceRange,
-                          clang::OptionalFileEntryRef file, llvm::StringRef,
-                          llvm::StringRef, const clang::Module *, bool,
-                          clang::SrcMgr::CharacteristicKind) override {
-    if (!file)
-      return;
-    // clang_getFileName parity: the path AS OPENED (search dir + spelling),
-    // never symlink-resolved (/var vs /private/var matters for ownership).
-    const std::string p = file->getName().str();
-    if (!p.empty())
-      state_.inclusions.push_back(p);
-  }
-
-private:
-  EngineState &state_;
-  clang::SourceManager &sm_;
 };
 
 // Severity map mirroring CXDiagnosticSeverity (collect_diagnostics parity).
@@ -142,6 +123,12 @@ public:
     run_header_passes(plan);
     // edges(main) LAST (commands.cpp ordering).
     run_edge_pass(state_.path, state_.rec->id);
+    // v31 include tier LAST of all: an include_edge references file(id), so
+    // every owned header must already have its row from the header two-pass.
+    if (state_.pp != nullptr) {
+      resolve_include_guards(*state_.pp, state_.includes);
+    }
+    persist_include_facts(db_, state_.includes, *state_.config);
   }
 
 private:
@@ -185,7 +172,11 @@ private:
     std::vector<PendingHeader> plan;
     std::unordered_set<std::string> seen;
     cidx::HeaderStats &counts = state_.out->headers;
-    for (const std::string &inc : state_.inclusions) {
+    for (const IncludeFact &f : state_.includes.includes) {
+      if (!f.resolved) {
+        continue; // no file was opened: nothing to index
+      }
+      const std::string &inc = f.dst_path;
       const std::string abs = cidx::pathutil::abspath(inc);
       if (!seen.insert(abs).second)
         continue;
@@ -276,8 +267,8 @@ public:
   explicit IndexFrontendAction(EngineState &state) : state_(state) {}
 
   bool BeginSourceFileAction(clang::CompilerInstance &ci) override {
-    ci.getPreprocessor().addPPCallbacks(
-        std::make_unique<IncludeRecorder>(state_, ci.getSourceManager()));
+    register_include_callbacks(ci, state_.includes);
+    state_.pp = &ci.getPreprocessor();
     return true;
   }
 
@@ -387,6 +378,20 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   DiagCollector collector(out.diagnostics);
   setup.tool.setDiagnosticConsumer(&collector);
 
+  // v31: the configuration the include tier records against is the one this
+  // parse actually used -- the same resolved args, driver, and resource dir --
+  // so a cleanup plan can revalidate a removal under exactly this TU later.
+  // Working dir is "." to match CompilationSetup's FixedCompilationDatabase.
+  cidx::IncludeConfig config;
+  config.tu_file_id = rec.id;
+  config.driver = rec.driver;
+  config.working_dir = std::string(".");
+  config.arguments = args;
+  config.lang_mode = cidx::Toolchain::is_cpp(path, args) ? "c++" : "c";
+#ifdef CIDX_CLANG_RESOURCE_DIR
+  config.resource_dir = std::string(CIDX_CLANG_RESOURCE_DIR);
+#endif
+
   EngineState state;
   state.db = &db;
   state.rec = &rec;
@@ -394,6 +399,7 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   state.graph_enabled = graph_enabled;
   state.strict = read_strict_mode();
   state.out = &out;
+  state.config = &config;
 
   IndexFrontendActionFactory factory(state);
   (void)setup.tool.run(&factory);

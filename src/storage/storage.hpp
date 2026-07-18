@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 30;
+constexpr int kSchemaVersion = 31;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -357,6 +357,107 @@ public:
   // ordered by (symbol_id, kind).
   std::vector<std::pair<int64_t, int64_t>>
   symbol_type_owners_of_types(const std::vector<int64_t> &type_ids);
+
+  // -- v31 include tier -------------------------------------------------------
+  // Upsert keyed by (tu_file_id, digest); returns the stable include_config.id.
+  // A repeat call refreshes the descriptive columns so a changed driver or
+  // resource dir under an unchanged digest cannot go stale.
+  int64_t add_include_config(const IncludeConfig &c);
+  std::optional<IncludeConfig> include_config_by_id(int64_t config_id);
+  // Configurations whose TU is `tu_file_id`, ordered by digest.
+  std::vector<IncludeConfig> include_configs_for_tu(int64_t tu_file_id);
+
+  // UNIQUE upsert on (src_file_id, dst_path, config_id); ACCUMULATES count on
+  // conflict (a header included twice in one file is two occurrences of one
+  // collapsed edge). dst_file_id is refreshed when the caller now knows it.
+  // Returns the include_edge.id for include_site linkage.
+  int64_t add_include_edge(const IncludeEdge &e);
+  // INSERT OR REPLACE keyed on (edge_id, begin_offset): re-indexing the same
+  // directive rewrites its site rather than duplicating it.
+  int64_t add_include_site(const IncludeSite &s);
+  // INSERT ... ON CONFLICT: accumulates count.
+  void add_include_macro_use(const IncludeMacroUse &m);
+
+  // Drop every configuration owned by this TU (cascades to that TU's edges,
+  // sites, and macro uses). Called before re-recording a TU's directives so a
+  // deleted #include -- or a whole configuration retired by a changed compile
+  // command -- leaves no stale row, while a shared header's facts recorded
+  // under OTHER TUs' configurations are untouched.
+  void delete_include_configs_for_tu(int64_t tu_file_id);
+
+  // Direct include edges out of / into a file. `include_system` keeps
+  // system-classified targets; otherwise they are filtered. Ordered by
+  // (dst_path, config digest) / (src path, config digest) for determinism.
+  std::vector<IncludeEdge> include_edges_from(int64_t src_file_id,
+                                              bool include_system);
+  std::vector<IncludeEdge> include_edges_to(int64_t dst_file_id);
+  // Every edge whose dst_path resolves to this path (covers targets that are
+  // not owned by a component, which therefore have no dst_file_id).
+  std::vector<IncludeEdge> include_edges_to_path(const std::string &dst_path);
+  // Every include edge in the database, ordered by (src_file_id, dst_path,
+  // config digest). Whole-graph queries (cycles, transitive closure, hotspots)
+  // need the full relation, and it is far cheaper to sort once here than to
+  // walk per-file.
+  std::vector<IncludeEdge> all_include_edges(bool include_system);
+  // Sites of one collapsed edge, ordered by begin_offset.
+  std::vector<IncludeSite> include_sites_for(int64_t edge_id);
+  // Macros expanded in `src_file_id` that are defined in `def_path`.
+  std::vector<IncludeMacroUse> include_macro_uses(int64_t src_file_id,
+                                                  const std::string &def_path);
+  // True once any include fact exists -- distinguishes "this DB predates the
+  // v31 tier / has not been reindexed" from "this file includes nothing".
+  bool include_graph_populated();
+  // True if the include tier actually observed this file: it was indexed as a
+  // TU (has a configuration), included something, or was included by something.
+  // Lets a scoped query tell "analyzed and genuinely clean" from "never indexed
+  // for includes", which otherwise both read as zero findings.
+  bool include_tier_covers_file(int64_t file_id);
+
+  // -- v31 reference-set analysis ---------------------------------------------
+  // These four back the unused(S, H) definition:
+  //   unused(S, H) := Refs(Owners(S)) INTERSECT Symbols(H) = {}
+  // (see docs/include-hygiene.md). They are deliberately set-oriented: one
+  // query per file, not one per symbol.
+
+  // Owners(F) / Symbols(F): every symbol DECLARED or DEFINED directly in this
+  // file. A symbol from a header this file includes is NOT owned by it -- that
+  // separation is what makes "a reference to a transitive header's symbol does
+  // not use the direct header" hold. Ordered by id.
+  std::vector<int64_t> symbol_ids_for_file(int64_t file_id);
+
+  // Targets of every persisted semantic edge out of `src_ids`, across ALL edge
+  // kinds (calls, uses, inherits, overrides, construct-*, destroy, friend,
+  // specializes, instantiates, field_of, method_of, ...). Sorted, unique.
+  std::vector<int64_t> edge_targets_from(const std::vector<int64_t> &src_ids);
+
+  // Targets of every def_edge out of a body DEFINED IN this file -- the
+  // per-file half of Refs.
+  //
+  // `edge` is keyed by symbol, and symbol.usr is UNIQUE, so bodies that share a
+  // USR across translation units collapse onto one row: re-indexing each TU
+  // deletes the previous TU's edges and writes its own, last writer wins. Every
+  // `int main(int, char**)` in a project is the same USR, so all but one lose
+  // their call graph entirely -- and a file whose calls vanished has no
+  // references, which makes every one of its includes look unused. The v27
+  // `def_edge` table records calls/uses per BODY rather than per symbol, so it
+  // survives the collapse and is the only accurate source for such a file.
+  //
+  // This does not replace edge_targets_from: def_edge only carries body
+  // calls/uses (kinds 1/7). Declaration relations -- inherits, method_of,
+  // field_of, friend, specializes -- exist only on `edge`. Refs needs both.
+  std::vector<int64_t> def_edge_targets_for_file(int64_t file_id);
+
+  // Type nodes these symbols name through the signature tier: their return
+  // type, declared type, underlying type (symbol_type) and every parameter type
+  // (parameter). Sorted, unique.
+  std::vector<int64_t> type_ids_used_by(const std::vector<int64_t> &symbol_ids);
+
+  // Every symbol id named by the transitive structural closure of `type_ids`:
+  // follows type_edge (pointee, element, alias_of, return, param, template
+  // argument) and canonical_id, then maps each node's decl_usr back to its
+  // symbol. This is what makes `const Foo&`, `Foo*`, `vector<Foo>`, and an
+  // alias of Foo all count as references to Foo. Sorted, unique.
+  std::vector<int64_t> symbols_named_by_types(const std::vector<int64_t> &type_ids);
 
   // Delete edges whose src is a symbol defined in this file (idempotent
   // re-index: edges cascade-delete their edge_site rows).

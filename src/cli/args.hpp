@@ -81,6 +81,24 @@ struct ParsedArgs {
   bool transitive = false;               // --transitive (walk whole hierarchy)
   std::string access{"all"};             // --access {public,protected,private,all}
 
+  // -- include sub-command fields (cidx include graph|check|plan|apply) -------
+  // Scope: PATH... positionally, and/or --files-from FILE (one path per line,
+  // absolute or repo-relative). Both may be combined; the union is used.
+  std::vector<std::string> inc_paths;      // PATH...
+  std::optional<std::string> files_from;   // --files-from FILE
+  bool inc_reverse = false;                // graph --reverse (who includes me)
+  bool inc_transitive = false;             // graph --transitive
+  bool inc_cycles = false;                 // graph --cycles
+  bool inc_system = false;                 // graph --system (keep system targets)
+  std::string inc_format{"text"};          // graph --format text|json|dot
+  int inc_depth = 0;                       // graph --depth N (0 = unbounded)
+  bool inc_duplicates = false;             // check/plan --duplicates
+  bool inc_unused = false;                 // check/plan --unused
+  bool inc_json = false;                   // check --json
+  std::optional<std::string> inc_output;   // plan --output FILE (required)
+  std::string inc_plan;                    // apply PLAN (positional, required)
+  std::vector<std::string> inc_only;       // apply --only ID[,ID...]
+
   // -- portable-paths (v14) fields -------------------------------------------
   std::optional<std::string> version_str; // --version VER (add-source)
   bool no_detect_version = false;          // --no-detect-version (add-source)
