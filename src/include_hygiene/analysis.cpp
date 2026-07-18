@@ -230,24 +230,13 @@ void classify(cidx::Storage &db, const IncludeGraph &graph,
       std::unique(c.header_symbols.begin(), c.header_symbols.end()),
       c.header_symbols.end());
 
-  // A symbol DECLARED in H and DEFINED in S is one symbol in both sets, and it
-  // never references itself -- so Refs alone misses the most common include in
-  // C++: a .cpp including its own header. Removing that directive usually still
-  // compiles (a definition does not need its declaration), so the validation
-  // gate cannot catch it either. The declaration/definition overlap is itself
-  // the dependency, and it must be part of the used test.
-  std::set<int64_t> owner_set(ctx.owners.begin(), ctx.owners.end());
-
+  // The verdict is defined purely by the reference intersection
+  // Refs(Owners(S)) ∩ Symbols(H): that is the contract, and nothing else may
+  // reclassify a zero-reference finding as `used`.
   std::vector<int64_t> hit;
-  std::set<int64_t> declares; // the overlap subset, for evidence
   for (const int64_t id : header_symbols) {
-    const bool referenced = ctx.refs.count(id) != 0;
-    const bool declared_here = owner_set.count(id) != 0;
-    if (referenced || declared_here) {
+    if (ctx.refs.count(id) != 0) {
       hit.push_back(id);
-    }
-    if (declared_here && !referenced) {
-      declares.insert(id);
     }
   }
   c.intersection_count = static_cast<int64_t>(hit.size());
@@ -261,12 +250,7 @@ void classify(cidx::Storage &db, const IncludeGraph &graph,
       }
       Evidence ev;
       ev.target = display_name_of(*sym);
-      if (declares.count(id) != 0) {
-        ev.owner = display_name_of(*sym);
-        ev.relation = "declares"; // this header declares what this file defines
-      } else {
-        ev.relation = relation_for(db, ctx.owners, id, ev.owner);
-      }
+      ev.relation = relation_for(db, ctx.owners, id, ev.owner);
       c.evidence.push_back(std::move(ev));
     }
     std::sort(c.evidence.begin(), c.evidence.end(),
@@ -277,7 +261,27 @@ void classify(cidx::Storage &db, const IncludeGraph &graph,
     return;
   }
 
-  // Zero references. Whether that is executable depends on the caveats.
+  // A symbol DECLARED in H and DEFINED in S is one symbol in both sets, and it
+  // never references itself -- so the reference intersection is legitimately
+  // empty for the most common include in C++: a .cpp including its own header.
+  // That is a true `unused_by_reference` finding, but NOT an automatically
+  // removable one: removing the directive usually still compiles (a definition
+  // does not need its declaration), so the compile gate cannot catch it either.
+  // The overlap is a safety CAVEAT, not a reference -- it never makes the
+  // include `used`; it forces manual_review while the reference verdict stands.
+  const std::set<int64_t> owner_set(ctx.owners.begin(), ctx.owners.end());
+  for (const int64_t id : header_symbols) {
+    if (owner_set.count(id) != 0) {
+      c.caveats.push_back(
+          "this file defines symbol(s) this header declares (its own header): "
+          "removal cannot be proven safe automatically");
+      break;
+    }
+  }
+
+  // Zero references by the contract. Whether that is executable depends on the
+  // caveats: any caveat (own header, macro use, conditional region, ...)
+  // downgrades an otherwise-clean removal to manual_review.
   if (c.caveats.empty()) {
     c.cls = Classification::UnusedByReference;
   } else {
@@ -309,8 +313,19 @@ AnalysisResult analyze(cidx::Storage &db, const AnalysisOptions &opts) {
 
   std::unordered_set<std::string> scope;
   for (const std::string &p : opts.scope_paths) {
-    scope.insert(cidx::pathutil::abspath(p));
+    const std::string abs = cidx::pathutil::abspath(p);
+    scope.insert(abs);
+    // A requested path the tier never observed would silently contribute zero
+    // findings and read as clean. Surface it instead of vanishing it.
+    const std::optional<cidx::File> f = db.get_file(abs);
+    if (!f || !db.include_tier_covers_file(f->id)) {
+      result.uncovered_scope.push_back(abs);
+    }
   }
+  std::sort(result.uncovered_scope.begin(), result.uncovered_scope.end());
+  result.uncovered_scope.erase(
+      std::unique(result.uncovered_scope.begin(), result.uncovered_scope.end()),
+      result.uncovered_scope.end());
 
   std::unordered_map<int64_t, std::string> paths;
   for (const auto &[row, abs] : db.list_files()) {

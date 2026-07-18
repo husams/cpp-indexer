@@ -13,8 +13,10 @@
 #include "doctest/doctest.h"
 
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
+#include <set>
 #include <cstdlib>
 #include <fstream>
 #include <optional>
@@ -204,14 +206,15 @@ TEST_CASE("unused: a reference through a TRANSITIVE header does not use the "
   CHECK(found);
 }
 
-TEST_CASE("unused: a .cpp including its OWN header is used, not unused") {
+TEST_CASE("unused: a .cpp including its OWN header is manual_review, not used") {
   // The most common include in C++, and the one the reference rule alone gets
   // wrong: `int f();` in u.hpp and `int f() { ... }` in u.cpp are ONE symbol,
-  // in both Owners(u.cpp) and Symbols(u.hpp), and it never references itself.
-  // Removing the directive also still COMPILES -- a definition does not need
-  // its declaration -- so the validation gate cannot catch it either. Both
-  // safety nets have a hole in the same shape; the declaration/definition
-  // overlap is what closes it.
+  // in both Owners(u.cpp) and Symbols(u.hpp), and it never references itself,
+  // so the reference intersection is genuinely empty. That does NOT make the
+  // include `used` -- the verdict is reference-only. The declaration/definition
+  // overlap is a safety CAVEAT: removing the directive still COMPILES (a
+  // definition does not need its declaration), so the compile gate cannot catch
+  // it either, and the finding must be manual_review, never executable.
   Project p;
   p.add("u.hpp", "#pragma once\nint helper(int x);\n");
   p.add("u.cpp", "#include \"u.hpp\"\nint helper(int x) { return x + 1; }\n");
@@ -221,12 +224,13 @@ TEST_CASE("unused: a .cpp including its OWN header is used, not unused") {
   const hyg::AnalysisResult r = p.analyze(db);
   const std::optional<hyg::IncludeCandidate> c = find_at(r, p.path("u.cpp"), 1);
   REQUIRE(c.has_value());
-  CHECK(c->cls == hyg::Classification::Used);
-  CHECK(c->intersection_count > 0);
-  const bool declares =
-      std::any_of(c->evidence.begin(), c->evidence.end(),
-                  [](const hyg::Evidence &e) { return e.relation == "declares"; });
-  CHECK(declares); // and it says WHY: the header declares what this file defines
+  CHECK(c->cls == hyg::Classification::ManualReview);
+  CHECK(c->intersection_count == 0); // the reference intersection IS empty
+  const bool own_header_caveat =
+      std::any_of(c->caveats.begin(), c->caveats.end(), [](const std::string &w) {
+        return w.find("own header") != std::string::npos;
+      });
+  CHECK(own_header_caveat); // and it says WHY it is not auto-removable
 
   // Belt and braces: it must never reach a plan as executable.
   for (const hyg::PlanItem &it :
@@ -618,6 +622,197 @@ TEST_CASE("an index with no include facts refuses rather than reporting zero") {
   const hyg::AnalysisResult r = hyg::analyze(db, hyg::AnalysisOptions{});
   CHECK(r.include_graph_empty);
   CHECK(r.candidates.empty());
+}
+
+TEST_CASE("conditional: an #ifdef on a macro from a header is never unused") {
+  // The header supplies no referenced SYMBOL, so the reference rule alone would
+  // call it unused. But #ifdef FEATURE selects a branch on the macro's
+  // definedness -- removing the header flips the branch and still compiles --
+  // so the dependency must be recorded and the finding forced to manual_review.
+  Project p;
+  p.add("feature.hpp", "#pragma once\n#define FEATURE 1\n");
+  p.add("main.cpp", "#include \"feature.hpp\"\n"
+                    "#ifdef FEATURE\nint on() { return 1; }\n#endif\n"
+                    "int main() { return 0; }\n");
+  p.index({"main.cpp"});
+
+  cidx::Storage db(p.cache + "/index.db");
+  const hyg::AnalysisResult r = p.analyze(db);
+  const std::optional<hyg::IncludeCandidate> c =
+      find_at(r, p.path("main.cpp"), 1);
+  REQUIRE(c.has_value());
+  CHECK(c->cls == hyg::Classification::ManualReview);
+  const bool has_macro =
+      std::find(c->macro_uses.begin(), c->macro_uses.end(), "FEATURE") !=
+      c->macro_uses.end();
+  CHECK(has_macro);
+}
+
+TEST_CASE("include facts: a header included by two TUs keeps facts under both "
+          "configurations") {
+  // shared.hpp is itself a source of includes (it pulls leaf.hpp) and is parsed
+  // once per TU, under a different build configuration each time. The old
+  // wholesale delete-by-src-file wiped the first TU's row when the second was
+  // recorded, collapsing the graph to last-TU-wins. The refresh is per
+  // configuration now, so both survive.
+  Project p;
+  p.add("leaf.hpp", "#pragma once\nstruct Leaf {};\n");
+  p.add("shared.hpp", "#pragma once\n#include \"leaf.hpp\"\nstruct Shared {};\n");
+  p.add("a.cpp", "#include \"shared.hpp\"\nint fa() { Shared s; (void)s; return 0; }\n");
+  p.add("b.cpp", "#include \"shared.hpp\"\nint fb() { Shared s; (void)s; return 0; }\n");
+  p.index({"a.cpp", "b.cpp"});
+
+  cidx::Storage db(p.cache + "/index.db");
+  const std::optional<cidx::File> shared = db.get_file(p.path("shared.hpp"));
+  REQUIRE(shared.has_value());
+  int leaf_edges = 0;
+  std::set<int64_t> configs;
+  for (const cidx::IncludeEdge &e : db.include_edges_from(shared->id, true)) {
+    if (e.dst_path == p.path("leaf.hpp")) {
+      ++leaf_edges;
+      configs.insert(e.config_id);
+    }
+  }
+  CHECK(leaf_edges == 2);   // one per TU configuration
+  CHECK(configs.size() == 2);
+}
+
+TEST_CASE("scope: a path the include tier never indexed is reported uncovered") {
+  // Reporting zero findings for an un-indexed path reads exactly like a clean
+  // bill of health. A covered path must NOT be flagged; an unknown one must.
+  Project p;
+  p.add("unused.hpp", "#pragma once\nstruct Unused {};\n");
+  p.add("main.cpp", "#include \"unused.hpp\"\nint main() { return 0; }\n");
+  p.index({"main.cpp"});
+
+  cidx::Storage db(p.cache + "/index.db");
+  hyg::AnalysisOptions opts;
+  opts.scope_paths = {p.path("main.cpp"), p.path("ghost.cpp")};
+  const hyg::AnalysisResult r = hyg::analyze(db, opts);
+  CHECK(std::find(r.uncovered_scope.begin(), r.uncovered_scope.end(),
+                  p.path("ghost.cpp")) != r.uncovered_scope.end());
+  CHECK(std::find(r.uncovered_scope.begin(), r.uncovered_scope.end(),
+                  p.path("main.cpp")) == r.uncovered_scope.end());
+}
+
+TEST_CASE("apply: a plan that promotes a USED include is refused") {
+  // The plan is editable. Re-pointing an accepted item at a `used` directive --
+  // with matching bytes and hash so the byte and staleness checks pass -- must
+  // still be caught, because apply re-derives the classification from the DB
+  // rather than trusting the plan's state.
+  Project p;
+  p.add("used.hpp", "#pragma once\nstruct Used { int f() const; };\n");
+  p.add("unused.hpp", "#pragma once\nstruct Unused {};\n");
+  p.add("main.cpp", "#include \"used.hpp\"\n#include \"unused.hpp\"\n"
+                    "int main() { Used u; return u.f(); }\n");
+  p.index({"main.cpp"});
+
+  cidx::Storage db(p.cache + "/index.db");
+  hyg::CleanupPlan plan =
+      hyg::build_plan(db, p.analyze(db), p.cache + "/index.db");
+  const hyg::AnalysisResult r = p.analyze(db);
+  const std::optional<hyg::IncludeCandidate> used =
+      find_at(r, p.path("main.cpp"), 1);
+  REQUIRE(used.has_value());
+  REQUIRE(used->cls == hyg::Classification::Used);
+
+  bool tampered = false;
+  for (hyg::PlanItem &it : plan.items) {
+    if (it.state == hyg::PlanState::Accepted) {
+      it.id = used->id;
+      it.line = used->line;
+      it.col = used->col;
+      it.begin_offset = used->begin_offset;
+      it.end_offset = used->end_offset;
+      it.directive_text = used->directive_text;
+      tampered = true;
+    }
+  }
+  REQUIRE(tampered);
+
+  const std::string plan_path = p.cache + "/tampered.json";
+  write_file(plan_path, hyg::serialize(plan));
+  const std::string before = read_file(p.path("main.cpp"));
+  CHECK(run_cidx({"include", "apply", plan_path}, p.cache) == 1);
+  CHECK(read_file(p.path("main.cpp")) == before); // the used include stays
+}
+
+TEST_CASE("apply: refuses an item whose file hash the plan omits") {
+  Project p;
+  p.add("unused.hpp", "#pragma once\nstruct Unused {};\n");
+  p.add("main.cpp", "#include \"unused.hpp\"\nint main() { return 0; }\n");
+  p.index({"main.cpp"});
+
+  cidx::Storage db(p.cache + "/index.db");
+  hyg::CleanupPlan plan =
+      hyg::build_plan(db, p.analyze(db), p.cache + "/index.db");
+  plan.file_hashes.clear(); // tamper: strip the evidence the staleness gate needs
+
+  const std::string plan_path = p.cache + "/nohash.json";
+  write_file(plan_path, hyg::serialize(plan));
+  const std::string before = read_file(p.path("main.cpp"));
+  CHECK(run_cidx({"include", "apply", plan_path}, p.cache) == 1);
+  CHECK(read_file(p.path("main.cpp")) == before);
+}
+
+TEST_CASE("apply: refuses an item whose path escapes the repository root") {
+  Project p;
+  p.add("unused.hpp", "#pragma once\nstruct Unused {};\n");
+  p.add("main.cpp", "#include \"unused.hpp\"\nint main() { return 0; }\n");
+  p.index({"main.cpp"});
+
+  cidx::Storage db(p.cache + "/index.db");
+  hyg::CleanupPlan plan =
+      hyg::build_plan(db, p.analyze(db), p.cache + "/index.db");
+  for (hyg::PlanItem &it : plan.items) {
+    if (it.state == hyg::PlanState::Accepted) {
+      it.file = "../escape.cpp"; // tamper: point outside repo_root
+    }
+  }
+  const std::string plan_path = p.cache + "/escape.json";
+  write_file(plan_path, hyg::serialize(plan));
+  const std::string before = read_file(p.path("main.cpp"));
+  CHECK(run_cidx({"include", "apply", plan_path}, p.cache) == 1);
+  CHECK(read_file(p.path("main.cpp")) == before);
+}
+
+TEST_CASE("apply: refuses to edit a symlinked source") {
+  // rename(2) would replace the symlink with a regular file, silently detaching
+  // it from its target (which could even lie outside the repo). Refuse instead.
+  Project p;
+  p.add("unused.hpp", "#pragma once\nstruct Unused {};\n");
+  p.add("real.cpp", "#include \"unused.hpp\"\nint main() { return 0; }\n");
+  REQUIRE(::symlink((p.proj + "/real.cpp").c_str(),
+                    (p.proj + "/main.cpp").c_str()) == 0);
+  p.index({"main.cpp"});
+
+  const std::string plan_path = p.cache + "/plan.json";
+  REQUIRE(run_cidx({"include", "plan", "--output", plan_path}, p.cache) == 0);
+  const std::string before = read_file(p.path("real.cpp"));
+  CHECK(run_cidx({"include", "apply", plan_path}, p.cache) == 1);
+
+  struct stat lst {};
+  REQUIRE(::lstat(p.path("main.cpp").c_str(), &lst) == 0);
+  CHECK(S_ISLNK(lst.st_mode));                     // still a symlink
+  CHECK(read_file(p.path("real.cpp")) == before);  // target untouched
+}
+
+TEST_CASE("apply: preserves the source file's permissions") {
+  Project p;
+  p.add("unused.hpp", "#pragma once\nstruct Unused {};\n");
+  p.add("main.cpp", "#include \"unused.hpp\"\nint main() { return 0; }\n");
+  p.index({"main.cpp"});
+  // An executable, group-writable source keeps its mode through the atomic swap.
+  REQUIRE(::chmod(p.path("main.cpp").c_str(), 0754) == 0);
+
+  const std::string plan_path = p.cache + "/plan.json";
+  REQUIRE(run_cidx({"include", "plan", "--output", plan_path}, p.cache) == 0);
+  REQUIRE(run_cidx({"include", "apply", plan_path}, p.cache) == 0);
+
+  struct stat st {};
+  REQUIRE(::stat(p.path("main.cpp").c_str(), &st) == 0);
+  CHECK((st.st_mode & 07777) == 0754);
+  CHECK(read_file(p.path("main.cpp")).find("unused.hpp") == std::string::npos);
 }
 
 } // TEST_SUITE("clang")

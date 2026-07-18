@@ -90,6 +90,15 @@ bool refuse_empty_graph(cidx::Storage &db, std::ostream &err) {
 
 std::string rel(const std::string &path) { return path; }
 
+// Warn about requested scope paths the include tier never observed: reporting
+// zero findings for them would look exactly like a clean bill of health.
+void warn_uncovered(const hygiene::AnalysisResult &res, std::ostream &err) {
+  for (const std::string &p : res.uncovered_scope) {
+    err << "warning: no include-tier coverage for " << p
+        << " (not indexed for includes; findings for it are not reported)\n";
+  }
+}
+
 // -- graph -------------------------------------------------------------------
 
 int emit_cycles(const hygiene::IncludeGraph &g, const std::string &format,
@@ -224,6 +233,7 @@ int cmd_include_check(const ParsedArgs &args, Context &ctx) {
   opts.want_unused = args.inc_unused;
 
   const hygiene::AnalysisResult res = hygiene::analyze(db, opts);
+  warn_uncovered(res, *ctx.err);
 
   // `used` findings are the analyzer's internal state, not a report: a user
   // asking what is wrong does not want a line per working include.
@@ -304,6 +314,7 @@ int cmd_include_plan(const ParsedArgs &args, Context &ctx) {
   opts.want_unused = args.inc_unused;
 
   const hygiene::AnalysisResult res = hygiene::analyze(db, opts);
+  warn_uncovered(res, *ctx.err);
   hygiene::CleanupPlan plan =
       hygiene::build_plan(db, res, args.index_db.value_or(ctx.index_path));
 

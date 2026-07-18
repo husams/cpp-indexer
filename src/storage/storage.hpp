@@ -371,10 +371,11 @@ public:
   // INSERT ... ON CONFLICT: accumulates count.
   void add_include_macro_use(const IncludeMacroUse &m);
 
-  // Drop every include fact recorded FROM this file under every configuration
-  // (edges cascade to their sites). Called before re-recording a file's
-  // directives so a deleted #include leaves no stale row.
-  void delete_include_facts_for_file(int64_t src_file_id);
+  // Drop every include fact (edges + sites + macro uses) recorded under ONE
+  // configuration. Called before re-recording a TU's directives so a deleted
+  // #include leaves no stale row, while a shared header's facts under other
+  // TUs' configurations are untouched.
+  void delete_include_facts_for_config(int64_t config_id);
   // Drop the configurations owned by this TU (cascades to that TU's edges).
   void delete_include_configs_for_tu(int64_t tu_file_id);
 
@@ -400,6 +401,11 @@ public:
   // True once any include fact exists -- distinguishes "this DB predates the
   // v31 tier / has not been reindexed" from "this file includes nothing".
   bool include_graph_populated();
+  // True if the include tier actually observed this file: it was indexed as a
+  // TU (has a configuration), included something, or was included by something.
+  // Lets a scoped query tell "analyzed and genuinely clean" from "never indexed
+  // for includes", which otherwise both read as zero findings.
+  bool include_tier_covers_file(int64_t file_id);
 
   // -- v31 reference-set analysis ---------------------------------------------
   // These four back the unused(S, H) definition:

@@ -179,12 +179,70 @@ public:
   void MacroExpands(const clang::Token &tok, const clang::MacroDefinition &md,
                     clang::SourceRange range,
                     const clang::MacroArgs * /*args*/) override {
+    record_macro_dependency(tok, md, range.getBegin());
+  }
+
+  void If(clang::SourceLocation loc, clang::SourceRange,
+          ConditionValueKind) override {
+    cond_.push(sm_, loc);
+  }
+  void Ifdef(clang::SourceLocation loc, const clang::Token &tok,
+             const clang::MacroDefinition &md) override {
+    // #ifdef/#ifndef select a branch on a macro's DEFINEDNESS without ever
+    // expanding it, so MacroExpands never fires. If the tested macro is
+    // supplied by a header, removing that header silently flips the branch --
+    // and still compiles. Record the dependency here so the header reads as
+    // used, exactly as an expansion would.
+    record_macro_dependency(tok, md, tok.getLocation());
+    cond_.push(sm_, loc);
+  }
+  void Ifndef(clang::SourceLocation loc, const clang::Token &tok,
+              const clang::MacroDefinition &md) override {
+    record_macro_dependency(tok, md, tok.getLocation());
+    cond_.push(sm_, loc);
+  }
+  void Defined(const clang::Token &tok, const clang::MacroDefinition &md,
+               clang::SourceRange range) override {
+    // defined(X) inside #if/#elif -- same definedness test, same silent branch
+    // flip if the providing header is removed.
+    record_macro_dependency(tok, md, range.getBegin());
+  }
+  void Elif(clang::SourceLocation, clang::SourceRange, ConditionValueKind,
+            clang::SourceLocation) override {
+    cond_.next_branch();
+  }
+  void Elifdef(clang::SourceLocation, const clang::Token &tok,
+               const clang::MacroDefinition &md) override {
+    record_macro_dependency(tok, md, tok.getLocation());
+    cond_.next_branch();
+  }
+  void Elifndef(clang::SourceLocation, const clang::Token &tok,
+                const clang::MacroDefinition &md) override {
+    record_macro_dependency(tok, md, tok.getLocation());
+    cond_.next_branch();
+  }
+  void Else(clang::SourceLocation, clang::SourceLocation) override {
+    cond_.next_branch();
+  }
+  void Endif(clang::SourceLocation, clang::SourceLocation) override {
+    cond_.pop();
+  }
+
+private:
+  // Record that the token `tok` (a macro name), used at `use_loc`, depends on
+  // the header that DEFINES it -- whether the dependency is an expansion or a
+  // definedness test. Deduped so a macro used thousands of times is one fact.
+  void record_macro_dependency(const clang::Token &tok,
+                               const clang::MacroDefinition &md,
+                               clang::SourceLocation use_loc) {
     const clang::MacroInfo *mi = md.getMacroInfo();
     if (mi == nullptr || mi->isBuiltinMacro()) {
-      return;
+      return; // undefined (#ifndef of a never-defined guard) or builtin: no
+              // header supplies it
     }
-    const clang::SourceLocation def = sm_.getExpansionLoc(mi->getDefinitionLoc());
-    const clang::SourceLocation use = sm_.getExpansionLoc(range.getBegin());
+    const clang::SourceLocation def =
+        sm_.getExpansionLoc(mi->getDefinitionLoc());
+    const clang::SourceLocation use = sm_.getExpansionLoc(use_loc);
     if (def.isInvalid() || use.isInvalid()) {
       return;
     }
@@ -206,46 +264,12 @@ public:
     if (m.name.empty()) {
       return;
     }
-    // Collapse the repeats here rather than in SQL: a macro in a loop body can
-    // expand thousands of times and each would otherwise be an UPSERT.
     if (seen_macro_uses_.insert(m.src_path + "\0" + m.def_path + "\0" + m.name)
             .second) {
       out_.macro_uses.push_back(std::move(m));
     }
   }
 
-  void If(clang::SourceLocation loc, clang::SourceRange,
-          ConditionValueKind) override {
-    cond_.push(sm_, loc);
-  }
-  void Ifdef(clang::SourceLocation loc, const clang::Token &,
-             const clang::MacroDefinition &) override {
-    cond_.push(sm_, loc);
-  }
-  void Ifndef(clang::SourceLocation loc, const clang::Token &,
-              const clang::MacroDefinition &) override {
-    cond_.push(sm_, loc);
-  }
-  void Elif(clang::SourceLocation, clang::SourceRange, ConditionValueKind,
-            clang::SourceLocation) override {
-    cond_.next_branch();
-  }
-  void Elifdef(clang::SourceLocation, const clang::Token &,
-               const clang::MacroDefinition &) override {
-    cond_.next_branch();
-  }
-  void Elifndef(clang::SourceLocation, const clang::Token &,
-                const clang::MacroDefinition &) override {
-    cond_.next_branch();
-  }
-  void Else(clang::SourceLocation, clang::SourceLocation) override {
-    cond_.next_branch();
-  }
-  void Endif(clang::SourceLocation, clang::SourceLocation) override {
-    cond_.pop();
-  }
-
-private:
   // The bytes `apply` would delete: the whole directive line including its
   // newline and any backslash-continued lines. Falls back to the directive's
   // own extent when the line holds anything else.
@@ -328,10 +352,15 @@ void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
                            const IncludeConfig &config) {
   auto txn = db.transaction();
 
-  // Configuration first: every edge references it.
+  // Configuration first: every edge references it. Re-recording a TU refreshes
+  // exactly its own (tu, digest) configuration -- clearing this config's prior
+  // edges/sites/macro uses and no others -- so a shared header's facts under a
+  // different TU's configuration are never wiped (last-TU-wins would otherwise
+  // collapse the include graph for every multiply-included header).
   IncludeConfig cfg = config;
   cfg.digest = include_config_digest(cfg);
   const int64_t config_id = db.add_include_config(cfg);
+  db.delete_include_facts_for_config(config_id);
 
   // Resolve each source file to its row once. A directive in a file no
   // component owns has nothing to hang off (and could never be edited), so it
@@ -350,16 +379,6 @@ void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
     }
     src_ids.emplace(abs, id);
     return id;
-  };
-
-  // Wholesale refresh per source file: re-recording a file's directives must
-  // drop the rows for #includes that no longer exist. Done once per file
-  // before any insert, so two facts from the same file do not wipe each other.
-  std::unordered_set<int64_t> cleared;
-  const auto clear_once = [&](int64_t sid) {
-    if (cleared.insert(sid).second) {
-      db.delete_include_facts_for_file(sid);
-    }
   };
 
   std::unordered_map<std::string, std::optional<int64_t>> dst_ids;
@@ -389,7 +408,6 @@ void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
     if (!sid) {
       continue;
     }
-    clear_once(*sid);
 
     IncludeEdge e;
     e.src_file_id = *sid;
@@ -420,7 +438,6 @@ void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
     if (!sid) {
       continue;
     }
-    clear_once(*sid);
     IncludeMacroUse u;
     u.src_file_id = *sid;
     u.def_path = cidx::pathutil::abspath(m.def_path);

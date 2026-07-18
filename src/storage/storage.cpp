@@ -3446,12 +3446,22 @@ void Storage::add_include_macro_use(const IncludeMacroUse &m) {
   st.step_done();
 }
 
-void Storage::delete_include_facts_for_file(int64_t src_file_id) {
-  auto st = db_.prepare("DELETE FROM include_edge WHERE src_file_id = ?");
-  st.bind(1, src_file_id);
+void Storage::delete_include_facts_for_config(int64_t config_id) {
+  // Scope the refresh to ONE configuration. Deleting by src_file_id instead
+  // would wipe a shared header's edges recorded under every OTHER TU's
+  // configuration, making the include graph last-TU-wins for any header more
+  // than one TU includes. include_site cascades from include_edge, but the
+  // sites are dropped explicitly so the result does not depend on the
+  // foreign_keys pragma being on.
+  auto s0 = db_.prepare("DELETE FROM include_site WHERE edge_id IN "
+                        "(SELECT id FROM include_edge WHERE config_id = ?)");
+  s0.bind(1, config_id);
+  s0.step_done();
+  auto st = db_.prepare("DELETE FROM include_edge WHERE config_id = ?");
+  st.bind(1, config_id);
   st.step_done();
-  auto st2 = db_.prepare("DELETE FROM include_macro_use WHERE src_file_id = ?");
-  st2.bind(1, src_file_id);
+  auto st2 = db_.prepare("DELETE FROM include_macro_use WHERE config_id = ?");
+  st2.bind(1, config_id);
   st2.step_done();
 }
 
@@ -3574,6 +3584,20 @@ Storage::include_macro_uses(int64_t src_file_id, const std::string &def_path) {
 
 bool Storage::include_graph_populated() {
   auto st = db_.prepare("SELECT 1 FROM include_edge LIMIT 1");
+  return st.step();
+}
+
+bool Storage::include_tier_covers_file(int64_t file_id) {
+  // A configuration row is written for every TU the tier processed (even one
+  // with no #includes), so it -- together with either direction of an include
+  // edge -- is the completion marker for "this file was seen".
+  auto st = db_.prepare(
+      "SELECT 1 FROM include_config WHERE tu_file_id = ? "
+      "UNION ALL SELECT 1 FROM include_edge WHERE src_file_id = ? "
+      "UNION ALL SELECT 1 FROM include_edge WHERE dst_file_id = ? LIMIT 1");
+  st.bind(1, file_id);
+  st.bind(2, file_id);
+  st.bind(3, file_id);
   return st.step();
 }
 

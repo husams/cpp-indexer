@@ -1,21 +1,23 @@
 // Include-candidate classification (planning/cidx-include-hygiene M2).
 //
-// The authoritative rule, for a direct include edge S -> H:
+// The authoritative rule, for a direct include edge S -> H, is reference-only:
 //
-//   unused(S, H) := (Refs(Owners(S)) INTERSECT Symbols(H) = {})
-//              AND (Owners(S)       INTERSECT Symbols(H) = {})
+//   unused_by_reference(S, H) := (Refs(Owners(S)) INTERSECT Symbols(H) = {})
 //
 // where Owners(S) is every symbol declared or defined in S, Symbols(H) is every
 // symbol declared or defined DIRECTLY in H (never in a header H itself
 // includes), and Refs is the target set of every persisted semantic edge and
-// type relation out of those owners.
+// type relation out of those owners. Nothing outside this intersection may
+// reclassify a zero-reference finding as `used`.
 //
-// The second clause is not decoration. A function declared in H and defined in
-// S is ONE symbol, in both sets, and it never references itself -- so the Refs
-// clause alone reports the most common include in C++ (a .cpp including its own
-// header) as unused. Removing it usually still compiles, because a definition
-// does not need its declaration, so the validation gate does not catch it
-// either. The declaration/definition overlap IS the dependency.
+// The declaration/definition overlap Owners(S) INTERSECT Symbols(H) is NOT part
+// of this definition. A function declared in H and defined in S is ONE symbol,
+// in both sets, and it never references itself, so the most common include in
+// C++ (a .cpp including its own header) is genuinely unused-by-reference. It is
+// still not automatically removable: removing it usually compiles (a definition
+// does not need its declaration), so the validation gate cannot catch it. That
+// overlap is therefore a safety CAVEAT that downgrades the finding to
+// manual_review -- it never makes the include `used`.
 //
 // Two things this layer deliberately does NOT do:
 //
@@ -46,7 +48,7 @@ enum class Classification {
   // A repeated directive for a guarded target in the same file, configuration,
   // and conditional region as an earlier one.
   Duplicate,
-  // Refs(Owners(S)) INTERSECT Symbols(H) is empty.
+  // Refs(Owners(S)) INTERSECT Symbols(H) is empty, with no safety caveat.
   UnusedByReference,
   // Concrete references exist: the include is doing work.
   Used,
@@ -109,6 +111,10 @@ struct AnalysisResult {
   // Set when the index has no include facts at all: every "unused" verdict
   // would be vacuous, so callers must refuse rather than report zero findings.
   bool include_graph_empty = false;
+  // Requested scope paths the include tier never observed (unknown to the index
+  // or not reindexed for includes). Reporting zero findings for these would be
+  // a false clean bill of health, so callers must surface them. Sorted, unique.
+  std::vector<std::string> uncovered_scope;
 };
 
 // Classify every direct include in scope. Read-only.

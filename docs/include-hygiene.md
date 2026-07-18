@@ -31,19 +31,22 @@ index is analyzed.
 For a direct include edge `S → H`:
 
 ```
-unused(S, H) := (Refs(Owners(S)) ∩ Symbols(H) = ∅)
-            AND (Owners(S)       ∩ Symbols(H) = ∅)
+unused_by_reference(S, H) := Refs(Owners(S)) ∩ Symbols(H) = ∅
 ```
 
 - **`Owners(S)`** — every symbol declared or defined in `S`. A reference inside
   a function body or a local initializer belongs to its enclosing callable, so
   local and global contexts are both covered.
-- The **second clause** covers the most common include in C++: a `.cpp`
-  including its own header. `int f();` in `u.hpp` and `int f() {…}` in `u.cpp`
-  are **one symbol**, in both sets, and it never references itself — so the
-  `Refs` clause alone calls it unused. Removing it also still *compiles*, since
-  a definition does not need its declaration, so the validation gate does not
-  catch it either. The declaration/definition overlap **is** the dependency.
+- The verdict is **reference-only**: nothing outside this intersection may
+  reclassify a zero-reference finding as `used`. The most common include in C++
+  — a `.cpp` including its own header — is genuinely unused *by reference*:
+  `int f();` in `u.hpp` and `int f() {…}` in `u.cpp` are **one symbol**, in both
+  `Owners(S)` and `Symbols(H)`, and it never references itself. That is a true
+  finding but **not** an automatically removable one: removing the directive
+  still *compiles* (a definition does not need its declaration), so the compile
+  gate cannot catch it either. The declaration/definition overlap
+  `Owners(S) ∩ Symbols(H) ≠ ∅` is therefore a **safety caveat** that downgrades
+  the finding to `manual_review` — it never makes the include `used`.
 - **`Symbols(H)`** — every symbol declared or defined **directly** in `H`.
   Symbols from headers that `H` itself includes are **not** counted. This is
   what makes "used through a transitive provider" not count as using the direct
