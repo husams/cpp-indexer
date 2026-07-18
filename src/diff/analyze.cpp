@@ -215,14 +215,53 @@ std::string method_quals(const clang::FunctionDecl *fd) {
   return join(parts, " ");
 }
 
+// The *written* explicit-specifier of a constructor/conversion as a canonical
+// token, for the syntax fingerprint. `isExplicit()` collapses a written
+// `explicit(false)` to "not explicit", so it would compare equal to a plain
+// declaration and hide a real source change; `getExplicitSpecifier()` preserves
+// the written form. When a condition expression is written -- `explicit(cond)`
+// -- its normalized source is kept regardless of whether Clang resolved the
+// condition, so `explicit(true)`, `explicit(0)`, and a dependent
+// `explicit(sizeof(T)>1)` stay distinct from a bare `explicit` and from each
+// other (`getKind()` alone maps explicit(true)->explicit and
+// explicit(0)->explicit(false), collapsing written forms). Whitespace is
+// stripped so `explicit( true )` and `explicit(true)` fingerprint identically.
+// Bare `explicit` is reserved for a specified form with no expression. Empty
+// when none is written.
+std::string explicit_spec_token(const clang::FunctionDecl *fd) {
+  clang::ExplicitSpecifier es;
+  if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fd))
+    es = ctor->getExplicitSpecifier();
+  else if (const auto *conv = llvm::dyn_cast<clang::CXXConversionDecl>(fd))
+    es = conv->getExplicitSpecifier();
+  else
+    return {};
+  if (!es.isSpecified())
+    return {};
+  if (const clang::Expr *e = es.getExpr()) {
+    std::string cond = source_slice(fd->getASTContext(), e->getSourceRange());
+    cond.erase(std::remove_if(cond.begin(), cond.end(),
+                              [](char c) {
+                                return c == ' ' || c == '\t' || c == '\n' ||
+                                       c == '\r' || c == '\f' || c == '\v';
+                              }),
+               cond.end());
+    return "explicit(" + cond + ")";
+  }
+  return "explicit";
+}
+
 // Canonical method API-state token appended to a callable's syntax label so a
 // directly selected method -- whose extent excludes the surrounding access
 // specifier -- still fingerprints access / final / pure / override / explicit /
-// deleted / defaulted changes. These mirror the fields the semantic IR compares
-// (fill_signature); a public->private move or an added `= delete` is a real
-// contract change, not a syntactically unchanged one. Empty for callables with
-// no API state (e.g. an ordinary free function), so their fingerprints are
-// unaffected.
+// deleted / defaulted changes. This is the *syntax* fingerprint, so it tracks
+// the written tokens: the `override` keyword (OverrideAttr) rather than whether
+// the method happens to override (size_overridden_methods() stays non-zero when
+// the keyword is removed), and the written explicit-specifier including an
+// `explicit(false)` condition. A public->private move, a removed `override`, or
+// an added `= delete` is a real source change, not a syntactically unchanged
+// one. Empty for callables with no API state (e.g. an ordinary free function),
+// so their fingerprints are unaffected.
 std::string method_api_state(const clang::FunctionDecl *fd) {
   std::vector<std::string> parts;
   if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(fd)) {
@@ -232,16 +271,11 @@ std::string method_api_state(const clang::FunctionDecl *fd) {
       parts.push_back("final");
     if (m->isPureVirtual())
       parts.push_back("pure");
-    if (m->size_overridden_methods() > 0)
+    if (m->hasAttr<clang::OverrideAttr>())
       parts.push_back("override");
   }
-  if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fd)) {
-    if (ctor->isExplicit())
-      parts.push_back("explicit");
-  } else if (const auto *conv = llvm::dyn_cast<clang::CXXConversionDecl>(fd)) {
-    if (conv->isExplicit())
-      parts.push_back("explicit");
-  }
+  if (const std::string ex = explicit_spec_token(fd); !ex.empty())
+    parts.push_back(ex);
   if (fd->isDeleted())
     parts.push_back("deleted");
   if (fd->isDefaulted())

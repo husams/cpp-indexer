@@ -130,7 +130,17 @@ declaration's subtree (never an empty `Friend` node). A method's node label
 carries its API state — member access (`public`/`protected`/`private`),
 `explicit`, `= delete`, `= default`, `final`, pure-virtual, `override` — so a
 directly selected method whose extent excludes the surrounding access specifier
-still fingerprints those changes (matching the semantic API-state comparison).
+still fingerprints those changes. Because this is the *syntax* fingerprint it
+tracks the **written** tokens: the `override` keyword itself (a method can
+override a base virtual without it, and removing the keyword is a real source
+change), and the written explicit-specifier. Whenever a condition expression is
+written — `explicit(cond)` — its whitespace-normalized source is kept regardless
+of whether the compiler resolved it, so `explicit`, `explicit(true)`,
+`explicit(false)`, `explicit(0)`, and a dependent `explicit(sizeof(T)>1)` are all
+distinct (`isExplicit()` alone collapses `explicit(false)` to "not explicit", and
+a kind-only token would collapse `explicit(true)`→`explicit` and
+`explicit(0)`→`explicit(false)`). The semantic API-state comparison, by contrast,
+compares effective state.
 
 Edit operations (`op` values): `added`, `removed`, `replaced`, `changed`
 (same node kind, differing label — e.g. callee `reserve` → `resize`, literal
