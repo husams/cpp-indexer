@@ -147,6 +147,25 @@ std::string entity_kind(const clang::Decl *d) {
   return "other";
 }
 
+// Stable name for a sizeof/alignof-family operator. The numeric fallback keeps
+// distinct trait kinds distinct across LLVM versions even when unnamed here.
+std::string unary_trait_name(clang::UnaryExprOrTypeTrait k) {
+  switch (k) {
+  case clang::UETT_SizeOf:
+    return "sizeof";
+  case clang::UETT_DataSizeOf:
+    return "__datasizeof";
+  case clang::UETT_AlignOf:
+    return "alignof";
+  case clang::UETT_PreferredAlignOf:
+    return "__alignof";
+  case clang::UETT_VecStep:
+    return "vec_step";
+  default:
+    return "typetrait#" + std::to_string(static_cast<int>(k));
+  }
+}
+
 const char *access_str(clang::AccessSpecifier as) {
   switch (as) {
   case clang::AS_private:
@@ -398,10 +417,20 @@ struct IrBuilder {
     if (const auto *bo = llvm::dyn_cast<clang::BinaryOperator>(s))
       return "(" + text(bo->getLHS()) + " " + bo->getOpcodeStr().str() + " " +
              text(bo->getRHS()) + ")";
+    if (const auto *ue = llvm::dyn_cast<clang::UnaryExprOrTypeTraitExpr>(s)) {
+      // sizeof/alignof of a type carries the operand as a type, not a child
+      // node; encode the canonical type so sizeof(int) != sizeof(long).
+      if (ue->isArgumentType())
+        return unary_trait_name(ue->getKind()) + "(" +
+               type_str(ue->getArgumentType()) + ")";
+      return unary_trait_name(ue->getKind()) + "(" +
+             text(ue->getArgumentExpr()) + ")";
+    }
     if (const auto *uo = llvm::dyn_cast<clang::UnaryOperator>(s))
       return "(" +
-             clang::UnaryOperator::getOpcodeStr(uo->getOpcode()).str() + " " +
-             text(uo->getSubExpr()) + ")";
+             clang::UnaryOperator::getOpcodeStr(uo->getOpcode()).str() +
+             (uo->isPostfix() ? "post" : "") + " " + text(uo->getSubExpr()) +
+             ")";
     if (const auto *co = llvm::dyn_cast<clang::ConditionalOperator>(s))
       return "(" + text(co->getCond()) + " ? " + text(co->getTrueExpr()) +
              " : " + text(co->getFalseExpr()) + ")";
@@ -530,7 +559,18 @@ struct Analyzer {
       n.detail = "operator " + n.label;
     } else if (const auto *uo = llvm::dyn_cast<clang::UnaryOperator>(s)) {
       n.label = clang::UnaryOperator::getOpcodeStr(uo->getOpcode()).str();
+      // x++ and ++x share an opcode string; the fixity is the whole difference.
+      if (uo->isPostfix())
+        n.label += " (postfix)";
       n.detail = "operator " + n.label;
+    } else if (const auto *ue =
+                   llvm::dyn_cast<clang::UnaryExprOrTypeTraitExpr>(s)) {
+      // A type operand (sizeof(int)) is not a child node, so it must ride in
+      // the label or the syntax fingerprint cannot tell the operands apart.
+      n.label = unary_trait_name(ue->getKind());
+      if (ue->isArgumentType())
+        n.label += "(" + type_str(ue->getArgumentType()) + ")";
+      n.detail = "trait " + n.label;
     } else if (const auto *dre = llvm::dyn_cast<clang::DeclRefExpr>(s)) {
       n.label = dre->getNameInfo().getAsString();
       n.detail = "ref " + n.label;
@@ -780,7 +820,22 @@ struct Analyzer {
     if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(fd)) {
       ir.is_virtual = m->isVirtual();
       ir.is_static_method = m->isStatic();
+      // Method-level API state: access and the declaration flags that a direct
+      // method comparison would otherwise miss (they live outside the selected
+      // method extent). A public->private move, an added `= delete`, or a lost
+      // `override` is a real, observable contract change, not equivalence.
+      if (m->getAccess() != clang::AS_none)
+        ir.access = access_str(m->getAccess());
+      ir.is_final = m->hasAttr<clang::FinalAttr>();
+      ir.is_pure = m->isPureVirtual();
+      ir.is_override = m->size_overridden_methods() > 0;
     }
+    if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fd))
+      ir.is_explicit = ctor->isExplicit();
+    else if (const auto *conv = llvm::dyn_cast<clang::CXXConversionDecl>(fd))
+      ir.is_explicit = conv->isExplicit();
+    ir.is_deleted = fd->isDeleted();
+    ir.is_defaulted = fd->isDefaulted();
     if (fd->getStorageClass() == clang::SC_Static)
       ir.storage = "static";
     else if (fd->getStorageClass() == clang::SC_Extern)

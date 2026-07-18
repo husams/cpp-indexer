@@ -99,6 +99,7 @@ jo::Value delta_value(const ConfigDelta &d) {
        {"driver", pair_value(d.driver)},
        {"definitions_added", str_array(d.definitions_added)},
        {"definitions_removed", str_array(d.definitions_removed)},
+       {"definitions_reordered", jo::Value::of(d.definitions_reordered)},
        {"includes_changed", jo::Value::of(d.includes_changed)},
        {"options_left_only", str_array(d.options_left_only)},
        {"options_right_only", str_array(d.options_right_only)}});
@@ -269,6 +270,8 @@ void render_delta_text(const ConfigDelta &d, std::ostream &out) {
   };
   list("definitions added", d.definitions_added);
   list("definitions removed", d.definitions_removed);
+  if (d.definitions_reordered)
+    out << "  definitions: reordered\n";
   if (d.includes_changed)
     out << "  includes: changed\n";
   list("options left only", d.options_left_only);

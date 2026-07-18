@@ -60,6 +60,13 @@ struct BehaviourIR {
   std::string constexpr_kind; // "constexpr"/"consteval"/"constinit"; "" none
   bool is_noreturn = false;
   bool is_static_method = false;
+  std::string access;         // "public"/"protected"/"private"; "" non-member
+  bool is_explicit = false;   // explicit ctor/conversion
+  bool is_deleted = false;    // = delete
+  bool is_defaulted = false;  // = default
+  bool is_final = false;      // final specifier on the method
+  bool is_pure = false;       // pure virtual (= 0)
+  bool is_override = false;   // overrides a base method
   bool has_body = false;
   std::vector<std::string> blocks; // one normalized text line per CFG element,
                                    // grouped by block in CFG order

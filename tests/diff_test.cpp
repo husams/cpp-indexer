@@ -182,6 +182,25 @@ TEST_CASE("config_delta names every differing axis") {
   CHECK_FALSE(same.includes_changed);
 }
 
+TEST_CASE("config_delta: reordered -D/-U is not identical") {
+  // Same multiset of definitions, opposite order -> opposite final macro
+  // state (X defined vs undefined). Must not read as an identical config.
+  diff::ParseConfig l;
+  diff::ParseConfig r;
+  l.classes = diff::classify_options({"-DX=1", "-UX"});
+  r.classes = diff::classify_options({"-UX", "-DX=1"});
+  const diff::ConfigDelta d = diff::config_delta(l, r);
+  CHECK(d.definitions_added.empty());
+  CHECK(d.definitions_removed.empty());
+  CHECK(d.definitions_reordered);
+  CHECK_FALSE(d.identical);
+
+  // Identical order stays identical and unflagged.
+  const diff::ConfigDelta same = diff::config_delta(l, l);
+  CHECK_FALSE(same.definitions_reordered);
+  CHECK(same.identical);
+}
+
 TEST_CASE("CLI misuse exits 2 with a usage message") {
   const Fixture f = make_index();
   std::string out;
@@ -723,6 +742,21 @@ struct ClangFixture {
          "struct Holder { struct { int x; } part; };\n"
          "struct { int x; } g_anon;\n"
          "int use_anon() { return g_anon.x; }\n"},
+        // sizeof of a type: the operand rides as a type, not a child node.
+        {"szt_left.cpp",
+         "unsigned long tsz() { unsigned long n = sizeof(int); return n; }\n"},
+        {"szt_right.cpp",
+         "unsigned long tsz() { unsigned long n = sizeof(long); return n; }\n"},
+        // public vs private, otherwise identical method (symbol scope).
+        {"acc_left.cpp", "struct Api { int m() const { return 1; } };\n"},
+        {"acc_right.cpp",
+         "struct Api {\n"
+         "private:\n"
+         "  int m() const { return 1; }\n"
+         "};\n"},
+        // postfix vs prefix increment: same opcode, different fixity.
+        {"fix_left.cpp", "void inc(int x) { x++; }\n"},
+        {"fix_right.cpp", "void inc(int x) { ++x; }\n"},
     };
     // The headers are registered by `cidx index` through their TUs; they are
     // not compile_commands entries themselves.
@@ -910,6 +944,43 @@ TEST_CASE("class profile contradiction names every change") {
   CHECK(out.find("method Widget::draw  different (signature contradiction)") !=
         std::string::npos);
   CHECK(out.find("change: virtual: false -> true") != std::string::npos);
+}
+
+TEST_CASE("sizeof(int) vs sizeof(long): not falsely equivalent") {
+  // The type operand is not a child node; before it was encoded, both bodies
+  // lowered to identical syntax and IR and reported equivalent.
+  std::string json;
+  std::string err;
+  CHECK(diff_pair("szt_left.cpp", "szt_right.cpp", {"--json"}, &json, &err) ==
+        0);
+  CHECK(json.find("\"status\": \"changed\"") != std::string::npos);
+  CHECK(json.find("\"verdict\": \"equivalent\"") == std::string::npos);
+  CHECK(json.find("\"verdict\": \"unknown\"") != std::string::npos);
+}
+
+TEST_CASE("method access change (public -> private): different") {
+  // Selected directly, the access specifier is outside the method extent;
+  // it must still be part of the callable's compared API state.
+  std::string out;
+  std::string err;
+  const int rc = run_diff({"symbol", fx().path("acc_left.cpp"),
+                           fx().path("acc_right.cpp"), "--db", fx().db,
+                           "--left", "Api::m", "--right", "Api::m"},
+                          &out, &err);
+  CHECK(rc == 0);
+  CHECK(out.find("semantic: different") != std::string::npos);
+  CHECK(out.find("change: access: public -> private") != std::string::npos);
+}
+
+TEST_CASE("postfix vs prefix increment: syntax changed") {
+  // x++ and ++x share an opcode string; only the fixity differs. Before, the
+  // label dropped it and syntax mode reported unchanged.
+  std::string json;
+  std::string err;
+  CHECK(diff_pair("fix_left.cpp", "fix_right.cpp", {"--json"}, &json, &err) ==
+        0);
+  CHECK(json.find("\"status\": \"changed\"") != std::string::npos);
+  CHECK(json.find("\"edit_count\": 0") == std::string::npos);
 }
 
 TEST_CASE("volatile and inline asm are unsupported markers, not verdicts") {

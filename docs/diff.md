@@ -175,8 +175,11 @@ Callable verdict:
   type, parameter count/types, default arguments (presence or normalized
   expression), cv/ref qualifiers, `noexcept`, resolved virtual-ness, storage
   class (`static`/`extern`), spelled `inline`, constexpr kind
-  (`constexpr`/`consteval`/`constinit`), `[[noreturn]]`, or
-  static-vs-instance method differ (evidence `summary-contradiction`);
+  (`constexpr`/`consteval`/`constinit`), `[[noreturn]]`,
+  static-vs-instance method, or — for methods — member access
+  (`public`/`protected`/`private`), `explicit`, `= delete`, `= default`,
+  `final`, pure-virtual, or `override` differ (evidence
+  `summary-contradiction`);
 - `unknown` — IR differs without a contradiction, or any unsupported marker
   (evidence `unsupported-or-incomplete`). Reported as
   `unknown (no behavioral difference established)` — never as equivalent.
@@ -241,6 +244,10 @@ The report always includes a compact delta of semantic-affecting flags
 between the two sides: language standard, target triple, driver, macro
 definitions (`-D`/`-U`), include search order (`-I`/`-isystem`/`-iquote`/`-F`),
 and remaining options (left-only / right-only after normalization).
+`-D`/`-U` are compared as an **ordered** sequence: two sides that share the
+same multiset of definitions but in a different order (e.g. `-DX=1 -UX` vs
+`-UX -DX=1`, which leave `X` defined vs undefined) are **not** identical —
+`definitions_reordered` is set and the configuration is treated as differing.
 Identical source under different configurations is not automatically
 identical behavior: any configuration delta downgrades a whole-file or
 class `equivalent` to `unknown` with the delta as the reason (callable
@@ -270,6 +277,7 @@ LF line endings, `json_out::dumps_indent2` + trailing newline. No floats.
   "config_delta": { "identical": true|false,
                     "std": ["<l>","<r>"]|null, "target": [..]|null, "driver": [..]|null,
                     "definitions_added": [..], "definitions_removed": [..],
+                    "definitions_reordered": true|false,
                     "includes_changed": true|false,
                     "options_left_only": [..], "options_right_only": [..] },
   "entities": [

@@ -337,6 +337,26 @@ std::vector<std::string> signature_changes(const BehaviourIR &l,
     out.push_back(std::string("static method: ") +
                   bool_str(l.is_static_method) + " -> " +
                   bool_str(r.is_static_method));
+  if (l.access != r.access)
+    out.push_back("access: " + or_dash(l.access) + " -> " + or_dash(r.access));
+  if (l.is_explicit != r.is_explicit)
+    out.push_back(std::string("explicit: ") + bool_str(l.is_explicit) + " -> " +
+                  bool_str(r.is_explicit));
+  if (l.is_deleted != r.is_deleted)
+    out.push_back(std::string("deleted: ") + bool_str(l.is_deleted) + " -> " +
+                  bool_str(r.is_deleted));
+  if (l.is_defaulted != r.is_defaulted)
+    out.push_back(std::string("defaulted: ") + bool_str(l.is_defaulted) +
+                  " -> " + bool_str(r.is_defaulted));
+  if (l.is_final != r.is_final)
+    out.push_back(std::string("final: ") + bool_str(l.is_final) + " -> " +
+                  bool_str(r.is_final));
+  if (l.is_pure != r.is_pure)
+    out.push_back(std::string("pure: ") + bool_str(l.is_pure) + " -> " +
+                  bool_str(r.is_pure));
+  if (l.is_override != r.is_override)
+    out.push_back(std::string("override: ") + bool_str(l.is_override) + " -> " +
+                  bool_str(r.is_override));
   return out;
 }
 

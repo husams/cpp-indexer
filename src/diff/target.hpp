@@ -57,6 +57,8 @@ struct ConfigDelta {
   std::optional<std::pair<std::string, std::string>> driver;
   std::vector<std::string> definitions_added;   // right-only, sorted
   std::vector<std::string> definitions_removed; // left-only, sorted
+  bool definitions_reordered = false; // same -D/-U multiset, different order
+                                      // (e.g. "-DX=1 -UX" vs "-UX -DX=1")
   bool includes_changed = false;
   std::vector<std::string> options_left_only;  // sorted
   std::vector<std::string> options_right_only; // sorted
