@@ -124,7 +124,7 @@ std::string SqliteStmt::col_text(int idx) const {
 
 // -- SqliteDb ----------------------------------------------------------------
 
-SqliteDb::SqliteDb(const std::string &path) {
+SqliteDb::SqliteDb(const std::string &path, bool read_only) {
   // Design §4.2: the RETURNING upserts are the only path shipped; refuse to
   // run against a pre-3.35 runtime with a clear message instead of a SQL
   // syntax error later.
@@ -133,8 +133,9 @@ SqliteDb::SqliteDb(const std::string &path) {
                                    "support); found ") +
                        sqlite3_libversion());
   }
-  const int rc = sqlite3_open_v2(
-      path.c_str(), &db_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+  const int flags = read_only ? SQLITE_OPEN_READONLY
+                              : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE;
+  const int rc = sqlite3_open_v2(path.c_str(), &db_, flags, nullptr);
   if (rc != SQLITE_OK) {
     std::string msg = db_ ? sqlite3_errmsg(db_) : "out of memory";
     sqlite3_close(db_);

@@ -59,7 +59,10 @@ private:
 // Owns a sqlite3*. Non-copyable, non-movable (Storage holds it by value).
 class SqliteDb {
 public:
-  explicit SqliteDb(const std::string &path); // throws StorageError
+  // read_only opens with SQLITE_OPEN_READONLY (no CREATE): the file must
+  // already exist; any write statement fails at the SQLite layer.
+  explicit SqliteDb(const std::string &path,
+                    bool read_only = false); // throws StorageError
   ~SqliteDb();
   SqliteDb(const SqliteDb &) = delete;
   SqliteDb &operator=(const SqliteDb &) = delete;

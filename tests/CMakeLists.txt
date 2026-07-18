@@ -145,6 +145,23 @@ set_tests_properties(cli_clang_test PROPERTIES
   LABELS "clang"
   SKIP_RETURN_CODE 77)
 
+# --- diff_test — cidx-diff plumbing (src/diff/) -------------------------------
+# Hermetic cases (read-only Storage mode, config resolution/delta, CLI11
+# grammar via diff::run) live in suite "diff" under the "default" label; the
+# real-parse fixture matrix (docs/diff.md) lives in doctest suite "clang",
+# registered separately. SKIP-77 reserved for a missing parse environment.
+add_executable(diff_test diff_test.cpp)
+target_compile_options(diff_test PRIVATE -Wall -Wextra)
+target_link_libraries(diff_test PRIVATE cidx_core)
+
+add_test(NAME diff_test COMMAND diff_test --test-suite-exclude=clang)
+set_tests_properties(diff_test PROPERTIES LABELS "default")
+
+add_test(NAME diff_clang_test COMMAND diff_test --test-suite=clang)
+set_tests_properties(diff_clang_test PROPERTIES
+  LABELS "clang"
+  SKIP_RETURN_CODE 77)
+
 # ast_query_test / astcache_test removed in the LibTooling cutover: the
 # `cidx ast` command and the AST/PCH cache they exercised were deleted.
 
