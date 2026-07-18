@@ -62,6 +62,8 @@ struct ConfigDelta {
   bool includes_changed = false;
   std::vector<std::string> options_left_only;  // sorted
   std::vector<std::string> options_right_only; // sorted
+  bool options_reordered = false; // same `other` multiset, different order
+                                  // (e.g. reversed "-include a.h -include b.h")
 };
 
 // Contract steps 1-5: read-only open (schema_version gate), registered file

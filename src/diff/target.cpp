@@ -112,10 +112,19 @@ ConfigDelta config_delta(const ParseConfig &left, const ParseConfig &right) {
   d.includes_changed = left.classes.includes != right.classes.includes;
   d.options_left_only = only_in(left.classes.other, right.classes.other);
   d.options_right_only = only_in(right.classes.other, left.classes.other);
+  // `other` covers ordered, paired flags whose final effect is order-sensitive
+  // (e.g. `-include a.h -include b.h` vs the reverse, or `-Xclang` sequences).
+  // When the multiset difference is empty yet the ordered sequences differ, the
+  // only change is a reorder -- which can still change what the parser sees, so
+  // conservatively treat it as a configuration delta, not an identical config.
+  d.options_reordered =
+      d.options_left_only.empty() && d.options_right_only.empty() &&
+      left.classes.other != right.classes.other;
   d.identical = !d.standard && !d.target && !d.driver &&
                 d.definitions_added.empty() && d.definitions_removed.empty() &&
                 !d.definitions_reordered && !d.includes_changed &&
-                d.options_left_only.empty() && d.options_right_only.empty();
+                d.options_left_only.empty() && d.options_right_only.empty() &&
+                !d.options_reordered;
   return d;
 }
 

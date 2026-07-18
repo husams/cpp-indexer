@@ -102,7 +102,8 @@ jo::Value delta_value(const ConfigDelta &d) {
        {"definitions_reordered", jo::Value::of(d.definitions_reordered)},
        {"includes_changed", jo::Value::of(d.includes_changed)},
        {"options_left_only", str_array(d.options_left_only)},
-       {"options_right_only", str_array(d.options_right_only)}});
+       {"options_right_only", str_array(d.options_right_only)},
+       {"options_reordered", jo::Value::of(d.options_reordered)}});
 }
 
 jo::Value edit_value(const EditOp &e) {
@@ -276,6 +277,8 @@ void render_delta_text(const ConfigDelta &d, std::ostream &out) {
     out << "  includes: changed\n";
   list("options left only", d.options_left_only);
   list("options right only", d.options_right_only);
+  if (d.options_reordered)
+    out << "  options: reordered\n";
 }
 
 void render_semantic_notes(const EntityPair &p, const std::string &indent,

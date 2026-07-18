@@ -215,6 +215,42 @@ std::string method_quals(const clang::FunctionDecl *fd) {
   return join(parts, " ");
 }
 
+// Canonical method API-state token appended to a callable's syntax label so a
+// directly selected method -- whose extent excludes the surrounding access
+// specifier -- still fingerprints access / final / pure / override / explicit /
+// deleted / defaulted changes. These mirror the fields the semantic IR compares
+// (fill_signature); a public->private move or an added `= delete` is a real
+// contract change, not a syntactically unchanged one. Empty for callables with
+// no API state (e.g. an ordinary free function), so their fingerprints are
+// unaffected.
+std::string method_api_state(const clang::FunctionDecl *fd) {
+  std::vector<std::string> parts;
+  if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(fd)) {
+    if (m->getAccess() != clang::AS_none)
+      parts.push_back(std::string("access=") + access_str(m->getAccess()));
+    if (m->hasAttr<clang::FinalAttr>())
+      parts.push_back("final");
+    if (m->isPureVirtual())
+      parts.push_back("pure");
+    if (m->size_overridden_methods() > 0)
+      parts.push_back("override");
+  }
+  if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fd)) {
+    if (ctor->isExplicit())
+      parts.push_back("explicit");
+  } else if (const auto *conv = llvm::dyn_cast<clang::CXXConversionDecl>(fd)) {
+    if (conv->isExplicit())
+      parts.push_back("explicit");
+  }
+  if (fd->isDeleted())
+    parts.push_back("deleted");
+  if (fd->isDefaulted())
+    parts.push_back("defaulted");
+  if (parts.empty())
+    return {};
+  return " [" + join(parts, " ") + "]";
+}
+
 // Collects constructs outside the supported behavioral subset (docs/diff.md
 // "Semantic model") with their source ranges instead of approximating them.
 struct UnsupportedScan {
@@ -660,7 +696,8 @@ struct Analyzer {
 
   void lower_function(const clang::FunctionDecl *fd, SynNode &n) {
     const std::string name = ast::spelling(fd);
-    n.label = name + "(" + param_types(fd) + ")" + fn_quals(fd);
+    n.label =
+        name + "(" + param_types(fd) + ")" + fn_quals(fd) + method_api_state(fd);
     n.detail = "name " + name;
     for (const clang::ParmVarDecl *p : fd->parameters())
       add_decl(p, n.children);

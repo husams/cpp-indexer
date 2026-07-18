@@ -201,6 +201,32 @@ TEST_CASE("config_delta: reordered -D/-U is not identical") {
   CHECK(same.identical);
 }
 
+TEST_CASE("config_delta: reordered paired `other` options are not identical") {
+  // `-include a.h -include b.h` and its reverse share an `other` multiset but
+  // can leave the parser seeing different macro state. The sorted multiset
+  // difference is empty, so the reorder must be flagged on its own axis.
+  diff::ParseConfig l;
+  diff::ParseConfig r;
+  l.classes = diff::classify_options({"-include", "a.h", "-include", "b.h"});
+  r.classes = diff::classify_options({"-include", "b.h", "-include", "a.h"});
+  const diff::ConfigDelta d = diff::config_delta(l, r);
+  CHECK(d.options_left_only.empty());
+  CHECK(d.options_right_only.empty());
+  CHECK(d.options_reordered);
+  CHECK_FALSE(d.identical);
+
+  // Identical order stays identical and unflagged; a genuine set difference
+  // still surfaces through options_left_only/right_only, not the reorder axis.
+  const diff::ConfigDelta same = diff::config_delta(l, l);
+  CHECK_FALSE(same.options_reordered);
+  CHECK(same.identical);
+  diff::ParseConfig r2;
+  r2.classes = diff::classify_options({"-include", "a.h", "-Xclang", "-foo"});
+  const diff::ConfigDelta setdiff = diff::config_delta(l, r2);
+  CHECK_FALSE(setdiff.options_reordered);
+  CHECK_FALSE(setdiff.identical);
+}
+
 TEST_CASE("CLI misuse exits 2 with a usage message") {
   const Fixture f = make_index();
   std::string out;
@@ -757,6 +783,12 @@ struct ClangFixture {
         // postfix vs prefix increment: same opcode, different fixity.
         {"fix_left.cpp", "void inc(int x) { x++; }\n"},
         {"fix_right.cpp", "void inc(int x) { ++x; }\n"},
+        // identical source, reversed `-include a -include b` order: the two
+        // forced headers leave a different final macro state, so the ordered
+        // `other` options must register as a configuration delta even though
+        // the callable itself is unchanged.
+        {"cfgi_left.cpp", "int fi() { return 0; }\n"},
+        {"cfgi_right.cpp", "int fi() { return 0; }\n"},
     };
     // The headers are registered by `cidx index` through their TUs; they are
     // not compile_commands entries themselves.
@@ -764,15 +796,29 @@ struct ClangFixture {
                "inline int hval(int x) { return x + 1; }\n");
     write_file(proj + "/hdr_right.hpp",
                "inline int hval(int x) { return x + 2; }\n");
+    // Forced-include headers with an order-sensitive final macro value.
+    write_file(proj + "/inc_a.hpp", "#undef IV\n#define IV 1\n");
+    write_file(proj + "/inc_b.hpp", "#undef IV\n#define IV 2\n");
     std::string cc = "[";
     for (std::size_t i = 0; i < sources.size(); ++i) {
       write_file(proj + "/" + sources[i].first, sources[i].second);
       if (i != 0)
         cc += ",\n ";
       // The config-delta fixture pair has identical sources; only the left
-      // side's stored compile options carry -DX=1.
-      const std::string extra =
-          sources[i].first == "cfg_left.cpp" ? "-DX=1 " : "";
+      // side's stored compile options carry -DX=1. The cfgi pair shares one
+      // source but stores reversed `-include` order.
+      // -include is not an include-search flag, so import does not rewrite it
+      // to an absolute path; use absolute header paths so the forced include
+      // resolves regardless of the parse CWD.
+      const std::string inc_a = "-include " + proj + "/inc_a.hpp";
+      const std::string inc_b = "-include " + proj + "/inc_b.hpp";
+      std::string extra;
+      if (sources[i].first == "cfg_left.cpp")
+        extra = "-DX=1 ";
+      else if (sources[i].first == "cfgi_left.cpp")
+        extra = inc_a + " " + inc_b + " ";
+      else if (sources[i].first == "cfgi_right.cpp")
+        extra = inc_b + " " + inc_a + " ";
       cc += "{\"directory\": \"" + proj +
             "\", \"command\": \"c++ -std=c++17 " + extra + "-c " +
             sources[i].first + " -o " + sources[i].first +
@@ -960,7 +1006,8 @@ TEST_CASE("sizeof(int) vs sizeof(long): not falsely equivalent") {
 
 TEST_CASE("method access change (public -> private): different") {
   // Selected directly, the access specifier is outside the method extent;
-  // it must still be part of the callable's compared API state.
+  // it must still be part of the callable's compared API state -- in both the
+  // semantic IR and the syntax fingerprint.
   std::string out;
   std::string err;
   const int rc = run_diff({"symbol", fx().path("acc_left.cpp"),
@@ -970,6 +1017,17 @@ TEST_CASE("method access change (public -> private): different") {
   CHECK(rc == 0);
   CHECK(out.find("semantic: different") != std::string::npos);
   CHECK(out.find("change: access: public -> private") != std::string::npos);
+
+  // Syntax mode must also see the API-state change: status changed, edits > 0.
+  std::string json;
+  const int rcj = run_diff({"symbol", fx().path("acc_left.cpp"),
+                            fx().path("acc_right.cpp"), "--db", fx().db,
+                            "--left", "Api::m", "--right", "Api::m", "--mode",
+                            "syntax", "--json"},
+                           &json, &err);
+  CHECK(rcj == 0);
+  CHECK(json.find("\"status\": \"changed\"") != std::string::npos);
+  CHECK(json.find("\"edit_count\": 0") == std::string::npos);
 }
 
 TEST_CASE("postfix vs prefix increment: syntax changed") {
@@ -1019,6 +1077,25 @@ TEST_CASE("config delta downgrades identical source to unknown") {
   CHECK(out.find("definitions removed: -DX=1") != std::string::npos);
   CHECK(out.find("semantic: unknown (configuration differs; no behavioral "
                  "difference established)") != std::string::npos);
+}
+
+TEST_CASE("reversed -include order is a config delta, not an identical config") {
+  // Identical source, reversed `-include a -include b`: before the fix the
+  // sorted `other` multiset matched and the whole-file verdict read as an
+  // identical-source-and-config equivalence. It must now downgrade.
+  std::string json;
+  std::string err;
+  CHECK(diff_pair("cfgi_left.cpp", "cfgi_right.cpp", {"--json"}, &json, &err) ==
+        0);
+  CHECK(json.find("\"identical\": false") != std::string::npos);
+  CHECK(json.find("\"options_reordered\": true") != std::string::npos);
+  CHECK(json.find("\"evidence\": \"identical-source-and-config\"") ==
+        std::string::npos);
+
+  std::string out;
+  CHECK(diff_pair("cfgi_left.cpp", "cfgi_right.cpp", {}, &out, &err) == 0);
+  CHECK(out.find("config: different") != std::string::npos);
+  CHECK(out.find("options: reordered") != std::string::npos);
 }
 
 TEST_CASE("callee change reserve -> resize: one changed CallExpr op") {
