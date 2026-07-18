@@ -46,6 +46,13 @@ task:
 - Git: agents may create worktrees and feature branches; keep each scoped to a
   single task and never remove a worktree or branch that may hold another
   contributor's work.
+- **After merging any PR into `main`, immediately bring local `main` up to date.**
+  This is mandatory, not optional. From the merged branch/worktree run
+  `git fetch origin main:main` (fast-forwards the local `main` ref without
+  switching branches); if `main` is the checked-out branch, `git pull --ff-only`.
+  Then verify `git rev-parse main` equals `git rev-parse origin/main`. Never
+  leave local `main` behind `origin/main` after a merge — a stale `main` makes the
+  next branch fork from an old base and reintroduces already-merged conflicts.
 - Keep agent scratch files under `/tmp` only — never in the repository tree.
   Do not commit generated artifacts (build dirs, caches, `__pycache__`, temp
   databases, local virtualenvs). The one exception is the checked-in semantic

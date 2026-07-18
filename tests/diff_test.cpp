@@ -801,6 +801,16 @@ struct ClangFixture {
         // explicit-specifier distinguishes them. Needs C++20 for explicit(bool).
         {"exp_left.cpp", "struct E { explicit(false) E(int) {} };\n"},
         {"exp_right.cpp", "struct E { E(int) {} };\n"},
+        // `explicit(true)` vs a bare `explicit`: both resolve to explicit, so
+        // getKind() collapses them -- only the written condition expression
+        // distinguishes them in the syntax fingerprint.
+        {"ex2_left.cpp", "struct V { explicit(true) V(int) {} };\n"},
+        {"ex2_right.cpp", "struct V { explicit V(int) {} };\n"},
+        // `explicit(0)` vs `explicit(false)`: both resolve to non-explicit;
+        // getKind() maps each to ResolvedFalse, so only the preserved written
+        // condition keeps them distinct.
+        {"ex3_left.cpp", "struct W { explicit(0) W(int) {} };\n"},
+        {"ex3_right.cpp", "struct W { explicit(false) W(int) {} };\n"},
     };
     // The headers are registered by `cidx index` through their TUs; they are
     // not compile_commands entries themselves.
@@ -834,7 +844,11 @@ struct ClangFixture {
       // explicit(bool) is C++20; the trailing -std overrides the -std=c++17 in
       // the base command (clang takes the last -std).
       else if (sources[i].first == "exp_left.cpp" ||
-               sources[i].first == "exp_right.cpp")
+               sources[i].first == "exp_right.cpp" ||
+               sources[i].first == "ex2_left.cpp" ||
+               sources[i].first == "ex2_right.cpp" ||
+               sources[i].first == "ex3_left.cpp" ||
+               sources[i].first == "ex3_right.cpp")
         extra = "-std=c++20 ";
       cc += "{\"directory\": \"" + proj +
             "\", \"command\": \"c++ -std=c++17 " + extra + "-c " +
@@ -1072,6 +1086,36 @@ TEST_CASE("explicit(false) vs plain constructor: syntax changed") {
   const int rc = run_diff({"symbol", fx().path("exp_left.cpp"),
                            fx().path("exp_right.cpp"), "--db", fx().db, "--left",
                            "E::E", "--right", "E::E", "--mode", "syntax",
+                           "--json"},
+                          &json, &err);
+  CHECK(rc == 0);
+  CHECK(json.find("\"status\": \"changed\"") != std::string::npos);
+  CHECK(json.find("\"edit_count\": 0") == std::string::npos);
+}
+
+TEST_CASE("explicit(true) vs bare explicit: syntax changed") {
+  // Both resolve to explicit (getKind() == ResolvedTrue), so a kind-only token
+  // collapses them; only the preserved written condition distinguishes the two.
+  std::string json;
+  std::string err;
+  const int rc = run_diff({"symbol", fx().path("ex2_left.cpp"),
+                           fx().path("ex2_right.cpp"), "--db", fx().db, "--left",
+                           "V::V", "--right", "V::V", "--mode", "syntax",
+                           "--json"},
+                          &json, &err);
+  CHECK(rc == 0);
+  CHECK(json.find("\"status\": \"changed\"") != std::string::npos);
+  CHECK(json.find("\"edit_count\": 0") == std::string::npos);
+}
+
+TEST_CASE("explicit(0) vs explicit(false): syntax changed") {
+  // Both resolve to non-explicit (getKind() == ResolvedFalse); only the
+  // preserved written condition keeps `0` distinct from `false`.
+  std::string json;
+  std::string err;
+  const int rc = run_diff({"symbol", fx().path("ex3_left.cpp"),
+                           fx().path("ex3_right.cpp"), "--db", fx().db, "--left",
+                           "W::W", "--right", "W::W", "--mode", "syntax",
                            "--json"},
                           &json, &err);
   CHECK(rc == 0);

@@ -219,8 +219,15 @@ std::string method_quals(const clang::FunctionDecl *fd) {
 // token, for the syntax fingerprint. `isExplicit()` collapses a written
 // `explicit(false)` to "not explicit", so it would compare equal to a plain
 // declaration and hide a real source change; `getExplicitSpecifier()` preserves
-// the written form -- `explicit`, `explicit(false)`, or a dependent
-// `explicit(<expr>)` with its source spelling. Empty when none is written.
+// the written form. When a condition expression is written -- `explicit(cond)`
+// -- its normalized source is kept regardless of whether Clang resolved the
+// condition, so `explicit(true)`, `explicit(0)`, and a dependent
+// `explicit(sizeof(T)>1)` stay distinct from a bare `explicit` and from each
+// other (`getKind()` alone maps explicit(true)->explicit and
+// explicit(0)->explicit(false), collapsing written forms). Whitespace is
+// stripped so `explicit( true )` and `explicit(true)` fingerprint identically.
+// Bare `explicit` is reserved for a specified form with no expression. Empty
+// when none is written.
 std::string explicit_spec_token(const clang::FunctionDecl *fd) {
   clang::ExplicitSpecifier es;
   if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fd))
@@ -231,16 +238,15 @@ std::string explicit_spec_token(const clang::FunctionDecl *fd) {
     return {};
   if (!es.isSpecified())
     return {};
-  switch (es.getKind()) {
-  case clang::ExplicitSpecKind::ResolvedFalse:
-    return "explicit(false)";
-  case clang::ExplicitSpecKind::ResolvedTrue:
-    return "explicit";
-  case clang::ExplicitSpecKind::Unresolved:
-    if (const clang::Expr *e = es.getExpr())
-      return "explicit(" +
-             source_slice(fd->getASTContext(), e->getSourceRange()) + ")";
-    return "explicit(dependent)";
+  if (const clang::Expr *e = es.getExpr()) {
+    std::string cond = source_slice(fd->getASTContext(), e->getSourceRange());
+    cond.erase(std::remove_if(cond.begin(), cond.end(),
+                              [](char c) {
+                                return c == ' ' || c == '\t' || c == '\n' ||
+                                       c == '\r' || c == '\f' || c == '\v';
+                              }),
+               cond.end());
+    return "explicit(" + cond + ")";
   }
   return "explicit";
 }
