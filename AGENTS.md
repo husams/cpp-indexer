@@ -45,3 +45,14 @@ task:
   indexer to regenerate `index.db` and commit the refreshed database in the same
   change. Verify with `sqlite3 index.db "SELECT value FROM meta WHERE
   key='schema_version';"` — it must match the current schema version.
+
+## Agent workflow preferences
+
+- When implementing features, Luna may be used with High or Extra effort.
+- When discussing or asking about design features, Sol may be used with High effort.
+- When creating a new thread, do not copy the existing context. Summarize the
+  context and include only the information needed for the task.
+- For implementations involving multiple stories, track progress in Markdown
+  files or a SQLite database.
+- When asked for the status of a story, provide only a one-line summary. Give
+  details only when explicitly requested.
