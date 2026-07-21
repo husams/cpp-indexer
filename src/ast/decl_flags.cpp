@@ -58,6 +58,9 @@ bool is_template_instantiation(const clang::Decl *decl) {
   if (const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(decl)) {
     tsk = rec->getTemplateSpecializationKind();
   } else if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(decl)) {
+    if (!fn->isFunctionTemplateSpecialization()) {
+      return false;
+    }
     tsk = fn->getTemplateSpecializationKind();
   } else if (const auto *var = llvm::dyn_cast<clang::VarDecl>(decl)) {
     tsk = var->getTemplateSpecializationKind();

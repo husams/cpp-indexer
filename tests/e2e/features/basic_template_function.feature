@@ -22,7 +22,7 @@ Feature: Indexing a function template, its explicit specialization and its impli
     And the entity graph is resolved
     And the index holds 1 indexed file
     And the index holds exactly 4 symbols
-    And the index holds exactly 4 edges
+    And the index holds exactly 3 edges
 
   Scenario: Primary, specialization, instantiation and caller are all indexed
     Then the index holds exactly these symbols:
@@ -66,13 +66,12 @@ Feature: Indexing a function template, its explicit specialization and its impli
     Then the edge kind totals are:
       | kind         | total |
       | specializes  | 1     |
-      | instantiates | 2     |
+      | instantiates | 1     |
       | calls        | 1     |
     And the index holds exactly these edges:
       | src                             | kind         | dst                                | count | sites |
       | usr:c:@F@add<#I>#I#I#           | specializes  | usr:c:@FT@>1#Tadd#t0.0#S0_#S0_#    | 1     | -     |
       | usr:c:@F@add<#d>#d#d#           | instantiates | usr:c:@FT@>1#Tadd#t0.0#S0_#S0_#    | 1     | -     |
-      | call                            | instantiates | usr:c:@FT@>1#Tadd#t0.0#S0_#S0_#    | 1     | -     |
       | call                            | calls        | usr:c:@F@add<#d>#d#d#              | 1     | 12:19 |
 
   Scenario: The call resolves to the double instantiation, not to the primary or the int specialization

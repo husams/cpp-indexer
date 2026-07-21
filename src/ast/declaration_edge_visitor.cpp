@@ -1,11 +1,12 @@
 #include "ast/declaration_edge_visitor.hpp"
 
+#include "ast/clang_compat.hpp"
+#include "ast/decl_flags.hpp"
 #include "ast/edge_sink.hpp"
 #include "ast/instantiation_edges.hpp"
 #include "ast/kind_map.hpp"
 #include "ast/location.hpp"
 #include "ast/type_use.hpp"
-#include "ast/clang_compat.hpp"
 #include "ast/usr.hpp"
 
 #include "clang/Lex/Lexer.h"
@@ -49,7 +50,7 @@ ParentKind parent_kind_of(const clang::Decl *parent) {
     if (llvm::isa<clang::ClassTemplatePartialSpecializationDecl>(rec)) {
       return ParentKind::Other; // not in the contains parent set
     }
-    return ParentKind::Record;  // class/struct/union (incl. full spec)
+    return ParentKind::Record; // class/struct/union (incl. full spec)
   }
   if (const auto *rec = llvm::dyn_cast<clang::RecordDecl>(parent)) {
     return rec->isUnion() ? ParentKind::Record : ParentKind::Record;
@@ -87,17 +88,19 @@ std::string usr_of(const clang::Decl *decl) {
 
 } // namespace
 
-DeclarationEdgeVisitor::DeclarationEdgeVisitor(clang::ASTContext &context, EdgeSink &sink,
-                         std::string target_file, int64_t file_id)
+DeclarationEdgeVisitor::DeclarationEdgeVisitor(clang::ASTContext &context,
+                                               EdgeSink &sink,
+                                               std::string target_file,
+                                               int64_t file_id)
     : context_(context), source_manager_(context.getSourceManager()),
       sink_(sink), mint_(context, sink), targ_encoder_(context, sink),
-      minter_(context, sink, mint_, targ_encoder_),
-      types_(context, sink),
+      minter_(context, sink, mint_, targ_encoder_), types_(context, sink),
       target_file_(std::move(target_file)), file_id_(file_id) {}
 
 // Signature-level uses(7): return + parameter types (emit_type_use in the
 // function-like B1 branch). Constructors/destructors record no return type.
-void DeclarationEdgeVisitor::emit_signature_uses(const clang::FunctionDecl *fn) {
+void DeclarationEdgeVisitor::emit_signature_uses(
+    const clang::FunctionDecl *fn) {
   const clang::NamedDecl *keyed = fn;
   if (const clang::FunctionTemplateDecl *ft =
           fn->getDescribedFunctionTemplate()) {
@@ -157,8 +160,7 @@ void DeclarationEdgeVisitor::emit_signature_types(const clang::FunctionDecl *fn,
 
 bool DeclarationEdgeVisitor::in_walk(const clang::Decl *decl) const {
   // for_file_cursors_p: expansion location in the target file...
-  const ExpansionLoc loc =
-      expansion_loc(context_, decl->getLocation());
+  const ExpansionLoc loc = expansion_loc(context_, decl->getLocation());
   if (loc.file != target_file_) {
     return false;
   }
@@ -174,8 +176,7 @@ bool DeclarationEdgeVisitor::in_walk(const clang::Decl *decl) const {
 // Returns the src symbol id when the edge was emitted.
 std::optional<int64_t>
 DeclarationEdgeVisitor::emit_lookup_edge(const std::string &src_usr,
-                                         const std::string &dst_usr,
-                                         int kind) {
+                                         const std::string &dst_usr, int kind) {
   if (src_usr.empty() || dst_usr.empty()) {
     return std::nullopt;
   }
@@ -210,7 +211,8 @@ bool DeclarationEdgeVisitor::VisitNamedDecl(clang::NamedDecl *decl) {
 // -> nested type children only.
 void DeclarationEdgeVisitor::emit_contains_edge(const clang::NamedDecl *decl) {
   const clang::DeclContext *ldc = decl->getLexicalDeclContext();
-  const auto *parent = ldc != nullptr ? llvm::dyn_cast<clang::Decl>(ldc) : nullptr;
+  const auto *parent =
+      ldc != nullptr ? llvm::dyn_cast<clang::Decl>(ldc) : nullptr;
   if (parent == nullptr) {
     return;
   }
@@ -249,9 +251,9 @@ bool DeclarationEdgeVisitor::VisitCXXRecordDecl(clang::CXXRecordDecl *decl) {
 
 // One inherits(2) edge for a base specifier, plus the CRTP instantiates(5)
 // edge when the base is a class-template specialization.
-void DeclarationEdgeVisitor::emit_base_specifier(const clang::NamedDecl *derived,
-                                      const std::string &derived_usr,
-                                      const clang::CXXBaseSpecifier &base) {
+void DeclarationEdgeVisitor::emit_base_specifier(
+    const clang::NamedDecl *derived, const std::string &derived_usr,
+    const clang::CXXBaseSpecifier &base) {
   // The base record decl; dependent bases (Base<T> in a template) resolve to
   // their template pattern via the type's declaration when available.
   const clang::CXXRecordDecl *base_rec = base.getType()->getAsCXXRecordDecl();
@@ -277,10 +279,17 @@ void DeclarationEdgeVisitor::emit_base_specifier(const clang::NamedDecl *derived
   e.dst_id = dst_id;
   e.kind = 2;
   switch (base.getAccessSpecifier()) {
-  case clang::AS_public:    e.base_access = 1; break;
-  case clang::AS_protected: e.base_access = 2; break;
-  case clang::AS_private:   e.base_access = 3; break;
-  case clang::AS_none:      break;
+  case clang::AS_public:
+    e.base_access = 1;
+    break;
+  case clang::AS_protected:
+    e.base_access = 2;
+    break;
+  case clang::AS_private:
+    e.base_access = 3;
+    break;
+  case clang::AS_none:
+    break;
   }
   e.is_virtual = base.isVirtual() ? 1 : 0;
   sink_.add_edge(e);
@@ -289,8 +298,9 @@ void DeclarationEdgeVisitor::emit_base_specifier(const clang::NamedDecl *derived
 
 // src of an inherits edge: lookup, else mint (unmapped kinds default to
 // "class-template").
-int64_t DeclarationEdgeVisitor::inherits_src_id(const clang::NamedDecl *derived,
-                                     const std::string &derived_usr) {
+int64_t
+DeclarationEdgeVisitor::inherits_src_id(const clang::NamedDecl *derived,
+                                        const std::string &derived_usr) {
   if (const auto sid = sink_.lookup_symbol_id(derived_usr)) {
     return *sid;
   }
@@ -305,9 +315,9 @@ int64_t DeclarationEdgeVisitor::inherits_src_id(const clang::NamedDecl *derived,
 }
 
 // CRTP/template base: specialization instance -> primary template.
-void DeclarationEdgeVisitor::emit_crtp_instantiates(const clang::CXXRecordDecl *base_rec,
-                                         const std::string &base_usr,
-                                         int64_t dst_id) {
+void DeclarationEdgeVisitor::emit_crtp_instantiates(
+    const clang::CXXRecordDecl *base_rec, const std::string &base_usr,
+    int64_t dst_id) {
   const auto *spec =
       llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(base_rec);
   if (spec == nullptr) {
@@ -330,7 +340,8 @@ void DeclarationEdgeVisitor::emit_crtp_instantiates(const clang::CXXRecordDecl *
   }
 }
 
-// -- field_of (kind=8) + field type use/mint -----------------------------------
+// -- field_of (kind=8) + field type use/mint
+// -----------------------------------
 bool DeclarationEdgeVisitor::VisitFieldDecl(clang::FieldDecl *decl) {
   if (!in_walk(decl)) {
     return true;
@@ -380,8 +391,8 @@ bool DeclarationEdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
   return true;
 }
 
-void DeclarationEdgeVisitor::emit_static_member_definition(const clang::VarDecl *decl,
-                                                int64_t symbol_id) {
+void DeclarationEdgeVisitor::emit_static_member_definition(
+    const clang::VarDecl *decl, int64_t symbol_id) {
   const clang::SourceRange range = decl->getSourceRange();
   const ExpansionLoc start = extent_start(context_, range);
   const ExpansionLoc end = extent_end(context_, range);
@@ -439,8 +450,8 @@ DeclarationEdgeVisitor::static_var_init_text(clang::SourceRange range) const {
 }
 
 // Call targets anywhere in the initializer become def_edge USES rows.
-void DeclarationEdgeVisitor::emit_static_init_def_edges(int64_t def_id,
-                                             const clang::Expr *init) {
+void DeclarationEdgeVisitor::emit_static_init_def_edges(
+    int64_t def_id, const clang::Expr *init) {
   std::vector<const clang::Stmt *> stack{init};
   while (!stack.empty()) {
     const clang::Stmt *s = stack.back();
@@ -466,7 +477,8 @@ void DeclarationEdgeVisitor::emit_static_init_def_edges(int64_t def_id,
 }
 
 // -- TYPEDEF/TYPE_ALIAS: named-instance mint + underlying type use ------------
-bool DeclarationEdgeVisitor::VisitTypedefNameDecl(clang::TypedefNameDecl *decl) {
+bool DeclarationEdgeVisitor::VisitTypedefNameDecl(
+    clang::TypedefNameDecl *decl) {
   if (!in_walk(decl)) {
     return true;
   }
@@ -528,7 +540,6 @@ void DeclarationEdgeVisitor::emit_override_edges(
     }
   }
 }
-
 
 // The record decls a `friend` type declaration references. For
 // `friend class B;` that is B itself; for `friend class Singleton<Cache>;`
@@ -606,7 +617,8 @@ void DeclarationEdgeVisitor::emit_template_params(
   }
 }
 
-bool DeclarationEdgeVisitor::VisitClassTemplateDecl(clang::ClassTemplateDecl *decl) {
+bool DeclarationEdgeVisitor::VisitClassTemplateDecl(
+    clang::ClassTemplateDecl *decl) {
   // Explicitly instantiated ordinary members of this class template's
   // specializations (`template void PlainMember<int>::run();`) — POI-gated,
   // like the function-template path.
@@ -691,6 +703,14 @@ void DeclarationEdgeVisitor::emit_callable_identity(
     const clang::FunctionDecl *fd) {
   const auto info = callable_template_info(fd);
   if (!info) {
+    const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fd);
+    if (method == nullptr || !is_template_instantiation(method->getParent())) {
+      return;
+    }
+    const auto dst_id = sink_.lookup_symbol_id(usr_for_decl(fd));
+    if (dst_id) {
+      emit_method_owner(sink_, mint_, targ_encoder_, *dst_id, method);
+    }
     return;
   }
   auto req = mint_.build(fd);
@@ -741,7 +761,8 @@ std::optional<int64_t> DeclarationEdgeVisitor::specialization_symbol_id(
   return sink_.lookup_symbol_id(spec_usr);
 }
 
-// -- specializes (4) / explicit-instantiation instantiates (5) + template_arg --
+// -- specializes (4) / explicit-instantiation instantiates (5) + template_arg
+// --
 bool DeclarationEdgeVisitor::VisitClassTemplateSpecializationDecl(
     clang::ClassTemplateSpecializationDecl *decl) {
   // Partial specializations have their own callback below.

@@ -17,12 +17,12 @@
 
 #include <cstdint>
 #include <optional>
-#include <string>
 #include <vector>
 
 namespace clang {
 class ASTContext;
 class ClassTemplateDecl;
+class CXXMethodDecl;
 class FunctionDecl;
 class FunctionTemplateDecl;
 class NamedDecl;
@@ -35,9 +35,9 @@ class MintBuilder;
 class TemplateArgumentEncoder;
 
 // Identity of a callable that specializes/instantiates a template: the primary
-// it relates to (its function template, or the instantiated-from declaration
-// for member specializations) and how, from getTemplateSpecializationKind().
-// nullopt for ordinary callables.
+// it relates to (its function template) and how, from
+// getTemplateSpecializationKind(). nullopt for ordinary callables and for
+// non-templated members of class-template specializations.
 struct CallableTemplateInfo {
   const clang::NamedDecl *primary = nullptr;
   clang::TemplateSpecializationKind tsk = clang::TSK_Undeclared;
@@ -52,22 +52,21 @@ callable_template_info(const clang::FunctionDecl *fd);
 //   - template_arg rows from the FULL specialization argument list, optionally
 //     overlaid with the as-written types `written` where positions align;
 //   - the display-name rewrite from the encoded argument literals;
-//   - method_of(9) owner promotion for methods, including the minted
-//     class-template-specialization owner with its own identity.
+//   - method_of(9) owner promotion for member-function templates, including
+//     the minted class-template-specialization owner with its own identity.
 // Safe to call from both the declaration pass and every call site.
-void emit_callable_template_identity(EdgeSink &sink, MintBuilder &mint,
-                                     const TemplateArgumentEncoder &targ_encoder,
-                                     int64_t dst_id,
-                                     const clang::FunctionDecl *fd,
-                                     const CallableTemplateInfo &info,
-                                     const std::vector<clang::QualType> &written);
+void emit_callable_template_identity(
+    EdgeSink &sink, MintBuilder &mint,
+    const TemplateArgumentEncoder &targ_encoder, int64_t dst_id,
+    const clang::FunctionDecl *fd, const CallableTemplateInfo &info,
+    const std::vector<clang::QualType> &written);
 
-// Call-site-owned companion: caller `src_id` -> primary instantiates(5),
-// counted per call (lookup-only). A no-op when the primary is not indexed or
-// shares the callee's USR.
-void emit_caller_instantiates(EdgeSink &sink, int64_t src_id,
-                              const CallableTemplateInfo &info,
-                              const std::string &callee_usr);
+// Emit method_of(9) for a concrete callable member. Ordinary members of a
+// class-template specialization use this path without becoming callable
+// template instantiations themselves.
+void emit_method_owner(EdgeSink &sink, MintBuilder &mint,
+                       const TemplateArgumentEncoder &targ_encoder,
+                       int64_t dst_id, const clang::CXXMethodDecl *method);
 
 // The TSK names an explicit instantiation (`template ...;` / `extern
 // template ...;`).
