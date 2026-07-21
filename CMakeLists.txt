@@ -161,6 +161,12 @@ add_library(cidx_core STATIC
   src/cli/json_out.cpp
   src/cli/kind_names.cpp
   src/cli/commands.cpp
+  src/cli/commands_delete.cpp
+  src/cli/commands_edit.cpp
+  src/cli/commands_graph.cpp
+  src/cli/commands_ingest.cpp
+  src/cli/commands_repo.cpp
+  src/cli/commands_show.cpp
   src/cli/analyze.cpp
   src/graph/query.cpp
   src/graph/emit.cpp
