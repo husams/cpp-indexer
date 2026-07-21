@@ -1,5 +1,7 @@
 #include "ast/names.hpp"
 
+#include <ranges>
+
 #include "ast/location.hpp"
 
 #include "clang/AST/ASTContext.h"
@@ -11,48 +13,12 @@
 
 namespace cidx::ast {
 
-const clang::PrintingPolicy &
-printing_policy(const clang::ASTContext &context) {
+const clang::PrintingPolicy &printing_policy(const clang::ASTContext &context) {
   return context.getPrintingPolicy();
 }
 
 std::string spelling(const clang::NamedDecl *decl) {
   return decl->getDeclName().getAsString();
-}
-
-std::string qualified_name(const clang::ASTContext &context,
-                           const clang::NamedDecl *decl) {
-  // Mirror cidx qualified_name (ast_cursor.cpp): walk semantic parents to the
-  // TU, joining non-empty spellings with "::" (anonymous levels skipped).
-  // libclang spells a lambda's closure class "(lambda at <file>:<line>:<col>)",
-  // so lambda scopes survive in the chain.
-  std::vector<std::string> parts;
-  const clang::Decl *d = decl;
-  while (d != nullptr && !llvm::isa<clang::TranslationUnitDecl>(d)) {
-    if (const auto *nd = llvm::dyn_cast<clang::NamedDecl>(d)) {
-      std::string s;
-      const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(nd);
-      if (rec != nullptr && rec->isLambda()) {
-        const ExpansionLoc loc = expansion_loc(context, rec->getLocation());
-        llvm::raw_string_ostream os(s);
-        os << "(lambda at " << loc.file << ':' << loc.line << ':' << loc.col
-           << ')';
-      } else {
-        s = nd->getDeclName().getAsString();
-      }
-      if (!s.empty())
-        parts.push_back(std::move(s));
-    }
-    const clang::DeclContext *dc = d->getDeclContext();
-    d = dc != nullptr ? llvm::dyn_cast<clang::Decl>(dc) : nullptr;
-  }
-  std::string out;
-  for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
-    if (!out.empty())
-      out += "::";
-    out += *it;
-  }
-  return out;
 }
 
 namespace {
@@ -65,8 +31,9 @@ void print_written_args(llvm::raw_string_ostream &os,
   if (written != nullptr) {
     bool first = true;
     for (const clang::TemplateArgumentLoc &tal : written->arguments()) {
-      if (!first)
+      if (!first) {
         os << ", ";
+      }
       first = false;
       tal.getArgument().print(policy, os, /*IncludeType=*/false);
     }
@@ -81,20 +48,23 @@ void print_function_display(llvm::raw_string_ostream &os,
                             const clang::PrintingPolicy &policy,
                             const clang::FunctionDecl *fd) {
   fd->getDeclName().print(os, policy);
-  if (fd->getTemplateSpecializationArgs() != nullptr)
+  if (fd->getTemplateSpecializationArgs() != nullptr) {
     print_written_args(os, policy,
                        fd->getTemplateSpecializationArgsAsWritten());
+  }
   os << '(';
   bool first = true;
   for (const clang::ParmVarDecl *p : fd->parameters()) {
-    if (!first)
+    if (!first) {
       os << ", ";
+    }
     first = false;
     os << p->getType().getAsString(policy);
   }
   if (fd->isVariadic()) {
-    if (!first)
+    if (!first) {
       os << ", ";
+    }
     os << "...";
   }
   os << ')';
@@ -121,6 +91,51 @@ void print_class_spec_display(
 
 } // namespace
 
+std::string qualified_name(const clang::ASTContext &context,
+                           const clang::NamedDecl *decl) {
+  // Mirror cidx qualified_name (ast_cursor.cpp): walk semantic parents to the
+  // TU, joining non-empty spellings with "::" (anonymous levels skipped).
+  // libclang spells a lambda's closure class "(lambda at <file>:<line>:<col>)",
+  // so lambda scopes survive in the chain.
+  std::vector<std::string> parts;
+  const clang::Decl *d = decl;
+  while (d != nullptr && !llvm::isa<clang::TranslationUnitDecl>(d)) {
+    if (const auto *nd = llvm::dyn_cast<clang::NamedDecl>(d)) {
+      std::string s;
+      const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(nd);
+      const auto *spec =
+          llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(nd);
+      if (rec != nullptr && rec->isLambda()) {
+        const ExpansionLoc loc = expansion_loc(context, rec->getLocation());
+        llvm::raw_string_ostream os(s);
+        os << "(lambda at " << loc.file << ':' << loc.line << ':' << loc.col
+           << ')';
+      } else if (spec != nullptr) {
+        // A specialization level carries its argument list, so MyClass<int>
+        // and MyClass<double> (and their members) never collapse onto the
+        // pattern's qualified name. Partial specializations print as written.
+        llvm::raw_string_ostream os(s);
+        print_class_spec_display(os, printing_policy(context), spec);
+      } else {
+        s = nd->getDeclName().getAsString();
+      }
+      if (!s.empty()) {
+        parts.push_back(std::move(s));
+      }
+    }
+    const clang::DeclContext *dc = d->getDeclContext();
+    d = dc != nullptr ? llvm::dyn_cast<clang::Decl>(dc) : nullptr;
+  }
+  std::string out;
+  for (const auto &part : std::views::reverse(parts)) {
+    if (!out.empty()) {
+      out += "::";
+    }
+    out += part;
+  }
+  return out;
+}
+
 std::optional<std::string> display_name(const clang::ASTContext &context,
                                         const clang::NamedDecl *decl) {
   // Mirror clang_getCursorDisplayName (CIndex.cpp): functions get their
@@ -142,8 +157,9 @@ std::optional<std::string> display_name(const clang::ASTContext &context,
     os << ct->getName() << '<';
     bool first = true;
     for (const clang::NamedDecl *p : *ct->getTemplateParameters()) {
-      if (!first)
+      if (!first) {
         os << ", ";
+      }
       first = false;
       os << p->getName();
     }
@@ -157,12 +173,14 @@ std::optional<std::string> display_name(const clang::ASTContext &context,
     print_class_spec_display(os, policy, spec);
   } else {
     std::string s = spelling(decl);
-    if (s.empty())
+    if (s.empty()) {
       return std::nullopt;
+    }
     return s;
   }
-  if (out.empty())
+  if (out.empty()) {
     return std::nullopt;
+  }
   return out;
 }
 
@@ -175,7 +193,8 @@ std::optional<std::string> type_info(const clang::ASTContext &context,
   clang::QualType type;
   if (const auto *td = llvm::dyn_cast<clang::TypedefNameDecl>(decl)) {
     type = td->getUnderlyingType();
-  } else if (const auto *ft = llvm::dyn_cast<clang::FunctionTemplateDecl>(decl)) {
+  } else if (const auto *ft =
+                 llvm::dyn_cast<clang::FunctionTemplateDecl>(decl)) {
     // libclang's cursor type of a function template is the templated
     // function's prototype (e.g. "T (T)"). Class templates have none.
     type = ft->getTemplatedDecl()->getType();
@@ -187,11 +206,13 @@ std::optional<std::string> type_info(const clang::ASTContext &context,
   } else {
     return std::nullopt;
   }
-  if (type.isNull())
+  if (type.isNull()) {
     return std::nullopt;
+  }
   std::string s = type.getAsString(policy);
-  if (s.empty())
+  if (s.empty()) {
     return std::nullopt;
+  }
   return s;
 }
 
