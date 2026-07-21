@@ -23,7 +23,7 @@ Feature: Indexing a member function template inside a struct
     And the entity graph is resolved
     And the index holds 1 indexed file
     And the index holds exactly 6 symbols
-    And the index holds exactly 11 edges
+    And the index holds exactly 10 edges
 
   Scenario: Struct, member template, specialization, caller, implicit ctor and instantiation are all indexed
     Then the index holds exactly these symbols:
@@ -65,7 +65,7 @@ Feature: Indexing a member function template inside a struct
       | contains        | 1     |
       | method_of       | 3     |
       | specializes     | 1     |
-      | instantiates    | 2     |
+      | instantiates    | 1     |
       | calls           | 2     |
       | uses            | 1     |
       | construct-value | 1     |
@@ -77,7 +77,6 @@ Feature: Indexing a member function template inside a struct
       | usr:c:@S@Calculator@F@add<#d>#d#d#         | method_of       | Calculator                                 | 1     | -     |
       | usr:c:@S@Calculator@F@add<#I>#I#I#         | specializes     | usr:c:@S@Calculator@FT@>1#Tadd#t0.0#S0_#S0_# | 1   | -     |
       | usr:c:@S@Calculator@F@add<#d>#d#d#         | instantiates    | usr:c:@S@Calculator@FT@>1#Tadd#t0.0#S0_#S0_# | 1   | -     |
-      | double_number                              | instantiates    | usr:c:@S@Calculator@FT@>1#Tadd#t0.0#S0_#S0_# | 1   | -     |
       | double_number                              | calls           | Calculator::Calculator                     | 1     | 15:16 |
       | double_number                              | calls           | usr:c:@S@Calculator@F@add<#d>#d#d#         | 1     | 16:12 |
       | double_number                              | uses            | Calculator                                 | 1     | 15:16 |

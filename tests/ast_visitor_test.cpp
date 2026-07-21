@@ -814,15 +814,15 @@ TEST_SUITE("clang") {
   TEST_CASE("template spec: call sites do not duplicate structural edges") {
     const IndexedTu tu(kSpecializationTu);
     // Every specializes/instantiates/method_of asserted above came back as a
-    // single row with count 1; the per-call caller -> primary instantiates
-    // edge is the one that still counts sites (two convert calls in use()).
+    // single row with count 1. Calls target the concrete callable instance;
+    // callers do not receive a redundant instantiates edge.
     CHECK(query_col(tu.db_path(),
                     "SELECT e.count FROM edge e "
                     "JOIN symbol ss ON ss.id = e.src_id "
                     "JOIN symbol ds ON ds.id = e.dst_id "
                     "WHERE e.kind = 5 AND ss.usr = 'c:@F@use#&$@S@Worker#f#' "
                     "AND ds.usr = 'c:@S@Worker@FT@>1#Tconvert#t0.0#I#'") ==
-          std::vector<std::string>{"2"});
+          std::vector<std::string>{});
   }
 
   TEST_CASE("template spec: explicit instantiation is owned by its POI file") {
@@ -921,17 +921,17 @@ TEST_SUITE("clang") {
     // PR #16 review: `template void PlainMember<int>::run();` lives only in
     // the class template's specialization list, not in any lexical position.
     const IndexedTu tu(kMemberInstantiationTu);
-    // The ordinary member: symbol at the POI line, instantiation flag, its
-    // instantiates edge to the member PATTERN, and method_of to the owner.
+    // The ordinary member is a concrete callable member of the class
+    // specialization, not an independent callable template instantiation.
     CHECK(sym_probe(tu.db_path(), "c:@S@PlainMember>#I@F@run#") ==
-          std::vector<std::string>{"method/1"});
+          std::vector<std::string>{"method/0"});
     CHECK(query_col(tu.db_path(),
                     "SELECT s.line FROM symbol s "
                     "WHERE s.usr = 'c:@S@PlainMember>#I@F@run#'") ==
           std::vector<std::string>{"4"});
     CHECK(structural_edges(tu.db_path(), "c:@S@PlainMember>#I@F@run#",
                            "c:@ST>1#T@PlainMember@F@run#") ==
-          std::vector<std::string>{"instantiates/1"});
+          std::vector<std::string>{});
     CHECK(structural_edges(tu.db_path(), "c:@S@PlainMember>#I@F@run#",
                            "c:@S@PlainMember>#I") ==
           std::vector<std::string>{"method_of/1"});
@@ -959,14 +959,14 @@ TEST_SUITE("clang") {
     // by recursing through instantiated contexts. Its owner Outer<int>::Inner
     // is never a lexical decl, so method_of relies on the minted owner.
     CHECK(sym_probe(tu.db_path(), "c:@S@Outer>#I@S@Inner@F@run#") ==
-          std::vector<std::string>{"method/1"});
+          std::vector<std::string>{"method/0"});
     CHECK(query_col(tu.db_path(),
                     "SELECT s.line FROM symbol s "
                     "WHERE s.usr = 'c:@S@Outer>#I@S@Inner@F@run#'") ==
           std::vector<std::string>{"13"});
     CHECK(structural_edges(tu.db_path(), "c:@S@Outer>#I@S@Inner@F@run#",
                            "c:@ST>1#T@Outer@S@Inner@F@run#") ==
-          std::vector<std::string>{"instantiates/1"});
+          std::vector<std::string>{});
     CHECK(structural_edges(tu.db_path(), "c:@S@Outer>#I@S@Inner@F@run#",
                            "c:@S@Outer>#I@S@Inner") ==
           std::vector<std::string>{"method_of/1"});

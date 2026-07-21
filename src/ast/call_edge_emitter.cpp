@@ -1,7 +1,8 @@
 #include "ast/call_edge_emitter.hpp"
 
-#include "ast/edge_emission_context.hpp"
 #include "ast/call_template_args.hpp"
+#include "ast/decl_flags.hpp"
+#include "ast/edge_emission_context.hpp"
 #include "ast/edge_sink.hpp"
 #include "ast/instantiation_edges.hpp"
 #include "ast/kind_map.hpp"
@@ -19,8 +20,9 @@
 
 namespace cidx::ast {
 
-int64_t CallEdgeEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
-                                              const std::string &callee_usr) {
+int64_t
+CallEdgeEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
+                                          const std::string &callee_usr) {
   int64_t dst_id = -1;
   if (const auto dst = ctx_.sink().lookup_symbol_id(callee_usr)) {
     dst_id = *dst;
@@ -49,8 +51,9 @@ int64_t CallEdgeEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
 // re-assert its declaration-owned template identity — idempotent, so a target
 // already handled by the declaration pass gains nothing twice. The call site
 // contributes only the as-written `<...>` type spellings.
-int64_t CallEdgeEmitter::mint_resolved_target(const clang::Expr *site,
-                                          const clang::FunctionDecl *callee) {
+int64_t
+CallEdgeEmitter::mint_resolved_target(const clang::Expr *site,
+                                      const clang::FunctionDecl *callee) {
   const auto info = callable_template_info(callee);
   auto req = ctx_.mint().build(callee);
   if (!req) {
@@ -62,13 +65,18 @@ int64_t CallEdgeEmitter::mint_resolved_target(const clang::Expr *site,
     emit_callable_template_identity(ctx_.sink(), ctx_.mint(),
                                     ctx_.targ_encoder(), dst_id, callee, *info,
                                     written_template_args(site));
+  } else if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(callee);
+             method != nullptr &&
+             is_template_instantiation(method->getParent())) {
+    emit_method_owner(ctx_.sink(), ctx_.mint(), ctx_.targ_encoder(), dst_id,
+                      method);
   }
   return dst_id;
 }
 
 // calls(1) edge + its edge_site row carrying the receiver provenance.
 int64_t CallEdgeEmitter::emit_call_site(const clang::Expr *site, int64_t dst_id,
-                                    const clang::FunctionDecl *callee) {
+                                        const clang::FunctionDecl *callee) {
   const ReceiverProvenance recv =
       classify_call_receiver(ctx_.context(), site, callee);
   EdgeRecord e;
@@ -99,37 +107,29 @@ int64_t CallEdgeEmitter::emit_call_site(const clang::Expr *site, int64_t dst_id,
 }
 
 void CallEdgeEmitter::emit_resolved_call(const clang::Expr *site,
-                                     const clang::FunctionDecl *callee,
-                                     bool recovered,
-                                     const clang::NamedDecl *mint_as) {
+                                         const clang::FunctionDecl *callee,
+                                         bool recovered,
+                                         const clang::NamedDecl *mint_as) {
   const clang::NamedDecl *keyed =
       mint_as != nullptr ? mint_as : llvm::cast<clang::NamedDecl>(callee);
   const std::string callee_usr = usr_for_decl(keyed);
   if (callee_usr.empty()) {
     return;
   }
-  const int64_t dst_id = recovered
-                             ? resolve_recovered_target(keyed, callee_usr)
-                             : mint_resolved_target(site, callee);
+  const int64_t dst_id = recovered ? resolve_recovered_target(keyed, callee_usr)
+                                   : mint_resolved_target(site, callee);
   if (dst_id < 0) {
     return;
   }
   const int64_t edge_id = emit_call_site(site, dst_id, callee);
   emit_call_args(site, llvm::dyn_cast<clang::CallExpr>(site),
                  llvm::dyn_cast<clang::CXXConstructExpr>(site), edge_id);
-  // B3: caller -> primary instantiates for a non-recovered template
-  // specialization (the callee's own identity was emitted at mint time).
-  if (!recovered) {
-    if (const auto info = callable_template_info(callee)) {
-      emit_caller_instantiates(ctx_.sink(), ctx_.src_id(), *info, callee_usr);
-    }
-  }
 }
 
 void CallEdgeEmitter::emit_call_args(const clang::Expr *site,
-                                 const clang::CallExpr *call,
-                                 const clang::CXXConstructExpr *ctor,
-                                 int64_t edge_id) {
+                                     const clang::CallExpr *call,
+                                     const clang::CXXConstructExpr *ctor,
+                                     int64_t edge_id) {
   const unsigned nargs = call != nullptr   ? call->getNumArgs()
                          : ctor != nullptr ? ctor->getNumArgs()
                                            : 0;

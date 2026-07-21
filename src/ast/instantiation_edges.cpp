@@ -146,13 +146,11 @@ emit_specialization_args(const TemplateArgumentEncoder &targ_encoder,
 
 std::optional<CallableTemplateInfo>
 callable_template_info(const clang::FunctionDecl *fd) {
-  CallableTemplateInfo info;
-  if (const clang::FunctionTemplateDecl *ft = fd->getPrimaryTemplate()) {
-    info.primary = ft;
-  } else if (fd->getMemberSpecializationInfo() != nullptr) {
-    info.primary = llvm::dyn_cast_or_null<clang::NamedDecl>(
-        fd->getMemberSpecializationInfo()->getInstantiatedFrom());
+  if (!fd->isFunctionTemplateSpecialization()) {
+    return std::nullopt;
   }
+  CallableTemplateInfo info;
+  info.primary = fd->getPrimaryTemplate();
   if (info.primary == nullptr) {
     return std::nullopt;
   }
@@ -193,6 +191,12 @@ void emit_callable_template_identity(
   if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(fd)) {
     emit_owner_promotion(sink, mint, targ_encoder, dst_id, m);
   }
+}
+
+void emit_method_owner(EdgeSink &sink, MintBuilder &mint,
+                       const TemplateArgumentEncoder &targ_encoder,
+                       int64_t dst_id, const clang::CXXMethodDecl *method) {
+  emit_owner_promotion(sink, mint, targ_encoder, dst_id, method);
 }
 
 bool is_explicit_instantiation_kind(clang::TemplateSpecializationKind tsk) {
@@ -251,24 +255,6 @@ void for_each_explicit_callable_instantiation(
        tmpl->specializations()) {
     walk_instantiated_context(spec, fn);
   }
-}
-
-void emit_caller_instantiates(EdgeSink &sink, int64_t src_id,
-                              const CallableTemplateInfo &info,
-                              const std::string &callee_usr) {
-  const std::string prim_usr = usr_for_decl(info.primary);
-  if (prim_usr.empty() || prim_usr == callee_usr) {
-    return;
-  }
-  const auto prim = sink.lookup_symbol_id(prim_usr);
-  if (!prim) {
-    return;
-  }
-  EdgeRecord inst;
-  inst.src_id = src_id;
-  inst.dst_id = *prim;
-  inst.kind = 5;
-  sink.add_edge(inst);
 }
 
 } // namespace cidx::ast
