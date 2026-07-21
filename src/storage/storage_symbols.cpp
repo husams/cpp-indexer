@@ -1,0 +1,571 @@
+// Symbol, edge, edge-site, call-arg and template-param/arg rows.
+// Split out of storage.cpp; Storage's interface is unchanged.
+#include "storage/storage.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cstring>
+#include <exception>
+#include <filesystem>
+#include <map>
+#include <optional>
+#include <set>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+
+#include "compiledb/compiledb.hpp"
+#include "storage/storage_detail.hpp"
+#include "storage/storage_schema.hpp"
+#include "util/errors.hpp"
+#include "util/json_min.hpp"
+#include "util/logger.hpp"
+#include "util/pathutil.hpp"
+
+namespace cidx {
+
+using namespace detail;
+
+int64_t Storage::add_symbol(const Symbol &sym) {
+  if (!is_symbol_kind(sym.kind)) {
+    throw StorageError("unknown symbol kind '" + sym.kind + "'");
+  }
+  auto st = db_.prepare(
+      "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
+      "type_info, file_id, line, col, decl_file_id, decl_line, decl_col, "
+      "is_definition, is_pure, is_static, is_instantiation, linkage, access, "
+      "parent_usr, resolved, decl_path, end_line, end_col) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+      "?, ?) "
+      "ON CONFLICT(usr) DO UPDATE SET "
+      "  spelling         = excluded.spelling, "
+      "  qual_name        = COALESCE(excluded.qual_name, symbol.qual_name), "
+      "  display_name     = COALESCE(excluded.display_name, symbol.display_name), "
+      "  kind             = excluded.kind, "
+      "  type_info        = COALESCE(excluded.type_info, symbol.type_info), "
+      "  file_id          = CASE WHEN excluded.is_definition >= "
+      "symbol.is_definition "
+      "                          THEN excluded.file_id ELSE symbol.file_id END, "
+      "  line             = CASE WHEN excluded.is_definition >= "
+      "symbol.is_definition "
+      "                          THEN excluded.line ELSE symbol.line END, "
+      "  col              = CASE WHEN excluded.is_definition >= "
+      "symbol.is_definition "
+      "                          THEN excluded.col ELSE symbol.col END, "
+      "  end_line         = CASE WHEN excluded.is_definition >= "
+      "symbol.is_definition "
+      "                          THEN excluded.end_line ELSE symbol.end_line END, "
+      "  end_col          = CASE WHEN excluded.is_definition >= "
+      "symbol.is_definition "
+      "                          THEN excluded.end_col ELSE symbol.end_col END, "
+      "  decl_file_id     = COALESCE(excluded.decl_file_id, symbol.decl_file_id), "
+      "  decl_line        = COALESCE(excluded.decl_line, symbol.decl_line), "
+      "  decl_col         = COALESCE(excluded.decl_col, symbol.decl_col), "
+      "  is_definition    = MAX(excluded.is_definition, symbol.is_definition), "
+      "  is_pure          = MAX(excluded.is_pure, symbol.is_pure), "
+      "  is_static        = MAX(excluded.is_static, symbol.is_static), "
+      // A real decl row states its TemplateSpecializationKind authoritatively,
+      // so reindexing an instantiation-turned-explicit-specialization (same
+      // USR) must DOWNGRADE the flag. Stub promotion stays monotonic in
+      // mint_symbol_id, which keeps its MAX.
+      "  is_instantiation = excluded.is_instantiation, "
+      "  linkage          = COALESCE(excluded.linkage, symbol.linkage), "
+      "  access           = COALESCE(excluded.access, symbol.access), "
+      "  parent_usr       = COALESCE(excluded.parent_usr, symbol.parent_usr), "
+      "  resolved         = MAX(excluded.resolved, symbol.resolved) "
+      "RETURNING id");
+  st.bind(1, std::string_view(sym.usr));
+  st.bind(2, std::string_view(sym.spelling));
+  bind_opt(st, 3, sym.qual_name);
+  bind_opt(st, 4, sym.display_name);
+  st.bind(5, symbol_kind_id(sym.kind)); // stored as CXCursorKind int (v16)
+  bind_opt(st, 6, sym.type_info);
+  bind_opt(st, 7, sym.file_id);
+  bind_opt(st, 8, sym.line);
+  bind_opt(st, 9, sym.col);
+  bind_opt(st, 10, sym.decl_file_id);
+  bind_opt(st, 11, sym.decl_line);
+  bind_opt(st, 12, sym.decl_col);
+  st.bind(13, static_cast<int64_t>(sym.is_definition ? 1 : 0));
+  st.bind(14, static_cast<int64_t>(sym.is_pure ? 1 : 0));
+  st.bind(15, static_cast<int64_t>(sym.is_static ? 1 : 0));
+  st.bind(16, static_cast<int64_t>(sym.is_instantiation ? 1 : 0));
+  bind_opt(st, 17, sym.linkage);
+  bind_opt(st, 18, sym.access);
+  bind_opt(st, 19, sym.parent_usr);
+  st.bind(20, static_cast<int64_t>(sym.resolved ? 1 : 0));
+  // decl_path is INSERTed but intentionally NOT in the ON CONFLICT SET: a real
+  // add_symbol never clobbers a stub's recorded external path (mirrors Python).
+  bind_opt(st, 21, sym.decl_path);
+  // end_line/end_col move in lockstep with line/col (same CASE in the SET above).
+  bind_opt(st, 22, sym.end_line);
+  bind_opt(st, 23, sym.end_col);
+  if (!st.step()) {
+    throw StorageError("symbol upsert returned no id");
+  }
+  const int64_t sid = st.col_int64(0);
+  st.step_done();
+  // v26: record THIS cursor's own site (mirrors Python add_symbol). The symbol
+  // row keeps only the winning definition + one declaration; decl_site keeps
+  // every physical site so references() can list all reopenings of an open
+  // symbol (a namespace above all). Guard on a real (file, line): locationless
+  // stubs would otherwise fan out on the NULL-file UNIQUE (NULL != NULL). INSERT
+  // OR IGNORE is idempotent -- reindexing the same TU re-adds nothing.
+  if (sym.file_id.has_value() && sym.line.has_value()) {
+    auto ds = db_.prepare(
+        "INSERT OR IGNORE INTO decl_site "
+        "(symbol_id, file_id, line, col, end_line, end_col, is_definition) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)");
+    ds.bind(1, sid);
+    bind_opt(ds, 2, sym.file_id);
+    bind_opt(ds, 3, sym.line);
+    bind_opt(ds, 4, sym.col);
+    bind_opt(ds, 5, sym.end_line);
+    bind_opt(ds, 6, sym.end_col);
+    ds.bind(7, static_cast<int64_t>(sym.is_definition ? 1 : 0));
+    ds.step_done();
+  }
+  return sid;
+}
+
+bool Storage::update_symbol(
+    const std::string &usr,
+    const std::vector<std::pair<std::string, SqlValue>> &values) {
+  std::vector<std::string> bad;
+  for (const auto &kv : values) {
+    if (std::ranges::find(kSymbolInsertCols, kv.first) ==
+        kSymbolInsertCols.end()) {
+      bad.push_back(kv.first);
+    }
+  }
+  if (!bad.empty()) {
+    // Dedupe then sort, then format as Python's list repr: ['col1', 'col2']
+    // (Python: raises f"unknown symbol column(s): {sorted(set(bad))}")
+    std::ranges::sort(bad);
+    bad.erase(std::ranges::unique(bad).begin(), bad.end());
+    std::string repr = "[";
+    for (std::size_t i = 0; i < bad.size(); ++i) {
+      if (i > 0) {
+        repr += ", ";
+      }
+      repr += '\'' + bad[i] + '\'';
+    }
+    repr += ']';
+    throw StorageError("unknown symbol column(s): " + repr);
+  }
+  for (const auto &kv : values) {
+    if (kv.first == "kind") {
+      const auto *k = std::get_if<std::string>(&kv.second);
+      if (k == nullptr || !is_symbol_kind(*k)) {
+        throw StorageError("unknown symbol kind in update_symbol");
+      }
+    }
+  }
+  if (values.empty()) {
+    return lookup_symbol(usr).has_value();
+  }
+  std::vector<std::string> sets;
+  sets.reserve(values.size());
+  for (const auto &kv : values) {
+    sets.push_back(kv.first + " = ?");
+  }
+  auto st = db_.prepare("UPDATE symbol SET " + join_strings(sets, ", ") +
+                        " WHERE usr = ?");
+  int idx = 1;
+  for (const auto &kv : values) {
+    st.bind(idx++, kv.second);
+  }
+  st.bind(idx, std::string_view(usr));
+  st.step_done();
+  return db_.changes() > 0;
+}
+
+std::optional<Symbol> Storage::lookup_symbol(const std::string &usr) {
+  auto st = db_.prepare(std::string("SELECT ") + kSymbolCols +
+                        " FROM symbol WHERE usr = ?");
+  st.bind(1, std::string_view(usr));
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return symbol_from(st);
+}
+
+std::optional<Symbol> Storage::lookup_symbol_by_id(int64_t symbol_id) {
+  auto st = db_.prepare(std::string("SELECT ") + kSymbolCols +
+                        " FROM symbol WHERE id = ?");
+  st.bind(1, symbol_id);
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return symbol_from(st);
+}
+
+std::vector<Symbol>
+Storage::lookup_symbols_by_name(const std::string &spelling,
+                                const std::optional<std::string> &kind) {
+  std::string sql =
+      std::string("SELECT ") + kSymbolCols + " FROM symbol WHERE spelling = ?";
+  std::vector<SqlValue> args;
+  args.emplace_back(spelling);
+  if (kind) {
+    sql += " AND kind = ?";
+    args.emplace_back(symbol_kind_id(*kind)); // stored as int (v16)
+  }
+  sql += " ORDER BY usr";
+  auto st = db_.prepare(sql);
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    st.bind(static_cast<int>(i + 1), args[i]);
+  }
+  std::vector<Symbol> out;
+  while (st.step()) {
+    out.push_back(symbol_from(st));
+  }
+  return out;
+}
+
+std::vector<Symbol>
+Storage::lookup_symbols_by_qual_name(const std::string &qual_name,
+                                     const std::optional<std::string> &kind) {
+  std::string sql =
+      std::string("SELECT ") + kSymbolCols + " FROM symbol WHERE qual_name = ?";
+  std::vector<SqlValue> args;
+  args.emplace_back(qual_name);
+  if (kind) {
+    sql += " AND kind = ?";
+    args.emplace_back(symbol_kind_id(*kind)); // stored as int (v16)
+  }
+  sql += " ORDER BY usr";
+  auto st = db_.prepare(sql);
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    st.bind(static_cast<int>(i + 1), args[i]);
+  }
+  std::vector<Symbol> out;
+  while (st.step()) {
+    out.push_back(symbol_from(st));
+  }
+  return out;
+}
+
+std::vector<Symbol>
+Storage::search_symbols(const std::string &pattern,
+                        const std::optional<std::string> &kind) {
+  // '%seg%seg%' on qual_name: each '::'-separated segment must appear, in
+  // order, as a substring. Only % and _ are escaped (storage.py parity).
+  std::vector<std::string> segs;
+  std::size_t start = 0;
+  while (start <= pattern.size()) {
+    const std::size_t pos = pattern.find("::", start);
+    const std::string seg = pattern.substr(
+        start, pos == std::string::npos ? std::string::npos : pos - start);
+    if (!seg.empty()) {
+      std::string esc;
+      for (const char c : seg) {
+        if (c == '%') {
+          esc += "\\%";
+        } else if (c == '_') {
+          esc += "\\_";
+        } else {
+          esc += c;
+        }
+      }
+      segs.push_back(esc);
+    }
+    if (pos == std::string::npos) {
+      break;
+    }
+    start = pos + 2;
+  }
+  const std::string like = "%" + join_strings(segs, "%") + "%";
+  std::string sql = std::string("SELECT ") + kSymbolCols +
+                    " FROM symbol WHERE qual_name LIKE ? ESCAPE '\\'";
+  std::vector<SqlValue> args;
+  args.emplace_back(like);
+  if (kind) {
+    sql += " AND kind = ?";
+    args.emplace_back(symbol_kind_id(*kind)); // stored as int (v16)
+  }
+  sql += " ORDER BY LENGTH(qual_name), qual_name";
+  auto st = db_.prepare(sql);
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    st.bind(static_cast<int>(i + 1), args[i]);
+  }
+  std::vector<Symbol> out;
+  while (st.step()) {
+    out.push_back(symbol_from(st));
+  }
+  return out;
+}
+
+std::vector<Symbol>
+Storage::list_symbols(const std::optional<int64_t> &component_id,
+                      const std::optional<std::string> &dir_path,
+                      const std::optional<int64_t> &file_id,
+                      const std::optional<std::string> &name,
+                      const std::optional<std::string> &kind) {
+  std::string sql = std::string("SELECT ") + kSymbolColsS + " FROM symbol s";
+  std::vector<std::string> where;
+  std::vector<SqlValue> args;
+  if (component_id || dir_path) {
+    // Location scope matches if EITHER the definition site or the declaration
+    // site falls inside (storage.py:701-714).
+    std::vector<std::string> scope;
+    std::vector<SqlValue> scope_args;
+    if (component_id) {
+      scope.emplace_back("d.component_id = ?");
+      scope_args.emplace_back(*component_id);
+    }
+    if (dir_path) {
+      scope.push_back(dir_scope_sql(*dir_path, scope_args));
+    }
+    where.push_back("EXISTS (SELECT 1 FROM file f "
+                    "JOIN directory d ON d.id = f.directory_id "
+                    "WHERE f.id IN (s.file_id, s.decl_file_id) AND " +
+                    join_strings(scope, " AND ") + ")");
+    for (auto &a : scope_args) {
+      args.push_back(std::move(a));
+    }
+  }
+  if (file_id) {
+    where.emplace_back("(s.file_id = ? OR s.decl_file_id = ?)");
+    args.emplace_back(*file_id);
+    args.emplace_back(*file_id);
+  }
+  if (name && !name->empty()) {
+    where.emplace_back("COALESCE(s.qual_name, s.spelling) LIKE ? ESCAPE '\\'");
+    args.emplace_back(fuzzy_like(*name));
+  }
+  if (kind) {
+    where.emplace_back("s.kind = ?");
+    args.emplace_back(symbol_kind_id(*kind)); // stored as int (v16)
+  }
+  if (!where.empty()) {
+    sql += " WHERE " + join_strings(where, " AND ");
+  }
+  sql += " ORDER BY LENGTH(COALESCE(s.qual_name, s.spelling)),"
+         " COALESCE(s.qual_name, s.spelling)";
+  auto st = db_.prepare(sql);
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    st.bind(static_cast<int>(i + 1), args[i]);
+  }
+  std::vector<Symbol> out;
+  while (st.step()) {
+    out.push_back(symbol_from(st));
+  }
+  return out;
+}
+
+std::vector<Symbol> Storage::symbols_in_file(int64_t file_id) {
+  auto st = db_.prepare(std::string("SELECT ") + kSymbolCols +
+                        " FROM symbol WHERE file_id = ? ORDER BY line, col");
+  st.bind(1, file_id);
+  std::vector<Symbol> out;
+  while (st.step()) {
+    out.push_back(symbol_from(st));
+  }
+  return out;
+}
+
+std::vector<Symbol> Storage::unresolved_symbols() {
+  auto st = db_.prepare(std::string("SELECT ") + kSymbolCols +
+                        " FROM symbol WHERE resolved = 0 ORDER BY usr");
+  std::vector<Symbol> out;
+  while (st.step()) {
+    out.push_back(symbol_from(st));
+  }
+  return out;
+}
+
+// -- graph layer (v7)
+// -----------------------------------------------------------------
+
+int64_t Storage::mint_symbol_id(const std::string &usr,
+                                const std::string &spelling,
+                                const std::string &qual_name,
+                                const std::string &display_name,
+                                const std::string &kind,
+                                const std::optional<int64_t> &decl_file_id,
+                                const std::optional<int64_t> &decl_line,
+                                const std::optional<int64_t> &decl_col,
+                                const std::optional<std::string> &decl_path,
+                                bool is_instantiation, bool is_named_instance) {
+  // The follow-up SELECT returns the stable id whether the row was minted or
+  // already present. 'function' is the fallback kind when the cursor kind is
+  // unknown; the real def's add_symbol upsert overwrites kind/location/resolved
+  // later. On a repeat mint we only UPGRADE an unnamed stub (empty spelling) --
+  // name and kind together -- never clobber a real symbol's; the decl location
+  // (registered id or raw path) is filled in only when still absent (COALESCE).
+  // decl_path carries the location of a target in an UNREGISTERED (system/
+  // stdlib) file so the stub stays located instead of @<no-location>.
+  // is_instantiation marks implicit template-instantiation nodes (v13); MAX()
+  // ensures a stub->instantiation promotion always upgrades but never downgrades.
+  auto ins = db_.prepare(
+      "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
+      "                    decl_file_id, decl_line, decl_col, decl_path, "
+      "                    is_instantiation, is_named_instance, resolved) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
+      "ON CONFLICT(usr) DO UPDATE SET "
+      "  kind             = CASE WHEN symbol.spelling = '' "
+      "                          THEN excluded.kind ELSE symbol.kind END, "
+      "  spelling         = CASE WHEN symbol.spelling = '' "
+      "                          THEN excluded.spelling ELSE symbol.spelling END, "
+      "  qual_name        = COALESCE(symbol.qual_name, excluded.qual_name), "
+      "  display_name     = COALESCE(symbol.display_name, excluded.display_name), "
+      "  decl_file_id     = COALESCE(symbol.decl_file_id, excluded.decl_file_id), "
+      "  decl_line        = COALESCE(symbol.decl_line, excluded.decl_line), "
+      "  decl_col         = COALESCE(symbol.decl_col, excluded.decl_col), "
+      "  decl_path        = COALESCE(symbol.decl_path, excluded.decl_path), "
+      "  is_instantiation = MAX(symbol.is_instantiation, excluded.is_instantiation), "
+      "  is_named_instance = MAX(symbol.is_named_instance, excluded.is_named_instance)");
+  ins.bind(1, std::string_view(usr));
+  ins.bind(2, std::string_view(spelling));
+  if (qual_name.empty()) {
+    ins.bind_null(3);
+  } else {
+    ins.bind(3, std::string_view(qual_name));
+  }
+  if (display_name.empty()) {
+    ins.bind_null(4);
+  } else {
+    ins.bind(4, std::string_view(display_name));
+  }
+  ins.bind(5, symbol_kind_id(kind)); // kind stored as CXCursorKind int (v16)
+  bind_opt(ins, 6, decl_file_id);
+  bind_opt(ins, 7, decl_line);
+  bind_opt(ins, 8, decl_col);
+  bind_opt(ins, 9, decl_path);
+  ins.bind(10, static_cast<int64_t>(is_instantiation ? 1 : 0));
+  ins.bind(11, static_cast<int64_t>(is_named_instance ? 1 : 0));
+  ins.step_done();
+  auto sel = db_.prepare("SELECT id FROM symbol WHERE usr = ?");
+  sel.bind(1, std::string_view(usr));
+  if (!sel.step()) {
+    throw StorageError("mint_symbol_id: SELECT returned no row for usr=" + usr);
+  }
+  return sel.col_int64(0);
+}
+
+int64_t Storage::add_edge(const Edge &e) {
+  auto st = db_.prepare(
+      "INSERT INTO edge (src_id, dst_id, kind, count, base_access, is_virtual, "
+      "                  vtable_slot) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?) "
+      "ON CONFLICT(src_id, dst_id, kind) DO UPDATE SET "
+      "  count       = edge.count + excluded.count, "
+      "  base_access = COALESCE(excluded.base_access, edge.base_access), "
+      "  is_virtual  = COALESCE(excluded.is_virtual,  edge.is_virtual), "
+      "  vtable_slot = COALESCE(excluded.vtable_slot, edge.vtable_slot) "
+      "RETURNING id");
+  st.bind(1, e.src_id);
+  st.bind(2, e.dst_id);
+  st.bind(3, e.kind);
+  st.bind(4, e.count);
+  bind_opt(st, 5, e.base_access);
+  bind_opt(st, 6, e.is_virtual);
+  bind_opt(st, 7, e.vtable_slot);
+  if (!st.step()) {
+    throw StorageError("add_edge: upsert returned no id");
+  }
+  const int64_t eid = st.col_int64(0);
+  st.step_done();
+  return eid;
+}
+
+int64_t Storage::ensure_edge(const Edge &e) {
+  // Structural upsert: presence matters, count does not accumulate. The
+  // DO UPDATE keeps count as-is (attributes still COALESCE-fill) so the
+  // statement can RETURN the stable id on both paths.
+  auto st = db_.prepare(
+      "INSERT INTO edge (src_id, dst_id, kind, count, base_access, is_virtual, "
+      "                  vtable_slot) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?) "
+      "ON CONFLICT(src_id, dst_id, kind) DO UPDATE SET "
+      "  count       = edge.count, "
+      "  base_access = COALESCE(excluded.base_access, edge.base_access), "
+      "  is_virtual  = COALESCE(excluded.is_virtual,  edge.is_virtual), "
+      "  vtable_slot = COALESCE(excluded.vtable_slot, edge.vtable_slot) "
+      "RETURNING id");
+  st.bind(1, e.src_id);
+  st.bind(2, e.dst_id);
+  st.bind(3, e.kind);
+  st.bind(4, e.count);
+  bind_opt(st, 5, e.base_access);
+  bind_opt(st, 6, e.is_virtual);
+  bind_opt(st, 7, e.vtable_slot);
+  if (!st.step()) {
+    throw StorageError("ensure_edge: upsert returned no id");
+  }
+  const int64_t eid = st.col_int64(0);
+  st.step_done();
+  return eid;
+}
+
+void Storage::add_edge_site(const EdgeSite &s) {
+  auto st = db_.prepare(
+      "INSERT OR IGNORE INTO edge_site "
+      "(edge_id, file_id, line, col, conditional, args_sig, "
+      " recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
+      " recv_type_is_value) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  st.bind(1, s.edge_id);
+  bind_opt(st, 2, s.file_id);
+  bind_opt(st, 3, s.line);
+  bind_opt(st, 4, s.col);
+  st.bind(5, s.conditional);
+  bind_opt(st, 6, s.args_sig);
+  bind_opt(st, 7, s.recv_src_kind);
+  bind_opt(st, 8, s.recv_type_usr);
+  bind_opt(st, 9, s.recv_decl_usr);
+  bind_opt(st, 10, s.recv_param_pos);
+  bind_opt(st, 11, s.recv_type_is_value);
+  st.step_done();
+}
+
+void Storage::add_call_arg(const CallArg &a) {
+  auto st = db_.prepare(
+      "INSERT OR IGNORE INTO call_arg "
+      "(edge_id, file_id, line, col, position, src_kind, "
+      " type_usr, decl_usr, callee_usr, type_is_value) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  st.bind(1, a.edge_id);
+  st.bind(2, a.file_id);
+  st.bind(3, a.line);
+  st.bind(4, a.col);
+  st.bind(5, a.position);
+  st.bind(6, std::string_view(a.src_kind));
+  bind_opt(st, 7, a.type_usr);
+  bind_opt(st, 8, a.decl_usr);
+  bind_opt(st, 9, a.callee_usr);
+  bind_opt(st, 10, a.type_is_value);
+  st.step_done();
+}
+
+void Storage::add_template_param(const TemplateParam &p) {
+  auto st = db_.prepare(
+      "INSERT OR REPLACE INTO template_param "
+      "(owner_id, position, param_kind, name, default_txt) "
+      "VALUES (?, ?, ?, ?, ?)");
+  st.bind(1, p.owner_id);
+  st.bind(2, p.position);
+  st.bind(3, p.param_kind);
+  bind_opt(st, 4, p.name);
+  bind_opt(st, 5, p.default_txt);
+  st.step_done();
+}
+
+void Storage::add_template_arg(const TemplateArg &a) {
+  auto st = db_.prepare(
+      "INSERT OR REPLACE INTO template_arg "
+      "(owner_id, position, arg_kind, ref_id, literal) "
+      "VALUES (?, ?, ?, ?, ?)");
+  st.bind(1, a.owner_id);
+  st.bind(2, a.position);
+  st.bind(3, a.arg_kind);
+  bind_opt(st, 4, a.ref_id);
+  bind_opt(st, 5, a.literal);
+  st.step_done();
+}
+
+// -- v30 signature/type tier ---------------------------------------------------
+
+} // namespace cidx

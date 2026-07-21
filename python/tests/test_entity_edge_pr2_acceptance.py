@@ -50,7 +50,6 @@ _CLI_PY = os.path.join(_WORKTREE, "python", "indexer", "cli.py")
 _QUERY_PY = os.path.join(_WORKTREE, "python", "indexer", "query.py")
 _ARGS_HPP = os.path.join(_WORKTREE, "src", "cli", "args.hpp")
 _STORAGE_HPP = os.path.join(_WORKTREE, "src", "storage", "storage.hpp")
-_STORAGE_CPP = os.path.join(_WORKTREE, "src", "storage", "storage.cpp")
 _PIPELINE_HPP = os.path.join(_WORKTREE, "manifests", "graphlab", "pipeline.hpp")
 _PIPELINE_CPP = os.path.join(_WORKTREE, "manifests", "graphlab", "pipeline.cpp")
 _ENTITY_ROLLUP_PY = os.path.join(_WORKTREE, "python", "indexer", "entity_rollup.py")
@@ -59,6 +58,18 @@ _ENTITY_ROLLUP_PY = os.path.join(_WORKTREE, "python", "indexer", "entity_rollup.
 def _read(path: str) -> str:
     with open(path, encoding="utf-8") as f:
         return f.read()
+
+
+def _read_storage_cpp() -> str:
+    """Storage's implementation, concatenated across its translation units.
+
+    storage.cpp was split into storage_*.cpp (schema, migrations, symbols,
+    entity roll-up, ...); the class interface is unchanged, so a source probe
+    for a Storage member has to look at the whole set, not one file.
+    """
+    root = os.path.join(_WORKTREE, "src", "storage")
+    names = sorted(n for n in os.listdir(root) if n.startswith("storage") and n.endswith(".cpp"))
+    return "\n".join(_read(os.path.join(root, n)) for n in names)
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +365,7 @@ def test_resolve_pass_calls_materialize_entity_edges():
 
 def test_cpp_resolve_pass_calls_materialize_entity_edges():
     """C++ Storage::resolve_pass() must call materialize_entity_edges() (P2-T8 hook)."""
-    cpp_src = _read(_STORAGE_CPP)
+    cpp_src = _read_storage_cpp()
     assert "materialize_entity_edges" in cpp_src, (
         "materialize_entity_edges not called anywhere in storage.cpp. "
         "P2-T8: wire materialize_entity_edges() into C++ Storage::resolve_pass()."
