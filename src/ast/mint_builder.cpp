@@ -16,8 +16,9 @@ MintBuilder::MintBuilder(const clang::ASTContext &context, EdgeSink &sink)
 std::optional<MintRequest>
 MintBuilder::build(const clang::NamedDecl *decl) const {
   std::string usr = usr_for_decl(decl);
-  if (usr.empty())
+  if (usr.empty()) {
     return std::nullopt;
+  }
 
   MintRequest req;
   req.usr = std::move(usr);
@@ -33,10 +34,11 @@ MintBuilder::build(const clang::NamedDecl *decl) const {
   if (!loc.file.empty()) {
     req.decl_line = loc.line;
     req.decl_col = loc.col;
-    if (std::optional<int64_t> fid = sink_.file_id_for_path(loc.file))
+    if (std::optional<int64_t> fid = sink_.file_id_for_path(loc.file)) {
       req.decl_file_id = fid;
-    else
+    } else {
       req.decl_path = loc.file;
+    }
   }
   return req;
 }

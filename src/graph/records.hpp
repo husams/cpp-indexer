@@ -27,8 +27,7 @@
 #include "cli/json_out.hpp"
 #include "util/pathutil.hpp"
 
-namespace cidx {
-namespace graph {
+namespace cidx::graph {
 
 // ---- Sym ------------------------------------------------------------------
 
@@ -57,10 +56,10 @@ struct Sym {
                          // per backend. Deliberately NOT in to_dict() (parity).
 
   // Python Sym.is_redefined property (query.py)
-  bool is_redefined() const { return multi_def > 1; }
+  [[nodiscard]] bool is_redefined() const { return multi_def > 1; }
 
   // Python Sym.loc property (query.py:135-140)
-  std::string loc() const {
+  [[nodiscard]] std::string loc() const {
     if (!file) {
       return "<no-location>";
     }
@@ -73,7 +72,7 @@ struct Sym {
 
   // Python Sym.span property: file:line-end_line, or nullopt when no end is
   // known -- the line range that slices the whole entity.
-  std::optional<std::string> span() const {
+  [[nodiscard]] std::optional<std::string> span() const {
     if (!file || !line || *line == 0 || !end_line || *end_line == 0) {
       return std::nullopt;
     }
@@ -82,54 +81,54 @@ struct Sym {
   }
 
   // Python Sym.is_stub property (query.py:143-153)
-  bool is_stub() const {
+  [[nodiscard]] bool is_stub() const {
     return !resolved && (!file.has_value() || external);
   }
 
   // Python Sym.to_dict() -- key order EXACT (query.py:155-172, R7)
-  json_out::Value to_dict() const {
+  [[nodiscard]] json_out::Value to_dict() const {
     using namespace json_out;
     Object o;
-    o.push_back({"id", Value::of(id)});
-    o.push_back({"usr", Value::of(usr)});
-    o.push_back({"spelling", Value::of(spelling)});
-    o.push_back({"qual_name", Value::of(name)}); // COALESCE result
-    o.push_back({"kind", Value::of(kind)});
+    o.emplace_back("id", Value::of(id));
+    o.emplace_back("usr", Value::of(usr));
+    o.emplace_back("spelling", Value::of(spelling));
+    o.emplace_back("qual_name", Value::of(name)); // COALESCE result
+    o.emplace_back("kind", Value::of(kind));
     if (type_info) {
-      o.push_back({"type_info", Value::of(*type_info)});
+      o.emplace_back("type_info", Value::of(*type_info));
     } else {
-      o.push_back({"type_info", Value::null()});
+      o.emplace_back("type_info", Value::null());
     }
     if (file) {
-      o.push_back({"file", Value::of(*file)});
+      o.emplace_back("file", Value::of(*file));
     } else {
-      o.push_back({"file", Value::null()});
+      o.emplace_back("file", Value::null());
     }
     if (line) {
-      o.push_back({"line", Value::of(*line)});
+      o.emplace_back("line", Value::of(*line));
     } else {
-      o.push_back({"line", Value::null()});
+      o.emplace_back("line", Value::null());
     }
     if (col) {
-      o.push_back({"col", Value::of(*col)});
+      o.emplace_back("col", Value::of(*col));
     } else {
-      o.push_back({"col", Value::null()});
+      o.emplace_back("col", Value::null());
     }
     if (end_line) {
-      o.push_back({"end_line", Value::of(*end_line)});
+      o.emplace_back("end_line", Value::of(*end_line));
     } else {
-      o.push_back({"end_line", Value::null()});
+      o.emplace_back("end_line", Value::null());
     }
     if (end_col) {
-      o.push_back({"end_col", Value::of(*end_col)});
+      o.emplace_back("end_col", Value::of(*end_col));
     } else {
-      o.push_back({"end_col", Value::null()});
+      o.emplace_back("end_col", Value::null());
     }
-    o.push_back({"is_definition", Value::of(is_definition)});
-    o.push_back({"is_pure", Value::of(is_pure)});
-    o.push_back({"is_static", Value::of(is_static)});
-    o.push_back({"is_instantiation", Value::of(is_instantiation)});
-    o.push_back({"is_stub", Value::of(is_stub())});
+    o.emplace_back("is_definition", Value::of(is_definition));
+    o.emplace_back("is_pure", Value::of(is_pure));
+    o.emplace_back("is_static", Value::of(is_static));
+    o.emplace_back("is_instantiation", Value::of(is_instantiation));
+    o.emplace_back("is_stub", Value::of(is_stub()));
     return Value::obj(std::move(o));
   }
 };
@@ -144,7 +143,7 @@ struct Definition {
   std::optional<int64_t> line, col, end_line, end_col;
   std::optional<std::string> init_text; // v28: (static member) var initializer
 
-  std::string loc() const {
+  [[nodiscard]] std::string loc() const {
     if (!file) {
       return "<no-location>";
     }
@@ -156,46 +155,46 @@ struct Definition {
   }
 
   // query.py:Definition.to_dict() -- key order EXACT.
-  json_out::Value to_dict() const {
+  [[nodiscard]] json_out::Value to_dict() const {
     using namespace json_out;
     Object o;
-    o.push_back({"usr", Value::of(sym.usr)});
-    o.push_back({"name", Value::of(sym.name)});
-    o.push_back({"kind", Value::of(sym.kind)});
+    o.emplace_back("usr", Value::of(sym.usr));
+    o.emplace_back("name", Value::of(sym.name));
+    o.emplace_back("kind", Value::of(sym.kind));
     if (component) {
-      o.push_back({"component", Value::of(*component)});
+      o.emplace_back("component", Value::of(*component));
     } else {
-      o.push_back({"component", Value::null()});
+      o.emplace_back("component", Value::null());
     }
     if (file) {
-      o.push_back({"file", Value::of(pathutil::basename(*file))});
+      o.emplace_back("file", Value::of(pathutil::basename(*file)));
     } else {
-      o.push_back({"file", Value::null()});
+      o.emplace_back("file", Value::null());
     }
     if (line) {
-      o.push_back({"line", Value::of(*line)});
+      o.emplace_back("line", Value::of(*line));
     } else {
-      o.push_back({"line", Value::null()});
+      o.emplace_back("line", Value::null());
     }
     if (col) {
-      o.push_back({"col", Value::of(*col)});
+      o.emplace_back("col", Value::of(*col));
     } else {
-      o.push_back({"col", Value::null()});
+      o.emplace_back("col", Value::null());
     }
     if (end_line) {
-      o.push_back({"end_line", Value::of(*end_line)});
+      o.emplace_back("end_line", Value::of(*end_line));
     } else {
-      o.push_back({"end_line", Value::null()});
+      o.emplace_back("end_line", Value::null());
     }
     if (end_col) {
-      o.push_back({"end_col", Value::of(*end_col)});
+      o.emplace_back("end_col", Value::of(*end_col));
     } else {
-      o.push_back({"end_col", Value::null()});
+      o.emplace_back("end_col", Value::null());
     }
     if (init_text) {
-      o.push_back({"init_text", Value::of(*init_text)});
+      o.emplace_back("init_text", Value::of(*init_text));
     } else {
-      o.push_back({"init_text", Value::null()});
+      o.emplace_back("init_text", Value::null());
     }
     return Value::obj(std::move(o));
   }
@@ -217,7 +216,7 @@ struct Site {
   std::optional<int64_t> recv_type_is_value;
 
   // Python Site.loc property (query.py:241-245)
-  std::string loc() const {
+  [[nodiscard]] std::string loc() const {
     if (!file) {
       return "<no-location>";
     }
@@ -230,29 +229,29 @@ struct Site {
   }
 
   // Python Site.to_dict() (query.py:247-254)
-  json_out::Value to_dict() const {
+  [[nodiscard]] json_out::Value to_dict() const {
     using namespace json_out;
     Object o;
     if (file) {
-      o.push_back({"file", Value::of(*file)});
+      o.emplace_back("file", Value::of(*file));
     } else {
-      o.push_back({"file", Value::null()});
+      o.emplace_back("file", Value::null());
     }
     if (line) {
-      o.push_back({"line", Value::of(*line)});
+      o.emplace_back("line", Value::of(*line));
     } else {
-      o.push_back({"line", Value::null()});
+      o.emplace_back("line", Value::null());
     }
     if (col) {
-      o.push_back({"col", Value::of(*col)});
+      o.emplace_back("col", Value::of(*col));
     } else {
-      o.push_back({"col", Value::null()});
+      o.emplace_back("col", Value::null());
     }
-    o.push_back({"conditional", Value::of(conditional)});
+    o.emplace_back("conditional", Value::of(conditional));
     if (args_sig) {
-      o.push_back({"args_sig", Value::of(*args_sig)});
+      o.emplace_back("args_sig", Value::of(*args_sig));
     } else {
-      o.push_back({"args_sig", Value::null()});
+      o.emplace_back("args_sig", Value::null());
     }
     return Value::obj(std::move(o));
   }
@@ -273,26 +272,28 @@ struct Edge {
 
   // Python Edge.to_dict(sites) (query.py:196-216, R7)
   // `sites_override` is passed for --json re-query (R8).
-  json_out::Value to_dict(const std::vector<Site> &sites_override) const {
+  [[nodiscard]] json_out::Value
+  to_dict(const std::vector<Site> &sites_override) const {
     using namespace json_out;
     // Start with the peer's dict then append edge fields.
     Value pv = peer.to_dict();
     // pv is already an Object; extend it.
-    pv.o.push_back({"edge_kind", Value::of(kind)});
-    pv.o.push_back({"count", Value::of(count)});
+    pv.o.emplace_back("edge_kind", Value::of(kind));
+    pv.o.emplace_back("count", Value::of(count));
     // base_access / is_virtual: only when non-null (R7 -- calls/uses MUST be absent)
     if (base_access) {
-      pv.o.push_back({"base_access", Value::of(*base_access)});
+      pv.o.emplace_back("base_access", Value::of(*base_access));
     }
     if (is_virtual) {
       // is_virtual serialized as bool (R7)
-      pv.o.push_back({"is_virtual", Value::of(static_cast<bool>(*is_virtual))});
+      pv.o.emplace_back("is_virtual",
+                        Value::of(static_cast<bool>(*is_virtual)));
     }
     Array sarr;
     for (const Site &s : sites_override) {
       sarr.push_back(s.to_dict());
     }
-    pv.o.push_back({"sites", Value::arr(std::move(sarr))});
+    pv.o.emplace_back("sites", Value::arr(std::move(sarr)));
     return pv;
   }
 };
@@ -314,7 +315,7 @@ struct Traversal {
   // stable_sort by (depth, name) where name = sym.name (COALESCE).
   // The initial vector is built in BFS insertion order so that stable_sort
   // preserves discovery order for same (depth, name) ties.
-  std::vector<Sym> nodes() const {
+  [[nodiscard]] std::vector<Sym> nodes() const {
     std::vector<Sym> out;
     out.reserve(insertion_order_.size());
     // Build in insertion order to get a deterministic stable_sort input.
@@ -324,9 +325,9 @@ struct Traversal {
         out.push_back(it->second);
       }
     }
-    std::stable_sort(out.begin(), out.end(), [this](const Sym &a, const Sym &b) {
-      const int da = depth_by_id.count(a.id) ? depth_by_id.at(a.id) : 0;
-      const int db = depth_by_id.count(b.id) ? depth_by_id.at(b.id) : 0;
+    std::ranges::stable_sort(out, [this](const Sym &a, const Sym &b) {
+      const int da = depth_by_id.contains(a.id) ? depth_by_id.at(a.id) : 0;
+      const int db = depth_by_id.contains(b.id) ? depth_by_id.at(b.id) : 0;
       if (da != db) {
         return da < db;
       }
@@ -336,5 +337,4 @@ struct Traversal {
   }
 };
 
-} // namespace graph
-} // namespace cidx
+} // namespace cidx::graph

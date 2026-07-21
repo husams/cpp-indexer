@@ -32,7 +32,9 @@ public:
 
   // Configure the file sink; the file is NOT created until the first record.
   void set_file(const std::string &path);
-  const std::string &file_path() const noexcept { return file_path_; }
+  [[nodiscard]] const std::string &file_path() const noexcept {
+    return file_path_;
+  }
 
   void log(LogLevel level, const std::string &name, const std::string &msg);
   void info(const std::string &name, const std::string &msg) {
@@ -46,7 +48,7 @@ public:
   }
 
   // Records at >= WARNING written to the FILE sink (stderr fallback excluded).
-  int warning_count() const noexcept { return warning_count_; }
+  [[nodiscard]] int warning_count() const noexcept { return warning_count_; }
 
 private:
   std::string file_path_;

@@ -4,9 +4,9 @@
 #include <chrono>
 #include <cstring>
 
+#include <csignal>
 #include <fcntl.h>
 #include <poll.h>
-#include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -103,8 +103,8 @@ RunResult run(const std::vector<std::string> &argv, double timeout_sec) {
       clock::now() + std::chrono::duration_cast<clock::duration>(
                          std::chrono::duration<double>(timeout_sec));
 
-  Sink sinks[2] = {{out_pipe[0], &res.out, true},
-                   {err_pipe[0], &res.err, true}};
+  Sink sinks[2] = {{.fd = out_pipe[0], .buf = &res.out, .open = true},
+                   {.fd = err_pipe[0], .buf = &res.err, .open = true}};
   char buf[4096];
   while (sinks[0].open || sinks[1].open) {
     const auto remaining =

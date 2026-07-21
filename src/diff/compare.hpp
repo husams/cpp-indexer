@@ -9,8 +9,7 @@
 #include "diff/syntax_ir.hpp"
 #include "diff/target.hpp"
 
-namespace cidx {
-namespace diff {
+namespace cidx::diff {
 
 // One matched (or one-sided) entity pair with its syntax edits and semantic
 // verdict. left/right point into the respective SideAnalysis (top-level
@@ -61,5 +60,4 @@ Comparison compare_sides(const SideAnalysis &left, const SideAnalysis &right,
                          const std::string &match_mode,
                          const ConfigDelta &delta, const std::string &scope);
 
-} // namespace diff
-} // namespace cidx
+} // namespace cidx::diff

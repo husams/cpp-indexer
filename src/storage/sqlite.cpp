@@ -11,8 +11,9 @@ namespace cidx {
 namespace {
 
 [[noreturn]] void throw_db_error(sqlite3 *db, const std::string &context) {
-  const char *msg = db ? sqlite3_errmsg(db) : "out of memory";
-  throw StorageError(context + ": " + (msg ? msg : "unknown SQLite error"));
+  const char *msg = (db != nullptr) ? sqlite3_errmsg(db) : "out of memory";
+  throw StorageError(context + ": " +
+                     ((msg != nullptr) ? msg : "unknown SQLite error"));
 }
 
 } // namespace
@@ -118,8 +119,7 @@ std::string SqliteStmt::col_text(int idx) const {
     return "";
   }
   const int len = sqlite3_column_bytes(stmt_, idx);
-  return std::string(reinterpret_cast<const char *>(text),
-                     static_cast<std::size_t>(len));
+  return {reinterpret_cast<const char *>(text), static_cast<std::size_t>(len)};
 }
 
 // -- SqliteDb ----------------------------------------------------------------
@@ -137,7 +137,7 @@ SqliteDb::SqliteDb(const std::string &path, bool read_only) {
                               : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE;
   const int rc = sqlite3_open_v2(path.c_str(), &db_, flags, nullptr);
   if (rc != SQLITE_OK) {
-    std::string msg = db_ ? sqlite3_errmsg(db_) : "out of memory";
+    std::string msg = (db_ != nullptr) ? sqlite3_errmsg(db_) : "out of memory";
     sqlite3_close(db_);
     db_ = nullptr;
     throw StorageError("cannot open database " + path + ": " + msg);
@@ -146,16 +146,14 @@ SqliteDb::SqliteDb(const std::string &path, bool read_only) {
 
 SqliteDb::~SqliteDb() { sqlite3_close(db_); }
 
-SqliteStmt SqliteDb::prepare(std::string_view sql) {
-  return SqliteStmt(db_, sql);
-}
+SqliteStmt SqliteDb::prepare(std::string_view sql) { return {db_, sql}; }
 
 void SqliteDb::exec(std::string_view sql_script) {
   char *err = nullptr;
   const int rc = sqlite3_exec(db_, std::string(sql_script).c_str(), nullptr,
                               nullptr, &err);
   if (rc != SQLITE_OK) {
-    std::string msg = err ? err : "unknown SQLite error";
+    std::string msg = (err != nullptr) ? err : "unknown SQLite error";
     sqlite3_free(err);
     throw StorageError("exec failed: " + msg);
   }

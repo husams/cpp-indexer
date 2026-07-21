@@ -20,14 +20,18 @@ namespace {
 // (getDescribedClassTemplate() is null on it): it is retained as a
 // first-class template symbol.
 bool is_template_pattern(const clang::NamedDecl *decl) {
-  if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(decl))
+  if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(decl)) {
     return fn->getDescribedFunctionTemplate() != nullptr;
-  if (const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(decl))
+  }
+  if (const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(decl)) {
     return rec->getDescribedClassTemplate() != nullptr;
-  if (const auto *var = llvm::dyn_cast<clang::VarDecl>(decl))
+  }
+  if (const auto *var = llvm::dyn_cast<clang::VarDecl>(decl)) {
     return var->getDescribedVarTemplate() != nullptr;
-  if (const auto *alias = llvm::dyn_cast<clang::TypeAliasDecl>(decl))
+  }
+  if (const auto *alias = llvm::dyn_cast<clang::TypeAliasDecl>(decl)) {
     return alias->getDescribedAliasTemplate() != nullptr;
+  }
   return false;
 }
 
@@ -67,32 +71,39 @@ bool SymbolVisitor::should_emit(const clang::NamedDecl *decl) const {
   // their file and the parity merger replays cidx's ordering.
   const clang::SourceLocation loc =
       source_manager_.getExpansionLoc(decl->getLocation());
-  if (loc.isInvalid() || source_manager_.isInSystemHeader(loc))
+  if (loc.isInvalid() || source_manager_.isInSystemHeader(loc)) {
     return false;
-  if (source_manager_.getFilename(loc).empty())
+  }
+  if (source_manager_.getFilename(loc).empty()) {
     return false;
+  }
   if (!target_file_.empty() &&
-      expansion_loc(context_, decl->getLocation()).file != target_file_)
+      expansion_loc(context_, decl->getLocation()).file != target_file_) {
     return false;
+  }
 
-  if (is_template_pattern(decl))
+  if (is_template_pattern(decl)) {
     return false;
+  }
 
   // Body-scope policy: within a function/method only named-type locals are
   // symbols (for_body_local_symbols); local vars feed reference sites, not
   // the symbol table.
   if (decl->getParentFunctionOrMethod() != nullptr &&
-      !is_local_symbol_decl(decl))
+      !is_local_symbol_decl(decl)) {
     return false;
+  }
 
   return true;
 }
 
 bool SymbolVisitor::VisitNamedDecl(clang::NamedDecl *decl) {
-  if (!should_emit(decl))
+  if (!should_emit(decl)) {
     return true;
-  if (std::optional<SymbolRecord> sym = extractor_.extract(decl))
+  }
+  if (std::optional<SymbolRecord> sym = extractor_.extract(decl)) {
     out_.emit(*sym);
+  }
   return true;
 }
 
@@ -115,17 +126,21 @@ bool SymbolVisitor::VisitNamedDecl(clang::NamedDecl *decl) {
 // recoverable from the AST when an earlier point exists.
 void SymbolVisitor::emit_explicit_instantiation(const clang::FunctionDecl *fd) {
   const clang::SourceLocation poi = fd->getPointOfInstantiation();
-  if (poi.isInvalid() || source_manager_.isInSystemHeader(
-                             source_manager_.getExpansionLoc(poi)))
+  if (poi.isInvalid() ||
+      source_manager_.isInSystemHeader(source_manager_.getExpansionLoc(poi))) {
     return;
+  }
   const ExpansionLoc loc = expansion_loc(context_, poi);
-  if (loc.file.empty())
+  if (loc.file.empty()) {
     return;
-  if (!target_file_.empty() && loc.file != target_file_)
+  }
+  if (!target_file_.empty() && loc.file != target_file_) {
     return;
+  }
   std::optional<SymbolRecord> sym = extractor_.extract(fd);
-  if (!sym)
+  if (!sym) {
     return;
+  }
   sym->file = loc.file;
   sym->line = loc.line;
   sym->col = loc.col;

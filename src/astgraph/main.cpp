@@ -77,9 +77,10 @@ CliArgs parse_cli(const std::vector<std::string> &argv) {
   for (std::size_t i = 0; i < argv.size(); ++i) {
     const std::string &a = argv[i];
     auto value = [&](const char *flag) -> std::string {
-      if (i + 1 >= argv.size())
+      if (i + 1 >= argv.size()) {
         throw cidx::UsageError(std::string(kUsage) + "cidx-astgraph: error: " +
                                flag + " expects a value\n");
+      }
       return argv[++i];
     };
     if (a == "--db") {
@@ -89,9 +90,10 @@ CliArgs parse_cli(const std::vector<std::string> &argv) {
     } else if (a == "--output") {
       out.output_path = value("--output");
     } else if (a == "--rule") {
-      if (out.rule)
+      if (out.rule) {
         throw cidx::UsageError(std::string(kUsage) +
                                "cidx-astgraph: error: --rule specified more than once\n");
+      }
       out.rule = value("--rule");
     } else if (a == "--jobs") {
       const std::string n = value("--jobs");
@@ -101,15 +103,17 @@ CliArgs parse_cli(const std::vector<std::string> &argv) {
         throw cidx::UsageError(std::string(kUsage) +
                                "cidx-astgraph: error: --jobs expects an integer\n");
       }
-      if (out.jobs < 1)
+      if (out.jobs < 1) {
         throw cidx::UsageError(std::string(kUsage) +
                                "cidx-astgraph: error: --jobs must be at least 1\n");
+      }
     } else if (a == "--main-only") {
       out.main_only = true;
     } else if (a == "analyze") {
-      if (out.analyze)
+      if (out.analyze) {
         throw cidx::UsageError(std::string(kUsage) +
                                "cidx-astgraph: error: analyze specified more than once\n");
+      }
       out.analyze = true;
     } else if (!a.empty() && a[0] == '-') {
       throw cidx::UsageError(std::string(kUsage) +
@@ -122,15 +126,18 @@ CliArgs parse_cli(const std::vector<std::string> &argv) {
                              "cidx-astgraph: error: exactly one SOURCE\n");
     }
   }
-  if (out.source.empty())
+  if (out.source.empty()) {
     throw cidx::UsageError(std::string(kUsage) +
                            "cidx-astgraph: error: SOURCE is required\n");
-  if (out.analyze && !out.rule)
+  }
+  if (out.analyze && !out.rule) {
     throw cidx::UsageError(std::string(kUsage) +
                            "cidx-astgraph: error: analyze requires --rule NAME\n");
-  if (!out.analyze && out.rule)
+  }
+  if (!out.analyze && out.rule) {
     throw cidx::UsageError(std::string(kUsage) +
                            "cidx-astgraph: error: --rule requires analyze\n");
+  }
   return out;
 }
 
@@ -154,7 +161,7 @@ cidx::json_out::Value callgraph_json(
     }));
   }
   return Value::obj(Object{
-      {"rule", Value::of("callgraph")},
+      {"rule", Value::of(true)},
       {"source", Value::of(source)},
       {"ast_db", Value::of(out_path)},
       {"calls", Value::arr(std::move(rows))},
@@ -182,25 +189,29 @@ int main(int argc, char **argv) {
     const std::string index_path =
         cli.index_db ? *cli.index_db
                      : cidx::pathutil::join(cache_dir, "index.db");
-    if (!file_exists(index_path))
+    if (!file_exists(index_path)) {
       throw cidx::CidxError("cidx index not found at " + index_path +
                             " (run `cidx import` first, or pass --db)");
+    }
     // Same log sink as cidx: parse-failure flag dumps and toolchain probes
     // go to cidx.log, never the terminal.
-    if (file_exists(cache_dir))
+    if (file_exists(cache_dir)) {
       cidx::Logger::root().set_file(
           cidx::pathutil::join(cache_dir, "cidx.log"));
+    }
 
     const std::string source = cidx::pathutil::abspath(cli.source);
-    if (!file_exists(source))
+    if (!file_exists(source)) {
       throw cidx::CidxError("source file not found: " + source);
+    }
 
     cidx::Storage db(index_path);
     const std::optional<cidx::File> rec = db.get_file(source);
-    if (!rec)
+    if (!rec) {
       throw cidx::CidxError(
           source + " is not registered in the cidx index (" + index_path +
           "); run `cidx import <compile_commands.json>` for its project");
+    }
 
     // The exact `cidx index` options pipeline: re-sanitize stored args (G11),
     // then decode <label>/$VAR tokens against the index's aliases (v0.6.0).
@@ -226,8 +237,9 @@ int main(int argc, char **argv) {
         source, opts, rec->driver, out_path, dump_opts);
 
     if (cli.analyze) {
-      if (*cli.rule != "callgraph")
+      if (*cli.rule != "callgraph") {
         throw cidx::CidxError("unsupported native rule: " + *cli.rule);
+      }
       const auto calls = cidx::astgraph::run_callgraph(out_path, cli.jobs);
       std::cout << cidx::json_out::dumps_indent2(
                        callgraph_json(source, out_path, calls))

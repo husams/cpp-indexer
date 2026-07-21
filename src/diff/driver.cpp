@@ -19,8 +19,7 @@
 #include "util/logger.hpp"
 #include "util/pathutil.hpp"
 
-namespace cidx {
-namespace diff {
+namespace cidx::diff {
 
 namespace {
 
@@ -202,18 +201,22 @@ int run(const std::vector<std::string> &argv, std::ostream &out,
     }
 
     const std::string shared_db = o.db.value_or(default_db);
-    const SideSpec left{"left", o.left_file, o.left_db.value_or(shared_db),
-                        o.left_tu};
-    const SideSpec right{"right", o.right_file, o.right_db.value_or(shared_db),
-                         o.right_tu};
+    const SideSpec left{.side = "left",
+                        .file = o.left_file,
+                        .db = o.left_db.value_or(shared_db),
+                        .tu = o.left_tu};
+    const SideSpec right{.side = "right",
+                         .file = o.right_file,
+                         .db = o.right_db.value_or(shared_db),
+                         .tu = o.right_tu};
     const ParseConfig left_cfg = resolve_parse_config(left);
     const ParseConfig right_cfg = resolve_parse_config(right);
 
     std::optional<Selector> left_sel;
     std::optional<Selector> right_sel;
     if (o.scope == "symbol") {
-      left_sel = Selector{o.left_sel, o.kind};
-      right_sel = Selector{o.right_sel, o.kind};
+      left_sel = Selector{.raw = o.left_sel, .kind = o.kind};
+      right_sel = Selector{.raw = o.right_sel, .kind = o.kind};
     }
     const SideAnalysis left_side = analyze_side(left_cfg, left_sel);
     const SideAnalysis right_side = analyze_side(right_cfg, right_sel);
@@ -221,7 +224,11 @@ int run(const std::vector<std::string> &argv, std::ostream &out,
     const ConfigDelta delta = config_delta(left_cfg, right_cfg);
     const Comparison cmp =
         compare_sides(left_side, right_side, o.match, delta, o.scope);
-    const ReportSpec spec{o.scope, o.mode, o.match, o.context, o.json};
+    const ReportSpec spec{.scope = o.scope,
+                          .mode = o.mode,
+                          .match = o.match,
+                          .context = o.context,
+                          .json = o.json};
     render_report(spec, left_side, right_side, delta, cmp, out);
     return 0;
   } catch (const UsageError &e) {
@@ -238,5 +245,4 @@ int run(const std::vector<std::string> &argv, std::ostream &out,
   }
 }
 
-} // namespace diff
-} // namespace cidx
+} // namespace cidx::diff

@@ -12,16 +12,17 @@
 
 #include "diff/behaviour_ir.hpp"
 
-namespace cidx {
-namespace diff {
+namespace cidx::diff {
 
 namespace {
 
 std::string strip_ws(const std::string &s) {
   std::string out;
-  for (const char c : s)
-    if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
+  for (const char c : s) {
+    if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
       out += c;
+    }
+  }
   return out;
 }
 
@@ -49,13 +50,14 @@ std::string describe(const SynNode &n) {
 std::string merged_detail(const std::string &l, const std::string &r) {
   const std::size_t sp = l.find(' ');
   if (sp != std::string::npos && r.size() > sp &&
-      r.compare(0, sp + 1, l, 0, sp + 1) == 0)
+      r.compare(0, sp + 1, l, 0, sp + 1) == 0) {
     return l + " -> " + r.substr(sp + 1);
+  }
   return l + " -> " + r;
 }
 
 bool is_decl_name(const std::string &detail) {
-  return detail.rfind("name ", 0) == 0;
+  return detail.starts_with("name ");
 }
 
 void diff_node(const SynNode &l, const SynNode &r, OpSink &sink);
@@ -65,10 +67,11 @@ void one_sided(const SynNode &n, bool left, OpSink &sink) {
   op.op = left ? "removed" : "added";
   op.node = n.kind;
   op.detail = n.detail;
-  if (left)
+  if (left) {
     op.left_range = n.range;
-  else
+  } else {
     op.right_range = n.range;
+  }
   sink.add(std::move(op));
 }
 
@@ -79,13 +82,15 @@ lcs_pairs(const std::vector<SynNode> &l, const std::vector<SynNode> &r) {
   const std::size_t m = r.size();
   std::vector<int> dp((n + 1) * (m + 1), 0);
   const auto at = [&](std::size_t i, std::size_t j) -> int & {
-    return dp[i * (m + 1) + j];
+    return dp[(i * (m + 1)) + j];
   };
-  for (std::size_t i = n; i-- > 0;)
-    for (std::size_t j = m; j-- > 0;)
+  for (std::size_t i = n; i-- > 0;) {
+    for (std::size_t j = m; j-- > 0;) {
       at(i, j) = l[i].fingerprint == r[j].fingerprint
                      ? at(i + 1, j + 1) + 1
                      : std::max(at(i + 1, j), at(i, j + 1));
+    }
+  }
   std::vector<std::pair<std::size_t, std::size_t>> out;
   std::size_t i = 0;
   std::size_t j = 0;
@@ -108,12 +113,15 @@ lcs_pairs(const std::vector<SynNode> &l, const std::vector<SynNode> &r) {
 void diff_gap(const std::vector<SynNode> &l, std::size_t lb, std::size_t le,
               const std::vector<SynNode> &r, std::size_t rb, std::size_t re,
               OpSink &sink) {
-  while (lb < le && rb < re)
+  while (lb < le && rb < re) {
     diff_node(l[lb++], r[rb++], sink);
-  while (lb < le)
+  }
+  while (lb < le) {
     one_sided(l[lb++], /*left=*/true, sink);
-  while (rb < re)
+  }
+  while (rb < re) {
     one_sided(r[rb++], /*left=*/false, sink);
+  }
 }
 
 void diff_children(const std::vector<SynNode> &l, const std::vector<SynNode> &r,
@@ -134,8 +142,9 @@ void diff_children(const std::vector<SynNode> &l, const std::vector<SynNode> &r,
 }
 
 void diff_node(const SynNode &l, const SynNode &r, OpSink &sink) {
-  if (l.fingerprint == r.fingerprint)
+  if (l.fingerprint == r.fingerprint) {
     return;
+  }
   if (l.kind != r.kind) {
     EditOp op;
     op.op = "replaced";
@@ -197,21 +206,28 @@ struct Matcher {
     std::map<std::string, int> lcount;
     std::map<std::string, int> rcount;
     if (unique_key) {
-      for (const Entity *e : left)
-        if (const std::string k = key(*e); !k.empty())
+      for (const Entity *e : left) {
+        if (const std::string k = key(*e); !k.empty()) {
           ++lcount[k];
-      for (const Entity *e : right)
-        if (const std::string k = key(*e); !k.empty())
+        }
+      }
+      for (const Entity *e : right) {
+        if (const std::string k = key(*e); !k.empty()) {
           ++rcount[k];
+        }
+      }
     }
     for (std::size_t i = 0; i < left.size(); ++i) {
-      if (lu[i])
+      if (lu[i]) {
         continue;
+      }
       const std::string k = key(*left[i]);
-      if (k.empty())
+      if (k.empty()) {
         continue;
-      if (unique_key && (lcount[k] != 1 || rcount[k] != 1))
+      }
+      if (unique_key && (lcount[k] != 1 || rcount[k] != 1)) {
         continue;
+      }
       for (std::size_t j = 0; j < right.size(); ++j) {
         if (!ru[j] && key(*right[j]) == k) {
           pair(i, j, name, conf, status);
@@ -243,19 +259,22 @@ std::vector<EntityPair> match_entities(const std::vector<const Entity *> &l,
     m.tier([](const Entity &e) { return e.kind + "\x1f" + e.fingerprint; },
            "fingerprint", 70, "renamed", true);
   }
-  if (force_pair && l.size() == 1 && r.size() == 1 && !m.lu[0] && !m.ru[0])
+  if (force_pair && l.size() == 1 && r.size() == 1 && !m.lu[0] && !m.ru[0]) {
     m.pair(0, 0, "", 0, "matched");
+  }
   for (std::size_t i = 0; i < l.size(); ++i) {
-    if (m.lu[i])
+    if (m.lu[i]) {
       continue;
+    }
     EntityPair p;
     p.left = l[i];
     p.status = "removed";
     m.pairs.push_back(std::move(p));
   }
   for (std::size_t j = 0; j < r.size(); ++j) {
-    if (m.ru[j])
+    if (m.ru[j]) {
       continue;
+    }
     EntityPair p;
     p.right = r[j];
     p.status = "added";
@@ -268,7 +287,7 @@ void compute_edits(EntityPair &p, int *total) {
   p.subtree_differs =
       p.left == nullptr || p.right == nullptr ||
       p.left->syntax.fingerprint != p.right->syntax.fingerprint;
-  OpSink sink{&p.edits, total};
+  OpSink sink{.ops = &p.edits, .total = total};
   if (p.left != nullptr && p.right != nullptr) {
     diff_node(p.left->syntax, p.right->syntax, sink);
   } else {
@@ -279,10 +298,11 @@ void compute_edits(EntityPair &p, int *total) {
     op.op = p.left != nullptr ? "removed" : "added";
     op.node = e.syntax.kind;
     op.detail = e.kind + " " + e.name;
-    if (p.left != nullptr)
+    if (p.left != nullptr) {
       op.left_range = e.range;
-    else
+    } else {
       op.right_range = e.range;
+    }
     sink.add(std::move(op));
   }
   p.truncated = sink.truncated;
@@ -295,68 +315,88 @@ std::string or_dash(const std::string &s) { return s.empty() ? "-" : s; }
 std::vector<std::string> signature_changes(const BehaviourIR &l,
                                            const BehaviourIR &r) {
   std::vector<std::string> out;
-  if (l.return_type != r.return_type)
+  if (l.return_type != r.return_type) {
     out.push_back("return type: " + l.return_type + " -> " + r.return_type);
+  }
   if (l.param_types.size() != r.param_types.size()) {
     out.push_back("parameter count: " + std::to_string(l.param_types.size()) +
                   " -> " + std::to_string(r.param_types.size()));
   } else {
-    for (std::size_t i = 0; i < l.param_types.size(); ++i)
-      if (l.param_types[i] != r.param_types[i])
+    for (std::size_t i = 0; i < l.param_types.size(); ++i) {
+      if (l.param_types[i] != r.param_types[i]) {
         out.push_back("parameter " + std::to_string(i + 1) + " type: " +
                       l.param_types[i] + " -> " + r.param_types[i]);
+      }
+    }
   }
   if (l.param_defaults.size() == r.param_defaults.size()) {
-    for (std::size_t i = 0; i < l.param_defaults.size(); ++i)
-      if (l.param_defaults[i] != r.param_defaults[i])
+    for (std::size_t i = 0; i < l.param_defaults.size(); ++i) {
+      if (l.param_defaults[i] != r.param_defaults[i]) {
         out.push_back("default argument of parameter " +
                       std::to_string(i + 1) + " changed");
+      }
+    }
   }
-  if (l.quals != r.quals)
+  if (l.quals != r.quals) {
     out.push_back("qualifiers: " + or_dash(l.quals) + " -> " +
                   or_dash(r.quals));
-  if (l.is_noexcept != r.is_noexcept)
+  }
+  if (l.is_noexcept != r.is_noexcept) {
     out.push_back(std::string("noexcept: ") + bool_str(l.is_noexcept) +
                   " -> " + bool_str(r.is_noexcept));
-  if (l.is_virtual != r.is_virtual)
+  }
+  if (l.is_virtual != r.is_virtual) {
     out.push_back(std::string("virtual: ") + bool_str(l.is_virtual) + " -> " +
                   bool_str(r.is_virtual));
-  if (l.storage != r.storage)
+  }
+  if (l.storage != r.storage) {
     out.push_back("storage class: " + or_dash(l.storage) + " -> " +
                   or_dash(r.storage));
-  if (l.is_inline != r.is_inline)
+  }
+  if (l.is_inline != r.is_inline) {
     out.push_back(std::string("inline: ") + bool_str(l.is_inline) + " -> " +
                   bool_str(r.is_inline));
-  if (l.constexpr_kind != r.constexpr_kind)
+  }
+  if (l.constexpr_kind != r.constexpr_kind) {
     out.push_back("constexpr: " + or_dash(l.constexpr_kind) + " -> " +
                   or_dash(r.constexpr_kind));
-  if (l.is_noreturn != r.is_noreturn)
+  }
+  if (l.is_noreturn != r.is_noreturn) {
     out.push_back(std::string("noreturn: ") + bool_str(l.is_noreturn) +
                   " -> " + bool_str(r.is_noreturn));
-  if (l.is_static_method != r.is_static_method)
+  }
+  if (l.is_static_method != r.is_static_method) {
     out.push_back(std::string("static method: ") +
                   bool_str(l.is_static_method) + " -> " +
                   bool_str(r.is_static_method));
-  if (l.access != r.access)
+  }
+  if (l.access != r.access) {
     out.push_back("access: " + or_dash(l.access) + " -> " + or_dash(r.access));
-  if (l.is_explicit != r.is_explicit)
+  }
+  if (l.is_explicit != r.is_explicit) {
     out.push_back(std::string("explicit: ") + bool_str(l.is_explicit) + " -> " +
                   bool_str(r.is_explicit));
-  if (l.is_deleted != r.is_deleted)
+  }
+  if (l.is_deleted != r.is_deleted) {
     out.push_back(std::string("deleted: ") + bool_str(l.is_deleted) + " -> " +
                   bool_str(r.is_deleted));
-  if (l.is_defaulted != r.is_defaulted)
+  }
+  if (l.is_defaulted != r.is_defaulted) {
     out.push_back(std::string("defaulted: ") + bool_str(l.is_defaulted) +
                   " -> " + bool_str(r.is_defaulted));
-  if (l.is_final != r.is_final)
+  }
+  if (l.is_final != r.is_final) {
     out.push_back(std::string("final: ") + bool_str(l.is_final) + " -> " +
                   bool_str(r.is_final));
-  if (l.is_pure != r.is_pure)
+  }
+  if (l.is_pure != r.is_pure) {
     out.push_back(std::string("pure: ") + bool_str(l.is_pure) + " -> " +
                   bool_str(r.is_pure));
-  if (l.is_override != r.is_override)
+  }
+  if (l.is_override != r.is_override) {
     out.push_back(std::string("override: ") + bool_str(l.is_override) + " -> " +
                   bool_str(r.is_override));
+  }
   return out;
 }
 
@@ -365,23 +405,23 @@ std::vector<std::string> signature_changes(const BehaviourIR &l,
 void seq_changes(const char *cat, const std::vector<std::string> &l,
                  const std::vector<std::string> &r,
                  std::vector<std::string> &out) {
-  if (l == r)
+  if (l == r) {
     return;
+  }
   std::vector<std::string> ls = l;
   std::vector<std::string> rs = r;
-  std::sort(ls.begin(), ls.end());
-  std::sort(rs.begin(), rs.end());
+  std::ranges::sort(ls);
+  std::ranges::sort(rs);
   std::vector<std::string> removed;
   std::vector<std::string> added;
-  std::set_difference(ls.begin(), ls.end(), rs.begin(), rs.end(),
-                      std::back_inserter(removed));
-  std::set_difference(rs.begin(), rs.end(), ls.begin(), ls.end(),
-                      std::back_inserter(added));
+  std::ranges::set_difference(ls, rs, std::back_inserter(removed));
+  std::ranges::set_difference(rs, ls, std::back_inserter(added));
   const auto keep_common = [](const std::vector<std::string> &rows,
                               const std::vector<std::string> &drop) {
     std::map<std::string, int> cnt;
-    for (const std::string &s : drop)
+    for (const std::string &s : drop) {
       ++cnt[s];
+    }
     std::vector<std::string> out;
     for (const std::string &s : rows) {
       if (const auto it = cnt.find(s); it != cnt.end() && it->second > 0) {
@@ -392,12 +432,15 @@ void seq_changes(const char *cat, const std::vector<std::string> &l,
     }
     return out;
   };
-  if (keep_common(l, removed) != keep_common(r, added))
+  if (keep_common(l, removed) != keep_common(r, added)) {
     out.push_back(std::string(cat) + " reordered");
-  for (const std::string &s : removed)
+  }
+  for (const std::string &s : removed) {
     out.push_back(std::string(cat) + " removed: " + s);
-  for (const std::string &s : added)
+  }
+  for (const std::string &s : added) {
     out.push_back(std::string(cat) + " added: " + s);
+  }
 }
 
 std::vector<std::string> profile_changes(const ClassProfile &l,
@@ -409,12 +452,14 @@ std::vector<std::string> profile_changes(const ClassProfile &l,
   seq_changes("template parameter", l.template_params, r.template_params, out);
   seq_changes("nested record", l.nested, r.nested, out);
   seq_changes("declaration", l.extras, r.extras, out);
-  if (l.polymorphic != r.polymorphic)
+  if (l.polymorphic != r.polymorphic) {
     out.push_back(std::string("polymorphic: ") + bool_str(l.polymorphic) +
                   " -> " + bool_str(r.polymorphic));
-  if (l.abstract != r.abstract)
+  }
+  if (l.abstract != r.abstract) {
     out.push_back(std::string("abstract: ") + bool_str(l.abstract) + " -> " +
                   bool_str(r.abstract));
+  }
   return out;
 }
 
@@ -422,8 +467,9 @@ constexpr const char *kNoDifference = "no behavioral difference established";
 
 std::optional<std::string> read_all(const std::string &path) {
   std::ifstream in(path, std::ios::binary);
-  if (!in.good())
+  if (!in.good()) {
     return std::nullopt;
+  }
   std::ostringstream buf;
   buf << in.rdbuf();
   return buf.str();
@@ -438,41 +484,42 @@ struct Verdicts {
   bool config_identical;
   const std::string &match_mode;
 
-  const BehaviourIR *behaviour_of(const SideAnalysis &s,
-                                  const Entity *e) const {
+  static const BehaviourIR *behaviour_of(const SideAnalysis &s,
+                                         const Entity *e) {
     return e != nullptr && e->behaviour >= 0
                ? &s.behaviours[static_cast<std::size_t>(e->behaviour)]
                : nullptr;
   }
 
-  const ClassProfile *profile_of(const SideAnalysis &s,
-                                 const Entity *e) const {
+  static const ClassProfile *profile_of(const SideAnalysis &s,
+                                        const Entity *e) {
     return e != nullptr && e->profile >= 0
                ? &s.profiles[static_cast<std::size_t>(e->profile)]
                : nullptr;
   }
 
-  void attach(EntityPair &p, const std::vector<Unsupported> &markers,
-              const char *side) const {
+  static void attach(EntityPair &p, const std::vector<Unsupported> &markers,
+                     const char *side) {
     for (Unsupported u : markers) {
       u.side = side;
       p.unsupported.push_back(std::move(u));
     }
   }
 
-  void set(EntityPair &p, const char *verdict, const char *evidence,
-           std::string detail) const {
+  static void set(EntityPair &p, const char *verdict, const char *evidence,
+                  std::string detail) {
     p.verdict = verdict;
     p.evidence = evidence;
     p.detail = std::move(detail);
   }
 
   void equivalent_with_evidence(EntityPair &p, const char *ir_detail) const {
-    if (config_identical && p.left->slice == p.right->slice)
+    if (config_identical && p.left->slice == p.right->slice) {
       set(p, verdict::kEquivalent, evidence::kIdenticalSourceAndConfig,
           "identical source and configuration");
-    else
+    } else {
       set(p, verdict::kEquivalent, evidence::kNormalizedIr, ir_detail);
+    }
   }
 
   void callable_verdict(EntityPair &p, const BehaviourIR &lb,
@@ -520,9 +567,10 @@ struct Verdicts {
     p.changes = profile_changes(lp, rp);
     attach(p, lp.unsupported, "left");
     attach(p, rp.unsupported, "right");
-    for (const EntityPair &mp : members)
+    for (const EntityPair &mp : members) {
       p.unsupported.insert(p.unsupported.end(), mp.unsupported.begin(),
                            mp.unsupported.end());
+    }
     if (!p.changes.empty()) {
       set(p, verdict::kDifferent, evidence::kSummaryContradiction,
           "class profile contradiction");
@@ -577,10 +625,14 @@ struct Verdicts {
     if (lp != nullptr && rp != nullptr) {
       std::vector<const Entity *> lm;
       std::vector<const Entity *> rm;
-      for (const Entity &m : p.left->members)
+      lm.reserve(p.left->members.size());
+      for (const Entity &m : p.left->members) {
         lm.push_back(&m);
-      for (const Entity &m : p.right->members)
+      }
+      rm.reserve(p.right->members.size());
+      for (const Entity &m : p.right->members) {
         rm.push_back(&m);
+      }
       std::vector<EntityPair> members =
           match_entities(lm, rm, match_mode, /*force_pair=*/false);
       int member_total = 0;
@@ -590,9 +642,11 @@ struct Verdicts {
         judge(mp, nullptr);
       }
       record_verdict(p, *lp, *rp, members);
-      if (member_out != nullptr)
-        for (EntityPair &mp : members)
+      if (member_out != nullptr) {
+        for (EntityPair &mp : members) {
           member_out->push_back(std::move(mp));
+        }
+      }
       return;
     }
     generic_verdict(p);
@@ -607,10 +661,14 @@ Comparison compare_sides(const SideAnalysis &left, const SideAnalysis &right,
   const bool symbol = scope == "symbol";
   std::vector<const Entity *> lt;
   std::vector<const Entity *> rt;
-  for (const Entity &e : left.entities)
+  lt.reserve(left.entities.size());
+  for (const Entity &e : left.entities) {
     lt.push_back(&e);
-  for (const Entity &e : right.entities)
+  }
+  rt.reserve(right.entities.size());
+  for (const Entity &e : right.entities) {
     rt.push_back(&e);
+  }
   std::vector<EntityPair> tops =
       match_entities(lt, rt, match_mode, /*force_pair=*/symbol);
 
@@ -618,17 +676,23 @@ Comparison compare_sides(const SideAnalysis &left, const SideAnalysis &right,
   int total = 0;
   for (EntityPair &p : tops) {
     compute_edits(p, &total);
-    if (p.truncated)
+    if (p.truncated) {
       c.truncated = true;
-    if (p.subtree_differs)
+    }
+    if (p.subtree_differs) {
       c.syntax_changed = true;
+    }
   }
   c.edit_count = total;
 
-  const Verdicts v{left, right, delta.identical, match_mode};
+  const Verdicts v{.ls = left,
+                   .rs = right,
+                   .config_identical = delta.identical,
+                   .match_mode = match_mode};
   std::vector<EntityPair> member_rows;
-  for (EntityPair &p : tops)
+  for (EntityPair &p : tops) {
     v.judge(p, symbol ? &member_rows : nullptr);
+  }
 
   int added_removed = 0;
   int different_count = 0;
@@ -636,14 +700,17 @@ Comparison compare_sides(const SideAnalysis &left, const SideAnalysis &right,
   bool all_identical_source = true;
   for (const EntityPair &p : tops) {
     c.unsupported_count += static_cast<int>(p.unsupported.size());
-    if (p.left == nullptr || p.right == nullptr)
+    if (p.left == nullptr || p.right == nullptr) {
       ++added_removed;
-    else if (p.verdict == verdict::kDifferent)
+    } else if (p.verdict == verdict::kDifferent) {
       ++different_count;
-    if (p.verdict != verdict::kEquivalent)
+    }
+    if (p.verdict != verdict::kEquivalent) {
       all_equivalent = false;
-    if (p.evidence != evidence::kIdenticalSourceAndConfig)
+    }
+    if (p.evidence != evidence::kIdenticalSourceAndConfig) {
       all_identical_source = false;
+    }
   }
   if (symbol && !tops.empty()) {
     // The whole-comparison verdict is the selected pair's verdict (the class
@@ -687,14 +754,15 @@ Comparison compare_sides(const SideAnalysis &left, const SideAnalysis &right,
     c.evidence = evidence::kUnsupportedOrIncomplete;
     c.detail = kNoDifference;
   }
-  if (c.verdict == verdict::kEquivalent)
+  if (c.verdict == verdict::kEquivalent) {
     c.assumptions = {"same-standard-library", "no-undefined-behavior"};
+  }
 
   c.pairs = std::move(tops);
-  for (EntityPair &mp : member_rows)
+  for (EntityPair &mp : member_rows) {
     c.pairs.push_back(std::move(mp));
+  }
   return c;
 }
 
-} // namespace diff
-} // namespace cidx
+} // namespace cidx::diff

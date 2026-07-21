@@ -11,20 +11,25 @@ bool is_definition(const clang::Decl *decl) {
   // Mirror clang_isCursorDefinition (CIndex.cpp isDeclADefinition): tag,
   // function, and variable decls answer "is THIS decl the definition";
   // members, enumerators, typedefs, and namespaces are definitions by nature.
-  if (const auto *tag = llvm::dyn_cast<clang::TagDecl>(decl))
+  if (const auto *tag = llvm::dyn_cast<clang::TagDecl>(decl)) {
     return tag->isThisDeclarationADefinition();
+  }
   // libclang's definition-of-a-function = THIS decl carries an actual body
   // STATEMENT (clang_getCursorDefinition goes through getBody). Explicitly
   // defaulted/deleted declarations have none, so `= default` / `= delete`
   // are NOT definitions — unlike isThisDeclarationADefinition().
-  if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(decl))
+  if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(decl)) {
     return fn->doesThisDeclarationHaveABody();
-  if (const auto *var = llvm::dyn_cast<clang::VarDecl>(decl))
+  }
+  if (const auto *var = llvm::dyn_cast<clang::VarDecl>(decl)) {
     return var->isThisDeclarationADefinition() == clang::VarDecl::Definition;
-  if (const auto *ft = llvm::dyn_cast<clang::FunctionTemplateDecl>(decl))
+  }
+  if (const auto *ft = llvm::dyn_cast<clang::FunctionTemplateDecl>(decl)) {
     return ft->getTemplatedDecl()->doesThisDeclarationHaveABody();
-  if (const auto *ct = llvm::dyn_cast<clang::ClassTemplateDecl>(decl))
+  }
+  if (const auto *ct = llvm::dyn_cast<clang::ClassTemplateDecl>(decl)) {
     return ct->isThisDeclarationADefinition();
+  }
   return llvm::isa<clang::FieldDecl>(decl) ||
          llvm::isa<clang::EnumConstantDecl>(decl) ||
          llvm::isa<clang::TypedefNameDecl>(decl) ||
@@ -50,12 +55,13 @@ bool is_template_instantiation(const clang::Decl *decl) {
   clang::TemplateSpecializationKind tsk = clang::TSK_Undeclared;
   // CXXRecordDecl::getTemplateSpecializationKind covers class-template
   // specializations AND instantiated member classes (Outer<int>::Inner).
-  if (const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(decl))
+  if (const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(decl)) {
     tsk = rec->getTemplateSpecializationKind();
-  else if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(decl))
+  } else if (const auto *fn = llvm::dyn_cast<clang::FunctionDecl>(decl)) {
     tsk = fn->getTemplateSpecializationKind();
-  else if (const auto *var = llvm::dyn_cast<clang::VarDecl>(decl))
+  } else if (const auto *var = llvm::dyn_cast<clang::VarDecl>(decl)) {
     tsk = var->getTemplateSpecializationKind();
+  }
   switch (tsk) {
   case clang::TSK_ImplicitInstantiation:
   case clang::TSK_ExplicitInstantiationDeclaration:
@@ -70,8 +76,9 @@ bool is_template_instantiation(const clang::Decl *decl) {
 
 std::optional<std::string> linkage_name(const clang::Decl *decl) {
   const auto *nd = llvm::dyn_cast<clang::NamedDecl>(decl);
-  if (nd == nullptr)
+  if (nd == nullptr) {
     return std::nullopt;
+  }
   // Mirror clang_getCursorLinkage's CXLinkageKind mapping.
   switch (nd->getLinkageInternal()) {
   case clang::Linkage::None:

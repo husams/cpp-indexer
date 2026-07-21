@@ -97,10 +97,11 @@ private:
                               const std::string &base_usr, int64_t dst_id);
   void emit_static_member_definition(const clang::VarDecl *decl,
                                      int64_t symbol_id);
-  std::optional<std::string> static_var_init_text(clang::SourceRange range) const;
+  [[nodiscard]] std::optional<std::string>
+  static_var_init_text(clang::SourceRange range) const;
   void emit_static_init_def_edges(int64_t def_id, const clang::Expr *init);
-  std::vector<const clang::NamedDecl *>
-  friend_targets(const clang::TypeSourceInfo *tsi) const;
+  static std::vector<const clang::NamedDecl *>
+  friend_targets(const clang::TypeSourceInfo *tsi);
   void emit_template_params(const clang::TemplateParameterList *params,
                             int64_t owner_id);
   // Explicit function/method instantiations live only in specialization

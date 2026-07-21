@@ -9,8 +9,7 @@
 
 #include "diff/syntax_ir.hpp"
 
-namespace cidx {
-namespace diff {
+namespace cidx::diff {
 
 // Tri-state semantic verdict values.
 namespace verdict {
@@ -98,5 +97,4 @@ struct ClassProfile {
   std::string fingerprint;         // sha1 over every row above
 };
 
-} // namespace diff
-} // namespace cidx
+} // namespace cidx::diff

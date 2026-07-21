@@ -5,8 +5,7 @@
 #include <cstdlib>
 #include <string>
 
-namespace cidx {
-namespace json_read {
+namespace cidx::json_read {
 
 namespace {
 
@@ -38,7 +37,7 @@ private:
     }
   }
 
-  char peek() const { return i_ < s_.size() ? s_[i_] : '\0'; }
+  [[nodiscard]] char peek() const { return i_ < s_.size() ? s_[i_] : '\0'; }
 
   void expect(char c) {
     if (i_ >= s_.size() || s_[i_] != c) {
@@ -280,5 +279,4 @@ private:
 
 Value parse(const std::string &text) { return Parser(text).parse_document(); }
 
-} // namespace json_read
-} // namespace cidx
+} // namespace cidx::json_read

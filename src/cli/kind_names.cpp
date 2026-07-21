@@ -10,8 +10,7 @@
 
 #include <cstdio>
 
-namespace cidx {
-namespace cli {
+namespace cidx::cli {
 
 const char *kind_name(unsigned kind) {
   // Doctest-pinned spot-checks:
@@ -277,5 +276,4 @@ const char *kind_name(unsigned kind) {
   }
 }
 
-} // namespace cli
-} // namespace cidx
+} // namespace cidx::cli

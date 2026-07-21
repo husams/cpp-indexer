@@ -18,8 +18,9 @@ int StorageSymbolSink::stored_count() const { return stored_; }
 
 void StorageSymbolSink::emit(const SymbolRecord &s) {
   const char *kind_name = cidx_kind_name_from_int(s.kind);
-  if (kind_name == nullptr)
+  if (kind_name == nullptr) {
     return;
+  }
 
   cidx::Symbol sym;
   sym.usr = s.usr;
@@ -48,8 +49,9 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
   sym.resolved = s.resolved;
   const std::optional<cidx::Symbol> existing = db_.lookup_symbol(sym.usr);
   db_.add_symbol(sym);
-  if (!(existing && existing->resolved))
+  if (!(existing && existing->resolved)) {
     ++stored_; // AstIndexer::store: true = counted as "stored"
+  }
 }
 
 } // namespace cidx::ast

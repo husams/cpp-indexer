@@ -12,8 +12,7 @@
 #include <string>
 #include <vector>
 
-namespace cidx {
-namespace json_min {
+namespace cidx::json_min {
 
 // Throws CidxError on malformed input, non-array payloads, or non-string
 // elements.
@@ -22,5 +21,4 @@ std::vector<std::string> decode_string_array(const std::string &text);
 // Compact encoding: ["a","b"]; control chars escaped, UTF-8 passed through.
 std::string encode_string_array(const std::vector<std::string> &items);
 
-} // namespace json_min
-} // namespace cidx
+} // namespace cidx::json_min

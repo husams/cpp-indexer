@@ -11,8 +11,7 @@
 
 #include "util/errors.hpp"
 
-namespace cidx {
-namespace pathutil {
+namespace cidx::pathutil {
 
 namespace {
 
@@ -55,7 +54,7 @@ std::string normpath(const std::string &path) {
   int initial_slashes = (path[0] == '/') ? 1 : 0;
   // POSIX allows one or two initial slashes; three or more -> one.
   if (initial_slashes == 1 && path.size() >= 2 && path[1] == '/' &&
-      !(path.size() >= 3 && path[2] == '/')) {
+      (path.size() < 3 || path[2] != '/')) {
     initial_slashes = 2;
   }
   std::vector<std::string> new_comps;
@@ -171,7 +170,7 @@ std::string getcwd() {
     }
     buf.resize(buf.size() * 2);
   }
-  return std::string(buf.data());
+  return {buf.data()};
 }
 
 namespace detail {
@@ -198,7 +197,7 @@ void join_one(std::string &path, const std::string &part) {
 std::string expandvars(const std::string &path) {
   // Fast-path: if no '$' present, return unchanged (CPython: 'if '$' not in
   // path: return path'). No regex engine touched.
-  if (path.find('$') == std::string::npos) {
+  if (!path.contains('$')) {
     return path;
   }
 
@@ -265,7 +264,7 @@ std::string expandvars(const std::string &path) {
 std::string label_expand(const std::string &token,
                          const LabelResolver &labels) {
   // Fast-path: no '<' means no placeholder.
-  if (token.find('<') == std::string::npos) {
+  if (!token.contains('<')) {
     return token;
   }
 
@@ -345,5 +344,4 @@ std::string resolve_fs_path(const std::string &stored) {
   return resolve_fs_path(stored, LabelResolver{});
 }
 
-} // namespace pathutil
-} // namespace cidx
+} // namespace cidx::pathutil

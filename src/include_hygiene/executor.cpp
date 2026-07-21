@@ -21,9 +21,10 @@
 #include <sys/stat.h>
 #include <sys/xattr.h>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
-#if defined(__APPLE__)
+#ifdef __APPLE__
 #include <sys/acl.h>
 #endif
 
@@ -70,7 +71,7 @@ bool within_repo(const std::string &rel) {
 // refusing on them would reject essentially every file (macOS stamps
 // com.apple.provenance on all of them).
 void copy_xattrs(const std::string &src, int dst) {
-#if defined(__APPLE__)
+#ifdef __APPLE__
   const int opt = XATTR_NOFOLLOW;
   ssize_t sz = ::listxattr(src.c_str(), nullptr, 0, opt);
 #else
@@ -80,7 +81,7 @@ void copy_xattrs(const std::string &src, int dst) {
     return;
   }
   std::vector<char> names(static_cast<std::size_t>(sz));
-#if defined(__APPLE__)
+#ifdef __APPLE__
   sz = ::listxattr(src.c_str(), names.data(), names.size(), opt);
 #else
   sz = ::llistxattr(src.c_str(), names.data(), names.size());
@@ -88,16 +89,16 @@ void copy_xattrs(const std::string &src, int dst) {
   if (sz <= 0) {
     return;
   }
-  for (std::size_t i = 0; i < static_cast<std::size_t>(sz);) {
+  for (std::size_t i = 0; std::cmp_less(i, sz);) {
     const char *name = &names[i];
-#if defined(__APPLE__)
+#ifdef __APPLE__
     const ssize_t vlen = ::getxattr(src.c_str(), name, nullptr, 0, 0, opt);
 #else
     const ssize_t vlen = ::lgetxattr(src.c_str(), name, nullptr, 0);
 #endif
     if (vlen >= 0) {
       std::vector<char> val(static_cast<std::size_t>(vlen));
-#if defined(__APPLE__)
+#ifdef __APPLE__
       if (::getxattr(src.c_str(), name, val.data(), val.size(), 0, opt) >= 0) {
         ::fsetxattr(dst, name, val.data(), val.size(), 0, 0);
       }
@@ -114,7 +115,7 @@ void copy_xattrs(const std::string &src, int dst) {
 // macOS keeps extended ACLs out of the xattr namespace, so carry them across
 // explicitly. On Linux ACLs are xattrs and copy_xattrs already handles them.
 void copy_acl(const std::string &src, int dst) {
-#if defined(__APPLE__)
+#ifdef __APPLE__
   acl_t acl = ::acl_get_file(src.c_str(), ACL_TYPE_EXTENDED);
   if (acl != nullptr) {
     ::acl_set_fd(dst, acl); // best-effort
@@ -286,7 +287,7 @@ ExecuteResult execute(cidx::Storage &db, const CleanupPlan &plan,
     res.refusals.push_back(r);
   }
   if (!res.refusals.empty()) {
-    res.refusals.push_back(
+    res.refusals.emplace_back(
         "regenerate the plan with `cidx include plan` and review it again");
     return res;
   }
@@ -299,16 +300,15 @@ ExecuteResult execute(cidx::Storage &db, const CleanupPlan &plan,
       ++res.skipped; // manual_review / rejected are never applied
       continue;
     }
-    if (!only.empty() && only.count(it.id) == 0) {
+    if (!only.empty() && !only.contains(it.id)) {
       ++res.skipped;
       continue;
     }
     chosen.push_back(&it);
   }
   for (const std::string &id : opts.only) {
-    const bool known = std::any_of(
-        plan.items.begin(), plan.items.end(),
-        [&](const PlanItem &it) { return it.id == id; });
+    const bool known = std::ranges::any_of(
+        plan.items, [&](const PlanItem &it) { return it.id == id; });
     if (!known) {
       res.refusals.push_back("--only names an id that is not in this plan: " + id);
     }
@@ -333,7 +333,7 @@ ExecuteResult execute(cidx::Storage &db, const CleanupPlan &plan,
                              "repository root: " + it->file);
       continue;
     }
-    if (plan.file_hashes.count(it->file) == 0) {
+    if (!plan.file_hashes.contains(it->file)) {
       res.refusals.push_back("plan carries no content hash for " + it->file +
                              " (item " + it->id +
                              "): it cannot be proven current, so it is refused");
@@ -345,17 +345,19 @@ ExecuteResult execute(cidx::Storage &db, const CleanupPlan &plan,
     // have fired -- this is the belt-and-braces check that we never delete
     // something other than the directive that was reviewed.
     const std::string content = read_file(abs);
-    if (it->end_offset > static_cast<int64_t>(content.size()) ||
-        content.substr(static_cast<std::size_t>(it->begin_offset),
-                       static_cast<std::size_t>(it->end_offset -
-                                                it->begin_offset)) !=
+    if (std::cmp_greater(it->end_offset, content.size()) ||
+        content.substr(
+            static_cast<std::size_t>(it->begin_offset),
+            static_cast<std::size_t>(it->end_offset - it->begin_offset)) !=
             it->directive_text) {
       res.refusals.push_back(
           "the bytes at " + it->file + ":" + std::to_string(it->line) +
           " are not the directive this plan reviewed (item " + it->id + ")");
       continue;
     }
-    removals.push_back({abs, it->begin_offset, it->end_offset});
+    removals.push_back({.abs_path = abs,
+                        .begin_offset = it->begin_offset,
+                        .end_offset = it->end_offset});
     touched.insert(abs);
   }
   if (!res.refusals.empty()) {
@@ -420,16 +422,15 @@ ExecuteResult execute(cidx::Storage &db, const CleanupPlan &plan,
     return res;
   }
   // De-duplicate: several edited files usually share TUs.
-  std::sort(targets.begin(), targets.end(),
-            [](const TuTarget &a, const TuTarget &b) {
-              return std::tie(a.tu_path, a.config_digest) <
-                     std::tie(b.tu_path, b.config_digest);
-            });
-  targets.erase(std::unique(targets.begin(), targets.end(),
-                            [](const TuTarget &a, const TuTarget &b) {
-                              return a.tu_path == b.tu_path &&
-                                     a.config_digest == b.config_digest;
-                            }),
+  std::ranges::sort(targets, [](const TuTarget &a, const TuTarget &b) {
+    return std::tie(a.tu_path, a.config_digest) <
+           std::tie(b.tu_path, b.config_digest);
+  });
+  targets.erase(std::ranges::unique(targets,
+                                    [](const TuTarget &a, const TuTarget &b) {
+                                      return a.tu_path == b.tu_path &&
+                                             a.config_digest == b.config_digest;
+                                    }).begin(),
                 targets.end());
 
   // The build configurations reaching these files must be the ones the plan was
@@ -442,12 +443,12 @@ ExecuteResult execute(cidx::Storage &db, const CleanupPlan &plan,
                                        plan.config_digests.end());
     std::set<std::string> unseen;
     for (const TuTarget &t : targets) {
-      if (proven.count(t.config_digest) == 0) {
+      if (!proven.contains(t.config_digest)) {
         unseen.insert(t.config_digest);
       }
     }
     if (!unseen.empty()) {
-      res.refusals.push_back(
+      res.refusals.emplace_back(
           "a build configuration reaching these files is not one the plan was "
           "reviewed against: regenerate the plan with `cidx include plan`");
       return res;

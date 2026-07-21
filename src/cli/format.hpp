@@ -15,8 +15,7 @@ namespace cidx {
 
 class Storage;
 
-namespace cli {
-namespace format {
+namespace cli::format {
 
 // Python f-string alignment: {value:>width} / {value:<width}.
 std::string rjust(const std::string &s, std::size_t width);
@@ -50,6 +49,6 @@ void print_field(std::ostream &out, const std::string &key,
 // Examples: 0->"0", 1234->"1,234", 1234567->"1,234,567", -1->"−1" (sign before groups).
 std::string group_thousands(int64_t n);
 
-} // namespace format
-} // namespace cli
+} // namespace cli::format
+
 } // namespace cidx

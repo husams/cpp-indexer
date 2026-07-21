@@ -10,8 +10,7 @@
 #include <set>
 #include <utility>
 
-namespace cidx {
-namespace query {
+namespace cidx::query {
 
 namespace {
 
@@ -23,19 +22,45 @@ namespace {
 // classification (PR #20 review).
 
 std::string col_expr(const std::string &field) {
-  if (field == "id") return "s.id";
-  if (field == "usr") return "s.usr";
-  if (field == "name") return "COALESCE(s.qual_name, s.spelling)";
-  if (field == "spelling") return "s.spelling";
-  if (field == "qual_name") return "s.qual_name";
-  if (field == "kind") return "s.kind";
-  if (field == "entity_type") return "en.kind";
-  if (field == "is_definition") return "s.is_definition";
-  if (field == "is_pure") return "s.is_pure";
-  if (field == "is_static") return "s.is_static";
-  if (field == "file") return "s.file_id";
-  if (field == "line") return "s.line";
-  if (field == "col") return "s.col";
+  if (field == "id") {
+    return "s.id";
+  }
+  if (field == "usr") {
+    return "s.usr";
+  }
+  if (field == "name") {
+    return "COALESCE(s.qual_name, s.spelling)";
+  }
+  if (field == "spelling") {
+    return "s.spelling";
+  }
+  if (field == "qual_name") {
+    return "s.qual_name";
+  }
+  if (field == "kind") {
+    return "s.kind";
+  }
+  if (field == "entity_type") {
+    return "en.kind";
+  }
+  if (field == "is_definition") {
+    return "s.is_definition";
+  }
+  if (field == "is_pure") {
+    return "s.is_pure";
+  }
+  if (field == "is_static") {
+    return "s.is_static";
+  }
+  if (field == "file") {
+    return "s.file_id";
+  }
+  if (field == "line") {
+    return "s.line";
+  }
+  if (field == "col") {
+    return "s.col";
+  }
   throw PlanError("E_FIELD: unknown field '" + field + "'");
 }
 
@@ -162,13 +187,18 @@ struct Stream {
 
 // Deterministic Cell ordering: ints < strings < null.
 int cell_rank(const Cell &c) {
-  if (std::holds_alternative<std::nullptr_t>(c)) return 2;
-  if (std::holds_alternative<int64_t>(c)) return 0;
+  if (std::holds_alternative<std::nullptr_t>(c)) {
+    return 2;
+  }
+  if (std::holds_alternative<int64_t>(c)) {
+    return 0;
+  }
   return 1;
 }
 
 bool cell_less(const Cell &a, const Cell &b) {
-  const int ra = cell_rank(a), rb = cell_rank(b);
+  const int ra = cell_rank(a);
+  const int rb = cell_rank(b);
   if (ra != rb) {
     return ra < rb;
   }
@@ -302,8 +332,8 @@ private:
         auto part = fetch_ids(db_, sql, args);
         kept.insert(kept.end(), part.begin(), part.end());
       }
-      std::sort(kept.begin(), kept.end());
-      kept.erase(std::unique(kept.begin(), kept.end()), kept.end());
+      std::ranges::sort(kept);
+      kept.erase(std::ranges::unique(kept).begin(), kept.end());
       st.ids = std::move(kept);
     }
     st.view = level;
@@ -347,8 +377,8 @@ private:
       auto part = fetch_ids(db_, sql, args);
       out.insert(out.end(), part.begin(), part.end());
     }
-    std::sort(out.begin(), out.end());
-    out.erase(std::unique(out.begin(), out.end()), out.end());
+    std::ranges::sort(out);
+    out.erase(std::ranges::unique(out).begin(), out.end());
     st.ids = std::move(out);
   }
 
@@ -367,9 +397,8 @@ private:
     const std::string to_col = outward ? "dst_id" : "src_id";
 
     std::vector<int64_t> frontier = st.ids;
-    std::sort(frontier.begin(), frontier.end());
-    frontier.erase(std::unique(frontier.begin(), frontier.end()),
-                   frontier.end());
+    std::ranges::sort(frontier);
+    frontier.erase(std::ranges::unique(frontier).begin(), frontier.end());
     std::set<int64_t> emitted;
     int64_t states = 0; // cumulative level sizes, bounded by the budget
 
@@ -389,8 +418,8 @@ private:
         auto part = fetch_ids(db_, sql, args);
         level.insert(level.end(), part.begin(), part.end());
       }
-      std::sort(level.begin(), level.end());
-      level.erase(std::unique(level.begin(), level.end()), level.end());
+      std::ranges::sort(level);
+      level.erase(std::ranges::unique(level).begin(), level.end());
       if (states + static_cast<int64_t>(level.size()) >
           kTraverseNodeBudget) {
         level.resize(static_cast<size_t>(kTraverseNodeBudget - states));
@@ -413,8 +442,8 @@ private:
     Stream sub = run_plan(*stage.operand);
     st.truncated = st.truncated || sub.truncated;
     auto dedup = [](std::vector<int64_t> v) {
-      std::sort(v.begin(), v.end());
-      v.erase(std::unique(v.begin(), v.end()), v.end());
+      std::ranges::sort(v);
+      v.erase(std::ranges::unique(v).begin(), v.end());
       return v;
     };
     const std::vector<int64_t> a = dedup(st.ids);
@@ -423,14 +452,11 @@ private:
     // All three are SET operations (PR #20 review: union must not
     // double-count overlapping ids).
     if (stage.op == StageOp::Union) {
-      std::set_union(a.begin(), a.end(), b.begin(), b.end(),
-                     std::back_inserter(out));
+      std::ranges::set_union(a, b, std::back_inserter(out));
     } else if (stage.op == StageOp::Intersect) {
-      std::set_intersection(a.begin(), a.end(), b.begin(), b.end(),
-                            std::back_inserter(out));
+      std::ranges::set_intersection(a, b, std::back_inserter(out));
     } else {
-      std::set_difference(a.begin(), a.end(), b.begin(), b.end(),
-                          std::back_inserter(out));
+      std::ranges::set_difference(a, b, std::back_inserter(out));
     }
     st.ids = std::move(out);
   }
@@ -447,13 +473,12 @@ private:
   std::map<int64_t, std::vector<Cell>>
   fetch_cells(Stream &st, const std::vector<std::string> &fields) {
     const bool need_entity =
-        std::find(fields.begin(), fields.end(), "entity_type") !=
-        fields.end();
+        std::ranges::find(fields, "entity_type") != fields.end();
     const std::string join = join_clause(need_entity);
 
     std::vector<int64_t> uniq = st.ids;
-    std::sort(uniq.begin(), uniq.end());
-    uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
+    std::ranges::sort(uniq);
+    uniq.erase(std::ranges::unique(uniq).begin(), uniq.end());
 
     std::string cols;
     for (const auto &f : fields) {
@@ -518,10 +543,10 @@ private:
     st.ids.clear();
   }
 
-  void apply_distinct(Stream &st) {
+  static void apply_distinct(Stream &st) {
     if (st.shape == Shape::Nodes) {
-      std::sort(st.ids.begin(), st.ids.end());
-      st.ids.erase(std::unique(st.ids.begin(), st.ids.end()), st.ids.end());
+      std::ranges::sort(st.ids);
+      st.ids.erase(std::ranges::unique(st.ids).begin(), st.ids.end());
       return;
     }
     std::vector<std::vector<Cell>> rows;
@@ -555,31 +580,29 @@ private:
   void apply_order(Stream &st, const std::vector<std::string> &fields) {
     if (st.shape == Shape::Nodes) {
       auto by_id = fetch_cells(st, fields);
-      std::stable_sort(st.ids.begin(), st.ids.end(),
-                       [&](int64_t a, int64_t b) {
-                         const auto &ca = by_id.at(a);
-                         const auto &cb = by_id.at(b);
-                         for (size_t i = 0; i < ca.size(); ++i) {
-                           if (!cell_eq(ca[i], cb[i])) {
-                             return cell_less(ca[i], cb[i]);
-                           }
-                         }
-                         return a < b;
-                       });
+      std::ranges::stable_sort(st.ids, [&](int64_t a, int64_t b) {
+        const auto &ca = by_id.at(a);
+        const auto &cb = by_id.at(b);
+        for (size_t i = 0; i < ca.size(); ++i) {
+          if (!cell_eq(ca[i], cb[i])) {
+            return cell_less(ca[i], cb[i]);
+          }
+        }
+        return a < b;
+      });
       return;
     }
     std::vector<size_t> pos;
     pos.reserve(fields.size());
     for (const auto &f : fields) {
-      pos.push_back(static_cast<size_t>(
-          std::find(st.fields.begin(), st.fields.end(), f) -
-          st.fields.begin()));
+      pos.push_back(static_cast<size_t>(std::ranges::find(st.fields, f) -
+                                        st.fields.begin()));
     }
     std::vector<size_t> idx(st.rows.size());
     for (size_t i = 0; i < idx.size(); ++i) {
       idx[i] = i;
     }
-    std::stable_sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
+    std::ranges::stable_sort(idx, [&](size_t a, size_t b) {
       for (size_t p : pos) {
         if (!cell_eq(st.rows[a][p], st.rows[b][p])) {
           return cell_less(st.rows[a][p], st.rows[b][p]);
@@ -602,10 +625,10 @@ private:
   static void apply_limit(Stream &st, int64_t n) {
     st.limit_in_effect = true;
     if (st.shape == Shape::Nodes) {
-      if (static_cast<int64_t>(st.ids.size()) > n) {
+      if (std::cmp_greater(st.ids.size(), n)) {
         st.ids.resize(n);
       }
-    } else if (static_cast<int64_t>(st.rows.size()) > n) {
+    } else if (std::cmp_greater(st.rows.size(), n)) {
       st.rows.resize(n);
       st.row_ids.resize(n);
     }
@@ -646,34 +669,34 @@ public:
 json_out::Value Result::to_json() const {
   using namespace json_out;
   Object o;
-  o.push_back({"shape", Value::of(std::string(
-                            shape == Shape::Nodes   ? "nodes"
-                            : shape == Shape::Rows ? "rows"
-                                                   : "scalar"))});
-  o.push_back({"view", Value::of(std::string(view_name(view)))});
+  o.emplace_back("shape",
+                 Value::of(std::string(shape == Shape::Nodes  ? "nodes"
+                                       : shape == Shape::Rows ? "rows"
+                                                              : "scalar")));
+  o.emplace_back("view", Value::of(std::string(view_name(view))));
   if (shape == Shape::Scalar) {
-    o.push_back({"count", Value::of(scalar)});
-    o.push_back({"truncated", Value::of(truncated)});
+    o.emplace_back("count", Value::of(scalar));
+    o.emplace_back("truncated", Value::of(truncated));
     return Value::obj(std::move(o));
   }
-  o.push_back({"count", Value::of(static_cast<int64_t>(rows.size()))});
-  o.push_back({"truncated", Value::of(truncated)});
+  o.emplace_back("count", Value::of(static_cast<int64_t>(rows.size())));
+  o.emplace_back("truncated", Value::of(truncated));
   Array arr;
   for (const auto &row : rows) {
     Object ro;
     for (size_t i = 0; i < fields.size(); ++i) {
       const Cell &c = row[i];
       if (std::holds_alternative<std::nullptr_t>(c)) {
-        ro.push_back({fields[i], Value::null()});
+        ro.emplace_back(fields[i], Value::null());
       } else if (std::holds_alternative<int64_t>(c)) {
-        ro.push_back({fields[i], Value::of(std::get<int64_t>(c))});
+        ro.emplace_back(fields[i], Value::of(std::get<int64_t>(c)));
       } else {
-        ro.push_back({fields[i], Value::of(std::get<std::string>(c))});
+        ro.emplace_back(fields[i], Value::of(std::get<std::string>(c)));
       }
     }
     arr.push_back(Value::obj(std::move(ro)));
   }
-  o.push_back({"rows", Value::arr(std::move(arr))});
+  o.emplace_back("rows", Value::arr(std::move(arr)));
   return Value::obj(std::move(o));
 }
 
@@ -685,5 +708,4 @@ Result Executor::run(const Plan &plan) {
   return res;
 }
 
-} // namespace query
-} // namespace cidx
+} // namespace cidx::query

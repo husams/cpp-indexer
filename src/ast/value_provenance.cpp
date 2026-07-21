@@ -17,8 +17,9 @@ const clang::FunctionDecl *callee_of(const clang::Expr *e) {
     const clang::Decl *callee = call->getCalleeDecl();
     return llvm::dyn_cast_or_null<clang::FunctionDecl>(callee);
   }
-  if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructExpr>(e))
+  if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructExpr>(e)) {
     return ctor->getConstructor();
+  }
   return nullptr;
 }
 
@@ -79,39 +80,49 @@ const clang::Expr *normalize_value_expr(const clang::Expr *expr) {
 }
 
 std::string record_usr_of_type(clang::QualType type) {
-  if (type.isNull())
+  if (type.isNull()) {
     return {};
+  }
   clang::QualType canonical = type.getCanonicalType();
-  while (canonical->isPointerType() || canonical->isReferenceType())
+  while (canonical->isPointerType() || canonical->isReferenceType()) {
     canonical = canonical->getPointeeType().getCanonicalType();
+  }
   const clang::TagDecl *decl = canonical->getAsTagDecl();
-  if (decl == nullptr)
+  if (decl == nullptr) {
     return {};
+  }
   return usr_for_decl(decl);
 }
 
 bool type_is_value(clang::QualType loc_type,
                    const std::string &dispatch_record_usr) {
-  if (dispatch_record_usr.empty() || loc_type.isNull())
+  if (dispatch_record_usr.empty() || loc_type.isNull()) {
     return false;
+  }
   const clang::QualType c = loc_type.getCanonicalType();
-  if (!c->isRecordType())
+  if (!c->isRecordType()) {
     return false;
+  }
   const clang::TagDecl *decl = c->getAsTagDecl();
-  if (decl == nullptr)
+  if (decl == nullptr) {
     return false;
+  }
   return usr_for_decl(decl) == dispatch_record_usr;
 }
 
 clang::QualType decl_type_for_expr(const clang::Expr *normalized) {
-  if (normalized == nullptr)
+  if (normalized == nullptr) {
     return {};
-  if (const auto *dre = llvm::dyn_cast<clang::DeclRefExpr>(normalized))
+  }
+  if (const auto *dre = llvm::dyn_cast<clang::DeclRefExpr>(normalized)) {
     return dre->getDecl()->getType();
-  if (const auto *me = llvm::dyn_cast<clang::MemberExpr>(normalized))
+  }
+  if (const auto *me = llvm::dyn_cast<clang::MemberExpr>(normalized)) {
     return me->getMemberDecl()->getType();
-  if (const clang::FunctionDecl *fd = callee_of(normalized))
+  }
+  if (const clang::FunctionDecl *fd = callee_of(normalized)) {
     return fd->getReturnType();
+  }
   return normalized->getType();
 }
 
@@ -126,18 +137,32 @@ ValueSource classify_decl_ref(const clang::DeclRefExpr *dre) {
   const std::string decl_usr = usr_for_decl(ref);
   const std::string type_usr =
       record_usr_of_type(llvm::cast<clang::Expr>(dre)->getType());
-  if (llvm::isa<clang::ParmVarDecl>(ref))
-    return {"local", type_usr, decl_usr, ""};
+  if (llvm::isa<clang::ParmVarDecl>(ref)) {
+    return {.src_kind = "local",
+            .type_usr = type_usr,
+            .decl_usr = decl_usr,
+            .callee_usr = ""};
+  }
   if (const auto *var = llvm::dyn_cast<clang::VarDecl>(ref)) {
     const auto *rec =
         llvm::dyn_cast_or_null<clang::CXXRecordDecl>(var->getDeclContext());
     const bool local_ctx =
         var->isLocalVarDecl() || (rec != nullptr && rec->isLambda());
-    if (local_ctx)
-      return {"local", type_usr, decl_usr, ""};
-    return {"global", type_usr, decl_usr, ""};
+    if (local_ctx) {
+      return {.src_kind = "local",
+              .type_usr = type_usr,
+              .decl_usr = decl_usr,
+              .callee_usr = ""};
+    }
+    return {.src_kind = "global",
+            .type_usr = type_usr,
+            .decl_usr = decl_usr,
+            .callee_usr = ""};
   }
-  return {"unknown", type_usr, decl_usr, ""};
+  return {.src_kind = "unknown",
+          .type_usr = type_usr,
+          .decl_usr = decl_usr,
+          .callee_usr = ""};
 }
 
 // Call-shaped values. A converted value — functional cast `std::string("x")`
@@ -146,17 +171,35 @@ ValueSource classify_decl_ref(const clang::DeclRefExpr *dre) {
 // calls resolving to a ctor/conversion) -> construct.
 ValueSource classify_call_shaped(const clang::Expr *peeled) {
   const std::string type_usr = record_usr_of_type(peeled->getType());
-  if (llvm::isa<clang::ExplicitCastExpr>(peeled))
-    return {"call_result", type_usr, "", ""};
-  if (llvm::isa<clang::CXXConstructExpr>(peeled))
-    return {"construct", type_usr, "", ""};
+  if (llvm::isa<clang::ExplicitCastExpr>(peeled)) {
+    return {.src_kind = "call_result",
+            .type_usr = type_usr,
+            .decl_usr = "",
+            .callee_usr = ""};
+  }
+  if (llvm::isa<clang::CXXConstructExpr>(peeled)) {
+    return {.src_kind = "construct",
+            .type_usr = type_usr,
+            .decl_usr = "",
+            .callee_usr = ""};
+  }
   if (const clang::FunctionDecl *fd = callee_of(peeled)) {
     if (llvm::isa<clang::CXXConstructorDecl>(fd) ||
-        llvm::isa<clang::CXXConversionDecl>(fd))
-      return {"construct", type_usr, "", ""};
-    return {"call_result", type_usr, "", usr_for_decl(fd)};
+        llvm::isa<clang::CXXConversionDecl>(fd)) {
+      return {.src_kind = "construct",
+              .type_usr = type_usr,
+              .decl_usr = "",
+              .callee_usr = ""};
+    }
+    return {.src_kind = "call_result",
+            .type_usr = type_usr,
+            .decl_usr = "",
+            .callee_usr = usr_for_decl(fd)};
   }
-  return {"call_result", type_usr, "", ""};
+  return {.src_kind = "call_result",
+          .type_usr = type_usr,
+          .decl_usr = "",
+          .callee_usr = ""};
 }
 
 } // namespace
@@ -164,38 +207,54 @@ ValueSource classify_call_shaped(const clang::Expr *peeled) {
 ValueSource classify_value_source(const clang::ASTContext & /*context*/,
                                   const clang::Expr *expr) {
   const clang::Expr *peeled = normalize_value_expr(expr);
-  if (peeled == nullptr)
-    return {"unknown", "", "", ""};
+  if (peeled == nullptr) {
+    return {.src_kind = "unknown",
+            .type_usr = "",
+            .decl_usr = "",
+            .callee_usr = ""};
+  }
 
   if (llvm::isa<clang::CXXThisExpr>(peeled)) {
     const std::string tu = record_usr_of_type(peeled->getType());
-    return {"this", tu, tu, ""};
+    return {
+        .src_kind = "this", .type_usr = tu, .decl_usr = tu, .callee_usr = ""};
   }
 
-  if (const auto *dre = llvm::dyn_cast<clang::DeclRefExpr>(peeled))
+  if (const auto *dre = llvm::dyn_cast<clang::DeclRefExpr>(peeled)) {
     return classify_decl_ref(dre);
+  }
 
   if (const auto *me = llvm::dyn_cast<clang::MemberExpr>(peeled)) {
     const std::string decl_usr = usr_for_decl(me->getMemberDecl());
     const std::string type_usr = record_usr_of_type(peeled->getType());
-    return {"member", type_usr, decl_usr, ""};
+    return {.src_kind = "member",
+            .type_usr = type_usr,
+            .decl_usr = decl_usr,
+            .callee_usr = ""};
   }
 
   if (llvm::isa<clang::ExplicitCastExpr>(peeled) ||
       llvm::isa<clang::CXXConstructExpr>(peeled) ||
-      llvm::isa<clang::CallExpr>(peeled))
+      llvm::isa<clang::CallExpr>(peeled)) {
     return classify_call_shaped(peeled);
+  }
 
   // Dependent construct in a template pattern (any(value) materialized for
   // `store_[key] = value`): a call-shaped value with no resolvable callee.
   if (const auto *uc =
           llvm::dyn_cast<clang::CXXUnresolvedConstructExpr>(peeled)) {
     const std::string type_usr = record_usr_of_type(uc->getTypeAsWritten());
-    return {"call_result", type_usr, "", ""};
+    return {.src_kind = "call_result",
+            .type_usr = type_usr,
+            .decl_usr = "",
+            .callee_usr = ""};
   }
   if (llvm::isa<clang::CXXNewExpr>(peeled)) {
     const std::string type_usr = record_usr_of_type(peeled->getType());
-    return {"construct", type_usr, "", ""};
+    return {.src_kind = "construct",
+            .type_usr = type_usr,
+            .decl_usr = "",
+            .callee_usr = ""};
   }
 
   if (llvm::isa<clang::IntegerLiteral>(peeled) ||
@@ -204,10 +263,15 @@ ValueSource classify_value_source(const clang::ASTContext & /*context*/,
       llvm::isa<clang::CharacterLiteral>(peeled) ||
       llvm::isa<clang::CXXBoolLiteralExpr>(peeled) ||
       llvm::isa<clang::CXXNullPtrLiteralExpr>(peeled) ||
-      llvm::isa<clang::GNUNullExpr>(peeled))
-    return {"literal", "", "", ""};
+      llvm::isa<clang::GNUNullExpr>(peeled)) {
+    return {.src_kind = "literal",
+            .type_usr = "",
+            .decl_usr = "",
+            .callee_usr = ""};
+  }
 
-  return {"unknown", "", "", ""};
+  return {
+      .src_kind = "unknown", .type_usr = "", .decl_usr = "", .callee_usr = ""};
 }
 
 } // namespace cidx::ast

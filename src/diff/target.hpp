@@ -9,8 +9,7 @@
 #include <utility>
 #include <vector>
 
-namespace cidx {
-namespace diff {
+namespace cidx::diff {
 
 // One side of the comparison as requested on the CLI (paths not yet
 // resolved). side is "left" or "right" — used verbatim in error messages.
@@ -75,5 +74,4 @@ OptionClasses classify_options(const std::vector<std::string> &options);
 
 ConfigDelta config_delta(const ParseConfig &left, const ParseConfig &right);
 
-} // namespace diff
-} // namespace cidx
+} // namespace cidx::diff

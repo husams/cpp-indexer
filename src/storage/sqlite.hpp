@@ -46,10 +46,10 @@ public:
   // Runs the statement to completion (e.g. DML with RETURNING).
   void step_done();
 
-  bool col_is_null(int idx) const;
-  int64_t col_int64(int idx) const;
-  double col_double(int idx) const;
-  std::string col_text(int idx) const; // NULL -> ""
+  [[nodiscard]] bool col_is_null(int idx) const;
+  [[nodiscard]] int64_t col_int64(int idx) const;
+  [[nodiscard]] double col_double(int idx) const;
+  [[nodiscard]] std::string col_text(int idx) const; // NULL -> ""
 
 private:
   sqlite3 *db_ = nullptr;
@@ -69,7 +69,7 @@ public:
 
   SqliteStmt prepare(std::string_view sql);
   void exec(std::string_view sql_script); // multi-statement, throws on error
-  int64_t changes() const;                // rows affected by the last DML
+  [[nodiscard]] int64_t changes() const;  // rows affected by the last DML
   sqlite3 *raw() { return db_; }
 
 private:

@@ -41,44 +41,56 @@ bool NamespaceUseVisitor::in_target_file(const clang::Decl *decl) const {
 // enclosing-source stack (nullopt when not a scope, unnamed, or unindexed).
 std::optional<int64_t>
 NamespaceUseVisitor::scope_symbol_id(const clang::Decl *decl) const {
-  if (!is_scope_decl(decl))
+  if (!is_scope_decl(decl)) {
     return std::nullopt;
+  }
   const auto *nd = llvm::dyn_cast<clang::NamedDecl>(decl);
-  if (nd == nullptr)
+  if (nd == nullptr) {
     return std::nullopt;
+  }
   const std::string usr = usr_for_decl(nd);
-  if (usr.empty())
+  if (usr.empty()) {
     return std::nullopt;
+  }
   return sink_.lookup_symbol_id(usr);
 }
 
 bool NamespaceUseVisitor::TraverseDecl(clang::Decl *decl) {
-  if (decl == nullptr)
+  if (decl == nullptr) {
     return true;
+  }
   const std::optional<int64_t> scope_id = scope_symbol_id(decl);
-  if (scope_id)
+  if (scope_id) {
     scope_stack_.push_back(*scope_id);
+  }
   const bool result = RecursiveASTVisitor::TraverseDecl(decl);
-  if (scope_id)
+  if (scope_id) {
     scope_stack_.pop_back();
+  }
   return result;
 }
 
 void NamespaceUseVisitor::emit_ns_use(const clang::NamedDecl *ns_decl,
                                 clang::SourceLocation loc) {
-  if (scope_stack_.empty())
+  if (scope_stack_.empty()) {
     return; // no enclosing indexed symbol (-1 root)
+  }
   const ExpansionLoc eloc = expansion_loc(context_, loc);
-  if (eloc.file != target_file_)
+  if (eloc.file != target_file_) {
     return;
+  }
   const std::string usr = usr_for_decl(ns_decl);
-  if (usr.empty())
+  if (usr.empty()) {
     return;
+  }
   const auto ns_id = sink_.lookup_symbol_id(usr);
-  if (!ns_id || *ns_id == scope_stack_.back())
+  if (!ns_id || *ns_id == scope_stack_.back()) {
     return;
-  if (!seen_.insert({scope_stack_.back(), *ns_id, eloc.line, eloc.col}).second)
+  }
+  if (!seen_.insert({scope_stack_.back(), *ns_id, eloc.line, eloc.col})
+           .second) {
     return; // same NAMESPACE_REF site reached twice via RAV
+  }
   EdgeRecord e;
   e.src_id = scope_stack_.back();
   e.dst_id = *ns_id;
@@ -103,16 +115,18 @@ bool NamespaceUseVisitor::TraverseNestedNameSpecifierLoc(
   for (clang::NestedNameSpecifierLoc level = nns; level;) {
 #if LLVM_VERSION_MAJOR >= 22
     if (level.getNestedNameSpecifier().getKind() !=
-        clang::NestedNameSpecifier::Kind::Namespace)
+        clang::NestedNameSpecifier::Kind::Namespace) {
       break;
+    }
     const clang::NamespaceAndPrefixLoc np = level.getAsNamespaceAndPrefix();
     if (np.Namespace != nullptr) {
       if (const auto *alias =
-              llvm::dyn_cast<clang::NamespaceAliasDecl>(np.Namespace))
+              llvm::dyn_cast<clang::NamespaceAliasDecl>(np.Namespace)) {
         emit_ns_use(alias->getNamespace(), level.getLocalBeginLoc());
-      else if (const auto *ns =
-                   llvm::dyn_cast<clang::NamespaceDecl>(np.Namespace))
+      } else if (const auto *ns =
+                     llvm::dyn_cast<clang::NamespaceDecl>(np.Namespace)) {
         emit_ns_use(ns, level.getLocalBeginLoc());
+      }
     }
     level = np.Prefix;
 #else
@@ -138,12 +152,14 @@ bool NamespaceUseVisitor::VisitTypeLoc(clang::TypeLoc tl) {
   // RAV traversal, so this shim is unnecessary (and TagTypeLoc has no
   // getQualifierLoc).
   clang::NestedNameSpecifierLoc qual;
-  if (auto tt = tl.getAs<clang::TagTypeLoc>())
+  if (auto tt = tl.getAs<clang::TagTypeLoc>()) {
     qual = tt.getQualifierLoc();
-  else if (auto td = tl.getAs<clang::TypedefTypeLoc>())
+  } else if (auto td = tl.getAs<clang::TypedefTypeLoc>()) {
     qual = td.getQualifierLoc();
-  if (qual)
+  }
+  if (qual) {
     TraverseNestedNameSpecifierLoc(qual);
+  }
   return true;
 }
 #else
@@ -151,9 +167,10 @@ bool NamespaceUseVisitor::VisitTypeLoc(clang::TypeLoc /*tl*/) { return true; }
 #endif
 
 bool NamespaceUseVisitor::VisitUsingDirectiveDecl(clang::UsingDirectiveDecl *decl) {
-  if (in_target_file(decl))
+  if (in_target_file(decl)) {
     emit_ns_use(decl->getNominatedNamespaceAsWritten(),
                 decl->getIdentLocation());
+  }
   return true;
 }
 

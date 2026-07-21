@@ -10,8 +10,7 @@
 #include "cli/args.hpp"
 #include "cli/json_out.hpp"
 
-namespace cidx {
-namespace diff {
+namespace cidx::diff {
 
 namespace {
 
@@ -26,18 +25,18 @@ const Entity *any_entity(const EntityPair &p) {
 std::vector<const EntityPair *> sorted_rows(const Comparison &cmp) {
   std::vector<const EntityPair *> rows;
   rows.reserve(cmp.pairs.size());
-  for (const EntityPair &p : cmp.pairs)
+  for (const EntityPair &p : cmp.pairs) {
     rows.push_back(&p);
-  std::sort(rows.begin(), rows.end(),
-            [](const EntityPair *a, const EntityPair *b) {
-              const auto key = [](const EntityPair *p) {
-                return std::make_tuple(
-                    any_entity(*p)->kind, any_entity(*p)->name,
-                    p->left != nullptr ? p->left->usr : std::string(),
-                    p->right != nullptr ? p->right->usr : std::string());
-              };
-              return key(a) < key(b);
-            });
+  }
+  std::ranges::sort(rows, [](const EntityPair *a, const EntityPair *b) {
+    const auto key = [](const EntityPair *p) {
+      return std::make_tuple(any_entity(*p)->kind, any_entity(*p)->name,
+                             p->left != nullptr ? p->left->usr : std::string(),
+                             p->right != nullptr ? p->right->usr
+                                                 : std::string());
+    };
+    return key(a) < key(b);
+  });
   return rows;
 }
 
@@ -79,15 +78,17 @@ jo::Value side_value(const ParseConfig &c) {
 }
 
 jo::Value pair_value(const std::optional<std::pair<std::string, std::string>> &p) {
-  if (!p)
+  if (!p) {
     return jo::Value::null();
+  }
   return jo::Value::arr({jo::Value::of(p->first), jo::Value::of(p->second)});
 }
 
 jo::Value str_array(const std::vector<std::string> &v) {
   jo::Array a;
-  for (const std::string &s : v)
+  for (const std::string &s : v) {
     a.push_back(jo::Value::of(s));
+  }
   return jo::Value::arr(std::move(a));
 }
 
@@ -129,8 +130,9 @@ jo::Value entity_value(const EntityPair &p, bool with_syntax,
   jo::Value syntax = jo::Value::null();
   if (with_syntax) {
     jo::Array edits;
-    for (const EditOp &op : p.edits)
+    for (const EditOp &op : p.edits) {
       edits.push_back(edit_value(op));
+    }
     syntax = jo::Value::obj(
         {{"status", jo::Value::of(std::string(
               p.subtree_differs ? "changed" : "unchanged"))},
@@ -142,8 +144,9 @@ jo::Value entity_value(const EntityPair &p, bool with_syntax,
   jo::Value semantic = jo::Value::null();
   if (with_semantic) {
     jo::Array unsupported;
-    for (const Unsupported &u : p.unsupported)
+    for (const Unsupported &u : p.unsupported) {
       unsupported.push_back(unsupported_value(u));
+    }
     semantic = jo::Value::obj(
         {{"verdict", jo::Value::of(p.verdict)},
          {"evidence", jo::Value::of(p.evidence)},
@@ -177,23 +180,26 @@ void render_json(const ReportSpec &spec, const SideAnalysis &left,
                  const std::vector<const EntityPair *> &rows, bool with_syntax,
                  bool with_semantic, std::ostream &out) {
   jo::Array entities;
-  for (const EntityPair *p : rows)
+  for (const EntityPair *p : rows) {
     entities.push_back(entity_value(*p, with_syntax, with_semantic));
+  }
   jo::Value syntax = jo::Value::null();
-  if (with_syntax)
+  if (with_syntax) {
     syntax = jo::Value::obj(
         {{"status", jo::Value::of(std::string(
               cmp.syntax_changed ? "changed" : "unchanged"))},
          {"edit_count", jo::Value::of(cmp.edit_count)},
          {"truncated", jo::Value::of(cmp.truncated)}});
+  }
   jo::Value semantic = jo::Value::null();
-  if (with_semantic)
+  if (with_semantic) {
     semantic = jo::Value::obj(
         {{"verdict", jo::Value::of(cmp.verdict)},
          {"evidence", jo::Value::of(cmp.evidence)},
          {"assumptions", str_array(cmp.assumptions)},
          {"unsupported_count", jo::Value::of(cmp.unsupported_count)},
          {"detail", jo::Value::of(cmp.detail)}});
+  }
   const jo::Value root = jo::Value::obj(
       {{"tool", jo::Value::of(std::string("cidx-diff"))},
        {"version", jo::Value::of(std::string(cli::kVersion))},
@@ -214,8 +220,9 @@ std::vector<std::string> read_lines(const std::string &path) {
   std::ifstream in(path);
   std::vector<std::string> lines;
   std::string l;
-  while (std::getline(in, l))
+  while (std::getline(in, l)) {
     lines.push_back(l);
+  }
   return lines;
 }
 
@@ -228,18 +235,21 @@ void print_context(char side, const std::vector<std::string> &lines,
   const long long hi =
       std::min(static_cast<long long>(lines.size()),
                static_cast<long long>(r.end_line) + static_cast<long long>(n));
-  for (long long ln = lo; ln <= hi; ++ln)
+  for (long long ln = lo; ln <= hi; ++ln) {
     out << indent << "  " << side << ln << " | "
         << lines[static_cast<std::size_t>(ln - 1)] << "\n";
+  }
 }
 
 std::string op_line(const EditOp &e) {
   std::string s = e.op;
-  if (s.size() < 7)
+  if (s.size() < 7) {
     s.resize(7, ' ');
+  }
   s += "  " + e.node;
-  if (!e.detail.empty())
+  if (!e.detail.empty()) {
     s += "  " + e.detail;
+  }
   s += "  " + fmt_op_ranges(e);
   return s;
 }
@@ -250,44 +260,52 @@ void render_delta_text(const ConfigDelta &d, std::ostream &out) {
     return;
   }
   out << "config: different\n";
-  const auto axis = [&out](const char *name,
-                           const std::optional<std::pair<std::string,
-                                                         std::string>> &p) {
-    if (p)
-      out << "  " << name << ": " << (p->first.empty() ? "-" : p->first)
-          << " -> " << (p->second.empty() ? "-" : p->second) << "\n";
-  };
+  const auto axis =
+      [&out](const char *name,
+             const std::optional<std::pair<std::string, std::string>> &p) {
+        if (p) {
+          out << "  " << name << ": " << (p->first.empty() ? "-" : p->first)
+              << " -> " << (p->second.empty() ? "-" : p->second) << "\n";
+        }
+      };
   axis("std", d.standard);
   axis("target", d.target);
   axis("driver", d.driver);
   const auto list = [&out](const char *name,
                            const std::vector<std::string> &v) {
-    if (v.empty())
+    if (v.empty()) {
       return;
+    }
     out << "  " << name << ":";
-    for (const std::string &s : v)
+    for (const std::string &s : v) {
       out << " " << s;
+    }
     out << "\n";
   };
   list("definitions added", d.definitions_added);
   list("definitions removed", d.definitions_removed);
-  if (d.definitions_reordered)
+  if (d.definitions_reordered) {
     out << "  definitions: reordered\n";
-  if (d.includes_changed)
+  }
+  if (d.includes_changed) {
     out << "  includes: changed\n";
+  }
   list("options left only", d.options_left_only);
   list("options right only", d.options_right_only);
-  if (d.options_reordered)
+  if (d.options_reordered) {
     out << "  options: reordered\n";
+  }
 }
 
 void render_semantic_notes(const EntityPair &p, const std::string &indent,
                            std::ostream &out) {
-  for (const std::string &c : p.changes)
+  for (const std::string &c : p.changes) {
     out << indent << "change: " << c << "\n";
-  for (const Unsupported &u : p.unsupported)
+  }
+  for (const Unsupported &u : p.unsupported) {
     out << indent << "unsupported: " << u.what << " (" << u.side << " "
         << fmt_range(u.range) << ")\n";
+  }
 }
 
 void render_text(const ReportSpec &spec, const SideAnalysis &left,
@@ -299,15 +317,19 @@ void render_text(const ReportSpec &spec, const SideAnalysis &left,
   out << "cidx-diff: " << spec.scope << "  mode: " << spec.mode
       << "  match: " << spec.match << "\n";
   const EntityPair *main_pair = nullptr;
-  if (symbol)
-    for (const EntityPair *p : rows)
-      if (!p->member)
+  if (symbol) {
+    for (const EntityPair *p : rows) {
+      if (!p->member) {
         main_pair = p;
+      }
+    }
+  }
   const auto side_line = [&](const char *label, const std::string &file,
                              const Entity *e) {
     out << label << file;
-    if (e != nullptr)
+    if (e != nullptr) {
       out << " :: " << (e->signature.empty() ? e->name : e->signature);
+    }
     out << "\n";
   };
   side_line("left:  ", left.config.file,
@@ -331,46 +353,55 @@ void render_text(const ReportSpec &spec, const SideAnalysis &left,
       const std::string indent = symbol ? "  " : "    ";
       for (const EntityPair *p : rows) {
         // Member rows repeat edits already inside the record pair's script.
-        if (p->member || !p->subtree_differs)
+        if (p->member || !p->subtree_differs) {
           continue;
+        }
         if (!symbol) {
           out << "  " << any_entity(*p)->kind << " " << any_entity(*p)->name
               << "  " << p->status;
-          if (!p->match.empty())
+          if (!p->match.empty()) {
             out << " (" << p->match << " " << p->confidence << ")";
+          }
           out << "\n";
         }
         for (const EditOp &e : p->edits) {
           out << indent << op_line(e) << "\n";
           if (spec.context > 0) {
-            if (e.left_range)
+            if (e.left_range) {
               print_context('L', left_lines, *e.left_range, spec.context,
                             indent, out);
-            if (e.right_range)
+            }
+            if (e.right_range) {
               print_context('R', right_lines, *e.right_range, spec.context,
                             indent, out);
+            }
           }
         }
       }
     }
   }
-  if (!with_semantic)
+  if (!with_semantic) {
     return;
+  }
   out << "semantic: " << cmp.verdict << " (" << cmp.detail << ")\n";
   if (!cmp.assumptions.empty()) {
     out << "  assumptions:";
-    for (const std::string &a : cmp.assumptions)
+    for (const std::string &a : cmp.assumptions) {
       out << " " << a;
+    }
     out << "\n";
   }
-  if (main_pair != nullptr)
+  if (main_pair != nullptr) {
     render_semantic_notes(*main_pair, "  ", out);
+  }
   for (const EntityPair *p : rows) {
-    if (p == main_pair)
+    if (p == main_pair) {
       continue;
+    }
     if (p->verdict == verdict::kEquivalent && p->changes.empty() &&
-        p->unsupported.empty())
+        p->unsupported.empty()) {
       continue;
+    }
     out << "  " << any_entity(*p)->kind << " " << any_entity(*p)->name << "  "
         << p->verdict << " (" << p->detail << ")\n";
     render_semantic_notes(*p, "    ", out);
@@ -385,13 +416,13 @@ void render_report(const ReportSpec &spec, const SideAnalysis &left,
   const std::vector<const EntityPair *> rows = sorted_rows(cmp);
   const bool with_syntax = spec.mode == "syntax" || spec.mode == "both";
   const bool with_semantic = spec.mode == "semantic" || spec.mode == "both";
-  if (spec.json)
+  if (spec.json) {
     render_json(spec, left, right, delta, cmp, rows, with_syntax,
                 with_semantic, out);
-  else
+  } else {
     render_text(spec, left, right, delta, cmp, rows, with_syntax,
                 with_semantic, out);
+  }
 }
 
-} // namespace diff
-} // namespace cidx
+} // namespace cidx::diff

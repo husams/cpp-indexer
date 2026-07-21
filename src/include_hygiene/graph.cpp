@@ -19,12 +19,11 @@ void merge_into(std::vector<GraphEdge> &list, GraphEdge e) {
     if (x.dst_path == e.dst_path && x.src_path == e.src_path) {
       x.count += e.count;
       for (std::string &d : e.configs) {
-        if (std::find(x.configs.begin(), x.configs.end(), d) ==
-            x.configs.end()) {
+        if (std::ranges::find(x.configs, d) == x.configs.end()) {
           x.configs.push_back(std::move(d));
         }
       }
-      std::sort(x.configs.begin(), x.configs.end());
+      std::ranges::sort(x.configs);
       // A target owned under one configuration and unresolved under another is
       // still that target: keep the id we know.
       if (!x.dst_file_id) {
@@ -37,8 +36,7 @@ void merge_into(std::vector<GraphEdge> &list, GraphEdge e) {
 }
 
 void sort_by_far_end(std::vector<GraphEdge> &list, bool by_dst) {
-  std::sort(list.begin(), list.end(), [by_dst](const GraphEdge &a,
-                                               const GraphEdge &b) {
+  std::ranges::sort(list, [by_dst](const GraphEdge &a, const GraphEdge &b) {
     return by_dst ? a.dst_path < b.dst_path : a.src_path < b.src_path;
   });
 }
@@ -180,7 +178,7 @@ std::vector<std::string> IncludeGraph::shortest_path(const std::string &from,
     cur = parent[cur];
     chain.push_back(cur);
   }
-  std::reverse(chain.begin(), chain.end());
+  std::ranges::reverse(chain);
   return chain;
 }
 
@@ -191,17 +189,18 @@ std::vector<std::vector<std::string>> IncludeGraph::cycles() const {
     std::string node;
     std::size_t next_child = 0;
   };
-  std::unordered_map<std::string, int> index, lowlink;
+  std::unordered_map<std::string, int> index;
+  std::unordered_map<std::string, int> lowlink;
   std::unordered_set<std::string> on_stack;
   std::vector<std::string> stack;
   std::vector<std::vector<std::string>> out;
   int counter = 0;
 
   for (const std::string &root : nodes()) {
-    if (index.count(root) != 0) {
+    if (index.contains(root)) {
       continue;
     }
-    std::vector<Frame> work{{root, 0}};
+    std::vector<Frame> work{{.node = root, .next_child = 0}};
     index[root] = lowlink[root] = counter++;
     stack.push_back(root);
     on_stack.insert(root);
@@ -214,12 +213,12 @@ std::vector<std::vector<std::string>> IncludeGraph::cycles() const {
 
       if (kids != nullptr && f.next_child < kids->size()) {
         const std::string &child = (*kids)[f.next_child++].dst_path;
-        if (index.count(child) == 0) {
+        if (!index.contains(child)) {
           index[child] = lowlink[child] = counter++;
           stack.push_back(child);
           on_stack.insert(child);
-          work.push_back({child, 0});
-        } else if (on_stack.count(child) != 0) {
+          work.push_back({.node = child, .next_child = 0});
+        } else if (on_stack.contains(child)) {
           lowlink[f.node] = std::min(lowlink[f.node], index[child]);
         }
         continue;
@@ -244,7 +243,7 @@ std::vector<std::vector<std::string>> IncludeGraph::cycles() const {
             std::any_of(it->second.begin(), it->second.end(),
                         [&](const GraphEdge &e) { return e.dst_path == f.node; });
         if (comp.size() > 1 || self_loop) {
-          std::sort(comp.begin(), comp.end());
+          std::ranges::sort(comp);
           out.push_back(std::move(comp));
         }
       }
@@ -256,7 +255,7 @@ std::vector<std::vector<std::string>> IncludeGraph::cycles() const {
       }
     }
   }
-  std::sort(out.begin(), out.end());
+  std::ranges::sort(out);
   return out;
 }
 
@@ -288,7 +287,7 @@ std::vector<std::string> IncludeGraph::nodes() const {
 }
 
 bool IncludeGraph::has_node(const std::string &path) const {
-  return out_.count(path) != 0 || in_.count(path) != 0;
+  return out_.contains(path) || in_.contains(path);
 }
 
 } // namespace cidx::hygiene

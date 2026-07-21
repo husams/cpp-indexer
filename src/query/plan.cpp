@@ -7,8 +7,7 @@
 
 #include "storage/storage.hpp"
 
-namespace cidx {
-namespace query {
+namespace cidx::query {
 
 // ---- Views --------------------------------------------------------------------
 
@@ -21,37 +20,37 @@ const char *view_name(View v) {
 const std::vector<RelationDesc> &relation_catalog() {
   static const std::vector<RelationDesc> cat = {
       // Layer-0 edge kinds (edge_kind seed, storage schema).
-      {"calls", View::Symbol, 1},
-      {"inherits", View::Symbol, 2},
-      {"contains", View::Symbol, 3},
-      {"specializes", View::Symbol, 4},
-      {"instantiates", View::Symbol, 5},
-      {"overrides", View::Symbol, 6},
-      {"uses", View::Symbol, 7},
-      {"field_of", View::Symbol, 8},
-      {"method_of", View::Symbol, 9},
-      {"construct-value", View::Symbol, 10},
-      {"construct-temp", View::Symbol, 11},
-      {"construct-heap", View::Symbol, 12},
-      {"construct-copy", View::Symbol, 13},
-      {"construct-move", View::Symbol, 14},
-      {"factory-construct", View::Symbol, 15},
-      {"destroy", View::Symbol, 16},
-      {"friend", View::Symbol, 17},
-      {"dispatch_calls", View::Symbol, 18},
+      {.name = "calls", .layer = View::Symbol, .kind_id = 1},
+      {.name = "inherits", .layer = View::Symbol, .kind_id = 2},
+      {.name = "contains", .layer = View::Symbol, .kind_id = 3},
+      {.name = "specializes", .layer = View::Symbol, .kind_id = 4},
+      {.name = "instantiates", .layer = View::Symbol, .kind_id = 5},
+      {.name = "overrides", .layer = View::Symbol, .kind_id = 6},
+      {.name = "uses", .layer = View::Symbol, .kind_id = 7},
+      {.name = "field_of", .layer = View::Symbol, .kind_id = 8},
+      {.name = "method_of", .layer = View::Symbol, .kind_id = 9},
+      {.name = "construct-value", .layer = View::Symbol, .kind_id = 10},
+      {.name = "construct-temp", .layer = View::Symbol, .kind_id = 11},
+      {.name = "construct-heap", .layer = View::Symbol, .kind_id = 12},
+      {.name = "construct-copy", .layer = View::Symbol, .kind_id = 13},
+      {.name = "construct-move", .layer = View::Symbol, .kind_id = 14},
+      {.name = "factory-construct", .layer = View::Symbol, .kind_id = 15},
+      {.name = "destroy", .layer = View::Symbol, .kind_id = 16},
+      {.name = "friend", .layer = View::Symbol, .kind_id = 17},
+      {.name = "dispatch_calls", .layer = View::Symbol, .kind_id = 18},
       // Layer-1 entity_edge kinds (entity_edge_kind seed).
-      {"generalizes", View::Entity, 1},
-      {"implements", View::Entity, 2},
-      {"specializes", View::Entity, 3},
-      {"composes", View::Entity, 4},
-      {"aggregates", View::Entity, 5},
-      {"associates", View::Entity, 6},
-      {"creates", View::Entity, 7},
-      {"uses", View::Entity, 8},
-      {"destroys", View::Entity, 9},
-      {"befriends", View::Entity, 10},
-      {"instantiates", View::Entity, 11},
-      {"declares", View::Entity, 12},
+      {.name = "generalizes", .layer = View::Entity, .kind_id = 1},
+      {.name = "implements", .layer = View::Entity, .kind_id = 2},
+      {.name = "specializes", .layer = View::Entity, .kind_id = 3},
+      {.name = "composes", .layer = View::Entity, .kind_id = 4},
+      {.name = "aggregates", .layer = View::Entity, .kind_id = 5},
+      {.name = "associates", .layer = View::Entity, .kind_id = 6},
+      {.name = "creates", .layer = View::Entity, .kind_id = 7},
+      {.name = "uses", .layer = View::Entity, .kind_id = 8},
+      {.name = "destroys", .layer = View::Entity, .kind_id = 9},
+      {.name = "befriends", .layer = View::Entity, .kind_id = 10},
+      {.name = "instantiates", .layer = View::Entity, .kind_id = 11},
+      {.name = "declares", .layer = View::Entity, .kind_id = 12},
   };
   return cat;
 }
@@ -59,10 +58,10 @@ const std::vector<RelationDesc> &relation_catalog() {
 const RelationDesc *resolve_relation(const std::string &name, View active) {
   std::string bare = name;
   std::optional<View> forced;
-  if (name.rfind("symbol.", 0) == 0) {
+  if (name.starts_with("symbol.")) {
     forced = View::Symbol;
     bare = name.substr(7);
-  } else if (name.rfind("entity.", 0) == 0) {
+  } else if (name.starts_with("entity.")) {
     forced = View::Entity;
     bare = name.substr(7);
   }
@@ -92,13 +91,13 @@ const std::vector<std::string> &entity_kind_names() {
 
 bool is_entity_kind(const std::string &name) {
   const auto &names = entity_kind_names();
-  return std::find(names.begin(), names.end(), name) != names.end();
+  return std::ranges::find(names, name) != names.end();
 }
 
 // entity_kind name -> id (matches the entity_kind seed values 0..9).
 int64_t entity_kind_id_of(const std::string &name) {
   const auto &names = entity_kind_names();
-  auto it = std::find(names.begin(), names.end(), name);
+  auto it = std::ranges::find(names, name);
   return it == names.end() ? -1 : static_cast<int64_t>(it - names.begin());
 }
 
@@ -112,19 +111,23 @@ struct FieldDesc {
 
 const std::vector<FieldDesc> &field_catalog() {
   static const std::vector<FieldDesc> f = {
-      {"id", true, false},
-      {"usr", true, true},
-      {"name", true, true},
-      {"spelling", true, true},
-      {"qual_name", true, true},
-      {"kind", true, true},        // C++ declaration kind (symbol_kind names)
-      {"entity_type", true, true}, // entity classification (entity_kind names)
-      {"is_definition", true, false},
-      {"is_pure", true, false},
-      {"is_static", true, false},
-      {"file", false, true},
-      {"line", false, false},
-      {"col", false, false},
+      {.name = "id", .filterable = true, .is_string = false},
+      {.name = "usr", .filterable = true, .is_string = true},
+      {.name = "name", .filterable = true, .is_string = true},
+      {.name = "spelling", .filterable = true, .is_string = true},
+      {.name = "qual_name", .filterable = true, .is_string = true},
+      {.name = "kind",
+       .filterable = true,
+       .is_string = true}, // C++ declaration kind (symbol_kind names)
+      {.name = "entity_type",
+       .filterable = true,
+       .is_string = true}, // entity classification (entity_kind names)
+      {.name = "is_definition", .filterable = true, .is_string = false},
+      {.name = "is_pure", .filterable = true, .is_string = false},
+      {.name = "is_static", .filterable = true, .is_string = false},
+      {.name = "file", .filterable = false, .is_string = true},
+      {.name = "line", .filterable = false, .is_string = false},
+      {.name = "col", .filterable = false, .is_string = false},
   };
   return f;
 }
@@ -234,9 +237,13 @@ const char *stage_op_name(StageOp op) {
   return "?";
 }
 
-Source codebase() { return Source{SourceKind::Codebase, ""}; }
-Source symbol(const std::string &ref) { return Source{SourceKind::Symbol, ref}; }
-Source entity(const std::string &ref) { return Source{SourceKind::Entity, ref}; }
+Source codebase() { return Source{.kind = SourceKind::Codebase, .ref = ""}; }
+Source symbol(const std::string &ref) {
+  return Source{.kind = SourceKind::Symbol, .ref = ref};
+}
+Source entity(const std::string &ref) {
+  return Source{.kind = SourceKind::Entity, .ref = ref};
+}
 
 Stage nodes() {
   Stage s;
@@ -577,8 +584,7 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
           fail("E_FIELD", "unknown field '" + f + "'");
         }
         if (st.shape == Shape::Rows &&
-            std::find(st.selected.begin(), st.selected.end(), f) ==
-                st.selected.end()) {
+            std::ranges::find(st.selected, f) == st.selected.end()) {
           fail("E_FIELD", "order_by field '" + f + "' is not selected");
         }
       }
@@ -622,18 +628,18 @@ json_out::Value pred_to_json(const Pred &p) {
   switch (p.op) {
   case PredOp::AllOf:
   case PredOp::AnyOf: {
-    o.push_back({"op", Value::of(std::string(
-                           p.op == PredOp::AllOf ? "all_of" : "any_of"))});
+    o.emplace_back("op", Value::of(std::string(
+                             p.op == PredOp::AllOf ? "all_of" : "any_of")));
     Array kids;
     for (const auto &k : p.kids) {
       kids.push_back(pred_to_json(k));
     }
-    o.push_back({"preds", Value::arr(std::move(kids))});
+    o.emplace_back("preds", Value::arr(std::move(kids)));
     break;
   }
   case PredOp::Not:
-    o.push_back({"op", Value::of(std::string("not"))});
-    o.push_back({"pred", pred_to_json(p.kids[0])});
+    o.emplace_back("op", Value::of(std::string("not")));
+    o.emplace_back("pred", pred_to_json(p.kids[0]));
     break;
   case PredOp::Eq:
   case PredOp::Ne:
@@ -641,23 +647,23 @@ json_out::Value pred_to_json(const Pred &p) {
     const char *name = p.op == PredOp::Eq   ? "eq"
                        : p.op == PredOp::Ne ? "ne"
                                             : "glob";
-    o.push_back({"op", Value::of(std::string(name))});
-    o.push_back({"field", Value::of(p.field)});
+    o.emplace_back("op", Value::of(std::string(name)));
+    o.emplace_back("field", Value::of(p.field));
     if (p.int_value.has_value()) {
-      o.push_back({"value", Value::of(*p.int_value)});
+      o.emplace_back("value", Value::of(*p.int_value));
     } else {
-      o.push_back({"value", Value::of(p.str_values[0])});
+      o.emplace_back("value", Value::of(p.str_values[0]));
     }
     break;
   }
   case PredOp::In: {
-    o.push_back({"op", Value::of(std::string("in"))});
-    o.push_back({"field", Value::of(p.field)});
+    o.emplace_back("op", Value::of(std::string("in")));
+    o.emplace_back("field", Value::of(p.field));
     Array vals;
     for (const auto &v : p.str_values) {
       vals.push_back(Value::of(v));
     }
-    o.push_back({"values", Value::arr(std::move(vals))});
+    o.emplace_back("values", Value::arr(std::move(vals)));
     break;
   }
   }
@@ -667,43 +673,43 @@ json_out::Value pred_to_json(const Pred &p) {
 json_out::Value plan_to_json_normalized(const Plan &plan) {
   using namespace json_out;
   Object root;
-  root.push_back({"cxq", Value::of(static_cast<int64_t>(1))});
+  root.emplace_back("cxq", Value::of(static_cast<int64_t>(1)));
   Object src;
   const char *skind = plan.source.kind == SourceKind::Codebase ? "codebase"
                       : plan.source.kind == SourceKind::Symbol ? "symbol"
                                                                : "entity";
-  src.push_back({"kind", Value::of(std::string(skind))});
+  src.emplace_back("kind", Value::of(std::string(skind)));
   if (plan.source.kind != SourceKind::Codebase) {
-    src.push_back({"ref", Value::of(plan.source.ref)});
+    src.emplace_back("ref", Value::of(plan.source.ref));
   }
-  root.push_back({"source", Value::obj(std::move(src))});
+  root.emplace_back("source", Value::obj(std::move(src)));
 
   Array stages;
   for (const auto &s : plan.stages) {
     Object o;
-    o.push_back({"op", Value::of(std::string(stage_op_name(s.op)))});
+    o.emplace_back("op", Value::of(std::string(stage_op_name(s.op))));
     switch (s.op) {
     case StageOp::Nodes:
       if (s.pred) {
-        o.push_back({"pred", pred_to_json(*s.pred)});
+        o.emplace_back("pred", pred_to_json(*s.pred));
       }
       break;
     case StageOp::ChangeView:
-      o.push_back({"level", Value::of(std::string(view_name(s.level)))});
+      o.emplace_back("level", Value::of(std::string(view_name(s.level))));
       break;
     case StageOp::Where:
-      o.push_back({"pred", pred_to_json(*s.pred)});
+      o.emplace_back("pred", pred_to_json(*s.pred));
       break;
     case StageOp::Out:
     case StageOp::In:
-      o.push_back({"relation", Value::of(s.relation)});
-      o.push_back({"min_depth", Value::of(s.min_depth)});
-      o.push_back({"max_depth", Value::of(s.max_depth)});
+      o.emplace_back("relation", Value::of(s.relation));
+      o.emplace_back("min_depth", Value::of(s.min_depth));
+      o.emplace_back("max_depth", Value::of(s.max_depth));
       break;
     case StageOp::Union:
     case StageOp::Intersect:
     case StageOp::Except:
-      o.push_back({"plan", plan_to_json_normalized(*s.operand)});
+      o.emplace_back("plan", plan_to_json_normalized(*s.operand));
       break;
     case StageOp::Select:
     case StageOp::OrderBy: {
@@ -711,19 +717,19 @@ json_out::Value plan_to_json_normalized(const Plan &plan) {
       for (const auto &n : s.fields) {
         f.push_back(Value::of(n));
       }
-      o.push_back({"fields", Value::arr(std::move(f))});
+      o.emplace_back("fields", Value::arr(std::move(f)));
       break;
     }
     case StageOp::Count:
     case StageOp::Distinct:
       break;
     case StageOp::Limit:
-      o.push_back({"n", Value::of(s.n)});
+      o.emplace_back("n", Value::of(s.n));
       break;
     }
     stages.push_back(Value::obj(std::move(o)));
   }
-  root.push_back({"stages", Value::arr(std::move(stages))});
+  root.emplace_back("stages", Value::arr(std::move(stages)));
   return Value::obj(std::move(root));
 }
 
@@ -737,5 +743,4 @@ std::string canonical_json(const Plan &plan) {
   return json_out::dumps_indent2(plan_to_json(plan));
 }
 
-} // namespace query
-} // namespace cidx
+} // namespace cidx::query

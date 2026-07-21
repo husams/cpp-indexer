@@ -14,8 +14,7 @@
 #include "cli/args.hpp"
 #include "util/logger.hpp"
 
-namespace cidx {
-namespace cli {
+namespace cidx::cli {
 
 // Cache-dir policy (analysis §1.3): $INDEXER_CACHE else ~/.cache/cidx,
 // expanduser'd, NOT abspath'd (Python parity). All generated files live
@@ -94,5 +93,4 @@ int cmd_include_apply(const ParsedArgs &args, Context &ctx);
 // Dispatch on args.command/args.what (args.help_text handled by the caller).
 int run_command(const ParsedArgs &args, Context &ctx);
 
-} // namespace cli
-} // namespace cidx
+} // namespace cidx::cli

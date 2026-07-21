@@ -46,16 +46,17 @@
 #include "util/errors.hpp"
 #include "util/hashing.hpp"
 
-namespace cidx {
-namespace diff {
+namespace cidx::diff {
 
 namespace {
 
 SrcRange to_range(const clang::ASTContext &ctx, clang::SourceRange r) {
   const ast::ExpansionLoc s = ast::extent_start(ctx, r);
   const ast::ExpansionLoc e = ast::extent_end(ctx, r);
-  return {static_cast<int>(s.line), static_cast<int>(s.col),
-          static_cast<int>(e.line), static_cast<int>(e.col)};
+  return {.line = static_cast<int>(s.line),
+          .col = static_cast<int>(s.col),
+          .end_line = static_cast<int>(e.line),
+          .end_col = static_cast<int>(e.col)};
 }
 
 std::string fmt_range(const SrcRange &r) {
@@ -68,7 +69,7 @@ std::string fmt_range(const SrcRange &r) {
 // path, keep the kind and line:col.
 std::string scrub_spelling(const std::string &s) {
   static const std::regex re(
-      "\\((unnamed [^()]*|anonymous[^()]*|lambda) at [^()]+:(\\d+):(\\d+)\\)");
+      R"(\((unnamed [^()]*|anonymous[^()]*|lambda) at [^()]+:(\d+):(\d+)\))");
   return std::regex_replace(s, re, "($1 at $2:$3)");
 }
 
@@ -78,14 +79,16 @@ std::string scrub_spelling(const std::string &s) {
 std::string scrub_usr(const clang::ASTContext &ctx, std::string usr) {
   const clang::SourceManager &sm = ctx.getSourceManager();
   const auto fe = sm.getFileEntryRefForID(sm.getMainFileID());
-  if (!fe)
+  if (!fe) {
     return usr;
+  }
   const std::string name = fe->getName().str();
   const std::size_t slash = name.find_last_of('/');
   const std::string base =
       slash == std::string::npos ? name : name.substr(slash + 1);
-  if (base.empty())
+  if (base.empty()) {
     return usr;
+  }
   std::size_t pos = 0;
   while ((pos = usr.find(base, pos)) != std::string::npos) {
     usr.replace(pos, base.size(), "{src}");
@@ -119,12 +122,15 @@ std::string structural_fingerprint(const SynNode &n) {
 }
 
 std::string entity_kind(const clang::Decl *d) {
-  if (llvm::isa<clang::CXXMethodDecl>(d))
+  if (llvm::isa<clang::CXXMethodDecl>(d)) {
     return "method";
-  if (llvm::isa<clang::FunctionDecl>(d))
+  }
+  if (llvm::isa<clang::FunctionDecl>(d)) {
     return "function";
-  if (llvm::isa<clang::EnumDecl>(d))
+  }
+  if (llvm::isa<clang::EnumDecl>(d)) {
     return "enum";
+  }
   if (const auto *td = llvm::dyn_cast<clang::TagDecl>(d)) {
     switch (td->getTagKind()) {
     case clang::TagTypeKind::Class:
@@ -137,13 +143,16 @@ std::string entity_kind(const clang::Decl *d) {
       return "other";
     }
   }
-  if (llvm::isa<clang::VarDecl>(d) || llvm::isa<clang::FieldDecl>(d))
+  if (llvm::isa<clang::VarDecl>(d) || llvm::isa<clang::FieldDecl>(d)) {
     return "variable";
-  if (llvm::isa<clang::TypedefNameDecl>(d))
+  }
+  if (llvm::isa<clang::TypedefNameDecl>(d)) {
     return "typedef";
+  }
   if (llvm::isa<clang::NamespaceDecl>(d) ||
-      llvm::isa<clang::NamespaceAliasDecl>(d))
+      llvm::isa<clang::NamespaceAliasDecl>(d)) {
     return "namespace";
+  }
   return "other";
 }
 
@@ -187,8 +196,9 @@ std::string source_slice(const clang::ASTContext &ctx, clang::SourceRange r) {
 std::string join(const std::vector<std::string> &parts, const char *sep) {
   std::string out;
   for (const std::string &p : parts) {
-    if (!out.empty())
+    if (!out.empty()) {
       out += sep;
+    }
     out += p;
   }
   return out;
@@ -198,20 +208,25 @@ std::string join(const std::vector<std::string> &parts, const char *sep) {
 // "const", "const volatile &&", ... ; "" for free/static callables.
 std::string method_quals(const clang::FunctionDecl *fd) {
   const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(fd);
-  if (m == nullptr || !m->isInstance())
+  if (m == nullptr || !m->isInstance()) {
     return {};
+  }
   const auto *fpt = fd->getType()->getAs<clang::FunctionProtoType>();
-  if (fpt == nullptr)
+  if (fpt == nullptr) {
     return {};
+  }
   std::vector<std::string> parts;
-  if (fpt->getMethodQuals().hasConst())
-    parts.push_back("const");
-  if (fpt->getMethodQuals().hasVolatile())
-    parts.push_back("volatile");
-  if (fpt->getRefQualifier() == clang::RQ_LValue)
-    parts.push_back("&");
-  else if (fpt->getRefQualifier() == clang::RQ_RValue)
-    parts.push_back("&&");
+  if (fpt->getMethodQuals().hasConst()) {
+    parts.emplace_back("const");
+  }
+  if (fpt->getMethodQuals().hasVolatile()) {
+    parts.emplace_back("volatile");
+  }
+  if (fpt->getRefQualifier() == clang::RQ_LValue) {
+    parts.emplace_back("&");
+  } else if (fpt->getRefQualifier() == clang::RQ_RValue) {
+    parts.emplace_back("&&");
+  }
   return join(parts, " ");
 }
 
@@ -230,21 +245,24 @@ std::string method_quals(const clang::FunctionDecl *fd) {
 // when none is written.
 std::string explicit_spec_token(const clang::FunctionDecl *fd) {
   clang::ExplicitSpecifier es;
-  if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fd))
+  if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fd)) {
     es = ctor->getExplicitSpecifier();
-  else if (const auto *conv = llvm::dyn_cast<clang::CXXConversionDecl>(fd))
+  } else if (const auto *conv = llvm::dyn_cast<clang::CXXConversionDecl>(fd)) {
     es = conv->getExplicitSpecifier();
-  else
+  } else {
     return {};
-  if (!es.isSpecified())
+  }
+  if (!es.isSpecified()) {
     return {};
+  }
   if (const clang::Expr *e = es.getExpr()) {
     std::string cond = source_slice(fd->getASTContext(), e->getSourceRange());
-    cond.erase(std::remove_if(cond.begin(), cond.end(),
-                              [](char c) {
-                                return c == ' ' || c == '\t' || c == '\n' ||
-                                       c == '\r' || c == '\f' || c == '\v';
-                              }),
+    cond.erase(std::ranges::remove_if(cond,
+                                      [](char c) {
+                                        return c == ' ' || c == '\t' ||
+                                               c == '\n' || c == '\r' ||
+                                               c == '\f' || c == '\v';
+                                      }).begin(),
                cond.end());
     return "explicit(" + cond + ")";
   }
@@ -265,23 +283,31 @@ std::string explicit_spec_token(const clang::FunctionDecl *fd) {
 std::string method_api_state(const clang::FunctionDecl *fd) {
   std::vector<std::string> parts;
   if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(fd)) {
-    if (m->getAccess() != clang::AS_none)
+    if (m->getAccess() != clang::AS_none) {
       parts.push_back(std::string("access=") + access_str(m->getAccess()));
-    if (m->hasAttr<clang::FinalAttr>())
-      parts.push_back("final");
-    if (m->isPureVirtual())
-      parts.push_back("pure");
-    if (m->hasAttr<clang::OverrideAttr>())
-      parts.push_back("override");
+    }
+    if (m->hasAttr<clang::FinalAttr>()) {
+      parts.emplace_back("final");
+    }
+    if (m->isPureVirtual()) {
+      parts.emplace_back("pure");
+    }
+    if (m->hasAttr<clang::OverrideAttr>()) {
+      parts.emplace_back("override");
+    }
   }
-  if (const std::string ex = explicit_spec_token(fd); !ex.empty())
+  if (const std::string ex = explicit_spec_token(fd); !ex.empty()) {
     parts.push_back(ex);
-  if (fd->isDeleted())
-    parts.push_back("deleted");
-  if (fd->isDefaulted())
-    parts.push_back("defaulted");
-  if (parts.empty())
+  }
+  if (fd->isDeleted()) {
+    parts.emplace_back("deleted");
+  }
+  if (fd->isDefaulted()) {
+    parts.emplace_back("defaulted");
+  }
+  if (parts.empty()) {
     return {};
+  }
   return " [" + join(parts, " ") + "]";
 }
 
@@ -292,12 +318,13 @@ struct UnsupportedScan {
   std::vector<Unsupported> *out;
 
   void add(const char *what, clang::SourceRange r) {
-    out->push_back({what, to_range(ctx, r), ""});
+    out->push_back({.what = what, .range = to_range(ctx, r), .side = ""});
   }
 
   void walk(const clang::Stmt *s) {
-    if (s == nullptr)
+    if (s == nullptr) {
       return;
+    }
     if (llvm::isa<clang::AsmStmt>(s)) {
       add("inline assembly", s->getSourceRange());
     } else if (llvm::isa<clang::CXXTryStmt>(s) ||
@@ -342,23 +369,27 @@ struct UnsupportedScan {
           un != nullptr && un->isIncrementDecrementOp() &&
           un->getSubExpr()->getType().isVolatileQualified();
       if ((named_access && e->getType().isVolatileQualified()) || load ||
-          store || incdec)
+          store || incdec) {
         add("volatile access", s->getSourceRange());
-      if (named_access && e->getType()->isAtomicType())
+      }
+      if (named_access && e->getType()->isAtomicType()) {
         add("atomic access", s->getSourceRange());
+      }
     }
     if (const auto *ds = llvm::dyn_cast<clang::DeclStmt>(s)) {
       for (const clang::Decl *d : ds->decls()) {
         if (const auto *vd = llvm::dyn_cast<clang::VarDecl>(d)) {
-          if (vd->getTLSKind() != clang::VarDecl::TLS_None)
+          if (vd->getTLSKind() != clang::VarDecl::TLS_None) {
             add("thread_local local", d->getSourceRange());
-          else if (vd->isStaticLocal())
+          } else if (vd->isStaticLocal()) {
             add("static local", d->getSourceRange());
+          }
         }
       }
     }
-    for (const clang::Stmt *c : s->children())
+    for (const clang::Stmt *c : s->children()) {
       walk(c);
+    }
   }
 };
 
@@ -372,14 +403,15 @@ struct IrBuilder {
   std::map<const clang::ValueDecl *, std::string> names;
   int locals = 0;
 
-  std::string type_str(clang::QualType t) const {
+  [[nodiscard]] std::string type_str(clang::QualType t) const {
     return scrub_spelling(t.getCanonicalType().getAsString(pp));
   }
 
   std::string value_name(const clang::ValueDecl *vd) {
     const auto it = names.find(vd);
-    if (it != names.end())
+    if (it != names.end()) {
       return it->second;
+    }
     if (const auto *var = llvm::dyn_cast<clang::VarDecl>(vd);
         var != nullptr && var->hasLocalStorage()) {
       std::string n = "%l" + std::to_string(locals++);
@@ -398,32 +430,42 @@ struct IrBuilder {
   }
 
   std::string text(const clang::Stmt *s) {
-    if (s == nullptr)
+    if (s == nullptr) {
       return "<null>";
-    if (const auto *pe = llvm::dyn_cast<clang::ParenExpr>(s))
+    }
+    if (const auto *pe = llvm::dyn_cast<clang::ParenExpr>(s)) {
       return text(pe->getSubExpr());
-    if (const auto *fe = llvm::dyn_cast<clang::FullExpr>(s))
+    }
+    if (const auto *fe = llvm::dyn_cast<clang::FullExpr>(s)) {
       return text(fe->getSubExpr()); // ExprWithCleanups / ConstantExpr framing
+    }
     if (const auto *ice = llvm::dyn_cast<clang::ImplicitCastExpr>(s)) {
-      if (ice->getCastKind() == clang::CK_NoOp)
+      if (ice->getCastKind() == clang::CK_NoOp) {
         return text(ice->getSubExpr());
-      if (ice->getCastKind() == clang::CK_LValueToRValue)
+      }
+      if (ice->getCastKind() == clang::CK_LValueToRValue) {
         return "load(" + text(ice->getSubExpr()) + ")";
+      }
       return std::string("cast<") + ice->getCastKindName() + "," +
              type_str(ice->getType()) + ">(" + text(ice->getSubExpr()) + ")";
     }
-    if (const auto *ec = llvm::dyn_cast<clang::ExplicitCastExpr>(s))
+    if (const auto *ec = llvm::dyn_cast<clang::ExplicitCastExpr>(s)) {
       return std::string("cast<") + ec->getCastKindName() + "," +
              type_str(ec->getTypeAsWritten()) + ">(" + text(ec->getSubExpr()) +
              ")";
-    if (const auto *da = llvm::dyn_cast<clang::CXXDefaultArgExpr>(s))
+    }
+    if (const auto *da = llvm::dyn_cast<clang::CXXDefaultArgExpr>(s)) {
       return text(da->getExpr());
-    if (const auto *di = llvm::dyn_cast<clang::CXXDefaultInitExpr>(s))
+    }
+    if (const auto *di = llvm::dyn_cast<clang::CXXDefaultInitExpr>(s)) {
       return text(di->getExpr());
-    if (const auto *dre = llvm::dyn_cast<clang::DeclRefExpr>(s))
+    }
+    if (const auto *dre = llvm::dyn_cast<clang::DeclRefExpr>(s)) {
       return value_name(dre->getDecl());
-    if (llvm::isa<clang::CXXThisExpr>(s))
+    }
+    if (llvm::isa<clang::CXXThisExpr>(s)) {
       return "%this";
+    }
     if (const auto *il = llvm::dyn_cast<clang::IntegerLiteral>(s)) {
       llvm::SmallString<32> buf;
       il->getValue().toString(buf, 10, il->getType()->isSignedIntegerType());
@@ -434,17 +476,22 @@ struct IrBuilder {
       fl->getValue().toString(buf);
       return std::string(buf);
     }
-    if (const auto *cl = llvm::dyn_cast<clang::CharacterLiteral>(s))
+    if (const auto *cl = llvm::dyn_cast<clang::CharacterLiteral>(s)) {
       return "'" + std::to_string(cl->getValue()) + "'";
-    if (const auto *bl = llvm::dyn_cast<clang::CXXBoolLiteralExpr>(s))
+    }
+    if (const auto *bl = llvm::dyn_cast<clang::CXXBoolLiteralExpr>(s)) {
       return bl->getValue() ? "true" : "false";
-    if (const auto *sl = llvm::dyn_cast<clang::StringLiteral>(s))
+    }
+    if (const auto *sl = llvm::dyn_cast<clang::StringLiteral>(s)) {
       return "\"" + sl->getBytes().str() + "\"";
-    if (llvm::isa<clang::CXXNullPtrLiteralExpr>(s))
+    }
+    if (llvm::isa<clang::CXXNullPtrLiteralExpr>(s)) {
       return "nullptr";
-    if (const auto *me = llvm::dyn_cast<clang::MemberExpr>(s))
+    }
+    if (const auto *me = llvm::dyn_cast<clang::MemberExpr>(s)) {
       return text(me->getBase()) + (me->isArrow() ? "->" : ".") +
              me->getMemberNameInfo().getAsString();
+    }
     if (const auto *ce = llvm::dyn_cast<clang::CallExpr>(s)) {
       std::string out = "call ";
       const clang::Decl *cd = ce->getCalleeDecl();
@@ -452,76 +499,93 @@ struct IrBuilder {
           cd != nullptr ? llvm::dyn_cast<clang::NamedDecl>(cd) : nullptr;
       out += nd != nullptr ? callee_name(nd) : text(ce->getCallee());
       std::vector<std::string> parts;
-      if (const auto *mc = llvm::dyn_cast<clang::CXXMemberCallExpr>(ce))
+      if (const auto *mc = llvm::dyn_cast<clang::CXXMemberCallExpr>(ce)) {
         parts.push_back(text(mc->getImplicitObjectArgument()));
-      for (const clang::Expr *a : ce->arguments())
+      }
+      for (const clang::Expr *a : ce->arguments()) {
         parts.push_back(text(a));
+      }
       return out + "(" + join(parts, ", ") + ")";
     }
     if (const auto *cc = llvm::dyn_cast<clang::CXXConstructExpr>(s)) {
       std::vector<std::string> parts;
-      for (const clang::Expr *a : cc->arguments())
+      for (const clang::Expr *a : cc->arguments()) {
         parts.push_back(text(a));
+      }
       return "ctor " + callee_name(cc->getConstructor()) + "(" +
              join(parts, ", ") + ")";
     }
     if (const auto *ne = llvm::dyn_cast<clang::CXXNewExpr>(s)) {
       std::string out = ne->isArray() ? "new[] " : "new ";
       out += type_str(ne->getAllocatedType());
-      if (ne->isArray() && ne->getArraySize())
+      if (ne->isArray() && ne->getArraySize()) {
         out += "[" + text(*ne->getArraySize()) + "]";
-      if (ne->hasInitializer())
+      }
+      if (ne->hasInitializer()) {
         out += "(" + text(ne->getInitializer()) + ")";
+      }
       return out;
     }
-    if (const auto *de = llvm::dyn_cast<clang::CXXDeleteExpr>(s))
+    if (const auto *de = llvm::dyn_cast<clang::CXXDeleteExpr>(s)) {
       return (de->isArrayForm() ? "delete[] " : "delete ") +
              text(de->getArgument());
-    if (const auto *te = llvm::dyn_cast<clang::CXXThrowExpr>(s))
+    }
+    if (const auto *te = llvm::dyn_cast<clang::CXXThrowExpr>(s)) {
       return te->getSubExpr() != nullptr ? "throw " + text(te->getSubExpr())
                                          : "throw";
-    if (const auto *mte = llvm::dyn_cast<clang::MaterializeTemporaryExpr>(s))
+    }
+    if (const auto *mte = llvm::dyn_cast<clang::MaterializeTemporaryExpr>(s)) {
       return "temp(" + text(mte->getSubExpr()) + ")";
-    if (const auto *bt = llvm::dyn_cast<clang::CXXBindTemporaryExpr>(s))
+    }
+    if (const auto *bt = llvm::dyn_cast<clang::CXXBindTemporaryExpr>(s)) {
       return "bind(" + text(bt->getSubExpr()) + ")";
-    if (const auto *bo = llvm::dyn_cast<clang::BinaryOperator>(s))
+    }
+    if (const auto *bo = llvm::dyn_cast<clang::BinaryOperator>(s)) {
       return "(" + text(bo->getLHS()) + " " + bo->getOpcodeStr().str() + " " +
              text(bo->getRHS()) + ")";
+    }
     if (const auto *ue = llvm::dyn_cast<clang::UnaryExprOrTypeTraitExpr>(s)) {
       // sizeof/alignof of a type carries the operand as a type, not a child
       // node; encode the canonical type so sizeof(int) != sizeof(long).
-      if (ue->isArgumentType())
+      if (ue->isArgumentType()) {
         return unary_trait_name(ue->getKind()) + "(" +
                type_str(ue->getArgumentType()) + ")";
+      }
       return unary_trait_name(ue->getKind()) + "(" +
              text(ue->getArgumentExpr()) + ")";
     }
-    if (const auto *uo = llvm::dyn_cast<clang::UnaryOperator>(s))
+    if (const auto *uo = llvm::dyn_cast<clang::UnaryOperator>(s)) {
       return "(" +
              clang::UnaryOperator::getOpcodeStr(uo->getOpcode()).str() +
              (uo->isPostfix() ? "post" : "") + " " + text(uo->getSubExpr()) +
              ")";
-    if (const auto *co = llvm::dyn_cast<clang::ConditionalOperator>(s))
+    }
+    if (const auto *co = llvm::dyn_cast<clang::ConditionalOperator>(s)) {
       return "(" + text(co->getCond()) + " ? " + text(co->getTrueExpr()) +
              " : " + text(co->getFalseExpr()) + ")";
-    if (const auto *as = llvm::dyn_cast<clang::ArraySubscriptExpr>(s))
+    }
+    if (const auto *as = llvm::dyn_cast<clang::ArraySubscriptExpr>(s)) {
       return text(as->getBase()) + "[" + text(as->getIdx()) + "]";
+    }
     if (const auto *ile = llvm::dyn_cast<clang::InitListExpr>(s)) {
       std::vector<std::string> parts;
-      for (const clang::Stmt *c : ile->children())
+      for (const clang::Stmt *c : ile->children()) {
         parts.push_back(text(c));
+      }
       return "{" + join(parts, ", ") + "}";
     }
-    if (llvm::isa<clang::ImplicitValueInitExpr>(s))
+    if (llvm::isa<clang::ImplicitValueInitExpr>(s)) {
       return "zeroinit";
+    }
     if (const auto *ds = llvm::dyn_cast<clang::DeclStmt>(s)) {
       std::vector<std::string> parts;
       for (const clang::Decl *d : ds->decls()) {
         if (const auto *vd = llvm::dyn_cast<clang::VarDecl>(d)) {
           std::string p =
               "decl " + value_name(vd) + " : " + type_str(vd->getType());
-          if (vd->hasInit())
+          if (vd->hasInit()) {
             p += " = " + text(vd->getInit());
+          }
           parts.push_back(std::move(p));
         } else if (const auto *nd = llvm::dyn_cast<clang::NamedDecl>(d)) {
           parts.push_back("decl " + ast::spelling(nd));
@@ -529,13 +593,15 @@ struct IrBuilder {
       }
       return join(parts, "; ");
     }
-    if (const auto *rs = llvm::dyn_cast<clang::ReturnStmt>(s))
+    if (const auto *rs = llvm::dyn_cast<clang::ReturnStmt>(s)) {
       return rs->getRetValue() != nullptr ? "return " + text(rs->getRetValue())
                                           : "return";
+    }
     std::string out = s->getStmtClassName();
     std::vector<std::string> parts;
-    for (const clang::Stmt *c : s->children())
+    for (const clang::Stmt *c : s->children()) {
       parts.push_back(text(c));
+    }
     return out + "(" + join(parts, ", ") + ")";
   }
 };
@@ -544,10 +610,12 @@ struct IrBuilder {
 // set (ParenExpr, ExprWithCleanups, no-op implicit casts) applied to the
 // element stream so a paren-only edit does not change the IR.
 bool transparent_element(const clang::Stmt *s) {
-  if (llvm::isa<clang::ParenExpr>(s) || llvm::isa<clang::FullExpr>(s))
+  if (llvm::isa<clang::ParenExpr>(s) || llvm::isa<clang::FullExpr>(s)) {
     return true;
-  if (const auto *ice = llvm::dyn_cast<clang::ImplicitCastExpr>(s))
+  }
+  if (const auto *ice = llvm::dyn_cast<clang::ImplicitCastExpr>(s)) {
     return ice->getCastKind() == clang::CK_NoOp;
+  }
   return false;
 }
 
@@ -558,36 +626,42 @@ struct Analyzer {
   std::vector<BehaviourIR> *behaviours;
   std::vector<ClassProfile> *profiles;
 
-  std::string type_str(clang::QualType t) const {
+  [[nodiscard]] std::string type_str(clang::QualType t) const {
     return scrub_spelling(t.getCanonicalType().getAsString(pp));
   }
 
   std::string param_types(const clang::FunctionDecl *fd) const {
     std::string out;
     for (const clang::ParmVarDecl *p : fd->parameters()) {
-      if (!out.empty())
+      if (!out.empty()) {
         out += ", ";
+      }
       out += type_str(p->getType());
     }
-    if (fd->isVariadic())
+    if (fd->isVariadic()) {
       out += out.empty() ? "..." : ", ...";
+    }
     return out;
   }
 
-  std::string fn_quals(const clang::FunctionDecl *fd) const {
+  static std::string fn_quals(const clang::FunctionDecl *fd) {
     std::string q;
     const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(fd);
-    if (m == nullptr || !m->isInstance())
+    if (m == nullptr || !m->isInstance()) {
       return q;
+    }
     if (const auto *fpt = fd->getType()->getAs<clang::FunctionProtoType>()) {
-      if (fpt->getMethodQuals().hasConst())
+      if (fpt->getMethodQuals().hasConst()) {
         q += " const";
-      if (fpt->getMethodQuals().hasVolatile())
+      }
+      if (fpt->getMethodQuals().hasVolatile()) {
         q += " volatile";
-      if (fpt->getRefQualifier() == clang::RQ_LValue)
+      }
+      if (fpt->getRefQualifier() == clang::RQ_LValue) {
         q += " &";
-      else if (fpt->getRefQualifier() == clang::RQ_RValue)
+      } else if (fpt->getRefQualifier() == clang::RQ_RValue) {
         q += " &&";
+      }
     }
     return q;
   }
@@ -595,8 +669,9 @@ struct Analyzer {
   // Transparent nodes are erased (children hoisted); purely implicit nodes
   // are dropped, so an AST rebuilt from identical tokens lowers identically.
   void add_stmt(const clang::Stmt *s, std::vector<SynNode> &out) {
-    if (s == nullptr)
+    if (s == nullptr) {
       return;
+    }
     if (const auto *ice = llvm::dyn_cast<clang::ImplicitCastExpr>(s)) {
       add_stmt(ice->getSubExpr(), out);
       return;
@@ -615,31 +690,35 @@ struct Analyzer {
     }
     if (llvm::isa<clang::CXXDefaultArgExpr>(s) ||
         llvm::isa<clang::CXXDefaultInitExpr>(s) ||
-        llvm::isa<clang::ImplicitValueInitExpr>(s))
+        llvm::isa<clang::ImplicitValueInitExpr>(s)) {
       return;
+    }
     if (const auto *te = llvm::dyn_cast<clang::CXXThisExpr>(s);
-        te != nullptr && te->isImplicit())
+        te != nullptr && te->isImplicit()) {
       return;
+    }
     out.push_back(lower_stmt(s));
   }
 
-  void set_stmt_label(const clang::Stmt *s, SynNode &n) {
+  void set_stmt_label(const clang::Stmt *s, SynNode &n) const {
     if (const auto *bo = llvm::dyn_cast<clang::BinaryOperator>(s)) {
       n.label = bo->getOpcodeStr().str();
       n.detail = "operator " + n.label;
     } else if (const auto *uo = llvm::dyn_cast<clang::UnaryOperator>(s)) {
       n.label = clang::UnaryOperator::getOpcodeStr(uo->getOpcode()).str();
       // x++ and ++x share an opcode string; the fixity is the whole difference.
-      if (uo->isPostfix())
+      if (uo->isPostfix()) {
         n.label += " (postfix)";
+      }
       n.detail = "operator " + n.label;
     } else if (const auto *ue =
                    llvm::dyn_cast<clang::UnaryExprOrTypeTraitExpr>(s)) {
       // A type operand (sizeof(int)) is not a child node, so it must ride in
       // the label or the syntax fingerprint cannot tell the operands apart.
       n.label = unary_trait_name(ue->getKind());
-      if (ue->isArgumentType())
+      if (ue->isArgumentType()) {
         n.label += "(" + type_str(ue->getArgumentType()) + ")";
+      }
       n.detail = "trait " + n.label;
     } else if (const auto *dre = llvm::dyn_cast<clang::DeclRefExpr>(s)) {
       n.label = dre->getNameInfo().getAsString();
@@ -693,8 +772,9 @@ struct Analyzer {
     n.kind = s->getStmtClassName();
     n.range = to_range(ctx, s->getSourceRange());
     if (const auto *ds = llvm::dyn_cast<clang::DeclStmt>(s)) {
-      for (const clang::Decl *d : ds->decls())
+      for (const clang::Decl *d : ds->decls()) {
         add_decl(d, n.children);
+      }
     } else if (const auto *ce = llvm::dyn_cast<clang::CallExpr>(s)) {
       // The resolved callee lives in the label (USR + spelling); the callee
       // subexpression is lowered only when unresolved, so a callee change is
@@ -709,22 +789,26 @@ struct Analyzer {
       } else {
         add_stmt(ce->getCallee(), n.children);
       }
-      if (const auto *mc = llvm::dyn_cast<clang::CXXMemberCallExpr>(ce))
+      if (const auto *mc = llvm::dyn_cast<clang::CXXMemberCallExpr>(ce)) {
         add_stmt(mc->getImplicitObjectArgument(), n.children);
-      for (const clang::Expr *a : ce->arguments())
+      }
+      for (const clang::Expr *a : ce->arguments()) {
         add_stmt(a, n.children);
+      }
     } else {
       set_stmt_label(s, n);
-      for (const clang::Stmt *c : s->children())
+      for (const clang::Stmt *c : s->children()) {
         add_stmt(c, n.children);
+      }
     }
     seal(n);
     return n;
   }
 
   void add_decl(const clang::Decl *d, std::vector<SynNode> &out) {
-    if (d == nullptr || d->isImplicit() || llvm::isa<clang::EmptyDecl>(d))
+    if (d == nullptr || d->isImplicit() || llvm::isa<clang::EmptyDecl>(d)) {
       return;
+    }
     out.push_back(lower_decl(d));
   }
 
@@ -733,37 +817,44 @@ struct Analyzer {
     n.label =
         name + "(" + param_types(fd) + ")" + fn_quals(fd) + method_api_state(fd);
     n.detail = "name " + name;
-    for (const clang::ParmVarDecl *p : fd->parameters())
+    for (const clang::ParmVarDecl *p : fd->parameters()) {
       add_decl(p, n.children);
+    }
     if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fd)) {
       for (const clang::CXXCtorInitializer *ci : ctor->inits()) {
-        if (!ci->isWritten())
+        if (!ci->isWritten()) {
           continue;
+        }
         SynNode c;
         c.kind = "CXXCtorInitializer";
-        if (ci->isMemberInitializer())
+        if (ci->isMemberInitializer()) {
           c.label = ci->getMember()->getNameAsString();
-        else if (ci->isBaseInitializer())
+        } else if (ci->isBaseInitializer()) {
           c.label = type_str(clang::QualType(ci->getBaseClass(), 0));
-        if (!c.label.empty())
+        }
+        if (!c.label.empty()) {
           c.detail = "init " + c.label;
+        }
         c.range = to_range(ctx, ci->getSourceRange());
         add_stmt(ci->getInit(), c.children);
         seal(c);
         n.children.push_back(std::move(c));
       }
     }
-    if (fd->doesThisDeclarationHaveABody())
+    if (fd->doesThisDeclarationHaveABody()) {
       add_stmt(fd->getBody(), n.children);
+    }
   }
 
   void lower_record(const clang::RecordDecl *rd, SynNode &n) {
     const std::string name = ast::spelling(rd);
     n.label = name;
-    if (!name.empty())
+    if (!name.empty()) {
       n.detail = "name " + name;
-    if (!rd->isThisDeclarationADefinition())
+    }
+    if (!rd->isThisDeclarationADefinition()) {
       return;
+    }
     if (const auto *cxx = llvm::dyn_cast<clang::CXXRecordDecl>(rd)) {
       for (const clang::CXXBaseSpecifier &b : cxx->bases()) {
         SynNode c;
@@ -777,8 +868,9 @@ struct Analyzer {
         n.children.push_back(std::move(c));
       }
     }
-    for (const clang::Decl *m : rd->decls())
+    for (const clang::Decl *m : rd->decls()) {
       add_decl(m, n.children);
+    }
   }
 
   SynNode lower_decl(const clang::Decl *d) {
@@ -799,8 +891,9 @@ struct Analyzer {
       n.detail = "name " + name;
       if (const auto *pv = llvm::dyn_cast<clang::ParmVarDecl>(vd)) {
         if (pv->hasDefaultArg() && !pv->hasUnparsedDefaultArg() &&
-            !pv->hasUninstantiatedDefaultArg())
+            !pv->hasUninstantiatedDefaultArg()) {
           add_stmt(pv->getDefaultArg(), n.children);
+        }
       } else if (vd->hasInit()) {
         add_stmt(vd->getInit(), n.children);
       }
@@ -808,17 +901,20 @@ struct Analyzer {
       const std::string name = ast::spelling(fld);
       n.label = name + " : " + type_str(fld->getType());
       n.detail = "name " + name;
-      if (fld->isBitField())
+      if (fld->isBitField()) {
         add_stmt(fld->getBitWidth(), n.children);
-      if (fld->hasInClassInitializer())
+      }
+      if (fld->hasInClassInitializer()) {
         add_stmt(fld->getInClassInitializer(), n.children);
+      }
     } else if (const auto *ecd = llvm::dyn_cast<clang::EnumConstantDecl>(d)) {
       const std::string name = ast::spelling(ecd);
       // The computed value rides in the label so an implicit-value shift
       // (an earlier enumerator added/renumbered) is a visible change.
       n.label = name;
-      if (!ecd->getType()->isDependentType())
+      if (!ecd->getType()->isDependentType()) {
         n.label += "|" + ast::compat::integral_to_string(ecd->getInitVal());
+      }
       n.detail = "name " + name;
       add_stmt(ecd->getInitExpr(), n.children);
     } else if (const auto *ed = llvm::dyn_cast<clang::EnumDecl>(d)) {
@@ -826,12 +922,15 @@ struct Analyzer {
       n.label = name;
       n.label += ed->isScoped() ? "|enum class" : "|enum";
       if (!ed->getIntegerType().isNull() &&
-          !ed->getIntegerType()->isDependentType())
+          !ed->getIntegerType()->isDependentType()) {
         n.label += "|" + type_str(ed->getIntegerType());
-      if (!name.empty())
+      }
+      if (!name.empty()) {
         n.detail = "name " + name;
-      for (const clang::EnumConstantDecl *ec : ed->enumerators())
+      }
+      for (const clang::EnumConstantDecl *ec : ed->enumerators()) {
         add_decl(ec, n.children);
+      }
     } else if (const auto *fr = llvm::dyn_cast<clang::FriendDecl>(d)) {
       if (const clang::NamedDecl *fnd = fr->getFriendDecl()) {
         n.children.push_back(lower_decl(fnd));
@@ -855,22 +954,26 @@ struct Analyzer {
       n.detail = "namespace " + n.label;
     } else if (const auto *nd = llvm::dyn_cast<clang::NamedDecl>(d)) {
       n.label = ast::spelling(nd);
-      if (!n.label.empty())
+      if (!n.label.empty()) {
         n.detail = "name " + n.label;
+      }
     }
     seal(n);
     return n;
   }
 
   std::string default_arg_text(const clang::ParmVarDecl *p) const {
-    if (!p->hasDefaultArg())
+    if (!p->hasDefaultArg()) {
       return {};
+    }
     // Dependent/uninstantiable defaults keep their raw source spelling.
-    if (p->hasUnparsedDefaultArg() || p->hasUninstantiatedDefaultArg())
+    if (p->hasUnparsedDefaultArg() || p->hasUninstantiatedDefaultArg()) {
       return "= " + source_slice(ctx, p->getDefaultArgRange());
+    }
     const clang::Expr *e = p->getDefaultArg();
-    if (e == nullptr)
+    if (e == nullptr) {
       return {};
+    }
     std::string text;
     llvm::raw_string_ostream os(text);
     e->printPretty(os, nullptr, pp);
@@ -883,11 +986,13 @@ struct Analyzer {
       ir.param_types.push_back(type_str(p->getType()));
       ir.param_defaults.push_back(default_arg_text(p));
     }
-    if (fd->isVariadic())
-      ir.param_types.push_back("...");
+    if (fd->isVariadic()) {
+      ir.param_types.emplace_back("...");
+    }
     ir.quals = method_quals(fd);
-    if (const auto *fpt = fd->getType()->getAs<clang::FunctionProtoType>())
+    if (const auto *fpt = fd->getType()->getAs<clang::FunctionProtoType>()) {
       ir.is_noexcept = fpt->isNothrow();
+    }
     if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(fd)) {
       ir.is_virtual = m->isVirtual();
       ir.is_static_method = m->isStatic();
@@ -895,22 +1000,26 @@ struct Analyzer {
       // method comparison would otherwise miss (they live outside the selected
       // method extent). A public->private move, an added `= delete`, or a lost
       // `override` is a real, observable contract change, not equivalence.
-      if (m->getAccess() != clang::AS_none)
+      if (m->getAccess() != clang::AS_none) {
         ir.access = access_str(m->getAccess());
+      }
       ir.is_final = m->hasAttr<clang::FinalAttr>();
       ir.is_pure = m->isPureVirtual();
       ir.is_override = m->size_overridden_methods() > 0;
     }
-    if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fd))
+    if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fd)) {
       ir.is_explicit = ctor->isExplicit();
-    else if (const auto *conv = llvm::dyn_cast<clang::CXXConversionDecl>(fd))
+    } else if (const auto *conv =
+                   llvm::dyn_cast<clang::CXXConversionDecl>(fd)) {
       ir.is_explicit = conv->isExplicit();
+    }
     ir.is_deleted = fd->isDeleted();
     ir.is_defaulted = fd->isDefaulted();
-    if (fd->getStorageClass() == clang::SC_Static)
+    if (fd->getStorageClass() == clang::SC_Static) {
       ir.storage = "static";
-    else if (fd->getStorageClass() == clang::SC_Extern)
+    } else if (fd->getStorageClass() == clang::SC_Extern) {
       ir.storage = "extern";
+    }
     ir.is_inline = fd->isInlineSpecified();
     switch (fd->getConstexprKind()) {
     case clang::ConstexprSpecKind::Constexpr:
@@ -927,46 +1036,55 @@ struct Analyzer {
     }
     ir.is_noreturn = fd->isNoReturn();
     ir.signature = ir.return_type + "(" + join(ir.param_types, ", ") + ")";
-    if (!ir.quals.empty())
+    if (!ir.quals.empty()) {
       ir.signature += " " + ir.quals;
-    if (ir.is_noexcept)
+    }
+    if (ir.is_noexcept) {
       ir.signature += " noexcept";
-    if (ir.is_virtual)
+    }
+    if (ir.is_virtual) {
       ir.signature += " virtual";
+    }
   }
 
   void lower_cfg(const clang::CFG &cfg, const clang::FunctionDecl *fd,
                  BehaviourIR &ir) {
-    IrBuilder b{ctx, pp, {}, 0};
+    IrBuilder b{.ctx = ctx, .pp = pp, .names = {}, .locals = 0};
     int pi = 0;
-    for (const clang::ParmVarDecl *p : fd->parameters())
+    for (const clang::ParmVarDecl *p : fd->parameters()) {
       b.names.emplace(p, "%p" + std::to_string(pi++));
+    }
     for (const clang::CFGBlock *blk : cfg) {
       std::string head = "B" + std::to_string(blk->getBlockID()) + ":";
-      if (blk == &cfg.getEntry())
+      if (blk == &cfg.getEntry()) {
         head += " (entry)";
-      if (blk == &cfg.getExit())
+      }
+      if (blk == &cfg.getExit()) {
         head += " (exit)";
+      }
       ir.blocks.push_back(std::move(head));
       for (const clang::CFGElement &el : *blk) {
         if (const auto cs = el.getAs<clang::CFGStmt>()) {
           const clang::Stmt *s = cs->getStmt();
-          if (transparent_element(s))
+          if (transparent_element(s)) {
             continue;
+          }
           std::string line = "  " + b.text(s);
           if (const auto *e = llvm::dyn_cast<clang::Expr>(s);
-              e != nullptr && !e->getType().isNull())
+              e != nullptr && !e->getType().isNull()) {
             line += " : " + type_str(e->getType());
+          }
           ir.blocks.push_back(std::move(line));
         } else if (const auto ci = el.getAs<clang::CFGInitializer>()) {
           const clang::CXXCtorInitializer *init = ci->getInitializer();
           std::string label;
-          if (init->isMemberInitializer())
+          if (init->isMemberInitializer()) {
             label = init->getMember()->getNameAsString();
-          else if (init->isBaseInitializer())
+          } else if (init->isBaseInitializer()) {
             label = type_str(clang::QualType(init->getBaseClass(), 0));
-          else
+          } else {
             label = "delegate";
+          }
           ir.blocks.push_back("  init " + label + "(" + b.text(init->getInit()) +
                               ")");
         } else if (const auto ad = el.getAs<clang::CFGAutomaticObjDtor>()) {
@@ -982,13 +1100,14 @@ struct Analyzer {
                                ? scrub_usr(ctx, ast::usr_for_decl(dd))
                                : std::string("-")));
         } else {
-          ir.blocks.push_back("  <element>");
+          ir.blocks.emplace_back("  <element>");
         }
       }
-      if (const clang::Stmt *t = blk->getTerminatorStmt())
+      if (const clang::Stmt *t = blk->getTerminatorStmt()) {
         ir.blocks.push_back(std::string("  T: ") + t->getStmtClassName());
+      }
       std::string succ = "  succ:";
-      for (auto it = blk->succ_begin(); it != blk->succ_end(); ++it) {
+      for (const auto *it = blk->succ_begin(); it != blk->succ_end(); ++it) {
         succ += " ";
         succ += *it != nullptr ? "B" + std::to_string((*it)->getBlockID())
                                : std::string("-");
@@ -1001,20 +1120,26 @@ struct Analyzer {
     BehaviourIR ir;
     fill_signature(fd, ir);
     const bool dependent = templated || fd->isTemplated();
-    if (dependent)
-      ir.unsupported.push_back({"dependent template code",
-                                to_range(ctx, fd->getSourceRange()), ""});
-    if (fd->isVariadic())
-      ir.unsupported.push_back(
-          {"varargs", to_range(ctx, fd->getSourceRange()), ""});
+    if (dependent) {
+      ir.unsupported.push_back({.what = "dependent template code",
+                                .range = to_range(ctx, fd->getSourceRange()),
+                                .side = ""});
+    }
+    if (fd->isVariadic()) {
+      ir.unsupported.push_back({.what = "varargs",
+                                .range = to_range(ctx, fd->getSourceRange()),
+                                .side = ""});
+    }
     if (fd->doesThisDeclarationHaveABody()) {
       ir.has_body = true;
       if (!dependent) {
         clang::Stmt *body = fd->getBody();
-        UnsupportedScan scan{ctx, &ir.unsupported};
-        if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fd))
-          for (const clang::CXXCtorInitializer *ci : ctor->inits())
+        UnsupportedScan scan{.ctx = ctx, .out = &ir.unsupported};
+        if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(fd)) {
+          for (const clang::CXXCtorInitializer *ci : ctor->inits()) {
             scan.walk(ci->getInit());
+          }
+        }
         scan.walk(body);
         clang::CFG::BuildOptions bo;
         bo.AddInitializers = true;
@@ -1022,12 +1147,14 @@ struct Analyzer {
         bo.AddTemporaryDtors = true;
         const std::unique_ptr<clang::CFG> cfg =
             clang::CFG::buildCFG(fd, body, &ctx, bo);
-        if (cfg != nullptr)
+        if (cfg != nullptr) {
           lower_cfg(*cfg, fd, ir);
-        else if (ir.unsupported.empty())
+        } else if (ir.unsupported.empty()) {
           ir.unsupported.push_back(
-              {"CFG construction failed", to_range(ctx, fd->getSourceRange()),
-               ""});
+              {.what = "CFG construction failed",
+               .range = to_range(ctx, fd->getSourceRange()),
+               .side = ""});
+        }
       }
     }
     behaviours->push_back(std::move(ir));
@@ -1040,25 +1167,34 @@ struct Analyzer {
     row += access_str(md->getAccess());
     row += std::string(" ") + type_str(md->getReturnType()) + " " +
            ast::spelling(md) + "(" + param_types(md) + ")";
-    if (const std::string q = method_quals(md); !q.empty())
+    if (const std::string q = method_quals(md); !q.empty()) {
       row += " " + q;
+    }
     if (const auto *fpt = md->getType()->getAs<clang::FunctionProtoType>();
-        fpt != nullptr && fpt->isNothrow())
+        fpt != nullptr && fpt->isNothrow()) {
       row += " noexcept";
-    if (md->isVirtual())
+    }
+    if (md->isVirtual()) {
       row += " virtual";
-    if (md->size_overridden_methods() > 0)
+    }
+    if (md->size_overridden_methods() > 0) {
       row += " override";
-    if (md->hasAttr<clang::FinalAttr>())
+    }
+    if (md->hasAttr<clang::FinalAttr>()) {
       row += " final";
-    if (md->isPureVirtual())
+    }
+    if (md->isPureVirtual()) {
       row += " pure";
-    if (md->isStatic())
+    }
+    if (md->isStatic()) {
       row += " static";
-    if (md->isDeleted())
+    }
+    if (md->isDeleted()) {
       row += " deleted";
-    if (md->isDefaulted())
+    }
+    if (md->isDefaulted()) {
       row += " defaulted";
+    }
     return row;
   }
 
@@ -1070,8 +1206,9 @@ struct Analyzer {
   std::string friend_row(const clang::FriendDecl *fr) const {
     const clang::NamedDecl *fnd = fr->getFriendDecl();
     if (fnd == nullptr) {
-      if (const clang::TypeSourceInfo *ti = fr->getFriendType())
+      if (const clang::TypeSourceInfo *ti = fr->getFriendType()) {
         return "friend " + type_str(ti->getType());
+      }
       return "friend <unknown>";
     }
     const clang::Decl *inner = fnd;
@@ -1081,10 +1218,11 @@ struct Analyzer {
       inner = ft->getTemplatedDecl();
       prefix = "friend template ";
     }
-    if (const auto *ffn = llvm::dyn_cast<clang::FunctionDecl>(inner))
+    if (const auto *ffn = llvm::dyn_cast<clang::FunctionDecl>(inner)) {
       return prefix + type_str(ffn->getReturnType()) + " " +
              ast::spelling(ffn) + "(" + param_types(ffn) + ")" +
              fn_quals(ffn);
+    }
     return prefix + ast::spelling(llvm::cast<clang::NamedDecl>(inner));
   }
 
@@ -1092,36 +1230,43 @@ struct Analyzer {
     ClassProfile p;
     const auto *cxx = llvm::dyn_cast<clang::CXXRecordDecl>(rd);
     if (cxx != nullptr) {
-      for (const clang::CXXBaseSpecifier &b : cxx->bases())
+      for (const clang::CXXBaseSpecifier &b : cxx->bases()) {
         p.bases.push_back(std::string(access_str(b.getAccessSpecifier())) +
                           (b.isVirtual() ? " virtual " : " ") +
                           type_str(b.getType()));
+      }
       p.polymorphic = cxx->isPolymorphic();
       p.abstract = cxx->isAbstract();
-      if (const clang::ClassTemplateDecl *ct = cxx->getDescribedClassTemplate())
+      if (const clang::ClassTemplateDecl *ct =
+              cxx->getDescribedClassTemplate()) {
         for (const clang::NamedDecl *tp : *ct->getTemplateParameters()) {
-          if (llvm::isa<clang::TemplateTypeParmDecl>(tp))
+          if (llvm::isa<clang::TemplateTypeParmDecl>(tp)) {
             p.template_params.push_back("typename " + ast::spelling(tp));
-          else if (const auto *nt =
-                       llvm::dyn_cast<clang::NonTypeTemplateParmDecl>(tp))
+          } else if (const auto *nt =
+                         llvm::dyn_cast<clang::NonTypeTemplateParmDecl>(tp)) {
             p.template_params.push_back(type_str(nt->getType()) + " " +
                                         ast::spelling(nt));
-          else
+          } else {
             p.template_params.push_back("template " + ast::spelling(tp));
+          }
         }
+      }
     }
     for (const clang::FieldDecl *f : rd->fields()) {
       std::string row = access_str(f->getAccess());
-      if (f->isMutable())
+      if (f->isMutable()) {
         row += " mutable";
+      }
       row += " " + ast::spelling(f) + " : " + type_str(f->getType());
-      if (f->isBitField() && !f->getBitWidth()->isValueDependent())
+      if (f->isBitField() && !f->getBitWidth()->isValueDependent()) {
         row += " : " + std::to_string(f->getBitWidthValue());
+      }
       p.fields.push_back(std::move(row));
     }
     for (const clang::Decl *m : rd->decls()) {
-      if (m->isImplicit())
+      if (m->isImplicit()) {
         continue;
+      }
       const clang::Decl *inner = m;
       std::string prefix;
       if (const auto *ft = llvm::dyn_cast<clang::FunctionTemplateDecl>(m);
@@ -1134,16 +1279,18 @@ struct Analyzer {
         continue;
       }
       if (const auto *nr = llvm::dyn_cast<clang::RecordDecl>(m)) {
-        if (nr->isThisDeclarationADefinition())
+        if (nr->isThisDeclarationADefinition()) {
           p.nested.push_back(ast::spelling(nr));
+        }
         continue;
       }
       // Fields have their own rows; tag/access decls are covered by member
       // entities / method access; shadow decls ride their UsingDecl.
       if (llvm::isa<clang::FieldDecl>(m) || llvm::isa<clang::TagDecl>(m) ||
           llvm::isa<clang::AccessSpecDecl>(m) ||
-          llvm::isa<clang::UsingShadowDecl>(m))
+          llvm::isa<clang::UsingShadowDecl>(m)) {
         continue;
+      }
       if (const auto *fr = llvm::dyn_cast<clang::FriendDecl>(m)) {
         p.extras.push_back(friend_row(fr));
         continue;
@@ -1169,12 +1316,14 @@ struct Analyzer {
       // Anything the profile cannot express degrades the class verdict to
       // unknown instead of a silent equivalent.
       p.unsupported.push_back(
-          {std::string("unhandled member declaration kind ") +
-               m->getDeclKindName(),
-           to_range(ctx, m->getSourceRange()), ""});
+          {.what = std::string("unhandled member declaration kind ") +
+                   m->getDeclKindName(),
+           .range = to_range(ctx, m->getSourceRange()),
+           .side = ""});
     }
-    if (cxx != nullptr && cxx->hasAttr<clang::FinalAttr>())
-      p.extras.push_back("final");
+    if (cxx != nullptr && cxx->hasAttr<clang::FinalAttr>()) {
+      p.extras.emplace_back("final");
+    }
     if (rd->isCompleteDefinition() && !rd->isInvalidDecl() &&
         !rd->isDependentType()) {
       const clang::ASTRecordLayout &rl = ctx.getASTRecordLayout(rd);
@@ -1182,8 +1331,8 @@ struct Analyzer {
           "layout size:" + std::to_string(rl.getSize().getQuantity()) +
           " align:" + std::to_string(rl.getAlignment().getQuantity()));
     }
-    std::sort(p.methods.begin(), p.methods.end());
-    std::sort(p.extras.begin(), p.extras.end());
+    std::ranges::sort(p.methods);
+    std::ranges::sort(p.extras);
     std::string acc;
     const auto fold = [&acc](const std::vector<std::string> &rows) {
       for (const std::string &r : rows) {
@@ -1205,7 +1354,7 @@ struct Analyzer {
     return static_cast<int>(profiles->size()) - 1;
   }
 
-  bool member_entity(const clang::Decl *m) const {
+  static bool member_entity(const clang::Decl *m) {
     if (const auto *fr = llvm::dyn_cast<clang::FriendDecl>(m)) {
       // A hidden friend with a body is a callable member entity; a pure
       // friend declaration is only a profile row.
@@ -1223,18 +1372,22 @@ struct Analyzer {
 
   Entity make_entity(const clang::Decl *d) {
     if (const auto *fr = llvm::dyn_cast<clang::FriendDecl>(d);
-        fr != nullptr && fr->getFriendDecl() != nullptr)
+        fr != nullptr && fr->getFriendDecl() != nullptr) {
       d = fr->getFriendDecl();
+    }
     Entity e;
     const clang::Decl *inner = d;
     if (const auto *td = llvm::dyn_cast<clang::TemplateDecl>(d);
-        td != nullptr && td->getTemplatedDecl() != nullptr)
+        td != nullptr && td->getTemplatedDecl() != nullptr) {
       inner = td->getTemplatedDecl();
+    }
     e.kind = entity_kind(inner);
-    if (const auto *nd = llvm::dyn_cast<clang::NamedDecl>(inner))
+    if (const auto *nd = llvm::dyn_cast<clang::NamedDecl>(inner)) {
       e.name = scrub_spelling(ast::qualified_name(ctx, nd));
-    if (const auto *fd = llvm::dyn_cast<clang::FunctionDecl>(inner))
+    }
+    if (const auto *fd = llvm::dyn_cast<clang::FunctionDecl>(inner)) {
       e.signature = e.name + "(" + param_types(fd) + ")" + fn_quals(fd);
+    }
     e.usr = ast::usr_for_decl(d);
     e.range = to_range(ctx, d->getSourceRange());
     e.is_definition = ast::is_definition(inner);
@@ -1251,9 +1404,11 @@ struct Analyzer {
     if (const auto *rd = llvm::dyn_cast<clang::RecordDecl>(inner);
         rd != nullptr && rd->isThisDeclarationADefinition()) {
       e.profile = build_profile(rd);
-      for (const clang::Decl *m : rd->decls())
-        if (!m->isImplicit() && member_entity(m))
+      for (const clang::Decl *m : rd->decls()) {
+        if (!m->isImplicit() && member_entity(m)) {
           e.members.push_back(make_entity(m));
+        }
+      }
     }
     return e;
   }
@@ -1264,8 +1419,9 @@ struct Analyzer {
 
   void collect(const clang::DeclContext *dc, std::vector<Entity> &out) {
     for (const clang::Decl *d : dc->decls()) {
-      if (d->isImplicit() || llvm::isa<clang::EmptyDecl>(d))
+      if (d->isImplicit() || llvm::isa<clang::EmptyDecl>(d)) {
         continue;
+      }
       if (const auto *ns = llvm::dyn_cast<clang::NamespaceDecl>(d)) {
         collect(ns, out);
         continue;
@@ -1274,8 +1430,9 @@ struct Analyzer {
         collect(ls, out);
         continue;
       }
-      if (!in_target(d) || ast::is_template_instantiation(d))
+      if (!in_target(d) || ast::is_template_instantiation(d)) {
         continue;
+      }
       out.push_back(make_entity(d));
     }
   }
@@ -1292,10 +1449,11 @@ std::vector<Entity> dedupe_entities(std::vector<Entity> in) {
       continue;
     }
     const auto [it, fresh] = by_usr.emplace(e.usr, out.size());
-    if (fresh)
+    if (fresh) {
       out.push_back(std::move(e));
-    else if (e.is_definition && !out[it->second].is_definition)
+    } else if (e.is_definition && !out[it->second].is_definition) {
       out[it->second] = std::move(e);
+    }
   }
   return out;
 }
@@ -1309,19 +1467,23 @@ void flatten(const std::vector<Entity> &es, std::vector<const Entity *> &out) {
 
 std::string strip_ws(const std::string &s) {
   std::string out;
-  for (const char c : s)
-    if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
+  for (const char c : s) {
+    if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
       out += c;
+    }
+  }
   return out;
 }
 
 std::optional<int> line_selector(const std::string &raw) {
-  if (raw.rfind("line:", 0) != 0)
+  if (!raw.starts_with("line:")) {
     return std::nullopt;
+  }
   const std::string num = raw.substr(5);
   if (num.empty() || num.size() > 9 ||
-      num.find_first_not_of("0123456789") != std::string::npos)
+      num.find_first_not_of("0123456789") != std::string::npos) {
     return std::nullopt;
+  }
   return std::stoi(num);
 }
 
@@ -1341,55 +1503,66 @@ Entity select_entity(const std::vector<Entity> &top, const Selector &sel,
       continue;
     }
     const auto [it, fresh] = by_usr.emplace(e->usr, cands.size());
-    if (fresh)
+    if (fresh) {
       cands.push_back(e);
-    else if (e->is_definition && !cands[it->second]->is_definition)
+    } else if (e->is_definition && !cands[it->second]->is_definition) {
       cands[it->second] = e;
+    }
   }
 
   std::vector<const Entity *> hits;
-  for (const Entity *e : cands)
-    if (!e->usr.empty() && e->usr == sel.raw)
+  for (const Entity *e : cands) {
+    if (!e->usr.empty() && e->usr == sel.raw) {
       hits.push_back(e);
-  if (hits.empty()) {
-    const std::string want = strip_ws(sel.raw);
-    for (const Entity *e : cands)
-      if (!e->signature.empty() && strip_ws(e->signature) == want)
-        hits.push_back(e);
+    }
   }
   if (hits.empty()) {
-    for (const Entity *e : cands)
-      if (!e->name.empty() && e->name == sel.raw &&
-          (!sel.kind || e->kind == *sel.kind))
+    const std::string want = strip_ws(sel.raw);
+    for (const Entity *e : cands) {
+      if (!e->signature.empty() && strip_ws(e->signature) == want) {
         hits.push_back(e);
+      }
+    }
+  }
+  if (hits.empty()) {
+    for (const Entity *e : cands) {
+      if (!e->name.empty() && e->name == sel.raw &&
+          (!sel.kind || e->kind == *sel.kind)) {
+        hits.push_back(e);
+      }
+    }
   }
   if (hits.empty()) {
     if (const std::optional<int> line = line_selector(sel.raw)) {
       int best = -1;
       for (const Entity *e : cands) {
-        if (e->range.line > *line || e->range.end_line < *line)
+        if (e->range.line > *line || e->range.end_line < *line) {
           continue;
+        }
         const int span = e->range.end_line - e->range.line;
         if (best < 0 || span < best) {
           best = span;
           hits.clear();
         }
-        if (span == best)
+        if (span == best) {
           hits.push_back(e);
+        }
       }
     }
   }
-  if (hits.empty())
+  if (hits.empty()) {
     throw CidxError("selector '" + sel.raw + "' matches nothing in " +
                     cfg.file);
+  }
   if (hits.size() > 1) {
     std::string msg =
         "selector '" + sel.raw + "' is ambiguous in " + cfg.file +
         "; candidates:";
-    for (const Entity *e : hits)
+    for (const Entity *e : hits) {
       msg += "\n  " + e->kind + " " +
              (e->signature.empty() ? e->name : e->signature) + " " +
              (e->usr.empty() ? "-" : e->usr) + " L" + fmt_range(e->range);
+    }
     throw CidxError(msg);
   }
   return *hits[0];
@@ -1405,15 +1578,19 @@ public:
 
   void HandleTranslationUnit(clang::ASTContext &ctx) override {
     try {
-      Analyzer a{ctx, ast::printing_policy(ctx), config_->file,
-                 &out_->behaviours, &out_->profiles};
+      Analyzer a{.ctx = ctx,
+                 .pp = ast::printing_policy(ctx),
+                 .target_file = config_->file,
+                 .behaviours = &out_->behaviours,
+                 .profiles = &out_->profiles};
       std::vector<Entity> ents;
       a.collect(ctx.getTranslationUnitDecl(), ents);
       ents = dedupe_entities(std::move(ents));
-      if (selector_->has_value())
+      if (selector_->has_value()) {
         out_->entities = {select_entity(ents, **selector_, *config_)};
-      else
+      } else {
         out_->entities = std::move(ents);
+      }
       *handled_ = true;
     } catch (...) {
       *err_ = std::current_exception();
@@ -1457,23 +1634,25 @@ public:
   void HandleDiagnostic(clang::DiagnosticsEngine::Level level,
                         const clang::Diagnostic &info) override {
     clang::DiagnosticConsumer::HandleDiagnostic(level, info);
-    if (level < clang::DiagnosticsEngine::Error || !first_error_.empty())
+    if (level < clang::DiagnosticsEngine::Error || !first_error_.empty()) {
       return;
+    }
     std::string loc;
     if (info.hasSourceManager() && info.getLocation().isValid()) {
       const clang::PresumedLoc pl =
           info.getSourceManager().getPresumedLoc(info.getLocation());
-      if (pl.isValid())
+      if (pl.isValid()) {
         loc = std::string(pl.getFilename()) + ":" +
               std::to_string(pl.getLine()) + ":" +
               std::to_string(pl.getColumn()) + ": ";
+      }
     }
     llvm::SmallString<256> msg;
     info.FormatDiagnostic(msg);
     first_error_ = loc + std::string(msg);
   }
 
-  const std::string &first_error() const { return first_error_; }
+  [[nodiscard]] const std::string &first_error() const { return first_error_; }
 
 private:
   std::string first_error_;
@@ -1515,12 +1694,13 @@ SideAnalysis analyze_side(const ParseConfig &config,
   Toolchain toolchain;
   const bool cpp = Toolchain::is_cpp(config.parse_file, config.args);
   std::vector<std::string> full = config.args;
-  for (std::string &f : toolchain.toolchain_flags(cpp, config.driver))
+  for (std::string &f : toolchain.toolchain_flags(cpp, config.driver)) {
     full.push_back(std::move(f));
-  full.push_back("-ferror-limit=0");
+  }
+  full.emplace_back("-ferror-limit=0");
   // Diagnostics are captured by CaptureDiagnostics below; this also silences
   // the "N errors generated." summary CompilerInstance prints to stderr.
-  full.push_back("-fno-caret-diagnostics");
+  full.emplace_back("-fno-caret-diagnostics");
 
   clang::tooling::FixedCompilationDatabase cdb(".", full);
   clang::tooling::ClangTool tool(cdb, {config.parse_file});
@@ -1533,16 +1713,18 @@ SideAnalysis analyze_side(const ParseConfig &config,
   tool.setDiagnosticConsumer(&diags);
   DiffActionFactory factory(&config, &selector, &out, &err, &handled);
   tool.run(&factory);
-  if (diags.getNumErrors() > 0)
+  if (diags.getNumErrors() > 0) {
     throw CidxError("cannot parse " + config.parse_file + ": " +
                     diags.first_error());
-  if (err)
+  }
+  if (err) {
     std::rethrow_exception(err);
-  if (!handled)
+  }
+  if (!handled) {
     throw CidxError("cannot parse " + config.parse_file +
                     " (no AST produced)");
+  }
   return out;
 }
 
-} // namespace diff
-} // namespace cidx
+} // namespace cidx::diff

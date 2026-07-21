@@ -13,8 +13,9 @@ namespace {
 ExpansionLoc to_expansion(const clang::SourceManager &sm,
                           clang::SourceLocation loc) {
   ExpansionLoc out;
-  if (loc.isInvalid())
+  if (loc.isInvalid()) {
     return out;
+  }
   const clang::SourceLocation exp = sm.getExpansionLoc(loc);
   // libclang reports the file SPELLING (symlinks like MacOSX.sdk stay
   // unresolved). Only a RELATIVE spelling (compile-db "file" entries) is
@@ -49,8 +50,9 @@ ExpansionLoc extent_end(const clang::ASTContext &context,
                         clang::SourceRange range) {
   const clang::SourceManager &sm = context.getSourceManager();
   clang::SourceLocation end = range.getEnd();
-  if (end.isInvalid())
+  if (end.isInvalid()) {
     return {};
+  }
   end = sm.getExpansionLoc(end);
   // libclang extent end = start of last token + token length.
   const clang::SourceLocation past = clang::Lexer::getLocForEndOfToken(

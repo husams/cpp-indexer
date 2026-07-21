@@ -18,10 +18,12 @@ int cidx_symbol_kind(const clang::Decl *decl) {
   case Decl::CXXRecord:
   case Decl::Record: {
     const auto *rd = llvm::cast<clang::RecordDecl>(decl);
-    if (rd->isUnion())
+    if (rd->isUnion()) {
       return 3; // union
-    if (rd->isStruct())
+    }
+    if (rd->isStruct()) {
       return 2; // struct
+    }
     return 4;   // class
   }
   case Decl::Enum:             return 5;  // enum

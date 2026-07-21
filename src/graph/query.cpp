@@ -12,12 +12,12 @@
 #include <string>
 #include <tuple>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "util/pathutil.hpp"
 
-namespace cidx {
-namespace graph {
+namespace cidx::graph {
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -274,7 +274,7 @@ GraphQuery::kind_ids(const std::optional<std::vector<std::string>> &kinds) {
       for (const auto &kv : km) {
         valid.push_back(kv.first);
       }
-      std::sort(valid.begin(), valid.end());
+      std::ranges::sort(valid);
       std::string msg = "unknown edge kind '" + k + "'; valid: [";
       for (std::size_t i = 0; i < valid.size(); ++i) {
         if (i != 0) {
@@ -315,8 +315,8 @@ GraphQuery::edges(int64_t sym_id, const std::string &direction,
     e.peer = make_sym_from_row(row);
     // count fallback (R3): 0 is falsy
     int64_t cnt = row.ecount;
-    if (!cnt) {
-      cnt = row.rawcount ? row.rawcount : 1;
+    if (cnt == 0) {
+      cnt = (row.rawcount != 0) ? row.rawcount : 1;
     }
     e.count = cnt;
     e.base_access = row.base_access;
@@ -449,13 +449,13 @@ GraphQuery::walk(int64_t start_id,
       auto edgs = edges(nid, direction, kid_ids, max_nodes,
                         /*with_sites=*/false);
       for (const Edge &e : edgs) {
-        if (tr.nodes_by_id.count(e.peer.id) == 0) {
+        if (!tr.nodes_by_id.contains(e.peer.id)) {
           tr.nodes_by_id[e.peer.id] = e.peer;
           tr.depth_by_id[e.peer.id] = d;
           tr.parent_by_id[e.peer.id] = nid;
           tr.insertion_order_.push_back(e.peer.id);
           nxt.push_back(e.peer.id);
-          if (static_cast<int>(tr.nodes_by_id.size()) >= max_nodes) {
+          if (std::cmp_greater_equal(tr.nodes_by_id.size(), max_nodes)) {
             return tr;
           }
         }
@@ -493,7 +493,7 @@ GraphQuery::reaches(int64_t src_id, int64_t dst_id,
     for (int64_t nid : frontier) {
       auto ps = peers(nid, kinds, direction, 500);
       for (const Sym &peer : ps) {
-        if (seen.count(peer.id)) {
+        if (seen.contains(peer.id)) {
           continue;
         }
         seen.insert(peer.id);
@@ -502,10 +502,10 @@ GraphQuery::reaches(int64_t src_id, int64_t dst_id,
           // Reconstruct chain
           std::vector<int64_t> chain;
           chain.push_back(t->id);
-          while (parent.count(chain.back())) {
+          while (parent.contains(chain.back())) {
             chain.push_back(parent.at(chain.back()));
           }
-          std::reverse(chain.begin(), chain.end());
+          std::ranges::reverse(chain);
           std::vector<Sym> path;
           path.reserve(chain.size());
           for (int64_t cid : chain) {
@@ -580,7 +580,7 @@ GraphQuery::members(int64_t sym_id,
 
   auto add = [&](std::vector<Edge> &edgs) {
     for (auto &e : edgs) {
-      if (!seen.count(e.peer.id)) {
+      if (!seen.contains(e.peer.id)) {
         seen.insert(e.peer.id);
         merged.push_back(std::move(e.peer));
       }
@@ -648,7 +648,7 @@ std::vector<Sym> GraphQuery::dispatch_targets(int64_t sym_id) {
     for (int64_t nid : frontier) {
       auto overriders = overridden_by(nid);
       for (const Sym &d : overriders) {
-        if (seen.count(d.id)) {
+        if (seen.contains(d.id)) {
           continue;
         }
         seen.insert(d.id);
@@ -785,15 +785,16 @@ std::vector<GraphQuery::TypeUser> GraphQuery::type_users(const std::string &usr,
     return out;
   }
   for (const auto &[owner_id, position] : db_.param_owners_of_types(tids)) {
-    if (static_cast<int>(out.size()) >= limit) {
+    if (std::cmp_greater_equal(out.size(), limit)) {
       return out;
     }
     if (auto s = get_by_id(owner_id)) {
-      out.push_back({std::move(*s), "param", position});
+      out.push_back(
+          {.sym = std::move(*s), .role = "param", .position = position});
     }
   }
   for (const auto &[sym_id, kind] : db_.symbol_type_owners_of_types(tids)) {
-    if (static_cast<int>(out.size()) >= limit) {
+    if (std::cmp_greater_equal(out.size(), limit)) {
       return out;
     }
     auto s = get_by_id(sym_id);
@@ -803,7 +804,8 @@ std::vector<GraphQuery::TypeUser> GraphQuery::type_users(const std::string &usr,
     const std::string role = kind == kSymbolTypeReturns   ? "returns"
                              : kind == kSymbolTypeOfType  ? "of_type"
                                                           : "underlying_type";
-    out.push_back({std::move(*s), role, std::nullopt});
+    out.push_back(
+        {.sym = std::move(*s), .role = role, .position = std::nullopt});
   }
   return out;
 }
@@ -819,5 +821,4 @@ std::string py_repr_simple(const std::string &s) {
 }
 } // namespace format
 
-} // namespace graph
-} // namespace cidx
+} // namespace cidx::graph

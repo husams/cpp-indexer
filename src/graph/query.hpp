@@ -22,8 +22,7 @@
 #include "graph/records.hpp"
 #include "storage/storage.hpp"
 
-namespace cidx {
-namespace graph {
+namespace cidx::graph {
 
 // Internal format helpers used in error message construction.
 namespace format {
@@ -142,7 +141,7 @@ public:
 
   // Parse kind spec string into kind_id vector. Throws std::invalid_argument on
   // unknown kind. Returns nullopt for null/empty (= all kinds).
-  std::optional<std::vector<int64_t>>
+  static std::optional<std::vector<int64_t>>
   kind_ids(const std::optional<std::vector<std::string>> &kinds);
 
   // Bounded BFS (walk). Mirrors query.py:walk() (query.py:967-1003).
@@ -202,7 +201,7 @@ public:
     std::vector<ParamInfo> params;
     std::optional<TypeInfo> of_type;
     std::optional<TypeInfo> underlying;
-    bool empty() const {
+    [[nodiscard]] bool empty() const {
       return !returns && params.empty() && !of_type && !underlying;
     }
   };
@@ -223,7 +222,7 @@ public:
 
   // ---- Accessors -----------------------------------------------------------
 
-  const std::string &db_path() const { return db_path_; }
+  [[nodiscard]] const std::string &db_path() const { return db_path_; }
 
 private:
   Storage &db_;
@@ -249,5 +248,4 @@ private:
   Site make_site(const Storage::EdgeSiteRow &row);
 };
 
-} // namespace graph
-} // namespace cidx
+} // namespace cidx::graph

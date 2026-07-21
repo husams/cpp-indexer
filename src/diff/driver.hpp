@@ -9,11 +9,9 @@
 #include <string>
 #include <vector>
 
-namespace cidx {
-namespace diff {
+namespace cidx::diff {
 
 int run(const std::vector<std::string> &argv, std::ostream &out,
         std::ostream &err);
 
-} // namespace diff
-} // namespace cidx
+} // namespace cidx::diff

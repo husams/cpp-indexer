@@ -23,10 +23,12 @@ FunctionDefinitionVisitor::FunctionDefinitionVisitor(clang::ASTContext &context,
 // function's descent), and sits in the target file.
 bool FunctionDefinitionVisitor::is_indexable_definition(
     const clang::FunctionDecl *decl) const {
-  if (!decl->doesThisDeclarationHaveABody())
+  if (!decl->doesThisDeclarationHaveABody()) {
     return false;
-  if (decl->getParentFunctionOrMethod() != nullptr)
+  }
+  if (decl->getParentFunctionOrMethod() != nullptr) {
     return false;
+  }
   return expansion_loc(context_, decl->getLocation()).file == target_file_;
 }
 
@@ -47,19 +49,23 @@ void FunctionDefinitionVisitor::index_definition(clang::FunctionDecl *decl,
 }
 
 bool FunctionDefinitionVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
-  if (!is_indexable_definition(decl))
+  if (!is_indexable_definition(decl)) {
     return true;
+  }
   // The symbol row keyed by this decl's USR: a templated pattern's body
   // belongs to its function template (same USR either way).
   const clang::NamedDecl *keyed = decl;
   if (const clang::FunctionTemplateDecl *ft =
-          decl->getDescribedFunctionTemplate())
+          decl->getDescribedFunctionTemplate()) {
     keyed = ft;
+  }
   const std::string usr = usr_for_decl(keyed);
-  if (usr.empty())
+  if (usr.empty()) {
     return true;
-  if (const auto fn_sym = sink_.lookup_symbol_id(usr))
+  }
+  if (const auto fn_sym = sink_.lookup_symbol_id(usr)) {
     index_definition(decl, keyed, *fn_sym);
+  }
   return true;
 }
 

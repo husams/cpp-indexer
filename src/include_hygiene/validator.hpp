@@ -67,9 +67,9 @@ public:
   // byte-identical to original-minus-directive. Proving the removal and then
   // writing something else would make the proof a lie. This lets both stages
   // prove exactly the bytes they mean.
-  std::vector<ValidationRecord>
+  static std::vector<ValidationRecord>
   validate(const std::vector<TuTarget> &targets,
-           const std::map<std::string, std::string> &overlay,
+           const std::map<std::string, std::string> &edited,
            const std::string &stage);
 
   // Convenience: build the overlay for `removals` by reading each file and

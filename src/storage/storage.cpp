@@ -915,8 +915,7 @@ std::string prepare_db_path(const std::string &path) {
 } // namespace
 
 bool is_symbol_kind(std::string_view kind) {
-  return std::find(kSymbolKinds.begin(), kSymbolKinds.end(), kind) !=
-         kSymbolKinds.end();
+  return std::ranges::find(kSymbolKinds, kind) != kSymbolKinds.end();
 }
 
 int64_t symbol_kind_id(std::string_view name) {
@@ -1000,7 +999,7 @@ Storage::Storage(const std::string &path, OpenMode mode)
     } catch (const StorageError &e) {
       // Only a missing meta table means "not a cidx index"; any other
       // SQLite failure (not a database, BUSY, I/O) keeps its real message.
-      if (std::string(e.what()).find("no such table") == std::string::npos) {
+      if (!std::string(e.what()).contains("no such table")) {
         throw;
       }
     }
@@ -1039,7 +1038,7 @@ void Storage::migrate() {
     }
   }
   const auto has_table = [&tables](const char *name) {
-    return std::find(tables.begin(), tables.end(), name) != tables.end();
+    return std::ranges::find(tables, name) != tables.end();
   };
   if (!has_table("symbol")) {
     return; // fresh database: the schema script creates everything
@@ -1054,7 +1053,7 @@ void Storage::migrate() {
   };
   const auto has_col = [](const std::vector<std::string> &cols,
                           const char *name) {
-    return std::find(cols.begin(), cols.end(), name) != cols.end();
+    return std::ranges::find(cols, name) != cols.end();
   };
 
   const auto cols = table_columns("symbol");
@@ -1274,7 +1273,7 @@ void Storage::migrate() {
       }
     }
     if (!comp_sql.empty() &&
-        comp_sql.find("UNIQUE (repository_id, path)") == std::string::npos) {
+        !comp_sql.contains("UNIQUE (repository_id, path)")) {
       migrate_component_repo_unique();
       changed = true;
     }
@@ -1299,8 +1298,8 @@ void Storage::migrate() {
       const int64_t cid = scan.col_int64(0);
       const std::string cpath = scan.col_text(1);
       const int64_t rid = scan.col_int64(2);
-      if (cpath.find('<') != std::string::npos ||
-          cpath.find('$') != std::string::npos || !pathutil::isabs(cpath)) {
+      if (cpath.contains('<') || cpath.contains('$') ||
+          !pathutil::isabs(cpath)) {
         continue; // portable or already relative
       }
       if (!CompileDb::split_base_version(cpath).second.empty()) {
@@ -1345,7 +1344,7 @@ void Storage::migrate() {
       } else {
         continue; // component outside the active clone -> keep absolute
       }
-      pend.push_back({cid, rel});
+      pend.push_back({.id = cid, .rel = rel});
     }
     } // scan finalized
     for (const Pending &p : pend) {
@@ -1593,11 +1592,9 @@ int64_t Storage::add_component(const std::string &name, const std::string &path,
                                const std::optional<std::string> &version) {
   // Preserve indirected (portable) paths verbatim; absolutize plain paths.
   // Mirrors Python: if "$" not in path and "<" not in path: path = abspath(path)
-  const std::string abs =
-      (path.find('$') == std::string::npos &&
-       path.find('<') == std::string::npos)
-          ? pathutil::abspath(path)
-          : path;
+  const std::string abs = (!path.contains('$') && !path.contains('<'))
+                              ? pathutil::abspath(path)
+                              : path;
   // v24: `path` is no longer globally UNIQUE (it is UNIQUE per repository, so
   // grouped components can share a '.' root), so the dedup is done here in code
   // rather than via ON CONFLICT(path). Idempotent on the exact stored path
@@ -1682,8 +1679,7 @@ bool Storage::set_component_effective_version(const std::string &name,
   if (!seg.empty()) {
     // version embedded in the path: swap the trailing segment.
     std::string new_path = pathutil::normpath(pathutil::join(base, version));
-    if (new_path.find('$') == std::string::npos &&
-        new_path.find('<') == std::string::npos) {
+    if (!new_path.contains('$') && !new_path.contains('<')) {
       new_path = pathutil::abspath(new_path);
     }
     auto st = db_.prepare(
@@ -1731,8 +1727,7 @@ Storage::active_clone_root(const std::optional<int64_t> &repository_id) {
 std::string Storage::component_abs_base(const Component &comp) {
   const std::string eff = effective_root(comp);
   if (comp.repository_id && !pathutil::isabs(comp.path) &&
-      comp.path.find('<') == std::string::npos &&
-      comp.path.find('$') == std::string::npos) {
+      !comp.path.contains('<') && !comp.path.contains('$')) {
     const auto root = active_clone_root(comp.repository_id);
     if (root) {
       return pathutil::abspath(pathutil::join(*root, eff));
@@ -1747,8 +1742,7 @@ void Storage::relativize_component(int64_t component_id,
   if (!comp) {
     return;
   }
-  if (comp->path.find('<') != std::string::npos ||
-      comp->path.find('$') != std::string::npos ||
+  if (comp->path.contains('<') || comp->path.contains('$') ||
       !pathutil::isabs(comp->path)) {
     return;
   }
@@ -1912,11 +1906,11 @@ Storage::list_components(const std::optional<std::string> &name,
   std::vector<std::string> where;
   std::vector<SqlValue> args;
   if (name && !name->empty()) {
-    where.push_back("name LIKE ? ESCAPE '\\'");
+    where.emplace_back("name LIKE ? ESCAPE '\\'");
     args.emplace_back(fuzzy_like(*name));
   }
   if (kind) {
-    where.push_back("kind = ?");
+    where.emplace_back("kind = ?");
     args.emplace_back(*kind);
   }
   if (!where.empty()) {
@@ -2022,11 +2016,11 @@ Storage::list_repositories(const std::optional<std::string> &name,
   std::vector<std::string> where;
   std::vector<SqlValue> args;
   if (name && !name->empty()) {
-    where.push_back("name LIKE ? ESCAPE '\\'");
+    where.emplace_back("name LIKE ? ESCAPE '\\'");
     args.emplace_back(fuzzy_like(*name));
   }
   if (kind) {
-    where.push_back("kind = ?");
+    where.emplace_back("kind = ?");
     args.emplace_back(*kind);
   }
   if (!where.empty()) {
@@ -2066,11 +2060,9 @@ void Storage::delete_repository(int64_t repository_id) {
 int64_t Storage::add_clone(int64_t repository_id, const std::string &path,
                            const std::optional<std::string> &label) {
   // Mirror Python: absolutize plain paths; preserve portable ($/<) verbatim.
-  const std::string abs =
-      (path.find('$') == std::string::npos &&
-       path.find('<') == std::string::npos)
-          ? pathutil::abspath(path)
-          : path;
+  const std::string abs = (!path.contains('$') && !path.contains('<'))
+                              ? pathutil::abspath(path)
+                              : path;
   auto st = db_.prepare(
       "INSERT INTO clone (repository_id, path, label) VALUES (?, ?, ?) "
       "ON CONFLICT(path) DO UPDATE SET repository_id = excluded.repository_id, "
@@ -2097,11 +2089,9 @@ std::optional<Clone> Storage::get_clone_by_id(int64_t clone_id) {
 }
 
 std::optional<Clone> Storage::get_clone_by_path(const std::string &path) {
-  const std::string abs =
-      (path.find('$') == std::string::npos &&
-       path.find('<') == std::string::npos)
-          ? pathutil::abspath(path)
-          : path;
+  const std::string abs = (!path.contains('$') && !path.contains('<'))
+                              ? pathutil::abspath(path)
+                              : path;
   auto st = db_.prepare(std::string("SELECT ") + kCloneCols +
                         " FROM clone WHERE path = ?");
   st.bind(1, std::string_view(abs));
@@ -2195,11 +2185,11 @@ Storage::list_directories(const std::optional<int64_t> &component_id,
   std::vector<std::string> where;
   std::vector<SqlValue> args;
   if (component_id) {
-    where.push_back("d.component_id = ?");
+    where.emplace_back("d.component_id = ?");
     args.emplace_back(*component_id);
   }
   if (name && !name->empty()) {
-    where.push_back("d.path LIKE ? ESCAPE '\\'");
+    where.emplace_back("d.path LIKE ? ESCAPE '\\'");
     args.emplace_back(fuzzy_like(*name));
   }
   if (!where.empty()) {
@@ -2389,18 +2379,18 @@ Storage::list_files(const std::optional<int64_t> &component_id,
   std::vector<std::string> where;
   std::vector<SqlValue> args;
   if (component_id) {
-    where.push_back("d.component_id = ?");
+    where.emplace_back("d.component_id = ?");
     args.emplace_back(*component_id);
   }
   if (dir_path) {
     where.push_back(dir_scope_sql(*dir_path, args));
   }
   if (name && !name->empty()) {
-    where.push_back("f.name LIKE ? ESCAPE '\\'");
+    where.emplace_back("f.name LIKE ? ESCAPE '\\'");
     args.emplace_back(fuzzy_like(*name));
   }
   if (indexed) {
-    where.push_back("f.indexed = ?");
+    where.emplace_back("f.indexed = ?");
     args.emplace_back(static_cast<int64_t>(*indexed ? 1 : 0));
   }
   if (!where.empty()) {
@@ -2665,16 +2655,16 @@ bool Storage::update_symbol(
     const std::vector<std::pair<std::string, SqlValue>> &values) {
   std::vector<std::string> bad;
   for (const auto &kv : values) {
-    if (std::find(kSymbolInsertCols.begin(), kSymbolInsertCols.end(),
-                  kv.first) == kSymbolInsertCols.end()) {
+    if (std::ranges::find(kSymbolInsertCols, kv.first) ==
+        kSymbolInsertCols.end()) {
       bad.push_back(kv.first);
     }
   }
   if (!bad.empty()) {
     // Dedupe then sort, then format as Python's list repr: ['col1', 'col2']
     // (Python: raises f"unknown symbol column(s): {sorted(set(bad))}")
-    std::sort(bad.begin(), bad.end());
-    bad.erase(std::unique(bad.begin(), bad.end()), bad.end());
+    std::ranges::sort(bad);
+    bad.erase(std::ranges::unique(bad).begin(), bad.end());
     std::string repr = "[";
     for (std::size_t i = 0; i < bad.size(); ++i) {
       if (i > 0) {
@@ -2843,7 +2833,7 @@ Storage::list_symbols(const std::optional<int64_t> &component_id,
     std::vector<std::string> scope;
     std::vector<SqlValue> scope_args;
     if (component_id) {
-      scope.push_back("d.component_id = ?");
+      scope.emplace_back("d.component_id = ?");
       scope_args.emplace_back(*component_id);
     }
     if (dir_path) {
@@ -2858,16 +2848,16 @@ Storage::list_symbols(const std::optional<int64_t> &component_id,
     }
   }
   if (file_id) {
-    where.push_back("(s.file_id = ? OR s.decl_file_id = ?)");
+    where.emplace_back("(s.file_id = ? OR s.decl_file_id = ?)");
     args.emplace_back(*file_id);
     args.emplace_back(*file_id);
   }
   if (name && !name->empty()) {
-    where.push_back("COALESCE(s.qual_name, s.spelling) LIKE ? ESCAPE '\\'");
+    where.emplace_back("COALESCE(s.qual_name, s.spelling) LIKE ? ESCAPE '\\'");
     args.emplace_back(fuzzy_like(*name));
   }
   if (kind) {
-    where.push_back("s.kind = ?");
+    where.emplace_back("s.kind = ?");
     args.emplace_back(symbol_kind_id(*kind)); // stored as int (v16)
   }
   if (!where.empty()) {
@@ -4074,7 +4064,7 @@ struct RollupState {
     }
     std::set<int64_t> seen;
     int64_t cur = sym_id;
-    while (seen.find(cur) == seen.end()) {
+    while (!seen.contains(cur)) {
       seen.insert(cur);
       auto nit = next_hop.find(cur);
       if (nit == next_hop.end()) {
@@ -4086,24 +4076,24 @@ struct RollupState {
     return cur;
   }
 
-  bool is_interface(int64_t sym_id) const {
+  [[nodiscard]] bool is_interface(int64_t sym_id) const {
     auto it = usr_by_id.find(sym_id);
     if (it == usr_by_id.end()) {
       return false;
     }
     const std::string &usr = it->second;
-    if (non_pure_method_owners.count(usr) != 0) {
+    if (non_pure_method_owners.contains(usr)) {
       return false;
     }
-    if (field_owners.count(usr) != 0) {
+    if (field_owners.contains(usr)) {
       return false;
     }
-    return pure_method_owners.count(usr) != 0;
+    return pure_method_owners.contains(usr);
   }
 
-  bool has_pure(int64_t sym_id) const {
+  [[nodiscard]] bool has_pure(int64_t sym_id) const {
     auto it = usr_by_id.find(sym_id);
-    return it != usr_by_id.end() && pure_method_owners.count(it->second) != 0;
+    return it != usr_by_id.end() && pure_method_owners.contains(it->second);
   }
 };
 
@@ -4187,7 +4177,9 @@ static void cpp_materialise_inheritance(cidx::SqliteDb &db) {
     // edge, so collapsing the dst was always a no-op.)
     int64_t src = cpp_collapse_to_primary(db, r.src);
     int64_t dst = r.dst;
-    if (src == dst) continue;  // no self-edge
+    if (src == dst) {
+      continue; // no self-edge
+    }
     int64_t ek = is_interface(dst) ? 2 : 1;  // implements=2 or generalizes=1
     auto ins = db.prepare(
         "INSERT INTO entity_edge "
@@ -4221,7 +4213,9 @@ static void cpp_materialise_specializes(cidx::SqliteDb &db) {
       "  AND src.kind IN (2,3,4,5,31) "
       "  AND dst.kind IN (2,3,4,5,31)");
   std::vector<std::pair<int64_t,int64_t>> rows;
-  while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
+  while (st.step()) {
+    rows.emplace_back(st.col_int64(0), st.col_int64(1));
+  }
   for (const auto &[src0, dst0] : rows) {
     // The specialization is its OWN design entity -- do NOT collapse the SOURCE
     // onto the primary (that would self-suppress the edge). Collapse only the
@@ -4229,7 +4223,9 @@ static void cpp_materialise_specializes(cidx::SqliteDb &db) {
     // phase robust to chains).
     int64_t src = src0;
     int64_t dst = cpp_collapse_to_primary(db, dst0);
-    if (src == dst) continue;
+    if (src == dst) {
+      continue;
+    }
     auto ins = db.prepare(
         "INSERT INTO entity_edge "
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
@@ -4259,11 +4255,15 @@ static void cpp_materialise_instantiates(cidx::SqliteDb &db) {
       "  AND src.kind IN (2,3,4,5,31) "
       "  AND dst.kind IN (2,3,4,5,31)");
   std::vector<std::pair<int64_t,int64_t>> rows;
-  while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
+  while (st.step()) {
+    rows.emplace_back(st.col_int64(0), st.col_int64(1));
+  }
   for (const auto &[src0, dst0] : rows) {
     int64_t src = src0;
     int64_t dst = cpp_collapse_to_primary(db, dst0);
-    if (src == dst) continue;
+    if (src == dst) {
+      continue;
+    }
     auto ins = db.prepare(
         "INSERT INTO entity_edge "
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
@@ -4295,8 +4295,12 @@ static std::vector<std::string> cpp_split_template_args(const std::string &inner
   for (char ch : inner) {
     if (ch == '<') { ++depth; cur.push_back(ch); }
     else if (ch == '>') { --depth; cur.push_back(ch); }
-    else if (ch == ',' && depth == 0) { flush(); }
-    else cur.push_back(ch);
+    else if (ch == ',' && depth == 0) { flush();
+    } else {
+      {
+        cur.push_back(ch);
+      }
+    }
   }
   flush();
   return args;
@@ -4307,9 +4311,15 @@ static std::vector<std::string> cpp_split_template_args(const std::string &inner
 static std::string cpp_wrapper_value_type(const std::string &s,
                                           const char *prefix) {
   std::string inner = s.substr(strlen(prefix));
-  while (!inner.empty() && inner.back() == ' ') inner.pop_back();
-  if (!inner.empty() && inner.back() == '>') inner.pop_back();
-  while (!inner.empty() && inner.back() == ' ') inner.pop_back();
+  while (!inner.empty() && inner.back() == ' ') {
+    inner.pop_back();
+  }
+  if (!inner.empty() && inner.back() == '>') {
+    inner.pop_back();
+  }
+  while (!inner.empty() && inner.back() == ' ') {
+    inner.pop_back();
+  }
   auto args = cpp_split_template_args(inner);
   return args.empty() ? inner : args.back();
 }
@@ -4321,14 +4331,22 @@ static std::pair<int64_t,int64_t> cpp_classify_field_type(
     // Strip const/volatile
     for (const auto *q : {"const ", "volatile "}) {
       std::string::size_type p;
-      while ((p = r.find(q)) != std::string::npos) r.erase(p, strlen(q));
+      while ((p = r.find(q)) != std::string::npos) {
+        r.erase(p, strlen(q));
+      }
     }
-    while (!r.empty() && r.front() == ' ') r.erase(r.begin());
-    while (!r.empty() && r.back()  == ' ') r.pop_back();
+    while (!r.empty() && r.front() == ' ') {
+      r.erase(r.begin());
+    }
+    while (!r.empty() && r.back() == ' ') {
+      r.pop_back();
+    }
     return r;
   }();
   // Array
-  if (!s.empty() && s.back() == ']') return {4, 4};
+  if (!s.empty() && s.back() == ']') {
+    return {4, 4};
+  }
   // Containers
   static const char *containers[] = {
     "std::vector<", "vector<", "std::list<", "list<",
@@ -4336,7 +4354,7 @@ static std::pair<int64_t,int64_t> cpp_classify_field_type(
     "std::unordered_set<", "unordered_set<",
     "std::map<", "std::unordered_map<", nullptr
   };
-  for (const char **c = containers; *c; ++c) {
+  for (const char **c = containers; (*c) != nullptr; ++c) {
     if (s.substr(0, strlen(*c)) == *c) {
       // Classify the VALUE type (last template arg, so map<K,V> uses V).
       auto [ik, _] = cpp_classify_field_type(cpp_wrapper_value_type(s, *c));
@@ -4347,21 +4365,31 @@ static std::pair<int64_t,int64_t> cpp_classify_field_type(
   // owner, cannot outlive it -- same lifetime as a value member), 0..1.
   static const char *excl[] = {"std::unique_ptr<", "unique_ptr<",
                                 "std::optional<", "optional<", nullptr};
-  for (const char **u = excl; *u; ++u) {
-    if (s.substr(0, strlen(*u)) == *u) return {4, 2};  // composes=4
+  for (const char **u = excl; (*u) != nullptr; ++u) {
+    if (s.substr(0, strlen(*u)) == *u) {
+      return {4, 2}; // composes=4
+    }
   }
   // shared_ptr -> aggregates (SHARED ownership: the pointee can outlive the
   // owner while other shared_ptrs keep it alive).
   static const char *shared[] = {"std::shared_ptr<", "shared_ptr<", nullptr};
-  for (const char **u = shared; *u; ++u) {
-    if (s.substr(0, strlen(*u)) == *u) return {5, 2};  // aggregates=5
+  for (const char **u = shared; (*u) != nullptr; ++u) {
+    if (s.substr(0, strlen(*u)) == *u) {
+      return {5, 2}; // aggregates=5
+    }
   }
   static const char *weak_raw[] = {"std::weak_ptr<", "weak_ptr<", nullptr};
-  for (const char **w = weak_raw; *w; ++w) {
-    if (s.substr(0, strlen(*w)) == *w) return {6, 2};  // associates=6
+  for (const char **w = weak_raw; (*w) != nullptr; ++w) {
+    if (s.substr(0, strlen(*w)) == *w) {
+      return {6, 2}; // associates=6
+    }
   }
-  if (!s.empty() && s.back() == '*') return {6, 2};
-  if (!s.empty() && s.back() == '&') return {6, 2};
+  if (!s.empty() && s.back() == '*') {
+    return {6, 2};
+  }
+  if (!s.empty() && s.back() == '&') {
+    return {6, 2};
+  }
   return {4, 1};  // composes=4, multiplicity=1 (value)
 }
 
@@ -4371,12 +4399,16 @@ static std::optional<int64_t> cpp_resolve_entity_from_type(
   // Strip qualifiers
   for (const auto *q : {"const ", "volatile "}) {
     std::string::size_type p;
-    while ((p = type_info.find(q)) != std::string::npos)
+    while ((p = type_info.find(q)) != std::string::npos) {
       type_info.erase(p, strlen(q));
+    }
   }
-  while (!type_info.empty() && type_info.front() == ' ')
+  while (!type_info.empty() && type_info.front() == ' ') {
     type_info.erase(type_info.begin());
-  while (!type_info.empty() && type_info.back() == ' ') type_info.pop_back();
+  }
+  while (!type_info.empty() && type_info.back() == ' ') {
+    type_info.pop_back();
+  }
   // Strip trailing * & []
   bool stripped = true;
   while (stripped) {
@@ -4389,7 +4421,9 @@ static std::optional<int64_t> cpp_resolve_entity_from_type(
       auto p = type_info.rfind('[');
       if (p != std::string::npos) { type_info = type_info.substr(0,p); stripped = true; }
     }
-    while (!type_info.empty() && type_info.back() == ' ') type_info.pop_back();
+    while (!type_info.empty() && type_info.back() == ' ') {
+      type_info.pop_back();
+    }
   }
   // Strip smart-ptr / container wrappers
   static const char *wrappers[] = {
@@ -4400,7 +4434,7 @@ static std::optional<int64_t> cpp_resolve_entity_from_type(
     "std::unordered_set<", "unordered_set<",
     "std::map<", "std::unordered_map<", nullptr
   };
-  for (const char **w = wrappers; *w; ++w) {
+  for (const char **w = wrappers; (*w) != nullptr; ++w) {
     if (type_info.substr(0, strlen(*w)) == *w) {
       // Recurse on the VALUE type (last template arg) so map<K,V> -> V and
       // nested generics peel one level at a time.
@@ -4411,12 +4445,16 @@ static std::optional<int64_t> cpp_resolve_entity_from_type(
   auto st1 = db.prepare(
       "SELECT id FROM symbol WHERE qual_name = ? AND kind IN (2,3,4,5) LIMIT 1");
   st1.bind(1, std::string_view(type_info));
-  if (st1.step()) return st1.col_int64(0);
+  if (st1.step()) {
+    return st1.col_int64(0);
+  }
   // Lookup by spelling
   auto st2 = db.prepare(
       "SELECT id FROM symbol WHERE spelling = ? AND kind IN (2,3,4,5) LIMIT 1");
   st2.bind(1, std::string_view(type_info));
-  if (st2.step()) return st2.col_int64(0);
+  if (st2.step()) {
+    return st2.col_int64(0);
+  }
   return std::nullopt;
 }
 
@@ -4451,8 +4489,12 @@ static void cpp_materialise_field_relations(cidx::SqliteDb &db) {
   };
 
   for (const auto &r : rows) {
-    if (r.field_kind_int != 6) continue;  // only data members
-    if (r.type_info.empty()) continue;
+    if (r.field_kind_int != 6) {
+      continue; // only data members
+    }
+    if (r.type_info.empty()) {
+      continue;
+    }
 
     // Stage 4: prefer a structural member -> NAMED-INSTANCE uses(7) edge. A
     // `X<B> m_;` member mints the `X<B>` instance (is_named_instance=1) and the
@@ -4483,23 +4525,34 @@ static void cpp_materialise_field_relations(cidx::SqliteDb &db) {
           "SELECT ref_id FROM template_arg WHERE owner_id = ? "
           "AND arg_kind = 1 AND ref_id IS NOT NULL ORDER BY position DESC LIMIT 1");
       tst.bind(1, r.field_id);
-      if (tst.step()) ref_entity_id = tst.col_int64(0);
+      if (tst.step()) {
+        ref_entity_id = tst.col_int64(0);
+      }
 
-      if (!ref_entity_id)
+      if (!ref_entity_id) {
         ref_entity_id = cpp_resolve_entity_from_type(db, r.type_info);
+      }
     }
-    if (!ref_entity_id) continue;
+    if (!ref_entity_id) {
+      continue;
+    }
 
     // Confirm referent is entity
     auto ck = db.prepare("SELECT kind FROM symbol WHERE id = ?");
     ck.bind(1, *ref_entity_id);
-    if (!ck.step()) continue;
+    if (!ck.step()) {
+      continue;
+    }
     const int64_t ref_kind = ck.col_int64(0);
-    if (ref_kind != 2 && ref_kind != 3 && ref_kind != 4 && ref_kind != 5) continue;
+    if (ref_kind != 2 && ref_kind != 3 && ref_kind != 4 && ref_kind != 5) {
+      continue;
+    }
 
     auto [ek, mult] = cpp_classify_field_type(r.type_info);
     int64_t access_int = 0;
-    if (acc_map.count(r.field_access)) access_int = acc_map.at(r.field_access);
+    if (acc_map.contains(r.field_access)) {
+      access_int = acc_map.at(r.field_access);
+    }
 
     // Collapse the owner onto its primary template.  The referent is collapsed
     // too UNLESS it is a named instance (kept un-collapsed so the edge points at
@@ -4508,7 +4561,9 @@ static void cpp_materialise_field_relations(cidx::SqliteDb &db) {
     int64_t ref_pid = skip_ref_collapse
                           ? *ref_entity_id
                           : cpp_collapse_to_primary(db, *ref_entity_id);
-    if (owner_pid == ref_pid) continue;
+    if (owner_pid == ref_pid) {
+      continue;
+    }
 
     auto ins = db.prepare(
         "INSERT INTO entity_edge "
@@ -4535,10 +4590,16 @@ static std::string cpp_strip_to_param_core(const std::string &type_spelling) {
   auto strip_quals = [](std::string s) {
     for (const auto *q : {"const ", "volatile "}) {
       std::string::size_type p;
-      while ((p = s.find(q)) != std::string::npos) s.erase(p, strlen(q));
+      while ((p = s.find(q)) != std::string::npos) {
+        s.erase(p, strlen(q));
+      }
     }
-    while (!s.empty() && s.front() == ' ') s.erase(s.begin());
-    while (!s.empty() && s.back() == ' ') s.pop_back();
+    while (!s.empty() && s.front() == ' ') {
+      s.erase(s.begin());
+    }
+    while (!s.empty() && s.back() == ' ') {
+      s.pop_back();
+    }
     return s;
   };
   std::string s = strip_quals(type_spelling);
@@ -4549,8 +4610,12 @@ static std::string cpp_strip_to_param_core(const std::string &type_spelling) {
     } else {
       s.pop_back();
     }
-    while (!s.empty() && s.front() == ' ') s.erase(s.begin());
-    while (!s.empty() && s.back() == ' ') s.pop_back();
+    while (!s.empty() && s.front() == ' ') {
+      s.erase(s.begin());
+    }
+    while (!s.empty() && s.back() == ' ') {
+      s.pop_back();
+    }
   }
   s = strip_quals(s);
   static const char *wrappers[] = {
@@ -4561,7 +4626,7 @@ static std::string cpp_strip_to_param_core(const std::string &type_spelling) {
     "std::unordered_set<", "unordered_set<",
     "std::map<", "std::unordered_map<", nullptr
   };
-  for (const char **w = wrappers; *w; ++w) {
+  for (const char **w = wrappers; (*w) != nullptr; ++w) {
     if (s.substr(0, strlen(*w)) == *w) {
       return cpp_strip_to_param_core(cpp_wrapper_value_type(s, *w));
     }
@@ -4588,7 +4653,10 @@ static void cpp_materialise_instance_composition(cidx::SqliteDb &db) {
         "JOIN symbol prim ON prim.id = e.dst_id "
         "WHERE e.kind = 5 AND inst.is_named_instance = 1 AND prim.kind = 31 "
         "ORDER BY e.src_id, e.dst_id");
-    while (st.step()) instances.push_back({st.col_int64(0), st.col_int64(1)});
+    while (st.step()) {
+      instances.push_back(
+          {.inst_id = st.col_int64(0), .prim_id = st.col_int64(1)});
+    }
   }
 
   static const std::map<std::string,int64_t> acc_map = {
@@ -4605,7 +4673,9 @@ static void cpp_materialise_instance_composition(cidx::SqliteDb &db) {
       st.bind(1, inst.prim_id);
       while (st.step()) {
         const std::string nm = st.col_text(1);
-        if (!nm.empty()) param_pos.emplace(nm, st.col_int64(0));
+        if (!nm.empty()) {
+          param_pos.emplace(nm, st.col_int64(0));
+        }
       }
     }
 
@@ -4619,7 +4689,9 @@ static void cpp_materialise_instance_composition(cidx::SqliteDb &db) {
       st.bind(1, inst.inst_id);
       while (st.step()) {
         std::optional<int64_t> ref;
-        if (!st.col_is_null(1)) ref = st.col_int64(1);
+        if (!st.col_is_null(1)) {
+          ref = st.col_int64(1);
+        }
         bound[st.col_int64(0)] = ref;
       }
     }
@@ -4635,12 +4707,17 @@ static void cpp_materialise_instance_composition(cidx::SqliteDb &db) {
           "WHERE e.kind = 8 AND e.dst_id = ? AND s.kind = 6 "
           "ORDER BY e.src_id");
       st.bind(1, inst.prim_id);
-      while (st.step())
-        fields.push_back({st.col_int64(0), st.col_text(1), st.col_text(2)});
+      while (st.step()) {
+        fields.push_back({.field_id = st.col_int64(0),
+                          .type_info = st.col_text(1),
+                          .access = st.col_text(2)});
+      }
     }
 
     for (const auto &f : fields) {
-      if (f.type_info.empty()) continue;
+      if (f.type_info.empty()) {
+        continue;
+      }
       const std::string core = cpp_strip_to_param_core(f.type_info);
       auto pit = param_pos.find(core);
       int64_t ref_entity_id;
@@ -4648,7 +4725,9 @@ static void cpp_materialise_instance_composition(cidx::SqliteDb &db) {
         // Parameterised member (binds T): substitute the instance's bound type
         // -> X<B> <ownership> B.
         auto bit = bound.find(pit->second);
-        if (bit == bound.end() || !bit->second) continue;  // builtin/unindexed
+        if (bit == bound.end() || !bit->second) {
+          continue; // builtin/unindexed
+        }
         ref_entity_id = *bit->second;
       } else {
         // Stage 3: CONCRETE (non-parameterised) member, e.g. `Widget w;` on the
@@ -4656,21 +4735,30 @@ static void cpp_materialise_instance_composition(cidx::SqliteDb &db) {
         // System / unindexed concrete types resolve to nullopt and are skipped,
         // so no std:: explosion.
         auto re = cpp_resolve_entity_from_type(db, f.type_info);
-        if (!re) continue;
+        if (!re) {
+          continue;
+        }
         ref_entity_id = *re;
       }
 
       auto ck = db.prepare("SELECT kind FROM symbol WHERE id = ?");
       ck.bind(1, ref_entity_id);
-      if (!ck.step()) continue;
-      const int64_t ref_kind = ck.col_int64(0);
-      if (ref_kind != 2 && ref_kind != 3 && ref_kind != 4 && ref_kind != 5)
+      if (!ck.step()) {
         continue;
-      if (inst.inst_id == ref_entity_id) continue;
+      }
+      const int64_t ref_kind = ck.col_int64(0);
+      if (ref_kind != 2 && ref_kind != 3 && ref_kind != 4 && ref_kind != 5) {
+        continue;
+      }
+      if (inst.inst_id == ref_entity_id) {
+        continue;
+      }
 
       auto [ek, mult] = cpp_classify_field_type(f.type_info);
       int64_t access_int = 0;
-      if (acc_map.count(f.access)) access_int = acc_map.at(f.access);
+      if (acc_map.contains(f.access)) {
+        access_int = acc_map.at(f.access);
+      }
 
       auto ins = db.prepare(
           "INSERT INTO entity_edge "
@@ -4707,7 +4795,9 @@ static void cpp_materialise_creates_destroys(cidx::SqliteDb &db) {
       "WHERE e.kind IN (10,11,12,13,14,15,16)");
   std::vector<SiteRow> rows;
   while (st.step()) {
-    rows.push_back({st.col_int64(0), st.col_int64(1), st.col_int64(2)});
+    rows.push_back({.src_fn = st.col_int64(0),
+                    .dst_sym = st.col_int64(1),
+                    .l0_kind = st.col_int64(2)});
   }
 
   for (const auto &r : rows) {
@@ -4718,7 +4808,9 @@ static void cpp_materialise_creates_destroys(cidx::SqliteDb &db) {
         "WHERE e.src_id = ? AND e.kind = 9 "
         "  AND owner.kind IN (2,3,4,5) LIMIT 1");
     own_st.bind(1, r.src_fn);
-    if (!own_st.step()) continue;  // free fn: no entity src
+    if (!own_st.step()) {
+      continue; // free fn: no entity src
+    }
     const int64_t owner_entity = own_st.col_int64(0);
 
     // Target entity: ctor/dtor parent → record
@@ -4736,15 +4828,21 @@ static void cpp_materialise_creates_destroys(cidx::SqliteDb &db) {
       dk.bind(1, r.dst_sym);
       if (dk.step()) {
         int64_t k = dk.col_int64(0);
-        if (k==2||k==3||k==4||k==5) target = r.dst_sym;
+        if (k == 2 || k == 3 || k == 4 || k == 5) {
+          target = r.dst_sym;
+        }
       }
     }
-    if (!target) continue;
+    if (!target) {
+      continue;
+    }
 
     // Collapse both endpoints onto their primary template.
     int64_t owner_pid = cpp_collapse_to_primary(db, owner_entity);
     int64_t target_pid = cpp_collapse_to_primary(db, *target);
-    if (owner_pid == target_pid) continue;
+    if (owner_pid == target_pid) {
+      continue;
+    }
 
     if (r.l0_kind == destroy_kind) {
       auto ins = db.prepare(
@@ -4787,7 +4885,9 @@ static void cpp_materialise_creates_destroys(cidx::SqliteDb &db) {
       "WHERE s.kind IN (21, 24) AND s.type_info IS NOT NULL");
   std::vector<RetRow> ret_rows;
   while (rst.step()) {
-    ret_rows.push_back({rst.col_int64(0), rst.col_int64(2), rst.col_text(1)});
+    ret_rows.push_back({.method_id = rst.col_int64(0),
+                        .owner_id = rst.col_int64(2),
+                        .type_info = rst.col_text(1)});
   }
   for (const auto &r : ret_rows) {
     const std::string &ti = r.type_info;
@@ -4795,18 +4895,26 @@ static void cpp_materialise_creates_destroys(cidx::SqliteDb &db) {
     auto paren = ti.find('(');
     if (paren != std::string::npos && paren > 0) {
       ret_type = ti.substr(0, paren);
-      while (!ret_type.empty() && ret_type.back() == ' ') ret_type.pop_back();
+      while (!ret_type.empty() && ret_type.back() == ' ') {
+        ret_type.pop_back();
+      }
     } else {
       ret_type = ti;
     }
-    if (ret_type.empty() || ret_type == "void" || ret_type == "auto") continue;
+    if (ret_type.empty() || ret_type == "void" || ret_type == "auto") {
+      continue;
+    }
     auto ret_eid = cpp_resolve_entity_from_type(db, ret_type);
-    if (!ret_eid) continue;
+    if (!ret_eid) {
+      continue;
+    }
 
     // Collapse both endpoints onto their primary template.
     int64_t owner_pid = cpp_collapse_to_primary(db, r.owner_id);
     int64_t ret_pid = cpp_collapse_to_primary(db, *ret_eid);
-    if (ret_pid == owner_pid) continue;  // constructors return own type
+    if (ret_pid == owner_pid) {
+      continue; // constructors return own type
+    }
 
     auto ins = db.prepare(
         "INSERT INTO entity_edge "
@@ -4834,7 +4942,9 @@ static void cpp_materialise_uses(cidx::SqliteDb &db) {
       "  AND dst.kind IN (21, 8, 24, 25, 30)");
   std::vector<UseRow> rows;
   while (st.step()) {
-    rows.push_back({st.col_int64(0), st.col_int64(1), st.col_int64(2)});
+    rows.push_back({.caller = st.col_int64(0),
+                    .callee = st.col_int64(1),
+                    .is_pure = st.col_int64(2)});
   }
   for (const auto &r : rows) {
     // Caller owner entity
@@ -4844,7 +4954,9 @@ static void cpp_materialise_uses(cidx::SqliteDb &db) {
         "WHERE e.src_id = ? AND e.kind = 9 "
         "  AND owner.kind IN (2,3,4,5) LIMIT 1");
     co.bind(1, r.caller);
-    if (!co.step()) continue;
+    if (!co.step()) {
+      continue;
+    }
     int64_t src_eid = co.col_int64(0);
 
     // Callee owner entity
@@ -4854,14 +4966,18 @@ static void cpp_materialise_uses(cidx::SqliteDb &db) {
         "WHERE e.src_id = ? AND e.kind = 9 "
         "  AND owner.kind IN (2,3,4,5) LIMIT 1");
     coe.bind(1, r.callee);
-    if (!coe.step()) continue;
+    if (!coe.step()) {
+      continue;
+    }
     int64_t dst_eid = coe.col_int64(0);
 
     // Collapse both endpoints onto their primary template.
     src_eid = cpp_collapse_to_primary(db, src_eid);
     dst_eid = cpp_collapse_to_primary(db, dst_eid);
-    if (src_eid == dst_eid) continue;
-    int64_t partial = r.is_pure ? 1 : 0;
+    if (src_eid == dst_eid) {
+      continue;
+    }
+    int64_t partial = (r.is_pure != 0) ? 1 : 0;
 
     auto ins = db.prepare(
         "INSERT INTO entity_edge "
@@ -4890,11 +5006,15 @@ static void cpp_materialise_befriends(cidx::SqliteDb &db) {
       "  AND src.kind IN (2,3,4,5) "
       "  AND dst.kind IN (2,3,4,5)");
   std::vector<std::pair<int64_t,int64_t>> rows;
-  while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
+  while (st.step()) {
+    rows.emplace_back(st.col_int64(0), st.col_int64(1));
+  }
   for (const auto &[src0, dst0] : rows) {
     int64_t src = cpp_collapse_to_primary(db, src0);
     int64_t dst = cpp_collapse_to_primary(db, dst0);
-    if (src == dst) continue;
+    if (src == dst) {
+      continue;
+    }
     auto ins = db.prepare(
         "INSERT INTO entity_edge "
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
@@ -4923,11 +5043,19 @@ static void cpp_materialise_entity_nodes(cidx::SqliteDb &db) {
   // class_template=6 abstract_class_template=7 interface_template=8.
   // is_interface / has_pure delegate to the precomputed owner-sets.
   const auto classify = [](int64_t sym_id, int64_t sym_kind) -> int64_t {
-    if (sym_kind == 5) return 5;  // enum
-    if (sym_kind == 3) return 4;  // union
+    if (sym_kind == 5) {
+      return 5; // enum
+    }
+    if (sym_kind == 3) {
+      return 4; // union
+    }
     bool is_template = (sym_kind == 31);
-    if (g_rollup_ctx->is_interface(sym_id)) return is_template ? 8 : 3;
-    if (g_rollup_ctx->has_pure(sym_id)) return is_template ? 7 : 2;
+    if (g_rollup_ctx->is_interface(sym_id)) {
+      return is_template ? 8 : 3;
+    }
+    if (g_rollup_ctx->has_pure(sym_id)) {
+      return is_template ? 7 : 2;
+    }
     return is_template ? 6 : 1;
   };
 
@@ -4935,7 +5063,9 @@ static void cpp_materialise_entity_nodes(cidx::SqliteDb &db) {
   std::vector<std::pair<int64_t, int64_t>> rows;  // (id, kind)
   {
     auto st = db.prepare("SELECT id, kind FROM symbol WHERE kind IN (2,3,4,5,31)");
-    while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
+    while (st.step()) {
+      rows.emplace_back(st.col_int64(0), st.col_int64(1));
+    }
   }
   for (const auto &[sym_id, sym_kind] : rows) {
     auto ins = db.prepare(
@@ -4950,7 +5080,9 @@ static void cpp_materialise_entity_nodes(cidx::SqliteDb &db) {
   std::vector<int64_t> ns_ids;
   {
     auto st = db.prepare("SELECT id FROM symbol WHERE kind = 22");
-    while (st.step()) ns_ids.push_back(st.col_int64(0));
+    while (st.step()) {
+      ns_ids.push_back(st.col_int64(0));
+    }
   }
   for (const int64_t ns_id : ns_ids) {
     auto ins = db.prepare(
@@ -4978,9 +5110,13 @@ static void cpp_materialise_declares(cidx::SqliteDb &db) {
       "JOIN entity_node en ON en.id = e.dst_id "
       "WHERE e.kind = 3 AND src.kind = 22");
   std::vector<std::pair<int64_t, int64_t>> rows;
-  while (st.step()) rows.emplace_back(st.col_int64(0), st.col_int64(1));
+  while (st.step()) {
+    rows.emplace_back(st.col_int64(0), st.col_int64(1));
+  }
   for (const auto &[src_id, dst_id] : rows) {
-    if (src_id == dst_id) continue;
+    if (src_id == dst_id) {
+      continue;
+    }
     auto ins = db.prepare(
         "INSERT INTO entity_edge "
         "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
@@ -5288,7 +5424,8 @@ Storage::graph_edges(int64_t mine_id, const std::string &direction,
                      int limit) {
   // direction "in": mine=dst_id, peer=src_id
   // direction "out": mine=src_id, peer=dst_id
-  std::string mine, peer;
+  std::string mine;
+  std::string peer;
   if (direction == "in") {
     mine = "dst_id";
     peer = "src_id";
@@ -5487,7 +5624,8 @@ Storage::component_alias_index() {
     const auto [pbase, pver] =
         CompileDb::split_base_version(component_abs_base(cbase));
     (void)pbase;
-    by_name[c.name].push_back({base, ver, pver.empty()});
+    by_name[c.name].push_back(
+        {.base = base, .ver = ver, .path_unversioned = pver.empty()});
   }
   std::map<std::string, std::tuple<std::string, std::string, bool>> out;
   for (const auto &[name, rows] : by_name) {
@@ -5528,7 +5666,7 @@ Storage::list_alias_pairs() {
     pairs[nv.first] = {nv.second, false}; // labels first / win
   }
   for (const auto &[name, entry] : component_alias_index()) {
-    if (pairs.find(name) == pairs.end()) {
+    if (!pairs.contains(name)) {
       pairs[name] = {std::get<0>(entry), true}; // version-stripped base
     }
   }

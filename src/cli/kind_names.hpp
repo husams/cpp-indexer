@@ -12,12 +12,10 @@
 
 #include <cstdio>
 
-namespace cidx {
-namespace cli {
+namespace cidx::cli {
 
 // Returns the Python CursorKind.name for a CXCursorKind value, or a loud
 // "<UNKNOWN_KIND_N>" marker for any value not present in the table.
 const char *kind_name(unsigned kind);
 
-} // namespace cli
-} // namespace cidx
+} // namespace cidx::cli

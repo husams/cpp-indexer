@@ -41,8 +41,7 @@
 #include "util/pathutil.hpp"
 #include "util/repo.hpp"
 
-namespace cidx {
-namespace cli {
+namespace cidx::cli {
 namespace {
 
 namespace fmt = format;
@@ -52,7 +51,7 @@ bool is_digits(const std::string &s) {
     return false;
   }
   for (char c : s) {
-    if (!std::isdigit(static_cast<unsigned char>(c))) {
+    if (std::isdigit(static_cast<unsigned char>(c)) == 0) {
       return false;
     }
   }
@@ -133,7 +132,7 @@ std::optional<double> file_mtime(const std::string &path) {
   }
 #ifdef __APPLE__
   return static_cast<double>(st.st_mtimespec.tv_sec) +
-         static_cast<double>(st.st_mtimespec.tv_nsec) * 1e-9;
+         (static_cast<double>(st.st_mtimespec.tv_nsec) * 1e-9);
 #else
   return static_cast<double>(st.st_mtim.tv_sec) +
          static_cast<double>(st.st_mtim.tv_nsec) * 1e-9;
@@ -190,8 +189,9 @@ int index_one(Storage &db, const File &rec, const std::string &path,
       if (ctx.logger != nullptr && !out.failed_flags.empty()) {
         std::string flags;
         for (std::size_t i = 0; i < out.failed_flags.size(); ++i) {
-          if (i != 0)
+          if (i != 0) {
             flags += " ";
+          }
           flags += out.failed_flags[i];
         }
         ctx.logger->error("cidx.clang",
@@ -202,10 +202,12 @@ int index_one(Storage &db, const File &rec, const std::string &path,
         // lines (capped at 20; classic logs error_diagnostics()).
         std::size_t shown = 0;
         for (const Diagnostic &d : out.diagnostics) {
-          if (d.severity < 3)
+          if (d.severity < 3) {
             continue;
-          if (shown++ >= 25)
+          }
+          if (shown++ >= 25) {
             break;
+          }
           ctx.logger->info("cidx.clang",
                            path + ": diag " + d.file_path.value_or("") + ":" +
                                std::to_string(d.line.value_or(0)) + ": " +
@@ -541,8 +543,7 @@ void bump_component_versions(Storage &db,
   std::map<std::string, std::string> seen; // name -> highest version seen
   for (const CompileCommand &cmd : commands) {
     for (const std::string &val : CompileDb::include_values(cmd.args)) {
-      if (val.find('<') != std::string::npos ||
-          val.find('$') != std::string::npos || !pathutil::isabs(val)) {
+      if (val.contains('<') || val.contains('$') || !pathutil::isabs(val)) {
         continue;
       }
       const auto m = CompileDb::match_alias(pathutil::normpath(val), label_map);
@@ -731,7 +732,7 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
     for (const CompileCommand &cmd : commands) {
       const std::optional<Component> comp =
           db.component_for_path(source_path(cmd));
-      if (!comp || attached.count(comp->id)) {
+      if (!comp || (attached.contains(comp->id))) {
         continue;
       }
       attached.insert(comp->id);
@@ -860,7 +861,7 @@ int cmd_list_dirs(const ParsedArgs &args, Context &ctx) {
 }
 
 int cmd_list_files(const ParsedArgs &args, Context &ctx) {
-  if (args.dir && !(args.component && !args.component->empty())) {
+  if (args.dir && (!args.component || args.component->empty())) {
     *ctx.err << kDirNeedsComponent << "\n";
     return 1;
   }
@@ -931,7 +932,7 @@ int cmd_list_files(const ParsedArgs &args, Context &ctx) {
 }
 
 int cmd_list_symbols(const ParsedArgs &args, Context &ctx) {
-  if (args.dir && !(args.component && !args.component->empty())) {
+  if (args.dir && (!args.component || args.component->empty())) {
     *ctx.err << kDirNeedsComponent << "\n";
     return 1;
   }
@@ -1374,8 +1375,8 @@ std::string str_trim(const std::string &s) {
 }
 
 std::string str_lower(std::string s) {
-  std::transform(s.begin(), s.end(), s.begin(),
-                 [](unsigned char c) { return std::tolower(c); });
+  std::ranges::transform(s, s.begin(),
+                         [](unsigned char c) { return std::tolower(c); });
   return s;
 }
 
@@ -1725,7 +1726,7 @@ int cmd_file(const ParsedArgs &args, Context &ctx) {
     }
     const std::string &flag = rest[0];
     if (action == "-set-flag") {
-      if (std::find(opts.begin(), opts.end(), flag) != opts.end()) {
+      if (std::ranges::find(opts, flag) != opts.end()) {
         *ctx.out << "flag already present on " << ap << ": " << flag << "\n";
         return 0;
       }
@@ -1734,7 +1735,7 @@ int cmd_file(const ParsedArgs &args, Context &ctx) {
       *ctx.out << "added flag to " << ap << ": " << flag << "\n";
       return 0;
     }
-    const std::size_t n =
+    const auto n =
         static_cast<std::size_t>(std::count(opts.begin(), opts.end(), flag));
     if (n == 0) {
       *ctx.out << "flag not present on " << ap << ": " << flag << "\n";
@@ -1843,10 +1844,17 @@ graph_edge_kinds(const std::optional<std::string> &spec) {
     if (c == ',') {
       if (!cur.empty()) {
         // strip leading/trailing spaces
-        std::size_t b = 0, e = cur.size();
-        while (b < e && cur[b] == ' ') ++b;
-        while (e > b && cur[e-1] == ' ') --e;
-        if (b < e) out.push_back(cur.substr(b, e-b));
+        std::size_t b = 0;
+        std::size_t e = cur.size();
+        while (b < e && cur[b] == ' ') {
+          ++b;
+        }
+        while (e > b && cur[e - 1] == ' ') {
+          --e;
+        }
+        if (b < e) {
+          out.push_back(cur.substr(b, e - b));
+        }
       }
       cur.clear();
     } else {
@@ -1854,10 +1862,17 @@ graph_edge_kinds(const std::optional<std::string> &spec) {
     }
   }
   if (!cur.empty()) {
-    std::size_t b = 0, e = cur.size();
-    while (b < e && cur[b] == ' ') ++b;
-    while (e > b && cur[e-1] == ' ') --e;
-    if (b < e) out.push_back(cur.substr(b, e-b));
+    std::size_t b = 0;
+    std::size_t e = cur.size();
+    while (b < e && cur[b] == ' ') {
+      ++b;
+    }
+    while (e > b && cur[e - 1] == ' ') {
+      --e;
+    }
+    if (b < e) {
+      out.push_back(cur.substr(b, e - b));
+    }
   }
   if (out.empty()) {
     return std::nullopt;
@@ -1978,10 +1993,14 @@ open_graph(const ParsedArgs & /*args*/, Context &ctx,
 
 int cmd_graph_callers(const ParsedArgs &args, Context &ctx) {
   auto h = open_graph(args, ctx);
-  if (!h) return 1;
+  if (!h) {
+    return 1;
+  }
   auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
                                     args.kind, args.first, *ctx.err);
-  if (!sym) return rc;
+  if (!sym) {
+    return rc;
+  }
   std::vector<std::string> kinds{"calls"};
   if (!args.direct_only) {
     kinds.emplace_back("dispatch_calls");
@@ -1994,10 +2013,14 @@ int cmd_graph_callers(const ParsedArgs &args, Context &ctx) {
 
 int cmd_graph_callees(const ParsedArgs &args, Context &ctx) {
   auto h = open_graph(args, ctx);
-  if (!h) return 1;
+  if (!h) {
+    return 1;
+  }
   auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
                                     args.kind, args.first, *ctx.err);
-  if (!sym) return rc;
+  if (!sym) {
+    return rc;
+  }
   std::vector<std::string> kinds{"calls"};
   if (!args.direct_only) {
     kinds.emplace_back("dispatch_calls");
@@ -2010,10 +2033,14 @@ int cmd_graph_callees(const ParsedArgs &args, Context &ctx) {
 
 int cmd_graph_refs(const ParsedArgs &args, Context &ctx) {
   auto h = open_graph(args, ctx);
-  if (!h) return 1;
+  if (!h) {
+    return 1;
+  }
   auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
                                     args.kind, args.first, *ctx.err);
-  if (!sym) return rc;
+  if (!sym) {
+    return rc;
+  }
   auto edges = h->g->references(sym->id, args.graph_limit);
   graph::emit_edges(*h->g, edges, args.graph_json, *ctx.out,
                     "references to " + sym->name + " (@" + sym->loc() + "):");
@@ -2022,10 +2049,14 @@ int cmd_graph_refs(const ParsedArgs &args, Context &ctx) {
 
 int cmd_graph_neighbors(const ParsedArgs &args, Context &ctx) {
   auto h = open_graph(args, ctx);
-  if (!h) return 1;
+  if (!h) {
+    return 1;
+  }
   auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
                                     args.kind, args.first, *ctx.err);
-  if (!sym) return rc;
+  if (!sym) {
+    return rc;
+  }
   auto kinds_vec = graph_edge_kinds(args.edge);
   std::optional<std::vector<int64_t>> kid_ids;
   try {
@@ -2044,10 +2075,14 @@ int cmd_graph_neighbors(const ParsedArgs &args, Context &ctx) {
 
 int cmd_graph_walk(const ParsedArgs &args, Context &ctx) {
   auto h = open_graph(args, ctx);
-  if (!h) return 1;
+  if (!h) {
+    return 1;
+  }
   auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
                                     args.kind, args.first, *ctx.err);
-  if (!sym) return rc;
+  if (!sym) {
+    return rc;
+  }
   auto kinds_vec = graph_edge_kinds(args.edge);
   // walk default edge kind is "calls"
   if (!kinds_vec) {
@@ -2055,7 +2090,7 @@ int cmd_graph_walk(const ParsedArgs &args, Context &ctx) {
   }
   graph::Traversal tr;
   try {
-    tr = h->g->walk(sym->id, *kinds_vec, args.direction, args.graph_depth,
+    tr = h->g->walk(sym->id, kinds_vec, args.direction, args.graph_depth,
                     args.graph_limit);
   } catch (const std::invalid_argument &e) {
     *ctx.err << "error: " << e.what() << "\n";
@@ -2071,7 +2106,9 @@ int cmd_graph_walk(const ParsedArgs &args, Context &ctx) {
   // Build kinds comma-separated string for header
   std::string kinds_str;
   for (std::size_t ki = 0; ki < kinds_vec->size(); ++ki) {
-    if (ki != 0) kinds_str += ",";
+    if (ki != 0) {
+      kinds_str += ",";
+    }
     kinds_str += (*kinds_vec)[ki];
   }
   graph::emit_syms(
@@ -2085,15 +2122,21 @@ int cmd_graph_walk(const ParsedArgs &args, Context &ctx) {
 
 int cmd_graph_path(const ParsedArgs &args, Context &ctx) {
   auto h = open_graph(args, ctx);
-  if (!h) return 1;
+  if (!h) {
+    return 1;
+  }
   auto [src, rc_src] = graph_select_one(*h->g, args.usr, args.graph_id,
                                         args.name, args.kind, args.first,
                                         *ctx.err);
-  if (!src) return rc_src;
+  if (!src) {
+    return rc_src;
+  }
   auto [dst, rc_dst] = graph_select_one(*h->g, args.to_usr, args.to_id,
                                         args.to_name, args.to_kind, args.first,
                                         *ctx.err);
-  if (!dst) return rc_dst;
+  if (!dst) {
+    return rc_dst;
+  }
 
   auto kinds_vec = graph_edge_kinds(args.edge);
   // path default edge kind is "calls"
@@ -2102,7 +2145,7 @@ int cmd_graph_path(const ParsedArgs &args, Context &ctx) {
   }
   std::optional<std::vector<graph::Sym>> chain;
   try {
-    chain = h->g->reaches(src->id, dst->id, *kinds_vec, args.direction,
+    chain = h->g->reaches(src->id, dst->id, kinds_vec, args.direction,
                           args.graph_depth);
   } catch (const std::invalid_argument &e) {
     *ctx.err << "error: " << e.what() << "\n";
@@ -2114,7 +2157,9 @@ int cmd_graph_path(const ParsedArgs &args, Context &ctx) {
     } else {
       std::string ks;
       for (std::size_t ki = 0; ki < kinds_vec->size(); ++ki) {
-        if (ki != 0) ks += ",";
+        if (ki != 0) {
+          ks += ",";
+        }
         ks += (*kinds_vec)[ki];
       }
       *ctx.out << "no path from " << src->name << " to " << dst->name
@@ -2132,10 +2177,14 @@ int cmd_graph_path(const ParsedArgs &args, Context &ctx) {
 
 int cmd_graph_hierarchy(const ParsedArgs &args, Context &ctx) {
   auto h = open_graph(args, ctx);
-  if (!h) return 1;
+  if (!h) {
+    return 1;
+  }
   auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
                                     args.kind, args.first, *ctx.err);
-  if (!sym) return rc;
+  if (!sym) {
+    return rc;
+  }
   const bool direct = !args.transitive;
   auto bases = h->g->bases(sym->id, direct);
   auto subs = h->g->subclasses(sym->id, direct);
@@ -2152,15 +2201,23 @@ int cmd_graph_hierarchy(const ParsedArgs &args, Context &ctx) {
   }
   if (args.graph_json) {
     using namespace json_out;
-    Array barr, sarr, marr;
-    for (const auto &s : bases) barr.push_back(s.to_dict());
-    for (const auto &s : subs) sarr.push_back(s.to_dict());
-    for (const auto &s : mems) marr.push_back(s.to_dict());
+    Array barr;
+    Array sarr;
+    Array marr;
+    for (const auto &s : bases) {
+      barr.push_back(s.to_dict());
+    }
+    for (const auto &s : subs) {
+      sarr.push_back(s.to_dict());
+    }
+    for (const auto &s : mems) {
+      marr.push_back(s.to_dict());
+    }
     Object o;
-    o.push_back({"symbol", sym->to_dict()});
-    o.push_back({"bases", Value::arr(std::move(barr))});
-    o.push_back({"subclasses", Value::arr(std::move(sarr))});
-    o.push_back({"members", Value::arr(std::move(marr))});
+    o.emplace_back("symbol", sym->to_dict());
+    o.emplace_back("bases", Value::arr(std::move(barr)));
+    o.emplace_back("subclasses", Value::arr(std::move(sarr)));
+    o.emplace_back("members", Value::arr(std::move(marr)));
     *ctx.out << dumps_indent2(Value::obj(std::move(o))) << "\n";
     return 0;
   }
@@ -2174,20 +2231,26 @@ int cmd_graph_hierarchy(const ParsedArgs &args, Context &ctx) {
 
 int cmd_graph_dispatch(const ParsedArgs &args, Context &ctx) {
   auto h = open_graph(args, ctx);
-  if (!h) return 1;
+  if (!h) {
+    return 1;
+  }
   auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
                                     args.kind, args.first, *ctx.err);
-  if (!sym) return rc;
+  if (!sym) {
+    return rc;
+  }
   auto targets = h->g->dispatch_targets(sym->id);
   const bool virt = h->g->is_virtual_method(sym->id);
   if (args.graph_json) {
     using namespace json_out;
     Array tarr;
-    for (const auto &t : targets) tarr.push_back(t.to_dict());
+    for (const auto &t : targets) {
+      tarr.push_back(t.to_dict());
+    }
     Object o;
-    o.push_back({"method", sym->to_dict()});
-    o.push_back({"is_virtual", Value::of(virt)});
-    o.push_back({"targets", Value::arr(std::move(tarr))});
+    o.emplace_back("method", sym->to_dict());
+    o.emplace_back("is_virtual", Value::of(virt));
+    o.emplace_back("targets", Value::arr(std::move(tarr)));
     *ctx.out << dumps_indent2(Value::obj(std::move(o))) << "\n";
     return 0;
   }
@@ -2201,7 +2264,9 @@ int cmd_graph_dispatch(const ParsedArgs &args, Context &ctx) {
 // v27: symbols defined in more than one backend (query.py:cmd_graph_redefined).
 int cmd_graph_redefined(const ParsedArgs &args, Context &ctx) {
   auto h = open_graph(args, ctx);
-  if (!h) return 1;
+  if (!h) {
+    return 1;
+  }
   auto syms = h->g->redefined(args.graph_limit);
   graph::emit_syms(syms, args.graph_json, *ctx.out,
                    "symbols redefined per backend (multi_def > 1):");
@@ -2212,24 +2277,34 @@ int cmd_graph_redefined(const ParsedArgs &args, Context &ctx) {
 // (query.py:cmd_graph_definitions -- output byte-identical).
 int cmd_graph_definitions(const ParsedArgs &args, Context &ctx) {
   auto h = open_graph(args, ctx);
-  if (!h) return 1;
+  if (!h) {
+    return 1;
+  }
   auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
                                     args.kind, args.first, *ctx.err);
-  if (!sym) return rc;
+  if (!sym) {
+    return rc;
+  }
   auto defs = h->g->definitions(sym->id);
   std::vector<graph::Definition> possible;
-  if (!args.direct_only) possible = h->g->possible_callees(sym->id);
+  if (!args.direct_only) {
+    possible = h->g->possible_callees(sym->id);
+  }
   if (args.graph_json) {
     using namespace json_out;
     Array darr;
-    for (const auto &d : defs) darr.push_back(d.to_dict());
+    for (const auto &d : defs) {
+      darr.push_back(d.to_dict());
+    }
     Array parr;
-    for (const auto &d : possible) parr.push_back(d.to_dict());
+    for (const auto &d : possible) {
+      parr.push_back(d.to_dict());
+    }
     Object o;
-    o.push_back({"symbol", sym->to_dict()});
-    o.push_back({"multi_def", Value::of(sym->multi_def)});
-    o.push_back({"definitions", Value::arr(std::move(darr))});
-    o.push_back({"possible_callees", Value::arr(std::move(parr))});
+    o.emplace_back("symbol", sym->to_dict());
+    o.emplace_back("multi_def", Value::of(sym->multi_def));
+    o.emplace_back("definitions", Value::arr(std::move(darr)));
+    o.emplace_back("possible_callees", Value::arr(std::move(parr)));
     *ctx.out << dumps_indent2(Value::obj(std::move(o))) << "\n";
     return 0;
   }
@@ -2244,7 +2319,7 @@ int cmd_graph_definitions(const ParsedArgs &args, Context &ctx) {
     std::size_t w = 0;
     for (const auto &d : possible) {
       const std::string &nm = d.sym.name.empty() ? d.sym.usr : d.sym.name;
-      if (nm.size() > w) w = nm.size();
+      w = std::max(nm.size(), w);
     }
     for (const auto &d : possible) {
       const std::string &nm = d.sym.name.empty() ? d.sym.usr : d.sym.name;
@@ -2259,61 +2334,73 @@ int cmd_graph_definitions(const ParsedArgs &args, Context &ctx) {
 // of_type for variables/fields, underlying for typedef/alias symbols).
 int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
   auto h = open_graph(args, ctx, /*require_edges=*/false);
-  if (!h) return 1;
+  if (!h) {
+    return 1;
+  }
   auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
                                     args.kind, args.first, *ctx.err);
-  if (!sym) return rc;
+  if (!sym) {
+    return rc;
+  }
   const graph::GraphQuery::SignatureInfo sig = h->g->signature(sym->id);
   if (args.graph_json) {
     using namespace json_out;
     const auto type_dict =
         [](const std::optional<graph::GraphQuery::TypeInfo> &t) {
-          if (!t) return Value::null();
+          if (!t) {
+            return Value::null();
+          }
           Object o;
-          o.push_back({"id", Value::of(t->id)});
-          o.push_back({"spelling", Value::of(t->spelling)});
-          o.push_back({"kind", Value::of(t->kind)});
-          o.push_back({"canonical",
-                       t->canonical ? Value::of(*t->canonical) : Value::null()});
+          o.emplace_back("id", Value::of(t->id));
+          o.emplace_back("spelling", Value::of(t->spelling));
+          o.emplace_back("kind", Value::of(t->kind));
+          o.emplace_back("canonical", t->canonical ? Value::of(*t->canonical)
+                                                   : Value::null());
           return Value::obj(std::move(o));
         };
     Object o;
-    o.push_back({"symbol", sym->to_dict()});
-    o.push_back({"returns", type_dict(sig.returns)});
+    o.emplace_back("symbol", sym->to_dict());
+    o.emplace_back("returns", type_dict(sig.returns));
     Array parr;
     for (const auto &p : sig.params) {
       Object po;
-      po.push_back({"position", Value::of(p.position)});
-      po.push_back({"name", p.name ? Value::of(*p.name) : Value::null()});
-      po.push_back({"type", type_dict(p.type)});
+      po.emplace_back("position", Value::of(p.position));
+      po.emplace_back("name", p.name ? Value::of(*p.name) : Value::null());
+      po.emplace_back("type", type_dict(p.type));
       parr.push_back(Value::obj(std::move(po)));
     }
-    o.push_back({"params", Value::arr(std::move(parr))});
-    o.push_back({"of_type", type_dict(sig.of_type)});
-    o.push_back({"underlying_type", type_dict(sig.underlying)});
+    o.emplace_back("params", Value::arr(std::move(parr)));
+    o.emplace_back("of_type", type_dict(sig.of_type));
+    o.emplace_back("underlying_type", type_dict(sig.underlying));
     *ctx.out << dumps_indent2(Value::obj(std::move(o))) << "\n";
     return 0;
   }
   *ctx.out << "signature of " << sym->name << " (@" << sym->loc() << "):\n";
   const auto type_str = [](const graph::GraphQuery::TypeInfo &t) {
     std::string s = t.spelling;
-    if (t.canonical) s += "  [canonical " + *t.canonical + "]";
+    if (t.canonical) {
+      s += "  [canonical " + *t.canonical + "]";
+    }
     return s;
   };
   if (sig.empty()) {
     *ctx.out << "  (no signature/type facts)\n";
     return 0;
   }
-  if (sig.returns)
+  if (sig.returns) {
     *ctx.out << "  returns: " << type_str(*sig.returns) << "\n";
-  for (const auto &p : sig.params)
+  }
+  for (const auto &p : sig.params) {
     *ctx.out << "  param " << p.position << ": "
              << (p.name ? *p.name : "_") << ": "
              << (p.type ? type_str(*p.type) : "<unknown>") << "\n";
-  if (sig.of_type)
+  }
+  if (sig.of_type) {
     *ctx.out << "  type: " << type_str(*sig.of_type) << "\n";
-  if (sig.underlying)
+  }
+  if (sig.underlying) {
     *ctx.out << "  underlying: " << type_str(*sig.underlying) << "\n";
+  }
   return 0;
 }
 
@@ -2321,24 +2408,28 @@ int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
 // it, through pointer/reference/array/alias/template-argument layers.
 int cmd_graph_typeusers(const ParsedArgs &args, Context &ctx) {
   auto h = open_graph(args, ctx, /*require_edges=*/false);
-  if (!h) return 1;
+  if (!h) {
+    return 1;
+  }
   auto [sym, rc] = graph_select_one(*h->g, args.usr, args.graph_id, args.name,
                                     args.kind, args.first, *ctx.err);
-  if (!sym) return rc;
+  if (!sym) {
+    return rc;
+  }
   const auto users = h->g->type_users(sym->usr, args.graph_limit);
   if (args.graph_json) {
     using namespace json_out;
     Array uarr;
     for (const auto &u : users) {
       Value v = u.sym.to_dict();
-      v.o.push_back({"role", Value::of(u.role)});
-      v.o.push_back({"position",
-                     u.position ? Value::of(*u.position) : Value::null()});
+      v.o.emplace_back("role", Value::of(u.role));
+      v.o.emplace_back("position",
+                       u.position ? Value::of(*u.position) : Value::null());
       uarr.push_back(std::move(v));
     }
     Object o;
-    o.push_back({"symbol", sym->to_dict()});
-    o.push_back({"users", Value::arr(std::move(uarr))});
+    o.emplace_back("symbol", sym->to_dict());
+    o.emplace_back("users", Value::arr(std::move(uarr)));
     *ctx.out << dumps_indent2(Value::obj(std::move(o))) << "\n";
     return 0;
   }
@@ -2346,12 +2437,14 @@ int cmd_graph_typeusers(const ParsedArgs &args, Context &ctx) {
   std::size_t width = 0;
   for (const auto &u : users) {
     const std::string &nm = u.sym.name.empty() ? u.sym.usr : u.sym.name;
-    if (nm.size() > width) width = nm.size();
+    width = std::max(nm.size(), width);
   }
   for (const auto &u : users) {
     const std::string &nm = u.sym.name.empty() ? u.sym.usr : u.sym.name;
     std::string role = u.role;
-    if (u.position) role += " " + std::to_string(*u.position);
+    if (u.position) {
+      role += " " + std::to_string(*u.position);
+    }
     *ctx.out << "  " << fmt::ljust(u.sym.kind, 14) << " "
              << fmt::ljust(nm, static_cast<int>(width)) << "  " << role
              << "  @" << u.sym.loc() << "\n";
@@ -2617,7 +2710,9 @@ int cmd_verify(const ParsedArgs &args, Context &ctx) {
     return ::stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode);
   };
 
-  int c_ok = 0, c_missing = 0, c_vermiss = 0;
+  int c_ok = 0;
+  int c_missing = 0;
+  int c_vermiss = 0;
   for (const Component &c : components) {
     const std::string resolved = db.component_abs_base(c);
     std::string status;
@@ -2639,7 +2734,8 @@ int cmd_verify(const ParsedArgs &args, Context &ctx) {
              << resolved << "\n";
   }
 
-  int f_ok = 0, f_missing = 0;
+  int f_ok = 0;
+  int f_missing = 0;
   for (const auto &[rec, path] : db.list_files(scope)) {
     if (is_reg_file(path)) {
       ++f_ok;
@@ -2752,34 +2848,76 @@ int run_command(const ParsedArgs &args, Context &ctx) {
     return cmd_delete_symbol(args, ctx);
   }
   if (args.command == "graph") {
-    if (args.what == "callers")   return cmd_graph_callers(args, ctx);
-    if (args.what == "callees")   return cmd_graph_callees(args, ctx);
-    if (args.what == "refs")      return cmd_graph_refs(args, ctx);
-    if (args.what == "neighbors") return cmd_graph_neighbors(args, ctx);
-    if (args.what == "walk")      return cmd_graph_walk(args, ctx);
-    if (args.what == "path")      return cmd_graph_path(args, ctx);
-    if (args.what == "hierarchy") return cmd_graph_hierarchy(args, ctx);
-    if (args.what == "dispatch")  return cmd_graph_dispatch(args, ctx);
-    if (args.what == "redefined")   return cmd_graph_redefined(args, ctx);
-    if (args.what == "definitions") return cmd_graph_definitions(args, ctx);
-    if (args.what == "signature")   return cmd_graph_signature(args, ctx);
-    if (args.what == "typeusers")   return cmd_graph_typeusers(args, ctx);
+    if (args.what == "callers") {
+      return cmd_graph_callers(args, ctx);
+    }
+    if (args.what == "callees") {
+      return cmd_graph_callees(args, ctx);
+    }
+    if (args.what == "refs") {
+      return cmd_graph_refs(args, ctx);
+    }
+    if (args.what == "neighbors") {
+      return cmd_graph_neighbors(args, ctx);
+    }
+    if (args.what == "walk") {
+      return cmd_graph_walk(args, ctx);
+    }
+    if (args.what == "path") {
+      return cmd_graph_path(args, ctx);
+    }
+    if (args.what == "hierarchy") {
+      return cmd_graph_hierarchy(args, ctx);
+    }
+    if (args.what == "dispatch") {
+      return cmd_graph_dispatch(args, ctx);
+    }
+    if (args.what == "redefined") {
+      return cmd_graph_redefined(args, ctx);
+    }
+    if (args.what == "definitions") {
+      return cmd_graph_definitions(args, ctx);
+    }
+    if (args.what == "signature") {
+      return cmd_graph_signature(args, ctx);
+    }
+    if (args.what == "typeusers") {
+      return cmd_graph_typeusers(args, ctx);
+    }
   }
   if (args.command == "include") {
-    if (args.what == "graph") return cmd_include_graph(args, ctx);
-    if (args.what == "check") return cmd_include_check(args, ctx);
-    if (args.what == "plan")  return cmd_include_plan(args, ctx);
-    if (args.what == "apply") return cmd_include_apply(args, ctx);
+    if (args.what == "graph") {
+      return cmd_include_graph(args, ctx);
+    }
+    if (args.what == "check") {
+      return cmd_include_check(args, ctx);
+    }
+    if (args.what == "plan") {
+      return cmd_include_plan(args, ctx);
+    }
+    if (args.what == "apply") {
+      return cmd_include_apply(args, ctx);
+    }
   }
   if (args.command == "component") {
-    if (args.what == "show") return cmd_component_show(args, ctx);
+    if (args.what == "show") {
+      return cmd_component_show(args, ctx);
+    }
     return cmd_component_set_version(args, ctx);
   }
   if (args.command == "repo") {
-    if (args.what == "show") return cmd_repo_show(args, ctx);
-    if (args.what == "add-clone") return cmd_repo_add_clone(args, ctx);
-    if (args.what == "switch") return cmd_repo_switch(args, ctx);
-    if (args.what == "rm") return cmd_repo_rm(args, ctx);
+    if (args.what == "show") {
+      return cmd_repo_show(args, ctx);
+    }
+    if (args.what == "add-clone") {
+      return cmd_repo_add_clone(args, ctx);
+    }
+    if (args.what == "switch") {
+      return cmd_repo_switch(args, ctx);
+    }
+    if (args.what == "rm") {
+      return cmd_repo_rm(args, ctx);
+    }
     return cmd_repo_list(args, ctx); // list (and its `ls` alias)
   }
   if (args.command == "verify") {
@@ -2801,5 +2939,4 @@ int run_command(const ParsedArgs &args, Context &ctx) {
   return cmd_list_symbols(args, ctx);
 }
 
-} // namespace cli
-} // namespace cidx
+} // namespace cidx::cli

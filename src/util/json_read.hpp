@@ -17,8 +17,7 @@
 
 #include "cli/json_out.hpp"
 
-namespace cidx {
-namespace json_read {
+namespace cidx::json_read {
 
 // Maximum array/object nesting. Far above any plan cidx emits; low enough that
 // the recursive-descent parser cannot be driven into a stack overflow.
@@ -28,5 +27,4 @@ inline constexpr int kMaxDepth = 100;
 // input, unbalanced structure, or nesting beyond kMaxDepth.
 cidx::json_out::Value parse(const std::string &text);
 
-} // namespace json_read
-} // namespace cidx
+} // namespace cidx::json_read

@@ -9,8 +9,9 @@ StorageEdgeSink::StorageEdgeSink(cidx::Storage &db) : db_(db) {}
 std::optional<int64_t>
 StorageEdgeSink::lookup_symbol_id(const std::string &usr) {
   const std::optional<cidx::Symbol> sym = db_.lookup_symbol(usr);
-  if (!sym)
+  if (!sym) {
     return std::nullopt;
+  }
   return sym->id;
 }
 
@@ -27,10 +28,12 @@ int64_t StorageEdgeSink::add_edge(const EdgeRecord &edge) {
   e.dst_id = edge.dst_id;
   e.kind = edge.kind;
   e.count = edge.count;
-  if (edge.base_access)
-    e.base_access = *edge.base_access;
-  if (edge.is_virtual)
-    e.is_virtual = *edge.is_virtual;
+  if (edge.base_access) {
+    e.base_access = edge.base_access;
+  }
+  if (edge.is_virtual) {
+    e.is_virtual = edge.is_virtual;
+  }
   return db_.add_edge(e);
 }
 
@@ -40,10 +43,12 @@ int64_t StorageEdgeSink::ensure_edge(const EdgeRecord &edge) {
   e.dst_id = edge.dst_id;
   e.kind = edge.kind;
   e.count = edge.count;
-  if (edge.base_access)
-    e.base_access = *edge.base_access;
-  if (edge.is_virtual)
-    e.is_virtual = *edge.is_virtual;
+  if (edge.base_access) {
+    e.base_access = edge.base_access;
+  }
+  if (edge.is_virtual) {
+    e.is_virtual = edge.is_virtual;
+  }
   return db_.ensure_edge(e);
 }
 
@@ -106,16 +111,18 @@ void StorageEdgeSink::copy_body_edges_to_def_edge(int64_t def_id,
 std::optional<std::string>
 StorageEdgeSink::lookup_display_name(int64_t id) {
   const std::optional<cidx::Symbol> sym = db_.lookup_symbol_by_id(id);
-  if (!sym)
+  if (!sym) {
     return std::nullopt;
+  }
   return sym->display_name;
 }
 
 void StorageEdgeSink::update_display_name(int64_t id,
                                           const std::string &display) {
   const std::optional<cidx::Symbol> sym = db_.lookup_symbol_by_id(id);
-  if (!sym)
+  if (!sym) {
     return;
+  }
   db_.update_symbol(sym->usr, {{"display_name", display}});
 }
 
@@ -124,8 +131,9 @@ StorageEdgeSink::symbol_ids_by_qual_name_kind(const std::string &qual_name,
                                               const std::string &kind_name) {
   std::vector<int64_t> out;
   for (const cidx::Symbol &sym :
-       db_.lookup_symbols_by_qual_name(qual_name, kind_name))
+       db_.lookup_symbols_by_qual_name(qual_name, kind_name)) {
     out.push_back(sym.id);
+  }
   return out;
 }
 
@@ -192,8 +200,9 @@ void StorageEdgeSink::add_symbol_type(int64_t symbol_id, int64_t kind,
 std::optional<int64_t>
 StorageEdgeSink::file_id_for_path(const std::string &path) {
   const auto row = db_.get_file(path);
-  if (!row)
+  if (!row) {
     return std::nullopt;
+  }
   return row->id;
 }
 

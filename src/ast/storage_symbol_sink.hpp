@@ -23,7 +23,7 @@ public:
   // index_file_notxn counters: a cursor whose symbol already exists RESOLVED
   // counts as skipped (AstIndexer::store semantics).
   void reset_counters();
-  int stored_count() const;
+  [[nodiscard]] int stored_count() const;
 
   void emit(const SymbolRecord &symbol) override;
 

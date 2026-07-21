@@ -50,38 +50,47 @@ const clang::NamedDecl *InstanceMinter::mintable_primary(
   const clang::NamedDecl *primary = spec->getSpecializedTemplate();
   const auto from = spec->getInstantiatedFrom();
   if (const auto *partial =
-          from.dyn_cast<clang::ClassTemplatePartialSpecializationDecl *>())
+          from.dyn_cast<clang::ClassTemplatePartialSpecializationDecl *>()) {
     primary = partial;
-  if (primary == nullptr)
+  }
+  if (primary == nullptr) {
     return nullptr;
-  if (context_.getSourceManager().isInSystemHeader(primary->getLocation()))
+  }
+  if (context_.getSourceManager().isInSystemHeader(primary->getLocation())) {
     return nullptr;
+  }
   return primary;
 }
 
 void InstanceMinter::mint_instance_from_type(clang::QualType type) const {
   type = strip_indirections(type);
-  if (type.isNull())
+  if (type.isNull()) {
     return;
+  }
   const auto *spec = llvm::dyn_cast_or_null<
       clang::ClassTemplateSpecializationDecl>(type->getAsCXXRecordDecl());
-  if (spec == nullptr)
+  if (spec == nullptr) {
     return; // not a class-template specialization
+  }
   const clang::NamedDecl *primary = mintable_primary(spec);
-  if (primary == nullptr)
+  if (primary == nullptr) {
     return;
+  }
   const std::string inst_usr = usr_for_decl(spec);
   const std::string prim_usr = usr_for_decl(primary);
-  if (inst_usr.empty() || prim_usr.empty() || inst_usr == prim_usr)
+  if (inst_usr.empty() || prim_usr.empty() || inst_usr == prim_usr) {
     return;
+  }
   const int64_t inst_id = mint_instance_pair(spec, primary, type);
-  if (inst_id < 0)
+  if (inst_id < 0) {
     return;
+  }
   // template_arg rows on the instance through the one canonical encoder
   // (all argument kinds, per docs/improvements/template-arg-contract.md).
   const clang::TemplateArgumentList &args = spec->getTemplateArgs();
-  for (unsigned ai = 0; ai < args.size(); ++ai)
+  for (unsigned ai = 0; ai < args.size(); ++ai) {
     targ_encoder_.emit(inst_id, static_cast<int64_t>(ai), args[ai]);
+  }
 }
 
 // Instance node + primary stub + the structural edge between them:
@@ -94,8 +103,9 @@ int64_t InstanceMinter::mint_instance_pair(
     const clang::ClassTemplateSpecializationDecl *spec,
     const clang::NamedDecl *primary, clang::QualType written_type) const {
   auto inst_req = mint_.build(spec);
-  if (!inst_req)
+  if (!inst_req) {
     return -1;
+  }
   inst_req->display_name =
       clang::QualType(written_type).getAsString(printing_policy(context_));
   inst_req->is_instantiation = is_template_instantiation(spec);
@@ -103,10 +113,12 @@ int64_t InstanceMinter::mint_instance_pair(
   const int64_t inst_id = sink_.mint_symbol(*inst_req);
 
   auto prim_req = mint_.build(primary);
-  if (!prim_req)
+  if (!prim_req) {
     return -1;
-  if (cidx_symbol_kind_name(primary) == nullptr)
+  }
+  if (cidx_symbol_kind_name(primary) == nullptr) {
     prim_req->kind_name = "class-template";
+  }
   const int64_t prim_id = sink_.mint_symbol(*prim_req);
 
   EdgeRecord e;

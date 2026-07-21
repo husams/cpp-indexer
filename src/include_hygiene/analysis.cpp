@@ -77,10 +77,9 @@ SourceContext build_source_context(cidx::Storage &db, int64_t src_file_id) {
       ctx.owner_names.push_back(display_name_of(*s));
     }
   }
-  std::sort(ctx.owner_names.begin(), ctx.owner_names.end());
-  ctx.owner_names.erase(
-      std::unique(ctx.owner_names.begin(), ctx.owner_names.end()),
-      ctx.owner_names.end());
+  std::ranges::sort(ctx.owner_names);
+  ctx.owner_names.erase(std::ranges::unique(ctx.owner_names).begin(),
+                        ctx.owner_names.end());
 
   // Refs has three parts:
   //
@@ -151,24 +150,25 @@ void classify(cidx::Storage &db, const IncludeGraph &graph,
   // These never change the zero-reference RESULT; they change whether it is
   // executable. Collected first so even a `used` finding carries them.
   if (!s.resolved) {
-    c.caveats.push_back("directive did not resolve to a file");
+    c.caveats.emplace_back("directive did not resolve to a file");
   }
   if (s.directive == kIncludeDirectiveIncludeNext) {
-    c.caveats.push_back("#include_next depends on search-path position");
+    c.caveats.emplace_back("#include_next depends on search-path position");
   } else if (s.directive == kIncludeDirectiveImport) {
-    c.caveats.push_back("#import has no multiple-include contract here");
+    c.caveats.emplace_back("#import has no multiple-include contract here");
   } else if (s.directive == kIncludeDirectiveIncludeMacros) {
-    c.caveats.push_back("__include_macros is a preprocessor-internal directive");
+    c.caveats.emplace_back(
+        "__include_macros is a preprocessor-internal directive");
   }
   if (!s.cond_fingerprint.empty()) {
-    c.caveats.push_back(
+    c.caveats.emplace_back(
         "inside a conditional region: only proven for this configuration");
   }
   if (e.is_system) {
-    c.caveats.push_back("system header: its internals are not indexed");
+    c.caveats.emplace_back("system header: its internals are not indexed");
   }
   if (!e.dst_file_id) {
-    c.caveats.push_back(
+    c.caveats.emplace_back(
         "target is not owned by any component: its symbols are not indexed");
   }
 
@@ -179,9 +179,9 @@ void classify(cidx::Storage &db, const IncludeGraph &graph,
        db.include_macro_uses(e.src_file_id, e.dst_path)) {
     c.macro_uses.push_back(m.name);
   }
-  std::sort(c.macro_uses.begin(), c.macro_uses.end());
+  std::ranges::sort(c.macro_uses);
   if (!c.macro_uses.empty()) {
-    c.caveats.push_back("source expands macro(s) defined in this header");
+    c.caveats.emplace_back("source expands macro(s) defined in this header");
   }
 
   // --- repeated UNGUARDED header: the X-macro pattern -----------------------
@@ -225,17 +225,16 @@ void classify(cidx::Storage &db, const IncludeGraph &graph,
       c.header_symbols.push_back(display_name_of(*sym));
     }
   }
-  std::sort(c.header_symbols.begin(), c.header_symbols.end());
-  c.header_symbols.erase(
-      std::unique(c.header_symbols.begin(), c.header_symbols.end()),
-      c.header_symbols.end());
+  std::ranges::sort(c.header_symbols);
+  c.header_symbols.erase(std::ranges::unique(c.header_symbols).begin(),
+                         c.header_symbols.end());
 
   // The verdict is defined purely by the reference intersection
   // Refs(Owners(S)) ∩ Symbols(H): that is the contract, and nothing else may
   // reclassify a zero-reference finding as `used`.
   std::vector<int64_t> hit;
   for (const int64_t id : header_symbols) {
-    if (ctx.refs.count(id) != 0) {
+    if (ctx.refs.contains(id)) {
       hit.push_back(id);
     }
   }
@@ -253,11 +252,10 @@ void classify(cidx::Storage &db, const IncludeGraph &graph,
       ev.relation = relation_for(db, ctx.owners, id, ev.owner);
       c.evidence.push_back(std::move(ev));
     }
-    std::sort(c.evidence.begin(), c.evidence.end(),
-              [](const Evidence &a, const Evidence &b) {
-                return std::tie(a.owner, a.target, a.relation) <
-                       std::tie(b.owner, b.target, b.relation);
-              });
+    std::ranges::sort(c.evidence, [](const Evidence &a, const Evidence &b) {
+      return std::tie(a.owner, a.target, a.relation) <
+             std::tie(b.owner, b.target, b.relation);
+    });
     return;
   }
 
@@ -271,8 +269,8 @@ void classify(cidx::Storage &db, const IncludeGraph &graph,
   // include `used`; it forces manual_review while the reference verdict stands.
   const std::set<int64_t> owner_set(ctx.owners.begin(), ctx.owners.end());
   for (const int64_t id : header_symbols) {
-    if (owner_set.count(id) != 0) {
-      c.caveats.push_back(
+    if (owner_set.contains(id)) {
+      c.caveats.emplace_back(
           "this file defines symbol(s) this header declares (its own header): "
           "removal cannot be proven safe automatically");
       break;
@@ -317,8 +315,8 @@ Classification combine_class(Classification a, Classification b) {
 }
 
 void sort_unique(std::vector<std::string> &v) {
-  std::sort(v.begin(), v.end());
-  v.erase(std::unique(v.begin(), v.end()), v.end());
+  std::ranges::sort(v);
+  v.erase(std::ranges::unique(v).begin(), v.end());
 }
 
 // Fold one per-(edge, config) candidate into the merged set keyed by physical
@@ -367,17 +365,16 @@ void finalize_merged(IncludeCandidate &c) {
   sort_unique(c.owners);
   sort_unique(c.header_symbols);
   sort_unique(c.reverse_dependants);
-  std::sort(c.evidence.begin(), c.evidence.end(),
-            [](const Evidence &a, const Evidence &b) {
-              return std::tie(a.owner, a.target, a.relation) <
-                     std::tie(b.owner, b.target, b.relation);
-            });
+  std::ranges::sort(c.evidence, [](const Evidence &a, const Evidence &b) {
+    return std::tie(a.owner, a.target, a.relation) <
+           std::tie(b.owner, b.target, b.relation);
+  });
   c.evidence.erase(
-      std::unique(c.evidence.begin(), c.evidence.end(),
-                  [](const Evidence &a, const Evidence &b) {
-                    return std::tie(a.owner, a.target, a.relation) ==
-                           std::tie(b.owner, b.target, b.relation);
-                  }),
+      std::ranges::unique(c.evidence,
+                          [](const Evidence &a, const Evidence &b) {
+                            return std::tie(a.owner, a.target, a.relation) ==
+                                   std::tie(b.owner, b.target, b.relation);
+                          }).begin(),
       c.evidence.end());
 }
 
@@ -408,10 +405,9 @@ AnalysisResult analyze(cidx::Storage &db, const AnalysisOptions &opts) {
       result.uncovered_scope.push_back(abs);
     }
   }
-  std::sort(result.uncovered_scope.begin(), result.uncovered_scope.end());
-  result.uncovered_scope.erase(
-      std::unique(result.uncovered_scope.begin(), result.uncovered_scope.end()),
-      result.uncovered_scope.end());
+  std::ranges::sort(result.uncovered_scope);
+  result.uncovered_scope.erase(std::ranges::unique(result.uncovered_scope).begin(),
+                               result.uncovered_scope.end());
 
   std::unordered_map<int64_t, std::string> paths;
   for (const auto &[row, abs] : db.list_files()) {
@@ -425,7 +421,7 @@ AnalysisResult analyze(cidx::Storage &db, const AnalysisOptions &opts) {
     if (p == paths.end()) {
       continue;
     }
-    if (!scope.empty() && scope.count(p->second) == 0) {
+    if (!scope.empty() && !scope.contains(p->second)) {
       continue;
     }
     by_src[e.src_file_id].push_back(e);
@@ -489,11 +485,11 @@ AnalysisResult analyze(cidx::Storage &db, const AnalysisOptions &opts) {
   }
 
   // Deterministic order: path, then source offset, then configuration digest.
-  std::sort(result.candidates.begin(), result.candidates.end(),
-            [](const IncludeCandidate &a, const IncludeCandidate &b) {
-              return std::tie(a.src_path, a.begin_offset, a.configs) <
-                     std::tie(b.src_path, b.begin_offset, b.configs);
-            });
+  std::ranges::sort(result.candidates,
+                    [](const IncludeCandidate &a, const IncludeCandidate &b) {
+                      return std::tie(a.src_path, a.begin_offset, a.configs) <
+                             std::tie(b.src_path, b.begin_offset, b.configs);
+                    });
   return result;
 }
 

@@ -9,8 +9,7 @@
 #include "diff/compare.hpp"
 #include "diff/target.hpp"
 
-namespace cidx {
-namespace diff {
+namespace cidx::diff {
 
 // Report-level inputs that are not part of either side's analysis.
 struct ReportSpec {
@@ -25,5 +24,4 @@ void render_report(const ReportSpec &spec, const SideAnalysis &left,
                    const SideAnalysis &right, const ConfigDelta &delta,
                    const Comparison &cmp, std::ostream &out);
 
-} // namespace diff
-} // namespace cidx
+} // namespace cidx::diff

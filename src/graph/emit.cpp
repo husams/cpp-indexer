@@ -4,14 +4,14 @@
 // Byte-identical output to Python for both text and --json modes.
 #include "graph/emit.hpp"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
 #include "cli/format.hpp"
 #include "cli/json_out.hpp"
 
-namespace cidx {
-namespace graph {
+namespace cidx::graph {
 
 // ---- emit_edges -----------------------------------------------------------
 // cli.py:1054-1069
@@ -37,15 +37,13 @@ void emit_edges(GraphQuery &g, const std::vector<Edge> &edges, bool json_mode,
   std::size_t width = 0;
   for (const Edge &e : edges) {
     const std::string &nm = e.peer.name.empty() ? e.peer.usr : e.peer.name;
-    if (nm.size() > width) {
-      width = nm.size();
-    }
+    width = std::max(nm.size(), width);
   }
 
   for (const Edge &e : edges) {
     // count suffix: only when count > 1 (or truthy and != 1)
     std::string cnt_str;
-    if (e.count && e.count != 1) {
+    if ((e.count != 0) && e.count != 1) {
       cnt_str = "  x" + std::to_string(e.count);
     }
     // sample site: first site from A8 limit=1
@@ -76,13 +74,13 @@ void emit_syms(const std::vector<Sym> &syms, bool json_mode, std::ostream &out,
     arr.reserve(syms.size());
     for (const Sym &s : syms) {
       json_out::Value v = s.to_dict();
-      if (depths) {
+      if (depths != nullptr) {
         // Append "depth" key LAST (walk only, R7)
         auto it = depths->find(s.id);
         if (it != depths->end()) {
-          v.o.push_back({"depth", json_out::Value::of(it->second)});
+          v.o.emplace_back("depth", json_out::Value::of(it->second));
         } else {
-          v.o.push_back({"depth", json_out::Value::null()});
+          v.o.emplace_back("depth", json_out::Value::null());
         }
       }
       arr.push_back(std::move(v));
@@ -98,14 +96,12 @@ void emit_syms(const std::vector<Sym> &syms, bool json_mode, std::ostream &out,
   std::size_t width = 0;
   for (const Sym &s : syms) {
     const std::string &nm = s.name.empty() ? s.usr : s.name;
-    if (nm.size() > width) {
-      width = nm.size();
-    }
+    width = std::max(nm.size(), width);
   }
 
   for (const Sym &s : syms) {
     std::string dep_str;
-    if (depths) {
+    if (depths != nullptr) {
       auto it = depths->find(s.id);
       if (it != depths->end()) {
         dep_str = "  d" + std::to_string(it->second);
@@ -120,5 +116,4 @@ void emit_syms(const std::vector<Sym> &syms, bool json_mode, std::ostream &out,
   out << syms.size() << " result(s)\n";
 }
 
-} // namespace graph
-} // namespace cidx
+} // namespace cidx::graph

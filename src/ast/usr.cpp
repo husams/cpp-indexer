@@ -7,8 +7,9 @@ namespace cidx::ast {
 
 std::string usr_for_decl(const clang::Decl *decl) {
   llvm::SmallString<128> buf;
-  if (clang::index::generateUSRForDecl(decl, buf))
+  if (clang::index::generateUSRForDecl(decl, buf)) {
     return {}; // generation failed
+  }
   return std::string(buf);
 }
 

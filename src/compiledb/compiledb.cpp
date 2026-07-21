@@ -80,7 +80,7 @@ const std::set<std::string> kLaunchers = {
 };
 
 bool is_launcher(const std::string &tok) {
-  return kLaunchers.count(pathutil::basename(tok)) != 0;
+  return kLaunchers.contains(pathutil::basename(tok));
 }
 
 // compiledb.py:23-24 — absolute paths returned UNCHANGED (not normalized).
@@ -95,8 +95,7 @@ std::string abs_against(const std::string &p, const std::string &base) {
 
 std::string CompileDb::db_dir_from_arg(const std::string &db_arg) {
   static const std::string kJson = "compile_commands.json";
-  if (db_arg.size() >= kJson.size() &&
-      db_arg.compare(db_arg.size() - kJson.size(), kJson.size(), kJson) == 0) {
+  if (db_arg.size() >= kJson.size() && db_arg.ends_with(kJson)) {
     std::string dir = db_arg.substr(0, db_arg.size() - kJson.size());
     return dir.empty() ? "." : dir; // `db_path[:-len(...)] or "."`
   }
@@ -144,10 +143,10 @@ CompileDb::strip_for_libclang(const std::vector<std::string> &argv,
   size_t i = argv.empty() ? 0 : command_start(argv) + 1;
   while (i < argv.size()) {
     const std::string &tok = argv[i++];
-    if (kDrop.count(tok) != 0) {
+    if (kDrop.contains(tok)) {
       continue;
     }
-    if (kDropWithArg.count(tok) != 0) {
+    if (kDropWithArg.contains(tok)) {
       if (i < argv.size()) {
         ++i; // drop flag + its argument
       }
@@ -156,7 +155,7 @@ CompileDb::strip_for_libclang(const std::vector<std::string> &argv,
     if (has_drop_prefix(tok)) {
       continue;
     }
-    if (src.count(tok) != 0) {
+    if (src.contains(tok)) {
       continue;
     }
     bool matched = false;
@@ -164,11 +163,10 @@ CompileDb::strip_for_libclang(const std::vector<std::string> &argv,
       const size_t flen = std::strlen(flag);
       if (tok == flag) { // space form: -I path
         const std::string arg = i < argv.size() ? argv[i++] : std::string();
-        out.push_back(flag);
+        out.emplace_back(flag);
         // Preserve rule (portable-paths §5): if the value contains '<' or '$'
         // it is a template/env-var reference — emit verbatim, not absolutized.
-        if (arg.find('<') != std::string::npos ||
-            arg.find('$') != std::string::npos) {
+        if (arg.contains('<') || arg.contains('$')) {
           out.push_back(arg);
         } else {
           out.push_back(abs_against(arg, directory));
@@ -180,8 +178,7 @@ CompileDb::strip_for_libclang(const std::vector<std::string> &argv,
         const std::string val = tok.substr(flen);
         // Preserve rule: if the value portion contains '<' or '$', emit the
         // entire original token verbatim (flag + value, already glued).
-        if (val.find('<') != std::string::npos ||
-            val.find('$') != std::string::npos) {
+        if (val.contains('<') || val.contains('$')) {
           out.push_back(tok); // verbatim: e.g. "-I<libfoo-include>/include"
         } else {
           out.push_back(flag + abs_against(val, directory));
@@ -211,10 +208,10 @@ CompileDb::sanitize(const std::vector<std::string> &stored) {
   }
   while (i < stored.size()) {
     const std::string &tok = stored[i++];
-    if (kDrop.count(tok) != 0) {
+    if (kDrop.contains(tok)) {
       continue;
     }
-    if (kDropWithArg.count(tok) != 0) {
+    if (kDropWithArg.contains(tok)) {
       if (i < stored.size()) {
         ++i;
       }
@@ -245,7 +242,7 @@ size_t CompileDb::command_start(const std::vector<std::string> &args) {
 std::string CompileDb::driver(const std::vector<std::string> &argv,
                               const std::string &directory) {
   if (argv.empty()) {
-    return std::string();
+    return {};
   }
   // Skip env-assignment + launcher prefix; the real compiler is the driver.
   const std::string &argv0 = argv[command_start(argv)];
@@ -333,8 +330,7 @@ CompileDb::resolve_options(
   return map_include_values(options, [&](const std::string &val) -> std::string {
     // Only resolve values that look indirected: contain '<', '$', or start
     // with '~'. Plain absolute paths pass through unchanged.
-    if (val.find('<') == std::string::npos &&
-        val.find('$') == std::string::npos &&
+    if (!val.contains('<') && !val.contains('$') &&
         (val.empty() || val[0] != '~')) {
       return val;
     }
@@ -358,13 +354,12 @@ CompileDb::build_label_map(
     out.emplace_back(name, rp, versioned);
   }
   // Sort: longest resolved path first; on tie, by name ascending.
-  std::sort(out.begin(), out.end(),
-            [](const AliasEntry &a, const AliasEntry &b) {
-              if (std::get<1>(a).size() != std::get<1>(b).size()) {
-                return std::get<1>(a).size() > std::get<1>(b).size(); // longer
-              }
-              return std::get<0>(a) < std::get<0>(b); // then name ascending
-            });
+  std::ranges::sort(out, [](const AliasEntry &a, const AliasEntry &b) {
+    if (std::get<1>(a).size() != std::get<1>(b).size()) {
+      return std::get<1>(a).size() > std::get<1>(b).size(); // longer
+    }
+    return std::get<0>(a) < std::get<0>(b); // then name ascending
+  });
   return out;
 }
 
@@ -424,9 +419,7 @@ CompileDb::alias_options(const std::vector<std::string> &options,
                          const std::vector<AliasEntry> &label_map) {
   return map_include_values(options, [&](const std::string &val) -> std::string {
     // Already indirected, or relative: leave unchanged.
-    if (val.find('<') != std::string::npos ||
-        val.find('$') != std::string::npos ||
-        !pathutil::isabs(val)) {
+    if (val.contains('<') || val.contains('$') || !pathutil::isabs(val)) {
       return val;
     }
     const auto m = match_alias(pathutil::normpath(val), label_map);
@@ -453,9 +446,8 @@ std::vector<long long> CompileDb::version_key(const std::string &version) {
   std::string cur;
   const auto flush = [&]() {
     if (!cur.empty()) {
-      const bool digits = std::all_of(cur.begin(), cur.end(), [](char c) {
-        return c >= '0' && c <= '9';
-      });
+      const bool digits =
+          std::ranges::all_of(cur, [](char c) { return c >= '0' && c <= '9'; });
       if (digits) {
         out.push_back(std::stoll(cur));
       }

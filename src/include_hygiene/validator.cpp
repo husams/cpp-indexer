@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <utility>
 
 namespace cidx::hygiene {
 
@@ -42,7 +43,7 @@ public:
     first_ = where + std::string(msg);
   }
 
-  const std::string &first() const { return first_; }
+  [[nodiscard]] const std::string &first() const { return first_; }
 
 private:
   std::string first_;
@@ -67,14 +68,13 @@ std::string RemovalValidator::apply_removals(const std::string &content,
   // Descending by offset: each erase then leaves every EARLIER offset valid.
   // Applying ascending would shift every subsequent range by the bytes already
   // removed -- the classic off-by-N that silently deletes the wrong code.
-  std::sort(removals.begin(), removals.end(),
-            [](const Removal &a, const Removal &b) {
-              return a.begin_offset > b.begin_offset;
-            });
+  std::ranges::sort(removals, [](const Removal &a, const Removal &b) {
+    return a.begin_offset > b.begin_offset;
+  });
   std::string out = content;
   int64_t last_begin = -1;
   for (const Removal &r : removals) {
-    if (r.begin_offset < 0 || r.end_offset > static_cast<int64_t>(out.size()) ||
+    if (r.begin_offset < 0 || std::cmp_greater(r.end_offset, out.size()) ||
         r.end_offset < r.begin_offset) {
       continue; // out of range for this buffer: the caller's hash check catches it
     }
@@ -99,8 +99,8 @@ RemovalValidator::affected_tus(const std::string &abs_path) {
   for (const std::string &p : g.transitive_to(abs_path, 0)) {
     roots.push_back(p);
   }
-  std::sort(roots.begin(), roots.end());
-  roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
+  std::ranges::sort(roots);
+  roots.erase(std::ranges::unique(roots).begin(), roots.end());
 
   bool any_tu = false;
   for (const std::string &root : roots) {
@@ -126,7 +126,7 @@ RemovalValidator::affected_tus(const std::string &abs_path) {
     // vacuous pass.
     return std::nullopt;
   }
-  std::sort(out.begin(), out.end(), [](const TuTarget &a, const TuTarget &b) {
+  std::ranges::sort(out, [](const TuTarget &a, const TuTarget &b) {
     return std::tie(a.tu_path, a.config_digest) <
            std::tie(b.tu_path, b.config_digest);
   });
@@ -200,8 +200,8 @@ RemovalValidator::validate(const std::vector<TuTarget> &targets,
 }
 
 bool RemovalValidator::all_ok(const std::vector<ValidationRecord> &records) {
-  return std::all_of(records.begin(), records.end(),
-                     [](const ValidationRecord &r) { return r.ok; });
+  return std::ranges::all_of(records,
+                             [](const ValidationRecord &r) { return r.ok; });
 }
 
 } // namespace cidx::hygiene

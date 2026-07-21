@@ -36,11 +36,12 @@ public:
   // Encode one argument for owner/position. `written` overrides the printed
   // spelling of a Type argument (the as-written sugared type when the caller
   // has one). Returns nullopt for a Null argument.
-  std::optional<TemplateArgRecord>
+  [[nodiscard]] std::optional<TemplateArgRecord>
   encode(int64_t owner_id, int64_t position, const clang::TemplateArgument &arg,
          clang::QualType written = clang::QualType()) const;
 
-  // encode + sink.add_template_arg. Returns the encoded record when emitted.
+  // encode + sink.add_template_arg. Returns the encoded record when emitted;
+  // callers that only want the sink side effect may discard it.
   std::optional<TemplateArgRecord>
   emit(int64_t owner_id, int64_t position, const clang::TemplateArgument &arg,
        clang::QualType written = clang::QualType()) const;

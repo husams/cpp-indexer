@@ -64,7 +64,7 @@ std::string strip(const std::string &s) {
   const char *ws = " \t\n\r\f\v";
   const std::size_t b = s.find_first_not_of(ws);
   if (b == std::string::npos) {
-    return std::string();
+    return {};
   }
   const std::size_t e = s.find_last_not_of(ws);
   return s.substr(b, e - b + 1);
@@ -147,9 +147,9 @@ std::vector<long> version_key(const std::string &ver) {
     const std::string::size_type dot = ver.find('.', pos);
     const std::string part = ver.substr(
         pos, dot == std::string::npos ? std::string::npos : dot - pos);
-    if (part.empty() ||
-        !std::all_of(part.begin(), part.end(),
-                     [](unsigned char c) { return std::isdigit(c) != 0; })) {
+    if (part.empty() || !std::ranges::all_of(part, [](unsigned char c) {
+          return std::isdigit(c) != 0;
+        })) {
       return {0};
     }
     key.push_back(std::strtol(part.c_str(), nullptr, 10));
@@ -250,8 +250,7 @@ std::pair<bool, bool> Toolchain::glibc_probe(const std::string &driver,
     const std::string c =
         pathutil::join(d, std::string("sys"), std::string("cdefs.h"));
     if (!malloc_args && path_exists(c)) {
-      malloc_args = read_file_ignore_errors(c).find("__attr_dealloc") !=
-                    std::string::npos;
+      malloc_args = read_file_ignore_errors(c).contains("__attr_dealloc");
     }
   }
   const auto result = std::make_pair(floatn13, malloc_args);
@@ -361,7 +360,7 @@ std::optional<std::string> Toolchain::resource_include() {
           glob_paths(pathutil::join(libdir, std::string("clang"),
                                     std::string("*"), std::string("include")));
       // sorted(..., reverse=True) -- reverse-LEXICOGRAPHIC, Python parity.
-      std::sort(cands.begin(), cands.end(), std::greater<std::string>());
+      std::ranges::sort(cands, std::greater<std::string>());
       for (const std::string &cand : cands) {
         if (resource_check(cand)) {
           resource_memo_ = cand;
@@ -462,32 +461,32 @@ std::vector<std::string> Toolchain::driver_flags(const std::string &driver,
     // list verbatim instead (gcc's own stddef.h parses fine under libclang).
     warn_no_resource();
     entry.warned_no_resource = true;
-    entry.flags.push_back("-nostdinc");
+    entry.flags.emplace_back("-nostdinc");
     entry.flags.insert(entry.flags.end(), gnuc.begin(), gnuc.end());
     for (const std::string &d : dirs) {
-      entry.flags.push_back("-isystem");
+      entry.flags.emplace_back("-isystem");
       entry.flags.push_back(d);
     }
     driver_flags_memo_.emplace(key, entry);
     return entry.flags;
   }
-  entry.flags.push_back("-nostdinc");
+  entry.flags.emplace_back("-nostdinc");
   entry.flags.insert(entry.flags.end(), gnuc.begin(), gnuc.end());
   bool substituted = false;
   for (const std::string &d : dirs) {
     if (std::regex_search(d, builtin_dir_re())) {
       if (!substituted) { // once, at the FIRST occurrence's position (G3)
-        entry.flags.push_back("-isystem");
+        entry.flags.emplace_back("-isystem");
         entry.flags.push_back(*res);
         substituted = true;
       }
       continue;
     }
-    entry.flags.push_back("-isystem");
+    entry.flags.emplace_back("-isystem");
     entry.flags.push_back(d);
   }
   if (!substituted) {
-    entry.flags.push_back("-isystem");
+    entry.flags.emplace_back("-isystem");
     entry.flags.push_back(*res);
   }
   driver_flags_memo_.emplace(key, entry);
@@ -507,10 +506,10 @@ Toolchain::toolchain_flags(bool cpp, const std::optional<std::string> &driver) {
   std::vector<std::string> flags;
   const std::optional<std::string> sdk = sysroot();
   if (sdk && !sdk->empty()) {
-    flags.push_back("-isysroot");
+    flags.emplace_back("-isysroot");
     flags.push_back(*sdk);
     if (cpp) {
-      flags.push_back("-isystem");
+      flags.emplace_back("-isystem");
       flags.push_back(pathutil::join(*sdk, std::string("usr"),
                                      std::string("include"), std::string("c++"),
                                      std::string("v1")));
@@ -518,7 +517,7 @@ Toolchain::toolchain_flags(bool cpp, const std::optional<std::string> &driver) {
   }
   const std::optional<std::string> res = resource_include();
   if (res && !res->empty()) {
-    flags.push_back("-isystem");
+    flags.emplace_back("-isystem");
     flags.push_back(*res);
   }
   return flags;
@@ -530,12 +529,12 @@ Toolchain::toolchain_flags(bool cpp, const std::optional<std::string> &driver) {
 bool Toolchain::is_cpp(const std::string &filename,
                        const std::vector<std::string> &args) {
   const auto has = [&args](const char *token) {
-    return std::find(args.begin(), args.end(), token) != args.end();
+    return std::ranges::find(args, token) != args.end();
   };
   if (has("--driver-mode=g++") || has("-xc++")) {
     return true;
   }
-  const auto x = std::find(args.begin(), args.end(), "-x");
+  const auto x = std::ranges::find(args, "-x");
   if (x != args.end()) {
     const auto value = std::next(x);
     if (value != args.end()) {
@@ -559,13 +558,12 @@ bool Toolchain::is_cpp(const std::string &filename,
       ++fn;
     }
   }
-  std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+  std::ranges::transform(ext, ext.begin(), [](unsigned char c) {
     return static_cast<char>(std::tolower(c));
   });
   static const std::array<const char *, 7> kCppSuffixes = {
       ".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hh", ".hxx"};
-  return std::find(kCppSuffixes.begin(), kCppSuffixes.end(), ext) !=
-         kCppSuffixes.end();
+  return std::ranges::find(kCppSuffixes, ext) != kCppSuffixes.end();
 }
 
 } // namespace cidx

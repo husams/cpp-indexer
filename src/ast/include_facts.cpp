@@ -27,7 +27,7 @@ namespace {
 class ConditionalTracker {
 public:
   void push(const clang::SourceManager &sm, clang::SourceLocation loc) {
-    stack_.push_back({region_key(sm, loc), 0});
+    stack_.push_back({.key = region_key(sm, loc), .branch = 0});
   }
   void next_branch() {
     if (!stack_.empty()) {
@@ -41,7 +41,7 @@ public:
   }
   // "" at unconditional top level; else a digest of the whole region stack so
   // nesting is distinguished without storing an unbounded string.
-  std::string fingerprint() const {
+  [[nodiscard]] std::string fingerprint() const {
     if (stack_.empty()) {
       return "";
     }
@@ -121,14 +121,18 @@ bool blank_between(llvm::StringRef buf, std::size_t from, std::size_t to) {
 }
 
 int64_t directive_kind_of(llvm::StringRef name) {
-  if (name == "include")
+  if (name == "include") {
     return kIncludeDirectiveInclude;
-  if (name == "include_next")
+  }
+  if (name == "include_next") {
     return kIncludeDirectiveIncludeNext;
-  if (name == "import")
+  }
+  if (name == "import") {
     return kIncludeDirectiveImport;
-  if (name == "__include_macros")
+  }
+  if (name == "__include_macros") {
     return kIncludeDirectiveIncludeMacros;
+  }
   return kIncludeDirectiveUnknown;
 }
 
@@ -164,10 +168,10 @@ public:
     f.is_angled = is_angled;
     f.line = static_cast<int64_t>(sm_.getExpansionLineNumber(loc));
     f.col = static_cast<int64_t>(sm_.getExpansionColumnNumber(loc));
-    f.directive = directive_kind_of(
-        include_tok.getIdentifierInfo()
-            ? include_tok.getIdentifierInfo()->getName()
-            : llvm::StringRef());
+    f.directive =
+        directive_kind_of((include_tok.getIdentifierInfo() != nullptr)
+                              ? include_tok.getIdentifierInfo()->getName()
+                              : llvm::StringRef());
     f.cond_fingerprint = cond_.fingerprint();
     f.is_system = file_type != clang::SrcMgr::C_User;
     compute_removal_range(fid, loc, filename_range, f);
@@ -182,8 +186,8 @@ public:
     record_macro_dependency(tok, md, range.getBegin());
   }
 
-  void If(clang::SourceLocation loc, clang::SourceRange,
-          ConditionValueKind) override {
+  void If(clang::SourceLocation loc, clang::SourceRange /*ConditionRange*/,
+          ConditionValueKind /*ConditionValue*/) override {
     cond_.push(sm_, loc);
   }
   void Ifdef(clang::SourceLocation loc, const clang::Token &tok,
@@ -207,24 +211,28 @@ public:
     // flip if the providing header is removed.
     record_macro_dependency(tok, md, range.getBegin());
   }
-  void Elif(clang::SourceLocation, clang::SourceRange, ConditionValueKind,
-            clang::SourceLocation) override {
+  void Elif(clang::SourceLocation /*Loc*/,
+            clang::SourceRange /*ConditionRange*/,
+            ConditionValueKind /*ConditionValue*/,
+            clang::SourceLocation /*IfLoc*/) override {
     cond_.next_branch();
   }
-  void Elifdef(clang::SourceLocation, const clang::Token &tok,
+  void Elifdef(clang::SourceLocation /*Loc*/, const clang::Token &tok,
                const clang::MacroDefinition &md) override {
     record_macro_dependency(tok, md, tok.getLocation());
     cond_.next_branch();
   }
-  void Elifndef(clang::SourceLocation, const clang::Token &tok,
+  void Elifndef(clang::SourceLocation /*Loc*/, const clang::Token &tok,
                 const clang::MacroDefinition &md) override {
     record_macro_dependency(tok, md, tok.getLocation());
     cond_.next_branch();
   }
-  void Else(clang::SourceLocation, clang::SourceLocation) override {
+  void Else(clang::SourceLocation /*Loc*/,
+            clang::SourceLocation /*IfLoc*/) override {
     cond_.next_branch();
   }
-  void Endif(clang::SourceLocation, clang::SourceLocation) override {
+  void Endif(clang::SourceLocation /*Loc*/,
+             clang::SourceLocation /*IfLoc*/) override {
     cond_.pop();
   }
 
@@ -259,8 +267,9 @@ private:
     if (m.src_path == m.def_path) {
       return; // self-supplied: no include depends on it
     }
-    m.name = tok.getIdentifierInfo() ? tok.getIdentifierInfo()->getName().str()
-                                     : std::string();
+    m.name = (tok.getIdentifierInfo() != nullptr)
+                 ? tok.getIdentifierInfo()->getName().str()
+                 : std::string();
     if (m.name.empty()) {
       return;
     }

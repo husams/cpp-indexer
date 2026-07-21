@@ -35,8 +35,9 @@ void emit_spec_owner(EdgeSink &sink, MintBuilder &mint,
                      const clang::ClassTemplateSpecializationDecl *ospec) {
   const clang::ClassTemplateDecl *cls_prim = ospec->getSpecializedTemplate();
   auto oreq = mint.build(ospec);
-  if (!oreq || cls_prim == nullptr)
+  if (!oreq || cls_prim == nullptr) {
     return;
+  }
   oreq->is_instantiation = is_template_instantiation(ospec);
   const int64_t type_id = sink.mint_symbol(*oreq);
   EdgeRecord mo;
@@ -45,7 +46,7 @@ void emit_spec_owner(EdgeSink &sink, MintBuilder &mint,
   mo.kind = 9;
   sink.ensure_edge(mo);
   const std::string cp = usr_for_decl(cls_prim);
-  if (!cp.empty())
+  if (!cp.empty()) {
     if (const auto cpid = sink.lookup_symbol_id(cp)) {
       EdgeRecord ie;
       ie.src_id = type_id;
@@ -53,9 +54,11 @@ void emit_spec_owner(EdgeSink &sink, MintBuilder &mint,
       ie.kind = structural_edge_kind(ospec->getSpecializationKind());
       sink.ensure_edge(ie);
     }
+  }
   const clang::TemplateArgumentList &args = ospec->getTemplateArgs();
-  for (unsigned ai = 0; ai < args.size(); ++ai)
+  for (unsigned ai = 0; ai < args.size(); ++ai) {
     targ_encoder.emit(type_id, static_cast<int64_t>(ai), args[ai]);
+  }
 }
 
 // A minted member-class instantiation (`Outer<int>::Inner`) is tied back to
@@ -65,14 +68,17 @@ void emit_spec_owner(EdgeSink &sink, MintBuilder &mint,
 void emit_member_class_pattern_edge(EdgeSink &sink, int64_t owner_id,
                                     const clang::CXXRecordDecl *owner) {
   const clang::CXXRecordDecl *pattern = owner->getInstantiatedFromMemberClass();
-  if (pattern == nullptr)
+  if (pattern == nullptr) {
     return;
+  }
   const std::string pat_usr = usr_for_decl(pattern);
-  if (pat_usr.empty())
+  if (pat_usr.empty()) {
     return;
+  }
   const auto pid = sink.lookup_symbol_id(pat_usr);
-  if (!pid)
+  if (!pid) {
     return;
+  }
   EdgeRecord ie;
   ie.src_id = owner_id;
   ie.dst_id = *pid;
@@ -91,8 +97,9 @@ void emit_owner_promotion(EdgeSink &sink, MintBuilder &mint,
                           const TemplateArgumentEncoder &targ_encoder,
                           int64_t dst_id, const clang::CXXMethodDecl *m) {
   const clang::CXXRecordDecl *owner = m->getParent();
-  if (owner == nullptr)
+  if (owner == nullptr) {
     return;
+  }
   const auto *ospec =
       llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(owner);
   if (ospec == nullptr) {
@@ -120,15 +127,17 @@ emit_specialization_args(const TemplateArgumentEncoder &targ_encoder,
                          const std::vector<clang::QualType> &written) {
   std::vector<std::string> display_args;
   const clang::TemplateArgumentList *args = fd->getTemplateSpecializationArgs();
-  if (args == nullptr)
+  if (args == nullptr) {
     return display_args;
+  }
   for (unsigned ai = 0; ai < args->size(); ++ai) {
     const clang::QualType w =
         ai < written.size() ? written[ai] : clang::QualType();
     const auto record =
         targ_encoder.emit(dst_id, static_cast<int64_t>(ai), args->get(ai), w);
-    if (record)
+    if (record) {
       display_args.push_back(TemplateArgumentEncoder::display_text(*record));
+    }
   }
   return display_args;
 }
@@ -138,13 +147,15 @@ emit_specialization_args(const TemplateArgumentEncoder &targ_encoder,
 std::optional<CallableTemplateInfo>
 callable_template_info(const clang::FunctionDecl *fd) {
   CallableTemplateInfo info;
-  if (const clang::FunctionTemplateDecl *ft = fd->getPrimaryTemplate())
+  if (const clang::FunctionTemplateDecl *ft = fd->getPrimaryTemplate()) {
     info.primary = ft;
-  else if (fd->getMemberSpecializationInfo() != nullptr)
+  } else if (fd->getMemberSpecializationInfo() != nullptr) {
     info.primary = llvm::dyn_cast_or_null<clang::NamedDecl>(
         fd->getMemberSpecializationInfo()->getInstantiatedFrom());
-  if (info.primary == nullptr)
+  }
+  if (info.primary == nullptr) {
     return std::nullopt;
+  }
   info.tsk = fd->getTemplateSpecializationKind();
   info.is_instantiation = is_template_instantiation(fd);
   return info;
@@ -155,11 +166,12 @@ void emit_callable_template_identity(
     const TemplateArgumentEncoder &targ_encoder, int64_t dst_id,
     const clang::FunctionDecl *fd, const CallableTemplateInfo &info,
     const std::vector<clang::QualType> &written) {
-  if (dst_id < 0)
+  if (dst_id < 0) {
     return;
+  }
   const std::string prim_usr = usr_for_decl(info.primary);
   const std::string fd_usr = usr_for_decl(fd);
-  if (!prim_usr.empty() && prim_usr != fd_usr)
+  if (!prim_usr.empty() && prim_usr != fd_usr) {
     if (const auto prim = sink.lookup_symbol_id(prim_usr)) {
       EdgeRecord e;
       e.src_id = dst_id;
@@ -167,16 +179,20 @@ void emit_callable_template_identity(
       e.kind = structural_edge_kind(info.tsk);
       sink.ensure_edge(e);
     }
+  }
 
   const std::vector<std::string> display_args =
       emit_specialization_args(targ_encoder, dst_id, fd, written);
-  if (const auto disp = sink.lookup_display_name(dst_id))
+  if (const auto disp = sink.lookup_display_name(dst_id)) {
     if (const auto rewritten =
-            rewrite_template_display_name(*disp, display_args))
+            rewrite_template_display_name(*disp, display_args)) {
       sink.update_display_name(dst_id, *rewritten);
+    }
+  }
 
-  if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(fd))
+  if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(fd)) {
     emit_owner_promotion(sink, mint, targ_encoder, dst_id, m);
+  }
 }
 
 bool is_explicit_instantiation_kind(clang::TemplateSpecializationKind tsk) {
@@ -187,9 +203,11 @@ bool is_explicit_instantiation_kind(clang::TemplateSpecializationKind tsk) {
 void for_each_explicit_callable_instantiation(
     const clang::FunctionTemplateDecl *tmpl,
     llvm::function_ref<void(const clang::FunctionDecl *)> fn) {
-  for (const clang::FunctionDecl *fd : tmpl->specializations())
-    if (is_explicit_instantiation_kind(fd->getTemplateSpecializationKind()))
+  for (const clang::FunctionDecl *fd : tmpl->specializations()) {
+    if (is_explicit_instantiation_kind(fd->getTemplateSpecializationKind())) {
       fn(fd);
+    }
+  }
 }
 
 namespace {
@@ -205,16 +223,18 @@ void walk_instantiated_context(
   for (const clang::Decl *d : dc->decls()) {
     if (const auto *m = llvm::dyn_cast<clang::FunctionDecl>(d)) {
       if (!m->isImplicit() &&
-          is_explicit_instantiation_kind(m->getTemplateSpecializationKind()))
+          is_explicit_instantiation_kind(m->getTemplateSpecializationKind())) {
         fn(m);
+      }
     } else if (const auto *ft =
                    llvm::dyn_cast<clang::FunctionTemplateDecl>(d)) {
       for_each_explicit_callable_instantiation(ft, fn);
     } else if (const auto *ct = llvm::dyn_cast<clang::ClassTemplateDecl>(d)) {
       for_each_explicit_callable_instantiation(ct, fn);
     } else if (const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(d)) {
-      if (!rec->isImplicit()) // skip the injected-class-name
+      if (!rec->isImplicit()) { // skip the injected-class-name
         walk_instantiated_context(rec, fn);
+      }
     }
   }
 }
@@ -228,19 +248,22 @@ void for_each_explicit_callable_instantiation(
   // (implicit) ClassTemplateSpecializationDecl — reachable only through the
   // class template's specialization list.
   for (const clang::ClassTemplateSpecializationDecl *spec :
-       tmpl->specializations())
+       tmpl->specializations()) {
     walk_instantiated_context(spec, fn);
+  }
 }
 
 void emit_caller_instantiates(EdgeSink &sink, int64_t src_id,
                               const CallableTemplateInfo &info,
                               const std::string &callee_usr) {
   const std::string prim_usr = usr_for_decl(info.primary);
-  if (prim_usr.empty() || prim_usr == callee_usr)
+  if (prim_usr.empty() || prim_usr == callee_usr) {
     return;
+  }
   const auto prim = sink.lookup_symbol_id(prim_usr);
-  if (!prim)
+  if (!prim) {
     return;
+  }
   EdgeRecord inst;
   inst.src_id = src_id;
   inst.dst_id = *prim;

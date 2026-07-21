@@ -8,9 +8,7 @@
 
 #include "storage/storage.hpp"
 
-namespace cidx {
-namespace cli {
-namespace format {
+namespace cidx::cli::format {
 
 std::string rjust(const std::string &s, std::size_t width) {
   if (s.size() >= width) {
@@ -143,6 +141,4 @@ std::string group_thousands(int64_t n) {
   return result;
 }
 
-} // namespace format
-} // namespace cli
-} // namespace cidx
+} // namespace cidx::cli::format

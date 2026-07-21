@@ -53,8 +53,7 @@
 #include "util/hashing.hpp"
 #include "util/json_min.hpp"
 
-namespace cidx {
-namespace astgraph {
+namespace cidx::astgraph {
 namespace {
 
 using clang::dyn_cast;
@@ -126,24 +125,24 @@ struct RelName {
   const char *name;
 };
 constexpr RelName kRelNames[] = {
-    {kRelChild, "child"},
-    {kRelReferences, "references"},
-    {kRelDefinition, "definition"},
-    {kRelCanonical, "canonical"},
-    {kRelSemanticParent, "semantic_parent"},
-    {kRelLexicalParent, "lexical_parent"},
-    {kRelSpecializes, "specializes"},
-    {kRelOverrides, "overrides"},
-    {kRelTypeDecl, "type_decl"},
-    {kRelCanonicalType, "canonical_type"},
-    {kRelPointee, "pointee"},
-    {kRelElementType, "element_type"},
-    {kRelResultType, "result_type"},
-    {kRelArgType, "arg_type"},
-    {kRelNamedType, "named_type"},
-    {kRelUnderlyingType, "underlying_type"},
-    {kRelTemplateArg, "template_arg"},
-    {kRelClassType, "class_type"},
+    {.id = kRelChild, .name = "child"},
+    {.id = kRelReferences, .name = "references"},
+    {.id = kRelDefinition, .name = "definition"},
+    {.id = kRelCanonical, .name = "canonical"},
+    {.id = kRelSemanticParent, .name = "semantic_parent"},
+    {.id = kRelLexicalParent, .name = "lexical_parent"},
+    {.id = kRelSpecializes, .name = "specializes"},
+    {.id = kRelOverrides, .name = "overrides"},
+    {.id = kRelTypeDecl, .name = "type_decl"},
+    {.id = kRelCanonicalType, .name = "canonical_type"},
+    {.id = kRelPointee, .name = "pointee"},
+    {.id = kRelElementType, .name = "element_type"},
+    {.id = kRelResultType, .name = "result_type"},
+    {.id = kRelArgType, .name = "arg_type"},
+    {.id = kRelNamedType, .name = "named_type"},
+    {.id = kRelUnderlyingType, .name = "underlying_type"},
+    {.id = kRelTemplateArg, .name = "template_arg"},
+    {.id = kRelClassType, .name = "class_type"},
 };
 
 // --- CIDX-STABLE kind mapping (live clang enum -> schema.hpp constant) --------
@@ -173,12 +172,24 @@ int decl_kind_id(const clang::Decl *d) {
 }
 
 int stmt_kind_id(const clang::Stmt *s) {
-  if (isa<clang::CallExpr>(s)) return kNodeCallExpr; // incl. member/operator
-  if (isa<clang::CXXConstructExpr>(s)) return kNodeCXXConstructExpr;
-  if (isa<clang::DeclRefExpr>(s)) return kNodeDeclRefExpr;
-  if (isa<clang::MemberExpr>(s)) return kNodeMemberExpr;
-  if (isa<clang::CXXNewExpr>(s)) return kNodeCXXNewExpr;
-  if (isa<clang::CXXDeleteExpr>(s)) return kNodeCXXDeleteExpr;
+  if (isa<clang::CallExpr>(s)) {
+    return kNodeCallExpr; // incl. member/operator
+  }
+  if (isa<clang::CXXConstructExpr>(s)) {
+    return kNodeCXXConstructExpr;
+  }
+  if (isa<clang::DeclRefExpr>(s)) {
+    return kNodeDeclRefExpr;
+  }
+  if (isa<clang::MemberExpr>(s)) {
+    return kNodeMemberExpr;
+  }
+  if (isa<clang::CXXNewExpr>(s)) {
+    return kNodeCXXNewExpr;
+  }
+  if (isa<clang::CXXDeleteExpr>(s)) {
+    return kNodeCXXDeleteExpr;
+  }
   return isa<clang::Expr>(s) ? kNodeOtherExpr : kNodeOtherStmt;
 }
 
@@ -204,20 +215,24 @@ int type_kind_id(const clang::Type *t) {
 }
 
 int64_t decl_is_definition(const clang::Decl *d) {
-  if (const auto *fd = dyn_cast<clang::FunctionDecl>(d))
+  if (const auto *fd = dyn_cast<clang::FunctionDecl>(d)) {
     return fd->isThisDeclarationADefinition() ? 1 : 0;
-  if (const auto *td = dyn_cast<clang::TagDecl>(d))
+  }
+  if (const auto *td = dyn_cast<clang::TagDecl>(d)) {
     return td->isThisDeclarationADefinition() ? 1 : 0;
-  if (const auto *vd = dyn_cast<clang::VarDecl>(d))
+  }
+  if (const auto *vd = dyn_cast<clang::VarDecl>(d)) {
     return vd->isThisDeclarationADefinition() != clang::VarDecl::DeclarationOnly
                ? 1
                : 0;
+  }
   return 0;
 }
 
 std::string decl_name(const clang::Decl *d) {
-  if (const auto *nd = dyn_cast<clang::NamedDecl>(d))
+  if (const auto *nd = dyn_cast<clang::NamedDecl>(d)) {
     return nd->getNameAsString();
+  }
   return "";
 }
 
@@ -244,53 +259,65 @@ public:
              "stable: decl 1000-1999, stmt/expr 2000-2999, type 3000-3999");
     put_meta("source_md5", md5_of(source).value_or(""));
     put_meta("options_sha1",
-             sha1_flags_hash(AstCacheKey{source, args, driver}));
+             sha1_flags_hash(AstCacheKey{
+                 .abspath = source, .flags = args, .driver = driver}));
     put_meta("artifact_key",
              artifact_key(source, args, driver, Options{.main_only = main_only_}));
   }
 
   void seed_relation_kinds() {
-    for (const RelName &r : kRelNames)
+    for (const RelName &r : kRelNames) {
       run("INSERT INTO relation_kind(id, name) VALUES (?, ?)",
           {static_cast<int64_t>(r.id), std::string(r.name)});
+    }
   }
 
   // --- interning -----------------------------------------------------------
 
   int64_t intern_decl(const clang::Decl *d) {
-    if (d == nullptr)
+    if (d == nullptr) {
       return 0;
+    }
     // Collapse a class's injected-class-name (the implicit same-named record
     // inside every class body) onto the class it names, so a class is a single
     // record node — libclang's cursor API did this implicitly.
     if (const auto *rd = dyn_cast<clang::CXXRecordDecl>(d);
         rd != nullptr && rd->isInjectedClassName()) {
-      if (const clang::DeclContext *dc = rd->getDeclContext(); dc != nullptr)
+      if (const clang::DeclContext *dc = rd->getDeclContext(); dc != nullptr) {
         if (const auto *outer = dyn_cast<clang::CXXRecordDecl>(
-                clang::Decl::castFromDeclContext(dc)))
+                clang::Decl::castFromDeclContext(dc))) {
           return intern_decl(outer);
+        }
+      }
     }
-    if (const auto it = decl_ids_.find(d); it != decl_ids_.end())
+    if (const auto it = decl_ids_.find(d); it != decl_ids_.end()) {
       return it->second;
+    }
     const int64_t id = next_node_++;
     decl_ids_.emplace(d, id);
     const int kind = decl_kind_id(d);
     seed_kind(kind, d->getDeclKindName(), "decl");
 
     bool is_main = false;
-    int64_t file_id = 0, line = 0, col = 0, end_line = 0, end_col = 0;
+    int64_t file_id = 0;
+    int64_t line = 0;
+    int64_t col = 0;
+    int64_t end_line = 0;
+    int64_t end_col = 0;
     loc_of(d->getBeginLoc(), d->getEndLoc(), is_main, file_id, line, col,
            end_line, end_col);
 
     const std::string spelling = decl_name(d);
     int64_t symbol_id = 0;
     std::string usr = cidx::ast::usr_for_decl(d);
-    if (!usr.empty())
+    if (!usr.empty()) {
       symbol_id = intern_symbol(std::move(usr), spelling, d, kind);
+    }
 
     int64_t type_id = 0;
-    if (const auto *vd = dyn_cast<clang::ValueDecl>(d))
+    if (const auto *vd = dyn_cast<clang::ValueDecl>(d)) {
       type_id = intern_type(vd->getType());
+    }
 
     run("INSERT INTO node(id, kind_id, symbol_id, type_id, spelling, file_id, "
         "line, col, end_line, end_col, is_definition, access, is_const, "
@@ -305,10 +332,12 @@ public:
   }
 
   int64_t intern_stmt(const clang::Stmt *s) {
-    if (s == nullptr)
+    if (s == nullptr) {
       return 0;
-    if (const auto it = stmt_ids_.find(s); it != stmt_ids_.end())
+    }
+    if (const auto it = stmt_ids_.find(s); it != stmt_ids_.end()) {
       return it->second;
+    }
     const int64_t id = next_node_++;
     stmt_ids_.emplace(s, id);
     const int kind = stmt_kind_id(s);
@@ -316,13 +345,18 @@ public:
               isa<clang::Expr>(s) ? "expr" : "stmt");
 
     bool is_main = false;
-    int64_t file_id = 0, line = 0, col = 0, end_line = 0, end_col = 0;
+    int64_t file_id = 0;
+    int64_t line = 0;
+    int64_t col = 0;
+    int64_t end_line = 0;
+    int64_t end_col = 0;
     loc_of(s->getBeginLoc(), s->getEndLoc(), is_main, file_id, line, col,
            end_line, end_col);
 
     int64_t type_id = 0;
-    if (const auto *e = dyn_cast<clang::Expr>(s))
+    if (const auto *e = dyn_cast<clang::Expr>(s)) {
       type_id = intern_type(e->getType());
+    }
 
     run("INSERT INTO node(id, kind_id, symbol_id, type_id, spelling, file_id, "
         "line, col, end_line, end_col, is_definition, access, is_const, "
@@ -336,13 +370,16 @@ public:
   }
 
   int64_t intern_type(clang::QualType qt) {
-    if (qt.isNull())
+    if (qt.isNull()) {
       return 0;
+    }
     const clang::Type *tp = qt.getTypePtrOrNull();
-    if (tp == nullptr)
+    if (tp == nullptr) {
       return 0;
-    if (const auto it = type_ids_.find(tp); it != type_ids_.end())
+    }
+    if (const auto it = type_ids_.find(tp); it != type_ids_.end()) {
       return it->second;
+    }
     const int64_t id = next_node_++;
     type_ids_.emplace(tp, id);
     const int kind = type_kind_id(tp);
@@ -361,12 +398,14 @@ public:
   }
 
   void add_edge(int64_t src, int64_t dst, int rel, int64_t ord) {
-    if (src == 0 || dst == 0)
+    if (src == 0 || dst == 0) {
       return;
+    }
     run("INSERT INTO edge(src_id, dst_id, rel_id, ord) VALUES (?,?,?,?)",
         {src, dst, static_cast<int64_t>(rel), ord});
-    if (db_.changes() == 1)
+    if (db_.changes() == 1) {
       ++stats_.edges;
+    }
   }
 
   // Drain the cross-reference worklists to fixpoint. Processing may intern new
@@ -398,48 +437,60 @@ public:
 private:
   void process_decl(const clang::Decl *d, int64_t id) {
     if (const auto *fd = dyn_cast<clang::FunctionDecl>(d)) {
-      if (const auto *def = fd->getDefinition(); def != nullptr && def != fd)
+      if (const auto *def = fd->getDefinition(); def != nullptr && def != fd) {
         add_edge(id, intern_decl(def), kRelDefinition, 0);
-      if (const auto *pt = fd->getPrimaryTemplate())
+      }
+      if (const auto *pt = fd->getPrimaryTemplate()) {
         add_edge(id, intern_decl(pt), kRelSpecializes, 0);
+      }
     } else if (const auto *td = dyn_cast<clang::TagDecl>(d)) {
-      if (const auto *def = td->getDefinition(); def != nullptr && def != td)
+      if (const auto *def = td->getDefinition(); def != nullptr && def != td) {
         add_edge(id, intern_decl(def), kRelDefinition, 0);
+      }
     } else if (const auto *vd = dyn_cast<clang::VarDecl>(d)) {
-      if (const auto *def = vd->getDefinition(); def != nullptr && def != vd)
+      if (const auto *def = vd->getDefinition(); def != nullptr && def != vd) {
         add_edge(id, intern_decl(def), kRelDefinition, 0);
+      }
     }
 
     if (const clang::Decl *canon = d->getCanonicalDecl();
-        canon != nullptr && canon != d)
+        canon != nullptr && canon != d) {
       add_edge(id, intern_decl(canon), kRelCanonical, 0);
+    }
 
-    if (const clang::DeclContext *dc = d->getDeclContext(); dc != nullptr)
+    if (const clang::DeclContext *dc = d->getDeclContext(); dc != nullptr) {
       add_edge(id, intern_decl(clang::Decl::castFromDeclContext(dc)),
                kRelSemanticParent, 0);
-    if (const clang::DeclContext *lc = d->getLexicalDeclContext(); lc != nullptr)
+    }
+    if (const clang::DeclContext *lc = d->getLexicalDeclContext();
+        lc != nullptr) {
       add_edge(id, intern_decl(clang::Decl::castFromDeclContext(lc)),
                kRelLexicalParent, 0);
+    }
 
     if (const auto *ctsd =
-            dyn_cast<clang::ClassTemplateSpecializationDecl>(d))
+            dyn_cast<clang::ClassTemplateSpecializationDecl>(d)) {
       add_edge(id, intern_decl(ctsd->getSpecializedTemplate()), kRelSpecializes,
                0);
+    }
 
     if (const auto *md = dyn_cast<clang::CXXMethodDecl>(d)) {
       int64_t i = 0;
-      for (const clang::CXXMethodDecl *o : md->overridden_methods())
+      for (const clang::CXXMethodDecl *o : md->overridden_methods()) {
         add_edge(id, intern_decl(o), kRelOverrides, i++);
+      }
     }
 
-    if (const auto *tnd = dyn_cast<clang::TypedefNameDecl>(d))
+    if (const auto *tnd = dyn_cast<clang::TypedefNameDecl>(d)) {
       add_edge(id, intern_type(tnd->getUnderlyingType()), kRelUnderlyingType, 0);
+    }
   }
 
   void process_stmt(const clang::Stmt *s, int64_t id) {
     if (const auto *ce = dyn_cast<clang::CallExpr>(s)) {
-      if (const clang::Decl *callee = ce->getCalleeDecl())
+      if (const clang::Decl *callee = ce->getCalleeDecl()) {
         add_edge(id, intern_decl(callee), kRelReferences, 0);
+      }
     } else if (const auto *dre = dyn_cast<clang::DeclRefExpr>(s)) {
       add_edge(id, intern_decl(dre->getDecl()), kRelReferences, 0);
     } else if (const auto *me = dyn_cast<clang::MemberExpr>(s)) {
@@ -451,39 +502,46 @@ private:
 
   void process_type(const clang::Type *tp, int64_t id) {
     const clang::QualType qt(tp, 0);
-    if (clang::TagDecl *tag = tp->getAsTagDecl())
+    if (clang::TagDecl *tag = tp->getAsTagDecl()) {
       add_edge(id, intern_decl(tag), kRelTypeDecl, 0);
-    else if (const auto *tdt = dyn_cast<clang::TypedefType>(tp))
+    } else if (const auto *tdt = dyn_cast<clang::TypedefType>(tp)) {
       add_edge(id, intern_decl(tdt->getDecl()), kRelTypeDecl, 0);
+    }
 
-    if (const clang::QualType canon = ctx_.getCanonicalType(qt);
-        !canon.isNull() && canon.getTypePtrOrNull() != tp)
+    if (const clang::QualType canon = clang::ASTContext::getCanonicalType(qt);
+        !canon.isNull() && canon.getTypePtrOrNull() != tp) {
       add_edge(id, intern_type(canon), kRelCanonicalType, 0);
+    }
 
-    if (tp->isPointerType() || tp->isReferenceType() || tp->isBlockPointerType())
+    if (tp->isPointerType() || tp->isReferenceType() ||
+        tp->isBlockPointerType()) {
       add_edge(id, intern_type(tp->getPointeeType()), kRelPointee, 0);
+    }
     // class_type (rel 19) edges for member pointers are intentionally NOT
     // emitted: the "class a member pointer belongs to" accessor churned hard
     // across LLVM 21/22 (getClass() removed; getTypeDeclType / QualType(Type*)
     // paths deleted on 22). It is an obscure, untested relation — the catalog
     // keeps rel 19 but produces no edges of that kind. The member-pointer
     // pointee edge (the useful one) is still emitted.
-    if (const auto *mpt = dyn_cast<clang::MemberPointerType>(tp))
+    if (const auto *mpt = dyn_cast<clang::MemberPointerType>(tp)) {
       add_edge(id, intern_type(mpt->getPointeeType()), kRelPointee, 0);
+    }
 
-    if (const auto *at = dyn_cast<clang::ArrayType>(tp))
+    if (const auto *at = dyn_cast<clang::ArrayType>(tp)) {
       add_edge(id, intern_type(at->getElementType()), kRelElementType, 0);
-    else if (const auto *vt = dyn_cast<clang::VectorType>(tp))
+    } else if (const auto *vt = dyn_cast<clang::VectorType>(tp)) {
       add_edge(id, intern_type(vt->getElementType()), kRelElementType, 0);
-    else if (const auto *cx = dyn_cast<clang::ComplexType>(tp))
+    } else if (const auto *cx = dyn_cast<clang::ComplexType>(tp)) {
       add_edge(id, intern_type(cx->getElementType()), kRelElementType, 0);
+    }
 
     if (const auto *ft = dyn_cast<clang::FunctionType>(tp)) {
       add_edge(id, intern_type(ft->getReturnType()), kRelResultType, 0);
       if (const auto *fpt = dyn_cast<clang::FunctionProtoType>(tp)) {
         int64_t i = 0;
-        for (const clang::QualType &pt : fpt->getParamTypes())
+        for (const clang::QualType &pt : fpt->getParamTypes()) {
           add_edge(id, intern_type(pt), kRelArgType, i++);
+        }
       }
     }
 
@@ -497,8 +555,9 @@ private:
     if (const auto *tst = dyn_cast<clang::TemplateSpecializationType>(tp)) {
       int64_t i = 0;
       for (const clang::TemplateArgument &ta : tst->template_arguments()) {
-        if (ta.getKind() == clang::TemplateArgument::Type)
+        if (ta.getKind() == clang::TemplateArgument::Type) {
           add_edge(id, intern_type(ta.getAsType()), kRelTemplateArg, i);
+        }
         ++i;
       }
     }
@@ -507,8 +566,9 @@ private:
   void loc_of(clang::SourceLocation begin, clang::SourceLocation end,
               bool &is_main, int64_t &file_id, int64_t &line, int64_t &col,
               int64_t &end_line, int64_t &end_col) {
-    if (begin.isInvalid())
+    if (begin.isInvalid()) {
       return;
+    }
     is_main = sm_.isInMainFile(sm_.getExpansionLoc(begin));
     const clang::PresumedLoc pb = sm_.getPresumedLoc(begin);
     if (pb.isValid()) {
@@ -525,8 +585,9 @@ private:
   }
 
   int64_t intern_file(const std::string &path, bool is_main) {
-    if (path.empty())
+    if (path.empty()) {
       return 0;
+    }
     const auto it = file_ids_.find(path);
     int64_t id = 0;
     if (it != file_ids_.end()) {
@@ -538,19 +599,22 @@ private:
           {id, path, int64_t{0}});
       ++stats_.files;
     }
-    if (is_main && main_files_.insert(id).second)
+    if (is_main && main_files_.insert(id).second) {
       run("UPDATE file SET is_main = 1 WHERE id = ?", {id});
+    }
     return id;
   }
 
   int64_t intern_symbol(std::string usr, const std::string &name,
                         const clang::Decl *d, int kind) {
-    if (const auto it = symbol_ids_.find(usr); it != symbol_ids_.end())
+    if (const auto it = symbol_ids_.find(usr); it != symbol_ids_.end()) {
       return it->second;
+    }
     const int64_t id = next_symbol_++;
     int64_t linkage = 0;
-    if (const auto *nd = dyn_cast<clang::NamedDecl>(d))
+    if (const auto *nd = dyn_cast<clang::NamedDecl>(d)) {
       linkage = static_cast<int64_t>(nd->getFormalLinkage());
+    }
     run("INSERT INTO symbol(id, usr, name, kind_id, linkage) VALUES (?,?,?,?,?)",
         {id, usr, name, static_cast<int64_t>(kind), linkage});
     symbol_ids_.emplace(std::move(usr), id);
@@ -559,8 +623,9 @@ private:
   }
 
   void seed_kind(int id, const char *name, const char *category) {
-    if (!seeded_kinds_.insert(id).second)
+    if (!seeded_kinds_.insert(id).second) {
       return;
+    }
     run("INSERT OR IGNORE INTO node_kind(id, name, category) VALUES (?,?,?)",
         {static_cast<int64_t>(id), std::string(name), std::string(category)});
   }
@@ -572,8 +637,9 @@ private:
   void run(const char *sql, std::initializer_list<SqlValue> vals) {
     SqliteStmt stmt = db_.prepare(sql);
     int idx = 1;
-    for (const SqlValue &v : vals)
+    for (const SqlValue &v : vals) {
       stmt.bind(idx++, v);
+    }
     stmt.step_done();
   }
 
@@ -607,18 +673,22 @@ public:
   StructVisitor(Dumper &d, const clang::SourceManager &sm, bool main_only)
       : d_(d), sm_(sm), main_only_(main_only) {}
 
-  bool shouldVisitTemplateInstantiations() const { return false; }
-  bool shouldVisitImplicitCode() const { return false; }
-  bool shouldUseDataRecursionFor(clang::Stmt * /*s*/) const { return false; }
+  [[nodiscard]] static bool shouldVisitTemplateInstantiations() {
+    return false;
+  }
+  [[nodiscard]] static bool shouldVisitImplicitCode() { return false; }
+  static bool shouldUseDataRecursionFor(clang::Stmt * /*s*/) { return false; }
 
   bool TraverseDecl(clang::Decl *decl) {
-    if (decl == nullptr)
+    if (decl == nullptr) {
       return true;
+    }
     // main_only: prune header-declared subtrees (referenced header decls still
     // surface as shallow nodes via cross-ref edges). The TU has no location.
     if (main_only_ && !isa<clang::TranslationUnitDecl>(decl) &&
-        !in_main(decl->getLocation()))
+        !in_main(decl->getLocation())) {
       return true;
+    }
     const int64_t id = d_.intern_decl(decl);
     return with_child(id, [&] {
       return clang::RecursiveASTVisitor<StructVisitor>::TraverseDecl(decl);
@@ -626,8 +696,9 @@ public:
   }
 
   bool TraverseStmt(clang::Stmt *stmt, DataRecursionQueue *queue = nullptr) {
-    if (stmt == nullptr)
+    if (stmt == nullptr) {
       return true;
+    }
     const int64_t id = d_.intern_stmt(stmt);
     return with_child(id, [&] {
       return clang::RecursiveASTVisitor<StructVisitor>::TraverseStmt(stmt,
@@ -636,13 +707,14 @@ public:
   }
 
 private:
-  bool in_main(clang::SourceLocation loc) const {
+  [[nodiscard]] bool in_main(clang::SourceLocation loc) const {
     return loc.isValid() && sm_.isInMainFile(sm_.getExpansionLoc(loc));
   }
 
   template <class Recurse> bool with_child(int64_t id, Recurse &&recurse) {
-    if (id != 0 && !stack_.empty())
+    if (id != 0 && !stack_.empty()) {
       d_.add_edge(stack_.back().first, id, kRelChild, stack_.back().second++);
+    }
     stack_.emplace_back(id, 0);
     const bool ok = recurse();
     stack_.pop_back();
@@ -752,7 +824,8 @@ std::string artifact_key(const std::string &source_path,
                          const std::vector<std::string> &args,
                          const std::optional<std::string> &driver,
                          const Options &opts) {
-  const AstCacheKey key{source_path, args, driver};
+  const AstCacheKey key{
+      .abspath = source_path, .flags = args, .driver = driver};
   return sha1_hex(sha1_cache_key(key) + std::string("\0main_only=", 11) +
                   (opts.main_only ? "1" : "0"));
 }
@@ -777,9 +850,10 @@ DumpStats dump_tu(const std::string &source_path,
     Toolchain toolchain;
     const bool cpp = Toolchain::is_cpp(source_path, args);
     std::vector<std::string> full = args;
-    for (std::string &f : toolchain.toolchain_flags(cpp, driver))
+    for (std::string &f : toolchain.toolchain_flags(cpp, driver)) {
       full.push_back(std::move(f));
-    full.push_back("-ferror-limit=0");
+    }
+    full.emplace_back("-ferror-limit=0");
 
     clang::tooling::FixedCompilationDatabase cdb(".", full);
     clang::tooling::ClangTool tool(cdb, {source_path});
@@ -791,12 +865,15 @@ DumpStats dump_tu(const std::string &source_path,
     AstGraphActionFactory factory(temp_path, opts, source_path, args, driver,
                                   &stats, &err, &handled);
     tool.run(&factory);
-    if (err)
+    if (err) {
       std::rethrow_exception(err);
-    if (!handled)
+    }
+    if (!handled) {
       throw CidxError("cannot parse " + source_path + " (no AST produced)");
-    if (std::rename(temp_path.c_str(), out_db_path.c_str()) != 0)
+    }
+    if (std::rename(temp_path.c_str(), out_db_path.c_str()) != 0) {
       throw CidxError("cannot publish AST database at " + out_db_path);
+    }
   } catch (...) {
     std::remove(temp_path.c_str());
     std::remove((temp_path + "-journal").c_str());
@@ -805,5 +882,4 @@ DumpStats dump_tu(const std::string &source_path,
   return stats;
 }
 
-} // namespace astgraph
-} // namespace cidx
+} // namespace cidx::astgraph

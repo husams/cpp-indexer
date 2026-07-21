@@ -71,8 +71,8 @@ bool resolve_scope(const ParsedArgs &args, std::vector<std::string> &out,
   if (args.files_from && !read_files_from(*args.files_from, out, err)) {
     return false;
   }
-  std::sort(out.begin(), out.end());
-  out.erase(std::unique(out.begin(), out.end()), out.end());
+  std::ranges::sort(out);
+  out.erase(std::ranges::unique(out).begin(), out.end());
   return true;
 }
 
@@ -125,7 +125,7 @@ void warn_unscoped_coverage(cidx::Storage &db, std::ostream &err) {
     if (tus.empty()) {
       return;
     }
-    std::sort(tus.begin(), tus.end());
+    std::ranges::sort(tus);
     err << "warning: " << tus.size() << " " << what
         << " (reindex to analyze them); findings cover only the rest:\n";
     const std::size_t cap = 10;
@@ -291,11 +291,22 @@ int cmd_include_check(const ParsedArgs &args, Context &ctx) {
   if (args.inc_json) {
     json_out::Array arr;
     for (const hygiene::IncludeCandidate &c : findings) {
-      json_out::Array owners, syms, macros, caveats;
-      for (const std::string &s : c.owners) owners.push_back(Value::of(s));
-      for (const std::string &s : c.header_symbols) syms.push_back(Value::of(s));
-      for (const std::string &s : c.macro_uses) macros.push_back(Value::of(s));
-      for (const std::string &s : c.caveats) caveats.push_back(Value::of(s));
+      json_out::Array owners;
+      json_out::Array syms;
+      json_out::Array macros;
+      json_out::Array caveats;
+      for (const std::string &s : c.owners) {
+        owners.push_back(Value::of(s));
+      }
+      for (const std::string &s : c.header_symbols) {
+        syms.push_back(Value::of(s));
+      }
+      for (const std::string &s : c.macro_uses) {
+        macros.push_back(Value::of(s));
+      }
+      for (const std::string &s : c.caveats) {
+        caveats.push_back(Value::of(s));
+      }
       arr.push_back(Value::obj({
           {"id", Value::of(c.id)},
           {"file", Value::of(rel(c.src_path))},
@@ -377,7 +388,9 @@ int cmd_include_plan(const ParsedArgs &args, Context &ctx) {
     return 1;
   }
 
-  int64_t accepted = 0, manual = 0, rejected = 0;
+  int64_t accepted = 0;
+  int64_t manual = 0;
+  int64_t rejected = 0;
   for (const hygiene::PlanItem &it : plan.items) {
     switch (it.state) {
     case hygiene::PlanState::Accepted: ++accepted; break;

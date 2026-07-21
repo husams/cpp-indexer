@@ -9,8 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace cidx {
-namespace diff {
+namespace cidx::diff {
 
 // 1-based line/column extent, end exclusive of nothing (matches index.db
 // extents: end is one past the last token).
@@ -70,5 +69,4 @@ struct EditOp {
 constexpr int kLcsLimit = 512;
 constexpr int kEditCap = 1000;
 
-} // namespace diff
-} // namespace cidx
+} // namespace cidx::diff

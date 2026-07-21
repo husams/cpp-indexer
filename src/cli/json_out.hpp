@@ -26,8 +26,7 @@
 #include <utility>
 #include <vector>
 
-namespace cidx {
-namespace json_out {
+namespace cidx::json_out {
 
 struct Value;
 using Array = std::vector<Value>;
@@ -49,10 +48,10 @@ struct Value {
   // `long long` on macOS but `long` on LP64 Linux, and a `long` argument would
   // otherwise be ambiguous between of(bool) and of(long long). bool is excluded
   // so it routes to of(bool).
-  template <typename Int, typename = std::enable_if_t<
-                              std::is_integral_v<Int> &&
-                              !std::is_same_v<std::remove_cv_t<Int>, bool>>>
-  static Value of(Int v) {
+  template <typename Int>
+  static Value of(Int v)
+      requires(std::is_integral_v<Int> &&
+               !std::is_same_v<std::remove_cv_t<Int>, bool>) {
     Value out;
     out.t = T::Int;
     out.i = static_cast<long long>(v);
@@ -69,5 +68,4 @@ struct Value {
 // print() convention).
 std::string dumps_indent2(const Value &v);
 
-} // namespace json_out
-} // namespace cidx
+} // namespace cidx::json_out

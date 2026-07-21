@@ -9,8 +9,7 @@
 #include <optional>
 #include <string>
 
-namespace cidx {
-namespace repo {
+namespace cidx::repo {
 
 // Walk up from `path` looking for a `.git` directory OR file (worktree); nullopt
 // when the filesystem root is reached without finding one.
@@ -26,5 +25,4 @@ std::string repo_name(const std::string &root);
 // unavailable. Mirrors Python indexer.utils.repo.git_remote_url.
 std::optional<std::string> git_remote_url(const std::string &root);
 
-} // namespace repo
-} // namespace cidx
+} // namespace cidx::repo

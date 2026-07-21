@@ -17,14 +17,16 @@ std::string splice_template_args(const std::string &display,
       (params == std::string::npos || start < params)) {
     int depth = 0;
     for (size_t i = start; i < display.size(); ++i) {
-      if (display[i] == '<')
+      if (display[i] == '<') {
         ++depth;
-      else if (display[i] == '>' && --depth == 0)
+      } else if (display[i] == '>' && --depth == 0) {
         return display.substr(0, start) + rendered + display.substr(i + 1);
+      }
     }
   }
-  if (params != std::string::npos)
+  if (params != std::string::npos) {
     return display.substr(0, params) + rendered + display.substr(params);
+  }
   return display + rendered;
 }
 
@@ -35,23 +37,26 @@ rewrite_template_display_name(const std::string &display,
                               const std::vector<std::string> &display_args) {
   // update_callable_template_display_name: skip on empty or any '?'.
   if (display_args.empty() ||
-      std::find(display_args.begin(), display_args.end(), "?") !=
-          display_args.end())
+      std::ranges::find(display_args, "?") != display_args.end()) {
     return std::nullopt;
-  if (display.empty())
+  }
+  if (display.empty()) {
     return std::nullopt;
+  }
 
   std::string rendered = "<";
   for (size_t i = 0; i < display_args.size(); ++i) {
-    if (i != 0)
+    if (i != 0) {
       rendered += ", ";
+    }
     rendered += display_args[i];
   }
   rendered += ">";
 
   const std::string out = splice_template_args(display, rendered);
-  if (out == display)
+  if (out == display) {
     return std::nullopt;
+  }
   return out;
 }
 

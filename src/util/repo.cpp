@@ -7,18 +7,19 @@
 
 #include "util/pathutil.hpp"
 
-namespace cidx {
-namespace repo {
+namespace cidx::repo {
 
 namespace {
 
 std::string strip(const std::string &s) {
   std::size_t begin = 0;
   std::size_t end = s.size();
-  while (begin < end && std::isspace(static_cast<unsigned char>(s[begin]))) {
+  while (begin < end &&
+         (std::isspace(static_cast<unsigned char>(s[begin])) != 0)) {
     ++begin;
   }
-  while (end > begin && std::isspace(static_cast<unsigned char>(s[end - 1]))) {
+  while (end > begin &&
+         (std::isspace(static_cast<unsigned char>(s[end - 1])) != 0)) {
     --end;
   }
   return s.substr(begin, end - begin);
@@ -55,7 +56,7 @@ std::optional<std::string> git_dir(const std::string &root) {
   }
   if (std::filesystem::is_regular_file(dot, ec)) {
     const std::optional<std::string> line = first_line(dot);
-    if (line && line->rfind("gitdir:", 0) == 0) {
+    if (line && line->starts_with("gitdir:")) {
       std::string gd = strip(line->substr(std::string("gitdir:").size()));
       if (!pathutil::isabs(gd)) {
         gd = pathutil::normpath(pathutil::join(root, gd));
@@ -154,7 +155,7 @@ std::string repo_name(const std::string &root) {
     }
     const std::size_t slash = url.rfind('/');
     std::string name = slash == std::string::npos ? url : url.substr(slash + 1);
-    if (name.size() >= 4 && name.compare(name.size() - 4, 4, ".git") == 0) {
+    if (name.size() >= 4 && name.ends_with(".git")) {
       name = name.substr(0, name.size() - 4);
     }
     return name;
@@ -168,5 +169,4 @@ std::string repo_name(const std::string &root) {
   return pathutil::basename(root);
 }
 
-} // namespace repo
-} // namespace cidx
+} // namespace cidx::repo

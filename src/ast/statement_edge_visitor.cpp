@@ -40,8 +40,9 @@ const clang::FunctionDecl *callee_decl(const clang::CallExpr *call) {
 // in callee position.
 const clang::OverloadExpr *callee_overload_expr(const clang::CallExpr *call) {
   const clang::Expr *callee = call->getCallee();
-  if (callee == nullptr)
+  if (callee == nullptr) {
     return nullptr;
+  }
   callee = normalize_value_expr(callee);
   return llvm::dyn_cast_or_null<clang::OverloadExpr>(callee);
 }
@@ -61,14 +62,17 @@ StatementEdgeVisitor::StatementEdgeVisitor(clang::ASTContext &context, EdgeSink 
 // Owner USR for the self-owner skip in the type-name branches.
 void StatementEdgeVisitor::record_owner_usr(const clang::FunctionDecl *fn) {
   const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fn);
-  if (method == nullptr)
+  if (method == nullptr) {
     return;
+  }
   const clang::CXXRecordDecl *owner = method->getParent();
-  if (owner == nullptr)
+  if (owner == nullptr) {
     return;
+  }
   const clang::NamedDecl *o = owner;
-  if (const clang::ClassTemplateDecl *ct = owner->getDescribedClassTemplate())
+  if (const clang::ClassTemplateDecl *ct = owner->getDescribedClassTemplate()) {
     o = ct;
+  }
   ctx_.set_owner_usr(usr_for_decl(o));
 }
 
@@ -84,8 +88,9 @@ void StatementEdgeVisitor::walk(const clang::FunctionDecl *fn) {
       }
     }
   }
-  if (clang::Stmt *body = fn->getBody())
+  if (clang::Stmt *body = fn->getBody()) {
     TraverseStmt(body);
+  }
 }
 
 // ---- narrow scoped traversal overrides -------------------------------------
@@ -143,8 +148,9 @@ void StatementEdgeVisitor::emit_call(const clang::CallExpr *call) {
   if (ref == nullptr) {
     // Dependent/overloaded callee: single-candidate recovery, else link every
     // indexed overload.
-    if (const clang::OverloadExpr *ovl = callee_overload_expr(call))
+    if (const clang::OverloadExpr *ovl = callee_overload_expr(call)) {
       emit_overloaded_call(call, ovl);
+    }
     return;
   }
   emitter_.emit_resolved_call(call, ref, /*recovered=*/false);
@@ -167,16 +173,19 @@ void StatementEdgeVisitor::emit_overloaded_call(const clang::CallExpr *call,
     } else {
       ref = llvm::dyn_cast<clang::FunctionDecl>(cand);
     }
-    if (ref != nullptr)
+    if (ref != nullptr) {
       emitter_.emit_resolved_call(call, ref, /*recovered=*/true, mint_as);
+    }
     return;
   }
-  if (cands.size() < 2)
+  if (cands.size() < 2) {
     return;
+  }
   // Overload set: fan out to every indexed candidate (minting non-system
   // ones), falling back to qual-name lookup when none resolved.
-  for (const int64_t dst_id : overload_candidate_ids(cands))
+  for (const int64_t dst_id : overload_candidate_ids(cands)) {
     ctx_.emit_site_edge(call, dst_id, 1);
+  }
 }
 
 std::set<int64_t> StatementEdgeVisitor::overload_candidate_ids(
@@ -184,24 +193,29 @@ std::set<int64_t> StatementEdgeVisitor::overload_candidate_ids(
   std::set<int64_t> dst_ids;
   for (const clang::NamedDecl *cand : cands) {
     const std::string usr = usr_for_decl(cand);
-    if (usr.empty())
+    if (usr.empty()) {
       continue;
+    }
     if (const auto s = ctx_.sink().lookup_symbol_id(usr)) {
       dst_ids.insert(*s);
       continue;
     }
     if (ctx_.context().getSourceManager().isInSystemHeader(
-            cand->getLocation()))
+            cand->getLocation())) {
       continue;
-    if (auto req = ctx_.mint().build(cand))
+    }
+    if (auto req = ctx_.mint().build(cand)) {
       dst_ids.insert(ctx_.sink().mint_symbol(*req));
+    }
   }
   if (dst_ids.empty() && !cands.empty()) {
     const std::string qn = qualified_name(ctx_.context(), cands[0]);
-    if (!qn.empty())
+    if (!qn.empty()) {
       for (const int64_t id : ctx_.sink().symbol_ids_by_qual_name_kind(
-               qn, cidx_stub_kind_name(cands[0])))
+               qn, cidx_stub_kind_name(cands[0]))) {
         dst_ids.insert(id);
+      }
+    }
   }
   return dst_ids;
 }
@@ -210,25 +224,31 @@ std::set<int64_t> StatementEdgeVisitor::overload_candidate_ids(
 // factory-construct(15) edge to B.
 void StatementEdgeVisitor::emit_factory_edge(const clang::CallExpr *call,
                                     const clang::FunctionDecl *ref) {
-  if (llvm::isa<clang::CXXMethodDecl>(ref))
+  if (llvm::isa<clang::CXXMethodDecl>(ref)) {
     return;
+  }
   const std::string sp = spelling(ref);
-  if (sp != "make_unique" && sp != "make_shared")
+  if (sp != "make_unique" && sp != "make_shared") {
     return;
-  if (!ctx_.context().getSourceManager().isInSystemHeader(ref->getLocation()))
+  }
+  if (!ctx_.context().getSourceManager().isInSystemHeader(ref->getLocation())) {
     return;
+  }
   const clang::QualType result = call->getType().getCanonicalType();
   const auto *spec =
       llvm::dyn_cast_or_null<clang::ClassTemplateSpecializationDecl>(
           result->getAsCXXRecordDecl());
-  if (spec == nullptr)
+  if (spec == nullptr) {
     return;
+  }
   const clang::TemplateArgumentList &args = spec->getTemplateArgs();
-  if (args.size() == 0 || args[0].getKind() != clang::TemplateArgument::Type)
+  if (args.size() == 0 || args[0].getKind() != clang::TemplateArgument::Type) {
     return;
+  }
   const std::string fact_usr = record_usr_of_type(args[0].getAsType());
-  if (fact_usr.empty())
+  if (fact_usr.empty()) {
     return;
+  }
   if (const auto fact = ctx_.sink().lookup_symbol_id(fact_usr)) {
     EdgeRecord fe;
     fe.src_id = ctx_.src_id();
@@ -247,19 +267,22 @@ bool StatementEdgeVisitor::VisitCXXConstructExpr(clang::CXXConstructExpr *ctor) 
 
 void StatementEdgeVisitor::emit_construct(const clang::CXXConstructExpr *ctor) {
   const clang::CXXConstructorDecl *ref = ctor->getConstructor();
-  if (ref == nullptr)
+  if (ref == nullptr) {
     return;
+  }
   // Every CXXConstructExpr maps to a call edge — including an implicit
   // default ctor for `B b;` (which mints a B() stub).
   emitter_.emit_resolved_call(ctor, ref, /*recovered=*/false);
   // Temporary-object syntax (Widget{...} / Widget(x)) names the type -> uses.
-  if (const auto *tmp = llvm::dyn_cast<clang::CXXTemporaryObjectExpr>(ctor))
+  if (const auto *tmp = llvm::dyn_cast<clang::CXXTemporaryObjectExpr>(ctor)) {
     ctx_.emit_type_name_use(tmp->getTypeSourceInfo(),
                             /*promote_described_template=*/false);
+  }
   // A ctor that is a new-expression's initializer emits no form —
   // construct-heap(12) covers it.
-  if (ctor != new_init_)
+  if (ctor != new_init_) {
     emit_construction_form(ctor, ref);
+  }
 }
 
 // Construction form (10 value / 11 temp / 13 copy / 14 move), chosen by the
@@ -269,21 +292,25 @@ void StatementEdgeVisitor::emit_construct(const clang::CXXConstructExpr *ctor) {
 void StatementEdgeVisitor::emit_construction_form(const clang::CXXConstructExpr *ctor,
                                          const clang::CXXConstructorDecl *ref) {
   const std::string type_usr = record_usr_of_type(ctor->getType());
-  if (type_usr.empty())
+  if (type_usr.empty()) {
     return;
+  }
   const auto dst = ctx_.sink().lookup_symbol_id(type_usr);
-  if (!dst)
+  if (!dst) {
     return;
+  }
   // The constructor CATEGORY decides copy/move — not the parameter's printed
   // spelling, which can contain '&' inside nested types (Holder<void(int &)>).
   int form = 10; // construct-value
-  if (ref->isMoveConstructor())
+  if (ref->isMoveConstructor()) {
     form = 14; // construct-move
-  else if (ref->isCopyConstructor())
+  } else if (ref->isCopyConstructor()) {
     form = 13; // construct-copy
+  }
   const bool var_init = ctor == direct_init_;
-  if (!var_init && form != 13 && form != 14)
+  if (!var_init && form != 13 && form != 14) {
     form = 11; // construct-temp
+  }
   EdgeRecord fe;
   fe.src_id = ctx_.src_id();
   fe.dst_id = *dst;
@@ -312,11 +339,13 @@ bool StatementEdgeVisitor::VisitCXXNewExpr(clang::CXXNewExpr *expr) {
 
 bool StatementEdgeVisitor::VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
   const clang::Expr *arg = expr->getArgument();
-  if (arg == nullptr)
+  if (arg == nullptr) {
     return true;
+  }
   const std::string usr = record_usr_of_type(arg->getType());
-  if (usr.empty())
+  if (usr.empty()) {
     return true;
+  }
   if (const auto dst = ctx_.sink().lookup_symbol_id(usr)) {
     EdgeRecord fe;
     fe.src_id = ctx_.src_id();
@@ -335,9 +364,10 @@ bool StatementEdgeVisitor::VisitDeclRefExpr(clang::DeclRefExpr *dre) {
   if (ref != nullptr && !is_function_like_decl(ref)) {
     const std::string usr = usr_for_decl(ref);
     if (!usr.empty()) {
-      if (const auto dst = ctx_.sink().lookup_symbol_id(usr))
+      if (const auto dst = ctx_.sink().lookup_symbol_id(usr)) {
         // The site anchors at the NAME (after qualifiers).
         ctx_.emit_site_edge_at(dre->getLocation(), *dst, 7);
+      }
     }
   }
   emit_qualifier_type_use(dre);
@@ -352,34 +382,42 @@ void StatementEdgeVisitor::emit_qualifier_type_use(const clang::DeclRefExpr *dre
   const clang::Type *t = nullptr;
 #if LLVM_VERSION_MAJOR >= 22
   const clang::NestedNameSpecifier nns = dre->getQualifier();
-  if (nns.getKind() == clang::NestedNameSpecifier::Kind::Type)
+  if (nns.getKind() == clang::NestedNameSpecifier::Kind::Type) {
     t = nns.getAsType();
+  }
 #else
   if (const clang::NestedNameSpecifier *nns = dre->getQualifier())
     t = nns->getAsType();
 #endif
-  if (t == nullptr)
+  if (t == nullptr) {
     return;
+  }
   const clang::NamedDecl *td = named_type_decl(clang::QualType(t, 0));
-  if (td == nullptr)
+  if (td == nullptr) {
     return;
+  }
   const std::string usr = usr_for_decl(td);
-  if (usr.empty() || usr == ctx_.owner_usr())
+  if (usr.empty() || usr == ctx_.owner_usr()) {
     return;
-  if (const auto dst = ctx_.sink().lookup_symbol_id(usr))
-    if (*dst != ctx_.src_id())
+  }
+  if (const auto dst = ctx_.sink().lookup_symbol_id(usr)) {
+    if (*dst != ctx_.src_id()) {
       ctx_.emit_site_edge(dre, *dst, 7);
+    }
+  }
 }
 
 // Explicit template arguments (make_unique<Widget>(...)): each named TYPE
 // argument is spelled at the expression — emit uses.
 void StatementEdgeVisitor::emit_explicit_template_arg_uses(
     const clang::DeclRefExpr *dre) {
-  if (!dre->hasExplicitTemplateArgs())
+  if (!dre->hasExplicitTemplateArgs()) {
     return;
+  }
   for (const clang::TemplateArgumentLoc &tal : dre->template_arguments()) {
-    if (tal.getArgument().getKind() != clang::TemplateArgument::Type)
+    if (tal.getArgument().getKind() != clang::TemplateArgument::Type) {
       continue;
+    }
     ctx_.emit_type_name_use(tal.getTypeSourceInfo(),
                             /*promote_described_template=*/false);
   }
@@ -390,9 +428,10 @@ bool StatementEdgeVisitor::VisitMemberExpr(clang::MemberExpr *me) {
   if (ref != nullptr && !is_function_like_decl(ref)) {
     const std::string usr = usr_for_decl(ref);
     if (!usr.empty()) {
-      if (const auto dst = ctx_.sink().lookup_symbol_id(usr))
+      if (const auto dst = ctx_.sink().lookup_symbol_id(usr)) {
         // The site anchors at the member NAME token.
         ctx_.emit_site_edge_at(me->getMemberLoc(), *dst, 7);
+      }
     }
   }
   return true;
@@ -402,9 +441,10 @@ bool StatementEdgeVisitor::VisitMemberExpr(clang::MemberExpr *me) {
 
 bool StatementEdgeVisitor::VisitUnaryExprOrTypeTraitExpr(
     clang::UnaryExprOrTypeTraitExpr *expr) {
-  if (expr->isArgumentType())
+  if (expr->isArgumentType()) {
     ctx_.emit_type_name_use(expr->getArgumentTypeInfo(),
                             /*promote_described_template=*/true);
+  }
   return true;
 }
 
@@ -422,8 +462,9 @@ bool StatementEdgeVisitor::VisitVarDecl(clang::VarDecl *var) {
   // static members) that is not a parameter, catch variable, lambda
   // init-capture, or compiler-generated.
   if (!var->isLocalVarDecl() || llvm::isa<clang::ParmVarDecl>(var) ||
-      var->isExceptionVariable() || var->isInitCapture() || var->isImplicit())
+      var->isExceptionVariable() || var->isInitCapture() || var->isImplicit()) {
     return true;
+  }
   emit_local_var(var);
   return true;
 }
@@ -439,17 +480,21 @@ void StatementEdgeVisitor::emit_local_var(const clang::VarDecl *var) {
   const auto *spec =
       llvm::dyn_cast_or_null<clang::ClassTemplateSpecializationDecl>(
           var->getType()->getAsCXXRecordDecl());
-  if (spec == nullptr)
+  if (spec == nullptr) {
     return;
+  }
   const clang::ClassTemplateDecl *primary = spec->getSpecializedTemplate();
-  if (primary == nullptr)
+  if (primary == nullptr) {
     return;
+  }
   const std::string prim_usr = usr_for_decl(primary);
-  if (prim_usr.empty())
+  if (prim_usr.empty()) {
     return;
+  }
   const auto prim = ctx_.sink().lookup_symbol_id(prim_usr);
-  if (!prim)
+  if (!prim) {
     return; // lookup-only: no stubs for stdlib templates
+  }
   EdgeRecord inst;
   inst.src_id = ctx_.src_id();
   inst.dst_id = *prim;
@@ -462,13 +507,15 @@ void StatementEdgeVisitor::emit_local_var(const clang::VarDecl *var) {
   if (const auto *tst =
           var->getType()->getAs<clang::TemplateSpecializationType>()) {
     int64_t pos = 0;
-    for (const clang::TemplateArgument &a : tst->template_arguments())
+    for (const clang::TemplateArgument &a : tst->template_arguments()) {
       ctx_.targ_encoder().emit(ctx_.src_id(), pos++, a);
+    }
   } else {
     const clang::TemplateArgumentList &args = spec->getTemplateArgs();
-    for (unsigned ai = 0; ai < args.size(); ++ai)
+    for (unsigned ai = 0; ai < args.size(); ++ai) {
       ctx_.targ_encoder().emit(ctx_.src_id(), static_cast<int64_t>(ai),
                                args[ai]);
+    }
   }
 }
 

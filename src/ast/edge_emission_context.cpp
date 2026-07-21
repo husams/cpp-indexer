@@ -28,15 +28,19 @@ clang::SourceLocation type_name_loc(clang::TypeLoc tl) {
     tl = etl.getNamedTypeLoc();
 #endif
   tl = tl.getUnqualifiedLoc();
-  if (auto ts = tl.getAs<clang::TemplateSpecializationTypeLoc>())
+  if (auto ts = tl.getAs<clang::TemplateSpecializationTypeLoc>()) {
     return ts.getTemplateNameLoc();
+  }
   // LLVM 22: tag/typedef TypeLocs embed their qualifier and carry NameLoc.
-  if (auto tt = tl.getAs<clang::TagTypeLoc>())
+  if (auto tt = tl.getAs<clang::TagTypeLoc>()) {
     return tt.getNameLoc();
-  if (auto td = tl.getAs<clang::TypedefTypeLoc>())
+  }
+  if (auto td = tl.getAs<clang::TypedefTypeLoc>()) {
     return td.getNameLoc();
-  if (auto spec = tl.getAs<clang::TypeSpecTypeLoc>())
+  }
+  if (auto spec = tl.getAs<clang::TypeSpecTypeLoc>()) {
     return spec.getNameLoc();
+  }
   return tl.getBeginLoc();
 }
 
@@ -74,22 +78,30 @@ int64_t EdgeEmissionContext::emit_site_edge_at(clang::SourceLocation loc_in,
 
 void EdgeEmissionContext::emit_type_name_use(const clang::TypeSourceInfo *tsi,
                                          bool promote_described_template) {
-  if (tsi == nullptr)
+  if (tsi == nullptr) {
     return;
+  }
   const clang::NamedDecl *named = named_type_decl(tsi->getType());
-  if (named == nullptr)
+  if (named == nullptr) {
     return;
+  }
   if (promote_described_template) {
-    if (const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(named))
-      if (const clang::ClassTemplateDecl *ct = rec->getDescribedClassTemplate())
+    if (const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(named)) {
+      if (const clang::ClassTemplateDecl *ct =
+              rec->getDescribedClassTemplate()) {
         named = ct;
+      }
+    }
   }
   const std::string usr = usr_for_decl(named);
-  if (usr.empty() || usr == owner_usr_)
+  if (usr.empty() || usr == owner_usr_) {
     return;
-  if (const auto dst = sink_.lookup_symbol_id(usr))
-    if (*dst != src_id_)
+  }
+  if (const auto dst = sink_.lookup_symbol_id(usr)) {
+    if (*dst != src_id_) {
       emit_site_edge_at(type_name_loc(tsi->getTypeLoc()), *dst, 7);
+    }
+  }
 }
 
 } // namespace cidx::ast

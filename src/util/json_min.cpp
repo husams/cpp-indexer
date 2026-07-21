@@ -4,8 +4,7 @@
 
 #include "util/errors.hpp"
 
-namespace cidx {
-namespace json_min {
+namespace cidx::json_min {
 
 namespace {
 
@@ -226,5 +225,4 @@ std::string encode_string_array(const std::vector<std::string> &items) {
   return out;
 }
 
-} // namespace json_min
-} // namespace cidx
+} // namespace cidx::json_min

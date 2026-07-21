@@ -95,7 +95,7 @@ TypeInterner::Result TypeInterner::emit_node(clang::QualType qt,
   // elaborated TagType vs its canonical TagType both key on the decl USR);
   // comparing keys keeps such self-canonical rows at NULL instead of writing
   // a self-loop.
-  const clang::QualType canon = context_.getCanonicalType(qt);
+  const clang::QualType canon = clang::ASTContext::getCanonicalType(qt);
   if (canon.getAsOpaquePtr() != qt.getAsOpaquePtr() && depth < kMaxDepth) {
     if (const std::optional<Result> c = build(canon, depth + 1);
         c && c->key != rec.type_key) {
@@ -121,7 +121,7 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
   TypeNodeRecord rec;
 
   if (depth >= kMaxDepth) {
-    const clang::QualType canon = context_.getCanonicalType(qt);
+    const clang::QualType canon = clang::ASTContext::getCanonicalType(qt);
     rec.kind = kTypeOther;
     rec.type_key = "o:" + canon.getAsString(context_.getPrintingPolicy());
     return emit_node(qt, std::move(rec), depth);
@@ -339,7 +339,7 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
 
   // Everything else (member pointers, dependent shapes, packs, atomics, ...):
   // one opaque node keyed by the canonical print. No children.
-  const clang::QualType canon = context_.getCanonicalType(qt);
+  const clang::QualType canon = clang::ASTContext::getCanonicalType(qt);
   rec.kind = kTypeOther;
   rec.type_key = "o:" + canon.getAsString(context_.getPrintingPolicy());
   return emit_node(qt, std::move(rec), depth);

@@ -23,22 +23,26 @@ const clang::Expr *receiver_expression(const clang::Expr *site) {
   if (const auto *mc = llvm::dyn_cast<clang::CXXMemberCallExpr>(site)) {
     const auto *me = llvm::dyn_cast_or_null<clang::MemberExpr>(
         normalize_value_expr(mc->getCallee()));
-    if (me != nullptr && !me->isImplicitAccess())
+    if (me != nullptr && !me->isImplicitAccess()) {
       return mc->getImplicitObjectArgument();
+    }
     return nullptr;
   }
   const auto *anycall = llvm::dyn_cast<clang::CallExpr>(site);
-  if (anycall == nullptr)
+  if (anycall == nullptr) {
     return nullptr;
+  }
   const clang::Expr *callee_expr = normalize_value_expr(anycall->getCallee());
   if (const auto *dep = llvm::dyn_cast_or_null<
           clang::CXXDependentScopeMemberExpr>(callee_expr)) {
-    if (!dep->isImplicitAccess())
+    if (!dep->isImplicitAccess()) {
       return dep->getBase();
+    }
   } else if (const auto *unres = llvm::dyn_cast_or_null<
                  clang::UnresolvedMemberExpr>(callee_expr)) {
-    if (!unres->isImplicitAccess())
+    if (!unres->isImplicitAccess()) {
       return unres->getBase();
+    }
   }
   return nullptr;
 }
@@ -57,16 +61,19 @@ ReceiverProvenance classify_explicit_receiver(const clang::ASTContext &context,
   if (recv.src_kind == "local" && !recv.decl_usr.empty()) {
     if (const auto *dre = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
             normalize_value_expr(recv_expr))) {
-      if (const auto *parm = llvm::dyn_cast<clang::ParmVarDecl>(dre->getDecl()))
+      if (const auto *parm =
+              llvm::dyn_cast<clang::ParmVarDecl>(dre->getDecl())) {
         recv.param_pos = static_cast<int64_t>(parm->getFunctionScopeIndex());
+      }
     }
   }
   if (recv.src_kind == "member" || recv.src_kind == "global" ||
       recv.src_kind == "call_result") {
     std::string dispatch_usr;
     if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(callee)) {
-      if (const clang::CXXRecordDecl *owner = m->getParent())
+      if (const clang::CXXRecordDecl *owner = m->getParent()) {
         dispatch_usr = usr_for_decl(owner);
+      }
     }
     recv.type_is_value =
         type_is_value(decl_type_for_expr(normalize_value_expr(recv_expr)),
@@ -83,11 +90,13 @@ ReceiverProvenance classify_implicit_this(const clang::FunctionDecl *callee) {
   ReceiverProvenance recv;
   const clang::CXXRecordDecl *owner =
       llvm::cast<clang::CXXMethodDecl>(callee)->getParent();
-  if (owner == nullptr)
+  if (owner == nullptr) {
     return recv;
+  }
   const clang::NamedDecl *o = owner;
-  if (const clang::ClassTemplateDecl *ct = owner->getDescribedClassTemplate())
+  if (const clang::ClassTemplateDecl *ct = owner->getDescribedClassTemplate()) {
     o = ct;
+  }
   const std::string ou = usr_for_decl(o);
   recv.src_kind = "this";
   recv.type_usr = ou;
@@ -100,10 +109,12 @@ ReceiverProvenance classify_implicit_this(const clang::FunctionDecl *callee) {
 ReceiverProvenance classify_call_receiver(const clang::ASTContext &context,
                                           const clang::Expr *site,
                                           const clang::FunctionDecl *callee) {
-  if (const clang::Expr *recv_expr = receiver_expression(site))
+  if (const clang::Expr *recv_expr = receiver_expression(site)) {
     return classify_explicit_receiver(context, recv_expr, callee);
-  if (llvm::isa<clang::CXXMethodDecl>(callee))
+  }
+  if (llvm::isa<clang::CXXMethodDecl>(callee)) {
     return classify_implicit_this(callee);
+  }
   return {};
 }
 

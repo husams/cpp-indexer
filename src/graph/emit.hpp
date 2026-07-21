@@ -14,8 +14,7 @@
 #include "graph/query.hpp"
 #include "graph/records.hpp"
 
-namespace cidx {
-namespace graph {
+namespace cidx::graph {
 
 // emit_edges -- cli.py:1054-1069
 // Emits a list of Edge results (human text or --json).
@@ -32,5 +31,4 @@ void emit_syms(const std::vector<Sym> &syms, bool json_mode, std::ostream &out,
                const std::string &header,
                const std::unordered_map<int64_t, int> *depths = nullptr);
 
-} // namespace graph
-} // namespace cidx
+} // namespace cidx::graph

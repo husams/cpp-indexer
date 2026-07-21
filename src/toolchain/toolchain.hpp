@@ -117,7 +117,7 @@ private:
 
   // Major of the loaded libclang; the test override wins, otherwise
   // LibClang::instance() (0 when undeterminable -- Python parity).
-  int libclang_major() const;
+  [[nodiscard]] int libclang_major() const;
 
   Logger &log_;
   std::optional<int> major_override_;

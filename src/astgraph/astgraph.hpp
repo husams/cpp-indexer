@@ -25,8 +25,7 @@
 
 #include "astgraph/schema.hpp"
 
-namespace cidx {
-namespace astgraph {
+namespace cidx::astgraph {
 
 // The fixed relation catalog.  1-8 relate cursor-space (decl/stmt) nodes, 10
 // crosses type→decl, 11-19 relate type nodes.  Id 9 (has_type) is RETIRED: a
@@ -88,5 +87,4 @@ DumpStats dump_tu(const std::string &source_path,
                   const std::optional<std::string> &driver,
                   const std::string &out_db_path, const Options &opts);
 
-} // namespace astgraph
-} // namespace cidx
+} // namespace cidx::astgraph

@@ -25,9 +25,10 @@ namespace {
 souffle::Relation &require_relation(souffle::SouffleProgram &program,
                                     const char *name) {
   souffle::Relation *rel = program.getRelation(name);
-  if (rel == nullptr)
+  if (rel == nullptr) {
     throw CidxError(std::string("generated Souffle rule has no relation: ") +
                     name);
+  }
   return *rel;
 }
 
@@ -84,16 +85,18 @@ void require_schema_v2(SqliteDb &db) {
 bool native_souffle_available() { return true; }
 
 std::vector<CallFact> run_callgraph(const std::string &ast_db_path, int jobs) {
-  if (jobs < 1)
+  if (jobs < 1) {
     throw CidxError("--jobs must be at least 1");
+  }
 
   SqliteDb db(ast_db_path);
   require_schema_v2(db);
 
   std::unique_ptr<souffle::SouffleProgram> program(
       souffle::ProgramFactory::newInstance("ast_callgraph"));
-  if (!program)
+  if (!program) {
     throw CidxError("embedded Souffle rule ast_callgraph is not linked");
+  }
 
   load_nodes(db, require_relation(*program, "ast_node"));
   load_edges(db, require_relation(*program, "ast_edge"));

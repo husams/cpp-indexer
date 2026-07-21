@@ -29,23 +29,25 @@ public:
   EdgeEmissionContext(clang::ASTContext &context, EdgeSink &sink, int64_t src_id,
                   int64_t file_id);
 
-  clang::ASTContext &context() const { return context_; }
-  EdgeSink &sink() const { return sink_; }
+  [[nodiscard]] clang::ASTContext &context() const { return context_; }
+  [[nodiscard]] EdgeSink &sink() const { return sink_; }
   MintBuilder &mint() { return mint_; }
-  const TemplateArgumentEncoder &targ_encoder() const { return targ_encoder_; }
-  const InstanceMinter &minter() const { return minter_; }
-  int64_t src_id() const { return src_id_; }
-  int64_t file_id() const { return file_id_; }
+  [[nodiscard]] const TemplateArgumentEncoder &targ_encoder() const {
+    return targ_encoder_;
+  }
+  [[nodiscard]] const InstanceMinter &minter() const { return minter_; }
+  [[nodiscard]] int64_t src_id() const { return src_id_; }
+  [[nodiscard]] int64_t file_id() const { return file_id_; }
 
   // Enclosing method's owning record (self-use skip in type-name branches).
-  const std::string &owner_usr() const { return owner_usr_; }
+  [[nodiscard]] const std::string &owner_usr() const { return owner_usr_; }
   void set_owner_usr(std::string usr) { owner_usr_ = std::move(usr); }
 
   // Conditional depth — driven by StatementEdgeVisitor's scoped traversal overrides
   // (If/For/While/Do/Switch/?:); edge sites emitted inside mark conditional.
   void enter_cond() { ++cond_depth_; }
   void exit_cond() { --cond_depth_; }
-  bool in_conditional() const { return cond_depth_ > 0; }
+  [[nodiscard]] bool in_conditional() const { return cond_depth_ > 0; }
 
   // Edge + edge_site pair. emit_site_edge anchors at the expression start;
   // emit_site_edge_at at an explicit token (reference semantics anchor

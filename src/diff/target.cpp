@@ -12,8 +12,7 @@
 #include "util/errors.hpp"
 #include "util/pathutil.hpp"
 
-namespace cidx {
-namespace diff {
+namespace cidx::diff {
 
 namespace {
 
@@ -25,11 +24,10 @@ bool file_exists(const std::string &path) {
 // Multiset difference a - b of two option lists, sorted.
 std::vector<std::string> only_in(std::vector<std::string> a,
                                  std::vector<std::string> b) {
-  std::sort(a.begin(), a.end());
-  std::sort(b.begin(), b.end());
+  std::ranges::sort(a);
+  std::ranges::sort(b);
   std::vector<std::string> out;
-  std::set_difference(a.begin(), a.end(), b.begin(), b.end(),
-                      std::back_inserter(out));
+  std::ranges::set_difference(a, b, std::back_inserter(out));
   return out;
 }
 
@@ -180,5 +178,4 @@ ParseConfig resolve_parse_config(const SideSpec &spec) {
   return cfg;
 }
 
-} // namespace diff
-} // namespace cidx
+} // namespace cidx::diff

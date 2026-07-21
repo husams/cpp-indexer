@@ -28,7 +28,7 @@ public:
   using CidxError::CidxError;
   ClangParseError(const std::string &msg, std::vector<Diagnostic> diags)
       : CidxError(msg), diagnostics_(std::move(diags)) {}
-  const std::vector<Diagnostic> &diagnostics() const noexcept {
+  [[nodiscard]] const std::vector<Diagnostic> &diagnostics() const noexcept {
     return diagnostics_;
   }
 
@@ -47,7 +47,7 @@ class UsageError : public CidxError {
 public:
   explicit UsageError(const std::string &msg, int exit_code = 2)
       : CidxError(msg), exit_code_(exit_code) {}
-  int exit_code() const noexcept { return exit_code_; }
+  [[nodiscard]] int exit_code() const noexcept { return exit_code_; }
 
 private:
   int exit_code_;

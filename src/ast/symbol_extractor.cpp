@@ -18,14 +18,17 @@ namespace {
 // ast_symbols.cpp:24-33).
 std::optional<std::string> parent_usr_of(const clang::NamedDecl *decl) {
   const clang::DeclContext *dc = decl->getDeclContext();
-  if (dc == nullptr)
+  if (dc == nullptr) {
     return std::nullopt;
+  }
   const auto *parent = llvm::dyn_cast<clang::Decl>(dc);
-  if (parent == nullptr || llvm::isa<clang::TranslationUnitDecl>(parent))
+  if (parent == nullptr || llvm::isa<clang::TranslationUnitDecl>(parent)) {
     return std::nullopt;
+  }
   std::string usr = usr_for_decl(parent);
-  if (usr.empty())
+  if (usr.empty()) {
     return std::nullopt;
+  }
   return usr;
 }
 
@@ -37,12 +40,14 @@ SymbolExtractor::SymbolExtractor(const clang::ASTContext &context)
 std::optional<SymbolRecord>
 SymbolExtractor::extract(const clang::NamedDecl *decl) const {
   const int kind = cidx_symbol_kind(decl);
-  if (kind < 0)
+  if (kind < 0) {
     return std::nullopt;
+  }
 
   std::string usr = usr_for_decl(decl);
-  if (usr.empty())
+  if (usr.empty()) {
     return std::nullopt; // no USR -> not indexable
+  }
 
   const bool is_def = is_definition(decl);
 
@@ -52,8 +57,9 @@ SymbolExtractor::extract(const clang::NamedDecl *decl) const {
   sym.spelling = spelling(decl);
   sym.kind = kind;
   std::string qual = qualified_name(context_, decl);
-  if (!qual.empty())
+  if (!qual.empty()) {
     sym.qual_name = std::move(qual);
+  }
   sym.display_name = display_name(context_, decl);
   sym.type_info = type_info(context_, decl);
 

@@ -1,11 +1,11 @@
 #include "cli/json_out.hpp"
 
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <sstream>
 
-namespace cidx {
-namespace json_out {
+namespace cidx::json_out {
 
 // ---------------------------------------------------------------------------
 // Value factory methods
@@ -62,8 +62,7 @@ namespace {
 
 void encode_string(std::ostringstream &out, const std::string &s) {
   out << '"';
-  const unsigned char *p =
-      reinterpret_cast<const unsigned char *>(s.data());
+  const auto *p = reinterpret_cast<const unsigned char *>(s.data());
   const unsigned char *end = p + s.size();
 
   while (p < end) {
@@ -155,8 +154,8 @@ void encode_string(std::ostringstream &out, const std::string &s) {
 // Recursive pretty-printer matching CPython json.dumps(indent=2) output.
 // depth = current nesting level (0 = top level).
 void emit(std::ostringstream &out, const Value &v, int depth) {
-  const std::string indent(2 * depth, ' ');
-  const std::string inner(2 * (depth + 1), ' ');
+  const std::string indent(static_cast<std::string::size_type>(2 * depth), ' ');
+  const std::string inner(static_cast<std::string::size_type>(2 * (depth + 1)), ' ');
 
   switch (v.t) {
   case Value::T::Null:
@@ -216,5 +215,4 @@ std::string dumps_indent2(const Value &v) {
   return out.str();
 }
 
-} // namespace json_out
-} // namespace cidx
+} // namespace cidx::json_out

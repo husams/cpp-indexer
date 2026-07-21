@@ -14,8 +14,7 @@
 #include <string>
 #include <vector>
 
-namespace cidx {
-namespace cli {
+namespace cidx::cli {
 
 // Tool version. Keep in sync with pyproject.toml [project].version and the
 // Python tool (cli.py VERSION). `cidx --version` prints "cidx <kVersion>".
@@ -127,5 +126,4 @@ struct ParsedArgs {
 // argv WITHOUT the program name. Throws UsageError on misuse.
 ParsedArgs parse_args(const std::vector<std::string> &argv);
 
-} // namespace cli
-} // namespace cidx
+} // namespace cidx::cli

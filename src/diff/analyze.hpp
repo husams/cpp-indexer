@@ -12,8 +12,7 @@
 #include "diff/syntax_ir.hpp"
 #include "diff/target.hpp"
 
-namespace cidx {
-namespace diff {
+namespace cidx::diff {
 
 // Symbol selector (docs/diff.md "Selectors"): exact USR, exact qualified
 // signature, exact qualified name (+ optional kind filter), or line:N.
@@ -39,5 +38,4 @@ struct SideAnalysis {
 SideAnalysis analyze_side(const ParseConfig &config,
                           const std::optional<Selector> &selector);
 
-} // namespace diff
-} // namespace cidx
+} // namespace cidx::diff

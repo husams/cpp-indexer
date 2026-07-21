@@ -44,30 +44,31 @@ public:
   static IncludeGraph load(cidx::Storage &db, bool include_system);
 
   // Direct targets of `path` / direct includers of `path`, ordered by path.
-  std::vector<GraphEdge> direct_from(const std::string &path) const;
-  std::vector<GraphEdge> direct_to(const std::string &path) const;
+  [[nodiscard]] std::vector<GraphEdge>
+  direct_from(const std::string &path) const;
+  [[nodiscard]] std::vector<GraphEdge> direct_to(const std::string &path) const;
 
   // Every path reachable from `path` within `max_depth` hops (0 = unbounded),
   // excluding `path` itself. Ordered by path. Cycle-safe.
-  std::vector<std::string> transitive_from(const std::string &path,
-                                           int max_depth) const;
+  [[nodiscard]] std::vector<std::string>
+  transitive_from(const std::string &path, int max_depth) const;
   // Every path that can reach `path` within `max_depth` hops -- the impact set
   // of changing that header. Ordered by path. Cycle-safe.
-  std::vector<std::string> transitive_to(const std::string &path,
-                                         int max_depth) const;
+  [[nodiscard]] std::vector<std::string> transitive_to(const std::string &path,
+                                                       int max_depth) const;
 
   // Shortest include chain from `from` to `to` inclusive, or empty when `to` is
   // unreachable -- the "why is this header here?" answer. BFS over a
   // path-sorted adjacency, so the chain is stable across runs when several
   // shortest paths tie.
-  std::vector<std::string> shortest_path(const std::string &from,
-                                         const std::string &to) const;
+  [[nodiscard]] std::vector<std::string>
+  shortest_path(const std::string &from, const std::string &to) const;
 
   // Strongly connected components of size > 1, plus self-loops: the include
   // cycles. Each component is path-sorted; components are ordered by their
   // first path. Tarjan, iterative -- a deep include chain must not blow the
   // native stack.
-  std::vector<std::vector<std::string>> cycles() const;
+  [[nodiscard]] std::vector<std::vector<std::string>> cycles() const;
 
   // (path, fan_in, fan_out) for every node, ordered by path.
   struct Hotspot {
@@ -75,11 +76,11 @@ public:
     int64_t fan_in = 0;
     int64_t fan_out = 0;
   };
-  std::vector<Hotspot> hotspots() const;
+  [[nodiscard]] std::vector<Hotspot> hotspots() const;
 
   // Every node, ordered by path.
-  std::vector<std::string> nodes() const;
-  bool has_node(const std::string &path) const;
+  [[nodiscard]] std::vector<std::string> nodes() const;
+  [[nodiscard]] bool has_node(const std::string &path) const;
 
 private:
   // path -> outgoing/incoming edges, each sorted by the far endpoint's path.

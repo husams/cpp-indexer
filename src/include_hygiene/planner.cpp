@@ -21,7 +21,7 @@ namespace {
 std::string iso_now() {
   const std::time_t t = std::time(nullptr);
   std::tm tm{};
-#if defined(_WIN32)
+#ifdef _WIN32
   ::gmtime_s(&tm, &t);
 #else
   ::gmtime_r(&t, &tm);
@@ -84,10 +84,10 @@ std::string common_root(const std::vector<std::string> &paths) {
 }
 
 std::string relative_to(const std::string &root, const std::string &abs) {
-  if (root != "/" && abs.rfind(root + "/", 0) == 0) {
+  if (root != "/" && abs.starts_with(root + "/")) {
     return abs.substr(root.size() + 1);
   }
-  if (root == "/" && abs.rfind('/', 0) == 0) {
+  if (root == "/" && abs.starts_with('/')) {
     return abs.substr(1);
   }
   return abs;
@@ -134,11 +134,12 @@ CleanupPlan build_plan(cidx::Storage &db, const AnalysisResult &res,
   };
 
   std::vector<std::string> files;
+  files.reserve(res.candidates.size());
   for (const IncludeCandidate &c : res.candidates) {
     files.push_back(c.src_path);
   }
-  std::sort(files.begin(), files.end());
-  files.erase(std::unique(files.begin(), files.end()), files.end());
+  std::ranges::sort(files);
+  files.erase(std::ranges::unique(files).begin(), files.end());
   plan.repo_root = common_root(files);
 
   for (const std::string &f : files) {
@@ -203,13 +204,14 @@ CleanupPlan build_plan(cidx::Storage &db, const AnalysisResult &res,
     for (const TuTarget &t : *targets) {
       it.affected_tus.push_back(t.tu_path);
     }
-    std::sort(it.affected_tus.begin(), it.affected_tus.end());
-    it.affected_tus.erase(
-        std::unique(it.affected_tus.begin(), it.affected_tus.end()),
-        it.affected_tus.end());
+    std::ranges::sort(it.affected_tus);
+    it.affected_tus.erase(std::ranges::unique(it.affected_tus).begin(),
+                          it.affected_tus.end());
 
     std::vector<Removal> trial = accepted;
-    trial.push_back({c.src_path, c.begin_offset, c.end_offset});
+    trial.push_back({.abs_path = c.src_path,
+                     .begin_offset = c.begin_offset,
+                     .end_offset = c.end_offset});
     it.validations = validator.validate(
         *targets, RemovalValidator::overlay_for(trial), "candidate");
 
@@ -261,11 +263,10 @@ CleanupPlan build_plan(cidx::Storage &db, const AnalysisResult &res,
   }
 
   // Deterministic: file, then source offset, then configuration digest.
-  std::sort(plan.items.begin(), plan.items.end(),
-            [](const PlanItem &a, const PlanItem &b) {
-              return std::tie(a.file, a.begin_offset, a.configs) <
-                     std::tie(b.file, b.begin_offset, b.configs);
-            });
+  std::ranges::sort(plan.items, [](const PlanItem &a, const PlanItem &b) {
+    return std::tie(a.file, a.begin_offset, a.configs) <
+           std::tie(b.file, b.begin_offset, b.configs);
+  });
   return plan;
 }
 

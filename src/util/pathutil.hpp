@@ -25,8 +25,7 @@
 #include <string>
 #include <utility>
 
-namespace cidx {
-namespace pathutil {
+namespace cidx::pathutil {
 
 bool isabs(const std::string &path);
 std::string normpath(const std::string &path);
@@ -95,5 +94,4 @@ std::string resolve_fs_path(const std::string &stored,
 // Equivalent to resolve_fs_path(stored, LabelResolver{}).
 std::string resolve_fs_path(const std::string &stored);
 
-} // namespace pathutil
-} // namespace cidx
+} // namespace cidx::pathutil

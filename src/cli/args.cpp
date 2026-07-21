@@ -18,8 +18,7 @@
 #include "util/errors.hpp"
 #include "util/pathutil.hpp"
 
-namespace cidx {
-namespace cli {
+namespace cidx::cli {
 namespace {
 
 const std::vector<std::string> kSymbolKinds = {
@@ -764,5 +763,4 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
   return pa;
 }
 
-} // namespace cli
-} // namespace cidx
+} // namespace cidx::cli

@@ -16,8 +16,7 @@
 #include "query/plan.hpp"
 #include "storage/storage.hpp"
 
-namespace cidx {
-namespace query {
+namespace cidx::query {
 
 // Execution budgets (docs/query-plan.md "Execution semantics").
 constexpr int64_t kTraverseNodeBudget = 10000;
@@ -37,7 +36,7 @@ struct Result {
   std::vector<std::vector<Cell>> rows;      // Shape::Nodes/Rows
 
   // {"shape","view","count","truncated","rows"} -- see docs/query-plan.md.
-  json_out::Value to_json() const;
+  [[nodiscard]] json_out::Value to_json() const;
 };
 
 class Executor {
@@ -51,5 +50,4 @@ private:
   Storage &db_;
 };
 
-} // namespace query
-} // namespace cidx
+} // namespace cidx::query

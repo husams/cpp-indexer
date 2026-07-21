@@ -12,12 +12,12 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cli/json_out.hpp"
 
-namespace cidx {
-namespace query {
+namespace cidx::query {
 
 // ---- Errors -----------------------------------------------------------------
 // Validation failure. The message starts with the stable "E_*: " code from
@@ -73,7 +73,7 @@ struct Pred {
 // Builders (portable programmatic boolean form -- and/or/not can't overload).
 Pred all_of(std::vector<Pred> preds);
 Pred any_of(std::vector<Pred> preds);
-Pred not_(Pred p);
+Pred not_(Pred inner);
 Pred eq(const std::string &field, const std::string &value);
 // A string literal would otherwise prefer the bool overload (pointer->bool is
 // a standard conversion; const char* -> std::string is user-defined).
@@ -158,10 +158,10 @@ Source entity(const std::string &ref);
 
 class Query {
 public:
-  explicit Query(Source src) { plan_.source = src; }
+  explicit Query(Source src) { plan_.source = std::move(src); }
   Query(const Query &) = default;
 
-  const Plan &plan() const { return plan_; }
+  [[nodiscard]] const Plan &plan() const { return plan_; }
 
   friend Query operator|(Query q, Stage s) {
     q.plan_.stages.push_back(std::move(s));
@@ -172,7 +172,7 @@ private:
   Plan plan_;
 };
 
-inline Query start(Source src) { return Query(src); }
+inline Query start(Source src) { return Query(std::move(src)); }
 
 // Stage factories (names mirror the CXQ surface; `in_` because Python's `in`
 // is reserved and the two builders keep one vocabulary).
@@ -193,5 +193,4 @@ Stage distinct();
 Stage order_by(std::vector<std::string> fields);
 Stage limit(int64_t n);
 
-} // namespace query
-} // namespace cidx
+} // namespace cidx::query

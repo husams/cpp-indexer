@@ -31,13 +31,15 @@ TemplateArgumentEncoder::encode(int64_t owner_id, int64_t position,
     ta.arg_kind = 1;
     const clang::QualType t = written.isNull() ? arg.getAsType() : written;
     const std::string sp = t.getAsString(printing_policy(context_));
-    if (!sp.empty())
+    if (!sp.empty()) {
       ta.literal = sp;
+    }
     // The referenced record resolves through pointer/reference wrappers
     // (Box<Foo *> links to Foo); record_usr_of_type strips them typedly.
     const std::string ref_usr = record_usr_of_type(t);
-    if (!ref_usr.empty())
+    if (!ref_usr.empty()) {
       ta.ref_id = sink_.lookup_symbol_id(ref_usr);
+    }
     break;
   }
   case clang::TemplateArgument::Integral:
@@ -66,15 +68,17 @@ TemplateArgumentEncoder::emit(int64_t owner_id, int64_t position,
                               const clang::TemplateArgument &arg,
                               clang::QualType written) const {
   const auto record = encode(owner_id, position, arg, written);
-  if (record)
+  if (record) {
     sink_.add_template_arg(*record);
+  }
   return record;
 }
 
 std::string TemplateArgumentEncoder::display_text(
     const TemplateArgRecord &record) {
-  if ((record.arg_kind == 1 || record.arg_kind == 2) && record.literal)
+  if ((record.arg_kind == 1 || record.arg_kind == 2) && record.literal) {
     return *record.literal;
+  }
   return "?";
 }
 
