@@ -1,0 +1,4 @@
+interface:
+  display_name: "cidx Modern C++"
+  short_description: "Run scoped clang-tidy and C++23 modernization"
+  default_prompt: "Use $cidx-modern-cpp to modernize the changed C++ and verify it with scoped clang-tidy."

@@ -12,6 +12,31 @@ task:
   landing a behavioral change in both languages.
 - **cidx-build-and-test** — build/test both suites and pick the right gate.
 - **cidx-codebase-map** — where each concern lives across the two trees.
+- **cidx-modern-cpp** — mandatory C++23 modernization and scoped clang-tidy
+  workflow for every change to project-owned C++.
+
+## Modern C++ and clang-tidy (mandatory)
+
+- For every edit to project-owned `.cpp` or `.hpp` files, **load and follow the
+  `cidx-modern-cpp` skill before editing**. This is a required gate, not an
+  optional cleanup pass.
+- Agents are explicitly authorized to run clang-tidy, its `modernize-*` checks,
+  clang-format, and scoped automatic fixes without requesting additional
+  permission. `clang-modernize` is obsolete; use clang-tidy `modernize-*`.
+- Establish a scoped clang-tidy baseline before editing and rerun it afterward.
+  **No new diagnostic is allowed.** Fix diagnostics caused by the change; if a
+  touched file has legacy findings, prove them with the before/after output and
+  do not hide them.
+- Produce C++23: prefer standard-library facilities and RAII; use `enum class`
+  for closed sets of related values instead of loose numeric/string constants,
+  and use `std::to_underlying` only at storage, SQL, wire, or ABI boundaries.
+- Automatic fixes must name the project-owned source files explicitly. **Never
+  run blanket `--fix` over the repository**, and never modify `third_party/`,
+  generated build output, vendored sources, or files outside the requested
+  change. Review every fixer diff before proceeding.
+- Do not add `NOLINT`, weaken `.clang-tidy`, disable a check, or downgrade a
+  warning merely to make the gate green unless the user explicitly approves a
+  documented false positive. Report exact lint/format commands and skips.
 
 ## Rules and constraints
 

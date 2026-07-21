@@ -5,7 +5,8 @@
 # function body" rule. The tighter per-family callback limits (Visit* <= 25,
 # Traverse* <= 20 statements) are enforced by scripts/check_ast_complexity.sh
 # via extra clang-tidy passes filtered by function name. Scoped to src/ast.
-Checks: '-*,readability-function-size,readability-function-cognitive-complexity'
+InheritParentConfig: true
+Checks: 'readability-function-size,readability-function-cognitive-complexity'
 CheckOptions:
   readability-function-size.StatementThreshold: '40'
   readability-function-size.NestingThreshold: '4'

@@ -14,6 +14,7 @@ test-repo/
 python/.venv/
 python/.pytest_cache/
 python/.ruff_cache/
+tests/e2e/.pytest_cache/
 **/__pycache__/
 python/dist/
 python/build/

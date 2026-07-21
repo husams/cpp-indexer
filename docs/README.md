@@ -23,6 +23,7 @@ per component plus a few cross-cutting pages. Start with the
 | [Glossary](glossary.md) | USR, Layer-0/1, driver introspection, stub, multi_def |
 | [Query DSL guide](query-dsl.md) | using the CXQ QueryPlan pipeline DSL from C++ and Python, with runnable samples |
 | [QueryPlan contract](query-plan.md) | the normative CXQ spec: IR grammar, canonical JSON, validation codes, execution semantics |
+| [CIDX Graph Search and Navigation Skill](cidx-search-language.md) | draft controlled-English graph search skill, semantic navigation IR, traits, inheritance, quantifiers, aggregation, negation, and backend compilation |
 | [Improvement roadmap](improvements/README.md) | prioritized follow-on work, with adoption gates |
 
 ## Modules (`src/`)

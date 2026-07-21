@@ -60,12 +60,27 @@ The C++ API is not source-stable across majors. Divergences are localized in
 (NestedNameSpecifier, `TypeLoc` qualifier handling, `APSInt` formatting).
 Validated on macOS (LLVM 22) and RHEL 9 (LLVM 21).
 
+## clang-tidy
+
+`make tidy` analyzes every project-owned C++ source with the checked-in
+`.clang-tidy` policies and CMake's exact C++23 compile commands. Generated and
+third-party code is excluded. To run clang-tidy alongside compilation instead:
+
+```bash
+cmake -S . -B build -DCIDX_ENABLE_CLANG_TIDY=ON
+cmake --build build -j
+```
+
+Add `-DCIDX_CLANG_TIDY_WARNINGS_AS_ERRORS=ON` when working against a clean
+baseline and findings should fail the target or build.
+
 ## Verification
 
 | Gate | Checks |
 |---|---|
 | `ctest --test-dir build -L default` | hermetic unit/integration suite |
 | `ctest --test-dir build -L clang` | real-parse suites incl. the index golden gate and the focused visitor fixtures |
+| `make tidy` | modern C++23, bug-prone, analyzer, performance, readability, and enum checks over `src/` |
 | `scripts/check_ast_complexity.sh` | the scoped clang-tidy complexity gate for `src/ast` |
 | `scripts/dump_layer0.sh <db>` | normalized Layer-0 projection for reviewing semantic deltas |
 | `pytest python/tests` | the Python storage/read-query suite |

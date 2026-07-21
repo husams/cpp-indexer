@@ -33,7 +33,9 @@ done
 # Pass 1 — general limits from src/ast/.clang-tidy (statements <= 40,
 # nesting <= 4, cognitive complexity <= 25) over every function.
 # shellcheck disable=SC2086
-"$tidy" -p "$build" --quiet --warnings-as-errors='*' $extra $files
+"$tidy" -p "$build" --quiet \
+  --checks='-*,readability-function-size,readability-function-cognitive-complexity' \
+  --warnings-as-errors='*' $extra $files
 
 # Pass 2 — the tighter visitor-callback limits (refactoring.md §Complexity
 # limits): Visit* <= 25 statements, Traverse* <= 20 statements. clang-tidy has

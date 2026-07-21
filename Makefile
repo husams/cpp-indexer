@@ -16,7 +16,10 @@ STATIC_BUILD_DIR ?= build-static
 JOBS             ?= $(shell (nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4))
 CMAKE_ARGS       ?=
 
-.PHONY: all build static test test-static clean help
+# Absolute repo path, so every target works no matter the caller's cwd.
+REPO_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+
+.PHONY: all build static test test-static test-e2e tidy clean help
 
 all: build
 
@@ -34,9 +37,21 @@ test: build
 test-static: static
 	cd $(STATIC_BUILD_DIR) && ctest --output-on-failure
 
+# BDD end-to-end suite: indexes tests/e2e/fixtures through the cidx CLI and
+# verifies the result through the Python graph-query API. Needs the binary.
+test-e2e: build
+	CIDX_BIN=$(REPO_DIR)/$(BUILD_DIR)/cidx \
+	  uv run --project $(REPO_DIR)/python pytest $(REPO_DIR)/tests/e2e $(PYTEST_ARGS)
+
+# Analyze project-owned C++ with the checked-in .clang-tidy policies. CMake's
+# compile database supplies the real C++23 flags and include paths.
+tidy:
+	cmake -S . -B $(BUILD_DIR) $(CMAKE_ARGS)
+	cmake --build $(BUILD_DIR) --target cidx-clang-tidy -j $(JOBS)
+
 clean:
 	rm -rf $(BUILD_DIR) $(STATIC_BUILD_DIR)
 
 help:
-	@echo "targets: build (default), static, test, test-static, clean"
-	@echo "vars:    BUILD_DIR, STATIC_BUILD_DIR, JOBS, CMAKE_ARGS"
+	@echo "targets: build (default), static, test, test-static, test-e2e, tidy, clean"
+	@echo "vars:    BUILD_DIR, STATIC_BUILD_DIR, JOBS, CMAKE_ARGS, PYTEST_ARGS"

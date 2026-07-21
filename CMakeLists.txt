@@ -33,6 +33,54 @@ option(CIDX_STATIC "Static-link SQLite3 (Clang/LLVM stay dynamic)" OFF)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# clang-tidy is opt-in for normal builds because a full analysis is
+# intentionally more expensive than compilation.  It consumes the checked-in
+# .clang-tidy files and the exact C++23 compile commands emitted by CMake.
+option(CIDX_ENABLE_CLANG_TIDY
+  "Run clang-tidy while compiling project C++ sources" OFF)
+option(CIDX_CLANG_TIDY_WARNINGS_AS_ERRORS
+  "Treat clang-tidy findings as build errors" OFF)
+
+if(CIDX_ENABLE_CLANG_TIDY)
+  find_program(CIDX_CLANG_TIDY_EXECUTABLE
+    NAMES clang-tidy clang-tidy-22 clang-tidy-21 clang-tidy-20
+          clang-tidy-19 clang-tidy-18 clang-tidy-17 clang-tidy-16
+    HINTS /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin
+    DOC "clang-tidy executable used for CIDX_ENABLE_CLANG_TIDY")
+  if(NOT CIDX_CLANG_TIDY_EXECUTABLE)
+    message(FATAL_ERROR
+      "CIDX_ENABLE_CLANG_TIDY=ON, but clang-tidy was not found")
+  endif()
+
+  set(_cidx_clang_tidy "${CIDX_CLANG_TIDY_EXECUTABLE}" "--quiet")
+  if(CIDX_CLANG_TIDY_WARNINGS_AS_ERRORS)
+    list(APPEND _cidx_clang_tidy "--warnings-as-errors=*")
+  endif()
+
+  # Homebrew clang-tidy does not infer the active macOS SDK when it analyzes
+  # compile commands produced by AppleClang.
+  if(APPLE)
+    find_program(CIDX_XCRUN_EXECUTABLE NAMES xcrun)
+    if(CIDX_XCRUN_EXECUTABLE)
+      execute_process(
+        COMMAND "${CIDX_XCRUN_EXECUTABLE}" --show-sdk-path
+        OUTPUT_VARIABLE _cidx_macos_sdk
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _cidx_xcrun_rc
+        ERROR_QUIET)
+      if(_cidx_xcrun_rc EQUAL 0 AND IS_DIRECTORY "${_cidx_macos_sdk}")
+        list(APPEND _cidx_clang_tidy
+          "--extra-arg-before=-isysroot"
+          "--extra-arg-before=${_cidx_macos_sdk}")
+      endif()
+    endif()
+  endif()
+
+  set(CMAKE_CXX_CLANG_TIDY "${_cidx_clang_tidy}")
+  message(STATUS "cidx: clang-tidy = ${CIDX_CLANG_TIDY_EXECUTABLE}")
+endif()
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
    CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13)
@@ -343,7 +391,10 @@ if(CIDX_ASTGRAPH_SOUFFLE)
     set_target_properties(cidx_astgraph_souffle_rules PROPERTIES
       CXX_STANDARD 17
       CXX_STANDARD_REQUIRED ON
-      CXX_EXTENSIONS OFF)
+      CXX_EXTENSIONS OFF
+      # Souffle emits ast_callgraph.cpp into the build tree. It is generated
+      # third-party code, so it is outside the project's clang-tidy policy.
+      CXX_CLANG_TIDY "")
     target_compile_definitions(cidx_astgraph_souffle_rules PRIVATE
       CIDX_HAVE_ASTGRAPH_SOUFFLE=1
       __EMBEDDED_SOUFFLE__)
@@ -429,3 +480,18 @@ endif()
 
 enable_testing()
 add_subdirectory(tests)
+
+# Always-available explicit lint target. This re-checks every project-owned
+# source in compile_commands.json, independent of incremental build state.
+set(_cidx_tidy_environment)
+if(CIDX_CLANG_TIDY_WARNINGS_AS_ERRORS)
+  list(APPEND _cidx_tidy_environment "CIDX_TIDY_WARNINGS_AS_ERRORS=1")
+endif()
+add_custom_target(cidx-clang-tidy
+  COMMAND "${CMAKE_COMMAND}" -E env ${_cidx_tidy_environment}
+          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_clang_tidy.sh"
+          "${CMAKE_BINARY_DIR}"
+  DEPENDS cidx_dl_rules
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  COMMENT "Running clang-tidy over C++23 project sources"
+  VERBATIM)

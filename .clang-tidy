@@ -1,4 +1,7 @@
 ---
+# modernize-* includes macro-to-enum, and readability-* includes the enum
+# initialization checks. Keep those enabled so named value sets are modeled as
+# enums instead of preprocessor constants and enum storage stays deliberate.
 Checks: >
   bugprone-*,
   clang-analyzer-*,
