@@ -55,8 +55,9 @@ bool is_function_like_decl(const clang::Decl *d) {
 
 } // namespace
 
-StatementEdgeVisitor::StatementEdgeVisitor(clang::ASTContext &context, EdgeSink &sink,
-                         int64_t src_id, int64_t file_id)
+StatementEdgeVisitor::StatementEdgeVisitor(clang::ASTContext &context,
+                                           EdgeSink &sink, int64_t src_id,
+                                           int64_t file_id)
     : ctx_(context, sink, src_id, file_id), emitter_(ctx_) {}
 
 // Owner USR for the self-owner skip in the type-name branches.
@@ -157,8 +158,8 @@ void StatementEdgeVisitor::emit_call(const clang::CallExpr *call) {
   emit_factory_edge(call, ref);
 }
 
-void StatementEdgeVisitor::emit_overloaded_call(const clang::CallExpr *call,
-                                       const clang::OverloadExpr *ovl) {
+void StatementEdgeVisitor::emit_overloaded_call(
+    const clang::CallExpr *call, const clang::OverloadExpr *ovl) {
   const std::vector<const clang::NamedDecl *> cands(ovl->decls_begin(),
                                                     ovl->decls_end());
   if (cands.size() == 1) {
@@ -223,7 +224,7 @@ std::set<int64_t> StatementEdgeVisitor::overload_candidate_ids(
 // Factory: make_unique<B> / make_shared<B> from system headers emits a
 // factory-construct(15) edge to B.
 void StatementEdgeVisitor::emit_factory_edge(const clang::CallExpr *call,
-                                    const clang::FunctionDecl *ref) {
+                                             const clang::FunctionDecl *ref) {
   if (llvm::isa<clang::CXXMethodDecl>(ref)) {
     return;
   }
@@ -260,7 +261,8 @@ void StatementEdgeVisitor::emit_factory_edge(const clang::CallExpr *call,
 
 // ---- construction -----------------------------------------------------------
 
-bool StatementEdgeVisitor::VisitCXXConstructExpr(clang::CXXConstructExpr *ctor) {
+bool StatementEdgeVisitor::VisitCXXConstructExpr(
+    clang::CXXConstructExpr *ctor) {
   emit_construct(ctor);
   return true;
 }
@@ -289,8 +291,8 @@ void StatementEdgeVisitor::emit_construct(const clang::CXXConstructExpr *ctor) {
 // ctor signature and the initializer position: a construct expression that IS
 // the direct initializer of a variable or of a constructor member initializer
 // sits in the var-init position.
-void StatementEdgeVisitor::emit_construction_form(const clang::CXXConstructExpr *ctor,
-                                         const clang::CXXConstructorDecl *ref) {
+void StatementEdgeVisitor::emit_construction_form(
+    const clang::CXXConstructExpr *ctor, const clang::CXXConstructorDecl *ref) {
   const std::string type_usr = record_usr_of_type(ctor->getType());
   if (type_usr.empty()) {
     return;
@@ -378,7 +380,8 @@ bool StatementEdgeVisitor::VisitDeclRefExpr(clang::DeclRefExpr *dre) {
 // Bare type name in the qualifier (Color::Red): a type use under an
 // expression parent. NNS is a value type with a Kind enum in LLVM 22, a
 // pointer with a SpecifierKind in LLVM 21.
-void StatementEdgeVisitor::emit_qualifier_type_use(const clang::DeclRefExpr *dre) {
+void StatementEdgeVisitor::emit_qualifier_type_use(
+    const clang::DeclRefExpr *dre) {
   const clang::Type *t = nullptr;
 #if LLVM_VERSION_MAJOR >= 22
   const clang::NestedNameSpecifier nns = dre->getQualifier();
@@ -448,13 +451,15 @@ bool StatementEdgeVisitor::VisitUnaryExprOrTypeTraitExpr(
   return true;
 }
 
-bool StatementEdgeVisitor::VisitExplicitCastExpr(clang::ExplicitCastExpr *cast) {
+bool StatementEdgeVisitor::VisitExplicitCastExpr(
+    clang::ExplicitCastExpr *cast) {
   ctx_.emit_type_name_use(cast->getTypeInfoAsWritten(),
                           /*promote_described_template=*/true);
   return true;
 }
 
-// ---- local variables ---------------------------------------------------------
+// ---- local variables
+// ---------------------------------------------------------
 
 bool StatementEdgeVisitor::VisitVarDecl(clang::VarDecl *var) {
   // Reference scope: variables a DeclStmt declares. Typed predicates replace
@@ -470,53 +475,11 @@ bool StatementEdgeVisitor::VisitVarDecl(clang::VarDecl *var) {
 }
 
 void StatementEdgeVisitor::emit_local_var(const clang::VarDecl *var) {
-  // Declared type -> uses edge + instance mint + class template
-  // instantiates/template_arg rows.
+  // Declared type -> uses edge + concrete class-template instance mint.
   const ExpansionLoc loc = expansion_loc(ctx_.context(), var->getLocation());
-  emit_type_use(ctx_.sink(), ctx_.src_id(), var->getType(), ctx_.file_id(),
-                loc, ctx_.in_conditional() ? 1 : 0);
+  emit_type_use(ctx_.sink(), ctx_.src_id(), var->getType(), ctx_.file_id(), loc,
+                ctx_.in_conditional() ? 1 : 0);
   ctx_.minter().mint_instance_from_type(var->getType());
-
-  const auto *spec =
-      llvm::dyn_cast_or_null<clang::ClassTemplateSpecializationDecl>(
-          var->getType()->getAsCXXRecordDecl());
-  if (spec == nullptr) {
-    return;
-  }
-  const clang::ClassTemplateDecl *primary = spec->getSpecializedTemplate();
-  if (primary == nullptr) {
-    return;
-  }
-  const std::string prim_usr = usr_for_decl(primary);
-  if (prim_usr.empty()) {
-    return;
-  }
-  const auto prim = ctx_.sink().lookup_symbol_id(prim_usr);
-  if (!prim) {
-    return; // lookup-only: no stubs for stdlib templates
-  }
-  EdgeRecord inst;
-  inst.src_id = ctx_.src_id();
-  inst.dst_id = *prim;
-  inst.kind = 5; // instantiates
-  ctx_.sink().add_edge(inst);
-
-  // Args print AS WRITTEN (`Box<Color> bc;` inside geo stores 'Color', not
-  // 'geo::Color'): prefer the sugared args off the declared type. Every kind
-  // encodes through the one canonical encoder.
-  if (const auto *tst =
-          var->getType()->getAs<clang::TemplateSpecializationType>()) {
-    int64_t pos = 0;
-    for (const clang::TemplateArgument &a : tst->template_arguments()) {
-      ctx_.targ_encoder().emit(ctx_.src_id(), pos++, a);
-    }
-  } else {
-    const clang::TemplateArgumentList &args = spec->getTemplateArgs();
-    for (unsigned ai = 0; ai < args.size(); ++ai) {
-      ctx_.targ_encoder().emit(ctx_.src_id(), static_cast<int64_t>(ai),
-                               args[ai]);
-    }
-  }
 }
 
 } // namespace cidx::ast
