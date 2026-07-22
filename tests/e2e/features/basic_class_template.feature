@@ -107,6 +107,29 @@ Feature: Indexing a class template with an explicit and an implicit instantiatio
       | testMyClass                            | calls           | usr:c:@S@MyClass>#d@F@setValue#d#      | 1     | 18:5  |
       | testMyClass                            | construct-value | usr:c:@S@MyClass>#d                    | 1     | -     |
 
+  Scenario: Every `uses` site is anchored at an exact source line and column
+    # Sites only, and only `uses` -- no relationship totals, no call sites. A
+    # site is WHERE the reference is written, never the declaration line of
+    # either endpoint: both rows read the field `value` inside a member body of
+    # the pattern, while the field itself is declared on line 4. `token` is read
+    # back from the fixture on disk, so line and col are proven against real
+    # source text instead of being echoed from the database.
+    #
+    #   7  |     T getValue() const { return value; }
+    #      |                                 ^ col 33
+    #   8  |     void setValue(T value) { this->value = value; }
+    #      |                                    ^ col 36  (the member, not the parameter)
+    Then the "uses" edge sites are:
+      | src                                    | dst                            | file                     | line | col | token |
+      | usr:c:@ST>1#T@MyClass@F@getValue#1     | usr:c:@ST>1#T@MyClass@FI@value | basic_class_template.cpp | 7    | 33  | value |
+      | usr:c:@ST>1#T@MyClass@F@setValue#t0.0# | usr:c:@ST>1#T@MyClass@FI@value | basic_class_template.cpp | 8    | 36  | value |
+
+  Scenario: The fixture is fully resolved -- nothing is left as a minted stub
+    # Every USR an edge anchors is declared or defined in the indexed file, so
+    # the indexer mints no placeholder for an unknown target.
+    Then the index holds exactly 0 unresolved symbols
+    And no edge points at an unresolved symbol
+
   Scenario: The calls land on the double family, never on the int family or the pattern
     Then symbol "testMyClass" calls:
       | qual_name                         | kind        | line |

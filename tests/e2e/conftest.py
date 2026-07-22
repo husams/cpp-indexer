@@ -669,6 +669,137 @@ def _check_edges(
         )
 
 
+def _sites(ws: Workspace) -> list[tuple]:
+    """Every (src Sym, Edge, Site) triple in the index, edge order preserved."""
+    out: list[tuple] = []
+    for src, edge in ws.edges():
+        for site in edge.sites:
+            out.append((src, edge, site))
+    return out
+
+
+def _site_repr(src, edge, site) -> str:
+    return f"{src.name} --{edge.kind}--> {edge.peer.name}  @ {site.loc}"
+
+
+def _source_line(ws: Workspace, site) -> str:
+    """The fixture's raw source line a site points at (1-based site.line)."""
+    path = Path(site.file) if site.file else None
+    if path is None or not path.is_file():
+        path = ws.source
+    assert path is not None and path.is_file(), (
+        f"cannot read the source for site {site.loc}: no such file {path}"
+    )
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert site.line is not None and 1 <= site.line <= len(lines), (
+        f"site {site.loc} points at line {site.line}, but {path.name} has "
+        f"{len(lines)} line(s)"
+    )
+    return lines[site.line - 1]
+
+
+@then(parsers.parse('the "{kind}" edge sites are:'))
+def edge_sites_of_kind(
+    workspace: Workspace, kind: str, datatable: list[list[str]]
+) -> None:
+    """Every SITE of one edge kind -- one row per site, exhaustive for that kind.
+
+    Table columns: src | dst | file | line | col | [token]
+
+    A site is the concrete `file:line:col` where a relationship is *written*,
+    which is not the declaration line of either endpoint. `token` is the source
+    text the site must point at: it is read back from the fixture on disk, so
+    the stated line and column are grounded in real text instead of merely
+    echoing the database.
+    """
+    actual = [t for t in _sites(workspace) if t[1].kind == kind]
+    rendered = [_site_repr(*triple) for triple in actual]
+    matched: set[int] = set()
+
+    for row in _rows(datatable):
+        unknown = set(row) - {"src", "dst", "file", "line", "col", "token"}
+        assert not unknown, f"unknown edge site column(s) {sorted(unknown)}"
+        for required in ("src", "dst", "line", "col"):
+            assert row.get(required) is not None, (
+                f"edge site rows require a {required!r} cell; got {row}"
+            )
+        src = workspace.resolve(row["src"])
+        dst = workspace.resolve(row["dst"])
+        hits = [
+            i
+            for i, (s, e, site) in enumerate(actual)
+            if s.id == src.id
+            and e.peer.id == dst.id
+            and site.line == row["line"]
+            and site.col == row["col"]
+        ]
+        assert len(hits) == 1, (
+            f"expected exactly 1 {kind!r} site "
+            f"{row['src']} -> {row['dst']} at {row['line']}:{row['col']}, "
+            f"found {len(hits)}.\n  all {kind!r} sites:\n"
+            + "\n".join(f"    {r}" for r in rendered)
+        )
+        index = hits[0]
+        assert index not in matched, (
+            "the edge site table mentions the same site more than once: "
+            f"{rendered[index]}"
+        )
+        _, _, site = actual[index]
+
+        if row.get("file") is not None:
+            got_file = os.path.basename(site.file) if site.file else None
+            assert got_file == row["file"], (
+                f"site {rendered[index]}: expected file {row['file']!r}, "
+                f"got {got_file!r}"
+            )
+        if row.get("token") is not None:
+            token = str(row["token"])
+            text = _source_line(workspace, site)
+            start = site.col - 1
+            got = text[start : start + len(token)]
+            assert got == token, (
+                f"site {rendered[index]}: expected column {site.col} to start "
+                f"the token {token!r}, got {got!r}\n"
+                f"    {os.path.basename(site.file or '')}:{site.line}\n"
+                f"    {text}\n"
+                f"    {' ' * start}^ col {site.col}"
+            )
+        matched.add(index)
+
+    extra = [r for i, r in enumerate(rendered) if i not in matched]
+    assert not extra, (
+        f"index holds {kind!r} edge sites the table does not mention:\n"
+        + "\n".join(f"    {r}" for r in extra)
+    )
+
+
+@then(parsers.parse("the index holds exactly {count:d} unresolved symbol"))
+@then(parsers.parse("the index holds exactly {count:d} unresolved symbols"))
+def index_unresolved_symbol_count(workspace: Workspace, count: int) -> None:
+    """Unresolved == a minted stub: a USR an edge anchors but that no indexed
+    file declares or defines (`Sym.is_stub`). A single-file fixture that names
+    nothing external must produce none."""
+    stubs = [s for s in workspace.symbols() if s.is_stub]
+    reported = workspace.graph.stats()["stubs"]
+    assert len(stubs) == count, (
+        f"expected {count} unresolved (stub) symbol(s), got {len(stubs)} "
+        f"[stats reports stubs={reported}]:\n"
+        + "\n".join(f"    {_describe(s)}  usr={s.usr}" for s in stubs)
+    )
+
+
+@then("no edge points at an unresolved symbol")
+def no_edge_points_at_stub(workspace: Workspace) -> None:
+    """Every endpoint of every edge is a real, indexed symbol."""
+    dangling = [
+        (s, e) for s, e in workspace.edges() if s.is_stub or e.peer.is_stub
+    ]
+    assert not dangling, (
+        "expected every edge endpoint to be a resolved symbol, but these edges "
+        "touch a stub:\n" + "\n".join(f"    {_edge_repr(s, e)}" for s, e in dangling)
+    )
+
+
 @then("the edge kind totals are:")
 def edge_kind_totals(workspace: Workspace, datatable: list[list[str]]) -> None:
     """Table columns: kind | total. Must account for every edge kind present."""
