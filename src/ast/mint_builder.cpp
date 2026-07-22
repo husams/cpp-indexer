@@ -25,6 +25,10 @@ MintBuilder::build(const clang::NamedDecl *decl) const {
   req.spelling = spelling(decl);
   req.qual_name = qualified_name(context_, decl);
   req.display_name = display_name(context_, decl).value_or(std::string());
+  // Carry the concrete type so an implicit template instantiation (never
+  // extracted by the traversal, only minted here) still records e.g.
+  // "double () const" instead of a null type_info.
+  req.type_info = type_info(context_, decl);
   req.kind_name = cidx_stub_kind_name(decl);
 
   // ref_decl_loc (ast_cursor.cpp:161): the decl's own location; registered

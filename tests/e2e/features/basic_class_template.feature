@@ -26,21 +26,21 @@ Feature: Indexing a class template with an explicit and an implicit instantiatio
 
   Scenario: The pattern, both instantiated records and their callable members are indexed
     Then the index holds exactly these symbols:
-      | usr                                | spelling    | qual_name                 | kind           | type_info    | line | col | end_line | end_col | access  | is_definition | is_instantiation |
-      | c:@ST>1#T@MyClass                  | MyClass     | MyClass                   | class-template | -            | 1    | 1   | 9        | 2       | -       | true          | false            |
-      | c:@ST>1#T@MyClass@FI@value         | value       | MyClass::value            | member         | T            | 4    | 5   | 4        | 12      | private | true          | false            |
-      | c:@ST>1#T@MyClass@F@MyClass#t0.0#  | MyClass<T>  | MyClass::MyClass<T>       | constructor    | void (T)     | 6    | 5   | 6        | 39      | public  | true          | false            |
-      | c:@ST>1#T@MyClass@F@getValue#1     | getValue    | MyClass::getValue         | method         | T () const   | 7    | 5   | 7        | 41      | public  | true          | false            |
-      | c:@ST>1#T@MyClass@F@setValue#t0.0# | setValue    | MyClass::setValue         | method         | void (T)     | 8    | 5   | 8        | 52      | public  | true          | false            |
-      | c:@S@MyClass>#I                    | MyClass     | MyClass<int>              | class          | MyClass<int> | 12   | 1   | 12       | 28      | -       | true          | true             |
-      | c:@S@MyClass>#I@F@MyClass#I#       | MyClass     | MyClass<int>::MyClass     | constructor    | void (int)   | 12   | 16  | 12       | 16      | public  | true          | false            |
-      | c:@S@MyClass>#I@F@getValue#1       | getValue    | MyClass<int>::getValue    | method         | int () const | 12   | 16  | 12       | 16      | public  | true          | false            |
-      | c:@S@MyClass>#I@F@setValue#I#      | setValue    | MyClass<int>::setValue    | method         | void (int)   | 12   | 16  | 12       | 16      | public  | true          | false            |
-      | c:@F@testMyClass#                  | testMyClass | testMyClass               | function       | void ()      | 15   | 1   | 19       | 2       | -       | true          | false            |
-      | c:@S@MyClass>#d                    | MyClass     | MyClass<double>           | class          | -            | 2    | 7   | -        | -       | -       | false         | true             |
-      | c:@S@MyClass>#d@F@MyClass#d#       | MyClass     | MyClass<double>::MyClass  | constructor    | -            | 6    | 5   | -       | -       | -       | false         | false            |
-      | c:@S@MyClass>#d@F@getValue#1       | getValue    | MyClass<double>::getValue | method         | -            | 7    | 7   | -       | -       | -       | false         | false            |
-      | c:@S@MyClass>#d@F@setValue#d#      | setValue    | MyClass<double>::setValue | method         | -            | 8    | 10  | -       | -       | -       | false         | false            |
+      | usr                                | spelling    | qual_name                        | kind           | type_info        | line | col | end_line | end_col | access  | is_definition | is_instantiation |
+      | c:@ST>1#T@MyClass                  | MyClass     | MyClass                          | class-template | -                | 1    | 1   | 9        | 2       | -       | true          | false            |
+      | c:@ST>1#T@MyClass@FI@value         | value       | MyClass::value                   | member         | T                | 4    | 5   | 4        | 12      | private | true          | false            |
+      | c:@ST>1#T@MyClass@F@MyClass#t0.0#  | MyClass<T>  | MyClass::MyClass<T>(T)           | constructor    | void (T)         | 6    | 5   | 6        | 39      | public  | true          | false            |
+      | c:@ST>1#T@MyClass@F@getValue#1     | getValue    | MyClass::getValue() const        | method         | T () const       | 7    | 5   | 7        | 41      | public  | true          | false            |
+      | c:@ST>1#T@MyClass@F@setValue#t0.0# | setValue    | MyClass::setValue(T)             | method         | void (T)         | 8    | 5   | 8        | 52      | public  | true          | false            |
+      | c:@S@MyClass>#I                    | MyClass     | MyClass<int>                     | class          | MyClass<int>     | 12   | 1   | 12       | 28      | -       | true          | true             |
+      | c:@S@MyClass>#I@F@MyClass#I#       | MyClass     | MyClass<int>::MyClass(int)       | constructor    | void (int)       | 12   | 16  | 12       | 16      | public  | true          | false            |
+      | c:@S@MyClass>#I@F@getValue#1       | getValue    | MyClass<int>::getValue() const   | method         | int () const     | 12   | 16  | 12       | 16      | public  | true          | false            |
+      | c:@S@MyClass>#I@F@setValue#I#      | setValue    | MyClass<int>::setValue(int)      | method         | void (int)       | 12   | 16  | 12       | 16      | public  | true          | false            |
+      | c:@F@testMyClass#                  | testMyClass | testMyClass()                    | function       | void ()          | 15   | 1   | 19       | 2       | -       | true          | false            |
+      | c:@S@MyClass>#d                    | MyClass     | MyClass<double>                  | class          | MyClass<double>  | 2    | 7   | -        | -       | -       | false         | true             |
+      | c:@S@MyClass>#d@F@MyClass#d#       | MyClass     | MyClass<double>::MyClass(double) | constructor    | void (double)    | 6    | 5   | -        | -       | -       | false         | false            |
+      | c:@S@MyClass>#d@F@getValue#1       | getValue    | MyClass<double>::getValue() const | method        | double () const  | 7    | 7   | -        | -       | -       | false         | false            |
+      | c:@S@MyClass>#d@F@setValue#d#      | setValue    | MyClass<double>::setValue(double) | method        | void (double)    | 8    | 10  | -        | -       | -       | false         | false            |
 
   Scenario: The pattern declares one type parameter and is instantiated twice
     Then symbol "usr:c:@ST>1#T@MyClass" declares the template parameters:
@@ -105,12 +105,12 @@ Feature: Indexing a class template with an explicit and an implicit instantiatio
 
   Scenario: The calls land on the double family, never on the int family or the pattern
     Then symbol "testMyClass" calls:
-      | qual_name                 | kind        | line |
-      | MyClass<double>::MyClass  | constructor | 6    |
-      | MyClass<double>::getValue | method      | 7    |
-      | MyClass<double>::setValue | method      | 8    |
+      | qual_name                         | kind        | line |
+      | MyClass<double>::MyClass(double)  | constructor | 6    |
+      | MyClass<double>::getValue() const | method      | 7    |
+      | MyClass<double>::setValue(double) | method      | 8    |
     And symbol "usr:c:@S@MyClass>#d@F@getValue#1" is called by:
-      | qual_name   | kind     | line |
-      | testMyClass | function | 15   |
+      | qual_name     | kind     | line |
+      | testMyClass() | function | 15   |
     And symbol "usr:c:@S@MyClass>#I@F@getValue#1" is called by nothing
     And symbol "usr:c:@ST>1#T@MyClass@F@getValue#1" is called by nothing

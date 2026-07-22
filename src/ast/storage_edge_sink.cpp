@@ -16,10 +16,10 @@ StorageEdgeSink::lookup_symbol_id(const std::string &usr) {
 }
 
 int64_t StorageEdgeSink::mint_symbol(const MintRequest &req) {
-  return db_.mint_symbol_id(req.usr, req.spelling, req.qual_name,
-                            req.display_name, req.kind_name, req.decl_file_id,
-                            req.decl_line, req.decl_col, req.decl_path,
-                            req.is_instantiation, req.is_named_instance);
+  return db_.mint_symbol_id(
+      req.usr, req.spelling, req.qual_name, req.display_name, req.kind_name,
+      req.decl_file_id, req.decl_line, req.decl_col, req.decl_path,
+      req.is_instantiation, req.is_named_instance, req.type_info);
 }
 
 int64_t StorageEdgeSink::add_edge(const EdgeRecord &edge) {
@@ -108,8 +108,7 @@ void StorageEdgeSink::copy_body_edges_to_def_edge(int64_t def_id,
   db_.copy_body_edges_to_def_edge(def_id, src_id);
 }
 
-std::optional<std::string>
-StorageEdgeSink::lookup_display_name(int64_t id) {
+std::optional<std::string> StorageEdgeSink::lookup_display_name(int64_t id) {
   const std::optional<cidx::Symbol> sym = db_.lookup_symbol_by_id(id);
   if (!sym) {
     return std::nullopt;

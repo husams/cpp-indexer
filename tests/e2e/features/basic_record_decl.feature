@@ -38,12 +38,12 @@ Feature: Indexing struct, class and union declarations
       | c:@S@PointClass                    | PointClass | PointClass             | class       | PointClass      | basic_record_decl.cpp | 7    | 1   | 18       | 2       | -       | true          | false     |
       | c:@S@PointClass@FI@x               | x          | PointClass::x          | member      | int             | basic_record_decl.cpp | 9    | 5   | 9        | 10      | private | true          | false     |
       | c:@S@PointClass@FI@y               | y          | PointClass::y          | member      | int             | basic_record_decl.cpp | 10   | 5   | 10       | 10      | private | true          | false     |
-      | c:@S@PointClass@F@PointClass#I#I#  | PointClass | PointClass::PointClass | constructor | void (int, int) | basic_record_decl.cpp | 12   | 5   | 12       | 45      | public  | true          | false     |
-      | c:@S@PointClass@F@PointClass#      | PointClass | PointClass::PointClass | constructor | void ()         | basic_record_decl.cpp | 13   | 5   | 13       | 33      | public  | true          | false     |
-      | c:@S@PointClass@F@getX#1           | getX       | PointClass::getX       | method      | int () const    | basic_record_decl.cpp | 14   | 5   | 14       | 35      | public  | true          | false     |
-      | c:@S@PointClass@F@getY#1           | getY       | PointClass::getY       | method      | int () const    | basic_record_decl.cpp | 15   | 5   | 15       | 35      | public  | true          | false     |
-      | c:@S@PointClass@F@setX#I#          | setX       | PointClass::setX       | method      | void (int)      | basic_record_decl.cpp | 16   | 5   | 16       | 38      | public  | true          | false     |
-      | c:@S@PointClass@F@setY#I#          | setY       | PointClass::setY       | method      | void (int)      | basic_record_decl.cpp | 17   | 5   | 17       | 38      | public  | true          | false     |
+      | c:@S@PointClass@F@PointClass#I#I#  | PointClass | PointClass::PointClass(int, int) | constructor | void (int, int) | basic_record_decl.cpp | 12   | 5   | 12       | 45      | public  | true          | false     |
+      | c:@S@PointClass@F@PointClass#      | PointClass | PointClass::PointClass()         | constructor | void ()         | basic_record_decl.cpp | 13   | 5   | 13       | 33      | public  | true          | false     |
+      | c:@S@PointClass@F@getX#1           | getX       | PointClass::getX() const         | method      | int () const    | basic_record_decl.cpp | 14   | 5   | 14       | 35      | public  | true          | false     |
+      | c:@S@PointClass@F@getY#1           | getY       | PointClass::getY() const         | method      | int () const    | basic_record_decl.cpp | 15   | 5   | 15       | 35      | public  | true          | false     |
+      | c:@S@PointClass@F@setX#I#          | setX       | PointClass::setX(int)            | method      | void (int)      | basic_record_decl.cpp | 16   | 5   | 16       | 38      | public  | true          | false     |
+      | c:@S@PointClass@F@setY#I#          | setY       | PointClass::setY(int)            | method      | void (int)      | basic_record_decl.cpp | 17   | 5   | 17       | 38      | public  | true          | false     |
       | c:@U@PointUnion                    | PointUnion | PointUnion             | union       | PointUnion      | basic_record_decl.cpp | 20   | 1   | 23       | 2       | -       | true          | false     |
       | c:@U@PointUnion@FI@x               | x          | PointUnion::x          | member      | int             | basic_record_decl.cpp | 21   | 5   | 21       | 10      | public  | true          | false     |
       | c:@U@PointUnion@FI@y               | y          | PointUnion::y          | member      | int             | basic_record_decl.cpp | 22   | 5   | 22       | 10      | public  | true          | false     |
@@ -54,17 +54,17 @@ Feature: Indexing struct, class and union declarations
     And symbol "PointUnion::x" has type "int"
 
   Scenario: The two overloaded constructors are distinguished by their signature
-    Then symbol "PointClass::PointClass@12" takes the parameters:
+    Then symbol "PointClass::PointClass(int, int)" takes the parameters:
       | position | name | type |
       | 0        | x    | int  |
       | 1        | y    | int  |
-    And symbol "PointClass::PointClass@13" takes no parameters
+    And symbol "PointClass::PointClass()" takes no parameters
 
   Scenario: Accessors record their return type and parameters
-    Then symbol "PointClass::getX" returns "int"
-    And symbol "PointClass::getX" takes no parameters
-    And symbol "PointClass::setX" returns "void"
-    And symbol "PointClass::setX" takes the parameters:
+    Then symbol "PointClass::getX() const" returns "int"
+    And symbol "PointClass::getX() const" takes no parameters
+    And symbol "PointClass::setX(int)" returns "void"
+    And symbol "PointClass::setX(int)" takes the parameters:
       | position | name | type |
       | 0        | x    | int  |
 
@@ -82,17 +82,17 @@ Feature: Indexing struct, class and union declarations
       | PointClass::y            | field_of  | PointClass    | 1     | -     |
       | PointUnion::x            | field_of  | PointUnion    | 1     | -     |
       | PointUnion::y            | field_of  | PointUnion    | 1     | -     |
-      | PointClass::PointClass@12| method_of | PointClass    | 1     | -     |
-      | PointClass::PointClass@13| method_of | PointClass    | 1     | -     |
-      | PointClass::getX         | method_of | PointClass    | 1     | -     |
-      | PointClass::getY         | method_of | PointClass    | 1     | -     |
-      | PointClass::setX         | method_of | PointClass    | 1     | -     |
-      | PointClass::setY         | method_of | PointClass    | 1     | -     |
-      | PointClass::getX         | uses      | PointClass::x | 1     | 14:31 |
-      | PointClass::getY         | uses      | PointClass::y | 1     | 15:31 |
-      | PointClass::setX         | uses      | PointClass::x | 1     | 16:30 |
-      | PointClass::setY         | uses      | PointClass::y | 1     | 17:30 |
+      | PointClass::PointClass(int, int) | method_of | PointClass    | 1     | -     |
+      | PointClass::PointClass()         | method_of | PointClass    | 1     | -     |
+      | PointClass::getX() const         | method_of | PointClass    | 1     | -     |
+      | PointClass::getY() const         | method_of | PointClass    | 1     | -     |
+      | PointClass::setX(int)            | method_of | PointClass    | 1     | -     |
+      | PointClass::setY(int)            | method_of | PointClass    | 1     | -     |
+      | PointClass::getX() const         | uses      | PointClass::x | 1     | 14:31 |
+      | PointClass::getY() const         | uses      | PointClass::y | 1     | 15:31 |
+      | PointClass::setX(int)            | uses      | PointClass::x | 1     | 16:30 |
+      | PointClass::setY(int)            | uses      | PointClass::y | 1     | 17:30 |
 
   Scenario: Member bodies that only access fields produce no call graph
     Then the index holds no calls edges
-    And symbol "PointClass::getX" is called by nothing
+    And symbol "PointClass::getX() const" is called by nothing

@@ -89,14 +89,55 @@ void print_class_spec_display(
                                    policy);
 }
 
-} // namespace
+// The FunctionDecl whose signature identifies this decl: the decl itself, or a
+// function template's templated function. Non-callables return null.
+const clang::FunctionDecl *function_for_signature(const clang::NamedDecl *nd) {
+  if (const auto *fd = llvm::dyn_cast<clang::FunctionDecl>(nd)) {
+    return fd;
+  }
+  if (const auto *ft = llvm::dyn_cast<clang::FunctionTemplateDecl>(nd)) {
+    return ft->getTemplatedDecl();
+  }
+  return nullptr;
+}
 
-std::string qualified_name(const clang::ASTContext &context,
-                           const clang::NamedDecl *decl) {
-  // Mirror cidx qualified_name (ast_cursor.cpp): walk semantic parents to the
-  // TU, joining non-empty spellings with "::" (anonymous levels skipped).
-  // libclang spells a lambda's closure class "(lambda at <file>:<line>:<col>)",
-  // so lambda scopes survive in the chain.
+// The leaf function/method's qualified-name rendering: its display form (name,
+// as-written spec args, parameter TYPE list) plus the member cv/ref qualifiers
+// that belong to the C++ signature, so a const overload keeps a qualified name
+// distinct from its non-const twin.
+void print_function_signature(llvm::raw_string_ostream &os,
+                              const clang::PrintingPolicy &policy,
+                              const clang::FunctionDecl *fd) {
+  print_function_display(os, policy, fd);
+  const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fd);
+  if (method == nullptr) {
+    return;
+  }
+  if (method->isConst()) {
+    os << " const";
+  }
+  if (method->isVolatile()) {
+    os << " volatile";
+  }
+  switch (method->getRefQualifier()) {
+  case clang::RQ_LValue:
+    os << " &";
+    break;
+  case clang::RQ_RValue:
+    os << " &&";
+    break;
+  case clang::RQ_None:
+    break;
+  }
+}
+
+// Mirror cidx qualified_name (ast_cursor.cpp): walk semantic parents to the TU,
+// joining non-empty spellings with "::" (anonymous levels skipped). libclang
+// spells a lambda's closure class "(lambda at <file>:<line>:<col>)", so lambda
+// scopes survive in the chain. With with_signature, the leaf function/method
+// carries its full signature so overloads stay distinct.
+std::string join_qualified(const clang::ASTContext &context,
+                           const clang::NamedDecl *decl, bool with_signature) {
   std::vector<std::string> parts;
   const clang::Decl *d = decl;
   while (d != nullptr && !llvm::isa<clang::TranslationUnitDecl>(d)) {
@@ -116,6 +157,15 @@ std::string qualified_name(const clang::ASTContext &context,
         // pattern's qualified name. Partial specializations print as written.
         llvm::raw_string_ostream os(s);
         print_class_spec_display(os, printing_policy(context), spec);
+      } else if (const clang::FunctionDecl *fd =
+                     with_signature && d == decl ? function_for_signature(nd)
+                                                 : nullptr;
+                 fd != nullptr) {
+        // The leaf function/method carries its full signature (parameter types
+        // plus member cv/ref qualifiers) so overloads never collapse onto one
+        // qualified name. Enclosing function scopes stay bare names.
+        llvm::raw_string_ostream os(s);
+        print_function_signature(os, printing_policy(context), fd);
       } else {
         s = nd->getDeclName().getAsString();
       }
@@ -134,6 +184,18 @@ std::string qualified_name(const clang::ASTContext &context,
     out += part;
   }
   return out;
+}
+
+} // namespace
+
+std::string qualified_name(const clang::ASTContext &context,
+                           const clang::NamedDecl *decl) {
+  return join_qualified(context, decl, /*with_signature=*/true);
+}
+
+std::string qualified_name_bare(const clang::ASTContext &context,
+                                const clang::NamedDecl *decl) {
+  return join_qualified(context, decl, /*with_signature=*/false);
 }
 
 std::optional<std::string> display_name(const clang::ASTContext &context,

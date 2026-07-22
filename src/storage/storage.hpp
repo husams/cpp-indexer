@@ -74,16 +74,16 @@ public:
   Transaction transaction() { return Transaction(*this); }
 
   // -- components ------------------------------------------------------------
-  int64_t add_component(const std::string &name, const std::string &path,
-                        const std::string &kind = "repo",
-                        const std::optional<std::string> &version =
-                            std::nullopt);
+  int64_t
+  add_component(const std::string &name, const std::string &path,
+                const std::string &kind = "repo",
+                const std::optional<std::string> &version = std::nullopt);
   // v24: refresh an EXISTING component's name/kind in place (version COALESCE-
-  // kept) without touching its stored path. Mirrors Python update_component_meta.
-  void update_component_meta(int64_t component_id, const std::string &name,
-                             const std::string &kind,
-                             const std::optional<std::string> &version =
-                                 std::nullopt);
+  // kept) without touching its stored path. Mirrors Python
+  // update_component_meta.
+  void update_component_meta(
+      int64_t component_id, const std::string &name, const std::string &kind,
+      const std::optional<std::string> &version = std::nullopt);
   // Two-step lookup: first by stored BASE path, then by effective root.
   // Required because version-detection may split a trailing segment off the
   // registered path (see §2 hazard in portable_paths_contract.md).
@@ -129,7 +129,8 @@ public:
   // repository's active clone root (`.` when it IS the clone root). A portable
   // path, an already-relative path, a version-in-path representation, or a base
   // outside clone_root is left untouched. Mirrors Python relativize_component.
-  void relativize_component(int64_t component_id, const std::string &clone_root);
+  void relativize_component(int64_t component_id,
+                            const std::string &clone_root);
 
   // v23: attach (or, with nullopt, detach) a component to a repository.
   void set_component_repository(int64_t component_id,
@@ -140,10 +141,9 @@ public:
   // -- repositories / clones (v23) -------------------------------------------
   // Insert a repository; idempotent on name. remote_url updated only when a
   // non-null value is supplied (COALESCE). Returns the repository id.
-  int64_t add_repository(const std::string &name,
-                         const std::string &kind = "repo",
-                         const std::optional<std::string> &remote_url =
-                             std::nullopt);
+  int64_t
+  add_repository(const std::string &name, const std::string &kind = "repo",
+                 const std::optional<std::string> &remote_url = std::nullopt);
   std::optional<Repository> get_repository_by_name(const std::string &name);
   std::optional<Repository> get_repository_by_id(int64_t repository_id);
   std::optional<Repository>
@@ -258,10 +258,9 @@ public:
   // Exact match on qual_name column; mirrors lookup_symbols_by_name but keyed
   // on qual_name instead of spelling. Used to recover a callee whose USR is
   // inconsistent (member function template in a dependent template body).
-  std::vector<Symbol>
-  lookup_symbols_by_qual_name(const std::string &qual_name,
-                              const std::optional<std::string> &kind =
-                                  std::nullopt);
+  std::vector<Symbol> lookup_symbols_by_qual_name(
+      const std::string &qual_name,
+      const std::optional<std::string> &kind = std::nullopt);
   // '::'-segment fuzzy match on qual_name, ordered LENGTH(qual_name) first.
   std::vector<Symbol>
   search_symbols(const std::string &pattern,
@@ -283,26 +282,24 @@ public:
   // definition is never indexed (stdlib calls, implicit template
   // instantiations, defaulted ctors), where no add_symbol ever backfills it.
   // The reference cursor's declaration location travels too: when it sits in an
-  // indexed file the stub is born LOCATED (e.g. a defaulted ctor anchored to its
-  // `struct` line), so chain::D::D resolves to chain.hpp:25 instead of
+  // indexed file the stub is born LOCATED (e.g. a defaulted ctor anchored to
+  // its `struct` line), so chain::D::D resolves to chain.hpp:25 instead of
   // `@<no-location>`. decl_file_id is nullopt for targets in unregistered
   // (system/stdlib) headers, which correctly stay location-less.
   // An existing real row is kept intact; a repeat mint only UPGRADES an empty
   // name, never clobbers a real one, and fills the location only when still
   // absent. Returns the stable symbol.id either way.
-  int64_t mint_symbol_id(const std::string &usr,
-                         const std::string &spelling = "",
-                         const std::string &qual_name = "",
-                         const std::string &display_name = "",
-                         const std::string &kind = "function",
-                         const std::optional<int64_t> &decl_file_id =
-                             std::nullopt,
-                         const std::optional<int64_t> &decl_line = std::nullopt,
-                         const std::optional<int64_t> &decl_col = std::nullopt,
-                         const std::optional<std::string> &decl_path =
-                             std::nullopt,
-                         bool is_instantiation = false,
-                         bool is_named_instance = false);
+  int64_t
+  mint_symbol_id(const std::string &usr, const std::string &spelling = "",
+                 const std::string &qual_name = "",
+                 const std::string &display_name = "",
+                 const std::string &kind = "function",
+                 const std::optional<int64_t> &decl_file_id = std::nullopt,
+                 const std::optional<int64_t> &decl_line = std::nullopt,
+                 const std::optional<int64_t> &decl_col = std::nullopt,
+                 const std::optional<std::string> &decl_path = std::nullopt,
+                 bool is_instantiation = false, bool is_named_instance = false,
+                 const std::optional<std::string> &type_info = std::nullopt);
 
   // UNIQUE upsert on (src_id, dst_id, kind); increments count on conflict.
   // Returns the edge.id for edge_site linkage.
@@ -457,14 +454,16 @@ public:
   // argument) and canonical_id, then maps each node's decl_usr back to its
   // symbol. This is what makes `const Foo&`, `Foo*`, `vector<Foo>`, and an
   // alias of Foo all count as references to Foo. Sorted, unique.
-  std::vector<int64_t> symbols_named_by_types(const std::vector<int64_t> &type_ids);
+  std::vector<int64_t>
+  symbols_named_by_types(const std::vector<int64_t> &type_ids);
 
   // Delete edges whose src is a symbol defined in this file (idempotent
   // re-index: edges cascade-delete their edge_site rows).
   void delete_edges_for_file(int64_t file_id);
 
-  // -- entity_edge (v17) -------------------------------------------------------
-  // Upsert an entity_edge row (idempotent re-materialise safe).
+  // -- entity_edge (v17)
+  // ------------------------------------------------------- Upsert an
+  // entity_edge row (idempotent re-materialise safe).
   void add_entity_edge(int64_t src_id, int64_t dst_id, int64_t kind,
                        int64_t count = 1,
                        std::optional<int64_t> via_member_id = std::nullopt,
@@ -504,8 +503,8 @@ public:
       const std::optional<std::string> &init_text = std::nullopt);
   // The component that owns this file (file -> directory -> component).
   std::optional<int64_t> component_id_for_file(std::optional<int64_t> file_id);
-  // Upsert a per-body outgoing edge (src is a definition). kind reuses edge_kind
-  // (1 calls / 7 uses). Returns the def_edge id.
+  // Upsert a per-body outgoing edge (src is a definition). kind reuses
+  // edge_kind (1 calls / 7 uses). Returns the def_edge id.
   int64_t add_def_edge(int64_t src_def_id, int64_t dst_id, int64_t kind,
                        int64_t count = 1);
   // Snapshot a function body's just-emitted calls/uses (edge kind 1/7 for this
@@ -548,7 +547,8 @@ public:
     int64_t symbol_id = -1;
     std::optional<int64_t> file_id;
     std::optional<int64_t> line, col, end_line, end_col;
-    std::optional<std::string> init_text; // v28: (static member) var initializer
+    std::optional<std::string>
+        init_text; // v28: (static member) var initializer
   };
   std::vector<Symbol> redefined_symbols(int limit);
   std::vector<DefinitionRow> definitions_of(int64_t symbol_id);
@@ -585,10 +585,10 @@ public:
   // A6: typed-edge query (query.py:782-813)
   // direction "in"|"out"; kind_ids empty => no kind filter; count_resolved
   // controls which count expression is used (A6 plan §count_expr).
-  std::vector<GraphEdgeRow>
-  graph_edges(int64_t mine_id, const std::string &direction,
-              const std::vector<int64_t> &kind_ids, bool count_resolved,
-              int limit);
+  std::vector<GraphEdgeRow> graph_edges(int64_t mine_id,
+                                        const std::string &direction,
+                                        const std::vector<int64_t> &kind_ids,
+                                        bool count_resolved, int limit);
 
   // A7: batch-load edge_site rows for many edge_ids (query.py:839-870)
   std::map<int64_t, std::vector<EdgeSiteRow>>
@@ -640,8 +640,8 @@ public:
 private:
   friend class Transaction;
 
-  void migrate(); // column-presence detection, §4.1
-  void migrate_symbol_kind_to_int(); // v15 -> v16: rebuild symbol, kind->int
+  void migrate();                       // column-presence detection, §4.1
+  void migrate_symbol_kind_to_int();    // v15 -> v16: rebuild symbol, kind->int
   void migrate_component_repo_unique(); // v23 -> v24: path UNIQUE per repo
   // v24: resolved absolute path of a repository's active clone, or nullopt when
   // ungrouped / no live clone. Mirrors Python Storage._active_clone_root.

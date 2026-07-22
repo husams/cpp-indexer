@@ -15,8 +15,9 @@ struct EdgeRecord {
   int64_t dst_id = 0;
   int64_t kind = 0; // edge_kind id (1=calls .. 18=dispatch_calls)
   int64_t count = 1;
-  std::optional<int64_t> base_access; // inherits: 1=public 2=protected 3=private
-  std::optional<int64_t> is_virtual;  // inherits: virtual base
+  std::optional<int64_t>
+      base_access;                   // inherits: 1=public 2=protected 3=private
+  std::optional<int64_t> is_virtual; // inherits: virtual base
 };
 
 // mint_symbol_id() payload: a USR-keyed stub for a symbol that may not be
@@ -26,6 +27,7 @@ struct MintRequest {
   std::string spelling;
   std::string qual_name;
   std::string display_name;
+  std::optional<std::string> type_info; // cursor type / prototype, when known
   std::string kind_name; // storage kind NAME ("class", "function", ...)
   std::optional<int64_t> decl_file_id;
   std::optional<int64_t> decl_line;
@@ -50,7 +52,8 @@ struct TemplateArgRecord {
   std::optional<std::string> literal;
 };
 
-// -- v30 signature/type tier records -------------------------------------------
+// -- v30 signature/type tier records
+// -------------------------------------------
 
 // intern_type_node() payload: one normalized type shape (mirrors
 // cidx::TypeNode minus the id). Identity is type_key; kind/edge-kind codes are
@@ -85,7 +88,6 @@ struct TypeArgCandidate {
 
 // ---- body-pass records ------------------------------------------------------
 
-
 struct EdgeSiteRecord {
   int64_t edge_id = 0;
   int64_t file_id = 0;
@@ -114,7 +116,8 @@ struct CallArgRecord {
 
 // classify_value_source result (ast_body.cpp ValueSource).
 struct ValueSource {
-  std::string src_kind; // local|construct|member|global|call_result|literal|this|unknown
+  std::string
+      src_kind; // local|construct|member|global|call_result|literal|this|unknown
   std::string type_usr;
   std::string decl_usr;
   std::string callee_usr; // call_result only

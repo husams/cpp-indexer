@@ -3,7 +3,9 @@
 //  - spelling:        clang_getCursorSpelling (DeclarationName as written)
 //  - qualified_name:  cidx's semantic-parent join, skipping anonymous levels
 //                     (NOT clang's getQualifiedNameAsString, which prints
-//                     "(anonymous namespace)" levels)
+//                     "(anonymous namespace)" levels). A leaf function/method
+//                     carries its full signature (parameter types + member
+//                     cv/ref qualifiers), so overloads stay distinct.
 //  - display_name:    clang_getCursorDisplayName (function name + parameter
 //                     type list, template-specialization args)
 //  - type_info:       clang_getTypeSpelling of the cursor type; underlying
@@ -29,9 +31,17 @@ const clang::PrintingPolicy &printing_policy(const clang::ASTContext &context);
 std::string spelling(const clang::NamedDecl *decl);
 
 // Empty string when every level is anonymous. Lambda scopes print as
-// "(lambda at <file>:<line>:<col>)" like libclang's cursor spelling.
+// "(lambda at <file>:<line>:<col>)" like libclang's cursor spelling. When the
+// decl is itself a function/method, the leaf level is its full signature, e.g.
+// "NS::Shape::area(double) const".
 std::string qualified_name(const clang::ASTContext &context,
                            const clang::NamedDecl *decl);
+
+// As qualified_name, but the leaf function/method keeps its bare name (no
+// signature). For callers that build the signature themselves or need the
+// scope-only path (e.g. cidx-diff's name selector).
+std::string qualified_name_bare(const clang::ASTContext &context,
+                                const clang::NamedDecl *decl);
 
 std::optional<std::string> display_name(const clang::ASTContext &context,
                                         const clang::NamedDecl *decl);

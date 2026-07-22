@@ -24,8 +24,8 @@ Feature: Indexing a plain free function
   Scenario: add() is the only symbol, and every recorded field is as expected
     Then the index holds exactly 1 symbol
     And the index holds exactly these symbols:
-      | usr             | spelling | qual_name | kind     | type_info              | file                     | line | col | end_line | end_col | is_definition | is_instantiation | is_static | is_pure | is_stub |
-      | c:@F@add#I#I#   | add      | add       | function | auto (int, int) -> int | basic_function_decl.cpp  | 1    | 1   | 3        | 2       | true          | false            | false     | false   | false   |
+      | usr             | spelling | qual_name     | kind     | type_info              | file                     | line | col | end_line | end_col | is_definition | is_instantiation | is_static | is_pure | is_stub |
+      | c:@F@add#I#I#   | add      | add(int, int) | function | auto (int, int) -> int | basic_function_decl.cpp  | 1    | 1   | 3        | 2       | true          | false            | false     | false   | false   |
 
   Scenario: The signature tier records the return type and both parameters
     Then symbol "add" returns "int"

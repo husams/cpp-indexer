@@ -80,9 +80,13 @@ The quoted name in a scalar step, and the `src`/`dst` cells of an edge table:
 | `usr:c:@F@add<#d>#d#d#` | exact USR -- always unambiguous                    |
 
 Qualified name beats spelling, so `PointClass` is the class and not its
-constructor. Templates need USR selectors: `MyClass::getValue` legitimately
-names three different symbols (the pattern member, the `int` member and the
-`double` member).
+constructor. A function or method's qualified name carries its full signature
+(parameter types plus any `const`/ref qualifiers), so overloads stay distinct:
+`PointClass::getX() const`, `PointClass::setX(int)`. The bare spelling
+`getValue` still names three different symbols (the pattern member, the `int`
+member and the `double` member), which the qualified names
+`MyClass::getValue() const`, `MyClass<int>::getValue() const` and
+`MyClass<double>::getValue() const` — or a USR selector — disambiguate.
 
 ## Step vocabulary
 

@@ -262,7 +262,8 @@ std::string explicit_spec_token(const clang::FunctionDecl *fd) {
                                         return c == ' ' || c == '\t' ||
                                                c == '\n' || c == '\r' ||
                                                c == '\f' || c == '\v';
-                                      }).begin(),
+                                      })
+                   .begin(),
                cond.end());
     return "explicit(" + cond + ")";
   }
@@ -356,18 +357,17 @@ struct UnsupportedScan {
       const bool named_access =
           llvm::isa<clang::DeclRefExpr>(e) || llvm::isa<clang::MemberExpr>(e);
       const auto *cast = llvm::dyn_cast<clang::CastExpr>(e);
-      const bool load =
-          cast != nullptr && cast->getCastKind() == clang::CK_LValueToRValue &&
-          cast->getSubExpr()->getType().isVolatileQualified();
+      const bool load = cast != nullptr &&
+                        cast->getCastKind() == clang::CK_LValueToRValue &&
+                        cast->getSubExpr()->getType().isVolatileQualified();
       const auto *bin = llvm::dyn_cast<clang::BinaryOperator>(e);
-      const bool store = bin != nullptr &&
-                         (bin->isAssignmentOp() ||
-                          bin->isCompoundAssignmentOp()) &&
-                         bin->getLHS()->getType().isVolatileQualified();
+      const bool store =
+          bin != nullptr &&
+          (bin->isAssignmentOp() || bin->isCompoundAssignmentOp()) &&
+          bin->getLHS()->getType().isVolatileQualified();
       const auto *un = llvm::dyn_cast<clang::UnaryOperator>(e);
-      const bool incdec =
-          un != nullptr && un->isIncrementDecrementOp() &&
-          un->getSubExpr()->getType().isVolatileQualified();
+      const bool incdec = un != nullptr && un->isIncrementDecrementOp() &&
+                          un->getSubExpr()->getType().isVolatileQualified();
       if ((named_access && e->getType().isVolatileQualified()) || load ||
           store || incdec) {
         add("volatile access", s->getSourceRange());
@@ -555,8 +555,7 @@ struct IrBuilder {
              text(ue->getArgumentExpr()) + ")";
     }
     if (const auto *uo = llvm::dyn_cast<clang::UnaryOperator>(s)) {
-      return "(" +
-             clang::UnaryOperator::getOpcodeStr(uo->getOpcode()).str() +
+      return "(" + clang::UnaryOperator::getOpcodeStr(uo->getOpcode()).str() +
              (uo->isPostfix() ? "post" : "") + " " + text(uo->getSubExpr()) +
              ")";
     }
@@ -780,8 +779,8 @@ struct Analyzer {
       // subexpression is lowered only when unresolved, so a callee change is
       // exactly one op.
       const clang::Decl *cd = ce->getCalleeDecl();
-      const auto *nd = cd != nullptr ? llvm::dyn_cast<clang::NamedDecl>(cd)
-                                     : nullptr;
+      const auto *nd =
+          cd != nullptr ? llvm::dyn_cast<clang::NamedDecl>(cd) : nullptr;
       if (nd != nullptr) {
         const std::string name = scrub_spelling(ast::spelling(nd));
         n.label = name + "|" + scrub_usr(ctx, ast::usr_for_decl(nd));
@@ -814,8 +813,8 @@ struct Analyzer {
 
   void lower_function(const clang::FunctionDecl *fd, SynNode &n) {
     const std::string name = ast::spelling(fd);
-    n.label =
-        name + "(" + param_types(fd) + ")" + fn_quals(fd) + method_api_state(fd);
+    n.label = name + "(" + param_types(fd) + ")" + fn_quals(fd) +
+              method_api_state(fd);
     n.detail = "name " + name;
     for (const clang::ParmVarDecl *p : fd->parameters()) {
       add_decl(p, n.children);
@@ -1085,20 +1084,19 @@ struct Analyzer {
           } else {
             label = "delegate";
           }
-          ir.blocks.push_back("  init " + label + "(" + b.text(init->getInit()) +
-                              ")");
+          ir.blocks.push_back("  init " + label + "(" +
+                              b.text(init->getInit()) + ")");
         } else if (const auto ad = el.getAs<clang::CFGAutomaticObjDtor>()) {
           const clang::CXXDestructorDecl *dd = ad->getDestructorDecl(ctx);
-          ir.blocks.push_back(
-              "  dtor " + b.value_name(ad->getVarDecl()) + " " +
-              (dd != nullptr ? scrub_usr(ctx, ast::usr_for_decl(dd))
-                             : std::string("-")));
+          ir.blocks.push_back("  dtor " + b.value_name(ad->getVarDecl()) + " " +
+                              (dd != nullptr
+                                   ? scrub_usr(ctx, ast::usr_for_decl(dd))
+                                   : std::string("-")));
         } else if (const auto id = el.getAs<clang::CFGImplicitDtor>()) {
           const clang::CXXDestructorDecl *dd = id->getDestructorDecl(ctx);
           ir.blocks.push_back(
-              "  dtor " + (dd != nullptr
-                               ? scrub_usr(ctx, ast::usr_for_decl(dd))
-                               : std::string("-")));
+              "  dtor " + (dd != nullptr ? scrub_usr(ctx, ast::usr_for_decl(dd))
+                                         : std::string("-")));
         } else {
           ir.blocks.emplace_back("  <element>");
         }
@@ -1220,8 +1218,7 @@ struct Analyzer {
     }
     if (const auto *ffn = llvm::dyn_cast<clang::FunctionDecl>(inner)) {
       return prefix + type_str(ffn->getReturnType()) + " " +
-             ast::spelling(ffn) + "(" + param_types(ffn) + ")" +
-             fn_quals(ffn);
+             ast::spelling(ffn) + "(" + param_types(ffn) + ")" + fn_quals(ffn);
     }
     return prefix + ast::spelling(llvm::cast<clang::NamedDecl>(inner));
   }
@@ -1383,7 +1380,9 @@ struct Analyzer {
     }
     e.kind = entity_kind(inner);
     if (const auto *nd = llvm::dyn_cast<clang::NamedDecl>(inner)) {
-      e.name = scrub_spelling(ast::qualified_name(ctx, nd));
+      // Bare scope path: the name selector matches "Api::m" without a
+      // signature, and e.signature appends the parameter list below.
+      e.name = scrub_spelling(ast::qualified_name_bare(ctx, nd));
     }
     if (const auto *fd = llvm::dyn_cast<clang::FunctionDecl>(inner)) {
       e.signature = e.name + "(" + param_types(fd) + ")" + fn_quals(fd);
@@ -1555,9 +1554,8 @@ Entity select_entity(const std::vector<Entity> &top, const Selector &sel,
                     cfg.file);
   }
   if (hits.size() > 1) {
-    std::string msg =
-        "selector '" + sel.raw + "' is ambiguous in " + cfg.file +
-        "; candidates:";
+    std::string msg = "selector '" + sel.raw + "' is ambiguous in " + cfg.file +
+                      "; candidates:";
     for (const Entity *e : hits) {
       msg += "\n  " + e->kind + " " +
              (e->signature.empty() ? e->name : e->signature) + " " +
@@ -1721,8 +1719,7 @@ SideAnalysis analyze_side(const ParseConfig &config,
     std::rethrow_exception(err);
   }
   if (!handled) {
-    throw CidxError("cannot parse " + config.parse_file +
-                    " (no AST produced)");
+    throw CidxError("cannot parse " + config.parse_file + " (no AST produced)");
   }
   return out;
 }
