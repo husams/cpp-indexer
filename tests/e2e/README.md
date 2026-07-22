@@ -9,9 +9,32 @@ libclang.
 tests/e2e/
   features/     Gherkin specs -- the expected symbols, edges and signature facts
   fixtures/     the C++ inputs, one translation unit per feature
-  conftest.py   the workspace fixture and every step definition
+  steps/        step definitions and their helpers, one module per concern
+  conftest.py   the two pytest fixtures (cidx_bin, workspace) and nothing else
   test_*.py     one thin binder per feature file
 ```
+
+`conftest.py` star-imports `steps`, which is what registers the step
+definitions with pytest-bdd. Inside `steps/`:
+
+| module              | holds                                                  |
+| ------------------- | ------------------------------------------------------ |
+| `pipeline_steps.py` | `Given` the fixture workspace, `When` the CLI runs      |
+| `index_steps.py`    | database, resolve pass, file/symbol/unresolved totals   |
+| `symbol_steps.py`   | symbol rows: membership, exhaustiveness, spans          |
+| `signature_steps.py`| types, parameters, templates, instantiations, definitions |
+| `edge_steps.py`     | edge counts, relationship tables, per-kind totals       |
+| `edge_site_steps.py`| edge sites -- where a relationship is written           |
+| `callgraph_steps.py`| callers and callees                                     |
+| `cli_steps.py`      | CLI output and read-only `cidx` subcommands             |
+| `paths.py`          | filesystem anchors; puts `python/` on `sys.path`        |
+| `workspace.py`      | the per-scenario `Workspace`: CLI runner + query handle |
+| `tables.py`         | Gherkin table parsing and row-list comparison           |
+| `symbol_facts.py`   | the comparable view of a symbol, and row matching       |
+| `edge_facts.py`     | rendering and lookup helpers for edges and sites        |
+
+Add a new step to the module that owns its concern -- never to `conftest.py`,
+and never by growing one catch-all step file.
 
 ## Running
 
@@ -46,8 +69,8 @@ call graph (`callers` / `callees`) and `definitions`.
 
 ## Where the expectations live
 
-**In the feature files, never in Python.** `conftest.py` knows only how to
-compare; it never hard-codes what a fixture should contain. A scenario states
+**In the feature files, never in Python.** The step modules know only how to
+compare; they never hard-code what a fixture should contain. A scenario states
 its expectation as a Gherkin data table:
 
 ```gherkin
