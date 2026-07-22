@@ -22,6 +22,7 @@
 namespace clang {
 class ASTContext;
 class ClassTemplateDecl;
+class ClassTemplateSpecializationDecl;
 class CXXMethodDecl;
 class FunctionDecl;
 class FunctionTemplateDecl;
@@ -67,6 +68,16 @@ void emit_callable_template_identity(
 void emit_method_owner(EdgeSink &sink, MintBuilder &mint,
                        const TemplateArgumentEncoder &targ_encoder,
                        int64_t dst_id, const clang::CXXMethodDecl *method);
+
+// An instantiated record is never traversed, so its fields (which carry the
+// substituted types) are minted here: each field of the instantiation gets its
+// own symbol (qual_name "X<int>::f", concrete type_info) plus a field_of(8)
+// edge back to the instance record `inst_id`, mirroring how instance methods
+// get method_of. No-op for authored (non-instantiation) specializations, whose
+// fields the ordinary traversal already records.
+void emit_instance_fields(EdgeSink &sink, const MintBuilder &mint,
+                          const clang::ClassTemplateSpecializationDecl *spec,
+                          int64_t inst_id);
 
 // The TSK names an explicit instantiation (`template ...;` / `extern
 // template ...;`).

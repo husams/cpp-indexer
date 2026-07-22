@@ -7,6 +7,7 @@ c:@F@add	add	add(int, int)	add(int, int)	function	int (int, int)	math.c	2	1	math
 c:@F@square	square	square(int)	square(int)	function	int (int)	math.c	3	1	math.h	4	5	1	0	0	0	external			1
 c:@F@unbox#$@S@Box>#I#	unbox	unbox(IntBox)	unbox(IntBox)	function	int (IntBox)	box.cpp	3	1				1	0	0	0	external			1
 c:@S@Box>#I	Box	Box<int>	Box<int>	struct	Box<int>				box.cpp	1	30	0	0	0	1				0
+c:@S@Box>#I@FI@item	item	Box<int>::item	item	member	int				box.cpp	1	38	0	0	0	0				0
 c:@ST>1#T@Box	Box	Box	Box<T>	class-template		box.cpp	1	1	box.cpp	1	30	1	0	0	0	external			1
 c:@ST>1#T@Box@FI@item	item	Box::item	item	member	T	box.cpp	1	36				1	0	0	0	external	public	c:@ST>1#T@Box	1
 c:box.cpp@T@IntBox	IntBox	IntBox	IntBox	typedef	Box<int>	box.cpp	2	1				1	0	0	0	no-linkage			1
@@ -21,12 +22,15 @@ c:@ST>1#T@Box@FI@item	box.cpp	1	36	1
 c:box.cpp@T@IntBox	box.cpp	2	1	1
 == edge ==
 c:@F@square	c:@F@add	calls	1		
+c:@F@unbox#$@S@Box>#I#	c:@S@Box>#I@FI@item	uses	1		
 c:@F@unbox#$@S@Box>#I#	c:box.cpp@T@IntBox	uses	1		
 c:@S@Box>#I	c:@ST>1#T@Box	instantiates	1		
+c:@S@Box>#I@FI@item	c:@S@Box>#I	field_of	1		
 c:@ST>1#T@Box@FI@item	c:@ST>1#T@Box	field_of	1		
 c:box.cpp@T@IntBox	c:@S@Box>#I	uses	1		
 == edge_site ==
 c:@F@square	c:@F@add	calls	math.c	3	28	0						
+c:@F@unbox#$@S@Box>#I#	c:@S@Box>#I@FI@item	uses	box.cpp	3	32	0						
 c:@F@unbox#$@S@Box>#I#	c:box.cpp@T@IntBox	uses	box.cpp	3	18	0						
 c:box.cpp@T@IntBox	c:@S@Box>#I	uses	box.cpp	2	18	0						
 == call_arg ==

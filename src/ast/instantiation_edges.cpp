@@ -199,6 +199,29 @@ void emit_method_owner(EdgeSink &sink, MintBuilder &mint,
   emit_owner_promotion(sink, mint, targ_encoder, dst_id, method);
 }
 
+void emit_instance_fields(EdgeSink &sink, const MintBuilder &mint,
+                          const clang::ClassTemplateSpecializationDecl *spec,
+                          int64_t inst_id) {
+  // Only real instantiations: an authored full/partial specialization's fields
+  // are traversed and recorded the ordinary way (VisitFieldDecl).
+  if (spec == nullptr || !is_template_instantiation(spec)) {
+    return;
+  }
+  const clang::CXXRecordDecl *def = spec->getDefinition();
+  if (def == nullptr) {
+    return; // never instantiated to completion -> no fields to mint
+  }
+  for (const clang::FieldDecl *field : def->fields()) {
+    if (auto req = mint.build(field)) {
+      EdgeRecord fo;
+      fo.src_id = sink.mint_symbol(*req);
+      fo.dst_id = inst_id;
+      fo.kind = 8; // field_of
+      sink.ensure_edge(fo);
+    }
+  }
+}
+
 bool is_explicit_instantiation_kind(clang::TemplateSpecializationKind tsk) {
   return tsk == clang::TSK_ExplicitInstantiationDeclaration ||
          tsk == clang::TSK_ExplicitInstantiationDefinition;

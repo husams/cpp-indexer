@@ -2,6 +2,7 @@
 
 #include "ast/decl_flags.hpp"
 #include "ast/edge_sink.hpp"
+#include "ast/instantiation_edges.hpp"
 #include "ast/kind_map.hpp"
 #include "ast/mint_builder.hpp"
 #include "ast/names.hpp"
@@ -16,11 +17,11 @@
 
 namespace cidx::ast {
 
-InstanceMinter::InstanceMinter(const clang::ASTContext &context,
-                               EdgeSink &sink, const MintBuilder &mint,
+InstanceMinter::InstanceMinter(const clang::ASTContext &context, EdgeSink &sink,
+                               const MintBuilder &mint,
                                const TemplateArgumentEncoder &targ_encoder)
-    : context_(context), sink_(sink), mint_(mint),
-      targ_encoder_(targ_encoder) {}
+    : context_(context), sink_(sink), mint_(mint), targ_encoder_(targ_encoder) {
+}
 
 namespace {
 
@@ -67,8 +68,9 @@ void InstanceMinter::mint_instance_from_type(clang::QualType type) const {
   if (type.isNull()) {
     return;
   }
-  const auto *spec = llvm::dyn_cast_or_null<
-      clang::ClassTemplateSpecializationDecl>(type->getAsCXXRecordDecl());
+  const auto *spec =
+      llvm::dyn_cast_or_null<clang::ClassTemplateSpecializationDecl>(
+          type->getAsCXXRecordDecl());
   if (spec == nullptr) {
     return; // not a class-template specialization
   }
@@ -125,9 +127,12 @@ int64_t InstanceMinter::mint_instance_pair(
   e.src_id = inst_id;
   e.dst_id = prim_id;
   e.kind = spec->getSpecializationKind() == clang::TSK_ExplicitSpecialization
-               ? 4   // specializes: authored full specialization
-               : 5;  // instantiates: X<B> -> X (or its partial)
+               ? 4  // specializes: authored full specialization
+               : 5; // instantiates: X<B> -> X (or its partial)
   sink_.ensure_edge(e);
+  // The instantiation's fields (with substituted types) — never traversed, so
+  // minted here with a field_of edge back to this instance.
+  emit_instance_fields(sink_, mint_, spec, inst_id);
   return inst_id;
 }
 

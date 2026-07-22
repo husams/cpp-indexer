@@ -21,8 +21,8 @@ Feature: Indexing a class template with an explicit and an implicit instantiatio
     Then the index database exists
     And the entity graph is resolved
     And the index holds 1 indexed file
-    And the index holds exactly 14 symbols
-    And the index holds exactly 18 edges
+    And the index holds exactly 16 symbols
+    And the index holds exactly 20 edges
 
   Scenario: The pattern, both instantiated records and their callable members are indexed
     Then the index holds exactly these symbols:
@@ -36,11 +36,13 @@ Feature: Indexing a class template with an explicit and an implicit instantiatio
       | c:@S@MyClass>#I@F@MyClass#I#       | MyClass     | MyClass<int>::MyClass(int)       | constructor    | void (int)       | 12   | 16  | 12       | 16      | public  | true          | false            |
       | c:@S@MyClass>#I@F@getValue#1       | getValue    | MyClass<int>::getValue() const   | method         | int () const     | 12   | 16  | 12       | 16      | public  | true          | false            |
       | c:@S@MyClass>#I@F@setValue#I#      | setValue    | MyClass<int>::setValue(int)      | method         | void (int)       | 12   | 16  | 12       | 16      | public  | true          | false            |
+      | c:@S@MyClass>#I@FI@value           | value       | MyClass<int>::value              | member         | int              | 4    | 7   | -        | -       | -       | false         | false            |
       | c:@F@testMyClass#                  | testMyClass | testMyClass()                    | function       | void ()          | 15   | 1   | 19       | 2       | -       | true          | false            |
       | c:@S@MyClass>#d                    | MyClass     | MyClass<double>                  | class          | MyClass<double>  | 2    | 7   | -        | -       | -       | false         | true             |
       | c:@S@MyClass>#d@F@MyClass#d#       | MyClass     | MyClass<double>::MyClass(double) | constructor    | void (double)    | 6    | 5   | -        | -       | -       | false         | false            |
       | c:@S@MyClass>#d@F@getValue#1       | getValue    | MyClass<double>::getValue() const | method        | double () const  | 7    | 7   | -        | -       | -       | false         | false            |
       | c:@S@MyClass>#d@F@setValue#d#      | setValue    | MyClass<double>::setValue(double) | method        | void (double)    | 8    | 10  | -        | -       | -       | false         | false            |
+      | c:@S@MyClass>#d@FI@value           | value       | MyClass<double>::value           | member         | double           | 4    | 7   | -        | -       | -       | false         | false            |
 
   Scenario: The pattern declares one type parameter and is instantiated twice
     Then symbol "usr:c:@ST>1#T@MyClass" declares the template parameters:
@@ -77,7 +79,7 @@ Feature: Indexing a class template with an explicit and an implicit instantiatio
     Then the edge kind totals are:
       | kind            | total |
       | method_of       | 9     |
-      | field_of        | 1     |
+      | field_of        | 3     |
       | instantiates    | 2     |
       | uses            | 2     |
       | calls           | 3     |
@@ -94,10 +96,12 @@ Feature: Indexing a class template with an explicit and an implicit instantiatio
       | usr:c:@S@MyClass>#I@F@MyClass#I#       | method_of       | usr:c:@S@MyClass>#I                    | 1     | -     |
       | usr:c:@S@MyClass>#I@F@getValue#1       | method_of       | usr:c:@S@MyClass>#I                    | 1     | -     |
       | usr:c:@S@MyClass>#I@F@setValue#I#      | method_of       | usr:c:@S@MyClass>#I                    | 1     | -     |
+      | usr:c:@S@MyClass>#I@FI@value           | field_of        | usr:c:@S@MyClass>#I                    | 1     | -     |
       | usr:c:@S@MyClass>#d                    | instantiates    | usr:c:@ST>1#T@MyClass                  | 1     | -     |
       | usr:c:@S@MyClass>#d@F@MyClass#d#       | method_of       | usr:c:@S@MyClass>#d                    | 1     | -     |
       | usr:c:@S@MyClass>#d@F@getValue#1       | method_of       | usr:c:@S@MyClass>#d                    | 1     | -     |
       | usr:c:@S@MyClass>#d@F@setValue#d#      | method_of       | usr:c:@S@MyClass>#d                    | 1     | -     |
+      | usr:c:@S@MyClass>#d@FI@value           | field_of        | usr:c:@S@MyClass>#d                    | 1     | -     |
       | testMyClass                            | calls           | usr:c:@S@MyClass>#d@F@MyClass#d#       | 1     | 16:21 |
       | testMyClass                            | calls           | usr:c:@S@MyClass>#d@F@getValue#1       | 1     | 17:20 |
       | testMyClass                            | calls           | usr:c:@S@MyClass>#d@F@setValue#d#      | 1     | 18:5  |

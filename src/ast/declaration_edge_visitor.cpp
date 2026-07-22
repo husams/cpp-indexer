@@ -796,6 +796,9 @@ bool DeclarationEdgeVisitor::VisitClassTemplateSpecializationDecl(
   for (unsigned ai = 0; ai < args.size(); ++ai) {
     targ_encoder_.emit(*spec_id, static_cast<int64_t>(ai), args[ai]);
   }
+  // The explicit instantiation's fields — never traversed as members — get
+  // their own symbols and field_of edges back to this instance.
+  emit_instance_fields(sink_, mint_, decl, *spec_id);
   return true;
 }
 
