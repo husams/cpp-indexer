@@ -14,19 +14,20 @@ namespace cidx {
 struct Component {
   int64_t id = -1;
   std::string name;
-  std::string path; // base path (no version segment)
-  std::string kind; // 'repo' | 'external'
+  std::string path;                   // base path (no version segment)
+  std::string kind;                   // 'repo' | 'external'
   std::optional<std::string> version; // v14: nullable; NULL = unversioned
-  std::optional<int64_t> repository_id; // v23: owning repository; NULL = ungrouped
+  std::optional<int64_t>
+      repository_id; // v23: owning repository; NULL = ungrouped
 };
 
 // v23: a logical code base grouping >=1 components, with switchable clones.
 struct Repository {
   int64_t id = -1;
   std::string name;
-  std::string kind; // 'repo' | 'external'
-  std::optional<std::string> remote_url;     // git origin URL when known
-  std::optional<int64_t> active_clone_id;    // -> clone.id; NULL if none yet
+  std::string kind;                       // 'repo' | 'external'
+  std::optional<std::string> remote_url;  // git origin URL when known
+  std::optional<int64_t> active_clone_id; // -> clone.id; NULL if none yet
 };
 
 // v23: one checkout/worktree directory of a repository.
@@ -86,7 +87,8 @@ struct Symbol {
   std::optional<int64_t> line;
   std::optional<int64_t> col;
   std::optional<int64_t> end_line; // v25: end of the symbol's own extent at
-  std::optional<int64_t> end_col;  // (line, col); (line..end_line) slices it whole
+  std::optional<int64_t>
+      end_col; // (line, col); (line..end_line) slices it whole
   std::optional<int64_t> decl_file_id;
   std::optional<int64_t> decl_line;
   std::optional<int64_t> decl_col;
@@ -97,9 +99,10 @@ struct Symbol {
   bool is_static = false; // v12: C++ static member function. Free functions and
                           // non-methods are false; a file-scope `static` free
                           // function is reflected by linkage='internal'.
-  bool is_instantiation = false; // v13: implicit template-instantiation node
-                                 // (X<int> type node or X<int>::member); its
-                                 // definition is expressed via instantiates edge.
+  bool is_instantiation =
+      false; // v13: implicit template-instantiation node
+             // (X<int> type node or X<int>::member); its
+             // definition is expressed via instantiates edge.
   std::optional<std::string> linkage;
   std::optional<std::string> access;
   std::optional<std::string> parent_usr;
@@ -114,11 +117,11 @@ struct Symbol {
 struct Edge {
   int64_t src_id = -1;
   int64_t dst_id = -1;
-  int64_t kind = 0;                       // edge_kind.id
+  int64_t kind = 0; // edge_kind.id
   int64_t count = 1;
-  std::optional<int64_t> base_access;     // inherits
-  std::optional<int64_t> is_virtual;      // inherits (0/1)
-  std::optional<int64_t> vtable_slot;     // overrides (reserved)
+  std::optional<int64_t> base_access; // inherits
+  std::optional<int64_t> is_virtual;  // inherits (0/1)
+  std::optional<int64_t> vtable_slot; // overrides (reserved)
   int64_t id = -1;
 };
 
@@ -133,8 +136,10 @@ struct EdgeSite {
   std::optional<std::string> recv_src_kind;
   std::optional<std::string> recv_type_usr;
   std::optional<std::string> recv_decl_usr;
-  std::optional<int64_t> recv_param_pos;  // 0-based index of receiver in callee params
-  std::optional<int64_t> recv_type_is_value;  // v11: receiver held by value (1) else 0/NULL
+  std::optional<int64_t>
+      recv_param_pos; // 0-based index of receiver in callee params
+  std::optional<int64_t>
+      recv_type_is_value; // v11: receiver held by value (1) else 0/NULL
 };
 
 struct CallArg {
@@ -143,11 +148,12 @@ struct CallArg {
   int64_t line = 0;
   int64_t col = 0;
   int64_t position = 0;
-  std::string src_kind;             // local|construct|member|global|call_result|unknown
+  std::string src_kind; // local|construct|member|global|call_result|unknown
   std::optional<std::string> type_usr;
   std::optional<std::string> decl_usr;
   std::optional<std::string> callee_usr;
-  std::optional<int64_t> type_is_value;  // v11: arg held by value (1) else 0/NULL
+  std::optional<int64_t>
+      type_is_value; // v11: arg held by value (1) else 0/NULL
 };
 
 struct TemplateParam {
@@ -156,17 +162,23 @@ struct TemplateParam {
   int64_t param_kind = 0;
   std::optional<std::string> name;
   std::optional<std::string> default_txt;
+  std::optional<int64_t> type_id;
+  std::optional<int64_t> default_type_id;
+  std::optional<int64_t> default_ref_id;
 };
 
 struct TemplateArg {
   int64_t owner_id = -1;
   int64_t position = 0;
+  int64_t pack_index = -1;
   int64_t arg_kind = 0;
   std::optional<int64_t> ref_id;
   std::optional<std::string> literal;
+  std::optional<int64_t> type_id;
 };
 
-// -- v30 signature/type tier records -------------------------------------------
+// -- v30 signature/type tier records
+// -------------------------------------------
 
 // One normalized type shape (type_node row). Identity is `type_key`, a
 // deterministic structural encoding of the Clang type (see ast/type_graph.cpp
@@ -198,14 +210,18 @@ inline constexpr int64_t kTypeKindArray = 8;
 inline constexpr int64_t kTypeKindFunction = 9;
 inline constexpr int64_t kTypeKindTemplateParam = 10;
 inline constexpr int64_t kTypeKindOther = 11;
+inline constexpr int64_t kTypeKindMemberDataPointer = 12;
+inline constexpr int64_t kTypeKindMemberFunctionPointer = 13;
 
 // type_edge kinds (seeded in type_edge_kind; mirrored in storage.py)
-inline constexpr int64_t kTypeEdgePointee = 1;      // pointer/reference -> inner
-inline constexpr int64_t kTypeEdgeElement = 2;      // array -> element
-inline constexpr int64_t kTypeEdgeAliasOf = 3;      // alias -> one-step target
-inline constexpr int64_t kTypeEdgeReturnType = 4;   // function type -> return
-inline constexpr int64_t kTypeEdgeParamType = 5;    // function type -> param i
-inline constexpr int64_t kTypeEdgeTemplateArg = 6;  // specialization -> arg i
+inline constexpr int64_t kTypeEdgePointee = 1;     // pointer/reference -> inner
+inline constexpr int64_t kTypeEdgeElement = 2;     // array -> element
+inline constexpr int64_t kTypeEdgeAliasOf = 3;     // alias -> one-step target
+inline constexpr int64_t kTypeEdgeReturnType = 4;  // function type -> return
+inline constexpr int64_t kTypeEdgeParamType = 5;   // function type -> param i
+inline constexpr int64_t kTypeEdgeTemplateArg = 6; // specialization -> arg i
+inline constexpr int64_t kTypeEdgeMemberOwner = 7; // member pointer -> owner
+inline constexpr int64_t kTypeEdgeMemberComponent = 8; // member pointer -> type
 
 // symbol_type kinds (seeded in symbol_type_kind; mirrored in storage.py)
 inline constexpr int64_t kSymbolTypeReturns = 1;    // callable -> return type
@@ -218,14 +234,21 @@ inline constexpr int64_t kSymbolTypeUnderlying = 3; // typedef/alias -> target
 struct Parameter {
   int64_t owner_id = -1;
   int64_t position = 0;
+  int64_t pack_index = -1;
   std::optional<std::string> name;
   std::optional<int64_t> type_id;
+  std::optional<int64_t> declared_type_id;
+  std::optional<int64_t> adjusted_type_id;
+  std::optional<std::string> default_text;
+  std::optional<std::string> default_origin;
+  std::optional<std::string> reference_semantics;
   std::optional<int64_t> file_id;
   std::optional<int64_t> line;
   std::optional<int64_t> col;
 };
 
-// -- v31 include tier records --------------------------------------------------
+// -- v31 include tier records
+// --------------------------------------------------
 
 // One normalized compilation configuration. `digest` is the stable identity
 // used by plan-freshness checks; it is computed by include_config_digest()
@@ -238,7 +261,7 @@ struct IncludeConfig {
   std::optional<std::string> driver;
   std::optional<std::string> working_dir;
   std::vector<std::string> arguments;
-  std::optional<std::string> lang_mode;   // "c" | "c++"
+  std::optional<std::string> lang_mode; // "c" | "c++"
   std::optional<std::string> resource_dir;
 };
 
@@ -274,10 +297,10 @@ struct IncludeSite {
   int64_t col = 0;
   int64_t begin_offset = 0;
   int64_t end_offset = 0;
-  std::string spelling;             // as written, without <> or ""
+  std::string spelling; // as written, without <> or ""
   bool is_angled = false;
   int64_t directive = kIncludeDirectiveInclude;
-  std::string cond_fingerprint;     // "" = unconditional top level
+  std::string cond_fingerprint; // "" = unconditional top level
   bool resolved = true;
   bool guarded = false;
 };

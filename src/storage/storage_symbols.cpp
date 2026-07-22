@@ -554,25 +554,31 @@ void Storage::add_call_arg(const CallArg &a) {
 
 void Storage::add_template_param(const TemplateParam &p) {
   auto st = db_.prepare("INSERT OR REPLACE INTO template_param "
-                        "(owner_id, position, param_kind, name, default_txt) "
-                        "VALUES (?, ?, ?, ?, ?)");
+                        "(owner_id, position, param_kind, name, default_txt, "
+                        "type_id, default_type_id, default_ref_id) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
   st.bind(1, p.owner_id);
   st.bind(2, p.position);
   st.bind(3, p.param_kind);
   bind_opt(st, 4, p.name);
   bind_opt(st, 5, p.default_txt);
+  bind_opt(st, 6, p.type_id);
+  bind_opt(st, 7, p.default_type_id);
+  bind_opt(st, 8, p.default_ref_id);
   st.step_done();
 }
 
 void Storage::add_template_arg(const TemplateArg &a) {
   auto st = db_.prepare("INSERT OR REPLACE INTO template_arg "
-                        "(owner_id, position, arg_kind, ref_id, literal) "
-                        "VALUES (?, ?, ?, ?, ?)");
+                        "(owner_id, position, pack_index, arg_kind, ref_id, "
+                        "literal, type_id) VALUES (?, ?, ?, ?, ?, ?, ?)");
   st.bind(1, a.owner_id);
   st.bind(2, a.position);
-  st.bind(3, a.arg_kind);
-  bind_opt(st, 4, a.ref_id);
-  bind_opt(st, 5, a.literal);
+  st.bind(3, a.pack_index);
+  st.bind(4, a.arg_kind);
+  bind_opt(st, 5, a.ref_id);
+  bind_opt(st, 6, a.literal);
+  bind_opt(st, 7, a.type_id);
   st.step_done();
 }
 

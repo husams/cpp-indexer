@@ -127,7 +127,8 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
     return emit_node(qt, std::move(rec), depth);
   }
 
-  // -- named alias layers (identity-preserving sugar) --------------------------
+  // -- named alias layers (identity-preserving sugar)
+  // --------------------------
   if (const auto *tt = llvm::dyn_cast<clang::TypedefType>(t)) {
     rec.kind = kTypeAlias;
     rec.decl_usr = usr_for_decl(tt->getDecl());
@@ -183,7 +184,8 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
     return self;
   }
 
-  // -- transparent sugar (elaborated, paren, using, subst, decltype, ...) ------
+  // -- transparent sugar (elaborated, paren, using, subst, decltype, ...)
+  // ------
   {
     const clang::QualType step = qt.getSingleStepDesugaredType(context_);
     if (step.getAsOpaquePtr() != qt.getAsOpaquePtr() &&
@@ -203,6 +205,13 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
     rec.kind = kTypeTemplateParam;
     rec.type_key = "T:" + std::to_string(tp->getDepth()) + "." +
                    std::to_string(tp->getIndex());
+    return emit_node(qt, std::move(rec), depth);
+  }
+
+  if (const auto *pack = llvm::dyn_cast<clang::PackExpansionType>(t)) {
+    rec.kind = kTypeOther;
+    const auto pattern = build(pack->getPattern(), depth + 1);
+    rec.type_key = "pack(" + (pattern ? pattern->key : "?") + ")";
     return emit_node(qt, std::move(rec), depth);
   }
 
@@ -243,11 +252,33 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
     const bool rvalue = llvm::isa<clang::RValueReferenceType>(t);
     const auto inner = build(rt->getPointeeTypeAsWritten(), depth + 1);
     rec.kind = rvalue ? kTypeRValueRef : kTypeLValueRef;
-    rec.type_key =
-        (rvalue ? "r(" : "l(") + (inner ? inner->key : "?") + ")";
+    rec.type_key = (rvalue ? "r(" : "l(") + (inner ? inner->key : "?") + ")";
     const Result self = emit_node(qt, std::move(rec), depth);
     if (inner) {
       sink_.add_type_edge(self.id, kTypeEdgePointeeK, 0, inner->id);
+    }
+    return self;
+  }
+
+  if (const auto *mp = llvm::dyn_cast<clang::MemberPointerType>(t)) {
+    const auto component = build(mp->getPointeeType(), depth + 1);
+    const clang::QualType owner(mp->getQualifier().getAsType(), 0);
+    const auto owner_node = build(owner, depth + 1);
+    // The component's QualType is the authoritative discriminator; avoid
+    // spelling-based classification and keep both owner and component as
+    // traversable children of the member-pointer node.
+    const bool is_function = mp->isMemberFunctionPointer();
+    rec.kind =
+        is_function ? kTypeMemberFunctionPointer : kTypeMemberDataPointer;
+    rec.type_key = (is_function ? "mpf(" : "mpd(") +
+                   (owner_node ? owner_node->key : "?") + ";" +
+                   (component ? component->key : "?") + ")";
+    const Result self = emit_node(qt, std::move(rec), depth);
+    if (owner_node) {
+      sink_.add_type_edge(self.id, kTypeEdgeMemberOwnerK, 0, owner_node->id);
+    }
+    if (component) {
+      sink_.add_type_edge(self.id, kTypeEdgeMemberComponentK, 0, component->id);
     }
     return self;
   }

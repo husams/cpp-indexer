@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -308,16 +308,21 @@ CREATE TABLE IF NOT EXISTS template_param (
     param_kind  INTEGER NOT NULL,  -- 1=type 2=non-type 3=template-template 4=pack
     name        TEXT,
     default_txt TEXT,
+    type_id     INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    default_type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    default_ref_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
     PRIMARY KEY (owner_id, position)
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS template_arg (
     owner_id  INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
     position  INTEGER NOT NULL,
+    pack_index INTEGER NOT NULL DEFAULT -1,
     arg_kind  INTEGER NOT NULL,  -- 1=type 2=non-type value 3=template-template 4=pack
     ref_id    INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
     literal   TEXT,
-    PRIMARY KEY (owner_id, position)
+    type_id   INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    PRIMARY KEY (owner_id, position, pack_index)
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS call_arg (
@@ -502,7 +507,8 @@ CREATE TABLE IF NOT EXISTS type_kind (
 INSERT OR IGNORE INTO type_kind (id, name) VALUES
   (1,'builtin'), (2,'record'), (3,'enum'), (4,'alias'),
   (5,'pointer'), (6,'lvalue-reference'), (7,'rvalue-reference'),
-  (8,'array'), (9,'function'), (10,'template-param'), (11,'other');
+  (8,'array'), (9,'function'), (10,'template-param'), (11,'other'),
+  (12,'member-data-pointer'), (13,'member-function-pointer');
 
 CREATE TABLE IF NOT EXISTS type_node (
     id           INTEGER PRIMARY KEY,
@@ -524,7 +530,8 @@ CREATE TABLE IF NOT EXISTS type_edge_kind (
 );
 INSERT OR IGNORE INTO type_edge_kind (id, name) VALUES
   (1,'pointee'), (2,'element_type'), (3,'alias_of'),
-  (4,'return_type'), (5,'param_type'), (6,'template_argument_type');
+  (4,'return_type'), (5,'param_type'), (6,'template_argument_type'),
+  (7,'member_owner'), (8,'member_component');
 
 CREATE TABLE IF NOT EXISTS type_edge (
     src_id   INTEGER NOT NULL REFERENCES type_node(id) ON DELETE CASCADE,
@@ -538,14 +545,22 @@ CREATE INDEX IF NOT EXISTS idx_type_edge_dst ON type_edge(dst_id);
 CREATE TABLE IF NOT EXISTS parameter (
     owner_id INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
     position INTEGER NOT NULL,
+    pack_index INTEGER NOT NULL DEFAULT -1,
     name     TEXT,
     type_id  INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    declared_type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    adjusted_type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    default_text TEXT,
+    default_origin TEXT,
+    reference_semantics TEXT,
     file_id  INTEGER REFERENCES file(id) ON DELETE SET NULL,
     line     INTEGER,
     col      INTEGER,
-    PRIMARY KEY (owner_id, position)
+    PRIMARY KEY (owner_id, position, pack_index)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_parameter_type ON parameter(type_id);
+CREATE INDEX IF NOT EXISTS idx_parameter_declared_type ON parameter(declared_type_id);
+CREATE INDEX IF NOT EXISTS idx_parameter_adjusted_type ON parameter(adjusted_type_id);
 
 CREATE TABLE IF NOT EXISTS symbol_type_kind (
     id   INTEGER PRIMARY KEY,
@@ -1802,6 +1817,90 @@ class Storage:
             # (CREATE TABLE IF NOT EXISTS); no backfill is possible from stored
             # rows -- a C++ reindex populates them. Mirrors storage.cpp.
             changed = True
+        if "parameter" in tables:
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(parameter)")}
+            for col, definition in (
+                ("pack_index", "INTEGER NOT NULL DEFAULT -1"),
+                ("declared_type_id", "INTEGER REFERENCES type_node(id) ON DELETE SET NULL"),
+                ("adjusted_type_id", "INTEGER REFERENCES type_node(id) ON DELETE SET NULL"),
+                ("default_text", "TEXT"),
+                ("default_origin", "TEXT"),
+                ("reference_semantics", "TEXT"),
+            ):
+                if col not in cols:
+                    self._conn.execute(
+                        f"ALTER TABLE parameter ADD COLUMN {col} {definition}"
+                    )
+                    changed = True
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_parameter_declared_type "
+                "ON parameter(declared_type_id)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_parameter_adjusted_type "
+                "ON parameter(adjusted_type_id)"
+            )
+            sql = self._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='parameter'"
+            ).fetchone()[0] or ""
+            if "PRIMARY KEY (owner_id, position, pack_index)" not in sql:
+                self._conn.execute("""
+                    CREATE TABLE parameter_v32 (
+                        owner_id INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+                        position INTEGER NOT NULL,
+                        pack_index INTEGER NOT NULL DEFAULT -1,
+                        name TEXT, type_id INTEGER, declared_type_id INTEGER,
+                        adjusted_type_id INTEGER, default_text TEXT,
+                        default_origin TEXT, reference_semantics TEXT,
+                        file_id INTEGER, line INTEGER, col INTEGER,
+                        PRIMARY KEY (owner_id, position, pack_index)
+                    ) WITHOUT ROWID
+                """)
+                self._conn.execute("INSERT INTO parameter_v32 SELECT owner_id, position, pack_index, name, type_id, declared_type_id, adjusted_type_id, default_text, default_origin, reference_semantics, file_id, line, col FROM parameter")
+                self._conn.execute("DROP TABLE parameter")
+                self._conn.execute("ALTER TABLE parameter_v32 RENAME TO parameter")
+                changed = True
+        if "template_param" in tables:
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(template_param)")}
+            for col in ("type_id", "default_type_id", "default_ref_id"):
+                if col not in cols:
+                    self._conn.execute(f"ALTER TABLE template_param ADD COLUMN {col} INTEGER")
+                    changed = True
+        if "template_arg" in tables:
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(template_arg)")}
+            if "pack_index" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE template_arg ADD COLUMN pack_index INTEGER NOT NULL DEFAULT -1"
+                )
+                changed = True
+            if "type_id" not in cols:
+                self._conn.execute("ALTER TABLE template_arg ADD COLUMN type_id INTEGER")
+                changed = True
+            sql = self._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='template_arg'"
+            ).fetchone()[0] or ""
+            if "PRIMARY KEY (owner_id, position, pack_index)" not in sql:
+                type_fk = (
+                    " REFERENCES type_node(id) ON DELETE SET NULL"
+                    if "type_node" in tables
+                    else ""
+                )
+                self._conn.execute("""
+                    CREATE TABLE template_arg_v32 (
+                        owner_id INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
+                        position INTEGER NOT NULL,
+                        pack_index INTEGER NOT NULL DEFAULT -1,
+                        arg_kind INTEGER NOT NULL,
+                        ref_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
+                        literal TEXT,
+                        type_id INTEGER%s,
+                        PRIMARY KEY (owner_id, position, pack_index)
+                    ) WITHOUT ROWID
+                """ % type_fk)
+                self._conn.execute("INSERT INTO template_arg_v32 SELECT owner_id, position, pack_index, arg_kind, ref_id, literal, type_id FROM template_arg")
+                self._conn.execute("DROP TABLE template_arg")
+                self._conn.execute("ALTER TABLE template_arg_v32 RENAME TO template_arg")
+                changed = True
         if "include_edge" not in tables:
             # v30 -> v31: include tier (include_config/include_edge/
             # include_site/include_macro_use + the directive seed table). All
@@ -3568,12 +3667,16 @@ class Storage:
         param_kind: int,
         name: Optional[str] = None,
         default_txt: Optional[str] = None,
+        type_id: Optional[int] = None,
+        default_type_id: Optional[int] = None,
+        default_ref_id: Optional[int] = None,
     ) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO template_param "
-            "(owner_id, position, param_kind, name, default_txt) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (owner_id, position, param_kind, name, default_txt),
+            "(owner_id, position, param_kind, name, default_txt, type_id, "
+            "default_type_id, default_ref_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (owner_id, position, param_kind, name, default_txt, type_id,
+             default_type_id, default_ref_id),
         )
 
     def add_template_arg(
@@ -3583,12 +3686,14 @@ class Storage:
         arg_kind: int,
         ref_id: Optional[int] = None,
         literal: Optional[str] = None,
+        pack_index: int = -1,
+        type_id: Optional[int] = None,
     ) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO template_arg "
-            "(owner_id, position, arg_kind, ref_id, literal) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (owner_id, position, arg_kind, ref_id, literal),
+            "(owner_id, position, pack_index, arg_kind, ref_id, literal, type_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (owner_id, position, pack_index, arg_kind, ref_id, literal, type_id),
         )
 
     def delete_edges_for_file(self, file_id: int) -> None:

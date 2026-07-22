@@ -6,6 +6,7 @@
 #include "ast/instantiation_edges.hpp"
 #include "ast/kind_map.hpp"
 #include "ast/location.hpp"
+#include "ast/names.hpp"
 #include "ast/type_use.hpp"
 #include "ast/usr.hpp"
 
@@ -17,10 +18,151 @@
 #include "clang/AST/DeclFriend.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/Basic/SourceManager.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace cidx::ast {
 
 namespace {
+
+std::optional<std::string> source_tokens(const clang::SourceRange range,
+                                         const clang::SourceManager &sm,
+                                         const clang::LangOptions &opts) {
+  if (range.isInvalid()) {
+    return std::nullopt;
+  }
+  const llvm::StringRef text = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(range), sm, opts);
+  if (text.empty()) {
+    return std::nullopt;
+  }
+  std::string out = text.str();
+  const auto first = out.find_first_not_of(" \t\r\n");
+  const auto last = out.find_last_not_of(" \t\r\n");
+  if (first == std::string::npos) {
+    return std::nullopt;
+  }
+  return out.substr(first, last - first + 1);
+}
+
+std::optional<std::string> default_tokens(const clang::ParmVarDecl *param,
+                                          const clang::SourceManager &sm,
+                                          const clang::LangOptions &opts) {
+  if (!param->hasDefaultArg()) {
+    return std::nullopt;
+  }
+  return source_tokens(param->getDefaultArgRange(), sm, opts);
+}
+
+std::optional<std::string>
+reference_semantics(const clang::FunctionDecl *fn,
+                    const clang::ParmVarDecl *param) {
+  if (!param->getType()->isReferenceType()) {
+    return std::nullopt;
+  }
+  const auto *ref = param->getType()->getAs<clang::RValueReferenceType>();
+  if (ref == nullptr) {
+    return std::string("ordinary");
+  }
+  const clang::QualType referred = ref->getPointeeTypeAsWritten();
+  if (referred.hasLocalQualifiers() ||
+      !llvm::isa<clang::TemplateTypeParmType>(referred.getTypePtr())) {
+    return std::string("ordinary");
+  }
+  const auto *templated = fn->getDescribedFunctionTemplate();
+  if (fn->getPrimaryTemplate() != nullptr) {
+    return std::string("from-forwarding");
+  }
+  if (templated == nullptr) {
+    return std::string("ordinary");
+  }
+  return std::string("forwarding");
+}
+
+std::string default_origin(const clang::ASTContext &context,
+                           const clang::FunctionDecl *fn) {
+  if (const auto *primary = fn->getPrimaryTemplate()) {
+    return qualified_name(context, primary->getTemplatedDecl());
+  }
+  int ordinal = 1;
+  for (const clang::FunctionDecl *prev = fn->getPreviousDecl(); prev != nullptr;
+       prev = prev->getPreviousDecl()) {
+    ++ordinal;
+  }
+  int redecl_count = 0;
+  for (const clang::FunctionDecl *redecl : fn->redecls()) {
+    (void)redecl;
+    ++redecl_count;
+  }
+  if (redecl_count > 1) {
+    return "declaration " + std::to_string(ordinal);
+  }
+  if (fn->getPreviousDecl() != nullptr || fn->getMostRecentDecl() != fn) {
+    return "declaration " + std::to_string(ordinal);
+  }
+  return qualified_name(context, fn);
+}
+
+struct DefaultFact {
+  std::optional<std::string> text;
+  std::optional<std::string> origin;
+};
+
+int declaration_ordinal(const clang::FunctionDecl *fn) {
+  int ordinal = 1;
+  for (const clang::FunctionDecl *prev = fn->getPreviousDecl(); prev != nullptr;
+       prev = prev->getPreviousDecl()) {
+    ++ordinal;
+  }
+  return ordinal;
+}
+
+DefaultFact inspect_default(const clang::ASTContext &context,
+                            const clang::SourceManager &source_manager,
+                            const clang::FunctionDecl *decl,
+                            unsigned position) {
+  if (position >= decl->getNumParams()) {
+    return {};
+  }
+  const clang::ParmVarDecl *param = decl->getParamDecl(position);
+  if (!param->hasDefaultArg() || param->hasInheritedDefaultArg()) {
+    return {};
+  }
+  DefaultFact out;
+  out.text = default_tokens(param, source_manager, context.getLangOpts());
+  if (out.text) {
+    out.origin = default_origin(context, decl);
+    const clang::FunctionDecl *latest = decl->getMostRecentDecl();
+    if (latest != decl || latest->getPreviousDecl() != nullptr) {
+      out.origin = "declaration " + std::to_string(declaration_ordinal(decl));
+    }
+  }
+  return out;
+}
+
+DefaultFact effective_default(const clang::ASTContext &context,
+                              const clang::SourceManager &source_manager,
+                              const clang::FunctionDecl *fn,
+                              unsigned position) {
+  if (const auto *primary = fn->getPrimaryTemplate()) {
+    return inspect_default(context, source_manager, primary->getTemplatedDecl(),
+                           position);
+  }
+  if (const auto *pattern = fn->getTemplateInstantiationPattern()) {
+    if (DefaultFact fact =
+            inspect_default(context, source_manager, pattern, position);
+        fact.text) {
+      return fact;
+    }
+  }
+  for (const clang::FunctionDecl *decl : fn->redecls()) {
+    if (DefaultFact fact =
+            inspect_default(context, source_manager, decl, position);
+        fact.text) {
+      return fact;
+    }
+  }
+  return inspect_default(context, source_manager, fn, position);
+}
 
 // The templated pattern is represented by its template decl (one libclang
 // cursor); handlers must not fire twice.
@@ -126,6 +268,122 @@ void DeclarationEdgeVisitor::emit_signature_uses(
   emit_signature_types(fn, *fn_sym);
 }
 
+std::optional<std::pair<unsigned, unsigned>>
+DeclarationEdgeVisitor::concrete_pack_info(
+    const clang::FunctionDecl *fn,
+    const clang::FunctionDecl *template_pattern) {
+  if (template_pattern == nullptr ||
+      fn->getNumParams() <= template_pattern->getNumParams()) {
+    return std::nullopt;
+  }
+  const auto *args = fn->getTemplateSpecializationArgs();
+  if (args == nullptr) {
+    return std::nullopt;
+  }
+  for (unsigned position = 0; position < template_pattern->getNumParams();
+       ++position) {
+    if (!llvm::isa<clang::PackExpansionType>(
+            template_pattern->getParamDecl(position)->getType())) {
+      continue;
+    }
+    for (unsigned index = 0; index < args->size(); ++index) {
+      if (args->get(index).getKind() == clang::TemplateArgument::Pack) {
+        return std::pair{position, args->get(index).pack_size()};
+      }
+    }
+    break;
+  }
+  return std::nullopt;
+}
+
+ParameterRecord DeclarationEdgeVisitor::signature_parameter_base(
+    const clang::FunctionDecl *fn, const clang::ParmVarDecl *param,
+    unsigned position) {
+  ParameterRecord record;
+  record.position = position;
+  if (!param->getName().empty()) {
+    record.name = param->getNameAsString();
+  }
+  const clang::QualType declared = param->getTypeSourceInfo() != nullptr
+                                       ? param->getTypeSourceInfo()->getType()
+                                       : param->getType();
+  clang::QualType adjusted = param->getType();
+  if (!adjusted->isReferenceType()) {
+    clang::Qualifiers quals = adjusted.getLocalQualifiers();
+    quals.removeConst();
+    quals.removeVolatile();
+    adjusted = clang::QualType(adjusted.getTypePtr(), quals.getAsOpaqueValue());
+  }
+  record.type_id = types_.intern(adjusted);
+  record.adjusted_type_id = record.type_id;
+  record.declared_type_id = types_.intern(declared);
+  (void)fn;
+  return record;
+}
+
+void DeclarationEdgeVisitor::fill_signature_parameter(
+    const clang::FunctionDecl *fn, const clang::ParmVarDecl *param,
+    const clang::FunctionDecl *template_pattern, unsigned position,
+    ParameterRecord &record) {
+  const DefaultFact default_fact =
+      effective_default(context_, source_manager_, fn, position);
+  record.default_text = default_fact.text;
+  record.reference_semantics = reference_semantics(fn, param);
+  record.default_origin = default_fact.origin;
+  const ExpansionLoc loc = expansion_loc(context_, param->getLocation());
+  if (loc.file == target_file_) {
+    record.file_id = file_id_;
+    record.line = loc.line;
+    record.col = loc.col;
+  }
+  const bool is_pack_parameter =
+      llvm::isa<clang::PackExpansionType>(param->getType()) ||
+      (template_pattern != nullptr &&
+       position < template_pattern->getNumParams() &&
+       llvm::isa<clang::PackExpansionType>(
+           template_pattern->getParamDecl(position)->getType()));
+  if (is_pack_parameter) {
+    record.pack_index = -1;
+  }
+}
+
+bool DeclarationEdgeVisitor::append_unmapped_pack_parameters(
+    const clang::FunctionDecl *fn, const clang::FunctionDecl *template_pattern,
+    const clang::ParmVarDecl *param, const ParameterRecord &record,
+    std::vector<ParameterRecord> &parameters) {
+  if (template_pattern == nullptr ||
+      !llvm::isa<clang::PackExpansionType>(param->getType())) {
+    return false;
+  }
+  const auto *args = fn->getTemplateSpecializationArgs();
+  if (args == nullptr) {
+    return false;
+  }
+  bool expanded = false;
+  for (unsigned index = 0; index < args->size(); ++index) {
+    if (args->get(index).getKind() != clang::TemplateArgument::Pack) {
+      continue;
+    }
+    const auto &pack = args->get(index).getPackAsArray();
+    for (unsigned pack_index = 0; pack_index < pack.size(); ++pack_index) {
+      if (pack[pack_index].getKind() != clang::TemplateArgument::Type) {
+        continue;
+      }
+      ParameterRecord concrete = record;
+      concrete.pack_index = static_cast<int64_t>(pack_index);
+      concrete.declared_type_id = types_.intern(pack[pack_index].getAsType());
+      concrete.adjusted_type_id = concrete.declared_type_id;
+      concrete.type_id = concrete.declared_type_id;
+      parameters.push_back(std::move(concrete));
+      expanded = true;
+    }
+    if (expanded) {
+      break;
+    }
+  }
+  return expanded;
+}
+
 // v30 signature/type tier: returns relation + one parameter row per position
 // (wholesale refresh, so a signature change never leaves stale rows).
 // Constructors/destructors record parameters but no return type.
@@ -137,25 +395,32 @@ void DeclarationEdgeVisitor::emit_signature_types(const clang::FunctionDecl *fn,
       sink_.add_symbol_type(fn_sym, kSymTypeReturnsK, *ret);
     }
   }
-  std::vector<ParameterRecord> params;
-  params.reserve(fn->getNumParams());
-  for (unsigned i = 0; i < fn->getNumParams(); ++i) {
-    const clang::ParmVarDecl *p = fn->getParamDecl(i);
-    ParameterRecord rec;
-    rec.position = i;
-    if (!p->getName().empty()) {
-      rec.name = p->getNameAsString();
+  const clang::FunctionDecl *template_pattern =
+      fn->getPrimaryTemplate() != nullptr
+          ? fn->getPrimaryTemplate()->getTemplatedDecl()
+          : fn->getTemplateInstantiationPattern();
+  const auto concrete_pack = concrete_pack_info(fn, template_pattern);
+  std::vector<ParameterRecord> parameters;
+  parameters.reserve(fn->getNumParams());
+  for (unsigned position = 0; position < fn->getNumParams(); ++position) {
+    const clang::ParmVarDecl *param = fn->getParamDecl(position);
+    ParameterRecord record = signature_parameter_base(fn, param, position);
+    if (concrete_pack && position >= concrete_pack->first &&
+        position < concrete_pack->first + concrete_pack->second) {
+      record.position = concrete_pack->first;
+      record.pack_index = static_cast<int64_t>(position - concrete_pack->first);
+      parameters.push_back(std::move(record));
+      continue;
     }
-    rec.type_id = types_.intern(p->getType());
-    const ExpansionLoc loc = expansion_loc(context_, p->getLocation());
-    if (loc.file == target_file_) {
-      rec.file_id = file_id_;
-      rec.line = loc.line;
-      rec.col = loc.col;
+    fill_signature_parameter(fn, param, template_pattern, position, record);
+    if (!concrete_pack &&
+        append_unmapped_pack_parameters(fn, template_pattern, param, record,
+                                        parameters)) {
+      continue;
     }
-    params.push_back(std::move(rec));
+    parameters.push_back(std::move(record));
   }
-  sink_.replace_parameters(fn_sym, params);
+  sink_.replace_parameters(fn_sym, parameters);
 }
 
 bool DeclarationEdgeVisitor::in_walk(const clang::Decl *decl) const {
@@ -518,6 +783,7 @@ bool DeclarationEdgeVisitor::VisitCXXMethodDecl(clang::CXXMethodDecl *decl) {
   if (!src) {
     return true;
   }
+  emit_signature_uses(decl);
   // overrides: plain methods only (not ctors/dtors).
   if (!llvm::isa<clang::CXXConstructorDecl>(decl) &&
       !llvm::isa<clang::CXXDestructorDecl>(decl)) {
@@ -593,6 +859,31 @@ bool DeclarationEdgeVisitor::VisitFriendDecl(clang::FriendDecl *decl) {
 }
 
 // -- template_param rows (templates + class partial specializations) ----------
+void DeclarationEdgeVisitor::set_template_default(
+    TemplateParamRecord &record, const clang::TemplateArgumentLoc &argument) {
+  record.default_txt = source_tokens(argument.getSourceRange(), source_manager_,
+                                     context_.getLangOpts());
+  if (!record.default_txt) {
+    std::string printed;
+    llvm::raw_string_ostream os(printed);
+    argument.getArgument().print(context_.getPrintingPolicy(), os,
+                                 /*IncludeType=*/true);
+    os.flush();
+    if (!printed.empty()) {
+      record.default_txt = printed;
+    }
+  }
+  const clang::TemplateArgument &value = argument.getArgument();
+  if (value.getKind() == clang::TemplateArgument::Type) {
+    record.default_type_id = types_.intern(value.getAsType());
+  } else if (value.getKind() == clang::TemplateArgument::Template) {
+    const auto *td = value.getAsTemplate().getAsTemplateDecl();
+    if (td != nullptr) {
+      record.default_ref_id = sink_.lookup_symbol_id(usr_for_decl(td));
+    }
+  }
+}
+
 void DeclarationEdgeVisitor::emit_template_params(
     const clang::TemplateParameterList *params, int64_t owner_id) {
   int64_t pos = 0;
@@ -600,12 +891,26 @@ void DeclarationEdgeVisitor::emit_template_params(
     TemplateParamRecord rec;
     rec.owner_id = owner_id;
     rec.position = pos++;
-    if (llvm::isa<clang::TemplateTypeParmDecl>(p)) {
-      rec.param_kind = 1;
+    if (const auto *type = llvm::dyn_cast<clang::TemplateTypeParmDecl>(p)) {
+      rec.param_kind = type->isParameterPack() ? 4 : 1;
+      if (type->hasDefaultArgument()) {
+        set_template_default(rec, type->getDefaultArgument());
+      }
     } else if (llvm::isa<clang::NonTypeTemplateParmDecl>(p)) {
       rec.param_kind = 2;
+      const auto *non_type = llvm::cast<clang::NonTypeTemplateParmDecl>(p);
+      rec.type_id = types_.intern(non_type->getType());
+      if (non_type->hasDefaultArgument()) {
+        rec.default_type_id = rec.type_id;
+        set_template_default(rec, non_type->getDefaultArgument());
+      }
     } else if (llvm::isa<clang::TemplateTemplateParmDecl>(p)) {
       rec.param_kind = 3;
+      const auto *template_param =
+          llvm::cast<clang::TemplateTemplateParmDecl>(p);
+      if (template_param->hasDefaultArgument()) {
+        set_template_default(rec, template_param->getDefaultArgument());
+      }
     } else {
       continue;
     }
@@ -674,6 +979,7 @@ bool DeclarationEdgeVisitor::VisitFunctionTemplateDecl(
   if (owner_rec != nullptr) {
     emit_lookup_edge(usr, usr_of(owner_rec), 9);
   }
+  emit_signature_uses(decl->getTemplatedDecl());
   emit_template_params(decl->getTemplateParameters(), *id);
   return true;
 }
@@ -710,6 +1016,7 @@ void DeclarationEdgeVisitor::emit_callable_identity(
     const auto dst_id = sink_.lookup_symbol_id(usr_for_decl(fd));
     if (dst_id) {
       emit_method_owner(sink_, mint_, targ_encoder_, *dst_id, method);
+      emit_signature_uses(fd);
     }
     return;
   }
@@ -737,6 +1044,7 @@ void DeclarationEdgeVisitor::emit_callable_identity(
   const int64_t dst_id = sink_.mint_symbol(*req);
   emit_callable_template_identity(sink_, mint_, targ_encoder_, dst_id, fd,
                                   *info, {});
+  emit_signature_uses(fd);
 }
 
 // Lexically written explicit specializations (free and member) land here.

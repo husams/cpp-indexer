@@ -29,11 +29,11 @@ Feature: Indexing a member function template inside a struct
     Then the index holds exactly these symbols:
       | usr                                          | spelling      | qual_name              | kind              | type_info      | line | col | end_line | end_col | is_definition | is_instantiation |
       | c:@S@Calculator                              | Calculator    | Calculator             | struct            | Calculator     | 1    | 1   | 6        | 2       | true          | false            |
-      | c:@S@Calculator@FT@>1#Tadd#t0.0#S0_#S0_#     | add           | Calculator::add(T, T)             | function-template | T (T, T)       | 2    | 5   | 5        | 6       | true          | false            |
+      | c:@S@Calculator@FT@>1#Tadd#t0.0#S0_#S0_#     | add           | Calculator::add<T>(T, T)         | function-template | T (T, T)       | 2    | 5   | 5        | 6       | true          | false            |
       | c:@S@Calculator@F@add<#I>#I#I#               | add           | Calculator::add<int>(int, int)    | method            | int (int, int) | 9    | 1   | 12       | 2       | true          | false            |
       | c:@F@double_number#d#                        | double_number | double_number(double)             | function          | double (double)| 14   | 1   | 17       | 2       | true          | false            |
       | c:@S@Calculator@F@Calculator#                | Calculator    | Calculator::Calculator()          | constructor       | void () noexcept      | 1    | 8   | -        | -       | false         | false            |
-      | c:@S@Calculator@F@add<#d>#d#d#               | add           | Calculator::add<>(double, double) | method            | double (double, double)| 3    | 7   | -        | -       | false         | true             |
+      | c:@S@Calculator@F@add<#d>#d#d#               | add           | Calculator::add<double>(double, double) | method            | double (double, double)| 3    | 7   | -        | -       | false         | true             |
 
   Scenario: The member template declares one type parameter and one instantiation
     Then symbol "usr:c:@S@Calculator@FT@>1#Tadd#t0.0#S0_#S0_#" declares the template parameters:
@@ -86,7 +86,7 @@ Feature: Indexing a member function template inside a struct
     Then symbol "double_number" calls:
       | qual_name                         | kind        | line |
       | Calculator::Calculator()          | constructor | 1    |
-      | Calculator::add<>(double, double) | method      | 3    |
+      | Calculator::add<double>(double, double) | method      | 3    |
     And symbol "usr:c:@S@Calculator@F@add<#d>#d#d#" is called by:
       | qual_name             | kind     | line |
       | double_number(double) | function | 14   |

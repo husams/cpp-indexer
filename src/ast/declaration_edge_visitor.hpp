@@ -8,9 +8,9 @@
 //   inherits(2)    derived -> base (+ access, virtual), from base specifiers
 //   instantiates(5) CRTP: base specialization instance -> primary template
 //   field_of(8)    field -> owning record
-//   method_of(9)   method/ctor/dtor -> owning record (incl. member fn-templates)
-//   overrides(6)   method -> each directly overridden method (minted)
-//   friend(17)     record -> befriended record (lookup-only)
+//   method_of(9)   method/ctor/dtor -> owning record (incl. member
+//   fn-templates) overrides(6)   method -> each directly overridden method
+//   (minted) friend(17)     record -> befriended record (lookup-only)
 //   specializes(4)/instantiates(5) + template_arg rows for class-template
 //                  full/partial specializations / explicit instantiations
 //   specializes(4)/instantiates(5) + template_arg rows for function/method
@@ -35,12 +35,15 @@
 
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace clang {
 class ASTContext;
 class CXXBaseSpecifier;
 class Expr;
+class TemplateArgumentLoc;
+class TemplateParameterList;
 class SourceManager;
 class SourceRange;
 class TypeSourceInfo;
@@ -52,22 +55,24 @@ namespace cidx::ast {
 
 class EdgeSink;
 
-class DeclarationEdgeVisitor : public clang::RecursiveASTVisitor<DeclarationEdgeVisitor> {
+class DeclarationEdgeVisitor
+    : public clang::RecursiveASTVisitor<DeclarationEdgeVisitor> {
 public:
   DeclarationEdgeVisitor(clang::ASTContext &context, EdgeSink &sink,
-              std::string target_file, int64_t file_id);
+                         std::string target_file, int64_t file_id);
 
-  bool VisitNamedDecl(clang::NamedDecl *decl);           // contains
-  bool VisitCXXRecordDecl(clang::CXXRecordDecl *decl);   // inherits (+CRTP)
-  bool VisitFieldDecl(clang::FieldDecl *decl);           // field_of
-  bool VisitCXXMethodDecl(clang::CXXMethodDecl *decl);   // method_of+overrides
-  bool VisitFriendDecl(clang::FriendDecl *decl);         // friend
+  bool VisitNamedDecl(clang::NamedDecl *decl);         // contains
+  bool VisitCXXRecordDecl(clang::CXXRecordDecl *decl); // inherits (+CRTP)
+  bool VisitFieldDecl(clang::FieldDecl *decl);         // field_of
+  bool VisitCXXMethodDecl(clang::CXXMethodDecl *decl); // method_of+overrides
+  bool VisitFriendDecl(clang::FriendDecl *decl);       // friend
   bool VisitClassTemplateDecl(clang::ClassTemplateDecl *decl);
   bool VisitFunctionTemplateDecl(clang::FunctionTemplateDecl *decl);
   bool VisitClassTemplateSpecializationDecl(
       clang::ClassTemplateSpecializationDecl *decl); // specializes/instantiates
   bool VisitClassTemplatePartialSpecializationDecl(
-      clang::ClassTemplatePartialSpecializationDecl *decl); // specializes+params
+      clang::ClassTemplatePartialSpecializationDecl
+          *decl);                                    // specializes+params
   bool VisitFunctionDecl(clang::FunctionDecl *decl); // callable explicit specs
   bool VisitVarDecl(clang::VarDecl *decl);           // type uses + static defs
   bool VisitTypedefNameDecl(clang::TypedefNameDecl *decl); // alias uses/mint
@@ -78,16 +83,15 @@ private:
   bool in_walk(const clang::Decl *decl) const;
 
   std::optional<int64_t> emit_lookup_edge(const std::string &src_usr,
-                                          const std::string &dst_usr,
-                                          int kind);
+                                          const std::string &dst_usr, int kind);
   void emit_contains_edge(const clang::NamedDecl *decl);
   void emit_override_edges(const clang::CXXMethodDecl *decl, int64_t src_id);
-  std::optional<int64_t> specialization_symbol_id(
-      const clang::ClassTemplateSpecializationDecl *decl,
-      const clang::ClassTemplateDecl *primary);
-  bool emit_specializes_edge(
-      const clang::ClassTemplateSpecializationDecl *decl,
-      const clang::ClassTemplateDecl *primary, int64_t spec_id);
+  std::optional<int64_t>
+  specialization_symbol_id(const clang::ClassTemplateSpecializationDecl *decl,
+                           const clang::ClassTemplateDecl *primary);
+  bool emit_specializes_edge(const clang::ClassTemplateSpecializationDecl *decl,
+                             const clang::ClassTemplateDecl *primary,
+                             int64_t spec_id);
   void emit_base_specifier(const clang::NamedDecl *derived,
                            const std::string &derived_usr,
                            const clang::CXXBaseSpecifier &base);
@@ -104,6 +108,8 @@ private:
   friend_targets(const clang::TypeSourceInfo *tsi);
   void emit_template_params(const clang::TemplateParameterList *params,
                             int64_t owner_id);
+  void set_template_default(TemplateParamRecord &record,
+                            const clang::TemplateArgumentLoc &argument);
   // Explicit function/method instantiations live only in specialization
   // lists (never as lexical decls); ownership follows the point of
   // instantiation, not the template's file.
@@ -113,6 +119,22 @@ private:
   // v30 signature/type tier: parameter rows + returns relation for a callable
   // (called alongside emit_signature_uses with the same keyed symbol).
   void emit_signature_types(const clang::FunctionDecl *fn, int64_t fn_sym);
+  static std::optional<std::pair<unsigned, unsigned>>
+  concrete_pack_info(const clang::FunctionDecl *fn,
+                     const clang::FunctionDecl *template_pattern);
+  ParameterRecord signature_parameter_base(const clang::FunctionDecl *fn,
+                                           const clang::ParmVarDecl *param,
+                                           unsigned position);
+  void fill_signature_parameter(const clang::FunctionDecl *fn,
+                                const clang::ParmVarDecl *param,
+                                const clang::FunctionDecl *template_pattern,
+                                unsigned position, ParameterRecord &record);
+  bool
+  append_unmapped_pack_parameters(const clang::FunctionDecl *fn,
+                                  const clang::FunctionDecl *template_pattern,
+                                  const clang::ParmVarDecl *param,
+                                  const ParameterRecord &record,
+                                  std::vector<ParameterRecord> &parameters);
 
   clang::ASTContext &context_;
   clang::SourceManager &source_manager_;

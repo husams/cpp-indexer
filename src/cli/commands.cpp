@@ -87,6 +87,9 @@ int run_command(const ParsedArgs &args, Context &ctx) {
     if (args.what == "signature") {
       return cmd_graph_signature(args, ctx);
     }
+    if (args.what == "template") {
+      return cmd_graph_template(args, ctx);
+    }
     if (args.what == "typeusers") {
       return cmd_graph_typeusers(args, ctx);
     }

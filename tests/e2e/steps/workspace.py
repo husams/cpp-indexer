@@ -126,6 +126,13 @@ class Workspace:
                 candidates = [s for s in candidates if s.col == col]
             return candidates
 
+        def canonical_name(value: str) -> str:
+            return (
+                value.replace(" ", "")
+                .replace("<<", "<")
+                .replace(">>", ">")
+            )
+
         # Qualified name wins over spelling: a constructor's spelling is its
         # class name, so "PointClass" must mean the class, not PointClass().
         hits: list = []
@@ -138,6 +145,35 @@ class Workspace:
                 return hits[0]
             if hits:
                 break
+
+        wanted = canonical_name(name)
+        fuzzy = narrow([
+            s for s in syms if canonical_name(s.name) == wanted
+            or canonical_name(s.name).replace("::", "") == wanted.replace("::", "")
+            or canonical_name(s.name).startswith(wanted + "(")
+        ])
+        if len(fuzzy) == 1:
+            return fuzzy[0]
+        template_base = wanted.split("<", 1)[0]
+        templated = narrow([
+            s for s in syms
+            if s.name == template_base or s.spelling == template_base
+        ])
+        if len(templated) == 1:
+            return templated[0]
+        def signature_key(value: str) -> str:
+            return (
+                value.replace("geo::", "")
+                .replace("const int", "int")
+                .replace("*const", "*")
+                .replace(" ", "")
+            )
+        sig_hits = narrow([
+            s for s in syms
+            if "(" in s.name and signature_key(s.name) == signature_key(name)
+        ])
+        if len(sig_hits) == 1:
+            return sig_hits[0]
 
         detail = "\n".join(
             f"    {s.name!r} kind={s.kind} at {s.line}:{s.col} usr={s.usr}"

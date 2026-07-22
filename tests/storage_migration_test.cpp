@@ -120,21 +120,31 @@ void check_migrated(const std::string &db_path) {
     indexes.insert(st.col_text(0));
   }
   CHECK(indexes == std::set<std::string>{"idx_symbol_spelling",
-                                         "idx_symbol_qual", "idx_symbol_file",
+                                         "idx_symbol_qual",
+                                         "idx_symbol_file",
                                          "idx_symbol_parent",
                                          "idx_symbol_kind",
                                          "idx_symbol_spelling_nc",
                                          "idx_symbol_qual_nc",
-                                         "idx_edge_src", "idx_edge_dst",
+                                         "idx_edge_src",
+                                         "idx_edge_dst",
                                          "idx_call_arg_edge",
                                          "idx_diagnostic_file",
                                          "idx_entity_edge_identity",
                                          "idx_entity_edge_src",
-                                         "idx_entity_edge_dst", "idx_decl_site_symbol", "idx_definition_symbol", "idx_def_edge_src", "idx_def_edge_dst", "idx_possible_call_src", "idx_possible_call_dst",
+                                         "idx_entity_edge_dst",
+                                         "idx_decl_site_symbol",
+                                         "idx_definition_symbol",
+                                         "idx_def_edge_src",
+                                         "idx_def_edge_dst",
+                                         "idx_possible_call_src",
+                                         "idx_possible_call_dst",
                                          "idx_type_node_decl_usr",
                                          "idx_type_node_canonical",
                                          "idx_type_edge_dst",
                                          "idx_parameter_type",
+                                         "idx_parameter_declared_type",
+                                         "idx_parameter_adjusted_type",
                                          "idx_symbol_type_type",
                                          "idx_include_config_digest",
                                          "idx_include_edge_dst",
@@ -247,7 +257,8 @@ TEST_CASE("migrated DB stays fully usable through the Storage API") {
 // v13 → v14 migration (portable-paths): component.version column + label table
 // ---------------------------------------------------------------------------
 
-TEST_CASE("v13 DB migrates to v14: component.version added, label table created") {
+TEST_CASE(
+    "v13 DB migrates to v14: component.version added, label table created") {
   const std::string tmp = make_temp_dir();
   const std::string path = tmp + "/v13.db";
 
@@ -379,18 +390,18 @@ TEST_CASE("v28 -> v29: template_arg arg_kind remapped to the canonical codes") {
   {
     cidx::SqliteDb raw(path);
     raw.exec("INSERT INTO symbol (id, usr, spelling, kind) VALUES "
-             "(1, 'c:@S@Spec', 'Spec', 2),"    // struct owner (class-spec path)
-             "(2, 'c:@F@fn', 'fn', 8)");       // function owner (callable path)
+             "(1, 'c:@S@Spec', 'Spec', 2)," // struct owner (class-spec path)
+             "(2, 'c:@F@fn', 'fn', 8)");    // function owner (callable path)
     raw.exec("INSERT INTO template_arg (owner_id, position, arg_kind) VALUES "
-             "(1, 0, 8)," // legacy Pack           -> 4
-             "(1, 1, 5)," // legacy Template       -> 3
-             "(1, 2, 6)," // legacy TmplExpansion  -> 3
-             "(1, 3, 7)," // legacy Expression     -> 2
-             "(1, 4, 3)," // legacy NullPtr        -> 2 (record owner)
-             "(1, 5, 0)," // legacy Null           -> row deleted
-             "(1, 6, 1)," // in-contract type      -> unchanged
-             "(2, 0, 4)," // callable pack         -> unchanged
-             "(2, 1, 3)");// callable tmpl-tmpl    -> unchanged (NOT NullPtr)
+             "(1, 0, 8),"  // legacy Pack           -> 4
+             "(1, 1, 5),"  // legacy Template       -> 3
+             "(1, 2, 6),"  // legacy TmplExpansion  -> 3
+             "(1, 3, 7),"  // legacy Expression     -> 2
+             "(1, 4, 3),"  // legacy NullPtr        -> 2 (record owner)
+             "(1, 5, 0),"  // legacy Null           -> row deleted
+             "(1, 6, 1),"  // in-contract type      -> unchanged
+             "(2, 0, 4),"  // callable pack         -> unchanged
+             "(2, 1, 3)"); // callable tmpl-tmpl    -> unchanged (NOT NullPtr)
     raw.exec("UPDATE meta SET value = '28' WHERE key = 'schema_version'");
   }
   {
@@ -399,9 +410,9 @@ TEST_CASE("v28 -> v29: template_arg arg_kind remapped to the canonical codes") {
   cidx::SqliteDb raw(path);
   CHECK(meta_version(raw) == std::to_string(cidx::kSchemaVersion));
   auto q = [&](int owner, int pos) -> std::string {
-    auto st = raw.prepare("SELECT arg_kind FROM template_arg WHERE owner_id = " +
-                          std::to_string(owner) + " AND position = " +
-                          std::to_string(pos));
+    auto st = raw.prepare(
+        "SELECT arg_kind FROM template_arg WHERE owner_id = " +
+        std::to_string(owner) + " AND position = " + std::to_string(pos));
     if (!st.step()) {
       return "<gone>";
     }
@@ -450,7 +461,7 @@ TEST_CASE("v29 -> v30: signature/type tier tables created, version stamped") {
     raw.exec("UPDATE meta SET value = '29' WHERE key = 'schema_version'");
   }
   {
-    cidx::Storage db(path); // migration runs here
+    cidx::Storage db(path);                           // migration runs here
     CHECK(db.get_component_by_name("c").has_value()); // old data intact
     // The migrated DB accepts the new tier end-to-end.
     cidx::TypeNode n;
@@ -463,10 +474,10 @@ TEST_CASE("v29 -> v30: signature/type tier tables created, version stamped") {
   cidx::SqliteDb raw(path);
   // migrate() stamps kSchemaVersion, not the version of the block that fired:
   // a v29 DB reopened by a v31 build lands on 31 in one step.
-  CHECK(meta_version(raw) == "31");
+  CHECK(meta_version(raw) == "32");
   auto st = raw.prepare("SELECT COUNT(*) FROM type_kind");
   REQUIRE(st.step());
-  CHECK(st.col_int64(0) == 11); // seed rows present
+  CHECK(st.col_int64(0) == 13); // seed rows present
 }
 
 TEST_CASE("v30 -> v31: include tier tables created, version stamped") {
@@ -493,9 +504,9 @@ TEST_CASE("v30 -> v31: include tier tables created, version stamped") {
     raw.exec("UPDATE meta SET value = '30' WHERE key = 'schema_version'");
   }
   {
-    cidx::Storage db(path); // migration runs here
+    cidx::Storage db(path);                           // migration runs here
     CHECK(db.get_component_by_name("c").has_value()); // old data intact
-    CHECK_FALSE(db.include_graph_populated()); // no backfill is possible
+    CHECK_FALSE(db.include_graph_populated());        // no backfill is possible
 
     // The migrated DB accepts the new tier end-to-end.
     cidx::IncludeConfig cfg;
@@ -514,7 +525,7 @@ TEST_CASE("v30 -> v31: include tier tables created, version stamped") {
     CHECK(db.include_graph_populated());
   }
   cidx::SqliteDb raw(path);
-  CHECK(meta_version(raw) == "31");
+  CHECK(meta_version(raw) == "32");
   auto st = raw.prepare("SELECT COUNT(*) FROM include_directive_kind");
   REQUIRE(st.step());
   CHECK(st.col_int64(0) == 5); // seed rows present

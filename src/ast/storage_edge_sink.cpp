@@ -142,6 +142,10 @@ void StorageEdgeSink::add_template_param(const TemplateParamRecord &param) {
   p.position = param.position;
   p.param_kind = param.param_kind;
   p.name = param.name;
+  p.default_txt = param.default_txt;
+  p.type_id = param.type_id;
+  p.default_type_id = param.default_type_id;
+  p.default_ref_id = param.default_ref_id;
   db_.add_template_param(p);
 }
 
@@ -149,9 +153,11 @@ void StorageEdgeSink::add_template_arg(const TemplateArgRecord &arg) {
   cidx::TemplateArg a;
   a.owner_id = arg.owner_id;
   a.position = arg.position;
+  a.pack_index = arg.pack_index;
   a.arg_kind = arg.arg_kind;
   a.ref_id = arg.ref_id;
   a.literal = arg.literal;
+  a.type_id = arg.type_id;
   db_.add_template_arg(a);
 }
 
@@ -181,8 +187,14 @@ void StorageEdgeSink::replace_parameters(
     cidx::Parameter row;
     row.owner_id = owner_id;
     row.position = p.position;
+    row.pack_index = p.pack_index;
     row.name = p.name;
     row.type_id = p.type_id;
+    row.declared_type_id = p.declared_type_id;
+    row.adjusted_type_id = p.adjusted_type_id;
+    row.default_text = p.default_text;
+    row.default_origin = p.default_origin;
+    row.reference_semantics = p.reference_semantics;
     row.file_id = p.file_id;
     row.line = p.line;
     row.col = p.col;

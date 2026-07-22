@@ -27,6 +27,7 @@ packages = ["indexer"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = ["spec: executable BDD specification"]
 
 [dependency-groups]
 dev = [
