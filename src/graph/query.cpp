@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -775,12 +776,74 @@ std::optional<GraphQuery::TypeInfo> GraphQuery::type_info(int64_t type_id) {
 
 GraphQuery::SignatureInfo GraphQuery::signature(int64_t sym_id) {
   SignatureInfo out;
+  const auto named_decl = [this](TypeInfo type) -> std::optional<std::string> {
+    std::set<int64_t> seen;
+    while (seen.insert(type.id).second) {
+      if (type.decl_usr) {
+        if (const auto decl = get_by_usr(*type.decl_usr)) {
+          return decl->name;
+        }
+      }
+      std::vector<std::pair<int64_t, int64_t>> children;
+      if (type.kind == "alias") {
+        children.emplace_back(3, 0);
+      } else if (type.kind == "pointer" ||
+                 type.kind == "lvalue-reference" ||
+                 type.kind == "rvalue-reference") {
+        children.emplace_back(1, 0);
+      } else if (type.kind == "array") {
+        children.emplace_back(2, 0);
+      } else if (type.kind == "member-data-pointer" ||
+                 type.kind == "member-function-pointer") {
+        children.emplace_back(7, 0);
+        children.emplace_back(8, 0);
+      } else if (type.kind == "function") {
+        children.emplace_back(4, 0);
+      }
+      std::optional<TypeInfo> child;
+      for (const auto [kind, position] : children) {
+        child = type_child(type.id, kind, position);
+        if (child) {
+          break;
+        }
+      }
+      if (!child) {
+        break;
+      }
+      type = *child;
+    }
+    return std::nullopt;
+  };
+  const auto facts = [this, &named_decl](const TypeInfo &declared,
+                                         const TypeInfo &adjusted) {
+    std::string mode = "value";
+    TypeInfo base = adjusted;
+    if (declared.kind == "lvalue-reference" ||
+        declared.kind == "rvalue-reference") {
+      mode = declared.kind;
+      base = declared;
+      while (const auto child = type_child(base.id, 1)) {
+        base = *child;
+        if (base.kind != "lvalue-reference" &&
+            base.kind != "rvalue-reference") {
+          break;
+        }
+      }
+    }
+    const std::string value_kind = base.spelling.ends_with("...")
+                                       ? "pack-expansion"
+                                       : base.kind;
+    return std::tuple{mode, value_kind, named_decl(base)};
+  };
   if (const auto tid = db_.symbol_type_of(sym_id, kSymbolTypeReturns)) {
     out.returns = type_info(*tid);
   }
   for (const Parameter &p : db_.parameters_of(sym_id)) {
     ParamInfo pi;
     pi.position = p.position;
+    if (p.pack_index >= 0) {
+      pi.pack_index = p.pack_index;
+    }
     pi.name = p.name;
     if (p.type_id) {
       pi.type = type_info(*p.type_id);
@@ -794,6 +857,10 @@ GraphQuery::SignatureInfo GraphQuery::signature(int64_t sym_id) {
       pi.adjusted_type = type_info(*p.adjusted_type_id);
     } else {
       pi.adjusted_type = pi.type;
+    }
+    if (pi.declared_type && pi.adjusted_type) {
+      std::tie(pi.mode, pi.value_kind, pi.named_decl) =
+          facts(*pi.declared_type, *pi.adjusted_type);
     }
     pi.default_text = p.default_text;
     pi.default_origin = p.default_origin;

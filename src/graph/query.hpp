@@ -219,10 +219,14 @@ public:
   };
   struct ParamInfo {
     int64_t position = 0;
+    std::optional<int64_t> pack_index;
     std::optional<std::string> name;
     std::optional<TypeInfo> type;
     std::optional<TypeInfo> declared_type;
     std::optional<TypeInfo> adjusted_type;
+    std::string mode = "value";
+    std::string value_kind = "other";
+    std::optional<std::string> named_decl;
     std::optional<std::string> default_text;
     std::optional<std::string> default_origin;
     std::optional<std::string> reference_semantics;

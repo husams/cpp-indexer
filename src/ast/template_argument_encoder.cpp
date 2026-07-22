@@ -100,13 +100,22 @@ TemplateArgumentEncoder::emit(int64_t owner_id, int64_t position,
   if (arg.getKind() == clang::TemplateArgument::Pack) {
     std::optional<TemplateArgRecord> first;
     const auto &pack = arg.getPackAsArray();
+    if (pack.empty()) {
+      const auto record = encode(owner_id, position, arg);
+      if (record) {
+        sink_.add_template_arg(*record);
+      }
+      return record;
+    }
     for (unsigned i = 0; i < pack.size(); ++i) {
       auto record = encode(owner_id, position, pack[i]);
-      if (!record)
+      if (!record) {
         continue;
+      }
       record->pack_index = static_cast<int64_t>(i);
-      if (!first)
+      if (!first) {
         first = record;
+      }
       sink_.add_template_arg(*record);
     }
     return first;

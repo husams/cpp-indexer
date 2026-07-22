@@ -77,6 +77,10 @@ public:
   bool VisitVarDecl(clang::VarDecl *decl);           // type uses + static defs
   bool VisitTypedefNameDecl(clang::TypedefNameDecl *decl); // alias uses/mint
 
+  // Reuse the declaration signature extraction for call-site minted symbols.
+  void emit_signature_types_for(const clang::FunctionDecl *fn,
+                                int64_t fn_sym);
+
 private:
   // The decl-level walk prunes at function bodies and only covers cursors of
   // the target file (for_file_cursors_p).
@@ -122,8 +126,7 @@ private:
   static std::optional<std::pair<unsigned, unsigned>>
   concrete_pack_info(const clang::FunctionDecl *fn,
                      const clang::FunctionDecl *template_pattern);
-  ParameterRecord signature_parameter_base(const clang::FunctionDecl *fn,
-                                           const clang::ParmVarDecl *param,
+  ParameterRecord signature_parameter_base(const clang::ParmVarDecl *param,
                                            unsigned position);
   void fill_signature_parameter(const clang::FunctionDecl *fn,
                                 const clang::ParmVarDecl *param,

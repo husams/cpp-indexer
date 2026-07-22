@@ -527,13 +527,16 @@ void Storage::migrate() {
         param_sql = st.col_text(0);
     }
     if (!param_sql.contains("PRIMARY KEY (owner_id, position, pack_index)")) {
+      db_.exec("PRAGMA foreign_keys = OFF");
       db_.exec(
           "CREATE TABLE parameter_v32 (owner_id INTEGER NOT NULL REFERENCES "
           "symbol(id) ON DELETE CASCADE, position INTEGER NOT NULL, pack_index "
-          "INTEGER NOT NULL DEFAULT -1, name TEXT, type_id INTEGER, "
-          "declared_type_id INTEGER, adjusted_type_id INTEGER, default_text "
-          "TEXT, default_origin TEXT, reference_semantics TEXT, file_id "
-          "INTEGER, line INTEGER, col INTEGER, PRIMARY KEY (owner_id, "
+          "INTEGER NOT NULL DEFAULT -1, name TEXT, type_id INTEGER REFERENCES "
+          "type_node(id) ON DELETE SET NULL, declared_type_id INTEGER REFERENCES "
+          "type_node(id) ON DELETE SET NULL, adjusted_type_id INTEGER REFERENCES "
+          "type_node(id) ON DELETE SET NULL, default_text TEXT, default_origin "
+          "TEXT, reference_semantics TEXT, file_id INTEGER REFERENCES file(id) "
+          "ON DELETE SET NULL, line INTEGER, col INTEGER, PRIMARY KEY (owner_id, "
           "position, pack_index)) WITHOUT ROWID");
       db_.exec("INSERT INTO parameter_v32 SELECT owner_id, position, "
                "pack_index, name, type_id, declared_type_id, adjusted_type_id, "
@@ -541,6 +544,7 @@ void Storage::migrate() {
                "line, col FROM parameter");
       db_.exec("DROP TABLE parameter");
       db_.exec("ALTER TABLE parameter_v32 RENAME TO parameter");
+      db_.exec("PRAGMA foreign_keys = ON");
       changed = true;
     }
   }
@@ -575,6 +579,7 @@ void Storage::migrate() {
         arg_sql = st.col_text(0);
     }
     if (!arg_sql.contains("PRIMARY KEY (owner_id, position, pack_index)")) {
+      db_.exec("PRAGMA foreign_keys = OFF");
       db_.exec(
           "CREATE TABLE template_arg_v32 (owner_id INTEGER NOT NULL REFERENCES "
           "symbol(id) ON DELETE CASCADE, position INTEGER NOT NULL, pack_index "
@@ -587,6 +592,7 @@ void Storage::migrate() {
           "arg_kind, ref_id, literal, type_id FROM template_arg");
       db_.exec("DROP TABLE template_arg");
       db_.exec("ALTER TABLE template_arg_v32 RENAME TO template_arg");
+      db_.exec("PRAGMA foreign_keys = ON");
       changed = true;
     }
   }

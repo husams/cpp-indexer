@@ -530,3 +530,89 @@ TEST_CASE("v30 -> v31: include tier tables created, version stamped") {
   REQUIRE(st.step());
   CHECK(st.col_int64(0) == 5); // seed rows present
 }
+
+TEST_CASE("v31 -> v32: parameter and template-argument foreign keys survive") {
+  const std::string tmp = make_temp_dir();
+  const std::string path = tmp + "/v31.db";
+  int64_t owner_id = -1;
+  int64_t type_id = -1;
+  int64_t file_id = -1;
+  {
+    cidx::Storage db(path);
+    db.add_component("c", "/data/c");
+    file_id = db.add_file_path("/data/c/main.cpp");
+    cidx::Symbol owner;
+    owner.usr = "c:@F@owner";
+    owner.spelling = "owner";
+    owner.kind = "function";
+    owner.file_id = file_id;
+    owner_id = db.add_symbol(owner);
+    cidx::TypeNode type;
+    type.type_key = "b:int";
+    type.spelling = "int";
+    type.kind = cidx::kTypeKindBuiltin;
+    type_id = db.intern_type_node(type);
+  }
+  {
+    cidx::SqliteDb raw(path);
+    raw.exec("DROP TABLE parameter");
+    raw.exec("DROP TABLE template_arg");
+    raw.exec("CREATE TABLE parameter (owner_id INTEGER NOT NULL, "
+             "position INTEGER NOT NULL, name TEXT, type_id INTEGER, "
+             "file_id INTEGER, line INTEGER, col INTEGER, "
+             "PRIMARY KEY (owner_id, position)) WITHOUT ROWID");
+    raw.exec("CREATE TABLE template_arg (owner_id INTEGER NOT NULL, "
+             "position INTEGER NOT NULL, arg_kind INTEGER NOT NULL, "
+             "ref_id INTEGER, literal TEXT, type_id INTEGER, "
+             "PRIMARY KEY (owner_id, position)) WITHOUT ROWID");
+    auto parameter = raw.prepare(
+        "INSERT INTO parameter(owner_id, position, name, type_id, file_id, "
+        "line, col) VALUES (?, 0, 'value', ?, ?, 7, 9)");
+    parameter.bind(1, owner_id);
+    parameter.bind(2, type_id);
+    parameter.bind(3, file_id);
+    parameter.step_done();
+    auto argument = raw.prepare(
+        "INSERT INTO template_arg(owner_id, position, arg_kind, literal, "
+        "type_id) VALUES (?, 0, 1, 'int', ?)");
+    argument.bind(1, owner_id);
+    argument.bind(2, type_id);
+    argument.step_done();
+    raw.exec("UPDATE meta SET value = '31' WHERE key = 'schema_version'");
+  }
+  {
+    cidx::Storage db(path);
+    CHECK(db.type_node_by_id(type_id).has_value());
+  }
+
+  cidx::SqliteDb raw(path);
+  CHECK(meta_version(raw) == "32");
+  auto parameter = raw.prepare(
+      "SELECT type_id, declared_type_id, adjusted_type_id, file_id "
+      "FROM parameter WHERE owner_id = ? AND position = 0 AND pack_index = -1");
+  parameter.bind(1, owner_id);
+  REQUIRE(parameter.step());
+  CHECK(parameter.col_int64(0) == type_id);
+  CHECK(parameter.col_is_null(1));
+  CHECK(parameter.col_is_null(2));
+  CHECK(parameter.col_int64(3) == file_id);
+  auto argument = raw.prepare(
+      "SELECT type_id, pack_index FROM template_arg WHERE owner_id = ?");
+  argument.bind(1, owner_id);
+  REQUIRE(argument.step());
+  CHECK(argument.col_int64(0) == type_id);
+  CHECK(argument.col_int64(1) == -1);
+
+  std::set<std::string> parameter_fks;
+  auto fk = raw.prepare("PRAGMA foreign_key_list(parameter)");
+  while (fk.step())
+    parameter_fks.insert(fk.col_text(2));
+  CHECK(parameter_fks.contains("type_node"));
+  CHECK(parameter_fks.contains("file"));
+  std::set<std::string> argument_fks;
+  fk = raw.prepare("PRAGMA foreign_key_list(template_arg)");
+  while (fk.step())
+    argument_fks.insert(fk.col_text(2));
+  CHECK(argument_fks.contains("type_node"));
+  CHECK(meta_version(raw) == "32");
+}

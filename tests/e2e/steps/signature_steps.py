@@ -279,17 +279,43 @@ def effective_defaults(workspace: Workspace, datatable):
 
 @then(parsers.parse("declaration {count:d} does not erase either default"))
 def defaults_retained(workspace: Workspace, count: int):
-    assert True
+    selector = getattr(workspace, "_last_signature_selector", None)
+    assert selector, "no callable selected for the redeclaration default check"
+    symbol = workspace.resolve(selector)
+    assert len(workspace.graph.declaration_sites(symbol)) == count
+    slots = [s for s in workspace.graph.signature_slots(symbol)
+             if s.role == "parameter"]
+    assert len(slots) == 2, (selector, slots)
+    assert {s.position for s in slots if s.default is not None} == {0, 1}
+    assert {s.default_origin for s in slots if s.default is not None} == {
+        "declaration 1", "declaration 2"
+    }
 
 
 @then(parsers.parse('after removing each reference layer, both canonical referent types are "{type_name}"'))
 def canonical_referents(workspace: Workspace, type_name: str):
-    assert type_name
+    selector = getattr(workspace, "_last_signature_selector", None)
+    assert selector, "no callable selected for the canonical referent check"
+    slots = workspace.graph.signature_slots(workspace.resolve(selector))
+    function_refs = [s for s in slots if s.position in {2, 3}]
+    assert len(function_refs) == 2
+    assert all(
+        s.declared_type
+        and s.declared_type.canonical
+        and s.declared_type.canonical.replace(" (&)", " ").replace(" (&&)", " ")
+        == type_name
+        for s in function_refs
+    ), function_refs
 
 
 @then(parsers.parse('member-function type of parameter {position:d} has cv-qualifier "{qual}"'))
 def member_cv(workspace: Workspace, position: int, qual: str):
-    assert qual == "const"
+    selector = getattr(workspace, "_last_signature_selector", None)
+    assert selector, "no callable selected for the member-function type check"
+    parameter = _parameter(workspace, selector, position)
+    spelling = parameter.declared_type.spelling
+    canonical = parameter.declared_type.canonical or ""
+    assert qual in spelling or qual in canonical, parameter
 
 
 @then(parsers.parse('the member-function type of parameter {position:d} has cv-qualifier "{qual}"'))
@@ -299,7 +325,11 @@ def member_cv_the(workspace: Workspace, position: int, qual: str):
 
 @then(parsers.parse('member-data pointer parameter {position:d} has value type "{type_name}"'))
 def member_data_value(workspace: Workspace, position: int, type_name: str):
-    assert type_name
+    selector = getattr(workspace, "_last_signature_selector", None)
+    assert selector, "no callable selected for the member-data pointer check"
+    parameter = _parameter(workspace, selector, position)
+    assert parameter.value_kind == "member-data-pointer"
+    assert type_name in parameter.declared_type.spelling, parameter
 
 
 @then(parsers.parse('its function type has component slots:'))
@@ -356,7 +386,12 @@ def no_synthetic_edge(workspace: Workspace):
 
 @then("the explicit specialization does not declare a new default argument")
 def explicit_no_new_default(workspace: Workspace):
-    assert True
+    symbol = workspace.resolve("identity<Widget>(Widget)")
+    slots = [s for s in workspace.graph.signature_slots(symbol)
+             if s.role == "parameter" and s.position == 0]
+    assert len(slots) == 1
+    assert slots[0].default == "T{}"
+    assert slots[0].default_origin == "identity<T>(T)"
 
 
 @then(parsers.parse('callable "{selector}" has no template relationship'))
@@ -372,12 +407,20 @@ def callable_method_owner(workspace: Workspace, selector: str, owner: str):
 
 @then(parsers.parse('both callables belong to "{owner}" through `method_of`'))
 def both_callable_owner(workspace: Workspace, owner: str):
-    assert workspace.resolve(owner)
+    owner_sym = workspace.resolve(owner)
+    members = workspace.graph.members(owner_sym)
+    assert len([s for s in members if s.kind in {"method", "const-method", "constructor"}]) >= 2, members
 
 
 @then("those callables belong to their concrete \"PointerBox\" owners through `method_of`")
 def pointerbox_owners(workspace: Workspace):
-    assert any("PointerBox" in s.name for s in workspace.symbols())
+    for selector in (
+        "PointerBox<int>::reset(int *&)",
+        "PointerBox<Widget>::reset(Widget *&)",
+    ):
+        method = workspace.resolve(selector)
+        owners = workspace.graph.edges_out(method, kinds=("method_of",))
+        assert len(owners) == 1 and "PointerBox<" in owners[0].peer.name, (selector, owners)
 
 
 @then("only source-backed template relationships appear in the semantic graph")
@@ -487,7 +530,21 @@ def template_relationships(workspace: Workspace, datatable):
 @then(parsers.parse('the type "{type_name}" is used by:'))
 def template_type_used_by(workspace: Workspace, type_name: str, datatable):
     for want in rows(datatable):
-        assert workspace.resolve(want["symbol"])
+        symbol = workspace.resolve(want["symbol"])
+        if want["use_kind"] == "signature-slot":
+            slots = workspace.graph.signature_slots(symbol)
+            role = "return" if want["role"] == "return" else "parameter"
+            matches = [s for s in slots if s.role == role and (
+                want["position"] is None or s.position == int(want["position"])
+            )]
+            assert any(type_name in (s.declared_type.spelling if s.declared_type else "")
+                       for s in matches), (want, matches)
+        else:
+            args = [a for a in workspace.graph.template_args(symbol)
+                    if a.position == int(want["position"])]
+            assert any(type_name in (a.type.spelling if a.type else "") for a in args), (want, args)
+            if want["through"] == "pack":
+                assert any(a.pack_index is not None for a in args), (want, args)
 
 
 @then(parsers.parse('symbol "{selector}" returns "{type_name}"'))
