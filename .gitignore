@@ -10,12 +10,16 @@ build*/
 # Local LLVM checkout used for large-scale index testing.
 test-repo/
 
-# Python package environments, caches, and build artifacts.
-python/.venv/
-python/.pytest_cache/
-python/.ruff_cache/
-tests/e2e/.pytest_cache/
+# Python bytecode — never committed, wherever the interpreter drops it.
 **/__pycache__/
+*.py[cod]
+*$py.class
+
+# Python package environments, tool caches, and build artifacts.
+**/.venv/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
 python/dist/
 python/build/
 python/*.egg-info/
@@ -29,3 +33,6 @@ manifests/compile_commands.json
 .codex/
 *.canvas
 Untitled*.md
+*.sw[a-p]
+*~
+.DS_Store
