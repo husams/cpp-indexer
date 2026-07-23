@@ -57,6 +57,12 @@ void Storage::migrate() {
 
   const auto cols = table_columns("symbol");
   bool changed = false;
+  // v34 -> v35: manifest metadata for immutable/rebuildable sidecars. The
+  // schema script creates the tables after this probe; only the version row is
+  // changed here so old databases remain readable during the same open.
+  if (!has_table("artifact")) {
+    changed = true;
+  }
   if (!has_col(cols, "qual_name")) {
     db_.exec("ALTER TABLE symbol ADD COLUMN qual_name TEXT");
     db_.exec(kQualNameBackfill);

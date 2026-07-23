@@ -153,7 +153,10 @@ void check_migrated(const std::string &db_path) {
                                          "idx_include_edge_dst",
                                          "idx_include_edge_config",
                                          "idx_include_site_edge",
-                                         "idx_include_macro_use_path"});
+                                         "idx_include_macro_use_path",
+                                         "idx_artifact_current_logical",
+                                         "idx_artifact_state",
+                                         "idx_artifact_identity_stable"});
 }
 
 } // namespace

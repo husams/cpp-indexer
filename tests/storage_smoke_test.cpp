@@ -405,7 +405,8 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
   // entity_edge_kind; v23 adds repository + clone; v26 adds decl_site; v30 adds
   // the signature/ type tier
   // (type_kind/type_node/type_edge_kind/type_edge/parameter/
-  // symbol_type_kind/symbol_type)
+  // symbol_type_kind/symbol_type); v35 adds the manifest-governed artifact
+  // tables and their retention/mapping relations.
   CHECK(tables == std::set<std::string>{"meta",
                                         "component",
                                         "directory",
@@ -445,7 +446,12 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                         "include_edge",
                                         "include_directive_kind",
                                         "include_site",
-                                        "include_macro_use"});
+                                        "include_macro_use",
+                                        "artifact",
+                                        "artifact_relation",
+                                        "artifact_identity_map",
+                                        "artifact_lease",
+                                        "artifact_pin"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {
@@ -538,7 +544,10 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_include_edge_dst",
                                          "idx_include_edge_config",
                                          "idx_include_site_edge",
-                                         "idx_include_macro_use_path"});
+                                         "idx_include_macro_use_path",
+                                         "idx_artifact_current_logical",
+                                         "idx_artifact_state",
+                                         "idx_artifact_identity_stable"});
 
   // meta row + pragma parity (D25: foreign_keys ON, default journal mode)
   {

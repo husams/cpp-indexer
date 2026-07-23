@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -19,6 +20,7 @@
 #include "cli/commands.hpp" // resolve_cache_dir()
 #include "cli/json_out.hpp"
 #include "compiledb/compiledb.hpp"
+#include "storage/artifacts.hpp"
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
 #include "util/logger.hpp"
@@ -250,9 +252,37 @@ int main(int argc, char **argv) {
     const cidx::astgraph::DumpStats stats = cidx::astgraph::dump_tu(
         source, opts, descriptor.driver, out_path, dump_opts);
 
+    // Per-TU AST databases are optional sidecars.  Publish them through the
+    // core manifest so readers can validate provenance and attach read-only;
+    // the authoritative index remains untouched by the AST node/edge dump.
+    cidx::ArtifactStore artifacts(
+        db, std::filesystem::path(index_path).parent_path());
+    cidx::ArtifactSpec artifact;
+    artifact.logical_id = "astgraph:" + source;
+    artifact.kind = "astgraph";
+    artifact.artifact_schema =
+        "cidx-astgraph/v" + std::to_string(cidx::astgraph::kSchemaVersion);
+    artifact.catalog_version = "astgraph-relations/v1";
+    artifact.producer_version =
+        std::string("cidx-astgraph ") + cidx::cli::kVersion;
+    artifact.engine_version = std::string("cidx ") + cidx::cli::kVersion;
+    artifact.workspace_identity = index_path;
+    artifact.tu_identity =
+        cidx::astgraph::artifact_key(source, opts, rec->driver, dump_opts);
+    artifact.configuration_identity = artifact.tu_identity;
+    artifact.input_fact_set_identity = artifact.tu_identity;
+    artifact.attachment_name = "astgraph";
+    artifact.exposed_relations = {"node", "edge", "symbol", "meta"};
+    const cidx::ArtifactRecord published =
+        artifacts.publish_existing(artifact, out_path);
+    out_path = (std::filesystem::path(index_path).parent_path() /
+                published.relative_path)
+                   .string();
+
     if (cli.analyze) {
-      if (*cli.rule != "callgraph") {
-        throw cidx::CidxError("unsupported native rule: " + *cli.rule);
+      const std::string rule = cli.rule.value_or("");
+      if (rule != "callgraph") {
+        throw cidx::CidxError("unsupported native rule: " + rule);
       }
       const auto calls = cidx::astgraph::run_callgraph(out_path, cli.jobs);
       std::cout << cidx::json_out::dumps_indent2(
