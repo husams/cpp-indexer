@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cpp-indexer.invalid/benchmarks/storage-m0/manifest-v1.schema.json",
+  "title": "cpp-indexer Storage M0 manifest",
+  "type": "object",
+  "required": ["manifest_version", "benchmark", "schema_version", "seed", "distributions", "workloads", "corpora", "interruption_points"],
+  "properties": {
+    "manifest_version": {"const": "storage-m0/manifest-v1"},
+    "benchmark": {"const": "storage-m0/v1"},
+    "schema_version": {"const": 34},
+    "seed": {"type": "integer"},
+    "distributions": {"type": "array", "minItems": 7, "items": {"type": "object", "required": ["id", "description"]}},
+    "generator": {"type": "string"},
+    "workloads": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/workload"}},
+    "corpora": {"type": "array", "items": {"type": "object", "required": ["id", "kind", "required"]}},
+    "interruption_points": {"type": "array", "items": {"type": "string"}},
+    "regression_probe": {"type": "object", "additionalProperties": true}
+  },
+  "$defs": {
+    "workload": {
+      "type": "object",
+      "required": ["id", "distribution", "topology", "scales", "queries"],
+      "properties": {
+        "id": {"type": "string"},
+        "distribution": {"enum": ["balanced", "high-fan-in", "high-fan-out", "long-chain", "diamond", "cyclic", "skewed"]},
+        "topology": {"type": "object", "required": ["repositories", "components_per_repository", "translation_units_per_component"]},
+        "scales": {"type": "object", "minProperties": 1},
+        "queries": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["id", "sql", "parameters", "row_limit"]}}
+      }
+    }
+  }
+}

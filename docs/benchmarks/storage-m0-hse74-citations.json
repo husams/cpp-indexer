@@ -1,0 +1,28 @@
+{
+  "artifact_version": "storage-m0/hse74-citations-v2",
+  "source_issue": "https://linear.app/hsenussi/issue/HSE-74/feature-scale-ready-local-semantic-storage-architecture",
+  "benchmark_issue": "https://linear.app/hsenussi/issue/HSE-75/storage-m0-benchmark-schema-v34-and-define-scaleslo-decision-gates",
+  "scope": {
+    "qualified_claims": ["v34 synthetic smoke measurements on the local-macos-v1 profile"],
+    "not_claimed_by_hse75": [
+      "million-node or 10M/50M/100M/500M relation performance",
+      "self-index corpus qualification",
+      "banking corpus qualification"
+    ],
+    "follow_up": "The excluded scale and corpus claims remain HSE-74 follow-up work and require their own measured result artifacts before citation."
+  },
+  "claims": [
+    {
+      "claim": "v34 authoritative SQLite storage remains measurable before physical redesign at the qualified smoke scale",
+      "result_artifact": "benchmarks/storage_m0/baselines/v34-smoke.result.json",
+      "reproduction": "benchmarks/storage_m0/manifests/storage-m0-v1.json#synthetic.smoke with benchmarks/storage_m0/profiles/local-macos-v1.json",
+      "status": "measured"
+    },
+    {
+      "claim": "cold, warm, changed-TU, transform, migration, backup, and recovery behavior is measured with semantic equivalence and current-state checks",
+      "result_artifact": "benchmarks/storage_m0/baselines/v34-smoke.result.json",
+      "reproduction": "benchmarks.storage_m0.run; lifecycle operations use isolated copies, an independent canonical reference, and real WAL/checkpoint boundaries",
+      "status": "measured"
+    }
+  ]
+}

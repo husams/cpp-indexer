@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cpp-indexer.invalid/benchmarks/storage-m0/result-v2.schema.json",
+  "title": "cpp-indexer Storage M0 benchmark result",
+  "type": "object",
+    "required": ["result_version", "benchmark", "schema_version", "manifest_sha256", "run_id", "identity", "scale", "seed", "distribution", "requested", "actual", "caps", "profile_id", "profile_sha256", "storage", "operations", "queries", "counters", "gates"],
+  "properties": {
+    "result_version": {"const": "storage-m0/result-v2"},
+    "benchmark": {"const": "storage-m0/v1"},
+    "schema_version": {"const": 34},
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "workload": {"type": "string"},
+    "scale": {"type": "string"},
+    "seed": {"type": "integer"},
+    "distribution": {"type": "string"},
+    "requested": {"$ref": "#/$defs/counts"},
+    "actual": {"$ref": "#/$defs/counts"},
+    "caps": {"type": "object", "required": ["rows", "evidence_rows"]},
+    "profile_id": {"type": "string"},
+    "profile_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "run_id": {"type": "string"},
+    "raw_samples_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "raw_samples_artifact": {"type": ["string", "null"]},
+    "identity": {"type": "object", "required": ["manifest_sha256", "workload", "scale", "seed", "distribution", "requested", "actual", "caps", "revision", "profile_id", "profile_sha256", "hardware_fingerprint", "configuration"]},
+    "started_at": {"type": "string", "format": "date-time"},
+    "revision": {"type": ["string", "null"]},
+    "environment": {"type": "object", "additionalProperties": true},
+    "storage": {
+      "type": "object",
+      "required": ["database_bytes", "page_size", "page_count", "freelist_pages", "objects"],
+      "properties": {
+        "database_bytes": {"type": "integer", "minimum": 0},
+        "page_size": {"type": "integer", "minimum": 1},
+        "page_count": {"type": "integer", "minimum": 0},
+        "freelist_pages": {"type": "integer", "minimum": 0},
+        "freelist_bytes": {"type": "integer", "minimum": 0},
+        "wal_bytes": {"type": "integer", "minimum": 0},
+        "journal_bytes": {"type": "integer", "minimum": 0},
+        "temp_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "inspection": {"enum": ["dbstat", "page_count"]},
+        "objects": {"type": "array", "items": {"$ref": "#/$defs/storageObject"}}
+      }
+    },
+    "operations": {"type": "object", "additionalProperties": true},
+    "queries": {"type": "array", "items": {"$ref": "#/$defs/query"}},
+    "counters": {"type": "object", "additionalProperties": true},
+    "gates": {"type": "object", "additionalProperties": true},
+    "notes": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "counts": {"type": "object", "required": ["nodes", "relations"], "properties": {"nodes": {"type": "integer", "minimum": 1}, "relations": {"type": "integer", "minimum": 1}}},
+    "storageObject": {
+      "type": "object",
+      "required": ["name", "type", "row_count", "bytes"],
+      "properties": {
+        "name": {"type": "string"},
+        "type": {"enum": ["table", "index"]},
+        "row_count": {"type": ["integer", "null"], "minimum": 0},
+        "bytes": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "query": {
+      "type": "object",
+      "required": ["id", "sql", "parameters", "row_count", "truncated", "latency_ms", "plan", "status"],
+      "properties": {
+        "id": {"type": "string"},
+        "category": {"type": "string"},
+        "sql": {"type": "string"},
+        "parameters": {"type": "array"},
+        "samples_ms": {"type": "array", "items": {"type": "number"}},
+        "row_count": {"type": ["integer", "null"], "minimum": 0},
+        "truncated": {"type": "boolean"},
+        "latency_ms": {"type": "object", "required": ["count", "p50_ms", "p95_ms", "p99_ms"], "additionalProperties": true},
+        "plan": {"type": "array"},
+        "status": {"enum": ["ok", "error"]}
+      }
+    }
+  }
+}

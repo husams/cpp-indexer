@@ -1,0 +1,42 @@
+{
+  "artifact_version": "storage-m0/baseline-v1",
+  "benchmark": "storage-m0/v1",
+  "schema_version": 34,
+  "manifest": "benchmarks/storage_m0/manifests/storage-m0-v1.json",
+  "profile": "benchmarks/storage_m0/profiles/local-macos-v1.json",
+  "source_revision": "ac2cd105061e89b52f3e31f517a0f2510098d466",
+  "source_commit": "https://github.com/husams/cpp-indexer/commit/ac2cd105061e89b52f3e31f517a0f2510098d466",
+  "workload": "synthetic",
+  "scale": "smoke",
+  "seed": 20260723,
+  "distribution": "balanced",
+  "requested": {"nodes": 128, "relations": 512},
+  "actual": {
+    "nodes": 128,
+    "relations": 512,
+    "evidence": 1536,
+    "files": 6,
+    "translation_units": 4,
+    "shared_headers": 2,
+    "repositories": 1,
+    "types": 128,
+    "entity_nodes": 128,
+    "type_edges": 128,
+    "entity_edges": 512,
+    "include_edges": 6
+  },
+  "semantic_digest": "08cc46550ceda20dc11e9457c26e394162cbdc359749fc5debe4b2a338a273d6",
+  "profile_sha256": "f48bca334d84cce223d869df03f4f86a90405418fb49ec28ce6d0dc71fdf5a23",
+  "raw_samples_artifact": "benchmarks/storage_m0/baselines/v34-smoke.result.json.samples.json",
+  "measured_operations": [
+    "cold_build",
+    "warm_noop",
+    "changed_tu_update",
+    "transform_rebuild",
+    "migration",
+    "backup",
+    "recovery"
+  ],
+  "reproducible_command": "PYTHONPATH=. python3 -m benchmarks.storage_m0.generator --manifest benchmarks/storage_m0/manifests/storage-m0-v1.json --workload synthetic --scale smoke --output /tmp/storage-m0-v34-smoke.db && PYTHONPATH=. python3 -m benchmarks.storage_m0.run --db /tmp/storage-m0-v34-smoke.db --manifest benchmarks/storage_m0/manifests/storage-m0-v1.json --workload synthetic --profile benchmarks/storage_m0/profiles/local-macos-v1.json --output /tmp/storage-m0-v34-smoke.result.json",
+  "note": "This checked-in artifact is the deterministic v34 smoke baseline contract; latency, RSS, storage bytes, plans, and operation durations are emitted by the machine-readable result at run time and are never inferred from this summary."
+}

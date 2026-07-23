@@ -1,0 +1,70 @@
+{
+  "decision": "hold",
+  "failed_slos": [],
+  "alternatives": [
+    {
+      "id": "schema-or-tuning",
+      "class": "schema_tuning",
+      "measured": true,
+      "description": "Measure the v34 schema/index/runtime change first.",
+      "evidence": {
+        "artifact": "replace with measured result artifact",
+        "run_id": "replace with artifact run_id",
+        "result_run_id": "replace with failed primary result run_id",
+        "content_sha256": "replace with canonical result digest",
+        "configuration": "replace with measured configuration",
+        "checks": [{"id": "replace", "status": "pass", "actual": "replace"}],
+        "outcome": {
+          "measured": true,
+          "measured_inability": true,
+          "slo_status": "fail",
+          "alternative_class": "schema_tuning",
+          "run_id": "replace with artifact run_id",
+          "content_sha256": "replace with canonical result digest",
+          "configuration": "replace with measured configuration",
+          "tested_failed_slos": ["replace with derived failed SLO IDs"],
+          "slo_checks_sha256": "replace with derived SLO-check digest"
+        }
+      }
+    },
+    {
+      "id": "derived-accelerator",
+      "class": "derived_accelerator",
+      "measured": true,
+      "description": "Measure a derived accelerator before replacing the primary store.",
+      "evidence": {
+        "artifact": "replace with measured result artifact",
+        "run_id": "replace with artifact run_id",
+        "result_run_id": "replace with failed primary result run_id",
+        "content_sha256": "replace with canonical result digest",
+        "configuration": "replace with measured configuration",
+        "checks": [{"id": "replace", "status": "pass", "actual": "replace"}],
+        "outcome": {
+          "measured": true,
+          "measured_inability": true,
+          "slo_status": "fail",
+          "alternative_class": "derived_accelerator",
+          "run_id": "replace with artifact run_id",
+          "content_sha256": "replace with canonical result digest",
+          "configuration": "replace with measured configuration",
+          "tested_failed_slos": ["replace with derived failed SLO IDs"],
+          "slo_checks_sha256": "replace with derived SLO-check digest"
+        }
+      }
+    }
+  ],
+  "costs": {
+    "engineering": {
+      "person_months": 0,
+      "work_items": [{"id": "replace", "description": "replace with substantive work description", "person_months": 0, "deliverables": ["replace with substantive deliverable"]}],
+      "source_artifact": "replace with cost source artifact"
+    },
+    "compatibility": {
+      "person_months": 0,
+      "migration_plan": [{"id": "replace", "description": "replace with substantive migration description", "person_months": 0, "deliverables": ["replace with substantive migration deliverable"]}],
+      "compatibility_checks": [{"id": "replace", "status": "pass", "actual": "replace with measured actual", "target": "replace with target", "evidence": "replace with substantive evidence"}],
+      "source_artifact": "replace with cost source artifact"
+    }
+  },
+  "notes": "Set decision to propose only after an exact failed SLO is reproduced on the same profile."
+}
