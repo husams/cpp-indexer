@@ -13,7 +13,8 @@
         "src/ast/symbol_record.hpp",
         "src/ast/edge_records.hpp",
         "src/diff/syntax_ir.hpp",
-        "src/diff/behaviour_ir.hpp"
+        "src/diff/behaviour_ir.hpp",
+        "src/catalogs/**"
       ],
       "allowedDependencies": ["model.contracts"],
       "description": "Clang-free, SQLite-free domain records and semantic IR values."
@@ -88,6 +89,7 @@
       "layer": "persistence",
       "paths": ["src/storage/**"],
       "excludePaths": ["src/storage/records.hpp"],
+      "sourceSuffixes": [".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".sql"],
       "allowedDependencies": [
         "persistence.sqlite",
         "frontend.compiledb",
@@ -274,6 +276,7 @@
   ],
   "targets": [
     {"name": "cidx_core", "kind": "library", "module": "compat.core-bundle", "links": ["clang-cpp", "LLVM", "${_cidx_sqlite_link}"]},
+    {"name": "cidx_catalog_check", "kind": "generated-target", "module": "model.contracts", "links": []},
     {"name": "cidx_ast", "kind": "object-library", "module": "extraction.ast", "links": []},
     {"name": "cidx_hygiene", "kind": "object-library", "module": "refactor.include-hygiene", "links": []},
     {"name": "cidx_astgraph_ast", "kind": "object-library", "module": "analysis.astgraph", "links": []},

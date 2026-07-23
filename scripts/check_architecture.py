@@ -25,7 +25,7 @@ from typing import Iterable
 
 
 CXX_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
-SOURCE_SUFFIXES = CXX_SUFFIXES | {".py", ".dl"}
+SOURCE_SUFFIXES = CXX_SUFFIXES | {".py", ".dl", ".sql"}
 VISIBILITY = {"PUBLIC", "PRIVATE", "INTERFACE"}
 ISSUE_RE = re.compile(r"HSE-\d+\Z")
 INCLUDE_RE = re.compile(r"^\s*#\s*include\s*([\"<])([^\">]+)[\">]", re.MULTILINE)
