@@ -6,6 +6,11 @@ graph, stores it in one SQLite database (`index.db`), and exposes
 navigation/query commands (callers, callees, references, hierarchy, virtual
 dispatch, impact) plus Datalog analyses.
 
+The C++23 LibTooling implementation is the sole production extractor. The
+Python tree is the supported storage/read-query SDK; its libclang extractor is
+legacy and emits a deprecation warning. Ownership and compatibility promises
+are defined in [the platform contracts](platform/README.md).
+
 This documentation describes the **C++23 implementation** under `src/` — the
 sole indexer. (The Python tree `python/indexer/` is storage + read-query only;
 its libclang indexer is legacy pending removal.) It is organized as one page

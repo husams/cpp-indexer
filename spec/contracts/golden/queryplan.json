@@ -1,0 +1,27 @@
+{
+  "cxq": 1,
+  "source": {
+    "kind": "symbol",
+    "ref": "main"
+  },
+  "stages": [
+    {
+      "op": "out",
+      "relation": "symbol.calls",
+      "min_depth": 1,
+      "max_depth": 1
+    },
+    {
+      "op": "select",
+      "fields": [
+        "id",
+        "name",
+        "kind"
+      ]
+    },
+    {
+      "op": "limit",
+      "n": 10
+    }
+  ]
+}

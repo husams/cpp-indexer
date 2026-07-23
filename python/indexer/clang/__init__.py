@@ -1,6 +1,6 @@
 """indexer.clang -- libclang parsing layer for the cidx indexer."""
 
-from .ast import index_headers, index_source, index_symbols
+from .ast import LegacyPythonExtractionWarning, index_headers, index_source, index_symbols
 from .util import (
     ClangParseError,
     driver_flags,
@@ -12,6 +12,7 @@ from .util import (
 
 __all__ = [
     "ClangParseError",
+    "LegacyPythonExtractionWarning",
     "driver_flags",
     "fatal_diagnostics",
     "index_headers",

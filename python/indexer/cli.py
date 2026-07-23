@@ -35,6 +35,7 @@ from datetime import datetime
 
 if __package__ in (None, ""):  # direct execution
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from indexer._version import __version__  # noqa: E402
     from indexer.storage import SCHEMA_VERSION, SYMBOL_KINDS, File, Storage  # noqa: E402
     from indexer import compiledb  # noqa: E402
     from indexer import souffle  # noqa: E402
@@ -55,6 +56,7 @@ if __package__ in (None, ""):  # direct execution
         resolve_file_arg,
     )
 else:
+    from ._version import __version__
     from .storage import SCHEMA_VERSION, SYMBOL_KINDS, File, Storage
     from . import astcmd, compiledb, pathx, souffle
     from .clang import ClangParseError, index_source
@@ -73,9 +75,8 @@ DEFAULT_CACHE = "~/.cache/cidx"
 INDEX_NAME = "index.db"
 LOG_NAME = "cidx.log"
 
-# Keep in sync with pyproject.toml [project].version and the C++ tool
-# (cidx-cpp/src/cli/args.hpp kVersion).
-VERSION = "0.53.0"
+# Compatibility alias for callers that imported the historical CLI constant.
+VERSION = __version__
 
 # Header extensions: a pending file with one of these (or no extension, e.g. a
 # bare libstdc++ header) is indexed via its including TU's index_headers() pass,

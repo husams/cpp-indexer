@@ -1,0 +1,7 @@
+{
+  "shape": "rows",
+  "view": "symbol",
+  "count": 1,
+  "truncated": false,
+  "rows": [{"id": 42, "name": "main", "kind": "function"}]
+}

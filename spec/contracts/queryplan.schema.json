@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["cxq", "source", "stages"],
+  "properties": {
+    "cxq": {"const": 1},
+    "source": {
+      "type": "object",
+      "required": ["kind", "ref"],
+      "properties": {
+        "kind": {"enum": ["codebase", "symbol", "entity"]},
+        "ref": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "stages": {"type": "array", "items": {"type": "object"}}
+  },
+  "additionalProperties": false
+}

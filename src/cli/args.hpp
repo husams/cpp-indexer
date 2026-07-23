@@ -14,11 +14,13 @@
 #include <string>
 #include <vector>
 
+#include "cli/version.hpp"
+
 namespace cidx::cli {
 
-// Tool version. Keep in sync with pyproject.toml [project].version and the
-// Python tool (cli.py VERSION). `cidx --version` prints "cidx <kVersion>".
-inline constexpr const char *kVersion = "0.53.0";
+// Product and compatibility versions are generated from
+// spec/platform/version.json. `cidx --version` prints "cidx <kVersion>".
+inline constexpr const char *kVersion = version::kProductVersion.data();
 
 struct ParsedArgs {
   std::string command; // add-source | import | index | search | show | list

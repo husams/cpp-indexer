@@ -2,9 +2,12 @@
 
 [← docs index](../README.md) · related: [cli](cli.md)
 
-A **separate binary**, `cidx-astgraph`, that dumps one translation unit's *raw
-libclang AST* into a per-TU SQLite graph for Datalog reasoning — far
-finer-grained than the repo-wide semantic index. ~1.1k LOC.
+A **separate C++23 LibTooling binary**, `cidx-astgraph`, that builds one
+translation unit with `clang::tooling::ClangTool` and dumps its Clang C++ AST
+into a per-TU SQLite graph for Datalog reasoning — far finer-grained than the
+repo-wide semantic index. The frontend uses `clang::ASTConsumer`,
+`clang::ASTContext`, and `clang::RecursiveASTVisitor`; no libclang C API or CX
+cursor implementation is involved. ~1.1k LOC.
 
 ## Files
 
@@ -16,12 +19,14 @@ finer-grained than the repo-wide semantic index. ~1.1k LOC.
 
 ## The artifact (`astgraph.hpp`)
 
-A unified node space: cursors **and** types are rows of `node`; every relation
-is a row of `edge(src, dst, rel, ord)`. No NULLs (0/'' sentinels). `RelKind`
-(`:43-63`) is grounded in the libclang cursor/type cross-reference API
-(kRelChild, kRelReferences, kRelOverrides, kRelResultType, kRelArgType, …);
-`kTypeKindBase = 1000` namespaces `CXTypeKind` ids. Entry point
-**`dump_tu(tu, out_db_path, opts, source, args, driver)`** (`:91`).
+A unified node space: declarations, statements/expressions, and types are rows
+of `node`; every relation is a row of `edge(src, dst, rel, ord)`. No NULLs
+(0/'' sentinels). `RelKind` (`:43-63`) is grounded in Clang C++ AST accessors
+such as `Decl::getDefinition()`, `ASTContext::getCanonicalType()`, and
+`FunctionType::getParamType()`. Node-kind IDs are CIDX-stable mappings from
+Clang's `Decl::Kind`, `Stmt::StmtClass`, and `Type::TypeClass` enums, not raw
+libclang CX values. Entry point **`dump_tu(source, args, driver,
+out_db_path, opts)`** (`:91`).
 
 ## Shares cidx's config
 
@@ -37,9 +42,9 @@ that per-TU artifact and emits JSON.
 | | `cidx-astgraph` | `cidx analyze` |
 |---|---|---|
 | Scope | one TU | whole repo-wide `index.db` |
-| Data | raw libclang AST (cursors + types + libclang relations) | the semantic graph (`symbol`/`edge`/`edge_site`/`entity_*`) exported to TSV |
+| Data | Clang C++ AST declarations, statements/expressions, and types | the semantic graph (`symbol`/`edge`/`edge_site`/`entity_*`) exported to TSV |
 | Rules | embedded native Souffle `callgraph` | Datalog `callgraph` / `cycles` / `unused` (`cli/analyze.cpp`) |
-| Detail | very fine (every cursor/type) | semantic (symbol-level) |
+| Detail | very fine (every declaration/statement/type) | semantic (symbol-level) |
 
 Use `cidx-astgraph` when you need the full AST shape of a single file; use
 `cidx analyze` for repo-scale semantic queries.
