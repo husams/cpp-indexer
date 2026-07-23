@@ -1,0 +1,31 @@
+# TLA+ toolchain contract
+
+The repository uses the TLA+ command-line tools, not the graphical Toolbox.
+The Toolbox is intentionally not part of the build or CI dependency surface.
+
+| Dependency | Pin | Verification |
+| --- | --- | --- |
+| TLA+ tools | release `1.8.0`, `tla2tools.jar` | SHA-256 `cc4803dce2a8ffaf0f5920a9dc39df4b5ee34ab4cb53fb58ac557277a7e516b3` |
+| Java runtime | major version `17` | `spec/tla/tools/check.sh` rejects any other major version |
+| TLC workers | `1` | avoids small-model traversal/diameter nondeterminism |
+| TLC fingerprint polynomial | `0` | fixed by the checker |
+
+The jar is fetched from the official release URL:
+
+```text
+https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+```
+
+The exact checked command is:
+
+```bash
+spec/tla/tools/check.sh
+```
+
+For an offline or pre-provisioned environment, point `TLA_TOOLS_JAR` at a
+local copy of the same jar. The checker still verifies its SHA-256. `JAVA_BIN`
+may select a Java 17 executable when `JAVA_HOME` is not suitable.
+
+The checker first invokes SANY for each model. Only after all syntax checks
+pass does it invoke TLC. It uses temporary metadata and a disposable flattened
+module directory, so no model-check output is written into the repository.
