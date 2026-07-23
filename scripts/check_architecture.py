@@ -296,10 +296,27 @@ def _cmake_condition(tokens: list[str]) -> str:
     return "unknown"
 
 
-def _cmake_active_condition(stack: list[str]) -> str:
-    if "false" in stack:
+def _cmake_sibling_active(prior: str, condition: str) -> str:
+    if prior == "true":
         return "false"
-    if "unknown" in stack:
+    if prior == "false":
+        return condition
+    return "unknown"
+
+
+def _cmake_prior_after(prior: str, condition: str) -> str:
+    if prior == "true":
+        return "true"
+    if prior == "false":
+        return condition
+    return "unknown"
+
+
+def _cmake_active_condition(stack: list[dict[str, str]]) -> str:
+    active = [frame["active"] for frame in stack]
+    if "false" in active:
+        return "false"
+    if "unknown" in active:
         return "unknown"
     return "true"
 
@@ -328,28 +345,34 @@ def _cmake_graph(root: Path, manifest: dict) -> BuildGraph:
             targets.add(tokens[0])
 
     variables: dict[str, list[str]] = {}
-    condition_stack: list[str] = []
+    condition_stack: list[dict[str, str]] = []
     for kind, tokens, _ in commands:
         if kind == "if":
-            condition_stack.append(_cmake_condition(tokens))
+            condition = _cmake_condition(tokens)
+            condition_stack.append({"prior": condition, "active": condition, "else": "false"})
             continue
         if kind == "elseif":
             if condition_stack:
-                previous = condition_stack.pop()
-                condition_stack.append(
-                    "false" if previous == "true" else
-                    "unknown" if previous == "unknown" else _cmake_condition(tokens)
-                )
+                frame = condition_stack[-1]
+                if frame["else"] == "true":
+                    parse_errors.append("unsupported CMake elseif after else")
+                    continue
+                condition = _cmake_condition(tokens)
+                frame["active"] = _cmake_sibling_active(frame["prior"], condition)
+                frame["prior"] = _cmake_prior_after(frame["prior"], condition)
             else:
                 parse_errors.append("unsupported CMake elseif without matching if")
             continue
         if kind == "else":
             if condition_stack:
-                previous = condition_stack.pop()
-                condition_stack.append(
-                    "false" if previous == "true" else
-                    "unknown" if previous == "unknown" else "true"
+                frame = condition_stack[-1]
+                if frame["else"] == "true":
+                    parse_errors.append("duplicate CMake else")
+                    continue
+                frame["active"] = {"true": "false", "false": "true"}.get(
+                    frame["prior"], "unknown"
                 )
+                frame["else"] = "true"
             else:
                 parse_errors.append("unsupported CMake else without matching if")
             continue
