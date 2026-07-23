@@ -9,6 +9,7 @@ set(CIDX_DEFAULT_TESTS
   env_logger_test
   storage_smoke_test
   storage_migration_test
+  storage_profile_test
   graph_storage_test
   graph_query_test
   graph_parity_boundary_test

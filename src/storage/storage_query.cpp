@@ -85,6 +85,16 @@ Stats Storage::stats() {
   return s;
 }
 
+auto Storage::integrity_ok() -> bool {
+  auto st = db_.prepare("PRAGMA integrity_check");
+  return st.step() && st.col_text(0) == "ok";
+}
+
+auto Storage::foreign_keys_ok() -> bool {
+  auto st = db_.prepare("PRAGMA foreign_key_check");
+  return !st.step();
+}
+
 // ============================================================================
 // M6 graph read-only accessors (A1–A8)
 // ============================================================================

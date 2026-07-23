@@ -18,6 +18,48 @@ namespace {
 
 } // namespace
 
+auto sqlite_profile_settings(SqliteProfile profile) -> SqliteProfileSettings {
+  switch (profile) {
+  case SqliteProfile::indexing:
+    return {.busy_timeout_ms = 5000,
+            .foreign_keys = true,
+            .query_only = false,
+            .rollback_journal = true,
+            .full_synchronous = true};
+  case SqliteProfile::interactive_read:
+  case SqliteProfile::read_only_replay:
+    return {.busy_timeout_ms = 5000,
+            .foreign_keys = true,
+            .query_only = true,
+            .rollback_journal = false,
+            .full_synchronous = false};
+  case SqliteProfile::migration:
+  case SqliteProfile::maintenance:
+    return {.busy_timeout_ms = 5000,
+            .foreign_keys = true,
+            .query_only = false,
+            .rollback_journal = true,
+            .full_synchronous = true};
+  }
+  throw StorageError("unknown SQLite profile");
+}
+
+auto sqlite_profile_name(SqliteProfile profile) -> std::string_view {
+  switch (profile) {
+  case SqliteProfile::indexing:
+    return "indexing";
+  case SqliteProfile::interactive_read:
+    return "interactive_read";
+  case SqliteProfile::read_only_replay:
+    return "read_only_replay";
+  case SqliteProfile::migration:
+    return "migration";
+  case SqliteProfile::maintenance:
+    return "maintenance";
+  }
+  throw StorageError("unknown SQLite profile");
+}
+
 // -- SqliteStmt --------------------------------------------------------------
 
 SqliteStmt::SqliteStmt(sqlite3 *db, std::string_view sql) : db_(db) {
@@ -124,7 +166,9 @@ std::string SqliteStmt::col_text(int idx) const {
 
 // -- SqliteDb ----------------------------------------------------------------
 
-SqliteDb::SqliteDb(const std::string &path, bool read_only) {
+SqliteDb::SqliteDb(const std::string &path, bool read_only,
+                   SqliteProfile profile)
+    : profile_(read_only ? SqliteProfile::read_only_replay : profile) {
   // Design §4.2: the RETURNING upserts are the only path shipped; refuse to
   // run against a pre-3.35 runtime with a clear message instead of a SQL
   // syntax error later.
@@ -141,6 +185,34 @@ SqliteDb::SqliteDb(const std::string &path, bool read_only) {
     sqlite3_close(db_);
     db_ = nullptr;
     throw StorageError("cannot open database " + path + ": " + msg);
+  }
+  try {
+    const auto settings = sqlite_profile_settings(profile_);
+    if (sqlite3_busy_timeout(db_, settings.busy_timeout_ms) != SQLITE_OK) {
+      throw_db_error(db_, "cannot configure SQLite busy timeout");
+    }
+    if (settings.foreign_keys) {
+      exec("PRAGMA foreign_keys = ON");
+    }
+    if (settings.query_only) {
+      exec("PRAGMA query_only = ON");
+    }
+    if (read_only || settings.query_only) {
+      return;
+    }
+    // CIDX ships rollback journaling with FULL synchronous durability. WAL is
+    // a benchmark candidate only; it is not enabled without measured
+    // operational and atomicity evidence for the active workload.
+    if (settings.rollback_journal) {
+      exec("PRAGMA journal_mode = DELETE");
+    }
+    if (settings.full_synchronous) {
+      exec("PRAGMA synchronous = FULL");
+    }
+  } catch (...) {
+    sqlite3_close(db_);
+    db_ = nullptr;
+    throw;
   }
 }
 
@@ -161,6 +233,42 @@ void SqliteDb::exec(std::string_view sql_script) {
 
 int64_t SqliteDb::changes() const {
   return sqlite3_changes(const_cast<sqlite3 *>(db_));
+}
+
+auto SqliteDb::backup_to(std::string_view path) const -> void {
+  if (path.empty()) {
+    throw StorageError("cannot back up SQLite database to an empty path");
+  }
+  sqlite3 *destination = nullptr;
+  const std::string destination_path(path);
+  const int open_rc =
+      sqlite3_open_v2(destination_path.c_str(), &destination,
+                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+  if (open_rc != SQLITE_OK) {
+    std::string message = (destination != nullptr) ? sqlite3_errmsg(destination)
+                                                   : "out of memory";
+    sqlite3_close(destination);
+    throw StorageError("cannot open backup database " + destination_path +
+                       ": " + message);
+  }
+
+  sqlite3_backup *backup =
+      sqlite3_backup_init(destination, "main", db_, "main");
+  if (backup == nullptr) {
+    const std::string message = sqlite3_errmsg(destination);
+    sqlite3_close(destination);
+    throw StorageError("cannot initialize SQLite backup: " + message);
+  }
+  const int step_rc = sqlite3_backup_step(backup, -1);
+  const int finish_rc = sqlite3_backup_finish(backup);
+  if (step_rc != SQLITE_DONE || finish_rc != SQLITE_OK) {
+    const std::string message = sqlite3_errmsg(destination);
+    sqlite3_close(destination);
+    throw StorageError("SQLite backup failed: " + message);
+  }
+  if (sqlite3_close(destination) != SQLITE_OK) {
+    throw StorageError("cannot close backup database " + destination_path);
+  }
 }
 
 } // namespace cidx

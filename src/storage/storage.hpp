@@ -629,6 +629,14 @@ public:
   // and future maintenance commands. Not part of the indexing flow.
   SqliteDb &raw_db() { return db_; }
 
+  // Runtime qualification and maintenance APIs. Backup uses SQLite's online
+  // backup API; maintenance is explicit because ANALYZE changes statistics.
+  auto backup_to(const std::string &path) const -> void { db_.backup_to(path); }
+  auto run_maintenance() -> void { db_.exec("PRAGMA optimize"); }
+  auto refresh_statistics() -> void { db_.exec("ANALYZE"); }
+  [[nodiscard]] auto integrity_ok() -> bool;
+  [[nodiscard]] auto foreign_keys_ok() -> bool;
+
   // %c%c% char-in-order LIKE pattern with '\ % _' escaping (G18); public
   // statics so fuzzy_match_test can pin them directly.
   static std::string fuzzy_like(std::string_view text);
