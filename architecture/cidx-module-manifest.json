@@ -210,11 +210,44 @@
         "python/indexer/clang/**",
         "python/indexer/astcmd.py",
         "python/indexer/backfill_alias_edges.py",
-        "python/indexer/compiledb.py"
+        "python/indexer/compiledb.py",
+        "python/indexer/astcache.py",
+        "python/indexer/cli.py",
+        "python/indexer/pch.py",
+        "python/indexer/query.py",
+        "python/indexer/souffle.py",
+        "python/indexer/storage.py"
       ],
       "allowedDependencies": ["sdk.python"],
       "allowedExternal": [],
+      "sourceAllowedDependencies": {
+        "python/indexer/__init__.py": ["sdk.python.compat"],
+        "python/indexer/__main__.py": ["sdk.python.compat"],
+        "python/indexer/_storage_smoke.py": ["sdk.python.compat"],
+        "python/indexer/entity_graph.py": ["sdk.python.compat"],
+        "python/indexer/entity_rollup.py": ["sdk.python.compat"],
+        "python/indexer/model.py": ["sdk.python.compat"],
+        "python/indexer/queryplan.py": ["sdk.python.compat"],
+        "python/indexer/relink.py": ["sdk.python.compat"],
+        "python/indexer/utils/files.py": ["sdk.python.compat"]
+      },
       "description": "Python storage, graph, query, and support SDK surface."
+    },
+    {
+      "id": "sdk.python.compat",
+      "layer": "sdk-compatibility",
+      "paths": [
+        "python/indexer/astcache.py",
+        "python/indexer/cli.py",
+        "python/indexer/pch.py",
+        "python/indexer/query.py",
+        "python/indexer/souffle.py",
+        "python/indexer/storage.py"
+      ],
+      "sourceSuffixes": [".py"],
+      "allowedDependencies": ["sdk.python", "sdk.python.compat", "sdk.python.legacy-clang"],
+      "allowedExternal": ["clang", "sqlite"],
+      "description": "Transitional Python compatibility adapters that still reach legacy Clang and SQLite APIs."
     },
     {
       "id": "sdk.python.legacy-clang",
@@ -228,6 +261,11 @@
       "sourceSuffixes": [".py"],
       "allowedDependencies": ["sdk.python", "sdk.python.legacy-clang"],
       "allowedExternal": ["clang"],
+      "sourceAllowedDependencies": {
+        "python/indexer/astcmd.py": ["sdk.python.compat"],
+        "python/indexer/backfill_alias_edges.py": ["sdk.python.compat"],
+        "python/indexer/clang/**": ["sdk.python.compat"]
+      },
       "description": "Legacy Python Clang adapter pending removal in a separate phase."
     },
     {
@@ -528,6 +566,156 @@
       "rationale": "The analyze command currently owns a direct SQLite handle while the application port is being extracted.",
       "expiresOn": "2026-12-31",
       "removalIssue": "HSE-62"
+    }
+  ],
+  "externalExceptions": [
+    {
+      "source": "src/ast/index_engine.cpp", "fromModule": "extraction.ast", "toModule": "external:filesystem", "include": "sys/stat.h",
+      "boundary": "extraction -> filesystem compatibility", "owner": "Platform M1 extraction maintainers", "rationale": "Retain the current source-stat probe until workspace context owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/astgraph/astgraph.cpp", "fromModule": "analysis.astgraph", "toModule": "external:process", "include": "unistd.h",
+      "boundary": "astgraph -> process compatibility", "owner": "Platform M2 analysis maintainers", "rationale": "Retain the current unlink compatibility call until the runner port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-62"
+    },
+    {
+      "source": "src/astgraph/main.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
+      "boundary": "product surface -> filesystem compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the standalone AST graph input stat until shared workspace context owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/cli/analyze.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
+      "boundary": "product surface -> filesystem compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the analyze input stat until shared workspace context owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/cli/analyze.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "product surface -> filesystem compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the analyze filesystem path adapter until shared workspace context owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/cli/analyze.cpp", "fromModule": "product.cli", "toModule": "external:process", "include": "unistd.h",
+      "boundary": "product surface -> process compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the analyze process compatibility call until the application port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-68"
+    },
+    {
+      "source": "src/cli/commands_detail.hpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
+      "boundary": "product surface -> filesystem compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the command filesystem probe until the workspace adapter is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/cli/commands_detail.hpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "product surface -> filesystem compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the command path adapter until the workspace boundary is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/cli/commands_detail.hpp", "fromModule": "product.cli", "toModule": "external:process", "include": "unistd.h",
+      "boundary": "product surface -> process compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the command process compatibility call until the application port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-68"
+    },
+    {
+      "source": "src/diff/driver.cpp", "fromModule": "analysis.diff", "toModule": "external:filesystem", "include": "sys/stat.h",
+      "boundary": "diff analysis -> filesystem compatibility", "owner": "Platform M3 diff maintainers", "rationale": "Retain the diff input stat until the workspace context is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/diff/target.cpp", "fromModule": "analysis.diff", "toModule": "external:filesystem", "include": "sys/stat.h",
+      "boundary": "diff analysis -> filesystem compatibility", "owner": "Platform M3 diff maintainers", "rationale": "Retain the diff target stat until the workspace context is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/graph/query.cpp", "fromModule": "analysis.graph", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "graph analysis -> filesystem compatibility", "owner": "Platform M3 query maintainers", "rationale": "Retain graph path normalization until the workspace adapter is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/include_hygiene/executor.cpp", "fromModule": "refactor.include-hygiene", "toModule": "external:filesystem", "include": "sys/stat.h",
+      "boundary": "include hygiene -> filesystem compatibility", "owner": "Platform M3 refactor maintainers", "rationale": "Retain the executor file metadata probe until the workspace adapter is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/include_hygiene/executor.cpp", "fromModule": "refactor.include-hygiene", "toModule": "external:filesystem", "include": "sys/xattr.h",
+      "boundary": "include hygiene -> filesystem compatibility", "owner": "Platform M3 refactor maintainers", "rationale": "Retain the executor extended-attribute compatibility path until the workspace adapter is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/include_hygiene/executor.cpp", "fromModule": "refactor.include-hygiene", "toModule": "external:filesystem", "include": "sys/acl.h",
+      "boundary": "include hygiene -> filesystem compatibility", "owner": "Platform M3 refactor maintainers", "rationale": "Retain the executor ACL compatibility path until the workspace adapter is shared.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/include_hygiene/executor.cpp", "fromModule": "refactor.include-hygiene", "toModule": "external:process", "include": "unistd.h",
+      "boundary": "include hygiene -> process compatibility", "owner": "Platform M3 refactor maintainers", "rationale": "Retain the executor process compatibility call until the application port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-68"
+    },
+    {
+      "source": "src/main.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
+      "boundary": "product surface -> filesystem compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the primary command input stat until shared workspace context owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/toolchain/toolchain.cpp", "fromModule": "workspace.toolchain", "toModule": "external:filesystem", "include": "sys/stat.h",
+      "boundary": "workspace -> filesystem adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain the toolchain filesystem probe while WorkspaceContext is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/util/pathutil.cpp", "fromModule": "foundation.util", "toModule": "external:filesystem", "include": "pwd.h",
+      "boundary": "foundation -> filesystem adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain the host-user lookup until the workspace adapter owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/util/pathutil.cpp", "fromModule": "foundation.util", "toModule": "external:process", "include": "unistd.h",
+      "boundary": "foundation -> process adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain the host process compatibility call until the process port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/util/repo.cpp", "fromModule": "foundation.util", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "foundation -> filesystem adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain repository path operations until the workspace adapter owns them.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/util/subprocess.cpp", "fromModule": "foundation.util", "toModule": "external:process", "include": "fcntl.h",
+      "boundary": "foundation -> process adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain subprocess descriptor setup until the process port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/util/subprocess.cpp", "fromModule": "foundation.util", "toModule": "external:process", "include": "poll.h",
+      "boundary": "foundation -> process adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain subprocess polling until the process port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/util/subprocess.cpp", "fromModule": "foundation.util", "toModule": "external:process", "include": "spawn.h",
+      "boundary": "foundation -> process adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain POSIX spawn until the process port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/util/subprocess.cpp", "fromModule": "foundation.util", "toModule": "external:process", "include": "sys/wait.h",
+      "boundary": "foundation -> process adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain subprocess wait handling until the process port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/util/subprocess.cpp", "fromModule": "foundation.util", "toModule": "external:process", "include": "unistd.h",
+      "boundary": "foundation -> process adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain subprocess pipe handling until the process port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/storage.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/storage_definitions.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/storage_detail.hpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/storage_entity_rollup.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/storage_files.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/storage_include.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/storage_migrate.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/storage_query.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/storage_repo.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/storage_symbols.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/storage_types.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
     }
   ],
   "ci": {

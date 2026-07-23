@@ -42,7 +42,12 @@ manifest. Keep Clang/LLVM object-library isolation and SQLite ownership explicit
 Record target links in the manifest so a target change cannot silently widen the
 build graph. The checker also validates actual `target_sources`, object-library,
 internal-link, external-link, and target-cycle edges; changing the manifest alone
-cannot bypass those checks.
+cannot bypass those checks. Supported generator-expression target references are
+resolved; unsupported expressions and unlisted CMake fragments fail closed.
+
+Python imports and Soufflé `.include` directives are checked when they resolve to
+project modules/rules. Clang, SQLite, process, and filesystem imports must be
+declared by the owning adapter or covered by a finite, issue-linked exception.
 
 ## Required checks and review note
 

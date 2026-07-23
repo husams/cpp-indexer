@@ -28,8 +28,12 @@ SOURCE_SUFFIXES = CXX_SUFFIXES | {".py", ".dl"}
 VISIBILITY = {"PUBLIC", "PRIVATE", "INTERFACE"}
 ISSUE_RE = re.compile(r"HSE-\d+\Z")
 INCLUDE_RE = re.compile(r"^\s*#\s*include\s*([\"<])([^\">]+)[\">]", re.MULTILINE)
+PY_IMPORT_RE = re.compile(r"^\s*import\s+([^#\n]+)", re.MULTILINE)
+PY_FROM_RE = re.compile(r"^\s*from\s+([.\w]+)\s+import\s+([^#\n]+)", re.MULTILINE)
+RULE_INCLUDE_RE = re.compile(r"^\s*\.include\s+[\"<]([^\">]+)[\">]", re.MULTILINE)
 COMMAND_RE = re.compile(r"\b(add_library|add_executable|add_custom_target|"
                          r"target_link_libraries|target_sources|add_dependencies)\s*\(")
+CMaKE_FRAGMENT_RE = re.compile(r"\b(include|add_subdirectory)\s*\(\s*([^\s)]+)")
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,7 @@ class BuildGraph:
     links: dict[str, set[str]]
     edges: dict[str, set[str]]
     source_edges: dict[str, set[str]]
+    parse_errors: list[str]
 
 
 @dataclass(frozen=True)
@@ -134,18 +139,28 @@ def _tokens(body: str) -> list[str]:
         return re.findall(r"\$<[^>]+>|\$\{[^}]+\}|[A-Za-z0-9_.+:/${}-]+", body)
 
 
+def _generator_targets(token: str, targets: set[str]) -> set[str]:
+    return {
+        target for target in targets
+        if re.search(rf"(?<![A-Za-z0-9_.+-]){re.escape(target)}(?![A-Za-z0-9_.+-])", token)
+    }
+
+
 def _cmake_graph(root: Path, manifest: dict) -> BuildGraph:
     targets: set[str] = set()
     links: dict[str, set[str]] = defaultdict(set)
     edges: dict[str, set[str]] = defaultdict(set)
     source_edges: dict[str, set[str]] = defaultdict(set)
+    parse_errors: list[str] = []
     commands: list[tuple[str, list[str]]] = []
     for relative in manifest.get("cmakeFiles", ["CMakeLists.txt"]):
         path = root / relative
         if path.exists():
-            commands.extend((kind, _tokens(body)) for kind, body in _commands(
-                path.read_text(encoding="utf-8", errors="replace")
-            ))
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for fragment, name in CMaKE_FRAGMENT_RE.findall(text):
+                if fragment == "include" or name != "tests":
+                    parse_errors.append(f"unsupported CMake fragment {fragment}({name}) in {relative}")
+            commands.extend((kind, _tokens(body)) for kind, body in _commands(text))
 
     for kind, tokens in commands:
         if not tokens:
@@ -165,15 +180,35 @@ def _cmake_graph(root: Path, manifest: dict) -> BuildGraph:
                 object_match = re.fullmatch(r"\$<TARGET_OBJECTS:([^>]+)>", token)
                 if object_match:
                     edges[target].add(object_match.group(1))
+                elif "$<" in token:
+                    references = _generator_targets(token, targets)
+                    if not references:
+                        parse_errors.append(f"unsupported CMake generator expression in {target}: {token}")
+                    edges[target].update(references)
                 elif token.startswith(("src/", "python/")):
                     source_edges[target].add(token)
         elif kind == "add_dependencies":
-            edges[target].update(token for token in tokens[1:] if token not in VISIBILITY)
+            for token in tokens[1:]:
+                if token in VISIBILITY:
+                    continue
+                if "$<" in token:
+                    references = _generator_targets(token, targets)
+                    if not references:
+                        parse_errors.append(f"unsupported CMake generator expression in {target}: {token}")
+                    edges[target].update(references)
+                else:
+                    edges[target].add(token)
 
     for target, values in links.items():
-        edges[target].update(value for value in values if value in targets)
-    return BuildGraph(set(targets), dict(links), dict(edges), dict(source_edges))
-
+        for token in values:
+            if "$<" in token:
+                references = _generator_targets(token, targets)
+                if not references:
+                    parse_errors.append(f"unsupported CMake generator expression in {target}: {token}")
+                edges[target].update(references)
+            elif token in targets:
+                edges[target].add(token)
+    return BuildGraph(set(targets), dict(links), dict(edges), dict(source_edges), parse_errors)
 
 def _normalise_include(source_path: str, spelling: str) -> list[str]:
     include = PurePosixPath(spelling)
@@ -210,6 +245,112 @@ def _includes(root: Path, sources: Iterable[Source]) -> tuple[list[Include], lis
     return includes, errors
 
 
+def _python_module_name(path: str) -> str:
+    relative = PurePosixPath(path).relative_to("python").with_suffix("")
+    parts = list(relative.parts)
+    if parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
+def _python_import_targets(source: Source, line: str, imported: str, modules: dict[str, str]) -> list[str]:
+    if imported.startswith("__future__"):
+        return []
+    if imported.startswith("."):
+        source_module = _python_module_name(source.path)
+        package = source_module.split(".")
+        if package and PurePosixPath(source.path).name != "__init__.py":
+            package.pop()
+        dots = len(imported) - len(imported.lstrip("."))
+        anchor = package[: len(package) - (dots - 1)] if dots <= len(package) + 1 else []
+        base = ".".join(anchor + [part for part in imported[dots:].split(".") if part])
+    else:
+        base = imported
+    candidates = [base]
+    for name in line.split(","):
+        name = name.strip().split()[0] if name.strip() else ""
+        if name and name != "(":
+            candidates.append(f"{base}.{name}")
+    return [candidate for candidate in candidates if candidate in modules]
+
+
+def _python_dependency_errors(root: Path, sources: Iterable[Source], modules: list[dict]) -> list[str]:
+    python_sources = [source for source in sources if Path(source.path).suffix == ".py"]
+    module_names = {_python_module_name(source.path): source.module for source in python_sources}
+    module_configs = {module["id"]: module for module in modules}
+    errors: list[str] = []
+    for source in python_sources:
+        config = module_configs.get(source.module, {})
+        allowed_dependencies = set(config.get("allowedDependencies", []))
+        for pattern, dependencies in config.get("sourceAllowedDependencies", {}).items():
+            if _matches(source.path, pattern):
+                allowed_dependencies.update(dependencies)
+        allowed_external = set(config.get("allowedExternal", []))
+        text = (root / source.path).read_text(encoding="utf-8", errors="replace")
+        for match in PY_IMPORT_RE.finditer(text):
+            for imported in match.group(1).split(","):
+                name = imported.strip().split()[0]
+                if not name:
+                    continue
+                top_level = name.split(".", 1)[0]
+                kind = {"clang": "clang", "sqlite3": "sqlite"}.get(top_level)
+                if kind and kind not in allowed_external:
+                    errors.append(f"python import {source.path}: {kind} is outside module confinement")
+                elif top_level == "indexer":
+                    targets = _python_import_targets(source, "", name, module_names)
+                    if not targets:
+                        errors.append(f"python import {source.path}: unresolved project import {name}")
+                    for target in targets:
+                        target_module = module_names[target]
+                        if target_module not in allowed_dependencies:
+                            errors.append(
+                                f"python import {source.path}: undeclared dependency {source.module} -> {target_module}"
+                            )
+        for match in PY_FROM_RE.finditer(text):
+            imported_module, imported_names = match.groups()
+            if imported_module.startswith("__future__"):
+                continue
+            top_level = imported_module.lstrip(".").split(".", 1)[0]
+            kind = {"clang": "clang", "sqlite3": "sqlite"}.get(top_level)
+            if kind and kind not in allowed_external:
+                errors.append(f"python import {source.path}: {kind} is outside module confinement")
+                continue
+            if not (imported_module.startswith(".") or top_level == "indexer"):
+                continue
+            targets = _python_import_targets(source, imported_names, imported_module, module_names)
+            if not targets:
+                errors.append(f"python import {source.path}: unresolved project import {imported_module}")
+            for target in targets:
+                target_module = module_names[target]
+                if target_module not in allowed_dependencies:
+                    errors.append(
+                        f"python import {source.path}: undeclared dependency {source.module} -> {target_module}"
+                    )
+    return errors
+
+
+def _rule_dependency_errors(root: Path, sources: Iterable[Source], modules: list[dict]) -> list[str]:
+    by_path = {source.path: source.module for source in sources}
+    allowed = {module["id"]: set(module.get("allowedDependencies", [])) for module in modules}
+    errors: list[str] = []
+    for source in sources:
+        if Path(source.path).suffix != ".dl":
+            continue
+        text = (root / source.path).read_text(encoding="utf-8", errors="replace")
+        for spelling in RULE_INCLUDE_RE.findall(text):
+            candidates = [
+                posixpath.normpath(str(PurePosixPath(source.path).parent / spelling)),
+                posixpath.normpath(spelling),
+                posixpath.normpath(str(PurePosixPath("python/indexer") / spelling)),
+            ]
+            target_module = next((by_path[candidate] for candidate in candidates if candidate in by_path), None)
+            if target_module is None:
+                errors.append(f"rule include {source.path}: unresolved project rule {spelling}")
+            elif target_module not in allowed.get(source.module, set()):
+                errors.append(f"rule include {source.path}: undeclared dependency {source.module} -> {target_module}")
+    return errors
+
+
 def _external_kind(spelling: str) -> str | None:
     if spelling.startswith("clang/") or spelling.startswith("clang-c/"):
         return "clang"
@@ -217,6 +358,11 @@ def _external_kind(spelling: str) -> str | None:
         return "llvm"
     if spelling in {"sqlite3.h", "sqlite3ext.h", "storage/sqlite.hpp"}:
         return "sqlite"
+    if spelling in {"spawn.h", "fcntl.h", "poll.h", "sys/wait.h", "signal.h", "unistd.h"}:
+        return "process"
+    if (spelling == "filesystem" or spelling in {"dirent.h", "pwd.h"}
+            or spelling.startswith("sys/")):
+        return "filesystem"
     return None
 
 
@@ -308,6 +454,12 @@ def check_manifest(root: Path, manifest_path: Path) -> list[str]:
         unknown = allowed.get(module.get("id"), set()) - module_ids
         if unknown:
             errors.append(f"module {module['id']}: unknown allowed dependencies {sorted(unknown)}")
+        for pattern, dependencies in module.get("sourceAllowedDependencies", {}).items():
+            unknown = set(dependencies) - module_ids
+            if unknown:
+                errors.append(
+                    f"module {module['id']} source rule {pattern}: unknown allowed dependencies {sorted(unknown)}"
+                )
 
     sources, source_errors = _sources(root, manifest)
     errors.extend(source_errors)
@@ -322,7 +474,13 @@ def check_manifest(root: Path, manifest_path: Path) -> list[str]:
 
     graph = _cmake_graph(root, manifest)
     target_entries = manifest.get("targets", [])
+    target_entry_names = [entry.get("name") for entry in target_entries]
+    if any(not _nonempty(name) for name in target_entry_names):
+        errors.append("manifest: target names must be non-empty")
+    duplicates = sorted({name for name in target_entry_names if name and target_entry_names.count(name) > 1})
+    errors.extend(f"manifest: duplicate target ownership for {name}" for name in duplicates)
     target_map = {entry.get("name"): entry for entry in target_entries}
+    errors.extend(graph.parse_errors)
     missing_targets = sorted(graph.targets - set(target_map))
     unknown_targets = sorted(set(target_map) - graph.targets)
     errors.extend(f"target {name}: missing manifest ownership" for name in missing_targets)
@@ -350,7 +508,7 @@ def check_manifest(root: Path, manifest_path: Path) -> list[str]:
                     f"target {target}: source edge {owner} -> {source_module} ({path}) is not allowed"
                 )
 
-    exceptions = manifest.get("exceptions", [])
+    exceptions = manifest.get("exceptions", []) + manifest.get("externalExceptions", [])
     for index, exception in enumerate(exceptions):
         prefix = f"exception {exception.get('source', '<unknown>')}[{index}]"
         errors.extend(_metadata_errors(prefix, exception))
@@ -451,11 +609,16 @@ def check_manifest(root: Path, manifest_path: Path) -> list[str]:
 
     for index, exception in enumerate(target_exceptions):
         dependencies = exception.get("dependencies", [])
-        if any((exception.get("target"), dependency) in actual_target_violations
-               and (index, dependency) in target_exception_hits for dependency in dependencies):
+        if dependencies and all((exception.get("target"), dependency) in actual_target_violations
+                                and (index, dependency) in target_exception_hits
+                                for dependency in dependencies):
             continue
-        errors.append(f"target exception {exception.get('target', '<unknown>')}: does not match an actual violation")
+        errors.append(
+            f"target exception {exception.get('target', '<unknown>')}: not every listed dependency matches an actual violation"
+        )
 
+    errors.extend(_python_dependency_errors(root, sources, modules))
+    errors.extend(_rule_dependency_errors(root, sources, modules))
     errors.extend(_contract_errors(root, manifest))
     module_graph = {module["id"]: set(module.get("allowedDependencies", [])) - {module["id"]}
                     for module in modules}

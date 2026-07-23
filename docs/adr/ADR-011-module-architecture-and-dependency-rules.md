@@ -48,8 +48,10 @@ the focused ports and application services.
 Clang/LLVM includes are allowed only in modules declared as frontend, extraction,
 or lowering adapters. SQLite includes and links are allowed only in the persistence
 adapter and explicitly declared analysis runners that consume a persisted artifact.
-These policies apply module-wide; the domain and artifact contract files listed in
-the manifest are an additional direct purity check.
+Process and filesystem headers are likewise classified and may cross a module
+boundary only through a declared adapter or finite issue-linked exception. These
+policies apply module-wide to C++ and supported Python imports; the domain and
+artifact contract files listed in the manifest are an additional direct purity check.
 
 ## Ports, adapters, and surfaces
 
@@ -69,6 +71,8 @@ An existing cross-boundary edge is not implicitly grandfathered. Each exception 
 the manifest must name a non-empty owner, rationale, affected boundary, expiry date,
 and valid Linear removal issue, and must match a current source or build violation.
 The checker fails on missing metadata, stale exceptions, or an expired exception.
+Target exceptions list one or more dependencies only when every listed dependency
+is a current violation; a future edge cannot be pre-authorized by a live exception.
 Exceptions are temporary migration work items, not permission to add a new edge
 without review.
 
