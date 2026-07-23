@@ -13,7 +13,7 @@ from indexer.generated_extensions import EXTENSION_RELATIONS
 from indexer.query import GraphQuery
 from indexer.queryplan import extension_relation_catalog, extension_relation_metadata
 from indexer.souffle import SouffleError, _open_ro
-from indexer.storage import Storage
+from indexer.storage import Storage, Symbol
 
 
 ROOT = Path(__file__).parents[2]
@@ -77,6 +77,64 @@ def test_catalog_compatibility_preserves_tombstones_and_rejects_reuse(tmp_path):
         "action": "reuse",
     })
     assert generator.compatibility_check(reused)["tombstones"]["symbol_kinds"] == {}
+
+
+def test_duplicate_extension_identity_is_rejected(tmp_path):
+    generator = _generator_module()
+    generator.EXTENSIONS_DIR = tmp_path
+    manifest = {
+        "format": "cidx.catalog.extension/v1",
+        "package": "dup.package",
+        "version": 1,
+        "relations": [{
+            "id": "relation/taints",
+            "name": "taints",
+            "layer": "symbol",
+            "source": "symbol.declaration",
+            "target": "symbol.declaration",
+            "inverse": "tainted_by",
+            "traversal": ["out", "in"],
+            "evidence": "derived",
+            "evidence_capabilities": ["derived"],
+            "completeness": "partial",
+        }],
+    }
+    (tmp_path / "one.json").write_text(json.dumps(manifest))
+    (tmp_path / "two.json").write_text(json.dumps(manifest))
+    with pytest.raises(SystemExit, match="duplicate extension package namespace"):
+        generator.load_extensions()
+
+
+def test_template_relation_metadata_matches_graph_direction():
+    db = Storage(":memory:")
+    templates = {
+        "class-template": db.add_symbol(Symbol("u:class-template", "Box", "class-template", is_definition=True, resolved=True)),
+        "function-template": db.add_symbol(Symbol("u:function-template", "make", "function-template", is_definition=True, resolved=True)),
+    }
+    concrete = {
+        "struct": db.add_symbol(Symbol("u:struct", "Box<int>", "struct", is_definition=True, resolved=True)),
+        "function": db.add_symbol(Symbol("u:function", "make<int>", "function", is_definition=True, resolved=True)),
+        "method": db.add_symbol(Symbol("u:method", "Box<int>::run", "method", is_definition=True, resolved=True)),
+        "constructor": db.add_symbol(Symbol("u:constructor", "Box<int>::Box", "constructor", is_definition=True, resolved=True)),
+    }
+    db.add_edge(concrete["struct"], templates["class-template"], 4)
+    for kind in ("function", "method", "constructor"):
+        db.add_edge(concrete[kind], templates["function-template"], 5)
+    rows = [tuple(row) for row in db._conn.execute(
+        "SELECT e.kind, src.kind, dst.kind FROM edge e "
+        "JOIN symbol src ON src.id = e.src_id JOIN symbol dst ON dst.id = e.dst_id "
+        "WHERE e.kind IN (4, 5) ORDER BY e.kind, e.id"
+    ).fetchall()]
+    assert rows == [
+        (4, 2, 31),
+        (5, 8, 30),
+        (5, 21, 30),
+        (5, 24, 30),
+    ]
+    for name in ("specializes", "instantiates"):
+        metadata = RELATION_METADATA[(name, "symbol", 4 if name == "specializes" else 5)]
+        assert metadata["source"] == "symbol.declaration"
+        assert metadata["target"] == "symbol.template"
 
 
 def _meta_db(path: Path, catalog_hash: str | None) -> None:

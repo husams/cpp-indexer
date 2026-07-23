@@ -1,7 +1,7 @@
 # Generated CIDX semantic catalog
 
 - Catalog version: `1`
-- Catalog hash: `dff2d12d732e5ee44972a0f67261d87325837ac12c2fad203096de216ab0f9eb`
+- Catalog hash: `15e7ce8206c521cff6794530a382f0389320c0f3e49d148b0f311d058aa5157a`
 
 ## Relations
 
@@ -10,8 +10,8 @@
 | symbol | 1 | `calls` | `symbol.callable` | `symbol.callable` | `called_by` | out,in | call_site | call_site,declaration | partial |
 | symbol | 2 | `inherits` | `symbol.record` | `symbol.record` | `subclasses` | out,in | declaration | declaration | complete |
 | symbol | 3 | `contains` | `symbol.scope` | `symbol.declaration` | `contained_by` | out,in | declaration | declaration | complete |
-| symbol | 4 | `specializes` | `symbol.template` | `symbol.template` | `specialized_by` | out,in | declaration | declaration,reference_site | partial |
-| symbol | 5 | `instantiates` | `symbol.template` | `symbol.declaration` | `instantiated_by` | out,in | declaration | declaration,reference_site | partial |
+| symbol | 4 | `specializes` | `symbol.declaration` | `symbol.template` | `specialized_by` | out,in | declaration | declaration,reference_site | partial |
+| symbol | 5 | `instantiates` | `symbol.declaration` | `symbol.template` | `instantiated_by` | out,in | declaration | declaration,reference_site | partial |
 | symbol | 6 | `overrides` | `symbol.method` | `symbol.method` | `overridden_by` | out,in | declaration | declaration | complete |
 | symbol | 7 | `uses` | `symbol.declaration` | `symbol.declaration` | `used_by` | out,in | reference_site | reference_site,call_site | partial |
 | symbol | 8 | `field_of` | `symbol.member` | `symbol.record` | `fields` | out,in | declaration | declaration | complete |

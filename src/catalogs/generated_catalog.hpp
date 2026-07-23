@@ -6,7 +6,7 @@
 
 namespace cidx::catalog {
 inline constexpr int kCatalogVersion = 1;
-inline constexpr std::string_view kCatalogHash = "dff2d12d732e5ee44972a0f67261d87325837ac12c2fad203096de216ab0f9eb";
+inline constexpr std::string_view kCatalogHash = "15e7ce8206c521cff6794530a382f0389320c0f3e49d148b0f311d058aa5157a";
 enum class View : std::uint8_t { Symbol, Entity };
 struct NamedId { int64_t id; std::string_view name; };
 struct Relation { int64_t id; std::string_view name; View layer; std::string_view source; std::string_view target; std::string_view inverse; std::string_view traversal; std::string_view evidence; std::string_view evidence_capabilities; std::string_view completeness; };
@@ -75,8 +75,8 @@ inline constexpr std::array<Relation, 32> kRelations = {{
     {.id = 1, .name = "calls", .layer = View::Symbol, .source = "symbol.callable", .target = "symbol.callable", .inverse = "called_by", .traversal = "out|in", .evidence = "call_site", .evidence_capabilities = "call_site|declaration", .completeness = "partial"},
     {.id = 2, .name = "inherits", .layer = View::Symbol, .source = "symbol.record", .target = "symbol.record", .inverse = "subclasses", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete"},
     {.id = 3, .name = "contains", .layer = View::Symbol, .source = "symbol.scope", .target = "symbol.declaration", .inverse = "contained_by", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete"},
-    {.id = 4, .name = "specializes", .layer = View::Symbol, .source = "symbol.template", .target = "symbol.template", .inverse = "specialized_by", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration|reference_site", .completeness = "partial"},
-    {.id = 5, .name = "instantiates", .layer = View::Symbol, .source = "symbol.template", .target = "symbol.declaration", .inverse = "instantiated_by", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration|reference_site", .completeness = "partial"},
+    {.id = 4, .name = "specializes", .layer = View::Symbol, .source = "symbol.declaration", .target = "symbol.template", .inverse = "specialized_by", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration|reference_site", .completeness = "partial"},
+    {.id = 5, .name = "instantiates", .layer = View::Symbol, .source = "symbol.declaration", .target = "symbol.template", .inverse = "instantiated_by", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration|reference_site", .completeness = "partial"},
     {.id = 6, .name = "overrides", .layer = View::Symbol, .source = "symbol.method", .target = "symbol.method", .inverse = "overridden_by", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete"},
     {.id = 7, .name = "uses", .layer = View::Symbol, .source = "symbol.declaration", .target = "symbol.declaration", .inverse = "used_by", .traversal = "out|in", .evidence = "reference_site", .evidence_capabilities = "reference_site|call_site", .completeness = "partial"},
     {.id = 8, .name = "field_of", .layer = View::Symbol, .source = "symbol.member", .target = "symbol.record", .inverse = "fields", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete"},

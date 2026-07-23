@@ -27,6 +27,8 @@ def canonical(value: Any) -> str:
 
 def load_extensions() -> list[dict[str, Any]]:
     manifests = []
+    packages: set[str] = set()
+    qualified_ids: set[str] = set()
     for path in sorted(EXTENSIONS_DIR.glob("*.json")):
         manifest = json.loads(path.read_text())
         if manifest.get("format") != "cidx.catalog.extension/v1":
@@ -34,6 +36,9 @@ def load_extensions() -> list[dict[str, Any]]:
         package = manifest.get("package", "")
         if not re.fullmatch(r"[a-z][a-z0-9_.-]*", package):
             raise SystemExit(f"extension {path} has invalid package namespace")
+        if package in packages:
+            raise SystemExit(f"duplicate extension package namespace: {package}")
+        packages.add(package)
         relations = manifest.get("relations")
         if not isinstance(relations, list) or not relations:
             raise SystemExit(f"extension {path} must declare relations")
@@ -42,11 +47,17 @@ def load_extensions() -> list[dict[str, Any]]:
                 raise SystemExit(f"extension {path} relation ids must be package-local strings")
             if not relation["id"].startswith("relation/"):
                 raise SystemExit(f"extension {path} relation ids must use relation/<name>")
+            qualified_id = f"{package}/{relation['id']}"
+            if qualified_id in qualified_ids:
+                raise SystemExit(f"duplicate extension relation identity: {qualified_id}")
+            qualified_ids.add(qualified_id)
             for key in ("source", "target", "inverse", "traversal", "evidence", "evidence_capabilities", "completeness"):
                 if key not in relation:
                     raise SystemExit(f"extension {path} relation missing {key}")
-            relation["qualified_name"] = f"{package}/{relation['id']}"
-        manifest["path"] = str(path.relative_to(ROOT))
+            relation["qualified_name"] = qualified_id
+        manifest["path"] = (
+            str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else path.name
+        )
         manifests.append(manifest)
     return manifests
 
