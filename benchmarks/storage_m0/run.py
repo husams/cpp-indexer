@@ -17,6 +17,7 @@ from .common import (
     canonical_json, git_revision, hardware_fingerprint, latency_summary, load_json,
     manifest_digest, semantic_digest, sha256, sqlite_compile_options, system_profile,
 )
+from .generator import generate
 from .recovery import simulate
 
 
@@ -152,58 +153,84 @@ def _timed_copy(path: Path, directory: Path, name: str) -> Path:
     target = directory / name; shutil.copy2(path, target); return target
 
 
-def _changed_tu_update(path: Path, directory: Path) -> dict[str, Any]:
-    first = _timed_copy(path, directory, "update-a.db"); second = _timed_copy(path, directory, "update-b.db")
+def _changed_tu_update(path: Path, directory: Path, manifest_path: Path, workload_id: str, scale_id: str, seed: int, distribution: str, caps: dict[str, int]) -> dict[str, Any]:
+    target = _timed_copy(path, directory, "update-incremental.db")
+    reference = directory / "update-canonical.db"
     started = time.perf_counter_ns()
-    for target in (first, second):
-        connection = sqlite3.connect(target)
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("UPDATE benchmark_meta SET value='building' WHERE key='state'")
-            connection.execute("UPDATE benchmark_meta SET value=CAST(value AS INTEGER)+1 WHERE key='generation'")
-            connection.execute("UPDATE file SET md5=md5 || '-changed' WHERE id=(SELECT MIN(id) FROM file)")
-            _refresh_current(target, connection)
-        finally:
-            connection.close()
-    duration = round((time.perf_counter_ns() - started) / 1_000_000, 6)
-    left, right = semantic_digest(first), semantic_digest(second)
-    return {"status": "ok", "duration_ms": duration, "changed_translation_units": 1,
-            "semantic_equivalence": left == right, "result_digest": left, "kind": "deterministic changed-TU transaction"}
-
-
-def _transform_rebuild(path: Path, directory: Path) -> dict[str, Any]:
-    first = _timed_copy(path, directory, "transform-a.db"); second = _timed_copy(path, directory, "transform-b.db")
-    started = time.perf_counter_ns()
-    for target in (first, second):
-        connection = sqlite3.connect(target)
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DELETE FROM entity_edge")
-            connection.execute("INSERT INTO entity_edge(src_id,dst_id,kind,count,via_member_id,multiplicity,access,is_virtual,partial) SELECT src_id,dst_id,8,count,src_id,1,0,0,0 FROM edge")
-            _refresh_current(target, connection)
-        finally:
-            connection.close()
-    duration = round((time.perf_counter_ns() - started) / 1_000_000, 6)
-    left, right = semantic_digest(first), semantic_digest(second)
-    return {"status": "ok", "duration_ms": duration, "semantic_equivalence": left == right,
-            "result_digest": left, "kind": "derived entity-edge transform rebuild"}
-
-
-def _migration(path: Path, directory: Path) -> dict[str, Any]:
-    target = _timed_copy(path, directory, "migration.db"); started = time.perf_counter_ns()
     connection = sqlite3.connect(target)
     try:
-        connection.execute("PRAGMA user_version=33")
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute("INSERT INTO benchmark_meta(key,value) VALUES('migration_from','33') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-        connection.execute("INSERT INTO benchmark_meta(key,value) VALUES('migration_to','34') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-        connection.execute("UPDATE meta SET value='34' WHERE key='schema_version'")
+        connection.execute("UPDATE benchmark_meta SET value='building' WHERE key='state'")
+        connection.execute("UPDATE benchmark_meta SET value=CAST(value AS INTEGER)+1 WHERE key='generation'")
+        connection.execute("UPDATE file SET md5=md5 || '-changed-tu-0' WHERE id=(SELECT MIN(id) FROM file)")
         _refresh_current(target, connection)
     finally:
         connection.close()
+    generate(manifest_path, workload_id, scale_id, reference, seed=seed, distribution=distribution,
+             max_rows=caps["rows"], evidence_max_rows=caps["evidence_rows"], variant="changed-tu-0")
+    duration = round((time.perf_counter_ns() - started) / 1_000_000, 6)
+    left, right = semantic_digest(target), semantic_digest(reference)
+    return {"status": "ok", "duration_ms": duration, "changed_translation_units": 1,
+            "semantic_equivalence": left == right, "result_digest": left, "canonical_reference": str(reference),
+            "kind": "incremental changed-TU transaction vs independent canonical build"}
+
+
+def _transform_rebuild(path: Path, directory: Path) -> dict[str, Any]:
+    first = _timed_copy(path, directory, "transform-incremental.db"); second = _timed_copy(path, directory, "transform-canonical.db")
+    started = time.perf_counter_ns()
+    connection = sqlite3.connect(first)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM entity_edge")
+        connection.execute("INSERT INTO entity_edge(src_id,dst_id,kind,count,via_member_id,multiplicity,access,is_virtual,partial) SELECT src_id,dst_id,8,count,src_id,1,0,0,0 FROM edge")
+        _refresh_current(first, connection)
+    finally:
+        connection.close()
+    connection = sqlite3.connect(second)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM entity_edge")
+        cursor = connection.execute("SELECT src_id,dst_id,count FROM edge ORDER BY id")
+        while rows := cursor.fetchmany(10_000):
+            connection.executemany("INSERT INTO entity_edge(src_id,dst_id,kind,count,via_member_id,multiplicity,access,is_virtual,partial) VALUES (?, ?, 8, ?, ?, 1, 0, 0, 0)", [(src, dst, count, src) for src, dst, count in rows])
+        _refresh_current(second, connection)
+    finally:
+        connection.close()
+    duration = round((time.perf_counter_ns() - started) / 1_000_000, 6)
+    left, right = semantic_digest(first), semantic_digest(second)
+    return {"status": "ok", "duration_ms": duration, "semantic_equivalence": left == right,
+            "result_digest": left, "canonical_reference": str(second), "kind": "derived entity-edge transform rebuild via SQL and streaming canonical paths"}
+
+
+def _migration(path: Path, directory: Path) -> dict[str, Any]:
+    target = _timed_copy(path, directory, "migration.db"); reference = _timed_copy(path, directory, "migration-canonical.db"); started = time.perf_counter_ns()
+    variable_edge = None
+    connection = sqlite3.connect(target)
+    try:
+        variable_edge = connection.execute("SELECT e.id FROM edge e JOIN symbol s ON s.id=e.src_id WHERE s.kind=9 LIMIT 1").fetchone()[0]
+        connection.execute("DELETE FROM edge_kind WHERE id IN (19,20)")
+        connection.execute("UPDATE edge SET kind=7 WHERE id=?", (variable_edge,))
+        connection.execute("UPDATE meta SET value='33' WHERE key='schema_version'")
+        connection.commit()
+    finally:
+        connection.close()
+    canonical = sqlite3.connect(reference)
+    try:
+        canonical.execute("DELETE FROM edge_kind WHERE id IN (19,20)")
+        canonical.execute("INSERT INTO edge_kind(id,name) VALUES (19,'alias_of'),(20,'of_type')")
+        canonical.execute("UPDATE edge SET kind=20 WHERE id=?", (variable_edge,))
+        canonical.commit()
+    finally:
+        canonical.close()
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))
+    from indexer.storage import Storage
+    with Storage(str(target)):
+        pass
     duration = round((time.perf_counter_ns() - started) / 1_000_000, 6)
     return {"status": "ok", "duration_ms": duration, "from_schema": 33, "to_schema": 34,
-            "semantic_equivalence": semantic_digest(target) == semantic_digest(path), "kind": "v33-to-v34 compatibility metadata migration"}
+            "semantic_equivalence": semantic_digest(target) == semantic_digest(reference), "canonical_reference": str(reference),
+            "migration_triggered": True, "kind": "actual v33-to-v34 compatibility migration"}
 
 
 def _backup(path: Path, directory: Path) -> dict[str, Any]:
@@ -255,15 +282,35 @@ def run(db_path: Path, manifest_path: Path, workload_id: str, profile_path: Path
             directory = Path(temporary)
             operations = {
                 "cold_build": {"status": "ok" if _meta(connection, "generation_duration_ms") else "failed", "duration_ms": float(_meta(connection, "generation_duration_ms") or 0), "rows_per_s": None, "kind": "synthetic materialization"},
-                "warm_noop": None, "changed_tu_update": _changed_tu_update(db_path, directory),
+                "warm_noop": None, "changed_tu_update": _changed_tu_update(
+                    db_path, directory, manifest_path, workload_id, scale, int(_meta(connection, "benchmark_seed") or manifest.get("seed", 0)),
+                    distribution, caps,
+                ),
                 "transform_rebuild": _transform_rebuild(db_path, directory), "migration": _migration(db_path, directory),
                 "backup": _backup(db_path, directory), "recovery": dict(checks),
+            }
+            recovery_simulation = simulate(db_path)
+            operations["recovery"] = {
+                **checks, "status": "ok" if checks.get("status") == "ok" and recovery_simulation.get("status") == "pass" else "failed",
+                "wal_boundaries": recovery_simulation,
             }
             rows_for_throughput = sum(int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) for table in ("symbol", "edge", "edge_site", "type_node", "entity_edge"))
             generation_ms = operations["cold_build"]["duration_ms"]
             operations["cold_build"]["rows_per_s"] = rows_for_throughput / (generation_ms / 1000) if generation_ms > 0 else None
-            warm_started = time.perf_counter_ns(); connection.execute("SELECT COUNT(*) FROM symbol").fetchone(); connection.execute("SELECT COUNT(*) FROM edge").fetchone()
-            operations["warm_noop"] = {"status": "ok", "duration_ms": round((time.perf_counter_ns() - warm_started) / 1_000_000, 6), "semantic_equivalence": True, "kind": "read-only warm no-op"}
+            warm_started = time.perf_counter_ns()
+            warm_connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                warm_integrity = warm_connection.execute("PRAGMA integrity_check").fetchone()[0]
+                warm_fks = warm_connection.execute("PRAGMA foreign_key_check").fetchall()
+                warm_digest = semantic_digest(db_path)
+            finally:
+                warm_connection.close()
+            operations["warm_noop"] = {
+                "status": "ok" if warm_integrity == "ok" and not warm_fks and warm_digest == checks["semantic_digest"] else "failed",
+                "duration_ms": round((time.perf_counter_ns() - warm_started) / 1_000_000, 6),
+                "semantic_equivalence": warm_digest == checks["semantic_digest"], "kind": "read-only WAL-safe integrity/digest validation",
+                "integrity_check": warm_integrity, "foreign_key_errors": len(warm_fks), "semantic_digest": warm_digest,
+            }
         operation_equivalence = all(operations[name].get("semantic_equivalence", True) is True for name in ("warm_noop", "changed_tu_update", "transform_rebuild", "migration", "backup"))
         reference_digest = semantic_digest(semantic_reference) if semantic_reference else None
         checks["semantic_reference_digest"] = reference_digest
@@ -280,7 +327,11 @@ def run(db_path: Path, manifest_path: Path, workload_id: str, profile_path: Path
             "configuration": effective_configuration, "measured": True,
             "indexes": measured_indexes,
             "artifact": str(db_path),
-            "checks": ["sqlite_master index inventory", "query plans captured"],
+            "checks": [
+                {"id": "configuration.index_inventory", "status": "pass", "actual": measured_indexes},
+                {"id": "configuration.query_plans", "status": "pass", "actual": [item["id"] for item in queries if item.get("plan")]},
+            ],
+            "manifest_artifact": str(manifest_path), "profile_artifact": str(profile_path),
         }
         result = {
             "result_version": "storage-m0/result-v2", "benchmark": BENCHMARK_VERSION, "schema_version": SCHEMA_VERSION,
@@ -299,6 +350,8 @@ def run(db_path: Path, manifest_path: Path, workload_id: str, profile_path: Path
         }
     finally:
         connection.close()
+    configuration_evidence["run_id"] = result["run_id"]
+    configuration_evidence["result_artifact"] = str(output) if output is not None else None
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True); output.write_text(canonical_json(result) + "\n", encoding="utf-8")
     return result

@@ -23,7 +23,7 @@
     "entity_edges": 512,
     "include_edges": 6
   },
-  "semantic_digest": "bea33573cc02c379e40e4c6d5ff6d930081247b2a802ec1233b625f95ae97beb",
+  "semantic_digest": "08cc46550ceda20dc11e9457c26e394162cbdc359749fc5debe4b2a338a273d6",
   "measured_operations": [
     "cold_build",
     "warm_noop",

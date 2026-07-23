@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 import time
 from pathlib import Path
@@ -26,7 +27,7 @@ def _scale(workload: dict[str, Any], scale_id: str) -> dict[str, int]:
     return {key: int(number) for key, number in value.items()}
 
 
-def _topology(connection: sqlite3.Connection, workload: dict[str, Any]) -> dict[str, list[int]]:
+def _topology(connection: sqlite3.Connection, workload: dict[str, Any], variant: str | None = None) -> dict[str, list[int]]:
     topology = workload.get("topology", {})
     repositories = int(topology.get("repositories", 1))
     components = int(topology.get("components_per_repository", 1))
@@ -59,7 +60,7 @@ def _topology(connection: sqlite3.Connection, workload: dict[str, Any]) -> dict[
             for tu in range(translation_units):
                 connection.execute(
                     "INSERT INTO file(directory_id, name, md5, compile_options, driver, indexed) VALUES (?, ?, ?, ?, ?, 1)",
-                    (directory_id, f"tu-{tu:04d}.cpp", f"benchmark-tu-{repository}-{component}-{tu:04d}",
+                    (directory_id, f"tu-{tu:04d}.cpp", f"benchmark-tu-{repository}-{component}-{tu:04d}{('-' + variant) if variant and repository == 0 and component == 0 and tu == 0 else ''}",
                      json.dumps(["-std=c++23"], separators=(",", ":")), "c++"),
                 )
                 file_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -119,10 +120,78 @@ def _pair(index: int, nodes: int, distribution: str, seed: int) -> tuple[int, in
         if target >= source:
             target += 1
         return source, target
-    offset = (index // nodes) % (nodes - 1) + 1
-    source = (index + seed) % nodes
-    target = (source + offset) % nodes
-    return source, target
+    if distribution == "balanced":
+        block = index // nodes
+        source = (index + seed) % nodes
+        offset = (block + source) % (nodes - 1) + 1
+        return source, (source + offset) % nodes
+    if distribution == "long-chain":
+        block = index // nodes
+        source = (index + seed) % nodes
+        return source, (source + block % (nodes - 1) + 1) % nodes
+    if distribution == "cyclic":
+        block = index // nodes
+        source = (index + seed) % nodes
+        offset = (block + source * source) % (nodes - 1) + 1
+        return source, (source + offset) % nodes
+    if distribution == "skewed":
+        # Enumerate two triangular regions: most edges leave a small source
+        # prefix, while the second region gives the tail nodes a sparse fanout.
+        if nodes < 128:
+            offset = index // nodes % (nodes - 1) + 1
+            source = (index + seed) % nodes
+            return source, (source + offset) % nodes
+        half = nodes * (nodes - 1) // 2
+        ordinal = index if index < half else index - half
+        if index < half:
+            block = (2 * (nodes - 1) + 1 - math.isqrt((2 * nodes - 1) ** 2 - 8 * ordinal)) // 2
+            while block * (nodes - 1) - block * (block - 1) // 2 > ordinal:
+                block -= 1
+            while (block + 1) * (nodes - 1) - (block + 1) * block // 2 <= ordinal:
+                block += 1
+            start = block * (nodes - 1) - block * (block - 1) // 2
+            return block, (block + ordinal - start + 1) % nodes
+        block = (1 + math.isqrt(1 + 8 * ordinal)) // 2
+        while block * (block - 1) // 2 > ordinal:
+            block -= 1
+        while (block + 1) * block // 2 <= ordinal:
+            block += 1
+        start = block * (block - 1) // 2
+        return block, (block + ordinal - start + 1) % nodes
+    if distribution == "diamond":
+        motif_limit = (nodes // 4) * 4
+        if motif_limit == 0:
+            offset = index // nodes % (nodes - 1) + 1
+            source = (index + seed) % nodes
+            return source, (source + offset) % nodes
+        if index < motif_limit:
+            motif, slot = divmod(index, 4)
+            base = motif * 4
+            return ((base, base + 1), (base, base + 2),
+                    (base + 1, base + 3), (base + 2, base + 3))[slot]
+        filler = index - motif_limit
+        allowed_per_offset = nodes - motif_limit // 2
+        if filler < allowed_per_offset:
+            offset = 1
+            rank = filler
+            if rank < motif_limit // 2:
+                source = 4 * (rank // 2) + 1 + 2 * (rank % 2)
+            else:
+                source = motif_limit + rank - motif_limit // 2
+            return source, (source + offset) % nodes
+        if filler < 2 * allowed_per_offset:
+            offset = 2
+            rank = filler - allowed_per_offset
+            if rank < motif_limit // 2:
+                source = 4 * (rank // 2) + 2 + 1 * (rank % 2)
+            else:
+                source = motif_limit + rank - motif_limit // 2
+            return source, (source + offset) % nodes
+        remainder = filler - 2 * allowed_per_offset
+        offset = 3 + remainder // nodes
+        source = (remainder % nodes + seed) % nodes
+        return source, (source + offset) % nodes
+    raise ValueError(f"unsupported distribution {distribution!r}")
 
 
 def _insert_symbols(connection: sqlite3.Connection, nodes: int, file_ids: list[int], kind_ids: dict[str, int], seed: int, chunk_size: int = 10_000) -> int:
@@ -249,7 +318,7 @@ def _insert_evidence(connection: sqlite3.Connection, edges: int, file_ids: list[
     return inserted
 
 
-def generate(manifest_path: Path, workload_id: str, scale_id: str, output: Path, *, seed: int | None = None, distribution: str | None = None, max_rows: int = 1_000_000, evidence_max_rows: int = 2_000_000) -> dict[str, Any]:
+def generate(manifest_path: Path, workload_id: str, scale_id: str, output: Path, *, seed: int | None = None, distribution: str | None = None, max_rows: int = 1_000_000, evidence_max_rows: int = 2_000_000, variant: str | None = None) -> dict[str, Any]:
     manifest = load_json(manifest_path)
     if manifest.get("manifest_version") != "storage-m0/manifest-v1" or manifest.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("unsupported Storage M0 v34 manifest")
@@ -273,7 +342,7 @@ def generate(manifest_path: Path, workload_id: str, scale_id: str, output: Path,
     try:
         connection.executescript(schema)
         connection.executescript("CREATE TABLE benchmark_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO benchmark_meta(key,value) VALUES ('state','building'),('generation','1');")
-        topology = _topology(connection, workload)
+        topology = _topology(connection, workload, variant)
         first_symbol_id = _insert_symbols(connection, actual_nodes, topology["files"], kind_ids, actual_seed)
         first_type_id = _insert_types_and_entities(connection, actual_nodes, first_symbol_id, actual_seed)
         first_edge_id = _insert_edges(connection, actual_relations, actual_nodes, first_symbol_id, actual_distribution, actual_seed)
@@ -287,6 +356,7 @@ def generate(manifest_path: Path, workload_id: str, scale_id: str, output: Path,
             "actual_nodes": str(actual_nodes), "actual_relations": str(actual_relations),
             "row_cap": str(max_rows), "evidence_row_cap": str(evidence_max_rows),
             "configuration": "v34-default",
+            "variant": variant or "baseline",
         }.items():
             connection.execute("INSERT INTO benchmark_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
         connection.execute("INSERT INTO meta(key,value) VALUES('benchmark_manifest_sha256',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (manifest_hash,))
@@ -316,7 +386,7 @@ def generate(manifest_path: Path, workload_id: str, scale_id: str, output: Path,
         "workload": workload_id, "scale": scale_id, "distribution": actual_distribution, "seed": actual_seed,
         "requested": {"nodes": requested_nodes, "relations": requested_relations},
         "materialization_cap": {"rows": max_rows, "evidence_rows": evidence_max_rows},
-        "counts": counts, "semantic_digest": digest, "output": str(output),
+        "counts": counts, "semantic_digest": digest, "output": str(output), "variant": variant or "baseline",
     }
 
 
@@ -325,9 +395,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", type=Path, required=True); parser.add_argument("--workload", default="synthetic")
     parser.add_argument("--scale", default="smoke"); parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seed", type=int); parser.add_argument("--distribution")
+    parser.add_argument("--variant")
     parser.add_argument("--max-rows", type=int, default=1_000_000); parser.add_argument("--evidence-max-rows", type=int, default=2_000_000)
     args = parser.parse_args(argv)
-    print(canonical_json(generate(args.manifest, args.workload, args.scale, args.output, seed=args.seed, distribution=args.distribution, max_rows=args.max_rows, evidence_max_rows=args.evidence_max_rows)))
+    print(canonical_json(generate(args.manifest, args.workload, args.scale, args.output, seed=args.seed, distribution=args.distribution, max_rows=args.max_rows, evidence_max_rows=args.evidence_max_rows, variant=args.variant)))
     return 0
 
 

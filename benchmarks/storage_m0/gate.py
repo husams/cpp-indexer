@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
 from pathlib import Path
 from typing import Any
 
-from .common import canonical_json, load_json, require_result_version
+from .common import canonical_json, load_json, manifest_digest, require_result_version, semantic_digest
 
 
 def _check(name: str, status: str, *, actual: Any = None, target: Any = None, reason: str | None = None) -> dict[str, Any]:
@@ -57,14 +58,94 @@ def _identity_dimensions(result: dict[str, Any]) -> dict[str, Any]:
     return {key: identity.get(key) for key in ("manifest_sha256", "workload", "scale", "seed", "distribution", "requested", "actual", "caps", "revision", "profile_id", "hardware_fingerprint")}
 
 
+def _bound_result_errors(result: dict[str, Any], role: str) -> list[str]:
+    errors: list[str] = []
+    try:
+        require_result_version(result)
+    except ValueError as error:
+        return [f"{role}: {error}"]
+    evidence = result.get("configuration_evidence")
+    if not isinstance(evidence, dict) or evidence.get("measured") is not True:
+        errors.append(f"{role}: configuration evidence is not measured")
+        return errors
+    for key in ("artifact", "result_artifact", "manifest_artifact", "profile_artifact"):
+        value = evidence.get(key)
+        if not value or not Path(value).is_file():
+            errors.append(f"{role}: missing bound {key}")
+    result_artifact = evidence.get("result_artifact")
+    if result_artifact and Path(result_artifact).is_file():
+        try:
+            on_disk = load_json(Path(result_artifact))
+            if canonical_json(on_disk) != canonical_json(result):
+                errors.append(f"{role}: in-memory result differs from bound result artifact")
+        except (OSError, ValueError) as error:
+            errors.append(f"{role}: invalid result artifact ({error})")
+    manifest_artifact = evidence.get("manifest_artifact")
+    manifest: dict[str, Any] | None = None
+    if manifest_artifact and Path(manifest_artifact).is_file():
+        try:
+            manifest = load_json(Path(manifest_artifact))
+            if manifest_digest(manifest) != result.get("manifest_sha256"):
+                errors.append(f"{role}: manifest digest does not match result identity")
+        except (OSError, ValueError) as error:
+            errors.append(f"{role}: invalid manifest artifact ({error})")
+    db_artifact = evidence.get("artifact")
+    if db_artifact and Path(db_artifact).is_file():
+        try:
+            connection = sqlite3.connect(db_artifact)
+            try:
+                configuration = connection.execute("SELECT value FROM benchmark_meta WHERE key='configuration'").fetchone()
+                indexes = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index' ORDER BY name")]
+                if manifest is not None:
+                    workload = next((item for item in manifest.get("workloads", []) if item.get("id") == result.get("workload")), None)
+                    if not isinstance(workload, dict):
+                        errors.append(f"{role}: workload is not present in manifest")
+                    else:
+                        from .run import _parameter_value
+                        expected = [{
+                            "id": query.get("id"), "category": query.get("category", "other"),
+                            "sql": query.get("sql"), "parameters": [_parameter_value(parameter, connection) for parameter in query.get("parameters", [])],
+                        } for query in workload.get("queries", [])]
+                        actual = [{key: item.get(key) for key in ("id", "category", "sql", "parameters")} for item in result.get("queries", [])]
+                        if actual != expected:
+                            errors.append(f"{role}: query SQL, parameters, categories, or ordering differ from manifest workload")
+            finally:
+                connection.close()
+            if configuration is None or configuration[0] != result.get("configuration"):
+                errors.append(f"{role}: database configuration is not bound to result")
+            if indexes != evidence.get("indexes"):
+                errors.append(f"{role}: index inventory is not measured from the bound database")
+            if semantic_digest(Path(db_artifact)) != result.get("operations", {}).get("recovery", {}).get("semantic_digest"):
+                errors.append(f"{role}: database semantic digest is not bound to result")
+        except sqlite3.DatabaseError as error:
+            errors.append(f"{role}: invalid database artifact ({error})")
+    checks = evidence.get("checks")
+    if not isinstance(checks, list) or not checks or any(
+        not isinstance(item, dict) or item.get("status") != "pass" or not item.get("id") or "actual" not in item
+        for item in checks
+    ):
+        errors.append(f"{role}: configuration checks must be structured measured pass records")
+    if evidence.get("run_id") != result.get("run_id"):
+        errors.append(f"{role}: configuration evidence run_id is not bound")
+    profile_artifact = evidence.get("profile_artifact")
+    if profile_artifact and Path(profile_artifact).is_file():
+        try:
+            if load_json(Path(profile_artifact)).get("profile_id") != result.get("profile_id"):
+                errors.append(f"{role}: profile artifact is not bound to result")
+        except (OSError, ValueError) as error:
+            errors.append(f"{role}: invalid profile artifact ({error})")
+    return errors
+
+
 def evaluate_regression(baseline: dict[str, Any], bad_config: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+    artifact_errors = _bound_result_errors(baseline, "baseline") + _bound_result_errors(bad_config, "bad-config")
+    if artifact_errors:
+        return {"id": "intentional_regression", "status": "fail", "reason": "; ".join(artifact_errors)}
     if _identity_dimensions(baseline) != _identity_dimensions(bad_config):
         return {"id": "intentional_regression", "status": "fail", "reason": "manifest/workload/scale/seed/distribution/count/cap/revision/profile/hardware mismatch"}
     if baseline.get("configuration") == bad_config.get("configuration"):
         return {"id": "intentional_regression", "status": "fail", "reason": "configuration was not changed"}
     evidence = bad_config.get("configuration_evidence", {})
-    if evidence.get("measured") is not True or evidence.get("artifact") is None or not evidence.get("checks"):
-        return {"id": "intentional_regression", "status": "fail", "reason": "bad configuration lacks measured artifact evidence"}
     if bad_config.get("configuration") == "drop_hot_indexes":
         hot = {"idx_symbol_qual", "idx_symbol_qual_nc", "idx_symbol_spelling", "idx_symbol_spelling_nc", "idx_edge_src", "idx_edge_dst"}
         if hot.intersection(evidence.get("indexes", [])):
@@ -89,9 +170,24 @@ def evaluate_regression(baseline: dict[str, Any], bad_config: dict[str, Any], pr
     return {"id": "intentional_regression", "status": "pass" if passed else "fail", "minimum_factor": factor, "comparisons": comparisons, "reason": None if passed else "measured bad configuration did not exceed the regression factor"}
 
 
-def _real_evidence(item: dict[str, Any]) -> bool:
+def _real_evidence(item: dict[str, Any], result: dict[str, Any] | None) -> bool:
     evidence = item.get("evidence")
-    return bool(item.get("measured") is True and isinstance(evidence, dict) and evidence.get("run_id") and evidence.get("artifact") and evidence.get("checks"))
+    if result is None or item.get("measured") is not True or not isinstance(evidence, dict):
+        return False
+    artifact = evidence.get("artifact")
+    if not artifact or not Path(artifact).is_file() or evidence.get("result_run_id") != result.get("run_id"):
+        return False
+    try:
+        bound = load_json(Path(artifact)); require_result_version(bound)
+    except (OSError, ValueError):
+        return False
+    checks = evidence.get("checks")
+    outcome = evidence.get("outcome")
+    return (
+        bound.get("run_id") == evidence.get("run_id")
+        and isinstance(checks, list) and checks and all(isinstance(check, dict) and check.get("status") == "pass" and check.get("id") and "actual" in check for check in checks)
+        and isinstance(outcome, dict) and outcome.get("measured") is True and isinstance(outcome.get("tested_failed_slos"), list)
+    )
 
 
 def evaluate_custom_store(decision: dict[str, Any], *, require: bool, result: dict[str, Any] | None = None, slo_checks: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -106,13 +202,24 @@ def evaluate_custom_store(decision: dict[str, Any], *, require: bool, result: di
         errors.append("custom-store proposal has no actual failed SLO in the bound result")
     if declared != actual_failed:
         errors.append("failed_slos must exactly equal the failed checks from the bound result")
+    if result is None or decision.get("result_run_id") != result.get("run_id"):
+        errors.append("proposal must bind to the failed result run_id")
     alternatives = decision.get("alternatives", []); classes = {item.get("class") for item in alternatives}
     if not {"schema_tuning", "derived_accelerator"}.issubset(classes):
         errors.append("proposal needs separately measured schema/tuning and derived-accelerator alternatives")
-    if any(not _real_evidence(item) for item in alternatives):
+    if any(not _real_evidence(item, result) for item in alternatives):
         errors.append("every alternative needs measured evidence bound to an artifact and checks")
     costs = decision.get("costs", {})
-    if not isinstance(costs.get("engineering"), dict) or not isinstance(costs.get("compatibility"), dict) or not costs["engineering"].get("person_months") or not costs["compatibility"].get("migration_plan"):
+    if (
+        not isinstance(costs.get("engineering"), dict)
+        or not isinstance(costs.get("compatibility"), dict)
+        or not costs["engineering"].get("person_months")
+        or not costs["compatibility"].get("migration_plan")
+        or not costs["engineering"].get("source_artifact")
+        or not costs["compatibility"].get("source_artifact")
+        or not Path(str(costs["engineering"].get("source_artifact"))).is_file()
+        or not Path(str(costs["compatibility"].get("source_artifact"))).is_file()
+    ):
         errors.append("engineering and compatibility cost evidence are required")
     return {"id": "custom_store", "status": "pass" if not errors else ("fail" if require else "not_run"), "decision": requested, "failed_slos": sorted(declared), "alternatives": alternatives, "costs": costs, "errors": errors}
 

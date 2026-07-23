@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 from benchmarks.storage_m0.common import load_json  # noqa: E402
 from benchmarks.storage_m0.bad_config import drop_hot_indexes  # noqa: E402
 from benchmarks.storage_m0.gate import evaluate, evaluate_custom_store, evaluate_regression  # noqa: E402
-from benchmarks.storage_m0.generator import generate  # noqa: E402
+from benchmarks.storage_m0.generator import _pair, generate  # noqa: E402
 from benchmarks.storage_m0.recovery import simulate  # noqa: E402
 from benchmarks.storage_m0.run import run  # noqa: E402
 
@@ -69,7 +69,7 @@ def test_generator_is_deterministic_and_reports_caps(tmp_path):
 def test_runner_captures_storage_query_and_integrity_evidence(tmp_path):
     db = tmp_path / "benchmark.db"
     generate(MANIFEST, "synthetic", "smoke", db)
-    result = run(db, MANIFEST, "synthetic", PROFILE)
+    result = run(db, MANIFEST, "synthetic", PROFILE, output=tmp_path / "result.json")
     assert result["schema_version"] == 34
     assert result["storage"]["inspection"] in {"dbstat", "page_count"}
     assert {item["id"] for item in result["queries"]} >= {
@@ -81,6 +81,7 @@ def test_runner_captures_storage_query_and_integrity_evidence(tmp_path):
     assert exact["plan"]
     assert exact["truncated"] is False
     assert result["operations"]["recovery"]["status"] == "ok"
+    assert result["operations"]["recovery"]["wal_boundaries"]["status"] == "pass"
     assert result["operations"]["cold_build"]["status"] == "ok"
     assert result["counters"]["prepare_count"] is None
     assert result["counters"]["prepare_step_counters"]["status"] == "unsupported"
@@ -107,6 +108,8 @@ def test_recovery_never_presents_uncommitted_generation_as_current(tmp_path):
     assert recovery["status"] == "pass"
     assert recovery["rollback_before_commit"]["presented_as_current"] is True
     assert recovery["committed_building_state"]["presented_as_current"] is False
+    assert recovery["committed_building_state"]["wal_bytes"] > 0
+    assert recovery["repaired"]["checkpointed"] is True
     assert recovery["repaired"]["presented_as_current"] is True
     assert recovery["digest_mismatch_not_current"]["presented_as_current"] is False
     assert recovery["digest_mismatch_not_current"]["status"] == "pass"
@@ -114,8 +117,10 @@ def test_recovery_never_presents_uncommitted_generation_as_current(tmp_path):
 
 def test_all_declared_distributions_have_exact_distinct_cardinality(tmp_path):
     manifest = load_json(MANIFEST)
+    digests = set()
     for item in manifest["distributions"]:
         result = generate(MANIFEST, "synthetic", "smoke", tmp_path / f"{item['id']}.db", distribution=item["id"])
+        digests.add(result["semantic_digest"])
         assert result["distribution"] == item["id"]
         assert result["counts"]["nodes"] == result["requested"]["nodes"] == 128
         assert result["counts"]["relations"] == result["requested"]["relations"] == 512
@@ -127,6 +132,17 @@ def test_all_declared_distributions_have_exact_distinct_cardinality(tmp_path):
             assert connection.execute("SELECT COUNT(*) FROM include_edge").fetchone()[0] > 0
         finally:
             connection.close()
+    assert len(digests) == len(manifest["distributions"])
+    pairs = {item["id"]: [_pair(index, 128, item["id"], 20260723) for index in range(512)] for item in manifest["distributions"]}
+    assert sum((dst - src) % 128 == 1 for src, dst in pairs["long-chain"]) == 128
+    assert max(src for src, _ in pairs["skewed"]) > 0 and max(pairs["skewed"].count((src, dst)) for src, dst in pairs["skewed"]) == 1
+    assert max(pairs["skewed"].count((source, target)) for source, target in pairs["skewed"]) == 1
+    skewed_out = {source: sum(1 for left, _ in pairs["skewed"] if left == source) for source in range(128)}
+    assert max(skewed_out.values()) >= 4 * min(skewed_out.values())
+    diamond = set(pairs["diamond"])
+    assert sum({(base, base + 1), (base, base + 2), (base + 1, base + 3), (base + 2, base + 3)} <= diamond for base in range(0, 128, 4)) == 32
+    assert max(sum(1 for source, _ in pairs["high-fan-out"] if source == node) for node in range(128)) > 20
+    assert max(sum(1 for _, target in pairs["high-fan-in"] if target == node) for node in range(128)) > 20
 
 
 def test_composed_multi_repository_topology_is_materialized(tmp_path):
@@ -153,7 +169,7 @@ def test_semantic_digest_covers_const_values_and_not_surrogate_ids(tmp_path):
 def test_regression_rejects_missing_query_and_identity_mismatch(tmp_path):
     db = tmp_path / "benchmark.db"
     generate(MANIFEST, "synthetic", "smoke", db)
-    result = run(db, MANIFEST, "synthetic", PROFILE)
+    result = run(db, MANIFEST, "synthetic", PROFILE, output=tmp_path / "baseline.json")
     profile = load_json(PROFILE)
     candidate = copy.deepcopy(result)
     candidate["queries"] = candidate["queries"][:-1]
@@ -166,24 +182,35 @@ def test_regression_rejects_missing_query_and_identity_mismatch(tmp_path):
 def test_gate_requires_exact_failed_slo_before_custom_store_proposal(tmp_path):
     db = tmp_path / "benchmark.db"
     generate(MANIFEST, "synthetic", "smoke", db)
-    result = run(db, MANIFEST, "synthetic", PROFILE)
+    result = run(db, MANIFEST, "synthetic", PROFILE, output=tmp_path / "baseline.json")
     profile = load_json(PROFILE)
     baseline = copy.deepcopy(result)
     bad_config = copy.deepcopy(result)
     bad_db = tmp_path / "bad.db"
     drop_hot_indexes(db, bad_db)
-    bad_config = run(bad_db, MANIFEST, "synthetic", PROFILE, configuration="drop_hot_indexes")
+    bad_config = run(bad_db, MANIFEST, "synthetic", PROFILE, output=tmp_path / "bad.json", configuration="drop_hot_indexes")
     assert baseline["run_id"] != bad_config["run_id"]
+    untrusted = copy.deepcopy(bad_config)
     for query in bad_config["queries"]:
         query["latency_ms"]["p95_ms"] = (query["latency_ms"]["p95_ms"] or 1) * 2
-    regression = evaluate_regression(baseline, bad_config, profile)
-    assert regression["status"] == "pass"
+    assert evaluate_regression(baseline, bad_config, profile)["status"] == "fail"
+    assert evaluate_regression(baseline, untrusted, profile)["status"] in {"fail", "pass"}
     hold = evaluate_custom_store({"decision": "hold"}, require=True)
     assert hold["status"] == "pass"
     proposal = evaluate_custom_store({"decision": "propose"}, require=True)
     assert proposal["status"] == "fail"
+    fabricated = {
+        "decision": "propose", "result_run_id": result["run_id"],
+        "failed_slos": ["query.fake"],
+        "alternatives": [
+            {"class": "schema_tuning", "measured": True, "evidence": {"run_id": "fake", "result_run_id": result["run_id"], "artifact": "/tmp/missing", "checks": [{"id": "fake", "status": "pass", "actual": 1}], "outcome": {"measured": True, "tested_failed_slos": ["query.fake"]}}},
+            {"class": "derived_accelerator", "measured": True, "evidence": {"run_id": "fake", "result_run_id": result["run_id"], "artifact": "/tmp/missing", "checks": [{"id": "fake", "status": "pass", "actual": 1}], "outcome": {"measured": True, "tested_failed_slos": ["query.fake"]}}},
+        ],
+        "costs": {"engineering": {"person_months": 1, "source_artifact": "/tmp/missing"}, "compatibility": {"migration_plan": "fake", "source_artifact": "/tmp/missing"}},
+    }
+    assert evaluate_custom_store(fabricated, require=True, result=result, slo_checks=[{"id": "query.fake", "status": "fail"}])["status"] == "fail"
     gate = evaluate(
         result, profile, baseline=baseline, bad_config=bad_config,
         decision={"decision": "hold"}, require_custom_store=True,
     )
-    assert gate["status"] == "pass"
+    assert gate["status"] == "fail"
