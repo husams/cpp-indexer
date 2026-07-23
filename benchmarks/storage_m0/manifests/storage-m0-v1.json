@@ -1,0 +1,132 @@
+{
+  "manifest_version": "storage-m0/manifest-v1",
+  "benchmark": "storage-m0/v1",
+  "schema_version": 34,
+  "seed": 20260723,
+  "generator": "benchmarks.storage_m0.generator",
+  "distributions": [
+    {"id": "balanced", "description": "bounded-degree spread across the node set"},
+    {"id": "high-fan-in", "description": "many sources converge on a small target set"},
+    {"id": "high-fan-out", "description": "a small source set reaches many targets"},
+    {"id": "long-chain", "description": "successive one-hop edges"},
+    {"id": "diamond", "description": "repeated converge/diverge motifs"},
+    {"id": "cyclic", "description": "bounded cycles with increasing offsets"},
+    {"id": "skewed", "description": "deterministic quadratic/power-like source skew"}
+  ],
+  "workloads": [
+    {
+      "id": "synthetic",
+      "description": "Deterministic symbol/edge/evidence workload on the checked-in v34 schema.",
+      "distribution": "balanced",
+      "topology": {
+        "repositories": 1,
+        "components_per_repository": 1,
+        "translation_units_per_component": 4,
+        "shared_headers": 2,
+        "translation_units_per_shared_header": 2
+      },
+      "scales": {
+        "smoke": {"nodes": 128, "relations": 512, "evidence_multiplier": 3},
+        "nodes-1m-relations-10m": {"nodes": 1000000, "relations": 10000000, "evidence_multiplier": 3},
+        "nodes-5m-relations-50m": {"nodes": 5000000, "relations": 50000000, "evidence_multiplier": 5},
+        "nodes-10m-relations-100m": {"nodes": 10000000, "relations": 100000000, "evidence_multiplier": 10},
+        "nodes-10m-relations-500m": {"nodes": 10000000, "relations": 500000000, "evidence_multiplier": 20}
+      },
+      "queries": [
+        {
+          "id": "exact_identity",
+          "category": "interactive",
+          "sql": "SELECT id, usr, spelling, qual_name FROM symbol WHERE id = ?",
+          "parameters": [{"source": "first_symbol_id"}],
+          "row_limit": 10
+        },
+        {
+          "id": "name_prefix",
+          "category": "interactive",
+          "sql": "SELECT id, usr, qual_name FROM symbol WHERE qual_name LIKE 'benchmark::Node%' ORDER BY qual_name LIMIT 100",
+          "parameters": [],
+          "row_limit": 100
+        },
+        {
+          "id": "outgoing_one_hop",
+          "category": "interactive",
+          "sql": "SELECT dst_id, kind, count FROM edge WHERE src_id = ? ORDER BY dst_id",
+          "parameters": [{"source": "first_symbol_id"}],
+          "row_limit": 100
+        },
+        {
+          "id": "incoming_one_hop",
+          "category": "interactive",
+          "sql": "SELECT src_id, kind, count FROM edge WHERE dst_id = ? ORDER BY src_id",
+          "parameters": [{"source": "first_symbol_id"}],
+          "row_limit": 100
+        },
+        {
+          "id": "bounded_paths",
+          "category": "interactive",
+          "sql": "WITH RECURSIVE walk(id, depth) AS (SELECT ?, 0 UNION ALL SELECT edge.dst_id, walk.depth + 1 FROM walk JOIN edge ON edge.src_id = walk.id WHERE walk.depth < 3) SELECT id, depth FROM walk ORDER BY depth, id",
+          "parameters": [{"source": "first_symbol_id"}],
+          "row_limit": 1000
+        },
+        {
+          "id": "references_sites",
+          "category": "interactive",
+          "sql": "SELECT edge_site.edge_id, edge_site.file_id, edge_site.line, edge_site.col FROM edge_site JOIN edge ON edge.id = edge_site.edge_id WHERE edge.src_id = ? ORDER BY edge_site.file_id, edge_site.line, edge_site.col",
+          "parameters": [{"source": "first_symbol_id"}],
+          "row_limit": 1000
+        },
+        {
+          "id": "type_closure",
+          "category": "batch",
+          "sql": "WITH RECURSIVE closure(id) AS (SELECT ? UNION SELECT type_edge.dst_id FROM closure JOIN type_edge ON type_edge.src_id = closure.id) SELECT id FROM closure ORDER BY id",
+          "parameters": [{"source": "first_symbol_id"}],
+          "row_limit": 1000
+        },
+        {
+          "id": "entity_graph",
+          "category": "batch",
+          "sql": "SELECT src_id, dst_id, kind, count FROM entity_edge ORDER BY src_id, dst_id, kind LIMIT 1000",
+          "parameters": [],
+          "row_limit": 1000
+        },
+        {
+          "id": "include_graph",
+          "category": "batch",
+          "sql": "SELECT src_file_id, dst_file_id, dst_path, count FROM include_edge ORDER BY src_file_id, dst_path LIMIT 1000",
+          "parameters": [],
+          "row_limit": 1000
+        },
+        {
+          "id": "cxq_representative",
+          "category": "batch",
+          "sql": "SELECT s.id, s.qual_name, e.dst_id FROM symbol s LEFT JOIN edge e ON e.src_id = s.id WHERE s.qual_name LIKE 'benchmark::Node%' ORDER BY s.id LIMIT 1000",
+          "parameters": [],
+          "row_limit": 1000
+        }
+      ]
+    }
+  ],
+  "corpora": [
+    {
+      "id": "cpp-indexer-self",
+      "kind": "repository",
+      "path": ".",
+      "required": true,
+      "profile": "self-index"
+    },
+    {
+      "id": "banking",
+      "kind": "repository",
+      "path": null,
+      "required": false,
+      "profile": "banking-corpus",
+      "provisioning": "supply a local checkout path at run time; no corpus is vendored"
+    }
+  ],
+  "interruption_points": ["before_write", "after_write_before_commit", "after_commit_before_checkpoint", "after_checkpoint"],
+  "regression_probe": {
+    "bad_configuration": "drop_hot_indexes",
+    "minimum_factor": 1.2,
+    "required_evidence": ["same_manifest", "same_hardware_profile", "same_query_set"]
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "profile_version": "storage-m0/profile-v1",
+  "profile_id": "local-macos-v1",
+  "description": "Explicit local development profile; runner records actual host facts in every result.",
+  "hardware": {
+    "os": "macOS",
+    "architecture": "recorded-at-run-time",
+    "cpu_model": "recorded-at-run-time",
+    "memory_bytes": "recorded-at-run-time",
+    "storage": "recorded-at-run-time",
+    "sqlite_build": "recorded-at-run-time"
+  },
+  "slo": {
+    "interactive": {"p95_ms_max": 250},
+    "batch": {"p95_ms_max": 1000},
+    "throughput": {"cold_build_rows_per_s_min": 1000},
+    "disk": {"database_bytes_max": 549755813888},
+    "memory": {"peak_rss_bytes_max": 4294967296},
+    "storage": {"database_bytes_max": 549755813888},
+    "queries": {
+      "exact_identity": {"p95_ms_max": 50},
+      "name_prefix": {"p95_ms_max": 100},
+      "outgoing_one_hop": {"p95_ms_max": 100},
+      "incoming_one_hop": {"p95_ms_max": 100},
+      "bounded_paths": {"p95_ms_max": 250},
+      "references_sites": {"p95_ms_max": 250},
+      "type_closure": {"p95_ms_max": 500},
+      "entity_graph": {"p95_ms_max": 500},
+      "include_graph": {"p95_ms_max": 500},
+      "cxq_representative": {"p95_ms_max": 500}
+    }
+  },
+  "gates": {
+    "minimum_regression_factor": 1.2,
+    "interactive_latency_percentile": "p95",
+    "batch_latency_percentile": "p95",
+    "custom_store_requires_exact_failed_slo": true
+  }
+}
