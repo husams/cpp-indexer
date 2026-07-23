@@ -145,6 +145,7 @@ Sym GraphQuery::make_sym_from_symbol(const Symbol &sym) {
   s.name = sym.qual_name ? *sym.qual_name : sym.spelling;
   s.kind = sym.kind;
   s.type_info = sym.type_info;
+  s.const_value = sym.const_value; // v33
   s.is_definition = sym.is_definition;
   s.is_pure = sym.is_pure;
   s.is_static = sym.is_static;

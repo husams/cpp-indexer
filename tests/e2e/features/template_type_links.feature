@@ -445,3 +445,12 @@ Feature: Template callables use the same typed signature slots as ordinary calla
       | instantiates: Buffer<T, N>         |
       | arg 0: type: Widget -> Widget      |
       | arg 1: non-type: 4: int            |
+
+  Scenario: Enumerators used as template arguments still record their values
+    # Mode::Read / Mode::Write feed the Access<Mode> non-type template
+    # parameter; independent of that use, each enumerator symbol carries its
+    # evaluated constant value (v33 const_value).
+    Then the index holds the symbols:
+      | spelling | qual_name   | kind          | const_value |
+      | Read     | Mode::Read  | enum-constant | 0           |
+      | Write    | Mode::Write | enum-constant | 1           |

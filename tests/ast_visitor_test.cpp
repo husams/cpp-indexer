@@ -84,13 +84,15 @@ int run_cidx(const std::vector<std::string> &argv, const std::string &cache,
 struct IndexedTu {
   std::string cache;
   cidx::Logger log;
-  IndexedTu(const std::string &source) : cache(make_temp_dir()) {
+  IndexedTu(const std::string &source, const std::string &flags = "")
+      : cache(make_temp_dir()) {
     const std::string proj = cache + "/proj";
     ::mkdir(proj.c_str(), 0755);
     write_file(proj + "/tu.cpp", source);
     write_file(proj + "/compile_commands.json",
-               "[{\"directory\": \"" + proj +
-                   "\", \"command\": \"cc -c tu.cpp -o tu.o\", "
+               "[{\"directory\": \"" + proj + "\", \"command\": \"cc " +
+                   (flags.empty() ? "" : flags + " ") +
+                   "-c tu.cpp -o tu.o\", "
                    "\"file\": \"tu.cpp\"}]\n");
     log.set_file(cache + "/cidx.log");
     REQUIRE(run_cidx({"import", "--db", proj, "--name", "fixture"}, cache,
@@ -1257,6 +1259,34 @@ TEST_SUITE("clang") {
                     "SELECT s.spelling FROM symbol_type st "
                     "JOIN symbol s ON s.id = st.symbol_id WHERE st.kind = 1")
               .empty());
+  }
+
+  // ---- v33: constant values -------------------------------------------------
+  // Clang's constant evaluator produces the value; the indexer only records
+  // its printed result on the symbol row. Runtime initializers record NULL.
+
+  TEST_CASE("const_value: globals, constexpr/consteval and enumerators") {
+    IndexedTu tu(R"cpp(
+      constexpr int kMax = 1'024;
+      const double kPi = 3.14159;
+      int g_init = kMax / 4;
+      consteval int square(int n) { return n * n; }
+      constexpr int kSquare = square(5);
+      enum class Color { red = 1, green = 4 };
+      int runtime_source();
+      int g_dynamic = runtime_source();
+      extern int g_extern;
+    )cpp",
+                 "-std=c++23");
+    CHECK(query_col(tu.db_path(),
+                    "SELECT spelling || '=' || COALESCE(const_value, '<null>') "
+                    "FROM symbol WHERE spelling IN ('kMax', 'kPi', 'g_init', "
+                    "'kSquare', 'red', 'green', 'g_dynamic', 'g_extern', "
+                    "'square')") ==
+          std::vector<std::string>{"g_dynamic=<null>", "g_extern=<null>",
+                                   "g_init=256", "green=4", "kMax=1024",
+                                   "kPi=3.141590e+00", "kSquare=25", "red=1",
+                                   "square=<null>"});
   }
 
 } // TEST_SUITE("clang")

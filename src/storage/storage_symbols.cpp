@@ -35,9 +35,9 @@ int64_t Storage::add_symbol(const Symbol &sym) {
       "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
       "type_info, file_id, line, col, decl_file_id, decl_line, decl_col, "
       "is_definition, is_pure, is_static, is_instantiation, linkage, access, "
-      "parent_usr, resolved, decl_path, end_line, end_col) "
+      "parent_usr, resolved, decl_path, end_line, end_col, const_value) "
       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-      "?, ?) "
+      "?, ?, ?) "
       "ON CONFLICT(usr) DO UPDATE SET "
       "  spelling         = excluded.spelling, "
       "  qual_name        = COALESCE(excluded.qual_name, symbol.qual_name), "
@@ -78,7 +78,10 @@ int64_t Storage::add_symbol(const Symbol &sym) {
       "  linkage          = COALESCE(excluded.linkage, symbol.linkage), "
       "  access           = COALESCE(excluded.access, symbol.access), "
       "  parent_usr       = COALESCE(excluded.parent_usr, symbol.parent_usr), "
-      "  resolved         = MAX(excluded.resolved, symbol.resolved) "
+      "  resolved         = MAX(excluded.resolved, symbol.resolved), "
+      // v33: only the initializer-bearing decl evaluates to a value, so a
+      // plain declaration must not erase the definition's stored constant.
+      "  const_value      = COALESCE(excluded.const_value, symbol.const_value) "
       "RETURNING id");
   st.bind(1, std::string_view(sym.usr));
   st.bind(2, std::string_view(sym.spelling));
@@ -107,6 +110,7 @@ int64_t Storage::add_symbol(const Symbol &sym) {
   // above).
   bind_opt(st, 22, sym.end_line);
   bind_opt(st, 23, sym.end_col);
+  bind_opt(st, 24, sym.const_value); // v33
   if (!st.step()) {
     throw StorageError("symbol upsert returned no id");
   }

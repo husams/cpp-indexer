@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -201,13 +201,19 @@ CREATE TABLE IF NOT EXISTS symbol (
     access       TEXT,                  -- C++: 'public' | 'protected' | 'private'
     parent_usr   TEXT,                  -- semantic parent (class/namespace) USR
     resolved     INTEGER NOT NULL DEFAULT 0,
-    multi_def    INTEGER NOT NULL DEFAULT 0  -- v27: COUNT of definitions of this
+    multi_def    INTEGER NOT NULL DEFAULT 0, -- v27: COUNT of definitions of this
                                              -- symbol (rows in `definition`), set
                                              -- at resolve. >1 means the symbol is
                                              -- redefined per backend (library
                                              -- method left undefined, each server
                                              -- re-implements it). O(1) "list
                                              -- redefined" without a join.
+    const_value  TEXT                        -- v33: the evaluated constant value
+                                             -- of a variable's initializer or an
+                                             -- enumerator, as printed by Clang's
+                                             -- constant evaluator. NULL when the
+                                             -- initializer needs runtime
+                                             -- evaluation (or there is none).
 );
 
 CREATE INDEX IF NOT EXISTS idx_symbol_spelling ON symbol(spelling);
@@ -1351,6 +1357,9 @@ class Symbol:
     resolved: bool = False
     multi_def: int = 0  # v27: number of definitions (bodies) of this symbol;
     # >1 == redefined per backend. Set at resolve, not by add_symbol.
+    const_value: Optional[str] = None  # v33: the evaluated constant value of a
+    # variable's initializer or an enumerator (Clang's constant evaluator
+    # output); None when the initializer needs runtime evaluation.
     id: Optional[int] = None
 
 
@@ -1549,6 +1558,12 @@ class Storage:
             self._conn.execute(
                 "ALTER TABLE symbol ADD COLUMN multi_def INTEGER NOT NULL DEFAULT 0"
             )
+            changed = True
+        # v32 -> v33: the evaluated constant value of a variable initializer /
+        # enumerator. No backfill is possible from stored rows -- a reindex
+        # populates it; old rows read NULL until then.
+        if "const_value" not in cols2:
+            self._conn.execute("ALTER TABLE symbol ADD COLUMN const_value TEXT")
             changed = True
         # v27 -> v28: per-backend initializer text on a (static member) variable
         # definition. `definition` is created by the schema script; ALTER the
@@ -3250,6 +3265,7 @@ class Storage:
         "access",
         "parent_usr",
         "resolved",
+        "const_value",
     )
 
     def add_symbol(self, sym: Symbol) -> int:
@@ -3298,7 +3314,10 @@ class Storage:
             "  linkage       = COALESCE(excluded.linkage, symbol.linkage), "
             "  access        = COALESCE(excluded.access, symbol.access), "
             "  parent_usr    = COALESCE(excluded.parent_usr, symbol.parent_usr), "
-            "  resolved      = MAX(excluded.resolved, symbol.resolved) "
+            "  resolved      = MAX(excluded.resolved, symbol.resolved), "
+            # v33: only the initializer-bearing decl evaluates to a value, so a
+            # plain declaration must not erase the definition's stored constant.
+            "  const_value   = COALESCE(excluded.const_value, symbol.const_value) "
             "RETURNING id",
             vals,
         )

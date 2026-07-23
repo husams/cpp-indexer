@@ -33,12 +33,13 @@ enum class View { Symbol, Entity };
 
 const char *view_name(View v);
 
-// ---- Relation catalog ---------------------------------------------------------
-// Relations are data, not methods: one descriptor per edge_kind /
-// entity_edge_kind name. `layer` is the view whose namespace owns the name.
+// ---- Relation catalog
+// --------------------------------------------------------- Relations are data,
+// not methods: one descriptor per edge_kind / entity_edge_kind name. `layer` is
+// the view whose namespace owns the name.
 
 struct RelationDesc {
-  std::string name;  // bare name ("calls", "uses", ...)
+  std::string name; // bare name ("calls", "uses", ...)
   View layer = View::Symbol;
   int64_t kind_id = 0; // edge_kind.id or entity_edge_kind.id
 };
@@ -53,7 +54,8 @@ const RelationDesc *resolve_relation(const std::string &name, View active);
 // entity_kind name -> id (entity_kind seed values 0..9; -1 when unknown).
 int64_t entity_kind_id(const std::string &name);
 
-// ---- Predicates ---------------------------------------------------------------
+// ---- Predicates
+// ---------------------------------------------------------------
 
 enum class PredOp { AllOf, AnyOf, Not, Eq, Ne, Glob, In };
 
@@ -84,10 +86,11 @@ Pred ne(const std::string &field, const std::string &value);
 Pred glob(const std::string &field, const std::string &pattern);
 Pred in_list(const std::string &field, std::vector<std::string> values);
 
-// ---- Stages -------------------------------------------------------------------
+// ---- Stages
+// -------------------------------------------------------------------
 
 enum class StageOp {
-  Nodes,     // enumerate current view's domain (codebase source only)
+  Nodes, // enumerate current view's domain (codebase source only)
   ChangeView,
   Where,
   Out,
@@ -104,20 +107,26 @@ enum class StageOp {
 
 const char *stage_op_name(StageOp op);
 
+enum class TraversalMode : std::uint8_t { Static, Devirtualized };
+
+const char *traversal_mode_name(TraversalMode mode);
+
 struct Plan; // fwd
 
 struct Stage {
   StageOp op = StageOp::Where;
-  std::optional<Pred> pred;              // Nodes (optional) / Where
-  View level = View::Symbol;             // ChangeView
-  std::string relation;                  // Out / In (normalized: qualified)
-  int64_t min_depth = 1, max_depth = 1;  // Out / In
-  std::shared_ptr<Plan> operand;         // Union / Intersect / Except
-  std::vector<std::string> fields;       // Select / OrderBy
-  int64_t n = 0;                         // Limit
+  std::optional<Pred> pred;  // Nodes (optional) / Where
+  View level = View::Symbol; // ChangeView
+  std::string relation;      // Out / In (normalized: qualified)
+  TraversalMode mode = TraversalMode::Static; // Out / In
+  int64_t min_depth = 1, max_depth = 1;       // Out / In
+  std::shared_ptr<Plan> operand;              // Union / Intersect / Except
+  std::vector<std::string> fields;            // Select / OrderBy
+  int64_t n = 0;                              // Limit
 };
 
-// ---- Source / Plan --------------------------------------------------------------
+// ---- Source / Plan
+// --------------------------------------------------------------
 
 enum class SourceKind { Codebase, Symbol, Entity };
 
@@ -131,10 +140,11 @@ struct Plan {
   std::vector<Stage> stages;
 };
 
-// ---- Validation / normalization / canonical JSON --------------------------------
-// validate() type-checks the plan (docs/query-plan.md "Validation") and
-// returns the normalized copy: relation names layer-qualified, nested
-// AllOf/AnyOf flattened, not(not(p)) reduced. Throws PlanError.
+// ---- Validation / normalization / canonical JSON
+// -------------------------------- validate() type-checks the plan
+// (docs/query-plan.md "Validation") and returns the normalized copy: relation
+// names layer-qualified, nested AllOf/AnyOf flattened, not(not(p)) reduced.
+// Throws PlanError.
 Plan validate(const Plan &plan);
 
 // Normalized-plan canonical JSON (validates first). Byte-identical to the
@@ -147,8 +157,9 @@ enum class Shape { Nodes, Rows, Scalar };
 // The view and shape after all stages (validated plans only).
 View final_view(const Plan &plan);
 
-// ---- Pipeline builder ------------------------------------------------------------
-// auto q = start(symbol("ns::f")) | out("calls") | where(eq("kind","function"))
+// ---- Pipeline builder
+// ------------------------------------------------------------ auto q =
+// start(symbol("ns::f")) | out("calls") | where(eq("kind","function"))
 //        | select({"name","usr"}) | limit(100);
 // Query is an immutable value: operator| copies. plan() hands back the IR.
 
@@ -181,7 +192,7 @@ Stage nodes(Pred pred);
 Stage view(View level);
 Stage where(Pred pred);
 Stage out(const std::string &relation, int64_t min_depth = 1,
-          int64_t max_depth = 1);
+          int64_t max_depth = 1, TraversalMode mode = TraversalMode::Static);
 Stage in_(const std::string &relation, int64_t min_depth = 1,
           int64_t max_depth = 1);
 Stage union_(const Query &operand);

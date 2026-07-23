@@ -30,7 +30,9 @@ struct SymbolRecord {
   std::optional<std::string> linkage;
   std::optional<std::string> access;
   std::optional<std::string> parent_usr;
-  bool resolved = false; // definition resolves the symbol
+  std::optional<std::string> const_value; // v33: evaluated constant initializer
+                                          // (variable) or enumerator value
+  bool resolved = false;                  // definition resolves the symbol
 };
 
 } // namespace cidx::ast

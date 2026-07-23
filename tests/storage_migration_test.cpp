@@ -474,7 +474,7 @@ TEST_CASE("v29 -> v30: signature/type tier tables created, version stamped") {
   cidx::SqliteDb raw(path);
   // migrate() stamps kSchemaVersion, not the version of the block that fired:
   // a v29 DB reopened by a v31 build lands on 31 in one step.
-  CHECK(meta_version(raw) == "32");
+  CHECK(meta_version(raw) == std::to_string(cidx::kSchemaVersion));
   auto st = raw.prepare("SELECT COUNT(*) FROM type_kind");
   REQUIRE(st.step());
   CHECK(st.col_int64(0) == 13); // seed rows present
@@ -525,8 +525,50 @@ TEST_CASE("v30 -> v31: include tier tables created, version stamped") {
     CHECK(db.include_graph_populated());
   }
   cidx::SqliteDb raw(path);
-  CHECK(meta_version(raw) == "32");
+  CHECK(meta_version(raw) == std::to_string(cidx::kSchemaVersion));
   auto st = raw.prepare("SELECT COUNT(*) FROM include_directive_kind");
   REQUIRE(st.step());
   CHECK(st.col_int64(0) == 5); // seed rows present
+}
+
+TEST_CASE("v32 -> v33: symbol.const_value column added, version stamped") {
+  // Simulate a v32 database: a fresh DB wound back to '32'. (SQLite < 3.35
+  // can't DROP COLUMN, so like the v13 case above this verifies the column
+  // guard is idempotent and the version restamps.) Values are NOT
+  // backfillable -- only a reindex populates them.
+  const std::string tmp = make_temp_dir();
+  const std::string path = tmp + "/v32.db";
+  {
+    cidx::Storage db(path);
+    db.add_component("c", "/data/c");
+  }
+  {
+    cidx::SqliteDb raw(path);
+    raw.exec("UPDATE meta SET value = '32' WHERE key = 'schema_version'");
+  }
+  {
+    cidx::Storage db(path);                           // migration runs here
+    CHECK(db.get_component_by_name("c").has_value()); // old data intact
+
+    // The migrated DB accepts constant values end-to-end, and the upsert
+    // keeps a stored value when a plain declaration (no initializer, so no
+    // value) is indexed afterwards.
+    cidx::Symbol s;
+    s.usr = "c:@kAnswer";
+    s.spelling = "kAnswer";
+    s.kind = "variable";
+    s.is_definition = true;
+    s.const_value = "42";
+    db.add_symbol(s);
+    cidx::Symbol decl = s;
+    decl.is_definition = false;
+    decl.const_value = std::nullopt;
+    db.add_symbol(decl);
+    const auto got = db.lookup_symbol("c:@kAnswer");
+    REQUIRE(got.has_value());
+    CHECK(got->const_value == std::optional<std::string>{"42"});
+  }
+  cidx::SqliteDb raw(path);
+  CHECK(meta_version(raw) == std::to_string(cidx::kSchemaVersion));
+  CHECK(has_col(table_columns(raw, "symbol"), "const_value"));
 }

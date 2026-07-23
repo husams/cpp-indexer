@@ -39,12 +39,15 @@ constexpr std::array<std::string_view, 17> kSymbolKinds = {
 // table is seeded with the same pairs (display only).
 inline const std::map<std::string_view, int64_t> &symbol_kind_ids_map() {
   static const std::map<std::string_view, int64_t> m = {
-      {"struct", 2},      {"union", 3},              {"class", 4},
-      {"enum", 5},        {"member", 6},             {"enum-constant", 7},
-      {"function", 8},    {"variable", 9},           {"typedef", 20},
-      {"method", 21},     {"namespace", 22},         {"constructor", 24},
-      {"destructor", 25}, {"function-template", 30}, {"class-template", 31},
-      {"type-alias", 36}, {"macro", 501},
+      {"struct", 2},          {"union", 3},
+      {"class", 4},           {"enum", 5},
+      {"member", 6},          {"enum-constant", 7},
+      {"function", 8},        {"variable", 9},
+      {"typedef", 20},        {"method", 21},
+      {"namespace", 22},      {"constructor", 24},
+      {"destructor", 25},     {"function-template", 30},
+      {"class-template", 31}, {"type-alias", 36},
+      {"macro", 501},
   };
   return m;
 }
@@ -62,22 +65,40 @@ inline const std::map<int64_t, std::string> &symbol_kind_names_map() {
 
 // Python Storage._SYMBOL_COLS — insert/update order is load-bearing for the
 // upsert statement and for update_symbol validation.
-constexpr std::array<std::string_view, 23> kSymbolInsertCols = {
-    "usr",            "spelling",      "qual_name",    "display_name",
-    "kind",           "type_info",     "file_id",      "line",
-    "col",            "decl_file_id",  "decl_line",    "decl_col",
-    "decl_path",      "is_definition", "is_pure",      "is_static",
-    "is_instantiation", "linkage",     "access",       "parent_usr",
-    "resolved",       "end_line",      "end_col",
+constexpr std::array<std::string_view, 24> kSymbolInsertCols = {
+    "usr",
+    "spelling",
+    "qual_name",
+    "display_name",
+    "kind",
+    "type_info",
+    "file_id",
+    "line",
+    "col",
+    "decl_file_id",
+    "decl_line",
+    "decl_col",
+    "decl_path",
+    "is_definition",
+    "is_pure",
+    "is_static",
+    "is_instantiation",
+    "linkage",
+    "access",
+    "parent_usr",
+    "resolved",
+    "end_line",
+    "end_col",
+    "const_value",
 };
 
 // Explicit SELECT lists (stable column positions even on migrated DBs).
 // Column order mirrors _SYMBOL_COLS in storage.py; is_instantiation comes
 // right after is_static (col index 16), then linkage/access/parent_usr/resolved
 // (17-20), then decl_path appended last (21) -- append-at-end pattern for
-// migrated DBs (ALTER TABLE appends; positional decode in symbol_from must match).
-// v14: version appended at end (append-at-end discipline so migrated DBs
-// whose ALTER added the column last decode positionally).
+// migrated DBs (ALTER TABLE appends; positional decode in symbol_from must
+// match). v14: version appended at end (append-at-end discipline so migrated
+// DBs whose ALTER added the column last decode positionally).
 constexpr const char *kComponentCols =
     "id, name, path, kind, version, repository_id";
 constexpr const char *kRepositoryCols =
@@ -91,13 +112,13 @@ constexpr const char *kSymbolCols =
     "id, usr, spelling, qual_name, display_name, kind, type_info, file_id, "
     "line, col, decl_file_id, decl_line, decl_col, is_definition, is_pure, "
     "is_static, linkage, access, parent_usr, resolved, decl_path, "
-    "is_instantiation, end_line, end_col, multi_def";
+    "is_instantiation, end_line, end_col, multi_def, const_value";
 constexpr const char *kSymbolColsS =
     "s.id, s.usr, s.spelling, s.qual_name, s.display_name, s.kind, "
     "s.type_info, s.file_id, s.line, s.col, s.decl_file_id, s.decl_line, "
     "s.decl_col, s.is_definition, s.is_pure, s.is_static, s.linkage, s.access, "
     "s.parent_usr, s.resolved, s.decl_path, s.is_instantiation, "
-    "s.end_line, s.end_col, s.multi_def";
+    "s.end_line, s.end_col, s.multi_def, s.const_value";
 
 inline std::optional<int64_t> opt_int64(const SqliteStmt &st, int idx) {
   if (st.col_is_null(idx)) {
@@ -136,7 +157,8 @@ inline void bind_opt(SqliteStmt &st, int idx, const std::optional<double> &v) {
   }
 }
 
-inline void bind_opt(SqliteStmt &st, int idx, const std::optional<std::string> &v) {
+inline void bind_opt(SqliteStmt &st, int idx,
+                     const std::optional<std::string> &v) {
   if (v) {
     st.bind(idx, std::string_view(*v));
   } else {
@@ -152,7 +174,8 @@ inline Component component_from(const SqliteStmt &st) {
   c.kind = st.col_text(3);
   // v14: version at column 4 (appended last; nullopt when NULL)
   c.version = opt_text(st, 4);
-  // v23: repository_id at column 5 (SELECT * order; nullopt when NULL/ungrouped)
+  // v23: repository_id at column 5 (SELECT * order; nullopt when
+  // NULL/ungrouped)
   c.repository_id = opt_int64(st, 5);
   return c;
 }
@@ -211,7 +234,8 @@ inline Symbol symbol_from_offset(const SqliteStmt &st, int off) {
   s.spelling = st.col_text(off + 2);
   s.qual_name = opt_text(st, off + 3);
   s.display_name = opt_text(st, off + 4);
-  s.kind = symbol_kind_name(st.col_int64(off + 5)); // stored as CXCursorKind int
+  s.kind =
+      symbol_kind_name(st.col_int64(off + 5)); // stored as CXCursorKind int
   s.type_info = opt_text(st, off + 6);
   s.file_id = opt_int64(st, off + 7);
   s.line = opt_int64(st, off + 8);
@@ -230,7 +254,8 @@ inline Symbol symbol_from_offset(const SqliteStmt &st, int off) {
   s.is_instantiation = st.col_int64(off + 21) != 0;
   s.end_line = opt_int64(st, off + 22);
   s.end_col = opt_int64(st, off + 23);
-  s.multi_def = st.col_int64(off + 24); // v27
+  s.multi_def = st.col_int64(off + 24);   // v27
+  s.const_value = opt_text(st, off + 25); // v33
   return s;
 }
 
@@ -258,7 +283,7 @@ inline std::string escape_like(const std::string &text) {
 }
 
 inline std::string join_strings(const std::vector<std::string> &parts,
-                         const std::string &sep) {
+                                const std::string &sep) {
   std::string out;
   for (std::size_t i = 0; i < parts.size(); ++i) {
     if (i != 0) {
@@ -270,8 +295,9 @@ inline std::string join_strings(const std::vector<std::string> &parts,
 }
 
 // abs path = component.path / directory.path / file.name (rel may be '').
-inline std::string reconstruct_path(const std::string &root, const std::string &rel,
-                             const std::string &name) {
+inline std::string reconstruct_path(const std::string &root,
+                                    const std::string &rel,
+                                    const std::string &name) {
   if (rel.empty()) {
     return pathutil::join(root, name);
   }
@@ -292,7 +318,6 @@ inline std::string prepare_db_path(const std::string &path) {
   }
   return path;
 }
-
 
 // Decode one include_config row starting at column `base`:
 //   id, tu_file_id, digest, driver, working_dir, arguments, lang_mode,
@@ -335,8 +360,6 @@ constexpr const char *kIncludeEdgeCols =
     "e.id, e.src_file_id, e.dst_file_id, e.dst_path, e.config_id, e.is_system, "
     "e.is_generated, e.count";
 
-
-
 // "?, ?, ?" for an IN clause of n binds.
 inline std::string in_placeholders(std::size_t n) {
   std::string s;
@@ -345,7 +368,6 @@ inline std::string in_placeholders(std::size_t n) {
   }
   return s;
 }
-
 
 } // namespace cidx::detail
 

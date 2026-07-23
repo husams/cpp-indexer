@@ -71,8 +71,8 @@ std::map<std::string, Plan> golden_plans() {
   plans["codebase_abstract"] =
       (start(codebase()) | view(View::Entity) |
        nodes(eq("entity_type", "abstract_class")) |
-       where(all_of({eq("is_definition", true),
-                     not_(glob("name", "*Legacy*"))})) |
+       where(all_of(
+           {eq("is_definition", true), not_(glob("name", "*Legacy*"))})) |
        select({"name", "kind"}) | order_by({"name"}) | limit(50))
           .plan();
   plans["symbol_callers"] =
@@ -83,10 +83,9 @@ std::map<std::string, Plan> golden_plans() {
       (start(symbol("A")) | out("calls", 1, 3) |
        union_(start(symbol("A")) | out("uses")) | distinct() | count())
           .plan();
-  plans["qualified_relation"] =
-      (start(symbol("Widget")) | out("entity.uses") | view(View::Entity) |
-       in_("generalizes", 1, 4))
-          .plan();
+  plans["qualified_relation"] = (start(symbol("Widget")) | out("entity.uses") |
+                                 view(View::Entity) | in_("generalizes", 1, 4))
+                                    .plan();
   plans["boolean_normalization"] =
       (start(codebase()) |
        nodes(all_of({all_of({eq("kind", "class"), eq("is_static", false)}),
@@ -176,7 +175,8 @@ TEST_CASE("query_plan: canonical JSON matches the shared golden") {
 // ---------------------------------------------------------------------------
 // Q2: normalization
 // ---------------------------------------------------------------------------
-TEST_CASE("query_plan: normalization qualifies relations and flattens booleans") {
+TEST_CASE(
+    "query_plan: normalization qualifies relations and flattens booleans") {
   // Bare relation in the active view qualifies to the layer name.
   Plan p = (start(symbol("A")) | out("calls")).plan();
   Plan n = validate(p);
@@ -188,8 +188,7 @@ TEST_CASE("query_plan: normalization qualifies relations and flattens booleans")
 
   // The stream view follows a traversal's layer: after a qualified entity
   // hop, a bare relation resolves in the entity namespace.
-  Plan pq = (start(symbol("Widget")) | out("entity.uses") |
-             in_("generalizes"))
+  Plan pq = (start(symbol("Widget")) | out("entity.uses") | in_("generalizes"))
                 .plan();
   CHECK(validate(pq).stages[1].relation == "entity.generalizes");
 
@@ -225,8 +224,9 @@ TEST_CASE("query_plan: validation error codes") {
         "E_FIELD"); // select-only field
   CHECK(code((start(symbol("A")) | where(eq("kind", "bogus_kind"))).plan()) ==
         "E_KIND");
-  CHECK(code((start(symbol("A")) | where(eq("kind", "abstract_class")))
-                 .plan()) == "E_KIND"); // classification is not a decl kind
+  CHECK(
+      code((start(symbol("A")) | where(eq("kind", "abstract_class"))).plan()) ==
+      "E_KIND"); // classification is not a decl kind
   CHECK(code((start(codebase()) | view(View::Entity) |
               nodes(eq("entity_type", "struct")))
                  .plan()) == "E_KIND"); // struct is not a classification
@@ -234,8 +234,7 @@ TEST_CASE("query_plan: validation error codes") {
               nodes(eq("kind", "struct")))
                  .plan()) == "<no-error>"); // decl kind is view-independent
   CHECK(code((start(symbol("A")) | limit(0)).plan()) == "E_LIMIT");
-  CHECK(code((start(symbol("A")) |
-              union_(start(entity("B")) | out("uses")))
+  CHECK(code((start(symbol("A")) | union_(start(entity("B")) | out("uses")))
                  .plan()) == "E_SETOP"); // view mismatch
   CHECK(code((start(symbol("A")) | select({"name"}) | out("calls")).plan()) ==
         "E_STAGE"); // traversal after select
@@ -246,8 +245,7 @@ TEST_CASE("query_plan: validation error codes") {
   CHECK(code((start(codebase()) | count()).plan()) ==
         "E_STAGE"); // codebase not enumerated
   CHECK(code((start(codebase()) | nodes()).plan()) == "<no-error>");
-  CHECK(code((start(symbol("A")) | select({"name"}) |
-              order_by({"usr"}))
+  CHECK(code((start(symbol("A")) | select({"name"}) | order_by({"usr"}))
                  .plan()) == "E_FIELD"); // order_by outside selection
 }
 
@@ -352,8 +350,8 @@ TEST_CASE("query_plan: set operations, distinct, count") {
   CHECK(std::get<int64_t>(ec.rows[0][0]) == s.B);
 
   // count() is a scalar.
-  auto c = ex.run((start(symbol("USR::A")) | out("calls", 1, 2) | count())
-                      .plan());
+  auto c =
+      ex.run((start(symbol("USR::A")) | out("calls", 1, 2) | count()).plan());
   CHECK(c.shape == Shape::Scalar);
   CHECK(c.scalar == 2);
 }
@@ -392,7 +390,8 @@ TEST_CASE("query_plan: order_by, limit, default fields, result JSON") {
   REQUIRE(r.rows.size() == 2);
   CHECK(std::get<std::string>(r.rows[0][0]) == "funcA");
   CHECK(std::get<std::string>(r.rows[1][0]) == "funcB");
-  CHECK(!r.truncated); // explicit limit is requested cardinality, not truncation
+  CHECK(
+      !r.truncated); // explicit limit is requested cardinality, not truncation
 
   // Default fields for a node stream: id, usr, name, kind.
   auto d = ex.run((start(symbol("USR::A")) | out("calls")).plan());
@@ -411,8 +410,8 @@ TEST_CASE("query_plan: default result cap reports truncation") {
   {
     auto txn = db.transaction();
     for (int i = 0; i < 1200; ++i) {
-      db.add_symbol(make_sym("USR::f" + std::to_string(i),
-                             "f" + std::to_string(i)));
+      db.add_symbol(
+          make_sym("USR::f" + std::to_string(i), "f" + std::to_string(i)));
     }
     txn.commit(); // the destructor is ROLLBACK-only (R2)
   }
@@ -450,7 +449,8 @@ TEST_CASE("query_plan: view(entity) drops ids without an entity_node row") {
   CHECK(back.rows.size() == 1);
 }
 
-TEST_CASE("query_plan: min_depth window uses path length, not first discovery") {
+TEST_CASE(
+    "query_plan: min_depth window uses path length, not first discovery") {
   // Diamond: P -> Q, P -> R -> Q. A length-2 path reaches Q, so
   // out(calls, 2, 2) must emit it even though Q is first seen at depth 1.
   Storage db(":memory:");
@@ -491,16 +491,16 @@ TEST_CASE("query_plan: default cap re-applies after an expanding stage") {
   CHECK(r.truncated);
 }
 
-TEST_CASE("query_plan: kind is the decl kind; entity_type is the classification") {
+TEST_CASE(
+    "query_plan: kind is the decl kind; entity_type is the classification") {
   Seeded s;
   Executor ex(s.db);
 
   // The abstract struct matches the declaration-kind predicate...
-  auto decl = ex.run((start(codebase()) |
-                      nodes(in_list("kind", {"class", "struct"})) |
-                      select({"spelling", "kind", "entity_type"}) |
-                      order_by({"spelling"}))
-                         .plan());
+  auto decl = ex.run(
+      (start(codebase()) | nodes(in_list("kind", {"class", "struct"})) |
+       select({"spelling", "kind", "entity_type"}) | order_by({"spelling"}))
+          .plan());
   REQUIRE(decl.rows.size() == 3); // AbsS, ClassD, ClassE
   CHECK(std::get<std::string>(decl.rows[0][0]) == "AbsS");
   CHECK(std::get<std::string>(decl.rows[0][1]) == "struct");
@@ -520,4 +520,85 @@ TEST_CASE("query_plan: kind is the decl kind; entity_type is the classification"
   auto fn = ex.run((start(symbol("funcA")) | select({"entity_type"})).plan());
   REQUIRE(fn.rows.size() == 1);
   CHECK(std::holds_alternative<std::nullptr_t>(fn.rows[0][0]));
+}
+
+TEST_CASE("query_plan: devirtualized calls preserve the inherited receiver") {
+  Storage db(":memory:");
+  {
+    auto txn = db.transaction();
+    const int64_t component_id = db.add_component("test", "/repo");
+    const int64_t directory_id = db.add_directory(component_id, "");
+    const int64_t file_id = db.add_file(directory_id, "dispatch.cpp");
+    const int64_t base_id =
+        db.add_symbol(make_sym("USR::Base", "Base", "struct", "Base"));
+    const int64_t x_id = db.add_symbol(make_sym("USR::X", "X", "struct", "X"));
+    const int64_t y_id = db.add_symbol(make_sym("USR::Y", "Y", "struct", "Y"));
+
+    Symbol do_something = make_sym("USR::Base::doSomething", "doSomething",
+                                   "method", "Base::doSomething(int)");
+    do_something.parent_usr = "USR::Base";
+    const int64_t do_id = db.add_symbol(do_something);
+
+    Symbol base_print =
+        make_sym("USR::Base::print", "print", "method", "Base::print(int)");
+    base_print.parent_usr = "USR::Base";
+    base_print.is_pure = true;
+    const int64_t base_print_id = db.add_symbol(base_print);
+
+    Symbol x_print =
+        make_sym("USR::X::print", "print", "method", "X::print(int)");
+    x_print.parent_usr = "USR::X";
+    const int64_t x_print_id = db.add_symbol(x_print);
+
+    Symbol y_print =
+        make_sym("USR::Y::print", "print", "method", "Y::print(int)");
+    y_print.parent_usr = "USR::Y";
+    const int64_t y_print_id = db.add_symbol(y_print);
+    const int64_t main_id =
+        db.add_symbol(make_sym("USR::main", "main", "function", "main()"));
+
+    db.add_edge(make_edge(x_id, base_id, 2));
+    db.add_edge(make_edge(y_id, base_id, 2));
+    db.add_edge(make_edge(x_print_id, base_print_id, 6));
+    db.add_edge(make_edge(y_print_id, base_print_id, 6));
+
+    const int64_t outer_edge = db.add_edge(make_edge(main_id, do_id, 1));
+    cidx::EdgeSite outer_site;
+    outer_site.edge_id = outer_edge;
+    outer_site.file_id = file_id;
+    outer_site.line = 20;
+    outer_site.col = 3;
+    outer_site.recv_src_kind = "local";
+    outer_site.recv_type_usr = "USR::X";
+    outer_site.recv_decl_usr = "USR::main::x";
+    outer_site.recv_type_is_value = 1;
+    db.add_edge_site(outer_site);
+
+    const int64_t inner_edge = db.add_edge(make_edge(do_id, base_print_id, 1));
+    cidx::EdgeSite inner_site;
+    inner_site.edge_id = inner_edge;
+    inner_site.file_id = file_id;
+    inner_site.line = 8;
+    inner_site.col = 5;
+    inner_site.recv_src_kind = "this";
+    inner_site.recv_type_usr = "USR::Base";
+    inner_site.recv_decl_usr = "USR::Base";
+    db.add_edge_site(inner_site);
+    txn.commit();
+  }
+
+  const Query plan = start(symbol("USR::main")) |
+                     out("calls", 1, 2, TraversalMode::Devirtualized) |
+                     select({"usr"});
+  CHECK(canonical_json(plan.plan()).contains("\"mode\": \"devirtualized\""));
+
+  Executor ex(db);
+  const Result result = ex.run(plan.plan());
+  std::set<std::string> usrs;
+  for (const auto &row : result.rows) {
+    usrs.insert(std::get<std::string>(row[0]));
+  }
+  CHECK(usrs.contains("USR::Base::doSomething"));
+  CHECK(usrs.contains("USR::X::print"));
+  CHECK_FALSE(usrs.contains("USR::Y::print"));
 }

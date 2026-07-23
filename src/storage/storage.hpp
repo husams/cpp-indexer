@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 32;
+constexpr int kSchemaVersion = 33;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -564,7 +564,7 @@ public:
     int64_t rawcount = 0;
     std::optional<int64_t> base_access;
     std::optional<int64_t> is_virtual;
-    Symbol sym; // decoded from cols 8..29 via symbol_from_offset
+    Symbol sym; // decoded from cols 8..33 via symbol_from_offset
   };
 
   // A7 result row for batch site loading.

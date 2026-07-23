@@ -342,3 +342,13 @@ Feature: Callable signature slots preserve types, declarations, qualifiers, and 
       | return: int [value, builtin]                           |
       | param 0: limit: int [value, builtin] = 10              |
       | param 1: unit: geo::Unit [value, enum] -> geo::Unit = Unit::Meters |
+
+  Scenario: Enumerators record their evaluated constant values
+    # Clang's constant evaluator assigns each enumerator its value and the
+    # symbol row records the printed result (v33 const_value). The enum type
+    # itself records none.
+    Then the index holds the symbols:
+      | spelling | qual_name         | kind          | const_value |
+      | Meters   | geo::Unit::Meters | enum-constant | 0           |
+      | Feet     | geo::Unit::Feet   | enum-constant | 1           |
+      | Unit     | geo::Unit         | enum          | -           |

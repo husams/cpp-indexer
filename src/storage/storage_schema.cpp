@@ -127,13 +127,19 @@ CREATE TABLE IF NOT EXISTS symbol (
     access       TEXT,                  -- C++: 'public' | 'protected' | 'private'
     parent_usr   TEXT,                  -- semantic parent (class/namespace) USR
     resolved     INTEGER NOT NULL DEFAULT 0,
-    multi_def    INTEGER NOT NULL DEFAULT 0  -- v27: COUNT of definitions of this
+    multi_def    INTEGER NOT NULL DEFAULT 0, -- v27: COUNT of definitions of this
                                              -- symbol (rows in `definition`), set
                                              -- at resolve. >1 means the symbol is
                                              -- redefined per backend (library
                                              -- method left undefined, each server
                                              -- re-implements it). O(1) "list
                                              -- redefined" without a join.
+    const_value  TEXT                        -- v33: the evaluated constant value
+                                             -- of a variable's initializer or an
+                                             -- enumerator, as printed by Clang's
+                                             -- constant evaluator. NULL when the
+                                             -- initializer needs runtime
+                                             -- evaluation (or there is none).
 );
 
 CREATE INDEX IF NOT EXISTS idx_symbol_spelling ON symbol(spelling);
@@ -609,7 +615,7 @@ CREATE TABLE IF NOT EXISTS include_macro_use (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_include_macro_use_path ON include_macro_use(def_path);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '32');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '33');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest

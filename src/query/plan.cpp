@@ -9,13 +9,15 @@
 
 namespace cidx::query {
 
-// ---- Views --------------------------------------------------------------------
+// ---- Views
+// --------------------------------------------------------------------
 
 const char *view_name(View v) {
   return v == View::Symbol ? "symbol" : "entity";
 }
 
-// ---- Relation catalog -----------------------------------------------------------
+// ---- Relation catalog
+// -----------------------------------------------------------
 
 const std::vector<RelationDesc> &relation_catalog() {
   static const std::vector<RelationDesc> cat = {
@@ -74,17 +76,23 @@ const RelationDesc *resolve_relation(const std::string &name, View active) {
   return nullptr;
 }
 
-// ---- entity_kind names (entity_kind seed) ----------------------------------------
+// ---- entity_kind names (entity_kind seed)
+// ----------------------------------------
 
 namespace {
 
 const std::vector<std::string> &entity_kind_names() {
   static const std::vector<std::string> names = {
-      "other",          "class",
-      "abstract_class", "interface",
-      "union",          "enum",
-      "class_template", "abstract_class_template",
-      "interface_template", "namespace",
+      "other",
+      "class",
+      "abstract_class",
+      "interface",
+      "union",
+      "enum",
+      "class_template",
+      "abstract_class_template",
+      "interface_template",
+      "namespace",
   };
   return names;
 }
@@ -101,12 +109,13 @@ int64_t entity_kind_id_of(const std::string &name) {
   return it == names.end() ? -1 : static_cast<int64_t>(it - names.begin());
 }
 
-// ---- field catalog ---------------------------------------------------------------
+// ---- field catalog
+// ---------------------------------------------------------------
 
 struct FieldDesc {
   const char *name;
-  bool filterable;  // usable in nodes()/where() predicates
-  bool is_string;   // string comparisons (eq/ne/glob/in); else int/bool
+  bool filterable; // usable in nodes()/where() predicates
+  bool is_string;  // string comparisons (eq/ne/glob/in); else int/bool
 };
 
 const std::vector<FieldDesc> &field_catalog() {
@@ -147,9 +156,12 @@ const FieldDesc *field_desc(const std::string &name) {
 
 } // namespace
 
-int64_t entity_kind_id(const std::string &name) { return entity_kind_id_of(name); }
+int64_t entity_kind_id(const std::string &name) {
+  return entity_kind_id_of(name);
+}
 
-// ---- Pred builders ---------------------------------------------------------------
+// ---- Pred builders
+// ---------------------------------------------------------------
 
 Pred all_of(std::vector<Pred> preds) {
   Pred p;
@@ -216,25 +228,43 @@ Pred in_list(const std::string &field, std::vector<std::string> values) {
   return p;
 }
 
-// ---- Stage factories --------------------------------------------------------------
+// ---- Stage factories
+// --------------------------------------------------------------
 
 const char *stage_op_name(StageOp op) {
   switch (op) {
-  case StageOp::Nodes: return "nodes";
-  case StageOp::ChangeView: return "view";
-  case StageOp::Where: return "where";
-  case StageOp::Out: return "out";
-  case StageOp::In: return "in";
-  case StageOp::Union: return "union";
-  case StageOp::Intersect: return "intersect";
-  case StageOp::Except: return "except";
-  case StageOp::Select: return "select";
-  case StageOp::Count: return "count";
-  case StageOp::Distinct: return "distinct";
-  case StageOp::OrderBy: return "order_by";
-  case StageOp::Limit: return "limit";
+  case StageOp::Nodes:
+    return "nodes";
+  case StageOp::ChangeView:
+    return "view";
+  case StageOp::Where:
+    return "where";
+  case StageOp::Out:
+    return "out";
+  case StageOp::In:
+    return "in";
+  case StageOp::Union:
+    return "union";
+  case StageOp::Intersect:
+    return "intersect";
+  case StageOp::Except:
+    return "except";
+  case StageOp::Select:
+    return "select";
+  case StageOp::Count:
+    return "count";
+  case StageOp::Distinct:
+    return "distinct";
+  case StageOp::OrderBy:
+    return "order_by";
+  case StageOp::Limit:
+    return "limit";
   }
   return "?";
+}
+
+const char *traversal_mode_name(TraversalMode mode) {
+  return mode == TraversalMode::Devirtualized ? "devirtualized" : "static";
 }
 
 Source codebase() { return Source{.kind = SourceKind::Codebase, .ref = ""}; }
@@ -272,10 +302,12 @@ Stage where(Pred pred) {
   return s;
 }
 
-Stage out(const std::string &relation, int64_t min_depth, int64_t max_depth) {
+Stage out(const std::string &relation, int64_t min_depth, int64_t max_depth,
+          TraversalMode mode) {
   Stage s;
   s.op = StageOp::Out;
   s.relation = relation;
+  s.mode = mode;
   s.min_depth = min_depth;
   s.max_depth = max_depth;
   return s;
@@ -296,7 +328,9 @@ Stage set_stage(StageOp op, const Query &operand) {
 }
 } // namespace
 
-Stage union_(const Query &operand) { return set_stage(StageOp::Union, operand); }
+Stage union_(const Query &operand) {
+  return set_stage(StageOp::Union, operand);
+}
 Stage intersect(const Query &operand) {
   return set_stage(StageOp::Intersect, operand);
 }
@@ -337,7 +371,8 @@ Stage limit(int64_t n) {
   return s;
 }
 
-// ---- Predicate validation + normalization -----------------------------------------
+// ---- Predicate validation + normalization
+// -----------------------------------------
 
 namespace {
 
@@ -369,8 +404,7 @@ void check_cmp(const Pred &p) {
       fail("E_FIELD", "field '" + p.field + "' takes an integer value");
     }
   }
-  if ((p.field == "kind" || p.field == "entity_type") &&
-      p.op == PredOp::Glob) {
+  if ((p.field == "kind" || p.field == "entity_type") && p.op == PredOp::Glob) {
     fail("E_FIELD", "field '" + p.field + "' does not support glob");
   }
   if (p.field == "kind") {
@@ -440,7 +474,8 @@ Pred norm_pred(const Pred &p) {
 
 } // namespace
 
-// ---- validate() --------------------------------------------------------------------
+// ---- validate()
+// --------------------------------------------------------------------
 
 namespace {
 
@@ -522,6 +557,12 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
       if (stage.min_depth < 1 || stage.min_depth > stage.max_depth ||
           stage.max_depth > 32) {
         fail("E_DEPTH", "depth bounds must satisfy 1 <= min <= max <= 32");
+      }
+      if (stage.mode == TraversalMode::Devirtualized &&
+          (stage.op != StageOp::Out || r->layer != View::Symbol ||
+           r->name != "calls")) {
+        fail("E_STAGE",
+             "devirtualized mode requires an outbound symbol.calls traversal");
       }
       ns.relation = std::string(view_name(r->layer)) + "." + r->name;
       // Traversal targets live in the relation's layer: the stream view (and
@@ -618,7 +659,8 @@ View final_view(const Plan &plan) {
   return st.active;
 }
 
-// ---- canonical JSON ------------------------------------------------------------------
+// ---- canonical JSON
+// ------------------------------------------------------------------
 
 namespace {
 
@@ -703,6 +745,10 @@ json_out::Value plan_to_json_normalized(const Plan &plan) {
     case StageOp::Out:
     case StageOp::In:
       o.emplace_back("relation", Value::of(s.relation));
+      if (s.mode != TraversalMode::Static) {
+        o.emplace_back("mode",
+                       Value::of(std::string(traversal_mode_name(s.mode))));
+      }
       o.emplace_back("min_depth", Value::of(s.min_depth));
       o.emplace_back("max_depth", Value::of(s.max_depth));
       break;

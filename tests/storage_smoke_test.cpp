@@ -488,7 +488,8 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                                    "access",
                                                    "parent_usr",
                                                    "resolved",
-                                                   "multi_def"});
+                                                   "multi_def",
+                                                   "const_value"});
 
   // the indexes (5 symbol + 2 edge + 1 call_arg + 1 diagnostic)
   std::set<std::string> indexes;

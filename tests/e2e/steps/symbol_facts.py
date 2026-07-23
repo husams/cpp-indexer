@@ -8,6 +8,14 @@ from typing import Any
 from .workspace import Workspace
 
 
+def _const_value_view(value: Any) -> Any:
+    """symbol.const_value is TEXT; present integral values as ints so table
+    cells (coerced per the `123 -> int` convention) compare equal."""
+    if isinstance(value, str) and value.lstrip("+-").isdigit():
+        return int(value)
+    return value
+
+
 def sym_facts(sym) -> dict[str, Any]:
     """The comparable view of a symbol: every column a feature file may assert."""
     return {
@@ -16,6 +24,7 @@ def sym_facts(sym) -> dict[str, Any]:
         "qual_name": sym.name,
         "kind": sym.kind,
         "type_info": sym.type_info,
+        "const_value": _const_value_view(sym.const_value),
         "file": sym.file.name if sym.file else None,
         "line": sym.line,
         "col": sym.col,

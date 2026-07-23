@@ -109,6 +109,9 @@ struct Symbol {
   bool resolved = false;
   int64_t multi_def = 0; // v27: number of definitions (bodies); >1 == redefined
                          // per backend. Set at resolve, not by add_symbol.
+  std::optional<std::string> const_value; // v33: evaluated constant initializer
+                                          // (variable) or enumerator value;
+                                          // NULL for runtime initializers
   int64_t id = -1;
 };
 

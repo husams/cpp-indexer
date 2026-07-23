@@ -590,6 +590,16 @@ void Storage::migrate() {
       changed = true;
     }
   }
+  // v32 -> v33: the evaluated constant value of a variable initializer /
+  // enumerator on symbol. No backfill is possible from stored rows -- a
+  // reindex populates it; old rows read NULL until then. Mirrors storage.py.
+  {
+    const auto scols = table_columns("symbol");
+    if (!has_col(scols, "const_value")) {
+      db_.exec("ALTER TABLE symbol ADD COLUMN const_value TEXT");
+      changed = true;
+    }
+  }
   if (changed) {
     auto st =
         db_.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'");

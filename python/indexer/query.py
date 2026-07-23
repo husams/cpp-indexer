@@ -376,6 +376,10 @@ class Sym:
     # surfaced in ``to_dict`` -- that view stays byte-identical to the C++ port.
     multi_def: int = 0  # v27: number of definitions (bodies). >1 == redefined
     # per backend (library method left undefined, each server reimplements it).
+    const_value: Optional[str] = None  # v33: the evaluated constant value of a
+    # variable's initializer or an enumerator, as printed by Clang's constant
+    # evaluator (constexpr/consteval arithmetic included); None when the
+    # initializer needs runtime evaluation or there is none.
 
     @property
     def is_redefined(self) -> bool:
@@ -441,6 +445,7 @@ class Sym:
             "qual_name": self.name,
             "kind": self.kind,
             "type_info": self.type_info,
+            "const_value": self.const_value,
             "file": self.file.path if self.file else None,
             "line": self.line,
             "col": self.col,
@@ -941,7 +946,7 @@ _SYM_COLS = (
     "s.file_id, s.line, s.col, s.end_line, s.end_col, "
     "s.decl_file_id, s.decl_line, s.decl_col, "
     "s.decl_path, s.is_definition, s.is_pure, s.is_static, s.is_instantiation, "
-    "s.access, s.parent_usr, s.resolved, s.multi_def"
+    "s.access, s.parent_usr, s.resolved, s.multi_def, s.const_value"
 )
 
 
@@ -1136,6 +1141,7 @@ class GraphQuery:
             end_col=end_col,
             external=external,
             multi_def=(r["multi_def"] if "multi_def" in r.keys() else 0),
+            const_value=(r["const_value"] if "const_value" in r.keys() else None),
         )
 
     @staticmethod
