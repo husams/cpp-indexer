@@ -15,6 +15,13 @@ task:
 - **cidx-modern-cpp** — mandatory C++23 modernization and scoped clang-tidy
   workflow for every change to project-owned C++.
 
+The enforceable module/dependency contract is
+[`docs/adr/ADR-011-module-architecture-and-dependency-rules.md`](docs/adr/ADR-011-module-architecture-and-dependency-rules.md)
+and its machine-readable source of truth is
+[`architecture/cidx-module-manifest.json`](architecture/cidx-module-manifest.json).
+Future platform work must extend that contract rather than introduce local
+layering rules.
+
 ## Modern C++ and clang-tidy (mandatory)
 
 - For every edit to project-owned `.cpp` or `.hpp` files, **load and follow the

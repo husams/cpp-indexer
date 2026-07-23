@@ -28,6 +28,8 @@ per component plus a few cross-cutting pages. Start with the
 | [Glossary](glossary.md) | USR, Layer-0/1, driver introspection, stub, multi_def |
 | [Query DSL guide](query-dsl.md) | using the CXQ QueryPlan pipeline DSL from C++ and Python, with runnable samples |
 | [QueryPlan contract](query-plan.md) | the normative CXQ spec: IR grammar, canonical JSON, validation codes, execution semantics |
+| [Module architecture and dependency rules](adr/ADR-011-module-architecture-and-dependency-rules.md) | enforceable layer ownership, dependency direction, exceptions, and review policy |
+| [Architecture contribution guide](architecture-contributing.md) | how to add a module, target, or dependency without bypassing the contract |
 | [CIDX Graph Search and Navigation Skill](cidx-search-language.md) | draft controlled-English graph search skill, semantic navigation IR, traits, inheritance, quantifiers, aggregation, negation, and backend compilation |
 | [Improvement roadmap](improvements/README.md) | prioritized follow-on work, with adoption gates |
 

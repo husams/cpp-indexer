@@ -1,0 +1,22 @@
+name: architecture
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check module and dependency contract
+        run: python scripts/check_architecture.py --manifest architecture/cidx-module-manifest.json
+      - name: Run architecture mutation tests
+        run: python tests/architecture_test.py
