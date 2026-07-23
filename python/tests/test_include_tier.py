@@ -37,8 +37,8 @@ def _add_edge(db, src, dst_path, config_id, dst_file_id=None, is_system=0, count
     return cur.fetchone()[0]
 
 
-def test_schema_version_is_31():
-    assert SCHEMA_VERSION == 31
+def test_schema_version_is_32():
+    assert SCHEMA_VERSION == 33
 
 
 def test_fresh_schema_has_the_include_tier(tmp_path):
@@ -100,7 +100,7 @@ def test_v30_to_v31_migration_creates_tables_and_stamps(tmp_path):
     ver = db2._conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0]
-    assert ver == "31"
+    assert ver == "33"
 
 
 def test_include_graph_populated_distinguishes_empty_from_absent(tmp_path):

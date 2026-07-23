@@ -27,10 +27,10 @@ Feature: Indexing a function template, its explicit specialization and its impli
   Scenario: Primary, specialization, instantiation and caller are all indexed
     Then the index holds exactly these symbols:
       | usr                           | spelling | qual_name             | kind              | type_info       | line | col | end_line | end_col | is_definition | is_instantiation |
-      | c:@FT@>1#Tadd#t0.0#S0_#S0_#   | add      | add(T, T)             | function-template | T (T, T)        | 1    | 1   | 4        | 2       | true          | false            |
+      | c:@FT@>1#Tadd#t0.0#S0_#S0_#   | add      | add<T>(T, T)         | function-template | T (T, T)        | 1    | 1   | 4        | 2       | true          | false            |
       | c:@F@add<#I>#I#I#             | add      | add<int>(int, int)    | function          | int (int, int)  | 6    | 1   | 8        | 2       | true          | false            |
       | c:@F@call#d#                  | call     | call(double)          | function          | float (double)  | 11   | 1   | 14       | 2       | true          | false            |
-      | c:@F@add<#d>#d#d#             | add      | add<>(double, double) | function          | double (double, double) | 2    | 3   | -        | -       | false         | true             |
+      | c:@F@add<#d>#d#d#             | add      | add<double>(double, double) | function          | double (double, double) | 2    | 3   | -        | -       | false         | true             |
 
   Scenario: The primary template declares one type parameter and no bound arguments
     Then symbol "usr:c:@FT@>1#Tadd#t0.0#S0_#S0_#" declares the template parameters:
@@ -77,7 +77,7 @@ Feature: Indexing a function template, its explicit specialization and its impli
   Scenario: The call resolves to the double instantiation, not to the primary or the int specialization
     Then symbol "call" calls:
       | qual_name             | kind     | line |
-      | add<>(double, double) | function | 2    |
+      | add<double>(double, double) | function | 2    |
     And symbol "usr:c:@F@add<#d>#d#d#" is called by:
       | qual_name    | kind     | line |
       | call(double) | function | 11   |

@@ -6,13 +6,15 @@
 // arg_kind regardless of where they were seen:
 //
 //   1 = type            (literal = printed spelling, ref_id = typed TagDecl)
-//   2 = non-type value  (Declaration/NullPtr/Integral/StructuralValue/Expression)
-//   3 = template-template (Template/TemplateExpansion)
-//   4 = pack            (one row for the pack; elements not expanded)
-//   Null encodes no row (an unfilled slot).
+//   2 = non-type value
+//   (Declaration/NullPtr/Integral/StructuralValue/Expression) 3 =
+//   template-template (Template/TemplateExpansion) 4 = pack            (one row
+//   for the pack; elements not expanded) Null encodes no row (an unfilled
+//   slot).
 #pragma once
 
 #include "ast/edge_records.hpp"
+#include "ast/type_graph.hpp"
 
 #include "clang/AST/Type.h"
 
@@ -31,7 +33,7 @@ class EdgeSink;
 
 class TemplateArgumentEncoder {
 public:
-  TemplateArgumentEncoder(const clang::ASTContext &context, EdgeSink &sink);
+  TemplateArgumentEncoder(clang::ASTContext &context, EdgeSink &sink);
 
   // Encode one argument for owner/position. `written` overrides the printed
   // spelling of a Type argument (the as-written sugared type when the caller
@@ -51,8 +53,9 @@ public:
   static std::string display_text(const TemplateArgRecord &record);
 
 private:
-  const clang::ASTContext &context_;
+  clang::ASTContext &context_;
   EdgeSink &sink_;
+  mutable TypeInterner types_;
 };
 
 } // namespace cidx::ast

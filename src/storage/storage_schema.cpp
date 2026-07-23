@@ -2,7 +2,6 @@
 
 namespace cidx::detail {
 
-
 // Schema v6 — exact text from design §4 (= Python's expanded _SCHEMA, kinds
 // in sorted order).
 extern const char *const kSchema = R"sql(
@@ -128,13 +127,19 @@ CREATE TABLE IF NOT EXISTS symbol (
     access       TEXT,                  -- C++: 'public' | 'protected' | 'private'
     parent_usr   TEXT,                  -- semantic parent (class/namespace) USR
     resolved     INTEGER NOT NULL DEFAULT 0,
-    multi_def    INTEGER NOT NULL DEFAULT 0  -- v27: COUNT of definitions of this
+    multi_def    INTEGER NOT NULL DEFAULT 0, -- v27: COUNT of definitions of this
                                              -- symbol (rows in `definition`), set
                                              -- at resolve. >1 means the symbol is
                                              -- redefined per backend (library
                                              -- method left undefined, each server
                                              -- re-implements it). O(1) "list
                                              -- redefined" without a join.
+    const_value  TEXT                        -- v33: the evaluated constant value
+                                             -- of a variable's initializer or an
+                                             -- enumerator, as printed by Clang's
+                                             -- constant evaluator. NULL when the
+                                             -- initializer needs runtime
+                                             -- evaluation (or there is none).
 );
 
 CREATE INDEX IF NOT EXISTS idx_symbol_spelling ON symbol(spelling);
@@ -235,16 +240,21 @@ CREATE TABLE IF NOT EXISTS template_param (
     param_kind  INTEGER NOT NULL,  -- 1=type 2=non-type 3=template-template 4=pack
     name        TEXT,
     default_txt TEXT,
+    type_id     INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    default_type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    default_ref_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
     PRIMARY KEY (owner_id, position)
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS template_arg (
     owner_id  INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
     position  INTEGER NOT NULL,
+    pack_index INTEGER NOT NULL DEFAULT -1,
     arg_kind  INTEGER NOT NULL,  -- 1=type 2=non-type value 3=template-template 4=pack
     ref_id    INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
     literal   TEXT,
-    PRIMARY KEY (owner_id, position)
+    type_id   INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    PRIMARY KEY (owner_id, position, pack_index)
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS call_arg (
@@ -414,7 +424,7 @@ CREATE TABLE IF NOT EXISTS possible_call (
 CREATE INDEX IF NOT EXISTS idx_possible_call_src ON possible_call(src_def_id);
 CREATE INDEX IF NOT EXISTS idx_possible_call_dst ON possible_call(dst_def_id);
 
--- ---- v30: signature/type tier (parameters + normalized types) ---------------
+-- ---- v30/v32: signature/type tier (parameters + normalized types) ------------
 -- Makes callable signatures traversable instead of strings/coarse uses edges:
 -- which callables accept/return T, where T is used by pointer/reference/alias,
 -- which aliases lead to a canonical type. Populated by the LibTooling decl
@@ -428,7 +438,8 @@ CREATE TABLE IF NOT EXISTS type_kind (
 INSERT OR IGNORE INTO type_kind (id, name) VALUES
   (1,'builtin'), (2,'record'), (3,'enum'), (4,'alias'),
   (5,'pointer'), (6,'lvalue-reference'), (7,'rvalue-reference'),
-  (8,'array'), (9,'function'), (10,'template-param'), (11,'other');
+  (8,'array'), (9,'function'), (10,'template-param'), (11,'other'),
+  (12,'member-data-pointer'), (13,'member-function-pointer');
 
 -- One row per distinct type SHAPE. Identity is type_key -- a deterministic
 -- structural encoding of the Clang type (grammar in ast/type_graph.cpp), NOT
@@ -463,7 +474,8 @@ CREATE TABLE IF NOT EXISTS type_edge_kind (
 );
 INSERT OR IGNORE INTO type_edge_kind (id, name) VALUES
   (1,'pointee'), (2,'element_type'), (3,'alias_of'),
-  (4,'return_type'), (5,'param_type'), (6,'template_argument_type');
+  (4,'return_type'), (5,'param_type'), (6,'template_argument_type'),
+  (7,'member_owner'), (8,'member_component');
 
 CREATE TABLE IF NOT EXISTS type_edge (
     src_id   INTEGER NOT NULL REFERENCES type_node(id) ON DELETE CASCADE,
@@ -481,14 +493,22 @@ CREATE INDEX IF NOT EXISTS idx_type_edge_dst ON type_edge(dst_id);
 CREATE TABLE IF NOT EXISTS parameter (
     owner_id INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
     position INTEGER NOT NULL,
+    pack_index INTEGER NOT NULL DEFAULT -1,
     name     TEXT,
     type_id  INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    declared_type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    adjusted_type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    default_text TEXT,
+    default_origin TEXT,
+    reference_semantics TEXT,
     file_id  INTEGER REFERENCES file(id) ON DELETE SET NULL,
     line     INTEGER,
     col      INTEGER,
-    PRIMARY KEY (owner_id, position)
+    PRIMARY KEY (owner_id, position, pack_index)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_parameter_type ON parameter(type_id);
+CREATE INDEX IF NOT EXISTS idx_parameter_declared_type ON parameter(declared_type_id);
+CREATE INDEX IF NOT EXISTS idx_parameter_adjusted_type ON parameter(adjusted_type_id);
 
 -- Symbol -> type relations: returns(1) callable -> return type (ctors/dtors
 -- have none), of_type(2) variable/field -> declared type, underlying_type(3)
@@ -595,7 +615,7 @@ CREATE TABLE IF NOT EXISTS include_macro_use (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_include_macro_use_path ON include_macro_use(def_path);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '31');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '33');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest

@@ -38,6 +38,8 @@ inline constexpr int64_t kTypeArray = 8;
 inline constexpr int64_t kTypeFunction = 9;
 inline constexpr int64_t kTypeTemplateParam = 10;
 inline constexpr int64_t kTypeOther = 11;
+inline constexpr int64_t kTypeMemberDataPointer = 12;
+inline constexpr int64_t kTypeMemberFunctionPointer = 13;
 
 // type_edge.kind codes (mirrors the storage type_edge_kind seed).
 inline constexpr int64_t kTypeEdgePointeeK = 1;
@@ -46,6 +48,8 @@ inline constexpr int64_t kTypeEdgeAliasOfK = 3;
 inline constexpr int64_t kTypeEdgeReturnK = 4;
 inline constexpr int64_t kTypeEdgeParamK = 5;
 inline constexpr int64_t kTypeEdgeTemplateArgK = 6;
+inline constexpr int64_t kTypeEdgeMemberOwnerK = 7;
+inline constexpr int64_t kTypeEdgeMemberComponentK = 8;
 
 // symbol_type.kind codes (mirrors the storage symbol_type_kind seed).
 inline constexpr int64_t kSymTypeReturnsK = 1;

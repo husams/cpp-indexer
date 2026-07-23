@@ -2,6 +2,7 @@
 
 #include "ast/call_template_args.hpp"
 #include "ast/decl_flags.hpp"
+#include "ast/declaration_edge_visitor.hpp"
 #include "ast/edge_emission_context.hpp"
 #include "ast/edge_sink.hpp"
 #include "ast/instantiation_edges.hpp"
@@ -19,6 +20,10 @@
 #include "clang/Basic/SourceManager.h"
 
 namespace cidx::ast {
+
+namespace {
+
+} // namespace
 
 int64_t
 CallEdgeEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
@@ -71,6 +76,9 @@ CallEdgeEmitter::mint_resolved_target(const clang::Expr *site,
     emit_method_owner(ctx_.sink(), ctx_.mint(), ctx_.targ_encoder(), dst_id,
                       method);
   }
+  DeclarationEdgeVisitor signature_visitor(ctx_.context(), ctx_.sink(), {},
+                                           ctx_.file_id());
+  signature_visitor.emit_signature_types_for(callee, dst_id);
   return dst_id;
 }
 

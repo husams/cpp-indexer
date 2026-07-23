@@ -43,6 +43,7 @@ Quick start:
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from dataclasses import dataclass, replace
 from typing import Any, Iterable, Literal, Optional, Sequence, overload
@@ -375,6 +376,10 @@ class Sym:
     # surfaced in ``to_dict`` -- that view stays byte-identical to the C++ port.
     multi_def: int = 0  # v27: number of definitions (bodies). >1 == redefined
     # per backend (library method left undefined, each server reimplements it).
+    const_value: Optional[str] = None  # v33: the evaluated constant value of a
+    # variable's initializer or an enumerator, as printed by Clang's constant
+    # evaluator (constexpr/consteval arithmetic included); None when the
+    # initializer needs runtime evaluation or there is none.
 
     @property
     def is_redefined(self) -> bool:
@@ -440,6 +445,7 @@ class Sym:
             "qual_name": self.name,
             "kind": self.kind,
             "type_info": self.type_info,
+            "const_value": self.const_value,
             "file": self.file.path if self.file else None,
             "line": self.line,
             "col": self.col,
@@ -506,6 +512,7 @@ TYPE_KIND_NAMES = {
     1: "builtin", 2: "record", 3: "enum", 4: "alias",
     5: "pointer", 6: "lvalue-reference", 7: "rvalue-reference",
     8: "array", 9: "function", 10: "template-param", 11: "other",
+    12: "member-data-pointer", 13: "member-function-pointer",
 }
 
 
@@ -520,6 +527,10 @@ class TypeInfo:
     spelling: str
     kind: str
     canonical: Optional[str] = None
+    decl_usr: Optional[str] = None
+    is_const: bool = False
+    is_volatile: bool = False
+    is_restrict: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -527,6 +538,10 @@ class TypeInfo:
             "spelling": self.spelling,
             "kind": self.kind,
             "canonical": self.canonical,
+            "decl_usr": self.decl_usr,
+            "const": self.is_const,
+            "volatile": self.is_volatile,
+            "restrict": self.is_restrict,
         }
 
 
@@ -560,6 +575,40 @@ class SignatureInfo:
     def empty(self) -> bool:
         return (self.returns is None and not self.params
                 and self.of_type is None and self.underlying is None)
+
+
+@dataclass(frozen=True)
+class SignatureSlot:
+    """One public callable signature slot, including source/adjusted types."""
+
+    role: str
+    position: Optional[int]
+    pack_index: Optional[int]
+    name: Optional[str]
+    declared_type: Optional[TypeInfo]
+    adjusted_type: Optional[TypeInfo]
+    mode: str
+    value_kind: str
+    named_decl: Optional[str]
+    reference_semantics: Optional[str] = None
+    default: Optional[str] = None
+    default_origin: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "role": self.role,
+            "position": self.position,
+            "pack_index": self.pack_index,
+            "name": self.name,
+            "declared_type": self.declared_type.to_dict() if self.declared_type else None,
+            "adjusted_type": self.adjusted_type.to_dict() if self.adjusted_type else None,
+            "mode": self.mode,
+            "value_kind": self.value_kind,
+            "named_decl": self.named_decl,
+            "reference_semantics": self.reference_semantics,
+            "default": self.default,
+            "default_origin": self.default_origin,
+        }
 
 
 @dataclass(frozen=True)
@@ -689,7 +738,11 @@ class CallContext:
 
 
 #: template_param.param_kind / template_arg.arg_kind code -> readable name.
-TEMPLATE_PARAM_KINDS = {1: "type", 2: "non-type", 3: "template-template", 4: "pack"}
+TEMPLATE_PARAM_KINDS = {
+    1: "type", 2: "non-type", 3: "template-template",
+    4: "type-pack", 5: "non-type-pack", 6: "template-template-pack",
+}
+TEMPLATE_ARG_KINDS = {1: "type", 2: "non-type", 3: "template", 4: "pack"}
 
 
 @dataclass(frozen=True)
@@ -705,6 +758,9 @@ class TemplateParam:
     param_kind: int
     name: Optional[str]
     default: Optional[str] = None
+    type: Optional[TypeInfo] = None
+    default_type: Optional[TypeInfo] = None
+    default_ref: Optional[Sym] = None
 
     @property
     def kind_name(self) -> str:
@@ -717,6 +773,9 @@ class TemplateParam:
             "kind_name": self.kind_name,
             "name": self.name,
             "default": self.default,
+            "type": self.type.to_dict() if self.type else None,
+            "default_type": self.default_type.to_dict() if self.default_type else None,
+            "default_ref": self.default_ref.to_dict() if self.default_ref else None,
         }
 
     def __repr__(self) -> str:
@@ -737,10 +796,12 @@ class TemplateArg:
     arg_kind: int
     ref_id: Optional[int] = None
     literal: Optional[str] = None
+    pack_index: Optional[int] = None
+    type: Optional[TypeInfo] = None
 
     @property
     def kind_name(self) -> str:
-        return TEMPLATE_PARAM_KINDS.get(self.arg_kind, str(self.arg_kind))
+        return TEMPLATE_ARG_KINDS.get(self.arg_kind, str(self.arg_kind))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -749,6 +810,8 @@ class TemplateArg:
             "kind_name": self.kind_name,
             "ref_id": self.ref_id,
             "literal": self.literal,
+            "pack_index": self.pack_index,
+            "type": self.type.to_dict() if self.type else None,
         }
 
     def __repr__(self) -> str:
@@ -886,7 +949,7 @@ _SYM_COLS = (
     "s.file_id, s.line, s.col, s.end_line, s.end_col, "
     "s.decl_file_id, s.decl_line, s.decl_col, "
     "s.decl_path, s.is_definition, s.is_pure, s.is_static, s.is_instantiation, "
-    "s.access, s.parent_usr, s.resolved, s.multi_def"
+    "s.access, s.parent_usr, s.resolved, s.multi_def, s.const_value"
 )
 
 
@@ -1081,6 +1144,7 @@ class GraphQuery:
             end_col=end_col,
             external=external,
             multi_def=(r["multi_def"] if "multi_def" in r.keys() else 0),
+            const_value=(r["const_value"] if "const_value" in r.keys() else None),
         )
 
     @staticmethod
@@ -1715,12 +1779,19 @@ class GraphQuery:
         template), in declaration order. Empty for non-templates."""
         sid = self._resolve_id(sym)
         rows = self._c.execute(
-            "SELECT position, param_kind, name, default_txt FROM template_param "
+            "SELECT position, param_kind, name, default_txt, type_id, "
+            "default_type_id, default_ref_id FROM template_param "
             "WHERE owner_id = ? ORDER BY position",
             (sid,),
         ).fetchall()
         return [
-            TemplateParam(r["position"], r["param_kind"], r["name"], r["default_txt"])
+            TemplateParam(
+                r["position"], r["param_kind"], r["name"], r["default_txt"],
+                self._type_info(r["type_id"]) if r["type_id"] is not None else None,
+                self._type_info(r["default_type_id"])
+                if r["default_type_id"] is not None else None,
+                self.get(r["default_ref_id"]) if r["default_ref_id"] is not None else None,
+            )
             for r in rows
         ]
 
@@ -1730,12 +1801,17 @@ class GraphQuery:
         position order. Empty when `sym` binds no template arguments."""
         sid = self._resolve_id(sym)
         rows = self._c.execute(
-            "SELECT position, arg_kind, ref_id, literal FROM template_arg "
-            "WHERE owner_id = ? ORDER BY position",
+            "SELECT position, pack_index, arg_kind, ref_id, literal, type_id "
+            "FROM template_arg "
+            "WHERE owner_id = ? ORDER BY position, pack_index",
             (sid,),
         ).fetchall()
         return [
-            TemplateArg(r["position"], r["arg_kind"], r["ref_id"], r["literal"])
+            TemplateArg(
+                r["position"], r["arg_kind"], r["ref_id"], r["literal"],
+                r["pack_index"],
+                self._type_info(r["type_id"]) if r["type_id"] is not None else None,
+            )
             for r in rows
         ]
 
@@ -2090,7 +2166,8 @@ class GraphQuery:
         """Display info for one type_node id (kind resolved to its name;
         canonical spelling attached when the node is sugared)."""
         r = self._c.execute(
-            "SELECT id, spelling, kind, canonical_id FROM type_node "
+            "SELECT id, spelling, kind, canonical_id, decl_usr, is_const, "
+            "is_volatile, is_restrict FROM type_node "
             "WHERE id = ?",
             (type_id,),
         ).fetchone()
@@ -2109,6 +2186,10 @@ class GraphQuery:
             spelling=r["spelling"],
             kind=TYPE_KIND_NAMES.get(r["kind"], str(r["kind"])),
             canonical=canonical,
+            decl_usr=r["decl_usr"],
+            is_const=bool(r["is_const"]),
+            is_volatile=bool(r["is_volatile"]),
+            is_restrict=bool(r["is_restrict"]),
         )
 
     def signature(self, sym) -> SignatureInfo:
@@ -2147,6 +2228,142 @@ class GraphQuery:
             underlying=info(3),
         )
 
+    def _type_child(self, type_id: int, kind: int, position: int = 0) -> Optional[TypeInfo]:
+        row = self._c.execute(
+            "SELECT dst_id FROM type_edge WHERE src_id = ? AND kind = ? AND position = ?",
+            (type_id, kind, position),
+        ).fetchone()
+        return self._type_info(row["dst_id"]) if row is not None else None
+
+    def type_layers(self, type_or_id) -> list[dict[str, Any]]:
+        """Return the recursive type shape as deterministic root-first rows."""
+        tid = type_or_id if isinstance(type_or_id, int) else getattr(type_or_id, "id", None)
+        if tid is None:
+            return []
+        out: list[dict[str, Any]] = []
+        path = "root"
+        seen: set[int] = set()
+        while tid not in seen:
+            seen.add(tid)
+            t = self._type_info(tid)
+            if t is None:
+                break
+            out.append({
+                "path": path,
+                "kind": t.kind,
+                "const": t.is_const,
+                "volatile": t.is_volatile,
+                "restrict": t.is_restrict,
+                "declaration": self._name_for_usr(t.decl_usr),
+                "decl_usr": t.decl_usr,
+            })
+            if t.kind == "array":
+                child = self._type_child(t.id, 2)
+                out[-1]["element_type"] = child.spelling if child else None
+                opening = t.spelling.rfind("[")
+                closing = t.spelling.rfind("]")
+                out[-1]["extent"] = (
+                    t.spelling[opening + 1:closing].strip()
+                    if opening >= 0 and closing > opening
+                    else None
+                )
+            edge_kind = 1 if t.kind in {
+                "pointer", "lvalue-reference", "rvalue-reference"
+            } else 2 if t.kind == "array" else None
+            if edge_kind is None:
+                break
+            row = self._c.execute(
+                "SELECT dst_id FROM type_edge WHERE src_id = ? AND kind = ? LIMIT 1",
+                (tid, edge_kind),
+            ).fetchone()
+            if row is None:
+                break
+            tid = row["dst_id"]
+            path += ".pointee" if t.kind == "pointer" else ".referent" if edge_kind == 1 else ".element"
+        return out
+
+    def _name_for_usr(self, usr: Optional[str]) -> Optional[str]:
+        if not usr:
+            return None
+        row = self._c.execute(
+            "SELECT COALESCE(qual_name, spelling) AS name FROM symbol WHERE usr = ?",
+            (usr,),
+        ).fetchone()
+        return row["name"] if row is not None else None
+
+    def _slot_type_facts(
+        self, declared: Optional[TypeInfo], adjusted: Optional[TypeInfo]
+    ) -> tuple[str, str, Optional[str]]:
+        if declared is None:
+            return "value", "other", None
+        mode = "value"
+        if declared.kind in {"lvalue-reference", "rvalue-reference"}:
+            mode = declared.kind
+            base = declared
+        else:
+            base = adjusted or declared
+        if mode != "value":
+            child = self._type_child(base.id, 1)
+            while child is not None and child.kind in {"lvalue-reference", "rvalue-reference"}:
+                child = self._type_child(child.id, 1)
+            if child is not None:
+                base = child
+            else:
+                spelling = base.spelling.rstrip().removesuffix("&&").removesuffix("&").rstrip()
+                fallback = self._c.execute(
+                    "SELECT id FROM type_node WHERE spelling=? ORDER BY id DESC LIMIT 1",
+                    (spelling,),
+                ).fetchone()
+                if fallback is not None:
+                    base = self._type_info(fallback["id"]) or base
+        value_kind = "pack-expansion" if base.spelling.endswith("...") else base.kind
+        named = None
+        current = base
+        through_pointer = base.kind == "pointer"
+        seen: set[int] = set()
+        while current is not None and current.id not in seen:
+            seen.add(current.id)
+            if current.decl_usr:
+                named = self._name_for_usr(current.decl_usr)
+                break
+            edge_kind = 1 if current.kind in {
+                "pointer", "lvalue-reference", "rvalue-reference"
+            } else 2 if current.kind == "array" else 4 if current.kind == "function" and not through_pointer else None
+            if edge_kind is None:
+                break
+            current = self._type_child(current.id, edge_kind)
+        return mode, value_kind, named
+
+    def signature_slots(self, sym) -> list[SignatureSlot]:
+        """Unified return/parameter view used by the E2E and public clients."""
+        sid = self._resolve_id(sym)
+        rows: list[SignatureSlot] = []
+        ret = self._c.execute(
+            "SELECT type_id FROM symbol_type WHERE symbol_id = ? AND kind = 1",
+            (sid,),
+        ).fetchone()
+        if ret is not None:
+            t = self._type_info(ret["type_id"])
+            mode, value_kind, named = self._slot_type_facts(t, t)
+            rows.append(SignatureSlot("return", None, None, None, t, t, mode, value_kind, named))
+        for r in self._c.execute(
+            "SELECT position, pack_index, name, type_id, declared_type_id, adjusted_type_id, "
+            "default_text, default_origin, reference_semantics FROM parameter "
+            "WHERE owner_id = ? ORDER BY position, pack_index",
+            (sid,),
+        ):
+            declared_id = r["declared_type_id"] or r["type_id"]
+            adjusted_id = r["adjusted_type_id"] or r["type_id"]
+            declared = self._type_info(declared_id) if declared_id is not None else None
+            adjusted = self._type_info(adjusted_id) if adjusted_id is not None else None
+            mode, value_kind, named = self._slot_type_facts(declared, adjusted)
+            rows.append(SignatureSlot(
+                "parameter", r["position"], r["pack_index"], r["name"], declared, adjusted,
+                mode, value_kind, named, r["reference_semantics"],
+                r["default_text"], r["default_origin"],
+            ))
+        return rows
+
     def type_users(self, sym, limit: int = 500) -> list[TypeUser]:
         """Symbols whose signature/type facts reach the type named by `sym`,
         through pointer/reference/array/alias/template-argument layers.
@@ -2175,9 +2392,10 @@ class GraphQuery:
         marks = ", ".join("?" for _ in tids)
         out: list[TypeUser] = []
         for r in self._c.execute(
-            f"SELECT owner_id, position FROM parameter WHERE type_id IN ({marks}) "
-            "ORDER BY owner_id, position",
-            tids,
+            f"SELECT owner_id, position FROM parameter WHERE "
+            f"type_id IN ({marks}) OR declared_type_id IN ({marks}) "
+            f"OR adjusted_type_id IN ({marks}) ORDER BY owner_id, position",
+            tids * 3,
         ).fetchall():
             if len(out) >= limit:
                 return out

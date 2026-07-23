@@ -32,8 +32,7 @@ const std::vector<std::string> kDirections = {"in", "out"};
 const std::vector<std::string> kAccessLevels = {"public", "protected",
                                                 "private", "all"};
 
-const char kDbHelpText[] =
-    "index database (default: the standard cache index)";
+const char kDbHelpText[] = "index database (default: the standard cache index)";
 const char kAltDbHelpText[] =
     "operate on this index DB (default: the standard index)";
 const char kPatternHelpText[] =
@@ -87,15 +86,17 @@ void add_graph_selector(CLI::App *sub, ParsedArgs &pa) {
       sub->add_option_group("selector", "symbol to start from");
   sel->add_option("--usr", pa.usr, "exact clang USR");
   sel->add_option("--id", pa.graph_id, "numeric symbol id");
-  sel->add_option("--name", pa.name, "fuzzy qualified-name match ('conf::set')");
+  sel->add_option("--name", pa.name,
+                  "fuzzy qualified-name match ('conf::set')");
   sel->require_option(1);
   sub->add_option("--kind", pa.kind,
                   "restrict a --name match to one symbol kind")
       ->check(CLI::IsMember(kSymbolKinds));
   sub->add_flag("--first", pa.first,
                 "if --name is ambiguous, take the closest match");
-  sub->add_option("--db", pa.index_db,
-                  "index database to query (default: the standard cache index)");
+  sub->add_option(
+      "--db", pa.index_db,
+      "index database to query (default: the standard cache index)");
   sub->add_flag("--json", pa.graph_json, "emit stable machine-readable JSON");
   sub->add_option("--limit", pa.graph_limit,
                   "cap the number of results (default 50)");
@@ -108,8 +109,9 @@ void build_top_level(CLI::App &app, ParsedArgs &pa) {
 
   CLI::App *import =
       app.add_subcommand("import", "import a compile_commands.json");
-  import->add_option("--db", pa.db,
-                     "compile_commands.json (or the directory holding it)")
+  import
+      ->add_option("--db", pa.db,
+                   "compile_commands.json (or the directory holding it)")
       ->required();
   import->add_option("--name", pa.name, "component name override");
   import->add_option("--repo", pa.repo,
@@ -141,9 +143,10 @@ void build_top_level(CLI::App &app, ParsedArgs &pa) {
 
   CLI::App *search =
       app.add_subcommand("search", "fuzzy-search symbols by qualified name");
-  search->add_option("pattern", pa.pattern,
-                     "'::'-separated substrings matched in order, e.g. "
-                     "'conf::set' hits RdKafka::Conf::set")
+  search
+      ->add_option("pattern", pa.pattern,
+                   "'::'-separated substrings matched in order, e.g. "
+                   "'conf::set' hits RdKafka::Conf::set")
       ->required();
   search->add_option("--kind", pa.kind, "restrict to one symbol kind")
       ->check(CLI::IsMember(kSymbolKinds));
@@ -287,8 +290,8 @@ void build_repo(CLI::App &app, ParsedArgs &pa) {
     pa.what = "list";
   });
 
-  CLI::App *show = repo->add_subcommand(
-      "show", "show a repository's clones and components");
+  CLI::App *show =
+      repo->add_subcommand("show", "show a repository's clones and components");
   show->add_option("NAME", pa.name, "repository name")->required();
   show->add_option("--db", pa.index_db, kDbHelpText);
   show->callback([&pa] {
@@ -296,8 +299,8 @@ void build_repo(CLI::App &app, ParsedArgs &pa) {
     pa.what = "show";
   });
 
-  CLI::App *add_clone = repo->add_subcommand(
-      "add-clone", "register another checkout directory");
+  CLI::App *add_clone =
+      repo->add_subcommand("add-clone", "register another checkout directory");
   add_clone->add_option("NAME", pa.name, "repository name")->required();
   add_clone->add_option("PATH", pa.path, "checkout/worktree directory")
       ->required();
@@ -346,8 +349,8 @@ void build_dir(CLI::App &app, ParsedArgs &pa) {
       app.add_subcommand("dir", "browse or delete indexed directories");
   dir->require_subcommand(1);
 
-  CLI::App *list = dir->add_subcommand(
-      "list", "list directories (all, or one component's)");
+  CLI::App *list =
+      dir->add_subcommand("list", "list directories (all, or one component's)");
   list->alias("ls");
   list->add_option("pattern", pa.pattern, kPatternHelpText);
   list->add_option("--component,-c", pa.component,
@@ -419,8 +422,9 @@ void build_file(CLI::App &app, ParsedArgs &pa) {
   CLI::App *flags = file->add_subcommand(
       "flags", "inspect or edit one file's stored compile flags");
   flags->prefix_command();
-  flags->add_option("TARGET", pa.target,
-                    "file address, e.g. 'mylib://src/foo.c'")
+  flags
+      ->add_option("TARGET", pa.target,
+                   "file address, e.g. 'mylib://src/foo.c'")
       ->required();
   flags->add_option("--db", pa.index_db, kAltDbHelpText);
   flags->callback([&pa, flags] {
@@ -460,8 +464,8 @@ void build_file(CLI::App &app, ParsedArgs &pa) {
 }
 
 void build_symbol(CLI::App &app, ParsedArgs &pa) {
-  CLI::App *symbol = app.add_subcommand(
-      "symbol", "inspect indexed symbols (list, show, rm)");
+  CLI::App *symbol =
+      app.add_subcommand("symbol", "inspect indexed symbols (list, show, rm)");
   symbol->require_subcommand(1);
 
   CLI::App *list = symbol->add_subcommand(
@@ -567,8 +571,9 @@ void build_include(CLI::App &app, ParsedArgs &pa) {
   add_include_scope(check, pa);
   check->add_flag("--duplicates", pa.inc_duplicates,
                   "report duplicate includes (default: both)");
-  check->add_flag("--unused", pa.inc_unused,
-                  "report includes with zero symbol references (default: both)");
+  check->add_flag(
+      "--unused", pa.inc_unused,
+      "report includes with zero symbol references (default: both)");
   check->add_flag("--json", pa.inc_json, "emit machine-readable JSON");
 
   CLI::App *plan = leaf("plan", "write a reviewable cleanup plan (no edits)");
@@ -579,16 +584,18 @@ void build_include(CLI::App &app, ParsedArgs &pa) {
   plan->add_flag("--duplicates", pa.inc_duplicates, "plan duplicate removals");
   plan->add_flag("--unused", pa.inc_unused, "plan unused removals");
 
-  CLI::App *apply = leaf("apply", "apply an approved cleanup plan (EDITS SOURCE)");
+  CLI::App *apply =
+      leaf("apply", "apply an approved cleanup plan (EDITS SOURCE)");
   apply->add_option("plan", pa.inc_plan, "the cleanup plan to apply")
       ->required()
       ->type_name("PLAN");
   apply->add_option("--db", pa.index_db, "index database (default: the cache)");
   apply->add_flag("--dry-run", pa.dry_run,
                   "validate and report, but write nothing");
-  apply->add_option("--only", pa.inc_only,
-                    "apply only these candidate ids (comma-separated); the "
-                    "final combined validation still covers every applied edit")
+  apply
+      ->add_option("--only", pa.inc_only,
+                   "apply only these candidate ids (comma-separated); the "
+                   "final combined validation still covers every applied edit")
       ->delimiter(',')
       ->type_name("ID");
 }
@@ -631,8 +638,8 @@ void build_graph(CLI::App &app, ParsedArgs &pa) {
   CLI::App *neighbors = leaf("neighbors", "one-hop typed neighbors");
   add_graph_selector(neighbors, pa);
   neighbors->add_option("--edge", pa.edge, "edge kinds (comma-separated)");
-  neighbors->add_option("--direction", pa.direction,
-                        "edge direction (default out)")
+  neighbors
+      ->add_option("--direction", pa.direction, "edge direction (default out)")
       ->check(CLI::IsMember(kDirections));
 
   CLI::App *walk = leaf("walk", "bounded BFS over typed edges");
@@ -642,8 +649,7 @@ void build_graph(CLI::App &app, ParsedArgs &pa) {
       ->check(CLI::IsMember(kDirections));
   walk->add_option("--depth", pa.graph_depth, "walk depth (default 3)");
 
-  CLI::App *path =
-      leaf("path", "shortest path between two symbols, or none");
+  CLI::App *path = leaf("path", "shortest path between two symbols, or none");
   add_graph_selector(path, pa);
   CLI::Option_group *to =
       path->add_option_group("destination", "symbol to reach");
@@ -665,8 +671,8 @@ void build_graph(CLI::App &app, ParsedArgs &pa) {
   add_graph_selector(hierarchy, pa);
   hierarchy->add_flag("--transitive", pa.transitive,
                       "walk the whole hierarchy");
-  hierarchy->add_option("--access", pa.access,
-                        "member access filter (default all)")
+  hierarchy
+      ->add_option("--access", pa.access, "member access filter (default all)")
       ->check(CLI::IsMember(kAccessLevels));
 
   CLI::App *dispatch =
@@ -684,24 +690,28 @@ void build_graph(CLI::App &app, ParsedArgs &pa) {
                         "cap the number of results (default 200)");
   redefined->preparse_callback([&pa](std::size_t) { pa.graph_limit = 200; });
 
-  CLI::App *definitions = leaf(
-      "definitions",
-      "each backend body of a symbol + its possible-call fan-out");
+  CLI::App *definitions =
+      leaf("definitions",
+           "each backend body of a symbol + its possible-call fan-out");
   add_graph_selector(definitions, pa);
   definitions->add_flag("--direct-only", pa.direct_only,
                         "list the backend bodies only (omit the "
                         "possible-call fan-out, which is shown by default)");
 
-  CLI::App *signature = leaf(
-      "signature",
-      "signature/type facts of a symbol (return + parameter types, "
-      "variable/field type, alias target)");
+  CLI::App *signature =
+      leaf("signature",
+           "signature/type facts of a symbol (return + parameter types, "
+           "variable/field type, alias target)");
   add_graph_selector(signature, pa);
 
-  CLI::App *typeusers = leaf(
-      "typeusers",
-      "callables accepting/returning the type + variables/fields/aliases "
-      "of it (through pointer/reference/array/alias layers)");
+  CLI::App *template_graph =
+      leaf("template", "template provenance, relationships, and arguments");
+  add_graph_selector(template_graph, pa);
+
+  CLI::App *typeusers =
+      leaf("typeusers",
+           "callables accepting/returning the type + variables/fields/aliases "
+           "of it (through pointer/reference/array/alias layers)");
   add_graph_selector(typeusers, pa);
 }
 

@@ -38,6 +38,8 @@ struct Sym {
   std::string name; // COALESCE(qual_name, spelling) -- displayed name
   std::string kind;
   std::optional<std::string> type_info;
+  std::optional<std::string> const_value; // v33: evaluated constant initializer
+                                          // (variable) or enumerator value
   bool is_definition = false;
   bool is_pure = false;
   bool is_static = false;
@@ -99,6 +101,11 @@ struct Sym {
       o.emplace_back("type_info", Value::of(*type_info));
     } else {
       o.emplace_back("type_info", Value::null());
+    }
+    if (const_value) {
+      o.emplace_back("const_value", Value::of(*const_value));
+    } else {
+      o.emplace_back("const_value", Value::null());
     }
     if (file) {
       o.emplace_back("file", Value::of(*file));

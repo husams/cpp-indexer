@@ -315,6 +315,7 @@ def test_sym_to_dict_schema(g):
         "qual_name",
         "kind",
         "type_info",
+        "const_value",
         "file",
         "line",
         "col",

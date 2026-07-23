@@ -84,13 +84,15 @@ int run_cidx(const std::vector<std::string> &argv, const std::string &cache,
 struct IndexedTu {
   std::string cache;
   cidx::Logger log;
-  IndexedTu(const std::string &source) : cache(make_temp_dir()) {
+  IndexedTu(const std::string &source, const std::string &flags = "")
+      : cache(make_temp_dir()) {
     const std::string proj = cache + "/proj";
     ::mkdir(proj.c_str(), 0755);
     write_file(proj + "/tu.cpp", source);
     write_file(proj + "/compile_commands.json",
-               "[{\"directory\": \"" + proj +
-                   "\", \"command\": \"cc -c tu.cpp -o tu.o\", "
+               "[{\"directory\": \"" + proj + "\", \"command\": \"cc " +
+                   (flags.empty() ? "" : flags + " ") +
+                   "-c tu.cpp -o tu.o\", "
                    "\"file\": \"tu.cpp\"}]\n");
     log.set_file(cache + "/cidx.log");
     REQUIRE(run_cidx({"import", "--db", proj, "--name", "fixture"}, cache,
@@ -136,8 +138,8 @@ ArgProbe probe_arg0(const std::string &db_path, const std::string &src,
     p.src_kind = st.col_text(0);
     p.has_decl_usr = !std::string(st.col_text(1)).empty();
   }
-  REQUIRE_MESSAGE(rows == 1, "expected exactly one arg row " << src << " -> "
-                                                             << dst);
+  REQUIRE_MESSAGE(rows == 1,
+                  "expected exactly one arg row " << src << " -> " << dst);
   return p;
 }
 
@@ -350,11 +352,10 @@ struct IndexedProject {
 // "<file-basename>:<line>" owning the symbol with this USR.
 std::vector<std::string> owner_probe(const std::string &db_path,
                                      const std::string &usr) {
-  return query_col(db_path,
-                   "SELECT f.name || ':' || s.line FROM symbol s "
-                   "JOIN file f ON f.id = s.file_id "
-                   "WHERE s.usr = '" +
-                       usr + "'");
+  return query_col(db_path, "SELECT f.name || ':' || s.line FROM symbol s "
+                            "JOIN file f ON f.id = s.file_id "
+                            "WHERE s.usr = '" +
+                                usr + "'");
 }
 
 // "<kind-name>/<is_instantiation>" of the unique symbol with this USR.
@@ -373,13 +374,12 @@ std::vector<std::string> sym_probe(const std::string &db_path,
 std::vector<std::string> structural_edges(const std::string &db_path,
                                           const std::string &src_usr,
                                           const std::string &dst_usr) {
-  return query_col(db_path,
-                   "SELECT ek.name || '/' || e.count FROM edge e "
-                   "JOIN symbol ss ON ss.id = e.src_id "
-                   "JOIN symbol ds ON ds.id = e.dst_id "
-                   "JOIN edge_kind ek ON ek.id = e.kind "
-                   "WHERE e.kind IN (4, 5, 9) AND ss.usr = '" +
-                       src_usr + "' AND ds.usr = '" + dst_usr + "'");
+  return query_col(db_path, "SELECT ek.name || '/' || e.count FROM edge e "
+                            "JOIN symbol ss ON ss.id = e.src_id "
+                            "JOIN symbol ds ON ds.id = e.dst_id "
+                            "JOIN edge_kind ek ON ek.id = e.kind "
+                            "WHERE e.kind IN (4, 5, 9) AND ss.usr = '" +
+                                src_usr + "' AND ds.usr = '" + dst_usr + "'");
 }
 
 // "<position>:<arg_kind>:<literal>" rows owned by the symbol with this USR.
@@ -423,14 +423,13 @@ void use_copyable() {
 std::vector<std::string> construct_forms(const std::string &db_path,
                                          const std::string &src,
                                          const std::string &dst) {
-  return query_col(db_path,
-                   "SELECT DISTINCT ek.name FROM edge e "
-                   "JOIN symbol ss ON ss.id = e.src_id "
-                   "JOIN symbol ds ON ds.id = e.dst_id "
-                   "JOIN edge_kind ek ON ek.id = e.kind "
-                   "WHERE ss.spelling = '" +
-                       src + "' AND ds.spelling = '" + dst +
-                       "' AND e.kind IN (10, 11, 13, 14)");
+  return query_col(db_path, "SELECT DISTINCT ek.name FROM edge e "
+                            "JOIN symbol ss ON ss.id = e.src_id "
+                            "JOIN symbol ds ON ds.id = e.dst_id "
+                            "JOIN edge_kind ek ON ek.id = e.kind "
+                            "WHERE ss.spelling = '" +
+                                src + "' AND ds.spelling = '" + dst +
+                                "' AND e.kind IN (10, 11, 13, 14)");
 }
 
 // arg_kinds recorded for every template_arg row owned by a symbol spelled
@@ -438,11 +437,10 @@ std::vector<std::string> construct_forms(const std::string &db_path,
 // selects the specialization's rows).
 std::vector<std::string> arg_kinds_of(const std::string &db_path,
                                       const std::string &owner) {
-  return query_col(db_path,
-                   "SELECT DISTINCT ta.arg_kind FROM template_arg ta "
-                   "JOIN symbol os ON os.id = ta.owner_id "
-                   "WHERE os.spelling = '" +
-                       owner + "'");
+  return query_col(db_path, "SELECT DISTINCT ta.arg_kind FROM template_arg ta "
+                            "JOIN symbol os ON os.id = ta.owner_id "
+                            "WHERE os.spelling = '" +
+                                owner + "'");
 }
 
 } // namespace
@@ -507,8 +505,7 @@ TEST_SUITE("clang") {
                     "JOIN symbol ss ON ss.id = e.src_id "
                     "JOIN symbol ds ON ds.id = e.dst_id "
                     "WHERE ss.spelling = 'call_via' "
-                    "AND ds.spelling = 'go'") ==
-          std::vector<std::string>{"0"});
+                    "AND ds.spelling = 'go'") == std::vector<std::string>{"0"});
   }
 
   TEST_CASE("review fix: named casts preserve the operand's provenance") {
@@ -535,16 +532,15 @@ TEST_SUITE("clang") {
     // Receiver path: static_cast<VBase>(d) slices — dispatch is exactly
     // VBase, so the receiver must not carry d's identity. It is a by-value
     // VBase (recv_type_is_value = 1), which devirtualization narrows on.
-    CHECK(query_col(tu.db_path(),
-                    "SELECT es.recv_src_kind || '/' || "
-                    "COALESCE(es.recv_decl_usr, '') || '/' || "
-                    "es.recv_type_is_value "
-                    "FROM edge_site es "
-                    "JOIN edge e ON e.id = es.edge_id "
-                    "JOIN symbol ss ON ss.id = e.src_id "
-                    "JOIN symbol ds ON ds.id = e.dst_id "
-                    "WHERE ss.spelling = 'recv_value_cast' "
-                    "AND ds.spelling = 'act'") ==
+    CHECK(query_col(tu.db_path(), "SELECT es.recv_src_kind || '/' || "
+                                  "COALESCE(es.recv_decl_usr, '') || '/' || "
+                                  "es.recv_type_is_value "
+                                  "FROM edge_site es "
+                                  "JOIN edge e ON e.id = es.edge_id "
+                                  "JOIN symbol ss ON ss.id = e.src_id "
+                                  "JOIN symbol ds ON ds.id = e.dst_id "
+                                  "WHERE ss.spelling = 'recv_value_cast' "
+                                  "AND ds.spelling = 'act'") ==
           std::vector<std::string>{"call_result//1"});
   }
 
@@ -553,16 +549,15 @@ TEST_SUITE("clang") {
     // reinterpret_cast<VBase *>(raw) fabricates a pointer from an integer
     // (CK_IntegralToPointer) — the int parameter is NOT the receiver's
     // identity, and a pointer receiver is not held by value.
-    CHECK(query_col(tu.db_path(),
-                    "SELECT es.recv_src_kind || '/' || "
-                    "COALESCE(es.recv_decl_usr, '') || '/' || "
-                    "es.recv_type_is_value "
-                    "FROM edge_site es "
-                    "JOIN edge e ON e.id = es.edge_id "
-                    "JOIN symbol ss ON ss.id = e.src_id "
-                    "JOIN symbol ds ON ds.id = e.dst_id "
-                    "WHERE ss.spelling = 'recv_intptr_cast' "
-                    "AND ds.spelling = 'act'") ==
+    CHECK(query_col(tu.db_path(), "SELECT es.recv_src_kind || '/' || "
+                                  "COALESCE(es.recv_decl_usr, '') || '/' || "
+                                  "es.recv_type_is_value "
+                                  "FROM edge_site es "
+                                  "JOIN edge e ON e.id = es.edge_id "
+                                  "JOIN symbol ss ON ss.id = e.src_id "
+                                  "JOIN symbol ds ON ds.id = e.dst_id "
+                                  "WHERE ss.spelling = 'recv_intptr_cast' "
+                                  "AND ds.spelling = 'act'") ==
           std::vector<std::string>{"call_result//0"});
     // IntRef(x) — functional notation through a reference alias — is a
     // glvalue NoOp that still denotes x's storage.
@@ -577,19 +572,17 @@ TEST_SUITE("clang") {
     // storage — the receiver keeps the parameter's identity for
     // devirtualization.
     for (const char *src : {"recv_ref_cast", "recv_ptr_cast"}) {
-      CHECK_MESSAGE(
-          query_col(tu.db_path(),
-                    std::string("SELECT es.recv_src_kind || '/' || "
-                                "es.recv_param_pos "
-                                "FROM edge_site es "
-                                "JOIN edge e ON e.id = es.edge_id "
-                                "JOIN symbol ss ON ss.id = e.src_id "
-                                "JOIN symbol ds ON ds.id = e.dst_id "
-                                "WHERE ss.spelling = '") +
-                        src +
-                        "' AND ds.spelling = 'act'") ==
-              std::vector<std::string>{"local/0"},
-          src);
+      CHECK_MESSAGE(query_col(tu.db_path(),
+                              std::string("SELECT es.recv_src_kind || '/' || "
+                                          "es.recv_param_pos "
+                                          "FROM edge_site es "
+                                          "JOIN edge e ON e.id = es.edge_id "
+                                          "JOIN symbol ss ON ss.id = e.src_id "
+                                          "JOIN symbol ds ON ds.id = e.dst_id "
+                                          "WHERE ss.spelling = '") +
+                                  src + "' AND ds.spelling = 'act'") ==
+                        std::vector<std::string>{"local/0"},
+                    src);
     }
   }
 
@@ -608,20 +601,17 @@ TEST_SUITE("clang") {
   TEST_CASE("arg_kind pin: integral spec arg and callable pack arg") {
     const IndexedTu tu(kTemplateArgsTu);
     // NumS<3>: Integral -> 2 on the class-spec path (already in contract).
-    CHECK(arg_kinds_of(tu.db_path(), "NumS") ==
-          std::vector<std::string>{"2"});
-    // count<int, char>: Pack -> 4 on the callable path (already in contract).
-    CHECK(arg_kinds_of(tu.db_path(), "count") ==
-          std::vector<std::string>{"4"});
+    CHECK(arg_kinds_of(tu.db_path(), "NumS") == std::vector<std::string>{"2"});
+    // count<int, char>: the expanded pack elements are type arguments.
+    CHECK(arg_kinds_of(tu.db_path(), "count") == std::vector<std::string>{"1"});
   }
 
   // ---- template arg_kind: corrections landed in Phase 3 --------------------
 
   TEST_CASE("correction: class-spec pack arg uses contract kind 4") {
     const IndexedTu tu(kTemplateArgsTu);
-    // PackS<int, char> stores raw CX kind 8 today.
-    CHECK(arg_kinds_of(tu.db_path(), "PackS") ==
-          std::vector<std::string>{"4"});
+    // PackS<int, char> stores the expanded type elements.
+    CHECK(arg_kinds_of(tu.db_path(), "PackS") == std::vector<std::string>{"1"});
   }
 
   TEST_CASE("correction: pack arg_kind agrees across extraction paths") {
@@ -649,19 +639,17 @@ TEST_SUITE("clang") {
     const IndexedTu tu(kTemplateArgsTu);
     // Box<Foo *> / Box<Foo &> instances: the type argument's underlying
     // record must resolve to Foo even through pointer/reference wrappers.
-    CHECK(query_col(tu.db_path(),
-                    "SELECT DISTINCT COALESCE(rs.usr, '<null>') "
-                    "FROM template_arg ta "
-                    "JOIN symbol os ON os.id = ta.owner_id "
-                    "LEFT JOIN symbol rs ON rs.id = ta.ref_id "
-                    "WHERE os.spelling = 'Box'") ==
+    CHECK(query_col(tu.db_path(), "SELECT DISTINCT COALESCE(rs.usr, '<null>') "
+                                  "FROM template_arg ta "
+                                  "JOIN symbol os ON os.id = ta.owner_id "
+                                  "LEFT JOIN symbol rs ON rs.id = ta.ref_id "
+                                  "WHERE os.spelling = 'Box'") ==
           std::vector<std::string>{"c:@S@Foo"});
     // The literal stays the written spelling.
-    CHECK(query_col(tu.db_path(),
-                    "SELECT DISTINCT COALESCE(ta.literal, '') "
-                    "FROM template_arg ta "
-                    "JOIN symbol os ON os.id = ta.owner_id "
-                    "WHERE os.spelling = 'Box'") ==
+    CHECK(query_col(tu.db_path(), "SELECT DISTINCT COALESCE(ta.literal, '') "
+                                  "FROM template_arg ta "
+                                  "JOIN symbol os ON os.id = ta.owner_id "
+                                  "WHERE os.spelling = 'Box'") ==
           (std::vector<std::string>{"Foo &", "Foo *"}));
   }
 
@@ -807,7 +795,7 @@ TEST_SUITE("clang") {
     CHECK(args_probe(tu.db_path(), "c:@F@nth<#VI9>#") ==
           std::vector<std::string>{"0:2:9"});
     // Pack -> contract kind 4; template-template -> contract kind 3.
-    CHECK(arg_kinds_of(tu.db_path(), "cnt") == std::vector<std::string>{"4"});
+    CHECK(arg_kinds_of(tu.db_path(), "cnt") == std::vector<std::string>{"1"});
     CHECK(arg_kinds_of(tu.db_path(), "pick") == std::vector<std::string>{"3"});
   }
 
@@ -951,9 +939,9 @@ TEST_SUITE("clang") {
     CHECK(structural_edges(tu.db_path(), "c:@S@Gadget>#C@F@conv<#L>#L#",
                            "c:@S@Gadget>#C") ==
           std::vector<std::string>{"method_of/1"});
-    CHECK(structural_edges(tu.db_path(), "c:@S@Gadget>#C",
-                           "c:@ST>1#T@Gadget") ==
-          std::vector<std::string>{"instantiates/1"});
+    CHECK(
+        structural_edges(tu.db_path(), "c:@S@Gadget>#C", "c:@ST>1#T@Gadget") ==
+        std::vector<std::string>{"instantiates/1"});
     // PR #16 review round 3: a member of a NESTED record inside the
     // specialization (`template void Outer<int>::Inner::run();`) is reached
     // by recursing through instantiated contexts. Its owner Outer<int>::Inner
@@ -1022,17 +1010,18 @@ TEST_SUITE("clang") {
                     "COALESCE(p.name,'') || '/' || tn.spelling "
                     "FROM parameter p JOIN symbol s ON s.id = p.owner_id "
                     "LEFT JOIN type_node tn ON tn.id = p.type_id") ==
-          std::vector<std::string>{
-              "consume/0/items/const Foo *", "consume/1//int",
-              "make_foo/0/seed/int", "make_foo/1/proto/const Foo &"});
+          std::vector<std::string>{"Foo/0//const Foo &",
+                                   "consume/0/items/const Foo *",
+                                   "consume/1//int", "make_foo/0/seed/int",
+                                   "make_foo/1/proto/const Foo &"});
     // symbol_type rows: returns(1) / of_type(2) / underlying_type(3).
     CHECK(query_col(tu.db_path(),
                     "SELECT s.spelling || '/' || st.kind || '/' || tn.spelling "
                     "FROM symbol_type st JOIN symbol s ON s.id = st.symbol_id "
                     "JOIN type_node tn ON tn.id = st.type_id") ==
-          std::vector<std::string>{
-              "FooAlias/3/Foo", "FooPtr/3/Foo *", "consume/1/int",
-              "make_foo/1/Foo", "weights/2/double[4]", "x/2/int"});
+          std::vector<std::string>{"FooAlias/3/Foo", "FooPtr/3/Foo *",
+                                   "consume/1/int", "make_foo/1/Foo",
+                                   "weights/2/double[4]", "x/2/int"});
   }
 
   TEST_CASE("signature tier: type shapes, alias canonical, template args") {
@@ -1044,11 +1033,12 @@ TEST_SUITE("clang") {
       void made() { Box<FooAlias> b; take(b, Foo{}); }
     )cpp");
     // The alias node links to its canonical record node.
-    CHECK(query_col(tu.db_path(),
-                    "SELECT tn.spelling || '->' || c.spelling FROM type_node tn "
-                    "JOIN type_node c ON c.id = tn.canonical_id "
-                    "WHERE tn.type_key = 'a:c:@FooAlias'") ==
-          std::vector<std::string>{"FooAlias->Foo"});
+    CHECK(
+        query_col(tu.db_path(),
+                  "SELECT tn.spelling || '->' || c.spelling FROM type_node tn "
+                  "JOIN type_node c ON c.id = tn.canonical_id "
+                  "WHERE tn.type_key = 'a:c:@FooAlias'") ==
+        std::vector<std::string>{"FooAlias->Foo"});
     // alias_of(3) edge: FooAlias -> Foo; template_argument_type(6) edge: the
     // Box specialization's arg 0 reaches Foo (a spec decl's stored args are
     // CANONICAL, so the arg edge lands on the record, not the alias).
@@ -1058,43 +1048,44 @@ TEST_SUITE("clang") {
                     "FROM type_edge te "
                     "JOIN type_node src ON src.id = te.src_id "
                     "JOIN type_node dst ON dst.id = te.dst_id "
-                    "WHERE te.kind IN (3, 6)") ==
-          std::vector<std::string>{"Box<Foo>/6/0/Foo", "FooAlias/3/0/Foo"});
+                    "WHERE te.kind IN (3, 6) "
+                    "ORDER BY src.spelling, te.position") ==
+          std::vector<std::string>{"Box<Foo>/6/0/Foo", "FooAlias/3/0/Foo",
+                                   "const Box<Foo>/6/0/Foo"});
     // Closure: parameters reaching Foo cover both the direct alias param and
     // the template-argument route (take's b and a).
     Storage store(tu.db_path());
     const auto tids = store.type_ids_reaching("c:@S@Foo");
     CHECK(!tids.empty());
     const auto owners = store.param_owners_of_types(tids);
-    REQUIRE(owners.size() == 2);
-    CHECK(owners[0].second == 0); // Box<FooAlias> b
-    CHECK(owners[1].second == 1); // FooAlias a
+    REQUIRE(owners.size() == 3);
+    CHECK(owners[0].second == 0);              // Box<FooAlias> b
+    CHECK(owners[1].second == 1);              // FooAlias a
     CHECK(owners[0].first == owners[1].first); // both on take()
+    CHECK(owners[2].second == 0); // implicit Box<Foo> copy constructor
   }
 
   TEST_CASE("signature tier: no facts for template patterns") {
-    // Walk policy parity with signature uses: function templates are skipped
-    // (the retired reference's accessors were undefined on templates), and
-    // parameterless use() records nothing -- the table stays empty.
+    // Function-template patterns now expose the same signature tier as
+    // ordinary callables; use() retains its own return fact.
     IndexedTu tu(R"cpp(
       template <class T> T ident(T v) { return v; }
       int use() { return ident(2); }
     )cpp");
-    CHECK(query_col(tu.db_path(),
-                    "SELECT s.spelling FROM parameter p "
-                    "JOIN symbol s ON s.id = p.owner_id")
-              .empty());
-    // use() still records its return type; ident (the template) records none.
-    CHECK(query_col(tu.db_path(),
-                    "SELECT s.spelling FROM symbol_type st "
-                    "JOIN symbol s ON s.id = st.symbol_id WHERE st.kind = 1") ==
-          std::vector<std::string>{"use"});
+    CHECK(query_col(tu.db_path(), "SELECT s.spelling FROM parameter p "
+                                  "JOIN symbol s ON s.id = p.owner_id") ==
+          std::vector<std::string>{"ident", "ident"});
+    // use() and ident both retain their return facts.
+    auto return_symbols = query_col(
+        tu.db_path(), "SELECT s.spelling FROM symbol_type st "
+                      "JOIN symbol s ON s.id = st.symbol_id WHERE st.kind = 1");
+    std::sort(return_symbols.begin(), return_symbols.end());
+    CHECK(return_symbols == std::vector<std::string>{"ident", "ident", "use"});
   }
 
   TEST_CASE("signature tier: reindex refreshes arity wholesale") {
-    IndexedProject prj("#pragma once\n",
-                       "#include \"templates.hpp\"\n"
-                       "void f(int a, int b, int c) {}\n");
+    IndexedProject prj("#pragma once\n", "#include \"templates.hpp\"\n"
+                                         "void f(int a, int b, int c) {}\n");
     CHECK(query_col(prj.db_path(),
                     "SELECT p.position || ':' || COALESCE(p.name,'') "
                     "FROM parameter p JOIN symbol s ON s.id = p.owner_id "
@@ -1144,8 +1135,7 @@ TEST_SUITE("clang") {
     // the record named by `usr`.
     const auto reaching_owners = [&](const char *usr) {
       Storage store(prj.db_path());
-      return store
-          .symbol_type_owners_of_types(store.type_ids_reaching(usr))
+      return store.symbol_type_owners_of_types(store.type_ids_reaching(usr))
           .size();
     };
     CHECK(alias_state() == std::vector<std::string>{"Foo/Foo"});
@@ -1179,7 +1169,8 @@ TEST_SUITE("clang") {
                "[{\"directory\": \"" + proj +
                    "\", \"command\": \"cc -I. -c plain.cpp -o plain.o\", "
                    "\"file\": \"plain.cpp\"},\n"
-                   " {\"directory\": \"" + proj +
+                   " {\"directory\": \"" +
+                   proj +
                    "\", \"command\": \"cc -I. -c aliased.cpp -o aliased.o\", "
                    "\"file\": \"aliased.cpp\"}]\n");
     cidx::Logger log;
@@ -1189,16 +1180,14 @@ TEST_SUITE("clang") {
     REQUIRE(run_cidx({"index"}, cache, log) == 0);
     const std::string db = cache + "/index.db";
     const auto var_types = [&] {
-      return query_col(db,
-                       "SELECT s.spelling || '/' || tn.spelling "
-                       "FROM symbol_type st "
-                       "JOIN symbol s ON s.id = st.symbol_id "
-                       "JOIN type_node tn ON tn.id = st.type_id "
-                       "WHERE st.kind = 2 AND s.spelling IN "
-                       "('plain', 'aliased')");
+      return query_col(db, "SELECT s.spelling || '/' || tn.spelling "
+                           "FROM symbol_type st "
+                           "JOIN symbol s ON s.id = st.symbol_id "
+                           "JOIN type_node tn ON tn.id = st.type_id "
+                           "WHERE st.kind = 2 AND s.spelling IN "
+                           "('plain', 'aliased')");
     };
-    const std::vector<std::string> stable{"aliased/Box<Foo>",
-                                          "plain/Box<Foo>"};
+    const std::vector<std::string> stable{"aliased/Box<Foo>", "plain/Box<Foo>"};
     CHECK(var_types() == stable);
     // Reindex ONLY aliased.cpp: the shared node must keep its spelling.
     write_file(proj + "/aliased.cpp", std::string(kAliased) + "// touch\n");
@@ -1220,14 +1209,13 @@ TEST_SUITE("clang") {
       void (*may_throw)(int);
       void (*no_throw)(int) noexcept;
     )cpp");
-    CHECK(query_col(tu.db_path(),
-                    "SELECT s.spelling || '/' || fn.type_key "
-                    "FROM symbol_type st "
-                    "JOIN symbol s ON s.id = st.symbol_id "
-                    "JOIN type_edge te ON te.src_id = st.type_id "
-                    "  AND te.kind = 1 "
-                    "JOIN type_node fn ON fn.id = te.dst_id "
-                    "WHERE st.kind = 2") ==
+    CHECK(query_col(tu.db_path(), "SELECT s.spelling || '/' || fn.type_key "
+                                  "FROM symbol_type st "
+                                  "JOIN symbol s ON s.id = st.symbol_id "
+                                  "JOIN type_edge te ON te.src_id = st.type_id "
+                                  "  AND te.kind = 1 "
+                                  "JOIN type_node fn ON fn.id = te.dst_id "
+                                  "WHERE st.kind = 2") ==
           std::vector<std::string>{
               "fixed/f(b:void;b:int)", "may_throw/f(b:void;b:int)",
               "no_throw/f(b:void;b:int)#n", "variadic/f(b:void;b:int,...)"});
@@ -1243,8 +1231,8 @@ TEST_SUITE("clang") {
     )cpp");
     CHECK(query_col(tu.db_path(), "SELECT COUNT(*) FROM edge") ==
           std::vector<std::string>{"0"});
-    CHECK(query_col(tu.db_path(),
-                    "SELECT COUNT(*) FROM symbol_type").front() != "0");
+    CHECK(query_col(tu.db_path(), "SELECT COUNT(*) FROM symbol_type").front() !=
+          "0");
     CHECK(run_cidx({"graph", "signature", "--name", "MyInt"}, tu.cache,
                    tu.log) == 0);
     CHECK(run_cidx({"graph", "typeusers", "--name", "MyInt"}, tu.cache,
@@ -1271,6 +1259,34 @@ TEST_SUITE("clang") {
                     "SELECT s.spelling FROM symbol_type st "
                     "JOIN symbol s ON s.id = st.symbol_id WHERE st.kind = 1")
               .empty());
+  }
+
+  // ---- v33: constant values -------------------------------------------------
+  // Clang's constant evaluator produces the value; the indexer only records
+  // its printed result on the symbol row. Runtime initializers record NULL.
+
+  TEST_CASE("const_value: globals, constexpr/consteval and enumerators") {
+    IndexedTu tu(R"cpp(
+      constexpr int kMax = 1'024;
+      const double kPi = 3.14159;
+      int g_init = kMax / 4;
+      consteval int square(int n) { return n * n; }
+      constexpr int kSquare = square(5);
+      enum class Color { red = 1, green = 4 };
+      int runtime_source();
+      int g_dynamic = runtime_source();
+      extern int g_extern;
+    )cpp",
+                 "-std=c++23");
+    CHECK(query_col(tu.db_path(),
+                    "SELECT spelling || '=' || COALESCE(const_value, '<null>') "
+                    "FROM symbol WHERE spelling IN ('kMax', 'kPi', 'g_init', "
+                    "'kSquare', 'red', 'green', 'g_dynamic', 'g_extern', "
+                    "'square')") ==
+          std::vector<std::string>{"g_dynamic=<null>", "g_extern=<null>",
+                                   "g_init=256", "green=4", "kMax=1024",
+                                   "kPi=3.141590e+00", "kSquare=25", "red=1",
+                                   "square=<null>"});
   }
 
 } // TEST_SUITE("clang")

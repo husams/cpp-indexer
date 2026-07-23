@@ -48,7 +48,8 @@ int cmd_delete_symbol(const ParsedArgs &args, Context &ctx);
 int cmd_file(const ParsedArgs &args, Context &ctx);
 int cmd_dump_compile_commands(const ParsedArgs &args, Context &ctx);
 
-// Portable-paths commands (v14): component show/set-version, label add/rm/list/resolve
+// Portable-paths commands (v14): component show/set-version, label
+// add/rm/list/resolve
 int cmd_component_show(const ParsedArgs &args, Context &ctx);
 int cmd_component_set_version(const ParsedArgs &args, Context &ctx);
 int cmd_label_add(const ParsedArgs &args, Context &ctx);
@@ -66,7 +67,8 @@ int cmd_repo_rm(const ParsedArgs &args, Context &ctx);
 // verify: check that component roots (incl. version) and files exist on disk.
 int cmd_verify(const ParsedArgs &args, Context &ctx);
 
-// analyze: Souffle Datalog analyses over the semantic index (src/cli/analyze.cpp).
+// analyze: Souffle Datalog analyses over the semantic index
+// (src/cli/analyze.cpp).
 int cmd_analyze(const ParsedArgs &args, Context &ctx);
 
 // Graph query commands (cidx graph callers|callees|refs|neighbors|walk|path|
@@ -81,6 +83,7 @@ int cmd_graph_hierarchy(const ParsedArgs &args, Context &ctx);
 int cmd_graph_dispatch(const ParsedArgs &args, Context &ctx);
 // v30 signature/type tier
 int cmd_graph_signature(const ParsedArgs &args, Context &ctx);
+int cmd_graph_template(const ParsedArgs &args, Context &ctx);
 int cmd_graph_typeusers(const ParsedArgs &args, Context &ctx);
 
 // v31 include hygiene (cli/include_cmd.cpp). graph/check/plan are read-only;

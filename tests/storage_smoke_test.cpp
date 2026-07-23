@@ -401,25 +401,47 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
       tables.insert(st.col_text(0));
     }
   }
-  // v14 adds label; v15 adds diagnostic; v17 adds entity_edge + entity_edge_kind;
-  // v23 adds repository + clone; v26 adds decl_site; v30 adds the signature/
-  // type tier (type_kind/type_node/type_edge_kind/type_edge/parameter/
+  // v14 adds label; v15 adds diagnostic; v17 adds entity_edge +
+  // entity_edge_kind; v23 adds repository + clone; v26 adds decl_site; v30 adds
+  // the signature/ type tier
+  // (type_kind/type_node/type_edge_kind/type_edge/parameter/
   // symbol_type_kind/symbol_type)
-  CHECK(tables == std::set<std::string>{"meta", "component", "directory",
-                                        "file", "symbol", "symbol_kind",
-                                        "edge_kind", "edge", "edge_site",
-                                        "template_param", "template_arg",
-                                        "call_arg", "label", "diagnostic",
-                                        "entity_edge_kind", "entity_edge",
-                                        "entity_kind", "entity_node",
-                                        "repository", "clone", "decl_site", "definition", "def_edge", "possible_call",
-                                        "type_kind", "type_node",
-                                        "type_edge_kind", "type_edge",
-                                        "parameter", "symbol_type_kind",
+  CHECK(tables == std::set<std::string>{"meta",
+                                        "component",
+                                        "directory",
+                                        "file",
+                                        "symbol",
+                                        "symbol_kind",
+                                        "edge_kind",
+                                        "edge",
+                                        "edge_site",
+                                        "template_param",
+                                        "template_arg",
+                                        "call_arg",
+                                        "label",
+                                        "diagnostic",
+                                        "entity_edge_kind",
+                                        "entity_edge",
+                                        "entity_kind",
+                                        "entity_node",
+                                        "repository",
+                                        "clone",
+                                        "decl_site",
+                                        "definition",
+                                        "def_edge",
+                                        "possible_call",
+                                        "type_kind",
+                                        "type_node",
+                                        "type_edge_kind",
+                                        "type_edge",
+                                        "parameter",
+                                        "symbol_type_kind",
                                         "symbol_type",
-                                        "include_config", "include_edge",
+                                        "include_config",
+                                        "include_edge",
                                         "include_directive_kind",
-                                        "include_site", "include_macro_use"});
+                                        "include_site",
+                                        "include_macro_use"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {
@@ -432,25 +454,42 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
   };
   CHECK(cols("meta") == std::vector<std::string>{"key", "value"});
   // v14 adds the version column to component; v23 adds repository_id
-  CHECK(cols("component") ==
-        std::vector<std::string>{"id", "name", "path", "kind", "version",
-                                 "repository_id"});
+  CHECK(cols("component") == std::vector<std::string>{"id", "name", "path",
+                                                      "kind", "version",
+                                                      "repository_id"});
   CHECK(cols("directory") ==
         std::vector<std::string>{"id", "component_id", "path"});
-  CHECK(cols("file") == std::vector<std::string>{"id", "directory_id", "name",
-                                                 "mtime", "md5",
-                                                 "compile_options", "driver",
-                                                 "indexed", "indexed_at",
-                                                 "args_overridden"});
-  CHECK(cols("symbol") == std::vector<std::string>{
-                              "id", "usr", "spelling", "qual_name",
-                              "display_name", "kind", "type_info", "file_id",
-                              "line", "col", "end_line", "end_col",
-                              "decl_file_id", "decl_line",
-                              "decl_col", "decl_path", "is_definition",
-                              "is_pure", "is_static", "is_instantiation",
-                              "is_named_instance",
-                              "linkage", "access", "parent_usr", "resolved", "multi_def"});
+  CHECK(cols("file") ==
+        std::vector<std::string>{"id", "directory_id", "name", "mtime", "md5",
+                                 "compile_options", "driver", "indexed",
+                                 "indexed_at", "args_overridden"});
+  CHECK(cols("symbol") == std::vector<std::string>{"id",
+                                                   "usr",
+                                                   "spelling",
+                                                   "qual_name",
+                                                   "display_name",
+                                                   "kind",
+                                                   "type_info",
+                                                   "file_id",
+                                                   "line",
+                                                   "col",
+                                                   "end_line",
+                                                   "end_col",
+                                                   "decl_file_id",
+                                                   "decl_line",
+                                                   "decl_col",
+                                                   "decl_path",
+                                                   "is_definition",
+                                                   "is_pure",
+                                                   "is_static",
+                                                   "is_instantiation",
+                                                   "is_named_instance",
+                                                   "linkage",
+                                                   "access",
+                                                   "parent_usr",
+                                                   "resolved",
+                                                   "multi_def",
+                                                   "const_value"});
 
   // the indexes (5 symbol + 2 edge + 1 call_arg + 1 diagnostic)
   std::set<std::string> indexes;
@@ -462,21 +501,31 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
     }
   }
   CHECK(indexes == std::set<std::string>{"idx_symbol_spelling",
-                                         "idx_symbol_qual", "idx_symbol_file",
+                                         "idx_symbol_qual",
+                                         "idx_symbol_file",
                                          "idx_symbol_parent",
                                          "idx_symbol_kind",
                                          "idx_symbol_spelling_nc",
                                          "idx_symbol_qual_nc",
-                                         "idx_edge_src", "idx_edge_dst",
+                                         "idx_edge_src",
+                                         "idx_edge_dst",
                                          "idx_call_arg_edge",
                                          "idx_diagnostic_file",
                                          "idx_entity_edge_identity",
                                          "idx_entity_edge_src",
-                                         "idx_entity_edge_dst", "idx_decl_site_symbol", "idx_definition_symbol", "idx_def_edge_src", "idx_def_edge_dst", "idx_possible_call_src", "idx_possible_call_dst",
+                                         "idx_entity_edge_dst",
+                                         "idx_decl_site_symbol",
+                                         "idx_definition_symbol",
+                                         "idx_def_edge_src",
+                                         "idx_def_edge_dst",
+                                         "idx_possible_call_src",
+                                         "idx_possible_call_dst",
                                          "idx_type_node_decl_usr",
                                          "idx_type_node_canonical",
                                          "idx_type_edge_dst",
                                          "idx_parameter_type",
+                                         "idx_parameter_declared_type",
+                                         "idx_parameter_adjusted_type",
                                          "idx_symbol_type_type",
                                          "idx_include_config_digest",
                                          "idx_include_edge_dst",
@@ -611,9 +660,8 @@ TEST_CASE("diagnostics: replace/get/counts, refresh, locationless, cascade") {
   const int64_t dir = db.add_directory(comp, "");
   const int64_t fid = db.add_file(dir, "a.c");
 
-  auto mk = [](int sev, std::string spelling,
-               std::optional<std::string> path, std::optional<int64_t> line,
-               std::optional<int64_t> col) {
+  auto mk = [](int sev, std::string spelling, std::optional<std::string> path,
+               std::optional<int64_t> line, std::optional<int64_t> col) {
     cidx::Diagnostic d;
     d.severity = sev;
     d.spelling = std::move(spelling);
@@ -624,10 +672,10 @@ TEST_CASE("diagnostics: replace/get/counts, refresh, locationless, cascade") {
   };
 
   // Round-trip in TU (insertion) order; counts grouped by severity.
-  db.replace_diagnostics(
-      fid, {mk(2, "unused 'x'", std::string("/r/a.c"), 3, 5),
-            mk(3, "implicit decl", std::string("/r/a.c"), 7, 1),
-            mk(2, "shadow", std::string("/r/a.c"), 9, 2)});
+  db.replace_diagnostics(fid,
+                         {mk(2, "unused 'x'", std::string("/r/a.c"), 3, 5),
+                          mk(3, "implicit decl", std::string("/r/a.c"), 7, 1),
+                          mk(2, "shadow", std::string("/r/a.c"), 9, 2)});
   auto got = db.get_diagnostics(fid);
   REQUIRE(got.size() == 3);
   CHECK(got[0].severity == 2);
@@ -639,9 +687,8 @@ TEST_CASE("diagnostics: replace/get/counts, refresh, locationless, cascade") {
         std::map<int64_t, std::map<int, int64_t>>{{fid, {{2, 2}, {3, 1}}}});
 
   // Locationless diagnostic stores NULL file_path/line/col.
-  db.replace_diagnostics(
-      fid, {mk(2, "linker input unused", std::nullopt, std::nullopt,
-               std::nullopt)});
+  db.replace_diagnostics(fid, {mk(2, "linker input unused", std::nullopt,
+                                  std::nullopt, std::nullopt)});
   got = db.get_diagnostics(fid);
   REQUIRE(got.size() == 1); // wholesale refresh dropped the old three
   CHECK_FALSE(got[0].file_path.has_value());
@@ -654,8 +701,8 @@ TEST_CASE("diagnostics: replace/get/counts, refresh, locationless, cascade") {
   CHECK(db.diagnostic_counts().empty());
 
   // ON DELETE CASCADE: deleting the file removes its diagnostics.
-  db.replace_diagnostics(fid, {mk(3, "e", std::nullopt, std::nullopt,
-                                  std::nullopt)});
+  db.replace_diagnostics(
+      fid, {mk(3, "e", std::nullopt, std::nullopt, std::nullopt)});
   db.delete_file(fid);
   CHECK(db.diagnostic_counts().empty());
 }

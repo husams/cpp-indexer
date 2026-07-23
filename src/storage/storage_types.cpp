@@ -8,12 +8,9 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
-#include <map>
 #include <optional>
 #include <set>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 
 #include "compiledb/compiledb.hpp"
 #include "storage/storage_detail.hpp"
@@ -107,37 +104,53 @@ void Storage::replace_parameters(int64_t owner_id,
     del.bind(1, owner_id);
     del.step_done();
   }
-  for (const Parameter &p : params) {
+  for (const Parameter &incoming : params) {
+    const Parameter &p = incoming;
     auto ins = db_.prepare(
         "INSERT OR REPLACE INTO parameter "
-        "(owner_id, position, name, type_id, file_id, line, col) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)");
+        "(owner_id, position, pack_index, name, type_id, declared_type_id, "
+        "adjusted_type_id, default_text, default_origin, reference_semantics, "
+        "file_id, line, col) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     ins.bind(1, owner_id);
     ins.bind(2, p.position);
-    bind_opt(ins, 3, p.name);
-    bind_opt(ins, 4, p.type_id);
-    bind_opt(ins, 5, p.file_id);
-    bind_opt(ins, 6, p.line);
-    bind_opt(ins, 7, p.col);
+    ins.bind(3, p.pack_index);
+    bind_opt(ins, 4, p.name);
+    bind_opt(ins, 5, p.type_id);
+    bind_opt(ins, 6, p.declared_type_id);
+    bind_opt(ins, 7, p.adjusted_type_id);
+    bind_opt(ins, 8, p.default_text);
+    bind_opt(ins, 9, p.default_origin);
+    bind_opt(ins, 10, p.reference_semantics);
+    bind_opt(ins, 11, p.file_id);
+    bind_opt(ins, 12, p.line);
+    bind_opt(ins, 13, p.col);
     ins.step_done();
   }
 }
 
 std::vector<Parameter> Storage::parameters_of(int64_t symbol_id) {
   auto st = db_.prepare(
-      "SELECT owner_id, position, name, type_id, file_id, line, col "
-      "FROM parameter WHERE owner_id = ? ORDER BY position");
+      "SELECT owner_id, position, pack_index, name, type_id, declared_type_id, "
+      "adjusted_type_id, default_text, default_origin, reference_semantics, "
+      "file_id, line, col "
+      "FROM parameter WHERE owner_id = ? ORDER BY position, pack_index");
   st.bind(1, symbol_id);
   std::vector<Parameter> out;
   while (st.step()) {
     Parameter p;
     p.owner_id = st.col_int64(0);
     p.position = st.col_int64(1);
-    p.name = opt_text(st, 2);
-    p.type_id = opt_int64(st, 3);
-    p.file_id = opt_int64(st, 4);
-    p.line = opt_int64(st, 5);
-    p.col = opt_int64(st, 6);
+    p.pack_index = st.col_int64(2);
+    p.name = opt_text(st, 3);
+    p.type_id = opt_int64(st, 4);
+    p.declared_type_id = opt_int64(st, 5);
+    p.adjusted_type_id = opt_int64(st, 6);
+    p.default_text = opt_text(st, 7);
+    p.default_origin = opt_text(st, 8);
+    p.reference_semantics = opt_text(st, 9);
+    p.file_id = opt_int64(st, 10);
+    p.line = opt_int64(st, 11);
+    p.col = opt_int64(st, 12);
     out.push_back(std::move(p));
   }
   return out;

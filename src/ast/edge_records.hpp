@@ -42,14 +42,20 @@ struct TemplateParamRecord {
   int64_t position = 0;
   int64_t param_kind = 0; // 1=type 2=non-type 3=template
   std::optional<std::string> name;
+  std::optional<std::string> default_txt;
+  std::optional<int64_t> type_id;
+  std::optional<int64_t> default_type_id;
+  std::optional<int64_t> default_ref_id;
 };
 
 struct TemplateArgRecord {
   int64_t owner_id = 0;
   int64_t position = 0;
+  int64_t pack_index = -1;
   int64_t arg_kind = 0; // 1=type, 2=integral, else raw CXTemplateArgumentKind
   std::optional<int64_t> ref_id;
   std::optional<std::string> literal;
+  std::optional<int64_t> type_id;
 };
 
 // -- v30 signature/type tier records
@@ -72,8 +78,14 @@ struct TypeNodeRecord {
 // One parameter of a callable (replace_parameters payload).
 struct ParameterRecord {
   int64_t position = 0;
+  int64_t pack_index = -1;
   std::optional<std::string> name;
   std::optional<int64_t> type_id;
+  std::optional<int64_t> declared_type_id;
+  std::optional<int64_t> adjusted_type_id;
+  std::optional<std::string> default_text;
+  std::optional<std::string> default_origin;
+  std::optional<std::string> reference_semantics;
   std::optional<int64_t> file_id;
   std::optional<int64_t> line;
   std::optional<int64_t> col;

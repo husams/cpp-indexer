@@ -35,12 +35,12 @@
 
 using cidx::Storage;
 using cidx::Symbol;
-using cidx::graph::GraphQuery;
-using cidx::graph::Sym;
-using cidx::graph::Site;
-using cidx::graph::Traversal;
 using cidx::graph::emit_edges;
 using cidx::graph::emit_syms;
+using cidx::graph::GraphQuery;
+using cidx::graph::Site;
+using cidx::graph::Sym;
+using cidx::graph::Traversal;
 
 namespace {
 
@@ -61,7 +61,8 @@ Symbol make_sym(const std::string &usr, const std::string &spelling,
 }
 
 // Helper: build a storage Edge record for add_edge.
-cidx::Edge make_edge(int64_t src, int64_t dst, int64_t kind, int64_t count = 1) {
+cidx::Edge make_edge(int64_t src, int64_t dst, int64_t kind,
+                     int64_t count = 1) {
   cidx::Edge e;
   e.src_id = src;
   e.dst_id = dst;
@@ -71,8 +72,9 @@ cidx::Edge make_edge(int64_t src, int64_t dst, int64_t kind, int64_t count = 1) 
 }
 
 // Helper: build a storage EdgeSite record for add_edge_site.
-cidx::EdgeSite make_edge_site(int64_t eid, std::optional<int64_t> line = std::nullopt,
-                               std::optional<int64_t> col = std::nullopt) {
+cidx::EdgeSite make_edge_site(int64_t eid,
+                              std::optional<int64_t> line = std::nullopt,
+                              std::optional<int64_t> col = std::nullopt) {
   cidx::EdgeSite s;
   s.edge_id = eid;
   s.line = line;
@@ -234,7 +236,8 @@ TEST_CASE("graph_query: count fallback (R3) from accumulated ecount") {
   auto out_A = g.edges_out(s.id_A, std::vector<std::string>{"calls"}, 50);
   REQUIRE(!out_A.empty());
   // ecount accumulates
-  CHECK(out_A[0].count >= 1); // at least 1 (may be 3 depending on count_resolved)
+  CHECK(out_A[0].count >=
+        1); // at least 1 (may be 3 depending on count_resolved)
 
   // A --uses--> C was added 2 times
   auto out_AC = g.edges_out(s.id_A, std::vector<std::string>{"uses"}, 50);
@@ -255,14 +258,17 @@ TEST_CASE("graph_query: references() = calls + uses inbound") {
   // Verify both peers exist
   bool found_B = false, found_A = false;
   for (const auto &e : refs_C) {
-    if (e.peer.id == s.id_B) found_B = true;
-    if (e.peer.id == s.id_A) found_A = true;
+    if (e.peer.id == s.id_B)
+      found_B = true;
+    if (e.peer.id == s.id_A)
+      found_A = true;
   }
   CHECK(found_B);
   CHECK(found_A);
 }
 
-TEST_CASE("graph_query: aliased_by() returns typedef and type-alias users only") {
+TEST_CASE(
+    "graph_query: aliased_by() returns typedef and type-alias users only") {
   Storage db(":memory:");
 
   const int64_t target_id =
@@ -318,18 +324,21 @@ TEST_CASE("graph_query: reaches() shortest path") {
   GraphQuery g(s.db, ":memory:");
 
   // A -> B -> C via calls
-  auto path = g.reaches(s.id_A, s.id_C, std::vector<std::string>{"calls"}, "out", 5);
+  auto path =
+      g.reaches(s.id_A, s.id_C, std::vector<std::string>{"calls"}, "out", 5);
   REQUIRE(path);
   CHECK(path->size() == 3); // A, B, C
   CHECK((*path)[0].id == s.id_A);
   CHECK((*path)[2].id == s.id_C);
 
   // C -> A: unreachable via calls out
-  auto no_path = g.reaches(s.id_C, s.id_A, std::vector<std::string>{"calls"}, "out", 5);
+  auto no_path =
+      g.reaches(s.id_C, s.id_A, std::vector<std::string>{"calls"}, "out", 5);
   CHECK(!no_path);
 
   // A -> A: same node
-  auto self_path = g.reaches(s.id_A, s.id_A, std::vector<std::string>{"calls"}, "out", 5);
+  auto self_path =
+      g.reaches(s.id_A, s.id_A, std::vector<std::string>{"calls"}, "out", 5);
   REQUIRE(self_path);
   CHECK(self_path->size() == 1);
 }
@@ -360,7 +369,8 @@ TEST_CASE("graph_query: hierarchy — bases, subclasses, members") {
   CHECK(!mems.empty());
   bool has_E = false;
   for (const auto &m : mems) {
-    if (m.id == s.id_E) has_E = true;
+    if (m.id == s.id_E)
+      has_E = true;
   }
   CHECK(has_E);
 }
@@ -379,8 +389,10 @@ TEST_CASE("graph_query: dispatch_targets() BFS from virtual root") {
   // A is not pure -> in targets; B is pure -> NOT in targets
   bool has_A = false, has_B = false;
   for (const auto &t : targets) {
-    if (t.id == s.id_A) has_A = true;
-    if (t.id == s.id_B) has_B = true;
+    if (t.id == s.id_A)
+      has_A = true;
+    if (t.id == s.id_B)
+      has_B = true;
   }
   CHECK(has_A);
   CHECK(!has_B);
@@ -437,26 +449,28 @@ TEST_CASE("graph_query: Sym value type — is_stub, loc, to_dict key order") {
   CHECK(real.loc() == "foo.cpp:42");
 
   // to_dict key order (R7): id,usr,spelling,qual_name,kind,type_info,
-  //                         file,line,col,end_line,end_col,is_definition,
-  //                         is_pure,is_static,is_instantiation,is_stub
+  //                         const_value,file,line,col,end_line,end_col,
+  //                         is_definition,is_pure,is_static,is_instantiation,
+  //                         is_stub
   auto dict = real.to_dict();
-  REQUIRE(dict.o.size() == 16);
+  REQUIRE(dict.o.size() == 17);
   CHECK(dict.o[0].first == "id");
   CHECK(dict.o[1].first == "usr");
   CHECK(dict.o[2].first == "spelling");
   CHECK(dict.o[3].first == "qual_name");
   CHECK(dict.o[4].first == "kind");
   CHECK(dict.o[5].first == "type_info");
-  CHECK(dict.o[6].first == "file");
-  CHECK(dict.o[7].first == "line");
-  CHECK(dict.o[8].first == "col");
-  CHECK(dict.o[9].first == "end_line");
-  CHECK(dict.o[10].first == "end_col");
-  CHECK(dict.o[11].first == "is_definition");
-  CHECK(dict.o[12].first == "is_pure");
-  CHECK(dict.o[13].first == "is_static");
-  CHECK(dict.o[14].first == "is_instantiation");
-  CHECK(dict.o[15].first == "is_stub");
+  CHECK(dict.o[6].first == "const_value");
+  CHECK(dict.o[7].first == "file");
+  CHECK(dict.o[8].first == "line");
+  CHECK(dict.o[9].first == "col");
+  CHECK(dict.o[10].first == "end_line");
+  CHECK(dict.o[11].first == "end_col");
+  CHECK(dict.o[12].first == "is_definition");
+  CHECK(dict.o[13].first == "is_pure");
+  CHECK(dict.o[14].first == "is_static");
+  CHECK(dict.o[15].first == "is_instantiation");
+  CHECK(dict.o[16].first == "is_stub");
 }
 
 // ---------------------------------------------------------------------------
@@ -491,7 +505,11 @@ TEST_CASE("graph_query: emit_edges text — header, count suffix, trailer") {
 TEST_CASE("graph_query: emit_syms text — depth suffix, trailer") {
   std::vector<Sym> syms;
   Sym a;
-  a.id = 1; a.usr = "u1"; a.spelling = "fnA"; a.name = "fnA"; a.kind = "function";
+  a.id = 1;
+  a.usr = "u1";
+  a.spelling = "fnA";
+  a.name = "fnA";
+  a.kind = "function";
   a.resolved = true;
   syms.push_back(a);
 

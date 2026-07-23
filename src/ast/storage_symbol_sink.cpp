@@ -46,6 +46,7 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
   sym.linkage = s.linkage;
   sym.access = s.access;
   sym.parent_usr = s.parent_usr;
+  sym.const_value = s.const_value;
   sym.resolved = s.resolved;
   const std::optional<cidx::Symbol> existing = db_.lookup_symbol(sym.usr);
   db_.add_symbol(sym);

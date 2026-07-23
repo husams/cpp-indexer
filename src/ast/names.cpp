@@ -47,10 +47,34 @@ void print_written_args(llvm::raw_string_ostream &os,
 void print_function_display(llvm::raw_string_ostream &os,
                             const clang::PrintingPolicy &policy,
                             const clang::FunctionDecl *fd) {
-  fd->getDeclName().print(os, policy);
+  if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(fd);
+      method != nullptr && llvm::isa<clang::CXXConstructorDecl>(method)) {
+    os << method->getParent()->getName();
+  } else {
+    fd->getDeclName().print(os, policy);
+  }
   if (fd->getTemplateSpecializationArgs() != nullptr) {
-    print_written_args(os, policy,
-                       fd->getTemplateSpecializationArgsAsWritten());
+    if (const auto *written = fd->getTemplateSpecializationArgsAsWritten()) {
+      print_written_args(os, policy, written);
+    } else {
+      clang::printTemplateArgumentList(
+          os, fd->getTemplateSpecializationArgs()->asArray(), policy);
+    }
+  } else if (const auto *ft = fd->getDescribedFunctionTemplate()) {
+    os << '<';
+    bool first = true;
+    for (const clang::NamedDecl *param : *ft->getTemplateParameters()) {
+      if (!first) {
+        os << ", ";
+      }
+      first = false;
+      os << param->getNameAsString();
+      if (const auto *type = llvm::dyn_cast<clang::TemplateTypeParmDecl>(param);
+          type != nullptr && type->isParameterPack()) {
+        os << "...";
+      }
+    }
+    os << '>';
   }
   os << '(';
   bool first = true;
@@ -166,6 +190,40 @@ std::string join_qualified(const clang::ASTContext &context,
         // qualified name. Enclosing function scopes stay bare names.
         llvm::raw_string_ostream os(s);
         print_function_signature(os, printing_policy(context), fd);
+      } else if (rec != nullptr &&
+                 rec->getDescribedClassTemplate() != nullptr) {
+        s = rec->getNameAsString();
+        s += '<';
+        bool first = true;
+        for (const clang::NamedDecl *param :
+             *rec->getDescribedClassTemplate()->getTemplateParameters()) {
+          if (!first) {
+            s += ", ";
+          }
+          first = false;
+          s += param->getNameAsString();
+          if (const auto *type =
+                  llvm::dyn_cast<clang::TemplateTypeParmDecl>(param);
+              type != nullptr && type->isParameterPack()) {
+            s += "...";
+          }
+        }
+        s += '>';
+      } else if (const auto *ct =
+                     llvm::dyn_cast<clang::ClassTemplateDecl>(nd)) {
+        s = ct->getNameAsString() + "<";
+        bool first = true;
+        for (const clang::NamedDecl *param : *ct->getTemplateParameters()) {
+          if (!first)
+            s += ", ";
+          first = false;
+          s += param->getNameAsString();
+          if (const auto *type =
+                  llvm::dyn_cast<clang::TemplateTypeParmDecl>(param);
+              type != nullptr && type->isParameterPack())
+            s += "...";
+        }
+        s += '>';
       } else {
         s = nd->getDeclName().getAsString();
       }

@@ -8,8 +8,8 @@ c:@F@square	square	square(int)	square(int)	function	int (int)	math.c	3	1	math.h	
 c:@F@unbox#$@S@Box>#I#	unbox	unbox(IntBox)	unbox(IntBox)	function	int (IntBox)	box.cpp	3	1				1	0	0	0	external			1
 c:@S@Box>#I	Box	Box<int>	Box<int>	struct	Box<int>				box.cpp	1	30	0	0	0	1				0
 c:@S@Box>#I@FI@item	item	Box<int>::item	item	member	int				box.cpp	1	38	0	0	0	0				0
-c:@ST>1#T@Box	Box	Box	Box<T>	class-template		box.cpp	1	1	box.cpp	1	30	1	0	0	0	external			1
-c:@ST>1#T@Box@FI@item	item	Box::item	item	member	T	box.cpp	1	36				1	0	0	0	external	public	c:@ST>1#T@Box	1
+c:@ST>1#T@Box	Box	Box<T>	Box<T>	class-template		box.cpp	1	1	box.cpp	1	30	1	0	0	0	external			1
+c:@ST>1#T@Box@FI@item	item	Box<T>::item	item	member	T	box.cpp	1	36				1	0	0	0	external	public	c:@ST>1#T@Box	1
 c:box.cpp@T@IntBox	IntBox	IntBox	IntBox	typedef	Box<int>	box.cpp	2	1				1	0	0	0	no-linkage			1
 == decl_site ==
 c:@F@add	math.c	2	1	1

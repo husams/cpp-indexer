@@ -87,8 +87,8 @@ void Storage::migrate() {
   if (!has_col(cols, "is_instantiation")) {
     // v12 -> v13: implicit template-instantiation node marker. No backfill
     // possible from stored data -- reindex to populate; old rows read as 0.
-    db_.exec(
-        "ALTER TABLE symbol ADD COLUMN is_instantiation INTEGER NOT NULL DEFAULT 0");
+    db_.exec("ALTER TABLE symbol ADD COLUMN is_instantiation INTEGER NOT NULL "
+             "DEFAULT 0");
     changed = true;
   }
   if (!has_col(cols, "decl_path")) {
@@ -132,13 +132,15 @@ void Storage::migrate() {
   {
     const auto cols2 = table_columns("symbol");
     if (!has_col(cols2, "is_named_instance")) {
-      db_.exec("ALTER TABLE symbol ADD COLUMN is_named_instance INTEGER NOT NULL "
-               "DEFAULT 0");
+      db_.exec(
+          "ALTER TABLE symbol ADD COLUMN is_named_instance INTEGER NOT NULL "
+          "DEFAULT 0");
       changed = true;
     }
-    // v24 -> v25: end of the symbol's own extent (end_line/end_col), paired with
-    // (line, col). Only the START was stored before, so nothing to backfill --
-    // old rows read NULL until a reindex populates them from cursor.extent.end.
+    // v24 -> v25: end of the symbol's own extent (end_line/end_col), paired
+    // with (line, col). Only the START was stored before, so nothing to
+    // backfill -- old rows read NULL until a reindex populates them from
+    // cursor.extent.end.
     if (!has_col(cols2, "end_line")) {
       db_.exec("ALTER TABLE symbol ADD COLUMN end_line INTEGER");
       db_.exec("ALTER TABLE symbol ADD COLUMN end_col INTEGER");
@@ -198,7 +200,8 @@ void Storage::migrate() {
       changed = true;
     }
     // v10 -> v11: value-ness booleans for exact-singleton Gamma narrowing.
-    // No backfill -- reindex repopulates; old rows read as NULL == not-value == TOP.
+    // No backfill -- reindex repopulates; old rows read as NULL == not-value ==
+    // TOP.
     if (!has_col(escols, "recv_type_is_value")) {
       db_.exec("ALTER TABLE edge_site ADD COLUMN recv_type_is_value INTEGER");
       changed = true;
@@ -247,7 +250,8 @@ void Storage::migrate() {
   // v22 -> v23: repository + clone tables and component.repository_id. The two
   // tables are created by the schema script (CREATE TABLE IF NOT EXISTS); only
   // the new component column needs an ALTER. No backfill -- existing components
-  // stay ungrouped (repository_id NULL) until a re-import / `cidx repo` command.
+  // stay ungrouped (repository_id NULL) until a re-import / `cidx repo`
+  // command.
   if (has_table("component")) {
     const auto ccols2 = table_columns("component");
     if (!has_col(ccols2, "repository_id")) {
@@ -291,60 +295,60 @@ void Storage::migrate() {
     };
     std::vector<Pending> pend;
     { // scope the read statement so it is finalized before the UPDATEs below
-    auto scan = db_.prepare("SELECT id, path, repository_id FROM component "
-                            "WHERE repository_id IS NOT NULL");
-    while (scan.step()) {
-      const int64_t cid = scan.col_int64(0);
-      const std::string cpath = scan.col_text(1);
-      const int64_t rid = scan.col_int64(2);
-      if (cpath.contains('<') || cpath.contains('$') ||
-          !pathutil::isabs(cpath)) {
-        continue; // portable or already relative
-      }
-      if (!CompileDb::split_base_version(cpath).second.empty()) {
-        continue; // version-in-path: keep absolute (see relativize_component)
-      }
-      std::optional<int64_t> active;
-      {
-        auto rst =
-            db_.prepare("SELECT active_clone_id FROM repository WHERE id = ?");
-        rst.bind(1, rid);
-        if (!rst.step()) {
+      auto scan = db_.prepare("SELECT id, path, repository_id FROM component "
+                              "WHERE repository_id IS NOT NULL");
+      while (scan.step()) {
+        const int64_t cid = scan.col_int64(0);
+        const std::string cpath = scan.col_text(1);
+        const int64_t rid = scan.col_int64(2);
+        if (cpath.contains('<') || cpath.contains('$') ||
+            !pathutil::isabs(cpath)) {
+          continue; // portable or already relative
+        }
+        if (!CompileDb::split_base_version(cpath).second.empty()) {
+          continue; // version-in-path: keep absolute (see relativize_component)
+        }
+        std::optional<int64_t> active;
+        {
+          auto rst = db_.prepare(
+              "SELECT active_clone_id FROM repository WHERE id = ?");
+          rst.bind(1, rid);
+          if (!rst.step()) {
+            continue;
+          }
+          active = opt_int64(rst, 0);
+        }
+        if (!active) {
           continue;
         }
-        active = opt_int64(rst, 0);
-      }
-      if (!active) {
-        continue;
-      }
-      std::string clone_path;
-      {
-        auto cst = db_.prepare("SELECT path FROM clone WHERE id = ?");
-        cst.bind(1, *active);
-        if (!cst.step()) {
-          continue;
+        std::string clone_path;
+        {
+          auto cst = db_.prepare("SELECT path FROM clone WHERE id = ?");
+          cst.bind(1, *active);
+          if (!cst.step()) {
+            continue;
+          }
+          clone_path = cst.col_text(0);
         }
-        clone_path = cst.col_text(0);
+        std::string root =
+            pathutil::abspath(pathutil::resolve_fs_path(clone_path));
+        while (!root.empty() && root.back() == '/') {
+          root.pop_back();
+        }
+        std::string base = pathutil::abspath(cpath);
+        while (!base.empty() && base.back() == '/') {
+          base.pop_back();
+        }
+        std::string rel;
+        if (base == root) {
+          rel = ".";
+        } else if (base.starts_with(root + "/")) {
+          rel = pathutil::relpath(base, root);
+        } else {
+          continue; // component outside the active clone -> keep absolute
+        }
+        pend.push_back({.id = cid, .rel = rel});
       }
-      std::string root =
-          pathutil::abspath(pathutil::resolve_fs_path(clone_path));
-      while (!root.empty() && root.back() == '/') {
-        root.pop_back();
-      }
-      std::string base = pathutil::abspath(cpath);
-      while (!base.empty() && base.back() == '/') {
-        base.pop_back();
-      }
-      std::string rel;
-      if (base == root) {
-        rel = ".";
-      } else if (base.starts_with(root + "/")) {
-        rel = pathutil::relpath(base, root);
-      } else {
-        continue; // component outside the active clone -> keep absolute
-      }
-      pend.push_back({.id = cid, .rel = rel});
-    }
     } // scan finalized
     for (const Pending &p : pend) {
       auto upd = db_.prepare("UPDATE component SET path = ? WHERE id = ?");
@@ -361,7 +365,8 @@ void Storage::migrate() {
   }
   // v16 -> v17: Layer-1 entity_edge + entity_edge_kind tables. Created by the
   // schema script (CREATE TABLE IF NOT EXISTS). entity_edge is a derived,
-  // materialised table -- populate via `cidx resolve`. No backfill on migration.
+  // materialised table -- populate via `cidx resolve`. No backfill on
+  // migration.
   if (!has_table("entity_edge")) {
     changed = true; // tables will be created by the schema script
   } else {
@@ -370,14 +375,14 @@ void Storage::migrate() {
     // the defunct nests rows (kind 10) and renumber befriends 11 -> 10 to match
     // the new contiguous seed. Order matters -- delete the old kind-10 rows
     // BEFORE renumbering 11 -> 10 so the two never collide on
-    // UNIQUE(src,dst,kind,via). Also drop the stale entity_edge_kind rows so the
-    // schema script's INSERT OR IGNORE reseeds (10,'befriends'). Mirrors
+    // UNIQUE(src,dst,kind,via). Also drop the stale entity_edge_kind rows so
+    // the schema script's INSERT OR IGNORE reseeds (10,'befriends'). Mirrors
     // storage.py.
     //
     // Gate on the STALE DATA (a leftover 'nests' seed row), NOT the schema
-    // version: an earlier build bumped schema_version to 18 WITHOUT cleaning, so
-    // a version gate would skip those already-stamped DBs. Idempotent -- after
-    // cleanup there is no 'nests' row, so it never runs again.
+    // version: an earlier build bumped schema_version to 18 WITHOUT cleaning,
+    // so a version gate would skip those already-stamped DBs. Idempotent --
+    // after cleanup there is no 'nests' row, so it never runs again.
     bool stale = false;
     {
       auto st = db_.prepare(
@@ -391,9 +396,10 @@ void Storage::migrate() {
       changed = true;
     }
     // Rename kind 2 'realizes' -> 'implements' (display name only; the stored
-    // entity_edge.kind int is unchanged). Data-gated on the old name so it fires
-    // regardless of schema_version; the schema script's INSERT OR IGNORE would
-    // otherwise leave the stale (2,'realizes') row in place. Mirrors storage.py.
+    // entity_edge.kind int is unchanged). Data-gated on the old name so it
+    // fires regardless of schema_version; the schema script's INSERT OR IGNORE
+    // would otherwise leave the stale (2,'realizes') row in place. Mirrors
+    // storage.py.
     bool renamed = false;
     {
       auto st = db_.prepare(
@@ -406,26 +412,24 @@ void Storage::migrate() {
     }
     // v20 -> v21: NULL-safe entity_edge identity. The old table-level
     // UNIQUE(src,dst,kind,via_member_id) never collided on NULL-via rows
-    // (SQLite NULL != NULL), so every materialise fanned NULL-via edges out into
-    // duplicate copies. The schema script now builds a COALESCE unique index
-    // idx_entity_edge_identity; it would fail to create over a DB that already
-    // carries those duplicates, so dedup in place first (keep the lowest rowid
-    // per logical key). Gate on the index's absence so it runs exactly once;
-    // entity_edge is derived, so `cidx resolve` repopulates cleanly. Mirrors
-    // storage.py.
+    // (SQLite NULL != NULL), so every materialise fanned NULL-via edges out
+    // into duplicate copies. The schema script now builds a COALESCE unique
+    // index idx_entity_edge_identity; it would fail to create over a DB that
+    // already carries those duplicates, so dedup in place first (keep the
+    // lowest rowid per logical key). Gate on the index's absence so it runs
+    // exactly once; entity_edge is derived, so `cidx resolve` repopulates
+    // cleanly. Mirrors storage.py.
     bool has_identity_idx = false;
     {
-      auto st = db_.prepare(
-          "SELECT 1 FROM sqlite_master WHERE type = 'index' "
-          "AND name = 'idx_entity_edge_identity'");
+      auto st = db_.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' "
+                            "AND name = 'idx_entity_edge_identity'");
       has_identity_idx = st.step();
     }
     if (!has_identity_idx) {
-      db_.exec(
-          "DELETE FROM entity_edge WHERE rowid NOT IN ("
-          "  SELECT MIN(rowid) FROM entity_edge GROUP BY "
-          "    src_id, dst_id, kind, "
-          "    COALESCE(via_member_id, -1), COALESCE(create_form, -1))");
+      db_.exec("DELETE FROM entity_edge WHERE rowid NOT IN ("
+               "  SELECT MIN(rowid) FROM entity_edge GROUP BY "
+               "    src_id, dst_id, kind, "
+               "    COALESCE(via_member_id, -1), COALESCE(create_form, -1))");
       changed = true;
     }
   }
@@ -439,9 +443,9 @@ void Storage::migrate() {
   }
   // v25 -> v26: per-symbol declaration/reopen sites (decl_site). Created by the
   // schema script (CREATE TABLE IF NOT EXISTS). No backfill from stored rows is
-  // possible -- only the winning site survives on the symbol row -- so a reindex
-  // repopulates every site; bump the version so the DB is stamped v26. Mirrors
-  // storage.py.
+  // possible -- only the winning site survives on the symbol row -- so a
+  // reindex repopulates every site; bump the version so the DB is stamped v26.
+  // Mirrors storage.py.
   if (!has_table("decl_site")) {
     changed = true;
   }
@@ -496,6 +500,112 @@ void Storage::migrate() {
   if (!has_table("include_edge")) {
     changed = true; // tables will be created by the schema script
   }
+  // v31 -> v32: complete callable signature metadata. Existing rows retain
+  // their adjusted type in type_id; the declaration pass repopulates the
+  // source-level and default fields on the next index.
+  if (has_table("parameter")) {
+    const auto pcols = table_columns("parameter");
+    const std::array<std::string_view, 6> added = {
+        "pack_index",   "declared_type_id", "adjusted_type_id",
+        "default_text", "default_origin",   "reference_semantics"};
+    for (const auto col : added) {
+      if (!has_col(pcols, std::string(col).c_str())) {
+        db_.exec("ALTER TABLE parameter ADD COLUMN " + std::string(col) +
+                 (col == "pack_index"    ? " INTEGER NOT NULL DEFAULT -1"
+                  : col.ends_with("_id") ? " INTEGER"
+                                         : " TEXT"));
+        changed = true;
+      }
+    }
+  }
+  if (has_table("parameter")) {
+    std::string param_sql;
+    {
+      auto st = db_.prepare("SELECT sql FROM sqlite_master WHERE type='table' "
+                            "AND name='parameter'");
+      if (st.step())
+        param_sql = st.col_text(0);
+    }
+    if (!param_sql.contains("PRIMARY KEY (owner_id, position, pack_index)")) {
+      db_.exec("PRAGMA foreign_keys = OFF");
+      db_.exec(
+          "CREATE TABLE parameter_v32 (owner_id INTEGER NOT NULL REFERENCES "
+          "symbol(id) ON DELETE CASCADE, position INTEGER NOT NULL, pack_index "
+          "INTEGER NOT NULL DEFAULT -1, name TEXT, type_id INTEGER REFERENCES "
+          "type_node(id) ON DELETE SET NULL, declared_type_id INTEGER REFERENCES "
+          "type_node(id) ON DELETE SET NULL, adjusted_type_id INTEGER REFERENCES "
+          "type_node(id) ON DELETE SET NULL, default_text TEXT, default_origin "
+          "TEXT, reference_semantics TEXT, file_id INTEGER REFERENCES file(id) "
+          "ON DELETE SET NULL, line INTEGER, col INTEGER, PRIMARY KEY (owner_id, "
+          "position, pack_index)) WITHOUT ROWID");
+      db_.exec("INSERT INTO parameter_v32 SELECT owner_id, position, "
+               "pack_index, name, type_id, declared_type_id, adjusted_type_id, "
+               "default_text, default_origin, reference_semantics, file_id, "
+               "line, col FROM parameter");
+      db_.exec("DROP TABLE parameter");
+      db_.exec("ALTER TABLE parameter_v32 RENAME TO parameter");
+      db_.exec("PRAGMA foreign_keys = ON");
+      changed = true;
+    }
+  }
+  if (has_table("template_param")) {
+    const auto tcols = table_columns("template_param");
+    const std::array<std::string_view, 3> added = {"type_id", "default_type_id",
+                                                   "default_ref_id"};
+    for (const auto col : added) {
+      if (!has_col(tcols, std::string(col).c_str())) {
+        db_.exec("ALTER TABLE template_param ADD COLUMN " + std::string(col) +
+                 " INTEGER");
+        changed = true;
+      }
+    }
+  }
+  if (has_table("template_arg")) {
+    const auto acols = table_columns("template_arg");
+    if (!has_col(acols, "pack_index")) {
+      db_.exec("ALTER TABLE template_arg ADD COLUMN pack_index INTEGER "
+               "NOT NULL DEFAULT -1");
+      changed = true;
+    }
+    if (!has_col(acols, "type_id")) {
+      db_.exec("ALTER TABLE template_arg ADD COLUMN type_id INTEGER");
+      changed = true;
+    }
+    std::string arg_sql;
+    {
+      auto st = db_.prepare("SELECT sql FROM sqlite_master WHERE type='table' "
+                            "AND name='template_arg'");
+      if (st.step())
+        arg_sql = st.col_text(0);
+    }
+    if (!arg_sql.contains("PRIMARY KEY (owner_id, position, pack_index)")) {
+      db_.exec("PRAGMA foreign_keys = OFF");
+      db_.exec(
+          "CREATE TABLE template_arg_v32 (owner_id INTEGER NOT NULL REFERENCES "
+          "symbol(id) ON DELETE CASCADE, position INTEGER NOT NULL, pack_index "
+          "INTEGER NOT NULL DEFAULT -1, arg_kind INTEGER NOT NULL, ref_id "
+          "INTEGER REFERENCES symbol(id) ON DELETE SET NULL, literal TEXT, "
+          "type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL, "
+          "PRIMARY KEY (owner_id, position, pack_index)) WITHOUT ROWID");
+      db_.exec(
+          "INSERT INTO template_arg_v32 SELECT owner_id, position, pack_index, "
+          "arg_kind, ref_id, literal, type_id FROM template_arg");
+      db_.exec("DROP TABLE template_arg");
+      db_.exec("ALTER TABLE template_arg_v32 RENAME TO template_arg");
+      db_.exec("PRAGMA foreign_keys = ON");
+      changed = true;
+    }
+  }
+  // v32 -> v33: the evaluated constant value of a variable initializer /
+  // enumerator on symbol. No backfill is possible from stored rows -- a
+  // reindex populates it; old rows read NULL until then. Mirrors storage.py.
+  {
+    const auto scols = table_columns("symbol");
+    if (!has_col(scols, "const_value")) {
+      db_.exec("ALTER TABLE symbol ADD COLUMN const_value TEXT");
+      changed = true;
+    }
+  }
   if (changed) {
     auto st =
         db_.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'");
@@ -514,54 +624,55 @@ void Storage::migrate() {
 void Storage::migrate_symbol_kind_to_int() {
   std::string cases;
   for (const auto &kv : symbol_kind_ids_map()) {
-    cases += " WHEN '" + std::string(kv.first) +
-             "' THEN " + std::to_string(kv.second);
+    cases += " WHEN '" + std::string(kv.first) + "' THEN " +
+             std::to_string(kv.second);
   }
   db_.exec("PRAGMA foreign_keys = OFF");
-  db_.exec(
-      "CREATE TABLE symbol_new ("
-      " id INTEGER PRIMARY KEY,"
-      " usr TEXT NOT NULL UNIQUE,"
-      " spelling TEXT NOT NULL,"
-      " qual_name TEXT,"
-      " display_name TEXT,"
-      " kind INTEGER NOT NULL,"
-      " type_info TEXT,"
-      " file_id INTEGER REFERENCES file(id) ON DELETE SET NULL,"
-      " line INTEGER,"
-      " col INTEGER,"
-      " decl_file_id INTEGER REFERENCES file(id) ON DELETE SET NULL,"
-      " decl_line INTEGER,"
-      " decl_col INTEGER,"
-      " decl_path TEXT,"
-      " is_definition INTEGER NOT NULL DEFAULT 0,"
-      " is_pure INTEGER NOT NULL DEFAULT 0,"
-      " is_static INTEGER NOT NULL DEFAULT 0,"
-      " is_instantiation INTEGER NOT NULL DEFAULT 0,"
-      " linkage TEXT,"
-      " access TEXT,"
-      " parent_usr TEXT,"
-      " resolved INTEGER NOT NULL DEFAULT 0"
-      ");"
-      "INSERT INTO symbol_new"
-      " SELECT id, usr, spelling, qual_name, display_name,"
-      "        CASE kind" + cases + " ELSE kind END,"
-      "        type_info, file_id, line, col, decl_file_id, decl_line,"
-      "        decl_col, decl_path, is_definition, is_pure, is_static,"
-      "        is_instantiation, linkage, access, parent_usr, resolved"
-      " FROM symbol;"
-      "DROP TABLE symbol;"
-      "ALTER TABLE symbol_new RENAME TO symbol;");
+  db_.exec("CREATE TABLE symbol_new ("
+           " id INTEGER PRIMARY KEY,"
+           " usr TEXT NOT NULL UNIQUE,"
+           " spelling TEXT NOT NULL,"
+           " qual_name TEXT,"
+           " display_name TEXT,"
+           " kind INTEGER NOT NULL,"
+           " type_info TEXT,"
+           " file_id INTEGER REFERENCES file(id) ON DELETE SET NULL,"
+           " line INTEGER,"
+           " col INTEGER,"
+           " decl_file_id INTEGER REFERENCES file(id) ON DELETE SET NULL,"
+           " decl_line INTEGER,"
+           " decl_col INTEGER,"
+           " decl_path TEXT,"
+           " is_definition INTEGER NOT NULL DEFAULT 0,"
+           " is_pure INTEGER NOT NULL DEFAULT 0,"
+           " is_static INTEGER NOT NULL DEFAULT 0,"
+           " is_instantiation INTEGER NOT NULL DEFAULT 0,"
+           " linkage TEXT,"
+           " access TEXT,"
+           " parent_usr TEXT,"
+           " resolved INTEGER NOT NULL DEFAULT 0"
+           ");"
+           "INSERT INTO symbol_new"
+           " SELECT id, usr, spelling, qual_name, display_name,"
+           "        CASE kind" +
+           cases +
+           " ELSE kind END,"
+           "        type_info, file_id, line, col, decl_file_id, decl_line,"
+           "        decl_col, decl_path, is_definition, is_pure, is_static,"
+           "        is_instantiation, linkage, access, parent_usr, resolved"
+           " FROM symbol;"
+           "DROP TABLE symbol;"
+           "ALTER TABLE symbol_new RENAME TO symbol;");
   db_.exec("PRAGMA foreign_keys = ON");
 }
 
 // v23 -> v24: rebuild `component` so `path` is UNIQUE per repository (was
-// globally UNIQUE). A grouped component stores a clone-RELATIVE path, so several
-// repositories can each carry a '.' root -- the old global UNIQUE(path) would
-// reject that. Foreign keys are disabled for the swap so dropping the table does
-// not cascade-delete directories (they keep the ids the copied rows carry). The
-// schema script (run right after) is a no-op (CREATE TABLE IF NOT EXISTS).
-// Mirrors Python _migrate_component_repo_unique.
+// globally UNIQUE). A grouped component stores a clone-RELATIVE path, so
+// several repositories can each carry a '.' root -- the old global UNIQUE(path)
+// would reject that. Foreign keys are disabled for the swap so dropping the
+// table does not cascade-delete directories (they keep the ids the copied rows
+// carry). The schema script (run right after) is a no-op (CREATE TABLE IF NOT
+// EXISTS). Mirrors Python _migrate_component_repo_unique.
 void Storage::migrate_component_repo_unique() {
   db_.exec("PRAGMA foreign_keys = OFF");
   db_.exec(

@@ -11,8 +11,7 @@ from .paths import FIXTURES_DIR
 from .workspace import Workspace
 
 
-@given(parsers.parse('a clean index workspace for fixture "{fixture}"'))
-def a_clean_workspace(workspace: Workspace, fixture: str) -> Workspace:
+def _stage_fixture(workspace: Workspace, fixture: str, std: str) -> Workspace:
     src = FIXTURES_DIR / fixture
     assert src.is_file(), (
         f"fixture {fixture!r} not found in {FIXTURES_DIR}; "
@@ -26,7 +25,7 @@ def a_clean_workspace(workspace: Workspace, fixture: str) -> Workspace:
         {
             "directory": str(workspace.src_dir),
             "file": str(workspace.source),
-            "arguments": ["clang++", "-std=c++17", "-c", fixture],
+            "arguments": ["clang++", f"-std={std}", "-c", fixture],
         }
     ]
     (workspace.root / "compile_commands.json").write_text(
@@ -34,6 +33,16 @@ def a_clean_workspace(workspace: Workspace, fixture: str) -> Workspace:
     )
     assert not workspace.db.exists(), "workspace must start without an index.db"
     return workspace
+
+
+@given(parsers.parse('a clean index workspace for fixture "{fixture}"'))
+def a_clean_workspace(workspace: Workspace, fixture: str) -> Workspace:
+    return _stage_fixture(workspace, fixture, "c++17")
+
+
+@given(parsers.parse('a clean index workspace for fixture "{fixture}" compiled as {std}'))
+def a_clean_workspace_with_std(workspace: Workspace, fixture: str, std: str) -> Workspace:
+    return _stage_fixture(workspace, fixture, std.strip().lower())
 
 
 @when("I build the index with the cidx CLI")

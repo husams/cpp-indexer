@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -77,28 +78,34 @@ bool GraphQuery::is_resolved() {
 // hand back a clone-relative (unopenable) path.
 // ---------------------------------------------------------------------------
 
-const std::unordered_map<int64_t, std::pair<std::string, std::optional<std::string>>> &
+const std::unordered_map<int64_t,
+                         std::pair<std::string, std::optional<std::string>>> &
 GraphQuery::files() {
   if (!file_cache_) {
-    std::unordered_map<int64_t, std::pair<std::string, std::optional<std::string>>> cache;
-    std::map<std::tuple<std::string, std::optional<std::string>, std::optional<int64_t>>,
-              std::string>
+    std::unordered_map<int64_t,
+                       std::pair<std::string, std::optional<std::string>>>
+        cache;
+    std::map<std::tuple<std::string, std::optional<std::string>,
+                        std::optional<int64_t>>,
+             std::string>
         abs_base_cache;
     auto &raw = db_.raw_db();
-    auto st = raw.prepare(
-        "SELECT f.id AS fid, c.name AS cname, c.path AS root, "
-        "       c.version AS version, c.repository_id AS repo_id, "
-        "       d.path AS rel, f.name AS name "
-        "FROM file f JOIN directory d ON d.id = f.directory_id "
-        "JOIN component c ON c.id = d.component_id");
+    auto st =
+        raw.prepare("SELECT f.id AS fid, c.name AS cname, c.path AS root, "
+                    "       c.version AS version, c.repository_id AS repo_id, "
+                    "       d.path AS rel, f.name AS name "
+                    "FROM file f JOIN directory d ON d.id = f.directory_id "
+                    "JOIN component c ON c.id = d.component_id");
     while (st.step()) {
       const int64_t fid = st.col_int64(0);
       const std::string cname = st.col_text(1);
       const std::string root = st.col_text(2);
       const std::optional<std::string> version =
-          st.col_is_null(3) ? std::nullopt : std::optional<std::string>(st.col_text(3));
+          st.col_is_null(3) ? std::nullopt
+                            : std::optional<std::string>(st.col_text(3));
       const std::optional<int64_t> repo_id =
-          st.col_is_null(4) ? std::nullopt : std::optional<int64_t>(st.col_int64(4));
+          st.col_is_null(4) ? std::nullopt
+                            : std::optional<int64_t>(st.col_int64(4));
       const std::string rel = st.col_text(5);
       const std::string name = st.col_text(6);
 
@@ -109,7 +116,8 @@ GraphQuery::files() {
         comp_stub.path = root;
         comp_stub.version = version;
         comp_stub.repository_id = repo_id;
-        it = abs_base_cache.emplace(key, db_.component_abs_base(comp_stub)).first;
+        it = abs_base_cache.emplace(key, db_.component_abs_base(comp_stub))
+                 .first;
       }
       const std::string &eff = it->second;
       std::string path;
@@ -138,6 +146,7 @@ Sym GraphQuery::make_sym_from_symbol(const Symbol &sym) {
   s.name = sym.qual_name ? *sym.qual_name : sym.spelling;
   s.kind = sym.kind;
   s.type_info = sym.type_info;
+  s.const_value = sym.const_value; // v33
   s.is_definition = sym.is_definition;
   s.is_pure = sym.is_pure;
   s.is_static = sym.is_static;
@@ -297,7 +306,8 @@ std::vector<Edge>
 GraphQuery::edges(int64_t sym_id, const std::string &direction,
                   const std::optional<std::vector<int64_t>> &kind_ids_opt,
                   int limit, bool with_sites) {
-  const std::vector<int64_t> kv = kind_ids_opt ? *kind_ids_opt : std::vector<int64_t>{};
+  const std::vector<int64_t> kv =
+      kind_ids_opt ? *kind_ids_opt : std::vector<int64_t>{};
   const bool cr = is_resolved();
   auto rows = db_.graph_edges(sym_id, direction, kv, cr, limit);
 
@@ -361,11 +371,11 @@ std::vector<Edge> GraphQuery::references(int64_t sym_id, int limit) {
 
 std::vector<Sym> GraphQuery::aliased_by(int64_t sym_id, int limit) {
   auto &raw = db_.raw_db();
-  auto st = raw.prepare(
-      "SELECT s.id FROM symbol s "
-      "JOIN edge e ON e.src_id = s.id "
-      "WHERE e.dst_id = ? AND e.kind = ? AND s.kind IN (?, ?) "
-      "ORDER BY COALESCE(s.qual_name, s.spelling), s.id LIMIT ?");
+  auto st =
+      raw.prepare("SELECT s.id FROM symbol s "
+                  "JOIN edge e ON e.src_id = s.id "
+                  "WHERE e.dst_id = ? AND e.kind = ? AND s.kind IN (?, ?) "
+                  "ORDER BY COALESCE(s.qual_name, s.spelling), s.id LIMIT ?");
   st.bind(1, sym_id);
   st.bind(2, edge_kinds_map().at("uses"));
   st.bind(3, symbol_kind_id("typedef"));
@@ -425,10 +435,10 @@ GraphQuery::peers(int64_t sym_id,
   return out;
 }
 
-Traversal
-GraphQuery::walk(int64_t start_id,
-                 const std::optional<std::vector<std::string>> &kinds,
-                 const std::string &direction, int depth, int max_nodes) {
+Traversal GraphQuery::walk(int64_t start_id,
+                           const std::optional<std::vector<std::string>> &kinds,
+                           const std::string &direction, int depth,
+                           int max_nodes) {
   auto start_sym = get_by_id(start_id);
   if (!start_sym) {
     return Traversal{};
@@ -565,15 +575,14 @@ std::vector<Sym> GraphQuery::subclasses(int64_t sym_id, bool direct) {
   return out;
 }
 
-std::vector<Sym>
-GraphQuery::members(int64_t sym_id,
-                    const std::optional<std::string> &access) {
-  auto out_edgs = edges(sym_id, "out",
-                        kind_ids(std::vector<std::string>{"contains"}), 500,
-                        /*with_sites=*/false);
-  auto in_edgs = edges(sym_id, "in",
-                       kind_ids(std::vector<std::string>{"field_of", "method_of"}),
-                       500, /*with_sites=*/false);
+std::vector<Sym> GraphQuery::members(int64_t sym_id,
+                                     const std::optional<std::string> &access) {
+  auto out_edgs =
+      edges(sym_id, "out", kind_ids(std::vector<std::string>{"contains"}), 500,
+            /*with_sites=*/false);
+  auto in_edgs = edges(
+      sym_id, "in", kind_ids(std::vector<std::string>{"field_of", "method_of"}),
+      500, /*with_sites=*/false);
 
   std::unordered_set<int64_t> seen;
   std::vector<Sym> merged;
@@ -680,11 +689,10 @@ std::vector<Sym> GraphQuery::redefined(int limit) {
 
 // Build Definition records from raw definition rows, joining file/component
 // from the file cache (mirrors query.py:_definition_rows).
-static std::vector<Definition>
-defs_from_rows(GraphQuery &g,
-               const std::vector<Storage::DefinitionRow> &rows,
-               const std::unordered_map<
-                   int64_t, std::pair<std::string, std::optional<std::string>>> &fc) {
+static std::vector<Definition> defs_from_rows(
+    GraphQuery &g, const std::vector<Storage::DefinitionRow> &rows,
+    const std::unordered_map<
+        int64_t, std::pair<std::string, std::optional<std::string>>> &fc) {
   std::vector<Definition> out;
   out.reserve(rows.size());
   for (const auto &r : rows) {
@@ -726,10 +734,19 @@ namespace {
 // the storage type_kind table / storage.py).
 const std::map<int64_t, std::string> &type_kind_names() {
   static const std::map<int64_t, std::string> m = {
-      {1, "builtin"}, {2, "record"}, {3, "enum"},
-      {4, "alias"},   {5, "pointer"}, {6, "lvalue-reference"},
-      {7, "rvalue-reference"}, {8, "array"}, {9, "function"},
-      {10, "template-param"}, {11, "other"},
+      {1, "builtin"},
+      {2, "record"},
+      {3, "enum"},
+      {4, "alias"},
+      {5, "pointer"},
+      {6, "lvalue-reference"},
+      {7, "rvalue-reference"},
+      {8, "array"},
+      {9, "function"},
+      {10, "template-param"},
+      {11, "other"},
+      {12, "member-data-pointer"},
+      {13, "member-function-pointer"},
   };
   return m;
 }
@@ -746,6 +763,10 @@ std::optional<GraphQuery::TypeInfo> GraphQuery::type_info(int64_t type_id) {
   const auto &names = type_kind_names();
   const auto it = names.find(n->kind);
   t.kind = it != names.end() ? it->second : std::to_string(n->kind);
+  t.decl_usr = n->decl_usr;
+  t.is_const = n->is_const;
+  t.is_volatile = n->is_volatile;
+  t.is_restrict = n->is_restrict;
   if (n->canonical_id) {
     if (const auto c = db_.type_node_by_id(*n->canonical_id)) {
       t.canonical = c->spelling;
@@ -756,16 +777,95 @@ std::optional<GraphQuery::TypeInfo> GraphQuery::type_info(int64_t type_id) {
 
 GraphQuery::SignatureInfo GraphQuery::signature(int64_t sym_id) {
   SignatureInfo out;
+  const auto named_decl = [this](TypeInfo type) -> std::optional<std::string> {
+    std::set<int64_t> seen;
+    while (seen.insert(type.id).second) {
+      if (type.decl_usr) {
+        if (const auto decl = get_by_usr(*type.decl_usr)) {
+          return decl->name;
+        }
+      }
+      std::vector<std::pair<int64_t, int64_t>> children;
+      if (type.kind == "alias") {
+        children.emplace_back(3, 0);
+      } else if (type.kind == "pointer" ||
+                 type.kind == "lvalue-reference" ||
+                 type.kind == "rvalue-reference") {
+        children.emplace_back(1, 0);
+      } else if (type.kind == "array") {
+        children.emplace_back(2, 0);
+      } else if (type.kind == "member-data-pointer" ||
+                 type.kind == "member-function-pointer") {
+        children.emplace_back(7, 0);
+        children.emplace_back(8, 0);
+      } else if (type.kind == "function") {
+        children.emplace_back(4, 0);
+      }
+      std::optional<TypeInfo> child;
+      for (const auto [kind, position] : children) {
+        child = type_child(type.id, kind, position);
+        if (child) {
+          break;
+        }
+      }
+      if (!child) {
+        break;
+      }
+      type = *child;
+    }
+    return std::nullopt;
+  };
+  const auto facts = [this, &named_decl](const TypeInfo &declared,
+                                         const TypeInfo &adjusted) {
+    std::string mode = "value";
+    TypeInfo base = adjusted;
+    if (declared.kind == "lvalue-reference" ||
+        declared.kind == "rvalue-reference") {
+      mode = declared.kind;
+      base = declared;
+      while (const auto child = type_child(base.id, 1)) {
+        base = *child;
+        if (base.kind != "lvalue-reference" &&
+            base.kind != "rvalue-reference") {
+          break;
+        }
+      }
+    }
+    const std::string value_kind = base.spelling.ends_with("...")
+                                       ? "pack-expansion"
+                                       : base.kind;
+    return std::tuple{mode, value_kind, named_decl(base)};
+  };
   if (const auto tid = db_.symbol_type_of(sym_id, kSymbolTypeReturns)) {
     out.returns = type_info(*tid);
   }
   for (const Parameter &p : db_.parameters_of(sym_id)) {
     ParamInfo pi;
     pi.position = p.position;
+    if (p.pack_index >= 0) {
+      pi.pack_index = p.pack_index;
+    }
     pi.name = p.name;
     if (p.type_id) {
       pi.type = type_info(*p.type_id);
     }
+    if (p.declared_type_id) {
+      pi.declared_type = type_info(*p.declared_type_id);
+    } else {
+      pi.declared_type = pi.type;
+    }
+    if (p.adjusted_type_id) {
+      pi.adjusted_type = type_info(*p.adjusted_type_id);
+    } else {
+      pi.adjusted_type = pi.type;
+    }
+    if (pi.declared_type && pi.adjusted_type) {
+      std::tie(pi.mode, pi.value_kind, pi.named_decl) =
+          facts(*pi.declared_type, *pi.adjusted_type);
+    }
+    pi.default_text = p.default_text;
+    pi.default_origin = p.default_origin;
+    pi.reference_semantics = p.reference_semantics;
     out.params.push_back(std::move(pi));
   }
   if (const auto tid = db_.symbol_type_of(sym_id, kSymbolTypeOfType)) {
@@ -775,6 +875,23 @@ GraphQuery::SignatureInfo GraphQuery::signature(int64_t sym_id) {
     out.underlying = type_info(*tid);
   }
   return out;
+}
+
+std::optional<GraphQuery::TypeInfo>
+GraphQuery::type_child(int64_t type_id, int64_t edge_kind, int64_t position) {
+  auto st = db_.raw_db().prepare(
+      "SELECT dst_id FROM type_edge WHERE src_id = ? AND kind = ? "
+      "AND position = ? LIMIT 1");
+  st.bind(1, type_id);
+  st.bind(2, edge_kind);
+  st.bind(3, position);
+  if (!st.step()) {
+    st.step_done();
+    return std::nullopt;
+  }
+  const int64_t child = st.col_int64(0);
+  st.step_done();
+  return type_info(child);
 }
 
 std::vector<GraphQuery::TypeUser> GraphQuery::type_users(const std::string &usr,
@@ -801,9 +918,9 @@ std::vector<GraphQuery::TypeUser> GraphQuery::type_users(const std::string &usr,
     if (!s) {
       continue;
     }
-    const std::string role = kind == kSymbolTypeReturns   ? "returns"
-                             : kind == kSymbolTypeOfType  ? "of_type"
-                                                          : "underlying_type";
+    const std::string role = kind == kSymbolTypeReturns  ? "returns"
+                             : kind == kSymbolTypeOfType ? "of_type"
+                                                         : "underlying_type";
     out.push_back(
         {.sym = std::move(*s), .role = role, .position = std::nullopt});
   }
