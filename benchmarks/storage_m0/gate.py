@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -190,7 +191,11 @@ def evaluate_regression(baseline: dict[str, Any], bad_config: dict[str, Any], pr
     return {"id": "intentional_regression", "status": "pass" if passed else "fail", "minimum_factor": factor, "comparisons": comparisons, "reason": None if passed else "measured bad configuration did not exceed the regression factor"}
 
 
-def _real_evidence(item: dict[str, Any], result: dict[str, Any] | None, failed_slos: set[str], seen: set[tuple[str, str]]) -> bool:
+def _result_content_sha256(result: dict[str, Any]) -> str:
+    return sha256(canonical_json(result))
+
+
+def _real_evidence(item: dict[str, Any], result: dict[str, Any] | None, failed_slos: set[str], seen: dict[str, set[str]]) -> bool:
     evidence = item.get("evidence")
     if result is None or item.get("measured") is not True or not isinstance(evidence, dict):
         return False
@@ -203,18 +208,63 @@ def _real_evidence(item: dict[str, Any], result: dict[str, Any] | None, failed_s
         return False
     if bound.get("run_id") == result.get("run_id") or _identity_dimensions(bound) != _identity_dimensions(result):
         return False
-    key = (str(evidence.get("run_id")), str(artifact))
-    if key in seen or bound.get("run_id") != evidence.get("run_id") or _bound_result_errors(bound, "alternative"):
+    content_sha256 = _result_content_sha256(bound)
+    run_id = str(bound.get("run_id"))
+    configuration = str(bound.get("configuration"))
+    if (
+        run_id in seen["run_id"]
+        or content_sha256 in seen["content_sha256"]
+        or configuration in seen["configuration"]
+        or bound.get("run_id") != evidence.get("run_id")
+        or evidence.get("content_sha256") != content_sha256
+        or evidence.get("configuration") != bound.get("configuration")
+        or _bound_result_errors(bound, "alternative")
+    ):
         return False
-    seen.add(key)
     checks = evidence.get("checks")
     outcome = evidence.get("outcome")
-    return (
+    valid = (
         isinstance(checks, list) and checks and all(isinstance(check, dict) and check.get("status") == "pass" and check.get("id") and "actual" in check and "placeholder" not in canonical_json(check).lower() for check in checks)
         and isinstance(outcome, dict) and outcome.get("measured") is True
         and outcome.get("measured_inability") is True and outcome.get("slo_status") == "fail"
+        and outcome.get("alternative_class") == item.get("class")
+        and outcome.get("run_id") == bound.get("run_id")
+        and outcome.get("content_sha256") == content_sha256
         and outcome.get("configuration") == bound.get("configuration")
         and set(outcome.get("tested_failed_slos", [])) == failed_slos
+    )
+    if valid:
+        seen["run_id"].add(run_id)
+        seen["content_sha256"].add(content_sha256)
+        seen["configuration"].add(configuration)
+    return valid
+
+
+def _positive_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and value > 0
+
+
+def _meaningful_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and "placeholder" not in value.lower()
+
+
+def _cost_evidence_valid(costs: Any) -> bool:
+    if not isinstance(costs, dict) or not isinstance(costs.get("engineering"), dict) or not isinstance(costs.get("compatibility"), dict):
+        return False
+    engineering = costs["engineering"]
+    compatibility = costs["compatibility"]
+    work_items = engineering.get("work_items")
+    migration_plan = compatibility.get("migration_plan")
+    compatibility_checks = compatibility.get("compatibility_checks")
+    return (
+        _positive_number(engineering.get("person_months"))
+        and isinstance(work_items, list) and bool(work_items)
+        and all(isinstance(item, dict) and _meaningful_text(item.get("id")) and _meaningful_text(item.get("description")) and _positive_number(item.get("person_months")) and isinstance(item.get("deliverables"), list) and bool(item["deliverables"]) and all(_meaningful_text(deliverable) for deliverable in item["deliverables"]) for item in work_items)
+        and _positive_number(compatibility.get("person_months"))
+        and isinstance(migration_plan, list) and bool(migration_plan)
+        and all(isinstance(item, dict) and _meaningful_text(item.get("id")) and _meaningful_text(item.get("description")) and _positive_number(item.get("person_months")) and isinstance(item.get("deliverables"), list) and bool(item["deliverables"]) and all(_meaningful_text(deliverable) for deliverable in item["deliverables"]) for item in migration_plan)
+        and isinstance(compatibility_checks, list) and bool(compatibility_checks)
+        and all(isinstance(item, dict) and _meaningful_text(item.get("id")) and item.get("status") in {"pass", "fail", "not_run"} and _meaningful_text(item.get("actual")) and _meaningful_text(item.get("target")) for item in compatibility_checks)
     )
 
 
@@ -235,21 +285,12 @@ def evaluate_custom_store(decision: dict[str, Any], *, require: bool, result: di
     alternatives = decision.get("alternatives", []); classes = {item.get("class") for item in alternatives}
     if not {"schema_tuning", "derived_accelerator"}.issubset(classes):
         errors.append("proposal needs separately measured schema/tuning and derived-accelerator alternatives")
-    seen: set[tuple[str, str]] = set()
+    seen = {"run_id": set(), "content_sha256": set(), "configuration": set()}
     if len(alternatives) != 2 or classes != {"schema_tuning", "derived_accelerator"} or any(not _real_evidence(item, result, actual_failed, seen) for item in alternatives):
         errors.append("every alternative needs measured evidence bound to an artifact and checks")
     costs = decision.get("costs", {})
     if (
-        not isinstance(costs.get("engineering"), dict)
-        or not isinstance(costs.get("compatibility"), dict)
-        or not costs["engineering"].get("person_months")
-        or not isinstance(costs["engineering"].get("work_items"), list) or not costs["engineering"]["work_items"]
-        or any(not isinstance(item, dict) or not item.get("id") for item in costs["engineering"]["work_items"])
-        or not isinstance(costs["compatibility"].get("migration_plan"), list) or not costs["compatibility"]["migration_plan"]
-        or any(not isinstance(item, dict) or not item.get("id") for item in costs["compatibility"]["migration_plan"])
-        or not isinstance(costs["compatibility"].get("compatibility_checks"), list) or not costs["compatibility"]["compatibility_checks"]
-        or any(not isinstance(item, dict) or not item.get("id") or item.get("status") not in {"pass", "fail", "not_run"} for item in costs["compatibility"]["compatibility_checks"])
-        or not costs["compatibility"].get("person_months")
+        not _cost_evidence_valid(costs)
         or not costs["engineering"].get("source_artifact")
         or not costs["compatibility"].get("source_artifact")
         or not Path(str(costs["engineering"].get("source_artifact"))).is_file()
