@@ -6,10 +6,10 @@
 
 namespace cidx::catalog {
 inline constexpr int kCatalogVersion = 1;
-inline constexpr std::string_view kCatalogHash = "a36486447a5b4d5cb1ad6e1a7248be623e56650ed44469e8e8131cd44eb2dc5e";
+inline constexpr std::string_view kCatalogHash = "dff2d12d732e5ee44972a0f67261d87325837ac12c2fad203096de216ab0f9eb";
 enum class View : std::uint8_t { Symbol, Entity };
 struct NamedId { int64_t id; std::string_view name; };
-struct Relation { int64_t id; std::string_view name; View layer; std::string_view source; std::string_view target; std::string_view inverse; std::string_view evidence; std::string_view completeness; };
+struct Relation { int64_t id; std::string_view name; View layer; std::string_view source; std::string_view target; std::string_view inverse; std::string_view traversal; std::string_view evidence; std::string_view evidence_capabilities; std::string_view completeness; };
 struct Field { std::string_view name; bool filterable; bool is_string; };
 inline constexpr std::array<NamedId, 17> kSymbolKinds = {{
     {.id = 2, .name = "struct"},
@@ -72,38 +72,38 @@ inline constexpr std::array<NamedId, 8> kTypeEdgeKinds = {{
 }};
 
 inline constexpr std::array<Relation, 32> kRelations = {{
-    {.id = 1, .name = "calls", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "called_by", .evidence = "call_site", .completeness = "partial"},
-    {.id = 2, .name = "inherits", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "subclasses", .evidence = "declaration", .completeness = "complete"},
-    {.id = 3, .name = "contains", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "contained_by", .evidence = "declaration", .completeness = "complete"},
-    {.id = 4, .name = "specializes", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "specialized_by", .evidence = "declaration", .completeness = "partial"},
-    {.id = 5, .name = "instantiates", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "instantiated_by", .evidence = "declaration", .completeness = "partial"},
-    {.id = 6, .name = "overrides", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "overridden_by", .evidence = "declaration", .completeness = "complete"},
-    {.id = 7, .name = "uses", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "used_by", .evidence = "reference_site", .completeness = "partial"},
-    {.id = 8, .name = "field_of", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "fields", .evidence = "declaration", .completeness = "complete"},
-    {.id = 9, .name = "method_of", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "methods", .evidence = "declaration", .completeness = "complete"},
-    {.id = 10, .name = "construct-value", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "constructed_by", .evidence = "call_site", .completeness = "partial"},
-    {.id = 11, .name = "construct-temp", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "constructed_by", .evidence = "call_site", .completeness = "partial"},
-    {.id = 12, .name = "construct-heap", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "constructed_by", .evidence = "call_site", .completeness = "partial"},
-    {.id = 13, .name = "construct-copy", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "constructed_by", .evidence = "call_site", .completeness = "partial"},
-    {.id = 14, .name = "construct-move", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "constructed_by", .evidence = "call_site", .completeness = "partial"},
-    {.id = 15, .name = "factory-construct", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "constructed_by", .evidence = "call_site", .completeness = "partial"},
-    {.id = 16, .name = "destroy", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "destroyed_by", .evidence = "call_site", .completeness = "partial"},
-    {.id = 17, .name = "friend", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "befriended_by", .evidence = "declaration", .completeness = "complete"},
-    {.id = 18, .name = "dispatch_calls", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "dispatch_callers", .evidence = "call_site", .completeness = "partial"},
-    {.id = 19, .name = "alias_of", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "aliased_by", .evidence = "declaration", .completeness = "complete"},
-    {.id = 20, .name = "of_type", .layer = View::Symbol, .source = "symbol", .target = "symbol", .inverse = "typed_by", .evidence = "declaration", .completeness = "partial"},
-    {.id = 1, .name = "generalizes", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "specialized_by", .evidence = "derived", .completeness = "complete"},
-    {.id = 2, .name = "implements", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "implemented_by", .evidence = "derived", .completeness = "partial"},
-    {.id = 3, .name = "specializes", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "specialized_by", .evidence = "derived", .completeness = "partial"},
-    {.id = 4, .name = "composes", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "composed_by", .evidence = "derived", .completeness = "partial"},
-    {.id = 5, .name = "aggregates", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "aggregated_by", .evidence = "derived", .completeness = "partial"},
-    {.id = 6, .name = "associates", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "associated_by", .evidence = "derived", .completeness = "partial"},
-    {.id = 7, .name = "creates", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "created_by", .evidence = "derived", .completeness = "partial"},
-    {.id = 8, .name = "uses", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "used_by", .evidence = "derived", .completeness = "partial"},
-    {.id = 9, .name = "destroys", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "destroyed_by", .evidence = "derived", .completeness = "partial"},
-    {.id = 10, .name = "befriends", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "befriended_by", .evidence = "derived", .completeness = "complete"},
-    {.id = 11, .name = "instantiates", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "instantiated_by", .evidence = "derived", .completeness = "partial"},
-    {.id = 12, .name = "declares", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "declared_by", .evidence = "derived", .completeness = "complete"},
+    {.id = 1, .name = "calls", .layer = View::Symbol, .source = "symbol.callable", .target = "symbol.callable", .inverse = "called_by", .traversal = "out|in", .evidence = "call_site", .evidence_capabilities = "call_site|declaration", .completeness = "partial"},
+    {.id = 2, .name = "inherits", .layer = View::Symbol, .source = "symbol.record", .target = "symbol.record", .inverse = "subclasses", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete"},
+    {.id = 3, .name = "contains", .layer = View::Symbol, .source = "symbol.scope", .target = "symbol.declaration", .inverse = "contained_by", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete"},
+    {.id = 4, .name = "specializes", .layer = View::Symbol, .source = "symbol.template", .target = "symbol.template", .inverse = "specialized_by", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration|reference_site", .completeness = "partial"},
+    {.id = 5, .name = "instantiates", .layer = View::Symbol, .source = "symbol.template", .target = "symbol.declaration", .inverse = "instantiated_by", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration|reference_site", .completeness = "partial"},
+    {.id = 6, .name = "overrides", .layer = View::Symbol, .source = "symbol.method", .target = "symbol.method", .inverse = "overridden_by", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete"},
+    {.id = 7, .name = "uses", .layer = View::Symbol, .source = "symbol.declaration", .target = "symbol.declaration", .inverse = "used_by", .traversal = "out|in", .evidence = "reference_site", .evidence_capabilities = "reference_site|call_site", .completeness = "partial"},
+    {.id = 8, .name = "field_of", .layer = View::Symbol, .source = "symbol.member", .target = "symbol.record", .inverse = "fields", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete"},
+    {.id = 9, .name = "method_of", .layer = View::Symbol, .source = "symbol.method", .target = "symbol.record", .inverse = "methods", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete"},
+    {.id = 10, .name = "construct-value", .layer = View::Symbol, .source = "symbol.callable", .target = "symbol.record", .inverse = "constructed_by", .traversal = "out|in", .evidence = "call_site", .evidence_capabilities = "call_site", .completeness = "partial"},
+    {.id = 11, .name = "construct-temp", .layer = View::Symbol, .source = "symbol.callable", .target = "symbol.record", .inverse = "constructed_by", .traversal = "out|in", .evidence = "call_site", .evidence_capabilities = "call_site", .completeness = "partial"},
+    {.id = 12, .name = "construct-heap", .layer = View::Symbol, .source = "symbol.callable", .target = "symbol.record", .inverse = "constructed_by", .traversal = "out|in", .evidence = "call_site", .evidence_capabilities = "call_site", .completeness = "partial"},
+    {.id = 13, .name = "construct-copy", .layer = View::Symbol, .source = "symbol.callable", .target = "symbol.record", .inverse = "constructed_by", .traversal = "out|in", .evidence = "call_site", .evidence_capabilities = "call_site", .completeness = "partial"},
+    {.id = 14, .name = "construct-move", .layer = View::Symbol, .source = "symbol.callable", .target = "symbol.record", .inverse = "constructed_by", .traversal = "out|in", .evidence = "call_site", .evidence_capabilities = "call_site", .completeness = "partial"},
+    {.id = 15, .name = "factory-construct", .layer = View::Symbol, .source = "symbol.callable", .target = "symbol.record", .inverse = "constructed_by", .traversal = "out|in", .evidence = "call_site", .evidence_capabilities = "call_site", .completeness = "partial"},
+    {.id = 16, .name = "destroy", .layer = View::Symbol, .source = "symbol.callable", .target = "symbol.record", .inverse = "destroyed_by", .traversal = "out|in", .evidence = "call_site", .evidence_capabilities = "call_site", .completeness = "partial"},
+    {.id = 17, .name = "friend", .layer = View::Symbol, .source = "symbol.declaration", .target = "symbol.declaration", .inverse = "befriended_by", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete"},
+    {.id = 18, .name = "dispatch_calls", .layer = View::Symbol, .source = "symbol.callable", .target = "symbol.callable", .inverse = "dispatch_callers", .traversal = "out|in", .evidence = "call_site", .evidence_capabilities = "call_site|derived", .completeness = "partial"},
+    {.id = 19, .name = "alias_of", .layer = View::Symbol, .source = "symbol.alias", .target = "symbol.declaration", .inverse = "aliased_by", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete"},
+    {.id = 20, .name = "of_type", .layer = View::Symbol, .source = "symbol.declaration", .target = "type", .inverse = "typed_by", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "partial"},
+    {.id = 1, .name = "generalizes", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "specialized_by", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "complete"},
+    {.id = 2, .name = "implements", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "implemented_by", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "partial"},
+    {.id = 3, .name = "specializes", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "specialized_by", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "partial"},
+    {.id = 4, .name = "composes", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "composed_by", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "partial"},
+    {.id = 5, .name = "aggregates", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "aggregated_by", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "partial"},
+    {.id = 6, .name = "associates", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "associated_by", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "partial"},
+    {.id = 7, .name = "creates", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "created_by", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "partial"},
+    {.id = 8, .name = "uses", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "used_by", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "partial"},
+    {.id = 9, .name = "destroys", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "destroyed_by", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "partial"},
+    {.id = 10, .name = "befriends", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "befriended_by", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "complete"},
+    {.id = 11, .name = "instantiates", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "instantiated_by", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "partial"},
+    {.id = 12, .name = "declares", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "declared_by", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "complete"},
 }};
 
 inline constexpr std::array<Field, 13> kFields = {{

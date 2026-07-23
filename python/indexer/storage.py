@@ -41,6 +41,37 @@ from indexer.generated_catalog import (
 
 SCHEMA_VERSION = 34
 
+
+def _catalog_hash(conn: sqlite3.Connection) -> Optional[str]:
+    """Return the stored catalog hash, or None when the database has no meta row."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'catalog_hash'"
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return None
+        raise
+    return None if row is None else row[0]
+
+
+def _validate_catalog_hash(
+    conn: sqlite3.Connection, database: str, *, require_present: bool
+) -> None:
+    actual = _catalog_hash(conn)
+    if actual is None:
+        if require_present:
+            raise RuntimeError(
+                f"incompatible cidx semantic catalogs: catalog_hash missing; "
+                f"expected {CATALOG_HASH!r} for {database}. Regenerate the index."
+            )
+        return
+    if actual != CATALOG_HASH:
+        raise RuntimeError(
+            f"incompatible cidx semantic catalogs: catalog_hash {actual!r}; "
+            f"expected {CATALOG_HASH!r} for {database}. Regenerate the index."
+        )
+
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
 #: 1:1 (e.g. CXCursor_CXXMethod == 21). Storing the small int instead of the
@@ -1417,6 +1448,7 @@ class Storage:
         self._conn = conn
         self._in_txn = False
         self._needs_entity_node_backfill = False
+        _validate_catalog_hash(conn, path, require_present=True)
         return self
 
     def __init__(self, path: str = ":memory:"):
@@ -1426,6 +1458,10 @@ class Storage:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._needs_entity_node_backfill = False
+        # Reject an incompatible existing catalog before migrations or schema
+        # seeding can mutate the database. Fresh and legacy databases without a
+        # catalog hash are upgraded and receive the current seed below.
+        _validate_catalog_hash(self._conn, path, require_present=False)
         self._migrate()  # before _SCHEMA: its indexes need new columns
         self._conn.executescript(_SCHEMA)
         self._conn.commit()

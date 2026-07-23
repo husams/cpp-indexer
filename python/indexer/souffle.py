@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 import tempfile
 
+from .generated_catalog import CATALOG_HASH
 from .storage import SCHEMA_VERSION
 
 RULES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules")
@@ -105,6 +106,20 @@ def _open_ro(db_path: str) -> sqlite3.Connection:
         raise SouffleError(
             f"unsupported index schema version: {got}"
             f" (expected {SCHEMA_VERSION}); run 'cidx db migrate'")
+    try:
+        catalog_row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'catalog_hash'"
+        ).fetchone()
+    except sqlite3.DatabaseError as e:
+        conn.close()
+        raise SouffleError(f"cannot read catalog hash at {db_path}: {e}")
+    if catalog_row is None or catalog_row[0] != CATALOG_HASH:
+        got = "missing" if catalog_row is None else catalog_row[0]
+        conn.close()
+        raise SouffleError(
+            f"incompatible cidx semantic catalogs: catalog_hash {got!r}; "
+            f"expected {CATALOG_HASH!r}. Regenerate the index."
+        )
     return conn
 
 

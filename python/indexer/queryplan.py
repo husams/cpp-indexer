@@ -23,6 +23,7 @@ from .generated_catalog import (
     RELATION_CATALOG as _GENERATED_RELATION_CATALOG,
     RELATION_METADATA as _GENERATED_RELATION_METADATA,
 )
+from .generated_extensions import EXTENSION_RELATIONS as _GENERATED_EXTENSION_RELATIONS
 
 __all__ = [
     "PlanError", "TraversalMode", "Pred", "Stage", "Source", "Plan", "Query", "Result",
@@ -31,6 +32,7 @@ __all__ = [
     "nodes", "view", "where", "out", "in_", "union_", "intersect", "except_",
     "select", "count", "distinct", "order_by", "limit",
     "validate", "canonical_json", "relation_catalog", "relation_metadata", "resolve_relation",
+    "extension_relation_catalog", "extension_relation_metadata",
 ]
 
 # ---- Budgets (docs/query-plan.md "Execution semantics") ----------------------
@@ -64,6 +66,7 @@ ENTITY_VIEW = "entity"
 # Generated relation and entity-kind identifiers are the shared query contract.
 RELATION_CATALOG = tuple(_GENERATED_RELATION_CATALOG)
 RELATION_METADATA = dict(_GENERATED_RELATION_METADATA)
+EXTENSION_RELATIONS = dict(_GENERATED_EXTENSION_RELATIONS)
 ENTITY_KIND_NAMES = tuple(_GENERATED_ENTITY_KIND_NAMES)
 
 
@@ -76,6 +79,14 @@ def relation_metadata(name: str, active: str) -> Optional[dict[str, str]]:
     if relation is None:
         return None
     return RELATION_METADATA.get(relation)
+
+
+def extension_relation_catalog() -> tuple[tuple[str, dict[str, str]], ...]:
+    return tuple(EXTENSION_RELATIONS.items())
+
+
+def extension_relation_metadata(name: str) -> Optional[dict[str, str]]:
+    return EXTENSION_RELATIONS.get(name)
 
 
 def resolve_relation(name: str, active: str) -> Optional[tuple[str, str, int]]:

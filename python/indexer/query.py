@@ -50,7 +50,11 @@ from typing import Any, Iterable, Literal, Optional, Sequence, overload
 
 # symbol.kind is stored as a CXCursorKind int (v16); these recover the name and
 # convert a name filter back to the stored int. Single source of truth = storage.
-from indexer.storage import SYMBOL_KIND_IDS, SYMBOL_KIND_NAMES
+from indexer.storage import (
+    SYMBOL_KIND_IDS,
+    SYMBOL_KIND_NAMES,
+    _validate_catalog_hash,
+)
 from indexer.generated_catalog import (
     CATALOG_HASH,
     EDGE_KINDS as _GENERATED_EDGE_KINDS,
@@ -954,15 +958,7 @@ class GraphQuery:
         self._c.row_factory = sqlite3.Row
         self.db_path = db_path
         self._owns_conn = True
-        stored_hash = self._c.execute(
-            "SELECT value FROM meta WHERE key = 'catalog_hash'"
-        ).fetchone()
-        if stored_hash is None or stored_hash[0] != CATALOG_HASH:
-            actual = "missing" if stored_hash is None else stored_hash[0]
-            raise RuntimeError(
-                f"incompatible cidx semantic catalogs: catalog_hash {actual!r}; "
-                f"expected {CATALOG_HASH!r}. Regenerate the index."
-            )
+        _validate_catalog_hash(self._c, db_path, require_present=True)
         self._file_cache: Optional[dict[int, tuple[str, Optional[str]]]] = None
         self._resolved: Optional[bool] = None
         self._entity_nodes_ready: Optional[bool] = None
@@ -979,6 +975,7 @@ class GraphQuery:
         self._c = conn
         self.db_path = db_path
         self._owns_conn = False
+        _validate_catalog_hash(conn, db_path, require_present=True)
         self._file_cache = None
         self._resolved = None
         self._entity_nodes_ready = None

@@ -1,0 +1,19 @@
+{
+  "format": "cidx.catalog.extension/v1",
+  "package": "test.extension",
+  "version": 1,
+  "relations": [
+    {
+      "id": "relation/taints",
+      "name": "taints",
+      "layer": "symbol",
+      "source": "symbol.declaration",
+      "target": "symbol.declaration",
+      "inverse": "tainted_by",
+      "traversal": ["out", "in"],
+      "evidence": "derived",
+      "evidence_capabilities": ["derived", "proof"],
+      "completeness": "partial"
+    }
+  ]
+}

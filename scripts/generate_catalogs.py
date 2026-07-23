@@ -11,16 +11,44 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "catalogs/core.json"
 LOCK = ROOT / "catalogs/compatibility.json"
+EXTENSIONS_DIR = ROOT / "catalogs/extensions"
 
 
 def canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def load_extensions() -> list[dict[str, Any]]:
+    manifests = []
+    for path in sorted(EXTENSIONS_DIR.glob("*.json")):
+        manifest = json.loads(path.read_text())
+        if manifest.get("format") != "cidx.catalog.extension/v1":
+            raise SystemExit(f"extension {path} must declare cidx.catalog.extension/v1")
+        package = manifest.get("package", "")
+        if not re.fullmatch(r"[a-z][a-z0-9_.-]*", package):
+            raise SystemExit(f"extension {path} has invalid package namespace")
+        relations = manifest.get("relations")
+        if not isinstance(relations, list) or not relations:
+            raise SystemExit(f"extension {path} must declare relations")
+        for relation in relations:
+            if not isinstance(relation.get("id"), str) or ":" in relation["id"]:
+                raise SystemExit(f"extension {path} relation ids must be package-local strings")
+            if not relation["id"].startswith("relation/"):
+                raise SystemExit(f"extension {path} relation ids must use relation/<name>")
+            for key in ("source", "target", "inverse", "traversal", "evidence", "evidence_capabilities", "completeness"):
+                if key not in relation:
+                    raise SystemExit(f"extension {path} relation missing {key}")
+            relation["qualified_name"] = f"{package}/{relation['id']}"
+        manifest["path"] = str(path.relative_to(ROOT))
+        manifests.append(manifest)
+    return manifests
 
 
 def load() -> tuple[dict[str, Any], str]:
@@ -44,10 +72,16 @@ def load() -> tuple[dict[str, Any], str]:
     if len(relation_keys) != len(set(relation_keys)):
         raise SystemExit("relation ids must be unique within each layer")
     for row in data["relations"]:
+        required = ("source", "target", "inverse", "traversal", "evidence", "evidence_capabilities", "completeness")
+        if any(key not in row for key in required):
+            raise SystemExit(f"relation {row.get('name', '<unnamed>')} must declare endpoint and capability metadata")
+        if not row["traversal"] or not row["evidence_capabilities"]:
+            raise SystemExit(f"relation {row['name']} must declare traversal/evidence capabilities")
         if row["completeness"] not in data["statuses"]:
             raise SystemExit(f"unknown completeness status: {row['completeness']}")
         if row["evidence"] not in data["evidence_classes"] and row["evidence"] != "call_site" and row["evidence"] != "reference_site" and row["evidence"] != "declaration":
             raise SystemExit(f"unknown evidence class: {row['evidence']}")
+    data["extensions"] = load_extensions()
     return data, hashlib.sha256(canonical(data).encode()).hexdigest()
 
 
@@ -58,15 +92,37 @@ def compatibility_check(data: dict[str, Any]) -> dict[str, Any]:
     }
     if data["relations"]:
         current["relations"] = {f"{row['layer']}:{row['id']}": row["name"] for row in data["relations"]}
-    baseline = json.loads(LOCK.read_text()) if LOCK.exists() else {"catalog_version": data["catalog_version"], "entries": current}
-    migrations = {(m.get("catalog"), str(m.get("id")), m.get("from"), m.get("to")) for m in data.get("migrations", [])}
+    baseline = json.loads(LOCK.read_text()) if LOCK.exists() else {"catalog_version": data["catalog_version"], "entries": current, "tombstones": {}}
+    migrations = data.get("migrations", [])
+
+    def migration(group: str, key: str, old: str, new: str | None, action: str | None = None) -> bool:
+        return any(
+            m.get("catalog") == group
+            and str(m.get("id", m.get("key"))) == key
+            and m.get("from") == old
+            and m.get("to") == new
+            and (action is None or m.get("action") == action)
+            for m in migrations
+        )
+
+    tombstones = {group: dict(rows) for group, rows in baseline.get("tombstones", {}).items()}
     for group, old_rows in baseline.get("entries", {}).items():
         for key, old_name in old_rows.items():
             new_name = current.get(group, {}).get(key)
-            if new_name is not None and new_name != old_name:
-                if not any(m[0] == group and m[1] == key and m[2] == old_name and m[3] == new_name for m in migrations):
-                    raise SystemExit(f"{group} id {key} renamed {old_name!r}->{new_name!r} without a migration entry")
-    return {"catalog_version": data["catalog_version"], "entries": current}
+            if new_name is None:
+                if not migration(group, key, old_name, None, "tombstone"):
+                    raise SystemExit(f"{group} id {key} deleted without an explicit tombstone migration")
+                tombstones.setdefault(group, {})[key] = old_name
+            elif new_name != old_name and not migration(group, key, old_name, new_name):
+                raise SystemExit(f"{group} id {key} renamed {old_name!r}->{new_name!r} without a migration entry")
+    for group, old_rows in tombstones.items():
+        for key, old_name in list(old_rows.items()):
+            new_name = current.get(group, {}).get(key)
+            if new_name is not None:
+                if not migration(group, key, old_name, new_name, "reuse"):
+                    raise SystemExit(f"{group} id {key} reuses tombstoned identity without an explicit reuse migration")
+                del old_rows[key]
+    return {"catalog_version": data["catalog_version"], "entries": current, "tombstones": tombstones}
 
 
 def py_name(name: str) -> str:
@@ -78,16 +134,6 @@ def render_python(data: dict[str, Any], digest: str) -> str:
         return "{\n" + "\n".join(f"    {row['name']!r}: {row['id']}," for row in rows) + "\n}"
     relations = [(r["name"], r["layer"], r["id"]) for r in data["relations"]]
     return f'''# Generated by scripts/generate_catalogs.py; DO NOT EDIT.\nfrom dataclasses import dataclass\nfrom enum import StrEnum\n\nCATALOG_VERSION = {data["catalog_version"]}\nCATALOG_HASH = {digest!r}\n\nclass CatalogView(StrEnum):\n    SYMBOL = "symbol"\n    ENTITY = "entity"\n\nclass ResultStatus(StrEnum):\n{''.join(f'    {py_name(s).upper()} = "{s}"\n' for s in data["statuses"])}\n\nclass EvidenceClass(StrEnum):\n{''.join(f'    {py_name(s).upper()} = "{s}"\n' for s in data["evidence_classes"])}\n\nSYMBOL_KIND_IDS = {dict_rows(data["symbol_kinds"])}\nSYMBOL_KIND_NAMES = {{v: k for k, v in SYMBOL_KIND_IDS.items()}}\nSYMBOL_KINDS = frozenset(SYMBOL_KIND_IDS)\nENTITY_KIND_NAMES = tuple(row["name"] for row in {data["entity_kinds"]!r})\nTYPE_KIND_NAMES = {{row["id"]: row["name"] for row in {data["type_kinds"]!r}}}\nTYPE_EDGE_KIND_NAMES = {{row["id"]: row["name"] for row in {data["type_edge_kinds"]!r}}}\nEDGE_KINDS = {dict_rows(data["relations"][:20])}\nENTITY_EDGE_KINDS = {dict_rows(data["relations"][20:])}\nRELATION_CATALOG = {relations!r}\nFIELD_CATALOG = {[(f["name"], f["filterable"], f["is_string"]) for f in data["fields"]]!r}\nUNKNOWN_REASONS = {dict_rows(data["unknown_reasons"])}\nARTIFACT_KINDS = {dict_rows(data["artifact_kinds"])}\n\n@dataclass(frozen=True)\nclass ArtifactManifest:\n    artifact_kind: str\n    schema_version: int\n    catalog_version: int\n    catalog_hash: str\n    status: str = "complete"\n    evidence: str = "source"\n\n    def as_dict(self) -> dict[str, object]:\n        return {{"artifact_kind": self.artifact_kind, "schema_version": self.schema_version, "catalog_version": self.catalog_version, "catalog_hash": self.catalog_hash, "status": self.status, "evidence": self.evidence}}\n'''
-
-
-def render_cpp(data: dict[str, Any], digest: str) -> str:
-    def rows(name: str, values: list[dict[str, Any]], fields: str) -> str:
-        return f"inline constexpr std::array<{name}, {len(values)}> k{py_name(name)}s = {{\n" + "".join(f"    {{{json.dumps(row.get('id', row.get('name')))}, {json.dumps(row['name'])}{', ' + json.dumps(row.get('layer', '')) if 'layer' in row else ''}}},\n" for row in values) + "};\n"
-    rel = "".join(f'    {{{r["id"]}, "{r["name"]}", View::{"Symbol" if r["layer"] == "symbol" else "Entity"}}},\n' for r in data["relations"])
-    fields = "".join(f'    {{"{f["name"]}", {str(f["filterable"]).lower()}, {str(f["is_string"]).lower()}}},\n' for f in data["fields"])
-    def named(rows: list[dict[str, Any]]) -> str:
-        return "".join(f'    {{{r["id"]}, "{r["name"]}"}},\n' for r in rows)
-    return f'''// Generated by scripts/generate_catalogs.py; DO NOT EDIT.\n#pragma once\n#include <array>\n#include <cstdint>\n#include <string_view>\n\nnamespace cidx::catalog {{\ninline constexpr int kCatalogVersion = {data["catalog_version"]};\ninline constexpr std::string_view kCatalogHash = "{digest}";\nenum class View {{ Symbol, Entity }};\nstruct NamedId {{ int64_t id; std::string_view name; }};\nstruct Relation {{ int64_t id; std::string_view name; View layer; }};\nstruct Field {{ std::string_view name; bool filterable; bool is_string; }};\ninline constexpr std::array<NamedId, {len(data["symbol_kinds"])}> kSymbolKinds = {{\n{named(data["symbol_kinds"])} }};\ninline constexpr std::array<NamedId, {len(data["entity_kinds"])}> kEntityKinds = {{\n{named(data["entity_kinds"])} }};\ninline constexpr std::array<NamedId, {len(data["type_kinds"])}> kTypeKinds = {{\n{named(data["type_kinds"])} }};\ninline constexpr std::array<NamedId, {len(data["type_edge_kinds"])}> kTypeEdgeKinds = {{\n{named(data["type_edge_kinds"])} }};\ninline constexpr std::array<Relation, {len(data["relations"])}> kRelations = {{\n{rel}}};\ninline constexpr std::array<Field, {len(data["fields"])}> kFields = {{\n{fields}}};\ninline constexpr std::array<std::string_view, {len(data["statuses"])}> kStatuses = {{{', '.join(json.dumps(s) for s in data["statuses"])}}};\ninline constexpr std::array<std::string_view, {len(data["evidence_classes"])}> kEvidenceClasses = {{{', '.join(json.dumps(s) for s in data["evidence_classes"])}}};\n}} // namespace cidx::catalog\n'''
 
 
 def render_cpp(data: dict[str, Any], digest: str) -> str:
@@ -107,7 +153,7 @@ def render_cpp(data: dict[str, Any], digest: str) -> str:
 
     relations = "".join(
         row(
-            ["id", "name", "layer", "source", "target", "inverse", "evidence", "completeness"],
+            ["id", "name", "layer", "source", "target", "inverse", "traversal", "evidence", "evidence_capabilities", "completeness"],
             [
                 str(item["id"]),
                 json.dumps(item["name"]),
@@ -115,7 +161,9 @@ def render_cpp(data: dict[str, Any], digest: str) -> str:
                 json.dumps(item.get("source", item["layer"])),
                 json.dumps(item.get("target", item["layer"])),
                 json.dumps(item["inverse"]),
+                json.dumps("|".join(item["traversal"])),
                 json.dumps(item["evidence"]),
+                json.dumps("|".join(item["evidence_capabilities"])),
                 json.dumps(item["completeness"]),
             ],
         )
@@ -144,7 +192,7 @@ def render_cpp(data: dict[str, Any], digest: str) -> str:
         f"inline constexpr std::string_view kCatalogHash = {json.dumps(digest)};",
         "enum class View : std::uint8_t { Symbol, Entity };",
         "struct NamedId { int64_t id; std::string_view name; };",
-        "struct Relation { int64_t id; std::string_view name; View layer; std::string_view source; std::string_view target; std::string_view inverse; std::string_view evidence; std::string_view completeness; };",
+        "struct Relation { int64_t id; std::string_view name; View layer; std::string_view source; std::string_view target; std::string_view inverse; std::string_view traversal; std::string_view evidence; std::string_view evidence_capabilities; std::string_view completeness; };",
         "struct Field { std::string_view name; bool filterable; bool is_string; };",
         array("NamedId", "kSymbolKinds", named(data["symbol_kinds"]), len(data["symbol_kinds"])),
         array("NamedId", "kEntityKinds", named(data["entity_kinds"]), len(data["entity_kinds"])),
@@ -174,6 +222,15 @@ def render_sql(data: dict[str, Any], digest: str) -> str:
         out.append(f"INSERT OR IGNORE INTO {table}(id,name) VALUES")
         values = [f"  ({r['id']},{json.dumps(r['name'])})" for r in rows]
         out.append(",\n".join(values) + ";")
+    for relation in data["relations"]:
+        key = f"relation:{relation['layer']}:{relation['id']}"
+        value = canonical({k: relation[k] for k in ("name", "source", "target", "inverse", "traversal", "evidence", "evidence_capabilities", "completeness")})
+        out.append("INSERT OR IGNORE INTO meta(key,value) VALUES (" + json.dumps(key) + ",'" + value.replace("'", "''") + "');")
+    for extension in data.get("extensions", []):
+        for relation in extension["relations"]:
+            value = canonical({"package": extension["package"], **relation})
+            key = f"extension:{relation['qualified_name']}"
+            out.append("INSERT OR IGNORE INTO meta(key,value) VALUES (" + json.dumps(key) + ",'" + value.replace("'", "''") + "');")
     out.extend([
         "INSERT OR IGNORE INTO meta(key,value) VALUES ('catalog_version'," + str(data["catalog_version"]) + ");",
         "INSERT OR IGNORE INTO meta(key,value) VALUES ('catalog_hash'," + json.dumps(digest) + ");",
@@ -202,19 +259,58 @@ def render_schema(data: dict[str, Any], digest: str) -> str:
 
 
 def render_docs(data: dict[str, Any], digest: str) -> str:
-    lines = ["# Generated CIDX semantic catalog", "", f"- Catalog version: `{data['catalog_version']}`", f"- Catalog hash: `{digest}`", "", "## Relations", "", "| Layer | ID | Name | Inverse | Evidence | Completeness |", "|---|---:|---|---|---|---|"]
-    lines += [f"| {r['layer']} | {r['id']} | `{r['name']}` | `{r['inverse']}` | {r['evidence']} | {r['completeness']} |" for r in data["relations"]]
+    lines = ["# Generated CIDX semantic catalog", "", f"- Catalog version: `{data['catalog_version']}`", f"- Catalog hash: `{digest}`", "", "## Relations", "", "| Layer | ID | Name | Source | Target | Inverse | Traversal | Evidence | Evidence capabilities | Completeness |", "|---|---:|---|---|---|---|---|---|---|---|"]
+    lines += [f"| {r['layer']} | {r['id']} | `{r['name']}` | `{r['source']}` | `{r['target']}` | `{r['inverse']}` | {','.join(r['traversal'])} | {r['evidence']} | {','.join(r['evidence_capabilities'])} | {r['completeness']} |" for r in data["relations"]]
     lines += ["", "## Compatibility", "", "Stable IDs are locked in `catalogs/compatibility.json`. A rename or reuse requires a migration entry in the source and a new catalog version.", ""]
     return "\n".join(lines)
 
 
 def render_souffle(data: dict[str, Any], digest: str) -> str:
-    lines = ["// Generated by scripts/generate_catalogs.py; DO NOT EDIT.", f"// catalog_hash = {digest}", ".decl cidx_symbol_kind(id:number, name:symbol)", ".decl cidx_relation(id:number, layer:symbol, name:symbol, inverse:symbol, completeness:symbol)", ".decl cidx_status(name:symbol)", ".decl cidx_evidence(name:symbol)", ""]
+    lines = ["// Generated by scripts/generate_catalogs.py; DO NOT EDIT.", f"// catalog_hash = {digest}", ".decl cidx_symbol_kind(id:number, name:symbol)", ".decl cidx_relation(id:number, layer:symbol, name:symbol, source:symbol, target:symbol, inverse:symbol, traversal:symbol, evidence:symbol, evidence_capabilities:symbol, completeness:symbol)", ".decl cidx_extension_relation(qualified_name:symbol, package:symbol, id:symbol, name:symbol, layer:symbol, source:symbol, target:symbol, inverse:symbol, traversal:symbol, evidence:symbol, evidence_capabilities:symbol, completeness:symbol)", ".decl cidx_status(name:symbol)", ".decl cidx_evidence(name:symbol)", ""]
     lines += [f"#define CIDX_CATALOG_HASH \"{digest}\"", ""]
+    lines += [f"cidx_symbol_kind({row['id']}, \"{row['name']}\")." for row in data["symbol_kinds"]]
     lines += [f"cidx_status(\"{s}\")." for s in data["statuses"]]
     lines += [f"cidx_evidence(\"{s}\")." for s in data["evidence_classes"]]
-    lines += [f"cidx_relation({r['id']}, \"{r['layer']}\", \"{r['name']}\", \"{r['inverse']}\", \"{r['completeness']}\")." for r in data["relations"]]
+    lines += [f"cidx_relation({r['id']}, \"{r['layer']}\", \"{r['name']}\", \"{r['source']}\", \"{r['target']}\", \"{r['inverse']}\", \"{'|'.join(r['traversal'])}\", \"{r['evidence']}\", \"{'|'.join(r['evidence_capabilities'])}\", \"{r['completeness']}\")." for r in data["relations"]]
+    lines += [f"cidx_extension_relation(\"{r['qualified_name']}\", \"{extension['package']}\", \"{r['id']}\", \"{r['name']}\", \"{r['layer']}\", \"{r['source']}\", \"{r['target']}\", \"{r['inverse']}\", \"{'|'.join(r['traversal'])}\", \"{r['evidence']}\", \"{'|'.join(r['evidence_capabilities'])}\", \"{r['completeness']}\")." for extension in data.get("extensions", []) for r in extension["relations"]]
     return "\n".join(lines) + "\n"
+
+
+def render_extensions_python(data: dict[str, Any], digest: str) -> str:
+    relations = {}
+    for extension in data.get("extensions", []):
+        for relation in extension["relations"]:
+            relations[relation["qualified_name"]] = {
+                "package": extension["package"],
+                **{key: relation[key] for key in ("id", "name", "layer", "source", "target", "inverse", "traversal", "evidence", "evidence_capabilities", "completeness")},
+            }
+    return "# Generated by scripts/generate_catalogs.py; DO NOT EDIT.\n" + f"CATALOG_HASH = {digest!r}\nEXTENSION_RELATIONS = {relations!r}\nEXTENSION_RELATION_CATALOG = tuple(EXTENSION_RELATIONS.items())\n"
+
+
+def render_extensions_cpp(data: dict[str, Any], digest: str) -> str:
+    rows = []
+    names = ("qualified_name", "package", "id", "name", "layer", "source", "target", "inverse", "traversal", "evidence", "evidence_capabilities", "completeness")
+    for extension in data.get("extensions", []):
+        for relation in extension["relations"]:
+            values = [
+                relation["qualified_name"], extension["package"], relation["id"], relation["name"],
+                relation["layer"], relation["source"], relation["target"], relation["inverse"],
+                "|".join(relation["traversal"]), relation["evidence"],
+                "|".join(relation["evidence_capabilities"]), relation["completeness"],
+            ]
+            rows.append("    {" + ", ".join(f".{name} = {json.dumps(value)}" for name, value in zip(names, values)) + "},")
+    return (
+        "// Generated by scripts/generate_catalogs.py; DO NOT EDIT.\n"
+        "#pragma once\n"
+        "#include <array>\n"
+        "#include <string_view>\n"
+        "namespace cidx::catalog {\n"
+        "struct ExtensionRelation { std::string_view qualified_name; std::string_view package; std::string_view id; std::string_view name; std::string_view layer; std::string_view source; std::string_view target; std::string_view inverse; std::string_view traversal; std::string_view evidence; std::string_view evidence_capabilities; std::string_view completeness; };\n"
+        f"inline constexpr std::string_view kExtensionCatalogHash = {json.dumps(digest)};\n"
+        f"inline constexpr std::array<ExtensionRelation, {len(rows)}> kExtensionRelations = {{{{\n"
+        + "\n".join(rows)
+        + "\n}};\n}\n"
+    )
 
 
 def outputs(data: dict[str, Any], digest: str) -> dict[Path, str]:
@@ -229,7 +325,9 @@ def outputs(data: dict[str, Any], digest: str) -> dict[Path, str]:
             "source": r.get("source", r["layer"]),
             "target": r.get("target", r["layer"]),
             "inverse": r["inverse"],
+            "traversal": r["traversal"],
             "evidence": r["evidence"],
+            "evidence_capabilities": r["evidence_capabilities"],
             "completeness": r["completeness"],
         }
         for r in data["relations"]
@@ -266,6 +364,8 @@ def outputs(data: dict[str, Any], digest: str) -> dict[Path, str]:
         ROOT / "schemas/semantic-artifact.schema.json": json.dumps(artifact_schema, indent=2) + "\n",
         ROOT / "docs/generated/semantic-catalog.md": render_docs(data, digest),
         ROOT / "src/astgraph/rules/catalog_generated.dl": render_souffle(data, digest),
+        ROOT / "python/indexer/generated_extensions.py": render_extensions_python(data, digest),
+        ROOT / "src/catalogs/generated_extensions.hpp": render_extensions_cpp(data, digest),
         ROOT / "tests/golden/catalog_manifest.json": json.dumps({"catalog_version": data["catalog_version"], "catalog_hash": digest, "artifact_kinds": data["artifact_kinds"]}, indent=2) + "\n",
     }
 

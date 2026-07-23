@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "catalogs/generated_extensions.hpp"
 #include "cli/json_out.hpp"
 
 namespace cidx::query {
@@ -45,12 +46,17 @@ struct RelationDesc {
   std::string source;
   std::string target;
   std::string inverse;
+  std::string traversal;
   std::string evidence;
+  std::string evidence_capabilities;
   std::string completeness;
 };
 
 // All catalogued relations (18 symbol-layer + 12 entity-layer).
 const std::vector<RelationDesc> &relation_catalog();
+const std::array<catalog::ExtensionRelation,
+                 catalog::kExtensionRelations.size()> &
+extension_relation_catalog();
 
 // Resolve `name` (bare or "symbol."/"entity."-qualified) in `active` view.
 // Returns nullptr when unknown.

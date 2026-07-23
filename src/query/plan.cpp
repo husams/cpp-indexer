@@ -33,13 +33,21 @@ const std::vector<RelationDesc> &relation_catalog() {
           .source = std::string(relation.source),
           .target = std::string(relation.target),
           .inverse = std::string(relation.inverse),
+          .traversal = std::string(relation.traversal),
           .evidence = std::string(relation.evidence),
+          .evidence_capabilities = std::string(relation.evidence_capabilities),
           .completeness = std::string(relation.completeness),
       });
     }
     return result;
   }();
   return cat;
+}
+
+const std::array<catalog::ExtensionRelation,
+                 catalog::kExtensionRelations.size()> &
+extension_relation_catalog() {
+  return catalog::kExtensionRelations;
 }
 
 const RelationDesc *resolve_relation(const std::string &name, View active) {

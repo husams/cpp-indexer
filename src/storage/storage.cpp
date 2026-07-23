@@ -146,6 +146,28 @@ Storage::Storage(const std::string &path, OpenMode mode)
     return;
   }
   db_.exec("PRAGMA foreign_keys = ON");
+  // Reject an incompatible existing catalog before migrations or schema
+  // seeding can mutate the database. Fresh and legacy databases without a
+  // catalog hash are allowed to receive the current seed below.
+  std::string existing_catalog_hash;
+  try {
+    auto catalog_stmt =
+        db_.prepare("SELECT value FROM meta WHERE key = 'catalog_hash'");
+    if (catalog_stmt.step()) {
+      existing_catalog_hash = catalog_stmt.col_text(0);
+    }
+  } catch (const StorageError &e) {
+    if (!std::string(e.what()).contains("no such table")) {
+      throw;
+    }
+  }
+  if (!existing_catalog_hash.empty() &&
+      existing_catalog_hash != catalog::kCatalogHash) {
+    throw CidxError(
+        "catalog_hash " + existing_catalog_hash +
+        " does not match the required " + std::string(catalog::kCatalogHash) +
+        " (regenerate the database with the matching semantic catalogs)");
+  }
   migrate(); // BEFORE the schema script: its indexes need migrated columns
              // (G19)
   db_.exec(kSchema);
