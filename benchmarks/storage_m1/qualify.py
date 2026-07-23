@@ -28,11 +28,18 @@ REQUIRED_RELATIONS = {
     "edge",
     "def_edge",
     "entity_edge",
-    "possible_call",
     "type_edge",
     "include_edge",
     "edge_site",
     "include_site",
+}
+REVERSE_QUERY_IDS = {
+    "incoming_one_hop",
+    "definition_incoming",
+    "possible_call_incoming",
+    "type_closure_reverse",
+    "entity_graph_reverse",
+    "include_graph_reverse",
 }
 
 
@@ -197,14 +204,9 @@ def query_cases(connection: sqlite3.Connection) -> list[dict[str, Any]]:
     ).fetchone()
     edge_src = first("SELECT src_id FROM edge ORDER BY src_id, dst_id LIMIT 1")
     edge_dst = first("SELECT dst_id FROM edge ORDER BY dst_id, src_id LIMIT 1")
-    edge_site_src = first(
-        "SELECT edge.src_id FROM edge_site JOIN edge ON edge.id=edge_site.edge_id "
-        "ORDER BY edge.src_id, edge.id LIMIT 1"
-    )
+    edge_site_id = first("SELECT edge_id FROM edge_site ORDER BY edge_id LIMIT 1")
     def_src = first("SELECT src_def_id FROM def_edge ORDER BY src_def_id, dst_id LIMIT 1")
     def_dst = first("SELECT dst_id FROM def_edge ORDER BY dst_id, src_def_id LIMIT 1")
-    call_src = first("SELECT src_def_id FROM possible_call ORDER BY src_def_id, dst_def_id LIMIT 1")
-    call_dst = first("SELECT dst_def_id FROM possible_call ORDER BY dst_def_id, src_def_id LIMIT 1")
     type_src = first("SELECT src_id FROM type_edge ORDER BY src_id, kind, position LIMIT 1")
     type_dst = first("SELECT dst_id FROM type_edge ORDER BY dst_id, src_id LIMIT 1")
     entity_src = first("SELECT src_id FROM entity_edge ORDER BY src_id, dst_id LIMIT 1")
@@ -216,25 +218,28 @@ def query_cases(connection: sqlite3.Connection) -> list[dict[str, Any]]:
     return [
         {"id": "exact_identity", "sql": "SELECT id, usr, spelling, qual_name FROM symbol WHERE id = ?", "params": [symbol_id], "expected": None, "limit": 10, "require_rows": True},
         {"id": "name_prefix", "sql": "SELECT id, usr, qual_name FROM symbol WHERE qual_name LIKE ? ORDER BY qual_name LIMIT 100", "params": [prefix], "expected": "idx_symbol_qual_nc", "limit": 100},
-        {"id": "outgoing_one_hop", "sql": "SELECT dst_id, kind, count FROM edge WHERE src_id = ? ORDER BY dst_id", "params": [edge_src], "expected": "sqlite_autoindex_edge_1", "limit": 100, "require_rows": True},
-        {"id": "incoming_one_hop", "sql": "SELECT src_id, kind, count FROM edge WHERE dst_id = ? ORDER BY src_id", "params": [edge_dst], "expected": "idx_edge_dst", "limit": 100, "require_rows": True},
-        {"id": "definition_outgoing", "sql": "SELECT dst_id, kind, count FROM def_edge WHERE src_def_id = ? ORDER BY dst_id", "params": [def_src], "expected": "sqlite_autoindex_def_edge_1", "limit": 100, "require_rows": True},
-        {"id": "definition_incoming", "sql": "SELECT src_def_id, kind, count FROM def_edge WHERE dst_id = ? ORDER BY src_def_id", "params": [def_dst], "expected": "idx_def_edge_dst", "limit": 100, "require_rows": True},
-        {"id": "possible_call_outgoing", "sql": "SELECT dst_def_id, count FROM possible_call WHERE src_def_id = ? ORDER BY dst_def_id", "params": [call_src], "expected": "sqlite_autoindex_possible_call_1", "limit": 100, "require_rows": False},
-        {"id": "possible_call_incoming", "sql": "SELECT src_def_id, count FROM possible_call WHERE dst_def_id = ? ORDER BY src_def_id", "params": [call_dst], "expected": "idx_possible_call_dst", "limit": 100, "require_rows": False},
-        {"id": "bounded_paths", "sql": "WITH RECURSIVE walk(id, depth) AS (SELECT ?, 0 UNION ALL SELECT edge.dst_id, walk.depth + 1 FROM walk JOIN edge ON edge.src_id = walk.id WHERE walk.depth < 3) SELECT id, depth FROM walk ORDER BY depth, id", "params": [edge_src], "expected": "sqlite_autoindex_edge_1", "limit": 1000, "require_rows": True},
-        {"id": "references_sites", "sql": "SELECT edge_site.edge_id, edge_site.file_id, edge_site.line, edge_site.col FROM edge_site JOIN edge ON edge.id = edge_site.edge_id WHERE edge.src_id = ? ORDER BY edge_site.file_id, edge_site.line, edge_site.col", "params": [edge_site_src], "expected": "idx_edge_src", "limit": 1000, "require_rows": True},
-        {"id": "type_closure_forward", "sql": "WITH RECURSIVE closure(id) AS (SELECT ? UNION SELECT type_edge.dst_id FROM closure JOIN type_edge ON type_edge.src_id = closure.id) SELECT id FROM closure ORDER BY id", "params": [type_src], "expected": "PRIMARY KEY", "limit": 1000, "require_rows": True},
-        {"id": "type_closure_reverse", "sql": "SELECT src_id, kind, position FROM type_edge WHERE dst_id = ? ORDER BY src_id, kind, position", "params": [type_dst], "expected": "idx_type_edge_dst", "limit": 1000, "require_rows": True},
-        {"id": "entity_graph_forward", "sql": "SELECT dst_id, kind, count FROM entity_edge WHERE src_id = ? ORDER BY dst_id", "params": [entity_src], "expected": "idx_entity_edge_identity", "limit": 1000, "require_rows": True},
-        {"id": "entity_graph_reverse", "sql": "SELECT src_id, kind, count FROM entity_edge WHERE dst_id = ? ORDER BY src_id", "params": [entity_dst], "expected": "idx_entity_edge_dst", "limit": 1000, "require_rows": True},
-        {"id": "include_graph", "sql": "SELECT dst_file_id, dst_path, count FROM include_edge WHERE src_file_id = ? ORDER BY dst_path", "params": [include_src], "expected": "sqlite_autoindex_include_edge_1", "limit": 1000, "require_rows": True},
-        {"id": "include_graph_reverse", "sql": "SELECT src_file_id, dst_path, count FROM include_edge WHERE dst_file_id = ? ORDER BY src_file_id", "params": [include_dst], "expected": "idx_include_edge_dst", "limit": 1000, "require_rows": True},
-        {"id": "include_sites", "sql": "SELECT edge_id, begin_offset, end_offset FROM include_site WHERE edge_id = ? ORDER BY begin_offset", "params": [include_site_edge], "expected": "sqlite_autoindex_include_site_1", "limit": 1000, "require_rows": True},
+        {"id": "outgoing_one_hop", "sql": "SELECT dst_id, kind, count FROM edge WHERE src_id = ? ORDER BY dst_id", "params": [edge_src], "strategy_table": "edge", "strategy_direction": "forward", "limit": 100, "require_rows": True},
+        {"id": "incoming_one_hop", "sql": "SELECT src_id, kind, count FROM edge WHERE dst_id = ? ORDER BY src_id", "params": [edge_dst], "strategy_table": "edge", "strategy_direction": "reverse", "limit": 100, "require_rows": True},
+        {"id": "definition_outgoing", "sql": "SELECT dst_id, kind, count FROM def_edge WHERE src_def_id = ? ORDER BY dst_id", "params": [def_src], "strategy_table": "def_edge", "strategy_direction": "forward", "limit": 100, "require_rows": True},
+        {"id": "definition_incoming", "sql": "SELECT src_def_id, kind, count FROM def_edge WHERE dst_id = ? ORDER BY src_def_id", "params": [def_dst], "strategy_table": "def_edge", "strategy_direction": "reverse", "limit": 100, "require_rows": True},
+        {"id": "bounded_paths", "sql": "WITH RECURSIVE walk(id, depth) AS (SELECT ?, 0 UNION ALL SELECT edge.dst_id, walk.depth + 1 FROM walk JOIN edge ON edge.src_id = walk.id WHERE walk.depth < 3) SELECT id, depth FROM walk ORDER BY depth, id", "params": [edge_src], "strategy_table": "edge", "strategy_direction": "forward", "limit": 1000, "require_rows": True},
+        {"id": "references_sites", "sql": "SELECT edge_id, file_id, line, col FROM edge_site WHERE edge_id = ? ORDER BY file_id, line, col", "params": [edge_site_id], "strategy_table": "edge_site", "strategy_direction": "forward", "limit": 1000, "require_rows": True},
+        {"id": "type_closure_forward", "sql": "WITH RECURSIVE closure(id) AS (SELECT ? UNION SELECT type_edge.dst_id FROM closure JOIN type_edge ON type_edge.src_id = closure.id) SELECT id FROM closure ORDER BY id", "params": [type_src], "strategy_table": "type_edge", "strategy_direction": "forward", "limit": 1000, "require_rows": True},
+        {"id": "type_closure_reverse", "sql": "SELECT src_id, kind, position FROM type_edge WHERE dst_id = ? ORDER BY src_id, kind, position", "params": [type_dst], "strategy_table": "type_edge", "strategy_direction": "reverse", "limit": 1000, "require_rows": True},
+        {"id": "entity_graph_forward", "sql": "SELECT dst_id, kind, count FROM entity_edge WHERE src_id = ? ORDER BY dst_id", "params": [entity_src], "strategy_table": "entity_edge", "strategy_direction": "forward", "limit": 1000, "require_rows": True},
+        {"id": "entity_graph_reverse", "sql": "SELECT src_id, kind, count FROM entity_edge WHERE dst_id = ? ORDER BY src_id", "params": [entity_dst], "strategy_table": "entity_edge", "strategy_direction": "reverse", "limit": 1000, "require_rows": True},
+        {"id": "include_graph", "sql": "SELECT dst_file_id, dst_path, count FROM include_edge WHERE src_file_id = ? ORDER BY dst_path", "params": [include_src], "strategy_table": "include_edge", "strategy_direction": "forward", "limit": 1000, "require_rows": True},
+        {"id": "include_graph_reverse", "sql": "SELECT src_file_id, dst_path, count FROM include_edge WHERE dst_file_id = ? ORDER BY src_file_id", "params": [include_dst], "strategy_table": "include_edge", "strategy_direction": "reverse", "limit": 1000, "require_rows": True},
+        {"id": "include_sites", "sql": "SELECT edge_id, begin_offset, end_offset FROM include_site WHERE edge_id = ? ORDER BY begin_offset", "params": [include_site_edge], "strategy_table": "include_site", "strategy_direction": "forward", "limit": 1000, "require_rows": True},
     ]
 
 
-def query_evidence(connection: sqlite3.Connection, cases: list[dict[str, Any]], iterations: int) -> list[dict[str, Any]]:
+def query_evidence(
+    connection: sqlite3.Connection,
+    cases: list[dict[str, Any]],
+    iterations: int,
+    strategy_expectations: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     evidence = []
     for case in cases:
         plan = connection.execute("EXPLAIN QUERY PLAN " + case["sql"], case["params"]).fetchall()
@@ -254,8 +259,20 @@ def query_evidence(connection: sqlite3.Connection, cases: list[dict[str, Any]], 
                 truncated = len(rows) > case["limit"]
         except sqlite3.DatabaseError as exc:
             error = str(exc)
-        expected = case["expected"]
-        indexed = expected is None or any(expected.lower() in line.lower() for line in plan_text)
+        expected = case.get("expected")
+        if expected is None and strategy_expectations is not None:
+            expected = strategy_expectations.get(case["id"])
+        if case.get("strategy_table") and expected is None:
+            error = "missing declared strategy expectation"
+        expected_text = expected.lower() if expected is not None else None
+        indexed = expected is None or any(
+            expected_text in line.lower()
+            or (
+                expected_text.startswith("primary key")
+                and "primary key" in line.lower()
+            )
+            for line in plan_text
+        )
         required_rows = case.get("require_rows", True)
         has_evidence = rows_seen > 0 or not required_rows
         status = "ok" if error is None and indexed and has_evidence else "error"
@@ -273,6 +290,8 @@ def query_evidence(connection: sqlite3.Connection, cases: list[dict[str, Any]], 
             },
             "plan": plan_text,
             "expected_index": expected,
+            "strategy_table": case.get("strategy_table"),
+            "strategy_direction": case.get("strategy_direction"),
             "indexed": indexed,
             "required_rows": required_rows,
             "has_evidence": has_evidence,
@@ -282,7 +301,36 @@ def query_evidence(connection: sqlite3.Connection, cases: list[dict[str, Any]], 
     return evidence
 
 
-def run_layout(path: Path, iterations: int) -> dict[str, Any]:
+def strategy_expectations(relation_strategies: list[dict[str, Any]]) -> dict[str, str]:
+    expectations = {}
+    for strategy in relation_strategies:
+        for query_id in strategy.get("query_ids", []):
+            direction = query_id in REVERSE_QUERY_IDS
+            expectations[query_id] = strategy.get("reverse" if direction else "forward")
+    return expectations
+
+
+def case_strategy_expectations(
+    relation_strategies: list[dict[str, Any]],
+    cases: list[dict[str, Any]],
+) -> dict[str, str]:
+    by_table = {strategy["table"]: strategy for strategy in relation_strategies}
+    expectations = strategy_expectations(relation_strategies)
+    for case in cases:
+        table = case.get("strategy_table")
+        if table is None:
+            continue
+        strategy = by_table.get(table)
+        if strategy is not None:
+            expectations[case["id"]] = strategy.get(case["strategy_direction"])
+    return expectations
+
+
+def run_layout(
+    path: Path,
+    iterations: int,
+    relation_strategies: list[dict[str, Any]],
+) -> dict[str, Any]:
     connection = connect(path, read_only=True)
     try:
         version = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
@@ -290,7 +338,12 @@ def run_layout(path: Path, iterations: int) -> dict[str, Any]:
             "SELECT value FROM meta WHERE key='graph_resolved_at'"
         ).fetchone()
         cases = query_cases(connection)
-        queries = query_evidence(connection, cases, iterations)
+        queries = query_evidence(
+            connection,
+            cases,
+            iterations,
+            case_strategy_expectations(relation_strategies, cases),
+        )
         return {
             "schema_version": int(version[0]) if version else None,
             "graph_resolved_at": resolved_row[0] if resolved_row else None,
@@ -353,6 +406,66 @@ def run_identity_sensitivity_check(source: Path) -> dict[str, Any]:
         }
 
 
+def run_strategy_negative_checks(
+    source: Path,
+    relation_strategies: list[dict[str, Any]],
+    iterations: int,
+) -> dict[str, Any]:
+    variants: list[tuple[str, list[dict[str, Any]], set[str]]] = []
+    bogus = [dict(strategy) for strategy in relation_strategies]
+    bogus_edge = next(strategy for strategy in bogus if strategy["table"] == "edge")
+    bogus_edge["forward"] = "definitely_not_an_index"
+    variants.append(("bogus_forward", bogus, {"outgoing_one_hop", "bounded_paths"}))
+
+    swapped = [dict(strategy) for strategy in relation_strategies]
+    swapped_edge = next(strategy for strategy in swapped if strategy["table"] == "edge")
+    swapped_edge["forward"], swapped_edge["reverse"] = (
+        swapped_edge["reverse"],
+        swapped_edge["forward"],
+    )
+    variants.append(("swapped_edge_directions", swapped, {"outgoing_one_hop", "incoming_one_hop"}))
+
+    results = []
+    for name, variant, expected_failures in variants:
+        connection = connect(source, read_only=True)
+        try:
+            cases = query_cases(connection)
+            queries = query_evidence(
+                connection,
+                cases,
+                iterations,
+                case_strategy_expectations(variant, cases),
+            )
+        finally:
+            connection.close()
+        failures = {
+            item["id"] for item in queries if item["status"] != "ok"
+        }
+        detected = expected_failures <= failures
+        results.append({
+            "name": name,
+            "expected_failures": sorted(expected_failures),
+            "observed_failures": sorted(failures),
+            "status": "pass" if detected else "fail",
+        })
+    return {
+        "status": "pass" if all(item["status"] == "pass" for item in results) else "fail",
+        "cases": results,
+    }
+
+
+def source_connection_count(source: Path, table: str | None) -> int:
+    if not table:
+        return -1
+    connection = connect(source, read_only=True)
+    try:
+        if not _has_table(connection, table):
+            return -1
+        return int(connection.execute(f"SELECT COUNT(*) FROM {qident(table)}").fetchone()[0])
+    finally:
+        connection.close()
+
+
 def run_runtime_profile(source: Path, mode: str, iterations: int) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="cidx-storage-m1-") as temporary:
         path = copy_for_profile(source, Path(temporary), mode)
@@ -398,6 +511,7 @@ def run_read_only_check(source: Path) -> dict[str, Any]:
                 connection.close()
             after = file_facts(path)
             new_sidecars = sorted(set(after) - set(before))
+            preexisting_sidecar_mutation = before.get("-shm") != after.get("-shm")
             persistent_unchanged = all(
                 after.get(key) == before.get(key)
                 for key in ("database", "-wal")
@@ -408,8 +522,10 @@ def run_read_only_check(source: Path) -> dict[str, Any]:
                 "before": before,
                 "after": after,
                 "new_sidecars": new_sidecars,
-                "preexisting_sidecar_mutation": before.get("-shm") != after.get("-shm"),
+                "preexisting_sidecar_mutation": preexisting_sidecar_mutation,
                 "preexisting_wal": "-wal" in before and "-shm" in before,
+                "contract": "persistent database/WAL bytes are immutable; pre-existing WAL -shm lock-state mutation is permitted",
+                "sidecar_mutation_allowed": preexisting_sidecar_mutation,
                 "profile": state,
             }
         finally:
@@ -614,9 +730,23 @@ def run_recovery_check(source: Path) -> dict[str, Any]:
 def qualify(source: Path, profile_path: Path, iterations: int) -> dict[str, Any]:
     profile = json.loads(profile_path.read_text())
     relation_strategies = profile["relation_strategies"]
+    deferred_relations = profile.get("deferred_relations", [])
     strategies = {item["table"] for item in relation_strategies}
     missing = sorted(REQUIRED_RELATIONS - strategies)
-    layout = run_layout(source, iterations)
+    deferred_relation_validation = []
+    for item in deferred_relations:
+        table = item.get("table")
+        row_count = source_connection_count(source, table)
+        deferred_relation_validation.append({
+            "table": table,
+            "reason": item.get("reason"),
+            "owner": item.get("owner"),
+            "empty_in_source": row_count,
+            "status": "pass" if (
+                table not in strategies and item.get("reason") and row_count == 0
+            ) else "fail",
+        })
+    layout = run_layout(source, iterations, relation_strategies)
     query_by_id = {item["id"]: item for item in layout["queries"]}
     declared_query_ids = sorted({
         query_id
@@ -628,23 +758,45 @@ def qualify(source: Path, profile_path: Path, iterations: int) -> dict[str, Any]
     unexpected_query_ids = sorted(
         set(query_by_id) - set(declared_query_ids) - declared_supporting_ids
     )
-    strategy_validation = [
-        {
+    strategy_validation = []
+    for strategy in relation_strategies:
+        bindings = []
+        for query_id in strategy.get("query_ids", []):
+            query = query_by_id.get(query_id)
+            direction = query.get("strategy_direction") if query else (
+                "reverse" if query_id in REVERSE_QUERY_IDS else "forward"
+            )
+            bindings.append({
+                "query_id": query_id,
+                "direction": direction,
+                "binding_matches": bool(
+                    query
+                    and query.get("strategy_table") == strategy["table"]
+                    and query.get("strategy_direction") == direction
+                ),
+                "plan_bound": bool(
+                    query
+                    and query.get("expected_index") == strategy.get(direction)
+                    and query.get("indexed")
+                    and query.get("status") == "ok"
+                ),
+            })
+        strategy_validation.append({
             "table": strategy["table"],
             "forward": strategy.get("forward"),
             "reverse": strategy.get("reverse"),
             "query_ids": strategy.get("query_ids", []),
-            "query_ids_present": all(
-                query_id in query_by_id for query_id in strategy.get("query_ids", [])
-            ),
-        }
-        for strategy in relation_strategies
-    ]
+            "query_ids_present": all(item["query_id"] in query_by_id for item in bindings),
+            "bindings": bindings,
+        })
     runtime = [run_runtime_profile(source, mode, iterations) for mode in ("DELETE", "WAL")]
     read_only = run_read_only_check(source)
     backup = run_backup_check(source)
     recovery = run_recovery_check(source)
     identity_sensitivity = run_identity_sensitivity_check(source)
+    strategy_negative_checks = run_strategy_negative_checks(
+        source, relation_strategies, iterations
+    )
     query_failures = [item["id"] for item in layout["queries"] if item["status"] != "ok"]
     representative_failures = [
         item["id"]
@@ -661,7 +813,12 @@ def qualify(source: Path, profile_path: Path, iterations: int) -> dict[str, Any]
         if not missing
         and not missing_query_ids
         and not unexpected_query_ids
-        and all(item["query_ids_present"] for item in strategy_validation)
+        and all(item["status"] == "pass" for item in deferred_relation_validation)
+        and all(
+            item["query_ids_present"]
+            and all(binding["binding_matches"] and binding["plan_bound"] for binding in item["bindings"])
+            for item in strategy_validation
+        )
         else "fail"
     )
     return {
@@ -681,10 +838,11 @@ def qualify(source: Path, profile_path: Path, iterations: int) -> dict[str, Any]
             "relation_strategy_catalog": strategy_status,
             "representative_corpus": corpus_status,
             "query_plans": "pass" if not query_failures and not missing_query_ids else "fail",
-            "read_only_non_mutating": read_only["status"],
+            "read_only_persistent_non_mutating": read_only["status"],
             "backup_restore_identity": backup["status"],
             "interruption_recovery": recovery["status"],
             "fact_identity_sensitivity": identity_sensitivity["status"],
+            "strategy_negative_checks": strategy_negative_checks["status"],
             "wal_decision": "qualification_only",
         },
         "missing_relation_strategies": missing,
@@ -692,11 +850,15 @@ def qualify(source: Path, profile_path: Path, iterations: int) -> dict[str, Any]
         "missing_query_ids": missing_query_ids,
         "unexpected_query_ids": unexpected_query_ids,
         "strategy_validation": strategy_validation,
+        "strategy_negative_checks": strategy_negative_checks,
+        "deferred_relation_validation": deferred_relation_validation,
         "representative_failures": representative_failures,
         "query_failures": query_failures,
         "notes": [
             "DELETE is the shipped runtime profile; WAL is measured on the same copied database and workload.",
             "A benchmark result is host-specific and must not be treated as a universal SLO.",
+            "possible_call is deferred because the canonical corpus has no multi-definition call fan-out; the deferral is a hard-checked profile decision, not empty query evidence.",
+            "A pre-existing WAL -shm lock-state change is permitted; persistent database and WAL bytes must remain unchanged.",
         ],
     }
 

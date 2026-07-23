@@ -39,8 +39,10 @@ distinct configuration/evidence access path. The profile names the strategy
 for every required relation in both directions. In particular:
 
 - `edge`, `def_edge`, and `entity_edge` use source and destination indexes;
-- `possible_call` uses its unique source-leading key forward and a destination
-  index reverse;
+- `possible_call` retains its unique source-leading key and destination index
+  in the schema, but has no required M1 query workload because the canonical
+  resolved corpus contains no multi-definition call fan-out. HSE-67 owns the
+  follow-up qualification when a representative fan-out corpus is available;
 - `type_edge` uses its `WITHOUT ROWID` primary key forward and a destination
   index reverse;
 - `include_edge` uses its source/path/configuration unique key forward,
@@ -68,8 +70,11 @@ corpus, deterministic workspace/fact-content identities, rollback-vs-WAL
 measurements, read-only side-effect checks, backup/restore identity, and
 interruption recovery probes.
 The qualifier fails on an unexpected scan for a strategy that requires an
-index, a read-only mutation/sidecar, identity mismatch, failed integrity/FK
-checks, or a recovery state presented as current.
+index, a bogus or swapped strategy that does not fail its negative probe, an
+empty required relation, an undeclared/deferred relation with evidence, a new read-only sidecar or persistent database/WAL
+mutation (pre-existing WAL shared-memory lock-state mutation is permitted and
+reported), identity mismatch, failed integrity/FK checks, or a recovery state
+presented as current.
 
 The current schema version remains 34. No migration is needed for this
 runtime-only change, and old v34 databases retain their existing semantics.

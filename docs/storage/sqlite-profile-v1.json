@@ -63,11 +63,17 @@
     }
   ],
   "supporting_query_ids": ["exact_identity", "name_prefix", "bounded_paths"],
+  "deferred_relations": [
+    {
+      "table": "possible_call",
+      "owner": "HSE-67",
+      "reason": "The canonical resolved corpus contains no multi-definition call fan-out, so HSE-78 declares no required forward/reverse workload for this relation. The schema's unique source-leading key and destination index remain covered by storage schema tests; query-plan qualification resumes when a representative fan-out corpus is available."
+    }
+  ],
   "relation_strategies": [
     {"table": "edge", "forward": "sqlite_autoindex_edge_1", "reverse": "idx_edge_dst", "secondary_covering": "idx_edge_src", "query_ids": ["outgoing_one_hop", "incoming_one_hop"]},
     {"table": "def_edge", "forward": "sqlite_autoindex_def_edge_1", "reverse": "idx_def_edge_dst", "secondary_covering": "idx_def_edge_src", "query_ids": ["definition_outgoing", "definition_incoming"]},
     {"table": "entity_edge", "forward": "idx_entity_edge_identity", "reverse": "idx_entity_edge_dst", "secondary_covering": "idx_entity_edge_src", "query_ids": ["entity_graph_forward", "entity_graph_reverse"]},
-    {"table": "possible_call", "forward": "sqlite_autoindex_possible_call_1", "reverse": "idx_possible_call_dst", "natural_key_reuse": "sqlite_autoindex_possible_call_1", "query_ids": ["possible_call_outgoing", "possible_call_incoming"]},
     {"table": "type_edge", "forward": "PRIMARY KEY (src_id, kind, position)", "reverse": "idx_type_edge_dst", "natural_key_reuse": "PRIMARY KEY (src_id, kind, position)", "query_ids": ["type_closure_forward", "type_closure_reverse"]},
     {"table": "include_edge", "forward": "sqlite_autoindex_include_edge_1", "reverse": "idx_include_edge_dst", "configuration": "idx_include_edge_config", "natural_key_reuse": "sqlite_autoindex_include_edge_1", "query_ids": ["include_graph", "include_graph_reverse"]},
     {"table": "edge_site", "forward": "PRIMARY KEY (edge_id, file_id, line, col)", "reverse": "none", "query_ids": ["references_sites"]},
@@ -86,7 +92,7 @@
   "identity_and_recovery": {
     "backup": "SQLite online backup API",
     "restore_checks": ["schema_version", "catalog identity", "fact-set identity", "integrity_check", "foreign_key_check"],
-    "read_only_checks": ["no migration", "no schema creation", "no WAL/journal sidecar creation", "no statistics mutation"],
+    "read_only_checks": ["no migration", "no schema creation", "no new WAL/journal sidecar", "persistent database and WAL bytes remain unchanged", "pre-existing WAL shared-memory lock-state mutation is permitted and reported", "no statistics mutation"],
     "current_state": "only integrity-valid, schema-compatible, identity-matching databases are current; interrupted work is stale-but-valid until revalidated"
   }
 }

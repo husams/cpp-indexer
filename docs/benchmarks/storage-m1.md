@@ -18,6 +18,9 @@ The result covers:
   dbstat;
 - a resolved representative corpus plus every declared forward/reverse query
   ID, with parameters, row counts, truncation, and repeated latency samples;
+- explicit deferred-relation evidence: `possible_call` is not declared as a
+  required query because the canonical corpus has zero multi-definition
+  fan-out rows; declaring it without a non-empty corpus fails qualification;
 - deterministic workspace identity and full fact-content identity, including a
   same-count content-change negative check;
 - rollback-journal versus WAL on identical temporary copies;
@@ -28,5 +31,8 @@ The result covers:
   or stale-but-valid after integrity/schema validation.
 
 The production gate is conservative: rollback/FULL remains current, WAL is
-reported as qualification-only, and any missing index plan, mutation on
-read-only open, identity mismatch, or invalid recovery state fails the run.
+reported as qualification-only, and any missing index plan, bogus/swapped
+strategy that does not fail its negative probe, undeclared relation evidence,
+persistent read-only mutation, identity mismatch, or invalid recovery state
+fails the run. A pre-existing WAL `-shm` lock-state change is reported but is
+not treated as persistent database/WAL mutation.
