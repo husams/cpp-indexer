@@ -166,6 +166,58 @@ class ArchitectureCheckerTests(unittest.TestCase):
         errors = check_manifest(root, manifest)
         self.assertTrue(any("app: source edge cli -> extraction" in error for error in errors))
 
+    def test_cmake_multi_value_dependency_variables_are_modeled(self) -> None:
+        root, manifest = _fixture()
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["targets"].append({"name": "app", "module": "cli", "links": []})
+        data["targets"][0]["links"] = ["${LINKS}"]
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        (root / "CMakeLists.txt").write_text(
+            "set(LINKS model_lib app)\n"
+            "add_library(core STATIC src/extraction/pass.cpp)\n"
+            "target_link_libraries(core PRIVATE ${LINKS})\n"
+            "add_library(app STATIC src/cli/format.hpp)\n",
+            encoding="utf-8",
+        )
+        errors = check_manifest(root, manifest)
+        self.assertTrue(any("undeclared target dependency extraction -> cli" in error for error in errors))
+
+    def test_cmake_list_append_dependency_variables_are_modeled(self) -> None:
+        root, manifest = _fixture()
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["targets"].append({"name": "app", "module": "cli", "links": []})
+        data["targets"][0]["links"] = ["${LINKS}"]
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        (root / "CMakeLists.txt").write_text(
+            "set(LINKS model_lib)\n"
+            "list(APPEND LINKS app)\n"
+            "add_library(core STATIC src/extraction/pass.cpp)\n"
+            "target_link_libraries(core PRIVATE ${LINKS})\n"
+            "add_library(app STATIC src/cli/format.hpp)\n",
+            encoding="utf-8",
+        )
+        errors = check_manifest(root, manifest)
+        self.assertTrue(any("undeclared target dependency extraction -> cli" in error for error in errors))
+
+    def test_cmake_false_conditional_assignment_does_not_replace_edge(self) -> None:
+        root, manifest = _fixture()
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["targets"].append({"name": "app", "module": "cli", "links": []})
+        data["targets"][0]["links"] = ["${LINK}"]
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        (root / "CMakeLists.txt").write_text(
+            "set(LINK app)\n"
+            "if(FALSE)\n"
+            "  set(LINK model_lib)\n"
+            "endif()\n"
+            "add_library(core STATIC src/extraction/pass.cpp)\n"
+            "target_link_libraries(core PRIVATE ${LINK})\n"
+            "add_library(app STATIC src/cli/format.hpp)\n",
+            encoding="utf-8",
+        )
+        errors = check_manifest(root, manifest)
+        self.assertTrue(any("undeclared target dependency extraction -> cli" in error for error in errors))
+
     def test_cmake_variable_cycles_fail_closed(self) -> None:
         root, manifest = _fixture()
         (root / "CMakeLists.txt").write_text(

@@ -296,7 +296,7 @@
       "rationale": "The current static library aggregates the product and adapter object libraries and owns their Clang/LLVM/SQLite links.",
       "expiresOn": "2026-12-31",
       "removalIssue": "HSE-62",
-      "dependencies": ["clang-cpp", "LLVM", "${_cidx_sqlite_link}"]
+      "dependencies": ["clang-cpp", "LLVM", "${_cidx_sqlite_link}", "SQLite::SQLite3"]
     },
     {
       "target": "cidx",

@@ -30,8 +30,9 @@ VISIBILITY = {"PUBLIC", "PRIVATE", "INTERFACE"}
 ISSUE_RE = re.compile(r"HSE-\d+\Z")
 INCLUDE_RE = re.compile(r"^\s*#\s*include\s*([\"<])([^\">]+)[\">]", re.MULTILINE)
 RULE_INCLUDE_RE = re.compile(r"^\s*\.include\s+[\"<]([^\">]+)[\">]", re.MULTILINE)
-COMMAND_RE = re.compile(r"\b(set|add_library|add_executable|add_custom_target|"
-                         r"target_link_libraries|target_sources|add_dependencies)\s*\(")
+COMMAND_RE = re.compile(r"\b(set|list|if|elseif|else|endif|add_library|add_executable|"
+                         r"add_custom_target|target_link_libraries|target_sources|"
+                         r"add_dependencies)\s*\(")
 CMaKE_FRAGMENT_RE = re.compile(r"\b(include|add_subdirectory)\s*\(\s*([^\s)]+)")
 
 
@@ -110,7 +111,7 @@ def _sources(root: Path, manifest: dict) -> tuple[list[Source], list[str]]:
     return found, errors
 
 
-def _commands(text: str) -> Iterable[tuple[str, str]]:
+def _commands(text: str) -> Iterable[tuple[str, str, int]]:
     """Yield CMake commands while handling nested generator expressions safely."""
     for match in COMMAND_RE.finditer(text):
         depth = 1
@@ -129,7 +130,7 @@ def _commands(text: str) -> Iterable[tuple[str, str]]:
                 depth -= 1
             index += 1
         if depth == 0:
-            yield match.group(1), text[match.end(): index - 1]
+            yield match.group(1), text[match.end(): index - 1], match.start()
 
 
 def _tokens(body: str) -> list[str]:
@@ -181,6 +182,7 @@ _CMAKE_OPAQUE_VARIABLES = {
     "CMAKE_CURRENT_BINARY_DIR",
     "CMAKE_CURRENT_SOURCE_DIR",
     "CIDX_CLANG_TIDY_EXECUTABLE",
+    "_cidx_macos_sdk",
     "CIDX_SOUFFLE_EXECUTABLE",
     "CIDX_SOUFFLE_INCLUDE_DIR",
     "LLVM_LIBRARY_DIR",
@@ -190,41 +192,67 @@ _CMAKE_OPAQUE_VARIABLES = {
 }
 
 
-def _expand_cmake_value(value: str, variables: dict[str, str], parse_errors: list[str],
-                        context: str, stack: tuple[str, ...] = ()) -> str:
-    variable_re = re.compile(r"\$\{([^{}]+)\}")
-
-    def replace(match: re.Match[str]) -> str:
-        name = match.group(1)
-        if name in stack:
-            cycle = " -> ".join((*stack, name))
-            parse_errors.append(f"CMake variable cycle in {context}: {cycle}")
-            return ""
-        if name not in variables:
-            if name in _CMAKE_OPAQUE_VARIABLES or name == "CMAKE_DL_LIBS":
-                return match.group(0)
-            parse_errors.append(f"unresolved CMake variable in {context}: ${{{name}}}")
-            return ""
-        return _expand_cmake_value(variables[name], variables, parse_errors, context,
-                                   (*stack, name))
-
-    previous = None
-    expanded = value
-    while previous != expanded and variable_re.search(expanded):
-        previous = expanded
-        expanded = variable_re.sub(replace, expanded)
-    return expanded
+_CMAKE_VARIABLE_RE = re.compile(r"\$\{([^{}]+)\}")
 
 
-def _expand_cmake_reference(token: str, targets: set[str], variables: dict[str, str],
+def _expand_cmake_values(values: Iterable[str], variables: dict[str, list[str]],
+                         parse_errors: list[str], context: str,
+                         stack: tuple[str, ...] = ()) -> list[str]:
+    expanded_values: list[str] = []
+    for value in values:
+        exact = re.fullmatch(r"\$\{([^{}]+)\}", value)
+        if exact:
+            name = exact.group(1)
+            if name in stack:
+                cycle = " -> ".join((*stack, name))
+                parse_errors.append(f"CMake variable cycle in {context}: {cycle}")
+                continue
+            if name not in variables:
+                if name in _CMAKE_OPAQUE_VARIABLES or name == "CMAKE_DL_LIBS":
+                    expanded_values.append(value)
+                else:
+                    parse_errors.append(f"unresolved CMake variable in {context}: ${{{name}}}")
+                continue
+            expanded_values.extend(
+                _expand_cmake_values(variables[name], variables, parse_errors, context,
+                                     (*stack, name))
+            )
+            continue
+
+        matches = list(_CMAKE_VARIABLE_RE.finditer(value))
+        if not matches:
+            expanded_values.append(value)
+            continue
+        substituted = value
+        for match in matches:
+            name = match.group(1)
+            replacements = _expand_cmake_values([f"${{{name}}}"], variables, parse_errors,
+                                                context, stack)
+            if len(replacements) != 1:
+                parse_errors.append(
+                    f"unsupported multi-valued embedded CMake variable in {context}: {value}"
+                )
+                substituted = ""
+                break
+            substituted = substituted.replace(match.group(0), replacements[0], 1)
+        if substituted:
+            expanded_values.append(substituted)
+    return expanded_values
+
+
+def _expand_cmake_reference(token: str, targets: set[str], variables: dict[str, list[str]],
                             parse_errors: list[str], context: str) -> set[str]:
     """Expand the small, explicit CMake reference subset understood by the gate."""
     if "${" in token:
-        token = _expand_cmake_value(token, variables, parse_errors, context)
-        if not token:
-            return set()
-    if token.startswith("${") and token.endswith("}"):
-        return set()
+        expanded_tokens = _expand_cmake_values([token], variables, parse_errors, context)
+        references: set[str] = set()
+        for expanded_token in expanded_tokens:
+            if "${" in expanded_token:
+                continue
+            references.update(
+                _expand_cmake_reference(expanded_token, targets, variables, parse_errors, context)
+            )
+        return references
     if "$<" not in token:
         return {token}
     inner = _genex_inner(token)
@@ -254,6 +282,28 @@ def _expand_cmake_reference(token: str, targets: set[str], variables: dict[str, 
     return set()
 
 
+def _cmake_condition(tokens: list[str]) -> str:
+    if not tokens:
+        return "unknown"
+    expression = " ".join(tokens).upper()
+    if expression in {"0", "FALSE", "OFF", "NO", "N", "IGNORE", "NOTFOUND"}:
+        return "false"
+    if expression in {"1", "TRUE", "ON", "YES", "Y"}:
+        return "true"
+    if expression.startswith("NOT "):
+        nested = _cmake_condition(tokens[1:])
+        return {"true": "false", "false": "true"}.get(nested, "unknown")
+    return "unknown"
+
+
+def _cmake_active_condition(stack: list[str]) -> str:
+    if "false" in stack:
+        return "false"
+    if "unknown" in stack:
+        return "unknown"
+    return "true"
+
+
 def _cmake_graph(root: Path, manifest: dict) -> BuildGraph:
     targets: set[str] = set()
     links: dict[str, set[str]] = defaultdict(set)
@@ -261,7 +311,7 @@ def _cmake_graph(root: Path, manifest: dict) -> BuildGraph:
     source_edges: dict[str, set[str]] = defaultdict(set)
     parse_errors: list[str] = []
     references: dict[str, set[str]] = defaultdict(set)
-    commands: list[tuple[str, list[str]]] = []
+    commands: list[tuple[str, list[str], int]] = []
     for relative in manifest.get("cmakeFiles", ["CMakeLists.txt"]):
         path = root / relative
         if path.exists():
@@ -269,36 +319,82 @@ def _cmake_graph(root: Path, manifest: dict) -> BuildGraph:
             for fragment, name in CMaKE_FRAGMENT_RE.findall(text):
                 if fragment == "include" or name != "tests":
                     parse_errors.append(f"unsupported CMake fragment {fragment}({name}) in {relative}")
-            commands.extend((kind, _tokens(body)) for kind, body in _commands(text))
+            commands.extend((kind, _tokens(body), start) for kind, body, start in _commands(text))
 
-    for kind, tokens in commands:
+    for kind, tokens, _ in commands:
         if not tokens:
             continue
         if kind in {"add_library", "add_executable", "add_custom_target"}:
             targets.add(tokens[0])
 
-    variables: dict[str, str] = {}
-    for kind, tokens in commands:
+    variables: dict[str, list[str]] = {}
+    condition_stack: list[str] = []
+    for kind, tokens, _ in commands:
+        if kind == "if":
+            condition_stack.append(_cmake_condition(tokens))
+            continue
+        if kind == "elseif":
+            if condition_stack:
+                previous = condition_stack.pop()
+                condition_stack.append(
+                    "false" if previous == "true" else
+                    "unknown" if previous == "unknown" else _cmake_condition(tokens)
+                )
+            else:
+                parse_errors.append("unsupported CMake elseif without matching if")
+            continue
+        if kind == "else":
+            if condition_stack:
+                previous = condition_stack.pop()
+                condition_stack.append(
+                    "false" if previous == "true" else
+                    "unknown" if previous == "unknown" else "true"
+                )
+            else:
+                parse_errors.append("unsupported CMake else without matching if")
+            continue
+        if kind == "endif":
+            if condition_stack:
+                condition_stack.pop()
+            else:
+                parse_errors.append("unsupported CMake endif without matching if")
+            continue
         if not tokens:
             continue
         target = tokens[0]
+        active_condition = _cmake_active_condition(condition_stack)
+        if kind == "list":
+            if len(tokens) < 3 or tokens[0] != "APPEND":
+                parse_errors.append(f"unsupported CMake list form: {' '.join(tokens)}")
+                continue
+            values = _expand_cmake_values(tokens[2:], variables, parse_errors, target)
+            if active_condition == "false":
+                continue
+            if active_condition == "unknown":
+                variables[tokens[1]] = list(dict.fromkeys(variables.get(tokens[1], []) + values))
+            else:
+                variables[tokens[1]] = list(dict.fromkeys(variables.get(tokens[1], []) + values))
+            continue
         if kind == "set":
             if len(tokens) == 1:
-                variables[target] = ""
-                continue
-            if "PARENT_SCOPE" in tokens:
+                values = []
+            elif "PARENT_SCOPE" in tokens:
                 parse_errors.append(f"unsupported scoped CMake set in {target}: {' '.join(tokens)}")
                 continue
-            if "CACHE" in tokens:
+            elif "CACHE" in tokens:
                 cache_index = tokens.index("CACHE")
                 if cache_index != 2 or len(tokens) < 4:
                     parse_errors.append(f"unsupported CMake set form: {' '.join(tokens)}")
                     continue
-                value = tokens[1]
+                values = _expand_cmake_values([tokens[1]], variables, parse_errors, target)
             else:
-                value = " ".join(tokens[1:])
-            variables[target] = _expand_cmake_value(value, variables, parse_errors, target,
-                                                     (target,))
+                values = _expand_cmake_values(tokens[1:], variables, parse_errors, target,
+                                              (target,))
+            if active_condition == "false":
+                continue
+            if active_condition == "unknown":
+                values = variables.get(target, []) + values
+            variables[target] = list(dict.fromkeys(values))
             continue
         if kind == "target_link_libraries":
             for token in tokens[1:]:
