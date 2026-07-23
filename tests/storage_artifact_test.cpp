@@ -24,8 +24,9 @@ cidx::ArtifactSpec complete_spec() {
   cidx::ArtifactSpec spec;
   spec.logical_id = "tu:1:astgraph";
   spec.kind = "astgraph";
-  spec.producer_version = "test-producer/1";
-  spec.engine_version = "test-engine/1";
+  spec.artifact_schema = "cidx-astgraph/v3";
+  spec.producer_version = "cidx-astgraph test/1";
+  spec.engine_version = "cidx test/1";
   spec.workspace_identity = "workspace:test";
   spec.tu_identity = "tu:1";
   spec.configuration_identity = "config:1";
@@ -48,10 +49,12 @@ TEST_CASE("artifact publication is deterministic and read-only") {
   const auto record =
       artifacts.publish(complete_spec(), [](cidx::SqliteDb &db) {
         db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY, usr TEXT NOT NULL);"
+                "CREATE TABLE edge(id INTEGER PRIMARY KEY);"
                 "INSERT INTO node VALUES (1, 'stable:node:1');");
       });
   CHECK(record.relative_path.starts_with("artifacts/"));
-  CHECK(record.content_hash.size() == 40);
+  CHECK(record.content_hash.starts_with("sha256:"));
+  REQUIRE(artifacts.current(record.spec.logical_id).has_value());
   CHECK(artifacts.current(record.spec.logical_id)->content_hash ==
         record.content_hash);
   CHECK(artifacts.validate(record.spec.logical_id).usable());
@@ -110,6 +113,8 @@ TEST_CASE("artifact validation reports partial and missing results") {
   auto spec = complete_spec();
   spec.logical_id = "tu:2:proof";
   spec.kind = "proof";
+  spec.artifact_schema = "cidx-proof/v1";
+  spec.producer_version = "cidx-proof test/1";
   spec.attachment_name = "proof";
   spec.completeness = cidx::ArtifactCompleteness::partial;
   spec.trust = cidx::ArtifactTrust::unverified;
@@ -135,20 +140,24 @@ TEST_CASE("existing astgraph output is adopted by the manifest policy") {
   {
     cidx::SqliteDb sidecar(source.string());
     sidecar.exec("CREATE TABLE node(id INTEGER PRIMARY KEY);"
+                 "CREATE TABLE edge(id INTEGER PRIMARY KEY);"
                  "INSERT INTO node VALUES (7);");
   }
   cidx::ArtifactStore artifacts(storage, root);
   auto spec = complete_spec();
   spec.logical_id = "tu:7:astgraph";
-  const auto record = artifacts.publish_existing(spec, source);
+  const auto record = artifacts.publish_existing(
+      spec, source, [&](const cidx::ArtifactRecord &published) {
+        artifacts.record_identity_mapping(published.spec.logical_id,
+                                          "usr:resolved", "usr", "usr:resolved",
+                                          "resolved", 7);
+        artifacts.record_identity_mapping(
+            published.spec.logical_id, "usr:missing", "usr", "usr:missing",
+            "unresolved", std::nullopt, "core symbol is not present in index");
+      });
   CHECK_FALSE(std::filesystem::exists(source));
   CHECK(artifacts.validate(spec.logical_id).usable());
   CHECK(std::filesystem::exists(root / record.relative_path));
-  artifacts.record_identity_mapping(spec.logical_id, "usr:resolved", "usr",
-                                    "usr:resolved", "resolved", 7);
-  artifacts.record_identity_mapping(spec.logical_id, "usr:missing", "usr",
-                                    "usr:missing", "unresolved", std::nullopt,
-                                    "core symbol is not present in index");
   auto mappings =
       storage.raw_db().prepare("SELECT COUNT(*), SUM(resolution_state = "
                                "'resolved') FROM artifact_identity_map");
@@ -218,12 +227,14 @@ TEST_CASE("attachment names and query-only state are connection-wide") {
   second_spec.logical_id = "tu:attach:two";
   second_spec.attachment_name = "astgraph_two";
   artifacts.publish(first_spec, [](cidx::SqliteDb &db) {
-    db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY); INSERT INTO node "
-            "VALUES (1)");
+    db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY);"
+            "CREATE TABLE edge(id INTEGER PRIMARY KEY);"
+            "INSERT INTO node VALUES (1)");
   });
   artifacts.publish(second_spec, [](cidx::SqliteDb &db) {
-    db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY); INSERT INTO node "
-            "VALUES (2)");
+    db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY);"
+            "CREATE TABLE edge(id INTEGER PRIMARY KEY);"
+            "INSERT INTO node VALUES (2)");
   });
   auto first = artifacts.attach_current(first_spec.logical_id);
   auto second = artifacts.attach_current(second_spec.logical_id);
@@ -246,6 +257,50 @@ TEST_CASE("attachment names and query-only state are connection-wide") {
   query_only = storage.raw_db().prepare("PRAGMA query_only");
   REQUIRE(query_only.step());
   CHECK(query_only.col_int64(0) == 0);
+  std::error_code ignored;
+  std::filesystem::remove_all(root, ignored);
+}
+
+TEST_CASE("validation rejects unsupported contracts and missing relations") {
+  cidx::Storage storage(":memory:");
+  const auto root = test_root("validation-contract");
+  cidx::ArtifactStore artifacts(storage, root);
+  auto unsupported = complete_spec();
+  unsupported.logical_id = "unsupported";
+  unsupported.artifact_schema = "cidx-astgraph/v999";
+  const auto unsupported_record =
+      artifacts.publish(unsupported, [](cidx::SqliteDb &db) {
+        db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY);"
+                "CREATE TABLE edge(id INTEGER PRIMARY KEY);");
+      });
+  CHECK_FALSE(artifacts.validate(unsupported_record.spec.logical_id).usable());
+
+  auto missing_relation = complete_spec();
+  missing_relation.logical_id = "missing-relation";
+  missing_relation.exposed_relations = {"node", "edge"};
+  const auto missing_record =
+      artifacts.publish(missing_relation, [](cidx::SqliteDb &db) {
+        db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY);");
+      });
+  CHECK_FALSE(artifacts.validate(missing_record.spec.logical_id).usable());
+  std::error_code ignored;
+  std::filesystem::remove_all(root, ignored);
+}
+
+TEST_CASE("attachment reset is safe after store destruction") {
+  cidx::Storage storage(":memory:");
+  const auto root = test_root("attachment-lifetime");
+  std::unique_ptr<cidx::ArtifactAttachment> attachment;
+  {
+    cidx::ArtifactStore artifacts(storage, root);
+    const auto record =
+        artifacts.publish(complete_spec(), [](cidx::SqliteDb &db) {
+          db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY);"
+                  "CREATE TABLE edge(id INTEGER PRIMARY KEY);");
+        });
+    attachment = artifacts.attach_current(record.spec.logical_id);
+  }
+  CHECK_NOTHROW(attachment.reset());
   std::error_code ignored;
   std::filesystem::remove_all(root, ignored);
 }
@@ -340,11 +395,15 @@ TEST_CASE("v35 artifact manifests migrate to the generated contract") {
     auto contract = migrated.raw_db().prepare(
         "SELECT catalog_version, catalog_hash, trust, evidence FROM artifact");
     REQUIRE(contract.step());
-    CHECK(contract.col_int64(0) == 1);
-    CHECK(contract.col_text(1) ==
-          "15e7ce8206c521cff6794530a382f0389320c0f3e49d148b0f311d058aa5157a");
-    CHECK(contract.col_text(2) == "producer-verified");
-    CHECK(contract.col_text(3) == "source");
+    CHECK(contract.col_int64(0) == 0);
+    CHECK(contract.col_text(1).empty());
+    CHECK(contract.col_text(2) == "unverified");
+    CHECK(contract.col_text(3) == "assumption");
+    auto state = migrated.raw_db().prepare(
+        "SELECT state, content_hash FROM artifact WHERE logical_id = 'legacy'");
+    REQUIRE(state.step());
+    CHECK(state.col_text(0) == "stale");
+    CHECK(state.col_text(1) == "legacy-sha1:hash");
   }
   std::error_code ignored;
   std::filesystem::remove_all(root, ignored);

@@ -2375,18 +2375,18 @@ class Storage:
                         content_hash, byte_size, state, created_at, published_at)
                     SELECT id, logical_id, kind, artifact_schema,
                            CASE WHEN catalog_version GLOB '[0-9]*'
+                                     AND catalog_version NOT GLOB '*[^0-9]*'
                                 THEN CAST(catalog_version AS INTEGER)
-                                ELSE ? END,
-                           ?, producer_version, engine_version, workspace_identity,
+                                ELSE 0 END,
+                           '', producer_version, engine_version, workspace_identity,
                            tu_identity, configuration_identity,
                            input_fact_set_identity, completeness, truncation,
-                           CASE trust WHEN 'trusted' THEN 'producer-verified'
-                                      ELSE 'unverified' END,
-                           'source', attachment_name, retention_policy,
-                           relative_path, content_hash, byte_size, state,
+                           'unverified', 'assumption', attachment_name,
+                           retention_policy, relative_path, content_hash,
+                           byte_size,
+                           CASE WHEN state = 'current' THEN 'stale' ELSE state END,
                            created_at, published_at
                     FROM artifact_v35""",
-                    (CATALOG_VERSION, CATALOG_HASH),
                 )
                 self._conn.executescript(
                     """
@@ -2438,6 +2438,17 @@ class Storage:
                         self._conn.execute(f"DROP TABLE {table}_v35")
                 self._conn.execute("DROP TABLE artifact_v35")
                 self._conn.execute("PRAGMA foreign_keys = ON")
+                changed = True
+            legacy_hashes = self._conn.execute(
+                """
+                UPDATE artifact
+                   SET content_hash = 'legacy-sha1:' || content_hash,
+                       state = CASE WHEN state = 'current' THEN 'stale' ELSE state END
+                 WHERE content_hash NOT LIKE 'sha256:%'
+                   AND content_hash NOT LIKE 'legacy-sha1:%'
+                """
+            )
+            if legacy_hashes.rowcount > 0:
                 changed = True
         if "artifact" not in tables:
             # v34 -> v35: manifest metadata for immutable/rebuildable

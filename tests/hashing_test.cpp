@@ -94,3 +94,16 @@ TEST_CASE("md5_of -> nullopt on missing/unreadable files (G30)") {
     ::chmod(locked.c_str(), 0600); // allow cleanup
   }
 }
+
+TEST_CASE("sha256 content identity is algorithm-tagged and deterministic") {
+  CHECK(cidx::sha256_hex(std::string("abc")) ==
+        "sha256:ba7816bf8f01cfea414140de5dae2223"
+        "b00361a396177a9cb410ff61f20015ad");
+
+  const std::string dir = make_temp_dir();
+  const std::string path = dir + "/sample.db";
+  write_file(path, "artifact bytes");
+  const auto digest = cidx::sha256_of(path);
+  REQUIRE(digest.has_value());
+  CHECK(*digest == cidx::sha256_hex(std::string("artifact bytes")));
+}

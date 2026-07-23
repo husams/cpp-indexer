@@ -4,10 +4,6 @@
 #include "util/errors.hpp"
 #include "util/hashing.hpp"
 
-extern "C" {
-#include "sha1/sha1.h"
-}
-
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -23,6 +19,10 @@ extern "C" {
 #include <utility>
 
 namespace cidx {
+struct ArtifactAttachmentLifetime {
+  ArtifactStore *owner = nullptr;
+};
+
 namespace {
 
 constexpr std::string_view kEnvelopeVersion = "cidx-artifact/v1";
@@ -100,7 +100,12 @@ ArtifactTrust trust_from_string(std::string_view value) {
 class ArtifactPublicationLock {
 public:
   explicit ArtifactPublicationLock(const std::filesystem::path &root) {
-    std::filesystem::create_directories(root);
+    std::error_code ec;
+    std::filesystem::create_directories(root, ec);
+    if (ec) {
+      throw StorageError("cannot create artifact root " + root.string() + ": " +
+                         ec.message());
+    }
     fd_ = ::open((root / ".artifact-publication.lock").c_str(),
                  O_CREAT | O_RDWR, 0600);
     if (fd_ < 0 || ::flock(fd_, LOCK_EX) != 0) {
@@ -147,33 +152,11 @@ bool safe_relative_path(const std::filesystem::path &path) {
 }
 
 std::string digest_file(const std::filesystem::path &path) {
-  std::ifstream input(path, std::ios::binary);
-  if (!input) {
+  const auto digest = sha256_of(path.string());
+  if (!digest) {
     throw StorageError("cannot read artifact " + path.string());
   }
-  SHA1_CTX context;
-  SHA1_Init(&context);
-  std::array<char, static_cast<std::size_t>(64) * 1024> buffer{};
-  while (input) {
-    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-    const auto count = input.gcount();
-    if (count > 0) {
-      SHA1_Update(&context, buffer.data(), static_cast<unsigned long>(count));
-    }
-  }
-  if (!input.eof()) {
-    throw StorageError("cannot finish reading artifact " + path.string());
-  }
-  std::array<unsigned char, SHA1_DIGEST_SIZE> digest{};
-  SHA1_Final(digest.data(), &context);
-  static constexpr std::string_view hex = "0123456789abcdef";
-  std::string result;
-  result.reserve(static_cast<std::size_t>(SHA1_DIGEST_SIZE) * 2);
-  for (const auto byte : digest) {
-    result.push_back(hex[byte >> 4]);
-    result.push_back(hex[byte & 0x0f]);
-  }
-  return result;
+  return *digest;
 }
 
 void fsync_path(const std::filesystem::path &path) {
@@ -191,10 +174,101 @@ void fsync_path(const std::filesystem::path &path) {
 
 void fsync_directory(const std::filesystem::path &path) {
   const int fd = ::open(path.c_str(), O_RDONLY);
-  if (fd >= 0) {
-    (void)::fsync(fd);
-    (void)::close(fd);
+  if (fd < 0) {
+    throw StorageError("cannot open directory for durability sync " +
+                       path.string());
   }
+  const int sync_result = ::fsync(fd);
+  const int close_result = ::close(fd);
+  if (sync_result != 0 || close_result != 0) {
+    throw StorageError("cannot fsync directory " + path.string());
+  }
+}
+
+void fsync_directory_chain(const std::filesystem::path &root,
+                           const std::filesystem::path &directory) {
+  auto current = std::filesystem::absolute(directory).lexically_normal();
+  const auto absolute_root = std::filesystem::absolute(root).lexically_normal();
+  while (current != absolute_root && current != current.root_path()) {
+    fsync_directory(current);
+    current = current.parent_path();
+  }
+  fsync_directory(absolute_root);
+}
+
+bool has_symlink_component(const std::filesystem::path &path) {
+  auto current =
+      path.has_root_path() ? path.root_path() : std::filesystem::path{};
+  for (const auto &part : path.relative_path()) {
+    current /= part;
+    std::error_code ec;
+    const auto status = std::filesystem::symlink_status(current, ec);
+    if (ec == std::errc::no_such_file_or_directory) {
+      return false;
+    }
+    if (ec) {
+      throw StorageError("cannot inspect artifact path " + current.string() +
+                         ": " + ec.message());
+    }
+    if (std::filesystem::is_symlink(status)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool is_within_root(const std::filesystem::path &root,
+                    const std::filesystem::path &candidate) {
+  std::error_code ec;
+  const auto canonical_root = std::filesystem::weakly_canonical(root, ec);
+  if (ec) {
+    throw StorageError("cannot resolve artifact root " + root.string() + ": " +
+                       ec.message());
+  }
+  const auto canonical_candidate =
+      std::filesystem::weakly_canonical(candidate, ec);
+  if (ec) {
+    throw StorageError("cannot resolve artifact path " + candidate.string() +
+                       ": " + ec.message());
+  }
+  const auto relative =
+      std::filesystem::relative(canonical_candidate, canonical_root, ec);
+  return !ec && !relative.empty() && relative != "." &&
+         !std::ranges::any_of(relative,
+                              [](const auto &part) { return part == ".."; });
+}
+
+bool supported_contract(const ArtifactSpec &spec) {
+  if (spec.kind == "astgraph") {
+    return spec.artifact_schema == "cidx-astgraph/v3" &&
+           spec.producer_version.starts_with("cidx-astgraph ") &&
+           spec.engine_version.starts_with("cidx ");
+  }
+  if (spec.kind == "analysis-result") {
+    return spec.artifact_schema == "cidx-analysis/v1" &&
+           spec.producer_version.starts_with("cidx-analysis ") &&
+           spec.engine_version.starts_with("cidx ");
+  }
+  if (spec.kind == "query-result") {
+    return spec.artifact_schema == "cidx-query/v1" &&
+           spec.producer_version.starts_with("cidx-query ") &&
+           spec.engine_version.starts_with("cidx ");
+  }
+  if (spec.kind == "proof") {
+    return spec.artifact_schema == "cidx-proof/v1" &&
+           spec.producer_version.starts_with("cidx-proof ") &&
+           spec.engine_version.starts_with("cidx ");
+  }
+  if (spec.kind.starts_with("extension:")) {
+    return spec.artifact_schema == "cidx-extension/v1" &&
+           spec.producer_version.starts_with("cidx-extension ") &&
+           spec.engine_version.starts_with("cidx ");
+  }
+  return false;
+}
+
+bool valid_relation_name(std::string_view value) {
+  return valid_attachment_name(value);
 }
 
 std::string envelope_value(SqliteDb &db, std::string_view key) {
@@ -263,26 +337,23 @@ void write_envelope(SqliteDb &sidecar, const ArtifactSpec &spec) {
 
 } // namespace
 
-ArtifactAttachment::ArtifactAttachment(ArtifactStore *owner, Storage *storage,
-                                       std::string name,
-                                       bool previous_query_only)
-    : owner_(owner), storage_(storage), name_(std::move(name)),
+ArtifactAttachment::ArtifactAttachment(
+    std::shared_ptr<ArtifactAttachmentLifetime> lifetime, std::string name,
+    bool previous_query_only)
+    : lifetime_(std::move(lifetime)), name_(std::move(name)),
       previous_query_only_(previous_query_only) {}
 
 ArtifactAttachment::~ArtifactAttachment() noexcept { reset(); }
 
 ArtifactAttachment::ArtifactAttachment(ArtifactAttachment &&other) noexcept
-    : owner_(std::exchange(other.owner_, nullptr)),
-      storage_(std::exchange(other.storage_, nullptr)),
-      name_(std::move(other.name_)),
+    : lifetime_(std::move(other.lifetime_)), name_(std::move(other.name_)),
       previous_query_only_(other.previous_query_only_) {}
 
 ArtifactAttachment &
 ArtifactAttachment::operator=(ArtifactAttachment &&other) noexcept {
   if (this != &other) {
     reset();
-    owner_ = std::exchange(other.owner_, nullptr);
-    storage_ = std::exchange(other.storage_, nullptr);
+    lifetime_ = std::move(other.lifetime_);
     name_ = std::move(other.name_);
     previous_query_only_ = other.previous_query_only_;
   }
@@ -290,12 +361,13 @@ ArtifactAttachment::operator=(ArtifactAttachment &&other) noexcept {
 }
 
 void ArtifactAttachment::reset() noexcept {
-  if (owner_ == nullptr || storage_ == nullptr) {
+  if (!lifetime_) {
     return;
   }
-  owner_->release_attachment(name_, previous_query_only_);
-  owner_ = nullptr;
-  storage_ = nullptr;
+  if (lifetime_->owner != nullptr) {
+    lifetime_->owner->release_attachment(name_, previous_query_only_);
+  }
+  lifetime_.reset();
 }
 
 ArtifactStore::ArtifactStore(Storage &storage, std::filesystem::path root,
@@ -303,6 +375,30 @@ ArtifactStore::ArtifactStore(Storage &storage, std::filesystem::path root,
     : storage_(storage), root_(std::move(root)), max_attached_(max_attached) {
   if (root_.empty()) {
     root_ = std::filesystem::current_path() / ".cidx-artifacts";
+  }
+  root_ = std::filesystem::absolute(root_).lexically_normal();
+  std::error_code root_ec;
+  if (std::filesystem::is_symlink(
+          std::filesystem::symlink_status(root_, root_ec))) {
+    throw StorageError("artifact root must not be a symlink");
+  }
+  const auto canonical_root = std::filesystem::weakly_canonical(root_, root_ec);
+  if (root_ec) {
+    throw StorageError("cannot resolve artifact root " + root_.string() + ": " +
+                       root_ec.message());
+  }
+  root_ = canonical_root;
+  attachment_lifetime_ = std::make_shared<ArtifactAttachmentLifetime>();
+  attachment_lifetime_->owner = this;
+}
+
+ArtifactStore::~ArtifactStore() {
+  while (!attached_names_.empty()) {
+    release_attachment(attached_names_.back(),
+                       query_only_before_attach_.value_or(false));
+  }
+  if (attachment_lifetime_) {
+    attachment_lifetime_->owner = nullptr;
   }
 }
 
@@ -369,6 +465,11 @@ ArtifactStore::validate_record(const ArtifactRecord &record) const {
     return validation;
   }
   const auto path = root_ / relative;
+  if (has_symlink_component(path) || !is_within_root(root_, path)) {
+    add_diagnostic(validation, "invalid_location",
+                   "artifact path escapes the trusted artifact root");
+    return validation;
+  }
   std::error_code ec;
   if (!std::filesystem::is_regular_file(path, ec)) {
     add_diagnostic(validation, "missing", "artifact file is missing");
@@ -422,6 +523,28 @@ ArtifactStore::validate_record(const ArtifactRecord &record) const {
             relation_list(record.spec.exposed_relations)) {
       add_diagnostic(validation, "incompatible",
                      "sidecar envelope does not match the manifest");
+    }
+    if (!supported_contract(record.spec)) {
+      add_diagnostic(
+          validation, "unsupported_contract",
+          "artifact kind, schema, producer, or engine is not supported by "
+          "this reader");
+    }
+    for (const auto &relation : record.spec.exposed_relations) {
+      if (!valid_relation_name(relation)) {
+        add_diagnostic(validation, "invalid_relation",
+                       "artifact relation is not a safe SQLite identifier");
+        continue;
+      }
+      auto relation_check = sidecar.prepare(
+          "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND "
+          "name = ? LIMIT 1");
+      bind_text(relation_check, 1, relation);
+      if (!relation_check.step()) {
+        add_diagnostic(validation, "missing_relation",
+                       "declared artifact relation does not exist: " +
+                           relation);
+      }
     }
   } catch (const StorageError &error) {
     add_diagnostic(validation, "corrupt", error.what());
@@ -497,7 +620,7 @@ ArtifactRecord ArtifactStore::publish(const ArtifactSpec &input_spec,
   const auto nonce =
       std::chrono::steady_clock::now().time_since_epoch().count();
   const auto temporary =
-      staging / (sha1_hex(spec.logical_id + std::to_string(nonce)) + ".db");
+      staging / (sha256_hex(spec.logical_id + std::to_string(nonce)) + ".db");
   try {
     {
       SqliteDb sidecar(temporary.string());
@@ -515,6 +638,13 @@ ArtifactRecord ArtifactStore::publish(const ArtifactSpec &input_spec,
 ArtifactRecord
 ArtifactStore::publish_existing(const ArtifactSpec &input_spec,
                                 const std::filesystem::path &source_path) {
+  return publish_existing(input_spec, source_path, {});
+}
+
+ArtifactRecord
+ArtifactStore::publish_existing(const ArtifactSpec &input_spec,
+                                const std::filesystem::path &source_path,
+                                const IdentityMappingWriter &mapping_writer) {
   if (input_spec.logical_id.empty() || input_spec.kind.empty() ||
       input_spec.workspace_identity.empty() ||
       !valid_attachment_name(input_spec.attachment_name)) {
@@ -522,7 +652,19 @@ ArtifactStore::publish_existing(const ArtifactSpec &input_spec,
         "artifact manifest has an incomplete or invalid identity");
   }
   std::error_code ec;
-  if (!std::filesystem::is_regular_file(source_path, ec)) {
+  const auto source_absolute =
+      std::filesystem::absolute(source_path).lexically_normal();
+  if (std::filesystem::is_symlink(
+          std::filesystem::symlink_status(source_absolute, ec))) {
+    throw StorageError("cannot adopt an artifact through a symlink");
+  }
+  const auto source_canonical =
+      std::filesystem::weakly_canonical(source_absolute, ec);
+  if (ec || !is_within_root(root_, source_canonical) ||
+      has_symlink_component(source_canonical.lexically_normal())) {
+    throw StorageError("cannot adopt an artifact outside the trusted root");
+  }
+  if (!std::filesystem::is_regular_file(source_canonical, ec)) {
     throw StorageError("cannot adopt missing artifact " + source_path.string());
   }
   ArtifactSpec spec = input_spec;
@@ -536,23 +678,23 @@ ArtifactStore::publish_existing(const ArtifactSpec &input_spec,
   const auto nonce =
       std::chrono::steady_clock::now().time_since_epoch().count();
   const auto temporary =
-      staging / (sha1_hex(spec.logical_id + std::to_string(nonce)) + ".db");
+      staging / (sha256_hex(spec.logical_id + std::to_string(nonce)) + ".db");
   try {
     std::filesystem::copy_file(
-        source_path, temporary,
+        source_canonical, temporary,
         std::filesystem::copy_options::overwrite_existing);
     {
       SqliteDb sidecar(temporary.string());
       auto check = sidecar.prepare("PRAGMA integrity_check");
       if (!check.step() || check.col_text(0) != "ok") {
         throw StorageError("cannot adopt corrupt artifact " +
-                           source_path.string());
+                           source_canonical.string());
       }
       write_envelope(sidecar, spec);
     }
-    const auto record = publish_staged(spec, temporary);
-    if (std::filesystem::absolute(source_path) !=
-        std::filesystem::absolute(root_ / record.relative_path)) {
+    const auto record = publish_staged(spec, temporary, mapping_writer);
+    if (source_canonical !=
+        std::filesystem::weakly_canonical(root_ / record.relative_path)) {
       std::filesystem::remove(source_path, ec);
     }
     return record;
@@ -564,12 +706,17 @@ ArtifactStore::publish_existing(const ArtifactSpec &input_spec,
 
 ArtifactRecord
 ArtifactStore::publish_staged(const ArtifactSpec &spec,
-                              const std::filesystem::path &staged_path) {
+                              const std::filesystem::path &staged_path,
+                              const IdentityMappingWriter &mapping_writer) {
   try {
     const auto hash = digest_file(staged_path);
     const auto relative = std::filesystem::path("artifacts") /
-                          sha1_hex(spec.kind) / (hash + ".db");
+                          sha256_hex(spec.kind) / (hash + ".db");
     const auto final_path = root_ / relative;
+    if (has_symlink_component(final_path) ||
+        !is_within_root(root_, final_path)) {
+      throw StorageError("artifact publication path escapes the trusted root");
+    }
     std::filesystem::create_directories(final_path.parent_path());
     if (std::filesystem::exists(final_path)) {
       if (digest_file(final_path) != hash) {
@@ -580,7 +727,7 @@ ArtifactStore::publish_staged(const ArtifactSpec &spec,
     } else {
       fsync_path(staged_path);
       std::filesystem::rename(staged_path, final_path);
-      fsync_directory(final_path.parent_path());
+      fsync_directory_chain(root_, final_path.parent_path());
     }
 
     ArtifactRecord record;
@@ -613,6 +760,14 @@ ArtifactStore::publish_staged(const ArtifactSpec &spec,
                                     "WHERE id = ?");
       restore.bind(1, existing_id);
       restore.step_done();
+      auto clear_mappings = storage_.raw_db().prepare(
+          "DELETE FROM artifact_identity_map WHERE artifact_id = ?");
+      clear_mappings.bind(1, existing_id);
+      clear_mappings.step_done();
+      record.id = existing_id;
+      if (mapping_writer) {
+        mapping_writer(record);
+      }
       txn.commit();
       std::filesystem::remove(staged_path);
       const auto current_record = current(spec.logical_id);
@@ -668,6 +823,9 @@ ArtifactStore::publish_staged(const ArtifactSpec &spec,
       bind_text(relation_insert, 2, relation);
       relation_insert.step_done();
     }
+    if (mapping_writer) {
+      mapping_writer(record);
+    }
     txn.commit();
     return record;
   } catch (...) {
@@ -720,22 +878,22 @@ ArtifactStore::attach_current(std::string_view logical_id) {
   attached_names_.push_back(name);
   storage_.attached_artifact_names_.insert(name);
   return std::unique_ptr<ArtifactAttachment>(
-      new ArtifactAttachment(this, &storage_, name, previous_query_only));
+      new ArtifactAttachment(attachment_lifetime_, name, previous_query_only));
 }
 
 void ArtifactStore::release_attachment(std::string_view name,
                                        bool previous_query_only) noexcept {
   try {
     storage_.raw_db().exec("DETACH DATABASE \"" + std::string(name) + "\"");
-    const auto it = std::ranges::find(attached_names_, name);
-    if (it != attached_names_.end()) {
-      attached_names_.erase(it);
-    }
-    storage_.attached_artifact_names_.erase(std::string(name));
   } catch (...) {
     const auto ignored = std::current_exception();
     (void)ignored;
   }
+  const auto it = std::ranges::find(attached_names_, name);
+  if (it != attached_names_.end()) {
+    attached_names_.erase(it);
+  }
+  storage_.attached_artifact_names_.erase(std::string(name));
   if (storage_.attached_artifact_names_.empty()) {
     reset_query_only(storage_.artifact_query_only_before_attach_.value_or(
         previous_query_only));

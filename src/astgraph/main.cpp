@@ -5,13 +5,13 @@
 // are read from the cidx index.db `file` row (same sanitize/resolve pipeline
 // as `cidx index`), and the parse goes through the same Toolchain/Parser.
 // Exit codes mirror cidx main.cpp: usage=2, any other error=1.
-#include <sys/stat.h>
-
 #include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <vector>
 
 #include "astgraph/astgraph.hpp"
@@ -60,8 +60,8 @@ constexpr const char *kHelp =
     "  --jobs N     Souffle worker count (default: 1)\n";
 
 bool file_exists(const std::string &path) {
-  struct stat st{};
-  return ::stat(path.c_str(), &st) == 0;
+  std::error_code ec;
+  return std::filesystem::exists(path, ec) && !ec;
 }
 
 struct CliArgs {
@@ -74,6 +74,32 @@ struct CliArgs {
   int jobs = 1;
   std::string source;
 };
+
+std::string stable_option(std::string_view option,
+                          const std::filesystem::path &component_root) {
+  const auto make_stable = [&](std::string_view value) {
+    const std::filesystem::path path(value);
+    if (!path.is_absolute()) {
+      return std::string(value);
+    }
+    std::error_code ec;
+    const auto relative = std::filesystem::relative(path, component_root, ec);
+    if (!ec && !relative.empty() && relative != "." &&
+        !std::ranges::any_of(relative,
+                             [](const auto &part) { return part == ".."; })) {
+      return relative.generic_string();
+    }
+    return std::string("external:") + path.filename().generic_string();
+  };
+  for (const std::string_view prefix :
+       {"-I", "-isystem", "-iquote", "-include", "-include-pch",
+        "-resource-dir", "-o", "-MF", "-MT"}) {
+    if (option.starts_with(prefix) && option.size() > prefix.size()) {
+      return std::string(prefix) + make_stable(option.substr(prefix.size()));
+    }
+  }
+  return make_stable(option);
+}
 
 CliArgs parse_cli(const std::vector<std::string> &argv) {
   CliArgs out;
@@ -282,18 +308,23 @@ int main(int argc, char **argv) {
         std::filesystem::relative(source, component_root).generic_string();
     std::string configuration_material;
     for (const auto &option : opts) {
-      configuration_material += std::to_string(option.size()) + ":" + option;
+      const auto stable = stable_option(option, component_root);
+      configuration_material += std::to_string(stable.size()) + ":" + stable;
     }
-    configuration_material += "driver:" + rec->driver.value_or("") +
+    const auto stable_driver =
+        rec->driver ? std::filesystem::path(*rec->driver).filename().string()
+                    : std::string{};
+    configuration_material += "driver:" + stable_driver +
                               ":main-only:" + (dump_opts.main_only ? "1" : "0");
     const std::string separator(1, '\0');
-    const std::string configuration_identity =
-        cidx::sha1_hex(workspace_identity + separator + configuration_material);
+    const std::string configuration_identity = cidx::sha256_hex(
+        workspace_identity + separator + configuration_material);
     const std::string tu_identity =
-        cidx::sha1_hex(workspace_identity + separator + relative_tu +
-                       separator + configuration_identity);
+        cidx::sha256_hex(workspace_identity + separator + relative_tu +
+                         separator + configuration_identity);
     cidx::ArtifactSpec artifact;
-    artifact.logical_id = "astgraph:" + workspace_identity + ":" + relative_tu;
+    artifact.logical_id = "astgraph:" + workspace_identity + ":" + relative_tu +
+                          ":" + configuration_identity;
     artifact.kind = "astgraph";
     artifact.artifact_schema =
         "cidx-astgraph/v" + std::to_string(cidx::astgraph::kSchemaVersion);
@@ -306,36 +337,36 @@ int main(int argc, char **argv) {
     artifact.tu_identity = tu_identity;
     artifact.configuration_identity = configuration_identity;
     artifact.input_fact_set_identity =
-        cidx::sha1_hex("facts:" + workspace_identity + ":" + tu_identity + ":" +
-                       std::string(cidx::catalog::kCatalogHash));
+        cidx::sha256_hex("facts:" + workspace_identity + ":" + tu_identity +
+                         ":" + std::string(cidx::catalog::kCatalogHash));
     artifact.completeness = cidx::ArtifactCompleteness::complete;
     artifact.truncation = cidx::ArtifactTruncation::none;
     artifact.trust = cidx::ArtifactTrust::producer_verified;
     artifact.evidence = "source";
     artifact.attachment_name = "astgraph_" + tu_identity.substr(0, 16);
     artifact.exposed_relations = {"node", "edge", "symbol", "meta"};
-    const cidx::ArtifactRecord published =
-        artifacts.publish_existing(artifact, out_path);
+    const cidx::ArtifactRecord published = artifacts.publish_existing(
+        artifact, out_path, [&](const cidx::ArtifactRecord &record) {
+          const auto published_path =
+              std::filesystem::path(index_path).parent_path() /
+              record.relative_path;
+          cidx::SqliteDb sidecar(published_path.string(), true);
+          auto sidecar_symbols = sidecar.prepare(
+              "SELECT usr FROM symbol WHERE usr <> '' ORDER BY usr");
+          while (sidecar_symbols.step()) {
+            const std::string usr = sidecar_symbols.col_text(0);
+            const auto core_symbol = db.lookup_symbol(usr);
+            artifacts.record_identity_mapping(
+                record.spec.logical_id, usr, "usr", usr,
+                core_symbol ? "resolved" : "unresolved",
+                core_symbol ? std::optional<std::int64_t>(core_symbol->id)
+                            : std::nullopt,
+                core_symbol ? "" : "core symbol is not present in index");
+          }
+        });
     out_path = (std::filesystem::path(index_path).parent_path() /
                 published.relative_path)
                    .string();
-
-    // USRs are the stable cross-database identity. Preserve both successful
-    // and unresolved joins so readers can distinguish absence from a mapping
-    // that was never attempted.
-    cidx::SqliteDb sidecar(out_path, true);
-    auto sidecar_symbols =
-        sidecar.prepare("SELECT usr FROM symbol WHERE usr <> '' ORDER BY usr");
-    while (sidecar_symbols.step()) {
-      const std::string usr = sidecar_symbols.col_text(0);
-      const auto core_symbol = db.lookup_symbol(usr);
-      artifacts.record_identity_mapping(
-          published.spec.logical_id, usr, "usr", usr,
-          core_symbol ? "resolved" : "unresolved",
-          core_symbol ? std::optional<std::int64_t>(core_symbol->id)
-                      : std::nullopt,
-          core_symbol ? "" : "core symbol is not present in index");
-    }
 
     if (cli.analyze) {
       const std::string rule = cli.rule.value_or("");

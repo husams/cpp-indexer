@@ -71,8 +71,8 @@ void Storage::migrate() {
     const auto artifact_cols = table_columns("artifact");
     if (!has_col(artifact_cols, "catalog_hash")) {
       db_.exec("PRAGMA foreign_keys = OFF");
-      for (const auto table : {"artifact_relation", "artifact_identity_map",
-                               "artifact_lease", "artifact_pin"}) {
+      for (const char *table : {"artifact_relation", "artifact_identity_map",
+                                "artifact_lease", "artifact_pin"}) {
         if (has_table(table)) {
           db_.exec(std::string("ALTER TABLE ") + table + " RENAME TO " + table +
                    "_v35");
@@ -106,27 +106,26 @@ void Storage::migrate() {
           "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, published_at "
           "TEXT, "
           "UNIQUE (logical_id, content_hash))");
-      db_.exec("INSERT INTO artifact(id, logical_id, kind, artifact_schema, "
-               "catalog_version, catalog_hash, "
-               "producer_version, engine_version, workspace_identity, "
-               "tu_identity, configuration_identity, "
-               "input_fact_set_identity, completeness, truncation, trust, "
-               "evidence, attachment_name, "
-               "retention_policy, relative_path, content_hash, byte_size, "
-               "state, created_at, published_at) "
-               "SELECT id, logical_id, kind, artifact_schema, "
-               "CASE WHEN catalog_version GLOB '[0-9]*' THEN "
-               "CAST(catalog_version AS INTEGER) ELSE " +
-               std::to_string(catalog::kCatalogVersion) + " END, '" +
-               std::string(catalog::kCatalogHash) +
-               "', producer_version, engine_version, workspace_identity, "
-               "tu_identity, configuration_identity, input_fact_set_identity, "
-               "completeness, truncation, "
-               "CASE trust WHEN 'trusted' THEN 'producer-verified' WHEN "
-               "'untrusted' THEN 'unverified' ELSE 'unverified' END, "
-               "'source', attachment_name, retention_policy, relative_path, "
-               "content_hash, byte_size, state, created_at, published_at "
-               "FROM artifact_v35");
+      db_.exec(
+          "INSERT INTO artifact(id, logical_id, kind, artifact_schema, "
+          "catalog_version, catalog_hash, "
+          "producer_version, engine_version, workspace_identity, "
+          "tu_identity, configuration_identity, "
+          "input_fact_set_identity, completeness, truncation, trust, "
+          "evidence, attachment_name, "
+          "retention_policy, relative_path, content_hash, byte_size, "
+          "state, created_at, published_at) "
+          "SELECT id, logical_id, kind, artifact_schema, "
+          "CASE WHEN catalog_version GLOB '[0-9]*' AND "
+          "catalog_version NOT GLOB '*[^0-9]*' THEN "
+          "CAST(catalog_version AS INTEGER) ELSE 0 END, '', "
+          "producer_version, engine_version, workspace_identity, "
+          "tu_identity, configuration_identity, input_fact_set_identity, "
+          "completeness, truncation, 'unverified', 'assumption', "
+          "attachment_name, retention_policy, relative_path, content_hash, "
+          "byte_size, CASE WHEN state = 'current' THEN 'stale' ELSE state "
+          "END, created_at, published_at "
+          "FROM artifact_v35");
       db_.exec("CREATE UNIQUE INDEX idx_artifact_current_logical ON "
                "artifact(logical_id) WHERE state = 'current';"
                "CREATE INDEX idx_artifact_state ON artifact(state);");
@@ -158,14 +157,25 @@ void Storage::migrate() {
           "artifact(id) ON DELETE CASCADE, pin_id TEXT NOT NULL, reason TEXT "
           "NOT NULL, PRIMARY KEY (artifact_id, pin_id)) WITHOUT ROWID;");
       db_.exec("INSERT INTO artifact_pin SELECT * FROM artifact_pin_v35;");
-      for (const auto table : {"artifact_relation", "artifact_identity_map",
-                               "artifact_lease", "artifact_pin"}) {
+      for (const char *table : {"artifact_relation", "artifact_identity_map",
+                                "artifact_lease", "artifact_pin"}) {
         if (has_table(table)) {
           db_.exec(std::string("DROP TABLE ") + table + "_v35");
         }
       }
       db_.exec("DROP TABLE artifact_v35");
       db_.exec("PRAGMA foreign_keys = ON");
+      changed = true;
+    }
+  }
+  if (has_table("artifact")) {
+    auto legacy_hashes = db_.prepare(
+        "UPDATE artifact SET content_hash = 'legacy-sha1:' || content_hash, "
+        "state = CASE WHEN state = 'current' THEN 'stale' ELSE state END "
+        "WHERE content_hash NOT LIKE 'sha256:%' AND content_hash NOT LIKE "
+        "'legacy-sha1:%'");
+    legacy_hashes.step_done();
+    if (db_.changes() > 0) {
       changed = true;
     }
   }

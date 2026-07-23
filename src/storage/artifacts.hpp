@@ -18,6 +18,7 @@ namespace cidx {
 
 class Storage;
 class ArtifactStore;
+struct ArtifactAttachmentLifetime;
 
 enum class ArtifactCompleteness : std::uint8_t { complete, partial, unknown };
 enum class ArtifactTruncation : std::uint8_t { none, truncated, unknown };
@@ -85,12 +86,11 @@ public:
 
 private:
   friend class ArtifactStore;
-  ArtifactAttachment(ArtifactStore *owner, Storage *storage, std::string name,
-                     bool previous_query_only);
+  ArtifactAttachment(std::shared_ptr<ArtifactAttachmentLifetime> lifetime,
+                     std::string name, bool previous_query_only);
   void reset() noexcept;
 
-  ArtifactStore *owner_ = nullptr;
-  Storage *storage_ = nullptr;
+  std::shared_ptr<ArtifactAttachmentLifetime> lifetime_;
   std::string name_;
   bool previous_query_only_ = false;
 };
@@ -101,7 +101,7 @@ public:
 
   explicit ArtifactStore(Storage &storage, std::filesystem::path root = {},
                          std::size_t max_attached = 8);
-  ~ArtifactStore() = default;
+  ~ArtifactStore();
   ArtifactStore(const ArtifactStore &) = delete;
   ArtifactStore &operator=(const ArtifactStore &) = delete;
 
@@ -114,6 +114,10 @@ public:
   // into the same content-addressed, manifest-governed publication path.
   ArtifactRecord publish_existing(const ArtifactSpec &spec,
                                   const std::filesystem::path &source_path);
+  using IdentityMappingWriter = std::function<void(const ArtifactRecord &)>;
+  ArtifactRecord publish_existing(const ArtifactSpec &spec,
+                                  const std::filesystem::path &source_path,
+                                  const IdentityMappingWriter &mapping_writer);
   [[nodiscard]] std::unique_ptr<ArtifactAttachment>
   attach_current(std::string_view logical_id);
 
@@ -150,7 +154,8 @@ private:
   validate_record(const ArtifactRecord &record) const;
   [[nodiscard]] ArtifactRecord
   publish_staged(const ArtifactSpec &spec,
-                 const std::filesystem::path &staged_path);
+                 const std::filesystem::path &staged_path,
+                 const IdentityMappingWriter &mapping_writer = {});
   void release_attachment(std::string_view name,
                           bool previous_query_only) noexcept;
   void reset_query_only(bool previous) noexcept;
@@ -160,6 +165,7 @@ private:
   std::size_t max_attached_;
   std::vector<std::string> attached_names_;
   std::optional<bool> query_only_before_attach_;
+  std::shared_ptr<ArtifactAttachmentLifetime> attachment_lifetime_;
 };
 
 } // namespace cidx

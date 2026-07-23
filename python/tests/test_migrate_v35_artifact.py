@@ -108,4 +108,8 @@ def test_v35_artifact_contract_is_rebuilt(tmp_path):
     row = migrated._conn.execute(
         "SELECT catalog_version, catalog_hash, trust, evidence FROM artifact"
     ).fetchone()
-    assert tuple(row) == (1, "15e7ce8206c521cff6794530a382f0389320c0f3e49d148b0f311d058aa5157a", "producer-verified", "source")
+    assert tuple(row) == (0, "", "unverified", "assumption")
+    state_hash = migrated._conn.execute(
+        "SELECT state, content_hash FROM artifact"
+    ).fetchone()
+    assert tuple(state_hash) == ("stale", "legacy-sha1:hash")

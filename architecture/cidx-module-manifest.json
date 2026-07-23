@@ -567,16 +567,32 @@
   ],
   "externalExceptions": [
     {
+      "source": "src/storage/artifacts.hpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter", "owner": "Storage M2 maintainers", "rationale": "Artifact public paths remain std::filesystem values until the WorkspaceContext path port is complete.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/artifacts.cpp", "fromModule": "persistence.sqlite", "toModule": "external:process", "include": "fcntl.h",
+      "boundary": "persistence -> process compatibility", "owner": "Storage M2 maintainers", "rationale": "Artifact publication uses POSIX durable-file flags until the foundation durability adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/artifacts.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "sys/file.h",
+      "boundary": "persistence -> filesystem adapter", "owner": "Storage M2 maintainers", "rationale": "Artifact publication uses the POSIX inter-process lock until the foundation durability adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/artifacts.cpp", "fromModule": "persistence.sqlite", "toModule": "external:process", "include": "unistd.h",
+      "boundary": "persistence -> process compatibility", "owner": "Storage M2 maintainers", "rationale": "Artifact publication uses POSIX fsync/close until the foundation durability adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/astgraph/main.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "product surface -> filesystem adapter", "owner": "Storage M2 maintainers", "rationale": "Astgraph adoption needs filesystem paths for sidecar publication until the shared workspace adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
       "source": "src/ast/index_engine.cpp", "fromModule": "extraction.ast", "toModule": "external:filesystem", "include": "sys/stat.h",
       "boundary": "extraction -> filesystem compatibility", "owner": "Platform M1 extraction maintainers", "rationale": "Retain the current source-stat probe until workspace context owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
     },
     {
       "source": "src/astgraph/astgraph.cpp", "fromModule": "analysis.astgraph", "toModule": "external:process", "include": "unistd.h",
       "boundary": "astgraph -> process compatibility", "owner": "Platform M2 analysis maintainers", "rationale": "Retain the current unlink compatibility call until the runner port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-62"
-    },
-    {
-      "source": "src/astgraph/main.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
-      "boundary": "product surface -> filesystem compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the standalone AST graph input stat until shared workspace context owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
     },
     {
       "source": "src/cli/analyze.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
