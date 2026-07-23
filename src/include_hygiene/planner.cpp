@@ -63,7 +63,8 @@ std::string common_root(const std::vector<std::string> &paths) {
   if (paths.empty()) {
     return "/";
   }
-  std::vector<std::string> root = split_components(pathutil::dirname(paths.front()));
+  std::vector<std::string> root =
+      split_components(pathutil::dirname(paths.front()));
   for (const std::string &p : paths) {
     const std::vector<std::string> dir = split_components(pathutil::dirname(p));
     std::size_t i = 0;
@@ -97,15 +98,30 @@ std::string relative_to(const std::string &root, const std::string &abs) {
 // artifact so a reviewer knows the exact search space behind a zero-reference
 // claim, and so a future kind that was NOT searched is visible in old plans.
 const std::vector<std::string> &searched_kinds() {
-  static const std::vector<std::string> k = {
-      "calls",           "inherits",        "contains",
-      "specializes",     "instantiates",    "overrides",
-      "uses",            "field_of",        "method_of",
-      "construct-value", "construct-temp",  "construct-heap",
-      "construct-copy",  "construct-move",  "factory-construct",
-      "destroy",         "friend",          "dispatch_calls",
-      "returns",         "of_type",         "underlying_type",
-      "parameter_type",  "template_argument_type"};
+  static const std::vector<std::string> k = {"calls",
+                                             "inherits",
+                                             "contains",
+                                             "specializes",
+                                             "instantiates",
+                                             "overrides",
+                                             "uses",
+                                             "field_of",
+                                             "method_of",
+                                             "construct-value",
+                                             "construct-temp",
+                                             "construct-heap",
+                                             "construct-copy",
+                                             "construct-move",
+                                             "factory-construct",
+                                             "destroy",
+                                             "friend",
+                                             "dispatch_calls",
+                                             "alias_of",
+                                             "returns",
+                                             "of_type",
+                                             "underlying_type",
+                                             "parameter_type",
+                                             "template_argument_type"};
   return k;
 }
 
@@ -122,12 +138,14 @@ CleanupPlan build_plan(cidx::Storage &db, const AnalysisResult &res,
   // What this plan does NOT prove, stated in the artifact itself so a reviewer
   // reads it without going to the docs.
   plan.limitations = {
-      "Compile success is not proof of behavioral equivalence: a header removed "
+      "Compile success is not proof of behavioral equivalence: a header "
+      "removed "
       "for a static registration, a configuration-changing macro, or a pragma "
       "can still compile and change the program.",
       "Only configurations recorded in the index were validated. A build "
       "configuration cidx has never indexed is not covered.",
-      "A zero-reference result is only as complete as the indexed files and the "
+      "A zero-reference result is only as complete as the indexed files and "
+      "the "
       "semantic edge kinds listed in reference_kinds_searched.",
       "Items marked manual_review are real findings with no automatic proof; "
       "they are never applied.",

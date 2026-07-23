@@ -1,8 +1,8 @@
 // graph_storage_test — Parametrised + boundary tests for the v7 graph storage
 // layer (edge_kind, edge, edge_site, template_param, template_arg).
 //
-// Category: property-based / parametrised (role: qa-engineer, mandatory addition).
-// All tests are hermetic (no libclang, no filesystem, :memory: DBs).
+// Category: property-based / parametrised (role: qa-engineer, mandatory
+// addition). All tests are hermetic (no libclang, no filesystem, :memory: DBs).
 // Label: "default" — added to CIDX_DEFAULT_TESTS in CMakeLists.txt.
 //
 // Covers test matrix from spec/06-graph-impl-plan.md §6:
@@ -16,7 +16,8 @@
 //   - add_edge called N times: count accumulates linearly
 //   - mint_symbol_id called twice for same USR: idempotent, same id returned
 //   - add_edge_site INSERT OR IGNORE: re-seen site does not duplicate
-//   - template_arg with NULL ref_id (builtin type arg): row present, ref_id NULL
+//   - template_arg with NULL ref_id (builtin type arg): row present, ref_id
+//   NULL
 //   - add_template_param positions are stable under INSERT OR REPLACE
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
@@ -79,20 +80,34 @@ TEST_CASE("T5 edge_kind table seeded with the design rows") {
     }
   }
 
-  REQUIRE(rows.size() == 18);  // +dispatch_calls (18, virtual-dispatch callers)
+  REQUIRE(rows.size() == 20); // +dispatch_calls(18) +alias_of(19)/of_type(20, v34)
   // Exact order + id + name for the first 9 (original design §2).
   const std::vector<std::pair<int64_t, std::string>> expected = {
-      {1, "calls"},    {2, "inherits"}, {3, "contains"},
-      {4, "specializes"}, {5, "instantiates"}, {6, "overrides"},
-      {7, "uses"},     {8, "field_of"}, {9, "method_of"},
+      {1, "calls"},
+      {2, "inherits"},
+      {3, "contains"},
+      {4, "specializes"},
+      {5, "instantiates"},
+      {6, "overrides"},
+      {7, "uses"},
+      {8, "field_of"},
+      {9, "method_of"},
       // PR1 (v17): construction/destruction forms
-      {10, "construct-value"}, {11, "construct-temp"}, {12, "construct-heap"},
-      {13, "construct-copy"}, {14, "construct-move"},
-      {15, "factory-construct"}, {16, "destroy"},
+      {10, "construct-value"},
+      {11, "construct-temp"},
+      {12, "construct-heap"},
+      {13, "construct-copy"},
+      {14, "construct-move"},
+      {15, "factory-construct"},
+      {16, "destroy"},
       // PR2 (v17): friend (rolled up to befriends)
       {17, "friend"},
       // Materialised virtual-dispatch caller edge (built by resolve)
       {18, "dispatch_calls"},
+      // v34: typedef / using alias -> the type it names (was uses(7))
+      {19, "alias_of"},
+      // v34: variable / class field -> its declared type (was uses(7))
+      {20, "of_type"},
   };
   for (std::size_t i = 0; i < expected.size(); ++i) {
     CHECK(rows[i].id == expected[i].first);
@@ -157,7 +172,8 @@ TEST_CASE("T2 add_edge UNIQUE upsert accumulates count, self-edge supported") {
   const int64_t eid3 = db.add_edge(make_edge(a_id, b_id, 8 /*field_of*/));
   CHECK(eid3 != eid1);
   {
-    auto st = raw.prepare("SELECT COUNT(*) FROM edge WHERE src_id=? AND dst_id=?");
+    auto st =
+        raw.prepare("SELECT COUNT(*) FROM edge WHERE src_id=? AND dst_id=?");
     st.bind(1, a_id);
     st.bind(2, b_id);
     REQUIRE(st.step());
@@ -165,12 +181,12 @@ TEST_CASE("T2 add_edge UNIQUE upsert accumulates count, self-edge supported") {
   }
 
   // BOUNDARY: self-edge (recurse->recurse). Must be accepted and upserted.
-  const int64_t r_id = db.add_symbol(make_sym("c:calls.c@F@recurse", "recurse"));
+  const int64_t r_id =
+      db.add_symbol(make_sym("c:calls.c@F@recurse", "recurse"));
   const int64_t self_eid = db.add_edge(make_edge(r_id, r_id, 1 /*calls*/));
   REQUIRE(self_eid > 0);
   {
-    auto st = raw.prepare(
-        "SELECT src_id, dst_id FROM edge WHERE id=?");
+    auto st = raw.prepare("SELECT src_id, dst_id FROM edge WHERE id=?");
     st.bind(1, self_eid);
     REQUIRE(st.step());
     CHECK(st.col_int64(0) == r_id);
@@ -268,17 +284,17 @@ TEST_CASE("T3 stub-mint resolved=0 then real def upsert: same id, resolved=1") {
     CHECK(st.col_text(1) == "external_fn");
   }
 
-  // Step 4: an edge pointing at the stub_id still joins correctly after resolution.
+  // Step 4: an edge pointing at the stub_id still joins correctly after
+  // resolution.
   const int64_t caller_id = db.add_symbol(make_sym("c:@F@caller", "caller"));
   const int64_t eid = db.add_edge(make_edge(caller_id, stub_id, 1 /*calls*/));
   REQUIRE(eid > 0);
   {
-    auto st = raw.prepare(
-        "SELECT d.resolved, d.spelling FROM edge e "
-        "JOIN symbol d ON d.id=e.dst_id WHERE e.id=?");
+    auto st = raw.prepare("SELECT d.resolved, d.spelling FROM edge e "
+                          "JOIN symbol d ON d.id=e.dst_id WHERE e.id=?");
     st.bind(1, eid);
     REQUIRE(st.step());
-    CHECK(st.col_int64(0) == 1);           // resolved after upsert
+    CHECK(st.col_int64(0) == 1);            // resolved after upsert
     CHECK(st.col_text(1) == "external_fn"); // correct spelling
   }
 }
@@ -286,7 +302,8 @@ TEST_CASE("T3 stub-mint resolved=0 then real def upsert: same id, resolved=1") {
 // ---------------------------------------------------------------------------
 // T3 BOUNDARY — mint_symbol_id: valid kind sentinel satisfies CHECK constraint
 // ---------------------------------------------------------------------------
-TEST_CASE("T3 boundary: stub minted with kind=function passes CHECK constraint") {
+TEST_CASE(
+    "T3 boundary: stub minted with kind=function passes CHECK constraint") {
   Storage db(":memory:");
   auto &raw = db.raw_db();
 
@@ -324,12 +341,12 @@ TEST_CASE("T3 decl_path: stub for an unregistered (system/stdlib) target is "
                         "decl_col, resolved FROM symbol WHERE id=?");
   st.bind(1, id);
   REQUIRE(st.step());
-  CHECK(st.col_is_null(0));                                    // no file row
+  CHECK(st.col_is_null(0)); // no file row
   CHECK(st.col_is_null(1));
   CHECK(st.col_text(2) == "/usr/include/c++/13/bits/stl_iterator.h");
   CHECK(st.col_int64(3) == 1234);
   CHECK(st.col_int64(4) == 7);
-  CHECK(st.col_int64(5) == 0);                                // still a stub
+  CHECK(st.col_int64(5) == 0); // still a stub
 
   // It still counts as a still-stub in resolve_pass (decl_path is not a
   // registered location): file_id IS NULL AND decl_file_id IS NULL.
@@ -365,8 +382,8 @@ TEST_CASE("T4 template_arg ref_id joins back to a real symbol (Widget case)") {
   REQUIRE(widget_id > 0);
 
   // Insert Box<Widget> specialization symbol.
-  const int64_t spec_id =
-      db.add_symbol(make_sym("c:@N@geo@S@Box>#$@S@Widget", "Box<Widget>", "class"));
+  const int64_t spec_id = db.add_symbol(
+      make_sym("c:@N@geo@S@Box>#$@S@Widget", "Box<Widget>", "class"));
   REQUIRE(spec_id > 0);
 
   // Add template_arg: position=0, arg_kind=1 (TYPE), ref_id=Widget.
@@ -379,10 +396,9 @@ TEST_CASE("T4 template_arg ref_id joins back to a real symbol (Widget case)") {
 
   // Assert: the ref_id joins back to Widget's spelling.
   {
-    auto st = raw.prepare(
-        "SELECT s.spelling FROM template_arg ta "
-        "JOIN symbol s ON s.id = ta.ref_id "
-        "WHERE ta.owner_id = ? AND ta.arg_kind = 1");
+    auto st = raw.prepare("SELECT s.spelling FROM template_arg ta "
+                          "JOIN symbol s ON s.id = ta.ref_id "
+                          "WHERE ta.owner_id = ? AND ta.arg_kind = 1");
     st.bind(1, spec_id);
     REQUIRE(st.step());
     CHECK(st.col_text(0) == "Widget");
@@ -399,9 +415,8 @@ TEST_CASE("T4 template_arg ref_id joins back to a real symbol (Widget case)") {
 
   // The builtin arg row must be present with NULL ref_id.
   {
-    auto st = raw.prepare(
-        "SELECT ref_id, literal FROM template_arg "
-        "WHERE owner_id=? AND position=1");
+    auto st = raw.prepare("SELECT ref_id, literal FROM template_arg "
+                          "WHERE owner_id=? AND position=1");
     st.bind(1, spec_id);
     REQUIRE(st.step());
     CHECK(st.col_int64(0) == 0); // NULL ref_id (col_int64 returns 0 for NULL)
@@ -413,8 +428,7 @@ TEST_CASE("T4 template_arg ref_id joins back to a real symbol (Widget case)") {
   ta_replace.literal = "updated";
   db.add_template_arg(ta_replace); // same owner+position → replaces
   {
-    auto st = raw.prepare(
-        "SELECT COUNT(*) FROM template_arg WHERE owner_id=?");
+    auto st = raw.prepare("SELECT COUNT(*) FROM template_arg WHERE owner_id=?");
     st.bind(1, spec_id);
     REQUIRE(st.step());
     CHECK(st.col_int64(0) == 2); // still 2 rows, not 3
@@ -424,7 +438,8 @@ TEST_CASE("T4 template_arg ref_id joins back to a real symbol (Widget case)") {
 // ---------------------------------------------------------------------------
 // T4 BOUNDARY — template_param positions are stable under INSERT OR REPLACE
 // ---------------------------------------------------------------------------
-TEST_CASE("T4 boundary: template_param INSERT OR REPLACE is idempotent on position") {
+TEST_CASE(
+    "T4 boundary: template_param INSERT OR REPLACE is idempotent on position") {
   Storage db(":memory:");
   auto &raw = db.raw_db();
 
@@ -443,8 +458,8 @@ TEST_CASE("T4 boundary: template_param INSERT OR REPLACE is idempotent on positi
   db.add_template_param(p);
 
   {
-    auto st = raw.prepare(
-        "SELECT COUNT(*) FROM template_param WHERE owner_id=?");
+    auto st =
+        raw.prepare("SELECT COUNT(*) FROM template_param WHERE owner_id=?");
     st.bind(1, box_id);
     REQUIRE(st.step());
     CHECK(st.col_int64(0) == 1);
@@ -459,8 +474,8 @@ TEST_CASE("T4 boundary: template_param INSERT OR REPLACE is idempotent on positi
   db.add_template_param(p2);
 
   {
-    auto st = raw.prepare(
-        "SELECT position, name FROM template_param WHERE owner_id=? ORDER BY position");
+    auto st = raw.prepare("SELECT position, name FROM template_param WHERE "
+                          "owner_id=? ORDER BY position");
     st.bind(1, box_id);
     REQUIRE(st.step());
     CHECK(st.col_int64(0) == 0);
@@ -529,13 +544,14 @@ TEST_CASE("rollup_edge_counts: count becomes COUNT(edge_site)") {
 // QA-v7-recheck: deleting edge rows cascades to edge_site and leaves symbols
 // intact (FK schema invariant; independent of any CLI command).
 // ---------------------------------------------------------------------------
-TEST_CASE("deleting edge/template rows cascades to edge_site, symbols survive") {
+TEST_CASE(
+    "deleting edge/template rows cascades to edge_site, symbols survive") {
   Storage db(":memory:");
   auto &raw = db.raw_db();
 
   const int64_t comp = db.add_component("r", "/r");
-  const int64_t dir  = db.add_directory(comp, "");
-  const int64_t fid  = db.add_file(dir, "a.c");
+  const int64_t dir = db.add_directory(comp, "");
+  const int64_t fid = db.add_file(dir, "a.c");
 
   const int64_t a = db.add_symbol(make_sym("c:@F@a", "a"));
   const int64_t b = db.add_symbol(make_sym("c:@F@b", "b"));
@@ -543,59 +559,78 @@ TEST_CASE("deleting edge/template rows cascades to edge_site, symbols survive") 
   REQUIRE(eid > 0);
 
   EdgeSite s;
-  s.edge_id = eid; s.file_id = fid; s.line = 1; s.col = 1; s.conditional = 0;
+  s.edge_id = eid;
+  s.file_id = fid;
+  s.line = 1;
+  s.col = 1;
+  s.conditional = 0;
   db.add_edge_site(s);
 
   TemplateParam tp;
-  tp.owner_id = a; tp.position = 0; tp.param_kind = 1; tp.name = "T";
+  tp.owner_id = a;
+  tp.position = 0;
+  tp.param_kind = 1;
+  tp.name = "T";
   db.add_template_param(tp);
 
   TemplateArg ta;
-  ta.owner_id = b; ta.position = 0; ta.arg_kind = 2; ta.literal = "42";
+  ta.owner_id = b;
+  ta.position = 0;
+  ta.arg_kind = 2;
+  ta.literal = "42";
   db.add_template_arg(ta);
 
   // Verify rows exist before clearing.
   {
-    auto st = raw.prepare("SELECT COUNT(*) FROM edge"); REQUIRE(st.step());
+    auto st = raw.prepare("SELECT COUNT(*) FROM edge");
+    REQUIRE(st.step());
     REQUIRE(st.col_int64(0) == 1);
   }
   {
-    auto st = raw.prepare("SELECT COUNT(*) FROM edge_site"); REQUIRE(st.step());
+    auto st = raw.prepare("SELECT COUNT(*) FROM edge_site");
+    REQUIRE(st.step());
     REQUIRE(st.col_int64(0) == 1);
   }
   {
-    auto st = raw.prepare("SELECT COUNT(*) FROM template_param"); REQUIRE(st.step());
+    auto st = raw.prepare("SELECT COUNT(*) FROM template_param");
+    REQUIRE(st.step());
     REQUIRE(st.col_int64(0) == 1);
   }
   {
-    auto st = raw.prepare("SELECT COUNT(*) FROM template_arg"); REQUIRE(st.step());
+    auto st = raw.prepare("SELECT COUNT(*) FROM template_arg");
+    REQUIRE(st.step());
     REQUIRE(st.col_int64(0) == 1);
   }
 
   // Clear.
   raw.exec("DELETE FROM template_arg");
   raw.exec("DELETE FROM template_param");
-  raw.exec("DELETE FROM edge");  // edge_site cascades via FK
+  raw.exec("DELETE FROM edge"); // edge_site cascades via FK
 
   {
-    auto st = raw.prepare("SELECT COUNT(*) FROM edge"); REQUIRE(st.step());
+    auto st = raw.prepare("SELECT COUNT(*) FROM edge");
+    REQUIRE(st.step());
     CHECK(st.col_int64(0) == 0);
   }
   {
-    auto st = raw.prepare("SELECT COUNT(*) FROM edge_site"); REQUIRE(st.step());
+    auto st = raw.prepare("SELECT COUNT(*) FROM edge_site");
+    REQUIRE(st.step());
     CHECK(st.col_int64(0) == 0);
   }
   {
-    auto st = raw.prepare("SELECT COUNT(*) FROM template_param"); REQUIRE(st.step());
+    auto st = raw.prepare("SELECT COUNT(*) FROM template_param");
+    REQUIRE(st.step());
     CHECK(st.col_int64(0) == 0);
   }
   {
-    auto st = raw.prepare("SELECT COUNT(*) FROM template_arg"); REQUIRE(st.step());
+    auto st = raw.prepare("SELECT COUNT(*) FROM template_arg");
+    REQUIRE(st.step());
     CHECK(st.col_int64(0) == 0);
   }
   // Symbol rows survive clear.
   {
-    auto st = raw.prepare("SELECT COUNT(*) FROM symbol"); REQUIRE(st.step());
+    auto st = raw.prepare("SELECT COUNT(*) FROM symbol");
+    REQUIRE(st.step());
     CHECK(st.col_int64(0) == 2);
   }
 }
@@ -607,8 +642,10 @@ TEST_CASE("instantiates edge kind=5 stored and retrieved via edge_kind join") {
   Storage db(":memory:");
   auto &raw = db.raw_db();
 
-  const int64_t fn_id   = db.add_symbol(make_sym("c:@F@widest", "widest", "function"));
-  const int64_t tmpl_id = db.add_symbol(make_sym("c:@FT@max_of", "max_of", "function-template"));
+  const int64_t fn_id =
+      db.add_symbol(make_sym("c:@F@widest", "widest", "function"));
+  const int64_t tmpl_id =
+      db.add_symbol(make_sym("c:@FT@max_of", "max_of", "function-template"));
   REQUIRE(fn_id > 0);
   REQUIRE(tmpl_id > 0);
 
@@ -618,13 +655,12 @@ TEST_CASE("instantiates edge kind=5 stored and retrieved via edge_kind join") {
 
   // Join via edge_kind.name to confirm id=5 maps to "instantiates".
   {
-    auto st = raw.prepare(
-        "SELECT ek.name, s.spelling, d.spelling "
-        "FROM edge e "
-        "JOIN edge_kind ek ON ek.id = e.kind "
-        "JOIN symbol s ON s.id = e.src_id "
-        "JOIN symbol d ON d.id = e.dst_id "
-        "WHERE e.kind = 5");
+    auto st = raw.prepare("SELECT ek.name, s.spelling, d.spelling "
+                          "FROM edge e "
+                          "JOIN edge_kind ek ON ek.id = e.kind "
+                          "JOIN symbol s ON s.id = e.src_id "
+                          "JOIN symbol d ON d.id = e.dst_id "
+                          "WHERE e.kind = 5");
     REQUIRE(st.step());
     CHECK(st.col_text(0) == "instantiates");
     CHECK(st.col_text(1) == "widest");
@@ -638,9 +674,10 @@ TEST_CASE("instantiates edge kind=5 stored and retrieved via edge_kind join") {
     auto st = raw.prepare("SELECT COUNT(*) FROM template_arg WHERE owner_id=?");
     st.bind(1, fn_id);
     REQUIRE(st.step());
-    CHECK(st.col_int64(0) == 0); // B3 known gap: function-template instantiates
-                                  // does not populate template_arg (class-template
-                                  // specializations do via specializes kind=4).
+    CHECK(st.col_int64(0) ==
+          0); // B3 known gap: function-template instantiates
+              // does not populate template_arg (class-template
+              // specializations do via specializes kind=4).
   }
 }
 
@@ -652,8 +689,10 @@ TEST_CASE("uses edge kind=7 stored: member DeclRefExpr referencing a field") {
   auto &raw = db.raw_db();
 
   // Simulate area() method referencing radius_ field.
-  const int64_t area_id   = db.add_symbol(make_sym("c:@N@geo@S@Circle@F@area#", "area", "method"));
-  const int64_t radius_id = db.add_symbol(make_sym("c:@N@geo@S@Circle@FI@radius_", "radius_", "member"));
+  const int64_t area_id =
+      db.add_symbol(make_sym("c:@N@geo@S@Circle@F@area#", "area", "method"));
+  const int64_t radius_id = db.add_symbol(
+      make_sym("c:@N@geo@S@Circle@FI@radius_", "radius_", "member"));
   REQUIRE(area_id > 0);
   REQUIRE(radius_id > 0);
 
@@ -662,14 +701,15 @@ TEST_CASE("uses edge kind=7 stored: member DeclRefExpr referencing a field") {
   REQUIRE(eid > 0);
 
   {
-    auto st = raw.prepare(
-        "SELECT ek.name FROM edge e JOIN edge_kind ek ON ek.id = e.kind WHERE e.id=?");
+    auto st = raw.prepare("SELECT ek.name FROM edge e JOIN edge_kind ek ON "
+                          "ek.id = e.kind WHERE e.id=?");
     st.bind(1, eid);
     REQUIRE(st.step());
     CHECK(st.col_text(0) == "uses");
   }
 
-  // BOUNDARY: uses edge with count > 1 (field read in a loop body, accumulated).
+  // BOUNDARY: uses edge with count > 1 (field read in a loop body,
+  // accumulated).
   Edge u2 = make_edge(area_id, radius_id, 7);
   u2.count = 1;
   const int64_t eid2 = db.add_edge(u2);
@@ -700,8 +740,8 @@ TEST_CASE("add_edge stores base_access and is_virtual for inherits kind") {
 
   auto &raw = db.raw_db();
   {
-    auto st = raw.prepare(
-        "SELECT base_access, is_virtual FROM edge WHERE id=?");
+    auto st =
+        raw.prepare("SELECT base_access, is_virtual FROM edge WHERE id=?");
     st.bind(1, eid);
     REQUIRE(st.step());
     CHECK(st.col_int64(0) == 1); // public
@@ -714,8 +754,8 @@ TEST_CASE("add_edge stores base_access and is_virtual for inherits kind") {
   const int64_t eid2 = db.add_edge(e2);
   CHECK(eid2 == eid); // same edge row
   {
-    auto st = raw.prepare(
-        "SELECT base_access, is_virtual FROM edge WHERE id=?");
+    auto st =
+        raw.prepare("SELECT base_access, is_virtual FROM edge WHERE id=?");
     st.bind(1, eid);
     REQUIRE(st.step());
     // COALESCE keeps the prior non-NULL values.
@@ -730,7 +770,8 @@ TEST_CASE("add_edge stores base_access and is_virtual for inherits kind") {
 // implicit template instantiations have no backfilling add_symbol, so the name
 // MUST travel with the USR at mint time.
 // ---------------------------------------------------------------------------
-TEST_CASE("T3 naming: mint carries spelling/qual_name; upgrades empty, never clobbers") {
+TEST_CASE("T3 naming: mint carries spelling/qual_name; upgrades empty, never "
+          "clobbers") {
   Storage db(":memory:");
   auto &raw = db.raw_db();
 
@@ -741,8 +782,8 @@ TEST_CASE("T3 naming: mint carries spelling/qual_name; upgrades empty, never clo
     REQUIRE(st.step());
     // v16: kind is stored as a CXCursorKind int; recover the name for asserts.
     return std::tuple<std::string, std::string, std::string, int64_t>(
-        st.col_text(0), st.col_text(1),
-        cidx::symbol_kind_name(st.col_int64(2)), st.col_int64(3));
+        st.col_text(0), st.col_text(1), cidx::symbol_kind_name(st.col_int64(2)),
+        st.col_int64(3));
   };
 
   // Named mint: a never-indexed stdlib target keeps its name AND kind.
@@ -768,11 +809,12 @@ TEST_CASE("T3 naming: mint carries spelling/qual_name; upgrades empty, never clo
   CHECK(std::get<2>(row_of("c:@F@unknown")) == "function");
 
   // Repeat mint upgrades an unnamed stub's name+kind, then NEVER clobbers.
-  db.mint_symbol_id("c:@F@f");                                  // nameless first
-  db.mint_symbol_id("c:@F@f", "f", "ns::f", "", "method");      // upgrade name+kind
+  db.mint_symbol_id("c:@F@f");                             // nameless first
+  db.mint_symbol_id("c:@F@f", "f", "ns::f", "", "method"); // upgrade name+kind
   CHECK(std::get<0>(row_of("c:@F@f")) == "f");
   CHECK(std::get<2>(row_of("c:@F@f")) == "method");
-  db.mint_symbol_id("c:@F@f", "WRONG", "x::WRONG", "", "class"); // must not clobber
+  db.mint_symbol_id("c:@F@f", "WRONG", "x::WRONG", "",
+                    "class"); // must not clobber
   CHECK(std::get<0>(row_of("c:@F@f")) == "f");
   CHECK(std::get<1>(row_of("c:@F@f")) == "ns::f");
   CHECK(std::get<2>(row_of("c:@F@f")) == "method");

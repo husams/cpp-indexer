@@ -131,7 +131,7 @@ An abstract struct is `kind = struct` **and** `entity_type = abstract_class`.
 
 | View | Nodes | Relations (namespace) |
 |---|---|---|
-| `symbol` | every symbol row | the 18 Layer-0 edge kinds: `calls`, `inherits`, `contains`, `specializes`, `instantiates`, `overrides`, `uses`, `field_of`, `method_of`, `construct-*`, `factory-construct`, `destroy`, `friend`, `dispatch_calls` |
+| `symbol` | every symbol row | the 20 Layer-0 edge kinds: `calls`, `inherits`, `contains`, `specializes`, `instantiates`, `overrides`, `uses`, `field_of`, `method_of`, `construct-*`, `factory-construct`, `destroy`, `friend`, `dispatch_calls`, `alias_of`, `of_type` |
 | `entity` | Layer-1 design entities (ids are symbol ids) | the 12 entity edge kinds: `generalizes`, `implements`, `specializes`, `composes`, `aggregates`, `associates`, `creates`, `uses`, `destroys`, `befriends`, `instantiates`, `declares` |
 
 Rules of thumb:

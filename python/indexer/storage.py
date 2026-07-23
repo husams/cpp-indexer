@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 from indexer import pathx as _pathx
 
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 34
 
 #: symbol.kind name -> the integer it is stored as on disk (v16+). The integer
 #: IS libclang's `CXCursorKind` enum value, so a stored kind matches the C API
@@ -277,7 +277,15 @@ INSERT OR IGNORE INTO edge_kind (id, name) VALUES
   (10,'construct-value'), (11,'construct-temp'), (12,'construct-heap'),
   (13,'construct-copy'), (14,'construct-move'),
   (15,'factory-construct'), (16,'destroy'), (17,'friend'),
-  (18,'dispatch_calls');
+  (18,'dispatch_calls'),
+  -- v34: a typedef / using alias -> the type it names. Previously written as
+  -- uses(7); a dedicated kind because "uses" is overloaded (body references,
+  -- signature types, namespace qualifiers) while the alias relation is a
+  -- definitional X -> alias_of -> Y.
+  (19,'alias_of'),
+  -- v34: a variable / class field -> its declared type. Previously written
+  -- as uses(7); "of_type" matches the signature tier's of_type relation.
+  (20,'of_type');
 
 CREATE TABLE IF NOT EXISTS edge (
     id          INTEGER PRIMARY KEY,
@@ -1565,6 +1573,45 @@ class Storage:
         if "const_value" not in cols2:
             self._conn.execute("ALTER TABLE symbol ADD COLUMN const_value TEXT")
             changed = True
+        # v33 -> v34: dedicated alias_of(19) edge kind. The typedef/using-alias
+        # -> underlying-type edge was previously stored as the overloaded
+        # uses(7); rewrite exactly those rows: source is an alias symbol
+        # (typedef 20 / type-alias 36) and the target is not a namespace (a
+        # qualified alias like `using X = ns::Foo` also carries an alias -> ns
+        # namespace-qualifier uses(7) edge, which stays a use). Mirrors
+        # storage_migrate.cpp.
+        if "edge_kind" in tables:
+            have_alias_of = self._conn.execute(
+                "SELECT 1 FROM edge_kind WHERE id = 19"
+            ).fetchone()
+            if have_alias_of is None:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO edge_kind (id, name) "
+                    "VALUES (19, 'alias_of')"
+                )
+                self._conn.execute(
+                    "UPDATE edge SET kind = 19 WHERE kind = 7 AND src_id IN "
+                    "(SELECT id FROM symbol WHERE kind IN (20, 36)) "
+                    "AND dst_id NOT IN (SELECT id FROM symbol WHERE kind = 22)"
+                )
+                changed = True
+            # Same step, second rewrite: a variable(9) / member(6) -> its
+            # declared type becomes of_type(20). Namespace-qualifier edges
+            # are excluded exactly as above.
+            have_of_type = self._conn.execute(
+                "SELECT 1 FROM edge_kind WHERE id = 20"
+            ).fetchone()
+            if have_of_type is None:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO edge_kind (id, name) "
+                    "VALUES (20, 'of_type')"
+                )
+                self._conn.execute(
+                    "UPDATE edge SET kind = 20 WHERE kind = 7 AND src_id IN "
+                    "(SELECT id FROM symbol WHERE kind IN (6, 9)) "
+                    "AND dst_id NOT IN (SELECT id FROM symbol WHERE kind = 22)"
+                )
+                changed = True
         # v27 -> v28: per-backend initializer text on a (static member) variable
         # definition. `definition` is created by the schema script; ALTER the
         # existing table so a v27 DB gains the column. No backfill -- a reindex

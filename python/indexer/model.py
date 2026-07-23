@@ -2263,16 +2263,12 @@ class Typedef(Entity):
         an alias resolves to the next alias, not through to the final record --
         chain ``.aliased()`` to walk the chain to its end."""
         for sym in self._cb.graph.neighbors(
-            self.sym, kinds=("uses",), direction="out"
+            self.sym, kinds=("alias_of",), direction="out"
         ):
-            # A type alias never *names* a namespace. A namespace uses-edge here
-            # is only the qualifier of the underlying type -- `using X = ns::Foo`
-            # and dependent nested members (`Tmpl<..., ns::T>::type`) each emit a
-            # NAMESPACE_REF -> ns uses-edge alongside (or instead of) the real
-            # type edge. Skipping it lets a qualified alias resolve to its record
-            # (`Foo`), and a dependent member alias fall back to its type_info
-            # spelling, rather than mis-reporting the namespace as the underlying
-            # type.
+            # A type alias never *names* a namespace (v34: the qualifier of a
+            # `using X = ns::Foo` alias emits a separate alias -> ns uses(7)
+            # edge, which the alias_of filter already excludes; the guard is
+            # kept as a safety net for defective rows).
             if sym.kind == "namespace":
                 continue
             e = self._cb.wrap(sym, alias_origin=self)

@@ -46,8 +46,9 @@ namespace RdKafka {
 
 
 @pytest.fixture
-def conf_uses() -> set[str]:
-    """qual_names of every symbol with a `uses` edge -> RdKafka::Conf."""
+def conf_uses() -> set[tuple[str, int]]:
+    """(qual_name, edge kind) of every symbol with a `uses`(7), `alias_of`(19)
+    or `of_type`(20) edge -> RdKafka::Conf."""
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "t.cpp")
         with open(path, "w") as fh:
@@ -69,35 +70,40 @@ def conf_uses() -> set[str]:
         conf = db.lookup_symbol("c:@N@RdKafka@S@Conf")
         assert conf is not None
         rows = db._conn.execute(
-            "SELECT s.qual_name FROM edge e "
+            "SELECT s.qual_name, e.kind FROM edge e "
             "JOIN symbol s ON e.src_id = s.id "
-            "WHERE e.dst_id = ? AND e.kind = 7",
+            "WHERE e.dst_id = ? AND e.kind IN (7, 19, 20)",
             (conf.id,),
         ).fetchall()
-        return {r[0] for r in rows}
+        return {(r[0], r[1]) for r in rows}
 
 
 def test_parameter_and_return_types_use_the_class(conf_uses):
     # `create` mentions Conf twice (param `const Conf*`, body local) -> one edge.
-    assert "RdKafka::Producer::create" in conf_uses
+    assert ("RdKafka::Producer::create", 7) in conf_uses
 
 
-def test_field_type_uses_the_class(conf_uses):
-    assert "RdKafka::Producer::m_conf" in conf_uses
+def test_field_type_is_of_type_the_class(conf_uses):
+    # v34: a field is OF its declared type -- of_type(20), not uses(7).
+    assert ("RdKafka::Producer::m_conf", 20) in conf_uses
+    assert ("RdKafka::Producer::m_conf", 7) not in conf_uses
 
 
 def test_return_type_uses_the_class(conf_uses):
     # Conf::self() returns Conf* -> the method uses Conf (no self-edge: the
     # method symbol is distinct from the class symbol).
-    assert "RdKafka::Conf::self" in conf_uses
+    assert ("RdKafka::Conf::self", 7) in conf_uses
 
 
-def test_typedef_underlying_type_uses_the_class(conf_uses):
-    assert "RdKafka::ConfAlias" in conf_uses
+def test_typedef_underlying_type_is_alias_of_the_class(conf_uses):
+    # v34: the definitional typedef -> underlying-type relation is alias_of(19),
+    # not the overloaded uses(7).
+    assert ("RdKafka::ConfAlias", 19) in conf_uses
+    assert ("RdKafka::ConfAlias", 7) not in conf_uses
 
 
 def test_no_self_edge_from_class_to_itself(conf_uses):
-    assert "RdKafka::Conf" not in conf_uses
+    assert not any(name == "RdKafka::Conf" for name, _ in conf_uses)
 
 
 # ---------------------------------------------------------------------------
@@ -184,8 +190,8 @@ def test_typeref_template_arg_local_not_double_counted(conf_uses):
     # TYPE_REF branch (parent=VAR_DECL/PARM_DECL is guarded out) adds nothing
     # spurious. create() must appear (set semantics) and Conf must have no
     # self-edge.
-    assert "RdKafka::Producer::create" in conf_uses
-    assert "RdKafka::Conf" not in conf_uses
+    assert ("RdKafka::Producer::create", 7) in conf_uses
+    assert not any(name == "RdKafka::Conf" for name, _ in conf_uses)
 
 
 # ---------------------------------------------------------------------------

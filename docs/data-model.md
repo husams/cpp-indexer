@@ -50,7 +50,7 @@ erDiagram
         int id PK
         int src_id FK
         int dst_id FK
-        int kind "1=calls..18=dispatch_calls"
+        int kind "1=calls..20=of_type"
         int count
         int base_access
         int is_virtual
@@ -125,6 +125,8 @@ erDiagram
 | 7 | uses | 16 | destroy |
 | 8 | field_of | 17 | friend |
 | 9 | method_of | 18 | dispatch_calls *(resolve)* |
+| | | 19 | alias_of *(v34: typedef/using alias → its target; was `uses`)* |
+| | | 20 | of_type *(v34: variable/field → its declared type; was `uses`)* |
 
 ## The three graph layers
 

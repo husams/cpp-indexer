@@ -280,9 +280,11 @@ TEST_CASE(
   const int64_t ordinary_user_id =
       db.add_symbol(make_sym("USR::use_target", "use_target", "function"));
 
-  db.add_edge(make_edge(alias_b_id, target_id, 7));
+  // v34: the alias -> target relation is alias_of(19); an ordinary reference
+  // stays uses(7) and must not be reported as an alias.
+  db.add_edge(make_edge(alias_b_id, target_id, 19));
   db.add_edge(make_edge(ordinary_user_id, target_id, 7));
-  db.add_edge(make_edge(alias_a_id, target_id, 7));
+  db.add_edge(make_edge(alias_a_id, target_id, 19));
 
   GraphQuery g(db, ":memory:");
   auto aliases = g.aliased_by(target_id, 50);

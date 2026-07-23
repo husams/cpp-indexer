@@ -27,12 +27,12 @@ c:@F@unbox#$@S@Box>#I#	c:box.cpp@T@IntBox	uses	1
 c:@S@Box>#I	c:@ST>1#T@Box	instantiates	1		
 c:@S@Box>#I@FI@item	c:@S@Box>#I	field_of	1		
 c:@ST>1#T@Box@FI@item	c:@ST>1#T@Box	field_of	1		
-c:box.cpp@T@IntBox	c:@S@Box>#I	uses	1		
+c:box.cpp@T@IntBox	c:@S@Box>#I	alias_of	1		
 == edge_site ==
 c:@F@square	c:@F@add	calls	math.c	3	28	0						
 c:@F@unbox#$@S@Box>#I#	c:@S@Box>#I@FI@item	uses	box.cpp	3	32	0						
 c:@F@unbox#$@S@Box>#I#	c:box.cpp@T@IntBox	uses	box.cpp	3	18	0						
-c:box.cpp@T@IntBox	c:@S@Box>#I	uses	box.cpp	2	18	0						
+c:box.cpp@T@IntBox	c:@S@Box>#I	alias_of	box.cpp	2	18	0						
 == call_arg ==
 c:@F@square	c:@F@add	calls	math.c	3	28	0	local		c:math.c@69@F@square@x		
 c:@F@square	c:@F@add	calls	math.c	3	28	1	local		c:math.c@69@F@square@x		

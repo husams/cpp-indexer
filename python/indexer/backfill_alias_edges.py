@@ -50,7 +50,7 @@ from indexer.storage import SYMBOL_KIND_IDS, Storage
 
 _TYPEDEF = SYMBOL_KIND_IDS["typedef"]
 _TYPEALIAS = SYMBOL_KIND_IDS["type-alias"]
-_USES = EDGE_KINDS["uses"]
+_ALIAS_OF = EDGE_KINDS["alias_of"]
 _ALIAS_CURSOR_KINDS = (cx.CursorKind.TYPEDEF_DECL, cx.CursorKind.TYPE_ALIAS_DECL)
 
 
@@ -73,7 +73,7 @@ def find_candidate_aliases(
         "  AND NOT EXISTS ("
         "    SELECT 1 FROM edge e WHERE e.src_id = s.id AND e.kind = ?)"
     )
-    params: list = [_TYPEDEF, _TYPEALIAS, _USES]
+    params: list = [_TYPEDEF, _TYPEALIAS, _ALIAS_OF]
     if component is not None:
         # Restrict to files under the named component (file -> directory ->
         # component). Component ids are small; resolve the name to an id first.
@@ -158,6 +158,7 @@ def _backfill_one_file(
                     cursor.underlying_typedef_type,
                     file_id,
                     cursor.location,
+                    edge_kind=_ALIAS_OF,
                 )
             tgt = _uses_target(db, sym.id)
         else:
@@ -184,7 +185,7 @@ def _uses_target(db: Storage, alias_id: int) -> str | None:
         "SELECT s.display_name AS dn, s.qual_name AS qn "
         "FROM edge e JOIN symbol s ON s.id = e.dst_id "
         "WHERE e.src_id = ? AND e.kind = ? LIMIT 1",
-        (alias_id, _USES),
+        (alias_id, _ALIAS_OF),
     ).fetchone()
     if row is None:
         return None

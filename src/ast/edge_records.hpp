@@ -13,7 +13,7 @@ namespace cidx::ast {
 struct EdgeRecord {
   int64_t src_id = 0;
   int64_t dst_id = 0;
-  int64_t kind = 0; // edge_kind id (1=calls .. 18=dispatch_calls)
+  int64_t kind = 0; // edge_kind id (1=calls .. 18=dispatch_calls, 19=alias_of)
   int64_t count = 1;
   std::optional<int64_t>
       base_access;                   // inherits: 1=public 2=protected 3=private

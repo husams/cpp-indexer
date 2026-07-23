@@ -78,6 +78,8 @@ RELATION_CATALOG: tuple[tuple[str, str, int], ...] = (
     ("destroy", SYMBOL_VIEW, 16),
     ("friend", SYMBOL_VIEW, 17),
     ("dispatch_calls", SYMBOL_VIEW, 18),
+    ("alias_of", SYMBOL_VIEW, 19),
+    ("of_type", SYMBOL_VIEW, 20),
     # Layer-1 entity_edge kinds (entity_edge_kind seed).
     ("generalizes", ENTITY_VIEW, 1),
     ("implements", ENTITY_VIEW, 2),

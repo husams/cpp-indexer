@@ -77,6 +77,10 @@ EDGE_KINDS = {
     # Materialised virtual-dispatch caller edge (built by resolve): caller ->
     # each transitive override of the virtual method it statically calls.
     "dispatch_calls": 18,
+    # v34: typedef / using alias -> the type it names (was uses(7)).
+    "alias_of": 19,
+    # v34: variable / class field -> its declared type (was uses(7)).
+    "of_type": 20,
 }
 EDGE_NAMES = {v: k for k, v in EDGE_KINDS.items()}
 
@@ -1483,15 +1487,18 @@ class GraphQuery:
         return out
 
     def references(self, sym, limit: int = 500) -> list[Edge]:
-        """All incoming `calls` + `uses` edges -- "who references this symbol".
-        Each Edge.peer is the referrer; Edge.count is how many times; follow with
-        sites() for exact file:line locations."""
-        return self.edges_in(sym, kinds=("calls", "uses"), limit=limit)
+        """All incoming `calls` + `uses` + `alias_of` + `of_type` edges --
+        "who references this symbol". Each Edge.peer is the referrer;
+        Edge.count is how many times; follow with sites() for exact file:line
+        locations."""
+        return self.edges_in(
+            sym, kinds=("calls", "uses", "alias_of", "of_type"), limit=limit
+        )
 
     def aliased_by(self, sym, limit: int = 500) -> list[Sym]:
         """Type aliases / typedefs whose underlying type directly names ``sym``.
 
-        This is the inverse of the alias ``uses`` edge consumed by the model
+        This is the inverse of the alias ``alias_of`` edge consumed by the model
         layer's ``Typedef.aliased()``. For ``using IntBox = Box<int>;`` it returns
         the ``IntBox`` alias when called on the concrete ``Box<int>`` instance.
 
@@ -1508,7 +1515,7 @@ class GraphQuery:
             "JOIN edge e ON e.src_id = s.id "
             "WHERE e.dst_id = ? AND e.kind = ? AND s.kind IN (?, ?) "
             "ORDER BY COALESCE(s.qual_name, s.spelling), s.id LIMIT ?",
-            (sid, EDGE_KINDS["uses"], *alias_kinds, limit),
+            (sid, EDGE_KINDS["alias_of"], *alias_kinds, limit),
         ).fetchall()
         return [self._sym(r) for r in rows]
 

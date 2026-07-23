@@ -59,7 +59,7 @@ std::optional<std::string> default_tokens(const clang::ParmVarDecl *param,
 
 std::optional<std::string>
 reference_semantics(const clang::FunctionDecl *fn,
-                   const clang::ParmVarDecl *param) {
+                    const clang::ParmVarDecl *param) {
   if (!param->getType()->isReferenceType()) {
     return std::nullopt;
   }
@@ -102,8 +102,7 @@ ordered_redecls(const clang::ASTContext &context,
   std::ranges::sort(out, [&context](const auto *lhs, const auto *rhs) {
     const ExpansionLoc l = expansion_loc(context, lhs->getLocation());
     const ExpansionLoc r = expansion_loc(context, rhs->getLocation());
-    return std::tie(l.file, l.line, l.col) <
-           std::tie(r.file, r.line, r.col);
+    return std::tie(l.file, l.line, l.col) < std::tie(r.file, r.line, r.col);
   });
   return out;
 }
@@ -116,8 +115,10 @@ std::string default_origin(const clang::ASTContext &context,
   const auto decls = ordered_redecls(context, fn);
   if (decls.size() > 1) {
     const auto it = std::ranges::find(decls, fn);
-    const auto ordinal = it == decls.end() ? 1 :
-                         static_cast<int>(std::distance(decls.begin(), it)) + 1;
+    const auto ordinal =
+        it == decls.end()
+            ? 1
+            : static_cast<int>(std::distance(decls.begin(), it)) + 1;
     return "declaration " + std::to_string(ordinal);
   }
   return qualified_name(context, fn);
@@ -611,11 +612,11 @@ bool DeclarationEdgeVisitor::VisitFieldDecl(clang::FieldDecl *decl) {
     return true;
   }
   // FIELD_DECL branch: mint the X<B> instance FIRST, then the structural
-  // uses(7) field -> its declared type.
+  // of_type(20) field -> its declared type (v34: was the overloaded uses(7)).
   minter_.mint_instance_from_type(decl->getType());
   if (const auto self = sink_.lookup_symbol_id(member_usr)) {
     emit_type_use(sink_, *self, decl->getType(), file_id_,
-                  expansion_loc(context_, decl->getLocation()), 0);
+                  expansion_loc(context_, decl->getLocation()), 0, 20);
     if (const auto tid = types_.intern(decl->getType())) {
       sink_.add_symbol_type(*self, kSymTypeOfTypeK, *tid);
     }
@@ -638,8 +639,10 @@ bool DeclarationEdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
   if (!self) {
     return true;
   }
+  // of_type(20), not uses(7): a variable is OF its declared type; "uses"
+  // stays for body/signature references.
   emit_type_use(sink_, *self, decl->getType(), file_id_,
-                expansion_loc(context_, decl->getLocation()), 0);
+                expansion_loc(context_, decl->getLocation()), 0, 20);
   if (const auto tid = types_.intern(decl->getType())) {
     sink_.add_symbol_type(*self, kSymTypeOfTypeK, *tid);
   }
@@ -753,8 +756,10 @@ bool DeclarationEdgeVisitor::VisitTypedefNameDecl(
   }
   minter_.mint_named_instance(decl); // minted FIRST (order-dependent)
   if (const auto self = sink_.lookup_symbol_id(usr)) {
+    // alias_of(19), not uses(7): the alias -> underlying-type relation is
+    // definitional, and "uses" stays for references.
     emit_type_use(sink_, *self, decl->getUnderlyingType(), file_id_,
-                  expansion_loc(context_, decl->getLocation()), 0);
+                  expansion_loc(context_, decl->getLocation()), 0, 19);
     if (const auto tid = types_.intern(decl->getUnderlyingType())) {
       sink_.add_symbol_type(*self, kSymTypeUnderlyingK, *tid);
     }

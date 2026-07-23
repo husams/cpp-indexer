@@ -40,6 +40,8 @@ const std::vector<RelationDesc> &relation_catalog() {
       {.name = "destroy", .layer = View::Symbol, .kind_id = 16},
       {.name = "friend", .layer = View::Symbol, .kind_id = 17},
       {.name = "dispatch_calls", .layer = View::Symbol, .kind_id = 18},
+      {.name = "alias_of", .layer = View::Symbol, .kind_id = 19},
+      {.name = "of_type", .layer = View::Symbol, .kind_id = 20},
       // Layer-1 entity_edge kinds (entity_edge_kind seed).
       {.name = "generalizes", .layer = View::Entity, .kind_id = 1},
       {.name = "implements", .layer = View::Entity, .kind_id = 2},

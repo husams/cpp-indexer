@@ -54,7 +54,7 @@ def _build_index(tmp: str) -> str:
         "SELECT id FROM symbol WHERE qual_name='app::IntBox'"
     ).fetchone()["id"]
     conn.execute(
-        "DELETE FROM edge WHERE src_id=? AND kind=?", (ib, EDGE_KINDS["uses"])
+        "DELETE FROM edge WHERE src_id=? AND kind=?", (ib, EDGE_KINDS["alias_of"])
     )
     conn.commit()
     db.close()
@@ -79,7 +79,7 @@ def _uses_count(db_path: str, qual_name: str) -> int:
         row = db._conn.execute(
             "SELECT e.count AS c FROM edge e JOIN symbol s ON s.id = e.src_id "
             "WHERE s.qual_name = ? AND e.kind = ?",
-            (qual_name, EDGE_KINDS["uses"]),
+            (qual_name, EDGE_KINDS["alias_of"]),
         ).fetchone()
         return row["c"] if row else 0
     finally:

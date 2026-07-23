@@ -68,6 +68,10 @@ inline const std::map<std::string, int64_t> &edge_kinds_map() {
       {"friend", 17},
       // Materialised virtual-dispatch caller edge (built by resolve)
       {"dispatch_calls", 18},
+      // v34: typedef / using alias -> the type it names (was uses(7))
+      {"alias_of", 19},
+      // v34: variable / class field -> its declared type (was uses(7))
+      {"of_type", 20},
   };
   return m;
 }
@@ -95,6 +99,10 @@ inline const std::map<int64_t, std::string> &edge_names_map() {
       {17, "friend"},
       // Materialised virtual-dispatch caller edge (built by resolve)
       {18, "dispatch_calls"},
+      // v34: typedef / using alias -> the type it names (was uses(7))
+      {19, "alias_of"},
+      // v34: variable / class field -> its declared type (was uses(7))
+      {20, "of_type"},
   };
   return m;
 }
@@ -149,7 +157,7 @@ public:
   std::vector<Edge> references(int64_t sym_id, int limit = 500);
 
   // Type aliases / typedefs whose underlying type directly names `sym_id`
-  // (inverse of alias --uses--> target).
+  // (inverse of alias --alias_of--> target).
   std::vector<Sym> aliased_by(int64_t sym_id, int limit = 500);
 
   // Per-edge sites (A8, limit 200). Used by emitter for --json re-query (R8).

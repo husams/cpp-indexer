@@ -532,11 +532,14 @@ void Storage::migrate() {
           "CREATE TABLE parameter_v32 (owner_id INTEGER NOT NULL REFERENCES "
           "symbol(id) ON DELETE CASCADE, position INTEGER NOT NULL, pack_index "
           "INTEGER NOT NULL DEFAULT -1, name TEXT, type_id INTEGER REFERENCES "
-          "type_node(id) ON DELETE SET NULL, declared_type_id INTEGER REFERENCES "
-          "type_node(id) ON DELETE SET NULL, adjusted_type_id INTEGER REFERENCES "
+          "type_node(id) ON DELETE SET NULL, declared_type_id INTEGER "
+          "REFERENCES "
+          "type_node(id) ON DELETE SET NULL, adjusted_type_id INTEGER "
+          "REFERENCES "
           "type_node(id) ON DELETE SET NULL, default_text TEXT, default_origin "
           "TEXT, reference_semantics TEXT, file_id INTEGER REFERENCES file(id) "
-          "ON DELETE SET NULL, line INTEGER, col INTEGER, PRIMARY KEY (owner_id, "
+          "ON DELETE SET NULL, line INTEGER, col INTEGER, PRIMARY KEY "
+          "(owner_id, "
           "position, pack_index)) WITHOUT ROWID");
       db_.exec("INSERT INTO parameter_v32 SELECT owner_id, position, "
                "pack_index, name, type_id, declared_type_id, adjusted_type_id, "
@@ -603,6 +606,35 @@ void Storage::migrate() {
     const auto scols = table_columns("symbol");
     if (!has_col(scols, "const_value")) {
       db_.exec("ALTER TABLE symbol ADD COLUMN const_value TEXT");
+      changed = true;
+    }
+  }
+  // v33 -> v34: dedicated alias_of(19) edge kind. The typedef/using-alias ->
+  // underlying-type edge was previously stored as the overloaded uses(7);
+  // rewrite exactly those rows: source is an alias symbol (typedef 20 /
+  // type-alias 36) and the target is not a namespace (a qualified alias like
+  // `using X = ns::Foo` also carries an alias -> ns namespace-qualifier
+  // uses(7) edge, which stays a use). Mirrors storage.py.
+  if (has_table("edge_kind")) {
+    auto probe = db_.prepare("SELECT 1 FROM edge_kind WHERE id = 19");
+    if (!probe.step()) {
+      db_.exec("INSERT OR IGNORE INTO edge_kind (id, name) "
+               "VALUES (19,'alias_of')");
+      db_.exec("UPDATE edge SET kind = 19 WHERE kind = 7 AND src_id IN "
+               "(SELECT id FROM symbol WHERE kind IN (20, 36)) "
+               "AND dst_id NOT IN (SELECT id FROM symbol WHERE kind = 22)");
+      changed = true;
+    }
+    // Same step, second rewrite: a variable(9) / member(6) -> its declared
+    // type becomes of_type(20). Namespace-qualifier edges are excluded
+    // exactly as above.
+    auto probe20 = db_.prepare("SELECT 1 FROM edge_kind WHERE id = 20");
+    if (!probe20.step()) {
+      db_.exec("INSERT OR IGNORE INTO edge_kind (id, name) "
+               "VALUES (20,'of_type')");
+      db_.exec("UPDATE edge SET kind = 20 WHERE kind = 7 AND src_id IN "
+               "(SELECT id FROM symbol WHERE kind IN (6, 9)) "
+               "AND dst_id NOT IN (SELECT id FROM symbol WHERE kind = 22)");
       changed = true;
     }
   }

@@ -613,9 +613,12 @@ def _emit_type_use(
     file_id: int,
     loc: Any,
     conditional: int = 0,
+    edge_kind: int = 7,
 ) -> None:
-    """Emit a `uses` edge (kind=7) src -> the record/enum/typedef named by
-    `ctype` (parameter, return, field, variable, or typedef-underlying type).
+    """Emit an edge src -> the record/enum/typedef named by `ctype`
+    (parameter, return, field, variable, or typedef-underlying type).
+    `edge_kind` is uses(7) for references and alias_of(19) for the
+    definitional typedef/using-alias -> underlying-type relation.
 
     Lookup-only, like body descent: the type's symbol must already be indexed,
     so builtins and unindexed stdlib types create neither edges nor stubs. No
@@ -630,7 +633,7 @@ def _emit_type_use(
     dst = db.lookup_symbol(usr)
     if dst is None or dst.id == src_id:
         return
-    edge_id = db.add_edge(src_id, dst.id, 7)  # uses
+    edge_id = db.add_edge(src_id, dst.id, edge_kind)
     if loc is not None and loc.line:
         db.add_edge_site(
             edge_id, file_id, loc.line, loc.column, conditional=conditional
@@ -2338,26 +2341,41 @@ def _index_edges_notxn(
         elif ck == cx.CursorKind.FIELD_DECL:
             # Stage 3/4: a member `X<B> field;` mints the X<B> instance entity
             # (its own composes/aggregates/associates via T->B), exactly like an
-            # alias.  Minted FIRST -- before the uses-emit below -- so the member
-            # reliably gets a structural uses(7) edge -> the X<B> instance (keyed
-            # on the spec USR), order-independent within the TU.  Stage 4's
-            # _materialise_field_relations reads that edge to give the owning
-            # record `A composes/associates X<B>` (the un-collapsed instance).
+            # alias.  Minted FIRST -- before the emit below -- so the member
+            # reliably gets a structural of_type(20) edge -> the X<B> instance
+            # (keyed on the spec USR), order-independent within the TU.  Stage
+            # 4's _materialise_field_relations reads that edge to give the
+            # owning record `A composes/associates X<B>` (the un-collapsed
+            # instance).
             _mint_instance_from_type(db, cursor.type)
             _m_usr = cursor.get_usr()
             if _m_usr:
                 _m_sym = db.lookup_symbol(_m_usr)
                 if _m_sym is not None:
-                    _emit_type_use(db, _m_sym.id, cursor.type, file_id, cursor.location)
+                    _emit_type_use(
+                        db,
+                        _m_sym.id,
+                        cursor.type,
+                        file_id,
+                        cursor.location,
+                        edge_kind=20,  # of_type, not uses
+                    )
         elif ck == cx.CursorKind.VAR_DECL:
             # File-scope variable (locals are reached via _body_descent).
-            # Mint the instance FIRST (order-independent uses edge), as above.
+            # Mint the instance FIRST (order-independent edge), as above.
             _mint_instance_from_type(db, cursor.type)
             _v_usr = cursor.get_usr()
             if _v_usr:
                 _v_sym = db.lookup_symbol(_v_usr)
                 if _v_sym is not None:
-                    _emit_type_use(db, _v_sym.id, cursor.type, file_id, cursor.location)
+                    _emit_type_use(
+                        db,
+                        _v_sym.id,
+                        cursor.type,
+                        file_id,
+                        cursor.location,
+                        edge_kind=20,  # of_type, not uses
+                    )
                     # v27: an out-of-line static DATA MEMBER definition
                     # (`int C::x = ...;`) is a per-backend body -- redefined in
                     # each backend. Record its `definition` row (so it counts
@@ -2399,6 +2417,7 @@ def _index_edges_notxn(
                         cursor.underlying_typedef_type,
                         file_id,
                         cursor.location,
+                        edge_kind=19,  # alias_of, not uses
                     )
 
         # -- CXX_BASE_SPECIFIER: inherits ---------------------------------

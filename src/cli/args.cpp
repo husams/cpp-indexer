@@ -631,8 +631,8 @@ void build_graph(CLI::App &app, ParsedArgs &pa) {
                     "targets reached via materialised dispatch_calls edges, "
                     "which are on by default)");
 
-  CLI::App *refs =
-      leaf("refs", "incoming references (calls + uses) to the symbol");
+  CLI::App *refs = leaf(
+      "refs", "incoming references (calls + uses + alias_of) to the symbol");
   add_graph_selector(refs, pa);
 
   CLI::App *neighbors = leaf("neighbors", "one-hop typed neighbors");

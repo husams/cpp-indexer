@@ -797,7 +797,7 @@ def _materialise_field_relations(db: "Storage") -> None:
 
         # Stage 4: prefer a structural member -> NAMED-INSTANCE uses(7) edge.
         # A `X<B> m_;` member mints the `X<B>` instance (is_named_instance=1) and
-        # the extractor records a uses(7) edge member -> instance keyed on the
+        # the extractor records an of_type(20) edge member -> instance keyed on the
         # spec USR (unambiguous across namespaces -- unlike display_name match).
         # The named instance is its OWN design entity, so it is NOT collapsed
         # onto the primary -> we emit `A composes/associates X<B>`, completing
@@ -807,7 +807,7 @@ def _materialise_field_relations(db: "Storage") -> None:
         inst_row = conn.execute(
             "SELECT e.dst_id FROM edge e "
             "JOIN symbol s ON s.id = e.dst_id "
-            "WHERE e.src_id = ? AND e.kind = 7 AND s.is_named_instance = 1 "
+            "WHERE e.src_id = ? AND e.kind = 20 AND s.is_named_instance = 1 "
             "ORDER BY e.dst_id LIMIT 1",
             (field_id,),
         ).fetchone()

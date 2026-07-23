@@ -658,3 +658,83 @@ TEST_CASE("v32 -> v33: symbol.const_value column added, version stamped") {
   CHECK(meta_version(raw) == std::to_string(cidx::kSchemaVersion));
   CHECK(has_col(table_columns(raw, "symbol"), "const_value"));
 }
+
+TEST_CASE("v33 -> v34: alias/variable/field uses(7) edges become "
+          "alias_of(19)/of_type(20)") {
+  // Simulate a v33 database: a fresh DB wound back to '33' with the new
+  // edge_kind rows removed and alias/variable/field type edges stored as
+  // uses(7), the way the pre-v34 indexer wrote them. The migration must
+  // rewrite exactly the alias -> type rows (alias_of) and the
+  // variable/member -> type rows (of_type): namespace-qualifier edges and
+  // the function -> type reference stay uses(7).
+  const std::string tmp = make_temp_dir();
+  const std::string path = tmp + "/v33.db";
+  int64_t alias_id = -1;
+  int64_t record_id = -1;
+  int64_t ns_id = -1;
+  int64_t fn_id = -1;
+  int64_t var_id = -1;
+  int64_t field_id = -1;
+  {
+    cidx::Storage db(path);
+    db.add_component("c", "/data/c");
+    auto sym = [&](const char *usr, const char *name, const char *kind) {
+      cidx::Symbol s;
+      s.usr = usr;
+      s.spelling = name;
+      s.kind = kind;
+      s.is_definition = true;
+      return db.add_symbol(s);
+    };
+    record_id = sym("c:@S@Color", "Color", "struct");
+    alias_id = sym("c:@Rgb", "Rgb", "type-alias");
+    ns_id = sym("c:@N@ns", "ns", "namespace");
+    fn_id = sym("c:@F@paint#", "paint", "function");
+    var_id = sym("c:@shade", "shade", "variable");
+    field_id = sym("c:@S@Palette@FI@main", "main", "member");
+    auto edge = [&](int64_t src, int64_t dst) {
+      cidx::Edge e;
+      e.src_id = src;
+      e.dst_id = dst;
+      e.kind = 7; // uses, as the pre-v34 indexer stored these relations
+      db.add_edge(e);
+    };
+    edge(alias_id, record_id); // alias -> type: must become alias_of(19)
+    edge(alias_id, ns_id);     // alias -> namespace qualifier: stays uses
+    edge(fn_id, record_id);    // reference from a function: stays uses
+    edge(var_id, record_id);   // variable -> its type: must become of_type(20)
+    edge(field_id, record_id); // field -> its type: must become of_type(20)
+    edge(var_id, ns_id);       // variable -> namespace qualifier: stays uses
+  }
+  {
+    cidx::SqliteDb raw(path);
+    raw.exec("DELETE FROM edge_kind WHERE id IN (19, 20)");
+    raw.exec("UPDATE meta SET value = '33' WHERE key = 'schema_version'");
+  }
+  {
+    cidx::Storage db(path); // migration runs here
+  }
+  cidx::SqliteDb raw(path);
+  CHECK(meta_version(raw) == std::to_string(cidx::kSchemaVersion));
+  auto kind_name = [&](int id) {
+    auto st = raw.prepare("SELECT name FROM edge_kind WHERE id = ?");
+    st.bind(1, static_cast<int64_t>(id));
+    REQUIRE(st.step());
+    return st.col_text(0);
+  };
+  CHECK(kind_name(19) == std::string("alias_of"));
+  CHECK(kind_name(20) == std::string("of_type"));
+  auto kind_of = [&](int64_t src, int64_t dst) {
+    auto st = raw.prepare("SELECT kind FROM edge WHERE src_id=? AND dst_id=?");
+    st.bind(1, src);
+    st.bind(2, dst);
+    REQUIRE(st.step());
+    return st.col_int64(0);
+  };
+  CHECK(kind_of(alias_id, record_id) == 19);
+  CHECK(kind_of(alias_id, ns_id) == 7);
+  CHECK(kind_of(fn_id, record_id) == 7);
+  CHECK(kind_of(var_id, record_id) == 20);
+  CHECK(kind_of(field_id, record_id) == 20);
+  CHECK(kind_of(var_id, ns_id) == 7);
+}

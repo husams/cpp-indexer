@@ -203,7 +203,16 @@ INSERT OR IGNORE INTO edge_kind (id, name) VALUES
   (10,'construct-value'), (11,'construct-temp'), (12,'construct-heap'),
   (13,'construct-copy'), (14,'construct-move'),
   (15,'factory-construct'), (16,'destroy'), (17,'friend'),
-  (18,'dispatch_calls');
+  (18,'dispatch_calls'),
+  -- v34: a typedef / using alias -> the type it names. Previously written as
+  -- uses(7); a dedicated kind because "uses" is overloaded (body references,
+  -- signature types, namespace qualifiers) while the alias relation is a
+  -- definitional X -> alias_of -> Y. Mirrors type_edge alias_of(3) and the
+  -- symbol_type 'underlying' relation on the type tier.
+  (19,'alias_of'),
+  -- v34: a variable / class field -> its declared type. Previously written
+  -- as uses(7); "of_type" matches the signature tier's of_type relation.
+  (20,'of_type');
 
 CREATE TABLE IF NOT EXISTS edge (
     id          INTEGER PRIMARY KEY,
@@ -615,7 +624,7 @@ CREATE TABLE IF NOT EXISTS include_macro_use (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_include_macro_use_path ON include_macro_use(def_path);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '33');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '34');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest

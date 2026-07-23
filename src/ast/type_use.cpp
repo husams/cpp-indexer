@@ -50,7 +50,8 @@ const clang::NamedDecl *named_type_decl(clang::QualType type) {
 }
 
 void emit_type_use(EdgeSink &sink, int64_t src_id, clang::QualType type,
-                   int64_t file_id, const ExpansionLoc &loc, int conditional) {
+                   int64_t file_id, const ExpansionLoc &loc, int conditional,
+                   int64_t edge_kind) {
   const clang::NamedDecl *decl = named_type_decl(type);
   if (decl == nullptr) {
     return;
@@ -66,7 +67,7 @@ void emit_type_use(EdgeSink &sink, int64_t src_id, clang::QualType type,
   EdgeRecord e;
   e.src_id = src_id;
   e.dst_id = *dst;
-  e.kind = 7; // uses
+  e.kind = edge_kind;
   const int64_t edge_id = sink.add_edge(e);
   if (loc.line != 0) {
     EdgeSiteRecord site;

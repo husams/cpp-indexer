@@ -366,7 +366,11 @@ GraphQuery::edges_out(int64_t sym_id,
 }
 
 std::vector<Edge> GraphQuery::references(int64_t sym_id, int limit) {
-  return edges_in(sym_id, std::vector<std::string>{"calls", "uses"}, limit);
+  // alias_of and of_type count as references: before v34 those edges were
+  // stored as uses(7) and were already part of this answer.
+  return edges_in(
+      sym_id, std::vector<std::string>{"calls", "uses", "alias_of", "of_type"},
+      limit);
 }
 
 std::vector<Sym> GraphQuery::aliased_by(int64_t sym_id, int limit) {
@@ -377,7 +381,7 @@ std::vector<Sym> GraphQuery::aliased_by(int64_t sym_id, int limit) {
                   "WHERE e.dst_id = ? AND e.kind = ? AND s.kind IN (?, ?) "
                   "ORDER BY COALESCE(s.qual_name, s.spelling), s.id LIMIT ?");
   st.bind(1, sym_id);
-  st.bind(2, edge_kinds_map().at("uses"));
+  st.bind(2, edge_kinds_map().at("alias_of"));
   st.bind(3, symbol_kind_id("typedef"));
   st.bind(4, symbol_kind_id("type-alias"));
   st.bind(5, static_cast<int64_t>(limit));
@@ -788,8 +792,7 @@ GraphQuery::SignatureInfo GraphQuery::signature(int64_t sym_id) {
       std::vector<std::pair<int64_t, int64_t>> children;
       if (type.kind == "alias") {
         children.emplace_back(3, 0);
-      } else if (type.kind == "pointer" ||
-                 type.kind == "lvalue-reference" ||
+      } else if (type.kind == "pointer" || type.kind == "lvalue-reference" ||
                  type.kind == "rvalue-reference") {
         children.emplace_back(1, 0);
       } else if (type.kind == "array") {
@@ -831,9 +834,8 @@ GraphQuery::SignatureInfo GraphQuery::signature(int64_t sym_id) {
         }
       }
     }
-    const std::string value_kind = base.spelling.ends_with("...")
-                                       ? "pack-expansion"
-                                       : base.kind;
+    const std::string value_kind =
+        base.spelling.ends_with("...") ? "pack-expansion" : base.kind;
     return std::tuple{mode, value_kind, named_decl(base)};
   };
   if (const auto tid = db_.symbol_type_of(sym_id, kSymbolTypeReturns)) {
