@@ -91,6 +91,19 @@ def _measurement_signature(result: dict[str, Any]) -> str:
     }))
 
 
+def _resolve_bound_profile(result: dict[str, Any], supplied: dict[str, Any], role: str) -> tuple[dict[str, Any], list[str]]:
+    errors = _bound_result_errors(result, role)
+    bound = _bound_profile(result)
+    supplied_sha256 = sha256(canonical_json(supplied)) if isinstance(supplied, dict) else None
+    if supplied_sha256 != result.get("profile_sha256"):
+        errors.append(f"{role}: supplied profile digest does not match result identity")
+    if bound is None:
+        errors.append(f"{role}: bound profile artifact is unavailable or has been mutated")
+    elif supplied_sha256 != sha256(canonical_json(bound)):
+        errors.append(f"{role}: supplied profile differs from bound profile artifact")
+    return bound or supplied, errors
+
+
 def _bound_result_errors(result: dict[str, Any], role: str) -> list[str]:
     errors: list[str] = []
     try:
@@ -203,9 +216,13 @@ def _bound_result_errors(result: dict[str, Any], role: str) -> list[str]:
 
 
 def evaluate_regression(baseline: dict[str, Any], bad_config: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
-    artifact_errors = _bound_result_errors(baseline, "baseline") + _bound_result_errors(bad_config, "bad-config")
+    baseline_profile, baseline_profile_errors = _resolve_bound_profile(baseline, profile, "baseline")
+    bad_profile, bad_profile_errors = _resolve_bound_profile(bad_config, profile, "bad-config")
+    artifact_errors = baseline_profile_errors + bad_profile_errors
     if artifact_errors:
         return {"id": "intentional_regression", "status": "fail", "reason": "; ".join(artifact_errors)}
+    if baseline.get("profile_sha256") != bad_config.get("profile_sha256") or baseline_profile != bad_profile:
+        return {"id": "intentional_regression", "status": "fail", "reason": "baseline and bad-config profiles differ"}
     if _identity_dimensions(baseline) != _identity_dimensions(bad_config):
         return {"id": "intentional_regression", "status": "fail", "reason": "manifest/workload/scale/seed/distribution/count/cap/revision/profile/hardware mismatch"}
     if baseline.get("configuration") == bad_config.get("configuration"):
@@ -222,7 +239,7 @@ def evaluate_regression(baseline: dict[str, Any], bad_config: dict[str, Any], pr
     if baseline.get("counters", {}).get("query_set_sha256") != bad_config.get("counters", {}).get("query_set_sha256"):
         return {"id": "intentional_regression", "status": "fail", "reason": "query workload parameters differ"}
     comparisons = []
-    factor = float(profile.get("gates", {}).get("minimum_regression_factor", 1.20))
+    factor = float(baseline_profile.get("gates", {}).get("minimum_regression_factor", 1.20))
     for query_id in sorted(baseline_queries):
         before, after = baseline_queries[query_id], candidate_queries[query_id]
         if before.get("status") != "ok" or after.get("status") != "ok" or not before.get("row_count") or not after.get("row_count"):
@@ -376,7 +393,10 @@ def evaluate_custom_store(decision: dict[str, Any], *, require: bool, result: di
 
 
 def evaluate(result: dict[str, Any], profile: dict[str, Any], *, baseline: dict[str, Any] | None = None, bad_config: dict[str, Any] | None = None, decision: dict[str, Any] | None = None, require_custom_store: bool = False) -> dict[str, Any]:
-    require_result_version(result); checks = evaluate_slos(result, profile)
+    require_result_version(result)
+    bound_profile, profile_errors = _resolve_bound_profile(result, profile, "primary")
+    checks = evaluate_slos(result, bound_profile)
+    checks.insert(0, _check("profile_binding", "fail" if profile_errors else "pass", reason="; ".join(profile_errors) if profile_errors else None))
     if baseline is not None and bad_config is not None:
         checks.append(evaluate_regression(baseline, bad_config, profile))
     elif require_custom_store:

@@ -182,6 +182,31 @@ def test_regression_rejects_missing_query_and_identity_mismatch(tmp_path):
     assert evaluate_regression(result, candidate, profile)["status"] == "fail"
 
 
+def test_gate_rejects_supplied_profile_substitution_for_normal_and_regression(tmp_path):
+    strict_profile = copy.deepcopy(load_json(PROFILE))
+    strict_profile["slo"]["queries"]["exact_identity"]["p95_ms_max"] = 0
+    strict_profile["gates"]["minimum_regression_factor"] = 999999
+    strict_profile_path = tmp_path / "strict-profile.json"
+    strict_profile_path.write_text(canonical_json(strict_profile) + "\n", encoding="utf-8")
+    baseline_db = tmp_path / "baseline.db"
+    generate(MANIFEST, "synthetic", "smoke", baseline_db)
+    baseline = run(baseline_db, MANIFEST, "synthetic", strict_profile_path, output=tmp_path / "baseline.json")
+    bad_db = tmp_path / "bad.db"
+    drop_hot_indexes(baseline_db, bad_db)
+    bad_config = run(bad_db, MANIFEST, "synthetic", strict_profile_path, output=tmp_path / "bad.json", configuration="drop_hot_indexes")
+
+    assert evaluate(baseline, strict_profile, baseline=baseline, bad_config=bad_config)["status"] == "fail"
+    substituted_profile = copy.deepcopy(strict_profile)
+    substituted_profile["slo"]["queries"]["exact_identity"]["p95_ms_max"] = 250
+    substituted_profile["gates"]["minimum_regression_factor"] = 0
+    normal = evaluate(baseline, substituted_profile)
+    assert normal["status"] == "fail"
+    assert next(item for item in normal["checks"] if item["id"] == "profile_binding")["status"] == "fail"
+    regression = evaluate_regression(baseline, bad_config, substituted_profile)
+    assert regression["status"] == "fail"
+    assert "profile" in regression["reason"]
+
+
 def test_gate_requires_exact_failed_slo_before_custom_store_proposal(tmp_path):
     db = tmp_path / "benchmark.db"
     generate(MANIFEST, "synthetic", "smoke", db)
