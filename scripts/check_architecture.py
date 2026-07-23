@@ -177,16 +177,54 @@ def _genex_inner(token: str) -> str | None:
     return None
 
 
+_CMAKE_OPAQUE_VARIABLES = {
+    "CMAKE_CURRENT_BINARY_DIR",
+    "CMAKE_CURRENT_SOURCE_DIR",
+    "CIDX_CLANG_TIDY_EXECUTABLE",
+    "CIDX_SOUFFLE_EXECUTABLE",
+    "CIDX_SOUFFLE_INCLUDE_DIR",
+    "LLVM_LIBRARY_DIR",
+    "LLVM_VERSION_MAJOR",
+    "_cidx_cmake_root",
+    "_cidx_llvm_cmakedir",
+}
+
+
+def _expand_cmake_value(value: str, variables: dict[str, str], parse_errors: list[str],
+                        context: str, stack: tuple[str, ...] = ()) -> str:
+    variable_re = re.compile(r"\$\{([^{}]+)\}")
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name in stack:
+            cycle = " -> ".join((*stack, name))
+            parse_errors.append(f"CMake variable cycle in {context}: {cycle}")
+            return ""
+        if name not in variables:
+            if name in _CMAKE_OPAQUE_VARIABLES or name == "CMAKE_DL_LIBS":
+                return match.group(0)
+            parse_errors.append(f"unresolved CMake variable in {context}: ${{{name}}}")
+            return ""
+        return _expand_cmake_value(variables[name], variables, parse_errors, context,
+                                   (*stack, name))
+
+    previous = None
+    expanded = value
+    while previous != expanded and variable_re.search(expanded):
+        previous = expanded
+        expanded = variable_re.sub(replace, expanded)
+    return expanded
+
+
 def _expand_cmake_reference(token: str, targets: set[str], variables: dict[str, str],
                             parse_errors: list[str], context: str) -> set[str]:
     """Expand the small, explicit CMake reference subset understood by the gate."""
-    if token.startswith("${") and token.endswith("}"):
-        name = token[2:-1]
-        value = variables.get(name)
-        if value is None and name not in {"CMAKE_DL_LIBS"}:
-            parse_errors.append(f"unresolved CMake variable in {context}: {token}")
+    if "${" in token:
+        token = _expand_cmake_value(token, variables, parse_errors, context)
+        if not token:
             return set()
-        return {value} if value else set()
+    if token.startswith("${") and token.endswith("}"):
+        return set()
     if "$<" not in token:
         return {token}
     inner = _genex_inner(token)
@@ -241,14 +279,26 @@ def _cmake_graph(root: Path, manifest: dict) -> BuildGraph:
 
     variables: dict[str, str] = {}
     for kind, tokens in commands:
-        if kind == "set" and len(tokens) == 2:
-            variables[tokens[0]] = tokens[1]
-
-    for kind, tokens in commands:
         if not tokens:
             continue
         target = tokens[0]
         if kind == "set":
+            if len(tokens) == 1:
+                variables[target] = ""
+                continue
+            if "PARENT_SCOPE" in tokens:
+                parse_errors.append(f"unsupported scoped CMake set in {target}: {' '.join(tokens)}")
+                continue
+            if "CACHE" in tokens:
+                cache_index = tokens.index("CACHE")
+                if cache_index != 2 or len(tokens) < 4:
+                    parse_errors.append(f"unsupported CMake set form: {' '.join(tokens)}")
+                    continue
+                value = tokens[1]
+            else:
+                value = " ".join(tokens[1:])
+            variables[target] = _expand_cmake_value(value, variables, parse_errors, target,
+                                                     (target,))
             continue
         if kind == "target_link_libraries":
             for token in tokens[1:]:
@@ -269,6 +319,9 @@ def _cmake_graph(root: Path, manifest: dict) -> BuildGraph:
                     expanded = _expand_cmake_reference(token, targets, variables, parse_errors, target)
                     references[target].update(expanded)
                     edges[target].update(value for value in expanded if value in targets)
+                    source_edges[target].update(
+                        value for value in expanded if value.startswith(("src/", "python/"))
+                    )
                 elif token.startswith(("src/", "python/")):
                     source_edges[target].add(token)
         elif kind == "add_dependencies":
@@ -353,6 +406,16 @@ def _python_import_targets(source: Source, node: ast.ImportFrom,
     return [candidate for candidate in candidates if candidate in modules]
 
 
+def _python_import_target(name: str, modules: dict[str, str]) -> str | None:
+    """Resolve the deepest project package represented by an import name."""
+    parts = name.split(".")
+    for length in range(len(parts), 0, -1):
+        candidate = ".".join(parts[:length])
+        if candidate in modules:
+            return candidate
+    return None
+
+
 def _python_external_kind(top_level: str) -> str | None:
     if top_level in {"clang"}:
         return "clang"
@@ -382,16 +445,20 @@ def _python_dependency_errors(root: Path, sources: Iterable[Source], modules: li
             continue
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                imported_names = [alias.name for alias in node.names]
-                targets: list[str] = []
-                for name in imported_names:
+                for alias in node.names:
+                    name = alias.name
                     kind = _python_external_kind(name.split(".", 1)[0])
                     if kind and kind not in allowed_external:
                         errors.append(f"python import {source.path}: {kind} is outside module confinement")
                     if name.split(".", 1)[0] == "indexer":
-                        targets.extend(candidate for candidate in module_names if candidate == name)
-                if any(name.split(".", 1)[0] == "indexer" for name in imported_names) and not targets:
-                    errors.append(f"python import {source.path}: unresolved project import")
+                        target = _python_import_target(name, module_names)
+                        if target is None:
+                            errors.append(f"python import {source.path}: unresolved project import")
+                        elif module_names[target] not in allowed_dependencies:
+                            errors.append(
+                                f"python import {source.path}: undeclared dependency "
+                                f"{source.module} -> {module_names[target]}"
+                            )
             elif isinstance(node, ast.ImportFrom):
                 if node.module == "__future__":
                     continue
@@ -458,6 +525,8 @@ def _exception_matches(exception: dict, path: str, source_module: str,
         return False
     if not _matches(path, exception.get("source", "")):
         return False
+    if target_module.startswith("external:"):
+        return _nonempty(exception.get("include")) and exception["include"] == spelling
     return not exception.get("include") or exception["include"] == spelling
 
 

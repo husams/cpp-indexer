@@ -128,6 +128,55 @@ class ArchitectureCheckerTests(unittest.TestCase):
         self.assertTrue(any("undeclared target dependency extraction -> cli" in error for error in errors))
         self.assertTrue(any("CMake target cycle" in error for error in errors))
 
+    def test_cmake_variables_expand_recursively_in_command_order(self) -> None:
+        root, manifest = _fixture()
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["targets"].extend([
+            {"name": "app", "module": "cli", "links": []},
+            {"name": "other", "module": "model", "links": []},
+        ])
+        data["targets"][0]["links"] = ["${NESTED_ALIAS}"]
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        (root / "CMakeLists.txt").write_text(
+            "set(APP_ALIAS app)\n"
+            "set(NESTED_ALIAS ${APP_ALIAS})\n"
+            "set(SOURCE_FILE src/cli/format.hpp)\n"
+            "add_library(core STATIC src/extraction/pass.cpp)\n"
+            "target_link_libraries(core PRIVATE ${NESTED_ALIAS})\n"
+            "add_library(app STATIC ${SOURCE_FILE})\n"
+            "set(SOURCE_FILE src/model/value.hpp)\n"
+            "add_library(other STATIC ${SOURCE_FILE})\n",
+            encoding="utf-8",
+        )
+        errors = check_manifest(root, manifest)
+        self.assertTrue(any("undeclared target dependency extraction -> cli" in error for error in errors))
+        self.assertFalse(any("app: source edge cli -> model" in error for error in errors))
+
+    def test_cmake_source_variable_edges_are_enforced(self) -> None:
+        root, manifest = _fixture()
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["targets"].append({"name": "app", "module": "cli", "links": []})
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        (root / "CMakeLists.txt").write_text(
+            "set(SOURCE_FILE src/extraction/pass.cpp)\n"
+            "add_library(core STATIC src/extraction/pass.cpp)\n"
+            "add_library(app STATIC ${SOURCE_FILE})\n",
+            encoding="utf-8",
+        )
+        errors = check_manifest(root, manifest)
+        self.assertTrue(any("app: source edge cli -> extraction" in error for error in errors))
+
+    def test_cmake_variable_cycles_fail_closed(self) -> None:
+        root, manifest = _fixture()
+        (root / "CMakeLists.txt").write_text(
+            "set(FIRST ${FIRST})\n"
+            "add_library(core STATIC src/extraction/pass.cpp)\n"
+            "target_link_libraries(core PRIVATE ${FIRST})\n",
+            encoding="utf-8",
+        )
+        errors = check_manifest(root, manifest)
+        self.assertTrue(any("CMake variable cycle" in error for error in errors))
+
     def test_unsupported_generator_expression_fails_closed(self) -> None:
         root, manifest = _fixture()
         data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -198,6 +247,24 @@ class ArchitectureCheckerTests(unittest.TestCase):
         manifest.write_text(json.dumps(data), encoding="utf-8")
         errors = check_manifest(root, manifest)
         self.assertTrue(any("sqlite is outside module confinement" in error for error in errors))
+        self.assertTrue(any("undeclared dependency sdk -> legacy" in error for error in errors))
+
+    def test_python_direct_import_checks_resolved_owner(self) -> None:
+        root, manifest = _fixture()
+        (root / "python/indexer/legacy").mkdir(parents=True)
+        (root / "python/indexer/sdk.py").parent.mkdir(parents=True, exist_ok=True)
+        (root / "python/indexer/sdk.py").write_text(
+            "import indexer.legacy\n", encoding="utf-8"
+        )
+        (root / "python/indexer/legacy/__init__.py").write_text("value = 1\n", encoding="utf-8")
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["sourceRoots"].append("python/indexer")
+        data["modules"].extend([
+            {"id": "sdk", "paths": ["python/indexer/**"], "excludePaths": ["python/indexer/legacy/**"], "sourceSuffixes": [".py"], "allowedDependencies": ["sdk"], "allowedExternal": []},
+            {"id": "legacy", "paths": ["python/indexer/legacy/**"], "sourceSuffixes": [".py"], "allowedDependencies": ["legacy"], "allowedExternal": []},
+        ])
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        errors = check_manifest(root, manifest)
         self.assertTrue(any("undeclared dependency sdk -> legacy" in error for error in errors))
 
     def test_python_ast_ignores_comments_and_docstrings_but_checks_multiline_imports(self) -> None:
