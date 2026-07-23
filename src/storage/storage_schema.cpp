@@ -236,7 +236,7 @@ CREATE INDEX IF NOT EXISTS idx_edge_dst ON edge(dst_id, kind);
 -- with NULL (absent evidence).
 CREATE TABLE IF NOT EXISTS external_identity (
     id               INTEGER PRIMARY KEY,
-    identity_kind    INTEGER NOT NULL, -- 1=type_usr 2=symbol_usr 3=path
+    identity_kind    INTEGER NOT NULL CHECK (identity_kind IN (1, 2, 3)),
     identity_text    TEXT NOT NULL,
     resolution_status INTEGER NOT NULL DEFAULT 0
                      CHECK (resolution_status IN (0, 1)),
@@ -249,23 +249,6 @@ CREATE INDEX IF NOT EXISTS idx_external_identity_symbol
 CREATE INDEX IF NOT EXISTS idx_external_identity_type
     ON external_identity(type_id);
 
-CREATE TABLE IF NOT EXISTS storage_enum_catalog (
-    domain TEXT NOT NULL,
-    id     INTEGER NOT NULL,
-    name   TEXT NOT NULL,
-    PRIMARY KEY (domain, id),
-    UNIQUE (domain, name)
-);
-INSERT OR IGNORE INTO storage_enum_catalog(domain, id, name) VALUES
-    ('source_kind', 1, 'literal'),
-    ('source_kind', 2, 'local'),
-    ('source_kind', 3, 'construct'),
-    ('source_kind', 4, 'member'),
-    ('source_kind', 5, 'global'),
-    ('source_kind', 6, 'call_result'),
-    ('source_kind', 7, 'this'),
-    ('source_kind', 8, 'unknown');
-
 CREATE TABLE IF NOT EXISTS edge_site (
     edge_id      INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE,
     file_id      INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
@@ -276,7 +259,7 @@ CREATE TABLE IF NOT EXISTS edge_site (
     recv_src_kind TEXT,
     recv_type_usr TEXT,
     recv_decl_usr TEXT,
-    recv_src_kind_id INTEGER,
+    recv_src_kind_id INTEGER CHECK (recv_src_kind_id IS NULL OR recv_src_kind_id IN (1,2,3,4,5,6,7,8)),
     recv_type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
     recv_decl_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
     recv_type_identity_id INTEGER REFERENCES external_identity(id) ON DELETE SET NULL,
@@ -315,11 +298,11 @@ CREATE TABLE IF NOT EXISTS call_arg (
     line       INTEGER NOT NULL,
     col        INTEGER NOT NULL,
     position   INTEGER NOT NULL,
-    src_kind   TEXT NOT NULL,
+    src_kind   TEXT,
     type_usr   TEXT,
     decl_usr   TEXT,
     callee_usr TEXT,
-    src_kind_id INTEGER,
+    src_kind_id INTEGER CHECK (src_kind_id IS NULL OR src_kind_id IN (1,2,3,4,5,6,7,8)),
     type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
     decl_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
     callee_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
@@ -330,17 +313,30 @@ CREATE TABLE IF NOT EXISTS call_arg (
     PRIMARY KEY (edge_id, file_id, line, col, position)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id);
+CREATE INDEX IF NOT EXISTS idx_edge_site_recv_type_identity
+    ON edge_site(recv_type_identity_id);
+CREATE INDEX IF NOT EXISTS idx_edge_site_recv_decl_identity
+    ON edge_site(recv_decl_identity_id);
+CREATE INDEX IF NOT EXISTS idx_call_arg_type_identity
+    ON call_arg(type_identity_id);
+CREATE INDEX IF NOT EXISTS idx_call_arg_decl_identity
+    ON call_arg(decl_identity_id);
+CREATE INDEX IF NOT EXISTS idx_call_arg_callee_identity
+    ON call_arg(callee_identity_id);
 
 -- Compatibility surfaces reconstruct stable USR/type-key identities for
 -- readers while the physical occurrence rows carry only compact IDs.
 CREATE VIEW IF NOT EXISTS edge_site_read AS
 SELECT es.edge_id, es.file_id, es.line, es.col, es.conditional, es.args_sig,
        COALESCE(es.recv_src_kind,
-                (SELECT c.name FROM storage_enum_catalog c
-                 WHERE c.domain = 'source_kind' AND c.id = es.recv_src_kind_id))
+                CASE es.recv_src_kind_id
+                  WHEN 1 THEN 'literal' WHEN 2 THEN 'local'
+                  WHEN 3 THEN 'construct' WHEN 4 THEN 'member'
+                  WHEN 5 THEN 'global' WHEN 6 THEN 'call_result'
+                  WHEN 7 THEN 'this' WHEN 8 THEN 'unknown' END)
            AS recv_src_kind,
-       COALESCE(tn.decl_usr, eti.identity_text, es.recv_type_usr) AS recv_type_usr,
-       COALESCE(ds.usr, edi.identity_text, es.recv_decl_usr) AS recv_decl_usr,
+       COALESCE(es.recv_type_usr, tn.decl_usr, eti.identity_text) AS recv_type_usr,
+       COALESCE(es.recv_decl_usr, ds.usr, edi.identity_text) AS recv_decl_usr,
        es.recv_param_pos, es.recv_type_is_value
 FROM edge_site es
 LEFT JOIN type_node tn ON tn.id = es.recv_type_id
@@ -351,12 +347,15 @@ LEFT JOIN external_identity edi ON edi.id = es.recv_decl_identity_id;
 CREATE VIEW IF NOT EXISTS call_arg_read AS
 SELECT ca.edge_id, ca.file_id, ca.line, ca.col, ca.position,
        COALESCE(ca.src_kind,
-                (SELECT c.name FROM storage_enum_catalog c
-                 WHERE c.domain = 'source_kind' AND c.id = ca.src_kind_id))
+                CASE ca.src_kind_id
+                  WHEN 1 THEN 'literal' WHEN 2 THEN 'local'
+                  WHEN 3 THEN 'construct' WHEN 4 THEN 'member'
+                  WHEN 5 THEN 'global' WHEN 6 THEN 'call_result'
+                  WHEN 7 THEN 'this' WHEN 8 THEN 'unknown' END)
            AS src_kind,
-       COALESCE(tn.decl_usr, eti.identity_text, ca.type_usr) AS type_usr,
-       COALESCE(ds.usr, edi.identity_text, ca.decl_usr) AS decl_usr,
-       COALESCE(cs.usr, eci.identity_text, ca.callee_usr) AS callee_usr,
+       COALESCE(ca.type_usr, tn.decl_usr, eti.identity_text) AS type_usr,
+       COALESCE(ca.decl_usr, ds.usr, edi.identity_text) AS decl_usr,
+       COALESCE(ca.callee_usr, cs.usr, eci.identity_text) AS callee_usr,
        ca.type_is_value
 FROM call_arg ca
 LEFT JOIN type_node tn ON tn.id = ca.type_id

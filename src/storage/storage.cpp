@@ -208,6 +208,183 @@ Storage::Storage(const std::string &path, OpenMode mode)
     cpp_materialise_entity_nodes(db_);
     txn.commit();
   }
+  reconcile_external_identities();
+}
+
+void Storage::reconcile_external_identities() {
+  for (const auto &entry : catalog::kSourceKinds) {
+    db_.exec(
+        "UPDATE edge_site SET recv_src_kind_id = " + std::to_string(entry.id) +
+        " WHERE recv_src_kind = '" + std::string(entry.name) + "'");
+    db_.exec("UPDATE call_arg SET src_kind_id = " + std::to_string(entry.id) +
+             " WHERE src_kind = '" + std::string(entry.name) + "'");
+  }
+  auto unknown_edge = db_.prepare(
+      "SELECT recv_src_kind FROM edge_site WHERE recv_src_kind IS NOT NULL "
+      "AND recv_src_kind_id IS NULL LIMIT 1");
+  if (unknown_edge.step()) {
+    throw StorageError("unknown source kind '" + unknown_edge.col_text(0) +
+                       "'");
+  }
+  auto unknown_arg =
+      db_.prepare("SELECT src_kind FROM call_arg WHERE src_kind IS NOT NULL "
+                  "AND src_kind_id IS NULL LIMIT 1");
+  if (unknown_arg.step()) {
+    throw StorageError("unknown source kind '" + unknown_arg.col_text(0) + "'");
+  }
+  db_.exec("UPDATE edge_site SET recv_src_kind = NULL WHERE recv_src_kind_id "
+           "IS NOT NULL");
+  db_.exec("UPDATE call_arg SET src_kind = NULL WHERE src_kind_id IS NOT NULL");
+  db_.exec(
+      "UPDATE external_identity SET symbol_id = CASE WHEN identity_kind = 2 "
+      "THEN (SELECT id FROM symbol WHERE usr = identity_text LIMIT 1) ELSE "
+      "NULL END, "
+      "type_id = CASE WHEN identity_kind = 1 THEN (SELECT id FROM type_node "
+      "WHERE decl_usr = identity_text ORDER BY id LIMIT 1) ELSE NULL END, "
+      "resolution_status = CASE WHEN (identity_kind = 2 AND EXISTS "
+      "(SELECT 1 FROM symbol WHERE usr = identity_text)) OR (identity_kind = 1 "
+      "AND EXISTS (SELECT 1 FROM type_node WHERE decl_usr = identity_text)) "
+      "THEN 1 ELSE 0 END");
+  db_.exec("UPDATE type_node SET decl_id = (SELECT id FROM symbol s WHERE "
+           "s.usr = type_node.decl_usr LIMIT 1) WHERE decl_usr IS NOT NULL");
+  db_.exec(
+      "UPDATE edge_site SET recv_decl_id = COALESCE(recv_decl_id, (SELECT id "
+      "FROM symbol s "
+      "WHERE s.usr = edge_site.recv_decl_usr LIMIT 1), (SELECT symbol_id FROM "
+      "external_identity i WHERE i.id = edge_site.recv_decl_identity_id)), "
+      "recv_type_id = COALESCE(recv_type_id, (SELECT id FROM type_node t WHERE "
+      "t.decl_usr = "
+      "edge_site.recv_type_usr ORDER BY id LIMIT 1), (SELECT type_id FROM "
+      "external_identity i WHERE i.id = edge_site.recv_type_identity_id))");
+  db_.exec("UPDATE edge_site SET recv_decl_identity_id = NULL WHERE "
+           "recv_decl_id IS NOT NULL");
+  db_.exec("UPDATE edge_site SET recv_type_identity_id = NULL WHERE "
+           "recv_type_id IS NOT NULL");
+  db_.exec("UPDATE call_arg SET decl_id = COALESCE(decl_id, (SELECT id FROM "
+           "symbol s WHERE "
+           "s.usr = call_arg.decl_usr LIMIT 1), (SELECT symbol_id FROM "
+           "external_identity i "
+           "WHERE i.id = call_arg.decl_identity_id)), "
+           "callee_id = COALESCE(callee_id, (SELECT id FROM symbol s WHERE "
+           "s.usr = call_arg.callee_usr LIMIT 1), "
+           "(SELECT symbol_id FROM external_identity i WHERE i.id = "
+           "call_arg.callee_identity_id)), "
+           "type_id = COALESCE(type_id, (SELECT id FROM type_node t WHERE "
+           "t.decl_usr = call_arg.type_usr "
+           "ORDER BY id LIMIT 1), (SELECT type_id FROM external_identity i "
+           "WHERE i.id = call_arg.type_identity_id))");
+  db_.exec(
+      "UPDATE call_arg SET decl_identity_id = NULL WHERE decl_id IS NOT NULL");
+  db_.exec("UPDATE call_arg SET callee_identity_id = NULL WHERE callee_id IS "
+           "NOT NULL");
+  db_.exec(
+      "UPDATE call_arg SET type_identity_id = NULL WHERE type_id IS NOT NULL");
+}
+
+void Storage::reconcile_symbol_identity(int64_t symbol_id,
+                                        std::string_view usr) {
+  auto identity = db_.prepare(
+      "UPDATE external_identity SET symbol_id = ?, resolution_status = 1 "
+      "WHERE identity_kind = 2 AND identity_text = ?");
+  identity.bind(1, symbol_id);
+  identity.bind(2, usr);
+  identity.step_done();
+
+  auto type_decl =
+      db_.prepare("UPDATE type_node SET decl_id = ? WHERE decl_usr = ?");
+  type_decl.bind(1, symbol_id);
+  type_decl.bind(2, usr);
+  type_decl.step_done();
+
+  auto edge_decl = db_.prepare(
+      "UPDATE edge_site SET recv_decl_id = ? WHERE recv_decl_id IS NULL "
+      "AND recv_decl_identity_id IN (SELECT id FROM external_identity WHERE "
+      "identity_kind = 2 AND identity_text = ?)");
+  edge_decl.bind(1, symbol_id);
+  edge_decl.bind(2, usr);
+  edge_decl.step_done();
+
+  auto call_decl =
+      db_.prepare("UPDATE call_arg SET decl_id = ? WHERE decl_id IS NULL AND "
+                  "decl_identity_id IN (SELECT id FROM external_identity WHERE "
+                  "identity_kind = 2 AND identity_text = ?)");
+  call_decl.bind(1, symbol_id);
+  call_decl.bind(2, usr);
+  call_decl.step_done();
+
+  auto call_callee = db_.prepare(
+      "UPDATE call_arg SET callee_id = ? WHERE callee_id IS NULL AND "
+      "callee_identity_id IN (SELECT id FROM external_identity WHERE "
+      "identity_kind = 2 AND identity_text = ?)");
+  call_callee.bind(1, symbol_id);
+  call_callee.bind(2, usr);
+  call_callee.step_done();
+
+  auto edge_clear = db_.prepare(
+      "UPDATE edge_site SET recv_decl_identity_id = NULL WHERE "
+      "recv_decl_id IS NOT NULL AND recv_decl_identity_id IN (SELECT id FROM "
+      "external_identity WHERE identity_kind = 2 AND identity_text = ?)");
+  edge_clear.bind(1, usr);
+  edge_clear.step_done();
+  auto call_decl_clear = db_.prepare(
+      "UPDATE call_arg SET decl_identity_id = NULL WHERE decl_id IS NOT NULL "
+      "AND decl_identity_id IN (SELECT id FROM external_identity WHERE "
+      "identity_kind = 2 AND identity_text = ?)");
+  call_decl_clear.bind(1, usr);
+  call_decl_clear.step_done();
+  auto call_callee_clear = db_.prepare(
+      "UPDATE call_arg SET callee_identity_id = NULL WHERE callee_id IS NOT "
+      "NULL "
+      "AND callee_identity_id IN (SELECT id FROM external_identity WHERE "
+      "identity_kind = 2 AND identity_text = ?)");
+  call_callee_clear.bind(1, usr);
+  call_callee_clear.step_done();
+}
+
+void Storage::reconcile_type_identity(int64_t type_id,
+                                      std::string_view decl_usr) {
+  auto identity = db_.prepare(
+      "UPDATE external_identity SET type_id = ?, resolution_status = 1 "
+      "WHERE identity_kind = 1 AND identity_text = ?");
+  identity.bind(1, type_id);
+  identity.bind(2, decl_usr);
+  identity.step_done();
+
+  auto type_decl = db_.prepare(
+      "UPDATE type_node SET decl_id = (SELECT id FROM symbol WHERE usr = ?) "
+      "WHERE decl_usr = ?");
+  type_decl.bind(1, decl_usr);
+  type_decl.bind(2, decl_usr);
+  type_decl.step_done();
+
+  auto edge_type = db_.prepare(
+      "UPDATE edge_site SET recv_type_id = ? WHERE recv_type_id IS NULL AND "
+      "recv_type_identity_id IN (SELECT id FROM external_identity WHERE "
+      "identity_kind = 1 AND identity_text = ?)");
+  edge_type.bind(1, type_id);
+  edge_type.bind(2, decl_usr);
+  edge_type.step_done();
+
+  auto call_type =
+      db_.prepare("UPDATE call_arg SET type_id = ? WHERE type_id IS NULL AND "
+                  "type_identity_id IN (SELECT id FROM external_identity WHERE "
+                  "identity_kind = 1 AND identity_text = ?)");
+  call_type.bind(1, type_id);
+  call_type.bind(2, decl_usr);
+  call_type.step_done();
+
+  auto edge_clear = db_.prepare(
+      "UPDATE edge_site SET recv_type_identity_id = NULL WHERE "
+      "recv_type_id IS NOT NULL AND recv_type_identity_id IN (SELECT id FROM "
+      "external_identity WHERE identity_kind = 1 AND identity_text = ?)");
+  edge_clear.bind(1, decl_usr);
+  edge_clear.step_done();
+  auto call_clear = db_.prepare(
+      "UPDATE call_arg SET type_identity_id = NULL WHERE type_id IS NOT NULL "
+      "AND type_identity_id IN (SELECT id FROM external_identity WHERE "
+      "identity_kind = 1 AND identity_text = ?)");
+  call_clear.bind(1, decl_usr);
+  call_clear.step_done();
 }
 
 } // namespace cidx

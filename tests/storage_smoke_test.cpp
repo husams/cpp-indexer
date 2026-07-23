@@ -442,7 +442,6 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                         "file_config",
                                         "fact_applicability",
                                         "external_identity",
-                                        "storage_enum_catalog",
                                         "include_config",
                                         "include_edge",
                                         "include_directive_kind",
@@ -545,7 +544,12 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_include_site_edge",
                                          "idx_include_macro_use_path",
                                          "idx_external_identity_symbol",
-                                         "idx_external_identity_type"});
+                                         "idx_external_identity_type",
+                                         "idx_edge_site_recv_type_identity",
+                                         "idx_edge_site_recv_decl_identity",
+                                         "idx_call_arg_type_identity",
+                                         "idx_call_arg_decl_identity",
+                                         "idx_call_arg_callee_identity"});
 
   // meta row + pragma parity (D25: foreign_keys ON, default journal mode)
   {
@@ -1030,7 +1034,7 @@ TEST_CASE("v35 occurrence identities are compact and lossless") {
       "type_id, decl_id, callee_id, type_identity_id, decl_identity_id, "
       "callee_identity_id FROM call_arg");
   REQUIRE(raw_arg.step());
-  CHECK(raw_arg.col_text(0) == "local");
+  CHECK(raw_arg.col_is_null(0));
   CHECK(raw_arg.col_int64(1) == 2);
   CHECK(raw_arg.col_is_null(2));
   CHECK(raw_arg.col_is_null(3));
@@ -1071,4 +1075,91 @@ TEST_CASE("v35 occurrence identities are compact and lossless") {
   CHECK(count.col_int64(0) == 2);
   arg.src_kind = "not-a-source-kind";
   CHECK_THROWS_AS(db.add_call_arg(arg), cidx::StorageError);
+}
+
+TEST_CASE("v35 identities reconcile independent of insertion order") {
+  cidx::Storage db(":memory:");
+  const auto component = db.add_component("c", "/repo/c");
+  const auto directory = db.add_directory(component, "");
+  const auto file = db.add_file(directory, "c.cpp");
+
+  cidx::Symbol caller;
+  caller.usr = "future:caller";
+  caller.spelling = "caller";
+  caller.kind = "function";
+  const auto caller_id = db.add_symbol(caller);
+  cidx::Symbol target;
+  target.usr = "future:target";
+  target.spelling = "target";
+  target.kind = "function";
+  const auto target_id = db.add_symbol(target);
+  cidx::Edge edge;
+  edge.src_id = caller_id;
+  edge.dst_id = target_id;
+  edge.kind = 1;
+  const auto edge_id = db.add_edge(edge);
+
+  cidx::EdgeSite site;
+  site.edge_id = edge_id;
+  site.file_id = file;
+  site.line = 10;
+  site.col = 1;
+  site.recv_src_kind = std::nullopt;
+  site.recv_type_usr = "future:type";
+  site.recv_decl_usr = "future:symbol";
+  db.add_edge_site(site);
+  cidx::CallArg arg;
+  arg.edge_id = edge_id;
+  arg.file_id = file;
+  arg.line = 10;
+  arg.col = 1;
+  arg.position = 0;
+  arg.src_kind = "local";
+  arg.type_usr = "future:type";
+  arg.decl_usr = "future:symbol";
+  arg.callee_usr = "future:callee";
+  db.add_call_arg(arg);
+  auto pending = db.raw_db().prepare(
+      "SELECT recv_type_identity_id, recv_decl_identity_id FROM edge_site");
+  REQUIRE(pending.step());
+  CHECK(pending.col_is_null(0) == false);
+  CHECK(pending.col_is_null(1) == false);
+
+  cidx::Symbol late_symbol;
+  late_symbol.usr = "future:symbol";
+  late_symbol.spelling = "symbol";
+  late_symbol.kind = "struct";
+  const auto late_symbol_id = db.add_symbol(late_symbol);
+  cidx::Symbol late_callee;
+  late_callee.usr = "future:callee";
+  late_callee.spelling = "callee";
+  late_callee.kind = "function";
+  const auto late_callee_id = db.add_symbol(late_callee);
+  cidx::TypeNode late_type;
+  late_type.type_key = "record:future:type";
+  late_type.spelling = "Future";
+  late_type.kind = cidx::kTypeKindRecord;
+  late_type.decl_usr = "future:type";
+  const auto late_type_id = db.intern_type_node(late_type);
+
+  auto raw = db.raw_db().prepare(
+      "SELECT recv_src_kind_id, recv_type_id, recv_decl_id FROM edge_site");
+  REQUIRE(raw.step());
+  CHECK(raw.col_is_null(0));
+  CHECK(raw.col_int64(1) == late_type_id);
+  CHECK(raw.col_int64(2) == late_symbol_id);
+  raw = db.raw_db().prepare("SELECT src_kind, src_kind_id, type_id, decl_id, "
+                            "callee_id FROM call_arg");
+  REQUIRE(raw.step());
+  CHECK(raw.col_is_null(0));
+  CHECK(raw.col_int64(1) == 2);
+  CHECK(raw.col_int64(2) == late_type_id);
+  CHECK(raw.col_int64(3) == late_symbol_id);
+  CHECK(raw.col_int64(4) == late_callee_id);
+  auto unresolved = db.raw_db().prepare(
+      "SELECT COUNT(*) FROM external_identity WHERE identity_text IN "
+      "('future:type','future:symbol','future:callee') AND resolution_status = "
+      "0");
+  REQUIRE(unresolved.step());
+  CHECK(unresolved.col_int64(0) == 0);
 }

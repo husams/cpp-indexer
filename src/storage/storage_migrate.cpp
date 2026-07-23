@@ -42,6 +42,11 @@ void Storage::migrate() {
   if (!has_table("symbol")) {
     return; // fresh database: the schema script creates everything
   }
+  if (has_table("storage_enum_catalog")) {
+    db_.exec("DROP VIEW IF EXISTS edge_site_read");
+    db_.exec("DROP VIEW IF EXISTS call_arg_read");
+    db_.exec("DROP TABLE storage_enum_catalog");
+  }
   const auto table_columns = [this](const char *table) {
     std::vector<std::string> cols;
     auto st = db_.prepare(std::string("PRAGMA table_info(") + table + ")");
@@ -677,7 +682,8 @@ void Storage::migrate() {
     // backfill; read-side compatibility views reconstruct the public USR
     // fields.
     db_.exec("CREATE TABLE IF NOT EXISTS external_identity ("
-             "id INTEGER PRIMARY KEY, identity_kind INTEGER NOT NULL, "
+             "id INTEGER PRIMARY KEY, identity_kind INTEGER NOT NULL "
+             "CHECK (identity_kind IN (1,2,3)), "
              "identity_text TEXT NOT NULL, resolution_status INTEGER NOT NULL "
              "DEFAULT 0 CHECK (resolution_status IN (0,1)), "
              "symbol_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL, "
@@ -687,15 +693,6 @@ void Storage::migrate() {
              "ON external_identity(symbol_id)");
     db_.exec("CREATE INDEX IF NOT EXISTS idx_external_identity_type "
              "ON external_identity(type_id)");
-    db_.exec("CREATE TABLE IF NOT EXISTS storage_enum_catalog ("
-             "domain TEXT NOT NULL, id INTEGER NOT NULL, name TEXT NOT NULL, "
-             "PRIMARY KEY(domain,id), UNIQUE(domain,name))");
-    db_.exec(
-        "INSERT OR IGNORE INTO storage_enum_catalog(domain,id,name) VALUES "
-        "('source_kind',1,'literal'),('source_kind',2,'local'),"
-        "('source_kind',3,'construct'),('source_kind',4,'member'),"
-        "('source_kind',5,'global'),('source_kind',6,'call_result'),"
-        "('source_kind',7,'this'),('source_kind',8,'unknown')");
 
     const auto add_col = [this](const char *table, const char *column,
                                 const char *definition) {
@@ -745,6 +742,21 @@ void Storage::migrate() {
               "INTEGER REFERENCES external_identity(id) ON DELETE SET NULL");
       add_col("edge_site", "recv_decl_identity_id",
               "INTEGER REFERENCES external_identity(id) ON DELETE SET NULL");
+      if (has_col(table_columns("edge_site"), "recv_src_kind")) {
+        for (const auto &entry : catalog::kSourceKinds) {
+          db_.exec("UPDATE edge_site SET recv_src_kind_id = " +
+                   std::to_string(entry.id) + " WHERE recv_src_kind = '" +
+                   std::string(entry.name) + "'");
+        }
+        auto unknown = db_.prepare("SELECT recv_src_kind FROM edge_site WHERE "
+                                   "recv_src_kind IS NOT NULL "
+                                   "AND recv_src_kind_id IS NULL LIMIT 1");
+        if (unknown.step()) {
+          throw StorageError("unknown source kind '" + unknown.col_text(0) +
+                             "' in edge_site migration");
+        }
+        db_.exec("UPDATE edge_site SET recv_src_kind = NULL");
+      }
       if (has_edge_identity_text && has_type_node) {
         db_.exec("INSERT OR IGNORE INTO "
                  "external_identity(identity_kind,identity_text,"
@@ -795,6 +807,52 @@ void Storage::migrate() {
               "INTEGER REFERENCES external_identity(id) ON DELETE SET NULL");
       add_col("call_arg", "callee_identity_id",
               "INTEGER REFERENCES external_identity(id) ON DELETE SET NULL");
+      add_col("call_arg", "type_usr", "TEXT");
+      add_col("call_arg", "decl_usr", "TEXT");
+      add_col("call_arg", "callee_usr", "TEXT");
+      add_col("call_arg", "type_is_value", "INTEGER");
+      bool source_kind_not_null = false;
+      {
+        auto info = db_.prepare("PRAGMA table_info(call_arg)");
+        while (info.step()) {
+          if (info.col_text(1) == "src_kind") {
+            source_kind_not_null = info.col_int64(3) != 0;
+          }
+        }
+      }
+      if (source_kind_not_null) {
+        db_.exec("DROP VIEW IF EXISTS call_arg_read");
+        db_.exec("PRAGMA foreign_keys = OFF");
+        db_.exec(
+            "CREATE TABLE call_arg_v35 ("
+            "edge_id INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE, "
+            "file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE, "
+            "line INTEGER NOT NULL, col INTEGER NOT NULL, position INTEGER NOT "
+            "NULL, "
+            "src_kind TEXT, type_usr TEXT, decl_usr TEXT, callee_usr TEXT, "
+            "src_kind_id INTEGER, type_id INTEGER REFERENCES type_node(id) ON "
+            "DELETE SET NULL, "
+            "decl_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL, "
+            "callee_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL, "
+            "type_identity_id INTEGER REFERENCES external_identity(id) ON "
+            "DELETE SET NULL, "
+            "decl_identity_id INTEGER REFERENCES external_identity(id) ON "
+            "DELETE SET NULL, "
+            "callee_identity_id INTEGER REFERENCES external_identity(id) ON "
+            "DELETE SET NULL, "
+            "type_is_value INTEGER, "
+            "PRIMARY KEY(edge_id,file_id,line,col,position)) WITHOUT ROWID");
+        db_.exec(
+            "INSERT INTO call_arg_v35 SELECT edge_id,file_id,line,col,position,"
+            "src_kind,type_usr,decl_usr,callee_usr,src_kind_id,type_id,decl_id,"
+            "callee_id,type_identity_id,decl_identity_id,callee_identity_id,"
+            "type_is_value FROM call_arg");
+        db_.exec("DROP TABLE call_arg");
+        db_.exec("ALTER TABLE call_arg_v35 RENAME TO call_arg");
+        db_.exec("CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON "
+                 "call_arg(edge_id)");
+        db_.exec("PRAGMA foreign_keys = ON");
+      }
       if (has_call_identity_text && has_type_node) {
         db_.exec(
             "INSERT OR IGNORE INTO "
@@ -831,10 +889,19 @@ void Storage::migrate() {
             "FROM external_identity i WHERE i.identity_kind = 1 AND "
             "i.identity_text = call_arg.type_usr)");
       }
-      db_.exec(
-          "UPDATE call_arg SET src_kind_id = (SELECT id FROM "
-          "storage_enum_catalog "
-          "c WHERE c.domain = 'source_kind' AND c.name = call_arg.src_kind)");
+      for (const auto &entry : catalog::kSourceKinds) {
+        db_.exec(
+            "UPDATE call_arg SET src_kind_id = " + std::to_string(entry.id) +
+            " WHERE src_kind = '" + std::string(entry.name) + "'");
+      }
+      auto unknown = db_.prepare(
+          "SELECT src_kind FROM call_arg WHERE src_kind IS NOT NULL "
+          "AND src_kind_id IS NULL LIMIT 1");
+      if (unknown.step()) {
+        throw StorageError("unknown source kind '" + unknown.col_text(0) +
+                           "' in call_arg migration");
+      }
+      db_.exec("UPDATE call_arg SET src_kind = NULL");
       if (has_call_identity_text && has_type_node) {
         db_.exec("UPDATE call_arg SET type_usr = NULL, decl_usr = NULL, "
                  "callee_usr = NULL");

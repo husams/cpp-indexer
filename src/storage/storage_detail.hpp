@@ -57,12 +57,21 @@ inline const std::map<int64_t, std::string> &symbol_kind_names_map() {
 }
 
 inline int64_t source_kind_id(std::string_view name) {
-  static const std::map<std::string_view, int64_t> ids = {
-      {"literal", 1}, {"local", 2},       {"construct", 3}, {"member", 4},
-      {"global", 5},  {"call_result", 6}, {"this", 7},      {"unknown", 8},
-  };
-  const auto it = ids.find(name);
-  return it == ids.end() ? -1 : it->second;
+  for (const auto &entry : catalog::kSourceKinds) {
+    if (entry.name == name) {
+      return entry.id;
+    }
+  }
+  return -1;
+}
+
+inline int64_t identity_kind_id(std::string_view name) {
+  for (const auto &entry : catalog::kIdentityKinds) {
+    if (entry.name == name) {
+      return entry.id;
+    }
+  }
+  return -1;
 }
 
 // Python Storage._SYMBOL_COLS — insert/update order is load-bearing for the

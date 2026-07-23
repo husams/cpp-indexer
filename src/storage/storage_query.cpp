@@ -391,7 +391,8 @@ Storage::edge_sites_one(int64_t edge_id, int limit) {
       "SELECT file_id, line, col, conditional, args_sig, "
       "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos, "
       "       recv_type_is_value "
-      "FROM edge_site_read WHERE edge_id = ? ORDER BY file_id, line, col LIMIT ?");
+      "FROM edge_site_read WHERE edge_id = ? ORDER BY file_id, line, col "
+      "LIMIT ?");
   st.bind(1, edge_id);
   st.bind(2, static_cast<int64_t>(limit));
 

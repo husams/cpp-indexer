@@ -157,7 +157,12 @@ void check_migrated(const std::string &db_path) {
                                          "idx_include_site_edge",
                                          "idx_include_macro_use_path",
                                          "idx_external_identity_symbol",
-                                         "idx_external_identity_type"});
+                                         "idx_external_identity_type",
+                                         "idx_edge_site_recv_type_identity",
+                                         "idx_edge_site_recv_decl_identity",
+                                         "idx_call_arg_type_identity",
+                                         "idx_call_arg_decl_identity",
+                                         "idx_call_arg_callee_identity"});
 }
 
 } // namespace
@@ -462,7 +467,6 @@ TEST_CASE("v29 -> v30: signature/type tier tables created, version stamped") {
     raw.exec("DROP VIEW edge_site_read");
     raw.exec("DROP VIEW call_arg_read");
     raw.exec("DROP TABLE external_identity");
-    raw.exec("DROP TABLE storage_enum_catalog");
     raw.exec("DROP TABLE call_arg");
     raw.exec("DROP TABLE edge_site");
     raw.exec("DROP TABLE template_arg");
@@ -573,13 +577,16 @@ TEST_CASE("v34 -> v35: legacy occurrence text is migrated losslessly") {
   {
     cidx::Storage db(path);
     auto site = db.raw_db().prepare(
-        "SELECT recv_type_usr, recv_decl_usr, recv_type_id, recv_decl_id "
+        "SELECT recv_src_kind, recv_src_kind_id, recv_type_usr, recv_decl_usr, "
+        "recv_type_id, recv_decl_id "
         "FROM edge_site");
     REQUIRE(site.step());
     CHECK(site.col_is_null(0));
-    CHECK(site.col_is_null(1));
-    CHECK(site.col_int64(2) > 0);
-    CHECK(site.col_int64(3) > 0);
+    CHECK(site.col_int64(1) == 2);
+    CHECK(site.col_is_null(2));
+    CHECK(site.col_is_null(3));
+    CHECK(site.col_int64(4) > 0);
+    CHECK(site.col_int64(5) > 0);
     auto readable_site = db.raw_db().prepare(
         "SELECT recv_src_kind, recv_type_usr, recv_decl_usr "
         "FROM edge_site_read");
@@ -589,15 +596,18 @@ TEST_CASE("v34 -> v35: legacy occurrence text is migrated losslessly") {
     CHECK(readable_site.col_text(2) == "legacy:type");
 
     auto arg = db.raw_db().prepare(
-        "SELECT type_usr, decl_usr, callee_usr, type_id, decl_id, callee_id "
+        "SELECT src_kind, src_kind_id, type_usr, decl_usr, callee_usr, "
+        "type_id, decl_id, callee_id "
         "FROM call_arg");
     REQUIRE(arg.step());
     CHECK(arg.col_is_null(0));
-    CHECK(arg.col_is_null(1));
+    CHECK(arg.col_int64(1) == 2);
     CHECK(arg.col_is_null(2));
     CHECK(arg.col_is_null(3));
     CHECK(arg.col_is_null(4));
-    CHECK(arg.col_int64(5) > 0);
+    CHECK(arg.col_is_null(5));
+    CHECK(arg.col_is_null(6));
+    CHECK(arg.col_int64(7) > 0);
     auto readable_arg = db.raw_db().prepare(
         "SELECT type_usr, decl_usr, callee_usr FROM call_arg_read");
     REQUIRE(readable_arg.step());

@@ -66,7 +66,11 @@ int64_t Storage::intern_type_node(const TypeNode &n) {
   if (!sel.step()) {
     throw StorageError("type_node intern failed for key " + n.type_key);
   }
-  return sel.col_int64(0);
+  const int64_t type_id = sel.col_int64(0);
+  if (n.decl_usr.has_value()) {
+    reconcile_type_identity(type_id, *n.decl_usr);
+  }
+  return type_id;
 }
 
 std::optional<TypeNode> Storage::type_node_by_id(int64_t type_id) {

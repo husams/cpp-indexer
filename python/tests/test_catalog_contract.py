@@ -13,7 +13,7 @@ from indexer.generated_extensions import EXTENSION_RELATIONS
 from indexer.query import GraphQuery
 from indexer.queryplan import extension_relation_catalog, extension_relation_metadata
 from indexer.souffle import SouffleError, _open_ro
-from indexer.storage import Storage, Symbol
+from indexer.storage import SCHEMA_VERSION, Storage, Symbol
 
 
 ROOT = Path(__file__).parents[2]
@@ -140,7 +140,7 @@ def test_template_relation_metadata_matches_graph_direction():
 def _meta_db(path: Path, catalog_hash: str | None) -> None:
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-    conn.execute("INSERT INTO meta VALUES ('schema_version', '36')")
+    conn.execute("INSERT INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
     if catalog_hash is not None:
         conn.execute("INSERT INTO meta VALUES ('catalog_hash', ?)", (catalog_hash,))
     conn.commit()

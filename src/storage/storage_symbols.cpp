@@ -144,6 +144,7 @@ int64_t Storage::add_symbol(const Symbol &sym) {
     ds.bind(7, static_cast<int64_t>(sym.is_definition ? 1 : 0));
     ds.step_done();
   }
+  reconcile_symbol_identity(sid, sym.usr);
   return sid;
 }
 
@@ -534,7 +535,8 @@ int64_t Storage::ensure_edge(const Edge &e) {
 
 void Storage::add_edge_site(const EdgeSite &s) {
   const auto source_id =
-      s.recv_src_kind ? source_kind_id(*s.recv_src_kind) : int64_t{0};
+      s.recv_src_kind ? std::optional<int64_t>(source_kind_id(*s.recv_src_kind))
+                      : std::nullopt;
   if (s.recv_src_kind && source_id < 0) {
     throw StorageError("unknown source kind '" + *s.recv_src_kind + "'");
   }
@@ -597,7 +599,7 @@ void Storage::add_edge_site(const EdgeSite &s) {
   bind_opt(st, 4, s.col);
   st.bind(5, s.conditional);
   bind_opt(st, 6, s.args_sig);
-  st.bind(7, source_id);
+  bind_opt(st, 7, source_id);
   bind_opt(st, 8, recv_type);
   bind_opt(st, 9, recv_decl);
   bind_opt(st, 10, recv_type_external);
@@ -682,21 +684,20 @@ void Storage::add_call_arg(const CallArg &a) {
       " type_usr, decl_usr, callee_usr, src_kind_id, type_id, "
       " decl_id, callee_id, type_identity_id, decl_identity_id, "
       " callee_identity_id, type_is_value) "
-      "VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)");
+      "VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)");
   st.bind(1, a.edge_id);
   st.bind(2, a.file_id);
   st.bind(3, a.line);
   st.bind(4, a.col);
   st.bind(5, a.position);
-  st.bind(6, std::string_view(a.src_kind));
-  st.bind(7, source_id);
-  bind_opt(st, 8, arg_type);
-  bind_opt(st, 9, arg_decl);
-  bind_opt(st, 10, arg_callee);
-  bind_opt(st, 11, arg_type_external);
-  bind_opt(st, 12, arg_decl_external);
-  bind_opt(st, 13, arg_callee_external);
-  bind_opt(st, 14, a.type_is_value);
+  st.bind(6, source_id);
+  bind_opt(st, 7, arg_type);
+  bind_opt(st, 8, arg_decl);
+  bind_opt(st, 9, arg_callee);
+  bind_opt(st, 10, arg_type_external);
+  bind_opt(st, 11, arg_decl_external);
+  bind_opt(st, 12, arg_callee_external);
+  bind_opt(st, 13, a.type_is_value);
   st.step_done();
 }
 

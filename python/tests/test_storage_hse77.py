@@ -1,0 +1,106 @@
+from indexer.storage import Storage, Symbol
+
+
+def test_hse77_v34_migration_backfills_source_and_preserves_reads(tmp_path):
+    path = str(tmp_path / "v34.db")
+    db = Storage(path)
+    component = db.add_component("c", "/repo/c")
+    directory = db.add_directory(component, "")
+    file_id = db.add_file(directory, "c.cpp")
+    caller_id = db.add_symbol(Symbol("legacy:caller", "caller", "function"))
+    callee_id = db.add_symbol(Symbol("legacy:callee", "callee", "function"))
+    edge_id = db.add_edge(caller_id, callee_id, 1)
+    db._conn.execute(
+        "INSERT INTO edge_site(edge_id,file_id,line,col,conditional,args_sig,"
+        "recv_src_kind,recv_type_usr,recv_decl_usr,recv_param_pos) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (edge_id, file_id, 10, 2, 0, "legacy", "local", "legacy:type", "legacy:callee", 0),
+    )
+    db._conn.execute(
+        "INSERT INTO call_arg(edge_id,file_id,line,col,position,src_kind,type_usr,decl_usr,callee_usr) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (edge_id, file_id, 11, 4, 0, "local", "legacy:missing-type", "legacy:missing-decl", "legacy:callee"),
+    )
+    db._conn.execute("UPDATE meta SET value='34' WHERE key='schema_version'")
+    db._conn.commit()
+    db.close()
+
+    db = Storage(path)
+    edge = db._conn.execute(
+        "SELECT recv_src_kind, recv_src_kind_id, recv_type_usr, recv_decl_usr, recv_decl_id "
+        "FROM edge_site"
+    ).fetchone()
+    assert tuple(edge) == (None, 2, None, None, callee_id)
+    arg = db._conn.execute(
+        "SELECT src_kind, src_kind_id, type_usr, decl_usr, callee_usr, callee_id FROM call_arg"
+    ).fetchone()
+    assert tuple(arg) == (None, 2, None, None, None, callee_id)
+    assert tuple(db._conn.execute(
+        "SELECT recv_src_kind, recv_type_usr, recv_decl_usr FROM edge_site_read"
+    ).fetchone()) == ("local", "legacy:type", "legacy:callee")
+    assert tuple(db._conn.execute(
+        "SELECT src_kind, type_usr, decl_usr, callee_usr FROM call_arg_read"
+    ).fetchone()) == ("local", "legacy:missing-type", "legacy:missing-decl", "legacy:callee")
+    assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "35"
+    db.close()
+
+
+def test_hse77_normalization_is_order_independent():
+    db = Storage(":memory:")
+    component = db.add_component("c", "/repo/c")
+    directory = db.add_directory(component, "")
+    file_id = db.add_file(directory, "c.cpp")
+    caller_id = db.add_symbol(Symbol("future:caller", "caller", "function"))
+    target_id = db.add_symbol(Symbol("future:target", "target", "function"))
+    edge_id = db.add_edge(caller_id, target_id, 1)
+
+    db.add_edge_site(
+        edge_id,
+        file_id,
+        10,
+        1,
+        recv_type_usr="future:type",
+        recv_decl_usr="future:symbol",
+    )
+    db.add_call_arg(
+        edge_id,
+        file_id,
+        10,
+        1,
+        0,
+        "local",
+        type_usr="future:type",
+        decl_usr="future:symbol",
+        callee_usr="future:callee",
+    )
+
+    symbol_id = db.add_symbol(Symbol("future:symbol", "symbol", "struct"))
+    callee_id = db.add_symbol(Symbol("future:callee", "callee", "function"))
+    type_id = db._conn.execute(
+        "INSERT INTO type_node(type_key, spelling, kind, decl_usr) VALUES (?, ?, ?, ?) RETURNING id",
+        ("record:future:type", "Future", 2, "future:type"),
+    ).fetchone()[0]
+    db._reconcile_external_identities()
+
+    edge = db._conn.execute(
+        "SELECT recv_src_kind, recv_src_kind_id, recv_type_id, recv_decl_id FROM edge_site"
+    ).fetchone()
+    assert edge[0] is None
+    assert edge[1] is None
+    assert edge[2] == type_id
+    assert edge[3] == symbol_id
+    arg = db._conn.execute(
+        "SELECT src_kind, src_kind_id, type_id, decl_id, callee_id FROM call_arg"
+    ).fetchone()
+    assert arg[0] is None
+    assert (arg[1], arg[2], arg[3], arg[4]) == (2, type_id, symbol_id, callee_id)
+    assert tuple(db._conn.execute(
+        "SELECT recv_src_kind, recv_type_usr, recv_decl_usr FROM edge_site_read"
+    ).fetchone()) == (None, "future:type", "future:symbol")
+    assert tuple(db._conn.execute(
+        "SELECT src_kind, type_usr, decl_usr, callee_usr FROM call_arg_read"
+    ).fetchone()) == ("local", "future:type", "future:symbol", "future:callee")
+    assert db._conn.execute(
+        "SELECT COUNT(*) FROM external_identity WHERE resolution_status = 0"
+    ).fetchone()[0] == 0
+    db.close()

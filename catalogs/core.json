@@ -117,5 +117,17 @@
     {"id": 3, "name": "analysis-result", "schema_version": 1},
     {"id": 4, "name": "query-result", "schema_version": 1}
   ],
+  "storage_enum_domains": [
+    {"name": "source_kind", "entries": [
+      {"id": 1, "name": "literal"}, {"id": 2, "name": "local"},
+      {"id": 3, "name": "construct"}, {"id": 4, "name": "member"},
+      {"id": 5, "name": "global"}, {"id": 6, "name": "call_result"},
+      {"id": 7, "name": "this"}, {"id": 8, "name": "unknown"}
+    ]},
+    {"name": "identity_kind", "entries": [
+      {"id": 1, "name": "type_usr"}, {"id": 2, "name": "symbol_usr"},
+      {"id": 3, "name": "path"}
+    ]}
+  ],
   "migrations": []
 }

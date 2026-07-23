@@ -6,7 +6,7 @@
 
 namespace cidx::catalog {
 inline constexpr int kCatalogVersion = 1;
-inline constexpr std::string_view kCatalogHash = "15e7ce8206c521cff6794530a382f0389320c0f3e49d148b0f311d058aa5157a";
+inline constexpr std::string_view kCatalogHash = "090236d604144c4b4624e67d9531e5b478eac215565939074922763ad4b4109c";
 enum class View : std::uint8_t { Symbol, Entity };
 struct NamedId { int64_t id; std::string_view name; };
 struct Relation { int64_t id; std::string_view name; View layer; std::string_view source; std::string_view target; std::string_view inverse; std::string_view traversal; std::string_view evidence; std::string_view evidence_capabilities; std::string_view completeness; };
@@ -136,6 +136,23 @@ inline constexpr std::array<NamedId, 5> kEffectRoles = {{
     {.id = 3, .name = "read"},
     {.id = 4, .name = "write"},
     {.id = 5, .name = "escape"},
+}};
+
+inline constexpr std::array<NamedId, 8> kSourceKinds = {{
+    {.id = 1, .name = "literal"},
+    {.id = 2, .name = "local"},
+    {.id = 3, .name = "construct"},
+    {.id = 4, .name = "member"},
+    {.id = 5, .name = "global"},
+    {.id = 6, .name = "call_result"},
+    {.id = 7, .name = "this"},
+    {.id = 8, .name = "unknown"},
+}};
+
+inline constexpr std::array<NamedId, 3> kIdentityKinds = {{
+    {.id = 1, .name = "type_usr"},
+    {.id = 2, .name = "symbol_usr"},
+    {.id = 3, .name = "path"},
 }};
 
 inline constexpr std::array<std::string_view, 4> kStatuses = {"complete", "partial", "unknown", "error"};

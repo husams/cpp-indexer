@@ -351,7 +351,7 @@ def test_gp02_edge_site_recv_round_trip(chain_p2_db):
     # Query the seeded site directly
     row = db._conn.execute(
         "SELECT recv_src_kind, recv_type_usr, recv_decl_usr "
-        "FROM edge_site WHERE edge_id = ? AND line = 11",
+        "FROM edge_site_read WHERE edge_id = ? AND line = 11",
         (ids["e_top_rank_to_arank"],),
     ).fetchone()
     assert row is not None, "edge_site row not found"
@@ -367,7 +367,7 @@ def test_gp02_call_arg_round_trip(chain_p2_db):
     db = Storage(db_path)
     rows = db._conn.execute(
         "SELECT position, src_kind, type_usr, decl_usr, callee_usr "
-        "FROM call_arg WHERE edge_id = ? ORDER BY position",
+        "FROM call_arg_read WHERE edge_id = ? ORDER BY position",
         (ids["e_f_to_toprank"],),
     ).fetchall()
     assert len(rows) == 1, f"expected 1 call_arg row, got {len(rows)}"
@@ -1290,7 +1290,7 @@ def test_gp13_real_extractor_classifies_local_arg(chain_real_cb):
     cb, db_path = chain_real_cb
     rows = cb.graph._c.execute(
         "SELECT ca.src_kind, ca.type_usr "
-        "FROM call_arg ca "
+        "FROM call_arg_read ca "
         "JOIN edge e ON ca.edge_id = e.id "
         "JOIN symbol src ON e.src_id = src.id "
         "JOIN symbol dst ON e.dst_id = dst.id "

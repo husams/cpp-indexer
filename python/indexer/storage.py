@@ -37,6 +37,8 @@ from typing import Any, Optional
 from indexer import pathx as _pathx
 from indexer.generated_catalog import CATALOG_HASH, CATALOG_SEED_SQL, CATALOG_VERSION
 from indexer.generated_catalog import (
+    IDENTITY_KIND_IDS as _GENERATED_IDENTITY_KIND_IDS,
+    SOURCE_KIND_IDS as _GENERATED_SOURCE_KIND_IDS,
     SYMBOL_KIND_IDS as _GENERATED_SYMBOL_KIND_IDS,
 )
 
@@ -82,16 +84,8 @@ SYMBOL_KIND_IDS = dict(_GENERATED_SYMBOL_KIND_IDS)
 #: stored integer -> symbol.kind name (display / read-side recovery).
 SYMBOL_KIND_NAMES = {v: k for k, v in SYMBOL_KIND_IDS.items()}
 
-SOURCE_KIND_IDS = {
-    "literal": 1,
-    "local": 2,
-    "construct": 3,
-    "member": 4,
-    "global": 5,
-    "call_result": 6,
-    "this": 7,
-    "unknown": 8,
-}
+SOURCE_KIND_IDS = dict(_GENERATED_SOURCE_KIND_IDS)
+IDENTITY_KIND_IDS = dict(_GENERATED_IDENTITY_KIND_IDS)
 
 #: Allowed values for symbol.kind. Superset of the cidx brief: the core C/C++
 #: declaration kinds plus the ones any real walk over a TU produces.
@@ -335,7 +329,7 @@ CREATE INDEX IF NOT EXISTS idx_edge_dst ON edge(dst_id, kind);
 -- v35: deduplicated, lossless identities for values without a local row.
 CREATE TABLE IF NOT EXISTS external_identity (
     id               INTEGER PRIMARY KEY,
-    identity_kind    INTEGER NOT NULL,
+    identity_kind    INTEGER NOT NULL CHECK (identity_kind IN (1, 2, 3)),
     identity_text    TEXT NOT NULL,
     resolution_status INTEGER NOT NULL DEFAULT 0 CHECK (resolution_status IN (0, 1)),
     symbol_id        INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
@@ -344,19 +338,6 @@ CREATE TABLE IF NOT EXISTS external_identity (
 );
 CREATE INDEX IF NOT EXISTS idx_external_identity_symbol ON external_identity(symbol_id);
 CREATE INDEX IF NOT EXISTS idx_external_identity_type ON external_identity(type_id);
-
-CREATE TABLE IF NOT EXISTS storage_enum_catalog (
-    domain TEXT NOT NULL,
-    id     INTEGER NOT NULL,
-    name   TEXT NOT NULL,
-    PRIMARY KEY (domain, id),
-    UNIQUE (domain, name)
-);
-INSERT OR IGNORE INTO storage_enum_catalog(domain, id, name) VALUES
-    ('source_kind', 1, 'literal'), ('source_kind', 2, 'local'),
-    ('source_kind', 3, 'construct'), ('source_kind', 4, 'member'),
-    ('source_kind', 5, 'global'), ('source_kind', 6, 'call_result'),
-    ('source_kind', 7, 'this'), ('source_kind', 8, 'unknown');
 
 CREATE TABLE IF NOT EXISTS edge_site (
     edge_id      INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE,
@@ -368,7 +349,7 @@ CREATE TABLE IF NOT EXISTS edge_site (
     recv_src_kind TEXT,
     recv_type_usr TEXT,
     recv_decl_usr TEXT,
-    recv_src_kind_id INTEGER,
+    recv_src_kind_id INTEGER CHECK (recv_src_kind_id IS NULL OR recv_src_kind_id IN (1,2,3,4,5,6,7,8)),
     recv_type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
     recv_decl_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
     recv_type_identity_id INTEGER REFERENCES external_identity(id) ON DELETE SET NULL,
@@ -407,11 +388,11 @@ CREATE TABLE IF NOT EXISTS call_arg (
     line       INTEGER NOT NULL,
     col        INTEGER NOT NULL,
     position   INTEGER NOT NULL,
-    src_kind   TEXT NOT NULL,
+    src_kind   TEXT,
     type_usr   TEXT,
     decl_usr   TEXT,
     callee_usr TEXT,
-    src_kind_id INTEGER,
+    src_kind_id INTEGER CHECK (src_kind_id IS NULL OR src_kind_id IN (1,2,3,4,5,6,7,8)),
     type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
     decl_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
     callee_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
@@ -422,13 +403,21 @@ CREATE TABLE IF NOT EXISTS call_arg (
     PRIMARY KEY (edge_id, file_id, line, col, position)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id);
+CREATE INDEX IF NOT EXISTS idx_edge_site_recv_type_identity ON edge_site(recv_type_identity_id);
+CREATE INDEX IF NOT EXISTS idx_edge_site_recv_decl_identity ON edge_site(recv_decl_identity_id);
+CREATE INDEX IF NOT EXISTS idx_call_arg_type_identity ON call_arg(type_identity_id);
+CREATE INDEX IF NOT EXISTS idx_call_arg_decl_identity ON call_arg(decl_identity_id);
+CREATE INDEX IF NOT EXISTS idx_call_arg_callee_identity ON call_arg(callee_identity_id);
 
 CREATE VIEW IF NOT EXISTS edge_site_read AS
 SELECT es.edge_id, es.file_id, es.line, es.col, es.conditional, es.args_sig,
-       COALESCE(es.recv_src_kind, (SELECT c.name FROM storage_enum_catalog c
-         WHERE c.domain = 'source_kind' AND c.id = es.recv_src_kind_id)) AS recv_src_kind,
-       COALESCE(tn.decl_usr, eti.identity_text, es.recv_type_usr) AS recv_type_usr,
-       COALESCE(ds.usr, edi.identity_text, es.recv_decl_usr) AS recv_decl_usr,
+       COALESCE(es.recv_src_kind, CASE es.recv_src_kind_id
+           WHEN 1 THEN 'literal' WHEN 2 THEN 'local'
+           WHEN 3 THEN 'construct' WHEN 4 THEN 'member'
+           WHEN 5 THEN 'global' WHEN 6 THEN 'call_result'
+           WHEN 7 THEN 'this' WHEN 8 THEN 'unknown' END) AS recv_src_kind,
+       COALESCE(es.recv_type_usr, tn.decl_usr, eti.identity_text) AS recv_type_usr,
+       COALESCE(es.recv_decl_usr, ds.usr, edi.identity_text) AS recv_decl_usr,
        es.recv_param_pos, es.recv_type_is_value
 FROM edge_site es
 LEFT JOIN type_node tn ON tn.id = es.recv_type_id
@@ -438,11 +427,14 @@ LEFT JOIN external_identity edi ON edi.id = es.recv_decl_identity_id;
 
 CREATE VIEW IF NOT EXISTS call_arg_read AS
 SELECT ca.edge_id, ca.file_id, ca.line, ca.col, ca.position,
-       COALESCE(ca.src_kind, (SELECT c.name FROM storage_enum_catalog c
-         WHERE c.domain = 'source_kind' AND c.id = ca.src_kind_id)) AS src_kind,
-       COALESCE(tn.decl_usr, eti.identity_text, ca.type_usr) AS type_usr,
-       COALESCE(ds.usr, edi.identity_text, ca.decl_usr) AS decl_usr,
-       COALESCE(cs.usr, eci.identity_text, ca.callee_usr) AS callee_usr,
+       COALESCE(ca.src_kind, CASE ca.src_kind_id
+           WHEN 1 THEN 'literal' WHEN 2 THEN 'local'
+           WHEN 3 THEN 'construct' WHEN 4 THEN 'member'
+           WHEN 5 THEN 'global' WHEN 6 THEN 'call_result'
+           WHEN 7 THEN 'this' WHEN 8 THEN 'unknown' END) AS src_kind,
+       COALESCE(ca.type_usr, tn.decl_usr, eti.identity_text) AS type_usr,
+       COALESCE(ca.decl_usr, ds.usr, edi.identity_text) AS decl_usr,
+       COALESCE(ca.callee_usr, cs.usr, eci.identity_text) AS callee_usr,
        ca.type_is_value
 FROM call_arg ca
 LEFT JOIN type_node tn ON tn.id = ca.type_id
@@ -1770,6 +1762,82 @@ class Storage:
 
             with self.transaction():
                 _materialise_entity_nodes(self)
+        self._reconcile_external_identities()
+
+    def _reconcile_external_identities(self) -> None:
+        """Promote unresolved occurrence identities when local rows arrive."""
+        for source_kind, source_kind_id in SOURCE_KIND_IDS.items():
+            self._conn.execute(
+                "UPDATE edge_site SET recv_src_kind_id=? WHERE recv_src_kind=?",
+                (source_kind_id, source_kind),
+            )
+            self._conn.execute(
+                "UPDATE call_arg SET src_kind_id=? WHERE src_kind=?",
+                (source_kind_id, source_kind),
+            )
+        unknown_edge = self._conn.execute(
+            "SELECT recv_src_kind FROM edge_site WHERE recv_src_kind IS NOT NULL "
+            "AND recv_src_kind_id IS NULL LIMIT 1"
+        ).fetchone()
+        if unknown_edge is not None:
+            raise ValueError(f"unknown source kind {unknown_edge[0]!r}")
+        unknown_arg = self._conn.execute(
+            "SELECT src_kind FROM call_arg WHERE src_kind IS NOT NULL "
+            "AND src_kind_id IS NULL LIMIT 1"
+        ).fetchone()
+        if unknown_arg is not None:
+            raise ValueError(f"unknown source kind {unknown_arg[0]!r}")
+        self._conn.execute("UPDATE edge_site SET recv_src_kind=NULL WHERE recv_src_kind_id IS NOT NULL")
+        self._conn.execute("UPDATE call_arg SET src_kind=NULL WHERE src_kind_id IS NOT NULL")
+        self._conn.execute(
+            """UPDATE external_identity SET
+                symbol_id = CASE WHEN identity_kind = ? THEN
+                    (SELECT id FROM symbol WHERE usr = identity_text LIMIT 1)
+                    ELSE NULL END,
+                type_id = CASE WHEN identity_kind = ? THEN
+                    (SELECT id FROM type_node WHERE decl_usr = identity_text ORDER BY id LIMIT 1)
+                    ELSE NULL END,
+                resolution_status = CASE WHEN
+                    (identity_kind = ? AND EXISTS (SELECT 1 FROM symbol WHERE usr = identity_text))
+                    OR (identity_kind = ? AND EXISTS (SELECT 1 FROM type_node WHERE decl_usr = identity_text))
+                    THEN 1 ELSE 0 END""",
+            (
+                IDENTITY_KIND_IDS["symbol_usr"],
+                IDENTITY_KIND_IDS["type_usr"],
+                IDENTITY_KIND_IDS["symbol_usr"],
+                IDENTITY_KIND_IDS["type_usr"],
+            ),
+        )
+        self._conn.execute(
+            "UPDATE type_node SET decl_id=(SELECT id FROM symbol s "
+            "WHERE s.usr=type_node.decl_usr LIMIT 1) WHERE decl_usr IS NOT NULL"
+        )
+        self._conn.execute(
+            """UPDATE edge_site SET
+                recv_decl_id=COALESCE(recv_decl_id,
+                    (SELECT id FROM symbol s WHERE s.usr=edge_site.recv_decl_usr LIMIT 1),
+                    (SELECT symbol_id FROM external_identity i WHERE i.id=edge_site.recv_decl_identity_id)),
+                recv_type_id=COALESCE(recv_type_id,
+                    (SELECT id FROM type_node t WHERE t.decl_usr=edge_site.recv_type_usr ORDER BY id LIMIT 1),
+                    (SELECT type_id FROM external_identity i WHERE i.id=edge_site.recv_type_identity_id))"""
+        )
+        self._conn.execute(
+            """UPDATE call_arg SET
+                decl_id=COALESCE(decl_id,
+                    (SELECT id FROM symbol s WHERE s.usr=call_arg.decl_usr LIMIT 1),
+                    (SELECT symbol_id FROM external_identity i WHERE i.id=call_arg.decl_identity_id)),
+                callee_id=COALESCE(callee_id,
+                    (SELECT id FROM symbol s WHERE s.usr=call_arg.callee_usr LIMIT 1),
+                    (SELECT symbol_id FROM external_identity i WHERE i.id=call_arg.callee_identity_id)),
+                type_id=COALESCE(type_id,
+                    (SELECT id FROM type_node t WHERE t.decl_usr=call_arg.type_usr ORDER BY id LIMIT 1),
+                    (SELECT type_id FROM external_identity i WHERE i.id=call_arg.type_identity_id))"""
+        )
+        self._conn.execute("UPDATE edge_site SET recv_decl_identity_id=NULL WHERE recv_decl_id IS NOT NULL")
+        self._conn.execute("UPDATE edge_site SET recv_type_identity_id=NULL WHERE recv_type_id IS NOT NULL")
+        self._conn.execute("UPDATE call_arg SET decl_identity_id=NULL WHERE decl_id IS NOT NULL")
+        self._conn.execute("UPDATE call_arg SET callee_identity_id=NULL WHERE callee_id IS NOT NULL")
+        self._conn.execute("UPDATE call_arg SET type_identity_id=NULL WHERE type_id IS NOT NULL")
 
     def _migrate(self) -> None:
         """In-place upgrade of a database created by an older schema version.
@@ -1793,6 +1861,10 @@ class Storage:
         }
         if "symbol" not in tables:
             return  # fresh database: _SCHEMA creates everything
+        if "storage_enum_catalog" in tables:
+            self._conn.execute("DROP VIEW IF EXISTS edge_site_read")
+            self._conn.execute("DROP VIEW IF EXISTS call_arg_read")
+            self._conn.execute("DROP TABLE storage_enum_catalog")
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(symbol)")}
         changed = False
         if "qual_name" not in cols:
@@ -1960,7 +2032,7 @@ class Storage:
                 """
                 CREATE TABLE IF NOT EXISTS external_identity (
                     id INTEGER PRIMARY KEY,
-                    identity_kind INTEGER NOT NULL,
+                    identity_kind INTEGER NOT NULL CHECK (identity_kind IN (1, 2, 3)),
                     identity_text TEXT NOT NULL,
                     resolution_status INTEGER NOT NULL DEFAULT 0
                         CHECK (resolution_status IN (0, 1)),
@@ -1972,18 +2044,6 @@ class Storage:
                     ON external_identity(symbol_id);
                 CREATE INDEX IF NOT EXISTS idx_external_identity_type
                     ON external_identity(type_id);
-                CREATE TABLE IF NOT EXISTS storage_enum_catalog (
-                    domain TEXT NOT NULL,
-                    id INTEGER NOT NULL,
-                    name TEXT NOT NULL,
-                    PRIMARY KEY (domain, id),
-                    UNIQUE (domain, name)
-                );
-                INSERT OR IGNORE INTO storage_enum_catalog(domain,id,name) VALUES
-                    ('source_kind',1,'literal'),('source_kind',2,'local'),
-                    ('source_kind',3,'construct'),('source_kind',4,'member'),
-                    ('source_kind',5,'global'),('source_kind',6,'call_result'),
-                    ('source_kind',7,'this'),('source_kind',8,'unknown');
                 """
             )
 
@@ -2034,6 +2094,19 @@ class Storage:
                     ("recv_decl_identity_id", "INTEGER REFERENCES external_identity(id) ON DELETE SET NULL"),
                 ):
                     add_column("edge_site", column, definition)
+                if "recv_src_kind" in edge_cols:
+                    for source_kind, source_kind_id in SOURCE_KIND_IDS.items():
+                        self._conn.execute(
+                            "UPDATE edge_site SET recv_src_kind_id=? WHERE recv_src_kind=?",
+                            (source_kind_id, source_kind),
+                        )
+                    unknown = self._conn.execute(
+                        "SELECT recv_src_kind FROM edge_site WHERE recv_src_kind IS NOT NULL "
+                        "AND recv_src_kind_id IS NULL LIMIT 1"
+                    ).fetchone()
+                    if unknown is not None:
+                        raise ValueError(f"unknown source kind {unknown[0]!r} in edge_site migration")
+                    self._conn.execute("UPDATE edge_site SET recv_src_kind=NULL")
                 if has_type_node:
                     self._conn.execute(
                         "INSERT OR IGNORE INTO external_identity(identity_kind,identity_text,resolution_status,type_id) "
@@ -2072,6 +2145,48 @@ class Storage:
                     ("callee_identity_id", "INTEGER REFERENCES external_identity(id) ON DELETE SET NULL"),
                 ):
                     add_column("call_arg", column, definition)
+                for column in ("type_usr", "decl_usr", "callee_usr"):
+                    add_column("call_arg", column, "TEXT")
+                add_column("call_arg", "type_is_value", "INTEGER")
+                source_kind_not_null = any(
+                    row[1] == "src_kind" and row[3] for row in self._conn.execute("PRAGMA table_info(call_arg)")
+                )
+                if source_kind_not_null:
+                    self._conn.execute("DROP VIEW IF EXISTS call_arg_read")
+                    self._conn.execute("PRAGMA foreign_keys = OFF")
+                    type_ref = " REFERENCES type_node(id) ON DELETE SET NULL" if has_type_node else ""
+                    self._conn.executescript(
+                        f"""
+                        CREATE TABLE call_arg_v35 (
+                            edge_id INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE,
+                            file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+                            line INTEGER NOT NULL,
+                            col INTEGER NOT NULL,
+                            position INTEGER NOT NULL,
+                            src_kind TEXT,
+                            type_usr TEXT,
+                            decl_usr TEXT,
+                            callee_usr TEXT,
+                            src_kind_id INTEGER,
+                            type_id INTEGER{type_ref},
+                            decl_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
+                            callee_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
+                            type_identity_id INTEGER REFERENCES external_identity(id) ON DELETE SET NULL,
+                            decl_identity_id INTEGER REFERENCES external_identity(id) ON DELETE SET NULL,
+                            callee_identity_id INTEGER REFERENCES external_identity(id) ON DELETE SET NULL,
+                            type_is_value INTEGER,
+                            PRIMARY KEY (edge_id, file_id, line, col, position)
+                        ) WITHOUT ROWID;
+                        INSERT INTO call_arg_v35 SELECT edge_id,file_id,line,col,position,
+                            src_kind,type_usr,decl_usr,callee_usr,src_kind_id,type_id,
+                            decl_id,callee_id,type_identity_id,decl_identity_id,
+                            callee_identity_id,type_is_value FROM call_arg;
+                        DROP TABLE call_arg;
+                        ALTER TABLE call_arg_v35 RENAME TO call_arg;
+                        CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id);
+                        """
+                    )
+                    self._conn.execute("PRAGMA foreign_keys = ON")
                 if has_type_node:
                     self._conn.execute(
                         "INSERT OR IGNORE INTO external_identity(identity_kind,identity_text,resolution_status,type_id) "
@@ -2093,10 +2208,18 @@ class Storage:
                         "decl_identity_id=(SELECT id FROM external_identity i WHERE i.identity_kind=2 AND i.identity_text=call_arg.decl_usr), "
                         "callee_identity_id=(SELECT id FROM external_identity i WHERE i.identity_kind=2 AND i.identity_text=call_arg.callee_usr)"
                     )
-                self._conn.execute(
-                    "UPDATE call_arg SET src_kind_id=(SELECT id FROM storage_enum_catalog c "
-                    "WHERE c.domain='source_kind' AND c.name=call_arg.src_kind)"
-                )
+                for source_kind, source_kind_id in SOURCE_KIND_IDS.items():
+                    self._conn.execute(
+                        "UPDATE call_arg SET src_kind_id=? WHERE src_kind=?",
+                        (source_kind_id, source_kind),
+                    )
+                unknown = self._conn.execute(
+                    "SELECT src_kind FROM call_arg WHERE src_kind IS NOT NULL "
+                    "AND src_kind_id IS NULL LIMIT 1"
+                ).fetchone()
+                if unknown is not None:
+                    raise ValueError(f"unknown source kind {unknown[0]!r} in call_arg migration")
+                self._conn.execute("UPDATE call_arg SET src_kind=NULL")
                 if has_call_identity_text and has_type_node:
                     self._conn.execute(
                         "UPDATE call_arg SET type_id=(SELECT id FROM type_node t WHERE t.decl_usr=call_arg.type_usr), "
@@ -4095,6 +4218,7 @@ class Storage:
                     1 if sym.is_definition else 0,
                 ),
             )
+        self._reconcile_external_identities()
         self._commit()
         return sid
 
@@ -4473,12 +4597,44 @@ class Storage:
         recv_type_is_value: Optional[int] = None,
     ) -> None:
         """INSERT OR IGNORE an edge_site (PK collision = same site, harmless)."""
+        source_kind_id = None if recv_src_kind is None else SOURCE_KIND_IDS.get(recv_src_kind)
+        if recv_src_kind is not None and source_kind_id is None:
+            raise ValueError(f"unknown source kind {recv_src_kind!r}")
+
+        def symbol_id(usr: Optional[str]) -> Optional[int]:
+            if not usr:
+                return None
+            row = self._conn.execute("SELECT id FROM symbol WHERE usr=? LIMIT 1", (usr,)).fetchone()
+            return None if row is None else row["id"]
+
+        def type_id(usr: Optional[str]) -> Optional[int]:
+            if not usr:
+                return None
+            row = self._conn.execute(
+                "SELECT id FROM type_node WHERE decl_usr=? ORDER BY id LIMIT 1", (usr,)
+            ).fetchone()
+            return None if row is None else row["id"]
+
+        def identity_id(kind: int, text: Optional[str], local_id: Optional[int]) -> Optional[int]:
+            if not text or local_id is not None:
+                return None
+            row = self._conn.execute(
+                "INSERT INTO external_identity(identity_kind,identity_text,resolution_status) "
+                "VALUES (?, ?, 0) ON CONFLICT(identity_kind,identity_text) DO UPDATE SET "
+                "resolution_status=0 RETURNING id",
+                (kind, text),
+            ).fetchone()
+            return None if row is None else row["id"]
+
+        recv_type_id = type_id(recv_type_usr)
+        recv_decl_id = symbol_id(recv_decl_usr)
         self._conn.execute(
             "INSERT OR IGNORE INTO edge_site "
             "(edge_id, file_id, line, col, conditional, args_sig, "
-            " recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
-            " recv_type_is_value) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " recv_src_kind, recv_type_usr, recv_decl_usr, recv_src_kind_id, "
+            " recv_type_id, recv_decl_id, recv_type_identity_id, recv_decl_identity_id, "
+            " recv_param_pos, recv_type_is_value) "
+            "VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)",
             (
                 edge_id,
                 file_id,
@@ -4486,13 +4642,16 @@ class Storage:
                 col,
                 conditional,
                 args_sig,
-                recv_src_kind,
-                recv_type_usr,
-                recv_decl_usr,
+                source_kind_id,
+                recv_type_id,
+                recv_decl_id,
+                identity_id(IDENTITY_KIND_IDS["type_usr"], recv_type_usr, recv_type_id),
+                identity_id(IDENTITY_KIND_IDS["symbol_usr"], recv_decl_usr, recv_decl_id),
                 recv_param_pos,
                 recv_type_is_value,
             ),
         )
+        self._reconcile_external_identities()
 
     def add_call_arg(
         self,
@@ -4508,24 +4667,61 @@ class Storage:
         type_is_value: Optional[int] = None,
     ) -> None:
         """INSERT OR IGNORE a call_arg row (PK collision = same arg, harmless)."""
+        source_kind_id = SOURCE_KIND_IDS.get(src_kind)
+        if source_kind_id is None:
+            raise ValueError(f"unknown source kind {src_kind!r}")
+
+        def symbol_id(usr: Optional[str]) -> Optional[int]:
+            if not usr:
+                return None
+            row = self._conn.execute("SELECT id FROM symbol WHERE usr=? LIMIT 1", (usr,)).fetchone()
+            return None if row is None else row["id"]
+
+        def type_id(usr: Optional[str]) -> Optional[int]:
+            if not usr:
+                return None
+            row = self._conn.execute(
+                "SELECT id FROM type_node WHERE decl_usr=? ORDER BY id LIMIT 1", (usr,)
+            ).fetchone()
+            return None if row is None else row["id"]
+
+        def identity_id(kind: int, text: Optional[str], local_id: Optional[int]) -> Optional[int]:
+            if not text or local_id is not None:
+                return None
+            row = self._conn.execute(
+                "INSERT INTO external_identity(identity_kind,identity_text,resolution_status) "
+                "VALUES (?, ?, 0) ON CONFLICT(identity_kind,identity_text) DO UPDATE SET "
+                "resolution_status=0 RETURNING id",
+                (kind, text),
+            ).fetchone()
+            return None if row is None else row["id"]
+
+        arg_type_id = type_id(type_usr)
+        arg_decl_id = symbol_id(decl_usr)
+        arg_callee_id = symbol_id(callee_usr)
         self._conn.execute(
             "INSERT OR IGNORE INTO call_arg "
             "(edge_id, file_id, line, col, position, src_kind, "
-            " type_usr, decl_usr, callee_usr, type_is_value) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " type_usr, decl_usr, callee_usr, src_kind_id, type_id, decl_id, "
+            " callee_id, type_identity_id, decl_identity_id, callee_identity_id, type_is_value) "
+            "VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 edge_id,
                 file_id,
                 line,
                 col,
                 position,
-                src_kind,
-                type_usr,
-                decl_usr,
-                callee_usr,
+                source_kind_id,
+                arg_type_id,
+                arg_decl_id,
+                arg_callee_id,
+                identity_id(IDENTITY_KIND_IDS["type_usr"], type_usr, arg_type_id),
+                identity_id(IDENTITY_KIND_IDS["symbol_usr"], decl_usr, arg_decl_id),
+                identity_id(IDENTITY_KIND_IDS["symbol_usr"], callee_usr, arg_callee_id),
                 type_is_value,
             ),
         )
+        self._reconcile_external_identities()
 
     def add_template_param(
         self,
