@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from benchmarks.storage_m0.common import canonical_json, load_json, sha256  # noqa: E402
 from benchmarks.storage_m0.bad_config import drop_hot_indexes  # noqa: E402
-from benchmarks.storage_m0.gate import evaluate, evaluate_custom_store, evaluate_regression  # noqa: E402
+from benchmarks.storage_m0.gate import _bound_profile, evaluate, evaluate_custom_store, evaluate_regression, evaluate_slos  # noqa: E402
 from benchmarks.storage_m0.generator import _pair, generate  # noqa: E402
 from benchmarks.storage_m0.recovery import simulate  # noqa: E402
 from benchmarks.storage_m0.run import run  # noqa: E402
@@ -228,22 +228,29 @@ def test_gate_requires_exact_failed_slo_before_custom_store_proposal(tmp_path):
 
 
 def test_custom_store_rejects_duplicate_alternative_and_placeholder_costs(tmp_path):
+    custom_profile = copy.deepcopy(load_json(PROFILE))
+    for target in custom_profile["slo"]["queries"].values():
+        target["p95_ms_max"] = 0
+    custom_profile_path = tmp_path / "custom-profile.json"
+    custom_profile_path.write_text(canonical_json(custom_profile) + "\n", encoding="utf-8")
     baseline_db = tmp_path / "baseline.db"
     generate(MANIFEST, "synthetic", "smoke", baseline_db)
-    result = run(baseline_db, MANIFEST, "synthetic", PROFILE, output=tmp_path / "baseline.json")
+    result = run(baseline_db, MANIFEST, "synthetic", custom_profile_path, output=tmp_path / "baseline.json")
     schema_db = tmp_path / "schema.db"
     drop_hot_indexes(baseline_db, schema_db)
-    schema_result = run(schema_db, MANIFEST, "synthetic", PROFILE, output=tmp_path / "schema.json", configuration="drop_hot_indexes")
+    schema_result = run(schema_db, MANIFEST, "synthetic", custom_profile_path, output=tmp_path / "schema.json", configuration="drop_hot_indexes")
     accelerator_db = tmp_path / "accelerator.db"
     shutil.copy2(baseline_db, accelerator_db)
     with sqlite3.connect(accelerator_db) as connection:
         connection.execute("UPDATE benchmark_meta SET value='derived_accelerator' WHERE key='configuration'")
         connection.commit()
-    accelerator_result = run(accelerator_db, MANIFEST, "synthetic", PROFILE, output=tmp_path / "accelerator.json", configuration="derived_accelerator")
-    failed = ["query.fake"]
+    accelerator_result = run(accelerator_db, MANIFEST, "synthetic", custom_profile_path, output=tmp_path / "accelerator.json", configuration="derived_accelerator")
+    failed = sorted({item["id"] for item in evaluate_slos(result, custom_profile) if item["status"] == "fail"})
+    assert failed
 
     def evidence(item_class, alternative, artifact):
         digest = sha256(canonical_json(alternative))
+        slo_checks = evaluate_slos(alternative, _bound_profile(alternative))
         return {
             "class": item_class,
             "measured": True,
@@ -251,23 +258,51 @@ def test_custom_store_rejects_duplicate_alternative_and_placeholder_costs(tmp_pa
                 "run_id": alternative["run_id"], "result_run_id": result["run_id"], "artifact": str(artifact),
                 "content_sha256": digest, "configuration": alternative["configuration"],
                 "checks": [{"id": f"{item_class}.measured", "status": "pass", "actual": "measured", "target": "target"}],
-                "outcome": {"measured": True, "measured_inability": True, "slo_status": "fail", "alternative_class": item_class, "run_id": alternative["run_id"], "content_sha256": digest, "configuration": alternative["configuration"], "tested_failed_slos": failed},
+                "outcome": {"measured": True, "measured_inability": True, "slo_status": "fail", "alternative_class": item_class, "run_id": alternative["run_id"], "content_sha256": digest, "configuration": alternative["configuration"], "tested_failed_slos": sorted({item["id"] for item in slo_checks if item["status"] == "fail"}), "slo_checks_sha256": sha256(canonical_json(slo_checks))},
             },
         }
 
     costs = {
         "engineering": {"person_months": 1.5, "work_items": [{"id": "schema-work", "description": "Implement and benchmark the schema alternative", "person_months": 1.5, "deliverables": ["measured schema result"]}], "source_artifact": str(MANIFEST)},
-        "compatibility": {"person_months": 0.5, "migration_plan": [{"id": "migration-work", "description": "Validate migration and compatibility paths", "person_months": 0.5, "deliverables": ["migration validation"]}], "compatibility_checks": [{"id": "api-compatibility", "status": "pass", "actual": "v34 query set", "target": "unchanged query set"}], "source_artifact": str(MANIFEST)},
+        "compatibility": {"person_months": 0.5, "migration_plan": [{"id": "migration-work", "description": "Validate migration and compatibility paths", "person_months": 0.5, "deliverables": ["migration validation"]}], "compatibility_checks": [{"id": "api-compatibility", "status": "pass", "actual": "v34 query workload", "target": "unchanged query workload", "evidence": "validated against the measured profile"}], "source_artifact": str(MANIFEST)},
     }
     valid = {"decision": "propose", "result_run_id": result["run_id"], "failed_slos": failed, "alternatives": [evidence("schema_tuning", schema_result, tmp_path / "schema.json"), evidence("derived_accelerator", accelerator_result, tmp_path / "accelerator.json")], "costs": costs}
-    assert evaluate_custom_store(valid, require=True, result=result, slo_checks=[{"id": failed[0], "status": "fail"}])["status"] == "pass"
+    valid_gate = evaluate_custom_store(valid, require=True, result=result)
+    assert valid_gate["status"] == "pass", valid_gate["errors"]
 
     duplicate_path = tmp_path / "duplicate.json"
     shutil.copy2(tmp_path / "schema.json", duplicate_path)
     duplicate = copy.deepcopy(valid)
     duplicate["alternatives"][1] = evidence("derived_accelerator", schema_result, duplicate_path)
-    assert evaluate_custom_store(duplicate, require=True, result=result, slo_checks=[{"id": failed[0], "status": "fail"}])["status"] == "fail"
+    assert evaluate_custom_store(duplicate, require=True, result=result)["status"] == "fail"
+
+    relabeled_db = tmp_path / "relabeled.db"
+    shutil.copy2(schema_db, relabeled_db)
+    with sqlite3.connect(relabeled_db) as connection:
+        connection.execute("UPDATE benchmark_meta SET value='derived_accelerator' WHERE key='configuration'")
+        connection.commit()
+    relabeled = copy.deepcopy(schema_result)
+    relabeled_result_path = tmp_path / "relabeled.json"
+    relabeled_samples_path = tmp_path / "relabeled.json.samples.json"
+    relabeled["configuration"] = "derived_accelerator"
+    relabeled["identity"]["configuration"] = "derived_accelerator"
+    relabeled["configuration_evidence"].update({"configuration": "derived_accelerator", "artifact": str(relabeled_db), "result_artifact": str(relabeled_result_path)})
+    relabeled["raw_samples_artifact"] = str(relabeled_samples_path)
+    relabeled["run_id"] = sha256(canonical_json(relabeled["identity"]))[:24]
+    relabeled["configuration_evidence"]["run_id"] = relabeled["run_id"]
+    relabeled_samples = load_json(tmp_path / "schema.json.samples.json")
+    relabeled_samples["run_id"] = relabeled["run_id"]
+    relabeled["raw_samples_sha256"] = sha256(canonical_json(relabeled_samples))
+    relabeled_result_path.write_text(canonical_json(relabeled) + "\n", encoding="utf-8")
+    relabeled_samples_path.write_text(canonical_json(relabeled_samples) + "\n", encoding="utf-8")
+    relabeled_decision = copy.deepcopy(valid)
+    relabeled_decision["alternatives"] = [evidence("schema_tuning", schema_result, tmp_path / "schema.json"), evidence("derived_accelerator", relabeled, relabeled_result_path)]
+    assert evaluate_custom_store(relabeled_decision, require=True, result=result)["status"] == "fail"
+
+    caller_supplied_failure = copy.deepcopy(valid)
+    caller_supplied_failure["failed_slos"] = ["query.fake"]
+    assert evaluate_custom_store(caller_supplied_failure, require=True, result=result, slo_checks=[{"id": "query.fake", "status": "fail"}])["status"] == "fail"
 
     placeholder = copy.deepcopy(valid)
     placeholder["costs"]["engineering"]["person_months"] = "placeholder"
-    assert evaluate_custom_store(placeholder, require=True, result=result, slo_checks=[{"id": failed[0], "status": "fail"}])["status"] == "fail"
+    assert evaluate_custom_store(placeholder, require=True, result=result)["status"] == "fail"

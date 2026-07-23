@@ -45,8 +45,12 @@ so it cannot be mistaken for a full-scale measurement.
 
 The custom-store gate is intentionally conservative. A decision of `propose`
 must name an exact failed SLO and include evidence for schema/tuning and derived
-accelerator alternatives plus engineering and compatibility costs. Without that
-evidence the gate rejects the proposal.
+accelerator alternatives plus engineering and compatibility costs. Each
+alternative is recomputed against its artifact-bound profile: its canonical
+run/identity/configuration, semantic database digest, query samples, and exact
+failed-SLO set must match the signed evidence. Relabeled or duplicate
+measurements, `not_run` compatibility checks, and placeholder or non-substantive
+cost records are rejected.
 
 The deterministic v34 smoke contract is checked in at
 `benchmarks/storage_m0/baselines/v34-smoke.json`; its HSE-74 claim-to-result

@@ -59,6 +59,34 @@ def _identity_dimensions(result: dict[str, Any]) -> dict[str, Any]:
     return {key: identity.get(key) for key in ("manifest_sha256", "workload", "scale", "seed", "distribution", "requested", "actual", "caps", "revision", "profile_id", "hardware_fingerprint")}
 
 
+def _bound_profile(result: dict[str, Any]) -> dict[str, Any] | None:
+    evidence = result.get("configuration_evidence")
+    profile_artifact = evidence.get("profile_artifact") if isinstance(evidence, dict) else None
+    if not profile_artifact or not Path(profile_artifact).is_file():
+        return None
+    try:
+        profile = load_json(Path(profile_artifact))
+    except (OSError, ValueError):
+        return None
+    return profile if isinstance(profile, dict) and profile.get("profile_id") == result.get("profile_id") else None
+
+
+def _failed_slo_ids(checks: list[dict[str, Any]]) -> set[str]:
+    return {item["id"] for item in checks if item.get("status") == "fail" and item.get("id")}
+
+
+def _measurement_signature(result: dict[str, Any]) -> str:
+    recovery = result.get("operations", {}).get("recovery", {})
+    queries = [{key: query.get(key) for key in ("id", "category", "sql", "parameters", "plan", "status", "row_count", "execution_count", "latency_ms", "samples_ms")} for query in result.get("queries", [])]
+    return sha256(canonical_json({
+        "identity": _identity_dimensions(result),
+        "semantic_digest": recovery.get("semantic_digest"),
+        "queries": queries,
+        "storage": result.get("storage"),
+        "counters": result.get("counters"),
+    }))
+
+
 def _bound_result_errors(result: dict[str, Any], role: str) -> list[str]:
     errors: list[str] = []
     try:
@@ -69,6 +97,14 @@ def _bound_result_errors(result: dict[str, Any], role: str) -> list[str]:
     if not isinstance(evidence, dict) or evidence.get("measured") is not True:
         errors.append(f"{role}: configuration evidence is not measured")
         return errors
+    identity = result.get("identity")
+    if not isinstance(identity, dict) or identity.get("configuration") != result.get("configuration"):
+        errors.append(f"{role}: result identity configuration is not bound")
+    elif sha256(canonical_json(identity))[:24] != result.get("run_id"):
+        errors.append(f"{role}: run_id is not the canonical identity binding")
+    for key in ("manifest_sha256", "workload", "scale", "seed", "distribution", "requested", "actual", "caps", "revision", "profile_id", "hardware_fingerprint", "configuration"):
+        if isinstance(identity, dict) and result.get(key) != identity.get(key):
+            errors.append(f"{role}: result field {key} is not bound to identity")
     for key in ("artifact", "result_artifact", "manifest_artifact", "profile_artifact"):
         value = evidence.get(key)
         if not value or not Path(value).is_file():
@@ -128,10 +164,12 @@ def _bound_result_errors(result: dict[str, Any], role: str) -> list[str]:
         errors.append(f"{role}: configuration checks must be structured measured pass records")
     if evidence.get("run_id") != result.get("run_id"):
         errors.append(f"{role}: configuration evidence run_id is not bound")
+    if evidence.get("configuration") != result.get("configuration"):
+        errors.append(f"{role}: configuration evidence configuration is not bound")
     profile_artifact = evidence.get("profile_artifact")
     if profile_artifact and Path(profile_artifact).is_file():
         try:
-            if load_json(Path(profile_artifact)).get("profile_id") != result.get("profile_id"):
+            if _bound_profile(result) is None:
                 errors.append(f"{role}: profile artifact is not bound to result")
         except (OSError, ValueError) as error:
             errors.append(f"{role}: invalid profile artifact ({error})")
@@ -221,6 +259,14 @@ def _real_evidence(item: dict[str, Any], result: dict[str, Any] | None, failed_s
         or _bound_result_errors(bound, "alternative")
     ):
         return False
+    profile = _bound_profile(bound)
+    if profile is None:
+        return False
+    slo_checks = evaluate_slos(bound, profile)
+    bound_failed_slos = _failed_slo_ids(slo_checks)
+    measurement_signature = _measurement_signature(bound)
+    if bound_failed_slos != failed_slos or measurement_signature in seen["measurement_signature"]:
+        return False
     checks = evidence.get("checks")
     outcome = evidence.get("outcome")
     valid = (
@@ -231,12 +277,14 @@ def _real_evidence(item: dict[str, Any], result: dict[str, Any] | None, failed_s
         and outcome.get("run_id") == bound.get("run_id")
         and outcome.get("content_sha256") == content_sha256
         and outcome.get("configuration") == bound.get("configuration")
-        and set(outcome.get("tested_failed_slos", [])) == failed_slos
+        and set(outcome.get("tested_failed_slos", [])) == bound_failed_slos
+        and outcome.get("slo_checks_sha256") == sha256(canonical_json(slo_checks))
     )
     if valid:
         seen["run_id"].add(run_id)
         seen["content_sha256"].add(content_sha256)
         seen["configuration"].add(configuration)
+        seen["measurement_signature"].add(measurement_signature)
     return valid
 
 
@@ -244,8 +292,24 @@ def _positive_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and value > 0
 
 
-def _meaningful_text(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip()) and "placeholder" not in value.lower()
+def _meaningful_text(value: Any, minimum: int = 8) -> bool:
+    return isinstance(value, str) and len(value.strip()) >= minimum and "placeholder" not in value.lower()
+
+
+def _meaningful_value(value: Any) -> bool:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return math.isfinite(float(value))
+    return _meaningful_text(value)
+
+
+def _source_artifact_valid(value: Any) -> bool:
+    if not value or not Path(str(value)).is_file():
+        return False
+    try:
+        text = Path(str(value)).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return bool(text.strip()) and "placeholder" not in text.lower()
 
 
 def _cost_evidence_valid(costs: Any) -> bool:
@@ -259,12 +323,12 @@ def _cost_evidence_valid(costs: Any) -> bool:
     return (
         _positive_number(engineering.get("person_months"))
         and isinstance(work_items, list) and bool(work_items)
-        and all(isinstance(item, dict) and _meaningful_text(item.get("id")) and _meaningful_text(item.get("description")) and _positive_number(item.get("person_months")) and isinstance(item.get("deliverables"), list) and bool(item["deliverables"]) and all(_meaningful_text(deliverable) for deliverable in item["deliverables"]) for item in work_items)
+        and all(isinstance(item, dict) and _meaningful_text(item.get("id"), 3) and _meaningful_text(item.get("description"), 16) and _positive_number(item.get("person_months")) and isinstance(item.get("deliverables"), list) and bool(item["deliverables"]) and all(_meaningful_text(deliverable, 12) for deliverable in item["deliverables"]) for item in work_items)
         and _positive_number(compatibility.get("person_months"))
         and isinstance(migration_plan, list) and bool(migration_plan)
-        and all(isinstance(item, dict) and _meaningful_text(item.get("id")) and _meaningful_text(item.get("description")) and _positive_number(item.get("person_months")) and isinstance(item.get("deliverables"), list) and bool(item["deliverables"]) and all(_meaningful_text(deliverable) for deliverable in item["deliverables"]) for item in migration_plan)
+        and all(isinstance(item, dict) and _meaningful_text(item.get("id"), 3) and _meaningful_text(item.get("description"), 16) and _positive_number(item.get("person_months")) and isinstance(item.get("deliverables"), list) and bool(item["deliverables"]) and all(_meaningful_text(deliverable, 12) for deliverable in item["deliverables"]) for item in migration_plan)
         and isinstance(compatibility_checks, list) and bool(compatibility_checks)
-        and all(isinstance(item, dict) and _meaningful_text(item.get("id")) and item.get("status") in {"pass", "fail", "not_run"} and _meaningful_text(item.get("actual")) and _meaningful_text(item.get("target")) for item in compatibility_checks)
+        and all(isinstance(item, dict) and _meaningful_text(item.get("id"), 3) and item.get("status") in {"pass", "fail"} and _meaningful_value(item.get("actual")) and _meaningful_value(item.get("target")) and _meaningful_text(item.get("evidence"), 12) for item in compatibility_checks)
     )
 
 
@@ -274,8 +338,13 @@ def evaluate_custom_store(decision: dict[str, Any], *, require: bool, result: di
         return {"id": "custom_store", "status": "fail", "reason": "invalid decision"}
     if requested != "propose":
         return {"id": "custom_store", "status": "pass", "decision": requested}
-    actual_failed = {item["id"] for item in (slo_checks or []) if item.get("status") == "fail"}
     declared = set(decision.get("failed_slos", [])); errors = []
+    actual_failed: set[str] = set()
+    primary_profile = _bound_profile(result) if result is not None else None
+    if result is not None:
+        errors.extend(_bound_result_errors(result, "primary"))
+        if primary_profile is not None:
+            actual_failed = _failed_slo_ids(evaluate_slos(result, primary_profile))
     if not actual_failed:
         errors.append("custom-store proposal has no actual failed SLO in the bound result")
     if declared != actual_failed:
@@ -285,7 +354,7 @@ def evaluate_custom_store(decision: dict[str, Any], *, require: bool, result: di
     alternatives = decision.get("alternatives", []); classes = {item.get("class") for item in alternatives}
     if not {"schema_tuning", "derived_accelerator"}.issubset(classes):
         errors.append("proposal needs separately measured schema/tuning and derived-accelerator alternatives")
-    seen = {"run_id": set(), "content_sha256": set(), "configuration": set()}
+    seen = {"run_id": set(), "content_sha256": set(), "configuration": set(), "measurement_signature": set()}
     if len(alternatives) != 2 or classes != {"schema_tuning", "derived_accelerator"} or any(not _real_evidence(item, result, actual_failed, seen) for item in alternatives):
         errors.append("every alternative needs measured evidence bound to an artifact and checks")
     costs = decision.get("costs", {})
@@ -293,8 +362,8 @@ def evaluate_custom_store(decision: dict[str, Any], *, require: bool, result: di
         not _cost_evidence_valid(costs)
         or not costs["engineering"].get("source_artifact")
         or not costs["compatibility"].get("source_artifact")
-        or not Path(str(costs["engineering"].get("source_artifact"))).is_file()
-        or not Path(str(costs["compatibility"].get("source_artifact"))).is_file()
+        or not _source_artifact_valid(costs["engineering"].get("source_artifact"))
+        or not _source_artifact_valid(costs["compatibility"].get("source_artifact"))
     ):
         errors.append("engineering and compatibility cost evidence are required")
     return {"id": "custom_store", "status": "pass" if not errors else ("fail" if require else "not_run"), "decision": requested, "failed_slos": sorted(declared), "alternatives": alternatives, "costs": costs, "errors": errors}
