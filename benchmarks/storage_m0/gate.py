@@ -236,7 +236,7 @@ def evaluate_custom_store(decision: dict[str, Any], *, require: bool, result: di
     if not {"schema_tuning", "derived_accelerator"}.issubset(classes):
         errors.append("proposal needs separately measured schema/tuning and derived-accelerator alternatives")
     seen: set[tuple[str, str]] = set()
-    if len(alternatives) < 2 or len({item.get("class") for item in alternatives}) != len(alternatives) or any(not _real_evidence(item, result, actual_failed, seen) for item in alternatives):
+    if len(alternatives) != 2 or classes != {"schema_tuning", "derived_accelerator"} or any(not _real_evidence(item, result, actual_failed, seen) for item in alternatives):
         errors.append("every alternative needs measured evidence bound to an artifact and checks")
     costs = decision.get("costs", {})
     if (
@@ -244,8 +244,11 @@ def evaluate_custom_store(decision: dict[str, Any], *, require: bool, result: di
         or not isinstance(costs.get("compatibility"), dict)
         or not costs["engineering"].get("person_months")
         or not isinstance(costs["engineering"].get("work_items"), list) or not costs["engineering"]["work_items"]
+        or any(not isinstance(item, dict) or not item.get("id") for item in costs["engineering"]["work_items"])
         or not isinstance(costs["compatibility"].get("migration_plan"), list) or not costs["compatibility"]["migration_plan"]
+        or any(not isinstance(item, dict) or not item.get("id") for item in costs["compatibility"]["migration_plan"])
         or not isinstance(costs["compatibility"].get("compatibility_checks"), list) or not costs["compatibility"]["compatibility_checks"]
+        or any(not isinstance(item, dict) or not item.get("id") or item.get("status") not in {"pass", "fail", "not_run"} for item in costs["compatibility"]["compatibility_checks"])
         or not costs["compatibility"].get("person_months")
         or not costs["engineering"].get("source_artifact")
         or not costs["compatibility"].get("source_artifact")
