@@ -8,6 +8,7 @@ set(CIDX_DEFAULT_TESTS
   hashing_test
   env_logger_test
   storage_smoke_test
+  storage_identity_scope_test
   storage_migration_test
   storage_profile_test
   storage_artifact_test

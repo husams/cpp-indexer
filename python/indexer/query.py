@@ -365,6 +365,8 @@ class Sym:
     # variable's initializer or an enumerator, as printed by Clang's constant
     # evaluator (constexpr/consteval arithmetic included); None when the
     # initializer needs runtime evaluation or there is none.
+    semantic_universe_id: int = -1  # v35: database-local scope row
+    identity_key: str = ""  # v35: portable scope-keyed semantic identity
 
     @property
     def is_redefined(self) -> bool:
@@ -928,7 +930,8 @@ _SYM_COLS = (
     "s.file_id, s.line, s.col, s.end_line, s.end_col, "
     "s.decl_file_id, s.decl_line, s.decl_col, "
     "s.decl_path, s.is_definition, s.is_pure, s.is_static, s.is_instantiation, "
-    "s.access, s.parent_usr, s.resolved, s.multi_def, s.const_value"
+    "s.access, s.parent_usr, s.resolved, s.multi_def, s.const_value, "
+    "s.semantic_universe_id, s.identity_key"
 )
 
 
@@ -1111,6 +1114,9 @@ class GraphQuery:
         return Sym(
             id=r["id"],
             usr=r["usr"],
+            semantic_universe_id=(r["semantic_universe_id"]
+                                  if "semantic_universe_id" in r.keys() else -1),
+            identity_key=(r["identity_key"] if "identity_key" in r.keys() else ""),
             spelling=r["spelling"],
             name=r["qual_name"] or r["spelling"],
             display_name=r["display_name"],
@@ -1159,8 +1165,10 @@ class GraphQuery:
         if isinstance(ident, Sym):
             return ident
         col = "id" if isinstance(ident, int) else "usr"
+        order = " ORDER BY s.semantic_universe_id, s.identity_key" if col == "usr" else ""
         r = self._c.execute(
-            f"SELECT {_SYM_COLS} FROM symbol s WHERE s.{col} = ?", (ident,)
+            f"SELECT {_SYM_COLS} FROM symbol s WHERE s.{col} = ?{order} LIMIT 1",
+            (ident,),
         ).fetchone()
         return self._sym(r) if r else None
 

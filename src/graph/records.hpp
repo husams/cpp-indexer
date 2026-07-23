@@ -34,6 +34,8 @@ namespace cidx::graph {
 struct Sym {
   int64_t id = -1;
   std::string usr;
+  int64_t semantic_universe_id = -1; // v35: database-local scope row
+  std::string identity_key; // v35: portable scope-keyed semantic identity
   std::string spelling;
   std::string name; // COALESCE(qual_name, spelling) -- displayed name
   std::string kind;

@@ -83,6 +83,23 @@ public:
   //   { auto txn = db.transaction(); ...; }   // commits at scope end
   Transaction transaction() { return Transaction(*this); }
 
+  // -- semantic universes / symbol identity (v35) --------------------------
+  // A universe is explicit policy: equal USRs merge only when their
+  // repositories/components are assigned to the same universe. The numeric
+  // id is database-local; Symbol::identity_key is the portable identity.
+  int64_t add_semantic_universe(const std::string &key,
+                                const std::string &name = "",
+                                const std::string &policy = "explicit");
+  std::optional<SemanticUniverse>
+  get_semantic_universe_by_id(int64_t universe_id);
+  std::optional<SemanticUniverse>
+  get_semantic_universe_by_key(const std::string &key);
+  std::vector<SemanticUniverse> list_semantic_universes();
+  void set_repository_semantic_universe(
+      int64_t repository_id, const std::optional<int64_t> &universe_id);
+  void set_component_semantic_universe(
+      int64_t component_id, const std::optional<int64_t> &universe_id);
+
   // -- components ------------------------------------------------------------
   int64_t
   add_component(const std::string &name, const std::string &path,
@@ -153,7 +170,9 @@ public:
   // non-null value is supplied (COALESCE). Returns the repository id.
   int64_t
   add_repository(const std::string &name, const std::string &kind = "repo",
-                 const std::optional<std::string> &remote_url = std::nullopt);
+                 const std::optional<std::string> &remote_url = std::nullopt,
+                 const std::optional<int64_t> &semantic_universe_id =
+                     std::nullopt);
   std::optional<Repository> get_repository_by_name(const std::string &name);
   std::optional<Repository> get_repository_by_id(int64_t repository_id);
   std::optional<Repository>
@@ -251,8 +270,9 @@ public:
   std::map<int64_t, std::map<int, int64_t>> diagnostic_counts();
 
   // -- symbols -----------------------------------------------------------
-  // Upsert keyed by USR; throws StorageError on a bad kind. Definition wins
-  // over a stored declaration; a declaration never downgrades a definition.
+  // Upsert keyed by semantic universe plus portable identity key; throws
+  // StorageError on a bad kind. Definition wins over a stored declaration; a
+  // declaration never downgrades a definition.
   int64_t add_symbol(const Symbol &sym);
   void delete_symbols_for_file(int64_t file_id);
   // Update named columns of the symbol with this USR; false when absent.
@@ -260,7 +280,16 @@ public:
   bool
   update_symbol(const std::string &usr,
                 const std::vector<std::pair<std::string, SqlValue>> &values);
-  std::optional<Symbol> lookup_symbol(const std::string &usr);
+  // Bare lookup is deterministic: zero -> null, one -> that row, multiple ->
+  // the lowest database-local scope id. Call lookup_symbols_by_usr() or pass
+  // a scope to disclose/select an ambiguous match explicitly.
+  std::optional<Symbol>
+  lookup_symbol(const std::string &usr,
+                const std::optional<int64_t> &semantic_universe_id =
+                    std::nullopt);
+  std::vector<Symbol> lookup_symbols_by_usr(
+      const std::string &usr,
+      const std::optional<int64_t> &semantic_universe_id = std::nullopt);
   std::optional<Symbol> lookup_symbol_by_id(int64_t symbol_id);
   // Remove a single symbol row.
   void delete_symbol(int64_t symbol_id);
@@ -701,6 +730,11 @@ private:
   void reconcile_type_identity(int64_t type_id, std::string_view decl_usr);
   void migrate_symbol_kind_to_int();    // v15 -> v16: rebuild symbol, kind->int
   void migrate_component_repo_unique(); // v23 -> v24: path UNIQUE per repo
+  void migrate_symbol_identity_scope(); // v34 -> v35: scoped symbol identity
+  int64_t default_semantic_universe_id();
+  int64_t semantic_universe_for_file(const std::optional<int64_t> &file_id);
+  std::string symbol_identity_key(const Symbol &sym, int64_t universe_id,
+                                  const std::optional<int64_t> &file_id);
   // v24: resolved absolute path of a repository's active clone, or nullopt when
   // ungrouped / no live clone. Mirrors Python Storage._active_clone_root.
   std::optional<std::string>

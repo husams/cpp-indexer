@@ -157,6 +157,17 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT
 );
 
+-- v35: explicit declared program/dependency universes. Numeric ids are
+-- database-local; key is the portable scope component of semantic identity.
+CREATE TABLE IF NOT EXISTS semantic_universe (
+    id      INTEGER PRIMARY KEY,
+    key     TEXT NOT NULL UNIQUE,
+    name    TEXT NOT NULL,
+    policy  TEXT NOT NULL DEFAULT 'explicit'
+);
+INSERT OR IGNORE INTO semantic_universe (id, key, name, policy)
+    VALUES (1, 'legacy', 'Legacy single-workspace universe', 'legacy');
+
 -- v23: a repository groups one or more components under one logical code base.
 -- A repo can be checked out in several directories (git worktrees / separate
 -- clones); each is a `clone` row and `active_clone_id` names the live one.
@@ -171,7 +182,9 @@ CREATE TABLE IF NOT EXISTS repository (
     kind            TEXT NOT NULL DEFAULT 'repo'
                     CHECK (kind IN ('repo', 'external')),
     remote_url      TEXT,                 -- git origin URL when known
-    active_clone_id INTEGER               -- -> clone.id (no FK: circular w/ clone)
+    active_clone_id INTEGER,              -- -> clone.id (no FK: circular w/ clone)
+    semantic_universe_id INTEGER NOT NULL DEFAULT 1
+            REFERENCES semantic_universe(id) ON DELETE SET DEFAULT
 );
 
 CREATE TABLE IF NOT EXISTS clone (
@@ -195,6 +208,8 @@ CREATE TABLE IF NOT EXISTS component (
     -- v24: path is UNIQUE per repository -- a grouped component stores a
     -- clone-relative path, so several repos can each carry a '.' root;
     -- ungrouped rows (repository_id NULL) are de-duplicated by add_component.
+    semantic_universe_id INTEGER
+            REFERENCES semantic_universe(id) ON DELETE SET NULL,
     UNIQUE (repository_id, path)
 );
 
@@ -225,7 +240,7 @@ CREATE TABLE IF NOT EXISTS file (
 
 CREATE TABLE IF NOT EXISTS symbol (
     id           INTEGER PRIMARY KEY,
-    usr          TEXT NOT NULL UNIQUE,  -- clang Unified Symbol Resolution
+    usr          TEXT NOT NULL,         -- clang Unified Symbol Resolution
     spelling     TEXT NOT NULL,
     qual_name    TEXT,                  -- fully qualified, e.g. 'RdKafka::ConfImpl::set'
     display_name TEXT,                  -- spelling + signature, e.g. 'multiply(int, int)'
@@ -290,12 +305,15 @@ CREATE TABLE IF NOT EXISTS symbol (
                                              -- method left undefined, each server
                                              -- re-implements it). O(1) "list
                                              -- redefined" without a join.
-    const_value  TEXT                        -- v33: the evaluated constant value
+    const_value  TEXT,                       -- v33: the evaluated constant value
                                              -- of a variable's initializer or an
                                              -- enumerator, as printed by Clang's
                                              -- constant evaluator. NULL when the
                                              -- initializer needs runtime
                                              -- evaluation (or there is none).
+    semantic_universe_id INTEGER NOT NULL DEFAULT 1
+            REFERENCES semantic_universe(id),
+    identity_key TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_symbol_spelling ON symbol(spelling);
@@ -311,6 +329,10 @@ CREATE INDEX IF NOT EXISTS idx_symbol_file     ON symbol(file_id);
 CREATE INDEX IF NOT EXISTS idx_symbol_parent   ON symbol(parent_usr);
 CREATE INDEX IF NOT EXISTS idx_symbol_parent_id ON symbol(parent_id);
 CREATE INDEX IF NOT EXISTS idx_symbol_kind     ON symbol(kind);
+CREATE INDEX IF NOT EXISTS idx_symbol_usr      ON symbol(usr);
+CREATE INDEX IF NOT EXISTS idx_symbol_scope    ON symbol(semantic_universe_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_symbol_identity
+    ON symbol(semantic_universe_id, identity_key) WHERE identity_key <> '';
 
 -- ---- v26: every declaration/reopen SITE of a symbol -------------------------
 -- symbol.(line,col)/decl_* keep only the winning definition + one declaration
@@ -950,6 +972,16 @@ INSERT INTO meta (key, value) VALUES ('evidence', 'source')
 
 
 @dataclass
+class SemanticUniverse:
+    """Explicit declared program/dependency scope for semantic identities."""
+
+    key: str
+    name: str
+    policy: str = "explicit"
+    id: Optional[int] = None
+
+
+@dataclass
 class Component:
     """A row in the ``component`` table -- and, once a ``Storage`` accessor hands
     it back, a *smart path* over that row.
@@ -968,6 +1000,7 @@ class Component:
     id: Optional[int] = None
     version: Optional[str] = None  # v14: nullable; NULL = unversioned
     repository_id: Optional[int] = None  # v23: owning repository; NULL = ungrouped
+    semantic_universe_id: Optional[int] = None  # v35: explicit ungrouped scope
 
     _storage: "Optional[Storage]" = field(
         default=None, init=False, repr=False, compare=False
@@ -1074,7 +1107,7 @@ class Component:
             raise RuntimeError("component has no id; add it to a Storage first")
         store.update_component(
             self.id, self.name, self.path, self.kind,
-            self.version, self.repository_id,
+            self.version, self.repository_id, self.semantic_universe_id,
         )
         return self
 
@@ -1092,6 +1125,7 @@ class Repository:
     kind: str = "repo"
     remote_url: Optional[str] = None
     active_clone_id: Optional[int] = None
+    semantic_universe_id: Optional[int] = None  # v35: declared program universe
     id: Optional[int] = None
 
     _storage: "Optional[Storage]" = field(
@@ -1244,6 +1278,7 @@ class Repository:
             raise RuntimeError("repository has no id; add it to a Storage first")
         store.update_repository(
             self.id, self.name, self.kind, self.remote_url, self.active_clone_id,
+            self.semantic_universe_id,
         )
         return self
 
@@ -1808,6 +1843,8 @@ class Symbol:
     const_value: Optional[str] = None  # v33: the evaluated constant value of a
     # variable's initializer or an enumerator (Clang's constant evaluator
     # output); None when the initializer needs runtime evaluation.
+    semantic_universe_id: int = -1  # v35: database-local scope row
+    identity_key: str = ""  # v35: portable scope-keyed semantic identity
     id: Optional[int] = None
 
 
@@ -2168,6 +2205,28 @@ class Storage:
                     "AND dst_id NOT IN (SELECT id FROM symbol WHERE kind = 22)"
                 )
                 changed = True
+        # v34 -> v35: make the symbol USR an explicitly scoped identity. All
+        # existing rows belong to the legacy single-workspace universe; the
+        # table rebuild preserves their ids and graph foreign keys.
+        symbol_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(symbol)")}
+        repository_cols = (
+            {r[1] for r in self._conn.execute("PRAGMA table_info(repository)")}
+            if "repository" in tables
+            else set()
+        )
+        component_cols = (
+            {r[1] for r in self._conn.execute("PRAGMA table_info(component)")}
+            if "component" in tables
+            else set()
+        )
+        if (
+            "semantic_universe" not in tables
+            or "semantic_universe_id" not in symbol_cols
+            or ("repository" in tables and "semantic_universe_id" not in repository_cols)
+            or ("component" in tables and "semantic_universe_id" not in component_cols)
+        ):
+            self._migrate_symbol_identity_scope()
+            changed = True
         # v27 -> v28: per-backend initializer text on a (static member) variable
         # definition. `definition` is created by the schema script; ALTER the
         # existing table so a v27 DB gains the column. No backfill -- a reindex
@@ -3037,6 +3096,101 @@ class Storage:
             )
         self._conn.commit()
 
+    def _migrate_symbol_identity_scope(self) -> None:
+        """v34 -> v35: scope portable USRs by a declared semantic universe."""
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS semantic_universe (
+                id INTEGER PRIMARY KEY,
+                key TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                policy TEXT NOT NULL DEFAULT 'explicit'
+            );
+            INSERT OR IGNORE INTO semantic_universe (id, key, name, policy)
+                VALUES (1, 'legacy', 'Legacy single-workspace universe', 'legacy');
+        """)
+        tables = {
+            r[0] for r in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        if "repository" in tables:
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(repository)")}
+            if "semantic_universe_id" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE repository ADD COLUMN semantic_universe_id "
+                    "INTEGER NOT NULL DEFAULT 1"
+                )
+        if "component" in tables:
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(component)")}
+            if "semantic_universe_id" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE component ADD COLUMN semantic_universe_id "
+                    "INTEGER REFERENCES semantic_universe(id) ON DELETE SET NULL"
+                )
+        symbol_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(symbol)")}
+        if "semantic_universe_id" in symbol_cols:
+            return
+
+        self._conn.commit()
+        self._conn.execute("PRAGMA foreign_keys = OFF")
+        self._conn.executescript("""
+            CREATE TABLE symbol_v35 (
+                id INTEGER PRIMARY KEY,
+                usr TEXT NOT NULL,
+                spelling TEXT NOT NULL,
+                qual_name TEXT,
+                display_name TEXT,
+                kind INTEGER NOT NULL,
+                type_info TEXT,
+                file_id INTEGER REFERENCES file(id) ON DELETE SET NULL,
+                line INTEGER,
+                col INTEGER,
+                end_line INTEGER,
+                end_col INTEGER,
+                decl_file_id INTEGER REFERENCES file(id) ON DELETE SET NULL,
+                decl_line INTEGER,
+                decl_col INTEGER,
+                decl_path TEXT,
+                is_definition INTEGER NOT NULL DEFAULT 0,
+                is_pure INTEGER NOT NULL DEFAULT 0,
+                is_static INTEGER NOT NULL DEFAULT 0,
+                is_instantiation INTEGER NOT NULL DEFAULT 0,
+                is_named_instance INTEGER NOT NULL DEFAULT 0,
+                linkage TEXT,
+                access TEXT,
+                parent_usr TEXT,
+                resolved INTEGER NOT NULL DEFAULT 0,
+                multi_def INTEGER NOT NULL DEFAULT 0,
+                const_value TEXT,
+                semantic_universe_id INTEGER NOT NULL DEFAULT 1
+                    REFERENCES semantic_universe(id),
+                identity_key TEXT NOT NULL DEFAULT ''
+            );
+            INSERT INTO symbol_v35 (
+                id, usr, spelling, qual_name, display_name, kind, type_info,
+                file_id, line, col, end_line, end_col, decl_file_id, decl_line,
+                decl_col,
+                decl_path, is_definition, is_pure, is_static, is_instantiation,
+                is_named_instance, linkage, access, parent_usr, resolved,
+                multi_def, const_value, semantic_universe_id, identity_key
+            )
+            SELECT id, usr, spelling, qual_name, display_name, kind, type_info,
+                   file_id, line, col, end_line, end_col, decl_file_id, decl_line,
+                   decl_col,
+                   decl_path, is_definition, is_pure, is_static, is_instantiation,
+                   is_named_instance, linkage, access, parent_usr, resolved,
+                   multi_def, const_value, 1,
+                   'legacy' || char(31) ||
+                   CASE WHEN linkage IN ('internal', 'no-linkage')
+                        THEN 'file:' || COALESCE(file_id, 0) || char(31)
+                        ELSE '' END || usr
+              FROM symbol;
+            DROP TABLE symbol;
+            ALTER TABLE symbol_v35 RENAME TO symbol;
+        """)
+        self._conn.commit()
+        self._conn.execute("PRAGMA foreign_keys = ON")
+
     def _migrate_symbol_kind_to_int(self) -> None:
         """v15 -> v16: rebuild `symbol` with kind stored as its CXCursorKind int.
 
@@ -3176,6 +3330,96 @@ class Storage:
         if not self._in_txn:
             self._conn.commit()
 
+    # -- semantic universes / symbol identity (v35) -------------------------
+
+    def add_semantic_universe(
+        self, key: str, name: Optional[str] = None, policy: str = "explicit"
+    ) -> int:
+        """Create or refresh an explicit program/dependency universe."""
+        if not key:
+            raise ValueError("semantic universe key must not be empty")
+        cur = self._conn.execute(
+            "INSERT INTO semantic_universe (key, name, policy) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET name = excluded.name, "
+            "policy = excluded.policy RETURNING id",
+            (key, name or key, policy),
+        )
+        uid = cur.fetchone()["id"]
+        self._commit()
+        return uid
+
+    def get_semantic_universe_by_id(self, universe_id: int) -> Optional[SemanticUniverse]:
+        row = self._conn.execute(
+            "SELECT * FROM semantic_universe WHERE id = ?", (universe_id,)
+        ).fetchone()
+        return _row_to(SemanticUniverse, row)
+
+    def get_semantic_universe_by_key(self, key: str) -> Optional[SemanticUniverse]:
+        row = self._conn.execute(
+            "SELECT * FROM semantic_universe WHERE key = ?", (key,)
+        ).fetchone()
+        return _row_to(SemanticUniverse, row)
+
+    def list_semantic_universes(self) -> list[SemanticUniverse]:
+        return [
+            _row_to(SemanticUniverse, row)
+            for row in self._conn.execute(
+                "SELECT * FROM semantic_universe ORDER BY key"
+            )
+        ]
+
+    def set_repository_semantic_universe(
+        self, repository_id: int, universe_id: Optional[int]
+    ) -> None:
+        self._conn.execute(
+            "UPDATE repository SET semantic_universe_id = COALESCE(?, 1) "
+            "WHERE id = ?",
+            (universe_id, repository_id),
+        )
+        self._commit()
+
+    def set_component_semantic_universe(
+        self, component_id: int, universe_id: Optional[int]
+    ) -> None:
+        self._conn.execute(
+            "UPDATE component SET semantic_universe_id = ? WHERE id = ?",
+            (universe_id, component_id),
+        )
+        self._commit()
+
+    def _default_semantic_universe_id(self) -> int:
+        row = self._conn.execute(
+            "SELECT id FROM semantic_universe WHERE key = 'legacy'"
+        ).fetchone()
+        return row["id"] if row else self.add_semantic_universe(
+            "legacy", "Legacy single-workspace universe", "legacy"
+        )
+
+    def _semantic_universe_for_file(self, file_id: Optional[int]) -> int:
+        if file_id is None:
+            return self._default_semantic_universe_id()
+        row = self._conn.execute(
+            "SELECT COALESCE(c.semantic_universe_id, r.semantic_universe_id, ?) "
+            "AS universe_id FROM file f "
+            "JOIN directory d ON d.id = f.directory_id "
+            "JOIN component c ON c.id = d.component_id "
+            "LEFT JOIN repository r ON r.id = c.repository_id "
+            "WHERE f.id = ?",
+            (self._default_semantic_universe_id(), file_id),
+        ).fetchone()
+        return row["universe_id"] if row else self._default_semantic_universe_id()
+
+    def _symbol_identity_key(
+        self, sym: Symbol, universe_id: int, file_id: Optional[int]
+    ) -> str:
+        universe = self.get_semantic_universe_by_id(universe_id)
+        key = universe.key if universe else "legacy"
+        local = sym.linkage in {"internal", "no-linkage"}
+        prefix = f"{key}\x1f"
+        if local:
+            prefix += f"file:{file_id or 0}\x1f"
+        return prefix + sym.usr
+
     # -- components ----------------------------------------------------------
 
     def add_component(
@@ -3238,14 +3482,16 @@ class Storage:
         kind: str,
         version: Optional[str],
         repository_id: Optional[int],
+        semantic_universe_id: Optional[int] = None,
     ) -> None:
         """Persist every mutable column of a component row in place. Backs
         Component.save() -- writes the object's current field values wholesale
         (this DOES clear a field set to None, unlike the COALESCE upserts)."""
         self._conn.execute(
             "UPDATE component SET name = ?, path = ?, kind = ?, version = ?, "
-            "repository_id = ? WHERE id = ?",
-            (name, path, kind, version, repository_id, component_id),
+            "repository_id = ?, semantic_universe_id = ? WHERE id = ?",
+            (name, path, kind, version, repository_id, semantic_universe_id,
+             component_id),
         )
         self._commit()
 
@@ -3655,7 +3901,8 @@ class Storage:
     # -- repositories / clones (v23) -----------------------------------------
 
     def add_repository(
-        self, name: str, kind: str = "repo", remote_url: Optional[str] = None
+        self, name: str, kind: str = "repo", remote_url: Optional[str] = None,
+        semantic_universe_id: Optional[int] = None,
     ) -> int:
         """Insert a repository; idempotent on name. Returns the repository id.
 
@@ -3663,12 +3910,15 @@ class Storage:
         non-None value is supplied (COALESCE: a re-import that cannot determine a
         remote does NOT wipe a stored one)."""
         cur = self._conn.execute(
-            "INSERT INTO repository (name, kind, remote_url) VALUES (?, ?, ?) "
+            "INSERT INTO repository (name, kind, remote_url, "
+            "semantic_universe_id) VALUES (?, ?, ?, COALESCE(?, 1)) "
             "ON CONFLICT(name) DO UPDATE SET "
             "  kind       = excluded.kind, "
-            "  remote_url = COALESCE(excluded.remote_url, repository.remote_url) "
+            "  remote_url = COALESCE(excluded.remote_url, repository.remote_url), "
+            "  semantic_universe_id = COALESCE(excluded.semantic_universe_id, "
+            "repository.semantic_universe_id) "
             "RETURNING id",
-            (name, kind, remote_url),
+            (name, kind, remote_url, semantic_universe_id),
         )
         rid = cur.fetchone()["id"]
         self._commit()
@@ -3728,6 +3978,7 @@ class Storage:
         kind: str,
         remote_url: Optional[str],
         active_clone_id: Optional[int],
+        semantic_universe_id: Optional[int] = None,
     ) -> None:
         """Persist every mutable column of a repository row in place. Backs
         Repository.save() -- writes the object's current field values wholesale
@@ -3735,8 +3986,10 @@ class Storage:
         None, so it is a true 'save what I have')."""
         self._conn.execute(
             "UPDATE repository SET name = ?, kind = ?, remote_url = ?, "
-            "active_clone_id = ? WHERE id = ?",
-            (name, kind, remote_url, active_clone_id, repository_id),
+            "active_clone_id = ?, semantic_universe_id = COALESCE(?, 1) "
+            "WHERE id = ?",
+            (name, kind, remote_url, active_clone_id, semantic_universe_id,
+             repository_id),
         )
         self._commit()
 
@@ -4557,25 +4810,38 @@ class Storage:
         "parent_usr",
         "resolved",
         "const_value",
+        "semantic_universe_id",
+        "identity_key",
     )
 
     def add_symbol(self, sym: Symbol) -> int:
-        """Insert or upsert a symbol keyed by USR. Returns the symbol id.
+        """Insert or upsert a symbol keyed by declared scope plus identity.
 
         A definition always wins over a previously stored declaration; a
         declaration never downgrades a stored definition's location.
         """
         if sym.kind not in SYMBOL_KINDS:
             raise ValueError(f"unknown symbol kind {sym.kind!r}")
+        scope_file_id = sym.file_id if sym.file_id is not None else sym.decl_file_id
+        universe_id = (
+            sym.semantic_universe_id
+            if sym.semantic_universe_id > 0
+            else self._semantic_universe_for_file(scope_file_id)
+        )
+        identity_key = self._symbol_identity_key(sym, universe_id, scope_file_id)
         # kind is stored as its CXCursorKind integer (v16); convert on the way in.
         vals = tuple(
-            SYMBOL_KIND_IDS[sym.kind] if c == "kind" else getattr(sym, c)
+            SYMBOL_KIND_IDS[sym.kind] if c == "kind"
+            else universe_id if c == "semantic_universe_id"
+            else identity_key if c == "identity_key"
+            else getattr(sym, c)
             for c in self._SYMBOL_COLS
         )
         cur = self._conn.execute(
             f"INSERT INTO symbol ({', '.join(self._SYMBOL_COLS)}) "
             f"VALUES ({', '.join('?' * len(self._SYMBOL_COLS))}) "
-            "ON CONFLICT(usr) DO UPDATE SET "
+            "ON CONFLICT(semantic_universe_id, identity_key) WHERE identity_key <> '' "
+            "DO UPDATE SET "
             "  spelling      = excluded.spelling, "
             "  qual_name     = COALESCE(excluded.qual_name, symbol.qual_name), "
             "  display_name  = COALESCE(excluded.display_name, symbol.display_name), "
@@ -4662,10 +4928,30 @@ class Storage:
         return cur.rowcount > 0
 
     def lookup_symbol(self, usr: str) -> Optional[Symbol]:
-        row = self._conn.execute(
-            "SELECT * FROM symbol WHERE usr = ?", (usr,)
-        ).fetchone()
-        return _row_to(Symbol, row)
+        """Return the deterministic first scoped match for a bare USR.
+
+        Zero matches return ``None``. Multiple matches are ordered by the
+        database-local universe id and then portable identity key; callers
+        that need every scoped match should use :meth:`lookup_symbols_by_usr`.
+        """
+        rows = self.lookup_symbols_by_usr(usr)
+        return rows[0] if rows else None
+
+    def lookup_symbols_by_usr(
+        self, usr: str, semantic_universe_id: Optional[int] = None
+    ) -> list[Symbol]:
+        """Return all scoped matches, deterministically ordered.
+
+        Passing ``semantic_universe_id`` makes the scope explicit; the integer
+        is local to this database and must not be used as a portable identity.
+        """
+        sql = "SELECT * FROM symbol WHERE usr = ?"
+        args: list[Any] = [usr]
+        if semantic_universe_id is not None:
+            sql += " AND semantic_universe_id = ?"
+            args.append(semantic_universe_id)
+        sql += " ORDER BY semantic_universe_id, identity_key"
+        return [_row_to(Symbol, row) for row in self._conn.execute(sql, args)]
 
     def lookup_symbol_by_id(self, symbol_id: int) -> Optional[Symbol]:
         row = self._conn.execute(
@@ -4934,12 +5220,20 @@ class Storage:
         is set via MAX() so a later stub->instantiation promotion always upgrades
         but never downgrades.
         """
+        universe_id = self._semantic_universe_for_file(decl_file_id)
+        identity_key = self._symbol_identity_key(
+            Symbol(usr=usr, spelling=spelling, kind=kind),
+            universe_id,
+            decl_file_id,
+        )
         self._conn.execute(
             "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
             "                    decl_file_id, decl_line, decl_col, decl_path, "
-            "                    is_instantiation, is_named_instance, resolved) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
-            "ON CONFLICT(usr) DO UPDATE SET "
+            "                    is_instantiation, is_named_instance, resolved, "
+            "                    semantic_universe_id, identity_key) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?) "
+            "ON CONFLICT(semantic_universe_id, identity_key) WHERE identity_key <> '' "
+            "DO UPDATE SET "
             "  kind             = CASE WHEN symbol.spelling = '' "
             "                          THEN excluded.kind ELSE symbol.kind END, "
             "  spelling         = CASE WHEN symbol.spelling = '' "
@@ -4964,10 +5258,13 @@ class Storage:
                 decl_path or None,
                 1 if is_instantiation else 0,
                 1 if is_named_instance else 0,
+                universe_id,
+                identity_key,
             ),
         )
         row = self._conn.execute(
-            "SELECT id FROM symbol WHERE usr = ?", (usr,)
+            "SELECT id FROM symbol WHERE semantic_universe_id = ? "
+            "AND identity_key = ?", (universe_id, identity_key)
         ).fetchone()
         if row is None:
             raise RuntimeError(

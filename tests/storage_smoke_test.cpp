@@ -441,6 +441,7 @@ TEST_CASE("fresh Storage produces schema v38 (file-backed and :memory:)") {
   // symbol_type_kind/symbol_type)
   // v38 adds the manifest-governed artifact tables.
   CHECK(tables == std::set<std::string>{"meta",
+                                        "semantic_universe",
                                         "component",
                                         "directory",
                                         "file",
@@ -497,10 +498,12 @@ TEST_CASE("fresh Storage produces schema v38 (file-backed and :memory:)") {
     return out;
   };
   CHECK(cols("meta") == std::vector<std::string>{"key", "value"});
-  // v14 adds the version column to component; v23 adds repository_id
+  // v14 adds the version column to component; v23 adds repository_id; v35
+  // adds semantic_universe_id.
   CHECK(cols("component") == std::vector<std::string>{"id", "name", "path",
                                                       "kind", "version",
-                                                      "repository_id"});
+                                                      "repository_id",
+                                                      "semantic_universe_id"});
   CHECK(cols("directory") ==
         std::vector<std::string>{"id", "component_id", "path"});
   CHECK(cols("file") ==
@@ -534,7 +537,9 @@ TEST_CASE("fresh Storage produces schema v38 (file-backed and :memory:)") {
                                                    "parent_id",
                                                    "resolved",
                                                    "multi_def",
-                                                   "const_value"});
+                                                   "const_value",
+                                                   "semantic_universe_id",
+                                                   "identity_key"});
 
   // the indexes (5 symbol + 2 edge + 1 call_arg + 1 diagnostic)
   std::set<std::string> indexes;
@@ -553,6 +558,9 @@ TEST_CASE("fresh Storage produces schema v38 (file-backed and :memory:)") {
                                          "idx_symbol_kind",
                                          "idx_symbol_spelling_nc",
                                          "idx_symbol_qual_nc",
+                                         "idx_symbol_usr",
+                                         "idx_symbol_scope",
+                                         "idx_symbol_identity",
                                          "idx_edge_src",
                                          "idx_edge_dst",
                                          "idx_call_arg_edge",

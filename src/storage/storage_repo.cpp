@@ -27,6 +27,137 @@ namespace cidx {
 
 using namespace detail;
 
+int64_t Storage::add_semantic_universe(const std::string &key,
+                                       const std::string &name,
+                                       const std::string &policy) {
+  if (key.empty()) {
+    throw StorageError("semantic universe key must not be empty");
+  }
+  auto st = db_.prepare(
+      "INSERT INTO semantic_universe (key, name, policy) VALUES (?, ?, ?) "
+      "ON CONFLICT(key) DO UPDATE SET name = excluded.name, "
+      "policy = excluded.policy RETURNING id");
+  st.bind(1, std::string_view(key));
+  st.bind(2, std::string_view(name.empty() ? key : name));
+  st.bind(3, std::string_view(policy));
+  if (!st.step()) {
+    throw StorageError("semantic universe insert returned no id");
+  }
+  const int64_t id = st.col_int64(0);
+  st.step_done();
+  return id;
+}
+
+std::optional<SemanticUniverse>
+Storage::get_semantic_universe_by_id(int64_t universe_id) {
+  auto st = db_.prepare("SELECT id, key, name, policy FROM semantic_universe "
+                        "WHERE id = ?");
+  st.bind(1, universe_id);
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  SemanticUniverse u;
+  u.id = st.col_int64(0);
+  u.key = st.col_text(1);
+  u.name = st.col_text(2);
+  u.policy = st.col_text(3);
+  return u;
+}
+
+std::optional<SemanticUniverse>
+Storage::get_semantic_universe_by_key(const std::string &key) {
+  auto st = db_.prepare("SELECT id, key, name, policy FROM semantic_universe "
+                        "WHERE key = ?");
+  st.bind(1, std::string_view(key));
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  SemanticUniverse u;
+  u.id = st.col_int64(0);
+  u.key = st.col_text(1);
+  u.name = st.col_text(2);
+  u.policy = st.col_text(3);
+  return u;
+}
+
+std::vector<SemanticUniverse> Storage::list_semantic_universes() {
+  auto st = db_.prepare("SELECT id, key, name, policy FROM semantic_universe "
+                        "ORDER BY key");
+  std::vector<SemanticUniverse> out;
+  while (st.step()) {
+    SemanticUniverse u;
+    u.id = st.col_int64(0);
+    u.key = st.col_text(1);
+    u.name = st.col_text(2);
+    u.policy = st.col_text(3);
+    out.push_back(std::move(u));
+  }
+  return out;
+}
+
+void Storage::set_repository_semantic_universe(
+    int64_t repository_id, const std::optional<int64_t> &universe_id) {
+  auto st = db_.prepare(
+      "UPDATE repository SET semantic_universe_id = COALESCE(?, 1) "
+      "WHERE id = ?");
+  bind_opt(st, 1, universe_id);
+  st.bind(2, repository_id);
+  st.step_done();
+}
+
+void Storage::set_component_semantic_universe(
+    int64_t component_id, const std::optional<int64_t> &universe_id) {
+  auto st = db_.prepare(
+      "UPDATE component SET semantic_universe_id = ? WHERE id = ?");
+  bind_opt(st, 1, universe_id);
+  st.bind(2, component_id);
+  st.step_done();
+}
+
+int64_t Storage::default_semantic_universe_id() {
+  auto st = db_.prepare(
+      "SELECT id FROM semantic_universe WHERE key = 'legacy'");
+  if (st.step()) {
+    return st.col_int64(0);
+  }
+  return add_semantic_universe("legacy", "Legacy single-workspace universe",
+                              "legacy");
+}
+
+int64_t Storage::semantic_universe_for_file(
+    const std::optional<int64_t> &file_id) {
+  if (!file_id) {
+    return default_semantic_universe_id();
+  }
+  auto st = db_.prepare(
+      "SELECT COALESCE(c.semantic_universe_id, r.semantic_universe_id, ?) "
+      "FROM file f JOIN directory d ON d.id = f.directory_id "
+      "JOIN component c ON c.id = d.component_id "
+      "LEFT JOIN repository r ON r.id = c.repository_id WHERE f.id = ?");
+  st.bind(1, default_semantic_universe_id());
+  st.bind(2, *file_id);
+  if (st.step() && !st.col_is_null(0)) {
+    return st.col_int64(0);
+  }
+  return default_semantic_universe_id();
+}
+
+std::string Storage::symbol_identity_key(
+    const Symbol &sym, int64_t universe_id,
+    const std::optional<int64_t> &file_id) {
+  const auto universe = get_semantic_universe_by_id(universe_id);
+  const std::string key = universe ? universe->key : "legacy";
+  const bool local = sym.linkage &&
+                     (*sym.linkage == "internal" ||
+                      *sym.linkage == "no-linkage");
+  std::string out = key + '\x1f';
+  if (local) {
+    out += "file:" + std::to_string(file_id.value_or(0)) + '\x1f';
+  }
+  out += sym.usr;
+  return out;
+}
+
 int64_t Storage::add_component(const std::string &name, const std::string &path,
                                const std::string &kind,
                                const std::optional<std::string> &version) {
@@ -398,15 +529,20 @@ Storage::components_for_repository(int64_t repository_id) {
 
 int64_t Storage::add_repository(const std::string &name,
                                 const std::string &kind,
-                                const std::optional<std::string> &remote_url) {
+                                const std::optional<std::string> &remote_url,
+                                const std::optional<int64_t> &universe_id) {
   auto st = db_.prepare(
-      "INSERT INTO repository (name, kind, remote_url) VALUES (?, ?, ?) "
+      "INSERT INTO repository (name, kind, remote_url, semantic_universe_id) "
+      "VALUES (?, ?, ?, COALESCE(?, 1)) "
       "ON CONFLICT(name) DO UPDATE SET kind = excluded.kind, "
-      "remote_url = COALESCE(excluded.remote_url, repository.remote_url) "
+      "remote_url = COALESCE(excluded.remote_url, repository.remote_url), "
+      "semantic_universe_id = COALESCE(excluded.semantic_universe_id, "
+      "repository.semantic_universe_id) "
       "RETURNING id");
   st.bind(1, std::string_view(name));
   st.bind(2, std::string_view(kind));
   bind_opt(st, 3, remote_url);
+  bind_opt(st, 4, universe_id);
   if (!st.step()) {
     throw StorageError("repository upsert returned no id");
   }

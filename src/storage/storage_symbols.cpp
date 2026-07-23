@@ -31,14 +31,23 @@ int64_t Storage::add_symbol(const Symbol &sym) {
   if (!is_symbol_kind(sym.kind)) {
     throw StorageError("unknown symbol kind '" + sym.kind + "'");
   }
+  const std::optional<int64_t> identity_file =
+      sym.file_id ? sym.file_id : sym.decl_file_id;
+  const int64_t universe_id = sym.semantic_universe_id > 0
+                                  ? sym.semantic_universe_id
+                                  : semantic_universe_for_file(identity_file);
+  const std::string identity_key =
+      symbol_identity_key(sym, universe_id, identity_file);
   auto st = db_.prepare(
       "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
       "type_info, file_id, line, col, decl_file_id, decl_line, decl_col, "
       "is_definition, is_pure, is_static, is_instantiation, linkage, access, "
-      "parent_usr, resolved, decl_path, end_line, end_col, const_value) "
+      "parent_usr, resolved, decl_path, end_line, end_col, const_value, "
+      "semantic_universe_id, identity_key) "
       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-      "?, ?, ?) "
-      "ON CONFLICT(usr) DO UPDATE SET "
+      "?, ?, ?, ?, ?) "
+      "ON CONFLICT(semantic_universe_id, identity_key) WHERE identity_key <> '' "
+      "DO UPDATE SET "
       "  spelling         = excluded.spelling, "
       "  qual_name        = COALESCE(excluded.qual_name, symbol.qual_name), "
       "  display_name     = COALESCE(excluded.display_name, "
@@ -111,6 +120,8 @@ int64_t Storage::add_symbol(const Symbol &sym) {
   bind_opt(st, 22, sym.end_line);
   bind_opt(st, 23, sym.end_col);
   bind_opt(st, 24, sym.const_value); // v33
+  st.bind(25, universe_id);
+  st.bind(26, std::string_view(identity_key));
   if (!st.step()) {
     throw StorageError("symbol upsert returned no id");
   }
@@ -217,14 +228,35 @@ void Storage::delete_symbols_for_file(int64_t file_id) {
   del.step_done();
 }
 
-std::optional<Symbol> Storage::lookup_symbol(const std::string &usr) {
-  auto st = db_.prepare(std::string("SELECT ") + kSymbolCols +
-                        " FROM symbol WHERE usr = ?");
-  st.bind(1, std::string_view(usr));
-  if (!st.step()) {
+std::optional<Symbol> Storage::lookup_symbol(
+    const std::string &usr,
+    const std::optional<int64_t> &semantic_universe_id) {
+  const auto matches = lookup_symbols_by_usr(usr, semantic_universe_id);
+  if (matches.empty()) {
     return std::nullopt;
   }
-  return symbol_from(st);
+  return matches.front();
+}
+
+std::vector<Symbol> Storage::lookup_symbols_by_usr(
+    const std::string &usr,
+    const std::optional<int64_t> &semantic_universe_id) {
+  std::string sql = std::string("SELECT ") + kSymbolCols +
+                    " FROM symbol WHERE usr = ?";
+  if (semantic_universe_id) {
+    sql += " AND semantic_universe_id = ?";
+  }
+  sql += " ORDER BY semantic_universe_id, identity_key";
+  auto st = db_.prepare(sql);
+  st.bind(1, std::string_view(usr));
+  if (semantic_universe_id) {
+    st.bind(2, *semantic_universe_id);
+  }
+  std::vector<Symbol> out;
+  while (st.step()) {
+    out.push_back(symbol_from(st));
+  }
+  return out;
 }
 
 std::optional<Symbol> Storage::lookup_symbol_by_id(int64_t symbol_id) {
@@ -430,6 +462,11 @@ int64_t Storage::mint_symbol_id(
     const std::optional<int64_t> &decl_col,
     const std::optional<std::string> &decl_path, bool is_instantiation,
     bool is_named_instance, const std::optional<std::string> &type_info) {
+  Symbol identity;
+  identity.usr = usr;
+  const int64_t universe_id = semantic_universe_for_file(decl_file_id);
+  const std::string identity_key =
+      symbol_identity_key(identity, universe_id, decl_file_id);
   // The follow-up SELECT returns the stable id whether the row was minted or
   // already present. 'function' is the fallback kind when the cursor kind is
   // unknown; the real def's add_symbol upsert overwrites kind/location/resolved
@@ -445,9 +482,10 @@ int64_t Storage::mint_symbol_id(
       "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
       "                    decl_file_id, decl_line, decl_col, decl_path, "
       "                    is_instantiation, is_named_instance, type_info, "
-      "                    resolved) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
-      "ON CONFLICT(usr) DO UPDATE SET "
+      "                    resolved, semantic_universe_id, identity_key) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?) "
+      "ON CONFLICT(semantic_universe_id, identity_key) WHERE identity_key <> '' "
+      "DO UPDATE SET "
       "  kind             = CASE WHEN symbol.spelling = '' "
       "                          THEN excluded.kind ELSE symbol.kind END, "
       "  spelling         = CASE WHEN symbol.spelling = '' "
@@ -486,9 +524,13 @@ int64_t Storage::mint_symbol_id(
   ins.bind(10, static_cast<int64_t>(is_instantiation ? 1 : 0));
   ins.bind(11, static_cast<int64_t>(is_named_instance ? 1 : 0));
   bind_opt(ins, 12, type_info);
+  ins.bind(13, universe_id);
+  ins.bind(14, std::string_view(identity_key));
   ins.step_done();
-  auto sel = db_.prepare("SELECT id FROM symbol WHERE usr = ?");
-  sel.bind(1, std::string_view(usr));
+  auto sel = db_.prepare("SELECT id FROM symbol WHERE semantic_universe_id = ? "
+                         "AND identity_key = ?");
+  sel.bind(1, universe_id);
+  sel.bind(2, std::string_view(identity_key));
   if (!sel.step()) {
     throw StorageError("mint_symbol_id: SELECT returned no row for usr=" + usr);
   }

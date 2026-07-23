@@ -142,6 +142,8 @@ Sym GraphQuery::make_sym_from_symbol(const Symbol &sym) {
   Sym s;
   s.id = sym.id;
   s.usr = sym.usr;
+  s.semantic_universe_id = sym.semantic_universe_id;
+  s.identity_key = sym.identity_key;
   s.spelling = sym.spelling;
   s.name = sym.qual_name ? *sym.qual_name : sym.spelling;
   s.kind = sym.kind;

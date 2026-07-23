@@ -777,6 +777,26 @@ void Storage::migrate() {
       changed = true;
     }
   }
+  // v34 -> v35: make the symbol USR an explicitly scoped identity. Existing
+  // v34 rows belong to the legacy single-workspace universe; preserve their
+  // ids and all graph foreign keys while rebuilding the old global-USR table.
+  {
+    const bool universe_missing = !has_table("semantic_universe");
+    const bool symbol_scope_missing =
+        !has_col(table_columns("symbol"), "semantic_universe_id") ||
+        !has_col(table_columns("symbol"), "identity_key");
+    const bool repository_scope_missing =
+        has_table("repository") &&
+        !has_col(table_columns("repository"), "semantic_universe_id");
+    const bool component_scope_missing =
+        has_table("component") &&
+        !has_col(table_columns("component"), "semantic_universe_id");
+    if (universe_missing || symbol_scope_missing || repository_scope_missing ||
+        component_scope_missing) {
+      migrate_symbol_identity_scope();
+      changed = true;
+    }
+  }
   if (!changed) {
     auto st =
         db_.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
@@ -1106,6 +1126,79 @@ void Storage::migrate() {
     st.bind(1, std::string_view(std::to_string(kSchemaVersion)));
     st.step_done();
   }
+}
+
+void Storage::migrate_symbol_identity_scope() {
+  db_.exec(
+      "CREATE TABLE IF NOT EXISTS semantic_universe ("
+      "id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, name TEXT NOT NULL, "
+      "policy TEXT NOT NULL DEFAULT 'explicit');"
+      "INSERT OR IGNORE INTO semantic_universe (id, key, name, policy) "
+      "VALUES (1, 'legacy', 'Legacy single-workspace universe', 'legacy');");
+
+  auto has_table = [this](const char *name) {
+    auto st = db_.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
+    st.bind(1, std::string_view(name));
+    return st.step();
+  };
+  auto has_column = [this](const char *table, const char *column) {
+    auto st = db_.prepare(std::string("PRAGMA table_info(") + table + ")");
+    while (st.step()) {
+      if (st.col_text(1) == column) {
+        return true;
+      }
+    }
+    return false;
+  };
+  if (has_table("repository") &&
+      !has_column("repository", "semantic_universe_id")) {
+    db_.exec("ALTER TABLE repository ADD COLUMN semantic_universe_id INTEGER "
+             "NOT NULL DEFAULT 1");
+  }
+  if (has_table("component") &&
+      !has_column("component", "semantic_universe_id")) {
+    db_.exec("ALTER TABLE component ADD COLUMN semantic_universe_id INTEGER "
+             "REFERENCES semantic_universe(id) ON DELETE SET NULL");
+  }
+  if (!has_table("symbol") || has_column("symbol", "semantic_universe_id")) {
+    return;
+  }
+
+  db_.exec("PRAGMA foreign_keys = OFF");
+  db_.exec(
+      "CREATE TABLE symbol_v35 ("
+      "id INTEGER PRIMARY KEY, usr TEXT NOT NULL, spelling TEXT NOT NULL, "
+      "qual_name TEXT, display_name TEXT, kind INTEGER NOT NULL, "
+      "type_info TEXT, file_id INTEGER REFERENCES file(id) ON DELETE SET NULL, "
+      "line INTEGER, col INTEGER, end_line INTEGER, end_col INTEGER, "
+      "decl_file_id INTEGER REFERENCES file(id) ON DELETE SET NULL, "
+      "decl_line INTEGER, decl_col INTEGER, decl_path TEXT, "
+      "is_definition INTEGER NOT NULL DEFAULT 0, "
+      "is_pure INTEGER NOT NULL DEFAULT 0, is_static INTEGER NOT NULL DEFAULT 0, "
+      "is_instantiation INTEGER NOT NULL DEFAULT 0, "
+      "is_named_instance INTEGER NOT NULL DEFAULT 0, linkage TEXT, access TEXT, "
+      "parent_usr TEXT, resolved INTEGER NOT NULL DEFAULT 0, "
+      "multi_def INTEGER NOT NULL DEFAULT 0, const_value TEXT, "
+      "semantic_universe_id INTEGER NOT NULL DEFAULT 1 "
+      "REFERENCES semantic_universe(id), identity_key TEXT NOT NULL DEFAULT '');");
+  db_.exec(
+      "INSERT INTO symbol_v35 (id, usr, spelling, qual_name, display_name, "
+      "kind, type_info, file_id, line, col, end_line, end_col, decl_file_id, "
+      "decl_line, decl_col, "
+      "decl_path, is_definition, is_pure, is_static, is_instantiation, "
+      "is_named_instance, linkage, access, parent_usr, resolved, multi_def, "
+      "const_value, semantic_universe_id, identity_key) "
+      "SELECT id, usr, spelling, qual_name, display_name, kind, type_info, "
+      "file_id, line, col, end_line, end_col, decl_file_id, decl_line, decl_col, "
+      "decl_path, is_definition, is_pure, is_static, is_instantiation, "
+      "is_named_instance, linkage, access, parent_usr, resolved, multi_def, "
+      "const_value, 1, "
+      "'legacy' || char(31) || CASE WHEN linkage IN ('internal', 'no-linkage') "
+      "THEN 'file:' || COALESCE(file_id, 0) || char(31) ELSE '' END || usr "
+      "FROM symbol;");
+  db_.exec("DROP TABLE symbol; ALTER TABLE symbol_v35 RENAME TO symbol;");
+  db_.exec("PRAGMA foreign_keys = ON");
 }
 
 // v15 -> v16: rebuild `symbol` with kind stored as its CXCursorKind int.
