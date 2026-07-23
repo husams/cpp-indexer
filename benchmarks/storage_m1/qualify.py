@@ -28,6 +28,7 @@ REQUIRED_RELATIONS = {
     "edge",
     "def_edge",
     "entity_edge",
+    "possible_call",
     "type_edge",
     "include_edge",
     "edge_site",
@@ -207,6 +208,8 @@ def query_cases(connection: sqlite3.Connection) -> list[dict[str, Any]]:
     edge_site_id = first("SELECT edge_id FROM edge_site ORDER BY edge_id LIMIT 1")
     def_src = first("SELECT src_def_id FROM def_edge ORDER BY src_def_id, dst_id LIMIT 1")
     def_dst = first("SELECT dst_id FROM def_edge ORDER BY dst_id, src_def_id LIMIT 1")
+    call_src = first("SELECT src_def_id FROM possible_call ORDER BY src_def_id, dst_def_id LIMIT 1")
+    call_dst = first("SELECT dst_def_id FROM possible_call ORDER BY dst_def_id, src_def_id LIMIT 1")
     type_src = first("SELECT src_id FROM type_edge ORDER BY src_id, kind, position LIMIT 1")
     type_dst = first("SELECT dst_id FROM type_edge ORDER BY dst_id, src_id LIMIT 1")
     entity_src = first("SELECT src_id FROM entity_edge ORDER BY src_id, dst_id LIMIT 1")
@@ -222,6 +225,8 @@ def query_cases(connection: sqlite3.Connection) -> list[dict[str, Any]]:
         {"id": "incoming_one_hop", "sql": "SELECT src_id, kind, count FROM edge WHERE dst_id = ? ORDER BY src_id", "params": [edge_dst], "strategy_table": "edge", "strategy_direction": "reverse", "limit": 100, "require_rows": True},
         {"id": "definition_outgoing", "sql": "SELECT dst_id, kind, count FROM def_edge WHERE src_def_id = ? ORDER BY dst_id", "params": [def_src], "strategy_table": "def_edge", "strategy_direction": "forward", "limit": 100, "require_rows": True},
         {"id": "definition_incoming", "sql": "SELECT src_def_id, kind, count FROM def_edge WHERE dst_id = ? ORDER BY src_def_id", "params": [def_dst], "strategy_table": "def_edge", "strategy_direction": "reverse", "limit": 100, "require_rows": True},
+        {"id": "possible_call_outgoing", "sql": "SELECT dst_def_id, count FROM possible_call WHERE src_def_id = ? ORDER BY dst_def_id", "params": [call_src], "strategy_table": "possible_call", "strategy_direction": "forward", "limit": 100, "require_rows": True},
+        {"id": "possible_call_incoming", "sql": "SELECT src_def_id, count FROM possible_call WHERE dst_def_id = ? ORDER BY src_def_id", "params": [call_dst], "strategy_table": "possible_call", "strategy_direction": "reverse", "limit": 100, "require_rows": True},
         {"id": "bounded_paths", "sql": "WITH RECURSIVE walk(id, depth) AS (SELECT ?, 0 UNION ALL SELECT edge.dst_id, walk.depth + 1 FROM walk JOIN edge ON edge.src_id = walk.id WHERE walk.depth < 3) SELECT id, depth FROM walk ORDER BY depth, id", "params": [edge_src], "strategy_table": "edge", "strategy_direction": "forward", "limit": 1000, "require_rows": True},
         {"id": "references_sites", "sql": "SELECT edge_id, file_id, line, col FROM edge_site WHERE edge_id = ? ORDER BY file_id, line, col", "params": [edge_site_id], "strategy_table": "edge_site", "strategy_direction": "forward", "limit": 1000, "require_rows": True},
         {"id": "type_closure_forward", "sql": "WITH RECURSIVE closure(id) AS (SELECT ? UNION SELECT type_edge.dst_id FROM closure JOIN type_edge ON type_edge.src_id = closure.id) SELECT id FROM closure ORDER BY id", "params": [type_src], "strategy_table": "type_edge", "strategy_direction": "forward", "limit": 1000, "require_rows": True},
@@ -324,6 +329,58 @@ def case_strategy_expectations(
         if strategy is not None:
             expectations[case["id"]] = strategy.get(case["strategy_direction"])
     return expectations
+
+
+def prepare_representative_corpus(
+    source: Path,
+    directory: Path,
+) -> tuple[Path, dict[str, Any]]:
+    target = copy_for_profile(source, directory, "representative")
+    connection = connect(target, read_only=False)
+    try:
+        before = int(connection.execute("SELECT COUNT(*) FROM possible_call").fetchone()[0])
+        if before:
+            return target, {
+                "source_rows": before,
+                "overlay_rows": 0,
+                "rows_used": before,
+                "status": "source_corpus",
+            }
+        candidate = connection.execute(
+            "SELECT symbol_id, COUNT(*) AS definition_count "
+            "FROM definition GROUP BY symbol_id "
+            "HAVING definition_count >= 2 ORDER BY symbol_id LIMIT 1"
+        ).fetchone()
+        if candidate is None:
+            raise RuntimeError(
+                "possible_call requires a representative multi-definition corpus"
+            )
+        definitions = [
+            int(row[0])
+            for row in connection.execute(
+                "SELECT id FROM definition WHERE symbol_id = ? ORDER BY id",
+                (candidate[0],),
+            )
+        ]
+        source_definition = definitions[0]
+        targets = definitions[1:]
+        connection.execute("BEGIN IMMEDIATE")
+        connection.executemany(
+            "INSERT INTO possible_call(src_def_id, dst_def_id, count) VALUES (?, ?, 1)",
+            [(source_definition, target) for target in targets],
+        )
+        connection.commit()
+        return target, {
+            "source_rows": before,
+            "overlay_rows": len(targets),
+            "rows_used": len(targets),
+            "status": "deterministic_multi_definition_overlay",
+            "symbol_id": int(candidate[0]),
+            "source_definition": source_definition,
+            "target_definitions": targets,
+        }
+    finally:
+        connection.close()
 
 
 def run_layout(
@@ -454,16 +511,75 @@ def run_strategy_negative_checks(
     }
 
 
-def source_connection_count(source: Path, table: str | None) -> int:
-    if not table:
-        return -1
-    connection = connect(source, read_only=True)
-    try:
-        if not _has_table(connection, table):
-            return -1
-        return int(connection.execute(f"SELECT COUNT(*) FROM {qident(table)}").fetchone()[0])
-    finally:
-        connection.close()
+def validate_profile_partition(profile: dict[str, Any]) -> dict[str, Any]:
+    strategies = {item.get("table") for item in profile.get("relation_strategies", [])}
+    deferred = profile.get("deferred_relations", [])
+    deferred_tables = {item.get("table") for item in deferred}
+    missing_required = sorted(REQUIRED_RELATIONS - strategies - deferred_tables)
+    unexpected_strategies = sorted(strategies - REQUIRED_RELATIONS)
+    unknown_deferred = sorted(deferred_tables - REQUIRED_RELATIONS)
+    overlap = sorted(strategies & deferred_tables)
+    malformed_deferred = [
+        item for item in deferred
+        if not item.get("table") or not item.get("owner") or not item.get("reason")
+    ]
+    return {
+        "status": "pass" if not (
+            missing_required
+            or unexpected_strategies
+            or unknown_deferred
+            or overlap
+            or malformed_deferred
+        ) else "fail",
+        "required_relations": sorted(REQUIRED_RELATIONS),
+        "strategy_tables": sorted(strategies),
+        "deferred_tables": sorted(deferred_tables),
+        "missing_required": missing_required,
+        "unexpected_strategies": unexpected_strategies,
+        "unknown_deferred": unknown_deferred,
+        "strategy_deferred_overlap": overlap,
+        "malformed_deferred": malformed_deferred,
+    }
+
+
+def run_partition_negative_checks(profile: dict[str, Any]) -> dict[str, Any]:
+    variants: list[tuple[str, dict[str, Any]]] = []
+
+    missing = dict(profile)
+    missing["relation_strategies"] = [
+        item for item in profile["relation_strategies"]
+        if item.get("table") != "possible_call"
+    ]
+    variants.append(("missing_required_possible_call", missing))
+
+    unknown = dict(profile)
+    unknown["deferred_relations"] = [{
+        "table": "unknown_relation",
+        "owner": "HSE-78",
+        "reason": "test mutation",
+    }]
+    variants.append(("unknown_deferred_relation", unknown))
+
+    altered = dict(profile)
+    altered["deferred_relations"] = [{
+        "table": "possible_call",
+        "owner": "wrong-owner",
+        "reason": "altered required deferral",
+    }]
+    variants.append(("altered_required_deferral", altered))
+
+    results = []
+    for name, variant in variants:
+        validation = validate_profile_partition(variant)
+        results.append({
+            "name": name,
+            "status": "pass" if validation["status"] == "fail" else "fail",
+            "validation": validation,
+        })
+    return {
+        "status": "pass" if all(item["status"] == "pass" for item in results) else "fail",
+        "cases": results,
+    }
 
 
 def run_runtime_profile(source: Path, mode: str, iterations: int) -> dict[str, Any]:
@@ -730,23 +846,18 @@ def run_recovery_check(source: Path) -> dict[str, Any]:
 def qualify(source: Path, profile_path: Path, iterations: int) -> dict[str, Any]:
     profile = json.loads(profile_path.read_text())
     relation_strategies = profile["relation_strategies"]
-    deferred_relations = profile.get("deferred_relations", [])
+    partition = validate_profile_partition(profile)
+    partition_negative_checks = run_partition_negative_checks(profile)
     strategies = {item["table"] for item in relation_strategies}
     missing = sorted(REQUIRED_RELATIONS - strategies)
-    deferred_relation_validation = []
-    for item in deferred_relations:
-        table = item.get("table")
-        row_count = source_connection_count(source, table)
-        deferred_relation_validation.append({
-            "table": table,
-            "reason": item.get("reason"),
-            "owner": item.get("owner"),
-            "empty_in_source": row_count,
-            "status": "pass" if (
-                table not in strategies and item.get("reason") and row_count == 0
-            ) else "fail",
-        })
-    layout = run_layout(source, iterations, relation_strategies)
+    with tempfile.TemporaryDirectory(prefix="cidx-storage-m1-representative-") as temporary:
+        representative_source, representative_corpus = prepare_representative_corpus(
+            source, Path(temporary)
+        )
+        layout = run_layout(representative_source, iterations, relation_strategies)
+        strategy_negative_checks = run_strategy_negative_checks(
+            representative_source, relation_strategies, iterations
+        )
     query_by_id = {item["id"]: item for item in layout["queries"]}
     declared_query_ids = sorted({
         query_id
@@ -794,9 +905,6 @@ def qualify(source: Path, profile_path: Path, iterations: int) -> dict[str, Any]
     backup = run_backup_check(source)
     recovery = run_recovery_check(source)
     identity_sensitivity = run_identity_sensitivity_check(source)
-    strategy_negative_checks = run_strategy_negative_checks(
-        source, relation_strategies, iterations
-    )
     query_failures = [item["id"] for item in layout["queries"] if item["status"] != "ok"]
     representative_failures = [
         item["id"]
@@ -813,7 +921,8 @@ def qualify(source: Path, profile_path: Path, iterations: int) -> dict[str, Any]
         if not missing
         and not missing_query_ids
         and not unexpected_query_ids
-        and all(item["status"] == "pass" for item in deferred_relation_validation)
+        and partition["status"] == "pass"
+        and partition_negative_checks["status"] == "pass"
         and all(
             item["query_ids_present"]
             and all(binding["binding_matches"] and binding["plan_bound"] for binding in item["bindings"])
@@ -843,6 +952,7 @@ def qualify(source: Path, profile_path: Path, iterations: int) -> dict[str, Any]
             "interruption_recovery": recovery["status"],
             "fact_identity_sensitivity": identity_sensitivity["status"],
             "strategy_negative_checks": strategy_negative_checks["status"],
+            "partition_negative_checks": partition_negative_checks["status"],
             "wal_decision": "qualification_only",
         },
         "missing_relation_strategies": missing,
@@ -851,13 +961,16 @@ def qualify(source: Path, profile_path: Path, iterations: int) -> dict[str, Any]
         "unexpected_query_ids": unexpected_query_ids,
         "strategy_validation": strategy_validation,
         "strategy_negative_checks": strategy_negative_checks,
-        "deferred_relation_validation": deferred_relation_validation,
+        "profile_partition": partition,
+        "partition_negative_checks": partition_negative_checks,
+        "representative_corpus": representative_corpus,
         "representative_failures": representative_failures,
         "query_failures": query_failures,
         "notes": [
             "DELETE is the shipped runtime profile; WAL is measured on the same copied database and workload.",
             "A benchmark result is host-specific and must not be treated as a universal SLO.",
-            "possible_call is deferred because the canonical corpus has no multi-definition call fan-out; the deferral is a hard-checked profile decision, not empty query evidence.",
+            "possible_call is required; an empty canonical relation is qualified through a deterministic temporary multi-definition overlay whose basis and row count are recorded.",
+            "The profile's required/deferred relation partition is exact; missing, unknown, or altered partition entries fail negative probes.",
             "A pre-existing WAL -shm lock-state change is permitted; persistent database and WAL bytes must remain unchanged.",
         ],
     }
