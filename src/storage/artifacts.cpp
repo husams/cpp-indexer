@@ -618,7 +618,7 @@ ArtifactStore::validate_record(const ArtifactRecord &record) const {
   }
 
   try {
-    SqliteDb sidecar(path.string(), true);
+    SqliteDb sidecar(path.string(), true, SqliteProfile::read_only_replay);
     auto check = sidecar.prepare("PRAGMA integrity_check");
     if (!check.step() || check.col_text(0) != "ok") {
       add_diagnostic(validation, "corrupt", "sidecar integrity_check failed");
