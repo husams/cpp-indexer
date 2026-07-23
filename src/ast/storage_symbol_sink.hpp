@@ -8,6 +8,8 @@
 
 #include <cstdint>
 #include <vector>
+#include <optional>
+#include <string>
 
 namespace cidx {
 class Storage;
@@ -20,6 +22,7 @@ public:
   explicit StorageSymbolSink(cidx::Storage &db);
 
   void set_current_file_id(int64_t file_id);
+  void set_identity_translation_unit_file_id(int64_t file_id);
 
   // index_file_notxn counters: a cursor whose symbol already exists RESOLVED
   // counts as skipped (AstIndexer::store semantics).
@@ -32,6 +35,7 @@ public:
 private:
   cidx::Storage &db_;
   int64_t current_file_id_ = -1;
+  std::optional<std::string> identity_translation_unit_;
   int stored_ = 0;
   std::vector<int64_t> symbol_ids_;
 };

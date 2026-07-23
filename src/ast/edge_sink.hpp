@@ -24,6 +24,7 @@ public:
       const std::optional<std::string> &identity_source = std::nullopt) = 0;
 
   virtual void set_current_file_id(int64_t /*file_id*/) {}
+  virtual void set_identity_translation_unit_file_id(int64_t /*file_id*/) {}
 
   // Upsert a USR-keyed stub, returning its stable id (mint_symbol_id).
   virtual int64_t mint_symbol(const MintRequest &req) = 0;

@@ -90,6 +90,73 @@ def test_local_identity_is_stable_across_file_insertion_order(tmp_path):
     assert make_key(False) == make_key(True)
 
 
+def test_translation_unit_identity_separates_same_header_locals(tmp_path):
+    with Storage(":memory:") as store:
+        universe = store.add_semantic_universe("program:banking")
+        repo = store.add_repository("banking", semantic_universe_id=universe)
+        component = store.add_component("banking", str(tmp_path / "banking"))
+        store.set_component_repository(component, repo)
+        header = store.add_file_path(str(tmp_path / "banking" / "shared.hpp"))
+        tu_a = store.add_file_path(
+            str(tmp_path / "banking" / "a.cpp"),
+            compile_options=["-DCONFIG_A"],
+            driver="clang++",
+        )
+        tu_b = store.add_file_path(
+            str(tmp_path / "banking" / "b.cpp"),
+            compile_options=["-DCONFIG_B"],
+            driver="clang++",
+        )
+        header_path = store.file_abs_path(header)
+        tu_a_key = store.portable_translation_unit_identity_for_file(tu_a)
+        tu_b_key = store.portable_translation_unit_identity_for_file(tu_b)
+
+        def add_local(tu_key):
+            return store.add_symbol(
+                Symbol(
+                    usr="c:@F@header_local",
+                    spelling="header_local",
+                    kind="function",
+                    file_id=header,
+                    linkage="internal",
+                    identity_source=header_path,
+                    identity_translation_unit=tu_key,
+                )
+            )
+
+        local_a = add_local(tu_a_key)
+        local_b = add_local(tu_b_key)
+        assert local_a != local_b
+        assert store.lookup_symbol(
+            "c:@F@header_local", universe, header_path, tu_a_key
+        ).id == local_a
+        assert store.lookup_symbol(
+            "c:@F@header_local", universe, header_path, tu_b_key
+        ).id == local_b
+
+        stub_a = store.mint_symbol_id(
+            "c:@F@header_stub",
+            spelling="header_stub",
+            kind="function",
+            decl_file_id=header,
+            semantic_universe_id=universe,
+            identity_source=header_path,
+            linkage="no-linkage",
+            identity_translation_unit=tu_a_key,
+        )
+        stub_b = store.mint_symbol_id(
+            "c:@F@header_stub",
+            spelling="header_stub",
+            kind="function",
+            decl_file_id=header,
+            semantic_universe_id=universe,
+            identity_source=header_path,
+            linkage="no-linkage",
+            identity_translation_unit=tu_b_key,
+        )
+        assert stub_a != stub_b
+
+
 def test_v34_migration_preserves_numeric_and_scoped_identity(tmp_path):
     path = tmp_path / "v34.db"
     conn = sqlite3.connect(path)
@@ -129,6 +196,8 @@ def test_v34_migration_preserves_numeric_and_scoped_identity(tmp_path):
         );
         INSERT INTO symbol (id, usr, spelling, kind, linkage)
           VALUES (7, 'c:@N@legacy', 'legacy', 22, 'external');
+        INSERT INTO symbol (id, usr, spelling, kind, file_id, linkage)
+          VALUES (8, 'c:@F@legacy_local', 'legacy_local', 8, 42, 'internal');
         INSERT INTO edge (id, src_id, dst_id, kind) VALUES (11, 7, 7, 1);
         """
     )
@@ -140,6 +209,11 @@ def test_v34_migration_preserves_numeric_and_scoped_identity(tmp_path):
         assert symbol.semantic_universe_id == 1
         assert symbol.identity_key == "legacy\x1fc:@N@legacy"
         assert store.get_repository_by_id(3).semantic_universe_id == 1
+        local = store.lookup_symbol_by_id(8)
+        assert "file:" not in local.identity_key
+        assert local.identity_key == (
+            "legacy\x1flocal:legacy\x1fsource:unknown\x1fc:@F@legacy_local"
+        )
 
     conn = sqlite3.connect(path)
     assert conn.execute(

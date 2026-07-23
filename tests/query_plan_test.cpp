@@ -403,9 +403,10 @@ TEST_CASE("query_plan: order_by, limit, default fields, result JSON") {
   CHECK(
       !r.truncated); // explicit limit is requested cardinality, not truncation
 
-  // Default fields for a node stream: id, usr, name, kind.
+  // Default fields for a node stream include portable scope identity.
   auto d = ex.run((start(symbol("USR::A")) | out("calls")).plan());
-  CHECK(d.fields == std::vector<std::string>{"id", "usr", "name", "kind"});
+  CHECK(d.fields == std::vector<std::string>{"id", "usr", "semantic_universe",
+                                             "identity_key", "name", "kind"});
 
   // Result JSON shape.
   auto j = cidx::json_out::dumps_indent2(d.to_json());
@@ -615,9 +616,10 @@ TEST_CASE(
 TEST_CASE("query_plan: scoped identity fields are selectable") {
   Seeded s;
   Executor ex(s.db);
-  const auto result = ex.run(
-      (start(symbol("USR::A")) |
-       select({"usr", "semantic_universe", "identity_key"})).plan());
+  const auto result =
+      ex.run((start(symbol("USR::A")) |
+              select({"usr", "semantic_universe", "identity_key"}))
+                 .plan());
   REQUIRE(result.rows.size() == 1);
   CHECK(std::get<std::string>(result.rows[0][0]) == "USR::A");
   CHECK(std::get<std::string>(result.rows[0][1]) == "legacy");

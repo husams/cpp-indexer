@@ -968,7 +968,10 @@ class Executor:
                 shape="scalar", view=st.view, truncated=st.truncated,
                 scalar=len(st.rows) if st.rows else len(st.ids))
         if st.shape == "nodes":
-            self._materialize(st, ("id", "usr", "name", "kind"))
+            self._materialize(
+                st,
+                ("id", "usr", "semantic_universe", "identity_key", "name", "kind"),
+            )
         if not st.limit_in_effect and len(st.rows) > DEFAULT_RESULT_CAP:
             del st.rows[DEFAULT_RESULT_CAP:]
             del st.row_ids[DEFAULT_RESULT_CAP:]

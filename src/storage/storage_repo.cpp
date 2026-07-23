@@ -177,9 +177,26 @@ std::string Storage::portable_source_identity_for_file(int64_t file_id) {
 }
 
 std::string
-Storage::symbol_identity_key(const Symbol &sym, int64_t universe_id,
-                             const std::optional<int64_t> &file_id,
-                             const std::optional<std::string> &source) {
+Storage::portable_translation_unit_identity_for_file(int64_t file_id) {
+  const auto file = get_file_by_id(file_id);
+  if (!file) {
+    return "tu-file-id-missing:" + std::to_string(file_id);
+  }
+  std::string out = portable_source_identity_for_file(file_id);
+  out += std::string(1, '\x1f') + "driver:";
+  out += file->driver.value_or("");
+  out += std::string(1, '\x1f') + "args:";
+  out += file->compile_options
+             ? json_min::encode_string_array(*file->compile_options)
+             : "[]";
+  return out;
+}
+
+std::string Storage::symbol_identity_key(
+    const Symbol &sym, int64_t universe_id,
+    const std::optional<int64_t> &file_id,
+    const std::optional<std::string> &source,
+    const std::optional<std::string> &translation_unit) {
   const auto universe = get_semantic_universe_by_id(universe_id);
   const std::string key = universe ? universe->key : "legacy";
   const bool local = sym.linkage && (*sym.linkage == "internal" ||
@@ -196,7 +213,18 @@ Storage::symbol_identity_key(const Symbol &sym, int64_t universe_id,
     } else {
       source_key = "unknown";
     }
-    out += "local:" + source_key + '\x1f';
+    std::string tu_key;
+    if (translation_unit && !translation_unit->empty()) {
+      tu_key = *translation_unit;
+    } else if (sym.identity_translation_unit &&
+               !sym.identity_translation_unit->empty()) {
+      tu_key = *sym.identity_translation_unit;
+    } else if (file_id) {
+      tu_key = portable_translation_unit_identity_for_file(*file_id);
+    } else {
+      tu_key = "unknown";
+    }
+    out += "local:" + tu_key + '\x1f' + source_key + '\x1f';
   }
   out += sym.usr;
   return out;

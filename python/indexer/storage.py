@@ -1846,6 +1846,7 @@ class Symbol:
     semantic_universe_id: int = -1  # v35: database-local scope row
     identity_key: str = ""  # v35: portable scope-keyed semantic identity
     identity_source: Optional[str] = None  # transient producer hint
+    identity_translation_unit: Optional[str] = None  # transient TU/build hint
     id: Optional[int] = None
 
 
@@ -1854,10 +1855,13 @@ def _row_to(cls, row: Optional[sqlite3.Row]) -> Any:
         return None
     # Only init fields map to columns; init=False fields (e.g. File's live
     # back-references) carry their defaults and are set by the accessor.
+    columns = set(row.keys())
     kwargs = {
         f.name: row[f.name]
         for f in fields(cls)
-        if f.init and f.name != "identity_source"
+        if f.init
+        and f.name in columns
+        and f.name not in {"identity_source", "identity_translation_unit"}
     }
     if cls is Symbol:
         # kind is stored as a CXCursorKind int (v16); present it as the name.
@@ -3138,7 +3142,22 @@ class Storage:
 
         self._conn.commit()
         self._conn.execute("PRAGMA foreign_keys = OFF")
-        self._conn.executescript("""
+        has_file_paths = {
+            "file", "directory", "component", "repository"
+        }.issubset(tables)
+        if has_file_paths:
+            legacy_source = (
+                "COALESCE((SELECT 'source:' || "
+                "COALESCE(r.remote_url, 'repo:' || r.name, 'component:' || c.path) "
+                "|| char(31) || c.path || char(31) || d.path || char(31) || f.name "
+                "FROM file f JOIN directory d ON d.id = f.directory_id "
+                "JOIN component c ON c.id = d.component_id "
+                "LEFT JOIN repository r ON r.id = c.repository_id "
+                "WHERE f.id = symbol.file_id), 'source:unknown')"
+            )
+        else:
+            legacy_source = "'source:unknown'"
+        self._conn.executescript(f"""
             CREATE TABLE symbol_v35 (
                 id INTEGER PRIMARY KEY,
                 usr TEXT NOT NULL,
@@ -3187,7 +3206,7 @@ class Storage:
                    multi_def, const_value, 1,
                    'legacy' || char(31) ||
                    CASE WHEN linkage IN ('internal', 'no-linkage')
-                        THEN 'file:' || COALESCE(file_id, 0) || char(31)
+                        THEN 'local:legacy' || char(31) || {legacy_source} || char(31)
                         ELSE '' END || usr
               FROM symbol;
             DROP TABLE symbol;
@@ -3440,8 +3459,22 @@ class Storage:
             f"file-id-missing:{file_id}"
         )
 
+    def portable_translation_unit_identity_for_file(self, file_id: int) -> str:
+        file = self.get_file_by_id(file_id)
+        if file is None:
+            return f"tu-file-id-missing:{file_id}"
+        args = json.dumps(file.compile_options or [], separators=(",", ":"))
+        return (
+            f"{self.portable_source_identity_for_file(file_id)}\x1f"
+            f"driver:{file.driver or ''}\x1fargs:{args}"
+        )
+
     def _symbol_identity_key(
-        self, sym: Symbol, universe_id: int, file_id: Optional[int]
+        self,
+        sym: Symbol,
+        universe_id: int,
+        file_id: Optional[int],
+        translation_unit: Optional[str] = None,
     ) -> str:
         universe = self.get_semantic_universe_by_id(universe_id)
         key = universe.key if universe else "legacy"
@@ -3455,7 +3488,10 @@ class Storage:
                 source_key = self.portable_source_identity_for_file(file_id)
             else:
                 source_key = "unknown"
-            prefix += f"local:{source_key}\x1f"
+            tu_key = translation_unit or sym.identity_translation_unit
+            if not tu_key and file_id is not None:
+                tu_key = self.portable_translation_unit_identity_for_file(file_id)
+            prefix += f"local:{tu_key or 'unknown'}\x1f{source_key}\x1f"
         return prefix + sym.usr
 
     # -- components ----------------------------------------------------------
@@ -4961,10 +4997,13 @@ class Storage:
         usr: str,
         semantic_universe_id: Optional[int] = None,
         identity_source: Optional[str] = None,
+        identity_translation_unit: Optional[str] = None,
         **values: Any,
     ) -> bool:
         """Update one explicitly resolved scoped symbol, never every USR row."""
-        target = self.lookup_symbol(usr, semantic_universe_id, identity_source)
+        target = self.lookup_symbol(
+            usr, semantic_universe_id, identity_source, identity_translation_unit
+        )
         if target is None:
             return False
         return self.update_symbol_by_id(target.id, **values)
@@ -4992,6 +5031,7 @@ class Storage:
         usr: str,
         semantic_universe_id: Optional[int] = None,
         identity_source: Optional[str] = None,
+        identity_translation_unit: Optional[str] = None,
     ) -> Optional[Symbol]:
         """Return one scoped symbol; reject ambiguous bare-USR lookups."""
         rows = self.lookup_symbols_by_usr(usr, semantic_universe_id)
@@ -5004,10 +5044,14 @@ class Storage:
                 kind="function",
                 linkage="internal",
                 identity_source=identity_source,
+                identity_translation_unit=identity_translation_unit,
             )
             for row in rows:
                 if row.identity_key == self._symbol_identity_key(
-                    probe, row.semantic_universe_id, None
+                    probe,
+                    row.semantic_universe_id,
+                    row.file_id,
+                    identity_translation_unit,
                 ):
                     return row
             universe = self.get_semantic_universe_by_id(rows[0].semantic_universe_id)
@@ -5019,6 +5063,21 @@ class Storage:
             if len(portable_matches) == 1:
                 return portable_matches[0]
             return None
+        if identity_translation_unit:
+            universe = self.get_semantic_universe_by_id(
+                rows[0].semantic_universe_id
+            )
+            prefix = (
+                f"{universe.key if universe is not None else 'legacy'}\x1flocal:"
+                f"{identity_translation_unit}\x1f"
+            )
+            tu_matches = [row for row in rows if row.identity_key.startswith(prefix)]
+            if len(tu_matches) == 1:
+                return tu_matches[0]
+            if len(tu_matches) > 1:
+                raise ValueError(
+                    f"ambiguous symbol USR within translation unit: {usr}"
+                )
         if len(rows) > 1:
             raise ValueError(
                 f"ambiguous symbol USR; pass semantic universe scope: {usr}"
@@ -5279,6 +5338,7 @@ class Storage:
         semantic_universe_id: Optional[int] = None,
         identity_source: Optional[str] = None,
         linkage: Optional[str] = None,
+        identity_translation_unit: Optional[str] = None,
     ) -> int:
         """Insert a stub row for `usr` (if absent), then SELECT its id.
 
@@ -5323,6 +5383,7 @@ class Storage:
                 kind=kind,
                 linkage=linkage,
                 identity_source=identity_source,
+                identity_translation_unit=identity_translation_unit,
             ),
             universe_id,
             decl_file_id,

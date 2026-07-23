@@ -53,7 +53,8 @@ NamespaceUseVisitor::scope_symbol_id(const clang::Decl *decl) const {
   if (usr.empty()) {
     return std::nullopt;
   }
-  return sink_.lookup_symbol_id(usr);
+  return sink_.lookup_symbol_id(
+      usr, expansion_loc(context_, nd->getLocation()).file);
 }
 
 bool NamespaceUseVisitor::TraverseDecl(clang::Decl *decl) {

@@ -37,7 +37,8 @@ int64_t Storage::add_symbol(const Symbol &sym) {
                                   ? sym.semantic_universe_id
                                   : semantic_universe_for_file(identity_file);
   const std::string identity_key =
-      symbol_identity_key(sym, universe_id, identity_file, sym.identity_source);
+      symbol_identity_key(sym, universe_id, identity_file, sym.identity_source,
+                          sym.identity_translation_unit);
   auto st = db_.prepare(
       "INSERT INTO symbol (usr, spelling, qual_name, display_name, kind, "
       "type_info, file_id, line, col, decl_file_id, decl_line, decl_col, "
@@ -175,8 +176,10 @@ bool Storage::update_symbol(
     const std::string &usr,
     const std::vector<std::pair<std::string, SqlValue>> &values,
     const std::optional<int64_t> &semantic_universe_id,
-    const std::optional<std::string> &identity_source) {
-  const auto target = lookup_symbol(usr, semantic_universe_id, identity_source);
+    const std::optional<std::string> &identity_source,
+    const std::optional<std::string> &identity_translation_unit) {
+  const auto target = lookup_symbol(usr, semantic_universe_id, identity_source,
+                                    identity_translation_unit);
   if (!target) {
     return false;
   }
@@ -242,21 +245,49 @@ void Storage::delete_symbols_for_file(int64_t file_id) {
 }
 
 std::optional<Symbol>
-Storage::lookup_symbol(const std::string &usr,
-                       const std::optional<int64_t> &semantic_universe_id,
-                       const std::optional<std::string> &identity_source) {
+Storage::lookup_symbol(
+    const std::string &usr, const std::optional<int64_t> &semantic_universe_id,
+    const std::optional<std::string> &identity_source,
+    const std::optional<std::string> &identity_translation_unit) {
+  if (semantic_universe_id && identity_source && !identity_source->empty() &&
+      identity_translation_unit && !identity_translation_unit->empty()) {
+    const auto universe = get_semantic_universe_by_id(*semantic_universe_id);
+    const std::string universe_key = universe ? universe->key : "legacy";
+    const auto find_by_identity_key =
+        [&](const std::string &identity_key) -> std::optional<Symbol> {
+      auto scoped = db_.prepare(std::string("SELECT ") + kSymbolCols +
+                                " FROM symbol WHERE semantic_universe_id = ?"
+                                " AND identity_key = ?");
+      scoped.bind(1, *semantic_universe_id);
+      scoped.bind(2, std::string_view(identity_key));
+      if (scoped.step()) {
+        return symbol_from(scoped);
+      }
+      return std::nullopt;
+    };
+    const std::string source_key =
+        portable_source_identity_for_path(*identity_source);
+    if (const auto local = find_by_identity_key(
+            universe_key + '\x1f' + "local:" + *identity_translation_unit +
+            '\x1f' + source_key + '\x1f' + usr)) {
+      return local;
+    }
+    if (const auto external =
+            find_by_identity_key(universe_key + '\x1f' + usr)) {
+      return external;
+    }
+    return std::nullopt;
+  }
   const auto matches = lookup_symbols_by_usr(usr, semantic_universe_id);
   if (matches.empty()) {
     return std::nullopt;
   }
   if (identity_source && !identity_source->empty()) {
-    Symbol local;
-    local.usr = usr;
-    local.linkage = "internal";
     for (const Symbol &candidate : matches) {
       if (candidate.identity_key ==
-          symbol_identity_key(local, candidate.semantic_universe_id,
-                              std::nullopt, identity_source)) {
+          symbol_identity_key(candidate, candidate.semantic_universe_id,
+                              candidate.file_id, identity_source,
+                              identity_translation_unit)) {
         return candidate;
       }
     }
@@ -276,6 +307,26 @@ Storage::lookup_symbol(const std::string &usr,
       return portable_matches.front();
     }
     return std::nullopt;
+  }
+  if (identity_translation_unit && !identity_translation_unit->empty()) {
+    const auto universe =
+        get_semantic_universe_by_id(matches.front().semantic_universe_id);
+    const std::string prefix = (universe ? universe->key : "legacy") +
+                               "\x1flocal:" + *identity_translation_unit +
+                               "\x1f";
+    std::vector<Symbol> tu_matches;
+    for (const Symbol &candidate : matches) {
+      if (candidate.identity_key.starts_with(prefix)) {
+        tu_matches.push_back(candidate);
+      }
+    }
+    if (tu_matches.size() == 1) {
+      return tu_matches.front();
+    }
+    if (tu_matches.size() > 1) {
+      throw StorageError("ambiguous symbol USR within translation unit: " +
+                         usr);
+    }
   }
   if (matches.size() > 1) {
     throw StorageError("ambiguous symbol USR; pass semantic universe scope: " +
@@ -518,7 +569,8 @@ int64_t Storage::mint_symbol_id(
     bool is_named_instance, const std::optional<std::string> &type_info,
     const std::optional<int64_t> &semantic_universe_id,
     const std::optional<std::string> &identity_source,
-    const std::optional<std::string> &linkage) {
+    const std::optional<std::string> &linkage,
+    const std::optional<std::string> &identity_translation_unit) {
   Symbol identity;
   identity.usr = usr;
   identity.linkage = linkage;
@@ -526,7 +578,8 @@ int64_t Storage::mint_symbol_id(
                                   ? *semantic_universe_id
                                   : semantic_universe_for_file(decl_file_id);
   const std::string identity_key =
-      symbol_identity_key(identity, universe_id, decl_file_id, identity_source);
+      symbol_identity_key(identity, universe_id, decl_file_id, identity_source,
+                          identity_translation_unit);
   // The follow-up SELECT returns the stable id whether the row was minted or
   // already present. 'function' is the fallback kind when the cursor kind is
   // unknown; the real def's add_symbol upsert overwrites kind/location/resolved

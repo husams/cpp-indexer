@@ -23,6 +23,7 @@ public:
 
   // nullopt when the decl has no USR.
   std::optional<MintRequest> build(const clang::NamedDecl *decl) const;
+  [[nodiscard]] const clang::ASTContext &context() const { return context_; }
 
 private:
   const clang::ASTContext &context_;

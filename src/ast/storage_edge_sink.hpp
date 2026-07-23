@@ -6,6 +6,8 @@
 
 #include "ast/edge_sink.hpp"
 
+#include <unordered_map>
+
 namespace cidx {
 class Storage;
 }
@@ -21,6 +23,7 @@ public:
                    const std::optional<std::string> &identity_source =
                        std::nullopt) override;
   void set_current_file_id(int64_t file_id) override;
+  void set_identity_translation_unit_file_id(int64_t file_id) override;
   int64_t mint_symbol(const MintRequest &req) override;
   int64_t add_edge(const EdgeRecord &edge) override;
   int64_t ensure_edge(const EdgeRecord &edge) override;
@@ -65,6 +68,9 @@ private:
   std::vector<int64_t> edge_ids_;
   std::vector<int64_t> definition_ids_;
   int64_t current_file_id_ = -1;
+  std::optional<int64_t> current_universe_id_;
+  std::optional<std::string> identity_translation_unit_;
+  std::unordered_map<std::string, std::optional<int64_t>> lookup_cache_;
 };
 
 } // namespace cidx::ast

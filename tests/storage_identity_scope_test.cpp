@@ -6,8 +6,10 @@
 #include <array>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
 #include "ast/storage_edge_sink.hpp"
+#include "ast/storage_symbol_sink.hpp"
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
@@ -158,6 +160,81 @@ TEST_CASE("v35 local identity is stable across file insertion order") {
   check_condition(make_key(false) == make_key(true));
 }
 
+TEST_CASE("v35 carries translation-unit identity through header sinks") {
+  cidx::Storage db(":memory:");
+  const auto universe = db.add_semantic_universe("program:banking");
+  const auto repo =
+      db.add_repository("banking", "repo", std::nullopt, universe);
+  const auto component = db.add_component("banking", "/tmp/cidx-banking");
+  db.set_component_repository(component, repo);
+  const auto dir = db.add_directory(component, "");
+  const auto header = db.add_file(dir, "shared.hpp");
+  const auto tu_a =
+      db.add_file(dir, "a.cpp", std::nullopt, std::nullopt,
+                  std::vector<std::string>{"-DCONFIG_A"}, "clang++");
+  const auto tu_b =
+      db.add_file(dir, "b.cpp", std::nullopt, std::nullopt,
+                  std::vector<std::string>{"-DCONFIG_B"}, "clang++");
+  const auto header_path = db.file_abs_path(header);
+  REQUIRE(header_path.has_value());
+
+  cidx::ast::SymbolRecord record;
+  record.file = *header_path;
+  record.usr = "c:@F@header_local";
+  record.spelling = "header_local";
+  record.kind = 8; // CXCursor_FunctionDecl
+  record.line = 1;
+  record.col = 1;
+  record.end_line = 1;
+  record.end_col = 13;
+  record.linkage = "internal";
+  record.is_definition = true;
+  record.resolved = true;
+
+  cidx::ast::StorageSymbolSink symbols(db);
+  symbols.set_current_file_id(header);
+  symbols.set_identity_translation_unit_file_id(tu_a);
+  symbols.emit(record);
+  symbols.set_identity_translation_unit_file_id(tu_b);
+  symbols.emit(record);
+  const auto rows = db.lookup_symbols_by_usr(record.usr, universe);
+  REQUIRE(rows.size() == 2);
+  CHECK(rows[0].identity_key != rows[1].identity_key);
+
+  cidx::ast::StorageEdgeSink edges(db);
+  edges.set_current_file_id(tu_a);
+  edges.set_identity_translation_unit_file_id(tu_a);
+  const auto a_id = edges.lookup_symbol_id(record.usr, *header_path);
+  edges.set_current_file_id(tu_b);
+  edges.set_identity_translation_unit_file_id(tu_b);
+  const auto b_id = edges.lookup_symbol_id(record.usr, *header_path);
+  REQUIRE(a_id.has_value());
+  REQUIRE(b_id.has_value());
+  CHECK(*a_id != *b_id);
+  CHECK(db.update_symbol(record.usr, {{"spelling", std::string("A")}}, universe,
+                         *header_path,
+                         db.portable_translation_unit_identity_for_file(tu_a)));
+  CHECK(db.lookup_symbol_by_id(*a_id)->spelling == "A");
+  CHECK(db.lookup_symbol_by_id(*b_id)->spelling == "header_local");
+
+  cidx::ast::MintRequest request;
+  request.usr = "c:@F@header_stub";
+  request.spelling = "header_stub";
+  request.kind_name = "function";
+  request.decl_file_id = header;
+  request.decl_line = 2;
+  request.decl_col = 1;
+  request.identity_source = *header_path;
+  request.linkage = "no-linkage";
+  edges.set_current_file_id(tu_a);
+  edges.set_identity_translation_unit_file_id(tu_a);
+  const auto stub_a = edges.mint_symbol(request);
+  edges.set_current_file_id(tu_b);
+  edges.set_identity_translation_unit_file_id(tu_b);
+  const auto stub_b = edges.mint_symbol(request);
+  CHECK(stub_a != stub_b);
+}
+
 TEST_CASE(
     "v34 migration preserves ids, graph references, and legacy identity") {
   const std::string path = temp_db();
@@ -199,6 +276,8 @@ TEST_CASE(
       );
       INSERT INTO symbol (id, usr, spelling, kind, linkage)
         VALUES (7, 'c:@N@legacy', 'legacy', 22, 'external');
+      INSERT INTO symbol (id, usr, spelling, kind, file_id, linkage)
+        VALUES (8, 'c:@F@legacy_local', 'legacy_local', 8, 42, 'internal');
       INSERT INTO edge (id, src_id, dst_id, kind) VALUES (11, 7, 7, 1);
     )sql");
   }
@@ -210,6 +289,14 @@ TEST_CASE(
       CHECK(symbol->semantic_universe_id == 1);
       CHECK(symbol->identity_key ==
             std::string("legacy") + char(31) + "c:@N@legacy");
+    }
+    const auto local = db.lookup_symbol_by_id(8);
+    REQUIRE(local.has_value());
+    if (local) {
+      CHECK(local->identity_key.find("file:") == std::string::npos);
+      CHECK(local->identity_key ==
+            std::string("legacy") + char(31) + "local:legacy" + char(31) +
+                "source:unknown" + char(31) + "c:@F@legacy_local");
     }
     REQUIRE(db.get_repository_by_id(3).has_value());
     const auto repository = db.get_repository_by_id(3);

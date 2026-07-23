@@ -252,7 +252,14 @@ void StatementEdgeVisitor::emit_factory_edge(const clang::CallExpr *call,
   if (fact_usr.empty()) {
     return;
   }
-  if (const auto fact = ctx_.sink().lookup_symbol_id(fact_usr)) {
+  const auto *fact_decl = args[0].getAsType()->getAsCXXRecordDecl();
+  if (const auto fact = ctx_.sink().lookup_symbol_id(
+          fact_usr,
+          fact_decl != nullptr
+              ? std::optional<std::string>(
+                    expansion_loc(ctx_.context(), fact_decl->getLocation())
+                        .file)
+              : std::nullopt)) {
     EdgeRecord fe;
     fe.src_id = ctx_.src_id();
     fe.dst_id = *fact;
@@ -299,7 +306,13 @@ void StatementEdgeVisitor::emit_construction_form(
   if (type_usr.empty()) {
     return;
   }
-  const auto dst = ctx_.sink().lookup_symbol_id(type_usr);
+  const auto *type_decl = ctor->getType()->getAsCXXRecordDecl();
+  const auto dst = ctx_.sink().lookup_symbol_id(
+      type_usr,
+      type_decl != nullptr
+          ? std::optional<std::string>(
+                expansion_loc(ctx_.context(), type_decl->getLocation()).file)
+          : std::nullopt);
   if (!dst) {
     return;
   }
@@ -327,7 +340,14 @@ void StatementEdgeVisitor::emit_construction_form(
 bool StatementEdgeVisitor::VisitCXXNewExpr(clang::CXXNewExpr *expr) {
   const std::string heap_usr = record_usr_of_type(expr->getType());
   if (!heap_usr.empty()) {
-    if (const auto dst = ctx_.sink().lookup_symbol_id(heap_usr)) {
+    const auto *heap_decl = expr->getType()->getAsCXXRecordDecl();
+    if (const auto dst = ctx_.sink().lookup_symbol_id(
+            heap_usr,
+            heap_decl != nullptr
+                ? std::optional<std::string>(
+                      expansion_loc(ctx_.context(), heap_decl->getLocation())
+                          .file)
+                : std::nullopt)) {
       EdgeRecord fe;
       fe.src_id = ctx_.src_id();
       fe.dst_id = *dst;
@@ -350,7 +370,13 @@ bool StatementEdgeVisitor::VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
   if (usr.empty()) {
     return true;
   }
-  if (const auto dst = ctx_.sink().lookup_symbol_id(usr)) {
+  const auto *type_decl = arg->getType()->getAsCXXRecordDecl();
+  if (const auto dst = ctx_.sink().lookup_symbol_id(
+          usr, type_decl != nullptr
+                   ? std::optional<std::string>(
+                         expansion_loc(ctx_.context(), type_decl->getLocation())
+                             .file)
+                   : std::nullopt)) {
     EdgeRecord fe;
     fe.src_id = ctx_.src_id();
     fe.dst_id = *dst;
@@ -368,7 +394,8 @@ bool StatementEdgeVisitor::VisitDeclRefExpr(clang::DeclRefExpr *dre) {
   if (ref != nullptr && !is_function_like_decl(ref)) {
     const std::string usr = usr_for_decl(ref);
     if (!usr.empty()) {
-      if (const auto dst = ctx_.sink().lookup_symbol_id(usr)) {
+      if (const auto dst = ctx_.sink().lookup_symbol_id(
+              usr, expansion_loc(ctx_.context(), ref->getLocation()).file)) {
         // The site anchors at the NAME (after qualifiers).
         ctx_.emit_site_edge_at(dre->getLocation(), *dst, 7);
       }
@@ -405,7 +432,8 @@ void StatementEdgeVisitor::emit_qualifier_type_use(
   if (usr.empty() || usr == ctx_.owner_usr()) {
     return;
   }
-  if (const auto dst = ctx_.sink().lookup_symbol_id(usr)) {
+  if (const auto dst = ctx_.sink().lookup_symbol_id(
+          usr, expansion_loc(ctx_.context(), td->getLocation()).file)) {
     if (*dst != ctx_.src_id()) {
       ctx_.emit_site_edge(dre, *dst, 7);
     }
@@ -433,7 +461,8 @@ bool StatementEdgeVisitor::VisitMemberExpr(clang::MemberExpr *me) {
   if (ref != nullptr && !is_function_like_decl(ref)) {
     const std::string usr = usr_for_decl(ref);
     if (!usr.empty()) {
-      if (const auto dst = ctx_.sink().lookup_symbol_id(usr)) {
+      if (const auto dst = ctx_.sink().lookup_symbol_id(
+              usr, expansion_loc(ctx_.context(), ref->getLocation()).file)) {
         // The site anchors at the member NAME token.
         ctx_.emit_site_edge_at(me->getMemberLoc(), *dst, 7);
       }

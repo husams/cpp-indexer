@@ -261,7 +261,8 @@ void DeclarationEdgeVisitor::emit_signature_uses(
   if (usr.empty()) {
     return;
   }
-  const auto fn_sym = sink_.lookup_symbol_id(usr);
+  const auto fn_sym = sink_.lookup_symbol_id(
+      usr, expansion_loc(context_, keyed->getLocation()).file);
   if (!fn_sym) {
     return;
   }
@@ -440,14 +441,14 @@ bool DeclarationEdgeVisitor::in_walk(const clang::Decl *decl) const {
 
 // Lookup-only edge between two already-indexed symbols (no stubs minted).
 // Returns the src symbol id when the edge was emitted.
-std::optional<int64_t>
-DeclarationEdgeVisitor::emit_lookup_edge(const std::string &src_usr,
-                                         const std::string &dst_usr, int kind) {
+std::optional<int64_t> DeclarationEdgeVisitor::emit_lookup_edge(
+    const std::string &src_usr, const std::string &dst_usr, int kind,
+    const std::string &src_source, const std::string &dst_source) {
   if (src_usr.empty() || dst_usr.empty()) {
     return std::nullopt;
   }
-  const auto src = sink_.lookup_symbol_id(src_usr);
-  const auto dst = sink_.lookup_symbol_id(dst_usr);
+  const auto src = sink_.lookup_symbol_id(src_usr, src_source);
+  const auto dst = sink_.lookup_symbol_id(dst_usr, dst_source);
   if (!src || !dst) {
     return std::nullopt;
   }
@@ -483,7 +484,9 @@ void DeclarationEdgeVisitor::emit_contains_edge(const clang::NamedDecl *decl) {
       ((pk == ParentKind::Record || pk == ParentKind::ClassTemplate) &&
        is_nested_type_child(decl));
   if (emit) {
-    emit_lookup_edge(usr_of(parent), usr_of(decl), 3);
+    emit_lookup_edge(usr_of(parent), usr_of(decl), 3,
+                     expansion_loc(context_, parent->getLocation()).file,
+                     expansion_loc(context_, decl->getLocation()).file);
   }
 }
 
@@ -562,7 +565,8 @@ void DeclarationEdgeVisitor::emit_base_specifier(
 int64_t
 DeclarationEdgeVisitor::inherits_src_id(const clang::NamedDecl *derived,
                                         const std::string &derived_usr) {
-  if (const auto sid = sink_.lookup_symbol_id(derived_usr)) {
+  if (const auto sid = sink_.lookup_symbol_id(
+          derived_usr, expansion_loc(context_, derived->getLocation()).file)) {
     return *sid;
   }
   auto req = mint_.build(derived);
@@ -592,7 +596,8 @@ void DeclarationEdgeVisitor::emit_crtp_instantiates(
   if (prim_usr.empty() || prim_usr == base_usr) {
     return;
   }
-  if (const auto prim_id = sink_.lookup_symbol_id(prim_usr)) {
+  if (const auto prim_id = sink_.lookup_symbol_id(
+          prim_usr, expansion_loc(context_, primary->getLocation()).file)) {
     EdgeRecord inst;
     inst.src_id = dst_id;
     inst.dst_id = *prim_id;
@@ -614,14 +619,18 @@ bool DeclarationEdgeVisitor::VisitFieldDecl(clang::FieldDecl *decl) {
   // FIELD_DECL branch: mint the X<B> instance FIRST, then the structural
   // of_type(20) field -> its declared type (v34: was the overloaded uses(7)).
   minter_.mint_instance_from_type(decl->getType());
-  if (const auto self = sink_.lookup_symbol_id(member_usr)) {
+  if (const auto self = sink_.lookup_symbol_id(
+          member_usr, expansion_loc(context_, decl->getLocation()).file)) {
     emit_type_use(sink_, *self, decl->getType(), file_id_,
                   expansion_loc(context_, decl->getLocation()), 0, 20);
     if (const auto tid = types_.intern(decl->getType())) {
       sink_.add_symbol_type(*self, kSymTypeOfTypeK, *tid);
     }
   }
-  emit_lookup_edge(member_usr, usr_of(decl->getParent()), 8);
+  emit_lookup_edge(
+      member_usr, usr_of(decl->getParent()), 8,
+      expansion_loc(context_, decl->getLocation()).file,
+      expansion_loc(context_, decl->getParent()->getLocation()).file);
   return true;
 }
 
@@ -635,7 +644,8 @@ bool DeclarationEdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
     return true;
   }
   minter_.mint_instance_from_type(decl->getType());
-  const auto self = sink_.lookup_symbol_id(usr);
+  const auto self = sink_.lookup_symbol_id(
+      usr, expansion_loc(context_, decl->getLocation()).file);
   if (!self) {
     return true;
   }
@@ -727,7 +737,8 @@ void DeclarationEdgeVisitor::emit_static_init_def_edges(
               call->getCalleeDecl())) {
         const std::string cu = usr_for_decl(fd);
         if (!cu.empty()) {
-          if (const auto cid = sink_.lookup_symbol_id(cu)) {
+          if (const auto cid = sink_.lookup_symbol_id(
+                  cu, expansion_loc(context_, fd->getLocation()).file)) {
             sink_.add_def_edge(def_id, *cid, 7);
           }
         }
@@ -755,7 +766,8 @@ bool DeclarationEdgeVisitor::VisitTypedefNameDecl(
     return true;
   }
   minter_.mint_named_instance(decl); // minted FIRST (order-dependent)
-  if (const auto self = sink_.lookup_symbol_id(usr)) {
+  if (const auto self = sink_.lookup_symbol_id(
+          usr, expansion_loc(context_, decl->getLocation()).file)) {
     // alias_of(19), not uses(7): the alias -> underlying-type relation is
     // definitional, and "uses" stays for references.
     emit_type_use(sink_, *self, decl->getUnderlyingType(), file_id_,
@@ -776,7 +788,8 @@ bool DeclarationEdgeVisitor::VisitCXXMethodDecl(clang::CXXMethodDecl *decl) {
   // (idempotent); a second counted emission here would duplicate it.
   std::optional<int64_t> src;
   if (callable_template_info(decl)) {
-    src = sink_.lookup_symbol_id(usr_for_decl(decl));
+    src = sink_.lookup_symbol_id(
+        usr_for_decl(decl), expansion_loc(context_, decl->getLocation()).file);
   } else {
     src = emit_lookup_edge(usr_for_decl(decl), usr_of(decl->getParent()), 9);
   }
@@ -856,7 +869,9 @@ bool DeclarationEdgeVisitor::VisitFriendDecl(clang::FriendDecl *decl) {
   }
   const std::string owner_usr = usr_of(owner);
   for (const clang::NamedDecl *target : friend_targets(tsi)) {
-    emit_lookup_edge(owner_usr, usr_for_decl(target), 17);
+    emit_lookup_edge(owner_usr, usr_for_decl(target), 17,
+                     expansion_loc(context_, owner->getLocation()).file,
+                     expansion_loc(context_, target->getLocation()).file);
   }
   return true;
 }
@@ -882,7 +897,8 @@ void DeclarationEdgeVisitor::set_template_default(
   } else if (value.getKind() == clang::TemplateArgument::Template) {
     const auto *td = value.getAsTemplate().getAsTemplateDecl();
     if (td != nullptr) {
-      record.default_ref_id = sink_.lookup_symbol_id(usr_for_decl(td));
+      record.default_ref_id = sink_.lookup_symbol_id(
+          usr_for_decl(td), expansion_loc(context_, td->getLocation()).file);
     }
   }
 }
@@ -943,7 +959,8 @@ bool DeclarationEdgeVisitor::VisitClassTemplateDecl(
   if (usr.empty()) {
     return true;
   }
-  const auto id = sink_.lookup_symbol_id(usr);
+  const auto id = sink_.lookup_symbol_id(
+      usr, expansion_loc(context_, decl->getLocation()).file);
   if (!id) {
     return true;
   }
@@ -970,7 +987,8 @@ bool DeclarationEdgeVisitor::VisitFunctionTemplateDecl(
   if (usr.empty()) {
     return true;
   }
-  const auto id = sink_.lookup_symbol_id(usr);
+  const auto id = sink_.lookup_symbol_id(
+      usr, expansion_loc(context_, decl->getLocation()).file);
   if (!id) {
     return true;
   }
@@ -980,7 +998,9 @@ bool DeclarationEdgeVisitor::VisitFunctionTemplateDecl(
   const auto *owner_rec = llvm::dyn_cast_or_null<clang::CXXRecordDecl>(
       dc != nullptr ? llvm::dyn_cast<clang::Decl>(dc) : nullptr);
   if (owner_rec != nullptr) {
-    emit_lookup_edge(usr, usr_of(owner_rec), 9);
+    emit_lookup_edge(usr, usr_of(owner_rec), 9,
+                     expansion_loc(context_, decl->getLocation()).file,
+                     expansion_loc(context_, owner_rec->getLocation()).file);
   }
   emit_signature_uses(decl->getTemplatedDecl());
   emit_template_params(decl->getTemplateParameters(), *id);
@@ -1016,7 +1036,8 @@ void DeclarationEdgeVisitor::emit_callable_identity(
     if (method == nullptr || !is_template_instantiation(method->getParent())) {
       return;
     }
-    const auto dst_id = sink_.lookup_symbol_id(usr_for_decl(fd));
+    const auto dst_id = sink_.lookup_symbol_id(
+        usr_for_decl(fd), expansion_loc(context_, fd->getLocation()).file);
     if (dst_id) {
       emit_method_owner(sink_, mint_, targ_encoder_, *dst_id, method);
       emit_signature_uses(fd);
@@ -1076,7 +1097,8 @@ std::optional<int64_t> DeclarationEdgeVisitor::specialization_symbol_id(
   if (spec_usr.empty() || prim_usr.empty() || spec_usr == prim_usr) {
     return std::nullopt;
   }
-  return sink_.lookup_symbol_id(spec_usr);
+  return sink_.lookup_symbol_id(
+      spec_usr, expansion_loc(context_, decl->getLocation()).file);
 }
 
 // -- specializes (4) / explicit-instantiation instantiates (5) + template_arg

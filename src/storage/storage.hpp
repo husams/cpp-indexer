@@ -282,7 +282,9 @@ public:
       const std::string &usr,
       const std::vector<std::pair<std::string, SqlValue>> &values,
       const std::optional<int64_t> &semantic_universe_id = std::nullopt,
-      const std::optional<std::string> &identity_source = std::nullopt);
+      const std::optional<std::string> &identity_source = std::nullopt,
+      const std::optional<std::string> &identity_translation_unit =
+          std::nullopt);
   bool update_symbol_by_id(
       int64_t symbol_id,
       const std::vector<std::pair<std::string, SqlValue>> &values);
@@ -292,7 +294,9 @@ public:
   std::optional<Symbol> lookup_symbol(
       const std::string &usr,
       const std::optional<int64_t> &semantic_universe_id = std::nullopt,
-      const std::optional<std::string> &identity_source = std::nullopt);
+      const std::optional<std::string> &identity_source = std::nullopt,
+      const std::optional<std::string> &identity_translation_unit =
+          std::nullopt);
   std::vector<Symbol> lookup_symbols_by_usr(
       const std::string &usr,
       const std::optional<int64_t> &semantic_universe_id = std::nullopt);
@@ -362,7 +366,9 @@ public:
       const std::optional<std::string> &type_info = std::nullopt,
       const std::optional<int64_t> &semantic_universe_id = std::nullopt,
       const std::optional<std::string> &identity_source = std::nullopt,
-      const std::optional<std::string> &linkage = std::nullopt);
+      const std::optional<std::string> &linkage = std::nullopt,
+      const std::optional<std::string> &identity_translation_unit =
+          std::nullopt);
 
   // UNIQUE upsert on (src_id, dst_id, kind); increments count on conflict.
   // Returns the edge.id for edge_site linkage.
@@ -730,6 +736,7 @@ public:
   void stamp_index_identity();
   std::string portable_source_identity_for_path(const std::string &path);
   std::string portable_source_identity_for_file(int64_t file_id);
+  std::string portable_translation_unit_identity_for_file(int64_t file_id);
   int64_t semantic_universe_for_file_id(int64_t file_id);
 
 private:
@@ -746,10 +753,11 @@ private:
   void migrate_symbol_identity_scope(); // v34 -> v35: scoped symbol identity
   int64_t default_semantic_universe_id();
   int64_t semantic_universe_for_file(const std::optional<int64_t> &file_id);
-  std::string
-  symbol_identity_key(const Symbol &sym, int64_t universe_id,
-                      const std::optional<int64_t> &file_id,
-                      const std::optional<std::string> &source = std::nullopt);
+  std::string symbol_identity_key(
+      const Symbol &sym, int64_t universe_id,
+      const std::optional<int64_t> &file_id,
+      const std::optional<std::string> &source = std::nullopt,
+      const std::optional<std::string> &translation_unit = std::nullopt);
   // v24: resolved absolute path of a repository's active clone, or nullopt when
   // ungrouped / no live clone. Mirrors Python Storage._active_clone_root.
   std::optional<std::string>

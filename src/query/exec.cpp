@@ -852,7 +852,8 @@ public:
       return res;
     }
     if (st.shape == Shape::Nodes) {
-      materialize(st, {"id", "usr", "name", "kind"});
+      materialize(st, {"id", "usr", "semantic_universe", "identity_key", "name",
+                       "kind"});
     }
     if (!st.limit_in_effect &&
         static_cast<int64_t>(st.rows.size()) > kDefaultResultCap) {

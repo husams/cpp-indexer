@@ -26,6 +26,7 @@ else ~/.cache/cidx -- never the current directory:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -92,6 +93,22 @@ _HEADER_SUFFIXES = frozenset(
 def _is_header(path: str) -> bool:
     ext = os.path.splitext(path)[1].lower()
     return ext == "" or ext in _HEADER_SUFFIXES
+
+
+def _build_evidence_universe_key(commands, root: str, remote_url: str | None) -> str:
+    """Derive a portable universe from the declared compile-command evidence."""
+    records = []
+    for cmd in commands:
+        record = os.path.relpath(compiledb.source_path(cmd), root)
+        record += "\0" + compiledb.driver(cmd)
+        for arg in compiledb.strip_for_libclang(cmd):
+            record += "\0" + arg
+        records.append(record)
+    records.sort()
+    evidence = remote_url or "workspace"
+    for record in records:
+        evidence += "\0" + record
+    return "build:" + hashlib.sha1(evidence.encode()).hexdigest()
 
 
 # clang diagnostic severities (clang.cindex.Diagnostic.Warning/Error/Fatal).
@@ -307,7 +324,20 @@ def cmd_add_source(args) -> int:
         # directory is its first clone and becomes active.
         repo_name_val = getattr(args, "repo", None) or name
         remote_url = git_remote_url(root) if root else None
-        rid = db.add_repository(repo_name_val, args.kind, remote_url)
+        universe_key = getattr(args, "universe", None) or (
+            "workspace:" + (remote_url or "path:" + path)
+        )
+        universe_id = db.add_semantic_universe(universe_key)
+        existing_repo = db.get_repository_by_name(repo_name_val)
+        repository_scope = (
+            universe_id
+            if getattr(args, "universe", None) or existing_repo is None
+            else None
+        )
+        rid = db.add_repository(
+            repo_name_val, args.kind, remote_url,
+            semantic_universe_id=repository_scope,
+        )
         clone_id = db.add_clone(rid, path)
         repo = db.get_repository_by_id(rid)
         if repo is not None and repo.active_clone_id is None:
@@ -392,6 +422,10 @@ def cmd_import(args) -> int:
     # version segment (e.g. .../1.4.0). Manual version control lives in
     # `cidx component set-version`, not on import.
     base, version = compiledb.split_base_version(root)
+    remote_url = git_remote_url(groot) if groot else None
+    universe_key = getattr(args, "universe", None) or _build_evidence_universe_key(
+        commands, root, remote_url
+    )
 
     imported, skipped = 0, 0
     with Storage(args.index) as db:
@@ -421,6 +455,7 @@ def cmd_import(args) -> int:
                     f"force: removed existing component #{existing.id} "
                     f"at {existing_base} (files and indexed symbols)"
                 )
+        universe_id = db.add_semantic_universe(universe_key)
         # The db-dir/git-root component is created LAZILY: only when a source
         # matches no already-registered component. Matching first means an
         # import whose sources are already covered by existing components
@@ -469,8 +504,16 @@ def cmd_import(args) -> int:
         # checkout directory (`root`) is registered as a clone and made active
         # when the repository has none yet; `repo switch` repoints it later.
         repo_name_val = getattr(args, "repo", None) or name
-        remote_url = git_remote_url(groot) if groot else None
-        rid = db.add_repository(repo_name_val, "repo", remote_url)
+        existing_repo = db.get_repository_by_name(repo_name_val)
+        repository_scope = (
+            universe_id
+            if getattr(args, "universe", None) or existing_repo is None
+            else None
+        )
+        rid = db.add_repository(
+            repo_name_val, "repo", remote_url,
+            semantic_universe_id=repository_scope,
+        )
         clone_id = db.add_clone(rid, root)
         repo = db.get_repository_by_id(rid)
         if repo is not None and repo.active_clone_id is None:
@@ -2096,6 +2139,10 @@ def main(argv=None) -> int:
         "(default: the git/dir-derived name)",
     )
     p.add_argument(
+        "--universe",
+        help="portable semantic universe key (default: build evidence)",
+    )
+    p.add_argument(
         "--force",
         action="store_true",
         help="reimport: delete the existing component (its files "
@@ -2231,6 +2278,10 @@ def main(argv=None) -> int:
     q.add_argument("--name", help="component name (default: from .git/config)")
     q.add_argument(
         "--repo", help="repository name to group under (default: component name)"
+    )
+    q.add_argument(
+        "--universe",
+        help="portable semantic universe key (default: workspace identity)",
     )
     q.add_argument("--kind", choices=("repo", "external"), default="repo")
     q.add_argument(

@@ -260,7 +260,9 @@ def test_order_limit_default_fields_result_dict(seeded):
     assert not r.truncated
 
     d = ex.run((start(symbol("USR::A")) | out("calls")).plan)
-    assert d.fields == ("id", "usr", "name", "kind")
+    assert d.fields == (
+        "id", "usr", "semantic_universe", "identity_key", "name", "kind"
+    )
     dd = d.to_dict()
     assert dd["shape"] == "nodes"
     assert dd["view"] == "symbol"

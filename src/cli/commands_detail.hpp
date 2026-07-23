@@ -155,6 +155,36 @@ inline std::string source_path(const CompileCommand &cmd) {
   return pathutil::normpath(pathutil::join(cmd.directory, cmd.filename));
 }
 
+// The default import universe is derived from declared build evidence, not a
+// repository display name.  The command set is normalized to source paths
+// relative to the workspace root plus driver/parse options, then anchored to
+// the repository's declared remote when one is available.  --universe remains
+// the explicit override for intentional composition.
+inline std::string
+build_evidence_universe_key(const std::vector<CompileCommand> &commands,
+                            const std::string &root,
+                            const std::optional<std::string> &remote_url) {
+  std::vector<std::string> records;
+  records.reserve(commands.size());
+  for (const CompileCommand &cmd : commands) {
+    std::string record = pathutil::relpath(source_path(cmd), root);
+    record += '\0';
+    record += cmd.driver;
+    for (const std::string &arg : cmd.args) {
+      record += '\0';
+      record += arg;
+    }
+    records.push_back(std::move(record));
+  }
+  std::ranges::sort(records);
+  std::string evidence = remote_url.value_or("workspace");
+  for (const std::string &record : records) {
+    evidence += '\0';
+    evidence += record;
+  }
+  return "build:" + sha1_hex(evidence);
+}
+
 // _lookup_component (cli.py:162-171): nullopt name -> no scoping; unknown
 // name -> "error: no component named '<name>'" printed, false returned
 // (LookupError -> return 1 in every caller).

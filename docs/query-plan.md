@@ -161,8 +161,10 @@ report `unverifiable`; a changed source/configuration reports `stale`.
 `Executor.explain(plan)` (C++ and Python) returns the normalized plan together
 with the same `index` object without changing the database.
 
-Node streams without `select` emit the default fields `id`, `usr`, `name`,
-`kind`. Row objects preserve `select` field order.
+Node streams without `select` emit the default fields `id`, `usr`,
+`semantic_universe`, `identity_key`, `name`, `kind`. The scope fields keep a
+bare-USR result portable and unambiguous across universes and database
+generations. Row objects preserve `select` field order.
 
 ## Compatibility
 

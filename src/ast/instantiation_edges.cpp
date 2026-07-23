@@ -4,6 +4,7 @@
 #include "ast/display_name_rewrite.hpp"
 #include "ast/edge_records.hpp"
 #include "ast/edge_sink.hpp"
+#include "ast/location.hpp"
 #include "ast/mint_builder.hpp"
 #include "ast/template_argument_encoder.hpp"
 #include "ast/usr.hpp"
@@ -47,7 +48,8 @@ void emit_spec_owner(EdgeSink &sink, MintBuilder &mint,
   sink.ensure_edge(mo);
   const std::string cp = usr_for_decl(cls_prim);
   if (!cp.empty()) {
-    if (const auto cpid = sink.lookup_symbol_id(cp)) {
+    if (const auto cpid = sink.lookup_symbol_id(
+            cp, expansion_loc(mint.context(), cls_prim->getLocation()).file)) {
       EdgeRecord ie;
       ie.src_id = type_id;
       ie.dst_id = *cpid;
@@ -65,7 +67,9 @@ void emit_spec_owner(EdgeSink &sink, MintBuilder &mint,
 // its pattern (`Outer<T>::Inner`) so the owner is not structurally orphaned:
 // owner -> pattern with the TSK-derived kind (instantiates, or specializes
 // for an authored member specialization).
-void emit_member_class_pattern_edge(EdgeSink &sink, int64_t owner_id,
+void emit_member_class_pattern_edge(EdgeSink &sink,
+                                    const clang::ASTContext &context,
+                                    int64_t owner_id,
                                     const clang::CXXRecordDecl *owner) {
   const clang::CXXRecordDecl *pattern = owner->getInstantiatedFromMemberClass();
   if (pattern == nullptr) {
@@ -75,7 +79,8 @@ void emit_member_class_pattern_edge(EdgeSink &sink, int64_t owner_id,
   if (pat_usr.empty()) {
     return;
   }
-  const auto pid = sink.lookup_symbol_id(pat_usr);
+  const auto pid = sink.lookup_symbol_id(
+      pat_usr, expansion_loc(context, pattern->getLocation()).file);
   if (!pid) {
     return;
   }
@@ -111,7 +116,7 @@ void emit_owner_promotion(EdgeSink &sink, MintBuilder &mint,
       mo.dst_id = oid;
       mo.kind = 9;
       sink.ensure_edge(mo);
-      emit_member_class_pattern_edge(sink, oid, owner);
+      emit_member_class_pattern_edge(sink, mint.context(), oid, owner);
     }
     return;
   }
@@ -170,7 +175,9 @@ void emit_callable_template_identity(
   const std::string prim_usr = usr_for_decl(info.primary);
   const std::string fd_usr = usr_for_decl(fd);
   if (!prim_usr.empty() && prim_usr != fd_usr) {
-    if (const auto prim = sink.lookup_symbol_id(prim_usr)) {
+    if (const auto prim = sink.lookup_symbol_id(
+            prim_usr,
+            expansion_loc(mint.context(), info.primary->getLocation()).file)) {
       EdgeRecord e;
       e.src_id = dst_id;
       e.dst_id = *prim;

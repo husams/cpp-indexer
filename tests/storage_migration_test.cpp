@@ -73,9 +73,9 @@ void check_migrated(const std::string &db_path) {
   cidx::SqliteDb raw(db_path);
 
   const auto scols = table_columns(raw, "symbol");
-  for (const char *c : {"qual_name", "decl_file_id", "decl_line", "decl_col",
-                        "is_pure", "is_static", "decl_path",
-                        "semantic_universe_id", "identity_key"}) {
+  for (const char *c :
+       {"qual_name", "decl_file_id", "decl_line", "decl_col", "is_pure",
+        "is_static", "decl_path", "semantic_universe_id", "identity_key"}) {
     CHECK_MESSAGE(has_col(scols, c), "symbol." << c << " present");
   }
   CHECK(has_col(table_columns(raw, "file"), "driver"));
@@ -463,10 +463,11 @@ TEST_CASE("v28 -> v29: template_arg arg_kind remapped to the canonical codes") {
   }
   {
     cidx::SqliteDb raw(path);
-    raw.exec("INSERT INTO symbol (id, usr, spelling, kind, "
-             "semantic_universe_id, identity_key) VALUES "
-             "(1, 'c:@S@Spec', 'Spec', 2, 1, 'legacy' || char(31) || 'c:@S@Spec'),"
-             "(2, 'c:@F@fn', 'fn', 8, 1, 'legacy' || char(31) || 'c:@F@fn')");
+    raw.exec(
+        "INSERT INTO symbol (id, usr, spelling, kind, "
+        "semantic_universe_id, identity_key) VALUES "
+        "(1, 'c:@S@Spec', 'Spec', 2, 1, 'legacy' || char(31) || 'c:@S@Spec'),"
+        "(2, 'c:@F@fn', 'fn', 8, 1, 'legacy' || char(31) || 'c:@F@fn')");
     raw.exec("INSERT INTO template_arg (owner_id, position, arg_kind) VALUES "
              "(1, 0, 8),"  // legacy Pack           -> 4
              "(1, 1, 5),"  // legacy Template       -> 3

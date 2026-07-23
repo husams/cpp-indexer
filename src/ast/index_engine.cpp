@@ -174,6 +174,7 @@ private:
 
   int run_symbol_pass(const std::string &file, int64_t file_id) {
     symbols_.set_current_file_id(file_id);
+    symbols_.set_identity_translation_unit_file_id(state_.rec->id);
     symbols_.reset_counters();
     auto txn = db_.transaction();
     SymbolVisitor visitor(context_, symbols_, file);
@@ -187,6 +188,7 @@ private:
       return;
     }
     edges_.set_current_file_id(file_id);
+    edges_.set_identity_translation_unit_file_id(state_.rec->id);
     edges_.delete_edges_for_file(file_id);
     edges_.delete_definitions_for_file(file_id);
     edges_.reset_fact_ids();

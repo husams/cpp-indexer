@@ -1165,6 +1165,22 @@ void Storage::migrate_symbol_identity_scope() {
     return;
   }
 
+  const bool has_file_paths = has_table("file") && has_table("directory") &&
+                              has_table("component") && has_table("repository");
+  const std::string legacy_source =
+      has_file_paths ? "COALESCE((SELECT 'source:' || "
+                       "COALESCE(r.remote_url, 'repo:' || "
+                       "r.name, 'component:' || c.path) || "
+                       "char(31) || c.path || char(31) || "
+                       "d.path || char(31) || f.name FROM "
+                       "file f JOIN directory d ON d.id = "
+                       "f.directory_id JOIN component c ON "
+                       "c.id = d.component_id LEFT JOIN "
+                       "repository r ON r.id = c.repository_id "
+                       "WHERE f.id = symbol.file_id), "
+                       "'source:unknown')"
+                     : "'source:unknown'";
+
   db_.exec("PRAGMA foreign_keys = OFF");
   db_.exec(
       "CREATE TABLE symbol_v35 ("
@@ -1175,13 +1191,16 @@ void Storage::migrate_symbol_identity_scope() {
       "decl_file_id INTEGER REFERENCES file(id) ON DELETE SET NULL, "
       "decl_line INTEGER, decl_col INTEGER, decl_path TEXT, "
       "is_definition INTEGER NOT NULL DEFAULT 0, "
-      "is_pure INTEGER NOT NULL DEFAULT 0, is_static INTEGER NOT NULL DEFAULT 0, "
+      "is_pure INTEGER NOT NULL DEFAULT 0, is_static INTEGER NOT NULL DEFAULT "
+      "0, "
       "is_instantiation INTEGER NOT NULL DEFAULT 0, "
-      "is_named_instance INTEGER NOT NULL DEFAULT 0, linkage TEXT, access TEXT, "
+      "is_named_instance INTEGER NOT NULL DEFAULT 0, linkage TEXT, access "
+      "TEXT, "
       "parent_usr TEXT, resolved INTEGER NOT NULL DEFAULT 0, "
       "multi_def INTEGER NOT NULL DEFAULT 0, const_value TEXT, "
       "semantic_universe_id INTEGER NOT NULL DEFAULT 1 "
-      "REFERENCES semantic_universe(id), identity_key TEXT NOT NULL DEFAULT '');");
+      "REFERENCES semantic_universe(id), identity_key TEXT NOT NULL DEFAULT "
+      "'');");
   db_.exec(
       "INSERT INTO symbol_v35 (id, usr, spelling, qual_name, display_name, "
       "kind, type_info, file_id, line, col, end_line, end_col, decl_file_id, "
@@ -1190,12 +1209,15 @@ void Storage::migrate_symbol_identity_scope() {
       "is_named_instance, linkage, access, parent_usr, resolved, multi_def, "
       "const_value, semantic_universe_id, identity_key) "
       "SELECT id, usr, spelling, qual_name, display_name, kind, type_info, "
-      "file_id, line, col, end_line, end_col, decl_file_id, decl_line, decl_col, "
+      "file_id, line, col, end_line, end_col, decl_file_id, decl_line, "
+      "decl_col, "
       "decl_path, is_definition, is_pure, is_static, is_instantiation, "
       "is_named_instance, linkage, access, parent_usr, resolved, multi_def, "
       "const_value, 1, "
       "'legacy' || char(31) || CASE WHEN linkage IN ('internal', 'no-linkage') "
-      "THEN 'file:' || COALESCE(file_id, 0) || char(31) ELSE '' END || usr "
+      "THEN 'local:legacy' || char(31) || " +
+      legacy_source +
+      " || char(31) ELSE '' END || usr "
       "FROM symbol;");
   db_.exec("DROP TABLE symbol; ALTER TABLE symbol_v35 RENAME TO symbol;");
   db_.exec("PRAGMA foreign_keys = ON");

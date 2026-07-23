@@ -128,6 +128,8 @@ struct Symbol {
   std::string identity_key; // v35: portable scope-keyed semantic identity
   // Transient producer hint; never persisted as a column.
   std::optional<std::string> identity_source;
+  // Transient translation-unit/build identity; never persisted as a column.
+  std::optional<std::string> identity_translation_unit;
   int64_t id = -1;
 };
 
