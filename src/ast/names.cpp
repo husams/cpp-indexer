@@ -5,6 +5,7 @@
 #include "ast/location.hpp"
 
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
@@ -22,6 +23,46 @@ std::string spelling(const clang::NamedDecl *decl) {
 }
 
 namespace {
+
+// The template PARAMETER name list, comma-joined inside <>: "<T, Args...>".
+void print_template_params(llvm::raw_string_ostream &os,
+                           const clang::TemplateParameterList *params) {
+  os << '<';
+  bool first = true;
+  for (const clang::NamedDecl *param : *params) {
+    if (!first) {
+      os << ", ";
+    }
+    first = false;
+    os << param->getNameAsString();
+    if (const auto *type = llvm::dyn_cast<clang::TemplateTypeParmDecl>(param);
+        type != nullptr && type->isParameterPack()) {
+      os << "...";
+    }
+  }
+  os << '>';
+}
+
+// The alias users write for a specialization, when the library declares one:
+// libc++ marks basic_string<char, ...> with [[clang::preferred_name(string)]],
+// so std::string is the name to show. Mirrors TypePrinter's printTag handling.
+const clang::TypedefNameDecl *
+preferred_name_for(const clang::PrintingPolicy &policy,
+                   const clang::ClassTemplateSpecializationDecl *spec) {
+  if (!policy.UsePreferredNames) {
+    return nullptr;
+  }
+  for (const auto *attr : spec->specific_attrs<clang::PreferredNameAttr>()) {
+    if (!clang::declaresSameEntity(attr->getTypedefType()->getAsCXXRecordDecl(),
+                                   spec)) {
+      continue;
+    }
+    if (const auto *tt = attr->getTypedefType()->getAs<clang::TypedefType>()) {
+      return tt->getDecl();
+    }
+  }
+  return nullptr;
+}
 
 // The AS-WRITTEN template argument list, comma-joined inside <>.
 void print_written_args(llvm::raw_string_ostream &os,
@@ -61,20 +102,7 @@ void print_function_display(llvm::raw_string_ostream &os,
           os, fd->getTemplateSpecializationArgs()->asArray(), policy);
     }
   } else if (const auto *ft = fd->getDescribedFunctionTemplate()) {
-    os << '<';
-    bool first = true;
-    for (const clang::NamedDecl *param : *ft->getTemplateParameters()) {
-      if (!first) {
-        os << ", ";
-      }
-      first = false;
-      os << param->getNameAsString();
-      if (const auto *type = llvm::dyn_cast<clang::TemplateTypeParmDecl>(param);
-          type != nullptr && type->isParameterPack()) {
-        os << "...";
-      }
-    }
-    os << '>';
+    print_template_params(os, ft->getTemplateParameters());
   }
   os << '(';
   bool first = true;
@@ -100,17 +128,33 @@ void print_function_display(llvm::raw_string_ostream &os,
 void print_class_spec_display(
     llvm::raw_string_ostream &os, const clang::PrintingPolicy &policy,
     const clang::ClassTemplateSpecializationDecl *spec) {
-  spec->getDeclName().print(os, policy);
-  if (const auto *partial =
-          llvm::dyn_cast<clang::ClassTemplatePartialSpecializationDecl>(spec)) {
-    if (const clang::ASTTemplateArgumentListInfo *written =
-            partial->getTemplateArgsAsWritten()) {
-      print_written_args(os, policy, written);
-      return;
-    }
+  // Anything authored keeps its arguments AS WRITTEN: a partial
+  // specialization shows 'RuleTemplate<int, NameType>' (not canonical
+  // type-parameter-0-0), and 'template class Buffer<Widget, 4>;' stays
+  // Buffer<Widget, 4> even where an argument restates a default.
+  const auto *partial =
+      llvm::dyn_cast<clang::ClassTemplatePartialSpecializationDecl>(spec);
+  const clang::ASTTemplateArgumentListInfo *written =
+      partial != nullptr ? partial->getTemplateArgsAsWritten()
+                         : spec->getTemplateArgsAsWritten();
+  if (written != nullptr) {
+    spec->getDeclName().print(os, policy);
+    print_written_args(os, policy, written);
+    return;
   }
-  clang::printTemplateArgumentList(os, spec->getTemplateArgs().asArray(),
-                                   policy);
+  // Implicit instantiations (every standard-library stub) print the alias
+  // users write: a library-declared preferred name wins outright
+  // (std::string, not basic_string<char, ...>), and TPL lets the policy drop
+  // trailing arguments that only restate the template's defaults
+  // (vector<int, std::allocator<int>> prints vector<int>).
+  if (const clang::TypedefNameDecl *alias = preferred_name_for(policy, spec)) {
+    alias->getDeclName().print(os, policy);
+    return;
+  }
+  spec->getDeclName().print(os, policy);
+  clang::printTemplateArgumentList(
+      os, spec->getTemplateArgs().asArray(), policy,
+      spec->getSpecializedTemplate()->getTemplateParameters());
 }
 
 // The FunctionDecl whose signature identifies this decl: the decl itself, or a
@@ -155,78 +199,72 @@ void print_function_signature(llvm::raw_string_ostream &os,
   }
 }
 
+// The template-parameter list a scope level prints alongside its name: a class
+// template pattern (or its templated record) shows "Name<T, Args...>".
+const clang::TemplateParameterList *
+described_params(const clang::NamedDecl *nd) {
+  if (const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(nd)) {
+    const auto *ct = rec->getDescribedClassTemplate();
+    return ct != nullptr ? ct->getTemplateParameters() : nullptr;
+  }
+  if (const auto *ct = llvm::dyn_cast<clang::ClassTemplateDecl>(nd)) {
+    return ct->getTemplateParameters();
+  }
+  return nullptr;
+}
+
+// One scope level's spelling inside a qualified name; empty levels are skipped
+// by the caller. Anonymous scopes print nothing; an inline namespace (libc++'s
+// std::__1) is transparent to users, so the alias every user writes --
+// std::vector, not std::__1::vector -- survives as the qualified name.
+std::string scope_level(const clang::ASTContext &context,
+                        const clang::NamedDecl *nd, bool leaf_signature) {
+  if (const auto *ns = llvm::dyn_cast<clang::NamespaceDecl>(nd);
+      ns != nullptr && ns->isInline()) {
+    return {};
+  }
+  std::string s;
+  llvm::raw_string_ostream os(s);
+  const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(nd);
+  if (rec != nullptr && rec->isLambda()) {
+    const ExpansionLoc loc = expansion_loc(context, rec->getLocation());
+    os << "(lambda at " << loc.file << ':' << loc.line << ':' << loc.col << ')';
+  } else if (const auto *spec =
+                 llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(nd)) {
+    // A specialization level carries its argument list, so MyClass<int>
+    // and MyClass<double> (and their members) never collapse onto the
+    // pattern's qualified name. Partial specializations print as written.
+    print_class_spec_display(os, printing_policy(context), spec);
+  } else if (const clang::FunctionDecl *fd =
+                 leaf_signature ? function_for_signature(nd) : nullptr;
+             fd != nullptr) {
+    // The leaf function/method carries its full signature (parameter types
+    // plus member cv/ref qualifiers) so overloads never collapse onto one
+    // qualified name. Enclosing function scopes stay bare names.
+    print_function_signature(os, printing_policy(context), fd);
+  } else if (const clang::TemplateParameterList *params =
+                 described_params(nd)) {
+    os << nd->getNameAsString();
+    print_template_params(os, params);
+  } else {
+    os << nd->getDeclName().getAsString();
+  }
+  return s;
+}
+
 // Mirror cidx qualified_name (ast_cursor.cpp): walk semantic parents to the TU,
-// joining non-empty spellings with "::" (anonymous levels skipped). libclang
-// spells a lambda's closure class "(lambda at <file>:<line>:<col>)", so lambda
-// scopes survive in the chain. With with_signature, the leaf function/method
-// carries its full signature so overloads stay distinct.
+// joining non-empty spellings with "::" (anonymous and inline-namespace levels
+// skipped). libclang spells a lambda's closure class
+// "(lambda at <file>:<line>:<col>)", so lambda scopes survive in the chain.
+// With with_signature, the leaf function/method carries its full signature so
+// overloads stay distinct.
 std::string join_qualified(const clang::ASTContext &context,
                            const clang::NamedDecl *decl, bool with_signature) {
   std::vector<std::string> parts;
   const clang::Decl *d = decl;
   while (d != nullptr && !llvm::isa<clang::TranslationUnitDecl>(d)) {
     if (const auto *nd = llvm::dyn_cast<clang::NamedDecl>(d)) {
-      std::string s;
-      const auto *rec = llvm::dyn_cast<clang::CXXRecordDecl>(nd);
-      const auto *spec =
-          llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(nd);
-      if (rec != nullptr && rec->isLambda()) {
-        const ExpansionLoc loc = expansion_loc(context, rec->getLocation());
-        llvm::raw_string_ostream os(s);
-        os << "(lambda at " << loc.file << ':' << loc.line << ':' << loc.col
-           << ')';
-      } else if (spec != nullptr) {
-        // A specialization level carries its argument list, so MyClass<int>
-        // and MyClass<double> (and their members) never collapse onto the
-        // pattern's qualified name. Partial specializations print as written.
-        llvm::raw_string_ostream os(s);
-        print_class_spec_display(os, printing_policy(context), spec);
-      } else if (const clang::FunctionDecl *fd =
-                     with_signature && d == decl ? function_for_signature(nd)
-                                                 : nullptr;
-                 fd != nullptr) {
-        // The leaf function/method carries its full signature (parameter types
-        // plus member cv/ref qualifiers) so overloads never collapse onto one
-        // qualified name. Enclosing function scopes stay bare names.
-        llvm::raw_string_ostream os(s);
-        print_function_signature(os, printing_policy(context), fd);
-      } else if (rec != nullptr &&
-                 rec->getDescribedClassTemplate() != nullptr) {
-        s = rec->getNameAsString();
-        s += '<';
-        bool first = true;
-        for (const clang::NamedDecl *param :
-             *rec->getDescribedClassTemplate()->getTemplateParameters()) {
-          if (!first) {
-            s += ", ";
-          }
-          first = false;
-          s += param->getNameAsString();
-          if (const auto *type =
-                  llvm::dyn_cast<clang::TemplateTypeParmDecl>(param);
-              type != nullptr && type->isParameterPack()) {
-            s += "...";
-          }
-        }
-        s += '>';
-      } else if (const auto *ct =
-                     llvm::dyn_cast<clang::ClassTemplateDecl>(nd)) {
-        s = ct->getNameAsString() + "<";
-        bool first = true;
-        for (const clang::NamedDecl *param : *ct->getTemplateParameters()) {
-          if (!first)
-            s += ", ";
-          first = false;
-          s += param->getNameAsString();
-          if (const auto *type =
-                  llvm::dyn_cast<clang::TemplateTypeParmDecl>(param);
-              type != nullptr && type->isParameterPack())
-            s += "...";
-        }
-        s += '>';
-      } else {
-        s = nd->getDeclName().getAsString();
-      }
+      std::string s = scope_level(context, nd, with_signature && d == decl);
       if (!s.empty()) {
         parts.push_back(std::move(s));
       }
