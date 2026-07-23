@@ -1,14 +1,14 @@
 # cpp-indexer
 
-`cpp-indexer` now contains the two parity implementations of `cidx`:
+`cpp-indexer` contains the C++23 production core and a supported Python SDK:
 
-- the C++17 implementation at the repository root, built with CMake;
-- the canonical Python implementation and query API in `python/`, packaged as
-  the pip-installable `cidx-indexer` project.
+- the C++23 LibTooling implementation under `src/`, built with CMake;
+- the Python storage/read-query SDK in `python/`, packaged as the
+  pip-installable `cidx-indexer` project.
 
-The previous Rust, Neo4j, IndraDB, and daemon implementation has been removed.
-Both implementations use the same SQLite index contract and must remain
-behaviorally compatible.
+The previous Rust, Neo4j, IndraDB, daemon, and C++ libclang C API
+implementations are retired. Python's libclang extractor remains only as a
+deprecation-boundary adapter; new extraction behavior belongs in C++.
 
 ## Build the C++ tool
 
@@ -37,8 +37,15 @@ This installs the `indexer` Python package and the `indexer` and
 `cidx-python` console commands. The repository launcher is also available as
 `python/cidx`.
 
-## Parity rule
+## Compatibility rule
 
-Observable behavior, SQLite schema changes, CLI output, and JSON output must
-be changed in both implementations in the same change. Run the Python tests
-and the C++ tests before merging.
+SQLite schema/read behavior and explicitly listed generated contracts are
+shared compatibility surfaces. Indexing semantics, CLI behavior, and product
+formatting are C++ authority surfaces. See
+[docs/platform/ownership.md](docs/platform/ownership.md) and
+[docs/platform/versioning-and-compatibility.md](docs/platform/versioning-and-compatibility.md).
+
+Product, database, catalog, artifact, and API versions come from one source:
+`spec/platform/version.json`. Run
+`uv run --project python python scripts/check_release_contract.py` before
+packaging or publishing.

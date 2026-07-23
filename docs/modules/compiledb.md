@@ -4,7 +4,9 @@
 
 Loads `compile_commands.json`, strips/sanitizes flags for the parser, locates
 the real compiler driver, and encodes/decodes portable include-path aliases.
-Shared by both indexing engines and by `cidx-astgraph`. ~0.6k LOC.
+It is the compile-command boundary for the sole C++23 Clang LibTooling engine,
+including `cidx-astgraph`; the Python SDK reads indexed data and does not use
+this module for extraction. ~0.6k LOC.
 
 ## Files
 
@@ -18,13 +20,15 @@ Plain data: `directory`, `filename`, `driver`, `args` (the stripped flags).
 
 ### `CompileDb` (`compiledb.hpp:32`)
 
-Loads through libclang's `CXCompilationDatabase` (never its own JSON parsing, so
-shell-unquoting matches Python exactly). Key operations:
+Loads through Clang C++ LibTooling's `clang::tooling::JSONCompilationDatabase`
+(never its own JSON parsing). The database loader accepts both
+`command`-string and `arguments`-array entries through Clang's tooling API.
+Key operations:
 
 | Method | Purpose |
 |---|---|
 | `load(db_arg)` `:37` | read `compile_commands.json` (path or dir), abspath'd |
-| `strip_for_libclang(argv, file, dir)` `:51` | parse-time strip: drop `argv[0]`, the frozen drop sets, and the source file; absolutize `-I/-isystem/-iquote` (spaced + glued); preserve `<label>`/`$VAR` values verbatim |
+| `strip_for_libclang(argv, file, dir)` `:51` | parse-time strip (the historical method name is retained): drop `argv[0]`, the frozen drop sets, and the source file; absolutize `-I/-isystem/-iquote` (spaced + glued); preserve `<label>`/`$VAR` values verbatim for the Clang C++ parser |
 | **`sanitize(stored)`** `:58` | re-apply *only* the drop rules to already-stored options — heals DBs imported by an older cidx with a shorter drop list |
 | `driver(...)` `:69` / `command_start` `:64` | locate + absolutize the real compiler, skipping env assignments and wrappers (ccache/sccache/distcc) |
 | **`resolve_options(options, lookup, autoderive)`** `:100` | **decode** `<label>`/`$VAR`/`~` include tokens back to absolute dirs (via alias lookup) so the parser sees real paths |
@@ -35,6 +39,6 @@ shell-unquoting matches Python exactly). Key operations:
 
 At **import**, options are stored (optionally aliased). At **index** time,
 `index_one` re-runs `sanitize` + `resolve_options` on the stored options before
-handing them to the engine — see the [data flow sequence](../data-flow.md#indexing-one-translation-unit).
+handing them to the C++ LibTooling engine — see the [data flow sequence](../data-flow.md#indexing-one-translation-unit).
 The include *search paths* (as opposed to the explicit `-I` flags kept here) are
 added separately by [`toolchain/`](toolchain.md) via driver introspection.

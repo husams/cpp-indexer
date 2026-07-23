@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["catalog_version", "entries"],
+  "properties": {
+    "catalog_version": {"type": "integer", "minimum": 1},
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "id", "layer"],
+        "properties": {
+          "name": {"type": "string"},
+          "id": {"type": "integer"},
+          "layer": {"enum": ["symbol", "entity", "artifact", "error"]}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

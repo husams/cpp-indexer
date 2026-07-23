@@ -1,7 +1,7 @@
 [project]
 name = "cidx-indexer"
-version = "0.52.0"
-description = "Python reference implementation and query API for cidx"
+dynamic = ["version"]
+description = "Python storage and read-query SDK for cidx"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -23,6 +23,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["indexer"]
+
+[tool.hatch.version]
+path = "indexer/_version.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -14,12 +14,17 @@ SAME TU; it must be called AFTER index_symbols for the same file.
 
 import ctypes
 import os
+import warnings
 from collections.abc import Iterator, Sequence
 from typing import Any, Optional
 
 import clang.cindex as cx
 
 from ..storage import Storage, Symbol
+
+
+class LegacyPythonExtractionWarning(DeprecationWarning):
+    """The Python/libclang extractor is retained only as a removal-boundary adapter."""
 
 # ---------------------------------------------------------------------------
 # Raw libclang function bindings not exposed by the Python bindings layer.
@@ -2807,6 +2812,12 @@ def index_source(
     written to the database -- so dropping the last reference in the `finally`
     immediately runs clang_disposeTranslationUnit and returns the AST's memory.
     """
+    warnings.warn(
+        "indexer.clang.index_source is legacy; use the C++23 LibTooling "
+        "cidx index command for production extraction",
+        LegacyPythonExtractionWarning,
+        stacklevel=2,
+    )
     tu = parse(filename, args, driver=driver)
     try:
         # Parse diagnostics (warnings + tolerated errors) captured while the TU
