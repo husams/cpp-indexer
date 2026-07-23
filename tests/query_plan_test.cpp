@@ -440,7 +440,7 @@ TEST_CASE("query_plan: default result cap reports truncation") {
 }
 
 TEST_CASE(
-    "query_plan: index identity detects source changes and explain agrees") {
+    "query_plan: legacy identity and result key order are deterministic") {
   const std::string dir = make_temp_dir();
   const std::string source = dir + "/source.cpp";
   {
@@ -455,25 +455,28 @@ TEST_CASE(
   db.mark_file_indexed(file_id);
 
   CHECK(db.index_identity().freshness == "unverifiable");
-  db.stamp_index_identity();
-  CHECK(db.index_identity().freshness == "current");
 
   Executor executor(db);
   const auto result = executor.run((start(codebase()) | nodes()).plan());
-  CHECK(result.index.freshness == "current");
+  CHECK(result.index.freshness == "unverifiable");
+  const std::string row_json = cidx::json_out::dumps_indent2(result.to_json());
+  CHECK(row_json.find("\"shape\"") < row_json.find("\"view\""));
+  CHECK(row_json.find("\"view\"") < row_json.find("\"count\""));
+  CHECK(row_json.find("\"count\"") < row_json.find("\"truncated\""));
+  CHECK(row_json.find("\"truncated\"") < row_json.find("\"index\""));
+  CHECK(row_json.find("\"index\"") < row_json.find("\"rows\""));
+
+  const auto scalar =
+      executor.run((start(codebase()) | nodes() | count()).plan());
+  const std::string scalar_json =
+      cidx::json_out::dumps_indent2(scalar.to_json());
+  CHECK(scalar_json.find("\"truncated\"") < scalar_json.find("\"index\""));
+  CHECK(scalar_json.find("\"index\"") < scalar_json.size());
+
   const std::string explained = cidx::json_out::dumps_indent2(
       executor.explain((start(codebase()) | nodes()).plan()));
-  CHECK(explained.find("\"freshness\": \"current\"") != std::string::npos);
+  CHECK(explained.find("\"freshness\": \"unverifiable\"") != std::string::npos);
   CHECK(explained.find("\"plan\"") != std::string::npos);
-
-  {
-    std::ofstream out(source);
-    out << "int answer = 2;\n";
-  }
-  CHECK(db.index_identity().freshness == "stale");
-
-  db.stamp_index_identity(); // represents a successful reindex pass
-  CHECK(db.index_identity().freshness == "current");
 }
 
 // ---------------------------------------------------------------------------

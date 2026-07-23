@@ -105,7 +105,7 @@ std::optional<std::string> meta_value(Storage &db, const char *key) {
   return st.col_text(0);
 }
 
-void set_meta_value(Storage &db, const char *key, std::string value) {
+void set_meta_value(Storage &db, const char *key, std::string_view value) {
   auto st = db.raw_db().prepare(
       "INSERT INTO meta (key, value) VALUES (?, ?) "
       "ON CONFLICT(key) DO UPDATE SET value = excluded.value");

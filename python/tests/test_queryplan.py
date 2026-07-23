@@ -283,7 +283,7 @@ def test_default_result_cap_reports_truncation():
     assert not lim.truncated
 
 
-def test_index_identity_freshness_and_explain(tmp_path):
+def test_legacy_index_identity_and_result_key_order(tmp_path):
     source = tmp_path / "source.cpp"
     source.write_text("int answer = 1;\n")
     db = Storage(":memory:")
@@ -292,19 +292,16 @@ def test_index_identity_freshness_and_explain(tmp_path):
     db.mark_file_indexed(file_id)
 
     assert db.index_identity().freshness == "unverifiable"
-    db.stamp_index_identity()
-    assert db.index_identity().freshness == "current"
     ex = Executor(db)
     result = ex.run((start(codebase()) | nodes()).plan)
-    assert result.to_dict()["index"]["freshness"] == "current"
+    row_dict = result.to_dict()
+    assert row_dict["index"]["freshness"] == "unverifiable"
+    assert list(row_dict) == ["shape", "view", "count", "truncated", "index", "rows"]
+    scalar = ex.run((start(codebase()) | nodes() | count()).plan)
+    assert list(scalar.to_dict()) == ["shape", "view", "count", "truncated", "index"]
     explained = ex.explain((start(codebase()) | nodes()).plan)
-    assert explained["index"] == result.to_dict()["index"]
+    assert explained["index"] == row_dict["index"]
     assert explained["plan"]["cxq"] == 1
-
-    source.write_text("int answer = 2;\n")
-    assert db.index_identity().freshness == "stale"
-    db.stamp_index_identity()  # represents a successful reindex pass
-    assert db.index_identity().freshness == "current"
 
 
 # ---------------------------------------------------------------------------

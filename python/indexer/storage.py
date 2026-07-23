@@ -3328,6 +3328,14 @@ class Storage:
         self._conn.execute("DELETE FROM file WHERE id = ?", (file_id,))
         self._commit()
 
+    def delete_symbols_for_file(self, file_id: int) -> None:
+        """Remove symbols owned by a file before replacing its AST output."""
+        self._conn.execute(
+            "DELETE FROM symbol WHERE file_id = ?",
+            (file_id,),
+        )
+        self._commit()
+
     def delete_symbol(self, symbol_id: int) -> None:
         """Remove a single symbol row."""
         self._conn.execute("DELETE FROM symbol WHERE id = ?", (symbol_id,))
@@ -3874,10 +3882,12 @@ class Storage:
         return out
 
     def mark_file_indexed(self, file_id: int, mtime: Optional[float] = None) -> None:
+        md5 = _md5_of(self.file_abs_path(file_id) or "")
         self._conn.execute(
             "UPDATE file SET indexed = 1, indexed_at = datetime('now'), "
-            "  mtime = COALESCE(?, mtime) WHERE id = ?",
-            (mtime, file_id),
+            "  mtime = COALESCE(?, mtime), md5 = COALESCE(?, md5) "
+            "WHERE id = ?",
+            (mtime, md5, file_id),
         )
         self._commit()
 

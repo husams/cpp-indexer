@@ -507,6 +507,7 @@ def index_headers(
             driver=header_driver,
         )
         # Pass 1: symbols only (each in its own transaction).
+        db.delete_symbols_for_file(file_id)
         with db.transaction():
             stored, _ = _index_file_notxn(db, tu, inc.include.name, file_id)
         pending.append((inc.include.name, file_id, mtime, stored))
@@ -2824,6 +2825,7 @@ def index_source(
         # is live, before the AST is freed; persisted by the caller against
         # this file's row.
         diagnostics = collect_diagnostics(tu)
+        db.delete_symbols_for_file(file_id)
         stored, skipped = index_symbols(db, tu, file_id)
         headers = index_headers(
             db,

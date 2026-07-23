@@ -252,6 +252,7 @@ public:
   // Upsert keyed by USR; throws StorageError on a bad kind. Definition wins
   // over a stored declaration; a declaration never downgrades a definition.
   int64_t add_symbol(const Symbol &sym);
+  void delete_symbols_for_file(int64_t file_id);
   // Update named columns of the symbol with this USR; false when absent.
   // Throws StorageError on unknown columns or a bad kind value (smoke parity).
   bool

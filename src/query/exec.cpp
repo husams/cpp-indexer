@@ -870,14 +870,15 @@ json_out::Value Result::to_json() const {
                                        : shape == Shape::Rows ? "rows"
                                                               : "scalar")));
   o.emplace_back("view", Value::of(std::string(view_name(view))));
-  o.emplace_back("index", index_identity_json(index));
   if (shape == Shape::Scalar) {
     o.emplace_back("count", Value::of(scalar));
     o.emplace_back("truncated", Value::of(truncated));
+    o.emplace_back("index", index_identity_json(index));
     return Value::obj(std::move(o));
   }
   o.emplace_back("count", Value::of(static_cast<int64_t>(rows.size())));
   o.emplace_back("truncated", Value::of(truncated));
+  o.emplace_back("index", index_identity_json(index));
   Array arr;
   for (const auto &row : rows) {
     Object ro;

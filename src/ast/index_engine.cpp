@@ -128,6 +128,7 @@ public:
         edges_(db_), tu_(context.getTranslationUnitDecl()) {}
 
   void run() {
+    db_.delete_symbols_for_file(state_.rec->id);
     state_.out->stored = run_symbol_pass(state_.path, state_.rec->id);
     const std::vector<int64_t> main_symbol_ids = symbols_.symbol_ids();
     const std::vector<PendingHeader> plan = plan_owned_headers();
@@ -243,6 +244,7 @@ private:
   void run_header_passes(std::vector<PendingHeader> plan) {
     cidx::HeaderStats &counts = state_.out->headers;
     for (PendingHeader &ph : plan) {
+      db_.delete_symbols_for_file(ph.file_id);
       ph.stored = run_symbol_pass(ph.path, ph.file_id);
       ph.symbol_ids = symbols_.symbol_ids();
     }

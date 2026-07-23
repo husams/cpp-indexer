@@ -643,6 +643,11 @@ def _index_pending(db: Storage, no_graph: bool = False) -> int:
     return 1 if failed else 0
 
 
+def _all_files_current(db: Storage) -> bool:
+    """Prove every stored file matches its indexed semantic content."""
+    return all(index_status(rec, path)[0] for rec, path in db.files())
+
+
 def cmd_index(args) -> int:
     no_graph = getattr(args, "no_graph", False)
     with Storage(args.index) as db:
@@ -656,7 +661,7 @@ def cmd_index(args) -> int:
             if args.files
             else _index_pending(db, no_graph=no_graph)
         )
-        if rc == 0:
+        if rc == 0 and _all_files_current(db):
             db.stamp_index_identity()
     if _warnings.count:
         print(f"{_warnings.count} warning(s)/error(s) logged to {log_path()}")

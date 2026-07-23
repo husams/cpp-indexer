@@ -418,7 +418,7 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
     rc = !args.files.empty()
              ? index_files(db, args.files, root, graph_enabled, ctx)
              : index_pending(db, graph_enabled, ctx);
-    if (rc == 0) {
+    if (rc == 0 && all_files_current(db)) {
       db.stamp_index_identity();
     }
   }
