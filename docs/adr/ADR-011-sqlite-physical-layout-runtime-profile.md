@@ -19,13 +19,17 @@ profiles:
   `foreign_keys=ON`, `query_only=ON`, and a 5-second busy timeout;
 - read-only connections never set journal mode, synchronous, page size, cache,
   mmap, or statistics state;
+- filesystem type is a deployment preflight responsibility: the storage layer
+  does not guess whether a path is local or network-backed, and unsupported
+  locking/rename environments must not publish a database as current;
 - WAL is a qualification candidate only. It is not a shipped default because
   its sidecar/checkpoint and cross-process atomicity costs are not justified by
   an unmeasured concurrency claim;
 - `Storage::run_maintenance()` and `Storage::refresh_statistics()` make
   maintenance/statistics mutation explicit;
 - `Storage::backup_to()` uses SQLite's online backup API. A restored file is
-  accepted only after schema/catalog/fact-set identity and integrity checks.
+  accepted only after schema/catalog/workspace/fact-content identity and
+  integrity checks.
 
 ## Physical layout qualification
 
@@ -41,7 +45,8 @@ for every required relation in both directions. In particular:
   index reverse;
 - `include_edge` uses its source/path/configuration unique key forward,
   destination index reverse, and configuration index for applicability;
-- `edge_site` and `include_site` use their edge-leading primary/index paths.
+- `edge_site` uses its edge-leading primary key, while `include_site` reuses
+  its measured edge-leading unique key (`sqlite_autoindex_include_site_1`).
 
 The existing nullable `entity_edge` identity expression index is retained for
 schema-v34 compatibility. A normalized sentinel representation is a separate
@@ -57,9 +62,11 @@ uv run --project python python benchmarks/storage_m1/qualify.py \
   --output /tmp/cidx-storage-m1.result.json
 ```
 
-The result records PRAGMA state, database/table/index bytes, every named query
-SQL/parameters/plan/row count/latency, rollback-vs-WAL measurements, read-only
-side-effect checks, backup/restore identity, and interruption recovery probes.
+The result records PRAGMA state, database/table/index bytes, every declared
+query ID and forward/reverse strategy against a resolved representative
+corpus, deterministic workspace/fact-content identities, rollback-vs-WAL
+measurements, read-only side-effect checks, backup/restore identity, and
+interruption recovery probes.
 The qualifier fails on an unexpected scan for a strategy that requires an
 index, a read-only mutation/sidecar, identity mismatch, failed integrity/FK
 checks, or a recovery state presented as current.

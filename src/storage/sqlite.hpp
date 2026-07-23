@@ -27,7 +27,7 @@ using SqlValue = std::variant<std::nullptr_t, int64_t, double, std::string>;
 // Runtime profiles are deliberately narrower than SQLite's tuning surface.
 // They name the supported lifecycle contract; benchmark-only WAL and cache
 // settings are not silently promoted to a production profile.
-enum class SqliteProfile {
+enum class SqliteProfile : std::uint8_t {
   indexing,
   interactive_read,
   read_only_replay,

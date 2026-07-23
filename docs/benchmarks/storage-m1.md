@@ -16,12 +16,16 @@ The result covers:
 
 - v34 catalog/table/index facts and dbstat bytes when the SQLite build exposes
   dbstat;
-- named forward/reverse relation plans, parameters, row counts, truncation,
-  and repeated latency samples;
+- a resolved representative corpus plus every declared forward/reverse query
+  ID, with parameters, row counts, truncation, and repeated latency samples;
+- deterministic workspace identity and full fact-content identity, including a
+  same-count content-change negative check;
 - rollback-journal versus WAL on identical temporary copies;
-- read-only side-effect checks;
+- read-only side-effect checks for a pre-existing WAL and missing sidecars;
 - online backup/restore identity plus integrity and foreign-key checks;
-- interrupted DML, DDL/migration-shaped, and post-commit recovery probes.
+- interrupted staging/indexing, named entity transform, migration-shaped DDL,
+  WAL checkpoint, and ANALYZE maintenance probes, each classified as current
+  or stale-but-valid after integrity/schema validation.
 
 The production gate is conservative: rollback/FULL remains current, WAL is
 reported as qualification-only, and any missing index plan, mutation on

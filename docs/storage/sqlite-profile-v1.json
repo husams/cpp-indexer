@@ -8,8 +8,8 @@
   },
   "filesystem": {
     "supported": ["local filesystem with reliable POSIX/ APFS locking and rename semantics"],
-    "rejected": ["network filesystem", "unsupported locking provider", "mixed local/network path"],
-    "failure": "fail before presenting a database as current"
+    "deployment_rejection": ["network filesystem", "unsupported locking provider", "mixed local/network path"],
+    "enforcement": "The storage layer does not guess filesystem type; deployment preflight must reject paths outside the supported local-filesystem contract before publishing a database as current."
   },
   "profiles": [
     {
@@ -62,15 +62,16 @@
       "policy": "PRAGMA optimize is safe to run routinely; ANALYZE is explicit and measured because it mutates statistics"
     }
   ],
+  "supporting_query_ids": ["exact_identity", "name_prefix", "bounded_paths"],
   "relation_strategies": [
     {"table": "edge", "forward": "sqlite_autoindex_edge_1", "reverse": "idx_edge_dst", "secondary_covering": "idx_edge_src", "query_ids": ["outgoing_one_hop", "incoming_one_hop"]},
     {"table": "def_edge", "forward": "sqlite_autoindex_def_edge_1", "reverse": "idx_def_edge_dst", "secondary_covering": "idx_def_edge_src", "query_ids": ["definition_outgoing", "definition_incoming"]},
-    {"table": "entity_edge", "forward": "idx_entity_edge_identity", "reverse": "idx_entity_edge_dst", "secondary_covering": "idx_entity_edge_src", "query_ids": ["entity_graph"]},
+    {"table": "entity_edge", "forward": "idx_entity_edge_identity", "reverse": "idx_entity_edge_dst", "secondary_covering": "idx_entity_edge_src", "query_ids": ["entity_graph_forward", "entity_graph_reverse"]},
     {"table": "possible_call", "forward": "sqlite_autoindex_possible_call_1", "reverse": "idx_possible_call_dst", "natural_key_reuse": "sqlite_autoindex_possible_call_1", "query_ids": ["possible_call_outgoing", "possible_call_incoming"]},
-    {"table": "type_edge", "forward": "PRIMARY KEY (src_id, kind, position)", "reverse": "idx_type_edge_dst", "natural_key_reuse": "PRIMARY KEY (src_id, kind, position)", "query_ids": ["type_closure"]},
-    {"table": "include_edge", "forward": "sqlite_autoindex_include_edge_1", "reverse": "idx_include_edge_dst", "configuration": "idx_include_edge_config", "natural_key_reuse": "sqlite_autoindex_include_edge_1", "query_ids": ["include_graph"]},
+    {"table": "type_edge", "forward": "PRIMARY KEY (src_id, kind, position)", "reverse": "idx_type_edge_dst", "natural_key_reuse": "PRIMARY KEY (src_id, kind, position)", "query_ids": ["type_closure_forward", "type_closure_reverse"]},
+    {"table": "include_edge", "forward": "sqlite_autoindex_include_edge_1", "reverse": "idx_include_edge_dst", "configuration": "idx_include_edge_config", "natural_key_reuse": "sqlite_autoindex_include_edge_1", "query_ids": ["include_graph", "include_graph_reverse"]},
     {"table": "edge_site", "forward": "PRIMARY KEY (edge_id, file_id, line, col)", "reverse": "none", "query_ids": ["references_sites"]},
-    {"table": "include_site", "forward": "idx_include_site_edge", "reverse": "none", "query_ids": ["include_sites"]}
+    {"table": "include_site", "forward": "sqlite_autoindex_include_site_1", "reverse": "none", "natural_key_reuse": "sqlite_autoindex_include_site_1", "query_ids": ["include_sites"]}
   ],
   "nullable_identity": {
     "entity_edge": "retain the existing COALESCE unique index until normalized sentinel storage is measured; HSE-77 owns identity normalization",

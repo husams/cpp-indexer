@@ -17,6 +17,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,14 @@ def canonical(value: Any) -> str:
 
 def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def stable_value(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return {"blob_hex": value.hex()}
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
 
 
 def qident(value: str) -> str:
@@ -93,14 +102,42 @@ def catalog_identity(connection: sqlite3.Connection) -> str:
     return digest({"catalog": catalog, "meta": meta})
 
 
-def fact_set_identity(connection: sqlite3.Connection) -> str:
-    tables = [row[0] for row in connection.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+def table_facts(connection: sqlite3.Connection, table: str) -> dict[str, Any]:
+    columns = [row[1] for row in connection.execute(f"PRAGMA table_info({qident(table)})")]
+    rows = connection.execute(f"SELECT * FROM {qident(table)}").fetchall()
+    encoded = [
+        [stable_value(value) for value in row]
+        for row in rows
+    ]
+    encoded.sort(key=canonical)
+    return {"columns": columns, "rows": encoded}
+
+
+def user_table_names(connection: sqlite3.Connection) -> list[str]:
+    return [row[0] for row in connection.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
     )]
-    counts = []
-    for table in tables:
-        counts.append((table, connection.execute(f"SELECT COUNT(*) FROM {qident(table)}").fetchone()[0]))
-    return digest(counts)
+
+
+def workspace_identity(connection: sqlite3.Connection) -> str:
+    workspace_tables = {
+        table: table_facts(connection, table)
+        for table in ("repository", "clone", "component", "directory", "file")
+        if _has_table(connection, table)
+    }
+    return digest(workspace_tables)
+
+
+def fact_set_identity(connection: sqlite3.Connection) -> str:
+    facts = {
+        table: table_facts(connection, table)
+        for table in user_table_names(connection)
+    }
+    return digest({
+        "workspace_identity": workspace_identity(connection),
+        "facts": facts,
+    })
 
 
 def _has_table(connection: sqlite3.Connection, table: str) -> bool:
@@ -147,33 +184,53 @@ def connection_profile(connection: sqlite3.Connection) -> dict[str, Any]:
 
 
 def query_cases(connection: sqlite3.Connection) -> list[dict[str, Any]]:
-    symbol_id = connection.execute("SELECT id FROM symbol ORDER BY id LIMIT 1").fetchone()
-    file_id = connection.execute("SELECT id FROM file ORDER BY id LIMIT 1").fetchone()
-    definition_id = connection.execute("SELECT id FROM definition ORDER BY id LIMIT 1").fetchone()
-    type_id = connection.execute("SELECT id FROM type_node ORDER BY id LIMIT 1").fetchone()
+    def first(sql: str, default: int = -1) -> int:
+        row = connection.execute(sql).fetchone()
+        return int(row[0]) if row else default
+
+    symbol_id = first("SELECT id FROM symbol ORDER BY id LIMIT 1")
+    file_id = first("SELECT id FROM file ORDER BY id LIMIT 1")
+    definition_id = first("SELECT id FROM definition ORDER BY id LIMIT 1")
+    type_id = first("SELECT id FROM type_node ORDER BY id LIMIT 1")
     qual_name = connection.execute(
         "SELECT qual_name FROM symbol WHERE qual_name IS NOT NULL ORDER BY qual_name LIMIT 1"
     ).fetchone()
-    first_symbol = symbol_id[0] if symbol_id else -1
-    first_file = file_id[0] if file_id else -1
-    first_definition = definition_id[0] if definition_id else -1
-    first_type = type_id[0] if type_id else -1
+    edge_src = first("SELECT src_id FROM edge ORDER BY src_id, dst_id LIMIT 1")
+    edge_dst = first("SELECT dst_id FROM edge ORDER BY dst_id, src_id LIMIT 1")
+    edge_site_src = first(
+        "SELECT edge.src_id FROM edge_site JOIN edge ON edge.id=edge_site.edge_id "
+        "ORDER BY edge.src_id, edge.id LIMIT 1"
+    )
+    def_src = first("SELECT src_def_id FROM def_edge ORDER BY src_def_id, dst_id LIMIT 1")
+    def_dst = first("SELECT dst_id FROM def_edge ORDER BY dst_id, src_def_id LIMIT 1")
+    call_src = first("SELECT src_def_id FROM possible_call ORDER BY src_def_id, dst_def_id LIMIT 1")
+    call_dst = first("SELECT dst_def_id FROM possible_call ORDER BY dst_def_id, src_def_id LIMIT 1")
+    type_src = first("SELECT src_id FROM type_edge ORDER BY src_id, kind, position LIMIT 1")
+    type_dst = first("SELECT dst_id FROM type_edge ORDER BY dst_id, src_id LIMIT 1")
+    entity_src = first("SELECT src_id FROM entity_edge ORDER BY src_id, dst_id LIMIT 1")
+    entity_dst = first("SELECT dst_id FROM entity_edge ORDER BY dst_id, src_id LIMIT 1")
+    include_src = first("SELECT src_file_id FROM include_edge ORDER BY src_file_id, dst_path LIMIT 1")
+    include_dst = first("SELECT dst_file_id FROM include_edge WHERE dst_file_id IS NOT NULL ORDER BY dst_file_id, src_file_id LIMIT 1")
+    include_site_edge = first("SELECT edge_id FROM include_site ORDER BY edge_id, begin_offset LIMIT 1")
     prefix = (qual_name[0].split("::", 1)[0] + "%") if qual_name else "%"
     return [
-        {"id": "exact_identity", "sql": "SELECT id, usr, spelling, qual_name FROM symbol WHERE id = ?", "params": [first_symbol], "expected": None, "limit": 10},
+        {"id": "exact_identity", "sql": "SELECT id, usr, spelling, qual_name FROM symbol WHERE id = ?", "params": [symbol_id], "expected": None, "limit": 10, "require_rows": True},
         {"id": "name_prefix", "sql": "SELECT id, usr, qual_name FROM symbol WHERE qual_name LIKE ? ORDER BY qual_name LIMIT 100", "params": [prefix], "expected": "idx_symbol_qual_nc", "limit": 100},
-        {"id": "outgoing_one_hop", "sql": "SELECT dst_id, kind, count FROM edge WHERE src_id = ? ORDER BY dst_id", "params": [first_symbol], "expected": "sqlite_autoindex_edge_1", "limit": 100},
-        {"id": "incoming_one_hop", "sql": "SELECT src_id, kind, count FROM edge WHERE dst_id = ? ORDER BY src_id", "params": [first_symbol], "expected": "idx_edge_dst", "limit": 100},
-        {"id": "definition_outgoing", "sql": "SELECT dst_id, kind, count FROM def_edge WHERE src_def_id = ? ORDER BY dst_id", "params": [first_definition], "expected": "sqlite_autoindex_def_edge_1", "limit": 100},
-        {"id": "definition_incoming", "sql": "SELECT src_def_id, kind, count FROM def_edge WHERE dst_id = ? ORDER BY src_def_id", "params": [first_symbol], "expected": "idx_def_edge_dst", "limit": 100},
-        {"id": "possible_call_outgoing", "sql": "SELECT dst_def_id, count FROM possible_call WHERE src_def_id = ? ORDER BY dst_def_id", "params": [first_definition], "expected": "sqlite_autoindex_possible_call_1", "limit": 100},
-        {"id": "possible_call_incoming", "sql": "SELECT src_def_id, count FROM possible_call WHERE dst_def_id = ? ORDER BY src_def_id", "params": [first_definition], "expected": "idx_possible_call_dst", "limit": 100},
-        {"id": "bounded_paths", "sql": "WITH RECURSIVE walk(id, depth) AS (SELECT ?, 0 UNION ALL SELECT edge.dst_id, walk.depth + 1 FROM walk JOIN edge ON edge.src_id = walk.id WHERE walk.depth < 3) SELECT id, depth FROM walk ORDER BY depth, id", "params": [first_symbol], "expected": "sqlite_autoindex_edge_1", "limit": 1000},
-        {"id": "references_sites", "sql": "SELECT edge_site.edge_id, edge_site.file_id, edge_site.line, edge_site.col FROM edge_site JOIN edge ON edge.id = edge_site.edge_id WHERE edge.src_id = ? ORDER BY edge_site.file_id, edge_site.line, edge_site.col", "params": [first_symbol], "expected": "idx_edge_src", "limit": 1000},
-        {"id": "type_closure", "sql": "WITH RECURSIVE closure(id) AS (SELECT ? UNION SELECT type_edge.dst_id FROM closure JOIN type_edge ON type_edge.src_id = closure.id) SELECT id FROM closure ORDER BY id", "params": [first_type], "expected": "PRIMARY KEY", "limit": 1000},
-        {"id": "entity_graph", "sql": "SELECT dst_id, kind, count FROM entity_edge WHERE src_id = ? ORDER BY dst_id", "params": [first_symbol], "expected": "idx_entity_edge_identity", "limit": 1000},
-        {"id": "include_graph", "sql": "SELECT dst_file_id, dst_path, count FROM include_edge WHERE src_file_id = ? ORDER BY dst_path", "params": [first_file], "expected": "sqlite_autoindex_include_edge_1", "limit": 1000},
-        {"id": "include_graph_reverse", "sql": "SELECT src_file_id, dst_path, count FROM include_edge WHERE dst_file_id = ? ORDER BY src_file_id", "params": [first_file], "expected": "idx_include_edge_dst", "limit": 1000},
+        {"id": "outgoing_one_hop", "sql": "SELECT dst_id, kind, count FROM edge WHERE src_id = ? ORDER BY dst_id", "params": [edge_src], "expected": "sqlite_autoindex_edge_1", "limit": 100, "require_rows": True},
+        {"id": "incoming_one_hop", "sql": "SELECT src_id, kind, count FROM edge WHERE dst_id = ? ORDER BY src_id", "params": [edge_dst], "expected": "idx_edge_dst", "limit": 100, "require_rows": True},
+        {"id": "definition_outgoing", "sql": "SELECT dst_id, kind, count FROM def_edge WHERE src_def_id = ? ORDER BY dst_id", "params": [def_src], "expected": "sqlite_autoindex_def_edge_1", "limit": 100, "require_rows": True},
+        {"id": "definition_incoming", "sql": "SELECT src_def_id, kind, count FROM def_edge WHERE dst_id = ? ORDER BY src_def_id", "params": [def_dst], "expected": "idx_def_edge_dst", "limit": 100, "require_rows": True},
+        {"id": "possible_call_outgoing", "sql": "SELECT dst_def_id, count FROM possible_call WHERE src_def_id = ? ORDER BY dst_def_id", "params": [call_src], "expected": "sqlite_autoindex_possible_call_1", "limit": 100, "require_rows": False},
+        {"id": "possible_call_incoming", "sql": "SELECT src_def_id, count FROM possible_call WHERE dst_def_id = ? ORDER BY src_def_id", "params": [call_dst], "expected": "idx_possible_call_dst", "limit": 100, "require_rows": False},
+        {"id": "bounded_paths", "sql": "WITH RECURSIVE walk(id, depth) AS (SELECT ?, 0 UNION ALL SELECT edge.dst_id, walk.depth + 1 FROM walk JOIN edge ON edge.src_id = walk.id WHERE walk.depth < 3) SELECT id, depth FROM walk ORDER BY depth, id", "params": [edge_src], "expected": "sqlite_autoindex_edge_1", "limit": 1000, "require_rows": True},
+        {"id": "references_sites", "sql": "SELECT edge_site.edge_id, edge_site.file_id, edge_site.line, edge_site.col FROM edge_site JOIN edge ON edge.id = edge_site.edge_id WHERE edge.src_id = ? ORDER BY edge_site.file_id, edge_site.line, edge_site.col", "params": [edge_site_src], "expected": "idx_edge_src", "limit": 1000, "require_rows": True},
+        {"id": "type_closure_forward", "sql": "WITH RECURSIVE closure(id) AS (SELECT ? UNION SELECT type_edge.dst_id FROM closure JOIN type_edge ON type_edge.src_id = closure.id) SELECT id FROM closure ORDER BY id", "params": [type_src], "expected": "PRIMARY KEY", "limit": 1000, "require_rows": True},
+        {"id": "type_closure_reverse", "sql": "SELECT src_id, kind, position FROM type_edge WHERE dst_id = ? ORDER BY src_id, kind, position", "params": [type_dst], "expected": "idx_type_edge_dst", "limit": 1000, "require_rows": True},
+        {"id": "entity_graph_forward", "sql": "SELECT dst_id, kind, count FROM entity_edge WHERE src_id = ? ORDER BY dst_id", "params": [entity_src], "expected": "idx_entity_edge_identity", "limit": 1000, "require_rows": True},
+        {"id": "entity_graph_reverse", "sql": "SELECT src_id, kind, count FROM entity_edge WHERE dst_id = ? ORDER BY src_id", "params": [entity_dst], "expected": "idx_entity_edge_dst", "limit": 1000, "require_rows": True},
+        {"id": "include_graph", "sql": "SELECT dst_file_id, dst_path, count FROM include_edge WHERE src_file_id = ? ORDER BY dst_path", "params": [include_src], "expected": "sqlite_autoindex_include_edge_1", "limit": 1000, "require_rows": True},
+        {"id": "include_graph_reverse", "sql": "SELECT src_file_id, dst_path, count FROM include_edge WHERE dst_file_id = ? ORDER BY src_file_id", "params": [include_dst], "expected": "idx_include_edge_dst", "limit": 1000, "require_rows": True},
+        {"id": "include_sites", "sql": "SELECT edge_id, begin_offset, end_offset FROM include_site WHERE edge_id = ? ORDER BY begin_offset", "params": [include_site_edge], "expected": "sqlite_autoindex_include_site_1", "limit": 1000, "require_rows": True},
     ]
 
 
@@ -199,7 +256,9 @@ def query_evidence(connection: sqlite3.Connection, cases: list[dict[str, Any]], 
             error = str(exc)
         expected = case["expected"]
         indexed = expected is None or any(expected.lower() in line.lower() for line in plan_text)
-        status = "ok" if error is None and indexed else "error"
+        required_rows = case.get("require_rows", True)
+        has_evidence = rows_seen > 0 or not required_rows
+        status = "ok" if error is None and indexed and has_evidence else "error"
         evidence.append({
             "id": case["id"],
             "sql": case["sql"],
@@ -215,6 +274,8 @@ def query_evidence(connection: sqlite3.Connection, cases: list[dict[str, Any]], 
             "plan": plan_text,
             "expected_index": expected,
             "indexed": indexed,
+            "required_rows": required_rows,
+            "has_evidence": has_evidence,
             "status": status,
             "error": error,
         })
@@ -225,14 +286,21 @@ def run_layout(path: Path, iterations: int) -> dict[str, Any]:
     connection = connect(path, read_only=True)
     try:
         version = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        resolved_row = connection.execute(
+            "SELECT value FROM meta WHERE key='graph_resolved_at'"
+        ).fetchone()
         cases = query_cases(connection)
+        queries = query_evidence(connection, cases, iterations)
         return {
             "schema_version": int(version[0]) if version else None,
+            "graph_resolved_at": resolved_row[0] if resolved_row else None,
+            "resolved": bool(resolved_row and resolved_row[0]),
             "profile": connection_profile(connection),
             "storage": {"database": file_facts(path), **storage_objects(connection)},
             "catalog_identity": catalog_identity(connection),
+            "workspace_identity": workspace_identity(connection),
             "fact_set_identity": fact_set_identity(connection),
-            "queries": query_evidence(connection, cases, iterations),
+            "queries": queries,
         }
     finally:
         connection.close()
@@ -242,6 +310,47 @@ def copy_for_profile(source: Path, directory: Path, mode: str) -> Path:
     target = directory / f"{mode}.db"
     shutil.copy2(source, target)
     return target
+
+
+def run_identity_sensitivity_check(source: Path) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="cidx-storage-m1-identity-") as temporary:
+        path = copy_for_profile(source, Path(temporary), "identity")
+        before_connection = connect(path, read_only=True)
+        try:
+            before = fact_set_identity(before_connection)
+            workspace_before = workspace_identity(before_connection)
+            before_count = before_connection.execute("SELECT COUNT(*) FROM symbol").fetchone()[0]
+        finally:
+            before_connection.close()
+        connection = connect(path, read_only=False)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE symbol SET spelling = spelling || ? WHERE id = "
+                "(SELECT id FROM symbol ORDER BY id LIMIT 1)",
+                ("__qualify_content_change__",),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        after_connection = connect(path, read_only=True)
+        try:
+            after = fact_set_identity(after_connection)
+            workspace_after = workspace_identity(after_connection)
+            after_count = after_connection.execute("SELECT COUNT(*) FROM symbol").fetchone()[0]
+        finally:
+            after_connection.close()
+        passed = (
+            before_count == after_count
+            and workspace_before == workspace_after
+            and before != after
+        )
+        return {
+            "status": "pass" if passed else "fail",
+            "same_count": before_count == after_count,
+            "workspace_unchanged": workspace_before == workspace_after,
+            "content_changed_identity": before != after,
+        }
 
 
 def run_runtime_profile(source: Path, mode: str, iterations: int) -> dict[str, Any]:
@@ -273,15 +382,38 @@ def run_runtime_profile(source: Path, mode: str, iterations: int) -> dict[str, A
 def run_read_only_check(source: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="cidx-storage-m1-ro-") as temporary:
         path = copy_for_profile(source, Path(temporary), "readonly")
-        before = file_facts(path)
-        connection = connect(path, read_only=True)
+        writer = connect(path, read_only=False, journal_mode="WAL")
         try:
-            connection.execute("SELECT COUNT(*) FROM symbol").fetchone()
-            state = connection_profile(connection)
+            writer.execute("BEGIN IMMEDIATE")
+            writer.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('__qualify_wal_probe__', '1')"
+            )
+            writer.commit()
+            before = file_facts(path)
+            connection = connect(path, read_only=True)
+            try:
+                connection.execute("SELECT COUNT(*) FROM symbol").fetchone()
+                state = connection_profile(connection)
+            finally:
+                connection.close()
+            after = file_facts(path)
+            new_sidecars = sorted(set(after) - set(before))
+            persistent_unchanged = all(
+                after.get(key) == before.get(key)
+                for key in ("database", "-wal")
+                if key in before
+            )
+            return {
+                "status": "pass" if not new_sidecars and persistent_unchanged else "fail",
+                "before": before,
+                "after": after,
+                "new_sidecars": new_sidecars,
+                "preexisting_sidecar_mutation": before.get("-shm") != after.get("-shm"),
+                "preexisting_wal": "-wal" in before and "-shm" in before,
+                "profile": state,
+            }
         finally:
-            connection.close()
-        after = file_facts(path)
-        return {"status": "pass" if before == after else "fail", "before": before, "after": after, "profile": state}
+            writer.close()
 
 
 def run_backup_check(source: Path) -> dict[str, Any]:
@@ -300,8 +432,16 @@ def run_backup_check(source: Path) -> dict[str, Any]:
             try:
                 integrity = restored.execute("PRAGMA integrity_check").fetchone()[0]
                 foreign_keys = restored.execute("PRAGMA foreign_key_check").fetchall()
-                source_identity = (catalog_identity(source_connection), fact_set_identity(source_connection))
-                target_identity = (catalog_identity(restored), fact_set_identity(restored))
+                source_identity = (
+                    catalog_identity(source_connection),
+                    workspace_identity(source_connection),
+                    fact_set_identity(source_connection),
+                )
+                target_identity = (
+                    catalog_identity(restored),
+                    workspace_identity(restored),
+                    fact_set_identity(restored),
+                )
                 version = restored.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
             finally:
                 restored.close()
@@ -316,28 +456,122 @@ def run_backup_check(source: Path) -> dict[str, Any]:
         }
 
 
+def prepare_recovery_copy(path: Path) -> None:
+    connection = connect(path, read_only=False, journal_mode="DELETE")
+    try:
+        connection.executescript(
+            "CREATE TABLE IF NOT EXISTS __qualify_index_stage "
+            "(id INTEGER PRIMARY KEY, usr TEXT NOT NULL, qual_name TEXT); "
+            "CREATE TABLE IF NOT EXISTS __qualify_entity_snapshot "
+            "AS SELECT * FROM entity_edge WHERE 0; "
+            "CREATE TABLE IF NOT EXISTS __qualify_migration_legacy "
+            "(id INTEGER PRIMARY KEY, payload TEXT NOT NULL);"
+        )
+        connection.execute("DELETE FROM __qualify_index_stage")
+        connection.execute(
+            "INSERT INTO __qualify_index_stage(id, usr, qual_name) "
+            "SELECT id, usr, qual_name FROM symbol ORDER BY id"
+        )
+        connection.execute("DELETE FROM __qualify_entity_snapshot")
+        connection.execute(
+            "INSERT INTO __qualify_entity_snapshot SELECT * FROM entity_edge"
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO __qualify_migration_legacy(id, payload) "
+            "SELECT id, COALESCE(spelling, '') FROM symbol ORDER BY id"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def kill_on_progress(connection: sqlite3.Connection, calls: int = 25) -> None:
+    state = {"calls": 0}
+
+    def progress() -> int:
+        state["calls"] += 1
+        if state["calls"] >= calls:
+            os.kill(os.getpid(), 9)
+        return 0
+
+    connection.set_progress_handler(progress, 1)
+
+
 def crash_child(path: Path, phase: str) -> int:
     connection = connect(path, read_only=False, journal_mode="DELETE")
     try:
-        connection.execute("BEGIN IMMEDIATE")
-        if phase == "migration":
-            connection.execute("CREATE TABLE migration_probe(value INTEGER)")
-        else:
-            connection.execute("UPDATE meta SET value=value WHERE key='schema_version'")
-        if phase == "after_commit_before_checkpoint":
+        if phase == "wal_checkpoint":
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT OR REPLACE INTO meta(key, value) "
+                "VALUES('__qualify_checkpoint_probe__', '1')"
+            )
             connection.commit()
-        os.kill(os.getpid(), 9)
+            blocker = sqlite3.connect(path)
+            blocker.execute("BEGIN")
+            blocker.execute("SELECT COUNT(*) FROM symbol").fetchone()
+            timer = threading.Timer(0.05, lambda: os.kill(os.getpid(), 9))
+            timer.start()
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            os.kill(os.getpid(), 9)
+        elif phase == "maintenance":
+            kill_on_progress(connection)
+            connection.execute("ANALYZE")
+        else:
+            connection.execute("BEGIN IMMEDIATE")
+            if phase == "indexing":
+                connection.execute("DELETE FROM __qualify_index_stage")
+                kill_on_progress(connection)
+                connection.execute(
+                    "INSERT INTO __qualify_index_stage(id, usr, qual_name) "
+                    "SELECT id, usr, qual_name FROM symbol ORDER BY id"
+                )
+            elif phase == "named_transform":
+                kill_on_progress(connection)
+                connection.execute("DELETE FROM entity_edge")
+                connection.execute(
+                    "INSERT INTO entity_edge SELECT * FROM __qualify_entity_snapshot"
+                )
+            elif phase == "migration":
+                connection.execute(
+                    "ALTER TABLE __qualify_migration_legacy "
+                    "ADD COLUMN migrated_marker INTEGER DEFAULT 0"
+                )
+                kill_on_progress(connection)
+                connection.execute(
+                    "UPDATE __qualify_migration_legacy SET migrated_marker = 1"
+                )
+            else:
+                raise ValueError(f"unknown recovery phase: {phase}")
     finally:
         connection.close()
     return 0
 
 
 def run_recovery_check(source: Path) -> dict[str, Any]:
-    phases = ["after_write_before_commit", "migration", "after_commit_before_checkpoint"]
+    phases = ["indexing", "named_transform", "migration", "wal_checkpoint", "maintenance"]
+    allowed_states = {
+        "indexing": {"current"},
+        "named_transform": {"current"},
+        "migration": {"current"},
+        "wal_checkpoint": {"current", "stale-but-valid"},
+        "maintenance": {"current", "stale-but-valid"},
+    }
     results = []
     for phase in phases:
         with tempfile.TemporaryDirectory(prefix="cidx-storage-m1-recovery-") as temporary:
             path = copy_for_profile(source, Path(temporary), phase)
+            prepare_recovery_copy(path)
+            before_connection = connect(path, read_only=True)
+            try:
+                before_identity = (
+                    catalog_identity(before_connection),
+                    workspace_identity(before_connection),
+                    fact_set_identity(before_connection),
+                )
+            finally:
+                before_connection.close()
             completed = subprocess.run(
                 [sys.executable, __file__, "--crash-child", "--db", str(path), "--phase", phase],
                 capture_output=True,
@@ -346,25 +580,90 @@ def run_recovery_check(source: Path) -> dict[str, Any]:
             connection = connect(path, read_only=True)
             try:
                 integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+                foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
                 version = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-                probe = _has_table(connection, "migration_probe")
+                after_identity = (
+                    catalog_identity(connection),
+                    workspace_identity(connection),
+                    fact_set_identity(connection),
+                )
             finally:
                 connection.close()
-            passed = completed.returncode == -9 and integrity == "ok" and int(version[0]) == SCHEMA_VERSION and not probe
-            results.append({"phase": phase, "status": "pass" if passed else "fail", "child_exit": completed.returncode, "integrity": integrity, "migration_probe_present": probe})
+            semantic_equivalent = before_identity == after_identity
+            valid = (
+                integrity == "ok"
+                and not foreign_keys
+                and version is not None
+                and int(version[0]) == SCHEMA_VERSION
+            )
+            state = "current" if semantic_equivalent else "stale-but-valid"
+            passed = completed.returncode == -9 and valid and state in allowed_states[phase]
+            results.append({
+                "phase": phase,
+                "status": "pass" if passed else "fail",
+                "child_exit": completed.returncode,
+                "integrity": integrity,
+                "foreign_key_errors": foreign_keys,
+                "semantic_equivalent": semantic_equivalent,
+                "state": state,
+                "allowed_states": sorted(allowed_states[phase]),
+            })
     return {"status": "pass" if all(item["status"] == "pass" for item in results) else "fail", "cases": results}
 
 
 def qualify(source: Path, profile_path: Path, iterations: int) -> dict[str, Any]:
     profile = json.loads(profile_path.read_text())
-    strategies = {item["table"] for item in profile["relation_strategies"]}
+    relation_strategies = profile["relation_strategies"]
+    strategies = {item["table"] for item in relation_strategies}
     missing = sorted(REQUIRED_RELATIONS - strategies)
     layout = run_layout(source, iterations)
+    query_by_id = {item["id"]: item for item in layout["queries"]}
+    declared_query_ids = sorted({
+        query_id
+        for strategy in relation_strategies
+        for query_id in strategy.get("query_ids", [])
+    })
+    missing_query_ids = sorted(set(declared_query_ids) - set(query_by_id))
+    declared_supporting_ids = set(profile.get("supporting_query_ids", []))
+    unexpected_query_ids = sorted(
+        set(query_by_id) - set(declared_query_ids) - declared_supporting_ids
+    )
+    strategy_validation = [
+        {
+            "table": strategy["table"],
+            "forward": strategy.get("forward"),
+            "reverse": strategy.get("reverse"),
+            "query_ids": strategy.get("query_ids", []),
+            "query_ids_present": all(
+                query_id in query_by_id for query_id in strategy.get("query_ids", [])
+            ),
+        }
+        for strategy in relation_strategies
+    ]
     runtime = [run_runtime_profile(source, mode, iterations) for mode in ("DELETE", "WAL")]
     read_only = run_read_only_check(source)
     backup = run_backup_check(source)
     recovery = run_recovery_check(source)
+    identity_sensitivity = run_identity_sensitivity_check(source)
     query_failures = [item["id"] for item in layout["queries"] if item["status"] != "ok"]
+    representative_failures = [
+        item["id"]
+        for item in layout["queries"]
+        if item.get("require_rows", True) and not item["has_evidence"]
+    ]
+    corpus_status = (
+        "pass"
+        if layout["resolved"] and not representative_failures
+        else "fail"
+    )
+    strategy_status = (
+        "pass"
+        if not missing
+        and not missing_query_ids
+        and not unexpected_query_ids
+        and all(item["query_ids_present"] for item in strategy_validation)
+        else "fail"
+    )
     return {
         "result_version": "storage-m1/result-v1",
         "benchmark": "storage-m1/v1",
@@ -377,15 +676,23 @@ def qualify(source: Path, profile_path: Path, iterations: int) -> dict[str, Any]
         "read_only": read_only,
         "backup_restore": backup,
         "recovery": recovery,
+        "identity_sensitivity": identity_sensitivity,
         "gates": {
-            "relation_strategy_catalog": "pass" if not missing else "fail",
-            "query_plans": "pass" if not query_failures else "fail",
+            "relation_strategy_catalog": strategy_status,
+            "representative_corpus": corpus_status,
+            "query_plans": "pass" if not query_failures and not missing_query_ids else "fail",
             "read_only_non_mutating": read_only["status"],
             "backup_restore_identity": backup["status"],
             "interruption_recovery": recovery["status"],
+            "fact_identity_sensitivity": identity_sensitivity["status"],
             "wal_decision": "qualification_only",
         },
         "missing_relation_strategies": missing,
+        "declared_query_ids": declared_query_ids,
+        "missing_query_ids": missing_query_ids,
+        "unexpected_query_ids": unexpected_query_ids,
+        "strategy_validation": strategy_validation,
+        "representative_failures": representative_failures,
         "query_failures": query_failures,
         "notes": [
             "DELETE is the shipped runtime profile; WAL is measured on the same copied database and workload.",

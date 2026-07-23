@@ -103,7 +103,7 @@ TEST_CASE("read-only replay is non-mutating and backup preserves identity") {
   CHECK(std::filesystem::file_size(database_path) == before_size);
 
   {
-    cidx::SqliteDb interactive(database_path, false,
+    cidx::SqliteDb interactive(database_path, true,
                                cidx::SqliteProfile::interactive_read);
     CHECK(interactive.profile() == cidx::SqliteProfile::interactive_read);
     CHECK(pragma_int(interactive, "query_only") == 1);
@@ -111,6 +111,13 @@ TEST_CASE("read-only replay is non-mutating and backup preserves identity") {
         interactive.exec("CREATE TABLE should_fail_again(id INTEGER)"),
         cidx::StorageError);
   }
+
+  CHECK_THROWS_AS(cidx::SqliteDb(database_path, false,
+                                 cidx::SqliteProfile::interactive_read),
+                  cidx::StorageError);
+  CHECK_THROWS_AS(
+      cidx::SqliteDb(database_path, true, cidx::SqliteProfile::indexing),
+      cidx::StorageError);
 
   cidx::Storage restored(backup_path, cidx::Storage::OpenMode::read_only);
   CHECK(restored.integrity_ok());

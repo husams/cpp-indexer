@@ -168,7 +168,13 @@ std::string SqliteStmt::col_text(int idx) const {
 
 SqliteDb::SqliteDb(const std::string &path, bool read_only,
                    SqliteProfile profile)
-    : profile_(read_only ? SqliteProfile::read_only_replay : profile) {
+    : profile_(profile) {
+  const bool profile_is_read_only =
+      profile == SqliteProfile::interactive_read ||
+      profile == SqliteProfile::read_only_replay;
+  if (profile_is_read_only != read_only) {
+    throw StorageError("SQLite profile/open-mode mismatch for " + path);
+  }
   // Design §4.2: the RETURNING upserts are the only path shipped; refuse to
   // run against a pre-3.35 runtime with a clear message instead of a SQL
   // syntax error later.
