@@ -89,7 +89,8 @@ std::string stable_option(std::string_view option,
                              [](const auto &part) { return part == ".."; })) {
       return relative.generic_string();
     }
-    return std::string("external:") + path.filename().generic_string();
+    return std::string("external:") +
+           cidx::sha256_hex(path.lexically_normal().generic_string());
   };
   for (const std::string_view prefix :
        {"-I", "-isystem", "-iquote", "-include", "-include-pch",
@@ -311,9 +312,9 @@ int main(int argc, char **argv) {
       const auto stable = stable_option(option, component_root);
       configuration_material += std::to_string(stable.size()) + ":" + stable;
     }
-    const auto stable_driver =
-        rec->driver ? std::filesystem::path(*rec->driver).filename().string()
-                    : std::string{};
+    const auto stable_driver = rec->driver
+                                   ? stable_option(*rec->driver, component_root)
+                                   : std::string{};
     configuration_material += "driver:" + stable_driver +
                               ":main-only:" + (dump_opts.main_only ? "1" : "0");
     const std::string separator(1, '\0');

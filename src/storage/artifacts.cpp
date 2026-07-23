@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <exception>
 #include <fcntl.h>
@@ -14,6 +15,7 @@
 #include <set>
 #include <sqlite3.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <system_error>
 #include <unistd.h>
 #include <utility>
@@ -97,15 +99,12 @@ ArtifactTrust trust_from_string(std::string_view value) {
   return ArtifactTrust::unverified;
 }
 
+void ensure_directories_durable(const std::filesystem::path &path);
+
 class ArtifactPublicationLock {
 public:
   explicit ArtifactPublicationLock(const std::filesystem::path &root) {
-    std::error_code ec;
-    std::filesystem::create_directories(root, ec);
-    if (ec) {
-      throw StorageError("cannot create artifact root " + root.string() + ": " +
-                         ec.message());
-    }
+    ensure_directories_durable(root);
     fd_ = ::open((root / ".artifact-publication.lock").c_str(),
                  O_CREAT | O_RDWR, 0600);
     if (fd_ < 0 || ::flock(fd_, LOCK_EX) != 0) {
@@ -196,6 +195,86 @@ void fsync_directory_chain(const std::filesystem::path &root,
   fsync_directory(absolute_root);
 }
 
+void ensure_directories_durable(const std::filesystem::path &path) {
+  std::vector<std::filesystem::path> created;
+  auto current = std::filesystem::absolute(path).lexically_normal();
+  while (!std::filesystem::exists(current)) {
+    created.push_back(current);
+    const auto parent = current.parent_path();
+    if (parent == current) {
+      throw StorageError("cannot find an existing parent for " + path.string());
+    }
+    current = parent;
+  }
+  std::error_code ec;
+  std::filesystem::create_directories(path, ec);
+  if (ec) {
+    throw StorageError("cannot create directory " + path.string() + ": " +
+                       ec.message());
+  }
+  for (const auto &created_directory : created) {
+    fsync_directory(created_directory);
+  }
+  if (!created.empty()) {
+    fsync_directory(current);
+  }
+}
+
+void copy_file_nofollow(const std::filesystem::path &source,
+                        const std::filesystem::path &destination) {
+  const int source_fd = ::open(source.c_str(), O_RDONLY | O_NOFOLLOW);
+  if (source_fd < 0) {
+    throw StorageError("cannot open artifact source without following links");
+  }
+  const int destination_fd = ::open(
+      destination.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+  if (destination_fd < 0) {
+    (void)::close(source_fd);
+    throw StorageError("cannot create artifact staging file safely");
+  }
+  try {
+    struct stat source_stat{};
+    if (::fstat(source_fd, &source_stat) != 0 ||
+        !S_ISREG(source_stat.st_mode)) {
+      throw StorageError("artifact source is not a regular file");
+    }
+    std::array<char, 65536> buffer{};
+    for (;;) {
+      const ssize_t read_count =
+          ::read(source_fd, buffer.data(), buffer.size());
+      if (read_count == 0) {
+        break;
+      }
+      if (read_count < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        throw StorageError("cannot read artifact source");
+      }
+      ssize_t written = 0;
+      while (written < read_count) {
+        const ssize_t write_count =
+            ::write(destination_fd, buffer.data() + written,
+                    static_cast<std::size_t>(read_count - written));
+        if (write_count < 0) {
+          if (errno == EINTR) {
+            continue;
+          }
+          throw StorageError("cannot write artifact staging file");
+        }
+        written += write_count;
+      }
+    }
+  } catch (...) {
+    (void)::close(source_fd);
+    (void)::close(destination_fd);
+    throw;
+  }
+  if (::close(source_fd) != 0 || ::close(destination_fd) != 0) {
+    throw StorageError("cannot close artifact staging file");
+  }
+}
+
 bool has_symlink_component(const std::filesystem::path &path) {
   auto current =
       path.has_root_path() ? path.root_path() : std::filesystem::path{};
@@ -211,6 +290,41 @@ bool has_symlink_component(const std::filesystem::path &path) {
                          ": " + ec.message());
     }
     if (std::filesystem::is_symlink(status)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool has_unsafe_symlink_component(const std::filesystem::path &path,
+                                  const std::filesystem::path &trusted_root) {
+  const auto canonical_root = std::filesystem::weakly_canonical(trusted_root);
+  auto current =
+      path.has_root_path() ? path.root_path() : std::filesystem::path{};
+  for (const auto &part : path.relative_path()) {
+    current /= part;
+    std::error_code ec;
+    const auto status = std::filesystem::symlink_status(current, ec);
+    if (ec == std::errc::no_such_file_or_directory) {
+      return false;
+    }
+    if (ec) {
+      throw StorageError("cannot inspect artifact path " + current.string() +
+                         ": " + ec.message());
+    }
+    if (!std::filesystem::is_symlink(status)) {
+      continue;
+    }
+    const auto canonical_target =
+        std::filesystem::weakly_canonical(current, ec);
+    if (ec) {
+      throw StorageError("cannot resolve artifact symlink " + current.string() +
+                         ": " + ec.message());
+    }
+    const auto relative =
+        std::filesystem::relative(canonical_root, canonical_target, ec);
+    if (ec || std::ranges::any_of(
+                  relative, [](const auto &part) { return part == ".."; })) {
       return true;
     }
   }
@@ -265,6 +379,23 @@ bool supported_contract(const ArtifactSpec &spec) {
            spec.engine_version.starts_with("cidx ");
   }
   return false;
+}
+
+std::vector<std::string_view> required_relations(const ArtifactSpec &spec) {
+  if (spec.artifact_schema == "cidx-astgraph/v3") {
+    return {"node", "edge", "symbol", "meta"};
+  }
+  if (spec.artifact_schema == "cidx-analysis/v1" ||
+      spec.artifact_schema == "cidx-query/v1") {
+    return {"result"};
+  }
+  if (spec.artifact_schema == "cidx-proof/v1") {
+    return {"proof"};
+  }
+  if (spec.artifact_schema == "cidx-extension/v1") {
+    return {"extension"};
+  }
+  return {};
 }
 
 bool valid_relation_name(std::string_view value) {
@@ -530,6 +661,13 @@ ArtifactStore::validate_record(const ArtifactRecord &record) const {
           "artifact kind, schema, producer, or engine is not supported by "
           "this reader");
     }
+    for (const auto required : required_relations(record.spec)) {
+      if (!std::ranges::contains(record.spec.exposed_relations, required)) {
+        add_diagnostic(validation, "missing_required_relation",
+                       "supported artifact schema requires relation: " +
+                           std::string(required));
+      }
+    }
     for (const auto &relation : record.spec.exposed_relations) {
       if (!valid_relation_name(relation)) {
         add_diagnostic(validation, "invalid_relation",
@@ -654,8 +792,7 @@ ArtifactStore::publish_existing(const ArtifactSpec &input_spec,
   std::error_code ec;
   const auto source_absolute =
       std::filesystem::absolute(source_path).lexically_normal();
-  if (std::filesystem::is_symlink(
-          std::filesystem::symlink_status(source_absolute, ec))) {
+  if (has_unsafe_symlink_component(source_absolute, root_)) {
     throw StorageError("cannot adopt an artifact through a symlink");
   }
   const auto source_canonical =
@@ -674,15 +811,17 @@ ArtifactStore::publish_existing(const ArtifactSpec &input_spec,
       std::ranges::unique(spec.exposed_relations).begin(),
       spec.exposed_relations.end());
   const auto staging = root_ / ".staging";
-  std::filesystem::create_directories(staging);
+  ensure_directories_durable(staging);
   const auto nonce =
       std::chrono::steady_clock::now().time_since_epoch().count();
   const auto temporary =
       staging / (sha256_hex(spec.logical_id + std::to_string(nonce)) + ".db");
   try {
-    std::filesystem::copy_file(
-        source_canonical, temporary,
-        std::filesystem::copy_options::overwrite_existing);
+    if (has_unsafe_symlink_component(source_absolute, root_) ||
+        has_symlink_component(temporary)) {
+      throw StorageError("cannot adopt an artifact through a symlink");
+    }
+    copy_file_nofollow(source_canonical, temporary);
     {
       SqliteDb sidecar(temporary.string());
       auto check = sidecar.prepare("PRAGMA integrity_check");
@@ -717,7 +856,10 @@ ArtifactStore::publish_staged(const ArtifactSpec &spec,
         !is_within_root(root_, final_path)) {
       throw StorageError("artifact publication path escapes the trusted root");
     }
-    std::filesystem::create_directories(final_path.parent_path());
+    ensure_directories_durable(final_path.parent_path());
+    if (has_symlink_component(final_path)) {
+      throw StorageError("artifact publication path contains a symlink");
+    }
     if (std::filesystem::exists(final_path)) {
       if (digest_file(final_path) != hash) {
         throw StorageError("content-addressed artifact path already contains a "
@@ -884,21 +1026,27 @@ ArtifactStore::attach_current(std::string_view logical_id) {
 void ArtifactStore::release_attachment(std::string_view name,
                                        bool previous_query_only) noexcept {
   try {
-    storage_.raw_db().exec("DETACH DATABASE \"" + std::string(name) + "\"");
+    const std::string owned_name(name);
+    try {
+      storage_.raw_db().exec("DETACH DATABASE \"" + owned_name + "\"");
+    } catch (...) {
+      const auto ignored = std::current_exception();
+      (void)ignored;
+    }
+    const auto it = std::ranges::find(attached_names_, name);
+    if (it != attached_names_.end()) {
+      attached_names_.erase(it);
+    }
+    storage_.attached_artifact_names_.erase(owned_name);
+    if (storage_.attached_artifact_names_.empty()) {
+      reset_query_only(storage_.artifact_query_only_before_attach_.value_or(
+          previous_query_only));
+      storage_.artifact_query_only_before_attach_.reset();
+      query_only_before_attach_.reset();
+    }
   } catch (...) {
     const auto ignored = std::current_exception();
     (void)ignored;
-  }
-  const auto it = std::ranges::find(attached_names_, name);
-  if (it != attached_names_.end()) {
-    attached_names_.erase(it);
-  }
-  storage_.attached_artifact_names_.erase(std::string(name));
-  if (storage_.attached_artifact_names_.empty()) {
-    reset_query_only(storage_.artifact_query_only_before_attach_.value_or(
-        previous_query_only));
-    storage_.artifact_query_only_before_attach_.reset();
-    query_only_before_attach_.reset();
   }
 }
 

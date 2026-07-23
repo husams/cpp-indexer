@@ -3,7 +3,9 @@
 
 #include "storage/artifacts.hpp"
 #include "storage/storage.hpp"
+#include "util/hashing.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -35,8 +37,15 @@ cidx::ArtifactSpec complete_spec() {
   spec.truncation = cidx::ArtifactTruncation::none;
   spec.trust = cidx::ArtifactTrust::producer_verified;
   spec.attachment_name = "astgraph";
-  spec.exposed_relations = {"node", "edge"};
+  spec.exposed_relations = {"node", "edge", "symbol", "meta"};
   return spec;
+}
+
+void create_astgraph_tables(cidx::SqliteDb &db) {
+  db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY);"
+          "CREATE TABLE edge(id INTEGER PRIMARY KEY);"
+          "CREATE TABLE symbol(id INTEGER PRIMARY KEY);"
+          "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);");
 }
 
 } // namespace
@@ -50,6 +59,8 @@ TEST_CASE("artifact publication is deterministic and read-only") {
       artifacts.publish(complete_spec(), [](cidx::SqliteDb &db) {
         db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY, usr TEXT NOT NULL);"
                 "CREATE TABLE edge(id INTEGER PRIMARY KEY);"
+                "CREATE TABLE symbol(id INTEGER PRIMARY KEY);"
+                "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);"
                 "INSERT INTO node VALUES (1, 'stable:node:1');");
       });
   CHECK(record.relative_path.starts_with("artifacts/"));
@@ -87,13 +98,13 @@ TEST_CASE("identical publication is idempotent") {
   const auto root = test_root("idempotent");
   cidx::ArtifactStore artifacts(storage, root);
   const auto first = artifacts.publish(complete_spec(), [](cidx::SqliteDb &db) {
-    db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY); INSERT INTO node "
-            "VALUES (1)");
+    create_astgraph_tables(db);
+    db.exec("INSERT INTO node VALUES (1)");
   });
   const auto second =
       artifacts.publish(complete_spec(), [](cidx::SqliteDb &db) {
-        db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY); INSERT INTO node "
-                "VALUES (1)");
+        create_astgraph_tables(db);
+        db.exec("INSERT INTO node VALUES (1)");
       });
   CHECK(second.id == first.id);
   CHECK(second.content_hash == first.content_hash);
@@ -141,6 +152,8 @@ TEST_CASE("existing astgraph output is adopted by the manifest policy") {
     cidx::SqliteDb sidecar(source.string());
     sidecar.exec("CREATE TABLE node(id INTEGER PRIMARY KEY);"
                  "CREATE TABLE edge(id INTEGER PRIMARY KEY);"
+                 "CREATE TABLE symbol(id INTEGER PRIMARY KEY);"
+                 "CREATE TABLE meta(key TEXT PRIMARY KEY);"
                  "INSERT INTO node VALUES (7);");
   }
   cidx::ArtifactStore artifacts(storage, root);
@@ -174,14 +187,14 @@ TEST_CASE("current selection and recovery respect leases and pins") {
   cidx::ArtifactStore artifacts(storage, root);
   auto first_spec = complete_spec();
   const auto first = artifacts.publish(first_spec, [](cidx::SqliteDb &db) {
-    db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY); INSERT INTO node "
-            "VALUES (1)");
+    create_astgraph_tables(db);
+    db.exec("INSERT INTO node VALUES (1)");
   });
   artifacts.lease(first_spec.logical_id, "replay-1", "pinned replay");
   auto second_spec = first_spec;
   const auto second = artifacts.publish(second_spec, [](cidx::SqliteDb &db) {
-    db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY); INSERT INTO node "
-            "VALUES (2)");
+    create_astgraph_tables(db);
+    db.exec("INSERT INTO node VALUES (2)");
   });
   CHECK(artifacts.current(first_spec.logical_id)->content_hash ==
         second.content_hash);
@@ -201,13 +214,13 @@ TEST_CASE("stale pins can be released after superseding") {
   cidx::ArtifactStore artifacts(storage, root);
   auto spec = complete_spec();
   const auto first = artifacts.publish(spec, [](cidx::SqliteDb &db) {
-    db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY); INSERT INTO node "
-            "VALUES (11)");
+    create_astgraph_tables(db);
+    db.exec("INSERT INTO node VALUES (11)");
   });
   artifacts.pin(spec.logical_id, "rebuild", "keep old generation");
   artifacts.publish(spec, [](cidx::SqliteDb &db) {
-    db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY); INSERT INTO node "
-            "VALUES (12)");
+    create_astgraph_tables(db);
+    db.exec("INSERT INTO node VALUES (12)");
   });
   artifacts.unpin(spec.logical_id, "rebuild");
   CHECK(artifacts.recover() >= 1);
@@ -229,11 +242,15 @@ TEST_CASE("attachment names and query-only state are connection-wide") {
   artifacts.publish(first_spec, [](cidx::SqliteDb &db) {
     db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY);"
             "CREATE TABLE edge(id INTEGER PRIMARY KEY);"
+            "CREATE TABLE symbol(id INTEGER PRIMARY KEY);"
+            "CREATE TABLE meta(key TEXT PRIMARY KEY);"
             "INSERT INTO node VALUES (1)");
   });
   artifacts.publish(second_spec, [](cidx::SqliteDb &db) {
     db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY);"
             "CREATE TABLE edge(id INTEGER PRIMARY KEY);"
+            "CREATE TABLE symbol(id INTEGER PRIMARY KEY);"
+            "CREATE TABLE meta(key TEXT PRIMARY KEY);"
             "INSERT INTO node VALUES (2)");
   });
   auto first = artifacts.attach_current(first_spec.logical_id);
@@ -282,9 +299,44 @@ TEST_CASE("validation rejects unsupported contracts and missing relations") {
       artifacts.publish(missing_relation, [](cidx::SqliteDb &db) {
         db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY);");
       });
-  CHECK_FALSE(artifacts.validate(missing_record.spec.logical_id).usable());
+  const auto validation = artifacts.validate(missing_record.spec.logical_id);
+  CHECK_FALSE(validation.usable());
+  CHECK(std::ranges::any_of(
+      validation.diagnostics, [](const cidx::ArtifactDiagnostic &diagnostic) {
+        return diagnostic.code == "missing_required_relation";
+      }));
   std::error_code ignored;
   std::filesystem::remove_all(root, ignored);
+}
+
+TEST_CASE("publication and adoption reject symlink escapes") {
+  cidx::Storage storage(":memory:");
+  const auto root = test_root("symlink-escape");
+  const auto outside = test_root("symlink-escape-outside");
+  cidx::ArtifactStore artifacts(storage, root);
+  auto spec = complete_spec();
+
+  const auto source = outside / "source.db";
+  {
+    cidx::SqliteDb sidecar(source.string());
+    create_astgraph_tables(sidecar);
+  }
+  const auto source_link = root / "input";
+  std::filesystem::create_directory_symlink(outside, source_link);
+  CHECK_THROWS(static_cast<void>(
+      artifacts.publish_existing(spec, source_link / source.filename())));
+
+  const auto outside_artifacts = outside / "artifacts";
+  std::filesystem::create_directories(outside_artifacts);
+  const auto kind_directory = root / "artifacts" / cidx::sha256_hex(spec.kind);
+  std::filesystem::create_directories(kind_directory.parent_path());
+  std::filesystem::create_directory_symlink(outside_artifacts, kind_directory);
+  CHECK_THROWS(static_cast<void>(artifacts.publish(
+      spec, [](cidx::SqliteDb &db) { create_astgraph_tables(db); })));
+
+  std::error_code ignored;
+  std::filesystem::remove_all(root, ignored);
+  std::filesystem::remove_all(outside, ignored);
 }
 
 TEST_CASE("attachment reset is safe after store destruction") {
@@ -296,7 +348,9 @@ TEST_CASE("attachment reset is safe after store destruction") {
     const auto record =
         artifacts.publish(complete_spec(), [](cidx::SqliteDb &db) {
           db.exec("CREATE TABLE node(id INTEGER PRIMARY KEY);"
-                  "CREATE TABLE edge(id INTEGER PRIMARY KEY);");
+                  "CREATE TABLE edge(id INTEGER PRIMARY KEY);"
+                  "CREATE TABLE symbol(id INTEGER PRIMARY KEY);"
+                  "CREATE TABLE meta(key TEXT PRIMARY KEY);");
         });
     attachment = artifacts.attach_current(record.spec.logical_id);
   }

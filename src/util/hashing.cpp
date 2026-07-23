@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <array>
-#include <cstdio>
+#include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <span>
 #include <string_view>
 
 extern "C" {
@@ -15,30 +18,21 @@ namespace cidx {
 
 namespace {
 
-std::string digest_to_hex_16(const unsigned char digest[16]) {
-  static const char kHex[] = "0123456789abcdef";
+std::string digest_to_hex(std::span<const unsigned char> digest) {
+  static constexpr std::array kHex = {'0', '1', '2', '3', '4', '5', '6', '7',
+                                      '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
   std::string out;
-  out.reserve(32);
-  for (int i = 0; i < 16; ++i) {
-    out += kHex[digest[i] >> 4];
-    out += kHex[digest[i] & 0x0F];
-  }
-  return out;
-}
-
-std::string digest_to_hex_20(const unsigned char digest[20]) {
-  static const char kHex[] = "0123456789abcdef";
-  std::string out;
-  out.reserve(40);
-  for (int i = 0; i < 20; ++i) {
-    out += kHex[digest[i] >> 4];
-    out += kHex[digest[i] & 0x0F];
+  out.reserve(digest.size() * 2);
+  for (const auto byte : digest) {
+    out += kHex[byte >> 4];
+    out += kHex[byte & 0x0F];
   }
   return out;
 }
 
 std::string digest_to_hex_32(const std::array<std::uint32_t, 8> &digest) {
-  static constexpr char kHex[] = "0123456789abcdef";
+  static constexpr std::array kHex = {'0', '1', '2', '3', '4', '5', '6', '7',
+                                      '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
   std::string out;
   out.reserve(64);
   for (const auto word : digest) {
@@ -159,18 +153,14 @@ private:
   std::uint64_t bit_count_ = 0;
 };
 
-std::string digest_to_hex(const unsigned char digest[16]) {
-  return digest_to_hex_16(digest);
-}
-
 } // namespace
 
 std::string md5_hex(const void *data, std::size_t len) {
   MD5_CTX ctx;
   MD5_Init(&ctx);
   MD5_Update(&ctx, data, static_cast<unsigned long>(len));
-  unsigned char digest[16];
-  MD5_Final(digest, &ctx);
+  std::array<unsigned char, 16> digest{};
+  MD5_Final(digest.data(), &ctx);
   return digest_to_hex(digest);
 }
 
@@ -179,24 +169,32 @@ std::string md5_hex(const std::string &data) {
 }
 
 std::optional<std::string> md5_of(const std::string &path) {
-  std::FILE *fh = std::fopen(path.c_str(), "rb");
-  if (fh == nullptr) {
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(path, ec) || ec) {
+    return std::nullopt;
+  }
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
     return std::nullopt;
   }
   MD5_CTX ctx;
   MD5_Init(&ctx);
-  char buf[65536];
-  std::size_t got = 0;
-  while ((got = std::fread(buf, 1, sizeof buf, fh)) > 0) {
-    MD5_Update(&ctx, buf, static_cast<unsigned long>(got));
+  std::array<char, 65536> buf{};
+  for (;;) {
+    input.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+    const auto count = input.gcount();
+    if (count > 0) {
+      MD5_Update(&ctx, buf.data(), static_cast<unsigned long>(count));
+    }
+    if (input.eof()) {
+      break;
+    }
+    if (!input) {
+      return std::nullopt;
+    }
   }
-  const bool failed = std::ferror(fh) != 0; // e.g. EISDIR — OSError parity
-  std::fclose(fh);
-  if (failed) {
-    return std::nullopt;
-  }
-  unsigned char digest[16];
-  MD5_Final(digest, &ctx);
+  std::array<unsigned char, 16> digest{};
+  MD5_Final(digest.data(), &ctx);
   return digest_to_hex(digest);
 }
 
@@ -207,9 +205,9 @@ std::string sha1_hex(const std::string &data) {
   SHA1_CTX ctx;
   SHA1_Init(&ctx);
   SHA1_Update(&ctx, data.data(), static_cast<unsigned long>(data.size()));
-  unsigned char digest[20];
-  SHA1_Final(digest, &ctx);
-  return digest_to_hex_20(digest);
+  std::array<unsigned char, 20> digest{};
+  SHA1_Final(digest.data(), &ctx);
+  return digest_to_hex(digest);
 }
 
 std::string sha256_hex(const std::string &data) {
@@ -219,20 +217,28 @@ std::string sha256_hex(const std::string &data) {
 }
 
 std::optional<std::string> sha256_of(const std::string &path) {
-  std::FILE *fh = std::fopen(path.c_str(), "rb");
-  if (fh == nullptr) {
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(path, ec) || ec) {
+    return std::nullopt;
+  }
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
     return std::nullopt;
   }
   Sha256 context;
   std::array<char, 65536> buffer{};
-  std::size_t got = 0;
-  while ((got = std::fread(buffer.data(), 1, buffer.size(), fh)) > 0) {
-    context.update(buffer.data(), got);
-  }
-  const bool failed = std::ferror(fh) != 0;
-  std::fclose(fh);
-  if (failed) {
-    return std::nullopt;
+  for (;;) {
+    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const auto count = input.gcount();
+    if (count > 0) {
+      context.update(buffer.data(), static_cast<std::size_t>(count));
+    }
+    if (input.eof()) {
+      break;
+    }
+    if (!input) {
+      return std::nullopt;
+    }
   }
   return "sha256:" + digest_to_hex_32(context.final());
 }
@@ -250,8 +256,8 @@ static void sha1_add_flags(SHA1_CTX &ctx, const std::vector<std::string> &flags,
   }
   if (driver) {
     // Python: b"\0drv\0" + driver.encode()
-    const char prefix[] = "\0drv\0";
-    SHA1_Update(&ctx, prefix, 5); // 5 bytes: \0 d r v \0
+    constexpr std::string_view prefix("\0drv\0", 5);
+    SHA1_Update(&ctx, prefix.data(), static_cast<unsigned long>(prefix.size()));
     SHA1_Update(&ctx, driver->data(),
                 static_cast<unsigned long>(driver->size()));
   }
@@ -267,18 +273,18 @@ std::string sha1_cache_key(const AstCacheKey &k) {
   SHA1_Update(&ctx, &sep, 1);
   // flags [+ "\0drv\0" + driver]
   sha1_add_flags(ctx, k.flags, k.driver);
-  unsigned char digest[20];
-  SHA1_Final(digest, &ctx);
-  return digest_to_hex_20(digest);
+  std::array<unsigned char, 20> digest{};
+  SHA1_Final(digest.data(), &ctx);
+  return digest_to_hex(digest);
 }
 
 std::string sha1_flags_hash(const AstCacheKey &k) {
   SHA1_CTX ctx;
   SHA1_Init(&ctx);
   sha1_add_flags(ctx, k.flags, k.driver);
-  unsigned char digest[20];
-  SHA1_Final(digest, &ctx);
-  return digest_to_hex_20(digest);
+  std::array<unsigned char, 20> digest{};
+  SHA1_Final(digest.data(), &ctx);
+  return digest_to_hex(digest);
 }
 
 } // namespace cidx
