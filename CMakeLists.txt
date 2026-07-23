@@ -103,6 +103,16 @@ message(STATUS "cidx: compiler ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VER
 
 # S02: storage layer sits on the system SQLite3 (>= 3.35 enforced at runtime).
 find_package(SQLite3 REQUIRED)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+# Every language consumer is generated from catalogs/core.json.  Keep the
+# checked-in artifacts reproducible and make drift fail as part of the normal
+# build rather than at release time.
+add_custom_target(cidx_catalog_check ALL
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/generate_catalogs.py" --check
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  COMMENT "Checking generated semantic catalog contracts"
+  VERBATIM)
 
 # Default: the shared SQLite3 imported target. Under CIDX_STATIC, swap in the
 # static archive when one is on disk (the sqlite amalgamation pulls in
@@ -184,6 +194,7 @@ add_library(cidx_core STATIC
   third_party/md5/md5.c
   third_party/sha1/sha1.c
 )
+add_dependencies(cidx_core cidx_catalog_check)
 
 # --- LLVM/Clang discovery ----------------------------------------------------
 # find_package(... CONFIG) only searches CMake's default prefixes, which do NOT

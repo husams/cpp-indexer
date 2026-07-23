@@ -1,0 +1,121 @@
+{
+  "format": "cidx.catalog/v1",
+  "catalog_version": 1,
+  "product": "cidx",
+  "symbol_kinds": [
+    {"id": 2, "name": "struct"},
+    {"id": 3, "name": "union"},
+    {"id": 4, "name": "class"},
+    {"id": 5, "name": "enum"},
+    {"id": 6, "name": "member"},
+    {"id": 7, "name": "enum-constant"},
+    {"id": 8, "name": "function"},
+    {"id": 9, "name": "variable"},
+    {"id": 20, "name": "typedef"},
+    {"id": 21, "name": "method"},
+    {"id": 22, "name": "namespace"},
+    {"id": 24, "name": "constructor"},
+    {"id": 25, "name": "destructor"},
+    {"id": 30, "name": "function-template"},
+    {"id": 31, "name": "class-template"},
+    {"id": 36, "name": "type-alias"},
+    {"id": 501, "name": "macro"}
+  ],
+  "relations": [
+    {"id": 1, "name": "calls", "layer": "symbol", "source": "symbol.callable", "target": "symbol.callable", "inverse": "called_by", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site", "declaration"], "completeness": "partial"},
+    {"id": 2, "name": "inherits", "layer": "symbol", "source": "symbol.record", "target": "symbol.record", "inverse": "subclasses", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "complete"},
+    {"id": 3, "name": "contains", "layer": "symbol", "source": "symbol.scope", "target": "symbol.declaration", "inverse": "contained_by", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "complete"},
+    {"id": 4, "name": "specializes", "layer": "symbol", "source": "symbol.declaration", "target": "symbol.template", "inverse": "specialized_by", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration", "reference_site"], "completeness": "partial"},
+    {"id": 5, "name": "instantiates", "layer": "symbol", "source": "symbol.declaration", "target": "symbol.template", "inverse": "instantiated_by", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration", "reference_site"], "completeness": "partial"},
+    {"id": 6, "name": "overrides", "layer": "symbol", "source": "symbol.method", "target": "symbol.method", "inverse": "overridden_by", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "complete"},
+    {"id": 7, "name": "uses", "layer": "symbol", "source": "symbol.declaration", "target": "symbol.declaration", "inverse": "used_by", "traversal": ["out", "in"], "evidence": "reference_site", "evidence_capabilities": ["reference_site", "call_site"], "completeness": "partial"},
+    {"id": 8, "name": "field_of", "layer": "symbol", "source": "symbol.member", "target": "symbol.record", "inverse": "fields", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "complete"},
+    {"id": 9, "name": "method_of", "layer": "symbol", "source": "symbol.method", "target": "symbol.record", "inverse": "methods", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "complete"},
+    {"id": 10, "name": "construct-value", "layer": "symbol", "source": "symbol.callable", "target": "symbol.record", "inverse": "constructed_by", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial"},
+    {"id": 11, "name": "construct-temp", "layer": "symbol", "source": "symbol.callable", "target": "symbol.record", "inverse": "constructed_by", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial"},
+    {"id": 12, "name": "construct-heap", "layer": "symbol", "source": "symbol.callable", "target": "symbol.record", "inverse": "constructed_by", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial"},
+    {"id": 13, "name": "construct-copy", "layer": "symbol", "source": "symbol.callable", "target": "symbol.record", "inverse": "constructed_by", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial"},
+    {"id": 14, "name": "construct-move", "layer": "symbol", "source": "symbol.callable", "target": "symbol.record", "inverse": "constructed_by", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial"},
+    {"id": 15, "name": "factory-construct", "layer": "symbol", "source": "symbol.callable", "target": "symbol.record", "inverse": "constructed_by", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial"},
+    {"id": 16, "name": "destroy", "layer": "symbol", "source": "symbol.callable", "target": "symbol.record", "inverse": "destroyed_by", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial"},
+    {"id": 17, "name": "friend", "layer": "symbol", "source": "symbol.declaration", "target": "symbol.declaration", "inverse": "befriended_by", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "complete"},
+    {"id": 18, "name": "dispatch_calls", "layer": "symbol", "source": "symbol.callable", "target": "symbol.callable", "inverse": "dispatch_callers", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site", "derived"], "completeness": "partial"},
+    {"id": 19, "name": "alias_of", "layer": "symbol", "source": "symbol.alias", "target": "symbol.declaration", "inverse": "aliased_by", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "complete"},
+    {"id": 20, "name": "of_type", "layer": "symbol", "source": "symbol.declaration", "target": "type", "inverse": "typed_by", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "partial"},
+    {"id": 1, "name": "generalizes", "layer": "entity", "source": "entity", "target": "entity", "inverse": "specialized_by", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "complete"},
+    {"id": 2, "name": "implements", "layer": "entity", "source": "entity", "target": "entity", "inverse": "implemented_by", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "partial"},
+    {"id": 3, "name": "specializes", "layer": "entity", "source": "entity", "target": "entity", "inverse": "specialized_by", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "partial"},
+    {"id": 4, "name": "composes", "layer": "entity", "source": "entity", "target": "entity", "inverse": "composed_by", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "partial"},
+    {"id": 5, "name": "aggregates", "layer": "entity", "source": "entity", "target": "entity", "inverse": "aggregated_by", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "partial"},
+    {"id": 6, "name": "associates", "layer": "entity", "source": "entity", "target": "entity", "inverse": "associated_by", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "partial"},
+    {"id": 7, "name": "creates", "layer": "entity", "source": "entity", "target": "entity", "inverse": "created_by", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "partial"},
+    {"id": 8, "name": "uses", "layer": "entity", "source": "entity", "target": "entity", "inverse": "used_by", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "partial"},
+    {"id": 9, "name": "destroys", "layer": "entity", "source": "entity", "target": "entity", "inverse": "destroyed_by", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "partial"},
+    {"id": 10, "name": "befriends", "layer": "entity", "source": "entity", "target": "entity", "inverse": "befriended_by", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "complete"},
+    {"id": 11, "name": "instantiates", "layer": "entity", "source": "entity", "target": "entity", "inverse": "instantiated_by", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "partial"},
+    {"id": 12, "name": "declares", "layer": "entity", "source": "entity", "target": "entity", "inverse": "declared_by", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "complete"}
+  ],
+  "entity_kinds": [
+    {"id": 0, "name": "other"}, {"id": 1, "name": "class"},
+    {"id": 2, "name": "abstract_class"}, {"id": 3, "name": "interface"},
+    {"id": 4, "name": "union"}, {"id": 5, "name": "enum"},
+    {"id": 6, "name": "class_template"},
+    {"id": 7, "name": "abstract_class_template"},
+    {"id": 8, "name": "interface_template"}, {"id": 9, "name": "namespace"}
+  ],
+  "type_kinds": [
+    {"id": 1, "name": "builtin"}, {"id": 2, "name": "record"},
+    {"id": 3, "name": "enum"}, {"id": 4, "name": "alias"},
+    {"id": 5, "name": "pointer"}, {"id": 6, "name": "lvalue-reference"},
+    {"id": 7, "name": "rvalue-reference"}, {"id": 8, "name": "array"},
+    {"id": 9, "name": "function"}, {"id": 10, "name": "template-param"},
+    {"id": 11, "name": "other"}, {"id": 12, "name": "member-data-pointer"},
+    {"id": 13, "name": "member-function-pointer"}
+  ],
+  "type_edge_kinds": [
+    {"id": 1, "name": "pointee"}, {"id": 2, "name": "element_type"},
+    {"id": 3, "name": "alias_of"}, {"id": 4, "name": "return_type"},
+    {"id": 5, "name": "param_type"}, {"id": 6, "name": "template_argument_type"},
+    {"id": 7, "name": "member_owner"}, {"id": 8, "name": "member_component"}
+  ],
+  "fields": [
+    {"name": "id", "filterable": true, "is_string": false},
+    {"name": "usr", "filterable": true, "is_string": true},
+    {"name": "name", "filterable": true, "is_string": true},
+    {"name": "spelling", "filterable": true, "is_string": true},
+    {"name": "qual_name", "filterable": true, "is_string": true},
+    {"name": "kind", "filterable": true, "is_string": true},
+    {"name": "entity_type", "filterable": true, "is_string": true},
+    {"name": "is_definition", "filterable": true, "is_string": false},
+    {"name": "is_pure", "filterable": true, "is_string": false},
+    {"name": "is_static", "filterable": true, "is_string": false},
+    {"name": "file", "filterable": false, "is_string": true},
+    {"name": "line", "filterable": false, "is_string": false},
+    {"name": "col", "filterable": false, "is_string": false}
+  ],
+  "statuses": ["complete", "partial", "unknown", "error"],
+  "trust_levels": ["unverified", "producer-verified", "reader-verified"],
+  "evidence_classes": ["source", "derived", "inferred", "runtime", "assumption", "proof"],
+  "occurrence_roles": [
+    {"id": 1, "name": "declaration"}, {"id": 2, "name": "definition"},
+    {"id": 3, "name": "reference"}, {"id": 4, "name": "call-site"},
+    {"id": 5, "name": "type-use"}
+  ],
+  "effect_roles": [
+    {"id": 1, "name": "construct"}, {"id": 2, "name": "destroy"},
+    {"id": 3, "name": "read"}, {"id": 4, "name": "write"},
+    {"id": 5, "name": "escape"}
+  ],
+  "unknown_reasons": [
+    {"id": 1, "name": "not_indexed"}, {"id": 2, "name": "unsupported_construct"},
+    {"id": 3, "name": "truncated_budget"}, {"id": 4, "name": "unresolved_symbol"},
+    {"id": 5, "name": "incompatible_artifact"}, {"id": 6, "name": "missing_evidence"}
+  ],
+  "artifact_kinds": [
+    {"id": 1, "name": "semantic-index", "schema_version": 34},
+    {"id": 2, "name": "astgraph", "schema_version": 3},
+    {"id": 3, "name": "analysis-result", "schema_version": 1},
+    {"id": 4, "name": "query-result", "schema_version": 1}
+  ],
+  "migrations": []
+}

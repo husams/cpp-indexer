@@ -5,6 +5,7 @@
 
 #include <algorithm>
 
+#include "catalogs/generated_catalog.hpp"
 #include "storage/storage.hpp"
 
 namespace cidx::query {
@@ -20,43 +21,33 @@ const char *view_name(View v) {
 // -----------------------------------------------------------
 
 const std::vector<RelationDesc> &relation_catalog() {
-  static const std::vector<RelationDesc> cat = {
-      // Layer-0 edge kinds (edge_kind seed, storage schema).
-      {.name = "calls", .layer = View::Symbol, .kind_id = 1},
-      {.name = "inherits", .layer = View::Symbol, .kind_id = 2},
-      {.name = "contains", .layer = View::Symbol, .kind_id = 3},
-      {.name = "specializes", .layer = View::Symbol, .kind_id = 4},
-      {.name = "instantiates", .layer = View::Symbol, .kind_id = 5},
-      {.name = "overrides", .layer = View::Symbol, .kind_id = 6},
-      {.name = "uses", .layer = View::Symbol, .kind_id = 7},
-      {.name = "field_of", .layer = View::Symbol, .kind_id = 8},
-      {.name = "method_of", .layer = View::Symbol, .kind_id = 9},
-      {.name = "construct-value", .layer = View::Symbol, .kind_id = 10},
-      {.name = "construct-temp", .layer = View::Symbol, .kind_id = 11},
-      {.name = "construct-heap", .layer = View::Symbol, .kind_id = 12},
-      {.name = "construct-copy", .layer = View::Symbol, .kind_id = 13},
-      {.name = "construct-move", .layer = View::Symbol, .kind_id = 14},
-      {.name = "factory-construct", .layer = View::Symbol, .kind_id = 15},
-      {.name = "destroy", .layer = View::Symbol, .kind_id = 16},
-      {.name = "friend", .layer = View::Symbol, .kind_id = 17},
-      {.name = "dispatch_calls", .layer = View::Symbol, .kind_id = 18},
-      {.name = "alias_of", .layer = View::Symbol, .kind_id = 19},
-      {.name = "of_type", .layer = View::Symbol, .kind_id = 20},
-      // Layer-1 entity_edge kinds (entity_edge_kind seed).
-      {.name = "generalizes", .layer = View::Entity, .kind_id = 1},
-      {.name = "implements", .layer = View::Entity, .kind_id = 2},
-      {.name = "specializes", .layer = View::Entity, .kind_id = 3},
-      {.name = "composes", .layer = View::Entity, .kind_id = 4},
-      {.name = "aggregates", .layer = View::Entity, .kind_id = 5},
-      {.name = "associates", .layer = View::Entity, .kind_id = 6},
-      {.name = "creates", .layer = View::Entity, .kind_id = 7},
-      {.name = "uses", .layer = View::Entity, .kind_id = 8},
-      {.name = "destroys", .layer = View::Entity, .kind_id = 9},
-      {.name = "befriends", .layer = View::Entity, .kind_id = 10},
-      {.name = "instantiates", .layer = View::Entity, .kind_id = 11},
-      {.name = "declares", .layer = View::Entity, .kind_id = 12},
-  };
+  static const std::vector<RelationDesc> cat = [] {
+    std::vector<RelationDesc> result;
+    result.reserve(catalog::kRelations.size());
+    for (const auto &relation : catalog::kRelations) {
+      result.push_back({
+          .name = std::string(relation.name),
+          .layer = relation.layer == catalog::View::Symbol ? View::Symbol
+                                                           : View::Entity,
+          .kind_id = relation.id,
+          .source = std::string(relation.source),
+          .target = std::string(relation.target),
+          .inverse = std::string(relation.inverse),
+          .traversal = std::string(relation.traversal),
+          .evidence = std::string(relation.evidence),
+          .evidence_capabilities = std::string(relation.evidence_capabilities),
+          .completeness = std::string(relation.completeness),
+      });
+    }
+    return result;
+  }();
   return cat;
+}
+
+const std::array<catalog::ExtensionRelation,
+                 catalog::kExtensionRelations.size()> &
+extension_relation_catalog() {
+  return catalog::kExtensionRelations;
 }
 
 const RelationDesc *resolve_relation(const std::string &name, View active) {
@@ -84,18 +75,14 @@ const RelationDesc *resolve_relation(const std::string &name, View active) {
 namespace {
 
 const std::vector<std::string> &entity_kind_names() {
-  static const std::vector<std::string> names = {
-      "other",
-      "class",
-      "abstract_class",
-      "interface",
-      "union",
-      "enum",
-      "class_template",
-      "abstract_class_template",
-      "interface_template",
-      "namespace",
-  };
+  static const std::vector<std::string> names = [] {
+    std::vector<std::string> result;
+    result.reserve(catalog::kEntityKinds.size());
+    for (const auto &kind : catalog::kEntityKinds) {
+      result.emplace_back(kind.name);
+    }
+    return result;
+  }();
   return names;
 }
 
@@ -115,31 +102,22 @@ int64_t entity_kind_id_of(const std::string &name) {
 // ---------------------------------------------------------------
 
 struct FieldDesc {
-  const char *name;
+  std::string_view name;
   bool filterable; // usable in nodes()/where() predicates
   bool is_string;  // string comparisons (eq/ne/glob/in); else int/bool
 };
 
 const std::vector<FieldDesc> &field_catalog() {
-  static const std::vector<FieldDesc> f = {
-      {.name = "id", .filterable = true, .is_string = false},
-      {.name = "usr", .filterable = true, .is_string = true},
-      {.name = "name", .filterable = true, .is_string = true},
-      {.name = "spelling", .filterable = true, .is_string = true},
-      {.name = "qual_name", .filterable = true, .is_string = true},
-      {.name = "kind",
-       .filterable = true,
-       .is_string = true}, // C++ declaration kind (symbol_kind names)
-      {.name = "entity_type",
-       .filterable = true,
-       .is_string = true}, // entity classification (entity_kind names)
-      {.name = "is_definition", .filterable = true, .is_string = false},
-      {.name = "is_pure", .filterable = true, .is_string = false},
-      {.name = "is_static", .filterable = true, .is_string = false},
-      {.name = "file", .filterable = false, .is_string = true},
-      {.name = "line", .filterable = false, .is_string = false},
-      {.name = "col", .filterable = false, .is_string = false},
-  };
+  static const std::vector<FieldDesc> f = [] {
+    std::vector<FieldDesc> result;
+    result.reserve(catalog::kFields.size());
+    for (const auto &field : catalog::kFields) {
+      result.push_back({.name = field.name,
+                        .filterable = field.filterable,
+                        .is_string = field.is_string});
+    }
+    return result;
+  }();
   return f;
 }
 

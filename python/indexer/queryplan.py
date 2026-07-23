@@ -17,6 +17,13 @@ from typing import Any, NoReturn, Optional, Sequence
 from .storage import (
     SYMBOL_KIND_IDS, SYMBOL_KIND_NAMES, SYMBOL_KINDS, Storage,
 )
+from .generated_catalog import (
+    ENTITY_KIND_NAMES as _GENERATED_ENTITY_KIND_NAMES,
+    FIELD_CATALOG as _GENERATED_FIELD_CATALOG,
+    RELATION_CATALOG as _GENERATED_RELATION_CATALOG,
+    RELATION_METADATA as _GENERATED_RELATION_METADATA,
+)
+from .generated_extensions import EXTENSION_RELATIONS as _GENERATED_EXTENSION_RELATIONS
 
 __all__ = [
     "PlanError", "TraversalMode", "Pred", "Stage", "Source", "Plan", "Query", "Result",
@@ -24,7 +31,8 @@ __all__ = [
     "all_of", "any_of", "not_", "eq", "ne", "glob", "in_list",
     "nodes", "view", "where", "out", "in_", "union_", "intersect", "except_",
     "select", "count", "distinct", "order_by", "limit",
-    "validate", "canonical_json", "relation_catalog", "resolve_relation",
+    "validate", "canonical_json", "relation_catalog", "relation_metadata", "resolve_relation",
+    "extension_relation_catalog", "extension_relation_metadata",
 ]
 
 # ---- Budgets (docs/query-plan.md "Execution semantics") ----------------------
@@ -55,56 +63,30 @@ class TraversalMode(str, Enum):
 SYMBOL_VIEW = "symbol"
 ENTITY_VIEW = "entity"
 
-# ---- Relation catalog -----------------------------------------------------------
-# (name, layer, kind_id) -- same rows as C++ relation_catalog().
-
-RELATION_CATALOG: tuple[tuple[str, str, int], ...] = (
-    # Layer-0 edge kinds (edge_kind seed).
-    ("calls", SYMBOL_VIEW, 1),
-    ("inherits", SYMBOL_VIEW, 2),
-    ("contains", SYMBOL_VIEW, 3),
-    ("specializes", SYMBOL_VIEW, 4),
-    ("instantiates", SYMBOL_VIEW, 5),
-    ("overrides", SYMBOL_VIEW, 6),
-    ("uses", SYMBOL_VIEW, 7),
-    ("field_of", SYMBOL_VIEW, 8),
-    ("method_of", SYMBOL_VIEW, 9),
-    ("construct-value", SYMBOL_VIEW, 10),
-    ("construct-temp", SYMBOL_VIEW, 11),
-    ("construct-heap", SYMBOL_VIEW, 12),
-    ("construct-copy", SYMBOL_VIEW, 13),
-    ("construct-move", SYMBOL_VIEW, 14),
-    ("factory-construct", SYMBOL_VIEW, 15),
-    ("destroy", SYMBOL_VIEW, 16),
-    ("friend", SYMBOL_VIEW, 17),
-    ("dispatch_calls", SYMBOL_VIEW, 18),
-    ("alias_of", SYMBOL_VIEW, 19),
-    ("of_type", SYMBOL_VIEW, 20),
-    # Layer-1 entity_edge kinds (entity_edge_kind seed).
-    ("generalizes", ENTITY_VIEW, 1),
-    ("implements", ENTITY_VIEW, 2),
-    ("specializes", ENTITY_VIEW, 3),
-    ("composes", ENTITY_VIEW, 4),
-    ("aggregates", ENTITY_VIEW, 5),
-    ("associates", ENTITY_VIEW, 6),
-    ("creates", ENTITY_VIEW, 7),
-    ("uses", ENTITY_VIEW, 8),
-    ("destroys", ENTITY_VIEW, 9),
-    ("befriends", ENTITY_VIEW, 10),
-    ("instantiates", ENTITY_VIEW, 11),
-    ("declares", ENTITY_VIEW, 12),
-)
-
-#: entity_kind seed names; index == stored id.
-ENTITY_KIND_NAMES = (
-    "other", "class", "abstract_class", "interface", "union", "enum",
-    "class_template", "abstract_class_template", "interface_template",
-    "namespace",
-)
+# Generated relation and entity-kind identifiers are the shared query contract.
+RELATION_CATALOG = tuple(_GENERATED_RELATION_CATALOG)
+RELATION_METADATA = dict(_GENERATED_RELATION_METADATA)
+EXTENSION_RELATIONS = dict(_GENERATED_EXTENSION_RELATIONS)
+ENTITY_KIND_NAMES = tuple(_GENERATED_ENTITY_KIND_NAMES)
 
 
 def relation_catalog() -> tuple[tuple[str, str, int], ...]:
     return RELATION_CATALOG
+
+
+def relation_metadata(name: str, active: str) -> Optional[dict[str, str]]:
+    relation = resolve_relation(name, active)
+    if relation is None:
+        return None
+    return RELATION_METADATA.get(relation)
+
+
+def extension_relation_catalog() -> tuple[tuple[str, dict[str, str]], ...]:
+    return tuple(EXTENSION_RELATIONS.items())
+
+
+def extension_relation_metadata(name: str) -> Optional[dict[str, str]]:
+    return EXTENSION_RELATIONS.get(name)
 
 
 def resolve_relation(name: str, active: str) -> Optional[tuple[str, str, int]]:
@@ -126,21 +108,7 @@ def resolve_relation(name: str, active: str) -> Optional[tuple[str, str, int]]:
 # (entity_kind names, null for non-entities) -- separate fields so
 # `kind in [class, struct]` keeps its declaration-kind meaning (PR #20 review).
 
-_FIELDS: dict[str, tuple[bool, bool]] = {
-    "id": (True, False),
-    "usr": (True, True),
-    "name": (True, True),
-    "spelling": (True, True),
-    "qual_name": (True, True),
-    "kind": (True, True),
-    "entity_type": (True, True),
-    "is_definition": (True, False),
-    "is_pure": (True, False),
-    "is_static": (True, False),
-    "file": (False, True),
-    "line": (False, False),
-    "col": (False, False),
-}
+_FIELDS = {name: (filterable, is_string) for name, filterable, is_string in _GENERATED_FIELD_CATALOG}
 
 # ---- Predicates ---------------------------------------------------------------
 
