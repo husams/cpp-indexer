@@ -216,21 +216,20 @@
         "python/indexer/pch.py",
         "python/indexer/query.py",
         "python/indexer/souffle.py",
-        "python/indexer/storage.py"
+        "python/indexer/storage.py",
+        "python/indexer/__init__.py",
+        "python/indexer/__main__.py",
+        "python/indexer/_storage_smoke.py",
+        "python/indexer/entity_graph.py",
+        "python/indexer/entity_rollup.py",
+        "python/indexer/model.py",
+        "python/indexer/queryplan.py",
+        "python/indexer/relink.py",
+        "python/indexer/utils/files.py",
+        "python/indexer/utils/__init__.py"
       ],
       "allowedDependencies": ["sdk.python"],
-      "allowedExternal": [],
-      "sourceAllowedDependencies": {
-        "python/indexer/__init__.py": ["sdk.python.compat"],
-        "python/indexer/__main__.py": ["sdk.python.compat"],
-        "python/indexer/_storage_smoke.py": ["sdk.python.compat"],
-        "python/indexer/entity_graph.py": ["sdk.python.compat"],
-        "python/indexer/entity_rollup.py": ["sdk.python.compat"],
-        "python/indexer/model.py": ["sdk.python.compat"],
-        "python/indexer/queryplan.py": ["sdk.python.compat"],
-        "python/indexer/relink.py": ["sdk.python.compat"],
-        "python/indexer/utils/files.py": ["sdk.python.compat"]
-      },
+      "allowedExternal": ["filesystem"],
       "description": "Python storage, graph, query, and support SDK surface."
     },
     {
@@ -242,31 +241,26 @@
         "python/indexer/pch.py",
         "python/indexer/query.py",
         "python/indexer/souffle.py",
-        "python/indexer/storage.py"
-      ],
-      "sourceSuffixes": [".py"],
-      "allowedDependencies": ["sdk.python", "sdk.python.compat", "sdk.python.legacy-clang"],
-      "allowedExternal": ["clang", "sqlite"],
-      "description": "Transitional Python compatibility adapters that still reach legacy Clang and SQLite APIs."
-    },
-    {
-      "id": "sdk.python.legacy-clang",
-      "layer": "sdk-legacy",
-      "paths": [
+        "python/indexer/storage.py",
+        "python/indexer/__init__.py",
+        "python/indexer/__main__.py",
+        "python/indexer/_storage_smoke.py",
+        "python/indexer/entity_graph.py",
+        "python/indexer/entity_rollup.py",
+        "python/indexer/model.py",
+        "python/indexer/queryplan.py",
+        "python/indexer/relink.py",
+        "python/indexer/utils/files.py",
+        "python/indexer/utils/__init__.py",
         "python/indexer/clang/**",
         "python/indexer/astcmd.py",
         "python/indexer/backfill_alias_edges.py",
         "python/indexer/compiledb.py"
       ],
       "sourceSuffixes": [".py"],
-      "allowedDependencies": ["sdk.python", "sdk.python.legacy-clang"],
-      "allowedExternal": ["clang"],
-      "sourceAllowedDependencies": {
-        "python/indexer/astcmd.py": ["sdk.python.compat"],
-        "python/indexer/backfill_alias_edges.py": ["sdk.python.compat"],
-        "python/indexer/clang/**": ["sdk.python.compat"]
-      },
-      "description": "Legacy Python Clang adapter pending removal in a separate phase."
+      "allowedDependencies": ["sdk.python", "sdk.python.compat"],
+      "allowedExternal": ["clang", "sqlite", "filesystem", "process"],
+      "description": "Transitional Python compatibility adapters that still reach legacy Clang and SQLite APIs."
     },
     {
       "id": "analysis.souffle-rules",

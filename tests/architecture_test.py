@@ -118,7 +118,8 @@ class ArchitectureCheckerTests(unittest.TestCase):
         manifest.write_text(json.dumps(data), encoding="utf-8")
         (root / "CMakeLists.txt").write_text(
             "add_library(core STATIC src/extraction/pass.cpp)\n"
-            "target_link_libraries(core PRIVATE $<$<BOOL:1>:app> model_lib)\n"
+            "set(HIDDEN_TARGET app)\n"
+            "target_link_libraries(core PRIVATE $<IF:$<BOOL:1>,${HIDDEN_TARGET},clang-cpp> model_lib)\n"
             "add_library(app STATIC src/cli/format.hpp)\n"
             "target_link_libraries(app PRIVATE core)\n",
             encoding="utf-8",
@@ -198,6 +199,65 @@ class ArchitectureCheckerTests(unittest.TestCase):
         errors = check_manifest(root, manifest)
         self.assertTrue(any("sqlite is outside module confinement" in error for error in errors))
         self.assertTrue(any("undeclared dependency sdk -> legacy" in error for error in errors))
+
+    def test_python_ast_ignores_comments_and_docstrings_but_checks_multiline_imports(self) -> None:
+        root, manifest = _fixture()
+        (root / "python/indexer/legacy").mkdir(parents=True)
+        (root / "python/indexer/sdk.py").parent.mkdir(parents=True, exist_ok=True)
+        (root / "python/indexer/sdk.py").write_text(
+            '"""import sqlite3 should not count."""\n'
+            "# import sqlite3 should not count\n"
+            "from indexer import (\n    legacy,\n)\n",
+            encoding="utf-8",
+        )
+        (root / "python/indexer/legacy/__init__.py").write_text("value = 1\n", encoding="utf-8")
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["sourceRoots"].append("python/indexer")
+        data["modules"].extend([
+            {"id": "sdk", "paths": ["python/indexer/**"], "excludePaths": ["python/indexer/legacy/**"], "sourceSuffixes": [".py"], "allowedDependencies": ["sdk"], "allowedExternal": []},
+            {"id": "legacy", "paths": ["python/indexer/legacy/**"], "sourceSuffixes": [".py"], "allowedDependencies": ["legacy"], "allowedExternal": []},
+        ])
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        errors = check_manifest(root, manifest)
+        self.assertFalse(any("sqlite is outside module confinement" in error for error in errors))
+        self.assertTrue(any("undeclared dependency sdk -> legacy" in error for error in errors))
+
+    def test_python_process_import_is_rejected(self) -> None:
+        root, manifest = _fixture()
+        (root / "python/indexer/sdk.py").parent.mkdir(parents=True, exist_ok=True)
+        (root / "python/indexer/sdk.py").write_text("import subprocess\n", encoding="utf-8")
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["sourceRoots"].append("python/indexer")
+        data["modules"].append({"id": "sdk", "paths": ["python/indexer/**"], "sourceSuffixes": [".py"], "allowedDependencies": ["sdk"], "allowedExternal": []})
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        errors = check_manifest(root, manifest)
+        self.assertTrue(any("process is outside module confinement" in error for error in errors))
+
+    def test_source_dependency_override_is_rejected(self) -> None:
+        root, manifest = _fixture()
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["modules"][2]["sourceAllowedDependencies"] = {"src/extraction/stale.cpp": ["cli"]}
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        errors = check_manifest(root, manifest)
+        self.assertTrue(any("sourceAllowedDependencies is unsupported" in error for error in errors))
+
+    def test_external_exception_requires_exact_include(self) -> None:
+        root, manifest = _fixture()
+        (root / "src/extraction/pass.cpp").write_text("#include <spawn.h>\n", encoding="utf-8")
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["externalExceptions"] = [{
+            "source": "src/extraction/pass.cpp",
+            "fromModule": "extraction",
+            "toModule": "external:process",
+            "boundary": "test",
+            "owner": "test",
+            "rationale": "test",
+            "expiresOn": "2099-01-01",
+            "removalIssue": "HSE-58",
+        }]
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        errors = check_manifest(root, manifest)
+        self.assertTrue(any("exact non-empty include is required" in error for error in errors))
 
     def test_rule_include_is_checked(self) -> None:
         root, manifest = _fixture()
