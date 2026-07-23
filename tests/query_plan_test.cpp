@@ -22,18 +22,27 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include "query/exec.hpp"
 #include "query/plan.hpp"
 #include "storage/records.hpp"
 #include "storage/storage.hpp"
+#include "util/hashing.hpp"
 
 using namespace cidx::query;
 using cidx::Storage;
 using cidx::Symbol;
 
 namespace {
+
+std::string make_temp_dir() {
+  char tmpl[] = "/tmp/cidx_query_identity_XXXXXX";
+  char *dir = ::mkdtemp(tmpl);
+  REQUIRE(dir != nullptr);
+  return dir;
+}
 
 Symbol make_sym(const std::string &usr, const std::string &spelling,
                 const std::string &kind = "function",
@@ -428,6 +437,43 @@ TEST_CASE("query_plan: default result cap reports truncation") {
   auto lim = ex.run((start(codebase()) | nodes() | limit(1100)).plan());
   CHECK(lim.rows.size() == 1100);
   CHECK(!lim.truncated);
+}
+
+TEST_CASE(
+    "query_plan: index identity detects source changes and explain agrees") {
+  const std::string dir = make_temp_dir();
+  const std::string source = dir + "/source.cpp";
+  {
+    std::ofstream out(source);
+    out << "int answer = 1;\n";
+  }
+
+  Storage db(":memory:");
+  db.add_component("fixture", dir);
+  const auto file_id =
+      db.add_file_path(source, std::nullopt, cidx::md5_of(source));
+  db.mark_file_indexed(file_id);
+
+  CHECK(db.index_identity().freshness == "unverifiable");
+  db.stamp_index_identity();
+  CHECK(db.index_identity().freshness == "current");
+
+  Executor executor(db);
+  const auto result = executor.run((start(codebase()) | nodes()).plan());
+  CHECK(result.index.freshness == "current");
+  const std::string explained = cidx::json_out::dumps_indent2(
+      executor.explain((start(codebase()) | nodes()).plan()));
+  CHECK(explained.find("\"freshness\": \"current\"") != std::string::npos);
+  CHECK(explained.find("\"plan\"") != std::string::npos);
+
+  {
+    std::ofstream out(source);
+    out << "int answer = 2;\n";
+  }
+  CHECK(db.index_identity().freshness == "stale");
+
+  db.stamp_index_identity(); // represents a successful reindex pass
+  CHECK(db.index_identity().freshness == "current");
 }
 
 // ---------------------------------------------------------------------------

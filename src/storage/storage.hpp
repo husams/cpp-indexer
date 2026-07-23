@@ -29,6 +29,15 @@ namespace cidx {
 
 constexpr int kSchemaVersion = 37;
 
+struct IndexIdentity {
+  int schema_version = kSchemaVersion;
+  std::optional<std::string> source_revision;
+  std::optional<std::string> source_fingerprint;
+  std::optional<std::string> index_config;
+  std::optional<std::string> index_config_fingerprint;
+  std::string freshness = "unverifiable"; // current | stale | unverifiable
+};
+
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
 // CXCursorKind integer; these helpers convert name <-> stored int.
@@ -672,6 +681,11 @@ public:
   // (G17). Appends the two LIKE args to `args`.
   static std::string dir_scope_sql(const std::string &dir_path,
                                    std::vector<SqlValue> &args);
+
+  // Content-addressed identity of the indexed source/configuration. Legacy
+  // databases without the v35 metadata remain readable but unverifiable.
+  IndexIdentity index_identity();
+  void stamp_index_identity();
 
 private:
   friend class Transaction;

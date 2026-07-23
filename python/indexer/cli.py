@@ -656,6 +656,8 @@ def cmd_index(args) -> int:
             if args.files
             else _index_pending(db, no_graph=no_graph)
         )
+        if rc == 0:
+            db.stamp_index_identity()
     if _warnings.count:
         print(f"{_warnings.count} warning(s)/error(s) logged to {log_path()}")
     return rc

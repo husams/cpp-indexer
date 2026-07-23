@@ -4,7 +4,6 @@
 
 namespace cidx::cli {
 
-
 std::string resolve_cache_dir() {
   // os.path.expanduser(os.environ.get("INDEXER_CACHE") or "~/.cache/cidx")
   std::optional<std::string> env = get_env("INDEXER_CACHE");
@@ -30,7 +29,9 @@ int cmd_init(const ParsedArgs &args, Context &ctx) {
     // os.remove raises on failure -> propagates to main() (exit 1).
     throw CidxError("cannot remove " + ctx.index_path);
   }
-  { Storage db(ctx.index_path); } // constructing Storage applies the schema
+  {
+    Storage db(ctx.index_path);
+  } // constructing Storage applies the schema
   *ctx.out << (existed ? "recreated" : "initialized")
            << " empty index database at " << ctx.index_path << "\n";
   return 0;
@@ -65,9 +66,9 @@ int cmd_migrate(const ParsedArgs &args, Context &ctx) {
     return v ? std::to_string(*v) : std::string("None"); // Python f"v{None}"
   };
   // A leftover 'nests' row (removed relation) or 'realizes' row (renamed to
-  // 'implements') marks a DB whose entity_edge_kind seed must be refreshed, even
-  // when schema_version is already current (an earlier build bumped the version
-  // without reconciling the seed).
+  // 'implements') marks a DB whose entity_edge_kind seed must be refreshed,
+  // even when schema_version is already current (an earlier build bumped the
+  // version without reconciling the seed).
   auto entity_kinds_stale = [&]() -> bool {
     SqliteDb db(ctx.index_path);
     try {
@@ -86,7 +87,9 @@ int cmd_migrate(const ParsedArgs &args, Context &ctx) {
     return 1;
   }
   const bool stale = entity_kinds_stale();
-  { Storage db(ctx.index_path); } // constructing Storage applies the migration
+  {
+    Storage db(ctx.index_path);
+  } // constructing Storage applies the migration
   const std::optional<int> after = schema_version();
   if (before != after) {
     *ctx.out << "migrated " << ctx.index_path << ": schema v" << vstr(before)
@@ -118,10 +121,10 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx) {
     }
   }
   const std::string name =
-      args.name
-          ? *args.name
-          : (use_git ? repo::repo_name(path) : pathutil::basename(path));
-  // v23: the (pre-version-split) source/repo dir is the repository's clone path.
+      args.name ? *args.name
+                : (use_git ? repo::repo_name(path) : pathutil::basename(path));
+  // v23: the (pre-version-split) source/repo dir is the repository's clone
+  // path.
   const std::string clone_path = path;
   // v14: version auto-detection (split_base_version) then explicit override.
   std::optional<std::string> version_to_store;
@@ -135,9 +138,9 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx) {
     }
   }
   Storage db(ctx.index_path);
-  // v24: a grouped component stores a clone-relative path, so re-adding the same
-  // source resolves the EXISTING component clone-aware (its stored path is no
-  // longer the absolute base) and refreshes its metadata in place; only a
+  // v24: a grouped component stores a clone-relative path, so re-adding the
+  // same source resolves the EXISTING component clone-aware (its stored path is
+  // no longer the absolute base) and refreshes its metadata in place; only a
   // genuinely new source mints a row. Mirrors Python cmd_add_source.
   int64_t cid;
   if (const auto existing = db.get_component(path); existing) {
@@ -174,7 +177,8 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx) {
 // is missing on disk (or not higher) leaves the version as registered. The
 // write goes through set_component_effective_version, which handles both the
 // version-as-property and version-embedded-in-path representations and is a
-// no-op for ambiguous multi-row names. Mirrors Python cli._bump_component_versions.
+// no-op for ambiguous multi-row names. Mirrors Python
+// cli._bump_component_versions.
 void bump_component_versions(Storage &db,
                              const std::vector<CompileCommand> &commands,
                              const std::vector<AliasEntry> &label_map) {
@@ -244,12 +248,12 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
   // Component root: the git repo owning the sources, else the directory
   // holding compile_commands.json (its basename names the component). The db
   // dir — not the first source's dir — keeps git-worktree checkouts, whose
-  // `.git` is a file rather than a directory, rooted where their build db lives.
+  // `.git` is a file rather than a directory, rooted where their build db
+  // lives.
   const std::string first_src = source_path(commands[0]);
   const std::optional<std::string> groot = repo::git_root(first_src);
   const std::string root =
-      groot ? *groot
-            : pathutil::abspath(CompileDb::db_dir_from_arg(args.db));
+      groot ? *groot : pathutil::abspath(CompileDb::db_dir_from_arg(args.db));
   const std::string name =
       args.name ? *args.name
                 : (groot ? repo::repo_name(root) : pathutil::basename(root));
@@ -275,14 +279,14 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
   // registry is uniquely-named components (plus any stored labels), so an -I
   // under a component root auto-aliases to <component-name>. Decode
   // (get_alias) mirrors this same registry.
-  // Mirrors Python cmd_import: build_label_map(db.list_alias_pairs(), db.get_alias).
+  // Mirrors Python cmd_import: build_label_map(db.list_alias_pairs(),
+  // db.get_alias).
   std::vector<AliasEntry> label_map;
   if (!args.no_alias) {
     const auto pairs = db.list_alias_pairs();
     if (!pairs.empty()) {
       label_map = CompileDb::build_label_map(
-          pairs,
-          [&db](const std::string &n) { return db.get_alias(n); });
+          pairs, [&db](const std::string &n) { return db.get_alias(n); });
     }
   }
   // Version-agnostic port: a ported -I under a versioned component base may
@@ -315,7 +319,8 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
       const std::string src = source_path(cmd);
       if (!db.component_for_path(src)) {
         if (!root_cid) {
-          root_cid = db.add_component(name, stored_root, "repo", version_to_store);
+          root_cid =
+              db.add_component(name, stored_root, "repo", version_to_store);
           *ctx.out << "component #" << *root_cid << ": " << name << " at "
                    << stored_root << "\n";
           // The label_map was built BEFORE this lazily-created component
@@ -324,13 +329,11 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
           // includes encode to <name>. Mirrors Python cmd_import.
           if (!args.no_alias) {
             const auto pairs = db.list_alias_pairs();
-            label_map =
-                pairs.empty()
-                    ? std::vector<AliasEntry>{}
-                    : CompileDb::build_label_map(
-                          pairs, [&db](const std::string &n) {
-                            return db.get_alias(n);
-                          });
+            label_map = pairs.empty() ? std::vector<AliasEntry>{}
+                                      : CompileDb::build_label_map(
+                                            pairs, [&db](const std::string &n) {
+                                              return db.get_alias(n);
+                                            });
             if (!label_map.empty()) {
               bump_component_versions(db, commands, label_map);
             }
@@ -359,8 +362,7 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
   {
     const std::string repo_name_val = args.repo ? *args.repo : name;
     std::optional<std::string> remote_url =
-        groot ? repo::git_remote_url(*groot)
-              : std::optional<std::string>{};
+        groot ? repo::git_remote_url(*groot) : std::optional<std::string>{};
     const int64_t rid = db.add_repository(repo_name_val, "repo", remote_url);
     const int64_t clone_id = db.add_clone(rid, root);
     const std::optional<Repository> repo = db.get_repository_by_id(rid);
@@ -407,7 +409,8 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
       return 1;
     }
     const std::optional<std::string> root =
-        comp ? std::optional<std::string>(db.component_abs_base(*comp)) : std::nullopt;
+        comp ? std::optional<std::string>(db.component_abs_base(*comp))
+             : std::nullopt;
     // v7: --no-graph disables edge extraction for this run. Indexing runs
     // through the LibTooling engine (ast::run_index_one), which builds its own
     // toolchain + parse internally — no Parser/AstIndexer needed here.
@@ -415,6 +418,9 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
     rc = !args.files.empty()
              ? index_files(db, args.files, root, graph_enabled, ctx)
              : index_pending(db, graph_enabled, ctx);
+    if (rc == 0) {
+      db.stamp_index_identity();
+    }
   }
   // cli.py:243-244 — only when the file-sink warning counter is > 0 (G27).
   if (log.warning_count() > 0) {

@@ -16,6 +16,36 @@ namespace cidx::query {
 
 namespace {
 
+json_out::Value index_identity_json(const IndexIdentity &index) {
+  json_out::Object o;
+  o.emplace_back("schema_version", json_out::Value::of(index.schema_version));
+  if (index.source_revision) {
+    o.emplace_back("source_revision",
+                   json_out::Value::of(*index.source_revision));
+  } else {
+    o.emplace_back("source_revision", json_out::Value::null());
+  }
+  if (index.source_fingerprint) {
+    o.emplace_back("source_fingerprint",
+                   json_out::Value::of(*index.source_fingerprint));
+  } else {
+    o.emplace_back("source_fingerprint", json_out::Value::null());
+  }
+  if (index.index_config) {
+    o.emplace_back("index_config", json_out::Value::of(*index.index_config));
+  } else {
+    o.emplace_back("index_config", json_out::Value::null());
+  }
+  if (index.index_config_fingerprint) {
+    o.emplace_back("index_config_fingerprint",
+                   json_out::Value::of(*index.index_config_fingerprint));
+  } else {
+    o.emplace_back("index_config_fingerprint", json_out::Value::null());
+  }
+  o.emplace_back("freshness", json_out::Value::of(index.freshness));
+  return json_out::Value::obj(std::move(o));
+}
+
 // ---- field -> SQL column expression -----------------------------------------
 // `kind` is ALWAYS the C++ declaration kind (symbol.kind); `entity_type` is
 // ALWAYS the Layer-1 classification (entity_node.kind, NULL for non-entities).
@@ -840,6 +870,7 @@ json_out::Value Result::to_json() const {
                                        : shape == Shape::Rows ? "rows"
                                                               : "scalar")));
   o.emplace_back("view", Value::of(std::string(view_name(view))));
+  o.emplace_back("index", index_identity_json(index));
   if (shape == Shape::Scalar) {
     o.emplace_back("count", Value::of(scalar));
     o.emplace_back("truncated", Value::of(truncated));
@@ -871,7 +902,16 @@ Result Executor::run(const Plan &plan) {
   Exec exec(db_);
   Stream st = exec.run_plan(normalized);
   Result res = exec.finish(std::move(st));
+  res.index = db_.index_identity();
   return res;
+}
+
+json_out::Value Executor::explain(const Plan &plan) {
+  const Plan normalized = validate(plan);
+  json_out::Object o;
+  o.emplace_back("plan", plan_to_json(normalized));
+  o.emplace_back("index", index_identity_json(db_.index_identity()));
+  return json_out::Value::obj(std::move(o));
 }
 
 } // namespace cidx::query

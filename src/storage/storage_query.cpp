@@ -19,6 +19,7 @@
 #include "storage/storage_detail.hpp"
 #include "storage/storage_schema.hpp"
 #include "util/errors.hpp"
+#include "util/hashing.hpp"
 #include "util/json_min.hpp"
 #include "util/logger.hpp"
 #include "util/pathutil.hpp"
@@ -26,6 +27,147 @@
 namespace cidx {
 
 using namespace detail;
+
+namespace {
+
+struct IdentityFile {
+  int64_t id = -1;
+  std::string key;
+  std::string compile_options;
+  std::string driver;
+  bool compile_options_null = true;
+  bool driver_null = true;
+  bool indexed = false;
+};
+
+std::vector<IdentityFile> identity_files(Storage &db) {
+  std::vector<IdentityFile> files;
+  auto st = db.raw_db().prepare(
+      "SELECT f.id, c.id, d.path, f.name, f.compile_options, f.driver, "
+      "f.indexed FROM file f JOIN directory d ON d.id = f.directory_id "
+      "JOIN component c ON c.id = d.component_id "
+      "ORDER BY c.id, d.path, f.name");
+  while (st.step()) {
+    IdentityFile file;
+    file.id = st.col_int64(0);
+    file.key = std::to_string(st.col_int64(1));
+    file.key.push_back('\0');
+    file.key += st.col_text(2);
+    file.key.push_back('\0');
+    file.key += st.col_text(3);
+    file.compile_options_null = st.col_is_null(4);
+    file.compile_options = st.col_text(4);
+    file.driver_null = st.col_is_null(5);
+    file.driver = st.col_text(5);
+    file.indexed = st.col_int64(6) != 0;
+    files.push_back(std::move(file));
+  }
+  return files;
+}
+
+std::string source_manifest(Storage &db, const std::vector<IdentityFile> &files,
+                            bool &complete) {
+  std::string manifest;
+  complete = true;
+  for (const IdentityFile &file : files) {
+    const auto md5 = md5_of(db.file_abs_path(file.id).value_or(""));
+    if (!md5) {
+      complete = false;
+    }
+    manifest += file.key;
+    manifest.push_back('\0');
+    manifest += md5.value_or("<unreadable>");
+    manifest.push_back('\0');
+    manifest += file.indexed ? "1\n" : "0\n";
+  }
+  return manifest;
+}
+
+std::string config_manifest(const std::vector<IdentityFile> &files) {
+  std::string manifest;
+  for (const IdentityFile &file : files) {
+    manifest += file.key;
+    manifest.push_back('\0');
+    manifest += file.compile_options_null ? "<null>" : file.compile_options;
+    manifest.push_back('\0');
+    manifest += file.driver_null ? "<null>" : file.driver;
+    manifest += "\n";
+  }
+  return manifest;
+}
+
+std::optional<std::string> meta_value(Storage &db, const char *key) {
+  auto st = db.raw_db().prepare("SELECT value FROM meta WHERE key = ?");
+  st.bind(1, std::string_view(key));
+  if (!st.step() || st.col_is_null(0) || st.col_text(0).empty()) {
+    return std::nullopt;
+  }
+  return st.col_text(0);
+}
+
+void set_meta_value(Storage &db, const char *key, std::string value) {
+  auto st = db.raw_db().prepare(
+      "INSERT INTO meta (key, value) VALUES (?, ?) "
+      "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+  st.bind(1, std::string_view(key));
+  st.bind(2, std::string_view(value));
+  st.step_done();
+}
+
+} // namespace
+
+IndexIdentity Storage::index_identity() {
+  const auto files = identity_files(*this);
+  bool complete = true;
+  const std::string source = source_manifest(*this, files, complete);
+  const std::string source_fingerprint = sha1_hex(source);
+  const std::string config_fingerprint = sha1_hex(config_manifest(files));
+  const auto stored_source = meta_value(*this, "source_fingerprint");
+  const auto stored_revision = meta_value(*this, "source_revision");
+  const auto stored_config = meta_value(*this, "index_config");
+  const auto stored_config_fingerprint =
+      meta_value(*this, "index_config_fingerprint");
+  const auto identity_version = meta_value(*this, "index_identity_version");
+
+  IndexIdentity identity;
+  identity.source_revision = stored_revision;
+  identity.source_fingerprint = stored_source;
+  identity.index_config = stored_config;
+  identity.index_config_fingerprint = stored_config_fingerprint;
+  if (!identity_version || *identity_version != "1" || !stored_source ||
+      !stored_revision || !stored_config || !stored_config_fingerprint) {
+    return identity;
+  }
+  if (!complete) {
+    return identity;
+  }
+  if (*stored_source != source_fingerprint ||
+      *stored_revision != "content-sha1:" + source_fingerprint ||
+      *stored_config_fingerprint != config_fingerprint ||
+      std::ranges::any_of(
+          files, [](const IdentityFile &file) { return !file.indexed; })) {
+    identity.freshness = "stale";
+    return identity;
+  }
+  identity.freshness = "current";
+  return identity;
+}
+
+void Storage::stamp_index_identity() {
+  const auto files = identity_files(*this);
+  bool complete = true;
+  const std::string source = source_manifest(*this, files, complete);
+  const std::string config = config_manifest(files);
+  const std::string source_fingerprint = sha1_hex(source);
+  const std::string config_fingerprint = sha1_hex(config);
+  set_meta_value(*this, "index_identity_version", "1");
+  set_meta_value(*this, "index_config", "manifest-sha1-v1");
+  set_meta_value(*this, "index_config_fingerprint", config_fingerprint);
+  set_meta_value(*this, "source_fingerprint",
+                 complete ? source_fingerprint : "");
+  set_meta_value(*this, "source_revision",
+                 complete ? "content-sha1:" + source_fingerprint : "");
+}
 
 std::string Storage::fuzzy_like(std::string_view text) {
   // '%c%c%' from the non-space chars, escaping '\ % _' (G18); used with
@@ -110,8 +252,8 @@ int64_t Storage::edge_count() {
 
 // A2 — true once graph_resolved_at is set (query.py:579-583)
 bool Storage::graph_resolved() {
-  auto st = db_.prepare(
-      "SELECT value FROM meta WHERE key = 'graph_resolved_at'");
+  auto st =
+      db_.prepare("SELECT value FROM meta WHERE key = 'graph_resolved_at'");
   if (!st.step()) {
     return false;
   }
@@ -143,9 +285,9 @@ std::optional<Symbol> Storage::graph_symbol_by_id(int64_t id) {
 
 // A5 — fuzzy COALESCE(qual_name,spelling) lookup (query.py:707-738, R1)
 // Escapes ONLY % and _ (NOT backslash — matching query.py:719).
-std::vector<Symbol> Storage::find_symbols(const std::string &pattern,
-                                          const std::optional<std::string> &kind,
-                                          int limit) {
+std::vector<Symbol>
+Storage::find_symbols(const std::string &pattern,
+                      const std::optional<std::string> &kind, int limit) {
   // Build like: "%" + join("%", escaped_segs) + "%"
   // where escaped_segs = each "::" segment with % and _ escaped.
   std::vector<std::string> segs;
@@ -291,13 +433,11 @@ Storage::graph_edges(int64_t mine_id, const std::string &direction,
           : "(SELECT COUNT(*) FROM edge_site es WHERE es.edge_id = e.id)";
 
   std::string sql =
-      "SELECT e.id AS eid, e.src_id, e.dst_id, e.kind AS ekind, " +
-      count_expr +
+      "SELECT e.id AS eid, e.src_id, e.dst_id, e.kind AS ekind, " + count_expr +
       " AS ecount, e.count AS rawcount, "
       "e.base_access, e.is_virtual, " +
-      std::string(kSymbolColsS) +
-      " FROM edge e JOIN symbol s ON s.id = e." + peer +
-      " WHERE e." + mine + " = ?";
+      std::string(kSymbolColsS) + " FROM edge e JOIN symbol s ON s.id = e." +
+      peer + " WHERE e." + mine + " = ?";
 
   std::vector<SqlValue> args;
   args.emplace_back(mine_id);
@@ -385,8 +525,8 @@ Storage::edge_sites_for(const std::vector<int64_t> &edge_ids) {
 }
 
 // A8 — single-edge sites with LIMIT (query.py:884-906)
-std::vector<Storage::EdgeSiteRow>
-Storage::edge_sites_one(int64_t edge_id, int limit) {
+std::vector<Storage::EdgeSiteRow> Storage::edge_sites_one(int64_t edge_id,
+                                                          int limit) {
   auto st = db_.prepare(
       "SELECT file_id, line, col, conditional, args_sig, "
       "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos, "
@@ -418,10 +558,9 @@ Storage::edge_sites_one(int64_t edge_id, int limit) {
 // -- labels (v14) ------------------------------------------------------------
 
 int64_t Storage::add_label(const std::string &name, const std::string &path) {
-  auto st = db_.prepare(
-      "INSERT INTO label (name, path) VALUES (?, ?) "
-      "ON CONFLICT(name) DO UPDATE SET path = excluded.path "
-      "RETURNING id");
+  auto st = db_.prepare("INSERT INTO label (name, path) VALUES (?, ?) "
+                        "ON CONFLICT(name) DO UPDATE SET path = excluded.path "
+                        "RETURNING id");
   st.bind(1, std::string_view(name));
   st.bind(2, std::string_view(path));
   if (!st.step()) {
@@ -513,7 +652,8 @@ Storage::list_alias_pairs() {
   // Explicit labels (exact) PLUS components (version-stripped base,
   // version-agnostic). Labels win on a name collision. std::map keeps the
   // result sorted by name (== Python sorted). Mirrors Python list_alias_pairs.
-  std::map<std::string, std::tuple<std::string, bool>> pairs; // name->(path,ver)
+  std::map<std::string, std::tuple<std::string, bool>>
+      pairs; // name->(path,ver)
   for (const auto &nv : list_labels()) {
     pairs[nv.first] = {nv.second, false}; // labels first / win
   }

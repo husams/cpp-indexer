@@ -51,6 +51,37 @@ PREVIOUS_SCHEMA_VERSION = SCHEMA_VERSION - 1
 PREVIOUS_CATALOG_HASH = "15e7ce8206c521cff6794530a382f0389320c0f3e49d148b0f311d058aa5157a"
 
 
+def _md5_of(path: str) -> Optional[str]:
+    """Hash a current source file without importing the utils package."""
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.md5(fh.read()).hexdigest()
+    except OSError:
+        return None
+
+
+@dataclass(frozen=True)
+class IndexIdentity:
+    """Persisted source/configuration identity plus current checkout status."""
+
+    schema_version: int
+    source_revision: Optional[str]
+    source_fingerprint: Optional[str]
+    index_config: Optional[str]
+    index_config_fingerprint: Optional[str]
+    freshness: str  # current | stale | unverifiable
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "source_revision": self.source_revision,
+            "source_fingerprint": self.source_fingerprint,
+            "index_config": self.index_config,
+            "index_config_fingerprint": self.index_config_fingerprint,
+            "freshness": self.freshness,
+        }
+
+
 def _catalog_hash(conn: sqlite3.Connection) -> Optional[str]:
     """Return the stored catalog hash, or None when the database has no meta row."""
     try:
@@ -5200,6 +5231,116 @@ class Storage:
             (key, value),
         )
         self._commit()
+
+    def _identity_files(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT f.id, c.id AS component_id, d.path, f.name, "
+            "f.compile_options, f.driver, f.indexed "
+            "FROM file f JOIN directory d ON d.id = f.directory_id "
+            "JOIN component c ON c.id = d.component_id "
+            "ORDER BY c.id, d.path, f.name"
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "key": (
+                    f"{row['component_id']}\0{row['path']}\0{row['name']}"
+                ),
+                "compile_options": row["compile_options"],
+                "driver": row["driver"],
+                "indexed": bool(row["indexed"]),
+            }
+            for row in rows
+        ]
+
+    def _source_manifest(
+        self, files: list[dict[str, Any]],
+    ) -> tuple[str, bool]:
+        parts: list[str] = []
+        complete = True
+        for file in files:
+            path = self.file_abs_path(file["id"]) or ""
+            digest = _md5_of(path)
+            if digest is None:
+                complete = False
+            parts.append(
+                f"{file['key']}\0{digest or '<unreadable>'}\0"
+                f"{'1' if file['indexed'] else '0'}\n"
+            )
+        return "".join(parts), complete
+
+    @staticmethod
+    def _config_manifest(files: list[dict[str, Any]]) -> str:
+        return "".join(
+            f"{file['key']}\0"
+            f"{file['compile_options'] if file['compile_options'] is not None else '<null>'}\0"
+            f"{file['driver'] if file['driver'] is not None else '<null>'}\n"
+            for file in files
+        )
+
+    def index_identity(self) -> IndexIdentity:
+        """Return stored identity and compare it with the current checkout."""
+        files = self._identity_files()
+        source, complete = self._source_manifest(files)
+        source_fingerprint = hashlib.sha1(source.encode()).hexdigest()
+        config_fingerprint = hashlib.sha1(
+            self._config_manifest(files).encode()
+        ).hexdigest()
+        values = {}
+        for key in (
+            "source_revision", "source_fingerprint", "index_config",
+            "index_config_fingerprint", "index_identity_version",
+        ):
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (key,)
+            ).fetchone()
+            values[key] = row[0] if row is not None and row[0] else None
+        freshness = "unverifiable"
+        if (
+            values["index_identity_version"] == "1"
+            and values["source_revision"]
+            and values["source_fingerprint"]
+            and values["index_config"]
+            and values["index_config_fingerprint"]
+        ):
+            if complete:
+                freshness = (
+                    "current"
+                    if (
+                        values["source_fingerprint"] == source_fingerprint
+                        and values["source_revision"]
+                        == f"content-sha1:{source_fingerprint}"
+                        and values["index_config_fingerprint"]
+                        == config_fingerprint
+                        and all(file["indexed"] for file in files)
+                    )
+                    else "stale"
+                )
+        return IndexIdentity(
+            schema_version=SCHEMA_VERSION,
+            source_revision=values["source_revision"],
+            source_fingerprint=values["source_fingerprint"],
+            index_config=values["index_config"],
+            index_config_fingerprint=values["index_config_fingerprint"],
+            freshness=freshness,
+        )
+
+    def stamp_index_identity(self) -> None:
+        """Persist the v1 identity after a successful indexing pass."""
+        files = self._identity_files()
+        source, complete = self._source_manifest(files)
+        source_fingerprint = hashlib.sha1(source.encode()).hexdigest()
+        config_fingerprint = hashlib.sha1(
+            self._config_manifest(files).encode()
+        ).hexdigest()
+        self.set_meta("index_identity_version", "1")
+        self.set_meta("index_config", "manifest-sha1-v1")
+        self.set_meta("index_config_fingerprint", config_fingerprint)
+        self.set_meta("source_fingerprint", source_fingerprint if complete else "")
+        self.set_meta(
+            "source_revision",
+            f"content-sha1:{source_fingerprint}" if complete else "",
+        )
 
     def resolve_pass(self) -> tuple[int, int]:
         """Roll up edge counts, materialise entity_edge, write graph_resolved_at meta.

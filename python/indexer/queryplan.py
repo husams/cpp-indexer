@@ -15,7 +15,7 @@ from enum import Enum
 from typing import Any, NoReturn, Optional, Sequence
 
 from .storage import (
-    SYMBOL_KIND_IDS, SYMBOL_KIND_NAMES, SYMBOL_KINDS, Storage,
+    IndexIdentity, SYMBOL_KIND_IDS, SYMBOL_KIND_NAMES, SYMBOL_KINDS, Storage,
 )
 from .generated_catalog import (
     ENTITY_KIND_NAMES as _GENERATED_ENTITY_KIND_NAMES,
@@ -523,16 +523,19 @@ class Result:
     scalar: int = 0
     fields: tuple[str, ...] = ()
     rows: list[tuple[Any, ...]] = field(default_factory=list)
+    index: IndexIdentity | None = None
 
     def to_dict(self) -> dict[str, Any]:
         if self.shape == "scalar":
             return {"shape": "scalar", "view": self.view, "count": self.scalar,
-                    "truncated": self.truncated}
+                    "truncated": self.truncated,
+                    "index": self.index.to_dict() if self.index else None}
         return {
             "shape": self.shape,
             "view": self.view,
             "count": len(self.rows),
             "truncated": self.truncated,
+            "index": self.index.to_dict() if self.index else None,
             "rows": [dict(zip(self.fields, row)) for row in self.rows],
         }
 
@@ -659,7 +662,17 @@ class Executor:
     def run(self, plan: Plan) -> Result:
         normalized = validate(plan)
         st = self._run_plan(normalized)
-        return self._finish(st)
+        result = self._finish(st)
+        result.index = self._db.index_identity()
+        return result
+
+    def explain(self, plan: Plan) -> dict[str, Any]:
+        """Return the normalized plan and the current index identity."""
+        normalized = validate(plan)
+        return {
+            "plan": plan_to_dict(normalized),
+            "index": self._db.index_identity().to_dict(),
+        }
 
     # -- plan walk ------------------------------------------------------------
 

@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from indexer.storage import Storage, Symbol  # noqa: E402
+from indexer.utils.hashing import md5_of  # noqa: E402
 from indexer import queryplan as qp  # noqa: E402
 from indexer.queryplan import (  # noqa: E402
     Executor, PlanError, all_of, canonical_json, codebase, count, distinct,
@@ -280,6 +281,30 @@ def test_default_result_cap_reports_truncation():
     lim = ex.run((start(codebase()) | nodes() | limit(1100)).plan)
     assert len(lim.rows) == 1100
     assert not lim.truncated
+
+
+def test_index_identity_freshness_and_explain(tmp_path):
+    source = tmp_path / "source.cpp"
+    source.write_text("int answer = 1;\n")
+    db = Storage(":memory:")
+    db.add_component("fixture", str(tmp_path))
+    file_id = db.add_file_path(str(source), md5=md5_of(str(source)))
+    db.mark_file_indexed(file_id)
+
+    assert db.index_identity().freshness == "unverifiable"
+    db.stamp_index_identity()
+    assert db.index_identity().freshness == "current"
+    ex = Executor(db)
+    result = ex.run((start(codebase()) | nodes()).plan)
+    assert result.to_dict()["index"]["freshness"] == "current"
+    explained = ex.explain((start(codebase()) | nodes()).plan)
+    assert explained["index"] == result.to_dict()["index"]
+    assert explained["plan"]["cxq"] == 1
+
+    source.write_text("int answer = 2;\n")
+    assert db.index_identity().freshness == "stale"
+    db.stamp_index_identity()  # represents a successful reindex pass
+    assert db.index_identity().freshness == "current"
 
 
 # ---------------------------------------------------------------------------
