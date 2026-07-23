@@ -441,6 +441,8 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                         "translation_unit",
                                         "file_config",
                                         "fact_applicability",
+                                        "external_identity",
+                                        "storage_enum_catalog",
                                         "include_config",
                                         "include_edge",
                                         "include_directive_kind",
@@ -491,6 +493,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                                    "linkage",
                                                    "access",
                                                    "parent_usr",
+                                                   "parent_id",
                                                    "resolved",
                                                    "multi_def",
                                                    "const_value"});
@@ -508,6 +511,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_symbol_qual",
                                          "idx_symbol_file",
                                          "idx_symbol_parent",
+                                         "idx_symbol_parent_id",
                                          "idx_symbol_kind",
                                          "idx_symbol_spelling_nc",
                                          "idx_symbol_qual_nc",
@@ -525,6 +529,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_possible_call_src",
                                          "idx_possible_call_dst",
                                          "idx_type_node_decl_usr",
+                                         "idx_type_node_decl_id",
                                          "idx_type_node_canonical",
                                          "idx_type_edge_dst",
                                          "idx_parameter_type",
@@ -538,7 +543,9 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_include_edge_dst",
                                          "idx_include_edge_config",
                                          "idx_include_site_edge",
-                                         "idx_include_macro_use_path"});
+                                         "idx_include_macro_use_path",
+                                         "idx_external_identity_symbol",
+                                         "idx_external_identity_type"});
 
   // meta row + pragma parity (D25: foreign_keys ON, default journal mode)
   {
@@ -941,4 +948,127 @@ TEST_CASE(
   CHECK(rows.front().config_id == second_config);
   db.delete_include_configs_for_tu(second_tu);
   CHECK(db.file_configs_for(header).empty());
+TEST_CASE("v35 occurrence identities are compact and lossless") {
+  cidx::Storage db(":memory:");
+  const int64_t component = db.add_component("c", "/repo/c");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "c.cpp");
+
+  cidx::Symbol caller;
+  caller.usr = "c:@F@caller";
+  caller.spelling = "caller";
+  caller.kind = "function";
+  const int64_t caller_id = db.add_symbol(caller);
+  cidx::Symbol target;
+  target.usr = "c:@F@target";
+  target.spelling = "target";
+  target.kind = "function";
+  const int64_t target_id = db.add_symbol(target);
+  cidx::Symbol receiver;
+  receiver.usr = "c:@S@Receiver";
+  receiver.spelling = "Receiver";
+  receiver.kind = "struct";
+  const int64_t receiver_id = db.add_symbol(receiver);
+
+  cidx::TypeNode receiver_type;
+  receiver_type.type_key = "record:Receiver";
+  receiver_type.spelling = "Receiver";
+  receiver_type.kind = cidx::kTypeKindRecord;
+  receiver_type.decl_usr = receiver.usr;
+  const int64_t receiver_type_id = db.intern_type_node(receiver_type);
+  cidx::Edge occurrence_edge;
+  occurrence_edge.src_id = caller_id;
+  occurrence_edge.dst_id = target_id;
+  occurrence_edge.kind = 1;
+  const int64_t edge_id = db.add_edge(occurrence_edge);
+
+  cidx::EdgeSite resolved;
+  resolved.edge_id = edge_id;
+  resolved.file_id = file;
+  resolved.line = 10;
+  resolved.col = 2;
+  resolved.recv_src_kind = "local";
+  resolved.recv_type_usr = receiver.usr;
+  resolved.recv_decl_usr = receiver.usr;
+  db.add_edge_site(resolved);
+  resolved.line = 11;
+  db.add_edge_site(resolved);
+
+  auto raw_resolved = db.raw_db().prepare(
+      "SELECT recv_src_kind, recv_src_kind_id, recv_type_usr, recv_decl_usr, "
+      "recv_type_id, recv_decl_id FROM edge_site ORDER BY line");
+  REQUIRE(raw_resolved.step());
+  CHECK(raw_resolved.col_is_null(0));
+  CHECK(raw_resolved.col_int64(1) == 2);
+  CHECK(raw_resolved.col_is_null(2));
+  CHECK(raw_resolved.col_is_null(3));
+  CHECK(raw_resolved.col_int64(4) == receiver_type_id);
+  CHECK(raw_resolved.col_int64(5) == receiver_id);
+  REQUIRE(raw_resolved.step());
+  CHECK(raw_resolved.col_int64(4) == receiver_type_id);
+
+  const auto sites = db.edge_sites_one(edge_id, 10);
+  REQUIRE(sites.size() == 2);
+  CHECK(sites[0].recv_src_kind == std::string("local"));
+  CHECK(sites[0].recv_type_usr == receiver.usr);
+  CHECK(sites[0].recv_decl_usr == receiver.usr);
+
+  cidx::CallArg arg;
+  arg.edge_id = edge_id;
+  arg.file_id = file;
+  arg.line = 20;
+  arg.col = 4;
+  arg.position = 0;
+  arg.src_kind = "local";
+  arg.type_usr = "external:type:Missing";
+  arg.decl_usr = "external:symbol:Missing";
+  arg.callee_usr = target.usr;
+  db.add_call_arg(arg);
+
+  auto raw_arg = db.raw_db().prepare(
+      "SELECT src_kind, src_kind_id, type_usr, decl_usr, callee_usr, "
+      "type_id, decl_id, callee_id, type_identity_id, decl_identity_id, "
+      "callee_identity_id FROM call_arg");
+  REQUIRE(raw_arg.step());
+  CHECK(raw_arg.col_text(0) == "local");
+  CHECK(raw_arg.col_int64(1) == 2);
+  CHECK(raw_arg.col_is_null(2));
+  CHECK(raw_arg.col_is_null(3));
+  CHECK(raw_arg.col_is_null(4));
+  CHECK(raw_arg.col_is_null(5));
+  CHECK(raw_arg.col_is_null(6));
+  CHECK(raw_arg.col_int64(7) == target_id);
+  CHECK(raw_arg.col_int64(8) > 0);
+  CHECK(raw_arg.col_int64(9) > 0);
+  CHECK(raw_arg.col_is_null(10));
+
+  auto readable = db.raw_db().prepare(
+      "SELECT type_usr, decl_usr, callee_usr FROM call_arg_read");
+  REQUIRE(readable.step());
+  CHECK(readable.col_text(0) == "external:type:Missing");
+  CHECK(readable.col_text(1) == "external:symbol:Missing");
+  CHECK(readable.col_text(2) == target.usr);
+  auto identities = db.raw_db().prepare(
+      "SELECT identity_kind, identity_text, resolution_status "
+      "FROM external_identity ORDER BY identity_kind, identity_text");
+  REQUIRE(identities.step());
+  CHECK(identities.col_int64(0) == 1);
+  CHECK(identities.col_text(1) == "external:type:Missing");
+  CHECK(identities.col_int64(2) == 0);
+  REQUIRE(identities.step());
+  CHECK(identities.col_int64(0) == 2);
+  CHECK(identities.col_text(1) == "external:symbol:Missing");
+  CHECK(identities.col_int64(2) == 0);
+  CHECK_FALSE(identities.step());
+
+  arg.position = 1;
+  arg.line = 21;
+  db.add_call_arg(arg);
+  auto count = db.raw_db().prepare(
+      "SELECT COUNT(*) FROM external_identity WHERE identity_text IN "
+      "('external:type:Missing', 'external:symbol:Missing')");
+  REQUIRE(count.step());
+  CHECK(count.col_int64(0) == 2);
+  arg.src_kind = "not-a-source-kind";
+  CHECK_THROWS_AS(db.add_call_arg(arg), cidx::StorageError);
 }

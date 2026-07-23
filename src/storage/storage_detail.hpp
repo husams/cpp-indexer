@@ -56,6 +56,15 @@ inline const std::map<int64_t, std::string> &symbol_kind_names_map() {
   return m;
 }
 
+inline int64_t source_kind_id(std::string_view name) {
+  static const std::map<std::string_view, int64_t> ids = {
+      {"literal", 1}, {"local", 2},       {"construct", 3}, {"member", 4},
+      {"global", 5},  {"call_result", 6}, {"this", 7},      {"unknown", 8},
+  };
+  const auto it = ids.find(name);
+  return it == ids.end() ? -1 : it->second;
+}
+
 // Python Storage._SYMBOL_COLS — insert/update order is load-bearing for the
 // upsert statement and for update_symbol validation.
 constexpr std::array<std::string_view, 24> kSymbolInsertCols = {

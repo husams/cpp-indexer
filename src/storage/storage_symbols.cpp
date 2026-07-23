@@ -116,6 +116,14 @@ int64_t Storage::add_symbol(const Symbol &sym) {
   }
   const int64_t sid = st.col_int64(0);
   st.step_done();
+  if (sym.parent_usr) {
+    auto parent = db_.prepare("UPDATE symbol SET parent_id = "
+                              "(SELECT id FROM symbol p WHERE p.usr = ?) "
+                              "WHERE id = ?");
+    parent.bind(1, std::string_view(*sym.parent_usr));
+    parent.bind(2, sid);
+    parent.step_done();
+  }
   // v26: record THIS cursor's own site (mirrors Python add_symbol). The symbol
   // row keeps only the winning definition + one declaration; decl_site keeps
   // every physical site so references() can list all reopenings of an open
@@ -525,41 +533,170 @@ int64_t Storage::ensure_edge(const Edge &e) {
 }
 
 void Storage::add_edge_site(const EdgeSite &s) {
+  const auto source_id =
+      s.recv_src_kind ? source_kind_id(*s.recv_src_kind) : int64_t{0};
+  if (s.recv_src_kind && source_id < 0) {
+    throw StorageError("unknown source kind '" + *s.recv_src_kind + "'");
+  }
+  const auto symbol_id =
+      [this](const std::optional<std::string> &usr) -> std::optional<int64_t> {
+    if (!usr || usr->empty()) {
+      return std::nullopt;
+    }
+    auto st = db_.prepare("SELECT id FROM symbol WHERE usr = ? LIMIT 1");
+    st.bind(1, std::string_view(*usr));
+    return st.step() ? std::optional<int64_t>(st.col_int64(0)) : std::nullopt;
+  };
+  const auto type_id =
+      [this](const std::optional<std::string> &usr) -> std::optional<int64_t> {
+    if (!usr || usr->empty()) {
+      return std::nullopt;
+    }
+    auto st = db_.prepare(
+        "SELECT id FROM type_node WHERE decl_usr = ? ORDER BY id LIMIT 1");
+    st.bind(1, std::string_view(*usr));
+    return st.step() ? std::optional<int64_t>(st.col_int64(0)) : std::nullopt;
+  };
+  const auto unresolved_id =
+      [this](int64_t kind, const std::optional<std::string> &text,
+             const std::optional<int64_t> &sid,
+             const std::optional<int64_t> &tid) -> std::optional<int64_t> {
+    if (!text || text->empty() || sid || tid) {
+      return std::nullopt;
+    }
+    auto st = db_.prepare(
+        "INSERT INTO external_identity(identity_kind, identity_text, "
+        "resolution_status, symbol_id, type_id) VALUES (?, ?, 0, NULL, NULL) "
+        "ON CONFLICT(identity_kind, identity_text) DO UPDATE SET "
+        "resolution_status = 0 RETURNING id");
+    st.bind(1, kind);
+    st.bind(2, std::string_view(*text));
+    if (!st.step()) {
+      throw StorageError("external identity insert returned no id");
+    }
+    const int64_t id = st.col_int64(0);
+    st.step_done();
+    return id;
+  };
+  const auto recv_type = type_id(s.recv_type_usr);
+  const auto recv_decl = symbol_id(s.recv_decl_usr);
+  const auto recv_type_external =
+      unresolved_id(1, s.recv_type_usr, std::nullopt, recv_type);
+  const auto recv_decl_external =
+      unresolved_id(2, s.recv_decl_usr, recv_decl, std::nullopt);
   auto st = db_.prepare(
       "INSERT OR IGNORE INTO edge_site "
       "(edge_id, file_id, line, col, conditional, args_sig, "
-      " recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
-      " recv_type_is_value) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      " recv_src_kind, recv_type_usr, recv_decl_usr, recv_src_kind_id, "
+      " recv_type_id, recv_decl_id, recv_type_identity_id, "
+      " recv_decl_identity_id, recv_param_pos, recv_type_is_value) "
+      "VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)");
   st.bind(1, s.edge_id);
   bind_opt(st, 2, s.file_id);
   bind_opt(st, 3, s.line);
   bind_opt(st, 4, s.col);
   st.bind(5, s.conditional);
   bind_opt(st, 6, s.args_sig);
-  bind_opt(st, 7, s.recv_src_kind);
-  bind_opt(st, 8, s.recv_type_usr);
-  bind_opt(st, 9, s.recv_decl_usr);
-  bind_opt(st, 10, s.recv_param_pos);
-  bind_opt(st, 11, s.recv_type_is_value);
+  st.bind(7, source_id);
+  bind_opt(st, 8, recv_type);
+  bind_opt(st, 9, recv_decl);
+  bind_opt(st, 10, recv_type_external);
+  bind_opt(st, 11, recv_decl_external);
+  bind_opt(st, 12, s.recv_param_pos);
+  bind_opt(st, 13, s.recv_type_is_value);
   st.step_done();
 }
 
 void Storage::add_call_arg(const CallArg &a) {
-  auto st = db_.prepare("INSERT OR IGNORE INTO call_arg "
-                        "(edge_id, file_id, line, col, position, src_kind, "
-                        " type_usr, decl_usr, callee_usr, type_is_value) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  const int64_t source_id = source_kind_id(a.src_kind);
+  if (source_id < 0) {
+    throw StorageError("unknown source kind '" + a.src_kind + "'");
+  }
+  const auto symbol_id =
+      [this](const std::optional<std::string> &usr) -> std::optional<int64_t> {
+    if (!usr || usr->empty()) {
+      return std::nullopt;
+    }
+    auto st = db_.prepare("SELECT id FROM symbol WHERE usr = ? LIMIT 1");
+    st.bind(1, std::string_view(*usr));
+    return st.step() ? std::optional<int64_t>(st.col_int64(0)) : std::nullopt;
+  };
+  const auto type_id =
+      [this](const std::optional<std::string> &usr) -> std::optional<int64_t> {
+    if (!usr || usr->empty()) {
+      return std::nullopt;
+    }
+    auto st = db_.prepare(
+        "SELECT id FROM type_node WHERE decl_usr = ? ORDER BY id LIMIT 1");
+    st.bind(1, std::string_view(*usr));
+    return st.step() ? std::optional<int64_t>(st.col_int64(0)) : std::nullopt;
+  };
+  const auto unresolved_id =
+      [this](const std::optional<std::string> &text,
+             const std::optional<int64_t> &sid,
+             const std::optional<int64_t> &tid) -> std::optional<int64_t> {
+    if (!text || text->empty() || sid || tid) {
+      return std::nullopt;
+    }
+    auto st = db_.prepare(
+        "INSERT INTO external_identity(identity_kind, identity_text, "
+        "resolution_status, symbol_id, type_id) VALUES (?, ?, 0, NULL, NULL) "
+        "ON CONFLICT(identity_kind, identity_text) DO UPDATE SET "
+        "resolution_status = 0 RETURNING id");
+    st.bind(1, int64_t{2});
+    st.bind(2, std::string_view(*text));
+    if (!st.step()) {
+      throw StorageError("external identity insert returned no id");
+    }
+    const int64_t id = st.col_int64(0);
+    st.step_done();
+    return id;
+  };
+  const auto arg_type = type_id(a.type_usr);
+  const auto arg_decl = symbol_id(a.decl_usr);
+  const auto arg_callee = symbol_id(a.callee_usr);
+  const auto arg_type_external = [&]() -> std::optional<int64_t> {
+    if (!a.type_usr || a.type_usr->empty() || arg_type) {
+      return std::nullopt;
+    }
+    auto st = db_.prepare(
+        "INSERT INTO external_identity(identity_kind, identity_text, "
+        "resolution_status, symbol_id, type_id) VALUES (1, ?, 0, NULL, NULL) "
+        "ON CONFLICT(identity_kind, identity_text) DO UPDATE SET "
+        "resolution_status = 0 RETURNING id");
+    st.bind(1, std::string_view(*a.type_usr));
+    if (!st.step()) {
+      throw StorageError("external identity insert returned no id");
+    }
+    const int64_t id = st.col_int64(0);
+    st.step_done();
+    return id;
+  }();
+  const auto arg_decl_external =
+      unresolved_id(a.decl_usr, arg_decl, std::nullopt);
+  const auto arg_callee_external =
+      unresolved_id(a.callee_usr, arg_callee, std::nullopt);
+  auto st = db_.prepare(
+      "INSERT OR IGNORE INTO call_arg "
+      "(edge_id, file_id, line, col, position, src_kind, "
+      " type_usr, decl_usr, callee_usr, src_kind_id, type_id, "
+      " decl_id, callee_id, type_identity_id, decl_identity_id, "
+      " callee_identity_id, type_is_value) "
+      "VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)");
   st.bind(1, a.edge_id);
   st.bind(2, a.file_id);
   st.bind(3, a.line);
   st.bind(4, a.col);
   st.bind(5, a.position);
   st.bind(6, std::string_view(a.src_kind));
-  bind_opt(st, 7, a.type_usr);
-  bind_opt(st, 8, a.decl_usr);
-  bind_opt(st, 9, a.callee_usr);
-  bind_opt(st, 10, a.type_is_value);
+  st.bind(7, source_id);
+  bind_opt(st, 8, arg_type);
+  bind_opt(st, 9, arg_decl);
+  bind_opt(st, 10, arg_callee);
+  bind_opt(st, 11, arg_type_external);
+  bind_opt(st, 12, arg_decl_external);
+  bind_opt(st, 13, arg_callee_external);
+  bind_opt(st, 14, a.type_is_value);
   st.step_done();
 }
 
