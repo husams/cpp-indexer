@@ -32,6 +32,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <fstream>
 #include <memory>
 #include <unordered_set>
 
@@ -51,6 +52,34 @@ std::optional<double> file_mtime(const std::string &path) {
   return static_cast<double>(st.st_mtim.tv_sec) +
          static_cast<double>(st.st_mtim.tv_nsec) * 1e-9;
 #endif
+}
+
+std::optional<std::string> parsed_file_md5(clang::SourceManager &source_manager,
+                                           const std::string &path) {
+  auto file = source_manager.getFileManager().getFileRef(path);
+  if (!file) {
+    return std::nullopt;
+  }
+  const auto buffer = source_manager.getMemoryBufferForFileOrNone(*file);
+  if (!buffer) {
+    return std::nullopt;
+  }
+  return cidx::md5_hex(buffer->getBufferStart(), buffer->getBufferSize());
+}
+
+void test_mutate_header_after_parse(const std::string &path) {
+  // Deterministic regression hook; inert unless explicitly configured by a
+  // test.
+  const auto target = cidx::get_env("CIDX_TEST_MUTATE_HEADER");
+  const auto content = cidx::get_env("CIDX_TEST_MUTATE_HEADER_CONTENT");
+  if (!target || !content ||
+      cidx::pathutil::abspath(*target) != cidx::pathutil::abspath(path)) {
+    return;
+  }
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (out) {
+    out << *content;
+  }
 }
 
 struct EngineState {
@@ -222,22 +251,25 @@ private:
         ++counts.unowned;
         continue;
       }
-      const std::optional<std::string> md5 = cidx::md5_of(abs);
+      const std::optional<std::string> current_md5 = cidx::md5_of(abs);
       const auto existing = db_.get_file(abs);
       const bool covered_by_current_config =
           header_covered_by_current_config(existing);
-      if (db_.is_file_indexed(abs, std::nullopt, md5) &&
+      if (db_.is_file_indexed(abs, std::nullopt, current_md5) &&
           covered_by_current_config) {
         ++counts.already;
         continue;
       }
+      const std::optional<std::string> parsed_md5 =
+          parsed_file_md5(context_.getSourceManager(), abs);
+      test_mutate_header_after_parse(abs);
       const std::optional<double> mtime = file_mtime(abs);
       const int64_t hid = db_.add_file_path(
-          abs, mtime, md5, state_.rec->compile_options, state_.rec->driver);
+          abs, mtime, parsed_md5, state_.rec->compile_options, state_.rec->driver);
       plan.push_back({.path = abs,
                       .file_id = hid,
                       .mtime = mtime,
-                      .md5 = md5,
+                      .md5 = parsed_md5,
                       .stored = 0});
     }
     return plan;
@@ -489,6 +521,8 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   apply_diagnostic_policy(path, state.strict, args, out);
   if (!source.matches(path)) {
     out.source_changed = true;
+    out.error = path + ": source changed during indexing; retry required";
+  } else if (out.source_changed && out.error.empty()) {
     out.error = path + ": source changed during indexing; retry required";
   }
   return out;
