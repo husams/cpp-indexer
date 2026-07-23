@@ -1,0 +1,5 @@
+# Protected TLA+ contracts require explicit human review.
+/spec/tla/protected/ @husams
+/spec/tla/trusted/ @husams
+/spec/tla/modules/CidxTypes.tla @husams
+/spec/tla/models/*.cfg @husams

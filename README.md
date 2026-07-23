@@ -20,6 +20,13 @@ ctest --test-dir build -L default --output-on-failure
 
 The resulting executable is `build/cidx`.
 
+## Normative TLA+ specification
+
+The executable behavioral contract for CIDX lives in
+[`spec/tla/README.md`](spec/tla/README.md). Run its pinned syntax and TLC
+smoke gate with `spec/tla/tools/check.sh`; the CI workflow reports that result
+separately from the C++ test job.
+
 ## Install the Python API
 
 ```bash
