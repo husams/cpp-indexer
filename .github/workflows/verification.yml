@@ -27,13 +27,16 @@ jobs:
   cpp-default:
     name: C++ default tests
     runs-on: ubuntu-24.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
       - name: Install LLVM/Clang 22 toolchain
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y ca-certificates gnupg
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install \
+            --no-install-recommends -y ca-certificates gnupg
           curl --fail --location --silent --show-error \
             https://apt.llvm.org/llvm-snapshot.gpg.key --output /tmp/llvm-snapshot.gpg.key
           test "$(gpg --show-keys --with-colons /tmp/llvm-snapshot.gpg.key \
@@ -44,8 +47,9 @@ jobs:
           sudo install -m 0644 /tmp/llvm-apt.gpg /usr/share/keyrings/llvm-apt.gpg
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/llvm-apt.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" \
             | sudo tee /etc/apt/sources.list.d/llvm-22.list >/dev/null
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install \
+            --no-install-recommends -y \
             clang-22 clang-tools-22 cmake libclang-22-dev \
             libclang-common-22-dev libclang-cpp22 libsqlite3-dev \
             llvm-22 llvm-22-dev ninja-build
