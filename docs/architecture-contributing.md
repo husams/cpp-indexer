@@ -11,9 +11,11 @@ python3 tests/architecture_test.py
 
 ## New source module
 
-Choose exactly one owner and layer for every new production source. Add a
-non-overlapping `paths` rule to `architecture/cidx-module-manifest.json`, or an
-explicit path entry for a small contract file. Declare only downward dependencies.
+Choose exactly one owner and layer for every new production source. The checker
+covers C++/header files under `src/`, Python SDK files under `python/indexer/`,
+and checked-in `.dl` rules. Add a non-overlapping `paths` rule (and source suffix
+when needed) to `architecture/cidx-module-manifest.json`, or an explicit path
+entry for a small contract file. Declare only downward dependencies.
 If the source needs Clang/LLVM, SQLite, CLI, filesystem, or process APIs, place that
 code in the corresponding adapter/product module rather than leaking the include
 into a model or port.
@@ -38,7 +40,9 @@ new edge. Expired exceptions fail the gate.
 Assign every production `add_library`, `add_executable`, and custom target in the
 manifest. Keep Clang/LLVM object-library isolation and SQLite ownership explicit.
 Record target links in the manifest so a target change cannot silently widen the
-build graph.
+build graph. The checker also validates actual `target_sources`, object-library,
+internal-link, external-link, and target-cycle edges; changing the manifest alone
+cannot bypass those checks.
 
 ## Required checks and review note
 

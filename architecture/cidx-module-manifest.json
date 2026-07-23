@@ -2,7 +2,7 @@
   "apiVersion": "cidx.architecture/v1",
   "manifestVersion": 1,
   "repository": "husams/cpp-indexer",
-  "sourceRoots": ["src"],
+  "sourceRoots": ["src", "python/indexer"],
   "cmakeFiles": ["CMakeLists.txt"],
   "modules": [
     {
@@ -45,6 +45,7 @@
         "foundation.util",
         "model.contracts"
       ],
+      "allowedExternal": ["clang", "llvm"],
       "description": "Clang compilation-database adapter."
     },
     {
@@ -62,6 +63,7 @@
         "frontend.compiledb",
         "workspace.toolchain"
       ],
+      "allowedExternal": ["clang", "llvm"],
       "description": "Typed LibTooling visitors, identity encoders, and extraction ports/adapters."
     },
     {
@@ -78,6 +80,7 @@
         "foundation.util",
         "persistence.sqlite"
       ],
+      "allowedExternal": ["clang", "llvm"],
       "description": "Raw-AST artifact extraction and Soufflé analysis adapter."
     },
     {
@@ -91,6 +94,7 @@
         "foundation.util",
         "model.contracts"
       ],
+      "allowedExternal": ["sqlite"],
       "description": "SQLite schema, migrations, transactions, and storage adapters."
     },
     {
@@ -127,6 +131,7 @@
         "foundation.util",
         "model.contracts"
       ],
+      "allowedExternal": ["clang", "llvm"],
       "description": "Include analysis/planning and its Clang validation/application adapter."
     },
     {
@@ -147,6 +152,7 @@
         "foundation.util",
         "model.contracts"
       ],
+      "allowedExternal": ["clang", "llvm"],
       "description": "Syntax/semantic diff lowering and comparison model."
     },
     {
@@ -194,6 +200,44 @@
         "model.contracts"
       ],
       "description": "Temporary cidx_core aggregation target retained during modular migration."
+    },
+    {
+      "id": "sdk.python",
+      "layer": "sdk",
+      "paths": ["python/indexer/**"],
+      "sourceSuffixes": [".py"],
+      "excludePaths": [
+        "python/indexer/clang/**",
+        "python/indexer/astcmd.py",
+        "python/indexer/backfill_alias_edges.py",
+        "python/indexer/compiledb.py"
+      ],
+      "allowedDependencies": ["sdk.python"],
+      "allowedExternal": [],
+      "description": "Python storage, graph, query, and support SDK surface."
+    },
+    {
+      "id": "sdk.python.legacy-clang",
+      "layer": "sdk-legacy",
+      "paths": [
+        "python/indexer/clang/**",
+        "python/indexer/astcmd.py",
+        "python/indexer/backfill_alias_edges.py",
+        "python/indexer/compiledb.py"
+      ],
+      "sourceSuffixes": [".py"],
+      "allowedDependencies": ["sdk.python", "sdk.python.legacy-clang"],
+      "allowedExternal": ["clang"],
+      "description": "Legacy Python Clang adapter pending removal in a separate phase."
+    },
+    {
+      "id": "analysis.souffle-rules",
+      "layer": "analysis",
+      "paths": ["python/indexer/rules/**", "src/astgraph/rules/**"],
+      "sourceSuffixes": [".dl"],
+      "allowedDependencies": ["analysis.souffle-rules"],
+      "allowedExternal": [],
+      "description": "Checked-in Soufflé rule sources shipped by the analysis adapters."
     }
   ],
   "targets": [
@@ -219,7 +263,44 @@
       "owner": "Platform M1 maintainers",
       "rationale": "The current static library aggregates the product and adapter object libraries and owns their Clang/LLVM/SQLite links.",
       "expiresOn": "2026-12-31",
-      "removalIssue": "HSE-62"
+      "removalIssue": "HSE-62",
+      "dependencies": ["clang-cpp", "LLVM", "${_cidx_sqlite_link}"]
+    },
+    {
+      "target": "cidx",
+      "boundary": "product executable -> compatibility bundle",
+      "owner": "Platform M1 build maintainers",
+      "rationale": "The product executable still consumes the transitional cidx_core aggregation target.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-62",
+      "dependencies": ["cidx_core"]
+    },
+    {
+      "target": "cidx-astgraph",
+      "boundary": "product executable -> compatibility bundle",
+      "owner": "Platform M1 build maintainers",
+      "rationale": "The AST graph executable still consumes the transitional cidx_core aggregation target.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-62",
+      "dependencies": ["cidx_core"]
+    },
+    {
+      "target": "cidx-diff",
+      "boundary": "product executable -> compatibility bundle",
+      "owner": "Platform M1 build maintainers",
+      "rationale": "The diff executable still consumes the transitional cidx_core aggregation target.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-62",
+      "dependencies": ["cidx_core"]
+    },
+    {
+      "target": "cidx-queryplan-example",
+      "boundary": "optional product executable -> compatibility bundle",
+      "owner": "Platform M1 build maintainers",
+      "rationale": "The optional query-plan example still consumes the transitional cidx_core aggregation target.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-62",
+      "dependencies": ["cidx_core"]
     }
   ],
   "contracts": [
@@ -414,6 +495,39 @@
       "rationale": "The generic JSON reader currently shares the CLI JSON value tree; it will move to a neutral artifact value.",
       "expiresOn": "2026-12-31",
       "removalIssue": "HSE-68"
+    },
+    {
+      "source": "src/astgraph/souffle_runner.cpp",
+      "fromModule": "analysis.astgraph",
+      "toModule": "persistence.sqlite",
+      "include": "storage/sqlite.hpp",
+      "boundary": "astgraph analysis -> SQLite adapter",
+      "owner": "Platform M2 analysis maintainers",
+      "rationale": "The current Soufflé runner still opens the persisted analysis database directly; a storage port will remove this coupling.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-62"
+    },
+    {
+      "source": "src/astgraph/astgraph.cpp",
+      "fromModule": "analysis.astgraph",
+      "toModule": "persistence.sqlite",
+      "include": "storage/sqlite.hpp",
+      "boundary": "astgraph analysis -> SQLite adapter",
+      "owner": "Platform M2 analysis maintainers",
+      "rationale": "The AST graph compatibility path still uses a direct SQLite handle while the storage port is extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-62"
+    },
+    {
+      "source": "src/cli/analyze.cpp",
+      "fromModule": "product.cli",
+      "toModule": "persistence.sqlite",
+      "include": "storage/sqlite.hpp",
+      "boundary": "product surface -> SQLite adapter",
+      "owner": "Platform M2 application maintainers",
+      "rationale": "The analyze command currently owns a direct SQLite handle while the application port is being extracted.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-62"
     }
   ],
   "ci": {

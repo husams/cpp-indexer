@@ -22,9 +22,11 @@ python3 scripts/check_architecture.py \
   --manifest architecture/cidx-module-manifest.json
 ```
 
-The checker assigns every project-owned production source and declared production
-CMake target exactly once, validates internal include edges and target links,
-checks contract purity, and rejects cycles in the declared dependency graph.
+The checker assigns every project-owned production source under `src/` and the
+Python SDK/rule roots exactly once. It validates CMake target links, internal
+target/source/object edges, external library placement, internal include edges,
+contract purity, and cycles in both the declared module graph and actual CMake
+graph.
 
 ## Layer and ownership rules
 
@@ -46,8 +48,8 @@ the focused ports and application services.
 Clang/LLVM includes are allowed only in modules declared as frontend, extraction,
 or lowering adapters. SQLite includes and links are allowed only in the persistence
 adapter and explicitly declared analysis runners that consume a persisted artifact.
-The domain and artifact contract files listed in the manifest are checked directly
-for forbidden includes.
+These policies apply module-wide; the domain and artifact contract files listed in
+the manifest are an additional direct purity check.
 
 ## Ports, adapters, and surfaces
 
@@ -64,8 +66,9 @@ then adds thin compatibility adapters where necessary.
 ## Exceptions
 
 An existing cross-boundary edge is not implicitly grandfathered. Each exception in
-the manifest must name an owner, rationale, affected boundary, expiry date, and
-removal issue. The checker fails on missing metadata or an expired exception.
+the manifest must name a non-empty owner, rationale, affected boundary, expiry date,
+and valid Linear removal issue, and must match a current source or build violation.
+The checker fails on missing metadata, stale exceptions, or an expired exception.
 Exceptions are temporary migration work items, not permission to add a new edge
 without review.
 
