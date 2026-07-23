@@ -215,7 +215,8 @@ public:
              const std::optional<std::string> &name = std::nullopt,
              const std::optional<bool> &indexed = std::nullopt);
   void mark_file_indexed(int64_t file_id,
-                         const std::optional<double> &mtime = std::nullopt);
+                         const std::optional<double> &mtime = std::nullopt,
+                         const std::optional<std::string> &md5 = std::nullopt);
   // Flip the indexed/pending flag in place; symbols are untouched.
   void set_file_indexed(int64_t file_id, bool indexed);
   // Replace a file's stored compile flags (and optionally its driver) and mark

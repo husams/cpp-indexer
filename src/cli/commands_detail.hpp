@@ -233,8 +233,14 @@ inline int index_one(Storage &db, const File &rec, const std::string &path,
       *ctx.err << "error: " << out.error << "\n";
       return 1;
     }
+    if (out.source_changed) {
+      db.replace_diagnostics(rec.id, out.diagnostics);
+      db.set_file_indexed(rec.id, false);
+      *ctx.err << "error: " << out.error << "\n";
+      return 1;
+    }
     db.replace_diagnostics(rec.id, out.diagnostics);
-    db.mark_file_indexed(rec.id, file_mtime(path));
+    db.mark_file_indexed(rec.id, file_mtime(path), out.source_md5);
     *ctx.out << "  -> " << out.stored
              << " symbols; headers: " << out.headers.indexed << " indexed (+"
              << out.headers.symbols << " symbols), " << out.headers.already
@@ -312,12 +318,10 @@ inline int index_pending(Storage &db, bool graph_enabled, Context &ctx) {
 }
 
 inline bool all_files_current(Storage &db) {
-  for (const auto &[rec, path] : db.list_files()) {
-    if (files::index_status(rec, path) != files::IndexStatus::kOk) {
-      return false;
-    }
-  }
-  return true;
+  return std::ranges::all_of(db.list_files(), [](const auto &entry) {
+    return files::index_status(entry.first, entry.second) ==
+           files::IndexStatus::kOk;
+  });
 }
 
 // -- delete helpers (cli.py _plural / _selector_str / _under_component /

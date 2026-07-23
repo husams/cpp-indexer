@@ -153,6 +153,7 @@ private:
     std::string path;
     int64_t file_id;
     std::optional<double> mtime;
+    std::optional<std::string> md5;
     int stored = 0;
     std::vector<int64_t> symbol_ids;
   };
@@ -233,8 +234,11 @@ private:
       const std::optional<double> mtime = file_mtime(abs);
       const int64_t hid = db_.add_file_path(
           abs, mtime, md5, state_.rec->compile_options, state_.rec->driver);
-      plan.push_back(
-          {.path = abs, .file_id = hid, .mtime = mtime, .stored = 0});
+      plan.push_back({.path = abs,
+                      .file_id = hid,
+                      .mtime = mtime,
+                      .md5 = md5,
+                      .stored = 0});
     }
     return plan;
   }
@@ -250,10 +254,15 @@ private:
     }
     for (const PendingHeader &ph : plan) {
       run_edge_pass(ph.path, ph.file_id);
+      if (!SourceSnapshot{.md5 = ph.md5}.matches(ph.path)) {
+        state_.out->source_changed = true;
+        db_.set_file_indexed(ph.file_id, false);
+        continue;
+      }
       db_.associate_facts_for_file(ph.file_id, state_.normalized_config_id,
                                    ph.symbol_ids, edges_.edge_ids(),
                                    edges_.definition_ids());
-      db_.mark_file_indexed(ph.file_id, ph.mtime);
+      db_.mark_file_indexed(ph.file_id, ph.mtime, ph.md5);
       ++counts.indexed;
       counts.symbols += ph.stored;
     }
@@ -423,9 +432,20 @@ static void apply_diagnostic_policy(const std::string &path, bool strict,
   out.failed_flags = args;
 }
 
+SourceSnapshot SourceSnapshot::capture(const std::string &path) {
+  return {.md5 = cidx::md5_of(path)};
+}
+
+bool SourceSnapshot::matches(const std::string &path) const {
+  const std::optional<std::string> current = cidx::md5_of(path);
+  return md5.has_value() && current.has_value() && md5 == current;
+}
+
 IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
                               const std::string &path, bool graph_enabled) {
   IndexOneOutcome out;
+  const SourceSnapshot source = SourceSnapshot::capture(path);
+  out.source_md5 = source.md5;
   const std::vector<std::string> args = build_clang_arguments(db, rec, path);
   CompilationSetup setup(args, path);
   DiagCollector collector(out.diagnostics);
@@ -467,6 +487,10 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
     return out;
   }
   apply_diagnostic_policy(path, state.strict, args, out);
+  if (!source.matches(path)) {
+    out.source_changed = true;
+    out.error = path + ": source changed during indexing; retry required";
+  }
   return out;
 }
 

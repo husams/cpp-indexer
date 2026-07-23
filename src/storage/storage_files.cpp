@@ -19,7 +19,6 @@
 #include "storage/storage_detail.hpp"
 #include "storage/storage_schema.hpp"
 #include "util/errors.hpp"
-#include "util/hashing.hpp"
 #include "util/json_min.hpp"
 #include "util/logger.hpp"
 #include "util/pathutil.hpp"
@@ -345,9 +344,8 @@ Storage::list_files(const std::optional<int64_t> &component_id,
 }
 
 void Storage::mark_file_indexed(int64_t file_id,
-                                const std::optional<double> &mtime) {
-  const auto path = file_abs_path(file_id);
-  const auto md5 = path ? md5_of(*path) : std::nullopt;
+                                const std::optional<double> &mtime,
+                                const std::optional<std::string> &md5) {
   auto st =
       db_.prepare("UPDATE file SET indexed = 1, indexed_at = datetime('now'), "
                   "  mtime = COALESCE(?, mtime), md5 = COALESCE(?, md5) "

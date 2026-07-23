@@ -25,6 +25,7 @@
 #include <string>
 #include <vector>
 
+#include "ast/index_engine.hpp"
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
 #include "cli/format.hpp"
@@ -2021,6 +2022,18 @@ TEST_SUITE("clang") {
     const auto replacement = db.find_symbols("new_symbol", {}, 10);
     REQUIRE(replacement.size() == 1);
     CHECK(replacement[0].line == 1);
+  }
+
+  TEST_CASE("index: source snapshot detects replacement after parse") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/source.cpp";
+    write_file(source, "int intermediate_symbol() { return 1; }\n");
+    const cidx::ast::SourceSnapshot parsed =
+        cidx::ast::SourceSnapshot::capture(source);
+    CHECK(parsed.matches(source));
+
+    write_file(source, "int final_symbol() { return 2; }\n");
+    CHECK_FALSE(parsed.matches(source));
   }
 
   TEST_CASE("index: two-TU pending flow — header counters, md5 skip, "
