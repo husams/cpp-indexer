@@ -1312,6 +1312,9 @@ class _GammaEngine:
         key the walk constructs in _devirt_prune (line ~1046), fixing the
         context-key mismatch that caused all gamma lookups to miss.
 
+        Receiver binding: the call site's implicit object is joined into the
+        callee owner's ``this`` location before visiting the callee body.
+
         Param binding: for each arg at position i with a known TypeSet ts we
         seed two callee-context keys:
           - (callee_ctx, ("@pos", i))  -- position-indexed, always available
@@ -1332,6 +1335,28 @@ class _GammaEngine:
         if count >= K_LIMIT:
             # Beyond limit => keep callee dispatch sites as KEEP_ALL (sound)
             return
+
+        if callee.parent_usr:
+            receiver_ts: "_Top | frozenset[str]" = frozenset()
+            saw_receiver = False
+            for site in edge.sites:
+                if site.recv_src_kind is None:
+                    continue
+                saw_receiver = True
+                site_ts = self._resolve_source(
+                    caller_ctx,
+                    site.recv_src_kind,
+                    site.recv_type_usr,
+                    site.recv_decl_usr,
+                    None,
+                    site.recv_type_is_value,
+                )
+                if site_ts is TOP:
+                    receiver_ts = TOP
+                    break
+                receiver_ts = receiver_ts | site_ts
+            if saw_receiver:
+                _join(self._gamma, (callee_ctx, callee.parent_usr), receiver_ts)
 
         # Bind params into callee's Gamma keyed by position and decl_usr.
         if all_args:
@@ -1393,7 +1418,7 @@ class _GammaEngine:
         """The TypeSet for a virtual call's receiver at ``site`` in ``ctx``.
 
         Lookup order (first hit wins):
-          0. 3a: value member/global/call_result receiver -> exact singleton.
+          0. 3a: exact by-value receiver -> exact singleton.
           1. (ctx, recv_decl_usr)   — USR of the named local/param
           2. (ctx, recv_type_usr)   — static declared type USR
           3. (ctx, ("@pos", recv_param_pos))  — position-indexed binding from
@@ -1402,10 +1427,10 @@ class _GammaEngine:
           4. construct shortcut     — recv_src_kind==construct -> {recv_type_usr}
           5. 3b: closed-world cross-TU param union (when assume_closed_world).
         """
-        # 3a: value member/global/call_result receiver -> exact singleton.
+        # 3a: an exact by-value receiver has no dynamic subtype ambiguity.
         if (
             site.recv_type_is_value
-            and site.recv_src_kind in ("member", "global", "call_result")
+            and site.recv_src_kind in ("local", "member", "global", "call_result")
             and site.recv_type_usr
         ):
             return frozenset({site.recv_type_usr})

@@ -7,12 +7,15 @@ namespace, where pytest collects them.
 
 Step modules
     pipeline_steps    GIVEN the fixture workspace / WHEN the cidx CLI runs
+    queryplan_steps   public Python QueryPlan execution and result assertions
     index_steps       index-level facts (database, resolve, file/symbol totals)
     symbol_steps      symbol rows: membership, exhaustiveness, spans
     signature_steps   the signature/type tier: types, parameters, templates
     edge_steps        the edge graph: counts, relationship tables, kind totals
     edge_site_steps   edge sites: where a relationship is written in the source
     callgraph_steps   callers and callees
+    hierarchy_steps   bases, subclasses, overrides and dynamic dispatch
+    provenance_steps  receiver provenance and query-time devirtualization
     cli_steps         CLI output and read-only cidx subcommands
 
 Support modules (no steps)
@@ -32,8 +35,11 @@ from . import (
     cli_steps,
     edge_site_steps,
     edge_steps,
+    hierarchy_steps,
     index_steps,
     pipeline_steps,
+    provenance_steps,
+    queryplan_steps,
     signature_steps,
     symbol_steps,
 )
@@ -42,12 +48,15 @@ from .workspace import Workspace
 
 _STEP_MODULES: tuple[ModuleType, ...] = (
     pipeline_steps,
+    queryplan_steps,
     index_steps,
     symbol_steps,
     signature_steps,
     edge_steps,
     edge_site_steps,
     callgraph_steps,
+    hierarchy_steps,
+    provenance_steps,
     cli_steps,
 )
 

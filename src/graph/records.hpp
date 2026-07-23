@@ -35,7 +35,7 @@ struct Sym {
   int64_t id = -1;
   std::string usr;
   std::string spelling;
-  std::string name;          // COALESCE(qual_name, spelling) -- displayed name
+  std::string name; // COALESCE(qual_name, spelling) -- displayed name
   std::string kind;
   std::optional<std::string> type_info;
   bool is_definition = false;
@@ -46,12 +46,13 @@ struct Sym {
   std::optional<std::string> parent_usr;
   bool resolved = false;
   std::optional<std::string> component;
-  std::optional<std::string> file; // abs path of best-known location, or nullopt
+  std::optional<std::string>
+      file; // abs path of best-known location, or nullopt
   std::optional<int64_t> line;
   std::optional<int64_t> col;
   std::optional<int64_t> end_line; // v25: end of the symbol's own extent at
   std::optional<int64_t> end_col;  // (line, col); nullopt for decl-only / stubs
-  bool external = false; // file is a raw path in an UNREGISTERED file
+  bool external = false;           // file is a raw path in an UNREGISTERED file
   int64_t multi_def = 0; // v27: number of definitions (bodies). >1 == redefined
                          // per backend. Deliberately NOT in to_dict() (parity).
 
@@ -63,7 +64,7 @@ struct Sym {
     if (!file) {
       return "<no-location>";
     }
-    const std::string base = pathutil::basename(*file);
+    std::string base = pathutil::basename(*file);
     if (line && *line != 0) {
       return base + ":" + std::to_string(*line);
     }
@@ -134,7 +135,8 @@ struct Sym {
 };
 
 // ---- Definition (v27) -----------------------------------------------------
-// One backend body of a (possibly redefined) symbol. Mirrors query.py:Definition
+// One backend body of a (possibly redefined) symbol. Mirrors
+// query.py:Definition
 // -- to_dict()/loc() byte-identical.
 struct Definition {
   Sym sym;
@@ -147,7 +149,7 @@ struct Definition {
     if (!file) {
       return "<no-location>";
     }
-    const std::string base = pathutil::basename(*file);
+    std::string base = pathutil::basename(*file);
     if (line && *line != 0) {
       return base + ":" + std::to_string(*line);
     }
@@ -220,7 +222,7 @@ struct Site {
     if (!file) {
       return "<no-location>";
     }
-    const std::string base = pathutil::basename(*file);
+    std::string base = pathutil::basename(*file);
     if (line && *line != 0) {
       return base + ":" + std::to_string(*line) + ":" +
              (col ? std::to_string(*col) : "");
@@ -264,7 +266,7 @@ struct Edge {
   std::string kind; // edge_kind name (e.g. "calls")
   int64_t src_id = -1;
   int64_t dst_id = -1;
-  Sym peer;         // the symbol at the other end
+  Sym peer; // the symbol at the other end
   int64_t count = 1;
   std::optional<int64_t> base_access; // inherits only
   std::optional<int64_t> is_virtual;  // inherits only (raw int)
@@ -280,7 +282,8 @@ struct Edge {
     // pv is already an Object; extend it.
     pv.o.emplace_back("edge_kind", Value::of(kind));
     pv.o.emplace_back("count", Value::of(count));
-    // base_access / is_virtual: only when non-null (R7 -- calls/uses MUST be absent)
+    // base_access / is_virtual: only when non-null (R7 -- calls/uses MUST be
+    // absent)
     if (base_access) {
       pv.o.emplace_back("base_access", Value::of(*base_access));
     }
@@ -306,9 +309,10 @@ struct Traversal {
   std::unordered_map<int64_t, std::optional<int64_t>> parent_by_id;
   // BFS insertion order: ids in the order they were first discovered.
   // Required so that stable_sort by (depth, name) breaks same-key ties by
-  // BFS discovery order (mirrors Python dict insertion order + sorted() stable).
-  // Populated by GraphQuery::walk(); callers that build Traversal directly
-  // should also append to this vector whenever they insert into nodes_by_id.
+  // BFS discovery order (mirrors Python dict insertion order + sorted()
+  // stable). Populated by GraphQuery::walk(); callers that build Traversal
+  // directly should also append to this vector whenever they insert into
+  // nodes_by_id.
   std::vector<int64_t> insertion_order_;
 
   // Python Traversal.nodes property (query.py:1667-1673, R5):

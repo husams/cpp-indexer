@@ -33,13 +33,15 @@ const clang::Expr *receiver_expression(const clang::Expr *site) {
     return nullptr;
   }
   const clang::Expr *callee_expr = normalize_value_expr(anycall->getCallee());
-  if (const auto *dep = llvm::dyn_cast_or_null<
-          clang::CXXDependentScopeMemberExpr>(callee_expr)) {
+  if (const auto *dep =
+          llvm::dyn_cast_or_null<clang::CXXDependentScopeMemberExpr>(
+              callee_expr)) {
     if (!dep->isImplicitAccess()) {
       return dep->getBase();
     }
-  } else if (const auto *unres = llvm::dyn_cast_or_null<
-                 clang::UnresolvedMemberExpr>(callee_expr)) {
+  } else if (const auto *unres =
+                 llvm::dyn_cast_or_null<clang::UnresolvedMemberExpr>(
+                     callee_expr)) {
     if (!unres->isImplicitAccess()) {
       return unres->getBase();
     }
@@ -50,9 +52,10 @@ const clang::Expr *receiver_expression(const clang::Expr *site) {
 // Provenance of an EXPLICIT receiver: value classification, parameter
 // position for parameter receivers, and by-value dispatch for the categories
 // devirtualization narrows on.
-ReceiverProvenance classify_explicit_receiver(const clang::ASTContext &context,
-                                              const clang::Expr *recv_expr,
-                                              const clang::FunctionDecl *callee) {
+ReceiverProvenance
+classify_explicit_receiver(const clang::ASTContext &context,
+                           const clang::Expr *recv_expr,
+                           const clang::FunctionDecl * /*callee*/) {
   ReceiverProvenance recv;
   const ValueSource rv = classify_value_source(context, recv_expr);
   recv.src_kind = rv.src_kind;
@@ -67,17 +70,12 @@ ReceiverProvenance classify_explicit_receiver(const clang::ASTContext &context,
       }
     }
   }
-  if (recv.src_kind == "member" || recv.src_kind == "global" ||
-      recv.src_kind == "call_result") {
-    std::string dispatch_usr;
-    if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(callee)) {
-      if (const clang::CXXRecordDecl *owner = m->getParent()) {
-        dispatch_usr = usr_for_decl(owner);
-      }
-    }
+  if ((recv.src_kind == "member" || recv.src_kind == "global" ||
+       recv.src_kind == "call_result" || recv.src_kind == "local") &&
+      !recv.type_usr.empty()) {
     recv.type_is_value =
         type_is_value(decl_type_for_expr(normalize_value_expr(recv_expr)),
-                      dispatch_usr)
+                      recv.type_usr)
             ? 1
             : 0;
   }
