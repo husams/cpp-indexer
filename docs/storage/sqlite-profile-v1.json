@@ -1,0 +1,93 @@
+{
+  "profile_version": "cidx/sqlite-profile-v1",
+  "schema_version": 34,
+  "wal_policy": {
+    "production": "disabled",
+    "qualification": "measure rollback and WAL on the same workload and hardware",
+    "decision": "do not enable WAL unless concurrency/update benefit exceeds checkpoint, sidecar, and atomicity costs"
+  },
+  "filesystem": {
+    "supported": ["local filesystem with reliable POSIX/ APFS locking and rename semantics"],
+    "deployment_rejection": ["network filesystem", "unsupported locking provider", "mixed local/network path"],
+    "enforcement": "The storage layer does not guess filesystem type; deployment preflight must reject paths outside the supported local-filesystem contract before publishing a database as current."
+  },
+  "profiles": [
+    {
+      "id": "indexing",
+      "open_mode": "read_write",
+      "journal_mode": "DELETE",
+      "pragmas": {
+        "foreign_keys": {"value": "ON", "set": true, "why": "reject dangling core references"},
+        "busy_timeout": {"value_ms": 5000, "set": true, "why": "bounded retry for a concurrent reader/writer"},
+        "journal_mode": {"value": "DELETE", "set": true, "why": "rollback journal keeps one-file publication and avoids unqualified WAL sidecars"},
+        "synchronous": {"value": "FULL", "set": true, "why": "durable indexing/build commits"},
+        "query_only": {"value": "OFF", "set": false, "why": "indexing writes are allowed"},
+        "temp_store": {"value": "DEFAULT", "set": false, "why": "do not trade bounded disk behavior for unmeasured RSS"},
+        "cache_size": {"value": "DEFAULT", "set": false, "why": "workload-specific benchmark variable"},
+        "mmap_size": {"value": "DEFAULT", "set": false, "why": "filesystem and address-space dependent"},
+        "page_size": {"value": "database-defined", "set": false, "why": "changing it requires a controlled rebuild"}
+      }
+    },
+    {
+      "id": "interactive_read",
+      "open_mode": "read_only",
+      "inherits": "read_only_replay"
+    },
+    {
+      "id": "read_only_replay",
+      "open_mode": "read_only",
+      "journal_mode": "unchanged",
+      "pragmas": {
+        "foreign_keys": {"value": "ON", "set": true, "why": "validate reads against the core contract"},
+        "busy_timeout": {"value_ms": 5000, "set": true, "why": "bounded retry while a writer publishes"},
+        "query_only": {"value": "ON", "set": true, "why": "connection-level write guard"},
+        "journal_mode": {"value": "unchanged", "set": false, "why": "never mutate the file or create WAL sidecars on open"},
+        "synchronous": {"value": "unchanged", "set": false, "why": "read-only open must not change durability state"},
+        "temp_store": {"value": "DEFAULT", "set": false, "why": "no unmeasured memory policy"},
+        "cache_size": {"value": "DEFAULT", "set": false, "why": "reader-specific tuning is outside the core contract"},
+        "mmap_size": {"value": "DEFAULT", "set": false, "why": "no filesystem-dependent mapping"},
+        "page_size": {"value": "observe", "set": false, "why": "read-only inspection only"}
+      }
+    },
+    {
+      "id": "migration",
+      "open_mode": "read_write",
+      "inherits": "indexing",
+      "policy": "schema migration completes before current-state publication; failed work remains rollback-recoverable or stale-but-valid"
+    },
+    {
+      "id": "maintenance",
+      "open_mode": "read_write",
+      "inherits": "indexing",
+      "policy": "PRAGMA optimize is safe to run routinely; ANALYZE is explicit and measured because it mutates statistics"
+    }
+  ],
+  "supporting_query_ids": ["exact_identity", "name_prefix", "bounded_paths"],
+  "deferred_relations": [],
+  "relation_strategies": [
+    {"table": "edge", "forward": "sqlite_autoindex_edge_1", "reverse": "idx_edge_dst", "secondary_covering": "idx_edge_src", "query_ids": ["outgoing_one_hop", "incoming_one_hop"]},
+    {"table": "def_edge", "forward": "sqlite_autoindex_def_edge_1", "reverse": "idx_def_edge_dst", "secondary_covering": "idx_def_edge_src", "query_ids": ["definition_outgoing", "definition_incoming"]},
+    {"table": "entity_edge", "forward": "idx_entity_edge_identity", "reverse": "idx_entity_edge_dst", "secondary_covering": "idx_entity_edge_src", "query_ids": ["entity_graph_forward", "entity_graph_reverse"]},
+    {"table": "possible_call", "forward": "sqlite_autoindex_possible_call_1", "reverse": "idx_possible_call_dst", "natural_key_reuse": "sqlite_autoindex_possible_call_1", "query_ids": ["possible_call_outgoing", "possible_call_incoming"]},
+    {"table": "type_edge", "forward": "PRIMARY KEY (src_id, kind, position)", "reverse": "idx_type_edge_dst", "natural_key_reuse": "PRIMARY KEY (src_id, kind, position)", "query_ids": ["type_closure_forward", "type_closure_reverse"]},
+    {"table": "include_edge", "forward": "sqlite_autoindex_include_edge_1", "reverse": "idx_include_edge_dst", "configuration": "idx_include_edge_config", "natural_key_reuse": "sqlite_autoindex_include_edge_1", "query_ids": ["include_graph", "include_graph_reverse"]},
+    {"table": "edge_site", "forward": "PRIMARY KEY (edge_id, file_id, line, col)", "reverse": "none", "query_ids": ["references_sites"]},
+    {"table": "include_site", "forward": "sqlite_autoindex_include_site_1", "reverse": "none", "natural_key_reuse": "sqlite_autoindex_include_site_1", "query_ids": ["include_sites"]}
+  ],
+  "nullable_identity": {
+    "entity_edge": "retain the existing COALESCE unique index until normalized sentinel storage is measured; HSE-77 owns identity normalization",
+    "expression_index_policy": "do not add another expression index for a predicate-only optimization"
+  },
+  "maintenance": {
+    "optimize": "explicit Storage::run_maintenance after bulk publication",
+    "analyze": "explicit Storage::refresh_statistics only after measured transform/reindex boundaries",
+    "vacuum": "manual maintenance only; auto_vacuum remains database-defined until benchmark evidence justifies rebuild cost",
+    "checkpoint": "WAL-only qualification step; rollback profile has no WAL checkpoint sidecar"
+  },
+  "identity_and_recovery": {
+    "backup": "SQLite online backup API",
+    "restore_checks": ["schema_version", "catalog identity", "fact-set identity", "integrity_check", "foreign_key_check"],
+    "read_only_checks": ["no migration", "no schema creation", "no new WAL/journal sidecar", "persistent database and WAL bytes remain unchanged", "pre-existing WAL shared-memory lock-state mutation is permitted and reported", "no statistics mutation"],
+    "current_state": "only integrity-valid, schema-compatible, identity-matching databases are current; interrupted work is stale-but-valid until revalidated"
+  }
+}

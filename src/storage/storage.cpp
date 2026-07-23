@@ -102,10 +102,10 @@ void Transaction::rollback() {
 
 Storage::Storage(const std::string &path, OpenMode mode)
     : db_(mode == OpenMode::read_only ? path : prepare_db_path(path),
-          mode == OpenMode::read_only) {
+          mode == OpenMode::read_only,
+          mode == OpenMode::read_only ? SqliteProfile::read_only_replay
+                                      : SqliteProfile::indexing) {
   if (mode == OpenMode::read_only) {
-    // A concurrent writer must produce BUSY-with-retry, not an instant error.
-    db_.exec("PRAGMA busy_timeout = 5000");
     // Version gate before anything else: a read-only connection cannot
     // migrate, so any other stored version is unusable.
     std::string stored;
@@ -142,10 +142,8 @@ Storage::Storage(const std::string &path, OpenMode mode)
           " does not match the required " + std::string(catalog::kCatalogHash) +
           " (regenerate with the matching semantic catalogs)");
     }
-    db_.exec("PRAGMA foreign_keys = ON");
     return;
   }
-  db_.exec("PRAGMA foreign_keys = ON");
   // Reject an incompatible existing catalog before migrations or schema
   // seeding can mutate the database. Fresh and legacy databases without a
   // catalog hash are allowed to receive the current seed below.

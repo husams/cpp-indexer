@@ -24,6 +24,30 @@ namespace cidx {
 // args). Mirrors Python's None/int/float/str binding.
 using SqlValue = std::variant<std::nullptr_t, int64_t, double, std::string>;
 
+// Runtime profiles are deliberately narrower than SQLite's tuning surface.
+// They name the supported lifecycle contract; benchmark-only WAL and cache
+// settings are not silently promoted to a production profile.
+enum class SqliteProfile : std::uint8_t {
+  indexing,
+  interactive_read,
+  read_only_replay,
+  migration,
+  maintenance,
+};
+
+struct SqliteProfileSettings {
+  int busy_timeout_ms;
+  bool foreign_keys;
+  bool query_only;
+  bool rollback_journal;
+  bool full_synchronous;
+};
+
+[[nodiscard]] auto sqlite_profile_settings(SqliteProfile profile)
+    -> SqliteProfileSettings;
+[[nodiscard]] auto sqlite_profile_name(SqliteProfile profile)
+    -> std::string_view;
+
 // Owns a sqlite3_stmt*. Movable, non-copyable. Bind indexes are 1-based,
 // column indexes 0-based (SQLite convention).
 class SqliteStmt {
@@ -61,8 +85,8 @@ class SqliteDb {
 public:
   // read_only opens with SQLITE_OPEN_READONLY (no CREATE): the file must
   // already exist; any write statement fails at the SQLite layer.
-  explicit SqliteDb(const std::string &path,
-                    bool read_only = false); // throws StorageError
+  explicit SqliteDb(const std::string &path, bool read_only = false,
+                    SqliteProfile profile = SqliteProfile::indexing);
   ~SqliteDb();
   SqliteDb(const SqliteDb &) = delete;
   SqliteDb &operator=(const SqliteDb &) = delete;
@@ -70,10 +94,13 @@ public:
   SqliteStmt prepare(std::string_view sql);
   void exec(std::string_view sql_script); // multi-statement, throws on error
   [[nodiscard]] int64_t changes() const;  // rows affected by the last DML
+  auto backup_to(std::string_view path) const -> void;
+  [[nodiscard]] auto profile() const -> SqliteProfile { return profile_; }
   sqlite3 *raw() { return db_; }
 
 private:
   sqlite3 *db_ = nullptr;
+  SqliteProfile profile_ = SqliteProfile::indexing;
 };
 
 } // namespace cidx

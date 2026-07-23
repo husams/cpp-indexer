@@ -955,6 +955,12 @@ class GraphQuery:
         # Read-only: file:...?mode=ro guards against accidental writes.
         uri = f"file:{os.path.abspath(db_path)}?mode=ro"
         self._c = sqlite3.connect(uri, uri=True)
+        # Keep the Python graph surface aligned with the C++ read-only replay
+        # profile. These are connection-local settings and do not mutate the
+        # database or create journal/WAL sidecars.
+        self._c.execute("PRAGMA busy_timeout = 5000")
+        self._c.execute("PRAGMA foreign_keys = ON")
+        self._c.execute("PRAGMA query_only = ON")
         self._c.row_factory = sqlite3.Row
         self.db_path = db_path
         self._owns_conn = True
