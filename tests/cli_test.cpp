@@ -17,12 +17,15 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "ast/index_engine.hpp"
@@ -2056,8 +2059,10 @@ TEST_SUITE("clang") {
     CHECK_FALSE(parsed.matches(source));
   }
 
-  TEST_CASE("index: owned header mutation during parse stays pending") {
+  TEST_CASE("index: owned header A to B to A mutation stays pending") {
     const HeaderRaceProject p;
+    const std::string initial_header =
+        "int initial_header_symbol() { return 1; }\n";
     CmdResult r = run_cli({"import", "--db", p.proj}, p.cache);
     REQUIRE(r.rc == 0);
 
@@ -2071,25 +2076,36 @@ TEST_SUITE("clang") {
       CHECK(db.find_symbols("initial_header_symbol", {}, 10).size() == 1);
     }
 
-    write_file(p.header, "int intermediate_header_symbol() { return 3; }\n");
-    write_file(p.source,
-               "#include \"header.hpp\"\nint main_symbol() { return 5; }\n");
-    const std::string final_header =
-        "int final_header_symbol() { return 4; }\n";
-    {
-      ScopedEnv target("CIDX_TEST_MUTATE_HEADER", p.header.c_str());
-      ScopedEnv content("CIDX_TEST_MUTATE_HEADER_CONTENT",
-                        final_header.c_str());
-      r = run_cli({"index"}, p.cache, &log);
-      CHECK(r.rc == 1);
-      CHECK(r.err.find("source changed during indexing") != std::string::npos);
-    }
+    std::string intermediate_header =
+        "int intermediate_header_symbol() { return 3; }\n/*";
+    intermediate_header.append(10 * 1024 * 1024, 'x');
+    intermediate_header += "*/\n";
+    write_file(p.header, intermediate_header);
+    write_file(p.source, "#include \"header.hpp\"\n"
+                         "int changed_main_symbol() { return 5; }\n");
+    std::atomic<bool> stop_restorer = false;
+    std::atomic<bool> restored = false;
+    std::thread restorer([&] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      if (stop_restorer.load(std::memory_order_relaxed)) {
+        return;
+      }
+      std::ofstream header(p.header);
+      header << initial_header;
+      restored.store(true, std::memory_order_relaxed);
+    });
+    r = run_cli({"index"}, p.cache, &log);
+    stop_restorer.store(true, std::memory_order_relaxed);
+    restorer.join();
+    REQUIRE(restored.load(std::memory_order_relaxed));
+    CHECK(r.rc == 1);
+    CHECK(r.err.find("source changed during indexing") != std::string::npos);
 
     {
       Storage db(p.cache + "/index.db");
       CHECK(db.index_identity().freshness == "stale");
       CHECK(db.find_symbols("intermediate_header_symbol", {}, 10).size() == 1);
-      CHECK(db.find_symbols("final_header_symbol", {}, 10).empty());
+      CHECK(db.find_symbols("initial_header_symbol", {}, 10).empty());
       const auto header = db.get_file(p.header);
       REQUIRE(header.has_value());
       CHECK_FALSE(header->indexed);
@@ -2099,9 +2115,9 @@ TEST_SUITE("clang") {
     REQUIRE(r.rc == 0);
     Storage db(p.cache + "/index.db");
     CHECK(db.index_identity().freshness == "current");
-    CHECK(db.find_symbols("initial_header_symbol", {}, 10).empty());
+    CHECK(db.find_symbols("initial_header_symbol", {}, 10).size() == 1);
     CHECK(db.find_symbols("intermediate_header_symbol", {}, 10).empty());
-    CHECK(db.find_symbols("final_header_symbol", {}, 10).size() == 1);
+    CHECK(db.find_symbols("changed_main_symbol", {}, 10).size() == 1);
   }
 
   TEST_CASE("index: two-TU pending flow — header counters, md5 skip, "

@@ -32,7 +32,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <fstream>
 #include <memory>
 #include <unordered_set>
 
@@ -65,21 +64,6 @@ std::optional<std::string> parsed_file_md5(clang::SourceManager &source_manager,
     return std::nullopt;
   }
   return cidx::md5_hex(buffer->getBufferStart(), buffer->getBufferSize());
-}
-
-void test_mutate_header_after_parse(const std::string &path) {
-  // Deterministic regression hook; inert unless explicitly configured by a
-  // test.
-  const auto target = cidx::get_env("CIDX_TEST_MUTATE_HEADER");
-  const auto content = cidx::get_env("CIDX_TEST_MUTATE_HEADER_CONTENT");
-  if (!target || !content ||
-      cidx::pathutil::abspath(*target) != cidx::pathutil::abspath(path)) {
-    return;
-  }
-  std::ofstream out(path, std::ios::binary | std::ios::trunc);
-  if (out) {
-    out << *content;
-  }
 }
 
 struct EngineState {
@@ -255,14 +239,14 @@ private:
       const auto existing = db_.get_file(abs);
       const bool covered_by_current_config =
           header_covered_by_current_config(existing);
-      if (db_.is_file_indexed(abs, std::nullopt, current_md5) &&
+      const std::optional<std::string> parsed_md5 =
+          parsed_file_md5(context_.getSourceManager(), abs);
+      if (current_md5 && parsed_md5 && current_md5 == parsed_md5 &&
+          db_.is_file_indexed(abs, std::nullopt, current_md5) &&
           covered_by_current_config) {
         ++counts.already;
         continue;
       }
-      const std::optional<std::string> parsed_md5 =
-          parsed_file_md5(context_.getSourceManager(), abs);
-      test_mutate_header_after_parse(abs);
       const std::optional<double> mtime = file_mtime(abs);
       const int64_t hid = db_.add_file_path(
           abs, mtime, parsed_md5, state_.rec->compile_options, state_.rec->driver);
