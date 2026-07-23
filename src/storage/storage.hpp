@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 35;
+constexpr int kSchemaVersion = 36;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -264,7 +264,19 @@ public:
   // '::'-segment fuzzy match on qual_name, ordered LENGTH(qual_name) first.
   std::vector<Symbol>
   search_symbols(const std::string &pattern,
-                 const std::optional<std::string> &kind = std::nullopt);
+                 const std::optional<std::string> &kind = std::nullopt,
+                 const std::optional<int64_t> &config_id = std::nullopt);
+  ConfiguredSymbols
+  symbols_for_config(int64_t file_id, const std::vector<int64_t> &config_ids,
+                     FactCoverage coverage = FactCoverage::one);
+  ConfiguredFactIds
+  fact_ids_for_config(int64_t file_id, const std::string &fact_kind,
+                      const std::vector<int64_t> &config_ids,
+                      FactCoverage coverage = FactCoverage::one);
+  void associate_facts_for_file(int64_t file_id, int64_t config_id,
+                                const std::vector<int64_t> &symbol_ids,
+                                const std::vector<int64_t> &edge_ids,
+                                const std::vector<int64_t> &definition_ids);
   // Location scope matches definition OR declaration site (§3.5).
   std::vector<Symbol>
   list_symbols(const std::optional<int64_t> &component_id = std::nullopt,

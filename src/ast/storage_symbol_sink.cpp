@@ -1,5 +1,7 @@
 #include "ast/storage_symbol_sink.hpp"
 
+#include <algorithm>
+
 #include "ast/kind_map.hpp"
 
 #include "storage/storage.hpp"
@@ -12,9 +14,16 @@ void StorageSymbolSink::set_current_file_id(int64_t file_id) {
   current_file_id_ = file_id;
 }
 
-void StorageSymbolSink::reset_counters() { stored_ = 0; }
+void StorageSymbolSink::reset_counters() {
+  stored_ = 0;
+  symbol_ids_.clear();
+}
 
 int StorageSymbolSink::stored_count() const { return stored_; }
+
+const std::vector<int64_t> &StorageSymbolSink::symbol_ids() const {
+  return symbol_ids_;
+}
 
 void StorageSymbolSink::emit(const SymbolRecord &s) {
   const char *kind_name = cidx_kind_name_from_int(s.kind);
@@ -49,7 +58,10 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
   sym.const_value = s.const_value;
   sym.resolved = s.resolved;
   const std::optional<cidx::Symbol> existing = db_.lookup_symbol(sym.usr);
-  db_.add_symbol(sym);
+  const int64_t symbol_id = db_.add_symbol(sym);
+  if (std::ranges::find(symbol_ids_, symbol_id) == symbol_ids_.end()) {
+    symbol_ids_.push_back(symbol_id);
+  }
   if (!(existing && existing->resolved)) {
     ++stored_; // AstIndexer::store: true = counted as "stored"
   }

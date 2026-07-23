@@ -58,6 +58,11 @@ struct Options {
   // Restrict the STRUCTURAL walk to main-file declarations; header entities
   // still appear as shallow nodes when referenced (references/definition/...).
   bool main_only = false;
+  // The normalized descriptor identity selected from index.db.  Astgraph
+  // records it in the artifact so downstream analysis can prove that it used
+  // the same configuration as indexing and diff.
+  std::optional<std::string> descriptor_hash;
+  std::optional<std::string> resource_dir;
 };
 
 struct DumpStats {

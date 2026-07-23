@@ -16,13 +16,24 @@
 #include <string_view>
 #include <utility>
 
-#include "toolchain/toolchain.hpp"
 #include "util/env.hpp"
 #include "util/errors.hpp"
 #include "util/pathutil.hpp"
 
 namespace cidx {
 namespace {
+
+bool arguments_select_cxx(const std::vector<std::string> &arguments) {
+  if (std::ranges::find(arguments, "--driver-mode=g++") != arguments.end() ||
+      std::ranges::find(arguments, "-xc++") != arguments.end()) {
+    return true;
+  }
+  const auto x = std::ranges::find(arguments, "-x");
+  if (x != arguments.end() && std::next(x) != arguments.end()) {
+    return std::next(x)->starts_with("c++");
+  }
+  return false;
+}
 
 // Frozen drop sets (compiledb.py, G10). Rationale baked into the Python
 // comments: -M* writes build artifacts into dirs that don't exist outside a
@@ -593,7 +604,7 @@ TranslationUnitConfig resolve_translation_unit_config(
     config.diagnostics_policy = "error-limit=0";
   }
   if (!config.language) {
-    config.language = Toolchain::is_cpp("", arguments) ? "c++" : "c";
+    config.language = arguments_select_cxx(arguments) ? "c++" : "c";
   }
   return config;
 }

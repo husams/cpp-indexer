@@ -218,21 +218,26 @@ int main(int argc, char **argv) {
           "); run `cidx import <compile_commands.json>` for its project");
     }
 
-    // Resolve through the shared descriptor adapter used by indexing, include
-    // extraction, and diff; the returned argument order is replayable.
-    const std::vector<std::string> stored = cidx::CompileDb::resolve_options(
-        cidx::CompileDb::sanitize(rec->compile_options
-                                      ? *rec->compile_options
-                                      : std::vector<std::string>{}),
-        [&db](const std::string &n) { return db.get_alias(n); });
-    const cidx::TranslationUnitConfig descriptor =
-        cidx::resolve_translation_unit_config(
-            rec->driver, std::string("."), stored, std::nullopt, std::nullopt,
-            std::string("error-limit=0"));
+    const std::vector<cidx::TranslationUnitConfig> descriptors =
+        db.translation_unit_configs_for_file(rec->id);
+    if (descriptors.size() != 1U) {
+      throw cidx::CidxError(
+          source + " has " + std::to_string(descriptors.size()) +
+          " registered translation-unit descriptors; astgraph requires one");
+    }
+    const cidx::TranslationUnitConfig &descriptor = descriptors.front();
+    if (descriptor.state != cidx::TranslationUnitConfigState::registered ||
+        descriptor.association_state !=
+            cidx::TranslationUnitConfigState::registered) {
+      throw cidx::CidxError(
+          source + " has a non-registered translation-unit descriptor");
+    }
     const std::vector<std::string> &opts = descriptor.arguments;
 
     cidx::astgraph::Options dump_opts;
     dump_opts.main_only = cli.main_only;
+    dump_opts.descriptor_hash = descriptor.descriptor_hash;
+    dump_opts.resource_dir = descriptor.resource_dir;
     const std::string default_name =
         cidx::pathutil::basename(source) + "." +
         cidx::astgraph::artifact_key(source, opts, descriptor.driver, dump_opts)

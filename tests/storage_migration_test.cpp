@@ -148,6 +148,7 @@ void check_migrated(const std::string &db_path) {
                                          "idx_symbol_type_type",
                                          "idx_translation_unit_config_hash",
                                          "idx_file_config_config",
+                                         "idx_fact_applicability_config",
                                          "idx_include_config_digest",
                                          "idx_include_edge_dst",
                                          "idx_include_edge_config",

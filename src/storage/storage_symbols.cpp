@@ -259,7 +259,8 @@ Storage::lookup_symbols_by_qual_name(const std::string &qual_name,
 
 std::vector<Symbol>
 Storage::search_symbols(const std::string &pattern,
-                        const std::optional<std::string> &kind) {
+                        const std::optional<std::string> &kind,
+                        const std::optional<int64_t> &config_id) {
   // '%seg%seg%' on qual_name: each '::'-separated segment must appear, in
   // order, as a substring. Only % and _ are escaped (storage.py parity).
   std::vector<std::string> segs;
@@ -294,6 +295,12 @@ Storage::search_symbols(const std::string &pattern,
   if (kind) {
     sql += " AND kind = ?";
     args.emplace_back(symbol_kind_id(*kind)); // stored as int (v16)
+  }
+  if (config_id) {
+    sql += " AND EXISTS (SELECT 1 FROM fact_applicability fa WHERE "
+           "fa.fact_kind = 'symbol' AND fa.fact_id = symbol.id AND "
+           "fa.config_id = ?)";
+    args.emplace_back(*config_id);
   }
   sql += " ORDER BY LENGTH(qual_name), qual_name";
   auto st = db_.prepare(sql);

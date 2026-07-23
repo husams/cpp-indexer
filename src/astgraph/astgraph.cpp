@@ -275,7 +275,8 @@ class Dumper {
 public:
   Dumper(const std::string &path, clang::ASTContext &ctx, const Options &opts)
       : db_(path), ctx_(ctx), sm_(ctx.getSourceManager()),
-        main_only_(opts.main_only) {
+        main_only_(opts.main_only), descriptor_hash_(opts.descriptor_hash),
+        options_(opts) {
     db_.exec(kSchemaSql);
     db_.exec("BEGIN");
   }
@@ -302,8 +303,8 @@ public:
     put_meta("options_sha1",
              sha1_flags_hash(AstCacheKey{
                  .abspath = source, .flags = args, .driver = driver}));
-    put_meta("artifact_key", artifact_key(source, args, driver,
-                                          Options{.main_only = main_only_}));
+    put_meta("descriptor_hash", descriptor_hash_.value_or(""));
+    put_meta("artifact_key", artifact_key(source, args, driver, options_));
   }
 
   void seed_relation_kinds() {
@@ -691,6 +692,8 @@ private:
   clang::ASTContext &ctx_;
   const clang::SourceManager &sm_;
   bool main_only_ = false;
+  std::optional<std::string> descriptor_hash_;
+  Options options_;
   DumpStats stats_;
 
   int64_t next_node_ = 1;
@@ -902,11 +905,18 @@ DumpStats dump_tu(const std::string &source_path,
 
     clang::tooling::FixedCompilationDatabase cdb(".", full);
     clang::tooling::ClangTool tool(cdb, {source_path});
+    const std::string resource_dir = opts.resource_dir.value_or(
 #ifdef CIDX_CLANG_RESOURCE_DIR
-    tool.appendArgumentsAdjuster(clang::tooling::getInsertArgumentAdjuster(
-        {"-resource-dir", CIDX_CLANG_RESOURCE_DIR},
-        clang::tooling::ArgumentInsertPosition::BEGIN));
+        std::string(CIDX_CLANG_RESOURCE_DIR)
+#else
+        std::string{}
 #endif
+    );
+    if (!resource_dir.empty()) {
+      tool.appendArgumentsAdjuster(clang::tooling::getInsertArgumentAdjuster(
+          {"-resource-dir", resource_dir},
+          clang::tooling::ArgumentInsertPosition::BEGIN));
+    }
     AstGraphActionFactory factory(temp_path, opts, source_path, args, driver,
                                   &stats, &err, &handled);
     tool.run(&factory);

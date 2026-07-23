@@ -129,10 +129,14 @@ public:
 
   void run() {
     state_.out->stored = run_symbol_pass(state_.path, state_.rec->id);
+    const std::vector<int64_t> main_symbol_ids = symbols_.symbol_ids();
     const std::vector<PendingHeader> plan = plan_owned_headers();
     run_header_passes(plan);
     // edges(main) LAST (commands.cpp ordering).
     run_edge_pass(state_.path, state_.rec->id);
+    db_.associate_facts_for_file(state_.rec->id, state_.normalized_config_id,
+                                 main_symbol_ids, edges_.edge_ids(),
+                                 edges_.definition_ids());
     // v31 include tier LAST of all: an include_edge references file(id), so
     // every owned header must already have its row from the header two-pass.
     if (state_.pp != nullptr) {
@@ -149,6 +153,7 @@ private:
     int64_t file_id;
     std::optional<double> mtime;
     int stored = 0;
+    std::vector<int64_t> symbol_ids;
   };
 
   int run_symbol_pass(const std::string &file, int64_t file_id) {
@@ -167,6 +172,7 @@ private:
     }
     edges_.delete_edges_for_file(file_id);
     edges_.delete_definitions_for_file(file_id);
+    edges_.reset_fact_ids();
     auto txn = db_.transaction();
     DeclarationEdgeVisitor decls(context_, edges_, file, file_id);
     decls.TraverseDecl(tu_);
@@ -238,9 +244,13 @@ private:
     cidx::HeaderStats &counts = state_.out->headers;
     for (PendingHeader &ph : plan) {
       ph.stored = run_symbol_pass(ph.path, ph.file_id);
+      ph.symbol_ids = symbols_.symbol_ids();
     }
     for (const PendingHeader &ph : plan) {
       run_edge_pass(ph.path, ph.file_id);
+      db_.associate_facts_for_file(ph.file_id, state_.normalized_config_id,
+                                   ph.symbol_ids, edges_.edge_ids(),
+                                   edges_.definition_ids());
       db_.mark_file_indexed(ph.file_id, ph.mtime);
       ++counts.indexed;
       counts.symbols += ph.stored;

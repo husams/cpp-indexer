@@ -7,6 +7,7 @@
 #include "ast/symbol_emitter.hpp"
 
 #include <cstdint>
+#include <vector>
 
 namespace cidx {
 class Storage;
@@ -24,6 +25,7 @@ public:
   // counts as skipped (AstIndexer::store semantics).
   void reset_counters();
   [[nodiscard]] int stored_count() const;
+  [[nodiscard]] const std::vector<int64_t> &symbol_ids() const;
 
   void emit(const SymbolRecord &symbol) override;
 
@@ -31,6 +33,7 @@ private:
   cidx::Storage &db_;
   int64_t current_file_id_ = -1;
   int stored_ = 0;
+  std::vector<int64_t> symbol_ids_;
 };
 
 } // namespace cidx::ast

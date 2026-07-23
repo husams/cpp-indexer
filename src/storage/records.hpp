@@ -330,6 +330,21 @@ struct ConfiguredIncludeEdges {
   bool coverage_complete = false;
 };
 
+enum class FactCoverage : std::uint8_t { one, all, invariant };
+
+// Configuration-qualified semantic facts.  `coverage_complete=false` is an
+// explicit unknown result: at least one requested configuration has not
+// produced a usable fact generation for this file.
+struct ConfiguredSymbols {
+  std::vector<Symbol> symbols;
+  bool coverage_complete = false;
+};
+
+struct ConfiguredFactIds {
+  std::vector<int64_t> ids;
+  bool coverage_complete = false;
+};
+
 // include_directive_kind ids (seeded in the table; mirrored in storage.py)
 inline constexpr int64_t kIncludeDirectiveInclude = 1;
 inline constexpr int64_t kIncludeDirectiveIncludeNext = 2;

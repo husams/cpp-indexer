@@ -2,6 +2,7 @@ import sqlite3
 
 from indexer.storage import (
     Storage,
+    Symbol,
     FileConfigApplicability,
     TranslationUnitConfig,
     canonical_translation_unit_config_json,
@@ -116,7 +117,7 @@ def test_v34_include_row_migrates_to_shared_config_identity(tmp_path):
     migrated = Storage(str(path))
     assert migrated._conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()[0] == "35"
+    ).fetchone()[0] == "36"
     assert migrated._conn.execute(
         "SELECT COUNT(*) FROM translation_unit_config"
     ).fetchone()[0] == 1
@@ -159,3 +160,30 @@ def test_header_can_be_applicable_under_multiple_typed_states():
     invariant = db.invariant_include_edges(header, [first, second])
     assert invariant.coverage_complete is True
     assert invariant.edges == []
+
+
+def test_configuration_qualified_symbol_reads_have_all_invariant_unknown_views():
+    db = Storage(":memory:")
+    component = db.add_component("config", "/repo/config")
+    directory = db.add_directory(component, "")
+    header = db.add_file(directory, "conditional.hpp")
+    first = db.add_translation_unit_config(TranslationUnitConfig(arguments=["a.cpp"]))
+    second = db.add_translation_unit_config(TranslationUnitConfig(arguments=["b.cpp"]))
+    db.add_file_config(FileConfigApplicability(header, first))
+    db.add_file_config(FileConfigApplicability(header, second))
+    one = db.add_symbol(Symbol("usr-a", "only_a", "function", qual_name="only_a"))
+    two = db.add_symbol(Symbol("usr-b", "only_b", "function", qual_name="only_b"))
+    db._conn.executemany(
+        "INSERT INTO fact_applicability(fact_kind, fact_id, file_id, config_id) "
+        "VALUES ('symbol', ?, ?, ?)",
+        [(one, header, first), (two, header, second)],
+    )
+    db._conn.commit()
+    assert [s.usr for s in db.symbols_for_config(header, [first], "one").symbols] == [
+        "usr-a"
+    ]
+    assert {s.usr for s in db.symbols_for_config(header, [first, second], "all").symbols} == {
+        "usr-a", "usr-b"
+    }
+    assert db.symbols_for_config(header, [first, second], "invariant").symbols == []
+    assert not db.symbols_for_config(header, [first, 999], "one").coverage_complete

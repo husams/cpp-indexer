@@ -649,6 +649,14 @@ void Storage::migrate() {
       changed = true;
     }
   }
+  if (!changed) {
+    auto st =
+        db_.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
+    if (st.step() && !st.col_text(0).empty() &&
+        std::stoi(st.col_text(0)) < kSchemaVersion) {
+      changed = true;
+    }
+  }
   if (changed) {
     auto st =
         db_.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'");

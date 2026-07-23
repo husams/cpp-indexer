@@ -566,7 +566,8 @@ CREATE INDEX IF NOT EXISTS idx_include_config_digest ON include_config(digest);
 -- dst_file_id is NULL for system/unowned/unresolved targets; dst_path is the
 -- path AS OPENED (never symlink-resolved), or the written spelling when the
 -- directive did not resolve.
--- v35 adds a shared normalized descriptor and per-file applicability rows.
+-- v35 adds a shared normalized descriptor and per-file applicability rows;
+-- v36 adds configuration-qualified semantic fact generations.
 CREATE TABLE IF NOT EXISTS translation_unit_config (
     id                    INTEGER PRIMARY KEY,
     descriptor_hash       TEXT NOT NULL UNIQUE,
@@ -615,6 +616,22 @@ CREATE TABLE IF NOT EXISTS file_config (
     PRIMARY KEY (file_id, config_id, role)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_file_config_config ON file_config(config_id);
+
+-- v36: every extracted or derived semantic fact is qualified by the file and
+-- normalized configuration generation that produced it.  fact_kind keeps the
+-- relation polymorphic while fact_id remains the native row id; the source
+-- file and configuration FKs make replacement/cleanup precise.
+CREATE TABLE IF NOT EXISTS fact_applicability (
+    fact_kind  TEXT NOT NULL,
+    fact_id    INTEGER NOT NULL,
+    file_id    INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    config_id  INTEGER NOT NULL REFERENCES translation_unit_config(id)
+               ON DELETE CASCADE,
+    generation INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (fact_kind, fact_id, file_id, config_id)
+);
+CREATE INDEX IF NOT EXISTS idx_fact_applicability_config
+    ON fact_applicability(file_id, config_id, fact_kind, fact_id);
 
 CREATE TABLE IF NOT EXISTS include_edge (
     id           INTEGER PRIMARY KEY,
@@ -676,7 +693,7 @@ CREATE TABLE IF NOT EXISTS include_macro_use (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_include_macro_use_path ON include_macro_use(def_path);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '35');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '36');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest

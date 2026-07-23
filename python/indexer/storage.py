@@ -40,7 +40,7 @@ from indexer.generated_catalog import (
     SYMBOL_KIND_IDS as _GENERATED_SYMBOL_KIND_IDS,
 )
 
-SCHEMA_VERSION = 35
+SCHEMA_VERSION = 36
 
 
 def _catalog_hash(conn: sqlite3.Connection) -> Optional[str]:
@@ -672,6 +672,18 @@ CREATE TABLE IF NOT EXISTS file_config (
     PRIMARY KEY (file_id, config_id, role)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_file_config_config ON file_config(config_id);
+
+CREATE TABLE IF NOT EXISTS fact_applicability (
+    fact_kind TEXT NOT NULL,
+    fact_id INTEGER NOT NULL,
+    file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    config_id INTEGER NOT NULL REFERENCES translation_unit_config(id)
+             ON DELETE CASCADE,
+    generation INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (fact_kind, fact_id, file_id, config_id)
+);
+CREATE INDEX IF NOT EXISTS idx_fact_applicability_config
+    ON fact_applicability(file_id, config_id, fact_kind, fact_id);
 
 CREATE TABLE IF NOT EXISTS include_edge (
     id           INTEGER PRIMARY KEY,
@@ -1530,6 +1542,24 @@ class IncludeEdge:
 @dataclass
 class ConfiguredIncludeEdges:
     edges: list[IncludeEdge] = field(default_factory=list)
+    coverage_complete: bool = False
+
+
+class FactCoverage:
+    ONE = "one"
+    ALL = "all"
+    INVARIANT = "invariant"
+
+
+@dataclass
+class ConfiguredSymbols:
+    symbols: list["Symbol"] = field(default_factory=list)
+    coverage_complete: bool = False
+
+
+@dataclass
+class ConfiguredFactIds:
+    ids: list[int] = field(default_factory=list)
     coverage_complete: bool = False
 
 
@@ -3890,7 +3920,10 @@ class Storage:
         sql += " ORDER BY usr"
         return [_row_to(Symbol, r) for r in self._conn.execute(sql, args)]
 
-    def search_symbols(self, pattern: str, kind: Optional[str] = None) -> list[Symbol]:
+    def search_symbols(
+        self, pattern: str, kind: Optional[str] = None,
+        config_id: Optional[int] = None,
+    ) -> list[Symbol]:
         """Fuzzy match against the qualified name (case-insensitive).
 
         Each '::'-separated segment of `pattern` must appear, in order, as a
@@ -3910,8 +3943,101 @@ class Storage:
         if kind is not None:
             sql += " AND kind = ?"
             args.append(SYMBOL_KIND_IDS.get(kind, -1))
+        if config_id is not None:
+            sql += (
+                " AND EXISTS (SELECT 1 FROM fact_applicability fa WHERE "
+                "fa.fact_kind = 'symbol' AND fa.fact_id = symbol.id "
+                "AND fa.config_id = ?)"
+            )
+            args.append(config_id)
         sql += " ORDER BY LENGTH(qual_name), qual_name"
         return [_row_to(Symbol, r) for r in self._conn.execute(sql, args)]
+
+    def symbols_for_config(
+        self, file_id: int, config_ids: Sequence[int],
+        coverage: str = FactCoverage.ONE,
+    ) -> ConfiguredSymbols:
+        """Read configuration-qualified symbols with explicit unknown coverage."""
+        if not config_ids:
+            return ConfiguredSymbols()
+        for config_id in config_ids:
+            covered = self._conn.execute(
+                "SELECT 1 FROM translation_unit_config c JOIN file_config f "
+                "ON f.config_id = c.id WHERE f.file_id = ? AND f.config_id = ? "
+                "AND f.state = 'registered' AND c.state = 'registered' LIMIT 1",
+                (file_id, config_id),
+            ).fetchone()
+            if covered is None:
+                return ConfiguredSymbols()
+
+        def read(config_id: int) -> dict[int, Symbol]:
+            rows = self._conn.execute(
+                "SELECT s.* FROM symbol s JOIN fact_applicability fa ON "
+                "fa.fact_kind = 'symbol' AND fa.fact_id = s.id "
+                "AND fa.file_id = ? AND fa.config_id = ? ORDER BY s.usr",
+                (file_id, config_id),
+            ).fetchall()
+            return {row["id"]: _row_to(Symbol, row) for row in rows}
+
+        selected: dict[int, Symbol] = {}
+        for index, config_id in enumerate(config_ids):
+            current = read(config_id)
+            if coverage == FactCoverage.ONE:
+                selected = current
+                break
+            if index == 0:
+                selected = current
+            elif coverage == FactCoverage.ALL:
+                selected.update(current)
+            elif coverage == FactCoverage.INVARIANT:
+                selected = {
+                    symbol_id: symbol
+                    for symbol_id, symbol in selected.items()
+                    if symbol_id in current
+                }
+            else:
+                raise ValueError(f"unknown fact coverage {coverage!r}")
+        return ConfiguredSymbols(
+            symbols=[selected[key] for key in sorted(selected)],
+            coverage_complete=True,
+        )
+
+    def fact_ids_for_config(
+        self, file_id: int, fact_kind: str, config_ids: Sequence[int],
+        coverage: str = FactCoverage.ONE,
+    ) -> ConfiguredFactIds:
+        if not config_ids:
+            return ConfiguredFactIds()
+        selected: set[int] = set()
+        for index, config_id in enumerate(config_ids):
+            covered = self._conn.execute(
+                "SELECT 1 FROM translation_unit_config c JOIN file_config f "
+                "ON f.config_id = c.id WHERE f.file_id = ? AND f.config_id = ? "
+                "AND f.state = 'registered' AND c.state = 'registered' LIMIT 1",
+                (file_id, config_id),
+            ).fetchone()
+            if covered is None:
+                return ConfiguredFactIds()
+            current = {
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT fact_id FROM fact_applicability WHERE fact_kind = ? "
+                    "AND file_id = ? AND config_id = ? ORDER BY fact_id",
+                    (fact_kind, file_id, config_id),
+                )
+            }
+            if coverage == FactCoverage.ONE:
+                selected = current
+                break
+            if index == 0:
+                selected = current
+            elif coverage == FactCoverage.ALL:
+                selected |= current
+            elif coverage == FactCoverage.INVARIANT:
+                selected &= current
+            else:
+                raise ValueError(f"unknown fact coverage {coverage!r}")
+        return ConfiguredFactIds(sorted(selected), True)
 
     def list_symbols(
         self,
