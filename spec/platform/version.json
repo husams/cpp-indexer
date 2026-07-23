@@ -17,7 +17,8 @@
       "src/query/plan.hpp",
       "src/query/plan.cpp",
       "python/indexer/queryplan.py",
-      "docs/query-plan.md"
+      "docs/query-plan.md",
+      "spec/contracts/golden/catalog.json"
     ]
   },
   "artifact": {

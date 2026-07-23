@@ -6,9 +6,9 @@
 - the Python storage/read-query SDK in `python/`, packaged as the
   pip-installable `cidx-indexer` project.
 
-The previous Rust, Neo4j, IndraDB, daemon, and libclang C API implementations
-are retired. Python's libclang extractor remains only as a deprecation-boundary
-adapter; new extraction behavior belongs in C++.
+The previous Rust, Neo4j, IndraDB, daemon, and C++ libclang C API
+implementations are retired. Python's libclang extractor remains only as a
+deprecation-boundary adapter; new extraction behavior belongs in C++.
 
 ## Build the C++ tool
 

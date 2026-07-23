@@ -9,7 +9,7 @@ The version families are deliberately independent:
 
 | Family | Current | Meaning | Compatibility rule |
 |---|---:|---|---|
-| Product | `0.53.0` | C++ binary and Python distribution release | Must match across generated outputs; prerelease channel/tag is machine-readable |
+| Product | `0.53.0` | C++ binary and Python distribution release | The published identity is `version` plus `-tag` for prereleases and must match across generated outputs |
 | Database | schema `34` | SQLite tables and migrations | Writers migrate v2–v34; readers refuse outside the declared window; future schemas are never downgraded |
 | Catalog | `1` + generated hash | Names, numeric IDs, fields, and relation descriptors | A changed hash requires a catalog version/compatibility entry; HSE-59 owns generation |
 | Artifact | `1` | Persisted JSON/TSV/result artifact shapes | Readers accept only the declared range and report an actionable mismatch |
@@ -24,11 +24,13 @@ product version.
 
 `uv run --project python python scripts/check_release_contract.py` verifies:
 
-- generated C++/Python outputs are current;
+- generated C++/Python outputs are current and carry the same full product identity;
+- compatibility windows are ordered and contain their current family version;
 - package metadata reads the generated Python version;
 - C++ and Python storage constants agree with the source contract;
 - the committed `index.db` carries the current database schema;
-- every compatibility-manifest schema and golden vector exists;
+- every compatibility-manifest golden validates against its schema;
+- declared C++/Python catalog outputs agree and the catalog golden is hashed;
 - every dual-executor contract names both implementations.
 
 The same check runs in `.github/workflows/contract-check.yml`. A release job

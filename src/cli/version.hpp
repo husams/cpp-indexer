@@ -6,6 +6,7 @@
 namespace cidx::version {
 
 inline constexpr std::string_view kProductVersion = "0.53.0";
+inline constexpr std::string_view kBaseProductVersion = "0.53.0";
 inline constexpr std::string_view kFullProductVersion = "0.53.0";
 inline constexpr std::string_view kReleaseChannel = "stable";
 inline constexpr std::string_view kPrerelease = {};
@@ -16,7 +17,8 @@ inline constexpr int kDatabaseReaderMin = 34;
 inline constexpr int kDatabaseReaderMax = 34;
 
 inline constexpr int kCatalogVersion = 1;
-inline constexpr std::string_view kCatalogHash = "sha256:e233c4da19a54e446b0e560c481d97097887c5f3c8b53be6fa6e6c50e0e998b6";
+inline constexpr std::string_view kCatalogHash =
+    "sha256:2103bdaca538520b9595a5c7cda167e9811da1da3f1b04971be9bb0bc8b950ec";
 inline constexpr int kArtifactVersion = 1;
 inline constexpr int kArtifactReaderMin = 1;
 inline constexpr int kArtifactReaderMax = 1;
