@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -675,6 +676,7 @@ public:
 
 private:
   friend class Transaction;
+  friend class ArtifactStore;
 
   void migrate();                       // column-presence detection, §4.1
   void migrate_symbol_kind_to_int();    // v15 -> v16: rebuild symbol, kind->int
@@ -693,6 +695,8 @@ private:
   // Set by migrate() on the v21->v22 transition; consumed by the constructor to
   // backfill entity_node from existing symbols (pure-DB, no re-index/resolve).
   bool needs_entity_node_backfill_ = false;
+  std::unordered_set<std::string> attached_artifact_names_;
+  std::optional<bool> artifact_query_only_before_attach_;
 };
 
 } // namespace cidx

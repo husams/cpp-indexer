@@ -23,6 +23,7 @@
 #include "storage/artifacts.hpp"
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
+#include "util/hashing.hpp"
 #include "util/logger.hpp"
 #include "util/pathutil.hpp"
 
@@ -257,27 +258,84 @@ int main(int argc, char **argv) {
     // the authoritative index remains untouched by the AST node/edge dump.
     cidx::ArtifactStore artifacts(
         db, std::filesystem::path(index_path).parent_path());
+    const auto component = db.component_for_path(source);
+    const std::string workspace_identity = [&]() {
+      if (!component) {
+        return std::string("workspace:unregistered");
+      }
+      if (!component->repository_id) {
+        return "component:" + component->name;
+      }
+      const auto repository =
+          db.get_repository_by_id(*component->repository_id);
+      if (!repository) {
+        return "component:" + component->name;
+      }
+      return repository->remote_url
+                 ? "repository:url:" + *repository->remote_url
+                 : "repository:name:" + repository->name;
+    }();
+    const std::string component_root =
+        component ? db.component_abs_base(*component)
+                  : std::filesystem::path(source).parent_path().string();
+    const std::string relative_tu =
+        std::filesystem::relative(source, component_root).generic_string();
+    std::string configuration_material;
+    for (const auto &option : opts) {
+      configuration_material += std::to_string(option.size()) + ":" + option;
+    }
+    configuration_material += "driver:" + rec->driver.value_or("") +
+                              ":main-only:" + (dump_opts.main_only ? "1" : "0");
+    const std::string separator(1, '\0');
+    const std::string configuration_identity =
+        cidx::sha1_hex(workspace_identity + separator + configuration_material);
+    const std::string tu_identity =
+        cidx::sha1_hex(workspace_identity + separator + relative_tu +
+                       separator + configuration_identity);
     cidx::ArtifactSpec artifact;
-    artifact.logical_id = "astgraph:" + source;
+    artifact.logical_id = "astgraph:" + workspace_identity + ":" + relative_tu;
     artifact.kind = "astgraph";
     artifact.artifact_schema =
         "cidx-astgraph/v" + std::to_string(cidx::astgraph::kSchemaVersion);
-    artifact.catalog_version = "astgraph-relations/v1";
+    artifact.catalog_version = cidx::catalog::kCatalogVersion;
+    artifact.catalog_hash = std::string(cidx::catalog::kCatalogHash);
     artifact.producer_version =
         std::string("cidx-astgraph ") + cidx::cli::kVersion;
     artifact.engine_version = std::string("cidx ") + cidx::cli::kVersion;
-    artifact.workspace_identity = index_path;
-    artifact.tu_identity =
-        cidx::astgraph::artifact_key(source, opts, rec->driver, dump_opts);
-    artifact.configuration_identity = artifact.tu_identity;
-    artifact.input_fact_set_identity = artifact.tu_identity;
-    artifact.attachment_name = "astgraph";
+    artifact.workspace_identity = workspace_identity;
+    artifact.tu_identity = tu_identity;
+    artifact.configuration_identity = configuration_identity;
+    artifact.input_fact_set_identity =
+        cidx::sha1_hex("facts:" + workspace_identity + ":" + tu_identity + ":" +
+                       std::string(cidx::catalog::kCatalogHash));
+    artifact.completeness = cidx::ArtifactCompleteness::complete;
+    artifact.truncation = cidx::ArtifactTruncation::none;
+    artifact.trust = cidx::ArtifactTrust::producer_verified;
+    artifact.evidence = "source";
+    artifact.attachment_name = "astgraph_" + tu_identity.substr(0, 16);
     artifact.exposed_relations = {"node", "edge", "symbol", "meta"};
     const cidx::ArtifactRecord published =
         artifacts.publish_existing(artifact, out_path);
     out_path = (std::filesystem::path(index_path).parent_path() /
                 published.relative_path)
                    .string();
+
+    // USRs are the stable cross-database identity. Preserve both successful
+    // and unresolved joins so readers can distinguish absence from a mapping
+    // that was never attempted.
+    cidx::SqliteDb sidecar(out_path, true);
+    auto sidecar_symbols =
+        sidecar.prepare("SELECT usr FROM symbol WHERE usr <> '' ORDER BY usr");
+    while (sidecar_symbols.step()) {
+      const std::string usr = sidecar_symbols.col_text(0);
+      const auto core_symbol = db.lookup_symbol(usr);
+      artifacts.record_identity_mapping(
+          published.spec.logical_id, usr, "usr", usr,
+          core_symbol ? "resolved" : "unresolved",
+          core_symbol ? std::optional<std::int64_t>(core_symbol->id)
+                      : std::nullopt,
+          core_symbol ? "" : "core symbol is not present in index");
+    }
 
     if (cli.analyze) {
       const std::string rule = cli.rule.value_or("");

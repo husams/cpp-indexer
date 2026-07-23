@@ -17,6 +17,7 @@ extern "C" {
 #include <fstream>
 #include <set>
 #include <sqlite3.h>
+#include <sys/file.h>
 #include <system_error>
 #include <unistd.h>
 #include <utility>
@@ -56,12 +57,12 @@ std::string to_string(ArtifactTruncation value) {
 
 std::string to_string(ArtifactTrust value) {
   switch (value) {
-  case ArtifactTrust::trusted:
-    return "trusted";
-  case ArtifactTrust::untrusted:
-    return "untrusted";
-  case ArtifactTrust::unknown:
-    return "unknown";
+  case ArtifactTrust::unverified:
+    return "unverified";
+  case ArtifactTrust::producer_verified:
+    return "producer-verified";
+  case ArtifactTrust::reader_verified:
+    return "reader-verified";
   }
   return "unknown";
 }
@@ -87,14 +88,40 @@ ArtifactTruncation truncation_from_string(std::string_view value) {
 }
 
 ArtifactTrust trust_from_string(std::string_view value) {
-  if (value == "trusted") {
-    return ArtifactTrust::trusted;
+  if (value == "producer-verified") {
+    return ArtifactTrust::producer_verified;
   }
-  if (value == "untrusted") {
-    return ArtifactTrust::untrusted;
+  if (value == "reader-verified") {
+    return ArtifactTrust::reader_verified;
   }
-  return ArtifactTrust::unknown;
+  return ArtifactTrust::unverified;
 }
+
+class ArtifactPublicationLock {
+public:
+  explicit ArtifactPublicationLock(const std::filesystem::path &root) {
+    std::filesystem::create_directories(root);
+    fd_ = ::open((root / ".artifact-publication.lock").c_str(),
+                 O_CREAT | O_RDWR, 0600);
+    if (fd_ < 0 || ::flock(fd_, LOCK_EX) != 0) {
+      if (fd_ >= 0) {
+        (void)::close(fd_);
+      }
+      throw StorageError("cannot acquire artifact publication lock");
+    }
+  }
+  ArtifactPublicationLock(const ArtifactPublicationLock &) = delete;
+  ArtifactPublicationLock &operator=(const ArtifactPublicationLock &) = delete;
+  ~ArtifactPublicationLock() {
+    if (fd_ >= 0) {
+      (void)::flock(fd_, LOCK_UN);
+      (void)::close(fd_);
+    }
+  }
+
+private:
+  int fd_ = -1;
+};
 
 bool valid_attachment_name(std::string_view value) {
   if (value.empty()) {
@@ -218,7 +245,8 @@ void write_envelope(SqliteDb &sidecar, const ArtifactSpec &spec) {
   insert("logical_id", spec.logical_id);
   insert("kind", spec.kind);
   insert("artifact_schema", spec.artifact_schema);
-  insert("catalog_version", spec.catalog_version);
+  insert("catalog_version", std::to_string(spec.catalog_version));
+  insert("catalog_hash", spec.catalog_hash);
   insert("producer_version", spec.producer_version);
   insert("engine_version", spec.engine_version);
   insert("workspace_identity", spec.workspace_identity);
@@ -228,6 +256,7 @@ void write_envelope(SqliteDb &sidecar, const ArtifactSpec &spec) {
   insert("completeness", to_string(spec.completeness));
   insert("truncation", to_string(spec.truncation));
   insert("trust", to_string(spec.trust));
+  insert("evidence", spec.evidence);
   insert("attachment_name", spec.attachment_name);
   insert("exposed_relations", relation_list(spec.exposed_relations));
 }
@@ -283,24 +312,26 @@ ArtifactRecord ArtifactStore::read_record(SqliteStmt &statement) const {
   record.spec.logical_id = statement.col_text(1);
   record.spec.kind = statement.col_text(2);
   record.spec.artifact_schema = statement.col_text(3);
-  record.spec.catalog_version = statement.col_text(4);
-  record.spec.producer_version = statement.col_text(5);
-  record.spec.engine_version = statement.col_text(6);
-  record.spec.workspace_identity = statement.col_text(7);
-  record.spec.tu_identity = statement.col_text(8);
-  record.spec.configuration_identity = statement.col_text(9);
-  record.spec.input_fact_set_identity = statement.col_text(10);
-  record.spec.completeness = completeness_from_string(statement.col_text(11));
-  record.spec.truncation = truncation_from_string(statement.col_text(12));
-  record.spec.trust = trust_from_string(statement.col_text(13));
-  record.spec.attachment_name = statement.col_text(14);
-  record.spec.retention_policy = statement.col_text(15);
-  record.relative_path = statement.col_text(16);
-  record.content_hash = statement.col_text(17);
-  record.byte_size = statement.col_int64(18);
-  record.state = statement.col_text(19);
-  record.created_at = statement.col_text(20);
-  record.published_at = statement.col_text(21);
+  record.spec.catalog_version = statement.col_int64(4);
+  record.spec.catalog_hash = statement.col_text(5);
+  record.spec.producer_version = statement.col_text(6);
+  record.spec.engine_version = statement.col_text(7);
+  record.spec.workspace_identity = statement.col_text(8);
+  record.spec.tu_identity = statement.col_text(9);
+  record.spec.configuration_identity = statement.col_text(10);
+  record.spec.input_fact_set_identity = statement.col_text(11);
+  record.spec.completeness = completeness_from_string(statement.col_text(12));
+  record.spec.truncation = truncation_from_string(statement.col_text(13));
+  record.spec.trust = trust_from_string(statement.col_text(14));
+  record.spec.evidence = statement.col_text(15);
+  record.spec.attachment_name = statement.col_text(16);
+  record.spec.retention_policy = statement.col_text(17);
+  record.relative_path = statement.col_text(18);
+  record.content_hash = statement.col_text(19);
+  record.byte_size = statement.col_int64(20);
+  record.state = statement.col_text(21);
+  record.created_at = statement.col_text(22);
+  record.published_at = statement.col_text(23);
 
   auto relations = storage_.raw_db().prepare(
       "SELECT relation_name FROM artifact_relation WHERE artifact_id = ? "
@@ -316,9 +347,11 @@ std::optional<ArtifactRecord>
 ArtifactStore::current(std::string_view logical_id) const {
   auto statement = storage_.raw_db().prepare(
       "SELECT id, logical_id, kind, artifact_schema, catalog_version, "
-      "producer_version, engine_version, workspace_identity, tu_identity, "
+      "catalog_hash, producer_version, engine_version, workspace_identity, "
+      "tu_identity, "
       "configuration_identity, input_fact_set_identity, completeness, "
-      "truncation, trust, attachment_name, retention_policy, relative_path, "
+      "truncation, trust, evidence, attachment_name, retention_policy, "
+      "relative_path, "
       "content_hash, byte_size, state, created_at, published_at FROM artifact "
       "WHERE logical_id = ? AND state = 'current' ORDER BY id DESC LIMIT 1");
   statement.bind(1, logical_id);
@@ -364,7 +397,8 @@ ArtifactStore::validate_record(const ArtifactRecord &record) const {
         envelope_value(sidecar, "artifact_schema") !=
             record.spec.artifact_schema ||
         envelope_value(sidecar, "catalog_version") !=
-            record.spec.catalog_version ||
+            std::to_string(record.spec.catalog_version) ||
+        envelope_value(sidecar, "catalog_hash") != record.spec.catalog_hash ||
         envelope_value(sidecar, "producer_version") !=
             record.spec.producer_version ||
         envelope_value(sidecar, "engine_version") !=
@@ -381,6 +415,7 @@ ArtifactStore::validate_record(const ArtifactRecord &record) const {
         envelope_value(sidecar, "truncation") !=
             to_string(record.spec.truncation) ||
         envelope_value(sidecar, "trust") != to_string(record.spec.trust) ||
+        envelope_value(sidecar, "evidence") != record.spec.evidence ||
         envelope_value(sidecar, "attachment_name") !=
             record.spec.attachment_name ||
         envelope_value(sidecar, "exposed_relations") !=
@@ -400,20 +435,31 @@ ArtifactStore::validate_record(const ArtifactRecord &record) const {
     add_diagnostic(validation, "truncated",
                    "artifact is truncated and cannot answer a complete query");
   }
-  if (record.spec.trust != ArtifactTrust::trusted) {
+  if (record.spec.trust == ArtifactTrust::unverified) {
     add_diagnostic(validation, "untrusted",
                    "artifact trust policy does not permit attachment");
   }
   if (record.spec.artifact_schema.empty() ||
       record.spec.artifact_schema == "unknown" ||
-      record.spec.catalog_version.empty() ||
-      record.spec.catalog_version == "unknown" ||
+      record.spec.catalog_hash.empty() ||
       record.spec.producer_version.empty() ||
       record.spec.producer_version == "unknown" ||
       record.spec.engine_version.empty() ||
       record.spec.engine_version == "unknown") {
     add_diagnostic(validation, "incompatible",
                    "artifact compatibility fields are incomplete");
+  }
+  if (record.spec.catalog_version != catalog::kCatalogVersion ||
+      record.spec.catalog_hash != catalog::kCatalogHash) {
+    add_diagnostic(
+        validation, "incompatible",
+        "artifact semantic catalog contract does not match the reader");
+  }
+  if (record.spec.evidence != "source" && record.spec.evidence != "derived" &&
+      record.spec.evidence != "inferred" && record.spec.evidence != "runtime" &&
+      record.spec.evidence != "assumption" && record.spec.evidence != "proof") {
+    add_diagnostic(validation, "incompatible",
+                   "artifact evidence class is invalid");
   }
   return validation;
 }
@@ -440,6 +486,7 @@ ArtifactRecord ArtifactStore::publish(const ArtifactSpec &input_spec,
     throw StorageError("artifact publication requires a sidecar writer");
   }
   ArtifactSpec spec = input_spec;
+  ArtifactPublicationLock publication_lock(root_);
   std::ranges::sort(spec.exposed_relations);
   spec.exposed_relations.erase(
       std::ranges::unique(spec.exposed_relations).begin(),
@@ -479,6 +526,7 @@ ArtifactStore::publish_existing(const ArtifactSpec &input_spec,
     throw StorageError("cannot adopt missing artifact " + source_path.string());
   }
   ArtifactSpec spec = input_spec;
+  ArtifactPublicationLock publication_lock(root_);
   std::ranges::sort(spec.exposed_relations);
   spec.exposed_relations.erase(
       std::ranges::unique(spec.exposed_relations).begin(),
@@ -542,6 +590,37 @@ ArtifactStore::publish_staged(const ArtifactSpec &spec,
     record.byte_size =
         static_cast<std::int64_t>(std::filesystem::file_size(final_path));
     record.state = "current";
+    auto existing = storage_.raw_db().prepare(
+        "SELECT id, logical_id, kind, artifact_schema, catalog_version, "
+        "catalog_hash, producer_version, engine_version, workspace_identity, "
+        "tu_identity, configuration_identity, input_fact_set_identity, "
+        "completeness, truncation, trust, evidence, attachment_name, "
+        "retention_policy, relative_path, content_hash, byte_size, state, "
+        "created_at, published_at FROM artifact WHERE logical_id = ? AND "
+        "content_hash = ? ORDER BY id DESC LIMIT 1");
+    bind_text(existing, 1, spec.logical_id);
+    bind_text(existing, 2, hash);
+    if (existing.step()) {
+      const auto existing_id = existing.col_int64(0);
+      auto txn = storage_.transaction();
+      auto supersede = storage_.raw_db().prepare(
+          "UPDATE artifact SET state = 'stale' WHERE logical_id = ?");
+      bind_text(supersede, 1, spec.logical_id);
+      supersede.step_done();
+      auto restore =
+          storage_.raw_db().prepare("UPDATE artifact SET state = 'current', "
+                                    "published_at = CURRENT_TIMESTAMP "
+                                    "WHERE id = ?");
+      restore.bind(1, existing_id);
+      restore.step_done();
+      txn.commit();
+      std::filesystem::remove(staged_path);
+      const auto current_record = current(spec.logical_id);
+      if (!current_record) {
+        throw StorageError("idempotent artifact publication lost its manifest");
+      }
+      return *current_record;
+    }
     auto txn = storage_.transaction();
     auto supersede =
         storage_.raw_db().prepare("UPDATE artifact SET state = 'stale' WHERE "
@@ -550,33 +629,35 @@ ArtifactStore::publish_staged(const ArtifactSpec &spec,
     supersede.step_done();
     auto insert = storage_.raw_db().prepare(
         "INSERT INTO artifact(logical_id, kind, artifact_schema, "
-        "catalog_version, "
+        "catalog_version, catalog_hash, "
         "producer_version, engine_version, workspace_identity, tu_identity, "
         "configuration_identity, input_fact_set_identity, completeness, "
         "truncation, "
-        "trust, attachment_name, retention_policy, relative_path, "
+        "trust, evidence, attachment_name, retention_policy, relative_path, "
         "content_hash, "
         "byte_size, state, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)");
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)");
     bind_text(insert, 1, spec.logical_id);
     bind_text(insert, 2, spec.kind);
     bind_text(insert, 3, spec.artifact_schema);
-    bind_text(insert, 4, spec.catalog_version);
-    bind_text(insert, 5, spec.producer_version);
-    bind_text(insert, 6, spec.engine_version);
-    bind_text(insert, 7, spec.workspace_identity);
-    bind_text(insert, 8, spec.tu_identity);
-    bind_text(insert, 9, spec.configuration_identity);
-    bind_text(insert, 10, spec.input_fact_set_identity);
-    bind_text(insert, 11, to_string(spec.completeness));
-    bind_text(insert, 12, to_string(spec.truncation));
-    bind_text(insert, 13, to_string(spec.trust));
-    bind_text(insert, 14, spec.attachment_name);
-    bind_text(insert, 15, spec.retention_policy);
-    bind_text(insert, 16, record.relative_path);
-    bind_text(insert, 17, record.content_hash);
-    insert.bind(18, record.byte_size);
-    bind_text(insert, 19, record.state);
+    bind_text(insert, 4, std::to_string(spec.catalog_version));
+    bind_text(insert, 5, spec.catalog_hash);
+    bind_text(insert, 6, spec.producer_version);
+    bind_text(insert, 7, spec.engine_version);
+    bind_text(insert, 8, spec.workspace_identity);
+    bind_text(insert, 9, spec.tu_identity);
+    bind_text(insert, 10, spec.configuration_identity);
+    bind_text(insert, 11, spec.input_fact_set_identity);
+    bind_text(insert, 12, to_string(spec.completeness));
+    bind_text(insert, 13, to_string(spec.truncation));
+    bind_text(insert, 14, to_string(spec.trust));
+    bind_text(insert, 15, spec.evidence);
+    bind_text(insert, 16, spec.attachment_name);
+    bind_text(insert, 17, spec.retention_policy);
+    bind_text(insert, 18, record.relative_path);
+    bind_text(insert, 19, record.content_hash);
+    insert.bind(20, record.byte_size);
+    bind_text(insert, 21, record.state);
     insert.step_done();
     record.id = sqlite3_last_insert_rowid(storage_.raw_db().raw());
     for (const auto &relation : spec.exposed_relations) {
@@ -598,7 +679,8 @@ ArtifactStore::publish_staged(const ArtifactSpec &spec,
 
 std::unique_ptr<ArtifactAttachment>
 ArtifactStore::attach_current(std::string_view logical_id) {
-  if (attached_names_.size() >= max_attached_) {
+  if (attached_names_.size() >= max_attached_ ||
+      storage_.attached_artifact_names_.size() >= 8) {
     throw StorageError("artifact attachment limit exceeded");
   }
   const auto validation = validate(logical_id);
@@ -611,7 +693,7 @@ ArtifactStore::attach_current(std::string_view logical_id) {
   }
   const auto &record = *validation.manifest;
   const auto name = record.spec.attachment_name;
-  if (std::ranges::find(attached_names_, name) != attached_names_.end()) {
+  if (storage_.attached_artifact_names_.contains(name)) {
     throw StorageError("artifact attachment name is already in use");
   }
   auto query_only = storage_.raw_db().prepare("PRAGMA query_only");
@@ -631,10 +713,12 @@ ArtifactStore::attach_current(std::string_view logical_id) {
     storage_.raw_db().exec("DETACH DATABASE \"" + name + "\"");
     throw;
   }
-  if (attached_names_.empty()) {
+  if (storage_.attached_artifact_names_.empty()) {
+    storage_.artifact_query_only_before_attach_ = previous_query_only;
     query_only_before_attach_ = previous_query_only;
   }
   attached_names_.push_back(name);
+  storage_.attached_artifact_names_.insert(name);
   return std::unique_ptr<ArtifactAttachment>(
       new ArtifactAttachment(this, &storage_, name, previous_query_only));
 }
@@ -647,12 +731,15 @@ void ArtifactStore::release_attachment(std::string_view name,
     if (it != attached_names_.end()) {
       attached_names_.erase(it);
     }
+    storage_.attached_artifact_names_.erase(std::string(name));
   } catch (...) {
     const auto ignored = std::current_exception();
     (void)ignored;
   }
-  if (attached_names_.empty()) {
-    reset_query_only(query_only_before_attach_.value_or(previous_query_only));
+  if (storage_.attached_artifact_names_.empty()) {
+    reset_query_only(storage_.artifact_query_only_before_attach_.value_or(
+        previous_query_only));
+    storage_.artifact_query_only_before_attach_.reset();
     query_only_before_attach_.reset();
   }
 }
@@ -743,14 +830,11 @@ void ArtifactStore::pin(std::string_view logical_id, std::string_view pin_id,
 
 void ArtifactStore::unpin(std::string_view logical_id,
                           std::string_view pin_id) {
-  const auto record = current(logical_id);
-  if (!record) {
-    return;
-  }
   auto statement = storage_.raw_db().prepare(
-      "DELETE FROM artifact_pin WHERE artifact_id = ? AND pin_id = ?");
-  statement.bind(1, record->id);
-  bind_text(statement, 2, pin_id);
+      "DELETE FROM artifact_pin WHERE pin_id = ? AND artifact_id IN "
+      "(SELECT id FROM artifact WHERE logical_id = ?)");
+  bind_text(statement, 1, pin_id);
+  bind_text(statement, 2, logical_id);
   statement.step_done();
 }
 
@@ -760,10 +844,11 @@ ArtifactStore::export_plan(bool include_optional) const {
   std::vector<ArtifactDiagnostic> diagnostics;
   auto statement = storage_.raw_db().prepare(
       "SELECT id, logical_id, kind, artifact_schema, catalog_version, "
-      "producer_version, engine_version, workspace_identity, tu_identity, "
+      "catalog_hash, producer_version, engine_version, workspace_identity, "
+      "tu_identity, "
       "configuration_identity, input_fact_set_identity, completeness, "
-      "truncation, "
-      "trust, attachment_name, retention_policy, relative_path, content_hash, "
+      "truncation, trust, evidence, attachment_name, retention_policy, "
+      "relative_path, content_hash, "
       "byte_size, state, created_at, published_at FROM artifact WHERE state = "
       "'current' "
       "ORDER BY logical_id");
@@ -781,6 +866,7 @@ ArtifactStore::export_plan(bool include_optional) const {
 }
 
 std::size_t ArtifactStore::recover() {
+  ArtifactPublicationLock publication_lock(root_);
   std::set<std::string> referenced;
   auto statement = storage_.raw_db().prepare(
       "SELECT relative_path FROM artifact WHERE EXISTS (SELECT 1 FROM "

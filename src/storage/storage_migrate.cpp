@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "catalogs/generated_catalog.hpp"
 #include "compiledb/compiledb.hpp"
 #include "storage/storage_detail.hpp"
 #include "storage/storage_schema.hpp"
@@ -62,6 +63,111 @@ void Storage::migrate() {
   // changed here so old databases remain readable during the same open.
   if (!has_table("artifact")) {
     changed = true;
+  }
+  // v35 -> v36: align the sidecar envelope with the generated semantic
+  // artifact contract. SQLite cannot alter the catalog type or CHECK values,
+  // so rebuild the small manifest family while preserving every child row.
+  if (has_table("artifact")) {
+    const auto artifact_cols = table_columns("artifact");
+    if (!has_col(artifact_cols, "catalog_hash")) {
+      db_.exec("PRAGMA foreign_keys = OFF");
+      for (const auto table : {"artifact_relation", "artifact_identity_map",
+                               "artifact_lease", "artifact_pin"}) {
+        if (has_table(table)) {
+          db_.exec(std::string("ALTER TABLE ") + table + " RENAME TO " + table +
+                   "_v35");
+        }
+      }
+      db_.exec("DROP INDEX IF EXISTS idx_artifact_current_logical");
+      db_.exec("DROP INDEX IF EXISTS idx_artifact_state");
+      db_.exec("DROP INDEX IF EXISTS idx_artifact_identity_stable");
+      db_.exec("ALTER TABLE artifact RENAME TO artifact_v35");
+      db_.exec(
+          "CREATE TABLE artifact (id INTEGER PRIMARY KEY, logical_id TEXT NOT "
+          "NULL, kind TEXT NOT NULL, artifact_schema TEXT NOT NULL, "
+          "catalog_version INTEGER NOT NULL, catalog_hash TEXT NOT NULL, "
+          "producer_version TEXT NOT NULL, engine_version TEXT NOT NULL, "
+          "workspace_identity TEXT NOT NULL, tu_identity TEXT NOT NULL DEFAULT "
+          "'', "
+          "configuration_identity TEXT NOT NULL DEFAULT '', "
+          "input_fact_set_identity TEXT NOT NULL DEFAULT '', completeness TEXT "
+          "NOT NULL CHECK (completeness IN ('complete','partial','unknown')), "
+          "truncation TEXT NOT NULL CHECK (truncation IN "
+          "('none','truncated','unknown')), "
+          "trust TEXT NOT NULL CHECK (trust IN "
+          "('unverified','producer-verified','reader-verified')), "
+          "evidence TEXT NOT NULL CHECK (evidence IN "
+          "('source','derived','inferred','runtime','assumption','proof')), "
+          "attachment_name TEXT NOT NULL, retention_policy TEXT NOT NULL "
+          "DEFAULT 'retain', "
+          "relative_path TEXT NOT NULL, content_hash TEXT NOT NULL, byte_size "
+          "INTEGER NOT NULL CHECK (byte_size >= 0), "
+          "state TEXT NOT NULL CHECK (state IN ('current','stale','retired')), "
+          "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, published_at "
+          "TEXT, "
+          "UNIQUE (logical_id, content_hash))");
+      db_.exec("INSERT INTO artifact(id, logical_id, kind, artifact_schema, "
+               "catalog_version, catalog_hash, "
+               "producer_version, engine_version, workspace_identity, "
+               "tu_identity, configuration_identity, "
+               "input_fact_set_identity, completeness, truncation, trust, "
+               "evidence, attachment_name, "
+               "retention_policy, relative_path, content_hash, byte_size, "
+               "state, created_at, published_at) "
+               "SELECT id, logical_id, kind, artifact_schema, "
+               "CASE WHEN catalog_version GLOB '[0-9]*' THEN "
+               "CAST(catalog_version AS INTEGER) ELSE " +
+               std::to_string(catalog::kCatalogVersion) + " END, '" +
+               std::string(catalog::kCatalogHash) +
+               "', producer_version, engine_version, workspace_identity, "
+               "tu_identity, configuration_identity, input_fact_set_identity, "
+               "completeness, truncation, "
+               "CASE trust WHEN 'trusted' THEN 'producer-verified' WHEN "
+               "'untrusted' THEN 'unverified' ELSE 'unverified' END, "
+               "'source', attachment_name, retention_policy, relative_path, "
+               "content_hash, byte_size, state, created_at, published_at "
+               "FROM artifact_v35");
+      db_.exec("CREATE UNIQUE INDEX idx_artifact_current_logical ON "
+               "artifact(logical_id) WHERE state = 'current';"
+               "CREATE INDEX idx_artifact_state ON artifact(state);");
+      db_.exec(
+          "CREATE TABLE artifact_relation (artifact_id INTEGER NOT NULL "
+          "REFERENCES artifact(id) ON DELETE CASCADE, relation_name TEXT NOT "
+          "NULL, PRIMARY KEY (artifact_id, relation_name)) WITHOUT ROWID;");
+      db_.exec(
+          "INSERT INTO artifact_relation SELECT * FROM artifact_relation_v35;");
+      db_.exec(
+          "CREATE TABLE artifact_identity_map (artifact_id INTEGER NOT NULL "
+          "REFERENCES artifact(id) ON DELETE CASCADE, local_identity TEXT NOT "
+          "NULL, identity_kind TEXT NOT NULL, stable_identity TEXT NOT NULL, "
+          "resolution_state TEXT NOT NULL CHECK (resolution_state IN "
+          "('resolved','unresolved','unknown')), core_symbol_id INTEGER, "
+          "diagnostic TEXT NOT NULL DEFAULT '', PRIMARY KEY (artifact_id, "
+          "local_identity, identity_kind)) WITHOUT ROWID;");
+      db_.exec("INSERT INTO artifact_identity_map SELECT * FROM "
+               "artifact_identity_map_v35;");
+      db_.exec("CREATE INDEX idx_artifact_identity_stable ON "
+               "artifact_identity_map(stable_identity);");
+      db_.exec("CREATE TABLE artifact_lease (artifact_id INTEGER NOT NULL "
+               "REFERENCES artifact(id) ON DELETE CASCADE, lease_id TEXT NOT "
+               "NULL, purpose TEXT NOT NULL, PRIMARY KEY (artifact_id, "
+               "lease_id)) WITHOUT ROWID;");
+      db_.exec("INSERT INTO artifact_lease SELECT * FROM artifact_lease_v35;");
+      db_.exec(
+          "CREATE TABLE artifact_pin (artifact_id INTEGER NOT NULL REFERENCES "
+          "artifact(id) ON DELETE CASCADE, pin_id TEXT NOT NULL, reason TEXT "
+          "NOT NULL, PRIMARY KEY (artifact_id, pin_id)) WITHOUT ROWID;");
+      db_.exec("INSERT INTO artifact_pin SELECT * FROM artifact_pin_v35;");
+      for (const auto table : {"artifact_relation", "artifact_identity_map",
+                               "artifact_lease", "artifact_pin"}) {
+        if (has_table(table)) {
+          db_.exec(std::string("DROP TABLE ") + table + "_v35");
+        }
+      }
+      db_.exec("DROP TABLE artifact_v35");
+      db_.exec("PRAGMA foreign_keys = ON");
+      changed = true;
+    }
   }
   if (!has_col(cols, "qual_name")) {
     db_.exec("ALTER TABLE symbol ADD COLUMN qual_name TEXT");

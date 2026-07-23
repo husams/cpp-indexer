@@ -23,7 +23,7 @@ Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
   pr1-fixture-2 Dashboard::refresh() method exists in pipeline.cpp (P1-FX)
   version-1     Python VERSION == "0.53.0"  (cidx-astgraph per-TU AST graph dumper)
   version-2     C++ kVersion == "0.53.0"
-  version-3     C++ kSchemaVersion == 34
+  version-3     C++ kSchemaVersion == 36
   rollup-1      resolve_pass() calls materialize_entity_edges()
   rollup-2      entity_rollup.py module exists
   parity-1      RETIRED (parity_check.sh removed with the byte-parity gate)
@@ -105,7 +105,7 @@ def test_schema_version_is_30():
     """SCHEMA_VERSION must be 30 after the v29→v30 signature/type tier."""
     storage = _import_storage()
     assert storage.SCHEMA_VERSION == 36, (
-        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 30. "
+        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 36. "
         "storage.py SCHEMA_VERSION must be bumped to 30 (type_node/type_edge/parameter/symbol_type)."
     )
 
@@ -337,7 +337,7 @@ def test_cpp_schema_version_is_30():
     assert match is not None, "kSchemaVersion not found in storage.hpp."
     version = int(match.group(1))
     assert version == 36, (
-        f"C++ kSchemaVersion is {version}; expected 30. "
+        f"C++ kSchemaVersion is {version}; expected 36. "
         "Bump kSchemaVersion 29 -> 30 in storage.hpp (type_node/type_edge/parameter/symbol_type)."
     )
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catalogs/generated_catalog.hpp"
 #include "storage/sqlite.hpp"
 
 #include <cstddef>
@@ -20,13 +21,18 @@ class ArtifactStore;
 
 enum class ArtifactCompleteness : std::uint8_t { complete, partial, unknown };
 enum class ArtifactTruncation : std::uint8_t { none, truncated, unknown };
-enum class ArtifactTrust : std::uint8_t { trusted, untrusted, unknown };
+enum class ArtifactTrust : std::uint8_t {
+  unverified,
+  producer_verified,
+  reader_verified
+};
 
 struct ArtifactSpec {
   std::string logical_id;
   std::string kind;
   std::string artifact_schema = "cidx-artifact/v1";
-  std::string catalog_version = "semantic-catalog/v1";
+  std::int64_t catalog_version = catalog::kCatalogVersion;
+  std::string catalog_hash = std::string(catalog::kCatalogHash);
   std::string producer_version = "unknown";
   std::string engine_version = "unknown";
   std::string workspace_identity;
@@ -35,7 +41,8 @@ struct ArtifactSpec {
   std::string input_fact_set_identity;
   ArtifactCompleteness completeness = ArtifactCompleteness::unknown;
   ArtifactTruncation truncation = ArtifactTruncation::unknown;
-  ArtifactTrust trust = ArtifactTrust::unknown;
+  ArtifactTrust trust = ArtifactTrust::unverified;
+  std::string evidence = "source";
   std::string attachment_name;
   std::vector<std::string> exposed_relations;
   std::string retention_policy = "retain";

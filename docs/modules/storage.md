@@ -18,7 +18,7 @@ by both indexing engines, and the resolve pass. ~5.5k LOC.
 
 ### `Storage` (`storage.hpp:61`)
 
-Owns the connection and creates/migrates the DB to `schema_version = 35`. It is
+Owns the connection and creates/migrates the DB to `schema_version = 36`. It is
 the write surface both engines use, plus the read surface for lookups. Key
 groups:
 
@@ -84,7 +84,7 @@ products:
 (`resolved = 0 AND file_id IS NULL AND decl_file_id IS NULL`) and returns that
  count for the `resolve: N still-stub …` line.
 
-## Manifest-governed sidecars (schema v35)
+## Manifest-governed sidecars (schema v36)
 
 `index.db` remains the authoritative identity store. Immutable or rebuildable
 artifacts such as AST graphs, extension facts, proof caches, and accelerators
@@ -102,8 +102,9 @@ from physical location, so rebuilding or relocating a sidecar does not change
 the logical result identity.
 
 `attach_current()` requires a current manifest, matching envelope, matching
-content hash/size, passing `integrity_check`, complete/non-truncated/trusted
-status, and a deterministic attachment identifier. It uses a read-only URI
+content hash/size, passing `integrity_check`, complete/non-truncated/
+producer- or reader-verified status, the generated numeric catalog contract,
+and a deterministic unique attachment identifier. It uses a read-only URI
 and `query_only` while attached. Missing, stale, corrupt, incompatible,
 partial, truncated, or untrusted artifacts are surfaced as diagnostics rather
 than empty complete results. Leases and replay pins protect stale artifacts

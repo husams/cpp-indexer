@@ -1,4 +1,4 @@
-# Data Model (schema 35)
+# Data Model (schema 36)
 
 [← docs index](README.md)
 
@@ -81,11 +81,14 @@ erDiagram
         string logical_id
         string kind
         string artifact_schema
-        string catalog_version
+        int catalog_version
+        string catalog_hash
         string producer_version
         string workspace_identity
         string tu_identity
         string content_hash
+        string evidence
+        string trust
         string state
         string relative_path
     }
@@ -97,7 +100,7 @@ erDiagram
 
 | Table | Purpose |
 |---|---|
-| `meta` | key/value; holds `schema_version` (35) and `graph_resolved_at` |
+| `meta` | key/value; holds `schema_version` (36) and `graph_resolved_at` |
 | `repository`, `clone` | group components; track git clones / active clone |
 | `component` | a source root (repo/dir): name, path, kind, version |
 | `directory` | a directory under a component |
@@ -114,8 +117,10 @@ erDiagram
 | `artifact_lease` / `artifact_pin` | retention references that protect artifacts from recovery cleanup |
 
 Sidecars are written, validated, durably renamed, and then published through a
-core transaction. Attachments are read-only and require a complete, trusted,
-hash-matching envelope. Missing, stale, corrupt, partial, or unknown artifacts
+core transaction guarded by a publication lock shared with recovery. Attachments
+are read-only and require a complete, non-truncated, producer- or reader-verified,
+hash-matching envelope with the current generated catalog version/hash and an
+evidence class. Missing, stale, corrupt, partial, or unverified artifacts
 produce diagnostics rather than an empty complete result.
 
 ### Layer-0 — raw extraction (written by the indexing engine)
