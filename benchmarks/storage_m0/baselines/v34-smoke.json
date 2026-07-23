@@ -4,6 +4,8 @@
   "schema_version": 34,
   "manifest": "benchmarks/storage_m0/manifests/storage-m0-v1.json",
   "profile": "benchmarks/storage_m0/profiles/local-macos-v1.json",
+  "source_revision": "50d6dbf69aea14fbe45b3483ee46eb0c813c5933",
+  "source_commit": "https://github.com/husams/cpp-indexer/commit/50d6dbf69aea14fbe45b3483ee46eb0c813c5933",
   "workload": "synthetic",
   "scale": "smoke",
   "seed": 20260723,
@@ -24,6 +26,7 @@
     "include_edges": 6
   },
   "semantic_digest": "08cc46550ceda20dc11e9457c26e394162cbdc359749fc5debe4b2a338a273d6",
+  "raw_samples_artifact": "benchmarks/storage_m0/baselines/v34-smoke.result.json.samples.json",
   "measured_operations": [
     "cold_build",
     "warm_noop",
