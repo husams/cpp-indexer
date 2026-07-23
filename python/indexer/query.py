@@ -738,7 +738,10 @@ class CallContext:
 
 
 #: template_param.param_kind / template_arg.arg_kind code -> readable name.
-TEMPLATE_PARAM_KINDS = {1: "type", 2: "non-type", 3: "template-template", 4: "type-pack"}
+TEMPLATE_PARAM_KINDS = {
+    1: "type", 2: "non-type", 3: "template-template",
+    4: "type-pack", 5: "non-type-pack", 6: "template-template-pack",
+}
 TEMPLATE_ARG_KINDS = {1: "type", 2: "non-type", 3: "template", 4: "pack"}
 
 
@@ -1800,7 +1803,7 @@ class GraphQuery:
         rows = self._c.execute(
             "SELECT position, pack_index, arg_kind, ref_id, literal, type_id "
             "FROM template_arg "
-            "WHERE owner_id = ? ORDER BY position",
+            "WHERE owner_id = ? ORDER BY position, pack_index",
             (sid,),
         ).fetchall()
         return [
@@ -2255,10 +2258,15 @@ class GraphQuery:
                 "decl_usr": t.decl_usr,
             })
             if t.kind == "array":
-                match = re.search(r"\[([^]]*)\]", t.spelling)
-                out[-1]["extent"] = match.group(1) if match else None
                 child = self._type_child(t.id, 2)
                 out[-1]["element_type"] = child.spelling if child else None
+                opening = t.spelling.rfind("[")
+                closing = t.spelling.rfind("]")
+                out[-1]["extent"] = (
+                    t.spelling[opening + 1:closing].strip()
+                    if opening >= 0 and closing > opening
+                    else None
+                )
             edge_kind = 1 if t.kind in {
                 "pointer", "lvalue-reference", "rvalue-reference"
             } else 2 if t.kind == "array" else None
@@ -2341,7 +2349,7 @@ class GraphQuery:
         for r in self._c.execute(
             "SELECT position, pack_index, name, type_id, declared_type_id, adjusted_type_id, "
             "default_text, default_origin, reference_semantics FROM parameter "
-            "WHERE owner_id = ? ORDER BY position",
+            "WHERE owner_id = ? ORDER BY position, pack_index",
             (sid,),
         ):
             declared_id = r["declared_type_id"] or r["type_id"]

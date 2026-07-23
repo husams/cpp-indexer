@@ -1859,21 +1859,29 @@ class Storage:
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='parameter'"
             ).fetchone()[0] or ""
             if "PRIMARY KEY (owner_id, position, pack_index)" not in sql:
+                self._conn.commit()
+                self._conn.execute("PRAGMA foreign_keys = OFF")
                 self._conn.execute("""
                     CREATE TABLE parameter_v32 (
                         owner_id INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
                         position INTEGER NOT NULL,
                         pack_index INTEGER NOT NULL DEFAULT -1,
-                        name TEXT, type_id INTEGER, declared_type_id INTEGER,
-                        adjusted_type_id INTEGER, default_text TEXT,
+                        name TEXT,
+                        type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+                        declared_type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+                        adjusted_type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+                        default_text TEXT,
                         default_origin TEXT, reference_semantics TEXT,
-                        file_id INTEGER, line INTEGER, col INTEGER,
+                        file_id INTEGER REFERENCES file(id) ON DELETE SET NULL,
+                        line INTEGER, col INTEGER,
                         PRIMARY KEY (owner_id, position, pack_index)
                     ) WITHOUT ROWID
                 """)
                 self._conn.execute("INSERT INTO parameter_v32 SELECT owner_id, position, pack_index, name, type_id, declared_type_id, adjusted_type_id, default_text, default_origin, reference_semantics, file_id, line, col FROM parameter")
                 self._conn.execute("DROP TABLE parameter")
                 self._conn.execute("ALTER TABLE parameter_v32 RENAME TO parameter")
+                self._conn.commit()
+                self._conn.execute("PRAGMA foreign_keys = ON")
                 changed = True
         if "template_param" in tables:
             cols = {r[1] for r in self._conn.execute("PRAGMA table_info(template_param)")}
@@ -1900,6 +1908,8 @@ class Storage:
                     if "type_node" in tables
                     else ""
                 )
+                self._conn.commit()
+                self._conn.execute("PRAGMA foreign_keys = OFF")
                 self._conn.execute("""
                     CREATE TABLE template_arg_v32 (
                         owner_id INTEGER NOT NULL REFERENCES symbol(id) ON DELETE CASCADE,
@@ -1915,6 +1925,8 @@ class Storage:
                 self._conn.execute("INSERT INTO template_arg_v32 SELECT owner_id, position, pack_index, arg_kind, ref_id, literal, type_id FROM template_arg")
                 self._conn.execute("DROP TABLE template_arg")
                 self._conn.execute("ALTER TABLE template_arg_v32 RENAME TO template_arg")
+                self._conn.commit()
+                self._conn.execute("PRAGMA foreign_keys = ON")
                 changed = True
         if "include_edge" not in tables:
             # v30 -> v31: include tier (include_config/include_edge/

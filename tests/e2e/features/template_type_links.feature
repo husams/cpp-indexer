@@ -440,11 +440,13 @@ Feature: Template callables use the same typed signature slots as ordinary calla
       | line                                                                      |
       | return: Widget [value, record] -> Widget                                  |
       | param 0: fallback: Widget [value, record] -> Widget = T{} [from Buffer<T, N>::get(T)] |
+    Then `cidx graph signature --name Buffer<Widget,4>::get --first` returns complete deterministic signature JSON
     And `cidx graph template --name Buffer<Widget,4> --first` lists:
       | line                               |
       | instantiates: Buffer<T, N>         |
       | arg 0: type: Widget -> Widget      |
       | arg 1: non-type: 4: int            |
+    Then `cidx graph template --name Buffer<Widget,4> --first` returns complete deterministic template JSON
 
   Scenario: Enumerators used as template arguments still record their values
     # Mode::Read / Mode::Write feed the Access<Mode> non-type template
