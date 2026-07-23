@@ -1,6 +1,7 @@
 // astgraph — dump one TU's Clang C++ AST into a per-TU SQLite graph DB for
 // Soufflé/Datalog reasoning. Rebuilt 2026-07-12 on the Clang C++ API
-// (RecursiveASTVisitor + ClangTool); the libclang cursor/type C API was removed.
+// (RecursiveASTVisitor + ClangTool); the libclang cursor/type C API was
+// removed.
 //
 // Node model: declarations and statements/expressions are interned by their
 // clang AST pointer; types by their canonical Type*. node_kind ids are the
@@ -8,9 +9,10 @@
 // 3000-3999), mapped from the live clang enums so the generated Souffle rules
 // (which hardcode kind literals) stay valid across LLVM majors. A structural
 // RecursiveASTVisitor emits `child` edges with sibling order; a worklist then
-// drains every node's semantic cross-references (references/definition/canonical
-// /parents/overrides/type relations) to a fixpoint — referenced header entities
-// surface as shallow nodes exactly as the libclang version did.
+// drains every node's semantic cross-references
+// (references/definition/canonical /parents/overrides/type relations) to a
+// fixpoint — referenced header entities surface as shallow nodes exactly as the
+// libclang version did.
 #include "astgraph/astgraph.hpp"
 
 #include <cstdint>
@@ -44,11 +46,12 @@
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Support/Casting.h"
 
-#include "astgraph/schema.hpp"
-#include "toolchain/toolchain.hpp"
 #include "ast/usr.hpp"
+#include "astgraph/schema.hpp"
+#include "catalogs/generated_catalog.hpp"
 #include "cli/args.hpp" // kVersion (meta.generator provenance)
 #include "storage/sqlite.hpp"
+#include "toolchain/toolchain.hpp"
 #include "util/errors.hpp"
 #include "util/hashing.hpp"
 #include "util/json_min.hpp"
@@ -145,29 +148,49 @@ constexpr RelName kRelNames[] = {
     {.id = kRelClassType, .name = "class_type"},
 };
 
-// --- CIDX-STABLE kind mapping (live clang enum -> schema.hpp constant) --------
+// --- CIDX-STABLE kind mapping (live clang enum -> schema.hpp constant)
+// --------
 
 int decl_kind_id(const clang::Decl *d) {
   switch (d->getKind()) {
-  case clang::Decl::TranslationUnit: return kNodeTranslationUnit;
-  case clang::Decl::Function: return kNodeFunction;
-  case clang::Decl::CXXMethod: return kNodeCXXMethod;
-  case clang::Decl::CXXConstructor: return kNodeCXXConstructor;
-  case clang::Decl::CXXDestructor: return kNodeCXXDestructor;
-  case clang::Decl::CXXConversion: return kNodeCXXMethod;
-  case clang::Decl::Var: return kNodeVar;
-  case clang::Decl::ParmVar: return kNodeParmVar;
-  case clang::Decl::Field: return kNodeField;
-  case clang::Decl::CXXRecord: return kNodeCXXRecord;
-  case clang::Decl::Record: return kNodeRecord;
-  case clang::Decl::Enum: return kNodeEnum;
-  case clang::Decl::EnumConstant: return kNodeEnumConstant;
-  case clang::Decl::Namespace: return kNodeNamespace;
-  case clang::Decl::Typedef: return kNodeTypedef;
-  case clang::Decl::TypeAlias: return kNodeTypeAlias;
-  case clang::Decl::FunctionTemplate: return kNodeFunctionTemplate;
-  case clang::Decl::ClassTemplate: return kNodeClassTemplate;
-  default: return kNodeOtherDecl;
+  case clang::Decl::TranslationUnit:
+    return kNodeTranslationUnit;
+  case clang::Decl::Function:
+    return kNodeFunction;
+  case clang::Decl::CXXMethod:
+    return kNodeCXXMethod;
+  case clang::Decl::CXXConstructor:
+    return kNodeCXXConstructor;
+  case clang::Decl::CXXDestructor:
+    return kNodeCXXDestructor;
+  case clang::Decl::CXXConversion:
+    return kNodeCXXMethod;
+  case clang::Decl::Var:
+    return kNodeVar;
+  case clang::Decl::ParmVar:
+    return kNodeParmVar;
+  case clang::Decl::Field:
+    return kNodeField;
+  case clang::Decl::CXXRecord:
+    return kNodeCXXRecord;
+  case clang::Decl::Record:
+    return kNodeRecord;
+  case clang::Decl::Enum:
+    return kNodeEnum;
+  case clang::Decl::EnumConstant:
+    return kNodeEnumConstant;
+  case clang::Decl::Namespace:
+    return kNodeNamespace;
+  case clang::Decl::Typedef:
+    return kNodeTypedef;
+  case clang::Decl::TypeAlias:
+    return kNodeTypeAlias;
+  case clang::Decl::FunctionTemplate:
+    return kNodeFunctionTemplate;
+  case clang::Decl::ClassTemplate:
+    return kNodeClassTemplate;
+  default:
+    return kNodeOtherDecl;
   }
 }
 
@@ -195,22 +218,34 @@ int stmt_kind_id(const clang::Stmt *s) {
 
 int type_kind_id(const clang::Type *t) {
   switch (t->getTypeClass()) {
-  case clang::Type::Builtin: return kNodeBuiltinType;
-  case clang::Type::Pointer: return kNodePointerType;
-  case clang::Type::LValueReference: return kNodeLValueReferenceType;
-  case clang::Type::RValueReference: return kNodeRValueReferenceType;
-  case clang::Type::Record: return kNodeRecordType;
-  case clang::Type::Enum: return kNodeEnumType;
-  case clang::Type::Typedef: return kNodeTypedefType;
+  case clang::Type::Builtin:
+    return kNodeBuiltinType;
+  case clang::Type::Pointer:
+    return kNodePointerType;
+  case clang::Type::LValueReference:
+    return kNodeLValueReferenceType;
+  case clang::Type::RValueReference:
+    return kNodeRValueReferenceType;
+  case clang::Type::Record:
+    return kNodeRecordType;
+  case clang::Type::Enum:
+    return kNodeEnumType;
+  case clang::Type::Typedef:
+    return kNodeTypedefType;
 #if LLVM_VERSION_MAJOR < 22
-  case clang::Type::Elaborated: return kNodeElaboratedType;
+  case clang::Type::Elaborated:
+    return kNodeElaboratedType;
 #endif
-  case clang::Type::FunctionProto: return kNodeFunctionProtoType;
-  case clang::Type::ConstantArray: return kNodeConstantArrayType;
+  case clang::Type::FunctionProto:
+    return kNodeFunctionProtoType;
+  case clang::Type::ConstantArray:
+    return kNodeConstantArrayType;
   case clang::Type::TemplateSpecialization:
     return kNodeTemplateSpecializationType;
-  case clang::Type::MemberPointer: return kNodeMemberPointerType;
-  default: return kNodeOtherType;
+  case clang::Type::MemberPointer:
+    return kNodeMemberPointerType;
+  default:
+    return kNodeOtherType;
   }
 }
 
@@ -249,6 +284,12 @@ public:
                   const std::vector<std::string> &args,
                   const std::optional<std::string> &driver) {
     put_meta("schema_version", std::to_string(kSchemaVersion));
+    put_meta("catalog_version", std::to_string(catalog::kCatalogVersion));
+    put_meta("catalog_hash", std::string(catalog::kCatalogHash));
+    put_meta("artifact_kind", "astgraph");
+    put_meta("status", "complete");
+    put_meta("trust", "producer-verified");
+    put_meta("evidence", "source");
     put_meta("generator", std::string("cidx-astgraph ") + cli::kVersion);
     put_meta("source", source);
     put_meta("args", json_min::encode_string_array(args));
@@ -261,8 +302,8 @@ public:
     put_meta("options_sha1",
              sha1_flags_hash(AstCacheKey{
                  .abspath = source, .flags = args, .driver = driver}));
-    put_meta("artifact_key",
-             artifact_key(source, args, driver, Options{.main_only = main_only_}));
+    put_meta("artifact_key", artifact_key(source, args, driver,
+                                          Options{.main_only = main_only_}));
   }
 
   void seed_relation_kinds() {
@@ -387,9 +428,10 @@ public:
     run("INSERT INTO node(id, kind_id, symbol_id, type_id, spelling, file_id, "
         "line, col, end_line, end_col, is_definition, access, is_const, "
         "is_volatile, is_restrict) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        {id, static_cast<int64_t>(kind), int64_t{0}, int64_t{0}, qt.getAsString(),
-         int64_t{0}, int64_t{0}, int64_t{0}, int64_t{0}, int64_t{0}, int64_t{0},
-         int64_t{0}, static_cast<int64_t>(qt.isConstQualified() ? 1 : 0),
+        {id, static_cast<int64_t>(kind), int64_t{0}, int64_t{0},
+         qt.getAsString(), int64_t{0}, int64_t{0}, int64_t{0}, int64_t{0},
+         int64_t{0}, int64_t{0}, int64_t{0},
+         static_cast<int64_t>(qt.isConstQualified() ? 1 : 0),
          static_cast<int64_t>(qt.isVolatileQualified() ? 1 : 0),
          static_cast<int64_t>(qt.isRestrictQualified() ? 1 : 0)});
     ++stats_.type_nodes;
@@ -482,7 +524,8 @@ private:
     }
 
     if (const auto *tnd = dyn_cast<clang::TypedefNameDecl>(d)) {
-      add_edge(id, intern_type(tnd->getUnderlyingType()), kRelUnderlyingType, 0);
+      add_edge(id, intern_type(tnd->getUnderlyingType()), kRelUnderlyingType,
+               0);
     }
   }
 
@@ -615,7 +658,8 @@ private:
     if (const auto *nd = dyn_cast<clang::NamedDecl>(d)) {
       linkage = static_cast<int64_t>(nd->getFormalLinkage());
     }
-    run("INSERT INTO symbol(id, usr, name, kind_id, linkage) VALUES (?,?,?,?,?)",
+    run("INSERT INTO symbol(id, usr, name, kind_id, linkage) VALUES "
+        "(?,?,?,?,?)",
         {id, usr, name, static_cast<int64_t>(kind), linkage});
     symbol_ids_.emplace(std::move(usr), id);
     ++stats_.symbols;
@@ -837,7 +881,8 @@ DumpStats dump_tu(const std::string &source_path,
   // Publish atomically: write beside the destination and rename only after
   // SQLite commits, so a failed dump preserves any previous complete artifact.
   const std::string temp_path =
-      out_db_path + ".tmp-" + std::to_string(static_cast<long long>(::getpid()));
+      out_db_path + ".tmp-" +
+      std::to_string(static_cast<long long>(::getpid()));
   std::remove(temp_path.c_str());
   std::remove((temp_path + "-journal").c_str());
 

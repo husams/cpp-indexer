@@ -18,12 +18,13 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "catalogs/generated_catalog.hpp"
+#include "catalogs/generated_catalog_sql.hpp"
 #include "compiledb/compiledb.hpp"
 #include "util/errors.hpp"
 #include "util/json_min.hpp"
 #include "util/logger.hpp"
 #include "util/pathutil.hpp"
-
 
 #include "storage/storage_detail.hpp"
 #include "storage/storage_schema.hpp"
@@ -32,7 +33,6 @@ namespace cidx {
 
 using namespace detail;
 
-
 bool is_symbol_kind(std::string_view kind) {
   return std::ranges::find(kSymbolKinds, kind) != kSymbolKinds.end();
 }
@@ -40,7 +40,8 @@ bool is_symbol_kind(std::string_view kind) {
 int64_t symbol_kind_id(std::string_view name) {
   const auto &m = symbol_kind_ids_map();
   const auto it = m.find(name);
-  return it != m.end() ? it->second : -1; // unknown -> matches nothing (filters)
+  return it != m.end() ? it->second
+                       : -1; // unknown -> matches nothing (filters)
 }
 
 std::string symbol_kind_name(int64_t id) {
@@ -128,6 +129,19 @@ Storage::Storage(const std::string &path, OpenMode mode)
                       std::to_string(kSchemaVersion) +
                       " (a read-only open cannot migrate)");
     }
+    std::string catalog_hash;
+    auto catalog_stmt =
+        db_.prepare("SELECT value FROM meta WHERE key = 'catalog_hash'");
+    if (catalog_stmt.step()) {
+      catalog_hash = catalog_stmt.col_text(0);
+    }
+    if (catalog_hash != catalog::kCatalogHash) {
+      throw CidxError(
+          "cannot open " + path + " read-only: catalog_hash " +
+          (catalog_hash.empty() ? std::string("missing") : catalog_hash) +
+          " does not match the required " + std::string(catalog::kCatalogHash) +
+          " (regenerate with the matching semantic catalogs)");
+    }
     db_.exec("PRAGMA foreign_keys = ON");
     return;
   }
@@ -135,6 +149,20 @@ Storage::Storage(const std::string &path, OpenMode mode)
   migrate(); // BEFORE the schema script: its indexes need migrated columns
              // (G19)
   db_.exec(kSchema);
+  std::string stored_catalog_hash;
+  auto catalog_stmt =
+      db_.prepare("SELECT value FROM meta WHERE key = 'catalog_hash'");
+  if (catalog_stmt.step()) {
+    stored_catalog_hash = catalog_stmt.col_text(0);
+  }
+  if (!stored_catalog_hash.empty() &&
+      stored_catalog_hash != catalog::kCatalogHash) {
+    throw CidxError(
+        "catalog_hash " + stored_catalog_hash +
+        " does not match the required " + std::string(catalog::kCatalogHash) +
+        " (regenerate the database with the matching semantic catalogs)");
+  }
+  db_.exec(catalog::kSeedSql);
   // v21 -> v22 one-time backfill: entity_node is a pure-DB classification of
   // existing symbols (no re-parse), so an upgraded index gets its design types
   // filled in immediately on open -- no re-index/resolve. (entity_node did not

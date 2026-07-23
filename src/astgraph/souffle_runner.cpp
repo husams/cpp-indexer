@@ -1,4 +1,5 @@
 #include "astgraph/souffle_runner.hpp"
+#include "catalogs/generated_catalog.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -33,9 +34,9 @@ souffle::Relation &require_relation(souffle::SouffleProgram &program,
 }
 
 void load_nodes(SqliteDb &db, souffle::Relation &rel) {
-  SqliteStmt stmt = db.prepare(
-      "SELECT id, kind_id, symbol_id, spelling, line, is_definition "
-      "FROM node ORDER BY id");
+  SqliteStmt stmt =
+      db.prepare("SELECT id, kind_id, symbol_id, spelling, line, is_definition "
+                 "FROM node ORDER BY id");
   while (stmt.step()) {
     souffle::tuple row(&rel);
     row << static_cast<souffle::RamSigned>(stmt.col_int64(0))
@@ -73,10 +74,17 @@ void load_symbols(SqliteDb &db, souffle::Relation &rel) {
 }
 
 void require_schema_v2(SqliteDb &db) {
-  SqliteStmt stmt = db.prepare(
-      "SELECT value FROM meta WHERE key = 'schema_version'");
+  SqliteStmt stmt =
+      db.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
   if (!stmt.step() || stmt.col_text(0) != std::to_string(kSchemaVersion)) {
-    throw CidxError("unsupported cidx-astgraph schema; regenerate the AST DB");
+    throw CidxError(
+        "unsupported cidx-astgraph schema/catalog; regenerate the AST DB");
+  }
+  auto catalog =
+      db.prepare("SELECT value FROM meta WHERE key = 'catalog_hash'");
+  if (!catalog.step() || catalog.col_text(0) != cidx::catalog::kCatalogHash) {
+    throw CidxError("unsupported cidx-astgraph schema/catalog; regenerate the "
+                    "AST DB with matching semantic catalogs");
   }
 }
 
@@ -119,12 +127,13 @@ std::vector<CallFact> run_callgraph(const std::string &ast_db_path, int jobs) {
     fact.line = static_cast<int64_t>(line);
     calls.push_back(std::move(fact));
   }
-  std::sort(calls.begin(), calls.end(), [](const CallFact &a, const CallFact &b) {
-    return std::tie(a.caller_usr, a.callee_usr, a.line, a.caller_node,
-                    a.callee_node) <
-           std::tie(b.caller_usr, b.callee_usr, b.line, b.caller_node,
-                    b.callee_node);
-  });
+  std::sort(calls.begin(), calls.end(),
+            [](const CallFact &a, const CallFact &b) {
+              return std::tie(a.caller_usr, a.callee_usr, a.line, a.caller_node,
+                              a.callee_node) <
+                     std::tie(b.caller_usr, b.callee_usr, b.line, b.caller_node,
+                              b.callee_node);
+            });
   return calls;
 }
 

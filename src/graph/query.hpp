@@ -19,6 +19,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "catalogs/generated_catalog.hpp"
 #include "graph/records.hpp"
 #include "storage/storage.hpp"
 
@@ -46,64 +47,28 @@ public:
 // a query and to validate any DB that disagrees.
 
 inline const std::map<std::string, int64_t> &edge_kinds_map() {
-  static const std::map<std::string, int64_t> m = {
-      {"calls", 1},
-      {"inherits", 2},
-      {"contains", 3},
-      {"specializes", 4},
-      {"instantiates", 5},
-      {"overrides", 6},
-      {"uses", 7},
-      {"field_of", 8},
-      {"method_of", 9},
-      // PR1 (v17): Layer-0 construction / destruction form edges
-      {"construct-value", 10},
-      {"construct-temp", 11},
-      {"construct-heap", 12},
-      {"construct-copy", 13},
-      {"construct-move", 14},
-      {"factory-construct", 15},
-      {"destroy", 16},
-      // PR2 (v17): Layer-0 friend declaration (rolled up to befriends)
-      {"friend", 17},
-      // Materialised virtual-dispatch caller edge (built by resolve)
-      {"dispatch_calls", 18},
-      // v34: typedef / using alias -> the type it names (was uses(7))
-      {"alias_of", 19},
-      // v34: variable / class field -> its declared type (was uses(7))
-      {"of_type", 20},
-  };
+  static const std::map<std::string, int64_t> m = [] {
+    std::map<std::string, int64_t> result;
+    for (const auto &relation : catalog::kRelations) {
+      if (relation.layer == catalog::View::Symbol) {
+        result.emplace(std::string(relation.name), relation.id);
+      }
+    }
+    return result;
+  }();
   return m;
 }
 
 inline const std::map<int64_t, std::string> &edge_names_map() {
-  static const std::map<int64_t, std::string> m = {
-      {1, "calls"},
-      {2, "inherits"},
-      {3, "contains"},
-      {4, "specializes"},
-      {5, "instantiates"},
-      {6, "overrides"},
-      {7, "uses"},
-      {8, "field_of"},
-      {9, "method_of"},
-      // PR1 (v17): Layer-0 construction / destruction form edges
-      {10, "construct-value"},
-      {11, "construct-temp"},
-      {12, "construct-heap"},
-      {13, "construct-copy"},
-      {14, "construct-move"},
-      {15, "factory-construct"},
-      {16, "destroy"},
-      // PR2 (v17): Layer-0 friend declaration (rolled up to befriends)
-      {17, "friend"},
-      // Materialised virtual-dispatch caller edge (built by resolve)
-      {18, "dispatch_calls"},
-      // v34: typedef / using alias -> the type it names (was uses(7))
-      {19, "alias_of"},
-      // v34: variable / class field -> its declared type (was uses(7))
-      {20, "of_type"},
-  };
+  static const std::map<int64_t, std::string> m = [] {
+    std::map<int64_t, std::string> result;
+    for (const auto &relation : catalog::kRelations) {
+      if (relation.layer == catalog::View::Symbol) {
+        result.emplace(relation.id, std::string(relation.name));
+      }
+    }
+    return result;
+  }();
   return m;
 }
 

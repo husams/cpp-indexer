@@ -13,6 +13,7 @@ set(CIDX_DEFAULT_TESTS
   graph_query_test
   graph_parity_boundary_test
   query_plan_test
+  catalog_test
   fuzzy_match_test
   repo_test
   include_aliasing_test

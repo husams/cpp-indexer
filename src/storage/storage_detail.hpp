@@ -13,6 +13,7 @@
 #include <string_view>
 #include <vector>
 
+#include "catalogs/generated_catalog.hpp"
 #include "storage/records.hpp"
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
@@ -22,33 +23,25 @@
 
 namespace cidx::detail {
 
-constexpr std::array<std::string_view, 17> kSymbolKinds = {
-    "class",          "struct",
-    "union",          "function",
-    "method",         "member",
-    "constructor",    "destructor",
-    "enum",           "enum-constant",
-    "typedef",        "type-alias",
-    "class-template", "function-template",
-    "variable",       "namespace",
-    "macro",
-};
+inline constexpr auto kSymbolKinds = [] {
+  std::array<std::string_view, catalog::kSymbolKinds.size()> names{};
+  for (std::size_t i = 0; i < catalog::kSymbolKinds.size(); ++i) {
+    names[i] = catalog::kSymbolKinds[i].name;
+  }
+  return names;
+}();
 
 // symbol.kind name <-> stored integer (== libclang CXCursorKind). Mirrors
 // storage.py SYMBOL_KIND_IDS / SYMBOL_KIND_NAMES. The metadata symbol_kind
 // table is seeded with the same pairs (display only).
 inline const std::map<std::string_view, int64_t> &symbol_kind_ids_map() {
-  static const std::map<std::string_view, int64_t> m = {
-      {"struct", 2},          {"union", 3},
-      {"class", 4},           {"enum", 5},
-      {"member", 6},          {"enum-constant", 7},
-      {"function", 8},        {"variable", 9},
-      {"typedef", 20},        {"method", 21},
-      {"namespace", 22},      {"constructor", 24},
-      {"destructor", 25},     {"function-template", 30},
-      {"class-template", 31}, {"type-alias", 36},
-      {"macro", 501},
-  };
+  static const std::map<std::string_view, int64_t> m = [] {
+    std::map<std::string_view, int64_t> result;
+    for (const auto &kind : catalog::kSymbolKinds) {
+      result.emplace(kind.name, kind.id);
+    }
+    return result;
+  }();
   return m;
 }
 

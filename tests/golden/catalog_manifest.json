@@ -1,0 +1,26 @@
+{
+  "catalog_version": 1,
+  "catalog_hash": "a36486447a5b4d5cb1ad6e1a7248be623e56650ed44469e8e8131cd44eb2dc5e",
+  "artifact_kinds": [
+    {
+      "id": 1,
+      "name": "semantic-index",
+      "schema_version": 34
+    },
+    {
+      "id": 2,
+      "name": "astgraph",
+      "schema_version": 3
+    },
+    {
+      "id": 3,
+      "name": "analysis-result",
+      "schema_version": 1
+    },
+    {
+      "id": 4,
+      "name": "query-result",
+      "schema_version": 1
+    }
+  ]
+}

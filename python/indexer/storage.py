@@ -34,6 +34,10 @@ from collections.abc import Iterator, Sequence
 from typing import Any, Optional
 
 from indexer import pathx as _pathx
+from indexer.generated_catalog import CATALOG_HASH, CATALOG_SEED_SQL, CATALOG_VERSION
+from indexer.generated_catalog import (
+    SYMBOL_KIND_IDS as _GENERATED_SYMBOL_KIND_IDS,
+)
 
 SCHEMA_VERSION = 34
 
@@ -42,25 +46,7 @@ SCHEMA_VERSION = 34
 #: 1:1 (e.g. CXCursor_CXXMethod == 21). Storing the small int instead of the
 #: name keeps the symbol table compact; the `symbol_kind` table (and the inverse
 #: map below) recover the string for display. Mirrors clang/ast.py:_KIND_MAP.
-SYMBOL_KIND_IDS = {
-    "struct": 2,             # CXCursor_StructDecl
-    "union": 3,              # CXCursor_UnionDecl
-    "class": 4,              # CXCursor_ClassDecl
-    "enum": 5,               # CXCursor_EnumDecl
-    "member": 6,             # CXCursor_FieldDecl
-    "enum-constant": 7,      # CXCursor_EnumConstantDecl
-    "function": 8,           # CXCursor_FunctionDecl
-    "variable": 9,           # CXCursor_VarDecl
-    "typedef": 20,           # CXCursor_TypedefDecl
-    "method": 21,            # CXCursor_CXXMethod
-    "namespace": 22,         # CXCursor_Namespace
-    "constructor": 24,       # CXCursor_Constructor
-    "destructor": 25,        # CXCursor_Destructor
-    "function-template": 30,  # CXCursor_FunctionTemplate
-    "class-template": 31,    # CXCursor_ClassTemplate
-    "type-alias": 36,        # CXCursor_TypeAliasDecl
-    "macro": 501,            # CXCursor_MacroDefinition
-}
+SYMBOL_KIND_IDS = dict(_GENERATED_SYMBOL_KIND_IDS)
 #: stored integer -> symbol.kind name (display / read-side recovery).
 SYMBOL_KIND_NAMES = {v: k for k, v in SYMBOL_KIND_IDS.items()}
 
@@ -659,6 +645,19 @@ CREATE TABLE IF NOT EXISTS include_macro_use (
 CREATE INDEX IF NOT EXISTS idx_include_macro_use_path ON include_macro_use(def_path);
 
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '{SCHEMA_VERSION}');
+INSERT INTO meta (key, value) VALUES ('catalog_version', '{CATALOG_VERSION}')
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+INSERT INTO meta (key, value) VALUES ('catalog_hash', '{CATALOG_HASH}')
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+INSERT INTO meta (key, value) VALUES ('artifact_kind', 'semantic-index')
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+INSERT INTO meta (key, value) VALUES ('status', 'complete')
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+INSERT INTO meta (key, value) VALUES ('trust', 'producer-verified')
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+INSERT INTO meta (key, value) VALUES ('evidence', 'source')
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+{CATALOG_SEED_SQL}
 """
 
 

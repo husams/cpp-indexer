@@ -42,6 +42,11 @@ struct RelationDesc {
   std::string name; // bare name ("calls", "uses", ...)
   View layer = View::Symbol;
   int64_t kind_id = 0; // edge_kind.id or entity_edge_kind.id
+  std::string source;
+  std::string target;
+  std::string inverse;
+  std::string evidence;
+  std::string completeness;
 };
 
 // All catalogued relations (18 symbol-layer + 12 entity-layer).

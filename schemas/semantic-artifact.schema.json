@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CIDX artifact manifest",
+  "type": "object",
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "catalog_version",
+    "catalog_hash",
+    "status",
+    "trust",
+    "evidence"
+  ],
+  "properties": {
+    "artifact_kind": {
+      "enum": [
+        "semantic-index",
+        "astgraph",
+        "analysis-result",
+        "query-result"
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "catalog_version": {
+      "const": 1
+    },
+    "catalog_hash": {
+      "const": "a36486447a5b4d5cb1ad6e1a7248be623e56650ed44469e8e8131cd44eb2dc5e"
+    },
+    "status": {
+      "enum": [
+        "complete",
+        "partial",
+        "unknown",
+        "error"
+      ]
+    },
+    "evidence": {
+      "enum": [
+        "source",
+        "derived",
+        "inferred",
+        "runtime",
+        "assumption",
+        "proof"
+      ]
+    },
+    "trust": {
+      "enum": [
+        "unverified",
+        "producer-verified",
+        "reader-verified"
+      ]
+    }
+  }
+}

@@ -51,37 +51,14 @@ from typing import Any, Iterable, Literal, Optional, Sequence, overload
 # symbol.kind is stored as a CXCursorKind int (v16); these recover the name and
 # convert a name filter back to the stored int. Single source of truth = storage.
 from indexer.storage import SYMBOL_KIND_IDS, SYMBOL_KIND_NAMES
+from indexer.generated_catalog import (
+    CATALOG_HASH,
+    EDGE_KINDS as _GENERATED_EDGE_KINDS,
+    TYPE_KIND_NAMES as _GENERATED_TYPE_KIND_NAMES,
+)
 
-# edge_kind.id <-> name -- seeded identically by the indexer (storage.py). We
-# hardcode to avoid a query and to validate any DB that disagrees.
-EDGE_KINDS = {
-    "calls": 1,
-    "inherits": 2,
-    "contains": 3,
-    "specializes": 4,
-    "instantiates": 5,
-    "overrides": 6,
-    "uses": 7,
-    "field_of": 8,
-    "method_of": 9,
-    # PR1 (v17): Layer-0 construction / destruction form edges
-    "construct-value": 10,
-    "construct-temp": 11,
-    "construct-heap": 12,
-    "construct-copy": 13,
-    "construct-move": 14,
-    "factory-construct": 15,
-    "destroy": 16,
-    # PR2 (v17): Layer-0 friend declaration (rolled up to befriends entity_edge)
-    "friend": 17,
-    # Materialised virtual-dispatch caller edge (built by resolve): caller ->
-    # each transitive override of the virtual method it statically calls.
-    "dispatch_calls": 18,
-    # v34: typedef / using alias -> the type it names (was uses(7)).
-    "alias_of": 19,
-    # v34: variable / class field -> its declared type (was uses(7)).
-    "of_type": 20,
-}
+# Generated relation identifiers are the read-side contract shared with C++.
+EDGE_KINDS = dict(_GENERATED_EDGE_KINDS)
 EDGE_NAMES = {v: k for k, v in EDGE_KINDS.items()}
 
 #: C++ access specifiers, used to validate the members(access=...) filter.
@@ -510,14 +487,8 @@ class Definition:
         }
 
 
-#: type_node.kind id -> display name (same seed values as the `type_kind`
-#: table / src/graph/query.cpp type_kind_names).
-TYPE_KIND_NAMES = {
-    1: "builtin", 2: "record", 3: "enum", 4: "alias",
-    5: "pointer", 6: "lvalue-reference", 7: "rvalue-reference",
-    8: "array", 9: "function", 10: "template-param", 11: "other",
-    12: "member-data-pointer", 13: "member-function-pointer",
-}
+# Generated type identifiers are the read-side contract shared with C++.
+TYPE_KIND_NAMES = dict(_GENERATED_TYPE_KIND_NAMES)
 
 
 @dataclass(frozen=True)
@@ -983,6 +954,15 @@ class GraphQuery:
         self._c.row_factory = sqlite3.Row
         self.db_path = db_path
         self._owns_conn = True
+        stored_hash = self._c.execute(
+            "SELECT value FROM meta WHERE key = 'catalog_hash'"
+        ).fetchone()
+        if stored_hash is None or stored_hash[0] != CATALOG_HASH:
+            actual = "missing" if stored_hash is None else stored_hash[0]
+            raise RuntimeError(
+                f"incompatible cidx semantic catalogs: catalog_hash {actual!r}; "
+                f"expected {CATALOG_HASH!r}. Regenerate the index."
+            )
         self._file_cache: Optional[dict[int, tuple[str, Optional[str]]]] = None
         self._resolved: Optional[bool] = None
         self._entity_nodes_ready: Optional[bool] = None
