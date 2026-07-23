@@ -339,16 +339,17 @@ def run(db_path: Path, manifest_path: Path, workload_id: str, profile_path: Path
         reference_digest = semantic_digest(semantic_reference) if semantic_reference else None
         checks["semantic_reference_digest"] = reference_digest
         checks["semantic_equivalence"] = operation_equivalence if reference_digest is None else checks["semantic_digest"] == reference_digest
+        profile_sha256 = sha256(canonical_json(profile))
         identity = {
             "manifest_sha256": manifest_digest(manifest), "workload": workload_id, "scale": scale,
             "seed": int(_meta(connection, "benchmark_seed") or manifest.get("seed", 0)), "distribution": distribution,
             "requested": requested, "actual": counts, "caps": caps, "revision": git_revision(),
-            "profile_id": profile["profile_id"], "hardware_fingerprint": hardware_fingerprint(environment),
+            "profile_id": profile["profile_id"], "profile_sha256": profile_sha256, "hardware_fingerprint": hardware_fingerprint(environment),
             "configuration": effective_configuration,
         }
         measured_indexes = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index' ORDER BY name")]
         configuration_evidence = {
-            "configuration": effective_configuration, "measured": True,
+            "configuration": effective_configuration, "profile_sha256": profile_sha256, "measured": True,
             "indexes": measured_indexes,
             "artifact": str(db_path),
             "checks": [
@@ -362,7 +363,7 @@ def run(db_path: Path, manifest_path: Path, workload_id: str, profile_path: Path
             "result_version": "storage-m0/result-v2", "benchmark": BENCHMARK_VERSION, "schema_version": SCHEMA_VERSION,
             "manifest_sha256": identity["manifest_sha256"], "workload": workload_id, "scale": scale,
             "seed": identity["seed"], "distribution": distribution, "requested": requested, "actual": counts,
-            "caps": caps, "profile_id": profile["profile_id"], "configuration": effective_configuration,
+            "caps": caps, "profile_id": profile["profile_id"], "profile_sha256": profile_sha256, "configuration": effective_configuration,
             "identity": identity, "run_id": run_id, "started_at": started,
             "revision": identity["revision"], "environment": environment, "hardware_fingerprint": identity["hardware_fingerprint"],
             "configuration_evidence": configuration_evidence,

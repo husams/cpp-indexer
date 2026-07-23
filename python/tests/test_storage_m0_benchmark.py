@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from benchmarks.storage_m0.common import canonical_json, load_json, sha256  # noqa: E402
 from benchmarks.storage_m0.bad_config import drop_hot_indexes  # noqa: E402
-from benchmarks.storage_m0.gate import _bound_profile, evaluate, evaluate_custom_store, evaluate_regression, evaluate_slos  # noqa: E402
+from benchmarks.storage_m0.gate import _bound_profile, _slo_checks_sha256, evaluate, evaluate_custom_store, evaluate_regression, evaluate_slos  # noqa: E402
 from benchmarks.storage_m0.generator import _pair, generate  # noqa: E402
 from benchmarks.storage_m0.recovery import simulate  # noqa: E402
 from benchmarks.storage_m0.run import run  # noqa: E402
@@ -258,7 +258,7 @@ def test_custom_store_rejects_duplicate_alternative_and_placeholder_costs(tmp_pa
                 "run_id": alternative["run_id"], "result_run_id": result["run_id"], "artifact": str(artifact),
                 "content_sha256": digest, "configuration": alternative["configuration"],
                 "checks": [{"id": f"{item_class}.measured", "status": "pass", "actual": "measured", "target": "target"}],
-                "outcome": {"measured": True, "measured_inability": True, "slo_status": "fail", "alternative_class": item_class, "run_id": alternative["run_id"], "content_sha256": digest, "configuration": alternative["configuration"], "tested_failed_slos": sorted({item["id"] for item in slo_checks if item["status"] == "fail"}), "slo_checks_sha256": sha256(canonical_json(slo_checks))},
+                "outcome": {"measured": True, "measured_inability": True, "slo_status": "fail", "alternative_class": item_class, "run_id": alternative["run_id"], "content_sha256": digest, "configuration": alternative["configuration"], "tested_failed_slos": sorted({item["id"] for item in slo_checks if item["status"] == "fail"}), "slo_checks_sha256": _slo_checks_sha256(alternative, slo_checks)},
             },
         }
 
@@ -269,6 +269,12 @@ def test_custom_store_rejects_duplicate_alternative_and_placeholder_costs(tmp_pa
     valid = {"decision": "propose", "result_run_id": result["run_id"], "failed_slos": failed, "alternatives": [evidence("schema_tuning", schema_result, tmp_path / "schema.json"), evidence("derived_accelerator", accelerator_result, tmp_path / "accelerator.json")], "costs": costs}
     valid_gate = evaluate_custom_store(valid, require=True, result=result)
     assert valid_gate["status"] == "pass", valid_gate["errors"]
+
+    mutated_profile = copy.deepcopy(custom_profile)
+    mutated_profile["description"] = "post-measurement profile mutation"
+    custom_profile_path.write_text(canonical_json(mutated_profile) + "\n", encoding="utf-8")
+    assert evaluate_custom_store(valid, require=True, result=result)["status"] == "fail"
+    custom_profile_path.write_text(canonical_json(custom_profile) + "\n", encoding="utf-8")
 
     duplicate_path = tmp_path / "duplicate.json"
     shutil.copy2(tmp_path / "schema.json", duplicate_path)

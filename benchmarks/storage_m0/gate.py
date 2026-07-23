@@ -56,7 +56,7 @@ def _identity_dimensions(result: dict[str, Any]) -> dict[str, Any]:
     identity = result.get("identity")
     if not isinstance(identity, dict):
         return {}
-    return {key: identity.get(key) for key in ("manifest_sha256", "workload", "scale", "seed", "distribution", "requested", "actual", "caps", "revision", "profile_id", "hardware_fingerprint")}
+    return {key: identity.get(key) for key in ("manifest_sha256", "workload", "scale", "seed", "distribution", "requested", "actual", "caps", "revision", "profile_id", "profile_sha256", "hardware_fingerprint")}
 
 
 def _bound_profile(result: dict[str, Any]) -> dict[str, Any] | None:
@@ -68,11 +68,15 @@ def _bound_profile(result: dict[str, Any]) -> dict[str, Any] | None:
         profile = load_json(Path(profile_artifact))
     except (OSError, ValueError):
         return None
-    return profile if isinstance(profile, dict) and profile.get("profile_id") == result.get("profile_id") else None
+    return profile if isinstance(profile, dict) and profile.get("profile_id") == result.get("profile_id") and sha256(canonical_json(profile)) == result.get("profile_sha256") else None
 
 
 def _failed_slo_ids(checks: list[dict[str, Any]]) -> set[str]:
     return {item["id"] for item in checks if item.get("status") == "fail" and item.get("id")}
+
+
+def _slo_checks_sha256(result: dict[str, Any], checks: list[dict[str, Any]]) -> str:
+    return sha256(canonical_json({"profile_sha256": result.get("profile_sha256"), "checks": checks}))
 
 
 def _measurement_signature(result: dict[str, Any]) -> str:
@@ -102,7 +106,7 @@ def _bound_result_errors(result: dict[str, Any], role: str) -> list[str]:
         errors.append(f"{role}: result identity configuration is not bound")
     elif sha256(canonical_json(identity))[:24] != result.get("run_id"):
         errors.append(f"{role}: run_id is not the canonical identity binding")
-    for key in ("manifest_sha256", "workload", "scale", "seed", "distribution", "requested", "actual", "caps", "revision", "profile_id", "hardware_fingerprint", "configuration"):
+    for key in ("manifest_sha256", "workload", "scale", "seed", "distribution", "requested", "actual", "caps", "revision", "profile_id", "profile_sha256", "hardware_fingerprint", "configuration"):
         if isinstance(identity, dict) and result.get(key) != identity.get(key):
             errors.append(f"{role}: result field {key} is not bound to identity")
     for key in ("artifact", "result_artifact", "manifest_artifact", "profile_artifact"):
@@ -166,6 +170,8 @@ def _bound_result_errors(result: dict[str, Any], role: str) -> list[str]:
         errors.append(f"{role}: configuration evidence run_id is not bound")
     if evidence.get("configuration") != result.get("configuration"):
         errors.append(f"{role}: configuration evidence configuration is not bound")
+    if evidence.get("profile_sha256") != result.get("profile_sha256"):
+        errors.append(f"{role}: configuration evidence profile digest is not bound")
     profile_artifact = evidence.get("profile_artifact")
     if profile_artifact and Path(profile_artifact).is_file():
         try:
@@ -278,7 +284,7 @@ def _real_evidence(item: dict[str, Any], result: dict[str, Any] | None, failed_s
         and outcome.get("content_sha256") == content_sha256
         and outcome.get("configuration") == bound.get("configuration")
         and set(outcome.get("tested_failed_slos", [])) == bound_failed_slos
-        and outcome.get("slo_checks_sha256") == sha256(canonical_json(slo_checks))
+        and outcome.get("slo_checks_sha256") == _slo_checks_sha256(bound, slo_checks)
     )
     if valid:
         seen["run_id"].add(run_id)
