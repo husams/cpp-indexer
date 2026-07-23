@@ -5,6 +5,8 @@
 
 #include "query/exec.hpp"
 
+#include "graph/query.hpp"
+
 #include <algorithm>
 #include <map>
 #include <set>
@@ -67,11 +69,16 @@ std::string col_expr(const std::string &field) {
 // entity_node.kind -> display name (entity_kind seed), null when out of range.
 Cell entity_type_name_cell(int64_t raw) {
   static const char *names[] = {
-      "other",          "class",
-      "abstract_class", "interface",
-      "union",          "enum",
-      "class_template", "abstract_class_template",
-      "interface_template", "namespace",
+      "other",
+      "class",
+      "abstract_class",
+      "interface",
+      "union",
+      "enum",
+      "class_template",
+      "abstract_class_template",
+      "interface_template",
+      "namespace",
   };
   if (raw >= 0 && raw <= 9) {
     return Cell(std::string(names[raw]));
@@ -84,7 +91,8 @@ int64_t kind_value_id(const std::string &field, const std::string &name) {
   return field == "entity_type" ? entity_kind_id(name) : symbol_kind_id(name);
 }
 
-// ---- predicate -> SQL ---------------------------------------------------------
+// ---- predicate -> SQL
+// ---------------------------------------------------------
 
 bool is_kind_field(const std::string &field) {
   return field == "kind" || field == "entity_type";
@@ -145,7 +153,8 @@ void pred_sql(const Pred &p, std::string &sql, std::vector<SqlValue> &args) {
   }
 }
 
-// ---- small SQL helpers ----------------------------------------------------------
+// ---- small SQL helpers
+// ----------------------------------------------------------
 
 std::string placeholders(size_t n) {
   std::string s;
@@ -168,7 +177,8 @@ std::vector<int64_t> fetch_ids(Storage &db, const std::string &sql,
   return out;
 }
 
-// ---- executor state --------------------------------------------------------------
+// ---- executor state
+// --------------------------------------------------------------
 
 struct Stream {
   View view = View::Symbol;
@@ -215,14 +225,115 @@ bool cell_eq(const Cell &a, const Cell &b) {
   return !cell_less(a, b) && !cell_less(b, a);
 }
 
+struct ReceiverTypes {
+  bool top = true;
+  std::set<std::string> types;
+};
+
+ReceiverTypes exact_receiver(const std::string &type_usr) {
+  return {.top = false, .types = {type_usr}};
+}
+
+void join_receiver_types(ReceiverTypes &into, const ReceiverTypes &other) {
+  if (into.top || other.top) {
+    into.top = true;
+    into.types.clear();
+    return;
+  }
+  into.types.insert(other.types.begin(), other.types.end());
+}
+
+ReceiverTypes resolve_receiver(const std::vector<graph::Site> &sites,
+                               const ReceiverTypes &current_this) {
+  ReceiverTypes result{.top = false, .types = {}};
+  bool saw_receiver = false;
+  for (const auto &site : sites) {
+    if (!site.recv_src_kind) {
+      continue;
+    }
+    saw_receiver = true;
+    ReceiverTypes resolved;
+    const bool exact_static_type =
+        site.recv_type_usr &&
+        ((site.recv_type_is_value && *site.recv_type_is_value != 0) ||
+         *site.recv_src_kind == "construct");
+    if (exact_static_type) {
+      resolved = exact_receiver(*site.recv_type_usr);
+    } else if (*site.recv_src_kind == "this") {
+      resolved = current_this;
+    }
+    join_receiver_types(result, resolved);
+  }
+  return saw_receiver ? result : ReceiverTypes{};
+}
+
+void append_unique(std::vector<graph::Sym> &symbols, const graph::Sym &symbol) {
+  if (std::ranges::none_of(symbols, [&symbol](const graph::Sym &item) {
+        return item.id == symbol.id;
+      })) {
+    symbols.push_back(symbol);
+  }
+}
+
+std::optional<graph::Sym>
+select_dispatch_target(graph::GraphQuery &graph,
+                       const std::vector<graph::Sym> &candidates,
+                       const std::string &receiver_usr) {
+  const auto receiver = graph.get_by_usr(receiver_usr);
+  if (!receiver) {
+    return std::nullopt;
+  }
+  std::vector<std::string> owners{receiver_usr};
+  for (const auto &base : graph.bases(receiver->id, false)) {
+    owners.push_back(base.usr);
+  }
+  for (const auto &owner_usr : owners) {
+    const auto target = std::ranges::find_if(
+        candidates, [&owner_usr](const graph::Sym &candidate) {
+          return candidate.parent_usr && *candidate.parent_usr == owner_usr;
+        });
+    if (target != candidates.end()) {
+      return *target;
+    }
+  }
+  return std::nullopt;
+}
+
+std::vector<graph::Sym>
+receiver_aware_callees(graph::GraphQuery &graph, const graph::Sym &callee,
+                       const ReceiverTypes &receiver_types) {
+  std::vector<graph::Sym> result{callee};
+  if (!graph.is_virtual_method(callee.id)) {
+    return result;
+  }
+  const auto candidates = graph.dispatch_targets(callee.id);
+  if (receiver_types.top) {
+    for (const auto &candidate : candidates) {
+      append_unique(result, candidate);
+    }
+    return result;
+  }
+  for (const auto &receiver_usr : receiver_types.types) {
+    const auto target = select_dispatch_target(graph, candidates, receiver_usr);
+    if (!target) {
+      for (const auto &candidate : candidates) {
+        append_unique(result, candidate);
+      }
+      return result;
+    }
+    append_unique(result, *target);
+  }
+  return result;
+}
+
 class Exec {
 public:
   explicit Exec(Storage &db) : db_(db) {}
 
   Stream run_plan(const Plan &plan) {
     Stream st;
-    st.view = plan.source.kind == SourceKind::Entity ? View::Entity
-                                                     : View::Symbol;
+    st.view =
+        plan.source.kind == SourceKind::Entity ? View::Entity : View::Symbol;
     if (plan.source.kind != SourceKind::Codebase) {
       st.ids = resolve_source(plan.source);
     }
@@ -241,7 +352,11 @@ public:
         break;
       case StageOp::Out:
       case StageOp::In:
-        traverse(st, stage);
+        if (stage.mode == TraversalMode::Devirtualized) {
+          traverse_devirtualized(st, stage);
+        } else {
+          traverse(st, stage);
+        }
         st.limit_in_effect = false;
         break;
       case StageOp::Union:
@@ -388,6 +503,58 @@ private:
   // is guaranteed by the finite max_depth (<= 32) and the state budget
   // (cumulative level sizes). In a diamond A->B, A->C->B, out(r, 2, 2)
   // therefore DOES emit B. The stream view follows the relation's layer.
+  void traverse_devirtualized(Stream &st, const Stage &stage) {
+    graph::GraphQuery graph(db_);
+    const std::optional<std::vector<std::string>> call_kinds =
+        std::vector<std::string>{"calls"};
+    std::map<int64_t, ReceiverTypes> frontier;
+    for (const int64_t id : st.ids) {
+      frontier.emplace(id, ReceiverTypes{});
+    }
+    std::set<int64_t> emitted;
+    int64_t states = 0;
+
+    for (int64_t depth = 1; depth <= stage.max_depth && !frontier.empty();
+         ++depth) {
+      std::map<int64_t, ReceiverTypes> level;
+      for (const auto &[caller_id, current_this] : frontier) {
+        const auto edges = graph.edges_out(
+            caller_id, call_kinds, static_cast<int>(kTraverseNodeBudget));
+        for (const auto &edge : edges) {
+          const ReceiverTypes receiver =
+              resolve_receiver(edge.sites, current_this);
+          for (const auto &callee :
+               receiver_aware_callees(graph, edge.peer, receiver)) {
+            const auto [at, inserted] = level.try_emplace(callee.id, receiver);
+            if (!inserted) {
+              join_receiver_types(at->second, receiver);
+            }
+          }
+        }
+      }
+
+      if (states + static_cast<int64_t>(level.size()) > kTraverseNodeBudget) {
+        const auto keep = static_cast<size_t>(kTraverseNodeBudget - states);
+        auto first_removed = level.begin();
+        std::advance(first_removed, static_cast<int64_t>(keep));
+        level.erase(first_removed, level.end());
+        st.truncated = true;
+      }
+      states += static_cast<int64_t>(level.size());
+      if (depth >= stage.min_depth) {
+        for (const auto &[id, _receiver] : level) {
+          emitted.insert(id);
+        }
+      }
+      if (st.truncated) {
+        break;
+      }
+      frontier = std::move(level);
+    }
+    st.ids.assign(emitted.begin(), emitted.end());
+    st.view = View::Symbol;
+  }
+
   void traverse(Stream &st, const Stage &stage) {
     const RelationDesc *rel = resolve_relation(stage.relation, st.view);
     const bool entity_layer = rel->layer == View::Entity;
@@ -420,8 +587,7 @@ private:
       }
       std::ranges::sort(level);
       level.erase(std::ranges::unique(level).begin(), level.end());
-      if (states + static_cast<int64_t>(level.size()) >
-          kTraverseNodeBudget) {
+      if (states + static_cast<int64_t>(level.size()) > kTraverseNodeBudget) {
         level.resize(static_cast<size_t>(kTraverseNodeBudget - states));
         st.truncated = true;
       }

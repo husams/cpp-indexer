@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from typing import Any, NoReturn, Optional, Sequence
 
 from .storage import (
@@ -18,7 +19,7 @@ from .storage import (
 )
 
 __all__ = [
-    "PlanError", "Pred", "Stage", "Source", "Plan", "Query", "Result",
+    "PlanError", "TraversalMode", "Pred", "Stage", "Source", "Plan", "Query", "Result",
     "Executor", "start", "codebase", "symbol", "entity",
     "all_of", "any_of", "not_", "eq", "ne", "glob", "in_list",
     "nodes", "view", "where", "out", "in_", "union_", "intersect", "except_",
@@ -40,6 +41,13 @@ class PlanError(Exception):
 
 def _fail(code: str, what: str) -> NoReturn:
     raise PlanError(f"{code}: {what}")
+
+
+class TraversalMode(str, Enum):
+    """Execution policy for a typed graph traversal stage."""
+
+    STATIC = "static"
+    DEVIRTUALIZED = "devirtualized"
 
 
 # ---- Views --------------------------------------------------------------------
@@ -186,6 +194,7 @@ class Stage:
     pred: Optional[Pred] = None
     level: str = SYMBOL_VIEW
     relation: str = ""
+    mode: str = TraversalMode.STATIC.value
     min_depth: int = 1
     max_depth: int = 1
     operand: Optional["Plan"] = None
@@ -247,9 +256,15 @@ def where(pred: Pred) -> Stage:
     return Stage(op="where", pred=pred)
 
 
-def out(relation: str, min_depth: int = 1, max_depth: int = 1) -> Stage:
-    return Stage(op="out", relation=relation, min_depth=min_depth,
-                 max_depth=max_depth)
+def out(
+    relation: str,
+    min_depth: int = 1,
+    max_depth: int = 1,
+    mode: TraversalMode | str = TraversalMode.STATIC,
+) -> Stage:
+    mode_value = mode.value if isinstance(mode, TraversalMode) else mode
+    return Stage(op="out", relation=relation, mode=mode_value,
+                 min_depth=min_depth, max_depth=max_depth)
 
 
 def in_(relation: str, min_depth: int = 1, max_depth: int = 1) -> Stage:
@@ -405,6 +420,18 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
                       f"{st.active} view")
             if not 1 <= stage.min_depth <= stage.max_depth <= 32:
                 _fail("E_DEPTH", "depth bounds must satisfy 1 <= min <= max <= 32")
+            if stage.mode not in (
+                TraversalMode.STATIC.value,
+                TraversalMode.DEVIRTUALIZED.value,
+            ):
+                _fail("E_STAGE", f"unknown traversal mode '{stage.mode}'")
+            if stage.mode == TraversalMode.DEVIRTUALIZED.value and not (
+                stage.op == "out" and rel[1] == SYMBOL_VIEW and rel[0] == "calls"
+            ):
+                _fail(
+                    "E_STAGE",
+                    "devirtualized mode requires an outbound symbol.calls traversal",
+                )
             ns = replace(stage, relation=f"{rel[1]}.{rel[0]}")
             # Traversal targets live in the relation's layer: the stream view
             # (and later bare-relation resolution) follows it.
@@ -493,6 +520,8 @@ def _plan_to_dict(plan: Plan) -> dict[str, Any]:
             o["pred"] = _pred_to_dict(s.pred)  # type: ignore[arg-type]
         elif s.op in ("out", "in"):
             o["relation"] = s.relation
+            if s.mode != TraversalMode.STATIC.value:
+                o["mode"] = s.mode
             o["min_depth"] = s.min_depth
             o["max_depth"] = s.max_depth
         elif s.op in ("union", "intersect", "except"):
@@ -678,7 +707,10 @@ class Executor:
             elif stage.op == "where":
                 self._filter(st, stage.pred)  # type: ignore[arg-type]
             elif stage.op in ("out", "in"):
-                self._traverse(st, stage)
+                if stage.mode == TraversalMode.DEVIRTUALIZED.value:
+                    self._traverse_devirtualized(st, stage)
+                else:
+                    self._traverse(st, stage)
                 st.limit_in_effect = False
             elif stage.op in ("union", "intersect", "except"):
                 self._set_op(st, stage)
@@ -809,6 +841,38 @@ class Executor:
             depth += 1
         st.ids = sorted(emitted)
         st.view = rel[1]
+
+    def _traverse_devirtualized(self, st: _Stream, stage: Stage) -> None:
+        """Run receiver-aware calls through the public compatibility model.
+
+        Unknown receivers retain the conservative target set; exact by-value
+        receivers use the same Gamma propagation as ``Callable`` callers.
+        """
+        from .model import Callable, CodeBase
+        from .query import GraphQuery
+
+        graph = GraphQuery.from_connection(self._conn, "<queryplan>")
+        codebase = CodeBase(graph)
+        emitted: set[int] = set()
+        states = 0
+        for root_id in sorted(set(st.ids)):
+            root = codebase.wrap(graph.get(root_id))
+            if not isinstance(root, Callable):
+                continue
+            for step in root.devirtualized_callgraph(
+                depth=stage.max_depth,
+                prune=True,
+            ):
+                states += 1
+                if states > TRAVERSE_NODE_BUDGET:
+                    st.truncated = True
+                    break
+                if step.depth >= stage.min_depth:
+                    emitted.add(step.callee.id)
+            if st.truncated:
+                break
+        st.ids = sorted(emitted)
+        st.view = SYMBOL_VIEW
 
     def _set_op(self, st: _Stream, stage: Stage) -> None:
         sub = self._run_plan(stage.operand)  # type: ignore[arg-type]

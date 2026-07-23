@@ -43,7 +43,8 @@ Normalization stores the qualified name in canonical JSON. `callers()` is
 Plan   := { source: Source, stages: [Stage...] }
 Source := codebase() | symbol(ref) | entity(ref)
 Stage  := nodes(pred?) | view(level) | where(pred)
-        | out(relation, depth=a..b) | in(relation, depth=a..b)
+        | out(relation, depth=a..b, mode=static|devirtualized)
+        | in(relation, depth=a..b)
         | union(plan) | intersect(plan) | except(plan)
         | select(fields) | count() | distinct() | order_by(fields) | limit(n)
 Pred   := all_of([p...]) | any_of([p...]) | not(p)
@@ -71,7 +72,8 @@ restricts hits to `entity_node` ids.
 `json.dumps(obj, indent=2)` (the existing `json_out` contract). Top-level key
 order: `cxq` (format version, `1`), `source`, `stages`. Stage key order:
 `op` first, then that op's fields in the documented order (`relation`,
-`min_depth`, `max_depth` for traversals; `pred` for filters; `fields`,
+optional non-static `mode`, `min_depth`, `max_depth` for traversals; `pred` for
+filters; `fields`,
 `n`, `level`, `plan` as applicable). Predicate key order: `op`, then
 `preds` / `pred` / (`field`, `values`|`value`).
 
@@ -109,6 +111,10 @@ Normalization: relation names become layer-qualified; nested `all_of` within
   set; termination comes from the finite max depth (≤ 32) and the state
   budget. Self (depth 0) is never emitted, but a start node reached again
   through a cycle of length ≥ 1 is.
+- `out(symbol.calls, mode=devirtualized)` preserves receiver types across
+  inherited method bodies and narrows virtual calls when the receiver is
+  exact. Unknown receivers retain every possible dispatch target. This mode
+  is rejected for inbound and non-`symbol.calls` traversals.
 - `union`, `intersect`, and `except` are all SET operations over deduped id
   sets — `union` never double-counts an id reached by both operands.
 - `distinct()` dedups row tuples after `select` (node streams are already
