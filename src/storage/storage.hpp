@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 34;
+constexpr int kSchemaVersion = 35;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -364,6 +364,14 @@ public:
   // Configurations whose TU is `tu_file_id`, ordered by digest.
   std::vector<IncludeConfig> include_configs_for_tu(int64_t tu_file_id);
 
+  int64_t add_translation_unit_config(const TranslationUnitConfig &input);
+  std::optional<TranslationUnitConfig>
+  translation_unit_config_by_id(int64_t config_id);
+  std::vector<TranslationUnitConfig>
+  translation_unit_configs_for_file(int64_t file_id);
+  void add_file_config(const FileConfigApplicability &applicability);
+  std::vector<FileConfigApplicability> file_configs_for(int64_t file_id);
+
   // UNIQUE upsert on (src_file_id, dst_path, config_id); ACCUMULATES count on
   // conflict (a header included twice in one file is two occurrences of one
   // collapsed edge). dst_file_id is refreshed when the caller now knows it.
@@ -387,6 +395,14 @@ public:
   // (dst_path, config digest) / (src path, config digest) for determinism.
   std::vector<IncludeEdge> include_edges_from(int64_t src_file_id,
                                               bool include_system);
+  std::vector<IncludeEdge>
+  include_edges_from_config(int64_t src_file_id,
+                            int64_t translation_unit_config_id,
+                            bool include_system);
+  ConfiguredIncludeEdges
+  invariant_include_edges(int64_t src_file_id,
+                          const std::vector<int64_t> &declared_config_ids,
+                          bool include_system);
   std::vector<IncludeEdge> include_edges_to(int64_t dst_file_id);
   // Every edge whose dst_path resolves to this path (covers targets that are
   // not owned by a component, which therefore have no dst_file_id).

@@ -556,6 +556,8 @@ CREATE TABLE IF NOT EXISTS include_config (
     arguments    TEXT,   -- JSON list of normalized parse args
     lang_mode    TEXT,   -- 'c' | 'c++'
     resource_dir TEXT,
+    translation_unit_config_id INTEGER REFERENCES translation_unit_config(id)
+                                ON DELETE SET NULL,
     UNIQUE (tu_file_id, digest)
 );
 CREATE INDEX IF NOT EXISTS idx_include_config_digest ON include_config(digest);
@@ -564,6 +566,56 @@ CREATE INDEX IF NOT EXISTS idx_include_config_digest ON include_config(digest);
 -- dst_file_id is NULL for system/unowned/unresolved targets; dst_path is the
 -- path AS OPENED (never symlink-resolved), or the written spelling when the
 -- directive did not resolve.
+-- v35 adds a shared normalized descriptor and per-file applicability rows.
+CREATE TABLE IF NOT EXISTS translation_unit_config (
+    id                    INTEGER PRIMARY KEY,
+    descriptor_hash       TEXT NOT NULL UNIQUE,
+    descriptor_json       TEXT NOT NULL,
+    driver                TEXT,
+    working_dir           TEXT,
+    language              TEXT,
+    standard              TEXT,
+    target                TEXT,
+    abi_options           TEXT NOT NULL,
+    sysroot               TEXT,
+    resource_dir          TEXT,
+    include_paths         TEXT NOT NULL,
+    macro_state           TEXT NOT NULL,
+    relevant_environment  TEXT NOT NULL,
+    generated_inputs      TEXT NOT NULL,
+    diagnostics_policy    TEXT,
+    arguments             TEXT NOT NULL,
+    state                 TEXT NOT NULL DEFAULT 'registered'
+                          CHECK (state IN ('registered','unregistered',
+                                            'ambiguous','stale','unavailable'))
+);
+CREATE INDEX IF NOT EXISTS idx_translation_unit_config_hash
+    ON translation_unit_config(descriptor_hash);
+
+CREATE TABLE IF NOT EXISTS translation_unit (
+    id        INTEGER PRIMARY KEY,
+    file_id   INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    config_id INTEGER NOT NULL REFERENCES translation_unit_config(id)
+              ON DELETE CASCADE,
+    state     TEXT NOT NULL DEFAULT 'registered'
+              CHECK (state IN ('registered','unregistered','ambiguous',
+                               'stale','unavailable')),
+    UNIQUE (file_id, config_id)
+);
+
+CREATE TABLE IF NOT EXISTS file_config (
+    file_id   INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    config_id INTEGER NOT NULL REFERENCES translation_unit_config(id)
+              ON DELETE CASCADE,
+    role      TEXT NOT NULL CHECK (role IN ('translation_unit','header')),
+    state     TEXT NOT NULL DEFAULT 'registered'
+              CHECK (state IN ('registered','unregistered','ambiguous',
+                               'stale','unavailable')),
+    reason    TEXT,
+    PRIMARY KEY (file_id, config_id, role)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_file_config_config ON file_config(config_id);
+
 CREATE TABLE IF NOT EXISTS include_edge (
     id           INTEGER PRIMARY KEY,
     src_file_id  INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
@@ -624,7 +676,7 @@ CREATE TABLE IF NOT EXISTS include_macro_use (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_include_macro_use_path ON include_macro_use(def_path);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '34');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '35');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest

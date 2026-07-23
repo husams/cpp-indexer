@@ -126,25 +126,44 @@ int64_t Storage::add_file(
   if (compile_options) {
     opts = json_min::encode_string_array(*compile_options);
   }
-  auto st =
-      db_.prepare("INSERT INTO file (directory_id, name, mtime, md5, "
-                  "compile_options, driver) "
-                  "VALUES (?, ?, ?, ?, ?, ?) "
-                  "ON CONFLICT(directory_id, name) DO UPDATE SET "
-                  "  mtime           = COALESCE(excluded.mtime, file.mtime), "
-                  "  compile_options = CASE WHEN file.args_overridden = 1 "
-                  "                         THEN file.compile_options "
-                  "                         ELSE COALESCE(excluded.compile_options, "
-                  "file.compile_options) END, "
-                  "  driver          = CASE WHEN file.args_overridden = 1 "
-                  "                         THEN file.driver "
-                  "                         ELSE COALESCE(excluded.driver, "
-                  "file.driver) END, "
-                  "  indexed         = CASE WHEN excluded.md5 IS NOT NULL "
-                  "                          AND excluded.md5 IS NOT file.md5 "
-                  "                         THEN 0 ELSE file.indexed END, "
-                  "  md5             = COALESCE(excluded.md5, file.md5) "
-                  "RETURNING id");
+  bool config_changed = false;
+  auto previous =
+      db_.prepare("SELECT compile_options, driver, args_overridden FROM file "
+                  "WHERE directory_id = ? AND name = ?");
+  previous.bind(1, directory_id);
+  previous.bind(2, std::string_view(name));
+  if (previous.step() && previous.col_int64(2) == 0) {
+    config_changed =
+        (opts && (previous.col_is_null(0) || previous.col_text(0) != *opts)) ||
+        (driver &&
+         (previous.col_is_null(1) || previous.col_text(1) != *driver));
+  }
+  auto st = db_.prepare(
+      "INSERT INTO file (directory_id, name, mtime, md5, "
+      "compile_options, driver) "
+      "VALUES (?, ?, ?, ?, ?, ?) "
+      "ON CONFLICT(directory_id, name) DO UPDATE SET "
+      "  mtime           = COALESCE(excluded.mtime, file.mtime), "
+      "  compile_options = CASE WHEN file.args_overridden = 1 "
+      "                         THEN file.compile_options "
+      "                         ELSE COALESCE(excluded.compile_options, "
+      "file.compile_options) END, "
+      "  driver          = CASE WHEN file.args_overridden = 1 "
+      "                         THEN file.driver "
+      "                         ELSE COALESCE(excluded.driver, "
+      "file.driver) END, "
+      "  indexed         = CASE WHEN (excluded.md5 IS NOT NULL "
+      "                          AND excluded.md5 IS NOT file.md5) "
+      "                         OR (file.args_overridden = 0 AND "
+      "                             ((excluded.compile_options IS NOT NULL "
+      "                               AND excluded.compile_options IS NOT "
+      "file.compile_options) "
+      "                              OR (excluded.driver IS NOT NULL "
+      "                               AND excluded.driver IS NOT "
+      "file.driver))) "
+      "                         THEN 0 ELSE file.indexed END, "
+      "  md5             = COALESCE(excluded.md5, file.md5) "
+      "RETURNING id");
   st.bind(1, directory_id);
   st.bind(2, std::string_view(name));
   bind_opt(st, 3, mtime);
@@ -156,6 +175,18 @@ int64_t Storage::add_file(
   }
   const int64_t fid = st.col_int64(0);
   st.step_done();
+  if (config_changed) {
+    auto stale =
+        db_.prepare("UPDATE file_config SET state = 'stale', "
+                    "reason = 'translation-unit configuration changed' "
+                    "WHERE file_id = ? AND role = 'translation_unit'");
+    stale.bind(1, fid);
+    stale.step_done();
+    auto tu = db_.prepare(
+        "UPDATE translation_unit SET state = 'stale' WHERE file_id = ?");
+    tu.bind(1, fid);
+    tu.step_done();
+  }
   return fid;
 }
 
@@ -223,12 +254,13 @@ std::optional<File> Storage::get_file_by_id(int64_t file_id) {
 }
 
 std::optional<std::string> Storage::file_abs_path(int64_t file_id) {
-  // SELECT c.path, c.version, c.repository_id so we can build the effective root
-  // (clone-anchored when grouped).
-  auto st = db_.prepare(
-      "SELECT c.path, c.version, c.repository_id, d.path AS rel, f.name AS name "
-      "FROM file f JOIN directory d ON d.id = f.directory_id "
-      "JOIN component c ON c.id = d.component_id WHERE f.id = ?");
+  // SELECT c.path, c.version, c.repository_id so we can build the effective
+  // root (clone-anchored when grouped).
+  auto st =
+      db_.prepare("SELECT c.path, c.version, c.repository_id, d.path AS rel, "
+                  "f.name AS name "
+                  "FROM file f JOIN directory d ON d.id = f.directory_id "
+                  "JOIN component c ON c.id = d.component_id WHERE f.id = ?");
   st.bind(1, file_id);
   if (!st.step()) {
     return std::nullopt;
@@ -243,9 +275,10 @@ std::optional<std::string> Storage::file_abs_path(int64_t file_id) {
 }
 
 std::optional<std::string> Storage::directory_abs_path(int64_t directory_id) {
-  auto st = db_.prepare(
-      "SELECT c.path, c.version, c.repository_id, d.path AS rel FROM directory d "
-      "JOIN component c ON c.id = d.component_id WHERE d.id = ?");
+  auto st =
+      db_.prepare("SELECT c.path, c.version, c.repository_id, d.path AS rel "
+                  "FROM directory d "
+                  "JOIN component c ON c.id = d.component_id WHERE d.id = ?");
   st.bind(1, directory_id);
   if (!st.step()) {
     return std::nullopt;
@@ -330,9 +363,10 @@ void Storage::set_file_indexed(int64_t file_id, bool indexed) {
   st.step_done();
 }
 
-void Storage::set_file_compile_options(
-    int64_t file_id, const std::vector<std::string> &options,
-    const std::optional<std::string> &driver, bool update_driver) {
+void Storage::set_file_compile_options(int64_t file_id,
+                                       const std::vector<std::string> &options,
+                                       const std::optional<std::string> &driver,
+                                       bool update_driver) {
   // Replace a file's stored flags (and optionally its driver) and mark it
   // args_overridden=1 so a later `import` (without --force) keeps the edit.
   const std::string opts = json_min::encode_string_array(options);
@@ -357,8 +391,7 @@ void Storage::update_file_compile_options(
   // UPDATE compile_options WITHOUT setting args_overridden (realias semantics).
   // Port of storage.py update_file_compile_options.
   const std::string opts = json_min::encode_string_array(options);
-  auto st =
-      db_.prepare("UPDATE file SET compile_options = ? WHERE id = ?");
+  auto st = db_.prepare("UPDATE file SET compile_options = ? WHERE id = ?");
   st.bind(1, std::string_view(opts));
   st.bind(2, file_id);
   st.step_done();
@@ -393,10 +426,9 @@ void Storage::replace_diagnostics(int64_t file_id,
     del.step_done();
   }
   for (const Diagnostic &d : diags) {
-    auto st = db_.prepare(
-        "INSERT INTO diagnostic "
-        "(file_id, severity, spelling, file_path, line, col) "
-        "VALUES (?, ?, ?, ?, ?, ?)");
+    auto st = db_.prepare("INSERT INTO diagnostic "
+                          "(file_id, severity, spelling, file_path, line, col) "
+                          "VALUES (?, ?, ?, ?, ?, ?)");
     st.bind(1, file_id);
     st.bind(2, static_cast<int64_t>(d.severity));
     st.bind(3, std::string_view(d.spelling));

@@ -19,6 +19,7 @@
 #include "storage/storage_detail.hpp"
 #include "storage/storage_schema.hpp"
 #include "util/errors.hpp"
+#include "util/hashing.hpp"
 #include "util/json_min.hpp"
 #include "util/logger.hpp"
 #include "util/pathutil.hpp"
@@ -27,18 +28,288 @@ namespace cidx {
 
 using namespace detail;
 
+namespace {
+std::string json_quote(std::string_view value) {
+  std::string out = "\"";
+  for (const unsigned char ch : value) {
+    switch (ch) {
+    case '"':
+      out += "\\\"";
+      break;
+    case '\\':
+      out += "\\\\";
+      break;
+    case '\b':
+      out += "\\b";
+      break;
+    case '\f':
+      out += "\\f";
+      break;
+    case '\n':
+      out += "\\n";
+      break;
+    case '\r':
+      out += "\\r";
+      break;
+    case '\t':
+      out += "\\t";
+      break;
+    default:
+      if (ch < 0x20) {
+        constexpr std::array hex = std::to_array("0123456789abcdef");
+        out += "\\u00";
+        out += hex[ch >> 4];
+        out += hex[ch & 0xf];
+      } else {
+        out += static_cast<char>(ch);
+      }
+    }
+  }
+  return out + '"';
+}
+
+std::string json_array(const std::vector<std::string> &values) {
+  std::string out = "[";
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (i != 0) {
+      out += ',';
+    }
+    out += json_quote(values[i]);
+  }
+  return out + ']';
+}
+
+std::string config_state_name(TranslationUnitConfigState state) {
+  switch (state) {
+  case TranslationUnitConfigState::registered:
+    return "registered";
+  case TranslationUnitConfigState::unregistered:
+    return "unregistered";
+  case TranslationUnitConfigState::ambiguous:
+    return "ambiguous";
+  case TranslationUnitConfigState::stale:
+    return "stale";
+  case TranslationUnitConfigState::unavailable:
+    return "unavailable";
+  }
+  return "unavailable";
+}
+
+TranslationUnitConfigState config_state(std::string_view name) {
+  if (name == "registered") {
+    return TranslationUnitConfigState::registered;
+  }
+  if (name == "unregistered") {
+    return TranslationUnitConfigState::unregistered;
+  }
+  if (name == "ambiguous") {
+    return TranslationUnitConfigState::ambiguous;
+  }
+  if (name == "stale") {
+    return TranslationUnitConfigState::stale;
+  }
+  return TranslationUnitConfigState::unavailable;
+}
+
+TranslationUnitConfig normalized_from_include(const IncludeConfig &c) {
+  TranslationUnitConfig out;
+  out.driver = c.driver;
+  out.working_dir = c.working_dir;
+  out.language = c.lang_mode;
+  out.resource_dir = c.resource_dir;
+  out.arguments = c.arguments;
+  out.diagnostics_policy = std::string("error-limit=0");
+  return out;
+}
+
+std::string canonical_config_json(const TranslationUnitConfig &c) {
+  std::vector<std::string> fields = {c.driver.value_or(""),
+                                     c.working_dir.value_or(""),
+                                     c.language.value_or(""),
+                                     c.standard.value_or(""),
+                                     c.target.value_or(""),
+                                     json_array(c.abi_options),
+                                     c.sysroot.value_or(""),
+                                     c.resource_dir.value_or(""),
+                                     json_array(c.include_paths),
+                                     json_array(c.macro_state),
+                                     json_array(c.relevant_environment),
+                                     json_array(c.generated_inputs),
+                                     c.diagnostics_policy.value_or(""),
+                                     json_array(c.arguments)};
+  std::string out = "[";
+  for (std::size_t i = 0; i < fields.size(); ++i) {
+    if (i != 0) {
+      out += ',';
+    }
+    if (i == 5 || i == 8 || i == 9 || i == 10 || i == 11 || i == 13) {
+      out += fields[i];
+    } else {
+      out += json_quote(fields[i]);
+    }
+  }
+  return out + ']';
+}
+
+TranslationUnitConfig config_from_row(const SqliteStmt &st) {
+  TranslationUnitConfig c;
+  c.id = st.col_int64(0);
+  c.descriptor_hash = st.col_text(1);
+  c.descriptor_json = st.col_text(2);
+  c.driver = opt_text(st, 3);
+  c.working_dir = opt_text(st, 4);
+  c.language = opt_text(st, 5);
+  c.standard = opt_text(st, 6);
+  c.target = opt_text(st, 7);
+  c.abi_options = json_min::decode_string_array(st.col_text(8));
+  c.sysroot = opt_text(st, 9);
+  c.resource_dir = opt_text(st, 10);
+  c.include_paths = json_min::decode_string_array(st.col_text(11));
+  c.macro_state = json_min::decode_string_array(st.col_text(12));
+  c.relevant_environment = json_min::decode_string_array(st.col_text(13));
+  c.generated_inputs = json_min::decode_string_array(st.col_text(14));
+  c.diagnostics_policy = opt_text(st, 15);
+  c.arguments = json_min::decode_string_array(st.col_text(16));
+  c.state = config_state(st.col_text(17));
+  return c;
+}
+} // namespace
+
+int64_t
+Storage::add_translation_unit_config(const TranslationUnitConfig &input) {
+  TranslationUnitConfig c = input;
+  c.descriptor_json = canonical_config_json(c);
+  c.descriptor_hash = sha1_hex(c.descriptor_json);
+  auto st = db_.prepare(
+      "INSERT INTO translation_unit_config "
+      "(descriptor_hash, descriptor_json, driver, working_dir, language, "
+      "standard, "
+      "target, abi_options, sysroot, resource_dir, include_paths, macro_state, "
+      "relevant_environment, generated_inputs, diagnostics_policy, arguments, "
+      "state) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+      "ON CONFLICT(descriptor_hash) DO UPDATE SET "
+      "descriptor_json=excluded.descriptor_json, "
+      "driver=excluded.driver, working_dir=excluded.working_dir, "
+      "language=excluded.language, "
+      "standard=excluded.standard, target=excluded.target, "
+      "abi_options=excluded.abi_options, "
+      "sysroot=excluded.sysroot, resource_dir=excluded.resource_dir, "
+      "include_paths=excluded.include_paths, macro_state=excluded.macro_state, "
+      "relevant_environment=excluded.relevant_environment, "
+      "generated_inputs=excluded.generated_inputs, "
+      "diagnostics_policy=excluded.diagnostics_policy, "
+      "arguments=excluded.arguments, "
+      "state=excluded.state RETURNING id");
+  st.bind(1, std::string_view(c.descriptor_hash));
+  st.bind(2, std::string_view(c.descriptor_json));
+  bind_opt(st, 3, c.driver);
+  bind_opt(st, 4, c.working_dir);
+  bind_opt(st, 5, c.language);
+  bind_opt(st, 6, c.standard);
+  bind_opt(st, 7, c.target);
+  st.bind(8, std::string_view(json_array(c.abi_options)));
+  bind_opt(st, 9, c.sysroot);
+  bind_opt(st, 10, c.resource_dir);
+  st.bind(11, std::string_view(json_array(c.include_paths)));
+  st.bind(12, std::string_view(json_array(c.macro_state)));
+  st.bind(13, std::string_view(json_array(c.relevant_environment)));
+  st.bind(14, std::string_view(json_array(c.generated_inputs)));
+  bind_opt(st, 15, c.diagnostics_policy);
+  st.bind(16, std::string_view(json_array(c.arguments)));
+  st.bind(17, std::string_view(config_state_name(c.state)));
+  if (!st.step()) {
+    throw StorageError("add_translation_unit_config: no id");
+  }
+  const int64_t id = st.col_int64(0);
+  st.step_done();
+  return id;
+}
+
+std::optional<TranslationUnitConfig>
+Storage::translation_unit_config_by_id(int64_t config_id) {
+  auto st = db_.prepare(
+      "SELECT id, descriptor_hash, descriptor_json, driver, working_dir, "
+      "language, "
+      "standard, target, abi_options, sysroot, resource_dir, include_paths, "
+      "macro_state, relevant_environment, generated_inputs, "
+      "diagnostics_policy, "
+      "arguments, state FROM translation_unit_config WHERE id = ?");
+  st.bind(1, config_id);
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return config_from_row(st);
+}
+
+std::vector<TranslationUnitConfig>
+Storage::translation_unit_configs_for_file(int64_t file_id) {
+  auto st = db_.prepare(
+      "SELECT c.id, c.descriptor_hash, c.descriptor_json, c.driver, "
+      "c.working_dir, "
+      "c.language, c.standard, c.target, c.abi_options, c.sysroot, "
+      "c.resource_dir, "
+      "c.include_paths, c.macro_state, c.relevant_environment, "
+      "c.generated_inputs, "
+      "c.diagnostics_policy, c.arguments, c.state FROM translation_unit_config "
+      "c "
+      "JOIN translation_unit t ON t.config_id = c.id WHERE t.file_id = ? "
+      "ORDER BY c.descriptor_hash");
+  st.bind(1, file_id);
+  std::vector<TranslationUnitConfig> out;
+  while (st.step()) {
+    out.push_back(config_from_row(st));
+  }
+  return out;
+}
+
+void Storage::add_file_config(const FileConfigApplicability &a) {
+  auto st = db_.prepare(
+      "INSERT INTO file_config(file_id, config_id, role, state, reason) VALUES "
+      "(?, ?, ?, ?, ?) ON CONFLICT(file_id, config_id, role) DO UPDATE SET "
+      "state=excluded.state, reason=excluded.reason");
+  st.bind(1, a.file_id);
+  st.bind(2, a.config_id);
+  st.bind(3, std::string_view(a.role));
+  st.bind(4, std::string_view(config_state_name(a.state)));
+  bind_opt(st, 5, a.reason);
+  st.step_done();
+}
+
+std::vector<FileConfigApplicability>
+Storage::file_configs_for(int64_t file_id) {
+  auto st = db_.prepare(
+      "SELECT file_id, config_id, role, state, reason FROM file_config "
+      "WHERE file_id = ? ORDER BY config_id, role");
+  st.bind(1, file_id);
+  std::vector<FileConfigApplicability> out;
+  while (st.step()) {
+    FileConfigApplicability a;
+    a.file_id = st.col_int64(0);
+    a.config_id = st.col_int64(1);
+    a.role = st.col_text(2);
+    a.state = config_state(st.col_text(3));
+    a.reason = opt_text(st, 4);
+    out.push_back(std::move(a));
+  }
+  return out;
+}
 
 int64_t Storage::add_include_config(const IncludeConfig &c) {
+  const int64_t normalized_id =
+      add_translation_unit_config(normalized_from_include(c));
   auto st = db_.prepare(
       "INSERT INTO include_config (tu_file_id, digest, driver, working_dir, "
-      "                            arguments, lang_mode, resource_dir) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?) "
+      "                            arguments, lang_mode, resource_dir, "
+      "                            translation_unit_config_id) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
       "ON CONFLICT(tu_file_id, digest) DO UPDATE SET "
       "  driver       = excluded.driver, "
       "  working_dir  = excluded.working_dir, "
       "  arguments    = excluded.arguments, "
       "  lang_mode    = excluded.lang_mode, "
-      "  resource_dir = excluded.resource_dir "
+      "  resource_dir = excluded.resource_dir, "
+      "  translation_unit_config_id = excluded.translation_unit_config_id "
       "RETURNING id");
   st.bind(1, c.tu_file_id);
   st.bind(2, std::string_view(c.digest));
@@ -47,11 +318,23 @@ int64_t Storage::add_include_config(const IncludeConfig &c) {
   st.bind(5, std::string_view(json_min::encode_string_array(c.arguments)));
   bind_opt(st, 6, c.lang_mode);
   bind_opt(st, 7, c.resource_dir);
+  st.bind(8, normalized_id);
   if (!st.step()) {
     throw StorageError("add_include_config: upsert returned no id");
   }
   const int64_t id = st.col_int64(0);
   st.step_done();
+  auto tu = db_.prepare("INSERT OR IGNORE INTO translation_unit(file_id, "
+                        "config_id) VALUES (?, ?)");
+  tu.bind(1, c.tu_file_id);
+  tu.bind(2, normalized_id);
+  tu.step_done();
+  add_file_config(
+      FileConfigApplicability{.file_id = c.tu_file_id,
+                              .config_id = normalized_id,
+                              .role = "translation_unit",
+                              .state = TranslationUnitConfigState::registered,
+                              .reason = std::nullopt});
   return id;
 }
 
@@ -88,7 +371,8 @@ int64_t Storage::add_include_edge(const IncludeEdge &e) {
       "VALUES (?, ?, ?, ?, ?, ?, ?) "
       "ON CONFLICT(src_file_id, dst_path, config_id) DO UPDATE SET "
       "  count       = include_edge.count + excluded.count, "
-      "  dst_file_id = COALESCE(excluded.dst_file_id, include_edge.dst_file_id), "
+      "  dst_file_id = COALESCE(excluded.dst_file_id, "
+      "include_edge.dst_file_id), "
       "  is_system   = excluded.is_system, "
       "  is_generated = excluded.is_generated "
       "RETURNING id");
@@ -155,6 +439,13 @@ void Storage::add_include_macro_use(const IncludeMacroUse &m) {
 }
 
 void Storage::delete_include_configs_for_tu(int64_t tu_file_id) {
+  auto tu = db_.prepare("DELETE FROM translation_unit WHERE file_id = ?");
+  tu.bind(1, tu_file_id);
+  tu.step_done();
+  auto fc = db_.prepare("DELETE FROM file_config WHERE file_id = ? AND role = "
+                        "'translation_unit'");
+  fc.bind(1, tu_file_id);
+  fc.step_done();
   auto st = db_.prepare("DELETE FROM include_config WHERE tu_file_id = ?");
   st.bind(1, tu_file_id);
   st.step_done();
@@ -177,6 +468,73 @@ std::vector<IncludeEdge> Storage::include_edges_from(int64_t src_file_id,
     out.push_back(include_edge_from(st));
   }
   return out;
+}
+
+std::vector<IncludeEdge>
+Storage::include_edges_from_config(int64_t src_file_id,
+                                   int64_t translation_unit_config_id,
+                                   bool include_system) {
+  std::string sql = std::string("SELECT ") + kIncludeEdgeCols +
+                    " FROM include_edge e JOIN include_config c ON c.id = "
+                    "e.config_id WHERE e.src_file_id = ? AND "
+                    "c.translation_unit_config_id = ?";
+  if (!include_system) {
+    sql += " AND e.is_system = 0";
+  }
+  sql += " ORDER BY e.dst_path, c.digest";
+  auto st = db_.prepare(sql);
+  st.bind(1, src_file_id);
+  st.bind(2, translation_unit_config_id);
+  std::vector<IncludeEdge> out;
+  while (st.step()) {
+    out.push_back(include_edge_from(st));
+  }
+  return out;
+}
+
+ConfiguredIncludeEdges Storage::invariant_include_edges(
+    int64_t src_file_id, const std::vector<int64_t> &declared_config_ids,
+    bool include_system) {
+  ConfiguredIncludeEdges result;
+  if (declared_config_ids.empty()) {
+    return result;
+  }
+  std::map<std::string, IncludeEdge> common;
+  for (const int64_t config_id : declared_config_ids) {
+    auto coverage = db_.prepare(
+        "SELECT 1 FROM translation_unit_config c JOIN file_config f "
+        "ON f.config_id = c.id WHERE f.file_id = ? AND f.config_id = ? "
+        "AND f.role = 'header' AND f.state = 'registered' "
+        "AND c.state = 'registered'");
+    coverage.bind(1, src_file_id);
+    coverage.bind(2, config_id);
+    if (!coverage.step()) {
+      return result;
+    }
+    const auto edges =
+        include_edges_from_config(src_file_id, config_id, include_system);
+    std::map<std::string, IncludeEdge> current;
+    for (const auto &edge : edges) {
+      current.emplace(edge.dst_path, edge);
+    }
+    if (common.empty()) {
+      common = std::move(current);
+    } else {
+      for (auto it = common.begin(); it != common.end();) {
+        if (!current.contains(it->first)) {
+          it = common.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+  }
+  result.coverage_complete = true;
+  for (auto &[path, edge] : common) {
+    (void)path;
+    result.edges.push_back(edge);
+  }
+  return result;
 }
 
 std::vector<IncludeEdge> Storage::include_edges_to(int64_t dst_file_id) {

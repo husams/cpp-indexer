@@ -266,6 +266,44 @@ struct IncludeConfig {
   std::vector<std::string> arguments;
   std::optional<std::string> lang_mode; // "c" | "c++"
   std::optional<std::string> resource_dir;
+  std::optional<int64_t> translation_unit_config_id;
+};
+
+enum class TranslationUnitConfigState : std::uint8_t {
+  registered,
+  unregistered,
+  ambiguous,
+  stale,
+  unavailable,
+};
+
+struct TranslationUnitConfig {
+  int64_t id = -1;
+  std::string descriptor_hash;
+  std::string descriptor_json;
+  std::optional<std::string> driver;
+  std::optional<std::string> working_dir;
+  std::optional<std::string> language;
+  std::optional<std::string> standard;
+  std::optional<std::string> target;
+  std::vector<std::string> abi_options;
+  std::optional<std::string> sysroot;
+  std::optional<std::string> resource_dir;
+  std::vector<std::string> include_paths;
+  std::vector<std::string> macro_state;
+  std::vector<std::string> relevant_environment;
+  std::vector<std::string> generated_inputs;
+  std::optional<std::string> diagnostics_policy;
+  std::vector<std::string> arguments;
+  TranslationUnitConfigState state = TranslationUnitConfigState::registered;
+};
+
+struct FileConfigApplicability {
+  int64_t file_id = -1;
+  int64_t config_id = -1;
+  std::string role = "header";
+  TranslationUnitConfigState state = TranslationUnitConfigState::registered;
+  std::optional<std::string> reason;
 };
 
 // A collapsed file->file include relation under one configuration.
@@ -281,6 +319,11 @@ struct IncludeEdge {
   bool is_system = false;
   bool is_generated = false;
   int64_t count = 1;
+};
+
+struct ConfiguredIncludeEdges {
+  std::vector<IncludeEdge> edges;
+  bool coverage_complete = false;
 };
 
 // include_directive_kind ids (seeded in the table; mirrored in storage.py)

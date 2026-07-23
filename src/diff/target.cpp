@@ -115,9 +115,9 @@ ConfigDelta config_delta(const ParseConfig &left, const ParseConfig &right) {
   // When the multiset difference is empty yet the ordered sequences differ, the
   // only change is a reorder -- which can still change what the parser sees, so
   // conservatively treat it as a configuration delta, not an identical config.
-  d.options_reordered =
-      d.options_left_only.empty() && d.options_right_only.empty() &&
-      left.classes.other != right.classes.other;
+  d.options_reordered = d.options_left_only.empty() &&
+                        d.options_right_only.empty() &&
+                        left.classes.other != right.classes.other;
   d.identical = !d.standard && !d.target && !d.driver &&
                 d.definitions_added.empty() && d.definitions_removed.empty() &&
                 !d.definitions_reordered && !d.includes_changed &&
@@ -144,6 +144,12 @@ ParseConfig resolve_parse_config(const SideSpec &spec) {
                     "project");
   }
   std::vector<std::string> stored;
+  const auto use_normalized = [&cfg,
+                               &stored](const TranslationUnitConfig &config) {
+    stored = config.arguments;
+    cfg.driver = config.driver;
+    cfg.config_hash = config.descriptor_hash;
+  };
   if (spec.tu) {
     cfg.tu = pathutil::abspath(*spec.tu);
     const std::optional<File> turec = db.get_file(*cfg.tu);
@@ -158,8 +164,17 @@ ParseConfig resolve_parse_config(const SideSpec &spec) {
     }
     cfg.parse_file = *cfg.tu;
     cfg.restrict_to_file = true;
-    stored = *turec->compile_options;
-    cfg.driver = turec->driver;
+    const auto configs = db.translation_unit_configs_for_file(turec->id);
+    if (configs.size() > 1) {
+      throw CidxError("--" + spec.side + "-tu " + *spec.tu +
+                      " has ambiguous stored configurations in " + cfg.db);
+    }
+    if (configs.empty()) {
+      stored = *turec->compile_options;
+      cfg.driver = turec->driver;
+    } else {
+      use_normalized(configs.front());
+    }
   } else {
     if (!rec->compile_options) {
       throw CidxError(spec.side + " file " + cfg.file +
@@ -168,8 +183,18 @@ ParseConfig resolve_parse_config(const SideSpec &spec) {
                       "-tu naming a registered TU)");
     }
     cfg.parse_file = cfg.file;
-    stored = *rec->compile_options;
-    cfg.driver = rec->driver;
+    const auto configs = db.translation_unit_configs_for_file(rec->id);
+    if (configs.size() > 1) {
+      throw CidxError(spec.side + " file " + cfg.file +
+                      " has ambiguous stored configurations; pass --" +
+                      spec.side + "-tu");
+    }
+    if (configs.empty()) {
+      stored = *rec->compile_options;
+      cfg.driver = rec->driver;
+    } else {
+      use_normalized(configs.front());
+    }
   }
   cfg.args = CompileDb::resolve_options(
       CompileDb::sanitize(stored),

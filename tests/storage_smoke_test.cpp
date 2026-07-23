@@ -437,6 +437,9 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                         "parameter",
                                         "symbol_type_kind",
                                         "symbol_type",
+                                        "translation_unit_config",
+                                        "translation_unit",
+                                        "file_config",
                                         "include_config",
                                         "include_edge",
                                         "include_directive_kind",
@@ -527,6 +530,8 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_parameter_declared_type",
                                          "idx_parameter_adjusted_type",
                                          "idx_symbol_type_type",
+                                         "idx_translation_unit_config_hash",
+                                         "idx_file_config_config",
                                          "idx_include_config_digest",
                                          "idx_include_edge_dst",
                                          "idx_include_edge_config",
@@ -757,4 +762,72 @@ TEST_CASE("delete_component removes files (cascade) and symbols (explicit)") {
   REQUIRE(db.get_file("/repo/b/b.c").has_value());
   CHECK_MESSAGE(db.lookup_symbol("c:@F@b_fn").has_value(),
                 "bystander component B untouched");
+}
+
+TEST_CASE(
+    "translation-unit configurations are canonical and multi-applicable") {
+  cidx::Storage db(":memory:");
+  const int64_t component = db.add_component("configs", "/repo/configs");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t tu = db.add_file(directory, "main.cpp");
+  const int64_t header = db.add_file(directory, "shared.hpp");
+
+  cidx::TranslationUnitConfig first;
+  first.driver = "clang++";
+  first.language = "c++";
+  first.arguments = {"-std=c++23", "-DFAST=1", "main.cpp"};
+  first.diagnostics_policy = "error-limit=0";
+  const int64_t first_id = db.add_translation_unit_config(first);
+  cidx::TranslationUnitConfig repeat = first;
+  CHECK(db.add_translation_unit_config(repeat) == first_id);
+  const auto stored = db.translation_unit_config_by_id(first_id);
+  REQUIRE(stored.has_value());
+  CHECK(stored->descriptor_json ==
+        "[\"clang++\",\"\",\"c++\",\"\",\"\",[],\"\",\"\",[],[],[],[],\"error-"
+        "limit=0\",[\"-std=c++23\",\"-DFAST=1\",\"main.cpp\"]]");
+
+  cidx::IncludeConfig include;
+  include.tu_file_id = tu;
+  include.digest = "legacy-digest-1";
+  include.driver = first.driver;
+  include.lang_mode = first.language;
+  include.arguments = first.arguments;
+  const int64_t include_id = db.add_include_config(include);
+  REQUIRE(db.include_config_by_id(include_id).has_value());
+  const auto configs = db.translation_unit_configs_for_file(tu);
+  REQUIRE(configs.size() == 1);
+  CHECK(configs.front().descriptor_json == stored->descriptor_json);
+  db.set_file_indexed(tu, true);
+  db.add_file(directory, "main.cpp", std::nullopt, std::nullopt,
+              std::vector<std::string>{"-DCHANGED"}, std::string("clang++"));
+  REQUIRE(db.get_file_by_id(tu).has_value());
+  CHECK_FALSE(db.get_file_by_id(tu)->indexed);
+  CHECK(db.file_configs_for(tu).front().state ==
+        cidx::TranslationUnitConfigState::stale);
+
+  cidx::TranslationUnitConfig second = first;
+  second.arguments.push_back("-DDEBUG=1");
+  const int64_t second_id = db.add_translation_unit_config(second);
+  CHECK(second_id != first_id);
+  db.add_file_config({header, first_id, "header",
+                      cidx::TranslationUnitConfigState::registered,
+                      std::nullopt});
+  db.add_file_config({header, second_id, "header",
+                      cidx::TranslationUnitConfigState::ambiguous,
+                      std::string("different compile worlds")});
+  const auto applicability = db.file_configs_for(header);
+  REQUIRE(applicability.size() == 2);
+  CHECK(applicability[0].config_id == first_id);
+  CHECK(applicability[1].config_id == second_id);
+  CHECK(applicability[1].state == cidx::TranslationUnitConfigState::ambiguous);
+  const auto unknown =
+      db.invariant_include_edges(header, {first_id, second_id}, false);
+  CHECK_FALSE(unknown.coverage_complete);
+  db.add_file_config({header, second_id, "header",
+                      cidx::TranslationUnitConfigState::registered,
+                      std::nullopt});
+  const auto invariant =
+      db.invariant_include_edges(header, {first_id, second_id}, false);
+  CHECK(invariant.coverage_complete);
+  CHECK(invariant.edges.empty());
 }
