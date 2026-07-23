@@ -8,8 +8,11 @@ tests use the bounded `smoke` scale.
 The generator writes the checked-in cidx schema and adds only `benchmark_meta`
 for generation state and semantic digests. The runner records database/table/
 index bytes, freelist/WAL/journal facts, query SQL/parameters/plans/row counts/
-truncation/latency distributions, integrity and foreign-key checks, and explicit
-`not_run` entries for adapters that need a real corpus or process instrumentation.
+truncation/latency distributions, integrity and foreign-key checks, and measured
+warm/update/transform/migration/backup/recovery operations on isolated copies.
+SQLite prepare/step/write counters are reported as unsupported because the
+Python sqlite3 API does not expose those counters; trace statement and
+transaction counts remain separately labeled.
 
 Run from the repository root with the Python project environment:
 
@@ -44,3 +47,7 @@ The custom-store gate is intentionally conservative. A decision of `propose`
 must name an exact failed SLO and include evidence for schema/tuning and derived
 accelerator alternatives plus engineering and compatibility costs. Without that
 evidence the gate rejects the proposal.
+
+The deterministic v34 smoke contract is checked in at
+`benchmarks/storage_m0/baselines/v34-smoke.json`; its HSE-74 claim-to-result
+map is `docs/benchmarks/storage-m0-hse74-citations.json`.

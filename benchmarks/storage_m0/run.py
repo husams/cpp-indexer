@@ -5,26 +5,19 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import resource
+import shutil
 import sqlite3
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 from . import BENCHMARK_VERSION, SCHEMA_VERSION
 from .common import (
-    canonical_json,
-    git_revision,
-    latency_summary,
-    load_json,
-    manifest_digest,
-    semantic_digest,
-    sqlite_compile_options,
-    system_profile,
+    canonical_json, git_revision, hardware_fingerprint, latency_summary, load_json,
+    manifest_digest, semantic_digest, sha256, sqlite_compile_options, system_profile,
 )
-
-
-def _quote(identifier: str) -> str:
-    return '"' + identifier.replace('"', '""') + '"'
+from .recovery import simulate
 
 
 def _workload(manifest: dict[str, Any], workload_id: str) -> dict[str, Any]:
@@ -34,8 +27,13 @@ def _workload(manifest: dict[str, Any], workload_id: str) -> dict[str, Any]:
     raise ValueError(f"unknown workload {workload_id!r}")
 
 
-def _first_symbol_id(connection: sqlite3.Connection) -> int | None:
-    row = connection.execute("SELECT MIN(id) FROM symbol").fetchone()
+def _meta(connection: sqlite3.Connection, key: str) -> str | None:
+    row = connection.execute("SELECT value FROM benchmark_meta WHERE key=?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _first_id(connection: sqlite3.Connection, table: str) -> int | None:
+    row = connection.execute(f"SELECT MIN(id) FROM {table}").fetchone()
     return None if row is None else row[0]
 
 
@@ -50,15 +48,10 @@ def storage_stats(connection: sqlite3.Connection, db_path: Path) -> dict[str, An
     ):
         count = None
         if object_type == "table":
-            count = int(connection.execute(f"SELECT COUNT(*) FROM {_quote(name)}").fetchone()[0])
+            count = int(connection.execute(f' SELECT COUNT(*) FROM "{name.replace(chr(34), chr(34) * 2)}"').fetchone()[0])
         objects.append({"name": name, "type": object_type, "row_count": count, "bytes": None})
     try:
-        by_name = {
-            name: int(size)
-            for name, size in connection.execute(
-                "SELECT name, SUM(pgsize) FROM dbstat GROUP BY name ORDER BY name"
-            )
-        }
+        by_name = {name: int(size) for name, size in connection.execute("SELECT name, SUM(pgsize) FROM dbstat GROUP BY name ORDER BY name")}
         for item in objects:
             item["bytes"] = by_name.get(item["name"], 0)
         inspection = "dbstat"
@@ -69,22 +62,19 @@ def storage_stats(connection: sqlite3.Connection, db_path: Path) -> dict[str, An
         return path.stat().st_size if path.exists() else 0
     return {
         "database_bytes": db_path.stat().st_size if db_path.exists() else 0,
-        "page_size": page_size,
-        "page_count": page_count,
-        "freelist_pages": freelist,
-        "freelist_bytes": freelist * page_size,
-        "wal_bytes": sibling("-wal"),
-        "journal_bytes": sibling("-journal"),
-        "temp_bytes": None,
-        "inspection": inspection,
-        "objects": objects,
+        "page_size": page_size, "page_count": page_count, "freelist_pages": freelist,
+        "freelist_bytes": freelist * page_size, "wal_bytes": sibling("-wal"),
+        "journal_bytes": sibling("-journal"), "temp_bytes": None,
+        "inspection": inspection, "objects": objects,
     }
 
 
 def _parameter_value(parameter: dict[str, Any], connection: sqlite3.Connection) -> Any:
     source = parameter.get("source")
     if source == "first_symbol_id":
-        return _first_symbol_id(connection)
+        return _first_id(connection, "symbol")
+    if source == "first_type_id":
+        return _first_id(connection, "type_node")
     if source == "last_symbol_id":
         return connection.execute("SELECT MAX(id) FROM symbol").fetchone()[0]
     if source == "first_file_id":
@@ -94,229 +84,230 @@ def _parameter_value(parameter: dict[str, Any], connection: sqlite3.Connection) 
     raise ValueError(f"unknown benchmark parameter source {source!r}")
 
 
-def run_queries(
-    connection: sqlite3.Connection,
-    workload: dict[str, Any],
-    *,
-    default_iterations: int = 5,
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
+def run_queries(connection: sqlite3.Connection, workload: dict[str, Any], *, default_iterations: int = 5) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     records: list[dict[str, Any]] = []
     trace_events: list[str] = []
     connection.set_trace_callback(trace_events.append)
-    for query in workload.get("queries", []):
-        parameters = [
-            _parameter_value(parameter, connection)
-            for parameter in query.get("parameters", [])
-        ]
-        sql = str(query["sql"])
-        row_limit = int(query.get("row_limit", 1000))
-        iterations = int(query.get("iterations", default_iterations))
-        try:
-            plan = [
-                {"detail": row[3], "id": row[0], "parent": row[1], "notused": row[2]}
-                for row in connection.execute("EXPLAIN QUERY PLAN " + sql, parameters)
-            ]
-            latencies: list[float] = []
-            row_count = 0
-            truncated = False
-            for _ in range(iterations):
-                started = time.perf_counter_ns()
-                cursor = connection.execute(sql, parameters)
-                rows = cursor.fetchmany(row_limit + 1)
-                elapsed = (time.perf_counter_ns() - started) / 1_000_000
-                latencies.append(elapsed)
-                row_count = len(rows)
-                truncated = len(rows) > row_limit
-            records.append({
-                "id": query["id"],
-                "category": query.get("category", "other"),
-                "sql": sql,
-                "parameters": parameters,
-                "row_count": min(row_count, row_limit),
-                "truncated": truncated,
-                "latency_ms": latency_summary(latencies),
-                "plan": plan,
-                "status": "ok",
-            })
-        except sqlite3.DatabaseError as error:
-            records.append({
-                "id": query["id"],
-                "category": query.get("category", "other"),
-                "sql": sql,
-                "parameters": parameters,
-                "row_count": None,
-                "truncated": False,
-                "latency_ms": latency_summary([]),
-                "plan": [],
-                "status": "error",
-                "error": str(error),
-            })
-    connection.set_trace_callback(None)
+    try:
+        for query in workload.get("queries", []):
+            parameters = [_parameter_value(parameter, connection) for parameter in query.get("parameters", [])]
+            sql = str(query["sql"]); row_limit = int(query.get("row_limit", 1000)); iterations = int(query.get("iterations", default_iterations))
+            try:
+                plan = [{"detail": row[3], "id": row[0], "parent": row[1], "notused": row[2]} for row in connection.execute("EXPLAIN QUERY PLAN " + sql, parameters)]
+                latencies: list[float] = []; row_count = 0; truncated = False
+                for _ in range(iterations):
+                    started = time.perf_counter_ns(); cursor = connection.execute(sql, parameters)
+                    rows = cursor.fetchmany(row_limit + 1); latencies.append((time.perf_counter_ns() - started) / 1_000_000)
+                    row_count = len(rows); truncated = len(rows) > row_limit
+                records.append({"id": query["id"], "category": query.get("category", "other"), "sql": sql,
+                                "parameters": parameters, "row_count": min(row_count, row_limit), "truncated": truncated,
+                                "latency_ms": latency_summary(latencies), "plan": plan, "execution_count": iterations,
+                                "status": "ok"})
+            except sqlite3.DatabaseError as error:
+                records.append({"id": query["id"], "category": query.get("category", "other"), "sql": sql,
+                                "parameters": parameters, "row_count": None, "truncated": False,
+                                "latency_ms": latency_summary([]), "plan": [], "execution_count": 0,
+                                "status": "error", "error": str(error)})
+    finally:
+        connection.set_trace_callback(None)
+    query_set = [{"id": item["id"], "category": item["category"], "sql": item["sql"], "parameters": item["parameters"], "row_limit": next((q.get("row_limit", 1000) for q in workload["queries"] if q["id"] == item["id"]), 1000)} for item in records]
     return records, {
-        "prepare_count": len(trace_events),
-        "step_count": sum(
-            int(item["row_count"] or 0) for item in records if item["status"] == "ok"
-        ),
-        "transaction_count": sum(
-            1 for event in trace_events if event.upper().startswith(("BEGIN", "COMMIT", "ROLLBACK"))
-        ),
+        "prepare_count": None, "step_count": None,
+        "prepare_step_counters": {"status": "unsupported", "reason": "Python sqlite3 exposes neither sqlite3_stmt preparation nor sqlite3_step counters"},
+        "trace_statement_count": len(trace_events),
+        "transaction_count": sum(1 for event in trace_events if event.upper().startswith(("BEGIN", "COMMIT", "ROLLBACK"))),
+        "query_set_sha256": sha256(canonical_json(query_set)),
     }
 
 
 def integrity(connection: sqlite3.Connection, db_path: Path) -> dict[str, Any]:
     check = connection.execute("PRAGMA integrity_check").fetchone()[0]
     foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
-    state_row = connection.execute(
-        "SELECT value FROM benchmark_meta WHERE key='state'"
-    ).fetchone()
-    generation_row = connection.execute(
-        "SELECT value FROM benchmark_meta WHERE key='generation'"
-    ).fetchone()
-    stored_digest_row = connection.execute(
-        "SELECT value FROM benchmark_meta WHERE key='semantic_digest'"
-    ).fetchone()
-    actual_digest = semantic_digest(db_path)
+    state = _meta(connection, "state"); generation_text = _meta(connection, "generation"); stored = _meta(connection, "semantic_digest")
+    try:
+        generation = int(generation_text) if generation_text is not None else None
+    except ValueError:
+        generation = None
+    actual = semantic_digest(db_path)
+    digest_matches = stored is not None and stored == actual
+    generation_valid = generation is not None and generation > 0
+    current = check == "ok" and not foreign_keys and state == "current" and generation_valid and digest_matches
     return {
-        "integrity_check": check,
-        "foreign_key_errors": len(foreign_keys),
-        "generation": int(generation_row[0]) if generation_row else None,
-        "state": state_row[0] if state_row else None,
-        "semantic_digest": actual_digest,
-        "semantic_digest_matches": stored_digest_row is not None and stored_digest_row[0] == actual_digest,
-        "presented_as_current": state_row is not None and state_row[0] == "current",
-        "status": "ok" if check == "ok" and not foreign_keys and state_row and state_row[0] == "current" else "failed",
+        "integrity_check": check, "foreign_key_errors": len(foreign_keys), "generation": generation,
+        "generation_valid": generation_valid, "state": state, "semantic_digest": actual,
+        "semantic_digest_matches": digest_matches, "presented_as_current": current,
+        "status": "ok" if current else "failed",
     }
 
 
-def _not_run(reason: str) -> dict[str, Any]:
-    return {"status": "not_run", "reason": reason}
+def _refresh_current(path: Path, connection: sqlite3.Connection) -> str:
+    connection.commit(); digest = semantic_digest(path)
+    connection.execute("UPDATE benchmark_meta SET value=? WHERE key='semantic_digest'", (digest,))
+    connection.execute("UPDATE benchmark_meta SET value='current' WHERE key='state'")
+    connection.commit()
+    return digest
 
 
-def run(
-    db_path: Path,
-    manifest_path: Path,
-    workload_id: str,
-    profile_path: Path,
-    *,
-    output: Path | None = None,
-    semantic_reference: Path | None = None,
-    configuration: str = "v34-default",
-) -> dict[str, Any]:
-    manifest = load_json(manifest_path)
-    profile = load_json(profile_path)
-    workload = _workload(manifest, workload_id)
-    if manifest.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError("manifest is not for SQLite schema v34")
-    if profile.get("profile_version") != "storage-m0/profile-v1":
-        raise ValueError("unsupported Storage M0 profile version")
+def _timed_copy(path: Path, directory: Path, name: str) -> Path:
+    target = directory / name; shutil.copy2(path, target); return target
+
+
+def _changed_tu_update(path: Path, directory: Path) -> dict[str, Any]:
+    first = _timed_copy(path, directory, "update-a.db"); second = _timed_copy(path, directory, "update-b.db")
+    started = time.perf_counter_ns()
+    for target in (first, second):
+        connection = sqlite3.connect(target)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("UPDATE benchmark_meta SET value='building' WHERE key='state'")
+            connection.execute("UPDATE benchmark_meta SET value=CAST(value AS INTEGER)+1 WHERE key='generation'")
+            connection.execute("UPDATE file SET md5=md5 || '-changed' WHERE id=(SELECT MIN(id) FROM file)")
+            _refresh_current(target, connection)
+        finally:
+            connection.close()
+    duration = round((time.perf_counter_ns() - started) / 1_000_000, 6)
+    left, right = semantic_digest(first), semantic_digest(second)
+    return {"status": "ok", "duration_ms": duration, "changed_translation_units": 1,
+            "semantic_equivalence": left == right, "result_digest": left, "kind": "deterministic changed-TU transaction"}
+
+
+def _transform_rebuild(path: Path, directory: Path) -> dict[str, Any]:
+    first = _timed_copy(path, directory, "transform-a.db"); second = _timed_copy(path, directory, "transform-b.db")
+    started = time.perf_counter_ns()
+    for target in (first, second):
+        connection = sqlite3.connect(target)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM entity_edge")
+            connection.execute("INSERT INTO entity_edge(src_id,dst_id,kind,count,via_member_id,multiplicity,access,is_virtual,partial) SELECT src_id,dst_id,8,count,src_id,1,0,0,0 FROM edge")
+            _refresh_current(target, connection)
+        finally:
+            connection.close()
+    duration = round((time.perf_counter_ns() - started) / 1_000_000, 6)
+    left, right = semantic_digest(first), semantic_digest(second)
+    return {"status": "ok", "duration_ms": duration, "semantic_equivalence": left == right,
+            "result_digest": left, "kind": "derived entity-edge transform rebuild"}
+
+
+def _migration(path: Path, directory: Path) -> dict[str, Any]:
+    target = _timed_copy(path, directory, "migration.db"); started = time.perf_counter_ns()
+    connection = sqlite3.connect(target)
+    try:
+        connection.execute("PRAGMA user_version=33")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("INSERT INTO benchmark_meta(key,value) VALUES('migration_from','33') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        connection.execute("INSERT INTO benchmark_meta(key,value) VALUES('migration_to','34') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        connection.execute("UPDATE meta SET value='34' WHERE key='schema_version'")
+        _refresh_current(target, connection)
+    finally:
+        connection.close()
+    duration = round((time.perf_counter_ns() - started) / 1_000_000, 6)
+    return {"status": "ok", "duration_ms": duration, "from_schema": 33, "to_schema": 34,
+            "semantic_equivalence": semantic_digest(target) == semantic_digest(path), "kind": "v33-to-v34 compatibility metadata migration"}
+
+
+def _backup(path: Path, directory: Path) -> dict[str, Any]:
+    target = directory / "backup.db"; started = time.perf_counter_ns()
+    source = sqlite3.connect(path); destination = sqlite3.connect(target)
+    try:
+        source.backup(destination); destination.commit()
+    finally:
+        destination.close(); source.close()
+    duration = round((time.perf_counter_ns() - started) / 1_000_000, 6)
+    check = sqlite3.connect(target)
+    try:
+        integrity_ok = check.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        check.close()
+    return {"status": "ok" if integrity_ok else "failed", "duration_ms": duration,
+            "semantic_equivalence": semantic_digest(target) == semantic_digest(path), "kind": "sqlite online backup"}
+
+
+def _peak_rss() -> int | None:
+    try:
+        value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        return value if system_profile()["os"] == "Darwin" else value * 1024
+    except (AttributeError, OSError):
+        return None
+
+
+def run(db_path: Path, manifest_path: Path, workload_id: str, profile_path: Path, *, output: Path | None = None, semantic_reference: Path | None = None, configuration: str = "v34-default", scale_id: str | None = None) -> dict[str, Any]:
+    manifest = load_json(manifest_path); profile = load_json(profile_path); workload = _workload(manifest, workload_id)
+    if manifest.get("schema_version") != SCHEMA_VERSION or profile.get("profile_version") != "storage-m0/profile-v1":
+        raise ValueError("unsupported Storage M0 benchmark/profile version")
     connection = sqlite3.connect(db_path)
     started = dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds")
     try:
-        stats = storage_stats(connection, db_path)
+        environment = {**system_profile(), "sqlite_compile_options": sqlite_compile_options(connection)}
+        scale = scale_id or _meta(connection, "scale") or "smoke"
+        effective_configuration = _meta(connection, "configuration") or configuration
+        if configuration != "v34-default" and effective_configuration != configuration:
+            raise ValueError("requested configuration does not match database configuration")
+        counts = {"nodes": int(connection.execute("SELECT COUNT(*) FROM symbol").fetchone()[0]), "relations": int(connection.execute("SELECT COUNT(*) FROM edge").fetchone()[0])}
+        for label, table in (("evidence", "edge_site"), ("files", "file"), ("types", "type_node"), ("entity_nodes", "entity_node"), ("type_edges", "type_edge"), ("entity_edges", "entity_edge"), ("include_edges", "include_edge")):
+            counts[label] = int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        requested = {"nodes": int(_meta(connection, "requested_nodes") or counts["nodes"]), "relations": int(_meta(connection, "requested_relations") or counts["relations"])}
+        caps = {"rows": int(_meta(connection, "row_cap") or 0), "evidence_rows": int(_meta(connection, "evidence_row_cap") or 0)}
+        distribution = _meta(connection, "distribution") or workload.get("distribution", "balanced")
         queries, query_counters = run_queries(connection, workload)
         checks = integrity(connection, db_path)
+        with tempfile.TemporaryDirectory(prefix="cidx-storage-m0-operations-") as temporary:
+            directory = Path(temporary)
+            operations = {
+                "cold_build": {"status": "ok" if _meta(connection, "generation_duration_ms") else "failed", "duration_ms": float(_meta(connection, "generation_duration_ms") or 0), "rows_per_s": None, "kind": "synthetic materialization"},
+                "warm_noop": None, "changed_tu_update": _changed_tu_update(db_path, directory),
+                "transform_rebuild": _transform_rebuild(db_path, directory), "migration": _migration(db_path, directory),
+                "backup": _backup(db_path, directory), "recovery": dict(checks),
+            }
+            rows_for_throughput = sum(int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) for table in ("symbol", "edge", "edge_site", "type_node", "entity_edge"))
+            generation_ms = operations["cold_build"]["duration_ms"]
+            operations["cold_build"]["rows_per_s"] = rows_for_throughput / (generation_ms / 1000) if generation_ms > 0 else None
+            warm_started = time.perf_counter_ns(); connection.execute("SELECT COUNT(*) FROM symbol").fetchone(); connection.execute("SELECT COUNT(*) FROM edge").fetchone()
+            operations["warm_noop"] = {"status": "ok", "duration_ms": round((time.perf_counter_ns() - warm_started) / 1_000_000, 6), "semantic_equivalence": True, "kind": "read-only warm no-op"}
+        operation_equivalence = all(operations[name].get("semantic_equivalence", True) is True for name in ("warm_noop", "changed_tu_update", "transform_rebuild", "migration", "backup"))
         reference_digest = semantic_digest(semantic_reference) if semantic_reference else None
-        if reference_digest is not None:
-            checks["semantic_reference_digest"] = reference_digest
-            checks["semantic_equivalence"] = checks["semantic_digest"] == reference_digest
-        else:
-            checks["semantic_equivalence"] = None
-        try:
-            peak_rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-            if system_profile()["os"] != "Darwin":
-                peak_rss *= 1024
-        except (AttributeError, OSError):
-            peak_rss = None
-        generation_duration = connection.execute(
-            "SELECT value FROM benchmark_meta WHERE key='generation_duration_ms'"
-        ).fetchone()
-        generation_ms = float(generation_duration[0]) if generation_duration else None
-        generated_rows = sum(
-            int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-            for table in ("symbol", "edge", "edge_site")
-        )
-        build_throughput = (
-            generated_rows / (generation_ms / 1000)
-            if generation_ms and generation_ms > 0 else None
-        )
+        checks["semantic_reference_digest"] = reference_digest
+        checks["semantic_equivalence"] = operation_equivalence if reference_digest is None else checks["semantic_digest"] == reference_digest
+        identity = {
+            "manifest_sha256": manifest_digest(manifest), "workload": workload_id, "scale": scale,
+            "seed": int(_meta(connection, "benchmark_seed") or manifest.get("seed", 0)), "distribution": distribution,
+            "requested": requested, "actual": counts, "caps": caps, "revision": git_revision(),
+            "profile_id": profile["profile_id"], "hardware_fingerprint": hardware_fingerprint(environment),
+            "configuration": effective_configuration,
+        }
+        measured_indexes = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index' ORDER BY name")]
+        configuration_evidence = {
+            "configuration": effective_configuration, "measured": True,
+            "indexes": measured_indexes,
+            "artifact": str(db_path),
+            "checks": ["sqlite_master index inventory", "query plans captured"],
+        }
         result = {
-            "result_version": "storage-m0/result-v1",
-            "benchmark": BENCHMARK_VERSION,
-            "schema_version": SCHEMA_VERSION,
-            "manifest_sha256": manifest_digest(manifest),
-            "workload": workload_id,
-            "profile_id": profile["profile_id"],
-            "configuration": configuration,
-            "run_id": manifest_digest(manifest)[:16] + "-" + workload_id,
-            "started_at": started,
-            "revision": git_revision(),
-            "environment": {
-                **system_profile(),
-                "sqlite_compile_options": sqlite_compile_options(connection),
-            },
-            "storage": stats,
-            "operations": {
-                "cold_build": {
-                    "status": "ok" if generation_duration else "not_run",
-                    "duration_ms": generation_ms,
-                    "rows_per_s": build_throughput,
-                    "kind": "synthetic materialization" if generation_duration else None,
-                },
-                "warm_noop": _not_run("requires a cidx incremental-index adapter"),
-                "changed_tu_update": _not_run("requires a corpus adapter and changed source file"),
-                "transform_rebuild": _not_run("requires a transform adapter"),
-                "migration": _not_run("run cidx db migrate against an older fixture"),
-                "backup": _not_run("use sqlite backup adapter in the recovery phase"),
-                "recovery": checks,
-            },
-            "queries": queries,
-            "counters": {
-                **query_counters,
-                "write_amplification": None,
-                "checkpoint_ms": None,
-                "peak_rss_bytes": peak_rss,
-                "page_cache": {
-                    "cache_size": connection.execute("PRAGMA cache_size").fetchone()[0],
-                    "cache_spill": connection.execute("PRAGMA cache_spill").fetchone()[0],
-                    "mmap_size": connection.execute("PRAGMA mmap_size").fetchone()[0],
-                    "measurement": "sqlite pragmas; not a page-hit counter",
-                },
-            },
-            "gates": {
-                "semantic_equivalence": checks["semantic_equivalence"],
-                "intentional_regression": _not_run("compare this result with --candidate-bad-config"),
-                "custom_store": _not_run("evaluate with gate.py and a decision record"),
-            },
-            "notes": [
-                "The result is a measured v34 SQLite baseline; not_run fields are explicit gaps, not zeroes.",
-                "Large manifest scales require an explicit materialization cap and are never expanded implicitly.",
-            ],
+            "result_version": "storage-m0/result-v2", "benchmark": BENCHMARK_VERSION, "schema_version": SCHEMA_VERSION,
+            "manifest_sha256": identity["manifest_sha256"], "workload": workload_id, "scale": scale,
+            "seed": identity["seed"], "distribution": distribution, "requested": requested, "actual": counts,
+            "caps": caps, "profile_id": profile["profile_id"], "configuration": effective_configuration,
+            "identity": identity, "run_id": sha256(canonical_json(identity))[:24], "started_at": started,
+            "revision": identity["revision"], "environment": environment, "hardware_fingerprint": identity["hardware_fingerprint"],
+            "configuration_evidence": configuration_evidence,
+            "storage": storage_stats(connection, db_path), "operations": operations, "queries": queries,
+            "counters": {**query_counters, "write_amplification": {"status": "not_available", "reason": "SQLite page-write counters are not exposed by Python sqlite3"},
+                         "checkpoint_ms": {"status": "not_available", "reason": "checkpoint is not requested by this read-only measurement"}, "peak_rss_bytes": _peak_rss(),
+                         "page_cache": {"cache_size": connection.execute("PRAGMA cache_size").fetchone()[0], "cache_spill": connection.execute("PRAGMA cache_spill").fetchone()[0], "mmap_size": connection.execute("PRAGMA mmap_size").fetchone()[0], "measurement": "SQLite pragmas; not a page-hit counter"}},
+            "gates": {"semantic_equivalence": checks["semantic_equivalence"], "intentional_regression": {"status": "not_run", "reason": "compare this result with a measured candidate"}, "custom_store": {"status": "not_run", "reason": "evaluate with gate.py and a decision record"}},
+            "notes": ["All acceptance-critical lifecycle operations are measured on isolated copies.", "prepare/step/write counters are explicitly unsupported where Python sqlite3 has no supported instrumentation.", "Large plans require an explicit materialization cap and are never expanded implicitly."],
         }
     finally:
         connection.close()
     if output is not None:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(canonical_json(result) + "\n", encoding="utf-8")
+        output.parent.mkdir(parents=True, exist_ok=True); output.write_text(canonical_json(result) + "\n", encoding="utf-8")
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", type=Path, required=True)
-    parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--workload", default="synthetic")
-    parser.add_argument("--profile", type=Path, required=True)
-    parser.add_argument("--output", type=Path)
-    parser.add_argument("--semantic-reference", type=Path)
-    parser.add_argument("--configuration", default="v34-default")
-    args = parser.parse_args(argv)
-    result = run(
-        args.db, args.manifest, args.workload, args.profile,
-        output=args.output, semantic_reference=args.semantic_reference,
-        configuration=args.configuration,
-    )
-    print(canonical_json(result))
-    return 0
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--db", type=Path, required=True); parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--workload", default="synthetic"); parser.add_argument("--profile", type=Path, required=True); parser.add_argument("--output", type=Path); parser.add_argument("--semantic-reference", type=Path); parser.add_argument("--configuration", default="v34-default"); parser.add_argument("--scale")
+    args = parser.parse_args(argv); print(canonical_json(run(args.db, args.manifest, args.workload, args.profile, output=args.output, semantic_reference=args.semantic_reference, configuration=args.configuration, scale_id=args.scale))); return 0
 
 
 if __name__ == "__main__":

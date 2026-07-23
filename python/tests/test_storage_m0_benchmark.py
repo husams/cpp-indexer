@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -44,8 +45,15 @@ def test_generator_is_deterministic_and_reports_caps(tmp_path):
         "nodes": 128,
         "relations": 512,
         "evidence": 1536,
-        "files": 4,
+        "files": 6,
+        "translation_units": 4,
+        "shared_headers": 2,
         "repositories": 1,
+        "types": 128,
+        "entity_nodes": 128,
+        "type_edges": 128,
+        "entity_edges": 512,
+        "include_edges": 6,
     }
     assert first["requested"] == {"nodes": 128, "relations": 512}
     assert first["distribution"] == "balanced"
@@ -74,8 +82,12 @@ def test_runner_captures_storage_query_and_integrity_evidence(tmp_path):
     assert exact["truncated"] is False
     assert result["operations"]["recovery"]["status"] == "ok"
     assert result["operations"]["cold_build"]["status"] == "ok"
-    assert result["counters"]["prepare_count"] > 0
-    assert result["operations"]["warm_noop"]["status"] == "not_run"
+    assert result["counters"]["prepare_count"] is None
+    assert result["counters"]["prepare_step_counters"]["status"] == "unsupported"
+    assert all(result["operations"][name]["status"] == "ok" for name in (
+        "warm_noop", "changed_tu_update", "transform_rebuild", "migration", "backup",
+    ))
+    assert result["gates"]["semantic_equivalence"] is True
 
 
 def test_bad_layout_preserves_semantics_and_is_identifiable(tmp_path):
@@ -96,6 +108,59 @@ def test_recovery_never_presents_uncommitted_generation_as_current(tmp_path):
     assert recovery["rollback_before_commit"]["presented_as_current"] is True
     assert recovery["committed_building_state"]["presented_as_current"] is False
     assert recovery["repaired"]["presented_as_current"] is True
+    assert recovery["digest_mismatch_not_current"]["presented_as_current"] is False
+    assert recovery["digest_mismatch_not_current"]["status"] == "pass"
+
+
+def test_all_declared_distributions_have_exact_distinct_cardinality(tmp_path):
+    manifest = load_json(MANIFEST)
+    for item in manifest["distributions"]:
+        result = generate(MANIFEST, "synthetic", "smoke", tmp_path / f"{item['id']}.db", distribution=item["id"])
+        assert result["distribution"] == item["id"]
+        assert result["counts"]["nodes"] == result["requested"]["nodes"] == 128
+        assert result["counts"]["relations"] == result["requested"]["relations"] == 512
+        connection = sqlite3.connect(result["output"])
+        try:
+            assert connection.execute("SELECT COUNT(*) FROM (SELECT src_id,dst_id,kind FROM edge GROUP BY src_id,dst_id,kind)").fetchone()[0] == 512
+            assert connection.execute("SELECT COUNT(*) FROM type_node").fetchone()[0] > 0
+            assert connection.execute("SELECT COUNT(*) FROM entity_node").fetchone()[0] > 0
+            assert connection.execute("SELECT COUNT(*) FROM include_edge").fetchone()[0] > 0
+        finally:
+            connection.close()
+
+
+def test_composed_multi_repository_topology_is_materialized(tmp_path):
+    result = generate(MANIFEST, "synthetic-multi-repo", "smoke", tmp_path / "multi.db")
+    assert result["counts"]["repositories"] == 2
+    assert result["counts"]["shared_headers"] == 8
+    assert result["counts"]["translation_units"] == 8
+    assert result["counts"]["include_edges"] > 0
+
+
+def test_semantic_digest_covers_const_values_and_not_surrogate_ids(tmp_path):
+    original = tmp_path / "original.db"
+    generate(MANIFEST, "synthetic", "smoke", original)
+    connection = sqlite3.connect(original)
+    try:
+        connection.execute("UPDATE symbol SET const_value='7' WHERE id=(SELECT MIN(id) FROM symbol)")
+        connection.commit()
+    finally:
+        connection.close()
+    from benchmarks.storage_m0.common import semantic_digest
+    assert semantic_digest(original) != generate(MANIFEST, "synthetic", "smoke", tmp_path / "fresh.db")["semantic_digest"]
+
+
+def test_regression_rejects_missing_query_and_identity_mismatch(tmp_path):
+    db = tmp_path / "benchmark.db"
+    generate(MANIFEST, "synthetic", "smoke", db)
+    result = run(db, MANIFEST, "synthetic", PROFILE)
+    profile = load_json(PROFILE)
+    candidate = copy.deepcopy(result)
+    candidate["queries"] = candidate["queries"][:-1]
+    assert evaluate_regression(result, candidate, profile)["status"] == "fail"
+    candidate = copy.deepcopy(result)
+    candidate["identity"]["hardware_fingerprint"] = "different"
+    assert evaluate_regression(result, candidate, profile)["status"] == "fail"
 
 
 def test_gate_requires_exact_failed_slo_before_custom_store_proposal(tmp_path):
@@ -105,8 +170,10 @@ def test_gate_requires_exact_failed_slo_before_custom_store_proposal(tmp_path):
     profile = load_json(PROFILE)
     baseline = copy.deepcopy(result)
     bad_config = copy.deepcopy(result)
-    bad_config["run_id"] = "bad-config"
-    bad_config["configuration"] = "drop_hot_indexes"
+    bad_db = tmp_path / "bad.db"
+    drop_hot_indexes(db, bad_db)
+    bad_config = run(bad_db, MANIFEST, "synthetic", PROFILE, configuration="drop_hot_indexes")
+    assert baseline["run_id"] != bad_config["run_id"]
     for query in bad_config["queries"]:
         query["latency_ms"]["p95_ms"] = (query["latency_ms"]["p95_ms"] or 1) * 2
     regression = evaluate_regression(baseline, bad_config, profile)

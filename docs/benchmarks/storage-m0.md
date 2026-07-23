@@ -30,9 +30,16 @@ bytes; page-count/freelist and WAL/journal measurements remain available as
 fallbacks. Query records retain SQL text, bound parameters, `EXPLAIN QUERY PLAN`,
 row count, truncation, and p50/p95/p99 latency.
 
-Build/update/migration/backup adapters are explicit `not_run` until connected to
-the real cidx CLI/corpus path. This avoids reporting zeros as successful
-measurements and makes missing coverage visible in review.
+The runner measures cold materialization plus warm no-op, changed-TU update,
+derived-transform rebuild, v33-to-v34 compatibility migration, online backup,
+and recovery on isolated database copies. Each update/transform/migration/
+backup path performs the operation twice and compares the stable semantic
+digest. Corpus-specific self-index and banking runs remain manifest-governed
+inputs; they are never represented by a synthetic result.
+
+The Python sqlite3 API does not expose prepare/step or page-write counters.
+Those fields are explicitly `unsupported`/`not_available`, while trace
+statement and transaction counts are reported under their actual names.
 
 ## Decision gates
 

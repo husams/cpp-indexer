@@ -1,0 +1,38 @@
+{
+  "artifact_version": "storage-m0/baseline-v1",
+  "benchmark": "storage-m0/v1",
+  "schema_version": 34,
+  "manifest": "benchmarks/storage_m0/manifests/storage-m0-v1.json",
+  "profile": "benchmarks/storage_m0/profiles/local-macos-v1.json",
+  "workload": "synthetic",
+  "scale": "smoke",
+  "seed": 20260723,
+  "distribution": "balanced",
+  "requested": {"nodes": 128, "relations": 512},
+  "actual": {
+    "nodes": 128,
+    "relations": 512,
+    "evidence": 1536,
+    "files": 6,
+    "translation_units": 4,
+    "shared_headers": 2,
+    "repositories": 1,
+    "types": 128,
+    "entity_nodes": 128,
+    "type_edges": 128,
+    "entity_edges": 512,
+    "include_edges": 6
+  },
+  "semantic_digest": "bea33573cc02c379e40e4c6d5ff6d930081247b2a802ec1233b625f95ae97beb",
+  "measured_operations": [
+    "cold_build",
+    "warm_noop",
+    "changed_tu_update",
+    "transform_rebuild",
+    "migration",
+    "backup",
+    "recovery"
+  ],
+  "reproducible_command": "PYTHONPATH=. python3 -m benchmarks.storage_m0.generator --manifest benchmarks/storage_m0/manifests/storage-m0-v1.json --workload synthetic --scale smoke --output /tmp/storage-m0-v34-smoke.db && PYTHONPATH=. python3 -m benchmarks.storage_m0.run --db /tmp/storage-m0-v34-smoke.db --manifest benchmarks/storage_m0/manifests/storage-m0-v1.json --workload synthetic --profile benchmarks/storage_m0/profiles/local-macos-v1.json --output /tmp/storage-m0-v34-smoke.result.json",
+  "note": "This checked-in artifact is the deterministic v34 smoke baseline contract; latency, RSS, storage bytes, plans, and operation durations are emitted by the machine-readable result at run time and are never inferred from this summary."
+}

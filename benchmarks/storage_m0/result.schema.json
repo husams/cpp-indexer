@@ -1,17 +1,24 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://cpp-indexer.invalid/benchmarks/storage-m0/result-v1.schema.json",
+  "$id": "https://cpp-indexer.invalid/benchmarks/storage-m0/result-v2.schema.json",
   "title": "cpp-indexer Storage M0 benchmark result",
   "type": "object",
-  "required": ["result_version", "benchmark", "schema_version", "manifest_sha256", "run_id", "storage", "operations", "queries", "counters", "gates"],
+    "required": ["result_version", "benchmark", "schema_version", "manifest_sha256", "run_id", "identity", "scale", "seed", "distribution", "requested", "actual", "caps", "storage", "operations", "queries", "counters", "gates"],
   "properties": {
-    "result_version": {"const": "storage-m0/result-v1"},
+    "result_version": {"const": "storage-m0/result-v2"},
     "benchmark": {"const": "storage-m0/v1"},
     "schema_version": {"const": 34},
     "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "workload": {"type": "string"},
+    "scale": {"type": "string"},
+    "seed": {"type": "integer"},
+    "distribution": {"type": "string"},
+    "requested": {"$ref": "#/$defs/counts"},
+    "actual": {"$ref": "#/$defs/counts"},
+    "caps": {"type": "object", "required": ["rows", "evidence_rows"]},
     "profile_id": {"type": "string"},
     "run_id": {"type": "string"},
+    "identity": {"type": "object", "required": ["manifest_sha256", "workload", "scale", "seed", "distribution", "requested", "actual", "caps", "revision", "profile_id", "hardware_fingerprint", "configuration"]},
     "started_at": {"type": "string", "format": "date-time"},
     "revision": {"type": ["string", "null"]},
     "environment": {"type": "object", "additionalProperties": true},
@@ -38,6 +45,7 @@
     "notes": {"type": "array", "items": {"type": "string"}}
   },
   "$defs": {
+    "counts": {"type": "object", "required": ["nodes", "relations"], "properties": {"nodes": {"type": "integer", "minimum": 1}, "relations": {"type": "integer", "minimum": 1}}},
     "storageObject": {
       "type": "object",
       "required": ["name", "type", "row_count", "bytes"],
