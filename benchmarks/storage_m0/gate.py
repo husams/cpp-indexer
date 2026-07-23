@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from .common import canonical_json, load_json, manifest_digest, require_result_version, semantic_digest
+from .common import canonical_json, latency_summary, load_json, manifest_digest, require_result_version, semantic_digest, sha256
 
 
 def _check(name: str, status: str, *, actual: Any = None, target: Any = None, reason: str | None = None) -> dict[str, Any]:
@@ -134,6 +134,26 @@ def _bound_result_errors(result: dict[str, Any], role: str) -> list[str]:
                 errors.append(f"{role}: profile artifact is not bound to result")
         except (OSError, ValueError) as error:
             errors.append(f"{role}: invalid profile artifact ({error})")
+    samples_artifact = result.get("raw_samples_artifact")
+    if not samples_artifact or not Path(samples_artifact).is_file():
+        errors.append(f"{role}: missing external raw-samples artifact")
+    else:
+        try:
+            samples = load_json(Path(samples_artifact))
+            if sha256(canonical_json(samples)) != result.get("raw_samples_sha256"):
+                errors.append(f"{role}: raw-samples content digest mismatch")
+            if samples.get("run_id") != result.get("run_id"):
+                errors.append(f"{role}: raw-samples run identity mismatch")
+            sample_rows = {item.get("id"): item for item in samples.get("queries", [])}
+            result_rows = {item.get("id"): item for item in result.get("queries", [])}
+            if set(sample_rows) != set(result_rows):
+                errors.append(f"{role}: raw-samples query set mismatch")
+            for query_id, query in result_rows.items():
+                values = sample_rows.get(query_id, {}).get("samples_ms")
+                if not isinstance(values, list) or latency_summary(values) != query.get("latency_ms") or len(values) != query.get("execution_count"):
+                    errors.append(f"{role}: latency summary is not derived from external raw samples for {query_id}")
+        except (OSError, ValueError, TypeError) as error:
+            errors.append(f"{role}: invalid raw-samples artifact ({error})")
     return errors
 
 
@@ -170,7 +190,7 @@ def evaluate_regression(baseline: dict[str, Any], bad_config: dict[str, Any], pr
     return {"id": "intentional_regression", "status": "pass" if passed else "fail", "minimum_factor": factor, "comparisons": comparisons, "reason": None if passed else "measured bad configuration did not exceed the regression factor"}
 
 
-def _real_evidence(item: dict[str, Any], result: dict[str, Any] | None) -> bool:
+def _real_evidence(item: dict[str, Any], result: dict[str, Any] | None, failed_slos: set[str], seen: set[tuple[str, str]]) -> bool:
     evidence = item.get("evidence")
     if result is None or item.get("measured") is not True or not isinstance(evidence, dict):
         return False
@@ -181,12 +201,20 @@ def _real_evidence(item: dict[str, Any], result: dict[str, Any] | None) -> bool:
         bound = load_json(Path(artifact)); require_result_version(bound)
     except (OSError, ValueError):
         return False
+    if bound.get("run_id") == result.get("run_id") or _identity_dimensions(bound) != _identity_dimensions(result):
+        return False
+    key = (str(evidence.get("run_id")), str(artifact))
+    if key in seen or bound.get("run_id") != evidence.get("run_id") or _bound_result_errors(bound, "alternative"):
+        return False
+    seen.add(key)
     checks = evidence.get("checks")
     outcome = evidence.get("outcome")
     return (
-        bound.get("run_id") == evidence.get("run_id")
-        and isinstance(checks, list) and checks and all(isinstance(check, dict) and check.get("status") == "pass" and check.get("id") and "actual" in check for check in checks)
-        and isinstance(outcome, dict) and outcome.get("measured") is True and isinstance(outcome.get("tested_failed_slos"), list)
+        isinstance(checks, list) and checks and all(isinstance(check, dict) and check.get("status") == "pass" and check.get("id") and "actual" in check and "placeholder" not in canonical_json(check).lower() for check in checks)
+        and isinstance(outcome, dict) and outcome.get("measured") is True
+        and outcome.get("measured_inability") is True and outcome.get("slo_status") == "fail"
+        and outcome.get("configuration") == bound.get("configuration")
+        and set(outcome.get("tested_failed_slos", [])) == failed_slos
     )
 
 
@@ -207,14 +235,18 @@ def evaluate_custom_store(decision: dict[str, Any], *, require: bool, result: di
     alternatives = decision.get("alternatives", []); classes = {item.get("class") for item in alternatives}
     if not {"schema_tuning", "derived_accelerator"}.issubset(classes):
         errors.append("proposal needs separately measured schema/tuning and derived-accelerator alternatives")
-    if any(not _real_evidence(item, result) for item in alternatives):
+    seen: set[tuple[str, str]] = set()
+    if len(alternatives) < 2 or len({item.get("class") for item in alternatives}) != len(alternatives) or any(not _real_evidence(item, result, actual_failed, seen) for item in alternatives):
         errors.append("every alternative needs measured evidence bound to an artifact and checks")
     costs = decision.get("costs", {})
     if (
         not isinstance(costs.get("engineering"), dict)
         or not isinstance(costs.get("compatibility"), dict)
         or not costs["engineering"].get("person_months")
-        or not costs["compatibility"].get("migration_plan")
+        or not isinstance(costs["engineering"].get("work_items"), list) or not costs["engineering"]["work_items"]
+        or not isinstance(costs["compatibility"].get("migration_plan"), list) or not costs["compatibility"]["migration_plan"]
+        or not isinstance(costs["compatibility"].get("compatibility_checks"), list) or not costs["compatibility"]["compatibility_checks"]
+        or not costs["compatibility"].get("person_months")
         or not costs["engineering"].get("source_artifact")
         or not costs["compatibility"].get("source_artifact")
         or not Path(str(costs["engineering"].get("source_artifact"))).is_file()

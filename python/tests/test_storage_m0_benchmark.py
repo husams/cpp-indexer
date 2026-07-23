@@ -88,6 +88,8 @@ def test_runner_captures_storage_query_and_integrity_evidence(tmp_path):
     assert all(result["operations"][name]["status"] == "ok" for name in (
         "warm_noop", "changed_tu_update", "transform_rebuild", "migration", "backup",
     ))
+    assert result["operations"]["migration"]["current_state"]["status"] == "ok"
+    assert result["operations"]["migration"]["current_state"]["semantic_digest_matches"] is True
     assert result["gates"]["semantic_equivalence"] is True
 
 
@@ -191,10 +193,13 @@ def test_gate_requires_exact_failed_slo_before_custom_store_proposal(tmp_path):
     bad_config = run(bad_db, MANIFEST, "synthetic", PROFILE, output=tmp_path / "bad.json", configuration="drop_hot_indexes")
     assert baseline["run_id"] != bad_config["run_id"]
     untrusted = copy.deepcopy(bad_config)
-    for query in bad_config["queries"]:
+    for query in untrusted["queries"]:
         query["latency_ms"]["p95_ms"] = (query["latency_ms"]["p95_ms"] or 1) * 2
-    assert evaluate_regression(baseline, bad_config, profile)["status"] == "fail"
-    assert evaluate_regression(baseline, untrusted, profile)["status"] in {"fail", "pass"}
+    assert evaluate_regression(baseline, untrusted, profile)["status"] == "fail"
+    disk_tampered = load_json(tmp_path / "bad.json")
+    disk_tampered["queries"][0]["latency_ms"]["p95_ms"] = (disk_tampered["queries"][0]["latency_ms"]["p95_ms"] or 1) * 2
+    (tmp_path / "bad.json").write_text(json.dumps(disk_tampered, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    assert evaluate_regression(baseline, load_json(tmp_path / "bad.json"), profile)["status"] == "fail"
     hold = evaluate_custom_store({"decision": "hold"}, require=True)
     assert hold["status"] == "pass"
     proposal = evaluate_custom_store({"decision": "propose"}, require=True)
@@ -209,6 +214,11 @@ def test_gate_requires_exact_failed_slo_before_custom_store_proposal(tmp_path):
         "costs": {"engineering": {"person_months": 1, "source_artifact": "/tmp/missing"}, "compatibility": {"migration_plan": "fake", "source_artifact": "/tmp/missing"}},
     }
     assert evaluate_custom_store(fabricated, require=True, result=result, slo_checks=[{"id": "query.fake", "status": "fail"}])["status"] == "fail"
+    same_valid_result = copy.deepcopy(fabricated)
+    for alternative in same_valid_result["alternatives"]:
+        alternative["evidence"] = {"run_id": result["run_id"], "result_run_id": result["run_id"], "artifact": str(tmp_path / "baseline.json"), "checks": [{"id": "alternative.slo", "status": "pass", "actual": 1}], "outcome": {"measured": True, "measured_inability": True, "slo_status": "fail", "configuration": result["configuration"], "tested_failed_slos": ["query.fake"]}}
+    same_valid_result["costs"] = {"engineering": {"person_months": 1, "work_items": [{"id": "x"}], "source_artifact": str(MANIFEST)}, "compatibility": {"person_months": 1, "migration_plan": [{"id": "x"}], "compatibility_checks": [{"id": "x"}], "source_artifact": str(MANIFEST)}}
+    assert evaluate_custom_store(same_valid_result, require=True, result=result, slo_checks=[{"id": "query.fake", "status": "fail"}])["status"] == "fail"
     gate = evaluate(
         result, profile, baseline=baseline, bad_config=bad_config,
         decision={"decision": "hold"}, require_custom_store=True,

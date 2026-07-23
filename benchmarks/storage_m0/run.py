@@ -102,12 +102,12 @@ def run_queries(connection: sqlite3.Connection, workload: dict[str, Any], *, def
                     row_count = len(rows); truncated = len(rows) > row_limit
                 records.append({"id": query["id"], "category": query.get("category", "other"), "sql": sql,
                                 "parameters": parameters, "row_count": min(row_count, row_limit), "truncated": truncated,
-                                "latency_ms": latency_summary(latencies), "plan": plan, "execution_count": iterations,
+                                "latency_ms": latency_summary(latencies), "samples_ms": latencies, "plan": plan, "execution_count": iterations,
                                 "status": "ok"})
             except sqlite3.DatabaseError as error:
                 records.append({"id": query["id"], "category": query.get("category", "other"), "sql": sql,
                                 "parameters": parameters, "row_count": None, "truncated": False,
-                                "latency_ms": latency_summary([]), "plan": [], "execution_count": 0,
+                                "latency_ms": latency_summary([]), "samples_ms": [], "plan": [], "execution_count": 0,
                                 "status": "error", "error": str(error)})
     finally:
         connection.set_trace_callback(None)
@@ -211,6 +211,10 @@ def _migration(path: Path, directory: Path) -> dict[str, Any]:
         connection.execute("DELETE FROM edge_kind WHERE id IN (19,20)")
         connection.execute("UPDATE edge SET kind=7 WHERE id=?", (variable_edge,))
         connection.execute("UPDATE meta SET value='33' WHERE key='schema_version'")
+        connection.execute("UPDATE benchmark_meta SET value='building' WHERE key='state'")
+        connection.execute("UPDATE benchmark_meta SET value=CAST(value AS INTEGER)+1 WHERE key='generation'")
+        connection.execute("INSERT INTO benchmark_meta(key,value) VALUES('migration_from','33') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        connection.execute("INSERT INTO benchmark_meta(key,value) VALUES('migration_to','34') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
         connection.commit()
     finally:
         connection.close()
@@ -227,9 +231,29 @@ def _migration(path: Path, directory: Path) -> dict[str, Any]:
     from indexer.storage import Storage
     with Storage(str(target)):
         pass
+    migrated_digest = semantic_digest(target)
+    validation_connection = sqlite3.connect(target)
+    try:
+        validation_connection.execute("PRAGMA foreign_keys=ON")
+        integrity_check = validation_connection.execute("PRAGMA integrity_check").fetchone()[0]
+        foreign_keys = validation_connection.execute("PRAGMA foreign_key_check").fetchall()
+        generation = int(validation_connection.execute("SELECT value FROM benchmark_meta WHERE key='generation'").fetchone()[0])
+        if integrity_check == "ok" and not foreign_keys and generation > 0:
+            validation_connection.execute("BEGIN IMMEDIATE")
+            validation_connection.execute("UPDATE benchmark_meta SET value=? WHERE key='semantic_digest'", (migrated_digest,))
+            validation_connection.execute("UPDATE benchmark_meta SET value='current' WHERE key='state'")
+            validation_connection.commit()
+    finally:
+        validation_connection.close()
+    current_state_connection = sqlite3.connect(target)
+    try:
+        current_state = integrity(current_state_connection, target)
+    finally:
+        current_state_connection.close()
+    equivalent = migrated_digest == semantic_digest(reference)
     duration = round((time.perf_counter_ns() - started) / 1_000_000, 6)
-    return {"status": "ok", "duration_ms": duration, "from_schema": 33, "to_schema": 34,
-            "semantic_equivalence": semantic_digest(target) == semantic_digest(reference), "canonical_reference": str(reference),
+    return {"status": "ok" if equivalent and current_state["status"] == "ok" else "failed", "duration_ms": duration, "from_schema": 33, "to_schema": 34,
+            "semantic_equivalence": equivalent, "canonical_reference": str(reference), "current_state": current_state,
             "migration_triggered": True, "kind": "actual v33-to-v34 compatibility migration"}
 
 
@@ -333,12 +357,13 @@ def run(db_path: Path, manifest_path: Path, workload_id: str, profile_path: Path
             ],
             "manifest_artifact": str(manifest_path), "profile_artifact": str(profile_path),
         }
+        run_id = sha256(canonical_json(identity))[:24]
         result = {
             "result_version": "storage-m0/result-v2", "benchmark": BENCHMARK_VERSION, "schema_version": SCHEMA_VERSION,
             "manifest_sha256": identity["manifest_sha256"], "workload": workload_id, "scale": scale,
             "seed": identity["seed"], "distribution": distribution, "requested": requested, "actual": counts,
             "caps": caps, "profile_id": profile["profile_id"], "configuration": effective_configuration,
-            "identity": identity, "run_id": sha256(canonical_json(identity))[:24], "started_at": started,
+            "identity": identity, "run_id": run_id, "started_at": started,
             "revision": identity["revision"], "environment": environment, "hardware_fingerprint": identity["hardware_fingerprint"],
             "configuration_evidence": configuration_evidence,
             "storage": storage_stats(connection, db_path), "operations": operations, "queries": queries,
@@ -348,12 +373,21 @@ def run(db_path: Path, manifest_path: Path, workload_id: str, profile_path: Path
             "gates": {"semantic_equivalence": checks["semantic_equivalence"], "intentional_regression": {"status": "not_run", "reason": "compare this result with a measured candidate"}, "custom_store": {"status": "not_run", "reason": "evaluate with gate.py and a decision record"}},
             "notes": ["All acceptance-critical lifecycle operations are measured on isolated copies.", "prepare/step/write counters are explicitly unsupported where Python sqlite3 has no supported instrumentation.", "Large plans require an explicit materialization cap and are never expanded implicitly."],
         }
+        samples_payload = {
+            "artifact_version": "storage-m0/raw-query-samples-v1", "run_id": run_id,
+            "queries": [{"id": item["id"], "samples_ms": item.get("samples_ms", [])} for item in queries],
+        }
+        samples_path = Path(str(output) + ".samples.json") if output is not None else None
+        result["raw_samples_sha256"] = sha256(canonical_json(samples_payload))
+        result["raw_samples_artifact"] = str(samples_path) if samples_path is not None else None
     finally:
         connection.close()
     configuration_evidence["run_id"] = result["run_id"]
     configuration_evidence["result_artifact"] = str(output) if output is not None else None
     if output is not None:
-        output.parent.mkdir(parents=True, exist_ok=True); output.write_text(canonical_json(result) + "\n", encoding="utf-8")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(canonical_json(result) + "\n", encoding="utf-8")
+        samples_path.write_text(canonical_json(samples_payload) + "\n", encoding="utf-8")
     return result
 
 
