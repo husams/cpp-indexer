@@ -101,8 +101,13 @@ def load_cidx_schema() -> tuple[str, dict[str, int]]:
         sys.path.insert(0, str(python_root))
     from indexer.storage import SCHEMA_VERSION as current_version
     from indexer.storage import SYMBOL_KIND_IDS, _SCHEMA
-    if current_version != SCHEMA_VERSION:
-        raise RuntimeError(f"benchmark requires schema v{SCHEMA_VERSION}, found v{current_version}")
+    # The M0 workload remains the v34 compatibility contract, but it must be
+    # generatable from the current schema after later additive migrations (the
+    # v35/v36 descriptor and applicability tables do not alter its projected
+    # semantic queries). Reject only a runtime older than the benchmark
+    # contract; newer additive schemas remain valid inputs.
+    if current_version < SCHEMA_VERSION:
+        raise RuntimeError(f"benchmark requires schema >=v{SCHEMA_VERSION}, found v{current_version}")
     return _SCHEMA, SYMBOL_KIND_IDS
 
 
