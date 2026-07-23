@@ -20,12 +20,15 @@ definitions with pytest-bdd. Inside `steps/`:
 | module              | holds                                                  |
 | ------------------- | ------------------------------------------------------ |
 | `pipeline_steps.py` | `Given` the fixture workspace, `When` the CLI runs      |
+| `queryplan_steps.py`| public Python QueryPlan execution and result assertions |
 | `index_steps.py`    | database, resolve pass, file/symbol/unresolved totals   |
 | `symbol_steps.py`   | symbol rows: membership, exhaustiveness, spans          |
 | `signature_steps.py`| types, parameters, templates, instantiations, definitions |
 | `edge_steps.py`     | edge counts, relationship tables, per-kind totals       |
 | `edge_site_steps.py`| edge sites -- where a relationship is written           |
 | `callgraph_steps.py`| callers and callees                                     |
+| `hierarchy_steps.py`| bases, subclasses, overrides and dynamic dispatch       |
+| `provenance_steps.py`| receiver provenance and query-time devirtualization    |
 | `cli_steps.py`      | CLI output and read-only `cidx` subcommands             |
 | `paths.py`          | filesystem anchors; puts `python/` on `sys.path`        |
 | `workspace.py`      | the per-scenario `Workspace`: CLI runner + query handle |
@@ -41,6 +44,7 @@ and never by growing one catch-all step file.
 ```bash
 cmake -S . -B build && cmake --build build -j        # the CLI under test
 uv run --project python pytest tests/e2e             # or: pytest tests/e2e
+uv run --project python pytest tests/e2e -m hse_33   # HSE-33 completion gate
 ```
 
 Set `CIDX_BIN` to test a binary other than `build/cidx`. Without a usable
@@ -62,10 +66,11 @@ cidx resolve
 scenario can see another's rows and nothing touches the repository's committed
 `index.db`.
 
-Assertions then go through `indexer.query.GraphQuery`: symbol rows, the
-signature/type tier (`signature`, `template_params`, `template_args`,
-`template_of`, `instantiations`), the edge graph (`edges_out` with sites), the
-call graph (`callers` / `callees`) and `definitions`.
+Assertions then go through `indexer.query.GraphQuery` or the public
+`indexer.queryplan` builder and executor. The HSE-33 cases compare the
+receiver-aware plan with the ordinary static `calls` plan, so receiver context
+must be represented in canonical QueryPlan JSON rather than hidden in a test
+callback.
 
 ## Where the expectations live
 
