@@ -37,6 +37,12 @@ This installs the `indexer` Python package and the `indexer` and
 `cidx-python` console commands. The repository launcher is also available as
 `python/cidx`.
 
+## Ownership rule
+
+See the [module architecture and dependency rules](docs/adr/ADR-011-module-architecture-and-dependency-rules.md)
+before adding a module or dependency. It is backed by the machine-readable
+[module manifest](architecture/cidx-module-manifest.json) and a bootstrap CI gate.
+
 ## Compatibility rule
 
 SQLite schema/read behavior and explicitly listed generated contracts are
