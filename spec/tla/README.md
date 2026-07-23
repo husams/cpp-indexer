@@ -67,13 +67,21 @@ From the repository root, run:
 spec/tla/tools/check.sh
 ```
 
+The protected-invariant mutation regression is checked separately with:
+
+```bash
+spec/tla/tools/check-regression.sh
+```
+
 The checker downloads and SHA-256 verifies the pinned `tla2tools.jar` when it
 is not already cached, requires Java 17, runs SANY syntax checks first, then
 runs TLC with one worker and fingerprint polynomial 0 for each checked-in
 model. It emits stable `TLA_SYNTAX_STATUS`, `TLA_MODEL_STATUS`,
 `TLA_TOOLCHAIN_STATUS`, and `TLA_CHECK_STATUS` lines. Syntax/toolchain failures
 and model failures have distinct exit classes, and the CI workflow exposes the
-TLA+ gate separately from C++ tests.
+TLA+ gate separately from C++ tests. The checker cross-checks every model's
+required invariant set against the `INVARIANT` entries in its `.cfg`; the
+regression command proves that removing `ProtectedInvariant` fails closed.
 
 See [TOOLCHAIN.md](TOOLCHAIN.md), [POLICY.md](POLICY.md), and
 [trusted/assumptions.md](trusted/assumptions.md) before changing the contract.

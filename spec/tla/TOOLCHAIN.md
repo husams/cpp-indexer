@@ -22,6 +22,12 @@ The exact checked command is:
 spec/tla/tools/check.sh
 ```
 
+The mutation regression is:
+
+```bash
+spec/tla/tools/check-regression.sh
+```
+
 For an offline or pre-provisioned environment, point `TLA_TOOLS_JAR` at a
 local copy of the same jar. The checker still verifies its SHA-256. `JAVA_BIN`
 may select a Java 17 executable when `JAVA_HOME` is not suitable.

@@ -21,6 +21,8 @@ jobs:
           java-version: '17'
       - name: Run normative TLA+ gate
         run: spec/tla/tools/check.sh
+      - name: Run invariant mutation regression
+        run: spec/tla/tools/check-regression.sh
 
   cpp-default:
     name: C++ default tests
@@ -32,9 +34,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            clang cmake libclang-cpp-dev libsqlite3-dev llvm-dev ninja-build
-      - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+            clang-18 clang-tools-18 cmake libclang-18-dev \
+            libclang-common-18-dev libclang-cpp18 libsqlite3-dev \
+            llvm-18 llvm-18-dev ninja-build
+      - name: Configure with the matching LLVM/Clang toolchain
+        run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=clang-18
+          -DCMAKE_CXX_COMPILER=clang++-18
+          -DLLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm
+          -DClang_DIR=/usr/lib/llvm-18/lib/cmake/clang
       - name: Build
         run: cmake --build build --parallel 2
       - name: Run C++ default tests
