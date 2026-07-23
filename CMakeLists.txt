@@ -356,8 +356,8 @@ target_compile_options(cidx_core PRIVATE
 target_compile_definitions(cidx_core PUBLIC
   "CIDX_CLANG_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
 
-# `cidx analyze` embeds the canonical Souffle rule files from
-# python/indexer/rules so both implementations ship byte-identical Datalog.
+# `cidx analyze` embeds the declared Souffle rule files from
+# python/indexer/rules; Python consumes the same fact/result contract.
 set(_cidx_dl_rules_dir "${CMAKE_CURRENT_SOURCE_DIR}/python/indexer/rules")
 set(_cidx_dl_header
   "${CMAKE_CURRENT_BINARY_DIR}/generated/cli/souffle_rules.hpp")

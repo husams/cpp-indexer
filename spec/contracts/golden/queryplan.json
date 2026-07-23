@@ -1,0 +1,4 @@
+{
+  "id": "calls-to-main",
+  "canonical_json": "{\n  \"cxq\": 1,\n  \"source\": {\n    \"kind\": \"symbol\",\n    \"ref\": \"main\"\n  },\n  \"stages\": [\n    {\n      \"op\": \"out\",\n      \"relation\": \"symbol.calls\",\n      \"min_depth\": 1,\n      \"max_depth\": 1\n    },\n    {\n      \"op\": \"select\",\n      \"fields\": [\n        \"id\",\n        \"name\",\n        \"kind\"\n      ]\n    },\n    {\n      \"op\": \"limit\",\n      \"n\": 10\n    }\n  ]\n}"
+}

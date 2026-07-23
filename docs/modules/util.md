@@ -3,8 +3,8 @@
 [← docs index](../README.md)
 
 Small, dependency-free building blocks used across the codebase. Many exist to
-reproduce Python/`os.path`/`json` semantics exactly (the parity invariant — see
-the [overview](../overview.md#design-invariants)). ~1.7k LOC.
+preserve the declared storage/read-query contracts and deterministic output
+(see the [overview](../overview.md#design-invariants)). ~1.7k LOC.
 
 | Module | Role |
 |---|---|
@@ -26,4 +26,4 @@ the [overview](../overview.md#design-invariants)). ~1.7k LOC.
 - `hashing` + `files` drive the incremental-index skip decision (see the
   [per-file interleave](../data-flow.md#the-per-file-interleave)).
 - `pathutil` + `json_min` keep `file.compile_options` and stored paths
-  byte-identical to the Python implementation.
+  deterministic and compatible with the Python SDK's declared read contract.

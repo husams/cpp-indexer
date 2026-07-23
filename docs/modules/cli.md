@@ -32,8 +32,10 @@ stdout/stderr). `resolve_cache_dir()` implements `$INDEXER_CACHE` else
 
 ### `ParsedArgs` + `parse_args()` (`args.hpp`)
 
-A hand-rolled parser mirroring the Python argparse command tree (per-command
-grammar branches; `kVersion = "0.53.0"`). Throws `UsageError` (exit 2) on misuse.
+A hand-rolled C++ parser for the product command tree (per-command grammar
+branches). `kVersion` is generated from `spec/platform/version.json`.
+Throws `UsageError` (exit 2) on misuse. The Python CLI is a compatibility
+adapter, not a second indexing authority.
 
 ## Command handlers (`commands.cpp`)
 

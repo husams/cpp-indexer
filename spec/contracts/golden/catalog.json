@@ -1,0 +1,8 @@
+{
+  "catalog_version": 1,
+  "entries": [
+    {"name": "calls", "id": 1, "layer": "symbol"},
+    {"name": "uses", "id": 7, "layer": "symbol"},
+    {"name": "generalizes", "id": 1, "layer": "entity"}
+  ]
+}

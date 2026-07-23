@@ -8,6 +8,7 @@ Modules:
 """
 
 from .storage import Storage, Component, Directory, File, Symbol, SYMBOL_KINDS
+from ._version import __version__
 from .query import (
     CallerWithContext,
     GraphQuery,
@@ -84,6 +85,7 @@ __all__ = [
     "File",
     "Symbol",
     "SYMBOL_KINDS",
+    "__version__",
     "CallerWithContext",
     "CallerWithContextModel",
     "GraphQuery",

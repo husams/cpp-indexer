@@ -1,0 +1,39 @@
+{
+  "manifest_version": 1,
+  "owner": "HSE-60",
+  "policy": "Only rows marked dual_executor promise cross-language behavior. Other rows name an adapter or authority, not an implementation-parity requirement.",
+  "contracts": [
+    {
+      "id": "queryplan.canonical-json",
+      "owner": "HSE-24",
+      "promise": "byte-identical",
+      "executors": ["cpp", "python"],
+      "schema": "spec/contracts/queryplan.schema.json",
+      "golden": "spec/contracts/golden/queryplan.json"
+    },
+    {
+      "id": "result.envelope",
+      "owner": "HSE-70",
+      "promise": "schema-compatible",
+      "executors": ["cpp", "python"],
+      "schema": "spec/contracts/result-envelope.schema.json",
+      "golden": "spec/contracts/golden/result-envelope.json"
+    },
+    {
+      "id": "error-status",
+      "owner": "HSE-70",
+      "promise": "stable-codes",
+      "executors": ["cpp", "python"],
+      "schema": "spec/contracts/error-status.schema.json",
+      "golden": "spec/contracts/golden/error-status.json"
+    },
+    {
+      "id": "public-catalogs",
+      "owner": "HSE-59",
+      "promise": "generated-from-shared-source",
+      "executors": ["cpp", "python"],
+      "schema": "spec/contracts/catalog.schema.json",
+      "golden": "spec/contracts/golden/catalog.json"
+    }
+  ]
+}

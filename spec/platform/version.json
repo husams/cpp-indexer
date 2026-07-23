@@ -1,0 +1,33 @@
+{
+  "format_version": 1,
+  "product": {
+    "version": "0.53.0",
+    "channel": "stable",
+    "prerelease": null
+  },
+  "database": {
+    "schema_version": 34,
+    "migration_floor": 2,
+    "reader_min": 34,
+    "reader_max": 34
+  },
+  "catalog": {
+    "version": 1,
+    "inputs": [
+      "src/query/plan.hpp",
+      "src/query/plan.cpp",
+      "python/indexer/queryplan.py",
+      "docs/query-plan.md"
+    ]
+  },
+  "artifact": {
+    "version": 1,
+    "reader_min": 1,
+    "reader_max": 1
+  },
+  "api": {
+    "version": 1,
+    "reader_min": 1,
+    "reader_max": 1
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "status": "error",
+  "code": "E_RELATION",
+  "message": "unknown relation: symbol.missing"
+}

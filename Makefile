@@ -19,7 +19,7 @@ CMAKE_ARGS       ?=
 # Absolute repo path, so every target works no matter the caller's cwd.
 REPO_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
-.PHONY: all build static test test-static test-e2e tidy clean help
+.PHONY: all build static test test-static test-e2e tidy contracts-check clean help
 
 all: build
 
@@ -49,9 +49,12 @@ tidy:
 	cmake -S . -B $(BUILD_DIR) $(CMAKE_ARGS)
 	cmake --build $(BUILD_DIR) --target cidx-clang-tidy -j $(JOBS)
 
+contracts-check:
+	uv run --project $(REPO_DIR)/python python $(REPO_DIR)/scripts/check_release_contract.py
+
 clean:
 	rm -rf $(BUILD_DIR) $(STATIC_BUILD_DIR)
 
 help:
-	@echo "targets: build (default), static, test, test-static, test-e2e, tidy, clean"
+	@echo "targets: build (default), static, test, test-static, test-e2e, tidy, contracts-check, clean"
 	@echo "vars:    BUILD_DIR, STATIC_BUILD_DIR, JOBS, CMAKE_ARGS, PYTEST_ARGS"

@@ -32,6 +32,7 @@ Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import sqlite3
@@ -49,6 +50,9 @@ _STORAGE_PY = os.path.join(_WORKTREE, "python", "indexer", "storage.py")
 _CLI_PY = os.path.join(_WORKTREE, "python", "indexer", "cli.py")
 _QUERY_PY = os.path.join(_WORKTREE, "python", "indexer", "query.py")
 _ARGS_HPP = os.path.join(_WORKTREE, "src", "cli", "args.hpp")
+_VERSION_JSON = os.path.join(_WORKTREE, "spec", "platform", "version.json")
+_VERSION_HPP = os.path.join(_WORKTREE, "src", "cli", "version.hpp")
+_VERSION_PY = os.path.join(_WORKTREE, "python", "indexer", "_version.py")
 _STORAGE_HPP = os.path.join(_WORKTREE, "src", "storage", "storage.hpp")
 _PIPELINE_HPP = os.path.join(_WORKTREE, "manifests", "graphlab", "pipeline.hpp")
 _PIPELINE_CPP = os.path.join(_WORKTREE, "manifests", "graphlab", "pipeline.cpp")
@@ -307,27 +311,23 @@ def test_p1_fx_refresh_in_pipeline_cpp():
 
 
 def test_python_version_is_0501():
-    """Python VERSION must be 0.53.0 (cidx-astgraph per-TU AST graph dumper)."""
-    cli_src = _read(_CLI_PY)
-    match = re.search(r'^VERSION\s*=\s*"([^"]+)"', cli_src, re.MULTILINE)
-    assert match is not None, "VERSION not found in cli.py."
+    """Python's generated product version must match the single source."""
+    expected = json.loads(_read(_VERSION_JSON))["product"]["version"]
+    version_src = _read(_VERSION_PY)
+    match = re.search(r'^__version__\s*=\s*"([^"]+)"', version_src, re.MULTILINE)
+    assert match is not None, "__version__ not found in generated _version.py."
     version = match.group(1)
-    assert version == "0.53.0", (
-        f"Python VERSION is '{version}'; expected '0.53.0'. "
-        "Bump VERSION to 0.53.0 in cli.py (cidx-astgraph per-TU AST graph dumper)."
-    )
+    assert version == expected
 
 
 def test_cpp_version_is_0501():
-    """C++ kVersion must be 0.53.0 (cidx-astgraph per-TU AST graph dumper)."""
-    args_src = _read(_ARGS_HPP)
-    match = re.search(r'kVersion\s*=\s*"([^"]+)"', args_src)
-    assert match is not None, "kVersion not found in args.hpp."
+    """C++'s generated product version must match the single source."""
+    expected = json.loads(_read(_VERSION_JSON))["product"]["version"]
+    version_src = _read(_VERSION_HPP)
+    match = re.search(r'kProductVersion\s*=\s*"([^"]+)"', version_src)
+    assert match is not None, "kProductVersion not found in generated version.hpp."
     version = match.group(1)
-    assert version == "0.53.0", (
-        f"C++ kVersion is '{version}'; expected '0.53.0'. "
-        "Bump kVersion to 0.53.0 in args.hpp (cidx-astgraph per-TU AST graph dumper)."
-    )
+    assert version == expected
 
 
 def test_cpp_schema_version_is_30():
