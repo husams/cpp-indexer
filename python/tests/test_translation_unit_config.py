@@ -5,22 +5,30 @@ from indexer.storage import (
     FileConfigApplicability,
     TranslationUnitConfig,
     canonical_translation_unit_config_json,
+    resolve_translation_unit_config,
+    translation_unit_config_hash,
 )
 
 
 def test_descriptor_is_cross_language_stable_and_repeated_configs_dedupe():
     db = Storage(":memory:")
-    config = TranslationUnitConfig(
-        driver="clang++",
-        language="c++",
-        arguments=["-std=c++23", "-DFAST=1", "main.cpp"],
-        diagnostics_policy="error-limit=0",
+    config = resolve_translation_unit_config(
+        ["-std=c++23", "-DFAST=1", "main.cpp"],
+        driver="clang++", language="c++", diagnostics_policy="error-limit=0",
     )
     expected = (
-        '["clang++","","c++","","",[],"","",[],[],[],[],'
+        '["clang++","","c++","c++23","",[],"","",[],["-DFAST=1"],[],[],'
         '"error-limit=0",["-std=c++23","-DFAST=1","main.cpp"]]'
     )
-    assert canonical_translation_unit_config_json(config) == expected
+    assert canonical_translation_unit_config_json(
+        resolve_translation_unit_config(
+            config.arguments,
+            driver=config.driver,
+            working_dir=config.working_dir,
+            language=config.language,
+            resource_dir=config.resource_dir,
+        )
+    ) == expected
     first = db.add_translation_unit_config(config)
     repeat = TranslationUnitConfig(
         driver="clang++", language="c++",
@@ -35,6 +43,46 @@ def test_descriptor_is_cross_language_stable_and_repeated_configs_dedupe():
         diagnostics_policy="error-limit=0",
     )
     assert db.add_translation_unit_config(changed) != first
+
+
+def test_descriptor_golden_captures_every_semantic_dimension():
+    config = TranslationUnitConfig(
+        driver="clang++",
+        working_dir=".",
+        language="c++",
+        resource_dir="/clang/resource",
+        arguments=[
+            "-std=c++23", "--target=x86_64-unknown-linux-gnu", "-mabi=lp64",
+            "-isysroot", "/sdk", "-I", "/inc", "-D", "FEATURE=1",
+            "-include", "/gen/header.hpp",
+        ],
+    )
+    expected = (
+        '["clang++",".","c++","c++23","x86_64-unknown-linux-gnu",'
+        '["-mabi=lp64"],"/sdk","/clang/resource",["/inc"],'
+        '["-DFEATURE=1"],[],["/gen/header.hpp"],"error-limit=0",'
+        '["-std=c++23","--target=x86_64-unknown-linux-gnu","-mabi=lp64",'
+        '"-isysroot","/sdk","-I","/inc","-D","FEATURE=1",'
+        '"-include","/gen/header.hpp"]]'
+    )
+    assert canonical_translation_unit_config_json(
+        resolve_translation_unit_config(
+            config.arguments,
+            driver=config.driver,
+            working_dir=config.working_dir,
+            language=config.language,
+            resource_dir=config.resource_dir,
+        )
+    ) == expected
+    assert translation_unit_config_hash(
+        resolve_translation_unit_config(
+            config.arguments,
+            driver=config.driver,
+            working_dir=config.working_dir,
+            language=config.language,
+            resource_dir=config.resource_dir,
+        )
+    ) == "0e65af5d6defe83a2ea53aeac13ca9f6237c4a20"
 
 
 def test_v34_include_row_migrates_to_shared_config_identity(tmp_path):

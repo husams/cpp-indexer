@@ -91,8 +91,9 @@ CliArgs parse_cli(const std::vector<std::string> &argv) {
       out.output_path = value("--output");
     } else if (a == "--rule") {
       if (out.rule) {
-        throw cidx::UsageError(std::string(kUsage) +
-                               "cidx-astgraph: error: --rule specified more than once\n");
+        throw cidx::UsageError(
+            std::string(kUsage) +
+            "cidx-astgraph: error: --rule specified more than once\n");
       }
       out.rule = value("--rule");
     } else if (a == "--jobs") {
@@ -100,19 +101,22 @@ CliArgs parse_cli(const std::vector<std::string> &argv) {
       try {
         out.jobs = std::stoi(n);
       } catch (...) {
-        throw cidx::UsageError(std::string(kUsage) +
-                               "cidx-astgraph: error: --jobs expects an integer\n");
+        throw cidx::UsageError(
+            std::string(kUsage) +
+            "cidx-astgraph: error: --jobs expects an integer\n");
       }
       if (out.jobs < 1) {
-        throw cidx::UsageError(std::string(kUsage) +
-                               "cidx-astgraph: error: --jobs must be at least 1\n");
+        throw cidx::UsageError(
+            std::string(kUsage) +
+            "cidx-astgraph: error: --jobs must be at least 1\n");
       }
     } else if (a == "--main-only") {
       out.main_only = true;
     } else if (a == "analyze") {
       if (out.analyze) {
-        throw cidx::UsageError(std::string(kUsage) +
-                               "cidx-astgraph: error: analyze specified more than once\n");
+        throw cidx::UsageError(
+            std::string(kUsage) +
+            "cidx-astgraph: error: analyze specified more than once\n");
       }
       out.analyze = true;
     } else if (!a.empty() && a[0] == '-') {
@@ -131,8 +135,9 @@ CliArgs parse_cli(const std::vector<std::string> &argv) {
                            "cidx-astgraph: error: SOURCE is required\n");
   }
   if (out.analyze && !out.rule) {
-    throw cidx::UsageError(std::string(kUsage) +
-                           "cidx-astgraph: error: analyze requires --rule NAME\n");
+    throw cidx::UsageError(
+        std::string(kUsage) +
+        "cidx-astgraph: error: analyze requires --rule NAME\n");
   }
   if (!out.analyze && out.rule) {
     throw cidx::UsageError(std::string(kUsage) +
@@ -141,9 +146,9 @@ CliArgs parse_cli(const std::vector<std::string> &argv) {
   return out;
 }
 
-cidx::json_out::Value callgraph_json(
-    const std::string &source, const std::string &out_path,
-    const std::vector<cidx::astgraph::CallFact> &calls) {
+cidx::json_out::Value
+callgraph_json(const std::string &source, const std::string &out_path,
+               const std::vector<cidx::astgraph::CallFact> &calls) {
   using cidx::json_out::Array;
   using cidx::json_out::Object;
   using cidx::json_out::Value;
@@ -213,28 +218,32 @@ int main(int argc, char **argv) {
           "); run `cidx import <compile_commands.json>` for its project");
     }
 
-    // The exact `cidx index` options pipeline: re-sanitize stored args (G11),
-    // then decode <label>/$VAR tokens against the index's aliases (v0.6.0).
-    const std::vector<std::string> opts = cidx::CompileDb::resolve_options(
+    // Resolve through the shared descriptor adapter used by indexing, include
+    // extraction, and diff; the returned argument order is replayable.
+    const std::vector<std::string> stored = cidx::CompileDb::resolve_options(
         cidx::CompileDb::sanitize(rec->compile_options
                                       ? *rec->compile_options
                                       : std::vector<std::string>{}),
         [&db](const std::string &n) { return db.get_alias(n); });
+    const cidx::TranslationUnitConfig descriptor =
+        cidx::resolve_translation_unit_config(
+            rec->driver, std::string("."), stored, std::nullopt, std::nullopt,
+            std::string("error-limit=0"));
+    const std::vector<std::string> &opts = descriptor.arguments;
 
     cidx::astgraph::Options dump_opts;
     dump_opts.main_only = cli.main_only;
     const std::string default_name =
         cidx::pathutil::basename(source) + "." +
-        cidx::astgraph::artifact_key(source, opts, rec->driver, dump_opts)
+        cidx::astgraph::artifact_key(source, opts, descriptor.driver, dump_opts)
             .substr(0, 12) +
         ".db";
     const std::string out_path =
-        cli.output_path
-            ? cidx::pathutil::abspath(*cli.output_path)
-            : cidx::pathutil::join(cli.out_dir ? *cli.out_dir : ".",
-                                   default_name);
+        cli.output_path ? cidx::pathutil::abspath(*cli.output_path)
+                        : cidx::pathutil::join(cli.out_dir ? *cli.out_dir : ".",
+                                               default_name);
     const cidx::astgraph::DumpStats stats = cidx::astgraph::dump_tu(
-        source, opts, rec->driver, out_path, dump_opts);
+        source, opts, descriptor.driver, out_path, dump_opts);
 
     if (cli.analyze) {
       if (*cli.rule != "callgraph") {

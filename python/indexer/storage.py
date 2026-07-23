@@ -1411,6 +1411,7 @@ class TranslationUnitConfig:
     diagnostics_policy: Optional[str] = None
     arguments: list[str] = field(default_factory=list)
     state: str = "registered"
+    association_state: str = "registered"
     id: Optional[int] = None
 
 
@@ -1439,6 +1440,79 @@ def translation_unit_config_hash(config: TranslationUnitConfig) -> str:
     return hashlib.sha1(
         canonical_translation_unit_config_json(config).encode("utf-8")
     ).hexdigest()
+
+
+def resolve_translation_unit_config(
+    arguments: Sequence[str],
+    *,
+    driver: Optional[str] = None,
+    working_dir: Optional[str] = None,
+    language: Optional[str] = None,
+    resource_dir: Optional[str] = None,
+    diagnostics_policy: Optional[str] = "error-limit=0",
+) -> TranslationUnitConfig:
+    """Build the shared descriptor fields from one replayable argument list."""
+    args = list(arguments)
+    config = TranslationUnitConfig(
+        driver=driver, working_dir=working_dir, language=language,
+        resource_dir=resource_dir, diagnostics_policy=diagnostics_policy,
+        arguments=args,
+    )
+    def last(names: tuple[str, ...]) -> Optional[str]:
+        value = None
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            for name in names:
+                if arg.startswith(name + "="):
+                    value = arg[len(name) + 1:]
+                elif arg == name and i + 1 < len(args):
+                    i += 1
+                    value = args[i]
+            i += 1
+        return value
+    config.standard = last(("-std", "--std"))
+    config.target = last(("-target", "--target"))
+    config.sysroot = last(("-isysroot", "--sysroot"))
+    def values(flags: tuple[str, ...]) -> list[str]:
+        out: list[str] = []
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            for flag in flags:
+                if arg == flag and i + 1 < len(args):
+                    i += 1
+                    out.append(args[i])
+                elif arg.startswith(flag) and len(arg) > len(flag):
+                    out.append(arg[len(flag):])
+            i += 1
+        return out
+    config.include_paths = values(("-I", "-isystem", "-iquote", "-F"))
+    config.generated_inputs = values(("-include", "-imacros", "-include-pch"))
+    for i, arg in enumerate(args):
+        if arg in {"-D", "-U"} and i + 1 < len(args):
+            config.macro_state.append(arg + args[i + 1])
+        elif arg.startswith(("-D", "-U")):
+            config.macro_state.append(arg)
+        if arg.startswith(("-m", "-fabi")) or arg in {
+            "-fshort-wchar", "-fshort-enums", "-fno-exceptions", "-fno-rtti",
+        }:
+            config.abi_options.append(arg)
+    for name in (
+        "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH",
+        "SDKROOT", "MACOSX_DEPLOYMENT_TARGET", "CIDX_RESOURCE_DIR",
+    ):
+        if name in os.environ:
+            config.relevant_environment.append(f"{name}={os.environ[name]}")
+    if not config.language:
+        config.language = "c++" if (
+            "--driver-mode=g++" in args or "-xc++" in args or any(
+                args[i + 1].startswith("c++")
+                for i, arg in enumerate(args[:-1])
+                if arg == "-x"
+            )
+        ) else "c"
+    return config
 
 
 @dataclass
@@ -2171,13 +2245,12 @@ class Storage:
         for row in rows:
             include = _row_to(IncludeConfig, row)
             args = json.loads(include.arguments) if include.arguments else []
-            config = TranslationUnitConfig(
+            config = resolve_translation_unit_config(
+                args,
                 driver=include.driver,
                 working_dir=include.working_dir,
                 language=include.lang_mode,
                 resource_dir=include.resource_dir,
-                diagnostics_policy="error-limit=0",
-                arguments=args,
             )
             config_id = self.add_translation_unit_config(config)
             self._conn.execute(
@@ -3319,6 +3392,25 @@ class Storage:
         """Store or refresh one canonical configuration descriptor."""
         if config.state not in CONFIG_STATES:
             raise ValueError(f"unknown translation-unit config state: {config.state}")
+        resolved = resolve_translation_unit_config(
+            config.arguments,
+            driver=config.driver,
+            working_dir=config.working_dir,
+            language=config.language,
+            resource_dir=config.resource_dir,
+            diagnostics_policy=config.diagnostics_policy,
+        )
+        for name in ("standard", "target", "sysroot"):
+            if getattr(config, name):
+                setattr(resolved, name, getattr(config, name))
+        for name in (
+            "abi_options", "include_paths", "macro_state",
+            "relevant_environment", "generated_inputs",
+        ):
+            if getattr(config, name):
+                setattr(resolved, name, list(getattr(config, name)))
+        resolved.state = config.state
+        config = resolved
         config.descriptor_json = canonical_translation_unit_config_json(config)
         config.descriptor_hash = translation_unit_config_hash(config)
         cur = self._conn.execute(
@@ -3366,8 +3458,12 @@ class Storage:
 
     def translation_unit_configs_for_file(self, file_id: int) -> list[TranslationUnitConfig]:
         rows = self._conn.execute(
-            "SELECT c.* FROM translation_unit_config c JOIN translation_unit t "
-            "ON t.config_id = c.id WHERE t.file_id = ? ORDER BY c.descriptor_hash",
+            "SELECT c.*, f.state AS association_state "
+            "FROM translation_unit_config c JOIN translation_unit t "
+            "ON t.config_id = c.id JOIN file_config f "
+            "ON f.file_id = t.file_id AND f.config_id = c.id "
+            "AND f.role = 'translation_unit' WHERE t.file_id = ? "
+            "ORDER BY c.descriptor_hash",
             (file_id,),
         ).fetchall()
         return [_row_to(TranslationUnitConfig, row) for row in rows]

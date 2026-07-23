@@ -146,6 +146,12 @@ ParseConfig resolve_parse_config(const SideSpec &spec) {
   std::vector<std::string> stored;
   const auto use_normalized = [&cfg,
                                &stored](const TranslationUnitConfig &config) {
+    if (config.state != TranslationUnitConfigState::registered ||
+        config.association_state != TranslationUnitConfigState::registered) {
+      throw CidxError("stale, unavailable, or ambiguous stored configuration "
+                      "for " +
+                      cfg.file + "; re-index the translation unit");
+    }
     stored = config.arguments;
     cfg.driver = config.driver;
     cfg.config_hash = config.descriptor_hash;
@@ -170,8 +176,11 @@ ParseConfig resolve_parse_config(const SideSpec &spec) {
                       " has ambiguous stored configurations in " + cfg.db);
     }
     if (configs.empty()) {
-      stored = *turec->compile_options;
-      cfg.driver = turec->driver;
+      const auto descriptor = resolve_translation_unit_config(
+          turec->driver, std::string("."), *turec->compile_options,
+          std::nullopt, std::nullopt, std::string("error-limit=0"));
+      stored = descriptor.arguments;
+      cfg.driver = descriptor.driver;
     } else {
       use_normalized(configs.front());
     }
@@ -190,8 +199,11 @@ ParseConfig resolve_parse_config(const SideSpec &spec) {
                       spec.side + "-tu");
     }
     if (configs.empty()) {
-      stored = *rec->compile_options;
-      cfg.driver = rec->driver;
+      const auto descriptor = resolve_translation_unit_config(
+          rec->driver, std::string("."), *rec->compile_options, std::nullopt,
+          std::nullopt, std::string("error-limit=0"));
+      stored = descriptor.arguments;
+      cfg.driver = descriptor.driver;
     } else {
       use_normalized(configs.front());
     }

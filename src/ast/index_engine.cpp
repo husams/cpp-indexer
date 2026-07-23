@@ -1,7 +1,7 @@
 #include "ast/index_engine.hpp"
 
-#include "ast/function_definition_visitor.hpp"
 #include "ast/declaration_edge_visitor.hpp"
+#include "ast/function_definition_visitor.hpp"
 #include "ast/include_facts.hpp"
 #include "ast/location.hpp"
 #include "ast/namespace_use_visitor.hpp"
@@ -9,9 +9,9 @@
 #include "ast/storage_symbol_sink.hpp"
 #include "ast/symbol_visitor.hpp"
 
-#include "toolchain/toolchain.hpp"
 #include "compiledb/compiledb.hpp"
 #include "storage/storage.hpp"
+#include "toolchain/toolchain.hpp"
 #include "util/env.hpp"
 #include "util/hashing.hpp"
 #include "util/pathutil.hpp"
@@ -30,6 +30,7 @@
 
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <cctype>
 #include <memory>
 #include <unordered_set>
@@ -65,19 +66,26 @@ struct EngineState {
   // rest.
   IncludeFacts includes;
   const cidx::IncludeConfig *config = nullptr; // v31: this TU's normalized args
-  clang::Preprocessor *pp = nullptr;           // v31: for include-guard status
+  int64_t normalized_config_id = -1;
+  clang::Preprocessor *pp = nullptr; // v31: for include-guard status
   bool tu_handled = false;
 };
 
 // Severity map mirroring CXDiagnosticSeverity (collect_diagnostics parity).
 int64_t cx_severity(clang::DiagnosticsEngine::Level level) {
   switch (level) {
-  case clang::DiagnosticsEngine::Ignored: return 0;
-  case clang::DiagnosticsEngine::Note:    return 1;
-  case clang::DiagnosticsEngine::Remark:  return 2; // CIndex maps Remark->Warning
-  case clang::DiagnosticsEngine::Warning: return 2;
-  case clang::DiagnosticsEngine::Error:   return 3;
-  case clang::DiagnosticsEngine::Fatal:   return 4;
+  case clang::DiagnosticsEngine::Ignored:
+    return 0;
+  case clang::DiagnosticsEngine::Note:
+    return 1;
+  case clang::DiagnosticsEngine::Remark:
+    return 2; // CIndex maps Remark->Warning
+  case clang::DiagnosticsEngine::Warning:
+    return 2;
+  case clang::DiagnosticsEngine::Error:
+    return 3;
+  case clang::DiagnosticsEngine::Fatal:
+    return 4;
   }
   return 2;
 }
@@ -169,6 +177,20 @@ private:
     txn.commit();
   }
 
+  [[nodiscard]] bool header_covered_by_current_config(
+      const std::optional<cidx::File> &file) const {
+    if (!file) {
+      return false;
+    }
+    const auto applicability = db_.file_configs_for(file->id);
+    return std::ranges::any_of(
+        applicability, [this](const cidx::FileConfigApplicability &a) {
+          return a.config_id == state_.normalized_config_id &&
+                 a.role == "header" &&
+                 a.state == cidx::TranslationUnitConfigState::registered;
+        });
+  }
+
   // Classify every recorded inclusion (system / unowned / already indexed)
   // and mint file rows for the headers this TU must index.
   std::vector<PendingHeader> plan_owned_headers() {
@@ -193,14 +215,17 @@ private:
         continue;
       }
       const std::optional<std::string> md5 = cidx::md5_of(abs);
-      if (db_.is_file_indexed(abs, std::nullopt, md5)) {
+      const auto existing = db_.get_file(abs);
+      const bool covered_by_current_config =
+          header_covered_by_current_config(existing);
+      if (db_.is_file_indexed(abs, std::nullopt, md5) &&
+          covered_by_current_config) {
         ++counts.already;
         continue;
       }
       const std::optional<double> mtime = file_mtime(abs);
-      const int64_t hid =
-          db_.add_file_path(abs, mtime, md5, state_.rec->compile_options,
-                            state_.rec->driver);
+      const int64_t hid = db_.add_file_path(
+          abs, mtime, md5, state_.rec->compile_options, state_.rec->driver);
       plan.push_back(
           {.path = abs, .file_id = hid, .mtime = mtime, .stored = 0});
     }
@@ -292,7 +317,8 @@ private:
   EngineState &state_;
 };
 
-class IndexFrontendActionFactory : public clang::tooling::FrontendActionFactory {
+class IndexFrontendActionFactory
+    : public clang::tooling::FrontendActionFactory {
 public:
   explicit IndexFrontendActionFactory(EngineState &state) : state_(state) {}
   std::unique_ptr<clang::FrontendAction> create() override {
@@ -366,8 +392,7 @@ static void apply_diagnostic_policy(const std::string &path, bool strict,
     ++fatal_count;
     if (summary.size() < 3) {
       summary.push_back(d.file_path.value_or("") + ":" +
-                        std::to_string(d.line.value_or(0)) + ": " +
-                        d.spelling);
+                        std::to_string(d.line.value_or(0)) + ": " + d.spelling);
     }
   }
   if (fatal_count == 0) {
@@ -407,6 +432,10 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
 #ifdef CIDX_CLANG_RESOURCE_DIR
   config.resource_dir = std::string(CIDX_CLANG_RESOURCE_DIR);
 #endif
+  const cidx::TranslationUnitConfig descriptor =
+      cidx::resolve_translation_unit_config(
+          config.driver, config.working_dir, config.arguments, config.lang_mode,
+          config.resource_dir, std::string("error-limit=0"));
 
   EngineState state;
   state.db = &db;
@@ -416,6 +445,7 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   state.strict = read_strict_mode();
   state.out = &out;
   state.config = &config;
+  state.normalized_config_id = db.add_translation_unit_config(descriptor);
 
   IndexFrontendActionFactory factory(state);
   (void)setup.tool.run(&factory);

@@ -112,14 +112,9 @@ TranslationUnitConfigState config_state(std::string_view name) {
 }
 
 TranslationUnitConfig normalized_from_include(const IncludeConfig &c) {
-  TranslationUnitConfig out;
-  out.driver = c.driver;
-  out.working_dir = c.working_dir;
-  out.language = c.lang_mode;
-  out.resource_dir = c.resource_dir;
-  out.arguments = c.arguments;
-  out.diagnostics_policy = std::string("error-limit=0");
-  return out;
+  return resolve_translation_unit_config(c.driver, c.working_dir, c.arguments,
+                                         c.lang_mode, c.resource_dir,
+                                         std::string("error-limit=0"));
 }
 
 std::string canonical_config_json(const TranslationUnitConfig &c) {
@@ -171,13 +166,41 @@ TranslationUnitConfig config_from_row(const SqliteStmt &st) {
   c.diagnostics_policy = opt_text(st, 15);
   c.arguments = json_min::decode_string_array(st.col_text(16));
   c.state = config_state(st.col_text(17));
+  c.association_state = config_state(st.col_text(18));
   return c;
 }
 } // namespace
 
 int64_t
 Storage::add_translation_unit_config(const TranslationUnitConfig &input) {
-  TranslationUnitConfig c = input;
+  TranslationUnitConfig c = resolve_translation_unit_config(
+      input.driver, input.working_dir, input.arguments, input.language,
+      input.resource_dir, input.diagnostics_policy);
+  if (input.standard) {
+    c.standard = input.standard;
+  }
+  if (input.target) {
+    c.target = input.target;
+  }
+  if (!input.abi_options.empty()) {
+    c.abi_options = input.abi_options;
+  }
+  if (input.sysroot) {
+    c.sysroot = input.sysroot;
+  }
+  if (!input.include_paths.empty()) {
+    c.include_paths = input.include_paths;
+  }
+  if (!input.macro_state.empty()) {
+    c.macro_state = input.macro_state;
+  }
+  if (!input.relevant_environment.empty()) {
+    c.relevant_environment = input.relevant_environment;
+  }
+  if (!input.generated_inputs.empty()) {
+    c.generated_inputs = input.generated_inputs;
+  }
+  c.state = input.state;
   c.descriptor_json = canonical_config_json(c);
   c.descriptor_hash = sha1_hex(c.descriptor_json);
   auto st = db_.prepare(
@@ -234,7 +257,8 @@ Storage::translation_unit_config_by_id(int64_t config_id) {
       "standard, target, abi_options, sysroot, resource_dir, include_paths, "
       "macro_state, relevant_environment, generated_inputs, "
       "diagnostics_policy, "
-      "arguments, state FROM translation_unit_config WHERE id = ?");
+      "arguments, state, 'registered' FROM translation_unit_config WHERE id = "
+      "?");
   st.bind(1, config_id);
   if (!st.step()) {
     return std::nullopt;
@@ -251,9 +275,11 @@ Storage::translation_unit_configs_for_file(int64_t file_id) {
       "c.resource_dir, "
       "c.include_paths, c.macro_state, c.relevant_environment, "
       "c.generated_inputs, "
-      "c.diagnostics_policy, c.arguments, c.state FROM translation_unit_config "
-      "c "
-      "JOIN translation_unit t ON t.config_id = c.id WHERE t.file_id = ? "
+      "c.diagnostics_policy, c.arguments, c.state, f.state "
+      "FROM translation_unit_config c "
+      "JOIN translation_unit t ON t.config_id = c.id "
+      "JOIN file_config f ON f.file_id = t.file_id AND f.config_id = c.id "
+      "AND f.role = 'translation_unit' WHERE t.file_id = ? "
       "ORDER BY c.descriptor_hash");
   st.bind(1, file_id);
   std::vector<TranslationUnitConfig> out;
@@ -264,6 +290,9 @@ Storage::translation_unit_configs_for_file(int64_t file_id) {
 }
 
 void Storage::add_file_config(const FileConfigApplicability &a) {
+  if (a.role != "translation_unit" && a.role != "header") {
+    throw StorageError("unknown file configuration role: " + a.role);
+  }
   auto st = db_.prepare(
       "INSERT INTO file_config(file_id, config_id, role, state, reason) VALUES "
       "(?, ?, ?, ?, ?) ON CONFLICT(file_id, config_id, role) DO UPDATE SET "
@@ -439,6 +468,14 @@ void Storage::add_include_macro_use(const IncludeMacroUse &m) {
 }
 
 void Storage::delete_include_configs_for_tu(int64_t tu_file_id) {
+  std::vector<int64_t> config_ids;
+  auto ids = db_.prepare(
+      "SELECT DISTINCT translation_unit_config_id FROM include_config "
+      "WHERE tu_file_id = ? AND translation_unit_config_id IS NOT NULL");
+  ids.bind(1, tu_file_id);
+  while (ids.step()) {
+    config_ids.push_back(ids.col_int64(0));
+  }
   auto tu = db_.prepare("DELETE FROM translation_unit WHERE file_id = ?");
   tu.bind(1, tu_file_id);
   tu.step_done();
@@ -449,6 +486,25 @@ void Storage::delete_include_configs_for_tu(int64_t tu_file_id) {
   auto st = db_.prepare("DELETE FROM include_config WHERE tu_file_id = ?");
   st.bind(1, tu_file_id);
   st.step_done();
+  // A normalized descriptor may be shared by several TUs. Retire header
+  // applicability only when no remaining TU or fact still supports it.
+  for (const int64_t config_id : config_ids) {
+    auto headers = db_.prepare(
+        "DELETE FROM file_config WHERE config_id = ? AND role = 'header' "
+        "AND NOT EXISTS (SELECT 1 FROM translation_unit "
+        "                WHERE config_id = ?) "
+        "AND NOT EXISTS (SELECT 1 FROM include_edge e "
+        "                JOIN include_config ic ON ic.id = e.config_id "
+        "                WHERE ic.translation_unit_config_id = ?) "
+        "AND NOT EXISTS (SELECT 1 FROM include_macro_use m "
+        "                JOIN include_config ic ON ic.id = m.config_id "
+        "                WHERE ic.translation_unit_config_id = ?)");
+    headers.bind(1, config_id);
+    headers.bind(2, config_id);
+    headers.bind(3, config_id);
+    headers.bind(4, config_id);
+    headers.step_done();
+  }
 }
 
 std::vector<IncludeEdge> Storage::include_edges_from(int64_t src_file_id,
@@ -500,6 +556,7 @@ ConfiguredIncludeEdges Storage::invariant_include_edges(
     return result;
   }
   std::map<std::string, IncludeEdge> common;
+  bool initialized = false;
   for (const int64_t config_id : declared_config_ids) {
     auto coverage = db_.prepare(
         "SELECT 1 FROM translation_unit_config c JOIN file_config f "
@@ -517,8 +574,9 @@ ConfiguredIncludeEdges Storage::invariant_include_edges(
     for (const auto &edge : edges) {
       current.emplace(edge.dst_path, edge);
     }
-    if (common.empty()) {
+    if (!initialized) {
       common = std::move(current);
+      initialized = true;
     } else {
       for (auto it = common.begin(); it != common.end();) {
         if (!current.contains(it->first)) {

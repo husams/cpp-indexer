@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include "storage/records.hpp"
+
 namespace cidx {
 
 // Encode-registry entry: (name, match_path, versioned). `versioned` marks a
@@ -60,7 +62,8 @@ public:
   // Index of the real compiler driver in a raw command vector: skips leading
   // env-var assignments (CCACHE_DIR=...) and launcher wrappers (ccache,
   // sccache, distcc, icecc, env, time, nice). 0 for a plain `cc ...`; 0 too
-  // if the whole vector is prefix (degenerate). Mirrors compiledb.command_start.
+  // if the whole vector is prefix (degenerate). Mirrors
+  // compiledb.command_start.
   static size_t command_start(const std::vector<std::string> &args);
 
   // The real compiler driver (token at command_start); absolutized against
@@ -97,19 +100,18 @@ public:
   // are resolved via the full resolution chain + abspath; plain absolute paths
   // are left untouched. Used at parse/index time so libclang sees real dirs.
   // lookup: returns stored path for a label name, or nullopt on miss.
-  static std::vector<std::string>
-  resolve_options(const std::vector<std::string> &options,
-                  std::function<std::optional<std::string>(const std::string &)>
-                      lookup = nullptr,
-                  bool autoderive = true);
+  static std::vector<std::string> resolve_options(
+      const std::vector<std::string> &options,
+      std::function<std::optional<std::string>(const std::string &)> lookup =
+          nullptr,
+      bool autoderive = true);
 
   // Build the encode label map from (name, stored_path, versioned) entries.
   // Each stored path is resolved to an absolute directory (env-vars expanded,
   // NO autoderive). Sorted longest-resolved-path first, then name, so the
   // longest prefix wins deterministically. The versioned flag passes through.
   // lookup: used to resolve labels within stored paths (rarely needed).
-  static std::vector<AliasEntry>
-  build_label_map(
+  static std::vector<AliasEntry> build_label_map(
       const std::vector<AliasEntry> &labels,
       std::function<std::optional<std::string>(const std::string &)> lookup =
           nullptr);
@@ -138,5 +140,15 @@ public:
   alias_options(const std::vector<std::string> &options,
                 const std::vector<AliasEntry> &label_map);
 };
+
+// Resolve one replayable compiler invocation into the shared descriptor used
+// by indexing, include extraction, astgraph, diff, and proof metadata.
+TranslationUnitConfig resolve_translation_unit_config(
+    const std::optional<std::string> &driver,
+    const std::optional<std::string> &working_dir,
+    const std::vector<std::string> &arguments,
+    const std::optional<std::string> &language = std::nullopt,
+    const std::optional<std::string> &resource_dir = std::nullopt,
+    const std::optional<std::string> &diagnostics_policy = std::nullopt);
 
 } // namespace cidx

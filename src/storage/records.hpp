@@ -296,6 +296,10 @@ struct TranslationUnitConfig {
   std::optional<std::string> diagnostics_policy;
   std::vector<std::string> arguments;
   TranslationUnitConfigState state = TranslationUnitConfigState::registered;
+  // State of this file's association with the descriptor. It can become
+  // stale while the descriptor remains reusable for another TU.
+  TranslationUnitConfigState association_state =
+      TranslationUnitConfigState::registered;
 };
 
 struct FileConfigApplicability {
