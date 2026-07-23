@@ -32,13 +32,23 @@ jobs:
         uses: actions/checkout@v4
       - name: Install LLVM/Clang 22 toolchain
         run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ca-certificates gnupg
           curl --fail --location --silent --show-error \
-            https://apt.llvm.org/llvm.sh --output /tmp/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 22 all
+            https://apt.llvm.org/llvm-snapshot.gpg.key --output /tmp/llvm-snapshot.gpg.key
+          test "$(gpg --show-keys --with-colons /tmp/llvm-snapshot.gpg.key \
+            | awk -F: '$1 == "fpr" { print $10; exit }')" = \
+            6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+          gpg --dearmor --yes --output /tmp/llvm-apt.gpg \
+            /tmp/llvm-snapshot.gpg.key
+          sudo install -m 0644 /tmp/llvm-apt.gpg /usr/share/keyrings/llvm-apt.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/llvm-apt.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-22.list >/dev/null
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            cmake libsqlite3-dev ninja-build
+            clang-22 clang-tools-22 cmake libclang-22-dev \
+            libclang-common-22-dev libclang-cpp22 libsqlite3-dev \
+            llvm-22 llvm-22-dev ninja-build
       - name: Configure with the matching LLVM/Clang toolchain
         run: >-
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
