@@ -197,7 +197,9 @@ std::set<int64_t> StatementEdgeVisitor::overload_candidate_ids(
     if (usr.empty()) {
       continue;
     }
-    if (const auto s = ctx_.sink().lookup_symbol_id(usr)) {
+    const auto identity_source =
+        expansion_loc(ctx_.context(), cand->getLocation()).file;
+    if (const auto s = ctx_.sink().lookup_symbol_id(usr, identity_source)) {
       dst_ids.insert(*s);
       continue;
     }

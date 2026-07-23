@@ -36,9 +36,9 @@ struct Component {
 struct Repository {
   int64_t id = -1;
   std::string name;
-  std::string kind;                       // 'repo' | 'external'
-  std::optional<std::string> remote_url;  // git origin URL when known
-  std::optional<int64_t> active_clone_id; // -> clone.id; NULL if none yet
+  std::string kind;                            // 'repo' | 'external'
+  std::optional<std::string> remote_url;       // git origin URL when known
+  std::optional<int64_t> active_clone_id;      // -> clone.id; NULL if none yet
   std::optional<int64_t> semantic_universe_id; // v35: declared program universe
 };
 
@@ -124,8 +124,10 @@ struct Symbol {
   std::optional<std::string> const_value; // v33: evaluated constant initializer
                                           // (variable) or enumerator value;
                                           // NULL for runtime initializers
-  int64_t semantic_universe_id = -1; // v35: database-local scope row
+  int64_t semantic_universe_id = -1;      // v35: database-local scope row
   std::string identity_key; // v35: portable scope-keyed semantic identity
+  // Transient producer hint; never persisted as a column.
+  std::optional<std::string> identity_source;
   int64_t id = -1;
 };
 

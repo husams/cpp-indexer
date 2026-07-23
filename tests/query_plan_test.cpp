@@ -612,6 +612,18 @@ TEST_CASE(
   CHECK(std::holds_alternative<std::nullptr_t>(fn.rows[0][0]));
 }
 
+TEST_CASE("query_plan: scoped identity fields are selectable") {
+  Seeded s;
+  Executor ex(s.db);
+  const auto result = ex.run(
+      (start(symbol("USR::A")) |
+       select({"usr", "semantic_universe", "identity_key"})).plan());
+  REQUIRE(result.rows.size() == 1);
+  CHECK(std::get<std::string>(result.rows[0][0]) == "USR::A");
+  CHECK(std::get<std::string>(result.rows[0][1]) == "legacy");
+  CHECK(std::get<std::string>(result.rows[0][2]) == "legacy\x1fUSR::A");
+}
+
 TEST_CASE("query_plan: devirtualized calls preserve the inherited receiver") {
   Storage db(":memory:");
   {

@@ -53,7 +53,8 @@ Pred   := all_of([p...]) | any_of([p...]) | not(p)
 
 Fields (v1): `id`, `usr`, `name` (COALESCE(qual_name, spelling)), `spelling`,
 `qual_name`, `kind`, `entity_type`, `file`, `line`, `col`, `is_definition`,
-`is_pure`, `is_static`. `file`/`line`/`col` are select-only; the rest are also
+`is_pure`, `is_static`, `semantic_universe`, `identity_key`.
+`file`/`line`/`col` are select-only; the rest are also
 filterable. Declaration kind and entity classification are SEPARATE fields in
 every view: `kind` is always the C++ declaration kind (symbol-kind names, so
 `kind in [class, struct]` keeps its current-API meaning) and `entity_type` is

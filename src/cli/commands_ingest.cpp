@@ -138,6 +138,11 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx) {
     }
   }
   Storage db(ctx.index_path);
+  const std::string repo_name_val = args.repo ? *args.repo : name;
+  // An ordinary import is isolated to its repository by default. Explicit
+  // --universe is the opt-in sharing contract for composed workspaces.
+  const std::optional<int64_t> universe_id = db.add_semantic_universe(
+      args.universe.value_or("repository:" + repo_name_val));
   // v24: a grouped component stores a clone-relative path, so re-adding the
   // same source resolves the EXISTING component clone-aware (its stored path is
   // no longer the absolute base) and refreshes its metadata in place; only a
@@ -151,11 +156,11 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx) {
   }
   // v23: group the component under a repository (same kind). The source dir is
   // its first clone and becomes active. Mirrors Python cmd_add_source.
-  const std::string repo_name_val = args.repo ? *args.repo : name;
   std::optional<std::string> remote_url =
       git_root_opt ? repo::git_remote_url(*git_root_opt)
                    : std::optional<std::string>{};
-  const int64_t rid = db.add_repository(repo_name_val, kind, remote_url);
+  const int64_t rid =
+      db.add_repository(repo_name_val, kind, remote_url, universe_id);
   const int64_t clone_id = db.add_clone(rid, clone_path);
   const std::optional<Repository> repo = db.get_repository_by_id(rid);
   if (repo && !repo->active_clone_id) {
@@ -274,6 +279,9 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
   int imported = 0;
   int skipped = 0;
   Storage db(ctx.index_path);
+  const std::string repo_name_val = args.repo ? *args.repo : name;
+  const std::optional<int64_t> universe_id = db.add_semantic_universe(
+      args.universe.value_or("repository:" + repo_name_val));
 
   // Encode include paths against the alias registry unless --no-alias. The
   // registry is uniquely-named components (plus any stored labels), so an -I
@@ -360,10 +368,10 @@ int cmd_import(const ParsedArgs &args, Context &ctx) {
   // worktrees map to one repository. The checkout dir (`root`) is registered as
   // a clone and made active when the repository has none. Mirrors Python.
   {
-    const std::string repo_name_val = args.repo ? *args.repo : name;
     std::optional<std::string> remote_url =
         groot ? repo::git_remote_url(*groot) : std::optional<std::string>{};
-    const int64_t rid = db.add_repository(repo_name_val, "repo", remote_url);
+    const int64_t rid =
+        db.add_repository(repo_name_val, "repo", remote_url, universe_id);
     const int64_t clone_id = db.add_clone(rid, root);
     const std::optional<Repository> repo = db.get_repository_by_id(rid);
     if (repo && !repo->active_clone_id) {

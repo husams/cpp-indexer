@@ -7,8 +7,10 @@
 #include <string>
 #include <unistd.h>
 
+#include "ast/storage_edge_sink.hpp"
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
+#include "util/errors.hpp"
 
 namespace {
 
@@ -17,10 +19,13 @@ std::string temp_db() {
   std::string pattern = "/tmp/cidx_identity_XXXXXX";
   std::ranges::copy(pattern, tmpl.begin());
   const int fd = ::mkstemp(tmpl.data());
-  REQUIRE(fd >= 0);
+  const bool valid_fd = fd >= 0;
+  REQUIRE(valid_fd);
   ::close(fd);
   return tmpl.data();
 }
+
+void check_condition(const bool condition) { CHECK(condition); }
 
 int64_t file_for(cidx::Storage &db, int64_t component,
                  const std::string &name) {
@@ -59,13 +64,29 @@ TEST_CASE("v35 isolates unrelated universes and merges declared sharing") {
       db.add_symbol(external_symbol("c:@N@collision", banking_file));
   const auto composed_id =
       db.add_symbol(external_symbol("c:@N@collision", composed_file));
-  CHECK(banking_id != composed_id);
-  CHECK(db.lookup_symbols_by_usr("c:@N@collision").size() == 2);
-  const auto bare = db.lookup_symbol("c:@N@collision");
-  REQUIRE(bare.has_value());
-  if (bare) {
-    CHECK(bare->id == std::min(banking_id, composed_id));
-  }
+  check_condition(banking_id != composed_id);
+  check_condition(db.lookup_symbols_by_usr("c:@N@collision").size() == 2);
+  CHECK_THROWS(db.lookup_symbol("c:@N@collision"));
+  const auto banking_match = db.lookup_symbol("c:@N@collision", banking);
+  const auto composed_match = db.lookup_symbol("c:@N@collision", composed);
+  REQUIRE(banking_match.has_value());
+  REQUIRE(composed_match.has_value());
+  const auto banking_match_value = banking_match.value_or(cidx::Symbol{});
+  const auto composed_match_value = composed_match.value_or(cidx::Symbol{});
+  check_condition(banking_match_value.id == banking_id);
+  check_condition(composed_match_value.id == composed_id);
+  CHECK_THROWS(
+      db.update_symbol("c:@N@collision", {{"spelling", std::string("X")}}));
+  CHECK(db.update_symbol("c:@N@collision", {{"spelling", std::string("B")}},
+                         banking));
+  const auto banking_updated = db.lookup_symbol_by_id(banking_id);
+  const auto composed_updated = db.lookup_symbol_by_id(composed_id);
+  REQUIRE(banking_updated.has_value());
+  REQUIRE(composed_updated.has_value());
+  const auto banking_updated_value = banking_updated.value_or(cidx::Symbol{});
+  const auto composed_updated_value = composed_updated.value_or(cidx::Symbol{});
+  check_condition(banking_updated_value.spelling == "B");
+  check_condition(composed_updated_value.spelling == "Thing");
 
   const auto composed_clone_repo =
       db.add_repository("composed-twin", "repo", std::nullopt, banking);
@@ -75,8 +96,8 @@ TEST_CASE("v35 isolates unrelated universes and merges declared sharing") {
   const auto shared_file = file_for(db, composed_clone, "collision.hpp");
   const auto shared_id =
       db.add_symbol(external_symbol("c:@N@collision", shared_file));
-  CHECK(shared_id == banking_id);
-  CHECK(db.lookup_symbols_by_usr("c:@N@collision").size() == 2);
+  check_condition(shared_id == banking_id);
+  check_condition(db.lookup_symbols_by_usr("c:@N@collision").size() == 2);
 
   auto internal_a = external_symbol("c:@F@hidden", banking_file);
   internal_a.linkage = "internal";
@@ -84,14 +105,14 @@ TEST_CASE("v35 isolates unrelated universes and merges declared sharing") {
   internal_b.linkage = "internal";
   const auto internal_id_a = db.add_symbol(internal_a);
   const auto internal_id_b = db.add_symbol(internal_b);
-  CHECK(internal_id_a != internal_id_b);
-  CHECK(db.lookup_symbols_by_usr("c:@F@hidden", banking).size() == 2);
+  check_condition(internal_id_a != internal_id_b);
+  check_condition(db.lookup_symbols_by_usr("c:@F@hidden", banking).size() == 2);
 
   auto no_linkage_a = external_symbol("c:@F@local", banking_file);
   no_linkage_a.linkage = "no-linkage";
   auto no_linkage_b = external_symbol("c:@F@local", shared_file);
   no_linkage_b.linkage = "no-linkage";
-  CHECK(db.add_symbol(no_linkage_a) != db.add_symbol(no_linkage_b));
+  check_condition(db.add_symbol(no_linkage_a) != db.add_symbol(no_linkage_b));
 
   const auto banking_symbol = db.lookup_symbol_by_id(banking_id);
   const auto composed_symbol = db.lookup_symbol_by_id(composed_id);
@@ -102,6 +123,39 @@ TEST_CASE("v35 isolates unrelated universes and merges declared sharing") {
     CHECK(composed_symbol->semantic_universe_id == composed);
     CHECK(banking_symbol->identity_key != composed_symbol->identity_key);
   }
+
+  cidx::ast::StorageEdgeSink sink(db);
+  sink.set_current_file_id(banking_file);
+  check_condition(sink.lookup_symbol_id("c:@N@collision") == banking_id);
+  sink.set_current_file_id(composed_file);
+  check_condition(sink.lookup_symbol_id("c:@N@collision") == composed_id);
+
+  const auto preserved = db.add_repository("composed", "repo", std::nullopt);
+  check_condition(preserved == composed_repo);
+  const auto preserved_repo = db.get_repository_by_id(preserved);
+  REQUIRE(preserved_repo.has_value());
+  const auto preserved_repo_value = preserved_repo.value_or(cidx::Repository{});
+  check_condition(preserved_repo_value.semantic_universe_id == composed);
+}
+
+TEST_CASE("v35 local identity is stable across file insertion order") {
+  const auto make_key = [](bool add_filler) {
+    cidx::Storage db(":memory:");
+    const auto repo = db.add_repository("clone", "repo", "ssh://example/clone");
+    const auto component = db.add_component("clone", "/tmp/cidx-stable-root");
+    db.set_component_repository(component, repo);
+    const auto dir = db.add_directory(component, "");
+    if (add_filler) {
+      db.add_file(dir, "unrelated.cpp");
+    }
+    const auto file = db.add_file(dir, "stable.cpp");
+    auto sym = external_symbol("c:@F@hidden", file);
+    sym.linkage = "internal";
+    const auto id = db.add_symbol(sym);
+    return db.lookup_symbol_by_id(id)->identity_key;
+  };
+
+  check_condition(make_key(false) == make_key(true));
 }
 
 TEST_CASE(
@@ -167,9 +221,9 @@ TEST_CASE(
   auto version =
       raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
   REQUIRE(version.step());
-  CHECK(version.col_text(0) == "35");
+  check_condition(version.col_text(0) == "35");
   auto edge = raw.prepare("SELECT src_id, dst_id FROM edge WHERE id = 11");
   REQUIRE(edge.step());
-  CHECK(edge.col_int64(0) == 7);
-  CHECK(edge.col_int64(1) == 7);
+  check_condition(edge.col_int64(0) == 7);
+  check_condition(edge.col_int64(1) == 7);
 }

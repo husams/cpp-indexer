@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from indexer.storage import Storage, Symbol
 
 
@@ -53,10 +55,39 @@ def test_unrelated_universes_isolate_and_declared_universe_merges(tmp_path):
         assert store.add_symbol(_symbol("c:@F@local", banking_file, "no-linkage")) != store.add_symbol(
             _symbol("c:@F@local", twin_file, "no-linkage")
         )
-        assert store.lookup_symbol("c:@N@collision").id == min(banking_id, composed_id)
+        with pytest.raises(ValueError, match="ambiguous symbol USR"):
+            store.lookup_symbol("c:@N@collision")
+        assert store.lookup_symbol("c:@N@collision", banking).id == banking_id
+        assert store.lookup_symbol("c:@N@collision", composed).id == composed_id
+        with pytest.raises(ValueError, match="ambiguous symbol USR"):
+            store.update_symbol("c:@N@collision", spelling="X")
+        assert store.update_symbol(
+            "c:@N@collision", banking, spelling="B"
+        )
+        assert store.lookup_symbol_by_id(banking_id).spelling == "B"
+        assert store.lookup_symbol_by_id(composed_id).spelling == "Thing"
+        assert store.add_repository("composed") == composed_repo
+        assert store.get_repository_by_id(composed_repo).semantic_universe_id == composed
         assert store.lookup_symbol_by_id(banking_id).identity_key == (
             "program:banking\x1fc:@N@collision"
         )
+
+
+def test_local_identity_is_stable_across_file_insertion_order(tmp_path):
+    def make_key(add_filler):
+        with Storage(":memory:") as store:
+            repo = store.add_repository("clone", remote_url="ssh://example/clone")
+            component = store.add_component("clone", str(tmp_path / "stable"))
+            store.set_component_repository(component, repo)
+            directory = store.add_directory(component, "")
+            if add_filler:
+                store.add_file(directory, "unrelated.cpp")
+            file_id = store.add_file(directory, "stable.cpp")
+            return store.lookup_symbol_by_id(
+                store.add_symbol(_symbol("c:@F@hidden", file_id, "internal"))
+            ).identity_key
+
+    assert make_key(False) == make_key(True)
 
 
 def test_v34_migration_preserves_numeric_and_scoped_identity(tmp_path):

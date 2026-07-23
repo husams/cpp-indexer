@@ -1845,6 +1845,7 @@ class Symbol:
     # output); None when the initializer needs runtime evaluation.
     semantic_universe_id: int = -1  # v35: database-local scope row
     identity_key: str = ""  # v35: portable scope-keyed semantic identity
+    identity_source: Optional[str] = None  # transient producer hint
     id: Optional[int] = None
 
 
@@ -1853,7 +1854,11 @@ def _row_to(cls, row: Optional[sqlite3.Row]) -> Any:
         return None
     # Only init fields map to columns; init=False fields (e.g. File's live
     # back-references) carry their defaults and are set by the accessor.
-    kwargs = {f.name: row[f.name] for f in fields(cls) if f.init}
+    kwargs = {
+        f.name: row[f.name]
+        for f in fields(cls)
+        if f.init and f.name != "identity_source"
+    }
     if cls is Symbol:
         # kind is stored as a CXCursorKind int (v16); present it as the name.
         kwargs["kind"] = SYMBOL_KIND_NAMES.get(kwargs["kind"], kwargs["kind"])
@@ -3409,6 +3414,32 @@ class Storage:
         ).fetchone()
         return row["universe_id"] if row else self._default_semantic_universe_id()
 
+    def semantic_universe_for_file_id(self, file_id: int) -> int:
+        return self._semantic_universe_for_file(file_id)
+
+    def portable_source_identity_for_path(self, path: str) -> str:
+        abs_path = os.path.abspath(path)
+        comp = self.component_for_path(abs_path)
+        if comp is None:
+            return f"path:{abs_path}"
+        owner = ""
+        if comp.repository_id is not None:
+            repo = self.get_repository_by_id(comp.repository_id)
+            if repo is not None and repo.remote_url:
+                owner = f"remote:{repo.remote_url}"
+            elif repo is not None:
+                owner = f"repo:{repo.name}"
+        if not owner:
+            owner = f"component:{self.effective_root(comp)}"
+        rel = os.path.relpath(abs_path, self.component_abs_base(comp))
+        return f"{owner}\x1f{self.effective_root(comp)}\x1f{rel}"
+
+    def portable_source_identity_for_file(self, file_id: int) -> str:
+        path = self.file_abs_path(file_id)
+        return self.portable_source_identity_for_path(path) if path else (
+            f"file-id-missing:{file_id}"
+        )
+
     def _symbol_identity_key(
         self, sym: Symbol, universe_id: int, file_id: Optional[int]
     ) -> str:
@@ -3417,7 +3448,14 @@ class Storage:
         local = sym.linkage in {"internal", "no-linkage"}
         prefix = f"{key}\x1f"
         if local:
-            prefix += f"file:{file_id or 0}\x1f"
+            source = sym.identity_source
+            if source:
+                source_key = self.portable_source_identity_for_path(source)
+            elif file_id is not None:
+                source_key = self.portable_source_identity_for_file(file_id)
+            else:
+                source_key = "unknown"
+            prefix += f"local:{source_key}\x1f"
         return prefix + sym.usr
 
     # -- components ----------------------------------------------------------
@@ -3909,17 +3947,26 @@ class Storage:
         On conflict (same name) updates kind, and updates remote_url only when a
         non-None value is supplied (COALESCE: a re-import that cannot determine a
         remote does NOT wipe a stored one)."""
-        cur = self._conn.execute(
-            "INSERT INTO repository (name, kind, remote_url, "
-            "semantic_universe_id) VALUES (?, ?, ?, COALESCE(?, 1)) "
-            "ON CONFLICT(name) DO UPDATE SET "
-            "  kind       = excluded.kind, "
-            "  remote_url = COALESCE(excluded.remote_url, repository.remote_url), "
-            "  semantic_universe_id = COALESCE(excluded.semantic_universe_id, "
-            "repository.semantic_universe_id) "
-            "RETURNING id",
-            (name, kind, remote_url, semantic_universe_id),
-        )
+        if semantic_universe_id is None:
+            cur = self._conn.execute(
+                "INSERT INTO repository (name, kind, remote_url) "
+                "VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET "
+                "kind = excluded.kind, "
+                "remote_url = COALESCE(excluded.remote_url, repository.remote_url) "
+                "RETURNING id",
+                (name, kind, remote_url),
+            )
+        else:
+            cur = self._conn.execute(
+                "INSERT INTO repository (name, kind, remote_url, "
+                "semantic_universe_id) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET "
+                "kind = excluded.kind, "
+                "remote_url = COALESCE(excluded.remote_url, repository.remote_url), "
+                "semantic_universe_id = excluded.semantic_universe_id "
+                "RETURNING id",
+                (name, kind, remote_url, semantic_universe_id),
+            )
         rid = cur.fetchone()["id"]
         self._commit()
         return rid
@@ -4909,8 +4956,21 @@ class Storage:
         self._commit()
         return sid
 
-    def update_symbol(self, usr: str, **values: Any) -> bool:
-        """Update named columns of the symbol with this USR. Returns False if absent."""
+    def update_symbol(
+        self,
+        usr: str,
+        semantic_universe_id: Optional[int] = None,
+        identity_source: Optional[str] = None,
+        **values: Any,
+    ) -> bool:
+        """Update one explicitly resolved scoped symbol, never every USR row."""
+        target = self.lookup_symbol(usr, semantic_universe_id, identity_source)
+        if target is None:
+            return False
+        return self.update_symbol_by_id(target.id, **values)
+
+    def update_symbol_by_id(self, symbol_id: int, **values: Any) -> bool:
+        """Update a single symbol row by its database-local handle."""
         bad = set(values) - set(self._SYMBOL_COLS)
         if bad:
             raise ValueError(f"unknown symbol column(s): {sorted(bad)}")
@@ -4919,23 +4979,51 @@ class Storage:
                 raise ValueError(f"unknown symbol kind {values['kind']!r}")
             values = {**values, "kind": SYMBOL_KIND_IDS[values["kind"]]}
         if not values:
-            return self.lookup_symbol(usr) is not None
+            return self.lookup_symbol_by_id(symbol_id) is not None
         sets = ", ".join(f"{c} = ?" for c in values)
         cur = self._conn.execute(
-            f"UPDATE symbol SET {sets} WHERE usr = ?", (*values.values(), usr)
+            f"UPDATE symbol SET {sets} WHERE id = ?", (*values.values(), symbol_id)
         )
         self._commit()
         return cur.rowcount > 0
 
-    def lookup_symbol(self, usr: str) -> Optional[Symbol]:
-        """Return the deterministic first scoped match for a bare USR.
-
-        Zero matches return ``None``. Multiple matches are ordered by the
-        database-local universe id and then portable identity key; callers
-        that need every scoped match should use :meth:`lookup_symbols_by_usr`.
-        """
-        rows = self.lookup_symbols_by_usr(usr)
-        return rows[0] if rows else None
+    def lookup_symbol(
+        self,
+        usr: str,
+        semantic_universe_id: Optional[int] = None,
+        identity_source: Optional[str] = None,
+    ) -> Optional[Symbol]:
+        """Return one scoped symbol; reject ambiguous bare-USR lookups."""
+        rows = self.lookup_symbols_by_usr(usr, semantic_universe_id)
+        if not rows:
+            return None
+        if identity_source:
+            probe = Symbol(
+                usr=usr,
+                spelling="",
+                kind="function",
+                linkage="internal",
+                identity_source=identity_source,
+            )
+            for row in rows:
+                if row.identity_key == self._symbol_identity_key(
+                    probe, row.semantic_universe_id, None
+                ):
+                    return row
+            universe = self.get_semantic_universe_by_id(rows[0].semantic_universe_id)
+            universe_key = universe.key if universe is not None else "legacy"
+            portable_matches = [
+                row for row in rows
+                if row.identity_key == f"{universe_key}\x1f{usr}"
+            ]
+            if len(portable_matches) == 1:
+                return portable_matches[0]
+            return None
+        if len(rows) > 1:
+            raise ValueError(
+                f"ambiguous symbol USR; pass semantic universe scope: {usr}"
+            )
+        return rows[0]
 
     def lookup_symbols_by_usr(
         self, usr: str, semantic_universe_id: Optional[int] = None
@@ -5188,6 +5276,9 @@ class Storage:
         decl_path: Optional[str] = None,
         is_instantiation: bool = False,
         is_named_instance: bool = False,
+        semantic_universe_id: Optional[int] = None,
+        identity_source: Optional[str] = None,
+        linkage: Optional[str] = None,
     ) -> int:
         """Insert a stub row for `usr` (if absent), then SELECT its id.
 
@@ -5220,9 +5311,19 @@ class Storage:
         is set via MAX() so a later stub->instantiation promotion always upgrades
         but never downgrades.
         """
-        universe_id = self._semantic_universe_for_file(decl_file_id)
+        universe_id = (
+            semantic_universe_id
+            if semantic_universe_id is not None
+            else self._semantic_universe_for_file(decl_file_id)
+        )
         identity_key = self._symbol_identity_key(
-            Symbol(usr=usr, spelling=spelling, kind=kind),
+            Symbol(
+                usr=usr,
+                spelling=spelling,
+                kind=kind,
+                linkage=linkage,
+                identity_source=identity_source,
+            ),
             universe_id,
             decl_file_id,
         )

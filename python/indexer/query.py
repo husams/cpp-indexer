@@ -367,6 +367,7 @@ class Sym:
     # initializer needs runtime evaluation or there is none.
     semantic_universe_id: int = -1  # v35: database-local scope row
     identity_key: str = ""  # v35: portable scope-keyed semantic identity
+    semantic_universe: str = ""  # portable universe key
 
     @property
     def is_redefined(self) -> bool:
@@ -428,6 +429,8 @@ class Sym:
         return {
             "id": self.id,
             "usr": self.usr,
+            "semantic_universe": self.semantic_universe,
+            "identity_key": self.identity_key,
             "spelling": self.spelling,
             "qual_name": self.name,
             "kind": self.kind,
@@ -481,6 +484,8 @@ class Definition:
     def to_dict(self) -> dict[str, Any]:
         return {
             "usr": self.sym.usr,
+            "semantic_universe": self.sym.semantic_universe,
+            "identity_key": self.sym.identity_key,
             "name": self.sym.name,
             "kind": self.sym.kind,
             "component": self.component,
@@ -931,7 +936,9 @@ _SYM_COLS = (
     "s.decl_file_id, s.decl_line, s.decl_col, "
     "s.decl_path, s.is_definition, s.is_pure, s.is_static, s.is_instantiation, "
     "s.access, s.parent_usr, s.resolved, s.multi_def, s.const_value, "
-    "s.semantic_universe_id, s.identity_key"
+    "s.semantic_universe_id, s.identity_key, "
+    "(SELECT key FROM semantic_universe su "
+    " WHERE su.id = s.semantic_universe_id) AS semantic_universe"
 )
 
 
@@ -1117,6 +1124,8 @@ class GraphQuery:
             semantic_universe_id=(r["semantic_universe_id"]
                                   if "semantic_universe_id" in r.keys() else -1),
             identity_key=(r["identity_key"] if "identity_key" in r.keys() else ""),
+            semantic_universe=(r["semantic_universe"]
+                               if "semantic_universe" in r.keys() else ""),
             spelling=r["spelling"],
             name=r["qual_name"] or r["spelling"],
             display_name=r["display_name"],
@@ -1166,11 +1175,17 @@ class GraphQuery:
             return ident
         col = "id" if isinstance(ident, int) else "usr"
         order = " ORDER BY s.semantic_universe_id, s.identity_key" if col == "usr" else ""
-        r = self._c.execute(
-            f"SELECT {_SYM_COLS} FROM symbol s WHERE s.{col} = ?{order} LIMIT 1",
+        rows = self._c.execute(
+            f"SELECT {_SYM_COLS} FROM symbol s WHERE s.{col} = ?{order}",
             (ident,),
-        ).fetchone()
-        return self._sym(r) if r else None
+        ).fetchall()
+        if not rows:
+            return None
+        if col == "usr" and len(rows) > 1:
+            raise ValueError(
+                f"ambiguous symbol USR; pass a scoped symbol id: {ident}"
+            )
+        return self._sym(rows[0])
 
     def def_decl_locations(
         self, sym

@@ -23,7 +23,7 @@ Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
   pr1-fixture-2 Dashboard::refresh() method exists in pipeline.cpp (P1-FX)
   version-1     Python VERSION == "0.53.0"  (cidx-astgraph per-TU AST graph dumper)
   version-2     C++ kVersion == "0.53.0"
-  version-3     C++ kSchemaVersion == 34
+  version-3     C++ kSchemaVersion == 35
   rollup-1      resolve_pass() calls materialize_entity_edges()
   rollup-2      entity_rollup.py module exists
   parity-1      RETIRED (parity_check.sh removed with the byte-parity gate)

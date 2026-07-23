@@ -186,6 +186,7 @@ private:
     if (!state_.graph_enabled) {
       return;
     }
+    edges_.set_current_file_id(file_id);
     edges_.delete_edges_for_file(file_id);
     edges_.delete_definitions_for_file(file_id);
     edges_.reset_fact_ids();

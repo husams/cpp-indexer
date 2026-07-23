@@ -275,14 +275,7 @@ bool Storage::graph_resolved() {
 
 // A3 — fetch one symbol by USR (query.py:666-668)
 std::optional<Symbol> Storage::graph_symbol_by_usr(const std::string &usr) {
-  auto st = db_.prepare(std::string("SELECT ") + kSymbolColsS +
-                        " FROM symbol s WHERE s.usr = ? "
-                        "ORDER BY s.semantic_universe_id, s.identity_key LIMIT 1");
-  st.bind(1, std::string_view(usr));
-  if (!st.step()) {
-    return std::nullopt;
-  }
-  return symbol_from_offset(st, 0);
+  return lookup_symbol(usr);
 }
 
 // A4 — fetch one symbol by numeric id (query.py:666-668)

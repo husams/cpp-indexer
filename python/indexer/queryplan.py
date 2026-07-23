@@ -545,6 +545,10 @@ def _col_expr(field_name: str) -> str:
         return "s.id"
     if field_name == "usr":
         return "s.usr"
+    if field_name == "semantic_universe":
+        return "(SELECT su.key FROM semantic_universe su WHERE su.id = s.semantic_universe_id)"
+    if field_name == "identity_key":
+        return "s.identity_key"
     if field_name == "name":
         return "COALESCE(s.qual_name, s.spelling)"
     if field_name == "spelling":

@@ -34,6 +34,7 @@ namespace cidx::graph {
 struct Sym {
   int64_t id = -1;
   std::string usr;
+  std::string semantic_universe;     // portable universe key
   int64_t semantic_universe_id = -1; // v35: database-local scope row
   std::string identity_key; // v35: portable scope-keyed semantic identity
   std::string spelling;
@@ -96,6 +97,8 @@ struct Sym {
     Object o;
     o.emplace_back("id", Value::of(id));
     o.emplace_back("usr", Value::of(usr));
+    o.emplace_back("semantic_universe", Value::of(semantic_universe));
+    o.emplace_back("identity_key", Value::of(identity_key));
     o.emplace_back("spelling", Value::of(spelling));
     o.emplace_back("qual_name", Value::of(name)); // COALESCE result
     o.emplace_back("kind", Value::of(kind));
@@ -170,6 +173,8 @@ struct Definition {
     using namespace json_out;
     Object o;
     o.emplace_back("usr", Value::of(sym.usr));
+    o.emplace_back("semantic_universe", Value::of(sym.semantic_universe));
+    o.emplace_back("identity_key", Value::of(sym.identity_key));
     o.emplace_back("name", Value::of(sym.name));
     o.emplace_back("kind", Value::of(sym.kind));
     if (component) {

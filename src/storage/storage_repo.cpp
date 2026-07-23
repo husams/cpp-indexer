@@ -97,9 +97,9 @@ std::vector<SemanticUniverse> Storage::list_semantic_universes() {
 
 void Storage::set_repository_semantic_universe(
     int64_t repository_id, const std::optional<int64_t> &universe_id) {
-  auto st = db_.prepare(
-      "UPDATE repository SET semantic_universe_id = COALESCE(?, 1) "
-      "WHERE id = ?");
+  auto st =
+      db_.prepare("UPDATE repository SET semantic_universe_id = COALESCE(?, 1) "
+                  "WHERE id = ?");
   bind_opt(st, 1, universe_id);
   st.bind(2, repository_id);
   st.step_done();
@@ -107,25 +107,25 @@ void Storage::set_repository_semantic_universe(
 
 void Storage::set_component_semantic_universe(
     int64_t component_id, const std::optional<int64_t> &universe_id) {
-  auto st = db_.prepare(
-      "UPDATE component SET semantic_universe_id = ? WHERE id = ?");
+  auto st =
+      db_.prepare("UPDATE component SET semantic_universe_id = ? WHERE id = ?");
   bind_opt(st, 1, universe_id);
   st.bind(2, component_id);
   st.step_done();
 }
 
 int64_t Storage::default_semantic_universe_id() {
-  auto st = db_.prepare(
-      "SELECT id FROM semantic_universe WHERE key = 'legacy'");
+  auto st =
+      db_.prepare("SELECT id FROM semantic_universe WHERE key = 'legacy'");
   if (st.step()) {
     return st.col_int64(0);
   }
   return add_semantic_universe("legacy", "Legacy single-workspace universe",
-                              "legacy");
+                               "legacy");
 }
 
-int64_t Storage::semantic_universe_for_file(
-    const std::optional<int64_t> &file_id) {
+int64_t
+Storage::semantic_universe_for_file(const std::optional<int64_t> &file_id) {
   if (!file_id) {
     return default_semantic_universe_id();
   }
@@ -142,17 +142,61 @@ int64_t Storage::semantic_universe_for_file(
   return default_semantic_universe_id();
 }
 
-std::string Storage::symbol_identity_key(
-    const Symbol &sym, int64_t universe_id,
-    const std::optional<int64_t> &file_id) {
+int64_t Storage::semantic_universe_for_file_id(int64_t file_id) {
+  return semantic_universe_for_file(file_id);
+}
+
+std::string
+Storage::portable_source_identity_for_path(const std::string &path) {
+  const std::string abs = pathutil::abspath(pathutil::resolve_fs_path(path));
+  const auto comp = component_for_path(abs);
+  if (!comp) {
+    return "path:" + abs;
+  }
+
+  std::string owner;
+  if (comp->repository_id) {
+    const auto repo = get_repository_by_id(*comp->repository_id);
+    if (repo && repo->remote_url && !repo->remote_url->empty()) {
+      owner = "remote:" + *repo->remote_url;
+    } else if (repo) {
+      owner = "repo:" + repo->name;
+    }
+  }
+  if (owner.empty()) {
+    owner = "component:" + effective_root(*comp);
+  }
+  const std::string rel = pathutil::relpath(abs, component_abs_base(*comp));
+  return owner + "\x1f" + effective_root(*comp) + "\x1f" + rel;
+}
+
+std::string Storage::portable_source_identity_for_file(int64_t file_id) {
+  const auto path = file_abs_path(file_id);
+  return path ? portable_source_identity_for_path(*path)
+              : "file-id-missing:" + std::to_string(file_id);
+}
+
+std::string
+Storage::symbol_identity_key(const Symbol &sym, int64_t universe_id,
+                             const std::optional<int64_t> &file_id,
+                             const std::optional<std::string> &source) {
   const auto universe = get_semantic_universe_by_id(universe_id);
   const std::string key = universe ? universe->key : "legacy";
-  const bool local = sym.linkage &&
-                     (*sym.linkage == "internal" ||
-                      *sym.linkage == "no-linkage");
+  const bool local = sym.linkage && (*sym.linkage == "internal" ||
+                                     *sym.linkage == "no-linkage");
   std::string out = key + '\x1f';
   if (local) {
-    out += "file:" + std::to_string(file_id.value_or(0)) + '\x1f';
+    std::string source_key;
+    if (source && !source->empty()) {
+      source_key = portable_source_identity_for_path(*source);
+    } else if (sym.identity_source && !sym.identity_source->empty()) {
+      source_key = portable_source_identity_for_path(*sym.identity_source);
+    } else if (file_id) {
+      source_key = portable_source_identity_for_file(*file_id);
+    } else {
+      source_key = "unknown";
+    }
+    out += "local:" + source_key + '\x1f';
   }
   out += sym.usr;
   return out;
@@ -162,7 +206,8 @@ int64_t Storage::add_component(const std::string &name, const std::string &path,
                                const std::string &kind,
                                const std::optional<std::string> &version) {
   // Preserve indirected (portable) paths verbatim; absolutize plain paths.
-  // Mirrors Python: if "$" not in path and "<" not in path: path = abspath(path)
+  // Mirrors Python: if "$" not in path and "<" not in path: path =
+  // abspath(path)
   const std::string abs = (!path.contains('$') && !path.contains('<'))
                               ? pathutil::abspath(path)
                               : path;
@@ -223,8 +268,7 @@ bool Storage::set_component_version(const std::string &name,
                                     const std::optional<std::string> &version) {
   // Explicit clear goes through this path (not add_component) to avoid the
   // COALESCE guard that would no-op a NULL-clear.
-  auto st = db_.prepare(
-      "UPDATE component SET version = ? WHERE name = ?");
+  auto st = db_.prepare("UPDATE component SET version = ? WHERE name = ?");
   bind_opt(st, 1, version);
   st.bind(2, std::string_view(name));
   st.step_done();
@@ -359,8 +403,8 @@ std::optional<Component> Storage::get_component(const std::string &path) {
   // Step 2: scan all components and match against effective root (required
   // when version-detection split the trailing segment off the stored base).
   {
-    auto st =
-        db_.prepare(std::string("SELECT ") + kComponentCols + " FROM component");
+    auto st = db_.prepare(std::string("SELECT ") + kComponentCols +
+                          " FROM component");
     while (st.step()) {
       Component c = component_from(st);
       const std::string root = component_abs_base(c);
@@ -531,18 +575,26 @@ int64_t Storage::add_repository(const std::string &name,
                                 const std::string &kind,
                                 const std::optional<std::string> &remote_url,
                                 const std::optional<int64_t> &universe_id) {
-  auto st = db_.prepare(
-      "INSERT INTO repository (name, kind, remote_url, semantic_universe_id) "
-      "VALUES (?, ?, ?, COALESCE(?, 1)) "
-      "ON CONFLICT(name) DO UPDATE SET kind = excluded.kind, "
-      "remote_url = COALESCE(excluded.remote_url, repository.remote_url), "
-      "semantic_universe_id = COALESCE(excluded.semantic_universe_id, "
-      "repository.semantic_universe_id) "
-      "RETURNING id");
+  const char *sql =
+      universe_id
+          ? "INSERT INTO repository (name, kind, remote_url, "
+            "semantic_universe_id) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET kind = excluded.kind, "
+            "remote_url = COALESCE(excluded.remote_url, "
+            "repository.remote_url), "
+            "semantic_universe_id = excluded.semantic_universe_id RETURNING id"
+          : "INSERT INTO repository (name, kind, remote_url) VALUES (?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET kind = excluded.kind, "
+            "remote_url = COALESCE(excluded.remote_url, repository.remote_url) "
+            "RETURNING id";
+  auto st = db_.prepare(sql);
   st.bind(1, std::string_view(name));
   st.bind(2, std::string_view(kind));
   bind_opt(st, 3, remote_url);
-  bind_opt(st, 4, universe_id);
+  if (universe_id) {
+    st.bind(4, *universe_id);
+  }
   if (!st.step()) {
     throw StorageError("repository upsert returned no id");
   }
@@ -704,7 +756,6 @@ void Storage::delete_clone(int64_t clone_id) {
   del.bind(1, clone_id);
   del.step_done();
 }
-
 
 // -- directories
 // -----------------------------------------------------------------

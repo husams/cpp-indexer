@@ -13,20 +13,35 @@ void StorageEdgeSink::reset_fact_ids() {
   definition_ids_.clear();
 }
 
-std::optional<int64_t>
-StorageEdgeSink::lookup_symbol_id(const std::string &usr) {
-  const std::optional<cidx::Symbol> sym = db_.lookup_symbol(usr);
+std::optional<int64_t> StorageEdgeSink::lookup_symbol_id(
+    const std::string &usr, const std::optional<std::string> &identity_source) {
+  const std::optional<int64_t> scope =
+      current_file_id_ >= 0
+          ? std::optional<int64_t>(
+                db_.semantic_universe_for_file_id(current_file_id_))
+          : std::nullopt;
+  const std::optional<cidx::Symbol> sym =
+      db_.lookup_symbol(usr, scope, identity_source);
   if (!sym) {
     return std::nullopt;
   }
   return sym->id;
 }
 
+void StorageEdgeSink::set_current_file_id(int64_t file_id) {
+  current_file_id_ = file_id;
+}
+
 int64_t StorageEdgeSink::mint_symbol(const MintRequest &req) {
   return db_.mint_symbol_id(
       req.usr, req.spelling, req.qual_name, req.display_name, req.kind_name,
       req.decl_file_id, req.decl_line, req.decl_col, req.decl_path,
-      req.is_instantiation, req.is_named_instance, req.type_info);
+      req.is_instantiation, req.is_named_instance, req.type_info,
+      current_file_id_ >= 0
+          ? std::optional<int64_t>(
+                db_.semantic_universe_for_file_id(current_file_id_))
+          : std::nullopt,
+      req.identity_source, req.linkage);
 }
 
 int64_t StorageEdgeSink::add_edge(const EdgeRecord &edge) {
@@ -141,15 +156,19 @@ void StorageEdgeSink::update_display_name(int64_t id,
   if (!sym) {
     return;
   }
-  db_.update_symbol(sym->usr, {{"display_name", display}});
+  db_.update_symbol_by_id(id, {{"display_name", display}});
 }
 
 std::vector<int64_t>
 StorageEdgeSink::symbol_ids_by_qual_name_kind(const std::string &qual_name,
                                               const std::string &kind_name) {
   std::vector<int64_t> out;
-  for (const cidx::Symbol &sym :
-       db_.lookup_symbols_by_qual_name(qual_name, kind_name)) {
+  for (const cidx::Symbol &sym : db_.lookup_symbols_by_qual_name(
+           qual_name, kind_name,
+           current_file_id_ >= 0
+               ? std::optional<int64_t>(
+                     db_.semantic_universe_for_file_id(current_file_id_))
+               : std::nullopt)) {
     out.push_back(sym.id);
   }
   return out;

@@ -91,7 +91,9 @@
     {"name": "is_static", "filterable": true, "is_string": false},
     {"name": "file", "filterable": false, "is_string": true},
     {"name": "line", "filterable": false, "is_string": false},
-    {"name": "col", "filterable": false, "is_string": false}
+    {"name": "col", "filterable": false, "is_string": false},
+    {"name": "semantic_universe", "filterable": true, "is_string": true},
+    {"name": "identity_key", "filterable": true, "is_string": true}
   ],
   "statuses": ["complete", "partial", "unknown", "error"],
   "trust_levels": ["unverified", "producer-verified", "reader-verified"],

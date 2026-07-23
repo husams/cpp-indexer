@@ -57,7 +57,10 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
   sym.parent_usr = s.parent_usr;
   sym.const_value = s.const_value;
   sym.resolved = s.resolved;
-  const std::optional<cidx::Symbol> existing = db_.lookup_symbol(sym.usr);
+  sym.semantic_universe_id =
+      db_.semantic_universe_for_file_id(current_file_id_);
+  const std::optional<cidx::Symbol> existing =
+      db_.lookup_symbol(sym.usr, sym.semantic_universe_id);
   const int64_t symbol_id = db_.add_symbol(sym);
   if (std::ranges::find(symbol_ids_, symbol_id) == symbol_ids_.end()) {
     symbol_ids_.push_back(symbol_id);

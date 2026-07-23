@@ -21,15 +21,16 @@ bool is_scope_decl(const clang::Decl *d) {
          llvm::isa<clang::FunctionTemplateDecl>(d) ||
          llvm::isa<clang::TagDecl>(d) ||
          llvm::isa<clang::ClassTemplateDecl>(d) ||
-         llvm::isa<clang::NamespaceDecl>(d) ||
-         llvm::isa<clang::VarDecl>(d) || llvm::isa<clang::FieldDecl>(d) ||
-         llvm::isa<clang::TypedefNameDecl>(d);
+         llvm::isa<clang::NamespaceDecl>(d) || llvm::isa<clang::VarDecl>(d) ||
+         llvm::isa<clang::FieldDecl>(d) || llvm::isa<clang::TypedefNameDecl>(d);
 }
 
 } // namespace
 
-NamespaceUseVisitor::NamespaceUseVisitor(clang::ASTContext &context, EdgeSink &sink,
-                             std::string target_file, int64_t file_id)
+NamespaceUseVisitor::NamespaceUseVisitor(clang::ASTContext &context,
+                                         EdgeSink &sink,
+                                         std::string target_file,
+                                         int64_t file_id)
     : context_(context), sink_(sink), target_file_(std::move(target_file)),
       file_id_(file_id) {}
 
@@ -71,7 +72,7 @@ bool NamespaceUseVisitor::TraverseDecl(clang::Decl *decl) {
 }
 
 void NamespaceUseVisitor::emit_ns_use(const clang::NamedDecl *ns_decl,
-                                clang::SourceLocation loc) {
+                                      clang::SourceLocation loc) {
   if (scope_stack_.empty()) {
     return; // no enclosing indexed symbol (-1 root)
   }
@@ -83,7 +84,8 @@ void NamespaceUseVisitor::emit_ns_use(const clang::NamedDecl *ns_decl,
   if (usr.empty()) {
     return;
   }
-  const auto ns_id = sink_.lookup_symbol_id(usr);
+  const auto ns_id = sink_.lookup_symbol_id(
+      usr, expansion_loc(context_, ns_decl->getLocation()).file);
   if (!ns_id || *ns_id == scope_stack_.back()) {
     return;
   }
@@ -166,7 +168,8 @@ bool NamespaceUseVisitor::VisitTypeLoc(clang::TypeLoc tl) {
 bool NamespaceUseVisitor::VisitTypeLoc(clang::TypeLoc /*tl*/) { return true; }
 #endif
 
-bool NamespaceUseVisitor::VisitUsingDirectiveDecl(clang::UsingDirectiveDecl *decl) {
+bool NamespaceUseVisitor::VisitUsingDirectiveDecl(
+    clang::UsingDirectiveDecl *decl) {
   if (in_target_file(decl)) {
     emit_ns_use(decl->getNominatedNamespaceAsWritten(),
                 decl->getIdentLocation());
