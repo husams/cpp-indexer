@@ -271,10 +271,10 @@ inline Symbol symbol_from_offset(const SqliteStmt &st, int off) {
   s.is_instantiation = st.col_int64(off + 21) != 0;
   s.end_line = opt_int64(st, off + 22);
   s.end_col = opt_int64(st, off + 23);
-  s.multi_def = st.col_int64(off + 24);   // v27
-  s.const_value = opt_text(st, off + 25); // v33
+  s.multi_def = st.col_int64(off + 24);            // v27
+  s.const_value = opt_text(st, off + 25);          // v33
   s.semantic_universe_id = st.col_int64(off + 26); // v35
-  s.identity_key = st.col_text(off + 27);         // v35
+  s.identity_key = st.col_text(off + 27);          // v35
   return s;
 }
 

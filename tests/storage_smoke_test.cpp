@@ -500,10 +500,9 @@ TEST_CASE("fresh Storage produces schema v39 (file-backed and :memory:)") {
   CHECK(cols("meta") == std::vector<std::string>{"key", "value"});
   // v14 adds the version column to component; v23 adds repository_id; v35
   // adds semantic_universe_id.
-  CHECK(cols("component") == std::vector<std::string>{"id", "name", "path",
-                                                      "kind", "version",
-                                                      "repository_id",
-                                                      "semantic_universe_id"});
+  CHECK(cols("component") ==
+        std::vector<std::string>{"id", "name", "path", "kind", "version",
+                                 "repository_id", "semantic_universe_id"});
   CHECK(cols("directory") ==
         std::vector<std::string>{"id", "component_id", "path"});
   CHECK(cols("file") ==

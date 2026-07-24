@@ -244,8 +244,7 @@ void Storage::delete_symbols_for_file(int64_t file_id) {
   del.step_done();
 }
 
-std::optional<Symbol>
-Storage::lookup_symbol(
+std::optional<Symbol> Storage::lookup_symbol(
     const std::string &usr, const std::optional<int64_t> &semantic_universe_id,
     const std::optional<std::string> &identity_source,
     const std::optional<std::string> &identity_translation_unit) {

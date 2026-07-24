@@ -778,8 +778,9 @@ void Storage::migrate() {
     }
   }
   // v38 -> v39: make the symbol USR an explicitly scoped identity. Existing
-  // unscoped rows belong to the legacy single-workspace universe; preserve their
-  // ids and all graph foreign keys while rebuilding the old global-USR table.
+  // unscoped rows belong to the legacy single-workspace universe; preserve
+  // their ids and all graph foreign keys while rebuilding the old global-USR
+  // table.
   {
     const bool universe_missing = !has_table("semantic_universe");
     const bool symbol_scope_missing =
