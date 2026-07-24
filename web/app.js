@@ -44,6 +44,16 @@ const graphState = (() => {
     if (sitesUsed !== undefined) merged.sites_used = sitesUsed;
     return merged;
   };
+  const budgetValue = (metadata, request, name) => {
+    const value = metadata?.[name] ?? request?.[name];
+    return Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : Number.POSITIVE_INFINITY;
+  };
+  const markTruncated = (element, evidence = false) => {
+    const status = mergeStatus(element.status, {truncated: true, ...(evidence ? {evidence_truncated: true} : {})});
+    const marked = {...element, status};
+    if (evidence) marked.evidence = mergeFlags(element.evidence, {truncated: true, sites_truncated: true});
+    return marked;
+  };
   const mergeSlices = (left, right) => {
     const nodes = new Map((left.nodes || []).map((node) => [String(node.id), node]));
     (right.nodes || []).forEach((node) => {
@@ -55,16 +65,45 @@ const graphState = (() => {
       const id = String(edge.id);
       edges.set(id, edges.has(id) ? mergeRecord(edges.get(id), edge) : edge);
     });
-    const sitesUsed = [...edges.values()].reduce((total, edge) => total + (edge.sites || []).length, 0);
-    const mergedNodes = [...nodes.values()];
-    const mergedEdges = [...edges.values()];
-    const elementTruncated = [...mergedNodes, ...mergedEdges].some((element) => element.status?.truncated === true);
-    const evidenceTruncated = mergedEdges.some((edge) => edge.status?.evidence_truncated === true || edge.evidence?.sites_truncated === true);
+    const allNodes = [...nodes.values()];
+    const allEdges = [...edges.values()];
+    const nodeBudget = Math.min(
+      budgetValue(left.metadata, left.request, 'node_budget'),
+      budgetValue(right.metadata, right.request, 'node_budget'));
+    const edgeBudget = Math.min(
+      budgetValue(left.metadata, left.request, 'edge_budget'),
+      budgetValue(right.metadata, right.request, 'edge_budget'));
+    const siteBudget = Math.min(
+      budgetValue(left.metadata, left.request, 'site_budget'),
+      budgetValue(right.metadata, right.request, 'site_budget'));
+    const nodeOverflow = allNodes.length > nodeBudget;
+    const mergedNodes = allNodes.slice(0, nodeBudget);
+    const retainedNodeIds = new Set(mergedNodes.map((node) => String(node.id)));
+    const eligibleEdges = allEdges.filter((edge) => retainedNodeIds.has(String(edge.source)) && retainedNodeIds.has(String(edge.target)));
+    const edgeOverflow = allEdges.length > edgeBudget || eligibleEdges.length < allEdges.length;
+    const mergedEdges = eligibleEdges.slice(0, edgeBudget);
+    let sitesUsed = 0;
+    let siteOverflow = false;
+    const limitedEdges = mergedEdges.map((edge) => {
+      const sites = edge.sites || [];
+      const remaining = Math.max(0, siteBudget - sitesUsed);
+      const retainedSites = sites.slice(0, remaining);
+      sitesUsed += retainedSites.length;
+      if (retainedSites.length < sites.length) siteOverflow = true;
+      if (retainedSites.length === sites.length) return edge;
+      return markTruncated({...edge, sites: retainedSites}, true);
+    });
+    const budgetTruncated = nodeOverflow || edgeOverflow || siteOverflow;
+    const retainedNodes = nodeOverflow ? mergedNodes.map((node) => markTruncated(node)) : mergedNodes;
+    const retainedEdges = edgeOverflow ? limitedEdges.map((edge) => markTruncated(edge, edge.status?.evidence_truncated === true)) : limitedEdges;
+    const elementTruncated = [...retainedNodes, ...retainedEdges].some((element) => element.status?.truncated === true);
+    const evidenceTruncated = retainedEdges.some((edge) => edge.status?.evidence_truncated === true || edge.evidence?.sites_truncated === true);
     const metadata = mergeMetadata(left.metadata, right.metadata, sitesUsed);
-    metadata.truncated = Boolean(metadata.truncated || elementTruncated);
+    metadata.truncated = Boolean(metadata.truncated || elementTruncated || budgetTruncated);
     metadata.evidence_truncated = Boolean(metadata.evidence_truncated || evidenceTruncated);
     metadata.continuation.available = Boolean(metadata.continuation.available || metadata.truncated);
-    return {...left, metadata, nodes: mergedNodes, edges: mergedEdges};
+    if (metadata.truncated && metadata.continuation.reason !== 'byte_budget') metadata.continuation.reason = 'budget';
+    return {...left, metadata, nodes: retainedNodes, edges: retainedEdges};
   };
   return {mergeSlices};
 })();
