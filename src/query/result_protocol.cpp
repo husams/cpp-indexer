@@ -20,12 +20,13 @@ Value identity_json(const Identity &identity) {
   for (const auto &fact_set : identity.fact_sets) {
     fact_sets.push_back(Value::of(redact_text(fact_set)));
   }
-  Object out{{"workspace", Value::of(redact_text(identity.workspace))},
-             {"index", Value::of(redact_text(identity.index))},
-             {"fact_sets", Value::arr(std::move(fact_sets))},
-             {"freshness", Value::of(redact_text(identity.freshness))},
-             {"source_revision", optional_string(identity.source_revision)},
-             {"source_fingerprint", optional_string(identity.source_fingerprint)}};
+  Object out{
+      {"workspace", Value::of(redact_text(identity.workspace))},
+      {"index", Value::of(redact_text(identity.index))},
+      {"fact_sets", Value::arr(std::move(fact_sets))},
+      {"freshness", Value::of(redact_text(identity.freshness))},
+      {"source_revision", optional_string(identity.source_revision)},
+      {"source_fingerprint", optional_string(identity.source_fingerprint)}};
   return Value::obj(std::move(out));
 }
 
@@ -37,11 +38,12 @@ Value producer_json(const Producer &producer) {
 }
 
 Value completeness_json(const Completeness &completeness) {
-  return Value::obj({{"state", Value::of(redact_text(completeness.state))},
-                     {"truncated", Value::of(completeness.truncated)},
-                     {"stale", Value::of(completeness.stale)},
-                     {"budget", completeness.budget ? Value::of(*completeness.budget)
-                                                       : Value::null()}});
+  return Value::obj(
+      {{"state", Value::of(redact_text(completeness.state))},
+       {"truncated", Value::of(completeness.truncated)},
+       {"stale", Value::of(completeness.stale)},
+       {"budget", completeness.budget ? Value::of(*completeness.budget)
+                                      : Value::null()}});
 }
 
 Value diagnostic_json(const Diagnostic &diagnostic) {
@@ -49,7 +51,8 @@ Value diagnostic_json(const Diagnostic &diagnostic) {
              {"severity", Value::of(redact_text(diagnostic.severity))},
              {"message", Value::of(redact_text(diagnostic.message))}};
   if (diagnostic.next_action) {
-    out.emplace_back("next_action", Value::of(redact_text(*diagnostic.next_action)));
+    out.emplace_back("next_action",
+                     Value::of(redact_text(*diagnostic.next_action)));
   }
   return Value::obj(std::move(out));
 }
@@ -65,8 +68,8 @@ bool valid_identifier(std::string_view value) {
     return false;
   }
   return std::ranges::all_of(value, [](char c) {
-    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-           c == '.' || c == '_' || c == '-';
+    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' ||
+           c == '_' || c == '-';
   });
 }
 
@@ -139,7 +142,8 @@ Value bounded_value(const Value &value, std::size_t depth) {
   }
   case Value::T::Obj: {
     if (value.o.size() > generated::kMaxResultProperties) {
-      throw std::invalid_argument("result payload exceeds protocol property bound");
+      throw std::invalid_argument(
+          "result payload exceeds protocol property bound");
     }
     Object out;
     out.reserve(value.o.size());
@@ -180,10 +184,9 @@ int exit_code(ExitClass exit_class) {
 
 ExitClass ResultEnvelope::exit_class() const {
   for (const auto &rule : generated::kExitReasonPrecedence) {
-    if (std::any_of(diagnostics.begin(), diagnostics.end(),
-                    [&rule](const Diagnostic &diagnostic) {
-                      return diagnostic.code == rule.code;
-                    })) {
+    if (std::ranges::any_of(diagnostics, [&rule](const Diagnostic &diagnostic) {
+          return diagnostic.code == rule.code;
+        })) {
       return rule.exit_class;
     }
   }
@@ -198,24 +201,29 @@ ExitClass ResultEnvelope::exit_class() const {
              : ExitClass::Success;
 }
 
-int ResultEnvelope::exit_code() const { return protocol::exit_code(exit_class()); }
+int ResultEnvelope::exit_code() const {
+  return protocol::exit_code(exit_class());
+}
 
 bool ResultEnvelope::valid() const {
   if (!valid_identifier(operation) ||
       static_cast<std::size_t>(status) >= generated::kStatusNames.size() ||
-      operation.empty() || identity.workspace.empty() || identity.index.empty() ||
-      identity.workspace == "unknown" || identity.workspace == "workspace:unknown" ||
+      operation.empty() || identity.workspace.empty() ||
+      identity.index.empty() || identity.workspace == "unknown" ||
+      identity.workspace == "workspace:unknown" ||
       identity.index == "unknown" || identity.fact_sets.empty() ||
-      identity.fact_sets.size() > generated::kMaxFactSets || producer.package.empty() ||
-      producer.version.empty() || producer.backend.empty() ||
-      producer.schema_version < 1) {
+      identity.fact_sets.size() > generated::kMaxFactSets ||
+      producer.package.empty() || producer.version.empty() ||
+      producer.backend.empty() || producer.schema_version < 1) {
     return false;
   }
   if (!one_of(identity.freshness, generated::kFreshness) ||
       !one_of(completeness.state, generated::kCompletenessStates) ||
-      std::ranges::any_of(identity.fact_sets, [this](const auto &fact_set) {
-        return std::ranges::count(identity.fact_sets, fact_set) > 1;
-      }) ||
+      std::ranges::any_of(identity.fact_sets,
+                          [this](const auto &fact_set) {
+                            return std::ranges::count(identity.fact_sets,
+                                                      fact_set) > 1;
+                          }) ||
       completeness.stale != (identity.freshness == "stale")) {
     return false;
   }
@@ -247,10 +255,21 @@ bool ResultEnvelope::valid() const {
   if (status == Status::Refuted && !has_code("policy_refuted")) {
     return false;
   }
+  if (has_code("stale_input") &&
+      (status != Status::Unknown || identity.freshness != "stale")) {
+    return false;
+  }
+  if ((has_code("backend_error") || has_code("timeout")) &&
+      status != Status::Error) {
+    return false;
+  }
+  if (has_code("policy_refuted") && status != Status::Refuted) {
+    return false;
+  }
   if (status == Status::Error &&
-      !std::any_of(generated::kExitReasonPrecedence.begin(),
-                   generated::kExitReasonPrecedence.end(),
-                   [&has_code](const auto &rule) { return has_code(rule.code); })) {
+      !std::ranges::any_of(
+          generated::kExitReasonPrecedence,
+          [&has_code](const auto &rule) { return has_code(rule.code); })) {
     return false;
   }
   if (diagnostics.size() > generated::kMaxDiagnostics ||
@@ -304,33 +323,38 @@ json_out::Value ResultEnvelope::to_json() const {
   for (const auto &node : evidence) {
     evidence_json_array.push_back(evidence_json(node, 1, evidence_nodes));
   }
-  Object out{{"protocol", Value::of(std::string(kProtocol))},
-             {"operation", Value::of(redact_text(operation))},
-             {"status", Value::of(std::string(status_name(status)))},
-             {"exit_class", Value::of(std::string(exit_class_name(exit_class())))},
-             {"exit_code", Value::of(exit_code())},
-             {"result", bounded_value(result, 0)},
-             {"identity", identity_json(identity)},
-             {"producer", producer_json(producer)},
-             {"completeness", completeness_json(completeness)},
-             {"diagnostics", Value::arr(std::move(diagnostics_json))},
-             {"evidence", Value::arr(std::move(evidence_json_array))},
-             {"artifacts", artifacts_json(artifacts)}};
+  Object out{
+      {"protocol", Value::of(std::string(kProtocol))},
+      {"operation", Value::of(redact_text(operation))},
+      {"status", Value::of(std::string(status_name(status)))},
+      {"exit_class", Value::of(std::string(exit_class_name(exit_class())))},
+      {"exit_code", Value::of(exit_code())},
+      {"result", bounded_value(result, 0)},
+      {"identity", identity_json(identity)},
+      {"producer", producer_json(producer)},
+      {"completeness", completeness_json(completeness)},
+      {"diagnostics", Value::arr(std::move(diagnostics_json))},
+      {"evidence", Value::arr(std::move(evidence_json_array))},
+      {"artifacts", artifacts_json(artifacts)}};
   if (replay) {
     Array args;
     for (const auto &argument : redact_arguments(replay->arguments)) {
       args.push_back(Value::of(argument));
     }
-    out.emplace_back("replay", Value::obj({
-        {"command", Value::of(redact_text(replay->command))},
-        {"arguments", Value::arr(std::move(args))}}));
+    out.emplace_back(
+        "replay",
+        Value::obj({{"command", Value::of(redact_text(replay->command))},
+                    {"arguments", Value::arr(std::move(args))}}));
   }
   if (resources) {
-    out.emplace_back("resources", Value::obj({
-        {"elapsed_ms", resources->elapsed_ms ? Value::of(*resources->elapsed_ms)
-                                               : Value::null()},
-        {"peak_bytes", resources->peak_bytes ? Value::of(*resources->peak_bytes)
-                                               : Value::null()}}));
+    out.emplace_back(
+        "resources",
+        Value::obj({{"elapsed_ms", resources->elapsed_ms
+                                       ? Value::of(*resources->elapsed_ms)
+                                       : Value::null()},
+                    {"peak_bytes", resources->peak_bytes
+                                       ? Value::of(*resources->peak_bytes)
+                                       : Value::null()}}));
   }
   return Value::obj(std::move(out));
 }
@@ -368,8 +392,8 @@ std::string ResultEnvelope::human_text() const {
 
 json_out::Value ProgressEvent::to_json() const {
   if (sequence < 0 || !valid_identifier(operation) ||
-      !one_of(event, generated::kEventKinds) ||
-      (completed && *completed < 0) || (total && *total < 0)) {
+      !one_of(event, generated::kEventKinds) || (completed && *completed < 0) ||
+      (total && *total < 0)) {
     throw std::invalid_argument("invalid progress event");
   }
   Object out{{"protocol", Value::of(std::string(kEventProtocol))},
@@ -389,8 +413,8 @@ json_out::Value ProgressEvent::to_json() const {
 std::string redact_text(std::string_view value, std::size_t max_bytes) {
   std::string text(value);
   constexpr std::string_view marker = "<redacted:secret>";
-  for (const std::string_view key : {"TOKEN=", "TOKEN:", "PASSWORD=",
-                                     "PASSWORD:", "SECRET=", "SECRET:"}) {
+  for (const std::string_view key :
+       {"TOKEN=", "TOKEN:", "PASSWORD=", "PASSWORD:", "SECRET=", "SECRET:"}) {
     std::size_t pos = 0;
     while ((pos = text.find(key, pos)) != std::string::npos) {
       const std::size_t value_start = pos + key.size();
@@ -419,8 +443,9 @@ std::string redact_text(std::string_view value, std::size_t max_bytes) {
   return text;
 }
 
-std::vector<std::string> redact_arguments(const std::vector<std::string> &arguments,
-                                          std::size_t max_bytes) {
+std::vector<std::string>
+redact_arguments(const std::vector<std::string> &arguments,
+                 std::size_t max_bytes) {
   std::vector<std::string> out;
   out.reserve(arguments.size());
   for (const auto &argument : arguments) {

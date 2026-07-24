@@ -942,8 +942,8 @@ protocol::ResultEnvelope Result::to_envelope() const {
         } else if (std::holds_alternative<int64_t>(cell)) {
           row_value.emplace_back(fields[i], Value::of(std::get<int64_t>(cell)));
         } else {
-          row_value.emplace_back(
-              fields[i], Value::of(std::get<std::string>(cell)));
+          row_value.emplace_back(fields[i],
+                                 Value::of(std::get<std::string>(cell)));
         }
       }
       row_values.push_back(Value::obj(std::move(row_value)));
@@ -965,8 +965,7 @@ protocol::ResultEnvelope Result::to_envelope() const {
   envelope.identity.workspace = index.workspace;
   envelope.identity.index =
       "semantic-index/schema/" + std::to_string(index.schema_version);
-  envelope.identity.fact_sets =
-      {view == View::Symbol ? "symbols" : "entities"};
+  envelope.identity.fact_sets = {view == View::Symbol ? "symbols" : "entities"};
   envelope.identity.freshness = index.freshness;
   envelope.identity.source_revision = index.source_revision;
   envelope.identity.source_fingerprint = index.source_fingerprint;
@@ -984,13 +983,13 @@ protocol::ResultEnvelope Result::to_envelope() const {
   envelope.completeness.truncated = truncated;
   envelope.completeness.stale = index.freshness == "stale";
   envelope.result = Value::obj(std::move(payload));
-  envelope.evidence.push_back(protocol::EvidenceNode{
-      .id = "queryplan",
-      .evidence_class = "derived",
-      .trust = "producer-verified",
-      .summary = "bounded QueryPlan execution",
-      .source = std::nullopt,
-      .children = {}});
+  envelope.evidence.push_back(
+      protocol::EvidenceNode{.id = "queryplan",
+                             .evidence_class = "derived",
+                             .trust = "producer-verified",
+                             .summary = "bounded QueryPlan execution",
+                             .source = std::nullopt,
+                             .children = {}});
   envelope.artifacts.push_back(protocol::ArtifactRef{
       .kind = "semantic-index",
       .id = envelope.identity.index,
@@ -1009,13 +1008,15 @@ protocol::ResultEnvelope Result::to_envelope() const {
         .code = "stale_input",
         .severity = "error",
         .message = "index contents are stale for the workspace",
-        .next_action = "re-index the affected sources before relying on this result"});
+        .next_action =
+            "re-index the affected sources before relying on this result"});
   } else if (index.freshness != "current") {
     envelope.diagnostics.push_back(protocol::Diagnostic{
         .code = "unknown",
         .severity = "warning",
         .message = "index freshness could not be verified",
-        .next_action = "stamp or re-index the workspace before relying on this result"});
+        .next_action =
+            "stamp or re-index the workspace before relying on this result"});
   }
   return envelope;
 }

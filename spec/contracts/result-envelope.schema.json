@@ -8,10 +8,9 @@
           "maxLength": 4096
         },
         {
-          "type": "integer"
-        },
-        {
-          "type": "number"
+          "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807
         },
         {
           "type": "boolean"
@@ -42,10 +41,9 @@
           "maxLength": 4096
         },
         {
-          "type": "integer"
-        },
-        {
-          "type": "number"
+          "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807
         },
         {
           "type": "boolean"
@@ -76,10 +74,9 @@
           "maxLength": 4096
         },
         {
-          "type": "integer"
-        },
-        {
-          "type": "number"
+          "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807
         },
         {
           "type": "boolean"
@@ -110,10 +107,9 @@
           "maxLength": 4096
         },
         {
-          "type": "integer"
-        },
-        {
-          "type": "number"
+          "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807
         },
         {
           "type": "boolean"
@@ -144,10 +140,9 @@
           "maxLength": 4096
         },
         {
-          "type": "integer"
-        },
-        {
-          "type": "number"
+          "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807
         },
         {
           "type": "boolean"
@@ -178,10 +173,9 @@
           "maxLength": 4096
         },
         {
-          "type": "integer"
-        },
-        {
-          "type": "number"
+          "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807
         },
         {
           "type": "boolean"
@@ -212,10 +206,9 @@
           "maxLength": 4096
         },
         {
-          "type": "integer"
-        },
-        {
-          "type": "number"
+          "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807
         },
         {
           "type": "boolean"
@@ -246,10 +239,9 @@
           "maxLength": 4096
         },
         {
-          "type": "integer"
-        },
-        {
-          "type": "number"
+          "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807
         },
         {
           "type": "boolean"
@@ -280,10 +272,9 @@
           "maxLength": 4096
         },
         {
-          "type": "integer"
-        },
-        {
-          "type": "number"
+          "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807
         },
         {
           "type": "boolean"
@@ -703,7 +694,8 @@
         },
         "schema_version": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 9223372036854775807
         }
       }
     },
@@ -734,7 +726,8 @@
           "anyOf": [
             {
               "type": "integer",
-              "minimum": 0
+              "minimum": 0,
+              "maximum": 9223372036854775807
             },
             {
               "type": "null"
@@ -830,11 +823,13 @@
           },
           "schema_version": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 9223372036854775807
           },
           "catalog_version": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 9223372036854775807
           },
           "catalog_hash": {
             "type": "string",
@@ -877,7 +872,8 @@
           "anyOf": [
             {
               "type": "integer",
-              "minimum": 0
+              "minimum": 0,
+              "maximum": 9223372036854775807
             },
             {
               "type": "null"
@@ -888,7 +884,8 @@
           "anyOf": [
             {
               "type": "integer",
-              "minimum": 0
+              "minimum": 0,
+              "maximum": 9223372036854775807
             },
             {
               "type": "null"
@@ -897,5 +894,298 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "diagnostics": {
+            "anyOf": [
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "const": "stale_input"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "enum": [
+              "unknown"
+            ]
+          },
+          "identity": {
+            "properties": {
+              "freshness": {
+                "enum": [
+                  "stale"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "diagnostics": {
+            "anyOf": [
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "const": "backend_error"
+                    }
+                  }
+                }
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "const": "timeout"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "enum": [
+              "error"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "diagnostics": {
+            "anyOf": [
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "const": "policy_refuted"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "enum": [
+              "refuted"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "complete"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "completeness": {
+            "properties": {
+              "state": {
+                "const": "complete"
+              },
+              "truncated": {
+                "const": false
+              },
+              "stale": {
+                "const": false
+              }
+            }
+          },
+          "identity": {
+            "properties": {
+              "freshness": {
+                "const": "current"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "partial"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "completeness": {
+            "properties": {
+              "state": {
+                "const": "partial"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "unknown"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "completeness": {
+            "properties": {
+              "state": {
+                "const": "unknown"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "conditional"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "completeness": {
+            "properties": {
+              "state": {
+                "const": "unknown"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "refuted"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "completeness": {
+            "properties": {
+              "state": {
+                "const": "unknown"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "error"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "completeness": {
+            "properties": {
+              "state": {
+                "const": "unknown"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "completeness": {
+            "properties": {
+              "truncated": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "partial"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "identity": {
+            "properties": {
+              "freshness": {
+                "const": "stale"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "unknown"
+          }
+        }
+      }
+    }
+  ]
 }

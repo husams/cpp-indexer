@@ -418,8 +418,7 @@ TEST_CASE("query_plan: order_by, limit, default fields, result JSON") {
   const auto envelope = d.to_envelope();
   CHECK(envelope.status == cidx::protocol::Status::Unknown);
   CHECK(envelope.identity.fact_sets == std::vector<std::string>{"symbols"});
-  const auto envelope_json =
-      cidx::json_out::dumps_indent2(envelope.to_json());
+  const auto envelope_json = cidx::json_out::dumps_indent2(envelope.to_json());
   CHECK(envelope_json.find("\"protocol\": \"cidx.result/v1\"") !=
         std::string::npos);
   CHECK(envelope_json.find("\"evidence\"") != std::string::npos);

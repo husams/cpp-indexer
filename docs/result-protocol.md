@@ -49,9 +49,17 @@ serialization. Human output is capped at 4096 UTF-8 bytes, with truncation only
 at code-point boundaries.
 
 Workspace identity is stable and derived from repository/component ownership
-metadata (`workspace:<sha1>`); adapters must not substitute `unknown`. When
+metadata using the same sorted owner list and NUL separator in both adapters
+(`workspace:<sha1>`); adapters must not substitute `unknown`. When
 freshness cannot be established, the result remains `unknown` rather than
 claiming completeness.
+
+Result numbers are signed 64-bit integers only; floating-point values,
+non-finite numbers, and integers outside that range are rejected. Diagnostic
+codes also constrain the envelope: `stale_input` requires an unknown result
+over stale input, backend/timeout diagnostics require `error`, and
+`policy_refuted` requires `refuted`. These cross-field rules are present in
+both serializers and the generated JSON Schema.
 
 The C++ adapter is `cidx::protocol::ResultEnvelope`; Python uses
 `indexer.result_protocol.ResultEnvelope`. QueryPlan exposes

@@ -6029,13 +6029,17 @@ class Storage:
             for row in rows
         ]
 
-    @staticmethod
-    def _workspace_identity(files: list[dict[str, Any]]) -> str:
+    def _workspace_identity(self) -> str:
+        rows = self._conn.execute(
+            "SELECT DISTINCT COALESCE(r.remote_url, ''), COALESCE(r.name, ''), "
+            "c.path FROM component c LEFT JOIN repository r ON r.id = c.repository_id "
+            "ORDER BY 1, 2, 3"
+        ).fetchall()
         owners = sorted({
-            f"remote:{file['remote_url']}" if file["remote_url"]
-            else f"repo:{file['repository_name']}" if file["repository_name"]
-            else f"component:{file['component_path']}"
-            for file in files
+            f"remote:{remote}" if remote
+            else f"repo:{repository}" if repository
+            else f"component:{component}"
+            for remote, repository, component in rows
         })
         material = "\0".join(owners) if owners else "memory"
         return f"workspace:{hashlib.sha1(material.encode()).hexdigest()}"
@@ -6110,7 +6114,7 @@ class Storage:
             index_config=values["index_config"],
             index_config_fingerprint=values["index_config_fingerprint"],
             freshness=freshness,
-            workspace=self._workspace_identity(files),
+            workspace=self._workspace_identity(),
         )
 
     def stamp_index_identity(self) -> None:

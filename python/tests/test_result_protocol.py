@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
+
+import pytest
 
 from indexer.result_protocol import (
     ArtifactRef,
@@ -129,6 +132,29 @@ def test_fail_closed_invariants_and_acceptance_vectors() -> None:
         current.to_dict()
         assert current.exit_class().value == vector["exit_class"]
         assert current.exit_code() == vector["exit_code"]
+
+
+def test_fail_closed_cross_field_and_numeric_invariants() -> None:
+    envelope = _golden_envelope()
+    envelope.diagnostics = [Diagnostic("backend_error")]
+    with pytest.raises(ValueError):
+        envelope.to_dict()
+
+    envelope = _golden_envelope()
+    envelope.identity = Identity("workspace://demo", "semantic-index://demo", ("symbols",), "current", "git:abc123", "sha256:source")
+    envelope.status = Status.UNKNOWN
+    envelope.completeness = Completeness("unknown")
+    envelope.diagnostics = [Diagnostic("stale_input")]
+    with pytest.raises(ValueError):
+        envelope.to_dict()
+
+    envelope = _golden_envelope()
+    envelope.result["nan"] = math.nan
+    with pytest.raises(ValueError):
+        envelope.to_dict()
+    envelope.result["nan"] = 2**63
+    with pytest.raises(ValueError):
+        envelope.to_dict()
 
 
 def test_event_and_error_goldens_are_executable() -> None:

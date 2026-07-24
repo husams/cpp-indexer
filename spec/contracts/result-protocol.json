@@ -1,6 +1,10 @@
 {
   "format": "cidx.result-protocol/v1",
   "protocol_version": 1,
+  "numeric": {
+    "min_integer": -9223372036854775808,
+    "max_integer": 9223372036854775807
+  },
   "limits": {
     "max_evidence_depth": 4,
     "max_evidence_nodes": 256,
@@ -35,6 +39,11 @@
     "policy_refuted", "unknown", "truncated_budget", "missing_evidence"
   ],
   "artifact_kinds": ["semantic-index", "query-result", "analysis", "diff", "refactoring-plan", "proof"],
+  "diagnostic_invariants": [
+    {"codes": ["stale_input"], "status": ["unknown"], "freshness": ["stale"]},
+    {"codes": ["backend_error", "timeout"], "status": ["error"]},
+    {"codes": ["policy_refuted"], "status": ["refuted"]}
+  ],
   "exit_reason_precedence": [
     {"code": "usage", "class": "usage", "exit_code": 2},
     {"code": "invalid_input", "class": "invalid_or_stale_input", "exit_code": 3},

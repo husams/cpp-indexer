@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import math
 import re
 from typing import Any, Iterable
 
@@ -32,6 +33,8 @@ from .generated_result_protocol import (
     MAX_RESULT_ITEMS,
     MAX_RESULT_PROPERTIES,
     MAX_TEXT_BYTES,
+    MAX_INTEGER,
+    MIN_INTEGER,
     EVENT_PROTOCOL as GENERATED_EVENT_PROTOCOL,
     PROTOCOL as GENERATED_PROTOCOL,
     PROTOCOL_VERSION,
@@ -44,6 +47,10 @@ PROTOCOL = GENERATED_PROTOCOL
 EVENT_PROTOCOL = GENERATED_EVENT_PROTOCOL
 _SECRET = re.compile(r"(TOKEN|PASSWORD|SECRET)([=:])[^\s,;]+")
 _PLACEHOLDER_IDENTITIES = {"", "unknown", "workspace:unknown", "workspace://unknown"}
+
+
+def _is_protocol_integer(value: Any) -> bool:
+    return type(value) is int and MIN_INTEGER <= value <= MAX_INTEGER
 
 
 def redact_text(value: str, max_bytes: int = MAX_TEXT_BYTES) -> str:
@@ -69,8 +76,16 @@ def _sanitize_value(value: Any, depth: int = 0) -> Any:
         raise ValueError("result payload exceeds protocol depth")
     if isinstance(value, str):
         return redact_text(value)
-    if value is None or isinstance(value, (bool, int, float)):
+    if value is None or isinstance(value, bool):
         return value
+    if isinstance(value, int):
+        if value < MIN_INTEGER or value > MAX_INTEGER:
+            raise ValueError("result integer exceeds the signed 64-bit protocol range")
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("non-finite result numbers are not valid JSON")
+        raise ValueError("floating-point result numbers are not supported by the protocol")
     if isinstance(value, (list, tuple)):
         if len(value) > MAX_RESULT_ITEMS:
             raise ValueError("result payload exceeds protocol item bound")
@@ -171,6 +186,8 @@ class ArtifactRef:
     def to_dict(self) -> dict[str, Any]:
         if self.kind not in ARTIFACT_KINDS:
             raise ValueError("artifact kind is invalid")
+        if not _is_protocol_integer(self.schema_version) or not _is_protocol_integer(self.catalog_version):
+            raise ValueError("artifact versions must be signed 64-bit integers")
         if self.schema_version < 1 or self.catalog_version < 1:
             raise ValueError("artifact versions must be positive")
         return {
@@ -199,6 +216,8 @@ class ResourceMetadata:
     peak_bytes: int | None = None
 
     def to_dict(self) -> dict[str, int | None]:
+        if any(value is not None and not _is_protocol_integer(value) for value in (self.elapsed_ms, self.peak_bytes)):
+            raise ValueError("resource metadata must use signed 64-bit integers")
         if (self.elapsed_ms is not None and self.elapsed_ms < 0) or (self.peak_bytes is not None and self.peak_bytes < 0):
             raise ValueError("resource metadata cannot be negative")
         return {"elapsed_ms": self.elapsed_ms, "peak_bytes": self.peak_bytes}
@@ -254,12 +273,14 @@ class ResultEnvelope:
             raise ValueError("result envelope producer is incomplete")
         if any(len(value.encode("utf-8")) > MAX_TEXT_BYTES for value in (self.producer.package, self.producer.version, self.producer.backend)):
             raise ValueError("result envelope producer exceeds protocol bounds")
-        if self.producer.schema_version < 1:
+        if not _is_protocol_integer(self.producer.schema_version) or self.producer.schema_version < 1:
             raise ValueError("producer schema version must be positive")
         if self.completeness.state not in COMPLETENESS_STATES:
             raise ValueError("result envelope completeness state is invalid")
         if self.completeness.stale != (self.identity.freshness == "stale"):
             raise ValueError("stale completeness must match index freshness")
+        if self.completeness.budget is not None and not _is_protocol_integer(self.completeness.budget):
+            raise ValueError("completeness budget must be a signed 64-bit integer")
         if self.completeness.budget is not None and self.completeness.budget < 0:
             raise ValueError("completeness budget cannot be negative")
         expected_state = {Status.COMPLETE: "complete", Status.PARTIAL: "partial"}.get(self.status)
@@ -267,14 +288,35 @@ class ResultEnvelope:
             raise ValueError("status and completeness state disagree")
         if self.completeness.truncated and self.status is not Status.PARTIAL:
             raise ValueError("truncated results must be partial")
+        if self.status is Status.COMPLETE and (
+            self.completeness.state != "complete"
+            or self.completeness.truncated
+            or self.completeness.stale
+            or self.identity.freshness != "current"
+        ):
+            raise ValueError("complete results require current, complete freshness")
+        if self.status in {Status.UNKNOWN, Status.CONDITIONAL, Status.REFUTED, Status.ERROR} and self.completeness.state != "unknown":
+            raise ValueError("non-complete statuses require unknown completeness")
+        if self.status is Status.PARTIAL and self.completeness.state != "partial":
+            raise ValueError("partial results require partial completeness")
         if self.identity.freshness == "stale" and self.status is not Status.UNKNOWN:
             raise ValueError("stale indexes must be unknown")
         if self.status in {Status.UNKNOWN, Status.CONDITIONAL, Status.REFUTED, Status.ERROR} and not self.diagnostics:
             raise ValueError("non-complete outcomes require a stable diagnostic")
         codes = {diagnostic.code for diagnostic in self.diagnostics}
+        if "stale_input" in codes and (self.status is not Status.UNKNOWN or self.identity.freshness != "stale"):
+            raise ValueError("stale_input requires an unknown result over a stale index")
+        if codes.intersection({"backend_error", "timeout"}) and self.status is not Status.ERROR:
+            raise ValueError("backend failures require an error result")
+        if "policy_refuted" in codes and self.status is not Status.REFUTED:
+            raise ValueError("policy_refuted requires a refuted result")
+        if self.status is Status.UNKNOWN and not codes.intersection({"stale_input", "unknown", "missing_evidence"}):
+            raise ValueError("unknown results require a stable unknown reason")
+        if self.status is Status.CONDITIONAL and not codes.intersection({"unknown", "missing_evidence"}):
+            raise ValueError("conditional results require an uncertainty reason")
         if self.status is Status.REFUTED and "policy_refuted" not in codes:
             raise ValueError("refuted outcomes require policy_refuted")
-        if self.status is Status.ERROR and not codes.intersection(DIAGNOSTIC_CODES):
+        if self.status is Status.ERROR and not codes.intersection({code for code, _, _ in EXIT_REASON_PRECEDENCE}):
             raise ValueError("error outcomes require a stable diagnostic")
         if any(d.code not in DIAGNOSTIC_CODES or d.severity not in DIAGNOSTIC_SEVERITIES for d in self.diagnostics):
             raise ValueError("diagnostic domain is invalid")
@@ -422,8 +464,10 @@ class ProgressEvent:
     total: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        if self.sequence < 0 or self.event not in EVENT_KINDS or not re.fullmatch(r"[a-z][a-z0-9._-]*", self.operation) or len(self.operation.encode("utf-8")) > MAX_TEXT_BYTES:
+        if not _is_protocol_integer(self.sequence) or self.sequence < 0 or self.event not in EVENT_KINDS or not re.fullmatch(r"[a-z][a-z0-9._-]*", self.operation) or len(self.operation.encode("utf-8")) > MAX_TEXT_BYTES:
             raise ValueError("event metadata is invalid")
+        if any(value is not None and not _is_protocol_integer(value) for value in (self.completed, self.total)):
+            raise ValueError("event progress must use signed 64-bit integers")
         if (self.completed is not None and self.completed < 0) or (self.total is not None and self.total < 0):
             raise ValueError("event progress cannot be negative")
         out: dict[str, Any] = {

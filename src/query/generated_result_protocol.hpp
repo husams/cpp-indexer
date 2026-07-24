@@ -21,6 +21,8 @@ inline constexpr std::size_t kMaxEvidence = 256;
 inline constexpr std::size_t kMaxArtifacts = 64;
 inline constexpr std::size_t kMaxFactSets = 32;
 inline constexpr std::size_t kMaxReplayArguments = 256;
+inline constexpr long long kMinInteger = -9223372036854775807LL - 1;
+inline constexpr long long kMaxInteger = 9223372036854775807LL;
 enum class Status : std::uint8_t {
   Complete,
   Partial,
