@@ -600,6 +600,8 @@ public:
   // calls/uses, report remaining stubs. Returns count of still-unresolved
   // stub symbols.
   int resolve_pass();
+  // Record the UTC completion marker after a successful resolve pass.
+  void stamp_graph_resolved();
 
   // Roll edge.count up to the true site count for calls (kind=1) and uses
   // (kind=7) — idempotent; COUNT(*) is the source of truth.
@@ -816,7 +818,9 @@ private:
 
 class StorageWorkspaceAdapter final : public WorkspaceDataSource {
 public:
-  explicit StorageWorkspaceAdapter(Storage &storage) : storage_(storage) {}
+  explicit StorageWorkspaceAdapter(Storage &storage)
+      : storage_(storage), workspace_read_(storage.workspace_catalog_read()),
+        source_read_(storage.source_read()) {}
 
   std::vector<Repository> list_repositories() override;
   std::vector<Component> list_components() override;
@@ -833,6 +837,8 @@ public:
 
 private:
   Storage &storage_;
+  storage::WorkspaceCatalogReadPort &workspace_read_;
+  storage::SourceStoreReadPort &source_read_;
 };
 
 } // namespace cidx

@@ -10,6 +10,7 @@
 #include "ast/symbol_visitor.hpp"
 
 #include "compiledb/compiledb.hpp"
+#include "storage/ports.hpp"
 #include "storage/storage.hpp"
 #include "toolchain/toolchain.hpp"
 #include "util/env.hpp"
@@ -69,6 +70,7 @@ std::optional<std::string> parsed_file_md5(clang::SourceManager &source_manager,
 
 struct EngineState {
   cidx::Storage *db = nullptr;
+  cidx::storage::AstStoragePorts *ports = nullptr;
   const cidx::File *rec = nullptr;
   std::string path; // main file (canonical absolute)
   bool graph_enabled = true;
@@ -138,10 +140,12 @@ private:
 class TranslationUnitIndexer {
 public:
   TranslationUnitIndexer(clang::ASTContext &context, EngineState &state)
-      : context_(context), state_(state), db_(*state.db), symbols_(db_),
-        edges_(db_), tu_(context.getTranslationUnitDecl()) {}
+      : context_(context), state_(state), db_(*state.db),
+        symbols_(*state.ports), edges_(*state.ports),
+        tu_(context.getTranslationUnitDecl()) {}
 
   void run() {
+    auto unit = state_.ports->unit_of_work.begin();
     db_.delete_symbols_for_file(state_.rec->id);
     state_.out->stored = run_symbol_pass(state_.path, state_.rec->id);
     const std::vector<int64_t> main_symbol_ids = symbols_.symbol_ids();
@@ -158,6 +162,7 @@ public:
       resolve_include_guards(*state_.pp, state_.includes);
     }
     persist_include_facts(db_, state_.includes, *state_.config);
+    unit->commit();
   }
 
 private:
@@ -178,10 +183,8 @@ private:
     symbols_.set_identity_translation_unit_config_id(
         state_.normalized_config_id, state_.rec->id);
     symbols_.reset_counters();
-    auto txn = db_.transaction();
     SymbolVisitor visitor(context_, symbols_, file);
     visitor.TraverseDecl(tu_);
-    txn.commit();
     return symbols_.stored_count();
   }
 
@@ -195,14 +198,12 @@ private:
     edges_.delete_edges_for_file(file_id);
     edges_.delete_definitions_for_file(file_id);
     edges_.reset_fact_ids();
-    auto txn = db_.transaction();
     DeclarationEdgeVisitor decls(context_, edges_, file, file_id);
     decls.TraverseDecl(tu_);
     FunctionDefinitionVisitor bodies(context_, edges_, file, file_id);
     bodies.TraverseDecl(tu_);
     NamespaceUseVisitor ns(context_, edges_, file, file_id);
     ns.TraverseDecl(tu_);
-    txn.commit();
   }
 
   [[nodiscard]] bool header_covered_by_current_config(
@@ -454,9 +455,8 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   const SourceSnapshot source = SourceSnapshot::capture(path);
   out.source_md5 = source.md5;
   cidx::StorageWorkspaceAdapter workspace_data(db);
-  WorkspaceContext context =
-      WorkspaceContext::borrow(workspace_data,
-                               WorkspaceReadWriteMode::read_write);
+  WorkspaceContext context = WorkspaceContext::borrow(
+      workspace_data, WorkspaceReadWriteMode::read_write);
   Toolchain toolchain;
   TranslationUnitConfigurationService resolver(context, toolchain);
   const TranslationUnitDescriptor descriptor = resolver.resolve(path);
@@ -481,7 +481,12 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   config.resource_dir = resolved.resource_dir;
 
   EngineState state;
+  cidx::storage::AstStoragePorts ast_ports{
+      db.workspace_catalog_read(), db.source_read(), db.symbol_read(),
+      db.symbol_write(),           db.type_write(),  db.fact_write(),
+      db.definition_write(),       db.unit_of_work()};
   state.db = &db;
+  state.ports = &ast_ports;
   state.rec = &rec;
   state.path = path;
   state.graph_enabled = graph_enabled;

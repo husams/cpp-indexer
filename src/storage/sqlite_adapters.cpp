@@ -44,6 +44,31 @@ std::vector<Component> SqliteWorkspaceCatalogAdapter::list_components(
   return db_->list_components(name, kind);
 }
 
+std::optional<std::string>
+SqliteWorkspaceCatalogAdapter::get_alias(const std::string &name) {
+  return db_->get_alias(name);
+}
+
+std::string
+SqliteWorkspaceCatalogAdapter::portable_translation_unit_identity_for_config(
+    int64_t config_id, std::optional<int64_t> translation_unit_file_id) {
+  return translation_unit_file_id
+             ? db_->portable_translation_unit_identity_for_config(
+                   config_id, *translation_unit_file_id)
+             : db_->portable_translation_unit_identity_for_config(config_id);
+}
+
+std::string
+SqliteWorkspaceCatalogAdapter::portable_translation_unit_identity_for_file(
+    int64_t file_id) {
+  return db_->portable_translation_unit_identity_for_file(file_id);
+}
+
+int64_t
+SqliteWorkspaceCatalogAdapter::semantic_universe_for_file_id(int64_t file_id) {
+  return db_->semantic_universe_for_file_id(file_id);
+}
+
 std::optional<Repository>
 SqliteWorkspaceCatalogAdapter::get_repository_by_id(int64_t id) {
   return db_->get_repository_by_id(id);
@@ -143,6 +168,16 @@ SqliteSourceStoreAdapter::diagnostic_counts() {
   return db_->diagnostic_counts();
 }
 
+std::vector<FileConfigApplicability>
+SqliteSourceStoreAdapter::file_configs_for(int64_t file_id) {
+  return db_->file_configs_for(file_id);
+}
+
+std::optional<TranslationUnitConfig>
+SqliteSourceStoreAdapter::translation_unit_config_by_id(int64_t config_id) {
+  return db_->translation_unit_config_by_id(config_id);
+}
+
 int64_t SqliteSourceStoreAdapter::add_file(
     int64_t directory_id, const std::string &name,
     const std::optional<double> &mtime, const std::optional<std::string> &md5,
@@ -179,9 +214,11 @@ void SqliteSourceStoreAdapter::replace_diagnostics(
 SqliteSymbolStoreAdapter::SqliteSymbolStoreAdapter(Storage &db) : db_(&db) {}
 
 std::optional<Symbol> SqliteSymbolStoreAdapter::lookup_symbol(
-    const std::string &usr,
-    const std::optional<int64_t> &semantic_universe_id) {
-  return db_->lookup_symbol(usr, semantic_universe_id);
+    const std::string &usr, const std::optional<int64_t> &semantic_universe_id,
+    const std::optional<std::string> &identity_source,
+    const std::optional<std::string> &identity_translation_unit) {
+  return db_->lookup_symbol(usr, semantic_universe_id, identity_source,
+                            identity_translation_unit);
 }
 
 std::optional<Symbol>

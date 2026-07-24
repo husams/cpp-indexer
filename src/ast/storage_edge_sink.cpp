@@ -2,11 +2,12 @@
 
 #include <algorithm>
 
-#include "storage/storage.hpp"
+#include "storage/ports.hpp"
 
 namespace cidx::ast {
 
-StorageEdgeSink::StorageEdgeSink(cidx::Storage &db) : db_(db) {}
+StorageEdgeSink::StorageEdgeSink(cidx::storage::AstStoragePorts &ports)
+    : ports_(ports) {}
 
 void StorageEdgeSink::reset_fact_ids() {
   edge_ids_.clear();
@@ -28,7 +29,7 @@ std::optional<int64_t> StorageEdgeSink::lookup_symbol_id(
       cached != lookup_cache_.end()) {
     return cached->second;
   }
-  const std::optional<cidx::Symbol> sym = db_.lookup_symbol(
+  const std::optional<cidx::Symbol> sym = ports_.symbols_read.lookup_symbol(
       usr, current_universe_id_, identity_source, identity_translation_unit_);
   const std::optional<int64_t> result =
       sym ? std::optional<int64_t>(sym->id) : std::nullopt;
@@ -40,7 +41,8 @@ void StorageEdgeSink::set_current_file_id(int64_t file_id) {
   current_file_id_ = file_id;
   current_universe_id_ =
       file_id >= 0
-          ? std::optional<int64_t>(db_.semantic_universe_for_file_id(file_id))
+          ? std::optional<int64_t>(
+                ports_.workspace.semantic_universe_for_file_id(file_id))
           : std::nullopt;
   lookup_cache_.clear();
 }
@@ -49,9 +51,10 @@ void StorageEdgeSink::set_identity_translation_unit_config_id(
     int64_t config_id, int64_t translation_unit_file_id) {
   identity_translation_unit_ =
       translation_unit_file_id >= 0
-          ? db_.portable_translation_unit_identity_for_config(
+          ? ports_.workspace.portable_translation_unit_identity_for_config(
                 config_id, translation_unit_file_id)
-          : db_.portable_translation_unit_identity_for_config(config_id);
+          : ports_.workspace.portable_translation_unit_identity_for_config(
+                config_id);
   lookup_cache_.clear();
 }
 
@@ -59,18 +62,31 @@ void StorageEdgeSink::set_identity_translation_unit_file_id(int64_t file_id) {
   identity_translation_unit_ =
       file_id >= 0
           ? std::optional<std::string>(
-                db_.portable_translation_unit_identity_for_file(file_id))
+                ports_.workspace.portable_translation_unit_identity_for_file(
+                    file_id))
           : std::nullopt;
   lookup_cache_.clear();
 }
 
 int64_t StorageEdgeSink::mint_symbol(const MintRequest &req) {
-  const int64_t id = db_.mint_symbol_id(
-      req.usr, req.spelling, req.qual_name, req.display_name, req.kind_name,
-      req.decl_file_id, req.decl_line, req.decl_col, req.decl_path,
-      req.is_instantiation, req.is_named_instance, req.type_info,
-      current_universe_id_, req.identity_source, req.linkage,
-      identity_translation_unit_);
+  cidx::SymbolIdentityRecord identity{
+      .usr = req.usr,
+      .spelling = req.spelling,
+      .qual_name = req.qual_name,
+      .display_name = req.display_name,
+      .kind = req.kind_name,
+      .decl_file_id = req.decl_file_id,
+      .decl_line = req.decl_line,
+      .decl_col = req.decl_col,
+      .decl_path = req.decl_path,
+      .is_instantiation = req.is_instantiation,
+      .is_named_instance = req.is_named_instance,
+      .type_info = req.type_info,
+      .semantic_universe_id = current_universe_id_,
+      .identity_source = req.identity_source,
+      .linkage = req.linkage,
+      .identity_translation_unit = identity_translation_unit_};
+  const int64_t id = ports_.symbols_write.mint_symbol_id(identity);
   lookup_cache_.clear();
   return id;
 }
@@ -87,7 +103,7 @@ int64_t StorageEdgeSink::add_edge(const EdgeRecord &edge) {
   if (edge.is_virtual) {
     e.is_virtual = edge.is_virtual;
   }
-  const int64_t id = db_.add_edge(e);
+  const int64_t id = ports_.facts_write.add_edge(e);
   if (std::ranges::find(edge_ids_, id) == edge_ids_.end()) {
     edge_ids_.push_back(id);
   }
@@ -106,7 +122,7 @@ int64_t StorageEdgeSink::ensure_edge(const EdgeRecord &edge) {
   if (edge.is_virtual) {
     e.is_virtual = edge.is_virtual;
   }
-  const int64_t id = db_.ensure_edge(e);
+  const int64_t id = ports_.facts_write.ensure_edge(e);
   if (std::ranges::find(edge_ids_, id) == edge_ids_.end()) {
     edge_ids_.push_back(id);
   }
@@ -125,7 +141,7 @@ void StorageEdgeSink::add_edge_site(const EdgeSiteRecord &site) {
   s.recv_decl_usr = site.recv_decl_usr;
   s.recv_param_pos = site.recv_param_pos;
   s.recv_type_is_value = site.recv_type_is_value;
-  db_.add_edge_site(s);
+  ports_.facts_write.add_edge_site(s);
 }
 
 void StorageEdgeSink::add_call_arg(const CallArgRecord &arg) {
@@ -140,23 +156,23 @@ void StorageEdgeSink::add_call_arg(const CallArgRecord &arg) {
   a.decl_usr = arg.decl_usr;
   a.callee_usr = arg.callee_usr;
   a.type_is_value = arg.type_is_value;
-  db_.add_call_arg(a);
+  ports_.facts_write.add_call_arg(a);
 }
 
 void StorageEdgeSink::delete_edges_for_file(int64_t file_id) {
-  db_.delete_edges_for_file(file_id);
+  ports_.definitions_write.delete_edges_for_file(file_id);
 }
 
 void StorageEdgeSink::delete_definitions_for_file(int64_t file_id) {
-  db_.delete_definitions_for_file(file_id);
+  ports_.definitions_write.delete_definitions_for_file(file_id);
 }
 
 int64_t StorageEdgeSink::get_or_create_definition(
     int64_t symbol_id, int64_t file_id, int64_t line, int64_t col,
     int64_t end_line, int64_t end_col,
     const std::optional<std::string> &init_text) {
-  const int64_t id = db_.get_or_create_definition(symbol_id, file_id, line, col,
-                                                  end_line, end_col, init_text);
+  const int64_t id = ports_.definitions_write.get_or_create_definition(
+      symbol_id, file_id, line, col, end_line, end_col, init_text);
   if (std::ranges::find(definition_ids_, id) == definition_ids_.end()) {
     definition_ids_.push_back(id);
   }
@@ -165,16 +181,17 @@ int64_t StorageEdgeSink::get_or_create_definition(
 
 void StorageEdgeSink::add_def_edge(int64_t def_id, int64_t dst_id,
                                    int64_t kind) {
-  db_.add_def_edge(def_id, dst_id, kind);
+  ports_.definitions_write.add_def_edge(def_id, dst_id, kind);
 }
 
 void StorageEdgeSink::copy_body_edges_to_def_edge(int64_t def_id,
                                                   int64_t src_id) {
-  db_.copy_body_edges_to_def_edge(def_id, src_id);
+  ports_.definitions_write.copy_body_edges_to_def_edge(def_id, src_id);
 }
 
 std::optional<std::string> StorageEdgeSink::lookup_display_name(int64_t id) {
-  const std::optional<cidx::Symbol> sym = db_.lookup_symbol_by_id(id);
+  const std::optional<cidx::Symbol> sym =
+      ports_.symbols_read.lookup_symbol_by_id(id);
   if (!sym) {
     return std::nullopt;
   }
@@ -183,22 +200,25 @@ std::optional<std::string> StorageEdgeSink::lookup_display_name(int64_t id) {
 
 void StorageEdgeSink::update_display_name(int64_t id,
                                           const std::string &display) {
-  const std::optional<cidx::Symbol> sym = db_.lookup_symbol_by_id(id);
+  const std::optional<cidx::Symbol> sym =
+      ports_.symbols_read.lookup_symbol_by_id(id);
   if (!sym) {
     return;
   }
-  db_.update_symbol_by_id(id, {{"display_name", display}});
+  ports_.symbols_write.update_symbol_by_id(id, {{"display_name", display}});
 }
 
 std::vector<int64_t>
 StorageEdgeSink::symbol_ids_by_qual_name_kind(const std::string &qual_name,
                                               const std::string &kind_name) {
   std::vector<int64_t> out;
-  for (const cidx::Symbol &sym : db_.lookup_symbols_by_qual_name(
+  for (const cidx::Symbol &sym :
+       ports_.symbols_read.lookup_symbols_by_qual_name(
            qual_name, kind_name,
            current_file_id_ >= 0
                ? std::optional<int64_t>(
-                     db_.semantic_universe_for_file_id(current_file_id_))
+                     ports_.workspace.semantic_universe_for_file_id(
+                         current_file_id_))
                : std::nullopt)) {
     out.push_back(sym.id);
   }
@@ -215,7 +235,7 @@ void StorageEdgeSink::add_template_param(const TemplateParamRecord &param) {
   p.type_id = param.type_id;
   p.default_type_id = param.default_type_id;
   p.default_ref_id = param.default_ref_id;
-  db_.add_template_param(p);
+  ports_.facts_write.add_template_param(p);
 }
 
 void StorageEdgeSink::add_template_arg(const TemplateArgRecord &arg) {
@@ -227,7 +247,7 @@ void StorageEdgeSink::add_template_arg(const TemplateArgRecord &arg) {
   a.ref_id = arg.ref_id;
   a.literal = arg.literal;
   a.type_id = arg.type_id;
-  db_.add_template_arg(a);
+  ports_.facts_write.add_template_arg(a);
 }
 
 int64_t StorageEdgeSink::intern_type_node(const TypeNodeRecord &node) {
@@ -240,12 +260,12 @@ int64_t StorageEdgeSink::intern_type_node(const TypeNodeRecord &node) {
   n.is_restrict = node.is_restrict;
   n.decl_usr = node.decl_usr;
   n.canonical_id = node.canonical_id;
-  return db_.intern_type_node(n);
+  return ports_.types_write.intern_type_node(n);
 }
 
 void StorageEdgeSink::add_type_edge(int64_t src_id, int64_t kind,
                                     int64_t position, int64_t dst_id) {
-  db_.add_type_edge(src_id, kind, position, dst_id);
+  ports_.types_write.add_type_edge(src_id, kind, position, dst_id);
 }
 
 void StorageEdgeSink::replace_parameters(
@@ -269,17 +289,17 @@ void StorageEdgeSink::replace_parameters(
     row.col = p.col;
     rows.push_back(std::move(row));
   }
-  db_.replace_parameters(owner_id, rows);
+  ports_.types_write.replace_parameters(owner_id, rows);
 }
 
 void StorageEdgeSink::add_symbol_type(int64_t symbol_id, int64_t kind,
                                       int64_t type_id) {
-  db_.add_symbol_type(symbol_id, kind, type_id);
+  ports_.types_write.add_symbol_type(symbol_id, kind, type_id);
 }
 
 std::optional<int64_t>
 StorageEdgeSink::file_id_for_path(const std::string &path) {
-  const auto row = db_.get_file(path);
+  const auto row = ports_.source.get_file(path);
   if (!row) {
     return std::nullopt;
   }
@@ -289,8 +309,8 @@ StorageEdgeSink::file_id_for_path(const std::string &path) {
 std::vector<TypeArgCandidate>
 StorageEdgeSink::type_arg_candidates(const std::string &name, bool qualified) {
   const std::vector<cidx::Symbol> hits =
-      qualified ? db_.lookup_symbols_by_qual_name(name)
-                : db_.lookup_symbols_by_name(name);
+      qualified ? ports_.symbols_read.lookup_symbols_by_qual_name(name)
+                : ports_.symbols_read.lookup_symbols_by_name(name);
   std::vector<TypeArgCandidate> out;
   out.reserve(hits.size());
   for (const cidx::Symbol &sym : hits) {

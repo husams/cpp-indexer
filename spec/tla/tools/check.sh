@@ -40,8 +40,15 @@ JAVA_MAJOR="$(printf '%s\n' "$JAVA_VERSION_OUTPUT" | sed -n 's/.*version "\([0-9
 JAR="${TLA_TOOLS_JAR:-${TMPDIR:-/tmp}/tla2tools-${TOOLS_VERSION}.jar}"
 if [[ ! -f "$JAR" ]]; then
   command -v curl >/dev/null 2>&1 || die "curl-not-found-and-tool-jar-is-missing"
-  curl --fail --location --silent --show-error "$TOOLS_URL" --output "$JAR" \
-    || die "download-failed"
+  download="$JAR.download.$$"
+  rm -f "$download"
+  if ! curl --fail --location --silent --show-error \
+      --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20 \
+      "$TOOLS_URL" --output "$download"; then
+    rm -f "$download"
+    die "download-failed"
+  fi
+  mv "$download" "$JAR"
 fi
 [[ "$(checksum "$JAR")" == "$TOOLS_SHA256" ]] || die "tla2tools-sha256-mismatch"
 

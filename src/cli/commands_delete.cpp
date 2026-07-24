@@ -58,8 +58,7 @@ int cmd_delete_dir(const ParsedArgs &args, Context &ctx) {
         comp ? std::optional<int64_t>(comp->id) : std::nullopt;
     for (const std::pair<Directory, std::string> &pr :
          db.list_directories(scope)) {
-      const std::optional<std::string> ap =
-          db.directory_abs_path(pr.first.id);
+      const std::optional<std::string> ap = db.directory_abs_path(pr.first.id);
       if (ap && *ap == target) {
         matches.push_back(pr.first);
       }
@@ -98,7 +97,8 @@ int cmd_delete_file(const ParsedArgs &args, Context &ctx) {
   } else if (args.del_path) {
     const std::string ap = files::resolve_file_arg(
         *args.del_path,
-        comp ? std::optional<std::string>(db.component_abs_base(*comp)) : std::nullopt);
+        comp ? std::optional<std::string>(db.component_abs_base(*comp))
+             : std::nullopt);
     if (std::optional<File> rec = db.get_file(ap)) {
       if (under_component(db, ap, comp)) {
         matches.emplace_back(rec->id, ap);
@@ -181,20 +181,9 @@ int cmd_resolve(const ParsedArgs &args, Context &ctx) {
   Storage db(ctx.index_path);
   const int stubs = db.resolve_pass();
   const std::vector<Edge> cross = db.cross_repo_edges();
-  // ISO 8601 UTC timestamp matching Python's
-  // datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ").
-  {
-    std::time_t now = std::time(nullptr);
-    char buf[32];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&now));
-    auto st = db.raw_db().prepare(
-        "INSERT OR REPLACE INTO meta (key, value) "
-        "VALUES ('graph_resolved_at', ?)");
-    st.bind(1, std::string_view(buf));
-    st.step_done();
-  }
-  *ctx.out << "resolve: " << stubs << " still-stub, "
-           << cross.size() << " cross-repo edge(s)\n";
+  db.stamp_graph_resolved();
+  *ctx.out << "resolve: " << stubs << " still-stub, " << cross.size()
+           << " cross-repo edge(s)\n";
   return 0;
 }
 

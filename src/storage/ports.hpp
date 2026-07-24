@@ -31,6 +31,13 @@ public:
   virtual std::vector<Component>
   list_components(const std::optional<std::string> &name = std::nullopt,
                   const std::optional<std::string> &kind = std::nullopt) = 0;
+  virtual std::optional<std::string> get_alias(const std::string &name) = 0;
+  virtual std::string portable_translation_unit_identity_for_config(
+      int64_t config_id,
+      std::optional<int64_t> translation_unit_file_id = std::nullopt) = 0;
+  virtual std::string
+  portable_translation_unit_identity_for_file(int64_t file_id) = 0;
+  virtual int64_t semantic_universe_for_file_id(int64_t file_id) = 0;
   virtual std::optional<Repository> get_repository_by_id(int64_t id) = 0;
   virtual std::optional<Repository>
   get_repository_by_name(const std::string &name) = 0;
@@ -72,6 +79,10 @@ public:
                   const std::optional<std::string> &md5 = std::nullopt) = 0;
   virtual std::vector<Diagnostic> get_diagnostics(int64_t file_id) = 0;
   virtual std::map<int64_t, std::map<int, int64_t>> diagnostic_counts() = 0;
+  virtual std::vector<FileConfigApplicability>
+  file_configs_for(int64_t file_id) = 0;
+  virtual std::optional<TranslationUnitConfig>
+  translation_unit_config_by_id(int64_t config_id) = 0;
 };
 
 class SourceStoreWritePort {
@@ -109,7 +120,10 @@ public:
 
   virtual std::optional<Symbol> lookup_symbol(
       const std::string &usr,
-      const std::optional<int64_t> &semantic_universe_id = std::nullopt) = 0;
+      const std::optional<int64_t> &semantic_universe_id = std::nullopt,
+      const std::optional<std::string> &identity_source = std::nullopt,
+      const std::optional<std::string> &identity_translation_unit =
+          std::nullopt) = 0;
   virtual std::optional<Symbol> lookup_symbol_by_id(int64_t id) = 0;
   virtual std::vector<Symbol> lookup_symbols_by_usr(
       const std::string &usr,
@@ -255,6 +269,20 @@ class UnitOfWorkFactory {
 public:
   virtual ~UnitOfWorkFactory() = default;
   virtual std::unique_ptr<UnitOfWork> begin() = 0;
+};
+
+// Capability bundle used by the AST extraction layer. It contains only the
+// ports needed to publish one translation unit; the extractor never receives
+// the Storage compatibility façade or a raw SQLite connection.
+struct AstStoragePorts {
+  WorkspaceCatalogReadPort &workspace;
+  SourceStoreReadPort &source;
+  SymbolReadPort &symbols_read;
+  SymbolWritePort &symbols_write;
+  TypeWritePort &types_write;
+  FactWritePort &facts_write;
+  DefinitionWritePort &definitions_write;
+  UnitOfWorkFactory &unit_of_work;
 };
 
 } // namespace cidx::storage

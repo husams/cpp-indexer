@@ -31,6 +31,13 @@ public:
   std::vector<Component> list_components(
       const std::optional<std::string> &name = std::nullopt,
       const std::optional<std::string> &kind = std::nullopt) override;
+  std::optional<std::string> get_alias(const std::string &name) override;
+  std::string portable_translation_unit_identity_for_config(
+      int64_t config_id,
+      std::optional<int64_t> translation_unit_file_id = std::nullopt) override;
+  std::string
+  portable_translation_unit_identity_for_file(int64_t file_id) override;
+  int64_t semantic_universe_for_file_id(int64_t file_id) override;
   std::optional<Repository> get_repository_by_id(int64_t id) override;
   std::optional<Repository>
   get_repository_by_name(const std::string &name) override;
@@ -70,6 +77,10 @@ public:
       const std::optional<std::string> &md5 = std::nullopt) override;
   std::vector<Diagnostic> get_diagnostics(int64_t file_id) override;
   std::map<int64_t, std::map<int, int64_t>> diagnostic_counts() override;
+  std::vector<FileConfigApplicability>
+  file_configs_for(int64_t file_id) override;
+  std::optional<TranslationUnitConfig>
+  translation_unit_config_by_id(int64_t config_id) override;
 
   int64_t
   add_file(int64_t directory_id, const std::string &name,
@@ -102,10 +113,12 @@ class SqliteSymbolStoreAdapter final : public SymbolReadPort,
 public:
   explicit SqliteSymbolStoreAdapter(Storage &db);
 
-  std::optional<Symbol>
-  lookup_symbol(const std::string &usr,
-                const std::optional<int64_t> &semantic_universe_id =
-                    std::nullopt) override;
+  std::optional<Symbol> lookup_symbol(
+      const std::string &usr,
+      const std::optional<int64_t> &semantic_universe_id = std::nullopt,
+      const std::optional<std::string> &identity_source = std::nullopt,
+      const std::optional<std::string> &identity_translation_unit =
+          std::nullopt) override;
   std::optional<Symbol> lookup_symbol_by_id(int64_t id) override;
   std::vector<Symbol>
   lookup_symbols_by_usr(const std::string &usr,

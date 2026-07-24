@@ -6,6 +6,7 @@
 #include <array>
 #include <cctype>
 #include <cstring>
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <map>
@@ -303,6 +304,17 @@ bool Storage::graph_resolved() {
   }
   const std::string val = st.col_text(0);
   return !val.empty();
+}
+
+void Storage::stamp_graph_resolved() {
+  const std::time_t now = std::time(nullptr);
+  std::array<char, 32> buffer{};
+  std::strftime(buffer.data(), buffer.size(), "%Y-%m-%dT%H:%M:%SZ",
+                std::gmtime(&now));
+  auto statement = db_.prepare("INSERT OR REPLACE INTO meta (key, value) "
+                               "VALUES ('graph_resolved_at', ?)");
+  statement.bind(1, std::string_view(buffer.data()));
+  statement.step_done();
 }
 
 // A3 — fetch one symbol by USR (query.py:666-668)

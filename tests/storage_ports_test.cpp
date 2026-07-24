@@ -5,6 +5,7 @@
 #include "storage/sqlite_adapters.hpp"
 #include "storage/storage.hpp"
 
+#include <stdexcept>
 #include <type_traits>
 
 using namespace cidx;
@@ -128,4 +129,20 @@ TEST_CASE("unit of work port commits and rolls back as a boundary") {
     unit->commit();
   }
   CHECK(catalog.get_component("/tmp/committed").has_value());
+}
+
+TEST_CASE("unit of work rolls back a failed one-TU publication") {
+  Storage db(":memory:");
+  SqliteWorkspaceCatalogAdapter catalog(db);
+  SqliteUnitOfWorkFactory units(db);
+
+  try {
+    auto unit = units.begin();
+    catalog.add_component(
+        ComponentWriteRecord{"failed-tu", "/tmp/failed-tu", "repo", {}});
+    throw std::runtime_error("injected publication failure");
+  } catch (const std::runtime_error &) {
+  }
+
+  CHECK_FALSE(catalog.get_component("/tmp/failed-tu").has_value());
 }

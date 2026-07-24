@@ -18,7 +18,7 @@ by both indexing engines, and the resolve pass. ~5.5k LOC.
 
 ### `Storage` (`storage.hpp:61`)
 
-Owns the connection and creates/migrates the DB to `schema_version = 38`. It is
+Owns the connection and creates/migrates the DB to `schema_version = 39`. It is
 the write surface both engines use, plus the read surface for lookups. Key
 groups:
 
@@ -39,8 +39,11 @@ groups:
 
 ### `Transaction` (`storage.hpp:45`)
 
-RAII commit/rollback. Indexing wraps each file's writes in one; an explicit
-`commit()` surfaces COMMIT failures instead of swallowing them.
+RAII commit/rollback. The LibTooling translation-unit pipeline obtains a
+`UnitOfWork` from the focused port factory and wraps symbol, edge, definition,
+include, and header publication in one transaction. An explicit `commit()`
+surfaces COMMIT failures instead of swallowing them; destruction after an
+injected adapter/transform failure rolls the whole TU back.
 
 ### `sqlite.hpp`
 
@@ -67,6 +70,33 @@ contracts to the existing `Storage` implementation while the compatibility
 facade remains available during the incremental migration. `Storage` exposes
 one owned adapter set through typed port accessors, so callers can select the
 smallest capability without taking a dependency on the monolithic facade.
+
+The current production migrations are the AST symbol/edge sinks, the
+translation-unit unit-of-work boundary, workspace/configuration resolution,
+and QueryPlan file-path reads. QueryPlan's remaining parameterized SQL is kept
+inside the query adapter boundary; `raw_db()` is not an indexing or workspace
+dependency. A repository-wide guard treats raw connection use outside
+`src/storage`, `src/query`, and the graph/query adapter boundary as a failure.
+
+Compatibility-facade removal plan:
+
+1. HSE-62: migrate AST extraction, workspace/configuration, and QueryPlan
+   consumers to focused ports; retain facade methods only as delegating shims.
+2. HSE-63/HSE-67: migrate remaining CLI and graph read surfaces and add fake
+   port contract tests.
+3. HSE-68: remove the unused facade methods and make adapter construction an
+   application-composition concern after downstream callers are port-only.
+
+The plan is intentionally tracked with the HSE work rather than deleting the
+facade in this slice; no new platform consumer may add a dependency on it.
+
+Acceptance evidence for this slice is produced by `storage_ports_test` (full
+identity/declaration payloads, read/write separation, commit/rollback, and
+injected one-TU failure), the v33→v34 and v34 compatibility migration tests,
+`cidx db verify`,
+and the storage M1 qualification runner. The committed benchmark baselines
+remain the regression reference for indexing, resolving, and QueryPlan
+latency, statement/transaction counts, and index-size tradeoffs.
 
 ## The schema
 
@@ -95,7 +125,7 @@ products:
 (`resolved = 0 AND file_id IS NULL AND decl_file_id IS NULL`) and returns that
  count for the `resolve: N still-stub …` line.
 
-## Manifest-governed sidecars (schema v38)
+## Manifest-governed sidecars (schema v39)
 
 `index.db` remains the authoritative identity store. Immutable or rebuildable
 artifacts such as AST graphs, extension facts, proof caches, and accelerators

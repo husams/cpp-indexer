@@ -15,6 +15,7 @@
 #include "cli/json_out.hpp"
 #include "query/plan.hpp"
 #include "query/result_protocol.hpp"
+#include "storage/ports.hpp"
 #include "storage/storage.hpp"
 
 namespace cidx::query {
@@ -51,7 +52,7 @@ struct Result {
 
 class Executor {
 public:
-  explicit Executor(Storage &db) : db_(db) {}
+  explicit Executor(Storage &db) : db_(db), source_read_(db.source_read()) {}
 
   // Validate + normalize + run. Throws PlanError on an invalid plan.
   Result run(const Plan &plan);
@@ -63,6 +64,7 @@ public:
 
 private:
   Storage &db_;
+  storage::SourceStoreReadPort &source_read_;
 };
 
 } // namespace cidx::query

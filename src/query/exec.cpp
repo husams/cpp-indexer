@@ -425,7 +425,8 @@ receiver_aware_callees(graph::GraphQuery &graph, const graph::Sym &callee,
 
 class Exec {
 public:
-  explicit Exec(Storage &db) : db_(db) {}
+  Exec(Storage &db, storage::SourceStoreReadPort &source_read)
+      : db_(db), source_read_(source_read) {}
 
   Stream run_plan(const Plan &plan) {
     Stream st;
@@ -492,6 +493,7 @@ public:
 
 private:
   Storage &db_;
+  storage::SourceStoreReadPort &source_read_;
   std::map<int64_t, std::optional<std::string>> file_paths_;
 
   bool ambiguous_ungrouped_file(int64_t file_id) {
@@ -1378,7 +1380,8 @@ private:
   std::optional<std::string> file_path(int64_t file_id) {
     auto it = file_paths_.find(file_id);
     if (it == file_paths_.end()) {
-      it = file_paths_.emplace(file_id, db_.file_abs_path(file_id)).first;
+      it = file_paths_.emplace(file_id, source_read_.file_abs_path(file_id))
+               .first;
     }
     return it->second;
   }
@@ -2160,7 +2163,7 @@ protocol::ResultEnvelope Result::to_envelope() const {
 
 Result Executor::run(const Plan &plan) {
   const Plan normalized = validate(plan);
-  Exec exec(db_);
+  Exec exec(db_, source_read_);
   Stream st = exec.run_plan(normalized);
   Result res = exec.finish(std::move(st));
   res.index = db_.index_identity();

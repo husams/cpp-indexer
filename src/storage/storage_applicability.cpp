@@ -61,7 +61,6 @@ void Storage::associate_facts_for_file(
     int64_t file_id, int64_t config_id, const std::vector<int64_t> &symbol_ids,
     const std::vector<int64_t> &edge_ids,
     const std::vector<int64_t> &definition_ids) {
-  auto txn = transaction();
   auto next = db_.prepare(
       "SELECT COALESCE(MAX(generation), 0) + 1 FROM fact_applicability "
       "WHERE file_id = ? AND config_id = ?");
@@ -188,7 +187,6 @@ void Storage::associate_facts_for_file(
         "JOIN fact_applicability fa ON fa.fact_kind = 'definition' AND "
         "fa.fact_id = pc.src_def_id AND fa.file_id = ? AND fa.config_id = ?");
   }
-  txn.commit();
 }
 
 ConfiguredSymbols
