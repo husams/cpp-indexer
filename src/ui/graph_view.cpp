@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <map>
 #include <set>
 #include <string_view>
@@ -22,7 +23,6 @@ using json_out::Object;
 using json_out::Value;
 
 constexpr int kGraphViewVersion = 1;
-constexpr int kMaxSiteFetch = 200;
 
 Value optional_string(const std::optional<std::string> &value) {
   return value ? Value::of(*value) : Value::null();
@@ -58,18 +58,113 @@ std::string location(const graph::Sym &sym,
   return out;
 }
 
+struct PortableReference {
+  std::string semantic_universe;
+  std::string identity_key;
+  std::string usr;
+};
+
+std::string length_field(std::string_view value) {
+  return std::to_string(value.size()) + ":" + std::string(value);
+}
+
+std::string hex_field(std::string_view value) {
+  constexpr std::string_view hex = "0123456789abcdef";
+  std::string encoded;
+  encoded.reserve(value.size() * 2);
+  for (const unsigned char byte : value) {
+    encoded.push_back(hex[byte >> 4]);
+    encoded.push_back(hex[byte & 0x0f]);
+  }
+  return length_field(encoded);
+}
+
 // The semantic universe plus identity key is portable across database
-// rebuilds. The local row id remains an internal join key only.
+// rebuilds. Length-prefixed fields make the wire form reversible even when
+// either value contains the delimiters used elsewhere in an identity key.
 std::string portable_id(const graph::Sym &sym) {
-  const std::string &external =
-      sym.identity_key.empty() ? sym.usr : sym.identity_key;
-  return "symbol:" + sym.semantic_universe + ":" + external;
+  return "symbol:v1:" + hex_field(sym.semantic_universe) +
+         hex_field(sym.identity_key) + hex_field(sym.usr);
 }
 
 std::string portable_edge_id(const graph::Sym &source, const graph::Edge &edge,
                              const graph::Sym &target) {
-  return "edge:" + portable_id(source) + ":" + edge.kind + ":" +
-         portable_id(target);
+  return "edge:v1:" + length_field(portable_id(source)) +
+         length_field(edge.kind) + length_field(portable_id(target));
+}
+
+std::optional<std::string_view> length_value(std::string_view encoded,
+                                             std::size_t &offset) {
+  const std::size_t separator = encoded.find(':', offset);
+  if (separator == std::string_view::npos || separator == offset) {
+    return std::nullopt;
+  }
+  std::size_t length = 0;
+  const auto *begin = encoded.data() + offset;
+  const auto *end = encoded.data() + separator;
+  const auto parsed = std::from_chars(begin, end, length);
+  if (parsed.ec != std::errc{} || parsed.ptr != end) {
+    return std::nullopt;
+  }
+  const std::size_t value_start = separator + 1;
+  if (length > encoded.size() - value_start) {
+    return std::nullopt;
+  }
+  offset = value_start + length;
+  return encoded.substr(value_start, length);
+}
+
+std::optional<std::string> decode_hex(std::string_view encoded) {
+  if (encoded.size() % 2 != 0) {
+    return std::nullopt;
+  }
+  std::string decoded;
+  decoded.reserve(encoded.size() / 2);
+  for (std::size_t i = 0; i < encoded.size(); i += 2) {
+    const auto digit = [](char value) -> std::optional<unsigned char> {
+      if (value >= '0' && value <= '9') {
+        return static_cast<unsigned char>(value - '0');
+      }
+      if (value >= 'a' && value <= 'f') {
+        return static_cast<unsigned char>(value - 'a' + 10);
+      }
+      if (value >= 'A' && value <= 'F') {
+        return static_cast<unsigned char>(value - 'A' + 10);
+      }
+      return std::nullopt;
+    };
+    const auto high = digit(encoded[i]);
+    const auto low = digit(encoded[i + 1]);
+    if (!high || !low) {
+      return std::nullopt;
+    }
+    decoded.push_back(static_cast<char>((*high << 4) | *low));
+  }
+  return decoded;
+}
+
+std::optional<PortableReference> parse_portable_id(std::string_view value) {
+  constexpr std::string_view prefix = "symbol:v1:";
+  if (!value.starts_with(prefix)) {
+    return std::nullopt;
+  }
+  std::size_t offset = prefix.size();
+  const auto universe_encoded = length_value(value, offset);
+  const auto identity_key_encoded = length_value(value, offset);
+  const auto usr_encoded = length_value(value, offset);
+  if (!universe_encoded || !identity_key_encoded || !usr_encoded ||
+      offset != value.size()) {
+    return std::nullopt;
+  }
+  const auto universe = decode_hex(*universe_encoded);
+  const auto identity_key = decode_hex(*identity_key_encoded);
+  const auto usr = decode_hex(*usr_encoded);
+  if (!universe || !identity_key || !usr) {
+    return std::nullopt;
+  }
+  return PortableReference{.semantic_universe = *universe,
+                           .identity_key = *identity_key,
+                           .usr = *usr};
 }
 
 std::string symbol_color(const graph::Sym &sym) {
@@ -198,6 +293,34 @@ struct RootResolution {
   std::vector<graph::Sym> candidates;
 };
 
+query::Query portable_lookup_plan(const PortableReference &reference) {
+  std::vector<query::Pred> predicates{
+      query::eq("semantic_universe", reference.semantic_universe)};
+  if (!reference.identity_key.empty()) {
+    predicates.push_back(query::eq("identity_key", reference.identity_key));
+  } else {
+    predicates.push_back(query::eq("usr", reference.usr));
+  }
+  return query::start(query::codebase()) |
+         query::nodes(query::all_of(std::move(predicates))) | query::limit(2);
+}
+
+std::vector<graph::Sym> portable_matches(Storage &db, graph::GraphQuery &graph,
+                                         const PortableReference &reference) {
+  const query::Result result =
+      query::Executor(db).run(portable_lookup_plan(reference).plan());
+  std::vector<graph::Sym> matches;
+  for (const auto &row : result.rows) {
+    if (row.empty() || !std::holds_alternative<int64_t>(row.front())) {
+      continue;
+    }
+    if (const auto symbol = graph.get_by_id(std::get<int64_t>(row.front()))) {
+      matches.push_back(*symbol);
+    }
+  }
+  return matches;
+}
+
 RootResolution resolve_root(graph::GraphQuery &graph, Storage &db,
                             const std::optional<std::string> &root) {
   RootResolution result;
@@ -212,6 +335,19 @@ RootResolution resolve_root(graph::GraphQuery &graph, Storage &db,
       result.symbol = std::nullopt;
     }
     result.status = result.symbol ? "exact_local_id" : "unknown";
+    return result;
+  }
+
+  if (const auto reference = parse_portable_id(*root)) {
+    result.candidates = portable_matches(db, graph, *reference);
+    if (result.candidates.size() == 1) {
+      result.symbol = result.candidates.front();
+      result.status = "exact_portable";
+    } else if (result.candidates.size() > 1) {
+      result.status = "ambiguous";
+    } else {
+      result.status = "unknown";
+    }
     return result;
   }
 
@@ -463,7 +599,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
       if (source == symbols_by_id.end() || target == symbols_by_id.end()) {
         continue;
       }
-      const int fetch_limit = std::clamp(sites_remaining + 1, 1, kMaxSiteFetch);
+      const int fetch_limit = sites_remaining + 1;
       auto sites = graph.sites(edge.edge_id, fetch_limit);
       std::ranges::sort(sites, [&](const graph::Site &a, const graph::Site &b) {
         return site_sort_key(a, request.workspace) <
@@ -529,26 +665,9 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   out.emplace_back("view_state", Value::obj({}));
   Value result = Value::obj(std::move(out));
 
-  bool byte_truncated = false;
-  while (json_out::dumps_indent2(result).size() >
-             static_cast<std::size_t>(byte_budget) &&
-         (member(result, "edges") != nullptr &&
-          !member(result, "edges")->a.empty())) {
-    member(result, "edges")->a.pop_back();
-    byte_truncated = true;
-  }
-  while (json_out::dumps_indent2(result).size() >
-             static_cast<std::size_t>(byte_budget) &&
-         (member(result, "nodes") != nullptr &&
-          !member(result, "nodes")->a.empty())) {
-    member(result, "nodes")->a.pop_back();
-    byte_truncated = true;
-  }
-  if (byte_truncated) {
-    set_bool_member(result, "truncated", true);
+  const auto mark_byte_truncated = [&] {
     if (Value *metadata_value = member(result, "metadata")) {
       set_bool_member(*metadata_value, "truncated", true);
-      set_bool_member(*metadata_value, "evidence_truncated", true);
       if (Value *continuation = member(*metadata_value, "continuation")) {
         set_bool_member(*continuation, "available", true);
         for (auto &[name, value] : continuation->o) {
@@ -558,6 +677,27 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
         }
       }
     }
+  };
+  if (json_out::dumps_indent2(result).size() >
+      static_cast<std::size_t>(byte_budget)) {
+    mark_byte_truncated();
+    while (json_out::dumps_indent2(result).size() >
+               static_cast<std::size_t>(byte_budget) &&
+           (member(result, "edges") != nullptr &&
+            !member(result, "edges")->a.empty())) {
+      member(result, "edges")->a.pop_back();
+    }
+    while (json_out::dumps_indent2(result).size() >
+               static_cast<std::size_t>(byte_budget) &&
+           (member(result, "nodes") != nullptr &&
+            !member(result, "nodes")->a.empty())) {
+      member(result, "nodes")->a.pop_back();
+    }
+  }
+  if (json_out::dumps_indent2(result).size() >
+      static_cast<std::size_t>(byte_budget)) {
+    throw CidxError(
+        "cidx ui: byte budget is too small for fixed GraphView metadata");
   }
   return result;
 }

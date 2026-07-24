@@ -9,6 +9,7 @@
 #include "storage/storage.hpp"
 #include "ui/assets.hpp"
 #include "ui/graph_view.hpp"
+#include "util/errors.hpp"
 
 using cidx::Storage;
 
@@ -23,6 +24,19 @@ cidx::Symbol symbol(const char *usr, const char *name) {
   result.is_definition = true;
   result.resolved = true;
   return result;
+}
+
+std::string first_node_id(const std::string &json) {
+  const std::string marker = "\"nodes\": [\n    {\n      \"id\": \"";
+  const std::size_t start = json.find(marker);
+  if (start == std::string::npos) {
+    return {};
+  }
+  const std::size_t value_start = start + marker.size();
+  const std::size_t value_end = json.find('"', value_start);
+  return value_end == std::string::npos
+             ? std::string{}
+             : json.substr(value_start, value_end - value_start);
 }
 
 } // namespace
@@ -70,12 +84,29 @@ TEST_CASE("GraphView is bounded, portable, and carries evidence") {
   CHECK(json.find("\"line\": 12") != std::string::npos);
   CHECK(json.find("\"truncated\": false") != std::string::npos);
 
+  const std::string emitted_id = first_node_id(json);
+  CHECK(emitted_id.starts_with("symbol:v1:"));
+
   request.root.reset();
   request.query = "ns::a";
   const std::string query_json =
       cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
   CHECK(query_json.find("\"query_plan\": \"{\\n") != std::string::npos);
   CHECK(query_json.find("USR::b") != std::string::npos);
+
+  request.query = emitted_id;
+  const std::string roundtrip_json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(roundtrip_json.find("\"status\": \"exact_portable\"") !=
+        std::string::npos);
+  CHECK(roundtrip_json.find("USR::b") != std::string::npos);
+
+  request.query = "ns::a";
+  request.edge_kinds = std::vector<std::string>{"calls"};
+  request.byte_budget = 16384;
+  const std::string bounded_json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(bounded_json.size() <= 16384);
 }
 
 TEST_CASE("GraphView reports ambiguous roots instead of choosing one") {
@@ -92,7 +123,7 @@ TEST_CASE("GraphView reports ambiguous roots instead of choosing one") {
   CHECK(json.find("USR::two") != std::string::npos);
 }
 
-TEST_CASE("GraphView bounds evidence sites") {
+TEST_CASE("GraphView reports evidence beyond the site budget") {
   Storage db(":memory:");
   const int64_t component = db.add_component("test", "/tmp/cidx-ui-sites");
   const int64_t directory = db.add_directory(component, "");
@@ -108,7 +139,7 @@ TEST_CASE("GraphView bounds evidence sites") {
   edge.dst_id = target_id;
   edge.kind = cidx::graph::edge_kinds_map().at("calls");
   const int64_t edge_id = db.add_edge(edge);
-  for (int line = 1; line <= 3; ++line) {
+  for (int line = 1; line <= 201; ++line) {
     cidx::EdgeSite site;
     site.edge_id = edge_id;
     site.file_id = file;
@@ -120,11 +151,19 @@ TEST_CASE("GraphView bounds evidence sites") {
   request.root = "ns::source";
   request.edge_kinds = std::vector<std::string>{"calls"};
   request.depth = 1;
-  request.site_budget = 1;
+  request.site_budget = 200;
   const std::string json =
       cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
-  CHECK(json.find("\"sites_used\": 1") != std::string::npos);
+  CHECK(json.find("\"sites_used\": 200") != std::string::npos);
   CHECK(json.find("\"evidence_truncated\": true") != std::string::npos);
+}
+
+TEST_CASE("GraphView enforces the byte budget or fails explicitly") {
+  Storage db(":memory:");
+  cidx::ui::GraphViewRequest request;
+  request.query = std::string(5000, 'q');
+  request.byte_budget = 1024;
+  CHECK_THROWS_AS(cidx::ui::build_graph_view(db, request), cidx::CidxError);
 }
 
 TEST_CASE("GraphView refuses to enumerate without a bounded root") {
