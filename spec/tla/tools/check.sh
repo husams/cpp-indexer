@@ -82,6 +82,23 @@ required_invariants() {
         ReadHonestyInvariant \
         ProtectedInvariant
       ;;
+    CidxBehaviorSmoke)
+      printf '%s\n' \
+        TypeInvariant \
+        NoPartialGenerationInvariant \
+        AtomicPublicationInvariant \
+        InvalidationInvariant \
+        FailureHonestyInvariant \
+        QueryHonestyInvariant \
+        MigrationInvariant \
+        IdentityInvariant \
+        GraphInvariant \
+        QueryPlanInvariant \
+        IncludeHygieneInvariant \
+        TraceInvariant \
+        BoundedProgressInvariant \
+        ProtectedInvariant
+      ;;
     *)
       echo "TLA_CONFIG_STATUS=FAIL reason=unknown-model-$1" >&2
       exit 25
@@ -99,16 +116,12 @@ required_properties() {
       ;;
     CidxBehaviorSmoke)
       printf '%s\n' \
-        TypeInvariant \
-        NoPartialGenerationInvariant \
-        AtomicPublicationInvariant \
-        InvalidationInvariant \
-        FailureHonestyInvariant \
-        QueryHonestyInvariant \
-        MigrationInvariant \
-        IdentityInvariant \
-        TraceInvariant \
-        ProtectedInvariant
+        IndexingLiveness \
+        PublicationLiveness \
+        QueryLiveness \
+        RecoveryLiveness \
+        TransformLiveness \
+        IncludePlanLiveness
       ;;
     *)
       echo "TLA_CONFIG_STATUS=FAIL reason=unknown-model-$1" >&2
@@ -145,6 +158,7 @@ run_model() {
     cat "$WORK/${model}.properties.diff" >&2
     exit 25
   fi
+  echo "TLA_LIVENESS_STATUS=PASS model=$model properties=$(paste -sd, "$actual_properties_file")"
 
   if ! (cd "$WORK" && "$JAVA_BIN" -cp "$JAR" tla2sany.SANY "$spec") >"$syntax_log" 2>&1; then
     echo "TLA_SYNTAX_STATUS=FAIL model=$model" >&2

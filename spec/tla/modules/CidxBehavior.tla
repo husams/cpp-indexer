@@ -10,6 +10,8 @@ CONSTANTS
     GenerationId,
     ArtifactId,
     QueryId,
+    RelationId,
+    EvidenceId,
     SemanticUniverseId,
     SharedUniverseId,
     TraceBound
@@ -33,6 +35,20 @@ VARIABLES
     queryTruncated,
     queryWrites,
     identityMode,
+    graphState,
+    graphEvidenceState,
+    graphTargetState,
+    graphConfigurationState,
+    graphArgumentOrder,
+    queryPlanState,
+    queryStreamShape,
+    queryTraversalBound,
+    queryViewState,
+    queryReadOnly,
+    includePlanState,
+    includeConfigurationState,
+    includeEditState,
+    destructiveEditAuthorized,
     trace
 
 vars == <<
@@ -54,6 +70,20 @@ vars == <<
     queryTruncated,
     queryWrites,
     identityMode,
+    graphState,
+    graphEvidenceState,
+    graphTargetState,
+    graphConfigurationState,
+    graphArgumentOrder,
+    queryPlanState,
+    queryStreamShape,
+    queryTraversalBound,
+    queryViewState,
+    queryReadOnly,
+    includePlanState,
+    includeConfigurationState,
+    includeEditState,
+    destructiveEditAuthorized,
     trace
 >>
 
@@ -78,9 +108,24 @@ Init ==
     /\ queryTruncated = FALSE
     /\ queryWrites = 0
     /\ identityMode = "separate"
+    /\ graphState = "empty"
+    /\ graphEvidenceState = "none"
+    /\ graphTargetState = "none"
+    /\ graphConfigurationState = "unbound"
+    /\ graphArgumentOrder = <<>>
+    /\ queryPlanState = "absent"
+    /\ queryStreamShape = "none"
+    /\ queryTraversalBound = 0
+    /\ queryViewState = "none"
+    /\ queryReadOnly = TRUE
+    /\ includePlanState = "none"
+    /\ includeConfigurationState = "none"
+    /\ includeEditState = "none"
+    /\ destructiveEditAuthorized = FALSE
     /\ trace = <<"Init">>
 
 ImportWorkspace ==
+    /\ storageState = "ready"
     /\ workspaceState = "empty"
     /\ TraceAvailable
     /\ workspaceState' = "imported"
@@ -89,9 +134,15 @@ ImportWorkspace ==
                     queryState, storageState, artifactState, failureMode,
                     generation, currentGeneration, migrationBaseline,
                     invalidated, evidenceState, queryResultState,
-                    queryTruncated, queryWrites, identityMode>>
+                    queryTruncated, queryWrites, identityMode, graphState,
+                    graphEvidenceState, graphTargetState, graphConfigurationState,
+                    graphArgumentOrder, queryPlanState, queryStreamShape,
+                    queryTraversalBound, queryViewState, queryReadOnly,
+                    includePlanState, includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
 
 CaptureConfiguration ==
+    /\ storageState = "ready"
     /\ workspaceState = "imported"
     /\ configState = "uncaptured"
     /\ TraceAvailable
@@ -102,10 +153,16 @@ CaptureConfiguration ==
                     storageState, artifactState, failureMode, generation,
                     currentGeneration, migrationBaseline, invalidated,
                     evidenceState, queryResultState, queryTruncated,
-                    queryWrites, identityMode>>
+                    queryWrites, identityMode, graphState, graphEvidenceState,
+                    graphTargetState, graphConfigurationState, graphArgumentOrder,
+                    queryPlanState, queryStreamShape, queryTraversalBound,
+                    queryViewState, queryReadOnly, includePlanState,
+                    includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
 
 StartIndexing ==
     /\ configState = "captured"
+    /\ storageState = "ready"
     /\ indexState \in {"empty", "stale", "failed"}
     /\ TraceAvailable
     /\ indexState' = "indexing"
@@ -115,7 +172,12 @@ StartIndexing ==
                     transformState, queryState, storageState, artifactState,
                     generation, currentGeneration, migrationBaseline,
                     invalidated, evidenceState, queryResultState,
-                    queryTruncated, queryWrites, identityMode>>
+                    queryTruncated, queryWrites, identityMode, graphState,
+                    graphEvidenceState, graphTargetState, graphConfigurationState,
+                    graphArgumentOrder, queryPlanState, queryStreamShape,
+                    queryTraversalBound, queryViewState, queryReadOnly,
+                    includePlanState, includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
 
 IndexSuccessfully ==
     /\ indexState = "indexing"
@@ -128,8 +190,12 @@ IndexSuccessfully ==
     /\ UNCHANGED <<workspaceState, configState, transformState, queryState,
                     storageState, artifactState, currentGeneration,
                     migrationBaseline, invalidated, evidenceState,
-                    queryResultState, queryTruncated, queryWrites,
-                    identityMode>>
+                    queryResultState, queryTruncated, queryWrites, identityMode,
+                    graphState, graphEvidenceState, graphTargetState,
+                    graphConfigurationState, graphArgumentOrder, queryPlanState,
+                    queryStreamShape, queryTraversalBound, queryViewState,
+                    queryReadOnly, includePlanState, includeConfigurationState,
+                    includeEditState, destructiveEditAuthorized>>
 
 IndexFails ==
     /\ indexState = "indexing"
@@ -141,7 +207,12 @@ IndexFails ==
                     transformState, queryState, storageState, artifactState,
                     generation, currentGeneration, migrationBaseline,
                     invalidated, evidenceState, queryResultState,
-                    queryTruncated, queryWrites, identityMode>>
+                    queryTruncated, queryWrites, identityMode, graphState,
+                    graphEvidenceState, graphTargetState, graphConfigurationState,
+                    graphArgumentOrder, queryPlanState, queryStreamShape,
+                    queryTraversalBound, queryViewState, queryReadOnly,
+                    includePlanState, includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
 
 PublishGeneration ==
     /\ publicationState = "candidate"
@@ -153,6 +224,20 @@ PublishGeneration ==
     /\ artifactState' = "published"
     /\ currentGeneration' = generation
     /\ invalidated' = FALSE
+    /\ graphState' = "published"
+    /\ graphEvidenceState' = "owned"
+    /\ graphTargetState' \in {"known", "unknown-retained"}
+    /\ graphConfigurationState' = "exact"
+    /\ graphArgumentOrder' = <<1, 2>>
+    /\ queryPlanState' = "absent"
+    /\ queryStreamShape' = "none"
+    /\ queryTraversalBound' = 0
+    /\ queryViewState' = "none"
+    /\ queryReadOnly' = TRUE
+    /\ includePlanState' = "none"
+    /\ includeConfigurationState' = "none"
+    /\ includeEditState' = "none"
+    /\ destructiveEditAuthorized' = FALSE
     /\ trace' = Append(trace, "PublishGeneration")
     /\ UNCHANGED <<workspaceState, configState, transformState, queryState,
                     storageState, failureMode, generation, migrationBaseline,
@@ -166,42 +251,88 @@ InterruptPublication ==
     /\ publicationState' = "stale"
     /\ indexState' = "stale"
     /\ failureMode' = "interrupted"
+    /\ graphState' = "empty"
+    /\ graphEvidenceState' = "none"
+    /\ graphTargetState' = "none"
+    /\ graphConfigurationState' = "unbound"
+    /\ graphArgumentOrder' = <<>>
+    /\ queryPlanState' = "absent"
+    /\ queryStreamShape' = "none"
+    /\ queryTraversalBound' = 0
+    /\ queryViewState' = "none"
+    /\ queryReadOnly' = TRUE
+    /\ includePlanState' = "none"
+    /\ includeConfigurationState' = "none"
+    /\ includeEditState' = "none"
+    /\ destructiveEditAuthorized' = FALSE
     /\ trace' = Append(trace, "InterruptPublication")
     /\ UNCHANGED <<workspaceState, configState, transformState, queryState,
                     storageState, artifactState, generation, currentGeneration,
                     migrationBaseline, invalidated, evidenceState,
                     queryResultState, queryTruncated, queryWrites,
-                    identityMode>>
+                    identityMode, graphState, graphEvidenceState,
+                    graphTargetState, graphConfigurationState, graphArgumentOrder,
+                    queryPlanState, queryStreamShape, queryTraversalBound,
+                    queryViewState, queryReadOnly, includePlanState,
+                    includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
 
 InvalidateGeneration ==
     /\ publicationState = "current"
     /\ indexState = "current"
+    /\ storageState = "ready"
+    /\ queryState = "idle"
+    /\ transformState = "idle"
     /\ TraceAvailable
     /\ publicationState' = "stale"
     /\ indexState' = "stale"
     /\ invalidated' = TRUE
+    /\ graphState' = "stale"
+    /\ graphConfigurationState' = "stale"
+    /\ queryPlanState' = "absent"
+    /\ queryStreamShape' = "none"
+    /\ queryTraversalBound' = 0
+    /\ queryViewState' = "none"
+    /\ queryReadOnly' = TRUE
+    /\ includePlanState' = "none"
+    /\ includeConfigurationState' = "none"
+    /\ includeEditState' = "none"
+    /\ destructiveEditAuthorized' = FALSE
     /\ trace' = Append(trace, "InvalidateGeneration")
     /\ UNCHANGED <<workspaceState, configState, transformState, queryState,
                     storageState, artifactState, failureMode, generation,
                     currentGeneration, migrationBaseline, evidenceState,
-                    queryResultState, queryTruncated, queryWrites,
-                    identityMode>>
+                    queryResultState, queryTruncated, queryWrites, identityMode,
+                    graphEvidenceState, graphTargetState, graphArgumentOrder,
+                    queryPlanState, queryStreamShape, queryTraversalBound,
+                    queryViewState, queryReadOnly, includePlanState,
+                    includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
 
 PlanTransform ==
     /\ publicationState = "current"
     /\ indexState = "current"
+    /\ storageState = "ready"
+    /\ queryState = "idle"
+    /\ transformState = "idle"
+    /\ includePlanState = "none"
     /\ invalidated = FALSE
     /\ artifactState = "published"
     /\ TraceAvailable
     /\ transformState' = "planned"
     /\ evidenceState' \in EvidenceStates
+    /\ destructiveEditAuthorized' = FALSE
     /\ failureMode' = "none"
     /\ trace' = Append(trace, "PlanTransform")
     /\ UNCHANGED <<workspaceState, configState, indexState, publicationState,
                     queryState, storageState, artifactState,
                     generation, currentGeneration, migrationBaseline,
                     invalidated, queryResultState, queryTruncated,
-                    queryWrites, identityMode>>
+                    queryWrites, identityMode, graphState, graphEvidenceState,
+                    graphTargetState, graphConfigurationState, graphArgumentOrder,
+                    queryPlanState, queryStreamShape, queryTraversalBound,
+                    queryViewState, queryReadOnly, includePlanState,
+                    includeConfigurationState, includeEditState>>
 
 ApplyTransform ==
     /\ transformState = "planned"
@@ -214,7 +345,12 @@ ApplyTransform ==
                     queryState, storageState, failureMode, generation,
                     currentGeneration, migrationBaseline, invalidated,
                     evidenceState, queryResultState, queryTruncated,
-                    queryWrites, identityMode>>
+                    queryWrites, identityMode, graphState, graphEvidenceState,
+                    graphTargetState, graphConfigurationState, graphArgumentOrder,
+                    queryPlanState, queryStreamShape, queryTraversalBound,
+                    queryViewState, queryReadOnly, includePlanState,
+                    includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
 
 RejectIncompleteTransform ==
     /\ transformState = "planned"
@@ -227,36 +363,89 @@ RejectIncompleteTransform ==
                     queryState, storageState, artifactState, generation,
                     currentGeneration, migrationBaseline, invalidated,
                     evidenceState, queryResultState, queryTruncated,
-                    queryWrites, identityMode>>
+                    queryWrites, identityMode, graphState, graphEvidenceState,
+                    graphTargetState, graphConfigurationState, graphArgumentOrder,
+                    queryPlanState, queryStreamShape, queryTraversalBound,
+                    queryViewState, queryReadOnly, includePlanState,
+                    includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
+
+ValidateQueryPlan ==
+    /\ publicationState = "current"
+    /\ indexState = "current"
+    /\ storageState = "ready"
+    /\ transformState = "idle"
+    /\ includePlanState = "none"
+    /\ invalidated = FALSE
+    /\ queryState = "idle"
+    /\ queryPlanState = "absent"
+    /\ TraceAvailable
+    /\ queryPlanState' = "validated"
+    /\ queryStreamShape' \in {"set", "path"}
+    /\ queryTraversalBound' = 1
+    /\ queryViewState' = "safe"
+    /\ queryReadOnly' = TRUE
+    /\ trace' = Append(trace, "ValidateQueryPlan")
+    /\ UNCHANGED <<workspaceState, configState, indexState, publicationState,
+                    transformState, storageState, artifactState, failureMode,
+                    generation, currentGeneration, migrationBaseline,
+                    invalidated, evidenceState, queryResultState,
+                    queryTruncated, queryWrites, identityMode, graphState,
+                    graphEvidenceState, graphTargetState, graphConfigurationState,
+                    graphArgumentOrder, queryState, includePlanState,
+                    includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
 
 StartQuery ==
     /\ publicationState = "current"
     /\ indexState = "current"
+    /\ storageState = "ready"
+    /\ transformState = "idle"
+    /\ includePlanState = "none"
     /\ invalidated = FALSE
     /\ queryState = "idle"
+    /\ queryPlanState = "validated"
     /\ TraceAvailable
     /\ queryState' = "running"
+    /\ queryPlanState' = "executing"
     /\ trace' = Append(trace, "StartQuery")
     /\ UNCHANGED <<workspaceState, configState, indexState, publicationState,
                     transformState, storageState, artifactState, failureMode,
                     generation, currentGeneration, migrationBaseline,
                     invalidated, evidenceState, queryResultState,
-                    queryTruncated, queryWrites, identityMode>>
+                    queryTruncated, queryWrites, identityMode, graphState,
+                    graphEvidenceState, graphTargetState, graphConfigurationState,
+                    graphArgumentOrder, queryStreamShape, queryTraversalBound,
+                    queryViewState, queryReadOnly, includePlanState,
+                    includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
 
 ReturnQuery ==
     /\ queryState = "running"
+    /\ queryPlanState = "executing"
     /\ TraceAvailable
     /\ queryState' = "complete"
+    /\ queryPlanState' = "returned"
     /\ queryResultState' \in {"complete", "partial", "ambiguous", "unknown"}
     /\ queryTruncated' = (queryResultState' = "partial")
     /\ trace' = Append(trace, "ReturnQuery")
     /\ UNCHANGED <<workspaceState, configState, indexState, publicationState,
                     transformState, storageState, artifactState, failureMode,
                     generation, currentGeneration, migrationBaseline,
-                    invalidated, evidenceState, queryWrites, identityMode>>
+                    invalidated, evidenceState, queryWrites, identityMode,
+                    graphState, graphEvidenceState, graphTargetState,
+                    graphConfigurationState, graphArgumentOrder, queryStreamShape,
+                    queryTraversalBound, queryViewState, queryReadOnly,
+                    includePlanState, includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
 
 BeginMigration ==
     /\ storageState = "ready"
+    /\ indexState # "indexing"
+    /\ publicationState # "candidate"
+    /\ queryState = "idle"
+    /\ transformState = "idle"
+    /\ includePlanState = "none"
     /\ TraceAvailable
     /\ storageState' = "migrating"
     /\ migrationBaseline' = currentGeneration
@@ -264,7 +453,12 @@ BeginMigration ==
     /\ UNCHANGED <<workspaceState, configState, indexState, publicationState,
                     transformState, queryState, artifactState, failureMode,
                     generation, currentGeneration, invalidated, evidenceState,
-                    queryResultState, queryTruncated, queryWrites, identityMode>>
+                    queryResultState, queryTruncated, queryWrites, identityMode,
+                    graphState, graphEvidenceState, graphTargetState,
+                    graphConfigurationState, graphArgumentOrder, queryPlanState,
+                    queryStreamShape, queryTraversalBound, queryViewState,
+                    queryReadOnly, includePlanState, includeConfigurationState,
+                    includeEditState, destructiveEditAuthorized>>
 
 CompleteMigration ==
     /\ storageState = "migrating"
@@ -276,7 +470,12 @@ CompleteMigration ==
                     transformState, queryState, artifactState, generation,
                     currentGeneration, migrationBaseline, invalidated,
                     evidenceState, queryResultState, queryTruncated,
-                    queryWrites, identityMode>>
+                    queryWrites, identityMode, graphState, graphEvidenceState,
+                    graphTargetState, graphConfigurationState, graphArgumentOrder,
+                    queryPlanState, queryStreamShape, queryTraversalBound,
+                    queryViewState, queryReadOnly, includePlanState,
+                    includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
 
 InterruptMigration ==
     /\ storageState = "migrating"
@@ -288,7 +487,12 @@ InterruptMigration ==
                     transformState, queryState, artifactState, generation,
                     currentGeneration, migrationBaseline, invalidated,
                     evidenceState, queryResultState, queryTruncated,
-                    queryWrites, identityMode>>
+                    queryWrites, identityMode, graphState, graphEvidenceState,
+                    graphTargetState, graphConfigurationState, graphArgumentOrder,
+                    queryPlanState, queryStreamShape, queryTraversalBound,
+                    queryViewState, queryReadOnly, includePlanState,
+                    includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
 
 RecoverMigration ==
     /\ storageState = "recovery-required"
@@ -300,11 +504,22 @@ RecoverMigration ==
                     transformState, queryState, artifactState, generation,
                     currentGeneration, migrationBaseline, invalidated,
                     evidenceState, queryResultState, queryTruncated,
-                    queryWrites, identityMode>>
+                    queryWrites, identityMode, graphState, graphEvidenceState,
+                    graphTargetState, graphConfigurationState, graphArgumentOrder,
+                    queryPlanState, queryStreamShape, queryTraversalBound,
+                    queryViewState, queryReadOnly, includePlanState,
+                    includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
 
 MergeSymbolsInUniverse ==
     /\ identityMode = "separate"
     /\ SemanticUniverseId = SharedUniverseId
+    /\ indexState # "indexing"
+    /\ publicationState # "candidate"
+    /\ queryState = "idle"
+    /\ storageState = "ready"
+    /\ transformState = "idle"
+    /\ includePlanState = "none"
     /\ TraceAvailable
     /\ identityMode' = "merged"
     /\ trace' = Append(trace, "MergeSymbolsInUniverse")
@@ -312,10 +527,21 @@ MergeSymbolsInUniverse ==
                     transformState, queryState, storageState, artifactState,
                     failureMode, generation, currentGeneration,
                     migrationBaseline, invalidated, evidenceState,
-                    queryResultState, queryTruncated, queryWrites>>
+                    queryResultState, queryTruncated, queryWrites, graphState,
+                    graphEvidenceState, graphTargetState, graphConfigurationState,
+                    graphArgumentOrder, queryPlanState, queryStreamShape,
+                    queryTraversalBound, queryViewState, queryReadOnly,
+                    includePlanState, includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
 
 SeparateSymbolsAcrossUniverses ==
     /\ identityMode = "merged"
+    /\ indexState # "indexing"
+    /\ publicationState # "candidate"
+    /\ queryState = "idle"
+    /\ transformState = "idle"
+    /\ storageState = "ready"
+    /\ includePlanState = "none"
     /\ TraceAvailable
     /\ identityMode' = "separate"
     /\ trace' = Append(trace, "SeparateSymbolsAcrossUniverses")
@@ -323,23 +549,143 @@ SeparateSymbolsAcrossUniverses ==
                     transformState, queryState, storageState, artifactState,
                     failureMode, generation, currentGeneration,
                     migrationBaseline, invalidated, evidenceState,
-                    queryResultState, queryTruncated, queryWrites>>
+                    queryResultState, queryTruncated, queryWrites, graphState,
+                    graphEvidenceState, graphTargetState, graphConfigurationState,
+                    graphArgumentOrder, queryPlanState, queryStreamShape,
+                    queryTraversalBound, queryViewState, queryReadOnly,
+                    includePlanState, includeConfigurationState, includeEditState,
+                    destructiveEditAuthorized>>
+
+PlanIncludeChange ==
+    /\ publicationState = "current"
+    /\ indexState = "current"
+    /\ storageState = "ready"
+    /\ queryState = "idle"
+    /\ transformState = "idle"
+    /\ invalidated = FALSE
+    /\ includePlanState = "none"
+    /\ TraceAvailable
+    /\ includePlanState' = "planned"
+    /\ includeConfigurationState' \in {"exact", "mismatch"}
+    /\ includeEditState' = "none"
+    /\ destructiveEditAuthorized' = FALSE
+    /\ trace' = Append(trace, "PlanIncludeChange")
+    /\ UNCHANGED <<workspaceState, configState, indexState, publicationState,
+                    transformState, queryState, storageState, artifactState,
+                    failureMode, generation, currentGeneration,
+                    migrationBaseline, invalidated, evidenceState,
+                    queryResultState, queryTruncated, queryWrites, identityMode,
+                    graphState, graphEvidenceState, graphTargetState,
+                    graphConfigurationState, graphArgumentOrder, queryPlanState,
+                    queryStreamShape, queryTraversalBound, queryViewState,
+                    queryReadOnly>>
+
+ValidateIncludeConfiguration ==
+    /\ includePlanState = "planned"
+    /\ includeConfigurationState = "exact"
+    /\ evidenceState = "complete"
+    /\ TraceAvailable
+    /\ includePlanState' = "validated"
+    /\ destructiveEditAuthorized' = TRUE
+    /\ trace' = Append(trace, "ValidateIncludeConfiguration")
+    /\ UNCHANGED <<workspaceState, configState, indexState, publicationState,
+                    transformState, queryState, storageState, artifactState,
+                    failureMode, generation, currentGeneration,
+                    migrationBaseline, invalidated, evidenceState,
+                    queryResultState, queryTruncated, queryWrites, identityMode,
+                    graphState, graphEvidenceState, graphTargetState,
+                    graphConfigurationState, graphArgumentOrder, queryPlanState,
+                    queryStreamShape, queryTraversalBound, queryViewState,
+                    queryReadOnly, includeConfigurationState, includeEditState>>
+
+RejectIncludeConfiguration ==
+    /\ includePlanState = "planned"
+    /\ includeConfigurationState = "mismatch"
+    /\ TraceAvailable
+    /\ includePlanState' = "rejected"
+    /\ destructiveEditAuthorized' = FALSE
+    /\ trace' = Append(trace, "RejectIncludeConfiguration")
+    /\ UNCHANGED <<workspaceState, configState, indexState, publicationState,
+                    transformState, queryState, storageState, artifactState,
+                    failureMode, generation, currentGeneration,
+                    migrationBaseline, invalidated, evidenceState,
+                    queryResultState, queryTruncated, queryWrites, identityMode,
+                    graphState, graphEvidenceState, graphTargetState,
+                    graphConfigurationState, graphArgumentOrder, queryPlanState,
+                    queryStreamShape, queryTraversalBound, queryViewState,
+                    queryReadOnly, includeConfigurationState, includeEditState>>
+
+ApplyIncludeChange ==
+    /\ includePlanState = "validated"
+    /\ includeConfigurationState = "exact"
+    /\ destructiveEditAuthorized = TRUE
+    /\ evidenceState = "complete"
+    /\ TraceAvailable
+    /\ includePlanState' = "applied"
+    /\ includeEditState' = "changed"
+    /\ destructiveEditAuthorized' = FALSE
+    /\ trace' = Append(trace, "ApplyIncludeChange")
+    /\ UNCHANGED <<workspaceState, configState, indexState, publicationState,
+                    transformState, queryState, storageState, artifactState,
+                    failureMode, generation, currentGeneration,
+                    migrationBaseline, invalidated, evidenceState,
+                    queryResultState, queryTruncated, queryWrites, identityMode,
+                    graphState, graphEvidenceState, graphTargetState,
+                    graphConfigurationState, graphArgumentOrder, queryPlanState,
+                    queryStreamShape, queryTraversalBound, queryViewState,
+                    queryReadOnly, includeConfigurationState>>
 
 NoOp == UNCHANGED vars
 
 Advance == ImportWorkspace \/ CaptureConfiguration \/ StartIndexing
     \/ IndexSuccessfully \/ IndexFails \/ PublishGeneration
     \/ InterruptPublication \/ InvalidateGeneration \/ PlanTransform
-    \/ ApplyTransform \/ RejectIncompleteTransform \/ StartQuery \/ ReturnQuery
+    \/ ApplyTransform \/ RejectIncompleteTransform \/ ValidateQueryPlan
+    \/ StartQuery \/ ReturnQuery
     \/ BeginMigration \/ CompleteMigration \/ InterruptMigration
     \/ RecoverMigration \/ MergeSymbolsInUniverse
-    \/ SeparateSymbolsAcrossUniverses
+    \/ SeparateSymbolsAcrossUniverses \/ PlanIncludeChange
+    \/ ValidateIncludeConfiguration \/ RejectIncludeConfiguration
+    \/ ApplyIncludeChange
 
 Next == Advance \/ NoOp
 
-Fairness == WF_vars(Advance)
+Fairness ==
+    /\ WF_vars(IndexSuccessfully)
+    /\ WF_vars(IndexFails)
+    /\ WF_vars(PublishGeneration)
+    /\ WF_vars(ReturnQuery)
+    /\ WF_vars(CompleteMigration)
+    /\ WF_vars(RecoverMigration)
+    /\ WF_vars(ApplyTransform)
+    /\ WF_vars(RejectIncompleteTransform)
+    /\ WF_vars(ValidateIncludeConfiguration)
+    /\ WF_vars(RejectIncludeConfiguration)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
+
+IndexingProgress ==
+    [](indexState = "indexing" /\ TraceAvailable =>
+        <> (indexState \in {"indexed", "current", "failed", "stale"}))
+
+PublicationProgress ==
+    [](publicationState = "candidate" /\ TraceAvailable =>
+        <> (publicationState \in {"current", "failed", "stale"}))
+
+QueryProgress ==
+    [](queryState = "running" /\ TraceAvailable => <> (queryState = "complete"))
+
+RecoveryProgress ==
+    [](storageState = "recovery-required" /\ TraceAvailable =>
+        <> (storageState = "ready"))
+
+TransformProgress ==
+    [](transformState = "planned" /\ TraceAvailable =>
+        <> (transformState \in {"applied", "failed"}))
+
+IncludePlanProgress ==
+    [](includePlanState = "planned" /\ TraceAvailable =>
+        <> (includePlanState \in {"validated", "rejected"}))
 
 TypeInvariant ==
     /\ workspaceState \in WorkspaceStates
@@ -354,11 +700,26 @@ TypeInvariant ==
     /\ evidenceState \in EvidenceStates
     /\ queryResultState \in QueryResultStates
     /\ identityMode \in IdentityModes
+    /\ graphState \in GraphStates
+    /\ graphEvidenceState \in GraphEvidenceStates
+    /\ graphTargetState \in GraphTargetStates
+    /\ graphConfigurationState \in GraphConfigurationStates
+    /\ graphArgumentOrder \in Seq(Nat)
+    /\ queryPlanState \in QueryPlanStates
+    /\ queryStreamShape \in QueryStreamShapes
+    /\ queryTraversalBound \in Nat
+    /\ queryViewState \in QueryViewStates
+    /\ queryReadOnly \in BOOLEAN
+    /\ includePlanState \in IncludePlanStates
+    /\ includeConfigurationState \in IncludeConfigurationStates
+    /\ includeEditState \in IncludeEditStates
+    /\ destructiveEditAuthorized \in BOOLEAN
     /\ generation \in Nat
     /\ currentGeneration \in Nat
     /\ migrationBaseline \in Nat
     /\ currentGeneration <= generation
     /\ queryWrites = 0
+    /\ queryTraversalBound <= TraceBound
     /\ Len(trace) <= TraceBound
     /\ WorkspaceId \in WorkspaceIds
     /\ RepositoryId \in RepositoryIds
@@ -367,6 +728,8 @@ TypeInvariant ==
     /\ GenerationId \in GenerationIds
     /\ ArtifactId \in ArtifactIds
     /\ QueryId \in QueryIds
+    /\ RelationId \in RelationIds
+    /\ EvidenceId \in EvidenceIds
 
 NoPartialGenerationInvariant ==
     NoPartialPublication(indexState, publicationState, artifactState,
@@ -399,6 +762,37 @@ MigrationInvariant ==
 IdentityInvariant ==
     identityMode = "merged" => SemanticUniverseId = SharedUniverseId
 
+GraphInvariant ==
+    /\ graphState = "published"
+        => /\ graphEvidenceState = "owned"
+           /\ graphTargetState \in {"known", "unknown-retained"}
+           /\ graphConfigurationState = "exact"
+           /\ graphArgumentOrder = <<1, 2>>
+    /\ graphTargetState = "unknown-retained"
+        => graphState \in {"published", "stale"}
+
+QueryPlanInvariant ==
+    /\ queryPlanState = "absent"
+        => /\ queryStreamShape = "none"
+           /\ queryTraversalBound = 0
+           /\ queryViewState = "none"
+    /\ queryPlanState \in {"validated", "executing", "returned"}
+        => /\ queryStreamShape \in {"set", "path"}
+           /\ queryTraversalBound > 0
+           /\ queryViewState = "safe"
+           /\ queryReadOnly
+    /\ queryState = "complete" => queryPlanState = "returned"
+
+IncludeHygieneInvariant ==
+    /\ destructiveEditAuthorized
+        => /\ includePlanState = "validated"
+           /\ includeConfigurationState = "exact"
+           /\ evidenceState = "complete"
+    /\ includeEditState = "changed"
+        => /\ includePlanState = "applied"
+           /\ ~destructiveEditAuthorized
+    /\ evidenceState = "incomplete" => ~destructiveEditAuthorized
+
 TraceInvariant ==
     /\ Len(trace) > 0
     /\ Head(trace) = "Init"
@@ -407,5 +801,8 @@ ProtectedInvariant ==
     /\ NoPartialGenerationInvariant
     /\ QueryHonestyInvariant
     /\ MigrationInvariant
+    /\ GraphInvariant
+    /\ QueryPlanInvariant
+    /\ IncludeHygieneInvariant
 
 =============================================================================

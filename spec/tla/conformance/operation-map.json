@@ -12,6 +12,7 @@
     {"operation": "transform.plan", "specAction": "PlanTransform", "observation": "transformState=planned"},
     {"operation": "transform.apply", "specAction": "ApplyTransform", "observation": "transformState=applied"},
     {"operation": "transform.reject", "specAction": "RejectIncompleteTransform", "observation": "failureMode=incomplete-evidence"},
+    {"operation": "query.plan", "specAction": "ValidateQueryPlan", "observation": "queryPlanState=validated"},
     {"operation": "query.start", "specAction": "StartQuery", "observation": "queryState=running"},
     {"operation": "query.return", "specAction": "ReturnQuery", "observation": "queryState=complete"},
     {"operation": "storage.migrate", "specAction": "BeginMigration", "observation": "storageState=migrating"},
@@ -19,6 +20,10 @@
     {"operation": "storage.migrate.interrupt", "specAction": "InterruptMigration", "observation": "storageState=recovery-required"},
     {"operation": "storage.recover", "specAction": "RecoverMigration", "observation": "storageState=ready"},
     {"operation": "identity.merge", "specAction": "MergeSymbolsInUniverse", "observation": "identityMode=merged"},
-    {"operation": "identity.separate", "specAction": "SeparateSymbolsAcrossUniverses", "observation": "identityMode=separate"}
+    {"operation": "identity.separate", "specAction": "SeparateSymbolsAcrossUniverses", "observation": "identityMode=separate"},
+    {"operation": "include.plan", "specAction": "PlanIncludeChange", "observation": "includePlanState=planned"},
+    {"operation": "include.validate", "specAction": "ValidateIncludeConfiguration", "observation": "includePlanState=validated"},
+    {"operation": "include.reject", "specAction": "RejectIncludeConfiguration", "observation": "includePlanState=rejected"},
+    {"operation": "include.apply", "specAction": "ApplyIncludeChange", "observation": "includeEditState=changed"}
   ]
 }

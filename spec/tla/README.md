@@ -17,6 +17,7 @@ reviewed contract change.
 | `modules/CidxResult.tla` | result-status lifecycle smoke specification | human-authored normative contract |
 | `modules/CidxWorkspaceLifecycle.tla` | workspace identity, configuration applicability, and generation lifecycle | human-authored normative contract |
 | `modules/CidxBehavior.tla` | bounded end-to-end lifecycle, identity, query, transform, storage, failure, and recovery behavior | human-authored normative contract |
+| `conformance/CidxConformance.tla` | deterministic action-sequence replay against the behavioral model | conformance checker contract |
 | `models/*.tla` and `models/*.cfg` | finite TLC smoke models and their constants/invariants | human-authored model boundary |
 | `manifest.json` | versioned module/model/invariant inventory | human-authored contract index |
 | `protected/CidxProtected.tla` | protected invariant predicates consumed by models | explicit human review required |
@@ -98,12 +99,15 @@ contracts: it does not import their C++ types, SQLite tables, or filesystem
 operations.
 
 `CidxBehavior` covers the M0 observable pipeline: workspace import,
-configuration capture, indexing, atomic publication, invalidation, derived
-transforms, read-only query outcomes, migration interruption/recovery, and
-semantic-universe identity separation/merging. It deliberately abstracts
-Clang, SQLite, filesystem durability, query algorithms, and implementation
-performance. The conformance package maps those abstract actions to observed
-C++ operations without importing implementation details into the model.
+configuration capture, indexing, atomic publication, invalidation, graph edge
+evidence/target/configuration applicability, ordered argument slots, validated
+query stream shape/bounds/view safety, derived transforms, read-only query
+outcomes, migration interruption/recovery, include-hygiene plan/validate/apply
+authorization, and semantic-universe identity separation/merging. It
+deliberately abstracts Clang, SQLite, filesystem durability, query algorithms,
+and implementation performance. The conformance package maps those abstract
+actions to observed C++ operations without importing implementation details into
+the model.
 
 ## Reproducible check
 
@@ -130,7 +134,8 @@ The checker downloads and SHA-256 verifies the pinned `tla2tools.jar` when it
 is not already cached, requires Java 17, runs SANY syntax checks first, then
 runs TLC with one worker and fingerprint polynomial 0 for each checked-in
 model. It emits stable `TLA_SYNTAX_STATUS`, `TLA_MODEL_STATUS`,
-`TLA_INVARIANT_STATUS`, `TLA_TOOLCHAIN_STATUS`, and `TLA_CHECK_STATUS` lines.
+`TLA_INVARIANT_STATUS`, `TLA_LIVENESS_STATUS`, `TLA_TOOLCHAIN_STATUS`, and
+`TLA_CHECK_STATUS` lines.
 Syntax/toolchain failures and model failures have distinct exit classes, and
 the CI workflow exposes syntax, model, invariant, conformance, and C++ gates
 separately. The checker cross-checks every model's

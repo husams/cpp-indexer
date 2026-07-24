@@ -12,7 +12,12 @@ Unknown, partial, stale, ambiguous, and failed observations remain explicit;
 the adapter may not coerce them into `complete` or `current`.
 
 `scenarios.json` is the deterministic interchange format for TLC counterexample
-traces and conformance regressions. Action names are canonical, scenario IDs are
-sorted, and every trace is short enough for the bounded model. A counterexample
-exporter can append the observed fields to one of these action sequences and
-run the same adapter without inventing a second scenario vocabulary.
+traces and conformance regressions. Each scenario contains a complete final
+observation record. `tools/check-conformance.sh` generates a replay config for
+every scenario, constrains the model's nondeterministic choices to that record,
+and runs SANY/TLC with the pinned deterministic worker/fingerprint/seed. An
+impossible action order, invalid observation value, or mismatched final state
+fails the gate. Action names are canonical, scenario IDs are sorted, and every
+trace is short enough for the bounded model. A counterexample exporter can
+append the observed fields to one of these action sequences and run the same
+adapter without inventing a second scenario vocabulary.

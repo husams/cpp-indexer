@@ -82,6 +82,16 @@ FailureModes == {"none", "index-failure", "interrupted", "incomplete-evidence"}
 EvidenceStates == {"complete", "incomplete"}
 QueryResultStates == {"none", "complete", "partial", "ambiguous", "unknown"}
 IdentityModes == {"separate", "merged"}
+GraphStates == {"empty", "published", "stale"}
+GraphEvidenceStates == {"none", "owned"}
+GraphTargetStates == {"none", "known", "unknown-retained"}
+GraphConfigurationStates == {"unbound", "exact", "stale"}
+QueryPlanStates == {"absent", "validated", "executing", "returned"}
+QueryStreamShapes == {"none", "set", "path"}
+QueryViewStates == {"none", "safe", "unsafe"}
+IncludePlanStates == {"none", "planned", "validated", "applied", "rejected"}
+IncludeConfigurationStates == {"none", "exact", "mismatch"}
+IncludeEditStates == {"none", "unchanged", "changed"}
 
 ElementIds == WorkspaceIds
     \cup RepositoryIds

@@ -6,6 +6,7 @@
     "modules/CidxRepository.tla",
     "modules/CidxResult.tla",
     "modules/CidxBehavior.tla",
+    "conformance/CidxConformance.tla",
     "protected/CidxProtected.tla"
   ],
   "models": [
@@ -31,6 +32,9 @@
         "QueryHonestyInvariant",
         "MigrationInvariant",
         "IdentityInvariant",
+        "GraphInvariant",
+        "QueryPlanInvariant",
+        "IncludeHygieneInvariant",
         "TraceInvariant",
         "ProtectedInvariant"
       ]
@@ -46,12 +50,12 @@
       "invariants": ["NoPartialGenerationInvariant", "AtomicPublicationInvariant", "InvalidationInvariant"]
     },
     "semantic-graph": {
-      "modules": ["CidxTypes", "CidxRepository"],
-      "invariants": ["TypeInvariant", "RepositoryStructureInvariant", "ProtectedInvariant"]
+      "modules": ["CidxTypes", "CidxRepository", "CidxBehavior"],
+      "invariants": ["TypeInvariant", "RepositoryStructureInvariant", "GraphInvariant", "ProtectedInvariant"]
     },
     "query-plan-and-cxq": {
       "modules": ["CidxBehavior", "CidxResult"],
-      "invariants": ["QueryHonestyInvariant", "SharedResultTypeInvariant", "TrustedOutcomeInvariant"]
+      "invariants": ["QueryPlanInvariant", "QueryHonestyInvariant", "SharedResultTypeInvariant", "TrustedOutcomeInvariant"]
     },
     "storage-sidecars-and-migrations": {
       "modules": ["CidxBehavior"],
@@ -59,7 +63,7 @@
     },
     "include-hygiene-and-transformations": {
       "modules": ["CidxBehavior"],
-      "invariants": ["FailureHonestyInvariant", "QueryHonestyInvariant"]
+      "invariants": ["IncludeHygieneInvariant", "FailureHonestyInvariant", "QueryHonestyInvariant"]
     }
   },
   "protectedPaths": [
