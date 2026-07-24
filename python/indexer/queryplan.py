@@ -366,7 +366,10 @@ def _cxq_int(value: str) -> Optional[int]:
     digits = text[1:] if text.startswith("-") else text
     if not digits or any(char < "0" or char > "9" for char in digits):
         return None
-    number = int(text)
+    try:
+        number = int(text)
+    except ValueError:
+        return None
     if number < -(1 << 63) or number > (1 << 63) - 1:
         return None
     return number

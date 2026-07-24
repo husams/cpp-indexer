@@ -234,6 +234,14 @@ TEST_CASE("query_plan: CXQ text reports stable parse errors") {
                     "E_PARSE: rank() is not available in v1");
 }
 
+TEST_CASE("query_plan: CXQ text rejects oversized integer tokens") {
+  const std::string digits(5000, '9');
+  CHECK_THROWS_WITH(parse_cxq("codebase() | nodes() | limit(" + digits + ")"),
+                    "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, " + digits + ")"),
+                    "E_PARSE: depth must be an integer or depth=min..max");
+}
+
 // ---------------------------------------------------------------------------
 // Q2: normalization
 // ---------------------------------------------------------------------------

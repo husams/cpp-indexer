@@ -157,6 +157,16 @@ def test_textual_cxq_rejects_unsupported_or_ambiguous_syntax(text, message):
         parse_cxq(text)
 
 
+def test_textual_cxq_rejects_oversized_integer_tokens():
+    digits = "9" * 5000
+    with pytest.raises(PlanError, match=r"E_PARSE: limit\(\) requires one integer"):
+        parse_cxq(f"codebase() | nodes() | limit({digits})")
+    with pytest.raises(
+        PlanError, match="E_PARSE: depth must be an integer or depth=min..max"
+    ):
+        parse_cxq(f"codebase() | out(calls, {digits})")
+
+
 # ---------------------------------------------------------------------------
 # Q2: normalization
 # ---------------------------------------------------------------------------
