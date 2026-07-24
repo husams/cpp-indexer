@@ -25,7 +25,7 @@ std::string
 canonical_translation_unit_config_json(const TranslationUnitConfig &config);
 
 struct IndexIdentity {
-  int schema_version = 39;
+  int schema_version = 0;
   std::optional<std::string> source_revision;
   std::optional<std::string> source_fingerprint;
   std::optional<std::string> index_config;

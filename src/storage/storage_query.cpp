@@ -142,6 +142,7 @@ IndexIdentity Storage::index_identity() {
   const auto identity_version = meta_value(*this, "index_identity_version");
 
   IndexIdentity identity;
+  identity.schema_version = kSchemaVersion;
   identity.source_revision = stored_revision;
   identity.source_fingerprint = stored_source;
   identity.index_config = stored_config;

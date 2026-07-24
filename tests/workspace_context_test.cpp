@@ -90,6 +90,15 @@ TEST_CASE("workspace identity ignores database ids but preserves relationships")
   CHECK(changed_relationship.identity != same_workspace.identity);
 }
 
+TEST_CASE("storage adapter supplies the authoritative schema version") {
+  cidx::Storage storage(":memory:");
+  cidx::StorageWorkspaceAdapter workspace_data(storage);
+
+  CHECK(cidx::IndexIdentity{}.schema_version == 0);
+  CHECK(workspace_data.index_identity().schema_version ==
+        cidx::kSchemaVersion);
+}
+
 TEST_CASE("descriptor resolver returns deterministic ambiguity diagnostics") {
   const fs::path root = make_temp_dir();
   const fs::path source = root / "src" / "main.cpp";
