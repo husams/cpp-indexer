@@ -24,17 +24,14 @@ public:
   virtual std::optional<SemanticUniverse>
   get_semantic_universe_by_key(const std::string &key) = 0;
   virtual std::vector<SemanticUniverse> list_semantic_universes() = 0;
-  virtual std::optional<Component>
-  get_component(const std::string &path) = 0;
-  virtual std::optional<Component>
-  get_component_by_id(int64_t id) = 0;
+  virtual std::optional<Component> get_component(const std::string &path) = 0;
+  virtual std::optional<Component> get_component_by_id(int64_t id) = 0;
   virtual std::optional<Component>
   component_for_path(const std::string &path) = 0;
   virtual std::vector<Component>
   list_components(const std::optional<std::string> &name = std::nullopt,
                   const std::optional<std::string> &kind = std::nullopt) = 0;
-  virtual std::optional<Repository>
-  get_repository_by_id(int64_t id) = 0;
+  virtual std::optional<Repository> get_repository_by_id(int64_t id) = 0;
   virtual std::optional<Repository>
   get_repository_by_name(const std::string &name) = 0;
   virtual std::vector<Repository>
@@ -51,15 +48,11 @@ public:
   virtual ~WorkspaceCatalogWritePort() = default;
 
   virtual int64_t add_semantic_universe(const std::string &key,
-                                         const std::string &name,
-                                         const std::string &policy) = 0;
-  virtual int64_t add_component(const std::string &name,
-                                const std::string &path,
-                                const std::string &kind) = 0;
+                                        const std::string &name,
+                                        const std::string &policy) = 0;
+  virtual int64_t add_component(const ComponentWriteRecord &component) = 0;
   virtual void delete_component(int64_t id) = 0;
-  virtual int64_t add_repository(
-      const std::string &name, const std::string &kind,
-      const std::optional<std::string> &remote_url) = 0;
+  virtual int64_t add_repository(const RepositoryWriteRecord &repository) = 0;
   virtual void delete_repository(int64_t id) = 0;
   virtual int64_t add_clone(int64_t repository_id, const std::string &path,
                             const std::optional<std::string> &label) = 0;
@@ -73,9 +66,10 @@ public:
   virtual std::optional<File> get_file(const std::string &path) = 0;
   virtual std::optional<File> get_file_by_id(int64_t id) = 0;
   virtual std::optional<std::string> file_abs_path(int64_t id) = 0;
-  virtual bool is_file_indexed(
-      const std::string &path, const std::optional<double> &mtime = std::nullopt,
-      const std::optional<std::string> &md5 = std::nullopt) = 0;
+  virtual bool
+  is_file_indexed(const std::string &path,
+                  const std::optional<double> &mtime = std::nullopt,
+                  const std::optional<std::string> &md5 = std::nullopt) = 0;
   virtual std::vector<Diagnostic> get_diagnostics(int64_t file_id) = 0;
   virtual std::map<int64_t, std::map<int, int64_t>> diagnostic_counts() = 0;
 };
@@ -84,27 +78,29 @@ class SourceStoreWritePort {
 public:
   virtual ~SourceStoreWritePort() = default;
 
-  virtual int64_t add_file(
-      int64_t directory_id, const std::string &name,
-      const std::optional<double> &mtime = std::nullopt,
-      const std::optional<std::string> &md5 = std::nullopt,
-      const std::optional<std::vector<std::string>> &compile_options =
-          std::nullopt,
-      const std::optional<std::string> &driver = std::nullopt) = 0;
-  virtual int64_t add_file_path(
-      const std::string &path, const std::optional<double> &mtime = std::nullopt,
-      const std::optional<std::string> &md5 = std::nullopt,
-      const std::optional<std::vector<std::string>> &compile_options =
-          std::nullopt,
-      const std::optional<std::string> &driver = std::nullopt) = 0;
+  virtual int64_t
+  add_file(int64_t directory_id, const std::string &name,
+           const std::optional<double> &mtime = std::nullopt,
+           const std::optional<std::string> &md5 = std::nullopt,
+           const std::optional<std::vector<std::string>> &compile_options =
+               std::nullopt,
+           const std::optional<std::string> &driver = std::nullopt) = 0;
+  virtual int64_t
+  add_file_path(const std::string &path,
+                const std::optional<double> &mtime = std::nullopt,
+                const std::optional<std::string> &md5 = std::nullopt,
+                const std::optional<std::vector<std::string>> &compile_options =
+                    std::nullopt,
+                const std::optional<std::string> &driver = std::nullopt) = 0;
   virtual void delete_file(int64_t id) = 0;
-  virtual void mark_file_indexed(
-      int64_t id, const std::optional<double> &mtime = std::nullopt,
-      const std::optional<std::string> &md5 = std::nullopt) = 0;
+  virtual void
+  mark_file_indexed(int64_t id,
+                    const std::optional<double> &mtime = std::nullopt,
+                    const std::optional<std::string> &md5 = std::nullopt) = 0;
   virtual void set_file_indexed(int64_t id, bool indexed) = 0;
-  virtual void replace_diagnostics(int64_t file_id,
-                                   const std::vector<Diagnostic> &diagnostics) =
-      0;
+  virtual void
+  replace_diagnostics(int64_t file_id,
+                      const std::vector<Diagnostic> &diagnostics) = 0;
 };
 
 class SymbolReadPort {
@@ -134,13 +130,10 @@ public:
   virtual ~SymbolWritePort() = default;
 
   virtual int64_t add_symbol(const Symbol &symbol) = 0;
-  virtual int64_t mint_symbol_id(const std::string &usr,
-                                 const std::string &spelling,
-                                 const std::string &kind) = 0;
+  virtual int64_t mint_symbol_id(const SymbolIdentityRecord &symbol) = 0;
   virtual bool update_symbol_by_id(
       int64_t id,
-      const std::vector<std::pair<std::string, SymbolValue>> &values) =
-      0;
+      const std::vector<std::pair<std::string, SymbolValue>> &values) = 0;
   virtual void delete_symbol(int64_t id) = 0;
   virtual void delete_symbols_for_file(int64_t file_id) = 0;
 };
@@ -222,12 +215,11 @@ class IncludeReadPort {
 public:
   virtual ~IncludeReadPort() = default;
 
-  virtual std::optional<IncludeConfig>
-  include_config_by_id(int64_t id) = 0;
+  virtual std::optional<IncludeConfig> include_config_by_id(int64_t id) = 0;
   virtual std::vector<IncludeConfig>
   include_configs_for_tu(int64_t file_id) = 0;
-  virtual std::vector<IncludeEdge>
-  include_edges_from(int64_t file_id, bool include_system) = 0;
+  virtual std::vector<IncludeEdge> include_edges_from(int64_t file_id,
+                                                      bool include_system) = 0;
   virtual std::vector<IncludeSite> include_sites_for(int64_t edge_id) = 0;
 };
 

@@ -11,13 +11,12 @@
 namespace cidx {
 class Storage;
 class Transaction;
-}
+} // namespace cidx
 
 namespace cidx::storage {
 
-class SqliteWorkspaceCatalogAdapter final
-    : public WorkspaceCatalogReadPort,
-      public WorkspaceCatalogWritePort {
+class SqliteWorkspaceCatalogAdapter final : public WorkspaceCatalogReadPort,
+                                            public WorkspaceCatalogWritePort {
 public:
   explicit SqliteWorkspaceCatalogAdapter(Storage &db);
 
@@ -43,15 +42,11 @@ public:
   std::vector<Clone> list_clones(
       const std::optional<int64_t> &repository_id = std::nullopt) override;
 
-  int64_t add_semantic_universe(const std::string &key,
-                                const std::string &name,
+  int64_t add_semantic_universe(const std::string &key, const std::string &name,
                                 const std::string &policy) override;
-  int64_t add_component(const std::string &name, const std::string &path,
-                        const std::string &kind) override;
+  int64_t add_component(const ComponentWriteRecord &component) override;
   void delete_component(int64_t id) override;
-  int64_t add_repository(
-      const std::string &name, const std::string &kind,
-      const std::optional<std::string> &remote_url) override;
+  int64_t add_repository(const RepositoryWriteRecord &repository) override;
   void delete_repository(int64_t id) override;
   int64_t add_clone(int64_t repository_id, const std::string &path,
                     const std::optional<std::string> &label) override;
@@ -69,29 +64,31 @@ public:
   std::optional<File> get_file(const std::string &path) override;
   std::optional<File> get_file_by_id(int64_t id) override;
   std::optional<std::string> file_abs_path(int64_t id) override;
-  bool is_file_indexed(const std::string &path,
-                       const std::optional<double> &mtime = std::nullopt,
-                       const std::optional<std::string> &md5 = std::nullopt) override;
+  bool is_file_indexed(
+      const std::string &path,
+      const std::optional<double> &mtime = std::nullopt,
+      const std::optional<std::string> &md5 = std::nullopt) override;
   std::vector<Diagnostic> get_diagnostics(int64_t file_id) override;
   std::map<int64_t, std::map<int, int64_t>> diagnostic_counts() override;
 
-  int64_t add_file(
-      int64_t directory_id, const std::string &name,
+  int64_t
+  add_file(int64_t directory_id, const std::string &name,
+           const std::optional<double> &mtime = std::nullopt,
+           const std::optional<std::string> &md5 = std::nullopt,
+           const std::optional<std::vector<std::string>> &compile_options =
+               std::nullopt,
+           const std::optional<std::string> &driver = std::nullopt) override;
+  int64_t add_file_path(
+      const std::string &path,
       const std::optional<double> &mtime = std::nullopt,
       const std::optional<std::string> &md5 = std::nullopt,
       const std::optional<std::vector<std::string>> &compile_options =
           std::nullopt,
       const std::optional<std::string> &driver = std::nullopt) override;
-  int64_t add_file_path(
-      const std::string &path, const std::optional<double> &mtime = std::nullopt,
-      const std::optional<std::string> &md5 = std::nullopt,
-      const std::optional<std::vector<std::string>> &compile_options =
-          std::nullopt,
-      const std::optional<std::string> &driver = std::nullopt) override;
   void delete_file(int64_t id) override;
-  void mark_file_indexed(int64_t id,
-                         const std::optional<double> &mtime = std::nullopt,
-                         const std::optional<std::string> &md5 = std::nullopt) override;
+  void mark_file_indexed(
+      int64_t id, const std::optional<double> &mtime = std::nullopt,
+      const std::optional<std::string> &md5 = std::nullopt) override;
   void set_file_indexed(int64_t id, bool indexed) override;
   void replace_diagnostics(int64_t file_id,
                            const std::vector<Diagnostic> &diagnostics) override;
@@ -105,26 +102,29 @@ class SqliteSymbolStoreAdapter final : public SymbolReadPort,
 public:
   explicit SqliteSymbolStoreAdapter(Storage &db);
 
-  std::optional<Symbol> lookup_symbol(
-      const std::string &usr,
-      const std::optional<int64_t> &semantic_universe_id = std::nullopt) override;
+  std::optional<Symbol>
+  lookup_symbol(const std::string &usr,
+                const std::optional<int64_t> &semantic_universe_id =
+                    std::nullopt) override;
   std::optional<Symbol> lookup_symbol_by_id(int64_t id) override;
-  std::vector<Symbol> lookup_symbols_by_usr(
-      const std::string &usr,
-      const std::optional<int64_t> &semantic_universe_id = std::nullopt) override;
-  std::vector<Symbol> lookup_symbols_by_name(
-      const std::string &name,
-      const std::optional<std::string> &kind = std::nullopt,
-      const std::optional<int64_t> &semantic_universe_id = std::nullopt) override;
+  std::vector<Symbol>
+  lookup_symbols_by_usr(const std::string &usr,
+                        const std::optional<int64_t> &semantic_universe_id =
+                            std::nullopt) override;
+  std::vector<Symbol>
+  lookup_symbols_by_name(const std::string &name,
+                         const std::optional<std::string> &kind = std::nullopt,
+                         const std::optional<int64_t> &semantic_universe_id =
+                             std::nullopt) override;
   std::vector<Symbol> lookup_symbols_by_qual_name(
       const std::string &name,
       const std::optional<std::string> &kind = std::nullopt,
-      const std::optional<int64_t> &semantic_universe_id = std::nullopt) override;
+      const std::optional<int64_t> &semantic_universe_id =
+          std::nullopt) override;
   std::vector<Symbol> symbols_in_file(int64_t file_id) override;
 
   int64_t add_symbol(const Symbol &symbol) override;
-  int64_t mint_symbol_id(const std::string &usr, const std::string &spelling,
-                         const std::string &kind) override;
+  int64_t mint_symbol_id(const SymbolIdentityRecord &symbol) override;
   bool update_symbol_by_id(
       int64_t id,
       const std::vector<std::pair<std::string, SymbolValue>> &values) override;
@@ -159,10 +159,11 @@ class SqliteFactStoreAdapter final : public FactReadPort, public FactWritePort {
 public:
   explicit SqliteFactStoreAdapter(Storage &db);
 
-  std::vector<GraphEdgeRecord>
-  graph_edges(int64_t symbol_id, const std::string &direction,
-              const std::vector<int64_t> &kind_ids, bool count_resolved,
-              int limit) override;
+  std::vector<GraphEdgeRecord> graph_edges(int64_t symbol_id,
+                                           const std::string &direction,
+                                           const std::vector<int64_t> &kind_ids,
+                                           bool count_resolved,
+                                           int limit) override;
   std::map<int64_t, std::vector<GraphEdgeSiteRecord>>
   edge_sites_for(const std::vector<int64_t> &edge_ids) override;
   int64_t add_edge(const Edge &edge) override;
@@ -182,8 +183,7 @@ public:
   explicit SqliteDefinitionStoreAdapter(Storage &db);
 
   std::vector<DefinitionRecord> definitions_of(int64_t symbol_id) override;
-  std::vector<DefinitionRecord>
-  possible_callees_of(int64_t symbol_id) override;
+  std::vector<DefinitionRecord> possible_callees_of(int64_t symbol_id) override;
   int64_t get_or_create_definition(
       int64_t symbol_id, std::optional<int64_t> file_id,
       std::optional<int64_t> line, std::optional<int64_t> col,
@@ -208,7 +208,7 @@ public:
   std::optional<IncludeConfig> include_config_by_id(int64_t id) override;
   std::vector<IncludeConfig> include_configs_for_tu(int64_t file_id) override;
   std::vector<IncludeEdge> include_edges_from(int64_t file_id,
-                                               bool include_system) override;
+                                              bool include_system) override;
   std::vector<IncludeSite> include_sites_for(int64_t edge_id) override;
   int64_t add_include_config(const IncludeConfig &config) override;
   int64_t add_include_edge(const IncludeEdge &edge) override;

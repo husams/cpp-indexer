@@ -26,8 +26,8 @@
 #include "util/logger.hpp"
 #include "util/pathutil.hpp"
 
-#include "storage/storage_detail.hpp"
 #include "storage/sqlite_adapters.hpp"
+#include "storage/storage_detail.hpp"
 #include "storage/storage_schema.hpp"
 
 namespace cidx {
@@ -262,7 +262,9 @@ storage::SourceStoreWritePort &Storage::source_write() {
   return ports_->source_write();
 }
 
-storage::SymbolReadPort &Storage::symbol_read() { return ports_->symbol_read(); }
+storage::SymbolReadPort &Storage::symbol_read() {
+  return ports_->symbol_read();
+}
 
 storage::SymbolWritePort &Storage::symbol_write() {
   return ports_->symbol_write();

@@ -36,6 +36,15 @@ struct Component {
       semantic_universe_id; // v35: explicit scope for ungrouped components
 };
 
+// Input payload for component creation. The adapter must preserve the
+// version even though it is not part of the generated component identity.
+struct ComponentWriteRecord {
+  std::string name;
+  std::string path;
+  std::string kind;
+  std::optional<std::string> version;
+};
+
 // v23: a logical code base grouping >=1 components, with switchable clones.
 struct Repository {
   int64_t id = -1;
@@ -44,6 +53,14 @@ struct Repository {
   std::optional<std::string> remote_url;       // git origin URL when known
   std::optional<int64_t> active_clone_id;      // -> clone.id; NULL if none yet
   std::optional<int64_t> semantic_universe_id; // v35: declared program universe
+};
+
+// Input payload for repository creation, including its declared universe.
+struct RepositoryWriteRecord {
+  std::string name;
+  std::string kind;
+  std::optional<std::string> remote_url;
+  std::optional<int64_t> semantic_universe_id;
 };
 
 // v23: one checkout/worktree directory of a repository.
@@ -135,6 +152,28 @@ struct Symbol {
   // Transient translation-unit/build identity; never persisted as a column.
   std::optional<std::string> identity_translation_unit;
   int64_t id = -1;
+};
+
+// Complete input payload for minting a reference/stub symbol. These fields
+// mirror Storage::mint_symbol_id so a port migration cannot lose identity,
+// declaration, linkage, or semantic-universe information.
+struct SymbolIdentityRecord {
+  std::string usr;
+  std::string spelling;
+  std::string qual_name;
+  std::string display_name;
+  std::string kind = "function";
+  std::optional<int64_t> decl_file_id;
+  std::optional<int64_t> decl_line;
+  std::optional<int64_t> decl_col;
+  std::optional<std::string> decl_path;
+  bool is_instantiation = false;
+  bool is_named_instance = false;
+  std::optional<std::string> type_info;
+  std::optional<int64_t> semantic_universe_id;
+  std::optional<std::string> identity_source;
+  std::optional<std::string> linkage;
+  std::optional<std::string> identity_translation_unit;
 };
 
 // -- v7 graph layer records ---------------------------------------------------

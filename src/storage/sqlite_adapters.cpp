@@ -50,8 +50,7 @@ SqliteWorkspaceCatalogAdapter::get_repository_by_id(int64_t id) {
 }
 
 std::optional<Repository>
-SqliteWorkspaceCatalogAdapter::get_repository_by_name(
-    const std::string &name) {
+SqliteWorkspaceCatalogAdapter::get_repository_by_name(const std::string &name) {
   return db_->get_repository_by_name(name);
 }
 
@@ -83,8 +82,9 @@ int64_t SqliteWorkspaceCatalogAdapter::add_semantic_universe(
 }
 
 int64_t SqliteWorkspaceCatalogAdapter::add_component(
-    const std::string &name, const std::string &path, const std::string &kind) {
-  return db_->add_component(name, path, kind);
+    const ComponentWriteRecord &component) {
+  return db_->add_component(component.name, component.path, component.kind,
+                            component.version);
 }
 
 void SqliteWorkspaceCatalogAdapter::delete_component(int64_t id) {
@@ -92,9 +92,10 @@ void SqliteWorkspaceCatalogAdapter::delete_component(int64_t id) {
 }
 
 int64_t SqliteWorkspaceCatalogAdapter::add_repository(
-    const std::string &name, const std::string &kind,
-    const std::optional<std::string> &remote_url) {
-  return db_->add_repository(name, kind, remote_url);
+    const RepositoryWriteRecord &repository) {
+  return db_->add_repository(repository.name, repository.kind,
+                             repository.remote_url,
+                             repository.semantic_universe_id);
 }
 
 void SqliteWorkspaceCatalogAdapter::delete_repository(int64_t id) {
@@ -122,8 +123,7 @@ std::optional<File> SqliteSourceStoreAdapter::get_file_by_id(int64_t id) {
   return db_->get_file_by_id(id);
 }
 
-std::optional<std::string>
-SqliteSourceStoreAdapter::file_abs_path(int64_t id) {
+std::optional<std::string> SqliteSourceStoreAdapter::file_abs_path(int64_t id) {
   return db_->file_abs_path(id);
 }
 
@@ -148,8 +148,7 @@ int64_t SqliteSourceStoreAdapter::add_file(
     const std::optional<double> &mtime, const std::optional<std::string> &md5,
     const std::optional<std::vector<std::string>> &compile_options,
     const std::optional<std::string> &driver) {
-  return db_->add_file(directory_id, name, mtime, md5, compile_options,
-                       driver);
+  return db_->add_file(directory_id, name, mtime, md5, compile_options, driver);
 }
 
 int64_t SqliteSourceStoreAdapter::add_file_path(
@@ -208,8 +207,7 @@ std::vector<Symbol> SqliteSymbolStoreAdapter::lookup_symbols_by_qual_name(
   return db_->lookup_symbols_by_qual_name(name, kind, semantic_universe_id);
 }
 
-std::vector<Symbol>
-SqliteSymbolStoreAdapter::symbols_in_file(int64_t file_id) {
+std::vector<Symbol> SqliteSymbolStoreAdapter::symbols_in_file(int64_t file_id) {
   return db_->symbols_in_file(file_id);
 }
 
@@ -217,14 +215,19 @@ int64_t SqliteSymbolStoreAdapter::add_symbol(const Symbol &symbol) {
   return db_->add_symbol(symbol);
 }
 
-int64_t SqliteSymbolStoreAdapter::mint_symbol_id(const std::string &usr,
-                                                 const std::string &spelling,
-                                                 const std::string &kind) {
-  return db_->mint_symbol_id(usr, spelling, "", "", kind);
+int64_t
+SqliteSymbolStoreAdapter::mint_symbol_id(const SymbolIdentityRecord &symbol) {
+  return db_->mint_symbol_id(
+      symbol.usr, symbol.spelling, symbol.qual_name, symbol.display_name,
+      symbol.kind, symbol.decl_file_id, symbol.decl_line, symbol.decl_col,
+      symbol.decl_path, symbol.is_instantiation, symbol.is_named_instance,
+      symbol.type_info, symbol.semantic_universe_id, symbol.identity_source,
+      symbol.linkage, symbol.identity_translation_unit);
 }
 
 bool SqliteSymbolStoreAdapter::update_symbol_by_id(
-    int64_t id, const std::vector<std::pair<std::string, SymbolValue>> &values) {
+    int64_t id,
+    const std::vector<std::pair<std::string, SymbolValue>> &values) {
   return db_->update_symbol_by_id(id, values);
 }
 
@@ -238,8 +241,7 @@ void SqliteSymbolStoreAdapter::delete_symbols_for_file(int64_t file_id) {
 
 SqliteTypeStoreAdapter::SqliteTypeStoreAdapter(Storage &db) : db_(&db) {}
 
-std::optional<TypeNode>
-SqliteTypeStoreAdapter::type_node_by_id(int64_t id) {
+std::optional<TypeNode> SqliteTypeStoreAdapter::type_node_by_id(int64_t id) {
   return db_->type_node_by_id(id);
 }
 
@@ -248,8 +250,8 @@ SqliteTypeStoreAdapter::parameters_of(int64_t symbol_id) {
   return db_->parameters_of(symbol_id);
 }
 
-std::optional<int64_t>
-SqliteTypeStoreAdapter::symbol_type_of(int64_t symbol_id, int64_t kind) {
+std::optional<int64_t> SqliteTypeStoreAdapter::symbol_type_of(int64_t symbol_id,
+                                                              int64_t kind) {
   return db_->symbol_type_of(symbol_id, kind);
 }
 
@@ -300,18 +302,17 @@ SqliteFactStoreAdapter::edge_sites_for(const std::vector<int64_t> &edge_ids) {
     auto &converted = result[edge_id];
     converted.reserve(rows.size());
     for (const auto &row : rows) {
-      converted.push_back(
-          {.edge_id = row.edge_id,
-           .file_id = row.file_id,
-           .line = row.line,
-           .col = row.col,
-           .conditional = row.conditional,
-           .args_sig = row.args_sig,
-           .recv_src_kind = row.recv_src_kind,
-           .recv_type_usr = row.recv_type_usr,
-           .recv_decl_usr = row.recv_decl_usr,
-           .recv_param_pos = row.recv_param_pos,
-           .recv_type_is_value = row.recv_type_is_value});
+      converted.push_back({.edge_id = row.edge_id,
+                           .file_id = row.file_id,
+                           .line = row.line,
+                           .col = row.col,
+                           .conditional = row.conditional,
+                           .args_sig = row.args_sig,
+                           .recv_src_kind = row.recv_src_kind,
+                           .recv_type_usr = row.recv_type_usr,
+                           .recv_decl_usr = row.recv_decl_usr,
+                           .recv_param_pos = row.recv_param_pos,
+                           .recv_type_is_value = row.recv_type_is_value});
     }
   }
   return result;
@@ -380,7 +381,7 @@ int64_t SqliteDefinitionStoreAdapter::get_or_create_definition(
     std::optional<int64_t> end_line, std::optional<int64_t> end_col,
     const std::optional<std::string> &init_text) {
   return db_->get_or_create_definition(symbol_id, file_id, line, col, end_line,
-                                        end_col, init_text);
+                                       end_col, init_text);
 }
 
 void SqliteDefinitionStoreAdapter::add_def_edge(int64_t definition_id,
@@ -415,8 +416,9 @@ SqliteIncludeStoreAdapter::include_configs_for_tu(int64_t file_id) {
   return db_->include_configs_for_tu(file_id);
 }
 
-std::vector<IncludeEdge> SqliteIncludeStoreAdapter::include_edges_from(
-    int64_t file_id, bool include_system) {
+std::vector<IncludeEdge>
+SqliteIncludeStoreAdapter::include_edges_from(int64_t file_id,
+                                              bool include_system) {
   return db_->include_edges_from(file_id, include_system);
 }
 
@@ -425,8 +427,8 @@ SqliteIncludeStoreAdapter::include_sites_for(int64_t edge_id) {
   return db_->include_sites_for(edge_id);
 }
 
-int64_t SqliteIncludeStoreAdapter::add_include_config(
-    const IncludeConfig &config) {
+int64_t
+SqliteIncludeStoreAdapter::add_include_config(const IncludeConfig &config) {
   return db_->add_include_config(config);
 }
 
@@ -447,7 +449,8 @@ void SqliteIncludeStoreAdapter::delete_include_configs_for_tu(int64_t file_id) {
   db_->delete_include_configs_for_tu(file_id);
 }
 
-SqliteSchemaCatalogAdapter::SqliteSchemaCatalogAdapter(Storage &db) : db_(&db) {}
+SqliteSchemaCatalogAdapter::SqliteSchemaCatalogAdapter(Storage &db)
+    : db_(&db) {}
 
 Stats SqliteSchemaCatalogAdapter::stats() { return db_->stats(); }
 
