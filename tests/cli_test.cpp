@@ -18,9 +18,9 @@
 #include <unistd.h>
 
 #include <atomic>
-#include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <fcntl.h>
 #include <fstream>
 #include <optional>
 #include <sstream>
@@ -1976,11 +1976,14 @@ TEST_SUITE("clang") {
     std::string cache;
     std::string proj;
     std::string header;
+    std::string parse_gate_one;
     std::string source;
 
     HeaderRaceProject()
         : cache(make_temp_dir()), proj(cache + "/proj"),
-          header(proj + "/header.hpp"), source(proj + "/main.cpp") {
+          header(proj + "/header.hpp"),
+          parse_gate_one(cache + "/parse_gate_one.hpp"),
+          source(proj + "/main.cpp") {
       makedirs(proj);
       write_file(header, "int initial_header_symbol() { return 1; }\n");
       write_file(source,
@@ -2076,28 +2079,56 @@ TEST_SUITE("clang") {
       CHECK(db.find_symbols("initial_header_symbol", {}, 10).size() == 1);
     }
 
-    std::string intermediate_header =
-        "int intermediate_header_symbol() { return 3; }\n/*";
-    intermediate_header.append(10 * 1024 * 1024, 'x');
-    intermediate_header += "*/\n";
+    const std::string intermediate_header =
+        "int intermediate_header_symbol() { return 3; }\n"
+        "#include \"" +
+        p.parse_gate_one + "\"\n";
     write_file(p.header, intermediate_header);
+    REQUIRE(::mkfifo(p.parse_gate_one.c_str(), 0600) == 0);
     write_file(p.source, "#include \"header.hpp\"\n"
                          "int changed_main_symbol() { return 5; }\n");
-    std::atomic<bool> stop_restorer = false;
+    std::atomic<bool> indexing_done = false;
+    std::atomic<bool> restorer_failed = false;
     std::atomic<bool> restored = false;
     std::thread restorer([&] {
-      std::this_thread::sleep_for(std::chrono::milliseconds(500));
-      if (stop_restorer.load(std::memory_order_relaxed)) {
+      int gate = -1;
+      while (!indexing_done.load(std::memory_order_acquire)) {
+        gate = ::open(p.parse_gate_one.c_str(), O_WRONLY | O_NONBLOCK);
+        if (gate >= 0) {
+          break;
+        }
+        std::this_thread::yield();
+      }
+      if (gate < 0) {
         return;
       }
-      std::ofstream header(p.header);
-      header << initial_header;
-      restored.store(true, std::memory_order_relaxed);
+      if (::unlink(p.header.c_str()) != 0) {
+        restorer_failed.store(true, std::memory_order_release);
+        ::close(gate);
+        return;
+      }
+      std::ofstream restored_header(p.header);
+      if (!restored_header.good()) {
+        restorer_failed.store(true, std::memory_order_release);
+        ::close(gate);
+        return;
+      }
+      restored_header << initial_header;
+      restored_header.close();
+      const char release = '\n';
+      if (::write(gate, &release, 1) != 1) {
+        restorer_failed.store(true, std::memory_order_release);
+        ::close(gate);
+        return;
+      }
+      ::close(gate);
+      restored.store(true, std::memory_order_release);
     });
     r = run_cli({"index"}, p.cache, &log);
-    stop_restorer.store(true, std::memory_order_relaxed);
+    indexing_done.store(true, std::memory_order_release);
     restorer.join();
-    REQUIRE(restored.load(std::memory_order_relaxed));
+    REQUIRE_FALSE(restorer_failed.load(std::memory_order_acquire));
+    REQUIRE(restored.load(std::memory_order_acquire));
     CHECK(r.rc == 1);
     CHECK(r.err.find("source changed during indexing") != std::string::npos);
 
