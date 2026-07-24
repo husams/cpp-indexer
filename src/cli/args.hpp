@@ -125,6 +125,8 @@ struct ParsedArgs {
   int ui_depth = 2;
   int ui_node_budget = 250;
   int ui_edge_budget = 500;
+  int ui_site_budget = 200;
+  int ui_byte_budget = 4 * 1024 * 1024;
   int ui_port = 0;
   bool ui_no_browser = false;
 

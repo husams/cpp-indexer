@@ -17,6 +17,8 @@ struct GraphViewRequest {
   int depth = 2;
   int node_budget = 250;
   int edge_budget = 500;
+  int site_budget = 200;
+  int byte_budget = 4 * 1024 * 1024;
   std::optional<std::string> workspace;
 };
 

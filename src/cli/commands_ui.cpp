@@ -19,6 +19,8 @@ ui::GraphViewRequest ui_request(const ParsedArgs &args) {
   request.depth = args.ui_depth;
   request.node_budget = args.ui_node_budget;
   request.edge_budget = args.ui_edge_budget;
+  request.site_budget = args.ui_site_budget;
+  request.byte_budget = args.ui_byte_budget;
   if (args.edge) {
     std::vector<std::string> kinds;
     std::string current;

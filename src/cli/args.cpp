@@ -733,7 +733,7 @@ void build_ui(CLI::App &app, ParsedArgs &pa) {
     sub->add_option("--root", pa.ui_root,
                     "bounded root symbol name, USR, or numeric id");
     sub->add_option("--query", pa.ui_query,
-                    "CXQ/query text recorded in the GraphView request");
+                    "portable symbol reference executed through QueryPlan");
     sub->add_option("--workspace", pa.ui_workspace,
                     "workspace label carried by the GraphView request");
     sub->add_option("--edge", pa.edge, "edge kinds (comma-separated)");
@@ -745,6 +745,12 @@ void build_ui(CLI::App &app, ParsedArgs &pa) {
         ->check(CLI::Range(1, 10000));
     sub->add_option("--edge-limit", pa.ui_edge_budget, "maximum graph edges")
         ->check(CLI::Range(1, 20000));
+    sub->add_option("--site-limit", pa.ui_site_budget,
+                    "maximum evidence sites in the graph")
+        ->check(CLI::Range(0, 20000));
+    sub->add_option("--byte-limit", pa.ui_byte_budget,
+                    "maximum graph JSON bytes")
+        ->check(CLI::Range(1024, 64 * 1024 * 1024));
     sub->add_option("--db", pa.index_db, kDbHelpText);
     return sub;
   };
@@ -755,7 +761,8 @@ void build_ui(CLI::App &app, ParsedArgs &pa) {
   open->add_flag("--no-browser", pa.ui_no_browser,
                  "serve without launching the default browser");
 
-  CLI::App *exporter = leaf("export", "write a self-contained offline snapshot");
+  CLI::App *exporter =
+      leaf("export", "write a self-contained offline snapshot");
   exporter->add_option("--output", pa.ui_output, "output HTML path")
       ->required()
       ->type_name("FILE");

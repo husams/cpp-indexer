@@ -164,6 +164,7 @@
       "paths": [
         "src/main.cpp",
         "src/cli/**",
+        "src/ui/**",
         "src/astgraph/main.cpp",
         "src/diff/main.cpp"
       ],
@@ -702,6 +703,18 @@
     {
       "source": "src/storage/storage_types.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
       "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/ui/server.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/socket.h",
+      "boundary": "product surface -> loopback transport", "owner": "Platform M4 UI maintainers", "rationale": "The local explorer uses the platform loopback socket API until the shared transport adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-84"
+    },
+    {
+      "source": "src/ui/server.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/types.h",
+      "boundary": "product surface -> loopback transport", "owner": "Platform M4 UI maintainers", "rationale": "The local explorer uses the platform loopback socket API until the shared transport adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-84"
+    },
+    {
+      "source": "src/ui/server.cpp", "fromModule": "product.cli", "toModule": "external:process", "include": "unistd.h",
+      "boundary": "product surface -> loopback transport", "owner": "Platform M4 UI maintainers", "rationale": "The local explorer uses POSIX accept/close and optional browser launch until the shared transport adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-84"
     }
   ],
   "ci": {

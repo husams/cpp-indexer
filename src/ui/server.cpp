@@ -45,7 +45,24 @@ void launch_browser(const std::string &url) {
   _exit(127);
 }
 
-void send_response(int fd, int code, std::string_view type,
+bool send_all(int fd, std::string_view bytes) {
+  std::size_t offset = 0;
+  while (offset < bytes.size()) {
+    const ssize_t sent =
+        ::send(fd, bytes.data() + offset, bytes.size() - offset, 0);
+    if (sent > 0) {
+      offset += static_cast<std::size_t>(sent);
+      continue;
+    }
+    if (sent < 0 && errno == EINTR) {
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+bool send_response(int fd, int code, std::string_view type,
                    std::string_view body) {
   const char *reason = "Bad Request";
   if (code == 200) {
@@ -59,8 +76,7 @@ void send_response(int fd, int code, std::string_view type,
        << "Content-Length: " << body.size() << "\r\n"
        << "Cache-Control: no-store\r\nConnection: close\r\n\r\n";
   const std::string header = head.str();
-  (void)::send(fd, header.data(), header.size(), 0);
-  (void)::send(fd, body.data(), body.size(), 0);
+  return send_all(fd, header) && send_all(fd, body);
 }
 
 } // namespace
@@ -118,7 +134,7 @@ int serve_live(const std::string &html, const std::string &graph_json,
     const std::size_t line_end = request.find("\r\n");
     if (line_end == std::string::npos || line_end > 4096 ||
         !request.starts_with("GET ")) {
-      send_response(client, 400, "text/plain", "bad request\n");
+      (void)send_response(client, 400, "text/plain", "bad request\n");
       ::close(client);
       continue;
     }
@@ -126,19 +142,23 @@ int serve_live(const std::string &html, const std::string &graph_json,
     const std::string_view target(
         request.data() + 4,
         target_end == std::string::npos ? 0 : target_end - 4);
+    bool sent = false;
     if (target_end == std::string::npos || !has_token(target, access_token)) {
-      send_response(client, 404, "text/plain", "not found\n");
+      (void)send_response(client, 404, "text/plain", "not found\n");
       ::close(client);
       continue;
     }
     if (target.starts_with("/?") || target.starts_with("/index.html?")) {
-      send_response(client, 200, "text/html; charset=utf-8", html);
+      sent = send_response(client, 200, "text/html; charset=utf-8", html);
     } else if (target.starts_with("/api/graph?")) {
-      send_response(client, 200, "application/json", graph_json);
+      sent = send_response(client, 200, "application/json", graph_json);
     } else {
-      send_response(client, 404, "text/plain", "not found\n");
+      sent = send_response(client, 404, "text/plain", "not found\n");
     }
     ::close(client);
+    if (!sent) {
+      continue;
+    }
   }
   ::close(server);
   return 0;
