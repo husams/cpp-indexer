@@ -7,6 +7,7 @@
 #include "ast/edge_sink.hpp"
 
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace cidx::storage {
@@ -78,6 +79,8 @@ private:
   std::vector<PresentationIntent> *presentation_intents_ = nullptr;
   std::vector<int64_t> edge_ids_;
   std::vector<int64_t> definition_ids_;
+  std::unordered_set<int64_t> edge_id_set_;
+  std::unordered_set<int64_t> definition_id_set_;
   int64_t current_file_id_ = -1;
   std::optional<int64_t> current_universe_id_;
   std::optional<std::string> identity_translation_unit_;

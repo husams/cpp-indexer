@@ -16,6 +16,8 @@ StorageEdgeSink::StorageEdgeSink(
 void StorageEdgeSink::reset_fact_ids() {
   edge_ids_.clear();
   definition_ids_.clear();
+  edge_id_set_.clear();
+  definition_id_set_.clear();
 }
 
 std::optional<int64_t> StorageEdgeSink::lookup_symbol_id(
@@ -124,7 +126,7 @@ int64_t StorageEdgeSink::add_edge(const EdgeRecord &edge) {
     e.is_virtual = edge.is_virtual;
   }
   const int64_t id = ports_.facts_write.add_edge(e);
-  if (std::ranges::find(edge_ids_, id) == edge_ids_.end()) {
+  if (edge_id_set_.insert(id).second) {
     edge_ids_.push_back(id);
   }
   return id;
@@ -143,7 +145,7 @@ int64_t StorageEdgeSink::ensure_edge(const EdgeRecord &edge) {
     e.is_virtual = edge.is_virtual;
   }
   const int64_t id = ports_.facts_write.ensure_edge(e);
-  if (std::ranges::find(edge_ids_, id) == edge_ids_.end()) {
+  if (edge_id_set_.insert(id).second) {
     edge_ids_.push_back(id);
   }
   return id;
@@ -193,7 +195,7 @@ int64_t StorageEdgeSink::get_or_create_definition(
     const std::optional<std::string> &init_text) {
   const int64_t id = ports_.definitions_write.get_or_create_definition(
       symbol_id, file_id, line, col, end_line, end_col, init_text);
-  if (std::ranges::find(definition_ids_, id) == definition_ids_.end()) {
+  if (definition_id_set_.insert(id).second) {
     definition_ids_.push_back(id);
   }
   return id;

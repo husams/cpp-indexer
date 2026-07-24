@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace cidx::storage {
@@ -43,7 +44,10 @@ private:
   std::optional<std::string> identity_translation_unit_;
   int stored_ = 0;
   std::vector<int64_t> symbol_ids_;
+<<<<<<< HEAD
   PassMetrics *metrics_ = nullptr;
+  std::unordered_set<int64_t> symbol_id_set_;
+  std::unordered_set<std::string> resolved_identity_cache_;
 };
 
 } // namespace cidx::ast

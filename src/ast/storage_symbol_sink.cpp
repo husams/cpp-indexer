@@ -9,11 +9,77 @@
 
 namespace cidx::ast {
 
+namespace {
+
+std::string identity_cache_key(const cidx::Symbol &sym) {
+  std::string key = sym.usr;
+  key.push_back('\x1f');
+  key += sym.identity_source.value_or("");
+  key.push_back('\x1f');
+  key += sym.identity_translation_unit.value_or("");
+  key.push_back('\x1f');
+  key += std::to_string(sym.semantic_universe_id);
+  return key;
+}
+
+std::optional<cidx::Symbol>
+lookup_existing_symbol(cidx::storage::AstStoragePorts &ports,
+                       const cidx::Symbol &sym, bool resolved_identity) {
+  if (resolved_identity) {
+    return std::nullopt;
+  }
+  return ports.symbols_read.lookup_symbol(sym.usr, sym.semantic_universe_id,
+                                          sym.identity_source,
+                                          sym.identity_translation_unit);
+}
+
+cidx::Symbol
+make_symbol(const SymbolRecord &s, int64_t current_file_id,
+            int64_t semantic_universe_id,
+            const std::optional<std::string> &identity_translation_unit) {
+  cidx::Symbol sym;
+  sym.usr = s.usr;
+  sym.spelling = s.spelling;
+  sym.kind = cidx_kind_name_from_int(s.kind);
+  sym.qual_name = s.qual_name;
+  sym.display_name = s.display_name;
+  sym.type_info = s.type_info;
+  sym.file_id = current_file_id;
+  sym.line = s.line;
+  sym.col = s.col;
+  sym.end_line = s.end_line;
+  sym.end_col = s.end_col;
+  if (s.decl_line) {
+    sym.decl_file_id = current_file_id;
+    sym.decl_line = s.decl_line;
+    sym.decl_col = s.decl_col;
+  }
+  sym.is_definition = s.is_definition;
+  sym.is_pure = s.is_pure;
+  sym.is_static = s.is_static;
+  sym.is_instantiation = s.is_instantiation;
+  sym.callable_kind = s.callable_kind;
+  sym.template_origin = s.template_origin;
+  sym.template_form = s.template_form;
+  sym.linkage = s.linkage;
+  sym.access = s.access;
+  sym.parent_usr = s.parent_usr;
+  sym.const_value = s.const_value;
+  sym.resolved = s.resolved;
+  sym.semantic_universe_id = semantic_universe_id;
+  sym.identity_source = s.file;
+  sym.identity_translation_unit = identity_translation_unit;
+  return sym;
+}
+
+} // namespace
+
 StorageSymbolSink::StorageSymbolSink(cidx::storage::AstStoragePorts &ports)
     : ports_(ports) {}
 
 void StorageSymbolSink::set_current_file_id(int64_t file_id) {
   current_file_id_ = file_id;
+  resolved_identity_cache_.clear();
 }
 
 void StorageSymbolSink::set_identity_translation_unit_config_id(
@@ -24,6 +90,7 @@ void StorageSymbolSink::set_identity_translation_unit_config_id(
                 config_id, translation_unit_file_id)
           : ports_.workspace.portable_translation_unit_identity_for_config(
                 config_id);
+  resolved_identity_cache_.clear();
 }
 
 void StorageSymbolSink::set_identity_translation_unit_file_id(int64_t file_id) {
@@ -33,11 +100,14 @@ void StorageSymbolSink::set_identity_translation_unit_file_id(int64_t file_id) {
                 ports_.workspace.portable_translation_unit_identity_for_file(
                     file_id))
           : std::nullopt;
+  resolved_identity_cache_.clear();
 }
 
 void StorageSymbolSink::reset_counters() {
   stored_ = 0;
   symbol_ids_.clear();
+  symbol_id_set_.clear();
+  resolved_identity_cache_.clear();
 }
 
 void StorageSymbolSink::set_metrics(PassMetrics *metrics) {
@@ -59,49 +129,24 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
     metrics_->note_emitted(1 + (s.decl_line ? 1 : 0));
   }
 
-  cidx::Symbol sym;
-  sym.usr = s.usr;
-  sym.spelling = s.spelling;
-  sym.kind = kind_name;
-  sym.qual_name = s.qual_name;
-  sym.display_name = s.display_name;
-  sym.type_info = s.type_info;
-  sym.file_id = current_file_id_;
-  sym.line = s.line;
-  sym.col = s.col;
-  sym.end_line = s.end_line;
-  sym.end_col = s.end_col;
-  if (s.decl_line) { // declarations record their own site (to_symbol)
-    sym.decl_file_id = current_file_id_;
-    sym.decl_line = s.decl_line;
-    sym.decl_col = s.decl_col;
-  }
-  sym.is_definition = s.is_definition;
-  sym.is_pure = s.is_pure;
-  sym.is_static = s.is_static;
-  sym.is_instantiation = s.is_instantiation;
-  sym.callable_kind = s.callable_kind;
-  sym.template_origin = s.template_origin;
-  sym.template_form = s.template_form;
-  sym.linkage = s.linkage;
-  sym.access = s.access;
-  sym.parent_usr = s.parent_usr;
-  sym.const_value = s.const_value;
-  sym.resolved = s.resolved;
-  sym.semantic_universe_id =
-      ports_.workspace.semantic_universe_for_file_id(current_file_id_);
-  sym.identity_source = s.file;
-  sym.identity_translation_unit = identity_translation_unit_;
+  const cidx::Symbol sym = make_symbol(
+      s, current_file_id_,
+      ports_.workspace.semantic_universe_for_file_id(current_file_id_),
+      identity_translation_unit_);
+  std::string identity_key = identity_cache_key(sym);
+  const bool resolved_identity =
+      resolved_identity_cache_.contains(identity_key);
   const std::optional<cidx::Symbol> existing =
-      ports_.symbols_read.lookup_symbol(sym.usr, sym.semantic_universe_id,
-                                        sym.identity_source,
-                                        sym.identity_translation_unit);
+      lookup_existing_symbol(ports_, sym, resolved_identity);
   const int64_t symbol_id = ports_.symbols_write.add_symbol(sym);
-  if (std::ranges::find(symbol_ids_, symbol_id) == symbol_ids_.end()) {
+  if (symbol_id_set_.insert(symbol_id).second) {
     symbol_ids_.push_back(symbol_id);
   }
-  if (!(existing && existing->resolved)) {
+  if (!(resolved_identity || (existing && existing->resolved))) {
     ++stored_; // AstIndexer::store: true = counted as "stored"
+  }
+  if (resolved_identity || (existing && existing->resolved) || sym.resolved) {
+    resolved_identity_cache_.insert(std::move(identity_key));
   }
 }
 
