@@ -1,3 +1,76 @@
+const graphState = (() => {
+  const completenessRank = {unknown: 0, partial: 1, complete: 2};
+  const freshnessRank = {stale: 0, unknown: 1, unverifiable: 1, current: 2};
+  const weakest = (left, right, ranks) => {
+    if (typeof left !== 'string') return right;
+    if (typeof right !== 'string') return left;
+    return (ranks[left] ?? 1) <= (ranks[right] ?? 1) ? left : right;
+  };
+  const mergeFlags = (left = {}, right = {}) => {
+    const merged = {...left, ...right};
+    new Set([...Object.keys(left), ...Object.keys(right)]).forEach((key) => {
+      if (typeof left[key] === 'boolean' || typeof right[key] === 'boolean') merged[key] = Boolean(left[key] || right[key]);
+    });
+    return merged;
+  };
+  const mergeStatus = (left = {}, right = {}) => {
+    const merged = mergeFlags(left, right);
+    if (left.completeness || right.completeness) merged.completeness = weakest(left.completeness, right.completeness, completenessRank);
+    if (left.freshness || right.freshness) merged.freshness = weakest(left.freshness, right.freshness, freshnessRank);
+    return merged;
+  };
+  const mergeSites = (left = [], right = []) => {
+    const seen = new Set();
+    return [...left, ...right].filter((site) => {
+      const key = JSON.stringify(site);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+  const mergeRecord = (left, right) => {
+    const merged = {...left, ...right};
+    if (left.status || right.status) merged.status = mergeStatus(left.status, right.status);
+    if (left.evidence || right.evidence) merged.evidence = mergeFlags(left.evidence, right.evidence);
+    if (Array.isArray(left.sites) || Array.isArray(right.sites)) merged.sites = mergeSites(left.sites, right.sites);
+    return merged;
+  };
+  const mergeMetadata = (left = {}, right = {}, sitesUsed) => {
+    const merged = {...left, ...right};
+    ['truncated', 'evidence_truncated'].forEach((key) => { merged[key] = Boolean(left[key] || right[key]); });
+    merged.continuation = {...left.continuation, ...right.continuation};
+    merged.continuation.available = Boolean(left.continuation?.available || right.continuation?.available);
+    if (left.continuation?.reason === 'byte_budget' || right.continuation?.reason === 'byte_budget') merged.continuation.reason = 'byte_budget';
+    if (sitesUsed !== undefined) merged.sites_used = sitesUsed;
+    return merged;
+  };
+  const mergeSlices = (left, right) => {
+    const nodes = new Map((left.nodes || []).map((node) => [String(node.id), node]));
+    (right.nodes || []).forEach((node) => {
+      const id = String(node.id);
+      nodes.set(id, nodes.has(id) ? mergeRecord(nodes.get(id), node) : node);
+    });
+    const edges = new Map((left.edges || []).map((edge) => [String(edge.id), edge]));
+    (right.edges || []).forEach((edge) => {
+      const id = String(edge.id);
+      edges.set(id, edges.has(id) ? mergeRecord(edges.get(id), edge) : edge);
+    });
+    const sitesUsed = [...edges.values()].reduce((total, edge) => total + (edge.sites || []).length, 0);
+    const mergedNodes = [...nodes.values()];
+    const mergedEdges = [...edges.values()];
+    const elementTruncated = [...mergedNodes, ...mergedEdges].some((element) => element.status?.truncated === true);
+    const evidenceTruncated = mergedEdges.some((edge) => edge.status?.evidence_truncated === true || edge.evidence?.sites_truncated === true);
+    const metadata = mergeMetadata(left.metadata, right.metadata, sitesUsed);
+    metadata.truncated = Boolean(metadata.truncated || elementTruncated);
+    metadata.evidence_truncated = Boolean(metadata.evidence_truncated || evidenceTruncated);
+    metadata.continuation.available = Boolean(metadata.continuation.available || metadata.truncated);
+    return {...left, metadata, nodes: mergedNodes, edges: mergedEdges};
+  };
+  return {mergeSlices};
+})();
+
+if (typeof module !== 'undefined') module.exports = graphState;
+if (typeof document !== 'undefined') {
 (() => {
   const embedded = window.CIDX_GRAPH_VIEW || {nodes: [], edges: [], metadata: {}};
   const liveToken = new URLSearchParams(window.location.search).get('token');
@@ -53,22 +126,23 @@
     });
   };
   const addView = (next, append) => {
-    const nodes = next.nodes || [];
-    const edges = next.edges || [];
     if (append) {
-      nodes.forEach((n) => nodeById.set(String(n.id), n));
+      const merged = graphState.mergeSlices(view, next);
       const newElements = [];
-      nodes.forEach((n) => {
-        if (!cy.$id(String(n.id)).length) newElements.push(elementForNode(n));
+      merged.nodes.forEach((n) => {
+        const id = String(n.id);
+        nodeById.set(id, n);
+        if (!cy.$id(id).length) newElements.push(elementForNode(n));
+        else cy.$id(id).data({...n, id, label: n.name || n.usr});
       });
-      edges.forEach((e) => {
-        if (!edgeIds.has(String(e.id))) {
-          edgeIds.add(String(e.id));
-          newElements.push(elementForEdge(e));
-        }
+      merged.edges.forEach((e) => {
+        const id = String(e.id);
+        if (!edgeIds.has(id)) newElements.push(elementForEdge(e));
+        else cy.$id(id).data({...e, id, source: String(e.source), target: String(e.target)});
+        edgeIds.add(id);
       });
       cy.add(newElements);
-      view = {...view, metadata: next.metadata || view.metadata, nodes: [...nodeById.values()], edges: [...view.edges, ...edges.filter((e) => !view.edges.some((old) => String(old.id) === String(e.id)))]};
+      view = merged;
     } else {
       view = next;
       nodeById.clear();
@@ -121,3 +195,4 @@
   };
   start();
 })();
+}
