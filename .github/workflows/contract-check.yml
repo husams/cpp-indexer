@@ -17,5 +17,10 @@ jobs:
         run: uv run --project python python scripts/check_release_contract.py
       - name: Validate raw SQLite caller boundaries
         run: python3 scripts/check_raw_db_boundaries.py
+      - name: Validate SQLite-free focused storage ports
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang
+          python3 scripts/check_storage_ports_header.py
       - name: Validate Python contract tests
         run: uv run --project python pytest python/tests/test_contracts.py

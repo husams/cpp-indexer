@@ -23,10 +23,15 @@ def main() -> int:
         print("STORAGE_PORTS_HEADER_STATUS=FAIL direct-sqlite-include")
         return 1
 
-    compiler = os.environ.get("CXX") or shutil.which("clang++")
+    configured_compiler = os.environ.get("CXX")
+    compiler = configured_compiler or shutil.which("clang++")
+    if compiler is not None:
+        compiler = shutil.which(compiler) or (
+            compiler if Path(compiler).is_file() else None
+        )
     if compiler is None:
-        print("STORAGE_PORTS_HEADER_STATUS=SKIP clang++-unavailable")
-        return 0
+        print("STORAGE_PORTS_HEADER_STATUS=FAIL clang++-unavailable")
+        return 1
 
     with tempfile.TemporaryDirectory(prefix="cidx-storage-ports-") as directory:
         probe = Path(directory) / "probe.cpp"
