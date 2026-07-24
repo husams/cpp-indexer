@@ -453,14 +453,17 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   IndexOneOutcome out;
   const SourceSnapshot source = SourceSnapshot::capture(path);
   out.source_md5 = source.md5;
+  cidx::StorageWorkspaceAdapter workspace_data(db);
   WorkspaceContext context =
-      WorkspaceContext::borrow(db, WorkspaceReadWriteMode::read_write);
+      WorkspaceContext::borrow(workspace_data,
+                               WorkspaceReadWriteMode::read_write);
   Toolchain toolchain;
   TranslationUnitConfigurationService resolver(context, toolchain);
   const TranslationUnitDescriptor descriptor = resolver.resolve(path);
   const TranslationUnitConfig &resolved = descriptor.configuration;
   const std::vector<std::string> args =
-      resolver.invocation_arguments(path, descriptor);
+      TranslationUnitConfigurationService::invocation_arguments(path,
+                                                                descriptor);
   CompilationSetup setup(args, path);
   DiagCollector collector(out.diagnostics);
   setup.tool.setDiagnosticConsumer(&collector);

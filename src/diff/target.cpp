@@ -146,8 +146,10 @@ ParseConfig resolve_parse_config(const SideSpec &spec) {
                     "); run `cidx import <compile_commands.json>` for its "
                     "project");
   }
+  StorageWorkspaceAdapter workspace_data(db);
   WorkspaceContext context =
-      WorkspaceContext::borrow(db, WorkspaceReadWriteMode::read_only);
+      WorkspaceContext::borrow(workspace_data,
+                               WorkspaceReadWriteMode::read_only);
   Toolchain toolchain;
   TranslationUnitConfigurationService resolver(context, toolchain);
   std::string resolution_path = cfg.file;

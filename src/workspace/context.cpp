@@ -201,7 +201,7 @@ std::string workspace_snapshot_json(const WorkspaceSnapshot &snapshot) {
   return result.str();
 }
 
-std::string absolute_source(const CompileCommand &command) {
+std::string absolute_source(const WorkspaceCompileCommand &command) {
   if (pathutil::isabs(command.filename)) {
     return pathutil::normpath(command.filename);
   }
@@ -253,17 +253,18 @@ WorkspaceError::WorkspaceError(WorkspaceErrorCode code,
                 message),
       code_(code), candidates_(std::move(candidates)) {}
 
-WorkspaceSnapshot WorkspaceSnapshot::capture(Storage &storage) {
+WorkspaceSnapshot WorkspaceSnapshot::capture(WorkspaceDataSource &data_source) {
   WorkspaceSnapshot snapshot;
-  snapshot.repositories = storage.list_repositories();
-  snapshot.components = storage.list_components();
-  snapshot.semantic_universes = storage.list_semantic_universes();
-  snapshot.index_identity = storage.index_identity();
+  snapshot.repositories = data_source.list_repositories();
+  snapshot.components = data_source.list_components();
+  snapshot.semantic_universes = data_source.list_semantic_universes();
+  snapshot.index_identity = data_source.index_identity();
   for (const Repository &repository : snapshot.repositories) {
     if (!repository.active_clone_id) {
       continue;
     }
-    if (const auto clone = storage.get_clone_by_id(*repository.active_clone_id)) {
+    if (const auto clone =
+            data_source.clone_by_id(*repository.active_clone_id)) {
       snapshot.active_clones.push_back(*clone);
     }
   }
@@ -278,28 +279,14 @@ void WorkspaceSnapshot::recompute_identity() {
 
 WorkspaceContext::WorkspaceContext(std::string index_path,
                                    WorkspaceReadWriteMode mode,
-                                   Storage *storage,
-                                   std::unique_ptr<Storage> owned_storage,
+                                   WorkspaceDataSource *data_source,
                                    WorkspaceSnapshot snapshot)
     : index_path_(std::move(index_path)), mode_(mode),
-      storage_(storage), owned_storage_(std::move(owned_storage)),
-      snapshot_(std::move(snapshot)) {}
+      data_source_(data_source), snapshot_(std::move(snapshot)) {}
 
-WorkspaceContext WorkspaceContext::open(const std::string &index_path,
-                                        WorkspaceReadWriteMode mode) {
-  const auto storage_mode = mode == WorkspaceReadWriteMode::read_only
-                                ? Storage::OpenMode::read_only
-                                : Storage::OpenMode::read_write;
-  auto storage = std::make_unique<Storage>(index_path, storage_mode);
-  Storage *storage_ptr = storage.get();
-  WorkspaceSnapshot snapshot = WorkspaceSnapshot::capture(*storage);
-  return {index_path, mode, storage_ptr, std::move(storage),
-          std::move(snapshot)};
-}
-
-WorkspaceContext WorkspaceContext::borrow(Storage &storage,
-                                          WorkspaceReadWriteMode mode) {
-  return {{}, mode, &storage, nullptr, WorkspaceSnapshot::capture(storage)};
+WorkspaceContext WorkspaceContext::borrow(WorkspaceDataSource &data_source,
+                                           WorkspaceReadWriteMode mode) {
+  return {{}, mode, &data_source, WorkspaceSnapshot::capture(data_source)};
 }
 
 WorkspaceContext::WorkspaceContext(WorkspaceContext &&) noexcept = default;
@@ -308,22 +295,13 @@ WorkspaceContext &WorkspaceContext::operator=(WorkspaceContext &&) noexcept =
 WorkspaceContext::~WorkspaceContext() = default;
 
 TranslationUnitConfigurationService::TranslationUnitConfigurationService(
-    WorkspaceContext &context, Toolchain &toolchain,
-    const std::string &compile_db_path)
-    : TranslationUnitConfigurationService(context, toolchain) {
-  commands_ = CompileDb::load(compile_db_path);
-}
-
-TranslationUnitConfigurationService::TranslationUnitConfigurationService(
     WorkspaceContext &context, Toolchain &toolchain)
     : context_(context), toolchain_(toolchain) {}
 
-std::vector<std::string> resolved_options(
-    Storage &storage, const std::vector<std::string> &arguments) {
-  return CompileDb::resolve_options(
-      CompileDb::sanitize(arguments),
-      [&storage](const std::string &name) { return storage.get_alias(name); });
-}
+TranslationUnitConfigurationService::TranslationUnitConfigurationService(
+    WorkspaceContext &context, Toolchain &toolchain,
+    std::vector<WorkspaceCompileCommand> commands)
+    : context_(context), toolchain_(toolchain), commands_(std::move(commands)) {}
 
 TranslationUnitConfig resolve_config(
     Toolchain &toolchain, const std::string &source_path,
@@ -347,7 +325,7 @@ TranslationUnitConfig resolve_config(
 
 TranslationUnitConfig
 TranslationUnitConfigurationService::config_for_command(
-    const CompileCommand &command) const {
+    const WorkspaceCompileCommand &command) const {
   if (command.driver.empty()) {
     throw WorkspaceError(WorkspaceErrorCode::unsupported_compiler,
                          "compile command has no driver");
@@ -368,7 +346,7 @@ TranslationUnitConfigurationService::config_for_file(
 std::vector<std::string>
 TranslationUnitConfigurationService::normalized_arguments(
     const std::vector<std::string> &arguments) const {
-  return resolved_options(context_.storage(), arguments);
+  return context_.data_source().normalized_arguments(arguments);
 }
 
 std::vector<std::string>
@@ -428,7 +406,7 @@ TranslationUnitConfigurationService::resolve_all(
   const std::string normalized =
       pathutil::normpath(pathutil::abspath(source_path));
   std::vector<TranslationUnitDescriptor> descriptors;
-  for (const CompileCommand &command : commands_) {
+  for (const WorkspaceCompileCommand &command : commands_) {
     if (absolute_source(command) == normalized) {
       descriptors.push_back(
           descriptor_for(normalized, config_for_command(command)));
@@ -436,10 +414,11 @@ TranslationUnitConfigurationService::resolve_all(
   }
 
   if (descriptors.empty()) {
-    const auto file = context_.storage().get_file(normalized);
+    const auto file = context_.data_source().file(normalized);
     if (file) {
       const bool header = files::is_header(normalized);
-      const auto applicability = context_.storage().file_configs_for(file->id);
+      const auto applicability =
+          context_.data_source().file_configs_for(file->id);
       for (const FileConfigApplicability &association : applicability) {
         const bool applicable_role =
             (header && association.role == "header") ||
@@ -447,7 +426,7 @@ TranslationUnitConfigurationService::resolve_all(
         if (!applicable_role) {
           continue;
         }
-        auto config = context_.storage().translation_unit_config_by_id(
+        auto config = context_.data_source().translation_unit_config_by_id(
             association.config_id);
         if (!config) {
           continue;

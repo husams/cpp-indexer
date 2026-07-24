@@ -2,18 +2,61 @@
 #pragma once
 
 #include <cstdint>
-#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
-#include "compiledb/compiledb.hpp"
-#include "storage/storage.hpp"
+#include "storage/records.hpp"
 #include "util/errors.hpp"
 
 namespace cidx {
 
 class Toolchain;
+
+TranslationUnitConfig resolve_translation_unit_config(
+    const std::optional<std::string> &driver,
+    const std::optional<std::string> &working_dir,
+    const std::vector<std::string> &arguments,
+    const std::optional<std::string> &language = std::nullopt,
+    const std::optional<std::string> &resource_dir = std::nullopt,
+    const std::optional<std::string> &diagnostics_policy = std::nullopt);
+
+std::string
+canonical_translation_unit_config_json(const TranslationUnitConfig &config);
+
+struct IndexIdentity {
+  int schema_version = 39;
+  std::optional<std::string> source_revision;
+  std::optional<std::string> source_fingerprint;
+  std::optional<std::string> index_config;
+  std::optional<std::string> index_config_fingerprint;
+  std::string freshness = "unverifiable";
+};
+
+struct WorkspaceCompileCommand {
+  std::string directory;
+  std::string filename;
+  std::string driver;
+  std::vector<std::string> args;
+};
+
+class WorkspaceDataSource {
+public:
+  virtual ~WorkspaceDataSource() = default;
+
+  virtual std::vector<Repository> list_repositories() = 0;
+  virtual std::vector<Component> list_components() = 0;
+  virtual std::vector<SemanticUniverse> list_semantic_universes() = 0;
+  virtual IndexIdentity index_identity() = 0;
+  virtual std::optional<Clone> clone_by_id(int64_t clone_id) = 0;
+  virtual std::optional<File> file(const std::string &path) = 0;
+  virtual std::vector<FileConfigApplicability>
+  file_configs_for(int64_t file_id) = 0;
+  virtual std::optional<TranslationUnitConfig>
+  translation_unit_config_by_id(int64_t config_id) = 0;
+  virtual std::vector<std::string>
+  normalized_arguments(const std::vector<std::string> &arguments) = 0;
+};
 
 enum class WorkspaceErrorCode : std::uint8_t {
   unregistered_file,
@@ -48,7 +91,7 @@ struct WorkspaceSnapshot {
   std::string canonical_json;
   std::string identity;
 
-  static WorkspaceSnapshot capture(Storage &storage);
+  static WorkspaceSnapshot capture(WorkspaceDataSource &data_source);
   void recompute_identity();
 };
 
@@ -56,11 +99,8 @@ enum class WorkspaceReadWriteMode : std::uint8_t { read_only, read_write };
 
 class WorkspaceContext final {
 public:
-  static WorkspaceContext open(
-      const std::string &index_path,
-      WorkspaceReadWriteMode mode = WorkspaceReadWriteMode::read_only);
   static WorkspaceContext borrow(
-      Storage &storage,
+      WorkspaceDataSource &data_source,
       WorkspaceReadWriteMode mode = WorkspaceReadWriteMode::read_write);
 
   WorkspaceContext(WorkspaceContext &&) noexcept;
@@ -76,18 +116,21 @@ public:
   [[nodiscard]] const WorkspaceSnapshot &snapshot() const noexcept {
     return snapshot_;
   }
-  [[nodiscard]] Storage &storage() noexcept { return *storage_; }
-  [[nodiscard]] const Storage &storage() const noexcept { return *storage_; }
+  [[nodiscard]] WorkspaceDataSource &data_source() noexcept {
+    return *data_source_;
+  }
+  [[nodiscard]] const WorkspaceDataSource &data_source() const noexcept {
+    return *data_source_;
+  }
 
 private:
   WorkspaceContext(std::string index_path, WorkspaceReadWriteMode mode,
-                   Storage *storage, std::unique_ptr<Storage> owned_storage,
+                   WorkspaceDataSource *data_source,
                    WorkspaceSnapshot snapshot);
 
   std::string index_path_;
   WorkspaceReadWriteMode mode_;
-  Storage *storage_ = nullptr;
-  std::unique_ptr<Storage> owned_storage_;
+  WorkspaceDataSource *data_source_ = nullptr;
   WorkspaceSnapshot snapshot_;
 };
 
@@ -103,7 +146,8 @@ class TranslationUnitConfigurationService final {
 public:
   TranslationUnitConfigurationService(WorkspaceContext &context,
                                       Toolchain &toolchain,
-                                      const std::string &compile_db_path);
+                                      std::vector<WorkspaceCompileCommand>
+                                          commands);
   TranslationUnitConfigurationService(WorkspaceContext &context,
                                       Toolchain &toolchain);
 
@@ -122,14 +166,14 @@ private:
   descriptor_for(const std::string &source_path,
                 TranslationUnitConfig config) const;
   [[nodiscard]] TranslationUnitConfig
-  config_for_command(const CompileCommand &command) const;
+  config_for_command(const WorkspaceCompileCommand &command) const;
   [[nodiscard]] TranslationUnitConfig
   config_for_file(const File &file, const std::string &source_path) const;
   static void validate(const TranslationUnitConfig &config);
 
   WorkspaceContext &context_;
   Toolchain &toolchain_;
-  std::vector<CompileCommand> commands_;
+  std::vector<WorkspaceCompileCommand> commands_;
 };
 
 [[nodiscard]] const char *workspace_error_code_name(

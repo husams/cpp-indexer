@@ -141,19 +141,7 @@ public:
                 const std::vector<AliasEntry> &label_map);
 };
 
-// Resolve one replayable compiler invocation into the shared descriptor used
-// by indexing, include extraction, astgraph, diff, and proof metadata.
-TranslationUnitConfig resolve_translation_unit_config(
-    const std::optional<std::string> &driver,
-    const std::optional<std::string> &working_dir,
-    const std::vector<std::string> &arguments,
-    const std::optional<std::string> &language = std::nullopt,
-    const std::optional<std::string> &resource_dir = std::nullopt,
-    const std::optional<std::string> &diagnostics_policy = std::nullopt);
-
-// Canonical HSE-76 descriptor encoding and its portable identity hash.
-std::string
-canonical_translation_unit_config_json(const TranslationUnitConfig &config);
+// Portable identity hash for the canonical workspace descriptor.
 std::string translation_unit_config_hash(const TranslationUnitConfig &config);
 
 } // namespace cidx

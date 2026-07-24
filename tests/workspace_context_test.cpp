@@ -5,9 +5,12 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include <unistd.h>
 
+#include "compiledb/compiledb.hpp"
+#include "storage/storage.hpp"
 #include "toolchain/toolchain.hpp"
 #include "util/logger.hpp"
 #include "workspace/context.hpp"
@@ -28,6 +31,18 @@ void write_file(const fs::path &path, const std::string &contents) {
   std::ofstream out(path);
   REQUIRE(out.good());
   out << contents;
+}
+
+std::vector<cidx::WorkspaceCompileCommand>
+load_commands(const fs::path &path) {
+  std::vector<cidx::WorkspaceCompileCommand> commands;
+  for (const cidx::CompileCommand &command : cidx::CompileDb::load(path.string())) {
+    commands.push_back({.directory = command.directory,
+                        .filename = command.filename,
+                        .driver = command.driver,
+                        .args = command.args});
+  }
+  return commands;
 }
 
 } // namespace
@@ -96,12 +111,14 @@ TEST_CASE("descriptor resolver returns deterministic ambiguity diagnostics") {
     storage.set_active_clone(repository_id, std::nullopt);
   }
 
-  cidx::WorkspaceContext context = cidx::WorkspaceContext::open(
-      index.string(), cidx::WorkspaceReadWriteMode::read_only);
+  cidx::Storage storage(index.string(), cidx::Storage::OpenMode::read_only);
+  cidx::StorageWorkspaceAdapter workspace_data(storage);
+  cidx::WorkspaceContext context = cidx::WorkspaceContext::borrow(
+      workspace_data, cidx::WorkspaceReadWriteMode::read_only);
   cidx::Toolchain toolchain(cidx::Logger::root());
   toolchain.set_resource_include_for_test(std::nullopt);
-  cidx::TranslationUnitConfigurationService resolver(context, toolchain,
-                                                     compile_db.string());
+  cidx::TranslationUnitConfigurationService resolver(
+      context, toolchain, load_commands(compile_db));
 
   const auto descriptors = resolver.resolve_all(source.string());
   REQUIRE(descriptors.size() == 2);
@@ -128,11 +145,13 @@ TEST_CASE("unregistered files have typed workspace errors") {
   const fs::path compile_db = root / "compile_commands.json";
   write_file(compile_db, "[]");
   { cidx::Storage storage(index.string()); }
-  cidx::WorkspaceContext context = cidx::WorkspaceContext::open(
-      index.string(), cidx::WorkspaceReadWriteMode::read_only);
+  cidx::Storage storage(index.string(), cidx::Storage::OpenMode::read_only);
+  cidx::StorageWorkspaceAdapter workspace_data(storage);
+  cidx::WorkspaceContext context = cidx::WorkspaceContext::borrow(
+      workspace_data, cidx::WorkspaceReadWriteMode::read_only);
   cidx::Toolchain toolchain(cidx::Logger::root());
-  cidx::TranslationUnitConfigurationService resolver(context, toolchain,
-                                                     compile_db.string());
+  cidx::TranslationUnitConfigurationService resolver(
+      context, toolchain, load_commands(compile_db));
 
   try {
     (void)resolver.resolve((root / "missing.hpp").string());
@@ -159,8 +178,9 @@ TEST_CASE("header resolution uses owner applicability and reports ambiguity") {
   first.arguments = {"-std=c++23", "-DFIRST=1"};
   const int64_t first_id = storage.add_translation_unit_config(first);
 
+  cidx::StorageWorkspaceAdapter workspace_data(storage);
   cidx::WorkspaceContext context = cidx::WorkspaceContext::borrow(
-      storage, cidx::WorkspaceReadWriteMode::read_only);
+      workspace_data, cidx::WorkspaceReadWriteMode::read_only);
   cidx::Toolchain toolchain(cidx::Logger::root());
   toolchain.set_resource_include_for_test(std::nullopt);
   cidx::TranslationUnitConfigurationService resolver(context, toolchain);
