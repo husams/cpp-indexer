@@ -157,6 +157,19 @@ void build_top_level(CLI::App &app, ParsedArgs &pa) {
   search->preparse_callback([&pa](std::size_t) { pa.limit = 25; });
   search->callback([&pa] { pa.command = "search"; });
 
+  CLI::App *query = app.add_subcommand(
+      "query", "execute a declarative CXQ query against the index");
+  query
+      ->add_option("query", pa.query_text,
+                   "CXQ expression, for example codebase() | nodes()")
+      ->required();
+  query->add_option("--db", pa.index_db, kDbHelpText);
+  query->add_flag("--json", pa.query_json,
+                  "emit the stable machine-readable result");
+  query->add_flag("--explain", pa.query_explain,
+                  "show the normalized plan without executing it");
+  query->callback([&pa] { pa.command = "query"; });
+
   CLI::App *analyze = app.add_subcommand(
       "analyze", "run Souffle Datalog analyses over the index");
   analyze->add_option("--rule", pa.analyze_rule,
@@ -719,6 +732,56 @@ void build_graph(CLI::App &app, ParsedArgs &pa) {
   add_graph_selector(typeusers, pa);
 }
 
+void build_ui(CLI::App &app, ParsedArgs &pa) {
+  CLI::App *ui = app.add_subcommand(
+      "ui", "open or export the local bounded Cytoscape.js graph explorer");
+  ui->require_subcommand(1);
+  const auto leaf = [&pa, ui](const std::string &name,
+                              const std::string &description) {
+    CLI::App *sub = ui->add_subcommand(name, description);
+    sub->callback([&pa, name] {
+      pa.command = "ui";
+      pa.what = name;
+    });
+    sub->add_option("--root", pa.ui_root,
+                    "bounded root symbol name, USR, or numeric id");
+    sub->add_option("--query", pa.ui_query,
+                    "portable symbol reference executed through QueryPlan");
+    sub->add_option("--workspace", pa.ui_workspace,
+                    "workspace label carried by the GraphView request");
+    sub->add_option("--edge", pa.edge, "edge kinds (comma-separated)");
+    sub->add_option("--direction", pa.direction, "edge direction")
+        ->check(CLI::IsMember(kDirections));
+    sub->add_option("--depth", pa.ui_depth, "bounded traversal depth")
+        ->check(CLI::Range(0, 32));
+    sub->add_option("--limit", pa.ui_node_budget, "maximum graph nodes")
+        ->check(CLI::Range(1, 10000));
+    sub->add_option("--edge-limit", pa.ui_edge_budget, "maximum graph edges")
+        ->check(CLI::Range(1, 20000));
+    sub->add_option("--site-limit", pa.ui_site_budget,
+                    "maximum evidence sites in the graph")
+        ->check(CLI::Range(0, 20000));
+    sub->add_option("--byte-limit", pa.ui_byte_budget,
+                    "maximum graph JSON bytes")
+        ->check(CLI::Range(1024, 64 * 1024 * 1024));
+    sub->add_option("--db", pa.index_db, kDbHelpText);
+    return sub;
+  };
+
+  CLI::App *open = leaf("open", "serve the explorer on loopback");
+  open->add_option("--port", pa.ui_port, "loopback port (0 = ephemeral)")
+      ->check(CLI::Range(0, 65535));
+  open->add_flag("--no-browser", pa.ui_no_browser,
+                 "serve without launching the default browser");
+
+  CLI::App *exporter =
+      leaf("export", "write a self-contained offline snapshot");
+  exporter->add_option("--output", pa.ui_output, "output HTML path")
+      ->required()
+      ->type_name("FILE");
+  leaf("status", "show explorer contract and asset status");
+}
+
 } // namespace
 
 ParsedArgs parse_args(const std::vector<std::string> &argv) {
@@ -737,6 +800,7 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
   build_symbol(app, pa);
   build_graph(app, pa);
   build_include(app, pa);
+  build_ui(app, pa);
 
   // CLI11's vector-parse consumes tokens from the back.
   std::vector<std::string> tokens(argv.rbegin(), argv.rend());
@@ -759,7 +823,9 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     usage_fail(app, e);
   }
 
-  if ((pa.command == "graph" || pa.command == "include") && pa.index_db) {
+  if ((pa.command == "graph" || pa.command == "include" ||
+       pa.command == "query") &&
+      pa.index_db) {
     pa.index_db = pathutil::abspath(pathutil::expanduser(*pa.index_db));
   }
   if (pa.command == "include") {

@@ -25,14 +25,16 @@ std::string identity_segment(const std::string &value) {
   return std::to_string(value.size()) + ":" + value;
 }
 
-std::string portable_ungrouped_component_suffix(const std::string &path) {
+std::string
+portable_ungrouped_component_suffix(const std::string &path,
+                                    const std::string &component_name) {
   const std::string normalized = pathutil::normpath(path);
-  const auto root = normalized.find_first_not_of('/');
-  if (root == std::string::npos) {
+  const auto separator = normalized.rfind('/');
+  if (separator == std::string::npos || separator == 0) {
     return {};
   }
-  const auto separator = normalized.find('/', root);
-  return separator == std::string::npos ? "" : normalized.substr(separator + 1);
+  const std::string basename = normalized.substr(separator + 1);
+  return basename == component_name ? "" : basename;
 }
 
 json_out::Value index_identity_json(const IndexIdentity &index) {
@@ -1347,8 +1349,8 @@ private:
     }
     const std::string component =
         pathutil::isabs(query.col_text(1))
-            ? "ungrouped:" +
-                  portable_ungrouped_component_suffix(query.col_text(1))
+            ? "ungrouped:" + portable_ungrouped_component_suffix(
+                                 query.col_text(1), query.col_text(0))
             : "grouped:" + query.col_text(0) + "\x1f" + query.col_text(1);
     std::string relative;
     for (int column = 2; column < 4; ++column) {

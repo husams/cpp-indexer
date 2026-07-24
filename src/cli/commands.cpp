@@ -37,6 +37,9 @@ int run_command(const ParsedArgs &args, Context &ctx) {
   if (args.command == "search") {
     return cmd_search(args, ctx);
   }
+  if (args.command == "query") {
+    return cmd_query(args, ctx);
+  }
   if (args.command == "show") {
     return args.what == "symbol" ? cmd_show_symbol(args, ctx)
                                  : cmd_show_file(args, ctx);
@@ -134,6 +137,15 @@ int run_command(const ParsedArgs &args, Context &ctx) {
   }
   if (args.command == "analyze") {
     return cmd_analyze(args, ctx);
+  }
+  if (args.command == "ui") {
+    if (args.what == "open") {
+      return cmd_ui_open(args, ctx);
+    }
+    if (args.what == "export") {
+      return cmd_ui_export(args, ctx);
+    }
+    return cmd_ui_status(args, ctx);
   }
   // list
   if (args.what == "components") {

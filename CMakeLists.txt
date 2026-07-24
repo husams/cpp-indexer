@@ -178,17 +178,23 @@ add_library(cidx_core STATIC
   src/cli/commands_graph.cpp
   src/cli/commands_ingest.cpp
   src/cli/commands_repo.cpp
+  src/cli/commands_query.cpp
   src/cli/commands_show.cpp
   src/cli/analyze.cpp
   src/graph/query.cpp
   src/graph/emit.cpp
   src/query/plan.cpp
+  src/query/cxq.cpp
   src/query/exec.cpp
   src/include_hygiene/graph.cpp
   src/include_hygiene/analysis.cpp
   src/include_hygiene/plan.cpp
   src/util/json_read.cpp
   src/cli/include_cmd.cpp
+  src/cli/commands_ui.cpp
+  src/ui/graph_view.cpp
+  src/ui/assets.cpp
+  src/ui/server.cpp
   src/diff/target.cpp
   src/diff/compare.cpp
   src/diff/report.cpp
@@ -361,6 +367,8 @@ target_include_directories(cidx_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
+target_compile_definitions(cidx_core PRIVATE
+  "CIDX_UI_ASSET_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/web\"")
 target_compile_options(cidx_core PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra>
 )

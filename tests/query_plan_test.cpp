@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <vector>
 
+#include "query/cxq.hpp"
 #include "query/exec.hpp"
 #include "query/plan.hpp"
 #include "storage/records.hpp"
@@ -180,6 +181,65 @@ TEST_CASE("query_plan: canonical JSON matches the shared golden") {
     out << rendered;
   }
   CHECK(rendered == read_file(CIDX_CXQ_GOLDEN));
+}
+
+TEST_CASE("query_plan: CXQ text lowers to the immutable plan") {
+  const Plan parsed =
+      parse_cxq("codebase() | nodes(kind = class) | "
+                "where(is_definition = true and name ~= 'Widget*') | "
+                "select(name, usr) | order_by(name) | limit(10)");
+  const Plan expected =
+      (start(codebase()) | nodes(eq("kind", "class")) |
+       where(all_of({eq("is_definition", true), glob("name", "Widget*")})) |
+       select({"name", "usr"}) | order_by({"name"}) | limit(10))
+          .plan();
+  CHECK(canonical_json(parsed) == canonical_json(expected));
+
+  const Plan symbol_plan = parse_cxq("symbol('USR::f') | out(calls, 1, 2)");
+  CHECK(canonical_json(symbol_plan).find("USR::f") != std::string::npos);
+}
+
+TEST_CASE("query_plan: CXQ text reports stable parse errors") {
+  CHECK_THROWS_WITH(
+      parse_cxq("nodes()"),
+      "E_PARSE: query must start with codebase(), symbol(), or entity()");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | limit(nope)"),
+                    "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(
+      parse_cxq("codebase() | nodes(kind = class, name = Widget)"),
+      "E_PARSE: nodes() takes zero or one predicate");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, mode=static)"),
+                    "E_PARSE: depth must be an integer or depth=min..max");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | nodes() | limit(+1)"),
+                    "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | nodes() | limit(1_0)"),
+                    "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(
+      parse_cxq("codebase() | nodes() | limit(9223372036854775808)"),
+      "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(
+      parse_cxq("codebase() | nodes() | limit(-9223372036854775809)"),
+      "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, +1)"),
+                    "E_PARSE: depth must be an integer or depth=min..max");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, 1_0)"),
+                    "E_PARSE: depth must be an integer or depth=min..max");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, 9223372036854775808)"),
+                    "E_PARSE: depth must be an integer or depth=min..max");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, depth=+1..2)"),
+                    "E_PARSE: depth must be written as depth=min..max");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | count(extra)"),
+                    "E_PARSE: count() takes no arguments");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | rank(name)"),
+                    "E_PARSE: rank() is not available in v1");
+}
+
+TEST_CASE("query_plan: CXQ text rejects oversized integer tokens") {
+  const std::string digits(5000, '9');
+  CHECK_THROWS_WITH(parse_cxq("codebase() | nodes() | limit(" + digits + ")"),
+                    "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, " + digits + ")"),
+                    "E_PARSE: depth must be an integer or depth=min..max");
 }
 
 // ---------------------------------------------------------------------------
@@ -839,6 +899,33 @@ TEST_CASE(
         std::get<int64_t>(ungrouped_arguments.rows[1][0]));
   CHECK(std::get<std::string>(ungrouped_arguments.rows[0][1]) !=
         std::get<std::string>(ungrouped_arguments.rows[1][1]));
+
+  Storage mirrored_first(":memory:");
+  seed(mirrored_first, "/Users/husam/.codex/worktrees/a/cpp-indexer", "",
+       "mirrored", false);
+  Storage mirrored_second(":memory:");
+  seed(mirrored_second, "/Users/husam/.codex/worktrees/b/cpp-indexer", "",
+       "mirrored", false);
+  Executor mirrored_first_executor(mirrored_first);
+  Executor mirrored_second_executor(mirrored_second);
+  const auto mirrored_first_evidence =
+      mirrored_first_executor.run((start(codebase()) | view(View::Evidence) |
+                                   nodes() | select({"identity_key"}))
+                                      .plan());
+  const auto mirrored_second_evidence =
+      mirrored_second_executor.run((start(codebase()) | view(View::Evidence) |
+                                    nodes() | select({"identity_key"}))
+                                       .plan());
+  const auto mirrored_first_arguments = mirrored_first_executor.run(
+      (start(codebase()) | view(View::CallArgument) | nodes() |
+       select({"identity_key"}))
+          .plan());
+  const auto mirrored_second_arguments = mirrored_second_executor.run(
+      (start(codebase()) | view(View::CallArgument) | nodes() |
+       select({"identity_key"}))
+          .plan());
+  CHECK(mirrored_first_evidence.rows == mirrored_second_evidence.rows);
+  CHECK(mirrored_first_arguments.rows == mirrored_second_arguments.rows);
 }
 
 TEST_CASE("query_plan: devirtualized calls preserve the inherited receiver") {

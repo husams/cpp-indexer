@@ -34,6 +34,16 @@
       "executors": ["cpp", "python"],
       "schema": "spec/contracts/catalog.schema.json",
       "golden": "spec/contracts/golden/catalog.json"
+    },
+    {
+      "id": "extension-packages",
+      "owner": "HSE-65",
+      "promise": "content-addressed-lockfile",
+      "executors": ["python"],
+      "schema": "schemas/extension-package.schema.json",
+      "lock_schema": "schemas/extension-lock.schema.json",
+      "result_schema": "spec/contracts/extension-result.schema.json",
+      "golden": "spec/contracts/golden/extension-packages.json"
     }
   ]
 }

@@ -1,0 +1,31 @@
+{
+  "cases": [
+    {
+      "id": "positive-boundary",
+      "package": "examples/packages/banking/extract",
+      "fixture": "../fixture/workspace.json",
+      "expected": "valid",
+      "expected_facts": [{"relation": "banking.extract/relation/application_state_boundary", "declaration": "AccountState"}]
+    },
+    {
+      "id": "positive-analysis",
+      "package": "examples/packages/banking/analysis",
+      "fixture": "../fixture/workspace.json",
+      "expected": "valid",
+      "expected_results": [{"boundary": "AccountState", "classification": "application-state"}],
+      "checks": {"kind": "cidx.analysis"}
+    },
+    {
+      "id": "output-limit",
+      "package": "examples/packages/banking/extract",
+      "fixture": "../fixture/workspace.json",
+      "expected": "invalid",
+      "expected_facts": [{"relation": "banking.extract/relation/application_state_boundary", "declaration": "AccountState"}],
+      "checks": {"max_output_rows": 0}
+    },
+    {"id": "excessive-budget", "package": "examples/packages/banking/analysis", "expected": "invalid", "checks": {"max_budget": 1000}},
+    {"id": "stale-schema", "package": "examples/packages/banking/negative/stale", "expected": "invalid"},
+    {"id": "malformed-manifest", "package": "examples/packages/banking/negative/malformed", "expected": "invalid"},
+    {"id": "missing-dependency", "package": "examples/packages/banking/negative/missing-dependency", "expected": "invalid"}
+  ]
+}

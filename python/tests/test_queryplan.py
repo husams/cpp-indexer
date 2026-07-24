@@ -22,6 +22,7 @@ from indexer.queryplan import (  # noqa: E402
     Executor, PlanError, all_of, canonical_json, codebase, count, distinct,
     entity, eq, except_, glob, in_, in_list, intersect, limit, ne, nodes,
     not_, order_by, out, select, start, symbol, union_, validate, view, where,
+    parse_cxq,
 )
 
 _REPO_ROOT = os.path.abspath(
@@ -106,6 +107,64 @@ def test_canonical_json_matches_shared_golden():
         for name, plan in sorted(_golden_plans().items()))
     with open(_GOLDEN, "rb") as fh:
         assert rendered.encode() == fh.read()
+
+
+def test_textual_cxq_lowers_to_the_shared_plan():
+    parsed = parse_cxq(
+        "codebase() | nodes(kind = class) | "
+        "where(is_definition = true and name ~= 'Widget*') | "
+        "select(name, usr) | order_by(name) | limit(10)")
+    expected = (
+        start(codebase()) | nodes(eq("kind", "class"))
+        | where(all_of([eq("is_definition", True),
+                       glob("name", "Widget*")]))
+        | select(["name", "usr"]) | order_by(["name"]) | limit(10)
+    ).plan
+    assert canonical_json(parsed) == canonical_json(expected)
+    with pytest.raises(PlanError, match=r"E_PARSE: limit\(\) requires one integer"):
+        parse_cxq("codebase() | limit(nope)")
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("codebase() | nodes(kind = class, name = Widget)",
+         r"E_PARSE: nodes\(\) takes zero or one predicate"),
+        ("codebase() | out(calls, mode=static)",
+         "E_PARSE: depth must be an integer or depth=min..max"),
+        ("codebase() | nodes() | limit(+1)",
+         r"E_PARSE: limit\(\) requires one integer"),
+        ("codebase() | nodes() | limit(1_0)",
+         r"E_PARSE: limit\(\) requires one integer"),
+        ("codebase() | nodes() | limit(9223372036854775808)",
+         r"E_PARSE: limit\(\) requires one integer"),
+        ("codebase() | nodes() | limit(-9223372036854775809)",
+         r"E_PARSE: limit\(\) requires one integer"),
+        ("codebase() | out(calls, +1)",
+         "E_PARSE: depth must be an integer or depth=min..max"),
+        ("codebase() | out(calls, 1_0)",
+         "E_PARSE: depth must be an integer or depth=min..max"),
+        ("codebase() | out(calls, 9223372036854775808)",
+         "E_PARSE: depth must be an integer or depth=min..max"),
+        ("codebase() | out(calls, depth=+1..2)",
+         "E_PARSE: depth must be written as depth=min..max"),
+        ("codebase() | count(extra)", r"E_PARSE: count\(\) takes no arguments"),
+        ("codebase() | rank(name)", r"E_PARSE: rank\(\) is not available in v1"),
+    ],
+)
+def test_textual_cxq_rejects_unsupported_or_ambiguous_syntax(text, message):
+    with pytest.raises(PlanError, match=message):
+        parse_cxq(text)
+
+
+def test_textual_cxq_rejects_oversized_integer_tokens():
+    digits = "9" * 5000
+    with pytest.raises(PlanError, match=r"E_PARSE: limit\(\) requires one integer"):
+        parse_cxq(f"codebase() | nodes() | limit({digits})")
+    with pytest.raises(
+        PlanError, match="E_PARSE: depth must be an integer or depth=min..max"
+    ):
+        parse_cxq(f"codebase() | out(calls, {digits})")
 
 
 # ---------------------------------------------------------------------------
@@ -566,3 +625,34 @@ def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable(
     assert len(ungrouped_arguments.rows) == 2
     assert len({row[0] for row in ungrouped_arguments.rows}) == 2
     assert len({row[1] for row in ungrouped_arguments.rows}) == 2
+
+    mirrored_first = Storage(":memory:")
+    _seed_reverse_typed_graph(
+        mirrored_first,
+        "/Users/husam/.codex/worktrees/a/cpp-indexer",
+        caller_suffix="mirrored",
+        grouped=False,
+    )
+    mirrored_second = Storage(":memory:")
+    _seed_reverse_typed_graph(
+        mirrored_second,
+        "/Users/husam/.codex/worktrees/b/cpp-indexer",
+        caller_suffix="mirrored",
+        grouped=False,
+    )
+    mirrored_first_executor = Executor(mirrored_first)
+    mirrored_second_executor = Executor(mirrored_second)
+    assert mirrored_first_executor.run(
+        (start(codebase()) | view("evidence") | nodes()
+         | select(["identity_key"])).plan
+    ).rows == mirrored_second_executor.run(
+        (start(codebase()) | view("evidence") | nodes()
+         | select(["identity_key"])).plan
+    ).rows
+    assert mirrored_first_executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | select(["identity_key"])).plan
+    ).rows == mirrored_second_executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | select(["identity_key"])).plan
+    ).rows
