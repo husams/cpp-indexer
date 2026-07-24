@@ -352,6 +352,7 @@ if(NOT LLVM_ENABLE_RTTI)
   target_compile_options(cidx_compiledb PRIVATE -fno-rtti)
 endif()
 target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_compiledb>)
+target_sources(cidx_core PRIVATE src/workspace/context.cpp)
 
 # cidx indexes via the Clang C++ API only (monolithic shared libs:
 # clang-cpp + libLLVM). No libclang.
