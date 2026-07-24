@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <ranges>
 
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
@@ -163,8 +164,12 @@ ParseConfig resolve_parse_config(const SideSpec &spec) {
   } else {
     cfg.parse_file = cfg.file;
     resolution_path = cfg.file;
-    if (files::is_header(cfg.file) &&
-        db.translation_unit_configs_for_file(rec->id).empty()) {
+    const auto applicability = db.file_configs_for(rec->id);
+    const bool has_header_owner = std::ranges::any_of(
+        applicability, [](const FileConfigApplicability &association) {
+          return association.role == "header";
+        });
+    if (files::is_header(cfg.file) && !has_header_owner) {
       throw CidxError(spec.side + " file " + cfg.file +
                       " has no stored translation-unit configuration; pass --" +
                       spec.side + "-tu");

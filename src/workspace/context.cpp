@@ -2,13 +2,13 @@
 
 #include <algorithm>
 #include <array>
-#include <filesystem>
 #include <ranges>
 #include <sstream>
 #include <string_view>
 #include <utility>
 
 #include "toolchain/toolchain.hpp"
+#include "util/files.hpp"
 #include "util/hashing.hpp"
 #include "util/pathutil.hpp"
 
@@ -63,6 +63,44 @@ std::string optional_json(const std::optional<std::string> &value) {
   return value ? json_string(*value) : "null";
 }
 
+const Repository *repository_for(const WorkspaceSnapshot &snapshot,
+                                 int64_t repository_id) {
+  const auto it = std::ranges::find_if(
+      snapshot.repositories, [repository_id](const Repository &repository) {
+        return repository.id == repository_id;
+      });
+  return it == snapshot.repositories.end() ? nullptr : &*it;
+}
+
+const SemanticUniverse *universe_for(const WorkspaceSnapshot &snapshot,
+                                     int64_t universe_id) {
+  const auto it = std::ranges::find_if(
+      snapshot.semantic_universes,
+      [universe_id](const SemanticUniverse &universe) {
+        return universe.id == universe_id;
+      });
+  return it == snapshot.semantic_universes.end() ? nullptr : &*it;
+}
+
+std::string repository_json(const Repository *repository) {
+  if (repository == nullptr) {
+    return "null";
+  }
+  return "{\"kind\":" + json_string(repository->kind) +
+         ",\"name\":" + json_string(repository->name) +
+         ",\"remote_url\":" + optional_json(repository->remote_url) +
+         "}";
+}
+
+std::string universe_key_json(const WorkspaceSnapshot &snapshot,
+                              const std::optional<int64_t> &universe_id) {
+  if (!universe_id) {
+    return "null";
+  }
+  const SemanticUniverse *universe = universe_for(snapshot, *universe_id);
+  return universe == nullptr ? "null" : json_string(universe->key);
+}
+
 std::string workspace_snapshot_json(const WorkspaceSnapshot &snapshot) {
   std::vector<std::string> repositories;
   repositories.reserve(snapshot.repositories.size());
@@ -71,10 +109,8 @@ std::string workspace_snapshot_json(const WorkspaceSnapshot &snapshot) {
     value << "{\"kind\":" << json_string(repository.kind)
           << ",\"name\":" << json_string(repository.name)
           << ",\"remote_url\":" << optional_json(repository.remote_url)
-          << ",\"active_clone_id\":"
-          << (repository.active_clone_id
-                  ? std::to_string(*repository.active_clone_id)
-                  : "null")
+          << ",\"semantic_universe_key\":"
+          << universe_key_json(snapshot, repository.semantic_universe_id)
           << "}";
     repositories.push_back(value.str());
   }
@@ -83,7 +119,9 @@ std::string workspace_snapshot_json(const WorkspaceSnapshot &snapshot) {
   std::vector<std::string> clones;
   clones.reserve(snapshot.active_clones.size());
   for (const Clone &clone : snapshot.active_clones) {
-    clones.push_back("{\"label\":" + optional_json(clone.label) +
+    clones.push_back("{\"repository\":" +
+                     repository_json(repository_for(snapshot, clone.repository_id)) +
+                     ",\"label\":" + optional_json(clone.label) +
                      ",\"path\":" + json_string(clone.path) + "}");
   }
   std::ranges::sort(clones);
@@ -95,7 +133,15 @@ std::string workspace_snapshot_json(const WorkspaceSnapshot &snapshot) {
     value << "{\"kind\":" << json_string(component.kind)
           << ",\"name\":" << json_string(component.name)
           << ",\"path\":" << json_string(component.path)
-          << ",\"version\":" << optional_json(component.version) << "}";
+          << ",\"version\":" << optional_json(component.version)
+          << ",\"repository\":"
+          << repository_json(component.repository_id
+                                 ? repository_for(snapshot,
+                                                  *component.repository_id)
+                                 : nullptr)
+          << ",\"semantic_universe_key\":"
+          << universe_key_json(snapshot, component.semantic_universe_id)
+          << "}";
     components.push_back(value.str());
   }
   std::ranges::sort(components);
@@ -348,7 +394,7 @@ void TranslationUnitConfigurationService::validate(
   }
   for (const std::string &input : config.generated_inputs) {
     const std::string path = absolute_input(input, config.working_dir);
-    if (!std::filesystem::is_regular_file(path)) {
+    if (!files::is_regular_file(path)) {
       throw WorkspaceError(
           WorkspaceErrorCode::missing_generated_input,
           "generated input is missing: " + path, {path});
@@ -381,7 +427,8 @@ TranslationUnitConfigurationService::descriptor_for(
 std::vector<TranslationUnitDescriptor>
 TranslationUnitConfigurationService::resolve_all(
     const std::string &source_path) const {
-  if (context_.snapshot().index_identity.freshness == "stale") {
+  if (context_.mode() == WorkspaceReadWriteMode::read_only &&
+      context_.snapshot().index_identity.freshness == "stale") {
     throw WorkspaceError(WorkspaceErrorCode::stale_index,
                          "workspace index is stale");
   }
@@ -398,15 +445,26 @@ TranslationUnitConfigurationService::resolve_all(
   if (descriptors.empty()) {
     const auto file = context_.storage().get_file(normalized);
     if (file) {
-      const auto configs =
-          context_.storage().translation_unit_configs_for_file(file->id);
-      if (configs.empty() && file->compile_options) {
+      const bool header = files::is_header(normalized);
+      const auto applicability = context_.storage().file_configs_for(file->id);
+      for (const FileConfigApplicability &association : applicability) {
+        const bool applicable_role =
+            (header && association.role == "header") ||
+            (!header && association.role == "translation_unit");
+        if (!applicable_role) {
+          continue;
+        }
+        auto config = context_.storage().translation_unit_config_by_id(
+            association.config_id);
+        if (!config) {
+          continue;
+        }
+        config->association_state = association.state;
+        descriptors.push_back(descriptor_for(normalized, std::move(*config)));
+      }
+      if (descriptors.empty() && !header && file->compile_options) {
         descriptors.push_back(
             descriptor_for(normalized, config_for_file(*file, normalized)));
-      } else {
-        for (const TranslationUnitConfig &config : configs) {
-          descriptors.push_back(descriptor_for(normalized, config));
-        }
       }
     }
   }

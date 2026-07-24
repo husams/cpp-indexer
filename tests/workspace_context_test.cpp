@@ -32,23 +32,47 @@ void write_file(const fs::path &path, const std::string &contents) {
 
 } // namespace
 
-TEST_CASE("workspace identity includes active clone and is canonical") {
+TEST_CASE("workspace identity ignores database ids but preserves relationships") {
   cidx::WorkspaceSnapshot first;
-  first.repositories.push_back(cidx::Repository{.name = "repo",
-                                                .kind = "repo"});
-  first.components.push_back(cidx::Component{.name = "repo",
+  first.semantic_universes.push_back(
+      cidx::SemanticUniverse{.id = 7, .key = "program", .name = "Program"});
+  first.repositories.push_back(cidx::Repository{
+      .id = 41,
+      .name = "repo",
+      .kind = "repo",
+      .remote_url = std::string("https://example.test/repo.git"),
+      .active_clone_id = 100,
+      .semantic_universe_id = 7});
+  first.active_clones.push_back(cidx::Clone{
+      .id = 100, .repository_id = 41, .path = "/tmp/repo-worktree"});
+  first.components.push_back(cidx::Component{.id = 5,
+                                             .name = "repo",
                                              .path = "/tmp/repo",
-                                             .kind = "repo"});
+                                             .kind = "repo",
+                                             .repository_id = 41,
+                                             .semantic_universe_id = 7});
   first.recompute_identity();
 
-  cidx::WorkspaceSnapshot second = first;
-  second.active_clones.push_back(
-      cidx::Clone{.repository_id = 1, .path = "/tmp/repo-worktree"});
-  second.recompute_identity();
+  cidx::WorkspaceSnapshot same_workspace = first;
+  same_workspace.semantic_universes.front().id = 700;
+  same_workspace.repositories.front().id = 941;
+  same_workspace.repositories.front().active_clone_id = 8100;
+  same_workspace.repositories.front().semantic_universe_id = 700;
+  same_workspace.active_clones.front().id = 8100;
+  same_workspace.active_clones.front().repository_id = 941;
+  same_workspace.components.front().id = 105;
+  same_workspace.components.front().repository_id = 941;
+  same_workspace.components.front().semantic_universe_id = 700;
+  same_workspace.recompute_identity();
 
-  CHECK(first.canonical_json != second.canonical_json);
-  CHECK(first.identity != second.identity);
-  CHECK(first.canonical_json.find("\"components\"") == 1);
+  CHECK(first.canonical_json == same_workspace.canonical_json);
+  CHECK(first.identity == same_workspace.identity);
+  CHECK(first.canonical_json.find("active_clone_id") == std::string::npos);
+
+  cidx::WorkspaceSnapshot changed_relationship = same_workspace;
+  changed_relationship.components.front().repository_id.reset();
+  changed_relationship.recompute_identity();
+  CHECK(changed_relationship.identity != same_workspace.identity);
 }
 
 TEST_CASE("descriptor resolver returns deterministic ambiguity diagnostics") {
@@ -111,5 +135,59 @@ TEST_CASE("unregistered files have typed workspace errors") {
   } catch (const cidx::WorkspaceError &error) {
     CHECK(error.code() == cidx::WorkspaceErrorCode::unregistered_file);
     CHECK(error.candidates().size() == 1);
+  }
+}
+
+TEST_CASE("header resolution uses owner applicability and reports ambiguity") {
+  const fs::path root = make_temp_dir();
+  const fs::path index = root / "index.db";
+  const fs::path header_path = root / "include" / "shared.hpp";
+  write_file(header_path, "#pragma once\n");
+
+  cidx::Storage storage(index.string());
+  const int64_t component = storage.add_component("headers", root.string());
+  const int64_t directory = storage.add_directory(component, "include");
+  const int64_t header = storage.add_file(directory, "shared.hpp");
+
+  cidx::TranslationUnitConfig first;
+  first.driver = "clang++";
+  first.arguments = {"-std=c++23", "-DFIRST=1"};
+  const int64_t first_id = storage.add_translation_unit_config(first);
+
+  cidx::WorkspaceContext context = cidx::WorkspaceContext::borrow(
+      storage, cidx::WorkspaceReadWriteMode::read_only);
+  cidx::Toolchain toolchain(cidx::Logger::root());
+  toolchain.set_resource_include_for_test(std::nullopt);
+  cidx::TranslationUnitConfigurationService resolver(context, toolchain);
+
+  try {
+    (void)resolver.resolve(header_path.string());
+    FAIL("expected an unregistered header without an owner");
+  } catch (const cidx::WorkspaceError &error) {
+    CHECK(error.code() == cidx::WorkspaceErrorCode::unregistered_file);
+  }
+
+  storage.add_file_config({header, first_id, "header",
+                           cidx::TranslationUnitConfigState::registered,
+                           std::nullopt});
+  const auto one = resolver.resolve_all(header_path.string());
+  REQUIRE(one.size() == 1);
+
+  cidx::TranslationUnitConfig second = first;
+  second.arguments.push_back("-DSECOND=1");
+  const int64_t second_id = storage.add_translation_unit_config(second);
+  storage.add_file_config({header, second_id, "header",
+                           cidx::TranslationUnitConfigState::registered,
+                           std::nullopt});
+
+  const auto two = resolver.resolve_all(header_path.string());
+  REQUIRE(two.size() == 2);
+  CHECK(two[0].semantic_hash < two[1].semantic_hash);
+  try {
+    (void)resolver.resolve(header_path.string());
+    FAIL("expected a typed ambiguity error");
+  } catch (const cidx::WorkspaceError &error) {
+    CHECK(error.code() == cidx::WorkspaceErrorCode::ambiguous_translation_unit);
+    CHECK(error.candidates().size() == 2);
   }
 }

@@ -3,12 +3,18 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <filesystem>
 
 #include "storage/storage.hpp"
 #include "util/hashing.hpp"
 #include "util/pathutil.hpp"
 
 namespace cidx::files {
+
+bool is_regular_file(const std::string &path) {
+  std::error_code error;
+  return std::filesystem::is_regular_file(path, error) && !error;
+}
 
 bool is_header(const std::string &path) {
   // Extension after the last '.', but only within the final path segment.
