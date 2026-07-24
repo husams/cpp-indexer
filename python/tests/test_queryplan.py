@@ -551,7 +551,7 @@ def _seed_reverse_typed_graph(
 
 def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable():
     first = Storage(":memory:")
-    _seed_reverse_typed_graph(first, "/worktree-a", grouped=False)
+    _seed_reverse_typed_graph(first, "/tmp/a/cpp-indexer", grouped=False)
     executor = Executor(first)
 
     reverse_evidence = executor.run(
@@ -568,7 +568,7 @@ def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable(
     assert reverse_occurrence.scalar == 1
 
     second = Storage(":memory:")
-    _seed_reverse_typed_graph(second, "/different-worktree", grouped=False)
+    _seed_reverse_typed_graph(second, "/tmp/b/cpp-indexer", grouped=False)
     first_evidence = executor.run(
         (start(codebase()) | view("evidence") | nodes()
          | select(["identity_key"])).plan)
@@ -625,12 +625,8 @@ def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable(
         (start(codebase()) | view("call_argument") | nodes()
          | select(["id", "identity_key"])).plan
     )
-    assert len(ungrouped_evidence.rows) == 2
-    assert len({row[0] for row in ungrouped_evidence.rows}) == 2
-    assert len({row[1] for row in ungrouped_evidence.rows}) == 2
-    assert len(ungrouped_arguments.rows) == 2
-    assert len({row[0] for row in ungrouped_arguments.rows}) == 2
-    assert len({row[1] for row in ungrouped_arguments.rows}) == 2
+    assert not ungrouped_evidence.rows
+    assert not ungrouped_arguments.rows
 
     mirrored_first = Storage(":memory:")
     _seed_reverse_typed_graph(
@@ -666,14 +662,14 @@ def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable(
     non_catalogued_first = Storage(":memory:")
     _seed_reverse_typed_graph(
         non_catalogued_first,
-        "/tmp/worktree-a/cpp-indexer",
+        "/tmp/a/cpp-indexer",
         caller_suffix="non-catalogued-mirrored",
         grouped=False,
     )
     non_catalogued_second = Storage(":memory:")
     _seed_reverse_typed_graph(
         non_catalogued_second,
-        "/tmp/worktree-b/cpp-indexer",
+        "/tmp/b/cpp-indexer",
         caller_suffix="non-catalogued-mirrored",
         grouped=False,
     )

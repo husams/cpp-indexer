@@ -818,7 +818,7 @@ TEST_CASE(
   };
 
   Storage first(":memory:");
-  seed(first, "/worktree-a", "", "shared", false);
+  seed(first, "/tmp/a/cpp-indexer", "", "shared", false);
   Executor first_executor(first);
   const auto reverse_evidence =
       first_executor.run((start(codebase()) | view(View::Evidence) | nodes() |
@@ -837,7 +837,7 @@ TEST_CASE(
   CHECK(reverse_occurrence.scalar == 1);
 
   Storage second(":memory:");
-  seed(second, "/different-worktree", "", "shared", false);
+  seed(second, "/tmp/b/cpp-indexer", "", "shared", false);
   Executor second_executor(second);
   const auto first_evidence =
       first_executor.run((start(codebase()) | view(View::Evidence) | nodes() |
@@ -897,16 +897,8 @@ TEST_CASE(
       ungrouped_executor.run((start(codebase()) | view(View::CallArgument) |
                               nodes() | select({"id", "identity_key"}))
                                  .plan());
-  REQUIRE(ungrouped_evidence.rows.size() == 2);
-  CHECK(std::get<int64_t>(ungrouped_evidence.rows[0][0]) !=
-        std::get<int64_t>(ungrouped_evidence.rows[1][0]));
-  CHECK(std::get<std::string>(ungrouped_evidence.rows[0][1]) !=
-        std::get<std::string>(ungrouped_evidence.rows[1][1]));
-  REQUIRE(ungrouped_arguments.rows.size() == 2);
-  CHECK(std::get<int64_t>(ungrouped_arguments.rows[0][0]) !=
-        std::get<int64_t>(ungrouped_arguments.rows[1][0]));
-  CHECK(std::get<std::string>(ungrouped_arguments.rows[0][1]) !=
-        std::get<std::string>(ungrouped_arguments.rows[1][1]));
+  CHECK(ungrouped_evidence.rows.empty());
+  CHECK(ungrouped_arguments.rows.empty());
 
   Storage mirrored_first(":memory:");
   seed(mirrored_first, "/Users/husam/.codex/worktrees/a/cpp-indexer", "",
@@ -936,10 +928,10 @@ TEST_CASE(
   CHECK(mirrored_first_arguments.rows == mirrored_second_arguments.rows);
 
   Storage non_catalogued_first(":memory:");
-  seed(non_catalogued_first, "/tmp/worktree-a/cpp-indexer", "",
+  seed(non_catalogued_first, "/tmp/a/cpp-indexer", "",
        "non-catalogued-mirrored", false);
   Storage non_catalogued_second(":memory:");
-  seed(non_catalogued_second, "/tmp/worktree-b/cpp-indexer", "",
+  seed(non_catalogued_second, "/tmp/b/cpp-indexer", "",
        "non-catalogued-mirrored", false);
   Executor non_catalogued_first_executor(non_catalogued_first);
   Executor non_catalogued_second_executor(non_catalogued_second);

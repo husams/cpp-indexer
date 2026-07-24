@@ -39,20 +39,12 @@ __all__ = [
 ]
 
 
-def _portable_ungrouped_component_anchor(path: str) -> str:
-    """Return a stable workspace/component anchor for an ungrouped path."""
-    normalized = os.path.normpath(path)
-    parts = [part for part in normalized.split(os.sep) if part]
-    if len(parts) <= 1:
-        return ""
-    if "worktrees" in parts:
-        worktree = len(parts) - 1 - parts[::-1].index("worktrees")
-        if worktree + 2 < len(parts):
-            return os.sep.join(parts[worktree + 2:])
-    for index, part in enumerate(parts[:-1]):
-        if part == "worktree" or part.startswith(("worktree-", "worktree_")):
-            return os.sep.join(parts[index + 1:])
-    return os.sep.join(parts[-2:])
+def _component_owner(repository: str, remote_url: str, semantic_universe: str) -> str:
+    if remote_url:
+        return f"remote:{remote_url}"
+    if repository:
+        return f"repo:{repository}"
+    return f"universe:{semantic_universe or 'legacy'}"
 
 # ---- Budgets (docs/query-plan.md "Execution semantics") ----------------------
 
@@ -1273,6 +1265,44 @@ class Executor:
             return f"missing-symbol:{symbol_id}"
         return row[1] or f"{row[0]}\x1f{row[2]}"
 
+    def _ambiguous_ungrouped_file(self, file_id: int) -> bool:
+        row = self._conn.execute(
+            "SELECT c.name,c.path,r.name,r.remote_url,su.key "
+            "FROM file f JOIN directory d ON d.id=f.directory_id "
+            "JOIN component c ON c.id=d.component_id "
+            "LEFT JOIN repository r ON r.id=c.repository_id "
+            "LEFT JOIN semantic_universe su ON "
+            "su.id=COALESCE(c.semantic_universe_id,r.semantic_universe_id,1) "
+            "WHERE f.id=?", (file_id,)
+        ).fetchone()
+        if row is None or not os.path.isabs(row[1]):
+            return False
+        if not row[0]:
+            return True
+        owner = _component_owner(row[2], row[3], row[4])
+        components = self._conn.execute(
+            "SELECT DISTINCT c.path,r.name,r.remote_url,su.key "
+            "FROM component c LEFT JOIN repository r ON r.id=c.repository_id "
+            "LEFT JOIN semantic_universe su ON "
+            "su.id=COALESCE(c.semantic_universe_id,r.semantic_universe_id,1) "
+            "WHERE c.name=?", (row[0],)
+        )
+        return any(
+            os.path.isabs(candidate[0])
+            and _component_owner(candidate[1], candidate[2], candidate[3]) == owner
+            and candidate[0] != row[1]
+            for candidate in components
+        )
+
+    def _filter_ambiguous_ungrouped(self, st: _Stream) -> None:
+        if st.view not in ("call_argument", "evidence"):
+            return
+        st.keys = [
+            key for key in st.keys
+            if (st.view == "evidence" and len(key) > 4 and key[4] == 1)
+            or not self._ambiguous_ungrouped_file(key[1])
+        ]
+
     def _portable_file(self, file_id: int) -> str:
         row = self._conn.execute(
             "SELECT c.name,c.path,d.path,f.name,r.name,r.remote_url,su.key "
@@ -1288,10 +1318,7 @@ class Executor:
         owner = (f"remote:{row[5]}" if row[5] else
                  f"repo:{row[4]}" if row[4] else f"universe:{row[6] or 'legacy'}")
         if os.path.isabs(row[1]):
-            component = (
-                "ungrouped:"
-                + _portable_ungrouped_component_anchor(row[1])
-            )
+            component = f"ungrouped:{row[0]}"
         else:
             component = f"grouped:{row[0]}\x1f{row[1]}"
         relative = "/".join(part.strip("/") for part in (row[2], row[3]) if part)
@@ -1725,6 +1752,7 @@ class Executor:
         return by_id
 
     def _materialize(self, st: _Stream, fields: Sequence[str]) -> None:
+        self._filter_ambiguous_ungrouped(st)
         if st.view not in (SYMBOL_VIEW, ENTITY_VIEW):
             by_key = self._fetch_typed_cells(st, fields)
             st.fields = tuple(fields)

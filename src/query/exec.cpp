@@ -29,42 +29,17 @@ std::string identity_segment(const std::string &value) {
   return std::to_string(value.size()) + ":" + value;
 }
 
-std::string portable_ungrouped_component_anchor(const std::string &path) {
-  const std::string normalized = pathutil::normpath(path);
-  std::vector<std::string_view> segments;
-  for (std::size_t begin = normalized.find_first_not_of('/');
-       begin != std::string::npos;) {
-    const std::size_t end = normalized.find('/', begin);
-    segments.emplace_back(normalized.data() + begin,
-                          end == std::string::npos ? normalized.size() - begin
-                                                   : end - begin);
-    if (end == std::string::npos) {
-      break;
-    }
-    begin = normalized.find_first_not_of('/', end);
+std::string component_owner(const std::string &repository,
+                            const std::string &remote_url,
+                            const std::string &semantic_universe) {
+  if (!remote_url.empty()) {
+    return "remote:" + remote_url;
   }
-
-  const auto join_from = [&segments](std::size_t begin) {
-    std::string result;
-    for (std::size_t index = begin; index < segments.size(); ++index) {
-      if (!result.empty()) {
-        result.push_back('/');
-      }
-      result.append(segments[index]);
-    }
-    return result;
-  };
-  for (std::size_t index = 0; index + 1 < segments.size(); ++index) {
-    if (segments[index] == "worktrees" && index + 2 < segments.size()) {
-      return join_from(index + 2);
-    }
-    if (segments[index] == "worktree" ||
-        segments[index].starts_with("worktree-") ||
-        segments[index].starts_with("worktree_")) {
-      return join_from(index + 1);
-    }
+  if (!repository.empty()) {
+    return "repo:" + repository;
   }
-  return segments.size() <= 1 ? std::string{} : join_from(segments.size() - 2);
+  return "universe:" +
+         (semantic_universe.empty() ? "legacy" : semantic_universe);
 }
 
 json_out::Value index_identity_json(const IndexIdentity &index) {
@@ -516,6 +491,64 @@ public:
 private:
   Storage &db_;
   std::map<int64_t, std::optional<std::string>> file_paths_;
+
+  bool ambiguous_ungrouped_file(int64_t file_id) {
+    auto file =
+        db_.raw_db().prepare("SELECT c.name,c.path,r.name,r.remote_url,su.key "
+                             "FROM file f "
+                             "JOIN directory d ON d.id=f.directory_id "
+                             "JOIN component c ON c.id=d.component_id "
+                             "LEFT JOIN repository r ON r.id=c.repository_id "
+                             "LEFT JOIN semantic_universe su ON "
+                             "su.id=COALESCE(c.semantic_universe_id,"
+                             "r.semantic_universe_id,1) WHERE f.id=?");
+    file.bind(1, file_id);
+    if (!file.step() || !pathutil::isabs(file.col_text(1))) {
+      return false;
+    }
+    const std::string component_name = file.col_text(0);
+    if (component_name.empty()) {
+      return true;
+    }
+    const std::string owner =
+        component_owner(file.col_text(2), file.col_text(3), file.col_text(4));
+    auto components = db_.raw_db().prepare(
+        "SELECT DISTINCT c.path,r.name,r.remote_url,su.key "
+        "FROM component c "
+        "LEFT JOIN repository r ON r.id=c.repository_id "
+        "LEFT JOIN semantic_universe su ON "
+        "su.id=COALESCE(c.semantic_universe_id,"
+        "r.semantic_universe_id,1) "
+        "WHERE c.name=?");
+    components.bind(1, std::string_view{component_name});
+    while (components.step()) {
+      if (pathutil::isabs(components.col_text(0)) &&
+          component_owner(components.col_text(1), components.col_text(2),
+                          components.col_text(3)) == owner &&
+          components.col_text(0) != file.col_text(1)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void filter_ambiguous_ungrouped(Stream &st) {
+    if (st.view != View::CallArgument && st.view != View::Evidence) {
+      return;
+    }
+    std::vector<Stream::LogicalKey> kept;
+    kept.reserve(st.keys.size());
+    for (const auto &key : st.keys) {
+      if (st.view == View::Evidence && key.tag == 1) {
+        kept.push_back(key);
+        continue;
+      }
+      if (!ambiguous_ungrouped_file(key.b)) {
+        kept.push_back(key);
+      }
+    }
+    st.keys = std::move(kept);
+  }
 
   static const std::string &join_clause(bool need_entity) {
     static const std::string entity_join =
@@ -1391,8 +1424,7 @@ private:
     }
     const std::string component =
         pathutil::isabs(query.col_text(1))
-            ? "ungrouped:" +
-                  portable_ungrouped_component_anchor(query.col_text(1))
+            ? "ungrouped:" + query.col_text(0)
             : "grouped:" + query.col_text(0) + "\x1f" + query.col_text(1);
     std::string relative;
     for (int column = 2; column < 4; ++column) {
@@ -1809,6 +1841,7 @@ private:
   }
 
   void materialize(Stream &st, const std::vector<std::string> &fields) {
+    filter_ambiguous_ungrouped(st);
     if (!st.keys.empty() ||
         (st.view != View::Symbol && st.view != View::Entity)) {
       auto by_key = fetch_typed_cells(st, fields);
@@ -1958,6 +1991,7 @@ public:
     Result res;
     res.view = st.view;
     res.truncated = st.truncated;
+    filter_ambiguous_ungrouped(st);
     if (st.shape == Shape::Scalar) {
       res.shape = Shape::Scalar;
       // count() after select carries rows; otherwise ids hold the stream.
