@@ -24,6 +24,7 @@
       "layer": "foundation",
       "paths": ["src/util/**"],
       "allowedDependencies": ["foundation.util", "model.contracts"],
+      "allowedExternal": ["filesystem", "process"],
       "description": "Small platform utilities; filesystem and process access live here."
     },
     {
@@ -567,16 +568,36 @@
   ],
   "externalExceptions": [
     {
+      "source": "src/storage/artifacts.hpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "persistence -> filesystem adapter", "owner": "Storage M2 maintainers", "rationale": "Artifact public paths remain std::filesystem values until the WorkspaceContext path port is complete.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/artifacts.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "sys/stat.h",
+      "boundary": "persistence -> filesystem adapter", "owner": "Storage M2 maintainers", "rationale": "Artifact publication uses descriptor validation until the WorkspaceContext filesystem adapter is complete.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/artifacts.cpp", "fromModule": "persistence.sqlite", "toModule": "external:process", "include": "fcntl.h",
+      "boundary": "persistence -> process compatibility", "owner": "Storage M2 maintainers", "rationale": "Artifact publication uses POSIX durable-file flags until the foundation durability adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/artifacts.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "sys/file.h",
+      "boundary": "persistence -> filesystem adapter", "owner": "Storage M2 maintainers", "rationale": "Artifact publication uses the POSIX inter-process lock until the foundation durability adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/storage/artifacts.cpp", "fromModule": "persistence.sqlite", "toModule": "external:process", "include": "unistd.h",
+      "boundary": "persistence -> process compatibility", "owner": "Storage M2 maintainers", "rationale": "Artifact publication uses POSIX fsync/close until the foundation durability adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/astgraph/main.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "product surface -> filesystem adapter", "owner": "Storage M2 maintainers", "rationale": "Astgraph adoption needs filesystem paths for sidecar publication until the shared workspace adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
       "source": "src/ast/index_engine.cpp", "fromModule": "extraction.ast", "toModule": "external:filesystem", "include": "sys/stat.h",
       "boundary": "extraction -> filesystem compatibility", "owner": "Platform M1 extraction maintainers", "rationale": "Retain the current source-stat probe until workspace context owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
     },
     {
       "source": "src/astgraph/astgraph.cpp", "fromModule": "analysis.astgraph", "toModule": "external:process", "include": "unistd.h",
       "boundary": "astgraph -> process compatibility", "owner": "Platform M2 analysis maintainers", "rationale": "Retain the current unlink compatibility call until the runner port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-62"
-    },
-    {
-      "source": "src/astgraph/main.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
-      "boundary": "product surface -> filesystem compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the standalone AST graph input stat until shared workspace context owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
     },
     {
       "source": "src/cli/analyze.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
@@ -637,38 +658,6 @@
     {
       "source": "src/toolchain/toolchain.cpp", "fromModule": "workspace.toolchain", "toModule": "external:filesystem", "include": "sys/stat.h",
       "boundary": "workspace -> filesystem adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain the toolchain filesystem probe while WorkspaceContext is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
-    },
-    {
-      "source": "src/util/pathutil.cpp", "fromModule": "foundation.util", "toModule": "external:filesystem", "include": "pwd.h",
-      "boundary": "foundation -> filesystem adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain the host-user lookup until the workspace adapter owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
-    },
-    {
-      "source": "src/util/pathutil.cpp", "fromModule": "foundation.util", "toModule": "external:process", "include": "unistd.h",
-      "boundary": "foundation -> process adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain the host process compatibility call until the process port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
-    },
-    {
-      "source": "src/util/repo.cpp", "fromModule": "foundation.util", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "foundation -> filesystem adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain repository path operations until the workspace adapter owns them.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
-    },
-    {
-      "source": "src/util/subprocess.cpp", "fromModule": "foundation.util", "toModule": "external:process", "include": "fcntl.h",
-      "boundary": "foundation -> process adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain subprocess descriptor setup until the process port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
-    },
-    {
-      "source": "src/util/subprocess.cpp", "fromModule": "foundation.util", "toModule": "external:process", "include": "poll.h",
-      "boundary": "foundation -> process adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain subprocess polling until the process port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
-    },
-    {
-      "source": "src/util/subprocess.cpp", "fromModule": "foundation.util", "toModule": "external:process", "include": "spawn.h",
-      "boundary": "foundation -> process adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain POSIX spawn until the process port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
-    },
-    {
-      "source": "src/util/subprocess.cpp", "fromModule": "foundation.util", "toModule": "external:process", "include": "sys/wait.h",
-      "boundary": "foundation -> process adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain subprocess wait handling until the process port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
-    },
-    {
-      "source": "src/util/subprocess.cpp", "fromModule": "foundation.util", "toModule": "external:process", "include": "unistd.h",
-      "boundary": "foundation -> process adapter", "owner": "Platform M1 workspace maintainers", "rationale": "Retain subprocess pipe handling until the process port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
     },
     {
       "source": "src/storage/storage.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",

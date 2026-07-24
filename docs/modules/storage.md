@@ -9,15 +9,16 @@ by both indexing engines, and the resolve pass. ~5.5k LOC.
 
 | File | Role |
 |---|---|
-| `storage.hpp` / `storage.cpp` | the `Storage` class, schema DDL, `v2 → v28` migrations, `resolve_pass()` |
+| `storage.hpp` / `storage.cpp` | the `Storage` class, schema DDL, migrations, `resolve_pass()` |
 | `sqlite.hpp` / `sqlite.cpp` | a thin RAII wrapper over libsqlite3 (`Db`, `Stmt`) |
+| `artifacts.hpp` / `artifacts.cpp` | manifest-governed sidecar publication, validation, read-only attachment, leases, pins, and recovery |
 | `records.hpp` | plain-data row structs — no clang types leak here |
 
 ## Classes
 
 ### `Storage` (`storage.hpp:61`)
 
-Owns the connection and creates/migrates the DB to `schema_version = 28`. It is
+Owns the connection and creates/migrates the DB to `schema_version = 38`. It is
 the write surface both engines use, plus the read surface for lookups. Key
 groups:
 
@@ -81,4 +82,34 @@ products:
 
 `resolve_pass` finally counts remaining **stub** symbols
 (`resolved = 0 AND file_id IS NULL AND decl_file_id IS NULL`) and returns that
-count for the `resolve: N still-stub …` line.
+ count for the `resolve: N still-stub …` line.
+
+## Manifest-governed sidecars (schema v38)
+
+`index.db` remains the authoritative identity store. Immutable or rebuildable
+artifacts such as AST graphs, extension facts, proof caches, and accelerators
+are published through `ArtifactStore` and recorded in `artifact`; the
+`artifact_relation`, `artifact_identity_map`, `artifact_lease`, and
+`artifact_pin` tables carry only core metadata and stable identities. No
+database-local sidecar integer is used as a portable core identity.
+
+Publication writes and validates a temporary SQLite file, synchronizes it,
+renames it into a content-addressed `artifacts/<kind-hash>/<content-hash>.db`
+location, then commits the manifest reference. A failed manifest commit leaves
+an unreferenced file for `recover()` to remove; this is deliberately not an
+atomic cross-file transaction. Current selection is by `logical_id`, separate
+from physical location, so rebuilding or relocating a sidecar does not change
+the logical result identity.
+
+`attach_current()` requires a current manifest, matching envelope, matching
+content hash/size, passing `integrity_check`, complete/non-truncated/
+producer- or reader-verified status, the generated numeric catalog contract,
+and a deterministic unique attachment identifier. It uses a read-only URI
+and `query_only` while attached. Missing, stale, corrupt, incompatible,
+partial, truncated, or untrusted artifacts are surfaced as diagnostics rather
+than empty complete results. Leases and replay pins protect stale artifacts
+from cleanup. Backup/export callers use `export_plan()` to list every current
+artifact and report intentionally partial packages.
+The single-file versus manifest-plus-sidecar disk, latency, open/attach, and
+complexity comparison is owned by the HSE-75 benchmark work; this policy keeps
+those layouts interchangeable without changing authoritative graph semantics.

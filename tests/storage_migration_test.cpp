@@ -163,7 +163,10 @@ void check_migrated(const std::string &db_path) {
                                          "idx_edge_site_recv_decl_identity",
                                          "idx_call_arg_type_identity",
                                          "idx_call_arg_decl_identity",
-                                         "idx_call_arg_callee_identity"});
+                                         "idx_call_arg_callee_identity",
+                                         "idx_artifact_current_logical",
+                                         "idx_artifact_state",
+                                         "idx_artifact_identity_stable"});
 }
 
 } // namespace
@@ -188,9 +191,9 @@ TEST_CASE(
   check_migrated(path);
 }
 
-TEST_CASE("predecessor catalog hash requires the v36 to v37 migration") {
+TEST_CASE("predecessor catalog hash requires the v37 to v38 migration") {
   const std::string tmp = make_temp_dir();
-  for (const char *wrong_version : {"35", "37"}) {
+  for (const char *wrong_version : {"36", "38"}) {
     const std::string path =
         std::string(tmp) + "/wrong-" + wrong_version + ".db";
     {
@@ -202,10 +205,43 @@ TEST_CASE("predecessor catalog hash requires the v36 to v37 migration") {
                "' WHERE key = 'schema_version'");
       raw.exec(
           "UPDATE meta SET value = "
-          "'15e7ce8206c521cff6794530a382f0389320c0f3e49d148b0f311d058aa5157a' "
+          "'be3a97cf69140080586a079a27a97da7816455f477ce56435ee91c600cc993fc' "
           "WHERE key = 'catalog_hash'");
     }
     CHECK_THROWS_AS(cidx::Storage{path}, cidx::CidxError);
+  }
+}
+
+TEST_CASE("v37 database migrates to the v38 artifact manifest layer") {
+  const std::string tmp = make_temp_dir();
+  const std::string path = tmp + "/v37.db";
+  {
+    cidx::Storage db(path);
+  }
+  {
+    cidx::SqliteDb raw(path);
+    raw.exec("PRAGMA foreign_keys = OFF;");
+    for (const char *table :
+         {"artifact_pin", "artifact_lease", "artifact_identity_map",
+          "artifact_relation", "artifact"}) {
+      raw.exec(std::string("DROP TABLE ") + table);
+    }
+    raw.exec("UPDATE meta SET value = '37' WHERE key = 'schema_version'");
+  }
+
+  {
+    cidx::Storage db(path);
+  }
+
+  cidx::SqliteDb raw(path);
+  CHECK(meta_version(raw) == std::to_string(cidx::kSchemaVersion));
+  for (const char *table :
+       {"artifact", "artifact_relation", "artifact_identity_map",
+        "artifact_lease", "artifact_pin"}) {
+    auto st = raw.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
+    st.bind(1, std::string_view(table));
+    CHECK(st.step());
   }
 }
 

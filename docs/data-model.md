@@ -1,8 +1,10 @@
-# Data Model (schema 29)
+# Data Model (schema 38)
 
 [← docs index](README.md)
 
-Everything lives in one SQLite file, `index.db`. Identity is the **USR**
+The authoritative graph lives in one SQLite file, `index.db`. Optional
+content-addressed sidecars are governed by manifest rows in that database;
+they never become authoritative graph tables. Identity is the **USR**
 (Unified Symbol Resolution string, e.g. `c:@N@geo@S@Circle@F@area#1`) — stable
 across translation units and identical between the two indexing engines. The
 schema and all migrations (`v2 → v28`) live in
@@ -19,6 +21,10 @@ erDiagram
     directory   ||--o{ file        : contains
     file        ||--o{ symbol      : "indexed from"
     file        ||--o{ diagnostic  : "parse msgs"
+    artifact    ||--o{ artifact_relation : exposes
+    artifact    ||--o{ artifact_identity_map : maps
+    artifact    ||--o{ artifact_lease : leased
+    artifact    ||--o{ artifact_pin : pinned
 
     symbol      ||--o{ decl_site   : "seen at"
     symbol      ||--o{ edge        : "src / dst"
@@ -70,6 +76,22 @@ erDiagram
         string driver
         bool indexed
     }
+    artifact {
+        int id PK
+        string logical_id
+        string kind
+        string artifact_schema
+        int catalog_version
+        string catalog_hash
+        string producer_version
+        string workspace_identity
+        string tu_identity
+        string content_hash
+        string evidence
+        string trust
+        string state
+        string relative_path
+    }
 ```
 
 ## Table reference
@@ -78,12 +100,28 @@ erDiagram
 
 | Table | Purpose |
 |---|---|
-| `meta` | key/value; holds `schema_version` (29) and `graph_resolved_at` |
+| `meta` | key/value; holds `schema_version` (38) and `graph_resolved_at` |
 | `repository`, `clone` | group components; track git clones / active clone |
 | `component` | a source root (repo/dir): name, path, kind, version |
 | `directory` | a directory under a component |
 | `file` | one source/header: `md5` (staleness), `compile_options`, `driver`, `indexed` |
 | `diagnostic` | parse warnings/errors kept per file |
+
+### Optional artifact manifest
+
+| Table | Purpose |
+|---|---|
+| `artifact` | manifest envelope, content hash, relative path, completeness/trust state, and current/stale/retired lifecycle |
+| `artifact_relation` | deterministic list of relations exposed by a sidecar |
+| `artifact_identity_map` | stable identity to sidecar-local identity mapping, including unresolved mappings |
+| `artifact_lease` / `artifact_pin` | retention references that protect artifacts from recovery cleanup |
+
+Sidecars are written, validated, durably renamed, and then published through a
+core transaction guarded by a publication lock shared with recovery. Attachments
+are read-only and require a complete, non-truncated, producer- or reader-verified,
+hash-matching envelope with the current generated catalog version/hash and an
+evidence class. Missing, stale, corrupt, partial, or unverified artifacts
+produce diagnostics rather than an empty complete result.
 
 ### Layer-0 — raw extraction (written by the indexing engine)
 

@@ -30,6 +30,11 @@ std::optional<std::string> md5_of(const std::string &path);
 //       -> "d6cca25a6ed23cd603c1baefecbc7f67f5435639"
 std::string sha1_hex(const std::string &data);
 
+// Algorithm-tagged SHA-256 digest for content-addressed artifacts.
+std::string sha256_hex(const std::string &data);
+std::optional<std::string> sha256_of(const std::string &path);
+std::optional<std::string> sha256_of_fd(int fd);
+
 // Cache key: sha1(abspath + "\0" + "\0".join(flags) [+ "\0drv\0" + driver])
 // Mirrors Python astcache.cache_key() byte-for-byte (ADR-005 §interchange).
 struct AstCacheKey {

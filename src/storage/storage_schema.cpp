@@ -779,7 +779,73 @@ CREATE TABLE IF NOT EXISTS include_macro_use (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_include_macro_use_path ON include_macro_use(def_path);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '37');
+-- Manifest-governed immutable/rebuildable artifacts. These rows are core
+-- metadata only: no foreign key crosses into a sidecar database.
+CREATE TABLE IF NOT EXISTS artifact (
+    id INTEGER PRIMARY KEY,
+    logical_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    artifact_schema TEXT NOT NULL,
+    catalog_version INTEGER NOT NULL,
+    catalog_hash TEXT NOT NULL,
+    producer_version TEXT NOT NULL,
+    engine_version TEXT NOT NULL,
+    workspace_identity TEXT NOT NULL,
+    tu_identity TEXT NOT NULL DEFAULT '',
+    configuration_identity TEXT NOT NULL DEFAULT '',
+    input_fact_set_identity TEXT NOT NULL DEFAULT '',
+    completeness TEXT NOT NULL CHECK (completeness IN ('complete','partial','unknown')),
+    truncation TEXT NOT NULL CHECK (truncation IN ('none','truncated','unknown')),
+    trust TEXT NOT NULL CHECK (trust IN ('unverified','producer-verified','reader-verified')),
+    evidence TEXT NOT NULL CHECK (evidence IN ('source','derived','inferred','runtime','assumption','proof')),
+    attachment_name TEXT NOT NULL,
+    retention_policy TEXT NOT NULL DEFAULT 'retain',
+    relative_path TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+    state TEXT NOT NULL CHECK (state IN ('current','stale','retired')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    published_at TEXT,
+    UNIQUE (logical_id, content_hash)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_current_logical
+    ON artifact(logical_id) WHERE state = 'current';
+CREATE INDEX IF NOT EXISTS idx_artifact_state ON artifact(state);
+
+CREATE TABLE IF NOT EXISTS artifact_relation (
+    artifact_id INTEGER NOT NULL REFERENCES artifact(id) ON DELETE CASCADE,
+    relation_name TEXT NOT NULL,
+    PRIMARY KEY (artifact_id, relation_name)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS artifact_identity_map (
+    artifact_id INTEGER NOT NULL REFERENCES artifact(id) ON DELETE CASCADE,
+    local_identity TEXT NOT NULL,
+    identity_kind TEXT NOT NULL,
+    stable_identity TEXT NOT NULL,
+    resolution_state TEXT NOT NULL CHECK (resolution_state IN ('resolved','unresolved','unknown')),
+    core_symbol_id INTEGER,
+    diagnostic TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (artifact_id, local_identity, identity_kind)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_artifact_identity_stable
+    ON artifact_identity_map(stable_identity);
+
+CREATE TABLE IF NOT EXISTS artifact_lease (
+    artifact_id INTEGER NOT NULL REFERENCES artifact(id) ON DELETE CASCADE,
+    lease_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    PRIMARY KEY (artifact_id, lease_id)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS artifact_pin (
+    artifact_id INTEGER NOT NULL REFERENCES artifact(id) ON DELETE CASCADE,
+    pin_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    PRIMARY KEY (artifact_id, pin_id)
+) WITHOUT ROWID;
+
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '38');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest
