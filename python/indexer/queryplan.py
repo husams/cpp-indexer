@@ -362,11 +362,14 @@ def _cxq_find_keyword(value: str, keyword: str) -> Optional[int]:
 
 
 def _cxq_int(value: str) -> Optional[int]:
-    try:
-        text = _cxq_trim(value)
-        return int(text) if text else None
-    except ValueError:
+    text = _cxq_trim(value)
+    digits = text[1:] if text.startswith("-") else text
+    if not digits or any(char < "0" or char > "9" for char in digits):
         return None
+    number = int(text)
+    if number < -(1 << 63) or number > (1 << 63) - 1:
+        return None
+    return number
 
 
 def _cxq_list(value: str) -> list[str]:

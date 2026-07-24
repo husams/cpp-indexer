@@ -210,6 +210,24 @@ TEST_CASE("query_plan: CXQ text reports stable parse errors") {
       "E_PARSE: nodes() takes zero or one predicate");
   CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, mode=static)"),
                     "E_PARSE: depth must be an integer or depth=min..max");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | nodes() | limit(+1)"),
+                    "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | nodes() | limit(1_0)"),
+                    "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(
+      parse_cxq("codebase() | nodes() | limit(9223372036854775808)"),
+      "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(
+      parse_cxq("codebase() | nodes() | limit(-9223372036854775809)"),
+      "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, +1)"),
+                    "E_PARSE: depth must be an integer or depth=min..max");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, 1_0)"),
+                    "E_PARSE: depth must be an integer or depth=min..max");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, 9223372036854775808)"),
+                    "E_PARSE: depth must be an integer or depth=min..max");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, depth=+1..2)"),
+                    "E_PARSE: depth must be written as depth=min..max");
   CHECK_THROWS_WITH(parse_cxq("codebase() | count(extra)"),
                     "E_PARSE: count() takes no arguments");
   CHECK_THROWS_WITH(parse_cxq("codebase() | rank(name)"),
