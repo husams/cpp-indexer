@@ -27,7 +27,8 @@ namespace cidx {
 
 using namespace detail;
 
-int64_t Storage::add_directory(int64_t component_id, const std::string &path) {
+int64_t SqliteStorageService::add_directory(int64_t component_id,
+                                            const std::string &path) {
   std::string p = path.empty() ? std::string(".") : pathutil::normpath(path);
   if (p == ".") {
     p = "";
@@ -46,8 +47,9 @@ int64_t Storage::add_directory(int64_t component_id, const std::string &path) {
   return did;
 }
 
-std::optional<Directory> Storage::get_directory(int64_t component_id,
-                                                const std::string &path) {
+std::optional<Directory>
+SqliteStorageService::get_directory(int64_t component_id,
+                                    const std::string &path) {
   const std::string p =
       (path.empty() || path == ".") ? std::string() : pathutil::normpath(path);
   auto st = db_.prepare(std::string("SELECT ") + kDirectoryCols +
@@ -60,7 +62,8 @@ std::optional<Directory> Storage::get_directory(int64_t component_id,
   return directory_from(st);
 }
 
-std::optional<Directory> Storage::get_directory_by_id(int64_t directory_id) {
+std::optional<Directory>
+SqliteStorageService::get_directory_by_id(int64_t directory_id) {
   auto st = db_.prepare(std::string("SELECT ") + kDirectoryCols +
                         " FROM directory WHERE id = ?");
   st.bind(1, directory_id);
@@ -71,8 +74,9 @@ std::optional<Directory> Storage::get_directory_by_id(int64_t directory_id) {
 }
 
 std::vector<std::pair<Directory, std::string>>
-Storage::list_directories(const std::optional<int64_t> &component_id,
-                          const std::optional<std::string> &name) {
+SqliteStorageService::list_directories(
+    const std::optional<int64_t> &component_id,
+    const std::optional<std::string> &name) {
   std::string sql =
       "SELECT d.id, d.component_id, d.path, c.name AS comp_name "
       "FROM directory d JOIN component c ON c.id = d.component_id";
@@ -101,8 +105,8 @@ Storage::list_directories(const std::optional<int64_t> &component_id,
   return out;
 }
 
-std::string Storage::dir_scope_sql(const std::string &dir_path,
-                                   std::vector<SqlValue> &args) {
+std::string SqliteStorageService::dir_scope_sql(const std::string &dir_path,
+                                                std::vector<SqlValue> &args) {
   std::string rel = pathutil::normpath(dir_path);
   if (rel == "." || rel.empty()) {
     rel = "";
@@ -117,7 +121,7 @@ std::string Storage::dir_scope_sql(const std::string &dir_path,
 // -- files
 // -------------------------------------------------------------------------
 
-int64_t Storage::add_file(
+int64_t SqliteStorageService::add_file(
     int64_t directory_id, const std::string &name,
     const std::optional<double> &mtime, const std::optional<std::string> &md5,
     const std::optional<std::vector<std::string>> &compile_options,
@@ -191,7 +195,7 @@ int64_t Storage::add_file(
 }
 
 std::optional<std::tuple<int64_t, std::string, std::string>>
-Storage::split_path(const std::string &abs_path) {
+SqliteStorageService::split_path(const std::string &abs_path) {
   const std::string abs = pathutil::abspath(abs_path);
   const auto comp = component_for_path(abs);
   if (!comp) {
@@ -208,7 +212,7 @@ Storage::split_path(const std::string &abs_path) {
   return std::make_tuple(comp->id, rel_dir, name);
 }
 
-int64_t Storage::add_file_path(
+int64_t SqliteStorageService::add_file_path(
     const std::string &abs_path, const std::optional<double> &mtime,
     const std::optional<std::string> &md5,
     const std::optional<std::vector<std::string>> &compile_options,
@@ -223,7 +227,8 @@ int64_t Storage::add_file_path(
   return add_file(dir_id, name, mtime, md5, compile_options, driver);
 }
 
-std::optional<File> Storage::get_file(const std::string &abs_path) {
+std::optional<File>
+SqliteStorageService::get_file(const std::string &abs_path) {
   const auto sp = split_path(abs_path);
   if (!sp) {
     return std::nullopt;
@@ -243,7 +248,7 @@ std::optional<File> Storage::get_file(const std::string &abs_path) {
   return file_from(st);
 }
 
-std::optional<File> Storage::get_file_by_id(int64_t file_id) {
+std::optional<File> SqliteStorageService::get_file_by_id(int64_t file_id) {
   auto st = db_.prepare(std::string("SELECT ") + kFileCols +
                         " FROM file WHERE id = ?");
   st.bind(1, file_id);
@@ -253,7 +258,8 @@ std::optional<File> Storage::get_file_by_id(int64_t file_id) {
   return file_from(st);
 }
 
-std::optional<std::string> Storage::file_abs_path(int64_t file_id) {
+std::optional<std::string>
+SqliteStorageService::file_abs_path(int64_t file_id) {
   // SELECT c.path, c.version, c.repository_id so we can build the effective
   // root (clone-anchored when grouped).
   auto st =
@@ -274,7 +280,8 @@ std::optional<std::string> Storage::file_abs_path(int64_t file_id) {
   return reconstruct_path(root, st.col_text(3), st.col_text(4));
 }
 
-std::optional<std::string> Storage::directory_abs_path(int64_t directory_id) {
+std::optional<std::string>
+SqliteStorageService::directory_abs_path(int64_t directory_id) {
   auto st =
       db_.prepare("SELECT c.path, c.version, c.repository_id, d.path AS rel "
                   "FROM directory d "
@@ -293,10 +300,10 @@ std::optional<std::string> Storage::directory_abs_path(int64_t directory_id) {
 }
 
 std::vector<std::pair<File, std::string>>
-Storage::list_files(const std::optional<int64_t> &component_id,
-                    const std::optional<std::string> &dir_path,
-                    const std::optional<std::string> &name,
-                    const std::optional<bool> &indexed) {
+SqliteStorageService::list_files(const std::optional<int64_t> &component_id,
+                                 const std::optional<std::string> &dir_path,
+                                 const std::optional<std::string> &name,
+                                 const std::optional<bool> &indexed) {
   std::string sql =
       "SELECT f.id, f.directory_id, f.name, f.mtime, f.md5, f.compile_options, "
       "f.driver, f.indexed, f.indexed_at, f.args_overridden, "
@@ -343,9 +350,9 @@ Storage::list_files(const std::optional<int64_t> &component_id,
   return out;
 }
 
-void Storage::mark_file_indexed(int64_t file_id,
-                                const std::optional<double> &mtime,
-                                const std::optional<std::string> &md5) {
+void SqliteStorageService::mark_file_indexed(
+    int64_t file_id, const std::optional<double> &mtime,
+    const std::optional<std::string> &md5) {
   auto st =
       db_.prepare("UPDATE file SET indexed = 1, indexed_at = datetime('now'), "
                   "  mtime = COALESCE(?, mtime), md5 = COALESCE(?, md5) "
@@ -356,7 +363,7 @@ void Storage::mark_file_indexed(int64_t file_id,
   st.step_done();
 }
 
-void Storage::set_file_indexed(int64_t file_id, bool indexed) {
+void SqliteStorageService::set_file_indexed(int64_t file_id, bool indexed) {
   // Flip the indexed/pending flag in place; symbols are untouched. Setting
   // indexed=0 marks the file pending so the next `index` re-parses it
   // (regenerating graph edges) without losing its existing symbols.
@@ -366,10 +373,9 @@ void Storage::set_file_indexed(int64_t file_id, bool indexed) {
   st.step_done();
 }
 
-void Storage::set_file_compile_options(int64_t file_id,
-                                       const std::vector<std::string> &options,
-                                       const std::optional<std::string> &driver,
-                                       bool update_driver) {
+void SqliteStorageService::set_file_compile_options(
+    int64_t file_id, const std::vector<std::string> &options,
+    const std::optional<std::string> &driver, bool update_driver) {
   // Replace a file's stored flags (and optionally its driver) and mark it
   // args_overridden=1 so a later `import` (without --force) keeps the edit.
   const std::string opts = json_min::encode_string_array(options);
@@ -389,7 +395,7 @@ void Storage::set_file_compile_options(int64_t file_id,
   }
 }
 
-void Storage::update_file_compile_options(
+void SqliteStorageService::update_file_compile_options(
     int64_t file_id, const std::vector<std::string> &options) {
   // UPDATE compile_options WITHOUT setting args_overridden (realias semantics).
   // Port of storage.py update_file_compile_options.
@@ -400,9 +406,9 @@ void Storage::update_file_compile_options(
   st.step_done();
 }
 
-bool Storage::is_file_indexed(const std::string &abs_path,
-                              const std::optional<double> &mtime,
-                              const std::optional<std::string> &md5) {
+bool SqliteStorageService::is_file_indexed(
+    const std::string &abs_path, const std::optional<double> &mtime,
+    const std::optional<std::string> &md5) {
   const auto f = get_file(abs_path);
   if (!f || !f->indexed) {
     return false;
@@ -419,8 +425,8 @@ bool Storage::is_file_indexed(const std::string &abs_path,
 // -- diagnostics (v15)
 // ----------------------------------------------------------------------
 
-void Storage::replace_diagnostics(int64_t file_id,
-                                  const std::vector<Diagnostic> &diags) {
+void SqliteStorageService::replace_diagnostics(
+    int64_t file_id, const std::vector<Diagnostic> &diags) {
   // Wholesale refresh: drop the file's stale rows, then insert in TU order so
   // ids follow the diagnostic sequence (parity with storage.py).
   {
@@ -442,7 +448,7 @@ void Storage::replace_diagnostics(int64_t file_id,
   }
 }
 
-std::vector<Diagnostic> Storage::get_diagnostics(int64_t file_id) {
+std::vector<Diagnostic> SqliteStorageService::get_diagnostics(int64_t file_id) {
   auto st = db_.prepare(
       "SELECT id, file_id, severity, spelling, file_path, line, col "
       "FROM diagnostic WHERE file_id = ? ORDER BY id");
@@ -462,7 +468,8 @@ std::vector<Diagnostic> Storage::get_diagnostics(int64_t file_id) {
   return out;
 }
 
-std::map<int64_t, std::map<int, int64_t>> Storage::diagnostic_counts() {
+std::map<int64_t, std::map<int, int64_t>>
+SqliteStorageService::diagnostic_counts() {
   auto st = db_.prepare("SELECT file_id, severity, COUNT(*) FROM diagnostic "
                         "GROUP BY file_id, severity");
   std::map<int64_t, std::map<int, int64_t>> out;

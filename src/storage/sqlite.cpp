@@ -151,6 +151,10 @@ void SqliteStmt::step_done() {
   }
 }
 
+bool SqliteStmt::readonly() const { return sqlite3_stmt_readonly(stmt_) != 0; }
+
+int SqliteStmt::column_count() const { return sqlite3_column_count(stmt_); }
+
 bool SqliteStmt::col_is_null(int idx) const {
   return sqlite3_column_type(stmt_, idx) == SQLITE_NULL;
 }

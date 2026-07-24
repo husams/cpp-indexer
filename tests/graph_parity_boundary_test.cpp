@@ -52,6 +52,7 @@
 #include "cli/commands.hpp"
 #include "graph/emit.hpp"
 #include "graph/query.hpp"
+#include "query/exec.hpp"
 #include "graph/records.hpp"
 #include "storage/records.hpp"
 #include "storage/storage.hpp"
@@ -75,9 +76,10 @@ namespace {
 // Returns the Storage and ids.
 struct MinGraph {
   Storage db;
+  cidx::query::SqliteQueryReadAdapter read;
   int64_t id_A = -1, id_B = -1, id_C = -1;
 
-  MinGraph() : db(":memory:") {
+  MinGraph() : db(":memory:"), read(db) {
     Symbol sA;
     sA.usr = "USR_A"; sA.spelling = "funcA"; sA.kind = "function";
     sA.is_definition = true; sA.resolved = true;
@@ -224,7 +226,7 @@ TEST_CASE("GB2: graph callers on missing index.db emits NoIndexError") {
 
 TEST_CASE("GB3: edges_in with limit=0 returns empty (LIMIT 0 = 0 rows, R12)") {
   MinGraph mg;
-  GraphQuery g(mg.db, ":memory:");
+  GraphQuery g(mg.read, ":memory:");
 
   // A has one caller from edges_in("calls") = nobody calls A in this graph
   // but C has one caller (B). Use edges_in on id_C with limit=0.
@@ -234,7 +236,7 @@ TEST_CASE("GB3: edges_in with limit=0 returns empty (LIMIT 0 = 0 rows, R12)") {
 
 TEST_CASE("GB3: edges_out with limit=1 caps at exactly 1") {
   MinGraph mg;
-  GraphQuery g(mg.db, ":memory:");
+  GraphQuery g(mg.read, ":memory:");
 
   // A --calls--> B (3 edges aggregated to 1 result in edge table with ecount=3)
   // B --calls--> C (1 edge)
@@ -253,7 +255,7 @@ TEST_CASE("GB3: edges_out with limit=1 caps at exactly 1") {
 
 TEST_CASE("GB3: walk --depth 1 only reaches direct neighbors") {
   MinGraph mg;
-  GraphQuery g(mg.db, ":memory:");
+  GraphQuery g(mg.read, ":memory:");
 
   // A --calls--> B --calls--> C
   // walk from A, depth=1, limit=100: must reach B but NOT C
@@ -272,7 +274,7 @@ TEST_CASE("GB3: walk --depth 1 only reaches direct neighbors") {
 
 TEST_CASE("GB3: walk --depth 2 reaches both B and C from A") {
   MinGraph mg;
-  GraphQuery g(mg.db, ":memory:");
+  GraphQuery g(mg.read, ":memory:");
 
   std::optional<std::vector<std::string>> calls_kinds =
       std::vector<std::string>{"calls"};
@@ -297,7 +299,7 @@ TEST_CASE("GB3: walk --depth 2 reaches both B and C from A") {
 
 TEST_CASE("GB3: find_symbols respects LIMIT (A5 -- R12)") {
   MinGraph mg;
-  GraphQuery g(mg.db, ":memory:");
+  GraphQuery g(mg.read, ":memory:");
 
   // find with limit=1 must return exactly 1 result even when 3 match "func"
   auto all = g.find("func", std::nullopt, 50);
@@ -327,7 +329,8 @@ TEST_CASE("GB3: edges count fallback (R3) — ecount=0 raw=2 -> count=2") {
   cidx::Edge e; e.src_id = id_A; e.dst_id = id_B; e.kind = 1; e.count = 2;
   db.add_edge(e);
 
-  GraphQuery g(db, ":memory:");
+  cidx::query::SqliteQueryReadAdapter read(db);
+  GraphQuery g(read, ":memory:");
   // is_resolved() checks graph_resolved_at in meta — fresh DB has no row → false
   // so count_expr = site count (A6 unresolved branch)
   // Since we have 1 edge row with no edge_sites, site count = 0 (ecount=0, rawcount=2)
@@ -389,7 +392,8 @@ TEST_CASE("GB4 [QD-1]: Traversal::nodes() preserves BFS insertion order for "
   cidx::Edge eRB; eRB.src_id = id_R; eRB.dst_id = id_B; eRB.kind = 1; eRB.count = 1;
   db.add_edge(eRB);
 
-  GraphQuery g(db, ":memory:");
+  cidx::query::SqliteQueryReadAdapter read(db);
+  GraphQuery g(read, ":memory:");
   std::optional<std::vector<std::string>> calls = std::vector<std::string>{"calls"};
   auto tr = g.walk(id_R, calls, "out", 1, 100);
 

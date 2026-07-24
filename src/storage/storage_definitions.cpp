@@ -27,8 +27,8 @@ namespace cidx {
 
 using namespace detail;
 
-
-std::vector<int64_t> Storage::symbol_ids_for_file(int64_t file_id) {
+std::vector<int64_t>
+SqliteStorageService::symbol_ids_for_file(int64_t file_id) {
   // Definition site OR declaration site: a class declared in a header and
   // defined in a source file is owned by both, which is what the unused rule
   // needs (either site makes the header the provider).
@@ -58,7 +58,7 @@ std::vector<int64_t> Storage::symbol_ids_for_file(int64_t file_id) {
 }
 
 std::vector<int64_t>
-Storage::edge_targets_from(const std::vector<int64_t> &src_ids) {
+SqliteStorageService::edge_targets_from(const std::vector<int64_t> &src_ids) {
   std::vector<int64_t> out;
   if (src_ids.empty()) {
     return out;
@@ -78,7 +78,8 @@ Storage::edge_targets_from(const std::vector<int64_t> &src_ids) {
   return out;
 }
 
-std::vector<int64_t> Storage::def_edge_targets_for_file(int64_t file_id) {
+std::vector<int64_t>
+SqliteStorageService::def_edge_targets_for_file(int64_t file_id) {
   auto st = db_.prepare("SELECT DISTINCT de.dst_id FROM def_edge de "
                         "JOIN definition d ON d.id = de.src_def_id "
                         "WHERE d.file_id = ? ORDER BY de.dst_id");
@@ -91,17 +92,21 @@ std::vector<int64_t> Storage::def_edge_targets_for_file(int64_t file_id) {
 }
 
 std::vector<int64_t>
-Storage::type_ids_used_by(const std::vector<int64_t> &symbol_ids) {
+SqliteStorageService::type_ids_used_by(const std::vector<int64_t> &symbol_ids) {
   std::vector<int64_t> out;
   if (symbol_ids.empty()) {
     return out;
   }
   const std::string ph = in_placeholders(symbol_ids.size());
   const std::string sql = "SELECT DISTINCT type_id FROM symbol_type "
-                          "WHERE symbol_id IN (" + ph + ") "
+                          "WHERE symbol_id IN (" +
+                          ph +
+                          ") "
                           "UNION "
                           "SELECT DISTINCT type_id FROM parameter "
-                          "WHERE owner_id IN (" + ph + ") AND type_id IS NOT NULL "
+                          "WHERE owner_id IN (" +
+                          ph +
+                          ") AND type_id IS NOT NULL "
                           "ORDER BY type_id";
   auto st = db_.prepare(sql);
   int idx = 1;
@@ -116,8 +121,8 @@ Storage::type_ids_used_by(const std::vector<int64_t> &symbol_ids) {
   return out;
 }
 
-std::vector<int64_t>
-Storage::symbols_named_by_types(const std::vector<int64_t> &type_ids) {
+std::vector<int64_t> SqliteStorageService::symbols_named_by_types(
+    const std::vector<int64_t> &type_ids) {
   std::vector<int64_t> out;
   if (type_ids.empty()) {
     return out;
@@ -153,30 +158,29 @@ Storage::symbols_named_by_types(const std::vector<int64_t> &type_ids) {
   return out;
 }
 
-void Storage::delete_edges_for_file(int64_t file_id) {
+void SqliteStorageService::delete_edges_for_file(int64_t file_id) {
   // Exclude contains (kind=3): declaration-level structural edges emitted
   // during header indexing. Namespaces reopen in every .cpp TU, so deleting
   // contains on each re-index would permanently erase the header-phase edges.
   // Contains edges are idempotent (UPSERT); excluding them here is safe.
-  auto st = db_.prepare(
-      "DELETE FROM edge WHERE kind != 3 AND src_id IN "
-      "(SELECT id FROM symbol WHERE file_id = ?)");
+  auto st = db_.prepare("DELETE FROM edge WHERE kind != 3 AND src_id IN "
+                        "(SELECT id FROM symbol WHERE file_id = ?)");
   st.bind(1, file_id);
   st.step_done();
 }
 
-void Storage::rollup_edge_counts() {
+void SqliteStorageService::rollup_edge_counts() {
   // For calls (1) and uses (7): set count = COUNT(edge_site) so the edge
   // reflects true site count after multi-TU indexing.
-  db_.exec(
-      "UPDATE edge SET count = ("
-      "  SELECT COUNT(*) FROM edge_site WHERE edge_site.edge_id = edge.id"
-      ") "
-      "WHERE kind IN (1, 7)"
-      "  AND EXISTS (SELECT 1 FROM edge_site WHERE edge_site.edge_id = edge.id)");
+  db_.exec("UPDATE edge SET count = ("
+           "  SELECT COUNT(*) FROM edge_site WHERE edge_site.edge_id = edge.id"
+           ") "
+           "WHERE kind IN (1, 7)"
+           "  AND EXISTS (SELECT 1 FROM edge_site WHERE edge_site.edge_id = "
+           "edge.id)");
 }
 
-void Storage::materialize_dispatch_calls() {
+void SqliteStorageService::materialize_dispatch_calls() {
   // Materialise virtual-dispatch caller edges (kind 18, 'dispatch_calls').
   // A static 'calls' edge (1) into a virtual method B understates reality: at
   // run time the call can land on any method that overrides B, transitively
@@ -190,21 +194,20 @@ void Storage::materialize_dispatch_calls() {
   // deleted and rebuilt each pass. Mirrors
   // indexer/storage.py:materialize_dispatch_calls() byte-identically.
   db_.exec("DELETE FROM edge WHERE kind = 18");
-  db_.exec(
-      "WITH RECURSIVE dispatch(base_id, target_id) AS ("
-      "    SELECT dst_id AS base_id, src_id AS target_id"
-      "    FROM edge WHERE kind = 6"
-      "  UNION"
-      "    SELECT d.base_id, o.src_id"
-      "    FROM dispatch d"
-      "    JOIN edge o ON o.dst_id = d.target_id AND o.kind = 6"
-      ") "
-      "INSERT OR IGNORE INTO edge (src_id, dst_id, kind, count) "
-      "SELECT c.src_id, d.target_id, 18, c.count "
-      "FROM edge c "
-      "JOIN dispatch d ON d.base_id = c.dst_id "
-      "WHERE c.kind = 1 "
-      "  AND c.src_id != d.target_id");
+  db_.exec("WITH RECURSIVE dispatch(base_id, target_id) AS ("
+           "    SELECT dst_id AS base_id, src_id AS target_id"
+           "    FROM edge WHERE kind = 6"
+           "  UNION"
+           "    SELECT d.base_id, o.src_id"
+           "    FROM dispatch d"
+           "    JOIN edge o ON o.dst_id = d.target_id AND o.kind = 6"
+           ") "
+           "INSERT OR IGNORE INTO edge (src_id, dst_id, kind, count) "
+           "SELECT c.src_id, d.target_id, 18, c.count "
+           "FROM edge c "
+           "JOIN dispatch d ON d.base_id = c.dst_id "
+           "WHERE c.kind = 1 "
+           "  AND c.src_id != d.target_id");
 }
 
 // -- v27: multi-definition (per-backend redefinition). Mirrors
@@ -215,7 +218,7 @@ void Storage::materialize_dispatch_calls() {
 // (materialize_possible_calls).
 
 std::optional<int64_t>
-Storage::component_id_for_file(std::optional<int64_t> file_id) {
+SqliteStorageService::component_id_for_file(std::optional<int64_t> file_id) {
   if (!file_id) {
     return std::nullopt;
   }
@@ -231,7 +234,7 @@ Storage::component_id_for_file(std::optional<int64_t> file_id) {
   return cid;
 }
 
-int64_t Storage::get_or_create_definition(
+int64_t SqliteStorageService::get_or_create_definition(
     int64_t symbol_id, std::optional<int64_t> file_id,
     std::optional<int64_t> line, std::optional<int64_t> col,
     std::optional<int64_t> end_line, std::optional<int64_t> end_col,
@@ -263,13 +266,14 @@ int64_t Storage::get_or_create_definition(
   return id;
 }
 
-int64_t Storage::add_def_edge(int64_t src_def_id, int64_t dst_id, int64_t kind,
-                              int64_t count) {
-  auto st = db_.prepare("INSERT INTO def_edge (src_def_id, dst_id, kind, count) "
-                        "VALUES (?, ?, ?, ?) "
-                        "ON CONFLICT(src_def_id, dst_id, kind) DO UPDATE SET "
-                        "  count = def_edge.count + excluded.count "
-                        "RETURNING id");
+int64_t SqliteStorageService::add_def_edge(int64_t src_def_id, int64_t dst_id,
+                                           int64_t kind, int64_t count) {
+  auto st =
+      db_.prepare("INSERT INTO def_edge (src_def_id, dst_id, kind, count) "
+                  "VALUES (?, ?, ?, ?) "
+                  "ON CONFLICT(src_def_id, dst_id, kind) DO UPDATE SET "
+                  "  count = def_edge.count + excluded.count "
+                  "RETURNING id");
   st.bind(1, src_def_id);
   st.bind(2, dst_id);
   st.bind(3, kind);
@@ -282,7 +286,8 @@ int64_t Storage::add_def_edge(int64_t src_def_id, int64_t dst_id, int64_t kind,
   return id;
 }
 
-void Storage::copy_body_edges_to_def_edge(int64_t def_id, int64_t symbol_id) {
+void SqliteStorageService::copy_body_edges_to_def_edge(int64_t def_id,
+                                                       int64_t symbol_id) {
   // At the instant this runs (right after body_descent for one function in one
   // TU) `edge` holds exactly THIS TU's kind-1/7 edges for the symbol
   // (delete_edges_for_file cleared the prior TU's). Copying them keyed by this
@@ -298,7 +303,7 @@ void Storage::copy_body_edges_to_def_edge(int64_t def_id, int64_t symbol_id) {
   st.step_done();
 }
 
-void Storage::delete_definitions_for_file(int64_t file_id) {
+void SqliteStorageService::delete_definitions_for_file(int64_t file_id) {
   // Keyed on definition.file_id (the actual body file), so re-indexing one
   // backend never disturbs another backend's rows. Cascades def_edge.
   auto st = db_.prepare("DELETE FROM definition WHERE file_id = ?");
@@ -306,36 +311,37 @@ void Storage::delete_definitions_for_file(int64_t file_id) {
   st.step_done();
 }
 
-void Storage::set_multi_def() {
+void SqliteStorageService::set_multi_def() {
   db_.exec("UPDATE symbol SET multi_def = 0");
-  db_.exec("UPDATE symbol SET multi_def = "
-           "  (SELECT COUNT(*) FROM definition d WHERE d.symbol_id = symbol.id) "
-           "WHERE id IN (SELECT DISTINCT symbol_id FROM definition)");
+  db_.exec(
+      "UPDATE symbol SET multi_def = "
+      "  (SELECT COUNT(*) FROM definition d WHERE d.symbol_id = symbol.id) "
+      "WHERE id IN (SELECT DISTINCT symbol_id FROM definition)");
 }
 
-void Storage::materialize_possible_calls() {
+void SqliteStorageService::materialize_possible_calls() {
   db_.exec("DELETE FROM possible_call");
-  db_.exec("INSERT OR IGNORE INTO possible_call (src_def_id, dst_def_id, count) "
-           "SELECT de.src_def_id, td.id, SUM(de.count) "
-           "FROM def_edge de "
-           "JOIN symbol s     ON s.id = de.dst_id "
-           "JOIN definition td ON td.symbol_id = de.dst_id "
-           "WHERE de.kind = 1 AND s.multi_def > 1 "
-           "GROUP BY de.src_def_id, td.id");
+  db_.exec(
+      "INSERT OR IGNORE INTO possible_call (src_def_id, dst_def_id, count) "
+      "SELECT de.src_def_id, td.id, SUM(de.count) "
+      "FROM def_edge de "
+      "JOIN symbol s     ON s.id = de.dst_id "
+      "JOIN definition td ON td.symbol_id = de.dst_id "
+      "WHERE de.kind = 1 AND s.multi_def > 1 "
+      "GROUP BY de.src_def_id, td.id");
 }
 
-std::vector<Edge> Storage::cross_repo_edges() {
-  auto st = db_.prepare(
-      "SELECT e.id, e.src_id, e.dst_id, e.kind, e.count, "
-      "       e.base_access, e.is_virtual, e.vtable_slot "
-      "FROM edge e "
-      "  JOIN symbol s1 ON s1.id = e.src_id "
-      "  JOIN symbol s2 ON s2.id = e.dst_id "
-      "  JOIN file f1 ON f1.id = s1.file_id "
-      "  JOIN directory d1 ON d1.id = f1.directory_id "
-      "  JOIN file f2 ON f2.id = s2.file_id "
-      "  JOIN directory d2 ON d2.id = f2.directory_id "
-      "WHERE d1.component_id <> d2.component_id");
+std::vector<Edge> SqliteStorageService::cross_repo_edges() {
+  auto st = db_.prepare("SELECT e.id, e.src_id, e.dst_id, e.kind, e.count, "
+                        "       e.base_access, e.is_virtual, e.vtable_slot "
+                        "FROM edge e "
+                        "  JOIN symbol s1 ON s1.id = e.src_id "
+                        "  JOIN symbol s2 ON s2.id = e.dst_id "
+                        "  JOIN file f1 ON f1.id = s1.file_id "
+                        "  JOIN directory d1 ON d1.id = f1.directory_id "
+                        "  JOIN file f2 ON f2.id = s2.file_id "
+                        "  JOIN directory d2 ON d2.id = f2.directory_id "
+                        "WHERE d1.component_id <> d2.component_id");
   std::vector<Edge> out;
   while (st.step()) {
     Edge e;
@@ -354,25 +360,24 @@ std::vector<Edge> Storage::cross_repo_edges() {
 
 // -- entity_edge (v17) --------------------------------------------------------
 
-void Storage::add_entity_edge(int64_t src_id, int64_t dst_id, int64_t kind,
-                               int64_t count,
-                               std::optional<int64_t> via_member_id,
-                               int64_t multiplicity, int64_t access,
-                               int64_t is_virtual,
-                               std::optional<int64_t> create_form,
-                               int64_t partial) {
-  auto st = db_.prepare(
-      "INSERT INTO entity_edge "
-      "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
-      " access, is_virtual, create_form, partial) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-      "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, -1), COALESCE(create_form, -1)) DO UPDATE SET "
-      "  count       = excluded.count, "
-      "  multiplicity = excluded.multiplicity, "
-      "  access      = excluded.access, "
-      "  is_virtual  = excluded.is_virtual, "
-      "  create_form = COALESCE(excluded.create_form, entity_edge.create_form), "
-      "  partial     = excluded.partial");
+void SqliteStorageService::add_entity_edge(
+    int64_t src_id, int64_t dst_id, int64_t kind, int64_t count,
+    std::optional<int64_t> via_member_id, int64_t multiplicity, int64_t access,
+    int64_t is_virtual, std::optional<int64_t> create_form, int64_t partial) {
+  auto st =
+      db_.prepare("INSERT INTO entity_edge "
+                  "(src_id, dst_id, kind, count, via_member_id, multiplicity, "
+                  " access, is_virtual, create_form, partial) "
+                  "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                  "ON CONFLICT(src_id, dst_id, kind, COALESCE(via_member_id, "
+                  "-1), COALESCE(create_form, -1)) DO UPDATE SET "
+                  "  count       = excluded.count, "
+                  "  multiplicity = excluded.multiplicity, "
+                  "  access      = excluded.access, "
+                  "  is_virtual  = excluded.is_virtual, "
+                  "  create_form = COALESCE(excluded.create_form, "
+                  "entity_edge.create_form), "
+                  "  partial     = excluded.partial");
   st.bind(1, src_id);
   st.bind(2, dst_id);
   st.bind(3, kind);
@@ -394,7 +399,7 @@ void Storage::add_entity_edge(int64_t src_id, int64_t dst_id, int64_t kind,
   st.step_done();
 }
 
-void Storage::clear_entity_edges() {
+void SqliteStorageService::clear_entity_edges() {
   db_.exec("DELETE FROM entity_edge");
 }
 

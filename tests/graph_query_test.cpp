@@ -30,6 +30,7 @@
 #include "graph/emit.hpp"
 #include "graph/query.hpp"
 #include "graph/records.hpp"
+#include "query/exec.hpp"
 #include "storage/records.hpp"
 #include "storage/storage.hpp"
 
@@ -88,11 +89,12 @@ cidx::EdgeSite make_edge_site(int64_t eid,
 //   B is a pure virtual method (is_pure=1)
 struct Seeded {
   Storage db;
+  cidx::query::SqliteQueryReadAdapter read;
   int64_t id_A = -1, id_B = -1, id_C = -1, id_D = -1, id_E = -1;
   int64_t eid_AB = -1, eid_BC = -1, eid_AC = -1;
   int64_t eid_DA = -1, eid_AE = -1;
 
-  Seeded() : db(":memory:") {
+  Seeded() : db(":memory:"), read(db) {
     auto sym_A = make_sym("USR::A", "funcA", "function", "ns::funcA");
     auto sym_B = make_sym("USR::B", "funcB", "function");
     sym_B.is_pure = true;
@@ -139,7 +141,8 @@ struct Seeded {
 // ---------------------------------------------------------------------------
 TEST_CASE("graph_query: empty DB — get_by_id returns nullopt") {
   Storage db(":memory:");
-  GraphQuery g(db, ":memory:");
+  cidx::query::SqliteQueryReadAdapter read(db);
+  GraphQuery g(read, ":memory:");
   CHECK(!g.get_by_id(1));
   CHECK(!g.get_by_usr("USR::X"));
   CHECK(g.find("anything").empty());
@@ -151,7 +154,7 @@ TEST_CASE("graph_query: empty DB — get_by_id returns nullopt") {
 // ---------------------------------------------------------------------------
 TEST_CASE("graph_query: get_by_id / get_by_usr on seeded DB") {
   Seeded s;
-  GraphQuery g(s.db, ":memory:");
+  GraphQuery g(s.read, ":memory:");
 
   auto sym_A = g.get_by_id(s.id_A);
   REQUIRE(sym_A);
@@ -194,7 +197,8 @@ TEST_CASE("graph_query: files() resolves grouped relative component path") {
   sym.col = 1;
   db.add_symbol(sym);
 
-  GraphQuery g(db, ":memory:");
+  cidx::query::SqliteQueryReadAdapter read(db);
+  GraphQuery g(read, ":memory:");
   auto s = g.get_by_usr("c:@F@main");
   REQUIRE(s);
   REQUIRE(s->file);
@@ -206,7 +210,7 @@ TEST_CASE("graph_query: files() resolves grouped relative component path") {
 // ---------------------------------------------------------------------------
 TEST_CASE("graph_query: edges_in / edges_out direction") {
   Seeded s;
-  GraphQuery g(s.db, ":memory:");
+  GraphQuery g(s.read, ":memory:");
 
   // A calls B and uses C (out)
   auto out_A = g.edges_out(s.id_A, std::vector<std::string>{"calls"}, 50);
@@ -230,7 +234,7 @@ TEST_CASE("graph_query: edges_in / edges_out direction") {
 // ---------------------------------------------------------------------------
 TEST_CASE("graph_query: count fallback (R3) from accumulated ecount") {
   Seeded s;
-  GraphQuery g(s.db, ":memory:");
+  GraphQuery g(s.read, ":memory:");
 
   // A --calls--> B was added 3 times; ecount should reflect that
   auto out_A = g.edges_out(s.id_A, std::vector<std::string>{"calls"}, 50);
@@ -250,7 +254,7 @@ TEST_CASE("graph_query: count fallback (R3) from accumulated ecount") {
 // ---------------------------------------------------------------------------
 TEST_CASE("graph_query: references() = calls + uses inbound") {
   Seeded s;
-  GraphQuery g(s.db, ":memory:");
+  GraphQuery g(s.read, ":memory:");
 
   // C is called by B (calls) and used by A (uses)
   auto refs_C = g.references(s.id_C, 50);
@@ -286,7 +290,8 @@ TEST_CASE(
   db.add_edge(make_edge(ordinary_user_id, target_id, 7));
   db.add_edge(make_edge(alias_a_id, target_id, 19));
 
-  GraphQuery g(db, ":memory:");
+  cidx::query::SqliteQueryReadAdapter read(db);
+  GraphQuery g(read, ":memory:");
   auto aliases = g.aliased_by(target_id, 50);
 
   REQUIRE(aliases.size() == 2);
@@ -301,7 +306,7 @@ TEST_CASE(
 // ---------------------------------------------------------------------------
 TEST_CASE("graph_query: walk() BFS depth") {
   Seeded s;
-  GraphQuery g(s.db, ":memory:");
+  GraphQuery g(s.read, ":memory:");
 
   // walk from A out over "calls", depth=1 -> only B
   auto tr1 = g.walk(s.id_A, std::vector<std::string>{"calls"}, "out", 1, 100);
@@ -323,7 +328,7 @@ TEST_CASE("graph_query: walk() BFS depth") {
 // ---------------------------------------------------------------------------
 TEST_CASE("graph_query: reaches() shortest path") {
   Seeded s;
-  GraphQuery g(s.db, ":memory:");
+  GraphQuery g(s.read, ":memory:");
 
   // A -> B -> C via calls
   auto path =
@@ -350,7 +355,7 @@ TEST_CASE("graph_query: reaches() shortest path") {
 // ---------------------------------------------------------------------------
 TEST_CASE("graph_query: hierarchy — bases, subclasses, members") {
   Seeded s;
-  GraphQuery g(s.db, ":memory:");
+  GraphQuery g(s.read, ":memory:");
 
   // D --inherits--> A; so A has subclass D
   auto subs = g.subclasses(s.id_A, true);
@@ -382,7 +387,7 @@ TEST_CASE("graph_query: hierarchy — bases, subclasses, members") {
 // ---------------------------------------------------------------------------
 TEST_CASE("graph_query: dispatch_targets() BFS from virtual root") {
   Seeded s;
-  GraphQuery g(s.db, ":memory:");
+  GraphQuery g(s.read, ":memory:");
 
   // A is a non-pure function; B --overrides--> A and B is pure.
   // dispatch_targets(A): root A is not pure -> A first, then overriders.
@@ -405,7 +410,8 @@ TEST_CASE("graph_query: dispatch_targets() BFS from virtual root") {
 // ---------------------------------------------------------------------------
 TEST_CASE("graph_query: kind_ids() valid kinds and invalid kind throws") {
   Storage db(":memory:");
-  GraphQuery g(db, ":memory:");
+  cidx::query::SqliteQueryReadAdapter read(db);
+  GraphQuery g(read, ":memory:");
 
   auto kv = g.kind_ids(std::vector<std::string>{"calls", "uses"});
   REQUIRE(kv);
@@ -483,7 +489,7 @@ TEST_CASE("graph_query: Sym value type — is_stub, loc, to_dict key order") {
 // ---------------------------------------------------------------------------
 TEST_CASE("graph_query: emit_edges text — header, count suffix, trailer") {
   Seeded s;
-  GraphQuery g(s.db, ":memory:");
+  GraphQuery g(s.read, ":memory:");
 
   auto edges = g.edges_out(s.id_A, std::vector<std::string>{"calls"}, 50);
   REQUIRE(!edges.empty());

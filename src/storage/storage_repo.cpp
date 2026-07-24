@@ -27,9 +27,9 @@ namespace cidx {
 
 using namespace detail;
 
-int64_t Storage::add_semantic_universe(const std::string &key,
-                                       const std::string &name,
-                                       const std::string &policy) {
+int64_t SqliteStorageService::add_semantic_universe(const std::string &key,
+                                                    const std::string &name,
+                                                    const std::string &policy) {
   if (key.empty()) {
     throw StorageError("semantic universe key must not be empty");
   }
@@ -49,7 +49,7 @@ int64_t Storage::add_semantic_universe(const std::string &key,
 }
 
 std::optional<SemanticUniverse>
-Storage::get_semantic_universe_by_id(int64_t universe_id) {
+SqliteStorageService::get_semantic_universe_by_id(int64_t universe_id) {
   auto st = db_.prepare("SELECT id, key, name, policy FROM semantic_universe "
                         "WHERE id = ?");
   st.bind(1, universe_id);
@@ -65,7 +65,7 @@ Storage::get_semantic_universe_by_id(int64_t universe_id) {
 }
 
 std::optional<SemanticUniverse>
-Storage::get_semantic_universe_by_key(const std::string &key) {
+SqliteStorageService::get_semantic_universe_by_key(const std::string &key) {
   auto st = db_.prepare("SELECT id, key, name, policy FROM semantic_universe "
                         "WHERE key = ?");
   st.bind(1, std::string_view(key));
@@ -80,7 +80,7 @@ Storage::get_semantic_universe_by_key(const std::string &key) {
   return u;
 }
 
-std::vector<SemanticUniverse> Storage::list_semantic_universes() {
+std::vector<SemanticUniverse> SqliteStorageService::list_semantic_universes() {
   auto st = db_.prepare("SELECT id, key, name, policy FROM semantic_universe "
                         "ORDER BY key");
   std::vector<SemanticUniverse> out;
@@ -95,7 +95,7 @@ std::vector<SemanticUniverse> Storage::list_semantic_universes() {
   return out;
 }
 
-void Storage::set_repository_semantic_universe(
+void SqliteStorageService::set_repository_semantic_universe(
     int64_t repository_id, const std::optional<int64_t> &universe_id) {
   auto st =
       db_.prepare("UPDATE repository SET semantic_universe_id = COALESCE(?, 1) "
@@ -105,7 +105,7 @@ void Storage::set_repository_semantic_universe(
   st.step_done();
 }
 
-void Storage::set_component_semantic_universe(
+void SqliteStorageService::set_component_semantic_universe(
     int64_t component_id, const std::optional<int64_t> &universe_id) {
   auto st =
       db_.prepare("UPDATE component SET semantic_universe_id = ? WHERE id = ?");
@@ -114,7 +114,7 @@ void Storage::set_component_semantic_universe(
   st.step_done();
 }
 
-int64_t Storage::default_semantic_universe_id() {
+int64_t SqliteStorageService::default_semantic_universe_id() {
   auto st =
       db_.prepare("SELECT id FROM semantic_universe WHERE key = 'legacy'");
   if (st.step()) {
@@ -124,8 +124,8 @@ int64_t Storage::default_semantic_universe_id() {
                                "legacy");
 }
 
-int64_t
-Storage::semantic_universe_for_file(const std::optional<int64_t> &file_id) {
+int64_t SqliteStorageService::semantic_universe_for_file(
+    const std::optional<int64_t> &file_id) {
   if (!file_id) {
     return default_semantic_universe_id();
   }
@@ -142,12 +142,12 @@ Storage::semantic_universe_for_file(const std::optional<int64_t> &file_id) {
   return default_semantic_universe_id();
 }
 
-int64_t Storage::semantic_universe_for_file_id(int64_t file_id) {
+int64_t SqliteStorageService::semantic_universe_for_file_id(int64_t file_id) {
   return semantic_universe_for_file(file_id);
 }
 
-std::string
-Storage::portable_source_identity_for_path(const std::string &path) {
+std::string SqliteStorageService::portable_source_identity_for_path(
+    const std::string &path) {
   const std::string abs = pathutil::abspath(pathutil::resolve_fs_path(path));
   const auto comp = component_for_path(abs);
   if (!comp) {
@@ -170,20 +170,21 @@ Storage::portable_source_identity_for_path(const std::string &path) {
   return owner + "\x1f" + effective_root(*comp) + "\x1f" + rel;
 }
 
-std::string Storage::portable_source_identity_for_file(int64_t file_id) {
+std::string
+SqliteStorageService::portable_source_identity_for_file(int64_t file_id) {
   const auto path = file_abs_path(file_id);
   return path ? portable_source_identity_for_path(*path)
               : "file-id-missing:" + std::to_string(file_id);
 }
 
-std::string
-Storage::portable_translation_unit_identity_for_config(int64_t config_id) {
+std::string SqliteStorageService::portable_translation_unit_identity_for_config(
+    int64_t config_id) {
   const auto config = translation_unit_config_by_id(config_id);
   return config ? "config:" + config->descriptor_hash
                 : "config-id-missing:" + std::to_string(config_id);
 }
 
-std::string Storage::portable_translation_unit_identity_for_config(
+std::string SqliteStorageService::portable_translation_unit_identity_for_config(
     int64_t config_id, int64_t translation_unit_file_id) {
   std::string config_identity =
       portable_translation_unit_identity_for_config(config_id);
@@ -194,8 +195,8 @@ std::string Storage::portable_translation_unit_identity_for_config(
          portable_source_identity_for_file(translation_unit_file_id);
 }
 
-std::string
-Storage::portable_translation_unit_identity_for_file(int64_t file_id) {
+std::string SqliteStorageService::portable_translation_unit_identity_for_file(
+    int64_t file_id) {
   const auto configs = translation_unit_configs_for_file(file_id);
   if (configs.size() == 1U) {
     return portable_translation_unit_identity_for_config(configs.front().id,
@@ -223,7 +224,7 @@ Storage::portable_translation_unit_identity_for_file(int64_t file_id) {
          "\x1fsource:" + portable_source_identity_for_file(file_id);
 }
 
-std::string Storage::symbol_identity_key(
+std::string SqliteStorageService::symbol_identity_key(
     const Symbol &sym, int64_t universe_id,
     const std::optional<int64_t> &file_id,
     const std::optional<std::string> &source,
@@ -261,9 +262,9 @@ std::string Storage::symbol_identity_key(
   return out;
 }
 
-int64_t Storage::add_component(const std::string &name, const std::string &path,
-                               const std::string &kind,
-                               const std::optional<std::string> &version) {
+int64_t SqliteStorageService::add_component(
+    const std::string &name, const std::string &path, const std::string &kind,
+    const std::optional<std::string> &version) {
   // Preserve indirected (portable) paths verbatim; absolutize plain paths.
   // Mirrors Python: if "$" not in path and "<" not in path: path =
   // abspath(path)
@@ -307,10 +308,9 @@ int64_t Storage::add_component(const std::string &name, const std::string &path,
   return cid;
 }
 
-void Storage::update_component_meta(int64_t component_id,
-                                    const std::string &name,
-                                    const std::string &kind,
-                                    const std::optional<std::string> &version) {
+void SqliteStorageService::update_component_meta(
+    int64_t component_id, const std::string &name, const std::string &kind,
+    const std::optional<std::string> &version) {
   // Refresh an EXISTING (already-grouped, possibly clone-relative) component's
   // name/kind in place without touching its stored path; version COALESCE-kept.
   // Mirrors Python Storage.update_component_meta.
@@ -323,8 +323,8 @@ void Storage::update_component_meta(int64_t component_id,
   st.step_done();
 }
 
-bool Storage::set_component_version(const std::string &name,
-                                    const std::optional<std::string> &version) {
+bool SqliteStorageService::set_component_version(
+    const std::string &name, const std::optional<std::string> &version) {
   // Explicit clear goes through this path (not add_component) to avoid the
   // COALESCE guard that would no-op a NULL-clear.
   auto st = db_.prepare("UPDATE component SET version = ? WHERE name = ?");
@@ -334,8 +334,8 @@ bool Storage::set_component_version(const std::string &name,
   return db_.changes() > 0;
 }
 
-bool Storage::set_component_effective_version(const std::string &name,
-                                              const std::string &version) {
+bool SqliteStorageService::set_component_effective_version(
+    const std::string &name, const std::string &version) {
   // Mirrors Python Storage.set_component_effective_version: only act when the
   // name resolves to exactly one row; pick property-vs-embedded by splitting
   // the STORED path (so portable <label>/$VAR prefixes survive the rewrite).
@@ -371,7 +371,7 @@ bool Storage::set_component_effective_version(const std::string &name,
 }
 
 // static
-std::string Storage::effective_root(const Component &comp) {
+std::string SqliteStorageService::effective_root(const Component &comp) {
   // Stored effective root (NOT resolved; may contain $VAR).
   if (!comp.version || comp.version->empty()) {
     return comp.path;
@@ -382,8 +382,8 @@ std::string Storage::effective_root(const Component &comp) {
 // Resolved absolute path of a repository's active clone, or nullopt when the
 // component is ungrouped / the repository has no live clone. Mirrors Python
 // Storage._active_clone_root.
-std::optional<std::string>
-Storage::active_clone_root(const std::optional<int64_t> &repository_id) {
+std::optional<std::string> SqliteStorageService::active_clone_root(
+    const std::optional<int64_t> &repository_id) {
   if (!repository_id) {
     return std::nullopt;
   }
@@ -398,7 +398,7 @@ Storage::active_clone_root(const std::optional<int64_t> &repository_id) {
   return pathutil::abspath(pathutil::resolve_fs_path(clone->path));
 }
 
-std::string Storage::component_abs_base(const Component &comp) {
+std::string SqliteStorageService::component_abs_base(const Component &comp) {
   const std::string eff = effective_root(comp);
   if (comp.repository_id && !pathutil::isabs(comp.path) &&
       !comp.path.contains('<') && !comp.path.contains('$')) {
@@ -410,8 +410,8 @@ std::string Storage::component_abs_base(const Component &comp) {
   return pathutil::abspath(pathutil::resolve_fs_path(eff));
 }
 
-void Storage::relativize_component(int64_t component_id,
-                                   const std::string &clone_root) {
+void SqliteStorageService::relativize_component(int64_t component_id,
+                                                const std::string &clone_root) {
   const auto comp = get_component_by_id(component_id);
   if (!comp) {
     return;
@@ -448,7 +448,8 @@ void Storage::relativize_component(int64_t component_id,
   upd.step_done();
 }
 
-std::optional<Component> Storage::get_component(const std::string &path) {
+std::optional<Component>
+SqliteStorageService::get_component(const std::string &path) {
   const std::string abs = pathutil::abspath(path);
   // Step 1: exact match on stored BASE path (fast-path for unversioned comps).
   {
@@ -476,7 +477,7 @@ std::optional<Component> Storage::get_component(const std::string &path) {
 }
 
 std::optional<Component>
-Storage::get_component_by_name(const std::string &name) {
+SqliteStorageService::get_component_by_name(const std::string &name) {
   auto st = db_.prepare(std::string("SELECT ") + kComponentCols +
                         " FROM component WHERE name = ?");
   st.bind(1, std::string_view(name));
@@ -486,7 +487,8 @@ Storage::get_component_by_name(const std::string &name) {
   return component_from(st);
 }
 
-std::optional<Component> Storage::get_component_by_id(int64_t component_id) {
+std::optional<Component>
+SqliteStorageService::get_component_by_id(int64_t component_id) {
   auto st = db_.prepare(std::string("SELECT ") + kComponentCols +
                         " FROM component WHERE id = ?");
   st.bind(1, component_id);
@@ -497,7 +499,7 @@ std::optional<Component> Storage::get_component_by_id(int64_t component_id) {
 }
 
 std::optional<Component>
-Storage::component_for_path(const std::string &abs_path) {
+SqliteStorageService::component_for_path(const std::string &abs_path) {
   const std::string abs = pathutil::abspath(abs_path);
   std::optional<Component> best;
   std::string best_root;
@@ -521,7 +523,7 @@ Storage::component_for_path(const std::string &abs_path) {
   return best;
 }
 
-void Storage::delete_component(int64_t component_id) {
+void SqliteStorageService::delete_component(int64_t component_id) {
   // Symbols reference files with ON DELETE SET NULL, so remove them before the
   // cascade nulls their file ids -- otherwise they linger as file-less orphans.
   // Directories and files then vanish via the component's ON DELETE CASCADE.
@@ -539,7 +541,7 @@ void Storage::delete_component(int64_t component_id) {
   del_comp.step_done();
 }
 
-void Storage::delete_directory(int64_t directory_id) {
+void SqliteStorageService::delete_directory(int64_t directory_id) {
   // Files cascade on directory delete; symbols (ON DELETE SET NULL) would
   // linger file-less, so delete them first.
   static const char kSub[] = "SELECT id FROM file WHERE directory_id = ?";
@@ -554,7 +556,7 @@ void Storage::delete_directory(int64_t directory_id) {
   del_dir.step_done();
 }
 
-void Storage::delete_file(int64_t file_id) {
+void SqliteStorageService::delete_file(int64_t file_id) {
   // Symbols reference files with ON DELETE SET NULL; delete them first so they
   // do not linger file-less.
   auto del_sym =
@@ -567,15 +569,15 @@ void Storage::delete_file(int64_t file_id) {
   del_file.step_done();
 }
 
-void Storage::delete_symbol(int64_t symbol_id) {
+void SqliteStorageService::delete_symbol(int64_t symbol_id) {
   auto del = db_.prepare("DELETE FROM symbol WHERE id = ?");
   del.bind(1, symbol_id);
   del.step_done();
 }
 
 std::vector<Component>
-Storage::list_components(const std::optional<std::string> &name,
-                         const std::optional<std::string> &kind) {
+SqliteStorageService::list_components(const std::optional<std::string> &name,
+                                      const std::optional<std::string> &kind) {
   std::string sql = std::string("SELECT ") + kComponentCols + " FROM component";
   std::vector<std::string> where;
   std::vector<SqlValue> args;
@@ -602,7 +604,7 @@ Storage::list_components(const std::optional<std::string> &name,
   return out;
 }
 
-void Storage::set_component_repository(
+void SqliteStorageService::set_component_repository(
     int64_t component_id, const std::optional<int64_t> &repository_id) {
   auto st = db_.prepare("UPDATE component SET repository_id = ? WHERE id = ?");
   if (repository_id) {
@@ -615,7 +617,7 @@ void Storage::set_component_repository(
 }
 
 std::vector<Component>
-Storage::components_for_repository(int64_t repository_id) {
+SqliteStorageService::components_for_repository(int64_t repository_id) {
   auto st = db_.prepare(std::string("SELECT ") + kComponentCols +
                         " FROM component WHERE repository_id = ? "
                         "ORDER BY name, path");
@@ -630,10 +632,10 @@ Storage::components_for_repository(int64_t repository_id) {
 // -- repositories / clones (v23)
 // -----------------------------------------------------------------
 
-int64_t Storage::add_repository(const std::string &name,
-                                const std::string &kind,
-                                const std::optional<std::string> &remote_url,
-                                const std::optional<int64_t> &universe_id) {
+int64_t SqliteStorageService::add_repository(
+    const std::string &name, const std::string &kind,
+    const std::optional<std::string> &remote_url,
+    const std::optional<int64_t> &universe_id) {
   const char *sql =
       universe_id
           ? "INSERT INTO repository (name, kind, remote_url, "
@@ -663,7 +665,7 @@ int64_t Storage::add_repository(const std::string &name,
 }
 
 std::optional<Repository>
-Storage::get_repository_by_name(const std::string &name) {
+SqliteStorageService::get_repository_by_name(const std::string &name) {
   auto st = db_.prepare(std::string("SELECT ") + kRepositoryCols +
                         " FROM repository WHERE name = ?");
   st.bind(1, std::string_view(name));
@@ -673,7 +675,8 @@ Storage::get_repository_by_name(const std::string &name) {
   return repository_from(st);
 }
 
-std::optional<Repository> Storage::get_repository_by_id(int64_t repository_id) {
+std::optional<Repository>
+SqliteStorageService::get_repository_by_id(int64_t repository_id) {
   auto st = db_.prepare(std::string("SELECT ") + kRepositoryCols +
                         " FROM repository WHERE id = ?");
   st.bind(1, repository_id);
@@ -684,7 +687,7 @@ std::optional<Repository> Storage::get_repository_by_id(int64_t repository_id) {
 }
 
 std::optional<Repository>
-Storage::get_repository_by_remote(const std::string &remote_url) {
+SqliteStorageService::get_repository_by_remote(const std::string &remote_url) {
   auto st = db_.prepare(std::string("SELECT ") + kRepositoryCols +
                         " FROM repository WHERE remote_url = ? "
                         "ORDER BY id LIMIT 1");
@@ -695,9 +698,9 @@ Storage::get_repository_by_remote(const std::string &remote_url) {
   return repository_from(st);
 }
 
-std::vector<Repository>
-Storage::list_repositories(const std::optional<std::string> &name,
-                           const std::optional<std::string> &kind) {
+std::vector<Repository> SqliteStorageService::list_repositories(
+    const std::optional<std::string> &name,
+    const std::optional<std::string> &kind) {
   std::string sql =
       std::string("SELECT ") + kRepositoryCols + " FROM repository";
   std::vector<std::string> where;
@@ -725,8 +728,8 @@ Storage::list_repositories(const std::optional<std::string> &name,
   return out;
 }
 
-void Storage::set_active_clone(int64_t repository_id,
-                               const std::optional<int64_t> &clone_id) {
+void SqliteStorageService::set_active_clone(
+    int64_t repository_id, const std::optional<int64_t> &clone_id) {
   auto st =
       db_.prepare("UPDATE repository SET active_clone_id = ? WHERE id = ?");
   if (clone_id) {
@@ -738,14 +741,15 @@ void Storage::set_active_clone(int64_t repository_id,
   st.step_done();
 }
 
-void Storage::delete_repository(int64_t repository_id) {
+void SqliteStorageService::delete_repository(int64_t repository_id) {
   auto st = db_.prepare("DELETE FROM repository WHERE id = ?");
   st.bind(1, repository_id);
   st.step_done();
 }
 
-int64_t Storage::add_clone(int64_t repository_id, const std::string &path,
-                           const std::optional<std::string> &label) {
+int64_t
+SqliteStorageService::add_clone(int64_t repository_id, const std::string &path,
+                                const std::optional<std::string> &label) {
   // Mirror Python: absolutize plain paths; preserve portable ($/<) verbatim.
   const std::string abs = (!path.contains('$') && !path.contains('<'))
                               ? pathutil::abspath(path)
@@ -765,7 +769,7 @@ int64_t Storage::add_clone(int64_t repository_id, const std::string &path,
   return cid;
 }
 
-std::optional<Clone> Storage::get_clone_by_id(int64_t clone_id) {
+std::optional<Clone> SqliteStorageService::get_clone_by_id(int64_t clone_id) {
   auto st = db_.prepare(std::string("SELECT ") + kCloneCols +
                         " FROM clone WHERE id = ?");
   st.bind(1, clone_id);
@@ -775,7 +779,8 @@ std::optional<Clone> Storage::get_clone_by_id(int64_t clone_id) {
   return clone_from(st);
 }
 
-std::optional<Clone> Storage::get_clone_by_path(const std::string &path) {
+std::optional<Clone>
+SqliteStorageService::get_clone_by_path(const std::string &path) {
   const std::string abs = (!path.contains('$') && !path.contains('<'))
                               ? pathutil::abspath(path)
                               : path;
@@ -789,7 +794,7 @@ std::optional<Clone> Storage::get_clone_by_path(const std::string &path) {
 }
 
 std::vector<Clone>
-Storage::list_clones(const std::optional<int64_t> &repository_id) {
+SqliteStorageService::list_clones(const std::optional<int64_t> &repository_id) {
   std::string sql = std::string("SELECT ") + kCloneCols + " FROM clone";
   if (repository_id) {
     sql += " WHERE repository_id = ?";
@@ -806,7 +811,7 @@ Storage::list_clones(const std::optional<int64_t> &repository_id) {
   return out;
 }
 
-void Storage::delete_clone(int64_t clone_id) {
+void SqliteStorageService::delete_clone(int64_t clone_id) {
   auto clr = db_.prepare("UPDATE repository SET active_clone_id = NULL "
                          "WHERE active_clone_id = ?");
   clr.bind(1, clone_id);

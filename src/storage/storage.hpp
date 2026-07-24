@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -29,6 +30,26 @@
 
 namespace cidx {
 
+namespace storage {
+class SqliteStoragePorts;
+class WorkspaceCatalogReadPort;
+class WorkspaceCatalogWritePort;
+class SourceStoreReadPort;
+class SourceStoreWritePort;
+class SymbolReadPort;
+class SymbolWritePort;
+class TypeReadPort;
+class TypeWritePort;
+class FactReadPort;
+class FactWritePort;
+class DefinitionReadPort;
+class DefinitionWritePort;
+class IncludeReadPort;
+class IncludeWritePort;
+class SchemaCatalogReadPort;
+class UnitOfWorkFactory;
+} // namespace storage
+
 constexpr int kSchemaVersion = 39;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
@@ -40,13 +61,14 @@ bool is_symbol_kind(std::string_view kind);
 int64_t symbol_kind_id(std::string_view name);
 std::string symbol_kind_name(int64_t id);
 
+class SqliteStorageService;
 class Storage;
 
 // RAII transaction: BEGIN on construction, COMMIT on clean destruction,
 // ROLLBACK when destroyed during exception unwind (Python _Transaction).
 class Transaction {
 public:
-  explicit Transaction(Storage &db);
+  explicit Transaction(SqliteStorageService &db);
   ~Transaction();
   Transaction(const Transaction &) = delete;
   Transaction &operator=(const Transaction &) = delete;
@@ -55,12 +77,12 @@ public:
   void rollback(); // explicit early rollback
 
 private:
-  Storage &db_;
+  SqliteStorageService &db_;
   bool done_ = false;
   int uncaught_on_entry_;
 };
 
-class Storage {
+class SqliteStorageService {
 public:
   // read_only opens with SQLITE_OPEN_READONLY and performs NO mutation on
   // connect: no directory creation, no migrate(), no schema script, no
@@ -68,8 +90,29 @@ public:
   // read-only open cannot migrate) or the constructor throws CidxError.
   enum class OpenMode { read_write, read_only };
 
-  explicit Storage(const std::string &path = ":memory:",
-                   OpenMode mode = OpenMode::read_write);
+  explicit SqliteStorageService(const std::string &path = ":memory:",
+                                OpenMode mode = OpenMode::read_write);
+  ~SqliteStorageService();
+
+  // Focused ports are the migration boundary for new platform code. The
+  // Storage methods remain available as a compatibility façade while callers
+  // move to the smallest read/write capability they need.
+  storage::WorkspaceCatalogReadPort &workspace_catalog_read();
+  storage::WorkspaceCatalogWritePort &workspace_catalog_write();
+  storage::SourceStoreReadPort &source_read();
+  storage::SourceStoreWritePort &source_write();
+  storage::SymbolReadPort &symbol_read();
+  storage::SymbolWritePort &symbol_write();
+  storage::TypeReadPort &type_read();
+  storage::TypeWritePort &type_write();
+  storage::FactReadPort &fact_read();
+  storage::FactWritePort &fact_write();
+  storage::DefinitionReadPort &definition_read();
+  storage::DefinitionWritePort &definition_write();
+  storage::IncludeReadPort &include_read();
+  storage::IncludeWritePort &include_write();
+  storage::SchemaCatalogReadPort &schema_read();
+  storage::UnitOfWorkFactory &unit_of_work();
 
   // Batch many mutations into one commit (the documented 100x win):
   //   { auto txn = db.transaction(); ...; }   // commits at scope end
@@ -558,6 +601,8 @@ public:
   // calls/uses, report remaining stubs. Returns count of still-unresolved
   // stub symbols.
   int resolve_pass();
+  // Record the UTC completion marker after a successful resolve pass.
+  void stamp_graph_resolved();
 
   // Roll edge.count up to the true site count for calls (kind=1) and uses
   // (kind=7) — idempotent; COUNT(*) is the source of truth.
@@ -620,44 +665,16 @@ public:
   // v27 multi-definition readers (query.py:GraphQuery.redefined/definitions/
   // possible_callees). DefinitionRow is one `definition` (or possible-call
   // target) row; the graph layer joins in component/file for display.
-  struct DefinitionRow {
-    int64_t symbol_id = -1;
-    std::optional<int64_t> file_id;
-    std::optional<int64_t> line, col, end_line, end_col;
-    std::optional<std::string>
-        init_text; // v28: (static member) var initializer
-  };
+  using DefinitionRow = ::cidx::DefinitionRow;
   std::vector<Symbol> redefined_symbols(int limit);
   std::vector<DefinitionRow> definitions_of(int64_t symbol_id);
   std::vector<DefinitionRow> possible_callees_of(int64_t symbol_id);
 
   // A6 result row: 8 edge columns + decoded symbol-from-offset (plan §A6).
-  struct GraphEdgeRow {
-    int64_t eid = -1;
-    int64_t src_id = -1;
-    int64_t dst_id = -1;
-    int64_t ekind = 0;
-    int64_t ecount = 0;
-    int64_t rawcount = 0;
-    std::optional<int64_t> base_access;
-    std::optional<int64_t> is_virtual;
-    Symbol sym; // decoded from cols 8..33 via symbol_from_offset
-  };
+  using GraphEdgeRow = ::cidx::GraphEdgeRow;
 
   // A7 result row for batch site loading.
-  struct EdgeSiteRow {
-    int64_t edge_id = -1;
-    std::optional<int64_t> file_id;
-    std::optional<int64_t> line;
-    std::optional<int64_t> col;
-    bool conditional = false;
-    std::optional<std::string> args_sig;
-    std::optional<std::string> recv_src_kind;
-    std::optional<std::string> recv_type_usr;
-    std::optional<std::string> recv_decl_usr;
-    std::optional<int64_t> recv_param_pos;
-    std::optional<int64_t> recv_type_is_value;
-  };
+  using EdgeSiteRow = ::cidx::EdgeSiteRow;
 
   // A6: typed-edge query (query.py:782-813)
   // direction "in"|"out"; kind_ids empty => no kind filter; count_resolved
@@ -763,6 +780,7 @@ private:
   split_path(const std::string &abs_path);
 
   SqliteDb db_;
+  std::unique_ptr<storage::SqliteStoragePorts> ports_;
   bool in_txn_ = false;
   // Set by migrate() on the v21->v22 transition; consumed by the constructor to
   // backfill entity_node from existing symbols (pure-DB, no re-index/resolve).
@@ -771,9 +789,21 @@ private:
   std::optional<bool> artifact_query_only_before_attach_;
 };
 
+// Compatibility façade for legacy application code. New code composes the
+// focused ports or the internal SQLite service directly; persistence
+// implementation lives in SqliteStorageService.
+class Storage : public SqliteStorageService {
+public:
+  using OpenMode = SqliteStorageService::OpenMode;
+  using SqliteStorageService::SqliteStorageService;
+  ~Storage() = default;
+};
+
 class StorageWorkspaceAdapter final : public WorkspaceDataSource {
 public:
-  explicit StorageWorkspaceAdapter(Storage &storage) : storage_(storage) {}
+  explicit StorageWorkspaceAdapter(Storage &storage)
+      : storage_(storage), workspace_read_(storage.workspace_catalog_read()),
+        source_read_(storage.source_read()) {}
 
   std::vector<Repository> list_repositories() override;
   std::vector<Component> list_components() override;
@@ -790,6 +820,8 @@ public:
 
 private:
   Storage &storage_;
+  storage::WorkspaceCatalogReadPort &workspace_read_;
+  storage::SourceStoreReadPort &source_read_;
 };
 
 } // namespace cidx

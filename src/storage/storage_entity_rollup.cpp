@@ -1166,7 +1166,7 @@ static void cpp_materialise_declares(cidx::SqliteDb &db) {
   }
 }
 
-void Storage::materialise_entity_edges() {
+void SqliteStorageService::materialise_entity_edges() {
   // Idempotent: full re-materialise each resolve. The DELETE runs INSIDE the
   // rebuild transaction so a failure in any phase rolls back to the previous
   // rows instead of leaving entity_edge empty (atomic resolve).
@@ -1194,7 +1194,7 @@ void Storage::materialise_entity_edges() {
   }
 }
 
-int Storage::resolve_pass() {
+int SqliteStorageService::resolve_pass() {
   // Roll up edge.count for calls/uses from edge_site counts.
   rollup_edge_counts();
   // v27: multi-definition. definition/def_edge are already written at index

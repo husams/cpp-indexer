@@ -3,13 +3,48 @@
 // the SQLite rowid once a row has been read back.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace cidx {
+
+using SymbolValue = std::variant<std::nullptr_t, int64_t, double, std::string>;
+
+struct IndexIdentity {
+  int schema_version = 0;
+  std::optional<std::string> source_revision;
+  std::optional<std::string> source_fingerprint;
+  std::optional<std::string> index_config;
+  std::optional<std::string> index_config_fingerprint;
+  std::string freshness = "unverifiable";
+  std::string workspace = "workspace:memory";
+};
+
+struct DefinitionRow {
+  int64_t symbol_id = -1;
+  std::optional<int64_t> file_id;
+  std::optional<int64_t> line, col, end_line, end_col;
+  std::optional<std::string> init_text;
+};
+
+struct EdgeSiteRow {
+  int64_t edge_id = -1;
+  std::optional<int64_t> file_id;
+  std::optional<int64_t> line;
+  std::optional<int64_t> col;
+  bool conditional = false;
+  std::optional<std::string> args_sig;
+  std::optional<std::string> recv_src_kind;
+  std::optional<std::string> recv_type_usr;
+  std::optional<std::string> recv_decl_usr;
+  std::optional<int64_t> recv_param_pos;
+  std::optional<int64_t> recv_type_is_value;
+};
 
 // v35: an explicit declared program/dependency universe. The key is the
 // portable part of a symbol identity; id is database-local only.
@@ -32,6 +67,15 @@ struct Component {
       semantic_universe_id; // v35: explicit scope for ungrouped components
 };
 
+// Input payload for component creation. The adapter must preserve the
+// version even though it is not part of the generated component identity.
+struct ComponentWriteRecord {
+  std::string name;
+  std::string path;
+  std::string kind;
+  std::optional<std::string> version;
+};
+
 // v23: a logical code base grouping >=1 components, with switchable clones.
 struct Repository {
   int64_t id = -1;
@@ -40,6 +84,14 @@ struct Repository {
   std::optional<std::string> remote_url;       // git origin URL when known
   std::optional<int64_t> active_clone_id;      // -> clone.id; NULL if none yet
   std::optional<int64_t> semantic_universe_id; // v35: declared program universe
+};
+
+// Input payload for repository creation, including its declared universe.
+struct RepositoryWriteRecord {
+  std::string name;
+  std::string kind;
+  std::optional<std::string> remote_url;
+  std::optional<int64_t> semantic_universe_id;
 };
 
 // v23: one checkout/worktree directory of a repository.
@@ -131,6 +183,40 @@ struct Symbol {
   // Transient translation-unit/build identity; never persisted as a column.
   std::optional<std::string> identity_translation_unit;
   int64_t id = -1;
+};
+
+struct GraphEdgeRow {
+  int64_t eid = -1;
+  int64_t src_id = -1;
+  int64_t dst_id = -1;
+  int64_t ekind = 0;
+  int64_t ecount = 0;
+  int64_t rawcount = 0;
+  std::optional<int64_t> base_access;
+  std::optional<int64_t> is_virtual;
+  Symbol sym;
+};
+
+// Complete input payload for minting a reference/stub symbol. These fields
+// mirror Storage::mint_symbol_id so a port migration cannot lose identity,
+// declaration, linkage, or semantic-universe information.
+struct SymbolIdentityRecord {
+  std::string usr;
+  std::string spelling;
+  std::string qual_name;
+  std::string display_name;
+  std::string kind = "function";
+  std::optional<int64_t> decl_file_id;
+  std::optional<int64_t> decl_line;
+  std::optional<int64_t> decl_col;
+  std::optional<std::string> decl_path;
+  bool is_instantiation = false;
+  bool is_named_instance = false;
+  std::optional<std::string> type_info;
+  std::optional<int64_t> semantic_universe_id;
+  std::optional<std::string> identity_source;
+  std::optional<std::string> linkage;
+  std::optional<std::string> identity_translation_unit;
 };
 
 // -- v7 graph layer records ---------------------------------------------------
@@ -407,6 +493,44 @@ struct Stats {
   std::map<std::string, int64_t> symbols_by_kind;
   int64_t edges = 0;
   std::map<std::string, int64_t> edges_by_kind;
+};
+
+// Query-facing graph rows. These records deliberately live beside the other
+// domain values instead of reusing Storage's SQLite-shaped nested rows.
+struct GraphEdgeRecord {
+  int64_t edge_id = -1;
+  int64_t src_id = -1;
+  int64_t dst_id = -1;
+  int64_t kind = 0;
+  int64_t count = 0;
+  int64_t raw_count = 0;
+  std::optional<int64_t> base_access;
+  std::optional<int64_t> is_virtual;
+  Symbol target;
+};
+
+struct GraphEdgeSiteRecord {
+  int64_t edge_id = -1;
+  std::optional<int64_t> file_id;
+  std::optional<int64_t> line;
+  std::optional<int64_t> col;
+  bool conditional = false;
+  std::optional<std::string> args_sig;
+  std::optional<std::string> recv_src_kind;
+  std::optional<std::string> recv_type_usr;
+  std::optional<std::string> recv_decl_usr;
+  std::optional<int64_t> recv_param_pos;
+  std::optional<int64_t> recv_type_is_value;
+};
+
+struct DefinitionRecord {
+  int64_t symbol_id = -1;
+  std::optional<int64_t> file_id;
+  std::optional<int64_t> line;
+  std::optional<int64_t> col;
+  std::optional<int64_t> end_line;
+  std::optional<int64_t> end_col;
+  std::optional<std::string> init_text;
 };
 
 } // namespace cidx
