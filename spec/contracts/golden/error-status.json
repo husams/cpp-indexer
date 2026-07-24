@@ -1,5 +1,7 @@
 {
   "status": "error",
-  "code": "E_RELATION",
-  "message": "unknown relation: symbol.missing"
+  "code": "backend_error",
+  "message": "backend unavailable",
+  "exit_class": "infrastructure_failure",
+  "exit_code": 6
 }

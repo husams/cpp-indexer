@@ -31,6 +31,7 @@ struct IndexIdentity {
   std::optional<std::string> index_config;
   std::optional<std::string> index_config_fingerprint;
   std::string freshness = "unverifiable";
+  std::string workspace = "workspace:memory";
 };
 
 struct WorkspaceCompileCommand {

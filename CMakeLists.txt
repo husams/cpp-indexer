@@ -185,6 +185,7 @@ add_library(cidx_core STATIC
   src/graph/query.cpp
   src/graph/emit.cpp
   src/query/plan.cpp
+  src/query/result_protocol.cpp
   src/query/cxq.cpp
   src/query/exec.cpp
   src/include_hygiene/graph.cpp

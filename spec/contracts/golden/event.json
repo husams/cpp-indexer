@@ -1,0 +1,9 @@
+{
+  "protocol": "cidx.event/v1",
+  "sequence": 3,
+  "operation": "index",
+  "event": "progress",
+  "message": "indexed 2 of 4 files",
+  "completed": 2,
+  "total": 4
+}

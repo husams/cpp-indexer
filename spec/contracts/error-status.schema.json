@@ -1,11 +1,49 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CIDX stable error reduction",
   "type": "object",
-  "required": ["status"],
+  "required": [
+    "status",
+    "code",
+    "message",
+    "exit_class",
+    "exit_code"
+  ],
+  "additionalProperties": false,
   "properties": {
-    "status": {"enum": ["ok", "partial", "truncated", "error"]},
-    "code": {"type": "string", "pattern": "^E_[A-Z0-9_]+$"},
-    "message": {"type": "string"}
-  },
-  "additionalProperties": false
+    "status": {
+      "const": "error"
+    },
+    "code": {
+      "enum": [
+        "usage",
+        "invalid_input",
+        "stale_input",
+        "timeout",
+        "backend_error",
+        "policy_refuted",
+        "unknown",
+        "truncated_budget",
+        "missing_evidence"
+      ]
+    },
+    "message": {
+      "type": "string",
+      "x-maxUtf8Bytes": 4096
+    },
+    "exit_class": {
+      "enum": [
+        "usage",
+        "invalid_or_stale_input",
+        "policy_failure",
+        "unknown",
+        "infrastructure_failure"
+      ]
+    },
+    "exit_code": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    }
+  }
 }
