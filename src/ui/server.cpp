@@ -28,8 +28,26 @@ std::string token() {
 }
 
 bool has_token(std::string_view target, std::string_view expected) {
-  const std::string needle = "token=" + std::string(expected);
-  return target.contains(needle);
+  const std::size_t question = target.find('?');
+  if (question == std::string_view::npos) {
+    return false;
+  }
+  const std::string expected_field = "token=" + std::string(expected);
+  std::size_t start = question + 1;
+  while (start <= target.size()) {
+    const std::size_t end = target.find('&', start);
+    const std::string_view field = target.substr(
+        start,
+        end == std::string_view::npos ? target.size() - start : end - start);
+    if (field == expected_field) {
+      return true;
+    }
+    if (end == std::string_view::npos) {
+      break;
+    }
+    start = end + 1;
+  }
+  return false;
 }
 
 void launch_browser(const std::string &url) {
@@ -79,9 +97,18 @@ bool send_response(int fd, int code, std::string_view type,
   return send_all(fd, header) && send_all(fd, body);
 }
 
+struct StaticGraphProvider {
+  std::string graph_json;
+
+  std::optional<std::string> operator()(std::string_view target) const {
+    (void)target;
+    return graph_json;
+  }
+};
+
 } // namespace
 
-int serve_live(const std::string &html, const std::string &graph_json,
+int serve_live(const std::string &html, const GraphProvider &graph_provider,
                const ServerOptions &options, std::ostream &out,
                std::ostream &err) {
   const int server = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -151,7 +178,17 @@ int serve_live(const std::string &html, const std::string &graph_json,
     if (target.starts_with("/?") || target.starts_with("/index.html?")) {
       sent = send_response(client, 200, "text/html; charset=utf-8", html);
     } else if (target.starts_with("/api/graph?")) {
-      sent = send_response(client, 200, "application/json", graph_json);
+      try {
+        const auto graph_json = graph_provider(target);
+        sent = graph_json
+                   ? send_response(client, 200, "application/json", *graph_json)
+                   : send_response(client, 400, "text/plain",
+                                   "bad graph request\n");
+      } catch (const std::exception &error) {
+        const std::string message =
+            "bad graph request: " + std::string(error.what()) + "\n";
+        sent = send_response(client, 400, "text/plain", message);
+      }
     } else {
       sent = send_response(client, 404, "text/plain", "not found\n");
     }
@@ -162,6 +199,12 @@ int serve_live(const std::string &html, const std::string &graph_json,
   }
   ::close(server);
   return 0;
+}
+
+int serve_live(const std::string &html, const std::string &graph_json,
+               const ServerOptions &options, std::ostream &out,
+               std::ostream &err) {
+  return serve_live(html, StaticGraphProvider{graph_json}, options, out, err);
 }
 
 } // namespace cidx::ui
