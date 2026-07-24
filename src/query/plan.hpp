@@ -68,7 +68,23 @@ int64_t entity_kind_id(const std::string &name);
 // ---- Predicates
 // ---------------------------------------------------------------
 
-enum class PredOp { AllOf, AnyOf, Not, Eq, Ne, Glob, In };
+enum class UnknownPolicy { Exclude, Include, Error };
+const char *unknown_policy_name(UnknownPolicy policy);
+
+enum class PredOp {
+  AllOf,
+  AnyOf,
+  Not,
+  Eq,
+  Ne,
+  Glob,
+  In,
+  Exists,
+  None,
+  All,
+  AtLeast,
+  Exactly,
+};
 
 // One predicate-tree node. Cmp ops use field + value/values; boolean ops use
 // kids. Values are strings ("true"/"false" for booleans is NOT used -- boolean
@@ -81,6 +97,19 @@ struct Pred {
   std::string field;
   std::vector<std::string> str_values; // Eq/Ne/Glob use [0]; In uses all
   std::optional<int64_t> int_value;    // Eq/Ne on boolean/int fields
+  // Relationship quantifiers. The target predicate is evaluated against each
+  // reached node; a missing target means "any target".
+  std::string relation;
+  std::shared_ptr<Pred> target;
+  int64_t min_depth = 1;
+  int64_t max_depth = 1;
+  int64_t threshold = 0;
+  bool inbound = false;
+};
+
+struct TargetSet {
+  enum class Kind { Any, All, None } kind = Kind::Any;
+  std::vector<std::string> refs;
 };
 
 // Builders (portable programmatic boolean form -- and/or/not can't overload).
@@ -96,6 +125,49 @@ Pred eq(const std::string &field, bool value);
 Pred ne(const std::string &field, const std::string &value);
 Pred glob(const std::string &field, const std::string &pattern);
 Pred in_list(const std::string &field, std::vector<std::string> values);
+
+// Relationship quantifiers. These are QueryPlan primitives; the semantic
+// helpers below lower to these nodes and ordinary field predicates.
+Pred exists(const std::string &relation, std::optional<Pred> target = {},
+            int64_t min_depth = 1, int64_t max_depth = 1, bool inbound = false);
+Pred none(const std::string &relation, std::optional<Pred> target = {},
+          int64_t min_depth = 1, int64_t max_depth = 1, bool inbound = false);
+Pred all(const std::string &relation, std::optional<Pred> target = {},
+         int64_t min_depth = 1, int64_t max_depth = 1, bool inbound = false);
+Pred at_least(int64_t threshold, const std::string &relation,
+              std::optional<Pred> target = {}, int64_t min_depth = 1,
+              int64_t max_depth = 1, bool inbound = false);
+Pred exactly(int64_t threshold, const std::string &relation,
+             std::optional<Pred> target = {}, int64_t min_depth = 1,
+             int64_t max_depth = 1, bool inbound = false);
+
+TargetSet any_target(std::vector<std::string> refs);
+TargetSet all_targets(std::vector<std::string> refs);
+TargetSet no_targets(std::vector<std::string> refs);
+
+Pred inherits_from(const std::string &target, bool transitive = false);
+Pred inherits_from(const TargetSet &targets, bool transitive = false);
+Pred implements(const std::string &target);
+Pred implements(const TargetSet &targets);
+Pred has_ancestor(const std::string &target, bool transitive = true);
+Pred has_member(std::optional<Pred> target = {});
+Pred has_method(std::optional<Pred> target = {});
+Pred has_field(std::optional<Pred> target = {});
+Pred has_nested(std::optional<Pred> target = {});
+Pred has_template_arg(std::optional<Pred> target = {});
+Pred is_specialization_of(const std::string &target);
+Pred is_instantiation_of(const std::string &target);
+Pred calls(std::optional<Pred> target = {});
+Pred called_by(std::optional<Pred> target = {});
+Pred uses(std::optional<Pred> target = {});
+Pred used_by(std::optional<Pred> target = {});
+
+Pred is_abstract();
+Pred is_interface();
+Pred is_pure();
+Pred is_static();
+Pred is_template();
+Pred is_instance();
 
 // ---- Stages
 // -------------------------------------------------------------------
@@ -134,6 +206,7 @@ struct Stage {
   std::shared_ptr<Plan> operand;              // Union / Intersect / Except
   std::vector<std::string> fields;            // Select / OrderBy
   int64_t n = 0;                              // Limit
+  UnknownPolicy unknown = UnknownPolicy::Exclude;
 };
 
 // ---- Source / Plan
@@ -199,9 +272,9 @@ inline Query start(Source src) { return Query(std::move(src)); }
 // Stage factories (names mirror the CXQ surface; `in_` because Python's `in`
 // is reserved and the two builders keep one vocabulary).
 Stage nodes();
-Stage nodes(Pred pred);
+Stage nodes(Pred pred, UnknownPolicy unknown = UnknownPolicy::Exclude);
 Stage view(View level);
-Stage where(Pred pred);
+Stage where(Pred pred, UnknownPolicy unknown = UnknownPolicy::Exclude);
 Stage out(const std::string &relation, int64_t min_depth = 1,
           int64_t max_depth = 1, TraversalMode mode = TraversalMode::Static);
 Stage in_(const std::string &relation, int64_t min_depth = 1,

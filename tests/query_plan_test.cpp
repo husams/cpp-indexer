@@ -706,3 +706,63 @@ TEST_CASE("query_plan: devirtualized calls preserve the inherited receiver") {
   CHECK(usrs.contains("USR::X::print"));
   CHECK_FALSE(usrs.contains("USR::Y::print"));
 }
+
+TEST_CASE("query_plan: semantic macros lower to quantifier primitives") {
+  Seeded s;
+  Executor ex(s.db);
+
+  const auto abstract = ex.run(
+      (start(codebase()) | view(View::Entity) | nodes(is_abstract())).plan());
+  REQUIRE(abstract.rows.size() == 1);
+  CHECK(std::get<int64_t>(abstract.rows[0][0]) == s.S);
+
+  const auto target_sets =
+      ex.run((start(symbol("USR::E")) |
+              where(inherits_from(any_target({"ClassD", "Missing"}))) |
+              select({"usr"}))
+                 .plan());
+  REQUIRE(target_sets.rows.size() == 1);
+  CHECK(std::get<std::string>(target_sets.rows[0][0]) == "USR::E");
+
+  const auto all_target_result =
+      ex.run((start(symbol("USR::E")) |
+              where(inherits_from(all_targets({"ClassD", "Missing"}))) |
+              select({"usr"}))
+                 .plan());
+  CHECK(all_target_result.rows.empty());
+
+  const std::string explained = cidx::json_out::dumps_indent2(ex.explain(
+      (start(symbol("USR::E")) | where(inherits_from("ClassD"))).plan()));
+  CHECK(explained.find("\"op\": \"exists\"") != std::string::npos);
+  CHECK(explained.find("\"relation\": \"symbol.inherits\"") !=
+        std::string::npos);
+}
+
+TEST_CASE("query_plan: partial relation quantifiers preserve unknown") {
+  Seeded s;
+  Executor ex(s.db);
+
+  const auto excluded = ex.run((start(symbol("USR::A")) |
+                                where(none("calls", eq("spelling", "missing"))))
+                                   .plan());
+  CHECK(excluded.rows.empty());
+
+  const auto included = ex.run(
+      (start(symbol("USR::A")) |
+       where(none("calls", eq("spelling", "missing")), UnknownPolicy::Include))
+          .plan());
+  REQUIRE(included.rows.size() == 1);
+  CHECK(std::get<int64_t>(included.rows[0][0]) == s.A);
+
+  CHECK_THROWS_WITH(ex.run((start(symbol("USR::A")) |
+                            where(none("calls", eq("spelling", "missing")),
+                                  UnknownPolicy::Error))
+                               .plan()),
+                    "E_UNKNOWN: predicate evaluation is unknown");
+
+  const auto exact = ex.run((start(symbol("USR::A")) |
+                             where(exactly(2, "calls"), UnknownPolicy::Include))
+                                .plan());
+  REQUIRE(exact.rows.size() == 1);
+  CHECK(std::get<int64_t>(exact.rows[0][0]) == s.A);
+}

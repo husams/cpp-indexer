@@ -26,9 +26,13 @@ from .generated_catalog import (
 from .generated_extensions import EXTENSION_RELATIONS as _GENERATED_EXTENSION_RELATIONS
 
 __all__ = [
-    "PlanError", "TraversalMode", "Pred", "Stage", "Source", "Plan", "Query", "Result",
+    "PlanError", "TraversalMode", "UnknownPolicy", "Pred", "Stage", "Source", "Plan", "Query", "Result",
     "Executor", "start", "codebase", "symbol", "entity",
     "all_of", "any_of", "not_", "eq", "ne", "glob", "in_list",
+    "exists", "none", "all", "at_least", "exactly", "any_target", "all_targets", "no_targets",
+    "inherits_from", "implements", "has_ancestor", "has_member", "has_method", "has_field", "has_nested",
+    "has_template_arg", "is_specialization_of", "is_instantiation_of", "calls", "called_by", "uses", "used_by",
+    "is_abstract", "is_interface", "is_pure", "is_static", "is_template", "is_instance",
     "nodes", "view", "where", "out", "in_", "union_", "intersect", "except_",
     "select", "count", "distinct", "order_by", "limit",
     "validate", "canonical_json", "relation_catalog", "relation_metadata", "resolve_relation",
@@ -56,6 +60,12 @@ class TraversalMode(str, Enum):
 
     STATIC = "static"
     DEVIRTUALIZED = "devirtualized"
+
+
+class UnknownPolicy(str, Enum):
+    EXCLUDE = "exclude"
+    INCLUDE = "include"
+    ERROR = "error"
 
 
 # ---- Views --------------------------------------------------------------------
@@ -120,6 +130,18 @@ class Pred:
     field: str = ""
     str_values: tuple[str, ...] = ()
     int_value: Optional[int] = None
+    relation: str = ""
+    target: Optional["Pred"] = None
+    min_depth: int = 1
+    max_depth: int = 1
+    threshold: int = 0
+    inbound: bool = False
+
+
+@dataclass(frozen=True)
+class TargetSet:
+    kind: str
+    refs: tuple[str, ...]
 
 
 def all_of(preds: Sequence[Pred]) -> Pred:
@@ -154,6 +176,155 @@ def in_list(field_name: str, values: Sequence[str]) -> Pred:
     return Pred(op="in", field=field_name, str_values=tuple(values))
 
 
+def _relation_pred(op: str, relation: str, target: Optional[Pred], min_depth: int,
+                   max_depth: int, inbound: bool, threshold: int = 0) -> Pred:
+    return Pred(op=op, relation=relation, target=target, min_depth=min_depth,
+                max_depth=max_depth, inbound=inbound, threshold=threshold)
+
+
+def exists(relation: str, target: Optional[Pred] = None, min_depth: int = 1,
+           max_depth: int = 1, inbound: bool = False) -> Pred:
+    return _relation_pred("exists", relation, target, min_depth, max_depth, inbound)
+
+
+def none(relation: str, target: Optional[Pred] = None, min_depth: int = 1,
+         max_depth: int = 1, inbound: bool = False) -> Pred:
+    return _relation_pred("none", relation, target, min_depth, max_depth, inbound)
+
+
+def all(relation: str, target: Optional[Pred] = None, min_depth: int = 1,
+        max_depth: int = 1, inbound: bool = False) -> Pred:
+    return _relation_pred("all", relation, target, min_depth, max_depth, inbound)
+
+
+def at_least(threshold: int, relation: str, target: Optional[Pred] = None,
+             min_depth: int = 1, max_depth: int = 1,
+             inbound: bool = False) -> Pred:
+    return _relation_pred("at_least", relation, target, min_depth, max_depth,
+                          inbound, threshold)
+
+
+def exactly(threshold: int, relation: str, target: Optional[Pred] = None,
+            min_depth: int = 1, max_depth: int = 1,
+            inbound: bool = False) -> Pred:
+    return _relation_pred("exactly", relation, target, min_depth, max_depth,
+                          inbound, threshold)
+
+
+def any_target(refs: Sequence[str]) -> TargetSet:
+    return TargetSet("any", tuple(refs))
+
+
+def all_targets(refs: Sequence[str]) -> TargetSet:
+    return TargetSet("all", tuple(refs))
+
+
+def no_targets(refs: Sequence[str]) -> TargetSet:
+    return TargetSet("none", tuple(refs))
+
+
+def _target_ref(ref: str) -> Pred:
+    return any_of([eq("usr", ref), eq("qual_name", ref), eq("spelling", ref)])
+
+
+def _target_set_pred(relation: str, targets: TargetSet, inbound: bool = False,
+                     max_depth: int = 1) -> Pred:
+    if not targets.refs:
+        return any_of([]) if targets.kind == "any" else all_of([])
+    parts = [exists(relation, _target_ref(ref), 1, max_depth, inbound)
+             for ref in targets.refs]
+    if targets.kind == "any":
+        return parts[0] if len(parts) == 1 else any_of(parts)
+    if targets.kind == "all":
+        return parts[0] if len(parts) == 1 else all_of(parts)
+    return none(relation, any_of([_target_ref(ref) for ref in targets.refs]),
+                1, max_depth, inbound)
+
+
+def inherits_from(target: str | TargetSet, transitive: bool = False) -> Pred:
+    if isinstance(target, TargetSet):
+        return _target_set_pred("inherits", target, max_depth=32 if transitive else 1)
+    return exists("inherits", _target_ref(target), 1, 32 if transitive else 1)
+
+
+def implements(target: str | TargetSet) -> Pred:
+    if isinstance(target, TargetSet):
+        return _target_set_pred("implements", target)
+    return exists("implements", _target_ref(target))
+
+
+def has_ancestor(target: str, transitive: bool = True) -> Pred:
+    return inherits_from(target, transitive)
+
+
+def has_member(target: Optional[Pred] = None) -> Pred:
+    return exists("field_of", target, inbound=True)
+
+
+def has_method(target: Optional[Pred] = None) -> Pred:
+    return exists("method_of", target, inbound=True)
+
+
+def has_field(target: Optional[Pred] = None) -> Pred:
+    return has_member(target)
+
+
+def has_nested(target: Optional[Pred] = None) -> Pred:
+    return exists("contains", target)
+
+
+def has_template_arg(target: Optional[Pred] = None) -> Pred:
+    return exists("instantiates", target)
+
+
+def is_specialization_of(target: str) -> Pred:
+    return exists("specializes", _target_ref(target))
+
+
+def is_instantiation_of(target: str) -> Pred:
+    return exists("instantiates", _target_ref(target))
+
+
+def calls(target: Optional[Pred] = None) -> Pred:
+    return exists("calls", target)
+
+
+def called_by(target: Optional[Pred] = None) -> Pred:
+    return exists("calls", target, inbound=True)
+
+
+def uses(target: Optional[Pred] = None) -> Pred:
+    return exists("uses", target)
+
+
+def used_by(target: Optional[Pred] = None) -> Pred:
+    return exists("uses", target, inbound=True)
+
+
+def is_abstract() -> Pred:
+    return in_list("entity_type", ["abstract_class", "abstract_class_template"])
+
+
+def is_interface() -> Pred:
+    return in_list("entity_type", ["interface", "interface_template"])
+
+
+def is_pure() -> Pred:
+    return eq("is_pure", True)
+
+
+def is_static() -> Pred:
+    return eq("is_static", True)
+
+
+def is_template() -> Pred:
+    return in_list("kind", ["class-template", "function-template"])
+
+
+def is_instance() -> Pred:
+    return not_(is_template())
+
+
 # ---- Stages / Source / Plan --------------------------------------------------------
 
 
@@ -170,6 +341,7 @@ class Stage:
     operand: Optional["Plan"] = None
     fields: tuple[str, ...] = ()
     n: int = 0
+    unknown: UnknownPolicy = UnknownPolicy.EXCLUDE
 
 
 @dataclass(frozen=True)
@@ -214,16 +386,18 @@ def entity(ref: str) -> Source:
     return Source(kind="entity", ref=ref)
 
 
-def nodes(pred: Optional[Pred] = None) -> Stage:
-    return Stage(op="nodes", pred=pred)
+def nodes(pred: Optional[Pred] = None,
+          unknown: UnknownPolicy = UnknownPolicy.EXCLUDE) -> Stage:
+    return Stage(op="nodes", pred=pred, unknown=unknown)
 
 
 def view(level: str) -> Stage:
     return Stage(op="view", level=level)
 
 
-def where(pred: Pred) -> Stage:
-    return Stage(op="where", pred=pred)
+def where(pred: Pred,
+          unknown: UnknownPolicy = UnknownPolicy.EXCLUDE) -> Stage:
+    return Stage(op="where", pred=pred, unknown=unknown)
 
 
 def out(
@@ -308,13 +482,13 @@ def _check_cmp(p: Pred) -> None:
                 _fail("E_KIND", f"unknown entity_type '{v}'")
 
 
-def _norm_pred(p: Pred) -> Pred:
+def _norm_pred(p: Pred, active: str) -> Pred:
     if p.op in ("all_of", "any_of"):
         if not p.kids:
             _fail("E_FIELD", "empty boolean combinator")
         kids: list[Pred] = []
         for k in p.kids:
-            nk = _norm_pred(k)
+            nk = _norm_pred(k, active)
             if nk.op == p.op:
                 kids.extend(nk.kids)
             else:
@@ -325,13 +499,23 @@ def _norm_pred(p: Pred) -> Pred:
     if p.op == "not":
         if len(p.kids) != 1:
             _fail("E_FIELD", "not() takes exactly one predicate")
-        nk = _norm_pred(p.kids[0])
+        nk = _norm_pred(p.kids[0], active)
         if nk.op == "not":
             return nk.kids[0]  # not(not(p)) -> p
         return Pred(op="not", kids=(nk,))
     if p.op in ("eq", "ne", "glob", "in"):
         _check_cmp(p)
         return p
+    if p.op in ("exists", "none", "all", "at_least", "exactly"):
+        rel = resolve_relation(p.relation, active)
+        if rel is None:
+            _fail("E_RELATION", f"unknown relation '{p.relation}' in {active} view")
+        if not 1 <= p.min_depth <= p.max_depth <= 32:
+            _fail("E_DEPTH", "depth bounds must satisfy 1 <= min <= max <= 32")
+        if p.op in ("at_least", "exactly") and p.threshold < 0:
+            _fail("E_LIMIT", "quantifier threshold must be >= 0")
+        target = (_norm_pred(p.target, rel[1]) if p.target is not None else None)
+        return replace(p, relation=f"{rel[1]}.{rel[0]}", target=target)
     _fail("E_FIELD", "bad predicate")
 
 
@@ -364,7 +548,7 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
                 _fail("E_STAGE",
                       "nodes() requires an unenumerated codebase() source")
             if stage.pred is not None:
-                ns = replace(stage, pred=_norm_pred(stage.pred))
+                ns = replace(stage, pred=_norm_pred(stage.pred, st.active))
             st.codebase_unenumerated = False
         elif stage.op == "view":
             if st.shape != "nodes":
@@ -378,7 +562,7 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
             if stage.pred is None:
                 _fail("E_FIELD", "where() requires a predicate")
             consume()
-            ns = replace(stage, pred=_norm_pred(stage.pred))
+            ns = replace(stage, pred=_norm_pred(stage.pred, st.active))
         elif stage.op in ("out", "in"):
             consume()
             if st.shape != "nodes":
@@ -470,6 +654,17 @@ def _pred_to_dict(p: Pred) -> dict[str, Any]:
         return {"op": "not", "pred": _pred_to_dict(p.kids[0])}
     if p.op == "in":
         return {"op": "in", "field": p.field, "values": list(p.str_values)}
+    if p.op in ("exists", "none", "all", "at_least", "exactly"):
+        out: dict[str, Any] = {"op": p.op, "relation": p.relation}
+        if p.inbound:
+            out["direction"] = "in"
+        out["min_depth"] = p.min_depth
+        out["max_depth"] = p.max_depth
+        if p.op in ("at_least", "exactly"):
+            out["threshold"] = p.threshold
+        if p.target is not None:
+            out["pred"] = _pred_to_dict(p.target)
+        return out
     value: Any = p.int_value if p.int_value is not None else p.str_values[0]
     return {"op": p.op, "field": p.field, "value": value}
 
@@ -484,10 +679,14 @@ def _plan_to_dict(plan: Plan) -> dict[str, Any]:
         if s.op == "nodes":
             if s.pred is not None:
                 o["pred"] = _pred_to_dict(s.pred)
+            if s.unknown != UnknownPolicy.EXCLUDE:
+                o["unknown"] = s.unknown.value
         elif s.op == "view":
             o["level"] = s.level
         elif s.op == "where":
             o["pred"] = _pred_to_dict(s.pred)  # type: ignore[arg-type]
+            if s.unknown != UnknownPolicy.EXCLUDE:
+                o["unknown"] = s.unknown.value
         elif s.op in ("out", "in"):
             o["relation"] = s.relation
             if s.mode != TraversalMode.STATIC.value:
@@ -540,37 +739,38 @@ class Result:
         }
 
 
-def _col_expr(field_name: str) -> str:
+def _col_expr(field_name: str, symbol_alias: str = "s",
+              entity_alias: str = "en") -> str:
     if field_name == "id":
-        return "s.id"
+        return f"{symbol_alias}.id"
     if field_name == "usr":
-        return "s.usr"
+        return f"{symbol_alias}.usr"
     if field_name == "semantic_universe":
-        return "(SELECT su.key FROM semantic_universe su WHERE su.id = s.semantic_universe_id)"
+        return f"(SELECT su.key FROM semantic_universe su WHERE su.id = {symbol_alias}.semantic_universe_id)"
     if field_name == "identity_key":
-        return "s.identity_key"
+        return f"{symbol_alias}.identity_key"
     if field_name == "name":
-        return "COALESCE(s.qual_name, s.spelling)"
+        return f"COALESCE({symbol_alias}.qual_name, {symbol_alias}.spelling)"
     if field_name == "spelling":
-        return "s.spelling"
+        return f"{symbol_alias}.spelling"
     if field_name == "qual_name":
-        return "s.qual_name"
+        return f"{symbol_alias}.qual_name"
     if field_name == "kind":
-        return "s.kind"
+        return f"{symbol_alias}.kind"
     if field_name == "entity_type":
-        return "en.kind"
+        return f"{entity_alias}.kind"
     if field_name == "is_definition":
-        return "s.is_definition"
+        return f"{symbol_alias}.is_definition"
     if field_name == "is_pure":
-        return "s.is_pure"
+        return f"{symbol_alias}.is_pure"
     if field_name == "is_static":
-        return "s.is_static"
+        return f"{symbol_alias}.is_static"
     if field_name == "file":
-        return "s.file_id"
+        return f"{symbol_alias}.file_id"
     if field_name == "line":
-        return "s.line"
+        return f"{symbol_alias}.line"
     if field_name == "col":
-        return "s.col"
+        return f"{symbol_alias}.col"
     raise PlanError(f"E_FIELD: unknown field '{field_name}'")
 
 
@@ -587,22 +787,139 @@ def _entity_type_name(raw: int) -> Optional[str]:
     return ENTITY_KIND_NAMES[raw] if 0 <= raw <= 9 else None
 
 
-def _pred_sql(p: Pred, sql: list[str], args: list[Any]) -> None:
+def _relation_exists_sql(p: Pred, active: str, sql: list[str], args: list[Any],
+                         target_filter: bool, negate_target: bool,
+                         outer_alias: str) -> None:
+    rel = resolve_relation(p.relation, active)
+    if rel is None:
+        raise PlanError(f"E_RELATION: unknown relation '{p.relation}'")
+    table = "entity_edge" if rel[1] == ENTITY_VIEW else "edge"
+    from_col = "dst_id" if p.inbound else "src_id"
+    to_col = "src_id" if p.inbound else "dst_id"
+    if p.max_depth > 1 or p.min_depth > 1:
+        sql.append(
+            "EXISTS (WITH RECURSIVE reach(id, depth) AS (SELECT e."
+            + to_col + " , 1 FROM " + table + " e WHERE e.kind = ? AND e."
+            + from_col + " = " + outer_alias + ".id UNION ALL SELECT e." + to_col
+            + " , reach.depth + 1 FROM " + table + " e JOIN reach ON e."
+            + from_col + " = reach.id WHERE e.kind = ? AND reach.depth < ?) "
+            "SELECT 1 FROM reach JOIN symbol qt ON qt.id = reach.id "
+            "LEFT JOIN entity_node qen ON qen.id = qt.id WHERE reach.depth BETWEEN ? AND ?"
+        )
+        args.extend([rel[2], rel[2], p.max_depth, p.min_depth, p.max_depth])
+    else:
+        sql.append(
+            "EXISTS (SELECT 1 FROM " + table + " qe JOIN symbol qt ON qt.id = qe."
+            + to_col + " LEFT JOIN entity_node qen ON qen.id = qt.id WHERE qe.kind = ? AND qe."
+            + from_col + " = " + outer_alias + ".id"
+        )
+        args.append(rel[2])
+    if target_filter and p.target is not None:
+        sql.append(" AND ")
+        if negate_target:
+            sql.append("NOT (")
+        _pred_sql(p.target, rel[1], sql, args, "qt", "qen")
+        if negate_target:
+            sql.append(")")
+    sql.append(")")
+
+
+def _relation_count_sql(p: Pred, active: str, sql: list[str], args: list[Any],
+                        target_filter: bool, outer_alias: str) -> None:
+    rel = resolve_relation(p.relation, active)
+    if rel is None:
+        raise PlanError(f"E_RELATION: unknown relation '{p.relation}'")
+    table = "entity_edge" if rel[1] == ENTITY_VIEW else "edge"
+    from_col = "dst_id" if p.inbound else "src_id"
+    to_col = "src_id" if p.inbound else "dst_id"
+    if p.max_depth > 1 or p.min_depth > 1:
+        sql.append(
+            "(WITH RECURSIVE reach(id, depth) AS (SELECT e." + to_col
+            + " , 1 FROM " + table + " e WHERE e.kind = ? AND e." + from_col
+            + " = " + outer_alias + ".id UNION ALL SELECT e." + to_col
+            + " , reach.depth + 1 FROM " + table + " e JOIN reach ON e."
+            + from_col + " = reach.id WHERE e.kind = ? AND reach.depth < ?) "
+            "SELECT COUNT(DISTINCT qt.id) FROM reach JOIN symbol qt ON qt.id = reach.id "
+            "LEFT JOIN entity_node qen ON qen.id = qt.id WHERE reach.depth BETWEEN ? AND ?"
+        )
+        args.extend([rel[2], rel[2], p.max_depth, p.min_depth, p.max_depth])
+    else:
+        sql.append(
+            "(SELECT COUNT(DISTINCT qe." + to_col + ") FROM " + table
+            + " qe JOIN symbol qt ON qt.id = qe." + to_col
+            + " LEFT JOIN entity_node qen ON qen.id = qt.id WHERE qe.kind = ? AND qe."
+            + from_col + " = " + outer_alias + ".id"
+        )
+        args.append(rel[2])
+    if target_filter and p.target is not None:
+        sql.append(" AND ")
+        _pred_sql(p.target, rel[1], sql, args, "qt", "qen")
+    sql.append(")")
+
+
+def _pred_sql(p: Pred, active: str, sql: list[str], args: list[Any],
+              symbol_alias: str = "s", entity_alias: str = "en") -> None:
     if p.op in ("all_of", "any_of"):
+        if not p.kids:
+            sql.append("1" if p.op == "all_of" else "0")
+            return
         joiner = " AND " if p.op == "all_of" else " OR "
         sql.append("(")
         for i, k in enumerate(p.kids):
             if i:
                 sql.append(joiner)
-            _pred_sql(k, sql, args)
+            _pred_sql(k, active, sql, args, symbol_alias, entity_alias)
         sql.append(")")
         return
     if p.op == "not":
         sql.append("NOT (")
-        _pred_sql(p.kids[0], sql, args)
+        _pred_sql(p.kids[0], active, sql, args, symbol_alias, entity_alias)
         sql.append(")")
         return
-    col = _col_expr(p.field)
+    if p.op in ("exists", "none", "all", "at_least", "exactly"):
+        rel = resolve_relation(p.relation, active)
+        if rel is None:
+            raise PlanError(f"E_RELATION: unknown relation '{p.relation}'")
+        complete = RELATION_METADATA[rel]["completeness"] == "complete"
+        found: list[str] = []
+        _relation_exists_sql(p, active, found, args, p.target is not None, False,
+                             symbol_alias)
+        found_sql = "".join(found)
+        if p.op in ("exists", "none"):
+            sql.append(
+                f"CASE WHEN {found_sql} THEN {1 if p.op == 'exists' else 0} "
+                f"WHEN {1 if complete else 0} THEN {0 if p.op == 'exists' else 1} ELSE NULL END"
+            )
+            return
+        if p.op == "all":
+            if p.target is None:
+                sql.append("1" if complete else "NULL")
+                return
+            violation: list[str] = []
+            _relation_exists_sql(p, active, violation, args, True, True,
+                                 symbol_alias)
+            sql.append(
+                f"CASE WHEN {''.join(violation)} THEN 0 WHEN {1 if complete else 0} "
+                "THEN 1 ELSE NULL END"
+            )
+            return
+        count: list[str] = []
+        _relation_count_sql(p, active, count, args, p.target is not None,
+                            symbol_alias)
+        count_sql = "".join(count)
+        if p.op == "at_least":
+            sql.append(
+                f"CASE WHEN {count_sql} >= {p.threshold} THEN 1 WHEN {1 if complete else 0} "
+                "THEN 0 ELSE NULL END"
+            )
+        else:
+            sql.append(
+                f"CASE WHEN {count_sql} > {p.threshold} THEN 0 WHEN {1 if complete else 0} "
+                f"AND {count_sql} = {p.threshold} THEN 1 WHEN {1 if complete else 0} "
+                "THEN 0 ELSE NULL END"
+            )
+        return
+    col = _col_expr(p.field, symbol_alias, entity_alias)
     is_kind = p.field in ("kind", "entity_type")
     if p.op in ("eq", "ne"):
         sql.append(col + (" = ?" if p.op == "eq" else " != ?"))
@@ -626,7 +943,8 @@ def _pred_sql(p: Pred, sql: list[str], args: list[Any]) -> None:
 def _pred_uses_entity_type(p: Pred) -> bool:
     if p.field == "entity_type":
         return True
-    return any(_pred_uses_entity_type(k) for k in p.kids)
+    return any(_pred_uses_entity_type(k) for k in p.kids) or (
+        p.target is not None and _pred_uses_entity_type(p.target))
 
 
 def _cell_key(c: Any) -> tuple:
@@ -687,12 +1005,12 @@ class Executor:
             st.ids = self._resolve_source(plan.source)
         for stage in plan.stages:
             if stage.op == "nodes":
-                self._enumerate(st, stage.pred)
+                self._enumerate(st, stage.pred, stage.unknown)
                 st.limit_in_effect = False
             elif stage.op == "view":
                 self._change_view(st, stage.level)
             elif stage.op == "where":
-                self._filter(st, stage.pred)  # type: ignore[arg-type]
+                self._filter(st, stage.pred, stage.unknown)  # type: ignore[arg-type]
             elif stage.op in ("out", "in"):
                 if stage.mode == TraversalMode.DEVIRTUALIZED.value:
                     self._traverse_devirtualized(st, stage)
@@ -752,7 +1070,12 @@ class Executor:
             st.ids = sorted(set(kept))
         st.view = level
 
-    def _enumerate(self, st: _Stream, pred: Optional[Pred]) -> None:
+    @staticmethod
+    def _append_unknown_policy(sql: list[str], policy: UnknownPolicy) -> None:
+        sql.append(" IS NOT FALSE" if policy == UnknownPolicy.INCLUDE else " IS TRUE")
+
+    def _enumerate(self, st: _Stream, pred: Optional[Pred],
+                   unknown: UnknownPolicy) -> None:
         sql = ["SELECT s.id FROM symbol s"]
         if st.view == ENTITY_VIEW:
             sql.append(" JOIN entity_node en ON en.id = s.id")
@@ -761,7 +1084,12 @@ class Executor:
         args: list[Any] = []
         if pred is not None:
             sql.append(" WHERE ")
-            _pred_sql(pred, sql, args)
+            _pred_sql(pred, st.view, sql, args)
+            if unknown == UnknownPolicy.ERROR:
+                probe = "".join(sql) + " IS NULL LIMIT 1"
+                if self._conn.execute(probe, args).fetchone() is not None:
+                    raise PlanError("E_UNKNOWN: predicate evaluation is unknown")
+            self._append_unknown_policy(sql, unknown)
         sql.append(" ORDER BY s.id LIMIT ?")
         args.append(ENUMERATE_BUDGET + 1)
         st.ids = [r["id"] for r in self._conn.execute("".join(sql), args)]
@@ -769,7 +1097,7 @@ class Executor:
             del st.ids[ENUMERATE_BUDGET:]
             st.truncated = True
 
-    def _filter(self, st: _Stream, pred: Pred) -> None:
+    def _filter(self, st: _Stream, pred: Pred, unknown: UnknownPolicy) -> None:
         out_ids: list[int] = []
         join = self._join_clause(_pred_uses_entity_type(pred))
         for at in range(0, len(st.ids), ID_CHUNK):
@@ -779,8 +1107,14 @@ class Executor:
                 + ",".join("?" * len(chunk)) + ") AND ("
             ]
             args: list[Any] = list(chunk)
-            _pred_sql(pred, sql, args)
-            sql.append(") ORDER BY s.id")
+            _pred_sql(pred, st.view, sql, args)
+            sql.append(")")
+            if unknown == UnknownPolicy.ERROR:
+                probe = "".join(sql) + " IS NULL LIMIT 1"
+                if self._conn.execute(probe, args).fetchone() is not None:
+                    raise PlanError("E_UNKNOWN: predicate evaluation is unknown")
+            self._append_unknown_policy(sql, unknown)
+            sql.append(" ORDER BY s.id")
             out_ids.extend(
                 r["id"] for r in self._conn.execute("".join(sql), args))
         st.ids = sorted(set(out_ids))
@@ -884,7 +1218,7 @@ class Executor:
     ) -> dict[int, tuple[Any, ...]]:
         join = self._join_clause("entity_type" in fields)
         uniq = sorted(set(st.ids))
-        cols = "".join(", " + _col_expr(f) for f in fields)
+        cols = "".join(", " + _col_expr(f, "s", "en") for f in fields)
         by_id: dict[int, tuple[Any, ...]] = {}
         for at in range(0, len(uniq), ID_CHUNK):
             chunk = uniq[at:at + ID_CHUNK]

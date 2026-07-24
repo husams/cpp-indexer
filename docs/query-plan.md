@@ -49,6 +49,9 @@ Stage  := nodes(pred?) | view(level) | where(pred)
         | select(fields) | count() | distinct() | order_by(fields) | limit(n)
 Pred   := all_of([p...]) | any_of([p...]) | not(p)
         | cmp(field, op, value)  op ∈ {eq, ne, glob, in}
+        | exists(relation, pred?) | none(relation, pred?)
+        | all(relation, pred?) | at_least(n, relation, pred?)
+        | exactly(n, relation, pred?)
 ```
 
 Fields (v1): `id`, `usr`, `name` (COALESCE(qual_name, spelling)), `spelling`,
@@ -99,6 +102,13 @@ Normalization: relation names become layer-qualified; nested `all_of` within
   source, or any consuming stage — including plan end — on a `codebase()`
   stream not yet enumerated by `nodes()`)
 
+Semantic helpers are builder-only macros. Trait helpers lower to field
+comparisons; ancestry, member, template, call, and use helpers lower to the
+relationship quantifiers above; and `any_target`, `all_targets`, and
+`no_targets` lower to boolean combinations of `exists`/`none`. The normalized
+plan contains only these QueryPlan primitives, so `explain()` exposes the
+expanded quantifier tree.
+
 ## Execution semantics
 
 - Read-only, parameterized SQL only; no arbitrary SQL, no mutation.
@@ -131,6 +141,13 @@ Normalization: relation names become layer-qualified; nested `all_of` within
   silently treated as complete.
 - `count()` counts the full (budget-bounded) stream; the default result cap
   does not apply to it.
+- Relationship quantifiers use Kleene true/false/unknown evaluation. A
+  relation catalogued as `partial` or `unknown` yields unknown when the
+  requested witness is absent; it never yields a proven negative. `where()`
+  and `nodes()` default to `unknown=exclude`; `unknown=include` retains true or
+  unknown rows, and `unknown=error` raises `E_UNKNOWN` on an unknown result.
+  `all`/`none`/`at_least`/`exactly` preserve the same rule, including vacuous
+  truth only for complete relations.
 
 ## Result shape
 
@@ -171,6 +188,5 @@ generations. Row objects preserve `select` field order.
 This is a read/query-layer addition: no schema bump, no reindex, and the
 existing `GraphQuery` / `EntityQuery` surfaces are untouched (adapter rewrites
 are migration step 4, a later slice). Deferred to later slices: CXQ text
-parser, semantic predicate macros (`inherits_from`, `has_method`, ...),
-quantifiers, three-valued `unknown` handling, `sites()`, `path()`, `rank()`,
-edge/site/type/template views, `cidx query` CLI, agent tool surface.
+parser, `sites()`, `path()`, `rank()`, edge/site/type/template views,
+`cidx query` CLI, and agent tool surface.

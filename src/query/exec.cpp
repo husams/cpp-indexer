@@ -53,52 +53,54 @@ json_out::Value index_identity_json(const IndexIdentity &index) {
 // declaration-kind meaning while `entity_type = abstract_class` filters on
 // classification (PR #20 review).
 
-std::string col_expr(const std::string &field) {
+std::string col_expr(const std::string &field, const std::string &symbol_alias,
+                     const std::string &entity_alias) {
   if (field == "id") {
-    return "s.id";
+    return symbol_alias + ".id";
   }
   if (field == "usr") {
-    return "s.usr";
+    return symbol_alias + ".usr";
   }
   if (field == "semantic_universe") {
-    return "(SELECT su.key FROM semantic_universe su WHERE su.id = "
-           "s.semantic_universe_id)";
+    return "(SELECT su.key FROM semantic_universe su WHERE su.id = " +
+           symbol_alias + ".semantic_universe_id)";
   }
   if (field == "identity_key") {
-    return "s.identity_key";
+    return symbol_alias + ".identity_key";
   }
   if (field == "name") {
-    return "COALESCE(s.qual_name, s.spelling)";
+    return "COALESCE(" + symbol_alias + ".qual_name, " + symbol_alias +
+           ".spelling)";
   }
   if (field == "spelling") {
-    return "s.spelling";
+    return symbol_alias + ".spelling";
   }
   if (field == "qual_name") {
-    return "s.qual_name";
+    return symbol_alias + ".qual_name";
   }
   if (field == "kind") {
-    return "s.kind";
+    return symbol_alias + ".kind";
   }
   if (field == "entity_type") {
-    return "en.kind";
+    return entity_alias + ".kind";
   }
   if (field == "is_definition") {
-    return "s.is_definition";
+    return symbol_alias + ".is_definition";
   }
   if (field == "is_pure") {
-    return "s.is_pure";
+    return symbol_alias + ".is_pure";
   }
   if (field == "is_static") {
-    return "s.is_static";
+    return symbol_alias + ".is_static";
   }
   if (field == "file") {
-    return "s.file_id";
+    return symbol_alias + ".file_id";
   }
   if (field == "line") {
-    return "s.line";
+    return symbol_alias + ".line";
   }
   if (field == "col") {
-    return "s.col";
+    return symbol_alias + ".col";
   }
   throw PlanError("E_FIELD: unknown field '" + field + "'");
 }
@@ -135,29 +137,143 @@ bool is_kind_field(const std::string &field) {
   return field == "kind" || field == "entity_type";
 }
 
-void pred_sql(const Pred &p, std::string &sql, std::vector<SqlValue> &args) {
+void pred_sql(const Pred &p, View active, std::string &sql,
+              std::vector<SqlValue> &args,
+              const std::string &symbol_alias = "s",
+              const std::string &entity_alias = "en");
+
+std::string relation_count_sql(const Pred &p, View active,
+                               std::vector<SqlValue> &args, bool target_filter,
+                               bool negate_target,
+                               const std::string &outer_alias) {
+  const RelationDesc *relation = resolve_relation(p.relation, active);
+  if (relation == nullptr) {
+    throw PlanError("E_RELATION: unknown relation '" + p.relation + "'");
+  }
+  const bool entity_layer = relation->layer == View::Entity;
+  const std::string table = entity_layer ? "entity_edge" : "edge";
+  const std::string from_col = p.inbound ? "dst_id" : "src_id";
+  const std::string to_col = p.inbound ? "src_id" : "dst_id";
+  const std::string edge_alias = "qe";
+  const std::string target_join =
+      " JOIN symbol qt ON qt.id = " + edge_alias + "." + to_col +
+      " LEFT JOIN entity_node qen ON qen.id = qt.id";
+  const bool recursive = p.max_depth > 1 || p.min_depth > 1;
+  std::string sql;
+  if (recursive) {
+    sql = "(WITH RECURSIVE reach(id, depth) AS (SELECT e." + to_col +
+          ", 1 FROM " + table + " e WHERE e.kind = ? AND e." + from_col +
+          " = " + outer_alias + ".id UNION ALL SELECT e." + to_col +
+          ", reach.depth + 1 FROM " + table + " e JOIN reach ON e." + from_col +
+          " = reach.id WHERE e.kind = ? AND reach.depth < ?) "
+          "SELECT COUNT(DISTINCT qt.id) FROM reach JOIN symbol qt ON qt.id = "
+          "reach.id "
+          "LEFT JOIN entity_node qen ON qen.id = qt.id WHERE reach.depth "
+          "BETWEEN ? AND ?";
+    args.emplace_back(relation->kind_id);
+    args.emplace_back(relation->kind_id);
+    args.emplace_back(p.max_depth);
+    args.emplace_back(p.min_depth);
+    args.emplace_back(p.max_depth);
+  } else {
+    sql = "(SELECT COUNT(DISTINCT " + edge_alias + "." + to_col + ") FROM " +
+          table + " " + edge_alias + target_join + " WHERE " + edge_alias +
+          ".kind = ? AND " + edge_alias + "." + from_col + " = " + outer_alias +
+          ".id";
+    args.emplace_back(relation->kind_id);
+  }
+  if (target_filter && p.target) {
+    sql += " AND ";
+    if (negate_target) {
+      sql += "NOT (";
+    }
+    pred_sql(*p.target, relation->layer, sql, args, "qt", "qen");
+    if (negate_target) {
+      sql += ")";
+    }
+  }
+  sql += ")";
+  return sql;
+}
+
+std::string relation_exists_sql(const Pred &p, View active,
+                                std::vector<SqlValue> &args, bool target_filter,
+                                bool negate_target,
+                                const std::string &outer_alias) {
+  const RelationDesc *relation = resolve_relation(p.relation, active);
+  if (relation == nullptr) {
+    throw PlanError("E_RELATION: unknown relation '" + p.relation + "'");
+  }
+  const bool entity_layer = relation->layer == View::Entity;
+  const std::string table = entity_layer ? "entity_edge" : "edge";
+  const std::string from_col = p.inbound ? "dst_id" : "src_id";
+  const std::string to_col = p.inbound ? "src_id" : "dst_id";
+  std::string sql;
+  if (p.max_depth > 1 || p.min_depth > 1) {
+    sql = "EXISTS (WITH RECURSIVE reach(id, depth) AS (SELECT e." + to_col +
+          ", 1 FROM " + table + " e WHERE e.kind = ? AND e." + from_col +
+          " = " + outer_alias + ".id UNION ALL SELECT e." + to_col +
+          ", reach.depth + 1 FROM " + table + " e JOIN reach ON e." + from_col +
+          " = reach.id WHERE e.kind = ? AND reach.depth < ?) "
+          "SELECT 1 FROM reach JOIN symbol qt ON qt.id = reach.id "
+          "LEFT JOIN entity_node qen ON qen.id = qt.id WHERE reach.depth "
+          "BETWEEN ? AND ?";
+    args.emplace_back(relation->kind_id);
+    args.emplace_back(relation->kind_id);
+    args.emplace_back(p.max_depth);
+    args.emplace_back(p.min_depth);
+    args.emplace_back(p.max_depth);
+  } else {
+    sql = "EXISTS (SELECT 1 FROM " + table +
+          " qe JOIN symbol qt ON qt.id = qe." + to_col +
+          " LEFT JOIN entity_node qen ON qen.id = qt.id WHERE qe.kind = ? AND "
+          "qe." +
+          from_col + " = " + outer_alias + ".id";
+    args.emplace_back(relation->kind_id);
+  }
+  if (target_filter && p.target) {
+    sql += " AND ";
+    if (negate_target) {
+      sql += "NOT (";
+    }
+    pred_sql(*p.target, relation->layer, sql, args, "qt", "qen");
+    if (negate_target) {
+      sql += ")";
+    }
+  }
+  sql += ")";
+  return sql;
+}
+
+void pred_sql(const Pred &p, View active, std::string &sql,
+              std::vector<SqlValue> &args, const std::string &symbol_alias,
+              const std::string &entity_alias) {
   switch (p.op) {
   case PredOp::AllOf:
   case PredOp::AnyOf: {
+    if (p.kids.empty()) {
+      sql += p.op == PredOp::AllOf ? "1" : "0";
+      return;
+    }
     const char *joiner = p.op == PredOp::AllOf ? " AND " : " OR ";
     sql += "(";
     for (size_t i = 0; i < p.kids.size(); ++i) {
       if (i != 0) {
         sql += joiner;
       }
-      pred_sql(p.kids[i], sql, args);
+      pred_sql(p.kids[i], active, sql, args, symbol_alias, entity_alias);
     }
     sql += ")";
     return;
   }
   case PredOp::Not:
     sql += "NOT (";
-    pred_sql(p.kids[0], sql, args);
+    pred_sql(p.kids[0], active, sql, args, symbol_alias, entity_alias);
     sql += ")";
     return;
   case PredOp::Eq:
   case PredOp::Ne: {
-    sql += col_expr(p.field);
+    sql += col_expr(p.field, symbol_alias, entity_alias);
     sql += p.op == PredOp::Eq ? " = ?" : " != ?";
     if (p.int_value.has_value()) {
       args.emplace_back(*p.int_value);
@@ -169,12 +285,12 @@ void pred_sql(const Pred &p, std::string &sql, std::vector<SqlValue> &args) {
     return;
   }
   case PredOp::Glob:
-    sql += col_expr(p.field);
+    sql += col_expr(p.field, symbol_alias, entity_alias);
     sql += " GLOB ?";
     args.emplace_back(p.str_values[0]);
     return;
   case PredOp::In: {
-    sql += col_expr(p.field);
+    sql += col_expr(p.field, symbol_alias, entity_alias);
     sql += " IN (";
     for (size_t i = 0; i < p.str_values.size(); ++i) {
       sql += i == 0 ? "?" : ",?";
@@ -185,6 +301,49 @@ void pred_sql(const Pred &p, std::string &sql, std::vector<SqlValue> &args) {
       }
     }
     sql += ")";
+    return;
+  }
+  case PredOp::Exists:
+  case PredOp::None:
+  case PredOp::All:
+  case PredOp::AtLeast:
+  case PredOp::Exactly: {
+    const RelationDesc *relation = resolve_relation(p.relation, active);
+    if (relation == nullptr) {
+      throw PlanError("E_RELATION: unknown relation '" + p.relation + "'");
+    }
+    const bool complete = relation->completeness == "complete";
+    const std::string found = relation_exists_sql(
+        p, active, args, p.target != nullptr, false, symbol_alias);
+    if (p.op == PredOp::Exists || p.op == PredOp::None) {
+      sql += "CASE WHEN " + found + " THEN " +
+             (p.op == PredOp::Exists ? "1" : "0") + " WHEN " +
+             (complete ? "1" : "0") + " THEN " +
+             (p.op == PredOp::Exists ? "0" : "1") + " ELSE NULL END";
+      return;
+    }
+    if (p.op == PredOp::All) {
+      if (!p.target) {
+        sql += complete ? "1" : "NULL";
+        return;
+      }
+      const std::string violation =
+          relation_exists_sql(p, active, args, true, true, symbol_alias);
+      sql += "CASE WHEN " + violation + " THEN 0 WHEN " +
+             (complete ? "1" : "0") + " THEN 1 ELSE NULL END";
+      return;
+    }
+    const std::string count = relation_count_sql(
+        p, active, args, p.target != nullptr, false, symbol_alias);
+    if (p.op == PredOp::Exactly) {
+      sql += "CASE WHEN " + count + " > " + std::to_string(p.threshold) +
+             " THEN 0 WHEN " + (complete ? "1" : "0") + " AND " + count +
+             " = " + std::to_string(p.threshold) + " THEN 1 WHEN " +
+             (complete ? "1" : "0") + " THEN 0 ELSE NULL END";
+      return;
+    }
+    sql += "CASE WHEN " + count + " >= " + std::to_string(p.threshold) +
+           " THEN 1 WHEN " + (complete ? "1" : "0") + " THEN 0 ELSE NULL END";
     return;
   }
   }
@@ -378,14 +537,14 @@ public:
     for (const auto &stage : plan.stages) {
       switch (stage.op) {
       case StageOp::Nodes:
-        enumerate(st, stage.pred);
+        enumerate(st, stage.pred, stage.unknown);
         st.limit_in_effect = false;
         break;
       case StageOp::ChangeView:
         change_view(st, stage.level);
         break;
       case StageOp::Where:
-        filter(st, *stage.pred);
+        filter(st, *stage.pred, stage.unknown);
         break;
       case StageOp::Out:
       case StageOp::In:
@@ -448,7 +607,7 @@ private:
         return true;
       }
     }
-    return false;
+    return p.target && pred_uses_entity_type(*p.target);
   }
 
   std::vector<int64_t> resolve_source(const Source &src) {
@@ -491,7 +650,12 @@ private:
     st.view = level;
   }
 
-  void enumerate(Stream &st, const std::optional<Pred> &pred) {
+  static void append_unknown_policy(std::string &sql, UnknownPolicy policy) {
+    sql += policy == UnknownPolicy::Include ? " IS NOT FALSE" : " IS TRUE";
+  }
+
+  void enumerate(Stream &st, const std::optional<Pred> &pred,
+                 UnknownPolicy unknown) {
     std::string sql = "SELECT s.id FROM symbol s";
     if (st.view == View::Entity) {
       sql += " JOIN entity_node en ON en.id = s.id";
@@ -501,7 +665,12 @@ private:
     std::vector<SqlValue> args;
     if (pred) {
       sql += " WHERE ";
-      pred_sql(*pred, sql, args);
+      pred_sql(*pred, st.view, sql, args);
+      if (unknown == UnknownPolicy::Error &&
+          !fetch_ids(db_, sql + " IS NULL LIMIT 1", args).empty()) {
+        throw PlanError("E_UNKNOWN: predicate evaluation is unknown");
+      }
+      append_unknown_policy(sql, unknown);
     }
     sql += " ORDER BY s.id LIMIT ?";
     args.emplace_back(kEnumerateBudget + 1);
@@ -512,7 +681,7 @@ private:
     }
   }
 
-  void filter(Stream &st, const Pred &pred) {
+  void filter(Stream &st, const Pred &pred, UnknownPolicy unknown) {
     std::vector<int64_t> out;
     const std::string join = join_clause(pred_uses_entity_type(pred));
     for (size_t at = 0; at < st.ids.size(); at += kIdChunk) {
@@ -524,8 +693,14 @@ private:
       for (size_t i = 0; i < n; ++i) {
         args.emplace_back(st.ids[at + i]);
       }
-      pred_sql(pred, sql, args);
-      sql += ") ORDER BY s.id";
+      pred_sql(pred, st.view, sql, args);
+      sql += ")";
+      if (unknown == UnknownPolicy::Error &&
+          !fetch_ids(db_, sql + " IS NULL LIMIT 1", args).empty()) {
+        throw PlanError("E_UNKNOWN: predicate evaluation is unknown");
+      }
+      append_unknown_policy(sql, unknown);
+      sql += " ORDER BY s.id";
       auto part = fetch_ids(db_, sql, args);
       out.insert(out.end(), part.begin(), part.end());
     }
@@ -685,7 +860,7 @@ private:
 
     std::string cols;
     for (const auto &f : fields) {
-      cols += ", " + col_expr(f);
+      cols += ", " + col_expr(f, "s", "en");
     }
 
     std::map<int64_t, std::vector<Cell>> by_id;

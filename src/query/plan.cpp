@@ -208,6 +208,188 @@ Pred in_list(const std::string &field, std::vector<std::string> values) {
   return p;
 }
 
+namespace {
+
+Pred relation_pred(PredOp op, const std::string &relation,
+                   std::optional<Pred> target, int64_t min_depth,
+                   int64_t max_depth, bool inbound, int64_t threshold = 0) {
+  Pred p;
+  p.op = op;
+  p.relation = relation;
+  p.min_depth = min_depth;
+  p.max_depth = max_depth;
+  p.inbound = inbound;
+  p.threshold = threshold;
+  if (target) {
+    p.target = std::make_shared<Pred>(std::move(*target));
+  }
+  return p;
+}
+
+Pred target_ref(const std::string &ref) {
+  return any_of({eq("usr", ref), eq("qual_name", ref), eq("spelling", ref)});
+}
+
+Pred target_set_pred(const std::string &relation, const TargetSet &targets,
+                     bool inbound, int64_t min_depth, int64_t max_depth) {
+  if (targets.refs.empty()) {
+    return targets.kind == TargetSet::Kind::Any ? any_of({}) : all_of({});
+  }
+  std::vector<Pred> parts;
+  parts.reserve(targets.refs.size());
+  for (const auto &ref : targets.refs) {
+    parts.push_back(
+        exists(relation, target_ref(ref), min_depth, max_depth, inbound));
+  }
+  if (targets.kind == TargetSet::Kind::Any) {
+    return parts.size() == 1 ? parts.front() : any_of(std::move(parts));
+  }
+  if (targets.kind == TargetSet::Kind::All) {
+    return parts.size() == 1 ? parts.front() : all_of(std::move(parts));
+  }
+  std::vector<Pred> targets_pred;
+  targets_pred.reserve(targets.refs.size());
+  for (const auto &ref : targets.refs) {
+    targets_pred.push_back(target_ref(ref));
+  }
+  return none(relation, any_of(std::move(targets_pred)), min_depth, max_depth,
+              inbound);
+}
+
+Pred relation_target(const std::string &relation, const std::string &target,
+                     bool inbound = false, int64_t min_depth = 1,
+                     int64_t max_depth = 1) {
+  return exists(relation, target_ref(target), min_depth, max_depth, inbound);
+}
+
+} // namespace
+
+Pred exists(const std::string &relation, std::optional<Pred> target,
+            int64_t min_depth, int64_t max_depth, bool inbound) {
+  return relation_pred(PredOp::Exists, relation, std::move(target), min_depth,
+                       max_depth, inbound);
+}
+
+Pred none(const std::string &relation, std::optional<Pred> target,
+          int64_t min_depth, int64_t max_depth, bool inbound) {
+  return relation_pred(PredOp::None, relation, std::move(target), min_depth,
+                       max_depth, inbound);
+}
+
+Pred all(const std::string &relation, std::optional<Pred> target,
+         int64_t min_depth, int64_t max_depth, bool inbound) {
+  return relation_pred(PredOp::All, relation, std::move(target), min_depth,
+                       max_depth, inbound);
+}
+
+Pred at_least(int64_t threshold, const std::string &relation,
+              std::optional<Pred> target, int64_t min_depth, int64_t max_depth,
+              bool inbound) {
+  return relation_pred(PredOp::AtLeast, relation, std::move(target), min_depth,
+                       max_depth, inbound, threshold);
+}
+
+Pred exactly(int64_t threshold, const std::string &relation,
+             std::optional<Pred> target, int64_t min_depth, int64_t max_depth,
+             bool inbound) {
+  return relation_pred(PredOp::Exactly, relation, std::move(target), min_depth,
+                       max_depth, inbound, threshold);
+}
+
+TargetSet any_target(std::vector<std::string> refs) {
+  return TargetSet{.kind = TargetSet::Kind::Any, .refs = std::move(refs)};
+}
+
+TargetSet all_targets(std::vector<std::string> refs) {
+  return TargetSet{.kind = TargetSet::Kind::All, .refs = std::move(refs)};
+}
+
+TargetSet no_targets(std::vector<std::string> refs) {
+  return TargetSet{.kind = TargetSet::Kind::None, .refs = std::move(refs)};
+}
+
+Pred inherits_from(const std::string &target, bool transitive) {
+  return relation_target("inherits", target, false, 1, transitive ? 32 : 1);
+}
+
+Pred inherits_from(const TargetSet &targets, bool transitive) {
+  return target_set_pred("inherits", targets, false, 1, transitive ? 32 : 1);
+}
+
+Pred implements(const std::string &target) {
+  return relation_target("implements", target);
+}
+
+Pred implements(const TargetSet &targets) {
+  return target_set_pred("implements", targets, false, 1, 1);
+}
+
+Pred has_ancestor(const std::string &target, bool transitive) {
+  return inherits_from(target, transitive);
+}
+
+Pred has_member(std::optional<Pred> target) {
+  return exists("field_of", std::move(target), 1, 1, true);
+}
+
+Pred has_method(std::optional<Pred> target) {
+  return exists("method_of", std::move(target), 1, 1, true);
+}
+
+Pred has_field(std::optional<Pred> target) {
+  return has_member(std::move(target));
+}
+
+Pred has_nested(std::optional<Pred> target) {
+  return exists("contains", std::move(target));
+}
+
+Pred has_template_arg(std::optional<Pred> target) {
+  return exists("instantiates", std::move(target));
+}
+
+Pred is_specialization_of(const std::string &target) {
+  return relation_target("specializes", target);
+}
+
+Pred is_instantiation_of(const std::string &target) {
+  return relation_target("instantiates", target);
+}
+
+Pred calls(std::optional<Pred> target) {
+  return exists("calls", std::move(target));
+}
+
+Pred called_by(std::optional<Pred> target) {
+  return exists("calls", std::move(target), 1, 1, true);
+}
+
+Pred uses(std::optional<Pred> target) {
+  return exists("uses", std::move(target));
+}
+
+Pred used_by(std::optional<Pred> target) {
+  return exists("uses", std::move(target), 1, 1, true);
+}
+
+Pred is_abstract() {
+  return in_list("entity_type", {"abstract_class", "abstract_class_template"});
+}
+
+Pred is_interface() {
+  return in_list("entity_type", {"interface", "interface_template"});
+}
+
+Pred is_pure() { return eq("is_pure", true); }
+
+Pred is_static() { return eq("is_static", true); }
+
+Pred is_template() {
+  return in_list("kind", {"class-template", "function-template"});
+}
+
+Pred is_instance() { return not_(is_template()); }
+
 // ---- Stage factories
 // --------------------------------------------------------------
 
@@ -247,6 +429,18 @@ const char *traversal_mode_name(TraversalMode mode) {
   return mode == TraversalMode::Devirtualized ? "devirtualized" : "static";
 }
 
+const char *unknown_policy_name(UnknownPolicy policy) {
+  switch (policy) {
+  case UnknownPolicy::Exclude:
+    return "exclude";
+  case UnknownPolicy::Include:
+    return "include";
+  case UnknownPolicy::Error:
+    return "error";
+  }
+  return "exclude";
+}
+
 Source codebase() { return Source{.kind = SourceKind::Codebase, .ref = ""}; }
 Source symbol(const std::string &ref) {
   return Source{.kind = SourceKind::Symbol, .ref = ref};
@@ -261,10 +455,11 @@ Stage nodes() {
   return s;
 }
 
-Stage nodes(Pred pred) {
+Stage nodes(Pred pred, UnknownPolicy unknown) {
   Stage s;
   s.op = StageOp::Nodes;
   s.pred = std::move(pred);
+  s.unknown = unknown;
   return s;
 }
 
@@ -275,10 +470,11 @@ Stage view(View level) {
   return s;
 }
 
-Stage where(Pred pred) {
+Stage where(Pred pred, UnknownPolicy unknown) {
   Stage s;
   s.op = StageOp::Where;
   s.pred = std::move(pred);
+  s.unknown = unknown;
   return s;
 }
 
@@ -404,8 +600,8 @@ void check_cmp(const Pred &p) {
 }
 
 // Validate + normalize a predicate tree: flatten nested AllOf/AnyOf, reduce
-// not(not(p)).
-Pred norm_pred(const Pred &p) {
+// not(not(p)), and qualify relationship quantifiers.
+Pred norm_pred(const Pred &p, View active) {
   switch (p.op) {
   case PredOp::AllOf:
   case PredOp::AnyOf: {
@@ -415,7 +611,7 @@ Pred norm_pred(const Pred &p) {
     Pred out;
     out.op = p.op;
     for (const auto &k : p.kids) {
-      Pred nk = norm_pred(k);
+      Pred nk = norm_pred(k, active);
       if (nk.op == p.op) {
         for (auto &g : nk.kids) {
           out.kids.push_back(std::move(g));
@@ -433,7 +629,7 @@ Pred norm_pred(const Pred &p) {
     if (p.kids.size() != 1) {
       fail("E_FIELD", "not() takes exactly one predicate");
     }
-    Pred nk = norm_pred(p.kids[0]);
+    Pred nk = norm_pred(p.kids[0], active);
     if (nk.op == PredOp::Not) {
       return nk.kids[0]; // not(not(p)) -> p
     }
@@ -448,6 +644,33 @@ Pred norm_pred(const Pred &p) {
   case PredOp::In:
     check_cmp(p);
     return p;
+  case PredOp::Exists:
+  case PredOp::None:
+  case PredOp::All:
+  case PredOp::AtLeast:
+  case PredOp::Exactly: {
+    const RelationDesc *r = resolve_relation(p.relation, active);
+    if (r == nullptr) {
+      fail("E_RELATION", "unknown relation '" + p.relation + "' in " +
+                             view_name(active) + " view");
+    }
+    if (p.min_depth < 1 || p.min_depth > p.max_depth || p.max_depth > 32) {
+      fail("E_DEPTH", "depth bounds must satisfy 1 <= min <= max <= 32");
+    }
+    if ((p.op == PredOp::AtLeast || p.op == PredOp::Exactly) &&
+        p.threshold < 0) {
+      fail("E_LIMIT", "quantifier threshold must be >= 0");
+    }
+    if (p.target) {
+      Pred out = p;
+      out.relation = std::string(view_name(r->layer)) + "." + r->name;
+      out.target = std::make_shared<Pred>(norm_pred(*p.target, r->layer));
+      return out;
+    }
+    Pred out = p;
+    out.relation = std::string(view_name(r->layer)) + "." + r->name;
+    return out;
+  }
   }
   fail("E_FIELD", "bad predicate");
 }
@@ -503,7 +726,7 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
         fail("E_STAGE", "nodes() requires an unenumerated codebase() source");
       }
       if (stage.pred) {
-        ns.pred = norm_pred(*stage.pred);
+        ns.pred = norm_pred(*stage.pred, st.active);
       }
       st.codebase_unenumerated = false;
       break;
@@ -521,7 +744,7 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
         fail("E_FIELD", "where() requires a predicate");
       }
       consume();
-      ns.pred = norm_pred(*stage.pred);
+      ns.pred = norm_pred(*stage.pred, st.active);
       break;
     case StageOp::Out:
     case StageOp::In: {
@@ -666,9 +889,12 @@ json_out::Value pred_to_json(const Pred &p) {
   case PredOp::Eq:
   case PredOp::Ne:
   case PredOp::Glob: {
-    const char *name = p.op == PredOp::Eq   ? "eq"
-                       : p.op == PredOp::Ne ? "ne"
-                                            : "glob";
+    const char *name = "glob";
+    if (p.op == PredOp::Eq) {
+      name = "eq";
+    } else if (p.op == PredOp::Ne) {
+      name = "ne";
+    }
     o.emplace_back("op", Value::of(std::string(name)));
     o.emplace_back("field", Value::of(p.field));
     if (p.int_value.has_value()) {
@@ -686,6 +912,45 @@ json_out::Value pred_to_json(const Pred &p) {
       vals.push_back(Value::of(v));
     }
     o.emplace_back("values", Value::arr(std::move(vals)));
+    break;
+  }
+  case PredOp::Exists:
+  case PredOp::None:
+  case PredOp::All:
+  case PredOp::AtLeast:
+  case PredOp::Exactly: {
+    const char *name = "exactly";
+    switch (p.op) {
+    case PredOp::Exists:
+      name = "exists";
+      break;
+    case PredOp::None:
+      name = "none";
+      break;
+    case PredOp::All:
+      name = "all";
+      break;
+    case PredOp::AtLeast:
+      name = "at_least";
+      break;
+    case PredOp::Exactly:
+      break;
+    default:
+      break;
+    }
+    o.emplace_back("op", Value::of(std::string(name)));
+    o.emplace_back("relation", Value::of(p.relation));
+    if (p.inbound) {
+      o.emplace_back("direction", Value::of(std::string("in")));
+    }
+    o.emplace_back("min_depth", Value::of(p.min_depth));
+    o.emplace_back("max_depth", Value::of(p.max_depth));
+    if (p.op == PredOp::AtLeast || p.op == PredOp::Exactly) {
+      o.emplace_back("threshold", Value::of(p.threshold));
+    }
+    if (p.target) {
+      o.emplace_back("pred", pred_to_json(*p.target));
+    }
     break;
   }
   }
@@ -715,12 +980,20 @@ json_out::Value plan_to_json_normalized(const Plan &plan) {
       if (s.pred) {
         o.emplace_back("pred", pred_to_json(*s.pred));
       }
+      if (s.unknown != UnknownPolicy::Exclude) {
+        o.emplace_back("unknown",
+                       Value::of(std::string(unknown_policy_name(s.unknown))));
+      }
       break;
     case StageOp::ChangeView:
       o.emplace_back("level", Value::of(std::string(view_name(s.level))));
       break;
     case StageOp::Where:
       o.emplace_back("pred", pred_to_json(*s.pred));
+      if (s.unknown != UnknownPolicy::Exclude) {
+        o.emplace_back("unknown",
+                       Value::of(std::string(unknown_policy_name(s.unknown))));
+      }
       break;
     case StageOp::Out:
     case StageOp::In:

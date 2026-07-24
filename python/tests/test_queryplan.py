@@ -22,6 +22,7 @@ from indexer.queryplan import (  # noqa: E402
     Executor, PlanError, all_of, canonical_json, codebase, count, distinct,
     entity, eq, except_, glob, in_, in_list, intersect, limit, ne, nodes,
     not_, order_by, out, select, start, symbol, union_, validate, view, where,
+    all_targets, any_target, exactly, inherits_from, is_abstract, none,
 )
 
 _REPO_ROOT = os.path.abspath(
@@ -402,3 +403,41 @@ def test_kind_vs_entity_type_separation(seeded):
 
     fn = ex.run((start(symbol("funcA")) | select(["entity_type"])).plan)
     assert [row[0] for row in fn.rows] == [None]
+
+
+def test_semantic_macros_expand_to_quantifiers(seeded):
+    db, ids = seeded
+    ex = Executor(db)
+    abstract = ex.run((start(codebase()) | view(qp.ENTITY_VIEW)
+                       | nodes(is_abstract())).plan)
+    assert [row[0] for row in abstract.rows] == [ids["S"]]
+
+    any_result = ex.run(
+        (start(symbol("USR::E"))
+         | where(inherits_from(any_target(["ClassD", "Missing"])))
+         | select(["usr"])).plan)
+    assert [row[0] for row in any_result.rows] == ["USR::E"]
+    all_result = ex.run(
+        (start(symbol("USR::E"))
+         | where(inherits_from(all_targets(["ClassD", "Missing"])))
+         | select(["usr"])).plan)
+    assert not all_result.rows
+    explained = ex.explain(
+        (start(symbol("USR::E")) | where(inherits_from("ClassD"))).plan)
+    assert explained["plan"]["stages"][0]["pred"]["op"] == "exists"
+
+
+def test_partial_quantifiers_preserve_unknown(seeded):
+    db, ids = seeded
+    ex = Executor(db)
+    predicate = none("calls", eq("spelling", "missing"))
+    assert not ex.run((start(symbol("USR::A")) | where(predicate)).plan).rows
+    included = ex.run((start(symbol("USR::A"))
+                       | where(predicate, qp.UnknownPolicy.INCLUDE)).plan)
+    assert [row[0] for row in included.rows] == [ids["A"]]
+    with pytest.raises(PlanError, match="^E_UNKNOWN:"):
+        ex.run((start(symbol("USR::A"))
+                | where(predicate, qp.UnknownPolicy.ERROR)).plan)
+    exact = ex.run((start(symbol("USR::A"))
+                    | where(exactly(2, "calls"), qp.UnknownPolicy.INCLUDE)).plan)
+    assert [row[0] for row in exact.rows] == [ids["A"]]
