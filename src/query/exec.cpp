@@ -5,10 +5,10 @@
 
 #include "query/exec.hpp"
 
-#include "storage/storage.hpp"
 #include "catalogs/generated_catalog.hpp"
 #include "cli/version.hpp"
 #include "graph/query.hpp"
+#include "storage/storage.hpp"
 
 #include <algorithm>
 #include <compare>
@@ -38,7 +38,7 @@ IndexIdentity SqliteQueryReadAdapter::index_identity() {
   return service_->index_identity();
 }
 
-graph::GraphReadPort &SqliteQueryReadAdapter::graph_read() { return *this; }
+storage::GraphReadPort &SqliteQueryReadAdapter::graph_read() { return *this; }
 
 int64_t SqliteQueryReadAdapter::edge_count() { return service_->edge_count(); }
 
@@ -46,8 +46,8 @@ bool SqliteQueryReadAdapter::graph_resolved() {
   return service_->graph_resolved();
 }
 
-std::string SqliteQueryReadAdapter::component_abs_base(
-    const Component &component) {
+std::string
+SqliteQueryReadAdapter::component_abs_base(const Component &component) {
   return service_->component_abs_base(component);
 }
 
@@ -61,8 +61,7 @@ SqliteQueryReadAdapter::graph_symbol_by_usr(const std::string &usr) {
   return service_->graph_symbol_by_usr(usr);
 }
 
-std::optional<Symbol>
-SqliteQueryReadAdapter::graph_symbol_by_id(int64_t id) {
+std::optional<Symbol> SqliteQueryReadAdapter::graph_symbol_by_id(int64_t id) {
   return service_->graph_symbol_by_id(id);
 }
 
@@ -71,9 +70,10 @@ SqliteQueryReadAdapter::lookup_symbols_by_usr(const std::string &usr) {
   return service_->lookup_symbols_by_usr(usr);
 }
 
-std::vector<Symbol> SqliteQueryReadAdapter::find_symbols(
-    const std::string &pattern, const std::optional<std::string> &kind,
-    int limit) {
+std::vector<Symbol>
+SqliteQueryReadAdapter::find_symbols(const std::string &pattern,
+                                     const std::optional<std::string> &kind,
+                                     int limit) {
   return service_->find_symbols(pattern, kind, limit);
 }
 
@@ -89,8 +89,8 @@ SqliteQueryReadAdapter::edge_sites_for(const std::vector<int64_t> &edge_ids) {
   return service_->edge_sites_for(edge_ids);
 }
 
-std::vector<EdgeSiteRow>
-SqliteQueryReadAdapter::edge_sites_one(int64_t edge_id, int limit) {
+std::vector<EdgeSiteRow> SqliteQueryReadAdapter::edge_sites_one(int64_t edge_id,
+                                                                int limit) {
   return service_->edge_sites_one(edge_id, limit);
 }
 
@@ -108,13 +108,12 @@ SqliteQueryReadAdapter::possible_callees_of(int64_t symbol_id) {
   return service_->possible_callees_of(symbol_id);
 }
 
-std::optional<TypeNode>
-SqliteQueryReadAdapter::type_node_by_id(int64_t id) {
+std::optional<TypeNode> SqliteQueryReadAdapter::type_node_by_id(int64_t id) {
   return service_->type_node_by_id(id);
 }
 
-std::optional<int64_t>
-SqliteQueryReadAdapter::symbol_type_of(int64_t symbol_id, int64_t kind) {
+std::optional<int64_t> SqliteQueryReadAdapter::symbol_type_of(int64_t symbol_id,
+                                                              int64_t kind) {
   return service_->symbol_type_of(symbol_id, kind);
 }
 

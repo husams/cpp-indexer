@@ -26,7 +26,7 @@ namespace cidx::graph {
 // Construction
 // ---------------------------------------------------------------------------
 
-GraphQuery::GraphQuery(GraphReadPort &db, std::string db_path)
+GraphQuery::GraphQuery(storage::GraphReadPort &db, std::string db_path)
     : db_(db), db_path_(std::move(db_path)) {}
 
 GraphQuery GraphQuery::open(const std::string &db_path) {
@@ -74,7 +74,7 @@ bool GraphQuery::is_resolved() {
 // ---------------------------------------------------------------------------
 // File cache: {file_id -> (abs_path, component_name)}
 // Batch query mirrors query.py:_files() -- routes each distinct component
-  // through GraphReadPort::component_abs_base (the resolution choke point,
+// through GraphReadPort::component_abs_base (the resolution choke point,
 // v24) rather than joining component.path raw: a grouped component's stored
 // path is RELATIVE to its repository's active clone root, so using it as-is
 // would hand back a clone-relative (unopenable) path.
@@ -208,8 +208,7 @@ Sym GraphQuery::make_sym_from_symbol(const Symbol &sym) {
   return s;
 }
 
-Sym GraphQuery::make_sym_from_row(
-    const GraphEdgeRow &row) {
+Sym GraphQuery::make_sym_from_row(const GraphEdgeRow &row) {
   // A6 row carries an embedded Symbol; reuse make_sym_from_symbol.
   return make_sym_from_symbol(row.sym);
 }

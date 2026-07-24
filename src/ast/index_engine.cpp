@@ -457,7 +457,8 @@ bool SourceSnapshot::matches(const std::string &path) const {
 
 class PipelineFailureInjector final : public cidx::storage::FailureInjector {
 public:
-  explicit PipelineFailureInjector(IndexFailurePoint target) : target_(target) {}
+  explicit PipelineFailureInjector(IndexFailurePoint target)
+      : target_(target) {}
 
   void inject(cidx::storage::FailurePoint point) override {
     const IndexFailurePoint current = [&] {
@@ -474,8 +475,8 @@ public:
       return IndexFailurePoint::none;
     }();
     if (current == target_) {
-      throw std::runtime_error(std::string("injected ") + failure_name(current) +
-                               " failure");
+      throw std::runtime_error(std::string("injected ") +
+                               failure_name(current) + " failure");
     }
   }
 

@@ -20,8 +20,8 @@
 #include <vector>
 
 #include "catalogs/generated_catalog.hpp"
-#include "graph/ports.hpp"
 #include "graph/records.hpp"
+#include "storage/ports.hpp"
 
 namespace cidx::graph {
 
@@ -78,7 +78,7 @@ class GraphQuery {
 public:
   // Open or wrap an existing SQLite service. `db_path` is used only for error
   // messages.
-  explicit GraphQuery(GraphReadPort &db, std::string db_path = "");
+  explicit GraphQuery(storage::GraphReadPort &db, std::string db_path = "");
 
   // Convenience: open from path (reserved for a service opened at path).
   // Throws NoIndexError when the DB file does not exist.
@@ -238,7 +238,7 @@ public:
   [[nodiscard]] const std::string &db_path() const { return db_path_; }
 
 private:
-  GraphReadPort &db_;
+  storage::GraphReadPort &db_;
   std::string db_path_;
   std::optional<bool> resolved_; // memoized _is_resolved
   std::optional<std::unordered_map<

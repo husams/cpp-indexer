@@ -191,8 +191,7 @@ struct TuPublicationSnapshot {
   friend bool operator==(const TuPublicationSnapshot &a,
                          const TuPublicationSnapshot &b) {
     return a.table_counts == b.table_counts && a.rows == b.rows &&
-           a.meta == b.meta &&
-           a.file_state == b.file_state;
+           a.meta == b.meta && a.file_state == b.file_state;
   }
 };
 
@@ -224,8 +223,20 @@ TuPublicationSnapshot snapshot_tu_publication(Storage &db,
         db.raw_db().prepare("SELECT COUNT(*) FROM " + std::string(table));
     REQUIRE(statement.step());
     snapshot.table_counts.emplace(table, statement.col_int64(0));
-    auto rows = db.raw_db().prepare("SELECT * FROM " + std::string(table) +
-                                   " ORDER BY rowid");
+    std::vector<std::string> column_names;
+    auto table_info =
+        db.raw_db().prepare("PRAGMA table_info(" + std::string(table) + ")");
+    while (table_info.step()) {
+      column_names.push_back(table_info.col_text(1));
+    }
+    std::string row_sql = "SELECT * FROM " + std::string(table);
+    if (!column_names.empty()) {
+      row_sql += " ORDER BY \"" + column_names.front() + "\"";
+      for (std::size_t i = 1; i < column_names.size(); ++i) {
+        row_sql += ",\"" + column_names[i] + "\"";
+      }
+    }
+    auto rows = db.raw_db().prepare(row_sql);
     const int columns = rows.column_count();
     while (rows.step()) {
       std::string encoded = std::string(table) + "\x1e";
@@ -233,8 +244,7 @@ TuPublicationSnapshot snapshot_tu_publication(Storage &db,
         if (column != 0) {
           encoded.push_back('\x1f');
         }
-        encoded += rows.col_is_null(column) ? "<null>"
-                                             : rows.col_text(column);
+        encoded += rows.col_is_null(column) ? "<null>" : rows.col_text(column);
       }
       snapshot.rows.push_back(std::move(encoded));
     }
@@ -1854,7 +1864,7 @@ TEST_SUITE("clang") {
     const std::string header = dir + "/header.hpp";
     write_file(header, "struct PublishedHeader { int value; };\n");
     write_file(source, "#include \"header.hpp\"\n"
-                      "int published_pipeline_symbol() { return 1; }\n");
+                       "int published_pipeline_symbol() { return 1; }\n");
 
     Storage db(":memory:");
     db.add_component("pipeline", dir);
@@ -1869,7 +1879,7 @@ TEST_SUITE("clang") {
         db, *file, source, true, cidx::ast::IndexFailurePoint::none));
     const auto published = snapshot_tu_publication(db, source);
     write_file(source, "#include \"header.hpp\"\n"
-                      "int changed_pipeline_symbol() { return 2; }\n");
+                       "int changed_pipeline_symbol() { return 2; }\n");
 
     for (const auto failure : {cidx::ast::IndexFailurePoint::begin,
                                cidx::ast::IndexFailurePoint::adapter,

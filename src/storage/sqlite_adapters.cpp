@@ -213,8 +213,8 @@ void SqliteSourceStoreAdapter::replace_diagnostics(
   db_->replace_diagnostics(file_id, diagnostics);
 }
 
-SqliteSymbolStoreAdapter::SqliteSymbolStoreAdapter(
-    SqliteStorageService &db, FailureInjector *injector)
+SqliteSymbolStoreAdapter::SqliteSymbolStoreAdapter(SqliteStorageService &db,
+                                                   FailureInjector *injector)
     : db_(&db), injector_(injector) {}
 
 std::optional<Symbol> SqliteSymbolStoreAdapter::lookup_symbol(
@@ -529,7 +529,7 @@ void SqliteUnitOfWork::commit() {
 void SqliteUnitOfWork::rollback() { transaction_->rollback(); }
 
 SqliteUnitOfWorkFactory::SqliteUnitOfWorkFactory(SqliteStorageService &db,
-                                                FailureInjector *injector)
+                                                 FailureInjector *injector)
     : db_(&db), injector_(injector) {}
 
 std::unique_ptr<UnitOfWork> SqliteUnitOfWorkFactory::begin() {
@@ -542,8 +542,7 @@ std::unique_ptr<UnitOfWork> SqliteUnitOfWorkFactory::begin() {
 
 SqliteStoragePorts::SqliteStoragePorts(SqliteStorageService &db,
                                        FailureInjector *injector)
-    : catalog_(db), source_(db), symbols_(db, injector), types_(db),
-      facts_(db), definitions_(db), includes_(db), schema_(db),
-      units_(db, injector) {}
+    : catalog_(db), source_(db), symbols_(db, injector), types_(db), facts_(db),
+      definitions_(db), includes_(db), schema_(db), units_(db, injector) {}
 
 } // namespace cidx::storage
