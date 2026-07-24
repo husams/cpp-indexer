@@ -2,7 +2,13 @@ import sqlite3
 
 import pytest
 
-from indexer.storage import PREVIOUS_CATALOG_HASH, Storage, Symbol
+from indexer.storage import (
+    PREVIOUS_CATALOG_HASH,
+    PREVIOUS_SCHEMA_VERSION,
+    Storage,
+    Symbol,
+)
+from benchmarks.storage_m1.hse77_normalization import decide_hot_cold
 
 
 def test_hse77_v34_migration_backfills_source_and_preserves_reads(tmp_path):
@@ -149,7 +155,6 @@ def test_migrated_enum_columns_keep_domain_checks(tmp_path):
     )
     db._conn.commit()
     db.close()
-
     db = Storage(path)
     with pytest.raises(sqlite3.IntegrityError):
         db._conn.execute(
@@ -164,3 +169,39 @@ def test_migrated_enum_columns_keep_domain_checks(tmp_path):
             (edge_id, file_id, 11, 1, 0),
         )
     db.close()
+
+
+@pytest.mark.parametrize("wrong_schema_version", [PREVIOUS_SCHEMA_VERSION - 1, 37])
+def test_predecessor_catalog_hash_requires_v36_migration(
+    tmp_path, wrong_schema_version
+):
+    path = str(tmp_path / f"wrong-v{wrong_schema_version}.db")
+    db = Storage(path)
+    db._conn.execute(
+        "UPDATE meta SET value=? WHERE key='schema_version'",
+        (str(wrong_schema_version),),
+    )
+    db._conn.execute(
+        "UPDATE meta SET value=? WHERE key='catalog_hash'",
+        (PREVIOUS_CATALOG_HASH,),
+    )
+    db._conn.commit()
+    db.close()
+
+    with pytest.raises(RuntimeError, match="requires schema_version"):
+        Storage(path)
+
+
+def test_hot_cold_decision_uses_explicit_thresholds():
+    decision = decide_hot_cold(
+        {
+            "unsplit": {"bytes": 1000, "lookup_ms_median": 10.0},
+            "split": {"bytes": 1100, "lookup_ms_median": 9.0},
+        }
+    )
+    assert decision["decision"] == "retain symbol attributes in one hot table"
+    assert decision["thresholds"]["max_split_byte_overhead_ratio"] == 0.0
+    assert decision["thresholds"]["min_split_latency_improvement_ratio"] == 0.05
+    assert decision["derived"]["split_byte_overhead_ratio"] == pytest.approx(0.1)
+    assert decision["derived"]["split_latency_improvement_ratio"] == pytest.approx(0.1)
+    assert "byte overhead" in decision["reason"]

@@ -35,6 +35,7 @@ using namespace detail;
 
 constexpr std::string_view kPreviousCatalogHash =
     "15e7ce8206c521cff6794530a382f0389320c0f3e49d148b0f311d058aa5157a";
+constexpr int kPreviousSchemaVersion = kSchemaVersion - 1;
 
 bool is_symbol_kind(std::string_view kind) {
   return std::ranges::find(kSymbolKinds, kind) != kSymbolKinds.end();
@@ -150,6 +151,18 @@ Storage::Storage(const std::string &path, OpenMode mode)
   // Reject an incompatible existing catalog before migrations or schema
   // seeding can mutate the database. Fresh and legacy databases without a
   // catalog hash are allowed to receive the current seed below.
+  std::string existing_schema_version;
+  try {
+    auto schema_stmt =
+        db_.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
+    if (schema_stmt.step()) {
+      existing_schema_version = schema_stmt.col_text(0);
+    }
+  } catch (const StorageError &e) {
+    if (!std::string(e.what()).contains("no such table")) {
+      throw;
+    }
+  }
   std::string existing_catalog_hash;
   try {
     auto catalog_stmt =
@@ -163,7 +176,16 @@ Storage::Storage(const std::string &path, OpenMode mode)
     }
   }
   const bool predecessor_catalog =
-      existing_catalog_hash == kPreviousCatalogHash;
+      existing_catalog_hash == kPreviousCatalogHash &&
+      existing_schema_version == std::to_string(kPreviousSchemaVersion);
+  if (existing_catalog_hash == kPreviousCatalogHash && !predecessor_catalog) {
+    throw CidxError("predecessor catalog hash requires schema_version " +
+                    std::to_string(kPreviousSchemaVersion) + " -> " +
+                    std::to_string(kSchemaVersion) + ", found " +
+                    (existing_schema_version.empty()
+                         ? std::string("missing")
+                         : existing_schema_version));
+  }
   if (!existing_catalog_hash.empty() &&
       existing_catalog_hash != catalog::kCatalogHash && !predecessor_catalog) {
     throw CidxError(

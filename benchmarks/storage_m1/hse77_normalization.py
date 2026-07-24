@@ -22,6 +22,8 @@ ROWS = 20_000
 REPETITIONS = 5
 QUERY_ROWS = 500
 SOURCE_KINDS = (1, 2, 3, 4, 5, 6, 7, 8)
+MAX_SPLIT_BYTE_OVERHEAD_RATIO = 0.0
+MIN_SPLIT_LATENCY_IMPROVEMENT_RATIO = 0.05
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -230,6 +232,56 @@ def measure_hot_cold(root: Path) -> dict[str, object]:
     return results
 
 
+def decide_hot_cold(measurements: dict[str, object]) -> dict[str, object]:
+    """Apply the explicit Storage M1 hot/cold acceptance policy."""
+    unsplit = measurements["unsplit"]
+    split = measurements["split"]
+    unsplit_bytes = float(unsplit["bytes"])
+    unsplit_latency = float(unsplit["lookup_ms_median"])
+    byte_overhead = float(split["bytes"]) / unsplit_bytes - 1.0
+    latency_improvement = 1.0 - float(split["lookup_ms_median"]) / unsplit_latency
+    within_byte_budget = byte_overhead <= MAX_SPLIT_BYTE_OVERHEAD_RATIO
+    meets_latency_target = latency_improvement >= MIN_SPLIT_LATENCY_IMPROVEMENT_RATIO
+    split_preferred = within_byte_budget and meets_latency_target
+    derived = {
+        "split_byte_overhead_ratio": byte_overhead,
+        "split_latency_improvement_ratio": latency_improvement,
+        "within_byte_budget": within_byte_budget,
+        "meets_latency_target": meets_latency_target,
+    }
+    if split_preferred:
+        reason = (
+            f"split stays within the {MAX_SPLIT_BYTE_OVERHEAD_RATIO:.0%} byte-overhead "
+            f"budget and improves lookup latency by {latency_improvement:.1%}, "
+            f"meeting the {MIN_SPLIT_LATENCY_IMPROVEMENT_RATIO:.0%} target"
+        )
+        decision = "split symbol attributes into hot and cold tables"
+    else:
+        reasons = []
+        if not within_byte_budget:
+            reasons.append(
+                f"split byte overhead is {byte_overhead:.1%}, above the "
+                f"{MAX_SPLIT_BYTE_OVERHEAD_RATIO:.0%} budget"
+            )
+        if not meets_latency_target:
+            reasons.append(
+                f"split lookup latency improvement is {latency_improvement:.1%}, "
+                f"below the {MIN_SPLIT_LATENCY_IMPROVEMENT_RATIO:.0%} target"
+            )
+        reason = "; ".join(reasons)
+        decision = "retain symbol attributes in one hot table"
+    return {
+        "measurements": measurements,
+        "thresholds": {
+            "max_split_byte_overhead_ratio": MAX_SPLIT_BYTE_OVERHEAD_RATIO,
+            "min_split_latency_improvement_ratio": MIN_SPLIT_LATENCY_IMPROVEMENT_RATIO,
+        },
+        "derived": derived,
+        "decision": decision,
+        "reason": reason,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
@@ -241,7 +293,7 @@ def main() -> int:
         normalized_path = root / f"normalized-{REPETITIONS - 1}.db"
         compatibility = measure_compatibility(normalized_path)
         migration_seconds, migration_objects = measure_migration(root)
-        hot_cold = measure_hot_cold(root)
+        hot_cold = decide_hot_cold(measure_hot_cold(root))
         report = {
             "benchmark": "storage-m1/hse77-normalization-v1",
             "method": {
@@ -260,9 +312,7 @@ def main() -> int:
                 "migration": {"seconds": migration_seconds, "rows_per_s": ROWS / migration_seconds, "objects": migration_objects},
             },
             "hot_cold_decision": {
-                "measurements": hot_cold,
-                "decision": "retain symbol attributes in one hot table",
-                "reason": "the measured split adds a join and does not reduce total bytes or improve the representative lookup median",
+                **hot_cold,
             },
         }
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

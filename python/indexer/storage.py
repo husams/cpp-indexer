@@ -43,6 +43,7 @@ from indexer.generated_catalog import (
 )
 
 SCHEMA_VERSION = 37
+PREVIOUS_SCHEMA_VERSION = SCHEMA_VERSION - 1
 
 # HSE-76 is the only supported predecessor for the HSE-77 storage migration.
 # Keep this explicit so an unrelated semantic catalog is never silently
@@ -61,6 +62,19 @@ def _catalog_hash(conn: sqlite3.Connection) -> Optional[str]:
             return None
         raise
     return None if row is None else row[0]
+
+
+def _schema_version(conn: sqlite3.Connection) -> Optional[int]:
+    """Return the stored schema version, or None for a fresh database."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return None
+        raise
+    return None if row is None else int(row[0])
 
 
 def _validate_catalog_hash(
@@ -1761,13 +1775,24 @@ class Storage:
         # seeding can mutate the database. Fresh and legacy databases without a
         # catalog hash are upgraded and receive the current seed below.
         previous_catalog = _catalog_hash(self._conn)
+        stored_schema_version = _schema_version(self._conn)
+        predecessor_catalog = (
+            previous_catalog == PREVIOUS_CATALOG_HASH
+            and stored_schema_version == PREVIOUS_SCHEMA_VERSION
+        )
         _validate_catalog_hash(
             self._conn, path, require_present=False, allow_predecessor=True
         )
+        if previous_catalog == PREVIOUS_CATALOG_HASH and not predecessor_catalog:
+            raise RuntimeError(
+                "incompatible cidx semantic catalogs: predecessor catalog hash "
+                f"requires schema_version {PREVIOUS_SCHEMA_VERSION} -> "
+                f"{SCHEMA_VERSION}, found {stored_schema_version!r} for {path}"
+            )
         self._migrate()  # before _SCHEMA: its indexes need new columns
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
-        if previous_catalog == PREVIOUS_CATALOG_HASH:
+        if predecessor_catalog:
             self._conn.execute(
                 "UPDATE meta SET value=? WHERE key='catalog_hash'", (CATALOG_HASH,)
             )

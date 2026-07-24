@@ -17,6 +17,7 @@
 
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
+#include "util/errors.hpp"
 
 #ifndef CIDX_FIXTURES_DIR
 #error "CIDX_FIXTURES_DIR must be defined by the build"
@@ -185,6 +186,27 @@ TEST_CASE(
     cidx::Storage db(path);
   } // open = migrate
   check_migrated(path);
+}
+
+TEST_CASE("predecessor catalog hash requires the v36 to v37 migration") {
+  const std::string tmp = make_temp_dir();
+  for (const char *wrong_version : {"35", "37"}) {
+    const std::string path =
+        std::string(tmp) + "/wrong-" + wrong_version + ".db";
+    {
+      cidx::Storage db(path);
+    }
+    {
+      cidx::SqliteDb raw(path);
+      raw.exec(std::string("UPDATE meta SET value = '") + wrong_version +
+               "' WHERE key = 'schema_version'");
+      raw.exec(
+          "UPDATE meta SET value = "
+          "'15e7ce8206c521cff6794530a382f0389320c0f3e49d148b0f311d058aa5157a' "
+          "WHERE key = 'catalog_hash'");
+    }
+    CHECK_THROWS_AS(cidx::Storage{path}, cidx::CidxError);
+  }
 }
 
 TEST_CASE("v3 fixture migrates: stored qual_name kept, decl backfill applied") {

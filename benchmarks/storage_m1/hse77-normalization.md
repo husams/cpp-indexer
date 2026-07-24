@@ -20,9 +20,9 @@ table/index byte inventory and raw samples are in
 | Measurement | Legacy text rows | Normalized rows |
 | --- | ---: | ---: |
 | Table/index bytes | 1,884,160 | 1,167,360 |
-| Write throughput (median rows/s) | 296,779 | 158,276 |
-| Compatibility query (median ms) | — | 0.516 |
-| v36-style migration cost | — | 0.106 s / 188,020 rows/s |
+| Write throughput (median rows/s) | 414,718 | 201,859 |
+| Compatibility query (median ms) | — | 0.495 |
+| v36-style migration cost | — | 0.086 s / 231,506 rows/s |
 
 The normalized layout removes repeated long identity text from the occurrence
 table and retains every unresolved value once in `external_identity`. The
@@ -30,7 +30,10 @@ write result includes identity dictionary population, so it is evidence of
 the migration/write tradeoff rather than a claim of faster writes. Read-side
 compatibility reconstructs the legacy fields through deterministic joins.
 
-The measured symbol split was 1,855,488 bytes and 4.592 ms median for the
-unsplit table versus 1,994,752 bytes and 5.726 ms for hot/cold tables. The
-decision is therefore to retain symbol attributes in one table: this workload
-showed no byte or lookup benefit from paying for the extra join.
+The benchmark applies an explicit policy: a split must add no bytes and must
+improve representative lookup latency by at least 5%. The measured unsplit
+layout was 1,855,488 bytes and 3.683 ms median versus 1,994,752 bytes and
+3.965 ms for hot/cold tables: 7.5% extra bytes and a 7.7% latency regression.
+Both thresholds fail, so the derived decision is to retain symbol attributes in
+one hot table. The exact thresholds, samples, and derived ratios are recorded
+in `hse77-normalization.json`.
