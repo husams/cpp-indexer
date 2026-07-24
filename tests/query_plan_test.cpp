@@ -699,13 +699,29 @@ TEST_CASE("query_plan: template defaults expose logical evidence") {
 
 TEST_CASE(
     "query_plan: reverse typed relations and file identities are portable") {
-  const auto seed = [](Storage &db, std::string_view component_path) {
+  const auto seed = [](Storage &db, std::string_view component_path,
+                       std::string_view repository_name,
+                       std::string_view symbol_suffix) {
+    const int64_t repository_id =
+        db.add_repository(std::string(repository_name), "repo",
+                          std::string("https://example.test/") +
+                              std::string(repository_name) + ".git");
     const int64_t component_id =
         db.add_component("project", std::string(component_path));
-    const int64_t directory_id = db.add_directory(component_id, "src");
+    db.set_component_repository(component_id, repository_id);
+    auto update =
+        db.raw_db().prepare("UPDATE component SET path = ? WHERE id = ?");
+    update.bind(1, std::string_view{"src"});
+    update.bind(2, component_id);
+    update.step_done();
+    const int64_t directory_id = db.add_directory(component_id, "include");
     const int64_t file_id = db.add_file(directory_id, "unit.cpp");
-    const int64_t caller = db.add_symbol(make_sym("USR::caller", "caller"));
-    const int64_t callee = db.add_symbol(make_sym("USR::callee", "callee"));
+    const std::string caller_usr =
+        "USR::" + std::string(symbol_suffix) + "::caller";
+    const std::string callee_usr =
+        "USR::" + std::string(symbol_suffix) + "::callee";
+    const int64_t caller = db.add_symbol(make_sym(caller_usr, "caller"));
+    const int64_t callee = db.add_symbol(make_sym(callee_usr, "callee"));
     const int64_t edge_id = db.add_edge(make_edge(caller, callee, 1));
 
     cidx::EdgeSite site;
@@ -727,7 +743,7 @@ TEST_CASE(
   };
 
   Storage first(":memory:");
-  seed(first, "/worktree-a");
+  seed(first, "/worktree-a", "repo", "shared");
   Executor first_executor(first);
   const auto reverse_evidence =
       first_executor.run((start(codebase()) | view(View::Evidence) | nodes() |
@@ -746,7 +762,7 @@ TEST_CASE(
   CHECK(reverse_occurrence.scalar == 1);
 
   Storage second(":memory:");
-  seed(second, "/different-worktree");
+  seed(second, "/different-worktree", "repo", "shared");
   Executor second_executor(second);
   const auto first_evidence =
       first_executor.run((start(codebase()) | view(View::Evidence) | nodes() |
@@ -770,6 +786,29 @@ TEST_CASE(
   REQUIRE(second_argument.rows.size() == 1);
   CHECK(first_evidence.rows[0] == second_evidence.rows[0]);
   CHECK(first_argument.rows[0] == second_argument.rows[0]);
+
+  Storage collision(":memory:");
+  seed(collision, "/repo-a", "repo-a", "repo-a");
+  seed(collision, "/repo-b", "repo-b", "repo-b");
+  Executor collision_executor(collision);
+  const auto collision_evidence =
+      collision_executor.run((start(codebase()) | view(View::Evidence) |
+                              nodes() | select({"id", "identity_key"}))
+                                 .plan());
+  const auto collision_arguments =
+      collision_executor.run((start(codebase()) | view(View::CallArgument) |
+                              nodes() | select({"id", "identity_key"}))
+                                 .plan());
+  REQUIRE(collision_evidence.rows.size() == 2);
+  CHECK(std::get<int64_t>(collision_evidence.rows[0][0]) !=
+        std::get<int64_t>(collision_evidence.rows[1][0]));
+  CHECK(std::get<std::string>(collision_evidence.rows[0][1]) !=
+        std::get<std::string>(collision_evidence.rows[1][1]));
+  REQUIRE(collision_arguments.rows.size() == 2);
+  CHECK(std::get<int64_t>(collision_arguments.rows[0][0]) !=
+        std::get<int64_t>(collision_arguments.rows[1][0]));
+  CHECK(std::get<std::string>(collision_arguments.rows[0][1]) !=
+        std::get<std::string>(collision_arguments.rows[1][1]));
 }
 
 TEST_CASE("query_plan: devirtualized calls preserve the inherited receiver") {

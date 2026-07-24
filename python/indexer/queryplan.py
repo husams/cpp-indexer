@@ -10,6 +10,7 @@ the executor mirrors the C++ SQL shapes so results match by construction.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, NoReturn, Optional, Sequence
@@ -980,13 +981,25 @@ class Executor:
 
     def _portable_file(self, file_id: int) -> str:
         row = self._conn.execute(
-            "SELECT c.name,d.path,f.name FROM file f "
+            "SELECT c.name,c.path,d.path,f.name,r.name,r.remote_url,su.key "
+            "FROM file f "
             "JOIN directory d ON d.id=f.directory_id "
-            "JOIN component c ON c.id=d.component_id WHERE f.id=?", (file_id,)
+            "JOIN component c ON c.id=d.component_id "
+            "LEFT JOIN repository r ON r.id=c.repository_id "
+            "LEFT JOIN semantic_universe su ON su.id=COALESCE(c.semantic_universe_id,r.semantic_universe_id,1) "
+            "WHERE f.id=?", (file_id,)
         ).fetchone()
         if row is None:
             return f"missing-file:{file_id}"
-        return "/".join(part.strip("/") for part in row if part)
+        component_path = row[1] if row[1] and not os.path.isabs(row[1]) else ""
+        owner = (f"remote:{row[5]}" if row[5] else
+                 f"repo:{row[4]}" if row[4] else f"universe:{row[6] or 'legacy'}")
+        component = f"{row[0]}\x1f{component_path}"
+        relative = "/".join(part.strip("/") for part in (row[2], row[3]) if part)
+        return "file:" + "".join(
+            f"{len(value.encode('utf-8'))}:{value}"
+            for value in (owner, component, relative)
+        )
 
     def _portable_type(self, type_id: int) -> str:
         row = self._conn.execute(

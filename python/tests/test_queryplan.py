@@ -460,12 +460,26 @@ def test_template_defaults_expose_logical_evidence():
     ]
 
 
-def _seed_reverse_typed_graph(db, component_path):
+def _seed_reverse_typed_graph(
+    db, component_path, repo_name="repo", caller_suffix="shared"
+):
+    repo = db.add_repository(
+        repo_name, remote_url=f"https://example.test/{repo_name}.git"
+    )
     component = db.add_component("project", component_path)
-    directory = db.add_directory(component, "src")
+    db.set_component_repository(component, repo)
+    db._conn.execute(
+        "UPDATE component SET path = ? WHERE id = ?", ("src", component)
+    )
+    db._conn.commit()
+    directory = db.add_directory(component, "include")
     file_id = db.add_file(directory, "unit.cpp")
-    caller = db.add_symbol(_make_sym("USR::caller", "caller"))
-    callee = db.add_symbol(_make_sym("USR::callee", "callee"))
+    caller = db.add_symbol(
+        _make_sym(f"USR::{caller_suffix}::caller", "caller")
+    )
+    callee = db.add_symbol(
+        _make_sym(f"USR::{caller_suffix}::callee", "callee")
+    )
     edge_id = db.add_edge(caller, callee, 1)
     db.add_edge_site(edge_id, file_id, 10, 2)
     db._conn.execute(
@@ -508,3 +522,22 @@ def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable(
          | select(["identity_key"])).plan)
     assert first_evidence.rows == second_evidence.rows
     assert first_argument.rows == second_argument.rows
+
+    collision = Storage(":memory:")
+    _seed_reverse_typed_graph(collision, "/repo-a", "repo-a", "repo-a")
+    _seed_reverse_typed_graph(collision, "/repo-b", "repo-b", "repo-b")
+    collision_executor = Executor(collision)
+    collision_evidence = collision_executor.run(
+        (start(codebase()) | view("evidence") | nodes()
+         | select(["id", "identity_key"])).plan
+    )
+    collision_arguments = collision_executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | select(["id", "identity_key"])).plan
+    )
+    assert len(collision_evidence.rows) == 2
+    assert len({row[0] for row in collision_evidence.rows}) == 2
+    assert len({row[1] for row in collision_evidence.rows}) == 2
+    assert len(collision_arguments.rows) == 2
+    assert len({row[0] for row in collision_arguments.rows}) == 2
+    assert len({row[1] for row in collision_arguments.rows}) == 2

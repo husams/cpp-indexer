@@ -11,12 +11,19 @@
 #include <compare>
 #include <map>
 #include <set>
+#include <string_view>
 #include <tuple>
 #include <utility>
+
+#include "util/pathutil.hpp"
 
 namespace cidx::query {
 
 namespace {
+
+std::string identity_segment(const std::string &value) {
+  return std::to_string(value.size()) + ":" + value;
+}
 
 json_out::Value index_identity_json(const IndexIdentity &index) {
   json_out::Object o;
@@ -1307,27 +1314,45 @@ private:
 
   std::string portable_file(int64_t id) {
     auto query = db_.raw_db().prepare(
-        "SELECT c.name,d.path,f.name FROM file f "
+        "SELECT c.name,c.path,d.path,f.name,r.name,r.remote_url,su.key "
+        "FROM file f "
         "JOIN directory d ON d.id=f.directory_id "
-        "JOIN component c ON c.id=d.component_id WHERE f.id=?");
+        "JOIN component c ON c.id=d.component_id "
+        "LEFT JOIN repository r ON r.id=c.repository_id "
+        "LEFT JOIN semantic_universe su ON "
+        "su.id=COALESCE(c.semantic_universe_id,"
+        "r.semantic_universe_id,1) WHERE f.id=?");
     query.bind(1, id);
     if (!query.step()) {
       return "missing-file:" + std::to_string(id);
     }
-    std::string path;
-    for (int column = 0; column < 3; ++column) {
+    std::string owner;
+    if (!query.col_text(5).empty()) {
+      owner = "remote:" + query.col_text(5);
+    } else if (!query.col_text(4).empty()) {
+      owner = "repo:" + query.col_text(4);
+    } else {
+      owner = "universe:" +
+              (query.col_text(6).empty() ? "legacy" : query.col_text(6));
+    }
+    const std::string component_path =
+        pathutil::isabs(query.col_text(1)) ? "" : query.col_text(1);
+    const std::string component = query.col_text(0) + "\x1f" + component_path;
+    std::string relative;
+    for (int column = 2; column < 4; ++column) {
       const auto raw = query.col_text(column);
       const auto first = raw.find_first_not_of('/');
       if (first != std::string::npos) {
         const auto last = raw.find_last_not_of('/');
         const auto part = raw.substr(first, last - first + 1);
-        if (!path.empty()) {
-          path += "/";
+        if (!relative.empty()) {
+          relative += "/";
         }
-        path += part;
+        relative += part;
       }
     }
-    return path;
+    return "file:" + identity_segment(owner) + identity_segment(component) +
+           identity_segment(relative);
   }
 
   std::string portable_type(int64_t id) {
