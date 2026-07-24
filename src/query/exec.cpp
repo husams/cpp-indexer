@@ -17,6 +17,7 @@
 #include <string_view>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 #include "util/pathutil.hpp"
 
@@ -30,27 +31,40 @@ std::string identity_segment(const std::string &value) {
 
 std::string portable_ungrouped_component_anchor(const std::string &path) {
   const std::string normalized = pathutil::normpath(path);
-  constexpr std::string_view worktree_anchor = "/worktrees/";
-  const auto worktree = normalized.rfind(worktree_anchor);
-  if (worktree != std::string::npos) {
-    const auto worktree_name =
-        normalized.find('/', worktree + worktree_anchor.size());
-    if (worktree_name != std::string::npos &&
-        worktree_name + 1 < normalized.size()) {
-      return normalized.substr(worktree_name + 1);
+  std::vector<std::string_view> segments;
+  for (std::size_t begin = normalized.find_first_not_of('/');
+       begin != std::string::npos;) {
+    const std::size_t end = normalized.find('/', begin);
+    segments.emplace_back(normalized.data() + begin,
+                          end == std::string::npos ? normalized.size() - begin
+                                                   : end - begin);
+    if (end == std::string::npos) {
+      break;
     }
+    begin = normalized.find_first_not_of('/', end);
   }
 
-  const auto component_separator = normalized.rfind('/');
-  if (component_separator == std::string::npos || component_separator == 0) {
-    return {};
+  const auto join_from = [&segments](std::size_t begin) {
+    std::string result;
+    for (std::size_t index = begin; index < segments.size(); ++index) {
+      if (!result.empty()) {
+        result.push_back('/');
+      }
+      result.append(segments[index]);
+    }
+    return result;
+  };
+  for (std::size_t index = 0; index + 1 < segments.size(); ++index) {
+    if (segments[index] == "worktrees" && index + 2 < segments.size()) {
+      return join_from(index + 2);
+    }
+    if (segments[index] == "worktree" ||
+        segments[index].starts_with("worktree-") ||
+        segments[index].starts_with("worktree_")) {
+      return join_from(index + 1);
+    }
   }
-  const auto workspace_separator =
-      normalized.rfind('/', component_separator - 1);
-  if (workspace_separator == std::string::npos) {
-    return normalized.substr(1);
-  }
-  return normalized.substr(workspace_separator + 1);
+  return segments.size() <= 1 ? std::string{} : join_from(segments.size() - 2);
 }
 
 json_out::Value index_identity_json(const IndexIdentity &index) {

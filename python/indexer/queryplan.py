@@ -49,6 +49,9 @@ def _portable_ungrouped_component_anchor(path: str) -> str:
         worktree = len(parts) - 1 - parts[::-1].index("worktrees")
         if worktree + 2 < len(parts):
             return os.sep.join(parts[worktree + 2:])
+    for index, part in enumerate(parts[:-1]):
+        if part == "worktree" or part.startswith(("worktree-", "worktree_")):
+            return os.sep.join(parts[index + 1:])
     return os.sep.join(parts[-2:])
 
 # ---- Budgets (docs/query-plan.md "Execution semantics") ----------------------

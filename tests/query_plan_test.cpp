@@ -934,6 +934,37 @@ TEST_CASE(
           .plan());
   CHECK(mirrored_first_evidence.rows == mirrored_second_evidence.rows);
   CHECK(mirrored_first_arguments.rows == mirrored_second_arguments.rows);
+
+  Storage non_catalogued_first(":memory:");
+  seed(non_catalogued_first, "/tmp/worktree-a/cpp-indexer", "",
+       "non-catalogued-mirrored", false);
+  Storage non_catalogued_second(":memory:");
+  seed(non_catalogued_second, "/tmp/worktree-b/cpp-indexer", "",
+       "non-catalogued-mirrored", false);
+  Executor non_catalogued_first_executor(non_catalogued_first);
+  Executor non_catalogued_second_executor(non_catalogued_second);
+  const auto non_catalogued_first_evidence = non_catalogued_first_executor.run(
+      (start(codebase()) | view(View::Evidence) | nodes() |
+       select({"identity_key"}))
+          .plan());
+  const auto non_catalogued_second_evidence =
+      non_catalogued_second_executor.run((start(codebase()) |
+                                          view(View::Evidence) | nodes() |
+                                          select({"identity_key"}))
+                                             .plan());
+  const auto non_catalogued_first_arguments = non_catalogued_first_executor.run(
+      (start(codebase()) | view(View::CallArgument) | nodes() |
+       select({"identity_key"}))
+          .plan());
+  const auto non_catalogued_second_arguments =
+      non_catalogued_second_executor.run((start(codebase()) |
+                                          view(View::CallArgument) | nodes() |
+                                          select({"identity_key"}))
+                                             .plan());
+  CHECK(non_catalogued_first_evidence.rows ==
+        non_catalogued_second_evidence.rows);
+  CHECK(non_catalogued_first_arguments.rows ==
+        non_catalogued_second_arguments.rows);
 }
 
 TEST_CASE("query_plan: devirtualized calls preserve the inherited receiver") {

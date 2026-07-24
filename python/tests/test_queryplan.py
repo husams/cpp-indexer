@@ -662,3 +662,34 @@ def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable(
         (start(codebase()) | view("call_argument") | nodes()
          | select(["identity_key"])).plan
     ).rows
+
+    non_catalogued_first = Storage(":memory:")
+    _seed_reverse_typed_graph(
+        non_catalogued_first,
+        "/tmp/worktree-a/cpp-indexer",
+        caller_suffix="non-catalogued-mirrored",
+        grouped=False,
+    )
+    non_catalogued_second = Storage(":memory:")
+    _seed_reverse_typed_graph(
+        non_catalogued_second,
+        "/tmp/worktree-b/cpp-indexer",
+        caller_suffix="non-catalogued-mirrored",
+        grouped=False,
+    )
+    non_catalogued_first_executor = Executor(non_catalogued_first)
+    non_catalogued_second_executor = Executor(non_catalogued_second)
+    assert non_catalogued_first_executor.run(
+        (start(codebase()) | view("evidence") | nodes()
+         | select(["identity_key"])).plan
+    ).rows == non_catalogued_second_executor.run(
+        (start(codebase()) | view("evidence") | nodes()
+         | select(["identity_key"])).plan
+    ).rows
+    assert non_catalogued_first_executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | select(["identity_key"])).plan
+    ).rows == non_catalogued_second_executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | select(["identity_key"])).plan
+    ).rows
