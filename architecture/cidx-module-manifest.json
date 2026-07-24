@@ -30,15 +30,27 @@
     {
       "id": "workspace.toolchain",
       "layer": "workspace",
-      "paths": ["src/toolchain/**", "src/workspace/**"],
+      "paths": ["src/toolchain/**"],
       "allowedDependencies": [
+        "workspace.toolchain",
+        "foundation.util",
+        "model.contracts"
+      ],
+      "description": "Compiler, driver, resource-directory, and shared translation-unit resolution."
+    },
+    {
+      "id": "application.workspace",
+      "layer": "application",
+      "paths": ["src/workspace/**"],
+      "allowedDependencies": [
+        "application.workspace",
         "workspace.toolchain",
         "foundation.util",
         "model.contracts",
         "frontend.compiledb",
         "persistence.sqlite"
       ],
-      "description": "Compiler, driver, resource-directory, workspace snapshots, and shared translation-unit resolution."
+      "description": "Concrete workspace context façade and translation-unit configuration service wiring."
     },
     {
       "id": "frontend.compiledb",
@@ -65,7 +77,8 @@
         "model.contracts",
         "foundation.util",
         "frontend.compiledb",
-        "workspace.toolchain"
+        "workspace.toolchain",
+        "application.workspace"
       ],
       "allowedExternal": ["clang", "llvm"],
       "description": "Typed LibTooling visitors, identity encoders, and extraction ports/adapters."
@@ -150,6 +163,7 @@
       ],
       "allowedDependencies": [
         "analysis.diff",
+        "application.workspace",
         "extraction.ast",
         "workspace.toolchain",
         "frontend.compiledb",
@@ -171,6 +185,7 @@
       ],
       "allowedDependencies": [
         "product.cli",
+        "application.workspace",
         "workspace.toolchain",
         "frontend.compiledb",
         "extraction.ast",
@@ -192,6 +207,7 @@
       "allowedDependencies": [
         "compat.core-bundle",
         "product.cli",
+        "application.workspace",
         "workspace.toolchain",
         "frontend.compiledb",
         "extraction.ast",
