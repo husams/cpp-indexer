@@ -1,0 +1,1 @@
+{"format": "cidx.extraction-plan/v1", "input_source": "symbols", "bindings": ["symbol"], "emits": ["banking.stale/relation"]}

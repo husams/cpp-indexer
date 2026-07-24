@@ -33,6 +33,7 @@ per component plus a few cross-cutting pages. Start with the
 | [Architecture contribution guide](architecture-contributing.md) | how to add a module, target, or dependency without bypassing the contract |
 | [CIDX Graph Search and Navigation Skill](cidx-search-language.md) | draft controlled-English graph search skill, semantic navigation IR, traits, inheritance, quantifiers, aggregation, negation, and backend compilation |
 | [Improvement roadmap](improvements/README.md) | prioritized follow-on work, with adoption gates |
+| [Extension packages](modules/extensions.md) | versioned declarative packages, registries, lockfiles, and conformance |
 
 ## Modules (`src/`)
 

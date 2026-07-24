@@ -1,0 +1,21 @@
+{
+  "format": "cidx.package/v1",
+  "name": "banking.missing-dependency",
+  "version": "1.0.0",
+  "kind": "cidx.extract",
+  "content_hash": "sha256:f9541800ee63663b2c8d945efc45947271ef2a056adf741a4d68c111b4e3feb4",
+  "publisher": "cidx.example",
+  "origin": "file:examples/packages/banking",
+  "license": "Apache-2.0",
+  "entry_points": {"extract/missing": "plan.json"},
+  "namespaces": ["banking.missing-dependency"],
+  "compatibility": {"catalog_version": 1},
+  "dependencies": [{"name": "banking.not-materialized", "version": "1.0.0"}],
+  "schemas": [],
+  "budgets": {"steps": 10},
+  "sandbox_profile": "declarative-default",
+  "trust": "unverified",
+  "evidence": "extension-analysis",
+  "capabilities": [],
+  "metadata": {}
+}

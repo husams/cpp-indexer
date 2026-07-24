@@ -1,0 +1,4 @@
+{
+  "type": "object",
+  "required": ["format", "name", "traversal", "bindings", "emits", "identity", "evidence"]
+}
