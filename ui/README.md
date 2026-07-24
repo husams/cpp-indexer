@@ -39,9 +39,11 @@ Cytoscape parent only in the adapter.
 
 ## Deterministic budgets
 
-`applyBudget` sorts by portable identity, keeps only bounded nodes/edges/groups,
-retains referenced evidence in stable order, and returns `partial` plus a
-`truncated` marker and `truncated_budget` diagnostic when input is oversized.
+`applyBudget` uses length-prefixed portable IDs, sorts nodes/edges/groups/sites
+deterministically, and enforces node, edge, label, evidence, site-count, and
+site-byte budgets. Overflow trims site references, returns `partial` plus a
+`truncated` marker and `truncated_budget` diagnostic, and exposes continuation
+metadata for the omitted work.
 This is a deterministic refusal/degradation response, not an unbounded browser
 operation.
 

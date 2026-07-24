@@ -4,16 +4,43 @@ import test from "node:test";
 import Ajv2020 from "ajv/dist/2020.js";
 import { toCytoscapeElements } from "../src/cytoscape-adapter.ts";
 import { boundedFixture, canonicalFixture, oversizedFixture } from "../src/fixtures.ts";
-import { applyBudget, canonicalSemanticContent, catalogRelationNames, createSavedView, stablePortableId, toResultEnvelope, utf8ByteLength, validateGraphView, visualSemantics, type Budget } from "../src/graph-view.ts";
+import { applyBudget, assertPortableReference, canonicalSemanticContent, catalogRelationNames, createSavedView, stablePortableId, toResultEnvelope, usageOf, utf8ByteLength, validateGraphView, visualSemantics, type Budget } from "../src/graph-view.ts";
 import { CORE_CATALOG } from "../src/generated/catalog.ts";
 
-const smallBudget: Budget = { maxNodes: 2, maxEdges: 1, maxGroups: 0, maxLabelChars: 400, maxEvidenceRefs: 4 };
+const smallBudget: Budget = { maxNodes: 2, maxEdges: 1, maxGroups: 0, maxLabelChars: 400, maxEvidenceRefs: 4, maxSites: 4, maxSiteBytes: 512 };
 
 test("portable GraphView validation rejects database-local identities", () => {
   const result = canonicalFixture("symbol");
   assert.throws(() => stablePortableId({ key: "42", kind: "symbol", semanticUniverse: "fixture" }), /database-local/);
   assert.doesNotThrow(() => validateGraphView(result));
   assert.ok(catalogRelationNames().includes("calls"));
+});
+
+test("portable IDs are length-prefixed and duplicate identities are rejected", () => {
+  const left = { kind: "symbol" as const, semanticUniverse: "a:b", key: "c" };
+  const right = { kind: "symbol" as const, semanticUniverse: "a", key: "b:c" };
+  assert.notEqual(stablePortableId(left), stablePortableId(right));
+  const result = canonicalFixture("symbol");
+  const nodes = [...result.nodes, { ...result.nodes[0]! }];
+  const duplicate = { ...result, nodes, usage: usageOf({ nodes, edges: result.edges, groups: result.groups, evidence: result.evidence }) };
+  assert.throws(() => validateGraphView(duplicate), /duplicate portable identities/);
+});
+
+test("portable-key parity vectors agree between runtime and JSON Schema", () => {
+  const vectors = JSON.parse(readFileSync(new URL("../../spec/contracts/golden/portable-key-vectors.json", import.meta.url), "utf8")) as { valid: string[]; invalid: string[] };
+  const schema = JSON.parse(readFileSync(new URL("../../schemas/graph-view.schema.json", import.meta.url), "utf8"));
+  const sharedSchema = JSON.parse(readFileSync(new URL("../../spec/contracts/result-envelope.schema.json", import.meta.url), "utf8"));
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  ajv.addSchema(sharedSchema, "https://cidx.dev/schemas/result-envelope/v1");
+  const validator = ajv.compile(schema);
+  for (const key of vectors.valid) {
+    assert.doesNotThrow(() => assertPortableReference({ key, kind: "symbol", semanticUniverse: "fixture" }));
+    assert.equal(validator({ version: 1, operation: "query", query: { slice: "symbol", root: { key, kind: "symbol", semanticUniverse: "fixture" } }, budget: { maxNodes: 1, maxEdges: 0, maxGroups: 0, maxLabelChars: 1, maxEvidenceRefs: 0, maxSites: 0, maxSiteBytes: 0 } }), true, `schema rejected valid key ${key}: ${JSON.stringify(validator.errors)}`);
+  }
+  for (const key of vectors.invalid) {
+    assert.throws(() => assertPortableReference({ key, kind: "symbol", semanticUniverse: "fixture" }), /database-local/);
+    assert.equal(validator({ version: 1, operation: "query", query: { slice: "symbol", root: { key, kind: "symbol", semanticUniverse: "fixture" } }, budget: { maxNodes: 1, maxEdges: 0, maxGroups: 0, maxLabelChars: 1, maxEvidenceRefs: 0, maxSites: 0, maxSiteBytes: 0 } }), false, `schema accepted invalid key ${key}`);
+  }
 });
 
 test("canonical semantic content is unchanged by layout choice", () => {
@@ -135,6 +162,32 @@ test("oversized input produces a deterministic bounded response", () => {
   assert.equal(first.status, "partial");
   assert.ok(first.markers.includes("truncated"));
   assert.equal(first.diagnostics[0]?.code, "truncated_budget");
+  assert.ok(first.continuation);
+});
+
+test("edge site budgets trim adversarial sites deterministically and preserve truth metadata", () => {
+  const source = canonicalFixture("symbol");
+  const edge = source.edges[0]!;
+  const adversarial = {
+    ...source,
+    edges: [{ ...edge, siteRefs: Array.from({ length: 1_000 }, (_, index) => ({ id: `site:${String(index).padStart(4, "0")}`, role: "call-site" as const })) }],
+  };
+  const budget = { ...source.budget, maxEdges: 1, maxSites: 3, maxSiteBytes: 180 };
+  const first = applyBudget(adversarial, budget);
+  const second = applyBudget(adversarial, budget);
+  assert.deepEqual(first, second);
+  assert.equal(first.edges[0]!.siteRefs.length, 3);
+  assert.equal(first.usage.sites, 3);
+  assert.ok(first.usage.siteBytes <= budget.maxSiteBytes);
+  assert.ok(first.markers.includes("truncated"));
+  assert.ok(first.edges[0]!.markers.includes("truncated"));
+  assert.equal(first.status, "partial");
+  assert.equal(first.completeness, "partial");
+  assert.ok(first.continuation?.remaining.sites);
+  validateGraphView(first);
+  const elements = toCytoscapeElements(first);
+  const renderedEdge = elements.find((element) => element.data?.kind === "edge");
+  assert.equal(renderedEdge?.data?.siteRefs.length, 3);
 });
 
 test("saved presentation state is separate from query/result identity", () => {

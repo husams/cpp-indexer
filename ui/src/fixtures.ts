@@ -1,6 +1,6 @@
 import { applyBudget, GRAPH_VIEW_VERSION, usageOf, type Budget, type GraphEdge, type GraphGroup, type GraphKind, type GraphNode, type GraphViewResult, type EvidenceReference, type PortableReference, type SiteReference } from "./graph-view.ts";
 
-const fixtureBudget: Budget = { maxNodes: 32, maxEdges: 48, maxGroups: 8, maxLabelChars: 2_400, maxEvidenceRefs: 64 };
+const fixtureBudget: Budget = { maxNodes: 32, maxEdges: 48, maxGroups: 8, maxLabelChars: 2_400, maxEvidenceRefs: 64, maxSites: 256, maxSiteBytes: 32_768 };
 const universe = "fixture:canonical-v1";
 
 function ref(kind: PortableReference["kind"], key: string): PortableReference {
@@ -111,7 +111,7 @@ function typeFixture(): GraphViewResult {
 export function oversizedFixture(count = 200): GraphViewResult {
   const nodes: GraphNode[] = Array.from({ length: count }, (_, index) => node("symbol", `symbol:oversized::node${String(index).padStart(3, "0")}`, `node-${String(index).padStart(3, "0")}`, "function"));
   const edges: GraphEdge[] = nodes.slice(1).map((current, index) => edge(`edge:oversized:${index}`, nodes[index]!.ref, current.ref, "calls", "calls"));
-  return baseResult("symbol", nodes, edges, [], "result:oversized:v1", { budget: { maxNodes: count, maxEdges: count, maxGroups: 0, maxLabelChars: count * 20, maxEvidenceRefs: 0 }, usage: usageOf({ nodes, edges, groups: [], evidence: [] }) });
+  return baseResult("symbol", nodes, edges, [], "result:oversized:v1", { budget: { maxNodes: count, maxEdges: count, maxGroups: 0, maxLabelChars: count * 20, maxEvidenceRefs: 0, maxSites: count, maxSiteBytes: count * 256 }, usage: usageOf({ nodes, edges, groups: [], evidence: [] }) });
 }
 
 export function boundedFixture(slice: Exclude<GraphKind, "group" | "file">, budget: Budget): GraphViewResult {

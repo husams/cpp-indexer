@@ -17,7 +17,7 @@
       "additionalProperties": false,
       "required": ["key", "kind", "semanticUniverse"],
       "properties": {
-        "key": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^(?![0-9]+$)(?!.*(?:row|db|sqlite)[-_:0-9]*$).+" },
+        "key": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^(?![0-9]+$)(?!.*(?:^|[-_:])(?:row|db|sqlite)[-_:0-9]*$).+" },
         "kind": { "$ref": "#/$defs/kind" },
         "semanticUniverse": { "type": "string", "minLength": 1, "maxLength": 120 }
       }
@@ -93,7 +93,7 @@
             "target": { "$ref": "#/$defs/portableReference" },
             "relation": { "type": "string", "minLength": 1, "maxLength": 120 },
             "label": { "type": "string", "maxLength": 160 },
-            "siteRefs": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/site" } }
+            "siteRefs": { "type": "array", "uniqueItems": true, "maxItems": 10000, "items": { "$ref": "#/$defs/site" } }
           }
         }
       ],
@@ -124,19 +124,23 @@
         "maxEdges": { "type": "integer", "minimum": 0, "maximum": 20000 },
         "maxGroups": { "type": "integer", "minimum": 0, "maximum": 1000 },
         "maxLabelChars": { "type": "integer", "minimum": 0, "maximum": 1000000 },
-        "maxEvidenceRefs": { "type": "integer", "minimum": 0, "maximum": 10000 }
+        "maxEvidenceRefs": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "maxSites": { "type": "integer", "minimum": 0, "maximum": 100000 },
+        "maxSiteBytes": { "type": "integer", "minimum": 0, "maximum": 10000000 }
       }
     },
     "usage": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["nodes", "edges", "groups", "labelChars", "evidenceRefs"],
+      "required": ["nodes", "edges", "groups", "labelChars", "evidenceRefs", "sites", "siteBytes"],
       "properties": {
         "nodes": { "type": "integer", "minimum": 0 },
         "edges": { "type": "integer", "minimum": 0 },
         "groups": { "type": "integer", "minimum": 0 },
         "labelChars": { "type": "integer", "minimum": 0 },
-        "evidenceRefs": { "type": "integer", "minimum": 0 }
+        "evidenceRefs": { "type": "integer", "minimum": 0 },
+        "sites": { "type": "integer", "minimum": 0 },
+        "siteBytes": { "type": "integer", "minimum": 0 }
       }
     },
     "remainingUsage": {
@@ -147,7 +151,9 @@
         "edges": { "type": "integer", "minimum": 0 },
         "groups": { "type": "integer", "minimum": 0 },
         "labelChars": { "type": "integer", "minimum": 0 },
-        "evidenceRefs": { "type": "integer", "minimum": 0 }
+        "evidenceRefs": { "type": "integer", "minimum": 0 },
+        "sites": { "type": "integer", "minimum": 0 },
+        "siteBytes": { "type": "integer", "minimum": 0 }
       }
     },
     "identity": {

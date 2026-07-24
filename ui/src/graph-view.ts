@@ -91,6 +91,8 @@ export interface Budget {
   maxGroups: number;
   maxLabelChars: number;
   maxEvidenceRefs: number;
+  maxSites: number;
+  maxSiteBytes: number;
 }
 
 export interface BudgetUsage {
@@ -99,6 +101,8 @@ export interface BudgetUsage {
   groups: number;
   labelChars: number;
   evidenceRefs: number;
+  sites: number;
+  siteBytes: number;
 }
 
 export interface Continuation {
@@ -240,7 +244,11 @@ export interface VisualSemantics {
 
 export function stablePortableId(ref: PortableReference): string {
   assertPortableReference(ref);
-  return `${ref.kind}:${ref.semanticUniverse}:${ref.key}`;
+  return [ref.kind, ref.semanticUniverse, ref.key].map(encodePortableSegment).join("");
+}
+
+function encodePortableSegment(value: string): string {
+  return `${value.length}:${value}`;
 }
 
 export function assertPortableReference(ref: PortableReference): void {
@@ -291,16 +299,19 @@ export function validateGraphView(result: GraphViewResult): void {
   if (result.groups.length > result.budget.maxGroups || result.evidence.length > result.budget.maxEvidenceRefs) {
     throw new Error("GraphView result exceeds its evidence budget");
   }
-  if (result.usage.labelChars > result.budget.maxLabelChars || result.usage.nodes > result.budget.maxNodes || result.usage.edges > result.budget.maxEdges || result.usage.groups > result.budget.maxGroups || result.usage.evidenceRefs > result.budget.maxEvidenceRefs) {
+  if (result.usage.labelChars > result.budget.maxLabelChars || result.usage.nodes > result.budget.maxNodes || result.usage.edges > result.budget.maxEdges || result.usage.groups > result.budget.maxGroups || result.usage.evidenceRefs > result.budget.maxEvidenceRefs || result.usage.sites > result.budget.maxSites || result.usage.siteBytes > result.budget.maxSiteBytes) {
     throw new Error("GraphView usage exceeds its declared budget");
   }
   const calculatedUsage = usageOf(result);
   if (JSON.stringify(calculatedUsage) !== JSON.stringify(result.usage)) throw new Error("GraphView usage is not deterministic");
-  const nodeKeys = new Set(result.nodes.map((node) => stablePortableId(node.ref)));
+  const nodeKeys = uniqueElementIds(result.nodes, "nodes");
+  uniqueElementIds(result.edges, "edges");
+  uniqueElementIds(result.groups, "groups");
   const evidenceIds = new Set(result.evidence.map((reference) => reference.id));
   for (const node of result.nodes) validateElement(node, evidenceIds);
   for (const edge of result.edges) {
     validateElement(edge, evidenceIds);
+    validateSites(edge.siteRefs);
     if (!nodeKeys.has(stablePortableId(edge.source)) || !nodeKeys.has(stablePortableId(edge.target))) {
       throw new Error(`edge ${edge.ref.key} references a node outside the result`);
     }
@@ -321,13 +332,45 @@ function validateElement(element: GraphElementState & { ref: PortableReference; 
   if (element.evidenceRefs.some((id) => !evidenceIds.has(id))) throw new Error(`element ${element.ref.key} references unknown evidence`);
 }
 
+function uniqueElementIds(elements: readonly { ref: PortableReference }[], label: string): Set<string> {
+  const ids = new Set(elements.map((element) => stablePortableId(element.ref)));
+  if (ids.size !== elements.length) throw new Error(`${label} contain duplicate portable identities`);
+  return ids;
+}
+
+function validateSites(sites: readonly SiteReference[]): void {
+  const ids = new Set<string>();
+  for (const site of sites) {
+    if (!site.id || site.id.length > 120 || ids.has(site.id)) throw new Error("edge sites must have unique bounded ids");
+    ids.add(site.id);
+    if (site.location && (!site.location.path || site.location.path.length > 512 || site.location.line < 1 || (site.location.column !== undefined && site.location.column < 1))) {
+      throw new Error("edge site location is invalid");
+    }
+  }
+}
+
+function canonicalSite(site: SiteReference): string {
+  return JSON.stringify({
+    id: site.id,
+    role: site.role,
+    ...(site.location === undefined ? {} : { location: { path: site.location.path, line: site.location.line, ...(site.location.column === undefined ? {} : { column: site.location.column }) } }),
+  });
+}
+
+export function siteByteLength(site: SiteReference): number {
+  return utf8ByteLength(canonicalSite(site));
+}
+
 export function usageOf(result: Pick<GraphViewResult, "nodes" | "edges" | "groups" | "evidence">): BudgetUsage {
+  const sites = result.edges.flatMap((edge) => edge.siteRefs);
   return {
     nodes: result.nodes.length,
     edges: result.edges.length,
     groups: result.groups.length,
     labelChars: [...result.nodes, ...result.edges, ...result.groups].reduce((sum, item) => sum + item.label.length, 0),
     evidenceRefs: result.evidence.length,
+    sites: sites.length,
+    siteBytes: sites.reduce((sum, site) => sum + siteByteLength(site), 0),
   };
 }
 
@@ -346,14 +389,55 @@ export function applyBudget(result: GraphViewResult, budget: Budget): GraphViewR
   const boundedEdges = edges.map((item) => ({ ...item, evidenceRefs: item.evidenceRefs.filter((id) => keptEvidenceIds.has(id)) }));
   const boundedGroups = groups.map((item) => ({ ...item, memberRefs: item.memberRefs.filter((member) => nodeKeys.has(stablePortableId(member))), evidenceRefs: item.evidenceRefs.filter((id) => keptEvidenceIds.has(id)) }));
   const labelBound = trimLabels(boundedNodes, boundedEdges, boundedGroups, budget.maxLabelChars);
-  const usage = usageOf({ nodes: labelBound.nodes, edges: labelBound.edges, groups: labelBound.groups, evidence });
-  const exceeded = nodes.length < result.nodes.length || edges.length < result.edges.length || groups.length < result.groups.length || evidence.length < evidenceIds.size || labelBound.truncated;
+  const siteBound = trimSites(labelBound.edges, budget);
+  const usage = usageOf({ nodes: labelBound.nodes, edges: siteBound.edges, groups: labelBound.groups, evidence });
+  const exceeded = nodes.length < result.nodes.length || edges.length < result.edges.length || groups.length < result.groups.length || evidence.length < evidenceIds.size || labelBound.truncated || siteBound.truncated;
   const markers = exceeded ? uniqueMarkers([...result.markers, "truncated"]) : [...result.markers];
   const status = exceeded && result.status === "complete" ? "partial" : result.status;
   const diagnostics = exceeded
-    ? [...result.diagnostics, { code: "truncated_budget" as const, message: "The fixture exceeded a deterministic browser budget; the slice was bounded.", severity: "warning" as const }].slice(0, MAX_DIAGNOSTICS)
+    ? [...result.diagnostics, { code: "truncated_budget" as const, message: siteBound.truncated ? "The graph exceeded a deterministic browser site/byte budget; sites were bounded and a continuation is available." : "The fixture exceeded a deterministic browser budget; the slice was bounded.", severity: "warning" as const }].slice(0, MAX_DIAGNOSTICS)
     : [...result.diagnostics];
-  return { ...result, budget, nodes: labelBound.nodes, edges: labelBound.edges, groups: labelBound.groups, evidence, usage, status, completeness: exceeded ? "partial" : result.completeness, markers, diagnostics };
+  const continuation = exceeded ? budgetContinuation(result, usage) : result.continuation;
+  return { ...result, budget, nodes: labelBound.nodes, edges: siteBound.edges, groups: labelBound.groups, evidence, usage, status, completeness: exceeded ? "partial" : result.completeness, markers, diagnostics, ...(continuation === undefined ? {} : { continuation }) };
+}
+
+function trimSites(edges: readonly GraphEdge[], budget: Budget): { edges: GraphEdge[]; truncated: boolean } {
+  let sites = 0;
+  let siteBytes = 0;
+  let truncated = false;
+  const boundedEdges = edges.map((edge) => {
+    let edgeTruncated = false;
+    const boundedSites = [...edge.siteRefs].sort((left, right) => left.id.localeCompare(right.id)).filter((site) => {
+      const bytes = siteByteLength(site);
+      if (sites >= budget.maxSites || siteBytes + bytes > budget.maxSiteBytes) {
+        truncated = true;
+        edgeTruncated = true;
+        return false;
+      }
+      sites += 1;
+      siteBytes += bytes;
+      return true;
+    });
+    return edgeTruncated ? { ...edge, siteRefs: boundedSites, markers: uniqueMarkers([...edge.markers, "truncated"]) } : { ...edge, siteRefs: boundedSites };
+  });
+  return { edges: boundedEdges, truncated };
+}
+
+function budgetContinuation(result: GraphViewResult, usage: BudgetUsage): Continuation {
+  const remaining = {
+    ...result.continuation?.remaining,
+    nodes: Math.max(0, result.nodes.length - usage.nodes),
+    edges: Math.max(0, result.edges.length - usage.edges),
+    groups: Math.max(0, result.groups.length - usage.groups),
+    sites: Math.max(0, usageOf(result).sites - usage.sites),
+    siteBytes: Math.max(0, usageOf(result).siteBytes - usage.siteBytes),
+  };
+  return {
+    ...result.continuation,
+    token: result.continuation?.token ?? `budget:${result.resultId}`.slice(0, 240),
+    nextDepth: result.continuation?.nextDepth ?? 0,
+    remaining,
+  };
 }
 
 function trimLabels(nodes: readonly GraphNode[], edges: readonly GraphEdge[], groups: readonly GraphGroup[], maxChars: number): { nodes: GraphNode[]; edges: GraphEdge[]; groups: GraphGroup[]; truncated: boolean } {
@@ -382,7 +466,7 @@ export function canonicalSemanticContent(result: GraphViewResult): string {
     status: result.status,
     markers: [...result.markers].sort(),
     nodes: [...result.nodes].map(({ ref, label, semanticKind, status, markers: stateMarkers }) => ({ ref, label, semanticKind, status, markers: [...stateMarkers].sort() })).sort((a, b) => stablePortableId(a.ref).localeCompare(stablePortableId(b.ref))),
-    edges: [...result.edges].map(({ ref, source, target, relation, label, status, markers: stateMarkers }) => ({ ref, source, target, relation, label, status, markers: [...stateMarkers].sort() })).sort((a, b) => stablePortableId(a.ref).localeCompare(stablePortableId(b.ref))),
+    edges: [...result.edges].map(({ ref, source, target, relation, label, status, markers: stateMarkers, siteRefs }) => ({ ref, source, target, relation, label, status, markers: [...stateMarkers].sort(), siteRefs: [...siteRefs].sort((left, right) => left.id.localeCompare(right.id)) })).sort((a, b) => stablePortableId(a.ref).localeCompare(stablePortableId(b.ref))),
   });
 }
 

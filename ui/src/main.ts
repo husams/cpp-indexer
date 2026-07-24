@@ -36,7 +36,7 @@ const visualTruthLegend = [
 ] as const;
 
 function browserBudget() {
-  return { maxNodes: 32, maxEdges: 48, maxGroups: 8, maxLabelChars: 2_400, maxEvidenceRefs: 64 };
+  return { maxNodes: 32, maxEdges: 48, maxGroups: 8, maxLabelChars: 2_400, maxEvidenceRefs: 64, maxSites: 256, maxSiteBytes: 32_768 };
 }
 
 function render(): void {
