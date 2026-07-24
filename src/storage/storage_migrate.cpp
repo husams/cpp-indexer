@@ -43,6 +43,11 @@ void Storage::migrate() {
   if (!has_table("symbol")) {
     return; // fresh database: the schema script creates everything
   }
+  if (has_table("storage_enum_catalog")) {
+    db_.exec("DROP VIEW IF EXISTS edge_site_read");
+    db_.exec("DROP VIEW IF EXISTS call_arg_read");
+    db_.exec("DROP TABLE storage_enum_catalog");
+  }
   const auto table_columns = [this](const char *table) {
     std::vector<std::string> cols;
     auto st = db_.prepare(std::string("PRAGMA table_info(") + table + ")");
@@ -778,6 +783,321 @@ void Storage::migrate() {
         std::stoi(st.col_text(0)) < kSchemaVersion) {
       changed = true;
     }
+  }
+
+  int stored_schema_version = 0;
+  {
+    auto st =
+        db_.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
+    if (st.step()) {
+      const std::string value = st.col_text(0);
+      if (!value.empty()) {
+        stored_schema_version = std::stoi(value);
+      }
+    }
+  }
+  if (stored_schema_version < kSchemaVersion) {
+    // v34 -> v35: compact high-cardinality occurrence identities. Resolvable
+    // USRs move to local integer FKs; values with no local row are retained
+    // once in external_identity and remain distinguishable from NULL evidence.
+    // The legacy text columns are intentionally nulled after the lossless
+    // backfill; read-side compatibility views reconstruct the public USR
+    // fields.
+    db_.exec("CREATE TABLE IF NOT EXISTS external_identity ("
+             "id INTEGER PRIMARY KEY, identity_kind INTEGER NOT NULL "
+             "CHECK (identity_kind IN (1,2,3)), "
+             "identity_text TEXT NOT NULL, resolution_status INTEGER NOT NULL "
+             "DEFAULT 0 CHECK (resolution_status IN (0,1)), "
+             "symbol_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL, "
+             "type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL, "
+             "UNIQUE(identity_kind, identity_text))");
+    db_.exec("CREATE INDEX IF NOT EXISTS idx_external_identity_symbol "
+             "ON external_identity(symbol_id)");
+    db_.exec("CREATE INDEX IF NOT EXISTS idx_external_identity_type "
+             "ON external_identity(type_id)");
+
+    const auto add_col = [this](const char *table, const char *column,
+                                const char *definition) {
+      auto st = db_.prepare(std::string("PRAGMA table_info(") + table + ")");
+      bool present = false;
+      while (st.step()) {
+        present = present || st.col_text(1) == column;
+      }
+      if (!present) {
+        db_.exec(std::string("ALTER TABLE ") + table + " ADD COLUMN " + column +
+                 " " + definition);
+      }
+    };
+    const bool has_type_node = has_table("type_node");
+    const bool has_edge_identity_text =
+        has_table("edge_site") &&
+        has_col(table_columns("edge_site"), "recv_type_usr") &&
+        has_col(table_columns("edge_site"), "recv_decl_usr");
+    const bool has_call_identity_text =
+        has_table("call_arg") &&
+        has_col(table_columns("call_arg"), "type_usr") &&
+        has_col(table_columns("call_arg"), "decl_usr") &&
+        has_col(table_columns("call_arg"), "callee_usr");
+    if (has_table("symbol")) {
+      add_col("symbol", "parent_id",
+              "INTEGER REFERENCES symbol(id) ON DELETE SET NULL");
+      db_.exec("CREATE INDEX IF NOT EXISTS idx_symbol_parent_id ON "
+               "symbol(parent_id)");
+      db_.exec("UPDATE symbol SET parent_id = (SELECT id FROM symbol p "
+               "WHERE p.usr = symbol.parent_usr) WHERE parent_usr IS NOT NULL");
+    }
+    if (has_table("type_node")) {
+      add_col("type_node", "decl_id",
+              "INTEGER REFERENCES symbol(id) ON DELETE SET NULL");
+      db_.exec("CREATE INDEX IF NOT EXISTS idx_type_node_decl_id ON "
+               "type_node(decl_id)");
+      db_.exec("UPDATE type_node SET decl_id = (SELECT id FROM symbol s "
+               "WHERE s.usr = type_node.decl_usr) WHERE decl_usr IS NOT NULL");
+    }
+    if (has_table("edge_site")) {
+      add_col("edge_site", "recv_src_kind_id", "INTEGER");
+      add_col("edge_site", "recv_type_id",
+              "INTEGER REFERENCES type_node(id) ON DELETE SET NULL");
+      add_col("edge_site", "recv_decl_id",
+              "INTEGER REFERENCES symbol(id) ON DELETE SET NULL");
+      add_col("edge_site", "recv_type_identity_id",
+              "INTEGER REFERENCES external_identity(id) ON DELETE SET NULL");
+      add_col("edge_site", "recv_decl_identity_id",
+              "INTEGER REFERENCES external_identity(id) ON DELETE SET NULL");
+      if (has_col(table_columns("edge_site"), "recv_src_kind")) {
+        db_.exec("UPDATE edge_site SET recv_src_kind = NULL WHERE "
+                 "recv_src_kind = 'value'");
+        for (const auto &entry : catalog::kSourceKinds) {
+          db_.exec("UPDATE edge_site SET recv_src_kind_id = " +
+                   std::to_string(entry.id) + " WHERE recv_src_kind = '" +
+                   std::string(entry.name) + "'");
+        }
+        auto unknown = db_.prepare("SELECT recv_src_kind FROM edge_site WHERE "
+                                   "recv_src_kind IS NOT NULL "
+                                   "AND recv_src_kind_id IS NULL LIMIT 1");
+        if (unknown.step()) {
+          throw StorageError("unknown source kind '" + unknown.col_text(0) +
+                             "' in edge_site migration");
+        }
+        db_.exec("UPDATE edge_site SET recv_src_kind = NULL");
+      }
+      if (has_edge_identity_text && has_type_node) {
+        db_.exec("INSERT OR IGNORE INTO "
+                 "external_identity(identity_kind,identity_text,"
+                 "resolution_status,type_id) SELECT 1, es.recv_type_usr, "
+                 "CASE WHEN tn.id IS NULL THEN 0 ELSE 1 END, tn.id FROM "
+                 "edge_site es "
+                 "LEFT JOIN type_node tn ON tn.decl_usr = es.recv_type_usr "
+                 "WHERE es.recv_type_usr IS NOT NULL");
+      }
+      if (has_edge_identity_text && has_type_node) {
+        db_.exec(
+            "INSERT OR IGNORE INTO "
+            "external_identity(identity_kind,identity_text,"
+            "resolution_status,symbol_id) SELECT 2, es.recv_decl_usr, "
+            "CASE WHEN s.id IS NULL THEN 0 ELSE 1 END, s.id FROM edge_site es "
+            "LEFT JOIN symbol s ON s.usr = es.recv_decl_usr "
+            "WHERE es.recv_decl_usr IS NOT NULL");
+        db_.exec("UPDATE edge_site SET recv_decl_id = (SELECT id FROM symbol s "
+                 "WHERE s.usr = edge_site.recv_decl_usr), "
+                 "recv_decl_identity_id = (SELECT id FROM external_identity i "
+                 "WHERE i.identity_kind = 2 AND i.identity_text = "
+                 "edge_site.recv_decl_usr)");
+      }
+      if (has_edge_identity_text && has_type_node) {
+        db_.exec(
+            "UPDATE edge_site SET recv_type_id = (SELECT id FROM type_node t "
+            "WHERE t.decl_usr = edge_site.recv_type_usr), "
+            "recv_type_identity_id = (SELECT id FROM external_identity i "
+            "WHERE i.identity_kind = 1 AND i.identity_text = "
+            "edge_site.recv_type_usr)");
+      }
+      if (has_edge_identity_text && has_type_node) {
+        db_.exec(
+            "UPDATE edge_site SET recv_type_usr = NULL, recv_decl_usr = NULL");
+      }
+    }
+    if (has_table("call_arg")) {
+      add_col("call_arg", "src_kind_id", "INTEGER");
+      add_col("call_arg", "type_id",
+              "INTEGER REFERENCES type_node(id) ON DELETE SET NULL");
+      add_col("call_arg", "decl_id",
+              "INTEGER REFERENCES symbol(id) ON DELETE SET NULL");
+      add_col("call_arg", "callee_id",
+              "INTEGER REFERENCES symbol(id) ON DELETE SET NULL");
+      add_col("call_arg", "type_identity_id",
+              "INTEGER REFERENCES external_identity(id) ON DELETE SET NULL");
+      add_col("call_arg", "decl_identity_id",
+              "INTEGER REFERENCES external_identity(id) ON DELETE SET NULL");
+      add_col("call_arg", "callee_identity_id",
+              "INTEGER REFERENCES external_identity(id) ON DELETE SET NULL");
+      add_col("call_arg", "type_usr", "TEXT");
+      add_col("call_arg", "decl_usr", "TEXT");
+      add_col("call_arg", "callee_usr", "TEXT");
+      add_col("call_arg", "type_is_value", "INTEGER");
+      bool source_kind_not_null = false;
+      {
+        auto info = db_.prepare("PRAGMA table_info(call_arg)");
+        while (info.step()) {
+          if (info.col_text(1) == "src_kind") {
+            source_kind_not_null = info.col_int64(3) != 0;
+          }
+        }
+      }
+      if (source_kind_not_null) {
+        db_.exec("DROP VIEW IF EXISTS call_arg_read");
+        db_.exec("PRAGMA foreign_keys = OFF");
+        db_.exec(
+            "CREATE TABLE call_arg_v35 ("
+            "edge_id INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE, "
+            "file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE, "
+            "line INTEGER NOT NULL, col INTEGER NOT NULL, position INTEGER NOT "
+            "NULL, "
+            "src_kind TEXT, type_usr TEXT, decl_usr TEXT, callee_usr TEXT, "
+            "src_kind_id INTEGER, type_id INTEGER REFERENCES type_node(id) ON "
+            "DELETE SET NULL, "
+            "decl_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL, "
+            "callee_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL, "
+            "type_identity_id INTEGER REFERENCES external_identity(id) ON "
+            "DELETE SET NULL, "
+            "decl_identity_id INTEGER REFERENCES external_identity(id) ON "
+            "DELETE SET NULL, "
+            "callee_identity_id INTEGER REFERENCES external_identity(id) ON "
+            "DELETE SET NULL, "
+            "type_is_value INTEGER, "
+            "PRIMARY KEY(edge_id,file_id,line,col,position)) WITHOUT ROWID");
+        db_.exec(
+            "INSERT INTO call_arg_v35 SELECT edge_id,file_id,line,col,position,"
+            "src_kind,type_usr,decl_usr,callee_usr,src_kind_id,type_id,decl_id,"
+            "callee_id,type_identity_id,decl_identity_id,callee_identity_id,"
+            "type_is_value FROM call_arg");
+        db_.exec("DROP TABLE call_arg");
+        db_.exec("ALTER TABLE call_arg_v35 RENAME TO call_arg");
+        db_.exec("CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON "
+                 "call_arg(edge_id)");
+        db_.exec("PRAGMA foreign_keys = ON");
+      }
+      if (has_call_identity_text && has_type_node) {
+        db_.exec(
+            "INSERT OR IGNORE INTO "
+            "external_identity(identity_kind,identity_text,"
+            "resolution_status,type_id) SELECT 1, ca.type_usr, "
+            "CASE WHEN tn.id IS NULL THEN 0 ELSE 1 END, tn.id FROM call_arg ca "
+            "LEFT JOIN type_node tn ON tn.decl_usr = ca.type_usr "
+            "WHERE ca.type_usr IS NOT NULL");
+      }
+      if (has_call_identity_text && has_type_node) {
+        db_.exec(
+            "INSERT OR IGNORE INTO "
+            "external_identity(identity_kind,identity_text,"
+            "resolution_status,symbol_id) SELECT 2, u.value, "
+            "CASE WHEN s.id IS NULL THEN 0 ELSE 1 END, s.id FROM "
+            "(SELECT decl_usr AS value FROM call_arg UNION SELECT callee_usr "
+            "FROM call_arg) u "
+            "LEFT JOIN symbol s ON s.usr = u.value WHERE u.value IS NOT NULL");
+        db_.exec(
+            "UPDATE call_arg SET decl_id = (SELECT id FROM symbol s "
+            "WHERE s.usr = call_arg.decl_usr), callee_id = (SELECT id FROM "
+            "symbol s "
+            "WHERE s.usr = call_arg.callee_usr), decl_identity_id = (SELECT id "
+            "FROM external_identity i WHERE i.identity_kind = 2 AND "
+            "i.identity_text = call_arg.decl_usr), callee_identity_id = "
+            "(SELECT id "
+            "FROM external_identity i WHERE i.identity_kind = 2 AND "
+            "i.identity_text = call_arg.callee_usr)");
+      }
+      if (has_call_identity_text && has_type_node) {
+        db_.exec(
+            "UPDATE call_arg SET type_id = (SELECT id FROM type_node t WHERE "
+            "t.decl_usr = call_arg.type_usr), type_identity_id = (SELECT id "
+            "FROM external_identity i WHERE i.identity_kind = 1 AND "
+            "i.identity_text = call_arg.type_usr)");
+      }
+      for (const auto &entry : catalog::kSourceKinds) {
+        db_.exec(
+            "UPDATE call_arg SET src_kind = NULL WHERE src_kind = 'value'");
+        db_.exec(
+            "UPDATE call_arg SET src_kind_id = " + std::to_string(entry.id) +
+            " WHERE src_kind = '" + std::string(entry.name) + "'");
+      }
+      auto unknown = db_.prepare(
+          "SELECT src_kind FROM call_arg WHERE src_kind IS NOT NULL "
+          "AND src_kind_id IS NULL LIMIT 1");
+      if (unknown.step()) {
+        throw StorageError("unknown source kind '" + unknown.col_text(0) +
+                           "' in call_arg migration");
+      }
+      db_.exec("UPDATE call_arg SET src_kind = NULL");
+      if (has_call_identity_text && has_type_node) {
+        db_.exec("UPDATE call_arg SET type_usr = NULL, decl_usr = NULL, "
+                 "callee_usr = NULL");
+      }
+    }
+    // ALTER TABLE cannot add the CHECK clauses that protect normalized enum
+    // IDs. Rebuild both hot occurrence tables so migrated databases have the
+    // same domains and foreign keys as a fresh v37 database.
+    if (has_table("edge_site")) {
+      add_col("edge_site", "args_sig", "TEXT");
+      add_col("edge_site", "recv_param_pos", "INTEGER");
+      add_col("edge_site", "recv_type_is_value", "INTEGER");
+      db_.exec("DROP VIEW IF EXISTS edge_site_read");
+      db_.exec("PRAGMA foreign_keys = OFF");
+      db_.exec(
+          "CREATE TABLE edge_site_v37 ("
+          "edge_id INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE, "
+          "file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE, "
+          "line INTEGER, col INTEGER, conditional INTEGER NOT NULL DEFAULT 0, "
+          "args_sig TEXT, recv_src_kind TEXT, recv_type_usr TEXT, "
+          "recv_decl_usr TEXT, recv_src_kind_id INTEGER CHECK "
+          "(recv_src_kind_id IS NULL OR recv_src_kind_id IN "
+          "(1,2,3,4,5,6,7,8)), recv_type_id INTEGER REFERENCES type_node(id) "
+          "ON DELETE SET NULL, recv_decl_id INTEGER REFERENCES symbol(id) ON "
+          "DELETE SET NULL, recv_type_identity_id INTEGER REFERENCES "
+          "external_identity(id) ON DELETE SET NULL, recv_decl_identity_id "
+          "INTEGER REFERENCES external_identity(id) ON DELETE SET NULL, "
+          "recv_param_pos INTEGER, recv_type_is_value INTEGER, PRIMARY KEY "
+          "(edge_id,file_id,line,col)) WITHOUT ROWID");
+      db_.exec(
+          "INSERT INTO edge_site_v37 SELECT edge_id,file_id,line,col,"
+          "conditional,args_sig,NULL,NULL,NULL,recv_src_kind_id,recv_type_id,"
+          "recv_decl_id,recv_type_identity_id,recv_decl_identity_id,"
+          "recv_param_pos,recv_type_is_value FROM edge_site");
+      db_.exec("DROP TABLE edge_site");
+      db_.exec("ALTER TABLE edge_site_v37 RENAME TO edge_site");
+      db_.exec("PRAGMA foreign_keys = ON");
+    }
+    if (has_table("call_arg")) {
+      add_col("call_arg", "type_is_value", "INTEGER");
+      db_.exec("DROP VIEW IF EXISTS call_arg_read");
+      db_.exec("PRAGMA foreign_keys = OFF");
+      db_.exec(
+          "CREATE TABLE call_arg_v37 ("
+          "edge_id INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE, "
+          "file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE, "
+          "line INTEGER NOT NULL, col INTEGER NOT NULL, position INTEGER NOT "
+          "NULL, src_kind TEXT, type_usr TEXT, decl_usr TEXT, callee_usr TEXT, "
+          "src_kind_id INTEGER CHECK (src_kind_id IS NULL OR src_kind_id IN "
+          "(1,2,3,4,5,6,7,8)), type_id INTEGER REFERENCES type_node(id) ON "
+          "DELETE SET NULL, decl_id INTEGER REFERENCES symbol(id) ON DELETE "
+          "SET NULL, callee_id INTEGER REFERENCES symbol(id) ON DELETE SET "
+          "NULL, type_identity_id INTEGER REFERENCES external_identity(id) ON "
+          "DELETE SET NULL, decl_identity_id INTEGER REFERENCES "
+          "external_identity "
+          "(id) ON DELETE SET NULL, callee_identity_id INTEGER REFERENCES "
+          "external_identity(id) ON DELETE SET NULL, type_is_value INTEGER, "
+          "PRIMARY KEY(edge_id,file_id,line,col,position)) WITHOUT ROWID");
+      db_.exec(
+          "INSERT INTO call_arg_v37 SELECT edge_id,file_id,line,col,position,"
+          "NULL,NULL,NULL,NULL,src_kind_id,type_id,decl_id,callee_id,"
+          "type_identity_id,decl_identity_id,callee_identity_id,type_is_value "
+          "FROM call_arg");
+      db_.exec("DROP TABLE call_arg");
+      db_.exec("ALTER TABLE call_arg_v37 RENAME TO call_arg");
+      db_.exec(
+          "CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id)");
+      db_.exec("PRAGMA foreign_keys = ON");
+    }
+    changed = true;
   }
   if (changed) {
     auto st =

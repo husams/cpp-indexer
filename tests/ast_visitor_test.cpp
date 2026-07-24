@@ -123,7 +123,7 @@ struct ArgProbe {
 ArgProbe probe_arg0(const std::string &db_path, const std::string &src,
                     const std::string &dst) {
   const std::string sql =
-      "SELECT ca.src_kind, COALESCE(ca.decl_usr,'') FROM call_arg ca "
+      "SELECT ca.src_kind, COALESCE(ca.decl_usr,'') FROM call_arg_read ca "
       "JOIN edge e ON e.id = ca.edge_id "
       "JOIN symbol ss ON ss.id = e.src_id "
       "JOIN symbol ds ON ds.id = e.dst_id "
@@ -461,7 +461,7 @@ TEST_SUITE("clang") {
     CHECK(probe_arg0(tu.db_path(), "statics", "sink").src_kind == "local");
     // The lambda body's call is attributed to the enclosing function symbol.
     CHECK(query_col(tu.db_path(),
-                    "SELECT DISTINCT ca.src_kind FROM call_arg ca "
+                    "SELECT DISTINCT ca.src_kind FROM call_arg_read ca "
                     "JOIN edge e ON e.id = ca.edge_id "
                     "JOIN symbol ss ON ss.id = e.src_id "
                     "JOIN symbol ds ON ds.id = e.dst_id "
@@ -500,7 +500,7 @@ TEST_SUITE("clang") {
     const IndexedTu tu(kProvenanceTu);
     CHECK(query_col(tu.db_path(),
                     "SELECT COALESCE(es.recv_param_pos, '<null>') "
-                    "FROM edge_site es "
+                    "FROM edge_site_read es "
                     "JOIN edge e ON e.id = es.edge_id "
                     "JOIN symbol ss ON ss.id = e.src_id "
                     "JOIN symbol ds ON ds.id = e.dst_id "
@@ -535,7 +535,7 @@ TEST_SUITE("clang") {
     CHECK(query_col(tu.db_path(), "SELECT es.recv_src_kind || '/' || "
                                   "COALESCE(es.recv_decl_usr, '') || '/' || "
                                   "es.recv_type_is_value "
-                                  "FROM edge_site es "
+                                  "FROM edge_site_read es "
                                   "JOIN edge e ON e.id = es.edge_id "
                                   "JOIN symbol ss ON ss.id = e.src_id "
                                   "JOIN symbol ds ON ds.id = e.dst_id "
@@ -552,7 +552,7 @@ TEST_SUITE("clang") {
     CHECK(query_col(tu.db_path(), "SELECT es.recv_src_kind || '/' || "
                                   "COALESCE(es.recv_decl_usr, '') || '/' || "
                                   "es.recv_type_is_value "
-                                  "FROM edge_site es "
+                                  "FROM edge_site_read es "
                                   "JOIN edge e ON e.id = es.edge_id "
                                   "JOIN symbol ss ON ss.id = e.src_id "
                                   "JOIN symbol ds ON ds.id = e.dst_id "
@@ -575,7 +575,7 @@ TEST_SUITE("clang") {
       CHECK_MESSAGE(query_col(tu.db_path(),
                               std::string("SELECT es.recv_src_kind || '/' || "
                                           "es.recv_param_pos "
-                                          "FROM edge_site es "
+                                          "FROM edge_site_read es "
                                           "JOIN edge e ON e.id = es.edge_id "
                                           "JOIN symbol ss ON ss.id = e.src_id "
                                           "JOIN symbol ds ON ds.id = e.dst_id "

@@ -223,6 +223,11 @@ def _migration(path: Path, directory: Path) -> dict[str, Any]:
         canonical.execute("DELETE FROM edge_kind WHERE id IN (19,20)")
         canonical.execute("INSERT INTO edge_kind(id,name) VALUES (19,'alias_of'),(20,'of_type')")
         canonical.execute("UPDATE edge SET kind=20 WHERE id=?", (variable_edge,))
+        # HSE-77 treats the historical v34 benchmark placeholder "value" as
+        # missing provenance; normalize the canonical compatibility view to
+        # the same NULL representation used by the migration.
+        canonical.execute("UPDATE edge_site SET recv_src_kind=NULL WHERE recv_src_kind='value'")
+        canonical.execute("UPDATE call_arg SET src_kind=NULL WHERE src_kind='value'")
         canonical.commit()
     finally:
         canonical.close()

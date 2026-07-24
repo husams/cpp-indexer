@@ -17,6 +17,7 @@
 
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
+#include "util/errors.hpp"
 
 #ifndef CIDX_FIXTURES_DIR
 #error "CIDX_FIXTURES_DIR must be defined by the build"
@@ -123,6 +124,7 @@ void check_migrated(const std::string &db_path) {
                                          "idx_symbol_qual",
                                          "idx_symbol_file",
                                          "idx_symbol_parent",
+                                         "idx_symbol_parent_id",
                                          "idx_symbol_kind",
                                          "idx_symbol_spelling_nc",
                                          "idx_symbol_qual_nc",
@@ -140,6 +142,7 @@ void check_migrated(const std::string &db_path) {
                                          "idx_possible_call_src",
                                          "idx_possible_call_dst",
                                          "idx_type_node_decl_usr",
+                                         "idx_type_node_decl_id",
                                          "idx_type_node_canonical",
                                          "idx_type_edge_dst",
                                          "idx_parameter_type",
@@ -154,6 +157,13 @@ void check_migrated(const std::string &db_path) {
                                          "idx_include_edge_config",
                                          "idx_include_site_edge",
                                          "idx_include_macro_use_path",
+                                         "idx_external_identity_symbol",
+                                         "idx_external_identity_type",
+                                         "idx_edge_site_recv_type_identity",
+                                         "idx_edge_site_recv_decl_identity",
+                                         "idx_call_arg_type_identity",
+                                         "idx_call_arg_decl_identity",
+                                         "idx_call_arg_callee_identity",
                                          "idx_artifact_current_logical",
                                          "idx_artifact_state",
                                          "idx_artifact_identity_stable"});
@@ -179,6 +189,27 @@ TEST_CASE(
     cidx::Storage db(path);
   } // open = migrate
   check_migrated(path);
+}
+
+TEST_CASE("predecessor catalog hash requires the v36 to v37 migration") {
+  const std::string tmp = make_temp_dir();
+  for (const char *wrong_version : {"35", "37"}) {
+    const std::string path =
+        std::string(tmp) + "/wrong-" + wrong_version + ".db";
+    {
+      cidx::Storage db(path);
+    }
+    {
+      cidx::SqliteDb raw(path);
+      raw.exec(std::string("UPDATE meta SET value = '") + wrong_version +
+               "' WHERE key = 'schema_version'");
+      raw.exec(
+          "UPDATE meta SET value = "
+          "'15e7ce8206c521cff6794530a382f0389320c0f3e49d148b0f311d058aa5157a' "
+          "WHERE key = 'catalog_hash'");
+    }
+    CHECK_THROWS_AS(cidx::Storage{path}, cidx::CidxError);
+  }
 }
 
 TEST_CASE("v3 fixture migrates: stored qual_name kept, decl backfill applied") {
@@ -457,6 +488,14 @@ TEST_CASE("v29 -> v30: signature/type tier tables created, version stamped") {
   }
   {
     cidx::SqliteDb raw(path);
+    raw.exec("PRAGMA foreign_keys = OFF");
+    raw.exec("DROP VIEW edge_site_read");
+    raw.exec("DROP VIEW call_arg_read");
+    raw.exec("DROP TABLE external_identity");
+    raw.exec("DROP TABLE call_arg");
+    raw.exec("DROP TABLE edge_site");
+    raw.exec("DROP TABLE template_arg");
+    raw.exec("DROP TABLE template_param");
     raw.exec("DROP TABLE symbol_type");
     raw.exec("DROP TABLE symbol_type_kind");
     raw.exec("DROP TABLE parameter");
@@ -464,6 +503,7 @@ TEST_CASE("v29 -> v30: signature/type tier tables created, version stamped") {
     raw.exec("DROP TABLE type_edge_kind");
     raw.exec("DROP TABLE type_node");
     raw.exec("DROP TABLE type_kind");
+    raw.exec("PRAGMA foreign_keys = ON");
     raw.exec("UPDATE meta SET value = '29' WHERE key = 'schema_version'");
   }
   {
@@ -484,6 +524,130 @@ TEST_CASE("v29 -> v30: signature/type tier tables created, version stamped") {
   auto st = raw.prepare("SELECT COUNT(*) FROM type_kind");
   REQUIRE(st.step());
   CHECK(st.col_int64(0) == 13); // seed rows present
+}
+
+TEST_CASE("v34 -> v35: legacy occurrence text is migrated losslessly") {
+  const std::string tmp = make_temp_dir();
+  const std::string path = tmp + "/v34.db";
+  int64_t edge_id = -1;
+  int64_t file_id = -1;
+  {
+    cidx::Storage db(path);
+    const int64_t component = db.add_component("c", "/repo/c");
+    const int64_t directory = db.add_directory(component, "");
+    file_id = db.add_file(directory, "c.cpp");
+    cidx::Symbol caller;
+    caller.usr = "legacy:caller";
+    caller.spelling = "caller";
+    caller.kind = "function";
+    const int64_t caller_id = db.add_symbol(caller);
+    cidx::Symbol target;
+    target.usr = "legacy:callee";
+    target.spelling = "callee";
+    target.kind = "function";
+    const int64_t target_id = db.add_symbol(target);
+    cidx::Symbol type_decl;
+    type_decl.usr = "legacy:type";
+    type_decl.spelling = "Legacy";
+    type_decl.kind = "struct";
+    db.add_symbol(type_decl);
+    cidx::TypeNode type;
+    type.type_key = "record:Legacy";
+    type.spelling = "Legacy";
+    type.kind = cidx::kTypeKindRecord;
+    type.decl_usr = type_decl.usr;
+    db.intern_type_node(type);
+    cidx::Edge occurrence_edge;
+    occurrence_edge.src_id = caller_id;
+    occurrence_edge.dst_id = target_id;
+    occurrence_edge.kind = 1;
+    edge_id = db.add_edge(occurrence_edge);
+
+    cidx::SqliteDb &raw = db.raw_db();
+    auto site = raw.prepare(
+        "INSERT INTO edge_site(edge_id,file_id,line,col,conditional,args_sig,"
+        "recv_src_kind,recv_type_usr,recv_decl_usr,recv_param_pos,"
+        "recv_type_is_value) VALUES (?,?,?,?,?,?,?,?,?,?,?)");
+    site.bind(1, edge_id);
+    site.bind(2, file_id);
+    site.bind(3, int64_t{10});
+    site.bind(4, int64_t{2});
+    site.bind(5, int64_t{0});
+    site.bind(6, std::string_view("legacy"));
+    site.bind(7, std::string_view("local"));
+    site.bind(8, std::string_view("legacy:type"));
+    site.bind(9, std::string_view("legacy:type"));
+    site.bind(10, int64_t{0});
+    site.bind(11, int64_t{1});
+    site.step_done();
+
+    auto arg = raw.prepare(
+        "INSERT INTO call_arg(edge_id,file_id,line,col,position,src_kind,"
+        "type_usr,decl_usr,callee_usr,type_is_value) VALUES "
+        "(?,?,?,?,?,?,?,?,?,?)");
+    arg.bind(1, edge_id);
+    arg.bind(2, file_id);
+    arg.bind(3, int64_t{11});
+    arg.bind(4, int64_t{4});
+    arg.bind(5, int64_t{0});
+    arg.bind(6, std::string_view("local"));
+    arg.bind(7, std::string_view("legacy:missing-type"));
+    arg.bind(8, std::string_view("legacy:missing-decl"));
+    arg.bind(9, std::string_view("legacy:callee"));
+    arg.bind(10, int64_t{0});
+    arg.step_done();
+    raw.exec("UPDATE meta SET value = '34' WHERE key = 'schema_version'");
+  }
+
+  {
+    cidx::Storage db(path);
+    auto site = db.raw_db().prepare(
+        "SELECT recv_src_kind, recv_src_kind_id, recv_type_usr, recv_decl_usr, "
+        "recv_type_id, recv_decl_id "
+        "FROM edge_site");
+    REQUIRE(site.step());
+    CHECK(site.col_is_null(0));
+    CHECK(site.col_int64(1) == 2);
+    CHECK(site.col_is_null(2));
+    CHECK(site.col_is_null(3));
+    CHECK(site.col_int64(4) > 0);
+    CHECK(site.col_int64(5) > 0);
+    auto readable_site = db.raw_db().prepare(
+        "SELECT recv_src_kind, recv_type_usr, recv_decl_usr "
+        "FROM edge_site_read");
+    REQUIRE(readable_site.step());
+    CHECK(readable_site.col_text(0) == "local");
+    CHECK(readable_site.col_text(1) == "legacy:type");
+    CHECK(readable_site.col_text(2) == "legacy:type");
+
+    auto arg = db.raw_db().prepare(
+        "SELECT src_kind, src_kind_id, type_usr, decl_usr, callee_usr, "
+        "type_id, decl_id, callee_id "
+        "FROM call_arg");
+    REQUIRE(arg.step());
+    CHECK(arg.col_is_null(0));
+    CHECK(arg.col_int64(1) == 2);
+    CHECK(arg.col_is_null(2));
+    CHECK(arg.col_is_null(3));
+    CHECK(arg.col_is_null(4));
+    CHECK(arg.col_is_null(5));
+    CHECK(arg.col_is_null(6));
+    CHECK(arg.col_int64(7) > 0);
+    auto readable_arg = db.raw_db().prepare(
+        "SELECT type_usr, decl_usr, callee_usr FROM call_arg_read");
+    REQUIRE(readable_arg.step());
+    CHECK(readable_arg.col_text(0) == "legacy:missing-type");
+    CHECK(readable_arg.col_text(1) == "legacy:missing-decl");
+    CHECK(readable_arg.col_text(2) == "legacy:callee");
+    auto identity_count = db.raw_db().prepare(
+        "SELECT COUNT(*) FROM external_identity WHERE resolution_status = 0");
+    REQUIRE(identity_count.step());
+    CHECK(identity_count.col_int64(0) == 2);
+    auto version = db.raw_db().prepare(
+        "SELECT value FROM meta WHERE key = 'schema_version'");
+    REQUIRE(version.step());
+    CHECK(version.col_text(0) == std::to_string(cidx::kSchemaVersion));
+  }
 }
 
 TEST_CASE("v30 -> v31: include tier tables created, version stamped") {

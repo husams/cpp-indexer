@@ -30,6 +30,39 @@ std::string make_temp_dir() {
   return d;
 }
 
+TEST_CASE("parent_id backfills when parent arrives after child") {
+  cidx::Storage db(":memory:");
+  cidx::Symbol child;
+  child.usr = "late:child";
+  child.spelling = "Child";
+  child.kind = "struct";
+  child.parent_usr = "late:parent";
+  const auto child_id = db.add_symbol(child);
+
+  auto before =
+      db.raw_db().prepare("SELECT parent_id FROM symbol WHERE id = ?");
+  before.bind(1, child_id);
+  REQUIRE(before.step());
+  CHECK(before.col_is_null(0));
+
+  cidx::Symbol parent;
+  parent.usr = "late:parent";
+  parent.spelling = "Parent";
+  parent.kind = "struct";
+  const auto parent_id = db.add_symbol(parent);
+
+  auto after = db.raw_db().prepare("SELECT parent_id FROM symbol WHERE id = ?");
+  after.bind(1, child_id);
+  REQUIRE(after.step());
+  CHECK(after.col_int64(0) == parent_id);
+
+  db.add_symbol(parent);
+  after = db.raw_db().prepare("SELECT parent_id FROM symbol WHERE id = ?");
+  after.bind(1, child_id);
+  REQUIRE(after.step());
+  CHECK(after.col_int64(0) == parent_id);
+}
+
 void makedirs(const std::string &path) {
   std::string cur;
   for (std::size_t i = 0; i <= path.size(); ++i) {
@@ -405,8 +438,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
   // entity_edge_kind; v23 adds repository + clone; v26 adds decl_site; v30 adds
   // the signature/ type tier
   // (type_kind/type_node/type_edge_kind/type_edge/parameter/
-  // symbol_type_kind/symbol_type); v35 adds the manifest-governed artifact
-  // tables and their retention/mapping relations.
+  // symbol_type_kind/symbol_type)
   CHECK(tables == std::set<std::string>{"meta",
                                         "component",
                                         "directory",
@@ -442,16 +474,12 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                         "translation_unit",
                                         "file_config",
                                         "fact_applicability",
+                                        "external_identity",
                                         "include_config",
                                         "include_edge",
                                         "include_directive_kind",
                                         "include_site",
-                                        "include_macro_use",
-                                        "artifact",
-                                        "artifact_relation",
-                                        "artifact_identity_map",
-                                        "artifact_lease",
-                                        "artifact_pin"});
+                                        "include_macro_use"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {
@@ -497,6 +525,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                                    "linkage",
                                                    "access",
                                                    "parent_usr",
+                                                   "parent_id",
                                                    "resolved",
                                                    "multi_def",
                                                    "const_value"});
@@ -514,6 +543,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_symbol_qual",
                                          "idx_symbol_file",
                                          "idx_symbol_parent",
+                                         "idx_symbol_parent_id",
                                          "idx_symbol_kind",
                                          "idx_symbol_spelling_nc",
                                          "idx_symbol_qual_nc",
@@ -531,6 +561,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_possible_call_src",
                                          "idx_possible_call_dst",
                                          "idx_type_node_decl_usr",
+                                         "idx_type_node_decl_id",
                                          "idx_type_node_canonical",
                                          "idx_type_edge_dst",
                                          "idx_parameter_type",
@@ -545,6 +576,13 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_include_edge_config",
                                          "idx_include_site_edge",
                                          "idx_include_macro_use_path",
+                                         "idx_external_identity_symbol",
+                                         "idx_external_identity_type",
+                                         "idx_edge_site_recv_type_identity",
+                                         "idx_edge_site_recv_decl_identity",
+                                         "idx_call_arg_type_identity",
+                                         "idx_call_arg_decl_identity",
+                                         "idx_call_arg_callee_identity",
                                          "idx_artifact_current_logical",
                                          "idx_artifact_state",
                                          "idx_artifact_identity_stable"});
@@ -950,4 +988,216 @@ TEST_CASE(
   CHECK(rows.front().config_id == second_config);
   db.delete_include_configs_for_tu(second_tu);
   CHECK(db.file_configs_for(header).empty());
+}
+
+TEST_CASE("v35 occurrence identities are compact and lossless") {
+  cidx::Storage db(":memory:");
+  const int64_t component = db.add_component("c", "/repo/c");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "c.cpp");
+
+  cidx::Symbol caller;
+  caller.usr = "c:@F@caller";
+  caller.spelling = "caller";
+  caller.kind = "function";
+  const int64_t caller_id = db.add_symbol(caller);
+  cidx::Symbol target;
+  target.usr = "c:@F@target";
+  target.spelling = "target";
+  target.kind = "function";
+  const int64_t target_id = db.add_symbol(target);
+  cidx::Symbol receiver;
+  receiver.usr = "c:@S@Receiver";
+  receiver.spelling = "Receiver";
+  receiver.kind = "struct";
+  const int64_t receiver_id = db.add_symbol(receiver);
+
+  cidx::TypeNode receiver_type;
+  receiver_type.type_key = "record:Receiver";
+  receiver_type.spelling = "Receiver";
+  receiver_type.kind = cidx::kTypeKindRecord;
+  receiver_type.decl_usr = receiver.usr;
+  const int64_t receiver_type_id = db.intern_type_node(receiver_type);
+  cidx::Edge occurrence_edge;
+  occurrence_edge.src_id = caller_id;
+  occurrence_edge.dst_id = target_id;
+  occurrence_edge.kind = 1;
+  const int64_t edge_id = db.add_edge(occurrence_edge);
+
+  cidx::EdgeSite resolved;
+  resolved.edge_id = edge_id;
+  resolved.file_id = file;
+  resolved.line = 10;
+  resolved.col = 2;
+  resolved.recv_src_kind = "local";
+  resolved.recv_type_usr = receiver.usr;
+  resolved.recv_decl_usr = receiver.usr;
+  db.add_edge_site(resolved);
+  resolved.line = 11;
+  db.add_edge_site(resolved);
+
+  auto raw_resolved = db.raw_db().prepare(
+      "SELECT recv_src_kind, recv_src_kind_id, recv_type_usr, recv_decl_usr, "
+      "recv_type_id, recv_decl_id FROM edge_site ORDER BY line");
+  REQUIRE(raw_resolved.step());
+  CHECK(raw_resolved.col_is_null(0));
+  CHECK(raw_resolved.col_int64(1) == 2);
+  CHECK(raw_resolved.col_is_null(2));
+  CHECK(raw_resolved.col_is_null(3));
+  CHECK(raw_resolved.col_int64(4) == receiver_type_id);
+  CHECK(raw_resolved.col_int64(5) == receiver_id);
+  REQUIRE(raw_resolved.step());
+  CHECK(raw_resolved.col_int64(4) == receiver_type_id);
+
+  const auto sites = db.edge_sites_one(edge_id, 10);
+  REQUIRE(sites.size() == 2);
+  CHECK(sites[0].recv_src_kind == std::string("local"));
+  CHECK(sites[0].recv_type_usr == receiver.usr);
+  CHECK(sites[0].recv_decl_usr == receiver.usr);
+
+  cidx::CallArg arg;
+  arg.edge_id = edge_id;
+  arg.file_id = file;
+  arg.line = 20;
+  arg.col = 4;
+  arg.position = 0;
+  arg.src_kind = "local";
+  arg.type_usr = "external:type:Missing";
+  arg.decl_usr = "external:symbol:Missing";
+  arg.callee_usr = target.usr;
+  db.add_call_arg(arg);
+
+  auto raw_arg = db.raw_db().prepare(
+      "SELECT src_kind, src_kind_id, type_usr, decl_usr, callee_usr, "
+      "type_id, decl_id, callee_id, type_identity_id, decl_identity_id, "
+      "callee_identity_id FROM call_arg");
+  REQUIRE(raw_arg.step());
+  CHECK(raw_arg.col_is_null(0));
+  CHECK(raw_arg.col_int64(1) == 2);
+  CHECK(raw_arg.col_is_null(2));
+  CHECK(raw_arg.col_is_null(3));
+  CHECK(raw_arg.col_is_null(4));
+  CHECK(raw_arg.col_is_null(5));
+  CHECK(raw_arg.col_is_null(6));
+  CHECK(raw_arg.col_int64(7) == target_id);
+  CHECK(raw_arg.col_int64(8) > 0);
+  CHECK(raw_arg.col_int64(9) > 0);
+  CHECK(raw_arg.col_is_null(10));
+
+  auto readable = db.raw_db().prepare(
+      "SELECT type_usr, decl_usr, callee_usr FROM call_arg_read");
+  REQUIRE(readable.step());
+  CHECK(readable.col_text(0) == "external:type:Missing");
+  CHECK(readable.col_text(1) == "external:symbol:Missing");
+  CHECK(readable.col_text(2) == target.usr);
+  auto identities = db.raw_db().prepare(
+      "SELECT identity_kind, identity_text, resolution_status "
+      "FROM external_identity ORDER BY identity_kind, identity_text");
+  REQUIRE(identities.step());
+  CHECK(identities.col_int64(0) == 1);
+  CHECK(identities.col_text(1) == "external:type:Missing");
+  CHECK(identities.col_int64(2) == 0);
+  REQUIRE(identities.step());
+  CHECK(identities.col_int64(0) == 2);
+  CHECK(identities.col_text(1) == "external:symbol:Missing");
+  CHECK(identities.col_int64(2) == 0);
+  CHECK_FALSE(identities.step());
+
+  arg.position = 1;
+  arg.line = 21;
+  db.add_call_arg(arg);
+  auto count = db.raw_db().prepare(
+      "SELECT COUNT(*) FROM external_identity WHERE identity_text IN "
+      "('external:type:Missing', 'external:symbol:Missing')");
+  REQUIRE(count.step());
+  CHECK(count.col_int64(0) == 2);
+  arg.src_kind = "not-a-source-kind";
+  CHECK_THROWS_AS(db.add_call_arg(arg), cidx::StorageError);
+}
+
+TEST_CASE("v35 identities reconcile independent of insertion order") {
+  cidx::Storage db(":memory:");
+  const auto component = db.add_component("c", "/repo/c");
+  const auto directory = db.add_directory(component, "");
+  const auto file = db.add_file(directory, "c.cpp");
+
+  cidx::Symbol caller;
+  caller.usr = "future:caller";
+  caller.spelling = "caller";
+  caller.kind = "function";
+  const auto caller_id = db.add_symbol(caller);
+  cidx::Symbol target;
+  target.usr = "future:target";
+  target.spelling = "target";
+  target.kind = "function";
+  const auto target_id = db.add_symbol(target);
+  cidx::Edge edge;
+  edge.src_id = caller_id;
+  edge.dst_id = target_id;
+  edge.kind = 1;
+  const auto edge_id = db.add_edge(edge);
+
+  cidx::EdgeSite site;
+  site.edge_id = edge_id;
+  site.file_id = file;
+  site.line = 10;
+  site.col = 1;
+  site.recv_src_kind = std::nullopt;
+  site.recv_type_usr = "future:type";
+  site.recv_decl_usr = "future:symbol";
+  db.add_edge_site(site);
+  cidx::CallArg arg;
+  arg.edge_id = edge_id;
+  arg.file_id = file;
+  arg.line = 10;
+  arg.col = 1;
+  arg.position = 0;
+  arg.src_kind = "local";
+  arg.type_usr = "future:type";
+  arg.decl_usr = "future:symbol";
+  arg.callee_usr = "future:callee";
+  db.add_call_arg(arg);
+  auto pending = db.raw_db().prepare(
+      "SELECT recv_type_identity_id, recv_decl_identity_id FROM edge_site");
+  REQUIRE(pending.step());
+  CHECK(pending.col_is_null(0) == false);
+  CHECK(pending.col_is_null(1) == false);
+
+  cidx::Symbol late_symbol;
+  late_symbol.usr = "future:symbol";
+  late_symbol.spelling = "symbol";
+  late_symbol.kind = "struct";
+  const auto late_symbol_id = db.add_symbol(late_symbol);
+  cidx::Symbol late_callee;
+  late_callee.usr = "future:callee";
+  late_callee.spelling = "callee";
+  late_callee.kind = "function";
+  const auto late_callee_id = db.add_symbol(late_callee);
+  cidx::TypeNode late_type;
+  late_type.type_key = "record:future:type";
+  late_type.spelling = "Future";
+  late_type.kind = cidx::kTypeKindRecord;
+  late_type.decl_usr = "future:type";
+  const auto late_type_id = db.intern_type_node(late_type);
+
+  auto raw = db.raw_db().prepare(
+      "SELECT recv_src_kind_id, recv_type_id, recv_decl_id FROM edge_site");
+  REQUIRE(raw.step());
+  CHECK(raw.col_is_null(0));
+  CHECK(raw.col_int64(1) == late_type_id);
+  CHECK(raw.col_int64(2) == late_symbol_id);
+  raw = db.raw_db().prepare("SELECT src_kind, src_kind_id, type_id, decl_id, "
+                            "callee_id FROM call_arg");
+  REQUIRE(raw.step());
+  CHECK(raw.col_is_null(0));
+  CHECK(raw.col_int64(1) == 2);
+  CHECK(raw.col_int64(2) == late_type_id);
+  CHECK(raw.col_int64(3) == late_symbol_id);
+  CHECK(raw.col_int64(4) == late_callee_id);
+  auto unresolved = db.raw_db().prepare(
+      "SELECT COUNT(*) FROM external_identity WHERE identity_text IN "
+      "('future:type','future:symbol','future:callee') AND resolution_status = "
+      "0");
+  REQUIRE(unresolved.step());
+  CHECK(unresolved.col_int64(0) == 0);
 }
