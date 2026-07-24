@@ -26,6 +26,16 @@ def test_storage_m3_report_schema_and_gate_pass():
         (REPORT.parent / "report.schema.json").read_text(encoding="utf-8")
     )
     assert schema["properties"]["report_version"]["const"] == report["report_version"]
+    assert (
+        schema["properties"]["authoritative_store"]["properties"]["engine"]["const"]
+        == "SQLite"
+    )
+    assert (
+        "required_failed_slo"
+        in schema["properties"]["comparison"]["properties"]["custom_store_gate"][
+            "required"
+        ]
+    )
     result = validate_report(report, ROOT)
     assert result["status"] == "pass", result
     assert result["failed_slos"] == []
@@ -47,6 +57,50 @@ def test_gate_requires_projection_metadata_and_no_mandatory_service():
     broken = copy.deepcopy(report)
     broken["candidates"][1]["execution"]["mandatory_service"] = True
     assert validate_report(broken, ROOT)["status"] == "fail"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "check_id"),
+    [
+        ("engine", "Neo4j", "authority.engine"),
+        ("role", "secondary graph store", "authority.role"),
+        ("schema_version", 35, "authority.schema"),
+    ],
+)
+def test_gate_rejects_non_sqlite_authority_contract(field, value, check_id):
+    report = json.loads(REPORT.read_text(encoding="utf-8"))
+    broken = copy.deepcopy(report)
+    broken["authoritative_store"][field] = value
+    result = validate_report(broken, ROOT)
+    assert result["status"] == "fail"
+    assert (
+        next(check for check in result["checks"] if check["id"] == check_id)["status"]
+        == "fail"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("required_failed_slo", False),
+        ("required_alternatives", []),
+        ("required_costs", []),
+    ],
+)
+def test_gate_rejects_missing_custom_store_prerequisite(field, value):
+    report = json.loads(REPORT.read_text(encoding="utf-8"))
+    broken = copy.deepcopy(report)
+    broken["comparison"]["custom_store_gate"][field] = value
+    result = validate_report(broken, ROOT)
+    assert result["status"] == "fail"
+    assert (
+        next(
+            check
+            for check in result["checks"]
+            if check["id"] == f"custom_store_gate.{field.removeprefix('required_')}"
+        )["status"]
+        == "fail"
+    )
 
 
 @pytest.mark.parametrize(

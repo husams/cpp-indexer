@@ -41,6 +41,13 @@ REQUIRED_PROJECTION_CONTRACT = {
     "ordering",
     "fallback",
 }
+REQUIRED_AUTHORITY_ENGINE = "SQLite"
+REQUIRED_AUTHORITY_ROLE = (
+    "authoritative source of semantic facts and projection metadata"
+)
+REQUIRED_AUTHORITY_SCHEMA = 34
+REQUIRED_CUSTOM_STORE_ALTERNATIVES = {"schema_tuning", "derived_accelerator"}
+REQUIRED_CUSTOM_STORE_COSTS = {"engineering", "compatibility", "operations"}
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -198,6 +205,24 @@ def validate_report(report: dict[str, Any], root: Path) -> dict[str, Any]:
     _check(checks, "report.issue", report.get("source_issue") == "HSE-81")
 
     authority = report.get("authoritative_store", {})
+    _check(
+        checks,
+        "authority.engine",
+        isinstance(authority, dict)
+        and authority.get("engine") == REQUIRED_AUTHORITY_ENGINE,
+    )
+    _check(
+        checks,
+        "authority.role",
+        isinstance(authority, dict)
+        and authority.get("role") == REQUIRED_AUTHORITY_ROLE,
+    )
+    _check(
+        checks,
+        "authority.schema",
+        isinstance(authority, dict)
+        and authority.get("schema_version") == REQUIRED_AUTHORITY_SCHEMA,
+    )
     baseline = report.get("baseline", {})
     result_path = _path(root, authority.get("result_artifact", ""))
     profile_path = _path(root, authority.get("profile_artifact", ""))
@@ -283,6 +308,27 @@ def validate_report(report: dict[str, Any], root: Path) -> dict[str, Any]:
         checks,
         "comparison.projection_contract",
         REQUIRED_PROJECTION_CONTRACT <= contract.keys(),
+    )
+    custom_store_gate = comparison.get("custom_store_gate", {})
+    _check(
+        checks,
+        "custom_store_gate.failed_slo",
+        isinstance(custom_store_gate, dict)
+        and custom_store_gate.get("required_failed_slo") is True,
+    )
+    _check(
+        checks,
+        "custom_store_gate.alternatives",
+        isinstance(custom_store_gate, dict)
+        and set(custom_store_gate.get("required_alternatives", []))
+        == REQUIRED_CUSTOM_STORE_ALTERNATIVES,
+    )
+    _check(
+        checks,
+        "custom_store_gate.costs",
+        isinstance(custom_store_gate, dict)
+        and set(custom_store_gate.get("required_costs", []))
+        == REQUIRED_CUSTOM_STORE_COSTS,
     )
 
     lifecycle = report.get("lifecycle_evidence", {})

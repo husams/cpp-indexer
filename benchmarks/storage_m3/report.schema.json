@@ -16,10 +16,32 @@
   "properties": {
     "report_version": {"const": "storage-m3/evaluation-v1"},
     "source_issue": {"const": "HSE-81"},
-    "authoritative_store": {"type": "object"},
+    "authoritative_store": {
+      "type": "object",
+      "required": ["engine", "schema_version", "role", "result_artifact", "summary_artifact", "profile_artifact"],
+      "properties": {
+        "engine": {"const": "SQLite"},
+        "schema_version": {"const": 34},
+        "role": {"const": "authoritative source of semantic facts and projection metadata"}
+      }
+    },
     "baseline": {"type": "object"},
     "candidates": {"type": "array", "minItems": 3},
-    "comparison": {"type": "object"},
+    "comparison": {
+      "type": "object",
+      "required": ["end_to_end_cost_dimensions", "projection_contract", "custom_store_gate"],
+      "properties": {
+        "custom_store_gate": {
+          "type": "object",
+          "required": ["required_failed_slo", "required_alternatives", "required_costs"],
+          "properties": {
+            "required_failed_slo": {"const": true},
+            "required_alternatives": {"contains": {"const": "schema_tuning"}},
+            "required_costs": {"contains": {"const": "engineering"}}
+          }
+        }
+      }
+    },
     "lifecycle_evidence": {"type": "object"},
     "decision": {"type": "object"}
   }
