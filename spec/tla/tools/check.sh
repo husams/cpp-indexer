@@ -4,6 +4,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL_DIR="${TLA_MODEL_DIR:-$ROOT/models}"
+MODULE_DIR="${TLA_MODULE_DIR:-$ROOT/modules}"
+PROTECTED_DIR="${TLA_PROTECTED_DIR:-$ROOT/protected}"
+MODEL_SOURCE_DIR="${TLA_MODEL_SOURCE_DIR:-$ROOT/models}"
 TOOLS_VERSION="1.8.0"
 TOOLS_URL="https://github.com/tlaplus/tlaplus/releases/download/v${TOOLS_VERSION}/tla2tools.jar"
 TOOLS_SHA256="cc4803dce2a8ffaf0f5920a9dc39df4b5ee34ab4cb53fb58ac557277a7e516b3"
@@ -47,9 +50,9 @@ trap 'rm -rf "$WORK"' EXIT
 
 # TLC resolves EXTENDS modules beside the root module.  Flatten only into a
 # disposable directory; no generated or protected repository file is changed.
-cp "$ROOT"/modules/*.tla "$WORK"/
-cp "$ROOT"/protected/*.tla "$WORK"/
-cp "$ROOT"/models/*.tla "$WORK"/
+cp "$MODULE_DIR"/*.tla "$WORK"/
+cp "$PROTECTED_DIR"/*.tla "$WORK"/
+cp "$MODEL_SOURCE_DIR"/*.tla "$WORK"/
 
 required_invariants() {
   case "$1" in
@@ -66,6 +69,60 @@ required_invariants() {
         SharedStatusInvariant \
         TrustedOutcomeInvariant
       ;;
+    CidxWorkspaceLifecycleSmoke)
+      printf '%s\n' \
+        LifecycleTypeInvariant \
+        WorkspaceContainmentInvariant \
+        ScopedSymbolIdentityInvariant \
+        ConfigurationApplicabilityInvariant \
+        NoPartialPublicationInvariant \
+        GenerationPublicationInvariant \
+        FailedGenerationInvariant \
+        InvalidationInvariant \
+        ReadHonestyInvariant \
+        ProtectedInvariant
+      ;;
+    CidxBehaviorSmoke)
+      printf '%s\n' \
+        TypeInvariant \
+        NoPartialGenerationInvariant \
+        AtomicPublicationInvariant \
+        InvalidationInvariant \
+        FailureHonestyInvariant \
+        QueryHonestyInvariant \
+        MigrationInvariant \
+        IdentityInvariant \
+        GraphInvariant \
+        QueryPlanInvariant \
+        IncludeHygieneInvariant \
+        TraceInvariant \
+        BoundedProgressInvariant \
+        ProtectedInvariant
+      ;;
+    *)
+      echo "TLA_CONFIG_STATUS=FAIL reason=unknown-model-$1" >&2
+      exit 25
+      ;;
+  esac
+}
+
+required_properties() {
+  case "$1" in
+    CidxRepositorySmoke|CidxResultSmoke)
+      printf '%s\n' Fairness
+      ;;
+    CidxWorkspaceLifecycleSmoke)
+      printf '%s\n' RebuildEventuallySettles
+      ;;
+    CidxBehaviorSmoke)
+      printf '%s\n' \
+        IndexingLiveness \
+        PublicationLiveness \
+        QueryLiveness \
+        RecoveryLiveness \
+        TransformLiveness \
+        IncludePlanLiveness
+      ;;
     *)
       echo "TLA_CONFIG_STATUS=FAIL reason=unknown-model-$1" >&2
       exit 25
@@ -79,6 +136,8 @@ run_model() {
   local cfg="$MODEL_DIR/${model}.cfg"
   local required_file="$WORK/${model}.required-invariants"
   local actual_file="$WORK/${model}.actual-invariants"
+  local required_properties_file="$WORK/${model}.required-properties"
+  local actual_properties_file="$WORK/${model}.actual-properties"
   local syntax_log="$WORK/${model}.syntax.log"
   local tlc_log="$WORK/${model}.tlc.log"
 
@@ -89,6 +148,17 @@ run_model() {
     cat "$WORK/${model}.invariants.diff" >&2
     exit 25
   fi
+  echo "TLA_INVARIANT_STATUS=PASS model=$model invariants=$(paste -sd, "$actual_file")"
+
+  required_properties "$model" | LC_ALL=C sort >"$required_properties_file"
+  awk '$1 == "PROPERTY" { print $2 }' "$cfg" | LC_ALL=C sort >"$actual_properties_file"
+  if ! diff -u "$required_properties_file" "$actual_properties_file" \
+      >"$WORK/${model}.properties.diff"; then
+    echo "TLA_CONFIG_STATUS=FAIL model=$model reason=property-mismatch" >&2
+    cat "$WORK/${model}.properties.diff" >&2
+    exit 25
+  fi
+  echo "TLA_LIVENESS_STATUS=PASS model=$model properties=$(paste -sd, "$actual_properties_file")"
 
   if ! (cd "$WORK" && "$JAVA_BIN" -cp "$JAR" tla2sany.SANY "$spec") >"$syntax_log" 2>&1; then
     echo "TLA_SYNTAX_STATUS=FAIL model=$model" >&2
@@ -100,6 +170,7 @@ run_model() {
   if ! (cd "$WORK" && "$JAVA_BIN" -jar "$JAR" \
       -workers 1 \
       -fp 0 \
+      -seed 1 \
       -nowarning \
       -metadir "$WORK/meta-${model}" \
       -config "$cfg" \
@@ -118,8 +189,9 @@ run_model() {
   echo "TLA_MODEL_STATUS=PASS model=$model invariants=$invariants"
 }
 
-run_model CidxRepositorySmoke
-run_model CidxResultSmoke
+for model in ${TLA_MODELS:-CidxRepositorySmoke CidxResultSmoke CidxWorkspaceLifecycleSmoke CidxBehaviorSmoke}; do
+  run_model "$model"
+done
 
 echo "TLA_TOOLCHAIN_STATUS=PASS version=$TOOLS_VERSION java=17"
-echo "TLA_CHECK_STATUS=PASS models=CidxRepositorySmoke,CidxResultSmoke workers=1 fingerprint=0"
+echo "TLA_CHECK_STATUS=PASS models=${TLA_MODELS:-CidxRepositorySmoke,CidxResultSmoke,CidxWorkspaceLifecycleSmoke,CidxBehaviorSmoke} workers=1 fingerprint=0 seed=1"

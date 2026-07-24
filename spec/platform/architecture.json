@@ -1,0 +1,96 @@
+{
+  "format_version": 1,
+  "status": "accepted",
+  "owner": "HSE-57",
+  "layers": [
+    {"id": "foundation", "purpose": "Small reusable platform utilities and environmental adapters.", "depends_on": ["model"]},
+    {"id": "workspace", "purpose": "Repositories, source revisions, build inputs, and immutable workspace snapshots.", "depends_on": ["foundation", "model"]},
+    {"id": "frontend", "purpose": "Frontend-neutral session ports and Clang/LLVM adapters.", "depends_on": ["workspace", "foundation", "model"]},
+    {"id": "extraction", "purpose": "Registered core and extension extraction passes that emit typed facts and evidence.", "depends_on": ["frontend", "workspace", "foundation", "model"]},
+    {"id": "model", "purpose": "Stable identities, catalogs, facts, evidence, completeness, trust, and artifact values.", "depends_on": []},
+    {"id": "persistence", "purpose": "Focused store ports and SQLite schema, migration, and transaction adapters.", "depends_on": ["workspace", "frontend", "foundation", "model"]},
+    {"id": "derivation", "purpose": "Named transforms and analysis runners that derive versioned artifacts from fact sets.", "depends_on": ["extraction", "frontend", "workspace", "foundation", "model", "persistence", "query"]},
+    {"id": "query", "purpose": "QueryPlan/CXQ navigation, bounded results, explanations, and read adapters.", "depends_on": ["persistence", "foundation", "model"]},
+    {"id": "proof", "purpose": "Effect, proof, replay, and solver-evidence orchestration over shared contracts.", "depends_on": ["workspace", "model", "derivation", "query"]},
+    {"id": "product", "purpose": "Application services, CLI, SDK, agent, IDE, and compatibility surfaces.", "depends_on": ["workspace", "frontend", "extraction", "derivation", "persistence", "query", "foundation", "model", "proof"]}
+  ],
+  "module_layer_mapping": {
+    "model.contracts": "model",
+    "foundation.util": "foundation",
+    "workspace.toolchain": "workspace",
+    "frontend.compiledb": "frontend",
+    "extraction.ast": "extraction",
+    "analysis.astgraph": "derivation",
+    "persistence.sqlite": "persistence",
+    "analysis.graph": "query",
+    "query.plan": "query",
+    "refactor.include-hygiene": "derivation",
+    "analysis.diff": "derivation",
+    "product.cli": "product",
+    "compat.core-bundle": "product",
+    "sdk.python": "product",
+    "sdk.python.compat": "product",
+    "analysis.souffle-rules": "derivation"
+  },
+  "external_ownership": {
+    "clang": ["frontend", "extraction"],
+    "llvm": ["frontend", "extraction"],
+    "sqlite": ["persistence"],
+    "filesystem": ["workspace", "persistence"],
+    "process": ["workspace", "derivation"],
+    "cli": ["product"]
+  },
+  "forbidden_dependencies": {
+    "model": ["clang", "llvm", "sqlite", "cli", "filesystem", "process"],
+    "public_artifacts": ["clang", "llvm", "sqlite", "cli", "filesystem", "process"],
+    "query": ["clang", "llvm", "sqlite", "process"],
+    "proof": ["clang", "llvm", "sqlite", "cli"]
+  },
+  "translation_unit_consumers": ["indexing", "astgraph", "diff", "include-validation", "proof-preparation"],
+  "ports": [
+    {"id": "WorkspaceSnapshot", "owner": "workspace", "kind": "immutable-input"},
+    {"id": "TranslationUnitDescriptor", "owner": "workspace", "kind": "immutable-input"},
+    {"id": "FrontendSessionFactory", "owner": "frontend", "kind": "service-port"},
+    {"id": "ExtractionPassRegistry", "owner": "extraction", "kind": "registry"},
+    {"id": "FactEmitter", "owner": "model", "kind": "emission-port"},
+    {"id": "EvidenceEmitter", "owner": "model", "kind": "emission-port"},
+    {"id": "WorkspaceStore", "owner": "persistence", "kind": "store-port"},
+    {"id": "SourceStore", "owner": "persistence", "kind": "store-port"},
+    {"id": "SymbolStore", "owner": "persistence", "kind": "store-port"},
+    {"id": "TypeStore", "owner": "persistence", "kind": "store-port"},
+    {"id": "FactStore", "owner": "persistence", "kind": "store-port"},
+    {"id": "EvidenceStore", "owner": "persistence", "kind": "store-port"},
+    {"id": "AnalysisArtifactStore", "owner": "persistence", "kind": "store-port"},
+    {"id": "ProofArtifactStore", "owner": "persistence", "kind": "store-port"},
+    {"id": "TransformRegistry", "owner": "derivation", "kind": "registry"},
+    {"id": "AnalysisEngine", "owner": "derivation", "kind": "service-port"},
+    {"id": "QueryPlan", "owner": "query", "kind": "read-algebra"},
+    {"id": "ApplicationContext", "owner": "product", "kind": "service-context"}
+  ],
+  "artifact_contract": {
+    "required_fields": ["identity", "source_revision", "configuration_identity", "producer", "producer_version", "schema_version", "catalog_version", "status", "completeness", "evidence", "freshness", "diagnostics", "budgets"],
+    "status_values": ["complete", "partial", "unknown", "error"],
+    "evidence_values": ["source", "derived", "inferred", "runtime", "assumption", "proof"],
+    "default_storage": "content-addressed-artifact",
+    "core_promotion": "schema-and-compatibility-review"
+  },
+  "extension_surfaces": [
+    {"id": "cxq", "input": "declared fact sets", "output": "bounded result or explanation", "read_only": true, "execution": "QueryPlan operations"},
+    {"id": "extraction-plan", "input": "typed Clang AST session", "output": "namespaced preview facts and evidence", "read_only": true, "execution": "sandboxed declarative matcher plan"},
+    {"id": "analysis-package", "input": "versioned semantic, raw-AST, or extension fact sets", "output": "versioned derived facts or result artifact", "read_only": true, "execution": "registered analysis engine"}
+  ],
+  "forbidden_extension_behaviors": ["arbitrary native callbacks", "shared-library loading", "shell execution", "arbitrary SQL", "filesystem writes", "overwriting core facts"],
+  "ownership": {
+    "cpp_core": "Clang frontend, core extraction, persistence adapter, built-in transforms, and product services",
+    "python_sdk": "QueryPlan/CXQ builders, artifact/result models, read client, and notebook conveniences",
+    "generated_contracts": "Versions, catalogs, schemas, status/error codes, and golden vectors",
+    "parity_rule": "Cross-language parity is required only for rows explicitly marked as shared generated contracts"
+  },
+  "delivery": [
+    {"milestone": "M0", "issues": ["HSE-58", "HSE-59", "HSE-60"], "outcome": "architecture and shared contracts"},
+    {"milestone": "M1", "issues": ["HSE-61", "HSE-62", "HSE-63"], "outcome": "workspace, frontend, persistence, and extraction ports"},
+    {"milestone": "M2", "issues": ["HSE-64", "HSE-65", "HSE-66", "HSE-67"], "outcome": "extension and derivation SDK"},
+    {"milestone": "M3", "issues": ["HSE-68", "HSE-69", "HSE-70"], "outcome": "application, CLI, query, and result surfaces"},
+    {"milestone": "M4", "issues": ["HSE-71", "HSE-72", "HSE-73"], "outcome": "self-hosting, qualification, and compatibility gates"}
+  ]
+}

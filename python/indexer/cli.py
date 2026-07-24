@@ -47,6 +47,19 @@ if __package__ in (None, ""):  # direct execution
         NoEdgesError,
         NoIndexError,
     )
+    from indexer.extensions import (  # noqa: E402
+        CompositeRegistry,
+        PackageDependency,
+        PackagePolicy,
+        PackageRegistry,
+        PackageResolver,
+        PackageError,
+        Lockfile,
+        ConformanceSDK,
+        load_conformance_cases,
+        pack_package,
+        validate_package,
+    )
     from indexer.utils import (  # noqa: E402
         git_remote_url,
         git_root,
@@ -61,6 +74,19 @@ else:
     from . import astcmd, compiledb, pathx, souffle
     from .clang import ClangParseError, index_source
     from .query import EDGE_KINDS, GraphQuery, NoEdgesError, NoIndexError
+    from .extensions import (
+        CompositeRegistry,
+        PackageDependency,
+        PackagePolicy,
+        PackageRegistry,
+        PackageResolver,
+        PackageError,
+        Lockfile,
+        ConformanceSDK,
+        load_conformance_cases,
+        pack_package,
+        validate_package,
+    )
     from .utils import (
         git_remote_url,
         git_root,
@@ -2050,6 +2076,68 @@ def cmd_analyze(args) -> int:
         return 1
 
 
+def _package_requirement(value: str) -> PackageDependency:
+    if "@" not in value:
+        return PackageDependency(value)
+    name, requirement = value.rsplit("@", 1)
+    if not name or not requirement:
+        raise PackageError(f"invalid package requirement: {value}")
+    return PackageDependency(name, requirement)
+
+
+def _package_policy(args) -> PackagePolicy:
+    return PackagePolicy.read(args.policy) if getattr(args, "policy", None) else PackagePolicy.local_development()
+
+
+def cmd_package(args) -> int:
+    """Validate, inspect, pack, lock, and conformance-test data packages."""
+    try:
+        if args.package_action in {"validate", "inspect"}:
+            manifest = validate_package(args.path)
+            print(json.dumps(manifest.as_dict(), indent=2, sort_keys=True))
+            return 0
+        if args.package_action == "pack":
+            manifest = pack_package(args.path, args.output)
+            print(json.dumps({"package": manifest.name, "version": manifest.version,
+                              "content_hash": manifest.content_hash, "output": os.path.abspath(args.output)},
+                             indent=2, sort_keys=True))
+            return 0
+        if args.package_action == "lock":
+            policy = _package_policy(args)
+            registries = [PackageRegistry(path, policy=policy) for path in args.registry]
+            resolver = PackageResolver(CompositeRegistry(registries), policy=policy)
+            lock = resolver.resolve(_package_requirement(item) for item in args.require)
+            lock.write(args.output)
+            print(json.dumps({"lock_hash": lock.lock_hash, "packages": len(lock.packages),
+                              "output": os.path.abspath(args.output)}, indent=2, sort_keys=True))
+            return 0
+        if args.package_action == "verify":
+            policy = _package_policy(args)
+            lock = Lockfile.read(args.lockfile)
+            resolver = PackageResolver(
+                CompositeRegistry([PackageRegistry(path, policy=policy) for path in args.registry]),
+                policy=policy,
+            )
+            resolver.verify_lock(lock)
+            print(json.dumps({"lock_hash": lock.lock_hash, "packages": len(lock.packages), "status": "valid"},
+                             indent=2, sort_keys=True))
+            return 0
+        if args.package_action == "conformance":
+            policy = _package_policy(args)
+            resolver = PackageResolver(
+                CompositeRegistry([PackageRegistry(path, policy=policy) for path in args.registry]),
+                policy=policy,
+            )
+            results = ConformanceSDK(resolver).run(load_conformance_cases(args.cases))
+            print(json.dumps({"cases": results, "status": "passed" if all(item["status"] == "passed" for item in results) else "failed"},
+                             indent=2, sort_keys=True))
+            return 0 if all(item["status"] == "passed" for item in results) else 1
+    except (PackageError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 2
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="cidx", description="cidx command-line skeleton")
     ap.add_argument("--version", action="version", version=f"cidx {VERSION}")
@@ -2188,6 +2276,45 @@ def main(argv=None) -> int:
     )
     _db_arg(p)
     p.set_defaults(fn=cmd_analyze)
+
+    # -- package: versioned declarative extension SDK -------------------------
+    p = sub.add_parser(
+        "package",
+        help="validate, pack, resolve, verify, and conformance-test extension packages",
+    )
+    psub = p.add_subparsers(dest="package_action", required=True)
+
+    q = psub.add_parser("validate", help="validate a package and its content hash")
+    q.add_argument("path", metavar="PACKAGE_DIR")
+    q.set_defaults(fn=cmd_package)
+
+    q = psub.add_parser("inspect", help="print a validated package manifest")
+    q.add_argument("path", metavar="PACKAGE_DIR")
+    q.set_defaults(fn=cmd_package)
+
+    q = psub.add_parser("pack", help="create a deterministic package archive")
+    q.add_argument("path", metavar="PACKAGE_DIR")
+    q.add_argument("--output", required=True, metavar="ARCHIVE")
+    q.set_defaults(fn=cmd_package)
+
+    q = psub.add_parser("lock", help="resolve package requirements into a lockfile")
+    q.add_argument("--require", action="append", required=True, metavar="NAME[@RANGE]")
+    q.add_argument("--registry", action="append", required=True, metavar="DIR")
+    q.add_argument("--output", required=True, metavar="LOCKFILE")
+    q.add_argument("--policy", metavar="POLICY_JSON")
+    q.set_defaults(fn=cmd_package)
+
+    q = psub.add_parser("verify", help="verify a lockfile against materialized registries")
+    q.add_argument("lockfile", metavar="LOCKFILE")
+    q.add_argument("--registry", action="append", required=True, metavar="DIR")
+    q.add_argument("--policy", metavar="POLICY_JSON")
+    q.set_defaults(fn=cmd_package)
+
+    q = psub.add_parser("conformance", help="run declarative package conformance cases")
+    q.add_argument("cases", metavar="CASES_JSON")
+    q.add_argument("--registry", action="append", required=True, metavar="DIR")
+    q.add_argument("--policy", metavar="POLICY_JSON")
+    q.set_defaults(fn=cmd_package)
 
     # -- db: migrate / verify --------------------------------------------------
     p = sub.add_parser("db", help="database maintenance (migrate, verify)")

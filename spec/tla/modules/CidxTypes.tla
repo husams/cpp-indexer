@@ -41,6 +41,23 @@ ArtifactKinds == {"index", "graph", "result", "diagnostic"}
 QueryKinds == {"search", "navigation", "impact", "verification"}
 TrustLevels == {"observed", "derived", "trusted-assumption"}
 
+(* Lifecycle states are shared by workspace, storage, and transform models. *)
+GenerationStatuses == {
+    "imported",
+    "capturing",
+    "extracting",
+    "validating",
+    "published",
+    "current",
+    "stale",
+    "failed",
+    "retired"
+}
+
+ReadStatuses == {"current", "stale", "partial", "unavailable"}
+
+InvalidationKinds == {"source", "configuration", "toolchain", "catalog"}
+
 (* One definition, reused by every later specification module. *)
 ResultStatuses == {
     "suggested",
@@ -51,6 +68,30 @@ ResultStatuses == {
     "refuted",
     "unknown"
 }
+
+(* Observable lifecycle and result domains shared by the behavioral models. *)
+WorkspaceStates == {"empty", "imported", "captured"}
+ConfigurationStates == {"uncaptured", "captured"}
+IndexStates == {"empty", "indexing", "indexed", "current", "stale", "failed"}
+PublicationStates == {"none", "candidate", "current", "stale"}
+TransformStates == {"idle", "planned", "applied", "failed"}
+QueryStates == {"idle", "running", "complete"}
+StorageStates == {"ready", "migrating", "recovery-required"}
+ArtifactStates == {"none", "published", "derived"}
+FailureModes == {"none", "index-failure", "interrupted", "incomplete-evidence"}
+EvidenceStates == {"complete", "incomplete"}
+QueryResultStates == {"none", "complete", "partial", "ambiguous", "unknown"}
+IdentityModes == {"separate", "merged"}
+GraphStates == {"empty", "published", "stale"}
+GraphEvidenceStates == {"none", "owned"}
+GraphTargetStates == {"none", "known", "unknown-retained"}
+GraphConfigurationStates == {"unbound", "exact", "stale"}
+QueryPlanStates == {"absent", "validated", "executing", "returned"}
+QueryStreamShapes == {"none", "set", "path"}
+QueryViewStates == {"none", "safe", "unsafe"}
+IncludePlanStates == {"none", "planned", "validated", "applied", "rejected"}
+IncludeConfigurationStates == {"none", "exact", "mismatch"}
+IncludeEditStates == {"none", "unchanged", "changed"}
 
 ElementIds == WorkspaceIds
     \cup RepositoryIds

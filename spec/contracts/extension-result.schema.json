@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cidx.dev/spec/contracts/extension-result.schema.json",
+  "title": "CIDX extension result provenance",
+  "type": "object",
+  "required": ["package", "entry_point", "input_fact_sets", "sandbox_profile", "applicability", "lock_hash", "evidence"],
+  "properties": {
+    "package": {
+      "type": "object",
+      "required": ["name", "version", "hash"],
+      "properties": {
+        "name": {"type": "string"},
+        "version": {"type": "string"},
+        "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "entry_point": {"type": "string", "minLength": 1},
+    "input_fact_sets": {"type": "array", "items": {"type": "string"}},
+    "sandbox_profile": {"type": "string", "minLength": 1},
+    "applicability": {"type": "object"},
+    "lock_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "evidence": {"const": "extension-analysis"}
+  },
+  "additionalProperties": false
+}

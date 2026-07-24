@@ -23,8 +23,9 @@ namespace cidx::cli {
 inline constexpr const char *kVersion = version::kProductVersion.data();
 
 struct ParsedArgs {
-  std::string command; // add-source | import | index | search | show | list
-  std::string what;    // show: symbol|file; list: components|dirs|files|symbols
+  std::string
+      command; // add-source | import | index | search | query | show | list
+  std::string what; // show: symbol|file; list: components|dirs|files|symbols
 
   // -h/--help anywhere: when set, print to stdout and exit 0 (argparse).
   std::optional<std::string> help_text;
@@ -57,6 +58,9 @@ struct ParsedArgs {
   bool no_graph = false;                  // index --no-graph
   std::vector<std::string> assignment;    // set FIELD=VALUE [FIELD=VALUE ...]
   std::optional<std::string> index_db; // set/file/dump-cc --db (index override)
+  std::string query_text;              // query CXQ expression (required)
+  bool query_json = false;             // query --json (machine-readable result)
+  bool query_explain = false;          // query --explain (plan only)
   std::string target;                  // file: target path or COMPONENT://PATH
   std::vector<std::string> op;         // file OP ... (REMAINDER tail)
 

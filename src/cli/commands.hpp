@@ -35,6 +35,7 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx);
 int cmd_import(const ParsedArgs &args, Context &ctx);
 int cmd_index(const ParsedArgs &args, Context &ctx);
 int cmd_search(const ParsedArgs &args, Context &ctx);
+int cmd_query(const ParsedArgs &args, Context &ctx);
 int cmd_show_symbol(const ParsedArgs &args, Context &ctx);
 int cmd_show_file(const ParsedArgs &args, Context &ctx);
 int cmd_list_components(const ParsedArgs &args, Context &ctx);
