@@ -419,7 +419,7 @@ TEST_CASE("storage smoke (port of _storage_smoke.py)") {
   }
 }
 
-TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
+TEST_CASE("fresh Storage produces schema v38 (file-backed and :memory:)") {
   // :memory: exercises the skip-mkdir branch; raw_db() lets us assert the
   // schema shape on the same connection.
   cidx::Storage db(":memory:");
@@ -439,6 +439,7 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
   // the signature/ type tier
   // (type_kind/type_node/type_edge_kind/type_edge/parameter/
   // symbol_type_kind/symbol_type)
+  // v38 adds the manifest-governed artifact tables.
   CHECK(tables == std::set<std::string>{"meta",
                                         "component",
                                         "directory",
@@ -479,7 +480,12 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                         "include_edge",
                                         "include_directive_kind",
                                         "include_site",
-                                        "include_macro_use"});
+                                        "include_macro_use",
+                                        "artifact",
+                                        "artifact_relation",
+                                        "artifact_identity_map",
+                                        "artifact_lease",
+                                        "artifact_pin"});
 
   // columns, in declared order (byte-compatible v6 layout)
   const auto cols = [&raw](const char *table) {

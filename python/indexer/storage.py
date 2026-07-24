@@ -42,13 +42,13 @@ from indexer.generated_catalog import (
     SYMBOL_KIND_IDS as _GENERATED_SYMBOL_KIND_IDS,
 )
 
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 PREVIOUS_SCHEMA_VERSION = SCHEMA_VERSION - 1
 
-# HSE-76 is the only supported predecessor for the HSE-77 storage migration.
+# HSE-77 is the only supported predecessor for the HSE-79 storage migration.
 # Keep this explicit so an unrelated semantic catalog is never silently
 # accepted merely because the database is writable.
-PREVIOUS_CATALOG_HASH = "15e7ce8206c521cff6794530a382f0389320c0f3e49d148b0f311d058aa5157a"
+PREVIOUS_CATALOG_HASH = "be3a97cf69140080586a079a27a97da7816455f477ce56435ee91c600cc993fc"
 
 
 def _catalog_hash(conn: sqlite3.Connection) -> Optional[str]:
@@ -2948,9 +2948,10 @@ class Storage:
             if legacy_hashes.rowcount > 0:
                 changed = True
         if "artifact" not in tables:
-            # v34 -> v35: manifest metadata for immutable/rebuildable
-            # sidecars. The schema script creates the tables after migrate;
-            # this probe only advances the compatibility version.
+            # v37 -> v38: add the manifest-governed artifact tables. The schema
+            # script creates the tables after migrate; this probe only advances
+            # the compatibility version. Older artifact-less databases follow
+            # the same ordered upgrade path.
             changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates

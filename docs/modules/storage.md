@@ -18,7 +18,7 @@ by both indexing engines, and the resolve pass. ~5.5k LOC.
 
 ### `Storage` (`storage.hpp:61`)
 
-Owns the connection and creates/migrates the DB to `schema_version = 36`. It is
+Owns the connection and creates/migrates the DB to `schema_version = 38`. It is
 the write surface both engines use, plus the read surface for lookups. Key
 groups:
 
@@ -84,7 +84,7 @@ products:
 (`resolved = 0 AND file_id IS NULL AND decl_file_id IS NULL`) and returns that
  count for the `resolve: N still-stub …` line.
 
-## Manifest-governed sidecars (schema v36)
+## Manifest-governed sidecars (schema v38)
 
 `index.db` remains the authoritative identity store. Immutable or rebuildable
 artifacts such as AST graphs, extension facts, proof caches, and accelerators

@@ -1,6 +1,7 @@
 import sqlite3
 
 from indexer.storage import (
+    SCHEMA_VERSION,
     Storage,
     Symbol,
     FileConfigApplicability,
@@ -117,7 +118,7 @@ def test_v34_include_row_migrates_to_shared_config_identity(tmp_path):
     migrated = Storage(str(path))
     assert migrated._conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()[0] == "37"
+    ).fetchone()[0] == str(SCHEMA_VERSION)
     assert migrated._conn.execute(
         "SELECT COUNT(*) FROM translation_unit_config"
     ).fetchone()[0] == 1

@@ -52,10 +52,10 @@ def test_v34_database_gets_artifact_tables_and_version_bump(tmp_path):
     db.close()
 
     migrated = Storage(str(path))
-    assert SCHEMA_VERSION == 36
+    assert SCHEMA_VERSION == 38
     assert migrated._conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()[0] == "36"
+    ).fetchone()[0] == "38"
     tables = {
         row[0]
         for row in migrated._conn.execute(
@@ -113,3 +113,34 @@ def test_v35_artifact_contract_is_rebuilt(tmp_path):
         "SELECT state, content_hash FROM artifact"
     ).fetchone()
     assert tuple(state_hash) == ("stale", "legacy-sha1:hash")
+
+
+def test_v37_database_gets_artifact_tables_and_version_bump(tmp_path):
+    path = tmp_path / "v37.db"
+    db = Storage(str(path))
+    db._conn.execute("PRAGMA foreign_keys = OFF")
+    for table in (
+        "artifact_pin",
+        "artifact_lease",
+        "artifact_identity_map",
+        "artifact_relation",
+        "artifact",
+    ):
+        db._conn.execute(f"DROP TABLE {table}")
+    db._conn.execute(
+        "UPDATE meta SET value = '37' WHERE key = 'schema_version'"
+    )
+    db._conn.commit()
+    db.close()
+
+    migrated = Storage(str(path))
+    assert migrated._conn.execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()[0] == "38"
+    tables = {
+        row[0]
+        for row in migrated._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    assert {"artifact", "artifact_relation", "artifact_identity_map", "artifact_lease", "artifact_pin"} <= tables

@@ -1,4 +1,4 @@
-# Data Model (schema 36)
+# Data Model (schema 38)
 
 [← docs index](README.md)
 
@@ -100,7 +100,7 @@ erDiagram
 
 | Table | Purpose |
 |---|---|
-| `meta` | key/value; holds `schema_version` (36) and `graph_resolved_at` |
+| `meta` | key/value; holds `schema_version` (38) and `graph_resolved_at` |
 | `repository`, `clone` | group components; track git clones / active clone |
 | `component` | a source root (repo/dir): name, path, kind, version |
 | `directory` | a directory under a component |

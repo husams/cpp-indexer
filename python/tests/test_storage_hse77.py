@@ -51,7 +51,7 @@ def test_hse77_v34_migration_backfills_source_and_preserves_reads(tmp_path):
     assert tuple(db._conn.execute(
         "SELECT src_kind, type_usr, decl_usr, callee_usr FROM call_arg_read"
     ).fetchone()) == ("local", "legacy:missing-type", "legacy:missing-decl", "legacy:callee")
-    assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "37"
+    assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "38"
     db.close()
 
 
@@ -138,7 +138,7 @@ def test_parent_id_backfills_when_parent_arrives_after_child():
 
 
 def test_migrated_enum_columns_keep_domain_checks(tmp_path):
-    path = str(tmp_path / "v36.db")
+    path = str(tmp_path / "v37.db")
     db = Storage(path)
     component = db.add_component("c", "/repo/c")
     directory = db.add_directory(component, "")
@@ -147,7 +147,7 @@ def test_migrated_enum_columns_keep_domain_checks(tmp_path):
     callee_id = db.add_symbol(Symbol("domain:callee", "callee", "function"))
     edge_id = db.add_edge(caller_id, callee_id, 1)
     db._conn.execute(
-        "UPDATE meta SET value='36' WHERE key='schema_version'"
+        "UPDATE meta SET value='37' WHERE key='schema_version'"
     )
     db._conn.execute(
         "UPDATE meta SET value=? WHERE key='catalog_hash'",
@@ -171,8 +171,8 @@ def test_migrated_enum_columns_keep_domain_checks(tmp_path):
     db.close()
 
 
-@pytest.mark.parametrize("wrong_schema_version", [PREVIOUS_SCHEMA_VERSION - 1, 37])
-def test_predecessor_catalog_hash_requires_v36_migration(
+@pytest.mark.parametrize("wrong_schema_version", [PREVIOUS_SCHEMA_VERSION - 1, 38])
+def test_predecessor_catalog_hash_requires_v37_migration(
     tmp_path, wrong_schema_version
 ):
     path = str(tmp_path / f"wrong-v{wrong_schema_version}.db")

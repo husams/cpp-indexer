@@ -845,7 +845,7 @@ CREATE TABLE IF NOT EXISTS artifact_pin (
     PRIMARY KEY (artifact_id, pin_id)
 ) WITHOUT ROWID;
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '37');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '38');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest

@@ -63,9 +63,10 @@ void Storage::migrate() {
 
   const auto cols = table_columns("symbol");
   bool changed = false;
-  // v34 -> v35: manifest metadata for immutable/rebuildable sidecars. The
-  // schema script creates the tables after this probe; only the version row is
-  // changed here so old databases remain readable during the same open.
+  // v37 -> v38: add the manifest-governed artifact tables. The schema script
+  // creates the tables after this probe; only the version row is changed here
+  // so old databases remain readable during the same open. This also keeps
+  // older artifact-less databases on the ordered migration path.
   if (!has_table("artifact")) {
     changed = true;
   }
