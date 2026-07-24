@@ -697,6 +697,81 @@ TEST_CASE("query_plan: template defaults expose logical evidence") {
         "evidence:template_default:legacy\x1fUSR::template:0");
 }
 
+TEST_CASE(
+    "query_plan: reverse typed relations and file identities are portable") {
+  const auto seed = [](Storage &db, std::string_view component_path) {
+    const int64_t component_id =
+        db.add_component("project", std::string(component_path));
+    const int64_t directory_id = db.add_directory(component_id, "src");
+    const int64_t file_id = db.add_file(directory_id, "unit.cpp");
+    const int64_t caller = db.add_symbol(make_sym("USR::caller", "caller"));
+    const int64_t callee = db.add_symbol(make_sym("USR::callee", "callee"));
+    const int64_t edge_id = db.add_edge(make_edge(caller, callee, 1));
+
+    cidx::EdgeSite site;
+    site.edge_id = edge_id;
+    site.file_id = file_id;
+    site.line = 10;
+    site.col = 2;
+    db.add_edge_site(site);
+
+    auto arg = db.raw_db().prepare(
+        "INSERT INTO call_arg(edge_id,file_id,line,col,position) "
+        "VALUES (?,?,?,?,?)");
+    arg.bind(1, edge_id);
+    arg.bind(2, file_id);
+    arg.bind(3, int64_t{10});
+    arg.bind(4, int64_t{2});
+    arg.bind(5, int64_t{0});
+    arg.step_done();
+  };
+
+  Storage first(":memory:");
+  seed(first, "/worktree-a");
+  Executor first_executor(first);
+  const auto reverse_evidence =
+      first_executor.run((start(codebase()) | view(View::Evidence) | nodes() |
+                          in_("edge.has_evidence") | count())
+                             .plan());
+  const auto reverse_argument =
+      first_executor.run((start(codebase()) | view(View::CallArgument) |
+                          nodes() | in_("edge.has_argument") | count())
+                             .plan());
+  const auto reverse_occurrence =
+      first_executor.run((start(codebase()) | view(View::CallArgument) |
+                          nodes() | in_("evidence.of_occurrence") | count())
+                             .plan());
+  CHECK(reverse_evidence.scalar == 1);
+  CHECK(reverse_argument.scalar == 1);
+  CHECK(reverse_occurrence.scalar == 1);
+
+  Storage second(":memory:");
+  seed(second, "/different-worktree");
+  Executor second_executor(second);
+  const auto first_evidence =
+      first_executor.run((start(codebase()) | view(View::Evidence) | nodes() |
+                          select({"identity_key"}))
+                             .plan());
+  const auto second_evidence =
+      second_executor.run((start(codebase()) | view(View::Evidence) | nodes() |
+                           select({"identity_key"}))
+                              .plan());
+  const auto first_argument =
+      first_executor.run((start(codebase()) | view(View::CallArgument) |
+                          nodes() | select({"identity_key"}))
+                             .plan());
+  const auto second_argument =
+      second_executor.run((start(codebase()) | view(View::CallArgument) |
+                           nodes() | select({"identity_key"}))
+                              .plan());
+  REQUIRE(first_evidence.rows.size() == 1);
+  REQUIRE(second_evidence.rows.size() == 1);
+  REQUIRE(first_argument.rows.size() == 1);
+  REQUIRE(second_argument.rows.size() == 1);
+  CHECK(first_evidence.rows[0] == second_evidence.rows[0]);
+  CHECK(first_argument.rows[0] == second_argument.rows[0]);
+}
+
 TEST_CASE("query_plan: devirtualized calls preserve the inherited receiver") {
   Storage db(":memory:");
   {

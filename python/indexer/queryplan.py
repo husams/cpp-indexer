@@ -980,7 +980,7 @@ class Executor:
 
     def _portable_file(self, file_id: int) -> str:
         row = self._conn.execute(
-            "SELECT c.name,c.path,d.path,f.name FROM file f "
+            "SELECT c.name,d.path,f.name FROM file f "
             "JOIN directory d ON d.id=f.directory_id "
             "JOIN component c ON c.id=d.component_id WHERE f.id=?", (file_id,)
         ).fetchone()
@@ -1086,7 +1086,7 @@ class Executor:
         elif not inbound and st.view == SYMBOL_VIEW and rel[0] == "of_type":
             for owner in st.ids:
                 add_ids("SELECT type_id FROM symbol_type WHERE symbol_id=? ORDER BY type_id", (owner,))
-        elif inbound and st.view in ("parameter", "template_parameter", "template_argument", "call_argument", "edge", "evidence"):
+        elif inbound and st.view in ("parameter", "template_parameter", "template_argument", "call_argument", "edge", "evidence") and rel[0] in ("has_parameter", "has_template_parameter", "has_template_argument", "has_call_edge"):
             if rel[0] in ("has_parameter", "has_template_parameter", "has_template_argument"):
                 ids.extend(key[0] for key in st.keys)
             elif rel[0] == "has_call_edge":
@@ -1182,7 +1182,7 @@ class Executor:
                 add_rows("SELECT id FROM edge WHERE id=?", key[:1])
         elif inbound and st.view == "call_argument" and rel[0] == "of_occurrence":
             for key in st.keys:
-                add_rows("SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) FROM edge_site WHERE edge_id=? AND file_id=? AND COALESCE(line,0)=? AND COALESCE(col,0)=?", key)
+                add_rows("SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) FROM edge_site WHERE edge_id=? AND file_id=? AND COALESCE(line,0)=? AND COALESCE(col,0)=?", key[:4])
         elif inbound and st.view == "edge" and rel[0] == "of_edge":
             for key in st.keys:
                 add_rows("SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) FROM edge_site WHERE edge_id=? ORDER BY file_id,line,col", key[:1])

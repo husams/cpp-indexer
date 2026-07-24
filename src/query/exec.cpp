@@ -1307,7 +1307,7 @@ private:
 
   std::string portable_file(int64_t id) {
     auto query = db_.raw_db().prepare(
-        "SELECT c.name,c.path,d.path,f.name FROM file f "
+        "SELECT c.name,d.path,f.name FROM file f "
         "JOIN directory d ON d.id=f.directory_id "
         "JOIN component c ON c.id=d.component_id WHERE f.id=?");
     query.bind(1, id);
@@ -1315,7 +1315,7 @@ private:
       return "missing-file:" + std::to_string(id);
     }
     std::string path;
-    for (int column = 0; column < 4; ++column) {
+    for (int column = 0; column < 3; ++column) {
       const auto raw = query.col_text(column);
       const auto first = raw.find_first_not_of('/');
       if (first != std::string::npos) {

@@ -458,3 +458,53 @@ def test_template_defaults_expose_logical_evidence():
     assert result.rows == [
         (owner, 0, "int", "evidence:template_default:legacy\x1fUSR::template:0")
     ]
+
+
+def _seed_reverse_typed_graph(db, component_path):
+    component = db.add_component("project", component_path)
+    directory = db.add_directory(component, "src")
+    file_id = db.add_file(directory, "unit.cpp")
+    caller = db.add_symbol(_make_sym("USR::caller", "caller"))
+    callee = db.add_symbol(_make_sym("USR::callee", "callee"))
+    edge_id = db.add_edge(caller, callee, 1)
+    db.add_edge_site(edge_id, file_id, 10, 2)
+    db._conn.execute(
+        "INSERT INTO call_arg(edge_id,file_id,line,col,position) "
+        "VALUES (?,?,?,?,?)", (edge_id, file_id, 10, 2, 0))
+    db._conn.commit()
+
+
+def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable():
+    first = Storage(":memory:")
+    _seed_reverse_typed_graph(first, "/worktree-a")
+    executor = Executor(first)
+
+    reverse_evidence = executor.run(
+        (start(codebase()) | view("evidence") | nodes()
+         | in_("edge.has_evidence") | count()).plan)
+    reverse_argument = executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | in_("edge.has_argument") | count()).plan)
+    reverse_occurrence = executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | in_("evidence.of_occurrence") | count()).plan)
+    assert reverse_evidence.scalar == 1
+    assert reverse_argument.scalar == 1
+    assert reverse_occurrence.scalar == 1
+
+    second = Storage(":memory:")
+    _seed_reverse_typed_graph(second, "/different-worktree")
+    first_evidence = executor.run(
+        (start(codebase()) | view("evidence") | nodes()
+         | select(["identity_key"])).plan)
+    second_evidence = Executor(second).run(
+        (start(codebase()) | view("evidence") | nodes()
+         | select(["identity_key"])).plan)
+    first_argument = executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | select(["identity_key"])).plan)
+    second_argument = Executor(second).run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | select(["identity_key"])).plan)
+    assert first_evidence.rows == second_evidence.rows
+    assert first_argument.rows == second_argument.rows
