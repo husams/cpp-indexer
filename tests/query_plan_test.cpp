@@ -17,6 +17,7 @@
 #include "doctest/doctest.h"
 
 #include <cstdlib>
+#include <concepts>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -36,6 +37,21 @@
 using namespace cidx::query;
 using cidx::Storage;
 using cidx::Symbol;
+
+template <typename T>
+concept NarrowQueryReadPort = requires(T &port) {
+  { port.read_db() } -> std::same_as<cidx::storage::SqliteReadDb &>;
+  { port.graph_read() } -> std::same_as<cidx::graph::GraphReadPort &>;
+};
+
+template <typename T>
+concept HasMutableQueryEscapeHatches = requires(T &port) {
+  port.raw_db();
+  port.graph_service();
+};
+
+static_assert(NarrowQueryReadPort<QueryReadPort>);
+static_assert(!HasMutableQueryEscapeHatches<QueryReadPort>);
 
 namespace {
 

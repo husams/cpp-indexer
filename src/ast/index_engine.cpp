@@ -11,6 +11,7 @@
 
 #include "compiledb/compiledb.hpp"
 #include "storage/ports.hpp"
+#include "storage/sqlite_adapters.hpp"
 #include "storage/storage.hpp"
 #include "toolchain/toolchain.hpp"
 #include "util/env.hpp"
@@ -77,7 +78,7 @@ struct EngineState {
   std::string path; // main file (canonical absolute)
   bool graph_enabled = true;
   bool strict = false; // CIDX_STRICT: abort on Error, not just Fatal
-  IndexFailurePoint failure = IndexFailurePoint::none;
+  cidx::storage::FailureInjector *failure_injector = nullptr;
   IndexOneOutcome *out = nullptr;
   // v31: the full preprocessing record (ast/include_facts.hpp). The header
   // two-pass consumes its resolved targets in directive order
@@ -150,12 +151,6 @@ public:
   void run() {
     db_.delete_symbols_for_file(state_.rec->id);
     state_.out->stored = run_symbol_pass(state_.path, state_.rec->id);
-    if (state_.failure == IndexFailurePoint::adapter) {
-      throw std::runtime_error("injected AST adapter failure");
-    }
-    if (state_.failure == IndexFailurePoint::partial_transform) {
-      throw std::runtime_error("injected partial transform failure");
-    }
     const std::vector<int64_t> main_symbol_ids = symbols_.symbol_ids();
     const std::vector<PendingHeader> plan = plan_owned_headers();
     run_header_passes(plan);
@@ -286,6 +281,10 @@ private:
       }
       ph.stored = run_symbol_pass(ph.path, ph.file_id);
       ph.symbol_ids = symbols_.symbol_ids();
+    }
+    if (state_.failure_injector != nullptr) {
+      state_.failure_injector->inject(
+          cidx::storage::FailurePoint::partial_transform);
     }
     for (const PendingHeader &ph : plan) {
       run_edge_pass(ph.path, ph.file_id);
@@ -456,6 +455,50 @@ bool SourceSnapshot::matches(const std::string &path) const {
   return md5.has_value() && current.has_value() && md5 == current;
 }
 
+class PipelineFailureInjector final : public cidx::storage::FailureInjector {
+public:
+  explicit PipelineFailureInjector(IndexFailurePoint target) : target_(target) {}
+
+  void inject(cidx::storage::FailurePoint point) override {
+    const IndexFailurePoint current = [&] {
+      switch (point) {
+      case cidx::storage::FailurePoint::begin:
+        return IndexFailurePoint::begin;
+      case cidx::storage::FailurePoint::adapter:
+        return IndexFailurePoint::adapter;
+      case cidx::storage::FailurePoint::partial_transform:
+        return IndexFailurePoint::partial_transform;
+      case cidx::storage::FailurePoint::commit:
+        return IndexFailurePoint::commit;
+      }
+      return IndexFailurePoint::none;
+    }();
+    if (current == target_) {
+      throw std::runtime_error(std::string("injected ") + failure_name(current) +
+                               " failure");
+    }
+  }
+
+private:
+  static const char *failure_name(IndexFailurePoint point) {
+    switch (point) {
+    case IndexFailurePoint::begin:
+      return "unit-of-work begin";
+    case IndexFailurePoint::adapter:
+      return "storage adapter";
+    case IndexFailurePoint::partial_transform:
+      return "partial transform";
+    case IndexFailurePoint::commit:
+      return "unit-of-work commit";
+    case IndexFailurePoint::none:
+      return "unexpected";
+    }
+    return "unexpected";
+  }
+
+  IndexFailurePoint target_;
+};
+
 IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
                               const std::string &path, bool graph_enabled,
                               IndexFailurePoint failure) {
@@ -475,6 +518,8 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   CompilationSetup setup(args, path);
   DiagCollector collector(out.diagnostics);
   setup.tool.setDiagnosticConsumer(&collector);
+  PipelineFailureInjector injector(failure);
+  cidx::storage::SqliteStoragePorts ports(db, &injector);
 
   // v31: the configuration the include tier records against is the one this
   // parse actually used -- the same resolved args, driver, and resource dir --
@@ -490,22 +535,19 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
 
   EngineState state;
   cidx::storage::AstStoragePorts ast_ports{
-      db.workspace_catalog_read(), db.source_read(), db.symbol_read(),
-      db.symbol_write(),           db.type_write(),  db.fact_write(),
-      db.definition_write(),       db.unit_of_work()};
+      ports.workspace_catalog_read(), ports.source_read(), ports.symbol_read(),
+      ports.symbol_write(),           ports.type_write(),  ports.fact_write(),
+      ports.definition_write(),       ports.unit_of_work()};
   state.db = &db;
   state.ports = &ast_ports;
   state.rec = &rec;
   state.path = path;
   state.graph_enabled = graph_enabled;
   state.strict = read_strict_mode();
-  state.failure = failure;
+  state.failure_injector = &injector;
   state.out = &out;
   state.config = &config;
-  if (failure == IndexFailurePoint::begin) {
-    throw std::runtime_error("injected unit-of-work begin failure");
-  }
-  state.unit = db.unit_of_work().begin();
+  state.unit = ports.unit_of_work().begin();
   state.normalized_config_id = db.add_translation_unit_config(resolved);
 
   IndexFrontendActionFactory factory(state);
@@ -523,9 +565,6 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
     out.error = path + ": source changed during indexing; retry required";
   }
   if (!out.parse_failed && !out.source_changed) {
-    if (failure == IndexFailurePoint::commit) {
-      throw std::runtime_error("injected unit-of-work commit failure");
-    }
     state.unit->commit();
   }
   return out;

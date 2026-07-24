@@ -13,13 +13,13 @@
 #include <vector>
 
 #include "cli/json_out.hpp"
+#include "graph/ports.hpp"
 #include "query/plan.hpp"
 #include "query/result_protocol.hpp"
 #include "storage/records.hpp"
 
 namespace cidx {
 class SqliteStorageService;
-class SqliteDb;
 } // namespace cidx
 
 namespace cidx::query {
@@ -27,23 +27,60 @@ namespace cidx::query {
 class QueryReadPort {
 public:
   virtual ~QueryReadPort() = default;
-  virtual SqliteDb &raw_db() = 0;
+  virtual storage::SqliteReadDb &read_db() = 0;
   virtual std::optional<std::string> file_abs_path(int64_t file_id) = 0;
   virtual IndexIdentity index_identity() = 0;
-  virtual SqliteStorageService &graph_service() = 0;
+  virtual graph::GraphReadPort &graph_read() = 0;
 };
 
-class SqliteQueryReadAdapter final : public QueryReadPort {
+class SqliteQueryReadAdapter final : public QueryReadPort,
+                                     public graph::GraphReadPort {
 public:
   explicit SqliteQueryReadAdapter(SqliteStorageService &service);
 
-  SqliteDb &raw_db() override;
+  storage::SqliteReadDb &read_db() override;
   std::optional<std::string> file_abs_path(int64_t file_id) override;
   IndexIdentity index_identity() override;
-  SqliteStorageService &graph_service() override;
+  graph::GraphReadPort &graph_read() override;
+
+  int64_t edge_count() override;
+  bool graph_resolved() override;
+  std::string component_abs_base(const Component &component) override;
+  std::optional<SemanticUniverse>
+  get_semantic_universe_by_id(int64_t id) override;
+  std::optional<Symbol> graph_symbol_by_usr(const std::string &usr) override;
+  std::optional<Symbol> graph_symbol_by_id(int64_t id) override;
+  std::vector<Symbol>
+  lookup_symbols_by_usr(const std::string &usr) override;
+  std::vector<Symbol>
+  find_symbols(const std::string &pattern,
+               const std::optional<std::string> &kind, int limit) override;
+  std::vector<GraphEdgeRow>
+  graph_edges(int64_t mine_id, const std::string &direction,
+              const std::vector<int64_t> &kind_ids, bool count_resolved,
+              int limit) override;
+  std::map<int64_t, std::vector<EdgeSiteRow>>
+  edge_sites_for(const std::vector<int64_t> &edge_ids) override;
+  std::vector<EdgeSiteRow> edge_sites_one(int64_t edge_id,
+                                           int limit) override;
+  std::vector<Symbol> redefined_symbols(int limit) override;
+  std::vector<DefinitionRow> definitions_of(int64_t symbol_id) override;
+  std::vector<DefinitionRow>
+  possible_callees_of(int64_t symbol_id) override;
+  std::optional<TypeNode> type_node_by_id(int64_t id) override;
+  std::optional<int64_t> symbol_type_of(int64_t symbol_id,
+                                         int64_t kind) override;
+  std::vector<Parameter> parameters_of(int64_t symbol_id) override;
+  std::vector<int64_t>
+  type_ids_reaching(const std::string &decl_usr) override;
+  std::vector<std::pair<int64_t, int64_t>>
+  param_owners_of_types(const std::vector<int64_t> &type_ids) override;
+  std::vector<std::pair<int64_t, int64_t>>
+  symbol_type_owners_of_types(const std::vector<int64_t> &type_ids) override;
 
 private:
   SqliteStorageService *service_;
+  storage::SqliteReadDb read_db_;
 };
 
 // Execution budgets (docs/query-plan.md "Execution semantics").

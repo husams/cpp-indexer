@@ -184,12 +184,14 @@ std::string read_file(const std::string &path) {
 
 struct TuPublicationSnapshot {
   std::map<std::string, int64_t> table_counts;
+  std::vector<std::string> rows;
   std::vector<std::string> meta;
   std::string file_state;
 
   friend bool operator==(const TuPublicationSnapshot &a,
                          const TuPublicationSnapshot &b) {
-    return a.table_counts == b.table_counts && a.meta == b.meta &&
+    return a.table_counts == b.table_counts && a.rows == b.rows &&
+           a.meta == b.meta &&
            a.file_state == b.file_state;
   }
 };
@@ -222,6 +224,20 @@ TuPublicationSnapshot snapshot_tu_publication(Storage &db,
         db.raw_db().prepare("SELECT COUNT(*) FROM " + std::string(table));
     REQUIRE(statement.step());
     snapshot.table_counts.emplace(table, statement.col_int64(0));
+    auto rows = db.raw_db().prepare("SELECT * FROM " + std::string(table) +
+                                   " ORDER BY rowid");
+    const int columns = rows.column_count();
+    while (rows.step()) {
+      std::string encoded = std::string(table) + "\x1e";
+      for (int column = 0; column < columns; ++column) {
+        if (column != 0) {
+          encoded.push_back('\x1f');
+        }
+        encoded += rows.col_is_null(column) ? "<null>"
+                                             : rows.col_text(column);
+      }
+      snapshot.rows.push_back(std::move(encoded));
+    }
   }
   auto meta = db.raw_db().prepare("SELECT key,value FROM meta ORDER BY key");
   while (meta.step()) {
@@ -1835,7 +1851,10 @@ TEST_SUITE("clang") {
   TEST_CASE("index TU publication is atomic at every injected failure point") {
     const std::string dir = make_temp_dir();
     const std::string source = dir + "/source.cpp";
-    write_file(source, "int injected_pipeline_symbol() { return 1; }\n");
+    const std::string header = dir + "/header.hpp";
+    write_file(header, "struct PublishedHeader { int value; };\n");
+    write_file(source, "#include \"header.hpp\"\n"
+                      "int published_pipeline_symbol() { return 1; }\n");
 
     Storage db(":memory:");
     db.add_component("pipeline", dir);
@@ -1846,19 +1865,24 @@ TEST_SUITE("clang") {
     REQUIRE(file.has_value());
     db.stamp_graph_resolved();
     db.stamp_index_identity();
-    const auto before = snapshot_tu_publication(db, source);
+    REQUIRE_NOTHROW(cidx::ast::run_index_one(
+        db, *file, source, true, cidx::ast::IndexFailurePoint::none));
+    const auto published = snapshot_tu_publication(db, source);
+    write_file(source, "#include \"header.hpp\"\n"
+                      "int changed_pipeline_symbol() { return 2; }\n");
 
     for (const auto failure : {cidx::ast::IndexFailurePoint::begin,
                                cidx::ast::IndexFailurePoint::adapter,
                                cidx::ast::IndexFailurePoint::partial_transform,
                                cidx::ast::IndexFailurePoint::commit}) {
       CHECK_THROWS(cidx::ast::run_index_one(db, *file, source, true, failure));
-      CHECK(snapshot_tu_publication(db, source) == before);
+      CHECK(snapshot_tu_publication(db, source) == published);
     }
 
-    CHECK_NOTHROW(cidx::ast::run_index_one(db, *file, source, true,
-                                           cidx::ast::IndexFailurePoint::none));
-    CHECK(db.find_symbols("injected_pipeline_symbol", {}, 10).size() == 1);
+    REQUIRE_NOTHROW(cidx::ast::run_index_one(
+        db, *file, source, true, cidx::ast::IndexFailurePoint::none));
+    CHECK(db.find_symbols("changed_pipeline_symbol", {}, 10).size() == 1);
+    CHECK(db.find_symbols("published_pipeline_symbol", {}, 10).empty());
   }
 
   TEST_CASE("index TU publication enforces read-only storage") {

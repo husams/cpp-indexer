@@ -5,6 +5,8 @@
 // count-fallback logic (R2/R3) are copied exactly.
 #include "graph/query.hpp"
 
+#include "storage/storage.hpp"
+
 #include <algorithm>
 #include <filesystem>
 #include <map>
@@ -24,7 +26,7 @@ namespace cidx::graph {
 // Construction
 // ---------------------------------------------------------------------------
 
-GraphQuery::GraphQuery(SqliteStorageService &db, std::string db_path)
+GraphQuery::GraphQuery(GraphReadPort &db, std::string db_path)
     : db_(db), db_path_(std::move(db_path)) {}
 
 GraphQuery GraphQuery::open(const std::string &db_path) {
@@ -38,11 +40,11 @@ GraphQuery GraphQuery::open(const std::string &db_path) {
         "or pass --db PATH / set $INDEXER_CACHE.");
   }
   // GraphQuery::open is only used from command handlers that own the SQLite
-  // service. The implementation returns a GraphQuery referencing the service
-  // owned by the command handler.
+  // service. The implementation returns a GraphQuery referencing the read
+  // port owned by the command handler.
   // This overload is just a documentation stub — see commands.cpp _open_graph.
   throw std::logic_error("GraphQuery::open should not be called directly; "
-                         "use the SQLite-service constructor from command "
+                         "use the graph-read-port constructor from command "
                          "handlers");
 }
 
@@ -72,7 +74,7 @@ bool GraphQuery::is_resolved() {
 // ---------------------------------------------------------------------------
 // File cache: {file_id -> (abs_path, component_name)}
 // Batch query mirrors query.py:_files() -- routes each distinct component
-// through SqliteStorageService::component_abs_base (the resolution choke point,
+  // through GraphReadPort::component_abs_base (the resolution choke point,
 // v24) rather than joining component.path raw: a grouped component's stored
 // path is RELATIVE to its repository's active clone root, so using it as-is
 // would hand back a clone-relative (unopenable) path.
@@ -89,7 +91,7 @@ GraphQuery::files() {
                         std::optional<int64_t>>,
              std::string>
         abs_base_cache;
-    auto &raw = db_.raw_db();
+    auto &raw = db_.read_db();
     auto st =
         raw.prepare("SELECT f.id AS fid, c.name AS cname, c.path AS root, "
                     "       c.version AS version, c.repository_id AS repo_id, "
@@ -207,7 +209,7 @@ Sym GraphQuery::make_sym_from_symbol(const Symbol &sym) {
 }
 
 Sym GraphQuery::make_sym_from_row(
-    const SqliteStorageService::GraphEdgeRow &row) {
+    const GraphEdgeRow &row) {
   // A6 row carries an embedded Symbol; reuse make_sym_from_symbol.
   return make_sym_from_symbol(row.sym);
 }
@@ -216,7 +218,7 @@ Sym GraphQuery::make_sym_from_row(
 // Site construction
 // ---------------------------------------------------------------------------
 
-Site GraphQuery::make_site(const SqliteStorageService::EdgeSiteRow &row) {
+Site GraphQuery::make_site(const EdgeSiteRow &row) {
   Site s;
   const auto &fc = files();
   if (row.file_id) {
@@ -385,7 +387,7 @@ std::vector<Edge> GraphQuery::references(int64_t sym_id, int limit) {
 }
 
 std::vector<Sym> GraphQuery::aliased_by(int64_t sym_id, int limit) {
-  auto &raw = db_.raw_db();
+  auto &raw = db_.read_db();
   auto st =
       raw.prepare("SELECT s.id FROM symbol s "
                   "JOIN edge e ON e.src_id = s.id "
@@ -705,7 +707,7 @@ std::vector<Sym> GraphQuery::redefined(int limit) {
 // Build Definition records from raw definition rows, joining file/component
 // from the file cache (mirrors query.py:_definition_rows).
 static std::vector<Definition> defs_from_rows(
-    GraphQuery &g, const std::vector<SqliteStorageService::DefinitionRow> &rows,
+    GraphQuery &g, const std::vector<DefinitionRow> &rows,
     const std::unordered_map<
         int64_t, std::pair<std::string, std::optional<std::string>>> &fc) {
   std::vector<Definition> out;
@@ -892,7 +894,7 @@ GraphQuery::SignatureInfo GraphQuery::signature(int64_t sym_id) {
 
 std::optional<GraphQuery::TypeInfo>
 GraphQuery::type_child(int64_t type_id, int64_t edge_kind, int64_t position) {
-  auto st = db_.raw_db().prepare(
+  auto st = db_.read_db().prepare(
       "SELECT dst_id FROM type_edge WHERE src_id = ? AND kind = ? "
       "AND position = ? LIMIT 1");
   st.bind(1, type_id);

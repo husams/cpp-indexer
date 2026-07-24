@@ -665,44 +665,16 @@ public:
   // v27 multi-definition readers (query.py:GraphQuery.redefined/definitions/
   // possible_callees). DefinitionRow is one `definition` (or possible-call
   // target) row; the graph layer joins in component/file for display.
-  struct DefinitionRow {
-    int64_t symbol_id = -1;
-    std::optional<int64_t> file_id;
-    std::optional<int64_t> line, col, end_line, end_col;
-    std::optional<std::string>
-        init_text; // v28: (static member) var initializer
-  };
+  using DefinitionRow = ::cidx::DefinitionRow;
   std::vector<Symbol> redefined_symbols(int limit);
   std::vector<DefinitionRow> definitions_of(int64_t symbol_id);
   std::vector<DefinitionRow> possible_callees_of(int64_t symbol_id);
 
   // A6 result row: 8 edge columns + decoded symbol-from-offset (plan §A6).
-  struct GraphEdgeRow {
-    int64_t eid = -1;
-    int64_t src_id = -1;
-    int64_t dst_id = -1;
-    int64_t ekind = 0;
-    int64_t ecount = 0;
-    int64_t rawcount = 0;
-    std::optional<int64_t> base_access;
-    std::optional<int64_t> is_virtual;
-    Symbol sym; // decoded from cols 8..33 via symbol_from_offset
-  };
+  using GraphEdgeRow = ::cidx::GraphEdgeRow;
 
   // A7 result row for batch site loading.
-  struct EdgeSiteRow {
-    int64_t edge_id = -1;
-    std::optional<int64_t> file_id;
-    std::optional<int64_t> line;
-    std::optional<int64_t> col;
-    bool conditional = false;
-    std::optional<std::string> args_sig;
-    std::optional<std::string> recv_src_kind;
-    std::optional<std::string> recv_type_usr;
-    std::optional<std::string> recv_decl_usr;
-    std::optional<int64_t> recv_param_pos;
-    std::optional<int64_t> recv_type_is_value;
-  };
+  using EdgeSiteRow = ::cidx::EdgeSiteRow;
 
   // A6: typed-edge query (query.py:782-813)
   // direction "in"|"out"; kind_ids empty => no kind filter; count_resolved

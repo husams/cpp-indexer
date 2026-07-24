@@ -112,7 +112,8 @@ private:
 class SqliteSymbolStoreAdapter final : public SymbolReadPort,
                                        public SymbolWritePort {
 public:
-  explicit SqliteSymbolStoreAdapter(SqliteStorageService &db);
+  explicit SqliteSymbolStoreAdapter(SqliteStorageService &db,
+                                    FailureInjector *injector = nullptr);
 
   std::optional<Symbol> lookup_symbol(
       const std::string &usr,
@@ -147,6 +148,7 @@ public:
 
 private:
   SqliteStorageService *db_;
+  FailureInjector *injector_;
 };
 
 class SqliteTypeStoreAdapter final : public TypeReadPort, public TypeWritePort {
@@ -249,7 +251,8 @@ private:
 
 class SqliteUnitOfWork final : public UnitOfWork {
 public:
-  explicit SqliteUnitOfWork(SqliteStorageService &db);
+  explicit SqliteUnitOfWork(SqliteStorageService &db,
+                            FailureInjector *injector = nullptr);
   ~SqliteUnitOfWork() override;
 
   void commit() override;
@@ -257,22 +260,26 @@ public:
 
 private:
   std::unique_ptr<Transaction> transaction_;
+  FailureInjector *injector_;
 };
 
 class SqliteUnitOfWorkFactory final : public UnitOfWorkFactory {
 public:
-  explicit SqliteUnitOfWorkFactory(SqliteStorageService &db);
+  explicit SqliteUnitOfWorkFactory(SqliteStorageService &db,
+                                   FailureInjector *injector = nullptr);
   std::unique_ptr<UnitOfWork> begin() override;
 
 private:
   SqliteStorageService *db_;
+  FailureInjector *injector_;
 };
 
 // The compatibility façade owns one adapter set so application code can
 // migrate port-by-port without constructing parallel SQLite bindings.
 class SqliteStoragePorts final {
 public:
-  explicit SqliteStoragePorts(SqliteStorageService &db);
+  explicit SqliteStoragePorts(SqliteStorageService &db,
+                              FailureInjector *injector = nullptr);
 
   WorkspaceCatalogReadPort &workspace_catalog_read() { return catalog_; }
   WorkspaceCatalogWritePort &workspace_catalog_write() { return catalog_; }

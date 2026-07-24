@@ -1,6 +1,7 @@
 // the graph query commands and their shared selection helpers.
 // Split out of commands.cpp; run_command's dispatch is unchanged.
 #include "cli/commands_detail.hpp"
+#include "query/exec.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -142,6 +143,7 @@ graph_select_one(graph::GraphQuery &g,
 // declaration-only index can carry with ZERO symbol edges.
 struct GraphHandle {
   std::unique_ptr<Storage> storage;
+  std::unique_ptr<query::SqliteQueryReadAdapter> read;
   std::unique_ptr<graph::GraphQuery> g;
 };
 
@@ -165,7 +167,8 @@ std::optional<GraphHandle> open_graph(const ParsedArgs & /*args*/, Context &ctx,
   }
 
   h.storage = std::make_unique<Storage>(ctx.index_path);
-  h.g = std::make_unique<graph::GraphQuery>(*h.storage, ctx.index_path);
+  h.read = std::make_unique<query::SqliteQueryReadAdapter>(*h.storage);
+  h.g = std::make_unique<graph::GraphQuery>(*h.read, ctx.index_path);
   if (require_edges && h.g->edge_count() == 0) {
     const std::string repr = format::py_repr(ctx.index_path);
     *ctx.err << "error: index " << repr

@@ -213,8 +213,9 @@ void SqliteSourceStoreAdapter::replace_diagnostics(
   db_->replace_diagnostics(file_id, diagnostics);
 }
 
-SqliteSymbolStoreAdapter::SqliteSymbolStoreAdapter(SqliteStorageService &db)
-    : db_(&db) {}
+SqliteSymbolStoreAdapter::SqliteSymbolStoreAdapter(
+    SqliteStorageService &db, FailureInjector *injector)
+    : db_(&db), injector_(injector) {}
 
 std::optional<Symbol> SqliteSymbolStoreAdapter::lookup_symbol(
     const std::string &usr, const std::optional<int64_t> &semantic_universe_id,
@@ -252,7 +253,11 @@ std::vector<Symbol> SqliteSymbolStoreAdapter::symbols_in_file(int64_t file_id) {
 }
 
 int64_t SqliteSymbolStoreAdapter::add_symbol(const Symbol &symbol) {
-  return db_->add_symbol(symbol);
+  const int64_t id = db_->add_symbol(symbol);
+  if (injector_ != nullptr) {
+    injector_->inject(FailurePoint::adapter);
+  }
+  return id;
 }
 
 int64_t
@@ -508,24 +513,37 @@ bool SqliteSchemaCatalogAdapter::graph_resolved() {
   return db_->graph_resolved();
 }
 
-SqliteUnitOfWork::SqliteUnitOfWork(SqliteStorageService &db)
-    : transaction_(std::make_unique<Transaction>(db)) {}
+SqliteUnitOfWork::SqliteUnitOfWork(SqliteStorageService &db,
+                                   FailureInjector *injector)
+    : transaction_(std::make_unique<Transaction>(db)), injector_(injector) {}
 
 SqliteUnitOfWork::~SqliteUnitOfWork() = default;
 
-void SqliteUnitOfWork::commit() { transaction_->commit(); }
+void SqliteUnitOfWork::commit() {
+  if (injector_ != nullptr) {
+    injector_->inject(FailurePoint::commit);
+  }
+  transaction_->commit();
+}
 
 void SqliteUnitOfWork::rollback() { transaction_->rollback(); }
 
-SqliteUnitOfWorkFactory::SqliteUnitOfWorkFactory(SqliteStorageService &db)
-    : db_(&db) {}
+SqliteUnitOfWorkFactory::SqliteUnitOfWorkFactory(SqliteStorageService &db,
+                                                FailureInjector *injector)
+    : db_(&db), injector_(injector) {}
 
 std::unique_ptr<UnitOfWork> SqliteUnitOfWorkFactory::begin() {
-  return std::make_unique<SqliteUnitOfWork>(*db_);
+  auto unit = std::make_unique<SqliteUnitOfWork>(*db_, injector_);
+  if (injector_ != nullptr) {
+    injector_->inject(FailurePoint::begin);
+  }
+  return unit;
 }
 
-SqliteStoragePorts::SqliteStoragePorts(SqliteStorageService &db)
-    : catalog_(db), source_(db), symbols_(db), types_(db), facts_(db),
-      definitions_(db), includes_(db), schema_(db), units_(db) {}
+SqliteStoragePorts::SqliteStoragePorts(SqliteStorageService &db,
+                                       FailureInjector *injector)
+    : catalog_(db), source_(db), symbols_(db, injector), types_(db),
+      facts_(db), definitions_(db), includes_(db), schema_(db),
+      units_(db, injector) {}
 
 } // namespace cidx::storage

@@ -25,6 +25,27 @@ struct IndexIdentity {
   std::string workspace = "workspace:memory";
 };
 
+struct DefinitionRow {
+  int64_t symbol_id = -1;
+  std::optional<int64_t> file_id;
+  std::optional<int64_t> line, col, end_line, end_col;
+  std::optional<std::string> init_text;
+};
+
+struct EdgeSiteRow {
+  int64_t edge_id = -1;
+  std::optional<int64_t> file_id;
+  std::optional<int64_t> line;
+  std::optional<int64_t> col;
+  bool conditional = false;
+  std::optional<std::string> args_sig;
+  std::optional<std::string> recv_src_kind;
+  std::optional<std::string> recv_type_usr;
+  std::optional<std::string> recv_decl_usr;
+  std::optional<int64_t> recv_param_pos;
+  std::optional<int64_t> recv_type_is_value;
+};
+
 // v35: an explicit declared program/dependency universe. The key is the
 // portable part of a symbol identity; id is database-local only.
 struct SemanticUniverse {
@@ -162,6 +183,18 @@ struct Symbol {
   // Transient translation-unit/build identity; never persisted as a column.
   std::optional<std::string> identity_translation_unit;
   int64_t id = -1;
+};
+
+struct GraphEdgeRow {
+  int64_t eid = -1;
+  int64_t src_id = -1;
+  int64_t dst_id = -1;
+  int64_t ekind = 0;
+  int64_t ecount = 0;
+  int64_t rawcount = 0;
+  std::optional<int64_t> base_access;
+  std::optional<int64_t> is_virtual;
+  Symbol sym;
 };
 
 // Complete input payload for minting a reference/stub symbol. These fields

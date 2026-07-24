@@ -20,8 +20,8 @@
 #include <vector>
 
 #include "catalogs/generated_catalog.hpp"
+#include "graph/ports.hpp"
 #include "graph/records.hpp"
-#include "storage/storage.hpp"
 
 namespace cidx::graph {
 
@@ -78,7 +78,7 @@ class GraphQuery {
 public:
   // Open or wrap an existing SQLite service. `db_path` is used only for error
   // messages.
-  explicit GraphQuery(SqliteStorageService &db, std::string db_path = "");
+  explicit GraphQuery(GraphReadPort &db, std::string db_path = "");
 
   // Convenience: open from path (reserved for a service opened at path).
   // Throws NoIndexError when the DB file does not exist.
@@ -238,7 +238,7 @@ public:
   [[nodiscard]] const std::string &db_path() const { return db_path_; }
 
 private:
-  SqliteStorageService &db_;
+  GraphReadPort &db_;
   std::string db_path_;
   std::optional<bool> resolved_; // memoized _is_resolved
   std::optional<std::unordered_map<
@@ -250,7 +250,7 @@ private:
                            std::pair<std::string, std::optional<std::string>>> &
   files();
 
-  Sym make_sym_from_row(const SqliteStorageService::GraphEdgeRow &row);
+  Sym make_sym_from_row(const GraphEdgeRow &row);
   Sym make_sym_from_symbol(const Symbol &sym);
   // v30: display info for a type_node id (nullopt when absent).
   std::optional<TypeInfo> type_info(int64_t type_id);
@@ -260,7 +260,7 @@ private:
   sites_for(const std::vector<int64_t> &edge_ids);
 
   // Resolve site file_id to abs path using the file cache.
-  Site make_site(const SqliteStorageService::EdgeSiteRow &row);
+  Site make_site(const EdgeSiteRow &row);
 };
 
 } // namespace cidx::graph

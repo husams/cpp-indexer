@@ -495,7 +495,8 @@ void set_int_member(Value &value, std::string_view key, int64_t number) {
 } // namespace
 
 Value build_graph_view(Storage &db, const GraphViewRequest &request) {
-  graph::GraphQuery graph(db, "<ui>");
+  query::SqliteQueryReadAdapter graph_read(db);
+  graph::GraphQuery graph(graph_read, "<ui>");
   const IndexIdentity identity = db.index_identity();
   const std::string freshness = identity.freshness;
   const int node_budget = std::clamp(request.node_budget, 1, 10000);
