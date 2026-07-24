@@ -1,0 +1,76 @@
+{
+  "specVersion": "1.0.0",
+  "normativeBoundary": "The checked-in TLA+ modules, model configurations, protected predicates, and trusted-assumption register define observable CIDX behavior independently of implementation structure.",
+  "modules": [
+    "modules/CidxTypes.tla",
+    "modules/CidxRepository.tla",
+    "modules/CidxResult.tla",
+    "modules/CidxBehavior.tla",
+    "protected/CidxProtected.tla"
+  ],
+  "models": [
+    {
+      "module": "models/CidxRepositorySmoke.tla",
+      "config": "models/CidxRepositorySmoke.cfg",
+      "invariants": ["TypeInvariant", "RepositoryStructureInvariant", "SharedStatusInvariant", "ProtectedInvariant"]
+    },
+    {
+      "module": "models/CidxResultSmoke.tla",
+      "config": "models/CidxResultSmoke.cfg",
+      "invariants": ["SharedResultTypeInvariant", "SharedStatusInvariant", "TrustedOutcomeInvariant"]
+    },
+    {
+      "module": "models/CidxBehaviorSmoke.tla",
+      "config": "models/CidxBehaviorSmoke.cfg",
+      "invariants": [
+        "TypeInvariant",
+        "NoPartialGenerationInvariant",
+        "AtomicPublicationInvariant",
+        "InvalidationInvariant",
+        "FailureHonestyInvariant",
+        "QueryHonestyInvariant",
+        "MigrationInvariant",
+        "IdentityInvariant",
+        "TraceInvariant",
+        "ProtectedInvariant"
+      ]
+    }
+  ],
+  "coverage": {
+    "workspace-and-identity": {
+      "modules": ["CidxRepository", "CidxBehavior"],
+      "invariants": ["TypeInvariant", "RepositoryStructureInvariant", "IdentityInvariant"]
+    },
+    "index-and-generation-lifecycle": {
+      "modules": ["CidxBehavior"],
+      "invariants": ["NoPartialGenerationInvariant", "AtomicPublicationInvariant", "InvalidationInvariant"]
+    },
+    "semantic-graph": {
+      "modules": ["CidxTypes", "CidxRepository"],
+      "invariants": ["TypeInvariant", "RepositoryStructureInvariant", "ProtectedInvariant"]
+    },
+    "query-plan-and-cxq": {
+      "modules": ["CidxBehavior", "CidxResult"],
+      "invariants": ["QueryHonestyInvariant", "SharedResultTypeInvariant", "TrustedOutcomeInvariant"]
+    },
+    "storage-sidecars-and-migrations": {
+      "modules": ["CidxBehavior"],
+      "invariants": ["MigrationInvariant", "NoPartialGenerationInvariant"]
+    },
+    "include-hygiene-and-transformations": {
+      "modules": ["CidxBehavior"],
+      "invariants": ["FailureHonestyInvariant", "QueryHonestyInvariant"]
+    }
+  },
+  "protectedPaths": [
+    "protected/",
+    "trusted/",
+    "modules/CidxTypes.tla",
+    "models/*.cfg"
+  ],
+  "conformance": {
+    "operations": "conformance/operation-map.json",
+    "observations": "conformance/observation-map.json",
+    "scenarios": "conformance/scenarios.json"
+  }
+}

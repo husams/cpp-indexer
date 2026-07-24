@@ -1,0 +1,47 @@
+{
+  "version": "1.0.0",
+  "scenarios": [
+    {
+      "id": "ambiguous-query",
+      "kind": "normal",
+      "actions": ["ImportWorkspace", "CaptureConfiguration", "StartIndexing", "IndexSuccessfully", "PublishGeneration", "StartQuery", "ReturnQuery"],
+      "observations": ["publicationState=current", "queryResultState=ambiguous"],
+      "purpose": "A bounded query reports ambiguity instead of claiming a complete answer."
+    },
+    {
+      "id": "incomplete-transform",
+      "kind": "incomplete",
+      "actions": ["ImportWorkspace", "CaptureConfiguration", "StartIndexing", "IndexSuccessfully", "PublishGeneration", "PlanTransform", "RejectIncompleteTransform"],
+      "observations": ["transformState=failed", "failureMode=incomplete-evidence"],
+      "purpose": "Incomplete evidence cannot authorize a destructive or derived transform."
+    },
+    {
+      "id": "interrupted-migration",
+      "kind": "interruption",
+      "actions": ["ImportWorkspace", "CaptureConfiguration", "StartIndexing", "IndexSuccessfully", "PublishGeneration", "BeginMigration", "InterruptMigration", "RecoverMigration"],
+      "observations": ["storageState=ready", "currentGeneration=1"],
+      "purpose": "Migration interruption requires recovery and preserves the published generation."
+    },
+    {
+      "id": "interrupted-publication",
+      "kind": "interruption",
+      "actions": ["ImportWorkspace", "CaptureConfiguration", "StartIndexing", "IndexSuccessfully", "InterruptPublication"],
+      "observations": ["publicationState=stale", "indexState=stale"],
+      "purpose": "A candidate generation is never reported as current after interruption."
+    },
+    {
+      "id": "normal-index-query",
+      "kind": "normal",
+      "actions": ["ImportWorkspace", "CaptureConfiguration", "StartIndexing", "IndexSuccessfully", "PublishGeneration", "StartQuery", "ReturnQuery"],
+      "observations": ["publicationState=current", "queryState=complete"],
+      "purpose": "The normal workspace-to-index-to-query lifecycle."
+    },
+    {
+      "id": "stale-invalidation",
+      "kind": "stale",
+      "actions": ["ImportWorkspace", "CaptureConfiguration", "StartIndexing", "IndexSuccessfully", "PublishGeneration", "InvalidateGeneration"],
+      "observations": ["invalidated=true", "publicationState=stale"],
+      "purpose": "Dependency invalidation withdraws current status before a replacement generation is published."
+    }
+  ]
+}

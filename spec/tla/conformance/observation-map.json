@@ -1,0 +1,13 @@
+{
+  "version": "1.0.0",
+  "observations": [
+    {"field": "workspaceState", "source": "workspace/import result", "allowed": ["empty", "imported", "captured"]},
+    {"field": "configState", "source": "captured translation-unit configuration", "allowed": ["uncaptured", "captured"]},
+    {"field": "indexState", "source": "index operation status", "allowed": ["empty", "indexing", "indexed", "current", "stale", "failed"]},
+    {"field": "publicationState", "source": "generation manifest publication", "allowed": ["none", "candidate", "current", "stale"]},
+    {"field": "transformState", "source": "derived transform result", "allowed": ["idle", "planned", "applied", "failed"]},
+    {"field": "queryResultState", "source": "result status/evidence envelope", "allowed": ["none", "complete", "partial", "ambiguous", "unknown"]},
+    {"field": "storageState", "source": "migration/recovery status", "allowed": ["ready", "migrating", "recovery-required"]},
+    {"field": "currentGeneration", "source": "published generation identity", "type": "non-negative integer"}
+  ]
+}

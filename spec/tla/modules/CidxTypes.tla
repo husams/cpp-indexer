@@ -69,6 +69,20 @@ ResultStatuses == {
     "unknown"
 }
 
+(* Observable lifecycle and result domains shared by the behavioral models. *)
+WorkspaceStates == {"empty", "imported", "captured"}
+ConfigurationStates == {"uncaptured", "captured"}
+IndexStates == {"empty", "indexing", "indexed", "current", "stale", "failed"}
+PublicationStates == {"none", "candidate", "current", "stale"}
+TransformStates == {"idle", "planned", "applied", "failed"}
+QueryStates == {"idle", "running", "complete"}
+StorageStates == {"ready", "migrating", "recovery-required"}
+ArtifactStates == {"none", "published", "derived"}
+FailureModes == {"none", "index-failure", "interrupted", "incomplete-evidence"}
+EvidenceStates == {"complete", "incomplete"}
+QueryResultStates == {"none", "complete", "partial", "ambiguous", "unknown"}
+IdentityModes == {"separate", "merged"}
+
 ElementIds == WorkspaceIds
     \cup RepositoryIds
     \cup ComponentIds

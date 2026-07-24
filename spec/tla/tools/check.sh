@@ -97,6 +97,19 @@ required_properties() {
     CidxWorkspaceLifecycleSmoke)
       printf '%s\n' RebuildEventuallySettles
       ;;
+    CidxBehaviorSmoke)
+      printf '%s\n' \
+        TypeInvariant \
+        NoPartialGenerationInvariant \
+        AtomicPublicationInvariant \
+        InvalidationInvariant \
+        FailureHonestyInvariant \
+        QueryHonestyInvariant \
+        MigrationInvariant \
+        IdentityInvariant \
+        TraceInvariant \
+        ProtectedInvariant
+      ;;
     *)
       echo "TLA_CONFIG_STATUS=FAIL reason=unknown-model-$1" >&2
       exit 25
@@ -122,6 +135,7 @@ run_model() {
     cat "$WORK/${model}.invariants.diff" >&2
     exit 25
   fi
+  echo "TLA_INVARIANT_STATUS=PASS model=$model invariants=$(paste -sd, "$actual_file")"
 
   required_properties "$model" | LC_ALL=C sort >"$required_properties_file"
   awk '$1 == "PROPERTY" { print $2 }' "$cfg" | LC_ALL=C sort >"$actual_properties_file"
@@ -142,6 +156,7 @@ run_model() {
   if ! (cd "$WORK" && "$JAVA_BIN" -jar "$JAR" \
       -workers 1 \
       -fp 0 \
+      -seed 1 \
       -nowarning \
       -metadir "$WORK/meta-${model}" \
       -config "$cfg" \
@@ -160,9 +175,9 @@ run_model() {
   echo "TLA_MODEL_STATUS=PASS model=$model invariants=$invariants"
 }
 
-for model in ${TLA_MODELS:-CidxRepositorySmoke CidxResultSmoke CidxWorkspaceLifecycleSmoke}; do
+for model in ${TLA_MODELS:-CidxRepositorySmoke CidxResultSmoke CidxWorkspaceLifecycleSmoke CidxBehaviorSmoke}; do
   run_model "$model"
 done
 
 echo "TLA_TOOLCHAIN_STATUS=PASS version=$TOOLS_VERSION java=17"
-echo "TLA_CHECK_STATUS=PASS models=${TLA_MODELS:-CidxRepositorySmoke,CidxResultSmoke,CidxWorkspaceLifecycleSmoke} workers=1 fingerprint=0"
+echo "TLA_CHECK_STATUS=PASS models=${TLA_MODELS:-CidxRepositorySmoke,CidxResultSmoke,CidxWorkspaceLifecycleSmoke,CidxBehaviorSmoke} workers=1 fingerprint=0 seed=1"

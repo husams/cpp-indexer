@@ -4,7 +4,9 @@ TLA+ is the normative behavioral specification of CIDX itself. The modules in
 this directory define the vocabulary, state transitions, invariants, fairness
 obligations, and result statuses that future CIDX specifications must reuse.
 The C++ indexer, Python query surface, SQLite schema, and generated artifacts
-are implementations or evidence; none is a semantic axiom here.
+are implementations or evidence; none is a semantic axiom here. The current
+specification version is recorded in `manifest.json` and is advanced only by a
+reviewed contract change.
 
 ## Layout
 
@@ -14,10 +16,14 @@ are implementations or evidence; none is a semantic axiom here.
 | `modules/CidxRepository.tla` | repository/workspace structure smoke specification | human-authored normative contract |
 | `modules/CidxResult.tla` | result-status lifecycle smoke specification | human-authored normative contract |
 | `modules/CidxWorkspaceLifecycle.tla` | workspace identity, configuration applicability, and generation lifecycle | human-authored normative contract |
+| `modules/CidxBehavior.tla` | bounded end-to-end lifecycle, identity, query, transform, storage, failure, and recovery behavior | human-authored normative contract |
 | `models/*.tla` and `models/*.cfg` | finite TLC smoke models and their constants/invariants | human-authored model boundary |
+| `manifest.json` | versioned module/model/invariant inventory | human-authored contract index |
 | `protected/CidxProtected.tla` | protected invariant predicates consumed by models | explicit human review required |
 | `trusted/assumptions.md` | trusted external assumptions and review rules | explicit human review required |
+| `conformance/` | operation/observation mappings and deterministic scenario traces | implementation adapter contract |
 | `tools/check.sh` | pinned syntax and TLC command-line gate | human-authored tool contract |
+| `tools/check-conformance.sh` | conformance inventory and scenario determinism gate | human-authored tool contract |
 | `generated/` | disposable reports and translated output only | generator-owned, ignored |
 
 The dependency direction is intentionally one-way:
@@ -26,6 +32,7 @@ The dependency direction is intentionally one-way:
 CidxTypes <- CidxRepository <- CidxRepositorySmoke
           <- CidxResult     <- CidxResultSmoke
           <- CidxWorkspaceLifecycle <- CidxWorkspaceLifecycleSmoke
+          <- CidxBehavior <- CidxBehaviorSmoke
 ```
 
 `CidxProtected` is a policy module imported by the repository model. Later
@@ -90,6 +97,14 @@ The model deliberately treats those implementation issues as observable
 contracts: it does not import their C++ types, SQLite tables, or filesystem
 operations.
 
+`CidxBehavior` covers the M0 observable pipeline: workspace import,
+configuration capture, indexing, atomic publication, invalidation, derived
+transforms, read-only query outcomes, migration interruption/recovery, and
+semantic-universe identity separation/merging. It deliberately abstracts
+Clang, SQLite, filesystem durability, query algorithms, and implementation
+performance. The conformance package maps those abstract actions to observed
+C++ operations without importing implementation details into the model.
+
 ## Reproducible check
 
 From the repository root, run:
@@ -104,13 +119,21 @@ The protected-invariant mutation regression is checked separately with:
 spec/tla/tools/check-regression.sh
 ```
 
+The machine-readable conformance and deterministic scenario gate is checked
+separately with:
+
+```bash
+spec/tla/tools/check-conformance.sh
+```
+
 The checker downloads and SHA-256 verifies the pinned `tla2tools.jar` when it
 is not already cached, requires Java 17, runs SANY syntax checks first, then
 runs TLC with one worker and fingerprint polynomial 0 for each checked-in
 model. It emits stable `TLA_SYNTAX_STATUS`, `TLA_MODEL_STATUS`,
-`TLA_TOOLCHAIN_STATUS`, and `TLA_CHECK_STATUS` lines. Syntax/toolchain failures
-and model failures have distinct exit classes, and the CI workflow exposes the
-TLA+ gate separately from C++ tests. The checker cross-checks every model's
+`TLA_INVARIANT_STATUS`, `TLA_TOOLCHAIN_STATUS`, and `TLA_CHECK_STATUS` lines.
+Syntax/toolchain failures and model failures have distinct exit classes, and
+the CI workflow exposes syntax, model, invariant, conformance, and C++ gates
+separately. The checker cross-checks every model's
 required invariant set against the `INVARIANT` entries in its `.cfg`; the
 regression command proves that removing `ProtectedInvariant` fails closed.
 

@@ -41,6 +41,12 @@ named, scoped, and reviewed rather than silently encoded as axioms.
 
 ## Protected files and review ownership
 
+AI-generated implementation changes may consume this contract but may not
+weaken, delete, or rewrite a protected invariant or trusted assumption without
+explicit human review. The repository owner rules below are the minimum review
+boundary; branch protection must require those owners for changes under these
+paths.
+
 The following paths are protected human-authored inputs:
 
 - `spec/tla/protected/`
