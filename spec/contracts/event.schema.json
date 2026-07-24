@@ -21,7 +21,7 @@
     },
     "operation": {
       "type": "string",
-      "maxLength": 4096
+      "x-maxUtf8Bytes": 4096
     },
     "event": {
       "enum": [
@@ -32,7 +32,7 @@
     },
     "message": {
       "type": "string",
-      "maxLength": 4096
+      "x-maxUtf8Bytes": 4096
     },
     "completed": {
       "type": "integer",

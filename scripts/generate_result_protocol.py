@@ -20,13 +20,15 @@ def load() -> dict:
     data = json.loads(SOURCE.read_text(encoding="utf-8"))
     if data.get("format") != "cidx.result-protocol/v1":
         raise ValueError("unsupported result protocol source")
-    for key in ("statuses", "exit_classes", "freshness", "completeness_states", "diagnostic_severities", "evidence_classes", "trust_levels", "event_kinds", "diagnostic_codes", "artifact_kinds", "diagnostic_invariants", "acceptance_vectors"):
+    for key in ("statuses", "exit_classes", "freshness", "completeness_states", "diagnostic_severities", "evidence_classes", "trust_levels", "event_kinds", "diagnostic_codes", "artifact_kinds", "placeholder_identities", "diagnostic_invariants", "diagnostic_status_invariants", "acceptance_vectors", "adversarial_vectors"):
         if not data.get(key):
             raise ValueError(f"protocol source requires {key}")
     status_set = set(data["statuses"])
     freshness_set = set(data["freshness"])
     state_set = set(data["completeness_states"])
     diagnostic_set = set(data["diagnostic_codes"])
+    if len(data["placeholder_identities"]) != len(set(data["placeholder_identities"])):
+        raise ValueError("placeholder identities must be unique")
     if data["numeric"]["min_integer"] >= data["numeric"]["max_integer"]:
         raise ValueError("numeric integer bounds are invalid")
     for invariant in data["diagnostic_invariants"]:
@@ -34,6 +36,19 @@ def load() -> dict:
             raise ValueError("diagnostic invariant contains an unknown domain value")
         if not set(invariant.get("freshness", freshness_set)).issubset(freshness_set):
             raise ValueError("diagnostic invariant contains an unknown freshness")
+    seen_statuses = set()
+    for invariant in data["diagnostic_status_invariants"]:
+        status = invariant["status"]
+        if status not in status_set or status in seen_statuses:
+            raise ValueError("diagnostic status invariants must cover each status once")
+        seen_statuses.add(status)
+        for key in ("required_any", "forbidden"):
+            if not set(invariant.get(key, [])).issubset(diagnostic_set):
+                raise ValueError("diagnostic status invariant contains an unknown code")
+        if set(invariant.get("required_any", [])) & set(invariant.get("forbidden", [])):
+            raise ValueError("diagnostic status invariant requires and forbids the same code")
+    if seen_statuses != status_set:
+        raise ValueError("diagnostic status invariants must cover every status")
     exit_set = {item["name"] for item in data["exit_classes"]}
     exit_codes = {item["name"]: item["code"] for item in data["exit_classes"]}
     for vector in data["acceptance_vectors"]:
@@ -65,13 +80,18 @@ def render_cpp(data: dict) -> str:
         for key in ("freshness", "completeness_states", "diagnostic_severities", "evidence_classes", "trust_levels", "event_kinds", "diagnostic_codes", "artifact_kinds")
     )
     rule_rows = "\n".join(
-        f'  {{"{r["code"]}", ExitClass::{enum_name(r["class"])}, {r["exit_code"]}}},'
+        f'  {{.code = "{r["code"]}", .exit_class = ExitClass::{enum_name(r["class"])}, .exit_code = {r["exit_code"]}}},'
         for r in rules
     )
     vector_rows = "\n".join(
-        f'  {{"{v["name"]}", "{v["operation"]}", Status::{enum_name(v["status"])}, "{v["state"]}", "{v["freshness"]}", {json.dumps(v["diagnostic"] or "")}, ExitClass::{enum_name(v["exit_class"])}, {v["exit_code"]}}},'
+        f'  {{.name = "{v["name"]}", .operation = "{v["operation"]}", .status = Status::{enum_name(v["status"])}, .completeness_state = "{v["state"]}", .freshness = "{v["freshness"]}", .diagnostic = {json.dumps(v["diagnostic"] or "")}, .exit_class = ExitClass::{enum_name(v["exit_class"])}, .exit_code = {v["exit_code"]}}},'
         for v in vectors
     )
+    status_rule_rows = "\n".join(
+        f'  {{.status = Status::{enum_name(rule["status"])}, .required_any = {json.dumps("|".join(rule.get("required_any", [])))}, .forbidden = {json.dumps("|".join(rule.get("forbidden", [])))}}},'
+        for rule in data["diagnostic_status_invariants"]
+    )
+    status_rule_type = "struct DiagnosticStatusRule { Status status; std::string_view required_any; std::string_view forbidden; };"
     limit_lines = "\n".join(f"inline constexpr std::size_t k{enum_name(k)} = {v};" for k, v in limits.items())
     numeric_lines = "\n".join(
         f"inline constexpr long long k{enum_name(key)} = "
@@ -98,11 +118,18 @@ enum class ExitClass : std::uint8_t {{
   {exit_enum}
 }};
 struct ExitRule {{ std::string_view code; ExitClass exit_class; int exit_code; }};
+{status_rule_type}
 struct AcceptanceVector {{ std::string_view name; std::string_view operation; Status status; std::string_view completeness_state; std::string_view freshness; std::string_view diagnostic; ExitClass exit_class; int exit_code; }};
 inline constexpr std::array<std::string_view, {len(statuses)}> kStatusNames = {{{{{status_names}}}}};
 inline constexpr std::array<std::string_view, {len(exits)}> kExitClassNames = {{{{{exit_names}}}}};
 inline constexpr std::array<int, {len(exits)}> kExitCodes = {{{{{exit_codes}}}}};
 {domain_arrays}
+inline constexpr std::array<std::string_view, {len(data["placeholder_identities"])}> kPlaceholderIdentities = {{{{{", ".join(json.dumps(x) for x in data["placeholder_identities"])}}}}};
+inline constexpr std::size_t kOversizedAsciiBytes = {data["adversarial_vectors"]["oversized_ascii_bytes"]};
+inline constexpr std::size_t kOversizedMultibyteChars = {data["adversarial_vectors"]["oversized_multibyte_chars"]};
+inline constexpr std::array<DiagnosticStatusRule, {len(data["diagnostic_status_invariants"])}> kDiagnosticStatusRules = {{{{
+{status_rule_rows}
+}}}};
 inline constexpr std::array<ExitRule, {len(rules)}> kExitReasonPrecedence = {{{{
 {rule_rows}
 }}}};
@@ -120,6 +147,7 @@ def render_python(data: dict) -> str:
     vector_repr = repr(tuple({"name": v["name"], "operation": v["operation"], "status": v["status"], "state": v["state"], "freshness": v["freshness"], "diagnostic": v["diagnostic"], "exit_class": v["exit_class"], "exit_code": v["exit_code"]} for v in data["acceptance_vectors"]))
     exit_repr = repr({e["name"]: e["code"] for e in exits})
     rules_repr = repr(tuple((r["code"], r["class"], r["exit_code"]) for r in data["exit_reason_precedence"]))
+    status_rules_repr = repr({rule["status"]: {"required_any": tuple(rule.get("required_any", [])), "forbidden": tuple(rule.get("forbidden", []))} for rule in data["diagnostic_status_invariants"]})
     enums = "\n".join(f"    {enum_name(v).upper()} = {v!r}" for v in statuses)
     exit_enums = "\n".join(f"    {v['name'].upper()} = {v['name']!r}" for v in exits)
     limit_lines = "\n".join(f"{k.upper()} = {v}" for k, v in limits.items())
@@ -143,6 +171,10 @@ class ExitClass(StrEnum):
 
 EXIT_CODES = {exit_repr}
 EXIT_REASON_PRECEDENCE = {rules_repr}
+PLACEHOLDER_IDENTITIES = {tuple(data["placeholder_identities"])!r}
+OVERSIZED_ASCII_BYTES = {data["adversarial_vectors"]["oversized_ascii_bytes"]}
+OVERSIZED_MULTIBYTE_CHARS = {data["adversarial_vectors"]["oversized_multibyte_chars"]}
+DIAGNOSTIC_STATUS_RULES = {status_rules_repr}
 ACCEPTANCE_VECTORS = {vector_repr}
 '''
 
@@ -150,7 +182,7 @@ ACCEPTANCE_VECTORS = {vector_repr}
 def bounded_schema(data: dict) -> dict:
     limits = data["limits"]
     numeric = data["numeric"]
-    text = {"type": "string", "maxLength": limits["max_text_bytes"]}
+    text = {"type": "string", "x-maxUtf8Bytes": limits["max_text_bytes"]}
     defs: dict[str, dict] = {}
     primitive = [text, {"type": "integer", "minimum": numeric["min_integer"], "maximum": numeric["max_integer"]}, {"type": "boolean"}, {"type": "null"}]
     for depth in range(limits["max_result_depth"] + 1):
@@ -167,7 +199,12 @@ def bounded_schema(data: dict) -> dict:
 def render_schema(data: dict) -> dict:
     limits = data["limits"]
     numeric = data["numeric"]
-    text = {"type": "string", "maxLength": limits["max_text_bytes"]}
+    text = {"type": "string", "x-maxUtf8Bytes": limits["max_text_bytes"]}
+    identity_text = {
+        **text,
+        "minLength": 1,
+        "not": {"enum": data["placeholder_identities"]},
+    }
     schema = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$defs": bounded_schema(data),
@@ -179,7 +216,7 @@ def render_schema(data: dict) -> dict:
             "protocol": {"const": "cidx.result/v1"}, "operation": {**text, "pattern": "^[a-z][a-z0-9._-]*$"},
             "status": {"enum": data["statuses"]}, "exit_class": {"enum": [x["name"] for x in data["exit_classes"]]}, "exit_code": {"type": "integer", "minimum": 0, "maximum": 6},
             "result": {"type": "object", "maxProperties": limits["max_result_properties"], "additionalProperties": {"$ref": "#/$defs/value0"}},
-            "identity": {"type": "object", "required": ["workspace", "index", "fact_sets", "freshness", "source_revision", "source_fingerprint"], "additionalProperties": False, "properties": {"workspace": text, "index": text, "fact_sets": {"type": "array", "maxItems": limits["max_fact_sets"], "items": text}, "freshness": {"enum": data["freshness"]}, "source_revision": {"anyOf": [text, {"type": "null"}]}, "source_fingerprint": {"anyOf": [text, {"type": "null"}]}}},
+            "identity": {"type": "object", "required": ["workspace", "index", "fact_sets", "freshness", "source_revision", "source_fingerprint"], "additionalProperties": False, "properties": {"workspace": identity_text, "index": identity_text, "fact_sets": {"type": "array", "maxItems": limits["max_fact_sets"], "items": text}, "freshness": {"enum": data["freshness"]}, "source_revision": {"anyOf": [text, {"type": "null"}]}, "source_fingerprint": {"anyOf": [text, {"type": "null"}]}}},
             "producer": {"type": "object", "required": ["package", "version", "backend", "schema_version"], "additionalProperties": False, "properties": {"package": text, "version": text, "backend": text, "schema_version": {"type": "integer", "minimum": 1, "maximum": numeric["max_integer"]}}},
             "completeness": {"type": "object", "required": ["state", "truncated", "stale", "budget"], "additionalProperties": False, "properties": {"state": {"enum": data["completeness_states"]}, "truncated": {"type": "boolean"}, "stale": {"type": "boolean"}, "budget": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": numeric["max_integer"]}, {"type": "null"}]}}},
             "diagnostics": {"type": "array", "maxItems": limits["max_diagnostics"], "items": {"type": "object", "required": ["code", "severity", "message"], "additionalProperties": False, "properties": {"code": {"enum": data["diagnostic_codes"]}, "severity": {"enum": data["diagnostic_severities"]}, "message": text, "next_action": {"anyOf": [text, {"type": "null"}]}}}},
@@ -205,6 +242,13 @@ def render_schema(data: dict) -> dict:
     }
     for status, properties in status_conditions.items():
         schema.setdefault("allOf", []).append({"if": {"properties": {"status": {"const": status}}}, "then": {"properties": properties}})
+    for rule in data["diagnostic_status_invariants"]:
+        then_all_of = []
+        if rule.get("required_any"):
+            then_all_of.append({"properties": {"diagnostics": {"contains": {"type": "object", "required": ["code"], "properties": {"code": {"enum": rule["required_any"]}}}}}})
+        if rule.get("forbidden"):
+            then_all_of.append({"properties": {"diagnostics": {"not": {"contains": {"type": "object", "required": ["code"], "properties": {"code": {"enum": rule["forbidden"]}}}}}}})
+        schema.setdefault("allOf", []).append({"if": {"properties": {"status": {"const": rule["status"]}}}, "then": {"allOf": then_all_of}})
     schema.setdefault("allOf", []).append({"if": {"properties": {"completeness": {"properties": {"truncated": {"const": True}}}}}, "then": {"properties": {"status": {"const": "partial"}}}})
     schema.setdefault("allOf", []).append({"if": {"properties": {"identity": {"properties": {"freshness": {"const": "stale"}}}}}, "then": {"properties": {"status": {"const": "unknown"}}}})
     for depth in range(limits["max_evidence_depth"] + 1):
@@ -218,11 +262,12 @@ def render_schema(data: dict) -> dict:
 def render_event_schema(data: dict) -> dict:
     limits = data["limits"]
     maximum = data["numeric"]["max_integer"]
-    return {"$schema": "https://json-schema.org/draft/2020-12/schema", "title": "CIDX JSONL event v1", "type": "object", "required": ["protocol", "sequence", "operation", "event", "message"], "additionalProperties": False, "properties": {"protocol": {"const": "cidx.event/v1"}, "sequence": {"type": "integer", "minimum": 0, "maximum": maximum}, "operation": {"type": "string", "maxLength": limits["max_text_bytes"]}, "event": {"enum": data["event_kinds"]}, "message": {"type": "string", "maxLength": limits["max_text_bytes"]}, "completed": {"type": "integer", "minimum": 0, "maximum": maximum}, "total": {"type": "integer", "minimum": 0, "maximum": maximum}}}
+    text = {"type": "string", "x-maxUtf8Bytes": limits["max_text_bytes"]}
+    return {"$schema": "https://json-schema.org/draft/2020-12/schema", "title": "CIDX JSONL event v1", "type": "object", "required": ["protocol", "sequence", "operation", "event", "message"], "additionalProperties": False, "properties": {"protocol": {"const": "cidx.event/v1"}, "sequence": {"type": "integer", "minimum": 0, "maximum": maximum}, "operation": text, "event": {"enum": data["event_kinds"]}, "message": text, "completed": {"type": "integer", "minimum": 0, "maximum": maximum}, "total": {"type": "integer", "minimum": 0, "maximum": maximum}}}
 
 
 def render_error_schema(data: dict) -> dict:
-    return {"$schema": "https://json-schema.org/draft/2020-12/schema", "title": "CIDX stable error reduction", "type": "object", "required": ["status", "code", "message", "exit_class", "exit_code"], "additionalProperties": False, "properties": {"status": {"const": "error"}, "code": {"enum": data["diagnostic_codes"]}, "message": {"type": "string", "maxLength": data["limits"]["max_text_bytes"]}, "exit_class": {"enum": [x["name"] for x in data["exit_classes"] if x["name"] != "success"]}, "exit_code": {"type": "integer", "minimum": 1, "maximum": data["numeric"]["max_integer"]}}}
+    return {"$schema": "https://json-schema.org/draft/2020-12/schema", "title": "CIDX stable error reduction", "type": "object", "required": ["status", "code", "message", "exit_class", "exit_code"], "additionalProperties": False, "properties": {"status": {"const": "error"}, "code": {"enum": data["diagnostic_codes"]}, "message": {"type": "string", "x-maxUtf8Bytes": data["limits"]["max_text_bytes"]}, "exit_class": {"enum": [x["name"] for x in data["exit_classes"] if x["name"] != "success"]}, "exit_code": {"type": "integer", "minimum": 1, "maximum": data["numeric"]["max_integer"]}}}
 
 
 def write_or_check(outputs: dict[Path, str], check: bool) -> int:

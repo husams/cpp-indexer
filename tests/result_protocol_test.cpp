@@ -132,6 +132,43 @@ TEST_CASE(
   CHECK(envelope.error_status_json().t == cidx::json_out::Value::T::Obj);
 }
 
+TEST_CASE("result protocol rejects generated placeholders, weak reasons, and "
+          "oversized identities") {
+  using namespace cidx::protocol;
+  for (const auto placeholder : generated::kPlaceholderIdentities) {
+    auto envelope = golden_envelope();
+    envelope.identity.workspace = std::string(placeholder);
+    CHECK_FALSE(envelope.valid());
+    envelope = golden_envelope();
+    envelope.identity.index = std::string(placeholder);
+    CHECK_FALSE(envelope.valid());
+  }
+
+  auto envelope = golden_envelope();
+  envelope.diagnostics = {{"unknown", "warning", "weak", std::nullopt}};
+  CHECK_FALSE(envelope.valid());
+  envelope.diagnostics = {
+      {"missing_evidence", "warning", "weak", std::nullopt}};
+  CHECK_FALSE(envelope.valid());
+  envelope.status = Status::Refuted;
+  envelope.completeness = {"unknown", false, false, std::nullopt};
+  envelope.diagnostics.clear();
+  CHECK_FALSE(envelope.valid());
+
+  envelope = golden_envelope();
+  envelope.identity.workspace =
+      std::string(generated::kOversizedAsciiBytes, 'x');
+  CHECK_FALSE(envelope.valid());
+  envelope = golden_envelope();
+  std::string oversized_multibyte;
+  for (std::size_t index = 0; index < generated::kOversizedMultibyteChars;
+       ++index) {
+    oversized_multibyte += "\xF0\x9F\x98\x80";
+  }
+  envelope.identity.workspace = oversized_multibyte;
+  CHECK_FALSE(envelope.valid());
+}
+
 TEST_CASE("progress events and redaction stay separate from final results") {
   using namespace cidx::protocol;
   const ProgressEvent event{3, "index", "progress", "TOKEN=secret", 2, 4};

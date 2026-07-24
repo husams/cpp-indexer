@@ -40,6 +40,7 @@ enum class ExitClass : std::uint8_t {
   InfrastructureFailure
 };
 struct ExitRule { std::string_view code; ExitClass exit_class; int exit_code; };
+struct DiagnosticStatusRule { Status status; std::string_view required_any; std::string_view forbidden; };
 struct AcceptanceVector { std::string_view name; std::string_view operation; Status status; std::string_view completeness_state; std::string_view freshness; std::string_view diagnostic; ExitClass exit_class; int exit_code; };
 inline constexpr std::array<std::string_view, 6> kStatusNames = {{"complete", "partial", "unknown", "refuted", "conditional", "error"}};
 inline constexpr std::array<std::string_view, 6> kExitClassNames = {{"success", "usage", "invalid_or_stale_input", "policy_failure", "unknown", "infrastructure_failure"}};
@@ -52,23 +53,34 @@ inline constexpr std::array<std::string_view, 3> kTrustLevels = {{"unverified", 
 inline constexpr std::array<std::string_view, 3> kEventKinds = {{"progress", "diagnostic", "completed"}};
 inline constexpr std::array<std::string_view, 9> kDiagnosticCodes = {{"usage", "invalid_input", "stale_input", "timeout", "backend_error", "policy_refuted", "unknown", "truncated_budget", "missing_evidence"}};
 inline constexpr std::array<std::string_view, 6> kArtifactKinds = {{"semantic-index", "query-result", "analysis", "diff", "refactoring-plan", "proof"}};
+inline constexpr std::array<std::string_view, 6> kPlaceholderIdentities = {{"", "unknown", "workspace:unknown", "workspace://unknown", "index:unknown", "index://unknown"}};
+inline constexpr std::size_t kOversizedAsciiBytes = 4097;
+inline constexpr std::size_t kOversizedMultibyteChars = 1025;
+inline constexpr std::array<DiagnosticStatusRule, 6> kDiagnosticStatusRules = {{
+  {.status = Status::Complete, .required_any = "", .forbidden = "usage|invalid_input|stale_input|timeout|backend_error|policy_refuted|unknown|truncated_budget|missing_evidence"},
+  {.status = Status::Partial, .required_any = "", .forbidden = "usage|invalid_input|stale_input|timeout|backend_error|policy_refuted|unknown"},
+  {.status = Status::Unknown, .required_any = "stale_input|unknown|missing_evidence", .forbidden = "usage|invalid_input|timeout|backend_error|policy_refuted|truncated_budget"},
+  {.status = Status::Conditional, .required_any = "unknown|missing_evidence", .forbidden = "usage|invalid_input|stale_input|timeout|backend_error|policy_refuted|truncated_budget"},
+  {.status = Status::Refuted, .required_any = "policy_refuted", .forbidden = "usage|invalid_input|stale_input|timeout|backend_error|unknown|truncated_budget|missing_evidence"},
+  {.status = Status::Error, .required_any = "usage|invalid_input|timeout|backend_error", .forbidden = "stale_input|policy_refuted|unknown|truncated_budget|missing_evidence"},
+}};
 inline constexpr std::array<ExitRule, 7> kExitReasonPrecedence = {{
-  {"usage", ExitClass::Usage, 2},
-  {"invalid_input", ExitClass::InvalidOrStaleInput, 3},
-  {"stale_input", ExitClass::InvalidOrStaleInput, 3},
-  {"policy_refuted", ExitClass::PolicyFailure, 4},
-  {"timeout", ExitClass::InfrastructureFailure, 6},
-  {"backend_error", ExitClass::InfrastructureFailure, 6},
-  {"unknown", ExitClass::Unknown, 5},
+  {.code = "usage", .exit_class = ExitClass::Usage, .exit_code = 2},
+  {.code = "invalid_input", .exit_class = ExitClass::InvalidOrStaleInput, .exit_code = 3},
+  {.code = "stale_input", .exit_class = ExitClass::InvalidOrStaleInput, .exit_code = 3},
+  {.code = "policy_refuted", .exit_class = ExitClass::PolicyFailure, .exit_code = 4},
+  {.code = "timeout", .exit_class = ExitClass::InfrastructureFailure, .exit_code = 6},
+  {.code = "backend_error", .exit_class = ExitClass::InfrastructureFailure, .exit_code = 6},
+  {.code = "unknown", .exit_class = ExitClass::Unknown, .exit_code = 5},
 }};
 inline constexpr std::array<AcceptanceVector, 8> kAcceptanceVectors = {{
-  {"complete-query", "query", Status::Complete, "complete", "current", "", ExitClass::Success, 0},
-  {"truncated-path", "query", Status::Partial, "partial", "current", "truncated_budget", ExitClass::Success, 0},
-  {"stale-index", "query", Status::Unknown, "unknown", "stale", "stale_input", ExitClass::InvalidOrStaleInput, 3},
-  {"partial-custom-analysis", "analysis", Status::Partial, "partial", "current", "missing_evidence", ExitClass::Success, 0},
-  {"diff", "diff", Status::Complete, "complete", "current", "", ExitClass::Success, 0},
-  {"refactoring-plan", "refactoring", Status::Conditional, "unknown", "current", "unknown", ExitClass::Unknown, 5},
-  {"refuted-proof", "proof", Status::Refuted, "unknown", "current", "policy_refuted", ExitClass::PolicyFailure, 4},
-  {"infrastructure-error", "index", Status::Error, "unknown", "unverifiable", "backend_error", ExitClass::InfrastructureFailure, 6},
+  {.name = "complete-query", .operation = "query", .status = Status::Complete, .completeness_state = "complete", .freshness = "current", .diagnostic = "", .exit_class = ExitClass::Success, .exit_code = 0},
+  {.name = "truncated-path", .operation = "query", .status = Status::Partial, .completeness_state = "partial", .freshness = "current", .diagnostic = "truncated_budget", .exit_class = ExitClass::Success, .exit_code = 0},
+  {.name = "stale-index", .operation = "query", .status = Status::Unknown, .completeness_state = "unknown", .freshness = "stale", .diagnostic = "stale_input", .exit_class = ExitClass::InvalidOrStaleInput, .exit_code = 3},
+  {.name = "partial-custom-analysis", .operation = "analysis", .status = Status::Partial, .completeness_state = "partial", .freshness = "current", .diagnostic = "missing_evidence", .exit_class = ExitClass::Success, .exit_code = 0},
+  {.name = "diff", .operation = "diff", .status = Status::Complete, .completeness_state = "complete", .freshness = "current", .diagnostic = "", .exit_class = ExitClass::Success, .exit_code = 0},
+  {.name = "refactoring-plan", .operation = "refactoring", .status = Status::Conditional, .completeness_state = "unknown", .freshness = "current", .diagnostic = "unknown", .exit_class = ExitClass::Unknown, .exit_code = 5},
+  {.name = "refuted-proof", .operation = "proof", .status = Status::Refuted, .completeness_state = "unknown", .freshness = "current", .diagnostic = "policy_refuted", .exit_class = ExitClass::PolicyFailure, .exit_code = 4},
+  {.name = "infrastructure-error", .operation = "index", .status = Status::Error, .completeness_state = "unknown", .freshness = "unverifiable", .diagnostic = "backend_error", .exit_class = ExitClass::InfrastructureFailure, .exit_code = 6},
 }};
 } // namespace cidx::protocol::generated

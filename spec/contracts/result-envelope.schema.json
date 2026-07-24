@@ -5,7 +5,7 @@
       "anyOf": [
         {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         {
           "type": "integer",
@@ -38,7 +38,7 @@
       "anyOf": [
         {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         {
           "type": "integer",
@@ -71,7 +71,7 @@
       "anyOf": [
         {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         {
           "type": "integer",
@@ -104,7 +104,7 @@
       "anyOf": [
         {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         {
           "type": "integer",
@@ -137,7 +137,7 @@
       "anyOf": [
         {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         {
           "type": "integer",
@@ -170,7 +170,7 @@
       "anyOf": [
         {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         {
           "type": "integer",
@@ -203,7 +203,7 @@
       "anyOf": [
         {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         {
           "type": "integer",
@@ -236,7 +236,7 @@
       "anyOf": [
         {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         {
           "type": "integer",
@@ -269,7 +269,7 @@
       "anyOf": [
         {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         {
           "type": "integer",
@@ -296,7 +296,7 @@
       "properties": {
         "id": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         "class": {
           "enum": [
@@ -317,13 +317,13 @@
         },
         "summary": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         "source": {
           "anyOf": [
             {
               "type": "string",
-              "maxLength": 4096
+              "x-maxUtf8Bytes": 4096
             },
             {
               "type": "null"
@@ -351,7 +351,7 @@
       "properties": {
         "id": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         "class": {
           "enum": [
@@ -372,13 +372,13 @@
         },
         "summary": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         "source": {
           "anyOf": [
             {
               "type": "string",
-              "maxLength": 4096
+              "x-maxUtf8Bytes": 4096
             },
             {
               "type": "null"
@@ -406,7 +406,7 @@
       "properties": {
         "id": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         "class": {
           "enum": [
@@ -427,13 +427,13 @@
         },
         "summary": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         "source": {
           "anyOf": [
             {
               "type": "string",
-              "maxLength": 4096
+              "x-maxUtf8Bytes": 4096
             },
             {
               "type": "null"
@@ -461,7 +461,7 @@
       "properties": {
         "id": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         "class": {
           "enum": [
@@ -482,13 +482,13 @@
         },
         "summary": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         "source": {
           "anyOf": [
             {
               "type": "string",
-              "maxLength": 4096
+              "x-maxUtf8Bytes": 4096
             },
             {
               "type": "null"
@@ -516,7 +516,7 @@
       "properties": {
         "id": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         "class": {
           "enum": [
@@ -537,13 +537,13 @@
         },
         "summary": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         "source": {
           "anyOf": [
             {
               "type": "string",
-              "maxLength": 4096
+              "x-maxUtf8Bytes": 4096
             },
             {
               "type": "null"
@@ -576,7 +576,7 @@
     },
     "operation": {
       "type": "string",
-      "maxLength": 4096,
+      "x-maxUtf8Bytes": 4096,
       "pattern": "^[a-z][a-z0-9._-]*$"
     },
     "status": {
@@ -625,18 +625,40 @@
       "properties": {
         "workspace": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096,
+          "minLength": 1,
+          "not": {
+            "enum": [
+              "",
+              "unknown",
+              "workspace:unknown",
+              "workspace://unknown",
+              "index:unknown",
+              "index://unknown"
+            ]
+          }
         },
         "index": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096,
+          "minLength": 1,
+          "not": {
+            "enum": [
+              "",
+              "unknown",
+              "workspace:unknown",
+              "workspace://unknown",
+              "index:unknown",
+              "index://unknown"
+            ]
+          }
         },
         "fact_sets": {
           "type": "array",
           "maxItems": 32,
           "items": {
             "type": "string",
-            "maxLength": 4096
+            "x-maxUtf8Bytes": 4096
           }
         },
         "freshness": {
@@ -650,7 +672,7 @@
           "anyOf": [
             {
               "type": "string",
-              "maxLength": 4096
+              "x-maxUtf8Bytes": 4096
             },
             {
               "type": "null"
@@ -661,7 +683,7 @@
           "anyOf": [
             {
               "type": "string",
-              "maxLength": 4096
+              "x-maxUtf8Bytes": 4096
             },
             {
               "type": "null"
@@ -682,15 +704,15 @@
       "properties": {
         "package": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         "version": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         "backend": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         "schema_version": {
           "type": "integer",
@@ -770,13 +792,13 @@
           },
           "message": {
             "type": "string",
-            "maxLength": 4096
+            "x-maxUtf8Bytes": 4096
           },
           "next_action": {
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 4096
+                "x-maxUtf8Bytes": 4096
               },
               {
                 "type": "null"
@@ -819,7 +841,7 @@
           },
           "id": {
             "type": "string",
-            "maxLength": 4096
+            "x-maxUtf8Bytes": 4096
           },
           "schema_version": {
             "type": "integer",
@@ -833,7 +855,7 @@
           },
           "catalog_hash": {
             "type": "string",
-            "maxLength": 4096
+            "x-maxUtf8Bytes": 4096
           }
         }
       }
@@ -848,14 +870,14 @@
       "properties": {
         "command": {
           "type": "string",
-          "maxLength": 4096
+          "x-maxUtf8Bytes": 4096
         },
         "arguments": {
           "type": "array",
           "maxItems": 256,
           "items": {
             "type": "string",
-            "maxLength": 4096
+            "x-maxUtf8Bytes": 4096
           }
         }
       }
@@ -1145,6 +1167,328 @@
             }
           }
         }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "complete"
+          }
+        }
+      },
+      "then": {
+        "allOf": [
+          {
+            "properties": {
+              "diagnostics": {
+                "not": {
+                  "contains": {
+                    "type": "object",
+                    "required": [
+                      "code"
+                    ],
+                    "properties": {
+                      "code": {
+                        "enum": [
+                          "usage",
+                          "invalid_input",
+                          "stale_input",
+                          "timeout",
+                          "backend_error",
+                          "policy_refuted",
+                          "unknown",
+                          "truncated_budget",
+                          "missing_evidence"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "partial"
+          }
+        }
+      },
+      "then": {
+        "allOf": [
+          {
+            "properties": {
+              "diagnostics": {
+                "not": {
+                  "contains": {
+                    "type": "object",
+                    "required": [
+                      "code"
+                    ],
+                    "properties": {
+                      "code": {
+                        "enum": [
+                          "usage",
+                          "invalid_input",
+                          "stale_input",
+                          "timeout",
+                          "backend_error",
+                          "policy_refuted",
+                          "unknown"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "unknown"
+          }
+        }
+      },
+      "then": {
+        "allOf": [
+          {
+            "properties": {
+              "diagnostics": {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "stale_input",
+                        "unknown",
+                        "missing_evidence"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "diagnostics": {
+                "not": {
+                  "contains": {
+                    "type": "object",
+                    "required": [
+                      "code"
+                    ],
+                    "properties": {
+                      "code": {
+                        "enum": [
+                          "usage",
+                          "invalid_input",
+                          "timeout",
+                          "backend_error",
+                          "policy_refuted",
+                          "truncated_budget"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "conditional"
+          }
+        }
+      },
+      "then": {
+        "allOf": [
+          {
+            "properties": {
+              "diagnostics": {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "unknown",
+                        "missing_evidence"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "diagnostics": {
+                "not": {
+                  "contains": {
+                    "type": "object",
+                    "required": [
+                      "code"
+                    ],
+                    "properties": {
+                      "code": {
+                        "enum": [
+                          "usage",
+                          "invalid_input",
+                          "stale_input",
+                          "timeout",
+                          "backend_error",
+                          "policy_refuted",
+                          "truncated_budget"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "refuted"
+          }
+        }
+      },
+      "then": {
+        "allOf": [
+          {
+            "properties": {
+              "diagnostics": {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "policy_refuted"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "diagnostics": {
+                "not": {
+                  "contains": {
+                    "type": "object",
+                    "required": [
+                      "code"
+                    ],
+                    "properties": {
+                      "code": {
+                        "enum": [
+                          "usage",
+                          "invalid_input",
+                          "stale_input",
+                          "timeout",
+                          "backend_error",
+                          "unknown",
+                          "truncated_budget",
+                          "missing_evidence"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "error"
+          }
+        }
+      },
+      "then": {
+        "allOf": [
+          {
+            "properties": {
+              "diagnostics": {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "usage",
+                        "invalid_input",
+                        "timeout",
+                        "backend_error"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "diagnostics": {
+                "not": {
+                  "contains": {
+                    "type": "object",
+                    "required": [
+                      "code"
+                    ],
+                    "properties": {
+                      "code": {
+                        "enum": [
+                          "stale_input",
+                          "policy_refuted",
+                          "unknown",
+                          "truncated_budget",
+                          "missing_evidence"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
       }
     },
     {

@@ -20,6 +20,11 @@ from indexer.result_protocol import (
     from_query_result,
     redact_text,
 )
+from indexer.generated_result_protocol import (
+    OVERSIZED_ASCII_BYTES,
+    OVERSIZED_MULTIBYTE_CHARS,
+    PLACEHOLDER_IDENTITIES,
+)
 from indexer.storage import Storage
 from indexer.queryplan import Executor, codebase, nodes, start
 
@@ -27,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = ROOT / "spec/contracts/golden/result-envelope.json"
 EVENT_GOLDEN = ROOT / "spec/contracts/golden/event.json"
 ERROR_GOLDEN = ROOT / "spec/contracts/golden/error-status.json"
+SCHEMA = ROOT / "spec/contracts/result-envelope.schema.json"
 
 
 def _golden_envelope() -> ResultEnvelope:
@@ -140,6 +146,39 @@ def test_fail_closed_cross_field_and_numeric_invariants() -> None:
     with pytest.raises(ValueError):
         envelope.to_dict()
 
+
+@pytest.mark.parametrize("placeholder", PLACEHOLDER_IDENTITIES)
+def test_generated_placeholder_identities_are_rejected(placeholder: str) -> None:
+    envelope = _golden_envelope()
+    envelope.identity = Identity(placeholder, "semantic-index://demo", ("symbols",), "current", "git:abc123", "sha256:source")
+    with pytest.raises(ValueError):
+        envelope.to_dict()
+    envelope.identity = Identity("workspace://demo", placeholder, ("symbols",), "current", "git:abc123", "sha256:source")
+    with pytest.raises(ValueError):
+        envelope.to_dict()
+
+
+def test_generated_reason_rules_and_utf8_identity_bounds_are_rejected() -> None:
+    for code in ("unknown", "missing_evidence"):
+        envelope = _golden_envelope()
+        envelope.diagnostics = [Diagnostic(code, "warning", "weak")]
+        with pytest.raises(ValueError):
+            envelope.to_dict()
+
+    envelope = _golden_envelope()
+    envelope.status = Status.REFUTED
+    envelope.completeness = Completeness("unknown")
+    with pytest.raises(ValueError):
+        envelope.to_dict()
+
+    envelope = _golden_envelope()
+    envelope.identity = Identity("x" * OVERSIZED_ASCII_BYTES, "semantic-index://demo", ("symbols",), "current", "git:abc123", "sha256:source")
+    with pytest.raises(ValueError):
+        envelope.to_dict()
+    envelope.identity = Identity("😀" * OVERSIZED_MULTIBYTE_CHARS, "semantic-index://demo", ("symbols",), "current", "git:abc123", "sha256:source")
+    with pytest.raises(ValueError):
+        envelope.to_dict()
+
     envelope = _golden_envelope()
     envelope.identity = Identity("workspace://demo", "semantic-index://demo", ("symbols",), "current", "git:abc123", "sha256:source")
     envelope.status = Status.UNKNOWN
@@ -165,3 +204,17 @@ def test_event_and_error_goldens_are_executable() -> None:
     envelope.completeness = Completeness("unknown")
     envelope.diagnostics = [Diagnostic("backend_error", message="backend unavailable")]
     assert envelope.error_status_dict() == json.loads(ERROR_GOLDEN.read_text(encoding="utf-8"))
+
+
+def test_generated_schema_carries_identity_and_utf8_contract_rules() -> None:
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    identity = schema["properties"]["identity"]["properties"]
+    for field in ("workspace", "index"):
+        assert identity[field]["x-maxUtf8Bytes"] == 4096
+        assert set(PLACEHOLDER_IDENTITIES) == set(identity[field]["not"]["enum"])
+    assert "maxLength" not in json.dumps(schema)
+    assert any(
+        rule.get("if", {}).get("properties", {}).get("status", {}).get("const") == "complete"
+        and "allOf" in rule.get("then", {})
+        for rule in schema["allOf"]
+    )

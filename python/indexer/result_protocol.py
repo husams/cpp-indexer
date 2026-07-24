@@ -35,9 +35,11 @@ from .generated_result_protocol import (
     MAX_TEXT_BYTES,
     MAX_INTEGER,
     MIN_INTEGER,
+    DIAGNOSTIC_STATUS_RULES,
     EVENT_PROTOCOL as GENERATED_EVENT_PROTOCOL,
     PROTOCOL as GENERATED_PROTOCOL,
     PROTOCOL_VERSION,
+    PLACEHOLDER_IDENTITIES,
     Status,
     ExitClass,
     TRUST_LEVELS,
@@ -46,11 +48,17 @@ from .generated_result_protocol import (
 PROTOCOL = GENERATED_PROTOCOL
 EVENT_PROTOCOL = GENERATED_EVENT_PROTOCOL
 _SECRET = re.compile(r"(TOKEN|PASSWORD|SECRET)([=:])[^\s,;]+")
-_PLACEHOLDER_IDENTITIES = {"", "unknown", "workspace:unknown", "workspace://unknown"}
-
-
 def _is_protocol_integer(value: Any) -> bool:
     return type(value) is int and MIN_INTEGER <= value <= MAX_INTEGER
+
+
+def _valid_text(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return len(value.encode("utf-8")) <= MAX_TEXT_BYTES
+    except UnicodeEncodeError:
+        return False
 
 
 def redact_text(value: str, max_bytes: int = MAX_TEXT_BYTES) -> str:
@@ -93,8 +101,10 @@ def _sanitize_value(value: Any, depth: int = 0) -> Any:
     if isinstance(value, dict):
         if len(value) > MAX_RESULT_PROPERTIES:
             raise ValueError("result payload exceeds protocol property bound")
+        if any(not _valid_text(key) for key in value):
+            raise ValueError("result property key exceeds protocol bounds")
         return {
-            redact_text(str(key)): _sanitize_value(item, depth + 1)
+            key: _sanitize_value(item, depth + 1)
             for key, item in value.items()
         }
     raise ValueError(f"unsupported result payload type: {type(value).__name__}")
@@ -255,27 +265,21 @@ class ResultEnvelope:
     def validate(self) -> None:
         if not isinstance(self.status, Status):
             raise ValueError("result envelope status is invalid")
-        if not re.fullmatch(r"[a-z][a-z0-9._-]*", self.operation):
+        if not _valid_text(self.operation) or not re.fullmatch(r"[a-z][a-z0-9._-]*", self.operation):
             raise ValueError("result envelope operation is invalid")
-        if self.identity.workspace in _PLACEHOLDER_IDENTITIES or self.identity.index in _PLACEHOLDER_IDENTITIES:
+        if self.identity.workspace in PLACEHOLDER_IDENTITIES or self.identity.index in PLACEHOLDER_IDENTITIES:
             raise ValueError("result envelope identity is incomplete")
-        if not self.identity.fact_sets or len(self.identity.fact_sets) > MAX_FACT_SETS or any(not isinstance(item, str) for item in self.identity.fact_sets):
+        if not _valid_text(self.identity.workspace) or not _valid_text(self.identity.index) or not self.identity.fact_sets or len(self.identity.fact_sets) > MAX_FACT_SETS or any(not _valid_text(item) for item in self.identity.fact_sets):
             raise ValueError("result envelope must identify fact sets")
-        if any(len(item.encode("utf-8")) > MAX_TEXT_BYTES for item in (self.identity.workspace, self.identity.index, *self.identity.fact_sets)):
-            raise ValueError("result envelope identity exceeds protocol bounds")
-        if any(value is not None and not isinstance(value, str) for value in (self.identity.source_revision, self.identity.source_fingerprint)):
+        if any(value is not None and not _valid_text(value) for value in (self.identity.source_revision, self.identity.source_fingerprint)):
             raise ValueError("result envelope source identity is invalid")
-        if any(value is not None and len(value.encode("utf-8")) > MAX_TEXT_BYTES for value in (self.identity.source_revision, self.identity.source_fingerprint)):
-            raise ValueError("result envelope source identity exceeds protocol bounds")
         if self.identity.freshness not in FRESHNESS:
             raise ValueError("result envelope freshness is invalid")
-        if not isinstance(self.producer.package, str) or not isinstance(self.producer.version, str) or not isinstance(self.producer.backend, str) or not self.producer.package or not self.producer.version or not self.producer.backend:
+        if not _valid_text(self.identity.freshness) or not _valid_text(self.producer.package) or not _valid_text(self.producer.version) or not _valid_text(self.producer.backend) or not self.producer.package or not self.producer.version or not self.producer.backend:
             raise ValueError("result envelope producer is incomplete")
-        if any(len(value.encode("utf-8")) > MAX_TEXT_BYTES for value in (self.producer.package, self.producer.version, self.producer.backend)):
-            raise ValueError("result envelope producer exceeds protocol bounds")
         if not _is_protocol_integer(self.producer.schema_version) or self.producer.schema_version < 1:
             raise ValueError("producer schema version must be positive")
-        if self.completeness.state not in COMPLETENESS_STATES:
+        if self.completeness.state not in COMPLETENESS_STATES or not _valid_text(self.completeness.state):
             raise ValueError("result envelope completeness state is invalid")
         if self.completeness.stale != (self.identity.freshness == "stale"):
             raise ValueError("stale completeness must match index freshness")
@@ -304,6 +308,8 @@ class ResultEnvelope:
         if self.status in {Status.UNKNOWN, Status.CONDITIONAL, Status.REFUTED, Status.ERROR} and not self.diagnostics:
             raise ValueError("non-complete outcomes require a stable diagnostic")
         codes = {diagnostic.code for diagnostic in self.diagnostics}
+        if any(not _valid_text(value) for diagnostic in self.diagnostics for value in (diagnostic.code, diagnostic.severity, diagnostic.message, diagnostic.next_action) if value is not None):
+            raise ValueError("diagnostic text exceeds protocol bounds")
         if "stale_input" in codes and (self.status is not Status.UNKNOWN or self.identity.freshness != "stale"):
             raise ValueError("stale_input requires an unknown result over a stale index")
         if codes.intersection({"backend_error", "timeout"}) and self.status is not Status.ERROR:
@@ -318,6 +324,11 @@ class ResultEnvelope:
             raise ValueError("refuted outcomes require policy_refuted")
         if self.status is Status.ERROR and not codes.intersection({code for code, _, _ in EXIT_REASON_PRECEDENCE}):
             raise ValueError("error outcomes require a stable diagnostic")
+        status_rule = DIAGNOSTIC_STATUS_RULES[self.status.value]
+        if status_rule["required_any"] and not codes.intersection(status_rule["required_any"]):
+            raise ValueError("status requires a matching stable diagnostic")
+        if codes.intersection(status_rule["forbidden"]):
+            raise ValueError("diagnostic reason is incompatible with result status")
         if any(d.code not in DIAGNOSTIC_CODES or d.severity not in DIAGNOSTIC_SEVERITIES for d in self.diagnostics):
             raise ValueError("diagnostic domain is invalid")
         if len(self.diagnostics) > MAX_DIAGNOSTICS or len(self.evidence) > MAX_EVIDENCE or len(self.artifacts) > MAX_ARTIFACTS:
@@ -329,10 +340,16 @@ class ResultEnvelope:
         _sanitize_value(self.result)
         count = [0]
         for node in self.evidence:
+            if any(not _valid_text(value) for value in (node.id, node.evidence_class, node.trust, node.summary, node.source) if value is not None):
+                raise ValueError("evidence text exceeds protocol bounds")
             node.to_dict(count=count)
         for artifact in self.artifacts:
+            if any(not _valid_text(value) for value in (artifact.kind, artifact.id, artifact.catalog_hash)):
+                raise ValueError("artifact text exceeds protocol bounds")
             artifact.to_dict()
         if self.replay is not None:
+            if not _valid_text(self.replay.command) or any(not _valid_text(argument) for argument in self.replay.arguments):
+                raise ValueError("replay text exceeds protocol bounds")
             self.replay.to_dict()
         if self.resources is not None:
             self.resources.to_dict()

@@ -11,6 +11,81 @@ using json_out::Array;
 using json_out::Object;
 using json_out::Value;
 
+bool valid_utf8(std::string_view value) {
+  for (std::size_t index = 0; index < value.size();) {
+    const auto lead = static_cast<unsigned char>(value[index]);
+    std::size_t continuation_count = 0;
+    unsigned char second_min = 0x80;
+    unsigned char second_max = 0xbf;
+    if (lead <= 0x7f) {
+      ++index;
+      continue;
+    }
+    if (lead >= 0xc2 && lead <= 0xdf) {
+      continuation_count = 1;
+    } else if (lead == 0xe0) {
+      continuation_count = 2;
+      second_min = 0xa0;
+    } else if (lead >= 0xe1 && lead <= 0xef) {
+      continuation_count = 2;
+      if (lead == 0xed) {
+        second_max = 0x9f;
+      }
+    } else if (lead == 0xf0) {
+      continuation_count = 3;
+      second_min = 0x90;
+    } else if (lead >= 0xf1 && lead <= 0xf3) {
+      continuation_count = 3;
+    } else if (lead == 0xf4) {
+      continuation_count = 3;
+      second_max = 0x8f;
+    } else {
+      return false;
+    }
+    if (index + continuation_count >= value.size()) {
+      return false;
+    }
+    const auto second = static_cast<unsigned char>(value[index + 1]);
+    if (second < second_min || second > second_max) {
+      return false;
+    }
+    for (std::size_t offset = 2; offset <= continuation_count; ++offset) {
+      const auto byte = static_cast<unsigned char>(value[index + offset]);
+      if (byte < 0x80 || byte > 0xbf) {
+        return false;
+      }
+    }
+    index += continuation_count + 1;
+  }
+  return true;
+}
+
+bool valid_text(std::string_view value) {
+  return value.size() <= kMaxTextBytes && valid_utf8(value);
+}
+
+bool placeholder_identity(std::string_view value) {
+  return std::ranges::find(generated::kPlaceholderIdentities, value) !=
+         generated::kPlaceholderIdentities.end();
+}
+
+bool code_list_contains(std::string_view list, std::string_view code) {
+  std::size_t start = 0;
+  while (start <= list.size()) {
+    const std::size_t end = list.find('|', start);
+    if (list.substr(start, end == std::string_view::npos
+                               ? std::string_view::npos
+                               : end - start) == code) {
+      return true;
+    }
+    if (end == std::string_view::npos) {
+      break;
+    }
+    start = end + 1;
+  }
+  return false;
+}
+
 Value optional_string(const std::optional<std::string> &value) {
   return value ? Value::of(redact_text(*value)) : Value::null();
 }
@@ -128,6 +203,9 @@ Value bounded_value(const Value &value, std::size_t depth) {
   case Value::T::Int:
     return value;
   case Value::T::Str:
+    if (!valid_utf8(value.s)) {
+      throw std::invalid_argument("result payload contains invalid UTF-8");
+    }
     return Value::of(redact_text(value.s));
   case Value::T::Arr: {
     if (value.a.size() > generated::kMaxResultItems) {
@@ -148,7 +226,11 @@ Value bounded_value(const Value &value, std::size_t depth) {
     Object out;
     out.reserve(value.o.size());
     for (const auto &[key, item] : value.o) {
-      out.emplace_back(redact_text(key), bounded_value(item, depth + 1));
+      if (!valid_text(key)) {
+        throw std::invalid_argument(
+            "result property key exceeds protocol bounds");
+      }
+      out.emplace_back(key, bounded_value(item, depth + 1));
     }
     return Value::obj(std::move(out));
   }
@@ -206,15 +288,21 @@ int ResultEnvelope::exit_code() const {
 }
 
 bool ResultEnvelope::valid() const {
-  if (!valid_identifier(operation) ||
+  if (!valid_text(operation) || !valid_identifier(operation) ||
       static_cast<std::size_t>(status) >= generated::kStatusNames.size() ||
       operation.empty() || identity.workspace.empty() ||
-      identity.index.empty() || identity.workspace == "unknown" ||
-      identity.workspace == "workspace:unknown" ||
-      identity.index == "unknown" || identity.fact_sets.empty() ||
+      identity.index.empty() || placeholder_identity(identity.workspace) ||
+      placeholder_identity(identity.index) || identity.fact_sets.empty() ||
       identity.fact_sets.size() > generated::kMaxFactSets ||
+      !valid_text(identity.workspace) || !valid_text(identity.index) ||
+      !valid_text(identity.freshness) || !valid_text(producer.package) ||
+      !valid_text(producer.version) || !valid_text(producer.backend) ||
       producer.package.empty() || producer.version.empty() ||
-      producer.backend.empty() || producer.schema_version < 1) {
+      producer.backend.empty() || producer.schema_version < 1 ||
+      (identity.source_revision && !valid_text(*identity.source_revision)) ||
+      (identity.source_fingerprint &&
+       !valid_text(*identity.source_fingerprint)) ||
+      !valid_text(completeness.state)) {
     return false;
   }
   if (!one_of(identity.freshness, generated::kFreshness) ||
@@ -224,7 +312,10 @@ bool ResultEnvelope::valid() const {
                             return std::ranges::count(identity.fact_sets,
                                                       fact_set) > 1;
                           }) ||
-      completeness.stale != (identity.freshness == "stale")) {
+      completeness.stale != (identity.freshness == "stale") ||
+      std::ranges::any_of(identity.fact_sets, [](const auto &fact_set) {
+        return !valid_text(fact_set);
+      })) {
     return false;
   }
   const auto has_code = [this](std::string_view code) {
@@ -285,15 +376,51 @@ bool ResultEnvelope::valid() const {
   }
   for (const auto &diagnostic : diagnostics) {
     if (!one_of(diagnostic.code, generated::kDiagnosticCodes) ||
-        !one_of(diagnostic.severity, generated::kDiagnosticSeverities)) {
+        !one_of(diagnostic.severity, generated::kDiagnosticSeverities) ||
+        !valid_text(diagnostic.code) || !valid_text(diagnostic.severity) ||
+        !valid_text(diagnostic.message) ||
+        (diagnostic.next_action && !valid_text(*diagnostic.next_action))) {
+      return false;
+    }
+  }
+  for (const auto &node : evidence) {
+    if (!valid_text(node.id) || !valid_text(node.evidence_class) ||
+        !valid_text(node.trust) || !valid_text(node.summary) ||
+        (node.source && !valid_text(*node.source))) {
       return false;
     }
   }
   for (const auto &artifact : artifacts) {
     if (!one_of(artifact.kind, generated::kArtifactKinds) ||
-        artifact.schema_version < 1 || artifact.catalog_version < 1) {
+        artifact.schema_version < 1 || artifact.catalog_version < 1 ||
+        !valid_text(artifact.kind) || !valid_text(artifact.id) ||
+        !valid_text(artifact.catalog_hash)) {
       return false;
     }
+  }
+  if (replay &&
+      (!valid_text(replay->command) ||
+       std::ranges::any_of(replay->arguments, [](const auto &argument) {
+         return !valid_text(argument);
+       }))) {
+    return false;
+  }
+  for (const auto &rule : generated::kDiagnosticStatusRules) {
+    if (rule.status != status) {
+      continue;
+    }
+    if (!rule.required_any.empty() &&
+        !std::ranges::any_of(diagnostics, [&rule](const auto &diagnostic) {
+          return code_list_contains(rule.required_any, diagnostic.code);
+        })) {
+      return false;
+    }
+    if (std::ranges::any_of(diagnostics, [&rule](const auto &diagnostic) {
+          return code_list_contains(rule.forbidden, diagnostic.code);
+        })) {
+      return false;
+    }
+    break;
   }
   if (result.t != json_out::Value::T::Obj) {
     return false;

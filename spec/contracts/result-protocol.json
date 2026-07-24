@@ -20,6 +20,7 @@
     "max_replay_arguments": 256
   },
   "statuses": ["complete", "partial", "unknown", "refuted", "conditional", "error"],
+  "placeholder_identities": ["", "unknown", "workspace:unknown", "workspace://unknown", "index:unknown", "index://unknown"],
   "exit_classes": [
     {"name": "success", "code": 0},
     {"name": "usage", "code": 2},
@@ -44,6 +45,18 @@
     {"codes": ["backend_error", "timeout"], "status": ["error"]},
     {"codes": ["policy_refuted"], "status": ["refuted"]}
   ],
+  "diagnostic_status_invariants": [
+    {"status": "complete", "required_any": [], "forbidden": ["usage", "invalid_input", "stale_input", "timeout", "backend_error", "policy_refuted", "unknown", "truncated_budget", "missing_evidence"]},
+    {"status": "partial", "required_any": [], "forbidden": ["usage", "invalid_input", "stale_input", "timeout", "backend_error", "policy_refuted", "unknown"]},
+    {"status": "unknown", "required_any": ["stale_input", "unknown", "missing_evidence"], "forbidden": ["usage", "invalid_input", "timeout", "backend_error", "policy_refuted", "truncated_budget"]},
+    {"status": "conditional", "required_any": ["unknown", "missing_evidence"], "forbidden": ["usage", "invalid_input", "stale_input", "timeout", "backend_error", "policy_refuted", "truncated_budget"]},
+    {"status": "refuted", "required_any": ["policy_refuted"], "forbidden": ["usage", "invalid_input", "stale_input", "timeout", "backend_error", "unknown", "truncated_budget", "missing_evidence"]},
+    {"status": "error", "required_any": ["usage", "invalid_input", "timeout", "backend_error"], "forbidden": ["stale_input", "policy_refuted", "unknown", "truncated_budget", "missing_evidence"]}
+  ],
+  "adversarial_vectors": {
+    "oversized_ascii_bytes": 4097,
+    "oversized_multibyte_chars": 1025
+  },
   "exit_reason_precedence": [
     {"code": "usage", "class": "usage", "exit_code": 2},
     {"code": "invalid_input", "class": "invalid_or_stale_input", "exit_code": 3},

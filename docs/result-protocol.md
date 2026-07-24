@@ -45,8 +45,11 @@ arrays, properties, diagnostics, and replay arguments are bounded by the same
 contract. Text, source
 snippets, compiler arguments, environment-derived values, solver logs, and
 extension output pass through the shared redaction and size-limit policy before
-serialization. Human output is capped at 4096 UTF-8 bytes, with truncation only
-at code-point boundaries.
+serialization. Semantic identity/provenance fields reject invalid UTF-8 or
+values over 4096 UTF-8 bytes; they are never silently rewritten. The generated
+schemas carry this byte contract as `x-maxUtf8Bytes` because standard JSON
+Schema `maxLength` counts characters, not encoded bytes. Human output is capped
+at 4096 UTF-8 bytes, with truncation only at code-point boundaries.
 
 Workspace identity is stable and derived from repository/component ownership
 metadata using the same sorted owner list and NUL separator in both adapters
@@ -55,11 +58,13 @@ freshness cannot be established, the result remains `unknown` rather than
 claiming completeness.
 
 Result numbers are signed 64-bit integers only; floating-point values,
-non-finite numbers, and integers outside that range are rejected. Diagnostic
-codes also constrain the envelope: `stale_input` requires an unknown result
-over stale input, backend/timeout diagnostics require `error`, and
-`policy_refuted` requires `refuted`. These cross-field rules are present in
-both serializers and the generated JSON Schema.
+non-finite numbers, and integers outside that range are rejected. Placeholder
+workspace/index identities are rejected in both runtimes. Diagnostic status
+rules are generated from the authority source: complete results cannot carry
+weak/error reasons; unknown, conditional, refuted, and error statuses require
+their matching stable reason; and stale/backend/refutation codes constrain the
+corresponding status and freshness. These cross-field rules are present in both
+serializers and the generated JSON Schema.
 
 The C++ adapter is `cidx::protocol::ResultEnvelope`; Python uses
 `indexer.result_protocol.ResultEnvelope`. QueryPlan exposes
