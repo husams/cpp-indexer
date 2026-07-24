@@ -60,6 +60,13 @@ std::string col_expr(const std::string &field) {
   if (field == "usr") {
     return "s.usr";
   }
+  if (field == "semantic_universe") {
+    return "(SELECT su.key FROM semantic_universe su WHERE su.id = "
+           "s.semantic_universe_id)";
+  }
+  if (field == "identity_key") {
+    return "s.identity_key";
+  }
   if (field == "name") {
     return "COALESCE(s.qual_name, s.spelling)";
   }
@@ -712,7 +719,8 @@ private:
             auto p = file_path(stq.col_int64(col));
             cells.emplace_back(p ? Cell(*p) : Cell(nullptr));
           } else if (f == "usr" || f == "name" || f == "spelling" ||
-                     f == "qual_name") {
+                     f == "qual_name" || f == "semantic_universe" ||
+                     f == "identity_key") {
             cells.emplace_back(stq.col_text(col));
           } else {
             cells.emplace_back(stq.col_int64(col));
@@ -844,7 +852,8 @@ public:
       return res;
     }
     if (st.shape == Shape::Nodes) {
-      materialize(st, {"id", "usr", "name", "kind"});
+      materialize(st, {"id", "usr", "semantic_universe", "identity_key", "name",
+                       "kind"});
     }
     if (!st.limit_in_effect &&
         static_cast<int64_t>(st.rows.size()) > kDefaultResultCap) {

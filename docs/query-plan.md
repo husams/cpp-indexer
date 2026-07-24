@@ -53,7 +53,8 @@ Pred   := all_of([p...]) | any_of([p...]) | not(p)
 
 Fields (v1): `id`, `usr`, `name` (COALESCE(qual_name, spelling)), `spelling`,
 `qual_name`, `kind`, `entity_type`, `file`, `line`, `col`, `is_definition`,
-`is_pure`, `is_static`. `file`/`line`/`col` are select-only; the rest are also
+`is_pure`, `is_static`, `semantic_universe`, `identity_key`.
+`file`/`line`/`col` are select-only; the rest are also
 filterable. Declaration kind and entity classification are SEPARATE fields in
 every view: `kind` is always the C++ declaration kind (symbol-kind names, so
 `kind in [class, struct]` keeps its current-API meaning) and `entity_type` is
@@ -160,8 +161,10 @@ report `unverifiable`; a changed source/configuration reports `stale`.
 `Executor.explain(plan)` (C++ and Python) returns the normalized plan together
 with the same `index` object without changing the database.
 
-Node streams without `select` emit the default fields `id`, `usr`, `name`,
-`kind`. Row objects preserve `select` field order.
+Node streams without `select` emit the default fields `id`, `usr`,
+`semantic_universe`, `identity_key`, `name`, `kind`. The scope fields keep a
+bare-USR result portable and unambiguous across universes and database
+generations. Row objects preserve `select` field order.
 
 ## Compatibility
 

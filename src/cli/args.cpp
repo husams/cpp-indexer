@@ -117,6 +117,8 @@ void build_top_level(CLI::App &app, ParsedArgs &pa) {
   import->add_option("--repo", pa.repo,
                      "repository name to group the imported components under "
                      "(default: the git/dir-derived name)");
+  import->add_option("--universe", pa.universe,
+                     "portable semantic universe key for this repository");
   import->add_flag("--force", pa.force,
                    "reimport: delete the existing component (its files and "
                    "indexed symbols) before importing");
@@ -209,6 +211,8 @@ void build_component(CLI::App &app, ParsedArgs &pa) {
                   "component name (default: from .git/config)");
   add->add_option("--repo", pa.repo,
                   "repository name to group under (default: component name)");
+  add->add_option("--universe", pa.universe,
+                  "portable semantic universe key for this repository");
   add->add_option("--kind", pa.kind, "component kind")
       ->check(CLI::IsMember(kComponentKinds));
   add->add_flag("--no-git", pa.no_git,

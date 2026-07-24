@@ -1,5 +1,6 @@
 #include "ast/mint_builder.hpp"
 
+#include "ast/decl_flags.hpp"
 #include "ast/edge_sink.hpp"
 #include "ast/kind_map.hpp"
 #include "ast/location.hpp"
@@ -30,12 +31,14 @@ MintBuilder::build(const clang::NamedDecl *decl) const {
   // "double () const" instead of a null type_info.
   req.type_info = type_info(context_, decl);
   req.kind_name = cidx_stub_kind_name(decl);
+  req.linkage = linkage_name(decl);
 
   // ref_decl_loc (ast_cursor.cpp:161): the decl's own location; registered
   // file -> decl_file_id, otherwise keep the raw path so system/stdlib
   // targets stay located instead of @<no-location>.
   const ExpansionLoc loc = expansion_loc(context_, decl->getLocation());
   if (!loc.file.empty()) {
+    req.identity_source = loc.file;
     req.decl_line = loc.line;
     req.decl_col = loc.col;
     if (std::optional<int64_t> fid = sink_.file_id_for_path(loc.file)) {

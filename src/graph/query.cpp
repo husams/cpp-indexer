@@ -142,6 +142,12 @@ Sym GraphQuery::make_sym_from_symbol(const Symbol &sym) {
   Sym s;
   s.id = sym.id;
   s.usr = sym.usr;
+  if (const auto universe =
+          db_.get_semantic_universe_by_id(sym.semantic_universe_id)) {
+    s.semantic_universe = universe->key;
+  }
+  s.semantic_universe_id = sym.semantic_universe_id;
+  s.identity_key = sym.identity_key;
   s.spelling = sym.spelling;
   s.name = sym.qual_name ? *sym.qual_name : sym.spelling;
   s.kind = sym.kind;
@@ -243,11 +249,15 @@ std::optional<Sym> GraphQuery::get_by_id(int64_t id) {
 }
 
 std::optional<Sym> GraphQuery::get_by_usr(const std::string &usr) {
-  auto sym = db_.graph_symbol_by_usr(usr);
-  if (!sym) {
+  const auto matches = db_.lookup_symbols_by_usr(usr);
+  if (matches.empty()) {
     return std::nullopt;
   }
-  return make_sym_from_symbol(*sym);
+  if (matches.size() > 1) {
+    throw std::invalid_argument(
+        "ambiguous symbol USR; pass a scoped symbol id: " + usr);
+  }
+  return make_sym_from_symbol(matches.front());
 }
 
 std::vector<Sym> GraphQuery::find(const std::string &pattern,

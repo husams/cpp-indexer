@@ -311,6 +311,8 @@ def test_sym_to_dict_schema(g):
     assert set(d) == {
         "id",
         "usr",
+        "semantic_universe",
+        "identity_key",
         "spelling",
         "qual_name",
         "kind",

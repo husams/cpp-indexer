@@ -6,6 +6,8 @@
 
 #include "ast/edge_sink.hpp"
 
+#include <unordered_map>
+
 namespace cidx {
 class Storage;
 }
@@ -16,7 +18,14 @@ class StorageEdgeSink : public EdgeSink {
 public:
   explicit StorageEdgeSink(cidx::Storage &db);
 
-  std::optional<int64_t> lookup_symbol_id(const std::string &usr) override;
+  std::optional<int64_t>
+  lookup_symbol_id(const std::string &usr,
+                   const std::optional<std::string> &identity_source =
+                       std::nullopt) override;
+  void set_current_file_id(int64_t file_id) override;
+  void set_identity_translation_unit_config_id(
+      int64_t config_id, int64_t translation_unit_file_id = -1) override;
+  void set_identity_translation_unit_file_id(int64_t file_id) override;
   int64_t mint_symbol(const MintRequest &req) override;
   int64_t add_edge(const EdgeRecord &edge) override;
   int64_t ensure_edge(const EdgeRecord &edge) override;
@@ -41,15 +50,15 @@ public:
   }
   void delete_edges_for_file(int64_t file_id) override;
   void delete_definitions_for_file(int64_t file_id) override;
-  int64_t
-  get_or_create_definition(int64_t symbol_id, int64_t file_id, int64_t line,
-                           int64_t col, int64_t end_line, int64_t end_col,
-                           const std::optional<std::string> &init_text) override;
+  int64_t get_or_create_definition(
+      int64_t symbol_id, int64_t file_id, int64_t line, int64_t col,
+      int64_t end_line, int64_t end_col,
+      const std::optional<std::string> &init_text) override;
   void add_def_edge(int64_t def_id, int64_t dst_id, int64_t kind) override;
   void copy_body_edges_to_def_edge(int64_t def_id, int64_t src_id) override;
   std::optional<int64_t> file_id_for_path(const std::string &path) override;
-  std::vector<TypeArgCandidate>
-  type_arg_candidates(const std::string &name, bool qualified) override;
+  std::vector<TypeArgCandidate> type_arg_candidates(const std::string &name,
+                                                    bool qualified) override;
   std::optional<std::string> lookup_display_name(int64_t id) override;
   void update_display_name(int64_t id, const std::string &display) override;
   std::vector<int64_t>
@@ -60,6 +69,10 @@ private:
   cidx::Storage &db_;
   std::vector<int64_t> edge_ids_;
   std::vector<int64_t> definition_ids_;
+  int64_t current_file_id_ = -1;
+  std::optional<int64_t> current_universe_id_;
+  std::optional<std::string> identity_translation_unit_;
+  std::unordered_map<std::string, std::optional<int64_t>> lookup_cache_;
 };
 
 } // namespace cidx::ast

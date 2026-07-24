@@ -21,15 +21,15 @@
 
 namespace cidx::ast {
 
-namespace {
-
-} // namespace
+namespace {} // namespace
 
 int64_t
 CallEdgeEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
                                           const std::string &callee_usr) {
   int64_t dst_id = -1;
-  if (const auto dst = ctx_.sink().lookup_symbol_id(callee_usr)) {
+  if (const auto dst = ctx_.sink().lookup_symbol_id(
+          callee_usr,
+          expansion_loc(ctx_.context(), keyed->getLocation()).file)) {
     dst_id = *dst;
   }
   if (dst_id < 0) {

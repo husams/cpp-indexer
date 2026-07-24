@@ -392,7 +392,6 @@ def cmd_import(args) -> int:
     # version segment (e.g. .../1.4.0). Manual version control lives in
     # `cidx component set-version`, not on import.
     base, version = compiledb.split_base_version(root)
-
     imported, skipped = 0, 0
     with Storage(args.index) as db:
         # Encode include paths against the alias registry unless --no-alias.

@@ -11,14 +11,14 @@ inline constexpr std::string_view kFullProductVersion = "0.53.0";
 inline constexpr std::string_view kReleaseChannel = "stable";
 inline constexpr std::string_view kPrerelease = {};
 
-inline constexpr int kDatabaseSchemaVersion = 38;
+inline constexpr int kDatabaseSchemaVersion = 39;
 inline constexpr int kDatabaseMigrationFloor = 2;
-inline constexpr int kDatabaseReaderMin = 38;
-inline constexpr int kDatabaseReaderMax = 38;
+inline constexpr int kDatabaseReaderMin = 39;
+inline constexpr int kDatabaseReaderMax = 39;
 
 inline constexpr int kCatalogVersion = 1;
 inline constexpr std::string_view kCatalogHash =
-    "sha256:2d0346c8cbf79deb73ddf22e7a143ed01b78f47c85640d267ae68008dcce7159";
+    "sha256:f1cabc8873138e27f72fc3be14439622ec4311f9b2ce2cb1584813226ee6bc41";
 inline constexpr int kArtifactVersion = 1;
 inline constexpr int kArtifactReaderMin = 1;
 inline constexpr int kArtifactReaderMax = 1;

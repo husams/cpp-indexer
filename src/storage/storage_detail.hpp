@@ -76,7 +76,7 @@ inline int64_t identity_kind_id(std::string_view name) {
 
 // Python Storage._SYMBOL_COLS — insert/update order is load-bearing for the
 // upsert statement and for update_symbol validation.
-constexpr std::array<std::string_view, 24> kSymbolInsertCols = {
+constexpr std::array<std::string_view, 26> kSymbolInsertCols = {
     "usr",
     "spelling",
     "qual_name",
@@ -101,6 +101,8 @@ constexpr std::array<std::string_view, 24> kSymbolInsertCols = {
     "end_line",
     "end_col",
     "const_value",
+    "semantic_universe_id",
+    "identity_key",
 };
 
 // Explicit SELECT lists (stable column positions even on migrated DBs).
@@ -111,9 +113,9 @@ constexpr std::array<std::string_view, 24> kSymbolInsertCols = {
 // match). v14: version appended at end (append-at-end discipline so migrated
 // DBs whose ALTER added the column last decode positionally).
 constexpr const char *kComponentCols =
-    "id, name, path, kind, version, repository_id";
+    "id, name, path, kind, version, repository_id, semantic_universe_id";
 constexpr const char *kRepositoryCols =
-    "id, name, kind, remote_url, active_clone_id";
+    "id, name, kind, remote_url, active_clone_id, semantic_universe_id";
 constexpr const char *kCloneCols = "id, repository_id, path, label";
 constexpr const char *kDirectoryCols = "id, component_id, path";
 constexpr const char *kFileCols =
@@ -123,13 +125,15 @@ constexpr const char *kSymbolCols =
     "id, usr, spelling, qual_name, display_name, kind, type_info, file_id, "
     "line, col, decl_file_id, decl_line, decl_col, is_definition, is_pure, "
     "is_static, linkage, access, parent_usr, resolved, decl_path, "
-    "is_instantiation, end_line, end_col, multi_def, const_value";
+    "is_instantiation, end_line, end_col, multi_def, const_value, "
+    "semantic_universe_id, identity_key";
 constexpr const char *kSymbolColsS =
     "s.id, s.usr, s.spelling, s.qual_name, s.display_name, s.kind, "
     "s.type_info, s.file_id, s.line, s.col, s.decl_file_id, s.decl_line, "
     "s.decl_col, s.is_definition, s.is_pure, s.is_static, s.linkage, s.access, "
     "s.parent_usr, s.resolved, s.decl_path, s.is_instantiation, "
-    "s.end_line, s.end_col, s.multi_def, s.const_value";
+    "s.end_line, s.end_col, s.multi_def, s.const_value, "
+    "s.semantic_universe_id, s.identity_key";
 
 inline std::optional<int64_t> opt_int64(const SqliteStmt &st, int idx) {
   if (st.col_is_null(idx)) {
@@ -188,6 +192,7 @@ inline Component component_from(const SqliteStmt &st) {
   // v23: repository_id at column 5 (SELECT * order; nullopt when
   // NULL/ungrouped)
   c.repository_id = opt_int64(st, 5);
+  c.semantic_universe_id = opt_int64(st, 6);
   return c;
 }
 
@@ -198,6 +203,7 @@ inline Repository repository_from(const SqliteStmt &st) {
   r.kind = st.col_text(2);
   r.remote_url = opt_text(st, 3);
   r.active_clone_id = opt_int64(st, 4);
+  r.semantic_universe_id = opt_int64(st, 5);
   return r;
 }
 
@@ -265,8 +271,10 @@ inline Symbol symbol_from_offset(const SqliteStmt &st, int off) {
   s.is_instantiation = st.col_int64(off + 21) != 0;
   s.end_line = opt_int64(st, off + 22);
   s.end_col = opt_int64(st, off + 23);
-  s.multi_def = st.col_int64(off + 24);   // v27
-  s.const_value = opt_text(st, off + 25); // v33
+  s.multi_def = st.col_int64(off + 24);            // v27
+  s.const_value = opt_text(st, off + 25);          // v33
+  s.semantic_universe_id = st.col_int64(off + 26); // v35
+  s.identity_key = st.col_text(off + 27);          // v35
   return s;
 }
 

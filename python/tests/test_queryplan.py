@@ -260,12 +260,20 @@ def test_order_limit_default_fields_result_dict(seeded):
     assert not r.truncated
 
     d = ex.run((start(symbol("USR::A")) | out("calls")).plan)
-    assert d.fields == ("id", "usr", "name", "kind")
+    assert d.fields == (
+        "id", "usr", "semantic_universe", "identity_key", "name", "kind"
+    )
     dd = d.to_dict()
     assert dd["shape"] == "nodes"
     assert dd["view"] == "symbol"
     assert dd["count"] == 1
     assert dd["rows"][0]["name"] == "funcB"
+
+    scoped = ex.run(
+        (start(symbol("USR::A"))
+         | select(["usr", "semantic_universe", "identity_key"])).plan
+    )
+    assert scoped.rows == [("USR::A", "legacy", "legacy\x1fUSR::A")]
 
 
 def test_default_result_cap_reports_truncation():

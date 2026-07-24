@@ -27,11 +27,246 @@ namespace cidx {
 
 using namespace detail;
 
+int64_t Storage::add_semantic_universe(const std::string &key,
+                                       const std::string &name,
+                                       const std::string &policy) {
+  if (key.empty()) {
+    throw StorageError("semantic universe key must not be empty");
+  }
+  auto st = db_.prepare(
+      "INSERT INTO semantic_universe (key, name, policy) VALUES (?, ?, ?) "
+      "ON CONFLICT(key) DO UPDATE SET name = excluded.name, "
+      "policy = excluded.policy RETURNING id");
+  st.bind(1, std::string_view(key));
+  st.bind(2, std::string_view(name.empty() ? key : name));
+  st.bind(3, std::string_view(policy));
+  if (!st.step()) {
+    throw StorageError("semantic universe insert returned no id");
+  }
+  const int64_t id = st.col_int64(0);
+  st.step_done();
+  return id;
+}
+
+std::optional<SemanticUniverse>
+Storage::get_semantic_universe_by_id(int64_t universe_id) {
+  auto st = db_.prepare("SELECT id, key, name, policy FROM semantic_universe "
+                        "WHERE id = ?");
+  st.bind(1, universe_id);
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  SemanticUniverse u;
+  u.id = st.col_int64(0);
+  u.key = st.col_text(1);
+  u.name = st.col_text(2);
+  u.policy = st.col_text(3);
+  return u;
+}
+
+std::optional<SemanticUniverse>
+Storage::get_semantic_universe_by_key(const std::string &key) {
+  auto st = db_.prepare("SELECT id, key, name, policy FROM semantic_universe "
+                        "WHERE key = ?");
+  st.bind(1, std::string_view(key));
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  SemanticUniverse u;
+  u.id = st.col_int64(0);
+  u.key = st.col_text(1);
+  u.name = st.col_text(2);
+  u.policy = st.col_text(3);
+  return u;
+}
+
+std::vector<SemanticUniverse> Storage::list_semantic_universes() {
+  auto st = db_.prepare("SELECT id, key, name, policy FROM semantic_universe "
+                        "ORDER BY key");
+  std::vector<SemanticUniverse> out;
+  while (st.step()) {
+    SemanticUniverse u;
+    u.id = st.col_int64(0);
+    u.key = st.col_text(1);
+    u.name = st.col_text(2);
+    u.policy = st.col_text(3);
+    out.push_back(std::move(u));
+  }
+  return out;
+}
+
+void Storage::set_repository_semantic_universe(
+    int64_t repository_id, const std::optional<int64_t> &universe_id) {
+  auto st =
+      db_.prepare("UPDATE repository SET semantic_universe_id = COALESCE(?, 1) "
+                  "WHERE id = ?");
+  bind_opt(st, 1, universe_id);
+  st.bind(2, repository_id);
+  st.step_done();
+}
+
+void Storage::set_component_semantic_universe(
+    int64_t component_id, const std::optional<int64_t> &universe_id) {
+  auto st =
+      db_.prepare("UPDATE component SET semantic_universe_id = ? WHERE id = ?");
+  bind_opt(st, 1, universe_id);
+  st.bind(2, component_id);
+  st.step_done();
+}
+
+int64_t Storage::default_semantic_universe_id() {
+  auto st =
+      db_.prepare("SELECT id FROM semantic_universe WHERE key = 'legacy'");
+  if (st.step()) {
+    return st.col_int64(0);
+  }
+  return add_semantic_universe("legacy", "Legacy single-workspace universe",
+                               "legacy");
+}
+
+int64_t
+Storage::semantic_universe_for_file(const std::optional<int64_t> &file_id) {
+  if (!file_id) {
+    return default_semantic_universe_id();
+  }
+  auto st = db_.prepare(
+      "SELECT COALESCE(c.semantic_universe_id, r.semantic_universe_id, ?) "
+      "FROM file f JOIN directory d ON d.id = f.directory_id "
+      "JOIN component c ON c.id = d.component_id "
+      "LEFT JOIN repository r ON r.id = c.repository_id WHERE f.id = ?");
+  st.bind(1, default_semantic_universe_id());
+  st.bind(2, *file_id);
+  if (st.step() && !st.col_is_null(0)) {
+    return st.col_int64(0);
+  }
+  return default_semantic_universe_id();
+}
+
+int64_t Storage::semantic_universe_for_file_id(int64_t file_id) {
+  return semantic_universe_for_file(file_id);
+}
+
+std::string
+Storage::portable_source_identity_for_path(const std::string &path) {
+  const std::string abs = pathutil::abspath(pathutil::resolve_fs_path(path));
+  const auto comp = component_for_path(abs);
+  if (!comp) {
+    return "path:" + abs;
+  }
+
+  std::string owner;
+  if (comp->repository_id) {
+    const auto repo = get_repository_by_id(*comp->repository_id);
+    if (repo && repo->remote_url && !repo->remote_url->empty()) {
+      owner = "remote:" + *repo->remote_url;
+    } else if (repo) {
+      owner = "repo:" + repo->name;
+    }
+  }
+  if (owner.empty()) {
+    owner = "component:" + effective_root(*comp);
+  }
+  const std::string rel = pathutil::relpath(abs, component_abs_base(*comp));
+  return owner + "\x1f" + effective_root(*comp) + "\x1f" + rel;
+}
+
+std::string Storage::portable_source_identity_for_file(int64_t file_id) {
+  const auto path = file_abs_path(file_id);
+  return path ? portable_source_identity_for_path(*path)
+              : "file-id-missing:" + std::to_string(file_id);
+}
+
+std::string
+Storage::portable_translation_unit_identity_for_config(int64_t config_id) {
+  const auto config = translation_unit_config_by_id(config_id);
+  return config ? "config:" + config->descriptor_hash
+                : "config-id-missing:" + std::to_string(config_id);
+}
+
+std::string Storage::portable_translation_unit_identity_for_config(
+    int64_t config_id, int64_t translation_unit_file_id) {
+  std::string config_identity =
+      portable_translation_unit_identity_for_config(config_id);
+  if (translation_unit_file_id < 0) {
+    return config_identity;
+  }
+  return config_identity + "\x1fsource:" +
+         portable_source_identity_for_file(translation_unit_file_id);
+}
+
+std::string
+Storage::portable_translation_unit_identity_for_file(int64_t file_id) {
+  const auto configs = translation_unit_configs_for_file(file_id);
+  if (configs.size() == 1U) {
+    return portable_translation_unit_identity_for_config(configs.front().id,
+                                                         file_id);
+  }
+  if (!configs.empty()) {
+    std::string out = "configs:";
+    for (std::size_t i = 0; i < configs.size(); ++i) {
+      if (i != 0) {
+        out += ',';
+      }
+      out += configs[i].descriptor_hash;
+    }
+    return "source:" + portable_source_identity_for_file(file_id) + "\x1f" +
+           out;
+  }
+  const auto file = get_file_by_id(file_id);
+  if (!file) {
+    return "config-id-missing:" + std::to_string(file_id);
+  }
+  const TranslationUnitConfig config = resolve_translation_unit_config(
+      file->driver, std::string("."),
+      file->compile_options.value_or(std::vector<std::string>{}));
+  return "config:" + translation_unit_config_hash(config) +
+         "\x1fsource:" + portable_source_identity_for_file(file_id);
+}
+
+std::string Storage::symbol_identity_key(
+    const Symbol &sym, int64_t universe_id,
+    const std::optional<int64_t> &file_id,
+    const std::optional<std::string> &source,
+    const std::optional<std::string> &translation_unit) {
+  const auto universe = get_semantic_universe_by_id(universe_id);
+  const std::string key = universe ? universe->key : "legacy";
+  const bool local = sym.linkage && (*sym.linkage == "internal" ||
+                                     *sym.linkage == "no-linkage");
+  std::string out = key + '\x1f';
+  if (local) {
+    std::string source_key;
+    if (source && !source->empty()) {
+      source_key = portable_source_identity_for_path(*source);
+    } else if (sym.identity_source && !sym.identity_source->empty()) {
+      source_key = portable_source_identity_for_path(*sym.identity_source);
+    } else if (file_id) {
+      source_key = portable_source_identity_for_file(*file_id);
+    } else {
+      source_key = "unknown";
+    }
+    std::string tu_key;
+    if (translation_unit && !translation_unit->empty()) {
+      tu_key = *translation_unit;
+    } else if (sym.identity_translation_unit &&
+               !sym.identity_translation_unit->empty()) {
+      tu_key = *sym.identity_translation_unit;
+    } else if (file_id) {
+      tu_key = portable_translation_unit_identity_for_file(*file_id);
+    } else {
+      tu_key = "unknown";
+    }
+    out += "local:" + tu_key + '\x1f' + source_key + '\x1f';
+  }
+  out += sym.usr;
+  return out;
+}
+
 int64_t Storage::add_component(const std::string &name, const std::string &path,
                                const std::string &kind,
                                const std::optional<std::string> &version) {
   // Preserve indirected (portable) paths verbatim; absolutize plain paths.
-  // Mirrors Python: if "$" not in path and "<" not in path: path = abspath(path)
+  // Mirrors Python: if "$" not in path and "<" not in path: path =
+  // abspath(path)
   const std::string abs = (!path.contains('$') && !path.contains('<'))
                               ? pathutil::abspath(path)
                               : path;
@@ -92,8 +327,7 @@ bool Storage::set_component_version(const std::string &name,
                                     const std::optional<std::string> &version) {
   // Explicit clear goes through this path (not add_component) to avoid the
   // COALESCE guard that would no-op a NULL-clear.
-  auto st = db_.prepare(
-      "UPDATE component SET version = ? WHERE name = ?");
+  auto st = db_.prepare("UPDATE component SET version = ? WHERE name = ?");
   bind_opt(st, 1, version);
   st.bind(2, std::string_view(name));
   st.step_done();
@@ -228,8 +462,8 @@ std::optional<Component> Storage::get_component(const std::string &path) {
   // Step 2: scan all components and match against effective root (required
   // when version-detection split the trailing segment off the stored base).
   {
-    auto st =
-        db_.prepare(std::string("SELECT ") + kComponentCols + " FROM component");
+    auto st = db_.prepare(std::string("SELECT ") + kComponentCols +
+                          " FROM component");
     while (st.step()) {
       Component c = component_from(st);
       const std::string root = component_abs_base(c);
@@ -398,15 +632,28 @@ Storage::components_for_repository(int64_t repository_id) {
 
 int64_t Storage::add_repository(const std::string &name,
                                 const std::string &kind,
-                                const std::optional<std::string> &remote_url) {
-  auto st = db_.prepare(
-      "INSERT INTO repository (name, kind, remote_url) VALUES (?, ?, ?) "
-      "ON CONFLICT(name) DO UPDATE SET kind = excluded.kind, "
-      "remote_url = COALESCE(excluded.remote_url, repository.remote_url) "
-      "RETURNING id");
+                                const std::optional<std::string> &remote_url,
+                                const std::optional<int64_t> &universe_id) {
+  const char *sql =
+      universe_id
+          ? "INSERT INTO repository (name, kind, remote_url, "
+            "semantic_universe_id) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET kind = excluded.kind, "
+            "remote_url = COALESCE(excluded.remote_url, "
+            "repository.remote_url), "
+            "semantic_universe_id = excluded.semantic_universe_id RETURNING id"
+          : "INSERT INTO repository (name, kind, remote_url) VALUES (?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET kind = excluded.kind, "
+            "remote_url = COALESCE(excluded.remote_url, repository.remote_url) "
+            "RETURNING id";
+  auto st = db_.prepare(sql);
   st.bind(1, std::string_view(name));
   st.bind(2, std::string_view(kind));
   bind_opt(st, 3, remote_url);
+  if (universe_id) {
+    st.bind(4, *universe_id);
+  }
   if (!st.step()) {
     throw StorageError("repository upsert returned no id");
   }
@@ -568,7 +815,6 @@ void Storage::delete_clone(int64_t clone_id) {
   del.bind(1, clone_id);
   del.step_done();
 }
-
 
 // -- directories
 // -----------------------------------------------------------------

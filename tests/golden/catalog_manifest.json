@@ -1,11 +1,11 @@
 {
   "catalog_version": 1,
-  "catalog_hash": "5a691cc4ecd6104beef77c602f9c09be641e1dd72591e3d02a3754a0a181f8fb",
+  "catalog_hash": "c5479dfc5757e0a8b23b6d0078b164814a73823a750b41631eb818e3733eef48",
   "artifact_kinds": [
     {
       "id": 1,
       "name": "semantic-index",
-      "schema_version": 38
+      "schema_version": 39
     },
     {
       "id": 2,

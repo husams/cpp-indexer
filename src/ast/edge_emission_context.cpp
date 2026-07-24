@@ -1,7 +1,7 @@
 #include "ast/edge_emission_context.hpp"
 
-#include "ast/edge_sink.hpp"
 #include "ast/clang_compat.hpp"
+#include "ast/edge_sink.hpp"
 #include "ast/location.hpp"
 #include "ast/type_use.hpp"
 #include "ast/usr.hpp"
@@ -46,20 +46,21 @@ clang::SourceLocation type_name_loc(clang::TypeLoc tl) {
 
 } // namespace
 
-EdgeEmissionContext::EdgeEmissionContext(clang::ASTContext &context, EdgeSink &sink,
-                                 int64_t src_id, int64_t file_id)
+EdgeEmissionContext::EdgeEmissionContext(clang::ASTContext &context,
+                                         EdgeSink &sink, int64_t src_id,
+                                         int64_t file_id)
     : context_(context), sink_(sink), mint_(context, sink),
       targ_encoder_(context, sink),
       minter_(context, sink, mint_, targ_encoder_), src_id_(src_id),
       file_id_(file_id) {}
 
-int64_t EdgeEmissionContext::emit_site_edge(const clang::Expr *site, int64_t dst_id,
-                                        int kind) {
+int64_t EdgeEmissionContext::emit_site_edge(const clang::Expr *site,
+                                            int64_t dst_id, int kind) {
   return emit_site_edge_at(site->getBeginLoc(), dst_id, kind);
 }
 
 int64_t EdgeEmissionContext::emit_site_edge_at(clang::SourceLocation loc_in,
-                                           int64_t dst_id, int kind) {
+                                               int64_t dst_id, int kind) {
   EdgeRecord e;
   e.src_id = src_id_;
   e.dst_id = dst_id;
@@ -77,7 +78,7 @@ int64_t EdgeEmissionContext::emit_site_edge_at(clang::SourceLocation loc_in,
 }
 
 void EdgeEmissionContext::emit_type_name_use(const clang::TypeSourceInfo *tsi,
-                                         bool promote_described_template) {
+                                             bool promote_described_template) {
   if (tsi == nullptr) {
     return;
   }
@@ -97,7 +98,9 @@ void EdgeEmissionContext::emit_type_name_use(const clang::TypeSourceInfo *tsi,
   if (usr.empty() || usr == owner_usr_) {
     return;
   }
-  if (const auto dst = sink_.lookup_symbol_id(usr)) {
+  const auto identity_source =
+      expansion_loc(context_, named->getLocation()).file;
+  if (const auto dst = sink_.lookup_symbol_id(usr, identity_source)) {
     if (*dst != src_id_) {
       emit_site_edge_at(type_name_loc(tsi->getTypeLoc()), *dst, 7);
     }

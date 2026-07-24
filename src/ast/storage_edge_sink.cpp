@@ -13,20 +13,66 @@ void StorageEdgeSink::reset_fact_ids() {
   definition_ids_.clear();
 }
 
-std::optional<int64_t>
-StorageEdgeSink::lookup_symbol_id(const std::string &usr) {
-  const std::optional<cidx::Symbol> sym = db_.lookup_symbol(usr);
-  if (!sym) {
-    return std::nullopt;
+std::optional<int64_t> StorageEdgeSink::lookup_symbol_id(
+    const std::string &usr, const std::optional<std::string> &identity_source) {
+  std::string cache_key = usr;
+  cache_key.push_back('\x1f');
+  if (identity_source) {
+    cache_key += *identity_source;
   }
-  return sym->id;
+  cache_key.push_back('\x1f');
+  if (identity_translation_unit_) {
+    cache_key += *identity_translation_unit_;
+  }
+  if (const auto cached = lookup_cache_.find(cache_key);
+      cached != lookup_cache_.end()) {
+    return cached->second;
+  }
+  const std::optional<cidx::Symbol> sym = db_.lookup_symbol(
+      usr, current_universe_id_, identity_source, identity_translation_unit_);
+  const std::optional<int64_t> result =
+      sym ? std::optional<int64_t>(sym->id) : std::nullopt;
+  lookup_cache_.emplace(std::move(cache_key), result);
+  return result;
+}
+
+void StorageEdgeSink::set_current_file_id(int64_t file_id) {
+  current_file_id_ = file_id;
+  current_universe_id_ =
+      file_id >= 0
+          ? std::optional<int64_t>(db_.semantic_universe_for_file_id(file_id))
+          : std::nullopt;
+  lookup_cache_.clear();
+}
+
+void StorageEdgeSink::set_identity_translation_unit_config_id(
+    int64_t config_id, int64_t translation_unit_file_id) {
+  identity_translation_unit_ =
+      translation_unit_file_id >= 0
+          ? db_.portable_translation_unit_identity_for_config(
+                config_id, translation_unit_file_id)
+          : db_.portable_translation_unit_identity_for_config(config_id);
+  lookup_cache_.clear();
+}
+
+void StorageEdgeSink::set_identity_translation_unit_file_id(int64_t file_id) {
+  identity_translation_unit_ =
+      file_id >= 0
+          ? std::optional<std::string>(
+                db_.portable_translation_unit_identity_for_file(file_id))
+          : std::nullopt;
+  lookup_cache_.clear();
 }
 
 int64_t StorageEdgeSink::mint_symbol(const MintRequest &req) {
-  return db_.mint_symbol_id(
+  const int64_t id = db_.mint_symbol_id(
       req.usr, req.spelling, req.qual_name, req.display_name, req.kind_name,
       req.decl_file_id, req.decl_line, req.decl_col, req.decl_path,
-      req.is_instantiation, req.is_named_instance, req.type_info);
+      req.is_instantiation, req.is_named_instance, req.type_info,
+      current_universe_id_, req.identity_source, req.linkage,
+      identity_translation_unit_);
+  lookup_cache_.clear();
+  return id;
 }
 
 int64_t StorageEdgeSink::add_edge(const EdgeRecord &edge) {
@@ -141,15 +187,19 @@ void StorageEdgeSink::update_display_name(int64_t id,
   if (!sym) {
     return;
   }
-  db_.update_symbol(sym->usr, {{"display_name", display}});
+  db_.update_symbol_by_id(id, {{"display_name", display}});
 }
 
 std::vector<int64_t>
 StorageEdgeSink::symbol_ids_by_qual_name_kind(const std::string &qual_name,
                                               const std::string &kind_name) {
   std::vector<int64_t> out;
-  for (const cidx::Symbol &sym :
-       db_.lookup_symbols_by_qual_name(qual_name, kind_name)) {
+  for (const cidx::Symbol &sym : db_.lookup_symbols_by_qual_name(
+           qual_name, kind_name,
+           current_file_id_ >= 0
+               ? std::optional<int64_t>(
+                     db_.semantic_universe_for_file_id(current_file_id_))
+               : std::nullopt)) {
     out.push_back(sym.id);
   }
   return out;

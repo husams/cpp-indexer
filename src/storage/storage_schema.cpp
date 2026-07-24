@@ -12,6 +12,17 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT
 );
 
+-- v35: explicit declared program/dependency universes. The numeric id is
+-- database-local; key is the portable scope component of semantic identity.
+CREATE TABLE IF NOT EXISTS semantic_universe (
+    id      INTEGER PRIMARY KEY,
+    key     TEXT NOT NULL UNIQUE,
+    name    TEXT NOT NULL,
+    policy  TEXT NOT NULL DEFAULT 'explicit'
+);
+INSERT OR IGNORE INTO semantic_universe (id, key, name, policy)
+    VALUES (1, 'legacy', 'Legacy single-workspace universe', 'legacy');
+
 -- v23: a repository groups one or more components under one logical code base.
 -- A repo can be checked out in several directories (git worktrees / separate
 -- clones); each is a `clone` row and `active_clone_id` names the live one.
@@ -26,7 +37,9 @@ CREATE TABLE IF NOT EXISTS repository (
     kind            TEXT NOT NULL DEFAULT 'repo'
                     CHECK (kind IN ('repo', 'external')),
     remote_url      TEXT,                 -- git origin URL when known
-    active_clone_id INTEGER               -- -> clone.id (no FK: circular w/ clone)
+    active_clone_id INTEGER,              -- -> clone.id (no FK: circular w/ clone)
+    semantic_universe_id INTEGER NOT NULL DEFAULT 1
+            REFERENCES semantic_universe(id) ON DELETE SET DEFAULT
 );
 
 CREATE TABLE IF NOT EXISTS clone (
@@ -50,6 +63,8 @@ CREATE TABLE IF NOT EXISTS component (
     -- v24: path is UNIQUE per repository -- a grouped component stores a
     -- clone-relative path, so several repos can each carry a '.' root;
     -- ungrouped rows (repository_id NULL) are de-duplicated by add_component.
+    semantic_universe_id INTEGER
+            REFERENCES semantic_universe(id) ON DELETE SET NULL,
     UNIQUE (repository_id, path)
 );
 
@@ -80,7 +95,7 @@ CREATE TABLE IF NOT EXISTS file (
 
 CREATE TABLE IF NOT EXISTS symbol (
     id           INTEGER PRIMARY KEY,
-    usr          TEXT NOT NULL UNIQUE,  -- clang Unified Symbol Resolution
+    usr          TEXT NOT NULL,         -- clang Unified Symbol Resolution
     spelling     TEXT NOT NULL,
     qual_name    TEXT,                  -- fully qualified, e.g. 'RdKafka::ConfImpl::set'
     display_name TEXT,                  -- spelling + signature, e.g. 'multiply(int, int)'
@@ -135,12 +150,15 @@ CREATE TABLE IF NOT EXISTS symbol (
                                              -- method left undefined, each server
                                              -- re-implements it). O(1) "list
                                              -- redefined" without a join.
-    const_value  TEXT                        -- v33: the evaluated constant value
+    const_value  TEXT,                       -- v33: the evaluated constant value
                                              -- of a variable's initializer or an
                                              -- enumerator, as printed by Clang's
                                              -- constant evaluator. NULL when the
                                              -- initializer needs runtime
                                              -- evaluation (or there is none).
+    semantic_universe_id INTEGER NOT NULL DEFAULT 1
+            REFERENCES semantic_universe(id),
+    identity_key TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_symbol_spelling ON symbol(spelling);
@@ -156,6 +174,10 @@ CREATE INDEX IF NOT EXISTS idx_symbol_file     ON symbol(file_id);
 CREATE INDEX IF NOT EXISTS idx_symbol_parent   ON symbol(parent_usr);
 CREATE INDEX IF NOT EXISTS idx_symbol_parent_id ON symbol(parent_id);
 CREATE INDEX IF NOT EXISTS idx_symbol_kind     ON symbol(kind);
+CREATE INDEX IF NOT EXISTS idx_symbol_usr      ON symbol(usr);
+CREATE INDEX IF NOT EXISTS idx_symbol_scope    ON symbol(semantic_universe_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_symbol_identity
+    ON symbol(semantic_universe_id, identity_key) WHERE identity_key <> '';
 
 -- ---- v26: every declaration/reopen SITE of a symbol -------------------------
 -- symbol.(line,col)/decl_* keep only the winning definition + one declaration
@@ -845,7 +867,7 @@ CREATE TABLE IF NOT EXISTS artifact_pin (
     PRIMARY KEY (artifact_id, pin_id)
 ) WITHOUT ROWID;
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '38');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '39');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest

@@ -2,7 +2,9 @@
 
 #include "ast/clang_compat.hpp"
 #include "ast/edge_sink.hpp"
+#include "ast/location.hpp"
 #include "ast/names.hpp"
+#include "ast/type_use.hpp"
 #include "ast/usr.hpp"
 #include "ast/value_provenance.hpp"
 
@@ -41,7 +43,13 @@ TemplateArgumentEncoder::encode(int64_t owner_id, int64_t position,
     // (Box<Foo *> links to Foo); record_usr_of_type strips them typedly.
     const std::string ref_usr = record_usr_of_type(t);
     if (!ref_usr.empty()) {
-      ta.ref_id = sink_.lookup_symbol_id(ref_usr);
+      const clang::NamedDecl *ref_decl = named_type_decl(t);
+      ta.ref_id = sink_.lookup_symbol_id(
+          ref_usr,
+          ref_decl != nullptr
+              ? std::optional<std::string>(
+                    expansion_loc(context_, ref_decl->getLocation()).file)
+              : std::nullopt);
     }
     break;
   }
@@ -74,7 +82,8 @@ TemplateArgumentEncoder::encode(int64_t owner_id, int64_t position,
     if (const auto *td = arg.getAsTemplate().getAsTemplateDecl();
         td != nullptr) {
       ta.literal = td->getNameAsString();
-      ta.ref_id = sink_.lookup_symbol_id(usr_for_decl(td));
+      ta.ref_id = sink_.lookup_symbol_id(
+          usr_for_decl(td), expansion_loc(context_, td->getLocation()).file);
     }
     break;
   case clang::TemplateArgument::TemplateExpansion:
@@ -83,7 +92,8 @@ TemplateArgumentEncoder::encode(int64_t owner_id, int64_t position,
             arg.getAsTemplateOrTemplatePattern().getAsTemplateDecl();
         td != nullptr) {
       ta.literal = td->getNameAsString();
-      ta.ref_id = sink_.lookup_symbol_id(usr_for_decl(td));
+      ta.ref_id = sink_.lookup_symbol_id(
+          usr_for_decl(td), expansion_loc(context_, td->getLocation()).file);
     }
     break;
   case clang::TemplateArgument::Pack:

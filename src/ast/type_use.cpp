@@ -60,7 +60,7 @@ void emit_type_use(EdgeSink &sink, int64_t src_id, clang::QualType type,
   if (usr.empty()) {
     return;
   }
-  const auto dst = sink.lookup_symbol_id(usr);
+  const auto dst = sink.lookup_symbol_id(usr, loc.file);
   if (!dst || *dst == src_id) {
     return;
   }

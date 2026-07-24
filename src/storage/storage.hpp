@@ -28,7 +28,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 38;
+constexpr int kSchemaVersion = 39;
 
 struct IndexIdentity {
   int schema_version = kSchemaVersion;
@@ -82,6 +82,25 @@ public:
   // Batch many mutations into one commit (the documented 100x win):
   //   { auto txn = db.transaction(); ...; }   // commits at scope end
   Transaction transaction() { return Transaction(*this); }
+
+  // -- semantic universes / symbol identity (v35) --------------------------
+  // A universe is explicit policy: equal USRs merge only when their
+  // repositories/components are assigned to the same universe. The numeric
+  // id is database-local; Symbol::identity_key is the portable identity.
+  int64_t add_semantic_universe(const std::string &key,
+                                const std::string &name = "",
+                                const std::string &policy = "explicit");
+  std::optional<SemanticUniverse>
+  get_semantic_universe_by_id(int64_t universe_id);
+  std::optional<SemanticUniverse>
+  get_semantic_universe_by_key(const std::string &key);
+  std::vector<SemanticUniverse> list_semantic_universes();
+  void
+  set_repository_semantic_universe(int64_t repository_id,
+                                   const std::optional<int64_t> &universe_id);
+  void
+  set_component_semantic_universe(int64_t component_id,
+                                  const std::optional<int64_t> &universe_id);
 
   // -- components ------------------------------------------------------------
   int64_t
@@ -151,9 +170,10 @@ public:
   // -- repositories / clones (v23) -------------------------------------------
   // Insert a repository; idempotent on name. remote_url updated only when a
   // non-null value is supplied (COALESCE). Returns the repository id.
-  int64_t
-  add_repository(const std::string &name, const std::string &kind = "repo",
-                 const std::optional<std::string> &remote_url = std::nullopt);
+  int64_t add_repository(
+      const std::string &name, const std::string &kind = "repo",
+      const std::optional<std::string> &remote_url = std::nullopt,
+      const std::optional<int64_t> &semantic_universe_id = std::nullopt);
   std::optional<Repository> get_repository_by_name(const std::string &name);
   std::optional<Repository> get_repository_by_id(int64_t repository_id);
   std::optional<Repository>
@@ -251,28 +271,49 @@ public:
   std::map<int64_t, std::map<int, int64_t>> diagnostic_counts();
 
   // -- symbols -----------------------------------------------------------
-  // Upsert keyed by USR; throws StorageError on a bad kind. Definition wins
-  // over a stored declaration; a declaration never downgrades a definition.
+  // Upsert keyed by semantic universe plus portable identity key; throws
+  // StorageError on a bad kind. Definition wins over a stored declaration; a
+  // declaration never downgrades a definition.
   int64_t add_symbol(const Symbol &sym);
   void delete_symbols_for_file(int64_t file_id);
   // Update named columns of the symbol with this USR; false when absent.
   // Throws StorageError on unknown columns or a bad kind value (smoke parity).
-  bool
-  update_symbol(const std::string &usr,
-                const std::vector<std::pair<std::string, SqlValue>> &values);
-  std::optional<Symbol> lookup_symbol(const std::string &usr);
+  bool update_symbol(
+      const std::string &usr,
+      const std::vector<std::pair<std::string, SqlValue>> &values,
+      const std::optional<int64_t> &semantic_universe_id = std::nullopt,
+      const std::optional<std::string> &identity_source = std::nullopt,
+      const std::optional<std::string> &identity_translation_unit =
+          std::nullopt);
+  bool update_symbol_by_id(
+      int64_t symbol_id,
+      const std::vector<std::pair<std::string, SqlValue>> &values);
+  // Bare lookup is unambiguous only when zero or one row matches. Call
+  // lookup_symbols_by_usr() or pass a scope/source to select an ambiguous
+  // match explicitly.
+  std::optional<Symbol> lookup_symbol(
+      const std::string &usr,
+      const std::optional<int64_t> &semantic_universe_id = std::nullopt,
+      const std::optional<std::string> &identity_source = std::nullopt,
+      const std::optional<std::string> &identity_translation_unit =
+          std::nullopt);
+  std::vector<Symbol> lookup_symbols_by_usr(
+      const std::string &usr,
+      const std::optional<int64_t> &semantic_universe_id = std::nullopt);
   std::optional<Symbol> lookup_symbol_by_id(int64_t symbol_id);
   // Remove a single symbol row.
   void delete_symbol(int64_t symbol_id);
-  std::vector<Symbol>
-  lookup_symbols_by_name(const std::string &spelling,
-                         const std::optional<std::string> &kind = std::nullopt);
+  std::vector<Symbol> lookup_symbols_by_name(
+      const std::string &spelling,
+      const std::optional<std::string> &kind = std::nullopt,
+      const std::optional<int64_t> &semantic_universe_id = std::nullopt);
   // Exact match on qual_name column; mirrors lookup_symbols_by_name but keyed
   // on qual_name instead of spelling. Used to recover a callee whose USR is
   // inconsistent (member function template in a dependent template body).
   std::vector<Symbol> lookup_symbols_by_qual_name(
       const std::string &qual_name,
-      const std::optional<std::string> &kind = std::nullopt);
+      const std::optional<std::string> &kind = std::nullopt,
+      const std::optional<int64_t> &semantic_universe_id = std::nullopt);
   // '::'-segment fuzzy match on qual_name, ordered LENGTH(qual_name) first.
   std::vector<Symbol>
   search_symbols(const std::string &pattern,
@@ -313,17 +354,21 @@ public:
   // An existing real row is kept intact; a repeat mint only UPGRADES an empty
   // name, never clobbers a real one, and fills the location only when still
   // absent. Returns the stable symbol.id either way.
-  int64_t
-  mint_symbol_id(const std::string &usr, const std::string &spelling = "",
-                 const std::string &qual_name = "",
-                 const std::string &display_name = "",
-                 const std::string &kind = "function",
-                 const std::optional<int64_t> &decl_file_id = std::nullopt,
-                 const std::optional<int64_t> &decl_line = std::nullopt,
-                 const std::optional<int64_t> &decl_col = std::nullopt,
-                 const std::optional<std::string> &decl_path = std::nullopt,
-                 bool is_instantiation = false, bool is_named_instance = false,
-                 const std::optional<std::string> &type_info = std::nullopt);
+  int64_t mint_symbol_id(
+      const std::string &usr, const std::string &spelling = "",
+      const std::string &qual_name = "", const std::string &display_name = "",
+      const std::string &kind = "function",
+      const std::optional<int64_t> &decl_file_id = std::nullopt,
+      const std::optional<int64_t> &decl_line = std::nullopt,
+      const std::optional<int64_t> &decl_col = std::nullopt,
+      const std::optional<std::string> &decl_path = std::nullopt,
+      bool is_instantiation = false, bool is_named_instance = false,
+      const std::optional<std::string> &type_info = std::nullopt,
+      const std::optional<int64_t> &semantic_universe_id = std::nullopt,
+      const std::optional<std::string> &identity_source = std::nullopt,
+      const std::optional<std::string> &linkage = std::nullopt,
+      const std::optional<std::string> &identity_translation_unit =
+          std::nullopt);
 
   // UNIQUE upsert on (src_id, dst_id, kind); increments count on conflict.
   // Returns the edge.id for edge_site linkage.
@@ -689,6 +734,13 @@ public:
   // databases without the v35 metadata remain readable but unverifiable.
   IndexIdentity index_identity();
   void stamp_index_identity();
+  std::string portable_source_identity_for_path(const std::string &path);
+  std::string portable_source_identity_for_file(int64_t file_id);
+  std::string portable_translation_unit_identity_for_config(int64_t config_id);
+  std::string portable_translation_unit_identity_for_config(
+      int64_t config_id, int64_t translation_unit_file_id);
+  std::string portable_translation_unit_identity_for_file(int64_t file_id);
+  int64_t semantic_universe_for_file_id(int64_t file_id);
 
 private:
   friend class Transaction;
@@ -701,6 +753,14 @@ private:
   void reconcile_type_identity(int64_t type_id, std::string_view decl_usr);
   void migrate_symbol_kind_to_int();    // v15 -> v16: rebuild symbol, kind->int
   void migrate_component_repo_unique(); // v23 -> v24: path UNIQUE per repo
+  void migrate_symbol_identity_scope(); // v34 -> v35: scoped symbol identity
+  int64_t default_semantic_universe_id();
+  int64_t semantic_universe_for_file(const std::optional<int64_t> &file_id);
+  std::string symbol_identity_key(
+      const Symbol &sym, int64_t universe_id,
+      const std::optional<int64_t> &file_id,
+      const std::optional<std::string> &source = std::nullopt,
+      const std::optional<std::string> &translation_unit = std::nullopt);
   // v24: resolved absolute path of a repository's active clone, or nullopt when
   // ungrouped / no live clone. Mirrors Python Storage._active_clone_root.
   std::optional<std::string>

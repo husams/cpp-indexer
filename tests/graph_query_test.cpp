@@ -450,29 +450,32 @@ TEST_CASE("graph_query: Sym value type — is_stub, loc, to_dict key order") {
   CHECK(!real.is_stub());
   CHECK(real.loc() == "foo.cpp:42");
 
-  // to_dict key order (R7): id,usr,spelling,qual_name,kind,type_info,
+  // to_dict key order (R7): id,usr,semantic_universe,identity_key,spelling,
+  //                         qual_name,kind,type_info,
   //                         const_value,file,line,col,end_line,end_col,
   //                         is_definition,is_pure,is_static,is_instantiation,
   //                         is_stub
   auto dict = real.to_dict();
-  REQUIRE(dict.o.size() == 17);
+  REQUIRE(dict.o.size() == 19);
   CHECK(dict.o[0].first == "id");
   CHECK(dict.o[1].first == "usr");
-  CHECK(dict.o[2].first == "spelling");
-  CHECK(dict.o[3].first == "qual_name");
-  CHECK(dict.o[4].first == "kind");
-  CHECK(dict.o[5].first == "type_info");
-  CHECK(dict.o[6].first == "const_value");
-  CHECK(dict.o[7].first == "file");
-  CHECK(dict.o[8].first == "line");
-  CHECK(dict.o[9].first == "col");
-  CHECK(dict.o[10].first == "end_line");
-  CHECK(dict.o[11].first == "end_col");
-  CHECK(dict.o[12].first == "is_definition");
-  CHECK(dict.o[13].first == "is_pure");
-  CHECK(dict.o[14].first == "is_static");
-  CHECK(dict.o[15].first == "is_instantiation");
-  CHECK(dict.o[16].first == "is_stub");
+  CHECK(dict.o[2].first == "semantic_universe");
+  CHECK(dict.o[3].first == "identity_key");
+  CHECK(dict.o[4].first == "spelling");
+  CHECK(dict.o[5].first == "qual_name");
+  CHECK(dict.o[6].first == "kind");
+  CHECK(dict.o[7].first == "type_info");
+  CHECK(dict.o[8].first == "const_value");
+  CHECK(dict.o[9].first == "file");
+  CHECK(dict.o[10].first == "line");
+  CHECK(dict.o[11].first == "col");
+  CHECK(dict.o[12].first == "end_line");
+  CHECK(dict.o[13].first == "end_col");
+  CHECK(dict.o[14].first == "is_definition");
+  CHECK(dict.o[15].first == "is_pure");
+  CHECK(dict.o[16].first == "is_static");
+  CHECK(dict.o[17].first == "is_instantiation");
+  CHECK(dict.o[18].first == "is_stub");
 }
 
 // ---------------------------------------------------------------------------

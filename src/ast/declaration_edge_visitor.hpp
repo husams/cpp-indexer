@@ -78,8 +78,7 @@ public:
   bool VisitTypedefNameDecl(clang::TypedefNameDecl *decl); // alias uses/mint
 
   // Reuse the declaration signature extraction for call-site minted symbols.
-  void emit_signature_types_for(const clang::FunctionDecl *fn,
-                                int64_t fn_sym);
+  void emit_signature_types_for(const clang::FunctionDecl *fn, int64_t fn_sym);
 
 private:
   // The decl-level walk prunes at function bodies and only covers cursors of
@@ -87,7 +86,9 @@ private:
   bool in_walk(const clang::Decl *decl) const;
 
   std::optional<int64_t> emit_lookup_edge(const std::string &src_usr,
-                                          const std::string &dst_usr, int kind);
+                                          const std::string &dst_usr, int kind,
+                                          const std::string &src_source = {},
+                                          const std::string &dst_source = {});
   void emit_contains_edge(const clang::NamedDecl *decl);
   void emit_override_edges(const clang::CXXMethodDecl *decl, int64_t src_id);
   std::optional<int64_t>

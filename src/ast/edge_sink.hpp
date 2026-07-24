@@ -19,8 +19,14 @@ public:
   virtual ~EdgeSink() = default;
 
   // symbol.id for an indexed USR (lookup_symbol).
-  virtual std::optional<int64_t>
-  lookup_symbol_id(const std::string &usr) = 0;
+  virtual std::optional<int64_t> lookup_symbol_id(
+      const std::string &usr,
+      const std::optional<std::string> &identity_source = std::nullopt) = 0;
+
+  virtual void set_current_file_id(int64_t /*file_id*/) {}
+  virtual void set_identity_translation_unit_config_id(
+      int64_t /*config_id*/, int64_t /*translation_unit_file_id*/ = -1) {}
+  virtual void set_identity_translation_unit_file_id(int64_t /*file_id*/) {}
 
   // Upsert a USR-keyed stub, returning its stable id (mint_symbol_id).
   virtual int64_t mint_symbol(const MintRequest &req) = 0;
@@ -43,8 +49,9 @@ public:
   virtual int64_t intern_type_node(const TypeNodeRecord &node) = 0;
   virtual void add_type_edge(int64_t src_id, int64_t kind, int64_t position,
                              int64_t dst_id) = 0;
-  virtual void replace_parameters(int64_t owner_id,
-                                  const std::vector<ParameterRecord> &params) = 0;
+  virtual void
+  replace_parameters(int64_t owner_id,
+                     const std::vector<ParameterRecord> &params) = 0;
   virtual void add_symbol_type(int64_t symbol_id, int64_t kind,
                                int64_t type_id) = 0;
 
@@ -59,13 +66,11 @@ public:
                            int64_t col, int64_t end_line, int64_t end_col,
                            const std::optional<std::string> &init_text) = 0;
   virtual void add_def_edge(int64_t def_id, int64_t dst_id, int64_t kind) = 0;
-  virtual void copy_body_edges_to_def_edge(int64_t def_id,
-                                           int64_t src_id) = 0;
+  virtual void copy_body_edges_to_def_edge(int64_t def_id, int64_t src_id) = 0;
 
   // file.id for a registered absolute path (get_file); nullopt when the path
   // is not part of any indexed component (system/stdlib headers).
-  virtual std::optional<int64_t>
-  file_id_for_path(const std::string &path) = 0;
+  virtual std::optional<int64_t> file_id_for_path(const std::string &path) = 0;
 
   // Symbols matching `name` by qual_name (qualified=true) or spelling, for
   // template-arg reference resolution (lookup_symbols_by_[qual_]name).

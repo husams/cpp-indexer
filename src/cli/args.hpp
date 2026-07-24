@@ -56,54 +56,54 @@ struct ParsedArgs {
   bool dry_run = false;                   // delete --dry-run
   bool no_graph = false;                  // index --no-graph
   std::vector<std::string> assignment;    // set FIELD=VALUE [FIELD=VALUE ...]
-  std::optional<std::string> index_db;    // set/file/dump-cc --db (index override)
-  std::string target;                     // file: target path or COMPONENT://PATH
-  std::vector<std::string> op;            // file OP ... (REMAINDER tail)
+  std::optional<std::string> index_db; // set/file/dump-cc --db (index override)
+  std::string target;                  // file: target path or COMPONENT://PATH
+  std::vector<std::string> op;         // file OP ... (REMAINDER tail)
 
   // Shared selector flag (graph): --first takes the closest --name match.
-  bool first = false;                    // --first (take closest --name match)
+  bool first = false; // --first (take closest --name match)
 
   // -- graph sub-command fields (cidx graph callers|callees|…) ---------------
   // Shared selector: reuse usr (above), kind (above), first (above), index_db.
-  std::optional<int64_t> graph_id;       // --id  N (graph: numeric symbol id)
-  bool graph_json = false;               // --json (emit machine-readable JSON)
-  int graph_limit = 50;                  // --limit N (default 50)
-  std::string direction{"out"};          // --direction {in,out} (default out)
-  std::optional<std::string> edge;       // --edge KINDS (comma-separated)
-  int graph_depth = 3;                   // --depth N (walk default 3, path 8)
+  std::optional<int64_t> graph_id; // --id  N (graph: numeric symbol id)
+  bool graph_json = false;         // --json (emit machine-readable JSON)
+  int graph_limit = 50;            // --limit N (default 50)
+  std::string direction{"out"};    // --direction {in,out} (default out)
+  std::optional<std::string> edge; // --edge KINDS (comma-separated)
+  int graph_depth = 3;             // --depth N (walk default 3, path 8)
   // path destination selector
-  std::optional<std::string> to_usr;     // --to-usr USR
-  std::optional<int64_t> to_id;          // --to-id N
-  std::optional<std::string> to_name;    // --to-name FUZZY
-  std::optional<std::string> to_kind;    // --to-kind {17 kinds}
+  std::optional<std::string> to_usr;  // --to-usr USR
+  std::optional<int64_t> to_id;       // --to-id N
+  std::optional<std::string> to_name; // --to-name FUZZY
+  std::optional<std::string> to_kind; // --to-kind {17 kinds}
   // callers flag
-  bool direct_only = false;              // --direct-only (exclude virtual callers)
+  bool direct_only = false; // --direct-only (exclude virtual callers)
   // hierarchy flags
-  bool transitive = false;               // --transitive (walk whole hierarchy)
-  std::string access{"all"};             // --access {public,protected,private,all}
+  bool transitive = false;   // --transitive (walk whole hierarchy)
+  std::string access{"all"}; // --access {public,protected,private,all}
 
   // -- include sub-command fields (cidx include graph|check|plan|apply) -------
   // Scope: PATH... positionally, and/or --files-from FILE (one path per line,
   // absolute or repo-relative). Both may be combined; the union is used.
-  std::vector<std::string> inc_paths;      // PATH...
-  std::optional<std::string> files_from;   // --files-from FILE
-  bool inc_reverse = false;                // graph --reverse (who includes me)
-  bool inc_transitive = false;             // graph --transitive
-  bool inc_cycles = false;                 // graph --cycles
-  bool inc_system = false;                 // graph --system (keep system targets)
-  std::string inc_format{"text"};          // graph --format text|json|dot
-  int inc_depth = 0;                       // graph --depth N (0 = unbounded)
-  bool inc_duplicates = false;             // check/plan --duplicates
-  bool inc_unused = false;                 // check/plan --unused
-  bool inc_json = false;                   // check --json
-  std::optional<std::string> inc_output;   // plan --output FILE (required)
-  std::string inc_plan;                    // apply PLAN (positional, required)
-  std::vector<std::string> inc_only;       // apply --only ID[,ID...]
+  std::vector<std::string> inc_paths;    // PATH...
+  std::optional<std::string> files_from; // --files-from FILE
+  bool inc_reverse = false;              // graph --reverse (who includes me)
+  bool inc_transitive = false;           // graph --transitive
+  bool inc_cycles = false;               // graph --cycles
+  bool inc_system = false;               // graph --system (keep system targets)
+  std::string inc_format{"text"};        // graph --format text|json|dot
+  int inc_depth = 0;                     // graph --depth N (0 = unbounded)
+  bool inc_duplicates = false;           // check/plan --duplicates
+  bool inc_unused = false;               // check/plan --unused
+  bool inc_json = false;                 // check --json
+  std::optional<std::string> inc_output; // plan --output FILE (required)
+  std::string inc_plan;                  // apply PLAN (positional, required)
+  std::vector<std::string> inc_only;     // apply --only ID[,ID...]
 
   // -- portable-paths (v14) fields -------------------------------------------
   std::optional<std::string> version_str; // --version VER (add-source)
-  bool no_detect_version = false;          // --no-detect-version (add-source)
-  bool no_autoderive_labels = false;       // --no-autoderive-labels (index)
+  bool no_detect_version = false;         // --no-detect-version (add-source)
+  bool no_autoderive_labels = false;      // --no-autoderive-labels (index)
 
   // -- aliasing (v0.6.0) fields ----------------------------------------------
   bool no_alias = false; // import --no-alias (skip alias_options encoding)
@@ -112,11 +112,13 @@ struct ParsedArgs {
   // repo subcommand (list|show|add-clone|switch|rm) is carried in `what`; the
   // repository NAME in `name`; add-clone PATH in `path`; switch TARGET in
   // `target`; list name filter in `pattern`; list kind filter in `kind`.
-  std::optional<std::string> repo;       // import/add-source --repo (group name)
+  std::optional<std::string> repo;     // import/add-source --repo (group name)
+  std::optional<std::string> universe; // import/add-source --universe key
   std::optional<std::string> repo_label; // repo add-clone --label
-  bool delete_components = false;         // repo rm --delete-components
+  bool delete_components = false;        // repo rm --delete-components
 
-  // -- analyze (Souffle) fields ------------------------------------------------
+  // -- analyze (Souffle) fields
+  // ------------------------------------------------
   // --db is carried in index_db.
   std::optional<std::string> analyze_rule;       // --rule NAME
   std::optional<std::string> analyze_rules_file; // --rules-file FILE

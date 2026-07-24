@@ -73,8 +73,9 @@ void check_migrated(const std::string &db_path) {
   cidx::SqliteDb raw(db_path);
 
   const auto scols = table_columns(raw, "symbol");
-  for (const char *c : {"qual_name", "decl_file_id", "decl_line", "decl_col",
-                        "is_pure", "is_static", "decl_path"}) {
+  for (const char *c :
+       {"qual_name", "decl_file_id", "decl_line", "decl_col", "is_pure",
+        "is_static", "decl_path", "semantic_universe_id", "identity_key"}) {
     CHECK_MESSAGE(has_col(scols, c), "symbol." << c << " present");
   }
   CHECK(has_col(table_columns(raw, "file"), "driver"));
@@ -128,6 +129,9 @@ void check_migrated(const std::string &db_path) {
                                          "idx_symbol_kind",
                                          "idx_symbol_spelling_nc",
                                          "idx_symbol_qual_nc",
+                                         "idx_symbol_usr",
+                                         "idx_symbol_scope",
+                                         "idx_symbol_identity",
                                          "idx_edge_src",
                                          "idx_edge_dst",
                                          "idx_call_arg_edge",
@@ -191,9 +195,9 @@ TEST_CASE(
   check_migrated(path);
 }
 
-TEST_CASE("predecessor catalog hash requires the v37 to v38 migration") {
+TEST_CASE("predecessor catalog hash requires the v38 to v39 migration") {
   const std::string tmp = make_temp_dir();
-  for (const char *wrong_version : {"36", "38"}) {
+  for (const char *wrong_version : {"37", "39"}) {
     const std::string path =
         std::string(tmp) + "/wrong-" + wrong_version + ".db";
     {
@@ -205,16 +209,16 @@ TEST_CASE("predecessor catalog hash requires the v37 to v38 migration") {
                "' WHERE key = 'schema_version'");
       raw.exec(
           "UPDATE meta SET value = "
-          "'be3a97cf69140080586a079a27a97da7816455f477ce56435ee91c600cc993fc' "
+          "'5a691cc4ecd6104beef77c602f9c09be641e1dd72591e3d02a3754a0a181f8fb' "
           "WHERE key = 'catalog_hash'");
     }
     CHECK_THROWS_AS(cidx::Storage{path}, cidx::CidxError);
   }
 }
 
-TEST_CASE("v37 database migrates to the v38 artifact manifest layer") {
+TEST_CASE("v38 database migrates to the v39 scoped identity layer") {
   const std::string tmp = make_temp_dir();
-  const std::string path = tmp + "/v37.db";
+  const std::string path = tmp + "/v38.db";
   {
     cidx::Storage db(path);
   }
@@ -226,7 +230,7 @@ TEST_CASE("v37 database migrates to the v38 artifact manifest layer") {
           "artifact_relation", "artifact"}) {
       raw.exec(std::string("DROP TABLE ") + table);
     }
-    raw.exec("UPDATE meta SET value = '37' WHERE key = 'schema_version'");
+    raw.exec("UPDATE meta SET value = '38' WHERE key = 'schema_version'");
   }
 
   {
@@ -237,7 +241,7 @@ TEST_CASE("v37 database migrates to the v38 artifact manifest layer") {
   CHECK(meta_version(raw) == std::to_string(cidx::kSchemaVersion));
   for (const char *table :
        {"artifact", "artifact_relation", "artifact_identity_map",
-        "artifact_lease", "artifact_pin"}) {
+        "artifact_lease", "artifact_pin", "semantic_universe"}) {
     auto st = raw.prepare(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
     st.bind(1, std::string_view(table));
@@ -459,9 +463,11 @@ TEST_CASE("v28 -> v29: template_arg arg_kind remapped to the canonical codes") {
   }
   {
     cidx::SqliteDb raw(path);
-    raw.exec("INSERT INTO symbol (id, usr, spelling, kind) VALUES "
-             "(1, 'c:@S@Spec', 'Spec', 2)," // struct owner (class-spec path)
-             "(2, 'c:@F@fn', 'fn', 8)");    // function owner (callable path)
+    raw.exec(
+        "INSERT INTO symbol (id, usr, spelling, kind, "
+        "semantic_universe_id, identity_key) VALUES "
+        "(1, 'c:@S@Spec', 'Spec', 2, 1, 'legacy' || char(31) || 'c:@S@Spec'),"
+        "(2, 'c:@F@fn', 'fn', 8, 1, 'legacy' || char(31) || 'c:@F@fn')");
     raw.exec("INSERT INTO template_arg (owner_id, position, arg_kind) VALUES "
              "(1, 0, 8),"  // legacy Pack           -> 4
              "(1, 1, 5),"  // legacy Template       -> 3

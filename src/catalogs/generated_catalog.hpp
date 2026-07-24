@@ -6,7 +6,7 @@
 
 namespace cidx::catalog {
 inline constexpr int kCatalogVersion = 1;
-inline constexpr std::string_view kCatalogHash = "5a691cc4ecd6104beef77c602f9c09be641e1dd72591e3d02a3754a0a181f8fb";
+inline constexpr std::string_view kCatalogHash = "c5479dfc5757e0a8b23b6d0078b164814a73823a750b41631eb818e3733eef48";
 enum class View : std::uint8_t { Symbol, Entity };
 struct NamedId { int64_t id; std::string_view name; };
 struct Relation { int64_t id; std::string_view name; View layer; std::string_view source; std::string_view target; std::string_view inverse; std::string_view traversal; std::string_view evidence; std::string_view evidence_capabilities; std::string_view completeness; };
@@ -106,7 +106,7 @@ inline constexpr std::array<Relation, 32> kRelations = {{
     {.id = 12, .name = "declares", .layer = View::Entity, .source = "entity", .target = "entity", .inverse = "declared_by", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "complete"},
 }};
 
-inline constexpr std::array<Field, 13> kFields = {{
+inline constexpr std::array<Field, 15> kFields = {{
     {.name = "id", .filterable = true, .is_string = false},
     {.name = "usr", .filterable = true, .is_string = true},
     {.name = "name", .filterable = true, .is_string = true},
@@ -120,6 +120,8 @@ inline constexpr std::array<Field, 13> kFields = {{
     {.name = "file", .filterable = false, .is_string = true},
     {.name = "line", .filterable = false, .is_string = false},
     {.name = "col", .filterable = false, .is_string = false},
+    {.name = "semantic_universe", .filterable = true, .is_string = true},
+    {.name = "identity_key", .filterable = true, .is_string = true},
 }};
 
 inline constexpr std::array<NamedId, 5> kOccurrenceRoles = {{
