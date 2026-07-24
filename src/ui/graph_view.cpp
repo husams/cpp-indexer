@@ -43,6 +43,18 @@ std::string redacted_path(const std::string &path,
   return pathutil::basename(path);
 }
 
+// render_html() script-escapes these bytes from one byte to six. Keep the
+// GraphView budget honest for both the raw JSON and the static-export form.
+std::size_t script_safe_size(std::string_view json) {
+  std::size_t size = json.size();
+  for (const char byte : json) {
+    if (byte == '<' || byte == '>' || byte == '&') {
+      size += 5;
+    }
+  }
+  return size;
+}
+
 std::string location(const graph::Sym &sym,
                      const std::optional<std::string> &workspace) {
   if (!sym.file) {
@@ -454,9 +466,24 @@ Value *member(Value &value, std::string_view key) {
   return nullptr;
 }
 
+const Value *member(const Value &value, std::string_view key) {
+  for (const auto &[name, child] : value.o) {
+    if (name == key) {
+      return &child;
+    }
+  }
+  return nullptr;
+}
+
 void set_bool_member(Value &value, std::string_view key, bool enabled) {
   if (Value *child = member(value, key)) {
     *child = Value::of(enabled);
+  }
+}
+
+void set_int_member(Value &value, std::string_view key, int64_t number) {
+  if (Value *child = member(value, key)) {
+    *child = Value::of(number);
   }
 }
 
@@ -668,6 +695,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   const auto mark_byte_truncated = [&] {
     if (Value *metadata_value = member(result, "metadata")) {
       set_bool_member(*metadata_value, "truncated", true);
+      set_bool_member(*metadata_value, "evidence_truncated", true);
       if (Value *continuation = member(*metadata_value, "continuation")) {
         set_bool_member(*continuation, "available", true);
         for (auto &[name, value] : continuation->o) {
@@ -677,24 +705,57 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
         }
       }
     }
+    if (Value *nodes_value = member(result, "nodes")) {
+      for (Value &node : nodes_value->a) {
+        if (Value *status_value = member(node, "status")) {
+          set_bool_member(*status_value, "truncated", true);
+        }
+        if (Value *evidence_value = member(node, "evidence")) {
+          set_bool_member(*evidence_value, "truncated", true);
+        }
+      }
+    }
+    if (Value *edges_value = member(result, "edges")) {
+      for (Value &edge : edges_value->a) {
+        if (Value *status_value = member(edge, "status")) {
+          set_bool_member(*status_value, "truncated", true);
+          set_bool_member(*status_value, "evidence_truncated", true);
+        }
+        if (Value *evidence_value = member(edge, "evidence")) {
+          set_bool_member(*evidence_value, "truncated", true);
+          set_bool_member(*evidence_value, "sites_truncated", true);
+        }
+      }
+    }
   };
-  if (json_out::dumps_indent2(result).size() >
+  if (script_safe_size(json_out::dumps_indent2(result)) >
       static_cast<std::size_t>(byte_budget)) {
     mark_byte_truncated();
-    while (json_out::dumps_indent2(result).size() >
+    while (script_safe_size(json_out::dumps_indent2(result)) >
                static_cast<std::size_t>(byte_budget) &&
            (member(result, "edges") != nullptr &&
             !member(result, "edges")->a.empty())) {
       member(result, "edges")->a.pop_back();
     }
-    while (json_out::dumps_indent2(result).size() >
+    while (script_safe_size(json_out::dumps_indent2(result)) >
                static_cast<std::size_t>(byte_budget) &&
            (member(result, "nodes") != nullptr &&
             !member(result, "nodes")->a.empty())) {
       member(result, "nodes")->a.pop_back();
     }
+    if (Value *metadata_value = member(result, "metadata")) {
+      int64_t retained_sites = 0;
+      if (Value *edges_value = member(result, "edges")) {
+        for (const Value &edge : edges_value->a) {
+          if (const Value *sites_value = member(edge, "sites")) {
+            retained_sites += static_cast<int64_t>(sites_value->a.size());
+          }
+        }
+      }
+      set_int_member(*metadata_value, "sites_used", retained_sites);
+    }
   }
-  if (json_out::dumps_indent2(result).size() >
+  if (script_safe_size(json_out::dumps_indent2(result)) >
       static_cast<std::size_t>(byte_budget)) {
     throw CidxError(
         "cidx ui: byte budget is too small for fixed GraphView metadata");

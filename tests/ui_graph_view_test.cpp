@@ -166,6 +166,88 @@ TEST_CASE("GraphView enforces the byte budget or fails explicitly") {
   CHECK_THROWS_AS(cidx::ui::build_graph_view(db, request), cidx::CidxError);
 }
 
+TEST_CASE(
+    "GraphView keeps retained element status and site counters consistent") {
+  Storage db(":memory:");
+  const int64_t component = db.add_component("test", "/tmp/cidx-ui-trim");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "main.cpp");
+  auto source = symbol("USR::trim-source", "ns::trim_source");
+  source.file_id = file;
+  auto target_a = symbol("USR::trim-target-a", "ns::trim_target_a");
+  target_a.file_id = file;
+  auto target_b = symbol("USR::trim-target-b", "ns::trim_target_b");
+  target_b.file_id = file;
+  const int64_t source_id = db.add_symbol(source);
+  const int64_t target_a_id = db.add_symbol(target_a);
+  const int64_t target_b_id = db.add_symbol(target_b);
+
+  for (const int64_t target_id : {target_a_id, target_b_id}) {
+    cidx::Edge edge;
+    edge.src_id = source_id;
+    edge.dst_id = target_id;
+    edge.kind = cidx::graph::edge_kinds_map().at("calls");
+    const int64_t edge_id = db.add_edge(edge);
+    cidx::EdgeSite site;
+    site.edge_id = edge_id;
+    site.file_id = file;
+    site.line = target_id == target_a_id ? 10 : 20;
+    site.col = 1;
+    site.args_sig = std::string(1000, '<');
+    db.add_edge_site(site);
+  }
+
+  CHECK(db.graph_edges(
+              source_id, "out",
+              std::vector<int64_t>{cidx::graph::edge_kinds_map().at("calls")},
+              false, 10)
+            .size() == 2);
+
+  cidx::ui::GraphViewRequest request;
+  request.root = "ns::trim_source";
+  request.edge_kinds = std::vector<std::string>{"calls"};
+  request.depth = 1;
+  request.node_budget = 3;
+  request.edge_budget = 2;
+  request.site_budget = 2;
+  request.byte_budget = 16000;
+  const std::string json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+
+  CHECK(json.find("\"sites_used\": 1") != std::string::npos);
+  CHECK(json.find("\"evidence_truncated\": true") != std::string::npos);
+  const std::size_t edge_start = json.find("\"edges\": [");
+  const std::size_t edge_status = json.find("\"status\": {", edge_start);
+  CHECK(edge_start != std::string::npos);
+  CHECK(edge_status != std::string::npos);
+  CHECK(json.find("\"truncated\": true", edge_status) != std::string::npos);
+  CHECK(json.find("\"evidence_truncated\": true", edge_status) !=
+        std::string::npos);
+  CHECK(json.find("\"edges\": [\n    {") != std::string::npos);
+  CHECK(json.find("\"edges\": [\n    {",
+                  json.find("\"edges\": [\n    {") + 1) == std::string::npos);
+}
+
+TEST_CASE("GraphView export enforces the byte budget after script escaping") {
+  Storage db(":memory:");
+  cidx::ui::GraphViewRequest request;
+  request.query =
+      std::string(150, '<') + std::string(150, '&') + std::string(150, '>');
+  request.byte_budget = 8192;
+  const auto view = cidx::ui::build_graph_view(db, request);
+  const std::string html = cidx::ui::render_html(view);
+  const std::string marker = "window.CIDX_GRAPH_VIEW = ";
+  const std::size_t start = html.find(marker);
+  const std::size_t end = html.find("</script>", start);
+
+  REQUIRE(start != std::string::npos);
+  REQUIRE(end != std::string::npos);
+  CHECK(end - (start + marker.size()) <= request.byte_budget);
+  CHECK(html.find("\\u003c", start) != std::string::npos);
+  CHECK(html.find("\\u0026", start) != std::string::npos);
+  CHECK(html.find("\\u003e", start) != std::string::npos);
+}
+
 TEST_CASE("GraphView refuses to enumerate without a bounded root") {
   Storage db(":memory:");
   cidx::ui::GraphViewRequest request;
