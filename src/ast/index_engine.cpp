@@ -167,6 +167,7 @@ private:
     int64_t file_id;
     std::optional<double> mtime;
     std::optional<std::string> md5;
+    bool covered_by_current_config = false;
     int stored = 0;
     std::vector<int64_t> symbol_ids;
   };
@@ -248,12 +249,14 @@ private:
         continue;
       }
       const std::optional<double> mtime = file_mtime(abs);
-      const int64_t hid = db_.add_file_path(
-          abs, mtime, parsed_md5, state_.rec->compile_options, state_.rec->driver);
+      const int64_t hid =
+          db_.add_file_path(abs, mtime, parsed_md5, state_.rec->compile_options,
+                            state_.rec->driver);
       plan.push_back({.path = abs,
                       .file_id = hid,
                       .mtime = mtime,
                       .md5 = parsed_md5,
+                      .covered_by_current_config = covered_by_current_config,
                       .stored = 0});
     }
     return plan;
@@ -264,7 +267,9 @@ private:
   void run_header_passes(std::vector<PendingHeader> plan) {
     cidx::HeaderStats &counts = state_.out->headers;
     for (PendingHeader &ph : plan) {
-      db_.delete_symbols_for_file(ph.file_id);
+      if (ph.covered_by_current_config) {
+        db_.delete_symbols_for_file(ph.file_id);
+      }
       ph.stored = run_symbol_pass(ph.path, ph.file_id);
       ph.symbol_ids = symbols_.symbol_ids();
     }
