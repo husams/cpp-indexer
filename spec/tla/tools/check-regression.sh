@@ -36,4 +36,43 @@ if grep -q "TLA_CHECK_STATUS=PASS" <<<"$output"; then
   exit 1
 fi
 
-echo "TLA_REGRESSION_STATUS=PASS mutation=missing-ProtectedInvariant"
+run_seed() {
+  local scenario="$1"
+  local expected="$2"
+  local seed_dir
+  seed_dir="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-seed.XXXXXX")"
+  cp "$ROOT"/models/*.cfg "$seed_dir"/
+  sed "s/^    Scenario = \"valid\"$/    Scenario = \"$scenario\"/" \
+    "$seed_dir/CidxWorkspaceLifecycleSmoke.cfg" \
+    >"$seed_dir/CidxWorkspaceLifecycleSmoke.cfg.seed"
+  mv "$seed_dir/CidxWorkspaceLifecycleSmoke.cfg.seed" \
+    "$seed_dir/CidxWorkspaceLifecycleSmoke.cfg"
+
+  set +e
+  local seed_output
+  seed_output="$(TLA_MODEL_DIR="$seed_dir" TLA_MODELS="CidxWorkspaceLifecycleSmoke" \
+    "$ROOT/tools/check.sh" 2>&1)"
+  local seed_status=$?
+  set -e
+  rm -rf "$seed_dir"
+
+  if [[ "$seed_status" -ne 30 ]]; then
+    echo "TLA_REGRESSION_STATUS=FAIL scenario=$scenario reason=unexpected-exit-$seed_status" >&2
+    printf '%s\n' "$seed_output" >&2
+    exit 1
+  fi
+  if ! grep -q "TLA_MODEL_STATUS=FAIL model=CidxWorkspaceLifecycleSmoke" <<<"$seed_output" \
+      || ! grep -q "$expected" <<<"$seed_output"; then
+    echo "TLA_REGRESSION_STATUS=FAIL scenario=$scenario reason=missing-$expected" >&2
+    printf '%s\n' "$seed_output" >&2
+    exit 1
+  fi
+  echo "TLA_SEEDED_VIOLATION_STATUS=PASS scenario=$scenario invariant=$expected"
+}
+
+run_seed cross-universe-conflation ScopedSymbolIdentityInvariant
+run_seed partial-publication NoPartialPublicationInvariant
+run_seed missing-invalidation InvalidationInvariant
+run_seed stale-as-current GenerationPublicationInvariant
+
+echo "TLA_REGRESSION_STATUS=PASS mutation=missing-ProtectedInvariant seeded=4"

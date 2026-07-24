@@ -41,6 +41,21 @@ ArtifactKinds == {"index", "graph", "result", "diagnostic"}
 QueryKinds == {"search", "navigation", "impact", "verification"}
 TrustLevels == {"observed", "derived", "trusted-assumption"}
 
+(* Lifecycle states are shared by workspace, storage, and transform models. *)
+GenerationStatuses == {
+    "imported",
+    "capturing",
+    "extracting",
+    "validating",
+    "published",
+    "current",
+    "stale",
+    "failed",
+    "retired"
+}
+
+ReadStatuses == {"current", "stale", "partial", "unavailable"}
+
 (* One definition, reused by every later specification module. *)
 ResultStatuses == {
     "suggested",

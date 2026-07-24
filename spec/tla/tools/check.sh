@@ -66,6 +66,19 @@ required_invariants() {
         SharedStatusInvariant \
         TrustedOutcomeInvariant
       ;;
+    CidxWorkspaceLifecycleSmoke)
+      printf '%s\n' \
+        LifecycleTypeInvariant \
+        WorkspaceContainmentInvariant \
+        ScopedSymbolIdentityInvariant \
+        ConfigurationApplicabilityInvariant \
+        NoPartialPublicationInvariant \
+        GenerationPublicationInvariant \
+        FailedGenerationInvariant \
+        InvalidationInvariant \
+        ReadHonestyInvariant \
+        ProtectedInvariant
+      ;;
     *)
       echo "TLA_CONFIG_STATUS=FAIL reason=unknown-model-$1" >&2
       exit 25
@@ -118,8 +131,9 @@ run_model() {
   echo "TLA_MODEL_STATUS=PASS model=$model invariants=$invariants"
 }
 
-run_model CidxRepositorySmoke
-run_model CidxResultSmoke
+for model in ${TLA_MODELS:-CidxRepositorySmoke CidxResultSmoke CidxWorkspaceLifecycleSmoke}; do
+  run_model "$model"
+done
 
 echo "TLA_TOOLCHAIN_STATUS=PASS version=$TOOLS_VERSION java=17"
-echo "TLA_CHECK_STATUS=PASS models=CidxRepositorySmoke,CidxResultSmoke workers=1 fingerprint=0"
+echo "TLA_CHECK_STATUS=PASS models=${TLA_MODELS:-CidxRepositorySmoke,CidxResultSmoke,CidxWorkspaceLifecycleSmoke} workers=1 fingerprint=0"

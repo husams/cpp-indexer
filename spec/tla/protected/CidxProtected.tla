@@ -10,6 +10,9 @@ EXTENDS CidxTypes
 ProtectedStatuses(records) ==
     \A record \in records : record.status \in ResultStatuses
 
+ProtectedGenerationStatuses(records) ==
+    \A record \in records : record.status \in GenerationStatuses
+
 ProtectedEvidence(records) ==
     \A evidence \in records :
         evidence.kind # "assumption"

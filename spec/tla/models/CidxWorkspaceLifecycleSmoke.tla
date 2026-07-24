@@ -1,0 +1,5 @@
+--------------------- MODULE CidxWorkspaceLifecycleSmoke -------------------
+
+EXTENDS CidxWorkspaceLifecycle
+
+=============================================================================
