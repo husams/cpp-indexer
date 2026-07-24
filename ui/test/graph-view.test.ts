@@ -5,6 +5,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import { toCytoscapeElements } from "../src/cytoscape-adapter.ts";
 import { boundedFixture, canonicalFixture, oversizedFixture } from "../src/fixtures.ts";
 import { applyBudget, canonicalSemanticContent, catalogRelationNames, createSavedView, stablePortableId, toResultEnvelope, utf8ByteLength, validateGraphView, visualSemantics, type Budget } from "../src/graph-view.ts";
+import { CORE_CATALOG } from "../src/generated/catalog.ts";
 
 const smallBudget: Budget = { maxNodes: 2, maxEdges: 1, maxGroups: 0, maxLabelChars: 400, maxEvidenceRefs: 4 };
 
@@ -63,13 +64,17 @@ test("GraphView JSON Schema validates canonical envelopes and rejects invalid pa
   const schema = JSON.parse(readFileSync(new URL("../../schemas/graph-view.schema.json", import.meta.url), "utf8"));
   const sharedSchema = JSON.parse(readFileSync(new URL("../../spec/contracts/result-envelope.schema.json", import.meta.url), "utf8"));
   const ajv = new Ajv2020({ allErrors: true, strict: false });
-  ajv.addSchema(sharedSchema);
+  ajv.addSchema(sharedSchema, "https://cidx.dev/schemas/result-envelope/v1");
   const validator = ajv.compile(schema);
   for (const slice of ["symbol", "entity", "include", "type"] as const) {
     const result = canonicalFixture(slice);
     const envelope = toResultEnvelope(result);
     assert.deepEqual(Object.keys(envelope), ["protocol", "operation", "status", "exit_class", "exit_code", "result", "identity", "producer", "completeness", "diagnostics", "evidence", "artifacts", "replay", "resources"]);
     assert.deepEqual(envelope.identity.fact_sets, [result.factSet.key]);
+    assert.equal(envelope.identity.freshness, result.freshness === "fresh" ? "current" : result.freshness === "stale" ? "stale" : "unverifiable");
+    assert.ok(envelope.identity.source_revision);
+    assert.ok(envelope.identity.source_fingerprint);
+    assert.equal(envelope.artifacts[0]?.catalog_hash, CORE_CATALOG.catalog_hash);
     assert.equal(validator(envelope), true, `${slice}: ${JSON.stringify(validator.errors)}`);
 
     const withContinuation = {
@@ -96,17 +101,18 @@ test("GraphView JSON Schema validates canonical envelopes and rejects invalid pa
   assert.equal(validator(missingSharedIdentity), false);
 });
 
-test("result resource accounting uses UTF-8 bytes for Unicode payloads", () => {
+test("shared protocol metadata preserves proof trust and UTF-8 bounds", () => {
   const result = canonicalFixture("symbol");
   const unicodeResult = {
     ...result,
     resultId: "result:unicode",
     nodes: result.nodes.map((node, index) => index === 0 ? { ...node, label: "λ 😀" } : node),
+    evidence: [...result.evidence, { id: "ev:proof", class: "proof" as const, role: "derived" as const, summary: "unverified proof claim" }],
   };
   const envelope = toResultEnvelope(unicodeResult);
   assert.equal(utf8ByteLength("λ 😀"), 7);
-  assert.equal(envelope.resources?.peak_bytes, utf8ByteLength(JSON.stringify(unicodeResult)));
-  assert.notEqual(envelope.resources?.peak_bytes, JSON.stringify(unicodeResult).length);
+  assert.equal(envelope.resources?.peak_bytes, null);
+  assert.equal(envelope.evidence.find((evidence) => evidence.id === "ev:proof")?.trust, "unverified");
 });
 
 test("all supported fixture slices adapt to Cytoscape elements with typed evidence", () => {
@@ -128,7 +134,7 @@ test("oversized input produces a deterministic bounded response", () => {
   assert.equal(first.edges.length, 1);
   assert.equal(first.status, "partial");
   assert.ok(first.markers.includes("truncated"));
-  assert.equal(first.diagnostics[0]?.code, "budget_exhausted");
+  assert.equal(first.diagnostics[0]?.code, "truncated_budget");
 });
 
 test("saved presentation state is separate from query/result identity", () => {

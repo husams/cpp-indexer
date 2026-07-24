@@ -1,4 +1,4 @@
-import type { ResultDiagnostic, ResultEnvelope } from "../../spec/contracts/generated/result-envelope.ts";
+import { EXIT_CODES, PROTOCOL, type DiagnosticCode, type ResultDiagnostic, type ResultEnvelope } from "./generated/result_protocol.ts";
 import { CORE_CATALOG } from "./generated/catalog.ts";
 
 export const GRAPH_VIEW_VERSION = 1 as const;
@@ -151,7 +151,7 @@ export type GraphViewEnvelope = ResultEnvelope<GraphViewResult>;
 export function toResultEnvelope(result: GraphViewResult): GraphViewEnvelope {
   const exit = exitForStatus(result.status);
   return {
-    protocol: "cidx.result/v1",
+    protocol: PROTOCOL,
     operation: "graph-view",
     status: result.status,
     exit_class: exit.exit_class,
@@ -162,8 +162,8 @@ export function toResultEnvelope(result: GraphViewResult): GraphViewEnvelope {
       index: result.index.key,
       fact_sets: [result.factSet.key],
       freshness: ({ fresh: "current", stale: "stale", unknown: "unverifiable" } as const)[result.freshness],
-      source_revision: null,
-      source_fingerprint: null,
+      source_revision: result.index.version,
+      source_fingerprint: `fixture-source:${result.index.key}:${result.factSet.key}`,
     },
     producer: { package: "cidx-graphview-prototype", version: "0.1.0", backend: "fixture", schema_version: 1 },
     completeness: {
@@ -177,9 +177,9 @@ export function toResultEnvelope(result: GraphViewResult): GraphViewEnvelope {
       const source = evidence.location ? `${evidence.location.path}:${evidence.location.line}${evidence.location.column === undefined ? "" : `:${evidence.location.column}`}` : evidence.artifact;
       return { id: evidence.id, class: evidence.class, trust: evidenceTrust(evidence.class), summary: evidence.summary, ...(source === undefined ? {} : { source }) };
     }),
-    artifacts: [{ kind: "graph-view", id: result.resultId, schema_version: result.version, catalog_version: CORE_CATALOG.catalog_version, catalog_hash: "c5479dfc5757e0a8b23b6d0078b164814a73823a750b41631eb818e3733eef48" }],
+    artifacts: [{ kind: "query-result", id: result.resultId, schema_version: result.version, catalog_version: CORE_CATALOG.catalog_version, catalog_hash: CORE_CATALOG.catalog_hash }],
     replay: { command: "graph-view", arguments: [result.queryIdentity] },
-    resources: { elapsed_ms: 0, peak_bytes: utf8ByteLength(JSON.stringify(result)) },
+    resources: { elapsed_ms: 0, peak_bytes: null },
   };
 }
 
@@ -190,17 +190,16 @@ function toProtocolDiagnostic(diagnostic: Diagnostic): ResultDiagnostic {
 
 function exitForStatus(status: GraphStatus): Pick<GraphViewEnvelope, "exit_class" | "exit_code"> {
   const exits: Record<GraphStatus, Pick<GraphViewEnvelope, "exit_class" | "exit_code">> = {
-    complete: { exit_class: "success", exit_code: 0 },
-    partial: { exit_class: "success", exit_code: 0 },
-    unknown: { exit_class: "unknown", exit_code: 5 },
-    error: { exit_class: "infrastructure_failure", exit_code: 6 },
+    complete: { exit_class: "success", exit_code: EXIT_CODES.success },
+    partial: { exit_class: "success", exit_code: EXIT_CODES.success },
+    unknown: { exit_class: "unknown", exit_code: EXIT_CODES.unknown },
+    error: { exit_class: "infrastructure_failure", exit_code: EXIT_CODES.infrastructure_failure },
   };
   return exits[status];
 }
 
 function evidenceTrust(evidenceClass: EvidenceClass): "unverified" | "producer-verified" | "reader-verified" {
-  if (evidenceClass === "inferred" || evidenceClass === "assumption") return "unverified";
-  if (evidenceClass === "proof") return "reader-verified";
+  if (evidenceClass === "inferred" || evidenceClass === "assumption" || evidenceClass === "proof") return "unverified";
   return "producer-verified";
 }
 
@@ -209,7 +208,7 @@ export function utf8ByteLength(value: string): number {
 }
 
 export interface Diagnostic {
-  code: "budget_exhausted" | "stale_input" | "unknown_input" | "invalid_fixture";
+  code: DiagnosticCode;
   message: string;
   severity: "info" | "warning" | "error";
 }
@@ -311,13 +310,13 @@ export function validateGraphView(result: GraphViewResult): void {
     if (group.memberRefs.length > result.budget.maxNodes) throw new Error("group membership exceeds the node budget");
   }
   for (const evidence of result.evidence) {
-    if (evidence.summary.length > MAX_STRING || evidence.id.length > 120) throw new Error("evidence is not bounded");
+    if (utf8ByteLength(evidence.summary) > MAX_STRING || utf8ByteLength(evidence.id) > 120) throw new Error("evidence is not bounded");
   }
 }
 
 function validateElement(element: GraphElementState & { ref: PortableReference; label?: string }, evidenceIds: ReadonlySet<string>): void {
   assertPortableReference(element.ref);
-  if (element.label && element.label.length > MAX_STRING) throw new Error("element label is not bounded");
+  if (element.label && utf8ByteLength(element.label) > MAX_STRING) throw new Error("element label is not bounded");
   if (element.evidenceRefs.length > MAX_EVIDENCE_PER_ELEMENT) throw new Error("element evidence references are not bounded");
   if (element.evidenceRefs.some((id) => !evidenceIds.has(id))) throw new Error(`element ${element.ref.key} references unknown evidence`);
 }
@@ -352,7 +351,7 @@ export function applyBudget(result: GraphViewResult, budget: Budget): GraphViewR
   const markers = exceeded ? uniqueMarkers([...result.markers, "truncated"]) : [...result.markers];
   const status = exceeded && result.status === "complete" ? "partial" : result.status;
   const diagnostics = exceeded
-    ? [...result.diagnostics, { code: "budget_exhausted" as const, message: "The fixture exceeded a deterministic browser budget; the slice was bounded.", severity: "warning" as const }].slice(0, MAX_DIAGNOSTICS)
+    ? [...result.diagnostics, { code: "truncated_budget" as const, message: "The fixture exceeded a deterministic browser budget; the slice was bounded.", severity: "warning" as const }].slice(0, MAX_DIAGNOSTICS)
     : [...result.diagnostics];
   return { ...result, budget, nodes: labelBound.nodes, edges: labelBound.edges, groups: labelBound.groups, evidence, usage, status, completeness: exceeded ? "partial" : result.completeness, markers, diagnostics };
 }

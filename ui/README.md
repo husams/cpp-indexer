@@ -8,8 +8,8 @@ never reads SQLite or executes a query.
 
 `src/graph-view.ts` is renderer-independent. It defines versioned requests and
 results, and consumes the generated HSE-70 `ResultEnvelope<GraphViewResult>`
-from `spec/contracts/generated/result-envelope.ts` (generated from the shared
-`spec/contracts/result-envelope.schema.json` boundary),
+from `src/generated/result_protocol.ts` (generated from the shared
+`spec/contracts/result-protocol.json` contract),
 portable semantic identities, nodes, edges, compound groups, typed bounded
 evidence references, capabilities, continuation tokens, budgets, and
 status/truth markers. Cytoscape element JSON and layout/position state live only
@@ -41,7 +41,7 @@ Cytoscape parent only in the adapter.
 
 `applyBudget` sorts by portable identity, keeps only bounded nodes/edges/groups,
 retains referenced evidence in stable order, and returns `partial` plus a
-`truncated` marker and `budget_exhausted` diagnostic when input is oversized.
+`truncated` marker and `truncated_budget` diagnostic when input is oversized.
 This is a deterministic refusal/degradation response, not an unbounded browser
 operation.
 

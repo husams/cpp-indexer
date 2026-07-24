@@ -3,6 +3,17 @@ export const CORE_CATALOG = {
   "format": "cidx.catalog/v1",
   "catalog_version": 1,
   "product": "cidx",
+  "views": [
+    "symbol",
+    "entity",
+    "parameter",
+    "template_parameter",
+    "template_argument",
+    "call_argument",
+    "edge",
+    "evidence",
+    "type"
+  ],
   "symbol_kinds": [
     {
       "id": 2,
@@ -622,6 +633,405 @@ export const CORE_CATALOG = {
         "derived"
       ],
       "completeness": "complete"
+    },
+    {
+      "id": 21,
+      "name": "has_parameter",
+      "layer": "symbol",
+      "source": "symbol.callable",
+      "target": "parameter",
+      "inverse": "of_callable",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "declaration",
+      "evidence_capabilities": [
+        "declaration",
+        "call_site"
+      ],
+      "completeness": "complete",
+      "virtual": true
+    },
+    {
+      "id": 22,
+      "name": "has_template_parameter",
+      "layer": "symbol",
+      "source": "symbol.template",
+      "target": "template_parameter",
+      "inverse": "of_template",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "declaration",
+      "evidence_capabilities": [
+        "declaration"
+      ],
+      "completeness": "complete",
+      "virtual": true
+    },
+    {
+      "id": 23,
+      "name": "has_template_argument",
+      "layer": "symbol",
+      "source": "symbol.template",
+      "target": "template_argument",
+      "inverse": "of_template",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "reference_site",
+      "evidence_capabilities": [
+        "reference_site",
+        "call_site"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 24,
+      "name": "has_call_edge",
+      "layer": "symbol",
+      "source": "symbol.callable",
+      "target": "edge",
+      "inverse": "of_caller",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "call_site",
+      "evidence_capabilities": [
+        "call_site"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 25,
+      "name": "has_evidence",
+      "layer": "symbol",
+      "source": "symbol.callable",
+      "target": "evidence",
+      "inverse": "of_symbol",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "call_site",
+      "evidence_capabilities": [
+        "call_site",
+        "declaration"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 1,
+      "name": "of_type",
+      "layer": "parameter",
+      "source": "parameter",
+      "target": "type",
+      "inverse": "has_parameter",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "declaration",
+      "evidence_capabilities": [
+        "declaration"
+      ],
+      "completeness": "complete",
+      "virtual": true
+    },
+    {
+      "id": 2,
+      "name": "declared_type",
+      "layer": "parameter",
+      "source": "parameter",
+      "target": "type",
+      "inverse": "has_declared_parameter",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "declaration",
+      "evidence_capabilities": [
+        "declaration"
+      ],
+      "completeness": "complete",
+      "virtual": true
+    },
+    {
+      "id": 3,
+      "name": "adjusted_type",
+      "layer": "parameter",
+      "source": "parameter",
+      "target": "type",
+      "inverse": "has_adjusted_parameter",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "declaration",
+      "evidence_capabilities": [
+        "declaration"
+      ],
+      "completeness": "complete",
+      "virtual": true
+    },
+    {
+      "id": 4,
+      "name": "references_symbol",
+      "layer": "parameter",
+      "source": "parameter",
+      "target": "symbol",
+      "inverse": "referenced_by_parameter",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "declaration",
+      "evidence_capabilities": [
+        "declaration"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 5,
+      "name": "has_evidence",
+      "layer": "parameter",
+      "source": "parameter",
+      "target": "evidence",
+      "inverse": "of_parameter",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "declaration",
+      "evidence_capabilities": [
+        "declaration"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 1,
+      "name": "of_type",
+      "layer": "template_parameter",
+      "source": "template_parameter",
+      "target": "type",
+      "inverse": "has_template_parameter",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "declaration",
+      "evidence_capabilities": [
+        "declaration"
+      ],
+      "completeness": "complete",
+      "virtual": true
+    },
+    {
+      "id": 2,
+      "name": "has_default",
+      "layer": "template_parameter",
+      "source": "template_parameter",
+      "target": "evidence",
+      "inverse": "defaulted_by",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "declaration",
+      "evidence_capabilities": [
+        "declaration"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 1,
+      "name": "of_type",
+      "layer": "template_argument",
+      "source": "template_argument",
+      "target": "type",
+      "inverse": "has_template_argument",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "reference_site",
+      "evidence_capabilities": [
+        "reference_site"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 2,
+      "name": "references_symbol",
+      "layer": "template_argument",
+      "source": "template_argument",
+      "target": "symbol",
+      "inverse": "referenced_by_template_argument",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "reference_site",
+      "evidence_capabilities": [
+        "reference_site"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 1,
+      "name": "has_argument",
+      "layer": "edge",
+      "source": "edge",
+      "target": "call_argument",
+      "inverse": "of_edge",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "call_site",
+      "evidence_capabilities": [
+        "call_site"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 2,
+      "name": "has_evidence",
+      "layer": "edge",
+      "source": "edge",
+      "target": "evidence",
+      "inverse": "of_edge",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "call_site",
+      "evidence_capabilities": [
+        "call_site"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 1,
+      "name": "of_type",
+      "layer": "call_argument",
+      "source": "call_argument",
+      "target": "type",
+      "inverse": "has_call_argument",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "call_site",
+      "evidence_capabilities": [
+        "call_site"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 2,
+      "name": "references_symbol",
+      "layer": "call_argument",
+      "source": "call_argument",
+      "target": "symbol",
+      "inverse": "referenced_by_call_argument",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "call_site",
+      "evidence_capabilities": [
+        "call_site"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 1,
+      "name": "of_edge",
+      "layer": "evidence",
+      "source": "evidence",
+      "target": "edge",
+      "inverse": "has_evidence",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "call_site",
+      "evidence_capabilities": [
+        "call_site"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 2,
+      "name": "of_occurrence",
+      "layer": "evidence",
+      "source": "evidence",
+      "target": "call_argument",
+      "inverse": "has_evidence",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "call_site",
+      "evidence_capabilities": [
+        "call_site"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 1,
+      "name": "references_symbol",
+      "layer": "type",
+      "source": "type",
+      "target": "symbol",
+      "inverse": "of_type",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "declaration",
+      "evidence_capabilities": [
+        "declaration"
+      ],
+      "completeness": "partial",
+      "virtual": true
+    },
+    {
+      "id": 2,
+      "name": "has_type_edge",
+      "layer": "type",
+      "source": "type",
+      "target": "type",
+      "inverse": "of_type_edge",
+      "traversal": [
+        "out",
+        "in"
+      ],
+      "evidence": "derived",
+      "evidence_capabilities": [
+        "derived"
+      ],
+      "completeness": "partial",
+      "virtual": true
     }
   ],
   "entity_kinds": [
@@ -829,12 +1239,149 @@ export const CORE_CATALOG = {
       "name": "identity_key",
       "filterable": true,
       "is_string": true
+    },
+    {
+      "name": "owner_id",
+      "filterable": true,
+      "is_string": false
+    },
+    {
+      "name": "position",
+      "filterable": true,
+      "is_string": false
+    },
+    {
+      "name": "pack_index",
+      "filterable": true,
+      "is_string": false
+    },
+    {
+      "name": "param_kind",
+      "filterable": true,
+      "is_string": false
+    },
+    {
+      "name": "arg_kind",
+      "filterable": true,
+      "is_string": false
+    },
+    {
+      "name": "default_text",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "default_origin",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "reference_semantics",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "default_txt",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "literal",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "edge_id",
+      "filterable": true,
+      "is_string": false
+    },
+    {
+      "name": "file_id",
+      "filterable": true,
+      "is_string": false
+    },
+    {
+      "name": "src_kind",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "type_usr",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "decl_usr",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "callee_usr",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "conditional",
+      "filterable": true,
+      "is_string": false
+    },
+    {
+      "name": "args_sig",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "evidence_kind",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "role",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "provenance",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "type_key",
+      "filterable": true,
+      "is_string": true
+    },
+    {
+      "name": "cv_qualifiers",
+      "filterable": true,
+      "is_string": false
+    },
+    {
+      "name": "decl_id",
+      "filterable": true,
+      "is_string": false
+    },
+    {
+      "name": "canonical_id",
+      "filterable": true,
+      "is_string": false
+    },
+    {
+      "name": "src_id",
+      "filterable": true,
+      "is_string": false
+    },
+    {
+      "name": "dst_id",
+      "filterable": true,
+      "is_string": false
     }
   ],
   "statuses": [
     "complete",
     "partial",
     "unknown",
+    "refuted",
+    "conditional",
     "error"
   ],
   "trust_levels": [
@@ -918,6 +1465,34 @@ export const CORE_CATALOG = {
     {
       "id": 6,
       "name": "missing_evidence"
+    },
+    {
+      "id": 7,
+      "name": "stale_input"
+    },
+    {
+      "id": 8,
+      "name": "timeout"
+    },
+    {
+      "id": 9,
+      "name": "backend_error"
+    },
+    {
+      "id": 10,
+      "name": "policy_refuted"
+    },
+    {
+      "id": 11,
+      "name": "invalid_input"
+    },
+    {
+      "id": 12,
+      "name": "redacted"
+    },
+    {
+      "id": 13,
+      "name": "size_limit"
     }
   ],
   "artifact_kinds": [
@@ -998,5 +1573,6 @@ export const CORE_CATALOG = {
       ]
     }
   ],
-  "migrations": []
+  "migrations": [],
+  "catalog_hash": "1adb5f6663a2e48dc3a624c79703ceaa5287f2784731a00bbc469dba8d5935d4"
 } as const;

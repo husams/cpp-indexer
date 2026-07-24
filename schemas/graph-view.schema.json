@@ -263,7 +263,7 @@
         "groups": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/group" } },
         "evidence": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/evidence" } },
         "capabilities": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/capability" } },
-        "diagnostics": { "type": "array", "maxItems": 8, "items": { "type": "object", "additionalProperties": false, "required": ["code", "message", "severity"], "properties": { "code": { "type": "string", "enum": ["budget_exhausted", "stale_input", "unknown_input", "invalid_fixture"] }, "message": { "type": "string", "maxLength": 160 }, "severity": { "type": "string", "enum": ["info", "warning", "error"] } } } },
+        "diagnostics": { "type": "array", "maxItems": 8, "items": { "type": "object", "additionalProperties": false, "required": ["code", "message", "severity"], "properties": { "code": { "type": "string", "enum": ["usage", "invalid_input", "stale_input", "timeout", "backend_error", "policy_refuted", "unknown", "truncated_budget", "missing_evidence"] }, "message": { "type": "string", "maxLength": 160 }, "severity": { "type": "string", "enum": ["info", "warning", "error"] } } } },
         "continuation": { "$ref": "#/$defs/continuation" }
       }
     }

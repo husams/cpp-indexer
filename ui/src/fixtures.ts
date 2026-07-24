@@ -105,7 +105,7 @@ function typeFixture(): GraphViewResult {
   const pointer = ref("type", "type:Canvas*");
   const nodes = [node("symbol", render.key, "render", "function", { evidenceRefs: ["ev:render-declaration"] }), node("type", canvas.key, "Canvas", "record", { evidenceRefs: ["ev:render-declaration"] }), node("type", pointer.key, "Canvas*", "pointer", { status: "complete", evidenceRefs: ["ev:render-declaration"] })];
   const edges = [edge("edge:render-of-type", render, canvas, "of_type", "returns", { evidenceRefs: ["ev:render-declaration"] }), edge("edge:pointer-pointee", pointer, canvas, "pointee", "pointee", { status: "partial", markers: ["stale"], evidenceRefs: ["ev:render-declaration"] })];
-  return baseResult("type", nodes, edges, [], "result:type:v1", { freshness: "stale", markers: ["stale"], status: "partial", completeness: "partial", diagnostics: [{ code: "stale_input", message: "Fixture intentionally models a stale type fact set.", severity: "warning" }] });
+  return baseResult("type", nodes, edges, [], "result:type:v1", { freshness: "stale", markers: ["stale"], status: "unknown", completeness: "unknown", diagnostics: [{ code: "stale_input", message: "Fixture intentionally models a stale type fact set.", severity: "warning" }] });
 }
 
 export function oversizedFixture(count = 200): GraphViewResult {
