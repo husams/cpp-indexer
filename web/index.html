@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-cidx-static'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:">
+  <title>CIDX Graph Explorer</title>
+  <style>__CIDX_STYLES__</style>
+</head>
+<body>
+  <header class="topbar">
+    <div><span class="eyebrow">LOCAL CIDX</span><h1>Graph Explorer</h1></div>
+    <label class="search"><span class="sr-only">Filter visible nodes</span><input id="search" type="search" placeholder="Filter nodes…"></label>
+    <div class="top-actions"><button id="fit" type="button">Fit graph</button><button id="save" type="button">Save view</button><button id="restore" type="button">Restore view</button><button id="reset" type="button">Reset view</button></div>
+  </header>
+  <main class="shell">
+    <section class="graph-panel" aria-label="Graph visualization"><div id="cy" role="img" aria-label="Interactive CIDX graph"></div><div id="accessible-nodes" class="sr-only" aria-label="Graph nodes"></div><div id="empty" class="empty" hidden>No bounded graph slice selected.</div></section>
+    <aside class="inspector" aria-live="polite"><div class="panel-heading"><span class="eyebrow">INSPECTOR</span><h2 id="selection-title">Select a node or edge</h2></div><div id="details" class="details"><p class="muted">Keyboard navigation and the status legend keep incomplete facts distinct from confirmed facts.</p></div><div class="legend"><h3>Status legend</h3><p><i class="dot complete"></i> complete <i class="dot partial"></i> partial <i class="dot external"></i> external/stub <i class="line truncated"></i> truncated</p></div></aside>
+  </main>
+  <footer><span id="summary"></span><span id="identity"></span></footer>
+  <script nonce="cidx-static">window.CIDX_GRAPH_VIEW = __CIDX_GRAPH_VIEW__;</script>
+  <script nonce="cidx-static">__CIDX_CYTOSCAPE__</script>
+  <script nonce="cidx-static">__CIDX_APP__</script>
+</body>
+</html>

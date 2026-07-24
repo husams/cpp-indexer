@@ -719,6 +719,49 @@ void build_graph(CLI::App &app, ParsedArgs &pa) {
   add_graph_selector(typeusers, pa);
 }
 
+void build_ui(CLI::App &app, ParsedArgs &pa) {
+  CLI::App *ui = app.add_subcommand(
+      "ui", "open or export the local bounded Cytoscape.js graph explorer");
+  ui->require_subcommand(1);
+  const auto leaf = [&pa, ui](const std::string &name,
+                              const std::string &description) {
+    CLI::App *sub = ui->add_subcommand(name, description);
+    sub->callback([&pa, name] {
+      pa.command = "ui";
+      pa.what = name;
+    });
+    sub->add_option("--root", pa.ui_root,
+                    "bounded root symbol name, USR, or numeric id");
+    sub->add_option("--query", pa.ui_query,
+                    "CXQ/query text recorded in the GraphView request");
+    sub->add_option("--workspace", pa.ui_workspace,
+                    "workspace label carried by the GraphView request");
+    sub->add_option("--edge", pa.edge, "edge kinds (comma-separated)");
+    sub->add_option("--direction", pa.direction, "edge direction")
+        ->check(CLI::IsMember(kDirections));
+    sub->add_option("--depth", pa.ui_depth, "bounded traversal depth")
+        ->check(CLI::Range(0, 32));
+    sub->add_option("--limit", pa.ui_node_budget, "maximum graph nodes")
+        ->check(CLI::Range(1, 10000));
+    sub->add_option("--edge-limit", pa.ui_edge_budget, "maximum graph edges")
+        ->check(CLI::Range(1, 20000));
+    sub->add_option("--db", pa.index_db, kDbHelpText);
+    return sub;
+  };
+
+  CLI::App *open = leaf("open", "serve the explorer on loopback");
+  open->add_option("--port", pa.ui_port, "loopback port (0 = ephemeral)")
+      ->check(CLI::Range(0, 65535));
+  open->add_flag("--no-browser", pa.ui_no_browser,
+                 "serve without launching the default browser");
+
+  CLI::App *exporter = leaf("export", "write a self-contained offline snapshot");
+  exporter->add_option("--output", pa.ui_output, "output HTML path")
+      ->required()
+      ->type_name("FILE");
+  leaf("status", "show explorer contract and asset status");
+}
+
 } // namespace
 
 ParsedArgs parse_args(const std::vector<std::string> &argv) {
@@ -737,6 +780,7 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
   build_symbol(app, pa);
   build_graph(app, pa);
   build_include(app, pa);
+  build_ui(app, pa);
 
   // CLI11's vector-parse consumes tokens from the back.
   std::vector<std::string> tokens(argv.rbegin(), argv.rend());

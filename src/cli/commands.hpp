@@ -71,6 +71,10 @@ int cmd_verify(const ParsedArgs &args, Context &ctx);
 // (src/cli/analyze.cpp).
 int cmd_analyze(const ParsedArgs &args, Context &ctx);
 
+int cmd_ui_export(const ParsedArgs &args, Context &ctx);
+int cmd_ui_open(const ParsedArgs &args, Context &ctx);
+int cmd_ui_status(const ParsedArgs &args, Context &ctx);
+
 // Graph query commands (cidx graph callers|callees|refs|neighbors|walk|path|
 //                            hierarchy|dispatch)
 int cmd_graph_callers(const ParsedArgs &args, Context &ctx);

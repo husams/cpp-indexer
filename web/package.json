@@ -1,0 +1,9 @@
+{
+  "name": "cidx-graph-explorer",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Offline assets for the local CIDX graph explorer",
+  "dependencies": {
+    "cytoscape": "3.31.2"
+  }
+}

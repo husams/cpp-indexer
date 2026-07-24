@@ -1,0 +1,26 @@
+(() => {
+  const view = window.CIDX_GRAPH_VIEW || {nodes: [], edges: [], metadata: {}};
+  const nodeById = new Map((view.nodes || []).map((n) => [String(n.id), n]));
+  const details = document.getElementById('details');
+  const title = document.getElementById('selection-title');
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const badge = (name, cls) => `<span class="badge ${cls || ''}">${esc(name)}</span>`;
+  const statusBadges = (s = {}) => Object.entries(s).filter(([k,v]) => v === true || v === 'partial' || v === 'stale' || v === 'truncated' || v === 'external').map(([k,v]) => badge(`${k}${v === true ? '' : `: ${v}`}`, k === 'external' ? 'external' : k)).join('');
+  const showNode = (n) => { title.textContent = n.name || n.usr || 'Node'; details.innerHTML = `<dl><dt>Identity</dt><dd><code>${esc(n.usr)}</code></dd><dt>Kind</dt><dd>${esc(n.kind)}</dd><dt>Location</dt><dd>${esc(n.location || 'No location')}</dd><dt>Status</dt><dd>${statusBadges(n.status)}</dd><dt>Evidence</dt><dd>${esc(n.evidence || 'No bounded evidence attached')}</dd></dl>`; };
+  const showEdge = (e) => { title.textContent = `${e.kind} relation`; details.innerHTML = `<dl><dt>From</dt><dd>${esc(nodeById.get(String(e.source))?.name || e.source)}</dd><dt>To</dt><dd>${esc(nodeById.get(String(e.target))?.name || e.target)}</dd><dt>Count</dt><dd>${esc(e.count)}</dd><dt>Status</dt><dd>${statusBadges(e.status)}</dd><dt>Evidence</dt><dd>${(e.sites || []).map((s) => esc(s.location || 'unknown')).join('<br>') || 'No site evidence'}</dd></dl>`; };
+  const elements = [...(view.nodes || []).map((n) => ({data: {...n, id: String(n.id), label: n.name || n.usr}})), ...(view.edges || []).map((e) => ({data: {...e, id: String(e.id), source: String(e.source), target: String(e.target)}}))];
+  const cy = cytoscape({container: document.getElementById('cy'), elements, style: [{selector:'node',style:{'background-color':'data(color)','label':'data(label)','color':'#e7edf4','font-size':10,'text-wrap':'wrap','text-max-width':120,'text-valign':'bottom','text-margin-y':7,'width':18,'height':18,'border-width':2,'border-color':'data(border)'}},{selector:'edge',style:{'width':1.5,'line-color':'data(color)','target-arrow-color':'data(color)','target-arrow-shape':'triangle','curve-style':'bezier','label':'data(kind)','font-size':8,'color':'#9fb0c0','text-background-color':'#0c1117','text-background-opacity':.8}},{selector:'.filtered',style:{display:'none'}},{selector:':selected',style:{'overlay-color':'#fff','overlay-opacity':.12}}], layout:{name:'cose',animate:false,padding:40}, wheelSensitivity:.25});
+  const setSelection = (x) => x.group() === 'nodes' ? showNode(nodeById.get(x.id())) : showEdge(x.data());
+  cy.on('tap', 'node,edge', (e) => setSelection(e.target));
+  const accessible = document.getElementById('accessible-nodes');
+  (view.nodes || []).forEach((n) => { const button = document.createElement('button'); button.type = 'button'; button.textContent = `${n.name || n.usr} (${n.kind})`; button.setAttribute('aria-label', `${n.name || n.usr}, ${n.status?.completeness || 'unknown'} status`); button.onclick = () => { const node = cy.$id(String(n.id)); node.select(); cy.animate({center:{eles:node}, duration:150}); showNode(n); }; accessible.appendChild(button); });
+  document.getElementById('fit').onclick = () => cy.fit(undefined, 40);
+  document.getElementById('reset').onclick = () => { cy.elements().removeClass('filtered'); cy.layout({name:'cose',animate:false,padding:40}).run(); };
+  const viewKey = `cidx-view:${view.schema || 'unknown'}:${view.request?.root || 'empty'}`;
+  document.getElementById('save').onclick = () => { localStorage.setItem(viewKey, JSON.stringify({positions: cy.nodes().reduce((p, n) => ({...p, [n.id()]: n.position()}), {}), zoom: cy.zoom(), pan: cy.pan()})); };
+  document.getElementById('restore').onclick = () => { try { const saved = JSON.parse(localStorage.getItem(viewKey) || 'null'); if (!saved) return; cy.nodes().positions((n) => saved.positions?.[n.id()] || n.position()); if (saved.zoom) cy.zoom(saved.zoom); if (saved.pan) cy.pan(saved.pan); } catch (_) {} };
+  document.getElementById('search').oninput = (e) => { const q = e.target.value.toLowerCase(); cy.nodes().forEach((n) => n.toggleClass('filtered', q && !String(n.data('label')).toLowerCase().includes(q))); };
+  document.getElementById('summary').textContent = `${view.nodes?.length || 0} nodes · ${view.edges?.length || 0} edges${view.metadata?.truncated ? ' · bounded/truncated' : ''}`;
+  document.getElementById('identity').textContent = view.metadata?.index?.freshness ? `index ${view.metadata.index.freshness}` : 'index freshness unverifiable';
+  if (!(view.nodes || []).length) document.getElementById('empty').hidden = false;
+})();

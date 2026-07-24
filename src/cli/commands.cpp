@@ -135,6 +135,15 @@ int run_command(const ParsedArgs &args, Context &ctx) {
   if (args.command == "analyze") {
     return cmd_analyze(args, ctx);
   }
+  if (args.command == "ui") {
+    if (args.what == "open") {
+      return cmd_ui_open(args, ctx);
+    }
+    if (args.what == "export") {
+      return cmd_ui_export(args, ctx);
+    }
+    return cmd_ui_status(args, ctx);
+  }
   // list
   if (args.what == "components") {
     return cmd_list_components(args, ctx);
