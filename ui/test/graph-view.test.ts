@@ -61,10 +61,15 @@ test("mixed truth cues are deterministic across marker permutations", () => {
 
 test("GraphView JSON Schema validates canonical envelopes and rejects invalid payloads", () => {
   const schema = JSON.parse(readFileSync(new URL("../../schemas/graph-view.schema.json", import.meta.url), "utf8"));
-  const validator = new Ajv2020({ allErrors: true, strict: false }).compile(schema);
+  const sharedSchema = JSON.parse(readFileSync(new URL("../../spec/contracts/result-envelope.schema.json", import.meta.url), "utf8"));
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  ajv.addSchema(sharedSchema);
+  const validator = ajv.compile(schema);
   for (const slice of ["symbol", "entity", "include", "type"] as const) {
     const result = canonicalFixture(slice);
     const envelope = toResultEnvelope(result);
+    assert.deepEqual(Object.keys(envelope), ["envelopeVersion", "operation", "status", "reasonCode", "diagnostics", "producer", "package", "backend", "context", "artifact", "replay", "resources", "payload"]);
+    assert.equal(envelope.context.factSet.key, result.factSet.key);
     assert.equal(validator(envelope), true, `${slice}: ${JSON.stringify(validator.errors)}`);
 
     const withContinuation = {
@@ -85,6 +90,10 @@ test("GraphView JSON Schema validates canonical envelopes and rejects invalid pa
   const missingEvidenceRefs = structuredClone(toResultEnvelope(canonicalFixture("symbol")));
   delete (missingEvidenceRefs.payload.nodes[0] as { evidenceRefs?: readonly string[] }).evidenceRefs;
   assert.equal(validator(missingEvidenceRefs), false);
+
+  const missingSharedIdentity = structuredClone(toResultEnvelope(canonicalFixture("symbol")));
+  delete (missingSharedIdentity as { producer?: unknown }).producer;
+  assert.equal(validator(missingSharedIdentity), false);
 });
 
 test("all supported fixture slices adapt to Cytoscape elements with typed evidence", () => {

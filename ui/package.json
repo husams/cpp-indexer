@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "generate": "node scripts/generate-catalog.mjs",
+    "generate": "node ../scripts/generate-result-envelope-model.mjs && node scripts/generate-catalog.mjs",
     "typecheck": "npm run generate && tsc --noEmit",
     "test": "npm run generate && node --experimental-strip-types --test test/*.test.ts",
     "build": "npm run generate && vite build",

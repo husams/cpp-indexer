@@ -7,7 +7,9 @@ never reads SQLite or executes a query.
 ## Contract boundary
 
 `src/graph-view.ts` is renderer-independent. It defines versioned requests and
-results, a shared HSE-70-shaped `ResultEnvelope<GraphViewResult>` boundary,
+results, and consumes the generated HSE-70 `ResultEnvelope<GraphViewResult>`
+from `spec/contracts/generated/result-envelope.ts` (generated from the shared
+`spec/contracts/result-envelope.schema.json` boundary),
 portable semantic identities, nodes, edges, compound groups, typed bounded
 evidence references, capabilities, continuation tokens, budgets, and
 status/truth markers. Cytoscape element JSON and layout/position state live only

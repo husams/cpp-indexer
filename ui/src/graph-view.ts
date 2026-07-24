@@ -1,3 +1,4 @@
+import type { ResultDiagnostic, ResultEnvelope } from "../../spec/contracts/generated/result-envelope.ts";
 import { CORE_CATALOG } from "./generated/catalog.ts";
 
 export const GRAPH_VIEW_VERSION = 1 as const;
@@ -145,18 +146,35 @@ export interface GraphViewResult {
   continuation?: Continuation;
 }
 
-/** Shared HSE-70 envelope boundary; the renderer consumes only `payload`. */
-export interface ResultEnvelope<TPayload> {
-  envelopeVersion: typeof GRAPH_VIEW_VERSION;
-  operation: "graph-view";
-  status: GraphStatus;
-  payload: TPayload;
-}
-
 export type GraphViewEnvelope = ResultEnvelope<GraphViewResult>;
 
 export function toResultEnvelope(result: GraphViewResult): GraphViewEnvelope {
-  return { envelopeVersion: GRAPH_VIEW_VERSION, operation: "graph-view", status: result.status, payload: result };
+  const diagnostics: readonly ResultDiagnostic[] = result.diagnostics.map((diagnostic) => ({ ...diagnostic }));
+  return {
+    envelopeVersion: 1,
+    operation: "graph-view",
+    status: result.status,
+    reasonCode: result.diagnostics[0]?.code ?? reasonCodeForStatus(result.status),
+    diagnostics,
+    producer: { name: "cidx-graphview", version: "0.1.0" },
+    package: { name: "cidx-graphview-prototype", version: "0.1.0" },
+    backend: { name: "fixture", version: "1", kind: "offline" },
+    context: { workspace: result.workspace, index: result.index, factSet: result.factSet },
+    artifact: { kind: "graph-view", id: result.resultId, schemaVersion: `graph-view/v${result.version}` },
+    replay: { requestIdentity: result.queryIdentity, inputRevision: result.index.version, deterministic: true },
+    resources: { elapsedMs: 0, bytes: JSON.stringify(result).length },
+    payload: result,
+  };
+}
+
+function reasonCodeForStatus(status: GraphStatus): GraphViewEnvelope["reasonCode"] {
+  const reasons: Record<GraphStatus, GraphViewEnvelope["reasonCode"]> = {
+    complete: "ok",
+    partial: "partial_result",
+    unknown: "unknown_result",
+    error: "backend_error",
+  };
+  return reasons[status];
 }
 
 export interface Diagnostic {

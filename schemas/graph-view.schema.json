@@ -218,15 +218,17 @@
       }
     },
     "resultEnvelope": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["envelopeVersion", "operation", "status", "payload"],
-      "properties": {
-        "envelopeVersion": { "const": 1 },
-        "operation": { "const": "graph-view" },
-        "status": { "$ref": "#/$defs/status" },
-        "payload": { "$ref": "#/$defs/result" }
-      }
+      "allOf": [
+        { "$ref": "https://cidx.dev/schemas/result-envelope/v1" },
+        {
+          "type": "object",
+          "required": ["operation", "payload"],
+          "properties": {
+            "operation": { "const": "graph-view" },
+            "payload": { "$ref": "#/$defs/result" }
+          }
+        }
+      ]
     },
     "savedView": {
       "type": "object",
