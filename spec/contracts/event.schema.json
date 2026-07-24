@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CIDX JSONL event v1",
+  "type": "object",
+  "required": [
+    "protocol",
+    "sequence",
+    "operation",
+    "event",
+    "message"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "protocol": {
+      "const": "cidx.event/v1"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "operation": {
+      "type": "string",
+      "x-maxUtf8Bytes": 4096
+    },
+    "event": {
+      "enum": [
+        "progress",
+        "diagnostic",
+        "completed"
+      ]
+    },
+    "message": {
+      "type": "string",
+      "x-maxUtf8Bytes": 4096
+    },
+    "completed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "total": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    }
+  }
+}

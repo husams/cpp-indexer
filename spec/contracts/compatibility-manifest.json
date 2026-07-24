@@ -28,6 +28,14 @@
       "golden": "spec/contracts/golden/error-status.json"
     },
     {
+      "id": "event-stream",
+      "owner": "HSE-70",
+      "promise": "schema-compatible",
+      "executors": ["cpp", "python"],
+      "schema": "spec/contracts/event.schema.json",
+      "golden": "spec/contracts/golden/event.json"
+    },
+    {
       "id": "public-catalogs",
       "owner": "HSE-59",
       "promise": "generated-from-shared-source",

@@ -70,6 +70,7 @@ class IndexIdentity:
     index_config: Optional[str]
     index_config_fingerprint: Optional[str]
     freshness: str  # current | stale | unverifiable
+    workspace: str = "workspace:memory"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -6021,9 +6022,27 @@ class Storage:
                 "compile_options": row["compile_options"],
                 "driver": row["driver"],
                 "indexed": bool(row["indexed"]),
+                "component_path": row["component_path"],
+                "repository_name": row["repository_name"],
+                "remote_url": row["remote_url"],
             }
             for row in rows
         ]
+
+    def _workspace_identity(self) -> str:
+        rows = self._conn.execute(
+            "SELECT DISTINCT COALESCE(r.remote_url, ''), COALESCE(r.name, ''), "
+            "c.path FROM component c LEFT JOIN repository r ON r.id = c.repository_id "
+            "ORDER BY 1, 2, 3"
+        ).fetchall()
+        owners = sorted({
+            f"remote:{remote}" if remote
+            else f"repo:{repository}" if repository
+            else f"component:{component}"
+            for remote, repository, component in rows
+        })
+        material = "\0".join(owners) if owners else "memory"
+        return f"workspace:{hashlib.sha1(material.encode()).hexdigest()}"
 
     def _source_manifest(
         self, files: list[dict[str, Any]],
@@ -6095,6 +6114,7 @@ class Storage:
             index_config=values["index_config"],
             index_config_fingerprint=values["index_config_fingerprint"],
             freshness=freshness,
+            workspace=self._workspace_identity(),
         )
 
     def stamp_index_identity(self) -> None:

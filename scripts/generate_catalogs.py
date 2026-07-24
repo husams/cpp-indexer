@@ -252,6 +252,12 @@ def render_cpp(data: dict[str, Any], digest: str) -> str:
         + "{"
         + ", ".join(json.dumps(evidence) for evidence in data["evidence_classes"])
         + "};",
+        f"inline constexpr std::array<std::string_view, {len(data['trust_levels'])}> kTrustLevels = "
+        + "{"
+        + ", ".join(json.dumps(trust) for trust in data["trust_levels"])
+        + "};",
+        array("NamedId", "kUnknownReasons", named(data["unknown_reasons"]), len(data["unknown_reasons"])),
+        array("NamedId", "kArtifactKinds", named(data["artifact_kinds"]), len(data["artifact_kinds"])),
         "} // namespace cidx::catalog",
         "",
     ]

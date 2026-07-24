@@ -809,6 +809,14 @@ class Result:
             "rows": [dict(zip(self.fields, row)) for row in self.rows],
         }
 
+    def to_envelope_dict(self) -> dict[str, Any]:
+        """Return the versioned HSE-70 envelope for this query result."""
+        from .result_protocol import from_query_result
+
+        if self.index is None:
+            raise PlanError("E_RESULT: result has no index identity")
+        return from_query_result(self, self.index).to_dict()
+
 
 def _col_expr(field_name: str) -> str:
     if field_name == "id":
