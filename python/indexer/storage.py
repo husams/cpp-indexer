@@ -26,6 +26,7 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -39,7 +40,7 @@ from indexer.generated_catalog import (
     SYMBOL_KIND_IDS as _GENERATED_SYMBOL_KIND_IDS,
 )
 
-SCHEMA_VERSION = 34
+SCHEMA_VERSION = 36
 
 
 def _catalog_hash(conn: sqlite3.Connection) -> Optional[str]:
@@ -622,9 +623,67 @@ CREATE TABLE IF NOT EXISTS include_config (
     arguments    TEXT,   -- JSON list of normalized parse args
     lang_mode    TEXT,   -- 'c' | 'c++'
     resource_dir TEXT,
+    translation_unit_config_id INTEGER REFERENCES translation_unit_config(id)
+                                ON DELETE SET NULL,
     UNIQUE (tu_file_id, digest)
 );
 CREATE INDEX IF NOT EXISTS idx_include_config_digest ON include_config(digest);
+
+CREATE TABLE IF NOT EXISTS translation_unit_config (
+    id INTEGER PRIMARY KEY,
+    descriptor_hash TEXT NOT NULL UNIQUE,
+    descriptor_json TEXT NOT NULL,
+    driver TEXT,
+    working_dir TEXT,
+    language TEXT,
+    standard TEXT,
+    target TEXT,
+    abi_options TEXT NOT NULL,
+    sysroot TEXT,
+    resource_dir TEXT,
+    include_paths TEXT NOT NULL,
+    macro_state TEXT NOT NULL,
+    relevant_environment TEXT NOT NULL,
+    generated_inputs TEXT NOT NULL,
+    diagnostics_policy TEXT,
+    arguments TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'registered'
+          CHECK (state IN ('registered','unregistered','ambiguous','stale','unavailable'))
+);
+CREATE INDEX IF NOT EXISTS idx_translation_unit_config_hash
+    ON translation_unit_config(descriptor_hash);
+
+CREATE TABLE IF NOT EXISTS translation_unit (
+    id INTEGER PRIMARY KEY,
+    file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    config_id INTEGER NOT NULL REFERENCES translation_unit_config(id) ON DELETE CASCADE,
+    state TEXT NOT NULL DEFAULT 'registered'
+          CHECK (state IN ('registered','unregistered','ambiguous','stale','unavailable')),
+    UNIQUE (file_id, config_id)
+);
+
+CREATE TABLE IF NOT EXISTS file_config (
+    file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    config_id INTEGER NOT NULL REFERENCES translation_unit_config(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('translation_unit','header')),
+    state TEXT NOT NULL DEFAULT 'registered'
+          CHECK (state IN ('registered','unregistered','ambiguous','stale','unavailable')),
+    reason TEXT,
+    PRIMARY KEY (file_id, config_id, role)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_file_config_config ON file_config(config_id);
+
+CREATE TABLE IF NOT EXISTS fact_applicability (
+    fact_kind TEXT NOT NULL,
+    fact_id INTEGER NOT NULL,
+    file_id INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
+    config_id INTEGER NOT NULL REFERENCES translation_unit_config(id)
+             ON DELETE CASCADE,
+    generation INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (fact_kind, fact_id, file_id, config_id)
+);
+CREATE INDEX IF NOT EXISTS idx_fact_applicability_config
+    ON fact_applicability(file_id, config_id, fact_kind, fact_id);
 
 CREATE TABLE IF NOT EXISTS include_edge (
     id           INTEGER PRIMARY KEY,
@@ -1336,7 +1395,136 @@ class IncludeConfig:
     arguments: Optional[str] = None  # JSON list, as stored
     lang_mode: Optional[str] = None
     resource_dir: Optional[str] = None
+    translation_unit_config_id: Optional[int] = None
     id: Optional[int] = None
+
+
+CONFIG_STATES = frozenset(
+    {"registered", "unregistered", "ambiguous", "stale", "unavailable"}
+)
+
+
+@dataclass
+class TranslationUnitConfig:
+    descriptor_hash: str = ""
+    descriptor_json: str = ""
+    driver: Optional[str] = None
+    working_dir: Optional[str] = None
+    language: Optional[str] = None
+    standard: Optional[str] = None
+    target: Optional[str] = None
+    abi_options: list[str] = field(default_factory=list)
+    sysroot: Optional[str] = None
+    resource_dir: Optional[str] = None
+    include_paths: list[str] = field(default_factory=list)
+    macro_state: list[str] = field(default_factory=list)
+    relevant_environment: list[str] = field(default_factory=list)
+    generated_inputs: list[str] = field(default_factory=list)
+    diagnostics_policy: Optional[str] = None
+    arguments: list[str] = field(default_factory=list)
+    state: str = "registered"
+    association_state: str = "registered"
+    id: Optional[int] = None
+
+
+@dataclass
+class FileConfigApplicability:
+    file_id: int
+    config_id: int
+    role: str = "header"
+    state: str = "registered"
+    reason: Optional[str] = None
+
+
+def canonical_translation_unit_config_json(config: TranslationUnitConfig) -> str:
+    """Return the cross-language, fixed-order descriptor representation."""
+    values = [
+        config.driver or "", config.working_dir or "", config.language or "",
+        config.standard or "", config.target or "", config.abi_options,
+        config.sysroot or "", config.resource_dir or "", config.include_paths,
+        config.macro_state, config.relevant_environment, config.generated_inputs,
+        config.diagnostics_policy or "", config.arguments,
+    ]
+    return json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+
+
+def translation_unit_config_hash(config: TranslationUnitConfig) -> str:
+    return hashlib.sha1(
+        canonical_translation_unit_config_json(config).encode("utf-8")
+    ).hexdigest()
+
+
+def resolve_translation_unit_config(
+    arguments: Sequence[str],
+    *,
+    driver: Optional[str] = None,
+    working_dir: Optional[str] = None,
+    language: Optional[str] = None,
+    resource_dir: Optional[str] = None,
+    diagnostics_policy: Optional[str] = "error-limit=0",
+) -> TranslationUnitConfig:
+    """Build the shared descriptor fields from one replayable argument list."""
+    args = list(arguments)
+    config = TranslationUnitConfig(
+        driver=driver, working_dir=working_dir, language=language,
+        resource_dir=resource_dir, diagnostics_policy=diagnostics_policy,
+        arguments=args,
+    )
+    def last(names: tuple[str, ...]) -> Optional[str]:
+        value = None
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            for name in names:
+                if arg.startswith(name + "="):
+                    value = arg[len(name) + 1:]
+                elif arg == name and i + 1 < len(args):
+                    i += 1
+                    value = args[i]
+            i += 1
+        return value
+    config.standard = last(("-std", "--std"))
+    config.target = last(("-target", "--target"))
+    config.sysroot = last(("-isysroot", "--sysroot"))
+    def values(flags: tuple[str, ...]) -> list[str]:
+        out: list[str] = []
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            for flag in flags:
+                if arg == flag and i + 1 < len(args):
+                    i += 1
+                    out.append(args[i])
+                elif arg.startswith(flag) and len(arg) > len(flag):
+                    out.append(arg[len(flag):])
+            i += 1
+        return out
+    config.include_paths = values(("-I", "-isystem", "-iquote", "-F"))
+    config.generated_inputs = values(("-include", "-imacros", "-include-pch"))
+    for i, arg in enumerate(args):
+        if arg in {"-D", "-U"} and i + 1 < len(args):
+            config.macro_state.append(arg + args[i + 1])
+        elif arg.startswith(("-D", "-U")):
+            config.macro_state.append(arg)
+        if arg.startswith(("-m", "-fabi")) or arg in {
+            "-fshort-wchar", "-fshort-enums", "-fno-exceptions", "-fno-rtti",
+        }:
+            config.abi_options.append(arg)
+    for name in (
+        "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH",
+        "SDKROOT", "MACOSX_DEPLOYMENT_TARGET", "CIDX_RESOURCE_DIR",
+    ):
+        if name in os.environ:
+            config.relevant_environment.append(f"{name}={os.environ[name]}")
+    if not config.language:
+        config.language = "c++" if (
+            "--driver-mode=g++" in args or "-xc++" in args or any(
+                args[i + 1].startswith("c++")
+                for i, arg in enumerate(args[:-1])
+                if arg == "-x"
+            )
+        ) else "c"
+    return config
 
 
 @dataclass
@@ -1349,6 +1537,30 @@ class IncludeEdge:
     is_generated: int = 0
     count: int = 1
     id: Optional[int] = None
+
+
+@dataclass
+class ConfiguredIncludeEdges:
+    edges: list[IncludeEdge] = field(default_factory=list)
+    coverage_complete: bool = False
+
+
+class FactCoverage:
+    ONE = "one"
+    ALL = "all"
+    INVARIANT = "invariant"
+
+
+@dataclass
+class ConfiguredSymbols:
+    symbols: list["Symbol"] = field(default_factory=list)
+    coverage_complete: bool = False
+
+
+@dataclass
+class ConfiguredFactIds:
+    ids: list[int] = field(default_factory=list)
+    coverage_complete: bool = False
 
 
 @dataclass
@@ -1466,6 +1678,7 @@ class Storage:
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
         self._in_txn = False
+        self._backfill_translation_unit_configs()
         # v21 -> v22 one-time backfill: entity_node is a pure-DB classification
         # of existing symbols (no re-parse), so an upgraded index gets its design
         # types filled in immediately on open -- no `cidx index`/`resolve` needed.
@@ -2018,6 +2231,19 @@ class Storage:
             # C++ reindex populates them, so an upgraded DB has an EMPTY include
             # graph until `cidx index` reruns. Mirrors storage.cpp.
             changed = True
+        # v34 -> v35: normalized translation-unit configuration identity. The
+        # legacy include_config columns remain for read/API compatibility.
+        if "include_config" in tables:
+            include_cols = {
+                r[1] for r in self._conn.execute("PRAGMA table_info(include_config)")
+            }
+            if "translation_unit_config_id" not in include_cols:
+                self._conn.execute(
+                    "ALTER TABLE include_config ADD COLUMN "
+                    "translation_unit_config_id INTEGER REFERENCES "
+                    "translation_unit_config(id) ON DELETE SET NULL"
+                )
+                changed = True
         if "edge" not in tables:
             # v6 -> v7: graph layer. The schema script (run AFTER migrate) creates
             # the tables + indexes + seeds edge_kind; nothing to backfill from
@@ -2039,6 +2265,37 @@ class Storage:
                 (str(SCHEMA_VERSION),),
             )
             self._conn.commit()
+
+    def _backfill_translation_unit_configs(self) -> None:
+        """Adapt v34 include rows into the v35 normalized identity tier."""
+        rows = self._conn.execute(
+            "SELECT * FROM include_config WHERE translation_unit_config_id IS NULL "
+            "ORDER BY id"
+        ).fetchall()
+        for row in rows:
+            include = _row_to(IncludeConfig, row)
+            args = json.loads(include.arguments) if include.arguments else []
+            config = resolve_translation_unit_config(
+                args,
+                driver=include.driver,
+                working_dir=include.working_dir,
+                language=include.lang_mode,
+                resource_dir=include.resource_dir,
+            )
+            config_id = self.add_translation_unit_config(config)
+            self._conn.execute(
+                "UPDATE include_config SET translation_unit_config_id = ? WHERE id = ?",
+                (config_id, include.id),
+            )
+            self._conn.execute(
+                "INSERT OR IGNORE INTO translation_unit(file_id, config_id) VALUES (?, ?)",
+                (include.tu_file_id, config_id),
+            )
+            self._conn.execute(
+                "INSERT OR IGNORE INTO file_config(file_id, config_id, role) VALUES (?, ?, 'translation_unit')",
+                (include.tu_file_id, config_id),
+            )
+        self._conn.commit()
 
     def _migrate_symbol_kind_to_int(self) -> None:
         """v15 -> v16: rebuild `symbol` with kind stored as its CXCursorKind int.
@@ -2854,6 +3111,21 @@ class Storage:
         changed, so the stored symbols are stale).
         """
         opts = json.dumps(compile_options) if compile_options is not None else None
+        previous = self._conn.execute(
+            "SELECT compile_options, driver, args_overridden FROM file "
+            "WHERE directory_id = ? AND name = ?",
+            (directory_id, name),
+        ).fetchone()
+        config_changed = bool(
+            previous is not None
+            and not previous["args_overridden"]
+            and (
+                opts is not None
+                and (previous["compile_options"] is None or previous["compile_options"] != opts)
+                or driver is not None
+                and (previous["driver"] is None or previous["driver"] != driver)
+            )
+        )
         cur = self._conn.execute(
             "INSERT INTO file (directory_id, name, mtime, md5, compile_options, driver) "
             "VALUES (?, ?, ?, ?, ?, ?) "
@@ -2867,14 +3139,30 @@ class Storage:
             "                         THEN file.driver "
             "                         ELSE COALESCE(excluded.driver, "
             "                                       file.driver) END, "
-            "  indexed         = CASE WHEN excluded.md5 IS NOT NULL "
-            "                          AND excluded.md5 IS NOT file.md5 "
+            "  indexed         = CASE WHEN (excluded.md5 IS NOT NULL "
+            "                          AND excluded.md5 IS NOT file.md5) "
+            "                         OR (file.args_overridden = 0 AND "
+            "                             ((excluded.compile_options IS NOT NULL "
+            "                               AND excluded.compile_options IS NOT file.compile_options) "
+            "                              OR (excluded.driver IS NOT NULL "
+            "                               AND excluded.driver IS NOT file.driver))) "
             "                         THEN 0 ELSE file.indexed END, "
             "  md5             = COALESCE(excluded.md5, file.md5) "
             "RETURNING id",
             (directory_id, name, mtime, md5, opts, driver),
         )
         fid = cur.fetchone()["id"]
+        if config_changed:
+            self._conn.execute(
+                "UPDATE file_config SET state = 'stale', "
+                "reason = 'translation-unit configuration changed' "
+                "WHERE file_id = ? AND role = 'translation_unit'",
+                (fid,),
+            )
+            self._conn.execute(
+                "UPDATE translation_unit SET state = 'stale' WHERE file_id = ?",
+                (fid,),
+            )
         self._commit()
         return fid
 
@@ -3128,7 +3416,94 @@ class Storage:
 
     # -- v31 include tier (read-only) -------------------------------------
     # Extraction lives in the C++ LibTooling engine; Python owns the schema,
-    # the migration, and these read queries. Nothing here writes.
+    # the migration, and these compatibility queries.
+
+    def add_translation_unit_config(self, config: TranslationUnitConfig) -> int:
+        """Store or refresh one canonical configuration descriptor."""
+        if config.state not in CONFIG_STATES:
+            raise ValueError(f"unknown translation-unit config state: {config.state}")
+        resolved = resolve_translation_unit_config(
+            config.arguments,
+            driver=config.driver,
+            working_dir=config.working_dir,
+            language=config.language,
+            resource_dir=config.resource_dir,
+            diagnostics_policy=config.diagnostics_policy,
+        )
+        for name in ("standard", "target", "sysroot"):
+            if getattr(config, name):
+                setattr(resolved, name, getattr(config, name))
+        for name in (
+            "abi_options", "include_paths", "macro_state",
+            "relevant_environment", "generated_inputs",
+        ):
+            if getattr(config, name):
+                setattr(resolved, name, list(getattr(config, name)))
+        resolved.state = config.state
+        config = resolved
+        config.descriptor_json = canonical_translation_unit_config_json(config)
+        config.descriptor_hash = translation_unit_config_hash(config)
+        cur = self._conn.execute(
+            "INSERT INTO translation_unit_config "
+            "(descriptor_hash, descriptor_json, driver, working_dir, language, standard, target, "
+            "abi_options, sysroot, resource_dir, include_paths, macro_state, relevant_environment, "
+            "generated_inputs, diagnostics_policy, arguments, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(descriptor_hash) DO UPDATE SET descriptor_json=excluded.descriptor_json, "
+            "driver=excluded.driver, working_dir=excluded.working_dir, language=excluded.language, "
+            "standard=excluded.standard, target=excluded.target, abi_options=excluded.abi_options, "
+            "sysroot=excluded.sysroot, resource_dir=excluded.resource_dir, include_paths=excluded.include_paths, "
+            "macro_state=excluded.macro_state, relevant_environment=excluded.relevant_environment, "
+            "generated_inputs=excluded.generated_inputs, diagnostics_policy=excluded.diagnostics_policy, "
+            "arguments=excluded.arguments, state=excluded.state RETURNING id",
+            (
+                config.descriptor_hash, config.descriptor_json, config.driver, config.working_dir,
+                config.language, config.standard, config.target,
+                json.dumps(config.abi_options, ensure_ascii=False, separators=(",", ":")),
+                config.sysroot, config.resource_dir,
+                json.dumps(config.include_paths, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(config.macro_state, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(config.relevant_environment, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(config.generated_inputs, ensure_ascii=False, separators=(",", ":")),
+                config.diagnostics_policy,
+                json.dumps(config.arguments, ensure_ascii=False, separators=(",", ":")),
+                config.state,
+            ),
+        )
+        config.id = cur.fetchone()["id"]
+        self._commit()
+        return config.id
+
+    def add_file_config(self, applicability: FileConfigApplicability) -> None:
+        if applicability.role not in {"translation_unit", "header"}:
+            raise ValueError(f"unknown file configuration role: {applicability.role}")
+        if applicability.state not in CONFIG_STATES:
+            raise ValueError(f"unknown file configuration state: {applicability.state}")
+        self._conn.execute(
+            "INSERT INTO file_config(file_id, config_id, role, state, reason) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(file_id, config_id, role) DO UPDATE SET state=excluded.state, reason=excluded.reason",
+            (applicability.file_id, applicability.config_id, applicability.role,
+             applicability.state, applicability.reason),
+        )
+        self._commit()
+
+    def translation_unit_configs_for_file(self, file_id: int) -> list[TranslationUnitConfig]:
+        rows = self._conn.execute(
+            "SELECT c.*, f.state AS association_state "
+            "FROM translation_unit_config c JOIN translation_unit t "
+            "ON t.config_id = c.id JOIN file_config f "
+            "ON f.file_id = t.file_id AND f.config_id = c.id "
+            "AND f.role = 'translation_unit' WHERE t.file_id = ? "
+            "ORDER BY c.descriptor_hash",
+            (file_id,),
+        ).fetchall()
+        return [_row_to(TranslationUnitConfig, row) for row in rows]
+
+    def file_configs_for(self, file_id: int) -> list[FileConfigApplicability]:
+        rows = self._conn.execute(
+            "SELECT file_id, config_id, role, state, reason FROM file_config "
+            "WHERE file_id = ? ORDER BY config_id, role", (file_id,)
+        ).fetchall()
+        return [_row_to(FileConfigApplicability, row) for row in rows]
 
     def include_graph_populated(self) -> bool:
         """True once any include fact exists.
@@ -3159,6 +3534,51 @@ class Storage:
             _row_to(IncludeEdge, r)
             for r in self._conn.execute(sql, (src_file_id,)).fetchall()
         ]
+
+    def include_edges_from_config(
+        self, src_file_id: int, translation_unit_config_id: int,
+        include_system: bool = False,
+    ) -> list[IncludeEdge]:
+        sql = (
+            "SELECT e.* FROM include_edge e JOIN include_config c ON c.id = e.config_id "
+            "WHERE e.src_file_id = ? AND c.translation_unit_config_id = ?"
+        )
+        args: tuple[int, int] = (src_file_id, translation_unit_config_id)
+        if not include_system:
+            sql += " AND e.is_system = 0"
+        sql += " ORDER BY e.dst_path, c.digest"
+        return [
+            _row_to(IncludeEdge, row)
+            for row in self._conn.execute(sql, args).fetchall()
+        ]
+
+    def invariant_include_edges(
+        self, src_file_id: int, declared_config_ids: Sequence[int],
+        include_system: bool = False,
+    ) -> ConfiguredIncludeEdges:
+        if not declared_config_ids:
+            return ConfiguredIncludeEdges()
+        common: Optional[dict[str, IncludeEdge]] = None
+        for config_id in declared_config_ids:
+            covered = self._conn.execute(
+                "SELECT 1 FROM translation_unit_config c JOIN file_config f "
+                "ON f.config_id = c.id WHERE f.file_id = ? AND f.config_id = ? "
+                "AND f.role = 'header' AND f.state = 'registered' "
+                "AND c.state = 'registered'",
+                (src_file_id, config_id),
+            ).fetchone()
+            if covered is None:
+                return ConfiguredIncludeEdges()
+            current = {
+                edge.dst_path: edge
+                for edge in self.include_edges_from_config(
+                    src_file_id, config_id, include_system
+                )
+            }
+            common = current if common is None else {
+                path: edge for path, edge in common.items() if path in current
+            }
+        return ConfiguredIncludeEdges(list(common.values()), True)
 
     def include_edges_to(self, dst_file_id: int) -> list[IncludeEdge]:
         """Direct include edges INTO a file -- who includes it."""
@@ -3500,7 +3920,10 @@ class Storage:
         sql += " ORDER BY usr"
         return [_row_to(Symbol, r) for r in self._conn.execute(sql, args)]
 
-    def search_symbols(self, pattern: str, kind: Optional[str] = None) -> list[Symbol]:
+    def search_symbols(
+        self, pattern: str, kind: Optional[str] = None,
+        config_id: Optional[int] = None,
+    ) -> list[Symbol]:
         """Fuzzy match against the qualified name (case-insensitive).
 
         Each '::'-separated segment of `pattern` must appear, in order, as a
@@ -3520,8 +3943,101 @@ class Storage:
         if kind is not None:
             sql += " AND kind = ?"
             args.append(SYMBOL_KIND_IDS.get(kind, -1))
+        if config_id is not None:
+            sql += (
+                " AND EXISTS (SELECT 1 FROM fact_applicability fa WHERE "
+                "fa.fact_kind = 'symbol' AND fa.fact_id = symbol.id "
+                "AND fa.config_id = ?)"
+            )
+            args.append(config_id)
         sql += " ORDER BY LENGTH(qual_name), qual_name"
         return [_row_to(Symbol, r) for r in self._conn.execute(sql, args)]
+
+    def symbols_for_config(
+        self, file_id: int, config_ids: Sequence[int],
+        coverage: str = FactCoverage.ONE,
+    ) -> ConfiguredSymbols:
+        """Read configuration-qualified symbols with explicit unknown coverage."""
+        if not config_ids:
+            return ConfiguredSymbols()
+        for config_id in config_ids:
+            covered = self._conn.execute(
+                "SELECT 1 FROM translation_unit_config c JOIN file_config f "
+                "ON f.config_id = c.id WHERE f.file_id = ? AND f.config_id = ? "
+                "AND f.state = 'registered' AND c.state = 'registered' LIMIT 1",
+                (file_id, config_id),
+            ).fetchone()
+            if covered is None:
+                return ConfiguredSymbols()
+
+        def read(config_id: int) -> dict[int, Symbol]:
+            rows = self._conn.execute(
+                "SELECT s.* FROM symbol s JOIN fact_applicability fa ON "
+                "fa.fact_kind = 'symbol' AND fa.fact_id = s.id "
+                "AND fa.file_id = ? AND fa.config_id = ? ORDER BY s.usr",
+                (file_id, config_id),
+            ).fetchall()
+            return {row["id"]: _row_to(Symbol, row) for row in rows}
+
+        selected: dict[int, Symbol] = {}
+        for index, config_id in enumerate(config_ids):
+            current = read(config_id)
+            if coverage == FactCoverage.ONE:
+                selected = current
+                break
+            if index == 0:
+                selected = current
+            elif coverage == FactCoverage.ALL:
+                selected.update(current)
+            elif coverage == FactCoverage.INVARIANT:
+                selected = {
+                    symbol_id: symbol
+                    for symbol_id, symbol in selected.items()
+                    if symbol_id in current
+                }
+            else:
+                raise ValueError(f"unknown fact coverage {coverage!r}")
+        return ConfiguredSymbols(
+            symbols=[selected[key] for key in sorted(selected)],
+            coverage_complete=True,
+        )
+
+    def fact_ids_for_config(
+        self, file_id: int, fact_kind: str, config_ids: Sequence[int],
+        coverage: str = FactCoverage.ONE,
+    ) -> ConfiguredFactIds:
+        if not config_ids:
+            return ConfiguredFactIds()
+        selected: set[int] = set()
+        for index, config_id in enumerate(config_ids):
+            covered = self._conn.execute(
+                "SELECT 1 FROM translation_unit_config c JOIN file_config f "
+                "ON f.config_id = c.id WHERE f.file_id = ? AND f.config_id = ? "
+                "AND f.state = 'registered' AND c.state = 'registered' LIMIT 1",
+                (file_id, config_id),
+            ).fetchone()
+            if covered is None:
+                return ConfiguredFactIds()
+            current = {
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT fact_id FROM fact_applicability WHERE fact_kind = ? "
+                    "AND file_id = ? AND config_id = ? ORDER BY fact_id",
+                    (fact_kind, file_id, config_id),
+                )
+            }
+            if coverage == FactCoverage.ONE:
+                selected = current
+                break
+            if index == 0:
+                selected = current
+            elif coverage == FactCoverage.ALL:
+                selected |= current
+            elif coverage == FactCoverage.INVARIANT:
+                selected &= current
+            else:
+                raise ValueError(f"unknown fact coverage {coverage!r}")
+        return ConfiguredFactIds(sorted(selected), True)
 
     def list_symbols(
         self,

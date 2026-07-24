@@ -111,11 +111,21 @@ RemovalValidator::affected_tus(const std::string &abs_path) {
     // A file is a TU exactly when it owns a recorded configuration. A header
     // has none; it is covered through the TUs that include it.
     for (const IncludeConfig &c : db_.include_configs_for_tu(f->id)) {
+      if (!c.translation_unit_config_id) {
+        return std::nullopt;
+      }
+      const std::optional<TranslationUnitConfig> descriptor =
+          db_.translation_unit_config_by_id(*c.translation_unit_config_id);
+      if (!descriptor ||
+          descriptor->state != TranslationUnitConfigState::registered) {
+        return std::nullopt;
+      }
       TuTarget t;
       t.tu_path = root;
       t.config_digest = c.digest;
-      t.arguments = c.arguments;
-      t.working_dir = c.working_dir.value_or(".");
+      t.descriptor_hash = descriptor->descriptor_hash;
+      t.arguments = descriptor->arguments;
+      t.working_dir = descriptor->working_dir.value_or(".");
       out.push_back(std::move(t));
       any_tu = true;
     }

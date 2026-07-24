@@ -1,10 +1,17 @@
 #include "ast/storage_edge_sink.hpp"
 
+#include <algorithm>
+
 #include "storage/storage.hpp"
 
 namespace cidx::ast {
 
 StorageEdgeSink::StorageEdgeSink(cidx::Storage &db) : db_(db) {}
+
+void StorageEdgeSink::reset_fact_ids() {
+  edge_ids_.clear();
+  definition_ids_.clear();
+}
 
 std::optional<int64_t>
 StorageEdgeSink::lookup_symbol_id(const std::string &usr) {
@@ -34,7 +41,11 @@ int64_t StorageEdgeSink::add_edge(const EdgeRecord &edge) {
   if (edge.is_virtual) {
     e.is_virtual = edge.is_virtual;
   }
-  return db_.add_edge(e);
+  const int64_t id = db_.add_edge(e);
+  if (std::ranges::find(edge_ids_, id) == edge_ids_.end()) {
+    edge_ids_.push_back(id);
+  }
+  return id;
 }
 
 int64_t StorageEdgeSink::ensure_edge(const EdgeRecord &edge) {
@@ -49,7 +60,11 @@ int64_t StorageEdgeSink::ensure_edge(const EdgeRecord &edge) {
   if (edge.is_virtual) {
     e.is_virtual = edge.is_virtual;
   }
-  return db_.ensure_edge(e);
+  const int64_t id = db_.ensure_edge(e);
+  if (std::ranges::find(edge_ids_, id) == edge_ids_.end()) {
+    edge_ids_.push_back(id);
+  }
+  return id;
 }
 
 void StorageEdgeSink::add_edge_site(const EdgeSiteRecord &site) {
@@ -94,8 +109,12 @@ int64_t StorageEdgeSink::get_or_create_definition(
     int64_t symbol_id, int64_t file_id, int64_t line, int64_t col,
     int64_t end_line, int64_t end_col,
     const std::optional<std::string> &init_text) {
-  return db_.get_or_create_definition(symbol_id, file_id, line, col, end_line,
-                                      end_col, init_text);
+  const int64_t id = db_.get_or_create_definition(symbol_id, file_id, line, col,
+                                                  end_line, end_col, init_text);
+  if (std::ranges::find(definition_ids_, id) == definition_ids_.end()) {
+    definition_ids_.push_back(id);
+  }
+  return id;
 }
 
 void StorageEdgeSink::add_def_edge(int64_t def_id, int64_t dst_id,

@@ -42,6 +42,7 @@ struct Removal {
 struct TuTarget {
   std::string tu_path;
   std::string config_digest;
+  std::string descriptor_hash;
   std::vector<std::string> arguments;
   std::string working_dir;
 };

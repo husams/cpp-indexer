@@ -4,20 +4,36 @@
 #include "clang/Tooling/JSONCompilationDatabase.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <regex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 
+#include "util/env.hpp"
 #include "util/errors.hpp"
 #include "util/pathutil.hpp"
 
 namespace cidx {
 namespace {
+
+bool arguments_select_cxx(const std::vector<std::string> &arguments) {
+  if (std::ranges::find(arguments, "--driver-mode=g++") != arguments.end() ||
+      std::ranges::find(arguments, "-xc++") != arguments.end()) {
+    return true;
+  }
+  const auto x = std::ranges::find(arguments, "-x");
+  if (x != arguments.end() && std::next(x) != arguments.end()) {
+    return std::next(x)->starts_with("c++");
+  }
+  return false;
+}
 
 // Frozen drop sets (compiledb.py, G10). Rationale baked into the Python
 // comments: -M* writes build artifacts into dirs that don't exist outside a
@@ -28,20 +44,46 @@ namespace {
 // (-nostdinc / -nostdinc++) and preprocessor-affecting flags (-pthread, -fPIC)
 // are NOT linker flags and are deliberately KEPT.
 const std::set<std::string> kDrop = {
-    "-c",       "--",
+    "-c",
+    "--",
     // dependency generation
-    "-M",       "-MM",      "-MD",      "-MMD", "-MG", "-MP", "-MV",
+    "-M",
+    "-MM",
+    "-MD",
+    "-MMD",
+    "-MG",
+    "-MP",
+    "-MV",
     // warnings-as-errors
-    "-Werror",  "-pedantic-errors",
+    "-Werror",
+    "-pedantic-errors",
     // link-stage modes (no effect on parsing)
-    "-shared",  "-static",  "-rdynamic", "-pie", "-no-pie", "-s", "-pipe",
-    "-nostdlib", "-nodefaultlibs", "-nostartfiles",
-    "-static-libgcc", "-shared-libgcc", "-static-libstdc++",
+    "-shared",
+    "-static",
+    "-rdynamic",
+    "-pie",
+    "-no-pie",
+    "-s",
+    "-pipe",
+    "-nostdlib",
+    "-nodefaultlibs",
+    "-nostartfiles",
+    "-static-libgcc",
+    "-shared-libgcc",
+    "-static-libstdc++",
 };
 const std::set<std::string> kDropWithArg = {
-    "-o", "-MF", "-MT", "-MQ", "-dependency-file", "--serialize-diagnostics",
+    "-o",
+    "-MF",
+    "-MT",
+    "-MQ",
+    "-dependency-file",
+    "--serialize-diagnostics",
     // linker options that take a separate argument
-    "-Xlinker", "-T", "-L", "-l",
+    "-Xlinker",
+    "-T",
+    "-L",
+    "-l",
 };
 const char *const kDropPrefix[] = {
     "-Werror=", // -Werror=return-type: keep it a plain warning
@@ -50,11 +92,11 @@ const char *const kDropPrefix[] = {
     "-MT",
     "-MQ",
     // linker / library / cache (glued forms)
-    "-l",     // -lfoo  (no frontend flag starts with -l)
-    "-L",     // -L/usr/lib (no frontend flag starts with -L)
-    "-Wl,",   // linker passthrough
-    "-Wa,",   // assembler passthrough
-    "-fuse-ld=",            // linker selection
+    "-l",                    // -lfoo  (no frontend flag starts with -l)
+    "-L",                    // -L/usr/lib (no frontend flag starts with -L)
+    "-Wl,",                  // linker passthrough
+    "-Wa,",                  // assembler passthrough
+    "-fuse-ld=",             // linker selection
     "-fmodules-cache-path=", // module/diagnostic cache dir
 };
 
@@ -104,9 +146,10 @@ std::string CompileDb::db_dir_from_arg(const std::string &db_arg) {
 
 std::vector<CompileCommand> CompileDb::load(const std::string &db_arg) {
   // Load compile_commands.json through the Clang C++ tooling API
-  // (JSONCompilationDatabase) — the same parser libclang's CXCompilationDatabase
-  // wrapped, minus the C API. AutoDetect tokenizes a `command` string or takes
-  // an `arguments` array, matching the previous libclang behavior.
+  // (JSONCompilationDatabase) — the same parser libclang's
+  // CXCompilationDatabase wrapped, minus the C API. AutoDetect tokenizes a
+  // `command` string or takes an `arguments` array, matching the previous
+  // libclang behavior.
   const std::string abs_dir = pathutil::abspath(db_dir_from_arg(db_arg));
   std::string err;
   // loadFromDirectory reads compile_commands.json from the directory and
@@ -119,7 +162,8 @@ std::vector<CompileCommand> CompileDb::load(const std::string &db_arg) {
   }
 
   std::vector<CompileCommand> out;
-  for (const clang::tooling::CompileCommand &cmd : db->getAllCompileCommands()) {
+  for (const clang::tooling::CompileCommand &cmd :
+       db->getAllCompileCommands()) {
     CompileCommand cc;
     cc.directory = cmd.Directory;
     cc.filename = cmd.Filename;
@@ -320,27 +364,26 @@ map_include_values(const std::vector<std::string> &options, Fn fn) {
 } // namespace
 
 // DECODE: resolve <label>/$VAR/~ in include-path values to absolute paths.
-std::vector<std::string>
-CompileDb::resolve_options(
+std::vector<std::string> CompileDb::resolve_options(
     const std::vector<std::string> &options,
     std::function<std::optional<std::string>(const std::string &)> lookup,
     bool autoderive) {
   pathutil::LabelResolver resolver(lookup ? std::move(lookup) : nullptr,
                                    autoderive);
-  return map_include_values(options, [&](const std::string &val) -> std::string {
-    // Only resolve values that look indirected: contain '<', '$', or start
-    // with '~'. Plain absolute paths pass through unchanged.
-    if (!val.contains('<') && !val.contains('$') &&
-        (val.empty() || val[0] != '~')) {
-      return val;
-    }
-    return pathutil::abspath(pathutil::resolve_fs_path(val, resolver));
-  });
+  return map_include_values(
+      options, [&](const std::string &val) -> std::string {
+        // Only resolve values that look indirected: contain '<', '$', or start
+        // with '~'. Plain absolute paths pass through unchanged.
+        if (!val.contains('<') && !val.contains('$') &&
+            (val.empty() || val[0] != '~')) {
+          return val;
+        }
+        return pathutil::abspath(pathutil::resolve_fs_path(val, resolver));
+      });
 }
 
 // Build the encode label map from (name, stored_path, versioned) entries.
-std::vector<AliasEntry>
-CompileDb::build_label_map(
+std::vector<AliasEntry> CompileDb::build_label_map(
     const std::vector<AliasEntry> &labels,
     std::function<std::optional<std::string>(const std::string &)> lookup) {
   // NO autoderive — a label's own stored value is taken literally.
@@ -417,17 +460,18 @@ CompileDb::include_values(const std::vector<std::string> &options) {
 std::vector<std::string>
 CompileDb::alias_options(const std::vector<std::string> &options,
                          const std::vector<AliasEntry> &label_map) {
-  return map_include_values(options, [&](const std::string &val) -> std::string {
-    // Already indirected, or relative: leave unchanged.
-    if (val.contains('<') || val.contains('$') || !pathutil::isabs(val)) {
-      return val;
-    }
-    const auto m = match_alias(pathutil::normpath(val), label_map);
-    if (!m.has_value()) {
-      return val;
-    }
-    return "<" + std::get<0>(*m) + ">" + std::get<2>(*m);
-  });
+  return map_include_values(
+      options, [&](const std::string &val) -> std::string {
+        // Already indirected, or relative: leave unchanged.
+        if (val.contains('<') || val.contains('$') || !pathutil::isabs(val)) {
+          return val;
+        }
+        const auto m = match_alias(pathutil::normpath(val), label_map);
+        if (!m.has_value()) {
+          return val;
+        }
+        return "<" + std::get<0>(*m) + ">" + std::get<2>(*m);
+      });
 }
 
 // True iff seg matches the version regex (compiledb.py:is_version_segment).
@@ -463,6 +507,106 @@ std::vector<long long> CompileDb::version_key(const std::string &version) {
   }
   flush();
   return out;
+}
+
+namespace {
+
+std::optional<std::string>
+last_option_value(const std::vector<std::string> &args,
+                  const std::initializer_list<std::string_view> names) {
+  std::optional<std::string> value;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::string_view arg = args[i];
+    for (const std::string_view name : names) {
+      if (arg.starts_with(name) && arg.size() > name.size() &&
+          arg[name.size()] == '=') {
+        value = std::string(arg.substr(name.size() + 1));
+      } else if (arg == name && i + 1 < args.size()) {
+        value = args[++i];
+      }
+    }
+  }
+  return value;
+}
+
+void append_flag_values(const std::vector<std::string> &args,
+                        std::vector<std::string> &out,
+                        const std::initializer_list<std::string_view> flags) {
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::string_view arg = args[i];
+    for (const std::string_view flag : flags) {
+      if (arg == flag && i + 1 < args.size()) {
+        out.emplace_back(args[++i]);
+      } else if (arg.starts_with(flag) && arg.size() > flag.size()) {
+        out.emplace_back(arg.substr(flag.size()));
+      }
+    }
+  }
+}
+
+std::vector<std::string> environment_inputs() {
+  constexpr std::array names = {"CPATH",
+                                "C_INCLUDE_PATH",
+                                "CPLUS_INCLUDE_PATH",
+                                "OBJC_INCLUDE_PATH",
+                                "SDKROOT",
+                                "MACOSX_DEPLOYMENT_TARGET",
+                                "CIDX_RESOURCE_DIR"};
+  std::vector<std::string> out;
+  for (const char *name : names) {
+    if (const auto value = get_env(name)) {
+      out.emplace_back(std::string(name) + "=" + *value);
+    }
+  }
+  return out;
+}
+
+} // namespace
+
+TranslationUnitConfig resolve_translation_unit_config(
+    const std::optional<std::string> &driver,
+    const std::optional<std::string> &working_dir,
+    const std::vector<std::string> &arguments,
+    const std::optional<std::string> &language,
+    const std::optional<std::string> &resource_dir,
+    const std::optional<std::string> &diagnostics_policy) {
+  TranslationUnitConfig config;
+  config.driver = driver;
+  config.working_dir = working_dir;
+  config.language = language;
+  config.resource_dir = resource_dir;
+  config.arguments = arguments;
+  config.diagnostics_policy = diagnostics_policy;
+  config.standard = last_option_value(arguments, {"-std", "--std"});
+  config.target = last_option_value(arguments, {"-target", "--target"});
+  config.sysroot = last_option_value(arguments, {"-isysroot", "--sysroot"});
+  append_flag_values(arguments, config.include_paths,
+                     {"-I", "-isystem", "-iquote", "-F"});
+  append_flag_values(arguments, config.generated_inputs,
+                     {"-include", "-imacros", "-include-pch"});
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    const std::string &arg = arguments[i];
+    if (arg == "-D" || arg == "-U") {
+      if (i + 1 < arguments.size()) {
+        config.macro_state.push_back(arg + arguments[++i]);
+      }
+    } else if (arg.starts_with("-D") || arg.starts_with("-U")) {
+      config.macro_state.push_back(arg);
+    }
+    if (arg.starts_with("-m") || arg.starts_with("-fabi") ||
+        arg == "-fshort-wchar" || arg == "-fshort-enums" ||
+        arg == "-fno-exceptions" || arg == "-fno-rtti") {
+      config.abi_options.push_back(arg);
+    }
+  }
+  config.relevant_environment = environment_inputs();
+  if (!config.diagnostics_policy) {
+    config.diagnostics_policy = "error-limit=0";
+  }
+  if (!config.language) {
+    config.language = arguments_select_cxx(arguments) ? "c++" : "c";
+  }
+  return config;
 }
 
 } // namespace cidx

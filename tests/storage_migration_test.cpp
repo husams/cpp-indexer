@@ -146,6 +146,9 @@ void check_migrated(const std::string &db_path) {
                                          "idx_parameter_declared_type",
                                          "idx_parameter_adjusted_type",
                                          "idx_symbol_type_type",
+                                         "idx_translation_unit_config_hash",
+                                         "idx_file_config_config",
+                                         "idx_fact_applicability_config",
                                          "idx_include_config_digest",
                                          "idx_include_edge_dst",
                                          "idx_include_edge_config",
@@ -737,4 +740,52 @@ TEST_CASE("v33 -> v34: alias/variable/field uses(7) edges become "
   CHECK(kind_of(var_id, record_id) == 20);
   CHECK(kind_of(field_id, record_id) == 20);
   CHECK(kind_of(var_id, ns_id) == 7);
+}
+
+TEST_CASE("v34 include configurations backfill into normalized identities") {
+  const std::string tmp = make_temp_dir();
+  const std::string path = tmp + "/v34.db";
+  int64_t tu = -1;
+  {
+    cidx::Storage db(path);
+    const int64_t component = db.add_component("config", "/repo/config");
+    const int64_t directory = db.add_directory(component, "");
+    tu = db.add_file(directory, "main.cpp");
+  }
+  {
+    cidx::SqliteDb raw(path);
+    raw.exec("DROP TABLE include_macro_use");
+    raw.exec("DROP TABLE include_site");
+    raw.exec("DROP TABLE include_edge");
+    raw.exec("DROP TABLE include_config");
+    raw.exec("DROP TABLE file_config");
+    raw.exec("DROP TABLE translation_unit");
+    raw.exec("DROP TABLE translation_unit_config");
+    raw.exec("CREATE TABLE include_config ("
+             "id INTEGER PRIMARY KEY, tu_file_id INTEGER NOT NULL, "
+             "digest TEXT NOT NULL, driver TEXT, working_dir TEXT, "
+             "arguments TEXT, lang_mode TEXT, resource_dir TEXT, "
+             "UNIQUE(tu_file_id, digest))");
+    auto insert = raw.prepare(
+        "INSERT INTO include_config(tu_file_id, digest, driver, working_dir, "
+        "arguments, lang_mode, resource_dir) VALUES (?, 'legacy', 'clang++', "
+        "'.', "
+        "'[\"-std=c++23\",\"main.cpp\"]', 'c++', NULL)");
+    insert.bind(1, tu);
+    insert.step_done();
+    raw.exec("UPDATE meta SET value = '34' WHERE key = 'schema_version'");
+  }
+  {
+    cidx::Storage db(path);
+    cidx::SqliteDb raw(path);
+    CHECK(meta_version(raw) == std::to_string(cidx::kSchemaVersion));
+    auto count = raw.prepare("SELECT COUNT(*) FROM translation_unit_config");
+    REQUIRE(count.step());
+    CHECK(count.col_int64(0) == 1);
+    auto linked =
+        raw.prepare("SELECT translation_unit_config_id FROM include_config");
+    REQUIRE(linked.step());
+    CHECK_FALSE(linked.col_is_null(0));
+    CHECK(db.translation_unit_configs_for_file(tu).size() == 1);
+  }
 }

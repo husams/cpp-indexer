@@ -183,6 +183,22 @@ Storage::Storage(const std::string &path, OpenMode mode)
         " (regenerate the database with the matching semantic catalogs)");
   }
   db_.exec(catalog::kSeedSql);
+  // v34 -> v35: preserve every legacy include configuration as one canonical
+  // descriptor and attach its compatibility row to that descriptor.
+  {
+    std::vector<int64_t> legacy_ids;
+    auto pending = db_.prepare("SELECT id FROM include_config WHERE "
+                               "translation_unit_config_id IS NULL "
+                               "ORDER BY id");
+    while (pending.step()) {
+      legacy_ids.push_back(pending.col_int64(0));
+    }
+    for (const int64_t id : legacy_ids) {
+      if (const auto config = include_config_by_id(id)) {
+        add_include_config(*config);
+      }
+    }
+  }
   // v21 -> v22 one-time backfill: entity_node is a pure-DB classification of
   // existing symbols (no re-parse), so an upgraded index gets its design types
   // filled in immediately on open -- no re-index/resolve. (entity_node did not

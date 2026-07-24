@@ -164,6 +164,7 @@ add_library(cidx_core STATIC
   src/storage/storage_repo.cpp
   src/storage/storage_schema.cpp
   src/storage/storage_symbols.cpp
+  src/storage/storage_applicability.cpp
   src/storage/storage_types.cpp
   src/toolchain/toolchain.cpp
   src/cli/args.cpp

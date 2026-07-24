@@ -369,6 +369,22 @@ TEST_CASE("resolve_parse_config resolves options, driver and TU scope") {
   CHECK(hdr.args == cfg.args);
 }
 
+TEST_CASE("resolve_parse_config rejects stale normalized associations") {
+  const Fixture f = make_index();
+  cidx::Storage db(f.db);
+  cidx::IncludeConfig include{.tu_file_id = db.get_file(f.src)->id,
+                              .digest = "stale",
+                              .driver = std::string("c++"),
+                              .working_dir = std::string("."),
+                              .arguments = {"-DOLD=1"},
+                              .lang_mode = std::string("c++")};
+  db.add_include_config(include);
+  db.add_file_path(f.src, std::nullopt, std::nullopt,
+                   std::vector<std::string>{"-DNEW=1"}, std::string("c++"));
+  CHECK_THROWS_WITH_AS(
+      diff::resolve_parse_config({"left", f.src, f.db, std::nullopt}),
+      doctest::Contains("stale"), cidx::CidxError);
+}
 TEST_CASE("edit script past kEditCap sets truncated and stops at the cap") {
   // Hermetic: synthetic syntax trees drive compare_sides directly. The child
   // count also exceeds kLcsLimit, so the positional-pairing fallback and the

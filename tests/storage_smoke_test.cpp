@@ -437,6 +437,10 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                         "parameter",
                                         "symbol_type_kind",
                                         "symbol_type",
+                                        "translation_unit_config",
+                                        "translation_unit",
+                                        "file_config",
+                                        "fact_applicability",
                                         "include_config",
                                         "include_edge",
                                         "include_directive_kind",
@@ -527,6 +531,9 @@ TEST_CASE("fresh Storage produces schema v19 (file-backed and :memory:)") {
                                          "idx_parameter_declared_type",
                                          "idx_parameter_adjusted_type",
                                          "idx_symbol_type_type",
+                                         "idx_translation_unit_config_hash",
+                                         "idx_file_config_config",
+                                         "idx_fact_applicability_config",
                                          "idx_include_config_digest",
                                          "idx_include_edge_dst",
                                          "idx_include_edge_config",
@@ -757,4 +764,181 @@ TEST_CASE("delete_component removes files (cascade) and symbols (explicit)") {
   REQUIRE(db.get_file("/repo/b/b.c").has_value());
   CHECK_MESSAGE(db.lookup_symbol("c:@F@b_fn").has_value(),
                 "bystander component B untouched");
+}
+
+TEST_CASE(
+    "translation-unit configurations are canonical and multi-applicable") {
+  cidx::Storage db(":memory:");
+  const int64_t component = db.add_component("configs", "/repo/configs");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t tu = db.add_file(directory, "main.cpp");
+  const int64_t header = db.add_file(directory, "shared.hpp");
+
+  cidx::TranslationUnitConfig first;
+  first.driver = "clang++";
+  first.language = "c++";
+  first.arguments = {"-std=c++23", "-DFAST=1", "main.cpp"};
+  first.diagnostics_policy = "error-limit=0";
+  const int64_t first_id = db.add_translation_unit_config(first);
+  cidx::TranslationUnitConfig repeat = first;
+  CHECK(db.add_translation_unit_config(repeat) == first_id);
+  const auto stored = db.translation_unit_config_by_id(first_id);
+  REQUIRE(stored.has_value());
+  CHECK(stored->descriptor_json ==
+        "[\"clang++\",\"\",\"c++\",\"c++23\",\"\",[],\"\",\"\",[],[\"-DFAST="
+        "1\"],[],[],\"error-"
+        "limit=0\",[\"-std=c++23\",\"-DFAST=1\",\"main.cpp\"]]");
+
+  cidx::IncludeConfig include;
+  include.tu_file_id = tu;
+  include.digest = "legacy-digest-1";
+  include.driver = first.driver;
+  include.lang_mode = first.language;
+  include.arguments = first.arguments;
+  const int64_t include_id = db.add_include_config(include);
+  REQUIRE(db.include_config_by_id(include_id).has_value());
+  const auto configs = db.translation_unit_configs_for_file(tu);
+  REQUIRE(configs.size() == 1);
+  CHECK(configs.front().descriptor_json == stored->descriptor_json);
+  db.set_file_indexed(tu, true);
+  db.add_file(directory, "main.cpp", std::nullopt, std::nullopt,
+              std::vector<std::string>{"-DCHANGED"}, std::string("clang++"));
+  REQUIRE(db.get_file_by_id(tu).has_value());
+  CHECK_FALSE(db.get_file_by_id(tu)->indexed);
+  CHECK(db.file_configs_for(tu).front().state ==
+        cidx::TranslationUnitConfigState::stale);
+
+  cidx::TranslationUnitConfig second = first;
+  second.arguments.push_back("-DDEBUG=1");
+  const int64_t second_id = db.add_translation_unit_config(second);
+  CHECK(second_id != first_id);
+  db.add_file_config({header, first_id, "header",
+                      cidx::TranslationUnitConfigState::registered,
+                      std::nullopt});
+  db.add_file_config({header, second_id, "header",
+                      cidx::TranslationUnitConfigState::ambiguous,
+                      std::string("different compile worlds")});
+  const auto applicability = db.file_configs_for(header);
+  REQUIRE(applicability.size() == 2);
+  CHECK(applicability[0].config_id == first_id);
+  CHECK(applicability[1].config_id == second_id);
+  CHECK(applicability[1].state == cidx::TranslationUnitConfigState::ambiguous);
+  const auto unknown =
+      db.invariant_include_edges(header, {first_id, second_id}, false);
+  CHECK_FALSE(unknown.coverage_complete);
+  db.add_file_config({header, second_id, "header",
+                      cidx::TranslationUnitConfigState::registered,
+                      std::nullopt});
+  const auto invariant =
+      db.invariant_include_edges(header, {first_id, second_id}, false);
+  CHECK(invariant.coverage_complete);
+  CHECK(invariant.edges.empty());
+}
+
+TEST_CASE("invariant include intersection keeps an empty first result empty") {
+  cidx::Storage db(":memory:");
+  const int64_t component = db.add_component("configs", "/repo/intersection");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t tu_empty = db.add_file(directory, "empty.cpp");
+  const int64_t tu_edge = db.add_file(directory, "edge.cpp");
+  const int64_t header = db.add_file(directory, "shared.hpp");
+
+  cidx::IncludeConfig empty_cfg{
+      .tu_file_id = tu_empty, .digest = "empty", .arguments = {"-DZERO"}};
+  cidx::IncludeConfig edge_cfg{
+      .tu_file_id = tu_edge, .digest = "edge", .arguments = {"-DONE"}};
+  const int64_t empty_include = db.add_include_config(empty_cfg);
+  const int64_t edge_include = db.add_include_config(edge_cfg);
+  const auto configs = db.translation_unit_configs_for_file(tu_empty);
+  REQUIRE(configs.size() == 1);
+  const int64_t empty_id = configs.front().id;
+  const auto other_configs = db.translation_unit_configs_for_file(tu_edge);
+  REQUIRE(other_configs.size() == 1);
+  const int64_t edge_id = other_configs.front().id;
+  db.add_file_config({header, empty_id, "header",
+                      cidx::TranslationUnitConfigState::registered,
+                      std::nullopt});
+  db.add_file_config({header, edge_id, "header",
+                      cidx::TranslationUnitConfigState::registered,
+                      std::nullopt});
+  db.add_include_edge({.src_file_id = header,
+                       .dst_path = "only-under-edge",
+                       .config_id = edge_include});
+
+  CHECK(db.invariant_include_edges(header, {empty_id, edge_id}, false)
+            .edges.empty());
+  CHECK(db.invariant_include_edges(header, {edge_id, empty_id}, false)
+            .edges.empty());
+  CHECK(db.invariant_include_edges(header, {empty_id, edge_id}, false)
+            .coverage_complete);
+  (void)empty_include;
+}
+
+TEST_CASE("descriptor golden captures every semantic dimension") {
+  cidx::Storage db(":memory:");
+  cidx::TranslationUnitConfig config;
+  config.driver = "clang++";
+  config.working_dir = ".";
+  config.language = "c++";
+  config.resource_dir = "/clang/resource";
+  config.arguments = {"-std=c++23",     "--target=x86_64-unknown-linux-gnu",
+                      "-mabi=lp64",     "-isysroot",
+                      "/sdk",           "-I",
+                      "/inc",           "-D",
+                      "FEATURE=1",      "-include",
+                      "/gen/header.hpp"};
+  const auto stored =
+      db.translation_unit_config_by_id(db.add_translation_unit_config(config));
+  REQUIRE(stored.has_value());
+  CHECK(stored->descriptor_json ==
+        "[\"clang++\",\".\",\"c++\",\"c++23\","
+        "\"x86_64-unknown-linux-gnu\",[\"-mabi=lp64\"],\"/sdk\","
+        "\"/clang/resource\",[\"/inc\"],[\"-DFEATURE=1\"],[],"
+        "[\"/gen/header.hpp\"],\"error-limit=0\",[\"-std=c++23\","
+        "\"--target=x86_64-unknown-linux-gnu\",\"-mabi=lp64\","
+        "\"-isysroot\",\"/sdk\",\"-I\",\"/inc\",\"-D\","
+        "\"FEATURE=1\",\"-include\",\"/gen/header.hpp\"]]");
+  CHECK(stored->descriptor_hash == "0e65af5d6defe83a2ea53aeac13ca9f6237c4a20");
+}
+
+TEST_CASE(
+    "retiring a TU removes obsolete header applicability only when unused") {
+  cidx::Storage db(":memory:");
+  const int64_t component = db.add_component("configs", "/repo/retire");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t first_tu = db.add_file(directory, "first.cpp");
+  const int64_t second_tu = db.add_file(directory, "second.cpp");
+  const int64_t header = db.add_file(directory, "shared.hpp");
+  cidx::IncludeConfig first{.tu_file_id = first_tu,
+                            .digest = "shared",
+                            .driver = std::nullopt,
+                            .working_dir = std::nullopt,
+                            .arguments = {},
+                            .lang_mode = std::nullopt,
+                            .resource_dir = std::nullopt};
+  cidx::IncludeConfig second{.tu_file_id = second_tu,
+                             .digest = "shared",
+                             .driver = std::nullopt,
+                             .working_dir = std::nullopt,
+                             .arguments = {},
+                             .lang_mode = std::nullopt,
+                             .resource_dir = std::nullopt};
+  db.add_include_config(first);
+  db.add_include_config(second);
+  const int64_t first_config =
+      db.translation_unit_configs_for_file(first_tu).front().id;
+  const int64_t second_config =
+      db.translation_unit_configs_for_file(second_tu).front().id;
+  db.add_file_config({header, first_config, "header",
+                      cidx::TranslationUnitConfigState::registered,
+                      std::nullopt});
+  db.add_file_config({header, second_config, "header",
+                      cidx::TranslationUnitConfigState::registered,
+                      std::nullopt});
+  db.delete_include_configs_for_tu(first_tu);
+  auto rows = db.file_configs_for(header);
+  REQUIRE(rows.size() == 1);
+  CHECK(rows.front().config_id == second_config);
+  db.delete_include_configs_for_tu(second_tu);
+  CHECK(db.file_configs_for(header).empty());
 }

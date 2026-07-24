@@ -638,6 +638,25 @@ void Storage::migrate() {
       changed = true;
     }
   }
+  // v34 -> v35: add the shared normalized configuration identity while
+  // retaining the v31 include_config columns for current API compatibility.
+  if (has_table("include_config")) {
+    const auto include_cols = table_columns("include_config");
+    if (!has_col(include_cols, "translation_unit_config_id")) {
+      db_.exec("ALTER TABLE include_config ADD COLUMN "
+               "translation_unit_config_id INTEGER REFERENCES "
+               "translation_unit_config(id) ON DELETE SET NULL");
+      changed = true;
+    }
+  }
+  if (!changed) {
+    auto st =
+        db_.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
+    if (st.step() && !st.col_text(0).empty() &&
+        std::stoi(st.col_text(0)) < kSchemaVersion) {
+      changed = true;
+    }
+  }
   if (changed) {
     auto st =
         db_.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'");

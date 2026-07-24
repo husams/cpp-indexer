@@ -31,6 +31,14 @@ public:
                           const std::vector<ParameterRecord> &params) override;
   void add_symbol_type(int64_t symbol_id, int64_t kind,
                        int64_t type_id) override;
+
+  void reset_fact_ids();
+  [[nodiscard]] const std::vector<int64_t> &edge_ids() const {
+    return edge_ids_;
+  }
+  [[nodiscard]] const std::vector<int64_t> &definition_ids() const {
+    return definition_ids_;
+  }
   void delete_edges_for_file(int64_t file_id) override;
   void delete_definitions_for_file(int64_t file_id) override;
   int64_t
@@ -50,6 +58,8 @@ public:
 
 private:
   cidx::Storage &db_;
+  std::vector<int64_t> edge_ids_;
+  std::vector<int64_t> definition_ids_;
 };
 
 } // namespace cidx::ast

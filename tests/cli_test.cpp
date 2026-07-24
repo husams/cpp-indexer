@@ -2111,9 +2111,74 @@ TEST_SUITE("clang") {
     CHECK(hits[0].is_definition);
   }
 
+  TEST_CASE("index: conditional header facts are configuration-qualified") {
+    const std::string t = make_temp_dir();
+    const std::string proj = t + "/proj";
+    makedirs(proj);
+    write_file(proj + "/conditional.hpp",
+               "#pragma once\n"
+               "#ifdef ONLY_A\nint only_a() { return 1; }\n#endif\n"
+               "#ifdef ONLY_B\nint only_b() { return 2; }\n#endif\n");
+    write_file(proj + "/a.cpp", "#include \"conditional.hpp\"\n"
+                                "int a() { return only_a(); }\n");
+    write_file(proj + "/b.cpp", "#include \"conditional.hpp\"\n"
+                                "int b() { return only_b(); }\n");
+    write_file(proj + "/compile_commands.json",
+               "[{\"directory\": \"" + proj +
+                   "\", \"command\": \"c++ -I. -DONLY_A -c a.cpp -o a.o\", "
+                   "\"file\": \"a.cpp\"}, {\"directory\": \"" +
+                   proj +
+                   "\", \"command\": \"c++ -I. -DONLY_B -c b.cpp -o b.o\", "
+                   "\"file\": \"b.cpp\"}]\n");
+    REQUIRE(run_cli({"import", "--db", proj}, t).rc == 0);
+    cidx::Logger log;
+    log.set_file(t + "/cidx.log");
+    REQUIRE(run_cli({"index"}, t, &log).rc == 0);
+
+    Storage db(t + "/index.db");
+    const auto header = db.get_file(proj + "/conditional.hpp");
+    REQUIRE(header.has_value());
+    std::vector<int64_t> configs;
+    for (const auto &row : db.file_configs_for(header->id)) {
+      if (row.role == "header" &&
+          row.state == cidx::TranslationUnitConfigState::registered) {
+        configs.push_back(row.config_id);
+      }
+    }
+    REQUIRE(configs.size() == 2);
+    std::ranges::sort(configs);
+
+    const bool first_is_a =
+        db.search_symbols("only_a", std::nullopt, configs[0]).size() == 1;
+    const bool first_is_b =
+        db.search_symbols("only_b", std::nullopt, configs[0]).size() == 1;
+    CHECK(first_is_a != first_is_b);
+    const auto all =
+        db.symbols_for_config(header->id, configs, cidx::FactCoverage::all);
+    REQUIRE(all.coverage_complete);
+    CHECK(all.symbols.size() >= 2);
+    const auto invariant = db.symbols_for_config(header->id, configs,
+                                                 cidx::FactCoverage::invariant);
+    CHECK(invariant.coverage_complete);
+    CHECK(invariant.symbols.empty());
+    const auto definitions_a = db.fact_ids_for_config(
+        header->id, "definition", {configs[0]}, cidx::FactCoverage::one);
+    const auto definitions_b = db.fact_ids_for_config(
+        header->id, "definition", {configs[1]}, cidx::FactCoverage::one);
+    CHECK(definitions_a.coverage_complete);
+    CHECK(definitions_b.coverage_complete);
+    REQUIRE(definitions_a.ids.size() == 1);
+    REQUIRE(definitions_b.ids.size() == 1);
+    CHECK(definitions_a.ids != definitions_b.ids);
+    CHECK_FALSE(db.symbols_for_config(header->id, {configs[0], -1},
+                                      cidx::FactCoverage::one)
+                    .coverage_complete);
+  }
+
 } // TEST_SUITE("clang")
 
-// -- analyze (Souffle Datalog) -------------------------------------------------
+// -- analyze (Souffle Datalog)
+// -------------------------------------------------
 
 namespace {
 

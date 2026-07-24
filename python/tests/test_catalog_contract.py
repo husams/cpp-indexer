@@ -140,7 +140,7 @@ def test_template_relation_metadata_matches_graph_direction():
 def _meta_db(path: Path, catalog_hash: str | None) -> None:
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-    conn.execute("INSERT INTO meta VALUES ('schema_version', '34')")
+    conn.execute("INSERT INTO meta VALUES ('schema_version', '36')")
     if catalog_hash is not None:
         conn.execute("INSERT INTO meta VALUES ('catalog_hash', ?)", (catalog_hash,))
     conn.commit()

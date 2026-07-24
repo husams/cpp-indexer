@@ -234,6 +234,24 @@ TEST_CASE("astgraph: artifact key changes for semantic inputs") {
                                      full));
 }
 
+TEST_CASE("astgraph: consumer records the indexed descriptor identity") {
+  Dumped out;
+  out.dir = make_temp_dir();
+  const std::string source = out.dir + "/consumer.cpp";
+  write_file(source, "int consumer_identity() { return 7; }\n");
+  out.db_path = out.dir + "/consumer.db";
+  ag::Options opts;
+  opts.descriptor_hash = "1f8ff5fb49ce63a5b9012f4f50a371045c7b9fc2";
+  out.stats = ag::dump_tu(source, {"-std=c++23", "-DREAL_CONSUMER=1"},
+                          std::nullopt, out.db_path, opts);
+
+  SqliteDb db(out.db_path);
+  CHECK(q_text(db, "SELECT value FROM meta WHERE key='descriptor_hash'") ==
+        *opts.descriptor_hash);
+  CHECK(q_text(db, "SELECT value FROM meta WHERE key='args'") ==
+        "[\"-std=c++23\",\"-DREAL_CONSUMER=1\"]");
+}
+
 TEST_CASE("astgraph: --main-only prunes header subtrees, keeps referenced "
           "decls shallow") {
   const std::string dir = make_temp_dir();

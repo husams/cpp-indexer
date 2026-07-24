@@ -1,6 +1,7 @@
 #include "ast/include_facts.hpp"
 
 #include "storage/storage.hpp"
+#include "util/errors.hpp"
 #include "util/hashing.hpp"
 #include "util/pathutil.hpp"
 
@@ -18,6 +19,15 @@
 namespace cidx::ast {
 
 namespace {
+
+void record_header_applicability(cidx::Storage &db,
+                                 const std::optional<int64_t> &file_id,
+                                 int64_t config_id) {
+  if (file_id) {
+    db.add_file_config(cidx::FileConfigApplicability{
+        .file_id = *file_id, .config_id = config_id, .role = "header"});
+  }
+}
 
 // The enclosing #if/#elif/#else stack at a directive. Clang only lexes taken
 // branches, so an include inside a false branch produces NO fact for this
@@ -67,8 +77,10 @@ private:
                                 clang::SourceLocation loc) {
     const clang::FileID fid = sm.getFileID(sm.getExpansionLoc(loc));
     const clang::OptionalFileEntryRef fe = sm.getFileEntryRefForID(fid);
-    const std::string path = fe ? fe->getName().str() : std::string("<builtin>");
-    return path + "@" + std::to_string(sm.getFileOffset(sm.getExpansionLoc(loc)));
+    const std::string path =
+        fe ? fe->getName().str() : std::string("<builtin>");
+    return path + "@" +
+           std::to_string(sm.getFileOffset(sm.getExpansionLoc(loc)));
   }
 
   std::vector<Region> stack_;
@@ -141,16 +153,13 @@ public:
   IncludeFactRecorder(clang::Preprocessor &pp, IncludeFacts &out)
       : sm_(pp.getSourceManager()), out_(out) {}
 
-  void InclusionDirective(clang::SourceLocation hash_loc,
-                          const clang::Token &include_tok,
-                          llvm::StringRef file_name, bool is_angled,
-                          clang::CharSourceRange filename_range,
-                          clang::OptionalFileEntryRef file,
-                          llvm::StringRef /*search_path*/,
-                          llvm::StringRef /*relative_path*/,
-                          const clang::Module * /*suggested_module*/,
-                          bool /*module_imported*/,
-                          clang::SrcMgr::CharacteristicKind file_type) override {
+  void InclusionDirective(
+      clang::SourceLocation hash_loc, const clang::Token &include_tok,
+      llvm::StringRef file_name, bool is_angled,
+      clang::CharSourceRange filename_range, clang::OptionalFileEntryRef file,
+      llvm::StringRef /*search_path*/, llvm::StringRef /*relative_path*/,
+      const clang::Module * /*suggested_module*/, bool /*module_imported*/,
+      clang::SrcMgr::CharacteristicKind file_type) override {
     const clang::SourceLocation loc = sm_.getExpansionLoc(hash_loc);
     const clang::FileID fid = sm_.getFileID(loc);
     const clang::OptionalFileEntryRef src = sm_.getFileEntryRefForID(fid);
@@ -352,7 +361,8 @@ std::string include_config_digest(const IncludeConfig &c) {
   return cidx::sha1_hex(data);
 }
 
-void register_include_callbacks(clang::CompilerInstance &ci, IncludeFacts &out) {
+void register_include_callbacks(clang::CompilerInstance &ci,
+                                IncludeFacts &out) {
   ci.getPreprocessor().addPPCallbacks(
       std::make_unique<IncludeFactRecorder>(ci.getPreprocessor(), out));
 }
@@ -362,8 +372,8 @@ void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
   auto txn = db.transaction();
 
   // Retire every configuration previously recorded for THIS TU, then write the
-  // current one. A TU is imported once per file, so exactly one configuration is
-  // current; a changed compile command produces a new digest, and the old
+  // current one. A TU is imported once per file, so exactly one configuration
+  // is current; a changed compile command produces a new digest, and the old
   // config -- with its edges, sites, and macro uses -- would otherwise linger
   // indefinitely and feed a stale build world into validation. The delete is
   // scoped to this tu_file_id (cascading to its own rows only), so a shared
@@ -372,6 +382,11 @@ void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
   cfg.digest = include_config_digest(cfg);
   db.delete_include_configs_for_tu(cfg.tu_file_id);
   const int64_t config_id = db.add_include_config(cfg);
+  const auto normalized = db.include_config_by_id(config_id);
+  if (!normalized || !normalized->translation_unit_config_id) {
+    throw CidxError("include config has no normalized identity");
+  }
+  const int64_t normalized_id = *normalized->translation_unit_config_id;
 
   // Resolve each source file to its row once. A directive in a file no
   // component owns has nothing to hang off (and could never be edited), so it
@@ -419,11 +434,13 @@ void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
     if (!sid) {
       continue;
     }
+    record_header_applicability(db, sid, normalized_id);
 
     IncludeEdge e;
     e.src_file_id = *sid;
     e.dst_path = f.resolved ? cidx::pathutil::abspath(f.dst_path) : f.spelling;
     e.dst_file_id = f.resolved ? dst_id_for(f.dst_path) : std::nullopt;
+    record_header_applicability(db, e.dst_file_id, normalized_id);
     e.config_id = config_id;
     e.is_system = f.is_system;
     e.count = 1;

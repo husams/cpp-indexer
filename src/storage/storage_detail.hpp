@@ -327,12 +327,13 @@ inline IncludeConfig include_config_from(const SqliteStmt &st) {
   }
   c.lang_mode = opt_text(st, 6);
   c.resource_dir = opt_text(st, 7);
+  c.translation_unit_config_id = opt_int64(st, 8);
   return c;
 }
 
 constexpr const char *kIncludeConfigCols =
     "id, tu_file_id, digest, driver, working_dir, arguments, lang_mode, "
-    "resource_dir";
+    "resource_dir, translation_unit_config_id";
 
 // Decode one include_edge row: id, src_file_id, dst_file_id, dst_path,
 // config_id, is_system, is_generated, count

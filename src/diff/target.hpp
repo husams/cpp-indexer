@@ -24,8 +24,8 @@ struct SideSpec {
 // (config_delta vocabulary). Spaced and glued spellings normalize to one
 // canonical token so the two sides compare textually.
 struct OptionClasses {
-  std::optional<std::string> standard; // -std= value, last wins
-  std::optional<std::string> target;   // -target/--target value, last wins
+  std::optional<std::string> standard;  // -std= value, last wins
+  std::optional<std::string> target;    // -target/--target value, last wins
   std::vector<std::string> definitions; // -D/-U, glued ("-DX=1", "-UX")
   std::vector<std::string> includes;    // -I/-isystem/-iquote/-F, in option
                                         // order ("<flag> <dir>")
@@ -42,6 +42,7 @@ struct ParseConfig {
   std::string parse_file;        // file actually parsed (tu when set)
   bool restrict_to_file = false; // header via TU: only decls spelled in file
   std::optional<std::string> driver;
+  std::optional<std::string> config_hash;
   std::vector<std::string> args; // sanitize + alias-resolved stored options
   OptionClasses classes;         // classify_options(args)
 };
