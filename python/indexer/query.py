@@ -1448,7 +1448,7 @@ class GraphQuery:
             "SELECT edge_id, file_id, line, col, conditional, args_sig, "
             "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
             "       recv_type_is_value "
-            f"FROM edge_site WHERE edge_id IN ({q}) "
+            f"FROM edge_site_read WHERE edge_id IN ({q}) "
             "ORDER BY edge_id, file_id, line, col",
             list(edge_ids),
         ):
@@ -1512,7 +1512,7 @@ class GraphQuery:
             "SELECT file_id, line, col, conditional, args_sig, "
             "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
             "       recv_type_is_value "
-            "FROM edge_site WHERE edge_id = ? ORDER BY file_id, line, col LIMIT ?",
+            "FROM edge_site_read WHERE edge_id = ? ORDER BY file_id, line, col LIMIT ?",
             (eid, limit),
         ):
             p = files.get(r["file_id"], (None, None))[0] if r["file_id"] else None
@@ -2569,7 +2569,7 @@ class GraphQuery:
         of this edge, ordered by (file_id, line, col, position)."""
         rows = self._c.execute(
             "SELECT position, src_kind, type_usr, decl_usr, callee_usr, type_is_value "
-            "FROM call_arg WHERE edge_id = ? "
+            "FROM call_arg_read WHERE edge_id = ? "
             "ORDER BY file_id, line, col, position",
             (edge_id,),
         ).fetchall()
@@ -2594,7 +2594,7 @@ class GraphQuery:
         position order."""
         rows = self._c.execute(
             "SELECT position, src_kind, type_usr, decl_usr, callee_usr, type_is_value "
-            "FROM call_arg WHERE edge_id = ? AND file_id = ? "
+            "FROM call_arg_read WHERE edge_id = ? AND file_id = ? "
             "AND line = ? AND col = ? ORDER BY position",
             (edge_id, file_id, line, col),
         ).fetchall()
@@ -2639,7 +2639,7 @@ class GraphQuery:
             "SELECT file_id, line, col, conditional, args_sig, "
             "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
             "       recv_type_is_value "
-            "FROM edge_site WHERE edge_id = ? AND file_id = ? "
+            "FROM edge_site_read WHERE edge_id = ? AND file_id = ? "
             "AND line = ? AND col = ?",
             (edge_id, file_id, line, col),
         ).fetchone()
@@ -2673,7 +2673,7 @@ class GraphQuery:
             "SELECT edge_id, file_id, line, col, conditional, args_sig, "
             "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos,"
             "       recv_type_is_value "
-            f"FROM edge_site WHERE edge_id IN ({q}) "
+            f"FROM edge_site_read WHERE edge_id IN ({q}) "
             "ORDER BY edge_id, file_id, line, col",
             list(edge_ids),
         ):

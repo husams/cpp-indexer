@@ -162,6 +162,12 @@ def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
     ).fetchone() is not None
 
 
+def _view_exists(connection: sqlite3.Connection, name: str) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='view' AND name=?", (name,)
+    ).fetchone() is not None
+
+
 def semantic_digest(path: Path, *, chunk_size: int = 512) -> str:
     """Hash the complete v34 semantic contract with stable keys, streaming rows."""
     digest = hashlib.sha256()
@@ -170,6 +176,12 @@ def semantic_digest(path: Path, *, chunk_size: int = 512) -> str:
         for table, query in (*SEMANTIC_QUERIES.items(), *CATALOG_QUERIES.items()):
             if not _table_exists(connection, table):
                 continue
+            # HSE-77 keeps the old semantic contract lossless through these
+            # compatibility views after raw hot-row text is normalized.
+            if table == "edge_site" and _view_exists(connection, "edge_site_read"):
+                query = query.replace("FROM edge_site es", "FROM edge_site_read es")
+            elif table == "call_arg" and _view_exists(connection, "call_arg_read"):
+                query = query.replace("FROM call_arg ca", "FROM call_arg_read ca")
             digest.update(canonical_json({"table": table}).encode("utf-8"))
             digest.update(b"\n")
             cursor = connection.execute(query)

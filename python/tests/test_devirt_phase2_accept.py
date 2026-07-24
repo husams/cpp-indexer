@@ -757,7 +757,7 @@ def test_acc10_real_parse_call_arg_extracted(chain_real_accept_cb):
     cb, db_path = chain_real_accept_cb
     row = cb.graph._c.execute(
         "SELECT ca.src_kind, ca.type_usr, ca.decl_usr "
-        "FROM call_arg ca "
+        "FROM call_arg_read ca "
         "JOIN edge e ON ca.edge_id = e.id "
         "JOIN symbol src ON e.src_id = src.id "
         "JOIN symbol dst ON e.dst_id = dst.id "
@@ -947,7 +947,7 @@ def _arg0_to_top_rank(cb, caller_spelling):
     caller_spelling()'s position-0 argument to top_rank()."""
     return cb.graph._c.execute(
         "SELECT ca.src_kind, ca.type_usr, ca.decl_usr, ca.callee_usr "
-        "FROM call_arg ca "
+        "FROM call_arg_read ca "
         "JOIN edge e ON ca.edge_id = e.id "
         "JOIN symbol src ON e.src_id = src.id "
         "JOIN symbol dst ON e.dst_id = dst.id "

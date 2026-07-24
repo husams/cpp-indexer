@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS symbol (
     linkage      TEXT,                  -- 'external' | 'internal' | 'no-linkage' | ...
     access       TEXT,                  -- C++: 'public' | 'protected' | 'private'
     parent_usr   TEXT,                  -- semantic parent (class/namespace) USR
+    parent_id    INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
     resolved     INTEGER NOT NULL DEFAULT 0,
     multi_def    INTEGER NOT NULL DEFAULT 0, -- v27: COUNT of definitions of this
                                              -- symbol (rows in `definition`), set
@@ -153,6 +154,7 @@ CREATE INDEX IF NOT EXISTS idx_symbol_spelling_nc ON symbol(spelling COLLATE NOC
 CREATE INDEX IF NOT EXISTS idx_symbol_qual_nc     ON symbol(qual_name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_symbol_file     ON symbol(file_id);
 CREATE INDEX IF NOT EXISTS idx_symbol_parent   ON symbol(parent_usr);
+CREATE INDEX IF NOT EXISTS idx_symbol_parent_id ON symbol(parent_id);
 CREATE INDEX IF NOT EXISTS idx_symbol_kind     ON symbol(kind);
 
 -- ---- v26: every declaration/reopen SITE of a symbol -------------------------
@@ -228,6 +230,25 @@ CREATE TABLE IF NOT EXISTS edge (
 CREATE INDEX IF NOT EXISTS idx_edge_src ON edge(src_id, kind);
 CREATE INDEX IF NOT EXISTS idx_edge_dst ON edge(dst_id, kind);
 
+-- v35: one lossless dictionary row for every identity that cannot resolve to a
+-- local symbol/type row. Resolved identities use the integer FK on hot rows;
+-- unresolved values remain exactly recoverable here and are never confused
+-- with NULL (absent evidence).
+CREATE TABLE IF NOT EXISTS external_identity (
+    id               INTEGER PRIMARY KEY,
+    identity_kind    INTEGER NOT NULL CHECK (identity_kind IN (1, 2, 3)),
+    identity_text    TEXT NOT NULL,
+    resolution_status INTEGER NOT NULL DEFAULT 0
+                     CHECK (resolution_status IN (0, 1)),
+    symbol_id        INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
+    type_id          INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    UNIQUE (identity_kind, identity_text)
+);
+CREATE INDEX IF NOT EXISTS idx_external_identity_symbol
+    ON external_identity(symbol_id);
+CREATE INDEX IF NOT EXISTS idx_external_identity_type
+    ON external_identity(type_id);
+
 CREATE TABLE IF NOT EXISTS edge_site (
     edge_id      INTEGER NOT NULL REFERENCES edge(id) ON DELETE CASCADE,
     file_id      INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
@@ -238,6 +259,11 @@ CREATE TABLE IF NOT EXISTS edge_site (
     recv_src_kind TEXT,
     recv_type_usr TEXT,
     recv_decl_usr TEXT,
+    recv_src_kind_id INTEGER CHECK (recv_src_kind_id IS NULL OR recv_src_kind_id IN (1,2,3,4,5,6,7,8)),
+    recv_type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    recv_decl_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
+    recv_type_identity_id INTEGER REFERENCES external_identity(id) ON DELETE SET NULL,
+    recv_decl_identity_id INTEGER REFERENCES external_identity(id) ON DELETE SET NULL,
     recv_param_pos INTEGER,
     recv_type_is_value INTEGER,          -- v11: receiver held by value (1) else 0/NULL
     PRIMARY KEY (edge_id, file_id, line, col)
@@ -272,14 +298,72 @@ CREATE TABLE IF NOT EXISTS call_arg (
     line       INTEGER NOT NULL,
     col        INTEGER NOT NULL,
     position   INTEGER NOT NULL,
-    src_kind   TEXT NOT NULL,
+    src_kind   TEXT,
     type_usr   TEXT,
     decl_usr   TEXT,
     callee_usr TEXT,
+    src_kind_id INTEGER CHECK (src_kind_id IS NULL OR src_kind_id IN (1,2,3,4,5,6,7,8)),
+    type_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    decl_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
+    callee_id INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
+    type_identity_id INTEGER REFERENCES external_identity(id) ON DELETE SET NULL,
+    decl_identity_id INTEGER REFERENCES external_identity(id) ON DELETE SET NULL,
+    callee_identity_id INTEGER REFERENCES external_identity(id) ON DELETE SET NULL,
     type_is_value INTEGER,               -- v11: arg held by value (1) else 0/NULL
     PRIMARY KEY (edge_id, file_id, line, col, position)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id);
+CREATE INDEX IF NOT EXISTS idx_edge_site_recv_type_identity
+    ON edge_site(recv_type_identity_id);
+CREATE INDEX IF NOT EXISTS idx_edge_site_recv_decl_identity
+    ON edge_site(recv_decl_identity_id);
+CREATE INDEX IF NOT EXISTS idx_call_arg_type_identity
+    ON call_arg(type_identity_id);
+CREATE INDEX IF NOT EXISTS idx_call_arg_decl_identity
+    ON call_arg(decl_identity_id);
+CREATE INDEX IF NOT EXISTS idx_call_arg_callee_identity
+    ON call_arg(callee_identity_id);
+
+-- Compatibility surfaces reconstruct stable USR/type-key identities for
+-- readers while the physical occurrence rows carry only compact IDs.
+CREATE VIEW IF NOT EXISTS edge_site_read AS
+SELECT es.edge_id, es.file_id, es.line, es.col, es.conditional, es.args_sig,
+       COALESCE(es.recv_src_kind,
+                CASE es.recv_src_kind_id
+                  WHEN 1 THEN 'literal' WHEN 2 THEN 'local'
+                  WHEN 3 THEN 'construct' WHEN 4 THEN 'member'
+                  WHEN 5 THEN 'global' WHEN 6 THEN 'call_result'
+                  WHEN 7 THEN 'this' WHEN 8 THEN 'unknown' END)
+           AS recv_src_kind,
+       COALESCE(es.recv_type_usr, tn.decl_usr, eti.identity_text) AS recv_type_usr,
+       COALESCE(es.recv_decl_usr, ds.usr, edi.identity_text) AS recv_decl_usr,
+       es.recv_param_pos, es.recv_type_is_value
+FROM edge_site es
+LEFT JOIN type_node tn ON tn.id = es.recv_type_id
+LEFT JOIN symbol ds ON ds.id = es.recv_decl_id
+LEFT JOIN external_identity eti ON eti.id = es.recv_type_identity_id
+LEFT JOIN external_identity edi ON edi.id = es.recv_decl_identity_id;
+
+CREATE VIEW IF NOT EXISTS call_arg_read AS
+SELECT ca.edge_id, ca.file_id, ca.line, ca.col, ca.position,
+       COALESCE(ca.src_kind,
+                CASE ca.src_kind_id
+                  WHEN 1 THEN 'literal' WHEN 2 THEN 'local'
+                  WHEN 3 THEN 'construct' WHEN 4 THEN 'member'
+                  WHEN 5 THEN 'global' WHEN 6 THEN 'call_result'
+                  WHEN 7 THEN 'this' WHEN 8 THEN 'unknown' END)
+           AS src_kind,
+       COALESCE(ca.type_usr, tn.decl_usr, eti.identity_text) AS type_usr,
+       COALESCE(ca.decl_usr, ds.usr, edi.identity_text) AS decl_usr,
+       COALESCE(ca.callee_usr, cs.usr, eci.identity_text) AS callee_usr,
+       ca.type_is_value
+FROM call_arg ca
+LEFT JOIN type_node tn ON tn.id = ca.type_id
+LEFT JOIN symbol ds ON ds.id = ca.decl_id
+LEFT JOIN symbol cs ON cs.id = ca.callee_id
+LEFT JOIN external_identity eti ON eti.id = ca.type_identity_id
+LEFT JOIN external_identity edi ON edi.id = ca.decl_identity_id
+LEFT JOIN external_identity eci ON eci.id = ca.callee_identity_id;
 
 CREATE TABLE IF NOT EXISTS label (
     id   INTEGER PRIMARY KEY,
@@ -467,9 +551,11 @@ CREATE TABLE IF NOT EXISTS type_node (
     is_volatile  INTEGER NOT NULL DEFAULT 0,
     is_restrict  INTEGER NOT NULL DEFAULT 0,
     decl_usr     TEXT,
+    decl_id      INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
     canonical_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_type_node_decl_usr ON type_node(decl_usr);
+CREATE INDEX IF NOT EXISTS idx_type_node_decl_id ON type_node(decl_id);
 CREATE INDEX IF NOT EXISTS idx_type_node_canonical ON type_node(canonical_id);
 
 -- Structural relations BETWEEN type nodes: pointee(1) pointer/reference ->
@@ -693,7 +779,7 @@ CREATE TABLE IF NOT EXISTS include_macro_use (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_include_macro_use_path ON include_macro_use(def_path);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '36');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '37');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest

@@ -25,6 +25,14 @@ namespace cidx {
 using namespace detail;
 
 int64_t Storage::intern_type_node(const TypeNode &n) {
+  std::optional<int64_t> decl_id;
+  if (n.decl_usr && !n.decl_usr->empty()) {
+    auto decl = db_.prepare("SELECT id FROM symbol WHERE usr = ? LIMIT 1");
+    decl.bind(1, std::string_view(*n.decl_usr));
+    if (decl.step()) {
+      decl_id = decl.col_int64(0);
+    }
+  }
   // Interned dictionary row keyed by type_key. Every attribute EXCEPT
   // canonical_id is derived from the key (kind, qualifier flags and decl_usr
   // are structural; spelling keeps the FIRST writer's form, since a key
@@ -38,9 +46,10 @@ int64_t Storage::intern_type_node(const TypeNode &n) {
     auto ins = db_.prepare(
         "INSERT INTO type_node "
         "(type_key, spelling, kind, is_const, is_volatile, is_restrict, "
-        " decl_usr, canonical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        " decl_usr, decl_id, canonical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(type_key) DO UPDATE SET "
-        "canonical_id = excluded.canonical_id");
+        "canonical_id = excluded.canonical_id, "
+        "decl_id = COALESCE(excluded.decl_id, type_node.decl_id)");
     ins.bind(1, std::string_view(n.type_key));
     ins.bind(2, std::string_view(n.spelling));
     ins.bind(3, n.kind);
@@ -48,7 +57,8 @@ int64_t Storage::intern_type_node(const TypeNode &n) {
     ins.bind(5, static_cast<int64_t>(n.is_volatile ? 1 : 0));
     ins.bind(6, static_cast<int64_t>(n.is_restrict ? 1 : 0));
     bind_opt(ins, 7, n.decl_usr);
-    bind_opt(ins, 8, n.canonical_id);
+    bind_opt(ins, 8, decl_id);
+    bind_opt(ins, 9, n.canonical_id);
     ins.step_done();
   }
   auto sel = db_.prepare("SELECT id FROM type_node WHERE type_key = ?");
@@ -56,7 +66,11 @@ int64_t Storage::intern_type_node(const TypeNode &n) {
   if (!sel.step()) {
     throw StorageError("type_node intern failed for key " + n.type_key);
   }
-  return sel.col_int64(0);
+  const int64_t type_id = sel.col_int64(0);
+  if (n.decl_usr.has_value()) {
+    reconcile_type_identity(type_id, *n.decl_usr);
+  }
+  return type_id;
 }
 
 std::optional<TypeNode> Storage::type_node_by_id(int64_t type_id) {

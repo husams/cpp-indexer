@@ -27,7 +27,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 36;
+constexpr int kSchemaVersion = 37;
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -676,7 +676,11 @@ public:
 private:
   friend class Transaction;
 
-  void migrate();                       // column-presence detection, §4.1
+  void migrate(); // column-presence detection, §4.1
+  void
+  reconcile_external_identities(); // resolve evidence after local rows arrive
+  void reconcile_symbol_identity(int64_t symbol_id, std::string_view usr);
+  void reconcile_type_identity(int64_t type_id, std::string_view decl_usr);
   void migrate_symbol_kind_to_int();    // v15 -> v16: rebuild symbol, kind->int
   void migrate_component_repo_unique(); // v23 -> v24: path UNIQUE per repo
   // v24: resolved absolute path of a repository's active clone, or nullopt when

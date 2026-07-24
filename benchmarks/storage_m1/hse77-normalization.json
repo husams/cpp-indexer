@@ -1,0 +1,83 @@
+{
+  "before_after": {
+    "compatibility_query_ms": {
+      "median": 0.4948750138282776,
+      "samples": [
+        0.568958988878876,
+        0.4872910212725401,
+        0.4855000297538936,
+        0.4948750138282776,
+        0.5510419723577797
+      ]
+    },
+    "legacy": {
+      "objects": {
+        "call_arg": 770048,
+        "idx_call_arg_callee_usr": 397312,
+        "idx_call_arg_decl_usr": 356352,
+        "idx_call_arg_type_usr": 356352,
+        "sqlite_schema": 4096
+      },
+      "write_rows_per_s_median": 414717.6407660609
+    },
+    "migration": {
+      "objects": {
+        "call_arg": 364544,
+        "external_identity": 61440,
+        "idx_call_arg_callee_identity": 221184,
+        "idx_call_arg_decl_identity": 221184,
+        "idx_call_arg_type_identity": 221184,
+        "sqlite_autoindex_external_identity_1": 65536,
+        "sqlite_schema": 4096
+      },
+      "rows_per_s": 231506.37915901394,
+      "seconds": 0.08639070799108595
+    },
+    "normalized": {
+      "objects": {
+        "call_arg": 364544,
+        "external_identity": 61440,
+        "idx_call_arg_callee_identity": 225280,
+        "idx_call_arg_decl_identity": 225280,
+        "idx_call_arg_type_identity": 221184,
+        "sqlite_autoindex_external_identity_1": 65536,
+        "sqlite_schema": 4096
+      },
+      "write_rows_per_s_median": 201859.03700121946
+    }
+  },
+  "benchmark": "storage-m1/hse77-normalization-v1",
+  "hot_cold_decision": {
+    "decision": "retain symbol attributes in one hot table",
+    "derived": {
+      "meets_latency_target": false,
+      "split_byte_overhead_ratio": 0.07505518763796903,
+      "split_latency_improvement_ratio": -0.07663589367914736,
+      "within_byte_budget": false
+    },
+    "measurements": {
+      "split": {
+        "bytes": 1994752,
+        "lookup_ms_median": 3.9652499835938215
+      },
+      "unsplit": {
+        "bytes": 1855488,
+        "lookup_ms_median": 3.6829999880865216
+      }
+    },
+    "reason": "split byte overhead is 7.5%, above the 0% budget; split lookup latency improvement is -7.7%, below the 5% target",
+    "thresholds": {
+      "max_split_byte_overhead_ratio": 0.0,
+      "min_split_latency_improvement_ratio": 0.05
+    }
+  },
+  "method": {
+    "command": "PYTHONPATH=. python3 benchmarks/storage_m1/hse77_normalization.py --output benchmarks/storage_m1/hse77-normalization.json",
+    "compatibility_rows": 500,
+    "journal_mode": "DELETE",
+    "repetitions": 5,
+    "rows": 20000,
+    "sqlite": "3.53.3",
+    "synchronous": "FULL"
+  }
+}
