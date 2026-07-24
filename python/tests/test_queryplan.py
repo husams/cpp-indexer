@@ -461,19 +461,21 @@ def test_template_defaults_expose_logical_evidence():
 
 
 def _seed_reverse_typed_graph(
-    db, component_path, repo_name="repo", caller_suffix="shared"
+    db, component_path, repo_name="repo", caller_suffix="shared", grouped=True
 ):
-    repo = db.add_repository(
-        repo_name, remote_url=f"https://example.test/{repo_name}.git"
-    )
+    if grouped:
+        repo = db.add_repository(
+            repo_name, remote_url=f"https://example.test/{repo_name}.git"
+        )
     component = db.add_component("project", component_path)
-    db.set_component_repository(component, repo)
-    db._conn.execute(
-        "UPDATE component SET path = ? WHERE id = ?", ("src", component)
-    )
-    db._conn.commit()
-    directory = db.add_directory(component, "include")
-    file_id = db.add_file(directory, "unit.cpp")
+    if grouped:
+        db.set_component_repository(component, repo)
+        db._conn.execute(
+            "UPDATE component SET path = ? WHERE id = ?", ("src", component)
+        )
+        db._conn.commit()
+    directory = db.add_directory(component, "include" if grouped else "src")
+    file_id = db.add_file(directory, "unit.cpp" if grouped else "same.cpp")
     caller = db.add_symbol(
         _make_sym(f"USR::{caller_suffix}::caller", "caller")
     )
@@ -490,7 +492,7 @@ def _seed_reverse_typed_graph(
 
 def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable():
     first = Storage(":memory:")
-    _seed_reverse_typed_graph(first, "/worktree-a")
+    _seed_reverse_typed_graph(first, "/worktree-a", grouped=False)
     executor = Executor(first)
 
     reverse_evidence = executor.run(
@@ -507,7 +509,7 @@ def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable(
     assert reverse_occurrence.scalar == 1
 
     second = Storage(":memory:")
-    _seed_reverse_typed_graph(second, "/different-worktree")
+    _seed_reverse_typed_graph(second, "/different-worktree", grouped=False)
     first_evidence = executor.run(
         (start(codebase()) | view("evidence") | nodes()
          | select(["identity_key"])).plan)
@@ -541,3 +543,26 @@ def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable(
     assert len(collision_arguments.rows) == 2
     assert len({row[0] for row in collision_arguments.rows}) == 2
     assert len({row[1] for row in collision_arguments.rows}) == 2
+
+    ungrouped = Storage(":memory:")
+    _seed_reverse_typed_graph(
+        ungrouped, "/repo/A", caller_suffix="ungrouped-a", grouped=False
+    )
+    _seed_reverse_typed_graph(
+        ungrouped, "/repo/B", caller_suffix="ungrouped-b", grouped=False
+    )
+    ungrouped_executor = Executor(ungrouped)
+    ungrouped_evidence = ungrouped_executor.run(
+        (start(codebase()) | view("evidence") | nodes()
+         | select(["id", "identity_key"])).plan
+    )
+    ungrouped_arguments = ungrouped_executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | select(["id", "identity_key"])).plan
+    )
+    assert len(ungrouped_evidence.rows) == 2
+    assert len({row[0] for row in ungrouped_evidence.rows}) == 2
+    assert len({row[1] for row in ungrouped_evidence.rows}) == 2
+    assert len(ungrouped_arguments.rows) == 2
+    assert len({row[0] for row in ungrouped_arguments.rows}) == 2
+    assert len({row[1] for row in ungrouped_arguments.rows}) == 2

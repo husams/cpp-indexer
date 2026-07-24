@@ -37,6 +37,12 @@ __all__ = [
     "extension_relation_catalog", "extension_relation_metadata",
 ]
 
+
+def _portable_ungrouped_component_suffix(path: str) -> str:
+    """Return the worktree-independent suffix of an absolute legacy path."""
+    parts = [part for part in os.path.normpath(path).split(os.sep) if part]
+    return os.sep.join(parts[1:])
+
 # ---- Budgets (docs/query-plan.md "Execution semantics") ----------------------
 
 TRAVERSE_NODE_BUDGET = 10000
@@ -991,10 +997,14 @@ class Executor:
         ).fetchone()
         if row is None:
             return f"missing-file:{file_id}"
-        component_path = row[1] if row[1] and not os.path.isabs(row[1]) else ""
         owner = (f"remote:{row[5]}" if row[5] else
                  f"repo:{row[4]}" if row[4] else f"universe:{row[6] or 'legacy'}")
-        component = f"{row[0]}\x1f{component_path}"
+        if os.path.isabs(row[1]):
+            component = (
+                "ungrouped:" + _portable_ungrouped_component_suffix(row[1])
+            )
+        else:
+            component = f"grouped:{row[0]}\x1f{row[1]}"
         relative = "/".join(part.strip("/") for part in (row[2], row[3]) if part)
         return "file:" + "".join(
             f"{len(value.encode('utf-8'))}:{value}"

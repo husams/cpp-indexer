@@ -701,21 +701,28 @@ TEST_CASE(
     "query_plan: reverse typed relations and file identities are portable") {
   const auto seed = [](Storage &db, std::string_view component_path,
                        std::string_view repository_name,
-                       std::string_view symbol_suffix) {
-    const int64_t repository_id =
-        db.add_repository(std::string(repository_name), "repo",
-                          std::string("https://example.test/") +
-                              std::string(repository_name) + ".git");
+                       std::string_view symbol_suffix, bool grouped = true) {
+    int64_t repository_id = 0;
+    if (grouped) {
+      repository_id =
+          db.add_repository(std::string(repository_name), "repo",
+                            std::string("https://example.test/") +
+                                std::string(repository_name) + ".git");
+    }
     const int64_t component_id =
         db.add_component("project", std::string(component_path));
-    db.set_component_repository(component_id, repository_id);
-    auto update =
-        db.raw_db().prepare("UPDATE component SET path = ? WHERE id = ?");
-    update.bind(1, std::string_view{"src"});
-    update.bind(2, component_id);
-    update.step_done();
-    const int64_t directory_id = db.add_directory(component_id, "include");
-    const int64_t file_id = db.add_file(directory_id, "unit.cpp");
+    if (grouped) {
+      db.set_component_repository(component_id, repository_id);
+      auto update =
+          db.raw_db().prepare("UPDATE component SET path = ? WHERE id = ?");
+      update.bind(1, std::string_view{"src"});
+      update.bind(2, component_id);
+      update.step_done();
+    }
+    const int64_t directory_id =
+        db.add_directory(component_id, grouped ? "include" : "src");
+    const int64_t file_id =
+        db.add_file(directory_id, grouped ? "unit.cpp" : "same.cpp");
     const std::string caller_usr =
         "USR::" + std::string(symbol_suffix) + "::caller";
     const std::string callee_usr =
@@ -743,7 +750,7 @@ TEST_CASE(
   };
 
   Storage first(":memory:");
-  seed(first, "/worktree-a", "repo", "shared");
+  seed(first, "/worktree-a", "", "shared", false);
   Executor first_executor(first);
   const auto reverse_evidence =
       first_executor.run((start(codebase()) | view(View::Evidence) | nodes() |
@@ -762,7 +769,7 @@ TEST_CASE(
   CHECK(reverse_occurrence.scalar == 1);
 
   Storage second(":memory:");
-  seed(second, "/different-worktree", "repo", "shared");
+  seed(second, "/different-worktree", "", "shared", false);
   Executor second_executor(second);
   const auto first_evidence =
       first_executor.run((start(codebase()) | view(View::Evidence) | nodes() |
@@ -809,6 +816,29 @@ TEST_CASE(
         std::get<int64_t>(collision_arguments.rows[1][0]));
   CHECK(std::get<std::string>(collision_arguments.rows[0][1]) !=
         std::get<std::string>(collision_arguments.rows[1][1]));
+
+  Storage ungrouped(":memory:");
+  seed(ungrouped, "/repo/A", "", "ungrouped-a", false);
+  seed(ungrouped, "/repo/B", "", "ungrouped-b", false);
+  Executor ungrouped_executor(ungrouped);
+  const auto ungrouped_evidence =
+      ungrouped_executor.run((start(codebase()) | view(View::Evidence) |
+                              nodes() | select({"id", "identity_key"}))
+                                 .plan());
+  const auto ungrouped_arguments =
+      ungrouped_executor.run((start(codebase()) | view(View::CallArgument) |
+                              nodes() | select({"id", "identity_key"}))
+                                 .plan());
+  REQUIRE(ungrouped_evidence.rows.size() == 2);
+  CHECK(std::get<int64_t>(ungrouped_evidence.rows[0][0]) !=
+        std::get<int64_t>(ungrouped_evidence.rows[1][0]));
+  CHECK(std::get<std::string>(ungrouped_evidence.rows[0][1]) !=
+        std::get<std::string>(ungrouped_evidence.rows[1][1]));
+  REQUIRE(ungrouped_arguments.rows.size() == 2);
+  CHECK(std::get<int64_t>(ungrouped_arguments.rows[0][0]) !=
+        std::get<int64_t>(ungrouped_arguments.rows[1][0]));
+  CHECK(std::get<std::string>(ungrouped_arguments.rows[0][1]) !=
+        std::get<std::string>(ungrouped_arguments.rows[1][1]));
 }
 
 TEST_CASE("query_plan: devirtualized calls preserve the inherited receiver") {

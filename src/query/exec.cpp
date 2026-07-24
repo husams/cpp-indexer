@@ -25,6 +25,16 @@ std::string identity_segment(const std::string &value) {
   return std::to_string(value.size()) + ":" + value;
 }
 
+std::string portable_ungrouped_component_suffix(const std::string &path) {
+  const std::string normalized = pathutil::normpath(path);
+  const auto root = normalized.find_first_not_of('/');
+  if (root == std::string::npos) {
+    return {};
+  }
+  const auto separator = normalized.find('/', root);
+  return separator == std::string::npos ? "" : normalized.substr(separator + 1);
+}
+
 json_out::Value index_identity_json(const IndexIdentity &index) {
   json_out::Object o;
   o.emplace_back("schema_version", json_out::Value::of(index.schema_version));
@@ -1335,9 +1345,11 @@ private:
       owner = "universe:" +
               (query.col_text(6).empty() ? "legacy" : query.col_text(6));
     }
-    const std::string component_path =
-        pathutil::isabs(query.col_text(1)) ? "" : query.col_text(1);
-    const std::string component = query.col_text(0) + "\x1f" + component_path;
+    const std::string component =
+        pathutil::isabs(query.col_text(1))
+            ? "ungrouped:" +
+                  portable_ungrouped_component_suffix(query.col_text(1))
+            : "grouped:" + query.col_text(0) + "\x1f" + query.col_text(1);
     std::string relative;
     for (int column = 2; column < 4; ++column) {
       const auto raw = query.col_text(column);
