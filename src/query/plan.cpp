@@ -4,6 +4,7 @@
 #include "query/plan.hpp"
 
 #include <algorithm>
+#include <array>
 
 #include "catalogs/generated_catalog.hpp"
 #include "storage/storage.hpp"
@@ -14,8 +15,70 @@ namespace cidx::query {
 // --------------------------------------------------------------------
 
 const char *view_name(View v) {
-  return v == View::Symbol ? "symbol" : "entity";
+  switch (v) {
+  case View::Symbol:
+    return "symbol";
+  case View::Entity:
+    return "entity";
+  case View::Parameter:
+    return "parameter";
+  case View::TemplateParameter:
+    return "template_parameter";
+  case View::TemplateArgument:
+    return "template_argument";
+  case View::CallArgument:
+    return "call_argument";
+  case View::Edge:
+    return "edge";
+  case View::Evidence:
+    return "evidence";
+  case View::Type:
+    return "type";
+  }
+  return "symbol";
 }
+
+namespace {
+
+View view_from_domain(std::string_view domain) {
+  const auto dot = domain.find('.');
+  const auto name = domain.substr(0, dot);
+  for (const auto view :
+       {View::Symbol, View::Entity, View::Parameter, View::TemplateParameter,
+        View::TemplateArgument, View::CallArgument, View::Edge, View::Evidence,
+        View::Type}) {
+    if (name == view_name(view)) {
+      return view;
+    }
+  }
+  return View::Symbol;
+}
+
+View catalog_view(catalog::View view) {
+  switch (view) {
+  case catalog::View::Symbol:
+    return View::Symbol;
+  case catalog::View::Entity:
+    return View::Entity;
+  case catalog::View::Parameter:
+    return View::Parameter;
+  case catalog::View::TemplateParameter:
+    return View::TemplateParameter;
+  case catalog::View::TemplateArgument:
+    return View::TemplateArgument;
+  case catalog::View::CallArgument:
+    return View::CallArgument;
+  case catalog::View::Edge:
+    return View::Edge;
+  case catalog::View::Evidence:
+    return View::Evidence;
+  case catalog::View::Type:
+    return View::Type;
+  }
+  return View::Symbol;
+}
+
+} // namespace
 
 // ---- Relation catalog
 // -----------------------------------------------------------
@@ -27,8 +90,7 @@ const std::vector<RelationDesc> &relation_catalog() {
     for (const auto &relation : catalog::kRelations) {
       result.push_back({
           .name = std::string(relation.name),
-          .layer = relation.layer == catalog::View::Symbol ? View::Symbol
-                                                           : View::Entity,
+          .layer = catalog_view(relation.layer),
           .kind_id = relation.id,
           .source = std::string(relation.source),
           .target = std::string(relation.target),
@@ -37,6 +99,8 @@ const std::vector<RelationDesc> &relation_catalog() {
           .evidence = std::string(relation.evidence),
           .evidence_capabilities = std::string(relation.evidence_capabilities),
           .completeness = std::string(relation.completeness),
+          .virtual_relation = relation.virtual_relation,
+          .target_view = view_from_domain(relation.target),
       });
     }
     return result;
@@ -50,7 +114,8 @@ extension_relation_catalog() {
   return catalog::kExtensionRelations;
 }
 
-const RelationDesc *resolve_relation(const std::string &name, View active) {
+const RelationDesc *resolve_relation(const std::string &name, View active,
+                                     bool inbound) {
   std::string bare = name;
   std::optional<View> forced;
   if (name.starts_with("symbol.")) {
@@ -59,10 +124,24 @@ const RelationDesc *resolve_relation(const std::string &name, View active) {
   } else if (name.starts_with("entity.")) {
     forced = View::Entity;
     bare = name.substr(7);
+  } else {
+    for (const auto view :
+         {View::Parameter, View::TemplateParameter, View::TemplateArgument,
+          View::CallArgument, View::Edge, View::Evidence, View::Type}) {
+      const std::string prefix = std::string(view_name(view)) + ".";
+      if (name.starts_with(prefix)) {
+        forced = view;
+        bare = name.substr(prefix.size());
+        break;
+      }
+    }
   }
-  const View layer = forced.value_or(active);
   for (const auto &r : relation_catalog()) {
-    if (r.layer == layer && r.name == bare) {
+    const bool matches = inbound && forced
+                             ? (r.layer == *forced && r.target_view == active)
+                         : inbound ? r.target_view == active
+                                   : r.layer == forced.value_or(active);
+    if (matches && r.name == bare) {
       return &r;
     }
   }
@@ -557,7 +636,94 @@ namespace {
 // entity-classification names (entity_kind) -- view-independent, so an
 // `abstract struct` is `kind = struct` AND `entity_type = abstract_class`.
 // Throws PlanError.
-void check_cmp(const Pred &p) {
+bool field_available(View view, const std::string &name) {
+  if (view == View::Symbol || view == View::Entity) {
+    return field_desc(name) != nullptr;
+  }
+  if (name == "id" || name == "identity_key") {
+    return true;
+  }
+  const auto has = [&name](const auto &names) {
+    return std::ranges::find(names, name) != names.end();
+  };
+  switch (view) {
+  case View::Parameter:
+    return has(std::array{"owner_id", "position", "pack_index", "name",
+                          "type_id", "declared_type_id", "adjusted_type_id",
+                          "default_text", "default_origin",
+                          "reference_semantics", "file_id", "line", "col"});
+  case View::TemplateParameter:
+    return has(std::array{"owner_id", "position", "param_kind", "name",
+                          "default_txt", "type_id", "default_type_id",
+                          "default_ref_id"});
+  case View::TemplateArgument:
+    return has(std::array{"owner_id", "position", "pack_index", "arg_kind",
+                          "ref_id", "literal", "type_id"});
+  case View::CallArgument:
+    return has(std::array{"edge_id", "file_id", "line", "col", "position",
+                          "src_kind", "type_usr", "decl_usr", "callee_usr",
+                          "type_id", "decl_id", "callee_id", "type_is_value"});
+  case View::Edge:
+    return has(std::array{"src_id", "dst_id", "kind", "count", "base_access",
+                          "is_virtual", "vtable_slot"});
+  case View::Evidence:
+    return has(std::array{"owner_id", "position", "default_txt",
+                          "default_type_id", "default_ref_id", "edge_id",
+                          "file_id", "line", "col", "conditional", "args_sig",
+                          "recv_src_kind", "recv_type_usr", "recv_decl_usr",
+                          "recv_type_id", "recv_decl_id", "recv_param_pos",
+                          "recv_type_is_value"});
+  case View::Type:
+    return has(std::array{"type_key", "spelling", "kind", "is_const",
+                          "is_volatile", "is_restrict", "cv_qualifiers",
+                          "decl_usr", "decl_id", "canonical_id"});
+  case View::Symbol:
+  case View::Entity:
+    break;
+  }
+  return false;
+}
+
+void check_cmp(const Pred &p, View active) {
+  if (!field_available(active, p.field)) {
+    fail("E_FIELD", "field '" + p.field + "' is unavailable in " +
+                        std::string(view_name(active)) + " view");
+  }
+  if (active != View::Symbol && active != View::Entity &&
+      p.op == PredOp::Glob) {
+    fail("E_FIELD", "glob predicates are not supported for typed views");
+  }
+  if (active != View::Symbol && active != View::Entity) {
+    constexpr std::array strings{"identity_key",  "name",
+                                 "spelling",      "type_key",
+                                 "default_text",  "default_origin",
+                                 "default_txt",   "reference_semantics",
+                                 "literal",       "src_kind",
+                                 "type_usr",      "decl_usr",
+                                 "callee_usr",    "args_sig",
+                                 "recv_src_kind", "recv_type_usr",
+                                 "recv_decl_usr"};
+    const auto is_string = [&p, &strings] {
+      return std::ranges::find(strings, p.field) != strings.end();
+    };
+    if (is_string()) {
+      if (p.int_value.has_value()) {
+        fail("E_FIELD", "field '" + p.field + "' takes a string value");
+      }
+      if (p.op == PredOp::In ? p.str_values.empty()
+                             : p.str_values.size() != 1) {
+        fail("E_FIELD", "bad value arity for field '" + p.field + "'");
+      }
+    } else {
+      if (p.op == PredOp::In) {
+        fail("E_FIELD", "field '" + p.field + "' supports eq/ne only");
+      }
+      if (!p.int_value.has_value()) {
+        fail("E_FIELD", "field '" + p.field + "' takes an integer value");
+      }
+    }
+    return;
+  }
   const FieldDesc *f = field_desc(p.field);
   if (f == nullptr) {
     fail("E_FIELD", "unknown field '" + p.field + "'");
@@ -642,7 +808,7 @@ Pred norm_pred(const Pred &p, View active) {
   case PredOp::Ne:
   case PredOp::Glob:
   case PredOp::In:
-    check_cmp(p);
+    check_cmp(p, active);
     return p;
   case PredOp::Exists:
   case PredOp::None:
@@ -689,6 +855,13 @@ struct WalkState {
   std::vector<std::string> selected;  // fields after Select
 };
 
+bool is_known_view(View view) {
+  return view == View::Symbol || view == View::Entity ||
+         view == View::Parameter || view == View::TemplateParameter ||
+         view == View::TemplateArgument || view == View::CallArgument ||
+         view == View::Edge || view == View::Evidence || view == View::Type;
+}
+
 Plan validate_walk(const Plan &plan, WalkState &st) {
   Plan out;
   out.source = plan.source;
@@ -734,6 +907,10 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
       if (st.shape != Shape::Nodes) {
         fail("E_STAGE", "view() applies to a node stream");
       }
+      if (!is_known_view(stage.level)) {
+        fail("E_VIEW",
+             "unknown view '" + std::string(view_name(stage.level)) + "'");
+      }
       st.active = stage.level;
       break;
     case StageOp::Where:
@@ -752,7 +929,9 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
       if (st.shape != Shape::Nodes) {
         fail("E_STAGE", "traversal applies to a node stream");
       }
-      const RelationDesc *r = resolve_relation(stage.relation, st.active);
+      const bool inbound = stage.op == StageOp::In;
+      const RelationDesc *r =
+          resolve_relation(stage.relation, st.active, inbound);
       if (r == nullptr) {
         fail("E_RELATION", "unknown relation '" + stage.relation + "' in " +
                                view_name(st.active) + " view");
@@ -760,6 +939,13 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
       if (stage.min_depth < 1 || stage.min_depth > stage.max_depth ||
           stage.max_depth > 32) {
         fail("E_DEPTH", "depth bounds must satisfy 1 <= min <= max <= 32");
+      }
+      const bool typed =
+          r->virtual_relation ||
+          (st.active != View::Symbol && st.active != View::Entity) ||
+          (r->target_view != View::Symbol && r->target_view != View::Entity);
+      if (typed && (stage.min_depth != 1 || stage.max_depth != 1)) {
+        fail("E_DEPTH", "typed traversal currently supports only depth 1..1");
       }
       if (stage.mode == TraversalMode::Devirtualized &&
           (stage.op != StageOp::Out || r->layer != View::Symbol ||
@@ -770,7 +956,7 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
       ns.relation = std::string(view_name(r->layer)) + "." + r->name;
       // Traversal targets live in the relation's layer: the stream view (and
       // therefore later bare-relation resolution) follows it.
-      st.active = r->layer;
+      st.active = inbound ? r->layer : r->target_view;
       break;
     }
     case StageOp::Union:
@@ -803,8 +989,9 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
         fail("E_FIELD", "select() requires at least one field");
       }
       for (const auto &f : stage.fields) {
-        if (field_desc(f) == nullptr) {
-          fail("E_FIELD", "unknown field '" + f + "'");
+        if (!field_available(st.active, f)) {
+          fail("E_FIELD", "field '" + f + "' is unavailable in " +
+                              std::string(view_name(st.active)) + " view");
         }
       }
       st.shape = Shape::Rows;
@@ -824,8 +1011,9 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
         fail("E_FIELD", "order_by() requires at least one field");
       }
       for (const auto &f : stage.fields) {
-        if (field_desc(f) == nullptr) {
-          fail("E_FIELD", "unknown field '" + f + "'");
+        if (!field_available(st.active, f)) {
+          fail("E_FIELD", "field '" + f + "' is unavailable in " +
+                              std::string(view_name(st.active)) + " view");
         }
         if (st.shape == Shape::Rows &&
             std::ranges::find(st.selected, f) == st.selected.end()) {

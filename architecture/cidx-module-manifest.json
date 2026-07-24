@@ -30,13 +30,13 @@
     {
       "id": "workspace.toolchain",
       "layer": "workspace",
-      "paths": ["src/toolchain/**"],
+      "paths": ["src/toolchain/**", "src/workspace/**"],
       "allowedDependencies": [
         "workspace.toolchain",
         "foundation.util",
         "model.contracts"
       ],
-      "description": "Compiler, driver, resource-directory, and workspace input resolution."
+      "description": "Compiler, driver, resource-directory, workspace snapshots, and shared translation-unit resolution."
     },
     {
       "id": "frontend.compiledb",
@@ -94,6 +94,7 @@
       "allowedDependencies": [
         "persistence.sqlite",
         "frontend.compiledb",
+        "workspace.toolchain",
         "foundation.util",
         "model.contracts"
       ],
@@ -119,6 +120,7 @@
       "allowedDependencies": [
         "query.plan",
         "persistence.sqlite",
+        "foundation.util",
         "model.contracts"
       ],
       "description": "Canonical read algebra and query execution adapter."
@@ -164,6 +166,7 @@
       "paths": [
         "src/main.cpp",
         "src/cli/**",
+        "src/ui/**",
         "src/astgraph/main.cpp",
         "src/diff/main.cpp"
       ],
@@ -503,6 +506,26 @@
       "removalIssue": "HSE-24"
     },
     {
+      "source": "src/query/result_protocol.hpp",
+      "fromModule": "query.plan",
+      "toModule": "product.cli",
+      "boundary": "versioned result protocol -> product JSON value",
+      "owner": "Platform M3 query maintainers",
+      "rationale": "The protocol uses the existing deterministic JSON value type until the product-surface serialization move.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-68"
+    },
+    {
+      "source": "src/query/exec.cpp",
+      "fromModule": "query.plan",
+      "toModule": "product.cli",
+      "boundary": "versioned result adapter -> product JSON value",
+      "owner": "Platform M3 query maintainers",
+      "rationale": "The QueryPlan result still exposes the existing deterministic JSON value type during the compatibility migration.",
+      "expiresOn": "2026-12-31",
+      "removalIssue": "HSE-68"
+    },
+    {
       "source": "src/query/plan.hpp",
       "fromModule": "query.plan",
       "toModule": "product.cli",
@@ -702,6 +725,18 @@
     {
       "source": "src/storage/storage_types.cpp", "fromModule": "persistence.sqlite", "toModule": "external:filesystem", "include": "filesystem",
       "boundary": "persistence -> filesystem adapter", "owner": "Platform M1 storage maintainers", "rationale": "Retain storage path handling until WorkspaceContext owns filesystem policy.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/ui/server.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/socket.h",
+      "boundary": "product surface -> loopback transport", "owner": "Platform M4 UI maintainers", "rationale": "The local explorer uses the platform loopback socket API until the shared transport adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-84"
+    },
+    {
+      "source": "src/ui/server.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/types.h",
+      "boundary": "product surface -> loopback transport", "owner": "Platform M4 UI maintainers", "rationale": "The local explorer uses the platform loopback socket API until the shared transport adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-84"
+    },
+    {
+      "source": "src/ui/server.cpp", "fromModule": "product.cli", "toModule": "external:process", "include": "unistd.h",
+      "boundary": "product surface -> loopback transport", "owner": "Platform M4 UI maintainers", "rationale": "The local explorer uses POSIX accept/close and optional browser launch until the shared transport adapter is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-84"
     }
   ],
   "ci": {

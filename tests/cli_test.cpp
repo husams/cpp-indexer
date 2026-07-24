@@ -963,6 +963,29 @@ TEST_CASE("add-source: --path not a directory -> exit 1") {
 // query commands — golden outputs (default label)
 // ---------------------------------------------------------------------------
 
+TEST_CASE("query: read-only execution and nonexistent database safety") {
+  const GoldFixture g;
+  const CmdResult result =
+      run_cli({"query", "codebase() | nodes() | limit(1)"}, g.cache);
+  CHECK(result.rc == 0);
+  CHECK(result.err.empty());
+  CHECK(result.out.find("\"shape\": \"nodes\"") != std::string::npos);
+  CHECK(result.out.find("\"index\":") != std::string::npos);
+
+  const std::string missing = g.cache + "/does-not-exist.db";
+  cli::ParsedArgs args = cli::parse_args({"query", "codebase() | nodes()"});
+  cli::Context ctx;
+  std::ostringstream out;
+  std::ostringstream err;
+  ctx.cache_dir = g.cache;
+  ctx.index_path = missing;
+  ctx.logger = &cidx::Logger::root();
+  ctx.out = &out;
+  ctx.err = &err;
+  CHECK_THROWS(cli::run_command(args, ctx));
+  CHECK_FALSE(path_exists(missing));
+}
+
 TEST_CASE("search: def row + second decl row; zero matches exit 1") {
   const GoldFixture g;
   // $ python3 -m indexer search multiply

@@ -6,11 +6,14 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <ranges>
 
-#include "compiledb/compiledb.hpp"
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
+#include "util/files.hpp"
 #include "util/pathutil.hpp"
+#include "workspace/context.hpp"
+#include "toolchain/toolchain.hpp"
 
 namespace cidx::diff {
 
@@ -143,19 +146,13 @@ ParseConfig resolve_parse_config(const SideSpec &spec) {
                     "); run `cidx import <compile_commands.json>` for its "
                     "project");
   }
-  std::vector<std::string> stored;
-  const auto use_normalized = [&cfg,
-                               &stored](const TranslationUnitConfig &config) {
-    if (config.state != TranslationUnitConfigState::registered ||
-        config.association_state != TranslationUnitConfigState::registered) {
-      throw CidxError("stale, unavailable, or ambiguous stored configuration "
-                      "for " +
-                      cfg.file + "; re-index the translation unit");
-    }
-    stored = config.arguments;
-    cfg.driver = config.driver;
-    cfg.config_hash = config.descriptor_hash;
-  };
+  StorageWorkspaceAdapter workspace_data(db);
+  WorkspaceContext context =
+      WorkspaceContext::borrow(workspace_data,
+                               WorkspaceReadWriteMode::read_only);
+  Toolchain toolchain;
+  TranslationUnitConfigurationService resolver(context, toolchain);
+  std::string resolution_path = cfg.file;
   if (spec.tu) {
     cfg.tu = pathutil::abspath(*spec.tu);
     const std::optional<File> turec = db.get_file(*cfg.tu);
@@ -163,54 +160,39 @@ ParseConfig resolve_parse_config(const SideSpec &spec) {
       throw CidxError("--" + spec.side + "-tu " + *cfg.tu +
                       " is not registered in the cidx index (" + cfg.db + ")");
     }
-    if (!turec->compile_options) {
-      throw CidxError("--" + spec.side + "-tu " + *cfg.tu +
-                      " has no stored compile options in " + cfg.db +
-                      " (name a TU registered from compile_commands.json)");
-    }
     cfg.parse_file = *cfg.tu;
     cfg.restrict_to_file = true;
-    const auto configs = db.translation_unit_configs_for_file(turec->id);
-    if (configs.size() > 1) {
-      throw CidxError("--" + spec.side + "-tu " + *spec.tu +
-                      " has ambiguous stored configurations in " + cfg.db);
-    }
-    if (configs.empty()) {
-      const auto descriptor = resolve_translation_unit_config(
-          turec->driver, std::string("."), *turec->compile_options,
-          std::nullopt, std::nullopt, std::string("error-limit=0"));
-      stored = descriptor.arguments;
-      cfg.driver = descriptor.driver;
-    } else {
-      use_normalized(configs.front());
-    }
+    resolution_path = *cfg.tu;
   } else {
-    if (!rec->compile_options) {
-      throw CidxError(spec.side + " file " + cfg.file +
-                      " has no stored compile options in " + cfg.db +
-                      " (a header needs --" + spec.side +
-                      "-tu naming a registered TU)");
-    }
     cfg.parse_file = cfg.file;
-    const auto configs = db.translation_unit_configs_for_file(rec->id);
-    if (configs.size() > 1) {
+    resolution_path = cfg.file;
+    const auto applicability = db.file_configs_for(rec->id);
+    const bool has_header_owner = std::ranges::any_of(
+        applicability, [](const FileConfigApplicability &association) {
+          return association.role == "header";
+        });
+    if (files::is_header(cfg.file) && !has_header_owner) {
       throw CidxError(spec.side + " file " + cfg.file +
-                      " has ambiguous stored configurations; pass --" +
+                      " has no stored translation-unit configuration; pass --" +
                       spec.side + "-tu");
     }
-    if (configs.empty()) {
-      const auto descriptor = resolve_translation_unit_config(
-          rec->driver, std::string("."), *rec->compile_options, std::nullopt,
-          std::nullopt, std::string("error-limit=0"));
-      stored = descriptor.arguments;
-      cfg.driver = descriptor.driver;
-    } else {
-      use_normalized(configs.front());
-    }
   }
-  cfg.args = CompileDb::resolve_options(
-      CompileDb::sanitize(stored),
-      [&db](const std::string &n) { return db.get_alias(n); });
+  TranslationUnitDescriptor descriptor;
+  try {
+    descriptor = resolver.resolve(resolution_path);
+  } catch (const WorkspaceError &error) {
+    if (error.code() == WorkspaceErrorCode::unreproducible_configuration) {
+      throw CidxError("stale, unavailable, or ambiguous stored configuration "
+                      "for " + cfg.file + "; re-index the translation unit");
+    }
+    throw;
+  }
+  cfg.driver = descriptor.configuration.driver;
+  cfg.config_hash = descriptor.configuration.descriptor_hash;
+  const auto resolved_record = db.get_file(resolution_path);
+  cfg.args = resolved_record && resolved_record->compile_options
+                 ? resolver.normalized_arguments(*resolved_record->compile_options)
+                 : descriptor.configuration.arguments;
   cfg.classes = classify_options(cfg.args);
   return cfg;
 }

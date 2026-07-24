@@ -24,6 +24,7 @@ from indexer.queryplan import (  # noqa: E402
     not_, order_by, out, select, start, symbol, union_, validate, view, where,
     all, all_targets, any_target, at_least, exactly, exists, inherits_from,
     is_abstract, is_instance, none,
+    parse_cxq,
 )
 
 _REPO_ROOT = os.path.abspath(
@@ -112,6 +113,64 @@ def test_canonical_json_matches_shared_golden():
         for name, plan in sorted(_golden_plans().items()))
     with open(_GOLDEN, "rb") as fh:
         assert rendered.encode() == fh.read()
+
+
+def test_textual_cxq_lowers_to_the_shared_plan():
+    parsed = parse_cxq(
+        "codebase() | nodes(kind = class) | "
+        "where(is_definition = true and name ~= 'Widget*') | "
+        "select(name, usr) | order_by(name) | limit(10)")
+    expected = (
+        start(codebase()) | nodes(eq("kind", "class"))
+        | where(all_of([eq("is_definition", True),
+                       glob("name", "Widget*")]))
+        | select(["name", "usr"]) | order_by(["name"]) | limit(10)
+    ).plan
+    assert canonical_json(parsed) == canonical_json(expected)
+    with pytest.raises(PlanError, match=r"E_PARSE: limit\(\) requires one integer"):
+        parse_cxq("codebase() | limit(nope)")
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("codebase() | nodes(kind = class, name = Widget)",
+         r"E_PARSE: nodes\(\) takes zero or one predicate"),
+        ("codebase() | out(calls, mode=static)",
+         "E_PARSE: depth must be an integer or depth=min..max"),
+        ("codebase() | nodes() | limit(+1)",
+         r"E_PARSE: limit\(\) requires one integer"),
+        ("codebase() | nodes() | limit(1_0)",
+         r"E_PARSE: limit\(\) requires one integer"),
+        ("codebase() | nodes() | limit(9223372036854775808)",
+         r"E_PARSE: limit\(\) requires one integer"),
+        ("codebase() | nodes() | limit(-9223372036854775809)",
+         r"E_PARSE: limit\(\) requires one integer"),
+        ("codebase() | out(calls, +1)",
+         "E_PARSE: depth must be an integer or depth=min..max"),
+        ("codebase() | out(calls, 1_0)",
+         "E_PARSE: depth must be an integer or depth=min..max"),
+        ("codebase() | out(calls, 9223372036854775808)",
+         "E_PARSE: depth must be an integer or depth=min..max"),
+        ("codebase() | out(calls, depth=+1..2)",
+         "E_PARSE: depth must be written as depth=min..max"),
+        ("codebase() | count(extra)", r"E_PARSE: count\(\) takes no arguments"),
+        ("codebase() | rank(name)", r"E_PARSE: rank\(\) is not available in v1"),
+    ],
+)
+def test_textual_cxq_rejects_unsupported_or_ambiguous_syntax(text, message):
+    with pytest.raises(PlanError, match=message):
+        parse_cxq(text)
+
+
+def test_textual_cxq_rejects_oversized_integer_tokens():
+    digits = "9" * 5000
+    with pytest.raises(PlanError, match=r"E_PARSE: limit\(\) requires one integer"):
+        parse_cxq(f"codebase() | nodes() | limit({digits})")
+    with pytest.raises(
+        PlanError, match="E_PARSE: depth must be an integer or depth=min..max"
+    ):
+        parse_cxq(f"codebase() | out(calls, {digits})")
 
 
 # ---------------------------------------------------------------------------
@@ -493,3 +552,252 @@ def test_all_quantifiers_bind_and_preserve_nested_unknown(seeded):
          | where(all("inherits", eq("entity_type", "class")),
                 qp.UnknownPolicy.INCLUDE)).plan)
     assert [row[0] for row in target_unknown.rows] == [ids["E"]]
+
+def test_typed_parameter_view_preserves_natural_slot_identity():
+    db = Storage(":memory:")
+    owner = db.add_symbol(_make_sym("USR::typed", "typed"))
+    db._conn.execute(
+        "INSERT INTO parameter(owner_id,position,pack_index,name,default_text,"
+        "reference_semantics) VALUES (?,?,?,?,?,?)",
+        (owner, 0, -1, "value", "0", "lvalue"),
+    )
+    db._conn.commit()
+
+    result = Executor(db).run(
+        (start(symbol("USR::typed")) | out("has_parameter")
+         | select(["owner_id", "position", "pack_index", "name",
+                   "default_text", "identity_key"])).plan)
+    assert result.view == "parameter"
+    assert len(result.rows) == 1
+    assert result.rows[0][:5] == (owner, 0, -1, "value", "0")
+    assert result.rows[0][5].startswith(
+        "parameter:legacy\x1fUSR::typed:0:-1")
+
+    db._conn.execute(
+        "INSERT INTO parameter(owner_id,position,pack_index,name) "
+        "VALUES (?,?,?,?)", (owner, 1, -1, "other"))
+    db._conn.commit()
+    filtered = Executor(db).run(
+        (start(symbol("USR::typed")) | out("has_parameter")
+         | where(eq("position", 1)) | select(["name"])).plan)
+    assert filtered.rows == [("other",)]
+
+    reverse = Executor(db).run(
+        (start(codebase()) | view("parameter") | nodes()
+         | in_("has_parameter") | select(["name"])).plan)
+    assert reverse.view == "symbol"
+    assert reverse.rows == [("typed",)]
+
+
+def test_template_defaults_expose_logical_evidence():
+    db = Storage(":memory:")
+    owner = db.add_symbol(_make_sym("USR::template", "template", "class"))
+    db._conn.execute(
+        "INSERT INTO template_param(owner_id,position,param_kind,name,"
+        "default_txt) VALUES (?,?,?,?,?)",
+        (owner, 0, 1, "T", "int"),
+    )
+    db._conn.commit()
+
+    result = Executor(db).run(
+        (start(symbol("USR::template")) | out("has_template_parameter")
+         | out("has_default")
+         | select(["owner_id", "position", "default_txt", "identity_key"])).plan)
+    assert result.view == "evidence"
+    assert result.rows == [
+        (owner, 0, "int", "evidence:template_default:legacy\x1fUSR::template:0")
+    ]
+
+
+def _seed_reverse_typed_graph(
+    db, component_path, repo_name="repo", caller_suffix="shared", grouped=True
+):
+    if grouped:
+        repo = db.add_repository(
+            repo_name, remote_url=f"https://example.test/{repo_name}.git"
+        )
+    component = db.add_component("project", component_path)
+    if grouped:
+        db.set_component_repository(component, repo)
+        db._conn.execute(
+            "UPDATE component SET path = ? WHERE id = ?", ("src", component)
+        )
+        db._conn.commit()
+    directory = db.add_directory(component, "include" if grouped else "src")
+    file_id = db.add_file(directory, "unit.cpp" if grouped else "same.cpp")
+    caller = db.add_symbol(
+        _make_sym(f"USR::{caller_suffix}::caller", "caller")
+    )
+    callee = db.add_symbol(
+        _make_sym(f"USR::{caller_suffix}::callee", "callee")
+    )
+    edge_id = db.add_edge(caller, callee, 1)
+    db.add_edge_site(edge_id, file_id, 10, 2)
+    db._conn.execute(
+        "INSERT INTO call_arg(edge_id,file_id,line,col,position) "
+        "VALUES (?,?,?,?,?)", (edge_id, file_id, 10, 2, 0))
+    db._conn.commit()
+
+
+def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable():
+    first = Storage(":memory:")
+    _seed_reverse_typed_graph(first, "/tmp/a/cpp-indexer", grouped=False)
+    executor = Executor(first)
+
+    reverse_evidence = executor.run(
+        (start(codebase()) | view("evidence") | nodes()
+         | in_("edge.has_evidence") | count()).plan)
+    reverse_argument = executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | in_("edge.has_argument") | count()).plan)
+    reverse_occurrence = executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | in_("evidence.of_occurrence") | count()).plan)
+    assert reverse_evidence.scalar == 1
+    assert reverse_argument.scalar == 1
+    assert reverse_occurrence.scalar == 1
+
+    second = Storage(":memory:")
+    _seed_reverse_typed_graph(second, "/tmp/b/cpp-indexer", grouped=False)
+    first_evidence = executor.run(
+        (start(codebase()) | view("evidence") | nodes()
+         | select(["identity_key"])).plan)
+    second_evidence = Executor(second).run(
+        (start(codebase()) | view("evidence") | nodes()
+         | select(["identity_key"])).plan)
+    first_argument = executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | select(["identity_key"])).plan)
+    second_argument = Executor(second).run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | select(["identity_key"])).plan)
+    assert first_evidence.rows == second_evidence.rows
+    assert first_argument.rows == second_argument.rows
+
+    collision = Storage(":memory:")
+    _seed_reverse_typed_graph(collision, "/repo-a", "repo-a", "repo-a")
+    _seed_reverse_typed_graph(collision, "/repo-b", "repo-b", "repo-b")
+    collision_executor = Executor(collision)
+    collision_evidence = collision_executor.run(
+        (start(codebase()) | view("evidence") | nodes()
+         | select(["id", "identity_key"])).plan
+    )
+    collision_arguments = collision_executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | select(["id", "identity_key"])).plan
+    )
+    assert len(collision_evidence.rows) == 2
+    assert len({row[0] for row in collision_evidence.rows}) == 2
+    assert len({row[1] for row in collision_evidence.rows}) == 2
+    assert len(collision_arguments.rows) == 2
+    assert len({row[0] for row in collision_arguments.rows}) == 2
+    assert len({row[1] for row in collision_arguments.rows}) == 2
+
+    ungrouped = Storage(":memory:")
+    _seed_reverse_typed_graph(
+        ungrouped,
+        "/repo/A/project",
+        caller_suffix="ungrouped-a",
+        grouped=False,
+    )
+    _seed_reverse_typed_graph(
+        ungrouped,
+        "/repo/B/project",
+        caller_suffix="ungrouped-b",
+        grouped=False,
+    )
+    ungrouped_executor = Executor(ungrouped)
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run(
+            (start(codebase()) | view("evidence") | nodes()
+             | select(["id", "identity_key"])).plan
+        )
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run(
+            (start(codebase()) | view("evidence") | nodes() | count()).plan
+        )
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run(
+            (start(codebase()) | view("call_argument") | nodes()
+             | select(["id", "identity_key"])).plan
+        )
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run(
+            (start(codebase()) | view("call_argument") | nodes() | count()).plan
+        )
+    evidence_base = start(codebase()) | view("evidence") | nodes()
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run((evidence_base | except_(evidence_base)).plan)
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run(
+            (evidence_base | except_(evidence_base) | count()).plan
+        )
+    argument_base = start(codebase()) | view("call_argument") | nodes()
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run((argument_base | except_(argument_base)).plan)
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run(
+            (argument_base | except_(argument_base) | count()).plan
+        )
+
+    mirrored_first = Storage(":memory:")
+    _seed_reverse_typed_graph(
+        mirrored_first,
+        "/Users/husam/.codex/worktrees/a/cpp-indexer",
+        caller_suffix="mirrored",
+        grouped=False,
+    )
+    mirrored_second = Storage(":memory:")
+    _seed_reverse_typed_graph(
+        mirrored_second,
+        "/Users/husam/.codex/worktrees/b/cpp-indexer",
+        caller_suffix="mirrored",
+        grouped=False,
+    )
+    mirrored_first_executor = Executor(mirrored_first)
+    mirrored_second_executor = Executor(mirrored_second)
+    assert mirrored_first_executor.run(
+        (start(codebase()) | view("evidence") | nodes()
+         | select(["identity_key"])).plan
+    ).rows == mirrored_second_executor.run(
+        (start(codebase()) | view("evidence") | nodes()
+         | select(["identity_key"])).plan
+    ).rows
+    assert mirrored_first_executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | select(["identity_key"])).plan
+    ).rows == mirrored_second_executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | select(["identity_key"])).plan
+    ).rows
+
+    non_catalogued_first = Storage(":memory:")
+    _seed_reverse_typed_graph(
+        non_catalogued_first,
+        "/tmp/a/cpp-indexer",
+        caller_suffix="non-catalogued-mirrored",
+        grouped=False,
+    )
+    non_catalogued_second = Storage(":memory:")
+    _seed_reverse_typed_graph(
+        non_catalogued_second,
+        "/tmp/b/cpp-indexer",
+        caller_suffix="non-catalogued-mirrored",
+        grouped=False,
+    )
+    non_catalogued_first_executor = Executor(non_catalogued_first)
+    non_catalogued_second_executor = Executor(non_catalogued_second)
+    assert non_catalogued_first_executor.run(
+        (start(codebase()) | view("evidence") | nodes()
+         | select(["identity_key"])).plan
+    ).rows == non_catalogued_second_executor.run(
+        (start(codebase()) | view("evidence") | nodes()
+         | select(["identity_key"])).plan
+    ).rows
+    assert non_catalogued_first_executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | select(["identity_key"])).plan
+    ).rows == non_catalogued_second_executor.run(
+        (start(codebase()) | view("call_argument") | nodes()
+         | select(["identity_key"])).plan
+    ).rows

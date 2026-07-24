@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <vector>
 
+#include "query/cxq.hpp"
 #include "query/exec.hpp"
 #include "query/plan.hpp"
 #include "storage/records.hpp"
@@ -184,6 +185,65 @@ TEST_CASE("query_plan: canonical JSON matches the shared golden") {
     out << rendered;
   }
   CHECK(rendered == read_file(CIDX_CXQ_GOLDEN));
+}
+
+TEST_CASE("query_plan: CXQ text lowers to the immutable plan") {
+  const Plan parsed =
+      parse_cxq("codebase() | nodes(kind = class) | "
+                "where(is_definition = true and name ~= 'Widget*') | "
+                "select(name, usr) | order_by(name) | limit(10)");
+  const Plan expected =
+      (start(codebase()) | nodes(eq("kind", "class")) |
+       where(all_of({eq("is_definition", true), glob("name", "Widget*")})) |
+       select({"name", "usr"}) | order_by({"name"}) | limit(10))
+          .plan();
+  CHECK(canonical_json(parsed) == canonical_json(expected));
+
+  const Plan symbol_plan = parse_cxq("symbol('USR::f') | out(calls, 1, 2)");
+  CHECK(canonical_json(symbol_plan).find("USR::f") != std::string::npos);
+}
+
+TEST_CASE("query_plan: CXQ text reports stable parse errors") {
+  CHECK_THROWS_WITH(
+      parse_cxq("nodes()"),
+      "E_PARSE: query must start with codebase(), symbol(), or entity()");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | limit(nope)"),
+                    "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(
+      parse_cxq("codebase() | nodes(kind = class, name = Widget)"),
+      "E_PARSE: nodes() takes zero or one predicate");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, mode=static)"),
+                    "E_PARSE: depth must be an integer or depth=min..max");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | nodes() | limit(+1)"),
+                    "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | nodes() | limit(1_0)"),
+                    "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(
+      parse_cxq("codebase() | nodes() | limit(9223372036854775808)"),
+      "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(
+      parse_cxq("codebase() | nodes() | limit(-9223372036854775809)"),
+      "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, +1)"),
+                    "E_PARSE: depth must be an integer or depth=min..max");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, 1_0)"),
+                    "E_PARSE: depth must be an integer or depth=min..max");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, 9223372036854775808)"),
+                    "E_PARSE: depth must be an integer or depth=min..max");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, depth=+1..2)"),
+                    "E_PARSE: depth must be written as depth=min..max");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | count(extra)"),
+                    "E_PARSE: count() takes no arguments");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | rank(name)"),
+                    "E_PARSE: rank() is not available in v1");
+}
+
+TEST_CASE("query_plan: CXQ text rejects oversized integer tokens") {
+  const std::string digits(5000, '9');
+  CHECK_THROWS_WITH(parse_cxq("codebase() | nodes() | limit(" + digits + ")"),
+                    "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, " + digits + ")"),
+                    "E_PARSE: depth must be an integer or depth=min..max");
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +478,14 @@ TEST_CASE("query_plan: order_by, limit, default fields, result JSON") {
   CHECK(j.find("\"view\": \"symbol\"") != std::string::npos);
   CHECK(j.find("\"count\": 1") != std::string::npos);
   CHECK(j.find("\"funcB\"") != std::string::npos);
+
+  const auto envelope = d.to_envelope();
+  CHECK(envelope.status == cidx::protocol::Status::Unknown);
+  CHECK(envelope.identity.fact_sets == std::vector<std::string>{"symbols"});
+  const auto envelope_json = cidx::json_out::dumps_indent2(envelope.to_json());
+  CHECK(envelope_json.find("\"protocol\": \"cidx.result/v1\"") !=
+        std::string::npos);
+  CHECK(envelope_json.find("\"evidence\"") != std::string::npos);
 }
 
 TEST_CASE("query_plan: default result cap reports truncation") {
@@ -628,6 +696,298 @@ TEST_CASE("query_plan: scoped identity fields are selectable") {
   CHECK(std::get<std::string>(result.rows[0][0]) == "USR::A");
   CHECK(std::get<std::string>(result.rows[0][1]) == "legacy");
   CHECK(std::get<std::string>(result.rows[0][2]) == "legacy\x1fUSR::A");
+}
+
+TEST_CASE("query_plan: typed parameter views preserve natural slot identity") {
+  Storage db(":memory:");
+  const int64_t owner =
+      db.add_symbol(make_sym("USR::typed", "typed", "function"));
+  db.raw_db().exec(
+      "INSERT INTO parameter(owner_id,position,pack_index,name,default_text,"
+      "reference_semantics) VALUES (1,0,-1,'value','0','lvalue')");
+
+  Executor ex(db);
+  const Result result =
+      ex.run((start(symbol("USR::typed")) | out("has_parameter") |
+              select({"owner_id", "position", "pack_index", "name",
+                      "default_text", "identity_key"}))
+                 .plan());
+  REQUIRE(result.view == View::Parameter);
+  REQUIRE(result.rows.size() == 1);
+  CHECK(std::get<int64_t>(result.rows[0][0]) == owner);
+  CHECK(std::get<int64_t>(result.rows[0][1]) == 0);
+  CHECK(std::get<int64_t>(result.rows[0][2]) == -1);
+  CHECK(std::get<std::string>(result.rows[0][3]) == "value");
+  CHECK(std::get<std::string>(result.rows[0][4]) == "0");
+  CHECK(std::get<std::string>(result.rows[0][5])
+            .starts_with("parameter:legacy\x1fUSR::typed:0:-1"));
+
+  db.raw_db().exec("INSERT INTO parameter(owner_id,position,pack_index,name) "
+                   "VALUES (1,1,-1,'other')");
+  const Result filtered =
+      ex.run((start(symbol("USR::typed")) | out("has_parameter") |
+              where(eq("position", int64_t{1})) | select({"name"}))
+                 .plan());
+  REQUIRE(filtered.rows.size() == 1);
+  CHECK(std::get<std::string>(filtered.rows[0][0]) == "other");
+
+  const Result reverse =
+      ex.run((start(codebase()) | view(View::Parameter) | nodes() |
+              in_("has_parameter") | select({"name"}))
+                 .plan());
+  REQUIRE(reverse.view == View::Symbol);
+  REQUIRE(reverse.rows.size() == 1);
+  CHECK(std::get<std::string>(reverse.rows[0][0]) == "typed");
+}
+
+TEST_CASE("query_plan: template defaults expose logical evidence") {
+  Storage db(":memory:");
+  const int64_t owner =
+      db.add_symbol(make_sym("USR::template", "template", "class"));
+  auto insert = db.raw_db().prepare(
+      "INSERT INTO template_param(owner_id,position,param_kind,name,"
+      "default_txt) VALUES (?,?,?,?,?)");
+  insert.bind(1, owner);
+  insert.bind(2, int64_t{0});
+  insert.bind(3, int64_t{1});
+  insert.bind(4, std::string_view{"T"});
+  insert.bind(5, std::string_view{"int"});
+  insert.step_done();
+
+  Executor ex(db);
+  const Result result =
+      ex.run((start(symbol("USR::template")) | out("has_template_parameter") |
+              out("has_default") |
+              select({"owner_id", "position", "default_txt", "identity_key"}))
+                 .plan());
+  REQUIRE(result.view == View::Evidence);
+  REQUIRE(result.rows.size() == 1);
+  CHECK(std::get<int64_t>(result.rows[0][0]) == owner);
+  CHECK(std::get<int64_t>(result.rows[0][1]) == 0);
+  CHECK(std::get<std::string>(result.rows[0][2]) == "int");
+  CHECK(std::get<std::string>(result.rows[0][3]) ==
+        "evidence:template_default:legacy\x1fUSR::template:0");
+}
+
+TEST_CASE(
+    "query_plan: reverse typed relations and file identities are portable") {
+  const auto seed = [](Storage &db, std::string_view component_path,
+                       std::string_view repository_name,
+                       std::string_view symbol_suffix, bool grouped = true) {
+    int64_t repository_id = 0;
+    if (grouped) {
+      repository_id =
+          db.add_repository(std::string(repository_name), "repo",
+                            std::string("https://example.test/") +
+                                std::string(repository_name) + ".git");
+    }
+    const int64_t component_id =
+        db.add_component("project", std::string(component_path));
+    if (grouped) {
+      db.set_component_repository(component_id, repository_id);
+      auto update =
+          db.raw_db().prepare("UPDATE component SET path = ? WHERE id = ?");
+      update.bind(1, std::string_view{"src"});
+      update.bind(2, component_id);
+      update.step_done();
+    }
+    const int64_t directory_id =
+        db.add_directory(component_id, grouped ? "include" : "src");
+    const int64_t file_id =
+        db.add_file(directory_id, grouped ? "unit.cpp" : "same.cpp");
+    const std::string caller_usr =
+        "USR::" + std::string(symbol_suffix) + "::caller";
+    const std::string callee_usr =
+        "USR::" + std::string(symbol_suffix) + "::callee";
+    const int64_t caller = db.add_symbol(make_sym(caller_usr, "caller"));
+    const int64_t callee = db.add_symbol(make_sym(callee_usr, "callee"));
+    const int64_t edge_id = db.add_edge(make_edge(caller, callee, 1));
+
+    cidx::EdgeSite site;
+    site.edge_id = edge_id;
+    site.file_id = file_id;
+    site.line = 10;
+    site.col = 2;
+    db.add_edge_site(site);
+
+    auto arg = db.raw_db().prepare(
+        "INSERT INTO call_arg(edge_id,file_id,line,col,position) "
+        "VALUES (?,?,?,?,?)");
+    arg.bind(1, edge_id);
+    arg.bind(2, file_id);
+    arg.bind(3, int64_t{10});
+    arg.bind(4, int64_t{2});
+    arg.bind(5, int64_t{0});
+    arg.step_done();
+  };
+
+  Storage first(":memory:");
+  seed(first, "/tmp/a/cpp-indexer", "", "shared", false);
+  Executor first_executor(first);
+  const auto reverse_evidence =
+      first_executor.run((start(codebase()) | view(View::Evidence) | nodes() |
+                          in_("edge.has_evidence") | count())
+                             .plan());
+  const auto reverse_argument =
+      first_executor.run((start(codebase()) | view(View::CallArgument) |
+                          nodes() | in_("edge.has_argument") | count())
+                             .plan());
+  const auto reverse_occurrence =
+      first_executor.run((start(codebase()) | view(View::CallArgument) |
+                          nodes() | in_("evidence.of_occurrence") | count())
+                             .plan());
+  CHECK(reverse_evidence.scalar == 1);
+  CHECK(reverse_argument.scalar == 1);
+  CHECK(reverse_occurrence.scalar == 1);
+
+  Storage second(":memory:");
+  seed(second, "/tmp/b/cpp-indexer", "", "shared", false);
+  Executor second_executor(second);
+  const auto first_evidence =
+      first_executor.run((start(codebase()) | view(View::Evidence) | nodes() |
+                          select({"identity_key"}))
+                             .plan());
+  const auto second_evidence =
+      second_executor.run((start(codebase()) | view(View::Evidence) | nodes() |
+                           select({"identity_key"}))
+                              .plan());
+  const auto first_argument =
+      first_executor.run((start(codebase()) | view(View::CallArgument) |
+                          nodes() | select({"identity_key"}))
+                             .plan());
+  const auto second_argument =
+      second_executor.run((start(codebase()) | view(View::CallArgument) |
+                           nodes() | select({"identity_key"}))
+                              .plan());
+  REQUIRE(first_evidence.rows.size() == 1);
+  REQUIRE(second_evidence.rows.size() == 1);
+  REQUIRE(first_argument.rows.size() == 1);
+  REQUIRE(second_argument.rows.size() == 1);
+  CHECK(first_evidence.rows[0] == second_evidence.rows[0]);
+  CHECK(first_argument.rows[0] == second_argument.rows[0]);
+
+  Storage collision(":memory:");
+  seed(collision, "/repo-a", "repo-a", "repo-a");
+  seed(collision, "/repo-b", "repo-b", "repo-b");
+  Executor collision_executor(collision);
+  const auto collision_evidence =
+      collision_executor.run((start(codebase()) | view(View::Evidence) |
+                              nodes() | select({"id", "identity_key"}))
+                                 .plan());
+  const auto collision_arguments =
+      collision_executor.run((start(codebase()) | view(View::CallArgument) |
+                              nodes() | select({"id", "identity_key"}))
+                                 .plan());
+  REQUIRE(collision_evidence.rows.size() == 2);
+  CHECK(std::get<int64_t>(collision_evidence.rows[0][0]) !=
+        std::get<int64_t>(collision_evidence.rows[1][0]));
+  CHECK(std::get<std::string>(collision_evidence.rows[0][1]) !=
+        std::get<std::string>(collision_evidence.rows[1][1]));
+  REQUIRE(collision_arguments.rows.size() == 2);
+  CHECK(std::get<int64_t>(collision_arguments.rows[0][0]) !=
+        std::get<int64_t>(collision_arguments.rows[1][0]));
+  CHECK(std::get<std::string>(collision_arguments.rows[0][1]) !=
+        std::get<std::string>(collision_arguments.rows[1][1]));
+
+  Storage ungrouped(":memory:");
+  seed(ungrouped, "/repo/A/project", "", "ungrouped-a", false);
+  seed(ungrouped, "/repo/B/project", "", "ungrouped-b", false);
+  Executor ungrouped_executor(ungrouped);
+  CHECK_THROWS_WITH(
+      ungrouped_executor.run((start(codebase()) | view(View::Evidence) |
+                              nodes() | select({"id", "identity_key"}))
+                                 .plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
+  CHECK_THROWS_WITH(
+      ungrouped_executor.run(
+          (start(codebase()) | view(View::Evidence) | nodes() | count())
+              .plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
+  CHECK_THROWS_WITH(
+      ungrouped_executor.run((start(codebase()) | view(View::CallArgument) |
+                              nodes() | select({"id", "identity_key"}))
+                                 .plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
+  CHECK_THROWS_WITH(
+      ungrouped_executor.run(
+          (start(codebase()) | view(View::CallArgument) | nodes() | count())
+              .plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
+  const auto evidence_base = start(codebase()) | view(View::Evidence) | nodes();
+  CHECK_THROWS_WITH(
+      ungrouped_executor.run((evidence_base | except_(evidence_base)).plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
+  CHECK_THROWS_WITH(
+      ungrouped_executor.run(
+          (evidence_base | except_(evidence_base) | count()).plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
+  const auto argument_base =
+      start(codebase()) | view(View::CallArgument) | nodes();
+  CHECK_THROWS_WITH(
+      ungrouped_executor.run((argument_base | except_(argument_base)).plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
+  CHECK_THROWS_WITH(
+      ungrouped_executor.run(
+          (argument_base | except_(argument_base) | count()).plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
+
+  Storage mirrored_first(":memory:");
+  seed(mirrored_first, "/Users/husam/.codex/worktrees/a/cpp-indexer", "",
+       "mirrored", false);
+  Storage mirrored_second(":memory:");
+  seed(mirrored_second, "/Users/husam/.codex/worktrees/b/cpp-indexer", "",
+       "mirrored", false);
+  Executor mirrored_first_executor(mirrored_first);
+  Executor mirrored_second_executor(mirrored_second);
+  const auto mirrored_first_evidence =
+      mirrored_first_executor.run((start(codebase()) | view(View::Evidence) |
+                                   nodes() | select({"identity_key"}))
+                                      .plan());
+  const auto mirrored_second_evidence =
+      mirrored_second_executor.run((start(codebase()) | view(View::Evidence) |
+                                    nodes() | select({"identity_key"}))
+                                       .plan());
+  const auto mirrored_first_arguments = mirrored_first_executor.run(
+      (start(codebase()) | view(View::CallArgument) | nodes() |
+       select({"identity_key"}))
+          .plan());
+  const auto mirrored_second_arguments = mirrored_second_executor.run(
+      (start(codebase()) | view(View::CallArgument) | nodes() |
+       select({"identity_key"}))
+          .plan());
+  CHECK(mirrored_first_evidence.rows == mirrored_second_evidence.rows);
+  CHECK(mirrored_first_arguments.rows == mirrored_second_arguments.rows);
+
+  Storage non_catalogued_first(":memory:");
+  seed(non_catalogued_first, "/tmp/a/cpp-indexer", "",
+       "non-catalogued-mirrored", false);
+  Storage non_catalogued_second(":memory:");
+  seed(non_catalogued_second, "/tmp/b/cpp-indexer", "",
+       "non-catalogued-mirrored", false);
+  Executor non_catalogued_first_executor(non_catalogued_first);
+  Executor non_catalogued_second_executor(non_catalogued_second);
+  const auto non_catalogued_first_evidence = non_catalogued_first_executor.run(
+      (start(codebase()) | view(View::Evidence) | nodes() |
+       select({"identity_key"}))
+          .plan());
+  const auto non_catalogued_second_evidence =
+      non_catalogued_second_executor.run((start(codebase()) |
+                                          view(View::Evidence) | nodes() |
+                                          select({"identity_key"}))
+                                             .plan());
+  const auto non_catalogued_first_arguments = non_catalogued_first_executor.run(
+      (start(codebase()) | view(View::CallArgument) | nodes() |
+       select({"identity_key"}))
+          .plan());
+  const auto non_catalogued_second_arguments =
+      non_catalogued_second_executor.run((start(codebase()) |
+                                          view(View::CallArgument) | nodes() |
+                                          select({"identity_key"}))
+                                             .plan());
+  CHECK(non_catalogued_first_evidence.rows ==
+        non_catalogued_second_evidence.rows);
+  CHECK(non_catalogued_first_arguments.rows ==
+        non_catalogued_second_arguments.rows);
 }
 
 TEST_CASE("query_plan: devirtualized calls preserve the inherited receiver") {

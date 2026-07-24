@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cidx.dev/schemas/extension-package.schema.json",
+  "title": "CIDX declarative extension package",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format", "name", "version", "kind", "content_hash", "publisher",
+    "origin", "license", "entry_points", "namespaces", "compatibility",
+    "dependencies", "schemas", "budgets", "sandbox_profile", "trust", "evidence"
+  ],
+  "properties": {
+    "format": {"const": "cidx.package/v1"},
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]*(/[a-z][a-z0-9_.-]*)?$"},
+    "version": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+){0,2}(-[0-9A-Za-z.-]+)?$"},
+    "kind": {"enum": ["cidx.extract", "cidx.analysis", "cidx.query", "cidx.model"]},
+    "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "publisher": {"type": "string", "minLength": 1},
+    "origin": {"type": "string", "minLength": 1},
+    "license": {"type": "string", "minLength": 1},
+    "entry_points": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}},
+    "namespaces": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cidx": {"type": ["string", "number"]},
+        "cidx_version": {"type": ["string", "number"]},
+        "clang": {"type": ["string", "number"]},
+        "catalog_version": {"type": "integer"},
+        "artifact_version": {"type": "integer"}
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {"type": "string"},
+          {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}, "version": {"type": "string"}, "kind": {"type": "string"}, "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}, "additionalProperties": false}
+        ]
+      }
+    },
+    "schemas": {"type": "array", "items": {"type": "string"}},
+    "budgets": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "sandbox_profile": {"type": "string", "minLength": 1},
+    "trust": {"enum": ["unverified", "publisher-verified", "trusted"]},
+    "evidence": {"enum": ["extension-analysis", "source", "derived", "inferred", "proof"]},
+    "capabilities": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "metadata": {"type": "object"},
+    "signature": {"type": "string", "minLength": 1}
+  }
+}

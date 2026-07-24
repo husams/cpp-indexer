@@ -18,5 +18,9 @@ jobs:
           python-version: "3.12"
       - name: Check module and dependency contract
         run: python scripts/check_architecture.py --manifest architecture/cidx-module-manifest.json
+      - name: Check platform architecture contract
+        run: python scripts/check_platform_contract.py --module-manifest architecture/cidx-module-manifest.json
       - name: Run architecture mutation tests
         run: python tests/architecture_test.py
+      - name: Run platform contract mutation tests
+        run: python tests/platform_contract_test.py

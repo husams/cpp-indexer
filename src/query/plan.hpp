@@ -30,7 +30,17 @@ public:
 
 // ---- Views ------------------------------------------------------------------
 
-enum class View { Symbol, Entity };
+enum class View : std::uint8_t {
+  Symbol,
+  Entity,
+  Parameter,
+  TemplateParameter,
+  TemplateArgument,
+  CallArgument,
+  Edge,
+  Evidence,
+  Type,
+};
 
 const char *view_name(View v);
 
@@ -50,6 +60,8 @@ struct RelationDesc {
   std::string evidence;
   std::string evidence_capabilities;
   std::string completeness;
+  bool virtual_relation = false;
+  View target_view = View::Symbol;
 };
 
 // All catalogued relations (18 symbol-layer + 12 entity-layer).
@@ -58,9 +70,10 @@ const std::array<catalog::ExtensionRelation,
                  catalog::kExtensionRelations.size()> &
 extension_relation_catalog();
 
-// Resolve `name` (bare or "symbol."/"entity."-qualified) in `active` view.
+// Resolve `name` (bare or view-qualified) in `active` view.
 // Returns nullptr when unknown.
-const RelationDesc *resolve_relation(const std::string &name, View active);
+const RelationDesc *resolve_relation(const std::string &name, View active,
+                                     bool inbound = false);
 
 // entity_kind name -> id (entity_kind seed values 0..9; -1 when unknown).
 int64_t entity_kind_id(const std::string &name);
@@ -255,6 +268,9 @@ class Query {
 public:
   explicit Query(Source src) { plan_.source = std::move(src); }
   Query(const Query &) = default;
+  Query &operator=(const Query &) = default;
+  Query(Query &&) noexcept = default;
+  Query &operator=(Query &&) noexcept = default;
 
   [[nodiscard]] const Plan &plan() const { return plan_; }
 

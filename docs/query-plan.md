@@ -10,29 +10,39 @@ parser all produce the same IR; execution is a read-only SQLite compiler over
 `index.db`. Both languages must emit **byte-identical canonical JSON** for the
 same plan and semantically identical, deterministic results.
 
-## Views (v1)
+## Views
 
 | View | Node domain | Relation namespace |
 |---|---|---|
 | `symbol` | `symbol` rows | `edge` kinds (`symbol.calls`, `symbol.uses`, ...) |
 | `entity` | `entity_node` rows (ids are symbol ids) | `entity_edge` kinds (`entity.uses`, ...) |
+| `parameter` | ordered callable parameter slots | virtual relations compiled to `parameter` |
+| `template_parameter` | ordered template parameter slots | virtual relations compiled to `template_param` |
+| `template_argument` | ordered template arguments and pack elements | virtual relations compiled to `template_arg` |
+| `call_argument` | arguments for one call occurrence | virtual relations compiled to `call_arg` |
+| `edge` | physical edge facts with logical identity | virtual relations compiled to `edge`/`edge_site` |
+| `evidence` | bounded source occurrence facts | virtual relations compiled to `edge_site` |
+| `type` | normalized type nodes | virtual relations compiled to `type_node`/`type_edge` |
 
 Views are typed: an id may appear in an entity-view stream only when it has an
 `entity_node` row. `view(entity)` therefore **drops** ids without one (it never
 maps them — moving from a method to its record still traverses `method_of`);
 `view(symbol)` is a pure relabel (every entity id is a symbol id). A traversal
-retargets the stream view to **its relation's layer** (`out(entity.uses)` from
-a symbol stream yields an entity-view stream, and later bare relation names
-resolve there). From a `codebase()` source, `nodes(...)` enumerates the current
-view's domain. Reserved for later slices: `codebase`, `edge`, `site`,
-`template_parameter`, `template_argument`, `type`, `concept`, `path`.
+retargets the stream view to its relation's target domain. From a `codebase()`
+source, `nodes(...)` enumerates the current view's domain. Every typed row has
+a stable logical identity derived from its natural key; physical SQLite row ids
+are implementation details. Pack-bearing views retain both the outer
+`position` and the element `pack_index`.
 
 ## Relation catalog
 
-Relations are data, not methods. v1 catalog = the 18 Layer-0 `edge_kind` names
-under the `symbol` layer and the 12 `entity_edge_kind` names under the `entity`
-layer. A bare relation name resolves in the current view's namespace; the
-qualified forms `symbol.<name>` / `entity.<name>` are always accepted.
+Relations are data, not methods. The catalog contains the 18 Layer-0
+`edge_kind` names, the 12 `entity_edge_kind` names, and typed virtual
+relations such as `has_parameter`, `has_template_argument`, `has_argument`,
+`of_type`, and `has_evidence`. Virtual relations compile to their dedicated
+physical tables; they never duplicate rows into a generic edge table. A bare
+relation resolves at the active endpoint; qualified forms are accepted for all
+logical views.
 Normalization stores the qualified name in canonical JSON. `callers()` is
 `in(calls)`; `callees()` is `out(calls)`; `bases()` is `out(inherits)`;
 `subclasses()` is `in(inherits)`.
@@ -54,7 +64,7 @@ Pred   := all_of([p...]) | any_of([p...]) | not(p)
         | exactly(n, relation, pred?)
 ```
 
-Fields (v1): `id`, `usr`, `name` (COALESCE(qual_name, spelling)), `spelling`,
+Fields: `id`, `usr`, `name` (COALESCE(qual_name, spelling)), `spelling`,
 `qual_name`, `kind`, `entity_type`, `file`, `line`, `col`, `is_definition`,
 `is_pure`, `is_static`, `semantic_universe`, `identity_key`.
 `file`/`line`/`col` are select-only; the rest are also
@@ -153,7 +163,8 @@ expanded quantifier tree.
 
 ```
 { "shape": "nodes" | "rows" | "scalar",
-  "view": "symbol" | "entity",
+  "view": "symbol" | "entity" | "parameter" | "template_parameter" |
+           "template_argument" | "call_argument" | "edge" | "evidence" | "type",
   "count": <int>,          // scalar value for shape=scalar
   "truncated": <bool>,
   "index": {
@@ -185,8 +196,9 @@ generations. Row objects preserve `select` field order.
 
 ## Compatibility
 
-This is a read/query-layer addition: no schema bump, no reindex, and the
-existing `GraphQuery` / `EntityQuery` surfaces are untouched (adapter rewrites
-are migration step 4, a later slice). Deferred to later slices: CXQ text
-parser, `sites()`, `path()`, `rank()`, edge/site/type/template views,
-`cidx query` CLI, and agent tool surface.
+This is a read/query-layer addition: no schema bump. Existing `GraphQuery` /
+`EntityQuery` surfaces remain compatibility adapters over the same physical
+tables, while CXQ exposes canonical logical slot and evidence identities.
+Evidence expansion is explicit and budgeted; truncated results remain marked
+`truncated: true`. Deferred to later slices: `sites()`, `path()`, `rank()`,
+and the `cidx query` agent tool surface.

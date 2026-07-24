@@ -35,6 +35,7 @@ int cmd_add_source(const ParsedArgs &args, Context &ctx);
 int cmd_import(const ParsedArgs &args, Context &ctx);
 int cmd_index(const ParsedArgs &args, Context &ctx);
 int cmd_search(const ParsedArgs &args, Context &ctx);
+int cmd_query(const ParsedArgs &args, Context &ctx);
 int cmd_show_symbol(const ParsedArgs &args, Context &ctx);
 int cmd_show_file(const ParsedArgs &args, Context &ctx);
 int cmd_list_components(const ParsedArgs &args, Context &ctx);
@@ -70,6 +71,10 @@ int cmd_verify(const ParsedArgs &args, Context &ctx);
 // analyze: Souffle Datalog analyses over the semantic index
 // (src/cli/analyze.cpp).
 int cmd_analyze(const ParsedArgs &args, Context &ctx);
+
+int cmd_ui_export(const ParsedArgs &args, Context &ctx);
+int cmd_ui_open(const ParsedArgs &args, Context &ctx);
+int cmd_ui_status(const ParsedArgs &args, Context &ctx);
 
 // Graph query commands (cidx graph callers|callees|refs|neighbors|walk|path|
 //                            hierarchy|dispatch)
