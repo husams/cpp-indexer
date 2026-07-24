@@ -17,6 +17,7 @@
 #include "query/result_protocol.hpp"
 #include "storage/ports.hpp"
 #include "storage/records.hpp"
+#include "storage/sqlite_read_adapter.hpp"
 
 namespace cidx {
 class SqliteStorageService;

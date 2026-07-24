@@ -5,6 +5,7 @@
 // count-fallback logic (R2/R3) are copied exactly.
 #include "graph/query.hpp"
 
+#include "storage/sqlite_read_adapter.hpp"
 #include "storage/storage.hpp"
 
 #include <algorithm>

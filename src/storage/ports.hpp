@@ -3,20 +3,19 @@
 #pragma once
 
 #include "storage/records.hpp"
-#include "storage/sqlite.hpp"
 
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
-#include <stdexcept>
 #include <string>
-#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
 
 namespace cidx::storage {
+
+class SqliteReadDb;
 
 enum class FailurePoint : std::uint8_t {
   begin,
@@ -29,25 +28,6 @@ class FailureInjector {
 public:
   virtual ~FailureInjector() = default;
   virtual void inject(FailurePoint point) = 0;
-};
-
-// Read-only SQL capability. The returned statement is prepared through
-// SQLite's readonly classification; callers cannot obtain the owning
-// connection, execute scripts, or prepare DML through this interface.
-class SqliteReadDb final {
-public:
-  explicit SqliteReadDb(SqliteDb &db) : db_(&db) {}
-
-  [[nodiscard]] SqliteStmt prepare(std::string_view sql) const {
-    SqliteStmt statement = db_->prepare(sql);
-    if (!statement.readonly()) {
-      throw std::logic_error("non-readonly SQL through SqliteReadDb");
-    }
-    return statement;
-  }
-
-private:
-  SqliteDb *db_;
 };
 
 class GraphReadPort {
