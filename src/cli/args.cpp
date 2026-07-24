@@ -157,6 +157,19 @@ void build_top_level(CLI::App &app, ParsedArgs &pa) {
   search->preparse_callback([&pa](std::size_t) { pa.limit = 25; });
   search->callback([&pa] { pa.command = "search"; });
 
+  CLI::App *query = app.add_subcommand(
+      "query", "execute a declarative CXQ query against the index");
+  query
+      ->add_option("query", pa.query_text,
+                   "CXQ expression, for example codebase() | nodes()")
+      ->required();
+  query->add_option("--db", pa.index_db, kDbHelpText);
+  query->add_flag("--json", pa.query_json,
+                  "emit the stable machine-readable result");
+  query->add_flag("--explain", pa.query_explain,
+                  "show the normalized plan without executing it");
+  query->callback([&pa] { pa.command = "query"; });
+
   CLI::App *analyze = app.add_subcommand(
       "analyze", "run Souffle Datalog analyses over the index");
   analyze->add_option("--rule", pa.analyze_rule,
@@ -759,7 +772,9 @@ ParsedArgs parse_args(const std::vector<std::string> &argv) {
     usage_fail(app, e);
   }
 
-  if ((pa.command == "graph" || pa.command == "include") && pa.index_db) {
+  if ((pa.command == "graph" || pa.command == "include" ||
+       pa.command == "query") &&
+      pa.index_db) {
     pa.index_db = pathutil::abspath(pathutil::expanduser(*pa.index_db));
   }
   if (pa.command == "include") {

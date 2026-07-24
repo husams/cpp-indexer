@@ -28,6 +28,7 @@ from .generated_extensions import EXTENSION_RELATIONS as _GENERATED_EXTENSION_RE
 __all__ = [
     "PlanError", "TraversalMode", "Pred", "Stage", "Source", "Plan", "Query", "Result",
     "Executor", "start", "codebase", "symbol", "entity",
+    "parse_cxq",
     "all_of", "any_of", "not_", "eq", "ne", "glob", "in_list",
     "nodes", "view", "where", "out", "in_", "union_", "intersect", "except_",
     "select", "count", "distinct", "order_by", "limit",
@@ -272,6 +273,259 @@ def order_by(fields: Sequence[str]) -> Stage:
 
 def limit(n: int) -> Stage:
     return Stage(op="limit", n=n)
+
+
+# ---- Textual CXQ -------------------------------------------------------------
+
+def _cxq_trim(value: str) -> str:
+    return value.strip()
+
+
+def _cxq_atom(value: str) -> str:
+    text = _cxq_trim(value)
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        return text[1:-1]
+    return text
+
+
+def _cxq_split(value: str, delimiter: str) -> list[str]:
+    parts: list[str] = []
+    begin = 0
+    parens = brackets = 0
+    quote = ""
+    escaped = False
+    for i, char in enumerate(value):
+        if quote:
+            if char == quote and not escaped:
+                quote = ""
+            escaped = char == "\\" and not escaped
+            continue
+        if char in "'\"":
+            quote = char
+        elif char == "(":
+            parens += 1
+        elif char == ")":
+            parens -= 1
+        elif char == "[":
+            brackets += 1
+        elif char == "]":
+            brackets -= 1
+        elif char == delimiter and parens == 0 and brackets == 0:
+            parts.append(_cxq_trim(value[begin:i]))
+            begin = i + 1
+    if quote or parens or brackets:
+        _fail("E_PARSE", "unbalanced quotes or delimiters")
+    parts.append(_cxq_trim(value[begin:]))
+    return parts
+
+
+def _cxq_call(token: str, name: str) -> list[str]:
+    value = _cxq_trim(token)
+    prefix = f"{name}("
+    if not value.startswith(prefix) or not value.endswith(")"):
+        _fail("E_PARSE", f"expected {name}(...)")
+    inside = value[len(prefix):-1]
+    return [] if not _cxq_trim(inside) else _cxq_split(inside, ",")
+
+
+def _cxq_find_keyword(value: str, keyword: str) -> Optional[int]:
+    parens = brackets = 0
+    quote = ""
+    escaped = False
+    for i, char in enumerate(value):
+        if quote:
+            if char == quote and not escaped:
+                quote = ""
+            escaped = char == "\\" and not escaped
+            continue
+        if char in "'\"":
+            quote = char
+            continue
+        if char == "(":
+            parens += 1
+            continue
+        if char == ")":
+            parens -= 1
+            continue
+        if char == "[":
+            brackets += 1
+            continue
+        if char == "]":
+            brackets -= 1
+            continue
+        end = i + len(keyword)
+        if (parens == 0 and brackets == 0 and value[i:end] == keyword and
+                (i == 0 or value[i - 1].isspace()) and
+                (end == len(value) or value[end].isspace())):
+            return i
+    return None
+
+
+def _cxq_int(value: str) -> Optional[int]:
+    try:
+        text = _cxq_trim(value)
+        return int(text) if text else None
+    except ValueError:
+        return None
+
+
+def _cxq_list(value: str) -> list[str]:
+    text = _cxq_trim(value)
+    if len(text) < 2 or text[0] != "[" or text[-1] != "]":
+        _fail("E_PARSE", "expected a bracketed value list")
+    inside = _cxq_trim(text[1:-1])
+    if not inside:
+        _fail("E_PARSE", "value list must not be empty")
+    return [_cxq_atom(part) for part in _cxq_split(inside, ",")]
+
+
+def _cxq_pred(expression: str) -> Pred:
+    text = _cxq_trim(expression)
+    while text.startswith("(") and text.endswith(")"):
+        inner = text[1:-1]
+        if len(_cxq_split(inner, ",")) != 1:
+            break
+        text = _cxq_trim(inner)
+    if text.startswith("not "):
+        return not_(_cxq_pred(text[4:]))
+    for keyword in ("or", "and"):
+        at = _cxq_find_keyword(text, keyword)
+        if at is not None:
+            children = [_cxq_pred(text[:at]), _cxq_pred(text[at + len(keyword):])]
+            return any_of(children) if keyword == "or" else all_of(children)
+    for name in ("eq", "ne", "glob", "in"):
+        if text.startswith(f"{name}("):
+            args = _cxq_call(text, name)
+            if name == "in":
+                if len(args) != 2:
+                    _fail("E_PARSE", "in() requires a field and list")
+                return in_list(_cxq_atom(args[0]), _cxq_list(args[1]))
+            if len(args) != 2:
+                _fail("E_PARSE", f"{name}() requires a field and value")
+            field_name, value = _cxq_atom(args[0]), _cxq_atom(args[1])
+            if name == "glob":
+                return glob(field_name, value)
+            if value in ("true", "false"):
+                pred = eq(field_name, value == "true")
+            elif (number := _cxq_int(value)) is not None:
+                pred = eq(field_name, number)
+            else:
+                pred = eq(field_name, value)
+            return not_(pred) if name == "ne" else pred
+    for operator in ("!=", "~=", "=", " in "):
+        at = text.find(operator)
+        if at == -1:
+            continue
+        field_name = _cxq_trim(text[:at])
+        value = _cxq_trim(text[at + len(operator):])
+        if not field_name:
+            _fail("E_PARSE", "missing predicate field")
+        if operator == " in ":
+            return in_list(field_name, _cxq_list(value))
+        rhs = _cxq_atom(value)
+        if operator == "~=":
+            return glob(field_name, rhs)
+        if rhs in ("true", "false"):
+            pred = eq(field_name, rhs == "true")
+        elif (number := _cxq_int(rhs)) is not None:
+            pred = eq(field_name, number)
+        else:
+            pred = eq(field_name, rhs)
+        return not_(pred) if operator == "!=" else pred
+    _fail("E_PARSE", f"unsupported predicate '{text}'")
+
+
+def _cxq_stage(token: str) -> Stage:
+    value = _cxq_trim(token)
+    names = ("nodes", "view", "where", "out", "in", "union", "intersect",
+             "except", "select", "count", "distinct", "order_by", "rank",
+             "limit")
+    for name in names:
+        if not value.startswith(f"{name}("):
+            continue
+        args = _cxq_call(value, name)
+        if name == "nodes":
+            if len(args) > 1:
+                _fail("E_PARSE", "nodes() takes zero or one predicate")
+            return nodes() if not args else nodes(_cxq_pred(args[0]))
+        if name == "view":
+            if len(args) != 1 or _cxq_atom(args[0]) not in (SYMBOL_VIEW, ENTITY_VIEW):
+                _fail("E_PARSE", "view() requires symbol or entity")
+            return view(_cxq_atom(args[0]))
+        if name == "where":
+            if len(args) != 1:
+                _fail("E_PARSE", "where() requires one expression")
+            return where(_cxq_pred(args[0]))
+        if name in ("out", "in"):
+            if not args:
+                _fail("E_PARSE", f"{name}() requires a relation")
+            min_depth = max_depth = 1
+            if len(args) >= 2 and (depth := _cxq_int(args[1])) is not None:
+                min_depth = max_depth = depth
+            if len(args) >= 3:
+                first = _cxq_int(args[1])
+                second = _cxq_int(args[2])
+                if first is None or second is None:
+                    _fail("E_PARSE", "depth must be written as depth=min..max")
+                min_depth, max_depth = first, second
+            for arg in args[1:]:
+                if arg.startswith("depth="):
+                    bounds = arg[6:].split("..")
+                    if len(bounds) != 2 or any(_cxq_int(x) is None for x in bounds):
+                        _fail("E_PARSE", "depth must be written as depth=min..max")
+                    min_depth, max_depth = int(bounds[0]), int(bounds[1])
+            return (out if name == "out" else in_)(_cxq_atom(args[0]), min_depth, max_depth)
+        if name in ("select", "order_by", "rank"):
+            fields = [_cxq_atom(arg) for arg in args]
+            if not fields:
+                _fail("E_PARSE", f"{name}() requires fields")
+            return select(fields) if name == "select" else order_by(fields)
+        if name == "count":
+            return count()
+        if name == "distinct":
+            return distinct()
+        if name == "limit":
+            if len(args) != 1 or (number := _cxq_int(args[0])) is None:
+                _fail("E_PARSE", "limit() requires one integer")
+            return limit(number)
+        if name in ("union", "intersect", "except"):
+            if len(args) != 1:
+                _fail("E_PARSE", f"{name}() requires one query")
+            nested = parse_cxq(args[0])
+            nested_query = Query(nested.source)
+            for nested_stage in nested.stages:
+                nested_query = nested_query | nested_stage
+            return {"union": union_, "intersect": intersect,
+                    "except": except_}[name](nested_query)
+    _fail("E_PARSE", f"unknown stage '{value}'")
+
+
+def parse_cxq(text: str) -> Plan:
+    """Parse the dependency-free v1 textual CXQ subset into a QueryPlan."""
+    parts = _cxq_split(text, "|")
+    if not parts or not parts[0]:
+        _fail("E_PARSE", "query is empty")
+    first = _cxq_trim(parts[0])
+    if first.startswith("codebase("):
+        args = _cxq_call(first, "codebase")
+        if args:
+            _fail("E_PARSE", "codebase() takes no arguments")
+        query = Query(codebase())
+    elif first.startswith("symbol("):
+        args = _cxq_call(first, "symbol")
+        if len(args) != 1:
+            _fail("E_PARSE", "symbol() requires one reference")
+        query = Query(symbol(_cxq_atom(args[0])))
+    elif first.startswith("entity("):
+        args = _cxq_call(first, "entity")
+        if len(args) != 1:
+            _fail("E_PARSE", "entity() requires one reference")
+        query = Query(entity(_cxq_atom(args[0])))
+    else:
+        _fail("E_PARSE", "query must start with codebase(), symbol(), or entity()")
+    for part in parts[1:]:
+        query = query | _cxq_stage(part)
+    return query.plan
 
 
 # ---- Validation / normalization -----------------------------------------------------

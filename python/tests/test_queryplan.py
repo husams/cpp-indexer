@@ -22,6 +22,7 @@ from indexer.queryplan import (  # noqa: E402
     Executor, PlanError, all_of, canonical_json, codebase, count, distinct,
     entity, eq, except_, glob, in_, in_list, intersect, limit, ne, nodes,
     not_, order_by, out, select, start, symbol, union_, validate, view, where,
+    parse_cxq,
 )
 
 _REPO_ROOT = os.path.abspath(
@@ -106,6 +107,22 @@ def test_canonical_json_matches_shared_golden():
         for name, plan in sorted(_golden_plans().items()))
     with open(_GOLDEN, "rb") as fh:
         assert rendered.encode() == fh.read()
+
+
+def test_textual_cxq_lowers_to_the_shared_plan():
+    parsed = parse_cxq(
+        "codebase() | nodes(kind = class) | "
+        "where(is_definition = true and name ~= 'Widget*') | "
+        "select(name, usr) | order_by(name) | limit(10)")
+    expected = (
+        start(codebase()) | nodes(eq("kind", "class"))
+        | where(all_of([eq("is_definition", True),
+                       glob("name", "Widget*")]))
+        | select(["name", "usr"]) | order_by(["name"]) | limit(10)
+    ).plan
+    assert canonical_json(parsed) == canonical_json(expected)
+    with pytest.raises(PlanError, match=r"E_PARSE: limit\(\) requires one integer"):
+        parse_cxq("codebase() | limit(nope)")
 
 
 # ---------------------------------------------------------------------------
