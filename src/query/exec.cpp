@@ -532,22 +532,18 @@ private:
     return false;
   }
 
-  void filter_ambiguous_ungrouped(Stream &st) {
+  void reject_ambiguous_ungrouped(Stream &st) {
     if (st.view != View::CallArgument && st.view != View::Evidence) {
       return;
     }
-    std::vector<Stream::LogicalKey> kept;
-    kept.reserve(st.keys.size());
     for (const auto &key : st.keys) {
       if (st.view == View::Evidence && key.tag == 1) {
-        kept.push_back(key);
         continue;
       }
-      if (!ambiguous_ungrouped_file(key.b)) {
-        kept.push_back(key);
+      if (ambiguous_ungrouped_file(key.b)) {
+        throw PlanError("E_IDENTITY: ambiguous ungrouped component identity");
       }
     }
-    st.keys = std::move(kept);
   }
 
   static const std::string &join_clause(bool need_entity) {
@@ -1841,7 +1837,7 @@ private:
   }
 
   void materialize(Stream &st, const std::vector<std::string> &fields) {
-    filter_ambiguous_ungrouped(st);
+    reject_ambiguous_ungrouped(st);
     if (!st.keys.empty() ||
         (st.view != View::Symbol && st.view != View::Entity)) {
       auto by_key = fetch_typed_cells(st, fields);
@@ -1991,7 +1987,7 @@ public:
     Result res;
     res.view = st.view;
     res.truncated = st.truncated;
-    filter_ambiguous_ungrouped(st);
+    reject_ambiguous_ungrouped(st);
     if (st.shape == Shape::Scalar) {
       res.shape = Shape::Scalar;
       // count() after select carries rows; otherwise ids hold the stream.

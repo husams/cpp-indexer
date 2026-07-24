@@ -617,16 +617,24 @@ def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable(
         grouped=False,
     )
     ungrouped_executor = Executor(ungrouped)
-    ungrouped_evidence = ungrouped_executor.run(
-        (start(codebase()) | view("evidence") | nodes()
-         | select(["id", "identity_key"])).plan
-    )
-    ungrouped_arguments = ungrouped_executor.run(
-        (start(codebase()) | view("call_argument") | nodes()
-         | select(["id", "identity_key"])).plan
-    )
-    assert not ungrouped_evidence.rows
-    assert not ungrouped_arguments.rows
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run(
+            (start(codebase()) | view("evidence") | nodes()
+             | select(["id", "identity_key"])).plan
+        )
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run(
+            (start(codebase()) | view("evidence") | nodes() | count()).plan
+        )
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run(
+            (start(codebase()) | view("call_argument") | nodes()
+             | select(["id", "identity_key"])).plan
+        )
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run(
+            (start(codebase()) | view("call_argument") | nodes() | count()).plan
+        )
 
     mirrored_first = Storage(":memory:")
     _seed_reverse_typed_graph(

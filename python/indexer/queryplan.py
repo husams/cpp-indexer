@@ -1294,14 +1294,14 @@ class Executor:
             for candidate in components
         )
 
-    def _filter_ambiguous_ungrouped(self, st: _Stream) -> None:
+    def _reject_ambiguous_ungrouped(self, st: _Stream) -> None:
         if st.view not in ("call_argument", "evidence"):
             return
-        st.keys = [
-            key for key in st.keys
-            if (st.view == "evidence" and len(key) > 4 and key[4] == 1)
-            or not self._ambiguous_ungrouped_file(key[1])
-        ]
+        for key in st.keys:
+            if (st.view == "evidence" and len(key) > 4 and key[4] == 1):
+                continue
+            if self._ambiguous_ungrouped_file(key[1]):
+                raise PlanError("E_IDENTITY: ambiguous ungrouped component identity")
 
     def _portable_file(self, file_id: int) -> str:
         row = self._conn.execute(
@@ -1752,7 +1752,7 @@ class Executor:
         return by_id
 
     def _materialize(self, st: _Stream, fields: Sequence[str]) -> None:
-        self._filter_ambiguous_ungrouped(st)
+        self._reject_ambiguous_ungrouped(st)
         if st.view not in (SYMBOL_VIEW, ENTITY_VIEW):
             by_key = self._fetch_typed_cells(st, fields)
             st.fields = tuple(fields)
@@ -1827,6 +1827,7 @@ class Executor:
     # -- finish --------------------------------------------------------------------
 
     def _finish(self, st: _Stream) -> Result:
+        self._reject_ambiguous_ungrouped(st)
         if st.shape == "scalar":
             return Result(
                 shape="scalar", view=st.view, truncated=st.truncated,

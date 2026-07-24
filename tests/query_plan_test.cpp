@@ -889,16 +889,26 @@ TEST_CASE(
   seed(ungrouped, "/repo/A/project", "", "ungrouped-a", false);
   seed(ungrouped, "/repo/B/project", "", "ungrouped-b", false);
   Executor ungrouped_executor(ungrouped);
-  const auto ungrouped_evidence =
+  CHECK_THROWS_WITH(
       ungrouped_executor.run((start(codebase()) | view(View::Evidence) |
                               nodes() | select({"id", "identity_key"}))
-                                 .plan());
-  const auto ungrouped_arguments =
+                                 .plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
+  CHECK_THROWS_WITH(
+      ungrouped_executor.run(
+          (start(codebase()) | view(View::Evidence) | nodes() | count())
+              .plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
+  CHECK_THROWS_WITH(
       ungrouped_executor.run((start(codebase()) | view(View::CallArgument) |
                               nodes() | select({"id", "identity_key"}))
-                                 .plan());
-  CHECK(ungrouped_evidence.rows.empty());
-  CHECK(ungrouped_arguments.rows.empty());
+                                 .plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
+  CHECK_THROWS_WITH(
+      ungrouped_executor.run(
+          (start(codebase()) | view(View::CallArgument) | nodes() | count())
+              .plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
 
   Storage mirrored_first(":memory:");
   seed(mirrored_first, "/Users/husam/.codex/worktrees/a/cpp-indexer", "",

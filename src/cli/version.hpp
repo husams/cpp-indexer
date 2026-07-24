@@ -18,7 +18,7 @@ inline constexpr int kDatabaseReaderMax = 39;
 
 inline constexpr int kCatalogVersion = 1;
 inline constexpr std::string_view kCatalogHash =
-    "sha256:6a0d9c70c30ea7954b6866b4345b2abc34936fd594acf51d088cb6232916e385";
+    "sha256:452f50ece11ad5817d04155351665d217f68c048de0fffd33769109c77c0a459";
 inline constexpr int kArtifactVersion = 1;
 inline constexpr int kArtifactReaderMin = 1;
 inline constexpr int kArtifactReaderMax = 1;
