@@ -14,9 +14,10 @@ explicitly deferred.
 - One core database is the default workspace layout. Core facts are not
   sharded by repository, table family, or analysis merely to make files
   smaller.
-- The current repository schema is v39. Schema-v34 databases remain the
-  compatibility floor and must migrate deterministically before they are
-  read as current.
+- The current repository schema is v39 with the reader window declared by
+  [`spec/platform/version.json`](../../spec/platform/version.json). Schema v34
+  is the HSE-74 qualification baseline; the authoritative migration floor is
+  the value in that version contract, and migrations must remain deterministic.
 - Database-local integer IDs are storage keys only. Stable external identity
   is carried by the semantic universe plus USR, type key, or artifact identity.
 - A missing, unresolved, stale, or partial fact is not represented as a
@@ -106,6 +107,6 @@ backup, inspection, packaging, and compatibility costs.
 
 Storage changes must update the machine-readable manifest and the relevant
 result artifact or test when they change a physical rule. Schema changes must
-include deterministic v34 migration evidence, old-database coverage, and
-canonical result equivalence. New indexes and projections require a named
+include deterministic v34-baseline migration evidence, old-database coverage,
+and canonical result equivalence. New indexes and projections require a named
 workload and before/after measurement.

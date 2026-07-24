@@ -3,8 +3,12 @@
   "authority": "sqlite-core",
   "schema": {
     "current": 39,
-    "compatibility_floor": 34,
-    "migration": "deterministic"
+    "migration_floor": 2,
+    "reader_min": 39,
+    "reader_max": 39,
+    "qualification_baseline": 34,
+    "migration": "deterministic",
+    "source": "spec/platform/version.json#/database"
   },
   "core": {
     "default_file": "index.db",

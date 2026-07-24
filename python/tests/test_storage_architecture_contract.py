@@ -9,19 +9,26 @@ def load_contract() -> dict:
     return json.loads((ROOT / "docs/storage/architecture-v1.json").read_text())
 
 
+def load_version_contract() -> dict:
+    return json.loads((ROOT / "spec/platform/version.json").read_text())
+
+
 def test_storage_architecture_contract_is_versioned_and_authoritative():
     contract = load_contract()
+    database = load_version_contract()["database"]
 
     assert contract["architecture_version"] == "storage-v1"
     assert contract["authority"] == "sqlite-core"
     assert contract["core"]["default_file"] == "index.db"
     assert contract["core"]["authoritative"] is True
     assert contract["core"]["single_database_default"] is True
-    assert contract["schema"] == {
-        "current": 39,
-        "compatibility_floor": 34,
-        "migration": "deterministic",
-    }
+    assert contract["schema"]["current"] == database["schema_version"]
+    assert contract["schema"]["migration_floor"] == database["migration_floor"]
+    assert contract["schema"]["reader_min"] == database["reader_min"]
+    assert contract["schema"]["reader_max"] == database["reader_max"]
+    assert contract["schema"]["qualification_baseline"] == 34
+    assert contract["schema"]["source"] == "spec/platform/version.json#/database"
+    assert contract["schema"]["migration"] == "deterministic"
 
 
 def test_storage_physical_classes_preserve_typed_slots_and_evidence():
