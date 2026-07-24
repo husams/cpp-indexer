@@ -71,6 +71,9 @@ public:
   // Runs the statement to completion (e.g. DML with RETURNING).
   void step_done();
 
+  [[nodiscard]] bool readonly() const;
+  [[nodiscard]] int column_count() const;
+
   [[nodiscard]] bool col_is_null(int idx) const;
   [[nodiscard]] int64_t col_int64(int idx) const;
   [[nodiscard]] double col_double(int idx) const;

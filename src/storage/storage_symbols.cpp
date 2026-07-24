@@ -27,7 +27,7 @@ namespace cidx {
 
 using namespace detail;
 
-int64_t Storage::add_symbol(const Symbol &sym) {
+int64_t SqliteStorageService::add_symbol(const Symbol &sym) {
   if (!is_symbol_kind(sym.kind)) {
     throw StorageError("unknown symbol kind '" + sym.kind + "'");
   }
@@ -172,7 +172,7 @@ int64_t Storage::add_symbol(const Symbol &sym) {
   return sid;
 }
 
-bool Storage::update_symbol(
+bool SqliteStorageService::update_symbol(
     const std::string &usr,
     const std::vector<std::pair<std::string, SqlValue>> &values,
     const std::optional<int64_t> &semantic_universe_id,
@@ -186,7 +186,7 @@ bool Storage::update_symbol(
   return update_symbol_by_id(target->id, values);
 }
 
-bool Storage::update_symbol_by_id(
+bool SqliteStorageService::update_symbol_by_id(
     int64_t symbol_id,
     const std::vector<std::pair<std::string, SqlValue>> &values) {
   std::vector<std::string> bad;
@@ -238,13 +238,13 @@ bool Storage::update_symbol_by_id(
   return db_.changes() > 0;
 }
 
-void Storage::delete_symbols_for_file(int64_t file_id) {
+void SqliteStorageService::delete_symbols_for_file(int64_t file_id) {
   auto del = db_.prepare("DELETE FROM symbol WHERE file_id = ?");
   del.bind(1, file_id);
   del.step_done();
 }
 
-std::optional<Symbol> Storage::lookup_symbol(
+std::optional<Symbol> SqliteStorageService::lookup_symbol(
     const std::string &usr, const std::optional<int64_t> &semantic_universe_id,
     const std::optional<std::string> &identity_source,
     const std::optional<std::string> &identity_translation_unit) {
@@ -334,7 +334,7 @@ std::optional<Symbol> Storage::lookup_symbol(
   return matches.front();
 }
 
-std::vector<Symbol> Storage::lookup_symbols_by_usr(
+std::vector<Symbol> SqliteStorageService::lookup_symbols_by_usr(
     const std::string &usr,
     const std::optional<int64_t> &semantic_universe_id) {
   std::string sql =
@@ -355,7 +355,8 @@ std::vector<Symbol> Storage::lookup_symbols_by_usr(
   return out;
 }
 
-std::optional<Symbol> Storage::lookup_symbol_by_id(int64_t symbol_id) {
+std::optional<Symbol>
+SqliteStorageService::lookup_symbol_by_id(int64_t symbol_id) {
   auto st = db_.prepare(std::string("SELECT ") + kSymbolCols +
                         " FROM symbol WHERE id = ?");
   st.bind(1, symbol_id);
@@ -365,7 +366,7 @@ std::optional<Symbol> Storage::lookup_symbol_by_id(int64_t symbol_id) {
   return symbol_from(st);
 }
 
-std::vector<Symbol> Storage::lookup_symbols_by_name(
+std::vector<Symbol> SqliteStorageService::lookup_symbols_by_name(
     const std::string &spelling, const std::optional<std::string> &kind,
     const std::optional<int64_t> &semantic_universe_id) {
   std::string sql =
@@ -392,7 +393,7 @@ std::vector<Symbol> Storage::lookup_symbols_by_name(
   return out;
 }
 
-std::vector<Symbol> Storage::lookup_symbols_by_qual_name(
+std::vector<Symbol> SqliteStorageService::lookup_symbols_by_qual_name(
     const std::string &qual_name, const std::optional<std::string> &kind,
     const std::optional<int64_t> &semantic_universe_id) {
   std::string sql =
@@ -420,9 +421,9 @@ std::vector<Symbol> Storage::lookup_symbols_by_qual_name(
 }
 
 std::vector<Symbol>
-Storage::search_symbols(const std::string &pattern,
-                        const std::optional<std::string> &kind,
-                        const std::optional<int64_t> &config_id) {
+SqliteStorageService::search_symbols(const std::string &pattern,
+                                     const std::optional<std::string> &kind,
+                                     const std::optional<int64_t> &config_id) {
   // '%seg%seg%' on qual_name: each '::'-separated segment must appear, in
   // order, as a substring. Only % and _ are escaped (storage.py parity).
   std::vector<std::string> segs;
@@ -477,11 +478,11 @@ Storage::search_symbols(const std::string &pattern,
 }
 
 std::vector<Symbol>
-Storage::list_symbols(const std::optional<int64_t> &component_id,
-                      const std::optional<std::string> &dir_path,
-                      const std::optional<int64_t> &file_id,
-                      const std::optional<std::string> &name,
-                      const std::optional<std::string> &kind) {
+SqliteStorageService::list_symbols(const std::optional<int64_t> &component_id,
+                                   const std::optional<std::string> &dir_path,
+                                   const std::optional<int64_t> &file_id,
+                                   const std::optional<std::string> &name,
+                                   const std::optional<std::string> &kind) {
   std::string sql = std::string("SELECT ") + kSymbolColsS + " FROM symbol s";
   std::vector<std::string> where;
   std::vector<SqlValue> args;
@@ -534,7 +535,7 @@ Storage::list_symbols(const std::optional<int64_t> &component_id,
   return out;
 }
 
-std::vector<Symbol> Storage::symbols_in_file(int64_t file_id) {
+std::vector<Symbol> SqliteStorageService::symbols_in_file(int64_t file_id) {
   auto st = db_.prepare(std::string("SELECT ") + kSymbolCols +
                         " FROM symbol WHERE file_id = ? ORDER BY line, col");
   st.bind(1, file_id);
@@ -545,7 +546,7 @@ std::vector<Symbol> Storage::symbols_in_file(int64_t file_id) {
   return out;
 }
 
-std::vector<Symbol> Storage::unresolved_symbols() {
+std::vector<Symbol> SqliteStorageService::unresolved_symbols() {
   auto st = db_.prepare(std::string("SELECT ") + kSymbolCols +
                         " FROM symbol WHERE resolved = 0 ORDER BY usr");
   std::vector<Symbol> out;
@@ -558,7 +559,7 @@ std::vector<Symbol> Storage::unresolved_symbols() {
 // -- graph layer (v7)
 // -----------------------------------------------------------------
 
-int64_t Storage::mint_symbol_id(
+int64_t SqliteStorageService::mint_symbol_id(
     const std::string &usr, const std::string &spelling,
     const std::string &qual_name, const std::string &display_name,
     const std::string &kind, const std::optional<int64_t> &decl_file_id,
@@ -650,7 +651,7 @@ int64_t Storage::mint_symbol_id(
   return sel.col_int64(0);
 }
 
-int64_t Storage::add_edge(const Edge &e) {
+int64_t SqliteStorageService::add_edge(const Edge &e) {
   auto st = db_.prepare(
       "INSERT INTO edge (src_id, dst_id, kind, count, base_access, is_virtual, "
       "                  vtable_slot) "
@@ -676,7 +677,7 @@ int64_t Storage::add_edge(const Edge &e) {
   return eid;
 }
 
-int64_t Storage::ensure_edge(const Edge &e) {
+int64_t SqliteStorageService::ensure_edge(const Edge &e) {
   // Structural upsert: presence matters, count does not accumulate. The
   // DO UPDATE keeps count as-is (attributes still COALESCE-fill) so the
   // statement can RETURN the stable id on both paths.
@@ -705,7 +706,7 @@ int64_t Storage::ensure_edge(const Edge &e) {
   return eid;
 }
 
-void Storage::add_edge_site(const EdgeSite &s) {
+void SqliteStorageService::add_edge_site(const EdgeSite &s) {
   const auto source_id =
       s.recv_src_kind ? std::optional<int64_t>(source_kind_id(*s.recv_src_kind))
                       : std::nullopt;
@@ -781,7 +782,7 @@ void Storage::add_edge_site(const EdgeSite &s) {
   st.step_done();
 }
 
-void Storage::add_call_arg(const CallArg &a) {
+void SqliteStorageService::add_call_arg(const CallArg &a) {
   const int64_t source_id = source_kind_id(a.src_kind);
   if (source_id < 0) {
     throw StorageError("unknown source kind '" + a.src_kind + "'");
@@ -873,7 +874,7 @@ void Storage::add_call_arg(const CallArg &a) {
   st.step_done();
 }
 
-void Storage::add_template_param(const TemplateParam &p) {
+void SqliteStorageService::add_template_param(const TemplateParam &p) {
   auto st = db_.prepare("INSERT OR REPLACE INTO template_param "
                         "(owner_id, position, param_kind, name, default_txt, "
                         "type_id, default_type_id, default_ref_id) "
@@ -889,7 +890,7 @@ void Storage::add_template_param(const TemplateParam &p) {
   st.step_done();
 }
 
-void Storage::add_template_arg(const TemplateArg &a) {
+void SqliteStorageService::add_template_arg(const TemplateArg &a) {
   auto st = db_.prepare("INSERT OR REPLACE INTO template_arg "
                         "(owner_id, position, pack_index, arg_kind, ref_id, "
                         "literal, type_id) VALUES (?, ?, ?, ?, ?, ?, ?)");

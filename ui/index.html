@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="CIDX GraphView Cytoscape.js UX prototype" />
+    <title>CIDX GraphView prototype</title>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="app-header">
+        <div>
+          <p class="eyebrow">CIDX / GraphView contract</p>
+          <h1>Bounded semantic graph explorer</h1>
+        </div>
+        <div class="header-status" aria-label="Prototype status">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span>Offline fixtures</span>
+        </div>
+      </header>
+
+      <section class="toolbar" aria-label="Graph controls">
+        <label class="query-field">
+          <span>Query or symbol</span>
+          <input id="query-input" type="search" value="render" placeholder="Enter CXQ or symbol" />
+        </label>
+        <label>
+          <span>Fixture slice</span>
+          <select id="fixture-select">
+            <option value="symbol">Symbol / calls</option>
+            <option value="entity">Entity / architecture</option>
+            <option value="include">Include / files</option>
+            <option value="type">Type / signatures</option>
+          </select>
+        </label>
+        <label>
+          <span>Layout</span>
+          <select id="layout-select">
+            <option value="breadthfirst">Hierarchy</option>
+            <option value="cose">Neighborhood</option>
+            <option value="circle">Circle</option>
+            <option value="grid">Grid</option>
+          </select>
+        </label>
+        <button id="reset-button" class="secondary-button" type="button">Reset view</button>
+      </section>
+
+      <div class="workspace-grid">
+        <aside class="left-rail" aria-label="Graph navigation">
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>History</h2>
+              <span id="history-count" class="count-badge">0</span>
+            </div>
+            <ol id="history-list" class="history-list">
+              <li class="muted">Select a fixture to begin.</li>
+            </ol>
+          </section>
+          <section class="panel">
+            <div class="panel-heading"><h2>Filters</h2></div>
+            <label class="check-row"><input id="show-groups" type="checkbox" checked /> <span>Show compound groups</span></label>
+            <label class="check-row"><input id="show-evidence" type="checkbox" checked /> <span>Show evidence cues</span></label>
+          </section>
+        </aside>
+
+        <section class="graph-panel" aria-label="Graph canvas">
+          <div id="graph" role="application" aria-label="Interactive semantic graph"></div>
+          <div id="canvas-status" class="canvas-status" role="status"></div>
+        </section>
+
+        <aside class="right-rail" aria-label="Selection inspector and legend">
+          <section class="panel inspector-panel">
+            <div class="panel-heading"><h2>Inspector</h2></div>
+            <div id="inspector" class="inspector-content">
+              <p class="muted">Select a node or edge to inspect its portable identity, status, and evidence.</p>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-heading"><h2>Visual truth</h2></div>
+            <div id="legend" class="legend-list"></div>
+          </section>
+          <section class="panel budget-panel">
+            <div class="panel-heading"><h2>Budget / status</h2></div>
+            <div id="budget-status" class="budget-content"></div>
+          </section>
+        </aside>
+      </div>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

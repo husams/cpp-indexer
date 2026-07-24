@@ -369,8 +369,6 @@ void register_include_callbacks(clang::CompilerInstance &ci,
 
 void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
                            const IncludeConfig &config) {
-  auto txn = db.transaction();
-
   // Retire every configuration previously recorded for THIS TU, then write the
   // current one. A TU is imported once per file, so exactly one configuration
   // is current; a changed compile command produces a new digest, and the old
@@ -474,8 +472,6 @@ void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
     u.count = 1;
     db.add_include_macro_use(u);
   }
-
-  txn.commit();
 }
 
 } // namespace cidx::ast

@@ -319,8 +319,9 @@ query::Query portable_lookup_plan(const PortableReference &reference) {
 
 std::vector<graph::Sym> portable_matches(Storage &db, graph::GraphQuery &graph,
                                          const PortableReference &reference) {
+  query::SqliteQueryReadAdapter read(db);
   const query::Result result =
-      query::Executor(db).run(portable_lookup_plan(reference).plan());
+      query::Executor(read).run(portable_lookup_plan(reference).plan());
   std::vector<graph::Sym> matches;
   for (const auto &row : result.rows) {
     if (row.empty() || !std::holds_alternative<int64_t>(row.front())) {
@@ -494,7 +495,8 @@ void set_int_member(Value &value, std::string_view key, int64_t number) {
 } // namespace
 
 Value build_graph_view(Storage &db, const GraphViewRequest &request) {
-  graph::GraphQuery graph(db, "<ui>");
+  query::SqliteQueryReadAdapter graph_read(db);
+  graph::GraphQuery graph(graph_read, "<ui>");
   const IndexIdentity identity = db.index_identity();
   const std::string freshness = identity.freshness;
   const int node_budget = std::clamp(request.node_budget, 1, 10000);
@@ -557,7 +559,8 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   if (resolution.symbol) {
     const query::Query plan =
         make_query_plan(*resolution.symbol, request, node_budget);
-    const query::Result result = query::Executor(db).run(plan.plan());
+    query::SqliteQueryReadAdapter read(db);
+    const query::Result result = query::Executor(read).run(plan.plan());
     metadata.emplace_back("query_plan",
                           Value::of(query::canonical_json(plan.plan())));
     truncated = result.truncated ||

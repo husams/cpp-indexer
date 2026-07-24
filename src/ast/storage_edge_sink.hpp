@@ -8,15 +8,15 @@
 
 #include <unordered_map>
 
-namespace cidx {
-class Storage;
+namespace cidx::storage {
+struct AstStoragePorts;
 }
 
 namespace cidx::ast {
 
 class StorageEdgeSink : public EdgeSink {
 public:
-  explicit StorageEdgeSink(cidx::Storage &db);
+  explicit StorageEdgeSink(cidx::storage::AstStoragePorts &ports);
 
   std::optional<int64_t>
   lookup_symbol_id(const std::string &usr,
@@ -66,7 +66,7 @@ public:
                                const std::string &kind_name) override;
 
 private:
-  cidx::Storage &db_;
+  cidx::storage::AstStoragePorts &ports_;
   std::vector<int64_t> edge_ids_;
   std::vector<int64_t> definition_ids_;
   int64_t current_file_id_ = -1;

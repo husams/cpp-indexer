@@ -26,6 +26,7 @@
 #include "util/logger.hpp"
 #include "util/pathutil.hpp"
 
+#include "storage/sqlite_adapters.hpp"
 #include "storage/storage_detail.hpp"
 #include "storage/storage_schema.hpp"
 
@@ -56,10 +57,11 @@ std::string symbol_kind_name(int64_t id) {
 
 // -- Transaction --------------------------------------------------------------
 
-Transaction::Transaction(Storage &db)
+Transaction::Transaction(SqliteStorageService &db)
     : db_(db), uncaught_on_entry_(std::uncaught_exceptions()) {
   if (db_.in_txn_) {
-    throw StorageError("nested Storage::transaction() is not supported");
+    throw StorageError(
+        "nested SqliteStorageService::transaction() is not supported");
   }
   db_.db_.exec("BEGIN");
   db_.in_txn_ = true;
@@ -104,11 +106,13 @@ void Transaction::rollback() {
 // Defined below (materialise pass); forward-declared so the constructor can run
 // the v21->v22 entity_node backfill right after the schema is created.
 
-Storage::Storage(const std::string &path, OpenMode mode)
+SqliteStorageService::SqliteStorageService(const std::string &path,
+                                           OpenMode mode)
     : db_(mode == OpenMode::read_only ? path : prepare_db_path(path),
           mode == OpenMode::read_only,
           mode == OpenMode::read_only ? SqliteProfile::read_only_replay
-                                      : SqliteProfile::indexing) {
+                                      : SqliteProfile::indexing),
+      ports_(std::make_unique<storage::SqliteStoragePorts>(*this)) {
   if (mode == OpenMode::read_only) {
     // Version gate before anything else: a read-only connection cannot
     // migrate, so any other stored version is unusable.
@@ -242,7 +246,75 @@ Storage::Storage(const std::string &path, OpenMode mode)
   reconcile_external_identities();
 }
 
-void Storage::reconcile_external_identities() {
+SqliteStorageService::~SqliteStorageService() = default;
+
+storage::WorkspaceCatalogReadPort &
+SqliteStorageService::workspace_catalog_read() {
+  return ports_->workspace_catalog_read();
+}
+
+storage::WorkspaceCatalogWritePort &
+SqliteStorageService::workspace_catalog_write() {
+  return ports_->workspace_catalog_write();
+}
+
+storage::SourceStoreReadPort &SqliteStorageService::source_read() {
+  return ports_->source_read();
+}
+
+storage::SourceStoreWritePort &SqliteStorageService::source_write() {
+  return ports_->source_write();
+}
+
+storage::SymbolReadPort &SqliteStorageService::symbol_read() {
+  return ports_->symbol_read();
+}
+
+storage::SymbolWritePort &SqliteStorageService::symbol_write() {
+  return ports_->symbol_write();
+}
+
+storage::TypeReadPort &SqliteStorageService::type_read() {
+  return ports_->type_read();
+}
+
+storage::TypeWritePort &SqliteStorageService::type_write() {
+  return ports_->type_write();
+}
+
+storage::FactReadPort &SqliteStorageService::fact_read() {
+  return ports_->fact_read();
+}
+
+storage::FactWritePort &SqliteStorageService::fact_write() {
+  return ports_->fact_write();
+}
+
+storage::DefinitionReadPort &SqliteStorageService::definition_read() {
+  return ports_->definition_read();
+}
+
+storage::DefinitionWritePort &SqliteStorageService::definition_write() {
+  return ports_->definition_write();
+}
+
+storage::IncludeReadPort &SqliteStorageService::include_read() {
+  return ports_->include_read();
+}
+
+storage::IncludeWritePort &SqliteStorageService::include_write() {
+  return ports_->include_write();
+}
+
+storage::SchemaCatalogReadPort &SqliteStorageService::schema_read() {
+  return ports_->schema_read();
+}
+
+storage::UnitOfWorkFactory &SqliteStorageService::unit_of_work() {
+  return ports_->unit_of_work();
+}
+
+void SqliteStorageService::reconcile_external_identities() {
   for (const auto &entry : catalog::kSourceKinds) {
     db_.exec(
         "UPDATE edge_site SET recv_src_kind_id = " + std::to_string(entry.id) +
@@ -314,8 +386,8 @@ void Storage::reconcile_external_identities() {
       "UPDATE call_arg SET type_identity_id = NULL WHERE type_id IS NOT NULL");
 }
 
-void Storage::reconcile_symbol_identity(int64_t symbol_id,
-                                        std::string_view usr) {
+void SqliteStorageService::reconcile_symbol_identity(int64_t symbol_id,
+                                                     std::string_view usr) {
   auto identity = db_.prepare(
       "UPDATE external_identity SET symbol_id = ?, resolution_status = 1 "
       "WHERE identity_kind = 2 AND identity_text = ?");
@@ -374,8 +446,8 @@ void Storage::reconcile_symbol_identity(int64_t symbol_id,
   call_callee_clear.step_done();
 }
 
-void Storage::reconcile_type_identity(int64_t type_id,
-                                      std::string_view decl_usr) {
+void SqliteStorageService::reconcile_type_identity(int64_t type_id,
+                                                   std::string_view decl_usr) {
   auto identity = db_.prepare(
       "UPDATE external_identity SET type_id = ?, resolution_status = 1 "
       "WHERE identity_kind = 1 AND identity_text = ?");

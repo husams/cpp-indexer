@@ -28,7 +28,7 @@ namespace cidx {
 
 using namespace detail;
 
-void Storage::migrate() {
+void SqliteStorageService::migrate() {
   std::vector<std::string> tables;
   {
     auto st =
@@ -1129,7 +1129,7 @@ void Storage::migrate() {
   }
 }
 
-void Storage::migrate_symbol_identity_scope() {
+void SqliteStorageService::migrate_symbol_identity_scope() {
   db_.exec("DROP VIEW IF EXISTS edge_site_read");
   db_.exec("DROP VIEW IF EXISTS call_arg_read");
   db_.exec(
@@ -1233,7 +1233,7 @@ void Storage::migrate_symbol_identity_scope() {
 // cascade-delete edges (edge.src_id/dst_id keep the ids the new rows carry).
 // The schema script (run right after migrate) recreates the symbol indexes via
 // CREATE INDEX IF NOT EXISTS. Mirrors storage.py _migrate_symbol_kind_to_int.
-void Storage::migrate_symbol_kind_to_int() {
+void SqliteStorageService::migrate_symbol_kind_to_int() {
   std::string cases;
   for (const auto &kv : symbol_kind_ids_map()) {
     cases += " WHEN '" + std::string(kv.first) + "' THEN " +
@@ -1285,7 +1285,7 @@ void Storage::migrate_symbol_kind_to_int() {
 // table does not cascade-delete directories (they keep the ids the copied rows
 // carry). The schema script (run right after) is a no-op (CREATE TABLE IF NOT
 // EXISTS). Mirrors Python _migrate_component_repo_unique.
-void Storage::migrate_component_repo_unique() {
+void SqliteStorageService::migrate_component_repo_unique() {
   db_.exec("PRAGMA foreign_keys = OFF");
   db_.exec(
       "CREATE TABLE component_new ("

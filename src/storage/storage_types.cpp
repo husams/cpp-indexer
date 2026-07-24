@@ -24,7 +24,7 @@ namespace cidx {
 
 using namespace detail;
 
-int64_t Storage::intern_type_node(const TypeNode &n) {
+int64_t SqliteStorageService::intern_type_node(const TypeNode &n) {
   std::optional<int64_t> decl_id;
   if (n.decl_usr && !n.decl_usr->empty()) {
     auto decl = db_.prepare("SELECT id FROM symbol WHERE usr = ? LIMIT 1");
@@ -73,7 +73,7 @@ int64_t Storage::intern_type_node(const TypeNode &n) {
   return type_id;
 }
 
-std::optional<TypeNode> Storage::type_node_by_id(int64_t type_id) {
+std::optional<TypeNode> SqliteStorageService::type_node_by_id(int64_t type_id) {
   auto st = db_.prepare(
       "SELECT id, type_key, spelling, kind, is_const, is_volatile, "
       "is_restrict, decl_usr, canonical_id FROM type_node WHERE id = ?");
@@ -94,8 +94,8 @@ std::optional<TypeNode> Storage::type_node_by_id(int64_t type_id) {
   return n;
 }
 
-void Storage::add_type_edge(int64_t src_id, int64_t kind, int64_t position,
-                            int64_t dst_id) {
+void SqliteStorageService::add_type_edge(int64_t src_id, int64_t kind,
+                                         int64_t position, int64_t dst_id) {
   // OR REPLACE on the (src, kind, position) key: for structural nodes the
   // re-derived dst is identical, and for a retargeted alias (see
   // intern_type_node) the alias_of edge must follow the new target.
@@ -109,8 +109,8 @@ void Storage::add_type_edge(int64_t src_id, int64_t kind, int64_t position,
   st.step_done();
 }
 
-void Storage::replace_parameters(int64_t owner_id,
-                                 const std::vector<Parameter> &params) {
+void SqliteStorageService::replace_parameters(
+    int64_t owner_id, const std::vector<Parameter> &params) {
   // Wholesale per-owner refresh: an arity change on re-index must drop the
   // stale higher positions, which a positional upsert alone cannot do.
   {
@@ -142,7 +142,7 @@ void Storage::replace_parameters(int64_t owner_id,
   }
 }
 
-std::vector<Parameter> Storage::parameters_of(int64_t symbol_id) {
+std::vector<Parameter> SqliteStorageService::parameters_of(int64_t symbol_id) {
   auto st = db_.prepare(
       "SELECT owner_id, position, pack_index, name, type_id, declared_type_id, "
       "adjusted_type_id, default_text, default_origin, reference_semantics, "
@@ -170,8 +170,8 @@ std::vector<Parameter> Storage::parameters_of(int64_t symbol_id) {
   return out;
 }
 
-void Storage::add_symbol_type(int64_t symbol_id, int64_t kind,
-                              int64_t type_id) {
+void SqliteStorageService::add_symbol_type(int64_t symbol_id, int64_t kind,
+                                           int64_t type_id) {
   auto st = db_.prepare(
       "INSERT OR REPLACE INTO symbol_type (symbol_id, kind, type_id) "
       "VALUES (?, ?, ?)");
@@ -181,8 +181,8 @@ void Storage::add_symbol_type(int64_t symbol_id, int64_t kind,
   st.step_done();
 }
 
-std::optional<int64_t> Storage::symbol_type_of(int64_t symbol_id,
-                                               int64_t kind) {
+std::optional<int64_t> SqliteStorageService::symbol_type_of(int64_t symbol_id,
+                                                            int64_t kind) {
   auto st = db_.prepare(
       "SELECT type_id FROM symbol_type WHERE symbol_id = ? AND kind = ?");
   st.bind(1, symbol_id);
@@ -193,7 +193,8 @@ std::optional<int64_t> Storage::symbol_type_of(int64_t symbol_id,
   return st.col_int64(0);
 }
 
-std::vector<int64_t> Storage::type_ids_reaching(const std::string &decl_usr) {
+std::vector<int64_t>
+SqliteStorageService::type_ids_reaching(const std::string &decl_usr) {
   // Closure of type nodes from which a node NAMING decl_usr is reachable:
   // seed = every node whose decl_usr matches (the bare type plus qualified/
   // sugared variants carry it too), then walk type_edge backwards (src wraps
@@ -216,7 +217,8 @@ std::vector<int64_t> Storage::type_ids_reaching(const std::string &decl_usr) {
 }
 
 std::vector<std::pair<int64_t, int64_t>>
-Storage::param_owners_of_types(const std::vector<int64_t> &type_ids) {
+SqliteStorageService::param_owners_of_types(
+    const std::vector<int64_t> &type_ids) {
   std::vector<std::pair<int64_t, int64_t>> out;
   if (type_ids.empty()) {
     return out;
@@ -238,7 +240,8 @@ Storage::param_owners_of_types(const std::vector<int64_t> &type_ids) {
 }
 
 std::vector<std::pair<int64_t, int64_t>>
-Storage::symbol_type_owners_of_types(const std::vector<int64_t> &type_ids) {
+SqliteStorageService::symbol_type_owners_of_types(
+    const std::vector<int64_t> &type_ids) {
   std::vector<std::pair<int64_t, int64_t>> out;
   if (type_ids.empty()) {
     return out;

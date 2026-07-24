@@ -1,0 +1,17 @@
+{
+  "valid": [
+    "narrow",
+    "symbol:narrow",
+    "db:rower",
+    "a-row-b",
+    "sqlite_value"
+  ],
+  "invalid": [
+    "42",
+    "row",
+    "db:row",
+    "symbol:row",
+    "sqlite:7",
+    "foo-db"
+  ]
+}

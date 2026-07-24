@@ -10,7 +10,8 @@ namespace cidx::cli {
 int cmd_query(const ParsedArgs &args, Context &ctx) {
   Storage db(ctx.index_path, Storage::OpenMode::read_only);
   const query::Plan plan = query::parse_cxq(args.query_text);
-  query::Executor executor(db);
+  query::SqliteQueryReadAdapter read(db);
+  query::Executor executor(read);
 
   const json_out::Value output = args.query_explain
                                      ? executor.explain(plan)

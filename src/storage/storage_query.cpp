@@ -6,6 +6,7 @@
 #include <array>
 #include <cctype>
 #include <cstring>
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <map>
@@ -40,7 +41,7 @@ struct IdentityFile {
   bool indexed = false;
 };
 
-std::vector<IdentityFile> identity_files(Storage &db) {
+std::vector<IdentityFile> identity_files(SqliteStorageService &db) {
   std::vector<IdentityFile> files;
   auto st = db.raw_db().prepare(
       "SELECT f.id, c.name, c.path, c.kind, c.version, r.name, "
@@ -77,7 +78,8 @@ std::vector<IdentityFile> identity_files(Storage &db) {
   return files;
 }
 
-std::string source_manifest(Storage &db, const std::vector<IdentityFile> &files,
+std::string source_manifest(SqliteStorageService &db,
+                            const std::vector<IdentityFile> &files,
                             bool &complete) {
   std::string manifest;
   complete = true;
@@ -108,7 +110,8 @@ std::string config_manifest(const std::vector<IdentityFile> &files) {
   return manifest;
 }
 
-std::optional<std::string> meta_value(Storage &db, const char *key) {
+std::optional<std::string> meta_value(SqliteStorageService &db,
+                                      const char *key) {
   auto st = db.raw_db().prepare("SELECT value FROM meta WHERE key = ?");
   st.bind(1, std::string_view(key));
   if (!st.step() || st.col_is_null(0) || st.col_text(0).empty()) {
@@ -117,7 +120,8 @@ std::optional<std::string> meta_value(Storage &db, const char *key) {
   return st.col_text(0);
 }
 
-void set_meta_value(Storage &db, const char *key, std::string_view value) {
+void set_meta_value(SqliteStorageService &db, const char *key,
+                    std::string_view value) {
   auto st = db.raw_db().prepare(
       "INSERT INTO meta (key, value) VALUES (?, ?) "
       "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
@@ -128,7 +132,7 @@ void set_meta_value(Storage &db, const char *key, std::string_view value) {
 
 } // namespace
 
-IndexIdentity Storage::index_identity() {
+IndexIdentity SqliteStorageService::index_identity() {
   const auto files = identity_files(*this);
   bool complete = true;
   const std::string source = source_manifest(*this, files, complete);
@@ -197,7 +201,7 @@ IndexIdentity Storage::index_identity() {
   return identity;
 }
 
-void Storage::stamp_index_identity() {
+void SqliteStorageService::stamp_index_identity() {
   const auto files = identity_files(*this);
   bool complete = true;
   const std::string source = source_manifest(*this, files, complete);
@@ -213,7 +217,7 @@ void Storage::stamp_index_identity() {
                  complete ? "content-sha1:" + source_fingerprint : "");
 }
 
-std::string Storage::fuzzy_like(std::string_view text) {
+std::string SqliteStorageService::fuzzy_like(std::string_view text) {
   // '%c%c%' from the non-space chars, escaping '\ % _' (G18); used with
   // LIKE ... ESCAPE '\' — ASCII case-insensitive.
   std::vector<std::string> chars;
@@ -237,7 +241,7 @@ std::string Storage::fuzzy_like(std::string_view text) {
 // -- stats
 // ----------------------------------------------------------------------------
 
-Stats Storage::stats() {
+Stats SqliteStorageService::stats() {
   const auto one = [this](const char *sql) {
     auto st = db_.prepare(sql);
     if (!st.step()) {
@@ -271,12 +275,12 @@ Stats Storage::stats() {
   return s;
 }
 
-auto Storage::integrity_ok() -> bool {
+auto SqliteStorageService::integrity_ok() -> bool {
   auto st = db_.prepare("PRAGMA integrity_check");
   return st.step() && st.col_text(0) == "ok";
 }
 
-auto Storage::foreign_keys_ok() -> bool {
+auto SqliteStorageService::foreign_keys_ok() -> bool {
   auto st = db_.prepare("PRAGMA foreign_key_check");
   return !st.step();
 }
@@ -286,7 +290,7 @@ auto Storage::foreign_keys_ok() -> bool {
 // ============================================================================
 
 // A1 — total edge count (query.py:558)
-int64_t Storage::edge_count() {
+int64_t SqliteStorageService::edge_count() {
   auto st = db_.prepare("SELECT COUNT(*) FROM edge");
   if (!st.step()) {
     return 0;
@@ -295,7 +299,7 @@ int64_t Storage::edge_count() {
 }
 
 // A2 — true once graph_resolved_at is set (query.py:579-583)
-bool Storage::graph_resolved() {
+bool SqliteStorageService::graph_resolved() {
   auto st =
       db_.prepare("SELECT value FROM meta WHERE key = 'graph_resolved_at'");
   if (!st.step()) {
@@ -305,13 +309,25 @@ bool Storage::graph_resolved() {
   return !val.empty();
 }
 
+void SqliteStorageService::stamp_graph_resolved() {
+  const std::time_t now = std::time(nullptr);
+  std::array<char, 32> buffer{};
+  std::strftime(buffer.data(), buffer.size(), "%Y-%m-%dT%H:%M:%SZ",
+                std::gmtime(&now));
+  auto statement = db_.prepare("INSERT OR REPLACE INTO meta (key, value) "
+                               "VALUES ('graph_resolved_at', ?)");
+  statement.bind(1, std::string_view(buffer.data()));
+  statement.step_done();
+}
+
 // A3 — fetch one symbol by USR (query.py:666-668)
-std::optional<Symbol> Storage::graph_symbol_by_usr(const std::string &usr) {
+std::optional<Symbol>
+SqliteStorageService::graph_symbol_by_usr(const std::string &usr) {
   return lookup_symbol(usr);
 }
 
 // A4 — fetch one symbol by numeric id (query.py:666-668)
-std::optional<Symbol> Storage::graph_symbol_by_id(int64_t id) {
+std::optional<Symbol> SqliteStorageService::graph_symbol_by_id(int64_t id) {
   auto st = db_.prepare(std::string("SELECT ") + kSymbolColsS +
                         " FROM symbol s WHERE s.id = ?");
   st.bind(1, id);
@@ -324,8 +340,9 @@ std::optional<Symbol> Storage::graph_symbol_by_id(int64_t id) {
 // A5 — fuzzy COALESCE(qual_name,spelling) lookup (query.py:707-738, R1)
 // Escapes ONLY % and _ (NOT backslash — matching query.py:719).
 std::vector<Symbol>
-Storage::find_symbols(const std::string &pattern,
-                      const std::optional<std::string> &kind, int limit) {
+SqliteStorageService::find_symbols(const std::string &pattern,
+                                   const std::optional<std::string> &kind,
+                                   int limit) {
   // Build like: "%" + join("%", escaped_segs) + "%"
   // where escaped_segs = each "::" segment with % and _ escaped.
   std::vector<std::string> segs;
@@ -387,7 +404,7 @@ Storage::find_symbols(const std::string &pattern,
 }
 
 // v27 — symbols defined in >1 backend (query.py:GraphQuery.redefined)
-std::vector<Symbol> Storage::redefined_symbols(int limit) {
+std::vector<Symbol> SqliteStorageService::redefined_symbols(int limit) {
   auto st = db_.prepare(std::string("SELECT ") + kSymbolColsS +
                         " FROM symbol s WHERE s.multi_def > 1 "
                         "ORDER BY s.multi_def DESC, s.qual_name, s.spelling "
@@ -401,7 +418,8 @@ std::vector<Symbol> Storage::redefined_symbols(int limit) {
 }
 
 // v27 — the backend bodies of a symbol (query.py:GraphQuery.definitions).
-std::vector<Storage::DefinitionRow> Storage::definitions_of(int64_t symbol_id) {
+std::vector<SqliteStorageService::DefinitionRow>
+SqliteStorageService::definitions_of(int64_t symbol_id) {
   auto st = db_.prepare(
       "SELECT symbol_id, file_id, line, col, end_line, end_col, init_text "
       "FROM definition WHERE symbol_id = ? ORDER BY file_id, line");
@@ -423,8 +441,8 @@ std::vector<Storage::DefinitionRow> Storage::definitions_of(int64_t symbol_id) {
 
 // v27 — possible-call fan-out: candidate target bodies for calls made by any of
 // this symbol's bodies (query.py:GraphQuery.possible_callees).
-std::vector<Storage::DefinitionRow>
-Storage::possible_callees_of(int64_t symbol_id) {
+std::vector<SqliteStorageService::DefinitionRow>
+SqliteStorageService::possible_callees_of(int64_t symbol_id) {
   auto st = db_.prepare(
       "SELECT td.symbol_id, td.file_id, td.line, td.col, td.end_line, "
       "       td.end_col, td.init_text "
@@ -449,10 +467,10 @@ Storage::possible_callees_of(int64_t symbol_id) {
 }
 
 // A6 — typed-edge query (query.py:782-813)
-std::vector<Storage::GraphEdgeRow>
-Storage::graph_edges(int64_t mine_id, const std::string &direction,
-                     const std::vector<int64_t> &kind_ids, bool count_resolved,
-                     int limit) {
+std::vector<SqliteStorageService::GraphEdgeRow>
+SqliteStorageService::graph_edges(int64_t mine_id, const std::string &direction,
+                                  const std::vector<int64_t> &kind_ids,
+                                  bool count_resolved, int limit) {
   // direction "in": mine=dst_id, peer=src_id
   // direction "out": mine=src_id, peer=dst_id
   std::string mine;
@@ -520,8 +538,8 @@ Storage::graph_edges(int64_t mine_id, const std::string &direction,
 }
 
 // A7 — batch-load edge_site rows for many edge_ids (query.py:839-870)
-std::map<int64_t, std::vector<Storage::EdgeSiteRow>>
-Storage::edge_sites_for(const std::vector<int64_t> &edge_ids) {
+std::map<int64_t, std::vector<SqliteStorageService::EdgeSiteRow>>
+SqliteStorageService::edge_sites_for(const std::vector<int64_t> &edge_ids) {
   if (edge_ids.empty()) {
     return {};
   }
@@ -563,8 +581,8 @@ Storage::edge_sites_for(const std::vector<int64_t> &edge_ids) {
 }
 
 // A8 — single-edge sites with LIMIT (query.py:884-906)
-std::vector<Storage::EdgeSiteRow> Storage::edge_sites_one(int64_t edge_id,
-                                                          int limit) {
+std::vector<SqliteStorageService::EdgeSiteRow>
+SqliteStorageService::edge_sites_one(int64_t edge_id, int limit) {
   auto st = db_.prepare(
       "SELECT file_id, line, col, conditional, args_sig, "
       "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos, "
@@ -595,7 +613,8 @@ std::vector<Storage::EdgeSiteRow> Storage::edge_sites_one(int64_t edge_id,
 
 // -- labels (v14) ------------------------------------------------------------
 
-int64_t Storage::add_label(const std::string &name, const std::string &path) {
+int64_t SqliteStorageService::add_label(const std::string &name,
+                                        const std::string &path) {
   auto st = db_.prepare("INSERT INTO label (name, path) VALUES (?, ?) "
                         "ON CONFLICT(name) DO UPDATE SET path = excluded.path "
                         "RETURNING id");
@@ -609,14 +628,15 @@ int64_t Storage::add_label(const std::string &name, const std::string &path) {
   return lid;
 }
 
-bool Storage::remove_label(const std::string &name) {
+bool SqliteStorageService::remove_label(const std::string &name) {
   auto st = db_.prepare("DELETE FROM label WHERE name = ?");
   st.bind(1, std::string_view(name));
   st.step_done();
   return db_.changes() > 0;
 }
 
-std::optional<std::string> Storage::get_label(const std::string &name) {
+std::optional<std::string>
+SqliteStorageService::get_label(const std::string &name) {
   auto st = db_.prepare("SELECT path FROM label WHERE name = ?");
   st.bind(1, std::string_view(name));
   if (!st.step()) {
@@ -625,7 +645,8 @@ std::optional<std::string> Storage::get_label(const std::string &name) {
   return st.col_text(0);
 }
 
-std::vector<std::pair<std::string, std::string>> Storage::list_labels() {
+std::vector<std::pair<std::string, std::string>>
+SqliteStorageService::list_labels() {
   auto st = db_.prepare("SELECT name, path FROM label ORDER BY name");
   std::vector<std::pair<std::string, std::string>> out;
   while (st.step()) {
@@ -635,7 +656,7 @@ std::vector<std::pair<std::string, std::string>> Storage::list_labels() {
 }
 
 std::map<std::string, std::tuple<std::string, std::string, bool>>
-Storage::component_alias_index() {
+SqliteStorageService::component_alias_index() {
   // Group components by name; split the resolved effective root into
   // (base, version) so matching is version-agnostic. Mirrors
   // Python Storage.component_alias_index.
@@ -686,7 +707,7 @@ Storage::component_alias_index() {
 }
 
 std::vector<std::tuple<std::string, std::string, bool>>
-Storage::list_alias_pairs() {
+SqliteStorageService::list_alias_pairs() {
   // Explicit labels (exact) PLUS components (version-stripped base,
   // version-agnostic). Labels win on a name collision. std::map keeps the
   // result sorted by name (== Python sorted). Mirrors Python list_alias_pairs.
@@ -708,7 +729,8 @@ Storage::list_alias_pairs() {
   return out;
 }
 
-std::optional<std::string> Storage::get_alias(const std::string &name) {
+std::optional<std::string>
+SqliteStorageService::get_alias(const std::string &name) {
   std::optional<std::string> lab = get_label(name);
   if (lab.has_value()) {
     return lab;

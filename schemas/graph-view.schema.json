@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cidx.dev/schemas/graph-view/v1",
+  "title": "CIDX GraphView v1",
+  "description": "Renderer-independent bounded graph payload. Cytoscape positions and layout state are intentionally outside this schema.",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/resultEnvelope" },
+    { "$ref": "#/$defs/savedView" }
+  ],
+  "$defs": {
+    "status": { "type": "string", "enum": ["complete", "partial", "unknown", "error"] },
+    "marker": { "type": "string", "enum": ["truncated", "stale", "unresolved", "external", "stub", "inferred", "assumed", "refuted", "proved"] },
+    "kind": { "type": "string", "enum": ["symbol", "entity", "include", "type", "file", "group", "edge"] },
+    "portableReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "kind", "semanticUniverse"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^(?![0-9]+$)(?!.*(?:^|[-_:])(?:row|db|sqlite)[-_:0-9]*$).+" },
+        "kind": { "$ref": "#/$defs/kind" },
+        "semanticUniverse": { "type": "string", "minLength": 1, "maxLength": 120 }
+      }
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "line"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "class", "role", "summary"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "class": { "type": "string", "enum": ["source", "derived", "inferred", "runtime", "assumption", "proof"] },
+        "role": { "type": "string", "enum": ["declaration", "definition", "reference", "call-site", "type-use", "derived"] },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "location": { "$ref": "#/$defs/location" },
+        "artifact": { "type": "string", "maxLength": 240 }
+      }
+    },
+    "elementState": {
+      "type": "object",
+      "required": ["status", "markers", "evidenceRefs"],
+      "properties": {
+        "status": { "$ref": "#/$defs/status" },
+        "markers": { "type": "array", "uniqueItems": true, "maxItems": 9, "items": { "$ref": "#/$defs/marker" } },
+        "evidenceRefs": { "type": "array", "uniqueItems": true, "maxItems": 8, "items": { "type": "string", "maxLength": 120 } }
+      }
+    },
+    "node": {
+      "allOf": [
+        { "$ref": "#/$defs/elementState" },
+        {
+          "type": "object",
+          "required": ["ref", "label", "semanticKind"],
+          "properties": {
+            "ref": { "$ref": "#/$defs/portableReference" },
+            "label": { "type": "string", "maxLength": 160 },
+            "semanticKind": { "type": "string", "maxLength": 120 },
+            "groupRef": { "$ref": "#/$defs/portableReference" },
+            "location": { "$ref": "#/$defs/location" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "site": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "role"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["reference", "call-site", "type-use"] },
+        "location": { "$ref": "#/$defs/location" }
+      }
+    },
+    "edge": {
+      "allOf": [
+        { "$ref": "#/$defs/elementState" },
+        {
+          "type": "object",
+          "required": ["ref", "source", "target", "relation", "label", "siteRefs"],
+          "properties": {
+            "ref": { "$ref": "#/$defs/portableReference" },
+            "source": { "$ref": "#/$defs/portableReference" },
+            "target": { "$ref": "#/$defs/portableReference" },
+            "relation": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "label": { "type": "string", "maxLength": 160 },
+            "siteRefs": { "type": "array", "uniqueItems": true, "maxItems": 10000, "items": { "$ref": "#/$defs/site" } }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "group": {
+      "allOf": [
+        { "$ref": "#/$defs/elementState" },
+        {
+          "type": "object",
+          "required": ["ref", "label", "memberRefs"],
+          "properties": {
+            "ref": { "$ref": "#/$defs/portableReference" },
+            "label": { "type": "string", "maxLength": 160 },
+            "memberRefs": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/portableReference" } },
+            "parentRef": { "$ref": "#/$defs/portableReference" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxNodes", "maxEdges", "maxGroups", "maxLabelChars", "maxEvidenceRefs", "maxSites", "maxSiteBytes"],
+      "properties": {
+        "maxNodes": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "maxEdges": { "type": "integer", "minimum": 0, "maximum": 20000 },
+        "maxGroups": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "maxLabelChars": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "maxEvidenceRefs": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "maxSites": { "type": "integer", "minimum": 0, "maximum": 100000 },
+        "maxSiteBytes": { "type": "integer", "minimum": 0, "maximum": 10000000 }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodes", "edges", "groups", "labelChars", "evidenceRefs", "sites", "siteBytes"],
+      "properties": {
+        "nodes": { "type": "integer", "minimum": 0 },
+        "edges": { "type": "integer", "minimum": 0 },
+        "groups": { "type": "integer", "minimum": 0 },
+        "labelChars": { "type": "integer", "minimum": 0 },
+        "evidenceRefs": { "type": "integer", "minimum": 0 },
+        "sites": { "type": "integer", "minimum": 0 },
+        "siteBytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "remainingUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "nodes": { "type": "integer", "minimum": 0 },
+        "edges": { "type": "integer", "minimum": 0 },
+        "groups": { "type": "integer", "minimum": 0 },
+        "labelChars": { "type": "integer", "minimum": 0 },
+        "evidenceRefs": { "type": "integer", "minimum": 0 },
+        "sites": { "type": "integer", "minimum": 0 },
+        "siteBytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "version"],
+      "properties": { "key": { "type": "string", "maxLength": 240 }, "version": { "type": "string", "maxLength": 120 } }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation"],
+      "properties": {
+        "operation": { "type": "string", "enum": ["expand", "path", "evidence"] },
+        "relation": { "type": "string", "maxLength": 120 },
+        "direction": { "type": "string", "enum": ["in", "out"] },
+        "maxDepth": { "type": "integer", "minimum": 0, "maximum": 64 }
+      }
+    },
+    "continuation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token", "nextDepth", "remaining"],
+      "properties": {
+        "token": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "relation": { "type": "string", "maxLength": 120 },
+        "direction": { "type": "string", "enum": ["in", "out"] },
+        "nextDepth": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "remaining": { "$ref": "#/$defs/remainingUsage" }
+      }
+    },
+    "presentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layout", "zoom", "pan", "hiddenKinds", "collapsedGroupKeys"],
+      "properties": {
+        "layout": { "type": "string", "enum": ["breadthfirst", "cose", "circle", "grid", "preset"] },
+        "zoom": { "type": "number", "minimum": 0.25, "maximum": 3 },
+        "pan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y"],
+          "properties": { "x": { "type": "number" }, "y": { "type": "number" } }
+        },
+        "hiddenKinds": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/kind" } },
+        "collapsedGroupKeys": { "type": "array", "uniqueItems": true, "maxItems": 1000, "items": { "type": "string", "maxLength": 240 } }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "operation", "query", "budget"],
+      "properties": {
+        "version": { "const": 1 },
+        "operation": { "type": "string", "enum": ["query", "expand", "path"] },
+        "query": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["slice"],
+          "properties": {
+            "cxq": { "type": "string", "maxLength": 2000 },
+            "root": { "$ref": "#/$defs/portableReference" },
+            "slice": { "$ref": "#/$defs/kind" }
+          }
+        },
+        "presentation": { "$ref": "#/$defs/presentation" },
+        "budget": { "$ref": "#/$defs/budget" }
+      }
+    },
+    "resultEnvelope": {
+      "allOf": [
+        { "$ref": "https://cidx.dev/schemas/result-envelope/v1" },
+        {
+          "type": "object",
+          "required": ["operation", "result"],
+          "properties": {
+            "operation": { "const": "graph-view" },
+            "result": { "$ref": "#/$defs/result" }
+          }
+        }
+      ]
+    },
+    "savedView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["savedViewId", "resultId", "queryIdentity", "presentation"],
+      "properties": {
+        "savedViewId": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "resultId": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "queryIdentity": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "presentation": { "$ref": "#/$defs/presentation" }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "resultId", "queryIdentity", "workspace", "index", "factSet", "status", "markers", "freshness", "completeness", "budget", "usage", "nodes", "edges", "groups", "evidence", "capabilities", "diagnostics"],
+      "properties": {
+        "version": { "const": 1 },
+        "resultId": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "queryIdentity": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "workspace": { "$ref": "#/$defs/identity" },
+        "index": { "$ref": "#/$defs/identity" },
+        "factSet": { "$ref": "#/$defs/identity" },
+        "status": { "$ref": "#/$defs/status" },
+        "markers": { "type": "array", "uniqueItems": true, "maxItems": 9, "items": { "$ref": "#/$defs/marker" } },
+        "freshness": { "type": "string", "enum": ["fresh", "stale", "unknown"] },
+        "completeness": { "type": "string", "enum": ["complete", "partial", "unknown"] },
+        "budget": { "$ref": "#/$defs/budget" },
+        "usage": { "$ref": "#/$defs/usage" },
+        "nodes": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/node" } },
+        "edges": { "type": "array", "maxItems": 20000, "items": { "$ref": "#/$defs/edge" } },
+        "groups": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/group" } },
+        "evidence": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/evidence" } },
+        "capabilities": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/capability" } },
+        "diagnostics": { "type": "array", "maxItems": 8, "items": { "type": "object", "additionalProperties": false, "required": ["code", "message", "severity"], "properties": { "code": { "type": "string", "enum": ["usage", "invalid_input", "stale_input", "timeout", "backend_error", "policy_refuted", "unknown", "truncated_budget", "missing_evidence"] }, "message": { "type": "string", "maxLength": 160 }, "severity": { "type": "string", "enum": ["info", "warning", "error"] } } } },
+        "continuation": { "$ref": "#/$defs/continuation" }
+      }
+    }
+  }
+}

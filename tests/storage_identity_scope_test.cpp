@@ -10,6 +10,7 @@
 
 #include "ast/storage_edge_sink.hpp"
 #include "ast/storage_symbol_sink.hpp"
+#include "storage/ports.hpp"
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
@@ -126,7 +127,11 @@ TEST_CASE("v39 isolates unrelated universes and merges declared sharing") {
     CHECK(banking_symbol->identity_key != composed_symbol->identity_key);
   }
 
-  cidx::ast::StorageEdgeSink sink(db);
+  cidx::storage::AstStoragePorts ports{
+      db.workspace_catalog_read(), db.source_read(), db.symbol_read(),
+      db.symbol_write(),           db.type_write(),  db.fact_write(),
+      db.definition_write(),       db.unit_of_work()};
+  cidx::ast::StorageEdgeSink sink(ports);
   sink.set_current_file_id(banking_file);
   check_condition(sink.lookup_symbol_id("c:@N@collision") == banking_id);
   sink.set_current_file_id(composed_file);
@@ -212,7 +217,11 @@ TEST_CASE("v39 carries translation-unit identity through header sinks") {
   record.is_definition = true;
   record.resolved = true;
 
-  cidx::ast::StorageSymbolSink symbols(db);
+  cidx::storage::AstStoragePorts ports{
+      db.workspace_catalog_read(), db.source_read(), db.symbol_read(),
+      db.symbol_write(),           db.type_write(),  db.fact_write(),
+      db.definition_write(),       db.unit_of_work()};
+  cidx::ast::StorageSymbolSink symbols(ports);
   symbols.set_current_file_id(tu_a);
   symbols.set_identity_translation_unit_config_id(config_a_id, tu_a);
   symbols.emit(record);
@@ -223,7 +232,7 @@ TEST_CASE("v39 carries translation-unit identity through header sinks") {
   REQUIRE(rows.size() == 2);
   CHECK(rows[0].identity_key != rows[1].identity_key);
 
-  cidx::ast::StorageEdgeSink edges(db);
+  cidx::ast::StorageEdgeSink edges(ports);
   edges.set_current_file_id(tu_a);
   edges.set_identity_translation_unit_config_id(config_a_id, tu_a);
   const auto a_id = edges.lookup_symbol_id(record.usr, *header_path);

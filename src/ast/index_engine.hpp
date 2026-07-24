@@ -10,6 +10,8 @@
 // commands.cpp can include it without the Clang C++ API.
 #pragma once
 
+#include <cstdint>
+
 #include "ast/header_stats.hpp" // HeaderStats
 #include "storage/records.hpp"
 
@@ -41,7 +43,20 @@ struct IndexOneOutcome {
   std::vector<std::string> failed_flags; // final args, for the log dump
 };
 
-IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
-                              const std::string &path, bool graph_enabled);
+// Deterministic fault points used by the production TU pipeline tests. The
+// default path is none; callers cannot enable these accidentally through the
+// CLI.
+enum class IndexFailurePoint : std::uint8_t {
+  none,
+  begin,
+  adapter,
+  partial_transform,
+  commit,
+};
+
+IndexOneOutcome
+run_index_one(cidx::Storage &db, const cidx::File &rec, const std::string &path,
+              bool graph_enabled,
+              IndexFailurePoint failure = IndexFailurePoint::none);
 
 } // namespace cidx::ast

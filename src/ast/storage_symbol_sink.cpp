@@ -4,11 +4,12 @@
 
 #include "ast/kind_map.hpp"
 
-#include "storage/storage.hpp"
+#include "storage/ports.hpp"
 
 namespace cidx::ast {
 
-StorageSymbolSink::StorageSymbolSink(cidx::Storage &db) : db_(db) {}
+StorageSymbolSink::StorageSymbolSink(cidx::storage::AstStoragePorts &ports)
+    : ports_(ports) {}
 
 void StorageSymbolSink::set_current_file_id(int64_t file_id) {
   current_file_id_ = file_id;
@@ -18,16 +19,18 @@ void StorageSymbolSink::set_identity_translation_unit_config_id(
     int64_t config_id, int64_t translation_unit_file_id) {
   identity_translation_unit_ =
       translation_unit_file_id >= 0
-          ? db_.portable_translation_unit_identity_for_config(
+          ? ports_.workspace.portable_translation_unit_identity_for_config(
                 config_id, translation_unit_file_id)
-          : db_.portable_translation_unit_identity_for_config(config_id);
+          : ports_.workspace.portable_translation_unit_identity_for_config(
+                config_id);
 }
 
 void StorageSymbolSink::set_identity_translation_unit_file_id(int64_t file_id) {
   identity_translation_unit_ =
       file_id >= 0
           ? std::optional<std::string>(
-                db_.portable_translation_unit_identity_for_file(file_id))
+                ports_.workspace.portable_translation_unit_identity_for_file(
+                    file_id))
           : std::nullopt;
 }
 
@@ -75,13 +78,14 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
   sym.const_value = s.const_value;
   sym.resolved = s.resolved;
   sym.semantic_universe_id =
-      db_.semantic_universe_for_file_id(current_file_id_);
+      ports_.workspace.semantic_universe_for_file_id(current_file_id_);
   sym.identity_source = s.file;
   sym.identity_translation_unit = identity_translation_unit_;
   const std::optional<cidx::Symbol> existing =
-      db_.lookup_symbol(sym.usr, sym.semantic_universe_id, sym.identity_source,
-                        sym.identity_translation_unit);
-  const int64_t symbol_id = db_.add_symbol(sym);
+      ports_.symbols_read.lookup_symbol(sym.usr, sym.semantic_universe_id,
+                                        sym.identity_source,
+                                        sym.identity_translation_unit);
+  const int64_t symbol_id = ports_.symbols_write.add_symbol(sym);
   if (std::ranges::find(symbol_ids_, symbol_id) == symbol_ids_.end()) {
     symbol_ids_.push_back(symbol_id);
   }

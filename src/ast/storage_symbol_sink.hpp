@@ -11,15 +11,15 @@
 #include <string>
 #include <vector>
 
-namespace cidx {
-class Storage;
+namespace cidx::storage {
+struct AstStoragePorts;
 }
 
 namespace cidx::ast {
 
 class StorageSymbolSink : public SymbolEmitter {
 public:
-  explicit StorageSymbolSink(cidx::Storage &db);
+  explicit StorageSymbolSink(cidx::storage::AstStoragePorts &ports);
 
   void set_current_file_id(int64_t file_id);
   void set_identity_translation_unit_config_id(
@@ -35,7 +35,7 @@ public:
   void emit(const SymbolRecord &symbol) override;
 
 private:
-  cidx::Storage &db_;
+  cidx::storage::AstStoragePorts &ports_;
   int64_t current_file_id_ = -1;
   std::optional<std::string> identity_translation_unit_;
   int stored_ = 0;
