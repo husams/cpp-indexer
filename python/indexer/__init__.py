@@ -77,6 +77,25 @@ from .entity_graph import (
     Instance,
     Interface,
 )
+from .extensions import (
+    ConformanceCase,
+    ConformanceSDK,
+    CompositeRegistry,
+    Lockfile,
+    PackageDependency,
+    PackageError,
+    PackageManifest,
+    PackageRegistry,
+    PackageResolutionError,
+    PackageResolver,
+    ResultProvenance,
+    Version,
+    artifact_identity,
+    canonical_json,
+    package_content_hash,
+    validate_package,
+    version_satisfies,
+)
 
 __all__ = [
     "Storage",
@@ -153,4 +172,22 @@ __all__ = [
     "EntityClassTemplate",
     "Instance",
     "Interface",
+    # versioned extension packages
+    "ConformanceCase",
+    "ConformanceSDK",
+    "CompositeRegistry",
+    "Lockfile",
+    "PackageDependency",
+    "PackageError",
+    "PackageManifest",
+    "PackageRegistry",
+    "PackageResolutionError",
+    "PackageResolver",
+    "ResultProvenance",
+    "Version",
+    "artifact_identity",
+    "canonical_json",
+    "package_content_hash",
+    "validate_package",
+    "version_satisfies",
 ]

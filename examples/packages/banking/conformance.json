@@ -1,0 +1,7 @@
+{
+  "cases": [
+    {"id": "positive-boundary", "package": "examples/packages/banking/extract", "expected": "valid"},
+    {"id": "positive-analysis", "package": "examples/packages/banking/analysis", "expected": "valid", "checks": {"kind": "cidx.analysis"}},
+    {"id": "excessive-budget", "package": "examples/packages/banking/analysis", "expected": "invalid", "checks": {"max_budget": 1000}}
+  ]
+}

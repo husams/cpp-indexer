@@ -1,0 +1,21 @@
+{
+  "format": "cidx.package/v1",
+  "name": "banking.extract",
+  "version": "1.0.0",
+  "kind": "cidx.extract",
+  "content_hash": "sha256:f6a3b42b6759b8ab3063bca29f1fb6c8c3a3b798dd47fbc91d7915c5364fe272",
+  "publisher": "cidx.example",
+  "origin": "file:examples/packages/banking",
+  "license": "Apache-2.0",
+  "entry_points": {"extract/boundaries": "extraction.json"},
+  "namespaces": ["banking.extract"],
+  "compatibility": {"catalog_version": 1, "artifact_version": 1},
+  "dependencies": [],
+  "schemas": ["extraction.schema.json"],
+  "budgets": {"matches": 1000, "output_bytes": 1048576},
+  "sandbox_profile": "declarative-default",
+  "trust": "unverified",
+  "evidence": "extension-analysis",
+  "capabilities": [],
+  "metadata": {"applicability": {"language": "c++"}}
+}

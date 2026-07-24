@@ -1,0 +1,3 @@
+// Declarative fixture only; execution is owned by the approved analysis engine.
+.decl application_state_boundary(node: symbol)
+.output application_state_boundary

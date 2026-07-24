@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cidx.dev/schemas/extension-lock.schema.json",
+  "title": "CIDX extension package lockfile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "roots", "packages", "lock_hash"],
+  "properties": {
+    "format": {"const": "cidx.lock/v1"},
+    "roots": {"type": "array", "items": {"$ref": "#/definitions/dependency"}},
+    "packages": {"type": "array", "items": {"$ref": "#/definitions/package"}},
+    "lock_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "definitions": {
+    "dependency": {"type": "object", "required": ["name", "version"], "properties": {"name": {"type": "string"}, "version": {"type": "string"}, "kind": {"type": "string"}}, "additionalProperties": false},
+    "package": {
+      "type": "object",
+      "required": ["name", "version", "kind", "content_hash", "registry", "dependencies", "namespaces"],
+      "properties": {
+        "name": {"type": "string"},
+        "version": {"type": "string"},
+        "kind": {"type": "string"},
+        "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "registry": {"type": "string"},
+        "dependencies": {"type": "array", "items": {"$ref": "#/definitions/dependency"}},
+        "namespaces": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      },
+      "additionalProperties": false
+    }
+  }
+}
