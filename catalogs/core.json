@@ -145,7 +145,7 @@
     {"name": "src_id", "filterable": true, "is_string": false},
     {"name": "dst_id", "filterable": true, "is_string": false}
   ],
-  "statuses": ["complete", "partial", "unknown", "error"],
+  "statuses": ["complete", "partial", "unknown", "refuted", "conditional", "error"],
   "trust_levels": ["unverified", "producer-verified", "reader-verified"],
   "evidence_classes": ["source", "derived", "inferred", "runtime", "assumption", "proof"],
   "occurrence_roles": [
@@ -161,7 +161,11 @@
   "unknown_reasons": [
     {"id": 1, "name": "not_indexed"}, {"id": 2, "name": "unsupported_construct"},
     {"id": 3, "name": "truncated_budget"}, {"id": 4, "name": "unresolved_symbol"},
-    {"id": 5, "name": "incompatible_artifact"}, {"id": 6, "name": "missing_evidence"}
+    {"id": 5, "name": "incompatible_artifact"}, {"id": 6, "name": "missing_evidence"},
+    {"id": 7, "name": "stale_input"}, {"id": 8, "name": "timeout"},
+    {"id": 9, "name": "backend_error"}, {"id": 10, "name": "policy_refuted"},
+    {"id": 11, "name": "invalid_input"}, {"id": 12, "name": "redacted"},
+    {"id": 13, "name": "size_limit"}
   ],
   "artifact_kinds": [
     {"id": 1, "name": "semantic-index", "schema_version": 39},

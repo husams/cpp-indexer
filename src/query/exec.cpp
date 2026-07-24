@@ -5,6 +5,8 @@
 
 #include "query/exec.hpp"
 
+#include "catalogs/generated_catalog.hpp"
+#include "cli/version.hpp"
 #include "graph/query.hpp"
 
 #include <algorithm>
@@ -156,6 +158,18 @@ Cell entity_type_name_cell(int64_t raw) {
     return Cell(std::string(names[raw]));
   }
   return Cell(nullptr);
+}
+
+std::string shape_name(Shape shape) {
+  switch (shape) {
+  case Shape::Nodes:
+    return "nodes";
+  case Shape::Rows:
+    return "rows";
+  case Shape::Scalar:
+    return "scalar";
+  }
+  return "scalar";
 }
 
 // kind/entity_type predicate value: name -> stored int, by FIELD (not view).
@@ -1965,10 +1979,7 @@ public:
 json_out::Value Result::to_json() const {
   using namespace json_out;
   Object o;
-  o.emplace_back("shape",
-                 Value::of(std::string(shape == Shape::Nodes  ? "nodes"
-                                       : shape == Shape::Rows ? "rows"
-                                                              : "scalar")));
+  o.emplace_back("shape", Value::of(shape_name(shape)));
   o.emplace_back("view", Value::of(std::string(view_name(view))));
   if (shape == Shape::Scalar) {
     o.emplace_back("count", Value::of(scalar));
@@ -1996,6 +2007,109 @@ json_out::Value Result::to_json() const {
   }
   o.emplace_back("rows", Value::arr(std::move(arr)));
   return Value::obj(std::move(o));
+}
+
+protocol::ResultEnvelope Result::to_envelope() const {
+  using namespace protocol;
+  using namespace json_out;
+
+  Object payload;
+  payload.emplace_back("shape", Value::of(shape_name(shape)));
+  payload.emplace_back("view", Value::of(std::string(view_name(view))));
+  if (shape == Shape::Scalar) {
+    payload.emplace_back("count", Value::of(scalar));
+  } else {
+    payload.emplace_back("count", Value::of(static_cast<int64_t>(rows.size())));
+  }
+  payload.emplace_back("truncated", Value::of(truncated));
+  if (shape != Shape::Scalar) {
+    Array row_values;
+    for (const auto &row : rows) {
+      Object row_value;
+      for (size_t i = 0; i < fields.size(); ++i) {
+        const Cell &cell = row[i];
+        if (std::holds_alternative<std::nullptr_t>(cell)) {
+          row_value.emplace_back(fields[i], Value::null());
+        } else if (std::holds_alternative<int64_t>(cell)) {
+          row_value.emplace_back(fields[i], Value::of(std::get<int64_t>(cell)));
+        } else {
+          row_value.emplace_back(fields[i],
+                                 Value::of(std::get<std::string>(cell)));
+        }
+      }
+      row_values.push_back(Value::obj(std::move(row_value)));
+    }
+    payload.emplace_back("rows", Value::arr(std::move(row_values)));
+  }
+
+  ResultEnvelope envelope;
+  envelope.operation = "query";
+  if (index.freshness == "stale") {
+    envelope.status = Status::Unknown;
+  } else if (truncated) {
+    envelope.status = Status::Partial;
+  } else if (index.freshness == "current") {
+    envelope.status = Status::Complete;
+  } else {
+    envelope.status = Status::Unknown;
+  }
+  envelope.identity.workspace = index.workspace;
+  envelope.identity.index =
+      "semantic-index/schema/" + std::to_string(index.schema_version);
+  envelope.identity.fact_sets = {view == View::Symbol ? "symbols" : "entities"};
+  envelope.identity.freshness = index.freshness;
+  envelope.identity.source_revision = index.source_revision;
+  envelope.identity.source_fingerprint = index.source_fingerprint;
+  envelope.producer.package = "cidx";
+  envelope.producer.version = std::string(version::kFullProductVersion);
+  envelope.producer.backend = "cpp";
+  envelope.producer.schema_version = kProtocolVersion;
+  if (envelope.status == Status::Complete) {
+    envelope.completeness.state = "complete";
+  } else if (envelope.status == Status::Partial) {
+    envelope.completeness.state = "partial";
+  } else {
+    envelope.completeness.state = "unknown";
+  }
+  envelope.completeness.truncated = truncated;
+  envelope.completeness.stale = index.freshness == "stale";
+  envelope.result = Value::obj(std::move(payload));
+  envelope.evidence.push_back(
+      protocol::EvidenceNode{.id = "queryplan",
+                             .evidence_class = "derived",
+                             .trust = "producer-verified",
+                             .summary = "bounded QueryPlan execution",
+                             .source = std::nullopt,
+                             .children = {}});
+  envelope.artifacts.push_back(protocol::ArtifactRef{
+      .kind = "semantic-index",
+      .id = envelope.identity.index,
+      .schema_version = index.schema_version,
+      .catalog_version = catalog::kCatalogVersion,
+      .catalog_hash = std::string(catalog::kCatalogHash)});
+  if (truncated) {
+    envelope.diagnostics.push_back(protocol::Diagnostic{
+        .code = "truncated_budget",
+        .severity = "warning",
+        .message = "result was bounded by the QueryPlan execution budget",
+        .next_action = "narrow the query or provide an explicit limit"});
+  }
+  if (index.freshness == "stale") {
+    envelope.diagnostics.push_back(protocol::Diagnostic{
+        .code = "stale_input",
+        .severity = "error",
+        .message = "index contents are stale for the workspace",
+        .next_action =
+            "re-index the affected sources before relying on this result"});
+  } else if (index.freshness != "current") {
+    envelope.diagnostics.push_back(protocol::Diagnostic{
+        .code = "unknown",
+        .severity = "warning",
+        .message = "index freshness could not be verified",
+        .next_action =
+            "stamp or re-index the workspace before relying on this result"});
+  }
+  return envelope;
 }
 
 Result Executor::run(const Plan &plan) {

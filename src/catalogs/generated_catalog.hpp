@@ -6,7 +6,7 @@
 
 namespace cidx::catalog {
 inline constexpr int kCatalogVersion = 1;
-inline constexpr std::string_view kCatalogHash = "0f403691e360a9bbfb0b2a15ca20f62c6f236038099b5e16cf034377d5df87f0";
+inline constexpr std::string_view kCatalogHash = "1adb5f6663a2e48dc3a624c79703ceaa5287f2784731a00bbc469dba8d5935d4";
 enum class View : std::uint8_t { Symbol, Entity, Parameter, TemplateParameter, TemplateArgument, CallArgument, Edge, Evidence, Type };
 struct NamedId { int64_t id; std::string_view name; };
 struct Relation { int64_t id; std::string_view name; View layer; std::string_view source; std::string_view target; std::string_view inverse; std::string_view traversal; std::string_view evidence; std::string_view evidence_capabilities; std::string_view completeness; bool virtual_relation; };
@@ -206,6 +206,30 @@ inline constexpr std::array<NamedId, 3> kIdentityKinds = {{
     {.id = 3, .name = "path"},
 }};
 
-inline constexpr std::array<std::string_view, 4> kStatuses = {"complete", "partial", "unknown", "error"};
+inline constexpr std::array<std::string_view, 6> kStatuses = {"complete", "partial", "unknown", "refuted", "conditional", "error"};
 inline constexpr std::array<std::string_view, 6> kEvidenceClasses = {"source", "derived", "inferred", "runtime", "assumption", "proof"};
+inline constexpr std::array<std::string_view, 3> kTrustLevels = {"unverified", "producer-verified", "reader-verified"};
+inline constexpr std::array<NamedId, 13> kUnknownReasons = {{
+    {.id = 1, .name = "not_indexed"},
+    {.id = 2, .name = "unsupported_construct"},
+    {.id = 3, .name = "truncated_budget"},
+    {.id = 4, .name = "unresolved_symbol"},
+    {.id = 5, .name = "incompatible_artifact"},
+    {.id = 6, .name = "missing_evidence"},
+    {.id = 7, .name = "stale_input"},
+    {.id = 8, .name = "timeout"},
+    {.id = 9, .name = "backend_error"},
+    {.id = 10, .name = "policy_refuted"},
+    {.id = 11, .name = "invalid_input"},
+    {.id = 12, .name = "redacted"},
+    {.id = 13, .name = "size_limit"},
+}};
+
+inline constexpr std::array<NamedId, 4> kArtifactKinds = {{
+    {.id = 1, .name = "semantic-index"},
+    {.id = 2, .name = "astgraph"},
+    {.id = 3, .name = "analysis-result"},
+    {.id = 4, .name = "query-result"},
+}};
+
 } // namespace cidx::catalog

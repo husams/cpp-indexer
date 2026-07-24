@@ -37,6 +37,7 @@ struct IndexIdentity {
   std::optional<std::string> index_config;
   std::optional<std::string> index_config_fingerprint;
   std::string freshness = "unverifiable"; // current | stale | unverifiable
+  std::string workspace = "workspace:memory";
 };
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an

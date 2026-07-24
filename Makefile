@@ -51,6 +51,7 @@ tidy:
 
 contracts-check:
 	uv run --project $(REPO_DIR)/python python $(REPO_DIR)/scripts/check_release_contract.py
+	uv run --project $(REPO_DIR)/python python $(REPO_DIR)/scripts/generate_result_protocol.py --check
 
 clean:
 	rm -rf $(BUILD_DIR) $(STATIC_BUILD_DIR)

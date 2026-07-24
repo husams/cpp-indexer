@@ -14,6 +14,7 @@
 
 #include "cli/json_out.hpp"
 #include "query/plan.hpp"
+#include "query/result_protocol.hpp"
 #include "storage/storage.hpp"
 
 namespace cidx::query {
@@ -39,6 +40,13 @@ struct Result {
   // {"shape","view","count","truncated","index","rows"} -- see
   // docs/query-plan.md.
   [[nodiscard]] json_out::Value to_json() const;
+
+  // Versioned HSE-70 envelope. to_json() remains the legacy QueryPlan shape
+  // for compatibility until downstream adapters complete their migration.
+  [[nodiscard]] protocol::ResultEnvelope to_envelope() const;
+  [[nodiscard]] json_out::Value to_envelope_json() const {
+    return to_envelope().to_json();
+  }
 };
 
 class Executor {
