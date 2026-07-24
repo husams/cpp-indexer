@@ -13,7 +13,8 @@ CONSTANTS
     UniverseIds,
     InputIds,
     RevisionIds,
-    ToolCatalogIds,
+    ToolchainIds,
+    CatalogIds,
     TransformId,
     Scenario
 
@@ -31,7 +32,11 @@ VARIABLES
     generations,
     currentGeneration,
     requiredRevision,
+    requiredConfigurations,
+    requiredToolchain,
+    requiredCatalog,
     invalidatedInputs,
+    invalidatedDependencies,
     readStatus
 
 vars == <<
@@ -48,7 +53,11 @@ vars == <<
     generations,
     currentGeneration,
     requiredRevision,
+    requiredConfigurations,
+    requiredToolchain,
+    requiredCatalog,
     invalidatedInputs,
+    invalidatedDependencies,
     readStatus
 >>
 
@@ -58,7 +67,10 @@ SeedScenarioIds == {
     "cross-universe-conflation",
     "partial-publication",
     "missing-invalidation",
-    "stale-as-current"
+    "stale-as-current",
+    "configuration-invalidation",
+    "toolchain-invalidation",
+    "catalog-invalidation"
 }
 
 GenerationRecord == [
@@ -66,7 +78,8 @@ GenerationRecord == [
     workspace: {WorkspaceId},
     status: GenerationStatuses,
     inputRevision: RevisionIds,
-    toolCatalog: ToolCatalogIds,
+    toolchain: ToolchainIds,
+    catalog: CatalogIds,
     configurations: SUBSET ConfigurationIds,
     inputs: SUBSET InputIds,
     outputs: SUBSET ArtifactIds,
@@ -153,7 +166,8 @@ FixtureTranslationUnits == {
 
 FixtureConfigurations == {
     [id |-> "config-1", descriptor |-> "clang-target-a"],
-    [id |-> "config-2", descriptor |-> "clang-target-b"]
+    [id |-> "config-2", descriptor |-> "clang-target-b"],
+    [id |-> "config-3", descriptor |-> "clang-target-c"]
 }
 
 FixtureSymbols == {
@@ -188,7 +202,8 @@ FixtureGeneration == [
     workspace |-> WorkspaceId,
     status |-> "current",
     inputRevision |-> "revision-0",
-    toolCatalog |-> "catalog-0",
+    toolchain |-> "toolchain-0",
+    catalog |-> "catalog-0",
     configurations |-> {"config-1", "config-2"},
     inputs |-> {"input-source-1", "input-config-1", "input-config-2"},
     outputs |-> {"artifact-0"},
@@ -201,7 +216,8 @@ ReplacementGeneration == [
     workspace |-> WorkspaceId,
     status |-> "extracting",
     inputRevision |-> "revision-1",
-    toolCatalog |-> "catalog-0",
+    toolchain |-> "toolchain-0",
+    catalog |-> "catalog-0",
     configurations |-> {"config-1", "config-2"},
     inputs |-> {"input-source-1", "input-config-1", "input-config-2"},
     outputs |-> {},
@@ -250,7 +266,11 @@ ValidInitialState ==
     /\ generations = FixtureGenerations
     /\ currentGeneration = "generation-0"
     /\ requiredRevision = "revision-0"
+    /\ requiredConfigurations = {"config-1", "config-2"}
+    /\ requiredToolchain = "toolchain-0"
+    /\ requiredCatalog = "catalog-0"
     /\ invalidatedInputs = {}
+    /\ invalidatedDependencies = {}
     /\ readStatus = "current"
 
 CrossUniverseConflationSeed ==
@@ -288,7 +308,11 @@ SeededState(scenario) ==
             generations |-> FixtureGenerations,
             currentGeneration |-> "generation-0",
             requiredRevision |-> "revision-0",
+            requiredConfigurations |-> {"config-1", "config-2"},
+            requiredToolchain |-> "toolchain-0",
+            requiredCatalog |-> "catalog-0",
             invalidatedInputs |-> {},
+            invalidatedDependencies |-> {},
             readStatus |-> "current"]
         [] scenario = "partial-publication" -> [
             phase |-> "ready",
@@ -304,7 +328,11 @@ SeededState(scenario) ==
             generations |-> PartialPublicationSeed,
             currentGeneration |-> "generation-1",
             requiredRevision |-> "revision-1",
+            requiredConfigurations |-> {"config-1", "config-2"},
+            requiredToolchain |-> "toolchain-0",
+            requiredCatalog |-> "catalog-0",
             invalidatedInputs |-> {},
+            invalidatedDependencies |-> {},
             readStatus |-> "current"]
         [] scenario = "missing-invalidation" -> [
             phase |-> "ready",
@@ -320,7 +348,11 @@ SeededState(scenario) ==
             generations |-> MissingInvalidationSeed,
             currentGeneration |-> "generation-0",
             requiredRevision |-> "revision-1",
+            requiredConfigurations |-> {"config-1", "config-2"},
+            requiredToolchain |-> "toolchain-0",
+            requiredCatalog |-> "catalog-0",
             invalidatedInputs |-> {"input-source-1"},
+            invalidatedDependencies |-> {"source"},
             readStatus |-> "current"]
         [] scenario = "stale-as-current" -> [
             phase |-> "ready",
@@ -336,7 +368,71 @@ SeededState(scenario) ==
             generations |-> StaleAsCurrentSeed,
             currentGeneration |-> "generation-0",
             requiredRevision |-> "revision-0",
+            requiredConfigurations |-> {"config-1", "config-2"},
+            requiredToolchain |-> "toolchain-0",
+            requiredCatalog |-> "catalog-0",
             invalidatedInputs |-> {},
+            invalidatedDependencies |-> {},
+            readStatus |-> "current"]
+        [] scenario = "configuration-invalidation" -> [
+            phase |-> "ready",
+            workspace |-> FixtureWorkspace,
+            universes |-> FixtureUniverses,
+            repositories |-> FixtureRepositories,
+            sources |-> FixtureSources,
+            translationUnits |-> FixtureTranslationUnits,
+            configurations |-> FixtureConfigurations,
+            symbols |-> FixtureSymbols,
+            symbolAppearances |-> FixtureAppearances,
+            facts |-> FixtureFacts,
+            generations |-> FixtureGenerations,
+            currentGeneration |-> "generation-0",
+            requiredRevision |-> "revision-0",
+            requiredConfigurations |-> {"config-1", "config-3"},
+            requiredToolchain |-> "toolchain-0",
+            requiredCatalog |-> "catalog-0",
+            invalidatedInputs |-> {"input-config-2", "input-config-3"},
+            invalidatedDependencies |-> {"configuration"},
+            readStatus |-> "current"]
+        [] scenario = "toolchain-invalidation" -> [
+            phase |-> "ready",
+            workspace |-> FixtureWorkspace,
+            universes |-> FixtureUniverses,
+            repositories |-> FixtureRepositories,
+            sources |-> FixtureSources,
+            translationUnits |-> FixtureTranslationUnits,
+            configurations |-> FixtureConfigurations,
+            symbols |-> FixtureSymbols,
+            symbolAppearances |-> FixtureAppearances,
+            facts |-> FixtureFacts,
+            generations |-> FixtureGenerations,
+            currentGeneration |-> "generation-0",
+            requiredRevision |-> "revision-0",
+            requiredConfigurations |-> {"config-1", "config-2"},
+            requiredToolchain |-> "toolchain-1",
+            requiredCatalog |-> "catalog-0",
+            invalidatedInputs |-> {"input-toolchain"},
+            invalidatedDependencies |-> {"toolchain"},
+            readStatus |-> "current"]
+        [] scenario = "catalog-invalidation" -> [
+            phase |-> "ready",
+            workspace |-> FixtureWorkspace,
+            universes |-> FixtureUniverses,
+            repositories |-> FixtureRepositories,
+            sources |-> FixtureSources,
+            translationUnits |-> FixtureTranslationUnits,
+            configurations |-> FixtureConfigurations,
+            symbols |-> FixtureSymbols,
+            symbolAppearances |-> FixtureAppearances,
+            facts |-> FixtureFacts,
+            generations |-> FixtureGenerations,
+            currentGeneration |-> "generation-0",
+            requiredRevision |-> "revision-0",
+            requiredConfigurations |-> {"config-1", "config-2"},
+            requiredToolchain |-> "toolchain-0",
+            requiredCatalog |-> "catalog-1",
+            invalidatedInputs |-> {"input-catalog"},
+            invalidatedDependencies |-> {"catalog"},
             readStatus |-> "current"]
 
 Init ==
@@ -357,7 +453,11 @@ Init ==
         /\ generations = SeededState(Scenario).generations
         /\ currentGeneration = SeededState(Scenario).currentGeneration
         /\ requiredRevision = SeededState(Scenario).requiredRevision
+        /\ requiredConfigurations = SeededState(Scenario).requiredConfigurations
+        /\ requiredToolchain = SeededState(Scenario).requiredToolchain
+        /\ requiredCatalog = SeededState(Scenario).requiredCatalog
         /\ invalidatedInputs = SeededState(Scenario).invalidatedInputs
+        /\ invalidatedDependencies = SeededState(Scenario).invalidatedDependencies
         /\ readStatus = SeededState(Scenario).readStatus
 
 ImportReplacement ==
@@ -370,7 +470,9 @@ ImportReplacement ==
     /\ generations' = generations \cup {ImportedReplacement}
     /\ UNCHANGED <<workspace, universes, repositories, sources,
         translationUnits, configurations, symbols, symbolAppearances, facts,
-        currentGeneration, requiredRevision, invalidatedInputs, readStatus>>
+        currentGeneration, requiredRevision, requiredConfigurations,
+        requiredToolchain, requiredCatalog, invalidatedInputs,
+        invalidatedDependencies, readStatus>>
 
 CaptureConfiguration ==
     /\ phase = "imported"
@@ -382,7 +484,9 @@ CaptureConfiguration ==
         generations)
     /\ UNCHANGED <<workspace, universes, repositories, sources,
         translationUnits, configurations, symbols, symbolAppearances, facts,
-        currentGeneration, requiredRevision, invalidatedInputs, readStatus>>
+        currentGeneration, requiredRevision, requiredConfigurations,
+        requiredToolchain, requiredCatalog, invalidatedInputs,
+        invalidatedDependencies, readStatus>>
 
 StartExtraction ==
     /\ Scenario = "valid"
@@ -392,17 +496,20 @@ StartExtraction ==
     /\ \E g \in generations : g.id = "generation-1" /\ g.status = "capturing"
     /\ phase' = "building"
     /\ generations' = ReplaceGeneration(
-        "generation-0",
-        [GenerationById("generation-0", generations) EXCEPT !.status = "stale"],
-        generations) \cup {
-            [GenerationById("generation-1", generations) EXCEPT !.status = "extracting"]
-        }
+        "generation-1",
+        [GenerationById("generation-1", generations) EXCEPT !.status = "extracting"],
+        ReplaceGeneration(
+            "generation-0",
+            [GenerationById("generation-0", generations) EXCEPT !.status = "stale"],
+            generations))
     /\ currentGeneration' = NoCurrent
     /\ requiredRevision' = "revision-1"
     /\ invalidatedInputs' = {"input-source-1"}
+    /\ invalidatedDependencies' = {"source"}
     /\ readStatus' = "stale"
     /\ UNCHANGED <<workspace, universes, repositories, sources,
-        translationUnits, configurations, symbols, symbolAppearances, facts>>
+        translationUnits, configurations, symbols, symbolAppearances, facts,
+        requiredConfigurations, requiredToolchain, requiredCatalog>>
 
 BeginValidation ==
     /\ phase = "building"
@@ -418,7 +525,9 @@ BeginValidation ==
     /\ readStatus' = "partial"
     /\ UNCHANGED <<workspace, universes, repositories, sources,
         translationUnits, configurations, symbols, symbolAppearances, facts,
-        currentGeneration, requiredRevision, invalidatedInputs>>
+        currentGeneration, requiredRevision, requiredConfigurations,
+        requiredToolchain, requiredCatalog, invalidatedInputs,
+        invalidatedDependencies>>
 
 PublishReplacement ==
     /\ phase = "validating"
@@ -438,9 +547,11 @@ PublishReplacement ==
     /\ currentGeneration' = NoCurrent
     /\ requiredRevision' = "revision-1"
     /\ invalidatedInputs' = {"input-source-1"}
+    /\ invalidatedDependencies' = {"source"}
     /\ readStatus' = "stale"
     /\ UNCHANGED <<workspace, universes, repositories, sources,
-        translationUnits, configurations, symbols, symbolAppearances, facts>>
+        translationUnits, configurations, symbols, symbolAppearances, facts,
+        requiredConfigurations, requiredToolchain, requiredCatalog>>
 
 MakeCurrent ==
     /\ phase = "published"
@@ -458,9 +569,11 @@ MakeCurrent ==
     /\ currentGeneration' = "generation-1"
     /\ requiredRevision' = "revision-1"
     /\ invalidatedInputs' = {}
+    /\ invalidatedDependencies' = {}
     /\ readStatus' = "current"
     /\ UNCHANGED <<workspace, universes, repositories, sources,
-        translationUnits, configurations, symbols, symbolAppearances, facts>>
+        translationUnits, configurations, symbols, symbolAppearances, facts,
+        requiredConfigurations, requiredToolchain, requiredCatalog>>
 
 FailReplacement ==
     /\ phase = "building" \/ phase = "validating"
@@ -472,10 +585,12 @@ FailReplacement ==
         generations)
     /\ currentGeneration' = NoCurrent
     /\ invalidatedInputs' = {"input-source-1"}
+    /\ invalidatedDependencies' = {"source"}
     /\ readStatus' = "unavailable"
     /\ UNCHANGED <<workspace, universes, repositories, sources,
         translationUnits, configurations, symbols, symbolAppearances, facts,
-        requiredRevision>>
+        requiredRevision, requiredConfigurations, requiredToolchain,
+        requiredCatalog>>
 
 RetireOldGeneration ==
     /\ phase = "ready"
@@ -487,19 +602,70 @@ RetireOldGeneration ==
         generations)
     /\ UNCHANGED <<phase, workspace, universes, repositories, sources,
         translationUnits, configurations, symbols, symbolAppearances, facts,
-        currentGeneration, requiredRevision, invalidatedInputs, readStatus>>
+        currentGeneration, requiredRevision, requiredConfigurations,
+        requiredToolchain, requiredCatalog, invalidatedInputs,
+        invalidatedDependencies, readStatus>>
+
+InvalidateCurrent(newRevision, newConfigurations, newToolchain, newCatalog,
+        dependencies, inputs) ==
+    /\ Scenario = "valid"
+    /\ phase = "ready"
+    /\ currentGeneration = "generation-0"
+    /\ readStatus = "current"
+    /\ \E g \in generations : g.id = "generation-0" /\ g.status = "current"
+    /\ generations' = ReplaceGeneration(
+        "generation-0",
+        [GenerationById("generation-0", generations) EXCEPT !.status = "stale"],
+        generations)
+    /\ currentGeneration' = NoCurrent
+    /\ requiredRevision' = newRevision
+    /\ requiredConfigurations' = newConfigurations
+    /\ requiredToolchain' = newToolchain
+    /\ requiredCatalog' = newCatalog
+    /\ invalidatedInputs' = inputs
+    /\ invalidatedDependencies' = dependencies
+    /\ readStatus' = "stale"
+    /\ UNCHANGED <<phase, workspace, universes, repositories, sources,
+        translationUnits, configurations, symbols, symbolAppearances, facts>>
+
+SourceInvalidation ==
+    InvalidateCurrent("revision-1", requiredConfigurations, requiredToolchain,
+        requiredCatalog, {"source"}, {"input-source-1"})
+
+ConfigurationInvalidation ==
+    InvalidateCurrent(requiredRevision, {"config-1", "config-3"},
+        requiredToolchain, requiredCatalog, {"configuration"},
+        {"input-config-2", "input-config-3"})
+
+ToolchainInvalidation ==
+    InvalidateCurrent(requiredRevision, requiredConfigurations, "toolchain-1",
+        requiredCatalog, {"toolchain"}, {"input-toolchain"})
+
+CatalogInvalidation ==
+    InvalidateCurrent(requiredRevision, requiredConfigurations, requiredToolchain,
+        "catalog-1", {"catalog"}, {"input-catalog"})
+
+InvalidationStep == SourceInvalidation \/ ConfigurationInvalidation
+    \/ ToolchainInvalidation \/ CatalogInvalidation
 
 LifecycleStep == ImportReplacement \/ CaptureConfiguration \/ StartExtraction
     \/ BeginValidation \/ PublishReplacement \/ MakeCurrent \/ FailReplacement
-    \/ RetireOldGeneration
+    \/ RetireOldGeneration \/ InvalidationStep
 
 NoOp == UNCHANGED vars
 
 Next == LifecycleStep \/ NoOp
 
-Fairness == WF_vars(LifecycleStep)
+EnvironmentFairness == WF_vars(LifecycleStep)
 
-Spec == Init /\ [][Next]_vars /\ Fairness
+Spec == Init /\ [][Next]_vars /\ EnvironmentFairness
+
+ReadSettled == phase = "ready"
+    /\ readStatus \in {"current", "stale", "unavailable"}
+
+RebuildEventuallySettles ==
+    []((phase \in {"imported", "capturing", "building", "validating", "published"})
+        => <>ReadSettled)
 
 LifecycleTypeInvariant ==
     /\ workspace.id = WorkspaceId
@@ -523,12 +689,17 @@ LifecycleTypeInvariant ==
         /\ g.workspace = WorkspaceId
         /\ g.status \in GenerationStatuses
         /\ g.inputRevision \in RevisionIds
-        /\ g.toolCatalog \in ToolCatalogIds
+        /\ g.toolchain \in ToolchainIds
+        /\ g.catalog \in CatalogIds
         /\ g.configurations \subseteq ConfigurationIds
         /\ g.inputs \subseteq InputIds
         /\ g.outputs \subseteq ArtifactIds
         /\ g.complete \in BOOLEAN
         /\ g.validated \in BOOLEAN
+    /\ requiredConfigurations \subseteq ConfigurationIds
+    /\ requiredToolchain \in ToolchainIds
+    /\ requiredCatalog \in CatalogIds
+    /\ invalidatedDependencies \subseteq InvalidationKinds
     /\ readStatus \in ReadStatuses
 
 WorkspaceContainmentInvariant ==
@@ -593,7 +764,11 @@ InvalidationInvariant ==
             /\ g.id = currentGeneration
             /\ g.status = "current"
             /\ g.inputRevision = requiredRevision
+            /\ g.configurations = requiredConfigurations
+            /\ g.toolchain = requiredToolchain
+            /\ g.catalog = requiredCatalog
         /\ invalidatedInputs = {}
+        /\ invalidatedDependencies = {}
 
 ReadHonestyInvariant ==
     /\ (readStatus = "current" => currentGeneration # NoCurrent)

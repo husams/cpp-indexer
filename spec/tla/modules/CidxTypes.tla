@@ -56,6 +56,8 @@ GenerationStatuses == {
 
 ReadStatuses == {"current", "stale", "partial", "unavailable"}
 
+InvalidationKinds == {"source", "configuration", "toolchain", "catalog"}
+
 (* One definition, reused by every later specification module. *)
 ResultStatuses == {
     "suggested",

@@ -49,6 +49,12 @@ the one shared `ResultStatuses` set:
 `partial`, and `unavailable`. Later models must reuse these sets instead of
 introducing subsystem-specific spellings.
 
+`CidxWorkspaceLifecycle.tla` keeps environment weak fairness as an assumption
+inside `Spec`, but checks the separate `RebuildEventuallySettles` property.
+That property requires an enabled import/rebuild path to reach a settled
+reader state; the regression checker removes publication and verifies TLC
+rejects the resulting non-progressing behavior.
+
 Future modules must import these operators instead of defining look-alike
 status strings or implementation-specific record shapes. Concrete identifiers
 and finite model sizes belong in `.cfg` files, not in the normative type

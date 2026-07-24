@@ -74,5 +74,34 @@ run_seed cross-universe-conflation ScopedSymbolIdentityInvariant
 run_seed partial-publication NoPartialPublicationInvariant
 run_seed missing-invalidation InvalidationInvariant
 run_seed stale-as-current GenerationPublicationInvariant
+run_seed configuration-invalidation InvalidationInvariant
+run_seed toolchain-invalidation InvalidationInvariant
+run_seed catalog-invalidation InvalidationInvariant
 
-echo "TLA_REGRESSION_STATUS=PASS mutation=missing-ProtectedInvariant seeded=4"
+progress_modules="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-progress.XXXXXX")"
+cp "$ROOT"/modules/*.tla "$progress_modules"/
+sed 's#\\/ MakeCurrent##' \
+  "$progress_modules/CidxWorkspaceLifecycle.tla" \
+  >"$progress_modules/CidxWorkspaceLifecycle.tla.mutated"
+mv "$progress_modules/CidxWorkspaceLifecycle.tla.mutated" \
+  "$progress_modules/CidxWorkspaceLifecycle.tla"
+
+set +e
+progress_output="$(TLA_MODULE_DIR="$progress_modules" \
+  TLA_MODELS="CidxWorkspaceLifecycleSmoke" \
+  "$ROOT/tools/check.sh" 2>&1)"
+progress_status=$?
+set -e
+rm -rf "$progress_modules"
+
+if [[ "$progress_status" -ne 30 ]] \
+    || ! grep -q "TLA_MODEL_STATUS=FAIL model=CidxWorkspaceLifecycleSmoke" \
+        <<<"$progress_output" \
+    || ! grep -q "RebuildEventuallySettles" <<<"$progress_output"; then
+  echo "TLA_REGRESSION_STATUS=FAIL reason=progress-property-did-not-fail-closed" >&2
+  printf '%s\n' "$progress_output" >&2
+  exit 1
+fi
+echo "TLA_PROGRESS_REGRESSION_STATUS=PASS mutation=removed-MakeCurrent"
+
+echo "TLA_REGRESSION_STATUS=PASS mutation=missing-ProtectedInvariant seeded=7"
