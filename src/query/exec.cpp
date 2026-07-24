@@ -23,6 +23,24 @@
 
 namespace cidx::query {
 
+SqliteQueryReadAdapter::SqliteQueryReadAdapter(SqliteStorageService &service)
+    : service_(&service) {}
+
+SqliteDb &SqliteQueryReadAdapter::raw_db() { return service_->raw_db(); }
+
+std::optional<std::string>
+SqliteQueryReadAdapter::file_abs_path(int64_t file_id) {
+  return service_->file_abs_path(file_id);
+}
+
+IndexIdentity SqliteQueryReadAdapter::index_identity() {
+  return service_->index_identity();
+}
+
+SqliteStorageService &SqliteQueryReadAdapter::graph_service() {
+  return *service_;
+}
+
 namespace {
 
 std::string identity_segment(const std::string &value) {
@@ -239,9 +257,9 @@ std::string placeholders(size_t n) {
   return s;
 }
 
-std::vector<int64_t> fetch_ids(Storage &db, const std::string &sql,
+std::vector<int64_t> fetch_ids(SqliteDb &db, const std::string &sql,
                                const std::vector<SqlValue> &args) {
-  auto st = db.raw_db().prepare(sql);
+  auto st = db.prepare(sql);
   for (size_t i = 0; i < args.size(); ++i) {
     st.bind(static_cast<int>(i + 1), args[i]);
   }
@@ -425,8 +443,7 @@ receiver_aware_callees(graph::GraphQuery &graph, const graph::Sym &callee,
 
 class Exec {
 public:
-  Exec(Storage &db, storage::SourceStoreReadPort &source_read)
-      : db_(db), source_read_(source_read) {}
+  explicit Exec(QueryReadPort &read) : read_(read) {}
 
   Stream run_plan(const Plan &plan) {
     Stream st;
@@ -492,20 +509,19 @@ public:
   }
 
 private:
-  Storage &db_;
-  storage::SourceStoreReadPort &source_read_;
+  QueryReadPort &read_;
   std::map<int64_t, std::optional<std::string>> file_paths_;
 
   bool ambiguous_ungrouped_file(int64_t file_id) {
-    auto file =
-        db_.raw_db().prepare("SELECT c.name,c.path,r.name,r.remote_url,su.key "
-                             "FROM file f "
-                             "JOIN directory d ON d.id=f.directory_id "
-                             "JOIN component c ON c.id=d.component_id "
-                             "LEFT JOIN repository r ON r.id=c.repository_id "
-                             "LEFT JOIN semantic_universe su ON "
-                             "su.id=COALESCE(c.semantic_universe_id,"
-                             "r.semantic_universe_id,1) WHERE f.id=?");
+    auto file = read_.raw_db().prepare(
+        "SELECT c.name,c.path,r.name,r.remote_url,su.key "
+        "FROM file f "
+        "JOIN directory d ON d.id=f.directory_id "
+        "JOIN component c ON c.id=d.component_id "
+        "LEFT JOIN repository r ON r.id=c.repository_id "
+        "LEFT JOIN semantic_universe su ON "
+        "su.id=COALESCE(c.semantic_universe_id,"
+        "r.semantic_universe_id,1) WHERE f.id=?");
     file.bind(1, file_id);
     if (!file.step() || !pathutil::isabs(file.col_text(1))) {
       return false;
@@ -516,7 +532,7 @@ private:
     }
     const std::string owner =
         component_owner(file.col_text(2), file.col_text(3), file.col_text(4));
-    auto components = db_.raw_db().prepare(
+    auto components = read_.raw_db().prepare(
         "SELECT DISTINCT c.path,r.name,r.remote_url,su.key "
         "FROM component c "
         "LEFT JOIN repository r ON r.id=c.repository_id "
@@ -576,7 +592,7 @@ private:
     for (const char *col : {"s.usr", "s.qual_name", "s.spelling"}) {
       std::string sql = std::string("SELECT s.id FROM symbol s") + join +
                         " WHERE " + col + " = ? ORDER BY s.id";
-      auto ids = fetch_ids(db_, sql, {SqlValue(src.ref)});
+      auto ids = fetch_ids(read_.raw_db(), sql, {SqlValue(src.ref)});
       if (!ids.empty()) {
         return ids;
       }
@@ -608,7 +624,7 @@ private:
         for (size_t i = 0; i < n; ++i) {
           args.emplace_back(st.ids[at + i]);
         }
-        auto part = fetch_ids(db_, sql, args);
+        auto part = fetch_ids(read_.raw_db(), sql, args);
         kept.insert(kept.end(), part.begin(), part.end());
       }
       std::ranges::sort(kept);
@@ -676,7 +692,7 @@ private:
     }
     sql += " ORDER BY s.id LIMIT ?";
     args.emplace_back(kEnumerateBudget + 1);
-    st.ids = fetch_ids(db_, sql, args);
+    st.ids = fetch_ids(read_.raw_db(), sql, args);
     if (st.ids.size() > static_cast<size_t>(kEnumerateBudget)) {
       st.ids.resize(kEnumerateBudget);
       st.truncated = true;
@@ -710,7 +726,7 @@ private:
       }
       pred_sql(pred, sql, args);
       sql += ") ORDER BY s.id";
-      auto part = fetch_ids(db_, sql, args);
+      auto part = fetch_ids(read_.raw_db(), sql, args);
       out.insert(out.end(), part.begin(), part.end());
     }
     std::ranges::sort(out);
@@ -777,7 +793,7 @@ private:
   // (cumulative level sizes). In a diamond A->B, A->C->B, out(r, 2, 2)
   // therefore DOES emit B. The stream view follows the relation's layer.
   void traverse_devirtualized(Stream &st, const Stage &stage) {
-    graph::GraphQuery graph(db_);
+    graph::GraphQuery graph(read_.graph_service());
     const std::optional<std::vector<std::string>> call_kinds =
         std::vector<std::string>{"calls"};
     std::map<int64_t, ReceiverTypes> frontier;
@@ -832,7 +848,7 @@ private:
 
   std::vector<LogicalKey> logical_rows(View target, const std::string &sql,
                                        const std::vector<SqlValue> &args) {
-    auto query = db_.raw_db().prepare(sql);
+    auto query = read_.raw_db().prepare(sql);
     for (size_t i = 0; i < args.size(); ++i) {
       query.bind(static_cast<int>(i + 1), args[i]);
     }
@@ -880,7 +896,7 @@ private:
 
   std::vector<int64_t> logical_ids(const std::string &sql,
                                    const std::vector<SqlValue> &args) {
-    return fetch_ids(db_, sql, args);
+    return fetch_ids(read_.raw_db(), sql, args);
   }
 
   void traverse_typed(Stream &st, const Stage &stage, const RelationDesc &rel) {
@@ -1062,7 +1078,7 @@ private:
                   "position=? AND type_id IS NOT NULL",
                   {SqlValue(key.a), SqlValue(key.b)});
         } else if (rel.name == "has_default") {
-          auto query = db_.raw_db().prepare(
+          auto query = read_.raw_db().prepare(
               "SELECT 1 FROM template_param WHERE owner_id=? AND "
               "position=? AND (default_txt IS NOT NULL OR "
               "default_type_id IS NOT NULL OR default_ref_id IS NOT NULL)");
@@ -1309,7 +1325,7 @@ private:
         for (size_t i = 0; i < n; ++i) {
           args.emplace_back(frontier[at + i]);
         }
-        auto part = fetch_ids(db_, sql, args);
+        auto part = fetch_ids(read_.raw_db(), sql, args);
         level.insert(level.end(), part.begin(), part.end());
       }
       std::ranges::sort(level);
@@ -1380,14 +1396,13 @@ private:
   std::optional<std::string> file_path(int64_t file_id) {
     auto it = file_paths_.find(file_id);
     if (it == file_paths_.end()) {
-      it = file_paths_.emplace(file_id, source_read_.file_abs_path(file_id))
-               .first;
+      it = file_paths_.emplace(file_id, read_.file_abs_path(file_id)).first;
     }
     return it->second;
   }
 
   std::string portable_symbol(int64_t id) {
-    auto query = db_.raw_db().prepare(
+    auto query = read_.raw_db().prepare(
         "SELECT COALESCE(su.key,''),s.identity_key,s.usr FROM symbol s "
         "LEFT JOIN semantic_universe su ON su.id=s.semantic_universe_id "
         "WHERE s.id=?");
@@ -1401,7 +1416,7 @@ private:
   }
 
   std::string portable_file(int64_t id) {
-    auto query = db_.raw_db().prepare(
+    auto query = read_.raw_db().prepare(
         "SELECT c.name,c.path,d.path,f.name,r.name,r.remote_url,su.key "
         "FROM file f "
         "JOIN directory d ON d.id=f.directory_id "
@@ -1445,7 +1460,7 @@ private:
   }
 
   std::string portable_type(int64_t id) {
-    auto query = db_.raw_db().prepare(
+    auto query = read_.raw_db().prepare(
         "SELECT type_key,spelling FROM type_node WHERE id=?");
     query.bind(1, id);
     if (!query.step()) {
@@ -1456,8 +1471,8 @@ private:
   }
 
   std::string portable_edge(int64_t id) {
-    auto query =
-        db_.raw_db().prepare("SELECT src_id,dst_id,kind FROM edge WHERE id=?");
+    auto query = read_.raw_db().prepare(
+        "SELECT src_id,dst_id,kind FROM edge WHERE id=?");
     query.bind(1, id);
     if (!query.step()) {
       return "missing-edge:" + std::to_string(id);
@@ -1666,7 +1681,7 @@ private:
     std::map<LogicalKey, std::vector<Cell>> result;
     for (const auto &key : st.keys) {
       if (st.view == View::Evidence && key.tag == 1) {
-        auto query = db_.raw_db().prepare(
+        auto query = read_.raw_db().prepare(
             "SELECT default_txt,default_type_id,default_ref_id FROM "
             "template_param WHERE owner_id=? AND position=?");
         query.bind(1, key.a);
@@ -1732,7 +1747,7 @@ private:
       }
       sql +=
           " FROM " + typed_table(st.view) + " WHERE " + logical_where(st.view);
-      auto query = db_.raw_db().prepare(sql);
+      auto query = read_.raw_db().prepare(sql);
       const auto args = logical_args(st.view, key);
       for (size_t i = 0; i < args.size(); ++i) {
         query.bind(static_cast<int>(i + 1), args[i]);
@@ -1807,7 +1822,7 @@ private:
       for (size_t i = 0; i < n; ++i) {
         args.emplace_back(uniq[at + i]);
       }
-      auto stq = db_.raw_db().prepare(sql);
+      auto stq = read_.raw_db().prepare(sql);
       for (size_t i = 0; i < args.size(); ++i) {
         stq.bind(static_cast<int>(i + 1), args[i]);
       }
@@ -2163,10 +2178,10 @@ protocol::ResultEnvelope Result::to_envelope() const {
 
 Result Executor::run(const Plan &plan) {
   const Plan normalized = validate(plan);
-  Exec exec(db_, source_read_);
+  Exec exec(read_);
   Stream st = exec.run_plan(normalized);
   Result res = exec.finish(std::move(st));
-  res.index = db_.index_identity();
+  res.index = read_.index_identity();
   return res;
 }
 
@@ -2174,7 +2189,7 @@ json_out::Value Executor::explain(const Plan &plan) {
   const Plan normalized = validate(plan);
   json_out::Object o;
   o.emplace_back("plan", plan_to_json(normalized));
-  o.emplace_back("index", index_identity_json(db_.index_identity()));
+  o.emplace_back("index", index_identity_json(read_.index_identity()));
   return json_out::Value::obj(std::move(o));
 }
 

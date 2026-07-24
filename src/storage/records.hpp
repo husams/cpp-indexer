@@ -15,6 +15,16 @@ namespace cidx {
 
 using SymbolValue = std::variant<std::nullptr_t, int64_t, double, std::string>;
 
+struct IndexIdentity {
+  int schema_version = 0;
+  std::optional<std::string> source_revision;
+  std::optional<std::string> source_fingerprint;
+  std::optional<std::string> index_config;
+  std::optional<std::string> index_config_fingerprint;
+  std::string freshness = "unverifiable";
+  std::string workspace = "workspace:memory";
+};
+
 // v35: an explicit declared program/dependency universe. The key is the
 // portable part of a symbol identity; id is database-local only.
 struct SemanticUniverse {

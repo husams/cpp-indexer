@@ -1,7 +1,8 @@
 // SQLite bindings for the focused persistence ports.
 //
 // This header is an adapter boundary: consumers that only need a port should
-// include storage/ports.hpp instead and remain independent of Storage/SQLite.
+// include storage/ports.hpp instead and remain independent of the SQLite
+// service implementation.
 #pragma once
 
 #include "storage/ports.hpp"
@@ -9,7 +10,7 @@
 #include <memory>
 
 namespace cidx {
-class Storage;
+class SqliteStorageService;
 class Transaction;
 } // namespace cidx
 
@@ -18,7 +19,7 @@ namespace cidx::storage {
 class SqliteWorkspaceCatalogAdapter final : public WorkspaceCatalogReadPort,
                                             public WorkspaceCatalogWritePort {
 public:
-  explicit SqliteWorkspaceCatalogAdapter(Storage &db);
+  explicit SqliteWorkspaceCatalogAdapter(SqliteStorageService &db);
 
   std::optional<SemanticUniverse>
   get_semantic_universe_by_id(int64_t id) override;
@@ -60,13 +61,13 @@ public:
   void delete_clone(int64_t id) override;
 
 private:
-  Storage *db_;
+  SqliteStorageService *db_;
 };
 
 class SqliteSourceStoreAdapter final : public SourceStoreReadPort,
                                        public SourceStoreWritePort {
 public:
-  explicit SqliteSourceStoreAdapter(Storage &db);
+  explicit SqliteSourceStoreAdapter(SqliteStorageService &db);
 
   std::optional<File> get_file(const std::string &path) override;
   std::optional<File> get_file_by_id(int64_t id) override;
@@ -105,13 +106,13 @@ public:
                            const std::vector<Diagnostic> &diagnostics) override;
 
 private:
-  Storage *db_;
+  SqliteStorageService *db_;
 };
 
 class SqliteSymbolStoreAdapter final : public SymbolReadPort,
                                        public SymbolWritePort {
 public:
-  explicit SqliteSymbolStoreAdapter(Storage &db);
+  explicit SqliteSymbolStoreAdapter(SqliteStorageService &db);
 
   std::optional<Symbol> lookup_symbol(
       const std::string &usr,
@@ -145,12 +146,12 @@ public:
   void delete_symbols_for_file(int64_t file_id) override;
 
 private:
-  Storage *db_;
+  SqliteStorageService *db_;
 };
 
 class SqliteTypeStoreAdapter final : public TypeReadPort, public TypeWritePort {
 public:
-  explicit SqliteTypeStoreAdapter(Storage &db);
+  explicit SqliteTypeStoreAdapter(SqliteStorageService &db);
 
   std::optional<TypeNode> type_node_by_id(int64_t id) override;
   std::vector<Parameter> parameters_of(int64_t symbol_id) override;
@@ -165,12 +166,12 @@ public:
                        int64_t type_id) override;
 
 private:
-  Storage *db_;
+  SqliteStorageService *db_;
 };
 
 class SqliteFactStoreAdapter final : public FactReadPort, public FactWritePort {
 public:
-  explicit SqliteFactStoreAdapter(Storage &db);
+  explicit SqliteFactStoreAdapter(SqliteStorageService &db);
 
   std::vector<GraphEdgeRecord> graph_edges(int64_t symbol_id,
                                            const std::string &direction,
@@ -187,13 +188,13 @@ public:
   void add_template_arg(const TemplateArg &arg) override;
 
 private:
-  Storage *db_;
+  SqliteStorageService *db_;
 };
 
 class SqliteDefinitionStoreAdapter final : public DefinitionReadPort,
                                            public DefinitionWritePort {
 public:
-  explicit SqliteDefinitionStoreAdapter(Storage &db);
+  explicit SqliteDefinitionStoreAdapter(SqliteStorageService &db);
 
   std::vector<DefinitionRecord> definitions_of(int64_t symbol_id) override;
   std::vector<DefinitionRecord> possible_callees_of(int64_t symbol_id) override;
@@ -210,13 +211,13 @@ public:
   void delete_definitions_for_file(int64_t file_id) override;
 
 private:
-  Storage *db_;
+  SqliteStorageService *db_;
 };
 
 class SqliteIncludeStoreAdapter final : public IncludeReadPort,
                                         public IncludeWritePort {
 public:
-  explicit SqliteIncludeStoreAdapter(Storage &db);
+  explicit SqliteIncludeStoreAdapter(SqliteStorageService &db);
 
   std::optional<IncludeConfig> include_config_by_id(int64_t id) override;
   std::vector<IncludeConfig> include_configs_for_tu(int64_t file_id) override;
@@ -230,12 +231,12 @@ public:
   void delete_include_configs_for_tu(int64_t file_id) override;
 
 private:
-  Storage *db_;
+  SqliteStorageService *db_;
 };
 
 class SqliteSchemaCatalogAdapter final : public SchemaCatalogReadPort {
 public:
-  explicit SqliteSchemaCatalogAdapter(Storage &db);
+  explicit SqliteSchemaCatalogAdapter(SqliteStorageService &db);
 
   Stats stats() override;
   bool integrity_ok() override;
@@ -243,12 +244,12 @@ public:
   bool graph_resolved() override;
 
 private:
-  Storage *db_;
+  SqliteStorageService *db_;
 };
 
 class SqliteUnitOfWork final : public UnitOfWork {
 public:
-  explicit SqliteUnitOfWork(Storage &db);
+  explicit SqliteUnitOfWork(SqliteStorageService &db);
   ~SqliteUnitOfWork() override;
 
   void commit() override;
@@ -260,18 +261,18 @@ private:
 
 class SqliteUnitOfWorkFactory final : public UnitOfWorkFactory {
 public:
-  explicit SqliteUnitOfWorkFactory(Storage &db);
+  explicit SqliteUnitOfWorkFactory(SqliteStorageService &db);
   std::unique_ptr<UnitOfWork> begin() override;
 
 private:
-  Storage *db_;
+  SqliteStorageService *db_;
 };
 
 // The compatibility façade owns one adapter set so application code can
 // migrate port-by-port without constructing parallel SQLite bindings.
 class SqliteStoragePorts final {
 public:
-  explicit SqliteStoragePorts(Storage &db);
+  explicit SqliteStoragePorts(SqliteStorageService &db);
 
   WorkspaceCatalogReadPort &workspace_catalog_read() { return catalog_; }
   WorkspaceCatalogWritePort &workspace_catalog_write() { return catalog_; }

@@ -1,7 +1,7 @@
 // query/exec.hpp -- SQLite executor for validated CXQ plans.
 //
 // Contract: docs/query-plan.md (v1). Read-only, parameterized SQL against the
-// index database via an existing Storage handle. Deterministic: the node
+// index database via a dedicated read port. Deterministic: the node
 // stream is kept ordered ascending by id after every stage; budgets surface
 // as `truncated`, never as a silently complete result.
 #pragma once
@@ -15,10 +15,36 @@
 #include "cli/json_out.hpp"
 #include "query/plan.hpp"
 #include "query/result_protocol.hpp"
-#include "storage/ports.hpp"
-#include "storage/storage.hpp"
+#include "storage/records.hpp"
+
+namespace cidx {
+class SqliteStorageService;
+class SqliteDb;
+} // namespace cidx
 
 namespace cidx::query {
+
+class QueryReadPort {
+public:
+  virtual ~QueryReadPort() = default;
+  virtual SqliteDb &raw_db() = 0;
+  virtual std::optional<std::string> file_abs_path(int64_t file_id) = 0;
+  virtual IndexIdentity index_identity() = 0;
+  virtual SqliteStorageService &graph_service() = 0;
+};
+
+class SqliteQueryReadAdapter final : public QueryReadPort {
+public:
+  explicit SqliteQueryReadAdapter(SqliteStorageService &service);
+
+  SqliteDb &raw_db() override;
+  std::optional<std::string> file_abs_path(int64_t file_id) override;
+  IndexIdentity index_identity() override;
+  SqliteStorageService &graph_service() override;
+
+private:
+  SqliteStorageService *service_;
+};
 
 // Execution budgets (docs/query-plan.md "Execution semantics").
 constexpr int64_t kTraverseNodeBudget = 10000;
@@ -52,7 +78,7 @@ struct Result {
 
 class Executor {
 public:
-  explicit Executor(Storage &db) : db_(db), source_read_(db.source_read()) {}
+  explicit Executor(QueryReadPort &read) : read_(read) {}
 
   // Validate + normalize + run. Throws PlanError on an invalid plan.
   Result run(const Plan &plan);
@@ -63,8 +89,7 @@ public:
   [[nodiscard]] json_out::Value explain(const Plan &plan);
 
 private:
-  Storage &db_;
-  storage::SourceStoreReadPort &source_read_;
+  QueryReadPort &read_;
 };
 
 } // namespace cidx::query

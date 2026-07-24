@@ -24,16 +24,6 @@ TranslationUnitConfig resolve_translation_unit_config(
 std::string
 canonical_translation_unit_config_json(const TranslationUnitConfig &config);
 
-struct IndexIdentity {
-  int schema_version = 0;
-  std::optional<std::string> source_revision;
-  std::optional<std::string> source_fingerprint;
-  std::optional<std::string> index_config;
-  std::optional<std::string> index_config_fingerprint;
-  std::string freshness = "unverifiable";
-  std::string workspace = "workspace:memory";
-};
-
 struct WorkspaceCompileCommand {
   std::string directory;
   std::string filename;
@@ -100,9 +90,9 @@ enum class WorkspaceReadWriteMode : std::uint8_t { read_only, read_write };
 
 class WorkspaceContext final {
 public:
-  static WorkspaceContext borrow(
-      WorkspaceDataSource &data_source,
-      WorkspaceReadWriteMode mode = WorkspaceReadWriteMode::read_write);
+  static WorkspaceContext
+  borrow(WorkspaceDataSource &data_source,
+         WorkspaceReadWriteMode mode = WorkspaceReadWriteMode::read_write);
 
   WorkspaceContext(WorkspaceContext &&) noexcept;
   WorkspaceContext &operator=(WorkspaceContext &&) noexcept;
@@ -145,10 +135,9 @@ struct TranslationUnitDescriptor {
 
 class TranslationUnitConfigurationService final {
 public:
-  TranslationUnitConfigurationService(WorkspaceContext &context,
-                                      Toolchain &toolchain,
-                                      std::vector<WorkspaceCompileCommand>
-                                          commands);
+  TranslationUnitConfigurationService(
+      WorkspaceContext &context, Toolchain &toolchain,
+      std::vector<WorkspaceCompileCommand> commands);
   TranslationUnitConfigurationService(WorkspaceContext &context,
                                       Toolchain &toolchain);
 
@@ -158,14 +147,14 @@ public:
   resolve(const std::string &source_path) const;
   [[nodiscard]] std::vector<std::string>
   normalized_arguments(const std::vector<std::string> &arguments) const;
-  [[nodiscard]] static std::vector<std::string> invocation_arguments(
-      const std::string &source_path,
-      const TranslationUnitDescriptor &descriptor);
+  [[nodiscard]] static std::vector<std::string>
+  invocation_arguments(const std::string &source_path,
+                       const TranslationUnitDescriptor &descriptor);
 
 private:
   [[nodiscard]] TranslationUnitDescriptor
   descriptor_for(const std::string &source_path,
-                TranslationUnitConfig config) const;
+                 TranslationUnitConfig config) const;
   [[nodiscard]] TranslationUnitConfig
   config_for_command(const WorkspaceCompileCommand &command) const;
   [[nodiscard]] TranslationUnitConfig
@@ -177,7 +166,7 @@ private:
   std::vector<WorkspaceCompileCommand> commands_;
 };
 
-[[nodiscard]] const char *workspace_error_code_name(
-    WorkspaceErrorCode code) noexcept;
+[[nodiscard]] const char *
+workspace_error_code_name(WorkspaceErrorCode code) noexcept;
 
 } // namespace cidx

@@ -61,13 +61,14 @@ bool is_symbol_kind(std::string_view kind);
 int64_t symbol_kind_id(std::string_view name);
 std::string symbol_kind_name(int64_t id);
 
+class SqliteStorageService;
 class Storage;
 
 // RAII transaction: BEGIN on construction, COMMIT on clean destruction,
 // ROLLBACK when destroyed during exception unwind (Python _Transaction).
 class Transaction {
 public:
-  explicit Transaction(Storage &db);
+  explicit Transaction(SqliteStorageService &db);
   ~Transaction();
   Transaction(const Transaction &) = delete;
   Transaction &operator=(const Transaction &) = delete;
@@ -76,12 +77,12 @@ public:
   void rollback(); // explicit early rollback
 
 private:
-  Storage &db_;
+  SqliteStorageService &db_;
   bool done_ = false;
   int uncaught_on_entry_;
 };
 
-class Storage {
+class SqliteStorageService {
 public:
   // read_only opens with SQLITE_OPEN_READONLY and performs NO mutation on
   // connect: no directory creation, no migrate(), no schema script, no
@@ -89,9 +90,9 @@ public:
   // read-only open cannot migrate) or the constructor throws CidxError.
   enum class OpenMode { read_write, read_only };
 
-  explicit Storage(const std::string &path = ":memory:",
-                   OpenMode mode = OpenMode::read_write);
-  ~Storage();
+  explicit SqliteStorageService(const std::string &path = ":memory:",
+                                OpenMode mode = OpenMode::read_write);
+  ~SqliteStorageService();
 
   // Focused ports are the migration boundary for new platform code. The
   // Storage methods remain available as a compatibility façade while callers
@@ -814,6 +815,16 @@ private:
   bool needs_entity_node_backfill_ = false;
   std::unordered_set<std::string> attached_artifact_names_;
   std::optional<bool> artifact_query_only_before_attach_;
+};
+
+// Compatibility façade for legacy application code. New code composes the
+// focused ports or the internal SQLite service directly; persistence
+// implementation lives in SqliteStorageService.
+class Storage : public SqliteStorageService {
+public:
+  using OpenMode = SqliteStorageService::OpenMode;
+  using SqliteStorageService::SqliteStorageService;
+  ~Storage() = default;
 };
 
 class StorageWorkspaceAdapter final : public WorkspaceDataSource {

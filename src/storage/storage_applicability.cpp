@@ -57,7 +57,7 @@ void insert_fact_ids(SqliteDb &db, std::string_view fact_kind,
 
 } // namespace
 
-void Storage::associate_facts_for_file(
+void SqliteStorageService::associate_facts_for_file(
     int64_t file_id, int64_t config_id, const std::vector<int64_t> &symbol_ids,
     const std::vector<int64_t> &edge_ids,
     const std::vector<int64_t> &definition_ids) {
@@ -190,9 +190,9 @@ void Storage::associate_facts_for_file(
 }
 
 ConfiguredSymbols
-Storage::symbols_for_config(int64_t file_id,
-                            const std::vector<int64_t> &config_ids,
-                            FactCoverage coverage) {
+SqliteStorageService::symbols_for_config(int64_t file_id,
+                                         const std::vector<int64_t> &config_ids,
+                                         FactCoverage coverage) {
   ConfiguredSymbols result;
   if (config_ids.empty()) {
     return result;
@@ -260,10 +260,9 @@ Storage::symbols_for_config(int64_t file_id,
   return result;
 }
 
-ConfiguredFactIds
-Storage::fact_ids_for_config(int64_t file_id, const std::string &fact_kind,
-                             const std::vector<int64_t> &config_ids,
-                             FactCoverage coverage) {
+ConfiguredFactIds SqliteStorageService::fact_ids_for_config(
+    int64_t file_id, const std::string &fact_kind,
+    const std::vector<int64_t> &config_ids, FactCoverage coverage) {
   ConfiguredFactIds result;
   if (config_ids.empty()) {
     return result;

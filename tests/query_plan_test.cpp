@@ -39,6 +39,20 @@ using cidx::Symbol;
 
 namespace {
 
+class QueryExecutor {
+public:
+  explicit QueryExecutor(Storage &db) : read_(db), executor_(read_) {}
+
+  Result run(const Plan &plan) { return executor_.run(plan); }
+  cidx::json_out::Value explain(const Plan &plan) {
+    return executor_.explain(plan);
+  }
+
+private:
+  SqliteQueryReadAdapter read_;
+  cidx::query::Executor executor_;
+};
+
 std::string make_temp_dir() {
   char tmpl[] = "/tmp/cidx_query_identity_XXXXXX";
   char *dir = ::mkdtemp(tmpl);
@@ -324,7 +338,7 @@ TEST_CASE("query_plan: validation error codes") {
 // ---------------------------------------------------------------------------
 TEST_CASE("query_plan: source resolution by usr / qual_name / spelling") {
   Seeded s;
-  Executor ex(s.db);
+  QueryExecutor ex(s.db);
 
   auto by_usr = ex.run((start(symbol("USR::A")) | out("calls")).plan());
   REQUIRE(by_usr.rows.size() == 1);
@@ -342,7 +356,7 @@ TEST_CASE("query_plan: source resolution by usr / qual_name / spelling") {
 
 TEST_CASE("query_plan: traversal depth windows and direction") {
   Seeded s;
-  Executor ex(s.db);
+  QueryExecutor ex(s.db);
 
   // depth 1..1: A -> B only
   auto d1 = ex.run((start(symbol("USR::A")) | out("calls")).plan());
@@ -366,7 +380,7 @@ TEST_CASE("query_plan: traversal depth windows and direction") {
 
 TEST_CASE("query_plan: where filter and select fields") {
   Seeded s;
-  Executor ex(s.db);
+  QueryExecutor ex(s.db);
 
   auto r = ex.run((start(codebase()) | nodes(eq("kind", "class")) |
                    select({"name", "kind", "usr"}))
@@ -386,7 +400,7 @@ TEST_CASE("query_plan: where filter and select fields") {
 
 TEST_CASE("query_plan: set operations, distinct, count") {
   Seeded s;
-  Executor ex(s.db);
+  QueryExecutor ex(s.db);
 
   // calls(1..2) = {B, C}; uses = {C}; union is a SET union -- the shared C
   // must NOT be double-counted (PR #20 review).
@@ -428,7 +442,7 @@ TEST_CASE("query_plan: set operations, distinct, count") {
 
 TEST_CASE("query_plan: entity view traversal") {
   Seeded s;
-  Executor ex(s.db);
+  QueryExecutor ex(s.db);
 
   // D entity-uses E.
   auto uses = ex.run((start(entity("ClassD")) | out("uses")).plan());
@@ -452,7 +466,7 @@ TEST_CASE("query_plan: entity view traversal") {
 
 TEST_CASE("query_plan: order_by, limit, default fields, result JSON") {
   Seeded s;
-  Executor ex(s.db);
+  QueryExecutor ex(s.db);
 
   auto r = ex.run((start(codebase()) | nodes(eq("kind", "function")) |
                    select({"spelling"}) | order_by({"spelling"}) | limit(2))
@@ -494,7 +508,7 @@ TEST_CASE("query_plan: default result cap reports truncation") {
     }
     txn.commit(); // the destructor is ROLLBACK-only (R2)
   }
-  Executor ex(db);
+  QueryExecutor ex(db);
   auto r = ex.run((start(codebase()) | nodes()).plan());
   CHECK(r.rows.size() == 1000);
   CHECK(r.truncated);
@@ -526,7 +540,7 @@ TEST_CASE(
 
   CHECK(db.index_identity().freshness == "unverifiable");
 
-  Executor executor(db);
+  QueryExecutor executor(db);
   const auto result = executor.run((start(codebase()) | nodes()).plan());
   CHECK(result.index.freshness == "unverifiable");
   const std::string row_json = cidx::json_out::dumps_indent2(result.to_json());
@@ -594,7 +608,7 @@ TEST_CASE("query_plan: identity is stable across component insertion order") {
 // ---------------------------------------------------------------------------
 TEST_CASE("query_plan: view(entity) drops ids without an entity_node row") {
   Seeded s;
-  Executor ex(s.db);
+  QueryExecutor ex(s.db);
 
   // A function is NOT an entity: relabelling must not surface it as one.
   auto fn = ex.run((start(symbol("funcA")) | view(View::Entity)).plan());
@@ -620,7 +634,7 @@ TEST_CASE(
   db.add_edge(make_edge(P, R, 1));
   db.add_edge(make_edge(R, Q, 1));
 
-  Executor ex(db);
+  QueryExecutor ex(db);
   auto d2 = ex.run((start(symbol("USR::P")) | out("calls", 2, 2)).plan());
   REQUIRE(d2.rows.size() == 1);
   CHECK(std::get<int64_t>(d2.rows[0][0]) == Q);
@@ -644,7 +658,7 @@ TEST_CASE("query_plan: default cap re-applies after an expanding stage") {
     }
     txn.commit(); // the destructor is ROLLBACK-only (R2)
   }
-  Executor ex(db);
+  QueryExecutor ex(db);
   auto r = ex.run((start(symbol("USR::hub")) | limit(1) | out("calls")).plan());
   CHECK(r.rows.size() == 1000);
   CHECK(r.truncated);
@@ -653,7 +667,7 @@ TEST_CASE("query_plan: default cap re-applies after an expanding stage") {
 TEST_CASE(
     "query_plan: kind is the decl kind; entity_type is the classification") {
   Seeded s;
-  Executor ex(s.db);
+  QueryExecutor ex(s.db);
 
   // The abstract struct matches the declaration-kind predicate...
   auto decl = ex.run(
@@ -683,7 +697,7 @@ TEST_CASE(
 
 TEST_CASE("query_plan: scoped identity fields are selectable") {
   Seeded s;
-  Executor ex(s.db);
+  QueryExecutor ex(s.db);
   const auto result =
       ex.run((start(symbol("USR::A")) |
               select({"usr", "semantic_universe", "identity_key"}))
@@ -702,7 +716,7 @@ TEST_CASE("query_plan: typed parameter views preserve natural slot identity") {
       "INSERT INTO parameter(owner_id,position,pack_index,name,default_text,"
       "reference_semantics) VALUES (1,0,-1,'value','0','lvalue')");
 
-  Executor ex(db);
+  QueryExecutor ex(db);
   const Result result =
       ex.run((start(symbol("USR::typed")) | out("has_parameter") |
               select({"owner_id", "position", "pack_index", "name",
@@ -750,7 +764,7 @@ TEST_CASE("query_plan: template defaults expose logical evidence") {
   insert.bind(5, std::string_view{"int"});
   insert.step_done();
 
-  Executor ex(db);
+  QueryExecutor ex(db);
   const Result result =
       ex.run((start(symbol("USR::template")) | out("has_template_parameter") |
               out("has_default") |
@@ -819,7 +833,7 @@ TEST_CASE(
 
   Storage first(":memory:");
   seed(first, "/tmp/a/cpp-indexer", "", "shared", false);
-  Executor first_executor(first);
+  QueryExecutor first_executor(first);
   const auto reverse_evidence =
       first_executor.run((start(codebase()) | view(View::Evidence) | nodes() |
                           in_("edge.has_evidence") | count())
@@ -838,7 +852,7 @@ TEST_CASE(
 
   Storage second(":memory:");
   seed(second, "/tmp/b/cpp-indexer", "", "shared", false);
-  Executor second_executor(second);
+  QueryExecutor second_executor(second);
   const auto first_evidence =
       first_executor.run((start(codebase()) | view(View::Evidence) | nodes() |
                           select({"identity_key"}))
@@ -865,7 +879,7 @@ TEST_CASE(
   Storage collision(":memory:");
   seed(collision, "/repo-a", "repo-a", "repo-a");
   seed(collision, "/repo-b", "repo-b", "repo-b");
-  Executor collision_executor(collision);
+  QueryExecutor collision_executor(collision);
   const auto collision_evidence =
       collision_executor.run((start(codebase()) | view(View::Evidence) |
                               nodes() | select({"id", "identity_key"}))
@@ -888,7 +902,7 @@ TEST_CASE(
   Storage ungrouped(":memory:");
   seed(ungrouped, "/repo/A/project", "", "ungrouped-a", false);
   seed(ungrouped, "/repo/B/project", "", "ungrouped-b", false);
-  Executor ungrouped_executor(ungrouped);
+  QueryExecutor ungrouped_executor(ungrouped);
   CHECK_THROWS_WITH(
       ungrouped_executor.run((start(codebase()) | view(View::Evidence) |
                               nodes() | select({"id", "identity_key"}))
@@ -933,8 +947,8 @@ TEST_CASE(
   Storage mirrored_second(":memory:");
   seed(mirrored_second, "/Users/husam/.codex/worktrees/b/cpp-indexer", "",
        "mirrored", false);
-  Executor mirrored_first_executor(mirrored_first);
-  Executor mirrored_second_executor(mirrored_second);
+  QueryExecutor mirrored_first_executor(mirrored_first);
+  QueryExecutor mirrored_second_executor(mirrored_second);
   const auto mirrored_first_evidence =
       mirrored_first_executor.run((start(codebase()) | view(View::Evidence) |
                                    nodes() | select({"identity_key"}))
@@ -960,8 +974,8 @@ TEST_CASE(
   Storage non_catalogued_second(":memory:");
   seed(non_catalogued_second, "/tmp/b/cpp-indexer", "",
        "non-catalogued-mirrored", false);
-  Executor non_catalogued_first_executor(non_catalogued_first);
-  Executor non_catalogued_second_executor(non_catalogued_second);
+  QueryExecutor non_catalogued_first_executor(non_catalogued_first);
+  QueryExecutor non_catalogued_second_executor(non_catalogued_second);
   const auto non_catalogued_first_evidence = non_catalogued_first_executor.run(
       (start(codebase()) | view(View::Evidence) | nodes() |
        select({"identity_key"}))
@@ -1056,7 +1070,7 @@ TEST_CASE("query_plan: devirtualized calls preserve the inherited receiver") {
                      select({"usr"});
   CHECK(canonical_json(plan.plan()).contains("\"mode\": \"devirtualized\""));
 
-  Executor ex(db);
+  QueryExecutor ex(db);
   const Result result = ex.run(plan.plan());
   std::set<std::string> usrs;
   for (const auto &row : result.rows) {

@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <cctype>
 #include <memory>
+#include <stdexcept>
 #include <unordered_set>
 
 namespace cidx::ast {
@@ -71,10 +72,12 @@ std::optional<std::string> parsed_file_md5(clang::SourceManager &source_manager,
 struct EngineState {
   cidx::Storage *db = nullptr;
   cidx::storage::AstStoragePorts *ports = nullptr;
+  std::unique_ptr<cidx::storage::UnitOfWork> unit;
   const cidx::File *rec = nullptr;
   std::string path; // main file (canonical absolute)
   bool graph_enabled = true;
   bool strict = false; // CIDX_STRICT: abort on Error, not just Fatal
+  IndexFailurePoint failure = IndexFailurePoint::none;
   IndexOneOutcome *out = nullptr;
   // v31: the full preprocessing record (ast/include_facts.hpp). The header
   // two-pass consumes its resolved targets in directive order
@@ -145,9 +148,14 @@ public:
         tu_(context.getTranslationUnitDecl()) {}
 
   void run() {
-    auto unit = state_.ports->unit_of_work.begin();
     db_.delete_symbols_for_file(state_.rec->id);
     state_.out->stored = run_symbol_pass(state_.path, state_.rec->id);
+    if (state_.failure == IndexFailurePoint::adapter) {
+      throw std::runtime_error("injected AST adapter failure");
+    }
+    if (state_.failure == IndexFailurePoint::partial_transform) {
+      throw std::runtime_error("injected partial transform failure");
+    }
     const std::vector<int64_t> main_symbol_ids = symbols_.symbol_ids();
     const std::vector<PendingHeader> plan = plan_owned_headers();
     run_header_passes(plan);
@@ -162,7 +170,6 @@ public:
       resolve_include_guards(*state_.pp, state_.includes);
     }
     persist_include_facts(db_, state_.includes, *state_.config);
-    unit->commit();
   }
 
 private:
@@ -450,7 +457,8 @@ bool SourceSnapshot::matches(const std::string &path) const {
 }
 
 IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
-                              const std::string &path, bool graph_enabled) {
+                              const std::string &path, bool graph_enabled,
+                              IndexFailurePoint failure) {
   IndexOneOutcome out;
   const SourceSnapshot source = SourceSnapshot::capture(path);
   out.source_md5 = source.md5;
@@ -491,8 +499,13 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   state.path = path;
   state.graph_enabled = graph_enabled;
   state.strict = read_strict_mode();
+  state.failure = failure;
   state.out = &out;
   state.config = &config;
+  if (failure == IndexFailurePoint::begin) {
+    throw std::runtime_error("injected unit-of-work begin failure");
+  }
+  state.unit = db.unit_of_work().begin();
   state.normalized_config_id = db.add_translation_unit_config(resolved);
 
   IndexFrontendActionFactory factory(state);
@@ -508,6 +521,12 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
     out.error = path + ": source changed during indexing; retry required";
   } else if (out.source_changed && out.error.empty()) {
     out.error = path + ": source changed during indexing; retry required";
+  }
+  if (!out.parse_failed && !out.source_changed) {
+    if (failure == IndexFailurePoint::commit) {
+      throw std::runtime_error("injected unit-of-work commit failure");
+    }
+    state.unit->commit();
   }
   return out;
 }

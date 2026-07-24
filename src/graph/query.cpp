@@ -24,7 +24,7 @@ namespace cidx::graph {
 // Construction
 // ---------------------------------------------------------------------------
 
-GraphQuery::GraphQuery(Storage &db, std::string db_path)
+GraphQuery::GraphQuery(SqliteStorageService &db, std::string db_path)
     : db_(db), db_path_(std::move(db_path)) {}
 
 GraphQuery GraphQuery::open(const std::string &db_path) {
@@ -37,13 +37,13 @@ GraphQuery GraphQuery::open(const std::string &db_path) {
         "--db <build> && cidx index && cidx resolve\n"
         "or pass --db PATH / set $INDEXER_CACHE.");
   }
-  // We store the Storage by value internally via a unique_ptr pattern — but
-  // GraphQuery::open is only used from command handlers that own the Storage.
-  // The impl is: open() returns a GraphQuery that references a stack-local
-  // Storage; commands.cpp owns the Storage and passes it by reference.
+  // GraphQuery::open is only used from command handlers that own the SQLite
+  // service. The implementation returns a GraphQuery referencing the service
+  // owned by the command handler.
   // This overload is just a documentation stub — see commands.cpp _open_graph.
   throw std::logic_error("GraphQuery::open should not be called directly; "
-                         "use the Storage& constructor from command handlers");
+                         "use the SQLite-service constructor from command "
+                         "handlers");
 }
 
 // ---------------------------------------------------------------------------
@@ -72,10 +72,10 @@ bool GraphQuery::is_resolved() {
 // ---------------------------------------------------------------------------
 // File cache: {file_id -> (abs_path, component_name)}
 // Batch query mirrors query.py:_files() -- routes each distinct component
-// through Storage::component_abs_base (the resolution choke point, v24)
-// rather than joining component.path raw: a grouped component's stored path
-// is RELATIVE to its repository's active clone root, so using it as-is would
-// hand back a clone-relative (unopenable) path.
+// through SqliteStorageService::component_abs_base (the resolution choke point,
+// v24) rather than joining component.path raw: a grouped component's stored
+// path is RELATIVE to its repository's active clone root, so using it as-is
+// would hand back a clone-relative (unopenable) path.
 // ---------------------------------------------------------------------------
 
 const std::unordered_map<int64_t,
@@ -206,7 +206,8 @@ Sym GraphQuery::make_sym_from_symbol(const Symbol &sym) {
   return s;
 }
 
-Sym GraphQuery::make_sym_from_row(const Storage::GraphEdgeRow &row) {
+Sym GraphQuery::make_sym_from_row(
+    const SqliteStorageService::GraphEdgeRow &row) {
   // A6 row carries an embedded Symbol; reuse make_sym_from_symbol.
   return make_sym_from_symbol(row.sym);
 }
@@ -215,7 +216,7 @@ Sym GraphQuery::make_sym_from_row(const Storage::GraphEdgeRow &row) {
 // Site construction
 // ---------------------------------------------------------------------------
 
-Site GraphQuery::make_site(const Storage::EdgeSiteRow &row) {
+Site GraphQuery::make_site(const SqliteStorageService::EdgeSiteRow &row) {
   Site s;
   const auto &fc = files();
   if (row.file_id) {
@@ -704,7 +705,7 @@ std::vector<Sym> GraphQuery::redefined(int limit) {
 // Build Definition records from raw definition rows, joining file/component
 // from the file cache (mirrors query.py:_definition_rows).
 static std::vector<Definition> defs_from_rows(
-    GraphQuery &g, const std::vector<Storage::DefinitionRow> &rows,
+    GraphQuery &g, const std::vector<SqliteStorageService::DefinitionRow> &rows,
     const std::unordered_map<
         int64_t, std::pair<std::string, std::optional<std::string>>> &fc) {
   std::vector<Definition> out;

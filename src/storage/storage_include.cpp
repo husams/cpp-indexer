@@ -180,8 +180,8 @@ std::string translation_unit_config_hash(const TranslationUnitConfig &config) {
   return sha1_hex(canonical_translation_unit_config_json(config));
 }
 
-int64_t
-Storage::add_translation_unit_config(const TranslationUnitConfig &input) {
+int64_t SqliteStorageService::add_translation_unit_config(
+    const TranslationUnitConfig &input) {
   TranslationUnitConfig c = resolve_translation_unit_config(
       input.driver, input.working_dir, input.arguments, input.language,
       input.resource_dir, input.diagnostics_policy);
@@ -259,7 +259,7 @@ Storage::add_translation_unit_config(const TranslationUnitConfig &input) {
 }
 
 std::optional<TranslationUnitConfig>
-Storage::translation_unit_config_by_id(int64_t config_id) {
+SqliteStorageService::translation_unit_config_by_id(int64_t config_id) {
   auto st = db_.prepare(
       "SELECT id, descriptor_hash, descriptor_json, driver, working_dir, "
       "language, "
@@ -276,7 +276,7 @@ Storage::translation_unit_config_by_id(int64_t config_id) {
 }
 
 std::vector<TranslationUnitConfig>
-Storage::translation_unit_configs_for_file(int64_t file_id) {
+SqliteStorageService::translation_unit_configs_for_file(int64_t file_id) {
   auto st = db_.prepare(
       "SELECT c.id, c.descriptor_hash, c.descriptor_json, c.driver, "
       "c.working_dir, "
@@ -298,7 +298,7 @@ Storage::translation_unit_configs_for_file(int64_t file_id) {
   return out;
 }
 
-void Storage::add_file_config(const FileConfigApplicability &a) {
+void SqliteStorageService::add_file_config(const FileConfigApplicability &a) {
   if (a.role != "translation_unit" && a.role != "header") {
     throw StorageError("unknown file configuration role: " + a.role);
   }
@@ -315,7 +315,7 @@ void Storage::add_file_config(const FileConfigApplicability &a) {
 }
 
 std::vector<FileConfigApplicability>
-Storage::file_configs_for(int64_t file_id) {
+SqliteStorageService::file_configs_for(int64_t file_id) {
   auto st = db_.prepare(
       "SELECT file_id, config_id, role, state, reason FROM file_config "
       "WHERE file_id = ? ORDER BY config_id, role");
@@ -333,7 +333,7 @@ Storage::file_configs_for(int64_t file_id) {
   return out;
 }
 
-int64_t Storage::add_include_config(const IncludeConfig &c) {
+int64_t SqliteStorageService::add_include_config(const IncludeConfig &c) {
   const int64_t normalized_id =
       add_translation_unit_config(normalized_from_include(c));
   auto st = db_.prepare(
@@ -376,7 +376,8 @@ int64_t Storage::add_include_config(const IncludeConfig &c) {
   return id;
 }
 
-std::optional<IncludeConfig> Storage::include_config_by_id(int64_t config_id) {
+std::optional<IncludeConfig>
+SqliteStorageService::include_config_by_id(int64_t config_id) {
   auto st = db_.prepare(std::string("SELECT ") + kIncludeConfigCols +
                         " FROM include_config WHERE id = ?");
   st.bind(1, config_id);
@@ -386,7 +387,8 @@ std::optional<IncludeConfig> Storage::include_config_by_id(int64_t config_id) {
   return include_config_from(st);
 }
 
-std::vector<IncludeConfig> Storage::include_configs_for_tu(int64_t tu_file_id) {
+std::vector<IncludeConfig>
+SqliteStorageService::include_configs_for_tu(int64_t tu_file_id) {
   auto st = db_.prepare(std::string("SELECT ") + kIncludeConfigCols +
                         " FROM include_config WHERE tu_file_id = ? "
                         "ORDER BY digest");
@@ -398,7 +400,7 @@ std::vector<IncludeConfig> Storage::include_configs_for_tu(int64_t tu_file_id) {
   return out;
 }
 
-int64_t Storage::add_include_edge(const IncludeEdge &e) {
+int64_t SqliteStorageService::add_include_edge(const IncludeEdge &e) {
   // count ACCUMULATES: the same header included twice in one file under one
   // configuration is two occurrences of one collapsed edge (each gets its own
   // include_site row). dst_file_id COALESCEs so a later caller that has
@@ -429,7 +431,7 @@ int64_t Storage::add_include_edge(const IncludeEdge &e) {
   return id;
 }
 
-int64_t Storage::add_include_site(const IncludeSite &s) {
+int64_t SqliteStorageService::add_include_site(const IncludeSite &s) {
   auto st = db_.prepare(
       "INSERT INTO include_site (edge_id, line, col, begin_offset, end_offset, "
       "                          spelling, is_angled, directive, "
@@ -461,7 +463,7 @@ int64_t Storage::add_include_site(const IncludeSite &s) {
   return id;
 }
 
-void Storage::add_include_macro_use(const IncludeMacroUse &m) {
+void SqliteStorageService::add_include_macro_use(const IncludeMacroUse &m) {
   auto st = db_.prepare(
       "INSERT INTO include_macro_use (src_file_id, def_path, name, config_id, "
       "                               count) "
@@ -476,7 +478,7 @@ void Storage::add_include_macro_use(const IncludeMacroUse &m) {
   st.step_done();
 }
 
-void Storage::delete_include_configs_for_tu(int64_t tu_file_id) {
+void SqliteStorageService::delete_include_configs_for_tu(int64_t tu_file_id) {
   std::vector<int64_t> config_ids;
   auto ids = db_.prepare(
       "SELECT DISTINCT translation_unit_config_id FROM include_config "
@@ -516,8 +518,9 @@ void Storage::delete_include_configs_for_tu(int64_t tu_file_id) {
   }
 }
 
-std::vector<IncludeEdge> Storage::include_edges_from(int64_t src_file_id,
-                                                     bool include_system) {
+std::vector<IncludeEdge>
+SqliteStorageService::include_edges_from(int64_t src_file_id,
+                                         bool include_system) {
   std::string sql = std::string("SELECT ") + kIncludeEdgeCols +
                     " FROM include_edge e "
                     "JOIN include_config c ON c.id = e.config_id "
@@ -535,10 +538,9 @@ std::vector<IncludeEdge> Storage::include_edges_from(int64_t src_file_id,
   return out;
 }
 
-std::vector<IncludeEdge>
-Storage::include_edges_from_config(int64_t src_file_id,
-                                   int64_t translation_unit_config_id,
-                                   bool include_system) {
+std::vector<IncludeEdge> SqliteStorageService::include_edges_from_config(
+    int64_t src_file_id, int64_t translation_unit_config_id,
+    bool include_system) {
   std::string sql = std::string("SELECT ") + kIncludeEdgeCols +
                     " FROM include_edge e JOIN include_config c ON c.id = "
                     "e.config_id WHERE e.src_file_id = ? AND "
@@ -557,7 +559,7 @@ Storage::include_edges_from_config(int64_t src_file_id,
   return out;
 }
 
-ConfiguredIncludeEdges Storage::invariant_include_edges(
+ConfiguredIncludeEdges SqliteStorageService::invariant_include_edges(
     int64_t src_file_id, const std::vector<int64_t> &declared_config_ids,
     bool include_system) {
   ConfiguredIncludeEdges result;
@@ -604,7 +606,8 @@ ConfiguredIncludeEdges Storage::invariant_include_edges(
   return result;
 }
 
-std::vector<IncludeEdge> Storage::include_edges_to(int64_t dst_file_id) {
+std::vector<IncludeEdge>
+SqliteStorageService::include_edges_to(int64_t dst_file_id) {
   auto st = db_.prepare(std::string("SELECT ") + kIncludeEdgeCols +
                         " FROM include_edge e "
                         "JOIN include_config c ON c.id = e.config_id "
@@ -619,7 +622,7 @@ std::vector<IncludeEdge> Storage::include_edges_to(int64_t dst_file_id) {
 }
 
 std::vector<IncludeEdge>
-Storage::include_edges_to_path(const std::string &dst_path) {
+SqliteStorageService::include_edges_to_path(const std::string &dst_path) {
   auto st = db_.prepare(std::string("SELECT ") + kIncludeEdgeCols +
                         " FROM include_edge e "
                         "JOIN include_config c ON c.id = e.config_id "
@@ -633,7 +636,8 @@ Storage::include_edges_to_path(const std::string &dst_path) {
   return out;
 }
 
-std::vector<IncludeEdge> Storage::all_include_edges(bool include_system) {
+std::vector<IncludeEdge>
+SqliteStorageService::all_include_edges(bool include_system) {
   std::string sql = std::string("SELECT ") + kIncludeEdgeCols +
                     " FROM include_edge e "
                     "JOIN include_config c ON c.id = e.config_id";
@@ -649,7 +653,8 @@ std::vector<IncludeEdge> Storage::all_include_edges(bool include_system) {
   return out;
 }
 
-std::vector<IncludeSite> Storage::include_sites_for(int64_t edge_id) {
+std::vector<IncludeSite>
+SqliteStorageService::include_sites_for(int64_t edge_id) {
   auto st = db_.prepare(
       "SELECT id, edge_id, line, col, begin_offset, end_offset, spelling, "
       "       is_angled, directive, cond_fingerprint, resolved, guarded "
@@ -676,7 +681,8 @@ std::vector<IncludeSite> Storage::include_sites_for(int64_t edge_id) {
 }
 
 std::vector<IncludeMacroUse>
-Storage::include_macro_uses(int64_t src_file_id, const std::string &def_path) {
+SqliteStorageService::include_macro_uses(int64_t src_file_id,
+                                         const std::string &def_path) {
   auto st = db_.prepare(
       "SELECT src_file_id, def_path, name, config_id, count "
       "FROM include_macro_use WHERE src_file_id = ? AND def_path = ? "
@@ -696,7 +702,7 @@ Storage::include_macro_uses(int64_t src_file_id, const std::string &def_path) {
   return out;
 }
 
-bool Storage::include_graph_populated() {
+bool SqliteStorageService::include_graph_populated() {
   // A configuration row is written for EVERY translation unit the include tier
   // processed, even one with no #includes at all -- so an existing config is
   // the true "the tier has run" marker, where an edge is not. A fully indexed
@@ -707,7 +713,7 @@ bool Storage::include_graph_populated() {
   return st.step();
 }
 
-bool Storage::include_tier_covers_file(int64_t file_id) {
+bool SqliteStorageService::include_tier_covers_file(int64_t file_id) {
   // A configuration row is written for every TU the tier processed (even one
   // with no #includes), so it -- together with either direction of an include
   // edge -- is the completion marker for "this file was seen".

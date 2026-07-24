@@ -182,6 +182,61 @@ std::string read_file(const std::string &path) {
   return ss.str();
 }
 
+struct TuPublicationSnapshot {
+  std::map<std::string, int64_t> table_counts;
+  std::vector<std::string> meta;
+  std::string file_state;
+
+  friend bool operator==(const TuPublicationSnapshot &a,
+                         const TuPublicationSnapshot &b) {
+    return a.table_counts == b.table_counts && a.meta == b.meta &&
+           a.file_state == b.file_state;
+  }
+};
+
+TuPublicationSnapshot snapshot_tu_publication(Storage &db,
+                                              const std::string &path) {
+  static constexpr const char *kTables[] = {"translation_unit_config",
+                                            "file_config",
+                                            "include_config",
+                                            "include_edge",
+                                            "include_site",
+                                            "include_macro_use",
+                                            "symbol",
+                                            "edge",
+                                            "edge_site",
+                                            "call_arg",
+                                            "template_param",
+                                            "template_arg",
+                                            "type_node",
+                                            "type_edge",
+                                            "symbol_type",
+                                            "parameter",
+                                            "definition",
+                                            "def_edge",
+                                            "entity_edge",
+                                            "diagnostic"};
+  TuPublicationSnapshot snapshot;
+  for (const char *table : kTables) {
+    auto statement =
+        db.raw_db().prepare("SELECT COUNT(*) FROM " + std::string(table));
+    REQUIRE(statement.step());
+    snapshot.table_counts.emplace(table, statement.col_int64(0));
+  }
+  auto meta = db.raw_db().prepare("SELECT key,value FROM meta ORDER BY key");
+  while (meta.step()) {
+    snapshot.meta.push_back(meta.col_text(0) + "\x1f" + meta.col_text(1));
+  }
+  const auto file = db.get_file(path);
+  if (file) {
+    snapshot.file_state = std::to_string(file->id) + "\x1f" +
+                          (file->indexed ? "1" : "0") + "\x1f" +
+                          file->md5.value_or("") + "\x1f" +
+                          file->indexed_at.value_or("");
+  }
+  return snapshot;
+}
+
 // -- golden DB seed -----------------------------------------------------------
 // Mirror of the Python seeding script used for the capture (same rows, same
 // order, same ids 1..6); root is a path that does NOT exist on disk.
@@ -1777,6 +1832,59 @@ TEST_CASE("query-only invocations never create cidx.log (G27/D7)") {
 
 TEST_SUITE("clang") {
 
+  TEST_CASE("index TU publication is atomic at every injected failure point") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/source.cpp";
+    write_file(source, "int injected_pipeline_symbol() { return 1; }\n");
+
+    Storage db(":memory:");
+    db.add_component("pipeline", dir);
+    const int64_t file_id = db.add_file_path(
+        source, std::nullopt, std::nullopt,
+        std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+    const auto file = db.get_file_by_id(file_id);
+    REQUIRE(file.has_value());
+    db.stamp_graph_resolved();
+    db.stamp_index_identity();
+    const auto before = snapshot_tu_publication(db, source);
+
+    for (const auto failure : {cidx::ast::IndexFailurePoint::begin,
+                               cidx::ast::IndexFailurePoint::adapter,
+                               cidx::ast::IndexFailurePoint::partial_transform,
+                               cidx::ast::IndexFailurePoint::commit}) {
+      CHECK_THROWS(cidx::ast::run_index_one(db, *file, source, true, failure));
+      CHECK(snapshot_tu_publication(db, source) == before);
+    }
+
+    CHECK_NOTHROW(cidx::ast::run_index_one(db, *file, source, true,
+                                           cidx::ast::IndexFailurePoint::none));
+    CHECK(db.find_symbols("injected_pipeline_symbol", {}, 10).size() == 1);
+  }
+
+  TEST_CASE("index TU publication enforces read-only storage") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/source.cpp";
+    const std::string database = dir + "/index.db";
+    write_file(source, "int read_only_pipeline_symbol() { return 1; }\n");
+    {
+      Storage writable(database);
+      writable.add_component("readonly", dir);
+      writable.add_file_path(source, std::nullopt, std::nullopt,
+                             std::vector<std::string>{"-std=c++23"},
+                             std::string("clang++"));
+      writable.stamp_graph_resolved();
+      writable.stamp_index_identity();
+    }
+
+    Storage readonly(database, Storage::OpenMode::read_only);
+    const auto file = readonly.get_file(source);
+    REQUIRE(file.has_value());
+    const auto before = snapshot_tu_publication(readonly, source);
+    CHECK_THROWS(cidx::ast::run_index_one(readonly, *file, source, true,
+                                          cidx::ast::IndexFailurePoint::none));
+    CHECK(snapshot_tu_publication(readonly, source) == before);
+  }
+
   TEST_CASE("import: synthetic compile DB — strip, driver, skip counter") {
     const std::string t = make_temp_dir();
     makedirs(t + "/proj/sub");
@@ -2037,7 +2145,8 @@ TEST_SUITE("clang") {
       CHECK(db.index_identity().freshness == "current");
       REQUIRE(db.find_symbols("old_symbol", {}, 10).size() == 1);
       using namespace cidx::query;
-      Executor executor(db);
+      SqliteQueryReadAdapter read(db);
+      Executor executor(read);
       const auto rows = executor.run((start(codebase()) | nodes()).plan());
       const std::string row_json =
           cidx::json_out::dumps_indent2(rows.to_json());
@@ -2158,11 +2267,11 @@ TEST_SUITE("clang") {
     {
       Storage db(p.cache + "/index.db");
       CHECK(db.index_identity().freshness == "stale");
-      CHECK(db.find_symbols("intermediate_header_symbol", {}, 10).size() == 1);
-      CHECK(db.find_symbols("initial_header_symbol", {}, 10).empty());
+      CHECK(db.find_symbols("intermediate_header_symbol", {}, 10).empty());
+      CHECK(db.find_symbols("initial_header_symbol", {}, 10).size() == 1);
       const auto header = db.get_file(p.header);
       REQUIRE(header.has_value());
-      CHECK_FALSE(header->indexed);
+      CHECK(header->indexed);
     }
 
     r = run_cli({"index"}, p.cache, &log);

@@ -16,11 +16,13 @@ by both indexing engines, and the resolve pass. ~5.5k LOC.
 
 ## Classes
 
-### `Storage` (`storage.hpp:61`)
+### `SqliteStorageService` / `Storage` (`storage.hpp`)
 
-Owns the connection and creates/migrates the DB to `schema_version = 39`. It is
-the write surface both engines use, plus the read surface for lookups. Key
-groups:
+`SqliteStorageService` owns the connection and creates/migrates the DB to
+`schema_version = 39`. It is the internal SQLite persistence implementation.
+`Storage` is now a compatibility façade derived from that service; its public
+surface remains for legacy callers while new code composes focused ports and
+read adapters.
 
 - **Symbols**: `add_symbol` (upsert keyed on `usr`; also records `decl_site`),
   `mint_symbol_id` (USR-keyed *stub* upsert for a not-yet-indexed target),
@@ -73,10 +75,10 @@ smallest capability without taking a dependency on the monolithic facade.
 
 The current production migrations are the AST symbol/edge sinks, the
 translation-unit unit-of-work boundary, workspace/configuration resolution,
-and QueryPlan file-path reads. QueryPlan's remaining parameterized SQL is kept
-inside the query adapter boundary; `raw_db()` is not an indexing or workspace
-dependency. A repository-wide guard treats raw connection use outside
-`src/storage`, `src/query`, and the graph/query adapter boundary as a failure.
+and QueryPlan's `QueryReadPort`/`SqliteQueryReadAdapter` boundary. QueryPlan's
+remaining parameterized SQL is kept inside that read adapter; `raw_db()` is not
+an indexing or workspace dependency. A repository-wide guard scans C++ sources
+and headers against an explicit seven-file persistence/read-adapter allowlist.
 
 Compatibility-facade removal plan:
 

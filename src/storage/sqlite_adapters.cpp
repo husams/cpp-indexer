@@ -4,7 +4,8 @@
 
 namespace cidx::storage {
 
-SqliteWorkspaceCatalogAdapter::SqliteWorkspaceCatalogAdapter(Storage &db)
+SqliteWorkspaceCatalogAdapter::SqliteWorkspaceCatalogAdapter(
+    SqliteStorageService &db)
     : db_(&db) {}
 
 std::optional<SemanticUniverse>
@@ -137,7 +138,8 @@ void SqliteWorkspaceCatalogAdapter::delete_clone(int64_t id) {
   db_->delete_clone(id);
 }
 
-SqliteSourceStoreAdapter::SqliteSourceStoreAdapter(Storage &db) : db_(&db) {}
+SqliteSourceStoreAdapter::SqliteSourceStoreAdapter(SqliteStorageService &db)
+    : db_(&db) {}
 
 std::optional<File>
 SqliteSourceStoreAdapter::get_file(const std::string &path) {
@@ -211,7 +213,8 @@ void SqliteSourceStoreAdapter::replace_diagnostics(
   db_->replace_diagnostics(file_id, diagnostics);
 }
 
-SqliteSymbolStoreAdapter::SqliteSymbolStoreAdapter(Storage &db) : db_(&db) {}
+SqliteSymbolStoreAdapter::SqliteSymbolStoreAdapter(SqliteStorageService &db)
+    : db_(&db) {}
 
 std::optional<Symbol> SqliteSymbolStoreAdapter::lookup_symbol(
     const std::string &usr, const std::optional<int64_t> &semantic_universe_id,
@@ -276,7 +279,8 @@ void SqliteSymbolStoreAdapter::delete_symbols_for_file(int64_t file_id) {
   db_->delete_symbols_for_file(file_id);
 }
 
-SqliteTypeStoreAdapter::SqliteTypeStoreAdapter(Storage &db) : db_(&db) {}
+SqliteTypeStoreAdapter::SqliteTypeStoreAdapter(SqliteStorageService &db)
+    : db_(&db) {}
 
 std::optional<TypeNode> SqliteTypeStoreAdapter::type_node_by_id(int64_t id) {
   return db_->type_node_by_id(id);
@@ -311,7 +315,8 @@ void SqliteTypeStoreAdapter::add_symbol_type(int64_t symbol_id, int64_t kind,
   db_->add_symbol_type(symbol_id, kind, type_id);
 }
 
-SqliteFactStoreAdapter::SqliteFactStoreAdapter(Storage &db) : db_(&db) {}
+SqliteFactStoreAdapter::SqliteFactStoreAdapter(SqliteStorageService &db)
+    : db_(&db) {}
 
 std::vector<GraphEdgeRecord> SqliteFactStoreAdapter::graph_edges(
     int64_t symbol_id, const std::string &direction,
@@ -379,7 +384,8 @@ void SqliteFactStoreAdapter::add_template_arg(const TemplateArg &arg) {
   db_->add_template_arg(arg);
 }
 
-SqliteDefinitionStoreAdapter::SqliteDefinitionStoreAdapter(Storage &db)
+SqliteDefinitionStoreAdapter::SqliteDefinitionStoreAdapter(
+    SqliteStorageService &db)
     : db_(&db) {}
 
 std::vector<DefinitionRecord>
@@ -441,7 +447,8 @@ void SqliteDefinitionStoreAdapter::delete_definitions_for_file(
   db_->delete_definitions_for_file(file_id);
 }
 
-SqliteIncludeStoreAdapter::SqliteIncludeStoreAdapter(Storage &db) : db_(&db) {}
+SqliteIncludeStoreAdapter::SqliteIncludeStoreAdapter(SqliteStorageService &db)
+    : db_(&db) {}
 
 std::optional<IncludeConfig>
 SqliteIncludeStoreAdapter::include_config_by_id(int64_t id) {
@@ -486,7 +493,7 @@ void SqliteIncludeStoreAdapter::delete_include_configs_for_tu(int64_t file_id) {
   db_->delete_include_configs_for_tu(file_id);
 }
 
-SqliteSchemaCatalogAdapter::SqliteSchemaCatalogAdapter(Storage &db)
+SqliteSchemaCatalogAdapter::SqliteSchemaCatalogAdapter(SqliteStorageService &db)
     : db_(&db) {}
 
 Stats SqliteSchemaCatalogAdapter::stats() { return db_->stats(); }
@@ -501,7 +508,7 @@ bool SqliteSchemaCatalogAdapter::graph_resolved() {
   return db_->graph_resolved();
 }
 
-SqliteUnitOfWork::SqliteUnitOfWork(Storage &db)
+SqliteUnitOfWork::SqliteUnitOfWork(SqliteStorageService &db)
     : transaction_(std::make_unique<Transaction>(db)) {}
 
 SqliteUnitOfWork::~SqliteUnitOfWork() = default;
@@ -510,13 +517,14 @@ void SqliteUnitOfWork::commit() { transaction_->commit(); }
 
 void SqliteUnitOfWork::rollback() { transaction_->rollback(); }
 
-SqliteUnitOfWorkFactory::SqliteUnitOfWorkFactory(Storage &db) : db_(&db) {}
+SqliteUnitOfWorkFactory::SqliteUnitOfWorkFactory(SqliteStorageService &db)
+    : db_(&db) {}
 
 std::unique_ptr<UnitOfWork> SqliteUnitOfWorkFactory::begin() {
   return std::make_unique<SqliteUnitOfWork>(*db_);
 }
 
-SqliteStoragePorts::SqliteStoragePorts(Storage &db)
+SqliteStoragePorts::SqliteStoragePorts(SqliteStorageService &db)
     : catalog_(db), source_(db), symbols_(db), types_(db), facts_(db),
       definitions_(db), includes_(db), schema_(db), units_(db) {}
 
