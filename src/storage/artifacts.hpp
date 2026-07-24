@@ -154,7 +154,8 @@ private:
   validate_record(const ArtifactRecord &record) const;
   [[nodiscard]] ArtifactRecord
   publish_staged(const ArtifactSpec &spec, int staging_fd, int staged_fd,
-                 std::string_view staged_name,
+                 std::string_view staged_name, int artifacts_fd, int kind_fd,
+                 std::string_view kind_name,
                  const IdentityMappingWriter &mapping_writer = {});
   void release_attachment(std::string_view name,
                           bool previous_query_only) noexcept;

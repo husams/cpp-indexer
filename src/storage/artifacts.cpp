@@ -139,6 +139,8 @@ private:
 void fsync_fd(int fd, std::string_view description);
 int open_trusted_root(const std::filesystem::path &path);
 int open_child_directory(int parent_fd, std::string_view name, bool create);
+void validate_directory_descriptor(int parent_fd, std::string_view name,
+                                   int directory_fd);
 int open_relative_file(int root_fd, const std::filesystem::path &relative,
                        int flags);
 std::string create_staged_name(const ArtifactSpec &spec);
@@ -256,6 +258,23 @@ int open_child_directory(const int parent_fd, const std::string_view name,
     fsync_fd(parent_fd, "artifact directory parent");
   }
   return fd;
+}
+
+void validate_directory_descriptor(const int parent_fd,
+                                   const std::string_view name,
+                                   const int directory_fd) {
+  const std::string component(name);
+  struct stat descriptor_stat{};
+  struct stat entry_stat{};
+  if (::fstat(directory_fd, &descriptor_stat) != 0 ||
+      !S_ISDIR(descriptor_stat.st_mode) ||
+      ::fstatat(parent_fd, component.c_str(), &entry_stat,
+                AT_SYMLINK_NOFOLLOW) != 0 ||
+      !S_ISDIR(entry_stat.st_mode) ||
+      descriptor_stat.st_dev != entry_stat.st_dev ||
+      descriptor_stat.st_ino != entry_stat.st_ino) {
+    throw StorageError("artifact publication directory was replaced");
+  }
 }
 
 int open_relative_file(const int root_fd, const std::filesystem::path &relative,
@@ -816,6 +835,9 @@ ArtifactRecord ArtifactStore::publish(const ArtifactSpec &input_spec,
       spec.exposed_relations.end());
 
   ScopedFd staging_fd(open_child_directory(root_fd_, ".staging", true));
+  ScopedFd artifacts_fd(open_child_directory(root_fd_, "artifacts", true));
+  const auto kind_name = sha256_hex(spec.kind);
+  ScopedFd kind_fd(open_child_directory(artifacts_fd.get(), kind_name, true));
   const auto temporary_name = create_staged_name(spec);
   ScopedFd temporary_fd(create_staged_file(staging_fd.get(), temporary_name));
   try {
@@ -827,7 +849,8 @@ ArtifactRecord ArtifactStore::publish(const ArtifactSpec &input_spec,
     }
     fsync_fd(temporary_fd.get(), "artifact staging file");
     return publish_staged(spec, staging_fd.get(), temporary_fd.get(),
-                          temporary_name);
+                          temporary_name, artifacts_fd.get(), kind_fd.get(),
+                          kind_name);
   } catch (...) {
     remove_staged_file(staging_fd.get(), temporary_name);
     throw;
@@ -862,6 +885,9 @@ ArtifactStore::publish_existing(const ArtifactSpec &input_spec,
       spec.exposed_relations.end());
   ScopedFd source_fd(open_relative_file(root_fd_, source_relative, O_RDONLY));
   ScopedFd staging_fd(open_child_directory(root_fd_, ".staging", true));
+  ScopedFd artifacts_fd(open_child_directory(root_fd_, "artifacts", true));
+  const auto kind_name = sha256_hex(spec.kind);
+  ScopedFd kind_fd(open_child_directory(artifacts_fd.get(), kind_name, true));
   const auto temporary_name = create_staged_name(spec);
   ScopedFd temporary_fd(create_staged_file(staging_fd.get(), temporary_name));
   try {
@@ -876,9 +902,9 @@ ArtifactStore::publish_existing(const ArtifactSpec &input_spec,
       sidecar.backup_to_fd(temporary_fd.get());
     }
     fsync_fd(temporary_fd.get(), "artifact staging file");
-    const auto record =
-        publish_staged(spec, staging_fd.get(), temporary_fd.get(),
-                       temporary_name, mapping_writer);
+    const auto record = publish_staged(
+        spec, staging_fd.get(), temporary_fd.get(), temporary_name,
+        artifacts_fd.get(), kind_fd.get(), kind_name, mapping_writer);
     if (source_relative != std::filesystem::path(record.relative_path)) {
       remove_relative_file(root_fd_, source_relative);
     }
@@ -889,12 +915,14 @@ ArtifactStore::publish_existing(const ArtifactSpec &input_spec,
   }
 }
 
-ArtifactRecord
-ArtifactStore::publish_staged(const ArtifactSpec &spec, const int staging_fd,
-                              const int staged_fd,
-                              const std::string_view staged_name,
-                              const IdentityMappingWriter &mapping_writer) {
+ArtifactRecord ArtifactStore::publish_staged(
+    const ArtifactSpec &spec, const int staging_fd, const int staged_fd,
+    const std::string_view staged_name, const int artifacts_fd,
+    const int kind_fd, const std::string_view kind_name,
+    const IdentityMappingWriter &mapping_writer) {
   try {
+    validate_directory_descriptor(root_fd_, "artifacts", artifacts_fd);
+    validate_directory_descriptor(artifacts_fd, kind_name, kind_fd);
     struct stat staged_stat{};
     if (::fstat(staged_fd, &staged_stat) != 0 ||
         !S_ISREG(staged_stat.st_mode)) {
@@ -909,13 +937,10 @@ ArtifactStore::publish_staged(const ArtifactSpec &spec, const int staging_fd,
       throw StorageError("artifact staging path was replaced");
     }
     const auto hash = digest_descriptor(staged_fd);
-    const auto relative = std::filesystem::path("artifacts") /
-                          sha256_hex(spec.kind) / (hash + ".db");
-    ScopedFd artifacts_fd(open_child_directory(root_fd_, "artifacts", true));
-    ScopedFd kind_fd(
-        open_child_directory(artifacts_fd.get(), sha256_hex(spec.kind), true));
+    const auto relative =
+        std::filesystem::path("artifacts") / kind_name / (hash + ".db");
     const std::string final_name = hash + ".db";
-    ScopedFd existing_fd(::openat(kind_fd.get(), final_name.c_str(),
+    ScopedFd existing_fd(::openat(kind_fd, final_name.c_str(),
                                   O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
     if (existing_fd.get() >= 0) {
       if (digest_descriptor(existing_fd.get()) != hash) {
@@ -928,22 +953,29 @@ ArtifactStore::publish_staged(const ArtifactSpec &spec, const int staging_fd,
         throw StorageError("cannot inspect final artifact path without links");
       }
       fsync_fd(staged_fd, "artifact staging file");
-      if (::renameat(staging_fd, staged_filename.c_str(), kind_fd.get(),
+      if (::renameat(staging_fd, staged_filename.c_str(), kind_fd,
                      final_name.c_str()) != 0) {
         throw StorageError("cannot publish artifact without following links");
       }
-      ScopedFd published_fd(::openat(kind_fd.get(), final_name.c_str(),
+      try {
+        validate_directory_descriptor(root_fd_, "artifacts", artifacts_fd);
+        validate_directory_descriptor(artifacts_fd, kind_name, kind_fd);
+      } catch (...) {
+        (void)::unlinkat(kind_fd, final_name.c_str(), 0);
+        throw;
+      }
+      ScopedFd published_fd(::openat(kind_fd, final_name.c_str(),
                                      O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
       struct stat published_stat{};
       if (published_fd.get() < 0 ||
           ::fstat(published_fd.get(), &published_stat) != 0 ||
           published_stat.st_dev != staged_stat.st_dev ||
           published_stat.st_ino != staged_stat.st_ino) {
-        (void)::unlinkat(kind_fd.get(), final_name.c_str(), 0);
+        (void)::unlinkat(kind_fd, final_name.c_str(), 0);
         throw StorageError("published artifact path was replaced");
       }
-      fsync_fd(kind_fd.get(), "artifact kind directory");
-      fsync_fd(artifacts_fd.get(), "artifact directory");
+      fsync_fd(kind_fd, "artifact kind directory");
+      fsync_fd(artifacts_fd, "artifact directory");
       fsync_fd(root_fd_, "artifact root directory");
     }
 
@@ -984,6 +1016,8 @@ ArtifactStore::publish_staged(const ArtifactSpec &spec, const int staging_fd,
       if (mapping_writer) {
         mapping_writer(record);
       }
+      validate_directory_descriptor(root_fd_, "artifacts", artifacts_fd);
+      validate_directory_descriptor(artifacts_fd, kind_name, kind_fd);
       txn.commit();
       remove_staged_file(staging_fd, staged_name);
       const auto current_record = current(spec.logical_id);
@@ -1042,6 +1076,8 @@ ArtifactStore::publish_staged(const ArtifactSpec &spec, const int staging_fd,
     if (mapping_writer) {
       mapping_writer(record);
     }
+    validate_directory_descriptor(root_fd_, "artifacts", artifacts_fd);
+    validate_directory_descriptor(artifacts_fd, kind_name, kind_fd);
     txn.commit();
     return record;
   } catch (...) {

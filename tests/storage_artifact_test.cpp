@@ -377,6 +377,28 @@ TEST_CASE("concurrent staging and final path replacement fails safely") {
   std::filesystem::remove_all(outside, ignored);
 }
 
+TEST_CASE("final kind directory replacement after acquisition is rejected") {
+  cidx::Storage storage(":memory:");
+  const auto root = test_root("final-kind-directory-race");
+  const auto outside = test_root("final-kind-directory-race-outside");
+  cidx::ArtifactStore artifacts(storage, root);
+  const auto spec = complete_spec();
+  const auto kind_directory = root / "artifacts" / cidx::sha256_hex(spec.kind);
+
+  CHECK_THROWS(
+      static_cast<void>(artifacts.publish(spec, [&](cidx::SqliteDb &db) {
+        create_astgraph_tables(db);
+        std::filesystem::rename(kind_directory,
+                                root / "artifacts" / "kind-replaced");
+        std::filesystem::create_directory_symlink(outside, kind_directory);
+      })));
+  CHECK(std::filesystem::is_empty(outside));
+
+  std::error_code ignored;
+  std::filesystem::remove_all(root, ignored);
+  std::filesystem::remove_all(outside, ignored);
+}
+
 TEST_CASE("attachment reset is safe after store destruction") {
   cidx::Storage storage(":memory:");
   const auto root = test_root("attachment-lifetime");
