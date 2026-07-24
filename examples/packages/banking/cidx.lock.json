@@ -1,9 +1,9 @@
 {
   "format": "cidx.lock/v1",
-  "lock_hash": "sha256:b84a7adeb3d1deabb4d10e6c63deeb1bec4959849c53eb49a8694ca10e5a85f7",
+  "lock_hash": "sha256:0209a54430cbdd1aba729df21d7e28b00f771f6074b01efb436e2c5f045ccdc8",
   "packages": [
     {
-      "content_hash": "sha256:7d6de5c9f0a60ec36b06738f317076744fec3177a182763617858fdd0c5a14c5",
+      "content_hash": "sha256:7dc22c3cff3693f07dcd8121310a9dec5e528e1bbde97e2bf298bfd3af7a043b",
       "dependencies": [
         {"kind": "cidx.extract", "name": "banking.extract", "version": "^1.0"}
       ],
@@ -14,7 +14,7 @@
       "version": "1.0.0"
     },
     {
-      "content_hash": "sha256:63747507fa0231c64ac58106ea67b20c79b23db69af9f58678341a5ad1fc383d",
+      "content_hash": "sha256:880b66df0bb7630ef39641122c0fee11f25266415e287e2958e5100227122161",
       "dependencies": [],
       "kind": "cidx.extract",
       "name": "banking.extract",

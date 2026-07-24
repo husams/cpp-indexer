@@ -3,7 +3,7 @@
   "name": "banking.stale",
   "version": "1.0.0",
   "kind": "cidx.extract",
-  "content_hash": "sha256:c6baf29decd115cf1abb47fe026a48690f1be0f170b1d65165e0c869a22cd6c2",
+  "content_hash": "sha256:4e5bd684f9fe6d00464249d12518a6e181527a9dd92c4dae87fbfd5b70ca4c56",
   "publisher": "cidx.example",
   "origin": "file:examples/packages/banking",
   "license": "Apache-2.0",

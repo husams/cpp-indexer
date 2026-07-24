@@ -26,13 +26,18 @@ from indexer.extensions import (
 def _package(root: Path, name: str, version: str, *, kind: str = "cidx.extract",
              dependencies: list[dict] | None = None, namespaces: list[str] | None = None,
              budgets: dict | None = None, capabilities: list[str] | None = None,
-             compatibility: dict | None = None) -> Path:
+             compatibility: dict | None = None, trust: str = "unverified",
+             publisher: str = "test", signature: str | None = None) -> Path:
     path = root / name.replace("/", "_") / version
     path.mkdir(parents=True)
     entry = "extract.json" if kind == "cidx.extract" else "analysis.json"
-    descriptor = ({"kind": kind, "name": name, "fact_source": "facts"}
+    descriptor = ({"kind": kind, "name": name, "input_source": "symbols",
+                   "bindings": ["symbol"], "emits": [f"{name}/relation"]}
                   if kind == "cidx.extract" else
-                  {"kind": kind, "name": name, "result_source": "results"})
+                  {"kind": kind, "name": name, "rules": [{
+                      "input_relation": f"{dependencies[0]['name']}/relation" if dependencies else f"{name}/relation",
+                      "emit": {"boundary": "$symbol"},
+                  }]})
     (path / entry).write_text(json.dumps(descriptor, sort_keys=True) + "\n")
     manifest = {
         "format": "cidx.package/v1",
@@ -40,7 +45,7 @@ def _package(root: Path, name: str, version: str, *, kind: str = "cidx.extract",
         "version": version,
         "kind": kind,
         "content_hash": "",
-        "publisher": "test",
+        "publisher": publisher,
         "origin": "file:test",
         "license": "Apache-2.0",
         "entry_points": {"extract/main" if kind == "cidx.extract" else "analysis/main": entry},
@@ -50,11 +55,13 @@ def _package(root: Path, name: str, version: str, *, kind: str = "cidx.extract",
         "schemas": [],
         "budgets": budgets or {"steps": 100},
         "sandbox_profile": "declarative-default",
-        "trust": "unverified",
+        "trust": trust,
         "evidence": "extension-analysis",
         "capabilities": capabilities or [],
         "metadata": {},
     }
+    if signature is not None:
+        manifest["signature"] = signature
     manifest_path = path / "package.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     manifest["content_hash"] = package_content_hash(path)
@@ -145,12 +152,12 @@ def test_execution_boundaries_and_invalidation_identity(tmp_path: Path):
 def test_conformance_sdk_covers_positive_negative_and_budget_cases(tmp_path: Path):
     valid = _package(tmp_path, "valid", "1.0.0")
     too_large = _package(tmp_path, "too-large", "1.0.0", budgets={"steps": 1000})
-    (tmp_path / "fixture.json").write_text(json.dumps({"facts": [{"name": "valid"}]}))
+    (tmp_path / "fixture.json").write_text(json.dumps({"symbols": [{"symbol": "valid"}]}))
     sdk = ConformanceSDK(PackageResolver(_registry(tmp_path, valid, too_large)))
     results = sdk.run([
         {"id": "positive", "package": str(valid), "expected": "valid",
          "fixture": str(tmp_path / "fixture.json"),
-         "expected_facts": [{"name": "valid"}]},
+         "expected_facts": [{"relation": "valid/relation", "symbol": "valid"}]},
         {"id": "budget", "package": str(too_large), "expected": "invalid", "checks": {"max_budget": 100}},
         {"id": "missing-dependency", "package": str(valid), "expected": "invalid",
          "checks": {"required_dependency": "not-materialized"}},
@@ -208,6 +215,26 @@ def test_compatibility_policy_and_ambiguous_candidates_fail_closed(tmp_path: Pat
     with pytest.raises(PackageError, match="publisher is not allowed"):
         validate_package(denied, policy=PackagePolicy(allowed_publishers=frozenset({"trusted"})))
 
+    verified = _package(tmp_path, "verified", "1.0.0", trust="publisher-verified")
+    with pytest.raises(PackageError, match="external publisher evidence"):
+        validate_package(verified)
+    verified_hash = package_content_hash(verified)
+    validate_package(verified, policy=PackagePolicy(
+        verified_publishers=frozenset({"test"}), verified_hashes=frozenset({verified_hash})
+    ))
+
+    trusted = _package(tmp_path, "trusted", "1.0.0", trust="trusted", signature="not-a-verified-signature")
+    with pytest.raises(PackageError, match="publisher is not allowlisted"):
+        validate_package(trusted)
+    with pytest.raises(PackageError, match="signature is not externally allowlisted"):
+        validate_package(trusted, policy=PackagePolicy(trusted_publishers=frozenset({"test"})))
+    trusted_hash = package_content_hash(trusted)
+    validate_package(trusted, policy=PackagePolicy(
+        trusted_publishers=frozenset({"test"}),
+        trusted_signatures=frozenset({"not-a-verified-signature"}),
+        allowed_hashes=frozenset({trusted_hash}),
+    ))
+
     first = _package(tmp_path / "first", "ambiguous", "1.0.0")
     second = _package(tmp_path / "second", "ambiguous", "1.0.0")
     (second / "extract.json").write_text(json.dumps({"kind": "cidx.extract", "name": "different"}) + "\n")
@@ -234,19 +261,36 @@ def test_conformance_executes_fixtures_and_negative_matrix(tmp_path: Path):
     malformed.mkdir()
     (malformed / "package.json").write_text("{not-json\n")
     fixture = tmp_path / "matrix-fixture.json"
-    fixture.write_text(json.dumps({"facts": [{"symbol": "Account"}], "results": [{"boundary": "Account"}]}))
+    fixture.write_text(json.dumps({"symbols": [{"symbol": "Account"}]}))
     sdk = ConformanceSDK(PackageResolver(_registry(tmp_path, extract, analysis, stale, missing)))
     results = sdk.run([
         {"id": "extract", "package": str(extract), "fixture": str(fixture), "expected": "valid",
-         "expected_facts": [{"symbol": "Account"}]},
+         "expected_facts": [{"relation": "matrix.extract/relation", "symbol": "Account"}]},
         {"id": "analysis", "package": str(analysis), "fixture": str(fixture), "expected": "valid",
          "expected_results": [{"boundary": "Account"}]},
         {"id": "stale-schema", "package": str(stale), "expected": "invalid"},
         {"id": "budget", "package": str(extract), "expected": "invalid",
          "checks": {"max_budget": 1}},
+        {"id": "output-limit", "package": str(extract), "fixture": str(fixture), "expected": "invalid",
+         "expected_facts": [{"relation": "matrix.extract/relation", "symbol": "Account"}],
+         "checks": {"max_output_rows": 0}},
         {"id": "malformed", "package": str(malformed), "expected": "invalid"},
         {"id": "missing-dependency", "package": str(missing), "expected": "invalid"},
     ])
-    assert [result["status"] for result in results] == ["passed"] * 6
-    assert results[0]["facts"] == [{"symbol": "Account"}]
+    assert [result["status"] for result in results] == ["passed"] * 7
+    assert results[0]["facts"] == [{"relation": "matrix.extract/relation", "symbol": "Account"}]
     assert results[1]["results"] == [{"boundary": "Account"}]
+
+    tampered = _package(tmp_path / "tampered", "tampered.extract", "1.0.0")
+    descriptor_path = tampered / "extract.json"
+    descriptor = json.loads(descriptor_path.read_text())
+    descriptor["emits"] = ["unrelated/relation"]
+    descriptor_path.write_text(json.dumps(descriptor, sort_keys=True) + "\n")
+    _refresh_hash(tampered)
+    tampered_sdk = ConformanceSDK(PackageResolver(_registry(tmp_path / "tampered-registry", tampered)))
+    tampered_result = tampered_sdk.run([{
+        "id": "tampered-plan", "package": str(tampered), "fixture": str(fixture), "expected": "valid",
+        "expected_facts": [{"relation": "tampered.extract/relation", "symbol": "Account"}],
+    }])[0]
+    assert tampered_result["status"] == "failed"
+    assert "do not match expected_facts" in tampered_result["error"]

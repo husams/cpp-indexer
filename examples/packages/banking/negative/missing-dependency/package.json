@@ -3,7 +3,7 @@
   "name": "banking.missing-dependency",
   "version": "1.0.0",
   "kind": "cidx.extract",
-  "content_hash": "sha256:03e69b10d75b004951514e773cb919f851f5a4580a855c27e04f8c053470c32e",
+  "content_hash": "sha256:f9541800ee63663b2c8d945efc45947271ef2a056adf741a4d68c111b4e3feb4",
   "publisher": "cidx.example",
   "origin": "file:examples/packages/banking",
   "license": "Apache-2.0",

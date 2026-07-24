@@ -1,8 +1,5 @@
 {
-  "facts": [
-    {"relation": "banking.extract/relation/application_state_boundary", "symbol": "AccountState"}
-  ],
-  "results": [
-    {"boundary": "AccountState", "classification": "application-state"}
+  "symbols": [
+    {"declaration": "AccountState"}
   ]
 }

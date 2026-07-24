@@ -74,6 +74,8 @@ class PackagePolicy:
     allowed_kinds: frozenset[str] = frozenset({"cidx.extract", "cidx.analysis", "cidx.query", "cidx.model"})
     allowed_capabilities: frozenset[str] = frozenset()
     allowed_sandbox_profiles: frozenset[str] = SAFE_SANDBOX_PROFILES
+    verified_publishers: frozenset[str] = frozenset()
+    verified_hashes: frozenset[str] = frozenset()
     trusted_publishers: frozenset[str] = frozenset()
     trusted_signatures: frozenset[str] = frozenset()
     reviewed_model_hashes: frozenset[str] = frozenset()
@@ -90,7 +92,8 @@ class PackagePolicy:
         allowed = {
             "allowed_registries", "allowed_publishers", "allowed_hashes", "allowed_kinds",
             "allowed_capabilities", "allowed_sandbox_profiles", "trusted_publishers",
-            "trusted_signatures", "reviewed_model_hashes", "require_signatures",
+            "verified_publishers", "verified_hashes", "trusted_signatures", "reviewed_model_hashes",
+            "require_signatures",
         }
         unknown = set(value) - allowed
         if unknown:
@@ -114,6 +117,8 @@ class PackagePolicy:
             allowed_kinds=strings("allowed_kinds", cls().allowed_kinds),
             allowed_capabilities=strings("allowed_capabilities", ()),
             allowed_sandbox_profiles=strings("allowed_sandbox_profiles", SAFE_SANDBOX_PROFILES),
+            verified_publishers=strings("verified_publishers", ()),
+            verified_hashes=strings("verified_hashes", ()),
             trusted_publishers=strings("trusted_publishers", ()),
             trusted_signatures=strings("trusted_signatures", ()),
             reviewed_model_hashes=strings("reviewed_model_hashes", ()),
@@ -143,17 +148,21 @@ class PackagePolicy:
             raise PackageError(f"package capabilities exceed policy: {manifest.capabilities}")
         if manifest.sandbox_profile not in self.allowed_sandbox_profiles:
             raise PackageError(f"sandbox profile is not allowed by policy: {manifest.sandbox_profile}")
+        if manifest.trust == "publisher-verified":
+            if not self.verified_publishers or manifest.publisher not in self.verified_publishers:
+                raise PackageError("publisher-verified package lacks external publisher evidence")
+            if not self.verified_hashes or manifest.content_hash not in self.verified_hashes:
+                raise PackageError("publisher-verified package hash lacks external evidence")
         if manifest.kind == "cidx.model" and manifest.content_hash not in self.reviewed_model_hashes:
             raise PackageError("model package hash lacks external review evidence")
         if manifest.trust == "trusted":
             if manifest.publisher not in self.trusted_publishers:
                 raise PackageError("trusted package publisher is not allowlisted")
-            if self.require_signatures and not manifest.signature:
-                raise PackageError("trusted package requires an external signature")
-            if self.trusted_signatures and manifest.signature not in self.trusted_signatures:
-                raise PackageError("package signature is not allowlisted")
-            if self.allowed_hashes and manifest.content_hash not in self.allowed_hashes:
-                raise PackageError("trusted package hash is not allowlisted")
+            if (not self.trusted_signatures or not manifest.signature or
+                    manifest.signature not in self.trusted_signatures):
+                raise PackageError("trusted package signature is not externally allowlisted")
+            if not self.allowed_hashes or manifest.content_hash not in self.allowed_hashes:
+                raise PackageError("trusted package hash is not externally allowlisted")
 
 
 def canonical_json(value: Any) -> str:
@@ -984,10 +993,31 @@ class ConformanceSDK:
         package_relative = package_path / requested
         return package_relative if package_relative.exists() else requested
 
+    @staticmethod
+    def _render(value: Any, row: Mapping[str, Any]) -> Any:
+        if isinstance(value, str):
+            if value.startswith("$"):
+                key = value[1:]
+                if key not in row:
+                    raise PackageError(f"analysis rule references missing fact field: {key}")
+                return row[key]
+            return value
+        if isinstance(value, list):
+            return [ConformanceSDK._render(item, row) for item in value]
+        if isinstance(value, dict):
+            return {key: ConformanceSDK._render(item, row) for key, item in value.items()}
+        return value
+
     def _execute_contract(self, case: ConformanceCase, package_path: Path,
-                          manifest: PackageManifest) -> dict[str, Any]:
-        fixture_path = self._fixture_path(case, package_path)
-        fixture = self._read_json(fixture_path, "fixture") if fixture_path is not None else {}
+                          manifest: PackageManifest,
+                          upstream_facts: Sequence[Mapping[str, Any]] = (),
+                          check_expected: bool = True,
+                          fixture_value: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        if fixture_value is None:
+            fixture_path = self._fixture_path(case, package_path)
+            fixture = self._read_json(fixture_path, "fixture") if fixture_path is not None else {}
+        else:
+            fixture = fixture_value
         entry_name, entry = next(iter(sorted(manifest.entry_points.items())))
         entry_path = package_path / entry
         if entry_path.suffix.lower() != ".json":
@@ -995,21 +1025,53 @@ class ConformanceSDK:
         descriptor = self._read_json(entry_path, "entry point")
         result: dict[str, Any] = {"entry_point": entry_name, "execution_status": "complete"}
         if manifest.kind == "cidx.extract":
-            source = descriptor.get("fact_source")
+            source = descriptor.get("input_source")
             if not isinstance(source, str) or not source:
-                raise PackageError("extract entry point must declare fact_source")
-            result["facts"] = self._normalized_rows(fixture.get(source, []), "fixture facts")
-            expected = self._normalized_rows(case.expected_facts, "expected_facts")
-            if result["facts"] != expected:
-                raise PackageError("fixture extraction facts do not match expected_facts")
+                raise PackageError("extract entry point must declare input_source")
+            emits = descriptor.get("emits")
+            bindings = descriptor.get("bindings", [])
+            if (not isinstance(emits, list) or not emits or
+                    any(not isinstance(relation, str) or not relation for relation in emits)):
+                raise PackageError("extract entry point must declare non-empty emits")
+            if not isinstance(bindings, list) or any(not isinstance(binding, str) for binding in bindings):
+                raise PackageError("extract entry point bindings must be an array of strings")
+            inputs = self._normalized_rows(fixture.get(source, []), "fixture inputs")
+            generated = []
+            for row in inputs:
+                for relation in emits:
+                    output = {"relation": relation}
+                    for binding in bindings:
+                        if binding not in row:
+                            raise PackageError(f"extract binding references missing input field: {binding}")
+                        output[binding] = row[binding]
+                    generated.append(output)
+            result["facts"] = self._normalized_rows(generated, "generated facts")
+            if check_expected:
+                expected = self._normalized_rows(case.expected_facts, "expected_facts")
+                if result["facts"] != expected:
+                    raise PackageError("fixture extraction facts do not match expected_facts")
         elif manifest.kind == "cidx.analysis":
-            source = descriptor.get("result_source")
-            if not isinstance(source, str) or not source:
-                raise PackageError("analysis entry point must declare result_source")
-            result["results"] = self._normalized_rows(fixture.get(source, []), "fixture results")
-            expected = self._normalized_rows(case.expected_results, "expected_results")
-            if result["results"] != expected:
-                raise PackageError("fixture analysis results do not match expected_results")
+            rules = descriptor.get("rules")
+            if not isinstance(rules, list) or not rules:
+                raise PackageError("analysis entry point must declare non-empty rules")
+            facts = list(upstream_facts)
+            if not facts:
+                facts = self._normalized_rows(fixture.get("facts", []), "analysis input facts")
+            generated = []
+            for rule in rules:
+                if not isinstance(rule, dict) or not isinstance(rule.get("input_relation"), str):
+                    raise PackageError("analysis rules require input_relation")
+                emit = rule.get("emit")
+                if not isinstance(emit, dict) or not emit:
+                    raise PackageError("analysis rules require a non-empty emit object")
+                for fact in facts:
+                    if fact.get("relation") == rule["input_relation"]:
+                        generated.append(self._render(emit, fact))
+            result["results"] = self._normalized_rows(generated, "generated results")
+            if check_expected:
+                expected = self._normalized_rows(case.expected_results, "expected_results")
+                if result["results"] != expected:
+                    raise PackageError("fixture analysis results do not match expected_results")
         elif manifest.kind == "cidx.query":
             if not isinstance(descriptor.get("plan"), list):
                 raise PackageError("query entry point must declare a plan")
@@ -1035,9 +1097,33 @@ class ConformanceSDK:
                     raise PackageError("budget exceeds conformance limit")
                 if "required_dependency" in checks and checks["required_dependency"] not in {d.name for d in manifest.dependencies}:
                     raise PackageError("required dependency is missing")
+                fixture_path = self._fixture_path(case, package_path)
+                fixture = self._read_json(fixture_path, "fixture") if fixture_path is not None else {}
+                upstream_facts: list[Mapping[str, Any]] = []
                 if manifest.dependencies:
-                    self.resolver.resolve(manifest.dependencies)
-                execution = self._execute_contract(case, package_path, manifest)
+                    dependency_lock = self.resolver.resolve(manifest.dependencies)
+                    for dependency in manifest.dependencies:
+                        locked = next(item for item in dependency_lock.packages if item.name == dependency.name)
+                        registry, dependency_manifest = self.resolver.registry.exact(
+                            locked.name, locked.version, locked.content_hash,
+                            self.resolver.policy, self.resolver.environment,
+                        )
+                        if dependency_manifest.kind == "cidx.extract":
+                            dependency_execution = self._execute_contract(
+                                case, registry.path_for(dependency_manifest), dependency_manifest,
+                                check_expected=False, fixture_value=fixture,
+                            )
+                            upstream_facts.extend(dependency_execution.get("facts", []))
+                execution = self._execute_contract(
+                    case, package_path, manifest, upstream_facts, fixture_value=fixture,
+                )
+                output_rows = execution.get("facts", execution.get("results", []))
+                output_bytes = len(canonical_json(output_rows).encode("utf-8"))
+                execution["resource"] = {"output_rows": len(output_rows), "output_bytes": output_bytes}
+                if "max_output_rows" in checks and len(output_rows) > int(checks["max_output_rows"]):
+                    raise PackageError("conformance output row limit exceeded")
+                if "max_output_bytes" in checks and output_bytes > int(checks["max_output_bytes"]):
+                    raise PackageError("conformance output byte limit exceeded")
                 if execution["execution_status"] != case.expected_status:
                     raise PackageError(
                         f"unexpected conformance status: {execution['execution_status']} (expected {case.expected_status})"

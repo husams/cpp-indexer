@@ -3,7 +3,7 @@
   "name": "banking.analysis",
   "version": "1.0.0",
   "kind": "cidx.analysis",
-  "content_hash": "sha256:7d6de5c9f0a60ec36b06738f317076744fec3177a182763617858fdd0c5a14c5",
+  "content_hash": "sha256:7dc22c3cff3693f07dcd8121310a9dec5e528e1bbde97e2bf298bfd3af7a043b",
   "publisher": "cidx.example",
   "origin": "file:examples/packages/banking",
   "license": "Apache-2.0",
