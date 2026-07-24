@@ -6,10 +6,10 @@
     "prerelease": null
   },
   "database": {
-    "schema_version": 38,
+    "schema_version": 39,
     "migration_floor": 2,
-    "reader_min": 38,
-    "reader_max": 38
+    "reader_min": 39,
+    "reader_max": 39
   },
   "catalog": {
     "version": 1,

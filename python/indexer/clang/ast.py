@@ -392,7 +392,7 @@ def _index_file_notxn(
         sym = _to_symbol(cur, file_id)
         if sym is None:
             return
-        existing = db.lookup_symbol(sym.usr)
+        existing = db._legacy_lookup_symbol(sym.usr)
         db.add_symbol(sym)
         if existing is not None and existing.resolved:
             skipped += 1
@@ -635,7 +635,7 @@ def _emit_type_use(
     usr: str = decl.get_usr()
     if not usr:
         return
-    dst = db.lookup_symbol(usr)
+    dst = db._legacy_lookup_symbol(usr)
     if dst is None or dst.id == src_id:
         return
     edge_id = db.add_edge(src_id, dst.id, edge_kind)
@@ -1014,7 +1014,7 @@ def _emit_overloaded_calls(
         usr = cand.get_usr()
         if not usr:
             continue
-        s = db.lookup_symbol(usr)
+        s = db._legacy_lookup_symbol(usr)
         if s is not None:
             dst_ids.add(s.id)
             continue
@@ -1123,14 +1123,14 @@ def _mint_instantiation_nodes(
     # existing owner record, but do not turn that owner into an instantiation.
     class_primary = _lib.clang_getSpecializedCursorTemplate(parent)
     if _invalid_cursor(class_primary):
-        owner_sym = db.lookup_symbol(type_usr)
+        owner_sym = db._legacy_lookup_symbol(type_usr)
         if owner_sym is not None:
             db.add_edge(member_id, owner_sym.id, 9)
         return
 
     class_prim_usr = class_primary.get_usr()
     if not class_prim_usr or class_prim_usr == type_usr:
-        owner_sym = db.lookup_symbol(type_usr)
+        owner_sym = db._legacy_lookup_symbol(type_usr)
         if owner_sym is not None:
             db.add_edge(member_id, owner_sym.id, 9)
         return
@@ -1154,7 +1154,7 @@ def _mint_instantiation_nodes(
     db.add_edge(member_id, type_id, 9)
 
     # (e) instantiates(5): type_id -> class primary, guarded by primary indexed
-    class_prim_sym = db.lookup_symbol(class_prim_usr)
+    class_prim_sym = db._legacy_lookup_symbol(class_prim_usr)
     if class_prim_sym is not None:
         db.add_edge(type_id, class_prim_sym.id, 5)
 
@@ -1189,7 +1189,7 @@ def _mint_instantiation_nodes(
         ):
             arg_usr = arg_decl.get_usr()
             if arg_usr:
-                rsym = db.lookup_symbol(arg_usr)
+                rsym = db._legacy_lookup_symbol(arg_usr)
                 if rsym is not None:
                     ref_id = rsym.id
         if ref_id is None:
@@ -1238,7 +1238,7 @@ def _index_cursor_template_args(
             ):
                 arg_usr = arg_decl.get_usr()
                 if arg_usr:
-                    rsym = db.lookup_symbol(arg_usr)
+                    rsym = db._legacy_lookup_symbol(arg_usr)
                     if rsym is not None:
                         ref_id = rsym.id
             if ref_id is None:
@@ -1578,7 +1578,7 @@ def _body_descent(
                     # miss truncated `std::string` to a fallback type. With a
                     # complete parse the call-site USR matches the declaration.)
                     if recovered:
-                        _dst = db.lookup_symbol(callee_usr)
+                        _dst = db._legacy_lookup_symbol(callee_usr)
                         if _dst is None:
                             # USR not yet indexed: try the stable fully-qualified
                             # name + kind first (links to an already-present
@@ -1768,7 +1768,7 @@ def _body_descent(
                         if not _invalid_cursor(primary):
                             prim_usr = primary.get_usr()
                             if prim_usr and prim_usr != callee_usr:
-                                prim_sym = db.lookup_symbol(prim_usr)
+                                prim_sym = db._legacy_lookup_symbol(prim_usr)
                                 if prim_sym is not None:
                                     db.add_edge(src_id, prim_sym.id, 5)  # instantiates
                                     # ADR-004 instantiation-member promotion block.
@@ -1797,7 +1797,7 @@ def _body_descent(
                     if parent_kind != cx.CursorKind.CXX_NEW_EXPR:
                         _type_usr = _record_usr_of_type(child.type)
                         if _type_usr:
-                            _dst_sym = db.lookup_symbol(_type_usr)
+                            _dst_sym = db._legacy_lookup_symbol(_type_usr)
                             if _dst_sym is not None:
                                 # Discriminate value/copy/move/temp by parent kind
                                 # and ctor parameter signature.
@@ -1827,7 +1827,7 @@ def _body_descent(
                         )
                         _fact_usr = _record_usr_of_type(_arg0)
                         if _fact_usr:
-                            _fact_sym = db.lookup_symbol(_fact_usr)
+                            _fact_sym = db._legacy_lookup_symbol(_fact_usr)
                             if _fact_sym is not None:
                                 db.add_edge(
                                     src_id, _fact_sym.id, 15
@@ -1837,7 +1837,7 @@ def _body_descent(
             # pointer to the allocated record (e.g. Widget*).
             _heap_usr = _record_usr_of_type(child.type)
             if _heap_usr:
-                _heap_sym = db.lookup_symbol(_heap_usr)
+                _heap_sym = db._legacy_lookup_symbol(_heap_usr)
                 if _heap_sym is not None:
                     db.add_edge(src_id, _heap_sym.id, 12)  # construct-heap
         elif kind == cx.CursorKind.CXX_DELETE_EXPR:
@@ -1846,7 +1846,7 @@ def _body_descent(
             for _del_child in child.get_children():
                 _del_usr = _record_usr_of_type(_del_child.type)
                 if _del_usr:
-                    _del_sym = db.lookup_symbol(_del_usr)
+                    _del_sym = db._legacy_lookup_symbol(_del_usr)
                     if _del_sym is not None:
                         db.add_edge(src_id, _del_sym.id, 16)  # destroy
                 break
@@ -1864,7 +1864,7 @@ def _body_descent(
                 ):
                     ref_usr: str = ref.get_usr()
                     if ref_usr:
-                        dst_sym = db.lookup_symbol(ref_usr)
+                        dst_sym = db._legacy_lookup_symbol(ref_usr)
                         if dst_sym is not None:
                             edge_id = db.add_edge(src_id, dst_sym.id, 7)  # uses
                             loc = child.location
@@ -1903,7 +1903,7 @@ def _body_descent(
                     # callee's class USR into descendants and wrongly suppress
                     # legitimate type uses).
                     if usr and usr != enclosing_owner_usr:
-                        dst = db.lookup_symbol(usr)
+                        dst = db._legacy_lookup_symbol(usr)
                         if dst is not None and dst.id != src_id:
                             edge_id = db.add_edge(src_id, dst.id, 7)  # uses
                             loc = child.location
@@ -1945,7 +1945,7 @@ def _body_descent(
                     if not _invalid_cursor(primary):
                         prim_usr = primary.get_usr()
                         if prim_usr:
-                            prim_sym = db.lookup_symbol(prim_usr)
+                            prim_sym = db._legacy_lookup_symbol(prim_usr)
                             if prim_sym is not None:
                                 # instantiates edge: fn -> primary template
                                 db.add_edge(src_id, prim_sym.id, 5)  # instantiates
@@ -1971,7 +1971,7 @@ def _body_descent(
                                     ):
                                         ref_usr = arg_decl.get_usr()
                                         if ref_usr:
-                                            rsym = db.lookup_symbol(ref_usr)
+                                            rsym = db._legacy_lookup_symbol(ref_usr)
                                             if rsym is not None:
                                                 ref_id = rsym.id
                                     db.add_template_arg(
@@ -2121,7 +2121,7 @@ def _mint_instance_from_type(db: Storage, type_obj: Optional[cx.Type]) -> None:
         if arg_decl is not None and arg_decl.kind != cx.CursorKind.NO_DECL_FOUND:
             ref_usr = arg_decl.get_usr()
             if ref_usr:
-                rsym = db.lookup_symbol(ref_usr)
+                rsym = db._legacy_lookup_symbol(ref_usr)
                 if rsym is not None:
                     ref_id = rsym.id
         literal = arg_type.spelling or None
@@ -2193,7 +2193,7 @@ def _emit_namespace_uses(
                     ref = child.referenced
                     nusr = ref.get_usr() if ref is not None else None
                     if nusr:
-                        nsym = db.lookup_symbol(nusr)
+                        nsym = db._legacy_lookup_symbol(nusr)
                         if nsym is not None and nsym.id != enclosing_id:
                             eid = db.add_edge(enclosing_id, nsym.id, 7)  # uses
                             loc = child.location
@@ -2206,7 +2206,7 @@ def _emit_namespace_uses(
             if ck in _SCOPE_KINDS:
                 usr = child.get_usr()
                 if usr:
-                    s = db.lookup_symbol(usr)
+                    s = db._legacy_lookup_symbol(usr)
                     if s is not None:
                         new_enclosing = s.id
             descend(child, new_enclosing)
@@ -2244,7 +2244,7 @@ def _emit_static_init_def_edges(
             if ref is not None:
                 usr = ref.get_usr()
                 if usr:
-                    sym = db.lookup_symbol(usr)
+                    sym = db._legacy_lookup_symbol(usr)
                     if sym is not None:
                         db.add_def_edge(def_id, sym.id, 7)  # uses (not a call)
 
@@ -2317,8 +2317,8 @@ def _index_edges_notxn(
             _child_usr = cursor.get_usr()
             _parent_usr = walk_parent.get_usr()
             if _child_usr and _parent_usr:
-                _child_sym = db.lookup_symbol(_child_usr)
-                _parent_sym = db.lookup_symbol(_parent_usr)
+                _child_sym = db._legacy_lookup_symbol(_child_usr)
+                _parent_sym = db._legacy_lookup_symbol(_parent_usr)
                 if _child_sym is not None and _parent_sym is not None:
                     db.add_edge(_parent_sym.id, _child_sym.id, 3)  # contains
 
@@ -2332,7 +2332,7 @@ def _index_edges_notxn(
         if ck in _FUNCTION_KINDS:
             _fn_usr = cursor.get_usr()
             if _fn_usr:
-                _fn_sym = db.lookup_symbol(_fn_usr)
+                _fn_sym = db._legacy_lookup_symbol(_fn_usr)
                 if _fn_sym is not None:
                     # return type (constructors/destructors have none worth recording)
                     if ck not in (cx.CursorKind.CONSTRUCTOR, cx.CursorKind.DESTRUCTOR):
@@ -2355,7 +2355,7 @@ def _index_edges_notxn(
             _mint_instance_from_type(db, cursor.type)
             _m_usr = cursor.get_usr()
             if _m_usr:
-                _m_sym = db.lookup_symbol(_m_usr)
+                _m_sym = db._legacy_lookup_symbol(_m_usr)
                 if _m_sym is not None:
                     _emit_type_use(
                         db,
@@ -2371,7 +2371,7 @@ def _index_edges_notxn(
             _mint_instance_from_type(db, cursor.type)
             _v_usr = cursor.get_usr()
             if _v_usr:
-                _v_sym = db.lookup_symbol(_v_usr)
+                _v_sym = db._legacy_lookup_symbol(_v_usr)
                 if _v_sym is not None:
                     _emit_type_use(
                         db,
@@ -2414,7 +2414,7 @@ def _index_edges_notxn(
             _mint_named_instance(db, cursor)
             _t_usr = cursor.get_usr()
             if _t_usr:
-                _t_sym = db.lookup_symbol(_t_usr)
+                _t_sym = db._legacy_lookup_symbol(_t_usr)
                 if _t_sym is not None:
                     _emit_type_use(
                         db,
@@ -2452,7 +2452,7 @@ def _index_edges_notxn(
             base_usr = ref.get_usr()
             if not base_usr:
                 continue
-            src_sym = db.lookup_symbol(derived_usr)
+            src_sym = db._legacy_lookup_symbol(derived_usr)
             if src_sym is not None:
                 src_id = src_sym.id
             else:
@@ -2514,7 +2514,7 @@ def _index_edges_notxn(
             if not _invalid_cursor(base_primary):
                 base_prim_usr = base_primary.get_usr()
                 if base_prim_usr and base_prim_usr != base_usr:
-                    base_prim_sym = db.lookup_symbol(base_prim_usr)
+                    base_prim_sym = db._legacy_lookup_symbol(base_prim_usr)
                     if base_prim_sym is not None:
                         db.add_edge(dst_id, base_prim_sym.id, 5)  # instantiates
             continue
@@ -2530,8 +2530,8 @@ def _index_edges_notxn(
             owner_usr = owner.get_usr()
             if not owner_usr:
                 continue
-            src_sym = db.lookup_symbol(member_usr)
-            dst_sym = db.lookup_symbol(owner_usr)
+            src_sym = db._legacy_lookup_symbol(member_usr)
+            dst_sym = db._legacy_lookup_symbol(owner_usr)
             if src_sym is None or dst_sym is None:
                 continue
             db.add_edge(src_sym.id, dst_sym.id, 8)  # field_of
@@ -2552,8 +2552,8 @@ def _index_edges_notxn(
             owner_usr = owner.get_usr()
             if not owner_usr:
                 continue
-            src_sym = db.lookup_symbol(method_usr)
-            dst_sym = db.lookup_symbol(owner_usr)
+            src_sym = db._legacy_lookup_symbol(method_usr)
+            dst_sym = db._legacy_lookup_symbol(owner_usr)
             if src_sym is None or dst_sym is None:
                 continue
             db.add_edge(src_sym.id, dst_sym.id, 9)  # method_of
@@ -2595,7 +2595,7 @@ def _index_edges_notxn(
             owner_usr = owner.get_usr()
             if not owner_usr:
                 continue
-            src_sym = db.lookup_symbol(owner_usr)
+            src_sym = db._legacy_lookup_symbol(owner_usr)
             if src_sym is None:
                 continue
             for child in cursor.get_children():
@@ -2611,7 +2611,7 @@ def _index_edges_notxn(
                 friend_usr = friend_decl.get_usr()
                 if not friend_usr:
                     continue
-                dst_sym = db.lookup_symbol(friend_usr)
+                dst_sym = db._legacy_lookup_symbol(friend_usr)
                 if dst_sym is None:
                     continue
                 db.add_edge(src_sym.id, dst_sym.id, 17)  # friend
@@ -2622,7 +2622,7 @@ def _index_edges_notxn(
             tmpl_usr = cursor.get_usr()
             if not tmpl_usr:
                 continue
-            tmpl_sym = db.lookup_symbol(tmpl_usr)
+            tmpl_sym = db._legacy_lookup_symbol(tmpl_usr)
             if tmpl_sym is None:
                 continue
             # A member function template (FUNCTION_TEMPLATE whose semantic parent
@@ -2640,7 +2640,7 @@ def _index_edges_notxn(
                 ):
                     owner_usr = owner.get_usr()
                     if owner_usr:
-                        owner_sym = db.lookup_symbol(owner_usr)
+                        owner_sym = db._legacy_lookup_symbol(owner_usr)
                         if owner_sym is not None:
                             db.add_edge(tmpl_sym.id, owner_sym.id, 9)  # method_of
             _PARAM_KIND_MAP = {
@@ -2669,7 +2669,7 @@ def _index_edges_notxn(
             prim_usr = primary.get_usr()
             if not spec_usr or not prim_usr or spec_usr == prim_usr:
                 continue
-            spec_sym = db.lookup_symbol(spec_usr)
+            spec_sym = db._legacy_lookup_symbol(spec_usr)
             if spec_sym is None:
                 continue
             _dfid, _dln, _dcol, _dpath = _ref_decl_loc(db, primary)
@@ -2711,7 +2711,7 @@ def _index_edges_notxn(
                     ):
                         ref_usr = arg_decl.get_usr()
                         if ref_usr:
-                            rsym = db.lookup_symbol(ref_usr)
+                            rsym = db._legacy_lookup_symbol(ref_usr)
                             if rsym is not None:
                                 ref_id = rsym.id
                     if ref_id is None:
@@ -2739,7 +2739,7 @@ def _index_edges_notxn(
         fn_usr = cursor.get_usr()
         if not fn_usr:
             continue
-        fn_sym = db.lookup_symbol(fn_usr)
+        fn_sym = db._legacy_lookup_symbol(fn_usr)
         if fn_sym is None:
             continue
         # Self-owner skip for the TYPE_REF branch: when `cursor` is a method,

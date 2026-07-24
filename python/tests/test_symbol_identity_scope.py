@@ -57,6 +57,9 @@ def test_unrelated_universes_isolate_and_declared_universe_merges(tmp_path):
         )
         with pytest.raises(ValueError, match="ambiguous symbol USR"):
             store.lookup_symbol("c:@N@collision")
+        # The pending-removal legacy producer keeps its historical deterministic
+        # fallback behind a private adapter; supported callers remain ambiguous.
+        assert store._legacy_lookup_symbol("c:@N@collision").id == banking_id
         assert store.lookup_symbol("c:@N@collision", banking).id == banking_id
         assert store.lookup_symbol("c:@N@collision", composed).id == composed_id
         with pytest.raises(ValueError, match="ambiguous symbol USR"):
@@ -249,6 +252,6 @@ def test_v34_migration_preserves_numeric_and_scoped_identity(tmp_path):
     conn = sqlite3.connect(path)
     assert conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()[0] == "36"
+    ).fetchone()[0] == "39"
     assert conn.execute("SELECT src_id, dst_id FROM edge WHERE id = 11").fetchone() == (7, 7)
     conn.close()

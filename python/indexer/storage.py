@@ -42,13 +42,13 @@ from indexer.generated_catalog import (
     SYMBOL_KIND_IDS as _GENERATED_SYMBOL_KIND_IDS,
 )
 
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 PREVIOUS_SCHEMA_VERSION = SCHEMA_VERSION - 1
 
-# HSE-77 is the only supported predecessor for the HSE-79 storage migration.
+# HSE-79 is the only supported predecessor for the HSE-82 storage migration.
 # Keep this explicit so an unrelated semantic catalog is never silently
 # accepted merely because the database is writable.
-PREVIOUS_CATALOG_HASH = "be3a97cf69140080586a079a27a97da7816455f477ce56435ee91c600cc993fc"
+PREVIOUS_CATALOG_HASH = "5a691cc4ecd6104beef77c602f9c09be641e1dd72591e3d02a3754a0a181f8fb"
 
 
 def _md5_of(path: str) -> Optional[str]:
@@ -2214,8 +2214,8 @@ class Storage:
                     "AND dst_id NOT IN (SELECT id FROM symbol WHERE kind = 22)"
                 )
                 changed = True
-        # v34 -> v35: make the symbol USR an explicitly scoped identity. All
-        # existing rows belong to the legacy single-workspace universe; the
+        # v38 -> v39: make the symbol USR an explicitly scoped identity. All
+        # unscoped rows belong to the legacy single-workspace universe; the
         # table rebuild preserves their ids and graph foreign keys.
         symbol_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(symbol)")}
         repository_cols = (
@@ -3106,7 +3106,9 @@ class Storage:
         self._conn.commit()
 
     def _migrate_symbol_identity_scope(self) -> None:
-        """v34 -> v35: scope portable USRs by a declared semantic universe."""
+        """v38 -> v39: scope portable USRs by a declared semantic universe."""
+        self._conn.execute("DROP VIEW IF EXISTS edge_site_read")
+        self._conn.execute("DROP VIEW IF EXISTS call_arg_read")
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS semantic_universe (
                 id INTEGER PRIMARY KEY,
@@ -5118,6 +5120,17 @@ class Storage:
                 f"ambiguous symbol USR; pass semantic universe scope: {usr}"
             )
         return rows[0]
+
+    def _legacy_lookup_symbol(self, usr: str) -> Optional[Symbol]:
+        """Compatibility lookup for the pending-removal Python producer.
+
+        The legacy producer historically selected the deterministic first row
+        for a bare USR. Keep that behavior behind a private boundary only;
+        supported storage and query callers continue to receive an explicit
+        ambiguity error from :meth:`lookup_symbol`.
+        """
+        rows = self.lookup_symbols_by_usr(usr)
+        return rows[0] if rows else None
 
     def lookup_symbols_by_usr(
         self, usr: str, semantic_universe_id: Optional[int] = None

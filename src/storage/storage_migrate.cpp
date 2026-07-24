@@ -777,8 +777,8 @@ void Storage::migrate() {
       changed = true;
     }
   }
-  // v34 -> v35: make the symbol USR an explicitly scoped identity. Existing
-  // v34 rows belong to the legacy single-workspace universe; preserve their
+  // v38 -> v39: make the symbol USR an explicitly scoped identity. Existing
+  // unscoped rows belong to the legacy single-workspace universe; preserve their
   // ids and all graph foreign keys while rebuilding the old global-USR table.
   {
     const bool universe_missing = !has_table("semantic_universe");
@@ -1129,6 +1129,8 @@ void Storage::migrate() {
 }
 
 void Storage::migrate_symbol_identity_scope() {
+  db_.exec("DROP VIEW IF EXISTS edge_site_read");
+  db_.exec("DROP VIEW IF EXISTS call_arg_read");
   db_.exec(
       "CREATE TABLE IF NOT EXISTS semantic_universe ("
       "id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, name TEXT NOT NULL, "

@@ -28,7 +28,7 @@
 
 namespace cidx {
 
-constexpr int kSchemaVersion = 38;
+constexpr int kSchemaVersion = 39;
 
 struct IndexIdentity {
   int schema_version = kSchemaVersion;

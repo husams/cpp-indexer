@@ -1,4 +1,4 @@
-// v36 symbol identity scope acceptance tests.
+// v39 symbol identity scope acceptance tests.
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
 
@@ -47,7 +47,7 @@ cidx::Symbol external_symbol(const std::string &usr, int64_t file_id) {
 
 } // namespace
 
-TEST_CASE("v35 isolates unrelated universes and merges declared sharing") {
+TEST_CASE("v39 isolates unrelated universes and merges declared sharing") {
   cidx::Storage db(":memory:");
   const auto banking = db.add_semantic_universe("program:banking");
   const auto composed = db.add_semantic_universe("program:composed");
@@ -160,7 +160,7 @@ TEST_CASE("v35 local identity is stable across file insertion order") {
   check_condition(make_key(false) == make_key(true));
 }
 
-TEST_CASE("v36 carries translation-unit identity through header sinks") {
+TEST_CASE("v39 carries translation-unit identity through header sinks") {
   cidx::Storage db(":memory:");
   const auto universe = db.add_semantic_universe("program:banking");
   const auto repo =
@@ -330,7 +330,7 @@ TEST_CASE(
   auto version =
       raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
   REQUIRE(version.step());
-  check_condition(version.col_text(0) == "36");
+  check_condition(version.col_text(0) == "39");
   auto edge = raw.prepare("SELECT src_id, dst_id FROM edge WHERE id = 11");
   REQUIRE(edge.step());
   check_condition(edge.col_int64(0) == 7);

@@ -419,7 +419,7 @@ TEST_CASE("storage smoke (port of _storage_smoke.py)") {
   }
 }
 
-TEST_CASE("fresh Storage produces schema v38 (file-backed and :memory:)") {
+TEST_CASE("fresh Storage produces schema v39 (file-backed and :memory:)") {
   // :memory: exercises the skip-mkdir branch; raw_db() lets us assert the
   // schema shape on the same connection.
   cidx::Storage db(":memory:");
@@ -439,7 +439,7 @@ TEST_CASE("fresh Storage produces schema v38 (file-backed and :memory:)") {
   // the signature/ type tier
   // (type_kind/type_node/type_edge_kind/type_edge/parameter/
   // symbol_type_kind/symbol_type)
-  // v38 adds the manifest-governed artifact tables.
+  // v38 adds the manifest-governed artifact tables; v39 adds scoped identity.
   CHECK(tables == std::set<std::string>{"meta",
                                         "semantic_universe",
                                         "component",
