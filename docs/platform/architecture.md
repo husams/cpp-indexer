@@ -31,7 +31,12 @@ new boundary.
 ## Layer ownership
 
 Dependencies point downward through ports and adapters. The machine-readable
-layer graph is authoritative for the allowed direction.
+layer graph is authoritative for the allowed direction. Its
+`module_layer_mapping` is validated against every module and declared
+dependency in `architecture/cidx-module-manifest.json`; the existing bootstrap
+checker then validates that manifest against source includes and CMake edges.
+Both checks are required in CI, so a platform-layer mutation cannot remain
+green while the enforced module manifest says otherwise.
 
 | Layer | Owns | Boundary rule |
 | --- | --- | --- |

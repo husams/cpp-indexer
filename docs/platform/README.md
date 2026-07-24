@@ -11,6 +11,7 @@ Python SDK.
 
 The machine-readable inputs are `spec/platform/architecture.json`,
 `spec/platform/version.json`, and `spec/contracts/compatibility-manifest.json`.
-Run `python3 scripts/check_platform_contract.py` and
+Run `python3 scripts/check_platform_contract.py --module-manifest
+architecture/cidx-module-manifest.json` and
 `uv run --project python python scripts/check_release_contract.py` before a
 release.
