@@ -108,6 +108,47 @@ echo "TLA_PROGRESS_REGRESSION_STATUS=PASS mutation=removed-MakeCurrent"
 
 echo "TLA_REGRESSION_STATUS=PASS mutation=missing-ProtectedInvariant seeded=7"
 
+run_semantic_seed() {
+  local scenario="$1"
+  local expected="$2"
+  local seed_dir
+  seed_dir="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-semantic-seed.XXXXXX")"
+  cp "$ROOT"/models/*.cfg "$seed_dir"/
+  sed "s/^    Defect = \"none\"$/    Defect = \"$scenario\"/" \
+    "$seed_dir/CidxSemanticGraphSmoke.cfg" \
+    >"$seed_dir/CidxSemanticGraphSmoke.cfg.seed"
+  mv "$seed_dir/CidxSemanticGraphSmoke.cfg.seed" \
+    "$seed_dir/CidxSemanticGraphSmoke.cfg"
+
+  set +e
+  local seed_output
+  seed_output="$(TLA_MODEL_DIR="$seed_dir" TLA_MODELS="CidxSemanticGraphSmoke" \
+    "$ROOT/tools/check.sh" 2>&1)"
+  local seed_status=$?
+  set -e
+  rm -rf "$seed_dir"
+
+  if [[ "$seed_status" -ne 30 ]] \
+      || ! grep -q "TLA_MODEL_STATUS=FAIL model=CidxSemanticGraphSmoke" \
+          <<<"$seed_output" \
+      || ! grep -q "$expected" <<<"$seed_output"; then
+    echo "TLA_SEMANTIC_SEED_STATUS=FAIL scenario=$scenario reason=missing-$expected" >&2
+    printf '%s\n' "$seed_output" >&2
+    exit 1
+  fi
+  echo "TLA_SEMANTIC_SEED_STATUS=PASS scenario=$scenario invariant=$expected"
+}
+
+run_semantic_seed illegal-stream PlanTransitionInvariant
+run_semantic_seed invalid-witness WitnessInvariant
+run_semantic_seed duplicate-results SetSemanticsInvariant
+run_semantic_seed query-write ReadOnlyExecutionInvariant
+run_semantic_seed complete-truncated CompletenessInvariant
+run_semantic_seed complete-unknown CompletenessInvariant
+run_semantic_seed stale-transform TransformConsumptionInvariant
+run_semantic_seed failed-transform TransformPublicationInvariant
+run_semantic_seed partial-transform TransformPublicationInvariant
+
 awk '
 index($0, "queryState") && index($0, "\"complete\"") {
   sub(/"complete"/, "\"running\"")

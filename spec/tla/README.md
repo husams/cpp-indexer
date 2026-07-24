@@ -17,6 +17,7 @@ reviewed contract change.
 | `modules/CidxResult.tla` | result-status lifecycle smoke specification | human-authored normative contract |
 | `modules/CidxWorkspaceLifecycle.tla` | workspace identity, configuration applicability, and generation lifecycle | human-authored normative contract |
 | `modules/CidxBehavior.tla` | bounded end-to-end lifecycle, identity, query, transform, storage, failure, and recovery behavior | human-authored normative contract |
+| `modules/CidxSemanticGraph.tla` | typed graph domains, evidence ownership, QueryPlan/CXQ safety, witnesses, completeness, and transform freshness | human-authored normative contract |
 | `conformance/CidxConformance.tla` | deterministic action-sequence replay against the behavioral model | conformance checker contract |
 | `models/*.tla` and `models/*.cfg` | finite TLC smoke models and their constants/invariants | human-authored model boundary |
 | `manifest.json` | versioned module/model/invariant inventory | human-authored contract index |
@@ -110,6 +111,16 @@ this model's current coverage. It deliberately abstracts Clang, SQLite,
 filesystem durability, query algorithms, and implementation performance.
 The conformance package maps those abstract actions to observed C++ operations
 without importing implementation details into the model.
+
+`CidxSemanticGraph` is the M2 contract for the previously abstracted concerns.
+It defines typed node/relation domains, endpoint compatibility, owned evidence,
+ordered slots, retained unknown targets, legal QueryPlan stream/view
+transitions, duplicate-free canonical set results, bounded witness paths,
+read-only execution, completeness/truncation/unknown honesty, and named
+transform publication and consumption freshness. Its smoke model also covers
+cycles, diamonds, bounded fan-out, incomplete targets, and partial evidence.
+The `Defect` constant seeds reproducible TLC counterexamples for each safety
+boundary; `spec/tla/tools/check-regression.sh` runs those seeds explicitly.
 
 ## Reproducible check
 
