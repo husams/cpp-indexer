@@ -304,6 +304,35 @@ def test_legacy_index_identity_and_result_key_order(tmp_path):
     assert explained["plan"]["cxq"] == 1
 
 
+def test_identity_is_stable_across_component_insertion_order(tmp_path):
+    roots = {name: tmp_path / name for name in ("alpha", "beta")}
+    for root in roots.values():
+        root.mkdir()
+    sources = {
+        name: root / f"{name}.cpp" for name, root in roots.items()
+    }
+    for name, source in sources.items():
+        source.write_text(f"int {name}() {{ return 1; }}\n", encoding="utf-8")
+
+    def make_identity(order):
+        db = Storage(":memory:")
+        for name in order:
+            db.add_component(name, str(roots[name]))
+        for source in sources.values():
+            file_id = db.add_file_path(str(source), md5=md5_of(str(source)))
+            db.mark_file_indexed(file_id)
+        db.stamp_index_identity()
+        return db.index_identity()
+
+    forward = make_identity(("alpha", "beta"))
+    reverse = make_identity(("beta", "alpha"))
+    assert forward.freshness == "current"
+    assert reverse.freshness == "current"
+    assert forward.source_revision == reverse.source_revision
+    assert forward.source_fingerprint == reverse.source_fingerprint
+    assert forward.index_config_fingerprint == reverse.index_config_fingerprint
+
+
 # ---------------------------------------------------------------------------
 # PR #20 review regressions (mirrors of the C++ cases)
 # ---------------------------------------------------------------------------

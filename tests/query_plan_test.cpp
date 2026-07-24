@@ -17,6 +17,7 @@
 #include "doctest/doctest.h"
 
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -477,6 +478,46 @@ TEST_CASE(
       executor.explain((start(codebase()) | nodes()).plan()));
   CHECK(explained.find("\"freshness\": \"unverifiable\"") != std::string::npos);
   CHECK(explained.find("\"plan\"") != std::string::npos);
+}
+
+TEST_CASE("query_plan: identity is stable across component insertion order") {
+  const std::string dir = make_temp_dir();
+  const std::string alpha_dir = dir + "/alpha";
+  const std::string beta_dir = dir + "/beta";
+  std::filesystem::create_directories(alpha_dir);
+  std::filesystem::create_directories(beta_dir);
+  const std::string alpha_source = alpha_dir + "/alpha.cpp";
+  const std::string beta_source = beta_dir + "/beta.cpp";
+  {
+    std::ofstream out(alpha_source);
+    out << "int alpha() { return 1; }\n";
+  }
+  {
+    std::ofstream out(beta_source);
+    out << "int beta() { return 2; }\n";
+  }
+
+  const auto make_identity = [&](const std::vector<std::string> &order) {
+    Storage db(":memory:");
+    for (const std::string &name : order) {
+      db.add_component(name, dir + "/" + name);
+    }
+    for (const std::string &source : {alpha_source, beta_source}) {
+      const auto file_id =
+          db.add_file_path(source, std::nullopt, cidx::md5_of(source));
+      db.mark_file_indexed(file_id, std::nullopt, cidx::md5_of(source));
+    }
+    db.stamp_index_identity();
+    return db.index_identity();
+  };
+
+  const auto forward = make_identity({"alpha", "beta"});
+  const auto reverse = make_identity({"beta", "alpha"});
+  CHECK(forward.freshness == "current");
+  CHECK(reverse.freshness == "current");
+  CHECK(forward.source_revision == reverse.source_revision);
+  CHECK(forward.source_fingerprint == reverse.source_fingerprint);
+  CHECK(forward.index_config_fingerprint == reverse.index_config_fingerprint);
 }
 
 // ---------------------------------------------------------------------------

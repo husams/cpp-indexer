@@ -5234,17 +5234,33 @@ class Storage:
 
     def _identity_files(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT f.id, c.id AS component_id, d.path, f.name, "
+            "SELECT f.id, c.name AS component_name, c.path AS component_path, "
+            "c.kind AS component_kind, c.version, r.name AS repository_name, "
+            "r.remote_url, d.path AS directory_path, f.name, "
             "f.compile_options, f.driver, f.indexed "
             "FROM file f JOIN directory d ON d.id = f.directory_id "
             "JOIN component c ON c.id = d.component_id "
-            "ORDER BY c.id, d.path, f.name"
+            "LEFT JOIN repository r ON r.id = c.repository_id "
+            "ORDER BY c.name, c.path, c.kind, COALESCE(c.version, '<null>'), "
+            "COALESCE(r.name, '<null>'), COALESCE(r.remote_url, '<null>'), "
+            "d.path, f.name"
         ).fetchall()
+
+        def identity_field(value: Optional[str]) -> str:
+            return value if value is not None else "<null>"
+
         return [
             {
                 "id": row["id"],
                 "key": (
-                    f"{row['component_id']}\0{row['path']}\0{row['name']}"
+                    "\0".join(
+                        identity_field(row[column])
+                        for column in (
+                            "component_name", "component_path", "component_kind",
+                            "version", "repository_name", "remote_url",
+                        )
+                    )
+                    + f"\0{row['directory_path']}\0{row['name']}"
                 ),
                 "compile_options": row["compile_options"],
                 "driver": row["driver"],

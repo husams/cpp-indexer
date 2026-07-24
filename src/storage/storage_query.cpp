@@ -43,23 +43,35 @@ struct IdentityFile {
 std::vector<IdentityFile> identity_files(Storage &db) {
   std::vector<IdentityFile> files;
   auto st = db.raw_db().prepare(
-      "SELECT f.id, c.id, d.path, f.name, f.compile_options, f.driver, "
-      "f.indexed FROM file f JOIN directory d ON d.id = f.directory_id "
+      "SELECT f.id, c.name, c.path, c.kind, c.version, r.name, "
+      "r.remote_url, d.path, f.name, f.compile_options, f.driver, f.indexed "
+      "FROM file f JOIN directory d ON d.id = f.directory_id "
       "JOIN component c ON c.id = d.component_id "
-      "ORDER BY c.id, d.path, f.name");
+      "LEFT JOIN repository r ON r.id = c.repository_id "
+      "ORDER BY c.name, c.path, c.kind, COALESCE(c.version, '<null>'), "
+      "COALESCE(r.name, '<null>'), COALESCE(r.remote_url, '<null>'), "
+      "d.path, f.name");
   while (st.step()) {
     IdentityFile file;
     file.id = st.col_int64(0);
-    file.key = std::to_string(st.col_int64(1));
+    const auto append_identity_field = [&file, &st](int column) {
+      file.key += st.col_is_null(column) ? "<null>" : st.col_text(column);
+      file.key.push_back('\0');
+    };
+    append_identity_field(1);   // component.name
+    append_identity_field(2);   // component.path
+    append_identity_field(3);   // component.kind
+    append_identity_field(4);   // component.version
+    append_identity_field(5);   // repository.name
+    append_identity_field(6);   // repository.remote_url
+    file.key += st.col_text(7); // directory.path
     file.key.push_back('\0');
-    file.key += st.col_text(2);
-    file.key.push_back('\0');
-    file.key += st.col_text(3);
-    file.compile_options_null = st.col_is_null(4);
-    file.compile_options = st.col_text(4);
-    file.driver_null = st.col_is_null(5);
-    file.driver = st.col_text(5);
-    file.indexed = st.col_int64(6) != 0;
+    file.key += st.col_text(8); // file.name
+    file.compile_options_null = st.col_is_null(9);
+    file.compile_options = st.col_text(9);
+    file.driver_null = st.col_is_null(10);
+    file.driver = st.col_text(10);
+    file.indexed = st.col_int64(11) != 0;
     files.push_back(std::move(file));
   }
   return files;
