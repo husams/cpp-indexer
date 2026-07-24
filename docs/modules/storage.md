@@ -57,6 +57,17 @@ Row structs crossing module boundaries: `Symbol`, `Edge`, `EdgeSite`,
 appear here (the [`ast`](ast.md) sinks translate their own records
 into these).
 
+### Focused ports and SQLite adapters
+
+New platform code should consume the SQLite-free contracts in
+`storage/ports.hpp`: workspace catalog, source, symbol identity, type,
+semantic fact, definition, include, schema-read, and unit-of-work ports each
+separate read capabilities from writes. `sqlite_adapters.hpp/.cpp` binds those
+contracts to the existing `Storage` implementation while the compatibility
+facade remains available during the incremental migration. `Storage` exposes
+one owned adapter set through typed port accessors, so callers can select the
+smallest capability without taking a dependency on the monolithic facade.
+
 ## The schema
 
 Full table reference and the ER diagram are on the [data model](../data-model.md)

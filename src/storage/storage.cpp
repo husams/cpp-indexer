@@ -27,6 +27,7 @@
 #include "util/pathutil.hpp"
 
 #include "storage/storage_detail.hpp"
+#include "storage/sqlite_adapters.hpp"
 #include "storage/storage_schema.hpp"
 
 namespace cidx {
@@ -108,7 +109,8 @@ Storage::Storage(const std::string &path, OpenMode mode)
     : db_(mode == OpenMode::read_only ? path : prepare_db_path(path),
           mode == OpenMode::read_only,
           mode == OpenMode::read_only ? SqliteProfile::read_only_replay
-                                      : SqliteProfile::indexing) {
+                                      : SqliteProfile::indexing),
+      ports_(std::make_unique<storage::SqliteStoragePorts>(*this)) {
   if (mode == OpenMode::read_only) {
     // Version gate before anything else: a read-only connection cannot
     // migrate, so any other stored version is unusable.
@@ -240,6 +242,62 @@ Storage::Storage(const std::string &path, OpenMode mode)
     txn.commit();
   }
   reconcile_external_identities();
+}
+
+Storage::~Storage() = default;
+
+storage::WorkspaceCatalogReadPort &Storage::workspace_catalog_read() {
+  return ports_->workspace_catalog_read();
+}
+
+storage::WorkspaceCatalogWritePort &Storage::workspace_catalog_write() {
+  return ports_->workspace_catalog_write();
+}
+
+storage::SourceStoreReadPort &Storage::source_read() {
+  return ports_->source_read();
+}
+
+storage::SourceStoreWritePort &Storage::source_write() {
+  return ports_->source_write();
+}
+
+storage::SymbolReadPort &Storage::symbol_read() { return ports_->symbol_read(); }
+
+storage::SymbolWritePort &Storage::symbol_write() {
+  return ports_->symbol_write();
+}
+
+storage::TypeReadPort &Storage::type_read() { return ports_->type_read(); }
+
+storage::TypeWritePort &Storage::type_write() { return ports_->type_write(); }
+
+storage::FactReadPort &Storage::fact_read() { return ports_->fact_read(); }
+
+storage::FactWritePort &Storage::fact_write() { return ports_->fact_write(); }
+
+storage::DefinitionReadPort &Storage::definition_read() {
+  return ports_->definition_read();
+}
+
+storage::DefinitionWritePort &Storage::definition_write() {
+  return ports_->definition_write();
+}
+
+storage::IncludeReadPort &Storage::include_read() {
+  return ports_->include_read();
+}
+
+storage::IncludeWritePort &Storage::include_write() {
+  return ports_->include_write();
+}
+
+storage::SchemaCatalogReadPort &Storage::schema_read() {
+  return ports_->schema_read();
+}
+
+storage::UnitOfWorkFactory &Storage::unit_of_work() {
+  return ports_->unit_of_work();
 }
 
 void Storage::reconcile_external_identities() {

@@ -3,13 +3,17 @@
 // the SQLite rowid once a row has been read back.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace cidx {
+
+using SymbolValue = std::variant<std::nullptr_t, int64_t, double, std::string>;
 
 // v35: an explicit declared program/dependency universe. The key is the
 // portable part of a symbol identity; id is database-local only.
@@ -407,6 +411,44 @@ struct Stats {
   std::map<std::string, int64_t> symbols_by_kind;
   int64_t edges = 0;
   std::map<std::string, int64_t> edges_by_kind;
+};
+
+// Query-facing graph rows. These records deliberately live beside the other
+// domain values instead of reusing Storage's SQLite-shaped nested rows.
+struct GraphEdgeRecord {
+  int64_t edge_id = -1;
+  int64_t src_id = -1;
+  int64_t dst_id = -1;
+  int64_t kind = 0;
+  int64_t count = 0;
+  int64_t raw_count = 0;
+  std::optional<int64_t> base_access;
+  std::optional<int64_t> is_virtual;
+  Symbol target;
+};
+
+struct GraphEdgeSiteRecord {
+  int64_t edge_id = -1;
+  std::optional<int64_t> file_id;
+  std::optional<int64_t> line;
+  std::optional<int64_t> col;
+  bool conditional = false;
+  std::optional<std::string> args_sig;
+  std::optional<std::string> recv_src_kind;
+  std::optional<std::string> recv_type_usr;
+  std::optional<std::string> recv_decl_usr;
+  std::optional<int64_t> recv_param_pos;
+  std::optional<int64_t> recv_type_is_value;
+};
+
+struct DefinitionRecord {
+  int64_t symbol_id = -1;
+  std::optional<int64_t> file_id;
+  std::optional<int64_t> line;
+  std::optional<int64_t> col;
+  std::optional<int64_t> end_line;
+  std::optional<int64_t> end_col;
+  std::optional<std::string> init_text;
 };
 
 } // namespace cidx

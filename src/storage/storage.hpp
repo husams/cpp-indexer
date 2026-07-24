@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <map>
 #include <optional>
 #include <string>
@@ -28,6 +29,26 @@
 #include "workspace/context.hpp"
 
 namespace cidx {
+
+namespace storage {
+class SqliteStoragePorts;
+class WorkspaceCatalogReadPort;
+class WorkspaceCatalogWritePort;
+class SourceStoreReadPort;
+class SourceStoreWritePort;
+class SymbolReadPort;
+class SymbolWritePort;
+class TypeReadPort;
+class TypeWritePort;
+class FactReadPort;
+class FactWritePort;
+class DefinitionReadPort;
+class DefinitionWritePort;
+class IncludeReadPort;
+class IncludeWritePort;
+class SchemaCatalogReadPort;
+class UnitOfWorkFactory;
+} // namespace storage
 
 constexpr int kSchemaVersion = 39;
 
@@ -70,6 +91,27 @@ public:
 
   explicit Storage(const std::string &path = ":memory:",
                    OpenMode mode = OpenMode::read_write);
+  ~Storage();
+
+  // Focused ports are the migration boundary for new platform code. The
+  // Storage methods remain available as a compatibility façade while callers
+  // move to the smallest read/write capability they need.
+  storage::WorkspaceCatalogReadPort &workspace_catalog_read();
+  storage::WorkspaceCatalogWritePort &workspace_catalog_write();
+  storage::SourceStoreReadPort &source_read();
+  storage::SourceStoreWritePort &source_write();
+  storage::SymbolReadPort &symbol_read();
+  storage::SymbolWritePort &symbol_write();
+  storage::TypeReadPort &type_read();
+  storage::TypeWritePort &type_write();
+  storage::FactReadPort &fact_read();
+  storage::FactWritePort &fact_write();
+  storage::DefinitionReadPort &definition_read();
+  storage::DefinitionWritePort &definition_write();
+  storage::IncludeReadPort &include_read();
+  storage::IncludeWritePort &include_write();
+  storage::SchemaCatalogReadPort &schema_read();
+  storage::UnitOfWorkFactory &unit_of_work();
 
   // Batch many mutations into one commit (the documented 100x win):
   //   { auto txn = db.transaction(); ...; }   // commits at scope end
@@ -763,6 +805,7 @@ private:
   split_path(const std::string &abs_path);
 
   SqliteDb db_;
+  std::unique_ptr<storage::SqliteStoragePorts> ports_;
   bool in_txn_ = false;
   // Set by migrate() on the v21->v22 transition; consumed by the constructor to
   // backfill entity_node from existing symbols (pure-DB, no re-index/resolve).
