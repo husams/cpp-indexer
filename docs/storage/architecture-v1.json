@@ -1,0 +1,117 @@
+{
+  "architecture_version": "storage-v1",
+  "authority": "sqlite-core",
+  "schema": {
+    "current": 39,
+    "migration_floor": 2,
+    "reader_min": 39,
+    "reader_max": 39,
+    "qualification_baseline": 34,
+    "migration": "deterministic",
+    "source": "spec/platform/version.json#/database"
+  },
+  "core": {
+    "default_file": "index.db",
+    "authoritative": true,
+    "single_database_default": true,
+    "foreign_keys": true,
+    "sidecar_cross_file_transactions": false
+  },
+  "physical_classes": {
+    "node": [
+      "symbol",
+      "type_node",
+      "file",
+      "definition",
+      "entity_node"
+    ],
+    "relation": [
+      "edge",
+      "type_edge",
+      "symbol_type",
+      "entity_edge",
+      "include_edge",
+      "possible_call"
+    ],
+    "ordered_slot": [
+      "parameter",
+      "template_param",
+      "template_arg",
+      "call_arg"
+    ],
+    "evidence": [
+      "decl_site",
+      "edge_site",
+      "include_site",
+      "diagnostic"
+    ],
+    "catalog": [
+      "generated semantic catalogs"
+    ],
+    "artifact_manifest": [
+      "artifact",
+      "fact_set"
+    ]
+  },
+  "identity": {
+    "portable": "semantic_universe_plus_external_identity",
+    "local_join_key": "nullable_integer_id",
+    "unresolved": "deduplicated_typed_identity_with_resolution_state",
+    "null_semantics": "absent_evidence_only"
+  },
+  "lifecycle": {
+    "fact_generation_states": [
+      "planned",
+      "building",
+      "validating",
+      "current",
+      "stale",
+      "failed",
+      "retired"
+    ],
+    "publish": "validate_then_atomic_publish",
+    "partial_current_generation": false
+  },
+  "sidecars": {
+    "allowed": true,
+    "required_properties": [
+      "content_hash",
+      "schema_version",
+      "catalog_version",
+      "producer_version",
+      "input_identity",
+      "completeness",
+      "lifecycle"
+    ],
+    "attach_mode": "controlled_read_only",
+    "unmanifested_attach": false,
+    "portable_integer_ids": false,
+    "core_fallback": true
+  },
+  "qualification": {
+    "measured": [
+      "v34 synthetic smoke on local-macos-v1",
+      "v39 SQLite physical/runtime profile",
+      "v36 occurrence identity normalization"
+    ],
+    "deferred": [
+      "million-node and large-relation performance",
+      "cpp-indexer self-index",
+      "banking corpus",
+      "optional accelerator",
+      "custom primary store"
+    ],
+    "custom_store_gate": [
+      "named qualified workload misses written SLO",
+      "SQLite schema/index/runtime tuning exhausted",
+      "derived accelerator cannot satisfy workload",
+      "migration/recovery/integrity/inspection/compatibility comparison approved"
+    ]
+  },
+  "references": {
+    "guide": "docs/storage/schema-guide-v1.md",
+    "runtime_profile": "docs/storage/sqlite-profile-v1.json",
+    "benchmark_claims": "docs/benchmarks/storage-m0-hse74-citations.json",
+    "benchmark_result_schema": "benchmarks/storage_m0/result.schema.json"
+  }
+}

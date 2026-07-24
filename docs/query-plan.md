@@ -1,12 +1,13 @@
 # CXQ QueryPlan contract (v1)
 
-Status: implemented (v1 slice) — C++ `src/query/`, Python `python/indexer/queryplan.py`.
+Status: implemented (v1 slice) — C++ `src/query/`, Python `python/indexer/queryplan.py`,
+and the dependency-free textual `parse_cxq` / `cidx query` entry point.
 Design source: wiki `pages/planning/cidx-query-language` (Lang-2 unified declarative query API).
 Usage guide with runnable samples: [query-dsl.md](query-dsl.md), `examples/queryplan/`.
 
 The stable product is the normalized **QueryPlan IR** plus its relation catalog and
-result shapes. The C++ builder, the Python builder, and (later) the textual CXQ
-parser all produce the same IR; execution is a read-only SQLite compiler over
+result shapes. The C++ builder, the Python builder, and the v1 textual CXQ parser
+all produce the same IR; execution is a read-only SQLite compiler over
 `index.db`. Both languages must emit **byte-identical canonical JSON** for the
 same plan and semantically identical, deterministic results.
 
@@ -81,6 +82,15 @@ filters; `fields`,
 Normalization: relation names become layer-qualified; nested `all_of` within
 `all_of` (and `any_of` within `any_of`) are flattened; `not(not(p))` reduces to
 `p`. Nothing else is rewritten — user ordering is preserved.
+
+## Textual CXQ and CLI
+
+The v1 textual subset is available as `parse_cxq(text)` in both language
+surfaces and through `cidx query`. It supports the source forms above, boolean
+predicates (`=`, `!=`, `~=`, `in`, `and`, `or`, `not`), traversal depth windows,
+projection, ordering, set operations, counting, distinctness, and limits. The
+CLI emits canonical JSON; `--explain` returns the normalized plan and index
+identity without executing row-producing stages.
 
 ## Validation (before execution; error identity is the leading `E_*` code)
 
@@ -170,7 +180,7 @@ generations. Row objects preserve `select` field order.
 
 This is a read/query-layer addition: no schema bump, no reindex, and the
 existing `GraphQuery` / `EntityQuery` surfaces are untouched (adapter rewrites
-are migration step 4, a later slice). Deferred to later slices: CXQ text
-parser, semantic predicate macros (`inherits_from`, `has_method`, ...),
+are migration step 4, a later slice). Deferred to later slices: semantic
+predicate macros (`inherits_from`, `has_method`, ...),
 quantifiers, three-valued `unknown` handling, `sites()`, `path()`, `rank()`,
-edge/site/type/template views, `cidx query` CLI, agent tool surface.
+edge/site/type/template views, and the agent tool surface.

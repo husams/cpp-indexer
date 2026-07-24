@@ -1,0 +1,21 @@
+{
+  "format": "cidx.package/v1",
+  "name": "example.extension",
+  "version": "1.0.0",
+  "kind": "cidx.extract",
+  "content_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "publisher": "cidx.example",
+  "origin": "file:example",
+  "license": "Apache-2.0",
+  "entry_points": {"extract/example": "plan.json"},
+  "namespaces": ["example.extension"],
+  "compatibility": {"catalog_version": 1},
+  "dependencies": [],
+  "schemas": [],
+  "budgets": {"matches": 1},
+  "sandbox_profile": "declarative-default",
+  "trust": "unverified",
+  "evidence": "extension-analysis",
+  "capabilities": [],
+  "metadata": {}
+}

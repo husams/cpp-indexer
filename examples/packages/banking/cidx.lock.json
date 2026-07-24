@@ -1,0 +1,30 @@
+{
+  "format": "cidx.lock/v1",
+  "lock_hash": "sha256:0209a54430cbdd1aba729df21d7e28b00f771f6074b01efb436e2c5f045ccdc8",
+  "packages": [
+    {
+      "content_hash": "sha256:7dc22c3cff3693f07dcd8121310a9dec5e528e1bbde97e2bf298bfd3af7a043b",
+      "dependencies": [
+        {"kind": "cidx.extract", "name": "banking.extract", "version": "^1.0"}
+      ],
+      "kind": "cidx.analysis",
+      "name": "banking.analysis",
+      "namespaces": ["banking.analysis"],
+      "registry": "file:examples/packages/banking",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "sha256:880b66df0bb7630ef39641122c0fee11f25266415e287e2958e5100227122161",
+      "dependencies": [],
+      "kind": "cidx.extract",
+      "name": "banking.extract",
+      "namespaces": ["banking.extract"],
+      "registry": "file:examples/packages/banking",
+      "version": "1.0.0"
+    }
+  ],
+  "roots": [
+    {"name": "banking.analysis", "version": "*"},
+    {"name": "banking.extract", "version": "*"}
+  ]
+}

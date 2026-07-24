@@ -1,0 +1,21 @@
+{
+  "format": "cidx.package/v1",
+  "name": "banking.analysis",
+  "version": "1.0.0",
+  "kind": "cidx.analysis",
+  "content_hash": "sha256:7dc22c3cff3693f07dcd8121310a9dec5e528e1bbde97e2bf298bfd3af7a043b",
+  "publisher": "cidx.example",
+  "origin": "file:examples/packages/banking",
+  "license": "Apache-2.0",
+  "entry_points": {"analysis/boundaries": "analysis.json"},
+  "namespaces": ["banking.analysis"],
+  "compatibility": {"catalog_version": 1, "artifact_version": 1},
+  "dependencies": [{"name": "banking.extract", "version": "^1.0", "kind": "cidx.extract"}],
+  "schemas": [],
+  "budgets": {"steps": 10000, "output_bytes": 1048576},
+  "sandbox_profile": "declarative-analysis",
+  "trust": "unverified",
+  "evidence": "extension-analysis",
+  "capabilities": [],
+  "metadata": {"applicability": {"language": "c++"}}
+}

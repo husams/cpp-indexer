@@ -9,6 +9,7 @@ The Toolbox is intentionally not part of the build or CI dependency surface.
 | Java runtime | major version `17` | `spec/tla/tools/check.sh` rejects any other major version |
 | TLC workers | `1` | avoids small-model traversal/diameter nondeterminism |
 | TLC fingerprint polynomial | `0` | fixed by the checker |
+| TLC seed | `1` | fixes finite-state traversal and counterexample ordering |
 
 The jar is fetched from the official release URL:
 

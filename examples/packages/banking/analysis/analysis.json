@@ -1,0 +1,10 @@
+{
+  "format": "cidx.analysis-plan/v1",
+  "name": "application-state-boundaries",
+  "rules": [
+    {
+      "input_relation": "banking.extract/relation/application_state_boundary",
+      "emit": {"boundary": "$declaration", "classification": "application-state"}
+    }
+  ]
+}
