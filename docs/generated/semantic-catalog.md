@@ -1,7 +1,7 @@
 # Generated CIDX semantic catalog
 
 - Catalog version: `1`
-- Catalog hash: `c5479dfc5757e0a8b23b6d0078b164814a73823a750b41631eb818e3733eef48`
+- Catalog hash: `38453dfc66a3cb7c2e31483cb711cb8a99231a531557e30a46c7d81d0e84ef7b`
 
 ## Relations
 

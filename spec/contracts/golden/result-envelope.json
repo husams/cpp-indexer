@@ -1,7 +1,62 @@
 {
-  "shape": "rows",
-  "view": "symbol",
-  "count": 1,
-  "truncated": false,
-  "rows": [{"id": 42, "name": "main", "kind": "function"}]
+  "protocol": "cidx.result/v1",
+  "operation": "query",
+  "status": "complete",
+  "exit_class": "success",
+  "exit_code": 0,
+  "result": {
+    "shape": "rows",
+    "view": "symbol",
+    "count": 1,
+    "truncated": false,
+    "rows": [
+      {
+        "id": 42,
+        "name": "main",
+        "kind": "function"
+      }
+    ]
+  },
+  "identity": {
+    "workspace": "workspace://demo",
+    "index": "semantic-index://demo",
+    "fact_sets": [
+      "symbols",
+      "files"
+    ],
+    "freshness": "current",
+    "source_revision": "git:abc123",
+    "source_fingerprint": "sha256:source"
+  },
+  "producer": {
+    "package": "cidx",
+    "version": "0.53.0",
+    "backend": "cpp",
+    "schema_version": 1
+  },
+  "completeness": {
+    "state": "complete",
+    "truncated": false,
+    "stale": false,
+    "budget": null
+  },
+  "diagnostics": [],
+  "evidence": [
+    {
+      "id": "queryplan",
+      "class": "derived",
+      "trust": "producer-verified",
+      "summary": "bounded QueryPlan execution",
+      "source": "query://demo"
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "query-result",
+      "id": "query-result://demo",
+      "schema_version": 1,
+      "catalog_version": 1,
+      "catalog_hash": "sha256:catalog"
+    }
+  ]
 }

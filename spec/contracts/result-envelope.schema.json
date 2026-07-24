@@ -1,13 +1,113 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CIDX result envelope v1",
   "type": "object",
-  "required": ["shape", "view", "truncated"],
+  "required": [
+    "protocol", "operation", "status", "exit_class", "exit_code", "result",
+    "identity", "producer", "completeness", "diagnostics", "evidence", "artifacts"
+  ],
+  "additionalProperties": false,
   "properties": {
-    "shape": {"enum": ["nodes", "rows", "scalar"]},
-    "view": {"enum": ["symbol", "entity"]},
-    "count": {"type": "integer", "minimum": 0},
-    "truncated": {"type": "boolean"},
-    "rows": {"type": "array", "items": {"type": "object"}}
-  },
-  "additionalProperties": false
+    "protocol": {"const": "cidx.result/v1"},
+    "operation": {"type": "string", "pattern": "^[a-z][a-z0-9._-]*$"},
+    "status": {"enum": ["complete", "partial", "unknown", "refuted", "conditional", "error"]},
+    "exit_class": {"enum": ["success", "usage", "invalid_or_stale_input", "policy_failure", "unknown", "infrastructure_failure"]},
+    "exit_code": {"type": "integer", "minimum": 0},
+    "result": {"type": "object"},
+    "identity": {
+      "type": "object",
+      "required": ["workspace", "index", "fact_sets", "freshness", "source_revision", "source_fingerprint"],
+      "additionalProperties": false,
+      "properties": {
+        "workspace": {"type": "string"},
+        "index": {"type": "string"},
+        "fact_sets": {"type": "array", "items": {"type": "string"}},
+        "freshness": {"enum": ["current", "stale", "unverifiable"]},
+        "source_revision": {},
+        "source_fingerprint": {}
+      }
+    },
+    "producer": {
+      "type": "object",
+      "required": ["package", "version", "backend", "schema_version"],
+      "additionalProperties": false,
+      "properties": {
+        "package": {"type": "string"},
+        "version": {"type": "string"},
+        "backend": {"type": "string"},
+        "schema_version": {"type": "integer", "minimum": 1}
+      }
+    },
+    "completeness": {
+      "type": "object",
+      "required": ["state", "truncated", "stale", "budget"],
+      "additionalProperties": false,
+      "properties": {
+        "state": {"enum": ["complete", "partial", "unknown"]},
+        "truncated": {"type": "boolean"},
+        "stale": {"type": "boolean"},
+        "budget": {}
+      }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "message"],
+        "additionalProperties": false,
+        "properties": {
+          "code": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+          "severity": {"enum": ["info", "warning", "error"]},
+          "message": {"type": "string"},
+          "next_action": {"type": "string"}
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "class", "trust", "summary"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string"},
+          "class": {"enum": ["source", "derived", "inferred", "runtime", "assumption", "proof"]},
+          "trust": {"enum": ["unverified", "producer-verified", "reader-verified"]},
+          "summary": {"type": "string"},
+          "source": {"type": "string"},
+          "children": {"type": "array", "items": {"type": "object"}}
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "id", "schema_version", "catalog_version", "catalog_hash"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {"type": "string"},
+          "id": {"type": "string"},
+          "schema_version": {"type": "integer", "minimum": 1},
+          "catalog_version": {"type": "integer", "minimum": 1},
+          "catalog_hash": {"type": "string"}
+        }
+      }
+    },
+    "replay": {
+      "type": "object",
+      "required": ["command", "arguments"],
+      "additionalProperties": false,
+      "properties": {
+        "command": {"type": "string"},
+        "arguments": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "resources": {
+      "type": "object",
+      "required": ["elapsed_ms", "peak_bytes"],
+      "additionalProperties": false,
+      "properties": {"elapsed_ms": {}, "peak_bytes": {}}
+    }
+  }
 }

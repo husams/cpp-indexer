@@ -414,6 +414,15 @@ TEST_CASE("query_plan: order_by, limit, default fields, result JSON") {
   CHECK(j.find("\"view\": \"symbol\"") != std::string::npos);
   CHECK(j.find("\"count\": 1") != std::string::npos);
   CHECK(j.find("\"funcB\"") != std::string::npos);
+
+  const auto envelope = d.to_envelope();
+  CHECK(envelope.status == cidx::protocol::Status::Complete);
+  CHECK(envelope.identity.fact_sets == std::vector<std::string>{"symbols"});
+  const auto envelope_json =
+      cidx::json_out::dumps_indent2(envelope.to_json());
+  CHECK(envelope_json.find("\"protocol\": \"cidx.result/v1\"") !=
+        std::string::npos);
+  CHECK(envelope_json.find("\"evidence\"") != std::string::npos);
 }
 
 TEST_CASE("query_plan: default result cap reports truncation") {
