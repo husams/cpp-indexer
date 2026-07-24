@@ -322,7 +322,7 @@ def is_template() -> Pred:
 
 
 def is_instance() -> Pred:
-    return not_(is_template())
+    return exists("instantiates")
 
 
 # ---- Stages / Source / Plan --------------------------------------------------------
@@ -787,78 +787,74 @@ def _entity_type_name(raw: int) -> Optional[str]:
     return ENTITY_KIND_NAMES[raw] if 0 <= raw <= 9 else None
 
 
-def _relation_exists_sql(p: Pred, active: str, sql: list[str], args: list[Any],
-                         target_filter: bool, negate_target: bool,
-                         outer_alias: str) -> None:
+def _next_alias(aliases: list[int], prefix: str) -> str:
+    value = f"{prefix}{aliases[0]}"
+    aliases[0] += 1
+    return value
+
+
+def _relation_candidates_sql(p: Pred, active: str, args: list[Any],
+                             aliases: list[int], outer_alias: str) -> str:
     rel = resolve_relation(p.relation, active)
     if rel is None:
         raise PlanError(f"E_RELATION: unknown relation '{p.relation}'")
     table = "entity_edge" if rel[1] == ENTITY_VIEW else "edge"
     from_col = "dst_id" if p.inbound else "src_id"
     to_col = "src_id" if p.inbound else "dst_id"
+    edge_alias = _next_alias(aliases, "qe")
+    target_alias = _next_alias(aliases, "qt")
+    target_entity_alias = _next_alias(aliases, "qen")
     if p.max_depth > 1 or p.min_depth > 1:
-        sql.append(
-            "EXISTS (WITH RECURSIVE reach(id, depth) AS (SELECT e."
+        args.extend([rel[2], rel[2], p.max_depth])
+        value = ["1"]
+        if p.target is not None:
+            value = ["("]
+            _pred_sql(p.target, rel[1], value, args, aliases,
+                      target_alias, target_entity_alias)
+            value.append(")")
+        result = (
+            "WITH RECURSIVE reach(id, depth) AS (SELECT e."
             + to_col + " , 1 FROM " + table + " e WHERE e.kind = ? AND e."
             + from_col + " = " + outer_alias + ".id UNION ALL SELECT e." + to_col
             + " , reach.depth + 1 FROM " + table + " e JOIN reach ON e."
             + from_col + " = reach.id WHERE e.kind = ? AND reach.depth < ?) "
-            "SELECT 1 FROM reach JOIN symbol qt ON qt.id = reach.id "
-            "LEFT JOIN entity_node qen ON qen.id = qt.id WHERE reach.depth BETWEEN ? AND ?"
+            "SELECT DISTINCT " + target_alias + ".id, " + "".join(value)
+            + " AS value FROM reach JOIN symbol " + target_alias + " ON "
+            + target_alias + ".id = reach.id LEFT JOIN entity_node "
+            + target_entity_alias + " ON " + target_entity_alias + ".id = "
+            + target_alias + ".id WHERE reach.depth BETWEEN ? AND ?"
         )
-        args.extend([rel[2], rel[2], p.max_depth, p.min_depth, p.max_depth])
+        args.extend([p.min_depth, p.max_depth])
+        return result
     else:
-        sql.append(
-            "EXISTS (SELECT 1 FROM " + table + " qe JOIN symbol qt ON qt.id = qe."
-            + to_col + " LEFT JOIN entity_node qen ON qen.id = qt.id WHERE qe.kind = ? AND qe."
-            + from_col + " = " + outer_alias + ".id"
-        )
+        value = ["1"]
+        if p.target is not None:
+            value = ["("]
+            _pred_sql(p.target, rel[1], value, args, aliases,
+                      target_alias, target_entity_alias)
+            value.append(")")
         args.append(rel[2])
-    if target_filter and p.target is not None:
-        sql.append(" AND ")
-        if negate_target:
-            sql.append("NOT (")
-        _pred_sql(p.target, rel[1], sql, args, "qt", "qen")
-        if negate_target:
-            sql.append(")")
-    sql.append(")")
+        return (
+            "SELECT DISTINCT " + target_alias + ".id, " + "".join(value)
+            + " AS value FROM " + table + " " + edge_alias + " JOIN symbol "
+            + target_alias + " ON " + target_alias + ".id = " + edge_alias
+            + "." + to_col + " LEFT JOIN entity_node " + target_entity_alias
+            + " ON " + target_entity_alias + ".id = " + target_alias
+            + ".id WHERE " + edge_alias + ".kind = ? AND " + edge_alias
+            + "." + from_col + " = " + outer_alias + ".id"
+        )
 
 
-def _relation_count_sql(p: Pred, active: str, sql: list[str], args: list[Any],
-                        target_filter: bool, outer_alias: str) -> None:
-    rel = resolve_relation(p.relation, active)
-    if rel is None:
-        raise PlanError(f"E_RELATION: unknown relation '{p.relation}'")
-    table = "entity_edge" if rel[1] == ENTITY_VIEW else "edge"
-    from_col = "dst_id" if p.inbound else "src_id"
-    to_col = "src_id" if p.inbound else "dst_id"
-    if p.max_depth > 1 or p.min_depth > 1:
-        sql.append(
-            "(WITH RECURSIVE reach(id, depth) AS (SELECT e." + to_col
-            + " , 1 FROM " + table + " e WHERE e.kind = ? AND e." + from_col
-            + " = " + outer_alias + ".id UNION ALL SELECT e." + to_col
-            + " , reach.depth + 1 FROM " + table + " e JOIN reach ON e."
-            + from_col + " = reach.id WHERE e.kind = ? AND reach.depth < ?) "
-            "SELECT COUNT(DISTINCT qt.id) FROM reach JOIN symbol qt ON qt.id = reach.id "
-            "LEFT JOIN entity_node qen ON qen.id = qt.id WHERE reach.depth BETWEEN ? AND ?"
-        )
-        args.extend([rel[2], rel[2], p.max_depth, p.min_depth, p.max_depth])
-    else:
-        sql.append(
-            "(SELECT COUNT(DISTINCT qe." + to_col + ") FROM " + table
-            + " qe JOIN symbol qt ON qt.id = qe." + to_col
-            + " LEFT JOIN entity_node qen ON qen.id = qt.id WHERE qe.kind = ? AND qe."
-            + from_col + " = " + outer_alias + ".id"
-        )
-        args.append(rel[2])
-    if target_filter and p.target is not None:
-        sql.append(" AND ")
-        _pred_sql(p.target, rel[1], sql, args, "qt", "qen")
-    sql.append(")")
+def _relation_count_sql(p: Pred, active: str, args: list[Any],
+                        aliases: list[int], truth: str,
+                        outer_alias: str) -> str:
+    candidates = _relation_candidates_sql(p, active, args, aliases, outer_alias)
+    return "(SELECT COUNT(*) FROM (" + candidates + ") AS " + _next_alias(aliases, "rows") + " WHERE value IS " + truth + ")"
 
 
 def _pred_sql(p: Pred, active: str, sql: list[str], args: list[Any],
-              symbol_alias: str = "s", entity_alias: str = "en") -> None:
+              aliases: list[int], symbol_alias: str = "s",
+              entity_alias: str = "en") -> None:
     if p.op in ("all_of", "any_of"):
         if not p.kids:
             sql.append("1" if p.op == "all_of" else "0")
@@ -868,12 +864,12 @@ def _pred_sql(p: Pred, active: str, sql: list[str], args: list[Any],
         for i, k in enumerate(p.kids):
             if i:
                 sql.append(joiner)
-            _pred_sql(k, active, sql, args, symbol_alias, entity_alias)
+            _pred_sql(k, active, sql, args, aliases, symbol_alias, entity_alias)
         sql.append(")")
         return
     if p.op == "not":
         sql.append("NOT (")
-        _pred_sql(p.kids[0], active, sql, args, symbol_alias, entity_alias)
+        _pred_sql(p.kids[0], active, sql, args, aliases, symbol_alias, entity_alias)
         sql.append(")")
         return
     if p.op in ("exists", "none", "all", "at_least", "exactly"):
@@ -881,41 +877,53 @@ def _pred_sql(p: Pred, active: str, sql: list[str], args: list[Any],
         if rel is None:
             raise PlanError(f"E_RELATION: unknown relation '{p.relation}'")
         complete = RELATION_METADATA[rel]["completeness"] == "complete"
-        found: list[str] = []
-        _relation_exists_sql(p, active, found, args, p.target is not None, False,
-                             symbol_alias)
-        found_sql = "".join(found)
         if p.op in ("exists", "none"):
+            true_count = _relation_count_sql(p, active, args, aliases, "TRUE", symbol_alias)
+            unknown_count = (
+                _relation_count_sql(p, active, args, aliases, "NULL", symbol_alias)
+                if p.target is not None else "0"
+            )
             sql.append(
-                f"CASE WHEN {found_sql} THEN {1 if p.op == 'exists' else 0} "
-                f"WHEN {1 if complete else 0} THEN {0 if p.op == 'exists' else 1} ELSE NULL END"
+                f"CASE WHEN {true_count} > 0 THEN {1 if p.op == 'exists' else 0} "
+                f"WHEN {unknown_count} > 0 THEN NULL WHEN {1 if complete else 0} "
+                f"THEN {0 if p.op == 'exists' else 1} ELSE NULL END"
             )
             return
         if p.op == "all":
-            if p.target is None:
-                sql.append("1" if complete else "NULL")
-                return
-            violation: list[str] = []
-            _relation_exists_sql(p, active, violation, args, True, True,
-                                 symbol_alias)
+            false_count = _relation_count_sql(p, active, args, aliases, "FALSE", symbol_alias)
+            unknown_count = (
+                _relation_count_sql(p, active, args, aliases, "NULL", symbol_alias)
+                if p.target is not None else "0"
+            )
             sql.append(
-                f"CASE WHEN {''.join(violation)} THEN 0 WHEN {1 if complete else 0} "
-                "THEN 1 ELSE NULL END"
+                f"CASE WHEN {false_count} > 0 THEN 0 WHEN {unknown_count} > 0 "
+                f"THEN NULL WHEN {1 if complete else 0} THEN 1 ELSE NULL END"
             )
             return
-        count: list[str] = []
-        _relation_count_sql(p, active, count, args, p.target is not None,
-                            symbol_alias)
-        count_sql = "".join(count)
+        true_count = _relation_count_sql(p, active, args, aliases, "TRUE", symbol_alias)
         if p.op == "at_least":
+            unknown_count = (
+                _relation_count_sql(p, active, args, aliases, "NULL", symbol_alias)
+                if p.target is not None else "0"
+            )
             sql.append(
-                f"CASE WHEN {count_sql} >= {p.threshold} THEN 1 WHEN {1 if complete else 0} "
-                "THEN 0 ELSE NULL END"
+                f"CASE WHEN {true_count} >= {p.threshold} THEN 1 WHEN {1 if complete else 0} "
+                f"AND {unknown_count} = 0 THEN 0 ELSE NULL END"
             )
         else:
+            equal_count = _relation_count_sql(p, active, args, aliases, "TRUE", symbol_alias)
+            unknown_for_equal = (
+                _relation_count_sql(p, active, args, aliases, "NULL", symbol_alias)
+                if p.target is not None else "0"
+            )
+            unknown_for_complete = (
+                _relation_count_sql(p, active, args, aliases, "NULL", symbol_alias)
+                if p.target is not None else "0"
+            )
             sql.append(
-                f"CASE WHEN {count_sql} > {p.threshold} THEN 0 WHEN {1 if complete else 0} "
-                f"AND {count_sql} = {p.threshold} THEN 1 WHEN {1 if complete else 0} "
+                f"CASE WHEN {true_count} > {p.threshold} THEN 0 WHEN {1 if complete else 0} "
+                f"AND {equal_count} = {p.threshold} AND {unknown_for_equal} = 0 THEN 1 "
+                f"WHEN {1 if complete else 0} AND {unknown_for_complete} = 0 "
                 "THEN 0 ELSE NULL END"
             )
         return
@@ -1084,7 +1092,8 @@ class Executor:
         args: list[Any] = []
         if pred is not None:
             sql.append(" WHERE ")
-            _pred_sql(pred, st.view, sql, args)
+            aliases = [0]
+            _pred_sql(pred, st.view, sql, args, aliases)
             if unknown == UnknownPolicy.ERROR:
                 probe = "".join(sql) + " IS NULL LIMIT 1"
                 if self._conn.execute(probe, args).fetchone() is not None:
@@ -1107,7 +1116,8 @@ class Executor:
                 + ",".join("?" * len(chunk)) + ") AND ("
             ]
             args: list[Any] = list(chunk)
-            _pred_sql(pred, st.view, sql, args)
+            aliases = [0]
+            _pred_sql(pred, st.view, sql, args, aliases)
             sql.append(")")
             if unknown == UnknownPolicy.ERROR:
                 probe = "".join(sql) + " IS NULL LIMIT 1"

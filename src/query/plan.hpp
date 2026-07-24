@@ -68,7 +68,7 @@ int64_t entity_kind_id(const std::string &name);
 // ---- Predicates
 // ---------------------------------------------------------------
 
-enum class UnknownPolicy { Exclude, Include, Error };
+enum class UnknownPolicy : std::uint8_t { Exclude, Include, Error };
 const char *unknown_policy_name(UnknownPolicy policy);
 
 enum class PredOp {
@@ -108,7 +108,7 @@ struct Pred {
 };
 
 struct TargetSet {
-  enum class Kind { Any, All, None } kind = Kind::Any;
+  enum class Kind : std::uint8_t { Any, All, None } kind = Kind::Any;
   std::vector<std::string> refs;
 };
 

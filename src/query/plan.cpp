@@ -388,7 +388,7 @@ Pred is_template() {
   return in_list("kind", {"class-template", "function-template"});
 }
 
-Pred is_instance() { return not_(is_template()); }
+Pred is_instance() { return exists("instantiates"); }
 
 // ---- Stage factories
 // --------------------------------------------------------------
@@ -920,23 +920,14 @@ json_out::Value pred_to_json(const Pred &p) {
   case PredOp::AtLeast:
   case PredOp::Exactly: {
     const char *name = "exactly";
-    switch (p.op) {
-    case PredOp::Exists:
+    if (p.op == PredOp::Exists) {
       name = "exists";
-      break;
-    case PredOp::None:
+    } else if (p.op == PredOp::None) {
       name = "none";
-      break;
-    case PredOp::All:
+    } else if (p.op == PredOp::All) {
       name = "all";
-      break;
-    case PredOp::AtLeast:
+    } else if (p.op == PredOp::AtLeast) {
       name = "at_least";
-      break;
-    case PredOp::Exactly:
-      break;
-    default:
-      break;
     }
     o.emplace_back("op", Value::of(std::string(name)));
     o.emplace_back("relation", Value::of(p.relation));

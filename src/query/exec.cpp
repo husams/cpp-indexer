@@ -137,15 +137,25 @@ bool is_kind_field(const std::string &field) {
   return field == "kind" || field == "entity_type";
 }
 
+struct SqlAliasState {
+  size_t next_id = 0;
+
+  std::string next(const char *prefix) {
+    return std::string(prefix) + std::to_string(next_id++);
+  }
+};
+
+enum class TargetTruth : std::uint8_t { True, False, Unknown };
+
 void pred_sql(const Pred &p, View active, std::string &sql,
-              std::vector<SqlValue> &args,
+              std::vector<SqlValue> &args, SqlAliasState &aliases,
               const std::string &symbol_alias = "s",
               const std::string &entity_alias = "en");
 
-std::string relation_count_sql(const Pred &p, View active,
-                               std::vector<SqlValue> &args, bool target_filter,
-                               bool negate_target,
-                               const std::string &outer_alias) {
+std::string relation_candidates_sql(const Pred &p, View active,
+                                    std::vector<SqlValue> &args,
+                                    SqlAliasState &aliases,
+                                    const std::string &outer_alias) {
   const RelationDesc *relation = resolve_relation(p.relation, active);
   if (relation == nullptr) {
     throw PlanError("E_RELATION: unknown relation '" + p.relation + "'");
@@ -154,99 +164,75 @@ std::string relation_count_sql(const Pred &p, View active,
   const std::string table = entity_layer ? "entity_edge" : "edge";
   const std::string from_col = p.inbound ? "dst_id" : "src_id";
   const std::string to_col = p.inbound ? "src_id" : "dst_id";
-  const std::string edge_alias = "qe";
-  const std::string target_join =
-      " JOIN symbol qt ON qt.id = " + edge_alias + "." + to_col +
-      " LEFT JOIN entity_node qen ON qen.id = qt.id";
+  const std::string edge_alias = aliases.next("qe");
+  const std::string target_alias = aliases.next("qt");
+  const std::string target_entity_alias = aliases.next("qen");
   const bool recursive = p.max_depth > 1 || p.min_depth > 1;
   std::string sql;
   if (recursive) {
-    sql = "(WITH RECURSIVE reach(id, depth) AS (SELECT e." + to_col +
+    sql = "WITH RECURSIVE reach(id, depth) AS (SELECT e." + to_col +
           ", 1 FROM " + table + " e WHERE e.kind = ? AND e." + from_col +
           " = " + outer_alias + ".id UNION ALL SELECT e." + to_col +
           ", reach.depth + 1 FROM " + table + " e JOIN reach ON e." + from_col +
-          " = reach.id WHERE e.kind = ? AND reach.depth < ?) "
-          "SELECT COUNT(DISTINCT qt.id) FROM reach JOIN symbol qt ON qt.id = "
-          "reach.id "
-          "LEFT JOIN entity_node qen ON qen.id = qt.id WHERE reach.depth "
-          "BETWEEN ? AND ?";
+          " = reach.id WHERE e.kind = ? AND reach.depth < ?) ";
     args.emplace_back(relation->kind_id);
     args.emplace_back(relation->kind_id);
     args.emplace_back(p.max_depth);
+    std::string value = "1";
+    if (p.target) {
+      std::string expression;
+      pred_sql(*p.target, relation->layer, expression, args, aliases,
+               target_alias, target_entity_alias);
+      value = "(" + expression + ")";
+    }
+    sql += "SELECT DISTINCT " + target_alias + ".id, " + value +
+           " AS value FROM reach JOIN symbol " + target_alias + " ON " +
+           target_alias + ".id = reach.id LEFT JOIN entity_node " +
+           target_entity_alias + " ON " + target_entity_alias +
+           ".id = " + target_alias + ".id WHERE reach.depth BETWEEN ? AND ?";
     args.emplace_back(p.min_depth);
     args.emplace_back(p.max_depth);
   } else {
-    sql = "(SELECT COUNT(DISTINCT " + edge_alias + "." + to_col + ") FROM " +
-          table + " " + edge_alias + target_join + " WHERE " + edge_alias +
-          ".kind = ? AND " + edge_alias + "." + from_col + " = " + outer_alias +
-          ".id";
+    std::string value = "1";
+    if (p.target) {
+      std::string expression;
+      pred_sql(*p.target, relation->layer, expression, args, aliases,
+               target_alias, target_entity_alias);
+      value = "(" + expression + ")";
+    }
     args.emplace_back(relation->kind_id);
+    sql = "SELECT DISTINCT " + target_alias + ".id, " + value +
+          " AS value "
+          "FROM " +
+          table + " " + edge_alias + " JOIN symbol " + target_alias + " ON " +
+          target_alias + ".id = " + edge_alias + "." + to_col +
+          " LEFT JOIN entity_node " + target_entity_alias + " ON " +
+          target_entity_alias + ".id = " + target_alias + ".id WHERE " +
+          edge_alias + ".kind = ? AND " + edge_alias + "." + from_col + " = " +
+          outer_alias + ".id";
   }
-  if (target_filter && p.target) {
-    sql += " AND ";
-    if (negate_target) {
-      sql += "NOT (";
-    }
-    pred_sql(*p.target, relation->layer, sql, args, "qt", "qen");
-    if (negate_target) {
-      sql += ")";
-    }
-  }
-  sql += ")";
   return sql;
 }
 
-std::string relation_exists_sql(const Pred &p, View active,
-                                std::vector<SqlValue> &args, bool target_filter,
-                                bool negate_target,
-                                const std::string &outer_alias) {
-  const RelationDesc *relation = resolve_relation(p.relation, active);
-  if (relation == nullptr) {
-    throw PlanError("E_RELATION: unknown relation '" + p.relation + "'");
+std::string relation_count_sql(const Pred &p, View active,
+                               std::vector<SqlValue> &args,
+                               SqlAliasState &aliases, TargetTruth truth,
+                               const std::string &outer_alias) {
+  const std::string candidates =
+      relation_candidates_sql(p, active, args, aliases, outer_alias);
+  const char *test = " IS NULL";
+  if (truth == TargetTruth::True) {
+    test = " IS TRUE";
+  } else if (truth == TargetTruth::False) {
+    test = " IS FALSE";
   }
-  const bool entity_layer = relation->layer == View::Entity;
-  const std::string table = entity_layer ? "entity_edge" : "edge";
-  const std::string from_col = p.inbound ? "dst_id" : "src_id";
-  const std::string to_col = p.inbound ? "src_id" : "dst_id";
-  std::string sql;
-  if (p.max_depth > 1 || p.min_depth > 1) {
-    sql = "EXISTS (WITH RECURSIVE reach(id, depth) AS (SELECT e." + to_col +
-          ", 1 FROM " + table + " e WHERE e.kind = ? AND e." + from_col +
-          " = " + outer_alias + ".id UNION ALL SELECT e." + to_col +
-          ", reach.depth + 1 FROM " + table + " e JOIN reach ON e." + from_col +
-          " = reach.id WHERE e.kind = ? AND reach.depth < ?) "
-          "SELECT 1 FROM reach JOIN symbol qt ON qt.id = reach.id "
-          "LEFT JOIN entity_node qen ON qen.id = qt.id WHERE reach.depth "
-          "BETWEEN ? AND ?";
-    args.emplace_back(relation->kind_id);
-    args.emplace_back(relation->kind_id);
-    args.emplace_back(p.max_depth);
-    args.emplace_back(p.min_depth);
-    args.emplace_back(p.max_depth);
-  } else {
-    sql = "EXISTS (SELECT 1 FROM " + table +
-          " qe JOIN symbol qt ON qt.id = qe." + to_col +
-          " LEFT JOIN entity_node qen ON qen.id = qt.id WHERE qe.kind = ? AND "
-          "qe." +
-          from_col + " = " + outer_alias + ".id";
-    args.emplace_back(relation->kind_id);
-  }
-  if (target_filter && p.target) {
-    sql += " AND ";
-    if (negate_target) {
-      sql += "NOT (";
-    }
-    pred_sql(*p.target, relation->layer, sql, args, "qt", "qen");
-    if (negate_target) {
-      sql += ")";
-    }
-  }
-  sql += ")";
-  return sql;
+  return "(SELECT COUNT(*) FROM (" + candidates + ") AS " +
+         aliases.next("rows") + " WHERE value" + test + ")";
 }
 
 void pred_sql(const Pred &p, View active, std::string &sql,
-              std::vector<SqlValue> &args, const std::string &symbol_alias,
+              std::vector<SqlValue> &args, SqlAliasState &aliases,
+              const std::string &symbol_alias,
               const std::string &entity_alias) {
   switch (p.op) {
   case PredOp::AllOf:
@@ -261,14 +247,15 @@ void pred_sql(const Pred &p, View active, std::string &sql,
       if (i != 0) {
         sql += joiner;
       }
-      pred_sql(p.kids[i], active, sql, args, symbol_alias, entity_alias);
+      pred_sql(p.kids[i], active, sql, args, aliases, symbol_alias,
+               entity_alias);
     }
     sql += ")";
     return;
   }
   case PredOp::Not:
     sql += "NOT (";
-    pred_sql(p.kids[0], active, sql, args, symbol_alias, entity_alias);
+    pred_sql(p.kids[0], active, sql, args, aliases, symbol_alias, entity_alias);
     sql += ")";
     return;
   case PredOp::Eq:
@@ -313,37 +300,58 @@ void pred_sql(const Pred &p, View active, std::string &sql,
       throw PlanError("E_RELATION: unknown relation '" + p.relation + "'");
     }
     const bool complete = relation->completeness == "complete";
-    const std::string found = relation_exists_sql(
-        p, active, args, p.target != nullptr, false, symbol_alias);
     if (p.op == PredOp::Exists || p.op == PredOp::None) {
-      sql += "CASE WHEN " + found + " THEN " +
-             (p.op == PredOp::Exists ? "1" : "0") + " WHEN " +
-             (complete ? "1" : "0") + " THEN " +
+      const std::string true_count = relation_count_sql(
+          p, active, args, aliases, TargetTruth::True, symbol_alias);
+      const std::string unknown_count =
+          p.target ? relation_count_sql(p, active, args, aliases,
+                                        TargetTruth::Unknown, symbol_alias)
+                   : "0";
+      sql += "CASE WHEN " + true_count + " > 0 THEN " +
+             (p.op == PredOp::Exists ? "1" : "0") + " WHEN " + unknown_count +
+             " > 0 THEN NULL WHEN " + (complete ? "1" : "0") + " THEN " +
              (p.op == PredOp::Exists ? "0" : "1") + " ELSE NULL END";
       return;
     }
     if (p.op == PredOp::All) {
-      if (!p.target) {
-        sql += complete ? "1" : "NULL";
-        return;
-      }
-      const std::string violation =
-          relation_exists_sql(p, active, args, true, true, symbol_alias);
-      sql += "CASE WHEN " + violation + " THEN 0 WHEN " +
-             (complete ? "1" : "0") + " THEN 1 ELSE NULL END";
+      const std::string false_count = relation_count_sql(
+          p, active, args, aliases, TargetTruth::False, symbol_alias);
+      const std::string unknown_count =
+          p.target ? relation_count_sql(p, active, args, aliases,
+                                        TargetTruth::Unknown, symbol_alias)
+                   : "0";
+      sql += "CASE WHEN " + false_count + " > 0 THEN 0 WHEN " + unknown_count +
+             " > 0 THEN NULL WHEN " + (complete ? "1" : "0") +
+             " THEN 1 ELSE NULL END";
       return;
     }
-    const std::string count = relation_count_sql(
-        p, active, args, p.target != nullptr, false, symbol_alias);
+    const std::string true_count = relation_count_sql(
+        p, active, args, aliases, TargetTruth::True, symbol_alias);
     if (p.op == PredOp::Exactly) {
-      sql += "CASE WHEN " + count + " > " + std::to_string(p.threshold) +
-             " THEN 0 WHEN " + (complete ? "1" : "0") + " AND " + count +
-             " = " + std::to_string(p.threshold) + " THEN 1 WHEN " +
-             (complete ? "1" : "0") + " THEN 0 ELSE NULL END";
+      const std::string equal_count = relation_count_sql(
+          p, active, args, aliases, TargetTruth::True, symbol_alias);
+      const std::string unknown_for_equal =
+          p.target ? relation_count_sql(p, active, args, aliases,
+                                        TargetTruth::Unknown, symbol_alias)
+                   : "0";
+      const std::string unknown_for_complete =
+          p.target ? relation_count_sql(p, active, args, aliases,
+                                        TargetTruth::Unknown, symbol_alias)
+                   : "0";
+      sql += "CASE WHEN " + true_count + " > " + std::to_string(p.threshold) +
+             " THEN 0 WHEN " + (complete ? "1" : "0") + " AND " + equal_count +
+             " = " + std::to_string(p.threshold) + " AND " + unknown_for_equal +
+             " = 0 THEN 1 WHEN " + (complete ? "1" : "0") + " AND " +
+             unknown_for_complete + " = 0 THEN 0 ELSE NULL END";
       return;
     }
-    sql += "CASE WHEN " + count + " >= " + std::to_string(p.threshold) +
-           " THEN 1 WHEN " + (complete ? "1" : "0") + " THEN 0 ELSE NULL END";
+    const std::string unknown_count =
+        p.target ? relation_count_sql(p, active, args, aliases,
+                                      TargetTruth::Unknown, symbol_alias)
+                 : "0";
+    sql += "CASE WHEN " + true_count + " >= " + std::to_string(p.threshold) +
+           " THEN 1 WHEN " + (complete ? "1" : "0") + " AND " + unknown_count +
+           " = 0 THEN 0 ELSE NULL END";
     return;
   }
   }
@@ -665,7 +673,8 @@ private:
     std::vector<SqlValue> args;
     if (pred) {
       sql += " WHERE ";
-      pred_sql(*pred, st.view, sql, args);
+      SqlAliasState aliases;
+      pred_sql(*pred, st.view, sql, args, aliases);
       if (unknown == UnknownPolicy::Error &&
           !fetch_ids(db_, sql + " IS NULL LIMIT 1", args).empty()) {
         throw PlanError("E_UNKNOWN: predicate evaluation is unknown");
@@ -693,7 +702,8 @@ private:
       for (size_t i = 0; i < n; ++i) {
         args.emplace_back(st.ids[at + i]);
       }
-      pred_sql(pred, st.view, sql, args);
+      SqlAliasState aliases;
+      pred_sql(pred, st.view, sql, args, aliases);
       sql += ")";
       if (unknown == UnknownPolicy::Error &&
           !fetch_ids(db_, sql + " IS NULL LIMIT 1", args).empty()) {

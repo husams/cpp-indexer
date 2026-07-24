@@ -22,7 +22,8 @@ from indexer.queryplan import (  # noqa: E402
     Executor, PlanError, all_of, canonical_json, codebase, count, distinct,
     entity, eq, except_, glob, in_, in_list, intersect, limit, ne, nodes,
     not_, order_by, out, select, start, symbol, union_, validate, view, where,
-    all_targets, any_target, exactly, inherits_from, is_abstract, none,
+    all, all_targets, any_target, at_least, exactly, exists, inherits_from,
+    is_abstract, is_instance, none,
 )
 
 _REPO_ROOT = os.path.abspath(
@@ -86,10 +87,14 @@ def seeded():
     # AbsS: declaration kind `struct`, classification `abstract_class` --
     # the two must stay separate fields (PR #20 review).
     ids["S"] = db.add_symbol(_make_sym("USR::S", "AbsS", "struct"))
+    ids["T"] = db.add_symbol(_make_sym("USR::T", "Thing", "class-template"))
+    ids["I"] = db.add_symbol(_make_sym("USR::I", "Thing<int>", "class"))
     db.add_edge(ids["A"], ids["B"], 1)  # calls
     db.add_edge(ids["B"], ids["C"], 1)  # calls
     db.add_edge(ids["A"], ids["C"], 7)  # uses
     db.add_edge(ids["E"], ids["D"], 2)  # inherits
+    db.add_edge(ids["E"], ids["C"], 2)  # inherits to a non-entity target
+    db.add_edge(ids["I"], ids["T"], 5)  # instantiates
     db._conn.execute(
         "INSERT INTO entity_node (id, kind) VALUES (?, 1), (?, 1), (?, 2)",
         (ids["D"], ids["E"], ids["S"]))
@@ -207,7 +212,7 @@ def test_where_and_select(seeded):
     ex = Executor(db)
     r = ex.run((start(codebase()) | nodes(eq("kind", "class"))
                 | select(["name", "kind", "usr"])).plan)
-    assert len(r.rows) == 2
+    assert len(r.rows) == 3
     assert r.fields == ("name", "kind", "usr")
     assert r.rows[0][0] == "ClassD"
     assert r.rows[0][1] == "class"
@@ -392,7 +397,7 @@ def test_kind_vs_entity_type_separation(seeded):
                    | nodes(in_list("kind", ["class", "struct"]))
                    | select(["spelling", "kind", "entity_type"])
                    | order_by(["spelling"])).plan)
-    assert [row[0] for row in decl.rows] == ["AbsS", "ClassD", "ClassE"]
+    assert [row[0] for row in decl.rows] == ["AbsS", "ClassD", "ClassE", "Thing<int>"]
     assert decl.rows[0][1] == "struct"
     assert decl.rows[0][2] == "abstract_class"
 
@@ -425,6 +430,9 @@ def test_semantic_macros_expand_to_quantifiers(seeded):
     explained = ex.explain(
         (start(symbol("USR::E")) | where(inherits_from("ClassD"))).plan)
     assert explained["plan"]["stages"][0]["pred"]["op"] == "exists"
+    instances = ex.run((start(codebase()) | nodes(is_instance())
+                         | select(["usr"])).plan)
+    assert [row[0] for row in instances.rows] == ["USR::I"]
 
 
 def test_partial_quantifiers_preserve_unknown(seeded):
@@ -441,3 +449,47 @@ def test_partial_quantifiers_preserve_unknown(seeded):
     exact = ex.run((start(symbol("USR::A"))
                     | where(exactly(2, "calls"), qp.UnknownPolicy.INCLUDE)).plan)
     assert [row[0] for row in exact.rows] == [ids["A"]]
+
+
+def test_all_quantifiers_bind_and_preserve_nested_unknown(seeded):
+    db, ids = seeded
+    ex = Executor(db)
+    assert ex.run((start(symbol("USR::A")) | where(exists("calls"))).plan).rows
+    assert not ex.run((start(symbol("USR::A")) | where(none("calls"))).plan).rows
+    assert ex.run((start(symbol("USR::A"))
+                   | where(all("calls"), qp.UnknownPolicy.INCLUDE)).plan).rows
+    assert ex.run((start(symbol("USR::A"))
+                   | where(at_least(1, "calls"))).plan).rows
+    assert ex.run((start(symbol("USR::A"))
+                   | where(exactly(1, "calls"), qp.UnknownPolicy.INCLUDE)).plan).rows
+
+    target = eq("spelling", "funcB")
+    assert ex.run((start(symbol("USR::A"))
+                   | where(exists("calls", target))).plan).rows
+    assert not ex.run((start(symbol("USR::A"))
+                      | where(none("calls", target))).plan).rows
+    assert ex.run((start(symbol("USR::A"))
+                   | where(all("calls", target), qp.UnknownPolicy.INCLUDE)).plan).rows
+    assert ex.run((start(symbol("USR::A"))
+                   | where(at_least(1, "calls", target))).plan).rows
+    assert ex.run((start(symbol("USR::A"))
+                   | where(exactly(1, "calls", target), qp.UnknownPolicy.INCLUDE)).plan).rows
+
+    nested = ex.run(
+        (start(symbol("USR::A"))
+         | where(exists("calls", exists("calls", eq("spelling", "funcC"))))).plan)
+    assert [row[0] for row in nested.rows] == [ids["A"]]
+    recursive_target = ex.run(
+        (start(symbol("USR::A"))
+         | where(exists("calls", eq("spelling", "funcC"), 2, 2))).plan)
+    assert [row[0] for row in recursive_target.rows] == [ids["A"]]
+    nested_unknown = ex.run(
+        (start(symbol("USR::A"))
+         | where(exists("calls", exists("calls", eq("spelling", "missing"))),
+                qp.UnknownPolicy.INCLUDE)).plan)
+    assert [row[0] for row in nested_unknown.rows] == [ids["A"]]
+    target_unknown = ex.run(
+        (start(symbol("USR::E"))
+         | where(all("inherits", eq("entity_type", "class")),
+                qp.UnknownPolicy.INCLUDE)).plan)
+    assert [row[0] for row in target_unknown.rows] == [ids["E"]]
