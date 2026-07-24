@@ -12,7 +12,7 @@
     "lock_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
   },
   "definitions": {
-    "dependency": {"type": "object", "required": ["name", "version"], "properties": {"name": {"type": "string"}, "version": {"type": "string"}, "kind": {"type": "string"}}, "additionalProperties": false},
+    "dependency": {"type": "object", "required": ["name", "version"], "properties": {"name": {"type": "string"}, "version": {"type": "string"}, "kind": {"type": "string"}, "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}, "additionalProperties": false},
     "package": {
       "type": "object",
       "required": ["name", "version", "kind", "content_hash", "registry", "dependencies", "namespaces"],

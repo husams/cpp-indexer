@@ -11,7 +11,9 @@ from indexer.extensions import (
     Lockfile,
     PackageDependency,
     PackageError,
+    PackageManifest,
     PackageRegistry,
+    PackagePolicy,
     PackageResolutionError,
     PackageResolver,
     ResultProvenance,
@@ -27,8 +29,11 @@ def _package(root: Path, name: str, version: str, *, kind: str = "cidx.extract",
              compatibility: dict | None = None) -> Path:
     path = root / name.replace("/", "_") / version
     path.mkdir(parents=True)
-    entry = "extract.json" if kind == "cidx.extract" else "analysis.dl"
-    (path / entry).write_text(json.dumps({"kind": kind, "name": name}, sort_keys=True) + "\n")
+    entry = "extract.json" if kind == "cidx.extract" else "analysis.json"
+    descriptor = ({"kind": kind, "name": name, "fact_source": "facts"}
+                  if kind == "cidx.extract" else
+                  {"kind": kind, "name": name, "result_source": "results"})
+    (path / entry).write_text(json.dumps(descriptor, sort_keys=True) + "\n")
     manifest = {
         "format": "cidx.package/v1",
         "name": name,
@@ -62,6 +67,13 @@ def _registry(tmp_path: Path, *packages: Path) -> CompositeRegistry:
     for package in packages:
         registry.register(package)
     return CompositeRegistry([registry])
+
+
+def _refresh_hash(path: Path) -> None:
+    manifest_path = path / "package.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["content_hash"] = package_content_hash(path)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
 
 def test_lockfile_is_deterministic_and_verifies_offline(tmp_path: Path):
@@ -113,8 +125,7 @@ def test_execution_boundaries_and_invalidation_identity(tmp_path: Path):
 
     query = _package(tmp_path, "query", "1.0.0", kind="cidx.query")
     query_manifest = json.loads((query / "package.json").read_text())
-    query_manifest["entry_points"] = {"sql/main": "extract.json"}
-    query_manifest["entry_points"] = {"sql/main": "analysis.dl"}
+    query_manifest["entry_points"] = {"sql/main": "analysis.json"}
     (query / "package.json").write_text(json.dumps(query_manifest, indent=2, sort_keys=True) + "\n")
     query_manifest["content_hash"] = package_content_hash(query)
     (query / "package.json").write_text(json.dumps(query_manifest, indent=2, sort_keys=True) + "\n")
@@ -134,11 +145,108 @@ def test_execution_boundaries_and_invalidation_identity(tmp_path: Path):
 def test_conformance_sdk_covers_positive_negative_and_budget_cases(tmp_path: Path):
     valid = _package(tmp_path, "valid", "1.0.0")
     too_large = _package(tmp_path, "too-large", "1.0.0", budgets={"steps": 1000})
+    (tmp_path / "fixture.json").write_text(json.dumps({"facts": [{"name": "valid"}]}))
     sdk = ConformanceSDK(PackageResolver(_registry(tmp_path, valid, too_large)))
     results = sdk.run([
-        {"id": "positive", "package": str(valid), "expected": "valid"},
+        {"id": "positive", "package": str(valid), "expected": "valid",
+         "fixture": str(tmp_path / "fixture.json"),
+         "expected_facts": [{"name": "valid"}]},
         {"id": "budget", "package": str(too_large), "expected": "invalid", "checks": {"max_budget": 100}},
         {"id": "missing-dependency", "package": str(valid), "expected": "invalid",
          "checks": {"required_dependency": "not-materialized"}},
     ])
     assert [result["status"] for result in results] == ["passed", "passed", "passed"]
+
+
+def test_unknown_fields_are_rejected_before_hashing_and_lock_verification(tmp_path: Path):
+    package = _package(tmp_path, "strict", "1.0.0", dependencies=[{"name": "dep"}])
+    manifest_path = package / "package.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["typo_field"] = "must not be ignored"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    with pytest.raises(PackageError, match="unknown manifest fields"):
+        package_content_hash(package)
+    with pytest.raises(PackageError, match="unknown manifest fields"):
+        validate_package(package)
+
+    package = _package(tmp_path, "dependency-fields", "1.0.0")
+    manifest = json.loads((package / "package.json").read_text())
+    manifest["dependencies"] = [{"name": "dep", "typo": True}]
+    (package / "package.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    with pytest.raises(PackageError, match="unknown dependency fields"):
+        PackageManifest.from_dict(manifest)
+
+    lock_package = _package(tmp_path, "lockable", "1.0.0")
+    lock = PackageResolver(_registry(tmp_path, lock_package)).resolve(["lockable"])
+    lock_path = tmp_path / "strict.lock.json"
+    lock.write(lock_path)
+    raw_lock = json.loads(lock_path.read_text())
+    raw_lock["unknown"] = 1
+    lock_path.write_text(json.dumps(raw_lock))
+    with pytest.raises(PackageError, match="unknown lockfile fields"):
+        Lockfile.read(lock_path)
+    raw_lock.pop("unknown")
+    raw_lock["packages"][0]["unknown"] = 1
+    lock_path.write_text(json.dumps(raw_lock))
+    with pytest.raises(PackageError, match="unknown locked package fields"):
+        Lockfile.read(lock_path)
+    raw_lock["packages"][0].pop("unknown")
+    raw_lock["packages"][0]["dependencies"] = [{"name": "dep", "version": "*", "unknown": 1}]
+    lock_path.write_text(json.dumps(raw_lock))
+    with pytest.raises(PackageError, match="unknown dependency fields"):
+        Lockfile.read(lock_path)
+
+
+def test_compatibility_policy_and_ambiguous_candidates_fail_closed(tmp_path: Path):
+    missing_fact = _package(tmp_path, "missing-fact", "1.0.0", compatibility={"clang": ">=1"})
+    with pytest.raises(PackageError, match="missing compatibility fact"):
+        validate_package(missing_fact)
+
+    denied = _package(tmp_path, "denied", "1.0.0", capabilities=["network"])
+    with pytest.raises(PackageError, match="capabilities exceed policy"):
+        PackageRegistry(tmp_path / "denied-registry").register(denied)
+    with pytest.raises(PackageError, match="publisher is not allowed"):
+        validate_package(denied, policy=PackagePolicy(allowed_publishers=frozenset({"trusted"})))
+
+    first = _package(tmp_path / "first", "ambiguous", "1.0.0")
+    second = _package(tmp_path / "second", "ambiguous", "1.0.0")
+    (second / "extract.json").write_text(json.dumps({"kind": "cidx.extract", "name": "different"}) + "\n")
+    _refresh_hash(second)
+    registry = PackageRegistry(tmp_path / "ambiguous-registry")
+    registry.register(first)
+    registry.register(second)
+    with pytest.raises(PackageResolutionError, match="ambiguous package candidates"):
+        PackageResolver(CompositeRegistry([registry])).resolve([PackageDependency("ambiguous", "1.0.0")])
+    explicit = PackageResolver(CompositeRegistry([registry])).resolve([
+        PackageDependency("ambiguous", "1.0.0", content_hash=package_content_hash(first))
+    ])
+    assert explicit.packages[0].content_hash == package_content_hash(first)
+
+
+def test_conformance_executes_fixtures_and_negative_matrix(tmp_path: Path):
+    extract = _package(tmp_path, "matrix.extract", "1.0.0")
+    analysis = _package(tmp_path, "matrix.analysis", "1.0.0", kind="cidx.analysis",
+                        dependencies=[{"name": "matrix.extract"}])
+    stale = _package(tmp_path, "matrix.stale", "1.0.0", compatibility={"catalog_version": 999})
+    missing = _package(tmp_path, "matrix.missing", "1.0.0",
+                       dependencies=[{"name": "matrix.not-materialized"}])
+    malformed = tmp_path / "matrix-malformed"
+    malformed.mkdir()
+    (malformed / "package.json").write_text("{not-json\n")
+    fixture = tmp_path / "matrix-fixture.json"
+    fixture.write_text(json.dumps({"facts": [{"symbol": "Account"}], "results": [{"boundary": "Account"}]}))
+    sdk = ConformanceSDK(PackageResolver(_registry(tmp_path, extract, analysis, stale, missing)))
+    results = sdk.run([
+        {"id": "extract", "package": str(extract), "fixture": str(fixture), "expected": "valid",
+         "expected_facts": [{"symbol": "Account"}]},
+        {"id": "analysis", "package": str(analysis), "fixture": str(fixture), "expected": "valid",
+         "expected_results": [{"boundary": "Account"}]},
+        {"id": "stale-schema", "package": str(stale), "expected": "invalid"},
+        {"id": "budget", "package": str(extract), "expected": "invalid",
+         "checks": {"max_budget": 1}},
+        {"id": "malformed", "package": str(malformed), "expected": "invalid"},
+        {"id": "missing-dependency", "package": str(missing), "expected": "invalid"},
+    ])
+    assert [result["status"] for result in results] == ["passed"] * 6
+    assert results[0]["facts"] == [{"symbol": "Account"}]
+    assert results[1]["results"] == [{"boundary": "Account"}]

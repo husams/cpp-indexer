@@ -1,6 +1,7 @@
 {
   "format": "cidx.extraction-plan/v1",
   "name": "application-state-boundary",
+  "fact_source": "facts",
   "traversal": "ignore-unless-spelled",
   "bindings": ["declaration"],
   "emits": ["banking.extract/relation/application_state_boundary"],

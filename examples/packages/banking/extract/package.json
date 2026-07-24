@@ -3,7 +3,7 @@
   "name": "banking.extract",
   "version": "1.0.0",
   "kind": "cidx.extract",
-  "content_hash": "sha256:f6a3b42b6759b8ab3063bca29f1fb6c8c3a3b798dd47fbc91d7915c5364fe272",
+  "content_hash": "sha256:63747507fa0231c64ac58106ea67b20c79b23db69af9f58678341a5ad1fc383d",
   "publisher": "cidx.example",
   "origin": "file:examples/packages/banking",
   "license": "Apache-2.0",

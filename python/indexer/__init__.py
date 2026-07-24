@@ -85,6 +85,7 @@ from .extensions import (
     PackageDependency,
     PackageError,
     PackageManifest,
+    PackagePolicy,
     PackageRegistry,
     PackageResolutionError,
     PackageResolver,
@@ -93,6 +94,7 @@ from .extensions import (
     artifact_identity,
     canonical_json,
     package_content_hash,
+    runtime_environment,
     validate_package,
     version_satisfies,
 )
@@ -180,6 +182,7 @@ __all__ = [
     "PackageDependency",
     "PackageError",
     "PackageManifest",
+    "PackagePolicy",
     "PackageRegistry",
     "PackageResolutionError",
     "PackageResolver",
@@ -188,6 +191,7 @@ __all__ = [
     "artifact_identity",
     "canonical_json",
     "package_content_hash",
+    "runtime_environment",
     "validate_package",
     "version_satisfies",
 ]

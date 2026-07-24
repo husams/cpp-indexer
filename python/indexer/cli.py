@@ -50,6 +50,7 @@ if __package__ in (None, ""):  # direct execution
     from indexer.extensions import (  # noqa: E402
         CompositeRegistry,
         PackageDependency,
+        PackagePolicy,
         PackageRegistry,
         PackageResolver,
         PackageError,
@@ -76,6 +77,7 @@ else:
     from .extensions import (
         CompositeRegistry,
         PackageDependency,
+        PackagePolicy,
         PackageRegistry,
         PackageResolver,
         PackageError,
@@ -2083,6 +2085,10 @@ def _package_requirement(value: str) -> PackageDependency:
     return PackageDependency(name, requirement)
 
 
+def _package_policy(args) -> PackagePolicy:
+    return PackagePolicy.read(args.policy) if getattr(args, "policy", None) else PackagePolicy.local_development()
+
+
 def cmd_package(args) -> int:
     """Validate, inspect, pack, lock, and conformance-test data packages."""
     try:
@@ -2097,22 +2103,31 @@ def cmd_package(args) -> int:
                              indent=2, sort_keys=True))
             return 0
         if args.package_action == "lock":
-            registries = [PackageRegistry(path) for path in args.registry]
-            resolver = PackageResolver(CompositeRegistry(registries))
+            policy = _package_policy(args)
+            registries = [PackageRegistry(path, policy=policy) for path in args.registry]
+            resolver = PackageResolver(CompositeRegistry(registries), policy=policy)
             lock = resolver.resolve(_package_requirement(item) for item in args.require)
             lock.write(args.output)
             print(json.dumps({"lock_hash": lock.lock_hash, "packages": len(lock.packages),
                               "output": os.path.abspath(args.output)}, indent=2, sort_keys=True))
             return 0
         if args.package_action == "verify":
+            policy = _package_policy(args)
             lock = Lockfile.read(args.lockfile)
-            resolver = PackageResolver(CompositeRegistry([PackageRegistry(path) for path in args.registry]))
+            resolver = PackageResolver(
+                CompositeRegistry([PackageRegistry(path, policy=policy) for path in args.registry]),
+                policy=policy,
+            )
             resolver.verify_lock(lock)
             print(json.dumps({"lock_hash": lock.lock_hash, "packages": len(lock.packages), "status": "valid"},
                              indent=2, sort_keys=True))
             return 0
         if args.package_action == "conformance":
-            resolver = PackageResolver(CompositeRegistry([PackageRegistry(path) for path in args.registry]))
+            policy = _package_policy(args)
+            resolver = PackageResolver(
+                CompositeRegistry([PackageRegistry(path, policy=policy) for path in args.registry]),
+                policy=policy,
+            )
             results = ConformanceSDK(resolver).run(load_conformance_cases(args.cases))
             print(json.dumps({"cases": results, "status": "passed" if all(item["status"] == "passed" for item in results) else "failed"},
                              indent=2, sort_keys=True))
@@ -2286,16 +2301,19 @@ def main(argv=None) -> int:
     q.add_argument("--require", action="append", required=True, metavar="NAME[@RANGE]")
     q.add_argument("--registry", action="append", required=True, metavar="DIR")
     q.add_argument("--output", required=True, metavar="LOCKFILE")
+    q.add_argument("--policy", metavar="POLICY_JSON")
     q.set_defaults(fn=cmd_package)
 
     q = psub.add_parser("verify", help="verify a lockfile against materialized registries")
     q.add_argument("lockfile", metavar="LOCKFILE")
     q.add_argument("--registry", action="append", required=True, metavar="DIR")
+    q.add_argument("--policy", metavar="POLICY_JSON")
     q.set_defaults(fn=cmd_package)
 
     q = psub.add_parser("conformance", help="run declarative package conformance cases")
     q.add_argument("cases", metavar="CASES_JSON")
     q.add_argument("--registry", action="append", required=True, metavar="DIR")
+    q.add_argument("--policy", metavar="POLICY_JSON")
     q.set_defaults(fn=cmd_package)
 
     # -- db: migrate / verify --------------------------------------------------

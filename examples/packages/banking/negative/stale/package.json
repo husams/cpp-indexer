@@ -1,0 +1,21 @@
+{
+  "format": "cidx.package/v1",
+  "name": "banking.stale",
+  "version": "1.0.0",
+  "kind": "cidx.extract",
+  "content_hash": "sha256:c6baf29decd115cf1abb47fe026a48690f1be0f170b1d65165e0c869a22cd6c2",
+  "publisher": "cidx.example",
+  "origin": "file:examples/packages/banking",
+  "license": "Apache-2.0",
+  "entry_points": {"extract/stale": "plan.json"},
+  "namespaces": ["banking.stale"],
+  "compatibility": {"catalog_version": 999},
+  "dependencies": [],
+  "schemas": [],
+  "budgets": {"steps": 10},
+  "sandbox_profile": "declarative-default",
+  "trust": "unverified",
+  "evidence": "extension-analysis",
+  "capabilities": [],
+  "metadata": {}
+}

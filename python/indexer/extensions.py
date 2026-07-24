@@ -20,6 +20,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from ._version import ARTIFACT_VERSION, __version__
+from .generated_catalog import CATALOG_VERSION
+
 
 PACKAGE_FORMAT = "cidx.package/v1"
 LOCK_FORMAT = "cidx.lock/v1"
@@ -30,6 +33,16 @@ FORBIDDEN_CAPABILITIES = frozenset(
 DECLARATIVE_SUFFIXES = frozenset(
     {".json", ".yaml", ".yml", ".toml", ".cxq", ".dl", ".md", ".txt"}
 )
+MANIFEST_KEYS = frozenset({
+    "format", "name", "version", "kind", "content_hash", "publisher", "origin", "license",
+    "entry_points", "namespaces", "compatibility", "dependencies", "schemas",
+    "budgets", "sandbox_profile", "trust", "evidence", "capabilities", "metadata", "signature",
+})
+DEPENDENCY_KEYS = frozenset({"name", "version", "kind", "content_hash"})
+LOCK_KEYS = frozenset({"format", "roots", "packages", "lock_hash"})
+LOCK_PACKAGE_KEYS = frozenset({"name", "version", "kind", "content_hash", "registry", "dependencies", "namespaces"})
+COMPATIBILITY_KEYS = frozenset({"cidx", "cidx_version", "clang", "catalog_version", "artifact_version"})
+SAFE_SANDBOX_PROFILES = frozenset({"declarative-default", "declarative-analysis", "declarative-query", "model-review"})
 
 
 class PackageError(ValueError):
@@ -38,6 +51,109 @@ class PackageError(ValueError):
 
 class PackageResolutionError(PackageError):
     """Resolution cannot produce one deterministic, compatible graph."""
+
+
+def runtime_environment() -> dict[str, str | int]:
+    """Return compatibility facts owned by the installed CIDX runtime."""
+
+    return {
+        "cidx": __version__,
+        "cidx_version": __version__,
+        "catalog_version": CATALOG_VERSION,
+        "artifact_version": ARTIFACT_VERSION,
+    }
+
+
+@dataclass(frozen=True)
+class PackagePolicy:
+    """Trust policy supplied by the host, never by a package manifest."""
+
+    allowed_registries: frozenset[str] = frozenset()
+    allowed_publishers: frozenset[str] = frozenset()
+    allowed_hashes: frozenset[str] = frozenset()
+    allowed_kinds: frozenset[str] = frozenset({"cidx.extract", "cidx.analysis", "cidx.query", "cidx.model"})
+    allowed_capabilities: frozenset[str] = frozenset()
+    allowed_sandbox_profiles: frozenset[str] = SAFE_SANDBOX_PROFILES
+    trusted_publishers: frozenset[str] = frozenset()
+    trusted_signatures: frozenset[str] = frozenset()
+    reviewed_model_hashes: frozenset[str] = frozenset()
+    require_signatures: bool = True
+
+    @classmethod
+    def local_development(cls) -> "PackagePolicy":
+        """Safe local default: unverified declarative packages only."""
+
+        return cls()
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "PackagePolicy":
+        allowed = {
+            "allowed_registries", "allowed_publishers", "allowed_hashes", "allowed_kinds",
+            "allowed_capabilities", "allowed_sandbox_profiles", "trusted_publishers",
+            "trusted_signatures", "reviewed_model_hashes", "require_signatures",
+        }
+        unknown = set(value) - allowed
+        if unknown:
+            raise PackageError(f"unknown policy fields: {', '.join(sorted(unknown))}")
+
+        source = value
+
+        def strings(key: str, default: Iterable[str]) -> frozenset[str]:
+            selected = source.get(key, list(default))
+            if not isinstance(selected, list) or any(not isinstance(item, str) or not item for item in selected):
+                raise PackageError(f"policy {key} must be a list of strings")
+            return frozenset(selected)
+
+        require_signatures = value.get("require_signatures", True)
+        if not isinstance(require_signatures, bool):
+            raise PackageError("policy require_signatures must be boolean")
+        return cls(
+            allowed_registries=strings("allowed_registries", ()),
+            allowed_publishers=strings("allowed_publishers", ()),
+            allowed_hashes=strings("allowed_hashes", ()),
+            allowed_kinds=strings("allowed_kinds", cls().allowed_kinds),
+            allowed_capabilities=strings("allowed_capabilities", ()),
+            allowed_sandbox_profiles=strings("allowed_sandbox_profiles", SAFE_SANDBOX_PROFILES),
+            trusted_publishers=strings("trusted_publishers", ()),
+            trusted_signatures=strings("trusted_signatures", ()),
+            reviewed_model_hashes=strings("reviewed_model_hashes", ()),
+            require_signatures=require_signatures,
+        )
+
+    @classmethod
+    def read(cls, path: str | os.PathLike[str]) -> "PackagePolicy":
+        try:
+            value = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PackageError(f"cannot read package policy: {path}") from exc
+        if not isinstance(value, dict):
+            raise PackageError("package policy must be an object")
+        return cls.from_dict(value)
+
+    def check(self, manifest: "PackageManifest", registry_id: str | None = None) -> None:
+        if self.allowed_registries and registry_id not in self.allowed_registries:
+            raise PackageError(f"registry is not allowed by policy: {registry_id}")
+        if self.allowed_publishers and manifest.publisher not in self.allowed_publishers:
+            raise PackageError(f"publisher is not allowed by policy: {manifest.publisher}")
+        if self.allowed_hashes and manifest.content_hash not in self.allowed_hashes:
+            raise PackageError(f"package hash is not allowed by policy: {manifest.content_hash}")
+        if manifest.kind not in self.allowed_kinds:
+            raise PackageError(f"package kind is not allowed by policy: {manifest.kind}")
+        if not set(manifest.capabilities).issubset(self.allowed_capabilities):
+            raise PackageError(f"package capabilities exceed policy: {manifest.capabilities}")
+        if manifest.sandbox_profile not in self.allowed_sandbox_profiles:
+            raise PackageError(f"sandbox profile is not allowed by policy: {manifest.sandbox_profile}")
+        if manifest.kind == "cidx.model" and manifest.content_hash not in self.reviewed_model_hashes:
+            raise PackageError("model package hash lacks external review evidence")
+        if manifest.trust == "trusted":
+            if manifest.publisher not in self.trusted_publishers:
+                raise PackageError("trusted package publisher is not allowlisted")
+            if self.require_signatures and not manifest.signature:
+                raise PackageError("trusted package requires an external signature")
+            if self.trusted_signatures and manifest.signature not in self.trusted_signatures:
+                raise PackageError("package signature is not allowlisted")
+            if self.allowed_hashes and manifest.content_hash not in self.allowed_hashes:
+                raise PackageError("trusted package hash is not allowlisted")
 
 
 def canonical_json(value: Any) -> str:
@@ -138,6 +254,7 @@ class PackageDependency:
     name: str
     version: str = "*"
     kind: str | None = None
+    content_hash: str | None = None
 
     @classmethod
     def from_value(cls, value: Any) -> "PackageDependency":
@@ -147,12 +264,26 @@ class PackageDependency:
             return cls(value)
         if not isinstance(value, dict) or not isinstance(value.get("name"), str):
             raise PackageError("dependencies must contain names or {name, version} objects")
-        return cls(value["name"], str(value.get("version", "*")), value.get("kind"))
+        unknown = set(value) - DEPENDENCY_KEYS
+        if unknown:
+            raise PackageError(f"unknown dependency fields: {', '.join(sorted(unknown))}")
+        name = value["name"]
+        if not name:
+            raise PackageError("dependency name must not be empty")
+        kind = value.get("kind")
+        if kind is not None and (not isinstance(kind, str) or not kind):
+            raise PackageError("dependency kind must be a non-empty string")
+        content_hash = value.get("content_hash")
+        if content_hash is not None and not re.fullmatch(r"sha256:[0-9a-f]{64}", content_hash):
+            raise PackageError("dependency content_hash must be sha256:<64 lowercase hex digits>")
+        return cls(name, str(value.get("version", "*")), kind, content_hash)
 
     def as_dict(self) -> dict[str, str]:
         result = {"name": self.name, "version": self.version}
         if self.kind is not None:
             result["kind"] = self.kind
+        if self.content_hash is not None:
+            result["content_hash"] = self.content_hash
         return result
 
 
@@ -176,9 +307,15 @@ class PackageManifest:
     evidence: str
     capabilities: tuple[str, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    signature: str | None = None
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any], *, require_hash: bool = True) -> "PackageManifest":
+        if not isinstance(value, dict):
+            raise PackageError("package manifest must be an object")
+        unknown = set(value) - MANIFEST_KEYS
+        if unknown:
+            raise PackageError(f"unknown manifest fields: {', '.join(sorted(unknown))}")
         if value.get("format") != PACKAGE_FORMAT:
             raise PackageError(f"manifest format must be {PACKAGE_FORMAT}")
         required = ("name", "version", "kind", "publisher", "origin", "license")
@@ -201,9 +338,20 @@ class PackageManifest:
             raise PackageError("entry_points must map names to declarative artifact paths")
         namespaces_value = value.get("namespaces", [name])
         namespaces = _string_list(namespaces_value, "namespaces")
-        compatibility = value.get("compatibility", value.get("required_versions", {}))
+        compatibility = value.get("compatibility", {})
         if not isinstance(compatibility, dict):
             raise PackageError("compatibility must be an object")
+        unknown_compatibility = set(compatibility) - COMPATIBILITY_KEYS
+        if unknown_compatibility:
+            raise PackageError(
+                f"unknown compatibility fields: {', '.join(sorted(unknown_compatibility))}"
+            )
+        for key, requirement in compatibility.items():
+            if key in {"catalog_version", "artifact_version"}:
+                if isinstance(requirement, bool) or not isinstance(requirement, int):
+                    raise PackageError(f"compatibility {key} must be an integer")
+            elif not isinstance(requirement, (str, int, float)):
+                raise PackageError(f"compatibility {key} must be a version value")
         dependencies = tuple(PackageDependency.from_value(item) for item in value.get("dependencies", []))
         if len({item.name for item in dependencies}) != len(dependencies):
             raise PackageError("a package may declare each dependency only once")
@@ -229,6 +377,9 @@ class PackageManifest:
         metadata = value.get("metadata", {})
         if not isinstance(metadata, dict):
             raise PackageError("metadata must be an object")
+        signature = value.get("signature")
+        if signature is not None and (not isinstance(signature, str) or not signature):
+            raise PackageError("signature must be a non-empty string when present")
         return cls(
             name=name,
             version=str(Version.parse(value["version"])),
@@ -248,6 +399,7 @@ class PackageManifest:
             evidence=evidence,
             capabilities=capabilities,
             metadata=dict(metadata),
+            signature=signature,
         )
 
     def as_dict(self, *, include_hash: bool = True) -> dict[str, Any]:
@@ -271,6 +423,8 @@ class PackageManifest:
             "capabilities": list(self.capabilities),
             "metadata": dict(self.metadata),
         }
+        if self.signature is not None:
+            result["signature"] = self.signature
         if include_hash:
             result["content_hash"] = self.content_hash
         return result
@@ -323,6 +477,9 @@ def validate_package(
     *,
     environment: Mapping[str, Any] | None = None,
     expected_hash: str | None = None,
+    policy: PackagePolicy | None = None,
+    registry_identity: str | None = None,
+    check_compatibility: bool = True,
 ) -> PackageManifest:
     path = _manifest_path(root)
     try:
@@ -341,16 +498,24 @@ def validate_package(
         entry_path = (path.parent / entry).resolve()
         if not entry_path.is_relative_to(path.parent) or not entry_path.is_file():
             raise PackageError(f"entry point is missing or outside the package: {entry}")
-    environment = environment or {}
-    for key, requirement in manifest.compatibility.items():
-        actual = environment.get(key)
-        if actual is None:
-            continue
-        if key in {"catalog_version", "artifact_version"}:
-            if int(actual) != int(requirement):
+    for schema in manifest.schemas:
+        schema_path = (path.parent / schema).resolve()
+        if not schema_path.is_relative_to(path.parent) or not schema_path.is_file():
+            raise PackageError(f"schema is missing or outside the package: {schema}")
+    if check_compatibility:
+        actual_environment = runtime_environment()
+        if environment is not None:
+            actual_environment.update(environment)
+        for key, requirement in manifest.compatibility.items():
+            actual = actual_environment.get(key)
+            if actual is None:
+                raise PackageError(f"missing compatibility fact: {key}")
+            if key in {"catalog_version", "artifact_version"}:
+                if int(actual) != int(requirement):
+                    raise PackageError(f"incompatible {key}: requires {requirement}, have {actual}")
+            elif not version_satisfies(str(actual), str(requirement)):
                 raise PackageError(f"incompatible {key}: requires {requirement}, have {actual}")
-        elif not version_satisfies(str(actual), str(requirement)):
-            raise PackageError(f"incompatible {key}: requires {requirement}, have {actual}")
+    (policy or PackagePolicy.local_development()).check(manifest, registry_identity)
     if manifest.kind == "cidx.query":
         for name in manifest.entry_points:
             if not name.startswith("macro/"):
@@ -370,40 +535,59 @@ def validate_package(
 class PackageRegistry:
     """Content-addressed package store rooted at one deterministic location."""
 
-    def __init__(self, root: str | os.PathLike[str]):
+    def __init__(self, root: str | os.PathLike[str], *, identity: str | None = None,
+                 policy: PackagePolicy | None = None):
         self.root = Path(root).expanduser().resolve()
+        self.identity = identity or str(self.root)
+        self.policy = policy or PackagePolicy.local_development()
 
     def _destination(self, manifest: PackageManifest) -> Path:
         return self.root / manifest.name / manifest.version / manifest.content_hash.removeprefix("sha256:")
 
     def register(self, package: str | os.PathLike[str]) -> PackageManifest:
-        manifest = validate_package(package)
+        manifest = validate_package(
+            package, policy=self.policy, registry_identity=self.identity,
+            check_compatibility=False,
+        )
         destination = self._destination(manifest)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
-            existing = validate_package(destination)
+            existing = validate_package(
+                destination, policy=self.policy, registry_identity=self.identity,
+                check_compatibility=False,
+            )
             if existing.content_hash != manifest.content_hash:
                 raise PackageError("registry path already contains different content")
             return existing
         shutil.copytree(Path(package).resolve(), destination, symlinks=False)
-        return validate_package(destination)
+        return validate_package(
+            destination, policy=self.policy, registry_identity=self.identity,
+            check_compatibility=False,
+        )
 
-    def candidates(self, name: str) -> list[PackageManifest]:
+    def candidates(self, name: str, policy: PackagePolicy | None = None,
+                   environment: Mapping[str, Any] | None = None) -> list[PackageManifest]:
         base = self.root / name
         if not base.is_dir():
             return []
         result: list[PackageManifest] = []
         for manifest_path in sorted(base.glob("*/*/package.json")):
             try:
-                result.append(validate_package(manifest_path.parent))
+                result.append(validate_package(
+                    manifest_path.parent, environment=environment,
+                    policy=policy or self.policy, registry_identity=self.identity,
+                ))
             except PackageError as exc:
                 raise PackageResolutionError(
-                    f"invalid materialized package under registry: {manifest_path.parent}"
+                    f"invalid materialized package under registry: {manifest_path.parent}: {exc}"
                 ) from exc
         return sorted(result, key=lambda item: Version.parse(item.version), reverse=True)
 
-    def exact(self, name: str, version: str, content_hash: str | None = None) -> PackageManifest:
-        candidates = [item for item in self.candidates(name) if item.version == str(Version.parse(version))]
+    def exact(self, name: str, version: str, content_hash: str | None = None,
+              policy: PackagePolicy | None = None,
+              environment: Mapping[str, Any] | None = None) -> PackageManifest:
+        candidates = [item for item in self.candidates(name, policy, environment)
+                      if item.version == str(Version.parse(version))]
         if content_hash is not None:
             candidates = [item for item in candidates if item.content_hash == content_hash]
         if len(candidates) != 1:
@@ -423,19 +607,20 @@ class CompositeRegistry:
     def __init__(self, registries: Sequence[PackageRegistry]):
         self.registries = tuple(registries)
 
-    def candidates(self, name: str) -> list[tuple[int, PackageRegistry, PackageManifest]]:
+    def candidates(self, name: str, policy: PackagePolicy | None = None,
+                   environment: Mapping[str, Any] | None = None) -> list[tuple[int, PackageRegistry, PackageManifest]]:
         rows = []
         for priority, registry in enumerate(self.registries):
-            rows.extend((priority, registry, item) for item in registry.candidates(name))
-        return sorted(rows, key=lambda row: (-Version.parse(row[2].version).major,
-                                             -Version.parse(row[2].version).minor,
-                                             -Version.parse(row[2].version).patch,
-                                             row[0], row[2].content_hash))
+            rows.extend((priority, registry, item)
+                        for item in registry.candidates(name, policy, environment))
+        return sorted(rows, key=lambda row: (Version.parse(row[2].version), -row[0], row[2].content_hash), reverse=True)
 
-    def exact(self, name: str, version: str, content_hash: str) -> tuple[PackageRegistry, PackageManifest]:
+    def exact(self, name: str, version: str, content_hash: str,
+              policy: PackagePolicy | None = None,
+              environment: Mapping[str, Any] | None = None) -> tuple[PackageRegistry, PackageManifest]:
         for registry in self.registries:
             try:
-                return registry, registry.exact(name, version, content_hash)
+                return registry, registry.exact(name, version, content_hash, policy, environment)
             except PackageResolutionError:
                 continue
         raise PackageResolutionError(f"locked package is not materialized: {name}@{version}")
@@ -478,6 +663,10 @@ class Lockfile:
     def create(cls, roots: Iterable[PackageDependency], packages: Iterable[LockedPackage]) -> "Lockfile":
         root_rows = tuple(sorted(roots, key=lambda item: item.name))
         package_rows = tuple(sorted(packages, key=lambda item: (item.name, Version.parse(item.version))))
+        if len({item.name for item in root_rows}) != len(root_rows):
+            raise PackageError("lockfile contains duplicate roots")
+        if len({item.name for item in package_rows}) != len(package_rows):
+            raise PackageError("lockfile contains duplicate package names")
         payload = {"format": LOCK_FORMAT, "roots": [item.as_dict() for item in root_rows],
                    "packages": [item.as_dict() for item in package_rows]}
         return cls(root_rows, package_rows, "sha256:" + _sha256_value(payload))
@@ -497,18 +686,39 @@ class Lockfile:
             value = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise PackageError(f"cannot read lockfile: {path}") from exc
+        if not isinstance(value, dict):
+            raise PackageError("lockfile must be an object")
+        unknown = set(value) - LOCK_KEYS
+        if unknown:
+            raise PackageError(f"unknown lockfile fields: {', '.join(sorted(unknown))}")
         if value.get("format") != LOCK_FORMAT:
             raise PackageError(f"lockfile format must be {LOCK_FORMAT}")
-        roots = tuple(PackageDependency.from_value(item) for item in value.get("roots", []))
+        if not isinstance(value.get("roots"), list) or not isinstance(value.get("packages"), list):
+            raise PackageError("lockfile roots and packages must be arrays")
+        if not isinstance(value.get("lock_hash"), str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["lock_hash"]):
+            raise PackageError("lock_hash must be sha256:<64 lowercase hex digits>")
+        roots = tuple(PackageDependency.from_value(item) for item in value["roots"])
         packages = []
-        for item in value.get("packages", []):
+        for item in value["packages"]:
+            if not isinstance(item, dict):
+                raise PackageError("lockfile packages must be objects")
+            unknown_package = set(item) - LOCK_PACKAGE_KEYS
+            if unknown_package:
+                raise PackageError(f"unknown locked package fields: {', '.join(sorted(unknown_package))}")
+            required = ("name", "version", "kind", "content_hash", "registry")
+            if any(key not in item for key in required):
+                raise PackageError("locked packages are missing required fields")
+            if any(not isinstance(item[key], str) or not item[key] for key in ("name", "kind", "registry")):
+                raise PackageError("locked package name, kind, and registry must be non-empty strings")
+            if not isinstance(item["content_hash"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["content_hash"]):
+                raise PackageError("locked package content_hash must be sha256:<64 lowercase hex digits>")
+            if not isinstance(item.get("dependencies", []), list) or not isinstance(item.get("namespaces", []), list):
+                raise PackageError("locked package dependencies and namespaces must be arrays")
             packages.append(LockedPackage(
                 item["name"], str(Version.parse(item["version"])), item["kind"], item["content_hash"],
                 item["registry"], tuple(PackageDependency.from_value(dep) for dep in item.get("dependencies", [])),
-                tuple(item.get("namespaces", [item["name"]])),
+                _string_list(item.get("namespaces", [item["name"]]), "locked namespaces"),
             ))
-        if len({item.name for item in packages}) != len(packages):
-            raise PackageError("lockfile contains duplicate package names")
         result = cls.create(roots, packages)
         if result.lock_hash != value.get("lock_hash"):
             raise PackageError("lock hash drift")
@@ -517,10 +727,12 @@ class Lockfile:
 
 class PackageResolver:
     def __init__(self, registry: CompositeRegistry, *, environment: Mapping[str, Any] | None = None,
-                 core_namespaces: Iterable[str] = ("cidx",)):
+                 core_namespaces: Iterable[str] = ("cidx",), policy: PackagePolicy | None = None):
         self.registry = registry
-        self.environment = dict(environment or {})
+        self.environment = runtime_environment()
+        self.environment.update(environment or {})
         self.core_namespaces = frozenset(core_namespaces)
+        self.policy = policy or PackagePolicy.local_development()
 
     def resolve(self, requirements: Iterable[PackageDependency | Mapping[str, Any] | str]) -> Lockfile:
         roots = tuple(PackageDependency.from_value(item) for item in requirements)
@@ -540,14 +752,30 @@ class PackageResolver:
                     )
                 if requirement.kind is not None and manifest.kind != requirement.kind:
                     raise PackageResolutionError(f"wrong package kind for {requirement.name}")
+                if requirement.content_hash is not None and manifest.content_hash != requirement.content_hash:
+                    raise PackageResolutionError(f"wrong package hash for {requirement.name}")
                 return
-            candidates = [row for row in self.registry.candidates(requirement.name)
+            candidates = [row for row in self.registry.candidates(
+                requirement.name, self.policy, self.environment
+            )
                           if version_satisfies(row[2].version, requirement.version)
-                          and (requirement.kind is None or row[2].kind == requirement.kind)]
+                          and (requirement.kind is None or row[2].kind == requirement.kind)
+                          and (requirement.content_hash is None or row[2].content_hash == requirement.content_hash)]
             if not candidates:
                 raise PackageResolutionError(f"missing dependency: {requirement.name} {requirement.version}")
-            priority, registry, manifest = candidates[0]
-            validate_package(registry.path_for(manifest), environment=self.environment)
+            highest_version = max(Version.parse(row[2].version) for row in candidates)
+            same_version = [row for row in candidates if Version.parse(row[2].version) == highest_version]
+            highest_priority = min(row[0] for row in same_version)
+            tier = [row for row in same_version if row[0] == highest_priority]
+            if requirement.content_hash is None and len({row[2].content_hash for row in tier}) > 1:
+                raise PackageResolutionError(
+                    f"ambiguous package candidates: {requirement.name}@{highest_version} has multiple content hashes"
+                )
+            priority, registry, manifest = sorted(tier, key=lambda row: row[2].content_hash)[0]
+            validate_package(
+                registry.path_for(manifest), environment=self.environment,
+                policy=self.policy, registry_identity=registry.identity,
+            )
             visiting.append(requirement.name)
             selected[requirement.name] = (registry, manifest)
             for dependency in manifest.dependencies:
@@ -575,12 +803,18 @@ class PackageResolver:
     def verify_lock(self, lockfile: Lockfile, *, offline: bool = True) -> dict[str, PackageManifest]:
         manifests: dict[str, PackageManifest] = {}
         for locked in lockfile.packages:
-            registry, manifest = self.registry.exact(locked.name, locked.version, locked.content_hash)
+            registry, manifest = self.registry.exact(
+                locked.name, locked.version, locked.content_hash, self.policy, self.environment
+            )
             if not offline and manifest.origin.startswith("file:"):
                 raise PackageResolutionError("network registry access is not supported by the offline SDK")
             if manifest.kind != locked.kind or manifest.namespaces != locked.namespaces:
                 raise PackageResolutionError(f"lock metadata drift for {locked.name}")
-            validate_package(registry.path_for(manifest), environment=self.environment, expected_hash=locked.content_hash)
+            validate_package(
+                registry.path_for(manifest), environment=self.environment,
+                expected_hash=locked.content_hash, policy=self.policy,
+                registry_identity=registry.identity,
+            )
             manifests[locked.name] = manifest
         for root in lockfile.roots:
             manifest = manifests.get(root.name)
@@ -590,7 +824,8 @@ class PackageResolver:
             for dependency in locked.dependencies:
                 dep = manifests.get(dependency.name)
                 if (dep is None or not version_satisfies(dep.version, dependency.version)
-                        or (dependency.kind is not None and dep.kind != dependency.kind)):
+                        or (dependency.kind is not None and dep.kind != dependency.kind)
+                        or (dependency.content_hash is not None and dep.content_hash != dependency.content_hash)):
                     raise PackageResolutionError(f"lockfile dependency is missing or incompatible: {locked.name} -> {dependency.name}")
         visiting: list[str] = []
 
@@ -657,14 +892,45 @@ class ConformanceCase:
     package: str
     expected: str
     checks: Mapping[str, Any] = field(default_factory=dict)
+    fixture: str | None = None
+    expected_facts: tuple[Mapping[str, Any], ...] = ()
+    expected_results: tuple[Mapping[str, Any], ...] = ()
+    expected_status: str = "complete"
+    environment: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ConformanceCase":
+        allowed = {
+            "id", "package", "expected", "checks", "fixture", "expected_facts",
+            "expected_results", "expected_status", "environment",
+        }
+        unknown = set(value) - allowed
+        if unknown:
+            raise PackageError(f"unknown conformance case fields: {', '.join(sorted(unknown))}")
         if not all(isinstance(value.get(key), str) and value[key] for key in ("id", "package", "expected")):
             raise PackageError("conformance cases require id, package, and expected")
         if value["expected"] not in {"valid", "invalid"}:
             raise PackageError("conformance expected must be valid or invalid")
-        return cls(value["id"], value["package"], value["expected"], dict(value.get("checks", {})))
+        expected_status = value.get("expected_status", "complete")
+        if not isinstance(expected_status, str) or not expected_status:
+            raise PackageError("conformance expected_status must be a non-empty string")
+        fixture = value.get("fixture")
+        if fixture is not None and (not isinstance(fixture, str) or not fixture):
+            raise PackageError("conformance fixture must be a non-empty path")
+        checks = value.get("checks", {})
+        environment = value.get("environment", {})
+        if not isinstance(checks, dict) or not isinstance(environment, dict):
+            raise PackageError("conformance checks and environment must be objects")
+
+        def rows(key: str) -> tuple[Mapping[str, Any], ...]:
+            selected = value.get(key, [])
+            if not isinstance(selected, list) or any(not isinstance(row, dict) for row in selected):
+                raise PackageError(f"conformance {key} must be an array of objects")
+            return tuple(dict(row) for row in selected)
+
+        return cls(value["id"], value["package"], value["expected"], dict(checks), fixture,
+                   rows("expected_facts"), rows("expected_results"), expected_status,
+                   dict(environment))
 
 
 class ConformanceSDK:
@@ -673,13 +939,95 @@ class ConformanceSDK:
     def __init__(self, resolver: PackageResolver):
         self.resolver = resolver
 
+    @staticmethod
+    def _normalized_rows(value: Any, label: str) -> list[dict[str, Any]]:
+        if not isinstance(value, (list, tuple)) or any(not isinstance(row, dict) for row in value):
+            raise PackageError(f"{label} must be an array of objects")
+        return sorted((json.loads(canonical_json(row)) for row in value), key=canonical_json)
+
+    @staticmethod
+    def _read_json(path: Path, label: str) -> Mapping[str, Any]:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PackageError(f"malformed {label}: {path}") from exc
+        if not isinstance(value, dict):
+            raise PackageError(f"{label} must be an object: {path}")
+        return value
+
+    def _materialize_case_package(self, case: ConformanceCase) -> tuple[Path, PackageManifest]:
+        candidate = Path(case.package).expanduser()
+        if candidate.is_dir():
+            return candidate.resolve(), validate_package(
+                candidate, environment={**self.resolver.environment, **case.environment},
+                policy=self.resolver.policy, registry_identity=str(candidate.resolve()),
+            )
+        if "@" in case.package:
+            name, version = case.package.rsplit("@", 1)
+        else:
+            name, version = case.package, "*"
+        lock = self.resolver.resolve([PackageDependency(name, version)])
+        locked = next(item for item in lock.packages if item.name == name)
+        registry, manifest = self.resolver.registry.exact(
+            locked.name, locked.version, locked.content_hash, self.resolver.policy,
+            self.resolver.environment,
+        )
+        return registry.path_for(manifest), manifest
+
+    @staticmethod
+    def _fixture_path(case: ConformanceCase, package_path: Path) -> Path | None:
+        if case.fixture is None:
+            return None
+        requested = Path(case.fixture).expanduser()
+        if requested.is_absolute():
+            return requested
+        package_relative = package_path / requested
+        return package_relative if package_relative.exists() else requested
+
+    def _execute_contract(self, case: ConformanceCase, package_path: Path,
+                          manifest: PackageManifest) -> dict[str, Any]:
+        fixture_path = self._fixture_path(case, package_path)
+        fixture = self._read_json(fixture_path, "fixture") if fixture_path is not None else {}
+        entry_name, entry = next(iter(sorted(manifest.entry_points.items())))
+        entry_path = package_path / entry
+        if entry_path.suffix.lower() != ".json":
+            raise PackageError(f"conformance requires a JSON declarative entry point: {entry}")
+        descriptor = self._read_json(entry_path, "entry point")
+        result: dict[str, Any] = {"entry_point": entry_name, "execution_status": "complete"}
+        if manifest.kind == "cidx.extract":
+            source = descriptor.get("fact_source")
+            if not isinstance(source, str) or not source:
+                raise PackageError("extract entry point must declare fact_source")
+            result["facts"] = self._normalized_rows(fixture.get(source, []), "fixture facts")
+            expected = self._normalized_rows(case.expected_facts, "expected_facts")
+            if result["facts"] != expected:
+                raise PackageError("fixture extraction facts do not match expected_facts")
+        elif manifest.kind == "cidx.analysis":
+            source = descriptor.get("result_source")
+            if not isinstance(source, str) or not source:
+                raise PackageError("analysis entry point must declare result_source")
+            result["results"] = self._normalized_rows(fixture.get(source, []), "fixture results")
+            expected = self._normalized_rows(case.expected_results, "expected_results")
+            if result["results"] != expected:
+                raise PackageError("fixture analysis results do not match expected_results")
+        elif manifest.kind == "cidx.query":
+            if not isinstance(descriptor.get("plan"), list):
+                raise PackageError("query entry point must declare a plan")
+            result["plan"] = descriptor["plan"]
+        else:
+            if not isinstance(descriptor.get("clauses"), list):
+                raise PackageError("model entry point must declare clauses")
+            result["clauses"] = descriptor["clauses"]
+        return result
+
     def run(self, cases: Iterable[ConformanceCase | Mapping[str, Any]]) -> list[dict[str, Any]]:
         results = []
         for item in cases:
             case = item if isinstance(item, ConformanceCase) else ConformanceCase.from_dict(item)
             error = None
+            execution: dict[str, Any] = {}
             try:
-                manifest = validate_package(case.package, environment=self.resolver.environment)
+                package_path, manifest = self._materialize_case_package(case)
                 checks = case.checks
                 if checks.get("kind") and manifest.kind != checks["kind"]:
                     raise PackageError("package kind mismatch")
@@ -687,10 +1035,18 @@ class ConformanceSDK:
                     raise PackageError("budget exceeds conformance limit")
                 if "required_dependency" in checks and checks["required_dependency"] not in {d.name for d in manifest.dependencies}:
                     raise PackageError("required dependency is missing")
+                if manifest.dependencies:
+                    self.resolver.resolve(manifest.dependencies)
+                execution = self._execute_contract(case, package_path, manifest)
+                if execution["execution_status"] != case.expected_status:
+                    raise PackageError(
+                        f"unexpected conformance status: {execution['execution_status']} (expected {case.expected_status})"
+                    )
             except PackageError as exc:
                 error = str(exc)
             passed = (error is None) if case.expected == "valid" else (error is not None)
-            results.append({"id": case.case_id, "status": "passed" if passed else "failed", "error": error})
+            results.append({"id": case.case_id, "status": "passed" if passed else "failed",
+                            "error": error, **execution})
         return results
 
 

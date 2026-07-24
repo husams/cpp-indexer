@@ -5,6 +5,13 @@ Python SDK in `indexer.extensions` owns manifest validation, registry
 materialization, dependency resolution, lockfile verification, provenance
 identities, and conformance cases.  Installing a package never grants trust.
 
+Hosts supply a `PackagePolicy` outside the package manifest. It can restrict
+registry identities, publishers, hashes, package kinds, capabilities, sandbox
+profiles, and trusted signatures; resolution and lock verification fail closed
+when a package violates that policy. Compatibility facts come from the runtime
+catalog and artifact contracts, so omitted environment values are not treated
+as compatible.
+
 Each `package.json` declares a package kind (`cidx.extract`, `cidx.analysis`,
 `cidx.query`, or `cidx.model`), qualified namespaces, entry points, schemas,
 compatibility ranges, dependencies, budgets, a sandbox profile, and a
@@ -33,3 +40,8 @@ Result producers should include `ResultProvenance.as_dict()` and use
 invalidate every dependent fact, analysis, query, and proof artifact while
 retaining package name/version/hash, entry point, input fact sets, sandbox,
 and applicability in the result evidence.
+
+`ConformanceSDK` executes JSON fixture contracts for extraction and analysis
+entry points, compares normalized facts/results, and covers malformed
+manifests, stale compatibility, missing dependencies, and budget limits. It
+does not execute package code or native plugins.

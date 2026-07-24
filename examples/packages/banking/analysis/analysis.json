@@ -1,0 +1,5 @@
+{
+  "format": "cidx.analysis-plan/v1",
+  "name": "application-state-boundaries",
+  "result_source": "results"
+}
