@@ -30,13 +30,13 @@
     {
       "id": "workspace.toolchain",
       "layer": "workspace",
-      "paths": ["src/toolchain/**"],
+      "paths": ["src/toolchain/**", "src/workspace/**"],
       "allowedDependencies": [
         "workspace.toolchain",
         "foundation.util",
         "model.contracts"
       ],
-      "description": "Compiler, driver, resource-directory, and workspace input resolution."
+      "description": "Compiler, driver, resource-directory, workspace snapshots, and shared translation-unit resolution."
     },
     {
       "id": "frontend.compiledb",
@@ -94,6 +94,7 @@
       "allowedDependencies": [
         "persistence.sqlite",
         "frontend.compiledb",
+        "workspace.toolchain",
         "foundation.util",
         "model.contracts"
       ],

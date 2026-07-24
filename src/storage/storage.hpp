@@ -25,20 +25,11 @@
 
 #include "storage/records.hpp"
 #include "storage/sqlite.hpp"
+#include "workspace/context.hpp"
 
 namespace cidx {
 
 constexpr int kSchemaVersion = 39;
-
-struct IndexIdentity {
-  int schema_version = kSchemaVersion;
-  std::optional<std::string> source_revision;
-  std::optional<std::string> source_fingerprint;
-  std::optional<std::string> index_config;
-  std::optional<std::string> index_config_fingerprint;
-  std::string freshness = "unverifiable"; // current | stale | unverifiable
-  std::string workspace = "workspace:memory";
-};
 
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
@@ -778,6 +769,27 @@ private:
   bool needs_entity_node_backfill_ = false;
   std::unordered_set<std::string> attached_artifact_names_;
   std::optional<bool> artifact_query_only_before_attach_;
+};
+
+class StorageWorkspaceAdapter final : public WorkspaceDataSource {
+public:
+  explicit StorageWorkspaceAdapter(Storage &storage) : storage_(storage) {}
+
+  std::vector<Repository> list_repositories() override;
+  std::vector<Component> list_components() override;
+  std::vector<SemanticUniverse> list_semantic_universes() override;
+  IndexIdentity index_identity() override;
+  std::optional<Clone> clone_by_id(int64_t clone_id) override;
+  std::optional<File> file(const std::string &path) override;
+  std::vector<FileConfigApplicability>
+  file_configs_for(int64_t file_id) override;
+  std::optional<TranslationUnitConfig>
+  translation_unit_config_by_id(int64_t config_id) override;
+  std::vector<std::string>
+  normalized_arguments(const std::vector<std::string> &arguments) override;
+
+private:
+  Storage &storage_;
 };
 
 } // namespace cidx

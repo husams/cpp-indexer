@@ -38,6 +38,10 @@ const char *index_status_reason(IndexStatus status);
 // even when its compile command sanitizes to no flags.
 bool is_header(const std::string &path);
 
+// True when path names a regular file. Filesystem access is confined to this
+// foundation adapter so higher-level modules do not import <filesystem>.
+bool is_regular_file(const std::string &path);
+
 // Absolute path for a CLI file argument: relative paths resolve against
 // `root` (the --source component path) when given, else against the CWD.
 std::string
