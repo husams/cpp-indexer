@@ -26,6 +26,17 @@ test("portable IDs are length-prefixed and duplicate identities are rejected", (
   assert.throws(() => validateGraphView(duplicate), /duplicate portable identities/);
 });
 
+test("global element identity rejects node-edge and node-group collisions", () => {
+  const result = canonicalFixture("symbol");
+  const edge = { ...result.edges[0]!, ref: result.nodes[0]!.ref };
+  const edgeCollision = { ...result, edges: [...result.edges, edge], usage: usageOf({ nodes: result.nodes, edges: [...result.edges, edge], groups: result.groups, evidence: result.evidence }) };
+  assert.throws(() => validateGraphView(edgeCollision), /elements contain duplicate portable identities/);
+
+  const group = { ref: result.nodes[0]!.ref, label: "collision", memberRefs: [], status: "complete" as const, markers: [], evidenceRefs: [] };
+  const groupCollision = { ...result, groups: [group], usage: usageOf({ nodes: result.nodes, edges: result.edges, groups: [group], evidence: result.evidence }) };
+  assert.throws(() => validateGraphView(groupCollision), /elements contain duplicate portable identities/);
+});
+
 test("portable-key parity vectors agree between runtime and JSON Schema", () => {
   const vectors = JSON.parse(readFileSync(new URL("../../spec/contracts/golden/portable-key-vectors.json", import.meta.url), "utf8")) as { valid: string[]; invalid: string[] };
   const schema = JSON.parse(readFileSync(new URL("../../schemas/graph-view.schema.json", import.meta.url), "utf8"));
@@ -126,6 +137,16 @@ test("GraphView JSON Schema validates canonical envelopes and rejects invalid pa
   const missingSharedIdentity = structuredClone(toResultEnvelope(canonicalFixture("symbol")));
   delete (missingSharedIdentity as { identity?: unknown }).identity;
   assert.equal(validator(missingSharedIdentity), false);
+
+  for (const field of ["maxSites", "maxSiteBytes"] as const) {
+    const missingSiteBudget = structuredClone(toResultEnvelope(canonicalFixture("symbol")));
+    delete missingSiteBudget.result.budget[field];
+    assert.equal(validator(missingSiteBudget), false, `schema accepted a result missing ${field}`);
+
+    const request = { version: 1 as const, operation: "query" as const, query: { slice: "symbol" as const }, budget: { ...canonicalFixture("symbol").budget } };
+    delete request.budget[field];
+    assert.equal(validator(request), false, `schema accepted a request missing ${field}`);
+  }
 });
 
 test("shared protocol metadata preserves proof trust and UTF-8 bounds", () => {

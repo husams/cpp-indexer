@@ -118,7 +118,7 @@
     "budget": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["maxNodes", "maxEdges", "maxGroups", "maxLabelChars", "maxEvidenceRefs"],
+      "required": ["maxNodes", "maxEdges", "maxGroups", "maxLabelChars", "maxEvidenceRefs", "maxSites", "maxSiteBytes"],
       "properties": {
         "maxNodes": { "type": "integer", "minimum": 0, "maximum": 10000 },
         "maxEdges": { "type": "integer", "minimum": 0, "maximum": 20000 },

@@ -304,9 +304,8 @@ export function validateGraphView(result: GraphViewResult): void {
   }
   const calculatedUsage = usageOf(result);
   if (JSON.stringify(calculatedUsage) !== JSON.stringify(result.usage)) throw new Error("GraphView usage is not deterministic");
-  const nodeKeys = uniqueElementIds(result.nodes, "nodes");
-  uniqueElementIds(result.edges, "edges");
-  uniqueElementIds(result.groups, "groups");
+  uniqueElementIds([...result.nodes, ...result.edges, ...result.groups], "elements");
+  const nodeKeys = new Set(result.nodes.map((node) => stablePortableId(node.ref)));
   const evidenceIds = new Set(result.evidence.map((reference) => reference.id));
   for (const node of result.nodes) validateElement(node, evidenceIds);
   for (const edge of result.edges) {
