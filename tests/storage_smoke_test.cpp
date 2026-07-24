@@ -30,6 +30,39 @@ std::string make_temp_dir() {
   return d;
 }
 
+TEST_CASE("parent_id backfills when parent arrives after child") {
+  cidx::Storage db(":memory:");
+  cidx::Symbol child;
+  child.usr = "late:child";
+  child.spelling = "Child";
+  child.kind = "struct";
+  child.parent_usr = "late:parent";
+  const auto child_id = db.add_symbol(child);
+
+  auto before =
+      db.raw_db().prepare("SELECT parent_id FROM symbol WHERE id = ?");
+  before.bind(1, child_id);
+  REQUIRE(before.step());
+  CHECK(before.col_is_null(0));
+
+  cidx::Symbol parent;
+  parent.usr = "late:parent";
+  parent.spelling = "Parent";
+  parent.kind = "struct";
+  const auto parent_id = db.add_symbol(parent);
+
+  auto after = db.raw_db().prepare("SELECT parent_id FROM symbol WHERE id = ?");
+  after.bind(1, child_id);
+  REQUIRE(after.step());
+  CHECK(after.col_int64(0) == parent_id);
+
+  db.add_symbol(parent);
+  after = db.raw_db().prepare("SELECT parent_id FROM symbol WHERE id = ?");
+  after.bind(1, child_id);
+  REQUIRE(after.step());
+  CHECK(after.col_int64(0) == parent_id);
+}
+
 void makedirs(const std::string &path) {
   std::string cur;
   for (std::size_t i = 0; i <= path.size(); ++i) {
@@ -952,6 +985,8 @@ TEST_CASE(
   CHECK(rows.front().config_id == second_config);
   db.delete_include_configs_for_tu(second_tu);
   CHECK(db.file_configs_for(header).empty());
+}
+
 TEST_CASE("v35 occurrence identities are compact and lossless") {
   cidx::Storage db(":memory:");
   const int64_t component = db.add_component("c", "/repo/c");

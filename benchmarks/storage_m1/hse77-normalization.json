@@ -1,0 +1,73 @@
+{
+  "before_after": {
+    "compatibility_query_ms": {
+      "median": 0.5158749991096556,
+      "samples": [
+        0.6065000197850168,
+        0.5158749991096556,
+        0.5092499777674675,
+        0.5083329742774367,
+        0.5178749561309814
+      ]
+    },
+    "legacy": {
+      "objects": {
+        "call_arg": 770048,
+        "idx_call_arg_callee_usr": 397312,
+        "idx_call_arg_decl_usr": 356352,
+        "idx_call_arg_type_usr": 356352,
+        "sqlite_schema": 4096
+      },
+      "write_rows_per_s_median": 296779.2064145994
+    },
+    "migration": {
+      "objects": {
+        "call_arg": 364544,
+        "external_identity": 61440,
+        "idx_call_arg_callee_identity": 221184,
+        "idx_call_arg_decl_identity": 221184,
+        "idx_call_arg_type_identity": 221184,
+        "sqlite_autoindex_external_identity_1": 65536,
+        "sqlite_schema": 4096
+      },
+      "rows_per_s": 188020.35991453106,
+      "seconds": 0.10637145896907896
+    },
+    "normalized": {
+      "objects": {
+        "call_arg": 364544,
+        "external_identity": 61440,
+        "idx_call_arg_callee_identity": 225280,
+        "idx_call_arg_decl_identity": 225280,
+        "idx_call_arg_type_identity": 221184,
+        "sqlite_autoindex_external_identity_1": 65536,
+        "sqlite_schema": 4096
+      },
+      "write_rows_per_s_median": 158275.84931438658
+    }
+  },
+  "benchmark": "storage-m1/hse77-normalization-v1",
+  "hot_cold_decision": {
+    "decision": "retain symbol attributes in one hot table",
+    "measurements": {
+      "split": {
+        "bytes": 1994752,
+        "lookup_ms_median": 5.7261670008301735
+      },
+      "unsplit": {
+        "bytes": 1855488,
+        "lookup_ms_median": 4.5918330433778465
+      }
+    },
+    "reason": "the measured split adds a join and does not reduce total bytes or improve the representative lookup median"
+  },
+  "method": {
+    "command": "PYTHONPATH=. python3 benchmarks/storage_m1/hse77_normalization.py --output benchmarks/storage_m1/hse77-normalization.json",
+    "compatibility_rows": 500,
+    "journal_mode": "DELETE",
+    "repetitions": 5,
+    "rows": 20000,
+    "sqlite": "3.53.3",
+    "synchronous": "FULL"
+  }
+}

@@ -124,6 +124,17 @@ int64_t Storage::add_symbol(const Symbol &sym) {
     parent.bind(2, sid);
     parent.step_done();
   }
+  // A child may be indexed before its semantic parent. When the parent arrives,
+  // reconcile every waiting child deterministically and idempotently.
+  {
+    auto children =
+        db_.prepare("UPDATE symbol SET parent_id = ? WHERE parent_usr = ? "
+                    "AND (parent_id IS NULL OR parent_id <> ?)");
+    children.bind(1, sid);
+    children.bind(2, std::string_view(sym.usr));
+    children.bind(3, sid);
+    children.step_done();
+  }
   // v26: record THIS cursor's own site (mirrors Python add_symbol). The symbol
   // row keeps only the winning definition + one declaration; decl_site keeps
   // every physical site so references() can list all reopenings of an open

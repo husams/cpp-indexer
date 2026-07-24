@@ -33,6 +33,9 @@ namespace cidx {
 
 using namespace detail;
 
+constexpr std::string_view kPreviousCatalogHash =
+    "15e7ce8206c521cff6794530a382f0389320c0f3e49d148b0f311d058aa5157a";
+
 bool is_symbol_kind(std::string_view kind) {
   return std::ranges::find(kSymbolKinds, kind) != kSymbolKinds.end();
 }
@@ -159,8 +162,10 @@ Storage::Storage(const std::string &path, OpenMode mode)
       throw;
     }
   }
+  const bool predecessor_catalog =
+      existing_catalog_hash == kPreviousCatalogHash;
   if (!existing_catalog_hash.empty() &&
-      existing_catalog_hash != catalog::kCatalogHash) {
+      existing_catalog_hash != catalog::kCatalogHash && !predecessor_catalog) {
     throw CidxError(
         "catalog_hash " + existing_catalog_hash +
         " does not match the required " + std::string(catalog::kCatalogHash) +
@@ -176,11 +181,15 @@ Storage::Storage(const std::string &path, OpenMode mode)
     stored_catalog_hash = catalog_stmt.col_text(0);
   }
   if (!stored_catalog_hash.empty() &&
-      stored_catalog_hash != catalog::kCatalogHash) {
+      stored_catalog_hash != catalog::kCatalogHash && !predecessor_catalog) {
     throw CidxError(
         "catalog_hash " + stored_catalog_hash +
         " does not match the required " + std::string(catalog::kCatalogHash) +
         " (regenerate the database with the matching semantic catalogs)");
+  }
+  if (predecessor_catalog) {
+    db_.exec("UPDATE meta SET value = '" + std::string(catalog::kCatalogHash) +
+             "' WHERE key = 'catalog_hash'");
   }
   db_.exec(catalog::kSeedSql);
   // v34 -> v35: preserve every legacy include configuration as one canonical
@@ -247,6 +256,8 @@ void Storage::reconcile_external_identities() {
       "THEN 1 ELSE 0 END");
   db_.exec("UPDATE type_node SET decl_id = (SELECT id FROM symbol s WHERE "
            "s.usr = type_node.decl_usr LIMIT 1) WHERE decl_usr IS NOT NULL");
+  db_.exec("UPDATE symbol SET parent_id = (SELECT id FROM symbol p WHERE "
+           "p.usr = symbol.parent_usr) WHERE parent_usr IS NOT NULL");
   db_.exec(
       "UPDATE edge_site SET recv_decl_id = COALESCE(recv_decl_id, (SELECT id "
       "FROM symbol s "

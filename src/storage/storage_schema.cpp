@@ -779,7 +779,7 @@ CREATE TABLE IF NOT EXISTS include_macro_use (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_include_macro_use_path ON include_macro_use(def_path);
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '36');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '37');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest

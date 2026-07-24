@@ -6,7 +6,7 @@
 
 namespace cidx::catalog {
 inline constexpr int kCatalogVersion = 1;
-inline constexpr std::string_view kCatalogHash = "090236d604144c4b4624e67d9531e5b478eac215565939074922763ad4b4109c";
+inline constexpr std::string_view kCatalogHash = "be3a97cf69140080586a079a27a97da7816455f477ce56435ee91c600cc993fc";
 enum class View : std::uint8_t { Symbol, Entity };
 struct NamedId { int64_t id; std::string_view name; };
 struct Relation { int64_t id; std::string_view name; View layer; std::string_view source; std::string_view target; std::string_view inverse; std::string_view traversal; std::string_view evidence; std::string_view evidence_capabilities; std::string_view completeness; };

@@ -1,4 +1,8 @@
-from indexer.storage import Storage, Symbol
+import sqlite3
+
+import pytest
+
+from indexer.storage import PREVIOUS_CATALOG_HASH, Storage, Symbol
 
 
 def test_hse77_v34_migration_backfills_source_and_preserves_reads(tmp_path):
@@ -41,7 +45,7 @@ def test_hse77_v34_migration_backfills_source_and_preserves_reads(tmp_path):
     assert tuple(db._conn.execute(
         "SELECT src_kind, type_usr, decl_usr, callee_usr FROM call_arg_read"
     ).fetchone()) == ("local", "legacy:missing-type", "legacy:missing-decl", "legacy:callee")
-    assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "35"
+    assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "37"
     db.close()
 
 
@@ -103,4 +107,60 @@ def test_hse77_normalization_is_order_independent():
     assert db._conn.execute(
         "SELECT COUNT(*) FROM external_identity WHERE resolution_status = 0"
     ).fetchone()[0] == 0
+    db.close()
+
+
+def test_parent_id_backfills_when_parent_arrives_after_child():
+    db = Storage(":memory:")
+    child_id = db.add_symbol(
+        Symbol("late:child", "Child", "struct", parent_usr="late:parent")
+    )
+    assert db._conn.execute(
+        "SELECT parent_id FROM symbol WHERE id=?", (child_id,)
+    ).fetchone()[0] is None
+
+    parent_id = db.add_symbol(Symbol("late:parent", "Parent", "struct"))
+    assert db._conn.execute(
+        "SELECT parent_id FROM symbol WHERE id=?", (child_id,)
+    ).fetchone()[0] == parent_id
+
+    db.add_symbol(Symbol("late:parent", "Parent", "struct"))
+    assert db._conn.execute(
+        "SELECT parent_id FROM symbol WHERE id=?", (child_id,)
+    ).fetchone()[0] == parent_id
+    db.close()
+
+
+def test_migrated_enum_columns_keep_domain_checks(tmp_path):
+    path = str(tmp_path / "v36.db")
+    db = Storage(path)
+    component = db.add_component("c", "/repo/c")
+    directory = db.add_directory(component, "")
+    file_id = db.add_file(directory, "c.cpp")
+    caller_id = db.add_symbol(Symbol("domain:caller", "caller", "function"))
+    callee_id = db.add_symbol(Symbol("domain:callee", "callee", "function"))
+    edge_id = db.add_edge(caller_id, callee_id, 1)
+    db._conn.execute(
+        "UPDATE meta SET value='36' WHERE key='schema_version'"
+    )
+    db._conn.execute(
+        "UPDATE meta SET value=? WHERE key='catalog_hash'",
+        (PREVIOUS_CATALOG_HASH,),
+    )
+    db._conn.commit()
+    db.close()
+
+    db = Storage(path)
+    with pytest.raises(sqlite3.IntegrityError):
+        db._conn.execute(
+            "INSERT INTO edge_site(edge_id,file_id,line,col,recv_src_kind_id) "
+            "VALUES(?,?,?,?,99)",
+            (edge_id, file_id, 10, 1),
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        db._conn.execute(
+            "INSERT INTO call_arg(edge_id,file_id,line,col,position,src_kind_id) "
+            "VALUES(?,?,?,?,?,99)",
+            (edge_id, file_id, 11, 1, 0),
+        )
     db.close()
