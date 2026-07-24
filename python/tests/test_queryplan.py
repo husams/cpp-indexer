@@ -605,10 +605,16 @@ def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable(
 
     ungrouped = Storage(":memory:")
     _seed_reverse_typed_graph(
-        ungrouped, "/repo/A", caller_suffix="ungrouped-a", grouped=False
+        ungrouped,
+        "/repo/A/project",
+        caller_suffix="ungrouped-a",
+        grouped=False,
     )
     _seed_reverse_typed_graph(
-        ungrouped, "/repo/B", caller_suffix="ungrouped-b", grouped=False
+        ungrouped,
+        "/repo/B/project",
+        caller_suffix="ungrouped-b",
+        grouped=False,
     )
     ungrouped_executor = Executor(ungrouped)
     ungrouped_evidence = ungrouped_executor.run(

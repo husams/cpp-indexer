@@ -878,8 +878,8 @@ TEST_CASE(
         std::get<std::string>(collision_arguments.rows[1][1]));
 
   Storage ungrouped(":memory:");
-  seed(ungrouped, "/repo/A", "", "ungrouped-a", false);
-  seed(ungrouped, "/repo/B", "", "ungrouped-b", false);
+  seed(ungrouped, "/repo/A/project", "", "ungrouped-a", false);
+  seed(ungrouped, "/repo/B/project", "", "ungrouped-b", false);
   Executor ungrouped_executor(ungrouped);
   const auto ungrouped_evidence =
       ungrouped_executor.run((start(codebase()) | view(View::Evidence) |

@@ -39,14 +39,17 @@ __all__ = [
 ]
 
 
-def _portable_ungrouped_component_suffix(path: str, component_name: str) -> str:
-    """Return a worktree-independent discriminator for an ungrouped path."""
+def _portable_ungrouped_component_anchor(path: str) -> str:
+    """Return a stable workspace/component anchor for an ungrouped path."""
     normalized = os.path.normpath(path)
-    separator = normalized.rfind(os.sep)
-    if separator <= 0:
+    parts = [part for part in normalized.split(os.sep) if part]
+    if len(parts) <= 1:
         return ""
-    basename = normalized[separator + 1:]
-    return "" if basename == component_name else basename
+    if "worktrees" in parts:
+        worktree = len(parts) - 1 - parts[::-1].index("worktrees")
+        if worktree + 2 < len(parts):
+            return os.sep.join(parts[worktree + 2:])
+    return os.sep.join(parts[-2:])
 
 # ---- Budgets (docs/query-plan.md "Execution semantics") ----------------------
 
@@ -1276,7 +1279,7 @@ class Executor:
         if os.path.isabs(row[1]):
             component = (
                 "ungrouped:"
-                + _portable_ungrouped_component_suffix(row[1], row[0])
+                + _portable_ungrouped_component_anchor(row[1])
             )
         else:
             component = f"grouped:{row[0]}\x1f{row[1]}"

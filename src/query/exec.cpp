@@ -11,6 +11,7 @@
 #include <compare>
 #include <map>
 #include <set>
+#include <string>
 #include <string_view>
 #include <tuple>
 #include <utility>
@@ -25,16 +26,29 @@ std::string identity_segment(const std::string &value) {
   return std::to_string(value.size()) + ":" + value;
 }
 
-std::string
-portable_ungrouped_component_suffix(const std::string &path,
-                                    const std::string &component_name) {
+std::string portable_ungrouped_component_anchor(const std::string &path) {
   const std::string normalized = pathutil::normpath(path);
-  const auto separator = normalized.rfind('/');
-  if (separator == std::string::npos || separator == 0) {
+  constexpr std::string_view worktree_anchor = "/worktrees/";
+  const auto worktree = normalized.rfind(worktree_anchor);
+  if (worktree != std::string::npos) {
+    const auto worktree_name =
+        normalized.find('/', worktree + worktree_anchor.size());
+    if (worktree_name != std::string::npos &&
+        worktree_name + 1 < normalized.size()) {
+      return normalized.substr(worktree_name + 1);
+    }
+  }
+
+  const auto component_separator = normalized.rfind('/');
+  if (component_separator == std::string::npos || component_separator == 0) {
     return {};
   }
-  const std::string basename = normalized.substr(separator + 1);
-  return basename == component_name ? "" : basename;
+  const auto workspace_separator =
+      normalized.rfind('/', component_separator - 1);
+  if (workspace_separator == std::string::npos) {
+    return normalized.substr(1);
+  }
+  return normalized.substr(workspace_separator + 1);
 }
 
 json_out::Value index_identity_json(const IndexIdentity &index) {
@@ -1349,8 +1363,8 @@ private:
     }
     const std::string component =
         pathutil::isabs(query.col_text(1))
-            ? "ungrouped:" + portable_ungrouped_component_suffix(
-                                 query.col_text(1), query.col_text(0))
+            ? "ungrouped:" +
+                  portable_ungrouped_component_anchor(query.col_text(1))
             : "grouped:" + query.col_text(0) + "\x1f" + query.col_text(1);
     std::string relative;
     for (int column = 2; column < 4; ++column) {
