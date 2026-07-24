@@ -205,6 +205,15 @@ TEST_CASE("query_plan: CXQ text reports stable parse errors") {
       "E_PARSE: query must start with codebase(), symbol(), or entity()");
   CHECK_THROWS_WITH(parse_cxq("codebase() | limit(nope)"),
                     "E_PARSE: limit() requires one integer");
+  CHECK_THROWS_WITH(
+      parse_cxq("codebase() | nodes(kind = class, name = Widget)"),
+      "E_PARSE: nodes() takes zero or one predicate");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | out(calls, mode=static)"),
+                    "E_PARSE: depth must be an integer or depth=min..max");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | count(extra)"),
+                    "E_PARSE: count() takes no arguments");
+  CHECK_THROWS_WITH(parse_cxq("codebase() | rank(name)"),
+                    "E_PARSE: rank() is not available in v1");
 }
 
 // ---------------------------------------------------------------------------

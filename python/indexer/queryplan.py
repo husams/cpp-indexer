@@ -437,8 +437,10 @@ def _cxq_pred(expression: str) -> Pred:
 
 def _cxq_stage(token: str) -> Stage:
     value = _cxq_trim(token)
+    if value.startswith("rank("):
+        _fail("E_PARSE", "rank() is not available in v1")
     names = ("nodes", "view", "where", "out", "in", "union", "intersect",
-             "except", "select", "count", "distinct", "order_by", "rank",
+             "except", "select", "count", "distinct", "order_by",
              "limit")
     for name in names:
         if not value.startswith(f"{name}("):
@@ -459,30 +461,38 @@ def _cxq_stage(token: str) -> Stage:
         if name in ("out", "in"):
             if not args:
                 _fail("E_PARSE", f"{name}() requires a relation")
+            if len(args) > 3:
+                _fail("E_PARSE", "traversal accepts relation and at most two depth arguments")
             min_depth = max_depth = 1
-            if len(args) >= 2 and (depth := _cxq_int(args[1])) is not None:
+            if len(args) == 2 and args[1].startswith("depth="):
+                bounds = args[1][6:].split("..")
+                if len(bounds) != 2 or any(_cxq_int(x) is None for x in bounds):
+                    _fail("E_PARSE", "depth must be written as depth=min..max")
+                min_depth, max_depth = int(bounds[0]), int(bounds[1])
+            elif len(args) == 2:
+                depth = _cxq_int(args[1])
+                if depth is None:
+                    _fail("E_PARSE", "depth must be an integer or depth=min..max")
                 min_depth = max_depth = depth
-            if len(args) >= 3:
+            elif len(args) == 3:
                 first = _cxq_int(args[1])
                 second = _cxq_int(args[2])
                 if first is None or second is None:
                     _fail("E_PARSE", "depth must be written as depth=min..max")
                 min_depth, max_depth = first, second
-            for arg in args[1:]:
-                if arg.startswith("depth="):
-                    bounds = arg[6:].split("..")
-                    if len(bounds) != 2 or any(_cxq_int(x) is None for x in bounds):
-                        _fail("E_PARSE", "depth must be written as depth=min..max")
-                    min_depth, max_depth = int(bounds[0]), int(bounds[1])
             return (out if name == "out" else in_)(_cxq_atom(args[0]), min_depth, max_depth)
-        if name in ("select", "order_by", "rank"):
+        if name in ("select", "order_by"):
             fields = [_cxq_atom(arg) for arg in args]
             if not fields:
                 _fail("E_PARSE", f"{name}() requires fields")
             return select(fields) if name == "select" else order_by(fields)
         if name == "count":
+            if args:
+                _fail("E_PARSE", "count() takes no arguments")
             return count()
         if name == "distinct":
+            if args:
+                _fail("E_PARSE", "distinct() takes no arguments")
             return distinct()
         if name == "limit":
             if len(args) != 1 or (number := _cxq_int(args[0])) is None:

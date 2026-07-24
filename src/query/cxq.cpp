@@ -18,11 +18,11 @@ namespace {
 
 std::string trim(std::string_view value) {
   while (!value.empty() &&
-         std::isspace(static_cast<unsigned char>(value.front()))) {
+         std::isspace(static_cast<unsigned char>(value.front())) != 0) {
     value.remove_prefix(1);
   }
   while (!value.empty() &&
-         std::isspace(static_cast<unsigned char>(value.back()))) {
+         std::isspace(static_cast<unsigned char>(value.back())) != 0) {
     value.remove_suffix(1);
   }
   return std::string(value);
@@ -34,7 +34,7 @@ bool quoted(std::string_view value) {
 }
 
 std::string atom(std::string_view value) {
-  const std::string result = trim(value);
+  std::string result = trim(value);
   if (quoted(result)) {
     return result.substr(1, result.size() - 2);
   }
@@ -102,8 +102,9 @@ size_t find_top_level_keyword(std::string_view value,
   for (size_t i = 0; i + keyword.size() <= value.size(); ++i) {
     const char ch = value[i];
     if (quote != '\0') {
-      if (ch == quote && (i == 0 || value[i - 1] != '\\'))
+      if (ch == quote && (i == 0 || value[i - 1] != '\\')) {
         quote = '\0';
+      }
       continue;
     }
     if (ch == '\'' || ch == '"') {
@@ -127,11 +128,11 @@ size_t find_top_level_keyword(std::string_view value,
       continue;
     }
     const bool left_boundary =
-        i == 0 || std::isspace(static_cast<unsigned char>(value[i - 1]));
+        i == 0 || std::isspace(static_cast<unsigned char>(value[i - 1])) != 0;
     const size_t end = i + keyword.size();
     const bool right_boundary =
         end == value.size() ||
-        std::isspace(static_cast<unsigned char>(value[end]));
+        std::isspace(static_cast<unsigned char>(value[end])) != 0;
     if (parens == 0 && brackets == 0 && left_boundary && right_boundary &&
         value.substr(i, keyword.size()) == keyword) {
       return i;
@@ -256,43 +257,56 @@ Pred predicate(std::string_view expression) {
 }
 
 std::pair<int64_t, int64_t> depth_args(const std::vector<std::string> &args) {
-  int64_t min_depth = 1;
-  int64_t max_depth = 1;
-  bool seen = false;
-  for (const auto &arg : args) {
-    if (!arg.starts_with("depth=")) {
-      continue;
-    }
-    const std::string value = arg.substr(6);
+  if (args.size() == 1) {
+    return {1, 1};
+  }
+  if (args.size() == 2 && args[1].starts_with("depth=")) {
+    const std::string value = args[1].substr(6);
     const size_t dots = value.find("..");
+    int64_t min_depth = 0;
+    int64_t max_depth = 0;
     if (dots == std::string::npos ||
         !integer(value.substr(0, dots), min_depth) ||
         !integer(value.substr(dots + 2), max_depth)) {
       parse_fail("depth must be written as depth=min..max");
     }
-    seen = true;
+    return {min_depth, max_depth};
   }
-  if (!seen && args.size() >= 3 && integer(args[1], min_depth) &&
-      integer(args[2], max_depth)) {
-    seen = true;
+  if (args.size() == 2) {
+    int64_t depth = 0;
+    if (!integer(args[1], depth)) {
+      parse_fail("depth must be an integer or depth=min..max");
+    }
+    return {depth, depth};
   }
-  if (!seen && args.size() >= 2 && integer(args[1], max_depth)) {
-    min_depth = max_depth;
+  if (args.size() == 3) {
+    int64_t min_depth = 0;
+    int64_t max_depth = 0;
+    if (!integer(args[1], min_depth) || !integer(args[2], max_depth)) {
+      parse_fail("depth must be written as depth=min..max");
+    }
+    return {min_depth, max_depth};
   }
-  return {min_depth, max_depth};
+  parse_fail("traversal accepts relation and at most two depth arguments");
 }
 
 Stage stage(std::string_view token) {
   const std::string value = trim(token);
+  if (value.starts_with("rank(")) {
+    parse_fail("rank() is not available in v1");
+  }
   for (const std::string_view name :
        {"nodes", "view", "where", "out", "in", "union", "intersect", "except",
-        "select", "count", "distinct", "order_by", "rank", "limit"}) {
+        "select", "count", "distinct", "order_by", "limit"}) {
     const std::string prefix(name);
     if (!value.starts_with(prefix + "(")) {
       continue;
     }
     const auto args = call_parts(value, name);
     if (name == "nodes") {
+      if (args.size() > 1) {
+        parse_fail("nodes() takes zero or one predicate");
+      }
       return args.empty() ? nodes() : nodes(predicate(args.front()));
     }
     if (name == "view") {
@@ -300,38 +314,54 @@ Stage stage(std::string_view token) {
         parse_fail("view() requires one level");
       }
       const std::string level = atom(args.front());
-      if (level == "symbol")
+      if (level == "symbol") {
         return view(View::Symbol);
-      if (level == "entity")
+      }
+      if (level == "entity") {
         return view(View::Entity);
+      }
       parse_fail("unknown view '" + level + "'");
     }
     if (name == "where") {
-      if (args.size() != 1)
+      if (args.size() != 1) {
         parse_fail("where() requires one expression");
+      }
       return where(predicate(args.front()));
     }
     if (name == "out" || name == "in") {
-      if (args.empty())
+      if (args.empty()) {
         parse_fail(std::string(name) + "() requires a relation");
+      }
       const auto [min_depth, max_depth] = depth_args(args);
-      if (name == "out")
+      if (name == "out") {
         return out(atom(args.front()), min_depth, max_depth);
+      }
       return in_(atom(args.front()), min_depth, max_depth);
     }
-    if (name == "select" || name == "order_by" || name == "rank") {
+    if (name == "select" || name == "order_by") {
       std::vector<std::string> fields;
-      for (const auto &arg : args)
+      fields.reserve(args.size());
+      for (const auto &arg : args) {
         fields.push_back(atom(arg));
-      if (fields.empty())
+      }
+      if (fields.empty()) {
         parse_fail(std::string(name) + "() requires fields");
+      }
       return name == "select" ? select(std::move(fields))
                               : order_by(std::move(fields));
     }
-    if (name == "count")
+    if (name == "count") {
+      if (!args.empty()) {
+        parse_fail("count() takes no arguments");
+      }
       return count();
-    if (name == "distinct")
+    }
+    if (name == "distinct") {
+      if (!args.empty()) {
+        parse_fail("distinct() takes no arguments");
+      }
       return distinct();
+    }
     if (name == "limit") {
       int64_t n = 0;
       if (args.size() != 1 || !integer(args.front(), n)) {
@@ -340,16 +370,20 @@ Stage stage(std::string_view token) {
       return limit(n);
     }
     if (name == "union" || name == "intersect" || name == "except") {
-      if (args.size() != 1)
+      if (args.size() != 1) {
         parse_fail(std::string(name) + "() requires one query");
+      }
       Plan parsed = parse_cxq(args.front());
       Query query(parsed.source);
-      for (const auto &nested : parsed.stages)
+      for (const auto &nested : parsed.stages) {
         query = query | nested;
-      if (name == "union")
+      }
+      if (name == "union") {
         return union_(query);
-      if (name == "intersect")
+      }
+      if (name == "intersect") {
         return intersect(query);
+      }
       return except_(query);
     }
   }
@@ -360,24 +394,28 @@ Stage stage(std::string_view token) {
 
 Plan parse_cxq(const std::string &text) {
   const auto parts = split_top_level(text, '|');
-  if (parts.empty() || parts.front().empty())
+  if (parts.empty() || parts.front().empty()) {
     parse_fail("query is empty");
+  }
   const std::string first = trim(parts.front());
   Source source;
   if (first.starts_with("codebase(")) {
     const auto source_args = call_parts(first, "codebase");
-    if (!source_args.empty())
+    if (!source_args.empty()) {
       parse_fail("codebase() takes no arguments");
+    }
     source = codebase();
   } else if (first.starts_with("symbol(")) {
     const auto source_args = call_parts(first, "symbol");
-    if (source_args.size() != 1)
+    if (source_args.size() != 1) {
       parse_fail("symbol() requires one reference");
+    }
     source = symbol(atom(source_args.front()));
   } else if (first.starts_with("entity(")) {
     const auto source_args = call_parts(first, "entity");
-    if (source_args.size() != 1)
+    if (source_args.size() != 1) {
       parse_fail("entity() requires one reference");
+    }
     source = entity(atom(source_args.front()));
   } else {
     parse_fail("query must start with codebase(), symbol(), or entity()");

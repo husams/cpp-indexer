@@ -125,6 +125,22 @@ def test_textual_cxq_lowers_to_the_shared_plan():
         parse_cxq("codebase() | limit(nope)")
 
 
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("codebase() | nodes(kind = class, name = Widget)",
+         r"E_PARSE: nodes\(\) takes zero or one predicate"),
+        ("codebase() | out(calls, mode=static)",
+         "E_PARSE: depth must be an integer or depth=min..max"),
+        ("codebase() | count(extra)", r"E_PARSE: count\(\) takes no arguments"),
+        ("codebase() | rank(name)", r"E_PARSE: rank\(\) is not available in v1"),
+    ],
+)
+def test_textual_cxq_rejects_unsupported_or_ambiguous_syntax(text, message):
+    with pytest.raises(PlanError, match=message):
+        parse_cxq(text)
+
+
 # ---------------------------------------------------------------------------
 # Q2: normalization
 # ---------------------------------------------------------------------------
