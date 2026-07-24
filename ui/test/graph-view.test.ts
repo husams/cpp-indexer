@@ -4,7 +4,7 @@ import test from "node:test";
 import Ajv2020 from "ajv/dist/2020.js";
 import { toCytoscapeElements } from "../src/cytoscape-adapter.ts";
 import { boundedFixture, canonicalFixture, oversizedFixture } from "../src/fixtures.ts";
-import { applyBudget, canonicalSemanticContent, catalogRelationNames, createSavedView, stablePortableId, toResultEnvelope, validateGraphView, visualSemantics, type Budget } from "../src/graph-view.ts";
+import { applyBudget, canonicalSemanticContent, catalogRelationNames, createSavedView, stablePortableId, toResultEnvelope, utf8ByteLength, validateGraphView, visualSemantics, type Budget } from "../src/graph-view.ts";
 
 const smallBudget: Budget = { maxNodes: 2, maxEdges: 1, maxGroups: 0, maxLabelChars: 400, maxEvidenceRefs: 4 };
 
@@ -68,13 +68,13 @@ test("GraphView JSON Schema validates canonical envelopes and rejects invalid pa
   for (const slice of ["symbol", "entity", "include", "type"] as const) {
     const result = canonicalFixture(slice);
     const envelope = toResultEnvelope(result);
-    assert.deepEqual(Object.keys(envelope), ["envelopeVersion", "operation", "status", "reasonCode", "diagnostics", "producer", "package", "backend", "context", "artifact", "replay", "resources", "payload"]);
-    assert.equal(envelope.context.factSet.key, result.factSet.key);
+    assert.deepEqual(Object.keys(envelope), ["protocol", "operation", "status", "exit_class", "exit_code", "result", "identity", "producer", "completeness", "diagnostics", "evidence", "artifacts", "replay", "resources"]);
+    assert.deepEqual(envelope.identity.fact_sets, [result.factSet.key]);
     assert.equal(validator(envelope), true, `${slice}: ${JSON.stringify(validator.errors)}`);
 
     const withContinuation = {
       ...envelope,
-      payload: { ...result, continuation: { token: "continuation:fixture", nextDepth: 1, remaining: { nodes: 4, edges: 5 } } },
+      result: { ...result, continuation: { token: "continuation:fixture", nextDepth: 1, remaining: { nodes: 4, edges: 5 } } },
     };
     assert.equal(validator(withContinuation), true, `${slice} continuation: ${JSON.stringify(validator.errors)}`);
   }
@@ -83,17 +83,30 @@ test("GraphView JSON Schema validates canonical envelopes and rejects invalid pa
   assert.equal(validator(saved), true, `saved view: ${JSON.stringify(validator.errors)}`);
 
   const invalid = structuredClone(toResultEnvelope(canonicalFixture("symbol")));
-  invalid.payload.nodes[0]!.ref.key = "42";
+  invalid.result.nodes[0]!.ref.key = "42";
   assert.equal(validator(invalid), false);
-  assert.ok(validator.errors?.some((error) => error.instancePath.includes("/payload/nodes/0/ref/key")));
+  assert.ok(validator.errors?.some((error) => error.instancePath.includes("/result/nodes/0/ref/key")));
 
   const missingEvidenceRefs = structuredClone(toResultEnvelope(canonicalFixture("symbol")));
-  delete (missingEvidenceRefs.payload.nodes[0] as { evidenceRefs?: readonly string[] }).evidenceRefs;
+  delete (missingEvidenceRefs.result.nodes[0] as { evidenceRefs?: readonly string[] }).evidenceRefs;
   assert.equal(validator(missingEvidenceRefs), false);
 
   const missingSharedIdentity = structuredClone(toResultEnvelope(canonicalFixture("symbol")));
-  delete (missingSharedIdentity as { producer?: unknown }).producer;
+  delete (missingSharedIdentity as { identity?: unknown }).identity;
   assert.equal(validator(missingSharedIdentity), false);
+});
+
+test("result resource accounting uses UTF-8 bytes for Unicode payloads", () => {
+  const result = canonicalFixture("symbol");
+  const unicodeResult = {
+    ...result,
+    resultId: "result:unicode",
+    nodes: result.nodes.map((node, index) => index === 0 ? { ...node, label: "λ 😀" } : node),
+  };
+  const envelope = toResultEnvelope(unicodeResult);
+  assert.equal(utf8ByteLength("λ 😀"), 7);
+  assert.equal(envelope.resources?.peak_bytes, utf8ByteLength(JSON.stringify(unicodeResult)));
+  assert.notEqual(envelope.resources?.peak_bytes, JSON.stringify(unicodeResult).length);
 });
 
 test("all supported fixture slices adapt to Cytoscape elements with typed evidence", () => {

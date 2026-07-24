@@ -222,10 +222,10 @@
         { "$ref": "https://cidx.dev/schemas/result-envelope/v1" },
         {
           "type": "object",
-          "required": ["operation", "payload"],
+          "required": ["operation", "result"],
           "properties": {
             "operation": { "const": "graph-view" },
-            "payload": { "$ref": "#/$defs/result" }
+            "result": { "$ref": "#/$defs/result" }
           }
         }
       ]

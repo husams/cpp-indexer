@@ -2,76 +2,81 @@
 // Source: spec/contracts/result-envelope.schema.json
 
 export type ResultStatus = "complete" | "partial" | "unknown" | "refuted" | "conditional" | "error";
-export type ResultReasonCode = "ok" | "partial_result" | "unknown_result" | "refuted_result" | "conditional_result" | "stale_input" | "unknown_input" | "timeout" | "backend_error" | "budget_exhausted" | "invalid_input" | "invalid_fixture" | "incompatible_artifact" | "missing_evidence";
-export type ResultDiagnosticCode = "budget_exhausted" | "stale_input" | "unknown_input" | "invalid_fixture" | "timeout" | "backend_error" | "incompatible_artifact" | "missing_evidence";
+export type ExitClass = "success" | "usage" | "invalid_or_stale_input" | "policy_failure" | "unknown" | "infrastructure_failure";
+export type EvidenceClass = "source" | "derived" | "inferred" | "runtime" | "assumption" | "proof";
+export type EvidenceTrust = "unverified" | "producer-verified" | "reader-verified";
 export type DiagnosticSeverity = "info" | "warning" | "error";
 
 export interface ResultDiagnostic {
-  code: ResultDiagnosticCode;
-  message: string;
+  code: string;
   severity: DiagnosticSeverity;
+  message: string;
+  next_action?: string;
 }
 
 export interface ResultIdentity {
-  key: string;
+  workspace: string;
+  index: string;
+  fact_sets: readonly string[];
+  freshness: "current" | "stale" | "unverifiable";
+  source_revision: string | null;
+  source_fingerprint: string | null;
+}
+
+export interface ResultProducer {
+  package: string;
   version: string;
+  backend: string;
+  schema_version: number;
 }
 
-export interface ProducerIdentity {
-  name: string;
-  version: string;
+export interface Completeness {
+  state: "complete" | "partial" | "unknown";
+  truncated: boolean;
+  stale: boolean;
+  budget: number | null;
 }
 
-export interface PackageIdentity {
-  name: string;
-  version: string;
+export interface ResultEvidence {
+  id: string;
+  class: EvidenceClass;
+  trust: EvidenceTrust;
+  summary: string;
+  source?: string;
+  children?: readonly ResultEvidence[];
 }
 
-export interface BackendIdentity {
-  name: string;
-  version: string;
-  kind: string;
-}
-
-export interface ResultContext {
-  workspace: ResultIdentity;
-  index: ResultIdentity;
-  factSet: ResultIdentity;
-}
-
-export interface ArtifactReference {
+export interface ResultArtifact {
   kind: string;
   id: string;
-  schemaVersion: string;
-  catalogVersion?: string;
-  catalogHash?: string;
+  schema_version: number;
+  catalog_version: number;
+  catalog_hash: string;
 }
 
-export interface ReplayMetadata {
-  requestIdentity: string;
-  inputRevision: string;
-  deterministic: boolean;
+export interface ReplayInput {
+  command: string;
+  arguments: readonly string[];
 }
 
 export interface ResourceMetadata {
-  elapsedMs: number;
-  cpuMs?: number;
-  bytes: number;
-  peakBytes?: number;
+  elapsed_ms: number | null;
+  peak_bytes: number | null;
 }
 
 export interface ResultEnvelope<TPayload> {
-  envelopeVersion: 1;
+  protocol: "cidx.result/v1";
   operation: string;
   status: ResultStatus;
-  reasonCode: ResultReasonCode;
+  exit_class: ExitClass;
+  exit_code: number;
+  result: TPayload;
+  identity: ResultIdentity;
+  producer: ResultProducer;
+  completeness: Completeness;
   diagnostics: readonly ResultDiagnostic[];
-  producer: ProducerIdentity;
-  package: PackageIdentity;
-  backend: BackendIdentity;
-  context: ResultContext;
-  artifact: ArtifactReference;
-  replay: ReplayMetadata;
-  resources: ResourceMetadata;
-  payload: TPayload;
+  evidence: readonly ResultEvidence[];
+  artifacts: readonly ResultArtifact[];
+  replay?: ReplayInput;
+  resources?: ResourceMetadata;
 }

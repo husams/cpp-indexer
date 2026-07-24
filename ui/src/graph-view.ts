@@ -149,32 +149,63 @@ export interface GraphViewResult {
 export type GraphViewEnvelope = ResultEnvelope<GraphViewResult>;
 
 export function toResultEnvelope(result: GraphViewResult): GraphViewEnvelope {
-  const diagnostics: readonly ResultDiagnostic[] = result.diagnostics.map((diagnostic) => ({ ...diagnostic }));
+  const exit = exitForStatus(result.status);
   return {
-    envelopeVersion: 1,
+    protocol: "cidx.result/v1",
     operation: "graph-view",
     status: result.status,
-    reasonCode: result.diagnostics[0]?.code ?? reasonCodeForStatus(result.status),
-    diagnostics,
-    producer: { name: "cidx-graphview", version: "0.1.0" },
-    package: { name: "cidx-graphview-prototype", version: "0.1.0" },
-    backend: { name: "fixture", version: "1", kind: "offline" },
-    context: { workspace: result.workspace, index: result.index, factSet: result.factSet },
-    artifact: { kind: "graph-view", id: result.resultId, schemaVersion: `graph-view/v${result.version}` },
-    replay: { requestIdentity: result.queryIdentity, inputRevision: result.index.version, deterministic: true },
-    resources: { elapsedMs: 0, bytes: JSON.stringify(result).length },
-    payload: result,
+    exit_class: exit.exit_class,
+    exit_code: exit.exit_code,
+    result,
+    identity: {
+      workspace: result.workspace.key,
+      index: result.index.key,
+      fact_sets: [result.factSet.key],
+      freshness: ({ fresh: "current", stale: "stale", unknown: "unverifiable" } as const)[result.freshness],
+      source_revision: null,
+      source_fingerprint: null,
+    },
+    producer: { package: "cidx-graphview-prototype", version: "0.1.0", backend: "fixture", schema_version: 1 },
+    completeness: {
+      state: result.completeness,
+      truncated: result.markers.includes("truncated"),
+      stale: result.freshness === "stale",
+      budget: result.budget.maxNodes,
+    },
+    diagnostics: result.diagnostics.map(toProtocolDiagnostic),
+    evidence: result.evidence.map((evidence) => {
+      const source = evidence.location ? `${evidence.location.path}:${evidence.location.line}${evidence.location.column === undefined ? "" : `:${evidence.location.column}`}` : evidence.artifact;
+      return { id: evidence.id, class: evidence.class, trust: evidenceTrust(evidence.class), summary: evidence.summary, ...(source === undefined ? {} : { source }) };
+    }),
+    artifacts: [{ kind: "graph-view", id: result.resultId, schema_version: result.version, catalog_version: CORE_CATALOG.catalog_version, catalog_hash: "c5479dfc5757e0a8b23b6d0078b164814a73823a750b41631eb818e3733eef48" }],
+    replay: { command: "graph-view", arguments: [result.queryIdentity] },
+    resources: { elapsed_ms: 0, peak_bytes: utf8ByteLength(JSON.stringify(result)) },
   };
 }
 
-function reasonCodeForStatus(status: GraphStatus): GraphViewEnvelope["reasonCode"] {
-  const reasons: Record<GraphStatus, GraphViewEnvelope["reasonCode"]> = {
-    complete: "ok",
-    partial: "partial_result",
-    unknown: "unknown_result",
-    error: "backend_error",
+function toProtocolDiagnostic(diagnostic: Diagnostic): ResultDiagnostic {
+  const next_action = diagnostic.code === "stale_input" ? "refresh the index before relying on this result" : undefined;
+  return { code: diagnostic.code, severity: diagnostic.severity, message: diagnostic.message, ...(next_action === undefined ? {} : { next_action }) };
+}
+
+function exitForStatus(status: GraphStatus): Pick<GraphViewEnvelope, "exit_class" | "exit_code"> {
+  const exits: Record<GraphStatus, Pick<GraphViewEnvelope, "exit_class" | "exit_code">> = {
+    complete: { exit_class: "success", exit_code: 0 },
+    partial: { exit_class: "success", exit_code: 0 },
+    unknown: { exit_class: "unknown", exit_code: 5 },
+    error: { exit_class: "infrastructure_failure", exit_code: 6 },
   };
-  return reasons[status];
+  return exits[status];
+}
+
+function evidenceTrust(evidenceClass: EvidenceClass): "unverified" | "producer-verified" | "reader-verified" {
+  if (evidenceClass === "inferred" || evidenceClass === "assumption") return "unverified";
+  if (evidenceClass === "proof") return "reader-verified";
+  return "producer-verified";
+}
+
+export function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }
 
 export interface Diagnostic {
