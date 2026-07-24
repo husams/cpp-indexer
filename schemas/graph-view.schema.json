@@ -5,7 +5,8 @@
   "description": "Renderer-independent bounded graph payload. Cytoscape positions and layout state are intentionally outside this schema.",
   "oneOf": [
     { "$ref": "#/$defs/request" },
-    { "$ref": "#/$defs/result" }
+    { "$ref": "#/$defs/resultEnvelope" },
+    { "$ref": "#/$defs/savedView" }
   ],
   "$defs": {
     "status": { "type": "string", "enum": ["complete", "partial", "unknown", "error"] },
@@ -46,7 +47,6 @@
     },
     "elementState": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["status", "markers", "evidenceRefs"],
       "properties": {
         "status": { "$ref": "#/$defs/status" },
@@ -59,7 +59,6 @@
         { "$ref": "#/$defs/elementState" },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["ref", "label", "semanticKind"],
           "properties": {
             "ref": { "$ref": "#/$defs/portableReference" },
@@ -69,7 +68,8 @@
             "location": { "$ref": "#/$defs/location" }
           }
         }
-      ]
+      ],
+      "unevaluatedProperties": false
     },
     "site": {
       "type": "object",
@@ -86,7 +86,6 @@
         { "$ref": "#/$defs/elementState" },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["ref", "source", "target", "relation", "label", "siteRefs"],
           "properties": {
             "ref": { "$ref": "#/$defs/portableReference" },
@@ -97,14 +96,14 @@
             "siteRefs": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/site" } }
           }
         }
-      ]
+      ],
+      "unevaluatedProperties": false
     },
     "group": {
       "allOf": [
         { "$ref": "#/$defs/elementState" },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["ref", "label", "memberRefs"],
           "properties": {
             "ref": { "$ref": "#/$defs/portableReference" },
@@ -113,7 +112,8 @@
             "parentRef": { "$ref": "#/$defs/portableReference" }
           }
         }
-      ]
+      ],
+      "unevaluatedProperties": false
     },
     "budget": {
       "type": "object",
@@ -139,6 +139,17 @@
         "evidenceRefs": { "type": "integer", "minimum": 0 }
       }
     },
+    "remainingUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "nodes": { "type": "integer", "minimum": 0 },
+        "edges": { "type": "integer", "minimum": 0 },
+        "groups": { "type": "integer", "minimum": 0 },
+        "labelChars": { "type": "integer", "minimum": 0 },
+        "evidenceRefs": { "type": "integer", "minimum": 0 }
+      }
+    },
     "identity": {
       "type": "object",
       "additionalProperties": false,
@@ -154,6 +165,35 @@
         "relation": { "type": "string", "maxLength": 120 },
         "direction": { "type": "string", "enum": ["in", "out"] },
         "maxDepth": { "type": "integer", "minimum": 0, "maximum": 64 }
+      }
+    },
+    "continuation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token", "nextDepth", "remaining"],
+      "properties": {
+        "token": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "relation": { "type": "string", "maxLength": 120 },
+        "direction": { "type": "string", "enum": ["in", "out"] },
+        "nextDepth": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "remaining": { "$ref": "#/$defs/remainingUsage" }
+      }
+    },
+    "presentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layout", "zoom", "pan", "hiddenKinds", "collapsedGroupKeys"],
+      "properties": {
+        "layout": { "type": "string", "enum": ["breadthfirst", "cose", "circle", "grid", "preset"] },
+        "zoom": { "type": "number", "minimum": 0.25, "maximum": 3 },
+        "pan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y"],
+          "properties": { "x": { "type": "number" }, "y": { "type": "number" } }
+        },
+        "hiddenKinds": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/kind" } },
+        "collapsedGroupKeys": { "type": "array", "uniqueItems": true, "maxItems": 1000, "items": { "type": "string", "maxLength": 240 } }
       }
     },
     "request": {
@@ -173,8 +213,30 @@
             "slice": { "$ref": "#/$defs/kind" }
           }
         },
-        "presentation": { "type": "object" },
+        "presentation": { "$ref": "#/$defs/presentation" },
         "budget": { "$ref": "#/$defs/budget" }
+      }
+    },
+    "resultEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["envelopeVersion", "operation", "status", "payload"],
+      "properties": {
+        "envelopeVersion": { "const": 1 },
+        "operation": { "const": "graph-view" },
+        "status": { "$ref": "#/$defs/status" },
+        "payload": { "$ref": "#/$defs/result" }
+      }
+    },
+    "savedView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["savedViewId", "resultId", "queryIdentity", "presentation"],
+      "properties": {
+        "savedViewId": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "resultId": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "queryIdentity": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "presentation": { "$ref": "#/$defs/presentation" }
       }
     },
     "result": {
@@ -199,7 +261,8 @@
         "groups": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/group" } },
         "evidence": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/evidence" } },
         "capabilities": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/capability" } },
-        "diagnostics": { "type": "array", "maxItems": 8, "items": { "type": "object", "additionalProperties": false, "required": ["code", "message", "severity"], "properties": { "code": { "type": "string", "enum": ["budget_exhausted", "stale_input", "unknown_input", "invalid_fixture"] }, "message": { "type": "string", "maxLength": 160 }, "severity": { "type": "string", "enum": ["info", "warning", "error"] } } } }
+        "diagnostics": { "type": "array", "maxItems": 8, "items": { "type": "object", "additionalProperties": false, "required": ["code", "message", "severity"], "properties": { "code": { "type": "string", "enum": ["budget_exhausted", "stale_input", "unknown_input", "invalid_fixture"] }, "message": { "type": "string", "maxLength": 160 }, "severity": { "type": "string", "enum": ["info", "warning", "error"] } } } },
+        "continuation": { "$ref": "#/$defs/continuation" }
       }
     }
   }

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import Ajv2020 from "ajv/dist/2020.js";
 import { toCytoscapeElements } from "../src/cytoscape-adapter.ts";
 import { boundedFixture, canonicalFixture, oversizedFixture } from "../src/fixtures.ts";
-import { applyBudget, canonicalSemanticContent, catalogRelationNames, createSavedView, stablePortableId, validateGraphView, visualSemantics, type Budget } from "../src/graph-view.ts";
+import { applyBudget, canonicalSemanticContent, catalogRelationNames, createSavedView, stablePortableId, toResultEnvelope, validateGraphView, visualSemantics, type Budget } from "../src/graph-view.ts";
 
 const smallBudget: Budget = { maxNodes: 2, maxEdges: 1, maxGroups: 0, maxLabelChars: 400, maxEvidenceRefs: 4 };
 
@@ -33,6 +35,56 @@ test("every weaker truth state has a non-colour cue and cannot use complete styl
     assert.notEqual(semantics.inspectorText, "");
     assert.equal(semantics.isCompleteStyle, false);
   }
+});
+
+test("mixed truth cues are deterministic across marker permutations", () => {
+  const permutations = [
+    ["proved", "stale", "inferred"],
+    ["inferred", "proved", "stale"],
+    ["stale", "inferred", "proved"],
+  ] as const;
+  const rendered = permutations.map((markers) => visualSemantics("partial", markers));
+  assert.equal(new Set(rendered.map((semantics) => JSON.stringify(semantics))).size, 1);
+  assert.match(rendered[0]!.labelSuffix, /partial/);
+  assert.match(rendered[0]!.labelSuffix, /proved/);
+  assert.match(rendered[0]!.inspectorText, /Partial coverage/);
+  assert.match(rendered[0]!.inspectorText, /Proof-backed/);
+  assert.equal(rendered[0]!.isCompleteStyle, false);
+
+  const refuted = visualSemantics("complete", ["external", "refuted"]);
+  assert.match(refuted.labelSuffix, /refuted/);
+  assert.match(refuted.labelSuffix, /external/);
+  assert.match(refuted.inspectorText, /Refuted/);
+  assert.match(refuted.inspectorText, /External/);
+  assert.equal(refuted.isCompleteStyle, false);
+});
+
+test("GraphView JSON Schema validates canonical envelopes and rejects invalid payloads", () => {
+  const schema = JSON.parse(readFileSync(new URL("../../schemas/graph-view.schema.json", import.meta.url), "utf8"));
+  const validator = new Ajv2020({ allErrors: true, strict: false }).compile(schema);
+  for (const slice of ["symbol", "entity", "include", "type"] as const) {
+    const result = canonicalFixture(slice);
+    const envelope = toResultEnvelope(result);
+    assert.equal(validator(envelope), true, `${slice}: ${JSON.stringify(validator.errors)}`);
+
+    const withContinuation = {
+      ...envelope,
+      payload: { ...result, continuation: { token: "continuation:fixture", nextDepth: 1, remaining: { nodes: 4, edges: 5 } } },
+    };
+    assert.equal(validator(withContinuation), true, `${slice} continuation: ${JSON.stringify(validator.errors)}`);
+  }
+
+  const saved = createSavedView(canonicalFixture("symbol"), { layout: "preset", zoom: 1, pan: { x: 0, y: 0 }, hiddenKinds: [], collapsedGroupKeys: [] });
+  assert.equal(validator(saved), true, `saved view: ${JSON.stringify(validator.errors)}`);
+
+  const invalid = structuredClone(toResultEnvelope(canonicalFixture("symbol")));
+  invalid.payload.nodes[0]!.ref.key = "42";
+  assert.equal(validator(invalid), false);
+  assert.ok(validator.errors?.some((error) => error.instancePath.includes("/payload/nodes/0/ref/key")));
+
+  const missingEvidenceRefs = structuredClone(toResultEnvelope(canonicalFixture("symbol")));
+  delete (missingEvidenceRefs.payload.nodes[0] as { evidenceRefs?: readonly string[] }).evidenceRefs;
+  assert.equal(validator(missingEvidenceRefs), false);
 });
 
 test("all supported fixture slices adapt to Cytoscape elements with typed evidence", () => {

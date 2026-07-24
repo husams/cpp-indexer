@@ -7,8 +7,9 @@ never reads SQLite or executes a query.
 ## Contract boundary
 
 `src/graph-view.ts` is renderer-independent. It defines versioned requests and
-results, portable semantic identities, nodes, edges, compound groups, typed
-bounded evidence references, capabilities, continuation tokens, budgets, and
+results, a shared HSE-70-shaped `ResultEnvelope<GraphViewResult>` boundary,
+portable semantic identities, nodes, edges, compound groups, typed bounded
+evidence references, capabilities, continuation tokens, budgets, and
 status/truth markers. Cytoscape element JSON and layout/position state live only
 in `src/cytoscape-adapter.ts` and `src/main.ts`.
 
@@ -53,3 +54,8 @@ npm run dev
 `npm run generate` produces the checked-in TypeScript catalog projection from
 the repository's `catalogs/core.json`; semantic relation names are not
 hand-copied into the UI.
+
+The focused tests validate `schemas/graph-view.schema.json` against every
+canonical envelope, a continuation, a saved view, and invalid identity/evidence
+payloads. The schema uses Draft 2020-12 `unevaluatedProperties` composition so
+the shared element state and node/edge/group fields validate together.

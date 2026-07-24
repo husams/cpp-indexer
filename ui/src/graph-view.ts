@@ -145,6 +145,20 @@ export interface GraphViewResult {
   continuation?: Continuation;
 }
 
+/** Shared HSE-70 envelope boundary; the renderer consumes only `payload`. */
+export interface ResultEnvelope<TPayload> {
+  envelopeVersion: typeof GRAPH_VIEW_VERSION;
+  operation: "graph-view";
+  status: GraphStatus;
+  payload: TPayload;
+}
+
+export type GraphViewEnvelope = ResultEnvelope<GraphViewResult>;
+
+export function toResultEnvelope(result: GraphViewResult): GraphViewEnvelope {
+  return { envelopeVersion: GRAPH_VIEW_VERSION, operation: "graph-view", status: result.status, payload: result };
+}
+
 export interface Diagnostic {
   code: "budget_exhausted" | "stale_input" | "unknown_input" | "invalid_fixture";
   message: string;
@@ -191,7 +205,6 @@ export function assertPortableReference(ref: PortableReference): void {
 }
 
 export function visualSemantics(status: GraphStatus, markers: readonly TruthMarker[]): VisualSemantics {
-  const marker = markers[0] ?? (status === "complete" ? "complete" : status);
   const table: Record<string, Omit<VisualSemantics, "isCompleteStyle">> = {
     complete: { marker: "complete", pattern: "solid", glyph: "●", labelSuffix: "", inspectorText: "Complete fact" },
     partial: { marker: "partial", pattern: "dashed", glyph: "◐", labelSuffix: " · partial", inspectorText: "Partial coverage; absence is not proof" },
@@ -207,8 +220,20 @@ export function visualSemantics(status: GraphStatus, markers: readonly TruthMark
     refuted: { marker: "refuted", pattern: "crossed", glyph: "×", labelSuffix: " · refuted", inspectorText: "Refuted claim or relation" },
     proved: { marker: "proved", pattern: "double", glyph: "✓", labelSuffix: " · proved", inspectorText: "Proof-backed result" },
   };
-  const semantics = table[marker] ?? table.unknown!;
-  return { ...semantics, isCompleteStyle: status === "complete" && markers.length === 0 };
+  const precedence: readonly string[] = ["error", "unknown", "refuted", "partial", "truncated", "stale", "unresolved", "assumed", "external", "stub", "inferred", "proved", "complete"];
+  const tokens = [...new Set([...(status === "complete" ? [] : [status]), ...markers])]
+    .sort((left, right) => precedence.indexOf(left) - precedence.indexOf(right));
+  const safeTokens = tokens.length > 0 ? tokens : ["complete"];
+  const primary = table[safeTokens[0]!] ?? table.unknown!;
+  const cues = safeTokens.map((token) => table[token] ?? table.unknown!);
+  return {
+    marker: safeTokens.join("+"),
+    pattern: primary.pattern,
+    glyph: cues.map((cue) => cue.glyph).join(""),
+    labelSuffix: safeTokens.length === 1 && safeTokens[0] === "complete" ? "" : ` · ${safeTokens.join(", ")}`,
+    inspectorText: cues.map((cue) => cue.inspectorText).join(" "),
+    isCompleteStyle: status === "complete" && markers.length === 0,
+  };
 }
 
 export function validateGraphView(result: GraphViewResult): void {
