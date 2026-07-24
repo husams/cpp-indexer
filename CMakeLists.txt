@@ -178,11 +178,13 @@ add_library(cidx_core STATIC
   src/cli/commands_graph.cpp
   src/cli/commands_ingest.cpp
   src/cli/commands_repo.cpp
+  src/cli/commands_query.cpp
   src/cli/commands_show.cpp
   src/cli/analyze.cpp
   src/graph/query.cpp
   src/graph/emit.cpp
   src/query/plan.cpp
+  src/query/cxq.cpp
   src/query/exec.cpp
   src/include_hygiene/graph.cpp
   src/include_hygiene/analysis.cpp
