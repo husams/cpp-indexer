@@ -161,7 +161,7 @@ std::string read_file(const std::string &path) {
 //            entity uses: D->E; generalizes: E->D
 struct Seeded {
   Storage db;
-  int64_t A = -1, B = -1, C = -1, D = -1, E = -1, S = -1;
+  int64_t A = -1, B = -1, C = -1, D = -1, E = -1, S = -1, T = -1, I = -1;
 
   Seeded() : db(":memory:") {
     A = db.add_symbol(make_sym("USR::A", "funcA", "function", "ns::funcA"));
@@ -170,10 +170,14 @@ struct Seeded {
     D = db.add_symbol(make_sym("USR::D", "ClassD", "class"));
     E = db.add_symbol(make_sym("USR::E", "ClassE", "class"));
     S = db.add_symbol(make_sym("USR::S", "AbsS", "struct"));
+    T = db.add_symbol(make_sym("USR::T", "Thing", "class-template"));
+    I = db.add_symbol(make_sym("USR::I", "Thing<int>", "class"));
     db.add_edge(make_edge(A, B, 1)); // calls
     db.add_edge(make_edge(B, C, 1)); // calls
     db.add_edge(make_edge(A, C, 7)); // uses
     db.add_edge(make_edge(E, D, 2)); // inherits
+    db.add_edge(make_edge(E, C, 2)); // inherits to a non-entity target
+    db.add_edge(make_edge(I, T, 5)); // instantiates
     // Layer-1: D and E are class entities; AbsS is an abstract struct;
     // D entity-uses E; E generalizes D.
     auto ins = db.raw_db().prepare(
@@ -400,7 +404,7 @@ TEST_CASE("query_plan: where filter and select fields") {
   auto r = ex.run((start(codebase()) | nodes(eq("kind", "class")) |
                    select({"name", "kind", "usr"}))
                       .plan());
-  REQUIRE(r.rows.size() == 2);
+  REQUIRE(r.rows.size() == 3);
   CHECK(r.fields == std::vector<std::string>{"name", "kind", "usr"});
   CHECK(std::get<std::string>(r.rows[0][0]) == "ClassD");
   CHECK(std::get<std::string>(r.rows[0][1]) == "class");
@@ -689,7 +693,7 @@ TEST_CASE(
       (start(codebase()) | nodes(in_list("kind", {"class", "struct"})) |
        select({"spelling", "kind", "entity_type"}) | order_by({"spelling"}))
           .plan());
-  REQUIRE(decl.rows.size() == 3); // AbsS, ClassD, ClassE
+  REQUIRE(decl.rows.size() == 4); // AbsS, ClassD, ClassE, Thing<int>
   CHECK(std::get<std::string>(decl.rows[0][0]) == "AbsS");
   CHECK(std::get<std::string>(decl.rows[0][1]) == "struct");
   CHECK(std::get<std::string>(decl.rows[0][2]) == "abstract_class");
@@ -1094,4 +1098,149 @@ TEST_CASE("query_plan: devirtualized calls preserve the inherited receiver") {
   CHECK(usrs.contains("USR::Base::doSomething"));
   CHECK(usrs.contains("USR::X::print"));
   CHECK_FALSE(usrs.contains("USR::Y::print"));
+}
+
+TEST_CASE("query_plan: semantic macros lower to quantifier primitives") {
+  Seeded s;
+  QueryExecutor ex(s.db);
+
+  const auto abstract = ex.run(
+      (start(codebase()) | view(View::Entity) | nodes(is_abstract())).plan());
+  REQUIRE(abstract.rows.size() == 1);
+  CHECK(std::get<int64_t>(abstract.rows[0][0]) == s.S);
+
+  const auto target_sets =
+      ex.run((start(symbol("USR::E")) |
+              where(inherits_from(any_target({"ClassD", "Missing"}))) |
+              select({"usr"}))
+                 .plan());
+  REQUIRE(target_sets.rows.size() == 1);
+  CHECK(std::get<std::string>(target_sets.rows[0][0]) == "USR::E");
+
+  const auto all_target_result =
+      ex.run((start(symbol("USR::E")) |
+              where(inherits_from(all_targets({"ClassD", "Missing"}))) |
+              select({"usr"}))
+                 .plan());
+  CHECK(all_target_result.rows.empty());
+
+  const std::string explained = cidx::json_out::dumps_indent2(ex.explain(
+      (start(symbol("USR::E")) | where(inherits_from("ClassD"))).plan()));
+  CHECK(explained.find("\"op\": \"exists\"") != std::string::npos);
+  CHECK(explained.find("\"relation\": \"symbol.inherits\"") !=
+        std::string::npos);
+
+  const auto instances = ex.run(
+      (start(codebase()) | nodes(is_instance()) | select({"usr"})).plan());
+  REQUIRE(instances.rows.size() == 1);
+  CHECK(std::get<std::string>(instances.rows[0][0]) == "USR::I");
+}
+
+TEST_CASE("query_plan: partial relation quantifiers preserve unknown") {
+  Seeded s;
+  QueryExecutor ex(s.db);
+
+  const auto excluded = ex.run((start(symbol("USR::A")) |
+                                where(none("calls", eq("spelling", "missing"))))
+                                   .plan());
+  CHECK(excluded.rows.empty());
+
+  const auto included = ex.run(
+      (start(symbol("USR::A")) |
+       where(none("calls", eq("spelling", "missing")), UnknownPolicy::Include))
+          .plan());
+  REQUIRE(included.rows.size() == 1);
+  CHECK(std::get<int64_t>(included.rows[0][0]) == s.A);
+
+  CHECK_THROWS_WITH(ex.run((start(symbol("USR::A")) |
+                            where(none("calls", eq("spelling", "missing")),
+                                  UnknownPolicy::Error))
+                               .plan()),
+                    "E_UNKNOWN: predicate evaluation is unknown");
+
+  const auto exact = ex.run((start(symbol("USR::A")) |
+                             where(exactly(2, "calls"), UnknownPolicy::Include))
+                                .plan());
+  REQUIRE(exact.rows.size() == 1);
+  CHECK(std::get<int64_t>(exact.rows[0][0]) == s.A);
+}
+
+TEST_CASE("query_plan: every relationship quantifier binds and aggregates") {
+  Seeded s;
+  QueryExecutor ex(s.db);
+
+  const auto exists_plain =
+      ex.run((start(symbol("USR::A")) | where(exists("calls"))).plan());
+  REQUIRE(exists_plain.rows.size() == 1);
+  CHECK(std::get<int64_t>(exists_plain.rows[0][0]) == s.A);
+
+  const auto none_plain =
+      ex.run((start(symbol("USR::A")) | where(none("calls"))).plan());
+  CHECK(none_plain.rows.empty());
+
+  const auto all_plain = ex.run(
+      (start(symbol("USR::A")) | where(all("calls"), UnknownPolicy::Include))
+          .plan());
+  REQUIRE(all_plain.rows.size() == 1);
+
+  const auto at_least_plain =
+      ex.run((start(symbol("USR::A")) | where(at_least(1, "calls"))).plan());
+  REQUIRE(at_least_plain.rows.size() == 1);
+
+  const auto exactly_plain =
+      ex.run((start(symbol("USR::A")) |
+              where(exactly(1, "calls"), UnknownPolicy::Include))
+                 .plan());
+  REQUIRE(exactly_plain.rows.size() == 1);
+
+  const auto target = eq("spelling", "funcB");
+  const auto exists_target =
+      ex.run((start(symbol("USR::A")) | where(exists("calls", target))).plan());
+  REQUIRE(exists_target.rows.size() == 1);
+
+  const auto none_target =
+      ex.run((start(symbol("USR::A")) | where(none("calls", target))).plan());
+  CHECK(none_target.rows.empty());
+
+  const auto all_target =
+      ex.run((start(symbol("USR::A")) |
+              where(all("calls", target), UnknownPolicy::Include))
+                 .plan());
+  REQUIRE(all_target.rows.size() == 1);
+
+  const auto at_least_target = ex.run(
+      (start(symbol("USR::A")) | where(at_least(1, "calls", target))).plan());
+  REQUIRE(at_least_target.rows.size() == 1);
+
+  const auto exactly_target =
+      ex.run((start(symbol("USR::A")) |
+              where(exactly(1, "calls", target), UnknownPolicy::Include))
+                 .plan());
+  REQUIRE(exactly_target.rows.size() == 1);
+
+  const auto nested =
+      ex.run((start(symbol("USR::A")) |
+              where(exists("calls", exists("calls", eq("spelling", "funcC")))))
+                 .plan());
+  REQUIRE(nested.rows.size() == 1);
+
+  const auto recursive_target =
+      ex.run((start(symbol("USR::A")) |
+              where(exists("calls", eq("spelling", "funcC"), 2, 2)))
+                 .plan());
+  REQUIRE(recursive_target.rows.size() == 1);
+
+  const auto nested_unknown =
+      ex.run((start(symbol("USR::A")) |
+              where(exists("calls", exists("calls", eq("spelling", "missing"))),
+                    UnknownPolicy::Include))
+                 .plan());
+  REQUIRE(nested_unknown.rows.size() == 1);
+
+  const auto target_unknown =
+      ex.run((start(symbol("USR::E")) |
+              where(all("inherits", eq("entity_type", "class")),
+                    UnknownPolicy::Include))
+                 .plan());
+  REQUIRE(target_unknown.rows.size() == 1);
 }
