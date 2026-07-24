@@ -626,6 +626,39 @@ TEST_CASE("query_plan: scoped identity fields are selectable") {
   CHECK(std::get<std::string>(result.rows[0][2]) == "legacy\x1fUSR::A");
 }
 
+TEST_CASE("query_plan: typed parameter views preserve natural slot identity") {
+  Storage db(":memory:");
+  const int64_t owner =
+      db.add_symbol(make_sym("USR::typed", "typed", "function"));
+  db.raw_db().exec(
+      "INSERT INTO parameter(owner_id,position,pack_index,name,default_text,"
+      "reference_semantics) VALUES (1,0,-1,'value','0','lvalue')");
+
+  Executor ex(db);
+  const Result result = ex.run(
+      (start(symbol("USR::typed")) | out("has_parameter") |
+       select({"owner_id", "position", "pack_index", "name", "default_text",
+               "identity_key"}))
+          .plan());
+  REQUIRE(result.view == View::Parameter);
+  REQUIRE(result.rows.size() == 1);
+  CHECK(std::get<int64_t>(result.rows[0][0]) == owner);
+  CHECK(std::get<int64_t>(result.rows[0][1]) == 0);
+  CHECK(std::get<int64_t>(result.rows[0][2]) == -1);
+  CHECK(std::get<std::string>(result.rows[0][3]) == "value");
+  CHECK(std::get<std::string>(result.rows[0][4]) == "0");
+  CHECK(std::get<std::string>(result.rows[0][5]) ==
+        "parameter:1:0:-1");
+
+  const Result reverse = ex.run(
+      (start(codebase()) | view(View::Parameter) | nodes() |
+       in_("has_parameter") | select({"name"}))
+          .plan());
+  REQUIRE(reverse.view == View::Symbol);
+  REQUIRE(reverse.rows.size() == 1);
+  CHECK(std::get<std::string>(reverse.rows[0][0]) == "typed");
+}
+
 TEST_CASE("query_plan: devirtualized calls preserve the inherited receiver") {
   Storage db(":memory:");
   {

@@ -402,3 +402,28 @@ def test_kind_vs_entity_type_separation(seeded):
 
     fn = ex.run((start(symbol("funcA")) | select(["entity_type"])).plan)
     assert [row[0] for row in fn.rows] == [None]
+
+
+def test_typed_parameter_view_preserves_natural_slot_identity():
+    db = Storage(":memory:")
+    owner = db.add_symbol(_make_sym("USR::typed", "typed"))
+    db._conn.execute(
+        "INSERT INTO parameter(owner_id,position,pack_index,name,default_text,"
+        "reference_semantics) VALUES (?,?,?,?,?,?)",
+        (owner, 0, -1, "value", "0", "lvalue"),
+    )
+    db._conn.commit()
+
+    result = Executor(db).run(
+        (start(symbol("USR::typed")) | out("has_parameter")
+         | select(["owner_id", "position", "pack_index", "name",
+                   "default_text", "identity_key"])).plan)
+    assert result.view == "parameter"
+    assert result.rows == [(owner, 0, -1, "value", "0",
+                            "parameter:1:0:-1")]
+
+    reverse = Executor(db).run(
+        (start(codebase()) | view("parameter") | nodes()
+         | in_("has_parameter") | select(["name"])).plan)
+    assert reverse.view == "symbol"
+    assert reverse.rows == [("typed",)]
