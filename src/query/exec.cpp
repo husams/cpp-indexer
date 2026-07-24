@@ -436,6 +436,7 @@ public:
     }
 
     for (const auto &stage : plan.stages) {
+      reject_ambiguous_ungrouped(st);
       switch (stage.op) {
       case StageOp::Nodes:
         enumerate(st, stage.pred);
@@ -485,6 +486,7 @@ public:
         break; // count() is terminal
       }
     }
+    reject_ambiguous_ungrouped(st);
     return st;
   }
 

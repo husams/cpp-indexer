@@ -1041,6 +1041,7 @@ class Executor:
         if plan.source.kind != "codebase":
             st.ids = self._resolve_source(plan.source)
         for stage in plan.stages:
+            self._reject_ambiguous_ungrouped(st)
             if stage.op == "nodes":
                 self._enumerate(st, stage.pred)
                 st.limit_in_effect = False
@@ -1071,6 +1072,7 @@ class Executor:
                 self._apply_limit(st, stage.n)
             if st.shape == "scalar":
                 break  # count() is terminal
+        self._reject_ambiguous_ungrouped(st)
         return st
 
     # -- stages ----------------------------------------------------------------

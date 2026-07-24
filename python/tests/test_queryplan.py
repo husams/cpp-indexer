@@ -635,6 +635,20 @@ def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable(
         ungrouped_executor.run(
             (start(codebase()) | view("call_argument") | nodes() | count()).plan
         )
+    evidence_base = start(codebase()) | view("evidence") | nodes()
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run((evidence_base | except_(evidence_base)).plan)
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run(
+            (evidence_base | except_(evidence_base) | count()).plan
+        )
+    argument_base = start(codebase()) | view("call_argument") | nodes()
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run((argument_base | except_(argument_base)).plan)
+    with pytest.raises(PlanError, match="^E_IDENTITY: ambiguous ungrouped component identity$"):
+        ungrouped_executor.run(
+            (argument_base | except_(argument_base) | count()).plan
+        )
 
     mirrored_first = Storage(":memory:")
     _seed_reverse_typed_graph(

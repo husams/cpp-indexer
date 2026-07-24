@@ -909,6 +909,23 @@ TEST_CASE(
           (start(codebase()) | view(View::CallArgument) | nodes() | count())
               .plan()),
       "E_IDENTITY: ambiguous ungrouped component identity");
+  const auto evidence_base = start(codebase()) | view(View::Evidence) | nodes();
+  CHECK_THROWS_WITH(
+      ungrouped_executor.run((evidence_base | except_(evidence_base)).plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
+  CHECK_THROWS_WITH(
+      ungrouped_executor.run(
+          (evidence_base | except_(evidence_base) | count()).plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
+  const auto argument_base =
+      start(codebase()) | view(View::CallArgument) | nodes();
+  CHECK_THROWS_WITH(
+      ungrouped_executor.run((argument_base | except_(argument_base)).plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
+  CHECK_THROWS_WITH(
+      ungrouped_executor.run(
+          (argument_base | except_(argument_base) | count()).plan()),
+      "E_IDENTITY: ambiguous ungrouped component identity");
 
   Storage mirrored_first(":memory:");
   seed(mirrored_first, "/Users/husam/.codex/worktrees/a/cpp-indexer", "",
