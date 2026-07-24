@@ -1,6 +1,7 @@
 # ADR-011: SQLite physical layout and runtime profile
 
-- Status: accepted for schema v34
+- Status: accepted for the schema-v34 compatibility floor; current layout is
+  tracked by [`docs/storage/schema-guide-v1.md`](../storage/schema-guide-v1.md)
 - Date: 2026-07-23
 - Scope: CIDX core `index.db` connection/runtime behavior and qualification
 - Related: [HSE-75](https://linear.app/hsenussi/issue/HSE-75), HSE-76, HSE-77,
@@ -30,6 +31,13 @@ profiles:
 - `Storage::backup_to()` uses SQLite's online backup API. A restored file is
   accepted only after schema/catalog/workspace/fact-content identity and
   integrity checks.
+
+The profile was initially qualified against schema v34. The repository's
+current schema is v39; v34 remains the deterministic migration and
+compatibility floor. The versioned physical classification and qualification
+status for the current layout are maintained in
+[`docs/storage/schema-guide-v1.md`](../storage/schema-guide-v1.md) and
+[`docs/storage/architecture-v1.json`](../storage/architecture-v1.json).
 
 ## Physical layout qualification
 
@@ -77,8 +85,9 @@ mutation (pre-existing WAL shared-memory lock-state mutation is permitted and
 reported), identity mismatch, failed integrity/FK checks, or a recovery state
 presented as current.
 
-The current schema version remains 34. No migration is needed for this
-runtime-only change, and old v34 databases retain their existing semantics.
+No schema migration is introduced by this runtime-only policy. Old v34
+databases retain their existing semantics through the repository's deterministic
+migration path.
 
 ## Consequences
 
