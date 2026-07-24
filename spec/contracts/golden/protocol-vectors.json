@@ -1,0 +1,84 @@
+{
+  "vectors": [
+    {
+      "name": "complete-query",
+      "operation": "query",
+      "status": "complete",
+      "state": "complete",
+      "freshness": "current",
+      "diagnostic": null,
+      "exit_class": "success",
+      "exit_code": 0
+    },
+    {
+      "name": "truncated-path",
+      "operation": "query",
+      "status": "partial",
+      "state": "partial",
+      "freshness": "current",
+      "diagnostic": "truncated_budget",
+      "exit_class": "success",
+      "exit_code": 0
+    },
+    {
+      "name": "stale-index",
+      "operation": "query",
+      "status": "unknown",
+      "state": "unknown",
+      "freshness": "stale",
+      "diagnostic": "stale_input",
+      "exit_class": "invalid_or_stale_input",
+      "exit_code": 3
+    },
+    {
+      "name": "partial-custom-analysis",
+      "operation": "analysis",
+      "status": "partial",
+      "state": "partial",
+      "freshness": "current",
+      "diagnostic": "missing_evidence",
+      "exit_class": "success",
+      "exit_code": 0
+    },
+    {
+      "name": "diff",
+      "operation": "diff",
+      "status": "complete",
+      "state": "complete",
+      "freshness": "current",
+      "diagnostic": null,
+      "exit_class": "success",
+      "exit_code": 0
+    },
+    {
+      "name": "refactoring-plan",
+      "operation": "refactoring",
+      "status": "conditional",
+      "state": "unknown",
+      "freshness": "current",
+      "diagnostic": "unknown",
+      "exit_class": "unknown",
+      "exit_code": 5
+    },
+    {
+      "name": "refuted-proof",
+      "operation": "proof",
+      "status": "refuted",
+      "state": "unknown",
+      "freshness": "current",
+      "diagnostic": "policy_refuted",
+      "exit_class": "policy_failure",
+      "exit_code": 4
+    },
+    {
+      "name": "infrastructure-error",
+      "operation": "index",
+      "status": "error",
+      "state": "unknown",
+      "freshness": "unverifiable",
+      "diagnostic": "backend_error",
+      "exit_class": "infrastructure_failure",
+      "exit_code": 6
+    }
+  ]
+}

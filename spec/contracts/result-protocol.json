@@ -1,0 +1,75 @@
+{
+  "format": "cidx.result-protocol/v1",
+  "protocol_version": 1,
+  "limits": {
+    "max_evidence_depth": 4,
+    "max_evidence_nodes": 256,
+    "max_text_bytes": 4096,
+    "max_human_output_bytes": 4096,
+    "max_result_depth": 8,
+    "max_result_properties": 64,
+    "max_result_items": 256,
+    "max_diagnostics": 64,
+    "max_evidence": 256,
+    "max_artifacts": 64,
+    "max_fact_sets": 32,
+    "max_replay_arguments": 256
+  },
+  "statuses": ["complete", "partial", "unknown", "refuted", "conditional", "error"],
+  "exit_classes": [
+    {"name": "success", "code": 0},
+    {"name": "usage", "code": 2},
+    {"name": "invalid_or_stale_input", "code": 3},
+    {"name": "policy_failure", "code": 4},
+    {"name": "unknown", "code": 5},
+    {"name": "infrastructure_failure", "code": 6}
+  ],
+  "freshness": ["current", "stale", "unverifiable"],
+  "completeness_states": ["complete", "partial", "unknown"],
+  "diagnostic_severities": ["info", "warning", "error"],
+  "evidence_classes": ["source", "derived", "inferred", "runtime", "assumption", "proof"],
+  "trust_levels": ["unverified", "producer-verified", "reader-verified"],
+  "event_kinds": ["progress", "diagnostic", "completed"],
+  "diagnostic_codes": [
+    "usage", "invalid_input", "stale_input", "timeout", "backend_error",
+    "policy_refuted", "unknown", "truncated_budget", "missing_evidence"
+  ],
+  "artifact_kinds": ["semantic-index", "query-result", "analysis", "diff", "refactoring-plan", "proof"],
+  "exit_reason_precedence": [
+    {"code": "usage", "class": "usage", "exit_code": 2},
+    {"code": "invalid_input", "class": "invalid_or_stale_input", "exit_code": 3},
+    {"code": "stale_input", "class": "invalid_or_stale_input", "exit_code": 3},
+    {"code": "policy_refuted", "class": "policy_failure", "exit_code": 4},
+    {"code": "timeout", "class": "infrastructure_failure", "exit_code": 6},
+    {"code": "backend_error", "class": "infrastructure_failure", "exit_code": 6},
+    {"code": "unknown", "class": "unknown", "exit_code": 5}
+  ],
+  "acceptance_vectors": [
+    {"name": "complete-query", "operation": "query", "status": "complete", "state": "complete", "freshness": "current", "diagnostic": null, "exit_class": "success", "exit_code": 0},
+    {"name": "truncated-path", "operation": "query", "status": "partial", "state": "partial", "freshness": "current", "diagnostic": "truncated_budget", "exit_class": "success", "exit_code": 0},
+    {"name": "stale-index", "operation": "query", "status": "unknown", "state": "unknown", "freshness": "stale", "diagnostic": "stale_input", "exit_class": "invalid_or_stale_input", "exit_code": 3},
+    {"name": "partial-custom-analysis", "operation": "analysis", "status": "partial", "state": "partial", "freshness": "current", "diagnostic": "missing_evidence", "exit_class": "success", "exit_code": 0},
+    {"name": "diff", "operation": "diff", "status": "complete", "state": "complete", "freshness": "current", "diagnostic": null, "exit_class": "success", "exit_code": 0},
+    {"name": "refactoring-plan", "operation": "refactoring", "status": "conditional", "state": "unknown", "freshness": "current", "diagnostic": "unknown", "exit_class": "unknown", "exit_code": 5},
+    {"name": "refuted-proof", "operation": "proof", "status": "refuted", "state": "unknown", "freshness": "current", "diagnostic": "policy_refuted", "exit_class": "policy_failure", "exit_code": 4},
+    {"name": "infrastructure-error", "operation": "index", "status": "error", "state": "unknown", "freshness": "unverifiable", "diagnostic": "backend_error", "exit_class": "infrastructure_failure", "exit_code": 6}
+  ],
+  "goldens": {
+    "result-envelope": {
+      "protocol": "cidx.result/v1",
+      "operation": "query",
+      "status": "complete",
+      "exit_class": "success",
+      "exit_code": 0,
+      "result": {"shape": "rows", "view": "symbol", "count": 1, "truncated": false, "rows": [{"id": 42, "name": "main", "kind": "function"}]},
+      "identity": {"workspace": "workspace://demo", "index": "semantic-index://demo", "fact_sets": ["symbols", "files"], "freshness": "current", "source_revision": "git:abc123", "source_fingerprint": "sha256:source"},
+      "producer": {"package": "cidx", "version": "0.53.0", "backend": "cpp", "schema_version": 1},
+      "completeness": {"state": "complete", "truncated": false, "stale": false, "budget": null},
+      "diagnostics": [],
+      "evidence": [{"id": "queryplan", "class": "derived", "trust": "producer-verified", "summary": "bounded QueryPlan execution", "source": "query://demo"}],
+      "artifacts": [{"kind": "query-result", "id": "query-result://demo", "schema_version": 1, "catalog_version": 1, "catalog_hash": "sha256:catalog"}]
+    },
+    "event": {"protocol": "cidx.event/v1", "sequence": 3, "operation": "index", "event": "progress", "message": "indexed 2 of 4 files", "completed": 2, "total": 4},
+    "error-status": {"status": "error", "code": "backend_error", "message": "backend unavailable", "exit_class": "infrastructure_failure", "exit_code": 6}
+  }
+}

@@ -957,10 +957,12 @@ protocol::ResultEnvelope Result::to_envelope() const {
     envelope.status = Status::Unknown;
   } else if (truncated) {
     envelope.status = Status::Partial;
-  } else {
+  } else if (index.freshness == "current") {
     envelope.status = Status::Complete;
+  } else {
+    envelope.status = Status::Unknown;
   }
-  envelope.identity.workspace = "unknown";
+  envelope.identity.workspace = index.workspace;
   envelope.identity.index =
       "semantic-index/schema/" + std::to_string(index.schema_version);
   envelope.identity.fact_sets =
@@ -1008,6 +1010,12 @@ protocol::ResultEnvelope Result::to_envelope() const {
         .severity = "error",
         .message = "index contents are stale for the workspace",
         .next_action = "re-index the affected sources before relying on this result"});
+  } else if (index.freshness != "current") {
+    envelope.diagnostics.push_back(protocol::Diagnostic{
+        .code = "unknown",
+        .severity = "warning",
+        .message = "index freshness could not be verified",
+        .next_action = "stamp or re-index the workspace before relying on this result"});
   }
   return envelope;
 }

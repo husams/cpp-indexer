@@ -4,6 +4,11 @@ All new machine-readable results use `cidx.result/v1`. The envelope owns
 meaning; renderers may choose a table or prose layout but must not upgrade a
 status or infer completeness from a message.
 
+The contract authority is `spec/contracts/result-protocol.json`. C++ and Python
+domains, schemas, goldens, and acceptance vectors are generated from it; run
+`uv run --project python python scripts/generate_result_protocol.py --check` to
+verify that checked-in outputs are current.
+
 ## Universal fields
 
 `operation`, `status`, `result`, `identity`, `producer`, `completeness`,
@@ -35,10 +40,18 @@ event stream. Progress and warnings are never written into the final JSON
 payload. Human output includes the status, first actionable reason, and next
 action for every non-complete result.
 
-Evidence is a bounded tree (maximum depth four and 256 nodes). Text, source
+Evidence is a bounded tree (maximum depth four and 256 nodes). Result payloads,
+arrays, properties, diagnostics, and replay arguments are bounded by the same
+contract. Text, source
 snippets, compiler arguments, environment-derived values, solver logs, and
 extension output pass through the shared redaction and size-limit policy before
-serialization.
+serialization. Human output is capped at 4096 UTF-8 bytes, with truncation only
+at code-point boundaries.
+
+Workspace identity is stable and derived from repository/component ownership
+metadata (`workspace:<sha1>`); adapters must not substitute `unknown`. When
+freshness cannot be established, the result remains `unknown` rather than
+claiming completeness.
 
 The C++ adapter is `cidx::protocol::ResultEnvelope`; Python uses
 `indexer.result_protocol.ResultEnvelope`. QueryPlan exposes

@@ -142,6 +142,31 @@ IndexIdentity Storage::index_identity() {
   const auto identity_version = meta_value(*this, "index_identity_version");
 
   IndexIdentity identity;
+  std::vector<std::string> owners;
+  auto owner_stmt = db_.prepare(
+      "SELECT DISTINCT COALESCE(r.remote_url, ''), COALESCE(r.name, ''), "
+      "c.path FROM component c LEFT JOIN repository r ON r.id = c.repository_id "
+      "ORDER BY 1, 2, 3");
+  while (owner_stmt.step()) {
+    const std::string remote = owner_stmt.col_text(0);
+    const std::string repository = owner_stmt.col_text(1);
+    const std::string component = owner_stmt.col_text(2);
+    owners.push_back(!remote.empty() ? "remote:" + remote
+                                     : !repository.empty()
+                                           ? "repo:" + repository
+                                           : "component:" + component);
+  }
+  std::ranges::sort(owners);
+  owners.erase(std::ranges::unique(owners).begin(), owners.end());
+  std::string owner_material;
+  for (const auto &owner : owners) {
+    owner_material += owner;
+    owner_material.push_back('\0');
+  }
+  if (owner_material.empty()) {
+    owner_material = "memory";
+  }
+  identity.workspace = "workspace:" + sha1_hex(owner_material);
   identity.source_revision = stored_revision;
   identity.source_fingerprint = stored_source;
   identity.index_config = stored_config;

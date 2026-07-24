@@ -68,10 +68,12 @@ TEST_CASE("result protocol keeps status, truncation, stale input, and exit class
   envelope.identity.freshness = "stale";
   envelope.completeness = {"unknown", false, true, std::nullopt};
   envelope.diagnostics.push_back({"stale_input", "error", "stale", "re-index"});
-  CHECK(envelope.exit_class() == ExitClass::Unknown);
+  CHECK(envelope.exit_class() == ExitClass::InvalidOrStaleInput);
+  CHECK(envelope.exit_code() == 3);
   CHECK(envelope.human_text().find("stale index") != std::string::npos);
 
   envelope.status = Status::Refuted;
+  envelope.diagnostics = {{"policy_refuted", "error", "claim refuted", "review evidence"}};
   CHECK(envelope.exit_class() == ExitClass::PolicyFailure);
   CHECK(envelope.exit_code() == 4);
 
@@ -87,6 +89,24 @@ TEST_CASE("result protocol keeps status, truncation, stale input, and exit class
   CHECK(envelope.exit_code() == 2);
 }
 
+TEST_CASE("result protocol rejects contradictory and weakly identified envelopes") {
+  using namespace cidx::protocol;
+  ResultEnvelope envelope = golden_envelope();
+  envelope.completeness.state = "unknown";
+  CHECK_FALSE(envelope.valid());
+  envelope = golden_envelope();
+  envelope.identity.workspace = "unknown";
+  CHECK_FALSE(envelope.valid());
+  envelope = golden_envelope();
+  envelope.status = Status::Error;
+  envelope.completeness = {"unknown", false, false, std::nullopt};
+  envelope.diagnostics = {{"backend_error", "error", "TOKEN=secret", "PASSWORD=next"}};
+  CHECK(envelope.human_text().find("TOKEN=secret") == std::string::npos);
+  CHECK(envelope.human_text().find("PASSWORD=next") == std::string::npos);
+  CHECK(envelope.human_text().find("<redacted:secret>") != std::string::npos);
+  CHECK(envelope.error_status_json().t == cidx::json_out::Value::T::Obj);
+}
+
 TEST_CASE("progress events and redaction stay separate from final results") {
   using namespace cidx::protocol;
   const ProgressEvent event{3, "index", "progress", "TOKEN=secret", 2, 4};
@@ -95,4 +115,37 @@ TEST_CASE("progress events and redaction stay separate from final results") {
   CHECK(json.find("<redacted:secret>") != std::string::npos);
   CHECK(redact_text(std::string(5000, 'x')).find("<redacted:size-limit>") !=
         std::string::npos);
+  const ProgressEvent golden_event{3, "index", "progress", "indexed 2 of 4 files", 2, 4};
+  CHECK(cidx::json_out::dumps_indent2(golden_event.to_json()) ==
+        read_file(CIDX_EVENT_PROTOCOL_GOLDEN));
+}
+
+TEST_CASE("cross-language acceptance vectors and error reduction are executable") {
+  using namespace cidx::protocol;
+  for (const auto &vector : generated::kAcceptanceVectors) {
+    ResultEnvelope envelope = golden_envelope();
+    envelope.operation = std::string(vector.operation);
+    envelope.status = vector.status;
+    envelope.identity.freshness = std::string(vector.freshness);
+    envelope.completeness.state = std::string(vector.completeness_state);
+    envelope.completeness.stale = vector.freshness == "stale";
+    envelope.completeness.truncated = vector.status == Status::Partial &&
+                                     vector.diagnostic == "truncated_budget";
+    envelope.diagnostics.clear();
+    if (!vector.diagnostic.empty()) {
+      envelope.diagnostics.push_back({std::string(vector.diagnostic), "error",
+                                      "vector diagnostic", "next"});
+    }
+    CHECK(envelope.valid());
+    CHECK(envelope.exit_class() == vector.exit_class);
+    CHECK(envelope.exit_code() == vector.exit_code);
+    CHECK(envelope.to_json().t == cidx::json_out::Value::T::Obj);
+  }
+
+  ResultEnvelope error = golden_envelope();
+  error.status = Status::Error;
+  error.completeness = {"unknown", false, false, std::nullopt};
+  error.diagnostics = {{"backend_error", "error", "backend unavailable", std::nullopt}};
+  CHECK(cidx::json_out::dumps_indent2(error.error_status_json()) ==
+        read_file(CIDX_ERROR_STATUS_GOLDEN));
 }

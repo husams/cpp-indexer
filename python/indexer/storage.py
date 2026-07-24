@@ -70,6 +70,7 @@ class IndexIdentity:
     index_config: Optional[str]
     index_config_fingerprint: Optional[str]
     freshness: str  # current | stale | unverifiable
+    workspace: str = "workspace:memory"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -6021,9 +6022,23 @@ class Storage:
                 "compile_options": row["compile_options"],
                 "driver": row["driver"],
                 "indexed": bool(row["indexed"]),
+                "component_path": row["component_path"],
+                "repository_name": row["repository_name"],
+                "remote_url": row["remote_url"],
             }
             for row in rows
         ]
+
+    @staticmethod
+    def _workspace_identity(files: list[dict[str, Any]]) -> str:
+        owners = sorted({
+            f"remote:{file['remote_url']}" if file["remote_url"]
+            else f"repo:{file['repository_name']}" if file["repository_name"]
+            else f"component:{file['component_path']}"
+            for file in files
+        })
+        material = "\0".join(owners) if owners else "memory"
+        return f"workspace:{hashlib.sha1(material.encode()).hexdigest()}"
 
     def _source_manifest(
         self, files: list[dict[str, Any]],
@@ -6095,6 +6110,7 @@ class Storage:
             index_config=values["index_config"],
             index_config_fingerprint=values["index_config_fingerprint"],
             freshness=freshness,
+            workspace=self._workspace_identity(files),
         )
 
     def stamp_index_identity(self) -> None:

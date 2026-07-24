@@ -3,63 +3,86 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
 import json
 import re
 from typing import Any, Iterable
 
 from ._version import FULL_VERSION
 from .generated_catalog import CATALOG_HASH, CATALOG_VERSION
+from .generated_result_protocol import (
+    ACCEPTANCE_VECTORS,
+    ARTIFACT_KINDS,
+    COMPLETENESS_STATES,
+    DIAGNOSTIC_CODES,
+    DIAGNOSTIC_SEVERITIES,
+    EVIDENCE_CLASSES,
+    EVENT_KINDS,
+    EXIT_CODES,
+    EXIT_REASON_PRECEDENCE,
+    FRESHNESS,
+    MAX_ARTIFACTS,
+    MAX_DIAGNOSTICS,
+    MAX_EVIDENCE,
+    MAX_EVIDENCE_DEPTH,
+    MAX_EVIDENCE_NODES,
+    MAX_FACT_SETS,
+    MAX_HUMAN_OUTPUT_BYTES,
+    MAX_REPLAY_ARGUMENTS,
+    MAX_RESULT_DEPTH,
+    MAX_RESULT_ITEMS,
+    MAX_RESULT_PROPERTIES,
+    MAX_TEXT_BYTES,
+    EVENT_PROTOCOL as GENERATED_EVENT_PROTOCOL,
+    PROTOCOL as GENERATED_PROTOCOL,
+    PROTOCOL_VERSION,
+    Status,
+    ExitClass,
+    TRUST_LEVELS,
+)
 
-PROTOCOL = "cidx.result/v1"
-EVENT_PROTOCOL = "cidx.event/v1"
-MAX_EVIDENCE_DEPTH = 4
-MAX_EVIDENCE_NODES = 256
-MAX_TEXT_BYTES = 4096
-
-
-class Status(StrEnum):
-    COMPLETE = "complete"
-    PARTIAL = "partial"
-    UNKNOWN = "unknown"
-    REFUTED = "refuted"
-    CONDITIONAL = "conditional"
-    ERROR = "error"
-
-
-class ExitClass(StrEnum):
-    SUCCESS = "success"
-    USAGE = "usage"
-    INVALID_OR_STALE_INPUT = "invalid_or_stale_input"
-    POLICY_FAILURE = "policy_failure"
-    UNKNOWN = "unknown"
-    INFRASTRUCTURE_FAILURE = "infrastructure_failure"
-
-
-_EXIT_CODES = {
-    ExitClass.SUCCESS: 0,
-    ExitClass.USAGE: 2,
-    ExitClass.INVALID_OR_STALE_INPUT: 3,
-    ExitClass.POLICY_FAILURE: 4,
-    ExitClass.UNKNOWN: 5,
-    ExitClass.INFRASTRUCTURE_FAILURE: 6,
-}
+PROTOCOL = GENERATED_PROTOCOL
+EVENT_PROTOCOL = GENERATED_EVENT_PROTOCOL
 _SECRET = re.compile(r"(TOKEN|PASSWORD|SECRET)([=:])[^\s,;]+")
+_PLACEHOLDER_IDENTITIES = {"", "unknown", "workspace:unknown", "workspace://unknown"}
 
 
 def redact_text(value: str, max_bytes: int = MAX_TEXT_BYTES) -> str:
     """Redact common secret assignments and bound untrusted text."""
     value = _SECRET.sub(lambda match: f"{match.group(1)}{match.group(2)}<redacted:secret>", value)
-    if len(value) <= max_bytes:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
         return value
     suffix = "...<redacted:size-limit>"
-    if max_bytes <= len(suffix):
-        return suffix[:max_bytes]
-    return value[: max_bytes - len(suffix)] + suffix
+    suffix_bytes = suffix.encode("utf-8")
+    if max_bytes <= len(suffix_bytes):
+        return suffix_bytes[:max_bytes].decode("utf-8", "ignore")
+    prefix = encoded[: max_bytes - len(suffix_bytes)]
+    return prefix.decode("utf-8", "ignore") + suffix
 
 
 def redact_arguments(arguments: Iterable[str], max_bytes: int = MAX_TEXT_BYTES) -> list[str]:
     return [redact_text(argument, max_bytes) for argument in arguments]
+
+
+def _sanitize_value(value: Any, depth: int = 0) -> Any:
+    if depth > MAX_RESULT_DEPTH:
+        raise ValueError("result payload exceeds protocol depth")
+    if isinstance(value, str):
+        return redact_text(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, (list, tuple)):
+        if len(value) > MAX_RESULT_ITEMS:
+            raise ValueError("result payload exceeds protocol item bound")
+        return [_sanitize_value(item, depth + 1) for item in value]
+    if isinstance(value, dict):
+        if len(value) > MAX_RESULT_PROPERTIES:
+            raise ValueError("result payload exceeds protocol property bound")
+        return {
+            redact_text(str(key)): _sanitize_value(item, depth + 1)
+            for key, item in value.items()
+        }
+    raise ValueError(f"unsupported result payload type: {type(value).__name__}")
 
 
 @dataclass(frozen=True)
@@ -116,6 +139,8 @@ class Evidence:
     children: tuple["Evidence", ...] = ()
 
     def to_dict(self, depth: int = 1, count: list[int] | None = None) -> dict[str, Any]:
+        if self.evidence_class not in EVIDENCE_CLASSES or self.trust not in TRUST_LEVELS:
+            raise ValueError("evidence domain is invalid")
         if depth > MAX_EVIDENCE_DEPTH:
             raise ValueError("evidence tree exceeds protocol bounds")
         count = count if count is not None else [0]
@@ -123,7 +148,7 @@ class Evidence:
         if count[0] > MAX_EVIDENCE_NODES:
             raise ValueError("evidence tree exceeds protocol bounds")
         out: dict[str, Any] = {
-            "id": self.id,
+            "id": redact_text(self.id),
             "class": self.evidence_class,
             "trust": self.trust,
             "summary": redact_text(self.summary),
@@ -144,12 +169,16 @@ class ArtifactRef:
     catalog_hash: str = CATALOG_HASH
 
     def to_dict(self) -> dict[str, Any]:
+        if self.kind not in ARTIFACT_KINDS:
+            raise ValueError("artifact kind is invalid")
+        if self.schema_version < 1 or self.catalog_version < 1:
+            raise ValueError("artifact versions must be positive")
         return {
             "kind": self.kind,
             "id": redact_text(self.id),
             "schema_version": self.schema_version,
             "catalog_version": self.catalog_version,
-            "catalog_hash": self.catalog_hash,
+            "catalog_hash": redact_text(self.catalog_hash),
         }
 
 
@@ -159,6 +188,8 @@ class ReplayInput:
     arguments: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
+        if len(self.arguments) > MAX_REPLAY_ARGUMENTS:
+            raise ValueError("replay arguments exceed protocol bounds")
         return {"command": redact_text(self.command), "arguments": redact_arguments(self.arguments)}
 
 
@@ -168,6 +199,8 @@ class ResourceMetadata:
     peak_bytes: int | None = None
 
     def to_dict(self) -> dict[str, int | None]:
+        if (self.elapsed_ms is not None and self.elapsed_ms < 0) or (self.peak_bytes is not None and self.peak_bytes < 0):
+            raise ValueError("resource metadata cannot be negative")
         return {"elapsed_ms": self.elapsed_ms, "peak_bytes": self.peak_bytes}
 
 
@@ -186,60 +219,103 @@ class ResultEnvelope:
     resources: ResourceMetadata | None = None
 
     def exit_class(self) -> ExitClass:
+        for code, exit_name, _ in EXIT_REASON_PRECEDENCE:
+            if any(diagnostic.code == code for diagnostic in self.diagnostics):
+                return ExitClass(exit_name)
         if self.status is Status.REFUTED:
             return ExitClass.POLICY_FAILURE
         if self.status is Status.ERROR:
-            codes = {diagnostic.code for diagnostic in self.diagnostics}
-            if "usage" in codes:
-                return ExitClass.USAGE
-            if codes & {"invalid_input", "stale_input"}:
-                return ExitClass.INVALID_OR_STALE_INPUT
-            if codes & {"backend_error", "timeout"}:
-                return ExitClass.INFRASTRUCTURE_FAILURE
             return ExitClass.INFRASTRUCTURE_FAILURE
-        if self.status is Status.UNKNOWN:
+        if self.status is Status.UNKNOWN or self.status is Status.CONDITIONAL:
             return ExitClass.UNKNOWN
         return ExitClass.SUCCESS
 
     def exit_code(self) -> int:
-        return _EXIT_CODES[self.exit_class()]
+        return EXIT_CODES[self.exit_class().value]
 
     def validate(self) -> None:
-        if not self.operation or not self.identity.workspace or not self.identity.index:
+        if not isinstance(self.status, Status):
+            raise ValueError("result envelope status is invalid")
+        if not re.fullmatch(r"[a-z][a-z0-9._-]*", self.operation):
+            raise ValueError("result envelope operation is invalid")
+        if self.identity.workspace in _PLACEHOLDER_IDENTITIES or self.identity.index in _PLACEHOLDER_IDENTITIES:
             raise ValueError("result envelope identity is incomplete")
-        if not self.identity.fact_sets:
+        if not self.identity.fact_sets or len(self.identity.fact_sets) > MAX_FACT_SETS or any(not isinstance(item, str) for item in self.identity.fact_sets):
             raise ValueError("result envelope must identify fact sets")
-        if not self.producer.package or not self.producer.version or not self.producer.backend:
+        if any(len(item.encode("utf-8")) > MAX_TEXT_BYTES for item in (self.identity.workspace, self.identity.index, *self.identity.fact_sets)):
+            raise ValueError("result envelope identity exceeds protocol bounds")
+        if any(value is not None and not isinstance(value, str) for value in (self.identity.source_revision, self.identity.source_fingerprint)):
+            raise ValueError("result envelope source identity is invalid")
+        if any(value is not None and len(value.encode("utf-8")) > MAX_TEXT_BYTES for value in (self.identity.source_revision, self.identity.source_fingerprint)):
+            raise ValueError("result envelope source identity exceeds protocol bounds")
+        if self.identity.freshness not in FRESHNESS:
+            raise ValueError("result envelope freshness is invalid")
+        if not isinstance(self.producer.package, str) or not isinstance(self.producer.version, str) or not isinstance(self.producer.backend, str) or not self.producer.package or not self.producer.version or not self.producer.backend:
             raise ValueError("result envelope producer is incomplete")
-        if self.completeness.truncated and self.completeness.state == "complete":
-            raise ValueError("truncated results cannot be complete")
-        if self.completeness.stale and self.identity.freshness != "stale":
-            raise ValueError("stale completeness must identify a stale index")
+        if any(len(value.encode("utf-8")) > MAX_TEXT_BYTES for value in (self.producer.package, self.producer.version, self.producer.backend)):
+            raise ValueError("result envelope producer exceeds protocol bounds")
+        if self.producer.schema_version < 1:
+            raise ValueError("producer schema version must be positive")
+        if self.completeness.state not in COMPLETENESS_STATES:
+            raise ValueError("result envelope completeness state is invalid")
+        if self.completeness.stale != (self.identity.freshness == "stale"):
+            raise ValueError("stale completeness must match index freshness")
+        if self.completeness.budget is not None and self.completeness.budget < 0:
+            raise ValueError("completeness budget cannot be negative")
+        expected_state = {Status.COMPLETE: "complete", Status.PARTIAL: "partial"}.get(self.status)
+        if expected_state is not None and self.completeness.state != expected_state:
+            raise ValueError("status and completeness state disagree")
+        if self.completeness.truncated and self.status is not Status.PARTIAL:
+            raise ValueError("truncated results must be partial")
+        if self.identity.freshness == "stale" and self.status is not Status.UNKNOWN:
+            raise ValueError("stale indexes must be unknown")
+        if self.status in {Status.UNKNOWN, Status.CONDITIONAL, Status.REFUTED, Status.ERROR} and not self.diagnostics:
+            raise ValueError("non-complete outcomes require a stable diagnostic")
+        codes = {diagnostic.code for diagnostic in self.diagnostics}
+        if self.status is Status.REFUTED and "policy_refuted" not in codes:
+            raise ValueError("refuted outcomes require policy_refuted")
+        if self.status is Status.ERROR and not codes.intersection(DIAGNOSTIC_CODES):
+            raise ValueError("error outcomes require a stable diagnostic")
+        if any(d.code not in DIAGNOSTIC_CODES or d.severity not in DIAGNOSTIC_SEVERITIES for d in self.diagnostics):
+            raise ValueError("diagnostic domain is invalid")
+        if len(self.diagnostics) > MAX_DIAGNOSTICS or len(self.evidence) > MAX_EVIDENCE or len(self.artifacts) > MAX_ARTIFACTS:
+            raise ValueError("result envelope collection exceeds protocol bounds")
+        if len(self.identity.fact_sets) != len(set(self.identity.fact_sets)):
+            raise ValueError("fact sets must be unique")
+        if self.replay is not None and len(self.replay.arguments) > MAX_REPLAY_ARGUMENTS:
+            raise ValueError("replay arguments exceed protocol bounds")
+        _sanitize_value(self.result)
         count = [0]
         for node in self.evidence:
             node.to_dict(count=count)
+        for artifact in self.artifacts:
+            artifact.to_dict()
+        if self.replay is not None:
+            self.replay.to_dict()
+        if self.resources is not None:
+            self.resources.to_dict()
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
         out: dict[str, Any] = {
             "protocol": PROTOCOL,
-            "operation": self.operation,
+                "operation": redact_text(self.operation),
             "status": self.status.value,
             "exit_class": self.exit_class().value,
             "exit_code": self.exit_code(),
-            "result": self.result,
+            "result": _sanitize_value(self.result),
             "identity": {
-                "workspace": self.identity.workspace,
-                "index": self.identity.index,
-                "fact_sets": list(self.identity.fact_sets),
-                "freshness": self.identity.freshness,
-                "source_revision": self.identity.source_revision,
-                "source_fingerprint": self.identity.source_fingerprint,
+                "workspace": redact_text(self.identity.workspace),
+                "index": redact_text(self.identity.index),
+                "fact_sets": [redact_text(item) for item in self.identity.fact_sets],
+                "freshness": redact_text(self.identity.freshness),
+                "source_revision": redact_text(self.identity.source_revision) if self.identity.source_revision is not None else None,
+                "source_fingerprint": redact_text(self.identity.source_fingerprint) if self.identity.source_fingerprint is not None else None,
             },
             "producer": {
-                "package": self.producer.package,
-                "version": self.producer.version,
-                "backend": self.producer.backend,
+                "package": redact_text(self.producer.package),
+                "version": redact_text(self.producer.version),
+                "backend": redact_text(self.producer.backend),
                 "schema_version": self.producer.schema_version,
             },
             "completeness": {
@@ -261,6 +337,19 @@ class ResultEnvelope:
     def dumps(self) -> str:
         return json.dumps(self.to_dict(), indent=2, ensure_ascii=True)
 
+    def error_status_dict(self) -> dict[str, Any]:
+        self.validate()
+        if self.status is not Status.ERROR or not self.diagnostics:
+            raise ValueError("error status requires an error envelope")
+        diagnostic = self.diagnostics[0]
+        return {
+            "status": "error",
+            "code": diagnostic.code,
+            "message": redact_text(diagnostic.message),
+            "exit_class": self.exit_class().value,
+            "exit_code": self.exit_code(),
+        }
+
     def human_text(self) -> str:
         out = f"status: {self.status.value}"
         if self.completeness.truncated:
@@ -268,17 +357,17 @@ class ResultEnvelope:
         if self.completeness.stale:
             out += " (stale index)"
         if self.diagnostics:
-            out += f"\nreason: {self.diagnostics[0].message}"
+            out += f"\nreason: {redact_text(self.diagnostics[0].message)}"
             if self.diagnostics[0].next_action:
-                out += f"\nnext: {self.diagnostics[0].next_action}"
-        return out
+                out += f"\nnext: {redact_text(self.diagnostics[0].next_action)}"
+        return redact_text(out, MAX_HUMAN_OUTPUT_BYTES)
 
 
 def from_query_result(result: Any, index: Any, *, operation: str = "query") -> ResultEnvelope:
     """Adapt a QueryPlan Result without allowing renderers to reclassify it."""
     stale = index.freshness == "stale"
-    status = Status.UNKNOWN if stale else Status.PARTIAL if result.truncated else Status.COMPLETE
-    state = "unknown" if stale else "partial" if result.truncated else "complete"
+    status = Status.UNKNOWN if stale else Status.PARTIAL if result.truncated else Status.COMPLETE if index.freshness == "current" else Status.UNKNOWN
+    state = "unknown" if status is Status.UNKNOWN else "partial" if result.truncated else "complete"
     payload: dict[str, Any] = {
         "shape": result.shape,
         "view": result.view,
@@ -291,6 +380,7 @@ def from_query_result(result: Any, index: Any, *, operation: str = "query") -> R
         operation=operation,
         status=status,
         identity=Identity(
+            workspace=index.workspace,
             index=f"semantic-index/schema/{index.schema_version}",
             fact_sets=("symbols" if result.view == "symbol" else "entities",),
             freshness=index.freshness,
@@ -314,6 +404,11 @@ def from_query_result(result: Any, index: Any, *, operation: str = "query") -> R
             "stale_input", "error", "index contents are stale for the workspace",
             "re-index the affected sources before relying on this result",
         ))
+    elif index.freshness != "current" and not result.truncated:
+        envelope.diagnostics.append(Diagnostic(
+            "unknown", "warning", "index freshness could not be verified",
+            "stamp or re-index the workspace before relying on this result",
+        ))
     return envelope
 
 
@@ -327,10 +422,14 @@ class ProgressEvent:
     total: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        if self.sequence < 0 or self.event not in EVENT_KINDS or not re.fullmatch(r"[a-z][a-z0-9._-]*", self.operation) or len(self.operation.encode("utf-8")) > MAX_TEXT_BYTES:
+            raise ValueError("event metadata is invalid")
+        if (self.completed is not None and self.completed < 0) or (self.total is not None and self.total < 0):
+            raise ValueError("event progress cannot be negative")
         out: dict[str, Any] = {
             "protocol": EVENT_PROTOCOL,
             "sequence": self.sequence,
-            "operation": self.operation,
+            "operation": redact_text(self.operation),
             "event": self.event,
             "message": redact_text(self.message),
         }

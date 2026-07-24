@@ -12,32 +12,32 @@ using json_out::Object;
 using json_out::Value;
 
 Value optional_string(const std::optional<std::string> &value) {
-  return value ? Value::of(*value) : Value::null();
+  return value ? Value::of(redact_text(*value)) : Value::null();
 }
 
 Value identity_json(const Identity &identity) {
   Array fact_sets;
   for (const auto &fact_set : identity.fact_sets) {
-    fact_sets.push_back(Value::of(fact_set));
+    fact_sets.push_back(Value::of(redact_text(fact_set)));
   }
-  Object out{{"workspace", Value::of(identity.workspace)},
-             {"index", Value::of(identity.index)},
+  Object out{{"workspace", Value::of(redact_text(identity.workspace))},
+             {"index", Value::of(redact_text(identity.index))},
              {"fact_sets", Value::arr(std::move(fact_sets))},
-             {"freshness", Value::of(identity.freshness)},
+             {"freshness", Value::of(redact_text(identity.freshness))},
              {"source_revision", optional_string(identity.source_revision)},
              {"source_fingerprint", optional_string(identity.source_fingerprint)}};
   return Value::obj(std::move(out));
 }
 
 Value producer_json(const Producer &producer) {
-  return Value::obj({{"package", Value::of(producer.package)},
-                     {"version", Value::of(producer.version)},
-                     {"backend", Value::of(producer.backend)},
+  return Value::obj({{"package", Value::of(redact_text(producer.package))},
+                     {"version", Value::of(redact_text(producer.version))},
+                     {"backend", Value::of(redact_text(producer.backend))},
                      {"schema_version", Value::of(producer.schema_version)}});
 }
 
 Value completeness_json(const Completeness &completeness) {
-  return Value::obj({{"state", Value::of(completeness.state)},
+  return Value::obj({{"state", Value::of(redact_text(completeness.state))},
                      {"truncated", Value::of(completeness.truncated)},
                      {"stale", Value::of(completeness.stale)},
                      {"budget", completeness.budget ? Value::of(*completeness.budget)
@@ -45,8 +45,8 @@ Value completeness_json(const Completeness &completeness) {
 }
 
 Value diagnostic_json(const Diagnostic &diagnostic) {
-  Object out{{"code", Value::of(diagnostic.code)},
-             {"severity", Value::of(diagnostic.severity)},
+  Object out{{"code", Value::of(redact_text(diagnostic.code))},
+             {"severity", Value::of(redact_text(diagnostic.severity))},
              {"message", Value::of(redact_text(diagnostic.message))}};
   if (diagnostic.next_action) {
     out.emplace_back("next_action", Value::of(redact_text(*diagnostic.next_action)));
@@ -54,14 +54,34 @@ Value diagnostic_json(const Diagnostic &diagnostic) {
   return Value::obj(std::move(out));
 }
 
+template <std::size_t N>
+bool one_of(std::string_view value,
+            const std::array<std::string_view, N> &allowed) {
+  return std::ranges::find(allowed, value) != allowed.end();
+}
+
+bool valid_identifier(std::string_view value) {
+  if (value.empty() || value.front() < 'a' || value.front() > 'z') {
+    return false;
+  }
+  return std::ranges::all_of(value, [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+           c == '.' || c == '_' || c == '-';
+  });
+}
+
 Value evidence_json(const EvidenceNode &node, std::size_t depth,
                     std::size_t &node_count) {
   if (depth > kMaxEvidenceDepth || ++node_count > kMaxEvidenceNodes) {
     throw std::invalid_argument("evidence tree exceeds protocol bounds");
   }
-  Object out{{"id", Value::of(node.id)},
-             {"class", Value::of(node.evidence_class)},
-             {"trust", Value::of(node.trust)},
+  if (!one_of(node.evidence_class, generated::kEvidenceClasses) ||
+      !one_of(node.trust, generated::kTrustLevels)) {
+    throw std::invalid_argument("invalid evidence domain");
+  }
+  Object out{{"id", Value::of(redact_text(node.id))},
+             {"class", Value::of(redact_text(node.evidence_class))},
+             {"trust", Value::of(redact_text(node.trust))},
              {"summary", Value::of(redact_text(node.summary))}};
   if (node.source) {
     out.emplace_back("source", Value::of(redact_text(*node.source)));
@@ -79,114 +99,189 @@ Value evidence_json(const EvidenceNode &node, std::size_t depth,
 Value artifacts_json(const std::vector<ArtifactRef> &artifacts) {
   Array out;
   for (const auto &artifact : artifacts) {
+    if (!one_of(artifact.kind, generated::kArtifactKinds)) {
+      throw std::invalid_argument("invalid artifact kind");
+    }
+    if (artifact.schema_version < 1 || artifact.catalog_version < 1) {
+      throw std::invalid_argument("artifact versions must be positive");
+    }
     out.push_back(Value::obj(
-        {{"kind", Value::of(artifact.kind)},
+        {{"kind", Value::of(redact_text(artifact.kind))},
          {"id", Value::of(redact_text(artifact.id))},
          {"schema_version", Value::of(artifact.schema_version)},
          {"catalog_version", Value::of(artifact.catalog_version)},
-         {"catalog_hash", Value::of(artifact.catalog_hash)}}));
+         {"catalog_hash", Value::of(redact_text(artifact.catalog_hash))}}));
   }
   return Value::arr(std::move(out));
+}
+
+Value bounded_value(const Value &value, std::size_t depth) {
+  if (depth > generated::kMaxResultDepth) {
+    throw std::invalid_argument("result payload exceeds protocol depth");
+  }
+  switch (value.t) {
+  case Value::T::Null:
+  case Value::T::Bool:
+  case Value::T::Int:
+    return value;
+  case Value::T::Str:
+    return Value::of(redact_text(value.s));
+  case Value::T::Arr: {
+    if (value.a.size() > generated::kMaxResultItems) {
+      throw std::invalid_argument("result payload exceeds protocol item bound");
+    }
+    Array out;
+    out.reserve(value.a.size());
+    for (const auto &item : value.a) {
+      out.push_back(bounded_value(item, depth + 1));
+    }
+    return Value::arr(std::move(out));
+  }
+  case Value::T::Obj: {
+    if (value.o.size() > generated::kMaxResultProperties) {
+      throw std::invalid_argument("result payload exceeds protocol property bound");
+    }
+    Object out;
+    out.reserve(value.o.size());
+    for (const auto &[key, item] : value.o) {
+      out.emplace_back(redact_text(key), bounded_value(item, depth + 1));
+    }
+    return Value::obj(std::move(out));
+  }
+  }
+  throw std::invalid_argument("unsupported result payload type");
 }
 
 } // namespace
 
 std::string_view status_name(Status status) {
-  switch (status) {
-  case Status::Complete:
-    return "complete";
-  case Status::Partial:
-    return "partial";
-  case Status::Unknown:
-    return "unknown";
-  case Status::Refuted:
-    return "refuted";
-  case Status::Conditional:
-    return "conditional";
-  case Status::Error:
-    return "error";
+  const auto index = static_cast<std::size_t>(status);
+  if (index >= generated::kStatusNames.size()) {
+    throw std::invalid_argument("invalid result status");
   }
-  return "error";
+  return generated::kStatusNames[index];
 }
 
 std::string_view exit_class_name(ExitClass exit_class) {
-  switch (exit_class) {
-  case ExitClass::Success:
-    return "success";
-  case ExitClass::Usage:
-    return "usage";
-  case ExitClass::InvalidOrStaleInput:
-    return "invalid_or_stale_input";
-  case ExitClass::PolicyFailure:
-    return "policy_failure";
-  case ExitClass::Unknown:
-    return "unknown";
-  case ExitClass::InfrastructureFailure:
-    return "infrastructure_failure";
+  const auto index = static_cast<std::size_t>(exit_class);
+  if (index >= generated::kExitClassNames.size()) {
+    throw std::invalid_argument("invalid exit class");
   }
-  return "infrastructure_failure";
+  return generated::kExitClassNames[index];
 }
 
 int exit_code(ExitClass exit_class) {
-  switch (exit_class) {
-  case ExitClass::Success:
-    return 0;
-  case ExitClass::Usage:
-    return 2;
-  case ExitClass::InvalidOrStaleInput:
-    return 3;
-  case ExitClass::PolicyFailure:
-    return 4;
-  case ExitClass::Unknown:
-    return 5;
-  case ExitClass::InfrastructureFailure:
-    return 6;
+  const auto index = static_cast<std::size_t>(exit_class);
+  if (index >= generated::kExitCodes.size()) {
+    throw std::invalid_argument("invalid exit class");
   }
-  return 6;
+  return generated::kExitCodes[index];
 }
 
 ExitClass ResultEnvelope::exit_class() const {
+  for (const auto &rule : generated::kExitReasonPrecedence) {
+    if (std::any_of(diagnostics.begin(), diagnostics.end(),
+                    [&rule](const Diagnostic &diagnostic) {
+                      return diagnostic.code == rule.code;
+                    })) {
+      return rule.exit_class;
+    }
+  }
   if (status == Status::Refuted) {
     return ExitClass::PolicyFailure;
   }
   if (status == Status::Error) {
-    for (const auto &diagnostic : diagnostics) {
-      if (diagnostic.code == "usage") {
-        return ExitClass::Usage;
-      }
-      if (diagnostic.code == "invalid_input" ||
-          diagnostic.code == "stale_input") {
-        return ExitClass::InvalidOrStaleInput;
-      }
-      if (diagnostic.code == "backend_error" ||
-          diagnostic.code == "timeout") {
-        return ExitClass::InfrastructureFailure;
-      }
-    }
     return ExitClass::InfrastructureFailure;
   }
-  if (status == Status::Unknown) {
-    return ExitClass::Unknown;
-  }
-  return ExitClass::Success;
+  return status == Status::Unknown || status == Status::Conditional
+             ? ExitClass::Unknown
+             : ExitClass::Success;
 }
 
 int ResultEnvelope::exit_code() const { return protocol::exit_code(exit_class()); }
 
 bool ResultEnvelope::valid() const {
-  if (operation.empty() || identity.workspace.empty() || identity.index.empty() ||
-      identity.fact_sets.empty() || producer.package.empty() ||
-      producer.version.empty() || producer.backend.empty()) {
+  if (!valid_identifier(operation) ||
+      static_cast<std::size_t>(status) >= generated::kStatusNames.size() ||
+      operation.empty() || identity.workspace.empty() || identity.index.empty() ||
+      identity.workspace == "unknown" || identity.workspace == "workspace:unknown" ||
+      identity.index == "unknown" || identity.fact_sets.empty() ||
+      identity.fact_sets.size() > generated::kMaxFactSets || producer.package.empty() ||
+      producer.version.empty() || producer.backend.empty() ||
+      producer.schema_version < 1) {
     return false;
   }
-  if (completeness.truncated && completeness.state == "complete") {
+  if (!one_of(identity.freshness, generated::kFreshness) ||
+      !one_of(completeness.state, generated::kCompletenessStates) ||
+      std::ranges::any_of(identity.fact_sets, [this](const auto &fact_set) {
+        return std::ranges::count(identity.fact_sets, fact_set) > 1;
+      }) ||
+      completeness.stale != (identity.freshness == "stale")) {
     return false;
   }
-  if (completeness.stale && identity.freshness != "stale") {
+  const auto has_code = [this](std::string_view code) {
+    return std::ranges::any_of(diagnostics, [code](const auto &diagnostic) {
+      return diagnostic.code == code;
+    });
+  };
+  if ((status == Status::Complete &&
+       (completeness.state != "complete" || completeness.truncated ||
+        completeness.stale || identity.freshness != "current")) ||
+      (status == Status::Partial && completeness.state != "partial") ||
+      (status == Status::Unknown && completeness.state != "unknown") ||
+      (status == Status::Conditional && completeness.state != "unknown") ||
+      (status == Status::Refuted && completeness.state != "unknown") ||
+      (status == Status::Error && completeness.state != "unknown") ||
+      (completeness.truncated && status != Status::Partial) ||
+      (identity.freshness == "stale" && status != Status::Unknown)) {
+    return false;
+  }
+  if (status == Status::Unknown && !has_code("stale_input") &&
+      !has_code("unknown") && !has_code("missing_evidence")) {
+    return false;
+  }
+  if (status == Status::Conditional && !has_code("unknown") &&
+      !has_code("missing_evidence")) {
+    return false;
+  }
+  if (status == Status::Refuted && !has_code("policy_refuted")) {
+    return false;
+  }
+  if (status == Status::Error &&
+      !std::any_of(generated::kExitReasonPrecedence.begin(),
+                   generated::kExitReasonPrecedence.end(),
+                   [&has_code](const auto &rule) { return has_code(rule.code); })) {
+    return false;
+  }
+  if (diagnostics.size() > generated::kMaxDiagnostics ||
+      evidence.size() > generated::kMaxEvidence ||
+      artifacts.size() > generated::kMaxArtifacts ||
+      (replay && replay->arguments.size() > generated::kMaxReplayArguments)) {
+    return false;
+  }
+  if ((completeness.budget && *completeness.budget < 0) ||
+      (resources && resources->elapsed_ms && *resources->elapsed_ms < 0) ||
+      (resources && resources->peak_bytes && *resources->peak_bytes < 0)) {
+    return false;
+  }
+  for (const auto &diagnostic : diagnostics) {
+    if (!one_of(diagnostic.code, generated::kDiagnosticCodes) ||
+        !one_of(diagnostic.severity, generated::kDiagnosticSeverities)) {
+      return false;
+    }
+  }
+  for (const auto &artifact : artifacts) {
+    if (!one_of(artifact.kind, generated::kArtifactKinds) ||
+        artifact.schema_version < 1 || artifact.catalog_version < 1) {
+      return false;
+    }
+  }
+  if (result.t != json_out::Value::T::Obj) {
     return false;
   }
   std::size_t nodes = 0;
   try {
+    (void)bounded_value(result, 0);
     for (const auto &node : evidence) {
       (void)evidence_json(node, 1, nodes);
     }
@@ -209,12 +304,12 @@ json_out::Value ResultEnvelope::to_json() const {
   for (const auto &node : evidence) {
     evidence_json_array.push_back(evidence_json(node, 1, evidence_nodes));
   }
-  Object out{{"protocol", Value::of(std::string("cidx.result/v1"))},
-             {"operation", Value::of(operation)},
+  Object out{{"protocol", Value::of(std::string(kProtocol))},
+             {"operation", Value::of(redact_text(operation))},
              {"status", Value::of(std::string(status_name(status)))},
              {"exit_class", Value::of(std::string(exit_class_name(exit_class())))},
              {"exit_code", Value::of(exit_code())},
-             {"result", result},
+             {"result", bounded_value(result, 0)},
              {"identity", identity_json(identity)},
              {"producer", producer_json(producer)},
              {"completeness", completeness_json(completeness)},
@@ -240,6 +335,20 @@ json_out::Value ResultEnvelope::to_json() const {
   return Value::obj(std::move(out));
 }
 
+json_out::Value ResultEnvelope::error_status_json() const {
+  if (!valid() || status != Status::Error || diagnostics.empty()) {
+    throw std::invalid_argument("error status requires an error envelope");
+  }
+  const auto &diagnostic = diagnostics.front();
+  return Value::obj({
+      {"status", Value::of(std::string(status_name(Status::Error)))},
+      {"code", Value::of(diagnostic.code)},
+      {"message", Value::of(redact_text(diagnostic.message))},
+      {"exit_class", Value::of(std::string(exit_class_name(exit_class())))},
+      {"exit_code", Value::of(exit_code())},
+  });
+}
+
 std::string ResultEnvelope::human_text() const {
   std::string out = "status: " + std::string(status_name(status));
   if (completeness.truncated) {
@@ -249,18 +358,23 @@ std::string ResultEnvelope::human_text() const {
     out += " (stale index)";
   }
   if (!diagnostics.empty()) {
-    out += "\nreason: " + diagnostics.front().message;
+    out += "\nreason: " + redact_text(diagnostics.front().message);
     if (diagnostics.front().next_action) {
-      out += "\nnext: " + *diagnostics.front().next_action;
+      out += "\nnext: " + redact_text(*diagnostics.front().next_action);
     }
   }
-  return out;
+  return redact_text(out, generated::kMaxHumanOutputBytes);
 }
 
 json_out::Value ProgressEvent::to_json() const {
-  Object out{{"protocol", Value::of(std::string("cidx.event/v1"))},
+  if (sequence < 0 || !valid_identifier(operation) ||
+      !one_of(event, generated::kEventKinds) ||
+      (completed && *completed < 0) || (total && *total < 0)) {
+    throw std::invalid_argument("invalid progress event");
+  }
+  Object out{{"protocol", Value::of(std::string(kEventProtocol))},
              {"sequence", Value::of(sequence)},
-             {"operation", Value::of(operation)},
+             {"operation", Value::of(redact_text(operation))},
              {"event", Value::of(event)},
              {"message", Value::of(redact_text(message))}};
   if (completed) {
@@ -295,7 +409,12 @@ std::string redact_text(std::string_view value, std::size_t max_bytes) {
   if (max_bytes <= suffix.size()) {
     return suffix.substr(0, max_bytes);
   }
-  text.resize(max_bytes - suffix.size());
+  std::size_t keep = max_bytes - suffix.size();
+  while (keep > 0 && keep < text.size() &&
+         (static_cast<unsigned char>(text[keep]) & 0xC0U) == 0x80U) {
+    --keep;
+  }
+  text.resize(keep);
   text += suffix;
   return text;
 }

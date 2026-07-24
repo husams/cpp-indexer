@@ -10,8 +10,10 @@ from indexer.result_protocol import (
     Evidence,
     Identity,
     Producer,
+    ProgressEvent,
     ResultEnvelope,
     Status,
+    ACCEPTANCE_VECTORS,
     from_query_result,
     redact_text,
 )
@@ -20,6 +22,8 @@ from indexer.queryplan import Executor, codebase, nodes, start
 
 ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = ROOT / "spec/contracts/golden/result-envelope.json"
+EVENT_GOLDEN = ROOT / "spec/contracts/golden/event.json"
+ERROR_GOLDEN = ROOT / "spec/contracts/golden/error-status.json"
 
 
 def _golden_envelope() -> ResultEnvelope:
@@ -57,7 +61,7 @@ def test_query_result_adapter_preserves_stale_and_truncated_semantics() -> None:
     db = Storage(":memory:")
     result = Executor(db).run((start(codebase()) | nodes()).plan)
     envelope = from_query_result(result, result.index)
-    assert envelope.status is Status.COMPLETE
+    assert envelope.status is Status.UNKNOWN
     assert envelope.identity.fact_sets == ("symbols",)
 
     result.truncated = True
@@ -76,6 +80,7 @@ def test_query_result_adapter_preserves_stale_and_truncated_semantics() -> None:
     )
     stale = from_query_result(result, result.index)
     assert stale.status is Status.UNKNOWN
+    assert stale.exit_code() == 3
     assert stale.completeness.stale
     assert {item.code for item in stale.diagnostics} >= {"stale_input"}
 
@@ -83,6 +88,15 @@ def test_query_result_adapter_preserves_stale_and_truncated_semantics() -> None:
 def test_untrusted_text_is_redacted_and_bounded() -> None:
     assert "<redacted:secret>" in redact_text("TOKEN=hidden")
     assert "<redacted:size-limit>" in redact_text("x" * 5000)
+    bounded = redact_text("😀" * 5000)
+    assert len(bounded.encode("utf-8")) <= 4096
+    envelope = _golden_envelope()
+    envelope.status = Status.ERROR
+    envelope.completeness = Completeness("unknown")
+    envelope.diagnostics = [Diagnostic("backend_error", message="TOKEN=hidden", next_action="PASSWORD=next")]
+    human = envelope.human_text()
+    assert "TOKEN=hidden" not in human and "PASSWORD=next" not in human
+    assert "<redacted:secret>" in human
 
 
 def test_exit_reduction_does_not_upgrade_error_reasons() -> None:
@@ -94,3 +108,34 @@ def test_exit_reduction_does_not_upgrade_error_reasons() -> None:
     assert envelope.exit_code() == 3
     envelope.diagnostics[:] = [Diagnostic("usage")]
     assert envelope.exit_code() == 2
+
+
+def test_fail_closed_invariants_and_acceptance_vectors() -> None:
+    envelope = _golden_envelope()
+    envelope.completeness = Completeness("unknown")
+    try:
+        envelope.to_dict()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("contradictory completeness must be rejected")
+    for vector in ACCEPTANCE_VECTORS:
+        current = _golden_envelope()
+        current.operation = vector["operation"]
+        current.status = Status(vector["status"])
+        current.identity = Identity("workspace://demo", "semantic-index://demo", ("symbols",), vector["freshness"], "git:abc123", "sha256:source")
+        current.completeness = Completeness(vector["state"], vector["diagnostic"] == "truncated_budget", vector["freshness"] == "stale")
+        current.diagnostics = [] if vector["diagnostic"] is None else [Diagnostic(vector["diagnostic"], "error", "vector diagnostic", "next")]
+        current.to_dict()
+        assert current.exit_class().value == vector["exit_class"]
+        assert current.exit_code() == vector["exit_code"]
+
+
+def test_event_and_error_goldens_are_executable() -> None:
+    event = ProgressEvent(3, "index", "progress", "indexed 2 of 4 files", 2, 4)
+    assert event.to_dict() == json.loads(EVENT_GOLDEN.read_text(encoding="utf-8"))
+    envelope = _golden_envelope()
+    envelope.status = Status.ERROR
+    envelope.completeness = Completeness("unknown")
+    envelope.diagnostics = [Diagnostic("backend_error", message="backend unavailable")]
+    assert envelope.error_status_dict() == json.loads(ERROR_GOLDEN.read_text(encoding="utf-8"))

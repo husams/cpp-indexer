@@ -9,31 +9,18 @@
 #include <vector>
 
 #include "cli/json_out.hpp"
+#include "query/generated_result_protocol.hpp"
 
 namespace cidx::protocol {
 
-inline constexpr int kProtocolVersion = 1;
-inline constexpr std::size_t kMaxEvidenceDepth = 4;
-inline constexpr std::size_t kMaxEvidenceNodes = 256;
-inline constexpr std::size_t kMaxTextBytes = 4096;
-
-enum class Status : std::uint8_t {
-  Complete,
-  Partial,
-  Unknown,
-  Refuted,
-  Conditional,
-  Error
-};
-
-enum class ExitClass : std::uint8_t {
-  Success,
-  Usage,
-  InvalidOrStaleInput,
-  PolicyFailure,
-  Unknown,
-  InfrastructureFailure,
-};
+using Status = generated::Status;
+using ExitClass = generated::ExitClass;
+inline constexpr int kProtocolVersion = generated::kProtocolVersion;
+inline constexpr std::string_view kProtocol = generated::kProtocol;
+inline constexpr std::string_view kEventProtocol = generated::kEventProtocol;
+inline constexpr std::size_t kMaxEvidenceDepth = generated::kMaxEvidenceDepth;
+inline constexpr std::size_t kMaxEvidenceNodes = generated::kMaxEvidenceNodes;
+inline constexpr std::size_t kMaxTextBytes = generated::kMaxTextBytes;
 
 [[nodiscard]] std::string_view status_name(Status status);
 [[nodiscard]] std::string_view exit_class_name(ExitClass exit_class);
@@ -113,6 +100,7 @@ struct ResultEnvelope {
   [[nodiscard]] int exit_code() const;
   [[nodiscard]] bool valid() const;
   [[nodiscard]] json_out::Value to_json() const;
+  [[nodiscard]] json_out::Value error_status_json() const;
   [[nodiscard]] std::string human_text() const;
 };
 

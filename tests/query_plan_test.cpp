@@ -416,7 +416,7 @@ TEST_CASE("query_plan: order_by, limit, default fields, result JSON") {
   CHECK(j.find("\"funcB\"") != std::string::npos);
 
   const auto envelope = d.to_envelope();
-  CHECK(envelope.status == cidx::protocol::Status::Complete);
+  CHECK(envelope.status == cidx::protocol::Status::Unknown);
   CHECK(envelope.identity.fact_sets == std::vector<std::string>{"symbols"});
   const auto envelope_json =
       cidx::json_out::dumps_indent2(envelope.to_json());
