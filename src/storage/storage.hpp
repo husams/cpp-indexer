@@ -29,6 +29,15 @@ namespace cidx {
 
 constexpr int kSchemaVersion = 37;
 
+struct IndexIdentity {
+  int schema_version = kSchemaVersion;
+  std::optional<std::string> source_revision;
+  std::optional<std::string> source_fingerprint;
+  std::optional<std::string> index_config;
+  std::optional<std::string> index_config_fingerprint;
+  std::string freshness = "unverifiable"; // current | stale | unverifiable
+};
+
 // Allowed symbol.kind values (storage.py SYMBOL_KINDS) — enforced by an
 // application-side StorageError (§3.2). v16: kind is stored on disk as its
 // CXCursorKind integer; these helpers convert name <-> stored int.
@@ -206,7 +215,8 @@ public:
              const std::optional<std::string> &name = std::nullopt,
              const std::optional<bool> &indexed = std::nullopt);
   void mark_file_indexed(int64_t file_id,
-                         const std::optional<double> &mtime = std::nullopt);
+                         const std::optional<double> &mtime = std::nullopt,
+                         const std::optional<std::string> &md5 = std::nullopt);
   // Flip the indexed/pending flag in place; symbols are untouched.
   void set_file_indexed(int64_t file_id, bool indexed);
   // Replace a file's stored compile flags (and optionally its driver) and mark
@@ -243,6 +253,7 @@ public:
   // Upsert keyed by USR; throws StorageError on a bad kind. Definition wins
   // over a stored declaration; a declaration never downgrades a definition.
   int64_t add_symbol(const Symbol &sym);
+  void delete_symbols_for_file(int64_t file_id);
   // Update named columns of the symbol with this USR; false when absent.
   // Throws StorageError on unknown columns or a bad kind value (smoke parity).
   bool
@@ -672,6 +683,11 @@ public:
   // (G17). Appends the two LIKE args to `args`.
   static std::string dir_scope_sql(const std::string &dir_path,
                                    std::vector<SqlValue> &args);
+
+  // Content-addressed identity of the indexed source/configuration. Legacy
+  // databases without the v35 metadata remain readable but unverifiable.
+  IndexIdentity index_identity();
+  void stamp_index_identity();
 
 private:
   friend class Transaction;

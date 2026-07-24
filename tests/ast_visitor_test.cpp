@@ -840,14 +840,12 @@ TEST_SUITE("clang") {
     CHECK(structural_edges(prj.db_path(), "c:@F@twice<#d>#d#",
                            "c:@FT@>1#Ttwice#t0.0#S0_#") ==
           std::vector<std::string>{});
-    // Pinned repo-wide storage semantic, NOT a claim of this fix: reindexing
-    // never garbage-collects the symbol row or its template_arg rows for a
-    // removed declaration — a deleted plain function lingers identically.
-    // Only the file's edges and definitions are dropped.
+    // Reindexing removes the file-owned symbol and its template arguments;
+    // stale declarations must not remain queryable after replacement.
     CHECK(sym_probe(prj.db_path(), "c:@F@twice<#d>#d#") ==
-          std::vector<std::string>{"function/1"});
+          std::vector<std::string>{});
     CHECK(args_probe(prj.db_path(), "c:@F@twice<#d>#d#") ==
-          std::vector<std::string>{"0:1:double"});
+          std::vector<std::string>{});
   }
 
   TEST_CASE("template spec: POI anchor is the first materialization point") {

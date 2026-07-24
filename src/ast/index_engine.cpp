@@ -53,6 +53,19 @@ std::optional<double> file_mtime(const std::string &path) {
 #endif
 }
 
+std::optional<std::string> parsed_file_md5(clang::SourceManager &source_manager,
+                                           const std::string &path) {
+  auto file = source_manager.getFileManager().getFileRef(path);
+  if (!file) {
+    return std::nullopt;
+  }
+  const auto buffer = source_manager.getMemoryBufferForFileOrNone(*file);
+  if (!buffer) {
+    return std::nullopt;
+  }
+  return cidx::md5_hex(buffer->getBufferStart(), buffer->getBufferSize());
+}
+
 struct EngineState {
   cidx::Storage *db = nullptr;
   const cidx::File *rec = nullptr;
@@ -128,6 +141,7 @@ public:
         edges_(db_), tu_(context.getTranslationUnitDecl()) {}
 
   void run() {
+    db_.delete_symbols_for_file(state_.rec->id);
     state_.out->stored = run_symbol_pass(state_.path, state_.rec->id);
     const std::vector<int64_t> main_symbol_ids = symbols_.symbol_ids();
     const std::vector<PendingHeader> plan = plan_owned_headers();
@@ -152,6 +166,8 @@ private:
     std::string path;
     int64_t file_id;
     std::optional<double> mtime;
+    std::optional<std::string> md5;
+    bool covered_by_current_config = false;
     int stored = 0;
     std::vector<int64_t> symbol_ids;
   };
@@ -220,20 +236,28 @@ private:
         ++counts.unowned;
         continue;
       }
-      const std::optional<std::string> md5 = cidx::md5_of(abs);
+      const std::optional<std::string> current_md5 = cidx::md5_of(abs);
       const auto existing = db_.get_file(abs);
       const bool covered_by_current_config =
           header_covered_by_current_config(existing);
-      if (db_.is_file_indexed(abs, std::nullopt, md5) &&
+      const std::optional<std::string> parsed_md5 =
+          parsed_file_md5(context_.getSourceManager(), abs);
+      if (current_md5 && parsed_md5 && current_md5 == parsed_md5 &&
+          db_.is_file_indexed(abs, std::nullopt, current_md5) &&
           covered_by_current_config) {
         ++counts.already;
         continue;
       }
       const std::optional<double> mtime = file_mtime(abs);
-      const int64_t hid = db_.add_file_path(
-          abs, mtime, md5, state_.rec->compile_options, state_.rec->driver);
-      plan.push_back(
-          {.path = abs, .file_id = hid, .mtime = mtime, .stored = 0});
+      const int64_t hid =
+          db_.add_file_path(abs, mtime, parsed_md5, state_.rec->compile_options,
+                            state_.rec->driver);
+      plan.push_back({.path = abs,
+                      .file_id = hid,
+                      .mtime = mtime,
+                      .md5 = parsed_md5,
+                      .covered_by_current_config = covered_by_current_config,
+                      .stored = 0});
     }
     return plan;
   }
@@ -243,15 +267,23 @@ private:
   void run_header_passes(std::vector<PendingHeader> plan) {
     cidx::HeaderStats &counts = state_.out->headers;
     for (PendingHeader &ph : plan) {
+      if (ph.covered_by_current_config) {
+        db_.delete_symbols_for_file(ph.file_id);
+      }
       ph.stored = run_symbol_pass(ph.path, ph.file_id);
       ph.symbol_ids = symbols_.symbol_ids();
     }
     for (const PendingHeader &ph : plan) {
       run_edge_pass(ph.path, ph.file_id);
+      if (!SourceSnapshot{.md5 = ph.md5}.matches(ph.path)) {
+        state_.out->source_changed = true;
+        db_.set_file_indexed(ph.file_id, false);
+        continue;
+      }
       db_.associate_facts_for_file(ph.file_id, state_.normalized_config_id,
                                    ph.symbol_ids, edges_.edge_ids(),
                                    edges_.definition_ids());
-      db_.mark_file_indexed(ph.file_id, ph.mtime);
+      db_.mark_file_indexed(ph.file_id, ph.mtime, ph.md5);
       ++counts.indexed;
       counts.symbols += ph.stored;
     }
@@ -421,9 +453,20 @@ static void apply_diagnostic_policy(const std::string &path, bool strict,
   out.failed_flags = args;
 }
 
+SourceSnapshot SourceSnapshot::capture(const std::string &path) {
+  return {.md5 = cidx::md5_of(path)};
+}
+
+bool SourceSnapshot::matches(const std::string &path) const {
+  const std::optional<std::string> current = cidx::md5_of(path);
+  return md5.has_value() && current.has_value() && md5 == current;
+}
+
 IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
                               const std::string &path, bool graph_enabled) {
   IndexOneOutcome out;
+  const SourceSnapshot source = SourceSnapshot::capture(path);
+  out.source_md5 = source.md5;
   const std::vector<std::string> args = build_clang_arguments(db, rec, path);
   CompilationSetup setup(args, path);
   DiagCollector collector(out.diagnostics);
@@ -465,6 +508,12 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
     return out;
   }
   apply_diagnostic_policy(path, state.strict, args, out);
+  if (!source.matches(path)) {
+    out.source_changed = true;
+    out.error = path + ": source changed during indexing; retry required";
+  } else if (out.source_changed && out.error.empty()) {
+    out.error = path + ": source changed during indexing; retry required";
+  }
   return out;
 }
 

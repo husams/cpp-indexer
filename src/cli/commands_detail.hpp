@@ -30,7 +30,6 @@
 
 #include "ast/clang_version.hpp"
 #include "ast/index_engine.hpp"
-#include "toolchain/toolchain.hpp"
 #include "cli/format.hpp"
 #include "cli/json_out.hpp"
 #include "cli/kind_names.hpp"
@@ -40,6 +39,7 @@
 #include "graph/records.hpp"
 #include "storage/records.hpp"
 #include "storage/storage.hpp"
+#include "toolchain/toolchain.hpp"
 #include "util/env.hpp"
 #include "util/errors.hpp"
 #include "util/files.hpp"
@@ -49,7 +49,6 @@
 
 namespace cidx::cli {
 namespace detail {
-
 
 namespace fmt = format;
 
@@ -159,8 +158,9 @@ inline std::string source_path(const CompileCommand &cmd) {
 // _lookup_component (cli.py:162-171): nullopt name -> no scoping; unknown
 // name -> "error: no component named '<name>'" printed, false returned
 // (LookupError -> return 1 in every caller).
-inline bool lookup_component(Storage &db, const std::optional<std::string> &name,
-                      std::optional<Component> &out, std::ostream &err) {
+inline bool lookup_component(Storage &db,
+                             const std::optional<std::string> &name,
+                             std::optional<Component> &out, std::ostream &err) {
   out.reset();
   if (!name || name->empty()) {
     return true;
@@ -186,7 +186,7 @@ const char kDirNeedsComponent[] =
 // frees the TU + Index BEFORE mark_file_indexed runs — Python's
 // `del tu` in index_source's finally (one-AST peak memory, design §7).
 inline int index_one(Storage &db, const File &rec, const std::string &path,
-              bool graph_enabled, Context &ctx) {
+                     bool graph_enabled, Context &ctx) {
   // All indexing runs through the LibTooling engine (parity-proven visitors
   // over the Clang C++ API): same DB effects, counters, and per-file output
   // line as the retired libclang cursor walk.
@@ -201,10 +201,10 @@ inline int index_one(Storage &db, const File &rec, const std::string &path,
           }
           flags += out.failed_flags[i];
         }
-        ctx.logger->error("cidx.clang",
-                          path + ": failed parse flags: " + flags +
-                              "; clang: " +
-                              std::to_string(clang_version_major()));
+        ctx.logger->error(
+            "cidx.clang",
+            path + ": failed parse flags: " + flags +
+                "; clang: " + std::to_string(clang_version_major()));
         // log_diagnostics parity: the ERROR-severity diagnostics as INFO
         // lines (capped at 20; classic logs error_diagnostics()).
         std::size_t shown = 0;
@@ -233,13 +233,19 @@ inline int index_one(Storage &db, const File &rec, const std::string &path,
       *ctx.err << "error: " << out.error << "\n";
       return 1;
     }
+    if (out.source_changed) {
+      db.replace_diagnostics(rec.id, out.diagnostics);
+      db.set_file_indexed(rec.id, false);
+      *ctx.err << "error: " << out.error << "\n";
+      return 1;
+    }
     db.replace_diagnostics(rec.id, out.diagnostics);
-    db.mark_file_indexed(rec.id, file_mtime(path));
-    *ctx.out << "  -> " << out.stored << " symbols; headers: "
-             << out.headers.indexed << " indexed (+" << out.headers.symbols
-             << " symbols), " << out.headers.already << " already, "
-             << out.headers.system << " system, " << out.headers.unowned
-             << " unowned\n";
+    db.mark_file_indexed(rec.id, file_mtime(path), out.source_md5);
+    *ctx.out << "  -> " << out.stored
+             << " symbols; headers: " << out.headers.indexed << " indexed (+"
+             << out.headers.symbols << " symbols), " << out.headers.already
+             << " already, " << out.headers.system << " system, "
+             << out.headers.unowned << " unowned\n";
     return 0;
   }
 }
@@ -247,8 +253,8 @@ inline int index_one(Storage &db, const File &rec, const std::string &path,
 // _index_files (cli.py:200-215): index FILE...; unknown files set the fail
 // flag but the loop continues.
 inline int index_files(Storage &db, const std::vector<std::string> &file_args,
-                const std::optional<std::string> &root, bool graph_enabled,
-                Context &ctx) {
+                       const std::optional<std::string> &root,
+                       bool graph_enabled, Context &ctx) {
   int rc = 0;
   for (const std::string &f : file_args) {
     const std::string path = files::resolve_file_arg(f, root);
@@ -311,10 +317,18 @@ inline int index_pending(Storage &db, bool graph_enabled, Context &ctx) {
   return failed != 0 ? 1 : 0;
 }
 
+inline bool all_files_current(Storage &db) {
+  return std::ranges::all_of(db.list_files(), [](const auto &entry) {
+    return files::index_status(entry.first, entry.second) ==
+           files::IndexStatus::kOk;
+  });
+}
+
 // -- delete helpers (cli.py _plural / _selector_str / _under_component /
 //    _finish_delete) -----------------------------------------------------
 
-inline const char *plural(std::size_t n, const char *singular, const char *plural) {
+inline const char *plural(std::size_t n, const char *singular,
+                          const char *plural) {
   return n == 1 ? singular : plural;
 }
 
@@ -336,8 +350,9 @@ inline std::string selector_str(const ParsedArgs &args) {
 }
 
 // True when comp is unset, or abs_path lies within the component root.
-inline bool under_component(Storage &db, const std::optional<std::string> &abs_path,
-                     const std::optional<Component> &comp) {
+inline bool under_component(Storage &db,
+                            const std::optional<std::string> &abs_path,
+                            const std::optional<Component> &comp) {
   if (!comp) {
     return true;
   }
@@ -354,10 +369,10 @@ inline bool under_component(Storage &db, const std::optional<std::string> &abs_p
 
 // Shared tail: print matched rows, delete (unless --dry-run), summarize.
 inline int finish_delete(const ParsedArgs &args, Context &ctx,
-                  const std::vector<int64_t> &ids,
-                  const std::vector<std::string> &lines,
-                  const std::function<void(int64_t)> &del_fn,
-                  const char *singular, const char *plural_word) {
+                         const std::vector<int64_t> &ids,
+                         const std::vector<std::string> &lines,
+                         const std::function<void(int64_t)> &del_fn,
+                         const char *singular, const char *plural_word) {
   for (const std::string &line : lines) {
     *ctx.out << line << "\n";
   }
@@ -370,7 +385,6 @@ inline int finish_delete(const ParsedArgs &args, Context &ctx,
            << plural(ids.size(), singular, plural_word) << "\n";
   return 0;
 }
-
 
 } // namespace detail
 

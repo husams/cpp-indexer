@@ -211,6 +211,12 @@ bool Storage::update_symbol(
   return db_.changes() > 0;
 }
 
+void Storage::delete_symbols_for_file(int64_t file_id) {
+  auto del = db_.prepare("DELETE FROM symbol WHERE file_id = ?");
+  del.bind(1, file_id);
+  del.step_done();
+}
+
 std::optional<Symbol> Storage::lookup_symbol(const std::string &usr) {
   auto st = db_.prepare(std::string("SELECT ") + kSymbolCols +
                         " FROM symbol WHERE usr = ?");

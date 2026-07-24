@@ -138,8 +138,27 @@ Normalization: relation names become layer-qualified; nested `all_of` within
   "view": "symbol" | "entity",
   "count": <int>,          // scalar value for shape=scalar
   "truncated": <bool>,
+  "index": {
+    "schema_version": <int>,
+    "source_revision": <string|null>,
+    "source_fingerprint": <string|null>,
+    "index_config": <string|null>,
+    "index_config_fingerprint": <string|null>,
+    "freshness": "current" | "stale" | "unverifiable"
+  },
   "rows": [ {field: value, ...} ... ] }   // absent for shape=scalar
 ```
+
+`source_fingerprint` is a SHA-1 digest of a deterministic, ordered manifest of
+indexed file identities, current content MD5s, and indexed flags. The
+`source_revision` is the content-addressed `content-sha1:<digest>` form. The
+configuration digest covers each file's stored compile options and driver.
+After a successful `index` pass the C++ and Python CLIs stamp these metadata
+rows. Legacy databases, missing files, or unreadable files remain queryable but
+report `unverifiable`; a changed source/configuration reports `stale`.
+
+`Executor.explain(plan)` (C++ and Python) returns the normalized plan together
+with the same `index` object without changing the database.
 
 Node streams without `select` emit the default fields `id`, `usr`, `name`,
 `kind`. Row objects preserve `select` field order.

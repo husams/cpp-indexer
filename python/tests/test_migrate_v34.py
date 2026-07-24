@@ -58,6 +58,7 @@ def test_v33_to_v34_rewrites_alias_edges_and_stamps_version(tmp_path):
 
     db = Storage(path)  # migration runs on open
     assert db.get_component("/data/c") is not None  # old data intact
+    assert db.index_identity().freshness == "unverifiable"
     db.close()
 
     conn = sqlite3.connect(path)

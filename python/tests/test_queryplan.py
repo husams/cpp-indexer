@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from indexer.storage import Storage, Symbol  # noqa: E402
+from indexer.utils.hashing import md5_of  # noqa: E402
 from indexer import queryplan as qp  # noqa: E402
 from indexer.queryplan import (  # noqa: E402
     Executor, PlanError, all_of, canonical_json, codebase, count, distinct,
@@ -280,6 +281,56 @@ def test_default_result_cap_reports_truncation():
     lim = ex.run((start(codebase()) | nodes() | limit(1100)).plan)
     assert len(lim.rows) == 1100
     assert not lim.truncated
+
+
+def test_legacy_index_identity_and_result_key_order(tmp_path):
+    source = tmp_path / "source.cpp"
+    source.write_text("int answer = 1;\n")
+    db = Storage(":memory:")
+    db.add_component("fixture", str(tmp_path))
+    file_id = db.add_file_path(str(source), md5=md5_of(str(source)))
+    db.mark_file_indexed(file_id)
+
+    assert db.index_identity().freshness == "unverifiable"
+    ex = Executor(db)
+    result = ex.run((start(codebase()) | nodes()).plan)
+    row_dict = result.to_dict()
+    assert row_dict["index"]["freshness"] == "unverifiable"
+    assert list(row_dict) == ["shape", "view", "count", "truncated", "index", "rows"]
+    scalar = ex.run((start(codebase()) | nodes() | count()).plan)
+    assert list(scalar.to_dict()) == ["shape", "view", "count", "truncated", "index"]
+    explained = ex.explain((start(codebase()) | nodes()).plan)
+    assert explained["index"] == row_dict["index"]
+    assert explained["plan"]["cxq"] == 1
+
+
+def test_identity_is_stable_across_component_insertion_order(tmp_path):
+    roots = {name: tmp_path / name for name in ("alpha", "beta")}
+    for root in roots.values():
+        root.mkdir()
+    sources = {
+        name: root / f"{name}.cpp" for name, root in roots.items()
+    }
+    for name, source in sources.items():
+        source.write_text(f"int {name}() {{ return 1; }}\n", encoding="utf-8")
+
+    def make_identity(order):
+        db = Storage(":memory:")
+        for name in order:
+            db.add_component(name, str(roots[name]))
+        for source in sources.values():
+            file_id = db.add_file_path(str(source), md5=md5_of(str(source)))
+            db.mark_file_indexed(file_id)
+        db.stamp_index_identity()
+        return db.index_identity()
+
+    forward = make_identity(("alpha", "beta"))
+    reverse = make_identity(("beta", "alpha"))
+    assert forward.freshness == "current"
+    assert reverse.freshness == "current"
+    assert forward.source_revision == reverse.source_revision
+    assert forward.source_fingerprint == reverse.source_fingerprint
+    assert forward.index_config_fingerprint == reverse.index_config_fingerprint
 
 
 # ---------------------------------------------------------------------------

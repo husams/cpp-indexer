@@ -17,23 +17,33 @@
 #include "doctest/doctest.h"
 
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <map>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include "query/exec.hpp"
 #include "query/plan.hpp"
 #include "storage/records.hpp"
 #include "storage/storage.hpp"
+#include "util/hashing.hpp"
 
 using namespace cidx::query;
 using cidx::Storage;
 using cidx::Symbol;
 
 namespace {
+
+std::string make_temp_dir() {
+  char tmpl[] = "/tmp/cidx_query_identity_XXXXXX";
+  char *dir = ::mkdtemp(tmpl);
+  REQUIRE(dir != nullptr);
+  return dir;
+}
 
 Symbol make_sym(const std::string &usr, const std::string &spelling,
                 const std::string &kind = "function",
@@ -428,6 +438,86 @@ TEST_CASE("query_plan: default result cap reports truncation") {
   auto lim = ex.run((start(codebase()) | nodes() | limit(1100)).plan());
   CHECK(lim.rows.size() == 1100);
   CHECK(!lim.truncated);
+}
+
+TEST_CASE(
+    "query_plan: legacy identity and result key order are deterministic") {
+  const std::string dir = make_temp_dir();
+  const std::string source = dir + "/source.cpp";
+  {
+    std::ofstream out(source);
+    out << "int answer = 1;\n";
+  }
+
+  Storage db(":memory:");
+  db.add_component("fixture", dir);
+  const auto file_id =
+      db.add_file_path(source, std::nullopt, cidx::md5_of(source));
+  db.mark_file_indexed(file_id);
+
+  CHECK(db.index_identity().freshness == "unverifiable");
+
+  Executor executor(db);
+  const auto result = executor.run((start(codebase()) | nodes()).plan());
+  CHECK(result.index.freshness == "unverifiable");
+  const std::string row_json = cidx::json_out::dumps_indent2(result.to_json());
+  CHECK(row_json.find("\"shape\"") < row_json.find("\"view\""));
+  CHECK(row_json.find("\"view\"") < row_json.find("\"count\""));
+  CHECK(row_json.find("\"count\"") < row_json.find("\"truncated\""));
+  CHECK(row_json.find("\"truncated\"") < row_json.find("\"index\""));
+  CHECK(row_json.find("\"index\"") < row_json.find("\"rows\""));
+
+  const auto scalar =
+      executor.run((start(codebase()) | nodes() | count()).plan());
+  const std::string scalar_json =
+      cidx::json_out::dumps_indent2(scalar.to_json());
+  CHECK(scalar_json.find("\"truncated\"") < scalar_json.find("\"index\""));
+  CHECK(scalar_json.find("\"index\"") < scalar_json.size());
+
+  const std::string explained = cidx::json_out::dumps_indent2(
+      executor.explain((start(codebase()) | nodes()).plan()));
+  CHECK(explained.find("\"freshness\": \"unverifiable\"") != std::string::npos);
+  CHECK(explained.find("\"plan\"") != std::string::npos);
+}
+
+TEST_CASE("query_plan: identity is stable across component insertion order") {
+  const std::string dir = make_temp_dir();
+  const std::string alpha_dir = dir + "/alpha";
+  const std::string beta_dir = dir + "/beta";
+  std::filesystem::create_directories(alpha_dir);
+  std::filesystem::create_directories(beta_dir);
+  const std::string alpha_source = alpha_dir + "/alpha.cpp";
+  const std::string beta_source = beta_dir + "/beta.cpp";
+  {
+    std::ofstream out(alpha_source);
+    out << "int alpha() { return 1; }\n";
+  }
+  {
+    std::ofstream out(beta_source);
+    out << "int beta() { return 2; }\n";
+  }
+
+  const auto make_identity = [&](const std::vector<std::string> &order) {
+    Storage db(":memory:");
+    for (const std::string &name : order) {
+      db.add_component(name, dir + "/" + name);
+    }
+    for (const std::string &source : {alpha_source, beta_source}) {
+      const auto file_id =
+          db.add_file_path(source, std::nullopt, cidx::md5_of(source));
+      db.mark_file_indexed(file_id, std::nullopt, cidx::md5_of(source));
+    }
+    db.stamp_index_identity();
+    return db.index_identity();
+  };
+
+  const auto forward = make_identity({"alpha", "beta"});
+  const auto reverse = make_identity({"beta", "alpha"});
+  CHECK(forward.freshness == "current");
+  CHECK(reverse.freshness == "current");
+  CHECK(forward.source_revision == reverse.source_revision);
+  CHECK(forward.source_fingerprint == reverse.source_fingerprint);
+  CHECK(forward.index_config_fingerprint == reverse.index_config_fingerprint);
 }
 
 // ---------------------------------------------------------------------------

@@ -17,17 +17,22 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cstdlib>
 #include <ctime>
+#include <fcntl.h>
 #include <fstream>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "ast/index_engine.hpp"
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
 #include "cli/format.hpp"
+#include "query/exec.hpp"
 #include "storage/records.hpp"
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
@@ -55,7 +60,6 @@ bool require_manifests() {
   }
   return true;
 }
-
 
 std::string make_temp_dir() {
   char tmpl[] = "/tmp/cidx_cli_XXXXXX";
@@ -326,8 +330,8 @@ const char kListFilesUsage[] = "Usage: cidx file list [OPTIONS] [pattern]\n";
 TEST_CASE("args: no command -> exit 2, subcommand required") {
   const ParseFail f = parse_fail({});
   CHECK(f.code == 2);
-  CHECK(f.msg == std::string(kTopUsage) +
-                     "cidx: error: A subcommand is required\n");
+  CHECK(f.msg ==
+        std::string(kTopUsage) + "cidx: error: A subcommand is required\n");
 }
 
 TEST_CASE("args: unknown command -> exit 2, named as unrecognized") {
@@ -340,8 +344,8 @@ TEST_CASE("args: unknown command -> exit 2, named as unrecognized") {
 
 TEST_CASE("args: file — REMAINDER captures the op tail verbatim") {
   // $ cidx file demo://src/a.c -set-flag -I/x -DFOO
-  cli::ParsedArgs pa =
-      cli::parse_args({"file", "flags", "demo://src/a.c", "-set-flag", "-I/x", "-DFOO"});
+  cli::ParsedArgs pa = cli::parse_args(
+      {"file", "flags", "demo://src/a.c", "-set-flag", "-I/x", "-DFOO"});
   CHECK(pa.command == "file");
   CHECK(pa.target == "demo://src/a.c");
   CHECK(pa.op == std::vector<std::string>{"-set-flag", "-I/x", "-DFOO"});
@@ -352,7 +356,8 @@ TEST_CASE("args: file — REMAINDER captures the op tail verbatim") {
   CHECK(pa.op.empty());
 
   // --db before the target is parsed as an option; the rest is the tail.
-  pa = cli::parse_args({"file", "flags", "--db", "/tmp/x.db", "demo://a.c", "-dump-args"});
+  pa = cli::parse_args(
+      {"file", "flags", "--db", "/tmp/x.db", "demo://a.c", "-dump-args"});
   CHECK(pa.index_db == "/tmp/x.db");
   CHECK(pa.target == "demo://a.c");
   CHECK(pa.op == std::vector<std::string>{"-dump-args"});
@@ -376,8 +381,8 @@ TEST_CASE("args: file -h returns help text") {
 }
 
 TEST_CASE("args: dump-compile-commands parses the component positional") {
-  cli::ParsedArgs pa =
-      cli::parse_args({"component", "compile-commands", "--db", "/tmp/x.db", "demo"});
+  cli::ParsedArgs pa = cli::parse_args(
+      {"component", "compile-commands", "--db", "/tmp/x.db", "demo"});
   CHECK(pa.command == "dump-compile-commands");
   CHECK(pa.component == "demo");
   CHECK(pa.index_db == "/tmp/x.db");
@@ -546,8 +551,8 @@ TEST_CASE("args: delete parses each selector + --component + --dry-run") {
   CHECK(*pa.del_id == 7);
   CHECK_FALSE(pa.dry_run);
 
-  pa = cli::parse_args({"symbol", "rm", "--usr", "c:@F@multiply", "-c",
-                        "proj", "--dry-run"});
+  pa = cli::parse_args(
+      {"symbol", "rm", "--usr", "c:@F@multiply", "-c", "proj", "--dry-run"});
   REQUIRE(pa.usr.has_value());
   CHECK(*pa.usr == "c:@F@multiply");
   REQUIRE(pa.component.has_value());
@@ -725,8 +730,9 @@ TEST_CASE("args: -h returns help text; validation beats help") {
 
 TEST_CASE("args: set grammar — assignment positional + component/file/db") {
   // $ cidx set pending=False --component demo --file sub/b.c
-  cli::ParsedArgs pa = cli::parse_args(
-      {"file", "set", "pending=False", "--component", "demo", "--file", "sub/b.c"});
+  cli::ParsedArgs pa =
+      cli::parse_args({"file", "set", "pending=False", "--component", "demo",
+                       "--file", "sub/b.c"});
   CHECK(pa.command == "set");
   REQUIRE(pa.assignment.size() == 1);
   CHECK(pa.assignment[0] == "pending=False");
@@ -767,9 +773,8 @@ TEST_CASE("args: set -h lists the assignment positional and options") {
 
 TEST_CASE("args: verify grammar — --component/-c, --all, --db") {
   // $ cidx verify --component demo --all --db /tmp/i.db
-  cli::ParsedArgs pa =
-      cli::parse_args({"db", "verify", "--component", "demo", "--all", "--db",
-                       "/tmp/i.db"});
+  cli::ParsedArgs pa = cli::parse_args(
+      {"db", "verify", "--component", "demo", "--all", "--db", "/tmp/i.db"});
   CHECK(pa.command == "verify");
   REQUIRE(pa.component);
   CHECK(*pa.component == "demo");
@@ -925,7 +930,8 @@ TEST_CASE("add-source: repo walks to git root, name from .git/config") {
   // external: path as-is, name = basename; no git walk
   makedirs(t + "/ext");
   // $ python3 -m indexer add-source --path <t>/ext --kind external
-  r = run_cli({"component", "add", "--path", t + "/ext", "--kind", "external"}, t);
+  r = run_cli({"component", "add", "--path", t + "/ext", "--kind", "external"},
+              t);
   CHECK(r.rc == 0);
   CHECK(r.out == "component #2: ext (external) at " + t + "/ext\n");
 
@@ -946,7 +952,8 @@ TEST_CASE("add-source: repo walks to git root, name from .git/config") {
 TEST_CASE("add-source: --path not a directory -> exit 1") {
   const std::string t = make_temp_dir();
   // $ python3 -m indexer add-source --path <t>/missing
-  const CmdResult r = run_cli({"component", "add", "--path", t + "/missing"}, t);
+  const CmdResult r =
+      run_cli({"component", "add", "--path", t + "/missing"}, t);
   CHECK(r.rc == 1);
   CHECK(r.out.empty());
   CHECK(r.err == "error: " + t + "/missing is not a directory\n");
@@ -1195,12 +1202,14 @@ TEST_CASE("list components: table, kind filter, fuzzy pattern, ls alias") {
   // $ python3 -m indexer list components
   CmdResult r = run_cli({"component", "list"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   1  gold  repo      -  -  {ROOT}\n1 component(s)\n"));
+  CHECK(r.out ==
+        g.expect("   1  gold  repo      -  -  {ROOT}\n1 component(s)\n"));
 
   // $ python3 -m indexer ls components   (alias, same output)
   r = run_cli({"component", "ls"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   1  gold  repo      -  -  {ROOT}\n1 component(s)\n"));
+  CHECK(r.out ==
+        g.expect("   1  gold  repo      -  -  {ROOT}\n1 component(s)\n"));
 
   // $ python3 -m indexer list components --kind external   (0 rows, exit 1)
   r = run_cli({"component", "list", "--kind", "external"}, g.cache);
@@ -1210,7 +1219,8 @@ TEST_CASE("list components: table, kind filter, fuzzy pattern, ls alias") {
   // $ python3 -m indexer list components gld   (char-in-order fuzzy)
   r = run_cli({"component", "list", "gld"}, g.cache);
   CHECK(r.rc == 0);
-  CHECK(r.out == g.expect("   1  gold  repo      -  -  {ROOT}\n1 component(s)\n"));
+  CHECK(r.out ==
+        g.expect("   1  gold  repo      -  -  {ROOT}\n1 component(s)\n"));
 }
 
 TEST_CASE("list dirs: table + unknown component error") {
@@ -1535,8 +1545,8 @@ TEST_CASE("migrate: upgrades a v15 DB in place (kind TEXT->int), no re-index") {
   // kind is now the CXCursorKind int, symbol_kind seeded, rows preserved.
   {
     cidx::SqliteDb raw(db);
-    auto st = raw.prepare(
-        "SELECT typeof(kind), kind FROM symbol WHERE usr='c:@F@f'");
+    auto st =
+        raw.prepare("SELECT typeof(kind), kind FROM symbol WHERE usr='c:@F@f'");
     REQUIRE(st.step());
     CHECK(st.col_text(0) == "integer");
     CHECK(st.col_int64(1) == 8); // function == CXCursor_FunctionDecl
@@ -1563,20 +1573,21 @@ TEST_CASE("migrate: v17 -> v19 drops nests edges and renumbers befriends") {
   {
     cidx::Storage s(db);
     auto &raw = s.raw_db();
-    raw.exec("INSERT INTO symbol (usr,spelling,kind) VALUES "
-             "('c:@S@A','A',4),('c:@S@B','B',4);"
-             "DELETE FROM entity_edge_kind;"
-             "INSERT INTO entity_edge_kind (id,name) VALUES "
-             "(1,'generalizes'),(2,'realizes'),(3,'specializes'),(4,'composes'),"
-             "(5,'aggregates'),(6,'associates'),(7,'creates'),(8,'uses'),"
-             "(9,'destroys'),(10,'nests'),(11,'befriends');"
-             "INSERT INTO entity_edge (src_id,dst_id,kind) SELECT a.id,b.id,10 "
-             "FROM (SELECT id FROM symbol WHERE usr='c:@S@A') a,"
-             "(SELECT id FROM symbol WHERE usr='c:@S@B') b;"
-             "INSERT INTO entity_edge (src_id,dst_id,kind) SELECT a.id,b.id,11 "
-             "FROM (SELECT id FROM symbol WHERE usr='c:@S@A') a,"
-             "(SELECT id FROM symbol WHERE usr='c:@S@B') b;"
-             "UPDATE meta SET value='17' WHERE key='schema_version';");
+    raw.exec(
+        "INSERT INTO symbol (usr,spelling,kind) VALUES "
+        "('c:@S@A','A',4),('c:@S@B','B',4);"
+        "DELETE FROM entity_edge_kind;"
+        "INSERT INTO entity_edge_kind (id,name) VALUES "
+        "(1,'generalizes'),(2,'realizes'),(3,'specializes'),(4,'composes'),"
+        "(5,'aggregates'),(6,'associates'),(7,'creates'),(8,'uses'),"
+        "(9,'destroys'),(10,'nests'),(11,'befriends');"
+        "INSERT INTO entity_edge (src_id,dst_id,kind) SELECT a.id,b.id,10 "
+        "FROM (SELECT id FROM symbol WHERE usr='c:@S@A') a,"
+        "(SELECT id FROM symbol WHERE usr='c:@S@B') b;"
+        "INSERT INTO entity_edge (src_id,dst_id,kind) SELECT a.id,b.id,11 "
+        "FROM (SELECT id FROM symbol WHERE usr='c:@S@A') a,"
+        "(SELECT id FROM symbol WHERE usr='c:@S@B') b;"
+        "UPDATE meta SET value='17' WHERE key='schema_version';");
   }
 
   // migrate via the CLI: reports the in-place upgrade.
@@ -1601,9 +1612,9 @@ TEST_CASE("migrate: v17 -> v19 drops nests edges and renumbers befriends") {
       CHECK(st.col_int64(0) == 1);
       CHECK(st.col_int64(1) == 10);
     }
-    // entity_edge_kind reseeded: 12 rows (old (11,'befriends') renumbered to 10,
-    // freeing id 11 for the reseeded instantiates; v26 adds declares(12)), id 10
-    // = befriends, no 'nests'.
+    // entity_edge_kind reseeded: 12 rows (old (11,'befriends') renumbered to
+    // 10, freeing id 11 for the reseeded instantiates; v26 adds declares(12)),
+    // id 10 = befriends, no 'nests'.
     {
       auto st = raw.prepare("SELECT COUNT(*) FROM entity_edge_kind");
       REQUIRE(st.step());
@@ -1625,8 +1636,8 @@ TEST_CASE("migrate: v17 -> v19 drops nests edges and renumbers befriends") {
       CHECK(st.col_text(0) == "declares");
     }
     {
-      auto st =
-          raw.prepare("SELECT COUNT(*) FROM entity_edge_kind WHERE name='nests'");
+      auto st = raw.prepare(
+          "SELECT COUNT(*) FROM entity_edge_kind WHERE name='nests'");
       REQUIRE(st.step());
       CHECK(st.col_int64(0) == 0);
     }
@@ -1646,7 +1657,8 @@ TEST_CASE("migrate: v17 -> v19 drops nests edges and renumbers befriends") {
                      "; nothing to migrate\n");
 }
 
-TEST_CASE("migrate: cleans a DB already stamped current but still carrying nests") {
+TEST_CASE(
+    "migrate: cleans a DB already stamped current but still carrying nests") {
   // Regression: an earlier build bumped schema_version WITHOUT cleaning, so the
   // migration must be gated on the stale 'nests' marker, not the version.
   const std::string t = make_temp_dir();
@@ -1655,19 +1667,20 @@ TEST_CASE("migrate: cleans a DB already stamped current but still carrying nests
   {
     cidx::Storage s(db);
     auto &raw = s.raw_db();
-    raw.exec("INSERT INTO symbol (usr,spelling,kind) VALUES "
-             "('c:@S@A','A',4),('c:@S@B','B',4);"
-             "DELETE FROM entity_edge_kind;"
-             "INSERT INTO entity_edge_kind (id,name) VALUES "
-             "(1,'generalizes'),(2,'realizes'),(3,'specializes'),(4,'composes'),"
-             "(5,'aggregates'),(6,'associates'),(7,'creates'),(8,'uses'),"
-             "(9,'destroys'),(10,'nests'),(11,'befriends');"
-             "INSERT INTO entity_edge (src_id,dst_id,kind) SELECT a.id,b.id,10 "
-             "FROM (SELECT id FROM symbol WHERE usr='c:@S@A') a,"
-             "(SELECT id FROM symbol WHERE usr='c:@S@B') b;"
-             "INSERT INTO entity_edge (src_id,dst_id,kind) SELECT a.id,b.id,11 "
-             "FROM (SELECT id FROM symbol WHERE usr='c:@S@A') a,"
-             "(SELECT id FROM symbol WHERE usr='c:@S@B') b;");
+    raw.exec(
+        "INSERT INTO symbol (usr,spelling,kind) VALUES "
+        "('c:@S@A','A',4),('c:@S@B','B',4);"
+        "DELETE FROM entity_edge_kind;"
+        "INSERT INTO entity_edge_kind (id,name) VALUES "
+        "(1,'generalizes'),(2,'realizes'),(3,'specializes'),(4,'composes'),"
+        "(5,'aggregates'),(6,'associates'),(7,'creates'),(8,'uses'),"
+        "(9,'destroys'),(10,'nests'),(11,'befriends');"
+        "INSERT INTO entity_edge (src_id,dst_id,kind) SELECT a.id,b.id,10 "
+        "FROM (SELECT id FROM symbol WHERE usr='c:@S@A') a,"
+        "(SELECT id FROM symbol WHERE usr='c:@S@B') b;"
+        "INSERT INTO entity_edge (src_id,dst_id,kind) SELECT a.id,b.id,11 "
+        "FROM (SELECT id FROM symbol WHERE usr='c:@S@A') a,"
+        "(SELECT id FROM symbol WHERE usr='c:@S@B') b;");
     // NOTE: schema_version stays at the fresh stamp (== kSchemaVersion) -- the
     // dirty case where the version is current but the data was never cleaned.
   }
@@ -1686,7 +1699,8 @@ TEST_CASE("migrate: cleans a DB already stamped current but still carrying nests
     REQUIRE(st.step());
     CHECK(st.col_int64(0) == 1);  // only befriends survives
     CHECK(st.col_int64(1) == 10); // renumbered 11 -> 10
-    auto k = raw.prepare("SELECT COUNT(*) FROM entity_edge_kind WHERE name='nests'");
+    auto k =
+        raw.prepare("SELECT COUNT(*) FROM entity_edge_kind WHERE name='nests'");
     REQUIRE(k.step());
     CHECK(k.col_int64(0) == 0);
     // realizes(2) renamed to implements(2).
@@ -1788,7 +1802,8 @@ TEST_SUITE("clang") {
     REQUIRE(a);
     // The lazily-created "proj" component is now in the alias registry, so its
     // own -I paths encode to <proj> (v0.28.1: rebuild the registry after the
-    // lazy creation so a fresh component's includes are portable, not absolute).
+    // lazy creation so a fresh component's includes are portable, not
+    // absolute).
     CHECK(*a->compile_options == std::vector<std::string>{"-I<proj>"});
     CHECK(*a->driver == "cc");
     CHECK(a->md5);
@@ -1842,8 +1857,8 @@ TEST_SUITE("clang") {
 
     const CmdResult r = run_cli({"import", "--db", db_path}, t);
     CHECK(r.rc == 0);
-    // Unified DB: assert the project TUs imported with their flags rather than a
-    // fixed total count (fixtures grow over time — see CLAUDE.md).
+    // Unified DB: assert the project TUs imported with their flags rather than
+    // a fixed total count (fixtures grow over time — see CLAUDE.md).
     CHECK(r.out.find("skipped 0\n") != std::string::npos);
     CHECK(r.err.empty());
 
@@ -1931,6 +1946,211 @@ TEST_SUITE("clang") {
     }
   };
 
+  struct FreshnessProject {
+    std::string cache;
+    std::string proj;
+    std::string a;
+    std::string b;
+
+    FreshnessProject()
+        : cache(make_temp_dir()), proj(cache + "/proj"), a(proj + "/a.cpp"),
+          b(proj + "/b.cpp") {
+      makedirs(proj);
+      write_file(a, "int old_symbol() { return 1; }\n");
+      write_file(b, "int other_symbol() { return 2; }\n");
+      write_file(proj + "/compile_commands.json",
+                 "[\n"
+                 "  {\"directory\": \"" +
+                     proj +
+                     "\", \"command\": \"c++ -std=c++23 -c a.cpp -o a.o\", "
+                     "\"file\": \"a.cpp\"},\n"
+                     "  {\"directory\": \"" +
+                     proj +
+                     "\", \"command\": \"c++ -std=c++23 -c b.cpp -o b.o\", "
+                     "\"file\": \"b.cpp\"}\n"
+                     "]\n");
+    }
+  };
+
+  struct HeaderRaceProject {
+    std::string cache;
+    std::string proj;
+    std::string header;
+    std::string parse_gate_one;
+    std::string source;
+
+    HeaderRaceProject()
+        : cache(make_temp_dir()), proj(cache + "/proj"),
+          header(proj + "/header.hpp"),
+          parse_gate_one(cache + "/parse_gate_one.hpp"),
+          source(proj + "/main.cpp") {
+      makedirs(proj);
+      write_file(header, "int initial_header_symbol() { return 1; }\n");
+      write_file(source,
+                 "#include \"header.hpp\"\nint main_symbol() { return 2; }\n");
+      write_file(proj + "/compile_commands.json",
+                 "[{\"directory\": \"" + proj +
+                     "\", \"command\": \"c++ -std=c++23 -c main.cpp -o "
+                     "main.o\", \"file\": \"main.cpp\"}]\n");
+    }
+  };
+
+  TEST_CASE("index: partial/no-op run preserves stale identity until reindex") {
+    const FreshnessProject p;
+    CmdResult r = run_cli({"import", "--db", p.proj}, p.cache);
+    REQUIRE(r.rc == 0);
+
+    {
+      Storage db(p.cache + "/index.db");
+      CHECK(db.index_identity().freshness == "unverifiable");
+    }
+
+    cidx::Logger log;
+    log.set_file(p.cache + "/cidx.log");
+    r = run_cli({"index"}, p.cache, &log);
+    REQUIRE(r.rc == 0);
+    {
+      Storage db(p.cache + "/index.db");
+      CHECK(db.index_identity().freshness == "current");
+      REQUIRE(db.find_symbols("old_symbol", {}, 10).size() == 1);
+      using namespace cidx::query;
+      Executor executor(db);
+      const auto rows = executor.run((start(codebase()) | nodes()).plan());
+      const std::string row_json =
+          cidx::json_out::dumps_indent2(rows.to_json());
+      CHECK(row_json.find("\"shape\"") < row_json.find("\"view\""));
+      CHECK(row_json.find("\"view\"") < row_json.find("\"count\""));
+      CHECK(row_json.find("\"count\"") < row_json.find("\"truncated\""));
+      CHECK(row_json.find("\"truncated\"") < row_json.find("\"index\""));
+      CHECK(row_json.find("\"index\"") < row_json.find("\"rows\""));
+      const auto scalar =
+          executor.run((start(codebase()) | nodes() | count()).plan());
+      const std::string scalar_json =
+          cidx::json_out::dumps_indent2(scalar.to_json());
+      CHECK(scalar_json.find("\"truncated\"") < scalar_json.find("\"index\""));
+    }
+
+    write_file(p.a, "int new_symbol() { return 3; }\n");
+    r = run_cli({"index", p.b}, p.cache, &log);
+    REQUIRE(r.rc == 0);
+    {
+      Storage db(p.cache + "/index.db");
+      CHECK(db.index_identity().freshness == "stale");
+      CHECK(db.find_symbols("old_symbol", {}, 10).size() == 1);
+      CHECK(db.find_symbols("new_symbol", {}, 10).empty());
+    }
+
+    r = run_cli({"index", p.a}, p.cache, &log);
+    REQUIRE(r.rc == 0);
+    Storage db(p.cache + "/index.db");
+    CHECK(db.index_identity().freshness == "current");
+    CHECK(db.find_symbols("old_symbol", {}, 10).empty());
+    const auto replacement = db.find_symbols("new_symbol", {}, 10);
+    REQUIRE(replacement.size() == 1);
+    CHECK(replacement[0].line == 1);
+  }
+
+  TEST_CASE("index: source snapshot detects replacement after parse") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/source.cpp";
+    write_file(source, "int intermediate_symbol() { return 1; }\n");
+    const cidx::ast::SourceSnapshot parsed =
+        cidx::ast::SourceSnapshot::capture(source);
+    CHECK(parsed.matches(source));
+
+    write_file(source, "int final_symbol() { return 2; }\n");
+    CHECK_FALSE(parsed.matches(source));
+  }
+
+  TEST_CASE("index: owned header A to B to A mutation stays pending") {
+    const HeaderRaceProject p;
+    const std::string initial_header =
+        "int initial_header_symbol() { return 1; }\n";
+    CmdResult r = run_cli({"import", "--db", p.proj}, p.cache);
+    REQUIRE(r.rc == 0);
+
+    cidx::Logger log;
+    log.set_file(p.cache + "/cidx.log");
+    r = run_cli({"index"}, p.cache, &log);
+    REQUIRE(r.rc == 0);
+    {
+      Storage db(p.cache + "/index.db");
+      CHECK(db.index_identity().freshness == "current");
+      CHECK(db.find_symbols("initial_header_symbol", {}, 10).size() == 1);
+    }
+
+    const std::string intermediate_header =
+        "int intermediate_header_symbol() { return 3; }\n"
+        "#include \"" +
+        p.parse_gate_one + "\"\n";
+    write_file(p.header, intermediate_header);
+    REQUIRE(::mkfifo(p.parse_gate_one.c_str(), 0600) == 0);
+    write_file(p.source, "#include \"header.hpp\"\n"
+                         "int changed_main_symbol() { return 5; }\n");
+    std::atomic<bool> indexing_done = false;
+    std::atomic<bool> restorer_failed = false;
+    std::atomic<bool> restored = false;
+    std::thread restorer([&] {
+      int gate = -1;
+      while (!indexing_done.load(std::memory_order_acquire)) {
+        gate = ::open(p.parse_gate_one.c_str(), O_WRONLY | O_NONBLOCK);
+        if (gate >= 0) {
+          break;
+        }
+        std::this_thread::yield();
+      }
+      if (gate < 0) {
+        return;
+      }
+      if (::unlink(p.header.c_str()) != 0) {
+        restorer_failed.store(true, std::memory_order_release);
+        ::close(gate);
+        return;
+      }
+      std::ofstream restored_header(p.header);
+      if (!restored_header.good()) {
+        restorer_failed.store(true, std::memory_order_release);
+        ::close(gate);
+        return;
+      }
+      restored_header << initial_header;
+      restored_header.close();
+      const char release = '\n';
+      if (::write(gate, &release, 1) != 1) {
+        restorer_failed.store(true, std::memory_order_release);
+        ::close(gate);
+        return;
+      }
+      ::close(gate);
+      restored.store(true, std::memory_order_release);
+    });
+    r = run_cli({"index"}, p.cache, &log);
+    indexing_done.store(true, std::memory_order_release);
+    restorer.join();
+    REQUIRE_FALSE(restorer_failed.load(std::memory_order_acquire));
+    REQUIRE(restored.load(std::memory_order_acquire));
+    CHECK(r.rc == 1);
+    CHECK(r.err.find("source changed during indexing") != std::string::npos);
+
+    {
+      Storage db(p.cache + "/index.db");
+      CHECK(db.index_identity().freshness == "stale");
+      CHECK(db.find_symbols("intermediate_header_symbol", {}, 10).size() == 1);
+      CHECK(db.find_symbols("initial_header_symbol", {}, 10).empty());
+      const auto header = db.get_file(p.header);
+      REQUIRE(header.has_value());
+      CHECK_FALSE(header->indexed);
+    }
+
+    r = run_cli({"index"}, p.cache, &log);
+    REQUIRE(r.rc == 0);
+    Storage db(p.cache + "/index.db");
+    CHECK(db.index_identity().freshness == "current");
+    CHECK(db.find_symbols("initial_header_symbol", {}, 10).size() == 1);
+    CHECK(db.find_symbols("intermediate_header_symbol", {}, 10).empty());
+    CHECK(db.find_symbols("changed_main_symbol", {}, 10).size() == 1);
+  }
+
   TEST_CASE("index: two-TU pending flow — header counters, md5 skip, "
             "content change re-indexes") {
     const TwoTuProject p;
@@ -1992,8 +2212,8 @@ TEST_SUITE("clang") {
     CHECK(r.out == "file: " + proj + "/app.c\n  already indexed\n");
 
     // Content change -> md5 mismatch -> only app.c re-indexed; the header is
-    // still current ("1 already"). main()'s row is already resolved, so the
-    // re-encounter is skipped (G15) — 0 NEW symbols stored, Python parity.
+    // still current ("1 already"). Reindex replacement removes the previous
+    // file-owned symbols before storing the new AST output.
     write_file(proj + "/app.c",
                "#include \"mathlib.h\"\n"
                "int main(void) { return add(square(2), 1); }\n");
@@ -2002,7 +2222,7 @@ TEST_SUITE("clang") {
     CHECK(r.out ==
           "indexing " + proj +
               "/app.c\n"
-              "  -> 0 symbols; headers: 0 indexed (+0 symbols), 1 already, "
+              "  -> 1 symbols; headers: 0 indexed (+0 symbols), 1 already, "
               "0 system, 0 unowned\n"
               "index: 1 indexed, 0 failed, 2 already indexed\n");
 
@@ -2334,10 +2554,9 @@ TEST_CASE("analyze: --export-facts writes TSV facts plus the prelude") {
   CHECK(r.out.find(out_dir + ": 10 fact files, ") == 0);
 
   const std::string symbols = read_file(out_dir + "/symbol.facts");
-  CHECK(symbols ==
-        "1\tc:@F@alpha\talpha\talpha\t8\t1\t1\t1\n"
-        "2\tc:@F@beta\tbeta\tbeta\t8\t1\t1\t10\n"
-        "3\tc:@F@gamma\tgamma\tgamma\t8\t1\t1\t20\n");
+  CHECK(symbols == "1\tc:@F@alpha\talpha\talpha\t8\t1\t1\t1\n"
+                   "2\tc:@F@beta\tbeta\tbeta\t8\t1\t1\t10\n"
+                   "3\tc:@F@gamma\tgamma\tgamma\t8\t1\t1\t20\n");
   const std::string edges = read_file(out_dir + "/edge.facts");
   CHECK(edges == "1\t1\t2\t1\t1\n"
                  "2\t2\t1\t1\t1\n"
@@ -2359,37 +2578,38 @@ TEST_CASE("analyze: --rule cycles finds the seeded recursion (needs souffle)") {
   const CmdResult r = run_cli({"analyze", "--rule", "cycles"}, t);
   CHECK(r.rc == 0);
   CHECK(r.err.empty());
-  CHECK(r.out ==
-        "{\n"
-        "  \"rule\": \"cycles\",\n"
-        "  \"db\": \"" + t + "/index.db\",\n"
-        "  \"relations\": {\n"
-        "    \"cycle_edge\": [\n"
-        "      [\n"
-        "        \"c:@F@alpha\",\n"
-        "        \"alpha\",\n"
-        "        \"c:@F@beta\",\n"
-        "        \"beta\"\n"
-        "      ],\n"
-        "      [\n"
-        "        \"c:@F@beta\",\n"
-        "        \"beta\",\n"
-        "        \"c:@F@alpha\",\n"
-        "        \"alpha\"\n"
-        "      ]\n"
-        "    ],\n"
-        "    \"cycle_member\": [\n"
-        "      [\n"
-        "        \"c:@F@alpha\",\n"
-        "        \"alpha\"\n"
-        "      ],\n"
-        "      [\n"
-        "        \"c:@F@beta\",\n"
-        "        \"beta\"\n"
-        "      ]\n"
-        "    ]\n"
-        "  }\n"
-        "}\n");
+  CHECK(r.out == "{\n"
+                 "  \"rule\": \"cycles\",\n"
+                 "  \"db\": \"" +
+                     t +
+                     "/index.db\",\n"
+                     "  \"relations\": {\n"
+                     "    \"cycle_edge\": [\n"
+                     "      [\n"
+                     "        \"c:@F@alpha\",\n"
+                     "        \"alpha\",\n"
+                     "        \"c:@F@beta\",\n"
+                     "        \"beta\"\n"
+                     "      ],\n"
+                     "      [\n"
+                     "        \"c:@F@beta\",\n"
+                     "        \"beta\",\n"
+                     "        \"c:@F@alpha\",\n"
+                     "        \"alpha\"\n"
+                     "      ]\n"
+                     "    ],\n"
+                     "    \"cycle_member\": [\n"
+                     "      [\n"
+                     "        \"c:@F@alpha\",\n"
+                     "        \"alpha\"\n"
+                     "      ],\n"
+                     "      [\n"
+                     "        \"c:@F@beta\",\n"
+                     "        \"beta\"\n"
+                     "      ]\n"
+                     "    ]\n"
+                     "  }\n"
+                     "}\n");
 }
 
 TEST_CASE("analyze: --rules-file runs user Datalog against the exported facts "
@@ -2410,17 +2630,21 @@ TEST_CASE("analyze: --rules-file runs user Datalog against the exported facts "
   const CmdResult r = run_cli({"analyze", "--rules-file", prog}, t);
   CHECK(r.rc == 0);
   CHECK(r.out == "{\n"
-                 "  \"rule\": \"" + prog + "\",\n"
-                 "  \"db\": \"" + t + "/index.db\",\n"
-                 "  \"relations\": {\n"
-                 "    \"leaf\": [\n"
-                 "      [\n"
-                 "        \"c:@F@gamma\",\n"
-                 "        \"gamma\"\n"
-                 "      ]\n"
-                 "    ]\n"
-                 "  }\n"
-                 "}\n");
+                 "  \"rule\": \"" +
+                     prog +
+                     "\",\n"
+                     "  \"db\": \"" +
+                     t +
+                     "/index.db\",\n"
+                     "  \"relations\": {\n"
+                     "    \"leaf\": [\n"
+                     "      [\n"
+                     "        \"c:@F@gamma\",\n"
+                     "        \"gamma\"\n"
+                     "      ]\n"
+                     "    ]\n"
+                     "  }\n"
+                     "}\n");
 }
 
 TEST_CASE("analyze: broken user Datalog surfaces the souffle error (needs "

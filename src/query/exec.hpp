@@ -31,11 +31,13 @@ struct Result {
   Shape shape = Shape::Nodes;
   View view = View::Symbol;
   bool truncated = false;
-  int64_t scalar = 0;                       // Shape::Scalar only
-  std::vector<std::string> fields;          // row column names, select order
-  std::vector<std::vector<Cell>> rows;      // Shape::Nodes/Rows
+  int64_t scalar = 0;                  // Shape::Scalar only
+  std::vector<std::string> fields;     // row column names, select order
+  std::vector<std::vector<Cell>> rows; // Shape::Nodes/Rows
+  IndexIdentity index;
 
-  // {"shape","view","count","truncated","rows"} -- see docs/query-plan.md.
+  // {"shape","view","count","truncated","index","rows"} -- see
+  // docs/query-plan.md.
   [[nodiscard]] json_out::Value to_json() const;
 };
 
@@ -45,6 +47,11 @@ public:
 
   // Validate + normalize + run. Throws PlanError on an invalid plan.
   Result run(const Plan &plan);
+
+  // Explain a plan without executing its row-producing stages. The returned
+  // object contains the normalized plan and the same index identity reported
+  // by Result::to_json().
+  [[nodiscard]] json_out::Value explain(const Plan &plan);
 
 private:
   Storage &db_;
