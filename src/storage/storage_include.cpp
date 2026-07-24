@@ -171,6 +171,15 @@ TranslationUnitConfig config_from_row(const SqliteStmt &st) {
 }
 } // namespace
 
+std::string
+canonical_translation_unit_config_json(const TranslationUnitConfig &config) {
+  return canonical_config_json(config);
+}
+
+std::string translation_unit_config_hash(const TranslationUnitConfig &config) {
+  return sha1_hex(canonical_translation_unit_config_json(config));
+}
+
 int64_t
 Storage::add_translation_unit_config(const TranslationUnitConfig &input) {
   TranslationUnitConfig c = resolve_translation_unit_config(
@@ -201,8 +210,8 @@ Storage::add_translation_unit_config(const TranslationUnitConfig &input) {
     c.generated_inputs = input.generated_inputs;
   }
   c.state = input.state;
-  c.descriptor_json = canonical_config_json(c);
-  c.descriptor_hash = sha1_hex(c.descriptor_json);
+  c.descriptor_json = canonical_translation_unit_config_json(c);
+  c.descriptor_hash = translation_unit_config_hash(c);
   auto st = db_.prepare(
       "INSERT INTO translation_unit_config "
       "(descriptor_hash, descriptor_json, driver, working_dir, language, "

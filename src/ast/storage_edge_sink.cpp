@@ -45,6 +45,16 @@ void StorageEdgeSink::set_current_file_id(int64_t file_id) {
   lookup_cache_.clear();
 }
 
+void StorageEdgeSink::set_identity_translation_unit_config_id(
+    int64_t config_id, int64_t translation_unit_file_id) {
+  identity_translation_unit_ =
+      translation_unit_file_id >= 0
+          ? db_.portable_translation_unit_identity_for_config(
+                config_id, translation_unit_file_id)
+          : db_.portable_translation_unit_identity_for_config(config_id);
+  lookup_cache_.clear();
+}
+
 void StorageEdgeSink::set_identity_translation_unit_file_id(int64_t file_id) {
   identity_translation_unit_ =
       file_id >= 0

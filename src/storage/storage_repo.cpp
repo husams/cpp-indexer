@@ -177,19 +177,50 @@ std::string Storage::portable_source_identity_for_file(int64_t file_id) {
 }
 
 std::string
+Storage::portable_translation_unit_identity_for_config(int64_t config_id) {
+  const auto config = translation_unit_config_by_id(config_id);
+  return config ? "config:" + config->descriptor_hash
+                : "config-id-missing:" + std::to_string(config_id);
+}
+
+std::string Storage::portable_translation_unit_identity_for_config(
+    int64_t config_id, int64_t translation_unit_file_id) {
+  std::string config_identity =
+      portable_translation_unit_identity_for_config(config_id);
+  if (translation_unit_file_id < 0) {
+    return config_identity;
+  }
+  return config_identity + "\x1fsource:" +
+         portable_source_identity_for_file(translation_unit_file_id);
+}
+
+std::string
 Storage::portable_translation_unit_identity_for_file(int64_t file_id) {
+  const auto configs = translation_unit_configs_for_file(file_id);
+  if (configs.size() == 1U) {
+    return portable_translation_unit_identity_for_config(configs.front().id,
+                                                         file_id);
+  }
+  if (!configs.empty()) {
+    std::string out = "configs:";
+    for (std::size_t i = 0; i < configs.size(); ++i) {
+      if (i != 0) {
+        out += ',';
+      }
+      out += configs[i].descriptor_hash;
+    }
+    return "source:" + portable_source_identity_for_file(file_id) + "\x1f" +
+           out;
+  }
   const auto file = get_file_by_id(file_id);
   if (!file) {
-    return "tu-file-id-missing:" + std::to_string(file_id);
+    return "config-id-missing:" + std::to_string(file_id);
   }
-  std::string out = portable_source_identity_for_file(file_id);
-  out += std::string(1, '\x1f') + "driver:";
-  out += file->driver.value_or("");
-  out += std::string(1, '\x1f') + "args:";
-  out += file->compile_options
-             ? json_min::encode_string_array(*file->compile_options)
-             : "[]";
-  return out;
+  const TranslationUnitConfig config = resolve_translation_unit_config(
+      file->driver, std::string("."),
+      file->compile_options.value_or(std::vector<std::string>{}));
+  return "config:" + translation_unit_config_hash(config) +
+         "\x1fsource:" + portable_source_identity_for_file(file_id);
 }
 
 std::string Storage::symbol_identity_key(

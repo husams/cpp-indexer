@@ -736,6 +736,9 @@ public:
   void stamp_index_identity();
   std::string portable_source_identity_for_path(const std::string &path);
   std::string portable_source_identity_for_file(int64_t file_id);
+  std::string portable_translation_unit_identity_for_config(int64_t config_id);
+  std::string portable_translation_unit_identity_for_config(
+      int64_t config_id, int64_t translation_unit_file_id);
   std::string portable_translation_unit_identity_for_file(int64_t file_id);
   int64_t semantic_universe_for_file_id(int64_t file_id);
 

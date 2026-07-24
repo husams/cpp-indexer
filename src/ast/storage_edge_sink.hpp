@@ -23,6 +23,8 @@ public:
                    const std::optional<std::string> &identity_source =
                        std::nullopt) override;
   void set_current_file_id(int64_t file_id) override;
+  void set_identity_translation_unit_config_id(
+      int64_t config_id, int64_t translation_unit_file_id = -1) override;
   void set_identity_translation_unit_file_id(int64_t file_id) override;
   int64_t mint_symbol(const MintRequest &req) override;
   int64_t add_edge(const EdgeRecord &edge) override;

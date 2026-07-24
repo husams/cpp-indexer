@@ -1,4 +1,4 @@
-// v35 symbol identity scope acceptance tests.
+// v36 symbol identity scope acceptance tests.
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
 
@@ -160,7 +160,7 @@ TEST_CASE("v35 local identity is stable across file insertion order") {
   check_condition(make_key(false) == make_key(true));
 }
 
-TEST_CASE("v35 carries translation-unit identity through header sinks") {
+TEST_CASE("v36 carries translation-unit identity through header sinks") {
   cidx::Storage db(":memory:");
   const auto universe = db.add_semantic_universe("program:banking");
   const auto repo =
@@ -177,6 +177,27 @@ TEST_CASE("v35 carries translation-unit identity through header sinks") {
                   std::vector<std::string>{"-DCONFIG_B"}, "clang++");
   const auto header_path = db.file_abs_path(header);
   REQUIRE(header_path.has_value());
+  cidx::TranslationUnitConfig config_a;
+  config_a.driver = "clang++";
+  config_a.working_dir = "/workspace";
+  config_a.language = "c++";
+  config_a.standard = "c++23";
+  config_a.target = "x86_64-linux-gnu";
+  config_a.sysroot = "/sdk/x86";
+  config_a.resource_dir = "/clang/resource";
+  config_a.include_paths = {"/workspace/include"};
+  config_a.macro_state = {"CONFIG_A"};
+  config_a.relevant_environment = {"SDKROOT=/sdk"};
+  config_a.generated_inputs = {"generated/config.h"};
+  config_a.diagnostics_policy = "error-limit=0";
+  config_a.arguments = {"-std=c++23", "-DCONFIG_A"};
+  auto config_b = config_a;
+  config_b.target = "aarch64-linux-gnu";
+  config_b.sysroot = "/sdk/arm64";
+  config_b.macro_state = {"CONFIG_B"};
+  config_b.generated_inputs = {"generated/config-arm.h"};
+  const auto config_a_id = db.add_translation_unit_config(config_a);
+  const auto config_b_id = db.add_translation_unit_config(config_b);
 
   cidx::ast::SymbolRecord record;
   record.file = *header_path;
@@ -192,10 +213,11 @@ TEST_CASE("v35 carries translation-unit identity through header sinks") {
   record.resolved = true;
 
   cidx::ast::StorageSymbolSink symbols(db);
-  symbols.set_current_file_id(header);
-  symbols.set_identity_translation_unit_file_id(tu_a);
+  symbols.set_current_file_id(tu_a);
+  symbols.set_identity_translation_unit_config_id(config_a_id, tu_a);
   symbols.emit(record);
-  symbols.set_identity_translation_unit_file_id(tu_b);
+  symbols.set_current_file_id(tu_b);
+  symbols.set_identity_translation_unit_config_id(config_b_id, tu_b);
   symbols.emit(record);
   const auto rows = db.lookup_symbols_by_usr(record.usr, universe);
   REQUIRE(rows.size() == 2);
@@ -203,17 +225,17 @@ TEST_CASE("v35 carries translation-unit identity through header sinks") {
 
   cidx::ast::StorageEdgeSink edges(db);
   edges.set_current_file_id(tu_a);
-  edges.set_identity_translation_unit_file_id(tu_a);
+  edges.set_identity_translation_unit_config_id(config_a_id, tu_a);
   const auto a_id = edges.lookup_symbol_id(record.usr, *header_path);
   edges.set_current_file_id(tu_b);
-  edges.set_identity_translation_unit_file_id(tu_b);
+  edges.set_identity_translation_unit_config_id(config_b_id, tu_b);
   const auto b_id = edges.lookup_symbol_id(record.usr, *header_path);
   REQUIRE(a_id.has_value());
   REQUIRE(b_id.has_value());
   CHECK(*a_id != *b_id);
-  CHECK(db.update_symbol(record.usr, {{"spelling", std::string("A")}}, universe,
-                         *header_path,
-                         db.portable_translation_unit_identity_for_file(tu_a)));
+  CHECK(db.update_symbol(
+      record.usr, {{"spelling", std::string("A")}}, universe, *header_path,
+      db.portable_translation_unit_identity_for_config(config_a_id, tu_a)));
   CHECK(db.lookup_symbol_by_id(*a_id)->spelling == "A");
   CHECK(db.lookup_symbol_by_id(*b_id)->spelling == "header_local");
 
@@ -227,10 +249,10 @@ TEST_CASE("v35 carries translation-unit identity through header sinks") {
   request.identity_source = *header_path;
   request.linkage = "no-linkage";
   edges.set_current_file_id(tu_a);
-  edges.set_identity_translation_unit_file_id(tu_a);
+  edges.set_identity_translation_unit_config_id(config_a_id, tu_a);
   const auto stub_a = edges.mint_symbol(request);
   edges.set_current_file_id(tu_b);
-  edges.set_identity_translation_unit_file_id(tu_b);
+  edges.set_identity_translation_unit_config_id(config_b_id, tu_b);
   const auto stub_b = edges.mint_symbol(request);
   CHECK(stub_a != stub_b);
 }
@@ -308,7 +330,7 @@ TEST_CASE(
   auto version =
       raw.prepare("SELECT value FROM meta WHERE key = 'schema_version'");
   REQUIRE(version.step());
-  check_condition(version.col_text(0) == "35");
+  check_condition(version.col_text(0) == "36");
   auto edge = raw.prepare("SELECT src_id, dst_id FROM edge WHERE id = 11");
   REQUIRE(edge.step());
   check_condition(edge.col_int64(0) == 7);

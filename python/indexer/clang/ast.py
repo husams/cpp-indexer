@@ -2182,15 +2182,6 @@ def _emit_namespace_uses(
     discipline of the other edge passes. No self-edge.
     """
 
-    tu_identity = db.portable_translation_unit_identity_for_file(file_id)
-
-    def scoped_lookup(usr: str):
-        return db.lookup_symbol(
-            usr,
-            identity_source=filename,
-            identity_translation_unit=tu_identity,
-        )
-
     def descend(cursor: cx.Cursor, enclosing_id: Optional[int]) -> None:
         for child in cursor.get_children():
             f = child.location.file
@@ -2202,7 +2193,7 @@ def _emit_namespace_uses(
                     ref = child.referenced
                     nusr = ref.get_usr() if ref is not None else None
                     if nusr:
-                        nsym = scoped_lookup(nusr)
+                        nsym = db.lookup_symbol(nusr)
                         if nsym is not None and nsym.id != enclosing_id:
                             eid = db.add_edge(enclosing_id, nsym.id, 7)  # uses
                             loc = child.location
@@ -2215,7 +2206,7 @@ def _emit_namespace_uses(
             if ck in _SCOPE_KINDS:
                 usr = child.get_usr()
                 if usr:
-                    s = scoped_lookup(usr)
+                    s = db.lookup_symbol(usr)
                     if s is not None:
                         new_enclosing = s.id
             descend(child, new_enclosing)

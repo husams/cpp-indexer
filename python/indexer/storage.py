@@ -3459,14 +3459,49 @@ class Storage:
             f"file-id-missing:{file_id}"
         )
 
+    def portable_translation_unit_identity_for_config(
+        self, config_id: int, translation_unit_file_id: Optional[int] = None
+    ) -> str:
+        row = self._conn.execute(
+            "SELECT descriptor_hash FROM translation_unit_config WHERE id = ?",
+            (config_id,),
+        ).fetchone()
+        identity = (
+            f"config:{row['descriptor_hash']}"
+            if row is not None
+            else f"config-id-missing:{config_id}"
+        )
+        if translation_unit_file_id is not None:
+            identity += "\x1fsource:" + self.portable_source_identity_for_file(
+                translation_unit_file_id
+            )
+        return identity
+
     def portable_translation_unit_identity_for_file(self, file_id: int) -> str:
+        configs = self.translation_unit_configs_for_file(file_id)
+        if len(configs) == 1:
+            return self.portable_translation_unit_identity_for_config(
+                configs[0].id or -1, file_id
+            )
+        if configs:
+            return (
+                "source:" + self.portable_source_identity_for_file(file_id)
+                + "\x1fconfigs:"
+                + ",".join(c.descriptor_hash for c in configs)
+            )
         file = self.get_file_by_id(file_id)
         if file is None:
-            return f"tu-file-id-missing:{file_id}"
-        args = json.dumps(file.compile_options or [], separators=(",", ":"))
+            return f"config-id-missing:{file_id}"
+        config = resolve_translation_unit_config(
+            file.compile_options or [],
+            driver=file.driver,
+            working_dir=".",
+        )
         return (
-            f"{self.portable_source_identity_for_file(file_id)}\x1f"
-            f"driver:{file.driver or ''}\x1fargs:{args}"
+            "config:"
+            + translation_unit_config_hash(config)
+            + "\x1fsource:"
+            + self.portable_source_identity_for_file(file_id)
         )
 
     def _symbol_identity_key(

@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from indexer.storage import Storage, Symbol
+from indexer.storage import Storage, Symbol, TranslationUnitConfig
 
 
 def _file(store, component, name):
@@ -108,8 +108,39 @@ def test_translation_unit_identity_separates_same_header_locals(tmp_path):
             driver="clang++",
         )
         header_path = store.file_abs_path(header)
-        tu_a_key = store.portable_translation_unit_identity_for_file(tu_a)
-        tu_b_key = store.portable_translation_unit_identity_for_file(tu_b)
+        config_a = TranslationUnitConfig(
+            driver="clang++",
+            working_dir="/workspace",
+            language="c++",
+            standard="c++23",
+            target="x86_64-linux-gnu",
+            sysroot="/sdk/x86",
+            resource_dir="/clang/resource",
+            include_paths=["/workspace/include"],
+            macro_state=["CONFIG_A"],
+            relevant_environment=["SDKROOT=/sdk"],
+            generated_inputs=["generated/config.h"],
+            diagnostics_policy="error-limit=0",
+            arguments=["-std=c++23", "-DCONFIG_A"],
+        )
+        config_b = TranslationUnitConfig(
+            **{
+                **config_a.__dict__,
+                "target": "aarch64-linux-gnu",
+                "sysroot": "/sdk/arm64",
+                "macro_state": ["CONFIG_B"],
+                "generated_inputs": ["generated/config-arm.h"],
+                "arguments": ["-std=c++23", "-DCONFIG_B"],
+            }
+        )
+        config_a_id = store.add_translation_unit_config(config_a)
+        config_b_id = store.add_translation_unit_config(config_b)
+        tu_a_key = store.portable_translation_unit_identity_for_config(
+            config_a_id, tu_a
+        )
+        tu_b_key = store.portable_translation_unit_identity_for_config(
+            config_b_id, tu_b
+        )
 
         def add_local(tu_key):
             return store.add_symbol(
@@ -218,6 +249,6 @@ def test_v34_migration_preserves_numeric_and_scoped_identity(tmp_path):
     conn = sqlite3.connect(path)
     assert conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()[0] == "35"
+    ).fetchone()[0] == "36"
     assert conn.execute("SELECT src_id, dst_id FROM edge WHERE id = 11").fetchone() == (7, 7)
     conn.close()

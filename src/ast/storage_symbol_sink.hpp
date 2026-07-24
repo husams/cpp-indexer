@@ -7,9 +7,9 @@
 #include "ast/symbol_emitter.hpp"
 
 #include <cstdint>
-#include <vector>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace cidx {
 class Storage;
@@ -22,6 +22,8 @@ public:
   explicit StorageSymbolSink(cidx::Storage &db);
 
   void set_current_file_id(int64_t file_id);
+  void set_identity_translation_unit_config_id(
+      int64_t config_id, int64_t translation_unit_file_id = -1);
   void set_identity_translation_unit_file_id(int64_t file_id);
 
   // index_file_notxn counters: a cursor whose symbol already exists RESOLVED
