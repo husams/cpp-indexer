@@ -13,6 +13,7 @@ are implementations or evidence; none is a semantic axiom here.
 | `modules/CidxTypes.tla` | shared abstract domains, relation kinds, evidence/trust levels, and result statuses | human-authored normative contract |
 | `modules/CidxRepository.tla` | repository/workspace structure smoke specification | human-authored normative contract |
 | `modules/CidxResult.tla` | result-status lifecycle smoke specification | human-authored normative contract |
+| `modules/CidxWorkspaceLifecycle.tla` | workspace identity, configuration applicability, and generation lifecycle | human-authored normative contract |
 | `models/*.tla` and `models/*.cfg` | finite TLC smoke models and their constants/invariants | human-authored model boundary |
 | `protected/CidxProtected.tla` | protected invariant predicates consumed by models | explicit human review required |
 | `trusted/assumptions.md` | trusted external assumptions and review rules | explicit human review required |
@@ -24,6 +25,7 @@ The dependency direction is intentionally one-way:
 ```text
 CidxTypes <- CidxRepository <- CidxRepositorySmoke
           <- CidxResult     <- CidxResultSmoke
+          <- CidxWorkspaceLifecycle <- CidxWorkspaceLifecycleSmoke
 ```
 
 `CidxProtected` is a policy module imported by the repository model. Later
@@ -41,6 +43,18 @@ the one shared `ResultStatuses` set:
 `suggested`, `observed`, `inferred`, `bounded-verified`,
 `proved-under-assumptions`, `refuted`, and `unknown`.
 
+`CidxTypes.tla` also defines the shared generation lifecycle states
+`imported`, `capturing`, `extracting`, `validating`, `published`, `current`,
+`stale`, `failed`, and `retired`, plus reader states `current`, `stale`,
+`partial`, and `unavailable`. Later models must reuse these sets instead of
+introducing subsystem-specific spellings.
+
+`CidxWorkspaceLifecycle.tla` keeps environment weak fairness as an assumption
+inside `Spec`, but checks the separate `RebuildEventuallySettles` property.
+That property requires an enabled import/rebuild path to reach a settled
+reader state; the regression checker removes publication and verifies TLC
+rejects the resulting non-progressing behavior.
+
 Future modules must import these operators instead of defining look-alike
 status strings or implementation-specific record shapes. Concrete identifiers
 and finite model sizes belong in `.cfg` files, not in the normative type
@@ -55,9 +69,26 @@ layout, traversal order, cache format, CLI spelling, or generated representation
 that is not imported as a TLA+ axiom. A successful smoke model proves only the
 modeled behavior and tool invocation; it is not implementation conformance.
 
-The first models deliberately cover repository identity/containment and result
-status transitions. They do not specify all subsystem behavior, compiler
-semantics, storage recovery, query planning, or implementation performance.
+The first models deliberately cover repository identity/containment, result
+status transitions, and the workspace/generation lifecycle. They do not
+specify compiler semantics, storage recovery internals, query planning, or
+implementation performance.
+
+## Contract handoffs
+
+The lifecycle model is the normative vocabulary handoff for the related
+implementation contracts:
+
+| Specification concern | Downstream contract |
+| --- | --- |
+| workspace, repository, clone/component boundary, and configuration capture | HSE-61 `WorkspaceContext` and translation-unit descriptor |
+| configuration-qualified facts and invariant facts | HSE-76 translation-unit configuration applicability |
+| scoped symbol identity and intentional cross-repository merge | HSE-82 semantic-universe identity |
+| generation inputs, dependency invalidation, atomic publication, and failed/stale reads | HSE-67 named transform lifecycle |
+
+The model deliberately treats those implementation issues as observable
+contracts: it does not import their C++ types, SQLite tables, or filesystem
+operations.
 
 ## Reproducible check
 
