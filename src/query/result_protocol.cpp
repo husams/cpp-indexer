@@ -153,6 +153,11 @@ Value evidence_json(const EvidenceNode &node, std::size_t depth,
   if (depth > kMaxEvidenceDepth || ++node_count > kMaxEvidenceNodes) {
     throw std::invalid_argument("evidence tree exceeds protocol bounds");
   }
+  if (!valid_text(node.id) || !valid_text(node.evidence_class) ||
+      !valid_text(node.trust) || !valid_text(node.summary) ||
+      (node.source && !valid_text(*node.source))) {
+    throw std::invalid_argument("evidence text exceeds protocol bounds");
+  }
   if (!one_of(node.evidence_class, generated::kEvidenceClasses) ||
       !one_of(node.trust, generated::kTrustLevels)) {
     throw std::invalid_argument("invalid evidence domain");

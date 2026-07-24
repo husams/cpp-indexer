@@ -166,6 +166,8 @@ class Evidence:
     def to_dict(self, depth: int = 1, count: list[int] | None = None) -> dict[str, Any]:
         if self.evidence_class not in EVIDENCE_CLASSES or self.trust not in TRUST_LEVELS:
             raise ValueError("evidence domain is invalid")
+        if any(not _valid_text(value) for value in (self.id, self.evidence_class, self.trust, self.summary, self.source) if value is not None):
+            raise ValueError("evidence text exceeds protocol bounds")
         if depth > MAX_EVIDENCE_DEPTH:
             raise ValueError("evidence tree exceeds protocol bounds")
         count = count if count is not None else [0]

@@ -196,6 +196,18 @@ def test_generated_reason_rules_and_utf8_identity_bounds_are_rejected() -> None:
         envelope.to_dict()
 
 
+def test_nested_evidence_text_is_validated_recursively() -> None:
+    for child_text in (
+        "x" * OVERSIZED_ASCII_BYTES,
+        "😀" * OVERSIZED_MULTIBYTE_CHARS,
+        "\ud800",
+    ):
+        envelope = _golden_envelope()
+        envelope.evidence = [Evidence("root", children=(Evidence(child_text),))]
+        with pytest.raises(ValueError):
+            envelope.to_dict()
+
+
 def test_event_and_error_goldens_are_executable() -> None:
     event = ProgressEvent(3, "index", "progress", "indexed 2 of 4 files", 2, 4)
     assert event.to_dict() == json.loads(EVENT_GOLDEN.read_text(encoding="utf-8"))

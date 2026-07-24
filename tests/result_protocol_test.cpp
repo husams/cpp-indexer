@@ -169,6 +169,45 @@ TEST_CASE("result protocol rejects generated placeholders, weak reasons, and "
   CHECK_FALSE(envelope.valid());
 }
 
+TEST_CASE("nested evidence text is validated recursively") {
+  using namespace cidx::protocol;
+  auto envelope = golden_envelope();
+  envelope.evidence = {EvidenceNode{
+      .id = "root",
+      .evidence_class = "derived",
+      .trust = "producer-verified",
+      .summary = "root",
+      .source = std::nullopt,
+      .children = {EvidenceNode{
+          .id = std::string(generated::kOversizedAsciiBytes, 'x')}}}};
+  CHECK_FALSE(envelope.valid());
+
+  envelope = golden_envelope();
+  std::string multibyte;
+  for (std::size_t index = 0; index < generated::kOversizedMultibyteChars;
+       ++index) {
+    multibyte += "\xF0\x9F\x98\x80";
+  }
+  envelope.evidence = {
+      EvidenceNode{.id = "root",
+                   .evidence_class = "derived",
+                   .trust = "producer-verified",
+                   .summary = "root",
+                   .source = std::nullopt,
+                   .children = {EvidenceNode{.id = multibyte}}}};
+  CHECK_FALSE(envelope.valid());
+
+  envelope = golden_envelope();
+  envelope.evidence = {EvidenceNode{
+      .id = "root",
+      .evidence_class = "derived",
+      .trust = "producer-verified",
+      .summary = "root",
+      .source = std::nullopt,
+      .children = {EvidenceNode{.id = std::string("bad\xF0\x9F", 5)}}}};
+  CHECK_FALSE(envelope.valid());
+}
+
 TEST_CASE("progress events and redaction stay separate from final results") {
   using namespace cidx::protocol;
   const ProgressEvent event{3, "index", "progress", "TOKEN=secret", 2, 4};
