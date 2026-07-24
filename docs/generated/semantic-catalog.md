@@ -1,7 +1,7 @@
 # Generated CIDX semantic catalog
 
 - Catalog version: `1`
-- Catalog hash: `38453dfc66a3cb7c2e31483cb711cb8a99231a531557e30a46c7d81d0e84ef7b`
+- Catalog hash: `1adb5f6663a2e48dc3a624c79703ceaa5287f2784731a00bbc469dba8d5935d4`
 
 ## Relations
 
@@ -39,6 +39,28 @@
 | entity | 10 | `befriends` | `entity` | `entity` | `befriended_by` | out,in | derived | derived | complete |
 | entity | 11 | `instantiates` | `entity` | `entity` | `instantiated_by` | out,in | derived | derived | partial |
 | entity | 12 | `declares` | `entity` | `entity` | `declared_by` | out,in | derived | derived | complete |
+| symbol | 21 | `has_parameter` | `symbol.callable` | `parameter` | `of_callable` | out,in | declaration | declaration,call_site | complete |
+| symbol | 22 | `has_template_parameter` | `symbol.template` | `template_parameter` | `of_template` | out,in | declaration | declaration | complete |
+| symbol | 23 | `has_template_argument` | `symbol.template` | `template_argument` | `of_template` | out,in | reference_site | reference_site,call_site | partial |
+| symbol | 24 | `has_call_edge` | `symbol.callable` | `edge` | `of_caller` | out,in | call_site | call_site | partial |
+| symbol | 25 | `has_evidence` | `symbol.callable` | `evidence` | `of_symbol` | out,in | call_site | call_site,declaration | partial |
+| parameter | 1 | `of_type` | `parameter` | `type` | `has_parameter` | out,in | declaration | declaration | complete |
+| parameter | 2 | `declared_type` | `parameter` | `type` | `has_declared_parameter` | out,in | declaration | declaration | complete |
+| parameter | 3 | `adjusted_type` | `parameter` | `type` | `has_adjusted_parameter` | out,in | declaration | declaration | complete |
+| parameter | 4 | `references_symbol` | `parameter` | `symbol` | `referenced_by_parameter` | out,in | declaration | declaration | partial |
+| parameter | 5 | `has_evidence` | `parameter` | `evidence` | `of_parameter` | out,in | declaration | declaration | partial |
+| template_parameter | 1 | `of_type` | `template_parameter` | `type` | `has_template_parameter` | out,in | declaration | declaration | complete |
+| template_parameter | 2 | `has_default` | `template_parameter` | `evidence` | `defaulted_by` | out,in | declaration | declaration | partial |
+| template_argument | 1 | `of_type` | `template_argument` | `type` | `has_template_argument` | out,in | reference_site | reference_site | partial |
+| template_argument | 2 | `references_symbol` | `template_argument` | `symbol` | `referenced_by_template_argument` | out,in | reference_site | reference_site | partial |
+| edge | 1 | `has_argument` | `edge` | `call_argument` | `of_edge` | out,in | call_site | call_site | partial |
+| edge | 2 | `has_evidence` | `edge` | `evidence` | `of_edge` | out,in | call_site | call_site | partial |
+| call_argument | 1 | `of_type` | `call_argument` | `type` | `has_call_argument` | out,in | call_site | call_site | partial |
+| call_argument | 2 | `references_symbol` | `call_argument` | `symbol` | `referenced_by_call_argument` | out,in | call_site | call_site | partial |
+| evidence | 1 | `of_edge` | `evidence` | `edge` | `has_evidence` | out,in | call_site | call_site | partial |
+| evidence | 2 | `of_occurrence` | `evidence` | `call_argument` | `has_evidence` | out,in | call_site | call_site | partial |
+| type | 1 | `references_symbol` | `type` | `symbol` | `of_type` | out,in | declaration | declaration | partial |
+| type | 2 | `has_type_edge` | `type` | `type` | `of_type_edge` | out,in | derived | derived | partial |
 
 ## Compatibility
 

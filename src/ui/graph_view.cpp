@@ -437,7 +437,11 @@ query::Query make_query_plan(const graph::Sym &root,
     relations = *request.edge_kinds;
   } else {
     for (const auto &relation : query::relation_catalog()) {
-      if (relation.layer == query::View::Symbol) {
+      const bool symbol_result =
+          request.direction == "in"
+              ? relation.layer == query::View::Symbol
+              : relation.target_view == query::View::Symbol;
+      if (relation.layer == query::View::Symbol && symbol_result) {
         relations.push_back(relation.name);
       }
     }

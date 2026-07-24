@@ -81,10 +81,17 @@ def _cpp_string_constants(path: Path) -> dict[str, str]:
 def _cpp_relation_catalog() -> tuple[tuple[str, str, int], ...]:
     source = (ROOT / "src/catalogs/generated_catalog.hpp").read_text(encoding="utf-8")
     rows = re.findall(
-        r'\{\.id = (\d+), \.name = "([^"]+)", \.layer = View::(Symbol|Entity),',
+        r'\{\.id = (\d+), \.name = "([^"]+)", \.layer = View::([A-Za-z]+),',
         source,
     )
-    return tuple((name, layer.lower(), int(kind_id)) for kind_id, name, layer in rows)
+    return tuple(
+        (
+            name,
+            re.sub(r"(?<!^)([A-Z])", r"_\1", layer).lower(),
+            int(kind_id),
+        )
+        for kind_id, name, layer in rows
+    )
 
 
 def compare_generated_outputs(data: dict, digest: str) -> None:

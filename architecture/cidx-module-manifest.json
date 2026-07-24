@@ -120,6 +120,7 @@
       "allowedDependencies": [
         "query.plan",
         "persistence.sqlite",
+        "foundation.util",
         "model.contracts"
       ],
       "description": "Canonical read algebra and query execution adapter."
