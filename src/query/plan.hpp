@@ -183,6 +183,7 @@ public:
   explicit Query(Source src) { plan_.source = std::move(src); }
   Query(const Query &) = default;
   Query &operator=(const Query &) = default;
+  Query(Query &&) noexcept = default;
   Query &operator=(Query &&) noexcept = default;
 
   [[nodiscard]] const Plan &plan() const { return plan_; }
