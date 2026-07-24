@@ -15,6 +15,7 @@
 #include "util/env.hpp"
 #include "util/hashing.hpp"
 #include "util/pathutil.hpp"
+#include "workspace/context.hpp"
 
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
@@ -378,26 +379,6 @@ private:
 
 } // namespace
 
-// Flag assembly identical to Parser::parse: re-sanitized stored options,
-// <label>/$VAR resolution, toolchain search paths, -ferror-limit=0.
-static std::vector<std::string> build_clang_arguments(cidx::Storage &db,
-                                                      const cidx::File &rec,
-                                                      const std::string &path) {
-  const std::vector<std::string> opts = cidx::CompileDb::resolve_options(
-      cidx::CompileDb::sanitize(rec.compile_options
-                                    ? *rec.compile_options
-                                    : std::vector<std::string>{}),
-      [&db](const std::string &n) { return db.get_alias(n); });
-  cidx::Toolchain toolchain;
-  const bool cpp = cidx::Toolchain::is_cpp(path, opts);
-  std::vector<std::string> args = opts;
-  for (std::string &f : toolchain.toolchain_flags(cpp, rec.driver)) {
-    args.push_back(std::move(f));
-  }
-  args.emplace_back("-ferror-limit=0");
-  return args;
-}
-
 // create_compilation_database + tool: the fixed database must outlive the
 // tool, so both live in one holder.
 struct CompilationSetup {
@@ -472,7 +453,17 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   IndexOneOutcome out;
   const SourceSnapshot source = SourceSnapshot::capture(path);
   out.source_md5 = source.md5;
-  const std::vector<std::string> args = build_clang_arguments(db, rec, path);
+  cidx::StorageWorkspaceAdapter workspace_data(db);
+  WorkspaceContext context =
+      WorkspaceContext::borrow(workspace_data,
+                               WorkspaceReadWriteMode::read_write);
+  Toolchain toolchain;
+  TranslationUnitConfigurationService resolver(context, toolchain);
+  const TranslationUnitDescriptor descriptor = resolver.resolve(path);
+  const TranslationUnitConfig &resolved = descriptor.configuration;
+  const std::vector<std::string> args =
+      TranslationUnitConfigurationService::invocation_arguments(path,
+                                                                descriptor);
   CompilationSetup setup(args, path);
   DiagCollector collector(out.diagnostics);
   setup.tool.setDiagnosticConsumer(&collector);
@@ -483,17 +474,11 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   // Working dir is "." to match CompilationSetup's FixedCompilationDatabase.
   cidx::IncludeConfig config;
   config.tu_file_id = rec.id;
-  config.driver = rec.driver;
-  config.working_dir = std::string(".");
+  config.driver = resolved.driver;
+  config.working_dir = resolved.working_dir;
   config.arguments = args;
-  config.lang_mode = cidx::Toolchain::is_cpp(path, args) ? "c++" : "c";
-#ifdef CIDX_CLANG_RESOURCE_DIR
-  config.resource_dir = std::string(CIDX_CLANG_RESOURCE_DIR);
-#endif
-  const cidx::TranslationUnitConfig descriptor =
-      cidx::resolve_translation_unit_config(
-          config.driver, config.working_dir, config.arguments, config.lang_mode,
-          config.resource_dir, std::string("error-limit=0"));
+  config.lang_mode = resolved.language;
+  config.resource_dir = resolved.resource_dir;
 
   EngineState state;
   state.db = &db;
@@ -503,7 +488,7 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   state.strict = read_strict_mode();
   state.out = &out;
   state.config = &config;
-  state.normalized_config_id = db.add_translation_unit_config(descriptor);
+  state.normalized_config_id = db.add_translation_unit_config(resolved);
 
   IndexFrontendActionFactory factory(state);
   (void)setup.tool.run(&factory);

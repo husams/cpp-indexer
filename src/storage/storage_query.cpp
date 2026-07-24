@@ -142,6 +142,7 @@ IndexIdentity Storage::index_identity() {
   const auto identity_version = meta_value(*this, "index_identity_version");
 
   IndexIdentity identity;
+  identity.schema_version = kSchemaVersion;
   std::vector<std::string> owners;
   auto owner_stmt = db_.prepare(
       "SELECT DISTINCT COALESCE(r.remote_url, ''), COALESCE(r.name, ''), "
