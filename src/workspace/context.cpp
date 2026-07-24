@@ -334,9 +334,11 @@ TranslationUnitConfig resolve_config(
   const std::optional<std::string> language =
       cpp ? std::optional<std::string>("c++")
           : std::optional<std::string>("c");
-  const std::vector<std::string> flags =
-      toolchain.toolchain_flags(cpp, driver);
-  options.insert(options.end(), flags.begin(), flags.end());
+  if (std::ranges::find(options, "-nostdinc") == options.end()) {
+    const std::vector<std::string> flags =
+        toolchain.toolchain_flags(cpp, driver);
+    options.insert(options.end(), flags.begin(), flags.end());
+  }
   options.emplace_back("-ferror-limit=0");
   return resolve_translation_unit_config(
       driver, working_dir, options, language, toolchain.resource_include(),
@@ -372,18 +374,9 @@ TranslationUnitConfigurationService::normalized_arguments(
 std::vector<std::string>
 TranslationUnitConfigurationService::invocation_arguments(
     const std::string &source_path,
-    const TranslationUnitDescriptor &descriptor) const {
-  std::vector<std::string> arguments = descriptor.configuration.arguments;
-  if (std::ranges::find(arguments, "-nostdinc") == arguments.end()) {
-    const bool cpp = Toolchain::is_cpp(source_path, arguments);
-    const std::vector<std::string> flags =
-        toolchain_.toolchain_flags(cpp, descriptor.configuration.driver);
-    arguments.insert(arguments.end(), flags.begin(), flags.end());
-  }
-  if (std::ranges::find(arguments, "-ferror-limit=0") == arguments.end()) {
-    arguments.emplace_back("-ferror-limit=0");
-  }
-  return arguments;
+    const TranslationUnitDescriptor &descriptor) {
+  (void)source_path;
+  return descriptor.configuration.arguments;
 }
 
 void TranslationUnitConfigurationService::validate(

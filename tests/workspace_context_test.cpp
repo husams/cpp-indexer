@@ -106,6 +106,11 @@ TEST_CASE("descriptor resolver returns deterministic ambiguity diagnostics") {
   const auto descriptors = resolver.resolve_all(source.string());
   REQUIRE(descriptors.size() == 2);
   CHECK(descriptors[0].semantic_hash < descriptors[1].semantic_hash);
+  const auto invocation =
+      cidx::TranslationUnitConfigurationService::invocation_arguments(
+          source.string(), descriptors.front());
+  CHECK(invocation == descriptors.front().configuration.arguments);
+  CHECK(invocation.size() == descriptors.front().configuration.arguments.size());
   CHECK_THROWS_AS(static_cast<void>(resolver.resolve(source.string())),
                   cidx::WorkspaceError);
   try {

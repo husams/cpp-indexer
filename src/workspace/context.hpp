@@ -113,9 +113,9 @@ public:
   resolve(const std::string &source_path) const;
   [[nodiscard]] std::vector<std::string>
   normalized_arguments(const std::vector<std::string> &arguments) const;
-  [[nodiscard]] std::vector<std::string> invocation_arguments(
+  [[nodiscard]] static std::vector<std::string> invocation_arguments(
       const std::string &source_path,
-      const TranslationUnitDescriptor &descriptor) const;
+      const TranslationUnitDescriptor &descriptor);
 
 private:
   [[nodiscard]] TranslationUnitDescriptor
