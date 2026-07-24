@@ -1,0 +1,119 @@
+{
+  "report_version": "storage-m3/evaluation-v1",
+  "source_issue": "HSE-81",
+  "benchmark_issue": "HSE-75",
+  "authoritative_store": {
+    "engine": "SQLite",
+    "schema_version": 34,
+    "role": "authoritative source of semantic facts and projection metadata",
+    "result_artifact": "benchmarks/storage_m0/baselines/v34-smoke.result.json",
+    "summary_artifact": "benchmarks/storage_m0/baselines/v34-smoke.json",
+    "profile_artifact": "benchmarks/storage_m0/profiles/local-macos-v1.json"
+  },
+  "baseline": {
+    "id": "sqlite-authoritative-v34",
+    "role": "sqlite_baseline",
+    "result_run_id": "c7e68cddd626cd5b086aaa54",
+    "semantic_digest": "08cc46550ceda20dc11e9457c26e394162cbdc359749fc5debe4b2a338a273d6",
+    "profile_id": "local-macos-v1",
+    "profile_sha256": "f48bca334d84cce223d869df03f4f86a90405418fb49ec28ce6d0dc71fdf5a23",
+    "failed_slos": [],
+    "measurement_scope": "HSE-75 v34 synthetic smoke baseline; scale and corpus claims require a new measured result"
+  },
+  "candidates": [
+    {
+      "id": "sqlite-authoritative-v34",
+      "role": "sqlite_baseline",
+      "prototype_status": "measured",
+      "source_fact_sets": ["workspace", "layer0.semantic", "layer1.derived", "evidence"],
+      "version": "schema-v34/catalog-v1",
+      "build_options": {"journal": "DELETE", "synchronous": "FULL", "query_only_reads": true},
+      "identity_mapping": {"exported_identity": "USR/type-key/artifact identity", "local_id_scope": "authoritative database generation", "generation_dictionary": "not applicable to core IDs"},
+      "invalidation_dependencies": ["workspace revision", "translation-unit configuration", "schema/catalog version", "input fact-set identity"],
+      "publication": {"immutable_or_atomic_replace": true, "content_addressed": false, "disposable": false, "rebuildable": true},
+      "execution": {"local_embedded": true, "mandatory_service": false, "fallback": "authoritative query path"},
+      "query_contract": {"query_semantics": "canonical QueryPlan result semantics", "completeness": "complete/partial/unknown is explicit", "evidence": "source and artifact evidence retained", "ordering": "deterministic canonical ordering", "fallback": "none; this is the source of truth"},
+      "cost_model": {"dimensions": ["build_update", "hot_query_latency", "end_to_end_latency", "duplicate_disk", "memory_mapping", "open_attach", "cleanup_retention", "portability_packaging", "crash_recovery", "maintenance"]}
+    },
+    {
+      "id": "csr-adjacency",
+      "role": "derived_accelerator",
+      "prototype_status": "deferred-until-baseline-fails",
+      "source_fact_sets": ["layer0.semantic", "layer1.derived", "evidence"],
+      "version": "storage-m3/csr-v1",
+      "build_options": {"layout": "memory-mapped CSR forward/reverse", "metadata": "compact generation-local IDs with degree/offset tables", "compression": "optional", "publication": "temporary-validate-rename-manifest"},
+      "identity_mapping": {"exported_identity": "USR/type-key/artifact identity", "local_id_scope": "projection generation", "generation_dictionary": "content-addressed generation-specific semantic ID map"},
+      "invalidation_dependencies": ["source fact-set identity", "schema/catalog version", "workspace/configuration identity", "CSR build options"],
+      "publication": {"immutable_or_atomic_replace": true, "content_addressed": true, "disposable": true, "rebuildable": true},
+      "execution": {"local_embedded": true, "mandatory_service": false, "fallback": "SQLite QueryPlan port"},
+      "query_contract": {"query_semantics": "bounded forward/reverse traversal only", "completeness": "projection completeness and truncation are explicit", "evidence": "map projection rows back to core evidence", "ordering": "core ordering or declared projection ordering", "fallback": "missing/stale projection uses SQLite or unknown/slow-path"},
+      "cost_model": {"dimensions": ["build_update", "hot_query_latency", "end_to_end_latency", "duplicate_disk", "memory_mapping", "open_attach", "cleanup_retention", "portability_packaging", "crash_recovery", "maintenance"]}
+    },
+    {
+      "id": "columnar-scan-artifact",
+      "role": "derived_accelerator",
+      "prototype_status": "deferred-until-baseline-fails",
+      "source_fact_sets": ["layer0.semantic", "layer1.derived", "analysis results"],
+      "version": "storage-m3/columnar-v1",
+      "build_options": {"layout": "immutable columnar artifact", "compression": "declared per column", "publication": "content-addressed sidecar"},
+      "identity_mapping": {"exported_identity": "USR/type-key/artifact identity", "local_id_scope": "artifact generation", "generation_dictionary": "explicit generation-scoped dictionary with unresolved entries"},
+      "invalidation_dependencies": ["input fact-set identity", "analysis package/version", "catalog version", "column encoding options"],
+      "publication": {"immutable_or_atomic_replace": true, "content_addressed": true, "disposable": true, "rebuildable": true},
+      "execution": {"local_embedded": true, "mandatory_service": false, "fallback": "SQLite scans and QueryPlan"},
+      "query_contract": {"query_semantics": "large scan and aggregation projection only", "completeness": "row coverage and truncation are explicit", "evidence": "source fact-set and row evidence references retained", "ordering": "stable sort key declared per result", "fallback": "SQLite slow path or documented unknown"},
+      "cost_model": {"dimensions": ["build_update", "hot_query_latency", "end_to_end_latency", "duplicate_disk", "memory_mapping", "open_attach", "cleanup_retention", "portability_packaging", "crash_recovery", "maintenance"]}
+    },
+    {
+      "id": "bounded-reachability-index",
+      "role": "derived_accelerator",
+      "prototype_status": "deferred-until-baseline-fails",
+      "source_fact_sets": ["layer1.derived", "relation catalog", "evidence"],
+      "version": "storage-m3/reachability-v1",
+      "build_options": {"scope": "declared bounded depths only", "invalidation": "rebuild on dependency change", "publication": "immutable manifest-governed sidecar"},
+      "identity_mapping": {"exported_identity": "USR/type-key/artifact identity", "local_id_scope": "reachability generation", "generation_dictionary": "generation-specific mapping, never exported as semantic identity"},
+      "invalidation_dependencies": ["relation input identity", "depth/budget options", "workspace/configuration identity"],
+      "publication": {"immutable_or_atomic_replace": true, "content_addressed": true, "disposable": true, "rebuildable": true},
+      "execution": {"local_embedded": true, "mandatory_service": false, "fallback": "bounded SQLite traversal"},
+      "query_contract": {"query_semantics": "only the declared bounded reachability relation", "completeness": "depth and budget boundaries are explicit", "evidence": "paths carry source/artifact evidence or unknown", "ordering": "canonical path ordering is preserved", "fallback": "SQLite traversal or unknown when incomplete"},
+      "cost_model": {"dimensions": ["build_update", "hot_query_latency", "end_to_end_latency", "duplicate_disk", "memory_mapping", "open_attach", "cleanup_retention", "portability_packaging", "crash_recovery", "maintenance"]}
+    },
+    {
+      "id": "mutable-global-graph",
+      "role": "unsuitable_projection",
+      "prototype_status": "control",
+      "source_fact_sets": ["layer0.semantic", "layer1.derived"],
+      "version": "control/unsuitable-v1",
+      "build_options": {"layout": "mutable process-global adjacency", "publication": "in-place mutation", "identity": "database-local integers"},
+      "identity_mapping": {"exported_identity": "none; intentionally invalid", "local_id_scope": "process lifetime", "generation_dictionary": "none"},
+      "invalidation_dependencies": ["implicit process state"],
+      "publication": {"immutable_or_atomic_replace": false, "content_addressed": false, "disposable": false, "rebuildable": false},
+      "execution": {"local_embedded": true, "mandatory_service": false, "fallback": "not supported"},
+      "query_contract": {"query_semantics": "not approved", "completeness": "not explicit", "evidence": "not retained", "ordering": "not deterministic", "fallback": "SQLite baseline"},
+      "cost_model": {"dimensions": ["build_update", "hot_query_latency", "end_to_end_latency", "duplicate_disk", "memory_mapping", "open_attach", "cleanup_retention", "portability_packaging", "crash_recovery", "maintenance"]},
+      "rejection_reason": "cannot survive deletion/rebuild or preserve portable semantic identity; retained as an unsuitable control"
+    }
+  ],
+  "comparison": {
+    "end_to_end_cost_dimensions": ["build_update", "hot_query_latency", "end_to_end_latency", "duplicate_disk", "memory_mapping", "open_attach", "cleanup_retention", "portability_packaging", "crash_recovery", "maintenance"],
+    "projection_contract": {
+      "query_semantics": "same QueryPlan/application-service semantics unless explicitly scoped",
+      "completeness": "complete, partial, truncated, stale, and unknown are distinguishable",
+      "evidence": "results retain source fact-set and evidence identity",
+      "ordering": "canonical ordering remains stable or a projection contract records the approved difference",
+      "fallback": "SQLite remains available through a focused port"
+    },
+    "custom_store_gate": {"required_failed_slo": true, "required_alternatives": ["schema_tuning", "derived_accelerator"], "required_costs": ["engineering", "compatibility", "operations"]}
+  },
+  "lifecycle_evidence": {
+    "status": "pass",
+    "test": "python/tests/test_storage_m3.py::test_accelerator_lifecycle_is_disposable",
+    "authoritative_unchanged_after_delete": true,
+    "rebuild_content_identity_matches": true
+  },
+  "decision": {
+    "recommendation": "do_nothing",
+    "reason": "The retained HSE-75 v34 baseline has no failed SLO on its measured workload; candidate accelerators remain local, optional, and specified for a future qualified workload.",
+    "custom_store_gate": "closed",
+    "required_before_reopening": ["same named workload reproduces an exact failed SLO after HSE-77/HSE-78 optimization", "derived accelerator fails to address it", "full transaction/crash/migration/backup/concurrency/packaging evidence", "ADR and explicit user decision"]
+  }
+}

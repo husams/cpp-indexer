@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cpp-indexer.invalid/benchmarks/storage-m3/evaluation-v1.schema.json",
+  "title": "CIDX Storage M3 optional accelerator evaluation",
+  "type": "object",
+  "required": [
+    "report_version",
+    "source_issue",
+    "authoritative_store",
+    "baseline",
+    "candidates",
+    "comparison",
+    "lifecycle_evidence",
+    "decision"
+  ],
+  "properties": {
+    "report_version": {"const": "storage-m3/evaluation-v1"},
+    "source_issue": {"const": "HSE-81"},
+    "authoritative_store": {"type": "object"},
+    "baseline": {"type": "object"},
+    "candidates": {"type": "array", "minItems": 3},
+    "comparison": {"type": "object"},
+    "lifecycle_evidence": {"type": "object"},
+    "decision": {"type": "object"}
+  }
+}
