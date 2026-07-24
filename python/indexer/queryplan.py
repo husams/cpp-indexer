@@ -125,6 +125,22 @@ def resolve_relation(name: str, active: str, inbound: bool = False) -> Optional[
 
 _FIELDS = {name: (filterable, is_string) for name, filterable, is_string in _GENERATED_FIELD_CATALOG}
 
+_TYPED_FIELDS = {
+    "parameter": {"id", "identity_key", "owner_id", "position", "pack_index", "name", "type_id", "declared_type_id", "adjusted_type_id", "default_text", "default_origin", "reference_semantics", "file_id", "line", "col"},
+    "template_parameter": {"id", "identity_key", "owner_id", "position", "param_kind", "name", "default_txt", "type_id", "default_type_id", "default_ref_id"},
+    "template_argument": {"id", "identity_key", "owner_id", "position", "pack_index", "arg_kind", "ref_id", "literal", "type_id"},
+    "call_argument": {"id", "identity_key", "edge_id", "file_id", "line", "col", "position", "src_kind", "type_usr", "decl_usr", "callee_usr", "type_id", "decl_id", "callee_id", "type_is_value"},
+    "edge": {"id", "identity_key", "src_id", "dst_id", "kind", "count", "base_access", "is_virtual", "vtable_slot"},
+    "evidence": {"id", "identity_key", "owner_id", "position", "default_txt", "default_type_id", "default_ref_id", "edge_id", "file_id", "line", "col", "conditional", "args_sig", "recv_src_kind", "recv_type_usr", "recv_decl_usr", "recv_type_id", "recv_decl_id", "recv_param_pos", "recv_type_is_value"},
+    "type": {"id", "identity_key", "type_key", "spelling", "kind", "is_const", "is_volatile", "is_restrict", "cv_qualifiers", "decl_usr", "decl_id", "canonical_id"},
+}
+
+
+def _field_available(view_name: str, field_name: str) -> bool:
+    if view_name in (SYMBOL_VIEW, ENTITY_VIEW):
+        return field_name in _FIELDS
+    return field_name in _TYPED_FIELDS.get(view_name, set())
+
 # ---- Predicates ---------------------------------------------------------------
 
 
@@ -292,7 +308,33 @@ def limit(n: int) -> Stage:
 # ---- Validation / normalization -----------------------------------------------------
 
 
-def _check_cmp(p: Pred) -> None:
+def _check_cmp(p: Pred, active: str) -> None:
+    if not _field_available(active, p.field):
+        _fail("E_FIELD", f"field '{p.field}' is unavailable in {active} view")
+    if active not in (SYMBOL_VIEW, ENTITY_VIEW):
+        if p.op == "glob":
+            _fail("E_FIELD", "glob predicates are not supported for typed views")
+        typed_strings = {
+            "identity_key", "name", "spelling", "type_key", "default_text",
+            "default_origin", "default_txt", "reference_semantics", "literal",
+            "src_kind", "type_usr", "decl_usr", "callee_usr", "args_sig",
+            "recv_src_kind", "recv_type_usr", "recv_decl_usr",
+        }
+        is_string = p.field in typed_strings
+        if is_string:
+            if p.int_value is not None:
+                _fail("E_FIELD", f"field '{p.field}' takes a string value")
+            bad_arity = (len(p.str_values) == 0 if p.op == "in"
+                         else len(p.str_values) != 1)
+        else:
+            if p.op == "in":
+                _fail("E_FIELD", f"field '{p.field}' supports eq/ne only")
+            if p.int_value is None:
+                _fail("E_FIELD", f"field '{p.field}' takes an integer value")
+            bad_arity = False
+        if bad_arity:
+            _fail("E_FIELD", f"bad value arity for field '{p.field}'")
+        return
     desc = _FIELDS.get(p.field)
     if desc is None:
         _fail("E_FIELD", f"unknown field '{p.field}'")
@@ -323,13 +365,13 @@ def _check_cmp(p: Pred) -> None:
                 _fail("E_KIND", f"unknown entity_type '{v}'")
 
 
-def _norm_pred(p: Pred) -> Pred:
+def _norm_pred(p: Pred, active: str) -> Pred:
     if p.op in ("all_of", "any_of"):
         if not p.kids:
             _fail("E_FIELD", "empty boolean combinator")
         kids: list[Pred] = []
         for k in p.kids:
-            nk = _norm_pred(k)
+            nk = _norm_pred(k, active)
             if nk.op == p.op:
                 kids.extend(nk.kids)
             else:
@@ -340,12 +382,12 @@ def _norm_pred(p: Pred) -> Pred:
     if p.op == "not":
         if len(p.kids) != 1:
             _fail("E_FIELD", "not() takes exactly one predicate")
-        nk = _norm_pred(p.kids[0])
+        nk = _norm_pred(p.kids[0], active)
         if nk.op == "not":
             return nk.kids[0]  # not(not(p)) -> p
         return Pred(op="not", kids=(nk,))
     if p.op in ("eq", "ne", "glob", "in"):
-        _check_cmp(p)
+        _check_cmp(p, active)
         return p
     _fail("E_FIELD", "bad predicate")
 
@@ -379,7 +421,7 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
                 _fail("E_STAGE",
                       "nodes() requires an unenumerated codebase() source")
             if stage.pred is not None:
-                ns = replace(stage, pred=_norm_pred(stage.pred))
+                ns = replace(stage, pred=_norm_pred(stage.pred, st.active))
             st.codebase_unenumerated = False
         elif stage.op == "view":
             if st.shape != "nodes":
@@ -393,7 +435,7 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
             if stage.pred is None:
                 _fail("E_FIELD", "where() requires a predicate")
             consume()
-            ns = replace(stage, pred=_norm_pred(stage.pred))
+            ns = replace(stage, pred=_norm_pred(stage.pred, st.active))
         elif stage.op in ("out", "in"):
             consume()
             if st.shape != "nodes":
@@ -412,6 +454,9 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
             ):
                 _fail("E_STAGE", f"unknown traversal mode '{stage.mode}'")
             metadata = RELATION_METADATA.get(rel, {})
+            typed = bool(metadata.get("virtual")) or st.active not in (SYMBOL_VIEW, ENTITY_VIEW) or _relation_view(metadata.get("target", rel[1])) not in (SYMBOL_VIEW, ENTITY_VIEW)
+            if typed and (stage.min_depth != 1 or stage.max_depth != 1):
+                _fail("E_DEPTH", "typed traversal currently supports only depth 1..1")
             if stage.mode == TraversalMode.DEVIRTUALIZED.value and not (
                 stage.op == "out" and rel[1] == SYMBOL_VIEW and rel[0] == "calls"
             ):
@@ -444,8 +489,8 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
             if not stage.fields:
                 _fail("E_FIELD", "select() requires at least one field")
             for f in stage.fields:
-                if f not in _FIELDS:
-                    _fail("E_FIELD", f"unknown field '{f}'")
+                if not _field_available(st.active, f):
+                    _fail("E_FIELD", f"field '{f}' is unavailable in {st.active} view")
             st.shape = "rows"
             st.selected = stage.fields
         elif stage.op == "count":
@@ -458,8 +503,8 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
             if not stage.fields:
                 _fail("E_FIELD", "order_by() requires at least one field")
             for f in stage.fields:
-                if f not in _FIELDS:
-                    _fail("E_FIELD", f"unknown field '{f}'")
+                if not _field_available(st.active, f):
+                    _fail("E_FIELD", f"field '{f}' is unavailable in {st.active} view")
                 if st.shape == "rows" and f not in st.selected:
                     _fail("E_FIELD", f"order_by field '{f}' is not selected")
         elif stage.op == "limit":
@@ -672,6 +717,10 @@ class _Stream:
         self.limit_in_effect = False
 
 
+def _is_typed_view(view_name: str) -> bool:
+    return view_name not in (SYMBOL_VIEW, ENTITY_VIEW)
+
+
 class Executor:
     """Run validated plans against a cidx index via an open Storage."""
 
@@ -789,10 +838,13 @@ class Executor:
                 "evidence": "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) FROM edge_site ORDER BY edge_id,file_id,line,col",
                 "type": "SELECT id FROM type_node ORDER BY id",
             }
-            st.keys = [tuple(row) for row in self._conn.execute(queries[st.view])]
+            st.keys = [tuple(row) for row in self._conn.execute(
+                queries[st.view] + " LIMIT ?", (ENUMERATE_BUDGET + 1,))]
             if len(st.keys) > ENUMERATE_BUDGET:
                 del st.keys[ENUMERATE_BUDGET:]
                 st.truncated = True
+            if pred is not None:
+                self._filter(st, pred)
             return
         sql = ["SELECT s.id FROM symbol s"]
         if st.view == ENTITY_VIEW:
@@ -811,6 +863,15 @@ class Executor:
             st.truncated = True
 
     def _filter(self, st: _Stream, pred: Pred) -> None:
+        if _is_typed_view(st.view):
+            fields = tuple(self._predicate_fields(pred))
+            by_key = self._fetch_typed_cells(st, fields)
+            st.keys = [
+                key for key in st.keys
+                if key in by_key
+                if self._predicate_matches(pred, dict(zip(fields, by_key[key])))
+            ]
+            return
         out_ids: list[int] = []
         join = self._join_clause(_pred_uses_entity_type(pred))
         for at in range(0, len(st.ids), ID_CHUNK):
@@ -825,6 +886,35 @@ class Executor:
             out_ids.extend(
                 r["id"] for r in self._conn.execute("".join(sql), args))
         st.ids = sorted(set(out_ids))
+
+    @staticmethod
+    def _predicate_fields(pred: Pred) -> set[str]:
+        if pred.op in ("all_of", "any_of", "not"):
+            return set().union(*(Executor._predicate_fields(k) for k in pred.kids))
+        return {pred.field}
+
+    @staticmethod
+    def _predicate_matches(pred: Pred, values: dict[str, Any]) -> bool:
+        if pred.op == "all_of":
+            return all(Executor._predicate_matches(k, values) for k in pred.kids)
+        if pred.op == "any_of":
+            return any(Executor._predicate_matches(k, values) for k in pred.kids)
+        if pred.op == "not":
+            return not Executor._predicate_matches(pred.kids[0], values)
+        value = values.get(pred.field)
+        if pred.int_value is not None:
+            expected: Any = pred.int_value
+        elif pred.str_values:
+            expected = pred.str_values[0]
+        else:
+            expected = None
+        if pred.op == "eq":
+            return value == expected
+        if pred.op == "ne":
+            return value != expected
+        if pred.op == "in":
+            return value in pred.str_values
+        return False
 
     def _traverse(self, st: _Stream, stage: Stage) -> None:
         """Path-length-window BFS (PR #20 review): a node is emitted iff SOME
@@ -878,14 +968,64 @@ class Executor:
         st.ids = sorted(emitted)
         st.view = target_view
 
-    @staticmethod
-    def _logical_identity(view: str, key: tuple[int, ...]) -> str:
+    def _portable_symbol(self, symbol_id: int) -> str:
+        row = self._conn.execute(
+            "SELECT COALESCE(su.key,''), s.identity_key, s.usr "
+            "FROM symbol s LEFT JOIN semantic_universe su "
+            "ON su.id=s.semantic_universe_id WHERE s.id=?", (symbol_id,)
+        ).fetchone()
+        if row is None:
+            return f"missing-symbol:{symbol_id}"
+        return row[1] or f"{row[0]}\x1f{row[2]}"
+
+    def _portable_file(self, file_id: int) -> str:
+        row = self._conn.execute(
+            "SELECT c.name,c.path,d.path,f.name FROM file f "
+            "JOIN directory d ON d.id=f.directory_id "
+            "JOIN component c ON c.id=d.component_id WHERE f.id=?", (file_id,)
+        ).fetchone()
+        if row is None:
+            return f"missing-file:{file_id}"
+        return "/".join(part.strip("/") for part in row if part)
+
+    def _portable_type(self, type_id: int) -> str:
+        row = self._conn.execute(
+            "SELECT type_key,spelling FROM type_node WHERE id=?", (type_id,)
+        ).fetchone()
+        return (row[0] or row[1]) if row else f"missing-type:{type_id}"
+
+    def _portable_edge(self, edge_id: int) -> str:
+        row = self._conn.execute(
+            "SELECT src_id,dst_id,kind FROM edge WHERE id=?", (edge_id,)
+        ).fetchone()
+        if row is None:
+            return f"missing-edge:{edge_id}"
+        return f"{self._portable_symbol(row[0])}:{row[2]}:{self._portable_symbol(row[1])}"
+
+    def _logical_identity(self, view: str, key: tuple[int, ...]) -> str:
+        if view == "parameter":
+            return f"parameter:{self._portable_symbol(key[0])}:{key[1]}:{key[2]}"
+        if view == "template_parameter":
+            return f"template_parameter:{self._portable_symbol(key[0])}:{key[1]}"
+        if view == "template_argument":
+            return f"template_argument:{self._portable_symbol(key[0])}:{key[1]}:{key[2]}"
+        if view == "call_argument":
+            return (f"call_argument:{self._portable_edge(key[0])}:"
+                    f"{self._portable_file(key[1])}:{key[2]}:{key[3]}:{key[4]}")
+        if view == "evidence":
+            if len(key) > 4 and key[4] == 1:
+                return f"evidence:template_default:{self._portable_symbol(key[0])}:{key[1]}"
+            return (f"evidence:{self._portable_edge(key[0])}:"
+                    f"{self._portable_file(key[1])}:{key[2]}:{key[3]}")
+        if view == "edge":
+            return f"edge:{self._portable_edge(key[0])}"
+        if view == "type":
+            return f"type:{self._portable_type(key[0])}"
         return view + ":" + ":".join(str(value) for value in key)
 
-    @classmethod
-    def _logical_row_id(cls, view: str, key: tuple[int, ...]) -> int:
+    def _logical_row_id(self, view: str, key: tuple[int, ...]) -> int:
         value = 1469598103934665603
-        for byte in cls._logical_identity(view, key).encode():
+        for byte in self._logical_identity(view, key).encode():
             value ^= byte
             value = (value * 1099511628211) & 0xFFFFFFFFFFFFFFFF
         return value & 0x7FFFFFFFFFFFFFFF
@@ -900,10 +1040,34 @@ class Executor:
         ids: list[int] = []
 
         def add_rows(sql: str, args: Sequence[Any]) -> None:
-            rows.extend(tuple(row) for row in self._conn.execute(sql, args))
+            remaining = TRAVERSE_NODE_BUDGET - len(rows) - len(ids)
+            if remaining <= 0:
+                st.truncated = True
+                return
+            result = [tuple(row) for row in self._conn.execute(
+                sql + " LIMIT ?", [*args, remaining + 1])]
+            if len(result) > remaining:
+                result = result[:remaining]
+                st.truncated = True
+            rows.extend(result)
 
         def add_ids(sql: str, args: Sequence[Any]) -> None:
-            ids.extend(row[0] for row in self._conn.execute(sql, args))
+            remaining = TRAVERSE_NODE_BUDGET - len(rows) - len(ids)
+            if remaining <= 0:
+                st.truncated = True
+                return
+            result = [row[0] for row in self._conn.execute(
+                sql + " LIMIT ?", [*args, remaining + 1])]
+            if len(result) > remaining:
+                result = result[:remaining]
+                st.truncated = True
+            ids.extend(result)
+
+        def add_synthetic(key: tuple[int, ...]) -> None:
+            if len(rows) + len(ids) >= TRAVERSE_NODE_BUDGET:
+                st.truncated = True
+                return
+            rows.append(key)
 
         if not inbound and st.view == SYMBOL_VIEW:
             for owner in st.ids:
@@ -917,28 +1081,33 @@ class Executor:
                     add_rows("SELECT id FROM edge WHERE src_id=? AND kind=? ORDER BY id", (owner, rel[2] - 23))
                 elif rel[0] == "has_evidence":
                     add_rows("SELECT es.edge_id,es.file_id,COALESCE(es.line,0),COALESCE(es.col,0) FROM edge_site es JOIN edge e ON e.id=es.edge_id WHERE e.src_id=? ORDER BY es.edge_id,es.file_id,es.line,es.col", (owner,))
-        elif inbound and st.view == "parameter" and rel[0] == "has_parameter":
-            ids.extend(key[0] for key in st.keys)
-        elif inbound and st.view == "template_parameter" and rel[0] == "has_template_parameter":
-            ids.extend(key[0] for key in st.keys)
-        elif inbound and st.view == "template_argument" and rel[0] == "has_template_argument":
-            ids.extend(key[0] for key in st.keys)
-        elif inbound and st.view == "edge" and rel[0] == "has_call_edge":
-            for key in st.keys:
-                add_ids("SELECT src_id FROM edge WHERE id=?", key)
+                elif rel[0] == "of_type":
+                    add_ids("SELECT type_id FROM symbol_type WHERE symbol_id=? ORDER BY type_id", (owner,))
+        elif not inbound and st.view == SYMBOL_VIEW and rel[0] == "of_type":
+            for owner in st.ids:
+                add_ids("SELECT type_id FROM symbol_type WHERE symbol_id=? ORDER BY type_id", (owner,))
+        elif inbound and st.view in ("parameter", "template_parameter", "template_argument", "call_argument", "edge", "evidence"):
+            if rel[0] in ("has_parameter", "has_template_parameter", "has_template_argument"):
+                ids.extend(key[0] for key in st.keys)
+            elif rel[0] == "has_call_edge":
+                for key in st.keys:
+                    add_ids("SELECT src_id FROM edge WHERE id=?", key[:1])
         elif not inbound and st.view == "parameter":
             for owner, position, pack_index in st.keys:
                 if rel[0] in ("of_type", "declared_type", "adjusted_type"):
                     column = {"of_type": "type_id", "declared_type": "declared_type_id", "adjusted_type": "adjusted_type_id"}[rel[0]]
                     add_ids(f"SELECT {column} FROM parameter WHERE owner_id=? AND position=? AND pack_index=? AND {column} IS NOT NULL", (owner, position, pack_index))
-        elif inbound and st.view == "type" and rel[0] in ("of_type", "declared_type", "adjusted_type"):
-            column = {"of_type": "type_id", "declared_type": "declared_type_id", "adjusted_type": "adjusted_type_id"}[rel[0]]
-            for type_id in st.keys:
-                add_rows(f"SELECT owner_id,position,pack_index FROM parameter WHERE {column}=? ORDER BY owner_id,position,pack_index", type_id)
+                elif rel[0] == "references_symbol":
+                    add_ids("SELECT decl_id FROM type_node WHERE id=(SELECT type_id FROM parameter WHERE owner_id=? AND position=? AND pack_index=?) AND decl_id IS NOT NULL UNION SELECT symbol_id FROM symbol_type WHERE type_id=(SELECT type_id FROM parameter WHERE owner_id=? AND position=? AND pack_index=?) ORDER BY 1", (owner, position, pack_index, owner, position, pack_index))
+                elif rel[0] == "has_evidence":
+                    add_rows("SELECT e.edge_id,e.file_id,COALESCE(e.line,0),COALESCE(e.col,0) FROM edge_site e JOIN parameter p ON p.file_id=e.file_id AND p.line=e.line AND p.col=e.col WHERE p.owner_id=? AND p.position=? AND p.pack_index=? ORDER BY e.edge_id,e.file_id,e.line,e.col", (owner, position, pack_index))
         elif not inbound and st.view == "template_parameter":
             for owner, position in st.keys:
                 if rel[0] == "of_type":
                     add_ids("SELECT type_id FROM template_param WHERE owner_id=? AND position=? AND type_id IS NOT NULL", (owner, position))
+                elif rel[0] == "has_default":
+                    if self._conn.execute("SELECT 1 FROM template_param WHERE owner_id=? AND position=? AND (default_txt IS NOT NULL OR default_type_id IS NOT NULL OR default_ref_id IS NOT NULL)", (owner, position)).fetchone():
+                        add_synthetic((owner, position, 0, 0, 1))
         elif not inbound and st.view == "template_argument":
             for owner, position, pack_index in st.keys:
                 if rel[0] == "of_type":
@@ -971,6 +1140,55 @@ class Executor:
                     add_ids("SELECT decl_id FROM type_node WHERE id=? AND decl_id IS NOT NULL UNION SELECT symbol_id FROM symbol_type WHERE type_id=? ORDER BY 1", (type_id, type_id))
                 elif rel[0] == "has_type_edge":
                     add_ids("SELECT dst_id FROM type_edge WHERE src_id=? ORDER BY position", (type_id,))
+        elif inbound and st.view == "type":
+            column = {"of_type": "type_id", "declared_type": "declared_type_id", "adjusted_type": "adjusted_type_id"}.get(rel[0])
+            if column is not None:
+                if rel[1] == SYMBOL_VIEW:
+                    for (type_id,) in st.keys:
+                        add_ids("SELECT symbol_id FROM symbol_type WHERE type_id=? ORDER BY symbol_id", (type_id,))
+                    column = None
+            if column is not None:
+                table = {"parameter": ("parameter", "owner_id,position,pack_index"), "template_parameter": ("template_param", "owner_id,position"), "template_argument": ("template_arg", "owner_id,position,pack_index"), "call_argument": ("call_arg", "edge_id,file_id,line,col,position")}.get(rel[1])
+                if table is not None:
+                    for (type_id,) in st.keys:
+                        add_rows(f"SELECT {table[1]} FROM {table[0]} WHERE {column}=? ORDER BY {table[1]}", (type_id,))
+        elif inbound and st.view == SYMBOL_VIEW:
+            if rel[0] == "references_symbol":
+                for symbol_id in st.ids:
+                    if rel[1] == "parameter":
+                        add_rows("SELECT p.owner_id,p.position,p.pack_index FROM parameter p WHERE EXISTS (SELECT 1 FROM type_node t WHERE t.id=p.type_id AND t.decl_id=?) OR EXISTS (SELECT 1 FROM symbol_type st WHERE st.type_id=p.type_id AND st.symbol_id=?) ORDER BY p.owner_id,p.position,p.pack_index", (symbol_id, symbol_id))
+                    elif rel[1] == "template_argument":
+                        add_rows("SELECT owner_id,position,pack_index FROM template_arg WHERE ref_id=? ORDER BY owner_id,position,pack_index", (symbol_id,))
+                    elif rel[1] == "call_argument":
+                        add_rows("SELECT edge_id,file_id,line,col,position FROM call_arg WHERE decl_id=? ORDER BY edge_id,file_id,line,col,position", (symbol_id,))
+                    elif rel[1] == "type":
+                        add_ids("SELECT type_id FROM symbol_type WHERE symbol_id=? UNION SELECT id FROM type_node WHERE decl_id=? ORDER BY 1", (symbol_id, symbol_id))
+            elif rel[0] == "of_type":
+                for symbol_id in st.ids:
+                    add_ids("SELECT symbol_id FROM symbol_type WHERE type_id=?", (symbol_id,))
+        elif inbound and st.view == "evidence":
+            for edge_id, file_id, line, col in st.keys:
+                if rel[0] == "has_evidence":
+                    if rel[1] == "edge":
+                        add_rows("SELECT edge_id FROM edge_site WHERE edge_id=? AND file_id=? AND COALESCE(line,0)=? AND COALESCE(col,0)=?", (edge_id, file_id, line, col))
+                    elif rel[1] == "call_argument":
+                        add_rows("SELECT edge_id,file_id,line,col,position FROM call_arg WHERE edge_id=? AND file_id=? AND line=? AND col=?", (edge_id, file_id, line, col))
+                    elif rel[1] == "symbol":
+                        add_ids("SELECT src_id FROM edge WHERE id=?", (edge_id,))
+                    elif rel[1] == "parameter":
+                        add_rows("SELECT owner_id,position,pack_index FROM parameter WHERE file_id=? AND line=? AND col=?", (file_id, line, col))
+        elif inbound and st.view == "call_argument" and rel[0] == "has_argument":
+            for key in st.keys:
+                add_rows("SELECT id FROM edge WHERE id=?", key[:1])
+        elif inbound and st.view == "call_argument" and rel[0] == "of_occurrence":
+            for key in st.keys:
+                add_rows("SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) FROM edge_site WHERE edge_id=? AND file_id=? AND COALESCE(line,0)=? AND COALESCE(col,0)=?", key)
+        elif inbound and st.view == "edge" and rel[0] == "of_edge":
+            for key in st.keys:
+                add_rows("SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) FROM edge_site WHERE edge_id=? ORDER BY file_id,line,col", key[:1])
+        elif inbound and st.view == "type" and rel[0] == "has_type_edge":
+            for (type_id,) in st.keys:
+                add_ids("SELECT src_id FROM type_edge WHERE dst_id=? ORDER BY src_id", (type_id,))
 
         if target in (SYMBOL_VIEW, ENTITY_VIEW):
             st.ids = sorted(set(ids))
@@ -1023,6 +1241,19 @@ class Executor:
     def _set_op(self, st: _Stream, stage: Stage) -> None:
         sub = self._run_plan(stage.operand)  # type: ignore[arg-type]
         st.truncated = st.truncated or sub.truncated
+        if _is_typed_view(st.view):
+            left, right = set(st.keys), set(sub.keys)
+            if stage.op == "union":
+                st.keys = sorted(left | right)
+            elif stage.op == "intersect":
+                st.keys = sorted(left & right)
+            else:
+                st.keys = sorted(left - right)
+            st.ids = []
+            if len(st.keys) > TRAVERSE_NODE_BUDGET:
+                del st.keys[TRAVERSE_NODE_BUDGET:]
+                st.truncated = True
+            return
         a, b = set(st.ids), set(sub.ids)
         # All three are SET operations (PR #20 review: union must not
         # double-count overlapping ids).
@@ -1065,6 +1296,8 @@ class Executor:
     def _typed_column(view: str, field_name: str) -> str:
         if field_name == "file":
             return "file_id"
+        if field_name == "cv_qualifiers" and view == "type":
+            return "(is_const + 2 * is_volatile + 4 * is_restrict)"
         if field_name == "edge_id" and view == "edge":
             return "id"
         if field_name in ("id", "identity_key"):
@@ -1086,6 +1319,38 @@ class Executor:
         result: dict[tuple[int, ...], tuple[Any, ...]] = {}
         string_fields = {"name", "spelling", "type_key", "default_text", "default_origin", "default_txt", "reference_semantics", "literal", "src_kind", "type_usr", "decl_usr", "callee_usr", "args_sig", "recv_src_kind", "recv_type_usr", "recv_decl_usr", "identity_key", "file"}
         for key in st.keys:
+            if st.view == "evidence" and len(key) > 4 and key[4] == 1:
+                source = self._conn.execute(
+                    "SELECT default_txt,default_type_id,default_ref_id "
+                    "FROM template_param WHERE owner_id=? AND position=?",
+                    key[:2],
+                ).fetchone()
+                if source is None:
+                    continue
+                cells = []
+                for field_name in fields:
+                    if field_name == "identity_key":
+                        cells.append(self._logical_identity(st.view, key))
+                    elif field_name == "id":
+                        cells.append(self._logical_row_id(st.view, key))
+                    elif field_name == "owner_id":
+                        cells.append(key[0])
+                    elif field_name == "position":
+                        cells.append(key[1])
+                    elif field_name == "default_txt":
+                        cells.append(source[0])
+                    elif field_name == "default_type_id":
+                        cells.append(source[1])
+                    elif field_name == "default_ref_id":
+                        cells.append(source[2])
+                    elif field_name == "role":
+                        cells.append("default")
+                    elif field_name == "provenance":
+                        cells.append("template_parameter")
+                    else:
+                        cells.append(None)
+                result[key] = tuple(cells)
+                continue
             columns: list[str] = []
             indexes: list[int] = []
             for field_name in fields:

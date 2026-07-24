@@ -635,11 +635,11 @@ TEST_CASE("query_plan: typed parameter views preserve natural slot identity") {
       "reference_semantics) VALUES (1,0,-1,'value','0','lvalue')");
 
   Executor ex(db);
-  const Result result = ex.run(
-      (start(symbol("USR::typed")) | out("has_parameter") |
-       select({"owner_id", "position", "pack_index", "name", "default_text",
-               "identity_key"}))
-          .plan());
+  const Result result =
+      ex.run((start(symbol("USR::typed")) | out("has_parameter") |
+              select({"owner_id", "position", "pack_index", "name",
+                      "default_text", "identity_key"}))
+                 .plan());
   REQUIRE(result.view == View::Parameter);
   REQUIRE(result.rows.size() == 1);
   CHECK(std::get<int64_t>(result.rows[0][0]) == owner);
@@ -647,16 +647,54 @@ TEST_CASE("query_plan: typed parameter views preserve natural slot identity") {
   CHECK(std::get<int64_t>(result.rows[0][2]) == -1);
   CHECK(std::get<std::string>(result.rows[0][3]) == "value");
   CHECK(std::get<std::string>(result.rows[0][4]) == "0");
-  CHECK(std::get<std::string>(result.rows[0][5]) ==
-        "parameter:1:0:-1");
+  CHECK(std::get<std::string>(result.rows[0][5])
+            .starts_with("parameter:legacy\x1fUSR::typed:0:-1"));
 
-  const Result reverse = ex.run(
-      (start(codebase()) | view(View::Parameter) | nodes() |
-       in_("has_parameter") | select({"name"}))
-          .plan());
+  db.raw_db().exec("INSERT INTO parameter(owner_id,position,pack_index,name) "
+                   "VALUES (1,1,-1,'other')");
+  const Result filtered =
+      ex.run((start(symbol("USR::typed")) | out("has_parameter") |
+              where(eq("position", int64_t{1})) | select({"name"}))
+                 .plan());
+  REQUIRE(filtered.rows.size() == 1);
+  CHECK(std::get<std::string>(filtered.rows[0][0]) == "other");
+
+  const Result reverse =
+      ex.run((start(codebase()) | view(View::Parameter) | nodes() |
+              in_("has_parameter") | select({"name"}))
+                 .plan());
   REQUIRE(reverse.view == View::Symbol);
   REQUIRE(reverse.rows.size() == 1);
   CHECK(std::get<std::string>(reverse.rows[0][0]) == "typed");
+}
+
+TEST_CASE("query_plan: template defaults expose logical evidence") {
+  Storage db(":memory:");
+  const int64_t owner =
+      db.add_symbol(make_sym("USR::template", "template", "class"));
+  auto insert = db.raw_db().prepare(
+      "INSERT INTO template_param(owner_id,position,param_kind,name,"
+      "default_txt) VALUES (?,?,?,?,?)");
+  insert.bind(1, owner);
+  insert.bind(2, int64_t{0});
+  insert.bind(3, int64_t{1});
+  insert.bind(4, std::string_view{"T"});
+  insert.bind(5, std::string_view{"int"});
+  insert.step_done();
+
+  Executor ex(db);
+  const Result result =
+      ex.run((start(symbol("USR::template")) | out("has_template_parameter") |
+              out("has_default") |
+              select({"owner_id", "position", "default_txt", "identity_key"}))
+                 .plan());
+  REQUIRE(result.view == View::Evidence);
+  REQUIRE(result.rows.size() == 1);
+  CHECK(std::get<int64_t>(result.rows[0][0]) == owner);
+  CHECK(std::get<int64_t>(result.rows[0][1]) == 0);
+  CHECK(std::get<std::string>(result.rows[0][2]) == "int");
+  CHECK(std::get<std::string>(result.rows[0][3]) ==
+        "evidence:template_default:legacy\x1fUSR::template:0");
 }
 
 TEST_CASE("query_plan: devirtualized calls preserve the inherited receiver") {

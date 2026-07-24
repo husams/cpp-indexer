@@ -419,11 +419,42 @@ def test_typed_parameter_view_preserves_natural_slot_identity():
          | select(["owner_id", "position", "pack_index", "name",
                    "default_text", "identity_key"])).plan)
     assert result.view == "parameter"
-    assert result.rows == [(owner, 0, -1, "value", "0",
-                            "parameter:1:0:-1")]
+    assert len(result.rows) == 1
+    assert result.rows[0][:5] == (owner, 0, -1, "value", "0")
+    assert result.rows[0][5].startswith(
+        "parameter:legacy\x1fUSR::typed:0:-1")
+
+    db._conn.execute(
+        "INSERT INTO parameter(owner_id,position,pack_index,name) "
+        "VALUES (?,?,?,?)", (owner, 1, -1, "other"))
+    db._conn.commit()
+    filtered = Executor(db).run(
+        (start(symbol("USR::typed")) | out("has_parameter")
+         | where(eq("position", 1)) | select(["name"])).plan)
+    assert filtered.rows == [("other",)]
 
     reverse = Executor(db).run(
         (start(codebase()) | view("parameter") | nodes()
          | in_("has_parameter") | select(["name"])).plan)
     assert reverse.view == "symbol"
     assert reverse.rows == [("typed",)]
+
+
+def test_template_defaults_expose_logical_evidence():
+    db = Storage(":memory:")
+    owner = db.add_symbol(_make_sym("USR::template", "template", "class"))
+    db._conn.execute(
+        "INSERT INTO template_param(owner_id,position,param_kind,name,"
+        "default_txt) VALUES (?,?,?,?,?)",
+        (owner, 0, 1, "T", "int"),
+    )
+    db._conn.commit()
+
+    result = Executor(db).run(
+        (start(symbol("USR::template")) | out("has_template_parameter")
+         | out("has_default")
+         | select(["owner_id", "position", "default_txt", "identity_key"])).plan)
+    assert result.view == "evidence"
+    assert result.rows == [
+        (owner, 0, "int", "evidence:template_default:legacy\x1fUSR::template:0")
+    ]
