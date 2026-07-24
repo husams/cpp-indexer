@@ -7,7 +7,9 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-regression.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 mkdir -p "$WORK/models"
+mkdir -p "$WORK/modules"
 cp "$ROOT"/models/*.cfg "$WORK/models"/
+cp "$ROOT"/modules/*.tla "$WORK/modules"/
 sed '/^INVARIANT ProtectedInvariant$/d' \
   "$WORK/models/CidxRepositorySmoke.cfg" \
   >"$WORK/models/CidxRepositorySmoke.cfg.mutated"
@@ -105,3 +107,78 @@ fi
 echo "TLA_PROGRESS_REGRESSION_STATUS=PASS mutation=removed-MakeCurrent"
 
 echo "TLA_REGRESSION_STATUS=PASS mutation=missing-ProtectedInvariant seeded=7"
+
+awk '
+index($0, "queryState") && index($0, "\"complete\"") {
+  sub(/"complete"/, "\"running\"")
+}
+{ print }
+' "$WORK/modules/CidxBehavior.tla" >"$WORK/modules/CidxBehavior.tla.mutated"
+mv "$WORK/modules/CidxBehavior.tla.mutated" "$WORK/modules/CidxBehavior.tla"
+
+set +e
+liveness_output="$(JAVA_BIN="${JAVA_BIN:-}" \
+  TLA_MODEL_DIR="$ROOT/models" \
+  TLA_MODULE_DIR="$WORK/modules" \
+  "$ROOT/tools/check.sh" 2>&1)"
+liveness_status=$?
+set -e
+
+if [[ "$liveness_status" -ne 30 ]]; then
+  echo "TLA_LIVENESS_REGRESSION_STATUS=FAIL reason=unexpected-exit-$liveness_status" >&2
+  printf '%s\n' "$liveness_output" >&2
+  exit 1
+fi
+if ! grep -q "TLA_MODEL_STATUS=FAIL model=CidxBehaviorSmoke" <<<"$liveness_output"; then
+  echo "TLA_LIVENESS_REGRESSION_STATUS=FAIL reason=missing-model-failure" >&2
+  printf '%s\n' "$liveness_output" >&2
+  exit 1
+fi
+if grep -q "TLA_CHECK_STATUS=PASS" <<<"$liveness_output"; then
+  echo "TLA_LIVENESS_REGRESSION_STATUS=FAIL reason=false-pass" >&2
+  printf '%s\n' "$liveness_output" >&2
+  exit 1
+fi
+
+echo "TLA_LIVENESS_REGRESSION_STATUS=PASS mutation=missing-QueryCompletion"
+
+EDGE_WORK="$WORK/edge"
+mkdir -p "$EDGE_WORK/models" "$EDGE_WORK/modules"
+cp "$ROOT"/models/*.cfg "$EDGE_WORK/models"/
+cp "$ROOT"/modules/*.tla "$EDGE_WORK/modules"/
+sed 's/TraceBound = 9/TraceBound = 4/' \
+  "$EDGE_WORK/models/CidxBehaviorSmoke.cfg" \
+  >"$EDGE_WORK/models/CidxBehaviorSmoke.cfg.mutated"
+mv "$EDGE_WORK/models/CidxBehaviorSmoke.cfg.mutated" \
+  "$EDGE_WORK/models/CidxBehaviorSmoke.cfg"
+sed '/^ProgressTraceAvailable ==/! s/ProgressTraceAvailable/TraceAvailable/g' \
+  "$EDGE_WORK/modules/CidxBehavior.tla" \
+  >"$EDGE_WORK/modules/CidxBehavior.tla.mutated"
+mv "$EDGE_WORK/modules/CidxBehavior.tla.mutated" \
+  "$EDGE_WORK/modules/CidxBehavior.tla"
+
+set +e
+edge_output="$(JAVA_BIN="${JAVA_BIN:-}" \
+  TLA_MODEL_DIR="$EDGE_WORK/models" \
+  TLA_MODULE_DIR="$EDGE_WORK/modules" \
+  "$ROOT/tools/check.sh" 2>&1)"
+edge_status=$?
+set -e
+
+if [[ "$edge_status" -ne 30 ]]; then
+  echo "TLA_BOUND_EDGE_REGRESSION_STATUS=FAIL reason=unexpected-exit-$edge_status" >&2
+  printf '%s\n' "$edge_output" >&2
+  exit 1
+fi
+if ! grep -q "TLA_MODEL_STATUS=FAIL model=CidxBehaviorSmoke" <<<"$edge_output"; then
+  echo "TLA_BOUND_EDGE_REGRESSION_STATUS=FAIL reason=missing-model-failure" >&2
+  printf '%s\n' "$edge_output" >&2
+  exit 1
+fi
+if grep -q "TLA_CHECK_STATUS=PASS" <<<"$edge_output"; then
+  echo "TLA_BOUND_EDGE_REGRESSION_STATUS=FAIL reason=false-pass" >&2
+  printf '%s\n' "$edge_output" >&2
+  exit 1
+fi
+
+echo "TLA_BOUND_EDGE_REGRESSION_STATUS=PASS mutation=unbounded-pending-state"
