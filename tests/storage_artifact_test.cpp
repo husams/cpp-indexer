@@ -339,6 +339,44 @@ TEST_CASE("publication and adoption reject symlink escapes") {
   std::filesystem::remove_all(outside, ignored);
 }
 
+TEST_CASE("staging symlink is rejected without an outside artifact") {
+  cidx::Storage storage(":memory:");
+  const auto root = test_root("staging-symlink");
+  const auto outside = test_root("staging-symlink-outside");
+  cidx::ArtifactStore artifacts(storage, root);
+  std::filesystem::create_directory_symlink(outside, root / ".staging");
+
+  CHECK_THROWS(static_cast<void>(
+      artifacts.publish(complete_spec(), [](cidx::SqliteDb &db) {
+        create_astgraph_tables(db);
+      })));
+  CHECK(std::filesystem::is_empty(outside));
+
+  std::error_code ignored;
+  std::filesystem::remove_all(root, ignored);
+  std::filesystem::remove_all(outside, ignored);
+}
+
+TEST_CASE("concurrent staging and final path replacement fails safely") {
+  cidx::Storage storage(":memory:");
+  const auto root = test_root("staging-race");
+  const auto outside = test_root("staging-race-outside");
+  cidx::ArtifactStore artifacts(storage, root);
+
+  CHECK_THROWS(static_cast<void>(
+      artifacts.publish(complete_spec(), [&](cidx::SqliteDb &db) {
+        create_astgraph_tables(db);
+        std::filesystem::rename(root / ".staging", root / ".staging-replaced");
+        std::filesystem::create_directory_symlink(outside, root / ".staging");
+        std::filesystem::create_directory_symlink(outside, root / "artifacts");
+      })));
+  CHECK(std::filesystem::is_empty(outside));
+
+  std::error_code ignored;
+  std::filesystem::remove_all(root, ignored);
+  std::filesystem::remove_all(outside, ignored);
+}
+
 TEST_CASE("attachment reset is safe after store destruction") {
   cidx::Storage storage(":memory:");
   const auto root = test_root("attachment-lifetime");

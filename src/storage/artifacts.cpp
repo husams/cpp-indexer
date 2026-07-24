@@ -9,9 +9,12 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <cstring>
 #include <exception>
 #include <fcntl.h>
 #include <fstream>
+#include <iterator>
+#include <limits>
 #include <set>
 #include <sqlite3.h>
 #include <sys/file.h>
@@ -19,6 +22,7 @@
 #include <system_error>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 namespace cidx {
 struct ArtifactAttachmentLifetime {
@@ -99,14 +103,53 @@ ArtifactTrust trust_from_string(std::string_view value) {
   return ArtifactTrust::unverified;
 }
 
-void ensure_directories_durable(const std::filesystem::path &path);
+class ScopedFd {
+public:
+  explicit ScopedFd(int fd = -1) : fd_(fd) {}
+  ~ScopedFd() {
+    if (fd_ >= 0) {
+      (void)::close(fd_);
+    }
+  }
+  ScopedFd(const ScopedFd &) = delete;
+  ScopedFd &operator=(const ScopedFd &) = delete;
+  ScopedFd(ScopedFd &&other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
+  ScopedFd &operator=(ScopedFd &&other) noexcept {
+    if (this != &other) {
+      if (fd_ >= 0) {
+        (void)::close(fd_);
+      }
+      fd_ = other.fd_;
+      other.fd_ = -1;
+    }
+    return *this;
+  }
+
+  [[nodiscard]] int get() const { return fd_; }
+  [[nodiscard]] int release() {
+    const int fd = fd_;
+    fd_ = -1;
+    return fd;
+  }
+
+private:
+  int fd_;
+};
+
+void fsync_fd(int fd, std::string_view description);
+int open_trusted_root(const std::filesystem::path &path);
+int open_child_directory(int parent_fd, std::string_view name, bool create);
+int open_relative_file(int root_fd, const std::filesystem::path &relative,
+                       int flags);
+std::string create_staged_name(const ArtifactSpec &spec);
+int create_staged_file(int staging_fd, std::string_view name);
+void remove_staged_file(int staging_fd, std::string_view name) noexcept;
 
 class ArtifactPublicationLock {
 public:
-  explicit ArtifactPublicationLock(const std::filesystem::path &root) {
-    ensure_directories_durable(root);
-    fd_ = ::open((root / ".artifact-publication.lock").c_str(),
-                 O_CREAT | O_RDWR, 0600);
+  explicit ArtifactPublicationLock(int root_fd) {
+    fd_ = ::openat(root_fd, ".artifact-publication.lock",
+                   O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (fd_ < 0 || ::flock(fd_, LOCK_EX) != 0) {
       if (fd_ >= 0) {
         (void)::close(fd_);
@@ -150,6 +193,152 @@ bool safe_relative_path(const std::filesystem::path &path) {
                               [](const auto &part) { return part == ".."; });
 }
 
+void fsync_fd(const int fd, const std::string_view description) {
+  if (fd < 0 || ::fsync(fd) != 0) {
+    throw StorageError("cannot fsync " + std::string(description));
+  }
+}
+
+int open_trusted_root(const std::filesystem::path &path) {
+  const auto absolute = std::filesystem::absolute(path).lexically_normal();
+  ScopedFd current(::open(absolute.root_path().c_str(),
+                          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+  if (current.get() < 0) {
+    throw StorageError("cannot open artifact root " + absolute.string());
+  }
+  for (const auto &part : absolute.relative_path()) {
+    if (part == ".") {
+      continue;
+    }
+    if (part == ".." || part.empty()) {
+      throw StorageError("artifact root contains an unsafe path component");
+    }
+    int next = ::openat(current.get(), part.c_str(),
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool created = false;
+    if (next < 0 && errno == ENOENT) {
+      if (::mkdirat(current.get(), part.c_str(), 0700) != 0 &&
+          errno != EEXIST) {
+        throw StorageError("cannot create artifact root component " +
+                           part.string());
+      }
+      created = true;
+      next = ::openat(current.get(), part.c_str(),
+                      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    }
+    if (next < 0) {
+      throw StorageError("cannot open artifact root component " +
+                         part.string());
+    }
+    if (created) {
+      fsync_fd(current.get(), "artifact root parent");
+    }
+    current = ScopedFd(next);
+  }
+  return current.release();
+}
+
+int open_child_directory(const int parent_fd, const std::string_view name,
+                         const bool create) {
+  const std::string component(name);
+  bool created = false;
+  if (create && ::mkdirat(parent_fd, component.c_str(), 0700) == 0) {
+    created = true;
+  } else if (create && errno != EEXIST) {
+    throw StorageError("cannot create artifact directory " + component);
+  }
+  const int fd = ::openat(parent_fd, component.c_str(),
+                          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) {
+    throw StorageError("cannot open artifact directory " + component);
+  }
+  if (created) {
+    fsync_fd(parent_fd, "artifact directory parent");
+  }
+  return fd;
+}
+
+int open_relative_file(const int root_fd, const std::filesystem::path &relative,
+                       const int flags) {
+  if (!safe_relative_path(relative)) {
+    throw StorageError("artifact path is not safely relative to its root");
+  }
+  ScopedFd current(::dup(root_fd));
+  if (current.get() < 0) {
+    throw StorageError("cannot duplicate artifact root descriptor");
+  }
+  auto part = relative.begin();
+  const auto end = relative.end();
+  if (part == end) {
+    throw StorageError("artifact file path is empty");
+  }
+  for (; part != end; ++part) {
+    if (*part == "." || part->empty()) {
+      continue;
+    }
+    const bool final = std::next(part) == end;
+    const int open_flags =
+        final ? flags | O_CLOEXEC | O_NOFOLLOW
+              : O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW;
+    const int next = ::openat(current.get(), part->c_str(), open_flags);
+    if (next < 0) {
+      throw StorageError("cannot open artifact path component " +
+                         part->string());
+    }
+    if (final) {
+      return next;
+    }
+    current = ScopedFd(next);
+  }
+  throw StorageError("artifact file path has no final component");
+}
+
+void remove_relative_file(const int root_fd,
+                          const std::filesystem::path &relative) noexcept {
+  try {
+    if (!safe_relative_path(relative) || relative.filename().empty()) {
+      return;
+    }
+    const auto parent = relative.parent_path();
+    ScopedFd parent_fd =
+        parent.empty() ? ScopedFd(::dup(root_fd))
+                       : ScopedFd(open_relative_file(root_fd, parent,
+                                                     O_RDONLY | O_DIRECTORY));
+    if (parent_fd.get() >= 0) {
+      (void)::unlinkat(parent_fd.get(), relative.filename().c_str(), 0);
+    }
+  } catch (...) {
+    return;
+  }
+}
+
+std::string create_staged_name(const ArtifactSpec &spec) {
+  const auto nonce =
+      std::chrono::steady_clock::now().time_since_epoch().count();
+  return sha256_hex(spec.logical_id + std::to_string(nonce)) + ".db";
+}
+
+int create_staged_file(const int staging_fd, const std::string_view name) {
+  const std::string filename(name);
+  const int fd =
+      ::openat(staging_fd, filename.c_str(),
+               O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0) {
+    throw StorageError("cannot create artifact staging file safely");
+  }
+  return fd;
+}
+
+void remove_staged_file(const int staging_fd,
+                        const std::string_view name) noexcept {
+  try {
+    const std::string filename(name);
+    (void)::unlinkat(staging_fd, filename.c_str(), 0);
+  } catch (...) {
+    return;
+  }
+}
+
 std::string digest_file(const std::filesystem::path &path) {
   const auto digest = sha256_of(path.string());
   if (!digest) {
@@ -158,121 +347,24 @@ std::string digest_file(const std::filesystem::path &path) {
   return *digest;
 }
 
-void fsync_path(const std::filesystem::path &path) {
-  const int fd = ::open(path.c_str(), O_RDONLY);
-  if (fd < 0) {
-    throw StorageError("cannot open artifact for durability sync " +
-                       path.string());
+std::string digest_descriptor(const int fd) {
+  const auto digest = sha256_of_fd(fd);
+  if (!digest) {
+    throw StorageError("cannot read descriptor-backed artifact");
   }
-  const int sync_result = ::fsync(fd);
-  const int close_result = ::close(fd);
-  if (sync_result != 0 || close_result != 0) {
-    throw StorageError("cannot fsync artifact " + path.string());
-  }
+  return *digest;
 }
 
-void fsync_directory(const std::filesystem::path &path) {
-  const int fd = ::open(path.c_str(), O_RDONLY);
-  if (fd < 0) {
-    throw StorageError("cannot open directory for durability sync " +
-                       path.string());
-  }
-  const int sync_result = ::fsync(fd);
-  const int close_result = ::close(fd);
-  if (sync_result != 0 || close_result != 0) {
-    throw StorageError("cannot fsync directory " + path.string());
-  }
-}
-
-void fsync_directory_chain(const std::filesystem::path &root,
-                           const std::filesystem::path &directory) {
-  auto current = std::filesystem::absolute(directory).lexically_normal();
-  const auto absolute_root = std::filesystem::absolute(root).lexically_normal();
-  while (current != absolute_root && current != current.root_path()) {
-    fsync_directory(current);
-    current = current.parent_path();
-  }
-  fsync_directory(absolute_root);
-}
-
-void ensure_directories_durable(const std::filesystem::path &path) {
-  std::vector<std::filesystem::path> created;
-  auto current = std::filesystem::absolute(path).lexically_normal();
-  while (!std::filesystem::exists(current)) {
-    created.push_back(current);
-    const auto parent = current.parent_path();
-    if (parent == current) {
-      throw StorageError("cannot find an existing parent for " + path.string());
-    }
-    current = parent;
-  }
+std::filesystem::path relative_to_root(const std::filesystem::path &root,
+                                       const std::filesystem::path &candidate) {
   std::error_code ec;
-  std::filesystem::create_directories(path, ec);
-  if (ec) {
-    throw StorageError("cannot create directory " + path.string() + ": " +
-                       ec.message());
+  const auto relative = std::filesystem::relative(
+      std::filesystem::absolute(candidate).lexically_normal(),
+      std::filesystem::absolute(root).lexically_normal(), ec);
+  if (ec || !safe_relative_path(relative)) {
+    throw StorageError("artifact path is outside the trusted root");
   }
-  for (const auto &created_directory : created) {
-    fsync_directory(created_directory);
-  }
-  if (!created.empty()) {
-    fsync_directory(current);
-  }
-}
-
-void copy_file_nofollow(const std::filesystem::path &source,
-                        const std::filesystem::path &destination) {
-  const int source_fd = ::open(source.c_str(), O_RDONLY | O_NOFOLLOW);
-  if (source_fd < 0) {
-    throw StorageError("cannot open artifact source without following links");
-  }
-  const int destination_fd = ::open(
-      destination.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
-  if (destination_fd < 0) {
-    (void)::close(source_fd);
-    throw StorageError("cannot create artifact staging file safely");
-  }
-  try {
-    struct stat source_stat{};
-    if (::fstat(source_fd, &source_stat) != 0 ||
-        !S_ISREG(source_stat.st_mode)) {
-      throw StorageError("artifact source is not a regular file");
-    }
-    std::array<char, 65536> buffer{};
-    for (;;) {
-      const ssize_t read_count =
-          ::read(source_fd, buffer.data(), buffer.size());
-      if (read_count == 0) {
-        break;
-      }
-      if (read_count < 0) {
-        if (errno == EINTR) {
-          continue;
-        }
-        throw StorageError("cannot read artifact source");
-      }
-      ssize_t written = 0;
-      while (written < read_count) {
-        const ssize_t write_count =
-            ::write(destination_fd, buffer.data() + written,
-                    static_cast<std::size_t>(read_count - written));
-        if (write_count < 0) {
-          if (errno == EINTR) {
-            continue;
-          }
-          throw StorageError("cannot write artifact staging file");
-        }
-        written += write_count;
-      }
-    }
-  } catch (...) {
-    (void)::close(source_fd);
-    (void)::close(destination_fd);
-    throw;
-  }
-  if (::close(source_fd) != 0 || ::close(destination_fd) != 0) {
-    throw StorageError("cannot close artifact staging file");
-  }
+  return relative;
 }
 
 bool has_symlink_component(const std::filesystem::path &path) {
@@ -290,41 +382,6 @@ bool has_symlink_component(const std::filesystem::path &path) {
                          ": " + ec.message());
     }
     if (std::filesystem::is_symlink(status)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-bool has_unsafe_symlink_component(const std::filesystem::path &path,
-                                  const std::filesystem::path &trusted_root) {
-  const auto canonical_root = std::filesystem::weakly_canonical(trusted_root);
-  auto current =
-      path.has_root_path() ? path.root_path() : std::filesystem::path{};
-  for (const auto &part : path.relative_path()) {
-    current /= part;
-    std::error_code ec;
-    const auto status = std::filesystem::symlink_status(current, ec);
-    if (ec == std::errc::no_such_file_or_directory) {
-      return false;
-    }
-    if (ec) {
-      throw StorageError("cannot inspect artifact path " + current.string() +
-                         ": " + ec.message());
-    }
-    if (!std::filesystem::is_symlink(status)) {
-      continue;
-    }
-    const auto canonical_target =
-        std::filesystem::weakly_canonical(current, ec);
-    if (ec) {
-      throw StorageError("cannot resolve artifact symlink " + current.string() +
-                         ": " + ec.message());
-    }
-    const auto relative =
-        std::filesystem::relative(canonical_root, canonical_target, ec);
-    if (ec || std::ranges::any_of(
-                  relative, [](const auto &part) { return part == ".."; })) {
       return true;
     }
   }
@@ -519,6 +576,7 @@ ArtifactStore::ArtifactStore(Storage &storage, std::filesystem::path root,
                        root_ec.message());
   }
   root_ = canonical_root;
+  root_fd_ = open_trusted_root(root_);
   attachment_lifetime_ = std::make_shared<ArtifactAttachmentLifetime>();
   attachment_lifetime_->owner = this;
 }
@@ -530,6 +588,10 @@ ArtifactStore::~ArtifactStore() {
   }
   if (attachment_lifetime_) {
     attachment_lifetime_->owner = nullptr;
+  }
+  if (root_fd_ >= 0) {
+    (void)::close(root_fd_);
+    root_fd_ = -1;
   }
 }
 
@@ -747,28 +809,27 @@ ArtifactRecord ArtifactStore::publish(const ArtifactSpec &input_spec,
     throw StorageError("artifact publication requires a sidecar writer");
   }
   ArtifactSpec spec = input_spec;
-  ArtifactPublicationLock publication_lock(root_);
+  ArtifactPublicationLock publication_lock(root_fd_);
   std::ranges::sort(spec.exposed_relations);
   spec.exposed_relations.erase(
       std::ranges::unique(spec.exposed_relations).begin(),
       spec.exposed_relations.end());
 
-  const auto staging = root_ / ".staging";
-  std::filesystem::create_directories(staging);
-  const auto nonce =
-      std::chrono::steady_clock::now().time_since_epoch().count();
-  const auto temporary =
-      staging / (sha256_hex(spec.logical_id + std::to_string(nonce)) + ".db");
+  ScopedFd staging_fd(open_child_directory(root_fd_, ".staging", true));
+  const auto temporary_name = create_staged_name(spec);
+  ScopedFd temporary_fd(create_staged_file(staging_fd.get(), temporary_name));
   try {
     {
-      SqliteDb sidecar(temporary.string());
+      SqliteDb sidecar(":memory:");
       writer(sidecar);
       write_envelope(sidecar, spec);
+      sidecar.backup_to_fd(temporary_fd.get());
     }
-    return publish_staged(spec, temporary);
+    fsync_fd(temporary_fd.get(), "artifact staging file");
+    return publish_staged(spec, staging_fd.get(), temporary_fd.get(),
+                          temporary_name);
   } catch (...) {
-    std::error_code ignored;
-    std::filesystem::remove(temporary, ignored);
+    remove_staged_file(staging_fd.get(), temporary_name);
     throw;
   }
 }
@@ -792,92 +853,105 @@ ArtifactStore::publish_existing(const ArtifactSpec &input_spec,
   std::error_code ec;
   const auto source_absolute =
       std::filesystem::absolute(source_path).lexically_normal();
-  if (has_unsafe_symlink_component(source_absolute, root_)) {
-    throw StorageError("cannot adopt an artifact through a symlink");
-  }
-  const auto source_canonical =
-      std::filesystem::weakly_canonical(source_absolute, ec);
-  if (ec || !is_within_root(root_, source_canonical) ||
-      has_symlink_component(source_canonical.lexically_normal())) {
-    throw StorageError("cannot adopt an artifact outside the trusted root");
-  }
-  if (!std::filesystem::is_regular_file(source_canonical, ec)) {
-    throw StorageError("cannot adopt missing artifact " + source_path.string());
-  }
+  const auto source_relative = relative_to_root(root_, source_absolute);
   ArtifactSpec spec = input_spec;
-  ArtifactPublicationLock publication_lock(root_);
+  ArtifactPublicationLock publication_lock(root_fd_);
   std::ranges::sort(spec.exposed_relations);
   spec.exposed_relations.erase(
       std::ranges::unique(spec.exposed_relations).begin(),
       spec.exposed_relations.end());
-  const auto staging = root_ / ".staging";
-  ensure_directories_durable(staging);
-  const auto nonce =
-      std::chrono::steady_clock::now().time_since_epoch().count();
-  const auto temporary =
-      staging / (sha256_hex(spec.logical_id + std::to_string(nonce)) + ".db");
+  ScopedFd source_fd(open_relative_file(root_fd_, source_relative, O_RDONLY));
+  ScopedFd staging_fd(open_child_directory(root_fd_, ".staging", true));
+  const auto temporary_name = create_staged_name(spec);
+  ScopedFd temporary_fd(create_staged_file(staging_fd.get(), temporary_name));
   try {
-    if (has_unsafe_symlink_component(source_absolute, root_) ||
-        has_symlink_component(temporary)) {
-      throw StorageError("cannot adopt an artifact through a symlink");
-    }
-    copy_file_nofollow(source_canonical, temporary);
     {
-      SqliteDb sidecar(temporary.string());
+      SqliteDb sidecar(source_fd.get(), false, SqliteProfile::artifact_staging);
       auto check = sidecar.prepare("PRAGMA integrity_check");
       if (!check.step() || check.col_text(0) != "ok") {
         throw StorageError("cannot adopt corrupt artifact " +
-                           source_canonical.string());
+                           source_path.string());
       }
       write_envelope(sidecar, spec);
+      sidecar.backup_to_fd(temporary_fd.get());
     }
-    const auto record = publish_staged(spec, temporary, mapping_writer);
-    if (source_canonical !=
-        std::filesystem::weakly_canonical(root_ / record.relative_path)) {
-      std::filesystem::remove(source_path, ec);
+    fsync_fd(temporary_fd.get(), "artifact staging file");
+    const auto record =
+        publish_staged(spec, staging_fd.get(), temporary_fd.get(),
+                       temporary_name, mapping_writer);
+    if (source_relative != std::filesystem::path(record.relative_path)) {
+      remove_relative_file(root_fd_, source_relative);
     }
     return record;
   } catch (...) {
-    std::filesystem::remove(temporary, ec);
+    remove_staged_file(staging_fd.get(), temporary_name);
     throw;
   }
 }
 
 ArtifactRecord
-ArtifactStore::publish_staged(const ArtifactSpec &spec,
-                              const std::filesystem::path &staged_path,
+ArtifactStore::publish_staged(const ArtifactSpec &spec, const int staging_fd,
+                              const int staged_fd,
+                              const std::string_view staged_name,
                               const IdentityMappingWriter &mapping_writer) {
   try {
-    const auto hash = digest_file(staged_path);
+    struct stat staged_stat{};
+    if (::fstat(staged_fd, &staged_stat) != 0 ||
+        !S_ISREG(staged_stat.st_mode)) {
+      throw StorageError("artifact staging file is not regular");
+    }
+    struct stat named_stat{};
+    const std::string staged_filename(staged_name);
+    if (::fstatat(staging_fd, staged_filename.c_str(), &named_stat,
+                  AT_SYMLINK_NOFOLLOW) != 0 ||
+        named_stat.st_dev != staged_stat.st_dev ||
+        named_stat.st_ino != staged_stat.st_ino) {
+      throw StorageError("artifact staging path was replaced");
+    }
+    const auto hash = digest_descriptor(staged_fd);
     const auto relative = std::filesystem::path("artifacts") /
                           sha256_hex(spec.kind) / (hash + ".db");
-    const auto final_path = root_ / relative;
-    if (has_symlink_component(final_path) ||
-        !is_within_root(root_, final_path)) {
-      throw StorageError("artifact publication path escapes the trusted root");
-    }
-    ensure_directories_durable(final_path.parent_path());
-    if (has_symlink_component(final_path)) {
-      throw StorageError("artifact publication path contains a symlink");
-    }
-    if (std::filesystem::exists(final_path)) {
-      if (digest_file(final_path) != hash) {
+    ScopedFd artifacts_fd(open_child_directory(root_fd_, "artifacts", true));
+    ScopedFd kind_fd(
+        open_child_directory(artifacts_fd.get(), sha256_hex(spec.kind), true));
+    const std::string final_name = hash + ".db";
+    ScopedFd existing_fd(::openat(kind_fd.get(), final_name.c_str(),
+                                  O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+    if (existing_fd.get() >= 0) {
+      if (digest_descriptor(existing_fd.get()) != hash) {
         throw StorageError("content-addressed artifact path already contains a "
                            "different file");
       }
-      std::filesystem::remove(staged_path);
+      remove_staged_file(staging_fd, staged_name);
     } else {
-      fsync_path(staged_path);
-      std::filesystem::rename(staged_path, final_path);
-      fsync_directory_chain(root_, final_path.parent_path());
+      if (errno != ENOENT) {
+        throw StorageError("cannot inspect final artifact path without links");
+      }
+      fsync_fd(staged_fd, "artifact staging file");
+      if (::renameat(staging_fd, staged_filename.c_str(), kind_fd.get(),
+                     final_name.c_str()) != 0) {
+        throw StorageError("cannot publish artifact without following links");
+      }
+      ScopedFd published_fd(::openat(kind_fd.get(), final_name.c_str(),
+                                     O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+      struct stat published_stat{};
+      if (published_fd.get() < 0 ||
+          ::fstat(published_fd.get(), &published_stat) != 0 ||
+          published_stat.st_dev != staged_stat.st_dev ||
+          published_stat.st_ino != staged_stat.st_ino) {
+        (void)::unlinkat(kind_fd.get(), final_name.c_str(), 0);
+        throw StorageError("published artifact path was replaced");
+      }
+      fsync_fd(kind_fd.get(), "artifact kind directory");
+      fsync_fd(artifacts_fd.get(), "artifact directory");
+      fsync_fd(root_fd_, "artifact root directory");
     }
 
     ArtifactRecord record;
     record.spec = spec;
     record.relative_path = relative.generic_string();
     record.content_hash = hash;
-    record.byte_size =
-        static_cast<std::int64_t>(std::filesystem::file_size(final_path));
+    record.byte_size = static_cast<std::int64_t>(staged_stat.st_size);
     record.state = "current";
     auto existing = storage_.raw_db().prepare(
         "SELECT id, logical_id, kind, artifact_schema, catalog_version, "
@@ -911,7 +985,7 @@ ArtifactStore::publish_staged(const ArtifactSpec &spec,
         mapping_writer(record);
       }
       txn.commit();
-      std::filesystem::remove(staged_path);
+      remove_staged_file(staging_fd, staged_name);
       const auto current_record = current(spec.logical_id);
       if (!current_record) {
         throw StorageError("idempotent artifact publication lost its manifest");
@@ -971,8 +1045,6 @@ ArtifactStore::publish_staged(const ArtifactSpec &spec,
     txn.commit();
     return record;
   } catch (...) {
-    std::error_code ignored;
-    std::filesystem::remove(staged_path, ignored);
     throw;
   }
 }
@@ -1172,7 +1244,7 @@ ArtifactStore::export_plan(bool include_optional) const {
 }
 
 std::size_t ArtifactStore::recover() {
-  ArtifactPublicationLock publication_lock(root_);
+  ArtifactPublicationLock publication_lock(root_fd_);
   std::set<std::string> referenced;
   auto statement = storage_.raw_db().prepare(
       "SELECT relative_path FROM artifact WHERE EXISTS (SELECT 1 FROM "
@@ -1236,6 +1308,120 @@ std::size_t ArtifactStore::recover() {
     }
   }
   return removed;
+}
+
+auto SqliteDb::backup_to_fd(int destination_fd) const -> void {
+  if (destination_fd < 0) {
+    throw StorageError("cannot back up database to an invalid descriptor");
+  }
+  sqlite3_int64 size = 0;
+  auto *serialized = sqlite3_serialize(db_, "main", &size, 0);
+  if (serialized == nullptr || size < 0 ||
+      std::cmp_greater(size, std::numeric_limits<std::size_t>::max())) {
+    sqlite3_free(serialized);
+    throw StorageError("cannot serialize descriptor-backed database");
+  }
+  if (::ftruncate(destination_fd, 0) != 0 ||
+      ::lseek(destination_fd, 0, SEEK_SET) < 0) {
+    sqlite3_free(serialized);
+    throw StorageError("cannot reset descriptor-backed database");
+  }
+  const auto byte_count = static_cast<std::size_t>(size);
+  std::size_t written = 0;
+  while (written < byte_count) {
+    const ssize_t count =
+        ::write(destination_fd, serialized + written, byte_count - written);
+    if (count < 0 && errno == EINTR) {
+      continue;
+    }
+    if (count <= 0) {
+      sqlite3_free(serialized);
+      throw StorageError("cannot write descriptor-backed database");
+    }
+    written += static_cast<std::size_t>(count);
+  }
+  sqlite3_free(serialized);
+}
+
+SqliteDb::SqliteDb(int source_fd, bool read_only, SqliteProfile profile)
+    : profile_(profile) {
+  const bool profile_is_read_only =
+      profile == SqliteProfile::interactive_read ||
+      profile == SqliteProfile::read_only_replay;
+  if (profile_is_read_only != read_only) {
+    throw StorageError("SQLite profile/open-mode mismatch for descriptor");
+  }
+  if (sqlite3_libversion_number() < 3035000) {
+    throw StorageError(std::string("cidx requires SQLite >= 3.35 (RETURNING "
+                                   "support); found ") +
+                       sqlite3_libversion());
+  }
+  struct stat source_stat{};
+  if (source_fd < 0 || ::fstat(source_fd, &source_stat) != 0 ||
+      !S_ISREG(source_stat.st_mode) || source_stat.st_size < 0) {
+    throw StorageError("cannot load descriptor-backed database");
+  }
+  const auto size = static_cast<std::size_t>(source_stat.st_size);
+  std::vector<unsigned char> image(size);
+  std::size_t read_total = 0;
+  while (read_total < size) {
+    const ssize_t count =
+        ::pread(source_fd, image.data() + read_total, size - read_total,
+                static_cast<off_t>(read_total));
+    if (count < 0 && errno == EINTR) {
+      continue;
+    }
+    if (count <= 0) {
+      throw StorageError("cannot read descriptor-backed database");
+    }
+    read_total += static_cast<std::size_t>(count);
+  }
+  const int open_rc = sqlite3_open_v2(
+      ":memory:", &db_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+  if (open_rc != SQLITE_OK) {
+    const std::string message =
+        (db_ != nullptr) ? sqlite3_errmsg(db_) : "out of memory";
+    sqlite3_close(db_);
+    db_ = nullptr;
+    throw StorageError("cannot open descriptor-backed database: " + message);
+  }
+  auto *serialized = static_cast<unsigned char *>(sqlite3_malloc64(size));
+  if (size > 0 && serialized == nullptr) {
+    sqlite3_free(serialized);
+    sqlite3_close(db_);
+    db_ = nullptr;
+    throw StorageError("cannot deserialize descriptor-backed database");
+  }
+  if (size > 0) {
+    std::memcpy(serialized, image.data(), size);
+  }
+  if (sqlite3_deserialize(db_, "main", serialized,
+                          static_cast<sqlite3_int64>(size),
+                          static_cast<sqlite3_int64>(size),
+                          SQLITE_DESERIALIZE_FREEONCLOSE |
+                              SQLITE_DESERIALIZE_RESIZEABLE) != SQLITE_OK) {
+    sqlite3_free(serialized);
+    sqlite3_close(db_);
+    db_ = nullptr;
+    throw StorageError("cannot deserialize descriptor-backed database");
+  }
+  try {
+    const auto settings = sqlite_profile_settings(profile_);
+    if (sqlite3_busy_timeout(db_, settings.busy_timeout_ms) != SQLITE_OK) {
+      throw StorageError("cannot configure SQLite busy timeout: " +
+                         std::string(sqlite3_errmsg(db_)));
+    }
+    if (settings.foreign_keys) {
+      exec("PRAGMA foreign_keys = ON");
+    }
+    if (settings.query_only) {
+      exec("PRAGMA query_only = ON");
+    }
+  } catch (...) {
+    sqlite3_close(db_);
+    db_ = nullptr;
+    throw;
+  }
 }
 
 } // namespace cidx

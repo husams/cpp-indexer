@@ -273,7 +273,7 @@ int main(int argc, char **argv) {
         cidx::astgraph::artifact_key(source, opts, descriptor.driver, dump_opts)
             .substr(0, 12) +
         ".db";
-    const std::string out_path =
+    std::string out_path =
         cli.output_path ? cidx::pathutil::abspath(*cli.output_path)
                         : cidx::pathutil::join(cli.out_dir ? *cli.out_dir : ".",
                                                default_name);

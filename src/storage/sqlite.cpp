@@ -40,6 +40,12 @@ auto sqlite_profile_settings(SqliteProfile profile) -> SqliteProfileSettings {
             .query_only = false,
             .rollback_journal = true,
             .full_synchronous = true};
+  case SqliteProfile::artifact_staging:
+    return {.busy_timeout_ms = 5000,
+            .foreign_keys = true,
+            .query_only = false,
+            .rollback_journal = false,
+            .full_synchronous = false};
   }
   throw StorageError("unknown SQLite profile");
 }
@@ -56,6 +62,8 @@ auto sqlite_profile_name(SqliteProfile profile) -> std::string_view {
     return "migration";
   case SqliteProfile::maintenance:
     return "maintenance";
+  case SqliteProfile::artifact_staging:
+    return "artifact_staging";
   }
   throw StorageError("unknown SQLite profile");
 }

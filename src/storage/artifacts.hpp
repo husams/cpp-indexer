@@ -153,8 +153,8 @@ private:
   [[nodiscard]] ArtifactValidation
   validate_record(const ArtifactRecord &record) const;
   [[nodiscard]] ArtifactRecord
-  publish_staged(const ArtifactSpec &spec,
-                 const std::filesystem::path &staged_path,
+  publish_staged(const ArtifactSpec &spec, int staging_fd, int staged_fd,
+                 std::string_view staged_name,
                  const IdentityMappingWriter &mapping_writer = {});
   void release_attachment(std::string_view name,
                           bool previous_query_only) noexcept;
@@ -162,6 +162,7 @@ private:
 
   Storage &storage_;
   std::filesystem::path root_;
+  int root_fd_ = -1;
   std::size_t max_attached_;
   std::vector<std::string> attached_names_;
   std::optional<bool> query_only_before_attach_;

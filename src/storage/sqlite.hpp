@@ -33,6 +33,7 @@ enum class SqliteProfile : std::uint8_t {
   read_only_replay,
   migration,
   maintenance,
+  artifact_staging,
 };
 
 struct SqliteProfileSettings {
@@ -87,6 +88,8 @@ public:
   // already exist; any write statement fails at the SQLite layer.
   explicit SqliteDb(const std::string &path, bool read_only = false,
                     SqliteProfile profile = SqliteProfile::indexing);
+  explicit SqliteDb(int source_fd, bool read_only = false,
+                    SqliteProfile profile = SqliteProfile::indexing);
   ~SqliteDb();
   SqliteDb(const SqliteDb &) = delete;
   SqliteDb &operator=(const SqliteDb &) = delete;
@@ -95,6 +98,7 @@ public:
   void exec(std::string_view sql_script); // multi-statement, throws on error
   [[nodiscard]] int64_t changes() const;  // rows affected by the last DML
   auto backup_to(std::string_view path) const -> void;
+  auto backup_to_fd(int destination_fd) const -> void;
   [[nodiscard]] auto profile() const -> SqliteProfile { return profile_; }
   sqlite3 *raw() { return db_; }
 
