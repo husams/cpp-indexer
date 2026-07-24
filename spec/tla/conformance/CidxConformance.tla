@@ -34,6 +34,9 @@ CONSTANTS
     ExpectedGraphEvidenceState,
     ExpectedGraphTargetState,
     ExpectedGraphConfigurationState,
+    ExpectedGraphArgumentOrderLength,
+    ExpectedGraphArgumentOrder1,
+    ExpectedGraphArgumentOrder2,
     ExpectedQueryPlanState,
     ExpectedQueryStreamShape,
     ExpectedQueryTraversalBound,
@@ -67,9 +70,15 @@ ReplayPlanIncludeChange ==
     /\ PlanIncludeChange
     /\ includeConfigurationState' = ExpectedIncludeConfigurationState
 
+ExpectedGraphArgumentOrder ==
+    IF ExpectedGraphArgumentOrderLength = 0
+    THEN << >>
+    ELSE <<ExpectedGraphArgumentOrder1, ExpectedGraphArgumentOrder2>>
+
 ReplayPublishGeneration ==
     /\ PublishGeneration
     /\ graphTargetState' = ExpectedGraphTargetState
+    /\ graphArgumentOrder' = ExpectedGraphArgumentOrder
 
 ReplayReturnQuery == ReturnQuery
 

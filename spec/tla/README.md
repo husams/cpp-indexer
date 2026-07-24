@@ -100,14 +100,16 @@ operations.
 
 `CidxBehavior` covers the M0 observable pipeline: workspace import,
 configuration capture, indexing, atomic publication, invalidation, graph edge
-evidence/target/configuration applicability, ordered argument slots, validated
-query stream shape/bounds/view safety, derived transforms, read-only query
-outcomes, migration interruption/recovery, include-hygiene plan/validate/apply
-authorization, and semantic-universe identity separation/merging. It
-deliberately abstracts Clang, SQLite, filesystem durability, query algorithms,
-and implementation performance. The conformance package maps those abstract
-actions to observed C++ operations without importing implementation details into
-the model.
+evidence/target/configuration applicability, one ordered argument sequence,
+validated query stream shape/bounds/view safety, derived transforms, read-only
+query outcomes, migration interruption/recovery, include-hygiene plan/validate/apply
+authorization, and semantic-universe identity separation/merging. The manifest
+explicitly marks concrete graph identity/completeness records, separate ordered
+slot families, and deterministic query result sets/paths/witnesses as outside
+this model's current coverage. It deliberately abstracts Clang, SQLite,
+filesystem durability, query algorithms, and implementation performance.
+The conformance package maps those abstract actions to observed C++ operations
+without importing implementation details into the model.
 
 ## Reproducible check
 
@@ -117,7 +119,8 @@ From the repository root, run:
 spec/tla/tools/check.sh
 ```
 
-The protected-invariant mutation regression is checked separately with:
+The protected-invariant, liveness-mutation, and trace-boundary regressions are
+checked separately with:
 
 ```bash
 spec/tla/tools/check-regression.sh

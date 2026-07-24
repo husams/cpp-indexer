@@ -36,6 +36,7 @@
         "QueryPlanInvariant",
         "IncludeHygieneInvariant",
         "TraceInvariant",
+        "BoundedProgressInvariant",
         "ProtectedInvariant"
       ]
     }
@@ -51,11 +52,18 @@
     },
     "semantic-graph": {
       "modules": ["CidxTypes", "CidxRepository", "CidxBehavior"],
-      "invariants": ["TypeInvariant", "RepositoryStructureInvariant", "GraphInvariant", "ProtectedInvariant"]
+      "invariants": ["TypeInvariant", "RepositoryStructureInvariant", "GraphInvariant", "ProtectedInvariant"],
+      "coverage": "partial",
+      "notModeled": [
+        "concrete graph identity records and completeness sets",
+        "separate ordered-slot families beyond graphArgumentOrder"
+      ]
     },
     "query-plan-and-cxq": {
       "modules": ["CidxBehavior", "CidxResult"],
-      "invariants": ["QueryPlanInvariant", "QueryHonestyInvariant", "SharedResultTypeInvariant", "TrustedOutcomeInvariant"]
+      "invariants": ["QueryPlanInvariant", "QueryHonestyInvariant", "SharedResultTypeInvariant", "TrustedOutcomeInvariant"],
+      "coverage": "partial",
+      "notModeled": ["deterministic query result sets, paths, and witnesses"]
     },
     "storage-sidecars-and-migrations": {
       "modules": ["CidxBehavior"],

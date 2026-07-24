@@ -8,6 +8,9 @@ enabled action and named invariants for the selected model configuration.
 
 The adapter must not import C++ types, SQLite tables, traversal order, or file
 formats into the specification. Those details are translated at the boundary.
+The published graph's `graphArgumentOrder` is observed as an ordered sequence;
+separate slot families and concrete graph/query identity records remain outside
+the current coverage boundary.
 Unknown, partial, stale, ambiguous, and failed observations remain explicit;
 the adapter may not coerce them into `complete` or `current`.
 

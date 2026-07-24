@@ -149,6 +149,10 @@ def tla_value(value):
         return "TRUE" if value else "FALSE"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, list):
+        if not value:
+            return "<< >>"
+        return "<<" + ", ".join(tla_value(item) for item in value) + ">>"
     return json.dumps(value)
 
 for scenario in scenario_rows:
@@ -172,6 +176,11 @@ for scenario in scenario_rows:
             raise SystemExit("TLA_CONFORMANCE_STATUS=FAIL reason=invalid-observation-value:" + scenario["id"])
         if spec.get("type") == "non-negative integer" and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
             raise SystemExit("TLA_CONFORMANCE_STATUS=FAIL reason=invalid-observation-type:" + scenario["id"])
+        if spec.get("type") == "sequence of non-negative integers" and (
+            not isinstance(value, list)
+            or any(not isinstance(item, int) or isinstance(item, bool) or item < 0 for item in value)
+        ):
+            raise SystemExit("TLA_CONFORMANCE_STATUS=FAIL reason=invalid-observation-type:" + scenario["id"])
         final_state[field] = value
     if set(final_state) != set(state_fields):
         raise SystemExit("TLA_CONFORMANCE_STATUS=FAIL reason=missing-final-state-field:" + scenario["id"])
@@ -181,7 +190,16 @@ for scenario in scenario_rows:
     constants.extend((f"ScenarioAction{index}", json.dumps(action))
                      for index, action in enumerate(padded_actions, start=1))
     constants.append(("ScenarioLength", str(len(actions))))
-    constants.extend((expected_names[field], tla_value(final_state[field])) for field in state_fields)
+    for field in state_fields:
+        if field == "graphArgumentOrder":
+            order = final_state[field]
+            constants.extend([
+                ("ExpectedGraphArgumentOrderLength", str(len(order))),
+                ("ExpectedGraphArgumentOrder1", str(order[0] if len(order) > 0 else 0)),
+                ("ExpectedGraphArgumentOrder2", str(order[1] if len(order) > 1 else 0)),
+            ])
+        else:
+            constants.append((expected_names[field], tla_value(final_state[field])))
     lines = ["CONSTANTS"] + [f"    {name} = {value}" for name, value in constants]
     lines += [
         "",

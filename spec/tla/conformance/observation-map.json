@@ -23,6 +23,7 @@
     {"field": "graphEvidenceState", "source": "edge/evidence ownership", "allowed": ["none", "owned"]},
     {"field": "graphTargetState", "source": "known or conservatively retained unknown target", "allowed": ["none", "known", "unknown-retained"]},
     {"field": "graphConfigurationState", "source": "graph configuration applicability", "allowed": ["unbound", "exact", "stale"]},
+    {"field": "graphArgumentOrder", "source": "ordered graph argument slots", "type": "sequence of non-negative integers"},
     {"field": "queryPlanState", "source": "validated query-plan lifecycle", "allowed": ["absent", "validated", "executing", "returned"]},
     {"field": "queryStreamShape", "source": "validated stream shape", "allowed": ["none", "set", "path"]},
     {"field": "queryTraversalBound", "source": "bounded traversal witness limit", "type": "non-negative integer"},

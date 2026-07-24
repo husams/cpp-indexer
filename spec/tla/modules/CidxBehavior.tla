@@ -89,6 +89,8 @@ vars == <<
 
 TraceAvailable == Len(trace) < TraceBound
 
+ProgressTraceAvailable == Len(trace) + 1 < TraceBound
+
 Init ==
     /\ workspaceState = "empty"
     /\ configState = "uncaptured"
@@ -164,7 +166,7 @@ StartIndexing ==
     /\ configState = "captured"
     /\ storageState = "ready"
     /\ indexState \in {"empty", "stale", "failed"}
-    /\ TraceAvailable
+    /\ ProgressTraceAvailable
     /\ indexState' = "indexing"
     /\ failureMode' = "none"
     /\ trace' = Append(trace, "StartIndexing")
@@ -181,7 +183,7 @@ StartIndexing ==
 
 IndexSuccessfully ==
     /\ indexState = "indexing"
-    /\ TraceAvailable
+    /\ ProgressTraceAvailable
     /\ indexState' = "indexed"
     /\ publicationState' = "candidate"
     /\ generation' = generation + 1
@@ -318,7 +320,7 @@ PlanTransform ==
     /\ includePlanState = "none"
     /\ invalidated = FALSE
     /\ artifactState = "published"
-    /\ TraceAvailable
+    /\ ProgressTraceAvailable
     /\ transformState' = "planned"
     /\ evidenceState' \in EvidenceStates
     /\ destructiveEditAuthorized' = FALSE
@@ -405,7 +407,7 @@ StartQuery ==
     /\ invalidated = FALSE
     /\ queryState = "idle"
     /\ queryPlanState = "validated"
-    /\ TraceAvailable
+    /\ ProgressTraceAvailable
     /\ queryState' = "running"
     /\ queryPlanState' = "executing"
     /\ trace' = Append(trace, "StartQuery")
@@ -446,7 +448,7 @@ BeginMigration ==
     /\ queryState = "idle"
     /\ transformState = "idle"
     /\ includePlanState = "none"
-    /\ TraceAvailable
+    /\ ProgressTraceAvailable
     /\ storageState' = "migrating"
     /\ migrationBaseline' = currentGeneration
     /\ trace' = Append(trace, "BeginMigration")
@@ -479,7 +481,7 @@ CompleteMigration ==
 
 InterruptMigration ==
     /\ storageState = "migrating"
-    /\ TraceAvailable
+    /\ ProgressTraceAvailable
     /\ storageState' = "recovery-required"
     /\ failureMode' = "interrupted"
     /\ trace' = Append(trace, "InterruptMigration")
@@ -564,7 +566,7 @@ PlanIncludeChange ==
     /\ transformState = "idle"
     /\ invalidated = FALSE
     /\ includePlanState = "none"
-    /\ TraceAvailable
+    /\ ProgressTraceAvailable
     /\ includePlanState' = "planned"
     /\ includeConfigurationState' \in {"exact", "mismatch"}
     /\ includeEditState' = "none"
@@ -664,27 +666,27 @@ Fairness ==
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
-IndexingProgress ==
-    [](indexState = "indexing" /\ TraceAvailable =>
+IndexingLiveness ==
+    [](indexState = "indexing" =>
         <> (indexState \in {"indexed", "current", "failed", "stale"}))
 
-PublicationProgress ==
-    [](publicationState = "candidate" /\ TraceAvailable =>
+PublicationLiveness ==
+    [](publicationState = "candidate" =>
         <> (publicationState \in {"current", "failed", "stale"}))
 
-QueryProgress ==
-    [](queryState = "running" /\ TraceAvailable => <> (queryState = "complete"))
+QueryLiveness ==
+    [](queryState = "running" => <> (queryState = "complete"))
 
-RecoveryProgress ==
-    [](storageState = "recovery-required" /\ TraceAvailable =>
+RecoveryLiveness ==
+    [](storageState = "recovery-required" =>
         <> (storageState = "ready"))
 
-TransformProgress ==
-    [](transformState = "planned" /\ TraceAvailable =>
+TransformLiveness ==
+    [](transformState = "planned" =>
         <> (transformState \in {"applied", "failed"}))
 
-IncludePlanProgress ==
-    [](includePlanState = "planned" /\ TraceAvailable =>
+IncludePlanLiveness ==
+    [](includePlanState = "planned" =>
         <> (includePlanState \in {"validated", "rejected"}))
 
 TypeInvariant ==
@@ -797,6 +799,15 @@ TraceInvariant ==
     /\ Len(trace) > 0
     /\ Head(trace) = "Init"
 
+BoundedProgressInvariant ==
+    Len(trace) = TraceBound
+        => /\ indexState # "indexing"
+           /\ publicationState # "candidate"
+           /\ queryState # "running"
+           /\ storageState # "recovery-required"
+           /\ transformState # "planned"
+           /\ includePlanState # "planned"
+
 ProtectedInvariant ==
     /\ NoPartialGenerationInvariant
     /\ QueryHonestyInvariant
@@ -804,5 +815,6 @@ ProtectedInvariant ==
     /\ GraphInvariant
     /\ QueryPlanInvariant
     /\ IncludeHygieneInvariant
+    /\ BoundedProgressInvariant
 
 =============================================================================
