@@ -68,6 +68,7 @@ enum class AnalysisResultClass : std::uint8_t {
   truncated_input,
   timeout,
   step_budget_exceeded,
+  unsupported_budget,
   output_budget_exceeded,
   provider_failure,
   engine_failure,
@@ -95,6 +96,14 @@ struct AnalysisPublication {
   std::string content_hash;
   std::string relative_path;
   std::vector<std::string> relations;
+};
+
+struct AnalysisPublicationRequest {
+  std::filesystem::path artifact_root;
+  std::string namespace_name;
+  std::filesystem::path storage_path;
+  std::string workspace_identity;
+  std::string tu_identity;
 };
 
 struct AnalysisRun {
@@ -186,6 +195,7 @@ struct AnalysisRequest {
   ProviderDeclaration provider;
   FactRequest facts;
   AnalysisOptions options;
+  std::optional<AnalysisPublicationRequest> publication;
 };
 
 class AnalysisService {

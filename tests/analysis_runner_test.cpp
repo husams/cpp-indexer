@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -9,10 +10,12 @@
 #include <string>
 #include <thread>
 #include <unistd.h>
+#include <variant>
 #include <vector>
 
 #include "analysis/facts.hpp"
 #include "analysis/runner.hpp"
+#include "astgraph/astgraph.hpp"
 #include "astgraph/schema.hpp"
 #include "catalogs/generated_catalog.hpp"
 #include "storage/sqlite.hpp"
@@ -66,48 +69,6 @@ std::string make_extension_db(const std::string &root,
   return path;
 }
 
-std::string make_ast_db(const std::string &root, const std::string &workspace,
-                        const std::string &tu) {
-  const std::string path = root + "/banking.ast.db";
-  cidx::SqliteDb db(path);
-  db.exec("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-  db.exec(
-      "CREATE TABLE artifact_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-  db.exec(
-      "CREATE TABLE file(id INTEGER PRIMARY KEY, path TEXT, is_main INTEGER)");
-  db.exec("CREATE TABLE node_kind(id INTEGER PRIMARY KEY, name TEXT, category "
-          "TEXT)");
-  db.exec("CREATE TABLE relation_kind(id INTEGER PRIMARY KEY, name TEXT)");
-  db.exec("CREATE TABLE symbol(id INTEGER PRIMARY KEY, usr TEXT, name TEXT, "
-          "kind_id INTEGER, linkage INTEGER)");
-  db.exec(
-      "CREATE TABLE node(id INTEGER PRIMARY KEY, kind_id INTEGER, symbol_id "
-      "INTEGER, type_id INTEGER, spelling TEXT, file_id INTEGER, line "
-      "INTEGER, col INTEGER, end_line INTEGER, end_col INTEGER, "
-      "is_definition INTEGER)");
-  db.exec("CREATE TABLE edge(src_id INTEGER, dst_id INTEGER, rel_id INTEGER, "
-          "ord INTEGER)");
-  put_meta(db, "meta", "schema_version",
-           std::to_string(cidx::astgraph::kSchemaVersion));
-  put_meta(db, "meta", "catalog_version",
-           std::to_string(cidx::catalog::kCatalogVersion));
-  put_meta(db, "meta", "catalog_hash",
-           std::string(cidx::catalog::kCatalogHash));
-  put_meta(db, "meta", "status", "complete");
-  put_meta(db, "artifact_meta", "workspace_identity", workspace);
-  put_meta(db, "artifact_meta", "tu_identity", tu);
-  put_meta(db, "artifact_meta", "completeness", "complete");
-  put_meta(db, "artifact_meta", "truncation", "none");
-  db.exec("INSERT INTO file VALUES (1,'banking.cpp',1)");
-  db.exec("INSERT INTO node_kind VALUES (1,'function','decl')");
-  db.exec("INSERT INTO relation_kind VALUES (1,'calls')");
-  db.exec("INSERT INTO symbol VALUES (1,'usr:bank.deposit','deposit',1,0)");
-  db.exec("INSERT INTO node VALUES "
-          "(10,1,1,0,'deposit',1,4,1,4,8,1),"
-          "(11,1,0,0,'near_miss',1,8,1,8,9,1)");
-  return path;
-}
-
 class SnapshotEngine final : public AnalysisEngine {
 public:
   [[nodiscard]] std::string engine_version() const override {
@@ -136,6 +97,25 @@ public:
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     AnalysisRun result;
     result.relations = facts.relations;
+    return result;
+  }
+};
+
+class CountingEngine final : public AnalysisEngine {
+public:
+  [[nodiscard]] std::string engine_version() const override {
+    return "test-counting-engine";
+  }
+
+  [[nodiscard]] AnalysisRun
+  execute(const AnalysisPackage &package, const FactSnapshot &facts,
+          const AnalysisOptions &options) const override {
+    (void)package;
+    (void)options;
+    AnalysisRun result;
+    result.relations = facts.relations;
+    result.engine_version = engine_version();
+    result.step_count = 2;
     return result;
   }
 };
@@ -325,7 +305,12 @@ TEST_CASE("public service runs a real extension Souffle package") {
           ".input banking_fact\n"
           ".decl hit(usr:symbol)\n"
           "hit(usr) :- banking_fact(usr, \"payments\", 1).\n"
-          ".output hit\n",
+          ".output hit\n"
+          ".decl typed(value:number, flag:number, text:symbol)\n"
+          "typed(7, 1, \"ok\") :- banking_fact(_, \"payments\", 1).\n"
+          ".output typed\n"
+          ".decl empty(value:number, flag:number, text:symbol)\n"
+          ".output empty\n",
       .prelude = {},
       .include_catalog_prelude = false,
       .content_hash = {},
@@ -334,8 +319,26 @@ TEST_CASE("public service runs a real extension Souffle package") {
                               .catalog_version = 1,
                               .columns = {}}},
       .output_relations = {
-          {.name = "hit", .version = 1, .catalog_version = 1, .columns = {}}}};
-  const AnalysisRequest request{
+          {.name = "hit", .version = 1, .catalog_version = 1, .columns = {}},
+          {.name = "typed",
+           .version = 1,
+           .catalog_version = 1,
+           .columns = {{.name = "value", .type = FactType::integer},
+                       {.name = "flag", .type = FactType::boolean},
+                       {.name = "text", .type = FactType::string}}},
+          {.name = "empty",
+           .version = 1,
+           .catalog_version = 1,
+           .columns = {{.name = "value", .type = FactType::integer},
+                       {.name = "flag", .type = FactType::boolean},
+                       {.name = "text", .type = FactType::string}}}}};
+  const std::string publication_index = root + "/publication.sqlite";
+  {
+    cidx::Storage storage(publication_index);
+    storage.add_component("banking", root, "repo");
+    storage.stamp_index_identity();
+  }
+  AnalysisRequest request{
       .package = package,
       .provider = ProviderDeclaration{.kind = ProviderKind::extension,
                                       .path = path,
@@ -348,32 +351,123 @@ TEST_CASE("public service runs a real extension Souffle package") {
                                  .time_budget_ms = 600'000,
                                  .output_budget = 0,
                                  .artifact_root = root + "/retained",
-                                 .capture_budget = 1'048'576}};
+                                 .capture_budget = 1'048'576},
+      .publication =
+          AnalysisPublicationRequest{.artifact_root = root + "/published",
+                                     .namespace_name = "banking",
+                                     .storage_path = publication_index,
+                                     .workspace_identity = {},
+                                     .tu_identity = {}}};
   const AnalysisRun result = AnalysisService().run(request);
   CHECK_UNARY(result.status == AnalysisStatus::complete);
   CHECK_UNARY(result.result_class == AnalysisResultClass::complete);
   REQUIRE_UNARY(result.relations.contains("hit"));
   CHECK_UNARY(result.relations.at("hit").rows.size() == 1);
+  REQUIRE_UNARY(result.relations.contains("typed"));
+  REQUIRE_UNARY(result.relations.at("typed").rows.size() == 1);
+  const FactRow &typed = result.relations.at("typed").rows.front();
+  CHECK_UNARY(std::holds_alternative<std::int64_t>(typed[0]));
+  CHECK_UNARY(std::holds_alternative<bool>(typed[1]));
+  CHECK_UNARY(std::get<bool>(typed[1]));
+  CHECK_UNARY(std::get<std::string>(typed[2]) == "ok");
+  REQUIRE_UNARY(result.relations.contains("empty"));
+  CHECK_UNARY(result.relations.at("empty").rows.empty());
+  CHECK_UNARY(result.relations.at("empty").descriptor.columns[1].type ==
+              FactType::boolean);
   CHECK_UNARY(result.generated_inputs.size() >= 2);
+  CHECK_UNARY(std::ranges::is_sorted(result.generated_inputs));
+  AnalysisRun perturbed = result;
+  std::ranges::reverse(perturbed.generated_inputs);
+  CHECK_UNARY(perturbed.artifact_hash() == result.artifact_hash());
   CHECK_UNARY(!result.engine_version.empty());
+  if (!result.publication) {
+    throw std::runtime_error("public analysis result omitted publication");
+  }
+  const AnalysisPublication &publication = *result.publication;
+  CHECK_UNARY(publication.logical_id == "analysis:banking");
+  CHECK_UNARY(!publication.content_hash.empty());
   CHECK_UNARY(fs::exists(root + "/retained"));
   const AnalysisRun replay = AnalysisService().run(request);
   CHECK_UNARY(replay.run_id == result.run_id);
   CHECK_UNARY(replay.generated_inputs == result.generated_inputs);
   CHECK_UNARY(replay.artifact_hash() == result.artifact_hash());
+
+  AnalysisRequest overflow = request;
+  overflow.options.output_budget = 1;
+  const AnalysisRun overflow_result = AnalysisService().run(overflow);
+  CHECK_UNARY(overflow_result.result_class ==
+              AnalysisResultClass::output_budget_exceeded);
+
+  AnalysisRequest recursive = request;
+  recursive.package = AnalysisPackage{
+      .name = "banking-recursive",
+      .version = "1.0.0",
+      .entry_point = "reach",
+      .engine = "souffle",
+      .program = ".decl edge(source:symbol, target:symbol)\n"
+                 "edge(usr, usr) :- banking_fact(usr, \"payments\", 1).\n"
+                 ".decl reach(source:symbol, target:symbol)\n"
+                 "reach(source, target) :- edge(source, target).\n"
+                 "reach(source, target) :- reach(source, middle), "
+                 "edge(middle, target).\n"
+                 ".output reach\n",
+      .prelude = {},
+      .include_catalog_prelude = false,
+      .content_hash = {},
+      .required_relations = {{.name = "banking_fact",
+                              .version = 1,
+                              .catalog_version = 1,
+                              .columns = {}}},
+      .output_relations = {}};
+  recursive.options.step_budget = 1;
+  const AnalysisRun recursive_result = AnalysisService().run(recursive);
+  CHECK_UNARY(recursive_result.result_class ==
+              AnalysisResultClass::unsupported_budget);
 }
 
 TEST_CASE("public service composes real AST and semantic providers") {
   const std::string root = temp_dir();
   const std::string semantic_path = root + "/index.sqlite";
+  const std::string source_path = root + "/banking.cpp";
+  {
+    std::ofstream source(source_path);
+    REQUIRE_UNARY(source.good());
+    source << "int deposit() { return 1; }\n"
+              "int near_miss() { return 2; }\n";
+  }
+  const std::string raw_path = root + "/banking.raw.db";
+  std::string published_path;
   std::string workspace;
+  std::string tu_identity;
   {
     cidx::Storage storage(semantic_path);
-    storage.mint_symbol_id("usr:bank.deposit", "deposit", "deposit");
+    storage.add_component("banking", root, "repo");
     storage.stamp_index_identity();
     workspace = storage.index_identity().workspace;
+    const cidx::astgraph::Options ast_options{.main_only = true,
+                                              .descriptor_hash = std::nullopt,
+                                              .resource_dir = std::nullopt};
+    (void)cidx::astgraph::dump_tu(source_path, {"-std=c++17"}, std::nullopt,
+                                  raw_path, ast_options);
+    cidx::SqliteDb raw(raw_path, true, cidx::SqliteProfile::read_only_replay);
+    auto symbol = raw.prepare(
+        "SELECT usr FROM symbol WHERE name = 'deposit' ORDER BY id LIMIT 1");
+    REQUIRE_UNARY(symbol.step());
+    storage.mint_symbol_id(symbol.col_text(0), "deposit", "function");
+    storage.stamp_index_identity();
+    const cidx::ArtifactRecord published = cidx::astgraph::publish_tu_artifact(
+        storage, semantic_path, source_path, raw_path, {"-std=c++17"},
+        std::nullopt, ast_options);
+    published_path =
+        (fs::path(semantic_path).parent_path() / published.relative_path)
+            .string();
+    cidx::SqliteDb published_db(published_path, true,
+                                cidx::SqliteProfile::read_only_replay);
+    auto manifest = published_db.prepare(
+        "SELECT value FROM artifact_meta WHERE key = 'tu_identity'");
+    REQUIRE_UNARY(manifest.step());
+    tu_identity = manifest.col_text(0);
   }
-  const std::string ast_path = make_ast_db(root, workspace, "tu:banking:1");
   const AnalysisPackage package{.name = "banking-composed",
                                 .version = "1.0.0",
                                 .entry_point = "joined",
@@ -386,7 +480,7 @@ TEST_CASE("public service composes real AST and semantic providers") {
                                 .output_relations = {}};
   const auto left = std::make_shared<ProviderDeclaration>(
       ProviderDeclaration{.kind = ProviderKind::astgraph,
-                          .path = ast_path,
+                          .path = published_path,
                           .left = {},
                           .right = {},
                           .joins = {}});
@@ -408,20 +502,21 @@ TEST_CASE("public service composes real AST and semantic providers") {
                                          .left_key = "usr",
                                          .right_key = "usr",
                                          .output_relation = "banking/join"}}},
-      .facts = {},
-      .options = {}};
+      .facts = FactRequest{.relations = {"ast_node", "symbol", "banking/join"},
+                           .workspace_identity = workspace,
+                           .tu_identity = tu_identity},
+      .options = {},
+      .publication = std::nullopt};
   const AnalysisRun result = AnalysisService([](const AnalysisPackage &) {
                                return std::make_unique<SnapshotEngine>();
                              }).run(request);
-  CHECK_UNARY(result.status == AnalysisStatus::partial);
+  CHECK_UNARY(result.status == AnalysisStatus::partial ||
+              result.status == AnalysisStatus::complete);
+  REQUIRE_UNARY(result.relations.contains("ast_node"));
+  REQUIRE_UNARY(result.relations.contains("symbol"));
   REQUIRE_UNARY(result.relations.contains("banking/join"));
-  CHECK_UNARY(result.relations.at("banking/join").rows.size() == 2);
-  REQUIRE_UNARY(result.relations.contains("analysis/unresolved_join"));
-  CHECK_UNARY(result.relations.at("analysis/unresolved_join").rows.size() == 1);
-  CHECK_UNARY(
-      fact_value_text(
-          result.relations.at("analysis/unresolved_join").rows[0].back()) ==
-      "missing_identity");
+  CHECK_UNARY(!result.relations.at("banking/join").rows.empty());
+  CHECK_UNARY(!result.relations.contains("analysis/unresolved_join"));
 }
 
 TEST_CASE("composition propagates both provider completeness and truncation") {
@@ -487,9 +582,10 @@ TEST_CASE("budgets and typed provider or engine failures remain distinct") {
                                  .time_budget_ms = 600'000,
                                  .output_budget = 0,
                                  .artifact_root = std::nullopt,
-                                 .capture_budget = 1'048'576}};
+                                 .capture_budget = 1'048'576},
+      .publication = std::nullopt};
   const AnalysisRun step = AnalysisService([](const AnalysisPackage &) {
-                             return std::make_unique<SnapshotEngine>();
+                             return std::make_unique<CountingEngine>();
                            }).run(step_request);
   CHECK_UNARY(step.result_class == AnalysisResultClass::step_budget_exceeded);
 
@@ -520,7 +616,8 @@ TEST_CASE("budgets and typed provider or engine failures remain distinct") {
                                       .right = {},
                                       .joins = {}},
       .facts = {},
-      .options = {}});
+      .options = {},
+      .publication = std::nullopt});
   CHECK_UNARY(missing.result_class == AnalysisResultClass::missing_tu);
 
   AnalysisPackage invalid_package = package;
@@ -538,7 +635,8 @@ TEST_CASE("budgets and typed provider or engine failures remain distinct") {
                                       .right = {},
                                       .joins = {}},
               .facts = {},
-              .options = {}});
+              .options = {},
+              .publication = std::nullopt});
   CHECK_UNARY(invalid_package_result.result_class ==
               AnalysisResultClass::invalid_package);
 
@@ -550,7 +648,8 @@ TEST_CASE("budgets and typed provider or engine failures remain distinct") {
           .run(AnalysisRequest{.package = package,
                                .provider = ProviderDeclaration{},
                                .facts = {},
-                               .options = {}});
+                               .options = {},
+                               .publication = std::nullopt});
   CHECK_UNARY(invalid.result_class == AnalysisResultClass::engine_failure);
 }
 
@@ -577,13 +676,15 @@ TEST_CASE(
   const std::string db_path = root + "/index.sqlite";
   cidx::Storage storage(db_path);
   AnalysisRun run;
-  run.run_id = "stable-run";
-  run.input_hash = "input-hash";
+  run.run_id = "run-one";
+  run.input_hash = "input-hash-one";
   run.package_hash = "package-hash";
   run.engine_version = "souffle:1";
   run.relations = facts.relations;
   const auto first = AnalysisPublisher::publish(
       storage, root + "/artifacts", "banking", run, "workspace:banking");
+  run.run_id = "run-two";
+  run.input_hash = "input-hash-two";
   run.relations["symbol"].rows.push_back({3, "usr:bank.new", "new"});
   const auto second = AnalysisPublisher::publish(
       storage, root + "/artifacts", "banking", run, "workspace:banking");
@@ -591,9 +692,10 @@ TEST_CASE(
     throw std::runtime_error("publication did not create a new generation");
   }
   cidx::ArtifactStore artifacts(storage, root + "/artifacts");
-  const auto current = artifacts.current("analysis:banking:stable-run");
+  const auto current = artifacts.current("analysis:banking");
   if (!current || current->content_hash != second.content_hash ||
-      !artifacts.validate("analysis:banking:stable-run").usable()) {
+      !artifacts.validate("analysis:banking").usable() ||
+      current->spec.logical_id != first.spec.logical_id) {
     throw std::runtime_error("published analysis generation is not current");
   }
   bool rejected = false;

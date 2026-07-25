@@ -801,8 +801,106 @@ ComposedFactProvider::ComposedFactProvider(std::unique_ptr<FactProvider> left,
 
 FactSnapshot ComposedFactProvider::snapshot(const FactRequest &request) const {
   try {
-    return compose_snapshots(left_->snapshot(request),
-                             right_->snapshot(request), joins_);
+    if (request.relations.empty()) {
+      FactRequest left_request = request;
+      FactRequest right_request = request;
+      left_request.tu_identity.reset();
+      right_request.tu_identity.reset();
+      const auto load_child = [&request](const FactProvider &provider,
+                                         FactRequest child_request) {
+        FactSnapshot child = provider.snapshot(child_request);
+        if (request.tu_identity &&
+            child.applicability.contains("translation-unit")) {
+          child_request.tu_identity = request.tu_identity;
+          child = provider.snapshot(child_request);
+        }
+        return child;
+      };
+      return compose_snapshots(load_child(*left_, left_request),
+                               load_child(*right_, right_request), joins_);
+    }
+
+    FactRequest left_request = request;
+    FactRequest right_request = request;
+    left_request.tu_identity.reset();
+    right_request.tu_identity.reset();
+    left_request.relations.clear();
+    right_request.relations.clear();
+    const auto add_unique = [](std::vector<std::string> &names,
+                               const std::string &name) {
+      if (!std::ranges::contains(names, name)) {
+        names.push_back(name);
+      }
+    };
+    const auto is_derived = [&](const std::string &name) {
+      return std::ranges::any_of(joins_, [&name](const JoinSpec &join) {
+        return join.output_relation == name;
+      });
+    };
+    for (const auto &join : joins_) {
+      add_unique(left_request.relations, join.left_relation);
+      add_unique(right_request.relations, join.right_relation);
+    }
+    for (const auto &name : request.relations) {
+      if (is_derived(name)) {
+        continue;
+      }
+      bool selected = false;
+      try {
+        FactRequest probe = request;
+        probe.relations = {name};
+        probe.tu_identity.reset();
+        (void)left_->snapshot(probe);
+        add_unique(left_request.relations, name);
+        selected = true;
+      } catch (const FactProviderError &error) {
+        if (error.code() != "unsupported_relation") {
+          throw;
+        }
+      }
+      try {
+        FactRequest probe = request;
+        probe.relations = {name};
+        probe.tu_identity.reset();
+        (void)right_->snapshot(probe);
+        add_unique(right_request.relations, name);
+        selected = true;
+      } catch (const FactProviderError &error) {
+        if (error.code() != "unsupported_relation") {
+          throw;
+        }
+      }
+      if (!selected) {
+        throw FactProviderError("unsupported_relation",
+                                "unsupported composed fact relation: " + name);
+      }
+    }
+
+    const auto load_child = [&request](const FactProvider &provider,
+                                       FactRequest child_request) {
+      FactSnapshot child = provider.snapshot(child_request);
+      if (request.tu_identity &&
+          child.applicability.contains("translation-unit")) {
+        child_request.tu_identity = request.tu_identity;
+        child = provider.snapshot(child_request);
+      }
+      return child;
+    };
+    FactSnapshot composed =
+        compose_snapshots(load_child(*left_, left_request),
+                          load_child(*right_, right_request), joins_);
+    FactSnapshot filtered = composed;
+    filtered.relations.clear();
+    for (const auto &name : request.relations) {
+      const FactRelation *relation = composed.find_relation(name);
+      if (relation == nullptr) {
+        throw FactProviderError("unsupported_relation",
+                                "unsupported composed fact relation: " + name);
+      }
+      filtered.add_relation(*relation);
+    }
+    filtered.validate();
+    return filtered;
   } catch (const FactProviderError &) {
     throw;
   } catch (const std::exception &error) {

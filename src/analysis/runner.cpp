@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -12,6 +13,7 @@
 #include <string_view>
 #include <tuple>
 #include <unistd.h>
+#include <utility>
 
 #include "cli/souffle_rules.hpp"
 #include "storage/storage.hpp"
@@ -149,15 +151,6 @@ std::string retained_input(const fs::path &root, std::string_view name,
   return "analysis-input:" + hash + "/" + filename;
 }
 
-std::int64_t snapshot_steps(const FactSnapshot &snapshot) {
-  std::int64_t count = 0;
-  for (const auto &[name, relation] : snapshot.relations) {
-    (void)name;
-    count += static_cast<std::int64_t>(relation.rows.size());
-  }
-  return count;
-}
-
 std::string detect_souffle_version(const std::string &executable) {
   const RunResult version = run({executable, "--version"}, 2.0, 4096);
   if (version.exit_code != 0 || version.out.empty()) {
@@ -225,10 +218,126 @@ std::vector<std::string> output_relations(std::string_view program) {
   return names;
 }
 
-std::vector<FactRow> read_relation(const fs::path &path) {
+FactValue decode_value(std::string_view text, const FactType type,
+                       std::string_view relation_name) {
+  if (type == FactType::string) {
+    return std::string(text);
+  }
+  if (type == FactType::boolean) {
+    if (text == "1" || text == "true") {
+      return true;
+    }
+    if (text == "0" || text == "false") {
+      return false;
+    }
+    throw AnalysisEngineError("engine_failure",
+                              "invalid boolean in output relation " +
+                                  std::string(relation_name));
+  }
+  std::int64_t value = 0;
+  const auto [end, error] =
+      std::from_chars(text.data(), text.data() + text.size(), value);
+  if (error != std::errc{} || end != text.data() + text.size()) {
+    throw AnalysisEngineError("engine_failure",
+                              "invalid integer in output relation " +
+                                  std::string(relation_name));
+  }
+  return value;
+}
+
+std::vector<FactColumn> declared_columns(std::string_view program,
+                                         std::string_view relation_name) {
+  std::istringstream lines{std::string(program)};
+  std::string line;
+  const std::string prefix = ".decl " + std::string(relation_name) + "(";
+  std::string declaration;
+  bool collecting = false;
+  while (std::getline(lines, line)) {
+    const std::size_t begin = line.find_first_not_of(" \t\r\f\v");
+    if (!collecting) {
+      if (begin == std::string::npos ||
+          line.compare(begin, prefix.size(), prefix) != 0) {
+        continue;
+      }
+      declaration = line.substr(begin + prefix.size());
+      collecting = true;
+    } else {
+      declaration += line;
+    }
+    const std::size_t close = declaration.find(')');
+    if (close == std::string::npos) {
+      continue;
+    }
+    std::vector<FactColumn> columns;
+    std::istringstream values(declaration.substr(0, close));
+    std::string column;
+    while (std::getline(values, column, ',')) {
+      const std::size_t column_begin = column.find_first_not_of(" \t");
+      const std::size_t column_end = column.find_last_not_of(" \t");
+      if (column_begin == std::string::npos) {
+        continue;
+      }
+      column = column.substr(column_begin, column_end - column_begin + 1);
+      const std::size_t separator = column.find(':');
+      if (separator == std::string::npos) {
+        continue;
+      }
+      const std::string name = column.substr(0, separator);
+      const std::string type_name = column.substr(separator + 1);
+      FactType type = FactType::string;
+      if (type_name.contains("number") || type_name.contains("unsigned")) {
+        type = FactType::integer;
+      } else if (type_name.contains("boolean")) {
+        type = FactType::boolean;
+      }
+      columns.push_back({.name = name, .type = type});
+    }
+    return columns;
+  }
+  return {};
+}
+
+RelationDescriptor output_descriptor(const AnalysisPackage &package,
+                                     const FactSnapshot &snapshot,
+                                     std::string_view name,
+                                     std::string_view program) {
+  const auto requirement = std::ranges::find(package.output_relations, name,
+                                             &RelationRequirement::name);
+  std::vector<FactColumn> columns =
+      requirement == package.output_relations.end() ||
+              requirement->columns.empty()
+          ? declared_columns(program, name)
+          : requirement->columns;
+  return RelationDescriptor{
+      .name = std::string(name),
+      .version = requirement == package.output_relations.end()
+                     ? 1
+                     : requirement->version,
+      .catalog_version = requirement == package.output_relations.end()
+                             ? snapshot.catalog_version
+                             : requirement->catalog_version,
+      .columns = std::move(columns)};
+}
+
+std::vector<FactRow> read_relation(const fs::path &path,
+                                   const RelationDescriptor &descriptor,
+                                   std::uintmax_t &output_bytes,
+                                   const std::int64_t output_budget) {
   if (!regular_file(path)) {
     return {};
   }
+  std::error_code size_error;
+  const std::uintmax_t file_bytes = fs::file_size(path, size_error);
+  if (size_error) {
+    throw AnalysisEngineError("artifact_io",
+                              "cannot stat output relation " + path.string());
+  }
+  if (output_budget > 0 &&
+      output_bytes + file_bytes > static_cast<std::uintmax_t>(output_budget)) {
+    throw AnalysisEngineError("output_budget_exceeded",
+                              "analysis result files exceed output budget");
+  }
+  output_bytes += file_bytes;
   std::ifstream input(path, std::ios::binary);
   std::ostringstream buffer;
   buffer << input.rdbuf();
@@ -244,13 +353,27 @@ std::vector<FactRow> read_relation(const fs::path &path) {
       std::size_t cell_start = 0;
       while (cell_start <= line.size()) {
         const std::size_t tab = line.find('\t', cell_start);
-        row.emplace_back(line.substr(cell_start, tab == std::string::npos
-                                                     ? std::string::npos
-                                                     : tab - cell_start));
+        const std::string cell = line.substr(
+            cell_start,
+            tab == std::string::npos ? std::string::npos : tab - cell_start);
+        const std::size_t column = row.size();
+        if (column >= descriptor.columns.size()) {
+          throw AnalysisEngineError(
+              "engine_failure",
+              "output row has too many columns in relation " + descriptor.name);
+        }
+        row.push_back(decode_value(cell, descriptor.columns[column].type,
+                                   descriptor.name));
         if (tab == std::string::npos) {
           break;
         }
         cell_start = tab + 1;
+      }
+      if (row.size() != descriptor.columns.size()) {
+        throw AnalysisEngineError(
+            "engine_failure",
+            "output row has the wrong column count in relation " +
+                descriptor.name);
       }
       rows.push_back(std::move(row));
     }
@@ -296,12 +419,16 @@ std::map<std::string, FactRelation> run_souffle(const AnalysisPackage &package,
   (void)export_stats;
   const fs::path retained_root = options.artifact_root.value_or(
       fs::temp_directory_path() / ".cidx-analysis-inputs");
+  std::vector<fs::path> fact_files;
   for (const auto &entry : fs::directory_iterator(facts_dir)) {
     if (regular_file(entry.path())) {
-      execution.generated_inputs.push_back(
-          retained_input(retained_root, entry.path().filename().string(),
-                         read_file(entry.path())));
+      fact_files.push_back(entry.path());
     }
+  }
+  std::ranges::sort(fact_files);
+  for (const auto &fact_file : fact_files) {
+    execution.generated_inputs.push_back(retained_input(
+        retained_root, fact_file.filename().string(), read_file(fact_file)));
   }
   const fs::path program_path = temp.path / "program.dl";
   {
@@ -330,9 +457,6 @@ std::map<std::string, FactRelation> run_souffle(const AnalysisPackage &package,
   std::size_t output_limit = kDefaultCaptureBudget;
   if (options.capture_budget > 0) {
     output_limit = static_cast<std::size_t>(options.capture_budget);
-  }
-  if (options.output_budget > 0) {
-    output_limit = static_cast<std::size_t>(options.output_budget);
   }
   const RunResult result = run(argv, timeout, output_limit);
   execution.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -363,25 +487,38 @@ std::map<std::string, FactRelation> run_souffle(const AnalysisPackage &package,
   std::map<std::string, FactRelation> relations;
   const std::string full_program =
       (prelude.empty() ? std::string{} : prelude + '\n') + package.program;
-  for (const std::string &name : output_relations(full_program)) {
-    FactRelation relation{
-        .descriptor =
-            RelationDescriptor{.name = name,
-                               .version = 1,
-                               .catalog_version = snapshot.catalog_version,
-                               .columns = {}},
-        .rows = {}};
-    const auto rows = read_relation(output_dir / (name + ".csv"));
-    if (!rows.empty()) {
-      relation.descriptor.columns.reserve(rows.front().size());
-      for (std::size_t index = 0; index < rows.front().size(); ++index) {
-        relation.descriptor.columns.push_back(
-            {.name = "col" + std::to_string(index), .type = FactType::string});
+  if (options.output_budget > 0) {
+    std::uintmax_t csv_bytes = 0;
+    for (const std::string &name : output_relations(full_program)) {
+      const fs::path output_path = output_dir / (name + ".csv");
+      if (!regular_file(output_path)) {
+        continue;
+      }
+      std::error_code size_error;
+      const std::uintmax_t file_bytes = fs::file_size(output_path, size_error);
+      if (size_error) {
+        throw AnalysisEngineError("artifact_io",
+                                  "cannot stat output relation " +
+                                      output_path.string());
+      }
+      csv_bytes += file_bytes;
+      if (std::cmp_greater(csv_bytes, options.output_budget)) {
+        throw AnalysisEngineError("output_budget_exceeded",
+                                  "analysis result files exceed output budget");
       }
     }
-    relation.rows = rows;
+  }
+  std::uintmax_t result_bytes = 0;
+  for (const std::string &name : output_relations(full_program)) {
+    const RelationDescriptor descriptor =
+        output_descriptor(package, snapshot, name, full_program);
+    FactRelation relation{.descriptor = descriptor, .rows = {}};
+    relation.rows = read_relation(output_dir / (name + ".csv"), descriptor,
+                                  result_bytes, options.output_budget);
     relations.insert_or_assign(name, std::move(relation));
   }
+  execution.output_bytes = static_cast<std::int64_t>(result_bytes);
+  std::ranges::sort(execution.generated_inputs);
   return relations;
 }
 
@@ -486,7 +623,9 @@ std::string AnalysisRun::canonical_result() const {
       << "status=" << analysis_status_name(status) << '\n'
       << "class=" << analysis_result_class_name(result_class) << '\n'
       << "engine=" << engine_version << '\n';
-  for (const auto &input : generated_inputs) {
+  std::vector<std::string> sorted_inputs = generated_inputs;
+  std::ranges::sort(sorted_inputs);
+  for (const auto &input : sorted_inputs) {
     out << "generated=" << input << '\n';
   }
   for (const auto &[name, relation] : relations) {
@@ -522,26 +661,13 @@ SouffleAnalysisEngine::execute(const AnalysisPackage &package,
                                const AnalysisOptions &options) const {
   AnalysisRun result = base_run(package, snapshot, options);
   result.engine_version = engine_version();
-  result.step_count = snapshot_steps(snapshot);
-  if (options.step_budget > 0 && result.step_count > options.step_budget) {
-    result.status = AnalysisStatus::error;
-    result.result_class = AnalysisResultClass::step_budget_exceeded;
-    result.diagnostics.push_back(
-        {.code = "step_budget_exceeded",
-         .message = "fact input exceeds the declared step budget"});
-    return result;
+  if (options.step_budget > 0) {
+    throw AnalysisEngineError(
+        "unsupported_budget",
+        "Souffle step budgets are unsupported because recursive evaluation "
+        "steps are not externally enforceable");
   }
   result.relations = run_souffle(package, snapshot, options, result);
-  result.output_bytes =
-      static_cast<std::int64_t>(result.canonical_result().size());
-  if (options.output_budget > 0 &&
-      result.output_bytes > options.output_budget) {
-    result.status = AnalysisStatus::error;
-    result.result_class = AnalysisResultClass::output_budget_exceeded;
-    result.diagnostics.push_back(
-        {.code = "output_budget_exceeded",
-         .message = "analysis result exceeds the declared output budget"});
-  }
   return result;
 }
 
@@ -566,14 +692,10 @@ AstgraphCallgraphEngine::execute(const AnalysisPackage &package,
                                  const AnalysisOptions &options) const {
   AnalysisRun result = base_run(package, snapshot, options);
   result.engine_version = engine_version();
-  result.step_count = snapshot_steps(snapshot);
-  if (options.step_budget > 0 && result.step_count > options.step_budget) {
-    result.status = AnalysisStatus::error;
-    result.result_class = AnalysisResultClass::step_budget_exceeded;
-    result.diagnostics.push_back(
-        {.code = "step_budget_exceeded",
-         .message = "astgraph input exceeds the declared step budget"});
-    return result;
+  if (options.step_budget > 0) {
+    throw AnalysisEngineError(
+        "unsupported_budget",
+        "native astgraph step budgets require an engine work counter");
   }
   if (!snapshot.artifact_path) {
     throw AnalysisEngineError("missing_tu",
@@ -592,7 +714,7 @@ AstgraphCallgraphEngine::execute(const AnalysisPackage &package,
   if (result.elapsed_ms > options.time_budget_ms) {
     throw AnalysisEngineError("timeout", "astgraph analysis timed out");
   }
-  result.step_count += static_cast<std::int64_t>(calls.size());
+  result.step_count = 0;
   FactRelation relation{
       .descriptor =
           RelationDescriptor{
@@ -612,14 +734,6 @@ AstgraphCallgraphEngine::execute(const AnalysisPackage &package,
                                     std::move(relation));
   result.output_bytes =
       static_cast<std::int64_t>(result.canonical_result().size());
-  if (options.output_budget > 0 &&
-      result.output_bytes > options.output_budget) {
-    result.status = AnalysisStatus::error;
-    result.result_class = AnalysisResultClass::output_budget_exceeded;
-    result.diagnostics.push_back(
-        {.code = "output_budget_exceeded",
-         .message = "astgraph result exceeds the declared output budget"});
-  }
   return result;
 }
 
@@ -721,15 +835,6 @@ AnalysisRun AnalysisRunner::run(const AnalysisPackage &package,
            .message = "fact snapshot applicability is unknown"});
       return result;
     }
-    if (options.step_budget > 0 &&
-        snapshot_steps(snapshot) > options.step_budget) {
-      result.status = AnalysisStatus::error;
-      result.result_class = AnalysisResultClass::step_budget_exceeded;
-      result.diagnostics.push_back(
-          {.code = "step_budget_exceeded",
-           .message = "fact input exceeds the declared step budget"});
-      return result;
-    }
     engine_started = true;
     result = engine_->execute(package, snapshot, options);
     result.elapsed_ms =
@@ -816,6 +921,8 @@ AnalysisRun AnalysisRunner::run(const AnalysisPackage &package,
       result.result_class = AnalysisResultClass::timeout;
     } else if (error.code() == "step_budget_exceeded") {
       result.result_class = AnalysisResultClass::step_budget_exceeded;
+    } else if (error.code() == "unsupported_budget") {
+      result.result_class = AnalysisResultClass::unsupported_budget;
     } else if (error.code() == "output_budget_exceeded") {
       result.result_class = AnalysisResultClass::output_budget_exceeded;
     } else {
@@ -885,8 +992,32 @@ AnalysisRun AnalysisService::run(const AnalysisRequest &request) const {
   try {
     auto provider = provider_for(request.provider);
     auto engine = factory_(request.package);
-    return AnalysisRunner(std::move(engine))
-        .run(request.package, *provider, request.facts, request.options);
+    AnalysisRun result =
+        AnalysisRunner(std::move(engine))
+            .run(request.package, *provider, request.facts, request.options);
+    if (request.publication && result.status != AnalysisStatus::error &&
+        result.status != AnalysisStatus::unknown) {
+      const auto &publication = *request.publication;
+      if (publication.storage_path.empty()) {
+        throw AnalysisEngineError(
+            "publication_failure",
+            "analysis publication requires the semantic storage path");
+      }
+      Storage storage(publication.storage_path.string());
+      const IndexIdentity identity = storage.index_identity();
+      const std::string workspace = identity.workspace;
+      const ArtifactRecord record = AnalysisPublisher::publish(
+          storage, publication.artifact_root, publication.namespace_name,
+          result, workspace, publication.tu_identity);
+      AnalysisPublication metadata;
+      metadata.logical_id = record.spec.logical_id;
+      metadata.namespace_name = publication.namespace_name;
+      metadata.content_hash = record.content_hash;
+      metadata.relative_path = record.relative_path;
+      metadata.relations = record.spec.exposed_relations;
+      result.publication = std::move(metadata);
+    }
+    return result;
   } catch (const FactProviderError &error) {
     AnalysisRun result;
     result.status =
@@ -906,7 +1037,17 @@ AnalysisRun AnalysisService::run(const AnalysisRequest &request) const {
   } catch (const AnalysisEngineError &error) {
     AnalysisRun result;
     result.status = AnalysisStatus::error;
-    result.result_class = AnalysisResultClass::engine_failure;
+    if (error.code() == "unsupported_budget") {
+      result.result_class = AnalysisResultClass::unsupported_budget;
+    } else if (error.code() == "output_budget_exceeded") {
+      result.result_class = AnalysisResultClass::output_budget_exceeded;
+    } else if (error.code() == "timeout") {
+      result.result_class = AnalysisResultClass::timeout;
+    } else if (error.code() == "publication_failure") {
+      result.result_class = AnalysisResultClass::publication_failure;
+    } else {
+      result.result_class = AnalysisResultClass::engine_failure;
+    }
     result.diagnostics.push_back(
         {.code = error.code(), .message = error.what()});
     return result;
@@ -956,8 +1097,7 @@ AnalysisPublisher::publish(Storage &storage, const std::filesystem::path &root,
     throw AnalysisEngineError("publication_failure",
                               "only known analysis results can be published");
   }
-  const std::string logical_id =
-      "analysis:" + std::string(namespace_name) + ":" + run.run_id;
+  const std::string logical_id = "analysis:" + std::string(namespace_name);
   ArtifactSpec spec;
   spec.logical_id = logical_id;
   spec.kind = "analysis-result";
@@ -1073,6 +1213,8 @@ std::string analysis_result_class_name(const AnalysisResultClass result_class) {
     return "timeout";
   case AnalysisResultClass::step_budget_exceeded:
     return "step_budget_exceeded";
+  case AnalysisResultClass::unsupported_budget:
+    return "unsupported_budget";
   case AnalysisResultClass::output_budget_exceeded:
     return "output_budget_exceeded";
   case AnalysisResultClass::provider_failure:

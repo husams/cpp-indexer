@@ -19,8 +19,11 @@
 #include <cstdio>
 #include <deque>
 #include <exception>
+#include <filesystem>
 #include <optional>
+#include <ranges>
 #include <string>
+#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -50,7 +53,9 @@
 #include "astgraph/schema.hpp"
 #include "catalogs/generated_catalog.hpp"
 #include "cli/args.hpp" // kVersion (meta.generator provenance)
+#include "storage/artifacts.hpp"
 #include "storage/sqlite.hpp"
+#include "storage/storage.hpp"
 #include "toolchain/toolchain.hpp"
 #include "util/errors.hpp"
 #include "util/hashing.hpp"
@@ -61,6 +66,33 @@ namespace {
 
 using clang::dyn_cast;
 using clang::isa;
+
+std::string stable_option(std::string_view option,
+                          const std::filesystem::path &component_root) {
+  const auto make_stable = [&](std::string_view value) {
+    const std::filesystem::path path(value);
+    if (!path.is_absolute()) {
+      return std::string(value);
+    }
+    std::error_code ec;
+    const auto relative = std::filesystem::relative(path, component_root, ec);
+    if (!ec && !relative.empty() && relative != "." &&
+        !std::ranges::any_of(relative,
+                             [](const auto &part) { return part == ".."; })) {
+      return relative.generic_string();
+    }
+    return std::string("external:") +
+           cidx::sha256_hex(path.lexically_normal().generic_string());
+  };
+  for (const std::string_view prefix :
+       {"-I", "-isystem", "-iquote", "-include", "-include-pch",
+        "-resource-dir", "-o", "-MF", "-MT"}) {
+    if (option.starts_with(prefix) && option.size() > prefix.size()) {
+      return std::string(prefix) + make_stable(option.substr(prefix.size()));
+    }
+  }
+  return make_stable(option);
+}
 
 // The <TU>.db DDL. Every column is NOT NULL with a 0/'' sentinel — Soufflé's
 // sqlite IO reads these tables verbatim and has no notion of NULL. The edge
@@ -935,6 +967,84 @@ DumpStats dump_tu(const std::string &source_path,
     throw;
   }
   return stats;
+}
+
+ArtifactRecord publish_tu_artifact(Storage &storage,
+                                   const std::string &index_path,
+                                   const std::string &source_path,
+                                   const std::string &out_db_path,
+                                   const std::vector<std::string> &args,
+                                   const std::optional<std::string> &driver,
+                                   const Options &opts) {
+  const auto component = storage.component_for_path(source_path);
+  const std::string workspace_identity = storage.index_identity().workspace;
+  const std::filesystem::path component_root =
+      component ? std::filesystem::path(storage.component_abs_base(*component))
+                : std::filesystem::path(source_path).parent_path();
+  const std::string relative_tu =
+      std::filesystem::relative(source_path, component_root).generic_string();
+
+  std::string configuration_material;
+  for (const auto &option : args) {
+    const auto stable = stable_option(option, component_root);
+    configuration_material += std::to_string(stable.size()) + ":" + stable;
+  }
+  const auto stable_driver =
+      driver ? stable_option(*driver, component_root) : std::string{};
+  configuration_material +=
+      "driver:" + stable_driver + ":main-only:" + (opts.main_only ? "1" : "0");
+  const std::string separator(1, '\0');
+  const std::string configuration_identity =
+      sha256_hex(workspace_identity + separator + configuration_material);
+  const std::string tu_identity =
+      sha256_hex(workspace_identity + separator + relative_tu + separator +
+                 configuration_identity);
+
+  ArtifactSpec artifact;
+  artifact.logical_id = "astgraph:" + workspace_identity + ":" + relative_tu +
+                        ":" + configuration_identity;
+  artifact.kind = "astgraph";
+  artifact.artifact_schema = "cidx-astgraph/v" + std::to_string(kSchemaVersion);
+  artifact.catalog_version = catalog::kCatalogVersion;
+  artifact.catalog_hash = std::string(catalog::kCatalogHash);
+  artifact.producer_version = std::string("cidx-astgraph ") + cli::kVersion;
+  artifact.engine_version = std::string("cidx ") + cli::kVersion;
+  artifact.workspace_identity = workspace_identity;
+  artifact.tu_identity = tu_identity;
+  artifact.configuration_identity = configuration_identity;
+  artifact.input_fact_set_identity =
+      sha256_hex("facts:" + workspace_identity + ":" + tu_identity + ":" +
+                 std::string(catalog::kCatalogHash));
+  artifact.completeness = ArtifactCompleteness::complete;
+  artifact.truncation = ArtifactTruncation::none;
+  artifact.trust = ArtifactTrust::producer_verified;
+  artifact.evidence = "source";
+  const std::size_t hash_prefix = tu_identity.starts_with("sha256:") ? 7 : 0;
+  artifact.attachment_name = "astgraph_" + tu_identity.substr(hash_prefix, 16);
+  artifact.exposed_relations = {"node", "edge", "symbol", "meta"};
+
+  ArtifactStore artifacts(storage,
+                          std::filesystem::path(index_path).parent_path());
+  return artifacts.publish_existing(
+      artifact, out_db_path, [&](const ArtifactRecord &record) {
+        const auto published_path =
+            std::filesystem::path(index_path).parent_path() /
+            record.relative_path;
+        SqliteDb sidecar(published_path.string(), true,
+                         SqliteProfile::read_only_replay);
+        auto sidecar_symbols = sidecar.prepare(
+            "SELECT usr FROM symbol WHERE usr <> '' ORDER BY usr");
+        while (sidecar_symbols.step()) {
+          const std::string usr = sidecar_symbols.col_text(0);
+          const auto core_symbol = storage.lookup_symbol(usr);
+          artifacts.record_identity_mapping(
+              record.spec.logical_id, usr, "usr", usr,
+              core_symbol ? "resolved" : "unresolved",
+              core_symbol ? std::optional<std::int64_t>(core_symbol->id)
+                          : std::nullopt,
+              core_symbol ? "" : "core symbol is not present in index");
+        }
+      });
 }
 
 } // namespace cidx::astgraph

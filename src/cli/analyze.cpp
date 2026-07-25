@@ -177,7 +177,8 @@ int cmd_analyze(const ParsedArgs &args, Context &ctx) {
                                              .time_budget_ms = 600'000,
                                              .output_budget = 0,
                                              .artifact_root = std::nullopt,
-                                             .capture_budget = 1'048'576}};
+                                             .capture_budget = 1'048'576},
+        .publication = std::nullopt};
     const analysis::AnalysisRun result =
         analysis::AnalysisService().run(analysis_request);
     if (result.status == analysis::AnalysisStatus::error ||
