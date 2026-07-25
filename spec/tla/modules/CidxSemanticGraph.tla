@@ -854,8 +854,15 @@ SelectPlan ==
 TraceCount(action, start) ==
     Cardinality({i \in start..Len(trace) : trace[i] = action})
 
-RecoveryStarted ==
+InvalidationRecoveryStarted ==
     ~seeded /\ Len(trace) >= 2 /\ trace[2] = "InvalidateTransform"
+
+FailureRecoveryStarted ==
+    ~seeded
+    /\ \E i \in 2..Len(trace) : trace[i] = "FailResolve"
+
+RecoveryStarted ==
+    InvalidationRecoveryStarted \/ FailureRecoveryStarted
 
 RecoveryResolvePending ==
     RecoveryStarted /\ transformLifecycle["resolve"] \in {"stale", "failed", "planned", "running"}
@@ -886,6 +893,13 @@ RecoveryTraceInvariant ==
         /\ factPublished["resolved-facts-v1"]
         /\ factPublished["answer-facts-v1"]
         /\ factPublished["summary-facts-v1"]
+
+RecoveryFailureHonestyInvariant ==
+    RecoveryStarted =>
+        \A t \in TransformNames :
+            transformState[t] \in {"stale", "failed"}
+            => /\ ~transformOutputPublished[t]
+               /\ ~transformConsumed[t]
 
 ValidatePlan ==
     /\ ~RecoveryStarted
@@ -1091,6 +1105,8 @@ PublishTransform ==
 
 FailTransform ==
     \E t \in TransformNames :
+        /\ ~RecoveryStarted
+        /\ ~\E i \in 2..Len(trace) : trace[i] = "InvalidateTransform"
         /\ ~planValidated /\ ~queryExecuted /\ transformLifecycle[t] = "running"
         /\ LET affected == AffectedTransforms(t) IN
             /\ transformLifecycle' = [x \in TransformNames |->
@@ -1113,14 +1129,15 @@ FailTransform ==
             /\ factCompleteness' = [f \in FactSets |->
                  IF \E x \in affected : f \in ProducedFacts(x)
                  THEN "unknown" ELSE factCompleteness[f]]
-        /\ trace' = Append(trace, "FailTransform")
+        /\ trace' = Append(trace, IF t = "resolve" THEN "FailResolve"
+                                      ELSE "FailTransform")
     /\ UNCHANGED <<candidatePlan, candidateSteps, leftOperand, rightOperand, fixture,
         planValidated, planRejected, queryExecuted, resultReturned, resultStatus,
         resultItems, resultOrder, resultRelations, witnessPath, sourceCompleteness,
         filterCompleteness, viewCompleteness, leftCompleteness, rightCompleteness,
         traverseCompleteness, evidenceCompleteness, limitCompleteness,
         abstractIndexVersion, queryWrites, currentGeneration, transformInputComplete,
-        transformGeneration, transformLifecycle, factGeneration,
+        transformGeneration, factGeneration,
         stageCompleteness, operandCompleteness, stepResults, stepCompleteness,
         stepFacts, queryStarted, frontier, traversalVisited, traversalOrder,
         traversalTruncated, seeded>>
@@ -1470,5 +1487,6 @@ Fairness ==
 Spec == Init /\ [][Next]_SemanticVars /\ Fairness
 SemanticLiveness == [](planValidated /\ ~queryExecuted => <> queryExecuted)
 RecoveryLiveness == [](RecoveryStarted => <> RecoveryComplete)
+FailureRecoveryLiveness == [](FailureRecoveryStarted => <> RecoveryComplete)
 
 =============================================================================
