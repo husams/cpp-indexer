@@ -474,4 +474,36 @@ void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
   }
 }
 
+auto include_fact_count(cidx::Storage &db, const IncludeFacts &facts)
+    -> std::size_t {
+  std::size_t count =
+      4; // normalized config, include config, TU, TU file config
+  const auto file_id_for = [&db](const std::string &path) {
+    if (path.empty()) {
+      return std::optional<int64_t>{};
+    }
+    return db.get_file(cidx::pathutil::abspath(path))
+        .transform([](const cidx::File &file) { return file.id; });
+  };
+  for (const IncludeFact &fact : facts.includes) {
+    const auto source_id = file_id_for(fact.src_path);
+    if (!source_id) {
+      continue;
+    }
+    ++count; // source header applicability
+    if (fact.resolved) {
+      if (file_id_for(fact.dst_path)) {
+        ++count; // destination header applicability
+      }
+    }
+    count += 2; // include edge and include site
+  }
+  for (const MacroUseFact &fact : facts.macro_uses) {
+    if (file_id_for(fact.src_path)) {
+      ++count;
+    }
+  }
+  return count;
+}
+
 } // namespace cidx::ast

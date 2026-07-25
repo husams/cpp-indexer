@@ -189,6 +189,96 @@ void SqliteStorageService::associate_facts_for_file(
   }
 }
 
+auto SqliteStorageService::association_fact_count(
+    int64_t file_id, const std::vector<int64_t> &symbol_ids,
+    const std::vector<int64_t> &edge_ids,
+    const std::vector<int64_t> &definition_ids) -> std::size_t {
+  const auto count_with_ids = [this](std::string_view sql,
+                                     const std::vector<int64_t> &ids) {
+    if (ids.empty()) {
+      return std::size_t{0};
+    }
+    std::string statement(sql);
+    statement += " (";
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      if (i != 0) {
+        statement += ",";
+      }
+      statement += "?";
+    }
+    statement += ")";
+    auto query = db_.prepare(statement);
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      query.bind(static_cast<int>(i + 1), ids[i]);
+    }
+    return query.step() ? static_cast<std::size_t>(query.col_int64(0)) : 0;
+  };
+  const auto count_file = [this](std::string_view sql, int64_t id) {
+    auto query = db_.prepare(sql);
+    query.bind(1, id);
+    return query.step() ? static_cast<std::size_t>(query.col_int64(0)) : 0;
+  };
+  const auto count_decl_sites = [this,
+                                 file_id](const std::vector<int64_t> &ids) {
+    if (ids.empty()) {
+      return std::size_t{0};
+    }
+    std::string statement =
+        "SELECT COUNT(*) FROM decl_site WHERE file_id = ? AND symbol_id IN (";
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      if (i != 0) {
+        statement += ",";
+      }
+      statement += "?";
+    }
+    statement += ")";
+    auto query = db_.prepare(statement);
+    query.bind(1, file_id);
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      query.bind(static_cast<int>(i + 2), ids[i]);
+    }
+    return query.step() ? static_cast<std::size_t>(query.col_int64(0)) : 0;
+  };
+
+  std::size_t total = 0;
+  total +=
+      count_with_ids("SELECT COUNT(*) FROM symbol WHERE id IN", symbol_ids);
+  total += count_decl_sites(symbol_ids);
+  total += count_with_ids("SELECT COUNT(*) FROM definition WHERE id IN",
+                          definition_ids);
+  total += count_with_ids("SELECT COUNT(*) FROM edge WHERE id IN", edge_ids);
+  total += count_with_ids("SELECT COUNT(*) FROM def_edge WHERE src_def_id IN",
+                          definition_ids);
+  total +=
+      count_file("SELECT COUNT(*) FROM diagnostic WHERE file_id = ?", file_id);
+
+  total += count_with_ids("SELECT COUNT(*) FROM parameter WHERE owner_id IN",
+                          symbol_ids);
+  total += count_with_ids("SELECT COUNT(*) FROM symbol_type WHERE symbol_id IN",
+                          symbol_ids);
+  total += count_with_ids(
+      "SELECT COUNT(DISTINCT type_id) FROM symbol_type WHERE symbol_id IN",
+      symbol_ids);
+  total +=
+      count_with_ids("SELECT COUNT(*) FROM type_edge te JOIN symbol_type st "
+                     "ON st.type_id = te.src_id WHERE st.symbol_id IN",
+                     symbol_ids);
+  total += count_with_ids("SELECT COUNT(*) FROM entity_node WHERE id IN",
+                          symbol_ids);
+  total += count_with_ids(
+      "SELECT COUNT(DISTINCT ee.rowid) FROM entity_edge ee WHERE ee.src_id IN",
+      symbol_ids);
+  total += count_with_ids(
+      "SELECT COUNT(*) FROM template_param WHERE owner_id IN", symbol_ids);
+  total += count_with_ids("SELECT COUNT(*) FROM template_arg WHERE owner_id IN",
+                          symbol_ids);
+  total += count_with_ids("SELECT COUNT(*) FROM call_arg WHERE edge_id IN",
+                          edge_ids);
+  total += count_with_ids(
+      "SELECT COUNT(*) FROM possible_call WHERE src_def_id IN", definition_ids);
+  return total;
+}
+
 ConfiguredSymbols
 SqliteStorageService::symbols_for_config(int64_t file_id,
                                          const std::vector<int64_t> &config_ids,

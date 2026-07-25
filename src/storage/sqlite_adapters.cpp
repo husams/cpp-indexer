@@ -438,6 +438,11 @@ void SqliteDefinitionStoreAdapter::add_def_edge(int64_t definition_id,
   db_->add_def_edge(definition_id, destination_id, kind);
 }
 
+auto SqliteDefinitionStoreAdapter::body_edge_count(int64_t symbol_id)
+    -> std::size_t {
+  return db_->body_edge_count(symbol_id);
+}
+
 void SqliteDefinitionStoreAdapter::copy_body_edges_to_def_edge(
     int64_t definition_id, int64_t symbol_id) {
   db_->copy_body_edges_to_def_edge(definition_id, symbol_id);

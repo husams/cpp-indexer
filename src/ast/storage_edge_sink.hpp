@@ -6,8 +6,8 @@
 
 #include "ast/edge_sink.hpp"
 
-#include <vector>
 #include <unordered_map>
+#include <vector>
 
 namespace cidx::storage {
 struct AstStoragePorts;
@@ -17,8 +17,10 @@ namespace cidx::ast {
 
 class StorageEdgeSink : public EdgeSink {
 public:
-  explicit StorageEdgeSink(cidx::storage::AstStoragePorts &ports,
-                           std::vector<EvidenceRecord> *evidence = nullptr);
+  explicit StorageEdgeSink(
+      cidx::storage::AstStoragePorts &ports,
+      std::vector<EvidenceRecord> *evidence = nullptr,
+      std::vector<PresentationIntent> *presentation_intents = nullptr);
 
   std::optional<int64_t>
   lookup_symbol_id(const std::string &usr,
@@ -57,12 +59,14 @@ public:
       int64_t end_line, int64_t end_col,
       const std::optional<std::string> &init_text) override;
   void add_def_edge(int64_t def_id, int64_t dst_id, int64_t kind) override;
+  auto body_edge_count(int64_t src_id) -> std::size_t override;
   void copy_body_edges_to_def_edge(int64_t def_id, int64_t src_id) override;
   std::optional<int64_t> file_id_for_path(const std::string &path) override;
   std::vector<TypeArgCandidate> type_arg_candidates(const std::string &name,
                                                     bool qualified) override;
   std::optional<std::string> lookup_display_name(int64_t id) override;
   void update_display_name(int64_t id, const std::string &display) override;
+  void emit(const PresentationIntent &intent) override;
   std::vector<int64_t>
   symbol_ids_by_qual_name_kind(const std::string &qual_name,
                                const std::string &kind_name) override;
@@ -71,6 +75,7 @@ public:
 private:
   cidx::storage::AstStoragePorts &ports_;
   std::vector<EvidenceRecord> *evidence_ = nullptr;
+  std::vector<PresentationIntent> *presentation_intents_ = nullptr;
   std::vector<int64_t> edge_ids_;
   std::vector<int64_t> definition_ids_;
   int64_t current_file_id_ = -1;

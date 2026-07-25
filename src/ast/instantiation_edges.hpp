@@ -34,7 +34,7 @@ namespace cidx::ast {
 class DeclarationIdentityResolver;
 class RelationFactEmitter;
 class MintBuilder;
-class PresentationNormalizer;
+class PresentationIntentEmitter;
 class TemplateArgumentEncoder;
 
 // Identity of a callable that specializes/instantiates a template: the primary
@@ -54,13 +54,13 @@ callable_template_info(const clang::FunctionDecl *fd);
 //     idempotent (lookup-only: the primary must already be indexed);
 //   - template_arg rows from the FULL specialization argument list, optionally
 //     overlaid with the as-written types `written` where positions align;
-//   - the display-name rewrite from the encoded argument literals;
+//   - a typed presentation intent carrying the encoded argument literals;
 //   - method_of(9) owner promotion for member-function templates, including
 //     the minted class-template-specialization owner with its own identity.
 // Safe to call from both the declaration pass and every call site.
 void emit_callable_template_identity(
     DeclarationIdentityResolver &identity, RelationFactEmitter &relations,
-    PresentationNormalizer *presentation, MintBuilder &mint,
+    PresentationIntentEmitter *presentation_intents, MintBuilder &mint,
     const TemplateArgumentEncoder &targ_encoder, int64_t dst_id,
     const clang::FunctionDecl *fd, const CallableTemplateInfo &info,
     const std::vector<clang::QualType> &written);

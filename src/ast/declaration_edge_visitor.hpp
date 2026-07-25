@@ -55,15 +55,18 @@ namespace cidx::ast {
 
 class DeclarationPassPorts;
 class DefinitionScopeEmitter;
+class PresentationIntentEmitter;
 struct PassMetrics;
 
 class DeclarationEdgeVisitor
     : public clang::RecursiveASTVisitor<DeclarationEdgeVisitor> {
 public:
-  DeclarationEdgeVisitor(clang::ASTContext &context, DeclarationPassPorts &ports,
-                         std::string target_file, int64_t file_id,
-                         DefinitionScopeEmitter *definitions = nullptr,
-                         PassMetrics *metrics = nullptr);
+  DeclarationEdgeVisitor(
+      clang::ASTContext &context, DeclarationPassPorts &ports,
+      std::string target_file, int64_t file_id,
+      DefinitionScopeEmitter *definitions = nullptr,
+      PassMetrics *metrics = nullptr,
+      PresentationIntentEmitter *presentation_intents = nullptr);
 
   bool VisitDecl(clang::Decl *decl);
   bool VisitNamedDecl(clang::NamedDecl *decl);         // contains
@@ -156,6 +159,7 @@ private:
   std::string target_file_;
   int64_t file_id_;
   PassMetrics *metrics_;
+  PresentationIntentEmitter *presentation_intents_;
 };
 
 } // namespace cidx::ast

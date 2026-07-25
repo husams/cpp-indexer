@@ -30,6 +30,7 @@ struct FactBatch {
   std::vector<DefinitionFactRecord> definitions;
   std::vector<DefinitionEdgeRecord> definition_edges;
   std::vector<EvidenceRecord> evidence;
+  std::vector<PresentationIntent> presentation_intents;
 
   // Sorts and removes duplicate canonical records. It is intentionally
   // explicit so writers, rather than traversal order, own determinism.
@@ -41,7 +42,9 @@ class FactBatchRecorder final : public SymbolFactEmitter,
                                 public DeclarationPassPorts,
                                 public NamespacePassPorts,
                                 public DefinitionScopeEmitter,
-                                public IndexingLifecycle {
+                                public IndexingLifecycle,
+                                public PresentationNormalizer,
+                                public PresentationIntentEmitter {
 public:
   explicit FactBatchRecorder(std::string producer = {});
 
@@ -84,6 +87,7 @@ public:
       -> std::int64_t override;
   void add_def_edge(std::int64_t definition_id, std::int64_t destination_id,
                     std::int64_t kind) override;
+  auto body_edge_count(std::int64_t symbol_id) -> std::size_t override;
   void copy_body_edges_to_def_edge(std::int64_t definition_id,
                                    std::int64_t symbol_id) override;
 
@@ -94,6 +98,7 @@ public:
       -> std::optional<std::string> override;
   void update_display_name(std::int64_t symbol_id,
                            const std::string &display) override;
+  void emit(const PresentationIntent &intent) override;
 
   [[nodiscard]] auto batch() const -> const FactBatch & { return batch_; }
   [[nodiscard]] auto canonical_batch() const -> FactBatch;
@@ -108,6 +113,7 @@ private:
   std::unordered_map<std::string, std::int64_t> edge_ids_;
   std::unordered_map<std::string, std::int64_t> type_ids_;
   std::map<std::int64_t, std::string> display_names_;
+  std::vector<PresentationIntent> presentation_intents_;
 };
 
 } // namespace cidx::ast

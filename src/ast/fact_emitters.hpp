@@ -9,6 +9,7 @@
 #include "ast/fact_records.hpp"
 #include "ast/symbol_emitter.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -70,6 +71,7 @@ public:
       const std::optional<std::string> &init_text) -> std::int64_t = 0;
   virtual void add_def_edge(std::int64_t definition_id,
                             std::int64_t destination_id, std::int64_t kind) = 0;
+  virtual auto body_edge_count(std::int64_t symbol_id) -> std::size_t = 0;
   virtual void copy_body_edges_to_def_edge(std::int64_t definition_id,
                                            std::int64_t symbol_id) = 0;
 };
@@ -103,14 +105,19 @@ public:
                                    const std::string &display) = 0;
 };
 
+class PresentationIntentEmitter {
+public:
+  virtual ~PresentationIntentEmitter() = default;
+  virtual void emit(const PresentationIntent &intent) = 0;
+};
+
 // Pass-specific port bundles keep visitors honest about the services they
 // may use. They are deliberately virtual compositions so a recorder or a
 // storage adapter can implement several independently testable passes
 // without reintroducing a monolithic visitor dependency.
 class DeclarationPassPorts : public virtual DeclarationIdentityResolver,
                              public virtual RelationFactEmitter,
-                             public virtual TypeFactEmitter,
-                             public virtual PresentationNormalizer {
+                             public virtual TypeFactEmitter {
 public:
   ~DeclarationPassPorts() override = default;
 };

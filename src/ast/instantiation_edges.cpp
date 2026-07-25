@@ -1,7 +1,6 @@
 #include "ast/instantiation_edges.hpp"
 
 #include "ast/decl_flags.hpp"
-#include "ast/display_name_rewrite.hpp"
 #include "ast/edge_records.hpp"
 #include "ast/fact_emitters.hpp"
 #include "ast/location.hpp"
@@ -170,7 +169,7 @@ callable_template_info(const clang::FunctionDecl *fd) {
 
 void emit_callable_template_identity(
     DeclarationIdentityResolver &identity, RelationFactEmitter &relations,
-    PresentationNormalizer *presentation, MintBuilder &mint,
+    PresentationIntentEmitter *presentation_intents, MintBuilder &mint,
     const TemplateArgumentEncoder &targ_encoder, int64_t dst_id,
     const clang::FunctionDecl *fd, const CallableTemplateInfo &info,
     const std::vector<clang::QualType> &written) {
@@ -193,13 +192,9 @@ void emit_callable_template_identity(
 
   const std::vector<std::string> display_args =
       emit_specialization_args(targ_encoder, dst_id, fd, written);
-  if (presentation != nullptr) {
-    if (const auto disp = presentation->lookup_display_name(dst_id)) {
-      if (const auto rewritten =
-              rewrite_template_display_name(*disp, display_args)) {
-        presentation->update_display_name(dst_id, *rewritten);
-      }
-    }
+  if (presentation_intents != nullptr && !display_args.empty()) {
+    presentation_intents->emit(
+        PresentationIntent{.symbol_id = dst_id, .display_args = display_args});
   }
 
   if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(fd)) {

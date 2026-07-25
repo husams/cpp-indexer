@@ -34,9 +34,9 @@ namespace cidx::ast {
 // written. Paths are "as opened" (search dir + spelling), never symlink-
 // resolved, matching the rest of the engine's ownership rules.
 struct IncludeFact {
-  std::string src_path;   // file containing the directive
-  std::string dst_path;   // resolved target, or "" when unresolved
-  std::string spelling;   // written filename, without <> or ""
+  std::string src_path; // file containing the directive
+  std::string dst_path; // resolved target, or "" when unresolved
+  std::string spelling; // written filename, without <> or ""
   bool is_angled = false;
   int64_t line = 0;
   int64_t col = 0;
@@ -96,5 +96,10 @@ void resolve_include_guards(clang::Preprocessor &pp, IncludeFacts &out);
 // #include leaves no stale row.
 void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
                            const IncludeConfig &config);
+
+// Count every persistence operation performed by persist_include_facts before
+// it mutates storage. This is the budget preflight for the bulk include pass.
+auto include_fact_count(cidx::Storage &db, const IncludeFacts &facts)
+    -> std::size_t;
 
 } // namespace cidx::ast

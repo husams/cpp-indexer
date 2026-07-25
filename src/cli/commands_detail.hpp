@@ -222,6 +222,9 @@ inline int index_one(Storage &db, const File &rec, const std::string &path,
   // line as the retired libclang cursor walk.
   {
     ast::IndexOneOutcome out = ast::run_index_one(db, rec, path, graph_enabled);
+    if (ctx.index_outcome_sink) {
+      ctx.index_outcome_sink(out);
+    }
     if (out.parse_failed) {
       if (ctx.logger != nullptr && !out.failed_flags.empty()) {
         std::string flags;

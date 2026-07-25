@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -22,6 +23,20 @@ namespace cidx::ast {
 
 class ExtractionPassRegistry;
 
+enum class FrontendCapability : std::uint8_t {
+  ast,
+  preprocessor,
+  cfg,
+  templates,
+};
+
+struct PassBudget {
+  std::size_t max_visited_constructs = 0;
+  std::size_t max_emitted_facts = 0;
+  std::size_t max_diagnostics = 0;
+  bool declared = false;
+};
+
 struct FrontendSession {
   clang::ASTContext *ast_context = nullptr;
   clang::Preprocessor *preprocessor = nullptr;
@@ -30,14 +45,13 @@ struct FrontendSession {
   NamespacePassPorts *namespace_ports = nullptr;
   DefinitionScopeEmitter *definition_ports = nullptr;
   EvidenceEmitter *evidence = nullptr;
+  PresentationIntentEmitter *presentation_intents = nullptr;
   IndexingLifecycle *lifecycle = nullptr;
-};
+  bool cfg_available = false;
+  bool templates_available = false;
+  std::map<std::string, PassBudget> budget_overrides;
 
-enum class FrontendCapability : std::uint8_t {
-  ast,
-  preprocessor,
-  cfg,
-  templates,
+  [[nodiscard]] auto supports(FrontendCapability capability) const -> bool;
 };
 
 enum class PassScope : std::uint8_t {
@@ -53,13 +67,6 @@ enum class TraversalMode : std::uint8_t {
   lifecycle,
 };
 
-struct PassBudget {
-  std::size_t max_visited_constructs = 0;
-  std::size_t max_emitted_facts = 0;
-  std::size_t max_diagnostics = 0;
-  bool declared = false;
-};
-
 class PassBudgetExceeded final : public std::runtime_error {
 public:
   PassBudgetExceeded(std::string pass_id, std::string dimension);
@@ -72,6 +79,20 @@ public:
 private:
   std::string pass_id_;
   std::string dimension_;
+};
+
+class FrontendCapabilityUnavailable final : public std::runtime_error {
+public:
+  FrontendCapabilityUnavailable(std::string pass_id,
+                                FrontendCapability capability);
+  [[nodiscard]] auto pass_id() const -> const std::string & { return pass_id_; }
+  [[nodiscard]] auto capability() const -> FrontendCapability {
+    return capability_;
+  }
+
+private:
+  std::string pass_id_;
+  FrontendCapability capability_;
 };
 
 struct ExtractionPassDescriptor {
@@ -173,11 +194,22 @@ public:
   void replace_parameters(std::int64_t,
                           const std::vector<ParameterRecord> &) override;
   void add_symbol_type(std::int64_t, std::int64_t, std::int64_t) override;
-  auto lookup_display_name(std::int64_t) -> std::optional<std::string> override;
-  void update_display_name(std::int64_t, const std::string &) override;
 
 private:
   DeclarationPassPorts &ports_;
+  PassMetrics &metrics_;
+};
+
+class BudgetedPresentationIntentEmitter final
+    : public PresentationIntentEmitter {
+public:
+  BudgetedPresentationIntentEmitter(PresentationIntentEmitter &emitter,
+                                    PassMetrics &metrics)
+      : emitter_(emitter), metrics_(metrics) {}
+  void emit(const PresentationIntent &intent) override;
+
+private:
+  PresentationIntentEmitter &emitter_;
   PassMetrics &metrics_;
 };
 
@@ -209,13 +241,14 @@ private:
 class BudgetedDefinitionScopeEmitter final : public DefinitionScopeEmitter {
 public:
   BudgetedDefinitionScopeEmitter(DefinitionScopeEmitter &definitions,
-                                  PassMetrics &metrics);
+                                 PassMetrics &metrics);
 
   auto get_or_create_definition(std::int64_t, std::int64_t, std::int64_t,
                                 std::int64_t, std::int64_t, std::int64_t,
                                 const std::optional<std::string> &)
       -> std::int64_t override;
   void add_def_edge(std::int64_t, std::int64_t, std::int64_t) override;
+  auto body_edge_count(std::int64_t) -> std::size_t override;
   void copy_body_edges_to_def_edge(std::int64_t, std::int64_t) override;
 
 private:

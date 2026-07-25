@@ -4,6 +4,7 @@
 
 #include "storage/records.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -272,6 +273,7 @@ public:
       const std::optional<std::string> &init_text) = 0;
   virtual void add_def_edge(int64_t definition_id, int64_t destination_id,
                             int64_t kind) = 0;
+  virtual auto body_edge_count(int64_t symbol_id) -> std::size_t = 0;
   virtual void copy_body_edges_to_def_edge(int64_t definition_id,
                                            int64_t symbol_id) = 0;
   virtual void delete_edges_for_file(int64_t file_id) = 0;

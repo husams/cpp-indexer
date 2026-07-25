@@ -40,7 +40,9 @@ void StorageSymbolSink::reset_counters() {
   symbol_ids_.clear();
 }
 
-void StorageSymbolSink::set_metrics(PassMetrics *metrics) { metrics_ = metrics; }
+void StorageSymbolSink::set_metrics(PassMetrics *metrics) {
+  metrics_ = metrics;
+}
 
 int StorageSymbolSink::stored_count() const { return stored_; }
 
@@ -54,7 +56,7 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
     return;
   }
   if (metrics_ != nullptr) {
-    metrics_->note_emitted();
+    metrics_->note_emitted(1 + (s.decl_line ? 1 : 0));
   }
 
   cidx::Symbol sym;

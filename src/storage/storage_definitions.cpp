@@ -303,6 +303,13 @@ void SqliteStorageService::copy_body_edges_to_def_edge(int64_t def_id,
   st.step_done();
 }
 
+auto SqliteStorageService::body_edge_count(int64_t symbol_id) -> std::size_t {
+  auto st = db_.prepare(
+      "SELECT COUNT(*) FROM edge WHERE src_id = ? AND kind IN (1, 7)");
+  st.bind(1, symbol_id);
+  return st.step() ? static_cast<std::size_t>(st.col_int64(0)) : 0;
+}
+
 void SqliteStorageService::delete_definitions_for_file(int64_t file_id) {
   // Keyed on definition.file_id (the actual body file), so re-indexing one
   // backend never disturbs another backend's rows. Cascades def_edge.

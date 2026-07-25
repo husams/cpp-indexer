@@ -21,18 +21,19 @@ void canonicalize_records(std::vector<T> &records, Key key) {
 } // namespace
 
 void FactBatch::canonicalize() {
-  canonicalize_records(
-      symbols,
-      [](const SymbolRecord &record) -> auto {
-        return std::tie(
-            record.file, record.usr, record.spelling, record.kind,
-            record.qual_name, record.display_name, record.type_info,
-            record.line, record.col, record.end_line, record.end_col,
-            record.decl_line, record.decl_col, record.is_definition,
-            record.is_pure, record.is_static, record.is_instantiation,
-            record.linkage, record.access, record.parent_usr, record.const_value,
-            record.resolved);
-      });
+  canonicalize_records(symbols, [](const SymbolRecord &record) -> auto {
+    return std::tie(record.file, record.usr, record.spelling, record.kind,
+                    record.qual_name, record.display_name, record.type_info,
+                    record.line, record.col, record.end_line, record.end_col,
+                    record.decl_line, record.decl_col, record.is_definition,
+                    record.is_pure, record.is_static, record.is_instantiation,
+                    record.linkage, record.access, record.parent_usr,
+                    record.const_value, record.resolved);
+  });
+  canonicalize_records(presentation_intents,
+                       [](const PresentationIntent &intent) -> auto {
+                         return std::tie(intent.symbol_id, intent.display_args);
+                       });
   canonicalize_records(
       relations,
       [](const EdgeRecord &record)
@@ -198,12 +199,10 @@ void FactBatchRecorder::emit(const EvidenceRecord &evidence) {
 }
 
 auto FactBatchRecorder::lookup_symbol_id(
-    const std::string &usr,
-    const std::optional<std::string> &identity_source)
+    const std::string &usr, const std::optional<std::string> &identity_source)
     -> std::optional<std::int64_t> {
   if (identity_source) {
-    if (const auto found =
-            symbol_ids_.find(symbol_key(*identity_source, usr));
+    if (const auto found = symbol_ids_.find(symbol_key(*identity_source, usr));
         found != symbol_ids_.end()) {
       return found->second;
     }
@@ -211,8 +210,7 @@ auto FactBatchRecorder::lookup_symbol_id(
   }
   std::optional<std::int64_t> result;
   for (const auto &[key, id] : symbol_ids_) {
-    if (key.ends_with("\n" + usr) &&
-        (!result || id < *result)) {
+    if (key.ends_with("\n" + usr) && (!result || id < *result)) {
       result = id;
     }
   }
@@ -224,8 +222,7 @@ auto FactBatchRecorder::mint_symbol(const MintRequest &request)
   const std::string key = symbol_key(
       request.identity_source.value_or(request.decl_path.value_or("")),
       request.usr);
-  if (const auto found = symbol_ids_.find(key);
-      found != symbol_ids_.end()) {
+  if (const auto found = symbol_ids_.find(key); found != symbol_ids_.end()) {
     return found->second;
   }
   const std::int64_t id = stable_id("symbol:" + key);
@@ -383,11 +380,11 @@ auto FactBatchRecorder::get_or_create_definition(
     std::int64_t symbol_id, std::int64_t file_id, std::int64_t line,
     std::int64_t col, std::int64_t end_line, std::int64_t end_col,
     const std::optional<std::string> &init_text) -> std::int64_t {
-  const std::int64_t id = stable_id(
-      "definition:" + std::to_string(symbol_id) + ":" +
-      std::to_string(file_id) + ":" + std::to_string(line) + ":" +
-      std::to_string(col) + ":" + std::to_string(end_line) + ":" +
-      std::to_string(end_col) + ":" + init_text.value_or(""));
+  const std::int64_t id =
+      stable_id("definition:" + std::to_string(symbol_id) + ":" +
+                std::to_string(file_id) + ":" + std::to_string(line) + ":" +
+                std::to_string(col) + ":" + std::to_string(end_line) + ":" +
+                std::to_string(end_col) + ":" + init_text.value_or(""));
   batch_.definitions.push_back({.id = id,
                                 .symbol_id = symbol_id,
                                 .file_id = file_id,
@@ -407,10 +404,17 @@ void FactBatchRecorder::add_def_edge(std::int64_t definition_id,
                                      .kind = kind});
 }
 
+auto FactBatchRecorder::body_edge_count(std::int64_t symbol_id) -> std::size_t {
+  return static_cast<std::size_t>(std::ranges::count_if(
+      batch_.relations, [symbol_id](const EdgeRecord &edge) {
+        return edge.src_id == symbol_id && (edge.kind == 1 || edge.kind == 7);
+      }));
+}
+
 void FactBatchRecorder::copy_body_edges_to_def_edge(std::int64_t definition_id,
                                                     std::int64_t symbol_id) {
   for (const EdgeRecord &edge : batch_.relations) {
-    if (edge.src_id == symbol_id) {
+    if (edge.src_id == symbol_id && (edge.kind == 1 || edge.kind == 7)) {
       add_def_edge(definition_id, edge.dst_id, edge.kind);
     }
   }
@@ -433,6 +437,11 @@ void FactBatchRecorder::update_display_name(std::int64_t symbol_id,
       symbol.display_name = display;
     }
   }
+}
+
+void FactBatchRecorder::emit(const PresentationIntent &intent) {
+  presentation_intents_.push_back(intent);
+  batch_.presentation_intents.push_back(intent);
 }
 
 auto FactBatchRecorder::canonical_batch() const -> FactBatch {

@@ -44,6 +44,7 @@ valid_descriptor(std::string id, std::vector<std::string> dependencies = {}) {
 struct StatementRecordingResult {
   FactBatch batch;
   bool found = false;
+  std::size_t emitted = 0;
 };
 
 // This recorder intentionally implements only the focused statement port.
@@ -52,11 +53,12 @@ struct StatementRecordingResult {
 class MinimalStatementRecorder final : public StatementFactPorts {
 public:
   void emit(const SymbolRecord &symbol) { backend_.emit(symbol); }
-  void emit(const EvidenceRecord &evidence) override { backend_.emit(evidence); }
+  void emit(const EvidenceRecord &evidence) override {
+    backend_.emit(evidence);
+  }
 
-  auto lookup_symbol_id(
-      const std::string &usr,
-      const std::optional<std::string> &source = std::nullopt)
+  auto lookup_symbol_id(const std::string &usr,
+                        const std::optional<std::string> &source = std::nullopt)
       -> std::optional<std::int64_t> override {
     return backend_.lookup_symbol_id(usr, source);
   }
@@ -101,9 +103,9 @@ public:
                      std::int64_t position, std::int64_t dst_id) override {
     backend_.add_type_edge(src_id, kind, position, dst_id);
   }
-  void replace_parameters(
-      std::int64_t owner_id,
-      const std::vector<ParameterRecord> &parameters) override {
+  void
+  replace_parameters(std::int64_t owner_id,
+                     const std::vector<ParameterRecord> &parameters) override {
     backend_.replace_parameters(owner_id, parameters);
   }
   void add_symbol_type(std::int64_t symbol_id, std::int64_t kind,
@@ -149,17 +151,18 @@ public:
                                .usr = usr_for_decl(caller),
                                .spelling = "caller",
                                .kind = 1});
-    recorder.emit(SymbolRecord{.file = "test.cpp",
-                               .usr = usr_for_decl(callee),
-                               .spelling = "callee",
-                               .kind = 1});
     const auto caller_id = recorder.lookup_symbol_id(usr_for_decl(caller));
     if (!caller_id) {
       return;
     }
-    StatementEdgeVisitor visitor(context, recorder, *caller_id, 1, "test.cpp");
+    PassMetrics metrics;
+    metrics.bind("statement-test", PassBudget{.declared = true});
+    BudgetedStatementFactPorts ports(recorder, metrics);
+    StatementEdgeVisitor visitor(context, ports, *caller_id, 1, "test.cpp",
+                                 &metrics);
     visitor.walk(caller);
     result_.batch = recorder.canonical_batch();
+    result_.emitted = metrics.emitted_facts;
     result_.found = true;
   }
 
@@ -284,6 +287,31 @@ TEST_CASE("pass descriptors require metadata and bind every budget") {
                   });
 }
 
+TEST_CASE(
+    "pass registry rejects unavailable frontend capabilities before running") {
+  ExtractionPassRegistry registry;
+  auto descriptor = valid_descriptor("cfg-pass");
+  descriptor.required_capabilities = {FrontendCapability::cfg};
+  bool ran = false;
+  registry.register_pass(descriptor,
+                         [&](PassExecutionContext &) { ran = true; });
+  IndexingPlan plan;
+  plan.add("cfg-pass");
+  FrontendSession session;
+  session.ast_context = reinterpret_cast<clang::ASTContext *>(1);
+  CHECK(!session.supports(FrontendCapability::templates));
+  CHECK(!session.supports(FrontendCapability::cfg));
+  CHECK_THROWS_AS(static_cast<void>(registry.run(plan, &session)),
+                  FrontendCapabilityUnavailable);
+  CHECK(!ran);
+
+  session.cfg_available = true;
+  session.templates_available = true;
+  CHECK(session.supports(FrontendCapability::templates));
+  CHECK_NOTHROW(static_cast<void>(registry.run(plan, &session)));
+  CHECK(ran);
+}
+
 TEST_CASE("pass stable keys include the complete descriptor contract") {
   const ExtractionPassDescriptor base = valid_descriptor("contract");
   auto catalog_changed = base;
@@ -368,6 +396,11 @@ TEST_CASE("statement pass records calls from a parsed AST") {
   CHECK(std::ranges::any_of(
       result.batch.edge_sites,
       [](const EdgeSiteRecord &site) { return site.line == 2; }));
+  CHECK(result.emitted == 6);
+  CHECK(result.batch.symbols.size() == 2);
+  CHECK(result.batch.parameters.size() == 1);
+  CHECK(result.batch.type_nodes.size() == 1);
+  CHECK(result.batch.symbol_types.size() == 1);
 }
 
 TEST_CASE("focused ports are independently usable by a fact recorder") {

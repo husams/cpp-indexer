@@ -6,8 +6,8 @@
 #include "ast/instantiation_edges.hpp"
 #include "ast/kind_map.hpp"
 #include "ast/location.hpp"
-#include "ast/pass_registry.hpp"
 #include "ast/names.hpp"
+#include "ast/pass_registry.hpp"
 #include "ast/type_use.hpp"
 #include "ast/usr.hpp"
 
@@ -240,19 +240,18 @@ std::string usr_of(const clang::Decl *decl) {
 
 } // namespace
 
-DeclarationEdgeVisitor::DeclarationEdgeVisitor(clang::ASTContext &context,
-                                               DeclarationPassPorts &ports,
-                                               std::string target_file,
-                                               int64_t file_id,
-                                               DefinitionScopeEmitter *definitions,
-                                               PassMetrics *metrics)
+DeclarationEdgeVisitor::DeclarationEdgeVisitor(
+    clang::ASTContext &context, DeclarationPassPorts &ports,
+    std::string target_file, int64_t file_id,
+    DefinitionScopeEmitter *definitions, PassMetrics *metrics,
+    PresentationIntentEmitter *presentation_intents)
     : context_(context), source_manager_(context.getSourceManager()),
       sink_(ports), mint_(context, ports),
       targ_encoder_(context, ports, ports, ports),
       minter_(context, ports, ports, mint_, targ_encoder_),
-      types_(context, ports),
-      target_file_(std::move(target_file)), file_id_(file_id),
-      definitions_(definitions), metrics_(metrics) {}
+      types_(context, ports), target_file_(std::move(target_file)),
+      file_id_(file_id), definitions_(definitions), metrics_(metrics),
+      presentation_intents_(presentation_intents) {}
 
 bool DeclarationEdgeVisitor::VisitDecl(clang::Decl * /*decl*/) {
   if (metrics_ != nullptr) {
@@ -1040,8 +1039,8 @@ bool DeclarationEdgeVisitor::owns_instantiation(
 }
 
 // One shared helper (emit_callable_template_identity) covers flags, arguments,
-// display names, and structural edges for BOTH this declaration pass and the
-// call path, so the two cannot diverge; every emission in it is idempotent.
+// presentation intents, and structural edges for BOTH this declaration pass and
+// the call path, so the two cannot diverge; every emission in it is idempotent.
 // Explicit instantiations anchor their mint provenance at the point of
 // instantiation, matching the symbol pass.
 void DeclarationEdgeVisitor::emit_callable_identity(
@@ -1082,9 +1081,8 @@ void DeclarationEdgeVisitor::emit_callable_identity(
     }
   }
   const int64_t dst_id = sink_.mint_symbol(*req);
-  emit_callable_template_identity(sink_, sink_, &sink_, mint_, targ_encoder_,
-                                  dst_id,
-                                  fd, *info, {});
+  emit_callable_template_identity(sink_, sink_, presentation_intents_, mint_,
+                                  targ_encoder_, dst_id, fd, *info, {});
   emit_signature_uses(fd);
 }
 

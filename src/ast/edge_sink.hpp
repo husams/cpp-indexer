@@ -12,6 +12,8 @@ class EdgeSink : public StatementFactPorts,
                  public DeclarationPassPorts,
                  public NamespacePassPorts,
                  public DefinitionScopeEmitter,
-                 public IndexingLifecycle {};
+                 public IndexingLifecycle,
+                 public PresentationNormalizer,
+                 public PresentationIntentEmitter {};
 
 } // namespace cidx::ast

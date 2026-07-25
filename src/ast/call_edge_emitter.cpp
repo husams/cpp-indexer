@@ -23,16 +23,15 @@ namespace cidx::ast {
 
 namespace {
 
-// Callable signatures reuse the declaration visitor, but body extraction must
-// not require presentation or lifecycle services. This adapter supplies the
-// declaration visitor's presentation port as an intentionally inert view.
+// Callable signatures reuse the declaration visitor through only its focused
+// declaration services. The statement port already owns the pass budget.
 class StatementDeclarationAdapter final : public DeclarationPassPorts {
 public:
   explicit StatementDeclarationAdapter(StatementFactPorts &ports)
       : ports_(ports) {}
 
   auto lookup_symbol_id(const std::string &usr,
-                       const std::optional<std::string> &source = std::nullopt)
+                        const std::optional<std::string> &source = std::nullopt)
       -> std::optional<std::int64_t> override {
     return ports_.lookup_symbol_id(usr, source);
   }
@@ -77,21 +76,15 @@ public:
                      std::int64_t position, std::int64_t dst_id) override {
     ports_.add_type_edge(src_id, kind, position, dst_id);
   }
-  void replace_parameters(
-      std::int64_t owner_id,
-      const std::vector<ParameterRecord> &parameters) override {
+  void
+  replace_parameters(std::int64_t owner_id,
+                     const std::vector<ParameterRecord> &parameters) override {
     ports_.replace_parameters(owner_id, parameters);
   }
   void add_symbol_type(std::int64_t symbol_id, std::int64_t kind,
                        std::int64_t type_id) override {
     ports_.add_symbol_type(symbol_id, kind, type_id);
   }
-  auto lookup_display_name(std::int64_t /*symbol_id*/)
-      -> std::optional<std::string> override {
-    return std::nullopt;
-  }
-  void update_display_name(std::int64_t /*symbol_id*/,
-                           const std::string & /*display*/) override {}
 
 private:
   StatementFactPorts &ports_;
@@ -144,26 +137,17 @@ CallEdgeEmitter::mint_resolved_target(const clang::Expr *site,
   const int64_t dst_id = ctx_.ports().mint_symbol(*req);
   if (info) {
     emit_callable_template_identity(ctx_.ports(), ctx_.ports(), nullptr,
-                                    ctx_.mint(),
-                                    ctx_.targ_encoder(), dst_id, callee, *info,
-                                    written_template_args(site));
+                                    ctx_.mint(), ctx_.targ_encoder(), dst_id,
+                                    callee, *info, written_template_args(site));
   } else if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(callee);
              method != nullptr &&
              is_template_instantiation(method->getParent())) {
     emit_method_owner(ctx_.ports(), ctx_.ports(), ctx_.mint(),
-                      ctx_.targ_encoder(), dst_id,
-                      method);
+                      ctx_.targ_encoder(), dst_id, method);
   }
   StatementDeclarationAdapter declaration_ports(ctx_.ports());
-  if (ctx_.metrics() != nullptr) {
-    BudgetedDeclarationPassPorts budgeted(declaration_ports, *ctx_.metrics());
-    DeclarationEdgeVisitor signature_visitor(ctx_.context(), budgeted, {},
-                                             ctx_.file_id());
-    signature_visitor.emit_signature_types_for(callee, dst_id);
-    return dst_id;
-  }
-  DeclarationEdgeVisitor signature_visitor(ctx_.context(), declaration_ports, {},
-                                           ctx_.file_id());
+  DeclarationEdgeVisitor signature_visitor(ctx_.context(), declaration_ports,
+                                           {}, ctx_.file_id());
   signature_visitor.emit_signature_types_for(callee, dst_id);
   return dst_id;
 }

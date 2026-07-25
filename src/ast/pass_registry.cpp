@@ -55,8 +55,7 @@ auto ExtractionPassDescriptor::stable_key() const -> std::string {
   key += "|dependencies=";
   append_keys(key, dependencies);
   key += "|scope=" + std::to_string(static_cast<std::uint8_t>(scope));
-  key += "|traversal=" +
-         std::to_string(static_cast<std::uint8_t>(traversal));
+  key += "|traversal=" + std::to_string(static_cast<std::uint8_t>(traversal));
   key += "|completeness=" +
          std::to_string(static_cast<std::uint8_t>(completeness));
   key += "|trust=" + std::to_string(static_cast<std::uint8_t>(trust));
@@ -69,9 +68,29 @@ auto ExtractionPassDescriptor::stable_key() const -> std::string {
 
 PassBudgetExceeded::PassBudgetExceeded(std::string pass_id,
                                        std::string dimension)
-    : std::runtime_error("pass budget exceeded: " + pass_id + " (" +
-                         dimension + ")"),
+    : std::runtime_error("pass budget exceeded: " + pass_id + " (" + dimension +
+                         ")"),
       pass_id_(std::move(pass_id)), dimension_(std::move(dimension)) {}
+
+FrontendCapabilityUnavailable::FrontendCapabilityUnavailable(
+    std::string pass_id, FrontendCapability capability)
+    : std::runtime_error("frontend capability unavailable for pass: " +
+                         pass_id),
+      pass_id_(std::move(pass_id)), capability_(capability) {}
+
+auto FrontendSession::supports(FrontendCapability capability) const -> bool {
+  switch (capability) {
+  case FrontendCapability::ast:
+    return ast_context != nullptr;
+  case FrontendCapability::preprocessor:
+    return preprocessor != nullptr;
+  case FrontendCapability::cfg:
+    return cfg_available;
+  case FrontendCapability::templates:
+    return templates_available;
+  }
+  return false;
+}
 
 void PassMetrics::bind(std::string pass_id, PassBudget budget) {
   pass_id_ = std::move(pass_id);
@@ -104,8 +123,8 @@ void PassMetrics::note_diagnostic(std::string message) {
   enforce(diagnostics, budget_.max_diagnostics, "diagnostics");
 }
 
-BudgetedStatementFactPorts::BudgetedStatementFactPorts(StatementFactPorts &ports,
-                                                       PassMetrics &metrics)
+BudgetedStatementFactPorts::BudgetedStatementFactPorts(
+    StatementFactPorts &ports, PassMetrics &metrics)
     : ports_(ports), metrics_(metrics) {}
 
 auto BudgetedStatementFactPorts::lookup_symbol_id(
@@ -267,13 +286,9 @@ void BudgetedDeclarationPassPorts::add_symbol_type(std::int64_t symbol_id,
   metrics_.note_emitted();
   ports_.add_symbol_type(symbol_id, kind, type_id);
 }
-auto BudgetedDeclarationPassPorts::lookup_display_name(std::int64_t symbol_id)
-    -> std::optional<std::string> {
-  return ports_.lookup_display_name(symbol_id);
-}
-void BudgetedDeclarationPassPorts::update_display_name(
-    std::int64_t symbol_id, const std::string &display) {
-  ports_.update_display_name(symbol_id, display);
+void BudgetedPresentationIntentEmitter::emit(const PresentationIntent &intent) {
+  metrics_.note_emitted();
+  emitter_.emit(intent);
 }
 
 BudgetedNamespacePassPorts::BudgetedNamespacePassPorts(
@@ -342,8 +357,8 @@ auto BudgetedDefinitionScopeEmitter::get_or_create_definition(
     std::int64_t col, std::int64_t end_line, std::int64_t end_col,
     const std::optional<std::string> &init_text) -> std::int64_t {
   metrics_.note_emitted();
-  return definitions_.get_or_create_definition(
-      symbol_id, file_id, line, col, end_line, end_col, init_text);
+  return definitions_.get_or_create_definition(symbol_id, file_id, line, col,
+                                               end_line, end_col, init_text);
 }
 void BudgetedDefinitionScopeEmitter::add_def_edge(std::int64_t definition_id,
                                                   std::int64_t destination_id,
@@ -351,9 +366,13 @@ void BudgetedDefinitionScopeEmitter::add_def_edge(std::int64_t definition_id,
   metrics_.note_emitted();
   definitions_.add_def_edge(definition_id, destination_id, kind);
 }
+auto BudgetedDefinitionScopeEmitter::body_edge_count(std::int64_t symbol_id)
+    -> std::size_t {
+  return definitions_.body_edge_count(symbol_id);
+}
 void BudgetedDefinitionScopeEmitter::copy_body_edges_to_def_edge(
     std::int64_t definition_id, std::int64_t symbol_id) {
-  metrics_.note_emitted();
+  metrics_.note_emitted(body_edge_count(symbol_id));
   definitions_.copy_body_edges_to_def_edge(definition_id, symbol_id);
 }
 
@@ -368,11 +387,18 @@ auto PassExecutionReport::find(const std::string &id) const
 
 void ExtractionPassRegistry::register_pass(ExtractionPassDescriptor descriptor,
                                            Runner runner) {
+  const bool source_pass = descriptor.consumed_fact_families.empty();
   if (descriptor.id.empty() || descriptor.version == 0 || !runner ||
       descriptor.required_capabilities.empty() ||
-      descriptor.consumed_fact_families.empty() ||
       descriptor.produced_fact_families.empty() ||
-      descriptor.catalog_versions.empty() || !descriptor.budget.declared) {
+      descriptor.catalog_versions.empty() || !descriptor.budget.declared ||
+      (source_pass && !descriptor.dependencies.empty()) ||
+      std::ranges::any_of(
+          descriptor.consumed_fact_families,
+          [](const std::string &family) { return family.empty(); }) ||
+      std::ranges::any_of(
+          descriptor.produced_fact_families,
+          [](const std::string &family) { return family.empty(); })) {
     throw std::invalid_argument(
         "invalid extraction pass registration: incomplete metadata");
   }
@@ -436,19 +462,40 @@ auto ExtractionPassRegistry::run(const IndexingPlan &plan,
     }
 
     PassMetrics metrics;
-    metrics.bind(found->descriptor.id, found->descriptor.budget);
+    PassBudget budget = found->descriptor.budget;
+    if (session != nullptr) {
+      if (const auto override_budget =
+              session->budget_overrides.find(found->descriptor.id);
+          override_budget != session->budget_overrides.end()) {
+        budget = override_budget->second;
+      }
+    }
+    metrics.bind(found->descriptor.id, budget);
+    if (session != nullptr) {
+      for (const FrontendCapability capability :
+           found->descriptor.required_capabilities) {
+        if (!session->supports(capability)) {
+          throw FrontendCapabilityUnavailable(found->descriptor.id, capability);
+        }
+      }
+    }
     const auto started = std::chrono::steady_clock::now();
     FrontendSession pass_session;
     std::optional<BudgetedStatementFactPorts> statement_ports;
     std::optional<BudgetedDeclarationPassPorts> declaration_ports;
     std::optional<BudgetedNamespacePassPorts> namespace_ports;
     std::optional<BudgetedDefinitionScopeEmitter> definition_ports;
+    std::optional<BudgetedPresentationIntentEmitter> presentation_intents;
     if (session != nullptr) {
       pass_session = *session;
       if (session->statement_ports != nullptr) {
         statement_ports.emplace(*session->statement_ports, metrics);
         pass_session.statement_ports = &*statement_ports;
         pass_session.evidence = &*statement_ports;
+      }
+      if (session->presentation_intents != nullptr) {
+        presentation_intents.emplace(*session->presentation_intents, metrics);
+        pass_session.presentation_intents = &*presentation_intents;
       }
       if (session->declaration_ports != nullptr) {
         declaration_ports.emplace(*session->declaration_ports, metrics);
@@ -464,13 +511,11 @@ auto ExtractionPassRegistry::run(const IndexingPlan &plan,
       }
     }
     PassExecutionContext context{.metrics = metrics,
-                                 .session = session != nullptr
-                                                ? &pass_session
-                                                : nullptr};
+                                 .session = session != nullptr ? &pass_session
+                                                               : nullptr};
     found->runner(context);
     metrics.elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - started);
-    const PassBudget &budget = found->descriptor.budget;
     if ((budget.max_visited_constructs != 0 &&
          metrics.visited_constructs > budget.max_visited_constructs) ||
         (budget.max_emitted_facts != 0 &&

@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace cidx::ast {
 
@@ -30,6 +31,11 @@ struct EvidenceRecord {
   FactCompleteness completeness = FactCompleteness::complete;
   FactTrust trust = FactTrust::trusted;
   std::string detail;
+};
+
+struct PresentationIntent {
+  std::int64_t symbol_id = 0;
+  std::vector<std::string> display_args;
 };
 
 struct TypeEdgeRecord {

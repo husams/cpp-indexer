@@ -156,7 +156,8 @@ struct CmdResult {
 // cumulative per Logger instance (Python's module-global _warnings), so a
 // fresh one keeps the "N warning(s)/error(s)" assertions deterministic.
 CmdResult run_cli(const std::vector<std::string> &argv,
-                  const std::string &cache, cidx::Logger *logger = nullptr) {
+                  const std::string &cache, cidx::Logger *logger = nullptr,
+                  cli::IndexOutcomeSink outcome_sink = {}) {
   cli::ParsedArgs pa = cli::parse_args(argv);
   REQUIRE(!pa.help_text);
   std::ostringstream out;
@@ -167,6 +168,7 @@ CmdResult run_cli(const std::vector<std::string> &argv,
   ctx.logger = logger != nullptr ? logger : &cidx::Logger::root();
   ctx.out = &out;
   ctx.err = &err;
+  ctx.index_outcome_sink = std::move(outcome_sink);
   CmdResult r;
   r.rc = cli::run_command(pa, ctx);
   r.out = out.str();
@@ -1953,19 +1955,22 @@ TEST_SUITE("clang") {
     db.stamp_graph_resolved();
     db.stamp_index_identity();
 
-    const auto outcome =
-        cidx::ast::run_index_one(db, *file, source, true);
+    const auto outcome = cidx::ast::run_index_one(db, *file, source, true);
     REQUIRE(!outcome.parse_failed);
     const std::vector<std::string> expected{
-        "symbols.main",       "symbols.headers",   "lifecycle.headers",
+        "symbols.main",         "symbols.headers",     "lifecycle.headers",
         "declarations.headers", "definitions.headers", "statements.headers",
-        "namespaces.headers", "headers.associate", "lifecycle.main",
-        "declarations.main", "definitions.main",   "statements.main",
-        "namespaces.main",    "main.associate",    "includes.persist",
-        "evidence.persist"};
+        "namespaces.headers",   "headers.associate",   "lifecycle.main",
+        "declarations.main",    "definitions.main",    "statements.main",
+        "namespaces.main",      "main.associate",      "presentation.persist",
+        "includes.persist",     "evidence.persist"};
     REQUIRE(outcome.pass_metrics.size() == expected.size());
     for (std::size_t index = 0; index < expected.size(); ++index) {
       CHECK(outcome.pass_metrics[index].id == expected[index]);
+      CHECK(!outcome.pass_metrics[index].produced_fact_families.empty());
+      if (outcome.pass_metrics[index].id != "symbols.main") {
+        CHECK(!outcome.pass_metrics[index].consumed_fact_families.empty());
+      }
     }
     const auto main_associate = std::ranges::find_if(
         outcome.pass_metrics, [](const cidx::ast::IndexPassMetrics &metrics) {
@@ -1990,6 +1995,46 @@ TEST_SUITE("clang") {
     CHECK(std::ranges::find(main_associate->produced_fact_families,
                             "file_associations") !=
           main_associate->produced_fact_families.end());
+    const auto presentation = std::ranges::find_if(
+        outcome.pass_metrics, [](const cidx::ast::IndexPassMetrics &metrics) {
+          return metrics.id == "presentation.persist";
+        });
+    REQUIRE(presentation != outcome.pass_metrics.end());
+    CHECK(presentation->consumed_fact_families ==
+          std::vector<std::string>{"presentation_intents"});
+    CHECK(presentation->produced_fact_families ==
+          std::vector<std::string>{"display_names"});
+  }
+
+  TEST_CASE(
+      "CLI index publishes evidence and pass metrics to its outcome sink") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/observable.cpp";
+    write_file(source,
+               "void observable() { void (*callable)(); callable(); }\n");
+    Storage db(dir + "/index.db");
+    db.add_component("observable", dir);
+    const int64_t file_id = db.add_file_path(
+        source, std::nullopt, std::nullopt,
+        std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+    REQUIRE(db.get_file_by_id(file_id).has_value());
+    db.stamp_graph_resolved();
+    db.stamp_index_identity();
+
+    bool observed = false;
+    std::size_t metric_count = 0;
+    std::size_t evidence_count = 0;
+    const CmdResult result =
+        run_cli({"index"}, dir, nullptr,
+                [&](const cidx::ast::IndexOneOutcome &outcome) {
+                  observed = true;
+                  metric_count = outcome.pass_metrics.size();
+                  evidence_count = outcome.evidence.size();
+                });
+    CHECK(result.rc == 0);
+    CHECK(observed);
+    CHECK(metric_count >= 17);
+    CHECK(evidence_count > 0);
   }
 
   TEST_CASE("frontend session providers receive focused services") {
@@ -2022,8 +2067,9 @@ TEST_SUITE("clang") {
           auto descriptor = cidx::ast::ExtractionPassDescriptor{
               .id = "synthetic.extension",
               .version = 1,
-              .required_capabilities = {cidx::ast::FrontendCapability::ast,
-                                         cidx::ast::FrontendCapability::preprocessor},
+              .required_capabilities =
+                  {cidx::ast::FrontendCapability::ast,
+                   cidx::ast::FrontendCapability::preprocessor},
               .consumed_fact_families = {"ast", "preprocessor"},
               .produced_fact_families = {"extension"},
               .catalog_versions = {1},
@@ -2037,33 +2083,32 @@ TEST_SUITE("clang") {
           registry.register_pass(
               std::move(descriptor),
               [&](cidx::ast::PassExecutionContext &context) {
-                runner_saw_session = context.session != nullptr &&
-                                     context.session->ast_context != nullptr &&
-                                     context.session->preprocessor != nullptr &&
-                                     context.session->statement_ports != nullptr;
+                runner_saw_session =
+                    context.session != nullptr &&
+                    context.session->ast_context != nullptr &&
+                    context.session->preprocessor != nullptr &&
+                    context.session->statement_ports != nullptr;
                 context.metrics.note_visited();
                 context.session->statement_ports->emit(
-                    cidx::ast::EvidenceRecord{.producer = "extension",
-                                               .construct = "Synthetic",
-                                               .file = source,
-                                               .completeness =
-                                                   cidx::ast::FactCompleteness::partial,
-                                               .trust = cidx::ast::FactTrust::inferred,
-                                               .detail = "extension"});
+                    cidx::ast::EvidenceRecord{
+                        .producer = "extension",
+                        .construct = "Synthetic",
+                        .file = source,
+                        .completeness = cidx::ast::FactCompleteness::partial,
+                        .trust = cidx::ast::FactTrust::inferred,
+                        .detail = "extension"});
               });
           plan.insert_before("evidence.persist", "synthetic.extension");
         });
-    const auto outcome =
-        cidx::ast::run_index_one(db, *file, source, true);
+    const auto outcome = cidx::ast::run_index_one(db, *file, source, true);
     cidx::ast::clear_frontend_pass_providers();
     CHECK(!outcome.parse_failed);
     CHECK(provider_saw_session);
     CHECK(runner_saw_session);
-    CHECK(std::ranges::find_if(
-              outcome.pass_metrics,
-              [](const cidx::ast::IndexPassMetrics &metrics) {
-                return metrics.id == "synthetic.extension";
-              }) != outcome.pass_metrics.end());
+    CHECK(std::ranges::find_if(outcome.pass_metrics,
+                               [](const cidx::ast::IndexPassMetrics &metrics) {
+                                 return metrics.id == "synthetic.extension";
+                               }) != outcome.pass_metrics.end());
   }
 
   TEST_CASE("over-budget frontend storage emission cannot commit") {
@@ -2107,17 +2152,74 @@ TEST_SUITE("clang") {
                 if (symbols.empty()) {
                   return;
                 }
-                const cidx::ast::EdgeRecord edge{
-                    .src_id = symbols.front().id,
-                    .dst_id = symbols.front().id,
-                    .kind = 1};
+                const cidx::ast::EdgeRecord edge{.src_id = symbols.front().id,
+                                                 .dst_id = symbols.front().id,
+                                                 .kind = 1};
                 context.session->statement_ports->add_edge(edge);
                 context.session->statement_ports->add_edge(edge);
               });
           plan.add("synthetic.over-budget");
         });
-    const auto outcome =
-        cidx::ast::run_index_one(db, *file, source, true);
+    const auto outcome = cidx::ast::run_index_one(db, *file, source, true);
+    cidx::ast::clear_frontend_pass_providers();
+    CHECK(outcome.parse_failed);
+    CHECK(outcome.error.find("budget exceeded") != std::string::npos);
+    CHECK(snapshot_tu_publication(db, source) == before);
+  }
+
+  TEST_CASE(
+      "production association preflight rejects low budgets before writes") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/association_budget.cpp";
+    write_file(source, "int association_budget_symbol() { return 1; }\n");
+    Storage db(":memory:");
+    db.add_component("association-budget", dir);
+    const int64_t file_id = db.add_file_path(
+        source, std::nullopt, std::nullopt,
+        std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+    const auto file = db.get_file_by_id(file_id);
+    REQUIRE(file.has_value());
+    db.stamp_graph_resolved();
+    db.stamp_index_identity();
+    const auto before = snapshot_tu_publication(db, source);
+    cidx::ast::register_frontend_pass_provider(
+        [](cidx::ast::FrontendSession &session,
+           cidx::ast::ExtractionPassRegistry &, cidx::ast::IndexingPlan &) {
+          session.budget_overrides["main.associate"] =
+              cidx::ast::PassBudget{.max_emitted_facts = 1, .declared = true};
+        });
+    const auto outcome = cidx::ast::run_index_one(db, *file, source, true);
+    cidx::ast::clear_frontend_pass_providers();
+    CHECK(outcome.parse_failed);
+    CHECK(outcome.error.find("budget exceeded") != std::string::npos);
+    CHECK(snapshot_tu_publication(db, source) == before);
+  }
+
+  TEST_CASE("production include preflight rejects low budgets before writes") {
+    const std::string dir = make_temp_dir();
+    const std::string header = dir + "/include_budget.hpp";
+    const std::string source = dir + "/include_budget.cpp";
+    write_file(header, "int include_budget_value = 1;\n");
+    write_file(source, "#include \"include_budget.hpp\"\n"
+                       "int include_budget_symbol() { return 1; }\n");
+    Storage db(":memory:");
+    db.add_component("include-budget", dir);
+    const int64_t file_id =
+        db.add_file_path(source, std::nullopt, std::nullopt,
+                         std::vector<std::string>{"-std=c++23", "-I", dir},
+                         std::string("clang++"));
+    const auto file = db.get_file_by_id(file_id);
+    REQUIRE(file.has_value());
+    db.stamp_graph_resolved();
+    db.stamp_index_identity();
+    const auto before = snapshot_tu_publication(db, source);
+    cidx::ast::register_frontend_pass_provider(
+        [](cidx::ast::FrontendSession &session,
+           cidx::ast::ExtractionPassRegistry &, cidx::ast::IndexingPlan &) {
+          session.budget_overrides["includes.persist"] =
+              cidx::ast::PassBudget{.max_emitted_facts = 1, .declared = true};
+        });
+    const auto outcome = cidx::ast::run_index_one(db, *file, source, true);
     cidx::ast::clear_frontend_pass_providers();
     CHECK(outcome.parse_failed);
     CHECK(outcome.error.find("budget exceeded") != std::string::npos);
