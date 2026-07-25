@@ -5,6 +5,7 @@
 #include "storage/sqlite_adapters.hpp"
 #include "storage/storage.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 #include <type_traits>
 
@@ -149,26 +150,29 @@ TEST_CASE("unit of work rolls back a failed one-TU publication") {
 
 TEST_CASE("transform registry declares a deterministic dependency order") {
   TransformRegistry registry;
-  registry.register_transform(TransformDescriptor{"source",
-                                                  1,
-                                                  {"raw"},
-                                                  {"source.fact"},
-                                                  {},
-                                                  {"source"},
-                                                  {},
-                                                  {"SELECT 1"},
-                                                  {"SELECT 1"},
-                                                  "SELECT 1"});
-  registry.register_transform(TransformDescriptor{"derived",
-                                                  1,
-                                                  {"source.fact"},
-                                                  {"derived.fact"},
-                                                  {"source"},
-                                                  {"derived"},
-                                                  {},
-                                                  {"SELECT 1"},
-                                                  {"SELECT 1"},
-                                                  "SELECT 1"});
+  TransformDescriptor source;
+  source.id = "source";
+  source.version = 1;
+  source.input_facts = {"raw"};
+  source.produced_facts = {"source.fact"};
+  source.invalidation_keys = {"source"};
+  source.options = {"deterministic-sql-v1"};
+  source.input_queries = {"SELECT 1"};
+  source.output_queries = {"SELECT 1"};
+  source.output_count_query = "SELECT 1";
+  registry.register_transform(source);
+  TransformDescriptor derived;
+  derived.id = "derived";
+  derived.version = 1;
+  derived.input_facts = {"source.fact"};
+  derived.produced_facts = {"derived.fact"};
+  derived.dependencies = {"source"};
+  derived.invalidation_keys = {"derived"};
+  derived.options = {"deterministic-sql-v1"};
+  derived.input_queries = {"SELECT 1"};
+  derived.output_queries = {"SELECT 1"};
+  derived.output_count_query = "SELECT 1";
+  registry.register_transform(derived);
 
   const auto order = registry.execution_order();
   REQUIRE(order.size() == 2);
@@ -179,11 +183,32 @@ TEST_CASE("transform registry declares a deterministic dependency order") {
 TEST_CASE("named transform pipeline reuses identical content identities") {
   Storage db(":memory:");
 
+  Symbol source;
+  source.usr = "transform:@F@nonempty-source";
+  source.spelling = "nonempty-source";
+  source.kind = "function";
+  source.is_definition = true;
+  source.resolved = true;
+  const auto source_id = db.add_symbol(source);
+  Symbol target;
+  target.usr = "transform:@F@nonempty-target";
+  target.spelling = "nonempty-target";
+  target.kind = "function";
+  target.is_definition = true;
+  target.resolved = true;
+  const auto target_id = db.add_symbol(target);
+  Edge edge;
+  edge.src_id = source_id;
+  edge.dst_id = target_id;
+  edge.kind = 1;
+  db.add_edge(edge);
+
   const auto first = db.run_transform_pipeline();
-  REQUIRE(first.runs.size() == 5);
+  REQUIRE(first.runs.size() == 8);
   CHECK(first.still_stub_count == 0);
   for (const auto &run : first.runs) {
-    CHECK(run.status == TransformRunStatus::ran);
+    CHECK((run.status == TransformRunStatus::ran ||
+           run.status == TransformRunStatus::skipped));
     CHECK_FALSE(run.input_identity.empty());
     CHECK_FALSE(run.output_identity.empty());
   }
@@ -217,7 +242,7 @@ TEST_CASE(
   db.add_edge(dispatch_edge);
 
   const auto baseline = db.run_transform_pipeline();
-  REQUIRE(baseline.runs.size() == 5);
+  REQUIRE(baseline.runs.size() == 8);
 
   db.raw_db().exec("INSERT OR IGNORE INTO entity_node(id, kind) VALUES (" +
                    std::to_string(src_id) + ", 1), (" + std::to_string(dst_id) +
@@ -242,7 +267,109 @@ TEST_CASE(
                                    "'transform.entity-graph-rollup.status'");
   REQUIRE(state.step());
   CHECK(state.col_text(0) == "failed");
+  auto published = db.raw_db().prepare(
+      "SELECT value FROM meta WHERE key = "
+      "'transform.entity-graph-rollup.published.status'");
+  REQUIRE(published.step());
+  CHECK(published.col_text(0) == "ran");
+  auto attempt_input = db.raw_db().prepare(
+      "SELECT value FROM meta WHERE key = "
+      "'transform.entity-graph-rollup.attempt.input'");
+  REQUIRE(attempt_input.step());
+  CHECK_FALSE(attempt_input.col_text(0).empty());
   auto after = db.raw_db().prepare("SELECT COUNT(*) FROM entity_edge");
   REQUIRE(after.step());
   CHECK(after.col_int64(0) == 1);
+}
+
+TEST_CASE("transform invalidation is typed and has minimum closure") {
+  Storage db(":memory:");
+  const auto first = db.run_transform_pipeline();
+  REQUIRE(first.complete);
+
+  db.set_transform_invalidation_for_testing("catalog", "catalog-v2");
+  const auto catalog_change = db.run_transform_pipeline();
+  CHECK(catalog_change.runs[0].status == TransformRunStatus::reused);
+  CHECK(catalog_change.runs[4].status == TransformRunStatus::ran);
+  CHECK(catalog_change.runs[5].status == TransformRunStatus::reused);
+  CHECK(catalog_change.runs[6].status == TransformRunStatus::skipped);
+  CHECK(catalog_change.runs[7].status == TransformRunStatus::skipped);
+
+  db.set_transform_invalidation_for_testing("catalog", "catalog-v1");
+  db.set_transform_invalidation_for_testing("source", "source-v2");
+  const auto source_change = db.run_transform_pipeline();
+  CHECK(source_change.runs[0].status == TransformRunStatus::ran);
+  CHECK(source_change.runs[1].status == TransformRunStatus::ran);
+  CHECK(source_change.runs[2].status == TransformRunStatus::ran);
+  CHECK(source_change.runs[3].status == TransformRunStatus::ran);
+  CHECK(source_change.runs[4].status == TransformRunStatus::ran);
+  CHECK(source_change.runs[5].status == TransformRunStatus::skipped);
+  CHECK(source_change.runs[6].status == TransformRunStatus::skipped);
+}
+
+TEST_CASE("clean and incremental publication have equal identities") {
+  const auto seed = [](Storage &db) {
+    Symbol lhs;
+    lhs.usr = "transform:@F@clean-lhs";
+    lhs.spelling = "clean-lhs";
+    lhs.kind = "function";
+    lhs.is_definition = true;
+    lhs.resolved = true;
+    const auto lhs_id = db.add_symbol(lhs);
+    Symbol rhs = lhs;
+    rhs.usr = "transform:@F@clean-rhs";
+    rhs.spelling = "clean-rhs";
+    const auto rhs_id = db.add_symbol(rhs);
+    Edge edge;
+    edge.src_id = lhs_id;
+    edge.dst_id = rhs_id;
+    edge.kind = 1;
+    db.add_edge(edge);
+  };
+  Storage clean(":memory:");
+  Storage incremental(":memory:");
+  seed(clean);
+  seed(incremental);
+  const auto clean_run = clean.run_transform_pipeline();
+  const auto incremental_run = incremental.run_transform_pipeline();
+  REQUIRE(clean_run.complete);
+  REQUIRE(incremental_run.complete);
+  REQUIRE(clean_run.runs.size() == incremental_run.runs.size());
+  for (std::size_t i = 0; i < clean_run.runs.size(); ++i) {
+    CHECK(clean_run.runs[i].output_identity ==
+          incremental_run.runs[i].output_identity);
+  }
+  const auto reused = incremental.run_transform_pipeline();
+  CHECK(std::ranges::all_of(reused.runs, [](const TransformRun &run) {
+    return run.status == TransformRunStatus::reused;
+  }));
+}
+
+TEST_CASE("legacy resolve propagates a failed transform") {
+  Storage db(":memory:");
+  REQUIRE(db.run_transform_pipeline().complete);
+  db.set_transform_invalidation_for_testing("source", "resolve-failure");
+  db.inject_transform_failure_for_testing("entity-graph-rollup");
+  bool threw = false;
+  try {
+    (void)db.resolve_pass();
+  } catch (const std::exception &) {
+    threw = true;
+  }
+  CHECK(threw);
+  CHECK_FALSE(db.graph_resolved());
+}
+
+TEST_CASE("pending transform publication stays stale until graph extraction") {
+  Storage db(":memory:");
+  REQUIRE(db.run_transform_pipeline().complete);
+  db.stamp_graph_resolved();
+  db.mark_transform_pipeline_pending("selected file remains pending");
+  const auto status = db.transform_status();
+  CHECK_FALSE(status.complete);
+  CHECK_FALSE(db.graph_resolved());
+  CHECK(std::ranges::all_of(status.runs, [](const TransformRun &run) {
+    return run.status == TransformRunStatus::stale &&
+           run.completeness == TransformCompleteness::pending;
+  }));
 }

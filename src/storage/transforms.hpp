@@ -15,6 +15,42 @@ enum class TransformRunStatus : std::uint8_t {
   stale
 };
 
+enum class TransformInputKind : std::uint8_t {
+  source,
+  catalog,
+  schema,
+  applicability,
+  configuration,
+  pass,
+  package,
+  model,
+  implementation
+};
+
+enum class TransformApplicability : std::uint8_t { applicable, inapplicable };
+enum class TransformCompleteness : std::uint8_t { complete, partial, pending };
+enum class TransformPublicationRule : std::uint8_t {
+  atomic_generation,
+  preserve_previous_on_failure
+};
+
+struct TransformInvalidationInput {
+  std::string name;
+  TransformInputKind kind = TransformInputKind::source;
+  std::string value_query;
+  std::string static_value;
+};
+
+struct TransformBudget {
+  std::int64_t max_rows = 0;
+  std::int64_t max_milliseconds = 0;
+};
+
+struct TransformFactSetRequirement {
+  std::string name;
+  std::vector<std::string> facts;
+};
+
 struct TransformDescriptor {
   std::string id;
   int version = 0;
@@ -26,6 +62,13 @@ struct TransformDescriptor {
   std::vector<std::string> input_queries;
   std::vector<std::string> output_queries;
   std::string output_count_query;
+  std::vector<TransformInvalidationInput> invalidation_inputs;
+  TransformApplicability applicability = TransformApplicability::applicable;
+  TransformCompleteness completeness = TransformCompleteness::complete;
+  TransformPublicationRule publication_rule =
+      TransformPublicationRule::preserve_previous_on_failure;
+  TransformBudget budget;
+  std::vector<TransformFactSetRequirement> fact_set_requirements;
 };
 
 struct TransformRun {
@@ -36,14 +79,28 @@ struct TransformRun {
   std::string output_identity;
   std::int64_t output_count = 0;
   std::string diagnostic;
+  std::uint64_t generation = 0;
+  std::uint64_t published_generation = 0;
+  TransformApplicability applicability = TransformApplicability::applicable;
+  TransformCompleteness completeness = TransformCompleteness::complete;
+  std::vector<std::string> changed_inputs;
 };
 
 struct TransformReport {
   std::vector<TransformRun> runs;
   int still_stub_count = 0;
+  bool failed = false;
+  bool complete = false;
+  std::vector<std::string> affected_transforms;
+  std::vector<std::string> missing_fact_sets;
 };
 
 [[nodiscard]] const char *transform_run_status_name(TransformRunStatus status);
+[[nodiscard]] const char *transform_input_kind_name(TransformInputKind kind);
+[[nodiscard]] const char *transform_applicability_name(
+    TransformApplicability applicability);
+[[nodiscard]] const char *transform_completeness_name(
+    TransformCompleteness completeness);
 
 class TransformRegistry {
 public:

@@ -417,6 +417,21 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
   int rc = 0;
   {
     Storage db(ctx.index_path);
+    if (args.index_status || args.index_explain) {
+      if (args.index_explain) {
+        *ctx.out << db.transform_explain() << "\n";
+      } else {
+        const TransformReport report = db.transform_status();
+        for (const auto &run : report.runs) {
+          *ctx.out << run.transform_id << " "
+                   << transform_run_status_name(run.status) << " "
+                   << transform_completeness_name(run.completeness) << "\n";
+        }
+        *ctx.out << "readiness: "
+                 << (report.complete ? "ready" : "stale") << "\n";
+      }
+      return 0;
+    }
     // _source_root (cli.py:174-177): unknown --source name -> error, exit 1
     // (the warning-count line is NOT printed on this path — Python returns
     // from inside the `with` block before reaching it).
@@ -434,22 +449,28 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
     rc = !args.files.empty()
              ? index_files(db, args.files, root, graph_enabled, ctx)
              : index_pending(db, graph_enabled, ctx);
-    if (rc == 0 && graph_enabled) {
-      const TransformReport report = db.run_transform_pipeline();
-      const bool failed =
-          std::ranges::any_of(report.runs, [](const TransformRun &run) {
-            return run.status == TransformRunStatus::failed;
-          });
-      if (failed) {
-        for (const auto &run : report.runs) {
-          if (run.status == TransformRunStatus::failed) {
-            *ctx.err << "error: transform '" << run.transform_id
-                     << "' failed: " << run.diagnostic << "\n";
+    if (rc == 0) {
+      const bool current = all_files_current(db);
+      if (!graph_enabled) {
+        db.mark_transform_pipeline_pending("graph extraction disabled");
+      } else if (!current) {
+        db.mark_transform_pipeline_pending("index has pending or selected files");
+      } else {
+        const TransformReport report = db.run_transform_pipeline();
+        if (report.failed) {
+          for (const auto &run : report.runs) {
+            if (run.status == TransformRunStatus::failed) {
+              *ctx.err << "error: transform '" << run.transform_id
+                       << "' failed: " << run.diagnostic << "\n";
+            }
           }
+          rc = 1;
+        } else {
+          db.stamp_graph_resolved();
         }
-        rc = 1;
-      } else if (all_files_current(db)) {
-        db.stamp_graph_resolved();
+      }
+      // Source/index identity is independent of derived-graph publication.
+      if (current) {
         db.stamp_index_identity();
       }
     }

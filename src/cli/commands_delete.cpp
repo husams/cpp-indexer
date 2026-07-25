@@ -179,7 +179,13 @@ int cmd_delete_symbol(const ParsedArgs &args, Context &ctx) {
 int cmd_resolve(const ParsedArgs &args, Context &ctx) {
   (void)args;
   Storage db(ctx.index_path);
-  const int stubs = db.resolve_pass();
+  int stubs = 0;
+  try {
+    stubs = db.resolve_pass();
+  } catch (const std::exception &error) {
+    *ctx.err << "error: resolve failed: " << error.what() << "\n";
+    return 1;
+  }
   const std::vector<Edge> cross = db.cross_repo_edges();
   db.stamp_graph_resolved();
   *ctx.out << "resolve: " << stubs << " still-stub, " << cross.size()

@@ -605,11 +605,18 @@ public:
   // Execute the named derived-fact pipeline. Each transform is independently
   // identified and reused by content identity; publication is one transaction.
   TransformReport run_transform_pipeline();
+  // Read the last published/attempted lifecycle state without executing.
+  TransformReport transform_status();
+  // Stable, human-readable reasons for stale or unavailable fact sets.
+  std::string transform_explain();
+  void mark_transform_pipeline_pending(const std::string &reason);
   [[nodiscard]] const std::vector<TransformRun> &transform_runs() const {
     return last_transform_runs_;
   }
   // Test seam for failure-atomic publication; production callers never set it.
   void inject_transform_failure_for_testing(std::string transform_id);
+  void set_transform_invalidation_for_testing(const std::string &key,
+                                              const std::string &value);
   // Record the UTC completion marker after a successful resolve pass.
   void stamp_graph_resolved();
 

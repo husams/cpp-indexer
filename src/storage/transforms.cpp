@@ -25,6 +25,48 @@ const char *transform_run_status_name(TransformRunStatus status) {
   return "stale";
 }
 
+const char *transform_input_kind_name(TransformInputKind kind) {
+  switch (kind) {
+  case TransformInputKind::source:
+    return "source";
+  case TransformInputKind::catalog:
+    return "catalog";
+  case TransformInputKind::schema:
+    return "schema";
+  case TransformInputKind::applicability:
+    return "applicability";
+  case TransformInputKind::configuration:
+    return "configuration";
+  case TransformInputKind::pass:
+    return "pass";
+  case TransformInputKind::package:
+    return "package";
+  case TransformInputKind::model:
+    return "model";
+  case TransformInputKind::implementation:
+    return "implementation";
+  }
+  return "implementation";
+}
+
+const char *transform_applicability_name(
+    TransformApplicability applicability) {
+  return applicability == TransformApplicability::applicable ? "applicable"
+                                                               : "inapplicable";
+}
+
+const char *transform_completeness_name(TransformCompleteness completeness) {
+  switch (completeness) {
+  case TransformCompleteness::complete:
+    return "complete";
+  case TransformCompleteness::partial:
+    return "partial";
+  case TransformCompleteness::pending:
+    return "pending";
+  }
+  return "pending";
+}
+
 void TransformRegistry::register_transform(TransformDescriptor descriptor) {
   if (descriptor.id.empty()) {
     throw std::invalid_argument("transform id must not be empty");
@@ -51,10 +93,38 @@ void TransformRegistry::validate() const {
       throw std::invalid_argument("transform facts must be declared: " +
                                   descriptor.id);
     }
+    if (descriptor.options.empty() ||
+        std::ranges::find(descriptor.options, "deterministic-sql-v1") ==
+            descriptor.options.end()) {
+      throw std::invalid_argument("transform must declare deterministic options: " +
+                                  descriptor.id);
+    }
+    if (descriptor.budget.max_rows < 0 ||
+        descriptor.budget.max_milliseconds < 0) {
+      throw std::invalid_argument("transform budget must be non-negative: " +
+                                  descriptor.id);
+    }
     if (descriptor.input_queries.empty() || descriptor.output_queries.empty() ||
         descriptor.output_count_query.empty()) {
       throw std::invalid_argument("transform identities must be declared: " +
                                   descriptor.id);
+    }
+    std::set<std::string> typed_keys;
+    for (const auto &input : descriptor.invalidation_inputs) {
+      if (input.name.empty() ||
+          !typed_keys.insert(input.name).second) {
+        throw std::invalid_argument("invalid typed invalidation input: " +
+                                    descriptor.id);
+      }
+      if (input.value_query.empty() && input.static_value.empty()) {
+        throw std::invalid_argument("invalidation input has no provider: " +
+                                    descriptor.id + " -> " + input.name);
+      }
+    }
+    if (descriptor.publication_rule !=
+            TransformPublicationRule::preserve_previous_on_failure &&
+        descriptor.publication_rule != TransformPublicationRule::atomic_generation) {
+      throw std::invalid_argument("invalid publication rule: " + descriptor.id);
     }
     std::set<std::string> invalidation_keys(
         descriptor.invalidation_keys.begin(),

@@ -56,6 +56,9 @@ struct ParsedArgs {
   std::optional<std::string> usr;         // delete symbol --usr
   bool dry_run = false;                   // delete --dry-run
   bool no_graph = false;                  // index --no-graph
+  bool index_status = false;              // index status
+  bool index_explain = false;             // index explain
+  std::optional<std::string> index_fact_set; // index status/explain --fact-set
   std::vector<std::string> assignment;    // set FIELD=VALUE [FIELD=VALUE ...]
   std::optional<std::string> index_db; // set/file/dump-cc --db (index override)
   std::string query_text;              // query CXQ expression (required)

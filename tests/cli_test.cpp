@@ -743,6 +743,39 @@ TEST_CASE("args: index collects FILE... and --source") {
   CHECK(*pa.source == "comp");
 }
 
+TEST_CASE("args: index status and explain expose fact-set readiness") {
+  cli::ParsedArgs pa = cli::parse_args({"index", "status", "--fact-set",
+                                        "entity-graph"});
+  CHECK(pa.command == "index");
+  CHECK(pa.index_status);
+  CHECK(*pa.index_fact_set == "entity-graph");
+  pa = cli::parse_args({"index", "explain"});
+  CHECK(pa.command == "index");
+  CHECK(pa.index_explain);
+}
+
+TEST_CASE("resolve compatibility adapter reports transform failure") {
+  const std::string cache = make_temp_dir();
+  {
+    Storage db(cache + "/index.db");
+    const auto baseline = db.run_transform_pipeline();
+    if (!baseline.complete) {
+      for (const auto &run : baseline.runs) {
+        MESSAGE(run.transform_id << " " << transform_run_status_name(run.status)
+                << " " << run.diagnostic);
+      }
+    }
+    REQUIRE(baseline.complete);
+    db.set_transform_invalidation_for_testing("source", "compat-failure");
+    db.inject_transform_failure_for_testing("entity-graph-rollup");
+  }
+  const CmdResult result = run_cli({"resolve"}, cache);
+  CHECK(result.rc == 1);
+  CHECK(result.err.find("resolve failed") != std::string::npos);
+  Storage db(cache + "/index.db");
+  CHECK_FALSE(db.graph_resolved());
+}
+
 TEST_CASE("args: --version sets the version flag (top level only)") {
   // $ python3 -m indexer --version   -> "cidx 0.13.0" on stdout, exit 0
   cli::ParsedArgs pa = cli::parse_args({"--version"});
