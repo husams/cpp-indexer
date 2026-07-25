@@ -6,7 +6,7 @@ corpora, caches, JSON, and profiler traces remain outside the repository.
 ## Provenance and method
 
 - Host: Darwin arm64, Python 3.14.6.
-- Baseline executable: latest `origin/main` commit `def1bdf`.
+- Baseline executable: latest `origin/main` commit `a74ae83`.
 - Candidate executable: the rebased HSE-95 branch after replacing repeated
   resolved-symbol upserts with an idempotent declaration-site path guarded by
   a complete `add_symbol()` merge-semantic check.
@@ -15,18 +15,18 @@ corpora, caches, JSON, and profiler traces remain outside the repository.
   supplies warning-diagnostic, macro-use, call-argument, template,
   template-parameter, parameter, and pointer type-edge facts.
 - Trials: three paired trials per executable and corpus size; values below are
-  medians. Raw report: `/tmp/hse95-postfix-v10.json`.
+  medians. Raw report: `/tmp/hse95-postrebase-v11.json`.
 - Command:
 
 ```text
 python3 benchmarks/indexing/run.py \
-  --baseline-cidx /tmp/hse95-baseline-rebased/build/cidx \
+  --baseline-cidx /tmp/hse95-origin-main-latest/build/cidx \
   --current-cidx build/cidx \
   --representative-files 32 \
   --scale-files 1000 \
   --per-tu 5 \
   --trials 3 \
-  --output /tmp/hse95-postfix-v10.json
+  --output /tmp/hse95-postrebase-v11.json
 ```
 
 The baseline was rebuilt from `origin/main` in a disposable worktree. Because
@@ -34,10 +34,10 @@ that main revision's CMake graph does not emit the legacy `cli/souffle_rules.hpp
 include required by its existing sources, the baseline build additionally ran:
 
 ```text
-cmake -DRULES_DIR=/tmp/hse95-origin-main-rebased/python/indexer/rules \
-  -DOUT=/tmp/hse95-baseline-rebased/build/generated/cli/souffle_rules.hpp \
-  -P /tmp/hse95-origin-main-rebased/cmake/embed_dl.cmake
-cmake --build /tmp/hse95-baseline-rebased/build -j1 --target cidx
+cmake -DRULES_DIR=/tmp/hse95-origin-main-latest/python/indexer/rules \
+  -DOUT=/tmp/hse95-origin-main-latest/build/generated/cli/souffle_rules.hpp \
+  -P /tmp/hse95-origin-main-latest/cmake/embed_dl.cmake
+cmake --build /tmp/hse95-origin-main-latest/build -j1 --target cidx
 ```
 
 The harness performs fresh import, cold index, resolve, unchanged warm index,
@@ -55,17 +55,17 @@ are current versus baseline wall time; positive means faster.
 
 | Corpus | Stage | Baseline | HSE-95 | Improvement |
 | ---: | --- | ---: | ---: | ---: |
-| 32 TUs | cold | 1.866 s / 0.922 | 1.711 s / 0.927 | +8.3% |
-| 32 TUs | warm | 0.045 s / 0.890 | 0.046 s / 0.884 | -2.0% |
-| 32 TUs | incremental | 0.092 s / 0.925 | 0.088 s / 0.922 | +4.7% |
-| 1,000 TUs | cold | 221.326 s / 0.957 | 203.757 s / 0.953 | +7.9% |
-| 1,000 TUs | warm | 0.347 s / 0.886 | 0.345 s / 0.946 | +0.5% |
-| 1,000 TUs | incremental | 0.647 s / 0.954 | 0.671 s / 0.959 | -3.8% |
+| 32 TUs | cold | 2.273 s / 0.898 | 1.819 s / 0.918 | +20.0% |
+| 32 TUs | warm | 0.051 s / 0.881 | 0.045 s / 0.908 | +12.8% |
+| 32 TUs | incremental | 0.110 s / 0.920 | 0.113 s / 0.883 | -2.9% |
+| 1,000 TUs | cold | 244.336 s / 0.952 | 214.781 s / 0.951 | +12.1% |
+| 1,000 TUs | warm | 0.348 s / 0.954 | 0.399 s / 0.834 | -14.6% |
+| 1,000 TUs | incremental | 0.722 s / 0.954 | 0.716 s / 0.948 | +0.8% |
 
 The three-trial aggregation demonstrates a repeatable full-refresh win at both
 sizes, including the 1,000-TU acceptance case. Warm and incremental paths
 remain below the 5-second and 2-second operational targets. Cold RSS was
-44.9/44.8 MiB at 32 TUs and 55.5/55.6 MiB at 1,000 TUs (baseline/HSE-95).
+45.1/45.0 MiB at 32 TUs and 55.6/55.5 MiB at 1,000 TUs (baseline/HSE-95).
 
 ## SQLite activity and repeated work
 
@@ -74,10 +74,10 @@ values are deltas from the immediately preceding stage.
 
 | Corpus / stage | Page bytes | File rows | Symbol rows | Edge rows | Edge-site rows | Fact rows | Header counters |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 32 / cold | 462,848 | 2 | 331 | 325 | 579 | 2,520 | 2 indexed, 31 already |
+| 32 / cold | 471,040 | 2 | 331 | 325 | 579 | 2,520 | 2 indexed, 31 already |
 | 32 / warm | 0 | 0 | 0 | 0 | 0 | 0 | 0 indexed, 0 already |
 | 32 / incremental | 12,288 | 0 | 0 | 0 | 0 | 0 | 0 indexed, 2 already |
-| 1,000 / cold | 16,064,512 | 2 | 10,011 | 10,005 | 18,003 | 77,056 | 2 indexed, 999 already |
+| 1,000 / cold | 16,252,928 | 2 | 10,011 | 10,005 | 18,003 | 77,056 | 2 indexed, 999 already |
 | 1,000 / warm | 0 | 0 | 0 | 0 | 0 | 0 | 0 indexed, 0 already |
 | 1,000 / incremental | 8,192 | 0 | 0 | 0 | 0 | 0 | 0 indexed, 2 already |
 
@@ -90,9 +90,9 @@ row directly, preserving all row counts and canonical digests.
 ## Database and semantic correctness
 
 Every produced database passed `PRAGMA integrity_check` and the harness's
-foreign-key check. Every database reported schema version `39`, catalog version
+foreign-key check. Every database reported schema version `40`, catalog version
 `1`, and catalog hash
-`3337824260ee0afe1260859b6be88e6fb8280852fd736cde5e12cca5c3847ba4`.
+`21497a89add82fba96293f97b34f9a19c68912b6cc823a915889acf0709c216d`.
 
 The canonical projection has exactly these 23 required sections:
 `semantic_universe`, `translation_unit_config`, `file`, `file_config`,
@@ -150,11 +150,11 @@ parenthesized values are all three trial measurements in seconds.
 
 | TU | Baseline | HSE-95 |
 | --- | ---: | ---: |
-| 0 | 0.665 (0.643, 0.665, 0.690) | 0.670 (0.662, 0.670, 0.685) |
-| 1 | 0.575 (0.558, 0.575, 0.579) | 0.527 (0.526, 0.527, 0.549) |
-| 2 | 0.562 (0.552, 0.562, 0.575) | 0.525 (0.525, 0.525, 0.543) |
-| 3 | 0.569 (0.556, 0.569, 0.570) | 0.528 (0.512, 0.528, 0.548) |
-| 4 | 0.576 (0.546, 0.576, 0.636) | 0.524 (0.514, 0.524, 0.577) |
+| 0 | 0.717 (0.687, 0.717, 0.828) | 0.668 (0.628, 0.668, 0.747) |
+| 1 | 0.602 (0.558, 0.602, 0.644) | 0.612 (0.532, 0.612, 0.632) |
+| 2 | 0.608 (0.579, 0.608, 0.685) | 0.618 (0.556, 0.618, 0.620) |
+| 3 | 0.658 (0.574, 0.658, 0.674) | 0.588 (0.550, 0.588, 0.619) |
+| 4 | 0.653 (0.567, 0.653, 0.764) | 0.602 (0.568, 0.602, 0.692) |
 
 ## Profiler-derived attribution
 

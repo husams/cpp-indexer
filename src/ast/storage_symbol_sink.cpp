@@ -95,6 +95,9 @@ cidx::Symbol merged_symbol_state(const cidx::Symbol &persisted,
   coalesce(merged.linkage, incoming.linkage);
   coalesce(merged.access, incoming.access);
   coalesce(merged.parent_usr, incoming.parent_usr);
+  coalesce(merged.callable_kind, incoming.callable_kind);
+  coalesce(merged.template_origin, incoming.template_origin);
+  coalesce(merged.template_form, incoming.template_form);
   merged.resolved = persisted.resolved || incoming.resolved;
   coalesce(merged.const_value, incoming.const_value);
   return merged;
@@ -117,6 +120,9 @@ bool same_add_symbol_result_except_decl_site(const cidx::Symbol &left,
          left.is_instantiation == right.is_instantiation &&
          left.linkage == right.linkage && left.access == right.access &&
          left.parent_usr == right.parent_usr &&
+         left.callable_kind == right.callable_kind &&
+         left.template_origin == right.template_origin &&
+         left.template_form == right.template_form &&
          left.resolved == right.resolved &&
          left.const_value == right.const_value &&
          left.semantic_universe_id == right.semantic_universe_id &&

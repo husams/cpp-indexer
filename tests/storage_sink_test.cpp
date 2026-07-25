@@ -248,6 +248,25 @@ TEST_CASE("symbol sink checks every merge-sensitive definition field") {
          CHECK(symbol.access == std::optional<std::string>{"private"});
        },
        {}},
+      {"callable_kind",
+       [](auto &symbol) { symbol.callable_kind = "function"; },
+       [](const auto &symbol) {
+         CHECK(symbol.callable_kind == std::optional<std::string>{"function"});
+       },
+       {}},
+      {"template_origin",
+       [](auto &symbol) { symbol.template_origin = "origin"; },
+       [](const auto &symbol) {
+         CHECK(symbol.template_origin == std::optional<std::string>{"origin"});
+       },
+       {}},
+      {"template_form",
+       [](auto &symbol) { symbol.template_form = "specialization"; },
+       [](const auto &symbol) {
+         CHECK(symbol.template_form ==
+               std::optional<std::string>{"specialization"});
+       },
+       {}},
       {"parent_usr",
        [](auto &symbol) { symbol.parent_usr = "changed_parent"; },
        [](const auto &symbol) {
@@ -331,6 +350,25 @@ TEST_CASE("symbol sink checks merge-sensitive declaration fields and parents") {
        [](auto &symbol) { symbol.access = "protected"; },
        [](const auto &symbol) {
          CHECK(symbol.access == std::optional<std::string>{"protected"});
+       },
+       {}},
+      {"callable_kind",
+       [](auto &symbol) { symbol.callable_kind = "method"; },
+       [](const auto &symbol) {
+         CHECK(symbol.callable_kind == std::optional<std::string>{"method"});
+       },
+       {}},
+      {"template_origin",
+       [](auto &symbol) { symbol.template_origin = "declaration_origin"; },
+       [](const auto &symbol) {
+         CHECK(symbol.template_origin ==
+               std::optional<std::string>{"declaration_origin"});
+       },
+       {}},
+      {"template_form",
+       [](auto &symbol) { symbol.template_form = "primary"; },
+       [](const auto &symbol) {
+         CHECK(symbol.template_form == std::optional<std::string>{"primary"});
        },
        {}},
       {"parent_usr",
