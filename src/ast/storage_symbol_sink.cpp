@@ -11,6 +11,27 @@ namespace cidx::ast {
 
 namespace {
 
+constexpr std::size_t kSymbolIdSetThreshold = 32;
+
+bool record_symbol_id(std::vector<int64_t> &ids,
+                      std::unordered_set<int64_t> &set, int64_t id) {
+  const bool repeated = ids.size() < kSymbolIdSetThreshold
+                            ? std::ranges::find(ids, id) != ids.end()
+                            : set.contains(id);
+  if (ids.size() < kSymbolIdSetThreshold) {
+    if (!repeated) {
+      ids.push_back(id);
+      if (ids.size() == kSymbolIdSetThreshold) {
+        set.insert(ids.begin(), ids.end());
+      }
+    }
+  } else if (!repeated) {
+    set.insert(id);
+    ids.push_back(id);
+  }
+  return repeated;
+}
+
 std::string identity_cache_key(const cidx::Symbol &sym) {
   std::string key = sym.usr;
   key.push_back('\x1f');
@@ -80,6 +101,7 @@ StorageSymbolSink::StorageSymbolSink(cidx::storage::AstStoragePorts &ports)
 void StorageSymbolSink::set_current_file_id(int64_t file_id) {
   current_file_id_ = file_id;
   resolved_identity_cache_.clear();
+  resolved_cache_active_ = false;
 }
 
 void StorageSymbolSink::set_identity_translation_unit_config_id(
@@ -91,6 +113,7 @@ void StorageSymbolSink::set_identity_translation_unit_config_id(
           : ports_.workspace.portable_translation_unit_identity_for_config(
                 config_id);
   resolved_identity_cache_.clear();
+  resolved_cache_active_ = false;
 }
 
 void StorageSymbolSink::set_identity_translation_unit_file_id(int64_t file_id) {
@@ -101,6 +124,7 @@ void StorageSymbolSink::set_identity_translation_unit_file_id(int64_t file_id) {
                     file_id))
           : std::nullopt;
   resolved_identity_cache_.clear();
+  resolved_cache_active_ = false;
 }
 
 void StorageSymbolSink::reset_counters() {
@@ -108,6 +132,7 @@ void StorageSymbolSink::reset_counters() {
   symbol_ids_.clear();
   symbol_id_set_.clear();
   resolved_identity_cache_.clear();
+  resolved_cache_active_ = false;
 }
 
 void StorageSymbolSink::set_metrics(PassMetrics *metrics) {
@@ -133,19 +158,34 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
       s, current_file_id_,
       ports_.workspace.semantic_universe_for_file_id(current_file_id_),
       identity_translation_unit_);
-  std::string identity_key = identity_cache_key(sym);
-  const bool resolved_identity =
-      resolved_identity_cache_.contains(identity_key);
+  std::string identity_key;
+  const bool resolved_identity = [&] {
+    if (!resolved_cache_active_) {
+      return false;
+    }
+    identity_key = identity_cache_key(sym);
+    return resolved_identity_cache_.contains(identity_key);
+  }();
   const std::optional<cidx::Symbol> existing =
       lookup_existing_symbol(ports_, sym, resolved_identity);
   const int64_t symbol_id = ports_.symbols_write.add_symbol(sym);
-  if (symbol_id_set_.insert(symbol_id).second) {
-    symbol_ids_.push_back(symbol_id);
-  }
+  const bool repeated_symbol =
+      record_symbol_id(symbol_ids_, symbol_id_set_, symbol_id);
   if (!(resolved_identity || (existing && existing->resolved))) {
     ++stored_; // AstIndexer::store: true = counted as "stored"
   }
-  if (resolved_identity || (existing && existing->resolved) || sym.resolved) {
+  if (existing && existing->resolved) {
+    resolved_cache_active_ = true;
+  }
+  if (repeated_symbol && sym.resolved) {
+    resolved_cache_active_ = true;
+  }
+  if (resolved_cache_active_ &&
+      (resolved_identity || (repeated_symbol && sym.resolved) ||
+       (existing && existing->resolved))) {
+    if (identity_key.empty()) {
+      identity_key = identity_cache_key(sym);
+    }
     resolved_identity_cache_.insert(std::move(identity_key));
   }
 }

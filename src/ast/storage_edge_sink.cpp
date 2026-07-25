@@ -6,6 +6,31 @@
 
 namespace cidx::ast {
 
+namespace {
+
+constexpr std::size_t kFactIdSetThreshold = 32;
+
+bool append_unique_id(std::vector<int64_t> &ids,
+                      std::unordered_set<int64_t> &set, int64_t id) {
+  if (ids.size() < kFactIdSetThreshold) {
+    if (std::ranges::find(ids, id) != ids.end()) {
+      return false;
+    }
+    ids.push_back(id);
+    if (ids.size() == kFactIdSetThreshold) {
+      set.insert(ids.begin(), ids.end());
+    }
+    return true;
+  }
+  if (!set.insert(id).second) {
+    return false;
+  }
+  ids.push_back(id);
+  return true;
+}
+
+} // namespace
+
 StorageEdgeSink::StorageEdgeSink(
     cidx::storage::AstStoragePorts &ports,
     std::vector<EvidenceRecord> *evidence,
@@ -126,9 +151,7 @@ int64_t StorageEdgeSink::add_edge(const EdgeRecord &edge) {
     e.is_virtual = edge.is_virtual;
   }
   const int64_t id = ports_.facts_write.add_edge(e);
-  if (edge_id_set_.insert(id).second) {
-    edge_ids_.push_back(id);
-  }
+  append_unique_id(edge_ids_, edge_id_set_, id);
   return id;
 }
 
@@ -145,9 +168,7 @@ int64_t StorageEdgeSink::ensure_edge(const EdgeRecord &edge) {
     e.is_virtual = edge.is_virtual;
   }
   const int64_t id = ports_.facts_write.ensure_edge(e);
-  if (edge_id_set_.insert(id).second) {
-    edge_ids_.push_back(id);
-  }
+  append_unique_id(edge_ids_, edge_id_set_, id);
   return id;
 }
 
@@ -195,9 +216,7 @@ int64_t StorageEdgeSink::get_or_create_definition(
     const std::optional<std::string> &init_text) {
   const int64_t id = ports_.definitions_write.get_or_create_definition(
       symbol_id, file_id, line, col, end_line, end_col, init_text);
-  if (definition_id_set_.insert(id).second) {
-    definition_ids_.push_back(id);
-  }
+  append_unique_id(definition_ids_, definition_id_set_, id);
   return id;
 }
 

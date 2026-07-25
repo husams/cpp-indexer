@@ -12,6 +12,7 @@ set(CIDX_DEFAULT_TESTS
   storage_migration_test
   storage_profile_test
   storage_ports_test
+  storage_sink_test
   storage_artifact_test
   graph_storage_test
   graph_query_test
