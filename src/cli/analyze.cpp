@@ -11,10 +11,10 @@
 #include "analysis/facts.hpp"
 #include "analysis/runner.hpp"
 #include "application/analysis_service.hpp"
+#include "application/souffle_rules.hpp"
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
 #include "cli/json_out.hpp"
-#include "cli/souffle_rules.hpp"
 #include "util/errors.hpp"
 #include "util/pathutil.hpp"
 

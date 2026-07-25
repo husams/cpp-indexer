@@ -68,7 +68,8 @@ void print_rows(const Result &r, size_t max_rows = 10) {
 int main(int argc, char **argv) {
   const std::string db_path = argc > 1 ? argv[1] : "index.db";
   cidx::Storage db(db_path);
-  Executor ex(db);
+  SqliteQueryReadAdapter read(db);
+  Executor ex(read);
 
   // 1. BUILD a plan — who calls resolve_relation()? A plan is an immutable
   //    pipeline: start(source) | stage | stage. symbol(ref) resolves ref
