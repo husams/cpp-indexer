@@ -540,7 +540,7 @@ int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
   if (args.graph_json) {
     using namespace json_out;
     const auto type_dict =
-        [](const std::optional<graph::GraphQuery::TypeInfo> &t) {
+        [&h](const std::optional<graph::GraphQuery::TypeInfo> &t) {
           if (!t) {
             return Value::null();
           }
@@ -555,6 +555,37 @@ int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
           o.emplace_back("const", Value::of(t->is_const));
           o.emplace_back("volatile", Value::of(t->is_volatile));
           o.emplace_back("restrict", Value::of(t->is_restrict));
+          Array layers;
+          for (const auto &layer : h->g->type_layers(t->id)) {
+            Object row;
+            row.emplace_back("path", Value::of(layer.path));
+            row.emplace_back("relation", Value::of(layer.relation));
+            row.emplace_back("position", Value::of(layer.position));
+            row.emplace_back("id", Value::of(layer.type.id));
+            row.emplace_back("spelling", Value::of(layer.type.spelling));
+            row.emplace_back("kind", Value::of(layer.type.kind));
+            row.emplace_back("canonical", layer.type.canonical
+                                              ? Value::of(*layer.type.canonical)
+                                              : Value::null());
+            row.emplace_back("decl_usr", layer.type.decl_usr
+                                             ? Value::of(*layer.type.decl_usr)
+                                             : Value::null());
+            row.emplace_back("const", Value::of(layer.type.is_const));
+            row.emplace_back("volatile", Value::of(layer.type.is_volatile));
+            row.emplace_back("restrict", Value::of(layer.type.is_restrict));
+            std::optional<std::string> extent;
+            if (layer.type.kind == "array" &&
+                layer.type.type_key.starts_with("A")) {
+              const std::size_t end = layer.type.type_key.find('(');
+              if (end != std::string::npos && end > 1) {
+                extent = layer.type.type_key.substr(1, end - 1);
+              }
+            }
+            row.emplace_back("extent",
+                             extent ? Value::of(*extent) : Value::null());
+            layers.push_back(Value::obj(std::move(row)));
+          }
+          o.emplace_back("layers", Value::arr(std::move(layers)));
           return Value::obj(std::move(o));
         };
     const auto slot_dict = [&type_dict](
@@ -623,16 +654,11 @@ int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
     o.emplace_back("underlying_type", type_dict(sig.underlying));
     Array slots;
     if (sig.returns) {
-      std::optional<std::string> named;
-      if (sig.returns->decl_usr) {
-        if (const auto d = h->g->get_by_usr(*sig.returns->decl_usr)) {
-          named = d->name;
-        }
-      }
+      const auto facts = h->g->slot_facts(sig.returns, sig.returns);
       slots.push_back(slot_dict("return", std::nullopt, std::nullopt,
-                                std::nullopt, sig.returns, sig.returns, "value",
-                                sig.returns->kind, named, std::nullopt,
-                                std::nullopt, std::nullopt));
+                                std::nullopt, sig.returns, sig.returns,
+                                facts.mode, facts.value_kind, facts.named_decl,
+                                std::nullopt, std::nullopt, std::nullopt));
     }
     for (const auto &p : sig.params) {
       slots.push_back(slot_dict(
@@ -670,30 +696,6 @@ int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
       t = *child;
     }
     return std::string{};
-  };
-  const auto facts = [&h,
-                      &named_decl](const graph::GraphQuery::TypeInfo &declared,
-                                   const graph::GraphQuery::TypeInfo &adjusted,
-                                   bool forwarding) {
-    std::string mode = "value";
-    graph::GraphQuery::TypeInfo base = adjusted;
-    if (declared.kind == "lvalue-reference" ||
-        declared.kind == "rvalue-reference") {
-      mode = declared.kind;
-      if (const auto child = h->g->type_child(declared.id, 1)) {
-        base = *child;
-      }
-    }
-    std::string kind = base.kind;
-    if (base.spelling.ends_with("...")) {
-      kind = "pack-expansion";
-    }
-    std::string out = mode + ", " + kind;
-    if (forwarding) {
-      out += ", forwarding";
-    }
-    const std::string name = named_decl(base);
-    return std::pair{out, name};
   };
   const auto type_line = [&h,
                           &named_decl](const graph::GraphQuery::TypeInfo &t) {
@@ -733,7 +735,9 @@ int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
     return 0;
   }
   if (sig.returns) {
-    const auto [facts_text, name] = facts(*sig.returns, *sig.returns, false);
+    const auto facts = h->g->slot_facts(sig.returns, sig.returns);
+    const std::string facts_text = facts.mode + ", " + facts.value_kind;
+    const std::string name = facts.named_decl.value_or("");
     *ctx.out << "  return: " << type_line(*sig.returns) << " [" << facts_text
              << "]";
     if (!name.empty()) {
@@ -747,9 +751,12 @@ int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
                << (p.name ? *p.name : "_") << ": <unknown>\n";
       continue;
     }
-    const auto [facts_text, name] =
-        facts(*p.declared_type, *p.adjusted_type,
-              p.reference_semantics && *p.reference_semantics == "forwarding");
+    const auto slot = h->g->slot_facts(p.declared_type, p.adjusted_type);
+    std::string facts_text = slot.mode + ", " + slot.value_kind;
+    if (p.reference_semantics && *p.reference_semantics == "forwarding") {
+      facts_text += ", forwarding";
+    }
+    const std::string name = slot.named_decl.value_or("");
     *ctx.out << "  param " << p.position << ": " << (p.name ? *p.name : "_")
              << ": " << type_line(*p.declared_type);
     if (p.declared_type->spelling != p.adjusted_type->spelling) {

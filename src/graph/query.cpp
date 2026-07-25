@@ -776,6 +776,7 @@ std::optional<GraphQuery::TypeInfo> GraphQuery::type_info(int64_t type_id) {
   }
   TypeInfo t;
   t.id = n->id;
+  t.type_key = n->type_key;
   t.spelling = n->spelling;
   const auto &names = type_kind_names();
   const auto it = names.find(n->kind);
@@ -792,65 +793,71 @@ std::optional<GraphQuery::TypeInfo> GraphQuery::type_info(int64_t type_id) {
   return t;
 }
 
-GraphQuery::SignatureInfo GraphQuery::signature(int64_t sym_id) {
-  SignatureInfo out;
-  const auto named_decl = [this](TypeInfo type) -> std::optional<std::string> {
-    std::set<int64_t> seen;
-    while (seen.insert(type.id).second) {
-      if (type.decl_usr) {
-        if (const auto decl = get_by_usr(*type.decl_usr)) {
-          return decl->name;
-        }
+std::optional<std::string> GraphQuery::named_decl(TypeInfo type) {
+  std::set<int64_t> seen;
+  while (seen.insert(type.id).second) {
+    if (type.decl_usr) {
+      if (const auto decl = get_by_usr(*type.decl_usr)) {
+        return decl->name;
       }
-      std::vector<std::pair<int64_t, int64_t>> children;
-      if (type.kind == "alias") {
-        children.emplace_back(3, 0);
-      } else if (type.kind == "pointer" || type.kind == "lvalue-reference" ||
-                 type.kind == "rvalue-reference") {
-        children.emplace_back(1, 0);
-      } else if (type.kind == "array") {
-        children.emplace_back(2, 0);
-      } else if (type.kind == "member-data-pointer" ||
-                 type.kind == "member-function-pointer") {
-        children.emplace_back(7, 0);
-        children.emplace_back(8, 0);
-      } else if (type.kind == "function") {
-        children.emplace_back(4, 0);
-      }
-      std::optional<TypeInfo> child;
-      for (const auto [kind, position] : children) {
-        child = type_child(type.id, kind, position);
-        if (child) {
-          break;
-        }
-      }
-      if (!child) {
+    }
+    std::vector<std::pair<int64_t, int64_t>> candidates;
+    if (type.kind == "alias") {
+      candidates.emplace_back(3, 0);
+    } else if (type.kind == "pointer" || type.kind == "lvalue-reference" ||
+               type.kind == "rvalue-reference") {
+      candidates.emplace_back(1, 0);
+    } else if (type.kind == "array") {
+      candidates.emplace_back(2, 0);
+    } else if (type.kind == "function") {
+      candidates.emplace_back(4, 0);
+    } else if (type.kind == "member-data-pointer" ||
+               type.kind == "member-function-pointer") {
+      candidates.emplace_back(7, 0);
+      candidates.emplace_back(8, 0);
+    }
+    std::optional<TypeInfo> child;
+    for (const auto [kind, position] : candidates) {
+      child = type_child(type.id, kind, position);
+      if (child) {
         break;
       }
-      type = *child;
     }
-    return std::nullopt;
-  };
-  const auto facts = [this, &named_decl](const TypeInfo &declared,
-                                         const TypeInfo &adjusted) {
-    std::string mode = "value";
-    TypeInfo base = adjusted;
-    if (declared.kind == "lvalue-reference" ||
-        declared.kind == "rvalue-reference") {
-      mode = declared.kind;
-      base = declared;
-      while (const auto child = type_child(base.id, 1)) {
-        base = *child;
-        if (base.kind != "lvalue-reference" &&
-            base.kind != "rvalue-reference") {
-          break;
-        }
+    if (!child) {
+      break;
+    }
+    type = *child;
+  }
+  return std::nullopt;
+}
+
+GraphQuery::SlotFacts
+GraphQuery::slot_facts(const std::optional<TypeInfo> &declared,
+                       const std::optional<TypeInfo> &adjusted) {
+  SlotFacts out;
+  if (!declared) {
+    return out;
+  }
+  TypeInfo base = adjusted.value_or(*declared);
+  if (declared->kind == "lvalue-reference" ||
+      declared->kind == "rvalue-reference") {
+    out.mode = declared->kind;
+    base = *declared;
+    while (const auto child = type_child(base.id, 1)) {
+      base = *child;
+      if (base.kind != "lvalue-reference" && base.kind != "rvalue-reference") {
+        break;
       }
     }
-    const std::string value_kind =
-        base.spelling.ends_with("...") ? "pack-expansion" : base.kind;
-    return std::tuple{mode, value_kind, named_decl(base)};
-  };
+  }
+  out.value_kind =
+      base.spelling.ends_with("...") ? "pack-expansion" : base.kind;
+  out.named_decl = named_decl(std::move(base));
+  return out;
+}
+
+GraphQuery::SignatureInfo GraphQuery::signature(int64_t sym_id) {
+  SignatureInfo out;
   if (const auto tid = db_.symbol_type_of(sym_id, kSymbolTypeReturns)) {
     out.returns = type_info(*tid);
   }
@@ -875,8 +882,10 @@ GraphQuery::SignatureInfo GraphQuery::signature(int64_t sym_id) {
       pi.adjusted_type = pi.type;
     }
     if (pi.declared_type && pi.adjusted_type) {
-      std::tie(pi.mode, pi.value_kind, pi.named_decl) =
-          facts(*pi.declared_type, *pi.adjusted_type);
+      const SlotFacts facts = slot_facts(pi.declared_type, pi.adjusted_type);
+      pi.mode = facts.mode;
+      pi.value_kind = facts.value_kind;
+      pi.named_decl = facts.named_decl;
     }
     pi.default_text = p.default_text;
     pi.default_origin = p.default_origin;
@@ -888,6 +897,91 @@ GraphQuery::SignatureInfo GraphQuery::signature(int64_t sym_id) {
   }
   if (const auto tid = db_.symbol_type_of(sym_id, kSymbolTypeUnderlying)) {
     out.underlying = type_info(*tid);
+  }
+  return out;
+}
+
+std::vector<GraphQuery::TypeLayer> GraphQuery::type_layers(int64_t type_id) {
+  struct Pending {
+    int64_t id;
+    std::string path;
+    std::string relation;
+    int64_t position;
+    int depth;
+  };
+  std::vector<TypeLayer> out;
+  std::vector<Pending> pending{{.id = type_id,
+                                .path = "root",
+                                .relation = "root",
+                                .position = 0,
+                                .depth = 0}};
+  while (!pending.empty()) {
+    Pending current = std::move(pending.back());
+    pending.pop_back();
+    if (current.depth > 64) {
+      continue;
+    }
+    const auto type = type_info(current.id);
+    if (!type) {
+      continue;
+    }
+    out.push_back({.path = current.path,
+                   .relation = current.relation,
+                   .position = current.position,
+                   .type = *type});
+
+    auto children = db_.read_db().prepare(
+        "SELECT kind, position, dst_id FROM type_edge WHERE src_id = ? "
+        "ORDER BY kind, position");
+    children.bind(1, current.id);
+    std::vector<Pending> next;
+    while (children.step()) {
+      const int64_t kind = children.col_int64(0);
+      const int64_t position = children.col_int64(1);
+      const int64_t child_id = children.col_int64(2);
+      const std::string relation = [&] {
+        switch (kind) {
+        case 1:
+          return std::string("pointee");
+        case 2:
+          return std::string("element_type");
+        case 3:
+          return std::string("alias_of");
+        case 4:
+          return std::string("return_type");
+        case 5:
+          return std::string("param_type");
+        case 6:
+          return std::string("template_argument_type");
+        case 7:
+          return std::string("member_owner");
+        case 8:
+          return std::string("member_component");
+        default:
+          return std::string("unknown");
+        }
+      }();
+      std::string path_relation = relation;
+      if (kind == 1 && (type->kind == "lvalue-reference" ||
+                        type->kind == "rvalue-reference")) {
+        path_relation = "referent";
+      } else if (kind == 2) {
+        path_relation = "element";
+      }
+      std::string path = current.path + "." + path_relation;
+      if (kind == 5 || kind == 6) {
+        path += "[" + std::to_string(position) + "]";
+      }
+      next.push_back({.id = child_id,
+                      .path = std::move(path),
+                      .relation = relation,
+                      .position = position,
+                      .depth = current.depth + 1});
+    }
+    std::ranges::reverse(next);
+    for (auto &child : next) {
+      pending.push_back(std::move(child));
+    }
   }
   return out;
 }
