@@ -160,6 +160,9 @@ Sym GraphQuery::make_sym_from_symbol(const Symbol &sym) {
   s.is_pure = sym.is_pure;
   s.is_static = sym.is_static;
   s.is_instantiation = sym.is_instantiation;
+  s.callable_kind = sym.callable_kind;
+  s.template_origin = sym.template_origin;
+  s.template_form = sym.template_form;
   s.access = sym.access;
   s.parent_usr = sym.parent_usr;
   s.resolved = sym.resolved;
@@ -764,6 +767,7 @@ const std::map<int64_t, std::string> &type_kind_names() {
       {11, "other"},
       {12, "member-data-pointer"},
       {13, "member-function-pointer"},
+      {14, "pack-expansion"},
   };
   return m;
 }
@@ -776,7 +780,6 @@ std::optional<GraphQuery::TypeInfo> GraphQuery::type_info(int64_t type_id) {
   }
   TypeInfo t;
   t.id = n->id;
-  t.type_key = n->type_key;
   t.spelling = n->spelling;
   const auto &names = type_kind_names();
   const auto it = names.find(n->kind);
@@ -785,6 +788,7 @@ std::optional<GraphQuery::TypeInfo> GraphQuery::type_info(int64_t type_id) {
   t.is_const = n->is_const;
   t.is_volatile = n->is_volatile;
   t.is_restrict = n->is_restrict;
+  t.extent = n->extent;
   if (n->canonical_id) {
     if (const auto c = db_.type_node_by_id(*n->canonical_id)) {
       t.canonical = c->spelling;
@@ -850,8 +854,7 @@ GraphQuery::slot_facts(const std::optional<TypeInfo> &declared,
       }
     }
   }
-  out.value_kind =
-      base.spelling.ends_with("...") ? "pack-expansion" : base.kind;
+  out.value_kind = base.kind;
   out.named_decl = named_decl(std::move(base));
   return out;
 }
@@ -908,27 +911,48 @@ std::vector<GraphQuery::TypeLayer> GraphQuery::type_layers(int64_t type_id) {
     std::string relation;
     int64_t position;
     int depth;
+    std::vector<int64_t> ancestry;
   };
+  constexpr int kMaxDepth = 64;
+  constexpr std::size_t kMaxRows = 256;
   std::vector<TypeLayer> out;
   std::vector<Pending> pending{{.id = type_id,
                                 .path = "root",
                                 .relation = "root",
                                 .position = 0,
-                                .depth = 0}};
-  while (!pending.empty()) {
+                                .depth = 0,
+                                .ancestry = {type_id}}};
+  while (!pending.empty() && out.size() < kMaxRows) {
     Pending current = std::move(pending.back());
     pending.pop_back();
-    if (current.depth > 64) {
-      continue;
-    }
     const auto type = type_info(current.id);
     if (!type) {
+      out.push_back({.path = current.path,
+                     .relation = current.relation,
+                     .position = current.position,
+                     .depth = current.depth,
+                     .status = "unknown",
+                     .element_type = {},
+                     .type = {}});
       continue;
     }
-    out.push_back({.path = current.path,
-                   .relation = current.relation,
-                   .position = current.position,
-                   .type = *type});
+    std::optional<std::string> element_type;
+    if (type->kind == "array") {
+      if (const auto element = type_child(type->id, 2)) {
+        element_type = element->spelling;
+      }
+    }
+    out.push_back(
+        {.path = current.path,
+         .relation = current.relation,
+         .position = current.position,
+         .depth = current.depth,
+         .status = current.depth >= kMaxDepth ? "truncated" : "complete",
+         .element_type = std::move(element_type),
+         .type = *type});
+    if (current.depth >= kMaxDepth) {
+      continue;
+    }
 
     auto children = db_.read_db().prepare(
         "SELECT kind, position, dst_id FROM type_edge WHERE src_id = ? "
@@ -972,16 +996,36 @@ std::vector<GraphQuery::TypeLayer> GraphQuery::type_layers(int64_t type_id) {
       if (kind == 5 || kind == 6) {
         path += "[" + std::to_string(position) + "]";
       }
-      next.push_back({.id = child_id,
-                      .path = std::move(path),
-                      .relation = relation,
-                      .position = position,
-                      .depth = current.depth + 1});
+      Pending child{.id = child_id,
+                    .path = std::move(path),
+                    .relation = relation,
+                    .position = position,
+                    .depth = current.depth + 1,
+                    .ancestry = current.ancestry};
+      if (std::ranges::find(current.ancestry, child_id) !=
+          current.ancestry.end()) {
+        const auto cycle_type = type_info(child_id);
+        if (cycle_type) {
+          out.push_back({.path = child.path,
+                         .relation = child.relation,
+                         .position = child.position,
+                         .depth = child.depth,
+                         .status = "cycle",
+                         .element_type = {},
+                         .type = *cycle_type});
+        }
+        continue;
+      }
+      child.ancestry.push_back(child_id);
+      next.push_back(std::move(child));
     }
     std::ranges::reverse(next);
     for (auto &child : next) {
       pending.push_back(std::move(child));
     }
+  }
+  if (!pending.empty() && !out.empty() && out.back().status == "complete") {
+    out.back().status = "truncated";
   }
   return out;
 }

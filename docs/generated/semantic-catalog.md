@@ -1,7 +1,7 @@
 # Generated CIDX semantic catalog
 
 - Catalog version: `1`
-- Catalog hash: `3337824260ee0afe1260859b6be88e6fb8280852fd736cde5e12cca5c3847ba4`
+- Catalog hash: `d9737467d97c6ace48899bd7e493fa3637d7923da3039a343aa20d6ac9730573`
 
 ## Relations
 
@@ -44,6 +44,7 @@
 | symbol | 23 | `has_template_argument` | `symbol.template` | `template_argument` | `of_template` | out,in | reference_site | reference_site,call_site | partial |
 | symbol | 24 | `has_call_edge` | `symbol.callable` | `edge` | `of_caller` | out,in | call_site | call_site | partial |
 | symbol | 25 | `has_evidence` | `symbol.callable` | `evidence` | `of_symbol` | out,in | call_site | call_site,declaration | partial |
+| symbol | 26 | `has_signature_slot` | `symbol.callable` | `signature_slot` | `of_callable` | out,in | declaration | declaration | complete |
 | parameter | 1 | `of_type` | `parameter` | `type` | `has_parameter` | out,in | declaration | declaration | complete |
 | parameter | 2 | `declared_type` | `parameter` | `type` | `has_declared_parameter` | out,in | declaration | declaration | complete |
 | parameter | 3 | `adjusted_type` | `parameter` | `type` | `has_adjusted_parameter` | out,in | declaration | declaration | complete |
@@ -63,6 +64,11 @@
 | site | 1 | `of_edge` | `site` | `edge` | `has_site` | out,in | call_site | call_site | partial |
 | type | 1 | `references_symbol` | `type` | `symbol` | `of_type` | out,in | declaration | declaration | partial |
 | type | 2 | `has_type_edge` | `type` | `type` | `of_type_edge` | out,in | derived | derived | partial |
+| type | 3 | `has_layer` | `type` | `type_layer` | `of_type` | out,in | derived | derived | complete |
+| signature_slot | 1 | `of_callable` | `signature_slot` | `symbol` | `has_signature_slot` | out,in | declaration | declaration | complete |
+| signature_slot | 2 | `of_type` | `signature_slot` | `type` | `has_signature_slot` | out,in | declaration | declaration | complete |
+| type_layer | 1 | `of_type` | `type_layer` | `type` | `has_layer` | out,in | derived | derived | complete |
+| type_layer | 2 | `child` | `type_layer` | `type_layer` | `parent` | out,in | derived | derived | complete |
 
 ## Compatibility
 

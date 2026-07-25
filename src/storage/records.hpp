@@ -167,6 +167,9 @@ struct Symbol {
       false; // v13: implicit template-instantiation node
              // (X<int> type node or X<int>::member); its
              // definition is expressed via instantiates edge.
+  std::optional<std::string> callable_kind;
+  std::optional<std::string> template_origin;
+  std::optional<std::string> template_form;
   std::optional<std::string> linkage;
   std::optional<std::string> access;
   std::optional<std::string> parent_usr;
@@ -297,12 +300,13 @@ struct TypeNode {
   int64_t id = -1;
   std::string type_key;
   std::string spelling;
-  int64_t kind = 0; // type_kind.id (1=builtin .. 11=other)
+  int64_t kind = 0; // type_kind.id (1=builtin .. 14=pack-expansion)
   bool is_const = false;
   bool is_volatile = false;
   bool is_restrict = false;
   std::optional<std::string> decl_usr;
   std::optional<int64_t> canonical_id;
+  std::optional<std::string> extent;
 };
 
 struct EntityNode {
@@ -346,6 +350,7 @@ inline constexpr int64_t kTypeKindTemplateParam = 10;
 inline constexpr int64_t kTypeKindOther = 11;
 inline constexpr int64_t kTypeKindMemberDataPointer = 12;
 inline constexpr int64_t kTypeKindMemberFunctionPointer = 13;
+inline constexpr int64_t kTypeKindPackExpansion = 14;
 
 // type_edge kinds (seeded in type_edge_kind; mirrored in storage.py)
 inline constexpr int64_t kTypeEdgePointee = 1;     // pointer/reference -> inner

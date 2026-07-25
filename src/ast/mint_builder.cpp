@@ -33,6 +33,18 @@ MintBuilder::build(const clang::NamedDecl *decl) const {
   req.type_info = type_info(context_, decl);
   req.kind_name = cidx_stub_kind_name(decl);
   req.linkage = linkage_name(decl);
+  req.callable_kind = callable_kind_name(decl);
+  req.template_origin = template_origin_name(context_, decl);
+  req.template_form = template_form_name(decl);
+  if (req.callable_kind) {
+    const auto *parent = llvm::dyn_cast<clang::Decl>(decl->getDeclContext());
+    if (parent != nullptr && !llvm::isa<clang::TranslationUnitDecl>(parent)) {
+      const std::string parent_usr = usr_for_decl(parent);
+      if (!parent_usr.empty()) {
+        req.parent_usr = parent_usr;
+      }
+    }
+  }
 
   // ref_decl_loc (ast_cursor.cpp:161): the decl's own location; registered
   // file -> decl_file_id, otherwise keep the raw path so system/stdlib

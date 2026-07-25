@@ -75,7 +75,8 @@ INSERT OR IGNORE INTO type_kind(id,name) VALUES
   (10,"template-param"),
   (11,"other"),
   (12,"member-data-pointer"),
-  (13,"member-function-pointer");
+  (13,"member-function-pointer"),
+  (14,"pack-expansion");
 INSERT OR IGNORE INTO type_edge_kind(id,name) VALUES
   (1,"pointee"),
   (2,"element_type"),
@@ -122,6 +123,7 @@ INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:symbol:22",'{"completene
 INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:symbol:23",'{"completeness":"partial","evidence":"reference_site","evidence_capabilities":["reference_site","call_site"],"inverse":"of_template","layer":"symbol","name":"has_template_argument","source":"symbol.template","target":"template_argument","traversal":["out","in"],"virtual":true}');
 INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:symbol:24",'{"completeness":"partial","evidence":"call_site","evidence_capabilities":["call_site"],"inverse":"of_caller","layer":"symbol","name":"has_call_edge","source":"symbol.callable","target":"edge","traversal":["out","in"],"virtual":true}');
 INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:symbol:25",'{"completeness":"partial","evidence":"call_site","evidence_capabilities":["call_site","declaration"],"inverse":"of_symbol","layer":"symbol","name":"has_evidence","source":"symbol.callable","target":"evidence","traversal":["out","in"],"virtual":true}');
+INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:symbol:26",'{"completeness":"complete","evidence":"declaration","evidence_capabilities":["declaration"],"inverse":"of_callable","layer":"symbol","name":"has_signature_slot","source":"symbol.callable","target":"signature_slot","traversal":["out","in"],"virtual":true}');
 INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:parameter:1",'{"completeness":"complete","evidence":"declaration","evidence_capabilities":["declaration"],"inverse":"has_parameter","layer":"parameter","name":"of_type","source":"parameter","target":"type","traversal":["out","in"],"virtual":true}');
 INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:parameter:2",'{"completeness":"complete","evidence":"declaration","evidence_capabilities":["declaration"],"inverse":"has_declared_parameter","layer":"parameter","name":"declared_type","source":"parameter","target":"type","traversal":["out","in"],"virtual":true}');
 INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:parameter:3",'{"completeness":"complete","evidence":"declaration","evidence_capabilities":["declaration"],"inverse":"has_adjusted_parameter","layer":"parameter","name":"adjusted_type","source":"parameter","target":"type","traversal":["out","in"],"virtual":true}');
@@ -141,9 +143,14 @@ INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:evidence:2",'{"completen
 INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:site:1",'{"completeness":"partial","evidence":"call_site","evidence_capabilities":["call_site"],"inverse":"has_site","layer":"site","name":"of_edge","source":"site","target":"edge","traversal":["out","in"],"virtual":true}');
 INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:type:1",'{"completeness":"partial","evidence":"declaration","evidence_capabilities":["declaration"],"inverse":"of_type","layer":"type","name":"references_symbol","source":"type","target":"symbol","traversal":["out","in"],"virtual":true}');
 INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:type:2",'{"completeness":"partial","evidence":"derived","evidence_capabilities":["derived"],"inverse":"of_type_edge","layer":"type","name":"has_type_edge","source":"type","target":"type","traversal":["out","in"],"virtual":true}');
+INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:type:3",'{"completeness":"complete","evidence":"derived","evidence_capabilities":["derived"],"inverse":"of_type","layer":"type","name":"has_layer","source":"type","target":"type_layer","traversal":["out","in"],"virtual":true}');
+INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:signature_slot:1",'{"completeness":"complete","evidence":"declaration","evidence_capabilities":["declaration"],"inverse":"has_signature_slot","layer":"signature_slot","name":"of_callable","source":"signature_slot","target":"symbol","traversal":["out","in"],"virtual":true}');
+INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:signature_slot:2",'{"completeness":"complete","evidence":"declaration","evidence_capabilities":["declaration"],"inverse":"has_signature_slot","layer":"signature_slot","name":"of_type","source":"signature_slot","target":"type","traversal":["out","in"],"virtual":true}');
+INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:type_layer:1",'{"completeness":"complete","evidence":"derived","evidence_capabilities":["derived"],"inverse":"has_layer","layer":"type_layer","name":"of_type","source":"type_layer","target":"type","traversal":["out","in"],"virtual":true}');
+INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:type_layer:2",'{"completeness":"complete","evidence":"derived","evidence_capabilities":["derived"],"inverse":"parent","layer":"type_layer","name":"child","source":"type_layer","target":"type_layer","traversal":["out","in"],"virtual":true}');
 INSERT OR IGNORE INTO meta(key,value) VALUES ("extension:test.extension/relation/taints",'{"completeness":"partial","evidence":"derived","evidence_capabilities":["derived","proof"],"id":"relation/taints","inverse":"tainted_by","layer":"symbol","name":"taints","package":"test.extension","qualified_name":"test.extension/relation/taints","source":"symbol.declaration","target":"symbol.declaration","traversal":["out","in"]}');
 INSERT OR IGNORE INTO meta(key,value) VALUES ('catalog_version',1);
-INSERT OR IGNORE INTO meta(key,value) VALUES ('catalog_hash',"3337824260ee0afe1260859b6be88e6fb8280852fd736cde5e12cca5c3847ba4");
+INSERT OR IGNORE INTO meta(key,value) VALUES ('catalog_hash',"d9737467d97c6ace48899bd7e493fa3637d7923da3039a343aa20d6ac9730573");
 INSERT OR IGNORE INTO meta(key,value) VALUES ('artifact_kind','semantic-index');
 INSERT OR IGNORE INTO meta(key,value) VALUES ('status','complete');
 INSERT OR IGNORE INTO meta(key,value) VALUES ('trust','producer-verified');

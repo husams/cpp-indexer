@@ -26,6 +26,7 @@ from .generated_catalog import (
     RELATION_METADATA as _GENERATED_RELATION_METADATA,
 )
 from .generated_extensions import EXTENSION_RELATIONS as _GENERATED_EXTENSION_RELATIONS
+from .query import GraphQuery
 
 __all__ = [
     "PlanError", "TraversalMode", "UnknownPolicy", "Pred", "TargetSet", "Stage", "Source", "Plan", "Query", "Result",
@@ -149,11 +150,13 @@ _TYPED_FIELDS = {
     "parameter": {"id", "identity_key", "owner_id", "position", "pack_index", "name", "type_id", "declared_type_id", "adjusted_type_id", "default_text", "default_origin", "reference_semantics", "file_id", "line", "col"},
     "template_parameter": {"id", "identity_key", "owner_id", "position", "param_kind", "name", "default_txt", "type_id", "default_type_id", "default_ref_id"},
     "template_argument": {"id", "identity_key", "owner_id", "position", "pack_index", "arg_kind", "ref_id", "literal", "type_id"},
+    "signature_slot": {"id", "identity_key", "owner_id", "position", "pack_index", "slot_kind", "name", "type_id", "declared_type_id", "adjusted_type_id", "default_text", "default_origin", "reference_semantics"},
     "call_argument": {"id", "identity_key", "edge_id", "file_id", "line", "col", "position", "src_kind", "type_usr", "decl_usr", "callee_usr", "type_id", "decl_id", "callee_id", "type_is_value"},
     "edge": {"id", "identity_key", "src_id", "dst_id", "kind", "count", "base_access", "is_virtual", "vtable_slot", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
     "site": {"id", "identity_key", "edge_id", "file_id", "file", "line", "col", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
     "evidence": {"id", "identity_key", "owner_id", "position", "default_txt", "default_type_id", "default_ref_id", "edge_id", "file_id", "line", "col", "conditional", "args_sig", "recv_src_kind", "recv_type_usr", "recv_decl_usr", "recv_type_id", "recv_decl_id", "recv_param_pos", "recv_type_is_value", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
-    "type": {"id", "identity_key", "type_key", "spelling", "kind", "is_const", "is_volatile", "is_restrict", "cv_qualifiers", "decl_usr", "decl_id", "canonical_id"},
+    "type_layer": {"id", "identity_key", "root_id", "path", "relation", "position", "depth", "status", "type_id", "spelling", "kind", "extent", "element_type", "decl_usr", "canonical_id", "is_const", "is_volatile", "is_restrict"},
+    "type": {"id", "identity_key", "type_key", "spelling", "kind", "is_const", "is_volatile", "is_restrict", "cv_qualifiers", "decl_usr", "decl_id", "canonical_id", "extent"},
 }
 
 
@@ -779,7 +782,8 @@ def _check_cmp(p: Pred, active: str) -> None:
             "identity_key", "name", "spelling", "type_key", "default_text",
             "default_origin", "default_txt", "reference_semantics", "literal",
             "src_kind", "type_usr", "decl_usr", "callee_usr", "args_sig",
-            "recv_src_kind", "recv_type_usr", "recv_decl_usr",
+            "recv_src_kind", "recv_type_usr", "recv_decl_usr", "slot_kind",
+            "path", "relation", "status", "extent", "element_type", "kind",
         }
         is_string = p.field in typed_strings
         if is_string:
@@ -1139,6 +1143,14 @@ def _col_expr(field_name: str, symbol_alias: str = "s",
         return f"{symbol_alias}.is_pure"
     if field_name == "is_static":
         return f"{symbol_alias}.is_static"
+    if field_name == "callable_kind":
+        return f"{symbol_alias}.callable_kind"
+    if field_name == "template_origin":
+        return f"{symbol_alias}.template_origin"
+    if field_name == "template_form":
+        return f"{symbol_alias}.template_form"
+    if field_name == "owner":
+        return f"(SELECT COALESCE(p.qual_name, p.spelling) FROM symbol p WHERE p.usr = {symbol_alias}.parent_usr)"
     if field_name == "file":
         return f"{symbol_alias}.file_id"
     if field_name == "line":
@@ -1502,12 +1514,25 @@ class Executor:
                 "parameter": "SELECT owner_id,position,pack_index FROM parameter ORDER BY owner_id,position,pack_index",
                 "template_parameter": "SELECT owner_id,position FROM template_param ORDER BY owner_id,position",
                 "template_argument": "SELECT owner_id,position,pack_index FROM template_arg ORDER BY owner_id,position,pack_index",
+                "signature_slot": "SELECT symbol_id,-1,-1,0,0,1 FROM symbol_type WHERE kind=1 UNION ALL SELECT owner_id,position,pack_index,0,0,2 FROM parameter UNION ALL SELECT owner_id,position,-1,0,0,3 FROM template_param UNION ALL SELECT owner_id,position,pack_index,0,0,4 FROM template_arg ORDER BY 1,2,3,6",
                 "call_argument": "SELECT edge_id,file_id,line,col,position FROM call_arg ORDER BY edge_id,file_id,line,col,position",
                 "edge": "SELECT id FROM edge ORDER BY id",
                 "site": "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) FROM edge_site ORDER BY edge_id,file_id,line,col",
                 "evidence": "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) FROM edge_site ORDER BY edge_id,file_id,line,col",
                 "type": "SELECT id FROM type_node ORDER BY id",
             }
+            if st.view == "type_layer":
+                graph = GraphQuery.from_connection(self._conn)
+                for row in self._conn.execute("SELECT id FROM type_node ORDER BY id"):
+                    layers = graph.type_layers(row["id"])
+                    st.keys.extend((row["id"], index) for index in range(len(layers)))
+                    if len(st.keys) > ENUMERATE_BUDGET:
+                        del st.keys[ENUMERATE_BUDGET:]
+                        st.truncated = True
+                        break
+                if pred is not None:
+                    self._filter(st, pred, unknown)
+                return
             st.keys = [tuple(row) for row in self._conn.execute(
                 queries[st.view] + " LIMIT ?", (ENUMERATE_BUDGET + 1,))]
             if len(st.keys) > ENUMERATE_BUDGET:
@@ -1759,6 +1784,10 @@ class Executor:
             return f"edge:{self._portable_edge(key[0])}"
         if view == "type":
             return f"type:{self._portable_type(key[0])}"
+        if view == "signature_slot":
+            return (f"signature_slot:{self._portable_symbol(key[0])}:{key[1]}:{key[2]}:{key[5]}" )
+        if view == "type_layer":
+            return f"type_layer:{self._portable_type(key[0])}:{key[1]}"
         return view + ":" + ":".join(str(value) for value in key)
 
     def _logical_row_id(self, view: str, key: tuple[int, ...]) -> int:
@@ -1815,6 +1844,8 @@ class Executor:
                     add_rows("SELECT owner_id,position FROM template_param WHERE owner_id=? ORDER BY position", (owner,))
                 elif rel[0] == "has_template_argument":
                     add_rows("SELECT owner_id,position,pack_index FROM template_arg WHERE owner_id=? ORDER BY position,pack_index", (owner,))
+                elif rel[0] == "has_signature_slot":
+                    add_rows("SELECT symbol_id,-1,-1,0,0,1 FROM symbol_type WHERE symbol_id=? AND kind=1 UNION ALL SELECT owner_id,position,pack_index,0,0,2 FROM parameter WHERE owner_id=? UNION ALL SELECT owner_id,position,-1,0,0,3 FROM template_param WHERE owner_id=? UNION ALL SELECT owner_id,position,pack_index,0,0,4 FROM template_arg WHERE owner_id=? ORDER BY 1,2,3,6", (owner, owner, owner, owner))
                 elif rel[0] == "has_call_edge":
                     add_rows("SELECT id FROM edge WHERE src_id=? AND kind=? ORDER BY id", (owner, rel[2] - 23))
                 elif rel[0] == "has_evidence":
@@ -1826,6 +1857,45 @@ class Executor:
         elif not inbound and st.view == SYMBOL_VIEW and rel[0] == "of_type":
             for owner in st.ids:
                 add_ids("SELECT type_id FROM symbol_type WHERE symbol_id=? ORDER BY type_id", (owner,))
+        elif inbound and st.view == "signature_slot" and rel[0] == "of_callable":
+            ids.extend(key[0] for key in st.keys)
+        elif inbound and st.view == "signature_slot" and rel[0] == "of_type":
+            for key in st.keys:
+                if key[5] == 1:
+                    add_ids("SELECT type_id FROM symbol_type WHERE symbol_id=? AND kind=1", (key[0],))
+                elif key[5] == 2:
+                    add_ids("SELECT type_id FROM parameter WHERE owner_id=? AND position=? AND pack_index=?", key[:3])
+                elif key[5] == 3:
+                    add_ids("SELECT type_id FROM template_param WHERE owner_id=? AND position=?", key[:2])
+                else:
+                    add_ids("SELECT type_id FROM template_arg WHERE owner_id=? AND position=? AND pack_index=?", key[:3])
+        elif not inbound and st.view == "type" and rel[0] == "has_layer":
+            graph = GraphQuery.from_connection(self._conn)
+            for key in st.keys:
+                for index, _layer in enumerate(graph.type_layers(key[0])):
+                    add_synthetic((key[0], index))
+        elif not inbound and st.view == "type_layer" and rel[0] == "of_type":
+            ids.extend(key[0] for key in st.keys)
+        elif not inbound and st.view == "type_layer" and rel[0] == "child":
+            graph = GraphQuery.from_connection(self._conn)
+            for key in st.keys:
+                layers = graph.type_layers(key[0])
+                if key[1] < len(layers):
+                    parent = layers[key[1]]
+                    for index, child in enumerate(layers):
+                        if (child["depth"] == parent["depth"] + 1 and
+                                child["path"].startswith(parent["path"] + ".")):
+                            add_synthetic((key[0], index))
+        elif inbound and st.view == "type_layer" and rel[0] == "parent":
+            graph = GraphQuery.from_connection(self._conn)
+            for key in st.keys:
+                layers = graph.type_layers(key[0])
+                if key[1] < len(layers):
+                    child = layers[key[1]]
+                    for index, parent in enumerate(layers):
+                        if (child["depth"] == parent["depth"] + 1 and
+                                child["path"].startswith(parent["path"] + ".")):
+                            add_synthetic((key[0], index))
         elif inbound and st.view in ("parameter", "template_parameter", "template_argument", "call_argument", "edge", "evidence") and rel[0] in ("has_parameter", "has_template_parameter", "has_template_argument", "has_call_edge"):
             if rel[0] in ("has_parameter", "has_template_parameter", "has_template_argument"):
                 ids.extend(key[0] for key in st.keys)
@@ -2062,7 +2132,7 @@ class Executor:
             "evidence": {"edge_id", "file_id", "line", "col", "conditional", "args_sig", "recv_src_kind", "recv_type_usr", "recv_decl_usr", "recv_type_id", "recv_decl_id", "recv_param_pos", "recv_type_is_value"},
             "site": {"edge_id", "file_id", "line", "col"},
             "edge": {"id", "src_id", "dst_id", "kind", "count", "base_access", "is_virtual", "vtable_slot"},
-            "type": {"id", "type_key", "spelling", "kind", "is_const", "is_volatile", "is_restrict", "decl_usr", "decl_id", "canonical_id"},
+        "type": {"id", "type_key", "spelling", "kind", "is_const", "is_volatile", "is_restrict", "decl_usr", "decl_id", "canonical_id", "extent"},
         }
         return field_name if field_name in columns[view] else ""
 
@@ -2175,8 +2245,97 @@ class Executor:
         self, st: _Stream, fields: Sequence[str]
     ) -> dict[tuple[int, ...], tuple[Any, ...]]:
         result: dict[tuple[int, ...], tuple[Any, ...]] = {}
-        string_fields = {"name", "spelling", "type_key", "default_text", "default_origin", "default_txt", "reference_semantics", "literal", "src_kind", "type_usr", "decl_usr", "callee_usr", "args_sig", "recv_src_kind", "recv_type_usr", "recv_decl_usr", "identity_key", "file"}
+        string_fields = {"name", "spelling", "type_key", "extent", "default_text", "default_origin", "default_txt", "reference_semantics", "literal", "src_kind", "type_usr", "decl_usr", "callee_usr", "args_sig", "recv_src_kind", "recv_type_usr", "recv_decl_usr", "identity_key", "file"}
         for key in st.keys:
+            if st.view == "signature_slot":
+                role = key[5]
+                if role == 1:
+                    row = self._conn.execute(
+                        "SELECT type_id FROM symbol_type WHERE symbol_id=? AND kind=1",
+                        (key[0],)).fetchone()
+                    values = ("return", None, None, row[0] if row else None,
+                              row[0] if row else None, row[0] if row else None,
+                              None, None, None)
+                elif role == 2:
+                    row = self._conn.execute(
+                        "SELECT name,type_id,declared_type_id,adjusted_type_id,"
+                        "default_text,default_origin,reference_semantics FROM parameter "
+                        "WHERE owner_id=? AND position=? AND pack_index=?",
+                        key[:3]).fetchone()
+                    if row is None:
+                        continue
+                    values = ("parameter", row[0], row[1], row[1], row[2], row[3],
+                              row[4], row[5], row[6])
+                elif role == 3:
+                    row = self._conn.execute(
+                        "SELECT name,type_id,default_txt FROM template_param "
+                        "WHERE owner_id=? AND position=?", key[:2]).fetchone()
+                    if row is None:
+                        continue
+                    values = ("template_parameter", row[0], None, row[1], row[1],
+                              row[1], row[2], None, None)
+                else:
+                    row = self._conn.execute(
+                        "SELECT type_id,literal FROM template_arg WHERE owner_id=? "
+                        "AND position=? AND pack_index=?", key[:3]).fetchone()
+                    if row is None:
+                        continue
+                    values = ("template_argument", None, key[2], row[0], row[0],
+                              row[0], row[1], None, None)
+                cells = []
+                for field_name in fields:
+                    if field_name == "id":
+                        cells.append(self._logical_row_id(st.view, key))
+                    elif field_name == "identity_key":
+                        cells.append(self._logical_identity(st.view, key))
+                    elif field_name == "owner_id":
+                        cells.append(key[0])
+                    elif field_name == "position":
+                        cells.append(None if key[1] < 0 else key[1])
+                    elif field_name == "pack_index":
+                        cells.append(None if key[2] < 0 else key[2])
+                    elif field_name == "slot_kind":
+                        cells.append(values[0])
+                    elif field_name == "name":
+                        cells.append(values[1])
+                    elif field_name in {"type_id", "declared_type_id", "adjusted_type_id"}:
+                        cells.append(values[{"type_id": 3, "declared_type_id": 4, "adjusted_type_id": 5}[field_name]])
+                    elif field_name == "default_text":
+                        cells.append(values[6])
+                    elif field_name == "default_origin":
+                        cells.append(values[7])
+                    elif field_name == "reference_semantics":
+                        cells.append(values[8])
+                    else:
+                        cells.append(None)
+                result[key] = tuple(cells)
+                continue
+            if st.view == "type_layer":
+                graph = GraphQuery.from_connection(self._conn)
+                layers = graph.type_layers(key[0])
+                if key[1] >= len(layers):
+                    continue
+                layer = layers[key[1]]
+                type_row = self._conn.execute(
+                    "SELECT canonical_id,is_const,is_volatile,is_restrict FROM type_node WHERE id=?",
+                    (layer.get("id"),)).fetchone()
+                raw = {
+                    "id": self._logical_row_id(st.view, key),
+                    "identity_key": self._logical_identity(st.view, key),
+                    "root_id": key[0], "path": layer.get("path"),
+                    "relation": layer.get("relation"), "position": layer.get("position"),
+                    "depth": layer.get("depth"), "status": layer.get("status"),
+                    "type_id": layer.get("id"), "spelling": layer.get("spelling"),
+                    "kind": layer.get("kind"), "extent": layer.get("extent"),
+                    "element_type": layer.get("element_type"),
+                    "decl_usr": layer.get("decl_usr"),
+                    "canonical_id": type_row[0] if type_row else None,
+                    "is_const": type_row[1] if type_row else None,
+                    "is_volatile": type_row[2] if type_row else None,
+                    "is_restrict": type_row[3] if type_row else None,
+                }
+                result[key] = tuple(raw.get(field_name) for field_name in fields)
+                continue
             if st.view == "evidence" and len(key) > 4 and key[4] == 1:
                 source = self._conn.execute(
                     "SELECT default_txt,default_type_id,default_ref_id "

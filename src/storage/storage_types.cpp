@@ -46,9 +46,11 @@ int64_t SqliteStorageService::intern_type_node(const TypeNode &n) {
     auto ins = db_.prepare(
         "INSERT INTO type_node "
         "(type_key, spelling, kind, is_const, is_volatile, is_restrict, "
-        " decl_usr, decl_id, canonical_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " decl_usr, decl_id, canonical_id, extent) VALUES (?, ?, ?, ?, ?, ?, "
+        "?, ?, ?, ?) "
         "ON CONFLICT(type_key) DO UPDATE SET "
         "canonical_id = excluded.canonical_id, "
+        "extent = COALESCE(excluded.extent, type_node.extent), "
         "decl_id = COALESCE(excluded.decl_id, type_node.decl_id)");
     ins.bind(1, std::string_view(n.type_key));
     ins.bind(2, std::string_view(n.spelling));
@@ -59,6 +61,7 @@ int64_t SqliteStorageService::intern_type_node(const TypeNode &n) {
     bind_opt(ins, 7, n.decl_usr);
     bind_opt(ins, 8, decl_id);
     bind_opt(ins, 9, n.canonical_id);
+    bind_opt(ins, 10, n.extent);
     ins.step_done();
   }
   auto sel = db_.prepare("SELECT id FROM type_node WHERE type_key = ?");
@@ -74,9 +77,10 @@ int64_t SqliteStorageService::intern_type_node(const TypeNode &n) {
 }
 
 std::optional<TypeNode> SqliteStorageService::type_node_by_id(int64_t type_id) {
-  auto st = db_.prepare(
-      "SELECT id, type_key, spelling, kind, is_const, is_volatile, "
-      "is_restrict, decl_usr, canonical_id FROM type_node WHERE id = ?");
+  auto st =
+      db_.prepare("SELECT id, type_key, spelling, kind, is_const, is_volatile, "
+                  "is_restrict, decl_usr, canonical_id, extent FROM type_node "
+                  "WHERE id = ?");
   st.bind(1, type_id);
   if (!st.step()) {
     return std::nullopt;
@@ -91,6 +95,7 @@ std::optional<TypeNode> SqliteStorageService::type_node_by_id(int64_t type_id) {
   n.is_restrict = st.col_int64(6) != 0;
   n.decl_usr = opt_text(st, 7);
   n.canonical_id = opt_int64(st, 8);
+  n.extent = opt_text(st, 9);
   return n;
 }
 

@@ -769,6 +769,72 @@ TEST_CASE("query_plan: typed parameter views preserve natural slot identity") {
   CHECK(std::get<std::string>(reverse.rows[0][0]) == "typed");
 }
 
+TEST_CASE(
+    "query_plan: named signature slots and recursive type layers are typed") {
+  Storage db(":memory:");
+  Symbol callable = make_sym("USR::typed_views", "typed_views", "function");
+  callable.callable_kind = "free-function";
+  callable.template_origin = "typed_views<T>";
+  callable.template_form = "pattern";
+  const int64_t owner = db.add_symbol(callable);
+  db.raw_db().exec(
+      "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+      "('A4(b:int)','int[4]',8,'4'),('b:int','int',1,NULL)");
+  auto type_ids = db.raw_db().prepare("SELECT id FROM type_node ORDER BY id");
+  REQUIRE(type_ids.step());
+  const int64_t array_id = type_ids.col_int64(0);
+  REQUIRE(type_ids.step());
+  const int64_t int_id = type_ids.col_int64(0);
+  db.add_type_edge(array_id, 2, 0, int_id);
+  db.add_symbol_type(owner, 1, array_id);
+  db.raw_db().exec(
+      "INSERT INTO parameter(owner_id,position,pack_index,name,type_id,"
+      "declared_type_id,adjusted_type_id) VALUES (1,0,-1,'value',2,2,2)");
+  const auto structure = [&] {
+    auto symbols = db.raw_db().prepare(
+        "SELECT count(*),COALESCE(group_concat(id,','),'') FROM symbol");
+    REQUIRE(symbols.step());
+    auto edges = db.raw_db().prepare(
+        "SELECT count(*),COALESCE(group_concat(id,','),'') FROM edge");
+    REQUIRE(edges.step());
+    return std::tuple{symbols.col_int64(0), symbols.col_text(1),
+                      edges.col_int64(0), edges.col_text(1)};
+  };
+  const auto before = structure();
+  QueryExecutor ex(db);
+  const auto symbols =
+      ex.run((start(symbol("USR::typed_views")) |
+              where(all_of({eq("callable_kind", "free-function"),
+                            eq("template_origin", "typed_views<T>"),
+                            eq("template_form", "pattern")})) |
+              select({"callable_kind", "template_origin", "template_form"}))
+                 .plan());
+  REQUIRE(symbols.rows.size() == 1);
+  CHECK(std::get<std::string>(symbols.rows[0][0]) == "free-function");
+  const auto slots =
+      ex.run((start(symbol("USR::typed_views")) | out("has_signature_slot") |
+              where(eq("slot_kind", "parameter")) |
+              select({"slot_kind", "position", "name", "type_id"}))
+                 .plan());
+  REQUIRE(slots.rows.size() == 1);
+  CHECK(std::get<std::string>(slots.rows[0][0]) == "parameter");
+  CHECK(std::get<int64_t>(slots.rows[0][1]) == 0);
+  CHECK(std::get<std::string>(slots.rows[0][2]) == "value");
+  CHECK(std::get<int64_t>(slots.rows[0][3]) == int_id);
+  const auto layers = ex.run(
+      (start(codebase()) | view(View::Type) | nodes() | out("has_layer") |
+       where(eq("root_id", array_id)) |
+       select({"root_id", "path", "relation", "depth", "status", "extent"}))
+          .plan());
+  REQUIRE(layers.rows.size() == 2);
+  CHECK(std::get<std::string>(layers.rows[0][1]) == "root");
+  CHECK(std::get<std::string>(layers.rows[1][1]) == "root.element");
+  CHECK(std::get<std::string>(layers.rows[1][2]) == "element_type");
+  CHECK(std::get<std::string>(layers.rows[0][4]) == "complete");
+  CHECK(std::get<std::string>(layers.rows[0][5]) == "4");
+  CHECK(structure() == before);
+}
+
 TEST_CASE("query_plan: template defaults expose logical evidence") {
   Storage db(":memory:");
   const int64_t owner =

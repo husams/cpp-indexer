@@ -42,13 +42,13 @@ from indexer.generated_catalog import (
     SYMBOL_KIND_IDS as _GENERATED_SYMBOL_KIND_IDS,
 )
 
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 42
 PREVIOUS_SCHEMA_VERSION = SCHEMA_VERSION - 1
 
 # HSE-79 is the only supported predecessor for the HSE-82 storage migration.
 # Keep this explicit so an unrelated semantic catalog is never silently
 # accepted merely because the database is writable.
-PREVIOUS_CATALOG_HASH = "5a691cc4ecd6104beef77c602f9c09be641e1dd72591e3d02a3754a0a181f8fb"
+PREVIOUS_CATALOG_HASH = "eed1f38ccdc779776c637d8e8ffbc015c7616a94fecabd5e4302f0587c1bab93"
 
 
 def _md5_of(path: str) -> Optional[str]:
@@ -281,6 +281,9 @@ CREATE TABLE IF NOT EXISTS symbol (
                                               -- file-scope `static` free function
                                               -- is captured by linkage='internal'
     is_instantiation INTEGER NOT NULL DEFAULT 0,  -- v13: implicit template
+    callable_kind TEXT,
+    template_origin TEXT,
+    template_form TEXT,
                                               -- instantiation node (own USR,
                                               -- definition via `instantiates` edge)
     is_named_instance INTEGER NOT NULL DEFAULT 0, -- v20: a template instance
@@ -693,7 +696,8 @@ INSERT OR IGNORE INTO type_kind (id, name) VALUES
   (1,'builtin'), (2,'record'), (3,'enum'), (4,'alias'),
   (5,'pointer'), (6,'lvalue-reference'), (7,'rvalue-reference'),
   (8,'array'), (9,'function'), (10,'template-param'), (11,'other'),
-  (12,'member-data-pointer'), (13,'member-function-pointer');
+  (12,'member-data-pointer'), (13,'member-function-pointer'),
+  (14,'pack-expansion');
 
 CREATE TABLE IF NOT EXISTS type_node (
     id           INTEGER PRIMARY KEY,
@@ -705,7 +709,8 @@ CREATE TABLE IF NOT EXISTS type_node (
     is_restrict  INTEGER NOT NULL DEFAULT 0,
     decl_usr     TEXT,
     decl_id      INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
-    canonical_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL
+    canonical_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    extent      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_type_node_decl_usr ON type_node(decl_usr);
 CREATE INDEX IF NOT EXISTS idx_type_node_decl_id ON type_node(decl_id);
@@ -1835,6 +1840,9 @@ class Symbol:
     is_pure: bool = False
     is_static: bool = False
     is_instantiation: bool = False  # v13: implicit template-instantiation node
+    callable_kind: Optional[str] = None
+    template_origin: Optional[str] = None
+    template_form: Optional[str] = None
     linkage: Optional[str] = None
     access: Optional[str] = None
     parent_usr: Optional[str] = None
@@ -3047,6 +3055,14 @@ class Storage:
             )
             if legacy_hashes.rowcount > 0:
                 changed = True
+        if "symbol" in tables:
+            add_column("symbol", "callable_kind", "TEXT")
+            add_column("symbol", "template_origin", "TEXT")
+            add_column("symbol", "template_form", "TEXT")
+        if "type_node" in tables:
+            add_column("type_node", "extent", "TEXT")
+        if "symbol" in tables or "type_node" in tables:
+            changed = True
         if "artifact" not in tables:
             # v37 -> v38: add the manifest-governed artifact tables. The schema
             # script creates the tables after migrate; this probe only advances
@@ -4933,6 +4949,9 @@ class Storage:
         "const_value",
         "semantic_universe_id",
         "identity_key",
+        "callable_kind",
+        "template_origin",
+        "template_form",
     )
 
     def add_symbol(self, sym: Symbol) -> int:
@@ -4996,6 +5015,9 @@ class Storage:
             # v33: only the initializer-bearing decl evaluates to a value, so a
             # plain declaration must not erase the definition's stored constant.
             "  const_value   = COALESCE(excluded.const_value, symbol.const_value) "
+            ", callable_kind = COALESCE(excluded.callable_kind, symbol.callable_kind) "
+            ", template_origin = COALESCE(excluded.template_origin, symbol.template_origin) "
+            ", template_form = COALESCE(excluded.template_form, symbol.template_form) "
             "RETURNING id",
             vals,
         )

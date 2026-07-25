@@ -40,6 +40,7 @@ inline constexpr int64_t kTypeTemplateParam = 10;
 inline constexpr int64_t kTypeOther = 11;
 inline constexpr int64_t kTypeMemberDataPointer = 12;
 inline constexpr int64_t kTypeMemberFunctionPointer = 13;
+inline constexpr int64_t kTypePackExpansion = 14;
 
 // type_edge.kind codes (mirrors the storage type_edge_kind seed).
 inline constexpr int64_t kTypeEdgePointeeK = 1;

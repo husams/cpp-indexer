@@ -182,7 +182,6 @@ public:
   // spelling attached when the node is sugared).
   struct TypeInfo {
     int64_t id = -1;
-    std::string type_key;
     std::string spelling;
     std::string kind; // type_kind name ("builtin", "record", "alias", ...)
     std::optional<std::string> canonical; // canonical spelling when sugared
@@ -190,6 +189,7 @@ public:
     bool is_const = false;
     bool is_volatile = false;
     bool is_restrict = false;
+    std::optional<std::string> extent;
   };
   struct ParamInfo {
     int64_t position = 0;
@@ -214,6 +214,9 @@ public:
     std::string path;
     std::string relation;
     int64_t position = 0;
+    int depth = 0;
+    std::string status = "complete";
+    std::optional<std::string> element_type;
     TypeInfo type;
   };
   // Everything the signature/type tier knows about one symbol. Callables get

@@ -195,9 +195,9 @@ TEST_CASE(
   check_migrated(path);
 }
 
-TEST_CASE("predecessor catalog hash requires the v38 to v39 migration") {
+TEST_CASE("predecessor catalog hash requires the v41 to v42 migration") {
   const std::string tmp = make_temp_dir();
-  for (const char *wrong_version : {"37", "39"}) {
+  for (const char *wrong_version : {"40", "42"}) {
     const std::string path =
         std::string(tmp) + "/wrong-" + wrong_version + ".db";
     {
@@ -209,7 +209,7 @@ TEST_CASE("predecessor catalog hash requires the v38 to v39 migration") {
                "' WHERE key = 'schema_version'");
       raw.exec(
           "UPDATE meta SET value = "
-          "'5a691cc4ecd6104beef77c602f9c09be641e1dd72591e3d02a3754a0a181f8fb' "
+          "'eed1f38ccdc779776c637d8e8ffbc015c7616a94fecabd5e4302f0587c1bab93' "
           "WHERE key = 'catalog_hash'");
     }
     CHECK_THROWS_AS(cidx::Storage{path}, cidx::CidxError);
@@ -558,11 +558,12 @@ TEST_CASE("v29 -> v30: signature/type tier tables created, version stamped") {
   }
   cidx::SqliteDb raw(path);
   // migrate() stamps kSchemaVersion, not the version of the block that fired:
-  // a v29 DB reopened by a v31 build lands on 31 in one step.
+  // a v29 DB reopened by a current build lands on the current version in one
+  // step.
   CHECK(meta_version(raw) == std::to_string(cidx::kSchemaVersion));
   auto st = raw.prepare("SELECT COUNT(*) FROM type_kind");
   REQUIRE(st.step());
-  CHECK(st.col_int64(0) == 13); // seed rows present
+  CHECK(st.col_int64(0) == 14); // seed rows present
 }
 
 TEST_CASE("v34 -> v35: legacy occurrence text is migrated losslessly") {

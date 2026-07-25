@@ -101,12 +101,11 @@ def _import_query():
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_36():
+def test_schema_version_is_current():
     """SCHEMA_VERSION must match the current storage contract."""
     storage = _import_storage()
-    assert storage.SCHEMA_VERSION == 39, (
-        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 30. "
-        "storage.py SCHEMA_VERSION must be bumped to 30 (type_node/type_edge/parameter/symbol_type)."
+    assert storage.SCHEMA_VERSION == 42, (
+        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 42."
     )
 
 
@@ -330,15 +329,14 @@ def test_cpp_version_is_0501():
     assert version == expected
 
 
-def test_cpp_schema_version_is_36():
+def test_cpp_schema_version_is_current():
     """C++ kSchemaVersion must match the current storage contract."""
     hpp_src = _read(_STORAGE_HPP)
     match = re.search(r'kSchemaVersion\s*=\s*(\d+)', hpp_src)
     assert match is not None, "kSchemaVersion not found in storage.hpp."
     version = int(match.group(1))
-    assert version == 39, (
-        f"C++ kSchemaVersion is {version}; expected 30. "
-        "Bump kSchemaVersion 29 -> 30 in storage.hpp (type_node/type_edge/parameter/symbol_type)."
+    assert version == 42, (
+        f"C++ kSchemaVersion is {version}; expected 42."
     )
 
 

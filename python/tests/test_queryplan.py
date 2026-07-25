@@ -591,6 +591,66 @@ def test_typed_parameter_view_preserves_natural_slot_identity():
     assert reverse.rows == [("typed",)]
 
 
+def test_named_signature_slots_and_recursive_type_layers_match_cpp_values():
+    db = Storage(":memory:")
+    owner = db.add_symbol(Symbol(
+        usr="USR::typed_views", spelling="typed_views", kind="function",
+        is_definition=True, resolved=True, callable_kind="free-function",
+        template_origin="typed_views<T>", template_form="pattern"))
+    db._conn.execute(
+        "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+        "('A4(b:int)','int[4]',8,'4'),('b:int','int',1,NULL)"
+    )
+    type_ids = [row[0] for row in db._conn.execute(
+        "SELECT id FROM type_node ORDER BY id")]
+    array_id, int_id = type_ids
+    db._conn.execute(
+        "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES (?,?,?,?)",
+        (array_id, 2, 0, int_id))
+    db._conn.execute(
+        "INSERT INTO symbol_type(symbol_id,kind,type_id) VALUES (?,?,?)",
+        (owner, 1, array_id))
+    db._conn.execute(
+        "INSERT INTO parameter(owner_id,position,pack_index,name,type_id,"
+        "declared_type_id,adjusted_type_id) VALUES (?,?,?,?,?,?,?)",
+        (owner, 0, -1, "value", int_id, int_id, int_id))
+    db._conn.commit()
+
+    def structure():
+        symbols = tuple(db._conn.execute(
+            "SELECT id,usr FROM symbol ORDER BY id"))
+        edges = tuple(db._conn.execute(
+            "SELECT src_id,dst_id,kind FROM edge ORDER BY id"))
+        return len(symbols), symbols, len(edges), edges
+
+    before = structure()
+    ex = Executor(db)
+    symbols = ex.run(
+        (start(symbol("USR::typed_views"))
+         | where(all_of([eq("callable_kind", "free-function"),
+                         eq("template_origin", "typed_views<T>"),
+                         eq("template_form", "pattern")]))
+         | select(["callable_kind", "template_origin", "template_form"])).plan)
+    assert symbols.rows == [("free-function", "typed_views<T>", "pattern")]
+
+    slots = ex.run(
+        (start(symbol("USR::typed_views")) | out("has_signature_slot")
+         | where(eq("slot_kind", "parameter"))
+         | select(["slot_kind", "position", "name", "type_id"])).plan)
+    assert slots.rows == [("parameter", 0, "value", int_id)]
+
+    layers = ex.run(
+        (start(codebase()) | view("type") | nodes() | out("has_layer")
+         | where(eq("root_id", array_id))
+         | select(["root_id", "path", "relation", "depth", "status",
+                  "extent"])).plan)
+    assert layers.rows == [
+        (array_id, "root", "root", 0, "complete", "4"),
+        (array_id, "root.element", "element_type", 1, "complete", None),
+    ]
+    assert structure() == before
+
+
 def test_template_defaults_expose_logical_evidence():
     db = Storage(":memory:")
     owner = db.add_symbol(_make_sym("USR::template", "template", "class"))

@@ -58,7 +58,7 @@ def test_v29_to_v30_creates_tier_and_stamps_version(tmp_path):
     conn.close()
     assert ver == str(SCHEMA_VERSION)
     assert set(_V30_TABLES) <= tables
-    assert seeds == 13
+    assert seeds == 14
 
 
 def _seed_signature_fixture(path: str) -> None:

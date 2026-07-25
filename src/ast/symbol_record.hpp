@@ -27,6 +27,9 @@ struct SymbolRecord {
   bool is_pure = false;
   bool is_static = false;
   bool is_instantiation = false; // from TemplateSpecializationKind
+  std::optional<std::string> callable_kind;
+  std::optional<std::string> template_origin;
+  std::optional<std::string> template_form;
   std::optional<std::string> linkage;
   std::optional<std::string> access;
   std::optional<std::string> parent_usr;

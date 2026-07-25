@@ -37,6 +37,10 @@ struct MintRequest {
   bool is_named_instance = false;       // X<B> minted from alias/member/local
   std::optional<std::string> identity_source; // portable declaration source
   std::optional<std::string> linkage;
+  std::optional<std::string> callable_kind;
+  std::optional<std::string> template_origin;
+  std::optional<std::string> template_form;
+  std::optional<std::string> parent_usr;
 };
 
 struct TemplateParamRecord {
@@ -75,6 +79,7 @@ struct TypeNodeRecord {
   bool is_restrict = false;
   std::optional<std::string> decl_usr;
   std::optional<int64_t> canonical_id;
+  std::optional<std::string> extent;
 };
 
 // One parameter of a callable (replace_parameters payload).

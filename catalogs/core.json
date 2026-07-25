@@ -2,7 +2,7 @@
   "format": "cidx.catalog/v1",
   "catalog_version": 1,
   "product": "cidx",
-  "views": ["symbol", "entity", "parameter", "template_parameter", "template_argument", "call_argument", "edge", "site", "evidence", "type"],
+  "views": ["symbol", "entity", "parameter", "template_parameter", "template_argument", "signature_slot", "call_argument", "edge", "site", "evidence", "type", "type_layer"],
   "symbol_kinds": [
     {"id": 2, "name": "struct"},
     {"id": 3, "name": "union"},
@@ -60,6 +60,7 @@
     ,{"id": 23, "name": "has_template_argument", "layer": "symbol", "source": "symbol.template", "target": "template_argument", "inverse": "of_template", "traversal": ["out", "in"], "evidence": "reference_site", "evidence_capabilities": ["reference_site", "call_site"], "completeness": "partial", "virtual": true}
     ,{"id": 24, "name": "has_call_edge", "layer": "symbol", "source": "symbol.callable", "target": "edge", "inverse": "of_caller", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial", "virtual": true}
     ,{"id": 25, "name": "has_evidence", "layer": "symbol", "source": "symbol.callable", "target": "evidence", "inverse": "of_symbol", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site", "declaration"], "completeness": "partial", "virtual": true}
+    ,{"id": 26, "name": "has_signature_slot", "layer": "symbol", "source": "symbol.callable", "target": "signature_slot", "inverse": "of_callable", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "complete", "virtual": true}
     ,{"id": 1, "name": "of_type", "layer": "parameter", "source": "parameter", "target": "type", "inverse": "has_parameter", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "complete", "virtual": true}
     ,{"id": 2, "name": "declared_type", "layer": "parameter", "source": "parameter", "target": "type", "inverse": "has_declared_parameter", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "complete", "virtual": true}
     ,{"id": 3, "name": "adjusted_type", "layer": "parameter", "source": "parameter", "target": "type", "inverse": "has_adjusted_parameter", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "complete", "virtual": true}
@@ -79,6 +80,11 @@
     ,{"id": 1, "name": "of_edge", "layer": "site", "source": "site", "target": "edge", "inverse": "has_site", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial", "virtual": true}
     ,{"id": 1, "name": "references_symbol", "layer": "type", "source": "type", "target": "symbol", "inverse": "of_type", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "partial", "virtual": true}
     ,{"id": 2, "name": "has_type_edge", "layer": "type", "source": "type", "target": "type", "inverse": "of_type_edge", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "partial", "virtual": true}
+    ,{"id": 3, "name": "has_layer", "layer": "type", "source": "type", "target": "type_layer", "inverse": "of_type", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "complete", "virtual": true}
+    ,{"id": 1, "name": "of_callable", "layer": "signature_slot", "source": "signature_slot", "target": "symbol", "inverse": "has_signature_slot", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "complete", "virtual": true}
+    ,{"id": 2, "name": "of_type", "layer": "signature_slot", "source": "signature_slot", "target": "type", "inverse": "has_signature_slot", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "complete", "virtual": true}
+    ,{"id": 1, "name": "of_type", "layer": "type_layer", "source": "type_layer", "target": "type", "inverse": "has_layer", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "complete", "virtual": true}
+    ,{"id": 2, "name": "child", "layer": "type_layer", "source": "type_layer", "target": "type_layer", "inverse": "parent", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "complete", "virtual": true}
   ],
   "entity_kinds": [
     {"id": 0, "name": "other"}, {"id": 1, "name": "class"},
@@ -95,7 +101,8 @@
     {"id": 7, "name": "rvalue-reference"}, {"id": 8, "name": "array"},
     {"id": 9, "name": "function"}, {"id": 10, "name": "template-param"},
     {"id": 11, "name": "other"}, {"id": 12, "name": "member-data-pointer"},
-    {"id": 13, "name": "member-function-pointer"}
+    {"id": 13, "name": "member-function-pointer"},
+    {"id": 14, "name": "pack-expansion"}
   ],
   "type_edge_kinds": [
     {"id": 1, "name": "pointee"}, {"id": 2, "name": "element_type"},
@@ -114,6 +121,10 @@
     {"name": "is_definition", "filterable": true, "is_string": false},
     {"name": "is_pure", "filterable": true, "is_string": false},
     {"name": "is_static", "filterable": true, "is_string": false},
+    {"name": "callable_kind", "filterable": true, "is_string": true},
+    {"name": "template_origin", "filterable": true, "is_string": true},
+    {"name": "template_form", "filterable": true, "is_string": true},
+    {"name": "owner", "filterable": true, "is_string": true},
     {"name": "file", "filterable": false, "is_string": true},
     {"name": "line", "filterable": false, "is_string": false},
     {"name": "col", "filterable": false, "is_string": false},
@@ -144,6 +155,14 @@
     {"name": "cv_qualifiers", "filterable": true, "is_string": false},
     {"name": "decl_id", "filterable": true, "is_string": false},
     {"name": "canonical_id", "filterable": true, "is_string": false},
+    {"name": "extent", "filterable": true, "is_string": true},
+    {"name": "element_type", "filterable": true, "is_string": true},
+    {"name": "path", "filterable": true, "is_string": true},
+    {"name": "relation", "filterable": true, "is_string": true},
+    {"name": "depth", "filterable": true, "is_string": false},
+    {"name": "status", "filterable": true, "is_string": true},
+    {"name": "root_id", "filterable": true, "is_string": false},
+    {"name": "slot_kind", "filterable": true, "is_string": true},
     {"name": "src_id", "filterable": true, "is_string": false},
     {"name": "dst_id", "filterable": true, "is_string": false}
   ],

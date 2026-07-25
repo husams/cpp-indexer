@@ -130,6 +130,9 @@ CREATE TABLE IF NOT EXISTS symbol (
                                               -- file-scope `static` free function
                                               -- is captured by linkage='internal'
     is_instantiation INTEGER NOT NULL DEFAULT 0,  -- v13: implicit template
+    callable_kind TEXT,
+    template_origin TEXT,
+    template_form TEXT,
                                               -- instantiation node (own USR,
                                               -- definition via `instantiates` edge)
     is_named_instance INTEGER NOT NULL DEFAULT 0, -- v20: instance minted from a
@@ -554,7 +557,8 @@ INSERT OR IGNORE INTO type_kind (id, name) VALUES
   (1,'builtin'), (2,'record'), (3,'enum'), (4,'alias'),
   (5,'pointer'), (6,'lvalue-reference'), (7,'rvalue-reference'),
   (8,'array'), (9,'function'), (10,'template-param'), (11,'other'),
-  (12,'member-data-pointer'), (13,'member-function-pointer');
+  (12,'member-data-pointer'), (13,'member-function-pointer'),
+  (14,'pack-expansion');
 
 -- One row per distinct type SHAPE. Identity is type_key -- a deterministic
 -- structural encoding of the Clang type (grammar in ast/type_graph.cpp), NOT
@@ -574,7 +578,8 @@ CREATE TABLE IF NOT EXISTS type_node (
     is_restrict  INTEGER NOT NULL DEFAULT 0,
     decl_usr     TEXT,
     decl_id      INTEGER REFERENCES symbol(id) ON DELETE SET NULL,
-    canonical_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL
+    canonical_id INTEGER REFERENCES type_node(id) ON DELETE SET NULL,
+    extent      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_type_node_decl_usr ON type_node(decl_usr);
 CREATE INDEX IF NOT EXISTS idx_type_node_decl_id ON type_node(decl_id);
@@ -867,7 +872,7 @@ CREATE TABLE IF NOT EXISTS artifact_pin (
     PRIMARY KEY (artifact_id, pin_id)
 ) WITHOUT ROWID;
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '39');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '42');
 )sql";
 
 // v2 -> v3 qual_name backfill — verbatim from storage.py:231-244: the longest

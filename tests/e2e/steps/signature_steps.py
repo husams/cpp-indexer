@@ -497,20 +497,15 @@ def template_provenance(workspace: Workspace, datatable):
     for want in rows(datatable):
         s=workspace.resolve(want["callable"])
         rels = workspace.graph.edges_out(s, kinds=("instantiates", "specializes"))
-        if any(e.kind == "specializes" for e in rels):
-            form = "explicit-specialization"
-        elif s.is_instantiation:
-            explicit = False
-            if s.line is not None and workspace.source is not None:
-                lines = workspace.source.read_text(encoding="utf-8").splitlines()
-                explicit = 1 <= s.line <= len(lines) and lines[s.line - 1].lstrip().startswith("template ")
-            form = "explicit-instantiation" if explicit else "implicit-instantiation"
-        else:
-            owners = workspace.graph.edges_out(s, kinds=("method_of",))
-            if owners and "<" in owners[0].peer.name:
-                form = "owner-instance-member" if "<" in owners[0].peer.name and "T" not in owners[0].peer.name else "owner-pattern-member"
-            else:
-                form = "pattern"
+        form = s.template_form or "unknown"
+        origin = s.template_origin
+        owner = None
+        if s.parent_usr:
+            parent = workspace.graph.get(s.parent_usr)
+            owner = parent.name if parent else None
+        assert s.callable_kind == want["callable_kind"], (want, s, s.callable_kind)
+        assert origin == want["template_origin"], (want, s, origin)
+        assert owner == want["owner"], (want, s, owner)
         assert form == want["template_form"], (want, s, form)
 
 

@@ -6,8 +6,8 @@
 
 namespace cidx::catalog {
 inline constexpr int kCatalogVersion = 1;
-inline constexpr std::string_view kCatalogHash = "3337824260ee0afe1260859b6be88e6fb8280852fd736cde5e12cca5c3847ba4";
-enum class View : std::uint8_t { Symbol, Entity, Parameter, TemplateParameter, TemplateArgument, CallArgument, Edge, Site, Evidence, Type };
+inline constexpr std::string_view kCatalogHash = "d9737467d97c6ace48899bd7e493fa3637d7923da3039a343aa20d6ac9730573";
+enum class View : std::uint8_t { Symbol, Entity, Parameter, TemplateParameter, TemplateArgument, SignatureSlot, CallArgument, Edge, Site, Evidence, Type, TypeLayer };
 struct NamedId { int64_t id; std::string_view name; };
 struct Relation { int64_t id; std::string_view name; View layer; std::string_view source; std::string_view target; std::string_view inverse; std::string_view traversal; std::string_view evidence; std::string_view evidence_capabilities; std::string_view completeness; bool virtual_relation; };
 struct Field { std::string_view name; bool filterable; bool is_string; };
@@ -44,7 +44,7 @@ inline constexpr std::array<NamedId, 10> kEntityKinds = {{
     {.id = 9, .name = "namespace"},
 }};
 
-inline constexpr std::array<NamedId, 13> kTypeKinds = {{
+inline constexpr std::array<NamedId, 14> kTypeKinds = {{
     {.id = 1, .name = "builtin"},
     {.id = 2, .name = "record"},
     {.id = 3, .name = "enum"},
@@ -58,6 +58,7 @@ inline constexpr std::array<NamedId, 13> kTypeKinds = {{
     {.id = 11, .name = "other"},
     {.id = 12, .name = "member-data-pointer"},
     {.id = 13, .name = "member-function-pointer"},
+    {.id = 14, .name = "pack-expansion"},
 }};
 
 inline constexpr std::array<NamedId, 8> kTypeEdgeKinds = {{
@@ -71,7 +72,7 @@ inline constexpr std::array<NamedId, 8> kTypeEdgeKinds = {{
     {.id = 8, .name = "member_component"},
 }};
 
-inline constexpr std::array<Relation, 56> kRelations = {{
+inline constexpr std::array<Relation, 62> kRelations = {{
     {.id = 1, .name = "calls", .layer = View::Symbol, .source = "symbol.callable", .target = "symbol.callable", .inverse = "called_by", .traversal = "out|in", .evidence = "call_site", .evidence_capabilities = "call_site|declaration", .completeness = "partial", .virtual_relation = false},
     {.id = 2, .name = "inherits", .layer = View::Symbol, .source = "symbol.record", .target = "symbol.record", .inverse = "subclasses", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete", .virtual_relation = false},
     {.id = 3, .name = "contains", .layer = View::Symbol, .source = "symbol.scope", .target = "symbol.declaration", .inverse = "contained_by", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete", .virtual_relation = false},
@@ -109,6 +110,7 @@ inline constexpr std::array<Relation, 56> kRelations = {{
     {.id = 23, .name = "has_template_argument", .layer = View::Symbol, .source = "symbol.template", .target = "template_argument", .inverse = "of_template", .traversal = "out|in", .evidence = "reference_site", .evidence_capabilities = "reference_site|call_site", .completeness = "partial", .virtual_relation = true},
     {.id = 24, .name = "has_call_edge", .layer = View::Symbol, .source = "symbol.callable", .target = "edge", .inverse = "of_caller", .traversal = "out|in", .evidence = "call_site", .evidence_capabilities = "call_site", .completeness = "partial", .virtual_relation = true},
     {.id = 25, .name = "has_evidence", .layer = View::Symbol, .source = "symbol.callable", .target = "evidence", .inverse = "of_symbol", .traversal = "out|in", .evidence = "call_site", .evidence_capabilities = "call_site|declaration", .completeness = "partial", .virtual_relation = true},
+    {.id = 26, .name = "has_signature_slot", .layer = View::Symbol, .source = "symbol.callable", .target = "signature_slot", .inverse = "of_callable", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete", .virtual_relation = true},
     {.id = 1, .name = "of_type", .layer = View::Parameter, .source = "parameter", .target = "type", .inverse = "has_parameter", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete", .virtual_relation = true},
     {.id = 2, .name = "declared_type", .layer = View::Parameter, .source = "parameter", .target = "type", .inverse = "has_declared_parameter", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete", .virtual_relation = true},
     {.id = 3, .name = "adjusted_type", .layer = View::Parameter, .source = "parameter", .target = "type", .inverse = "has_adjusted_parameter", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete", .virtual_relation = true},
@@ -128,9 +130,14 @@ inline constexpr std::array<Relation, 56> kRelations = {{
     {.id = 1, .name = "of_edge", .layer = View::Site, .source = "site", .target = "edge", .inverse = "has_site", .traversal = "out|in", .evidence = "call_site", .evidence_capabilities = "call_site", .completeness = "partial", .virtual_relation = true},
     {.id = 1, .name = "references_symbol", .layer = View::Type, .source = "type", .target = "symbol", .inverse = "of_type", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "partial", .virtual_relation = true},
     {.id = 2, .name = "has_type_edge", .layer = View::Type, .source = "type", .target = "type", .inverse = "of_type_edge", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "partial", .virtual_relation = true},
+    {.id = 3, .name = "has_layer", .layer = View::Type, .source = "type", .target = "type_layer", .inverse = "of_type", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "complete", .virtual_relation = true},
+    {.id = 1, .name = "of_callable", .layer = View::SignatureSlot, .source = "signature_slot", .target = "symbol", .inverse = "has_signature_slot", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete", .virtual_relation = true},
+    {.id = 2, .name = "of_type", .layer = View::SignatureSlot, .source = "signature_slot", .target = "type", .inverse = "has_signature_slot", .traversal = "out|in", .evidence = "declaration", .evidence_capabilities = "declaration", .completeness = "complete", .virtual_relation = true},
+    {.id = 1, .name = "of_type", .layer = View::TypeLayer, .source = "type_layer", .target = "type", .inverse = "has_layer", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "complete", .virtual_relation = true},
+    {.id = 2, .name = "child", .layer = View::TypeLayer, .source = "type_layer", .target = "type_layer", .inverse = "parent", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "complete", .virtual_relation = true},
 }};
 
-inline constexpr std::array<Field, 42> kFields = {{
+inline constexpr std::array<Field, 54> kFields = {{
     {.name = "id", .filterable = true, .is_string = false},
     {.name = "usr", .filterable = true, .is_string = true},
     {.name = "name", .filterable = true, .is_string = true},
@@ -141,6 +148,10 @@ inline constexpr std::array<Field, 42> kFields = {{
     {.name = "is_definition", .filterable = true, .is_string = false},
     {.name = "is_pure", .filterable = true, .is_string = false},
     {.name = "is_static", .filterable = true, .is_string = false},
+    {.name = "callable_kind", .filterable = true, .is_string = true},
+    {.name = "template_origin", .filterable = true, .is_string = true},
+    {.name = "template_form", .filterable = true, .is_string = true},
+    {.name = "owner", .filterable = true, .is_string = true},
     {.name = "file", .filterable = false, .is_string = true},
     {.name = "line", .filterable = false, .is_string = false},
     {.name = "col", .filterable = false, .is_string = false},
@@ -171,6 +182,14 @@ inline constexpr std::array<Field, 42> kFields = {{
     {.name = "cv_qualifiers", .filterable = true, .is_string = false},
     {.name = "decl_id", .filterable = true, .is_string = false},
     {.name = "canonical_id", .filterable = true, .is_string = false},
+    {.name = "extent", .filterable = true, .is_string = true},
+    {.name = "element_type", .filterable = true, .is_string = true},
+    {.name = "path", .filterable = true, .is_string = true},
+    {.name = "relation", .filterable = true, .is_string = true},
+    {.name = "depth", .filterable = true, .is_string = false},
+    {.name = "status", .filterable = true, .is_string = true},
+    {.name = "root_id", .filterable = true, .is_string = false},
+    {.name = "slot_kind", .filterable = true, .is_string = true},
     {.name = "src_id", .filterable = true, .is_string = false},
     {.name = "dst_id", .filterable = true, .is_string = false},
 }};

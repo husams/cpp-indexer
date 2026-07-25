@@ -91,6 +91,22 @@ int64_t StorageEdgeSink::mint_symbol(const MintRequest &req) {
       .linkage = req.linkage,
       .identity_translation_unit = identity_translation_unit_};
   const int64_t id = ports_.symbols_write.mint_symbol_id(identity);
+  std::vector<std::pair<std::string, cidx::SymbolValue>> typed_facts;
+  if (req.callable_kind) {
+    typed_facts.emplace_back("callable_kind", *req.callable_kind);
+  }
+  if (req.template_origin) {
+    typed_facts.emplace_back("template_origin", *req.template_origin);
+  }
+  if (req.template_form) {
+    typed_facts.emplace_back("template_form", *req.template_form);
+  }
+  if (req.parent_usr) {
+    typed_facts.emplace_back("parent_usr", *req.parent_usr);
+  }
+  if (!typed_facts.empty()) {
+    ports_.symbols_write.update_symbol_by_id(id, typed_facts);
+  }
   lookup_cache_.clear();
   return id;
 }
@@ -280,6 +296,7 @@ int64_t StorageEdgeSink::intern_type_node(const TypeNodeRecord &node) {
   n.is_restrict = node.is_restrict;
   n.decl_usr = node.decl_usr;
   n.canonical_id = node.canonical_id;
+  n.extent = node.extent;
   return ports_.types_write.intern_type_node(n);
 }
 

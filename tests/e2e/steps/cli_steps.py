@@ -72,7 +72,7 @@ def cidx_signature_json(workspace: Workspace, argv: str) -> None:
     }
     type_keys = {
         "id", "spelling", "kind", "canonical", "decl_usr", "const",
-        "volatile", "restrict", "layers",
+        "volatile", "restrict", "extent", "layers",
     }
     slot_keys = {
         "role", "position", "pack_index", "name", "declared_type", "adjusted_type",

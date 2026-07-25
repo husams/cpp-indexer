@@ -44,9 +44,10 @@ int64_t SqliteStorageService::add_symbol(const Symbol &sym) {
       "type_info, file_id, line, col, decl_file_id, decl_line, decl_col, "
       "is_definition, is_pure, is_static, is_instantiation, linkage, access, "
       "parent_usr, resolved, decl_path, end_line, end_col, const_value, "
-      "semantic_universe_id, identity_key) "
+      "semantic_universe_id, identity_key, callable_kind, template_origin, "
+      "template_form) "
       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-      "?, ?, ?, ?, ?) "
+      "?, ?, ?, ?, ?, ?, ?, ?) "
       "ON CONFLICT(semantic_universe_id, identity_key) WHERE identity_key <> "
       "'' "
       "DO UPDATE SET "
@@ -92,7 +93,14 @@ int64_t SqliteStorageService::add_symbol(const Symbol &sym) {
       "  resolved         = MAX(excluded.resolved, symbol.resolved), "
       // v33: only the initializer-bearing decl evaluates to a value, so a
       // plain declaration must not erase the definition's stored constant.
-      "  const_value      = COALESCE(excluded.const_value, symbol.const_value) "
+      "  const_value      = COALESCE(excluded.const_value, "
+      "symbol.const_value), "
+      "  callable_kind   = COALESCE(excluded.callable_kind, "
+      "symbol.callable_kind), "
+      "  template_origin = COALESCE(excluded.template_origin, "
+      "symbol.template_origin), "
+      "  template_form = COALESCE(excluded.template_form, "
+      "symbol.template_form) "
       "RETURNING id");
   st.bind(1, std::string_view(sym.usr));
   st.bind(2, std::string_view(sym.spelling));
@@ -124,6 +132,9 @@ int64_t SqliteStorageService::add_symbol(const Symbol &sym) {
   bind_opt(st, 24, sym.const_value); // v33
   st.bind(25, universe_id);
   st.bind(26, std::string_view(identity_key));
+  bind_opt(st, 27, sym.callable_kind);
+  bind_opt(st, 28, sym.template_origin);
+  bind_opt(st, 29, sym.template_form);
   if (!st.step()) {
     throw StorageError("symbol upsert returned no id");
   }
