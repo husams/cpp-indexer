@@ -1,6 +1,9 @@
 #define DOCTEST_CONFIG_IMPLEMENT
 #include "doctest/doctest.h"
 
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -83,6 +86,14 @@ struct RecordingServices final : cidx::application::ApplicationServices {
   mutable std::vector<std::string> calls;
 };
 
+struct RecordingProgress final : cidx::application::ProgressSink {
+  void publish(const cidx::protocol::ProgressEvent &event) override {
+    events.push_back(event);
+  }
+
+  std::vector<cidx::protocol::ProgressEvent> events;
+};
+
 } // namespace
 
 TEST_CASE("application registry is complete and validated") {
@@ -109,6 +120,26 @@ TEST_CASE(
       compatibility.value));
   CHECK(std::get<cidx::cli::CompatibilityRequest>(compatibility.value).argv ==
         std::vector<std::string>{"search", "nodes"});
+
+  const auto ast = cidx::cli::parse_application_request(
+      {"ast", "dump", "fixture.cpp", "--json"});
+  REQUIRE(std::holds_alternative<cidx::application::CommandRequest>(ast.value));
+  const auto &ast_request =
+      std::get<cidx::application::CommandRequest>(ast.value);
+  REQUIRE(std::holds_alternative<cidx::application::AstInspectionRequest>(
+      ast_request));
+  CHECK(std::get<cidx::application::AstInspectionRequest>(ast_request).json);
+
+  const auto diff = cidx::cli::parse_application_request(
+      {"diff", "source", "left", "right", "--left-source-revision", "a",
+       "--right-source-revision", "b"});
+  REQUIRE(
+      std::holds_alternative<cidx::application::CommandRequest>(diff.value));
+  const auto &diff_request =
+      std::get<cidx::application::CommandRequest>(diff.value);
+  REQUIRE(std::holds_alternative<cidx::application::DiffRequest>(diff_request));
+  CHECK(std::get<cidx::application::DiffRequest>(diff_request)
+            .left_source_revision == std::optional<std::string>{"a"});
 }
 
 TEST_CASE("typed services dispatch every HSE-68 request family") {
@@ -184,6 +215,175 @@ TEST_CASE("cancellation is enforced at the application boundary") {
   CHECK(result.diagnostics.front().code == "timeout");
 }
 
+TEST_CASE("metadata derives capabilities and policy protects artifacts") {
+  const auto *analysis = cidx::application::metadata(
+      cidx::application::Operation::analysis_execute);
+  REQUIRE(analysis != nullptr);
+  CHECK(analysis->required_capabilities ==
+        cidx::application::capability_bit(
+            cidx::application::Capability::analysis));
+
+  RecordingServices services;
+  cidx::application::ApplicationService service(services);
+  cidx::application::ApplicationContext context(
+      {.access = cidx::application::AccessMode::read_only,
+       .capabilities = cidx::application::capability_bit(
+           cidx::application::Capability::include_read)});
+  const auto result = service.execute(
+      cidx::application::IncludeRequest{
+          .action = cidx::application::IncludeAction::plan,
+          .output = "/tmp/forbidden-plan"},
+      context);
+  CHECK(result.status == cidx::protocol::Status::Refuted);
+  CHECK(services.calls.empty());
+}
+
+TEST_CASE("direct source and index diff compares effective identities") {
+  cidx::Storage db(":memory:");
+  cidx::application::StorageApplicationOperations operations(db);
+  cidx::application::ApplicationOperationPorts operation_ports{.diff =
+                                                                   &operations};
+  cidx::application::ApplicationContext context(
+      cidx::application::ApplicationPolicy{
+          .capabilities = cidx::application::capability_bit(
+              cidx::application::Capability::diff)},
+      operation_ports);
+  const cidx::application::DefaultApplicationServices services;
+  const cidx::application::ApplicationService service(services);
+  const auto source = service.execute(
+      cidx::application::DiffRequest{.scope =
+                                         cidx::application::DiffScope::source,
+                                     .left = "rev-a",
+                                     .right = "rev-b"},
+      context);
+  CHECK(cidx::json_out::dumps_indent2(source.result).find("false") !=
+        std::string::npos);
+  const auto index = service.execute(
+      cidx::application::DiffRequest{.scope =
+                                         cidx::application::DiffScope::index,
+                                     .left = "index-a",
+                                     .right = "index-b"},
+      context);
+  CHECK(cidx::json_out::dumps_indent2(index.result).find("false") !=
+        std::string::npos);
+}
+
+TEST_CASE("direct AST service parses a registered translation unit") {
+  const std::filesystem::path source =
+      std::filesystem::temp_directory_path() / "cidx-application-ast.cpp";
+  {
+    std::ofstream output(source);
+    REQUIRE(output.good());
+    output << "int answer() { return 42; }\n";
+  }
+  cidx::Storage db(":memory:");
+  db.add_component("app", source.parent_path().string());
+  db.add_file_path(source.string(), std::nullopt, std::nullopt,
+                   std::vector<std::string>{"-std=c++17"}, std::string("c++"));
+  cidx::application::StorageApplicationOperations operations(db);
+  cidx::application::ApplicationOperationPorts operation_ports{.ast =
+                                                                   &operations};
+  cidx::application::ApplicationContext context(
+      cidx::application::ApplicationPolicy{
+          .capabilities = cidx::application::capability_bit(
+              cidx::application::Capability::ast)},
+      operation_ports);
+  const cidx::application::DefaultApplicationServices services;
+  const cidx::application::ApplicationService service(services);
+  const auto result = service.execute(
+      cidx::application::AstInspectionRequest{
+          .action = cidx::application::AstInspectionAction::dump,
+          .source = source.string()},
+      context);
+  CHECK(result.status == cidx::protocol::Status::Complete);
+  CHECK(cidx::json_out::dumps_indent2(result.result).find("cursor_nodes") !=
+        std::string::npos);
+  std::error_code ec;
+  std::filesystem::remove(source, ec);
+}
+
+TEST_CASE("index service enforces work and diagnostic budgets stably") {
+  const std::filesystem::path root =
+      std::filesystem::temp_directory_path() / "cidx-application-budget";
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
+  std::filesystem::create_directories(root, ec);
+  REQUIRE_FALSE(ec);
+  const std::filesystem::path first = root / "first.cpp";
+  const std::filesystem::path second = root / "second.cpp";
+  {
+    std::ofstream(first) << "int first() { return 1; }\n";
+    std::ofstream(second) << "int second() { return 2; }\n";
+  }
+
+  cidx::Storage db(":memory:");
+  db.add_component("app", root.string());
+  for (const auto &source : {first, second}) {
+    db.add_file_path(source.string(), std::nullopt, std::nullopt,
+                     std::vector<std::string>{"-std=c++17"},
+                     std::string("c++"));
+  }
+  cidx::StorageWorkspaceAdapter workspace_data(db);
+  cidx::WorkspaceContext workspace =
+      cidx::WorkspaceContext::borrow(workspace_data);
+  cidx::application::StorageApplicationOperations operations(db);
+  cidx::application::ApplicationOperationPorts operation_ports{.index =
+                                                                   &operations};
+  cidx::application::ApplicationContext context(
+      workspace,
+      cidx::application::ApplicationPolicy{.max_work_items = 1,
+                                           .max_diagnostics = 0},
+      {}, {}, operation_ports);
+  RecordingProgress progress;
+  context.set_progress_sink(&progress);
+  const cidx::application::DefaultApplicationServices services;
+  const cidx::application::ApplicationService service(services);
+  const auto result =
+      service.execute(cidx::application::IndexRequest{}, context);
+
+  CHECK(result.status == cidx::protocol::Status::Complete);
+  CHECK(result.completeness.truncated);
+  CHECK(result.completeness.budget == 1);
+  CHECK(result.diagnostics.empty());
+  REQUIRE(progress.events.size() == 1);
+  CHECK(progress.events.front().sequence == 0);
+  CHECK(progress.events.front().completed == 0);
+  CHECK(progress.events.front().total == 1);
+
+  std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("direct analysis service exports real fact relations") {
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() / "cidx-application-analysis";
+  std::error_code ec;
+  std::filesystem::remove_all(directory, ec);
+  std::filesystem::create_directories(directory, ec);
+  REQUIRE_FALSE(ec);
+  const std::string index = (directory / "index.db").string();
+  cidx::Storage db(index);
+  cidx::application::StorageApplicationOperations operations(db, index);
+  cidx::application::ApplicationOperationPorts operation_ports{.analysis =
+                                                                   &operations};
+  cidx::application::ApplicationContext context(
+      cidx::application::ApplicationPolicy{
+          .capabilities = cidx::application::capability_bit(
+                              cidx::application::Capability::analysis) |
+                          cidx::application::capability_bit(
+                              cidx::application::Capability::artifacts)},
+      operation_ports);
+  const cidx::application::DefaultApplicationServices services;
+  const cidx::application::ApplicationService service(services);
+  const auto result = service.execute(
+      cidx::application::AnalysisRequest{
+          .action = cidx::application::AnalysisAction::export_facts,
+          .export_directory = (directory / "facts").string()},
+      context);
+  CHECK(result.status == cidx::protocol::Status::Complete);
+  CHECK(std::filesystem::exists(directory / "facts" / "symbol.facts"));
+  std::filesystem::remove_all(directory, ec);
+}
+
 TEST_CASE("default services execute real storage-backed operations") {
   cidx::Storage db(":memory:");
   cidx::StorageWorkspaceAdapter workspace_data(db);
@@ -211,8 +411,16 @@ TEST_CASE("default services execute real storage-backed operations") {
       .includes = &db.include_write(),
       .unit_of_work = &db.unit_of_work(),
   };
-  cidx::application::ApplicationContext context(workspace, {}, read_ports,
-                                                write_ports, nullptr, &db);
+  cidx::application::StorageApplicationOperations operations(db);
+  cidx::application::ApplicationOperationPorts operation_ports{
+      .index = &operations,
+      .analysis = &operations,
+      .ast = &operations,
+      .diff = &operations,
+      .include = &operations,
+  };
+  cidx::application::ApplicationContext context(
+      workspace, {}, read_ports, write_ports, operation_ports, nullptr);
   const cidx::application::DefaultApplicationServices services;
   const cidx::application::ApplicationService service(services);
 
@@ -226,6 +434,19 @@ TEST_CASE("default services execute real storage-backed operations") {
                                                        "codebase() | nodes()"},
                    context)
           .status == cidx::protocol::Status::Complete);
+
+  const auto analysis = service.execute(
+      cidx::application::AnalysisRequest{
+          .action = cidx::application::AnalysisAction::list},
+      context);
+  CHECK(cidx::json_out::dumps_indent2(analysis.result).find("callgraph") !=
+        std::string::npos);
+
+  const auto unknown_source = service.execute(
+      cidx::application::AstInspectionRequest{.source = "missing.cpp"},
+      context);
+  CHECK(unknown_source.status == cidx::protocol::Status::Error);
+  CHECK(unknown_source.diagnostics.front().code == "unknown_source");
 }
 
 int main(int argc, char **argv) {

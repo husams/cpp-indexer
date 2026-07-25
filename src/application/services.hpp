@@ -5,11 +5,40 @@
 
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "application/context.hpp"
 #include "application/registry.hpp"
 
-namespace cidx::application {
+namespace cidx {
+class Storage;
+namespace application {
+
+class StorageApplicationOperations final : public IndexServicePort,
+                                           public AnalysisServicePort,
+                                           public AstServicePort,
+                                           public DiffServicePort,
+                                           public IncludeServicePort {
+public:
+  explicit StorageApplicationOperations(Storage &storage,
+                                        std::string index_path = {})
+      : storage_(storage), index_path_(std::move(index_path)) {}
+
+  protocol::ResultEnvelope execute(const IndexRequest &request,
+                                   ApplicationContext &context) override;
+  protocol::ResultEnvelope execute(const AnalysisRequest &request,
+                                   ApplicationContext &context) override;
+  protocol::ResultEnvelope execute(const AstInspectionRequest &request,
+                                   ApplicationContext &context) override;
+  protocol::ResultEnvelope execute(const DiffRequest &request,
+                                   ApplicationContext &context) override;
+  protocol::ResultEnvelope execute(const IncludeRequest &request,
+                                   ApplicationContext &context) override;
+
+private:
+  Storage &storage_;
+  std::string index_path_;
+};
 
 class ApplicationServices {
 public:
@@ -40,24 +69,25 @@ public:
 // future surfaces without changing request dispatch or policy enforcement.
 class DefaultApplicationServices final : public ApplicationServices {
 public:
-  protocol::ResultEnvelope index(const IndexRequest &,
-                                 ApplicationContext &) const override;
-  protocol::ResultEnvelope query(const QueryRequest &,
-                                 ApplicationContext &) const override;
-  protocol::ResultEnvelope analysis(const AnalysisRequest &,
-                                    ApplicationContext &) const override;
-  protocol::ResultEnvelope workspace(const WorkspaceRequest &,
-                                     ApplicationContext &) const override;
-  protocol::ResultEnvelope ast(const AstInspectionRequest &,
-                               ApplicationContext &) const override;
-  protocol::ResultEnvelope diff(const DiffRequest &,
-                                ApplicationContext &) const override;
-  protocol::ResultEnvelope include(const IncludeRequest &,
-                                   ApplicationContext &) const override;
-  protocol::ResultEnvelope refactor(const RefactoringRequest &,
-                                    ApplicationContext &) const override;
-  protocol::ResultEnvelope proof(const ProofRequest &,
-                                 ApplicationContext &) const override;
+  protocol::ResultEnvelope index(const IndexRequest &request,
+                                 ApplicationContext &context) const override;
+  protocol::ResultEnvelope query(const QueryRequest &request,
+                                 ApplicationContext &context) const override;
+  protocol::ResultEnvelope analysis(const AnalysisRequest &request,
+                                    ApplicationContext &context) const override;
+  protocol::ResultEnvelope
+  workspace(const WorkspaceRequest &request,
+            ApplicationContext &context) const override;
+  protocol::ResultEnvelope ast(const AstInspectionRequest &request,
+                               ApplicationContext &context) const override;
+  protocol::ResultEnvelope diff(const DiffRequest &request,
+                                ApplicationContext &context) const override;
+  protocol::ResultEnvelope include(const IncludeRequest &request,
+                                   ApplicationContext &context) const override;
+  protocol::ResultEnvelope refactor(const RefactoringRequest &request,
+                                    ApplicationContext &context) const override;
+  protocol::ResultEnvelope proof(const ProofRequest &request,
+                                 ApplicationContext &context) const override;
 };
 
 class ApplicationService final {
@@ -76,4 +106,5 @@ private:
   const ApplicationServices &services_;
 };
 
-} // namespace cidx::application
+} // namespace application
+} // namespace cidx

@@ -4,18 +4,63 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 
+#include "application/requests.hpp"
 #include "query/exec.hpp"
 #include "query/result_protocol.hpp"
 #include "storage/ports.hpp"
 #include "util/logger.hpp"
 #include "workspace/context.hpp"
 
-namespace cidx {
-class Storage;
-namespace application {
+namespace cidx::application {
+
+class ApplicationContext;
+
+class IndexServicePort {
+public:
+  virtual ~IndexServicePort() = default;
+  virtual protocol::ResultEnvelope execute(const IndexRequest &request,
+                                           ApplicationContext &context) = 0;
+};
+
+class AnalysisServicePort {
+public:
+  virtual ~AnalysisServicePort() = default;
+  virtual protocol::ResultEnvelope execute(const AnalysisRequest &request,
+                                           ApplicationContext &context) = 0;
+};
+
+class AstServicePort {
+public:
+  virtual ~AstServicePort() = default;
+  virtual protocol::ResultEnvelope execute(const AstInspectionRequest &request,
+                                           ApplicationContext &context) = 0;
+};
+
+class DiffServicePort {
+public:
+  virtual ~DiffServicePort() = default;
+  virtual protocol::ResultEnvelope execute(const DiffRequest &request,
+                                           ApplicationContext &context) = 0;
+};
+
+class IncludeServicePort {
+public:
+  virtual ~IncludeServicePort() = default;
+  virtual protocol::ResultEnvelope execute(const IncludeRequest &request,
+                                           ApplicationContext &context) = 0;
+};
+
+struct ApplicationOperationPorts {
+  IndexServicePort *index = nullptr;
+  AnalysisServicePort *analysis = nullptr;
+  AstServicePort *ast = nullptr;
+  DiffServicePort *diff = nullptr;
+  IncludeServicePort *include = nullptr;
+};
 
 enum class AccessMode : std::uint8_t { read_only, read_write };
 
@@ -56,6 +101,8 @@ struct ApplicationPolicy {
   AccessMode access = AccessMode::read_write;
   CapabilityMask capabilities = all_capabilities();
   bool allow_schema_migration = false;
+  std::size_t max_work_items = 0;
+  std::size_t max_diagnostics = 1000;
 };
 
 struct ApplicationReadPorts {
@@ -111,12 +158,17 @@ public:
   explicit ApplicationContext(ApplicationPolicy policy = {})
       : policy_(policy) {}
 
+  ApplicationContext(ApplicationPolicy policy,
+                     ApplicationOperationPorts operations)
+      : policy_(policy), operations_(operations) {}
+
   ApplicationContext(WorkspaceContext &workspace, ApplicationPolicy policy,
                      ApplicationReadPorts read_ports = {},
                      ApplicationWritePorts write_ports = {},
-                     Logger *logger = nullptr, Storage *storage = nullptr)
+                     ApplicationOperationPorts operations = {},
+                     Logger *logger = nullptr)
       : workspace_(&workspace), policy_(policy), read_ports_(read_ports),
-        write_ports_(write_ports), logger_(logger), storage_(storage) {}
+        write_ports_(write_ports), logger_(logger), operations_(operations) {}
 
   [[nodiscard]] const ApplicationPolicy &policy() const noexcept {
     return policy_;
@@ -137,7 +189,9 @@ public:
     return write_ports_;
   }
   [[nodiscard]] Logger *logger() const noexcept { return logger_; }
-  [[nodiscard]] Storage *storage() const noexcept { return storage_; }
+  [[nodiscard]] const ApplicationOperationPorts &operations() const noexcept {
+    return operations_;
+  }
   [[nodiscard]] ProgressSink *progress() const noexcept { return progress_; }
   [[nodiscard]] ArtifactStore *artifacts() const noexcept { return artifacts_; }
 
@@ -148,7 +202,7 @@ public:
   void set_progress_sink(ProgressSink *sink) noexcept { progress_ = sink; }
   void set_artifact_store(ArtifactStore *store) noexcept { artifacts_ = store; }
 
-  void publish(protocol::ProgressEvent event) const {
+  void publish(const protocol::ProgressEvent &event) const {
     if (progress_ != nullptr) {
       progress_->publish(event);
     }
@@ -161,10 +215,9 @@ private:
   ApplicationReadPorts read_ports_;
   ApplicationWritePorts write_ports_;
   Logger *logger_ = nullptr;
-  Storage *storage_ = nullptr;
+  ApplicationOperationPorts operations_;
   ProgressSink *progress_ = nullptr;
   ArtifactStore *artifacts_ = nullptr;
 };
 
-} // namespace application
-} // namespace cidx
+} // namespace cidx::application

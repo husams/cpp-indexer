@@ -42,6 +42,13 @@ endforeach()
 target_include_directories(ast_pass_test SYSTEM PRIVATE
   ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 
+add_executable(application_process_test application_process_test.cpp)
+target_compile_options(application_process_test PRIVATE -Wall -Wextra)
+target_link_libraries(application_process_test PRIVATE cidx_core)
+add_test(NAME application_process_test
+         COMMAND application_process_test $<TARGET_FILE:cidx>)
+set_tests_properties(application_process_test PROPERTIES LABELS "default")
+
 target_compile_definitions(result_protocol_test PRIVATE
   CIDX_RESULT_PROTOCOL_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/../spec/contracts/golden/result-envelope.json"
   CIDX_EVENT_PROTOCOL_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/../spec/contracts/golden/event.json"

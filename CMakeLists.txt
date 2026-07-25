@@ -393,7 +393,7 @@ target_compile_definitions(cidx_core PUBLIC
 # python/indexer/rules; Python consumes the same fact/result contract.
 set(_cidx_dl_rules_dir "${CMAKE_CURRENT_SOURCE_DIR}/python/indexer/rules")
 set(_cidx_dl_header
-  "${CMAKE_CURRENT_BINARY_DIR}/generated/cli/souffle_rules.hpp")
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/application/souffle_rules.hpp")
 add_custom_command(
   OUTPUT "${_cidx_dl_header}"
   COMMAND "${CMAKE_COMMAND}"

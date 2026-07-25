@@ -1,12 +1,15 @@
 #include "application/services.hpp"
 
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <type_traits>
 #include <utility>
 
+#include "application/analysis_service.hpp"
 #include "ast/index_engine.hpp"
+#include "astgraph/astgraph.hpp"
 #include "diff/analyze.hpp"
 #include "diff/compare.hpp"
 #include "diff/report.hpp"
@@ -60,13 +63,6 @@ protocol::ResultEnvelope service_error(std::string operation,
   return result;
 }
 
-json_out::Value count_result(std::int64_t indexed, std::int64_t failed,
-                             std::int64_t skipped) {
-  return json_out::Value::obj({{"indexed", json_out::Value::of(indexed)},
-                               {"failed", json_out::Value::of(failed)},
-                               {"skipped", json_out::Value::of(skipped)}});
-}
-
 std::string operation_name(const std::optional<Operation> &operation) {
   if (!operation) {
     return "application";
@@ -77,11 +73,16 @@ std::string operation_name(const std::optional<Operation> &operation) {
   return "application";
 }
 
+bool belongs_to_root(const std::string &path, const std::string &root) {
+  return path == root || (path.starts_with(root) && path.size() > root.size() &&
+                          path[root.size()] == '/');
+}
+
 } // namespace
 
 protocol::ResultEnvelope
-DefaultApplicationServices::index(const IndexRequest &request,
-                                  ApplicationContext &context) const {
+StorageApplicationOperations::execute(const IndexRequest &request,
+                                      ApplicationContext &context) {
   if (request.action == IndexAction::status &&
       context.read_ports().schema != nullptr) {
     const Stats stats = context.read_ports().schema->stats();
@@ -93,11 +94,17 @@ DefaultApplicationServices::index(const IndexRequest &request,
                               {"edges", json_out::Value::of(stats.edges)}});
     return result;
   }
-  if (context.storage() == nullptr) {
-    return service_error("index", context, "backend_error",
-                         "index storage is not installed");
+  Storage &db = storage_;
+  std::optional<std::string> source_root;
+  if (request.source) {
+    const std::optional<Component> component =
+        db.get_component_by_name(*request.source);
+    if (!component) {
+      return service_error("index", context, "unknown_source",
+                           "no component named " + *request.source);
+    }
+    source_root = db.component_abs_base(*component);
   }
-  Storage &db = *context.storage();
   if (request.action == IndexAction::explain) {
     protocol::ResultEnvelope result =
         service_result("index.explain", context, "index");
@@ -114,6 +121,9 @@ DefaultApplicationServices::index(const IndexRequest &request,
   const bool rebuild = request.action == IndexAction::rebuild;
   if (rebuild) {
     for (const auto &[file, path] : db.list_files()) {
+      if (source_root && !belongs_to_root(path, *source_root)) {
+        continue;
+      }
       db.set_file_indexed(file.id, false);
       if (!files::is_header(path)) {
         targets.emplace_back(file, path);
@@ -121,13 +131,19 @@ DefaultApplicationServices::index(const IndexRequest &request,
     }
   } else if (!request.files.empty()) {
     for (const std::string &file_arg : request.files) {
-      const std::string path = files::resolve_file_arg(file_arg);
+      const std::string path =
+          source_root
+              ? pathutil::abspath(pathutil::join(*source_root, file_arg))
+              : files::resolve_file_arg(file_arg);
       if (const auto file = db.get_file(path)) {
         targets.emplace_back(*file, path);
       }
     }
   } else {
     for (const auto &[file, path] : db.list_files()) {
+      if (source_root && !belongs_to_root(path, *source_root)) {
+        continue;
+      }
       if (!files::is_header(path) &&
           files::index_status(file, path) != files::IndexStatus::kOk) {
         targets.emplace_back(file, path);
@@ -135,15 +151,47 @@ DefaultApplicationServices::index(const IndexRequest &request,
     }
   }
 
+  bool truncated = false;
+  if (context.policy().max_work_items != 0 &&
+      targets.size() > context.policy().max_work_items) {
+    targets.resize(context.policy().max_work_items);
+    truncated = true;
+  }
+
   std::int64_t indexed = 0;
   std::int64_t failed = 0;
-  for (const auto &[file, path] : targets) {
+  std::int64_t warnings = 0;
+  std::int64_t errors = 0;
+  std::size_t diagnostics_emitted = 0;
+  std::vector<protocol::Diagnostic> diagnostics;
+  for (std::size_t position = 0; position < targets.size(); ++position) {
+    const auto &[file, path] = targets[position];
     if (context.cancellation().cancelled()) {
       break;
     }
+    context.publish(
+        protocol::ProgressEvent{.sequence = static_cast<int64_t>(position),
+                                .operation = "index",
+                                .message = path,
+                                .completed = static_cast<int64_t>(position),
+                                .total = static_cast<int64_t>(targets.size())});
     const ast::IndexOneOutcome outcome =
         ast::run_index_one(db, file, path, request.graph);
     db.replace_diagnostics(file.id, outcome.diagnostics);
+    for (const Diagnostic &diagnostic : outcome.diagnostics) {
+      if (diagnostic.severity >= 3) {
+        ++errors;
+      } else if (diagnostic.severity == 2) {
+        ++warnings;
+      }
+      if (diagnostics_emitted < context.policy().max_diagnostics) {
+        diagnostics.push_back(protocol::Diagnostic{
+            .code = "index-diagnostic",
+            .severity = diagnostic.severity >= 3 ? "error" : "warning",
+            .message = diagnostic.spelling});
+        ++diagnostics_emitted;
+      }
+    }
     if (outcome.parse_failed || outcome.source_changed) {
       db.set_file_indexed(file.id, false);
       ++failed;
@@ -153,113 +201,128 @@ DefaultApplicationServices::index(const IndexRequest &request,
     }
   }
   protocol::ResultEnvelope result = service_result("index", context, "index");
-  result.result = count_result(indexed, failed,
-                               static_cast<std::int64_t>(targets.size()) -
-                                   indexed - failed);
+  const std::int64_t skipped =
+      static_cast<std::int64_t>(targets.size()) - indexed - failed;
+  result.result =
+      json_out::Value::obj({{"indexed", json_out::Value::of(indexed)},
+                            {"failed", json_out::Value::of(failed)},
+                            {"skipped", json_out::Value::of(skipped)},
+                            {"warnings", json_out::Value::of(warnings)},
+                            {"errors", json_out::Value::of(errors)}});
+  result.diagnostics = std::move(diagnostics);
   if (failed != 0) {
     result.status = protocol::Status::Partial;
     result.completeness.state = "partial";
   }
+  result.completeness.truncated = truncated;
+  if (truncated) {
+    result.completeness.budget =
+        static_cast<int64_t>(context.policy().max_work_items);
+  }
+  if (failed == 0 && !context.cancellation().cancelled()) {
+    db.stamp_index_identity();
+  }
+  result.identity.index = db.index_identity().freshness;
   return result;
 }
 
 protocol::ResultEnvelope
-DefaultApplicationServices::query(const QueryRequest &request,
-                                  ApplicationContext &context) const {
-  if (context.read_ports().query == nullptr) {
-    return service_error("query", context, "backend_error",
-                         "query read port is not installed");
-  }
+StorageApplicationOperations::execute(const AnalysisRequest &request,
+                                      ApplicationContext &context) {
   try {
-    const query::Plan plan = query::parse_cxq(request.expression);
-    query::Executor executor(*context.read_ports().query);
-    protocol::ResultEnvelope result = base_result("query", context);
-    result.result =
-        request.explain ? executor.explain(plan) : executor.run(plan).to_json();
+    protocol::ResultEnvelope result =
+        service_result("analysis", context, "souffle-analysis");
+    const std::string path =
+        index_path_.empty() && context.workspace() != nullptr
+            ? context.workspace()->index_path()
+            : index_path_;
+    result.result = cli::run_analysis_application(request, path).result;
     return result;
   } catch (const std::exception &error) {
-    return service_error("query", context, "invalid_input", error.what());
+    return service_error("analysis", context, "backend_error", error.what());
   }
 }
 
 protocol::ResultEnvelope
-DefaultApplicationServices::analysis(const AnalysisRequest &request,
-                                     ApplicationContext &context) const {
-  if (request.action == AnalysisAction::list) {
-    protocol::ResultEnvelope result =
-        service_result("analysis.list", context, "analysis");
-    json_out::Array rules;
-    rules.push_back(json_out::Value::of(std::string("cycles")));
-    rules.push_back(json_out::Value::of(std::string("calls")));
-    result.result = json_out::Value::obj(
-        {{"rules", json_out::Value::arr(std::move(rules))}});
-    return result;
+StorageApplicationOperations::execute(const AstInspectionRequest &request,
+                                      ApplicationContext &context) {
+  const std::optional<File> file =
+      storage_.get_file(files::resolve_file_arg(request.source));
+  if (!file) {
+    return service_error("ast", context, "unknown_source",
+                         "source is not registered in the selected index");
   }
-  if (context.storage() == nullptr) {
-    return service_error("analysis", context, "backend_error",
-                         "analysis storage is not installed");
-  }
-  protocol::ResultEnvelope result =
-      service_result("analysis", context, "analysis");
-  result.result = json_out::Value::obj(
-      {{"files", json_out::Value::of(context.storage()->stats().files)},
-       {"symbols", json_out::Value::of(context.storage()->stats().symbols)},
-       {"edges", json_out::Value::of(context.storage()->stats().edges)}});
-  return result;
-}
-
-protocol::ResultEnvelope
-DefaultApplicationServices::workspace(const WorkspaceRequest &request,
-                                      ApplicationContext &context) const {
-  if (context.workspace() == nullptr) {
-    return service_error("workspace", context, "backend_error",
-                         "workspace context is not installed");
-  }
-  protocol::ResultEnvelope result =
-      service_result("workspace", context, "workspace");
-  result.result = json_out::Value::obj(
-      {{"action", json_out::Value::of(static_cast<int>(request.action))},
-       {"identity",
-        json_out::Value::of(context.workspace()->snapshot().identity)}});
-  return result;
-}
-
-protocol::ResultEnvelope
-DefaultApplicationServices::ast(const AstInspectionRequest &,
-                                ApplicationContext &context) const {
-  if (context.read_ports().source == nullptr) {
+  if (!file->compile_options) {
     return service_error("ast", context, "backend_error",
-                         "source read port is not installed");
+                         "source has no translation-unit configuration");
   }
-  return service_result("ast", context, "ast-inspection");
+
+  std::error_code ec;
+  const std::filesystem::path temp_dir =
+      std::filesystem::temp_directory_path(ec) / "cidx-application-ast";
+  if (ec) {
+    return service_error("ast", context, "backend_error",
+                         "cannot resolve temporary AST directory");
+  }
+  std::filesystem::create_directories(temp_dir, ec);
+  if (ec) {
+    return service_error("ast", context, "backend_error",
+                         "cannot create temporary AST directory");
+  }
+  const std::filesystem::path output =
+      temp_dir / (std::to_string(file->id) + ".db");
+  try {
+    const astgraph::DumpStats stats = astgraph::dump_tu(
+        files::resolve_file_arg(request.source), *file->compile_options,
+        file->driver, output.string(), astgraph::Options{});
+    std::filesystem::remove(output, ec);
+    std::filesystem::remove(temp_dir, ec);
+    protocol::ResultEnvelope result =
+        service_result("ast", context, "astgraph");
+    result.result = json_out::Value::obj(
+        {{"action", json_out::Value::of(static_cast<int>(request.action))},
+         {"source", json_out::Value::of(request.source)},
+         {"cursor_nodes", json_out::Value::of(stats.cursor_nodes)},
+         {"type_nodes", json_out::Value::of(stats.type_nodes)},
+         {"edges", json_out::Value::of(stats.edges)},
+         {"symbols", json_out::Value::of(stats.symbols)},
+         {"files", json_out::Value::of(stats.files)}});
+    return result;
+  } catch (const std::exception &error) {
+    std::filesystem::remove(output, ec);
+    std::filesystem::remove(temp_dir, ec);
+    return service_error("ast", context, "backend_error", error.what());
+  }
 }
 
 protocol::ResultEnvelope
-DefaultApplicationServices::diff(const DiffRequest &request,
-                                 ApplicationContext &context) const {
+StorageApplicationOperations::execute(const DiffRequest &request,
+                                      ApplicationContext &context) {
   try {
     if (request.scope == DiffScope::index) {
+      const std::string left =
+          request.left_index_identity.value_or(request.left);
+      const std::string right =
+          request.right_index_identity.value_or(request.right);
       protocol::ResultEnvelope result =
           service_result("diff.index", context, "diff");
-      result.result = json_out::Value::obj(
-          {{"left", json_out::Value::of(
-                        request.left_index_identity.value_or(request.left))},
-           {"right", json_out::Value::of(
-                         request.right_index_identity.value_or(request.right))},
-           {"equal", json_out::Value::of(request.left_index_identity ==
-                                         request.right_index_identity)}});
+      result.result =
+          json_out::Value::obj({{"left", json_out::Value::of(left)},
+                                {"right", json_out::Value::of(right)},
+                                {"equal", json_out::Value::of(left == right)}});
       return result;
     }
     if (request.scope == DiffScope::source) {
+      const std::string left =
+          request.left_source_revision.value_or(request.left);
+      const std::string right =
+          request.right_source_revision.value_or(request.right);
       protocol::ResultEnvelope result =
           service_result("diff.source", context, "diff");
-      result.result = json_out::Value::obj(
-          {{"left", json_out::Value::of(
-                        request.left_source_revision.value_or(request.left))},
-           {"right", json_out::Value::of(request.right_source_revision.value_or(
-                         request.right))},
-           {"equal", json_out::Value::of(request.left_source_revision ==
-                                         request.right_source_revision)}});
+      result.result =
+          json_out::Value::obj({{"left", json_out::Value::of(left)},
+                                {"right", json_out::Value::of(right)},
+                                {"equal", json_out::Value::of(left == right)}});
       return result;
     }
 
@@ -321,18 +384,13 @@ DefaultApplicationServices::diff(const DiffRequest &request,
 }
 
 protocol::ResultEnvelope
-DefaultApplicationServices::include(const IncludeRequest &request,
-                                    ApplicationContext &context) const {
-  if (context.storage() == nullptr) {
-    return service_error("include", context, "backend_error",
-                         "include storage is not installed");
-  }
+StorageApplicationOperations::execute(const IncludeRequest &request,
+                                      ApplicationContext &context) {
   hygiene::AnalysisOptions options;
   options.scope_paths = request.paths;
   options.want_duplicates = request.duplicates || !request.unused;
   options.want_unused = request.unused || !request.duplicates;
-  const hygiene::AnalysisResult analysis =
-      hygiene::analyze(*context.storage(), options);
+  const hygiene::AnalysisResult analysis = hygiene::analyze(storage_, options);
   protocol::ResultEnvelope result =
       service_result("include", context, "include-hygiene");
   result.result = json_out::Value::obj(
@@ -341,19 +399,18 @@ DefaultApplicationServices::include(const IncludeRequest &request,
        {"uncovered", json_out::Value::of(static_cast<std::int64_t>(
                          analysis.uncovered_scope.size()))}});
   if (request.action == IncludeAction::plan) {
-    if (!request.output || context.workspace() == nullptr) {
-      return service_error(
-          "include.plan", context, "invalid_input",
-          "include plans require an output path and workspace");
+    if (context.workspace() == nullptr) {
+      return service_error("include.plan", context, "invalid_input",
+                           "include plans require a workspace");
     }
     const hygiene::CleanupPlan plan = hygiene::build_plan(
-        *context.storage(), analysis, context.workspace()->index_path());
-    std::ofstream output(*request.output);
-    if (!output) {
-      return service_error("include.plan", context, "backend_error",
-                           "cannot write include plan");
-    }
-    output << hygiene::serialize(plan);
+        storage_, analysis, context.workspace()->index_path());
+    result.result = json_out::Value::obj(
+        {{"candidates", json_out::Value::of(static_cast<std::int64_t>(
+                            analysis.candidates.size()))},
+         {"uncovered", json_out::Value::of(static_cast<std::int64_t>(
+                           analysis.uncovered_scope.size()))},
+         {"plan", json_out::Value::of(hygiene::serialize(plan))}});
   } else if (request.action == IncludeAction::apply) {
     if (!request.plan) {
       return service_error("include.apply", context, "invalid_input",
@@ -368,7 +425,7 @@ DefaultApplicationServices::include(const IncludeRequest &request,
         std::string((std::istreambuf_iterator<char>(input)),
                     std::istreambuf_iterator<char>()));
     const hygiene::ExecuteResult execution =
-        hygiene::execute(*context.storage(), plan,
+        hygiene::execute(storage_, plan,
                          hygiene::ExecuteOptions{.dry_run = request.dry_run,
                                                  .only = request.only});
     result.result = json_out::Value::obj(
@@ -381,6 +438,97 @@ DefaultApplicationServices::include(const IncludeRequest &request,
     }
   }
   return result;
+}
+
+protocol::ResultEnvelope
+DefaultApplicationServices::index(const IndexRequest &request,
+                                  ApplicationContext &context) const {
+  return context.operations().index == nullptr
+             ? service_error("index", context, "backend_error",
+                             "index operation is not installed")
+             : context.operations().index->execute(request, context);
+}
+
+protocol::ResultEnvelope
+DefaultApplicationServices::query(const QueryRequest &request,
+                                  ApplicationContext &context) const {
+  if (context.read_ports().query == nullptr) {
+    return service_error("query", context, "backend_error",
+                         "query read port is not installed");
+  }
+  try {
+    const query::Plan plan = query::parse_cxq(request.expression);
+    query::Executor executor(*context.read_ports().query);
+    protocol::ResultEnvelope result = base_result("query", context);
+    result.result =
+        request.explain ? executor.explain(plan) : executor.run(plan).to_json();
+    return result;
+  } catch (const std::exception &error) {
+    return service_error("query", context, "invalid_input", error.what());
+  }
+}
+
+protocol::ResultEnvelope
+DefaultApplicationServices::analysis(const AnalysisRequest &request,
+                                     ApplicationContext &context) const {
+  if (request.action == AnalysisAction::list) {
+    try {
+      protocol::ResultEnvelope result =
+          service_result("analysis.list", context, "souffle-analysis");
+      result.result = cli::run_analysis_application(request, {}).result;
+      return result;
+    } catch (const std::exception &error) {
+      return service_error("analysis.list", context, "backend_error",
+                           error.what());
+    }
+  }
+  return context.operations().analysis == nullptr
+             ? service_error("analysis", context, "backend_error",
+                             "analysis operation is not installed")
+             : context.operations().analysis->execute(request, context);
+}
+
+protocol::ResultEnvelope
+DefaultApplicationServices::workspace(const WorkspaceRequest &request,
+                                      ApplicationContext &context) const {
+  if (context.workspace() == nullptr) {
+    return service_error("workspace", context, "backend_error",
+                         "workspace context is not installed");
+  }
+  protocol::ResultEnvelope result =
+      service_result("workspace", context, "workspace");
+  result.result = json_out::Value::obj(
+      {{"action", json_out::Value::of(static_cast<int>(request.action))},
+       {"identity",
+        json_out::Value::of(context.workspace()->snapshot().identity)}});
+  return result;
+}
+
+protocol::ResultEnvelope
+DefaultApplicationServices::ast(const AstInspectionRequest &request,
+                                ApplicationContext &context) const {
+  return context.operations().ast == nullptr
+             ? service_error("ast", context, "backend_error",
+                             "AST operation is not installed")
+             : context.operations().ast->execute(request, context);
+}
+
+protocol::ResultEnvelope
+DefaultApplicationServices::diff(const DiffRequest &request,
+                                 ApplicationContext &context) const {
+  return context.operations().diff == nullptr
+             ? service_error("diff", context, "backend_error",
+                             "diff operation is not installed")
+             : context.operations().diff->execute(request, context);
+}
+
+protocol::ResultEnvelope
+DefaultApplicationServices::include(const IncludeRequest &request,
+                                    ApplicationContext &context) const {
+  return context.operations().include == nullptr
+             ? service_error("include", context, "backend_error",
+                             "include operation is not installed")
+             : context.operations().include->execute(request, context);
 }
 
 protocol::ResultEnvelope
@@ -430,6 +578,13 @@ ApplicationService::execute(const CommandRequest &request,
     return failure(
         operation, "policy_refuted",
         "read-only application context rejects a mutating operation");
+  }
+  if (const auto *include = std::get_if<IncludeRequest>(&request);
+      include != nullptr && include->action == IncludeAction::plan &&
+      include->output &&
+      !context.permits(capability_bit(Capability::artifacts))) {
+    return failure(operation, "policy_refuted",
+                   "include plan output requires the artifacts capability");
   }
   if (!context.permits(entry->required_capabilities) ||
       (entry->mutability == Mutability::mutating &&

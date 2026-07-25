@@ -19,6 +19,7 @@ struct IndexRequest {
   std::optional<std::string> source;
   bool graph = true;
   bool autoderive_labels = true;
+  std::optional<std::string> index;
 };
 
 enum class QueryOutput : std::uint8_t { human, json };
@@ -48,6 +49,7 @@ struct WorkspaceRequest {
   std::optional<std::string> workspace;
   std::optional<std::string> repository;
   std::optional<std::string> revision;
+  std::optional<std::string> index;
 };
 
 enum class AstInspectionAction : std::uint8_t { dump, locals, conditions };
@@ -100,6 +102,7 @@ struct IncludeRequest {
   std::optional<std::string> plan;
   std::vector<std::string> only;
   bool dry_run = false;
+  std::optional<std::string> index;
 };
 
 enum class RefactoringAction : std::uint8_t { check, plan, apply };
@@ -110,6 +113,7 @@ struct RefactoringRequest {
   std::optional<std::string> plan;
   std::vector<std::string> only;
   bool dry_run = false;
+  std::optional<std::string> index;
 };
 
 enum class ProofAction : std::uint8_t { prepare, execute, status, explain };
@@ -119,6 +123,7 @@ struct ProofRequest {
   std::optional<std::string> target;
   std::optional<std::string> policy;
   std::optional<std::string> budget;
+  std::optional<std::string> index;
 };
 
 using CommandRequest =

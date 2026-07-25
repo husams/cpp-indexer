@@ -47,7 +47,7 @@ constexpr std::array<CommandMetadata, 31> kRegistry = {{
      protocol::ExitClass::Success, kCompletePartial},
     {Operation::analysis_list, "analysis", "list", kNoAliases,
      "list available analyses", Mutability::read_only, kAnalysis, kJson,
-     protocol::ExitClass::Success, kComplete},
+     protocol::ExitClass::Success, kComplete, false, false},
     {Operation::analysis_execute, "analysis", "execute", kNoAliases,
      "run an analysis", Mutability::read_only, kAnalysis, kTextJson,
      protocol::ExitClass::Success, kCompletePartial},

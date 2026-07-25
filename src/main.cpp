@@ -54,28 +54,15 @@ int main(int argc, char **argv) {
         cidx::cli::parse_application_request(args);
 
     cidx::cli::Context ctx;
-    ctx.cache_dir = cidx::cli::resolve_cache_dir();
-    makedirs(ctx.cache_dir);
-    ctx.index_path = cidx::pathutil::join(ctx.cache_dir, "index.db");
-    cidx::Logger::root().set_file(
-        cidx::pathutil::join(ctx.cache_dir, "cidx.log"));
-    ctx.logger = &cidx::Logger::root();
     ctx.out = &std::cout;
     ctx.err = &std::cerr;
     if (std::holds_alternative<cidx::application::CommandRequest>(
             application_parse.value)) {
       const auto &request =
           std::get<cidx::application::CommandRequest>(application_parse.value);
-      if (const auto *query =
-              std::get_if<cidx::application::QueryRequest>(&request);
-          query != nullptr && query->index) {
-        ctx.index_path = *query->index;
-      }
-      if (const auto *analysis =
-              std::get_if<cidx::application::AnalysisRequest>(&request);
-          analysis != nullptr && analysis->index) {
-        ctx.index_path = *analysis->index;
-      }
+      ctx.cache_dir = cidx::cli::resolve_cache_dir();
+      ctx.index_path = cidx::pathutil::join(ctx.cache_dir, "index.db");
+      ctx.logger = &cidx::Logger::root();
       return cidx::cli::run_application_request(request, ctx);
     }
 
@@ -90,6 +77,12 @@ int main(int argc, char **argv) {
       std::cout << "cidx " << cidx::cli::kVersion << "\n";
       return 0;
     }
+    ctx.cache_dir = cidx::cli::resolve_cache_dir();
+    makedirs(ctx.cache_dir);
+    ctx.index_path = cidx::pathutil::join(ctx.cache_dir, "index.db");
+    cidx::Logger::root().set_file(
+        cidx::pathutil::join(ctx.cache_dir, "cidx.log"));
+    ctx.logger = &cidx::Logger::root();
     if (parsed.index_db) {
       ctx.index_path = *parsed.index_db;
     }

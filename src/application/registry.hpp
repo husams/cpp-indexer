@@ -62,6 +62,7 @@ struct CommandMetadata {
   protocol::ExitClass exit_class;
   std::span<const protocol::Status> result_statuses;
   bool deprecated = false;
+  bool requires_index = true;
 };
 
 [[nodiscard]] std::span<const CommandMetadata> command_registry() noexcept;
