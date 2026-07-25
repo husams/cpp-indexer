@@ -1,49 +1,79 @@
-// Application-service execution boundary.  Concrete product surfaces install
-// handlers; the service owns typed dispatch, policy checks, cancellation, and
-// the result/event contract.
+// Application-service execution boundary. Concrete services receive typed
+// requests and capability-scoped context ports; CLI adapters only translate
+// argv and render the returned result envelope.
 #pragma once
 
-#include <functional>
+#include <optional>
 #include <string>
-#include <utility>
 
 #include "application/context.hpp"
 #include "application/registry.hpp"
 
 namespace cidx::application {
 
-using IndexHandler = std::function<protocol::ResultEnvelope(
-    const IndexRequest &, ApplicationContext &)>;
-using QueryHandler = std::function<protocol::ResultEnvelope(
-    const QueryRequest &, ApplicationContext &)>;
-using AnalysisHandler = std::function<protocol::ResultEnvelope(
-    const AnalysisRequest &, ApplicationContext &)>;
-using AstInspectionHandler = std::function<protocol::ResultEnvelope(
-    const AstInspectionRequest &, ApplicationContext &)>;
-using DiffHandler = std::function<protocol::ResultEnvelope(
-    const DiffRequest &, ApplicationContext &)>;
+class ApplicationServices {
+public:
+  virtual ~ApplicationServices() = default;
+  virtual protocol::ResultEnvelope index(const IndexRequest &,
+                                         ApplicationContext &) const = 0;
+  virtual protocol::ResultEnvelope query(const QueryRequest &,
+                                         ApplicationContext &) const = 0;
+  virtual protocol::ResultEnvelope analysis(const AnalysisRequest &,
+                                            ApplicationContext &) const = 0;
+  virtual protocol::ResultEnvelope workspace(const WorkspaceRequest &,
+                                             ApplicationContext &) const = 0;
+  virtual protocol::ResultEnvelope ast(const AstInspectionRequest &,
+                                       ApplicationContext &) const = 0;
+  virtual protocol::ResultEnvelope diff(const DiffRequest &,
+                                        ApplicationContext &) const = 0;
+  virtual protocol::ResultEnvelope include(const IncludeRequest &,
+                                           ApplicationContext &) const = 0;
+  virtual protocol::ResultEnvelope refactor(const RefactoringRequest &,
+                                            ApplicationContext &) const = 0;
+  virtual protocol::ResultEnvelope proof(const ProofRequest &,
+                                         ApplicationContext &) const = 0;
+};
 
-struct ApplicationHandlers {
-  IndexHandler index;
-  QueryHandler query;
-  AnalysisHandler analysis;
-  AstInspectionHandler ast_inspection;
-  DiffHandler diff;
+// The default product service set is deliberately independent of CLI state.
+// It uses QueryReadPort and the HSE-61 workspace/persistence ports directly;
+// product-specific adapters may replace individual services in tests or
+// future surfaces without changing request dispatch or policy enforcement.
+class DefaultApplicationServices final : public ApplicationServices {
+public:
+  protocol::ResultEnvelope index(const IndexRequest &,
+                                 ApplicationContext &) const override;
+  protocol::ResultEnvelope query(const QueryRequest &,
+                                 ApplicationContext &) const override;
+  protocol::ResultEnvelope analysis(const AnalysisRequest &,
+                                    ApplicationContext &) const override;
+  protocol::ResultEnvelope workspace(const WorkspaceRequest &,
+                                     ApplicationContext &) const override;
+  protocol::ResultEnvelope ast(const AstInspectionRequest &,
+                               ApplicationContext &) const override;
+  protocol::ResultEnvelope diff(const DiffRequest &,
+                                ApplicationContext &) const override;
+  protocol::ResultEnvelope include(const IncludeRequest &,
+                                   ApplicationContext &) const override;
+  protocol::ResultEnvelope refactor(const RefactoringRequest &,
+                                    ApplicationContext &) const override;
+  protocol::ResultEnvelope proof(const ProofRequest &,
+                                 ApplicationContext &) const override;
 };
 
 class ApplicationService final {
 public:
-  explicit ApplicationService(ApplicationHandlers handlers)
-      : handlers_(std::move(handlers)) {}
+  explicit ApplicationService(const ApplicationServices &services)
+      : services_(services) {}
 
   [[nodiscard]] protocol::ResultEnvelope
   execute(const CommandRequest &request, ApplicationContext &context) const;
 
 private:
   [[nodiscard]] static protocol::ResultEnvelope
-  failure(Operation operation, std::string code, std::string message);
+  failure(const std::optional<Operation> &operation, std::string code,
+          std::string message);
 
-  ApplicationHandlers handlers_;
+  const ApplicationServices &services_;
 };
 
 } // namespace cidx::application

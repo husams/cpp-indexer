@@ -1,9 +1,11 @@
-// Transitional CLI adapter for the typed application boundary.  The legacy
-// ParsedArgs path remains available for commands that have not migrated yet.
+// Transitional CLI adapter. Migrated commands return typed requests directly;
+// commands without an application service remain an explicitly tagged
+// compatibility request and are parsed by the legacy grammar in main().
 #pragma once
 
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "application/requests.hpp"
@@ -12,13 +14,19 @@
 
 namespace cidx::cli {
 
-[[nodiscard]] std::optional<application::CommandRequest>
-try_build_application_request(const ParsedArgs &args);
+struct CompatibilityRequest {
+  std::vector<std::string> argv;
+};
 
-// Typed parser entry point for migrated operations. Commands without a
-// migrated service return nullopt and remain on the compatibility adapter.
+struct ApplicationParseResult {
+  std::variant<application::CommandRequest, CompatibilityRequest> value;
+};
+
 [[nodiscard]] std::optional<application::CommandRequest>
 parse_request(const std::vector<std::string> &argv);
+
+[[nodiscard]] ApplicationParseResult
+parse_application_request(const std::vector<std::string> &argv);
 
 int run_application_request(const application::CommandRequest &request,
                             Context &ctx);

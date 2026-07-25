@@ -26,6 +26,7 @@
     "query.plan": "query",
     "refactor.include-hygiene": "derivation",
     "analysis.diff": "derivation",
+    "product.application": "product",
     "product.cli": "product",
     "compat.core-bundle": "product",
     "sdk.python": "product",

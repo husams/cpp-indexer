@@ -161,6 +161,26 @@
       "description": "Syntax/semantic diff lowering and comparison model."
     },
     {
+      "id": "product.application",
+      "layer": "product-surface",
+      "paths": ["src/application/**"],
+      "allowedDependencies": [
+        "product.application",
+        "workspace.toolchain",
+        "frontend.compiledb",
+        "extraction.ast",
+        "analysis.astgraph",
+        "persistence.sqlite",
+        "analysis.graph",
+        "query.plan",
+        "refactor.include-hygiene",
+        "analysis.diff",
+        "foundation.util",
+        "model.contracts"
+      ],
+      "description": "Typed application requests, policy context, and concrete product services."
+    },
+    {
       "id": "product.cli",
       "layer": "product-surface",
       "paths": [
@@ -173,6 +193,7 @@
       "excludePaths": ["src/cli/souffle_rules.hpp"],
       "allowedDependencies": [
         "product.cli",
+        "product.application",
         "workspace.toolchain",
         "frontend.compiledb",
         "extraction.ast",
@@ -195,6 +216,7 @@
       "allowedDependencies": [
         "compat.core-bundle",
         "product.cli",
+        "product.application",
         "workspace.toolchain",
         "frontend.compiledb",
         "extraction.ast",

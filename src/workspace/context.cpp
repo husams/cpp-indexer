@@ -74,11 +74,11 @@ const Repository *repository_for(const WorkspaceSnapshot &snapshot,
 
 const SemanticUniverse *universe_for(const WorkspaceSnapshot &snapshot,
                                      int64_t universe_id) {
-  const auto it = std::ranges::find_if(
-      snapshot.semantic_universes,
-      [universe_id](const SemanticUniverse &universe) {
-        return universe.id == universe_id;
-      });
+  const auto it =
+      std::ranges::find_if(snapshot.semantic_universes,
+                           [universe_id](const SemanticUniverse &universe) {
+                             return universe.id == universe_id;
+                           });
   return it == snapshot.semantic_universes.end() ? nullptr : &*it;
 }
 
@@ -88,8 +88,7 @@ std::string repository_json(const Repository *repository) {
   }
   return "{\"kind\":" + json_string(repository->kind) +
          ",\"name\":" + json_string(repository->name) +
-         ",\"remote_url\":" + optional_json(repository->remote_url) +
-         "}";
+         ",\"remote_url\":" + optional_json(repository->remote_url) + "}";
 }
 
 std::string universe_key_json(const WorkspaceSnapshot &snapshot,
@@ -119,10 +118,11 @@ std::string workspace_snapshot_json(const WorkspaceSnapshot &snapshot) {
   std::vector<std::string> clones;
   clones.reserve(snapshot.active_clones.size());
   for (const Clone &clone : snapshot.active_clones) {
-    clones.push_back("{\"repository\":" +
-                     repository_json(repository_for(snapshot, clone.repository_id)) +
-                     ",\"label\":" + optional_json(clone.label) +
-                     ",\"path\":" + json_string(clone.path) + "}");
+    clones.push_back(
+        "{\"repository\":" +
+        repository_json(repository_for(snapshot, clone.repository_id)) +
+        ",\"label\":" + optional_json(clone.label) +
+        ",\"path\":" + json_string(clone.path) + "}");
   }
   std::ranges::sort(clones);
 
@@ -135,13 +135,12 @@ std::string workspace_snapshot_json(const WorkspaceSnapshot &snapshot) {
           << ",\"path\":" << json_string(component.path)
           << ",\"version\":" << optional_json(component.version)
           << ",\"repository\":"
-          << repository_json(component.repository_id
-                                 ? repository_for(snapshot,
-                                                  *component.repository_id)
-                                 : nullptr)
+          << repository_json(
+                 component.repository_id
+                     ? repository_for(snapshot, *component.repository_id)
+                     : nullptr)
           << ",\"semantic_universe_key\":"
-          << universe_key_json(snapshot, component.semantic_universe_id)
-          << "}";
+          << universe_key_json(snapshot, component.semantic_universe_id) << "}";
     components.push_back(value.str());
   }
   std::ranges::sort(components);
@@ -151,8 +150,7 @@ std::string workspace_snapshot_json(const WorkspaceSnapshot &snapshot) {
   for (const SemanticUniverse &universe : snapshot.semantic_universes) {
     universes.push_back("{\"key\":" + json_string(universe.key) +
                         ",\"name\":" + json_string(universe.name) +
-                        ",\"policy\":" + json_string(universe.policy) +
-                        "}");
+                        ",\"policy\":" + json_string(universe.policy) + "}");
   }
   std::ranges::sort(universes);
 
@@ -166,8 +164,7 @@ std::string workspace_snapshot_json(const WorkspaceSnapshot &snapshot) {
   }
   result << R"(],"index":{"freshness":)"
          << json_string(snapshot.index_identity.freshness)
-         << ",\"schema_version\":"
-         << snapshot.index_identity.schema_version
+         << ",\"schema_version\":" << snapshot.index_identity.schema_version
          << ",\"index_config\":"
          << optional_json(snapshot.index_identity.index_config)
          << ",\"index_config_fingerprint\":"
@@ -249,8 +246,7 @@ const char *workspace_error_code_name(WorkspaceErrorCode code) noexcept {
 WorkspaceError::WorkspaceError(WorkspaceErrorCode code,
                                const std::string &message,
                                std::vector<std::string> candidates)
-    : CidxError(std::string(workspace_error_code_name(code)) + ": " +
-                message),
+    : CidxError(std::string(workspace_error_code_name(code)) + ": " + message),
       code_(code), candidates_(std::move(candidates)) {}
 
 WorkspaceSnapshot WorkspaceSnapshot::capture(WorkspaceDataSource &data_source) {
@@ -285,13 +281,20 @@ WorkspaceContext::WorkspaceContext(std::string index_path,
       data_source_(data_source), snapshot_(std::move(snapshot)) {}
 
 WorkspaceContext WorkspaceContext::borrow(WorkspaceDataSource &data_source,
-                                           WorkspaceReadWriteMode mode) {
-  return {{}, mode, &data_source, WorkspaceSnapshot::capture(data_source)};
+                                          WorkspaceReadWriteMode mode) {
+  return borrow(data_source, mode, {});
+}
+
+WorkspaceContext WorkspaceContext::borrow(WorkspaceDataSource &data_source,
+                                          WorkspaceReadWriteMode mode,
+                                          std::string index_path) {
+  return {std::move(index_path), mode, &data_source,
+          WorkspaceSnapshot::capture(data_source)};
 }
 
 WorkspaceContext::WorkspaceContext(WorkspaceContext &&) noexcept = default;
-WorkspaceContext &WorkspaceContext::operator=(WorkspaceContext &&) noexcept =
-    default;
+WorkspaceContext &
+WorkspaceContext::operator=(WorkspaceContext &&) noexcept = default;
 WorkspaceContext::~WorkspaceContext() = default;
 
 TranslationUnitConfigurationService::TranslationUnitConfigurationService(
@@ -301,30 +304,29 @@ TranslationUnitConfigurationService::TranslationUnitConfigurationService(
 TranslationUnitConfigurationService::TranslationUnitConfigurationService(
     WorkspaceContext &context, Toolchain &toolchain,
     std::vector<WorkspaceCompileCommand> commands)
-    : context_(context), toolchain_(toolchain), commands_(std::move(commands)) {}
+    : context_(context), toolchain_(toolchain), commands_(std::move(commands)) {
+}
 
-TranslationUnitConfig resolve_config(
-    Toolchain &toolchain, const std::string &source_path,
-    const std::optional<std::string> &driver,
-    const std::optional<std::string> &working_dir,
-    std::vector<std::string> options) {
+TranslationUnitConfig
+resolve_config(Toolchain &toolchain, const std::string &source_path,
+               const std::optional<std::string> &driver,
+               const std::optional<std::string> &working_dir,
+               std::vector<std::string> options) {
   const bool cpp = Toolchain::is_cpp(source_path, options);
   const std::optional<std::string> language =
-      cpp ? std::optional<std::string>("c++")
-          : std::optional<std::string>("c");
+      cpp ? std::optional<std::string>("c++") : std::optional<std::string>("c");
   if (std::ranges::find(options, "-nostdinc") == options.end()) {
     const std::vector<std::string> flags =
         toolchain.toolchain_flags(cpp, driver);
     options.insert(options.end(), flags.begin(), flags.end());
   }
   options.emplace_back("-ferror-limit=0");
-  return resolve_translation_unit_config(
-      driver, working_dir, options, language, toolchain.resource_include(),
-      std::string("error-limit=0"));
+  return resolve_translation_unit_config(driver, working_dir, options, language,
+                                         toolchain.resource_include(),
+                                         std::string("error-limit=0"));
 }
 
-TranslationUnitConfig
-TranslationUnitConfigurationService::config_for_command(
+TranslationUnitConfig TranslationUnitConfigurationService::config_for_command(
     const WorkspaceCompileCommand &command) const {
   if (command.driver.empty()) {
     throw WorkspaceError(WorkspaceErrorCode::unsupported_compiler,
@@ -334,13 +336,11 @@ TranslationUnitConfigurationService::config_for_command(
                         command.directory, normalized_arguments(command.args));
 }
 
-TranslationUnitConfig
-TranslationUnitConfigurationService::config_for_file(
+TranslationUnitConfig TranslationUnitConfigurationService::config_for_file(
     const File &file, const std::string &source_path) const {
-  return resolve_config(
-      toolchain_, source_path, file.driver, std::string("."),
-      normalized_arguments(
-          file.compile_options.value_or(std::vector<std::string>{})));
+  return resolve_config(toolchain_, source_path, file.driver, std::string("."),
+                        normalized_arguments(file.compile_options.value_or(
+                            std::vector<std::string>{})));
 }
 
 std::vector<std::string>
@@ -366,9 +366,8 @@ void TranslationUnitConfigurationService::validate(
   for (const std::string &input : config.generated_inputs) {
     const std::string path = absolute_input(input, config.working_dir);
     if (!files::is_regular_file(path)) {
-      throw WorkspaceError(
-          WorkspaceErrorCode::missing_generated_input,
-          "generated input is missing: " + path, {path});
+      throw WorkspaceError(WorkspaceErrorCode::missing_generated_input,
+                           "generated input is missing: " + path, {path});
     }
   }
   if (config.state != TranslationUnitConfigState::registered) {
@@ -382,8 +381,7 @@ void TranslationUnitConfigurationService::validate(
   }
 }
 
-TranslationUnitDescriptor
-TranslationUnitConfigurationService::descriptor_for(
+TranslationUnitDescriptor TranslationUnitConfigurationService::descriptor_for(
     const std::string &source_path, TranslationUnitConfig config) const {
   validate(config);
   TranslationUnitDescriptor descriptor;
@@ -445,11 +443,10 @@ TranslationUnitConfigurationService::resolve_all(
                          "file is not registered in the workspace",
                          {normalized});
   }
-  std::ranges::sort(
-      descriptors, [](const TranslationUnitDescriptor &left,
-                      const TranslationUnitDescriptor &right) {
-        return left.semantic_hash < right.semantic_hash;
-      });
+  std::ranges::sort(descriptors, [](const TranslationUnitDescriptor &left,
+                                    const TranslationUnitDescriptor &right) {
+    return left.semantic_hash < right.semantic_hash;
+  });
   const auto unique_end = std::ranges::unique(
       descriptors, [](const TranslationUnitDescriptor &left,
                       const TranslationUnitDescriptor &right) {

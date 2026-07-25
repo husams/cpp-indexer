@@ -3,9 +3,11 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 
+#include "application/context.hpp"
 #include "application/requests.hpp"
 #include "query/result_protocol.hpp"
 
@@ -25,12 +27,28 @@ enum class Operation : std::uint8_t {
   ast_conditions,
   diff_file,
   diff_symbol,
+  diff_source,
+  diff_configuration,
+  diff_index,
+  workspace_list,
+  workspace_show,
+  workspace_select,
+  workspace_refresh,
+  include_graph,
+  include_check,
+  include_plan,
+  include_apply,
+  refactor_check,
+  refactor_plan,
+  refactor_apply,
+  proof_prepare,
+  proof_execute,
+  proof_status,
+  proof_explain,
 };
 
 enum class Mutability : std::uint8_t { read_only, mutating };
-enum class Capability : std::uint8_t { index_read, index_write, artifacts };
 enum class OutputFormat : std::uint8_t { text, json };
-using CapabilityMask = std::uint8_t;
 
 struct CommandMetadata {
   Operation operation;
@@ -48,7 +66,8 @@ struct CommandMetadata {
 
 [[nodiscard]] std::span<const CommandMetadata> command_registry() noexcept;
 [[nodiscard]] const CommandMetadata *metadata(Operation operation) noexcept;
-[[nodiscard]] Operation operation_of(const CommandRequest &request) noexcept;
+[[nodiscard]] std::optional<Operation>
+operation_of(const CommandRequest &request) noexcept;
 [[nodiscard]] bool registry_is_valid() noexcept;
 
 } // namespace cidx::application

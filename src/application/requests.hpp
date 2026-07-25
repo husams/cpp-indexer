@@ -1,5 +1,5 @@
 // Typed application requests shared by CLI, agent, SDK, and future IDE
-// adapters.  These types deliberately do not depend on CLI11, streams, or
+// adapters. These types deliberately do not depend on CLI11, streams, or
 // command spelling.
 #pragma once
 
@@ -41,6 +41,15 @@ struct AnalysisRequest {
   int jobs = 1;
 };
 
+enum class WorkspaceAction : std::uint8_t { list, show, select, refresh };
+
+struct WorkspaceRequest {
+  WorkspaceAction action = WorkspaceAction::show;
+  std::optional<std::string> workspace;
+  std::optional<std::string> repository;
+  std::optional<std::string> revision;
+};
+
 enum class AstInspectionAction : std::uint8_t { dump, locals, conditions };
 
 struct AstInspectionRequest {
@@ -50,7 +59,13 @@ struct AstInspectionRequest {
   bool json = false;
 };
 
-enum class DiffScope : std::uint8_t { file, symbol };
+enum class DiffScope : std::uint8_t {
+  file,
+  symbol,
+  source,
+  configuration,
+  index
+};
 
 struct DiffRequest {
   DiffScope scope = DiffScope::file;
@@ -59,10 +74,56 @@ struct DiffRequest {
   std::optional<std::string> left_index;
   std::optional<std::string> right_index;
   std::optional<std::string> selector;
+  std::optional<std::string> left_source_revision;
+  std::optional<std::string> right_source_revision;
+  std::optional<std::string> left_configuration;
+  std::optional<std::string> right_configuration;
+  std::optional<std::string> left_index_identity;
+  std::optional<std::string> right_index_identity;
   bool json = false;
 };
 
-using CommandRequest = std::variant<IndexRequest, QueryRequest, AnalysisRequest,
-                                    AstInspectionRequest, DiffRequest>;
+enum class IncludeAction : std::uint8_t { graph, check, plan, apply };
+
+struct IncludeRequest {
+  IncludeAction action = IncludeAction::check;
+  std::vector<std::string> paths;
+  std::optional<std::string> files_from;
+  bool reverse = false;
+  bool transitive = false;
+  bool cycles = false;
+  bool include_system = false;
+  bool duplicates = false;
+  bool unused = false;
+  bool json = false;
+  std::optional<std::string> output;
+  std::optional<std::string> plan;
+  std::vector<std::string> only;
+  bool dry_run = false;
+};
+
+enum class RefactoringAction : std::uint8_t { check, plan, apply };
+
+struct RefactoringRequest {
+  RefactoringAction action = RefactoringAction::check;
+  std::vector<std::string> paths;
+  std::optional<std::string> plan;
+  std::vector<std::string> only;
+  bool dry_run = false;
+};
+
+enum class ProofAction : std::uint8_t { prepare, execute, status, explain };
+
+struct ProofRequest {
+  ProofAction action = ProofAction::status;
+  std::optional<std::string> target;
+  std::optional<std::string> policy;
+  std::optional<std::string> budget;
+};
+
+using CommandRequest =
+    std::variant<IndexRequest, QueryRequest, AnalysisRequest, WorkspaceRequest,
+                 AstInspectionRequest, DiffRequest, IncludeRequest,
+                 RefactoringRequest, ProofRequest>;
 
 } // namespace cidx::application

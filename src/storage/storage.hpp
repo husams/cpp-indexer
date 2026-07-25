@@ -89,7 +89,7 @@ public:
   // connect: no directory creation, no migrate(), no schema script, no
   // backfill. The stored schema_version must equal kSchemaVersion (a
   // read-only open cannot migrate) or the constructor throws CidxError.
-  enum class OpenMode { read_write, read_only };
+  enum class OpenMode : std::uint8_t { read_write, read_only };
 
   explicit SqliteStorageService(const std::string &path = ":memory:",
                                 OpenMode mode = OpenMode::read_write);
