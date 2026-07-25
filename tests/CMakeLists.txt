@@ -28,6 +28,8 @@ set(CIDX_DEFAULT_TESTS
   ast_pass_test
   ui_graph_view_test
   application_services_test
+  tla_counterexample_regression_test
+  conformance_recorder_test
 )
 
 foreach(test_name IN LISTS CIDX_DEFAULT_TESTS)

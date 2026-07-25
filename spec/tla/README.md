@@ -20,13 +20,20 @@ reviewed contract change.
 | `modules/CidxBehavior.tla` | bounded end-to-end lifecycle, identity, query, transform, storage, failure, and recovery behavior | human-authored normative contract |
 | `modules/CidxSemanticGraph.tla` | typed graph domains, evidence ownership, QueryPlan/CXQ safety, witnesses, completeness, and transform freshness | human-authored normative contract |
 | `conformance/CidxConformance.tla` | deterministic action-sequence replay against the behavioral model | conformance checker contract |
+| `conformance/CidxStorageConformance.tla` | deterministic sidecar-publication replay against `CidxStorageLifecycle` | conformance checker contract |
 | `models/*.tla` and `models/*.cfg` | finite TLC smoke models and their constants/invariants | human-authored model boundary |
-| `manifest.json` | versioned module/model/invariant inventory | human-authored contract index |
+| `manifest.json` | versioned module/model/invariant/proof/conformance inventory | human-authored contract index |
+| `ASSURANCE.md` | which invariants need TLC only, TLAPS, conformance replay, or all three, and what each proves | human-authored contract index |
 | `protected/CidxProtected.tla` | protected invariant predicates consumed by models | explicit human review required |
 | `trusted/assumptions.md` | trusted external assumptions and review rules | explicit human review required |
+| `proofs/` | TLAPS inductive-invariance proof modules | explicit human review required |
+| `counterexamples/golden/` | committed, exported TLC counterexample traces | explicit human review required |
 | `conformance/` | operation/observation mappings and deterministic scenario traces | implementation adapter contract |
 | `tools/check.sh` | pinned syntax and TLC command-line gate | human-authored tool contract |
+| `tools/check-proofs.sh` | pinned TLAPS proof-checking gate | human-authored tool contract |
 | `tools/check-conformance.sh` | conformance inventory and scenario determinism gate | human-authored tool contract |
+| `tools/check-sidecar-conformance.sh` | sidecar-publication conformance replay and rejection gate | human-authored tool contract |
+| `tools/export-counterexample.sh` | TLC counterexample -> stable JSON exporter | human-authored tool contract |
 | `generated/` | disposable reports and translated output only | generator-owned, ignored |
 
 The dependency direction is intentionally one-way:
@@ -180,17 +187,44 @@ separately with:
 spec/tla/tools/check-conformance.sh
 ```
 
+The sidecar-publication conformance replay (HSE-89's third named conformance
+flow, alongside index-generation publication and QueryPlan read-only
+execution above) is checked separately with:
+
+```bash
+spec/tla/tools/check-sidecar-conformance.sh
+```
+
+The TLAPS inductive-proof gate -- a stronger assurance level than TLC's
+one-instance check, see [ASSURANCE.md](ASSURANCE.md) -- is checked separately
+with:
+
+```bash
+spec/tla/tools/check-proofs.sh
+```
+
+A seeded model defect can be exported into the stable, committed JSON format
+`counterexamples/golden/` uses, and re-verified deterministically, with:
+
+```bash
+spec/tla/tools/export-counterexample.sh --demo --out /tmp/out.json
+```
+
 The checker downloads and SHA-256 verifies the pinned `tla2tools.jar` when it
 is not already cached, requires Java 17, runs SANY syntax checks first, then
 runs TLC with one worker and fingerprint polynomial 0 for each checked-in
 model. It emits stable `TLA_SYNTAX_STATUS`, `TLA_MODEL_STATUS`,
-`TLA_INVARIANT_STATUS`, `TLA_LIVENESS_STATUS`, `TLA_TOOLCHAIN_STATUS`, and
-`TLA_CHECK_STATUS` lines.
-Syntax/toolchain failures and model failures have distinct exit classes, and
-the CI workflow exposes syntax, model, invariant, conformance, and C++ gates
-separately. The checker cross-checks every model's
-required invariant set against the `INVARIANT` entries in its `.cfg`; the
-regression command proves that removing `ProtectedInvariant` fails closed.
+`TLA_INVARIANT_STATUS`, `TLA_LIVENESS_STATUS`, `TLA_TOOLCHAIN_STATUS`,
+`TLA_MODEL_COVERAGE`, and `TLA_CHECK_STATUS` lines.
+Syntax/toolchain failures, model failures, TLAPS proof failures, conformance
+mismatches, and infrastructure failures (download/toolchain errors) are
+reported with distinct exit-code classes and status-line prefixes, and the CI
+workflow (`.github/workflows/verification.yml`) exposes each as a separate
+job so they never present as one undifferentiated "TLA+ failed" outcome. The
+checker cross-checks every model's required invariant set against the
+`INVARIANT` entries in its `.cfg`; the regression command proves that
+removing `ProtectedInvariant` fails closed.
 
-See [TOOLCHAIN.md](TOOLCHAIN.md), [POLICY.md](POLICY.md), and
-[trusted/assumptions.md](trusted/assumptions.md) before changing the contract.
+See [TOOLCHAIN.md](TOOLCHAIN.md), [POLICY.md](POLICY.md),
+[ASSURANCE.md](ASSURANCE.md), and [trusted/assumptions.md](trusted/assumptions.md)
+before changing the contract.

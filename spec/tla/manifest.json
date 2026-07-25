@@ -1,5 +1,5 @@
 {
-  "specVersion": "1.1.0",
+  "specVersion": "1.2.0",
   "normativeBoundary": "The checked-in TLA+ modules, model configurations, protected predicates, and trusted-assumption register define observable CIDX behavior independently of implementation structure.",
   "modules": [
     "modules/CidxTypes.tla",
@@ -10,8 +10,19 @@
     "modules/CidxWorkspaceLifecycle.tla",
     "modules/CidxSemanticGraph.tla",
     "conformance/CidxConformance.tla",
+    "conformance/CidxStorageConformance.tla",
     "protected/CidxProtected.tla"
   ],
+  "proofs": [
+    {
+      "module": "proofs/CidxResultProof.tla",
+      "extends": "modules/CidxResult.tla",
+      "theorem": "ResultInvarianceTheorem",
+      "provesInvariants": ["SharedResultTypeInvariant", "TrustedOutcomeInvariant"],
+      "checker": "tools/check-proofs.sh"
+    }
+  ],
+  "assurance": "ASSURANCE.md",
   "models": [
     {
       "module": "models/CidxRepositorySmoke.tla",
@@ -139,11 +150,24 @@
     "protected/",
     "trusted/",
     "modules/CidxTypes.tla",
-    "models/*.cfg"
+    "models/*.cfg",
+    "proofs/",
+    "counterexamples/golden/"
   ],
   "conformance": {
     "operations": "conformance/operation-map.json",
     "observations": "conformance/observation-map.json",
-    "scenarios": "conformance/scenarios.json"
+    "scenarios": "conformance/scenarios.json",
+    "sidecarOperations": "conformance/sidecar-operation-map.json",
+    "sidecarObservations": "conformance/sidecar-observation-map.json",
+    "sidecarScenarios": "conformance/sidecar-scenarios.json",
+    "sidecarChecker": "tools/check-sidecar-conformance.sh"
+  },
+  "counterexampleExport": {
+    "tool": "tools/export-counterexample.sh",
+    "golden": "counterexamples/golden/",
+    "cppRegressionSeededFrom": {
+      "counterexamples/golden/trusted-outcome-violation.json": "tests/tla_counterexample_regression_test.cpp"
+    }
   }
 }

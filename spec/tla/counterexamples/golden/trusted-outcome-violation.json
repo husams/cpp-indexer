@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "model": "CidxResultSmoke",
+  "invariant": "TrustedOutcomeInvariant",
+  "toolchain": {
+    "tool": "tla2tools",
+    "workers": 1,
+    "fingerprint": 0,
+    "seed": 1
+  },
+  "states": [
+    {
+      "index": 1,
+      "label": "Initial predicate",
+      "action": null,
+      "location": null,
+      "values": "result = [ id |-> \"result-1\",\n  query |-> \"query-1\",\n  status |-> \"suggested\",\n  evidence |-> {},\n  assumptions |-> {} ]"
+    },
+    {
+      "index": 2,
+      "label": null,
+      "action": "Observe",
+      "location": "line 21, col 5 to line 24, col 34 of module CidxResult",
+      "values": "result = [ id |-> \"result-1\",\n  query |-> \"query-1\",\n  status |-> \"observed\",\n  evidence |-> {\"evidence-1\"},\n  assumptions |-> {} ]"
+    },
+    {
+      "index": 3,
+      "label": null,
+      "action": "BoundedVerify",
+      "location": "line 31, col 5 to line 32, col 62 of module CidxResult",
+      "values": "result = [ id |-> \"result-1\",\n  query |-> \"query-1\",\n  status |-> \"bounded-verified\",\n  evidence |-> {\"evidence-1\"},\n  assumptions |-> {} ]"
+    },
+    {
+      "index": 4,
+      "label": null,
+      "action": "ProveUnderAssumptions",
+      "location": "line 35, col 5 to line 38, col 27 of module CidxResult",
+      "values": "result = [ id |-> \"result-1\",\n  query |-> \"query-1\",\n  status |-> \"proved-under-assumptions\",\n  evidence |-> {\"evidence-1\"},\n  assumptions |-> {} ]"
+    }
+  ],
+  "summary": {
+    "statesGenerated": 15,
+    "distinctStatesFound": 8,
+    "statesLeftOnQueue": 1,
+    "diameter": 4,
+    "exhaustive": false
+  }
+}

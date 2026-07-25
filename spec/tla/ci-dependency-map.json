@@ -1,0 +1,93 @@
+{
+  "version": "1.0.0",
+  "description": "Changed-spec/changed-code dependency selection (HSE-89): which CI gates a change requires, keyed by an explicit reviewable map rather than inferred solely from which directory a path happens to sit under. tools/select-changed-gates.sh consults this against a git diff.",
+  "flows": [
+    {
+      "name": "spec-core",
+      "gates": ["tla-syntax-and-model"],
+      "paths": [
+        "spec/tla/modules/",
+        "spec/tla/protected/",
+        "spec/tla/trusted/",
+        "spec/tla/models/",
+        "spec/tla/tools/check.sh",
+        "spec/tla/tools/check-regression.sh"
+      ]
+    },
+    {
+      "name": "proofs",
+      "gates": ["tla-proofs"],
+      "paths": [
+        "spec/tla/proofs/",
+        "spec/tla/modules/CidxResult.tla",
+        "spec/tla/modules/CidxTypes.tla",
+        "spec/tla/tools/check-proofs.sh"
+      ]
+    },
+    {
+      "name": "index-generation-publication-and-queryplan",
+      "gates": ["tla-conformance", "cpp-default"],
+      "paths": [
+        "spec/tla/modules/CidxBehavior.tla",
+        "spec/tla/modules/CidxSemanticGraph.tla",
+        "spec/tla/conformance/CidxConformance.tla",
+        "spec/tla/conformance/operation-map.json",
+        "spec/tla/conformance/observation-map.json",
+        "spec/tla/conformance/scenarios.json",
+        "spec/tla/tools/check-conformance.sh",
+        "src/application/services.cpp",
+        "src/application/services.hpp",
+        "src/application/conformance_recorder.cpp",
+        "src/application/conformance_recorder.hpp",
+        "src/query/exec.cpp",
+        "src/query/exec.hpp",
+        "src/query/result_protocol.cpp"
+      ]
+    },
+    {
+      "name": "sidecar-publication",
+      "gates": ["tla-sidecar-conformance", "cpp-default"],
+      "paths": [
+        "spec/tla/modules/CidxStorageLifecycle.tla",
+        "spec/tla/conformance/CidxStorageConformance.tla",
+        "spec/tla/conformance/sidecar-operation-map.json",
+        "spec/tla/conformance/sidecar-observation-map.json",
+        "spec/tla/conformance/sidecar-scenarios.json",
+        "spec/tla/tools/check-sidecar-conformance.sh",
+        "src/storage/artifacts.cpp",
+        "src/storage/artifacts.hpp",
+        "src/storage/storage_migrate.cpp",
+        "src/analysis/runner.cpp"
+      ]
+    },
+    {
+      "name": "counterexample-export",
+      "gates": ["tla-syntax-and-model", "cpp-default"],
+      "paths": [
+        "spec/tla/tools/export-counterexample.sh",
+        "spec/tla/counterexamples/",
+        "tests/tla_counterexample_regression_test.cpp",
+        "tests/conformance_recorder_test.cpp"
+      ]
+    },
+    {
+      "name": "policy-and-ownership",
+      "gates": ["tla-policy"],
+      "paths": [
+        "spec/tla/POLICY.md",
+        "spec/tla/ASSURANCE.md",
+        "spec/tla/manifest.json",
+        "spec/tla/README.md",
+        ".github/CODEOWNERS"
+      ]
+    }
+  ],
+  "allGates": [
+    "tla-syntax-and-model",
+    "tla-proofs",
+    "tla-conformance",
+    "tla-sidecar-conformance",
+    "tla-policy",
+    "cpp-default"
+  ]
+}

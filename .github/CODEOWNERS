@@ -3,3 +3,8 @@
 /spec/tla/trusted/ @husams
 /spec/tla/modules/CidxTypes.tla @husams
 /spec/tla/models/*.cfg @husams
+# HSE-89: TLAPS proofs and exported counterexamples are trust artifacts --
+# an AI agent must not weaken a proof obligation or replace a golden
+# counterexample to make a gate green.
+/spec/tla/proofs/ @husams
+/spec/tla/counterexamples/golden/ @husams

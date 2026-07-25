@@ -6,10 +6,44 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
-  tla-spec:
-    name: TLA+ syntax and TLC
+  # Changed-spec/changed-code dependency selection (HSE-89): a push always
+  # runs every gate as a safety net; a pull_request runs only the gates
+  # spec/tla/ci-dependency-map.json says the changed files require, driven
+  # by an explicit map (spec paths AND their real C++ implementation files),
+  # not by assuming only spec/tla/ paths matter.
+  changes:
+    name: Select required TLA+/conformance gates
+    runs-on: cpp-indexer-runner
+    outputs:
+      tla_syntax_and_model: ${{ steps.select.outputs.run_tla_syntax_and_model }}
+      tla_proofs: ${{ steps.select.outputs.run_tla_proofs }}
+      tla_conformance: ${{ steps.select.outputs.run_tla_conformance }}
+      tla_sidecar_conformance: ${{ steps.select.outputs.run_tla_sidecar_conformance }}
+      tla_policy: ${{ steps.select.outputs.run_tla_policy }}
+      cpp_default: ${{ steps.select.outputs.run_cpp_default }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Select gates
+        id: select
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            spec/tla/tools/select-changed-gates.sh \
+              "origin/${{ github.event.pull_request.base.ref }}" \
+              "${{ github.event.pull_request.head.sha }}"
+          else
+            spec/tla/tools/select-changed-gates.sh --all
+          fi
+
+  tla-syntax-and-model:
+    name: TLA+ syntax, TLC model checking, and mutation regression
+    needs: changes
+    if: needs.changes.outputs.tla_syntax_and_model == 'true'
     runs-on: cpp-indexer-runner
     steps:
       - name: Check out repository
@@ -23,13 +57,105 @@ jobs:
         run: spec/tla/tools/check.sh
       - name: Run invariant mutation regression
         run: spec/tla/tools/check-regression.sh
+
+  tla-proofs:
+    name: TLAPS proof checking
+    needs: changes
+    if: needs.changes.outputs.tla_proofs == 'true'
+    runs-on: cpp-indexer-runner
+    container: ubuntu:24.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install TLAPS build prerequisites
+        run: |
+          apt-get update
+          apt-get install --no-install-recommends -y ca-certificates curl make gcc python3
+      - name: Cache TLAPS install prefix
+        uses: actions/cache@v4
+        with:
+          path: /tmp/tlaps-1.5.0
+          key: tlaps-1.5.0-x86_64-linux-gnu-${{ runner.os }}-ebb7a3f2
+      - name: Run TLAPS proof gate
+        run: spec/tla/tools/check-proofs.sh
+
+  tla-conformance:
+    name: Conformance mappings and deterministic scenario replay
+    needs: changes
+    if: needs.changes.outputs.tla_conformance == 'true'
+    runs-on: cpp-indexer-runner
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up pinned Java runtime
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
       - name: Check conformance mappings and deterministic traces
         run: spec/tla/tools/check-conformance.sh
+      - name: Verify the exported-counterexample pipeline is reproducible
+        run: |
+          spec/tla/tools/export-counterexample.sh --demo --out /tmp/trusted-outcome-violation.json
+          diff /tmp/trusted-outcome-violation.json \
+            spec/tla/counterexamples/golden/trusted-outcome-violation.json
+
+  tla-sidecar-conformance:
+    name: Sidecar-publication conformance replay
+    needs: changes
+    if: needs.changes.outputs.tla_sidecar_conformance == 'true'
+    runs-on: cpp-indexer-runner
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up pinned Java runtime
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Check sidecar-publication conformance and rejection
+        run: spec/tla/tools/check-sidecar-conformance.sh
+
+  tla-policy:
+    name: Protected invariant review policy
+    needs: changes
+    if: needs.changes.outputs.tla_policy == 'true'
+    runs-on: cpp-indexer-runner
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
       - name: Check protected invariant review policy
         run: spec/tla/tools/check-policy.sh
 
+  tla-protected-diff-review:
+    name: Protected-path change requires CODEOWNER approval
+    if: github.event_name == 'pull_request'
+    runs-on: cpp-indexer-runner
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch base ref
+        run: git fetch origin "${{ github.event.pull_request.base.ref }}"
+      - name: Require CODEOWNER approval for protected-path changes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: spec/tla/tools/check-protected-review.sh
+
   cpp-default:
     name: C++ default tests
+    needs: changes
+    if: needs.changes.outputs.cpp_default == 'true'
     runs-on: cpp-indexer-runner
     # The self-hosted runner image is not Ubuntu 24.04; the job runs in a
     # noble container so the llvm-toolchain-noble-22 and gcc-13 packages

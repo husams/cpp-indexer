@@ -1,0 +1,12 @@
+{
+  "version": "1.0.0",
+  "observations": [
+    {"field": "sidecarState", "source": "sidecar publication lifecycle", "allowed": ["absent", "building", "validated", "current", "stale", "missing", "corrupt", "incompatible"]},
+    {"field": "sidecarQuality", "source": "sidecar artifact quality", "allowed": ["valid", "partial", "corrupt", "incompatible"]},
+    {"field": "sidecarValidated", "source": "sidecar validation result", "allowed": [true, false]},
+    {"field": "sidecarAttachment", "source": "sidecar SQLite attachment state", "allowed": ["detached", "attached"]},
+    {"field": "sidecarFilePublication", "source": "sidecar file publication pointer", "allowed": ["none", "current"]},
+    {"field": "readCompleteness", "source": "combined core+sidecar read completeness", "allowed": ["complete", "partial", "unknown", "unavailable"]},
+    {"field": "currentGeneration", "source": "published core generation identity", "type": "non-negative integer"}
+  ]
+}

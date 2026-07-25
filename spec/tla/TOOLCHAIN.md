@@ -10,6 +10,15 @@ The Toolbox is intentionally not part of the build or CI dependency surface.
 | TLC workers | `1` | avoids small-model traversal/diameter nondeterminism |
 | TLC fingerprint polynomial | `0` | fixed by the checker |
 | TLC seed | `1` | fixes finite-state traversal and counterexample ordering |
+| TLAPS (`tlapm`) | release `202210041448`, `tlaps-1.5.0-x86_64-linux-gnu-inst.bin` | SHA-256 `ebb7a3f271bdb564f74cb0a2767ef7b9ff7045621a9be7c50d363a03c2e6f08a`; `spec/tla/tools/check-proofs.sh` rejects any other reported `tlapm --version` |
+
+TLAPS is a separate, native OCaml (Zenon) + Isabelle/ML toolchain -- it does
+not use the Java/tla2tools pin above and needs a C toolchain (`cc`, `make`) to
+compile its bundled Isabelle theories on first install into a cached prefix.
+No Isabelle backend call is required for the proofs currently checked in;
+Zenon alone discharges every obligation (`spec/tla/tools/check-proofs.sh`
+still verifies the full toolchain installs so a future proof that does need
+Isabelle is not silently unsupported).
 
 The jar is fetched from the official release URL:
 
@@ -29,9 +38,18 @@ The mutation regression is:
 spec/tla/tools/check-regression.sh
 ```
 
+The TLAPS proof gate is:
+
+```bash
+spec/tla/tools/check-proofs.sh
+```
+
 For an offline or pre-provisioned environment, point `TLA_TOOLS_JAR` at a
 local copy of the same jar. The checker still verifies its SHA-256. `JAVA_BIN`
 may select a Java 17 executable when `JAVA_HOME` is not suitable.
+`TLA_PROOFS_INSTALLER` and `TLA_PROOFS_PREFIX` do the same for the TLAPS
+installer and its (potentially cached, since Isabelle compilation is the
+expensive step) install prefix.
 
 The checker first invokes SANY for each model. Only after all syntax checks
 pass does it invoke TLC. It uses temporary metadata and a disposable flattened

@@ -147,6 +147,7 @@ endif()
 add_library(cidx_core STATIC
   src/application/registry.cpp
   src/application/services.cpp
+  src/application/conformance_recorder.cpp
   src/util/logger.cpp
   src/util/env.cpp
   src/util/subprocess.cpp

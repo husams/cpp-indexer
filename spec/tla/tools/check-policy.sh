@@ -15,6 +15,8 @@ required = (
     "/spec/tla/trusted/ @husams",
     "/spec/tla/modules/CidxTypes.tla @husams",
     "/spec/tla/models/*.cfg @husams",
+    "/spec/tla/proofs/ @husams",
+    "/spec/tla/counterexamples/golden/ @husams",
 )
 missing = [entry for entry in required if entry not in codeowners]
 if missing:
@@ -22,5 +24,9 @@ if missing:
 for phrase in ("AI-generated implementation changes", "explicit human review"):
     if phrase not in policy:
         raise SystemExit("TLA_POLICY_STATUS=FAIL reason=missing-policy-language:" + phrase)
-print("TLA_POLICY_STATUS=PASS protected-paths=4 human-review-required=true")
+assurance = (root / "spec/tla/ASSURANCE.md").read_text()
+for phrase in ("TLC", "TLAPS", "Conformance replay"):
+    if phrase not in assurance:
+        raise SystemExit("TLA_POLICY_STATUS=FAIL reason=missing-assurance-language:" + phrase)
+print(f"TLA_POLICY_STATUS=PASS protected-paths={len(required)} human-review-required=true")
 PY

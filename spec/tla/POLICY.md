@@ -53,9 +53,26 @@ The following paths are protected human-authored inputs:
 - `spec/tla/trusted/`
 - `spec/tla/modules/CidxTypes.tla`
 - `spec/tla/models/*.cfg`
+- `spec/tla/proofs/`
+- `spec/tla/counterexamples/golden/`
 
 Generators may write only below `spec/tla/generated/`. They must not replace,
 delete, or rewrite protected or trusted files. Changes to protected files
 require the explicit review owner in `.github/CODEOWNERS` and a review of the
 invariant/assumption diff. CI must run the checker from the committed tree so a
 generated file cannot silently redefine the checked-in policy.
+
+## Assurance-level and proof policy (HSE-89)
+
+`spec/tla/ASSURANCE.md` classifies every named invariant/property as TLC-only,
+TLAPS-proved, conformance-replayed, or a combination, and states what each
+mechanism does and does not prove. `spec/tla/proofs/` holds TLAPS proof
+modules; a proof step (`BY`, `PROOF`) may not be deleted or weakened, and a
+proof module may not be edited to change which theorem it proves, without the
+same explicit human review protected modules require. `tools/check-proofs.sh`
+re-checks every obligation from a clean fingerprint cache on every run so a
+proof cannot pass by relying on stale cached results.
+`spec/tla/counterexamples/golden/` holds counterexamples exported from a real
+seeded TLC failure (`tools/export-counterexample.sh`); these are evidence
+files, not disposable output, and must not be hand-edited to match a changed
+implementation without re-deriving them from an actual TLC run.
