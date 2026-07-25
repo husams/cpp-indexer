@@ -1,7 +1,7 @@
 # Generated CIDX semantic catalog
 
 - Catalog version: `1`
-- Catalog hash: `1adb5f6663a2e48dc3a624c79703ceaa5287f2784731a00bbc469dba8d5935d4`
+- Catalog hash: `3337824260ee0afe1260859b6be88e6fb8280852fd736cde5e12cca5c3847ba4`
 
 ## Relations
 
@@ -55,10 +55,12 @@
 | template_argument | 2 | `references_symbol` | `template_argument` | `symbol` | `referenced_by_template_argument` | out,in | reference_site | reference_site | partial |
 | edge | 1 | `has_argument` | `edge` | `call_argument` | `of_edge` | out,in | call_site | call_site | partial |
 | edge | 2 | `has_evidence` | `edge` | `evidence` | `of_edge` | out,in | call_site | call_site | partial |
+| edge | 3 | `has_site` | `edge` | `site` | `of_edge` | out,in | call_site | call_site | partial |
 | call_argument | 1 | `of_type` | `call_argument` | `type` | `has_call_argument` | out,in | call_site | call_site | partial |
 | call_argument | 2 | `references_symbol` | `call_argument` | `symbol` | `referenced_by_call_argument` | out,in | call_site | call_site | partial |
 | evidence | 1 | `of_edge` | `evidence` | `edge` | `has_evidence` | out,in | call_site | call_site | partial |
 | evidence | 2 | `of_occurrence` | `evidence` | `call_argument` | `has_evidence` | out,in | call_site | call_site | partial |
+| site | 1 | `of_edge` | `site` | `edge` | `has_site` | out,in | call_site | call_site | partial |
 | type | 1 | `references_symbol` | `type` | `symbol` | `of_type` | out,in | declaration | declaration | partial |
 | type | 2 | `has_type_edge` | `type` | `type` | `of_type_edge` | out,in | derived | derived | partial |
 

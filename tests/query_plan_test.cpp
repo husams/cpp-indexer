@@ -1019,6 +1019,39 @@ TEST_CASE(
         non_catalogued_second_arguments.rows);
 }
 
+TEST_CASE("query_plan: sites expand edge provenance deterministically") {
+  Storage db(":memory:");
+  const int64_t component = db.add_component("project", "/tmp/site-view");
+  const int64_t directory = db.add_directory(component, "src");
+  const int64_t file = db.add_file(directory, "same.cpp");
+  const int64_t caller = db.add_symbol(make_sym("USR::caller", "caller"));
+  const int64_t callee = db.add_symbol(make_sym("USR::callee", "callee"));
+  const int64_t edge = db.add_edge(make_edge(caller, callee, 1));
+  cidx::EdgeSite site;
+  site.edge_id = edge;
+  site.file_id = file;
+  site.line = 10;
+  site.col = 2;
+  db.add_edge_site(site);
+
+  QueryExecutor ex(db);
+  const Result result = ex.run(
+      (start(codebase()) | view(View::Edge) | nodes() | sites() |
+       select({"edge_id", "file", "line", "col", "relation", "evidence",
+               "status", "partial"}))
+          .plan());
+  REQUIRE(result.view == View::Site);
+  REQUIRE(result.rows.size() == 1);
+  CHECK(std::get<int64_t>(result.rows[0][0]) == edge);
+  CHECK(std::get<std::string>(result.rows[0][1]).ends_with("/same.cpp"));
+  CHECK(std::get<int64_t>(result.rows[0][2]) == 10);
+  CHECK(std::get<int64_t>(result.rows[0][3]) == 2);
+  CHECK(std::get<std::string>(result.rows[0][4]) == "calls");
+  CHECK(std::get<std::string>(result.rows[0][5]) == "call_site");
+  CHECK(std::get<std::string>(result.rows[0][6]) == "partial");
+  CHECK(std::get<int64_t>(result.rows[0][7]) == 1);
+}
+
 TEST_CASE("query_plan: devirtualized calls preserve the inherited receiver") {
   Storage db(":memory:");
   {

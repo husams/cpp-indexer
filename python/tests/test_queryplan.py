@@ -21,7 +21,7 @@ from indexer import queryplan as qp  # noqa: E402
 from indexer.queryplan import (  # noqa: E402
     Executor, PlanError, all_of, canonical_json, codebase, count, distinct,
     entity, eq, except_, glob, in_, in_list, intersect, limit, ne, nodes,
-    not_, order_by, out, select, start, symbol, union_, validate, view, where,
+    not_, order_by, out, select, sites, start, symbol, union_, validate, view, where,
     all, all_targets, any_target, at_least, exactly, exists, inherits_from,
     is_abstract, is_instance, none,
     parse_cxq,
@@ -801,3 +801,31 @@ def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable(
         (start(codebase()) | view("call_argument") | nodes()
          | select(["identity_key"])).plan
     ).rows
+
+
+def test_site_view_expansion_exposes_deterministic_provenance():
+    db = Storage(":memory:")
+    _seed_reverse_typed_graph(db, "/tmp/site-view/cpp-indexer", grouped=False)
+    result = Executor(db).run(
+        (start(codebase()) | view("edge") | nodes() | sites()
+         | select(["edge_id", "file", "line", "col", "relation",
+                   "evidence", "status", "partial"])).plan
+    )
+    assert len(result.rows) == 1
+    edge_id, path, line, col, relation, evidence, status, partial = result.rows[0]
+    assert edge_id == 1
+    assert path.endswith("/same.cpp")
+    assert (line, col) == (10, 2)
+    assert (relation, evidence, status, partial) == ("calls", "call_site", "partial", 1)
+    assert result.view == "site"
+
+
+def test_typed_view_compositions_are_rejected_before_execution():
+    with pytest.raises(PlanError, match="^E_VIEW:"):
+        validate((start(codebase()) | view("edge") | nodes()
+                  | view("site")).plan)
+    with pytest.raises(PlanError, match="^E_VIEW:"):
+        validate((start(codebase()) | nodes() | sites()).plan)
+    assert '"op": "sites"' in canonical_json(
+        (start(codebase()) | view("edge") | nodes() | sites()).plan
+    )

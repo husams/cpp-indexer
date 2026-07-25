@@ -2,7 +2,7 @@
   "format": "cidx.catalog/v1",
   "catalog_version": 1,
   "product": "cidx",
-  "views": ["symbol", "entity", "parameter", "template_parameter", "template_argument", "call_argument", "edge", "evidence", "type"],
+  "views": ["symbol", "entity", "parameter", "template_parameter", "template_argument", "call_argument", "edge", "site", "evidence", "type"],
   "symbol_kinds": [
     {"id": 2, "name": "struct"},
     {"id": 3, "name": "union"},
@@ -71,10 +71,12 @@
     ,{"id": 2, "name": "references_symbol", "layer": "template_argument", "source": "template_argument", "target": "symbol", "inverse": "referenced_by_template_argument", "traversal": ["out", "in"], "evidence": "reference_site", "evidence_capabilities": ["reference_site"], "completeness": "partial", "virtual": true}
     ,{"id": 1, "name": "has_argument", "layer": "edge", "source": "edge", "target": "call_argument", "inverse": "of_edge", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial", "virtual": true}
     ,{"id": 2, "name": "has_evidence", "layer": "edge", "source": "edge", "target": "evidence", "inverse": "of_edge", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial", "virtual": true}
+    ,{"id": 3, "name": "has_site", "layer": "edge", "source": "edge", "target": "site", "inverse": "of_edge", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial", "virtual": true}
     ,{"id": 1, "name": "of_type", "layer": "call_argument", "source": "call_argument", "target": "type", "inverse": "has_call_argument", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial", "virtual": true}
     ,{"id": 2, "name": "references_symbol", "layer": "call_argument", "source": "call_argument", "target": "symbol", "inverse": "referenced_by_call_argument", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial", "virtual": true}
     ,{"id": 1, "name": "of_edge", "layer": "evidence", "source": "evidence", "target": "edge", "inverse": "has_evidence", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial", "virtual": true}
     ,{"id": 2, "name": "of_occurrence", "layer": "evidence", "source": "evidence", "target": "call_argument", "inverse": "has_evidence", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial", "virtual": true}
+    ,{"id": 1, "name": "of_edge", "layer": "site", "source": "site", "target": "edge", "inverse": "has_site", "traversal": ["out", "in"], "evidence": "call_site", "evidence_capabilities": ["call_site"], "completeness": "partial", "virtual": true}
     ,{"id": 1, "name": "references_symbol", "layer": "type", "source": "type", "target": "symbol", "inverse": "of_type", "traversal": ["out", "in"], "evidence": "declaration", "evidence_capabilities": ["declaration"], "completeness": "partial", "virtual": true}
     ,{"id": 2, "name": "has_type_edge", "layer": "type", "source": "type", "target": "type", "inverse": "of_type_edge", "traversal": ["out", "in"], "evidence": "derived", "evidence_capabilities": ["derived"], "completeness": "partial", "virtual": true}
   ],
