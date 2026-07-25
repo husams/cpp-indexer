@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -275,4 +276,131 @@ TEST_CASE("edge sink caches lookups and tracks unique facts in visit order") {
   CIDX_CHECK_BOOL(sink.definition_ids().front() == second_definition_id);
   CIDX_CHECK_BOOL(fixture.db.stats().edges == 2);
   CIDX_CHECK_BOOL(fixture.db.definitions_of(second_id).size() == 1);
+}
+
+TEST_CASE("sink ID collections preserve order across the 32-entry transition") {
+  SinkFixture fixture;
+  cidx::ast::StorageSymbolSink symbols(fixture.ports);
+  symbols.set_current_file_id(fixture.first_file);
+
+  std::vector<cidx::ast::SymbolRecord> symbol_records;
+  std::vector<int64_t> persisted_symbol_ids;
+  for (int index = 0; index < 64; ++index) {
+    symbol_records.push_back(
+        fixture.symbol("sink:@F@threshold_" + std::to_string(index), true,
+                       fixture.first_file));
+  }
+  for (const auto &record : symbol_records) {
+    symbols.emit(record);
+    persisted_symbol_ids.push_back(fixture.db.lookup_symbol(record.usr)->id);
+  }
+
+  for (int index = 0; index < 31; ++index) {
+    symbols.emit(symbol_records[index]);
+  }
+  symbols.emit(symbol_records[0]);
+  symbols.emit(symbol_records[31]);
+  symbols.emit(symbol_records[31]);
+  symbols.emit(symbol_records[32]);
+  symbols.emit(symbol_records[0]);
+  symbols.emit(symbol_records[32]);
+  for (int index = 33; index < 64; ++index) {
+    symbols.emit(symbol_records[index]);
+  }
+  CIDX_REQUIRE_BOOL(symbols.symbol_ids() == persisted_symbol_ids);
+  CIDX_CHECK_BOOL(fixture.db.stats().symbols == 64);
+
+  symbols.reset_counters();
+  for (int index = 32; index >= 0; --index) {
+    symbols.emit(symbol_records[index]);
+  }
+  symbols.emit(symbol_records[32]);
+  symbols.emit(symbol_records[0]);
+  CIDX_REQUIRE_BOOL(symbols.symbol_ids().size() == 33);
+  CIDX_CHECK_BOOL(symbols.symbol_ids().front() == persisted_symbol_ids[32]);
+  CIDX_CHECK_BOOL(symbols.symbol_ids().back() == persisted_symbol_ids[0]);
+  CIDX_CHECK_BOOL(fixture.db.stats().symbols == 64);
+
+  std::vector<int64_t> edge_symbol_ids;
+  for (int index = 0; index < 128; ++index) {
+    edge_symbol_ids.push_back(fixture.db.add_symbol(SinkFixture::stored_symbol(
+        "sink:@F@edge_threshold_" + std::to_string(index),
+        fixture.first_file)));
+  }
+  cidx::ast::StorageEdgeSink edges(fixture.ports);
+  std::vector<cidx::ast::EdgeRecord> edge_records;
+  for (int index = 0; index < 64; ++index) {
+    edge_records.push_back({.src_id = edge_symbol_ids[index * 2],
+                            .dst_id = edge_symbol_ids[index * 2 + 1],
+                            .kind = 1,
+                            .count = 1,
+                            .base_access = std::nullopt,
+                            .is_virtual = std::nullopt});
+  }
+  std::vector<int64_t> expected_edge_ids;
+  auto record_edge = [&](int index) {
+    const int64_t id = edges.ensure_edge(edge_records[index]);
+    if (std::ranges::find(expected_edge_ids, id) == expected_edge_ids.end()) {
+      expected_edge_ids.push_back(id);
+    }
+  };
+  for (int index = 0; index < 31; ++index) {
+    record_edge(index);
+  }
+  record_edge(0);
+  record_edge(31);
+  record_edge(31);
+  record_edge(32);
+  record_edge(0);
+  record_edge(32);
+  for (int index = 33; index < 64; ++index) {
+    record_edge(index);
+  }
+  CIDX_REQUIRE_BOOL(edges.edge_ids() == expected_edge_ids);
+  CIDX_CHECK_BOOL(fixture.db.stats().edges == 64);
+
+  std::vector<int64_t> expected_definition_ids;
+  auto record_definition = [&](int index) {
+    const int64_t id = edges.get_or_create_definition(
+        edge_symbol_ids[index], fixture.first_file, index + 1, 1, index + 1, 10,
+        std::nullopt);
+    if (std::ranges::find(expected_definition_ids, id) ==
+        expected_definition_ids.end()) {
+      expected_definition_ids.push_back(id);
+    }
+  };
+  for (int index = 0; index < 31; ++index) {
+    record_definition(index);
+  }
+  record_definition(0);
+  record_definition(31);
+  record_definition(31);
+  record_definition(32);
+  record_definition(0);
+  record_definition(32);
+  for (int index = 33; index < 64; ++index) {
+    record_definition(index);
+  }
+  CIDX_REQUIRE_BOOL(edges.definition_ids() == expected_definition_ids);
+
+  edges.reset_fact_ids();
+  for (int index = 32; index >= 0; --index) {
+    record_edge(index);
+    record_definition(index);
+  }
+  record_edge(32);
+  record_definition(32);
+  CIDX_REQUIRE_BOOL(edges.edge_ids().size() == 33);
+  CIDX_REQUIRE_BOOL(edges.definition_ids().size() == 33);
+  CIDX_CHECK_BOOL(edges.edge_ids().front() == expected_edge_ids[32]);
+  CIDX_CHECK_BOOL(edges.definition_ids().front() ==
+                  expected_definition_ids[32]);
+  CIDX_CHECK_BOOL(fixture.db.stats().edges == 64);
+
+  int persisted_definitions = 0;
+  for (int index = 0; index < 64; ++index) {
+    persisted_definitions += static_cast<int>(
+        fixture.db.definitions_of(edge_symbol_ids[index]).size());
+  }
+  CIDX_CHECK_BOOL(persisted_definitions == 64);
 }

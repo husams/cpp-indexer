@@ -1,6 +1,8 @@
 #include "ast/storage_symbol_sink.hpp"
 
 #include <algorithm>
+#include <functional>
+#include <string_view>
 
 #include "ast/kind_map.hpp"
 #include "ast/pass_registry.hpp"
@@ -41,6 +43,25 @@ std::string identity_cache_key(const cidx::Symbol &sym) {
   key.push_back('\x1f');
   key += std::to_string(sym.semantic_universe_id);
   return key;
+}
+
+std::size_t identity_cache_hash(const cidx::Symbol &sym) {
+  std::size_t hash = 0xcbf29ce484222325ULL;
+  const auto mix = [&hash](std::size_t value) {
+    hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+  };
+  const auto string_hash = std::hash<std::string_view>{};
+  mix(string_hash(sym.usr));
+  mix(static_cast<std::size_t>(sym.identity_source.has_value()));
+  if (sym.identity_source) {
+    mix(string_hash(*sym.identity_source));
+  }
+  mix(static_cast<std::size_t>(sym.identity_translation_unit.has_value()));
+  if (sym.identity_translation_unit) {
+    mix(string_hash(*sym.identity_translation_unit));
+  }
+  mix(std::hash<int64_t>{}(sym.semantic_universe_id));
+  return hash;
 }
 
 std::optional<cidx::Symbol>
@@ -101,6 +122,7 @@ StorageSymbolSink::StorageSymbolSink(cidx::storage::AstStoragePorts &ports)
 void StorageSymbolSink::set_current_file_id(int64_t file_id) {
   current_file_id_ = file_id;
   resolved_identity_cache_.clear();
+  resolved_identity_cache_hashes_.clear();
   resolved_cache_active_ = false;
 }
 
@@ -113,6 +135,7 @@ void StorageSymbolSink::set_identity_translation_unit_config_id(
           : ports_.workspace.portable_translation_unit_identity_for_config(
                 config_id);
   resolved_identity_cache_.clear();
+  resolved_identity_cache_hashes_.clear();
   resolved_cache_active_ = false;
 }
 
@@ -124,6 +147,7 @@ void StorageSymbolSink::set_identity_translation_unit_file_id(int64_t file_id) {
                     file_id))
           : std::nullopt;
   resolved_identity_cache_.clear();
+  resolved_identity_cache_hashes_.clear();
   resolved_cache_active_ = false;
 }
 
@@ -132,6 +156,7 @@ void StorageSymbolSink::reset_counters() {
   symbol_ids_.clear();
   symbol_id_set_.clear();
   resolved_identity_cache_.clear();
+  resolved_identity_cache_hashes_.clear();
   resolved_cache_active_ = false;
 }
 
@@ -163,6 +188,9 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
     if (!resolved_cache_active_) {
       return false;
     }
+    if (!resolved_identity_cache_hashes_.contains(identity_cache_hash(sym))) {
+      return false;
+    }
     identity_key = identity_cache_key(sym);
     return resolved_identity_cache_.contains(identity_key);
   }();
@@ -186,7 +214,9 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
     if (identity_key.empty()) {
       identity_key = identity_cache_key(sym);
     }
-    resolved_identity_cache_.insert(std::move(identity_key));
+    if (resolved_identity_cache_.insert(std::move(identity_key)).second) {
+      resolved_identity_cache_hashes_.insert(identity_cache_hash(sym));
+    }
   }
 }
 

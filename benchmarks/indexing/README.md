@@ -10,6 +10,10 @@ translation units, imports it into a temporary cache, and measures:
 - per-translation-unit timings for a bounded sample;
 - SQLite page/row deltas from the disposable benchmark database;
 - shared-header fan-in and the indexer's `indexed`/`already` header counters.
+- SQLite `integrity_check`, schema/catalog metadata, and a canonical semantic
+  digest of the Layer-0 rows at each index state;
+- repeated trials with median timing, CPU utilization, and per-TU latency
+  aggregation.
 
 Generated sources, caches, logs, and JSON reports belong outside the checkout.
 The runner uses a temporary `INDEXER_CACHE`; it never opens the checkout's
@@ -27,12 +31,14 @@ python3 benchmarks/indexing/run.py \
   --representative-files 32 \
   --scale-files 1000 \
   --per-tu 5 \
+  --trials 3 \
   --output /tmp/hse95-indexing.json
 ```
 
-The JSON report contains one case per requested corpus size and executable.
-The `comparison` section reports current-versus-baseline wall-time deltas for
-the cold, warm, and incremental index stages. The harness does not claim an
+The JSON report contains one case per trial, median aggregates, and a
+`comparison` section for current versus baseline. It reports wall-time deltas,
+CPU utilization, SQLite activity, semantic-digest parity, and schema/catalog
+parity for cold, warm, and incremental index stages. It does not claim an
 improvement when no baseline executable is supplied.
 
 The generated corpus is intentionally simple and stable: every source includes
@@ -41,7 +47,8 @@ and visits eight distinct call edges twice. This makes shared-header fan-in,
 resolved-identity reuse, and fact-ID de-duplication explicit while retaining the
 1,000+ TU scaling shape. Use a checked-out
 representative repository separately when a project-specific workload is
-required; the same stage and measurement fields apply.
+required; the same stage and measurement fields apply. The first per-TU sample
+mutates TU 0 after the separate incremental state, so it is not a no-op.
 
 The initial usability target is a cold 1,000-TU run in under 15 minutes on the
 benchmark host, an unchanged warm run in under 5 seconds, and a one-TU

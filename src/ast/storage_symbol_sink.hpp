@@ -47,6 +47,7 @@ private:
   PassMetrics *metrics_ = nullptr;
   std::unordered_set<int64_t> symbol_id_set_;
   std::unordered_set<std::string> resolved_identity_cache_;
+  std::unordered_set<std::size_t> resolved_identity_cache_hashes_;
   bool resolved_cache_active_ = false;
 };
 
