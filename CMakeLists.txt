@@ -183,6 +183,8 @@ add_library(cidx_core STATIC
   src/cli/commands_query.cpp
   src/cli/commands_show.cpp
   src/cli/analyze.cpp
+  src/analysis/facts.cpp
+  src/analysis/runner.cpp
   src/graph/query.cpp
   src/graph/emit.cpp
   src/query/plan.cpp

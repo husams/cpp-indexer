@@ -30,7 +30,8 @@
     "compat.core-bundle": "product",
     "sdk.python": "product",
     "sdk.python.compat": "product",
-    "analysis.souffle-rules": "derivation"
+    "analysis.souffle-rules": "derivation",
+    "analysis.fact-provider": "derivation"
   },
   "external_ownership": {
     "clang": ["frontend", "extraction"],

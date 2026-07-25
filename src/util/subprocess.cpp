@@ -1,13 +1,17 @@
 #include "util/subprocess.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 
 #include <csignal>
 #include <fcntl.h>
 #include <poll.h>
 #include <spawn.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -38,7 +42,9 @@ RunResult spawn_failure(const std::string &what, int err) {
 
 } // namespace
 
-RunResult run(const std::vector<std::string> &argv, double timeout_sec) {
+RunResult run(const std::vector<std::string> &argv, double timeout_sec,
+              const std::size_t output_limit,
+              const std::function<bool()> &output_guard) {
   RunResult res;
   if (argv.empty()) {
     res.exit_code = 127;
@@ -46,12 +52,12 @@ RunResult run(const std::vector<std::string> &argv, double timeout_sec) {
     return res;
   }
 
-  int out_pipe[2] = {-1, -1};
-  int err_pipe[2] = {-1, -1};
-  if (::pipe(out_pipe) != 0) {
+  std::array<int, 2> out_pipe = {-1, -1};
+  std::array<int, 2> err_pipe = {-1, -1};
+  if (::pipe(out_pipe.data()) != 0) {
     return spawn_failure("pipe", errno);
   }
-  if (::pipe(err_pipe) != 0) {
+  if (::pipe(err_pipe.data()) != 0) {
     const int e = errno;
     close_fd(out_pipe[0]);
     close_fd(out_pipe[1]);
@@ -103,10 +109,16 @@ RunResult run(const std::vector<std::string> &argv, double timeout_sec) {
       clock::now() + std::chrono::duration_cast<clock::duration>(
                          std::chrono::duration<double>(timeout_sec));
 
-  Sink sinks[2] = {{.fd = out_pipe[0], .buf = &res.out, .open = true},
-                   {.fd = err_pipe[0], .buf = &res.err, .open = true}};
-  char buf[4096];
+  std::array<Sink, 2> sinks = {
+      {{.fd = out_pipe[0], .buf = &res.out, .open = true},
+       {.fd = err_pipe[0], .buf = &res.err, .open = true}}};
+  std::array<char, 4096> buf{};
   while (sinks[0].open || sinks[1].open) {
+    if (output_guard && output_guard()) {
+      ::kill(pid, SIGKILL);
+      res.output_guard_triggered = true;
+      break;
+    }
     const auto remaining =
         std::chrono::duration_cast<std::chrono::milliseconds>(deadline -
                                                               clock::now())
@@ -116,7 +128,7 @@ RunResult run(const std::vector<std::string> &argv, double timeout_sec) {
       res.timed_out = true;
       break;
     }
-    struct pollfd pfds[2];
+    std::array<struct pollfd, 2> pfds{};
     int nfds = 0;
     for (const auto &s : sinks) {
       if (s.open) {
@@ -126,8 +138,9 @@ RunResult run(const std::vector<std::string> &argv, double timeout_sec) {
         ++nfds;
       }
     }
-    const int pr =
-        ::poll(pfds, static_cast<nfds_t>(nfds), static_cast<int>(remaining));
+    const int poll_timeout =
+        static_cast<int>(std::min<std::int64_t>(remaining, 50));
+    const int pr = ::poll(pfds.data(), static_cast<nfds_t>(nfds), poll_timeout);
     if (pr < 0) {
       if (errno == EINTR) {
         continue;
@@ -146,13 +159,31 @@ RunResult run(const std::vector<std::string> &argv, double timeout_sec) {
       if ((p.revents & (POLLIN | POLLHUP | POLLERR)) == 0) {
         continue;
       }
-      const ssize_t got = ::read(s.fd, buf, sizeof buf);
+      const auto got = ::read(s.fd, buf.data(), buf.size());
       if (got > 0) {
-        s.buf->append(buf, static_cast<size_t>(got));
+        const auto bytes = static_cast<std::size_t>(got);
+        std::size_t remaining = bytes;
+        if (output_limit != 0) {
+          remaining = res.captured_bytes >= output_limit
+                          ? 0
+                          : std::min(bytes, output_limit - res.captured_bytes);
+        }
+        s.buf->append(buf.data(), remaining);
+        res.captured_bytes += remaining;
+        if (output_limit != 0 && remaining < bytes) {
+          res.output_limited = true;
+          ::kill(pid, SIGKILL);
+          break;
+        }
       } else if (got == 0 || (errno != EINTR && errno != EAGAIN)) {
         close_fd(s.fd);
         s.open = false;
       }
+    }
+    if (!res.output_guard_triggered && output_guard && output_guard()) {
+      ::kill(pid, SIGKILL);
+      res.output_guard_triggered = true;
+      break;
     }
   }
   for (auto &s : sinks) {
@@ -164,6 +195,14 @@ RunResult run(const std::vector<std::string> &argv, double timeout_sec) {
 
   int status = 0;
   while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+  }
+  struct rusage usage{};
+  if (::getrusage(RUSAGE_CHILDREN, &usage) == 0) {
+#ifdef __APPLE__
+    res.peak_bytes = static_cast<std::size_t>(usage.ru_maxrss);
+#else
+    res.peak_bytes = static_cast<std::size_t>(usage.ru_maxrss) * 1024U;
+#endif
   }
   if (WIFEXITED(status)) {
     res.exit_code = WEXITSTATUS(status);

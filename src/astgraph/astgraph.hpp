@@ -10,7 +10,8 @@
 //     "absent" cell is a 0 sentinel (real ids start at 1) or ''.
 //   * relation_kind is a FIXED catalog (RelKind below) — each relation maps to
 //     a Clang C++ AST accessor (see astgraph.cpp process_* methods).
-//   * symbol is deduped by USR (clang::index::generateUSRForDecl, byte-identical
+//   * symbol is deduped by USR (clang::index::generateUSRForDecl,
+//   byte-identical
 //     to libclang) and joins against cidx index.db symbol.usr.
 //
 // The tool shares cidx's configuration: compile args + driver for the TU come
@@ -24,6 +25,11 @@
 #include <vector>
 
 #include "astgraph/schema.hpp"
+#include "storage/artifacts.hpp"
+
+namespace cidx {
+class Storage;
+}
 
 namespace cidx::astgraph {
 
@@ -42,16 +48,16 @@ enum RelKind : int {
   kRelSpecializes = 7,    // getSpecializedTemplate() / getPrimaryTemplate()
   kRelOverrides = 8,      // CXXMethodDecl::overridden_methods (ord = position)
   // 9 = has_type, retired (see node.type_id)
-  kRelTypeDecl = 10,      // Type -> its declaration node
-  kRelCanonicalType = 11, // ASTContext::getCanonicalType()
-  kRelPointee = 12,       // (Pointer|Reference|...)Type::getPointeeType()
-  kRelElementType = 13,   // ArrayType/VectorType/ComplexType::getElementType()
-  kRelResultType = 14,    // FunctionType::getReturnType()
-  kRelArgType = 15,       // FunctionProtoType::getParamType (ord = position)
-  kRelNamedType = 16,     // ElaboratedType::getNamedType()
-  kRelUnderlyingType = 17,// TypedefNameDecl::getUnderlyingType (decl -> type)
-  kRelTemplateArg = 18,   // TemplateSpecializationType arg (ord = position)
-  kRelClassType = 19,     // MemberPointerType::getClass()
+  kRelTypeDecl = 10,       // Type -> its declaration node
+  kRelCanonicalType = 11,  // ASTContext::getCanonicalType()
+  kRelPointee = 12,        // (Pointer|Reference|...)Type::getPointeeType()
+  kRelElementType = 13,    // ArrayType/VectorType/ComplexType::getElementType()
+  kRelResultType = 14,     // FunctionType::getReturnType()
+  kRelArgType = 15,        // FunctionProtoType::getParamType (ord = position)
+  kRelNamedType = 16,      // ElaboratedType::getNamedType()
+  kRelUnderlyingType = 17, // TypedefNameDecl::getUnderlyingType (decl -> type)
+  kRelTemplateArg = 18,    // TemplateSpecializationType arg (ord = position)
+  kRelClassType = 19,      // MemberPointerType::getClass()
 };
 
 struct Options {
@@ -91,5 +97,16 @@ DumpStats dump_tu(const std::string &source_path,
                   const std::vector<std::string> &args,
                   const std::optional<std::string> &driver,
                   const std::string &out_db_path, const Options &opts);
+
+// Publish a completed TU dump through the same manifest writer used by the
+// astgraph CLI. Workspace and TU identities are derived from Storage and the
+// published envelope; callers do not provide identity metadata.
+ArtifactRecord publish_tu_artifact(Storage &storage,
+                                   const std::string &index_path,
+                                   const std::string &source_path,
+                                   const std::string &out_db_path,
+                                   const std::vector<std::string> &args,
+                                   const std::optional<std::string> &driver,
+                                   const Options &opts);
 
 } // namespace cidx::astgraph
