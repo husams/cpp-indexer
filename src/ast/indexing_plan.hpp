@@ -1,0 +1,33 @@
+// Explicit ordering for the load-bearing translation-unit extraction plan.
+#pragma once
+
+#include <string>
+#include <vector>
+
+namespace cidx::ast {
+
+struct IndexingPlanStep {
+  std::string pass_id;
+};
+
+class IndexingPlan {
+public:
+  IndexingPlan() = default;
+  explicit IndexingPlan(std::vector<IndexingPlanStep> steps)
+      : steps_(std::move(steps)) {}
+
+  void add(std::string pass_id) {
+    steps_.push_back({.pass_id = std::move(pass_id)});
+  }
+
+  [[nodiscard]] auto steps() const -> const std::vector<IndexingPlanStep> & {
+    return steps_;
+  }
+
+  [[nodiscard]] auto contains(const std::string &pass_id) const -> bool;
+
+private:
+  std::vector<IndexingPlanStep> steps_;
+};
+
+} // namespace cidx::ast

@@ -67,7 +67,7 @@ CallEdgeEmitter::mint_resolved_target(const clang::Expr *site,
   req->is_instantiation = info && info->is_instantiation;
   const int64_t dst_id = ctx_.sink().mint_symbol(*req);
   if (info) {
-    emit_callable_template_identity(ctx_.sink(), ctx_.mint(),
+    emit_callable_template_identity(ctx_.sink(), ctx_.sink(), ctx_.mint(),
                                     ctx_.targ_encoder(), dst_id, callee, *info,
                                     written_template_args(site));
   } else if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(callee);

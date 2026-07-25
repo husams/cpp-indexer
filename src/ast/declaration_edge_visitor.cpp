@@ -1066,8 +1066,8 @@ void DeclarationEdgeVisitor::emit_callable_identity(
     }
   }
   const int64_t dst_id = sink_.mint_symbol(*req);
-  emit_callable_template_identity(sink_, mint_, targ_encoder_, dst_id, fd,
-                                  *info, {});
+  emit_callable_template_identity(sink_, sink_, mint_, targ_encoder_, dst_id,
+                                  fd, *info, {});
   emit_signature_uses(fd);
 }
 

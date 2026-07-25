@@ -4,6 +4,7 @@
 #include "ast/display_name_rewrite.hpp"
 #include "ast/edge_records.hpp"
 #include "ast/edge_sink.hpp"
+#include "ast/fact_emitters.hpp"
 #include "ast/location.hpp"
 #include "ast/mint_builder.hpp"
 #include "ast/template_argument_encoder.hpp"
@@ -165,7 +166,7 @@ callable_template_info(const clang::FunctionDecl *fd) {
 }
 
 void emit_callable_template_identity(
-    EdgeSink &sink, MintBuilder &mint,
+    EdgeSink &sink, PresentationNormalizer &presentation, MintBuilder &mint,
     const TemplateArgumentEncoder &targ_encoder, int64_t dst_id,
     const clang::FunctionDecl *fd, const CallableTemplateInfo &info,
     const std::vector<clang::QualType> &written) {
@@ -188,10 +189,10 @@ void emit_callable_template_identity(
 
   const std::vector<std::string> display_args =
       emit_specialization_args(targ_encoder, dst_id, fd, written);
-  if (const auto disp = sink.lookup_display_name(dst_id)) {
+  if (const auto disp = presentation.lookup_display_name(dst_id)) {
     if (const auto rewritten =
             rewrite_template_display_name(*disp, display_args)) {
-      sink.update_display_name(dst_id, *rewritten);
+      presentation.update_display_name(dst_id, *rewritten);
     }
   }
 

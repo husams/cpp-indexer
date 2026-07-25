@@ -33,6 +33,7 @@ namespace cidx::ast {
 
 class EdgeSink;
 class MintBuilder;
+class PresentationNormalizer;
 class TemplateArgumentEncoder;
 
 // Identity of a callable that specializes/instantiates a template: the primary
@@ -57,7 +58,7 @@ callable_template_info(const clang::FunctionDecl *fd);
 //     the minted class-template-specialization owner with its own identity.
 // Safe to call from both the declaration pass and every call site.
 void emit_callable_template_identity(
-    EdgeSink &sink, MintBuilder &mint,
+    EdgeSink &sink, PresentationNormalizer &presentation, MintBuilder &mint,
     const TemplateArgumentEncoder &targ_encoder, int64_t dst_id,
     const clang::FunctionDecl *fd, const CallableTemplateInfo &info,
     const std::vector<clang::QualType> &written);

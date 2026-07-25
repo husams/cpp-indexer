@@ -10,6 +10,7 @@
 // commands.cpp can include it without the Clang C++ API.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include "ast/header_stats.hpp" // HeaderStats
@@ -32,6 +33,17 @@ struct SourceSnapshot {
   [[nodiscard]] bool matches(const std::string &path) const;
 };
 
+struct IndexPassMetrics {
+  std::string id;
+  std::size_t visited_constructs = 0;
+  std::size_t emitted_facts = 0;
+  std::size_t unknown_constructs = 0;
+  std::size_t duplicates = 0;
+  std::size_t diagnostics = 0;
+  std::int64_t elapsed_microseconds = 0;
+  bool budget_exhausted = false;
+};
+
 struct IndexOneOutcome {
   int stored = 0;            // main-file symbols stored (index_symbols)
   cidx::HeaderStats headers; // header two-pass counters
@@ -41,6 +53,7 @@ struct IndexOneOutcome {
   std::optional<std::string> source_md5; // digest captured before the parse
   std::string error;
   std::vector<std::string> failed_flags; // final args, for the log dump
+  std::vector<IndexPassMetrics> pass_metrics;
 };
 
 // Deterministic fault points used by the production TU pipeline tests. The

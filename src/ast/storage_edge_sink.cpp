@@ -225,6 +225,12 @@ StorageEdgeSink::symbol_ids_by_qual_name_kind(const std::string &qual_name,
   return out;
 }
 
+void StorageEdgeSink::emit(const EvidenceRecord & /*evidence*/) {
+  // Evidence publication is intentionally separate from SQLite fact rows.
+  // The current compatibility adapter has no evidence table yet; passes can
+  // still record it in FactBatch-backed tests and future artifact writers.
+}
+
 void StorageEdgeSink::add_template_param(const TemplateParamRecord &param) {
   cidx::TemplateParam p;
   p.owner_id = param.owner_id;

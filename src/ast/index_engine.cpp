@@ -5,6 +5,7 @@
 #include "ast/include_facts.hpp"
 #include "ast/location.hpp"
 #include "ast/namespace_use_visitor.hpp"
+#include "ast/pass_registry.hpp"
 #include "ast/storage_edge_sink.hpp"
 #include "ast/storage_symbol_sink.hpp"
 #include "ast/symbol_visitor.hpp"
@@ -150,21 +151,129 @@ public:
 
   void run() {
     db_.delete_symbols_for_file(state_.rec->id);
-    state_.out->stored = run_symbol_pass(state_.path, state_.rec->id);
-    const std::vector<int64_t> main_symbol_ids = symbols_.symbol_ids();
-    const std::vector<PendingHeader> plan = plan_owned_headers();
-    run_header_passes(plan);
-    // edges(main) LAST (commands.cpp ordering).
-    run_edge_pass(state_.path, state_.rec->id);
-    db_.associate_facts_for_file(state_.rec->id, state_.normalized_config_id,
-                                 main_symbol_ids, edges_.edge_ids(),
-                                 edges_.definition_ids());
-    // v31 include tier LAST of all: an include_edge references file(id), so
-    // every owned header must already have its row from the header two-pass.
-    if (state_.pp != nullptr) {
-      resolve_include_guards(*state_.pp, state_.includes);
+    ExtractionPassRegistry registry;
+    registry.register_pass(
+        {.id = "symbols.main",
+         .version = 1,
+         .required_capabilities = {FrontendCapability::ast},
+         .produced_fact_families = {"symbols"},
+         .scope = PassScope::main_file,
+         .traversal = TraversalMode::declaration},
+        [this](PassExecutionContext &execution) -> void {
+          state_.out->stored = run_symbol_pass(state_.path, state_.rec->id);
+          execution.metrics.note_visited(
+              static_cast<std::size_t>(state_.out->stored));
+          execution.metrics.note_emitted(
+              static_cast<std::size_t>(symbols_.symbol_ids().size()));
+          main_symbol_ids_ = symbols_.symbol_ids();
+        });
+    registry.register_pass(
+        {.id = "symbols.headers",
+         .version = 1,
+         .required_capabilities = {FrontendCapability::ast,
+                                   FrontendCapability::preprocessor},
+         .produced_fact_families = {"symbols"},
+         .dependencies = {"symbols.main"},
+         .scope = PassScope::owned_header,
+         .traversal = TraversalMode::declaration},
+        [this](PassExecutionContext &execution) -> void {
+          pending_headers_ = plan_owned_headers();
+          for (PendingHeader &header : pending_headers_) {
+            if (header.covered_by_current_config) {
+              db_.delete_symbols_for_file(header.file_id);
+            }
+            header.stored = run_symbol_pass(header.path, header.file_id);
+            header.symbol_ids = symbols_.symbol_ids();
+            execution.metrics.note_visited(
+                static_cast<std::size_t>(header.stored));
+            execution.metrics.note_emitted(header.symbol_ids.size());
+          }
+        });
+    registry.register_pass(
+        {.id = "relations.headers",
+         .version = 1,
+         .required_capabilities = {FrontendCapability::ast},
+         .produced_fact_families = {"relations", "definitions", "types"},
+         .dependencies = {"symbols.headers"},
+         .scope = PassScope::owned_header,
+         .traversal = TraversalMode::declaration},
+        [this](PassExecutionContext &execution) -> void {
+          if (state_.failure_injector != nullptr) {
+            state_.failure_injector->inject(
+                cidx::storage::FailurePoint::partial_transform);
+          }
+          for (const PendingHeader &header : pending_headers_) {
+            run_edge_pass(header.path, header.file_id);
+            if (!SourceSnapshot{.md5 = header.md5}.matches(header.path)) {
+              state_.out->source_changed = true;
+              db_.set_file_indexed(header.file_id, false);
+              continue;
+            }
+            db_.associate_facts_for_file(
+                header.file_id, state_.normalized_config_id, header.symbol_ids,
+                edges_.edge_ids(), edges_.definition_ids());
+            db_.mark_file_indexed(header.file_id, header.mtime, header.md5);
+            ++state_.out->headers.indexed;
+            state_.out->headers.symbols += header.stored;
+            execution.metrics.note_emitted(edges_.edge_ids().size());
+          }
+        });
+    registry.register_pass(
+        {.id = "relations.main",
+         .version = 1,
+         .required_capabilities = {FrontendCapability::ast,
+                                   FrontendCapability::templates},
+         .produced_fact_families = {"relations", "definitions", "types"},
+         .dependencies = {"relations.headers"},
+         .scope = PassScope::main_file,
+         .traversal = TraversalMode::body},
+        [this](PassExecutionContext &execution) -> void {
+          // Main-file edges deliberately remain last after header symbols and
+          // header edges; this is the historical symbol-before-edge invariant.
+          run_edge_pass(state_.path, state_.rec->id);
+          db_.associate_facts_for_file(
+              state_.rec->id, state_.normalized_config_id, main_symbol_ids_,
+              edges_.edge_ids(), edges_.definition_ids());
+          execution.metrics.note_emitted(edges_.edge_ids().size());
+        });
+    registry.register_pass(
+        {.id = "includes.persist",
+         .version = 1,
+         .required_capabilities = {FrontendCapability::preprocessor},
+         .produced_fact_families = {"includes", "evidence"},
+         .dependencies = {"relations.main"},
+         .scope = PassScope::translation_unit,
+         .traversal = TraversalMode::preprocessing},
+        [this](PassExecutionContext &execution) -> void {
+          if (state_.pp != nullptr) {
+            resolve_include_guards(*state_.pp, state_.includes);
+          }
+          persist_include_facts(db_, state_.includes, *state_.config);
+          execution.metrics.note_visited(state_.includes.includes.size());
+          execution.metrics.note_emitted(state_.includes.includes.size() +
+                                         state_.includes.macro_uses.size());
+        });
+
+    IndexingPlan plan;
+    plan.add("symbols.main");
+    plan.add("symbols.headers");
+    plan.add("relations.headers");
+    plan.add("relations.main");
+    plan.add("includes.persist");
+    const PassExecutionReport report = registry.run(plan);
+    state_.out->pass_metrics.clear();
+    state_.out->pass_metrics.reserve(report.passes.size());
+    for (const PassExecutionRecord &pass : report.passes) {
+      state_.out->pass_metrics.push_back(
+          {.id = pass.descriptor.id,
+           .visited_constructs = pass.metrics.visited_constructs,
+           .emitted_facts = pass.metrics.emitted_facts,
+           .unknown_constructs = pass.metrics.unknown_constructs,
+           .duplicates = pass.metrics.duplicates,
+           .diagnostics = pass.metrics.diagnostics,
+           .elapsed_microseconds = pass.metrics.elapsed.count(),
+           .budget_exhausted = pass.metrics.budget_exhausted});
     }
-    persist_include_facts(db_, state_.includes, *state_.config);
   }
 
 private:
@@ -271,37 +380,6 @@ private:
     return plan;
   }
 
-  // Header two-pass (index_headers): pass 1 mints symbols for every planned
-  // header, pass 2 extracts its edges and marks it indexed.
-  void run_header_passes(std::vector<PendingHeader> plan) {
-    cidx::HeaderStats &counts = state_.out->headers;
-    for (PendingHeader &ph : plan) {
-      if (ph.covered_by_current_config) {
-        db_.delete_symbols_for_file(ph.file_id);
-      }
-      ph.stored = run_symbol_pass(ph.path, ph.file_id);
-      ph.symbol_ids = symbols_.symbol_ids();
-    }
-    if (state_.failure_injector != nullptr) {
-      state_.failure_injector->inject(
-          cidx::storage::FailurePoint::partial_transform);
-    }
-    for (const PendingHeader &ph : plan) {
-      run_edge_pass(ph.path, ph.file_id);
-      if (!SourceSnapshot{.md5 = ph.md5}.matches(ph.path)) {
-        state_.out->source_changed = true;
-        db_.set_file_indexed(ph.file_id, false);
-        continue;
-      }
-      db_.associate_facts_for_file(ph.file_id, state_.normalized_config_id,
-                                   ph.symbol_ids, edges_.edge_ids(),
-                                   edges_.definition_ids());
-      db_.mark_file_indexed(ph.file_id, ph.mtime, ph.md5);
-      ++counts.indexed;
-      counts.symbols += ph.stored;
-    }
-  }
-
   // System check: characteristic of the header's own content (parity with
   // clang_Location_isInSystemHeader at (file,1,1)).
   [[nodiscard]] bool is_system_header(const std::string &inc) const {
@@ -324,6 +402,8 @@ private:
   StorageSymbolSink symbols_;
   StorageEdgeSink edges_;
   clang::Decl *tu_;
+  std::vector<PendingHeader> pending_headers_;
+  std::vector<int64_t> main_symbol_ids_;
 };
 
 class IndexASTConsumer : public clang::ASTConsumer {

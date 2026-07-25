@@ -64,6 +64,7 @@ public:
   std::vector<int64_t>
   symbol_ids_by_qual_name_kind(const std::string &qual_name,
                                const std::string &kind_name) override;
+  void emit(const EvidenceRecord &evidence) override;
 
 private:
   cidx::storage::AstStoragePorts &ports_;
