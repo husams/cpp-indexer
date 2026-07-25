@@ -170,12 +170,14 @@
         "src/astgraph/main.cpp",
         "src/diff/main.cpp"
       ],
+      "excludePaths": ["src/cli/souffle_rules.hpp"],
       "allowedDependencies": [
         "product.cli",
         "workspace.toolchain",
         "frontend.compiledb",
         "extraction.ast",
         "analysis.astgraph",
+        "analysis.fact-provider",
         "persistence.sqlite",
         "analysis.graph",
         "query.plan",
@@ -197,6 +199,7 @@
         "frontend.compiledb",
         "extraction.ast",
         "analysis.astgraph",
+        "analysis.fact-provider",
         "persistence.sqlite",
         "analysis.graph",
         "query.plan",
@@ -271,11 +274,30 @@
     {
       "id": "analysis.souffle-rules",
       "layer": "analysis",
-      "paths": ["python/indexer/rules/**", "src/astgraph/rules/**"],
-      "sourceSuffixes": [".dl"],
+      "paths": [
+        "python/indexer/rules/**",
+        "src/astgraph/rules/**",
+        "src/cli/souffle_rules.hpp"
+      ],
+      "sourceSuffixes": [".dl", ".hpp"],
       "allowedDependencies": ["analysis.souffle-rules"],
       "allowedExternal": [],
       "description": "Checked-in Soufflé rule sources shipped by the analysis adapters."
+    },
+    {
+      "id": "analysis.fact-provider",
+      "layer": "analysis",
+      "paths": ["src/analysis/**"],
+      "allowedDependencies": [
+        "analysis.fact-provider",
+        "analysis.astgraph",
+        "analysis.souffle-rules",
+        "persistence.sqlite",
+        "foundation.util",
+        "model.contracts"
+      ],
+      "allowedExternal": ["filesystem", "sqlite", "process"],
+      "description": "Shared semantic/raw-AST fact providers and the unified analysis runner."
     }
   ],
   "targets": [
@@ -576,17 +598,6 @@
       "rationale": "The AST graph compatibility path still uses a direct SQLite handle while the storage port is extracted.",
       "expiresOn": "2026-12-31",
       "removalIssue": "HSE-62"
-    },
-    {
-      "source": "src/cli/analyze.cpp",
-      "fromModule": "product.cli",
-      "toModule": "persistence.sqlite",
-      "include": "storage/sqlite.hpp",
-      "boundary": "product surface -> SQLite adapter",
-      "owner": "Platform M2 application maintainers",
-      "rationale": "The analyze command currently owns a direct SQLite handle while the application port is being extracted.",
-      "expiresOn": "2026-12-31",
-      "removalIssue": "HSE-62"
     }
   ],
   "externalExceptions": [
@@ -623,16 +634,12 @@
       "boundary": "astgraph -> process compatibility", "owner": "Platform M2 analysis maintainers", "rationale": "Retain the current unlink compatibility call until the runner port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-62"
     },
     {
+      "source": "src/astgraph/astgraph.cpp", "fromModule": "analysis.astgraph", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "astgraph -> filesystem compatibility", "owner": "Platform M2 analysis maintainers", "rationale": "Retain the AST artifact path adapter until the shared workspace filesystem port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
       "source": "src/cli/analyze.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
       "boundary": "product surface -> filesystem compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the analyze input stat until shared workspace context owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
-    },
-    {
-      "source": "src/cli/analyze.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "filesystem",
-      "boundary": "product surface -> filesystem compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the analyze filesystem path adapter until shared workspace context owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
-    },
-    {
-      "source": "src/cli/analyze.cpp", "fromModule": "product.cli", "toModule": "external:process", "include": "unistd.h",
-      "boundary": "product surface -> process compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the analyze process compatibility call until the application port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-68"
     },
     {
       "source": "src/cli/commands_detail.hpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
