@@ -92,16 +92,85 @@ int bounded_depth(std::string_view value) {
   return depth;
 }
 
+int bounded_int(std::string_view value, int lo, int hi,
+               std::string_view field) {
+  int parsed = 0;
+  const auto [end, error] =
+      std::from_chars(value.data(), value.data() + value.size(), parsed);
+  if (error != std::errc{} || end != value.data() + value.size() ||
+      parsed < lo || parsed > hi) {
+    throw std::invalid_argument(std::string(field) + " out of range");
+  }
+  return parsed;
+}
+
+std::vector<std::string> split_comma_list(std::string_view text) {
+  std::vector<std::string> items;
+  std::string current;
+  for (const char c : text) {
+    if (c == ',') {
+      if (!current.empty()) {
+        items.push_back(current);
+        current.clear();
+      }
+    } else if (c != ' ') {
+      current += c;
+    }
+  }
+  if (!current.empty()) {
+    items.push_back(std::move(current));
+  }
+  return items;
+}
+
+std::optional<std::vector<std::string>>
+comma_list_param(std::string_view target, std::string_view name) {
+  const auto raw = query_parameter(target, name);
+  if (!raw) {
+    return std::nullopt;
+  }
+  auto items = split_comma_list(*raw);
+  if (items.empty()) {
+    return std::nullopt;
+  }
+  return items;
+}
+
+// Every filter/budget/typed-input field a live `/api/graph` request may
+// override on top of the base request `cidx ui open` was started with. This
+// is the SAME GraphViewRequest surface `ui_request()` builds from CLI flags
+// below, so live navigation and the offline exporter share one filter
+// vocabulary (HSE-92 preserves the HSE-90/HSE-91 GraphView contract).
 ui::GraphViewRequest live_request(const ui::GraphViewRequest &base,
                                   std::string_view target) {
   ui::GraphViewRequest request = base;
-  if (const auto root = query_parameter(target, "root")) {
+  if (const auto input_kind = query_parameter(target, "input_kind")) {
+    static const std::map<std::string, ui::GraphInputKind> kinds{
+        {"symbol", ui::GraphInputKind::Symbol},
+        {"file", ui::GraphInputKind::File},
+        {"entity", ui::GraphInputKind::Entity},
+        {"type", ui::GraphInputKind::Type},
+        {"cxq", ui::GraphInputKind::Cxq},
+        {"plan", ui::GraphInputKind::QueryPlan},
+        {"path", ui::GraphInputKind::Path},
+    };
+    const auto kind = kinds.find(*input_kind);
+    if (kind == kinds.end()) {
+      throw std::invalid_argument("unknown input_kind '" + *input_kind + "'");
+    }
+    const auto input = query_parameter(target, "input");
+    if (!input) {
+      throw std::invalid_argument("input_kind requires input");
+    }
+    request.input = ui::GraphViewInput{.kind = kind->second, .value = *input};
+    request.root.reset();
+    request.query.reset();
+  } else if (const auto root = query_parameter(target, "root")) {
     request.root = *root;
     request.query.reset();
     request.input =
         ui::GraphViewInput{.kind = ui::GraphInputKind::Symbol, .value = *root};
-  }
-  if (const auto query = query_parameter(target, "query")) {
+  } else if (const auto query = query_parameter(target, "query")) {
     request.query = *query;
     request.root.reset();
     request.input =
@@ -116,6 +185,45 @@ ui::GraphViewRequest live_request(const ui::GraphViewRequest &base,
   if (const auto depth = query_parameter(target, "depth")) {
     request.depth = bounded_depth(*depth);
   }
+  if (const auto value = query_parameter(target, "limit")) {
+    request.node_budget = bounded_int(*value, 1, 10000, "limit");
+  }
+  if (const auto value = query_parameter(target, "edge_limit")) {
+    request.edge_budget = bounded_int(*value, 1, 20000, "edge_limit");
+  }
+  if (const auto value = query_parameter(target, "site_limit")) {
+    request.site_budget = bounded_int(*value, 0, 20000, "site_limit");
+  }
+  if (const auto value = query_parameter(target, "byte_limit")) {
+    request.byte_budget =
+        bounded_int(*value, 1024, 64 * 1024 * 1024, "byte_limit");
+  }
+  if (const auto edge = comma_list_param(target, "edge")) {
+    request.edge_kinds = edge;
+  }
+  if (const auto node_kind = comma_list_param(target, "node_kind")) {
+    request.node_kinds = node_kind;
+  }
+  if (const auto file = comma_list_param(target, "file")) {
+    request.files = file;
+  }
+  if (const auto component = comma_list_param(target, "component")) {
+    request.components = component;
+  }
+  if (const auto repository = comma_list_param(target, "repository")) {
+    request.repositories = repository;
+  }
+  if (const auto status = query_parameter(target, "status")) {
+    request.status_filter = *status;
+  }
+  if (const auto applicability = query_parameter(target, "applicability")) {
+    request.applicability_filter = *applicability;
+  }
+  if (const auto continuation = query_parameter(target, "continuation")) {
+    request.continuation = *continuation;
+  } else {
+    request.continuation.reset();
+  }
   return request;
 }
 
@@ -128,6 +236,57 @@ struct LiveGraphProvider {
     try {
       const ui::GraphViewRequest request = live_request(base_request, target);
       return json_out::dumps_indent2(ui::build_graph_view(*db, request));
+    } catch (const std::exception &) {
+      return std::nullopt;
+    }
+  }
+};
+
+struct LiveSearchProvider {
+  Storage *db = nullptr;
+  std::optional<std::string> workspace;
+
+  std::optional<std::string>
+  operator()(std::string_view target) const noexcept {
+    try {
+      const auto text = query_parameter(target, "q");
+      if (!text || text->empty()) {
+        return std::nullopt;
+      }
+      const auto kind = query_parameter(target, "kind");
+      int limit = 25;
+      if (const auto value = query_parameter(target, "limit")) {
+        limit = bounded_int(*value, 1, 500, "limit");
+      }
+      return json_out::dumps_indent2(
+          ui::search_candidates(*db, *text, kind, workspace, limit));
+    } catch (const std::exception &) {
+      return std::nullopt;
+    }
+  }
+};
+
+struct LiveEvidenceProvider {
+  Storage *db = nullptr;
+  std::optional<std::string> workspace;
+
+  std::optional<std::string>
+  operator()(std::string_view target) const noexcept {
+    try {
+      const auto edge_id = query_parameter(target, "edge");
+      if (!edge_id || edge_id->empty()) {
+        return std::nullopt;
+      }
+      int site_offset = 0;
+      if (const auto value = query_parameter(target, "site_offset")) {
+        site_offset = bounded_int(*value, 0, 1'000'000, "site_offset");
+      }
+      int site_limit = 200;
+      if (const auto value = query_parameter(target, "site_limit")) {
+        site_limit = bounded_int(*value, 1, 5000, "site_limit");
+      }
+      return json_out::dumps_indent2(ui::load_edge_evidence(
+          *db, *edge_id, workspace, site_offset, site_limit));
     } catch (const std::exception &) {
       return std::nullopt;
     }
@@ -176,25 +335,37 @@ ui::GraphViewRequest ui_request(const ParsedArgs &args) {
   request.site_budget = args.ui_site_budget;
   request.byte_budget = args.ui_byte_budget;
   if (args.edge) {
-    std::vector<std::string> kinds;
-    std::string current;
-    for (const char c : *args.edge) {
-      if (c == ',') {
-        if (!current.empty()) {
-          kinds.push_back(current);
-          current.clear();
-        }
-      } else if (c != ' ') {
-        current += c;
-      }
-    }
-    if (!current.empty()) {
-      kinds.push_back(std::move(current));
-    }
+    auto kinds = split_comma_list(*args.edge);
     if (!kinds.empty()) {
       request.edge_kinds = std::move(kinds);
     }
   }
+  if (args.ui_node_kind) {
+    auto kinds = split_comma_list(*args.ui_node_kind);
+    if (!kinds.empty()) {
+      request.node_kinds = std::move(kinds);
+    }
+  }
+  if (args.ui_file) {
+    auto files = split_comma_list(*args.ui_file);
+    if (!files.empty()) {
+      request.files = std::move(files);
+    }
+  }
+  if (args.ui_component) {
+    auto components = split_comma_list(*args.ui_component);
+    if (!components.empty()) {
+      request.components = std::move(components);
+    }
+  }
+  if (args.ui_repository) {
+    auto repositories = split_comma_list(*args.ui_repository);
+    if (!repositories.empty()) {
+      request.repositories = std::move(repositories);
+    }
+  }
+  request.status_filter = args.ui_status;
+  request.applicability_filter = args.ui_applicability;
   return request;
 }
 
@@ -270,8 +441,12 @@ int cmd_ui_open(const ParsedArgs &args, Context &ctx) {
         ui::render_html(view, ui::RenderMode::LoopbackLive);
     const ui::GraphProvider graph_provider =
         LiveGraphProvider{.db = db.get(), .base_request = base_request};
+    const ui::GraphProvider search_provider =
+        LiveSearchProvider{.db = db.get(), .workspace = args.ui_workspace};
+    const ui::GraphProvider evidence_provider =
+        LiveEvidenceProvider{.db = db.get(), .workspace = args.ui_workspace};
     return ui::serve_live(
-        html, graph_provider,
+        html, graph_provider, search_provider, evidence_provider,
         ui::ServerOptions{.port = args.ui_port,
                           .launch_browser = !args.ui_no_browser},
         *ctx.out, *ctx.err);
@@ -286,7 +461,9 @@ int cmd_ui_status(const ParsedArgs & /*args*/, Context &ctx) {
            << "  \"contract\": \"cidx.graph-view.v1\",\n"
            << "  \"cytoscape\": \"3.31.2\",\n"
            << "  \"offline\": true,\n"
-           << "  \"live_transport\": \"loopback\"\n"
+           << "  \"live_transport\": \"loopback\",\n"
+           << "  \"live_operations\": ["
+              "\"graph\", \"search\", \"evidence\", \"shutdown\"]\n"
            << "}\n";
   return 0;
 }

@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const {mergeSlices} = require('./app.js');
+const {mergeSlices, trackFreshness} = require('./app.js');
 
 const merged = mergeSlices({
   metadata: {
@@ -96,5 +96,52 @@ assert.equal(siteBounded.metadata.evidence_truncated, true);
 assert.equal(siteBounded.metadata.truncated, true);
 assert.equal(siteBounded.edges[1].sites.length, 0);
 assert.equal(siteBounded.edges[1].evidence.sites_truncated, true);
+
+// HSE-92: a session must never present a merged view as fresher than its
+// weakest contributing slice (stale-index behavior surfaced immediately,
+// never silently upgraded by a later merge).
+const freshnessMerged = mergeSlices({
+  metadata: {
+    truncated: false, evidence_truncated: false,
+    continuation: {available: false, reason: 'complete'},
+    freshness: 'current', identity: {freshness: 'current', workspace: 'w'},
+  },
+  nodes: [{id: 'fresh-node'}], edges: [],
+}, {
+  metadata: {
+    truncated: false, evidence_truncated: false,
+    continuation: {available: false, reason: 'complete'},
+    freshness: 'stale', identity: {freshness: 'stale', workspace: 'w'},
+  },
+  nodes: [{id: 'fresh-node'}], edges: [],
+});
+assert.equal(freshnessMerged.metadata.freshness, 'stale');
+assert.equal(freshnessMerged.metadata.identity.freshness, 'stale');
+
+// Merging in the OTHER order (stale first, current second) must not let a
+// later "current" slice erase an earlier "stale" observation.
+const freshnessMergedReversed = mergeSlices({
+  metadata: {
+    truncated: false, evidence_truncated: false,
+    continuation: {available: false, reason: 'complete'},
+    freshness: 'stale', identity: {freshness: 'stale', workspace: 'w'},
+  },
+  nodes: [{id: 'fresh-node'}], edges: [],
+}, {
+  metadata: {
+    truncated: false, evidence_truncated: false,
+    continuation: {available: false, reason: 'complete'},
+    freshness: 'current', identity: {freshness: 'current', workspace: 'w'},
+  },
+  nodes: [{id: 'fresh-node'}], edges: [],
+});
+assert.equal(freshnessMergedReversed.metadata.freshness, 'stale');
+assert.equal(freshnessMergedReversed.metadata.identity.freshness, 'stale');
+
+assert.equal(trackFreshness('current', 'current'), 'current');
+assert.equal(trackFreshness('current', 'stale'), 'stale');
+assert.equal(trackFreshness('stale', 'current'), 'stale');
+assert.equal(trackFreshness('current', 'unverifiable'), 'unverifiable');
+assert.equal(trackFreshness(undefined, 'current'), 'current');
 
 console.log('graph state merge regression passed');

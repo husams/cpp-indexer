@@ -15,6 +15,45 @@
     <label class="search"><span class="sr-only">Filter visible nodes</span><input id="search" type="search" placeholder="Filter nodes…"></label>
     <div class="top-actions"><button id="fit" type="button">Fit graph</button><button id="expand" type="button" disabled>Expand selected</button><button id="save" type="button">Save view</button><button id="restore" type="button">Restore view</button><button id="reset" type="button">Reset view</button></div>
   </header>
+  <div id="stale-banner" class="stale-banner" role="alert" hidden>
+    <span>This session's index changed or is unverifiable; the canvas may no longer reflect the current index.</span>
+    <button id="stale-refresh" type="button">Refresh</button>
+  </div>
+  <div id="live-controls" class="live-controls" hidden>
+    <nav id="breadcrumbs" class="breadcrumbs" aria-label="Query history"></nav>
+    <div class="live-row">
+      <button id="history-back" type="button" disabled>&larr; Back</button>
+      <button id="history-forward" type="button" disabled>Forward &rarr;</button>
+      <label class="search"><span class="sr-only">Search the index</span><input id="index-search" type="search" placeholder="Search index by name…"></label>
+      <button id="index-search-run" type="button">Search</button>
+      <button id="expand-out" type="button" disabled>Expand out</button>
+      <button id="expand-in" type="button" disabled>Expand in</button>
+      <button id="load-more" type="button" hidden>Load more</button>
+      <select id="group-by" aria-label="Group nodes by">
+        <option value="">No grouping</option>
+        <option value="component">Group by component</option>
+        <option value="file">Group by file</option>
+        <option value="kind">Group by kind</option>
+      </select>
+      <select id="saved-views" aria-label="Saved views"></select>
+      <button id="load-view" type="button">Load view</button>
+      <button id="save-view" type="button">Save view as…</button>
+      <button id="shutdown" type="button">Stop server</button>
+    </div>
+    <div id="search-results" class="search-results" hidden></div>
+    <details class="filters">
+      <summary>Filters</summary>
+      <div class="filter-row">
+        <label>Node kind <input id="filter-node-kind" type="text" placeholder="function,class"></label>
+        <label>File <input id="filter-file" type="text" placeholder="path/to/file.cpp"></label>
+        <label>Component <input id="filter-component" type="text" placeholder="component-name"></label>
+        <label>Repository <input id="filter-repository" type="text" placeholder="repo-name"></label>
+        <label>Status <select id="filter-status"><option value="">any</option><option value="resolved">resolved</option><option value="unresolved">unresolved</option><option value="external">external</option><option value="internal">internal</option><option value="stub">stub</option></select></label>
+        <label>Applicability <select id="filter-applicability"><option value="">any</option><option value="universal">universal</option><option value="conditional">conditional</option></select></label>
+        <button id="apply-filters" type="button">Apply filters</button>
+      </div>
+    </details>
+  </div>
   <main class="shell">
     <section class="graph-panel" aria-label="Graph visualization"><div id="cy" role="img" aria-label="Interactive CIDX graph"></div><div id="canvas-status" class="snapshot-status" role="status"></div><div id="accessible-nodes" class="sr-only" aria-label="Graph nodes"></div><div id="empty" class="empty" hidden>No bounded graph slice selected.</div></section>
     <aside class="inspector" aria-live="polite"><div class="panel-heading"><span class="eyebrow">INSPECTOR</span><h2 id="selection-title">Snapshot status</h2></div><div id="details" class="details"><p class="muted">Keyboard navigation and the status legend keep incomplete facts distinct from confirmed facts.</p></div><div class="legend"><h3>Status legend</h3><p><i class="dot complete"></i> complete <i class="dot partial"></i> partial <i class="dot unknown"></i> unknown <i class="dot stale"></i> stale <i class="dot unresolved"></i> unresolved <i class="dot external"></i> external/stub <i class="line truncated"></i> truncated</p></div></aside>

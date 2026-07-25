@@ -1,6 +1,7 @@
 #include "ui/server.hpp"
 
 #include <array>
+#include <cctype>
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
@@ -50,6 +51,51 @@ bool has_token(std::string_view target, std::string_view expected) {
   return false;
 }
 
+// Case-insensitive HTTP header lookup over the raw request text (request
+// line plus CRLF-terminated header lines). Returns the trimmed value, or
+// nullopt when the header is absent.
+std::optional<std::string> find_header(std::string_view request,
+                                       std::string_view name) {
+  std::size_t line_start = request.find("\r\n");
+  if (line_start == std::string_view::npos) {
+    return std::nullopt;
+  }
+  line_start += 2;
+  const auto ieq = [](char a, char b) {
+    return std::tolower(static_cast<unsigned char>(a)) ==
+          std::tolower(static_cast<unsigned char>(b));
+  };
+  while (line_start < request.size()) {
+    const std::size_t line_end = request.find("\r\n", line_start);
+    const std::string_view line = request.substr(
+        line_start, line_end == std::string_view::npos
+                        ? request.size() - line_start
+                        : line_end - line_start);
+    if (line.empty()) {
+      break; // blank line: end of headers
+    }
+    const std::size_t colon = line.find(':');
+    if (colon != std::string_view::npos && colon == name.size() &&
+        std::equal(line.begin(),
+                  line.begin() + static_cast<std::ptrdiff_t>(colon),
+                  name.begin(), ieq)) {
+      std::string_view value = line.substr(colon + 1);
+      while (!value.empty() && value.front() == ' ') {
+        value.remove_prefix(1);
+      }
+      while (!value.empty() && value.back() == '\r') {
+        value.remove_suffix(1);
+      }
+      return std::string(value);
+    }
+    if (line_end == std::string_view::npos) {
+      break;
+    }
+    line_start = line_end + 2;
+  }
+  return std::nullopt;
+}
+
 void launch_browser(const std::string &url) {
   const pid_t child = fork();
   if (child != 0) {
@@ -85,6 +131,8 @@ bool send_response(int fd, int code, std::string_view type,
   const char *reason = "Bad Request";
   if (code == 200) {
     reason = "OK";
+  } else if (code == 403) {
+    reason = "Forbidden";
   } else if (code == 404) {
     reason = "Not Found";
   }
@@ -106,9 +154,26 @@ struct StaticGraphProvider {
   }
 };
 
+// search/evidence providers are new (HSE-92) and unconditionally optional
+// (default-constructed std::function is falsy); this keeps their call sites
+// uniform without duplicating the graph_provider's inline try/catch.
+std::optional<std::string> invoke(const GraphProvider &provider,
+                                  std::string_view target) {
+  if (!provider) {
+    return std::nullopt;
+  }
+  try {
+    return provider(target);
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
+}
+
 } // namespace
 
 int serve_live(const std::string &html, const GraphProvider &graph_provider,
+               const GraphProvider &search_provider,
+               const GraphProvider &evidence_provider,
                const ServerOptions &options, std::ostream &out,
                std::ostream &err) {
   const int server = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -137,16 +202,26 @@ int serve_live(const std::string &html, const GraphProvider &graph_provider,
     return 1;
   }
   const std::string access_token = token();
+  const std::string bound_port = std::to_string(ntohs(address.sin_port));
   const std::string url =
-      "http://127.0.0.1:" + std::to_string(ntohs(address.sin_port)) +
-      "/?token=" + access_token;
+      "http://127.0.0.1:" + bound_port + "/?token=" + access_token;
+  // Same-origin defense in depth beyond loopback-only binding: a same-host
+  // page (e.g. served from a different loopback port, or a DNS-rebound
+  // hostname pointed at 127.0.0.1) could still guess/observe the ephemeral
+  // port. Any browser-issued cross-origin fetch carries an Origin header
+  // naming the requesting page's own origin; a request from this explorer's
+  // own page carries none (top-level navigation) or exactly this origin
+  // (same-page fetch), so any OTHER declared Origin is rejected regardless
+  // of token validity.
+  const std::string expected_origin = "http://127.0.0.1:" + bound_port;
   out << url << "\n" << std::flush;
   if (options.launch_browser) {
     launch_browser(url);
   }
 
   std::array<char, 8192> buffer{};
-  while (true) {
+  bool shutdown_requested = false;
+  while (!shutdown_requested) {
     const int client = ::accept(server, nullptr, nullptr);
     if (client < 0) {
       if (errno == EINTR) {
@@ -169,17 +244,25 @@ int serve_live(const std::string &html, const GraphProvider &graph_provider,
     const std::string_view target(
         request.data() + 4,
         target_end == std::string::npos ? 0 : target_end - 4);
-    bool sent = false;
     if (target_end == std::string::npos || !has_token(target, access_token)) {
       (void)send_response(client, 404, "text/plain", "not found\n");
       ::close(client);
       continue;
     }
+    if (const auto origin = find_header(request, "Origin");
+        origin && *origin != expected_origin) {
+      (void)send_response(client, 403, "text/plain",
+                          "forbidden: origin mismatch\n");
+      ::close(client);
+      continue;
+    }
+    bool sent = false;
     if (target.starts_with("/?") || target.starts_with("/index.html?")) {
       sent = send_response(client, 200, "text/html; charset=utf-8", html);
     } else if (target.starts_with("/api/graph?")) {
       try {
-        const auto graph_json = graph_provider(target);
+        const auto graph_json = graph_provider ? graph_provider(target)
+                                               : std::nullopt;
         sent = graph_json
                    ? send_response(client, 200, "application/json", *graph_json)
                    : send_response(client, 400, "text/plain",
@@ -189,6 +272,22 @@ int serve_live(const std::string &html, const GraphProvider &graph_provider,
             "bad graph request: " + std::string(error.what()) + "\n";
         sent = send_response(client, 400, "text/plain", message);
       }
+    } else if (target.starts_with("/api/search?")) {
+      const auto search_json = invoke(search_provider, target);
+      sent = search_json ? send_response(client, 200, "application/json",
+                                         *search_json)
+                         : send_response(client, 400, "text/plain",
+                                         "bad search request\n");
+    } else if (target.starts_with("/api/evidence?")) {
+      const auto evidence_json = invoke(evidence_provider, target);
+      sent = evidence_json ? send_response(client, 200, "application/json",
+                                           *evidence_json)
+                           : send_response(client, 400, "text/plain",
+                                           "bad evidence request\n");
+    } else if (target.starts_with("/api/shutdown?")) {
+      sent = send_response(client, 200, "application/json",
+                           "{\"stopped\": true}\n");
+      shutdown_requested = true;
     } else {
       sent = send_response(client, 404, "text/plain", "not found\n");
     }
@@ -201,10 +300,18 @@ int serve_live(const std::string &html, const GraphProvider &graph_provider,
   return 0;
 }
 
+int serve_live(const std::string &html, const GraphProvider &graph_provider,
+               const ServerOptions &options, std::ostream &out,
+               std::ostream &err) {
+  return serve_live(html, graph_provider, GraphProvider{}, GraphProvider{},
+                    options, out, err);
+}
+
 int serve_live(const std::string &html, const std::string &graph_json,
                const ServerOptions &options, std::ostream &out,
                std::ostream &err) {
-  return serve_live(html, StaticGraphProvider{graph_json}, options, out, err);
+  return serve_live(html, StaticGraphProvider{graph_json}, GraphProvider{},
+                    GraphProvider{}, options, out, err);
 }
 
 } // namespace cidx::ui

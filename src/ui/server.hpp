@@ -17,7 +17,19 @@ using GraphProvider =
     std::function<std::optional<std::string>(std::string_view target)>;
 
 // Serve a GraphView snapshot and bounded live slices over loopback until
-// interrupted. The provider receives the authenticated request target.
+// interrupted (Ctrl+C) or authenticated-shutdown (`GET /api/shutdown`). Every
+// provider receives the full authenticated request target (path + query
+// string); a default-constructed (empty) provider makes its endpoint answer
+// 404. `search_provider` backs `/api/search`, `evidence_provider` backs
+// `/api/evidence`; both are optional so existing single-graph callers are
+// unaffected.
+int serve_live(const std::string &html, const GraphProvider &graph_provider,
+               const GraphProvider &search_provider,
+               const GraphProvider &evidence_provider,
+               const ServerOptions &options, std::ostream &out,
+               std::ostream &err);
+
+// Compatibility overload: graph-only live server (no search/evidence ops).
 int serve_live(const std::string &html, const GraphProvider &graph_provider,
                const ServerOptions &options, std::ostream &out,
                std::ostream &err);

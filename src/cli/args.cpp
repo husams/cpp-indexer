@@ -791,6 +791,21 @@ void build_ui(CLI::App &app, ParsedArgs &pa) {
     sub->add_option("--byte-limit", pa.ui_byte_budget,
                     "maximum graph JSON bytes")
         ->check(CLI::Range(1024, 64 * 1024 * 1024));
+    sub->add_option("--node-kind", pa.ui_node_kind,
+                    "filter: node kinds (comma-separated)");
+    sub->add_option("--file", pa.ui_file,
+                    "filter: file paths (comma-separated)");
+    sub->add_option("--component", pa.ui_component,
+                    "filter: component names (comma-separated)");
+    sub->add_option("--repository", pa.ui_repository,
+                    "filter: repository names (comma-separated)");
+    sub->add_option("--status", pa.ui_status,
+                    "filter: resolved|unresolved|external|internal|stub")
+        ->check(CLI::IsMember(
+            {"resolved", "unresolved", "external", "internal", "stub"}));
+    sub->add_option("--applicability", pa.ui_applicability,
+                    "filter: universal|conditional")
+        ->check(CLI::IsMember({"universal", "conditional"}));
     sub->add_option("--db", pa.index_db, kDbHelpText);
     return sub;
   };

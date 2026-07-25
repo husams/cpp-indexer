@@ -138,6 +138,15 @@ struct ParsedArgs {
   int ui_byte_budget = 4 * 1024 * 1024;
   int ui_port = 0;
   bool ui_no_browser = false;
+  // HSE-92 live-explorer filters (comma-separated lists where noted); shared
+  // by `ui open`/`ui export` so offline exports keep the same filter surface
+  // as the live explorer.
+  std::optional<std::string> ui_node_kind;   // symbol/entity/type kind list
+  std::optional<std::string> ui_file;        // redacted file path list
+  std::optional<std::string> ui_component;   // component name list
+  std::optional<std::string> ui_repository;  // repository name list
+  std::optional<std::string> ui_status;      // resolved|unresolved|external|internal|stub
+  std::optional<std::string> ui_applicability; // universal|conditional
 
   // -- analyze (Souffle) fields
   // ------------------------------------------------

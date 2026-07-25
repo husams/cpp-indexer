@@ -231,6 +231,33 @@ std::optional<PortableReference> parse_portable_id(std::string_view value) {
                            .usr = *usr};
 }
 
+struct PortableEdgeRef {
+  std::string source;
+  std::string kind;
+  std::string target;
+};
+
+// Reverse of portable_edge_id() (declared below): recovers the endpoint
+// identities and relation kind embedded in a previously-emitted edge id, for
+// HSE-92's live evidence-loading operation. Never trusts the input beyond
+// this bounded, fully-validated decode.
+std::optional<PortableEdgeRef> parse_portable_edge_id(std::string_view value) {
+  constexpr std::string_view prefix = "edge:v1:";
+  if (!value.starts_with(prefix)) {
+    return std::nullopt;
+  }
+  std::size_t offset = prefix.size();
+  const auto source = length_value(value, offset);
+  const auto kind = length_value(value, offset);
+  const auto target = length_value(value, offset);
+  if (!source || !kind || !target || offset != value.size()) {
+    return std::nullopt;
+  }
+  return PortableEdgeRef{.source = std::string(*source),
+                         .kind = std::string(*kind),
+                         .target = std::string(*target)};
+}
+
 std::string symbol_color(const graph::Sym &sym) {
   if (sym.external) {
     return "#f37777";
@@ -269,6 +296,8 @@ Value node_value(const graph::Sym &sym, const std::string &freshness,
   out.emplace_back("file", sym.file
                                ? Value::of(redacted_path(*sym.file, workspace))
                                : Value::null());
+  out.emplace_back("component", sym.component ? Value::of(*sym.component)
+                                              : Value::null());
   out.emplace_back("line", optional_int(sym.line));
   out.emplace_back("col", optional_int(sym.col));
   out.emplace_back("depth", Value::of(depth));
@@ -632,6 +661,24 @@ struct RootResolution {
   std::vector<graph::Sym> candidates;
 };
 
+bool matches_any(const std::vector<std::string> &allowed,
+                 const std::string &value) {
+  return std::ranges::find(allowed, value) != allowed.end();
+}
+
+// Progressive continuation (HSE-92): drop the first `offset` deterministically
+// ordered candidates so a repeat request with a larger offset picks up
+// exactly where the previous bounded slice left off.
+template <typename T>
+void skip_offset(std::vector<T> &ordered, int offset) {
+  if (offset <= 0 || ordered.empty()) {
+    return;
+  }
+  const auto count = std::min(static_cast<std::size_t>(offset), ordered.size());
+  ordered.erase(ordered.begin(),
+               ordered.begin() + static_cast<std::ptrdiff_t>(count));
+}
+
 void append_typed_facts(Storage &db, graph::GraphQuery &graph,
                         const std::vector<int64_t> &entity_ids,
                         const std::vector<int64_t> &type_ids, bool entity_view,
@@ -639,6 +686,8 @@ void append_typed_facts(Storage &db, graph::GraphQuery &graph,
                         const std::string &freshness, bool &truncated,
                         bool &partial_facts,
                         const std::optional<std::string> &workspace,
+                        const std::optional<std::vector<std::string>> &node_kinds,
+                        int node_offset, bool &more_nodes_available,
                         Array &nodes, Array &edges) {
   if (entity_view) {
     std::map<int64_t, std::pair<graph::Sym, EntityNode>> available;
@@ -662,13 +711,17 @@ void append_typed_facts(Storage &db, graph::GraphQuery &graph,
     }
     std::vector<int64_t> ordered_ids;
     for (const auto &[id, value] : available) {
-      (void)value;
+      if (node_kinds && !node_kinds->empty() &&
+          !matches_any(*node_kinds, value.second.kind_name)) {
+        continue;
+      }
       ordered_ids.push_back(id);
     }
     std::ranges::sort(ordered_ids, [&](int64_t left, int64_t right) {
       return entity_id(available.at(left).first, available.at(left).second) <
              entity_id(available.at(right).first, available.at(right).second);
     });
+    skip_offset(ordered_ids, node_offset);
     const std::size_t remaining =
         nodes.size() >= static_cast<std::size_t>(node_budget)
             ? 0
@@ -676,6 +729,7 @@ void append_typed_facts(Storage &db, graph::GraphQuery &graph,
     if (ordered_ids.size() > remaining) {
       ordered_ids.resize(remaining);
       truncated = true;
+      more_nodes_available = true;
     }
     std::set<int64_t> selected;
     for (const int64_t id : ordered_ids) {
@@ -725,12 +779,16 @@ void append_typed_facts(Storage &db, graph::GraphQuery &graph,
   }
   std::vector<int64_t> ordered_ids;
   for (const auto &[id, type] : available) {
-    (void)type;
+    if (node_kinds && !node_kinds->empty() &&
+        !matches_any(*node_kinds, std::to_string(type.kind))) {
+      continue;
+    }
     ordered_ids.push_back(id);
   }
   std::ranges::sort(ordered_ids, [&](int64_t left, int64_t right) {
     return type_id(available.at(left)) < type_id(available.at(right));
   });
+  skip_offset(ordered_ids, node_offset);
   const std::size_t remaining =
       nodes.size() >= static_cast<std::size_t>(node_budget)
           ? 0
@@ -738,6 +796,7 @@ void append_typed_facts(Storage &db, graph::GraphQuery &graph,
   if (ordered_ids.size() > remaining) {
     ordered_ids.resize(remaining);
     truncated = true;
+    more_nodes_available = true;
   }
   std::set<int64_t> selected;
   for (const int64_t id : ordered_ids) {
@@ -895,12 +954,15 @@ query::Query make_query_plan(const graph::Sym &root,
   if (request.edge_kinds && !request.edge_kinds->empty()) {
     relations = *request.edge_kinds;
   } else {
+    // Auto-discovery must only pick genuine symbol<->symbol relations
+    // (e.g. calls/uses), regardless of traversal direction: a relation whose
+    // TARGET view is not Symbol (e.g. "of_type" -> Type) cannot be traversed
+    // through query::in_()/out() in a plain symbol-view QueryPlan and fails
+    // validation. Direction only selects in_() vs out(); it must not widen
+    // which relations are eligible.
     for (const auto &relation : query::relation_catalog()) {
-      const bool symbol_result =
-          request.direction == "in"
-              ? relation.layer == query::View::Symbol
-              : relation.target_view == query::View::Symbol;
-      if (relation.layer == query::View::Symbol && symbol_result) {
+      if (relation.layer == query::View::Symbol &&
+          relation.target_view == query::View::Symbol) {
         relations.push_back(relation.name);
       }
     }
@@ -1303,6 +1365,199 @@ Value identity_value(const IndexIdentity &identity,
   return Value::obj(std::move(out));
 }
 
+// ---- HSE-92 live-explorer filters and continuation -------------------------
+
+// Node-level filters that apply uniformly to the symbol/CXQ/QueryPlan/File
+// path. Entity and type views only honor node_kinds (see append_typed_facts);
+// file/component/repository/status facts do not have an equivalent meaning
+// for structural entity/type facts.
+bool passes_node_filters(Storage &db, const graph::Sym &sym,
+                         const GraphViewRequest &request) {
+  if (request.node_kinds && !request.node_kinds->empty() &&
+      !matches_any(*request.node_kinds, sym.kind)) {
+    return false;
+  }
+  if (request.files && !request.files->empty()) {
+    const std::string path =
+        sym.file ? redacted_path(*sym.file, request.workspace) : std::string();
+    if (!matches_any(*request.files, path)) {
+      return false;
+    }
+  }
+  if (request.components && !request.components->empty()) {
+    if (!sym.component || !matches_any(*request.components, *sym.component)) {
+      return false;
+    }
+  }
+  if (request.status_filter) {
+    const std::string &status = *request.status_filter;
+    if (status == "resolved" && !sym.resolved) {
+      return false;
+    }
+    if (status == "unresolved" && sym.resolved) {
+      return false;
+    }
+    if (status == "external" && !sym.external) {
+      return false;
+    }
+    if (status == "internal" && sym.external) {
+      return false;
+    }
+    if (status == "stub" && !sym.is_stub()) {
+      return false;
+    }
+  }
+  if (request.repositories && !request.repositories->empty()) {
+    if (!sym.component) {
+      return false;
+    }
+    const auto component = db.get_component_by_name(*sym.component);
+    if (!component || !component->repository_id) {
+      return false;
+    }
+    const auto repository = db.get_repository_by_id(*component->repository_id);
+    if (!repository || !matches_any(*request.repositories, repository->name)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Whether a bounded set of evidence sites is uniformly present (no site is
+// config-conditional) versus config-varying. Mirrors the site.conditional
+// fact already carried on every emitted symbol/include edge; introduces no
+// new semantic claim beyond what is already indexed.
+bool sites_are_conditional(const std::vector<graph::Site> &sites) {
+  return std::ranges::any_of(
+      sites, [](const graph::Site &site) { return site.conditional; });
+}
+
+bool include_sites_are_conditional(const std::vector<IncludeSite> &sites) {
+  return std::ranges::any_of(sites, [](const IncludeSite &site) {
+    return !site.cond_fingerprint.empty();
+  });
+}
+
+bool passes_applicability_filter(const GraphViewRequest &request,
+                                 bool conditional) {
+  if (!request.applicability_filter) {
+    return true;
+  }
+  if (*request.applicability_filter == "conditional") {
+    return conditional;
+  }
+  if (*request.applicability_filter == "universal") {
+    return !conditional;
+  }
+  return true;
+}
+
+// Continuation tokens page a strictly-repeated request over its own
+// deterministically-ordered node/edge candidates. The token embeds the
+// query identity of the request that produced it so a token from one
+// normalized query can never be replayed against a different one -- paging
+// is deterministic and request-scoped, never a hidden server-side cursor.
+std::string encode_continuation(std::string_view query_identity,
+                                int node_offset, int edge_offset) {
+  return "cont:v1:" + length_field(query_identity) +
+        std::to_string(node_offset) + "," + std::to_string(edge_offset);
+}
+
+struct ContinuationToken {
+  std::string query_identity;
+  int node_offset = 0;
+  int edge_offset = 0;
+};
+
+std::optional<ContinuationToken> decode_continuation(std::string_view token) {
+  constexpr std::string_view prefix = "cont:v1:";
+  if (!token.starts_with(prefix)) {
+    return std::nullopt;
+  }
+  std::size_t offset = prefix.size();
+  const auto identity = length_value(token, offset);
+  if (!identity) {
+    return std::nullopt;
+  }
+  const std::size_t comma = token.find(',', offset);
+  if (comma == std::string_view::npos) {
+    return std::nullopt;
+  }
+  int node_offset_value = 0;
+  int edge_offset_value = 0;
+  const auto node_result = std::from_chars(
+      token.data() + offset, token.data() + comma, node_offset_value);
+  const auto edge_result =
+      std::from_chars(token.data() + comma + 1, token.data() + token.size(),
+                      edge_offset_value);
+  if (node_result.ec != std::errc{} || node_result.ptr != token.data() + comma ||
+      edge_result.ec != std::errc{} ||
+      edge_result.ptr != token.data() + token.size() || node_offset_value < 0 ||
+      edge_offset_value < 0) {
+    return std::nullopt;
+  }
+  return ContinuationToken{.query_identity = std::string(*identity),
+                           .node_offset = node_offset_value,
+                           .edge_offset = edge_offset_value};
+}
+
+// Computes and embeds (or, if it would blow the byte budget, omits) the
+// HSE-92 progressive-paging continuation token on an already-finalized
+// GraphView `continuation` metadata object. Split out of build_graph_view()
+// to keep that function within its complexity budget; see the call site for
+// the invariants each parameter carries.
+void apply_continuation_token(Value &continuation, Value &result,
+                              const std::string &query_identity,
+                              bool witness_view, bool more_nodes_available,
+                              bool more_edges_available,
+                              bool byte_trim_dropped_content, int node_offset,
+                              int edge_offset, int delivered_node_count,
+                              int delivered_edge_count, int byte_budget) {
+  // Deterministic progressive paging: a token is only emitted when this
+  // exact normalized query still has more nodes/edges beyond what was just
+  // delivered. Bounded witness paths never page.
+  const bool continuation_possible =
+      !witness_view && (more_nodes_available || more_edges_available ||
+                        byte_trim_dropped_content);
+  Value token = Value::null();
+  if (continuation_possible) {
+    int next_node_offset = node_offset;
+    int next_edge_offset = 0;
+    if (more_nodes_available) {
+      next_node_offset = node_offset + delivered_node_count;
+      next_edge_offset = 0;
+    } else {
+      next_edge_offset = edge_offset + delivered_edge_count;
+    }
+    token = Value::of(encode_continuation(query_identity, next_node_offset,
+                                          next_edge_offset));
+  }
+  const auto set_token = [&](const Value &value) {
+    bool set = false;
+    for (auto &[name, child] : continuation.o) {
+      if (name == "token") {
+        child = value;
+        set = true;
+      }
+    }
+    if (!set) {
+      continuation.o.emplace_back("token", value);
+    }
+  };
+  set_token(token);
+  // A continuation token is a "nice to have" atop an already-truncated
+  // response, never a reason to fail the whole request: if embedding it
+  // would itself blow the byte budget, drop the token (the client can still
+  // see `available: true` and retry with a larger byte limit) rather than
+  // throwing GraphViewFailureKind::Oversized over a response that was
+  // otherwise successfully trimmed to fit.
+  if (token.t != Value::T::Null &&
+      script_safe_size(json_out::dumps_indent2(result)) >
+          static_cast<std::size_t>(byte_budget)) {
+    set_token(Value::null());
+  }
+}
+
 } // namespace
 
 Value build_graph_view(Storage &db, const GraphViewRequest &request) {
@@ -1460,6 +1715,14 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   bool evidence_truncated = false;
   bool partial_facts = false;
   int sites_used = 0;
+  // HSE-92: whether more nodes/edges of THIS SAME normalized query exist
+  // beyond the page just delivered (independent of `truncated`, which also
+  // covers byte-budget overflow that a node/edge continuation token cannot
+  // resolve).
+  bool more_nodes_available = false;
+  bool more_edges_available = false;
+  int delivered_node_count = 0;
+  int delivered_edge_count = 0;
 
   const auto collect_include_edges = [&](const File &file) {
     include_edges = db.include_edges_from(file.id, false);
@@ -1521,6 +1784,10 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
             return std::tie(left.line, left.col, left.begin_offset) <
                    std::tie(right.line, right.col, right.begin_offset);
           });
+      if (!passes_applicability_filter(request,
+                                       include_sites_are_conditional(sites))) {
+        continue;
+      }
       const std::size_t retained_limit =
           static_cast<std::size_t>(std::max(0, sites_remaining));
       const bool sites_truncated = sites.size() > retained_limit;
@@ -1718,6 +1985,22 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   normalize_after_symbols();
   const std::string query_identity = graph_query_identity(
       request, normalized_input, identity, normalized_plan_json);
+
+  int node_offset = 0;
+  int edge_offset = 0;
+  if (request.continuation) {
+    const auto token = decode_continuation(*request.continuation);
+    if (!token || token->query_identity != query_identity) {
+      throw GraphViewError(
+          GraphViewFailureKind::InvalidInput,
+          "continuation token does not match the current normalized query",
+          "reissue the base request and use the continuation token it "
+          "returns");
+    }
+    node_offset = token->node_offset;
+    edge_offset = token->edge_offset;
+  }
+
   Object metadata;
   metadata.emplace_back("contract",
                         Value::of(std::string("cidx.graph-view.v1")));
@@ -1783,7 +2066,8 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
     if (entity_view || type_view) {
       append_typed_facts(db, graph, entity_ids, type_ids, entity_view,
                          node_budget, edge_budget, freshness, truncated,
-                         partial_facts, request.workspace, nodes, edges);
+                         partial_facts, request.workspace, request.node_kinds,
+                         node_offset, more_nodes_available, nodes, edges);
     } else {
       std::map<int64_t, graph::Sym> symbols_by_id;
       for (const auto &symbol : input_symbols) {
@@ -1807,12 +2091,15 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
         ordered_nodes.reserve(symbols_by_id.size());
         for (const auto &[id, symbol] : symbols_by_id) {
           (void)id;
-          ordered_nodes.push_back(symbol);
+          if (passes_node_filters(db, symbol, request)) {
+            ordered_nodes.push_back(symbol);
+          }
         }
         std::ranges::sort(ordered_nodes,
                           [](const graph::Sym &a, const graph::Sym &b) {
                             return portable_id(a) < portable_id(b);
                           });
+        skip_offset(ordered_nodes, node_offset);
       }
       const std::size_t remaining_node_budget =
           nodes.size() >= static_cast<std::size_t>(node_budget)
@@ -1821,7 +2108,9 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
       if (ordered_nodes.size() > remaining_node_budget) {
         ordered_nodes.resize(remaining_node_budget);
         truncated = true;
+        more_nodes_available = !witness_view;
       }
+      delivered_node_count = static_cast<int>(ordered_nodes.size());
       std::set<int64_t> selected_ids;
       std::map<int64_t, int> depths;
       for (const auto &symbol : ordered_nodes) {
@@ -1869,13 +2158,20 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
                 portable_edge_id(source->second, edge, target->second), edge);
           }
         }
-        if (by_key.size() >
+        std::vector<graph::Edge> ordered_edges;
+        ordered_edges.reserve(by_key.size());
+        for (auto &[key, edge] : by_key) {
+          (void)key;
+          ordered_edges.push_back(edge);
+        }
+        skip_offset(ordered_edges, edge_offset);
+        if (ordered_edges.size() >
             static_cast<std::size_t>(
                 std::max(0, edge_budget - static_cast<int>(edges.size())))) {
           truncated = true;
+          more_edges_available = true;
         }
-        for (const auto &[key, edge] : by_key) {
-          (void)key;
+        for (const auto &edge : ordered_edges) {
           if (edges.size() >= static_cast<std::size_t>(edge_budget)) {
             truncated = true;
             break;
@@ -1883,6 +2179,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
           selected_edges.push_back(edge);
         }
       }
+      const std::size_t symbol_edges_before = edges.size();
       int sites_remaining = std::max(0, site_budget - sites_used);
       for (const auto &edge : selected_edges) {
         if (edges.size() >= static_cast<std::size_t>(edge_budget)) {
@@ -1901,6 +2198,9 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
                             return site_sort_key(a, request.workspace) <
                                    site_sort_key(b, request.workspace);
                           });
+        if (!passes_applicability_filter(request, sites_are_conditional(sites))) {
+          continue;
+        }
         bool sites_truncated =
             sites.size() > static_cast<std::size_t>(sites_remaining);
         if (sites_truncated) {
@@ -1913,6 +2213,8 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
                                    freshness, truncated, sites_truncated, sites,
                                    request.workspace));
       }
+      delivered_edge_count =
+          static_cast<int>(edges.size() - symbol_edges_before);
     }
   } else {
     metadata.emplace_back("query_plan", Value::null());
@@ -2012,6 +2314,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   out.emplace_back("view_state", Value::obj({}));
   Value result = Value::obj(std::move(out));
   bool byte_truncated = false;
+  bool byte_trim_dropped_content = false;
 
   const auto mark_byte_truncated = [&] {
     if (Value *metadata_value = member(result, "metadata")) {
@@ -2049,21 +2352,40 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
       }
     }
   };
-  if (script_safe_size(json_out::dumps_indent2(result)) >
-      static_cast<std::size_t>(byte_budget)) {
+  // HSE-92's continuation token (added to metadata further below, once
+  // per-page delivery counts are final) costs a small, tightly-bounded
+  // number of bytes: a fixed "cont:v1:" prefix plus a 64-hex-char
+  // query-identity hash plus two small integers -- comfortably under 256
+  // bytes for any request. Trim to `trim_budget` (byte_budget minus that
+  // reserve) rather than the full byte_budget so the token almost always
+  // has room to land inside the real budget; the unmodified final check
+  // below still throws Oversized in the genuine can't-fit case instead of
+  // silently violating byte_budget.
+  constexpr std::size_t kContinuationReserve = 256;
+  const std::size_t trim_budget =
+      std::cmp_greater(byte_budget, kContinuationReserve)
+          ? static_cast<std::size_t>(byte_budget) - kContinuationReserve
+          : 1;
+  if (script_safe_size(json_out::dumps_indent2(result)) > trim_budget) {
     byte_truncated = true;
     mark_byte_truncated();
-    while (script_safe_size(json_out::dumps_indent2(result)) >
-               static_cast<std::size_t>(byte_budget) &&
+    while (script_safe_size(json_out::dumps_indent2(result)) > trim_budget &&
            (member(result, "edges") != nullptr &&
             !member(result, "edges")->a.empty())) {
       member(result, "edges")->a.pop_back();
+      byte_trim_dropped_content = true;
+      if (delivered_edge_count > 0) {
+        --delivered_edge_count;
+      }
     }
-    while (script_safe_size(json_out::dumps_indent2(result)) >
-               static_cast<std::size_t>(byte_budget) &&
+    while (script_safe_size(json_out::dumps_indent2(result)) > trim_budget &&
            (member(result, "nodes") != nullptr &&
             !member(result, "nodes")->a.empty())) {
       member(result, "nodes")->a.pop_back();
+      byte_trim_dropped_content = true;
+      if (delivered_node_count > 0) {
+        --delivered_node_count;
+      }
     }
     if (Value *metadata_value = member(result, "metadata")) {
       int64_t retained_sites = 0;
@@ -2144,6 +2466,11 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
           child = Value::of(std::move(reason));
         }
       }
+      apply_continuation_token(*continuation, result, query_identity,
+                               witness_view, more_nodes_available,
+                               more_edges_available, byte_trim_dropped_content,
+                               node_offset, edge_offset, delivered_node_count,
+                               delivered_edge_count, byte_budget);
     }
   }
   for (Value &node : member(result, "nodes")->a) {
@@ -2198,6 +2525,123 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
         "increase --byte-limit or reduce the input and evidence budgets");
   }
   return result;
+}
+
+json_out::Value
+search_candidates(Storage &db, const std::string &text,
+                  const std::optional<std::string> &node_kind,
+                  const std::optional<std::string> &workspace, int limit) {
+  const int bounded_limit = std::clamp(limit, 1, 500);
+  query::SqliteQueryReadAdapter graph_read(db);
+  graph::GraphQuery graph(graph_read, "<ui-search>");
+  auto matches = graph.find(text, node_kind, bounded_limit + 1);
+  const bool truncated =
+      matches.size() > static_cast<std::size_t>(bounded_limit);
+  if (truncated) {
+    matches.resize(static_cast<std::size_t>(bounded_limit));
+  }
+  std::ranges::sort(matches, [](const graph::Sym &a, const graph::Sym &b) {
+    return portable_id(a) < portable_id(b);
+  });
+  json_out::Array results;
+  for (const auto &sym : matches) {
+    json_out::Object item;
+    item.emplace_back("id", json_out::Value::of(portable_id(sym)));
+    item.emplace_back("usr", json_out::Value::of(sym.usr));
+    item.emplace_back(
+        "name", json_out::Value::of(sym.name.empty() ? sym.usr : sym.name));
+    item.emplace_back("kind", json_out::Value::of(sym.kind));
+    item.emplace_back("location", json_out::Value::of(location(sym, workspace)));
+    item.emplace_back("component", sym.component
+                                       ? json_out::Value::of(*sym.component)
+                                       : json_out::Value::null());
+    item.emplace_back(
+        "status",
+        json_out::Value::obj({
+            {"resolved", json_out::Value::of(sym.resolved)},
+            {"external", json_out::Value::of(sym.external)},
+            {"stub", json_out::Value::of(sym.is_stub())},
+        }));
+    results.push_back(json_out::Value::obj(std::move(item)));
+  }
+  json_out::Object out;
+  out.emplace_back("schema",
+                   json_out::Value::of(std::string("cidx.graph-view.search.v1")));
+  out.emplace_back("query", json_out::Value::of(text));
+  out.emplace_back("truncated", json_out::Value::of(truncated));
+  out.emplace_back("matches", json_out::Value::arr(std::move(results)));
+  return json_out::Value::obj(std::move(out));
+}
+
+json_out::Value load_edge_evidence(Storage &db, const std::string &edge_id,
+                                   const std::optional<std::string> &workspace,
+                                   int site_offset, int site_limit) {
+  const auto edge_ref = parse_portable_edge_id(edge_id);
+  if (!edge_ref) {
+    throw GraphViewError(
+        GraphViewFailureKind::InvalidInput,
+        "edge id is not a recognized portable identity",
+        "pass an edge id copied from a prior GraphView response");
+  }
+  const auto source_ref = parse_portable_id(edge_ref->source);
+  const auto target_ref = parse_portable_id(edge_ref->target);
+  if (!source_ref || !target_ref) {
+    throw GraphViewError(
+        GraphViewFailureKind::InvalidInput,
+        "edge id endpoints are not recognized portable identities",
+        "pass an edge id copied from a prior GraphView response");
+  }
+  query::SqliteQueryReadAdapter graph_read(db);
+  graph::GraphQuery graph(graph_read, "<ui-evidence>");
+  const auto sources = portable_matches(db, graph, *source_ref);
+  const auto targets = portable_matches(db, graph, *target_ref);
+  if (sources.size() != 1 || targets.size() != 1) {
+    throw GraphViewError(
+        GraphViewFailureKind::UnknownIdentity,
+        "edge endpoints no longer resolve to a unique identity",
+        "reissue the originating GraphView request");
+  }
+  const graph::Sym &source = sources.front();
+  const graph::Sym &target = targets.front();
+  const auto kind_ids =
+      graph::GraphQuery::kind_ids(std::vector<std::string>{edge_ref->kind});
+  const auto adjacent = graph.edges(source.id, "out", kind_ids, 2000, false);
+  const graph::Edge *matched = nullptr;
+  for (const auto &candidate : adjacent) {
+    if (candidate.src_id == source.id && candidate.dst_id == target.id &&
+        candidate.kind == edge_ref->kind) {
+      matched = &candidate;
+      break;
+    }
+  }
+  if (matched == nullptr) {
+    throw GraphViewError(GraphViewFailureKind::UnknownIdentity,
+                        "edge no longer exists between the given endpoints",
+                        "reissue the originating GraphView request");
+  }
+  const int bounded_offset = std::max(0, site_offset);
+  const int bounded_limit = std::clamp(site_limit, 1, 5000);
+  auto sites = graph.sites(matched->edge_id, bounded_offset + bounded_limit + 1);
+  std::ranges::sort(sites, [&](const graph::Site &a, const graph::Site &b) {
+    return site_sort_key(a, workspace) < site_sort_key(b, workspace);
+  });
+  skip_offset(sites, bounded_offset);
+  const bool truncated =
+      sites.size() > static_cast<std::size_t>(bounded_limit);
+  if (truncated) {
+    sites.resize(static_cast<std::size_t>(bounded_limit));
+  }
+  json_out::Array site_values;
+  for (const auto &site : sites) {
+    site_values.push_back(site_value(site, workspace));
+  }
+  json_out::Object out;
+  out.emplace_back(
+      "schema", json_out::Value::of(std::string("cidx.graph-view.evidence.v1")));
+  out.emplace_back("edge_id", json_out::Value::of(edge_id));
+  out.emplace_back("truncated", json_out::Value::of(truncated));
+  out.emplace_back("sites", json_out::Value::arr(std::move(site_values)));
+  return json_out::Value::obj(std::move(out));
 }
 
 } // namespace cidx::ui

@@ -67,10 +67,40 @@ struct GraphViewRequest {
   int byte_budget = 4 * 1024 * 1024;
   std::optional<std::string> workspace;
   bool strict = false;
+
+  // HSE-92 live-explorer filters. All optional/empty by default so existing
+  // CLI/offline-export callers (HSE-90/HSE-91) are unaffected byte-for-byte.
+  std::optional<std::vector<std::string>> node_kinds;   // symbol/entity/type kind
+  std::optional<std::vector<std::string>> files;        // redacted file path membership
+  std::optional<std::vector<std::string>> components;   // Sym::component membership
+  std::optional<std::vector<std::string>> repositories; // resolved repository name
+  std::optional<std::string> status_filter; // resolved|unresolved|external|internal|stub
+  std::optional<std::string>
+      applicability_filter; // universal|conditional (edge site aggregate)
+
+  // Progressive continuation: an opaque token bounding this request to the
+  // NEXT bounded slice of a strictly larger, previously-issued request. See
+  // decode_continuation()/encode_continuation() below.
+  std::optional<std::string> continuation;
 };
 
 // Build the portable, renderer-independent GraphView contract. The browser
 // receives this value; it never receives a Storage or SQL handle.
 json_out::Value build_graph_view(Storage &db, const GraphViewRequest &request);
+
+// A bounded, ranked list of typed search candidates for a free-text query.
+// Used by the live explorer's search operation to resolve a name to a
+// portable root identity without exposing SQL or raw database rows.
+json_out::Value search_candidates(Storage &db, const std::string &text,
+                                  const std::optional<std::string> &node_kind,
+                                  const std::optional<std::string> &workspace,
+                                  int limit);
+
+// Full bounded evidence (source sites) for one previously-emitted portable
+// edge id, beyond whatever the originating GraphView response embedded. The
+// edge id must have come from a prior build_graph_view() response.
+json_out::Value load_edge_evidence(Storage &db, const std::string &edge_id,
+                                   const std::optional<std::string> &workspace,
+                                   int site_offset, int site_limit);
 
 } // namespace cidx::ui

@@ -41,6 +41,15 @@ const graphState = (() => {
     merged.continuation = {...left.continuation, ...right.continuation};
     merged.continuation.available = Boolean(left.continuation?.available || right.continuation?.available);
     if (left.continuation?.reason === 'byte_budget' || right.continuation?.reason === 'byte_budget') merged.continuation.reason = 'byte_budget';
+    // The live explorer keeps growing one canvas across many merged slices
+    // (HSE-92 progressive patches); a session must never present a merged
+    // view as more current than its weakest contributing slice, so freshness
+    // is tracked with the same weakest-wins rule as per-element status.
+    if (left.freshness || right.freshness) merged.freshness = weakest(left.freshness, right.freshness, freshnessRank);
+    if (left.identity || right.identity) {
+      merged.identity = {...left.identity, ...right.identity};
+      if (left.identity?.freshness || right.identity?.freshness) merged.identity.freshness = weakest(left.identity?.freshness, right.identity?.freshness, freshnessRank);
+    }
     if (sitesUsed !== undefined) merged.sites_used = sitesUsed;
     return merged;
   };
@@ -105,7 +114,11 @@ const graphState = (() => {
     if (metadata.truncated && metadata.continuation.reason !== 'byte_budget') metadata.continuation.reason = 'budget';
     return {...left, metadata, nodes: retainedNodes, edges: retainedEdges};
   };
-  return {mergeSlices};
+  // Session-wide freshness tracker (HSE-92): a workspace becoming stale must
+  // be surfaced immediately and never silently upgraded back to "current" by
+  // a later merge; only an explicit full requery (not a merge) may clear it.
+  const trackFreshness = (previous, next) => weakest(previous, next, freshnessRank);
+  return {mergeSlices, trackFreshness};
 })();
 
 if (typeof module !== 'undefined') module.exports = graphState;
@@ -117,12 +130,20 @@ if (typeof document !== 'undefined') {
   let view = embedded;
   let cy;
   let selectedNode;
+  let sessionFreshness = 'current';
+  let currentParams = {};
+  let history = [];
+  let historyIndex = -1;
+  let lastContinuationToken = null;
   const nodeById = new Map();
   const edgeIds = new Set();
   const details = document.getElementById('details');
   const title = document.getElementById('selection-title');
   const expandButton = document.getElementById('expand');
+  const expandOutButton = document.getElementById('expand-out');
+  const expandInButton = document.getElementById('expand-in');
   const accessible = document.getElementById('accessible-nodes');
+  const liveControls = document.getElementById('live-controls');
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const badge = (name, cls) => `<span class="badge ${cls || ''}">${esc(name)}</span>`;
   const statusBadges = (s = {}) => Object.entries(s)
@@ -130,6 +151,23 @@ if (typeof document !== 'undefined') {
     .map(([k, v]) => badge(`${k}${v === true ? '' : `: ${v}`}`, k === 'external' ? 'external' : k))
     .join('');
   const sourceLocation = (item) => item?.location || (item?.file ? `${item.file}:${item.line ?? ''}:${item.col ?? ''}` : 'No location');
+  const copyButton = (text) => liveToken && text
+    ? `<button type="button" class="copy-location" data-copy="${esc(text)}">Copy location</button>`
+    : '';
+  const wireCopyButtons = () => {
+    details.querySelectorAll('.copy-location').forEach((button) => {
+      button.onclick = () => { navigator.clipboard?.writeText(button.dataset.copy || '').catch(() => {}); };
+    });
+  };
+  const updateStaleBanner = () => {
+    const banner = document.getElementById('stale-banner');
+    if (banner) banner.hidden = sessionFreshness === 'current';
+  };
+  const trackViewFreshness = (nextView) => {
+    const freshness = nextView.metadata?.identity?.freshness || nextView.identity?.freshness || nextView.metadata?.index?.freshness;
+    if (freshness) sessionFreshness = graphState.trackFreshness(sessionFreshness, freshness);
+    updateStaleBanner();
+  };
   const updateSummary = () => {
     const status = view.status || view.metadata?.status || 'unknown';
     const markers = view.markers || view.metadata?.markers || [];
@@ -142,10 +180,18 @@ if (typeof document !== 'undefined') {
     document.getElementById('identity').textContent = `${identity.workspace || 'workspace unknown'} · ${identity.index || 'index unknown'} · ${freshness} · query ${view.query_identity || 'unknown'} · result ${view.result_id || 'unknown'}`;
     const canvasStatus = document.getElementById('canvas-status');
     canvasStatus.innerHTML = `${badge(status, status)} ${markers.map((marker) => badge(marker, marker)).join('')} ${budgets.some((value) => value !== null) ? `<span class="budget">budgets ${budgets.filter((value) => value !== null).join(' / ')}</span>` : ''}`;
+    const loadMoreButton = document.getElementById('load-more');
+    if (loadMoreButton) {
+      const continuation = view.metadata?.continuation;
+      lastContinuationToken = continuation?.available && continuation?.token ? continuation.token : null;
+      loadMoreButton.hidden = !lastContinuationToken;
+    }
   };
   const showSnapshot = () => {
     selectedNode = undefined;
     expandButton.disabled = true;
+    if (expandOutButton) expandOutButton.disabled = true;
+    if (expandInButton) expandInButton.disabled = true;
     title.textContent = 'Snapshot status';
     const identity = view.identity || view.metadata?.identity || {};
     const request = view.request || {};
@@ -154,15 +200,37 @@ if (typeof document !== 'undefined') {
   const showNode = (n) => {
     selectedNode = n;
     expandButton.disabled = !liveToken;
+    if (expandOutButton) expandOutButton.disabled = !liveToken;
+    if (expandInButton) expandInButton.disabled = !liveToken;
     title.textContent = n.name || n.usr || 'Node';
     const evidence = n.evidence?.location || 'No bounded evidence attached';
-    details.innerHTML = `<dl><dt>Canonical id</dt><dd><code>${esc(n.id)}</code></dd><dt>USR</dt><dd><code>${esc(n.usr)}</code></dd><dt>Universe/key</dt><dd><code>${esc(`${n.semantic_universe || ''}/${n.identity_key || ''}`)}</code></dd><dt>Kind</dt><dd>${esc(n.kind)}</dd><dt>Location</dt><dd>${esc(sourceLocation(n))}</dd><dt>Status</dt><dd>${statusBadges(n.status) || 'No status flags'}</dd><dt>Evidence</dt><dd>${esc(evidence)}</dd></dl>`;
+    details.innerHTML = `<dl><dt>Canonical id</dt><dd><code>${esc(n.id)}</code></dd><dt>USR</dt><dd><code>${esc(n.usr)}</code></dd><dt>Universe/key</dt><dd><code>${esc(`${n.semantic_universe || ''}/${n.identity_key || ''}`)}</code></dd><dt>Kind</dt><dd>${esc(n.kind)}</dd><dt>Component</dt><dd>${esc(n.component || 'unknown')}</dd><dt>Location</dt><dd>${esc(sourceLocation(n))} ${copyButton(sourceLocation(n))}</dd><dt>Status</dt><dd>${statusBadges(n.status) || 'No status flags'}</dd><dt>Evidence</dt><dd>${esc(evidence)}</dd></dl>`;
+    wireCopyButtons();
   };
   const showEdge = (e) => {
     selectedNode = undefined;
     expandButton.disabled = true;
+    if (expandOutButton) expandOutButton.disabled = true;
+    if (expandInButton) expandInButton.disabled = true;
     title.textContent = `${e.kind} relation`;
-    details.innerHTML = `<dl><dt>Canonical id</dt><dd><code>${esc(e.id)}</code></dd><dt>From</dt><dd><code>${esc(e.source)}</code></dd><dt>To</dt><dd><code>${esc(e.target)}</code></dd><dt>Kind/count</dt><dd>${esc(e.kind)} · ${esc(e.count)}</dd><dt>Status</dt><dd>${statusBadges(e.status) || 'No status flags'}</dd><dt>Evidence</dt><dd>${(e.sites || []).map((s) => esc(sourceLocation(s))).join('<br>') || 'No site evidence'}</dd></dl>`;
+    const evidenceTruncated = Boolean(e.status?.evidence_truncated || e.evidence?.sites_truncated);
+    const loadEvidenceButton = evidenceTruncated && liveToken
+      ? '<button type="button" id="load-evidence">Load all evidence</button>' : '';
+    details.innerHTML = `<dl><dt>Canonical id</dt><dd><code>${esc(e.id)}</code></dd><dt>From</dt><dd><code>${esc(e.source)}</code></dd><dt>To</dt><dd><code>${esc(e.target)}</code></dd><dt>Kind/count</dt><dd>${esc(e.kind)} · ${esc(e.count)}</dd><dt>Status</dt><dd>${statusBadges(e.status) || 'No status flags'}</dd><dt>Evidence</dt><dd>${(e.sites || []).map((s) => esc(sourceLocation(s))).join('<br>') || 'No site evidence'} ${loadEvidenceButton}</dd></dl>`;
+    if (evidenceTruncated && liveToken) {
+      document.getElementById('load-evidence').onclick = async () => {
+        try {
+          const query = new URLSearchParams({token: liveToken, edge: String(e.id), site_limit: '5000'});
+          const response = await fetch(`/api/evidence?${query}`);
+          if (!response.ok) throw new Error(`Evidence request failed (${response.status})`);
+          const payload = await response.json();
+          const list = (payload.sites || []).map((s) => esc(sourceLocation(s))).join('<br>');
+          document.getElementById('load-evidence').outerHTML = `<div>${list || 'No additional sites'}${payload.truncated ? ' <span class="badge truncated">still truncated</span>' : ''}</div>`;
+        } catch (error) {
+          details.insertAdjacentHTML('beforeend', `<p class="muted">${esc(error.message)}</p>`);
+        }
+      };
+    }
   };
   const elementForNode = (n) => ({data: {...n, id: String(n.id), label: n.name || n.usr}});
   const elementForEdge = (e) => ({data: {...e, id: String(e.id), source: String(e.source), target: String(e.target)}});
@@ -180,6 +248,30 @@ if (typeof document !== 'undefined') {
         showNode(n);
       };
       accessible.appendChild(button);
+    });
+  };
+  // HSE-92 grouping: purely a presentation facet over already-delivered,
+  // already-authoritative node fields (component/file/kind) -- it never
+  // asks the server a new question or changes the semantic result.
+  const applyGrouping = () => {
+    const key = document.getElementById('group-by')?.value;
+    if (!cy) return;
+    cy.nodes('[^cidxGroup]').forEach((element) => element.move({parent: null}));
+    cy.$('.cidx-group').remove();
+    if (!key) return;
+    const groups = new Map();
+    cy.nodes('[^cidxGroup]').forEach((element) => {
+      const data = element.data();
+      const raw = key === 'kind' ? data.kind : key === 'file' ? data.file : data.component;
+      const groupKey = raw || `(no ${key})`;
+      if (!groups.has(groupKey)) groups.set(groupKey, []);
+      groups.get(groupKey).push(element);
+    });
+    groups.forEach((members, groupKey) => {
+      if (members.length < 2) return;
+      const groupId = `cidx-group:${key}:${groupKey}`;
+      cy.add({group: 'nodes', data: {id: groupId, label: groupKey, cidxGroup: true}, classes: 'cidx-group'});
+      members.forEach((member) => member.move({parent: groupId}));
     });
   };
   const addView = (next, append) => {
@@ -207,49 +299,229 @@ if (typeof document !== 'undefined') {
       (view.nodes || []).forEach((n) => nodeById.set(String(n.id), n));
       (view.edges || []).forEach((e) => edgeIds.add(String(e.id)));
       const elements = [...(view.nodes || []).map(elementForNode), ...(view.edges || []).map(elementForEdge)];
-      cy = cytoscape({container: document.getElementById('cy'), elements, style: [{selector:'node',style:{'background-color':'data(color)','label':'data(label)','color':'#e7edf4','font-size':10,'text-wrap':'wrap','text-max-width':120,'text-valign':'bottom','text-margin-y':7,'width':18,'height':18,'border-width':2,'border-color':'data(border)'}},{selector:'edge',style:{'width':1.5,'line-color':'data(color)','target-arrow-color':'data(color)','target-arrow-shape':'triangle','curve-style':'bezier','label':'data(kind)','font-size':8,'color':'#9fb0c0','text-background-color':'#0c1117','text-background-opacity':.8}},{selector:'.filtered',style:{display:'none'}},{selector:':selected',style:{'overlay-color':'#fff','overlay-opacity':.12}}], layout:{name:'cose',animate:false,padding:40}, wheelSensitivity:.25});
-      cy.on('tap', 'node,edge', (event) => event.target.group() === 'nodes' ? showNode(nodeById.get(event.target.id())) : showEdge(event.target.data()));
+      cy = cytoscape({container: document.getElementById('cy'), elements, style: [{selector:'node',style:{'background-color':'data(color)','label':'data(label)','color':'#e7edf4','font-size':10,'text-wrap':'wrap','text-max-width':120,'text-valign':'bottom','text-margin-y':7,'width':18,'height':18,'border-width':2,'border-color':'data(border)'}},{selector:'.cidx-group',style:{'background-opacity':.08,'border-width':1,'border-color':'#3a4a5c','label':'data(label)','text-valign':'top','font-size':10,'color':'#8fa0b3'}},{selector:'edge',style:{'width':1.5,'line-color':'data(color)','target-arrow-color':'data(color)','target-arrow-shape':'triangle','curve-style':'bezier','label':'data(kind)','font-size':8,'color':'#9fb0c0','text-background-color':'#0c1117','text-background-opacity':.8}},{selector:'.filtered',style:{display:'none'}},{selector:':selected',style:{'overlay-color':'#fff','overlay-opacity':.12}}], layout:{name:'cose',animate:false,padding:40}, wheelSensitivity:.25});
+      cy.on('tap', 'node,edge', (event) => event.target.group() === 'nodes' ? (event.target.data().cidxGroup ? undefined : showNode(nodeById.get(event.target.id()))) : showEdge(event.target.data()));
+      applyGrouping();
     }
+    trackViewFreshness(view);
     rebuildAccessibleNodes();
     updateSummary();
     if (!selectedNode) showSnapshot();
     document.getElementById('empty').hidden = nodeById.size !== 0;
   };
-  const expandSelected = async () => {
-    if (!liveToken || !selectedNode) return;
-    expandButton.disabled = true;
+  // ---- HSE-92: typed live operations -------------------------------------
+  const fetchGraph = async (params) => {
+    const query = new URLSearchParams({token: liveToken, ...params});
+    const response = await fetch(`/api/graph?${query}`);
+    if (!response.ok) throw new Error(`Graph request failed (${response.status})`);
+    return response.json();
+  };
+  const reportError = (error) => { details.innerHTML = `<p class="muted">${esc(error.message)}</p>`; };
+  const renderBreadcrumbs = () => {
+    const nav = document.getElementById('breadcrumbs');
+    if (!nav) return;
+    nav.replaceChildren();
+    history.forEach((entry, index) => {
+      if (index > 0) {
+        const sep = document.createElement('span');
+        sep.className = 'sep';
+        sep.textContent = '›';
+        nav.appendChild(sep);
+      }
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = entry.label;
+      if (index === historyIndex) button.setAttribute('aria-current', 'true');
+      button.onclick = () => { historyIndex = index; go(entry.params, entry.label); };
+      nav.appendChild(button);
+    });
+  };
+  const updateHistoryButtons = () => {
+    const back = document.getElementById('history-back');
+    const forward = document.getElementById('history-forward');
+    if (back) back.disabled = historyIndex <= 0;
+    if (forward) forward.disabled = historyIndex >= history.length - 1;
+  };
+  // Fetch+render only -- used both for fresh navigation and for replaying a
+  // history/breadcrumb entry (which manages historyIndex itself).
+  const go = async (params, label) => {
+    if (!liveToken) return;
     try {
-      const params = new URLSearchParams({token: liveToken, root: String(selectedNode.id), depth: '1', direction: 'out'});
-      const response = await fetch(`/api/graph?${params}`);
-      if (!response.ok) throw new Error(`Graph expansion failed (${response.status})`);
-      addView(await response.json(), true);
-      showNode(nodeById.get(String(selectedNode.id)) || selectedNode);
+      const nextView = await fetchGraph(params);
+      addView(nextView, false);
+      currentParams = params;
+      renderBreadcrumbs();
+      updateHistoryButtons();
     } catch (error) {
-      details.innerHTML = `<p class="muted">${esc(error.message)}</p>`;
-    } finally {
-      expandButton.disabled = false;
+      reportError(error);
     }
   };
-  const loadView = async () => {
-    if (offline || !liveToken) return embedded;
-    const response = await fetch(`/api/graph?token=${encodeURIComponent(liveToken)}`);
-    if (!response.ok) throw new Error(`Live GraphView request failed (${response.status})`);
-    return response.json();
+  // Pushes a NEW history entry (truncating any forward history), matching
+  // ordinary browser back/forward semantics for normalized queries.
+  const navigate = (params, label) => {
+    history = history.slice(0, historyIndex + 1);
+    history.push({label, params});
+    historyIndex = history.length - 1;
+    return go(params, label);
+  };
+  const expandDirection = async (direction) => {
+    if (!liveToken || !selectedNode) return;
+    try {
+      const params = {root: String(selectedNode.id), depth: '1', direction};
+      addView(await fetchGraph(params), true);
+      showNode(nodeById.get(String(selectedNode.id)) || selectedNode);
+    } catch (error) {
+      reportError(error);
+    }
+  };
+  const runSearch = async () => {
+    if (!liveToken) return;
+    const input = document.getElementById('index-search');
+    const results = document.getElementById('search-results');
+    const text = input?.value.trim();
+    if (!text || !results) return;
+    try {
+      const query = new URLSearchParams({token: liveToken, q: text, limit: '25'});
+      const response = await fetch(`/api/search?${query}`);
+      if (!response.ok) throw new Error(`Search failed (${response.status})`);
+      const payload = await response.json();
+      results.replaceChildren();
+      (payload.matches || []).forEach((match) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = `${match.name} (${match.kind}) — ${match.location}`;
+        button.onclick = () => { results.hidden = true; navigate({root: match.id}, match.name); };
+        results.appendChild(button);
+      });
+      if (!payload.matches?.length) {
+        const empty = document.createElement('p');
+        empty.className = 'muted';
+        empty.textContent = 'No matches.';
+        results.appendChild(empty);
+      }
+      results.hidden = false;
+    } catch (error) {
+      results.replaceChildren();
+      const message = document.createElement('p');
+      message.className = 'muted';
+      message.textContent = error.message;
+      results.appendChild(message);
+      results.hidden = false;
+    }
+  };
+  const SAVED_VIEWS_KEY = 'cidx-saved-views';
+  const loadSavedViews = () => { try { return JSON.parse(localStorage.getItem(SAVED_VIEWS_KEY) || '[]'); } catch (_error) { return []; } };
+  const persistSavedViews = (views) => { try { localStorage.setItem(SAVED_VIEWS_KEY, JSON.stringify(views)); } catch (_error) {} };
+  const renderSavedViews = () => {
+    const select = document.getElementById('saved-views');
+    if (!select) return;
+    select.replaceChildren();
+    loadSavedViews().forEach((entry) => {
+      const option = document.createElement('option');
+      option.value = entry.name;
+      option.textContent = entry.name;
+      select.appendChild(option);
+    });
   };
   const start = async () => {
     try {
-      addView(await loadView(), false);
+      if (offline || !liveToken) {
+        addView(embedded, false);
+      } else {
+        addView(await fetchGraph({}), false);
+      }
     } catch (error) {
       addView(embedded, false);
-      details.innerHTML = `<p class="muted">${esc(error.message)}</p>`;
+      reportError(error);
+    }
+    if (liveToken) {
+      history = [{label: 'initial', params: {}}];
+      historyIndex = 0;
+      renderBreadcrumbs();
+      updateHistoryButtons();
+      renderSavedViews();
+      if (liveControls) liveControls.hidden = false;
     }
     document.getElementById('fit').onclick = () => cy.fit(undefined, 40);
-    document.getElementById('expand').onclick = expandSelected;
+    document.getElementById('expand').onclick = () => expandDirection('out');
     document.getElementById('reset').onclick = () => { cy.elements().removeClass('filtered'); cy.layout({name:'cose',animate:false,padding:40}).run(); };
     const viewKey = `cidx-view:${view.schema || 'unknown'}:${view.request?.root || view.request?.query || 'empty'}`;
     document.getElementById('save').onclick = () => { localStorage.setItem(viewKey, JSON.stringify({positions: cy.nodes().reduce((p, n) => ({...p, [n.id()]: n.position()}), {}), zoom: cy.zoom(), pan: cy.pan()})); };
-    document.getElementById('restore').onclick = () => { try { const saved = JSON.parse(localStorage.getItem(viewKey) || 'null'); if (!saved) return; cy.nodes().positions((n) => saved.positions?.[n.id()] || n.position()); if (saved.zoom) cy.zoom(saved.zoom); if (saved.pan) cy.pan(saved.pan); } catch (_) {} };
+    document.getElementById('restore').onclick = () => { try { const saved = JSON.parse(localStorage.getItem(viewKey) || 'null'); if (!saved) return; cy.nodes().positions((n) => saved.positions?.[n.id()] || n.position()); if (saved.zoom) cy.zoom(saved.zoom); if (saved.pan) cy.pan(saved.pan); } catch (_error) {} };
     document.getElementById('search').oninput = (event) => { const query = event.target.value.toLowerCase(); cy.nodes().forEach((n) => n.toggleClass('filtered', query && !String(n.data('label')).toLowerCase().includes(query))); };
+    if (!liveToken) return;
+    if (expandOutButton) expandOutButton.onclick = () => expandDirection('out');
+    if (expandInButton) expandInButton.onclick = () => expandDirection('in');
+    document.getElementById('history-back').onclick = () => {
+      if (historyIndex <= 0) return;
+      historyIndex -= 1;
+      go(history[historyIndex].params, history[historyIndex].label);
+    };
+    document.getElementById('history-forward').onclick = () => {
+      if (historyIndex >= history.length - 1) return;
+      historyIndex += 1;
+      go(history[historyIndex].params, history[historyIndex].label);
+    };
+    document.getElementById('index-search-run').onclick = runSearch;
+    document.getElementById('index-search').addEventListener('keydown', (event) => { if (event.key === 'Enter') runSearch(); });
+    document.getElementById('load-more').onclick = async () => {
+      if (!lastContinuationToken) return;
+      try { addView(await fetchGraph({...currentParams, continuation: lastContinuationToken}), true); }
+      catch (error) { reportError(error); }
+    };
+    document.getElementById('group-by').onchange = applyGrouping;
+    document.getElementById('apply-filters').onclick = () => {
+      const params = {...currentParams};
+      const fields = [
+        ['filter-node-kind', 'node_kind'], ['filter-file', 'file'],
+        ['filter-component', 'component'], ['filter-repository', 'repository'],
+      ];
+      fields.forEach(([elementId, param]) => {
+        const value = document.getElementById(elementId)?.value.trim();
+        if (value) params[param] = value; else delete params[param];
+      });
+      const status = document.getElementById('filter-status')?.value;
+      if (status) params.status = status; else delete params.status;
+      const applicability = document.getElementById('filter-applicability')?.value;
+      if (applicability) params.applicability = applicability; else delete params.applicability;
+      navigate(params, 'filtered');
+    };
+    document.getElementById('save-view').onclick = () => {
+      const name = window.prompt('Name this saved view');
+      if (!name) return;
+      const views = loadSavedViews().filter((entry) => entry.name !== name);
+      views.push({
+        name, params: currentParams,
+        presentation: cy ? {positions: cy.nodes().reduce((acc, n) => ({...acc, [n.id()]: n.position()}), {}), zoom: cy.zoom(), pan: cy.pan()} : null,
+      });
+      persistSavedViews(views);
+      renderSavedViews();
+    };
+    document.getElementById('load-view').onclick = async () => {
+      const select = document.getElementById('saved-views');
+      const entry = loadSavedViews().find((item) => item.name === select?.value);
+      if (!entry) return;
+      await navigate(entry.params, entry.name);
+      if (entry.presentation && cy) {
+        cy.nodes().positions((n) => entry.presentation.positions?.[n.id()] || n.position());
+        if (entry.presentation.zoom) cy.zoom(entry.presentation.zoom);
+        if (entry.presentation.pan) cy.pan(entry.presentation.pan);
+      }
+    };
+    document.getElementById('stale-refresh').onclick = () => {
+      sessionFreshness = 'current';
+      updateStaleBanner();
+      go(currentParams, history[historyIndex]?.label || 'refresh');
+    };
+    document.getElementById('shutdown').onclick = async () => {
+      if (!window.confirm('Stop the local explorer server? This ends the session.')) return;
+      try {
+        await fetch(`/api/shutdown?token=${encodeURIComponent(liveToken)}`);
+      } catch (_error) {
+        // The connection closing as the server exits is the expected path.
+      }
+      details.innerHTML = '<p class="muted">Server stopped. You can close this tab.</p>';
+    };
   };
   start();
 })();
