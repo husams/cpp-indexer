@@ -175,7 +175,9 @@ void SqliteStorageService::rollup_edge_counts() {
   db_.exec("UPDATE edge SET count = ("
            "  SELECT COUNT(*) FROM edge_site WHERE edge_site.edge_id = edge.id"
            ") "
-           "WHERE kind IN (1, 7)");
+           "WHERE kind IN (1, 7)"
+           "  AND EXISTS (SELECT 1 FROM edge_site WHERE edge_site.edge_id = "
+           "edge.id)");
 }
 
 void SqliteStorageService::materialize_dispatch_calls() {

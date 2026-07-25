@@ -451,6 +451,43 @@ void write_transform_run(SqliteDb &db, const TransformRun &run) {
                                               .c_str()),
                        std::string(transform_run_status_name(run.status)) +
                            "|" + run.input_identity + "|" + run.diagnostic);
+  if (run.transform_id == "edge-site-count-rollup") {
+    auto snapshot = db.prepare(
+        "SELECT id, count FROM edge WHERE kind IN (1, 7) ORDER BY id");
+    std::string rows;
+    while (snapshot.step()) {
+      rows += std::to_string(snapshot.col_int64(0)) + "=" +
+              std::to_string(snapshot.col_int64(1)) + ";";
+    }
+    write_transform_meta(
+        db, transform_meta_key(run.transform_id, "published.rows"), rows);
+  }
+}
+
+bool restore_edge_count_snapshot(SqliteDb &db) {
+  const auto snapshot = read_transform_meta(
+      db, transform_meta_key("edge-site-count-rollup", "published.rows"));
+  if (!snapshot) {
+    return false;
+  }
+  std::size_t cursor = 0;
+  while (cursor < snapshot->size()) {
+    const auto end = snapshot->find(';', cursor);
+    if (end == std::string::npos) {
+      break;
+    }
+    const auto separator = snapshot->find('=', cursor);
+    if (separator == std::string::npos || separator > end) {
+      return false;
+    }
+    auto update = db.prepare("UPDATE edge SET count = ? WHERE id = ?");
+    update.bind(1, std::stoll(snapshot->substr(separator + 1,
+                                               end - separator - 1)));
+    update.bind(2, std::stoll(snapshot->substr(cursor, separator - cursor)));
+    update.step_done();
+    cursor = end + 1;
+  }
+  return true;
 }
 
 void write_reused_attempt(SqliteDb &db, const TransformRun &run,
@@ -2082,6 +2119,17 @@ TransformReport SqliteStorageService::run_transform_pipeline() {
       failed.applicability = current_transform->applicability;
       failed.completeness = current_transform->completeness;
     }
+    const auto prior_runs = report.runs;
+    std::unordered_map<std::string, TransformRun> final_runs;
+    for (const auto &prior_run : prior_runs) {
+      final_runs.emplace(prior_run.transform_id, prior_run);
+    }
+    if (failed.diagnostic.contains("failed output qualification") &&
+        current_transform != nullptr &&
+        current_transform->id == "edge-site-count-rollup" &&
+        restore_edge_count_snapshot(db_)) {
+      failed.diagnostic += "; restored published canonical rows";
+    }
     // A failed generation invalidates every declared downstream consumer, but
     // never destroys its previously published rows. Their attempt metadata
     // names the failed dependency for status/explain clients.
@@ -2090,7 +2138,6 @@ TransformReport SqliteStorageService::run_transform_pipeline() {
       // including successful earlier transforms. Retain their published
       // rows, but record stale attempts so named readiness cannot report an
       // earlier fact as ready for the new input.
-      const auto prior_runs = report.runs;
       for (const auto &prior_run : prior_runs) {
         if (prior_run.transform_id == current_transform->id ||
             (prior_run.status != TransformRunStatus::ran &&
@@ -2122,7 +2169,7 @@ TransformReport SqliteStorageService::run_transform_pipeline() {
         write_failed_attempt(db_, stale);
         write_attempt_invalidation_values(
             db_, *candidate, current_invalidation_values(db_, *candidate));
-        report.runs.push_back(stale);
+        final_runs[stale.transform_id] = stale;
       }
       std::unordered_set<std::string> stale_ids;
       stale_ids.insert(current_transform->id);
@@ -2165,7 +2212,7 @@ TransformReport SqliteStorageService::run_transform_pipeline() {
           stale.input_identity = previous->input_identity;
         }
         write_failed_attempt(db_, stale);
-        report.runs.push_back(stale);
+        final_runs[stale.transform_id] = stale;
       }
     }
     if (current_transform != nullptr) {
@@ -2175,6 +2222,9 @@ TransformReport SqliteStorageService::run_transform_pipeline() {
         failed.published_generation = previous->generation;
       }
     }
+    if (current_transform != nullptr) {
+      final_runs[current_transform->id] = failed;
+    }
     write_failed_attempt(db_, failed);
     if (current_transform != nullptr) {
       write_attempt_invalidation_values(db_, *current_transform, current_keys);
@@ -2183,7 +2233,25 @@ TransformReport SqliteStorageService::run_transform_pipeline() {
     write_transform_meta(db_, "transform.pipeline.state", "failed");
     write_transform_meta(db_, "transform.pipeline.stale_cause", error.what());
     write_transform_meta(db_, "graph_resolved_at", "");
-    report.runs.push_back(std::move(failed));
+    report.runs.clear();
+    for (const auto *descriptor : ordered) {
+      if (!final_runs.contains(descriptor->id)) {
+        if (const auto previous = read_transform_run(db_, *descriptor)) {
+          final_runs.emplace(descriptor->id, *previous);
+        } else {
+          TransformRun unavailable;
+          unavailable.transform_id = descriptor->id;
+          unavailable.version = descriptor->version;
+          unavailable.generation = generation;
+          unavailable.status = TransformRunStatus::stale;
+          unavailable.applicability = TransformApplicability::inapplicable;
+          unavailable.completeness = TransformCompleteness::pending;
+          unavailable.diagnostic = "not evaluated because the generation failed";
+          final_runs.emplace(descriptor->id, std::move(unavailable));
+        }
+      }
+      report.runs.push_back(final_runs.at(descriptor->id));
+    }
     report.failed = true;
     last_transform_runs_ = report.runs;
     return report;
@@ -2349,8 +2417,9 @@ void SqliteStorageService::mark_transform_pipeline_pending(
   write_transform_meta(db_, "transform.pipeline.state", "pending");
   write_transform_meta(db_, "transform.pipeline.stale_cause", reason);
   write_transform_meta(db_, "graph_resolved_at", "");
+  const auto registry = make_transform_registry(&db_);
   for (const TransformDescriptor *descriptor :
-       make_transform_registry(&db_).execution_order()) {
+       registry.execution_order()) {
     write_transform_meta(db_, transform_meta_key(descriptor->id, "status"),
                          "stale");
     write_transform_meta(db_, transform_meta_key(descriptor->id, "stale_cause"),
@@ -2407,9 +2476,14 @@ void SqliteStorageService::set_transform_budget_for_testing(
 int SqliteStorageService::resolve_pass() {
   const TransformReport report = run_transform_pipeline();
   if (report.failed) {
+    const auto failed = std::ranges::find_if(
+        report.runs, [](const TransformRun &run) {
+          return run.status == TransformRunStatus::failed;
+        });
     throw StorageError("resolve failed: " +
-                       (report.runs.empty() ? std::string("transform pipeline")
-                                            : report.runs.back().diagnostic));
+                       (failed == report.runs.end()
+                            ? std::string("transform pipeline")
+                            : failed->diagnostic));
   }
   return report.still_stub_count;
 }

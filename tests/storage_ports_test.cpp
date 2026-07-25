@@ -6,7 +6,9 @@
 #include "storage/storage.hpp"
 
 #include <algorithm>
+#include <array>
 #include <filesystem>
+#include <set>
 #include <stdexcept>
 #include <type_traits>
 
@@ -407,7 +409,12 @@ TEST_CASE("transform requalifies mutated derived output before reuse") {
   edge.src_id = src_id;
   edge.dst_id = dst_id;
   edge.kind = 1;
-  db.add_edge(edge);
+  const auto edge_id = db.add_edge(edge);
+  const auto component_id = db.add_component("mutation", "/tmp/mutation");
+  const auto directory_id = db.add_directory(component_id, "");
+  const auto file_id = db.add_file(directory_id, "mutation.cpp");
+  db.add_edge_site(
+      EdgeSite{.edge_id = edge_id, .file_id = file_id, .line = 1, .col = 1});
   REQUIRE(db.run_transform_pipeline().complete);
 
   db.raw_db().exec("UPDATE edge SET count = count + 99 WHERE kind = 1");
@@ -423,45 +430,100 @@ TEST_CASE("transform requalifies mutated derived output before reuse") {
 }
 
 TEST_CASE("non-reproducing derived mutation fails qualification and preserves publication") {
+  const auto path = std::filesystem::temp_directory_path() /
+                    "cidx-hse67-qualification-rollback.db";
+  std::filesystem::remove(path);
+  std::string published_identity;
+  int64_t edge_id = -1;
+  {
+    Storage db(path.string());
+    Symbol src;
+    src.usr = "transform:@F@nondeterministic-src";
+    src.spelling = "nondeterministic-src";
+    src.kind = "function";
+    src.is_definition = true;
+    const auto src_id = db.add_symbol(src);
+    Symbol dst = src;
+    dst.usr = "transform:@F@nondeterministic-dst";
+    dst.spelling = "nondeterministic-dst";
+    const auto dst_id = db.add_symbol(dst);
+    edge_id = db.add_edge(Edge{.src_id = src_id,
+                               .dst_id = dst_id,
+                               .kind = 1,
+                               .count = 1,
+                               .base_access = std::nullopt,
+                               .is_virtual = std::nullopt});
+    const auto component_id = db.add_component("qualification", "/tmp/qualification");
+    const auto directory_id = db.add_directory(component_id, "");
+    const auto file_id = db.add_file(directory_id, "qualification.cpp");
+    db.add_edge_site(EdgeSite{.edge_id = edge_id,
+                              .file_id = file_id,
+                              .line = 1,
+                              .col = 1});
+    REQUIRE(db.run_transform_pipeline().complete);
+    auto published = db.raw_db().prepare(
+        "SELECT value FROM meta WHERE key = "
+        "'transform.edge-site-count-rollup.published.output'");
+    REQUIRE(published.step());
+    published_identity = published.col_text(0);
+
+    db.raw_db().exec("UPDATE edge SET count = count + 99 WHERE kind = 1");
+    db.inject_transform_nondeterminism_for_testing("edge-site-count-rollup");
+    const auto failed = db.run_transform_pipeline();
+    CHECK(failed.failed);
+    const auto status = db.transform_fact_set_status("edge.count");
+    CHECK(status.known);
+    CHECK_FALSE(status.ready);
+    CHECK(status.status == TransformRunStatus::failed);
+    CHECK(db.transform_explain("edge.count").find("qualification") !=
+          std::string::npos);
+    auto retained = db.raw_db().prepare(
+        "SELECT value FROM meta WHERE key = "
+        "'transform.edge-site-count-rollup.published.output'");
+    REQUIRE(retained.step());
+    CHECK(retained.col_text(0) == published_identity);
+  }
+  {
+    Storage fresh(path.string());
+    auto row = fresh.raw_db().prepare("SELECT count FROM edge WHERE id = ?");
+    row.bind(1, edge_id);
+    REQUIRE(row.step());
+    CHECK(row.col_int64(0) == 1);
+    const auto status = fresh.transform_status("edge.count");
+    REQUIRE(status.runs.size() == 1);
+    CHECK(status.runs.front().output_identity == published_identity);
+  }
+  std::filesystem::remove(path);
+}
+
+TEST_CASE("site-less call and use counts retain indexed values") {
   Storage db(":memory:");
   Symbol src;
-  src.usr = "transform:@F@nondeterministic-src";
-  src.spelling = "nondeterministic-src";
+  src.usr = "transform:@F@site-less-src";
+  src.spelling = "site-less-src";
   src.kind = "function";
   src.is_definition = true;
   const auto src_id = db.add_symbol(src);
   Symbol dst = src;
-  dst.usr = "transform:@F@nondeterministic-dst";
-  dst.spelling = "nondeterministic-dst";
+  dst.usr = "transform:@F@site-less-dst";
+  dst.spelling = "site-less-dst";
   const auto dst_id = db.add_symbol(dst);
-  db.add_edge(Edge{.src_id = src_id,
-                   .dst_id = dst_id,
-                   .kind = 1,
-                   .count = 1,
-                   .base_access = std::nullopt,
-                   .is_virtual = std::nullopt});
+  const auto call_id = db.add_edge(Edge{.src_id = src_id,
+                                       .dst_id = dst_id,
+                                       .kind = 1,
+                                       .count = 7});
+  const auto use_id = db.add_edge(Edge{.src_id = src_id,
+                                       .dst_id = dst_id,
+                                       .kind = 7,
+                                       .count = 11});
   REQUIRE(db.run_transform_pipeline().complete);
-  auto published = db.raw_db().prepare(
-      "SELECT value FROM meta WHERE key = "
-      "'transform.edge-site-count-rollup.published.output'");
-  REQUIRE(published.step());
-  const std::string published_identity = published.col_text(0);
-
-  db.raw_db().exec("UPDATE edge SET count = count + 99 WHERE kind = 1");
-  db.inject_transform_nondeterminism_for_testing("edge-site-count-rollup");
-  const auto failed = db.run_transform_pipeline();
-  CHECK(failed.failed);
-  const auto status = db.transform_fact_set_status("edge.count");
-  CHECK(status.known);
-  CHECK_FALSE(status.ready);
-  CHECK(status.status == TransformRunStatus::failed);
-  CHECK(db.transform_explain("edge.count").find("qualification") !=
-        std::string::npos);
-  auto retained = db.raw_db().prepare(
-      "SELECT value FROM meta WHERE key = "
-      "'transform.edge-site-count-rollup.published.output'");
-  REQUIRE(retained.step());
-  CHECK(retained.col_text(0) == published_identity);
+  for (const auto [edge_id, expected] :
+       std::array<std::pair<int64_t, int64_t>, 2>{{{call_id, 7}, {use_id, 11}}}) {
+    auto row = db.raw_db().prepare("SELECT count FROM edge WHERE id = ?");
+    row.bind(1, edge_id);
+    REQUIRE(row.step());
+    CHECK(row.col_int64(0) == expected);
+  }
 }
 
 TEST_CASE("dynamic target changes rebuild semantic dependents only") {
@@ -622,9 +684,31 @@ TEST_CASE(
   db.add_edge(override_edge);
   db.inject_transform_failure_for_testing("entity-graph-rollup");
   const auto failed = db.run_transform_pipeline();
-  REQUIRE(failed.runs.back().transform_id == "entity-graph-rollup");
-  CHECK(failed.runs.back().status == TransformRunStatus::failed);
-  CHECK_FALSE(failed.runs.back().diagnostic.empty());
+  REQUIRE(failed.runs.size() == 9);
+  std::set<std::string> final_ids;
+  for (const auto &run : failed.runs) {
+    final_ids.insert(run.transform_id);
+  }
+  CHECK(final_ids.size() == failed.runs.size());
+  const auto entity = std::ranges::find_if(
+      failed.runs, [](const TransformRun &run) {
+        return run.transform_id == "entity-graph-rollup";
+      });
+  REQUIRE(entity != failed.runs.end());
+  CHECK(entity->status == TransformRunStatus::failed);
+  CHECK_FALSE(entity->diagnostic.empty());
+  const auto earlier_record = std::ranges::find_if(
+      failed.runs, [](const TransformRun &run) {
+        return run.transform_id == "edge-site-count-rollup";
+      });
+  REQUIRE(earlier_record != failed.runs.end());
+  CHECK(earlier_record->status == TransformRunStatus::stale);
+  const auto downstream_record = std::ranges::find_if(
+      failed.runs, [](const TransformRun &run) {
+        return run.transform_id == "hse-66-effect-registration";
+      });
+  REQUIRE(downstream_record != failed.runs.end());
+  CHECK(downstream_record->status == TransformRunStatus::stale);
 
   auto state = db.raw_db().prepare("SELECT value FROM meta WHERE key = "
                                    "'transform.entity-graph-rollup.status'");
