@@ -9,6 +9,7 @@
 
 #include <arpa/inet.h>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <future>
@@ -75,6 +76,15 @@ struct Fixture {
     const int64_t c = db.add_symbol(sym_c);
     const int64_t v = db.add_symbol(sym_v);
 
+    const auto add_site = [&](int64_t edge_id, int line, bool conditional) {
+      cidx::EdgeSite site;
+      site.edge_id = edge_id;
+      site.file_id = file;
+      site.line = line;
+      site.col = 4;
+      site.conditional = conditional ? 1 : 0;
+      db.add_edge_site(site);
+    };
     const auto add_edge = [&](int64_t src, int64_t dst, const char *kind,
                               int line) {
       cidx::Edge edge;
@@ -82,16 +92,16 @@ struct Fixture {
       edge.dst_id = dst;
       edge.kind = cidx::graph::edge_kinds_map().at(kind);
       const int64_t edge_id = db.add_edge(edge);
-      cidx::EdgeSite site;
-      site.edge_id = edge_id;
-      site.file_id = file;
-      site.line = line;
-      site.col = 4;
-      db.add_edge_site(site);
+      add_site(edge_id, line, /*conditional=*/false);
+      return edge_id;
     };
     add_edge(a, b, "calls", 10);
     add_edge(b, c, "uses", 20);
-    add_edge(a, v, "uses", 30);
+    const int64_t a_uses_v = add_edge(a, v, "uses", 30);
+    // A second site on the SAME edge, sorted after the first (line 31 >
+    // line 30) and conditional: a tiny site_limit must not be allowed to
+    // silently drop this from the applicability decision (HSE-92 review).
+    add_site(a_uses_v, 31, /*conditional=*/true);
   }
 };
 
@@ -285,11 +295,23 @@ ui::GraphProvider graph_provider_for(Storage &db) {
     request.edge_budget = 500;
     request.site_budget = 200;
     request.byte_budget = 4 * 1024 * 1024;
+    // Boundary-aware lookup: a plain substring search for "name=" would
+    // also match inside an unrelated longer key (e.g. `param("limit")`
+    // wrongly matching the "limit=" tail of "site_limit=0"). Each key must
+    // start right after '?' or '&'.
     const auto param = [&](std::string_view name) -> std::optional<std::string> {
       const std::string needle = std::string(name) + "=";
-      const std::size_t start = target.find(needle);
-      if (start == std::string_view::npos) {
-        return std::nullopt;
+      std::size_t start = 0;
+      while (true) {
+        start = target.find(needle, start);
+        if (start == std::string_view::npos) {
+          return std::nullopt;
+        }
+        if (start > 0 &&
+            (target[start - 1] == '?' || target[start - 1] == '&')) {
+          break;
+        }
+        start += 1;
       }
       const std::size_t value_start = start + needle.size();
       std::size_t value_end = target.find('&', value_start);
@@ -308,11 +330,20 @@ ui::GraphProvider graph_provider_for(Storage &db) {
     if (const auto direction = param("direction")) {
       request.direction = *direction;
     }
+    if (const auto depth = param("depth")) {
+      request.depth = parse_int(*depth);
+    }
     if (const auto node_kind = param("node_kind")) {
       request.node_kinds = std::vector<std::string>{*node_kind};
     }
     if (const auto limit = param("limit")) {
       request.node_budget = parse_int(*limit);
+    }
+    if (const auto site_limit = param("site_limit")) {
+      request.site_budget = parse_int(*site_limit);
+    }
+    if (const auto applicability = param("applicability")) {
+      request.applicability_filter = *applicability;
     }
     if (const auto byte_limit = param("byte_limit")) {
       request.byte_budget = parse_int(*byte_limit);
@@ -433,7 +464,11 @@ TEST_CASE("Live explorer: a bounded witness path resolves a -> b -> c") {
   CHECK(response.body.find("USR::c") != std::string::npos);
 }
 
-TEST_CASE("Live explorer: node_kind filter groups the result by kind") {
+// Server-side filter, NOT client-side grouping (HSE-92 review: this test was
+// previously misnamed "grouping", but it never exercises Cytoscape compound
+// parent assignment -- see web/grouping_dom_test.js for the real grouping
+// coverage, which loads web/app.js and calls applyGrouping() end-to-end).
+TEST_CASE("Live explorer: node_kind filter restricts the result by symbol kind") {
   Fixture fixture;
   RunningServer server(graph_provider_for(fixture.db));
   const auto response = http_get(server.port, "/api/graph?token=" + server.token +
@@ -495,6 +530,95 @@ TEST_CASE("Live explorer: a continuation token from a different query is "
                                 "&root=ns::b&direction=out&limit=1&continuation=" +
                                 continuation);
   CHECK(mismatched.status == 400);
+}
+
+TEST_CASE("Live explorer: a continuation token is rejected when replayed "
+         "under a different filter") {
+  Fixture fixture;
+  RunningServer server(graph_provider_for(fixture.db));
+  const auto first = http_get(
+      server.port, "/api/graph?token=" + server.token +
+                      "&root=ns::a&direction=out&limit=1&node_kind=function");
+  CHECK(first.status == 200);
+  const std::string token_marker = R"("token": ")";
+  const std::size_t token_start = first.body.find(token_marker);
+  REQUIRE(token_start != std::string::npos);
+  const std::size_t value_start = token_start + token_marker.size();
+  const std::size_t value_end = first.body.find('"', value_start);
+  REQUIRE(value_end != std::string::npos);
+  const std::string continuation =
+      first.body.substr(value_start, value_end - value_start);
+
+  // Identical root/direction/limit, but a DIFFERENT node_kind filter: the
+  // token must not be accepted, since it was minted under a different
+  // normalized query (HSE-92 review: filters were not bound into the
+  // continuation query identity).
+  const auto mismatched = http_get(
+      server.port, "/api/graph?token=" + server.token +
+                      "&root=ns::a&direction=out&limit=1&node_kind=variable"
+                      "&continuation=" +
+                      continuation);
+  CHECK(mismatched.status == 400);
+}
+
+TEST_CASE("Live explorer: a cross-page edge is not dropped when its "
+         "endpoints land on different pages") {
+  Fixture fixture;
+  RunningServer server(graph_provider_for(fixture.db));
+  // depth=1 + node_kind=function narrows the candidate set to exactly {a,
+  // b}, so limit=1 pages through them one at a time; whichever page
+  // delivers "a" as its primary node must also carry the a->b "calls" edge
+  // (with "b" bridged in), even though "b" is not that page's own node.
+  const std::string base =
+      "/api/graph?token=" + server.token +
+      "&root=ns::a&direction=out&depth=1&node_kind=function&limit=1";
+  const auto first = http_get(server.port, base);
+  CHECK(first.status == 200);
+  const std::string token_marker = R"("token": ")";
+  const std::size_t token_start = first.body.find(token_marker);
+  REQUIRE(token_start != std::string::npos);
+  const std::size_t value_start = token_start + token_marker.size();
+  const std::size_t value_end = first.body.find('"', value_start);
+  REQUIRE(value_end != std::string::npos);
+  const std::string continuation =
+      first.body.substr(value_start, value_end - value_start);
+  const auto second =
+      http_get(server.port, base + "&continuation=" + continuation);
+  CHECK(second.status == 200);
+
+  const bool has_a = first.body.contains("USR::a") || second.body.contains("USR::a");
+  const bool has_b = first.body.contains("USR::b") || second.body.contains("USR::b");
+  CHECK(has_a);
+  CHECK(has_b);
+  const bool has_calls_edge = first.body.contains(R"("kind": "calls")") ||
+                             second.body.contains(R"("kind": "calls")");
+  CHECK(has_calls_edge);
+}
+
+TEST_CASE("Live explorer: applicability is decided from the complete edge "
+         "fact, not the bounded evidence prefix") {
+  Fixture fixture;
+  RunningServer server(graph_provider_for(fixture.db));
+  // ns::a -uses-> ns::v has two sites: an unconditional one (sorted first)
+  // and a conditional one (sorted second). site_limit=0 would, under the
+  // old bounded-prefix bug, only ever see the first (unconditional) site
+  // and misreport the edge as "universal".
+  const auto response = http_get(
+      server.port, "/api/graph?token=" + server.token +
+                      "&root=ns::a&direction=out&depth=1&site_limit=0"
+                      "&applicability=universal");
+  CHECK(response.status == 200);
+  CHECK(response.body.find("USR::v") != std::string::npos);
+  // The uses edge to v is actually conditional (mixed sites), so filtering
+  // to applicability=universal must exclude it.
+  CHECK(response.body.find(R"("kind": "uses")") == std::string::npos);
+
+  const auto conditional_only = http_get(
+      server.port, "/api/graph?token=" + server.token +
+                      "&root=ns::a&direction=out&depth=1&site_limit=0"
+                      "&applicability=conditional");
+  CHECK(conditional_only.status == 200);
+  CHECK(conditional_only.body.find(R"("kind": "uses")") != std::string::npos);
 }
 
 TEST_CASE("Live explorer: evidence endpoint loads bounded sites for an edge") {
@@ -569,6 +693,73 @@ TEST_CASE("Live explorer tolerates a client aborting mid-request (cancellation)"
   // both aborted connections.
   const auto response = http_get(server.port, "/?token=" + server.token);
   CHECK(response.status == 200);
+}
+
+TEST_CASE("Live explorer: a client disconnect during a slow query does not "
+         "block the accept loop, and the server never crashes") {
+  // A deliberately slow/blocking provider, standing in for a long-running
+  // query. `completed` proves it actually ran to completion in the
+  // background even though the requesting client abandons the connection
+  // before that happens.
+  std::atomic<bool> completed{false};
+  const ui::GraphProvider slow_provider =
+      [&completed](std::string_view target) -> std::optional<std::string> {
+    (void)target;
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    completed = true;
+    return std::string(
+        R"({"schema": "cidx.graph-view.v1", "nodes": [], "edges": [], "metadata": {}})");
+  };
+  RunningServer server(slow_provider);
+
+  // Connect, send a well-formed request for the slow route, then close the
+  // socket immediately WITHOUT reading any response -- exactly the
+  // "cancel an in-flight query" scenario the previous abrupt_disconnect()
+  // test could not exercise (that one disconnects before a valid request
+  // even starts).
+  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  REQUIRE(fd >= 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(static_cast<uint16_t>(server.port));
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  REQUIRE(::connect(fd, reinterpret_cast<sockaddr *>(&address),
+                    sizeof(address)) == 0);
+  const std::string request = "GET /api/graph?token=" + server.token +
+                              "&root=ns::a HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                              "Connection: close\r\n\r\n";
+  std::size_t sent = 0;
+  while (sent < request.size()) {
+    const ssize_t written =
+        ::send(fd, request.data() + sent, request.size() - sent, 0);
+    if (written <= 0) {
+      break;
+    }
+    sent += static_cast<std::size_t>(written);
+  }
+  ::close(fd); // Abandon the connection before the slow query even finishes.
+
+  const auto probe_start = std::chrono::steady_clock::now();
+  // While the slow query is still (deliberately) sleeping, an ordinary
+  // second request must still be accepted and answered promptly -- if the
+  // accept loop were blocked synchronously on the first (abandoned)
+  // connection's query, as it was before this fix, this would take at
+  // least the full 300ms sleep instead of a few milliseconds.
+  const auto second = http_get(server.port, "/?token=" + server.token);
+  const auto elapsed = std::chrono::steady_clock::now() - probe_start;
+  CHECK(second.status == 200);
+  CHECK(elapsed < std::chrono::milliseconds(250));
+
+  // The abandoned query keeps running (providers have no cooperative
+  // cancellation point) and must complete without crashing the server,
+  // even though nothing will ever read its result.
+  for (int attempt = 0; attempt < 50 && !completed.load(); ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  CHECK(completed.load());
+  // The server must still be answering requests afterward.
+  const auto third = http_get(server.port, "/?token=" + server.token);
+  CHECK(third.status == 200);
 }
 
 TEST_CASE("Live explorer shuts down cleanly on an authenticated request") {

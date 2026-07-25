@@ -1,20 +1,26 @@
 #include "ui/server.hpp"
 
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
+#include <memory>
 #include <netinet/in.h>
+#include <poll.h>
 #include <random>
 #include <sstream>
 #include <string_view>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <thread>
 #include <unistd.h>
+#include <vector>
 
 namespace cidx::ui {
 namespace {
@@ -180,19 +186,96 @@ struct StaticGraphProvider {
   }
 };
 
-// search/evidence providers are new (HSE-92) and unconditionally optional
-// (default-constructed std::function is falsy); this keeps their call sites
-// uniform without duplicating the graph_provider's inline try/catch.
-std::optional<std::string> invoke(const GraphProvider &provider,
-                                  std::string_view target) {
-  if (!provider) {
-    return std::nullopt;
+// Whether the peer has closed (or reset) the connection, checked without
+// blocking. A readable socket that yields 0 bytes on a MSG_PEEK is the
+// standard way to detect an orderly close; POLLHUP/POLLERR cover the
+// abrupt-reset case.
+bool peer_disconnected(int fd) {
+  pollfd pfd{};
+  pfd.fd = fd;
+  pfd.events = POLLIN;
+  const int ready = ::poll(&pfd, 1, 0);
+  if (ready <= 0) {
+    return false;
   }
-  try {
-    return provider(target);
-  } catch (const std::exception &) {
-    return std::nullopt;
+  if ((pfd.revents & (POLLHUP | POLLERR)) != 0) {
+    return true;
   }
+  if ((pfd.revents & POLLIN) != 0) {
+    char probe = 0;
+    const ssize_t peeked = ::recv(fd, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (peeked == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Runs `provider(target)` on its own thread while this (caller's) thread
+// concurrently polls the client socket for disconnection, so a client that
+// goes away mid-query is noticed WHILE the query is still running rather
+// than only at the final send() (HSE-92 review: "cancellation" must mean
+// more than closing a connection before a valid request even starts).
+// Providers are budget-bounded and have no cooperative cancellation point of
+// their own, so this cannot abort mid-computation -- what it DOES guarantee
+// is that a disconnected client is never waited on or written to once
+// noticed, and that the accept loop calling this (via its own connection
+// thread, see serve_live()) is never blocked by one slow/abandoned
+// connection.
+//
+// The inner `worker` is always joined (never detached): a detached worker
+// could still be running `provider(target)` -- referencing `provider`,
+// which is only valid for serve_live()'s lifetime -- after serve_live()
+// itself returns, a dangling reference. Joining bounds this function's own
+// runtime to the provider's (budget-bounded) completion time in the worst
+// case, but never blocks the ACCEPT loop, since it always runs on its own
+// connection thread.
+// Deliberately built on a plain atomic completion flag rather than
+// std::promise/std::future: worker.join() below always runs before this
+// function returns, so the shared `value`/`done` locals stay valid for the
+// worker's entire lifetime without needing a heap-allocated shared state.
+// This also sidesteps a clang-analyzer false positive (proven via its own
+// emitted path notes -- it reports "Returning from 'future::wait_for'"
+// immediately before flagging the very next statement as still "inside" that
+// call's internal mutex) that misattributes peer_disconnected()'s recv() as
+// running inside libc++ future's internal critical section when
+// future::wait_for is polled in a loop.
+void run_provider_route(int client, const GraphProvider &provider,
+                        const std::string &target,
+                        std::string_view empty_message) {
+  std::optional<std::string> value;
+  std::atomic<bool> done{false};
+  // `target` is captured by reference, not by value: it is run_provider_route's
+  // own parameter, guaranteed valid for this whole call (worker.join() below
+  // always runs before this function returns), and capturing by value would
+  // insert a std::string copy-construction into this closure -- itself a
+  // (however unlikely) throwing operation running as part of a std::thread
+  // entry function, where an uncaught exception calls std::terminate().
+  std::thread worker([&provider, &target, &value, &done] {
+    try {
+      value = provider ? provider(target) : std::nullopt;
+    } catch (const std::exception &) {
+      value = std::nullopt;
+    }
+    done.store(true, std::memory_order_release);
+  });
+  bool disconnected = false;
+  while (!done.load(std::memory_order_acquire)) {
+    if (peer_disconnected(client)) {
+      disconnected = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  worker.join();
+  if (!disconnected) {
+    if (value) {
+      (void)send_response(client, 200, "application/json", *value);
+    } else {
+      (void)send_response(client, 400, "text/plain", empty_message);
+    }
+  }
+  ::close(client);
 }
 
 } // namespace
@@ -246,6 +329,13 @@ int serve_live(const std::string &html, const GraphProvider &graph_provider,
     launch_browser(url);
   }
 
+  // Connection threads for provider-dispatching routes (see
+  // run_provider_route): kept here, not detached, so serve_live() can join
+  // every one of them before it returns -- the alternative (a detached
+  // thread outliving serve_live()) would leave it holding a dangling
+  // reference to the provider parameters. Static/shutdown/error routes stay
+  // on the accept-loop thread; they are fast and never block on a provider.
+  std::vector<std::thread> connection_threads;
   std::array<char, 8192> buffer{};
   bool shutdown_requested = false;
   while (!shutdown_requested) {
@@ -283,44 +373,40 @@ int serve_live(const std::string &html, const GraphProvider &graph_provider,
       ::close(client);
       continue;
     }
-    bool sent = false;
     if (target.starts_with("/?") || target.starts_with("/index.html?")) {
-      sent = send_response(client, 200, "text/html; charset=utf-8", html);
+      (void)send_response(client, 200, "text/html; charset=utf-8", html);
+      ::close(client);
     } else if (target.starts_with("/api/graph?")) {
-      try {
-        const auto graph_json = graph_provider ? graph_provider(target)
-                                               : std::nullopt;
-        sent = graph_json
-                   ? send_response(client, 200, "application/json", *graph_json)
-                   : send_response(client, 400, "text/plain",
-                                   "bad graph request\n");
-      } catch (const std::exception &error) {
-        const std::string message =
-            "bad graph request: " + std::string(error.what()) + "\n";
-        sent = send_response(client, 400, "text/plain", message);
-      }
+      // `target` is a view into `buffer`, which the NEXT loop iteration
+      // reuses for a different connection's bytes -- copy it before handing
+      // off to a thread that will outlive this iteration.
+      connection_threads.emplace_back(run_provider_route, client,
+                                      std::cref(graph_provider),
+                                      std::string(target),
+                                      "bad graph request\n");
     } else if (target.starts_with("/api/search?")) {
-      const auto search_json = invoke(search_provider, target);
-      sent = search_json ? send_response(client, 200, "application/json",
-                                         *search_json)
-                         : send_response(client, 400, "text/plain",
-                                         "bad search request\n");
+      connection_threads.emplace_back(run_provider_route, client,
+                                      std::cref(search_provider),
+                                      std::string(target),
+                                      "bad search request\n");
     } else if (target.starts_with("/api/evidence?")) {
-      const auto evidence_json = invoke(evidence_provider, target);
-      sent = evidence_json ? send_response(client, 200, "application/json",
-                                           *evidence_json)
-                           : send_response(client, 400, "text/plain",
-                                           "bad evidence request\n");
+      connection_threads.emplace_back(run_provider_route, client,
+                                      std::cref(evidence_provider),
+                                      std::string(target),
+                                      "bad evidence request\n");
     } else if (target.starts_with("/api/shutdown?")) {
-      sent = send_response(client, 200, "application/json",
-                           "{\"stopped\": true}\n");
+      (void)send_response(client, 200, "application/json",
+                          "{\"stopped\": true}\n");
+      ::close(client);
       shutdown_requested = true;
     } else {
-      sent = send_response(client, 404, "text/plain", "not found\n");
+      (void)send_response(client, 404, "text/plain", "not found\n");
+      ::close(client);
     }
-    ::close(client);
-    if (!sent) {
-      continue;
+  }
+  for (auto &connection_thread : connection_threads) {
+    if (connection_thread.joinable()) {
+      connection_thread.join();
     }
   }
   ::close(server);

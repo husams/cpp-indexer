@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const {mergeSlices, trackFreshness} = require('./app.js');
+const {mergeSlices, trackFreshness, computeGroups} = require('./app.js');
 
 const merged = mergeSlices({
   metadata: {
@@ -97,6 +97,47 @@ assert.equal(siteBounded.metadata.truncated, true);
 assert.equal(siteBounded.edges[1].sites.length, 0);
 assert.equal(siteBounded.edges[1].evidence.sites_truncated, true);
 
+// HSE-92 review fix: a continuation ("Load more") merge must GROW the
+// canvas across pages, not re-cap it to a single page's own tiny budget.
+// Two one-node pages, each with node_budget=1, must merge to 2 retained
+// nodes (not 1) when merged with {cumulative: true}.
+const continuationPageOne = {
+  request: {node_budget: 1, edge_budget: 1, site_budget: 1},
+  metadata: {node_budget: 1, edge_budget: 1, site_budget: 1, continuation: {available: true, reason: 'budget'}},
+  nodes: [{id: 'cont-node-a'}],
+  edges: [],
+};
+const continuationPageTwo = {
+  request: {node_budget: 1, edge_budget: 1, site_budget: 1},
+  metadata: {node_budget: 1, edge_budget: 1, site_budget: 1, continuation: {available: false, reason: 'complete'}},
+  nodes: [{id: 'cont-node-b'}],
+  edges: [],
+};
+const continuationMerged = mergeSlices(continuationPageOne, continuationPageTwo, {cumulative: true});
+assert.deepEqual(continuationMerged.nodes.map((node) => node.id).sort(), ['cont-node-a', 'cont-node-b']);
+assert.equal(continuationMerged.metadata.truncated, false);
+assert.equal(continuationMerged.metadata.node_budget, 2);
+
+// A third page must keep growing against the ALREADY-grown budget (2),
+// not silently reset back to a single page's original budget (1).
+const continuationPageThree = {
+  request: {node_budget: 1, edge_budget: 1, site_budget: 1},
+  metadata: {node_budget: 1, edge_budget: 1, site_budget: 1, continuation: {available: false, reason: 'complete'}},
+  nodes: [{id: 'cont-node-c'}],
+  edges: [],
+};
+const continuationMergedAgain = mergeSlices(continuationMerged, continuationPageThree, {cumulative: true});
+assert.deepEqual(continuationMergedAgain.nodes.map((node) => node.id).sort(), ['cont-node-a', 'cont-node-b', 'cont-node-c']);
+assert.equal(continuationMergedAgain.metadata.truncated, false);
+assert.equal(continuationMergedAgain.metadata.node_budget, 3);
+
+// Without {cumulative: true} (the default, used for ordinary "expand"
+// merges), the pre-existing bounded-by-the-smaller-budget behavior is
+// unchanged -- this must keep matching the `bounded` assertions above.
+const nonCumulative = mergeSlices(continuationPageOne, continuationPageTwo);
+assert.deepEqual(nonCumulative.nodes.map((node) => node.id), ['cont-node-a']);
+assert.equal(nonCumulative.metadata.truncated, true);
+
 // HSE-92: a session must never present a merged view as fresher than its
 // weakest contributing slice (stale-index behavior surfaced immediately,
 // never silently upgraded by a later merge).
@@ -143,5 +184,31 @@ assert.equal(trackFreshness('current', 'stale'), 'stale');
 assert.equal(trackFreshness('stale', 'current'), 'stale');
 assert.equal(trackFreshness('current', 'unverifiable'), 'unverifiable');
 assert.equal(trackFreshness(undefined, 'current'), 'current');
+
+// HSE-92 review fix: exercise the grouping DECISION algorithm directly
+// (previously untested -- the C++ "grouping" test only covered the
+// node_kind server-side filter, never grouping at all).
+const groupingNodes = [
+  {id: 'n1', component: 'core', file: 'a.cpp', kind: 'function'},
+  {id: 'n2', component: 'core', file: 'b.cpp', kind: 'function'},
+  {id: 'n3', component: 'util', file: 'a.cpp', kind: 'variable'},
+  {id: 'n4', cidxGroup: true, id2: 'group-node-should-be-ignored'},
+];
+const byComponent = computeGroups(groupingNodes, 'component');
+assert.equal(byComponent.length, 1);
+assert.equal(byComponent[0].groupId, 'cidx-group:component:core');
+assert.deepEqual(byComponent[0].memberIds.sort(), ['n1', 'n2']);
+
+const byFile = computeGroups(groupingNodes, 'file');
+assert.equal(byFile.length, 1);
+assert.equal(byFile[0].groupId, 'cidx-group:file:a.cpp');
+assert.deepEqual(byFile[0].memberIds.sort(), ['n1', 'n3']);
+
+// A singleton group (only one member) is not grouped at all.
+assert.deepEqual(computeGroups(groupingNodes, 'kind').filter((g) => g.groupKey === 'variable'), []);
+// No key selected: no grouping.
+assert.deepEqual(computeGroups(groupingNodes, ''), []);
+// The synthetic compound-group node itself is never re-grouped.
+byComponent.concat(byFile).forEach((group) => assert.ok(!group.memberIds.includes('n4')));
 
 console.log('graph state merge regression passed');

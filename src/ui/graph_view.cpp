@@ -1268,15 +1268,31 @@ std::string graph_query_identity(const GraphViewRequest &request,
   material.emplace_back("workspace", request.workspace
                                          ? Value::of(*request.workspace)
                                          : Value::null());
-  Array edge_kinds;
-  if (request.edge_kinds) {
-    std::vector<std::string> sorted = *request.edge_kinds;
-    std::ranges::sort(sorted);
-    for (const auto &kind : sorted) {
-      edge_kinds.push_back(Value::of(kind));
+  const auto sorted_list_field = [&](std::string_view name,
+                                     const std::optional<std::vector<std::string>>
+                                         &values) {
+    Array array;
+    if (values) {
+      std::vector<std::string> sorted = *values;
+      std::ranges::sort(sorted);
+      for (const auto &value : sorted) {
+        array.push_back(Value::of(value));
+      }
     }
-  }
-  material.emplace_back("edge_kinds", Value::arr(std::move(edge_kinds)));
+    material.emplace_back(std::string(name), Value::arr(std::move(array)));
+  };
+  sorted_list_field("edge_kinds", request.edge_kinds);
+  // HSE-92: every filter that changes which nodes/edges a request can ever
+  // return must be part of the query identity a continuation token is
+  // bound to. Omitting one here would let a token minted under one filter
+  // set be silently replayed (and accepted) under a different one.
+  sorted_list_field("node_kinds", request.node_kinds);
+  sorted_list_field("files", request.files);
+  sorted_list_field("components", request.components);
+  sorted_list_field("repositories", request.repositories);
+  material.emplace_back("status_filter", optional_string(request.status_filter));
+  material.emplace_back("applicability_filter",
+                        optional_string(request.applicability_filter));
   material.emplace_back("workspace_identity", Value::of(identity.workspace));
   material.emplace_back("schema_version", Value::of(identity.schema_version));
   material.emplace_back("source_revision",
@@ -1438,6 +1454,12 @@ bool include_sites_are_conditional(const std::vector<IncludeSite> &sites) {
   });
 }
 
+// Effectively "all sites" for one edge when deciding applicability -- large
+// enough that no realistic edge site-fact count is ever itself truncated by
+// this probe, decoupling the applicability decision from the (much
+// smaller) per-response evidence budget.
+constexpr int kApplicabilityProbeLimit = 1'000'000;
+
 bool passes_applicability_filter(const GraphViewRequest &request,
                                  bool conditional) {
   if (!request.applicability_filter) {
@@ -1556,6 +1578,59 @@ void apply_continuation_token(Value &continuation, Value &result,
           static_cast<std::size_t>(byte_budget)) {
     set_token(Value::null());
   }
+}
+
+// The current page's primary node set: the full (unpaginated, filter-applied)
+// candidate set, `full_candidates_by_id` (its id-indexed form, used so an edge
+// whose two endpoints land on different continuation pages is still
+// recognized as eligible -- HSE-92 review finding -- rather than silently
+// dropped because one endpoint isn't part of THIS page), and `ordered_nodes`
+// (this page's slice of it, after node_offset/node_budget trimming). Split
+// out of build_graph_view() to keep that function within its complexity
+// budget; see the call site for the invariants each parameter carries.
+struct NodePageSelection {
+  std::vector<graph::Sym> full_filtered_nodes;
+  std::map<int64_t, graph::Sym> full_candidates_by_id;
+  std::vector<graph::Sym> ordered_nodes;
+  bool truncated = false;
+  bool more_nodes_available = false;
+};
+
+NodePageSelection
+select_node_page(Storage &db, const GraphViewRequest &request,
+                 const std::map<int64_t, graph::Sym> &symbols_by_id,
+                 const std::vector<graph::Sym> &witness_nodes,
+                 bool witness_view, int node_offset,
+                 std::size_t remaining_node_budget) {
+  NodePageSelection selection;
+  if (!witness_view) {
+    selection.full_filtered_nodes.reserve(symbols_by_id.size());
+    for (const auto &[id, symbol] : symbols_by_id) {
+      (void)id;
+      if (passes_node_filters(db, symbol, request)) {
+        selection.full_filtered_nodes.push_back(symbol);
+      }
+    }
+    std::ranges::sort(selection.full_filtered_nodes,
+                      [](const graph::Sym &a, const graph::Sym &b) {
+                        return portable_id(a) < portable_id(b);
+                      });
+  }
+  for (const auto &symbol : selection.full_filtered_nodes) {
+    selection.full_candidates_by_id.emplace(symbol.id, symbol);
+  }
+  if (witness_view) {
+    selection.ordered_nodes = witness_nodes;
+  } else {
+    selection.ordered_nodes = selection.full_filtered_nodes;
+    skip_offset(selection.ordered_nodes, node_offset);
+  }
+  if (selection.ordered_nodes.size() > remaining_node_budget) {
+    selection.ordered_nodes.resize(remaining_node_budget);
+    selection.truncated = true;
+    selection.more_nodes_available = !witness_view;
+  }
+  return selection;
 }
 
 } // namespace
@@ -2084,31 +2159,21 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
           }
         }
       }
-      std::vector<graph::Sym> ordered_nodes;
-      if (witness_view) {
-        ordered_nodes = witness_nodes;
-      } else {
-        ordered_nodes.reserve(symbols_by_id.size());
-        for (const auto &[id, symbol] : symbols_by_id) {
-          (void)id;
-          if (passes_node_filters(db, symbol, request)) {
-            ordered_nodes.push_back(symbol);
-          }
-        }
-        std::ranges::sort(ordered_nodes,
-                          [](const graph::Sym &a, const graph::Sym &b) {
-                            return portable_id(a) < portable_id(b);
-                          });
-        skip_offset(ordered_nodes, node_offset);
-      }
       const std::size_t remaining_node_budget =
           nodes.size() >= static_cast<std::size_t>(node_budget)
               ? 0
               : static_cast<std::size_t>(node_budget) - nodes.size();
-      if (ordered_nodes.size() > remaining_node_budget) {
-        ordered_nodes.resize(remaining_node_budget);
+      NodePageSelection node_page =
+          select_node_page(db, request, symbols_by_id, witness_nodes,
+                           witness_view, node_offset, remaining_node_budget);
+      std::map<int64_t, graph::Sym> &full_candidates_by_id =
+          node_page.full_candidates_by_id;
+      std::vector<graph::Sym> &ordered_nodes = node_page.ordered_nodes;
+      if (node_page.truncated) {
         truncated = true;
-        more_nodes_available = !witness_view;
+      }
+      if (node_page.more_nodes_available) {
+        more_nodes_available = true;
       }
       delivered_node_count = static_cast<int>(ordered_nodes.size());
       std::set<int64_t> selected_ids;
@@ -2121,6 +2186,24 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
         nodes.push_back(node_value(symbol, freshness, truncated,
                                    depths[symbol.id], request.workspace));
       }
+      // A "bridging" node: the far endpoint of a cross-page edge that
+      // wasn't part of THIS page's primary node set. Emitted alongside the
+      // edge so the client never receives an edge referencing a node id it
+      // hasn't seen yet. Does not count against delivered_node_count/the
+      // continuation node offset -- it is additional to, not part of, this
+      // page's primary node allotment.
+      const auto emit_bridging_node = [&](int64_t id) {
+        if (selected_ids.contains(id)) {
+          return;
+        }
+        const auto found = full_candidates_by_id.find(id);
+        if (found == full_candidates_by_id.end()) {
+          return;
+        }
+        selected_ids.insert(id);
+        nodes.push_back(
+            node_value(found->second, freshness, truncated, 1, request.workspace));
+      };
 
       std::vector<graph::Edge> selected_edges;
       if (witness_view) {
@@ -2144,8 +2227,12 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
           const auto adjacent = graph.edges(symbol.id, request.direction,
                                             kind_ids, edge_budget + 1, false);
           for (const auto &edge : adjacent) {
-            if (!selected_ids.contains(edge.src_id) ||
-                !selected_ids.contains(edge.dst_id)) {
+            // Both endpoints must belong to the FULL filtered candidate
+            // set, not just this page (`selected_ids`) -- otherwise an
+            // edge whose other endpoint lands on a different continuation
+            // page would be dropped and never appear on any page.
+            if (!full_candidates_by_id.contains(edge.src_id) ||
+                !full_candidates_by_id.contains(edge.dst_id)) {
               continue;
             }
             const auto source = symbols_by_id.find(edge.src_id);
@@ -2191,8 +2278,14 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
         if (source == symbols_by_id.end() || target == symbols_by_id.end()) {
           continue;
         }
-        const int fetch_limit = sites_remaining + 1;
-        auto sites = graph.sites(edge.edge_id, fetch_limit);
+        // Applicability must be decided from the edge's COMPLETE site fact,
+        // never from whatever prefix happens to survive the response's
+        // evidence budget: fetching only `sites_remaining + 1` sites (as
+        // this used to do) could see just the leading unconditional sites
+        // of an edge that has a later conditional one, and wrongly report
+        // "universal". Fetch effectively all sites first, decide
+        // applicability, and only then slice the bounded response prefix.
+        auto sites = graph.sites(edge.edge_id, kApplicabilityProbeLimit);
         std::ranges::sort(sites,
                           [&](const graph::Site &a, const graph::Site &b) {
                             return site_sort_key(a, request.workspace) <
@@ -2209,6 +2302,11 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
         sites_used += static_cast<int>(sites.size());
         sites_remaining -= static_cast<int>(sites.size());
         evidence_truncated = evidence_truncated || sites_truncated;
+        // A bridging edge's far endpoint may not be part of this page's
+        // primary node set; emit it now so the edge below never references
+        // a node id the client hasn't received.
+        emit_bridging_node(edge.src_id);
+        emit_bridging_node(edge.dst_id);
         edges.push_back(edge_value(edge, source->second, target->second,
                                    freshness, truncated, sites_truncated, sites,
                                    request.workspace));

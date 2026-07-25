@@ -63,7 +63,19 @@ const graphState = (() => {
     if (evidence) marked.evidence = mergeFlags(element.evidence, {truncated: true, sites_truncated: true});
     return marked;
   };
-  const mergeSlices = (left, right) => {
+  // `options.cumulative` distinguishes two merge scenarios that need
+  // different budget semantics (HSE-92 review):
+  //  - default (false): merging one "expand" result into the canvas. Each
+  //    side is independently bounded, and the merge stays bounded by the
+  //    SMALLER of the two -- unchanged, pre-existing behavior.
+  //  - true: merging a continuation "Load more" page, whose whole purpose
+  //    is to grow the canvas beyond any single page's own budget. Budgets
+  //    are SUMMED (not minimized) and the sum is persisted back into the
+  //    merged metadata, so a third, fourth, ... page keeps growing the
+  //    allowance instead of being re-capped to one page's size.
+  const mergeSlices = (left, right, options = {}) => {
+    const cumulative = options.cumulative === true;
+    const combineBudgets = cumulative ? (a, b) => a + b : Math.min;
     const nodes = new Map((left.nodes || []).map((node) => [String(node.id), node]));
     (right.nodes || []).forEach((node) => {
       const id = String(node.id);
@@ -76,13 +88,13 @@ const graphState = (() => {
     });
     const allNodes = [...nodes.values()];
     const allEdges = [...edges.values()];
-    const nodeBudget = Math.min(
+    const nodeBudget = combineBudgets(
       budgetValue(left.metadata, left.request, 'node_budget'),
       budgetValue(right.metadata, right.request, 'node_budget'));
-    const edgeBudget = Math.min(
+    const edgeBudget = combineBudgets(
       budgetValue(left.metadata, left.request, 'edge_budget'),
       budgetValue(right.metadata, right.request, 'edge_budget'));
-    const siteBudget = Math.min(
+    const siteBudget = combineBudgets(
       budgetValue(left.metadata, left.request, 'site_budget'),
       budgetValue(right.metadata, right.request, 'site_budget'));
     const nodeOverflow = allNodes.length > nodeBudget;
@@ -108,6 +120,13 @@ const graphState = (() => {
     const elementTruncated = [...retainedNodes, ...retainedEdges].some((element) => element.status?.truncated === true);
     const evidenceTruncated = retainedEdges.some((edge) => edge.status?.evidence_truncated === true || edge.evidence?.sites_truncated === true);
     const metadata = mergeMetadata(left.metadata, right.metadata, sitesUsed);
+    if (cumulative) {
+      // Carry the grown budget forward so the NEXT continuation merge sums
+      // against it, not against a single page's original small budget.
+      if (Number.isFinite(nodeBudget)) metadata.node_budget = nodeBudget;
+      if (Number.isFinite(edgeBudget)) metadata.edge_budget = edgeBudget;
+      if (Number.isFinite(siteBudget)) metadata.site_budget = siteBudget;
+    }
     metadata.truncated = Boolean(metadata.truncated || elementTruncated || budgetTruncated);
     metadata.evidence_truncated = Boolean(metadata.evidence_truncated || evidenceTruncated);
     metadata.continuation.available = Boolean(metadata.continuation.available || metadata.truncated);
@@ -118,7 +137,32 @@ const graphState = (() => {
   // be surfaced immediately and never silently upgraded back to "current" by
   // a later merge; only an explicit full requery (not a merge) may clear it.
   const trackFreshness = (previous, next) => weakest(previous, next, freshnessRank);
-  return {mergeSlices, trackFreshness};
+  // Pure grouping decision (HSE-92 review: the grouping ALGORITHM, not just
+  // the node-filter it was previously conflated with, needs its own
+  // coverage). Takes plain node data objects (as returned by a Cytoscape
+  // element's .data()) and a group-by key ('kind'|'file'|'component'), and
+  // returns which nodes should be placed under which synthetic compound
+  // parent -- singleton groups are left ungrouped, matching applyGrouping()
+  // in the browser IIFE below, which is the only caller that actually
+  // drives Cytoscape with this plan.
+  const computeGroups = (nodesData, key) => {
+    if (!key) return [];
+    const groups = new Map();
+    (nodesData || []).forEach((data) => {
+      if (!data || data.cidxGroup) return;
+      const raw = key === 'kind' ? data.kind : key === 'file' ? data.file : data.component;
+      const groupKey = raw || `(no ${key})`;
+      if (!groups.has(groupKey)) groups.set(groupKey, []);
+      groups.get(groupKey).push(data.id);
+    });
+    const plan = [];
+    groups.forEach((memberIds, groupKey) => {
+      if (memberIds.length < 2) return;
+      plan.push({groupId: `cidx-group:${key}:${groupKey}`, groupKey, memberIds});
+    });
+    return plan;
+  };
+  return {mergeSlices, trackFreshness, computeGroups};
 })();
 
 if (typeof module !== 'undefined') module.exports = graphState;
@@ -259,24 +303,17 @@ if (typeof document !== 'undefined') {
     cy.nodes('[^cidxGroup]').forEach((element) => element.move({parent: null}));
     cy.$('.cidx-group').remove();
     if (!key) return;
-    const groups = new Map();
-    cy.nodes('[^cidxGroup]').forEach((element) => {
-      const data = element.data();
-      const raw = key === 'kind' ? data.kind : key === 'file' ? data.file : data.component;
-      const groupKey = raw || `(no ${key})`;
-      if (!groups.has(groupKey)) groups.set(groupKey, []);
-      groups.get(groupKey).push(element);
-    });
-    groups.forEach((members, groupKey) => {
-      if (members.length < 2) return;
-      const groupId = `cidx-group:${key}:${groupKey}`;
+    const primaryNodes = cy.nodes('[^cidxGroup]');
+    const nodesData = primaryNodes.map((element) => element.data());
+    const byId = new Map(primaryNodes.map((element) => [element.id(), element]));
+    graphState.computeGroups(nodesData, key).forEach(({groupId, groupKey, memberIds}) => {
       cy.add({group: 'nodes', data: {id: groupId, label: groupKey, cidxGroup: true}, classes: 'cidx-group'});
-      members.forEach((member) => member.move({parent: groupId}));
+      memberIds.forEach((id) => byId.get(id)?.move({parent: groupId}));
     });
   };
-  const addView = (next, append) => {
+  const addView = (next, append, mergeOptions = {}) => {
     if (append) {
-      const merged = graphState.mergeSlices(view, next);
+      const merged = graphState.mergeSlices(view, next, mergeOptions);
       const newElements = [];
       merged.nodes.forEach((n) => {
         const id = String(n.id);
@@ -317,6 +354,19 @@ if (typeof document !== 'undefined') {
     return response.json();
   };
   const reportError = (error) => { details.innerHTML = `<p class="muted">${esc(error.message)}</p>`; };
+  // Presentation (camera/layout) state is captured/restored separately from
+  // the semantic request each history entry carries (HSE-92 review: history
+  // must restore both, independently).
+  const capturePresentation = () => cy ? {
+    positions: cy.nodes().reduce((acc, n) => ({...acc, [n.id()]: n.position()}), {}),
+    zoom: cy.zoom(), pan: cy.pan(),
+  } : null;
+  const restorePresentation = (presentation) => {
+    if (!presentation || !cy) return;
+    cy.nodes().positions((n) => presentation.positions?.[n.id()] || n.position());
+    if (presentation.zoom) cy.zoom(presentation.zoom);
+    if (presentation.pan) cy.pan(presentation.pan);
+  };
   const renderBreadcrumbs = () => {
     const nav = document.getElementById('breadcrumbs');
     if (!nav) return;
@@ -332,7 +382,7 @@ if (typeof document !== 'undefined') {
       button.type = 'button';
       button.textContent = entry.label;
       if (index === historyIndex) button.setAttribute('aria-current', 'true');
-      button.onclick = () => { historyIndex = index; go(entry.params, entry.label); };
+      button.onclick = () => jumpTo(index);
       nav.appendChild(button);
     });
   };
@@ -344,35 +394,91 @@ if (typeof document !== 'undefined') {
   };
   // Fetch+render only -- used both for fresh navigation and for replaying a
   // history/breadcrumb entry (which manages historyIndex itself).
-  const go = async (params, label) => {
+  const go = async (params, label, presentation, options = {}) => {
     if (!liveToken) return;
     try {
       const nextView = await fetchGraph(params);
+      // Only reset the session-wide stale flag once a request has actually
+      // SUCCEEDED, and reset it to 'current' immediately before folding in
+      // the new response's own freshness (via addView -> trackViewFreshness)
+      // -- an explicit refresh that itself comes back stale/unverifiable
+      // must still show the banner, and a refresh that fails outright must
+      // leave the stale state exactly as it was (HSE-92 review: do not
+      // clear staleness before the refresh is confirmed successful).
+      if (options.resetFreshness) sessionFreshness = 'current';
       addView(nextView, false);
       currentParams = params;
+      restorePresentation(presentation);
       renderBreadcrumbs();
       updateHistoryButtons();
     } catch (error) {
       reportError(error);
     }
   };
+  // Records the presentation snapshot of whatever is CURRENTLY shown onto
+  // the history entry we are about to navigate away from, so it can be
+  // restored later without disturbing the entry we are moving to.
+  const captureCurrentPresentation = () => {
+    if (history[historyIndex]) history[historyIndex].presentation = capturePresentation();
+  };
   // Pushes a NEW history entry (truncating any forward history), matching
   // ordinary browser back/forward semantics for normalized queries.
   const navigate = (params, label) => {
+    captureCurrentPresentation();
     history = history.slice(0, historyIndex + 1);
-    history.push({label, params});
+    history.push({label, params, presentation: null, append: false});
     historyIndex = history.length - 1;
     return go(params, label);
   };
-  const expandDirection = async (direction) => {
-    if (!liveToken || !selectedNode) return;
+  // Expansion is a MERGE onto the current canvas, not a replacement, but it
+  // is still a normalized semantic action and must enter breadcrumbs/back-
+  // forward like any other navigation (HSE-92 review). Pushes an `append`
+  // history entry; see jumpTo() for how such entries are replayed.
+  const pushExpand = async (params, label) => {
+    if (!liveToken) return;
     try {
-      const params = {root: String(selectedNode.id), depth: '1', direction};
-      addView(await fetchGraph(params), true);
-      showNode(nodeById.get(String(selectedNode.id)) || selectedNode);
+      const nextView = await fetchGraph(params);
+      addView(nextView, true);
+      captureCurrentPresentation();
+      history = history.slice(0, historyIndex + 1);
+      history.push({label, params, presentation: null, append: true});
+      historyIndex = history.length - 1;
+      renderBreadcrumbs();
+      updateHistoryButtons();
     } catch (error) {
       reportError(error);
     }
+  };
+  // Jumping to an arbitrary history entry (back/forward/breadcrumb click)
+  // replays every entry from the start up to and including `index`: each
+  // non-append entry replaces the canvas, each append (expand) entry merges
+  // onto whatever the replay has built so far. This reconstructs the exact
+  // canvas at that point in history regardless of how many expand actions
+  // came before it, then restores that entry's own presentation snapshot.
+  const jumpTo = async (index) => {
+    if (!liveToken || index < 0 || index >= history.length) return;
+    captureCurrentPresentation();
+    historyIndex = index;
+    try {
+      for (let step = 0; step <= index; step += 1) {
+        const entry = history[step];
+        const stepView = await fetchGraph(entry.params);
+        addView(stepView, Boolean(entry.append));
+      }
+      currentParams = history[index].params;
+      restorePresentation(history[index].presentation);
+      renderBreadcrumbs();
+      updateHistoryButtons();
+    } catch (error) {
+      reportError(error);
+    }
+  };
+  const expandDirection = async (direction) => {
+    if (!liveToken || !selectedNode) return;
+    const id = String(selectedNode.id);
+    const params = {root: id, depth: '1', direction};
+    await pushExpand(params, `${direction} ${nodeById.get(id)?.name || id}`);
+    showNode(nodeById.get(id) || selectedNode);
   };
   const runSearch = async () => {
     if (!liveToken) return;
@@ -435,7 +541,7 @@ if (typeof document !== 'undefined') {
       reportError(error);
     }
     if (liveToken) {
-      history = [{label: 'initial', params: {}}];
+      history = [{label: 'initial', params: {}, presentation: null, append: false}];
       historyIndex = 0;
       renderBreadcrumbs();
       updateHistoryButtons();
@@ -454,19 +560,17 @@ if (typeof document !== 'undefined') {
     if (expandInButton) expandInButton.onclick = () => expandDirection('in');
     document.getElementById('history-back').onclick = () => {
       if (historyIndex <= 0) return;
-      historyIndex -= 1;
-      go(history[historyIndex].params, history[historyIndex].label);
+      jumpTo(historyIndex - 1);
     };
     document.getElementById('history-forward').onclick = () => {
       if (historyIndex >= history.length - 1) return;
-      historyIndex += 1;
-      go(history[historyIndex].params, history[historyIndex].label);
+      jumpTo(historyIndex + 1);
     };
     document.getElementById('index-search-run').onclick = runSearch;
     document.getElementById('index-search').addEventListener('keydown', (event) => { if (event.key === 'Enter') runSearch(); });
     document.getElementById('load-more').onclick = async () => {
       if (!lastContinuationToken) return;
-      try { addView(await fetchGraph({...currentParams, continuation: lastContinuationToken}), true); }
+      try { addView(await fetchGraph({...currentParams, continuation: lastContinuationToken}), true, {cumulative: true}); }
       catch (error) { reportError(error); }
     };
     document.getElementById('group-by').onchange = applyGrouping;
@@ -509,9 +613,8 @@ if (typeof document !== 'undefined') {
       }
     };
     document.getElementById('stale-refresh').onclick = () => {
-      sessionFreshness = 'current';
-      updateStaleBanner();
-      go(currentParams, history[historyIndex]?.label || 'refresh');
+      go(currentParams, history[historyIndex]?.label || 'refresh',
+        history[historyIndex]?.presentation, {resetFreshness: true});
     };
     document.getElementById('shutdown').onclick = async () => {
       if (!window.confirm('Stop the local explorer server? This ends the session.')) return;
