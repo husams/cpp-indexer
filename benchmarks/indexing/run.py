@@ -159,13 +159,37 @@ def _canonical_rows(
     connection: Any, corpus_root: Path
 ) -> dict[str, list[list[Any]]]:
     queries = {
+        "semantic_universe": """
+            SELECT key, name, policy
+            FROM semantic_universe ORDER BY key
+        """,
+        "translation_unit_config": """
+            SELECT COALESCE(descriptor_json,''),
+                   COALESCE(driver,''), COALESCE(working_dir,''),
+                   COALESCE(language,''), COALESCE(standard,''),
+                   COALESCE(target,''), abi_options, sysroot,
+                   COALESCE(resource_dir,''), include_paths, macro_state,
+                   relevant_environment, generated_inputs,
+                   COALESCE(diagnostics_policy,''), arguments, state
+            FROM translation_unit_config ORDER BY descriptor_hash
+        """,
         "file": """
             SELECT f.name, COALESCE(f.compile_options,''),
                    COALESCE(f.driver,''), f.indexed, COALESCE(f.md5,'')
             FROM file f ORDER BY f.name
         """,
+        "file_config": """
+            SELECT COALESCE(f.name,''), tuc.descriptor_json, fc.role,
+                   fc.state, COALESCE(fc.reason,'')
+            FROM file_config fc
+            JOIN file f ON f.id = fc.file_id
+            JOIN translation_unit_config tuc ON tuc.id = fc.config_id
+            ORDER BY f.name, tuc.descriptor_hash, fc.role
+        """,
         "symbol": """
-            SELECT s.usr, s.spelling, COALESCE(s.qual_name,''),
+            SELECT s.usr, COALESCE(su.key,'legacy'),
+                   COALESCE(s.identity_key,''), s.spelling,
+                   COALESCE(s.qual_name,''),
                    COALESCE(s.display_name,''),
                    COALESCE(sk.name, CAST(s.kind AS TEXT)),
                    COALESCE(s.type_info,''), COALESCE(ff.name,''),
@@ -178,7 +202,8 @@ def _canonical_rows(
             LEFT JOIN symbol_kind sk ON sk.id = s.kind
             LEFT JOIN file ff ON ff.id = s.file_id
             LEFT JOIN file df ON df.id = s.decl_file_id
-            ORDER BY s.usr
+            LEFT JOIN semantic_universe su ON su.id = s.semantic_universe_id
+            ORDER BY COALESCE(su.key,'legacy'), s.identity_key, s.usr
         """,
         "decl_site": """
             SELECT s.usr, COALESCE(f.name,''), COALESCE(d.line,''),
@@ -188,47 +213,231 @@ def _canonical_rows(
             ORDER BY s.usr, f.name, d.line, d.col
         """,
         "edge": """
-            SELECT ss.usr, ds.usr, COALESCE(ek.name, CAST(e.kind AS TEXT)),
+            SELECT ss.usr, dst.usr, COALESCE(ek.name, CAST(e.kind AS TEXT)),
                    e.count, COALESCE(e.base_access,''), COALESCE(e.is_virtual,'')
             FROM edge e JOIN symbol ss ON ss.id = e.src_id
-            JOIN symbol ds ON ds.id = e.dst_id
+            JOIN symbol dst ON dst.id = e.dst_id
             LEFT JOIN edge_kind ek ON ek.id = e.kind
-            ORDER BY ss.usr, ds.usr, e.kind
+            ORDER BY ss.usr, dst.usr, e.kind
         """,
         "edge_site": """
             SELECT ss.usr, ds.usr, COALESCE(ek.name, CAST(e.kind AS TEXT)),
                    COALESCE(f.name,''), COALESCE(es.line,''),
                    COALESCE(es.col,''), es.conditional, COALESCE(es.args_sig,''),
-                   COALESCE(es.recv_src_kind,''), COALESCE(es.recv_type_usr,''),
-                   COALESCE(es.recv_decl_usr,''), COALESCE(es.recv_param_pos,''),
+                   COALESCE(es.recv_src_kind,''),
+                   COALESCE(es.recv_type_usr, tn.decl_usr, eti.identity_text,''),
+                   COALESCE(es.recv_decl_usr, rs.usr, edi.identity_text,''),
+                   COALESCE(es.recv_param_pos,''),
                    COALESCE(es.recv_type_is_value,'')
             FROM edge_site es JOIN edge e ON e.id = es.edge_id
             JOIN symbol ss ON ss.id = e.src_id
             JOIN symbol ds ON ds.id = e.dst_id
             LEFT JOIN edge_kind ek ON ek.id = e.kind
             LEFT JOIN file f ON f.id = es.file_id
+            LEFT JOIN type_node tn ON tn.id = es.recv_type_id
+            LEFT JOIN symbol rs ON rs.id = es.recv_decl_id
+            LEFT JOIN external_identity eti ON eti.id = es.recv_type_identity_id
+            LEFT JOIN external_identity edi ON edi.id = es.recv_decl_identity_id
             ORDER BY ss.usr, ds.usr, e.kind, f.name, es.line, es.col
         """,
         "call_arg": """
-            SELECT ss.usr, ds.usr, COALESCE(ek.name, CAST(e.kind AS TEXT)),
+            SELECT ss.usr, edge_dst.usr, COALESCE(ek.name, CAST(e.kind AS TEXT)),
                    COALESCE(f.name,''), ca.line, ca.col, ca.position,
-                   ca.src_kind, COALESCE(ca.type_usr,''),
-                   COALESCE(ca.decl_usr,''), COALESCE(ca.callee_usr,''),
+                   ca.src_kind,
+                   COALESCE(ca.type_usr, tn.decl_usr, eti.identity_text,''),
+                   COALESCE(ca.decl_usr, arg_decl.usr, edi.identity_text,''),
+                   COALESCE(ca.callee_usr, cs.usr, eci.identity_text,''),
                    COALESCE(ca.type_is_value,'')
             FROM call_arg ca JOIN edge e ON e.id = ca.edge_id
             JOIN symbol ss ON ss.id = e.src_id
-            JOIN symbol ds ON ds.id = e.dst_id
+            JOIN symbol edge_dst ON edge_dst.id = e.dst_id
             LEFT JOIN edge_kind ek ON ek.id = e.kind
             LEFT JOIN file f ON f.id = ca.file_id
-            ORDER BY ss.usr, ds.usr, e.kind, f.name, ca.line, ca.col,
+            LEFT JOIN type_node tn ON tn.id = ca.type_id
+            LEFT JOIN symbol arg_decl ON arg_decl.id = ca.decl_id
+            LEFT JOIN symbol cs ON cs.id = ca.callee_id
+            LEFT JOIN external_identity eti ON eti.id = ca.type_identity_id
+            LEFT JOIN external_identity edi ON edi.id = ca.decl_identity_id
+            LEFT JOIN external_identity eci ON eci.id = ca.callee_identity_id
+            ORDER BY ss.usr, edge_dst.usr, e.kind, f.name, ca.line, ca.col,
                      ca.position
         """,
         "template_arg": """
-            SELECT os.usr, ta.position, ta.arg_kind, COALESCE(rs.usr,''),
+            SELECT os.usr, ta.position, ta.pack_index, ta.arg_kind,
+                   COALESCE(rs.usr,''), COALESCE(rt.type_key,''),
                    COALESCE(ta.literal,'')
             FROM template_arg ta JOIN symbol os ON os.id = ta.owner_id
             LEFT JOIN symbol rs ON rs.id = ta.ref_id
-            ORDER BY os.usr, ta.position
+            LEFT JOIN type_node rt ON rt.id = ta.type_id
+            ORDER BY os.usr, ta.position, ta.pack_index
+        """,
+        "template_param": """
+            SELECT os.usr, tp.position, tp.param_kind,
+                   COALESCE(tp.name,''), COALESCE(tp.default_txt,''),
+                   COALESCE(t.type_key,''), COALESCE(dt.type_key,''),
+                   COALESCE(ds.usr,'')
+            FROM template_param tp JOIN symbol os ON os.id = tp.owner_id
+            LEFT JOIN type_node t ON t.id = tp.type_id
+            LEFT JOIN type_node dt ON dt.id = tp.default_type_id
+            LEFT JOIN symbol ds ON ds.id = tp.default_ref_id
+            ORDER BY os.usr, tp.position
+        """,
+        "definition": """
+            SELECT s.usr, COALESCE(c.name,''), COALESCE(f.name,''),
+                   COALESCE(d.line,''), COALESCE(d.col,''),
+                   COALESCE(d.end_line,''), COALESCE(d.end_col,''),
+                   COALESCE(d.init_text,'')
+            FROM definition d JOIN symbol s ON s.id = d.symbol_id
+            LEFT JOIN component c ON c.id = d.component_id
+            LEFT JOIN file f ON f.id = d.file_id
+            ORDER BY s.usr, c.name, f.name, d.line, d.col
+        """,
+        "def_edge": """
+            SELECT ss.usr, sd.usr,
+                   COALESCE(ek.name, CAST(de.kind AS TEXT)), de.count
+            FROM def_edge de
+            JOIN definition d ON d.id = de.src_def_id
+            JOIN symbol ss ON ss.id = d.symbol_id
+            JOIN symbol sd ON sd.id = de.dst_id
+            LEFT JOIN edge_kind ek ON ek.id = de.kind
+            ORDER BY ss.usr, sd.usr, de.kind
+        """,
+        "type_node": """
+            SELECT tn.type_key, tn.spelling,
+                   COALESCE(tk.name, CAST(tn.kind AS TEXT)), tn.is_const,
+                   tn.is_volatile, tn.is_restrict, COALESCE(tn.decl_usr,''),
+                   COALESCE(cn.type_key,'')
+            FROM type_node tn
+            LEFT JOIN type_kind tk ON tk.id = tn.kind
+            LEFT JOIN type_node cn ON cn.id = tn.canonical_id
+            ORDER BY tn.type_key
+        """,
+        "type_edge": """
+            SELECT ss.type_key, COALESCE(tek.name, CAST(te.kind AS TEXT)),
+                   te.position, ds.type_key
+            FROM type_edge te
+            JOIN type_node ss ON ss.id = te.src_id
+            JOIN type_node ds ON ds.id = te.dst_id
+            LEFT JOIN type_edge_kind tek ON tek.id = te.kind
+            ORDER BY ss.type_key, te.kind, te.position, ds.type_key
+        """,
+        "parameter": """
+            SELECT os.usr, p.position, p.pack_index, COALESCE(p.name,''),
+                   COALESCE(t.type_key,''), COALESCE(dt.type_key,''),
+                   COALESCE(at.type_key,''), COALESCE(p.default_text,''),
+                   COALESCE(p.default_origin,''),
+                   COALESCE(p.reference_semantics,''), COALESCE(f.name,''),
+                   COALESCE(p.line,''), COALESCE(p.col,'')
+            FROM parameter p JOIN symbol os ON os.id = p.owner_id
+            LEFT JOIN type_node t ON t.id = p.type_id
+            LEFT JOIN type_node dt ON dt.id = p.declared_type_id
+            LEFT JOIN type_node at ON at.id = p.adjusted_type_id
+            LEFT JOIN file f ON f.id = p.file_id
+            ORDER BY os.usr, p.position, p.pack_index
+        """,
+        "symbol_type": """
+            SELECT s.usr, COALESCE(stk.name, CAST(st.kind AS TEXT)),
+                   tn.type_key
+            FROM symbol_type st JOIN symbol s ON s.id = st.symbol_id
+            JOIN type_node tn ON tn.id = st.type_id
+            LEFT JOIN symbol_type_kind stk ON stk.id = st.kind
+            ORDER BY s.usr, st.kind, tn.type_key
+        """,
+        "fact_applicability": """
+            SELECT fa.fact_kind,
+                   CASE fa.fact_kind
+                     WHEN 'symbol' THEN 'symbol|' || COALESCE(su.key,'legacy')
+                       || '|' || COALESCE(NULLIF(s.identity_key,''), s.usr)
+                     WHEN 'edge' THEN 'edge|' || COALESCE(es.usr,'') || '|'
+                       || COALESCE(ed.usr,'') || '|' || CAST(e.kind AS TEXT)
+                     WHEN 'definition' THEN 'definition|' || COALESCE(ds.usr,'')
+                       || '|' || COALESCE(df.name,'') || '|'
+                       || COALESCE(CAST(d.line AS TEXT),'') || '|'
+                       || COALESCE(CAST(d.col AS TEXT),'')
+                     WHEN 'decl_site' THEN 'decl_site|' || COALESCE(dss.usr,'')
+                       || '|' || COALESCE(dsf.name,'') || '|'
+                       || COALESCE(CAST(dsite.line AS TEXT),'') || '|'
+                       || COALESCE(CAST(dsite.col AS TEXT),'')
+                     WHEN 'def_edge' THEN 'def_edge|' || COALESCE(defs.usr,'')
+                       || '|' || COALESCE(defd.usr,'') || '|'
+                       || CAST(defe.kind AS TEXT)
+                     WHEN 'diagnostic' THEN 'diagnostic|' || COALESCE(diaf.name,'')
+                       || '|' || dia.spelling || '|'
+                       || COALESCE(CAST(dia.line AS TEXT),'')
+                     WHEN 'parameter' THEN 'parameter|' || COALESCE(ps.usr,'')
+                     WHEN 'symbol_type' THEN 'symbol_type|' || COALESCE(sts.usr,'')
+                     WHEN 'type_edge' THEN 'type_edge|' || COALESCE(tes.type_key,'')
+                     WHEN 'entity_node' THEN 'entity_node|' || COALESCE(ens.usr,'')
+                     WHEN 'entity_edge' THEN 'entity_edge|' || COALESCE(ees.usr,'')
+                       || '|' || COALESCE(eed.usr,'') || '|'
+                       || CAST(eee.kind AS TEXT)
+                     WHEN 'template_param' THEN 'template_param|' || COALESCE(tps.usr,'')
+                     WHEN 'template_arg' THEN 'template_arg|' || COALESCE(tas.usr,'')
+                     WHEN 'call_arg' THEN 'call_arg|' || COALESCE(cas.usr,'')
+                       || '|' || COALESCE(cad.usr,'') || '|'
+                       || CAST(cae.kind AS TEXT)
+                     WHEN 'possible_call' THEN 'possible_call|' || COALESCE(pcs.usr,'')
+                       || '|' || COALESCE(pcd.usr,'')
+                     WHEN 'type_node' THEN 'type|' || COALESCE(tn.type_key,'')
+                     ELSE NULL
+                   END AS fact_key,
+                   COALESCE(f.name,''), tuc.descriptor_json, fa.generation
+            FROM fact_applicability fa
+            JOIN file f ON f.id = fa.file_id
+            JOIN translation_unit_config tuc ON tuc.id = fa.config_id
+            LEFT JOIN symbol s ON fa.fact_kind = 'symbol' AND s.id = fa.fact_id
+            LEFT JOIN semantic_universe su ON su.id = s.semantic_universe_id
+            LEFT JOIN edge e ON fa.fact_kind = 'edge' AND e.id = fa.fact_id
+            LEFT JOIN symbol es ON es.id = e.src_id
+            LEFT JOIN symbol ed ON ed.id = e.dst_id
+            LEFT JOIN definition d
+              ON fa.fact_kind = 'definition' AND d.id = fa.fact_id
+            LEFT JOIN symbol ds ON ds.id = d.symbol_id
+            LEFT JOIN file df ON df.id = d.file_id
+            LEFT JOIN decl_site dsite ON fa.fact_kind = 'decl_site'
+              AND dsite.rowid = fa.fact_id
+            LEFT JOIN symbol dss ON dss.id = dsite.symbol_id
+            LEFT JOIN file dsf ON dsf.id = dsite.file_id
+            LEFT JOIN def_edge defe ON fa.fact_kind = 'def_edge'
+              AND defe.rowid = fa.fact_id
+            LEFT JOIN definition defd0 ON defd0.id = defe.src_def_id
+            LEFT JOIN symbol defs ON defs.id = defd0.symbol_id
+            LEFT JOIN symbol defd ON defd.id = defe.dst_id
+            LEFT JOIN diagnostic dia ON fa.fact_kind = 'diagnostic'
+              AND dia.id = fa.fact_id
+            LEFT JOIN file diaf ON diaf.id = dia.file_id
+            LEFT JOIN symbol ps ON fa.fact_kind = 'parameter'
+              AND ps.id = fa.fact_id
+            LEFT JOIN symbol sts ON fa.fact_kind = 'symbol_type'
+              AND sts.id = fa.fact_id
+            LEFT JOIN type_node tes ON fa.fact_kind = 'type_edge'
+              AND tes.id = fa.fact_id
+            LEFT JOIN entity_node en ON fa.fact_kind = 'entity_node'
+              AND en.id = fa.fact_id
+            LEFT JOIN symbol ens ON ens.id = en.id
+            LEFT JOIN entity_edge eee ON fa.fact_kind = 'entity_edge'
+              AND eee.rowid = fa.fact_id
+            LEFT JOIN symbol ees ON ees.id = eee.src_id
+            LEFT JOIN symbol eed ON eed.id = eee.dst_id
+            LEFT JOIN symbol tps ON fa.fact_kind = 'template_param'
+              AND tps.id = fa.fact_id
+            LEFT JOIN symbol tas ON fa.fact_kind = 'template_arg'
+              AND tas.id = fa.fact_id
+            LEFT JOIN edge cae ON fa.fact_kind = 'call_arg'
+              AND cae.id = fa.fact_id
+            LEFT JOIN symbol cas ON cas.id = cae.src_id
+            LEFT JOIN symbol cad ON cad.id = cae.dst_id
+            LEFT JOIN definition pcsd ON fa.fact_kind = 'possible_call'
+              AND pcsd.id = fa.fact_id
+            LEFT JOIN symbol pcs ON pcs.id = pcsd.symbol_id
+            LEFT JOIN possible_call pc ON fa.fact_kind = 'possible_call'
+              AND pc.src_def_id = fa.fact_id
+            LEFT JOIN definition pcdd ON pcdd.id = pc.dst_def_id
+            LEFT JOIN symbol pcd ON pcd.id = pcdd.symbol_id
+            LEFT JOIN type_node tn
+              ON fa.fact_kind = 'type_node' AND tn.id = fa.fact_id
+            ORDER BY fa.fact_kind, fact_key, f.name, tuc.descriptor_hash,
+                     fa.generation
         """,
     }
 
@@ -236,14 +445,27 @@ def _canonical_rows(
 
     def normalize(value: Any) -> Any:
         if isinstance(value, str):
-            return value.replace(root_text, "<corpus>")
+            return re.sub(
+                r"build:[0-9a-f]{40}",
+                "build:<build>",
+                value.replace(root_text, "<corpus>"),
+            )
         return value
 
-    return {
+    canonical = {
         name: [[normalize(value) for value in row]
                for row in connection.execute(query).fetchall()]
         for name, query in queries.items()
     }
+    unresolved = [
+        row for row in canonical["fact_applicability"] if row[1] is None
+    ]
+    if unresolved:
+        raise RuntimeError(
+            "fact_applicability contains an unresolved fact family: "
+            f"{unresolved[0][0]}"
+        )
+    return canonical
 
 
 def database_snapshot(database: Path, corpus_root: Path) -> dict[str, Any]:
@@ -268,7 +490,10 @@ def database_snapshot(database: Path, corpus_root: Path) -> dict[str, Any]:
         page_size = connection.execute("PRAGMA page_size").fetchone()[0]
         freelist = connection.execute("PRAGMA freelist_count").fetchone()[0]
         tables = {}
-        for table in ("file", "symbol", "edge", "edge_site", "call_arg"):
+        for table in (
+            "file", "symbol", "edge", "edge_site", "call_arg",
+            "definition", "def_edge", "file_config", "fact_applicability",
+        ):
             try:
                 tables[table] = connection.execute(
                     f"SELECT COUNT(*) FROM {table}"
@@ -295,6 +520,10 @@ def database_snapshot(database: Path, corpus_root: Path) -> dict[str, Any]:
         "schema_version": int(metadata["schema_version"]),
         "catalog_version": int(metadata["catalog_version"]),
         "catalog_hash": metadata["catalog_hash"],
+        "canonical_sections": sorted(canonical),
+        "canonical_row_counts": {
+            name: len(rows) for name, rows in canonical.items()
+        },
         "canonical_sha256": hashlib.sha256(
             canonical_json.encode("utf-8")
         ).hexdigest(),
@@ -428,12 +657,53 @@ def run_case(cidx: Path, count: int, per_tu: int, case_root: Path) -> dict[str, 
 def comparison(
     baseline: dict[str, Any], current: dict[str, Any]
 ) -> dict[str, Any]:
-    result = {}
+    result: dict[str, Any] = {}
+    failures: list[str] = []
+
+    def snapshots(stage: dict[str, Any]) -> list[dict[str, Any]]:
+        return stage["sqlite"].get(
+            "snapshot_trials", [stage["sqlite"]["snapshot"]]
+        )
+
+    def signature(snapshot: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            snapshot["canonical_sha256"],
+            tuple(snapshot["canonical_sections"]),
+            snapshot["integrity_check"],
+            snapshot["foreign_key_check"],
+            snapshot["schema_version"],
+            snapshot["catalog_version"],
+            snapshot["catalog_hash"],
+        )
+
     for stage_name in ("index-cold", "index-warm", "index-incremental"):
         old = next(item for item in baseline["stages"] if item["label"] == stage_name)
         new = next(item for item in current["stages"] if item["label"] == stage_name)
-        old_snapshot = old["sqlite"]["snapshot"]
-        new_snapshot = new["sqlite"]["snapshot"]
+        old_snapshots = snapshots(old)
+        new_snapshots = snapshots(new)
+        old_repeat = len({signature(item) for item in old_snapshots}) == 1
+        new_repeat = len({signature(item) for item in new_snapshots}) == 1
+        trial_matches = [
+            index < len(new_snapshots)
+            and signature(old_snapshot) == signature(new_snapshots[index])
+            for index, old_snapshot in enumerate(old_snapshots)
+        ]
+        same_trial_count = len(old_snapshots) == len(new_snapshots)
+        canonical_match = (
+            same_trial_count and old_repeat and new_repeat
+            and all(trial_matches)
+        )
+        integrity_match = all(
+            item["integrity_check"] == "ok"
+            and item["foreign_key_check"] == "ok"
+            for item in (*old_snapshots, *new_snapshots)
+        )
+        schema_catalog_match = all(
+            item["schema_version"] == EXPECTED_SCHEMA_VERSION
+            and item["catalog_version"] == EXPECTED_CATALOG_VERSION
+            and item["catalog_hash"] == EXPECTED_CATALOG_HASH
+            for item in (*old_snapshots, *new_snapshots)
+        )
         result[stage_name] = {
             "baseline_wall_seconds": old["wall_seconds"],
             "current_wall_seconds": new["wall_seconds"],
@@ -449,28 +719,27 @@ def comparison(
                 "baseline": old["cpu_seconds"] / old["wall_seconds"],
                 "current": new["cpu_seconds"] / new["wall_seconds"],
             },
-            "canonical_semantic_match": (
-                old_snapshot["canonical_sha256"]
-                == new_snapshot["canonical_sha256"]
-            ),
-            "database_integrity_match": (
-                old_snapshot["integrity_check"] == "ok"
-                and new_snapshot["integrity_check"] == "ok"
-                and old_snapshot["foreign_key_check"] == "ok"
-                and new_snapshot["foreign_key_check"] == "ok"
-            ),
-            "schema_catalog_match": (
-                old_snapshot["schema_version"]
-                == new_snapshot["schema_version"]
-                == EXPECTED_SCHEMA_VERSION
-                and old_snapshot["catalog_version"]
-                == new_snapshot["catalog_version"]
-                == EXPECTED_CATALOG_VERSION
-                and old_snapshot["catalog_hash"]
-                == new_snapshot["catalog_hash"]
-                == EXPECTED_CATALOG_HASH
-            ),
+            "trial_count_match": same_trial_count,
+            "baseline_repeat_consistent": old_repeat,
+            "current_repeat_consistent": new_repeat,
+            "canonical_semantic_trial_matches": trial_matches,
+            "canonical_semantic_match": canonical_match,
+            "database_integrity_match": integrity_match,
+            "schema_catalog_match": schema_catalog_match,
         }
+        if not same_trial_count:
+            failures.append(f"{stage_name}: baseline/current trial counts differ")
+        if not old_repeat:
+            failures.append(f"{stage_name}: baseline trials are not repeat-consistent")
+        if not new_repeat:
+            failures.append(f"{stage_name}: current trials are not repeat-consistent")
+        if not all(trial_matches):
+            failures.append(f"{stage_name}: one or more baseline/current trials differ")
+        if not integrity_match:
+            failures.append(f"{stage_name}: database integrity mismatch")
+        if not schema_catalog_match:
+            failures.append(f"{stage_name}: schema/catalog mismatch")
+    result["parity_failures"] = failures
     return result
 
 
@@ -515,6 +784,9 @@ def aggregate_cases(cases: list[dict[str, Any]]) -> dict[str, Any]:
                 ),
                 "sqlite": {
                     "snapshot": first_snapshot,
+                    "snapshot_trials": [
+                        stage["sqlite"]["snapshot"] for stage in stage_values
+                    ],
                     "delta": {
                         "page_bytes": median(
                             [stage["sqlite"]["delta"]["page_bytes"]
@@ -630,15 +902,26 @@ def main() -> int:
 
     if args.baseline_cidx:
         report["comparison"] = {}
+        parity_failures: list[str] = []
         for count in dict.fromkeys(
             (args.representative_files, args.scale_files)
         ):
-            report["comparison"][str(count)] = comparison(
+            count_comparison = comparison(
                 report["aggregates"][f"baseline:{count}"],
                 report["aggregates"][f"current:{count}"],
             )
+            parity_failures.extend(
+                f"{count} files: {failure}"
+                for failure in count_comparison.pop("parity_failures")
+            )
+            report["comparison"][str(count)] = count_comparison
+        report["parity_failures"] = parity_failures
     args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(args.output)
+    if report.get("parity_failures"):
+        print("semantic parity failures:", file=sys.stderr)
+        print("\n".join(report["parity_failures"]), file=sys.stderr)
+        return 1
     return 0
 
 

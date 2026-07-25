@@ -11,9 +11,9 @@ translation units, imports it into a temporary cache, and measures:
 - SQLite page/row deltas from the disposable benchmark database;
 - shared-header fan-in and the indexer's `indexed`/`already` header counters.
 - SQLite `integrity_check`, schema/catalog metadata, and a canonical semantic
-  digest of the Layer-0 rows at each index state;
+  digest of normalized semantic/fact projections at each index state;
 - repeated trials with median timing, CPU utilization, and per-TU latency
-  aggregation.
+  aggregation, including per-trial and intra-build parity checks.
 
 Generated sources, caches, logs, and JSON reports belong outside the checkout.
 The runner uses a temporary `INDEXER_CACHE`; it never opens the checkout's
@@ -38,8 +38,25 @@ python3 benchmarks/indexing/run.py \
 The JSON report contains one case per trial, median aggregates, and a
 `comparison` section for current versus baseline. It reports wall-time deltas,
 CPU utilization, SQLite activity, semantic-digest parity, and schema/catalog
-parity for cold, warm, and incremental index stages. It does not claim an
-improvement when no baseline executable is supplied.
+parity for cold, warm, and incremental index stages. Every trial is compared;
+the process exits nonzero and records `parity_failures` if any trial or
+intra-build repeat differs. It does not claim an improvement when no baseline
+executable is supplied.
+
+## Reproduce profiler evidence
+
+`profile.py` creates a named disposable corpus and cache, records the exact
+import and `xctrace` launch commands, exports the time-profile table, and
+extracts inclusive frame counts into a JSON summary:
+
+```sh
+python3 benchmarks/indexing/profile.py \
+  --cidx build/cidx --label current --files 8 \
+  --work-root /tmp/hse95-profile-current \
+  --trace /tmp/hse95-profile-current.trace \
+  --xml /tmp/hse95-profile-current.xml \
+  --summary /tmp/hse95-profile-current.json
+```
 
 The generated corpus is intentionally simple and stable: every source includes
 `shared.hpp`, repeats its own declaration 16 times after a resolved definition,
