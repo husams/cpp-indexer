@@ -746,6 +746,10 @@ def test_exact_recursive_and_pointer_type_acceptance_is_read_only():
         "INSERT INTO parameter(owner_id,position,pack_index,name) "
         "VALUES (?,?,?,?)", (owner_id, 9, -1, "unknown")
     )
+    db._conn.execute(
+        "INSERT INTO parameter(owner_id,position,pack_index,name,type_id) "
+        "VALUES (?,?,?,?,?)", (owner_id, 10, -1, "type-only", regex_reference)
+    )
     db._conn.commit()
 
     graph = GraphQuery.from_connection(db._conn)
@@ -784,6 +788,37 @@ def test_exact_recursive_and_pointer_type_acceptance_is_read_only():
     assert null_slot.rows == [(
         "lvalue-reference", "record", "std::regex"
     )]
+    graph_slot = next(
+        slot for slot in graph.signature_slots(graph.get("cidx::version_re"))
+        if slot.position == 10
+    )
+    assert graph_slot.declared_type is not None
+    assert graph_slot.adjusted_type is not None
+    assert graph_slot.declared_type.id == regex_reference
+    assert graph_slot.adjusted_type.id == regex_reference
+    assert (graph_slot.mode, graph_slot.value_kind, graph_slot.named_decl) == (
+        "lvalue-reference", "record", "std::regex"
+    )
+    type_only_plan = Executor(db).run(
+        (start(symbol("cidx::version_re")) | out("has_signature_slot")
+         | where(eq("slot_kind", "parameter"))
+         | where(eq("position", 10))
+         | select(["type_id", "declared_type_id", "adjusted_type_id",
+                  "mode", "value_kind", "named_decl"])).plan
+    )
+    assert type_only_plan.rows == [(
+        regex_reference, None, None, "lvalue-reference", "record", "std::regex"
+    )]
+    type_only_filtered = Executor(db).run(
+        (start(symbol("cidx::version_re")) | out("has_signature_slot")
+         | where(eq("slot_kind", "parameter"))
+         | where(eq("position", 10))
+         | where(eq("mode", "lvalue-reference"))
+         | where(eq("value_kind", "record"))
+         | where(eq("named_decl", "std::regex"))
+         | select(["position"])).plan
+    )
+    assert type_only_filtered.rows == [(10,)]
     null_slot = Executor(db).run(
         (start(symbol("cidx::version_re")) | out("has_parameter")
          | where(eq("position", 9)) | select(["type_id"])).plan

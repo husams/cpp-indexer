@@ -940,6 +940,15 @@ TEST_CASE("query_plan: exact recursive and pointer type acceptance is read-only"
   unknown_parameter.bind(3, int64_t{-1});
   unknown_parameter.bind(4, std::string_view{"unknown"});
   unknown_parameter.step_done();
+  auto type_only_parameter = db.raw_db().prepare(
+      "INSERT INTO parameter(owner_id,position,pack_index,name,type_id) "
+      "VALUES (?,?,?,?,?)");
+  type_only_parameter.bind(1, owner_id);
+  type_only_parameter.bind(2, int64_t{10});
+  type_only_parameter.bind(3, int64_t{-1});
+  type_only_parameter.bind(4, std::string_view{"type-only"});
+  type_only_parameter.bind(5, regex_reference);
+  type_only_parameter.step_done();
 
   cidx::query::SqliteQueryReadAdapter read(db);
   cidx::graph::GraphQuery graph(read);
@@ -981,6 +990,50 @@ TEST_CASE("query_plan: exact recursive and pointer type acceptance is read-only"
         "lvalue-reference");
   CHECK(std::get<std::string>(version_return.rows[0][1]) == "record");
   CHECK(std::get<std::string>(version_return.rows[0][2]) == "std::regex");
+  const auto signature = graph.signature(owner_id);
+  const auto type_only_graph = [&]() -> const cidx::graph::GraphQuery::ParamInfo * {
+    for (const auto &param : signature.params) {
+      if (param.position == 10) {
+        return &param;
+      }
+    }
+    return nullptr;
+  }();
+  REQUIRE(type_only_graph != nullptr);
+  REQUIRE(type_only_graph->declared_type.has_value());
+  REQUIRE(type_only_graph->adjusted_type.has_value());
+  CHECK(type_only_graph->declared_type->id == regex_reference);
+  CHECK(type_only_graph->adjusted_type->id == regex_reference);
+  CHECK(type_only_graph->mode == "lvalue-reference");
+  CHECK(type_only_graph->value_kind == "record");
+  REQUIRE(type_only_graph->named_decl.has_value());
+  CHECK(*type_only_graph->named_decl == "std::regex");
+  const auto type_only_plan = ex.run(
+      (start(symbol("cidx::version_re")) | out("has_signature_slot") |
+       where(all_of({eq("slot_kind", "parameter"),
+                     eq("position", int64_t{10})})) |
+       select({"type_id", "declared_type_id", "adjusted_type_id", "mode",
+               "value_kind", "named_decl"}))
+          .plan());
+  REQUIRE(type_only_plan.rows.size() == 1);
+  CHECK(std::get<int64_t>(type_only_plan.rows[0][0]) == regex_reference);
+  CHECK(std::holds_alternative<std::nullptr_t>(type_only_plan.rows[0][1]));
+  CHECK(std::holds_alternative<std::nullptr_t>(type_only_plan.rows[0][2]));
+  CHECK(std::get<std::string>(type_only_plan.rows[0][3]) ==
+        "lvalue-reference");
+  CHECK(std::get<std::string>(type_only_plan.rows[0][4]) == "record");
+  CHECK(std::get<std::string>(type_only_plan.rows[0][5]) == "std::regex");
+  const auto type_only_filtered = ex.run(
+      (start(symbol("cidx::version_re")) | out("has_signature_slot") |
+       where(all_of({eq("slot_kind", "parameter"),
+                     eq("position", int64_t{10}),
+                     eq("mode", "lvalue-reference"),
+                     eq("value_kind", "record"),
+                     eq("named_decl", "std::regex")})) |
+       select({"position"}))
+          .plan());
+  REQUIRE(type_only_filtered.rows.size() == 1);
+  CHECK(std::get<int64_t>(type_only_filtered.rows[0][0]) == 10);
   const auto null_slot = ex.run(
       (start(symbol("cidx::version_re")) | out("has_parameter") |
        where(eq("position", int64_t{9})) | select({"type_id"}))

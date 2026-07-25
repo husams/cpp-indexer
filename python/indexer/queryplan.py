@@ -2294,8 +2294,13 @@ class Executor:
                         key[:3]).fetchone()
                     if row is None:
                         continue
-                    facts = graph.slot_type_facts_for_ids(row[2], row[3])
-                    values = ("parameter", row[0], row[1], row[1], row[2], row[3],
+                    type_id = row[1]
+                    declared_id = row[2] if row[2] is not None else type_id
+                    adjusted_id = row[3] if row[3] is not None else type_id
+                    facts = graph.slot_type_facts_for_ids(
+                        declared_id, adjusted_id
+                    )
+                    values = ("parameter", row[0], type_id, type_id, row[2], row[3],
                               row[4], row[5], row[6], *facts)
                 elif role == 3:
                     row = self._conn.execute(

@@ -2558,10 +2558,12 @@ private:
           if (!query.step()) {
             continue;
           }
+          const auto type_id = int_at(query, 1);
           const auto declared = int_at(query, 2);
           const auto adjusted = int_at(query, 3);
-          const auto facts = graph.slot_facts_for_ids(declared, adjusted);
-          push_slot("parameter", text_at(query, 0), int_at(query, 1),
+          const auto facts = graph.slot_facts_for_ids(
+              declared ? declared : type_id, adjusted ? adjusted : type_id);
+          push_slot("parameter", text_at(query, 0), type_id,
                     declared, adjusted, text_at(query, 4), text_at(query, 5),
                     text_at(query, 6), facts);
         } else if (key.tag == 3) {
