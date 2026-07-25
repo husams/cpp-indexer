@@ -1067,6 +1067,65 @@ TEST_CASE("query: read-only execution and nonexistent database safety") {
   CHECK_FALSE(path_exists(missing));
 }
 
+TEST_CASE("ui export rejects typed failures before publishing an artifact") {
+  const std::string cache = make_temp_dir();
+  const std::string index_path = cache + "/index.db";
+  {
+    Storage db(index_path);
+    const int64_t component = db.add_component("ui", cache);
+    const int64_t directory = db.add_directory(component, "");
+    const int64_t file = db.add_file(directory, "main.cpp");
+    Symbol exact;
+    exact.usr = "USR::ui-exact";
+    exact.spelling = "exact";
+    exact.qual_name = "exact";
+    exact.kind = "function";
+    exact.file_id = file;
+    exact.is_definition = true;
+    exact.resolved = true;
+    db.add_symbol(exact);
+    for (const char *usr : {"USR::ui-ambiguous-a", "USR::ui-ambiguous-b"}) {
+      Symbol ambiguous = exact;
+      ambiguous.usr = usr;
+      ambiguous.spelling = "ambiguous";
+      ambiguous.qual_name = "ambiguous";
+      db.add_symbol(ambiguous);
+    }
+    Symbol oversized = exact;
+    oversized.usr = "USR::ui-oversized";
+    oversized.spelling = std::string(4000, 'x');
+    oversized.qual_name = oversized.spelling;
+    db.add_symbol(oversized);
+  }
+
+  const std::string output = cache + "/snapshot.html";
+  const auto check_rejected = [&](const std::vector<std::string> &input,
+                                  const std::string &code) {
+    ::unlink(output.c_str());
+    const CmdResult result =
+        run_cli({"ui", "export", "--output", output, "--input-kind", input[0],
+                 "--input", input[1]},
+                cache);
+    CHECK(result.rc == 2);
+    CHECK(result.err.find(code) != std::string::npos);
+    CHECK_FALSE(path_exists(output));
+  };
+
+  check_rejected({"symbol", "USR::ui-missing"}, "E_UI_UNKNOWN_IDENTITY");
+  check_rejected({"symbol", "ambiguous"}, "E_UI_AMBIGUOUS_IDENTITY");
+  check_rejected({"cxq", "codebase() | nodes() | count()"},
+                 "E_UI_UNSUPPORTED_INPUT");
+
+  ::unlink(output.c_str());
+  const CmdResult oversized =
+      run_cli({"ui", "export", "--output", output, "--input-kind", "symbol",
+               "--input", "USR::ui-oversized", "--byte-limit", "1024"},
+              cache);
+  CHECK(oversized.rc == 2);
+  CHECK(oversized.err.find("E_UI_OVERSIZED") != std::string::npos);
+  CHECK_FALSE(path_exists(output));
+}
+
 TEST_CASE("search: def row + second decl row; zero matches exit 1") {
   const GoldFixture g;
   // $ python3 -m indexer search multiply

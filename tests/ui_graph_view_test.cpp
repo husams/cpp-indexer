@@ -5,6 +5,7 @@
 
 #include "cli/json_out.hpp"
 #include "graph/query.hpp"
+#include "query/plan.hpp"
 #include "storage/records.hpp"
 #include "storage/storage.hpp"
 #include "ui/assets.hpp"
@@ -207,10 +208,18 @@ TEST_CASE("GraphView normalizes typed file, path, and CXQ inputs") {
   const int64_t target_id = db.add_symbol(target);
   const int64_t include_config = db.add_include_config(
       {.tu_file_id = file, .digest = "typed", .arguments = {"-DTEST"}});
-  db.add_include_edge({.src_file_id = file,
-                       .dst_file_id = header,
-                       .dst_path = "/tmp/cidx-ui-typed/header.hpp",
-                       .config_id = include_config});
+  const int64_t include_edge_id =
+      db.add_include_edge({.src_file_id = file,
+                           .dst_file_id = header,
+                           .dst_path = "/tmp/cidx-ui-typed/header.hpp",
+                           .config_id = include_config});
+  db.add_include_site({.edge_id = include_edge_id,
+                       .line = 3,
+                       .col = 1,
+                       .begin_offset = 20,
+                       .end_offset = 38,
+                       .spelling = "header.hpp",
+                       .is_angled = true});
   cidx::Edge edge{.src_id = source_id,
                   .dst_id = target_id,
                   .kind = cidx::graph::edge_kinds_map().at("calls")};
@@ -226,6 +235,10 @@ TEST_CASE("GraphView normalizes typed file, path, and CXQ inputs") {
   CHECK(file_json.find("USR::typed-source") != std::string::npos);
   CHECK(file_json.find("\"files\"") != std::string::npos);
   CHECK(file_json.find("\"includes\"") != std::string::npos);
+  CHECK(file_json.find("file:v1:") != std::string::npos);
+  CHECK(file_json.find("include-edge:v1:") != std::string::npos);
+  CHECK(file_json.find("\"configuration\"") != std::string::npos);
+  CHECK(file_json.find("\"spelling\"") != std::string::npos);
 
   request.input =
       cidx::ui::GraphViewInput{.kind = cidx::ui::GraphInputKind::Path,
@@ -242,6 +255,21 @@ TEST_CASE("GraphView normalizes typed file, path, and CXQ inputs") {
       cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
   CHECK(cxq_json.find("\"input_kind\": \"cxq\"") != std::string::npos);
   CHECK(cxq_json.find("\"query_plan\": \"{\\n") != std::string::npos);
+
+  request.input = cidx::ui::GraphViewInput{
+      .kind = cidx::ui::GraphInputKind::QueryPlan,
+      .value = cidx::query::canonical_json(
+          cidx::query::start(cidx::query::symbol("USR::typed-source")).plan())};
+  const std::string plan_json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(plan_json.find("\"input_kind\": \"plan\"") != std::string::npos);
+  CHECK(plan_json.find("\"query_plan\": \"{\\n") != std::string::npos);
+
+  request.input = cidx::ui::GraphViewInput{
+      .kind = cidx::ui::GraphInputKind::Cxq,
+      .value = "symbol('USR::typed-source') | count()"};
+  CHECK_THROWS_AS(cidx::ui::build_graph_view(db, request),
+                  cidx::ui::GraphViewError);
 
   request.input = cidx::ui::GraphViewInput{
       .kind = cidx::ui::GraphInputKind::Entity, .value = "ns::typed_source"};

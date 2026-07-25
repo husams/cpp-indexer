@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright';
@@ -25,8 +26,15 @@ const page = html.replace('__CIDX_STYLES__', () => styles)
 const temp = await mkdtemp(join(tmpdir(), 'cidx-ui-smoke-'));
 const file = join(temp, 'snapshot.html');
 await writeFile(file, page);
-const executablePath = process.env.CIDX_BROWSER || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const browser = await chromium.launch({headless: true, executablePath});
+const candidates = process.platform === 'darwin'
+  ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
+  : process.platform === 'win32'
+    ? ['C:/Program Files/Google/Chrome/Application/chrome.exe']
+    : ['/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'];
+const executablePath = process.env.CIDX_BROWSER || candidates.find((path) => existsSync(path));
+const launchOptions = {headless: true};
+if (executablePath) launchOptions.executablePath = executablePath;
+const browser = await chromium.launch(launchOptions);
 const context = await browser.newContext();
 const network = [];
 await context.route('**/*', (route) => {

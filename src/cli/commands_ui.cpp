@@ -147,7 +147,6 @@ ui::GraphViewRequest ui_request(const ParsedArgs &args) {
         {"cxq", ui::GraphInputKind::Cxq},
         {"plan", ui::GraphInputKind::QueryPlan},
         {"path", ui::GraphInputKind::Path},
-        {"analysis", ui::GraphInputKind::Analysis},
     };
     const auto kind = kinds.find(args.ui_input_kind);
     if (kind == kinds.end()) {

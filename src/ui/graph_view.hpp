@@ -19,7 +19,6 @@ enum class GraphInputKind : std::uint8_t {
   Cxq,
   QueryPlan,
   Path,
-  Analysis,
 };
 
 const char *graph_input_kind_name(GraphInputKind kind);
@@ -41,7 +40,7 @@ enum class GraphViewFailureKind : std::uint8_t {
 
 class GraphViewError : public CidxError {
 public:
-  GraphViewError(GraphViewFailureKind kind, std::string message,
+  GraphViewError(GraphViewFailureKind kind, const std::string &message,
                  std::string next_action);
 
   [[nodiscard]] GraphViewFailureKind kind() const noexcept { return kind_; }
