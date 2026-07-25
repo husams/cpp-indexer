@@ -8,13 +8,20 @@
 // warning-count summary, exit 1 iff any file failed/unknown.
 #pragma once
 
+#include <functional>
 #include <ostream>
 #include <string>
 
 #include "cli/args.hpp"
 #include "util/logger.hpp"
 
+namespace cidx::ast {
+struct IndexOneOutcome;
+}
+
 namespace cidx::cli {
+using IndexOutcomeSink =
+    std::function<void(const cidx::ast::IndexOneOutcome &outcome)>;
 
 // Cache-dir policy (analysis §1.3): $INDEXER_CACHE else ~/.cache/cidx,
 // expanduser'd, NOT abspath'd (Python parity). All generated files live
@@ -27,6 +34,7 @@ struct Context {
   Logger *logger = nullptr;    // Logger::root() in main; file sink lazy
   std::ostream *out = nullptr; // stdout
   std::ostream *err = nullptr; // stderr
+  IndexOutcomeSink index_outcome_sink;
 };
 
 int cmd_init(const ParsedArgs &args, Context &ctx);

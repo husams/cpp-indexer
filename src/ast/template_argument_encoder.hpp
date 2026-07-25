@@ -29,11 +29,16 @@ class TemplateArgument;
 
 namespace cidx::ast {
 
-class EdgeSink;
+class DeclarationIdentityResolver;
+class RelationFactEmitter;
+class TypeFactEmitter;
 
 class TemplateArgumentEncoder {
 public:
-  TemplateArgumentEncoder(clang::ASTContext &context, EdgeSink &sink);
+  TemplateArgumentEncoder(clang::ASTContext &context,
+                          DeclarationIdentityResolver &identity,
+                          RelationFactEmitter &relations,
+                          TypeFactEmitter &types);
 
   // Encode one argument for owner/position. `written` overrides the printed
   // spelling of a Type argument (the as-written sugared type when the caller
@@ -54,7 +59,8 @@ public:
 
 private:
   clang::ASTContext &context_;
-  EdgeSink &sink_;
+  DeclarationIdentityResolver &identity_;
+  RelationFactEmitter &relations_;
   mutable TypeInterner types_;
 };
 

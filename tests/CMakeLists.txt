@@ -23,6 +23,7 @@ set(CIDX_DEFAULT_TESTS
   repo_test
   include_aliasing_test
   workspace_context_test
+  ast_pass_test
   ui_graph_view_test
 )
 
@@ -33,6 +34,11 @@ foreach(test_name IN LISTS CIDX_DEFAULT_TESTS)
   add_test(NAME ${test_name} COMMAND ${test_name})
   set_tests_properties(${test_name} PROPERTIES LABELS "default")
 endforeach()
+
+# The AST pass contract test drives a real LibTooling action through the
+# statement visitor, so it needs the same Clang C++ headers as cidx_ast.
+target_include_directories(ast_pass_test SYSTEM PRIVATE
+  ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 
 target_compile_definitions(result_protocol_test PRIVATE
   CIDX_RESULT_PROTOCOL_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/../spec/contracts/golden/result-envelope.json"

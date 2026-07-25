@@ -1,7 +1,7 @@
 #include "ast/template_argument_encoder.hpp"
 
 #include "ast/clang_compat.hpp"
-#include "ast/edge_sink.hpp"
+#include "ast/fact_emitters.hpp"
 #include "ast/location.hpp"
 #include "ast/names.hpp"
 #include "ast/type_use.hpp"
@@ -15,9 +15,11 @@
 
 namespace cidx::ast {
 
-TemplateArgumentEncoder::TemplateArgumentEncoder(clang::ASTContext &context,
-                                                 EdgeSink &sink)
-    : context_(context), sink_(sink), types_(context, sink) {}
+TemplateArgumentEncoder::TemplateArgumentEncoder(
+    clang::ASTContext &context, DeclarationIdentityResolver &identity,
+    RelationFactEmitter &relations, TypeFactEmitter &types)
+    : context_(context), identity_(identity), relations_(relations),
+      types_(context, types) {}
 
 std::optional<TemplateArgRecord>
 TemplateArgumentEncoder::encode(int64_t owner_id, int64_t position,
@@ -44,7 +46,7 @@ TemplateArgumentEncoder::encode(int64_t owner_id, int64_t position,
     const std::string ref_usr = record_usr_of_type(t);
     if (!ref_usr.empty()) {
       const clang::NamedDecl *ref_decl = named_type_decl(t);
-      ta.ref_id = sink_.lookup_symbol_id(
+      ta.ref_id = identity_.lookup_symbol_id(
           ref_usr,
           ref_decl != nullptr
               ? std::optional<std::string>(
@@ -82,7 +84,7 @@ TemplateArgumentEncoder::encode(int64_t owner_id, int64_t position,
     if (const auto *td = arg.getAsTemplate().getAsTemplateDecl();
         td != nullptr) {
       ta.literal = td->getNameAsString();
-      ta.ref_id = sink_.lookup_symbol_id(
+      ta.ref_id = identity_.lookup_symbol_id(
           usr_for_decl(td), expansion_loc(context_, td->getLocation()).file);
     }
     break;
@@ -92,7 +94,7 @@ TemplateArgumentEncoder::encode(int64_t owner_id, int64_t position,
             arg.getAsTemplateOrTemplatePattern().getAsTemplateDecl();
         td != nullptr) {
       ta.literal = td->getNameAsString();
-      ta.ref_id = sink_.lookup_symbol_id(
+      ta.ref_id = identity_.lookup_symbol_id(
           usr_for_decl(td), expansion_loc(context_, td->getLocation()).file);
     }
     break;
@@ -113,7 +115,7 @@ TemplateArgumentEncoder::emit(int64_t owner_id, int64_t position,
     if (pack.empty()) {
       const auto record = encode(owner_id, position, arg);
       if (record) {
-        sink_.add_template_arg(*record);
+        relations_.add_template_arg(*record);
       }
       return record;
     }
@@ -126,13 +128,13 @@ TemplateArgumentEncoder::emit(int64_t owner_id, int64_t position,
       if (!first) {
         first = record;
       }
-      sink_.add_template_arg(*record);
+      relations_.add_template_arg(*record);
     }
     return first;
   }
   const auto record = encode(owner_id, position, arg, written);
   if (record) {
-    sink_.add_template_arg(*record);
+    relations_.add_template_arg(*record);
   }
   return record;
 }

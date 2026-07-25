@@ -34,9 +34,9 @@ namespace cidx::ast {
 // written. Paths are "as opened" (search dir + spelling), never symlink-
 // resolved, matching the rest of the engine's ownership rules.
 struct IncludeFact {
-  std::string src_path;   // file containing the directive
-  std::string dst_path;   // resolved target, or "" when unresolved
-  std::string spelling;   // written filename, without <> or ""
+  std::string src_path; // file containing the directive
+  std::string dst_path; // resolved target, or "" when unresolved
+  std::string spelling; // written filename, without <> or ""
   bool is_angled = false;
   int64_t line = 0;
   int64_t col = 0;
@@ -68,6 +68,11 @@ struct IncludeFacts {
   std::vector<MacroUseFact> macro_uses;
 };
 
+struct IncludeFactCounts {
+  std::size_t emitted_facts = 0;
+  std::size_t duplicates = 0;
+};
+
 // Deterministic identity of a normalized compilation configuration:
 // sha1 over driver, working dir, lang mode, resource dir, and each argument in
 // order, NUL-separated. Stable across runs and machines given the same inputs,
@@ -96,5 +101,11 @@ void resolve_include_guards(clang::Preprocessor &pp, IncludeFacts &out);
 // #include leaves no stale row.
 void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
                            const IncludeConfig &config);
+
+// Count the unique fact identities that persist_include_facts will publish
+// before it mutates storage, and report repeated upsert attempts separately.
+// This is the budget preflight for the bulk include pass.
+auto include_fact_count(cidx::Storage &db, const IncludeFacts &facts)
+    -> IncludeFactCounts;
 
 } // namespace cidx::ast

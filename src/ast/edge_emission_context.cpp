@@ -1,8 +1,9 @@
 #include "ast/edge_emission_context.hpp"
 
 #include "ast/clang_compat.hpp"
-#include "ast/edge_sink.hpp"
+#include "ast/fact_emitters.hpp"
 #include "ast/location.hpp"
+#include "ast/pass_registry.hpp"
 #include "ast/type_use.hpp"
 #include "ast/usr.hpp"
 
@@ -47,12 +48,13 @@ clang::SourceLocation type_name_loc(clang::TypeLoc tl) {
 } // namespace
 
 EdgeEmissionContext::EdgeEmissionContext(clang::ASTContext &context,
-                                         EdgeSink &sink, int64_t src_id,
-                                         int64_t file_id)
-    : context_(context), sink_(sink), mint_(context, sink),
-      targ_encoder_(context, sink),
-      minter_(context, sink, mint_, targ_encoder_), src_id_(src_id),
-      file_id_(file_id) {}
+                                         StatementFactPorts &ports,
+                                         int64_t src_id, int64_t file_id,
+                                         std::string file, PassMetrics *metrics)
+    : context_(context), ports_(ports), mint_(context, ports),
+      targ_encoder_(context, ports, ports, ports),
+      minter_(context, ports, ports, mint_, targ_encoder_), src_id_(src_id),
+      file_id_(file_id), file_(std::move(file)), metrics_(metrics) {}
 
 int64_t EdgeEmissionContext::emit_site_edge(const clang::Expr *site,
                                             int64_t dst_id, int kind) {
@@ -65,7 +67,7 @@ int64_t EdgeEmissionContext::emit_site_edge_at(clang::SourceLocation loc_in,
   e.src_id = src_id_;
   e.dst_id = dst_id;
   e.kind = kind;
-  const int64_t edge_id = sink_.add_edge(e);
+  const int64_t edge_id = ports_.add_edge(e);
   const ExpansionLoc loc = expansion_loc(context_, loc_in);
   EdgeSiteRecord siter;
   siter.edge_id = edge_id;
@@ -73,7 +75,7 @@ int64_t EdgeEmissionContext::emit_site_edge_at(clang::SourceLocation loc_in,
   siter.line = loc.line;
   siter.col = loc.col;
   siter.conditional = cond_depth_ > 0 ? 1 : 0;
-  sink_.add_edge_site(siter);
+  ports_.add_edge_site(siter);
   return edge_id;
 }
 
@@ -100,10 +102,27 @@ void EdgeEmissionContext::emit_type_name_use(const clang::TypeSourceInfo *tsi,
   }
   const auto identity_source =
       expansion_loc(context_, named->getLocation()).file;
-  if (const auto dst = sink_.lookup_symbol_id(usr, identity_source)) {
+  if (const auto dst = ports_.lookup_symbol_id(usr, identity_source)) {
     if (*dst != src_id_) {
       emit_site_edge_at(type_name_loc(tsi->getTypeLoc()), *dst, 7);
     }
+  }
+}
+
+void EdgeEmissionContext::record_unsupported(std::string construct,
+                                             clang::SourceLocation loc,
+                                             std::string detail) {
+  const ExpansionLoc expanded = expansion_loc(context_, loc);
+  ports_.emit(EvidenceRecord{.producer = "statement-pass",
+                             .construct = std::move(construct),
+                             .file = file_,
+                             .line = expanded.line,
+                             .col = expanded.col,
+                             .completeness = FactCompleteness::partial,
+                             .trust = FactTrust::inferred,
+                             .detail = std::move(detail)});
+  if (metrics_ != nullptr) {
+    metrics_->note_unknown();
   }
 }
 

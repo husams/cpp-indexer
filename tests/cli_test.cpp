@@ -22,9 +22,11 @@
 #include <ctime>
 #include <fcntl.h>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -156,7 +158,8 @@ struct CmdResult {
 // cumulative per Logger instance (Python's module-global _warnings), so a
 // fresh one keeps the "N warning(s)/error(s)" assertions deterministic.
 CmdResult run_cli(const std::vector<std::string> &argv,
-                  const std::string &cache, cidx::Logger *logger = nullptr) {
+                  const std::string &cache, cidx::Logger *logger = nullptr,
+                  cli::IndexOutcomeSink outcome_sink = {}) {
   cli::ParsedArgs pa = cli::parse_args(argv);
   REQUIRE(!pa.help_text);
   std::ostringstream out;
@@ -167,6 +170,7 @@ CmdResult run_cli(const std::vector<std::string> &argv,
   ctx.logger = logger != nullptr ? logger : &cidx::Logger::root();
   ctx.out = &out;
   ctx.err = &err;
+  ctx.index_outcome_sink = std::move(outcome_sink);
   CmdResult r;
   r.rc = cli::run_command(pa, ctx);
   r.out = out.str();
@@ -1893,6 +1897,777 @@ TEST_SUITE("clang") {
         db, *file, source, true, cidx::ast::IndexFailurePoint::none));
     CHECK(db.find_symbols("changed_pipeline_symbol", {}, 10).size() == 1);
     CHECK(db.find_symbols("published_pipeline_symbol", {}, 10).empty());
+  }
+
+  TEST_CASE("index TU publishes unsupported-call evidence and metrics") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/unsupported.cpp";
+    write_file(source, "template <typename T> void unsupported(T value) {\n"
+                       "  value();\n"
+                       "}\n"
+                       "void indirect() { void (*callable)(); callable(); }\n");
+
+    Storage db(":memory:");
+    db.add_component("unsupported", dir);
+    const int64_t file_id = db.add_file_path(
+        source, std::nullopt, std::nullopt,
+        std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+    const auto file = db.get_file_by_id(file_id);
+    REQUIRE(file.has_value());
+    db.stamp_graph_resolved();
+    db.stamp_index_identity();
+
+    const cidx::ast::IndexOneOutcome outcome =
+        cidx::ast::run_index_one(db, *file, source, true);
+    REQUIRE(!outcome.parse_failed);
+    bool found_evidence = false;
+    for (const auto &evidence : outcome.evidence) {
+      found_evidence |= evidence.construct == "CallExpr";
+    }
+    CHECK(found_evidence);
+    bool found_unknown_metric = false;
+    for (const auto &metrics : outcome.pass_metrics) {
+      if (metrics.id == "statements.main") {
+        found_unknown_metric = metrics.unknown_constructs > 0;
+      }
+    }
+    CHECK(found_unknown_metric);
+    for (const auto &metrics : outcome.pass_metrics) {
+      if (metrics.id == "statements.main") {
+        CHECK(metrics.unknown_constructs >= 2);
+      }
+    }
+  }
+
+  TEST_CASE("index plan exposes the complete main and header lifecycle") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/sequence.cpp";
+    const std::string header = dir + "/sequence.hpp";
+    write_file(header, "struct SequenceHeader { int value; };\n");
+    write_file(source, "#include \"sequence.hpp\"\n"
+                       "int sequence_main() { return 1; }\n");
+
+    Storage db(":memory:");
+    db.add_component("sequence", dir);
+    const int64_t file_id = db.add_file_path(
+        source, std::nullopt, std::nullopt,
+        std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+    const auto file = db.get_file_by_id(file_id);
+    REQUIRE(file.has_value());
+    db.stamp_graph_resolved();
+    db.stamp_index_identity();
+
+    const auto outcome = cidx::ast::run_index_one(db, *file, source, true);
+    REQUIRE(!outcome.parse_failed);
+    const std::vector<std::string> expected{
+        "symbols.main",         "symbols.headers",     "lifecycle.headers",
+        "declarations.headers", "definitions.headers", "statements.headers",
+        "namespaces.headers",   "headers.associate",   "lifecycle.main",
+        "declarations.main",    "definitions.main",    "statements.main",
+        "namespaces.main",      "main.associate",      "presentation.persist",
+        "includes.persist",     "evidence.persist"};
+    REQUIRE(outcome.pass_metrics.size() == expected.size());
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+      CHECK(outcome.pass_metrics[index].id == expected[index]);
+      CHECK(!outcome.pass_metrics[index].produced_fact_families.empty());
+    }
+    const std::vector<std::vector<cidx::ast::FrontendCapability>> capabilities{
+        {cidx::ast::FrontendCapability::ast},
+        {cidx::ast::FrontendCapability::ast,
+         cidx::ast::FrontendCapability::preprocessor},
+        {},
+        {cidx::ast::FrontendCapability::ast},
+        {cidx::ast::FrontendCapability::ast},
+        {cidx::ast::FrontendCapability::ast,
+         cidx::ast::FrontendCapability::templates},
+        {cidx::ast::FrontendCapability::ast},
+        {},
+        {},
+        {cidx::ast::FrontendCapability::ast},
+        {cidx::ast::FrontendCapability::ast},
+        {cidx::ast::FrontendCapability::ast,
+         cidx::ast::FrontendCapability::templates},
+        {cidx::ast::FrontendCapability::ast},
+        {},
+        {},
+        {cidx::ast::FrontendCapability::preprocessor},
+        {}};
+    REQUIRE(outcome.pass_metrics.size() == capabilities.size());
+    for (std::size_t index = 0; index < capabilities.size(); ++index) {
+      CHECK(outcome.pass_metrics[index].required_capabilities ==
+            capabilities[index]);
+    }
+    const std::vector<
+        std::tuple<std::vector<std::string>, std::vector<std::string>,
+                   std::vector<std::string>>>
+        contracts{
+            {{}, {"symbols"}, {}},
+            {{"includes"}, {"symbols"}, {"symbols.main"}},
+            {{"symbols"}, {"fact_lifecycle"}, {"symbols.headers"}},
+            {{"symbols", "fact_lifecycle"},
+             {"relations", "types", "definitions", "presentation_intents"},
+             {"symbols.headers", "lifecycle.headers"}},
+            {{"symbols"}, {"definitions"}, {"declarations.headers"}},
+            {{"definitions", "relations", "types"},
+             {"relations", "types", "evidence", "definitions", "symbols"},
+             {"definitions.headers"}},
+            {{"symbols", "relations"}, {"relations"}, {"statements.headers"}},
+            {{"symbols", "relations", "definitions"},
+             {"file_associations"},
+             {"symbols.headers", "statements.headers", "namespaces.headers"}},
+            {{}, {"fact_lifecycle"}, {"headers.associate"}},
+            {{"symbols", "fact_lifecycle"},
+             {"relations", "types", "definitions", "presentation_intents"},
+             {"headers.associate", "lifecycle.main"}},
+            {{"symbols"}, {"definitions"}, {"declarations.main"}},
+            {{"definitions", "relations", "types"},
+             {"relations", "types", "evidence", "definitions", "symbols"},
+             {"definitions.main"}},
+            {{"symbols", "relations"}, {"relations"}, {"statements.main"}},
+            {{"symbols", "relations", "definitions"},
+             {"file_associations"},
+             {"symbols.main", "lifecycle.main", "statements.main",
+              "namespaces.main"}},
+            {{"presentation_intents"},
+             {"display_names"},
+             {"declarations.headers", "declarations.main"}},
+            {{"preprocessor_facts"}, {"include_facts"}, {"main.associate"}},
+            {{"evidence"},
+             {"evidence_artifact"},
+             {"statements.headers", "statements.main", "includes.persist"}},
+        };
+    REQUIRE(outcome.pass_metrics.size() == contracts.size());
+    for (std::size_t index = 0; index < contracts.size(); ++index) {
+      CHECK(std::tie(outcome.pass_metrics[index].consumed_fact_families,
+                     outcome.pass_metrics[index].produced_fact_families,
+                     outcome.pass_metrics[index].dependencies) ==
+            contracts[index]);
+    }
+    const auto main_associate = std::ranges::find_if(
+        outcome.pass_metrics, [](const cidx::ast::IndexPassMetrics &metrics) {
+          return metrics.id == "main.associate";
+        });
+    REQUIRE(main_associate != outcome.pass_metrics.end());
+    CHECK(std::ranges::find(main_associate->dependencies, "symbols.main") !=
+          main_associate->dependencies.end());
+    CHECK(std::ranges::find(main_associate->dependencies, "statements.main") !=
+          main_associate->dependencies.end());
+    CHECK(std::ranges::find(main_associate->consumed_fact_families,
+                            "definitions") !=
+          main_associate->consumed_fact_families.end());
+    const auto statements_main = std::ranges::find_if(
+        outcome.pass_metrics, [](const cidx::ast::IndexPassMetrics &metrics) {
+          return metrics.id == "statements.main";
+        });
+    REQUIRE(statements_main != outcome.pass_metrics.end());
+    CHECK(statements_main->completeness ==
+          cidx::ast::FactCompleteness::partial);
+    CHECK(statements_main->trust == cidx::ast::FactTrust::inferred);
+    CHECK(std::ranges::find(main_associate->produced_fact_families,
+                            "file_associations") !=
+          main_associate->produced_fact_families.end());
+    const auto presentation = std::ranges::find_if(
+        outcome.pass_metrics, [](const cidx::ast::IndexPassMetrics &metrics) {
+          return metrics.id == "presentation.persist";
+        });
+    REQUIRE(presentation != outcome.pass_metrics.end());
+    CHECK(presentation->consumed_fact_families ==
+          std::vector<std::string>{"presentation_intents"});
+    CHECK(presentation->produced_fact_families ==
+          std::vector<std::string>{"display_names"});
+  }
+
+  TEST_CASE(
+      "CLI index publishes evidence and pass metrics to its outcome sink") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/observable.cpp";
+    write_file(source,
+               "void observable() { void (*callable)(); callable(); }\n");
+    Storage db(dir + "/index.db");
+    db.add_component("observable", dir);
+    const int64_t file_id = db.add_file_path(
+        source, std::nullopt, std::nullopt,
+        std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+    REQUIRE(db.get_file_by_id(file_id).has_value());
+    db.stamp_graph_resolved();
+    db.stamp_index_identity();
+
+    bool observed = false;
+    std::size_t metric_count = 0;
+    std::size_t evidence_count = 0;
+    const CmdResult result =
+        run_cli({"index"}, dir, nullptr,
+                [&](const cidx::ast::IndexOneOutcome &outcome) {
+                  observed = true;
+                  metric_count = outcome.pass_metrics.size();
+                  evidence_count = outcome.evidence.size();
+                });
+    CHECK(result.rc == 0);
+    CHECK(observed);
+    CHECK(metric_count >= 17);
+    CHECK(evidence_count > 0);
+  }
+
+  TEST_CASE("frontend session providers receive focused services") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/extension.cpp";
+    write_file(source, "int extension_symbol() { return 1; }\n");
+
+    Storage db(":memory:");
+    db.add_component("extension", dir);
+    const int64_t file_id = db.add_file_path(
+        source, std::nullopt, std::nullopt,
+        std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+    const auto file = db.get_file_by_id(file_id);
+    REQUIRE(file.has_value());
+    db.stamp_graph_resolved();
+    db.stamp_index_identity();
+
+    bool provider_saw_session = false;
+    bool runner_saw_session = false;
+    cidx::ast::register_frontend_pass_provider(
+        [&](cidx::ast::FrontendSession &session,
+            cidx::ast::ExtractionPassRegistry &registry,
+            cidx::ast::IndexingPlan &plan) {
+          provider_saw_session =
+              session.ast_context != nullptr &&
+              session.preprocessor != nullptr &&
+              session.statement_ports != nullptr &&
+              session.declaration_ports != nullptr &&
+              session.namespace_ports != nullptr &&
+              session.evidence != nullptr &&
+              session.supports(cidx::ast::FrontendCapability::cfg) &&
+              session.supports(cidx::ast::FrontendCapability::templates);
+          auto descriptor = cidx::ast::ExtractionPassDescriptor{
+              .id = "synthetic.extension",
+              .version = 1,
+              .required_capabilities =
+                  {cidx::ast::FrontendCapability::ast,
+                   cidx::ast::FrontendCapability::preprocessor},
+              .consumed_fact_families = {"ast", "preprocessor"},
+              .produced_fact_families = {"extension"},
+              .catalog_versions = {1},
+              .dependencies = {"main.associate"},
+              .scope = cidx::ast::PassScope::translation_unit,
+              .traversal = cidx::ast::TraversalMode::lifecycle,
+              .budget = {.max_visited_constructs = 2,
+                         .max_emitted_facts = 2,
+                         .max_diagnostics = 2,
+                         .declared = true}};
+          registry.register_pass(
+              std::move(descriptor),
+              [&](cidx::ast::PassExecutionContext &context) {
+                runner_saw_session =
+                    context.session != nullptr &&
+                    context.session->ast_context != nullptr &&
+                    context.session->preprocessor != nullptr &&
+                    context.session->statement_ports != nullptr;
+                context.metrics.note_visited();
+                context.session->statement_ports->emit(
+                    cidx::ast::EvidenceRecord{
+                        .producer = "extension",
+                        .construct = "Synthetic",
+                        .file = source,
+                        .completeness = cidx::ast::FactCompleteness::partial,
+                        .trust = cidx::ast::FactTrust::inferred,
+                        .detail = "extension"});
+              });
+          plan.insert_before("evidence.persist", "synthetic.extension");
+        });
+    const auto outcome = cidx::ast::run_index_one(db, *file, source, true);
+    cidx::ast::clear_frontend_pass_providers();
+    CHECK(!outcome.parse_failed);
+    CHECK(provider_saw_session);
+    CHECK(runner_saw_session);
+    CHECK(std::ranges::find_if(outcome.pass_metrics,
+                               [](const cidx::ast::IndexPassMetrics &metrics) {
+                                 return metrics.id == "synthetic.extension";
+                               }) != outcome.pass_metrics.end());
+  }
+
+  TEST_CASE("over-budget frontend storage emission cannot commit") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/budget.cpp";
+    write_file(source, "int budget_symbol() { return 1; }\n");
+
+    Storage db(":memory:");
+    db.add_component("budget", dir);
+    const int64_t file_id = db.add_file_path(
+        source, std::nullopt, std::nullopt,
+        std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+    const auto file = db.get_file_by_id(file_id);
+    REQUIRE(file.has_value());
+    db.stamp_graph_resolved();
+    db.stamp_index_identity();
+    const auto before = snapshot_tu_publication(db, source);
+
+    cidx::ast::register_frontend_pass_provider(
+        [&db](cidx::ast::FrontendSession &,
+              cidx::ast::ExtractionPassRegistry &registry,
+              cidx::ast::IndexingPlan &plan) {
+          auto descriptor = cidx::ast::ExtractionPassDescriptor{
+              .id = "synthetic.over-budget",
+              .version = 1,
+              .required_capabilities = {cidx::ast::FrontendCapability::ast},
+              .consumed_fact_families = {"symbols"},
+              .produced_fact_families = {"relations"},
+              .catalog_versions = {1},
+              .dependencies = {"main.associate"},
+              .scope = cidx::ast::PassScope::main_file,
+              .traversal = cidx::ast::TraversalMode::body,
+              .budget = {.max_visited_constructs = 1,
+                         .max_emitted_facts = 1,
+                         .max_diagnostics = 1,
+                         .declared = true}};
+          registry.register_pass(
+              std::move(descriptor),
+              [&db](cidx::ast::PassExecutionContext &context) {
+                const auto symbols = db.find_symbols("budget_symbol", {}, 10);
+                if (symbols.empty()) {
+                  return;
+                }
+                const cidx::ast::EdgeRecord edge{.src_id = symbols.front().id,
+                                                 .dst_id = symbols.front().id,
+                                                 .kind = 1};
+                context.session->statement_ports->add_edge(edge);
+                context.session->statement_ports->add_edge(edge);
+              });
+          plan.add("synthetic.over-budget");
+        });
+    const auto outcome = cidx::ast::run_index_one(db, *file, source, true);
+    cidx::ast::clear_frontend_pass_providers();
+    CHECK(outcome.parse_failed);
+    CHECK(outcome.error.find("budget exceeded") != std::string::npos);
+    CHECK(snapshot_tu_publication(db, source) == before);
+  }
+
+  TEST_CASE(
+      "production association preflight rejects low budgets before writes") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/association_budget.cpp";
+    write_file(source, "int association_budget_symbol() { return 1; }\n");
+    Storage db(":memory:");
+    db.add_component("association-budget", dir);
+    const int64_t file_id = db.add_file_path(
+        source, std::nullopt, std::nullopt,
+        std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+    const auto file = db.get_file_by_id(file_id);
+    REQUIRE(file.has_value());
+    db.stamp_graph_resolved();
+    db.stamp_index_identity();
+    const auto before = snapshot_tu_publication(db, source);
+    cidx::ast::register_frontend_pass_provider(
+        [](cidx::ast::FrontendSession &session,
+           cidx::ast::ExtractionPassRegistry &, cidx::ast::IndexingPlan &) {
+          session.budget_overrides["main.associate"] =
+              cidx::ast::PassBudget{.max_emitted_facts = 1, .declared = true};
+        });
+    const auto outcome = cidx::ast::run_index_one(db, *file, source, true);
+    cidx::ast::clear_frontend_pass_providers();
+    CHECK(outcome.parse_failed);
+    CHECK(outcome.error.find("budget exceeded") != std::string::npos);
+    CHECK(snapshot_tu_publication(db, source) == before);
+  }
+
+  TEST_CASE("production include preflight rejects low budgets before writes") {
+    const std::string dir = make_temp_dir();
+    const std::string header = dir + "/include_budget.hpp";
+    const std::string source = dir + "/include_budget.cpp";
+    write_file(header, "int include_budget_value = 1;\n");
+    write_file(source, "#include \"include_budget.hpp\"\n"
+                       "int include_budget_symbol() { return 1; }\n");
+    Storage db(":memory:");
+    db.add_component("include-budget", dir);
+    const int64_t file_id =
+        db.add_file_path(source, std::nullopt, std::nullopt,
+                         std::vector<std::string>{"-std=c++23", "-I", dir},
+                         std::string("clang++"));
+    const auto file = db.get_file_by_id(file_id);
+    REQUIRE(file.has_value());
+    db.stamp_graph_resolved();
+    db.stamp_index_identity();
+    const auto before = snapshot_tu_publication(db, source);
+    cidx::ast::register_frontend_pass_provider(
+        [](cidx::ast::FrontendSession &session,
+           cidx::ast::ExtractionPassRegistry &, cidx::ast::IndexingPlan &) {
+          session.budget_overrides["includes.persist"] =
+              cidx::ast::PassBudget{.max_emitted_facts = 1, .declared = true};
+        });
+    const auto outcome = cidx::ast::run_index_one(db, *file, source, true);
+    cidx::ast::clear_frontend_pass_providers();
+    CHECK(outcome.parse_failed);
+    CHECK(outcome.error.find("budget exceeded") != std::string::npos);
+    CHECK(snapshot_tu_publication(db, source) == before);
+  }
+
+  TEST_CASE(
+      "production association and include budgets accept N and reject N-1") {
+    struct Prepared {
+      std::unique_ptr<Storage> db;
+      cidx::File file;
+      std::string source;
+    };
+    const auto prepare_association = [] {
+      Prepared prepared;
+      const std::string dir = make_temp_dir();
+      prepared.source = dir + "/exact_association.cpp";
+      write_file(prepared.source,
+                 "int exact_association_symbol() { return 1; }\n");
+      prepared.db = std::make_unique<Storage>(":memory:");
+      prepared.db->add_component("exact-association", dir);
+      const int64_t file_id = prepared.db->add_file_path(
+          prepared.source, std::nullopt, std::nullopt,
+          std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+      prepared.file = *prepared.db->get_file_by_id(file_id);
+      prepared.db->stamp_graph_resolved();
+      prepared.db->stamp_index_identity();
+      return prepared;
+    };
+    const auto measured_association = prepare_association();
+    const auto measured_association_outcome = cidx::ast::run_index_one(
+        *measured_association.db, measured_association.file,
+        measured_association.source, true);
+    REQUIRE(!measured_association_outcome.parse_failed);
+    const auto association_metrics =
+        std::ranges::find_if(measured_association_outcome.pass_metrics,
+                             [](const cidx::ast::IndexPassMetrics &metrics) {
+                               return metrics.id == "main.associate";
+                             });
+    REQUIRE(association_metrics !=
+            measured_association_outcome.pass_metrics.end());
+    const std::size_t association_n = association_metrics->emitted_facts;
+    REQUIRE(association_n > 0);
+
+    const auto run_association = [&](std::size_t budget) {
+      Prepared prepared = prepare_association();
+      const auto before =
+          snapshot_tu_publication(*prepared.db, prepared.source);
+      cidx::ast::register_frontend_pass_provider(
+          [budget](cidx::ast::FrontendSession &session,
+                   cidx::ast::ExtractionPassRegistry &,
+                   cidx::ast::IndexingPlan &) {
+            session.budget_overrides["main.associate"] = cidx::ast::PassBudget{
+                .max_emitted_facts = budget, .declared = true};
+          });
+      const auto outcome = cidx::ast::run_index_one(*prepared.db, prepared.file,
+                                                    prepared.source, true);
+      cidx::ast::clear_frontend_pass_providers();
+      if (budget < association_n) {
+        CHECK(outcome.parse_failed);
+        CHECK(snapshot_tu_publication(*prepared.db, prepared.source) == before);
+      } else {
+        CHECK(!outcome.parse_failed);
+      }
+      return outcome;
+    };
+    run_association(association_n);
+    run_association(association_n - 1);
+
+    const auto prepare_include = [] {
+      Prepared prepared;
+      const std::string dir = make_temp_dir();
+      const std::string header = dir + "/exact_include.hpp";
+      prepared.source = dir + "/exact_include.cpp";
+      write_file(header, "int exact_include_value = 1;\n");
+      write_file(
+          prepared.source,
+          "#include \"exact_include.hpp\"\n"
+          "#include \"exact_include.hpp\"\n"
+          "int exact_include_symbol() { return exact_include_value; }\n");
+      prepared.db = std::make_unique<Storage>(":memory:");
+      prepared.db->add_component("exact-include", dir);
+      const int64_t file_id = prepared.db->add_file_path(
+          prepared.source, std::nullopt, std::nullopt,
+          std::vector<std::string>{"-std=c++23", "-I", dir},
+          std::string("clang++"));
+      prepared.file = *prepared.db->get_file_by_id(file_id);
+      prepared.db->stamp_graph_resolved();
+      prepared.db->stamp_index_identity();
+      return prepared;
+    };
+    const auto measured_include = prepare_include();
+    const auto measured_include_outcome =
+        cidx::ast::run_index_one(*measured_include.db, measured_include.file,
+                                 measured_include.source, true);
+    REQUIRE(!measured_include_outcome.parse_failed);
+    const auto include_metrics =
+        std::ranges::find_if(measured_include_outcome.pass_metrics,
+                             [](const cidx::ast::IndexPassMetrics &metrics) {
+                               return metrics.id == "includes.persist";
+                             });
+    REQUIRE(include_metrics != measured_include_outcome.pass_metrics.end());
+    const std::size_t include_n = include_metrics->emitted_facts;
+    REQUIRE(include_n > 0);
+    CHECK(include_metrics->duplicates >= 3);
+    const auto run_include = [&](std::size_t budget) {
+      Prepared prepared = prepare_include();
+      const auto before =
+          snapshot_tu_publication(*prepared.db, prepared.source);
+      cidx::ast::register_frontend_pass_provider(
+          [budget](cidx::ast::FrontendSession &session,
+                   cidx::ast::ExtractionPassRegistry &,
+                   cidx::ast::IndexingPlan &) {
+            session.budget_overrides["includes.persist"] =
+                cidx::ast::PassBudget{.max_emitted_facts = budget,
+                                      .declared = true};
+          });
+      const auto outcome = cidx::ast::run_index_one(*prepared.db, prepared.file,
+                                                    prepared.source, true);
+      cidx::ast::clear_frontend_pass_providers();
+      if (budget < include_n) {
+        CHECK(outcome.parse_failed);
+        CHECK(snapshot_tu_publication(*prepared.db, prepared.source) == before);
+      } else {
+        CHECK(!outcome.parse_failed);
+      }
+      return outcome;
+    };
+    run_include(include_n);
+    run_include(include_n - 1);
+  }
+
+  TEST_CASE(
+      "production nested include preflight counts shared applicability once") {
+    struct Prepared {
+      std::unique_ptr<Storage> db;
+      cidx::File file;
+      std::string source;
+    };
+    const auto prepare = [] {
+      Prepared prepared;
+      const std::string dir = make_temp_dir();
+      write_file(dir + "/inner.hpp", "int nested_include_value = 1;\n");
+      write_file(dir + "/outer.hpp", "#include \"inner.hpp\"\n");
+      prepared.source = dir + "/nested.cpp";
+      write_file(
+          prepared.source,
+          "#include \"outer.hpp\"\n"
+          "int nested_include_user() { return nested_include_value; }\n");
+      prepared.db = std::make_unique<Storage>(":memory:");
+      prepared.db->add_component("nested-include", dir);
+      const int64_t file_id = prepared.db->add_file_path(
+          prepared.source, std::nullopt, std::nullopt,
+          std::vector<std::string>{"-std=c++23", "-I", dir},
+          std::string("clang++"));
+      prepared.file = *prepared.db->get_file_by_id(file_id);
+      prepared.db->stamp_graph_resolved();
+      prepared.db->stamp_index_identity();
+      return prepared;
+    };
+
+    const auto measured = prepare();
+    const auto measured_outcome = cidx::ast::run_index_one(
+        *measured.db, measured.file, measured.source, true);
+    REQUIRE(!measured_outcome.parse_failed);
+    const auto include_metrics =
+        std::ranges::find_if(measured_outcome.pass_metrics,
+                             [](const cidx::ast::IndexPassMetrics &metrics) {
+                               return metrics.id == "includes.persist";
+                             });
+    REQUIRE(include_metrics != measured_outcome.pass_metrics.end());
+    const std::size_t include_n = include_metrics->emitted_facts;
+    REQUIRE(include_n > 0);
+    CHECK(include_metrics->duplicates == 1);
+
+    const auto run = [&](std::size_t budget) {
+      Prepared prepared = prepare();
+      const auto before =
+          snapshot_tu_publication(*prepared.db, prepared.source);
+      cidx::ast::register_frontend_pass_provider(
+          [budget](cidx::ast::FrontendSession &session,
+                   cidx::ast::ExtractionPassRegistry &,
+                   cidx::ast::IndexingPlan &) {
+            session.budget_overrides["includes.persist"] =
+                cidx::ast::PassBudget{.max_emitted_facts = budget,
+                                      .declared = true};
+          });
+      const auto outcome = cidx::ast::run_index_one(*prepared.db, prepared.file,
+                                                    prepared.source, true);
+      cidx::ast::clear_frontend_pass_providers();
+      if (budget < include_n) {
+        CHECK(outcome.parse_failed);
+        CHECK(outcome.error.find("budget exceeded") != std::string::npos);
+        CHECK(snapshot_tu_publication(*prepared.db, prepared.source) == before);
+      } else {
+        CHECK(!outcome.parse_failed);
+      }
+    };
+    run(include_n);
+    run(include_n - 1);
+  }
+
+  TEST_CASE(
+      "production statement body-edge preflight rejects N-1 before mutation") {
+    struct Prepared {
+      std::unique_ptr<Storage> db;
+      cidx::File file;
+      std::string source;
+    };
+    const auto prepare = [] {
+      Prepared prepared;
+      const std::string dir = make_temp_dir();
+      prepared.source = dir + "/body_budget.cpp";
+      write_file(prepared.source,
+                 "int body_budget_callee() { return 1; }\n"
+                 "int body_budget_caller() { return body_budget_callee(); }\n");
+      prepared.db = std::make_unique<Storage>(":memory:");
+      prepared.db->add_component("body-budget", dir);
+      const int64_t file_id = prepared.db->add_file_path(
+          prepared.source, std::nullopt, std::nullopt,
+          std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+      prepared.file = *prepared.db->get_file_by_id(file_id);
+      prepared.db->stamp_graph_resolved();
+      prepared.db->stamp_index_identity();
+      return prepared;
+    };
+    const auto measured = prepare();
+    const auto measured_outcome = cidx::ast::run_index_one(
+        *measured.db, measured.file, measured.source, true);
+    REQUIRE(!measured_outcome.parse_failed);
+    const auto statement_metrics =
+        std::ranges::find_if(measured_outcome.pass_metrics,
+                             [](const cidx::ast::IndexPassMetrics &metrics) {
+                               return metrics.id == "statements.main";
+                             });
+    REQUIRE(statement_metrics != measured_outcome.pass_metrics.end());
+    const std::size_t statement_n = statement_metrics->emitted_facts;
+    REQUIRE(statement_n > 0);
+    for (const std::size_t budget : {statement_n, statement_n - 1}) {
+      Prepared prepared = prepare();
+      const auto before =
+          snapshot_tu_publication(*prepared.db, prepared.source);
+      cidx::ast::register_frontend_pass_provider(
+          [budget](cidx::ast::FrontendSession &session,
+                   cidx::ast::ExtractionPassRegistry &,
+                   cidx::ast::IndexingPlan &) {
+            session.budget_overrides["statements.main"] = cidx::ast::PassBudget{
+                .max_emitted_facts = budget, .declared = true};
+          });
+      const auto outcome = cidx::ast::run_index_one(*prepared.db, prepared.file,
+                                                    prepared.source, true);
+      cidx::ast::clear_frontend_pass_providers();
+      if (budget == statement_n) {
+        CHECK(!outcome.parse_failed);
+      } else {
+        CHECK(outcome.parse_failed);
+        CHECK(snapshot_tu_publication(*prepared.db, prepared.source) == before);
+      }
+    }
+  }
+
+  TEST_CASE(
+      "production presentation budget rejects N+1 before display writes") {
+    struct Prepared {
+      std::unique_ptr<Storage> db;
+      cidx::File file;
+      std::string source;
+    };
+    const auto prepare = [] {
+      Prepared prepared;
+      const std::string dir = make_temp_dir();
+      prepared.source = dir + "/presentation_budget.cpp";
+      write_file(prepared.source,
+                 "template <typename T> void presentation_budget(T) {}\n"
+                 "template <> void presentation_budget<int>(int) {}\n"
+                 "template <typename T> void presentation_budget_extra(T) {}\n"
+                 "template <> void presentation_budget_extra<int>(int) {}\n");
+      prepared.db = std::make_unique<Storage>(":memory:");
+      prepared.db->add_component("presentation-budget", dir);
+      const int64_t file_id = prepared.db->add_file_path(
+          prepared.source, std::nullopt, std::nullopt,
+          std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+      prepared.file = *prepared.db->get_file_by_id(file_id);
+      prepared.db->stamp_graph_resolved();
+      prepared.db->stamp_index_identity();
+      return prepared;
+    };
+    const auto install_presentation_provider = [](Storage &db,
+                                                  std::size_t budget,
+                                                  bool extra) {
+      cidx::ast::register_frontend_pass_provider(
+          [&db, budget, extra](cidx::ast::FrontendSession &session,
+                               cidx::ast::ExtractionPassRegistry &registry,
+                               cidx::ast::IndexingPlan &plan) {
+            session.budget_overrides["presentation.persist"] =
+                cidx::ast::PassBudget{.max_emitted_facts = budget,
+                                      .declared = true};
+            auto descriptor = cidx::ast::ExtractionPassDescriptor{
+                .id = "synthetic.presentation_intent",
+                .version = 1,
+                .required_capabilities = {cidx::ast::FrontendCapability::ast},
+                .consumed_fact_families = {"symbols"},
+                .produced_fact_families = {"presentation_intents"},
+                .catalog_versions = {1},
+                .dependencies = {"declarations.main"},
+                .scope = cidx::ast::PassScope::main_file,
+                .traversal = cidx::ast::TraversalMode::lifecycle,
+                .budget = {.max_visited_constructs = 4,
+                           .max_emitted_facts = 4,
+                           .max_diagnostics = 4,
+                           .declared = true}};
+            registry.register_pass(
+                std::move(descriptor),
+                [&db, extra](cidx::ast::PassExecutionContext &context) {
+                  const auto symbols =
+                      db.lookup_symbols_by_name("presentation_budget");
+                  const auto extra_symbols =
+                      db.lookup_symbols_by_name("presentation_budget_extra");
+                  if (symbols.empty() || (extra && extra_symbols.empty())) {
+                    return;
+                  }
+                  const auto emit_intent = [&db,
+                                            &context](const Symbol &symbol,
+                                                      std::string_view name) {
+                    db.update_symbol_by_id(
+                        symbol.id,
+                        {{"display_name", std::string(name) + "<old>"}});
+                    context.session->presentation_intents->emit(
+                        cidx::ast::PresentationIntent{.symbol_id = symbol.id,
+                                                      .display_args = {"int"}});
+                  };
+                  emit_intent(symbols.front(), "presentation_budget");
+                  if (extra) {
+                    emit_intent(extra_symbols.front(),
+                                "presentation_budget_extra");
+                  }
+                });
+            plan.insert_before("presentation.persist",
+                               "synthetic.presentation_intent");
+          });
+    };
+    const auto measured = prepare();
+    install_presentation_provider(*measured.db, 100, false);
+    const auto measured_outcome = cidx::ast::run_index_one(
+        *measured.db, measured.file, measured.source, true);
+    cidx::ast::clear_frontend_pass_providers();
+    REQUIRE(!measured_outcome.parse_failed);
+    const auto presentation_metrics =
+        std::ranges::find_if(measured_outcome.pass_metrics,
+                             [](const cidx::ast::IndexPassMetrics &metrics) {
+                               return metrics.id == "presentation.persist";
+                             });
+    REQUIRE(presentation_metrics != measured_outcome.pass_metrics.end());
+    const std::size_t presentation_n = presentation_metrics->emitted_facts;
+    REQUIRE(presentation_n > 0);
+    {
+      Prepared prepared = prepare();
+      install_presentation_provider(*prepared.db, presentation_n, false);
+      const auto outcome = cidx::ast::run_index_one(*prepared.db, prepared.file,
+                                                    prepared.source, true);
+      cidx::ast::clear_frontend_pass_providers();
+      CHECK(!outcome.parse_failed);
+    }
+    {
+      Prepared prepared = prepare();
+      const auto before =
+          snapshot_tu_publication(*prepared.db, prepared.source);
+      install_presentation_provider(*prepared.db, presentation_n, true);
+      const auto outcome = cidx::ast::run_index_one(*prepared.db, prepared.file,
+                                                    prepared.source, true);
+      cidx::ast::clear_frontend_pass_providers();
+      CHECK(outcome.parse_failed);
+      CHECK(snapshot_tu_publication(*prepared.db, prepared.source) == before);
+    }
   }
 
   TEST_CASE("index TU publication enforces read-only storage") {

@@ -17,6 +17,8 @@ struct AstStoragePorts;
 
 namespace cidx::ast {
 
+struct PassMetrics;
+
 class StorageSymbolSink : public SymbolEmitter {
 public:
   explicit StorageSymbolSink(cidx::storage::AstStoragePorts &ports);
@@ -29,6 +31,7 @@ public:
   // index_file_notxn counters: a cursor whose symbol already exists RESOLVED
   // counts as skipped (AstIndexer::store semantics).
   void reset_counters();
+  void set_metrics(PassMetrics *metrics);
   [[nodiscard]] int stored_count() const;
   [[nodiscard]] const std::vector<int64_t> &symbol_ids() const;
 
@@ -40,6 +43,7 @@ private:
   std::optional<std::string> identity_translation_unit_;
   int stored_ = 0;
   std::vector<int64_t> symbol_ids_;
+  PassMetrics *metrics_ = nullptr;
 };
 
 } // namespace cidx::ast

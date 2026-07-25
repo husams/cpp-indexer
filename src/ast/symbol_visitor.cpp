@@ -2,6 +2,7 @@
 
 #include "ast/instantiation_edges.hpp"
 #include "ast/location.hpp"
+#include "ast/pass_registry.hpp"
 #include "ast/symbol_emitter.hpp"
 
 #include "clang/AST/ASTContext.h"
@@ -59,9 +60,17 @@ bool is_local_symbol_decl(const clang::NamedDecl *decl) {
 } // namespace
 
 SymbolVisitor::SymbolVisitor(clang::ASTContext &context, SymbolEmitter &out,
-                             std::string target_file)
+                             std::string target_file, PassMetrics *metrics)
     : context_(context), source_manager_(context.getSourceManager()),
-      extractor_(context), out_(out), target_file_(std::move(target_file)) {}
+      extractor_(context), out_(out), target_file_(std::move(target_file)),
+      metrics_(metrics) {}
+
+bool SymbolVisitor::VisitDecl(clang::Decl * /*decl*/) {
+  if (metrics_ != nullptr) {
+    metrics_->note_visited();
+  }
+  return true;
+}
 
 bool SymbolVisitor::should_emit(const clang::NamedDecl *decl) const {
   // cidx's symbol phase covers the main file AND owned (non-system) headers,

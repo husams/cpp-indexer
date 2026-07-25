@@ -65,8 +65,8 @@ std::string usr_or_qualname(const clang::NamedDecl *decl) {
 
 } // namespace
 
-TypeInterner::TypeInterner(clang::ASTContext &context, EdgeSink &sink)
-    : context_(context), sink_(sink) {}
+TypeInterner::TypeInterner(clang::ASTContext &context, TypeFactEmitter &types)
+    : context_(context), types_(types) {}
 
 std::optional<int64_t> TypeInterner::intern(clang::QualType qt) {
   const std::optional<Result> r = build(qt, 0);
@@ -104,7 +104,7 @@ TypeInterner::Result TypeInterner::emit_node(clang::QualType qt,
   }
   Result out;
   out.key = rec.type_key;
-  out.id = sink_.intern_type_node(rec);
+  out.id = types_.intern_type_node(rec);
   memo_[qt.getAsOpaquePtr()] = out;
   return out;
 }
@@ -135,7 +135,7 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
     rec.type_key = "a:" + usr_or_qualname(tt->getDecl());
     const Result self = emit_node(qt, std::move(rec), depth);
     if (const auto target = build(tt->desugar(), depth + 1)) {
-      sink_.add_type_edge(self.id, kTypeEdgeAliasOfK, 0, target->id);
+      types_.add_type_edge(self.id, kTypeEdgeAliasOfK, 0, target->id);
     }
     return self;
   }
@@ -175,11 +175,11 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
     const Result self = emit_node(qt, std::move(rec), depth);
     for (const auto &[pos, r] : args) {
       if (r) {
-        sink_.add_type_edge(self.id, kTypeEdgeTemplateArgK, pos, r->id);
+        types_.add_type_edge(self.id, kTypeEdgeTemplateArgK, pos, r->id);
       }
     }
     if (const auto target = build(tst->desugar(), depth + 1)) {
-      sink_.add_type_edge(self.id, kTypeEdgeAliasOfK, 0, target->id);
+      types_.add_type_edge(self.id, kTypeEdgeAliasOfK, 0, target->id);
     }
     return self;
   }
@@ -230,7 +230,7 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
           continue;
         }
         if (const auto r = build(args[i].getAsType(), depth + 1)) {
-          sink_.add_type_edge(self.id, kTypeEdgeTemplateArgK, i, r->id);
+          types_.add_type_edge(self.id, kTypeEdgeTemplateArgK, i, r->id);
         }
       }
     }
@@ -243,7 +243,7 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
     rec.type_key = "p(" + (inner ? inner->key : "?") + ")";
     const Result self = emit_node(qt, std::move(rec), depth);
     if (inner) {
-      sink_.add_type_edge(self.id, kTypeEdgePointeeK, 0, inner->id);
+      types_.add_type_edge(self.id, kTypeEdgePointeeK, 0, inner->id);
     }
     return self;
   }
@@ -255,7 +255,7 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
     rec.type_key = (rvalue ? "r(" : "l(") + (inner ? inner->key : "?") + ")";
     const Result self = emit_node(qt, std::move(rec), depth);
     if (inner) {
-      sink_.add_type_edge(self.id, kTypeEdgePointeeK, 0, inner->id);
+      types_.add_type_edge(self.id, kTypeEdgePointeeK, 0, inner->id);
     }
     return self;
   }
@@ -275,10 +275,10 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
                    (component ? component->key : "?") + ")";
     const Result self = emit_node(qt, std::move(rec), depth);
     if (owner_node) {
-      sink_.add_type_edge(self.id, kTypeEdgeMemberOwnerK, 0, owner_node->id);
+      types_.add_type_edge(self.id, kTypeEdgeMemberOwnerK, 0, owner_node->id);
     }
     if (component) {
-      sink_.add_type_edge(self.id, kTypeEdgeMemberComponentK, 0, component->id);
+      types_.add_type_edge(self.id, kTypeEdgeMemberComponentK, 0, component->id);
     }
     return self;
   }
@@ -295,7 +295,7 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
     rec.type_key = "A" + size + "(" + (inner ? inner->key : "?") + ")";
     const Result self = emit_node(qt, std::move(rec), depth);
     if (inner) {
-      sink_.add_type_edge(self.id, kTypeEdgeElementK, 0, inner->id);
+      types_.add_type_edge(self.id, kTypeEdgeElementK, 0, inner->id);
     }
     return self;
   }
@@ -348,11 +348,11 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
     rec.type_key = std::move(key);
     const Result self = emit_node(qt, std::move(rec), depth);
     if (ret) {
-      sink_.add_type_edge(self.id, kTypeEdgeReturnK, 0, ret->id);
+      types_.add_type_edge(self.id, kTypeEdgeReturnK, 0, ret->id);
     }
     for (const auto &[pos, r] : params) {
       if (r) {
-        sink_.add_type_edge(self.id, kTypeEdgeParamK, pos, r->id);
+        types_.add_type_edge(self.id, kTypeEdgeParamK, pos, r->id);
       }
     }
     return self;
@@ -363,7 +363,7 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
     rec.type_key = "fnp(" + (ret ? ret->key : "?") + ")";
     const Result self = emit_node(qt, std::move(rec), depth);
     if (ret) {
-      sink_.add_type_edge(self.id, kTypeEdgeReturnK, 0, ret->id);
+      types_.add_type_edge(self.id, kTypeEdgeReturnK, 0, ret->id);
     }
     return self;
   }

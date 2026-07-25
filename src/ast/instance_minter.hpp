@@ -16,13 +16,16 @@ class TypedefNameDecl;
 
 namespace cidx::ast {
 
-class EdgeSink;
+class DeclarationIdentityResolver;
+class RelationFactEmitter;
 class MintBuilder;
 class TemplateArgumentEncoder;
 
 class InstanceMinter {
 public:
-  InstanceMinter(const clang::ASTContext &context, EdgeSink &sink,
+  InstanceMinter(const clang::ASTContext &context,
+                 DeclarationIdentityResolver &identity,
+                 RelationFactEmitter &relations,
                  const MintBuilder &mint,
                  const TemplateArgumentEncoder &targ_encoder);
 
@@ -42,7 +45,8 @@ private:
                      clang::QualType written_type) const;
 
   const clang::ASTContext &context_;
-  EdgeSink &sink_;
+  DeclarationIdentityResolver &identity_;
+  RelationFactEmitter &relations_;
   const MintBuilder &mint_;
   const TemplateArgumentEncoder &targ_encoder_;
 };

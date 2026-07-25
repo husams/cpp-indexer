@@ -1,9 +1,8 @@
 #include "ast/instantiation_edges.hpp"
 
 #include "ast/decl_flags.hpp"
-#include "ast/display_name_rewrite.hpp"
 #include "ast/edge_records.hpp"
-#include "ast/edge_sink.hpp"
+#include "ast/fact_emitters.hpp"
 #include "ast/location.hpp"
 #include "ast/mint_builder.hpp"
 #include "ast/template_argument_encoder.hpp"
@@ -30,7 +29,8 @@ int64_t structural_edge_kind(clang::TemplateSpecializationKind tsk) {
 // flag, its method_of(9) edge, the owner -> primary structural edge, and the
 // owner's template_arg rows through the one canonical encoder. All structural
 // emission is idempotent (ensure_edge / keyed REPLACE).
-void emit_spec_owner(EdgeSink &sink, MintBuilder &mint,
+void emit_spec_owner(DeclarationIdentityResolver &identity,
+                     RelationFactEmitter &relations, MintBuilder &mint,
                      const TemplateArgumentEncoder &targ_encoder,
                      int64_t dst_id,
                      const clang::ClassTemplateSpecializationDecl *ospec) {
@@ -40,21 +40,21 @@ void emit_spec_owner(EdgeSink &sink, MintBuilder &mint,
     return;
   }
   oreq->is_instantiation = is_template_instantiation(ospec);
-  const int64_t type_id = sink.mint_symbol(*oreq);
+  const int64_t type_id = identity.mint_symbol(*oreq);
   EdgeRecord mo;
   mo.src_id = dst_id;
   mo.dst_id = type_id;
   mo.kind = 9;
-  sink.ensure_edge(mo);
+  relations.ensure_edge(mo);
   const std::string cp = usr_for_decl(cls_prim);
   if (!cp.empty()) {
-    if (const auto cpid = sink.lookup_symbol_id(
+    if (const auto cpid = identity.lookup_symbol_id(
             cp, expansion_loc(mint.context(), cls_prim->getLocation()).file)) {
       EdgeRecord ie;
       ie.src_id = type_id;
       ie.dst_id = *cpid;
       ie.kind = structural_edge_kind(ospec->getSpecializationKind());
-      sink.ensure_edge(ie);
+      relations.ensure_edge(ie);
     }
   }
   const clang::TemplateArgumentList &args = ospec->getTemplateArgs();
@@ -67,7 +67,8 @@ void emit_spec_owner(EdgeSink &sink, MintBuilder &mint,
 // its pattern (`Outer<T>::Inner`) so the owner is not structurally orphaned:
 // owner -> pattern with the TSK-derived kind (instantiates, or specializes
 // for an authored member specialization).
-void emit_member_class_pattern_edge(EdgeSink &sink,
+void emit_member_class_pattern_edge(DeclarationIdentityResolver &identity,
+                                    RelationFactEmitter &relations,
                                     const clang::ASTContext &context,
                                     int64_t owner_id,
                                     const clang::CXXRecordDecl *owner) {
@@ -79,7 +80,7 @@ void emit_member_class_pattern_edge(EdgeSink &sink,
   if (pat_usr.empty()) {
     return;
   }
-  const auto pid = sink.lookup_symbol_id(
+  const auto pid = identity.lookup_symbol_id(
       pat_usr, expansion_loc(context, pattern->getLocation()).file);
   if (!pid) {
     return;
@@ -88,7 +89,7 @@ void emit_member_class_pattern_edge(EdgeSink &sink,
   ie.src_id = owner_id;
   ie.dst_id = *pid;
   ie.kind = structural_edge_kind(owner->getTemplateSpecializationKind());
-  sink.ensure_edge(ie);
+  relations.ensure_edge(ie);
 }
 
 // Owner-type promotion for a concrete method specialization/instantiation:
@@ -98,7 +99,8 @@ void emit_member_class_pattern_edge(EdgeSink &sink,
 // inside an instantiation (`Outer<int>::Inner`) is never a lexical decl, so
 // its concrete member would otherwise lose method_of. Indexed owners
 // resolve to their existing row (mint upserts by USR).
-void emit_owner_promotion(EdgeSink &sink, MintBuilder &mint,
+void emit_owner_promotion(DeclarationIdentityResolver &identity,
+                          RelationFactEmitter &relations, MintBuilder &mint,
                           const TemplateArgumentEncoder &targ_encoder,
                           int64_t dst_id, const clang::CXXMethodDecl *m) {
   const clang::CXXRecordDecl *owner = m->getParent();
@@ -110,17 +112,18 @@ void emit_owner_promotion(EdgeSink &sink, MintBuilder &mint,
   if (ospec == nullptr) {
     if (auto oreq = mint.build(owner)) {
       oreq->is_instantiation = is_template_instantiation(owner);
-      const int64_t oid = sink.mint_symbol(*oreq);
+      const int64_t oid = identity.mint_symbol(*oreq);
       EdgeRecord mo;
       mo.src_id = dst_id;
       mo.dst_id = oid;
       mo.kind = 9;
-      sink.ensure_edge(mo);
-      emit_member_class_pattern_edge(sink, mint.context(), oid, owner);
+      relations.ensure_edge(mo);
+      emit_member_class_pattern_edge(identity, relations, mint.context(), oid,
+                                     owner);
     }
     return;
   }
-  emit_spec_owner(sink, mint, targ_encoder, dst_id, ospec);
+  emit_spec_owner(identity, relations, mint, targ_encoder, dst_id, ospec);
 }
 
 // template_arg rows from the FULL specialization argument list (deduced and
@@ -165,7 +168,8 @@ callable_template_info(const clang::FunctionDecl *fd) {
 }
 
 void emit_callable_template_identity(
-    EdgeSink &sink, MintBuilder &mint,
+    DeclarationIdentityResolver &identity, RelationFactEmitter &relations,
+    PresentationIntentEmitter *presentation_intents, MintBuilder &mint,
     const TemplateArgumentEncoder &targ_encoder, int64_t dst_id,
     const clang::FunctionDecl *fd, const CallableTemplateInfo &info,
     const std::vector<clang::QualType> &written) {
@@ -175,38 +179,39 @@ void emit_callable_template_identity(
   const std::string prim_usr = usr_for_decl(info.primary);
   const std::string fd_usr = usr_for_decl(fd);
   if (!prim_usr.empty() && prim_usr != fd_usr) {
-    if (const auto prim = sink.lookup_symbol_id(
+    if (const auto prim = identity.lookup_symbol_id(
             prim_usr,
             expansion_loc(mint.context(), info.primary->getLocation()).file)) {
       EdgeRecord e;
       e.src_id = dst_id;
       e.dst_id = *prim;
       e.kind = structural_edge_kind(info.tsk);
-      sink.ensure_edge(e);
+      relations.ensure_edge(e);
     }
   }
 
   const std::vector<std::string> display_args =
       emit_specialization_args(targ_encoder, dst_id, fd, written);
-  if (const auto disp = sink.lookup_display_name(dst_id)) {
-    if (const auto rewritten =
-            rewrite_template_display_name(*disp, display_args)) {
-      sink.update_display_name(dst_id, *rewritten);
-    }
+  if (presentation_intents != nullptr && !display_args.empty()) {
+    presentation_intents->emit(
+        PresentationIntent{.symbol_id = dst_id, .display_args = display_args});
   }
 
   if (const auto *m = llvm::dyn_cast<clang::CXXMethodDecl>(fd)) {
-    emit_owner_promotion(sink, mint, targ_encoder, dst_id, m);
+    emit_owner_promotion(identity, relations, mint, targ_encoder, dst_id, m);
   }
 }
 
-void emit_method_owner(EdgeSink &sink, MintBuilder &mint,
+void emit_method_owner(DeclarationIdentityResolver &identity,
+                       RelationFactEmitter &relations, MintBuilder &mint,
                        const TemplateArgumentEncoder &targ_encoder,
                        int64_t dst_id, const clang::CXXMethodDecl *method) {
-  emit_owner_promotion(sink, mint, targ_encoder, dst_id, method);
+  emit_owner_promotion(identity, relations, mint, targ_encoder, dst_id, method);
 }
 
-void emit_instance_fields(EdgeSink &sink, const MintBuilder &mint,
+void emit_instance_fields(DeclarationIdentityResolver &identity,
+                          RelationFactEmitter &relations,
+                          const MintBuilder &mint,
                           const clang::ClassTemplateSpecializationDecl *spec,
                           int64_t inst_id) {
   // Only real instantiations: an authored full/partial specialization's fields
@@ -221,10 +226,10 @@ void emit_instance_fields(EdgeSink &sink, const MintBuilder &mint,
   for (const clang::FieldDecl *field : def->fields()) {
     if (auto req = mint.build(field)) {
       EdgeRecord fo;
-      fo.src_id = sink.mint_symbol(*req);
+      fo.src_id = identity.mint_symbol(*req);
       fo.dst_id = inst_id;
       fo.kind = 8; // field_of
-      sink.ensure_edge(fo);
+      relations.ensure_edge(fo);
     }
   }
 }

@@ -15,7 +15,8 @@ class NamedDecl;
 
 namespace cidx::ast {
 
-class EdgeSink;
+class DeclarationIdentityResolver;
+class RelationFactEmitter;
 struct ExpansionLoc;
 
 // Strip pointer/reference/array layers AS WRITTEN and return the named type's
@@ -26,8 +27,10 @@ const clang::NamedDecl *named_type_decl(clang::QualType type);
 // `loc` (the site cursor's expansion location). `edge_kind` is uses(7) for
 // signature/variable/body references and alias_of(19) for the definitional
 // typedef/using-alias -> underlying-type relation.
-void emit_type_use(EdgeSink &sink, int64_t src_id, clang::QualType type,
-                   int64_t file_id, const ExpansionLoc &loc, int conditional,
+void emit_type_use(DeclarationIdentityResolver &identity,
+                   RelationFactEmitter &relations, int64_t src_id,
+                   clang::QualType type, int64_t file_id,
+                   const ExpansionLoc &loc, int conditional,
                    int64_t edge_kind = 7);
 
 } // namespace cidx::ast
