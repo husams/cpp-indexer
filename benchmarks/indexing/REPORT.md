@@ -8,13 +8,14 @@ corpora, caches, JSON, and profiler traces remain outside the repository.
 - Host: Darwin arm64, Python 3.14.6.
 - Baseline executable: latest `origin/main` commit `def1bdf`.
 - Candidate executable: the rebased HSE-95 branch after replacing repeated
-  resolved-symbol upserts with an idempotent declaration-site path.
+  resolved-symbol upserts with an idempotent declaration-site path guarded by
+  a complete `add_symbol()` merge-semantic check.
 - Corpus sizes: 32 and 1,000 translation units. Every TU includes the shared
   high-fan-in `shared.hpp`; TU 0 additionally includes `coverage.hpp`, which
   supplies warning-diagnostic, macro-use, call-argument, template,
   template-parameter, parameter, and pointer type-edge facts.
 - Trials: three paired trials per executable and corpus size; values below are
-  medians. Raw report: `/tmp/hse95-rebased-final-v8.json`.
+  medians. Raw report: `/tmp/hse95-postfix-v10.json`.
 - Command:
 
 ```text
@@ -25,7 +26,7 @@ python3 benchmarks/indexing/run.py \
   --scale-files 1000 \
   --per-tu 5 \
   --trials 3 \
-  --output /tmp/hse95-rebased-final-v8.json
+  --output /tmp/hse95-postfix-v10.json
 ```
 
 The baseline was rebuilt from `origin/main` in a disposable worktree. Because
@@ -54,18 +55,17 @@ are current versus baseline wall time; positive means faster.
 
 | Corpus | Stage | Baseline | HSE-95 | Improvement |
 | ---: | --- | ---: | ---: | ---: |
-| 32 TUs | cold | 1.283 s / 0.940 | 1.236 s / 0.936 | +3.7% |
-| 32 TUs | warm | 0.033 s / 0.905 | 0.039 s / 0.911 | -17.0% |
-| 32 TUs | incremental | 0.069 s / 0.943 | 0.074 s / 0.946 | -7.4% |
-| 1,000 TUs | cold | 200.688 s / 0.979 | 148.888 s / 0.979 | +25.8% |
-| 1,000 TUs | warm | 0.317 s / 0.985 | 0.235 s / 0.985 | +25.8% |
-| 1,000 TUs | incremental | 0.777 s / 0.988 | 0.466 s / 0.988 | +40.1% |
+| 32 TUs | cold | 1.866 s / 0.922 | 1.711 s / 0.927 | +8.3% |
+| 32 TUs | warm | 0.045 s / 0.890 | 0.046 s / 0.884 | -2.0% |
+| 32 TUs | incremental | 0.092 s / 0.925 | 0.088 s / 0.922 | +4.7% |
+| 1,000 TUs | cold | 221.326 s / 0.957 | 203.757 s / 0.953 | +7.9% |
+| 1,000 TUs | warm | 0.347 s / 0.886 | 0.345 s / 0.946 | +0.5% |
+| 1,000 TUs | incremental | 0.647 s / 0.954 | 0.671 s / 0.959 | -3.8% |
 
 The three-trial aggregation demonstrates a repeatable full-refresh win at both
-sizes, including the 1,000-TU acceptance case. The 1,000-TU warm and
-incremental paths also improve and remain below the 5-second and 2-second
-operational targets. Cold RSS was 44.2/44.4 MiB at 32 TUs and 55.3/55.2 MiB at
-1,000 TUs (baseline/HSE-95).
+sizes, including the 1,000-TU acceptance case. Warm and incremental paths
+remain below the 5-second and 2-second operational targets. Cold RSS was
+44.9/44.8 MiB at 32 TUs and 55.5/55.6 MiB at 1,000 TUs (baseline/HSE-95).
 
 ## SQLite activity and repeated work
 
@@ -150,11 +150,11 @@ parenthesized values are all three trial measurements in seconds.
 
 | TU | Baseline | HSE-95 |
 | --- | ---: | ---: |
-| 0 | 0.681 (0.484, 0.681, 1.044) | 0.521 (0.464, 0.521, 0.667) |
-| 1 | 0.588 (0.423, 0.588, 0.808) | 0.455 (0.398, 0.455, 0.559) |
-| 2 | 0.580 (0.419, 0.580, 0.817) | 0.427 (0.400, 0.427, 0.577) |
-| 3 | 0.574 (0.420, 0.574, 0.923) | 0.407 (0.395, 0.407, 0.606) |
-| 4 | 0.636 (0.416, 0.636, 0.964) | 0.398 (0.398, 0.395, 0.540) |
+| 0 | 0.665 (0.643, 0.665, 0.690) | 0.670 (0.662, 0.670, 0.685) |
+| 1 | 0.575 (0.558, 0.575, 0.579) | 0.527 (0.526, 0.527, 0.549) |
+| 2 | 0.562 (0.552, 0.562, 0.575) | 0.525 (0.525, 0.525, 0.543) |
+| 3 | 0.569 (0.556, 0.569, 0.570) | 0.528 (0.512, 0.528, 0.548) |
+| 4 | 0.576 (0.546, 0.576, 0.636) | 0.524 (0.514, 0.524, 0.577) |
 
 ## Profiler-derived attribution
 

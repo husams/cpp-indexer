@@ -64,6 +64,85 @@ std::size_t identity_cache_hash(const cidx::Symbol &sym) {
   return hash;
 }
 
+template <typename T> void coalesce(T &target, const T &incoming) {
+  if (incoming.has_value()) {
+    target = incoming;
+  }
+}
+
+cidx::Symbol merged_symbol_state(const cidx::Symbol &persisted,
+                                 const cidx::Symbol &incoming) {
+  cidx::Symbol merged = persisted;
+  merged.spelling = incoming.spelling;
+  coalesce(merged.qual_name, incoming.qual_name);
+  coalesce(merged.display_name, incoming.display_name);
+  merged.kind = incoming.kind;
+  coalesce(merged.type_info, incoming.type_info);
+  if (!persisted.is_definition || incoming.is_definition) {
+    merged.file_id = incoming.file_id;
+    merged.line = incoming.line;
+    merged.col = incoming.col;
+    merged.end_line = incoming.end_line;
+    merged.end_col = incoming.end_col;
+  }
+  coalesce(merged.decl_file_id, incoming.decl_file_id);
+  coalesce(merged.decl_line, incoming.decl_line);
+  coalesce(merged.decl_col, incoming.decl_col);
+  merged.is_definition = persisted.is_definition || incoming.is_definition;
+  merged.is_pure = persisted.is_pure || incoming.is_pure;
+  merged.is_static = persisted.is_static || incoming.is_static;
+  merged.is_instantiation = incoming.is_instantiation;
+  coalesce(merged.linkage, incoming.linkage);
+  coalesce(merged.access, incoming.access);
+  coalesce(merged.parent_usr, incoming.parent_usr);
+  merged.resolved = persisted.resolved || incoming.resolved;
+  coalesce(merged.const_value, incoming.const_value);
+  return merged;
+}
+
+bool same_add_symbol_result_except_decl_site(const cidx::Symbol &left,
+                                             const cidx::Symbol &right) {
+  // decl_path is deliberately absent: add_symbol() inserts it but never
+  // updates it on conflict. The three decl_* fields are maintained by the
+  // direct add_decl_site() operation below. Every other persisted field is
+  // part of the conflict result and must match before bypassing add_symbol().
+  return left.usr == right.usr && left.spelling == right.spelling &&
+         left.kind == right.kind && left.qual_name == right.qual_name &&
+         left.display_name == right.display_name &&
+         left.type_info == right.type_info && left.file_id == right.file_id &&
+         left.line == right.line && left.col == right.col &&
+         left.end_line == right.end_line && left.end_col == right.end_col &&
+         left.is_definition == right.is_definition &&
+         left.is_pure == right.is_pure && left.is_static == right.is_static &&
+         left.is_instantiation == right.is_instantiation &&
+         left.linkage == right.linkage && left.access == right.access &&
+         left.parent_usr == right.parent_usr &&
+         left.resolved == right.resolved &&
+         left.const_value == right.const_value &&
+         left.semantic_universe_id == right.semantic_universe_id &&
+         left.identity_key == right.identity_key;
+}
+
+void apply_decl_site_to_cache(cidx::Symbol &persisted,
+                              const cidx::Symbol &incoming) {
+  coalesce(persisted.decl_file_id, incoming.decl_file_id);
+  coalesce(persisted.decl_line, incoming.decl_line);
+  coalesce(persisted.decl_col, incoming.decl_col);
+}
+
+bool cached_symbol_is_semantic_noop(const cidx::Symbol &persisted,
+                                    const cidx::Symbol &incoming) {
+  if (incoming.is_definition &&
+      (persisted.file_id != incoming.file_id ||
+       persisted.line != incoming.line || persisted.col != incoming.col ||
+       persisted.end_line != incoming.end_line ||
+       persisted.end_col != incoming.end_col)) {
+    return false;
+  }
+  const cidx::Symbol merged = merged_symbol_state(persisted, incoming);
+  return same_add_symbol_result_except_decl_site(persisted, merged);
+}
+
 std::optional<cidx::Symbol>
 lookup_existing_symbol(cidx::storage::AstStoragePorts &ports,
                        const cidx::Symbol &sym, bool resolved_identity) {
@@ -183,11 +262,6 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
       s, current_file_id_,
       ports_.workspace.semantic_universe_for_file_id(current_file_id_),
       identity_translation_unit_);
-  const auto same_decl_site = [&](const CachedResolvedIdentity &cached) {
-    return cached.file_id == sym.file_id && cached.line == sym.line &&
-           cached.col == sym.col && cached.end_line == sym.end_line &&
-           cached.end_col == sym.end_col;
-  };
   std::string identity_key;
   const bool resolved_identity =
       resolved_cache_active_ &&
@@ -195,13 +269,16 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
       [&] {
         identity_key = identity_cache_key(sym);
         const auto cached = resolved_identity_cache_.find(identity_key);
-        return cached != resolved_identity_cache_.end() &&
-               (!sym.is_definition || same_decl_site(cached->second));
+        if (cached == resolved_identity_cache_.end()) {
+          return false;
+        }
+        return cached_symbol_is_semantic_noop(cached->second.persisted, sym);
       }();
   if (resolved_identity) {
-    const int64_t symbol_id =
-        resolved_identity_cache_.at(identity_key).symbol_id;
+    auto &cached = resolved_identity_cache_.at(identity_key);
+    const int64_t symbol_id = cached.symbol_id;
     ports_.symbols_write.add_decl_site(symbol_id, sym);
+    apply_decl_site_to_cache(cached.persisted, sym);
     record_symbol_id(symbol_ids_, symbol_id_set_, symbol_id);
     return;
   }
@@ -215,14 +292,12 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
   if (existing && existing->resolved && existing->is_definition) {
     resolved_cache_active_ = true;
     identity_key = identity_cache_key(sym);
+    cidx::Symbol persisted = merged_symbol_state(*existing, sym);
+    persisted.id = symbol_id;
     resolved_identity_cache_.insert_or_assign(
         std::move(identity_key),
         CachedResolvedIdentity{.symbol_id = symbol_id,
-                               .file_id = sym.file_id,
-                               .line = sym.line,
-                               .col = sym.col,
-                               .end_line = sym.end_line,
-                               .end_col = sym.end_col});
+                               .persisted = std::move(persisted)});
     resolved_identity_cache_hashes_.insert(identity_cache_hash(sym));
   }
 }

@@ -3,8 +3,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -184,6 +186,227 @@ TEST_CASE("symbol sink caches resolved identities and invalidates state") {
   sink.emit(unresolved);
   CIDX_CHECK_BOOL(fixture.symbol_read.lookup_calls == 8);
   CIDX_CHECK_BOOL(sink.stored_count() == 2);
+}
+
+TEST_CASE("symbol sink checks every merge-sensitive definition field") {
+  struct Mutation {
+    const char *name;
+    std::function<void(cidx::ast::SymbolRecord &)> apply;
+    std::function<void(const cidx::Symbol &)> verify;
+    std::function<void(cidx::ast::SymbolRecord &)> prepare_seed;
+  };
+  const std::vector<Mutation> mutations = {
+      {"spelling",
+       [](auto &symbol) { symbol.spelling = "changed_spelling"; },
+       [](const auto &symbol) { CHECK(symbol.spelling == "changed_spelling"); },
+       {}},
+      {"qual_name",
+       [](auto &symbol) { symbol.qual_name = "changed::qual_name"; },
+       [](const auto &symbol) {
+         CHECK(symbol.qual_name ==
+               std::optional<std::string>{"changed::qual_name"});
+       },
+       {}},
+      {"display_name",
+       [](auto &symbol) { symbol.display_name = "changed_display"; },
+       [](const auto &symbol) {
+         CHECK(symbol.display_name ==
+               std::optional<std::string>{"changed_display"});
+       },
+       {}},
+      {"type_info",
+       [](auto &symbol) { symbol.type_info = "changed_type"; },
+       [](const auto &symbol) {
+         CHECK(symbol.type_info == std::optional<std::string>{"changed_type"});
+       },
+       {}},
+      {"kind",
+       [](auto &symbol) { symbol.kind = 9; },
+       [](const auto &symbol) { CHECK(symbol.kind == "variable"); },
+       {}},
+      {"is_pure",
+       [](auto &symbol) { symbol.is_pure = true; },
+       [](const auto &symbol) { CHECK(symbol.is_pure); },
+       {}},
+      {"is_static",
+       [](auto &symbol) { symbol.is_static = true; },
+       [](const auto &symbol) { CHECK(symbol.is_static); },
+       {}},
+      {"is_instantiation_downgrade",
+       [](auto &symbol) { symbol.is_instantiation = false; },
+       [](const auto &symbol) { CHECK_FALSE(symbol.is_instantiation); },
+       [](auto &symbol) { symbol.is_instantiation = true; }},
+      {"linkage",
+       [](auto &symbol) { symbol.linkage = "internal"; },
+       [](const auto &symbol) {
+         CHECK(symbol.linkage == std::optional<std::string>{"internal"});
+       },
+       {}},
+      {"access",
+       [](auto &symbol) { symbol.access = "private"; },
+       [](const auto &symbol) {
+         CHECK(symbol.access == std::optional<std::string>{"private"});
+       },
+       {}},
+      {"parent_usr",
+       [](auto &symbol) { symbol.parent_usr = "changed_parent"; },
+       [](const auto &symbol) {
+         CHECK(symbol.parent_usr ==
+               std::optional<std::string>{"changed_parent"});
+       },
+       {}},
+      {"const_value",
+       [](auto &symbol) { symbol.const_value = "42"; },
+       [](const auto &symbol) {
+         CHECK(symbol.const_value == std::optional<std::string>{"42"});
+       },
+       {}}};
+
+  for (const auto &mutation : mutations) {
+    SinkFixture fixture;
+    cidx::ast::StorageSymbolSink sink(fixture.ports);
+    sink.set_current_file_id(fixture.first_file);
+    auto seed =
+        fixture.symbol("sink:@F@merge_sensitive", true, fixture.first_file);
+    if (mutation.prepare_seed) {
+      mutation.prepare_seed(seed);
+    }
+    sink.emit(seed);
+    sink.emit(seed); // Resolve and populate the cache.
+    auto changed = seed;
+    mutation.apply(changed);
+    sink.emit(changed);
+
+    CHECK(fixture.symbol_read.lookup_calls == 3);
+    const bool creates_new_identity =
+        std::string_view(mutation.name) == "linkage";
+    REQUIRE(sink.symbol_ids().size() == (creates_new_identity ? 2 : 1));
+    const auto persisted =
+        fixture.db.lookup_symbol_by_id(sink.symbol_ids().back());
+    REQUIRE(persisted.has_value());
+    mutation.verify(*persisted);
+  }
+}
+
+TEST_CASE("symbol sink checks merge-sensitive declaration fields and parents") {
+  struct Mutation {
+    const char *name;
+    std::function<void(cidx::ast::SymbolRecord &)> apply;
+    std::function<void(const cidx::Symbol &)> verify;
+    std::function<void(cidx::ast::SymbolRecord &)> prepare_seed;
+  };
+  const std::vector<Mutation> mutations = {
+      {"display_name",
+       [](auto &symbol) { symbol.display_name = "decl_display"; },
+       [](const auto &symbol) {
+         CHECK(symbol.display_name ==
+               std::optional<std::string>{"decl_display"});
+       },
+       {}},
+      {"type_info",
+       [](auto &symbol) { symbol.type_info = "decl_type"; },
+       [](const auto &symbol) {
+         CHECK(symbol.type_info == std::optional<std::string>{"decl_type"});
+       },
+       {}},
+      {"is_pure",
+       [](auto &symbol) { symbol.is_pure = true; },
+       [](const auto &symbol) { CHECK(symbol.is_pure); },
+       {}},
+      {"is_static",
+       [](auto &symbol) { symbol.is_static = true; },
+       [](const auto &symbol) { CHECK(symbol.is_static); },
+       {}},
+      {"is_instantiation_downgrade",
+       [](auto &symbol) { symbol.is_instantiation = false; },
+       [](const auto &symbol) { CHECK_FALSE(symbol.is_instantiation); },
+       [](auto &symbol) { symbol.is_instantiation = true; }},
+      {"linkage",
+       [](auto &symbol) { symbol.linkage = "internal"; },
+       [](const auto &symbol) {
+         CHECK(symbol.linkage == std::optional<std::string>{"internal"});
+       },
+       {}},
+      {"access",
+       [](auto &symbol) { symbol.access = "protected"; },
+       [](const auto &symbol) {
+         CHECK(symbol.access == std::optional<std::string>{"protected"});
+       },
+       {}},
+      {"parent_usr",
+       [](auto &symbol) { symbol.parent_usr = "decl_parent"; },
+       [](const auto &symbol) {
+         CHECK(symbol.parent_usr == std::optional<std::string>{"decl_parent"});
+       },
+       {}},
+      {"const_value",
+       [](auto &symbol) { symbol.const_value = "decl_value"; },
+       [](const auto &symbol) {
+         CHECK(symbol.const_value == std::optional<std::string>{"decl_value"});
+       },
+       {}}};
+
+  for (const auto &mutation : mutations) {
+    SinkFixture fixture;
+    cidx::ast::StorageSymbolSink sink(fixture.ports);
+    sink.set_current_file_id(fixture.first_file);
+    auto seed =
+        fixture.symbol("sink:@F@declaration_merge", true, fixture.first_file);
+    if (mutation.prepare_seed) {
+      mutation.prepare_seed(seed);
+    }
+    sink.emit(seed);
+    sink.emit(seed); // Resolve and populate the cache.
+    auto declaration = seed;
+    declaration.is_definition = false;
+    declaration.line = 20;
+    declaration.col = 2;
+    declaration.end_line = 20;
+    declaration.end_col = 12;
+    declaration.decl_line = 20;
+    declaration.decl_col = 2;
+    mutation.apply(declaration);
+    sink.emit(declaration);
+
+    CHECK(fixture.symbol_read.lookup_calls == 3);
+    const bool creates_new_identity =
+        std::string_view(mutation.name) == "linkage";
+    REQUIRE(sink.symbol_ids().size() == (creates_new_identity ? 2 : 1));
+    const auto persisted =
+        fixture.db.lookup_symbol_by_id(sink.symbol_ids().back());
+    REQUIRE(persisted.has_value());
+    mutation.verify(*persisted);
+  }
+}
+
+TEST_CASE("symbol sink direct declaration path reconciles parents") {
+  SinkFixture fixture;
+  cidx::ast::StorageSymbolSink sink(fixture.ports);
+  sink.set_current_file_id(fixture.first_file);
+  auto child =
+      fixture.symbol("sink:@F@waiting_child", true, fixture.first_file);
+  child.parent_usr = "sink:@N@late_parent";
+  sink.emit(child);
+  sink.emit(child); // Resolve and populate the cache before the parent exists.
+
+  cidx::Symbol parent;
+  parent.usr = "sink:@N@late_parent";
+  parent.spelling = "late_parent";
+  parent.kind = "namespace";
+  parent.file_id = fixture.first_file;
+  parent.line = 1;
+  parent.is_definition = true;
+  parent.resolved = true;
+  const int64_t parent_id = fixture.db.add_symbol(parent);
+
+  sink.emit(child); // Must remain on the fast path and reconcile parent_id.
+  CHECK(fixture.symbol_read.lookup_calls == 2);
+  REQUIRE(sink.symbol_ids().size() == 1);
+  auto parent_lookup =
+      fixture.db.raw_db().prepare("SELECT parent_id FROM symbol WHERE id = ?");
+  parent_lookup.bind(1, sink.symbol_ids().front());
+  REQUIRE(parent_lookup.step());
+  CHECK(parent_lookup.col_int64(0) == parent_id);
 }
 
 TEST_CASE("symbol sink preserves first-seen IDs while suppressing duplicates") {

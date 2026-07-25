@@ -5,6 +5,7 @@
 #pragma once
 
 #include "ast/symbol_emitter.hpp"
+#include "storage/records.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -42,11 +43,7 @@ public:
 private:
   struct CachedResolvedIdentity {
     int64_t symbol_id;
-    std::optional<int64_t> file_id;
-    std::optional<int64_t> line;
-    std::optional<int64_t> col;
-    std::optional<int64_t> end_line;
-    std::optional<int64_t> end_col;
+    cidx::Symbol persisted;
   };
 
   cidx::storage::AstStoragePorts &ports_;
