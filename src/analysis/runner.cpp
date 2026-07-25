@@ -1,6 +1,9 @@
 #include "analysis/runner.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -11,6 +14,7 @@
 #include <unistd.h>
 
 #include "cli/souffle_rules.hpp"
+#include "storage/storage.hpp"
 #include "util/errors.hpp"
 #include "util/hashing.hpp"
 #include "util/pathutil.hpp"
@@ -21,7 +25,7 @@ namespace cidx::analysis {
 namespace {
 
 namespace fs = std::filesystem;
-constexpr double kSouffleTimeout = 600.0;
+constexpr std::size_t kDefaultCaptureBudget = 1'048'576;
 
 std::string relation_row_canonical(const FactRow &row) {
   std::ostringstream out;
@@ -91,6 +95,79 @@ struct TempDir {
 bool regular_file(const fs::path &path) {
   std::error_code ec;
   return fs::is_regular_file(path, ec) && !ec;
+}
+
+std::string read_file(const fs::path &path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    throw AnalysisEngineError("artifact_io", "cannot read " + path.string());
+  }
+  std::ostringstream buffer;
+  buffer << input.rdbuf();
+  return buffer.str();
+}
+
+std::string retained_input(const fs::path &root, std::string_view name,
+                           std::string_view content) {
+  const std::string hash = sha256_hex(std::string(content));
+  std::error_code ec;
+  fs::create_directories(root / hash, ec);
+  if (ec) {
+    throw AnalysisEngineError("artifact_io",
+                              "cannot create retained input directory: " +
+                                  ec.message());
+  }
+  const std::string filename = fact_file_name(name);
+  const fs::path destination = root / hash / filename;
+  if (!regular_file(destination)) {
+    const fs::path temporary =
+        destination.string() + ".tmp-" +
+        std::to_string(static_cast<long long>(::getpid()));
+    {
+      std::ofstream output(temporary, std::ios::binary);
+      if (!output) {
+        throw AnalysisEngineError("artifact_io",
+                                  "cannot retain generated input");
+      }
+      output.write(content.data(),
+                   static_cast<std::streamsize>(content.size()));
+      output.flush();
+      if (!output) {
+        throw AnalysisEngineError("artifact_io",
+                                  "cannot flush generated input");
+      }
+    }
+    fs::rename(temporary, destination, ec);
+    if (ec && !regular_file(destination)) {
+      throw AnalysisEngineError(
+          "artifact_io", "cannot publish generated input: " + ec.message());
+    }
+    if (ec) {
+      fs::remove(temporary, ec);
+    }
+  }
+  return "analysis-input:" + hash + "/" + filename;
+}
+
+std::int64_t snapshot_steps(const FactSnapshot &snapshot) {
+  std::int64_t count = 0;
+  for (const auto &[name, relation] : snapshot.relations) {
+    (void)name;
+    count += static_cast<std::int64_t>(relation.rows.size());
+  }
+  return count;
+}
+
+std::string detect_souffle_version(const std::string &executable) {
+  const RunResult version = run({executable, "--version"}, 2.0, 4096);
+  if (version.exit_code != 0 || version.out.empty()) {
+    return "souffle:unknown";
+  }
+  std::string value = version.out;
+  while (!value.empty() && (value.back() == '\n' || value.back() == '\r')) {
+    value.pop_back();
+  }
+  return value;
 }
 
 std::optional<std::string> find_souffle() {
@@ -186,36 +263,60 @@ std::vector<FactRow> read_relation(const fs::path &path) {
   return rows;
 }
 
-std::map<std::string, FactRelation>
-run_souffle(const AnalysisPackage &package, const FactSnapshot &snapshot,
-            const AnalysisOptions &options, std::vector<std::string> &inputs) {
+std::map<std::string, FactRelation> run_souffle(const AnalysisPackage &package,
+                                                const FactSnapshot &snapshot,
+                                                const AnalysisOptions &options,
+                                                AnalysisRun &execution) {
   const auto executable = find_souffle();
   if (!executable || !regular_file(*executable) ||
       ::access(executable->c_str(), X_OK) != 0) {
-    throw CidxError(
+    throw AnalysisEngineError(
+        "engine_unavailable",
         "souffle executable not found; install souffle or set CIDX_SOUFFLE");
   }
+  execution.engine_version = detect_souffle_version(*executable);
   TempDir temp;
   const fs::path facts_dir = temp.path / "facts";
   const fs::path output_dir = temp.path / "out";
   std::error_code ec;
   fs::create_directories(output_dir, ec);
   if (ec) {
-    throw CidxError("cannot create " + output_dir.string() + ": " +
-                    ec.message());
+    throw AnalysisEngineError("artifact_io", "cannot create " +
+                                                 output_dir.string() + ": " +
+                                                 ec.message());
+  }
+  std::string prelude;
+  if (!package.prelude.empty()) {
+    prelude = package.prelude;
+  } else if (package.include_catalog_prelude) {
+    prelude = cli::dlrules::k_prelude;
   }
   const FactExportStats export_stats =
-      write_fact_files(snapshot, facts_dir.string(), cli::dlrules::k_prelude);
+      write_fact_files(snapshot, facts_dir.string(), prelude);
   (void)export_stats;
+  const fs::path retained_root = options.artifact_root.value_or(
+      fs::temp_directory_path() / ".cidx-analysis-inputs");
+  for (const auto &entry : fs::directory_iterator(facts_dir)) {
+    if (regular_file(entry.path())) {
+      execution.generated_inputs.push_back(
+          retained_input(retained_root, entry.path().filename().string(),
+                         read_file(entry.path())));
+    }
+  }
   const fs::path program_path = temp.path / "program.dl";
   {
     std::ofstream output(program_path, std::ios::binary);
     if (!output) {
-      throw CidxError("cannot write " + program_path.string());
+      throw AnalysisEngineError("artifact_io",
+                                "cannot write " + program_path.string());
     }
-    output << cli::dlrules::k_prelude << '\n' << package.program;
+    if (!prelude.empty()) {
+      output << prelude << '\n';
+    }
+    output << package.program;
   }
-  inputs.push_back(program_path.string());
+  execution.generated_inputs.push_back(
+      retained_input(retained_root, "program.dl", read_file(program_path)));
   const std::vector<std::string> argv = {*executable,
                                          "-F",
                                          facts_dir.string(),
@@ -224,23 +325,44 @@ run_souffle(const AnalysisPackage &package, const FactSnapshot &snapshot,
                                          "-j",
                                          std::to_string(options.jobs),
                                          program_path.string()};
-  const RunResult result = run(argv, kSouffleTimeout);
+  const auto started = std::chrono::steady_clock::now();
+  const double timeout = static_cast<double>(options.time_budget_ms) / 1000.0;
+  std::size_t output_limit = kDefaultCaptureBudget;
+  if (options.capture_budget > 0) {
+    output_limit = static_cast<std::size_t>(options.capture_budget);
+  }
+  if (options.output_budget > 0) {
+    output_limit = static_cast<std::size_t>(options.output_budget);
+  }
+  const RunResult result = run(argv, timeout, output_limit);
+  execution.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - started)
+                             .count();
+  execution.stdout_text = result.out;
+  execution.stderr_text = result.err;
+  execution.output_bytes = static_cast<std::int64_t>(result.captured_bytes);
+  execution.peak_bytes = static_cast<std::int64_t>(result.peak_bytes);
   if (result.timed_out) {
-    throw CidxError("souffle timed out after " +
-                    std::to_string(static_cast<int>(kSouffleTimeout)) + "s");
+    throw AnalysisEngineError("timeout", "souffle timed out");
+  }
+  if (result.output_limited) {
+    throw AnalysisEngineError("output_budget_exceeded",
+                              "analysis output budget exceeded");
   }
   if (result.exit_code != 0) {
     std::string detail = result.err;
     if (detail.empty()) {
       detail = result.out;
     }
-    throw CidxError("souffle failed (exit " + std::to_string(result.exit_code) +
-                    "): " + detail);
+    throw AnalysisEngineError("engine_failure",
+                              "souffle failed (exit " +
+                                  std::to_string(result.exit_code) +
+                                  "): " + detail);
   }
 
   std::map<std::string, FactRelation> relations;
   const std::string full_program =
-      std::string(cli::dlrules::k_prelude) + '\n' + package.program;
+      (prelude.empty() ? std::string{} : prelude + '\n') + package.program;
   for (const std::string &name : output_relations(full_program)) {
     FactRelation relation{
         .descriptor =
@@ -274,6 +396,8 @@ AnalysisRun base_run(const AnalysisPackage &package,
   if (snapshot.completeness == FactCompleteness::partial ||
       snapshot.truncated) {
     run.status = AnalysisStatus::partial;
+    run.result_class = snapshot.truncated ? AnalysisResultClass::truncated_input
+                                          : AnalysisResultClass::partial;
     if (snapshot.truncated) {
       run.diagnostics.push_back({.code = "truncated_budget",
                                  .message = "fact snapshot was truncated"});
@@ -309,6 +433,12 @@ void validate_requirement(const FactSnapshot &snapshot,
 
 } // namespace
 
+AnalysisEngineError::AnalysisEngineError(std::string code,
+                                         const std::string &message)
+    : std::runtime_error(message), code_(std::move(code)) {}
+
+std::string AnalysisEngine::engine_version() const { return "unknown"; }
+
 std::string AnalysisPackage::canonical() const {
   std::vector<std::string> requirements;
   requirements.reserve(required_relations.size());
@@ -322,9 +452,20 @@ std::string AnalysisPackage::canonical() const {
       << "entry=" << entry_point << '\n'
       << "engine=" << engine << '\n'
       << "content_hash=" << content_hash << '\n'
+      << "prelude=" << prelude << '\n'
+      << "include_catalog_prelude=" << (include_catalog_prelude ? 1 : 0) << '\n'
       << "program=" << program << '\n';
   for (const auto &requirement : requirements) {
     out << "require=" << requirement << '\n';
+  }
+  std::vector<std::string> outputs;
+  outputs.reserve(output_relations.size());
+  for (const auto &output : output_relations) {
+    outputs.push_back(requirement_canonical(output));
+  }
+  std::ranges::sort(outputs);
+  for (const auto &output : outputs) {
+    out << "output=" << output << '\n';
   }
   return out.str();
 }
@@ -332,7 +473,9 @@ std::string AnalysisPackage::canonical() const {
 std::string AnalysisOptions::canonical() const {
   return "jobs=" + std::to_string(jobs) +
          ";steps=" + std::to_string(step_budget) +
-         ";output=" + std::to_string(output_budget);
+         ";time=" + std::to_string(time_budget_ms) +
+         ";output=" + std::to_string(output_budget) +
+         ";capture=" + std::to_string(capture_budget);
 }
 
 std::string AnalysisRun::canonical_result() const {
@@ -340,7 +483,12 @@ std::string AnalysisRun::canonical_result() const {
   out << "run=" << run_id << '\n'
       << "input=" << input_hash << '\n'
       << "package=" << package_hash << '\n'
-      << "status=" << analysis_status_name(status) << '\n';
+      << "status=" << analysis_status_name(status) << '\n'
+      << "class=" << analysis_result_class_name(result_class) << '\n'
+      << "engine=" << engine_version << '\n';
+  for (const auto &input : generated_inputs) {
+    out << "generated=" << input << '\n';
+  }
   for (const auto &[name, relation] : relations) {
     out << "relation=" << name << '\n';
     std::vector<std::string> rows;
@@ -372,18 +520,33 @@ AnalysisRun
 SouffleAnalysisEngine::execute(const AnalysisPackage &package,
                                const FactSnapshot &snapshot,
                                const AnalysisOptions &options) const {
-  if (options.jobs < 1) {
-    throw CidxError("analysis jobs must be at least 1");
-  }
   AnalysisRun result = base_run(package, snapshot, options);
-  result.relations =
-      run_souffle(package, snapshot, options, result.generated_inputs);
+  result.engine_version = engine_version();
+  result.step_count = snapshot_steps(snapshot);
+  if (options.step_budget > 0 && result.step_count > options.step_budget) {
+    result.status = AnalysisStatus::error;
+    result.result_class = AnalysisResultClass::step_budget_exceeded;
+    result.diagnostics.push_back(
+        {.code = "step_budget_exceeded",
+         .message = "fact input exceeds the declared step budget"});
+    return result;
+  }
+  result.relations = run_souffle(package, snapshot, options, result);
+  result.output_bytes =
+      static_cast<std::int64_t>(result.canonical_result().size());
   if (options.output_budget > 0 &&
-      result.canonical_result().size() >
-          static_cast<std::size_t>(options.output_budget)) {
-    throw CidxError("analysis output budget exceeded");
+      result.output_bytes > options.output_budget) {
+    result.status = AnalysisStatus::error;
+    result.result_class = AnalysisResultClass::output_budget_exceeded;
+    result.diagnostics.push_back(
+        {.code = "output_budget_exceeded",
+         .message = "analysis result exceeds the declared output budget"});
   }
   return result;
+}
+
+std::string SouffleAnalysisEngine::engine_version() const {
+  return "souffle:external";
 }
 
 AstgraphCallgraphEngine::AstgraphCallgraphEngine(CallgraphFunction callgraph)
@@ -393,18 +556,43 @@ AstgraphCallgraphEngine::AstgraphCallgraphEngine(CallgraphFunction callgraph)
   }
 }
 
+std::string AstgraphCallgraphEngine::engine_version() const {
+  return "astgraph-native";
+}
+
 AnalysisRun
 AstgraphCallgraphEngine::execute(const AnalysisPackage &package,
                                  const FactSnapshot &snapshot,
                                  const AnalysisOptions &options) const {
-  if (options.jobs < 1) {
-    throw CidxError("analysis jobs must be at least 1");
+  AnalysisRun result = base_run(package, snapshot, options);
+  result.engine_version = engine_version();
+  result.step_count = snapshot_steps(snapshot);
+  if (options.step_budget > 0 && result.step_count > options.step_budget) {
+    result.status = AnalysisStatus::error;
+    result.result_class = AnalysisResultClass::step_budget_exceeded;
+    result.diagnostics.push_back(
+        {.code = "step_budget_exceeded",
+         .message = "astgraph input exceeds the declared step budget"});
+    return result;
   }
   if (!snapshot.artifact_path) {
-    throw CidxError("astgraph analysis requires an artifact path");
+    throw AnalysisEngineError("missing_tu",
+                              "astgraph analysis requires an artifact path");
   }
-  AnalysisRun result = base_run(package, snapshot, options);
-  const auto calls = callgraph_(*snapshot.artifact_path, options.jobs);
+  const auto started = std::chrono::steady_clock::now();
+  std::vector<FactRow> calls;
+  try {
+    calls = callgraph_(*snapshot.artifact_path, options.jobs);
+  } catch (const std::exception &error) {
+    throw AnalysisEngineError("engine_failure", error.what());
+  }
+  result.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - started)
+                          .count();
+  if (result.elapsed_ms > options.time_budget_ms) {
+    throw AnalysisEngineError("timeout", "astgraph analysis timed out");
+  }
+  result.step_count += static_cast<std::int64_t>(calls.size());
   FactRelation relation{
       .descriptor =
           RelationDescriptor{
@@ -422,6 +610,16 @@ AstgraphCallgraphEngine::execute(const AnalysisPackage &package,
   relation.rows = calls;
   result.relations.insert_or_assign(relation.descriptor.name,
                                     std::move(relation));
+  result.output_bytes =
+      static_cast<std::int64_t>(result.canonical_result().size());
+  if (options.output_budget > 0 &&
+      result.output_bytes > options.output_budget) {
+    result.status = AnalysisStatus::error;
+    result.result_class = AnalysisResultClass::output_budget_exceeded;
+    result.diagnostics.push_back(
+        {.code = "output_budget_exceeded",
+         .message = "astgraph result exceeds the declared output budget"});
+  }
   return result;
 }
 
@@ -440,22 +638,57 @@ AnalysisRun AnalysisRunner::run(const AnalysisPackage &package,
   result.package_hash = sha256_hex(package.canonical());
   result.run_id = run_identity(package.canonical(), request_canonical(request),
                                options.canonical());
-  if (package.name.empty() || package.version.empty() ||
-      package.program.empty()) {
+  const auto invalid = [&result](AnalysisResultClass result_class,
+                                 std::string code, std::string message) {
     result.status = AnalysisStatus::error;
+    result.result_class = result_class;
     result.diagnostics.push_back(
-        {.code = "invalid_input", .message = "analysis package is incomplete"});
+        {.code = std::move(code), .message = std::move(message)});
+  };
+  if (package.name.empty() || package.version.empty() ||
+      package.entry_point.empty() || package.engine.empty() ||
+      package.program.empty()) {
+    invalid(AnalysisResultClass::invalid_package, "invalid_package",
+            "analysis package is incomplete");
+    return result;
+  }
+  if (!package.content_hash.empty() &&
+      package.content_hash != sha256_hex(package.program) &&
+      package.content_hash != "sha256:" + sha256_hex(package.program)) {
+    invalid(AnalysisResultClass::invalid_package, "invalid_package",
+            "analysis package content hash does not match its program");
     return result;
   }
   if (options.jobs < 1 || options.step_budget < 0 ||
-      options.output_budget < 0) {
-    result.status = AnalysisStatus::error;
-    result.diagnostics.push_back(
-        {.code = "invalid_input", .message = "analysis options are invalid"});
+      options.time_budget_ms <= 0 || options.output_budget < 0 ||
+      options.capture_budget < 0) {
+    invalid(AnalysisResultClass::invalid_package, "invalid_options",
+            "analysis options are invalid");
     return result;
   }
+  std::vector<std::string> required_names;
+  required_names.reserve(package.required_relations.size());
+  for (const auto &requirement : package.required_relations) {
+    required_names.push_back(requirement.name);
+  }
+  std::ranges::sort(required_names);
+  if (std::ranges::adjacent_find(required_names) != required_names.end()) {
+    invalid(AnalysisResultClass::invalid_package, "invalid_package",
+            "analysis package declares a duplicate required relation");
+    return result;
+  }
+  bool engine_started = false;
+  const auto run_started = std::chrono::steady_clock::now();
   try {
     const FactSnapshot snapshot = provider.snapshot(request);
+    result.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - run_started)
+                            .count();
+    if (result.elapsed_ms > options.time_budget_ms) {
+      invalid(AnalysisResultClass::timeout, "timeout",
+              "fact provider exceeded the declared time budget");
+      return result;
+    }
     result.input_hash = snapshot.stable_hash();
     result.run_id = run_identity(package.canonical(), result.input_hash,
                                  options.canonical());
@@ -464,38 +697,342 @@ AnalysisRun AnalysisRunner::run(const AnalysisPackage &package,
     }
     if (!result.diagnostics.empty()) {
       result.status = AnalysisStatus::unknown;
+      result.result_class = std::ranges::any_of(result.diagnostics,
+                                                [](const auto &diagnostic) {
+                                                  return diagnostic.code ==
+                                                         "unsupported_relation";
+                                                })
+                                ? AnalysisResultClass::unsupported_relation
+                                : AnalysisResultClass::package_incompatible;
       return result;
     }
     if (snapshot.completeness == FactCompleteness::stale) {
       result.status = AnalysisStatus::unknown;
+      result.result_class = AnalysisResultClass::stale_input;
       result.diagnostics.push_back(
           {.code = "stale_input", .message = "fact snapshot is stale"});
       return result;
     }
     if (snapshot.completeness == FactCompleteness::unknown) {
       result.status = AnalysisStatus::unknown;
+      result.result_class = AnalysisResultClass::unknown;
       result.diagnostics.push_back(
           {.code = "missing_evidence",
            .message = "fact snapshot applicability is unknown"});
       return result;
     }
+    if (options.step_budget > 0 &&
+        snapshot_steps(snapshot) > options.step_budget) {
+      result.status = AnalysisStatus::error;
+      result.result_class = AnalysisResultClass::step_budget_exceeded;
+      result.diagnostics.push_back(
+          {.code = "step_budget_exceeded",
+           .message = "fact input exceeds the declared step budget"});
+      return result;
+    }
+    engine_started = true;
     result = engine_->execute(package, snapshot, options);
+    result.elapsed_ms =
+        std::max(result.elapsed_ms,
+                 std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - run_started)
+                     .count());
     result.input_hash = snapshot.stable_hash();
     result.package_hash = sha256_hex(package.canonical());
     result.run_id = run_identity(package.canonical(), result.input_hash,
                                  options.canonical());
+    if (result.engine_version.empty()) {
+      result.engine_version = engine_->engine_version();
+    }
+    if (result.elapsed_ms > options.time_budget_ms) {
+      result.status = AnalysisStatus::error;
+      result.result_class = AnalysisResultClass::timeout;
+      result.diagnostics.push_back(
+          {.code = "timeout",
+           .message = "analysis exceeded the declared time budget"});
+    } else if (options.step_budget > 0 &&
+               result.step_count > options.step_budget) {
+      result.status = AnalysisStatus::error;
+      result.result_class = AnalysisResultClass::step_budget_exceeded;
+      result.diagnostics.push_back(
+          {.code = "step_budget_exceeded",
+           .message = "analysis exceeded the declared step budget"});
+    }
+    if ((snapshot.completeness == FactCompleteness::partial ||
+         snapshot.truncated) &&
+        result.status == AnalysisStatus::complete) {
+      result.status = AnalysisStatus::partial;
+      result.result_class = snapshot.truncated
+                                ? AnalysisResultClass::truncated_input
+                                : AnalysisResultClass::partial;
+    }
+    result.output_bytes =
+        static_cast<std::int64_t>(result.canonical_result().size());
+    if (options.output_budget > 0 &&
+        result.output_bytes > options.output_budget) {
+      result.status = AnalysisStatus::error;
+      result.result_class = AnalysisResultClass::output_budget_exceeded;
+      result.diagnostics.push_back(
+          {.code = "output_budget_exceeded",
+           .message = "analysis result exceeds the declared output budget"});
+    }
+    for (const auto &requirement : package.output_relations) {
+      const FactRelation *relation =
+          result.relations.contains(requirement.name)
+              ? &result.relations.at(requirement.name)
+              : nullptr;
+      if (relation == nullptr ||
+          relation->descriptor.version != requirement.version ||
+          relation->descriptor.catalog_version != requirement.catalog_version ||
+          (!requirement.columns.empty() &&
+           relation->descriptor.columns != requirement.columns)) {
+        result.status = AnalysisStatus::error;
+        result.result_class = AnalysisResultClass::package_incompatible;
+        result.diagnostics.push_back(
+            {.code = "package_incompatible",
+             .message = "engine did not produce declared output relation: " +
+                        requirement.name});
+      }
+    }
+    return result;
+  } catch (const FactProviderError &error) {
+    result.status =
+        error.code() == "unsupported_relation" || error.code() == "missing_tu"
+            ? AnalysisStatus::unknown
+            : AnalysisStatus::error;
+    if (error.code() == "unsupported_relation") {
+      result.result_class = AnalysisResultClass::unsupported_relation;
+    } else if (error.code() == "missing_tu") {
+      result.result_class = AnalysisResultClass::missing_tu;
+    } else {
+      result.result_class = AnalysisResultClass::provider_failure;
+    }
+    result.diagnostics.push_back(
+        {.code = error.code(), .message = error.what()});
+    return result;
+  } catch (const AnalysisEngineError &error) {
+    result.status = AnalysisStatus::error;
+    if (error.code() == "timeout") {
+      result.result_class = AnalysisResultClass::timeout;
+    } else if (error.code() == "step_budget_exceeded") {
+      result.result_class = AnalysisResultClass::step_budget_exceeded;
+    } else if (error.code() == "output_budget_exceeded") {
+      result.result_class = AnalysisResultClass::output_budget_exceeded;
+    } else {
+      result.result_class = AnalysisResultClass::engine_failure;
+    }
+    result.engine_version = engine_->engine_version();
+    result.diagnostics.push_back(
+        {.code = error.code(), .message = error.what()});
     return result;
   } catch (const CidxError &error) {
     result.status = AnalysisStatus::error;
+    result.result_class = engine_started
+                              ? AnalysisResultClass::engine_failure
+                              : AnalysisResultClass::provider_failure;
     result.diagnostics.push_back(
-        {.code = "backend_error", .message = error.what()});
+        {.code = engine_started ? "engine_failure" : "provider_failure",
+         .message = error.what()});
     return result;
   } catch (const std::exception &error) {
     result.status = AnalysisStatus::error;
+    result.result_class = engine_started
+                              ? AnalysisResultClass::engine_failure
+                              : AnalysisResultClass::provider_failure;
     result.diagnostics.push_back(
-        {.code = "backend_error", .message = error.what()});
+        {.code = engine_started ? "engine_failure" : "provider_failure",
+         .message = error.what()});
     return result;
   }
+}
+
+AnalysisService::AnalysisService(EngineFactory factory)
+    : factory_(std::move(factory)) {
+  if (!factory_) {
+    factory_ = [](const AnalysisPackage &package) {
+      if (package.engine != "souffle") {
+        throw AnalysisEngineError("engine_unavailable",
+                                  "no engine is registered for " +
+                                      package.engine);
+      }
+      return std::make_unique<SouffleAnalysisEngine>();
+    };
+  }
+}
+
+std::unique_ptr<FactProvider>
+AnalysisService::provider_for(const ProviderDeclaration &declaration) const {
+  switch (declaration.kind) {
+  case ProviderKind::semantic_index:
+    return std::make_unique<SqliteFactProvider>(declaration.path.string());
+  case ProviderKind::astgraph:
+    return std::make_unique<AstgraphFactProvider>(declaration.path.string());
+  case ProviderKind::extension:
+    return std::make_unique<ExtensionFactProvider>(declaration.path.string());
+  case ProviderKind::composed:
+    if (!declaration.left || !declaration.right) {
+      throw FactProviderError("provider_failure",
+                              "composed provider declaration is incomplete");
+    }
+    return std::make_unique<ComposedFactProvider>(
+        provider_for(*declaration.left), provider_for(*declaration.right),
+        declaration.joins);
+  }
+  throw FactProviderError("provider_failure", "unknown provider kind");
+}
+
+AnalysisRun AnalysisService::run(const AnalysisRequest &request) const {
+  try {
+    auto provider = provider_for(request.provider);
+    auto engine = factory_(request.package);
+    return AnalysisRunner(std::move(engine))
+        .run(request.package, *provider, request.facts, request.options);
+  } catch (const FactProviderError &error) {
+    AnalysisRun result;
+    result.status =
+        error.code() == "unsupported_relation" || error.code() == "missing_tu"
+            ? AnalysisStatus::unknown
+            : AnalysisStatus::error;
+    if (error.code() == "unsupported_relation") {
+      result.result_class = AnalysisResultClass::unsupported_relation;
+    } else if (error.code() == "missing_tu") {
+      result.result_class = AnalysisResultClass::missing_tu;
+    } else {
+      result.result_class = AnalysisResultClass::provider_failure;
+    }
+    result.diagnostics.push_back(
+        {.code = error.code(), .message = error.what()});
+    return result;
+  } catch (const AnalysisEngineError &error) {
+    AnalysisRun result;
+    result.status = AnalysisStatus::error;
+    result.result_class = AnalysisResultClass::engine_failure;
+    result.diagnostics.push_back(
+        {.code = error.code(), .message = error.what()});
+    return result;
+  } catch (const std::exception &error) {
+    AnalysisRun result;
+    result.status = AnalysisStatus::error;
+    result.result_class = AnalysisResultClass::provider_failure;
+    result.diagnostics.push_back(
+        {.code = "provider_failure", .message = error.what()});
+    return result;
+  }
+}
+
+namespace {
+
+bool valid_publication_namespace(const std::string_view value) {
+  if (value.empty() || value == "core" || value.starts_with("core.")) {
+    return false;
+  }
+  if (std::isalpha(static_cast<unsigned char>(value.front())) == 0) {
+    return false;
+  }
+  return std::ranges::all_of(value, [](const char character) {
+    return std::isalnum(static_cast<unsigned char>(character)) != 0 ||
+           character == '_' || character == '-' || character == '.';
+  });
+}
+
+std::string publication_row(const FactRow &row) {
+  return relation_row_canonical(row);
+}
+
+} // namespace
+
+ArtifactRecord
+AnalysisPublisher::publish(Storage &storage, const std::filesystem::path &root,
+                           const std::string_view namespace_name,
+                           const AnalysisRun &run,
+                           const std::string_view workspace_identity,
+                           const std::string_view tu_identity) {
+  if (!valid_publication_namespace(namespace_name)) {
+    throw AnalysisEngineError("publication_failure",
+                              "analysis publication namespace is not allowed");
+  }
+  if (run.status == AnalysisStatus::error ||
+      run.status == AnalysisStatus::unknown) {
+    throw AnalysisEngineError("publication_failure",
+                              "only known analysis results can be published");
+  }
+  const std::string logical_id =
+      "analysis:" + std::string(namespace_name) + ":" + run.run_id;
+  ArtifactSpec spec;
+  spec.logical_id = logical_id;
+  spec.kind = "analysis-result";
+  spec.artifact_schema = "cidx-analysis/v1";
+  spec.producer_version = "cidx-analysis 1";
+  spec.engine_version = "cidx " + run.engine_version;
+  spec.workspace_identity = std::string(workspace_identity);
+  spec.tu_identity = std::string(tu_identity);
+  spec.configuration_identity = run.package_hash;
+  spec.input_fact_set_identity = run.input_hash;
+  spec.completeness = run.status == AnalysisStatus::partial
+                          ? ArtifactCompleteness::partial
+                          : ArtifactCompleteness::complete;
+  spec.truncation = run.result_class == AnalysisResultClass::truncated_input
+                        ? ArtifactTruncation::truncated
+                        : ArtifactTruncation::none;
+  spec.trust = ArtifactTrust::producer_verified;
+  spec.evidence = "derived";
+  const std::string logical_hash = sha256_hex(logical_id);
+  spec.attachment_name =
+      "analysis_" + logical_hash.substr(logical_hash.starts_with("sha256:")
+                                            ? std::string_view("sha256:").size()
+                                            : 0,
+                                        16);
+  spec.exposed_relations = {"result"};
+  ArtifactStore artifacts(storage, root);
+  return artifacts.publish(spec, [&run, namespace_name](SqliteDb &db) {
+    db.exec("CREATE TABLE result(namespace TEXT NOT NULL, relation_name TEXT "
+            "NOT NULL, ordinal INTEGER NOT NULL, row_text TEXT NOT NULL, "
+            "PRIMARY KEY(namespace, relation_name, ordinal))");
+    db.exec("CREATE TABLE analysis_meta(key TEXT PRIMARY KEY, value TEXT NOT "
+            "NULL)");
+    const auto put = [&db](std::string_view key, std::string_view value) {
+      auto statement =
+          db.prepare("INSERT INTO analysis_meta(key, value) VALUES (?, ?)");
+      statement.bind(1, key);
+      statement.bind(2, value);
+      statement.step_done();
+    };
+    put("namespace", namespace_name);
+    put("run_id", run.run_id);
+    put("result_class", analysis_result_class_name(run.result_class));
+    put("engine_version", run.engine_version);
+    put("stdout", run.stdout_text);
+    put("stderr", run.stderr_text);
+    put("elapsed_ms", std::to_string(run.elapsed_ms));
+    put("peak_bytes", std::to_string(run.peak_bytes));
+    put("step_count", std::to_string(run.step_count));
+    put("output_bytes", std::to_string(run.output_bytes));
+    put("generated_inputs", [&run] {
+      std::ostringstream inputs;
+      for (const auto &input : run.generated_inputs) {
+        inputs << input << '\n';
+      }
+      return inputs.str();
+    }());
+    for (const auto &[name, relation] : run.relations) {
+      std::vector<std::string> rows;
+      rows.reserve(relation.rows.size());
+      for (const auto &row : relation.rows) {
+        rows.push_back(publication_row(row));
+      }
+      std::ranges::sort(rows);
+      for (std::size_t ordinal = 0; ordinal < rows.size(); ++ordinal) {
+        auto statement = db.prepare(
+            "INSERT INTO result(namespace, relation_name, ordinal, row_text) "
+            "VALUES (?, ?, ?, ?)");
+        statement.bind(1, namespace_name);
+        statement.bind(2, std::string_view(name));
+        statement.bind(3, static_cast<std::int64_t>(ordinal));
+        statement.bind(4, std::string_view(rows[ordinal]));
+        statement.step_done();
+      }
+    }
+  });
 }
 
 std::string analysis_status_name(AnalysisStatus status) {
@@ -510,6 +1047,42 @@ std::string analysis_status_name(AnalysisStatus status) {
     return "error";
   }
   throw CidxError("invalid analysis status");
+}
+
+std::string analysis_result_class_name(const AnalysisResultClass result_class) {
+  switch (result_class) {
+  case AnalysisResultClass::complete:
+    return "complete";
+  case AnalysisResultClass::partial:
+    return "partial";
+  case AnalysisResultClass::unknown:
+    return "unknown";
+  case AnalysisResultClass::invalid_package:
+    return "invalid_package";
+  case AnalysisResultClass::package_incompatible:
+    return "package_incompatible";
+  case AnalysisResultClass::unsupported_relation:
+    return "unsupported_relation";
+  case AnalysisResultClass::stale_input:
+    return "stale_input";
+  case AnalysisResultClass::missing_tu:
+    return "missing_tu";
+  case AnalysisResultClass::truncated_input:
+    return "truncated_input";
+  case AnalysisResultClass::timeout:
+    return "timeout";
+  case AnalysisResultClass::step_budget_exceeded:
+    return "step_budget_exceeded";
+  case AnalysisResultClass::output_budget_exceeded:
+    return "output_budget_exceeded";
+  case AnalysisResultClass::provider_failure:
+    return "provider_failure";
+  case AnalysisResultClass::engine_failure:
+    return "engine_failure";
+  case AnalysisResultClass::publication_failure:
+    return "publication_failure";
+  }
+  throw CidxError("invalid analysis result class");
 }
 
 } // namespace cidx::analysis

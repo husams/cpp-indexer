@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -25,6 +26,15 @@ namespace fs = std::filesystem;
 struct SqlRelationSpec {
   RelationDescriptor descriptor;
   const char *sql;
+};
+
+struct SnapshotMetadata {
+  std::optional<std::string> workspace_identity;
+  std::optional<std::string> tu_identity;
+  std::optional<std::string> applicability;
+  std::optional<std::string> source_revision;
+  std::optional<std::string> source_fingerprint;
+  std::optional<FactFreshness> freshness;
 };
 
 RelationDescriptor descriptor(std::string name,
@@ -152,6 +162,7 @@ std::array<SqlRelationSpec, 6> astgraph_relations() {
               {{.name = "id", .type = FactType::integer},
                {.name = "kind_id", .type = FactType::integer},
                {.name = "symbol_id", .type = FactType::integer},
+               {.name = "usr", .type = FactType::string},
                {.name = "type_id", .type = FactType::integer},
                {.name = "spelling", .type = FactType::string},
                {.name = "file_id", .type = FactType::integer},
@@ -160,9 +171,11 @@ std::array<SqlRelationSpec, 6> astgraph_relations() {
                {.name = "end_line", .type = FactType::integer},
                {.name = "end_col", .type = FactType::integer},
                {.name = "is_definition", .type = FactType::integer}}),
-          .sql = "SELECT id, kind_id, symbol_id, type_id, spelling, file_id, "
-                 "line, "
-                 "col, end_line, end_col, is_definition FROM node ORDER BY id"},
+          .sql = "SELECT n.id, n.kind_id, n.symbol_id, "
+                 "COALESCE(s.usr, ''), n.type_id, n.spelling, n.file_id, "
+                 "n.line, n.col, n.end_line, n.end_col, n.is_definition "
+                 "FROM node n LEFT JOIN symbol s ON s.id = n.symbol_id "
+                 "ORDER BY n.id"},
       SqlRelationSpec{
           .descriptor = descriptor(
               "ast_edge", {{.name = "src_id", .type = FactType::integer},
@@ -181,6 +194,21 @@ std::optional<std::string> meta_value(SqliteDb &db, std::string_view key) {
     return std::nullopt;
   }
   return stmt.col_text(0);
+}
+
+std::optional<std::string> artifact_meta_value(SqliteDb &db,
+                                               std::string_view key) {
+  try {
+    SqliteStmt stmt =
+        db.prepare("SELECT value FROM artifact_meta WHERE key = ?");
+    stmt.bind(1, key);
+    if (!stmt.step()) {
+      return std::nullopt;
+    }
+    return stmt.col_text(0);
+  } catch (const StorageError &) {
+    return std::nullopt;
+  }
 }
 
 int meta_int(SqliteDb &db, std::string_view key, int fallback) {
@@ -232,24 +260,41 @@ template <typename Range>
 FactSnapshot load_sqlite_snapshot(const std::string &path,
                                   const FactRequest &request,
                                   const Range &specs, std::string provider,
-                                  std::optional<std::string> artifact_path) {
+                                  std::optional<std::string> artifact_path,
+                                  const SnapshotMetadata &metadata = {}) {
   SqliteDb db(path, true, SqliteProfile::read_only_replay);
   FactSnapshot snapshot{
       .provider = std::move(provider),
-      .workspace_identity =
-          meta_value(db, "workspace_identity").value_or("unknown"),
-      .tu_identity = meta_value(db, "tu_identity"),
-      .applicability = meta_value(db, "applicability").value_or("workspace"),
+      .workspace_identity = metadata.workspace_identity.value_or(
+          meta_value(db, "workspace_identity").value_or("unknown")),
+      .tu_identity = metadata.tu_identity.value_or(
+          meta_value(db, "tu_identity").value_or("")),
+      .applicability = metadata.applicability.value_or(
+          meta_value(db, "applicability").value_or("workspace")),
       .schema_version = meta_int(db, "schema_version", 1),
       .catalog_version =
           meta_int(db, "catalog_version", catalog::kCatalogVersion),
       .catalog_hash = meta_value(db, "catalog_hash").value_or(""),
       .completeness = meta_completeness(db),
+      .freshness = FactFreshness::unknown,
       .truncated = meta_value(db, "truncated").value_or("0") == "1",
+      .source_revision = meta_value(db, "source_revision"),
+      .source_fingerprint = meta_value(db, "source_fingerprint"),
       .evidence_references = {},
       .input_hashes = {},
       .artifact_path = std::move(artifact_path),
       .relations = {}};
+  if (snapshot.tu_identity && snapshot.tu_identity->empty()) {
+    snapshot.tu_identity.reset();
+  }
+  if (metadata.freshness) {
+    snapshot.freshness = *metadata.freshness;
+  } else if (snapshot.completeness == FactCompleteness::stale) {
+    snapshot.freshness = FactFreshness::stale;
+  }
+  if (snapshot.freshness == FactFreshness::stale) {
+    snapshot.completeness = FactCompleteness::stale;
+  }
   snapshot.input_hashes.push_back(
       sha256_of(path).value_or("unreadable:" + path));
   snapshot.evidence_references.push_back(snapshot.provider + ":" +
@@ -264,7 +309,8 @@ FactSnapshot load_sqlite_snapshot(const std::string &path,
   }
   for (const std::string &name : request.relations) {
     if (!snapshot.find_relation(name)) {
-      throw CidxError("unsupported fact relation: " + name);
+      throw FactProviderError("unsupported_relation",
+                              "unsupported fact relation: " + name);
     }
   }
   if (request.workspace_identity &&
@@ -272,7 +318,8 @@ FactSnapshot load_sqlite_snapshot(const std::string &path,
     snapshot.completeness = FactCompleteness::unknown;
   }
   if (request.tu_identity && snapshot.tu_identity != request.tu_identity) {
-    snapshot.completeness = FactCompleteness::unknown;
+    throw FactProviderError("missing_tu",
+                            "requested TU identity is not available");
   }
   snapshot.validate();
   return snapshot;
@@ -333,6 +380,10 @@ bool compatible_value(const FactValue &value, FactType type) {
 }
 
 } // namespace
+
+FactProviderError::FactProviderError(std::string code,
+                                     const std::string &message)
+    : std::runtime_error(message), code_(std::move(code)) {}
 
 std::string fact_type_name(FactType type) {
   switch (type) {
@@ -422,7 +473,10 @@ std::string FactSnapshot::canonical() const {
       << "schema=" << schema_version << '\n'
       << "catalog=" << catalog_version << ':' << catalog_hash << '\n'
       << "completeness=" << static_cast<int>(completeness) << '\n'
+      << "freshness=" << static_cast<int>(freshness) << '\n'
       << "truncated=" << (truncated ? 1 : 0) << '\n';
+  out << "source_revision=" << source_revision.value_or("") << '\n'
+      << "source_fingerprint=" << source_fingerprint.value_or("") << '\n';
   for (const auto &hash : input_hashes) {
     out << "input=" << hash << '\n';
   }
@@ -458,16 +512,17 @@ FactSnapshot StaticFactProvider::snapshot(const FactRequest &request) const {
       snapshot_.workspace_identity != *request.workspace_identity) {
     FactSnapshot result = snapshot_;
     result.completeness = FactCompleteness::unknown;
+    result.freshness = FactFreshness::unknown;
     return result;
   }
   if (request.tu_identity && snapshot_.tu_identity != request.tu_identity) {
-    FactSnapshot result = snapshot_;
-    result.completeness = FactCompleteness::unknown;
-    return result;
+    throw FactProviderError("missing_tu",
+                            "requested TU identity is not available");
   }
   for (const auto &name : request.relations) {
     if (snapshot_.find_relation(name) == nullptr) {
-      throw CidxError("unsupported fact relation: " + name);
+      throw FactProviderError("unsupported_relation",
+                              "unsupported fact relation: " + name);
     }
   }
   return snapshot_;
@@ -477,21 +532,282 @@ SqliteFactProvider::SqliteFactProvider(std::string path)
     : path_(std::move(path)) {}
 
 FactSnapshot SqliteFactProvider::snapshot(const FactRequest &request) const {
-  return load_sqlite_snapshot(path_, request, semantic_relations(),
-                              "semantic-index", path_);
+  if (!fs::is_regular_file(path_)) {
+    throw FactProviderError("provider_unavailable",
+                            "semantic index is missing: " + path_);
+  }
+  try {
+    Storage storage(path_, Storage::OpenMode::read_only);
+    const IndexIdentity identity = storage.index_identity();
+    FactFreshness freshness = FactFreshness::unknown;
+    if (identity.freshness == "current") {
+      freshness = FactFreshness::current;
+    } else if (identity.freshness == "stale") {
+      freshness = FactFreshness::stale;
+    }
+    SnapshotMetadata metadata{.workspace_identity = identity.workspace,
+                              .tu_identity = std::nullopt,
+                              .applicability = "workspace",
+                              .source_revision = identity.source_revision,
+                              .source_fingerprint = identity.source_fingerprint,
+                              .freshness = freshness};
+    return load_sqlite_snapshot(path_, request, semantic_relations(),
+                                "semantic-index", path_, metadata);
+  } catch (const FactProviderError &) {
+    throw;
+  } catch (const std::exception &error) {
+    throw FactProviderError("provider_failure", error.what());
+  }
 }
 
 AstgraphFactProvider::AstgraphFactProvider(std::string path)
     : path_(std::move(path)) {}
 
 FactSnapshot AstgraphFactProvider::snapshot(const FactRequest &request) const {
-  FactSnapshot result = load_sqlite_snapshot(
-      path_, request, astgraph_relations(), "astgraph", path_);
-  if (result.schema_version != astgraph::kSchemaVersion) {
-    throw CidxError("unsupported astgraph fact schema version: " +
-                    std::to_string(result.schema_version));
+  if (!fs::is_regular_file(path_)) {
+    throw FactProviderError("missing_tu",
+                            "astgraph TU artifact is missing: " + path_);
   }
-  return result;
+  try {
+    SqliteDb db(path_, true, SqliteProfile::read_only_replay);
+    const auto workspace = artifact_meta_value(db, "workspace_identity");
+    const auto tu = artifact_meta_value(db, "tu_identity");
+    const auto applicability =
+        artifact_meta_value(db, "applicability").value_or("translation-unit");
+    if (!workspace || !tu || tu->empty()) {
+      throw FactProviderError("missing_tu",
+                              "astgraph artifact has no TU identity manifest");
+    }
+    SnapshotMetadata metadata{
+        .workspace_identity = workspace,
+        .tu_identity = tu,
+        .applicability = applicability,
+        .source_revision = artifact_meta_value(db, "source_revision"),
+        .source_fingerprint = artifact_meta_value(db, "source_fingerprint"),
+        .freshness = FactFreshness::current};
+    FactSnapshot result = load_sqlite_snapshot(
+        path_, request, astgraph_relations(), "astgraph", path_, metadata);
+    if (const auto completeness = artifact_meta_value(db, "completeness");
+        completeness && *completeness != "complete") {
+      if (*completeness == "stale") {
+        result.completeness = FactCompleteness::stale;
+      } else if (*completeness == "partial") {
+        result.completeness = FactCompleteness::partial;
+      } else {
+        result.completeness = FactCompleteness::unknown;
+      }
+    }
+    if (artifact_meta_value(db, "truncation") == "truncated") {
+      result.truncated = true;
+    }
+    if (request.tu_identity && result.tu_identity != request.tu_identity) {
+      throw FactProviderError("missing_tu",
+                              "requested TU identity is not this artifact");
+    }
+    if (result.schema_version != astgraph::kSchemaVersion) {
+      throw FactProviderError("provider_incompatible",
+                              "unsupported astgraph fact schema version: " +
+                                  std::to_string(result.schema_version));
+    }
+    return result;
+  } catch (const FactProviderError &) {
+    throw;
+  } catch (const std::exception &error) {
+    throw FactProviderError("provider_failure", error.what());
+  }
+}
+
+ExtensionFactProvider::ExtensionFactProvider(std::string path)
+    : path_(std::move(path)) {}
+
+FactSnapshot ExtensionFactProvider::snapshot(const FactRequest &request) const {
+  if (!fs::is_regular_file(path_)) {
+    throw FactProviderError("provider_unavailable",
+                            "extension artifact is missing: " + path_);
+  }
+  try {
+    SqliteDb db(path_, true, SqliteProfile::read_only_replay);
+    const auto kind = artifact_meta_value(db, "kind").value_or("extension");
+    const auto workspace =
+        artifact_meta_value(db, "workspace_identity")
+            .value_or(meta_value(db, "workspace_identity").value_or("unknown"));
+    const auto tu = artifact_meta_value(db, "tu_identity")
+                        .value_or(meta_value(db, "tu_identity").value_or(""));
+    const auto applicability =
+        artifact_meta_value(db, "applicability")
+            .value_or(meta_value(db, "applicability").value_or("workspace"));
+    FactSnapshot snapshot{
+        .provider = "extension:" + kind,
+        .workspace_identity = workspace,
+        .tu_identity =
+            tu.empty() ? std::nullopt : std::optional<std::string>(tu),
+        .applicability = applicability,
+        .schema_version = meta_int(db, "schema_version", 1),
+        .catalog_version =
+            meta_int(db, "catalog_version", catalog::kCatalogVersion),
+        .catalog_hash = meta_value(db, "catalog_hash")
+                            .value_or(std::string(catalog::kCatalogHash)),
+        .completeness = FactCompleteness::complete,
+        .freshness = FactFreshness::current,
+        .truncated = false,
+        .source_revision = artifact_meta_value(db, "source_revision"),
+        .source_fingerprint = artifact_meta_value(db, "source_fingerprint"),
+        .evidence_references = {},
+        .input_hashes = {sha256_of(path_).value_or("unreadable:" + path_)},
+        .artifact_path = path_,
+        .relations = {}};
+    snapshot.evidence_references.push_back(snapshot.provider + ":" +
+                                           snapshot.input_hashes.front());
+    if (const auto status = artifact_meta_value(db, "completeness"); status) {
+      if (*status == "partial") {
+        snapshot.completeness = FactCompleteness::partial;
+      } else if (*status == "stale") {
+        snapshot.completeness = FactCompleteness::stale;
+      } else if (*status == "unknown") {
+        snapshot.completeness = FactCompleteness::unknown;
+      } else {
+        snapshot.completeness = FactCompleteness::complete;
+      }
+    }
+    const auto truncation = artifact_meta_value(db, "truncation");
+    snapshot.truncated = truncation && *truncation == "truncated";
+    if (snapshot.completeness == FactCompleteness::stale) {
+      snapshot.freshness = FactFreshness::stale;
+    }
+
+    std::vector<std::string> relation_names;
+    if (const auto exposed = artifact_meta_value(db, "exposed_relations")) {
+      std::istringstream names(*exposed);
+      std::string name;
+      while (std::getline(names, name, ',')) {
+        if (!name.empty()) {
+          relation_names.push_back(name);
+        }
+      }
+    }
+    if (relation_names.empty()) {
+      auto tables = db.prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name NOT "
+          "LIKE 'sqlite_%' AND name NOT IN ('meta','artifact_meta') ORDER BY "
+          "name");
+      while (tables.step()) {
+        relation_names.push_back(tables.col_text(0));
+      }
+    }
+    for (const auto &name : relation_names) {
+      if (!request.relations.empty() &&
+          !std::ranges::contains(request.relations, name)) {
+        continue;
+      }
+      if (name.contains('\0') || name.empty()) {
+        throw FactProviderError("provider_incompatible",
+                                "extension relation name is invalid");
+      }
+      const std::string escaped = [&]() {
+        std::string value = name;
+        std::size_t offset = 0;
+        while ((offset = value.find('"', offset)) != std::string::npos) {
+          value.insert(offset, 1, '"');
+          offset += 2;
+        }
+        return value;
+      }();
+      std::vector<FactColumn> columns;
+      auto pragma = db.prepare("PRAGMA table_info(\"" + escaped + "\")");
+      while (pragma.step()) {
+        const std::string declared = pragma.col_text(2);
+        const std::string upper = [&]() {
+          std::string value = declared;
+          std::ranges::transform(value, value.begin(), [](unsigned char c) {
+            return static_cast<char>(std::toupper(c));
+          });
+          return value;
+        }();
+        FactType type = FactType::string;
+        if (upper.contains("INT")) {
+          type = FactType::integer;
+        } else if (upper.contains("BOOL")) {
+          type = FactType::boolean;
+        }
+        columns.push_back({.name = pragma.col_text(1), .type = type});
+      }
+      if (columns.empty()) {
+        throw FactProviderError("provider_incompatible",
+                                "extension relation has no columns: " + name);
+      }
+      FactRelation relation{.descriptor = descriptor(name, {}), .rows = {}};
+      relation.descriptor.columns = columns;
+      auto rows = db.prepare("SELECT * FROM \"" + escaped + "\"");
+      while (rows.step()) {
+        FactRow row;
+        row.reserve(columns.size());
+        for (std::size_t index = 0; index < columns.size(); ++index) {
+          if (rows.col_is_null(static_cast<int>(index))) {
+            row.push_back(default_value(columns[index].type));
+          } else if (columns[index].type == FactType::integer) {
+            row.emplace_back(rows.col_int64(static_cast<int>(index)));
+          } else if (columns[index].type == FactType::boolean) {
+            row.emplace_back(rows.col_int64(static_cast<int>(index)) != 0);
+          } else {
+            row.emplace_back(rows.col_text(static_cast<int>(index)));
+          }
+        }
+        relation.rows.push_back(std::move(row));
+      }
+      std::ranges::sort(relation.rows, {}, [](const FactRow &row) {
+        std::string key;
+        for (const auto &value : row) {
+          key += fact_value_text(value);
+          key.push_back('\x1f');
+        }
+        return key;
+      });
+      snapshot.add_relation(std::move(relation));
+    }
+    for (const auto &name : request.relations) {
+      if (snapshot.find_relation(name) == nullptr) {
+        throw FactProviderError("unsupported_relation",
+                                "unsupported extension relation: " + name);
+      }
+    }
+    if (request.workspace_identity &&
+        snapshot.workspace_identity != *request.workspace_identity) {
+      snapshot.completeness = FactCompleteness::unknown;
+      snapshot.freshness = FactFreshness::unknown;
+    }
+    if (request.tu_identity && snapshot.tu_identity != request.tu_identity) {
+      throw FactProviderError("missing_tu",
+                              "requested TU identity is not available");
+    }
+    snapshot.validate();
+    return snapshot;
+  } catch (const FactProviderError &) {
+    throw;
+  } catch (const std::exception &error) {
+    throw FactProviderError("provider_failure", error.what());
+  }
+}
+
+ComposedFactProvider::ComposedFactProvider(std::unique_ptr<FactProvider> left,
+                                           std::unique_ptr<FactProvider> right,
+                                           std::vector<JoinSpec> joins)
+    : left_(std::move(left)), right_(std::move(right)),
+      joins_(std::move(joins)) {
+  if (!left_ || !right_) {
+    throw FactProviderError("provider_failure",
+                            "composed provider requires two inputs");
+  }
+}
+
+FactSnapshot ComposedFactProvider::snapshot(const FactRequest &request) const {
+  try {
+    return compose_snapshots(left_->snapshot(request),
+                             right_->snapshot(request), joins_);
+  } catch (const FactProviderError &) {
+    throw;
+  } catch (const std::exception &error) {
+    throw FactProviderError("provider_failure", error.what());
+  }
 }
 
 FactSnapshot compose_snapshots(const FactSnapshot &left,
@@ -507,8 +823,74 @@ FactSnapshot compose_snapshots(const FactSnapshot &left,
   result.evidence_references.insert(result.evidence_references.end(),
                                     right.evidence_references.begin(),
                                     right.evidence_references.end());
+  result.source_revision.reset();
+  result.source_fingerprint.reset();
   result.artifact_path.reset();
-  if (left.workspace_identity != right.workspace_identity) {
+  result.workspace_identity =
+      left.workspace_identity == right.workspace_identity
+          ? left.workspace_identity
+          : "unknown";
+  result.tu_identity =
+      left.tu_identity == right.tu_identity ? left.tu_identity : std::nullopt;
+  result.applicability = left.applicability + "+" + right.applicability;
+  result.truncated = left.truncated || right.truncated;
+  const auto completeness_rank = [](FactCompleteness value) {
+    switch (value) {
+    case FactCompleteness::complete:
+      return 0;
+    case FactCompleteness::partial:
+      return 1;
+    case FactCompleteness::unknown:
+      return 2;
+    case FactCompleteness::stale:
+      return 3;
+    }
+    return 2;
+  };
+  const auto combined_completeness =
+      std::max(completeness_rank(left.completeness),
+               completeness_rank(right.completeness));
+  if (combined_completeness == 3) {
+    result.completeness = FactCompleteness::stale;
+  } else if (combined_completeness == 2) {
+    result.completeness = FactCompleteness::unknown;
+  } else if (combined_completeness == 1 || result.truncated) {
+    result.completeness = FactCompleteness::partial;
+  } else {
+    result.completeness = FactCompleteness::complete;
+  }
+  const auto freshness_rank = [](FactFreshness value) {
+    switch (value) {
+    case FactFreshness::current:
+      return 0;
+    case FactFreshness::unknown:
+      return 1;
+    case FactFreshness::stale:
+      return 2;
+    }
+    return 1;
+  };
+  const auto combined_freshness =
+      std::max(freshness_rank(left.freshness), freshness_rank(right.freshness));
+  if (combined_freshness == 2) {
+    result.freshness = FactFreshness::stale;
+  } else if (combined_freshness == 1) {
+    result.freshness = FactFreshness::unknown;
+  } else {
+    result.freshness = FactFreshness::current;
+  }
+  const bool identity_compatible =
+      left.workspace_identity != "unknown" &&
+      left.workspace_identity == right.workspace_identity &&
+      (left.tu_identity == right.tu_identity ||
+       left.applicability == "workspace" || right.applicability == "workspace");
+  const bool workspace_compatible =
+      left.workspace_identity != "unknown" &&
+      left.workspace_identity == right.workspace_identity;
+  const bool identities_known = left.workspace_identity != "unknown" &&
+                                right.workspace_identity != "unknown";
+  if (!identity_compatible &&
+      result.completeness == FactCompleteness::complete) {
     result.completeness = FactCompleteness::unknown;
   }
   for (const auto &[name, relation] : right.relations) {
@@ -557,7 +939,8 @@ FactSnapshot compose_snapshots(const FactSnapshot &left,
         {.name = "join_status", .type = FactType::string});
     for (const FactRow &source_row : source.rows) {
       const std::string key = join_key(source_row[source_index]);
-      const auto found = matches.find(key);
+      const auto found =
+          identity_compatible ? matches.find(key) : matches.end();
       if (found == matches.end()) {
         FactRow row = source_row;
         row.insert(row.end(), target.descriptor.columns.size(),
@@ -572,7 +955,12 @@ FactSnapshot compose_snapshots(const FactSnapshot &left,
         unresolved.rows.push_back(
             {join.left_relation, fact_value_text(source_row[source_index]),
              join.right_relation, fact_value_text(source_row[source_index]),
-             "missing_identity"});
+             [&] {
+               if (!workspace_compatible && identities_known) {
+                 return std::string("incompatible_provider_identity");
+               }
+               return std::string("missing_identity");
+             }()});
         continue;
       }
       for (const FactRow *target_row : found->second) {
@@ -594,6 +982,41 @@ FactSnapshot compose_snapshots(const FactSnapshot &left,
   return result;
 }
 
+std::string fact_file_name(const std::string_view logical_relation) {
+  if (logical_relation.empty() || logical_relation.front() == '/' ||
+      logical_relation.find('\0') != std::string_view::npos) {
+    throw CidxError("fact relation name is not safely mappable: " +
+                    std::string(logical_relation));
+  }
+  const fs::path logical_path(logical_relation);
+  if (logical_path.is_absolute() ||
+      std::ranges::any_of(logical_path,
+                          [](const auto &part) { return part == ".."; })) {
+    throw CidxError("fact relation name contains traversal: " +
+                    std::string(logical_relation));
+  }
+  const auto safe = [](const char value) {
+    return std::isalnum(static_cast<unsigned char>(value)) != 0 || value == '_';
+  };
+  if (std::ranges::all_of(logical_relation, safe)) {
+    return std::string(logical_relation) + ".facts";
+  }
+  std::string encoded = "r_";
+  constexpr std::array<char, 16> hex = {'0', '1', '2', '3', '4', '5', '6', '7',
+                                        '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+  for (const unsigned char value : logical_relation) {
+    if (safe(static_cast<char>(value))) {
+      encoded.push_back(static_cast<char>(value));
+    } else {
+      encoded += "_";
+      encoded.push_back(hex[value >> 4U]);
+      encoded.push_back(hex[value & 0x0fU]);
+      encoded += "_";
+    }
+  }
+  return encoded + ".facts";
+}
+
 FactExportStats write_fact_files(const FactSnapshot &snapshot,
                                  const std::string &out_dir,
                                  std::string_view prelude) {
@@ -604,8 +1027,15 @@ FactExportStats write_fact_files(const FactSnapshot &snapshot,
     throw CidxError("cannot create " + out_dir + ": " + ec.message());
   }
   FactExportStats stats;
+  const fs::path mapping_path = fs::path(out_dir) / "cidx_facts.map";
+  std::ofstream mapping(mapping_path, std::ios::binary);
+  if (!mapping) {
+    throw CidxError("cannot write " + mapping_path.string());
+  }
   for (const auto &[name, relation] : snapshot.relations) {
-    const std::string path = (fs::path(out_dir) / (name + ".facts")).string();
+    const std::string filename = fact_file_name(name);
+    const std::string path = (fs::path(out_dir) / filename).string();
+    mapping << name << '\t' << filename << '\n';
     std::ofstream out(path, std::ios::binary);
     if (!out) {
       throw CidxError("cannot write " + path);

@@ -3,7 +3,9 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -42,6 +44,18 @@ enum class FactCompleteness : std::uint8_t {
   stale
 };
 
+enum class FactFreshness : std::uint8_t { current, stale, unknown };
+
+class FactProviderError : public std::runtime_error {
+public:
+  FactProviderError(std::string code, const std::string &message);
+
+  [[nodiscard]] const std::string &code() const noexcept { return code_; }
+
+private:
+  std::string code_;
+};
+
 struct FactRequest {
   std::vector<std::string> relations;
   std::optional<std::string> workspace_identity;
@@ -57,7 +71,10 @@ struct FactSnapshot {
   int catalog_version = 1;
   std::string catalog_hash;
   FactCompleteness completeness = FactCompleteness::complete;
+  FactFreshness freshness = FactFreshness::unknown;
   bool truncated = false;
+  std::optional<std::string> source_revision;
+  std::optional<std::string> source_fingerprint;
   std::vector<std::string> evidence_references;
   std::vector<std::string> input_hashes;
   std::optional<std::string> artifact_path;
@@ -112,12 +129,38 @@ private:
   std::string path_;
 };
 
+class ExtensionFactProvider final : public FactProvider {
+public:
+  explicit ExtensionFactProvider(std::string path);
+
+  [[nodiscard]] FactSnapshot
+  snapshot(const FactRequest &request) const override;
+
+private:
+  std::string path_;
+};
+
 struct JoinSpec {
   std::string left_relation;
   std::string right_relation;
   std::string left_key;
   std::string right_key;
   std::string output_relation;
+};
+
+class ComposedFactProvider final : public FactProvider {
+public:
+  ComposedFactProvider(std::unique_ptr<FactProvider> left,
+                       std::unique_ptr<FactProvider> right,
+                       std::vector<JoinSpec> joins);
+
+  [[nodiscard]] FactSnapshot
+  snapshot(const FactRequest &request) const override;
+
+private:
+  std::unique_ptr<FactProvider> left_;
+  std::unique_ptr<FactProvider> right_;
+  std::vector<JoinSpec> joins_;
 };
 
 [[nodiscard]] FactSnapshot
@@ -132,6 +175,8 @@ struct FactExportStats {
 [[nodiscard]] FactExportStats write_fact_files(const FactSnapshot &snapshot,
                                                const std::string &out_dir,
                                                std::string_view prelude);
+
+[[nodiscard]] std::string fact_file_name(std::string_view logical_relation);
 
 [[nodiscard]] std::string fact_type_name(FactType type);
 [[nodiscard]] std::string fact_value_text(const FactValue &value);

@@ -402,27 +402,45 @@ int main(int argc, char **argv) {
           .entry_point = "callgraph",
           .engine = "astgraph-native",
           .program = "native:astgraph.callgraph",
+          .prelude = {},
+          .include_catalog_prelude = true,
           .content_hash = {},
-          .required_relations = {}};
-      const cidx::analysis::AstgraphFactProvider provider(out_path);
-      const cidx::analysis::AnalysisRun run =
-          cidx::analysis::AnalysisRunner(
-              std::make_unique<cidx::analysis::AstgraphCallgraphEngine>(
-                  [](const std::string &path, int jobs) {
-                    const auto facts =
-                        cidx::astgraph::run_callgraph(path, jobs);
-                    std::vector<cidx::analysis::FactRow> rows;
-                    rows.reserve(facts.size());
-                    for (const auto &fact : facts) {
-                      rows.push_back({fact.caller_node, fact.caller_usr,
-                                      fact.caller_name, fact.callee_node,
-                                      fact.callee_usr, fact.callee_name,
-                                      fact.line});
-                    }
-                    return rows;
-                  }))
-              .run(package, provider, {},
-                   cidx::analysis::AnalysisOptions{.jobs = cli.jobs});
+          .required_relations = {},
+          .output_relations = {}};
+      const cidx::analysis::AnalysisService service(
+          [](const cidx::analysis::AnalysisPackage &) {
+            return std::make_unique<cidx::analysis::AstgraphCallgraphEngine>(
+                [](const std::string &path, int jobs) {
+                  const auto facts = cidx::astgraph::run_callgraph(path, jobs);
+                  std::vector<cidx::analysis::FactRow> rows;
+                  rows.reserve(facts.size());
+                  for (const auto &fact : facts) {
+                    rows.push_back({fact.caller_node, fact.caller_usr,
+                                    fact.caller_name, fact.callee_node,
+                                    fact.callee_usr, fact.callee_name,
+                                    fact.line});
+                  }
+                  return rows;
+                });
+          });
+      const cidx::analysis::AnalysisRequest request{
+          .package = package,
+          .provider =
+              cidx::analysis::ProviderDeclaration{
+                  .kind = cidx::analysis::ProviderKind::astgraph,
+                  .path = out_path,
+                  .left = {},
+                  .right = {},
+                  .joins = {}},
+          .facts = {},
+          .options =
+              cidx::analysis::AnalysisOptions{.jobs = cli.jobs,
+                                              .step_budget = 0,
+                                              .time_budget_ms = 600'000,
+                                              .output_budget = 0,
+                                              .artifact_root = std::nullopt,
+                                              .capture_budget = 1'048'576}};
+      const cidx::analysis::AnalysisRun run = service.run(request);
       if (run.status == cidx::analysis::AnalysisStatus::error ||
           run.status == cidx::analysis::AnalysisStatus::unknown ||
           !run.relations.contains("call")) {

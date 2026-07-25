@@ -157,13 +157,29 @@ int cmd_analyze(const ParsedArgs &args, Context &ctx) {
                                             .entry_point = label,
                                             .engine = "souffle",
                                             .program = std::move(program),
+                                            .prelude = {},
+                                            .include_catalog_prelude = true,
                                             .content_hash = {},
-                                            .required_relations = {}};
+                                            .required_relations = {},
+                                            .output_relations = {}};
+    const analysis::AnalysisRequest analysis_request{
+        .package = package,
+        .provider =
+            analysis::ProviderDeclaration{
+                .kind = analysis::ProviderKind::semantic_index,
+                .path = ctx.index_path,
+                .left = {},
+                .right = {},
+                .joins = {}},
+        .facts = request,
+        .options = analysis::AnalysisOptions{.jobs = args.analyze_jobs,
+                                             .step_budget = 0,
+                                             .time_budget_ms = 600'000,
+                                             .output_budget = 0,
+                                             .artifact_root = std::nullopt,
+                                             .capture_budget = 1'048'576}};
     const analysis::AnalysisRun result =
-        analysis::AnalysisRunner(
-            std::make_unique<analysis::SouffleAnalysisEngine>())
-            .run(package, provider, request,
-                 analysis::AnalysisOptions{.jobs = args.analyze_jobs});
+        analysis::AnalysisService().run(analysis_request);
     if (result.status == analysis::AnalysisStatus::error ||
         result.status == analysis::AnalysisStatus::unknown) {
       if (result.diagnostics.empty()) {

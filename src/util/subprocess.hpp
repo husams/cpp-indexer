@@ -11,6 +11,7 @@
 //     never throws (the only consumer falls back to host defaults, G8)
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -21,8 +22,12 @@ struct RunResult {
   std::string out;
   std::string err;
   bool timed_out = false;
+  bool output_limited = false;
+  std::size_t captured_bytes = 0;
+  std::size_t peak_bytes = 0;
 };
 
-RunResult run(const std::vector<std::string> &argv, double timeout_sec = 30.0);
+RunResult run(const std::vector<std::string> &argv, double timeout_sec = 30.0,
+              std::size_t output_limit = 0);
 
 } // namespace cidx
