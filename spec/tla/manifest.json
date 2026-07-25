@@ -5,6 +5,7 @@
     "modules/CidxTypes.tla",
     "modules/CidxRepository.tla",
     "modules/CidxResult.tla",
+    "modules/CidxStorageLifecycle.tla",
     "modules/CidxBehavior.tla",
     "conformance/CidxConformance.tla",
     "protected/CidxProtected.tla"
@@ -39,6 +40,26 @@
         "BoundedProgressInvariant",
         "ProtectedInvariant"
       ]
+    },
+    {
+      "module": "models/CidxStorageLifecycleSmoke.tla",
+      "config": "models/CidxStorageLifecycleSmoke.cfg",
+      "invariants": [
+        "TypeInvariant",
+        "CurrentGenerationInvariant",
+        "NoInvalidCurrentInvariant",
+        "ReadOnlyStateInvariant",
+        "MigrationInvariant",
+        "SidecarInvariant",
+        "CrossFileAtomicityInvariant",
+        "CleanupSafetyInvariant",
+        "PackageInvariant",
+        "IncludeHygieneInvariant",
+        "PublicationRecoveryInvariant",
+        "TraceInvariant",
+        "BoundedProgressInvariant"
+      ],
+      "properties": ["StorageEventuallySettles"]
     }
   ],
   "coverage": {
@@ -66,8 +87,26 @@
       "notModeled": ["deterministic query result sets, paths, and witnesses"]
     },
     "storage-sidecars-and-migrations": {
-      "modules": ["CidxBehavior"],
-      "invariants": ["MigrationInvariant", "NoPartialGenerationInvariant"]
+      "modules": ["CidxStorageLifecycle", "CidxBehavior"],
+      "invariants": [
+        "CurrentGenerationInvariant",
+        "NoInvalidCurrentInvariant",
+        "ReadOnlyStateInvariant",
+        "MigrationInvariant",
+        "SidecarInvariant",
+        "CrossFileAtomicityInvariant",
+        "CleanupSafetyInvariant",
+        "PackageInvariant",
+        "PublicationRecoveryInvariant",
+        "NoPartialGenerationInvariant",
+        "StorageEventuallySettles"
+      ],
+      "coverage": "bounded",
+      "notModeled": [
+        "SQLite pager/journal/WAL/locking algorithms",
+        "filesystem durability guarantees",
+        "implementation-specific backup formats"
+      ]
     },
     "include-hygiene-and-transformations": {
       "modules": ["CidxBehavior"],
