@@ -26,14 +26,19 @@ class UsingDirectiveDecl;
 namespace cidx::ast {
 
 class NamespacePassPorts;
+struct PassMetrics;
 
 class NamespaceUseVisitor : public clang::RecursiveASTVisitor<NamespaceUseVisitor> {
 public:
   NamespaceUseVisitor(clang::ASTContext &context, NamespacePassPorts &ports,
                 std::string target_file, int64_t file_id);
+  NamespaceUseVisitor(clang::ASTContext &context, NamespacePassPorts &ports,
+                      std::string target_file, int64_t file_id,
+                      PassMetrics *metrics);
 
   // Scope tracking: the nearest enclosing INDEXED symbol is the edge source.
   bool TraverseDecl(clang::Decl *decl);
+  bool VisitDecl(clang::Decl *decl);
 
   std::optional<int64_t> scope_symbol_id(const clang::Decl *decl) const;
 
@@ -56,6 +61,7 @@ private:
   // RAV can reach the same qualifier TypeLoc via two paths (function proto +
   // param decl); libclang visits each NAMESPACE_REF once — dedupe by site.
   std::set<std::tuple<int64_t, int64_t, int64_t, int64_t>> seen_;
+  PassMetrics *metrics_ = nullptr;
 };
 
 } // namespace cidx::ast

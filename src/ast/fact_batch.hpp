@@ -38,6 +38,7 @@ struct FactBatch {
 
 class FactBatchRecorder final : public SymbolFactEmitter,
                                 public StatementFactPorts,
+                                public DeclarationPassPorts,
                                 public NamespacePassPorts,
                                 public DefinitionScopeEmitter,
                                 public IndexingLifecycle {
@@ -99,6 +100,8 @@ public:
 
 private:
   static auto stable_id(std::string_view key) -> std::int64_t;
+  static auto symbol_key(const std::string &source, const std::string &usr)
+      -> std::string;
   static auto edge_key(const EdgeRecord &edge) -> std::string;
   FactBatch batch_;
   std::unordered_map<std::string, std::int64_t> symbol_ids_;

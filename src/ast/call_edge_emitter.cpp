@@ -21,7 +21,83 @@
 
 namespace cidx::ast {
 
-namespace {} // namespace
+namespace {
+
+// Callable signatures reuse the declaration visitor, but body extraction must
+// not require presentation or lifecycle services. This adapter supplies the
+// declaration visitor's presentation port as an intentionally inert view.
+class StatementDeclarationAdapter final : public DeclarationPassPorts {
+public:
+  explicit StatementDeclarationAdapter(StatementFactPorts &ports)
+      : ports_(ports) {}
+
+  auto lookup_symbol_id(const std::string &usr,
+                       const std::optional<std::string> &source = std::nullopt)
+      -> std::optional<std::int64_t> override {
+    return ports_.lookup_symbol_id(usr, source);
+  }
+  auto mint_symbol(const MintRequest &request) -> std::int64_t override {
+    return ports_.mint_symbol(request);
+  }
+  auto file_id_for_path(const std::string &path)
+      -> std::optional<std::int64_t> override {
+    return ports_.file_id_for_path(path);
+  }
+  auto type_arg_candidates(const std::string &name, bool qualified)
+      -> std::vector<TypeArgCandidate> override {
+    return ports_.type_arg_candidates(name, qualified);
+  }
+  auto symbol_ids_by_qual_name_kind(const std::string &qual_name,
+                                    const std::string &kind_name)
+      -> std::vector<std::int64_t> override {
+    return ports_.symbol_ids_by_qual_name_kind(qual_name, kind_name);
+  }
+  auto add_edge(const EdgeRecord &edge) -> std::int64_t override {
+    return ports_.add_edge(edge);
+  }
+  auto ensure_edge(const EdgeRecord &edge) -> std::int64_t override {
+    return ports_.ensure_edge(edge);
+  }
+  void add_edge_site(const EdgeSiteRecord &site) override {
+    ports_.add_edge_site(site);
+  }
+  void add_call_arg(const CallArgRecord &arg) override {
+    ports_.add_call_arg(arg);
+  }
+  void add_template_param(const TemplateParamRecord &param) override {
+    ports_.add_template_param(param);
+  }
+  void add_template_arg(const TemplateArgRecord &arg) override {
+    ports_.add_template_arg(arg);
+  }
+  auto intern_type_node(const TypeNodeRecord &node) -> std::int64_t override {
+    return ports_.intern_type_node(node);
+  }
+  void add_type_edge(std::int64_t src_id, std::int64_t kind,
+                     std::int64_t position, std::int64_t dst_id) override {
+    ports_.add_type_edge(src_id, kind, position, dst_id);
+  }
+  void replace_parameters(
+      std::int64_t owner_id,
+      const std::vector<ParameterRecord> &parameters) override {
+    ports_.replace_parameters(owner_id, parameters);
+  }
+  void add_symbol_type(std::int64_t symbol_id, std::int64_t kind,
+                       std::int64_t type_id) override {
+    ports_.add_symbol_type(symbol_id, kind, type_id);
+  }
+  auto lookup_display_name(std::int64_t /*symbol_id*/)
+      -> std::optional<std::string> override {
+    return std::nullopt;
+  }
+  void update_display_name(std::int64_t /*symbol_id*/,
+                           const std::string & /*display*/) override {}
+
+private:
+  StatementFactPorts &ports_;
+};
+
+} // namespace
 
 int64_t
 CallEdgeEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
@@ -67,7 +143,7 @@ CallEdgeEmitter::mint_resolved_target(const clang::Expr *site,
   req->is_instantiation = info && info->is_instantiation;
   const int64_t dst_id = ctx_.ports().mint_symbol(*req);
   if (info) {
-    emit_callable_template_identity(ctx_.ports(), ctx_.ports(), ctx_.ports(),
+    emit_callable_template_identity(ctx_.ports(), ctx_.ports(), nullptr,
                                     ctx_.mint(),
                                     ctx_.targ_encoder(), dst_id, callee, *info,
                                     written_template_args(site));
@@ -78,7 +154,15 @@ CallEdgeEmitter::mint_resolved_target(const clang::Expr *site,
                       ctx_.targ_encoder(), dst_id,
                       method);
   }
-  DeclarationEdgeVisitor signature_visitor(ctx_.context(), ctx_.ports(), {},
+  StatementDeclarationAdapter declaration_ports(ctx_.ports());
+  if (ctx_.metrics() != nullptr) {
+    BudgetedDeclarationPassPorts budgeted(declaration_ports, *ctx_.metrics());
+    DeclarationEdgeVisitor signature_visitor(ctx_.context(), budgeted, {},
+                                             ctx_.file_id());
+    signature_visitor.emit_signature_types_for(callee, dst_id);
+    return dst_id;
+  }
+  DeclarationEdgeVisitor signature_visitor(ctx_.context(), declaration_ports, {},
                                            ctx_.file_id());
   signature_visitor.emit_signature_types_for(callee, dst_id);
   return dst_id;
@@ -124,11 +208,15 @@ void CallEdgeEmitter::emit_resolved_call(const clang::Expr *site,
       mint_as != nullptr ? mint_as : llvm::cast<clang::NamedDecl>(callee);
   const std::string callee_usr = usr_for_decl(keyed);
   if (callee_usr.empty()) {
+    ctx_.record_unsupported("CallExpr", site->getBeginLoc(),
+                            "callee has no canonical identity");
     return;
   }
   const int64_t dst_id = recovered ? resolve_recovered_target(keyed, callee_usr)
                                    : mint_resolved_target(site, callee);
   if (dst_id < 0) {
+    ctx_.record_unsupported("CallExpr", site->getBeginLoc(),
+                            "callee identity could not be resolved");
     return;
   }
   const int64_t edge_id = emit_call_site(site, dst_id, callee);

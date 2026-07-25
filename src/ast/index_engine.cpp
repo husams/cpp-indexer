@@ -158,18 +158,21 @@ public:
         [](std::string id, std::vector<FrontendCapability> capabilities,
            std::vector<std::string> facts,
            std::vector<std::string> dependencies, PassScope scope,
-           TraversalMode traversal) -> ExtractionPassDescriptor {
+           TraversalMode traversal,
+           FactCompleteness completeness = FactCompleteness::complete,
+           FactTrust trust = FactTrust::trusted) -> ExtractionPassDescriptor {
       return ExtractionPassDescriptor{
           .id = std::move(id),
           .version = 1,
           .required_capabilities = std::move(capabilities),
+          .consumed_fact_families = facts,
           .produced_fact_families = std::move(facts),
           .catalog_versions = {catalog::kCatalogVersion},
           .dependencies = std::move(dependencies),
           .scope = scope,
           .traversal = traversal,
-          .completeness = FactCompleteness::complete,
-          .trust = FactTrust::trusted,
+          .completeness = completeness,
+          .trust = trust,
           .budget = {.max_visited_constructs = 1'000'000,
                      .max_emitted_facts = 2'000'000,
                      .max_diagnostics = 1'024,
@@ -179,14 +182,11 @@ public:
         descriptor("symbols.main", {FrontendCapability::ast}, {"symbols"}, {},
                    PassScope::main_file, TraversalMode::declaration),
         [this](PassExecutionContext &execution) -> void {
-          state_.out->stored = run_symbol_pass(state_.path, state_.rec->id);
-          execution.metrics.note_visited(
-              static_cast<std::size_t>(state_.out->stored));
-          execution.metrics.note_emitted(
-              static_cast<std::size_t>(symbols_.symbol_ids().size()));
           for (const cidx::Diagnostic &diagnostic : state_.out->diagnostics) {
             execution.metrics.note_diagnostic(diagnostic.spelling);
           }
+          state_.out->stored =
+              run_symbol_pass(state_.path, state_.rec->id, execution);
           main_symbol_ids_ = symbols_.symbol_ids();
         });
     registry.register_pass(
@@ -200,11 +200,9 @@ public:
             if (header.covered_by_current_config) {
               db_.delete_symbols_for_file(header.file_id);
             }
-            header.stored = run_symbol_pass(header.path, header.file_id);
+            header.stored =
+                run_symbol_pass(header.path, header.file_id, execution);
             header.symbol_ids = symbols_.symbol_ids();
-            execution.metrics.note_visited(
-                static_cast<std::size_t>(header.stored));
-            execution.metrics.note_emitted(header.symbol_ids.size());
           }
         });
     registry.register_pass(
@@ -248,7 +246,8 @@ public:
         descriptor("statements.headers",
                    {FrontendCapability::ast, FrontendCapability::templates},
                    {"relations", "types", "evidence"}, {"definitions.headers"},
-                   PassScope::owned_header, TraversalMode::body),
+                   PassScope::owned_header, TraversalMode::body,
+                   FactCompleteness::partial, FactTrust::inferred),
         [this](PassExecutionContext &execution) -> void {
           for (std::size_t index = 0;
                index < header_definition_visitors_.size(); ++index) {
@@ -267,10 +266,16 @@ public:
                                 &header.edge_ids, &header.definition_ids);
           }
         });
-    registry.register_pass(
+    auto header_association =
         descriptor("headers.associate", {FrontendCapability::ast},
-                   {"relations", "definitions"}, {"namespaces.headers"},
-                   PassScope::owned_header, TraversalMode::lifecycle),
+                   {"file_associations"},
+                   {"symbols.headers", "statements.headers",
+                    "namespaces.headers"},
+                   PassScope::owned_header, TraversalMode::lifecycle);
+    header_association.consumed_fact_families =
+        {"symbols", "relations", "definitions"};
+    registry.register_pass(
+        std::move(header_association),
         [this](PassExecutionContext &execution) -> void {
           for (PendingHeader &header : pending_headers_) {
             if (!SourceSnapshot{.md5 = header.md5}.matches(header.path)) {
@@ -319,7 +324,8 @@ public:
         descriptor("statements.main",
                    {FrontendCapability::ast, FrontendCapability::templates},
                    {"relations", "types", "evidence"}, {"definitions.main"},
-                   PassScope::main_file, TraversalMode::body),
+                   PassScope::main_file, TraversalMode::body,
+                   FactCompleteness::partial, FactTrust::inferred),
         [this](PassExecutionContext &execution) -> void {
           for (const auto &visitor : main_definition_visitors_) {
             run_statement_stage(*visitor, execution, &main_edge_ids_,
@@ -333,6 +339,18 @@ public:
         [this](PassExecutionContext &execution) -> void {
           run_namespace_stage(state_.path, state_.rec->id, execution,
                               &main_edge_ids_, &main_definition_ids_);
+        });
+    auto main_association =
+        descriptor("main.associate", {FrontendCapability::ast},
+                   {"file_associations"},
+                   {"symbols.main", "lifecycle.main", "statements.main",
+                    "namespaces.main"},
+                   PassScope::main_file, TraversalMode::lifecycle);
+    main_association.consumed_fact_families =
+        {"symbols", "relations", "definitions"};
+    registry.register_pass(
+        std::move(main_association),
+        [this](PassExecutionContext &execution) -> void {
           db_.associate_facts_for_file(
               state_.rec->id, state_.normalized_config_id, main_symbol_ids_,
               main_edge_ids_, main_definition_ids_);
@@ -341,7 +359,7 @@ public:
         });
     registry.register_pass(
         descriptor("includes.persist", {FrontendCapability::preprocessor},
-                   {"includes"}, {"namespaces.main"},
+                   {"includes"}, {"main.associate"},
                    PassScope::translation_unit, TraversalMode::preprocessing),
         [this](PassExecutionContext &execution) -> void {
           if (state_.pp != nullptr) {
@@ -355,7 +373,8 @@ public:
     registry.register_pass(
         descriptor("evidence.persist", {FrontendCapability::ast}, {"evidence"},
                    {"includes.persist"}, PassScope::translation_unit,
-                   TraversalMode::lifecycle),
+                   TraversalMode::lifecycle, FactCompleteness::partial,
+                   FactTrust::inferred),
         [this](PassExecutionContext &execution) -> void {
           std::ranges::sort(state_.out->evidence, {},
                             [](const EvidenceRecord &record) -> auto {
@@ -397,14 +416,32 @@ public:
     plan.add("definitions.main");
     plan.add("statements.main");
     plan.add("namespaces.main");
+    plan.add("main.associate");
     plan.add("includes.persist");
     plan.add("evidence.persist");
-    const PassExecutionReport report = registry.run(plan);
+    FrontendSession session{
+        .ast_context = &context_,
+        .preprocessor = state_.pp,
+        .declaration_ports = &static_cast<DeclarationPassPorts &>(edges_),
+        .statement_ports = &static_cast<StatementFactPorts &>(edges_),
+        .namespace_ports = &static_cast<NamespacePassPorts &>(edges_),
+        .definition_ports = &static_cast<DefinitionScopeEmitter &>(edges_),
+        .evidence = &static_cast<EvidenceEmitter &>(edges_),
+        .lifecycle = &static_cast<IndexingLifecycle &>(edges_)};
+    for (const FrontendPassProvider &provider : frontend_pass_providers()) {
+      provider(session, registry, plan);
+    }
+    const PassExecutionReport report = registry.run(plan, &session);
     state_.out->pass_metrics.clear();
     state_.out->pass_metrics.reserve(report.passes.size());
     for (const PassExecutionRecord &pass : report.passes) {
       state_.out->pass_metrics.push_back(
           {.id = pass.descriptor.id,
+           .dependencies = pass.descriptor.dependencies,
+           .consumed_fact_families = pass.descriptor.consumed_fact_families,
+           .produced_fact_families = pass.descriptor.produced_fact_families,
+           .completeness = pass.descriptor.completeness,
+           .trust = pass.descriptor.trust,
            .visited_constructs = pass.metrics.visited_constructs,
            .emitted_facts = pass.metrics.emitted_facts,
            .unknown_constructs = pass.metrics.unknown_constructs,
@@ -433,12 +470,14 @@ private:
   using DefinitionVisitors =
       std::vector<std::unique_ptr<FunctionDefinitionVisitor>>;
 
-  int run_symbol_pass(const std::string &file, int64_t file_id) {
+  int run_symbol_pass(const std::string &file, int64_t file_id,
+                      PassExecutionContext &execution) {
     symbols_.set_current_file_id(file_id);
     symbols_.set_identity_translation_unit_config_id(
         state_.normalized_config_id, state_.rec->id);
     symbols_.reset_counters();
-    SymbolVisitor visitor(context_, symbols_, file);
+    symbols_.set_metrics(&execution.metrics);
+    SymbolVisitor visitor(context_, symbols_, file, &execution.metrics);
     visitor.TraverseDecl(tu_);
     return symbols_.stored_count();
   }
@@ -472,9 +511,12 @@ private:
     }
     configure_fact_file(file_id, false);
     edges_.reset_fact_ids();
-    DeclarationEdgeVisitor decls(
-        context_, static_cast<DeclarationPassPorts &>(edges_), file, file_id,
-        &static_cast<DefinitionScopeEmitter &>(edges_));
+    BudgetedDeclarationPassPorts ports(
+        static_cast<DeclarationPassPorts &>(edges_), execution.metrics);
+    BudgetedDefinitionScopeEmitter definitions(
+        static_cast<DefinitionScopeEmitter &>(edges_), execution.metrics);
+    DeclarationEdgeVisitor decls(context_, ports, file, file_id, &definitions,
+                                 &execution.metrics);
     decls.TraverseDecl(tu_);
     if (edge_ids != nullptr) {
       append_fact_ids(*edge_ids, edges_.edge_ids());
@@ -482,7 +524,6 @@ private:
     if (definition_ids != nullptr) {
       append_fact_ids(*definition_ids, edges_.definition_ids());
     }
-    execution.metrics.note_visited(1);
   }
 
   void collect_definitions(DefinitionVisitors &out, const std::string &file,
@@ -496,7 +537,8 @@ private:
     edges_.reset_fact_ids();
     auto visitor = std::make_unique<FunctionDefinitionVisitor>(
         context_, static_cast<DeclarationIdentityResolver &>(edges_),
-        static_cast<DefinitionScopeEmitter &>(edges_), file, file_id);
+        static_cast<DefinitionScopeEmitter &>(edges_), file, file_id,
+        &execution.metrics);
     visitor->TraverseDecl(tu_);
     if (edge_ids != nullptr) {
       append_fact_ids(*edge_ids, edges_.edge_ids());
@@ -504,7 +546,6 @@ private:
     if (definition_ids != nullptr) {
       append_fact_ids(*definition_ids, edges_.definition_ids());
     }
-    execution.metrics.note_visited(visitor->definition_count());
     out.push_back(std::move(visitor));
   }
 
@@ -517,8 +558,11 @@ private:
     }
     configure_fact_file(visitor.file_id(), false);
     edges_.reset_fact_ids();
-    visitor.run_statement_pass(static_cast<StatementFactPorts &>(edges_),
-                               &execution.metrics);
+    BudgetedStatementFactPorts ports(
+        static_cast<StatementFactPorts &>(edges_), execution.metrics);
+    BudgetedDefinitionScopeEmitter definitions(
+        static_cast<DefinitionScopeEmitter &>(edges_), execution.metrics);
+    visitor.run_statement_pass(ports, &execution.metrics, &definitions);
     if (edge_ids != nullptr) {
       append_fact_ids(*edge_ids, edges_.edge_ids());
     }
@@ -536,8 +580,9 @@ private:
     }
     configure_fact_file(file_id, false);
     edges_.reset_fact_ids();
-    NamespaceUseVisitor ns(context_, static_cast<NamespacePassPorts &>(edges_),
-                           file, file_id);
+    BudgetedNamespacePassPorts ports(
+        static_cast<NamespacePassPorts &>(edges_), execution.metrics);
+    NamespaceUseVisitor ns(context_, ports, file, file_id, &execution.metrics);
     ns.TraverseDecl(tu_);
     if (edge_ids != nullptr) {
       append_fact_ids(*edge_ids, edges_.edge_ids());
@@ -545,7 +590,6 @@ private:
     if (definition_ids != nullptr) {
       append_fact_ids(*definition_ids, edges_.definition_ids());
     }
-    execution.metrics.note_visited(1);
   }
 
   [[nodiscard]] bool header_covered_by_current_config(

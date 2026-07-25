@@ -60,7 +60,7 @@ callable_template_info(const clang::FunctionDecl *fd);
 // Safe to call from both the declaration pass and every call site.
 void emit_callable_template_identity(
     DeclarationIdentityResolver &identity, RelationFactEmitter &relations,
-    PresentationNormalizer &presentation, MintBuilder &mint,
+    PresentationNormalizer *presentation, MintBuilder &mint,
     const TemplateArgumentEncoder &targ_encoder, int64_t dst_id,
     const clang::FunctionDecl *fd, const CallableTemplateInfo &info,
     const std::vector<clang::QualType> &written);

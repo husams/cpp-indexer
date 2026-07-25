@@ -11,6 +11,7 @@
 
 namespace clang {
 class ASTContext;
+class Decl;
 class FunctionDecl;
 class NamedDecl;
 } // namespace clang
@@ -28,11 +29,15 @@ public:
   FunctionDefinitionVisitor(clang::ASTContext &context,
                             DeclarationIdentityResolver &identity,
                             DefinitionScopeEmitter &definitions,
-                            std::string target_file, int64_t file_id);
+                            std::string target_file, int64_t file_id,
+                            PassMetrics *metrics = nullptr);
 
+  bool VisitDecl(clang::Decl *decl);
   bool VisitFunctionDecl(clang::FunctionDecl *decl);
   auto run_statement_pass(StatementFactPorts &ports,
-                          PassMetrics *metrics = nullptr) -> void;
+                          PassMetrics *metrics = nullptr,
+                          DefinitionScopeEmitter *statement_definitions = nullptr)
+      -> void;
   [[nodiscard]] auto definition_count() const -> std::size_t {
     return definitions_found_.size();
   }
@@ -55,6 +60,7 @@ private:
   std::string target_file_;
   int64_t file_id_;
   std::vector<DefinitionFact> definitions_found_;
+  PassMetrics *metrics_ = nullptr;
 };
 
 } // namespace cidx::ast

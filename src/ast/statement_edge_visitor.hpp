@@ -113,7 +113,8 @@ private:
   void emit_overloaded_call(const clang::CallExpr *call,
                             const clang::OverloadExpr *ovl);
   std::set<int64_t>
-  overload_candidate_ids(const std::vector<const clang::NamedDecl *> &cands);
+  overload_candidate_ids(const clang::CallExpr *call,
+                         const std::vector<const clang::NamedDecl *> &cands);
   void emit_factory_edge(const clang::CallExpr *call,
                          const clang::FunctionDecl *ref);
   void emit_construct(const clang::CXXConstructExpr *ctor);

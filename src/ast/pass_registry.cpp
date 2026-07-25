@@ -1,6 +1,8 @@
 #include "ast/pass_registry.hpp"
 
 #include <algorithm>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -8,6 +10,9 @@
 namespace cidx::ast {
 
 namespace {
+
+std::mutex provider_mutex;
+std::vector<FrontendPassProvider> provider_list;
 
 template <typename T>
 void append_keys(std::string &out, const std::vector<T> &values) {
@@ -41,6 +46,8 @@ auto ExtractionPassDescriptor::stable_key() const -> std::string {
                     "|version=" + std::to_string(version);
   key += "|capabilities=";
   append_keys(key, required_capabilities);
+  key += "|inputs=";
+  append_keys(key, consumed_fact_families);
   key += "|facts=";
   append_keys(key, produced_fact_families);
   key += "|catalog=";
@@ -97,6 +104,259 @@ void PassMetrics::note_diagnostic(std::string message) {
   enforce(diagnostics, budget_.max_diagnostics, "diagnostics");
 }
 
+BudgetedStatementFactPorts::BudgetedStatementFactPorts(StatementFactPorts &ports,
+                                                       PassMetrics &metrics)
+    : ports_(ports), metrics_(metrics) {}
+
+auto BudgetedStatementFactPorts::lookup_symbol_id(
+    const std::string &usr, const std::optional<std::string> &source)
+    -> std::optional<std::int64_t> {
+  return ports_.lookup_symbol_id(usr, source);
+}
+auto BudgetedStatementFactPorts::mint_symbol(const MintRequest &request)
+    -> std::int64_t {
+  metrics_.note_emitted();
+  return ports_.mint_symbol(request);
+}
+auto BudgetedStatementFactPorts::file_id_for_path(const std::string &path)
+    -> std::optional<std::int64_t> {
+  return ports_.file_id_for_path(path);
+}
+auto BudgetedStatementFactPorts::type_arg_candidates(const std::string &name,
+                                                     bool qualified)
+    -> std::vector<TypeArgCandidate> {
+  return ports_.type_arg_candidates(name, qualified);
+}
+auto BudgetedStatementFactPorts::symbol_ids_by_qual_name_kind(
+    const std::string &qual_name, const std::string &kind_name)
+    -> std::vector<std::int64_t> {
+  return ports_.symbol_ids_by_qual_name_kind(qual_name, kind_name);
+}
+auto BudgetedStatementFactPorts::add_edge(const EdgeRecord &edge)
+    -> std::int64_t {
+  metrics_.note_emitted();
+  return ports_.add_edge(edge);
+}
+auto BudgetedStatementFactPorts::ensure_edge(const EdgeRecord &edge)
+    -> std::int64_t {
+  metrics_.note_emitted();
+  return ports_.ensure_edge(edge);
+}
+void BudgetedStatementFactPorts::add_edge_site(const EdgeSiteRecord &site) {
+  metrics_.note_emitted();
+  ports_.add_edge_site(site);
+}
+void BudgetedStatementFactPorts::add_call_arg(const CallArgRecord &arg) {
+  metrics_.note_emitted();
+  ports_.add_call_arg(arg);
+}
+void BudgetedStatementFactPorts::add_template_param(
+    const TemplateParamRecord &param) {
+  metrics_.note_emitted();
+  ports_.add_template_param(param);
+}
+void BudgetedStatementFactPorts::add_template_arg(
+    const TemplateArgRecord &arg) {
+  metrics_.note_emitted();
+  ports_.add_template_arg(arg);
+}
+auto BudgetedStatementFactPorts::intern_type_node(const TypeNodeRecord &node)
+    -> std::int64_t {
+  metrics_.note_emitted();
+  return ports_.intern_type_node(node);
+}
+void BudgetedStatementFactPorts::add_type_edge(std::int64_t src_id,
+                                               std::int64_t kind,
+                                               std::int64_t position,
+                                               std::int64_t dst_id) {
+  metrics_.note_emitted();
+  ports_.add_type_edge(src_id, kind, position, dst_id);
+}
+void BudgetedStatementFactPorts::replace_parameters(
+    std::int64_t owner_id, const std::vector<ParameterRecord> &parameters) {
+  metrics_.note_emitted(parameters.size());
+  ports_.replace_parameters(owner_id, parameters);
+}
+void BudgetedStatementFactPorts::add_symbol_type(std::int64_t symbol_id,
+                                                 std::int64_t kind,
+                                                 std::int64_t type_id) {
+  metrics_.note_emitted();
+  ports_.add_symbol_type(symbol_id, kind, type_id);
+}
+void BudgetedStatementFactPorts::emit(const EvidenceRecord &evidence) {
+  metrics_.note_emitted();
+  ports_.emit(evidence);
+}
+
+BudgetedDeclarationPassPorts::BudgetedDeclarationPassPorts(
+    DeclarationPassPorts &ports, PassMetrics &metrics)
+    : ports_(ports), metrics_(metrics) {}
+
+auto BudgetedDeclarationPassPorts::lookup_symbol_id(
+    const std::string &usr, const std::optional<std::string> &source)
+    -> std::optional<std::int64_t> {
+  return ports_.lookup_symbol_id(usr, source);
+}
+auto BudgetedDeclarationPassPorts::mint_symbol(const MintRequest &request)
+    -> std::int64_t {
+  metrics_.note_emitted();
+  return ports_.mint_symbol(request);
+}
+auto BudgetedDeclarationPassPorts::file_id_for_path(const std::string &path)
+    -> std::optional<std::int64_t> {
+  return ports_.file_id_for_path(path);
+}
+auto BudgetedDeclarationPassPorts::type_arg_candidates(const std::string &name,
+                                                       bool qualified)
+    -> std::vector<TypeArgCandidate> {
+  return ports_.type_arg_candidates(name, qualified);
+}
+auto BudgetedDeclarationPassPorts::symbol_ids_by_qual_name_kind(
+    const std::string &qual_name, const std::string &kind_name)
+    -> std::vector<std::int64_t> {
+  return ports_.symbol_ids_by_qual_name_kind(qual_name, kind_name);
+}
+auto BudgetedDeclarationPassPorts::add_edge(const EdgeRecord &edge)
+    -> std::int64_t {
+  metrics_.note_emitted();
+  return ports_.add_edge(edge);
+}
+auto BudgetedDeclarationPassPorts::ensure_edge(const EdgeRecord &edge)
+    -> std::int64_t {
+  metrics_.note_emitted();
+  return ports_.ensure_edge(edge);
+}
+void BudgetedDeclarationPassPorts::add_edge_site(const EdgeSiteRecord &site) {
+  metrics_.note_emitted();
+  ports_.add_edge_site(site);
+}
+void BudgetedDeclarationPassPorts::add_call_arg(const CallArgRecord &arg) {
+  metrics_.note_emitted();
+  ports_.add_call_arg(arg);
+}
+void BudgetedDeclarationPassPorts::add_template_param(
+    const TemplateParamRecord &param) {
+  metrics_.note_emitted();
+  ports_.add_template_param(param);
+}
+void BudgetedDeclarationPassPorts::add_template_arg(
+    const TemplateArgRecord &arg) {
+  metrics_.note_emitted();
+  ports_.add_template_arg(arg);
+}
+auto BudgetedDeclarationPassPorts::intern_type_node(const TypeNodeRecord &node)
+    -> std::int64_t {
+  metrics_.note_emitted();
+  return ports_.intern_type_node(node);
+}
+void BudgetedDeclarationPassPorts::add_type_edge(std::int64_t src_id,
+                                                 std::int64_t kind,
+                                                 std::int64_t position,
+                                                 std::int64_t dst_id) {
+  metrics_.note_emitted();
+  ports_.add_type_edge(src_id, kind, position, dst_id);
+}
+void BudgetedDeclarationPassPorts::replace_parameters(
+    std::int64_t owner_id, const std::vector<ParameterRecord> &parameters) {
+  metrics_.note_emitted(parameters.size());
+  ports_.replace_parameters(owner_id, parameters);
+}
+void BudgetedDeclarationPassPorts::add_symbol_type(std::int64_t symbol_id,
+                                                   std::int64_t kind,
+                                                   std::int64_t type_id) {
+  metrics_.note_emitted();
+  ports_.add_symbol_type(symbol_id, kind, type_id);
+}
+auto BudgetedDeclarationPassPorts::lookup_display_name(std::int64_t symbol_id)
+    -> std::optional<std::string> {
+  return ports_.lookup_display_name(symbol_id);
+}
+void BudgetedDeclarationPassPorts::update_display_name(
+    std::int64_t symbol_id, const std::string &display) {
+  ports_.update_display_name(symbol_id, display);
+}
+
+BudgetedNamespacePassPorts::BudgetedNamespacePassPorts(
+    NamespacePassPorts &ports, PassMetrics &metrics)
+    : ports_(ports), metrics_(metrics) {}
+
+auto BudgetedNamespacePassPorts::lookup_symbol_id(
+    const std::string &usr, const std::optional<std::string> &source)
+    -> std::optional<std::int64_t> {
+  return ports_.lookup_symbol_id(usr, source);
+}
+auto BudgetedNamespacePassPorts::mint_symbol(const MintRequest &request)
+    -> std::int64_t {
+  metrics_.note_emitted();
+  return ports_.mint_symbol(request);
+}
+auto BudgetedNamespacePassPorts::file_id_for_path(const std::string &path)
+    -> std::optional<std::int64_t> {
+  return ports_.file_id_for_path(path);
+}
+auto BudgetedNamespacePassPorts::type_arg_candidates(const std::string &name,
+                                                     bool qualified)
+    -> std::vector<TypeArgCandidate> {
+  return ports_.type_arg_candidates(name, qualified);
+}
+auto BudgetedNamespacePassPorts::symbol_ids_by_qual_name_kind(
+    const std::string &qual_name, const std::string &kind_name)
+    -> std::vector<std::int64_t> {
+  return ports_.symbol_ids_by_qual_name_kind(qual_name, kind_name);
+}
+auto BudgetedNamespacePassPorts::add_edge(const EdgeRecord &edge)
+    -> std::int64_t {
+  metrics_.note_emitted();
+  return ports_.add_edge(edge);
+}
+auto BudgetedNamespacePassPorts::ensure_edge(const EdgeRecord &edge)
+    -> std::int64_t {
+  metrics_.note_emitted();
+  return ports_.ensure_edge(edge);
+}
+void BudgetedNamespacePassPorts::add_edge_site(const EdgeSiteRecord &site) {
+  metrics_.note_emitted();
+  ports_.add_edge_site(site);
+}
+void BudgetedNamespacePassPorts::add_call_arg(const CallArgRecord &arg) {
+  metrics_.note_emitted();
+  ports_.add_call_arg(arg);
+}
+void BudgetedNamespacePassPorts::add_template_param(
+    const TemplateParamRecord &param) {
+  metrics_.note_emitted();
+  ports_.add_template_param(param);
+}
+void BudgetedNamespacePassPorts::add_template_arg(
+    const TemplateArgRecord &arg) {
+  metrics_.note_emitted();
+  ports_.add_template_arg(arg);
+}
+
+BudgetedDefinitionScopeEmitter::BudgetedDefinitionScopeEmitter(
+    DefinitionScopeEmitter &definitions, PassMetrics &metrics)
+    : definitions_(definitions), metrics_(metrics) {}
+
+auto BudgetedDefinitionScopeEmitter::get_or_create_definition(
+    std::int64_t symbol_id, std::int64_t file_id, std::int64_t line,
+    std::int64_t col, std::int64_t end_line, std::int64_t end_col,
+    const std::optional<std::string> &init_text) -> std::int64_t {
+  metrics_.note_emitted();
+  return definitions_.get_or_create_definition(
+      symbol_id, file_id, line, col, end_line, end_col, init_text);
+}
+void BudgetedDefinitionScopeEmitter::add_def_edge(std::int64_t definition_id,
+                                                  std::int64_t destination_id,
+                                                  std::int64_t kind) {
+  metrics_.note_emitted();
+  definitions_.add_def_edge(definition_id, destination_id, kind);
+}
+void BudgetedDefinitionScopeEmitter::copy_body_edges_to_def_edge(
+    std::int64_t definition_id, std::int64_t symbol_id) {
+  metrics_.note_emitted();
+  definitions_.copy_body_edges_to_def_edge(definition_id, symbol_id);
+}
+
 auto PassExecutionReport::find(const std::string &id) const
     -> const PassExecutionRecord * {
   const auto found = std::ranges::find_if(
@@ -110,6 +370,7 @@ void ExtractionPassRegistry::register_pass(ExtractionPassDescriptor descriptor,
                                            Runner runner) {
   if (descriptor.id.empty() || descriptor.version == 0 || !runner ||
       descriptor.required_capabilities.empty() ||
+      descriptor.consumed_fact_families.empty() ||
       descriptor.produced_fact_families.empty() ||
       descriptor.catalog_versions.empty() || !descriptor.budget.declared) {
     throw std::invalid_argument(
@@ -147,7 +408,8 @@ auto ExtractionPassRegistry::descriptors() const
   return result;
 }
 
-auto ExtractionPassRegistry::run(const IndexingPlan &plan) const
+auto ExtractionPassRegistry::run(const IndexingPlan &plan,
+                                 FrontendSession *session) const
     -> PassExecutionReport {
   if (plan.steps().empty()) {
     throw std::invalid_argument("an extraction plan must contain a pass");
@@ -176,7 +438,35 @@ auto ExtractionPassRegistry::run(const IndexingPlan &plan) const
     PassMetrics metrics;
     metrics.bind(found->descriptor.id, found->descriptor.budget);
     const auto started = std::chrono::steady_clock::now();
-    PassExecutionContext context{.metrics = metrics};
+    FrontendSession pass_session;
+    std::optional<BudgetedStatementFactPorts> statement_ports;
+    std::optional<BudgetedDeclarationPassPorts> declaration_ports;
+    std::optional<BudgetedNamespacePassPorts> namespace_ports;
+    std::optional<BudgetedDefinitionScopeEmitter> definition_ports;
+    if (session != nullptr) {
+      pass_session = *session;
+      if (session->statement_ports != nullptr) {
+        statement_ports.emplace(*session->statement_ports, metrics);
+        pass_session.statement_ports = &*statement_ports;
+        pass_session.evidence = &*statement_ports;
+      }
+      if (session->declaration_ports != nullptr) {
+        declaration_ports.emplace(*session->declaration_ports, metrics);
+        pass_session.declaration_ports = &*declaration_ports;
+      }
+      if (session->namespace_ports != nullptr) {
+        namespace_ports.emplace(*session->namespace_ports, metrics);
+        pass_session.namespace_ports = &*namespace_ports;
+      }
+      if (session->definition_ports != nullptr) {
+        definition_ports.emplace(*session->definition_ports, metrics);
+        pass_session.definition_ports = &*definition_ports;
+      }
+    }
+    PassExecutionContext context{.metrics = metrics,
+                                 .session = session != nullptr
+                                                ? &pass_session
+                                                : nullptr};
     found->runner(context);
     metrics.elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - started);
@@ -194,6 +484,24 @@ auto ExtractionPassRegistry::run(const IndexingPlan &plan) const
         {.descriptor = found->descriptor, .metrics = std::move(metrics)});
   }
   return report;
+}
+
+void register_frontend_pass_provider(FrontendPassProvider provider) {
+  if (!provider) {
+    throw std::invalid_argument("frontend pass provider must be callable");
+  }
+  const std::scoped_lock lock(provider_mutex);
+  provider_list.push_back(std::move(provider));
+}
+
+void clear_frontend_pass_providers() {
+  const std::scoped_lock lock(provider_mutex);
+  provider_list.clear();
+}
+
+auto frontend_pass_providers() -> std::vector<FrontendPassProvider> {
+  const std::scoped_lock lock(provider_mutex);
+  return provider_list;
 }
 
 } // namespace cidx::ast

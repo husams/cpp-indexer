@@ -9,6 +9,7 @@ namespace cidx::ast {
 // Keeping this composition preserves their behavior without preserving a
 // monolithic responsibility in the individual services.
 class EdgeSink : public StatementFactPorts,
+                 public DeclarationPassPorts,
                  public NamespacePassPorts,
                  public DefinitionScopeEmitter,
                  public IndexingLifecycle {};

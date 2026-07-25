@@ -27,6 +27,7 @@ valid_descriptor(std::string id, std::vector<std::string> dependencies = {}) {
   return {.id = std::move(id),
           .version = 1,
           .required_capabilities = {FrontendCapability::ast},
+          .consumed_fact_families = {"input"},
           .produced_fact_families = {"facts"},
           .catalog_versions = {1},
           .dependencies = std::move(dependencies),
@@ -43,6 +44,79 @@ valid_descriptor(std::string id, std::vector<std::string> dependencies = {}) {
 struct StatementRecordingResult {
   FactBatch batch;
   bool found = false;
+};
+
+// This recorder intentionally implements only the focused statement port.
+// In particular it has no presentation-normalization or lifecycle methods;
+// the parsed-AST test therefore catches accidental widening of the body pass.
+class MinimalStatementRecorder final : public StatementFactPorts {
+public:
+  void emit(const SymbolRecord &symbol) { backend_.emit(symbol); }
+  void emit(const EvidenceRecord &evidence) override { backend_.emit(evidence); }
+
+  auto lookup_symbol_id(
+      const std::string &usr,
+      const std::optional<std::string> &source = std::nullopt)
+      -> std::optional<std::int64_t> override {
+    return backend_.lookup_symbol_id(usr, source);
+  }
+  auto mint_symbol(const MintRequest &request) -> std::int64_t override {
+    return backend_.mint_symbol(request);
+  }
+  auto file_id_for_path(const std::string &path)
+      -> std::optional<std::int64_t> override {
+    return backend_.file_id_for_path(path);
+  }
+  auto type_arg_candidates(const std::string &name, bool qualified)
+      -> std::vector<TypeArgCandidate> override {
+    return backend_.type_arg_candidates(name, qualified);
+  }
+  auto symbol_ids_by_qual_name_kind(const std::string &qual_name,
+                                    const std::string &kind_name)
+      -> std::vector<std::int64_t> override {
+    return backend_.symbol_ids_by_qual_name_kind(qual_name, kind_name);
+  }
+  auto add_edge(const EdgeRecord &edge) -> std::int64_t override {
+    return backend_.add_edge(edge);
+  }
+  auto ensure_edge(const EdgeRecord &edge) -> std::int64_t override {
+    return backend_.ensure_edge(edge);
+  }
+  void add_edge_site(const EdgeSiteRecord &site) override {
+    backend_.add_edge_site(site);
+  }
+  void add_call_arg(const CallArgRecord &arg) override {
+    backend_.add_call_arg(arg);
+  }
+  void add_template_param(const TemplateParamRecord &param) override {
+    backend_.add_template_param(param);
+  }
+  void add_template_arg(const TemplateArgRecord &arg) override {
+    backend_.add_template_arg(arg);
+  }
+  auto intern_type_node(const TypeNodeRecord &node) -> std::int64_t override {
+    return backend_.intern_type_node(node);
+  }
+  void add_type_edge(std::int64_t src_id, std::int64_t kind,
+                     std::int64_t position, std::int64_t dst_id) override {
+    backend_.add_type_edge(src_id, kind, position, dst_id);
+  }
+  void replace_parameters(
+      std::int64_t owner_id,
+      const std::vector<ParameterRecord> &parameters) override {
+    backend_.replace_parameters(owner_id, parameters);
+  }
+  void add_symbol_type(std::int64_t symbol_id, std::int64_t kind,
+                       std::int64_t type_id) override {
+    backend_.add_symbol_type(symbol_id, kind, type_id);
+  }
+
+  [[nodiscard]] auto canonical_batch() const -> FactBatch {
+    return backend_.canonical_batch();
+  }
+
+private:
+  FactBatchRecorder backend_{"statement-pass"};
 };
 
 class StatementRecordingConsumer final : public clang::ASTConsumer {
@@ -70,7 +144,7 @@ public:
       return;
     }
 
-    FactBatchRecorder recorder("statement-pass");
+    MinimalStatementRecorder recorder;
     recorder.emit(SymbolRecord{.file = "test.cpp",
                                .usr = usr_for_decl(caller),
                                .spelling = "caller",
@@ -218,6 +292,9 @@ TEST_CASE("pass stable keys include the complete descriptor contract") {
   auto dependency_changed = base;
   dependency_changed.dependencies = {"other"};
   CHECK(base.stable_key() != dependency_changed.stable_key());
+  auto input_changed = base;
+  input_changed.consumed_fact_families = {"other-input"};
+  CHECK(base.stable_key() != input_changed.stable_key());
   auto contract_changed = base;
   contract_changed.completeness = FactCompleteness::partial;
   contract_changed.trust = FactTrust::inferred;

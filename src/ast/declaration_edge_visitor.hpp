@@ -55,14 +55,17 @@ namespace cidx::ast {
 
 class DeclarationPassPorts;
 class DefinitionScopeEmitter;
+struct PassMetrics;
 
 class DeclarationEdgeVisitor
     : public clang::RecursiveASTVisitor<DeclarationEdgeVisitor> {
 public:
   DeclarationEdgeVisitor(clang::ASTContext &context, DeclarationPassPorts &ports,
                          std::string target_file, int64_t file_id,
-                         DefinitionScopeEmitter *definitions = nullptr);
+                         DefinitionScopeEmitter *definitions = nullptr,
+                         PassMetrics *metrics = nullptr);
 
+  bool VisitDecl(clang::Decl *decl);
   bool VisitNamedDecl(clang::NamedDecl *decl);         // contains
   bool VisitCXXRecordDecl(clang::CXXRecordDecl *decl); // inherits (+CRTP)
   bool VisitFieldDecl(clang::FieldDecl *decl);         // field_of
@@ -152,6 +155,7 @@ private:
   TypeInterner types_;
   std::string target_file_;
   int64_t file_id_;
+  PassMetrics *metrics_;
 };
 
 } // namespace cidx::ast

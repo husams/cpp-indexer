@@ -15,6 +15,7 @@
 
 #include "ast/header_stats.hpp" // HeaderStats
 #include "ast/fact_records.hpp"
+#include "ast/pass_registry.hpp"
 #include "storage/records.hpp"
 
 #include <optional>
@@ -36,6 +37,11 @@ struct SourceSnapshot {
 
 struct IndexPassMetrics {
   std::string id;
+  std::vector<std::string> dependencies;
+  std::vector<std::string> consumed_fact_families;
+  std::vector<std::string> produced_fact_families;
+  FactCompleteness completeness = FactCompleteness::complete;
+  FactTrust trust = FactTrust::trusted;
   std::size_t visited_constructs = 0;
   std::size_t emitted_facts = 0;
   std::size_t unknown_constructs = 0;

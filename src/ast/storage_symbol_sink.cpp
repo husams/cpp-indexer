@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "ast/kind_map.hpp"
+#include "ast/pass_registry.hpp"
 
 #include "storage/ports.hpp"
 
@@ -39,6 +40,8 @@ void StorageSymbolSink::reset_counters() {
   symbol_ids_.clear();
 }
 
+void StorageSymbolSink::set_metrics(PassMetrics *metrics) { metrics_ = metrics; }
+
 int StorageSymbolSink::stored_count() const { return stored_; }
 
 const std::vector<int64_t> &StorageSymbolSink::symbol_ids() const {
@@ -49,6 +52,9 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
   const char *kind_name = cidx_kind_name_from_int(s.kind);
   if (kind_name == nullptr) {
     return;
+  }
+  if (metrics_ != nullptr) {
+    metrics_->note_emitted();
   }
 
   cidx::Symbol sym;

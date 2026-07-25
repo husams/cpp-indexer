@@ -173,6 +173,11 @@ void StatementEdgeVisitor::emit_overloaded_call(
     const clang::CallExpr *call, const clang::OverloadExpr *ovl) {
   const std::vector<const clang::NamedDecl *> cands(ovl->decls_begin(),
                                                     ovl->decls_end());
+  if (cands.empty()) {
+    ctx_.record_unsupported("CallExpr", call->getBeginLoc(),
+                            "overload set is empty");
+    return;
+  }
   if (cands.size() == 1) {
     // Single candidate: recover the concrete callee (template pattern for a
     // FunctionTemplateDecl, minted under the template itself).
@@ -187,25 +192,33 @@ void StatementEdgeVisitor::emit_overloaded_call(
     }
     if (ref != nullptr) {
       emitter_.emit_resolved_call(call, ref, /*recovered=*/true, mint_as);
+    } else {
+      ctx_.record_unsupported("CallExpr", call->getBeginLoc(),
+                              "overload candidate is not a function");
     }
-    return;
-  }
-  if (cands.size() < 2) {
     return;
   }
   // Overload set: fan out to every indexed candidate (minting non-system
   // ones), falling back to qual-name lookup when none resolved.
-  for (const int64_t dst_id : overload_candidate_ids(cands)) {
+  const std::set<int64_t> ids = overload_candidate_ids(call, cands);
+  if (ids.empty()) {
+    ctx_.record_unsupported("CallExpr", call->getBeginLoc(),
+                            "overload candidates could not be resolved");
+  }
+  for (const int64_t dst_id : ids) {
     ctx_.emit_site_edge(call, dst_id, 1);
   }
 }
 
 std::set<int64_t> StatementEdgeVisitor::overload_candidate_ids(
+    const clang::CallExpr *call,
     const std::vector<const clang::NamedDecl *> &cands) {
   std::set<int64_t> dst_ids;
   for (const clang::NamedDecl *cand : cands) {
     const std::string usr = usr_for_decl(cand);
     if (usr.empty()) {
+      ctx_.record_unsupported("CallExpr", call->getBeginLoc(),
+                              "overload candidate has no canonical identity");
       continue;
     }
     const auto identity_source =
@@ -220,6 +233,9 @@ std::set<int64_t> StatementEdgeVisitor::overload_candidate_ids(
     }
     if (auto req = ctx_.mint().build(cand)) {
       dst_ids.insert(ctx_.ports().mint_symbol(*req));
+    } else {
+      ctx_.record_unsupported("CallExpr", call->getBeginLoc(),
+                              "overload candidate identity could not be minted");
     }
   }
   if (dst_ids.empty() && !cands.empty()) {

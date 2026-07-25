@@ -1,6 +1,7 @@
 // Registry and execution contract for composable extraction passes.
 #pragma once
 
+#include "ast/fact_emitters.hpp"
 #include "ast/fact_records.hpp"
 #include "ast/indexing_plan.hpp"
 
@@ -12,7 +13,25 @@
 #include <string>
 #include <vector>
 
+namespace clang {
+class ASTContext;
+class Preprocessor;
+} // namespace clang
+
 namespace cidx::ast {
+
+class ExtractionPassRegistry;
+
+struct FrontendSession {
+  clang::ASTContext *ast_context = nullptr;
+  clang::Preprocessor *preprocessor = nullptr;
+  DeclarationPassPorts *declaration_ports = nullptr;
+  StatementFactPorts *statement_ports = nullptr;
+  NamespacePassPorts *namespace_ports = nullptr;
+  DefinitionScopeEmitter *definition_ports = nullptr;
+  EvidenceEmitter *evidence = nullptr;
+  IndexingLifecycle *lifecycle = nullptr;
+};
 
 enum class FrontendCapability : std::uint8_t {
   ast,
@@ -59,6 +78,7 @@ struct ExtractionPassDescriptor {
   std::string id;
   std::uint32_t version = 1;
   std::vector<FrontendCapability> required_capabilities;
+  std::vector<std::string> consumed_fact_families;
   std::vector<std::string> produced_fact_families;
   std::vector<std::uint32_t> catalog_versions;
   std::vector<std::string> dependencies;
@@ -95,9 +115,121 @@ private:
   PassBudget budget_;
 };
 
+class BudgetedStatementFactPorts final : public StatementFactPorts {
+public:
+  BudgetedStatementFactPorts(StatementFactPorts &ports, PassMetrics &metrics);
+
+  auto lookup_symbol_id(const std::string &, const std::optional<std::string> &)
+      -> std::optional<std::int64_t> override;
+  auto mint_symbol(const MintRequest &) -> std::int64_t override;
+  auto file_id_for_path(const std::string &)
+      -> std::optional<std::int64_t> override;
+  auto type_arg_candidates(const std::string &, bool)
+      -> std::vector<TypeArgCandidate> override;
+  auto symbol_ids_by_qual_name_kind(const std::string &, const std::string &)
+      -> std::vector<std::int64_t> override;
+  auto add_edge(const EdgeRecord &) -> std::int64_t override;
+  auto ensure_edge(const EdgeRecord &) -> std::int64_t override;
+  void add_edge_site(const EdgeSiteRecord &) override;
+  void add_call_arg(const CallArgRecord &) override;
+  void add_template_param(const TemplateParamRecord &) override;
+  void add_template_arg(const TemplateArgRecord &) override;
+  auto intern_type_node(const TypeNodeRecord &) -> std::int64_t override;
+  void add_type_edge(std::int64_t, std::int64_t, std::int64_t,
+                     std::int64_t) override;
+  void replace_parameters(std::int64_t,
+                          const std::vector<ParameterRecord> &) override;
+  void add_symbol_type(std::int64_t, std::int64_t, std::int64_t) override;
+  void emit(const EvidenceRecord &) override;
+
+private:
+  StatementFactPorts &ports_;
+  PassMetrics &metrics_;
+};
+
+class BudgetedDeclarationPassPorts final : public DeclarationPassPorts {
+public:
+  BudgetedDeclarationPassPorts(DeclarationPassPorts &ports,
+                               PassMetrics &metrics);
+
+  auto lookup_symbol_id(const std::string &, const std::optional<std::string> &)
+      -> std::optional<std::int64_t> override;
+  auto mint_symbol(const MintRequest &) -> std::int64_t override;
+  auto file_id_for_path(const std::string &)
+      -> std::optional<std::int64_t> override;
+  auto type_arg_candidates(const std::string &, bool)
+      -> std::vector<TypeArgCandidate> override;
+  auto symbol_ids_by_qual_name_kind(const std::string &, const std::string &)
+      -> std::vector<std::int64_t> override;
+  auto add_edge(const EdgeRecord &) -> std::int64_t override;
+  auto ensure_edge(const EdgeRecord &) -> std::int64_t override;
+  void add_edge_site(const EdgeSiteRecord &) override;
+  void add_call_arg(const CallArgRecord &) override;
+  void add_template_param(const TemplateParamRecord &) override;
+  void add_template_arg(const TemplateArgRecord &) override;
+  auto intern_type_node(const TypeNodeRecord &) -> std::int64_t override;
+  void add_type_edge(std::int64_t, std::int64_t, std::int64_t,
+                     std::int64_t) override;
+  void replace_parameters(std::int64_t,
+                          const std::vector<ParameterRecord> &) override;
+  void add_symbol_type(std::int64_t, std::int64_t, std::int64_t) override;
+  auto lookup_display_name(std::int64_t) -> std::optional<std::string> override;
+  void update_display_name(std::int64_t, const std::string &) override;
+
+private:
+  DeclarationPassPorts &ports_;
+  PassMetrics &metrics_;
+};
+
+class BudgetedNamespacePassPorts final : public NamespacePassPorts {
+public:
+  BudgetedNamespacePassPorts(NamespacePassPorts &ports, PassMetrics &metrics);
+
+  auto lookup_symbol_id(const std::string &, const std::optional<std::string> &)
+      -> std::optional<std::int64_t> override;
+  auto mint_symbol(const MintRequest &) -> std::int64_t override;
+  auto file_id_for_path(const std::string &)
+      -> std::optional<std::int64_t> override;
+  auto type_arg_candidates(const std::string &, bool)
+      -> std::vector<TypeArgCandidate> override;
+  auto symbol_ids_by_qual_name_kind(const std::string &, const std::string &)
+      -> std::vector<std::int64_t> override;
+  auto add_edge(const EdgeRecord &) -> std::int64_t override;
+  auto ensure_edge(const EdgeRecord &) -> std::int64_t override;
+  void add_edge_site(const EdgeSiteRecord &) override;
+  void add_call_arg(const CallArgRecord &) override;
+  void add_template_param(const TemplateParamRecord &) override;
+  void add_template_arg(const TemplateArgRecord &) override;
+
+private:
+  NamespacePassPorts &ports_;
+  PassMetrics &metrics_;
+};
+
+class BudgetedDefinitionScopeEmitter final : public DefinitionScopeEmitter {
+public:
+  BudgetedDefinitionScopeEmitter(DefinitionScopeEmitter &definitions,
+                                  PassMetrics &metrics);
+
+  auto get_or_create_definition(std::int64_t, std::int64_t, std::int64_t,
+                                std::int64_t, std::int64_t, std::int64_t,
+                                const std::optional<std::string> &)
+      -> std::int64_t override;
+  void add_def_edge(std::int64_t, std::int64_t, std::int64_t) override;
+  void copy_body_edges_to_def_edge(std::int64_t, std::int64_t) override;
+
+private:
+  DefinitionScopeEmitter &definitions_;
+  PassMetrics &metrics_;
+};
+
 struct PassExecutionContext {
   PassMetrics &metrics;
+  FrontendSession *session = nullptr;
 };
+
+using FrontendPassProvider = std::function<void(
+    FrontendSession &, ExtractionPassRegistry &, IndexingPlan &)>;
 
 struct PassExecutionRecord {
   ExtractionPassDescriptor descriptor;
@@ -121,7 +253,9 @@ public:
       -> const ExtractionPassDescriptor &;
   [[nodiscard]] auto descriptors() const
       -> std::vector<ExtractionPassDescriptor>;
-  [[nodiscard]] auto run(const IndexingPlan &plan) const -> PassExecutionReport;
+  [[nodiscard]] auto run(const IndexingPlan &plan,
+                         FrontendSession *session = nullptr) const
+      -> PassExecutionReport;
 
 private:
   struct Entry {
@@ -130,5 +264,10 @@ private:
   };
   std::vector<Entry> entries_;
 };
+
+void register_frontend_pass_provider(FrontendPassProvider provider);
+void clear_frontend_pass_providers();
+[[nodiscard]] auto frontend_pass_providers()
+    -> std::vector<FrontendPassProvider>;
 
 } // namespace cidx::ast

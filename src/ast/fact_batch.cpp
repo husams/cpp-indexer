@@ -186,8 +186,9 @@ auto FactBatchRecorder::stable_id(std::string_view key) -> std::int64_t {
 }
 
 void FactBatchRecorder::emit(const SymbolRecord &symbol) {
-  if (!symbol_ids_.contains(symbol.usr)) {
-    symbol_ids_.emplace(symbol.usr, stable_id("symbol:" + symbol.usr));
+  const std::string key = symbol_key(symbol.file, symbol.usr);
+  if (!symbol_ids_.contains(key)) {
+    symbol_ids_.emplace(key, stable_id("symbol:" + key));
   }
   batch_.symbols.push_back(symbol);
 }
@@ -198,22 +199,37 @@ void FactBatchRecorder::emit(const EvidenceRecord &evidence) {
 
 auto FactBatchRecorder::lookup_symbol_id(
     const std::string &usr,
-    const std::optional<std::string> & /*identity_source*/)
+    const std::optional<std::string> &identity_source)
     -> std::optional<std::int64_t> {
-  if (const auto found = symbol_ids_.find(usr); found != symbol_ids_.end()) {
-    return found->second;
+  if (identity_source) {
+    if (const auto found =
+            symbol_ids_.find(symbol_key(*identity_source, usr));
+        found != symbol_ids_.end()) {
+      return found->second;
+    }
+    return std::nullopt;
   }
-  return std::nullopt;
+  std::optional<std::int64_t> result;
+  for (const auto &[key, id] : symbol_ids_) {
+    if (key.ends_with("\n" + usr) &&
+        (!result || id < *result)) {
+      result = id;
+    }
+  }
+  return result;
 }
 
 auto FactBatchRecorder::mint_symbol(const MintRequest &request)
     -> std::int64_t {
-  if (const auto found = symbol_ids_.find(request.usr);
+  const std::string key = symbol_key(
+      request.identity_source.value_or(request.decl_path.value_or("")),
+      request.usr);
+  if (const auto found = symbol_ids_.find(key);
       found != symbol_ids_.end()) {
     return found->second;
   }
-  const std::int64_t id = stable_id("symbol:" + request.usr);
-  symbol_ids_.emplace(request.usr, id);
+  const std::int64_t id = stable_id("symbol:" + key);
+  symbol_ids_.emplace(key, id);
   batch_.symbols.push_back(SymbolRecord{
       .file = request.identity_source.value_or(request.decl_path.value_or("")),
       .usr = request.usr,
@@ -227,6 +243,11 @@ auto FactBatchRecorder::mint_symbol(const MintRequest &request)
       .is_instantiation = request.is_instantiation,
       .linkage = request.linkage});
   return id;
+}
+
+auto FactBatchRecorder::symbol_key(const std::string &source,
+                                   const std::string &usr) -> std::string {
+  return source + "\n" + usr;
 }
 
 auto FactBatchRecorder::file_id_for_path(const std::string & /*path*/)
@@ -243,7 +264,7 @@ auto FactBatchRecorder::type_arg_candidates(const std::string &name,
         qualified ? symbol.qual_name
                   : std::optional<std::string>(symbol.spelling);
     if (candidate && *candidate == name) {
-      const auto found = symbol_ids_.find(symbol.usr);
+      const auto found = symbol_ids_.find(symbol_key(symbol.file, symbol.usr));
       if (found != symbol_ids_.end()) {
         result.push_back({.id = found->second,
                           .kind_name = {},
@@ -260,7 +281,8 @@ auto FactBatchRecorder::symbol_ids_by_qual_name_kind(
   std::vector<std::int64_t> result;
   for (const SymbolRecord &symbol : batch_.symbols) {
     if (symbol.qual_name && *symbol.qual_name == qual_name) {
-      if (const auto found = symbol_ids_.find(symbol.usr);
+      if (const auto found =
+              symbol_ids_.find(symbol_key(symbol.file, symbol.usr));
           found != symbol_ids_.end()) {
         result.push_back(found->second);
       }
@@ -406,7 +428,7 @@ void FactBatchRecorder::update_display_name(std::int64_t symbol_id,
                                             const std::string &display) {
   display_names_[symbol_id] = display;
   for (SymbolRecord &symbol : batch_.symbols) {
-    const auto found = symbol_ids_.find(symbol.usr);
+    const auto found = symbol_ids_.find(symbol_key(symbol.file, symbol.usr));
     if (found != symbol_ids_.end() && found->second == symbol_id) {
       symbol.display_name = display;
     }

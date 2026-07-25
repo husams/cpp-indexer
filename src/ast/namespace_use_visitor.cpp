@@ -2,6 +2,7 @@
 
 #include "ast/fact_emitters.hpp"
 #include "ast/location.hpp"
+#include "ast/pass_registry.hpp"
 #include "ast/usr.hpp"
 
 #include "clang/AST/ASTContext.h"
@@ -33,6 +34,21 @@ NamespaceUseVisitor::NamespaceUseVisitor(clang::ASTContext &context,
                                          int64_t file_id)
     : context_(context), ports_(ports), target_file_(std::move(target_file)),
       file_id_(file_id) {}
+
+NamespaceUseVisitor::NamespaceUseVisitor(clang::ASTContext &context,
+                                         NamespacePassPorts &ports,
+                                         std::string target_file,
+                                         int64_t file_id,
+                                         PassMetrics *metrics)
+    : context_(context), ports_(ports), target_file_(std::move(target_file)),
+      file_id_(file_id), metrics_(metrics) {}
+
+bool NamespaceUseVisitor::VisitDecl(clang::Decl * /*decl*/) {
+  if (metrics_ != nullptr) {
+    metrics_->note_visited();
+  }
+  return true;
+}
 
 bool NamespaceUseVisitor::in_target_file(const clang::Decl *decl) const {
   return expansion_loc(context_, decl->getLocation()).file == target_file_;

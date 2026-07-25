@@ -2,6 +2,7 @@
 
 #include "ast/fact_emitters.hpp"
 #include "ast/location.hpp"
+#include "ast/pass_registry.hpp"
 #include "ast/statement_edge_visitor.hpp"
 #include "ast/usr.hpp"
 
@@ -17,9 +18,18 @@ FunctionDefinitionVisitor::FunctionDefinitionVisitor(clang::ASTContext &context,
                                                      DeclarationIdentityResolver &identity,
                                                      DefinitionScopeEmitter &definitions,
                                                      std::string target_file,
-                                                     int64_t file_id)
+                                                     int64_t file_id,
+                                                     PassMetrics *metrics)
     : context_(context), identity_(identity), definitions_(definitions),
-      target_file_(std::move(target_file)), file_id_(file_id) {}
+      target_file_(std::move(target_file)), file_id_(file_id),
+      metrics_(metrics) {}
+
+bool FunctionDefinitionVisitor::VisitDecl(clang::Decl * /*decl*/) {
+  if (metrics_ != nullptr) {
+    metrics_->note_visited();
+  }
+  return true;
+}
 
 // An indexable function definition: has an actual body, is not nested in
 // another function (a LOCAL class's methods are covered by the enclosing
@@ -36,13 +46,15 @@ bool FunctionDefinitionVisitor::is_indexable_definition(
 }
 
 void FunctionDefinitionVisitor::run_statement_pass(StatementFactPorts &ports,
-                                                    PassMetrics *metrics) {
+                                                    PassMetrics *metrics,
+                                                    DefinitionScopeEmitter *statement_definitions) {
+  DefinitionScopeEmitter &definitions =
+      statement_definitions != nullptr ? *statement_definitions : definitions_;
   for (const DefinitionFact &fact : definitions_found_) {
     StatementEdgeVisitor body(context_, ports, fact.symbol_id, file_id_,
                               target_file_, metrics);
     body.walk(fact.decl);
-    definitions_.copy_body_edges_to_def_edge(fact.definition_id,
-                                             fact.symbol_id);
+    definitions.copy_body_edges_to_def_edge(fact.definition_id, fact.symbol_id);
   }
 }
 
@@ -54,6 +66,9 @@ void FunctionDefinitionVisitor::index_definition(clang::FunctionDecl *decl,
   const clang::SourceRange range = keyed->getSourceRange();
   const ExpansionLoc start = extent_start(context_, range);
   const ExpansionLoc end = extent_end(context_, range);
+  if (metrics_ != nullptr) {
+    metrics_->note_emitted();
+  }
   const int64_t def_id = definitions_.get_or_create_definition(
       fn_sym, file_id_, start.line, start.col, end.line, end.col, std::nullopt);
   definitions_found_.push_back(

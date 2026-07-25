@@ -115,7 +115,9 @@ public:
   ~DeclarationPassPorts() override = default;
 };
 
-class StatementFactPorts : public virtual DeclarationPassPorts,
+class StatementFactPorts : public virtual DeclarationIdentityResolver,
+                           public virtual RelationFactEmitter,
+                           public virtual TypeFactEmitter,
                            public virtual EvidenceEmitter {
 public:
   ~StatementFactPorts() override = default;

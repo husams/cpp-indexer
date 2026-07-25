@@ -39,6 +39,7 @@ public:
   [[nodiscard]] const InstanceMinter &minter() const { return minter_; }
   [[nodiscard]] int64_t src_id() const { return src_id_; }
   [[nodiscard]] int64_t file_id() const { return file_id_; }
+  [[nodiscard]] PassMetrics *metrics() const { return metrics_; }
   void note_visited() {
     if (metrics_ != nullptr) {
       metrics_->note_visited();

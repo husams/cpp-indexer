@@ -6,6 +6,7 @@
 #include "ast/instantiation_edges.hpp"
 #include "ast/kind_map.hpp"
 #include "ast/location.hpp"
+#include "ast/pass_registry.hpp"
 #include "ast/names.hpp"
 #include "ast/type_use.hpp"
 #include "ast/usr.hpp"
@@ -243,14 +244,22 @@ DeclarationEdgeVisitor::DeclarationEdgeVisitor(clang::ASTContext &context,
                                                DeclarationPassPorts &ports,
                                                std::string target_file,
                                                int64_t file_id,
-                                               DefinitionScopeEmitter *definitions)
+                                               DefinitionScopeEmitter *definitions,
+                                               PassMetrics *metrics)
     : context_(context), source_manager_(context.getSourceManager()),
       sink_(ports), mint_(context, ports),
       targ_encoder_(context, ports, ports, ports),
       minter_(context, ports, ports, mint_, targ_encoder_),
       types_(context, ports),
       target_file_(std::move(target_file)), file_id_(file_id),
-      definitions_(definitions) {}
+      definitions_(definitions), metrics_(metrics) {}
+
+bool DeclarationEdgeVisitor::VisitDecl(clang::Decl * /*decl*/) {
+  if (metrics_ != nullptr) {
+    metrics_->note_visited();
+  }
+  return true;
+}
 
 // Signature-level uses(7): return + parameter types (emit_type_use in the
 // function-like B1 branch). Constructors/destructors record no return type.
@@ -1073,7 +1082,7 @@ void DeclarationEdgeVisitor::emit_callable_identity(
     }
   }
   const int64_t dst_id = sink_.mint_symbol(*req);
-  emit_callable_template_identity(sink_, sink_, sink_, mint_, targ_encoder_,
+  emit_callable_template_identity(sink_, sink_, &sink_, mint_, targ_encoder_,
                                   dst_id,
                                   fd, *info, {});
   emit_signature_uses(fd);

@@ -28,6 +28,7 @@
 
 namespace clang {
 class ASTContext;
+class Decl;
 class ClassTemplateDecl;
 class FunctionDecl;
 class FunctionTemplateDecl;
@@ -38,6 +39,7 @@ class NamedDecl;
 namespace cidx::ast {
 
 class SymbolEmitter;
+struct PassMetrics;
 
 class SymbolVisitor : public clang::RecursiveASTVisitor<SymbolVisitor> {
 public:
@@ -45,8 +47,10 @@ public:
   // whole-TU mode). Non-empty: emit ONLY decls of that file — the per-file
   // walk the interleaved indexer uses (index_file_notxn analogue).
   SymbolVisitor(clang::ASTContext &context, SymbolEmitter &out,
-                std::string target_file = std::string());
+                std::string target_file = std::string(),
+                PassMetrics *metrics = nullptr);
 
+  bool VisitDecl(clang::Decl *decl);
   bool VisitNamedDecl(clang::NamedDecl *decl);
   bool VisitFunctionTemplateDecl(clang::FunctionTemplateDecl *decl);
   bool VisitClassTemplateDecl(clang::ClassTemplateDecl *decl);
@@ -60,6 +64,7 @@ private:
   SymbolExtractor extractor_;
   SymbolEmitter &out_;
   std::string target_file_;
+  PassMetrics *metrics_ = nullptr;
 };
 
 } // namespace cidx::ast
