@@ -140,6 +140,11 @@ TEST_CASE(
   REQUIRE(std::holds_alternative<cidx::application::DiffRequest>(diff_request));
   CHECK(std::get<cidx::application::DiffRequest>(diff_request)
             .left_source_revision == std::optional<std::string>{"a"});
+
+  const auto include = cidx::cli::parse_application_request(
+      {"include", "graph", "--reverse", "--transitive"});
+  REQUIRE(
+      std::holds_alternative<cidx::cli::CompatibilityRequest>(include.value));
 }
 
 TEST_CASE("typed services dispatch every HSE-68 request family") {
@@ -268,6 +273,73 @@ TEST_CASE("direct source and index diff compares effective identities") {
         std::string::npos);
 }
 
+TEST_CASE("configuration diff consumes real and overridden configurations") {
+  const std::filesystem::path root =
+      std::filesystem::temp_directory_path() / "cidx-application-config-diff";
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
+  std::filesystem::create_directories(root, ec);
+  REQUIRE_FALSE(ec);
+  const std::filesystem::path left = root / "left.cpp";
+  const std::filesystem::path right = root / "right.cpp";
+  std::ofstream(left) << "int left() { return 1; }\n";
+  std::ofstream(right) << "int right() { return 2; }\n";
+  const std::string index = (root / "config.sqlite").string();
+  cidx::Storage db(index);
+  db.add_component("app", root.string());
+  for (const auto &source : {left, right}) {
+    db.add_file_path(source.string(), std::nullopt, std::nullopt,
+                     std::vector<std::string>{"-std=c++17"},
+                     std::string("c++"));
+  }
+  cidx::application::StorageApplicationOperations operations(db, index);
+  cidx::application::ApplicationOperationPorts operation_ports{.diff =
+                                                                   &operations};
+  cidx::application::ApplicationContext context(
+      cidx::application::ApplicationPolicy{
+          .capabilities = cidx::application::capability_bit(
+              cidx::application::Capability::diff)},
+      operation_ports);
+  const cidx::application::DefaultApplicationServices services;
+  const cidx::application::ApplicationService service(services);
+
+  const auto equal = service.execute(
+      cidx::application::DiffRequest{
+          .scope = cidx::application::DiffScope::configuration,
+          .left = left.string(),
+          .right = right.string(),
+          .left_index = index},
+      context);
+  CHECK(
+      cidx::json_out::dumps_indent2(equal.result).find("\"identical\": true") !=
+      std::string::npos);
+
+  const auto unequal = service.execute(
+      cidx::application::DiffRequest{
+          .scope = cidx::application::DiffScope::configuration,
+          .left = left.string(),
+          .right = right.string(),
+          .left_index = index,
+          .left_configuration = std::string("-std=c++17"),
+          .right_configuration = std::string("-std=c++20")},
+      context);
+  CHECK(cidx::json_out::dumps_indent2(unequal.result)
+            .find("\"identical\": false") != std::string::npos);
+
+  const auto mixed = service.execute(
+      cidx::application::DiffRequest{
+          .scope = cidx::application::DiffScope::configuration,
+          .left = left.string(),
+          .right = right.string(),
+          .left_index = index,
+          .left_configuration = std::string("-DLEFT=1")},
+      context);
+  CHECK(cidx::json_out::dumps_indent2(mixed.result)
+            .find("\"identical\": false") != std::string::npos);
+
+  std::filesystem::remove_all(root, ec);
+}
+
 TEST_CASE("direct AST service parses a registered translation unit") {
   const std::filesystem::path source =
       std::filesystem::temp_directory_path() / "cidx-application-ast.cpp";
@@ -298,6 +370,16 @@ TEST_CASE("direct AST service parses a registered translation unit") {
   CHECK(result.status == cidx::protocol::Status::Complete);
   CHECK(cidx::json_out::dumps_indent2(result.result).find("cursor_nodes") !=
         std::string::npos);
+  for (const auto action :
+       {cidx::application::AstInspectionAction::locals,
+        cidx::application::AstInspectionAction::conditions}) {
+    const auto unsupported = service.execute(
+        cidx::application::AstInspectionRequest{.action = action,
+                                                .source = source.string()},
+        context);
+    CHECK(unsupported.status == cidx::protocol::Status::Error);
+    CHECK(unsupported.diagnostics.front().code == "invalid_input");
+  }
   std::error_code ec;
   std::filesystem::remove(source, ec);
 }
@@ -341,14 +423,22 @@ TEST_CASE("index service enforces work and diagnostic budgets stably") {
   const auto result =
       service.execute(cidx::application::IndexRequest{}, context);
 
-  CHECK(result.status == cidx::protocol::Status::Complete);
+  CHECK(result.status == cidx::protocol::Status::Partial);
   CHECK(result.completeness.truncated);
+  CHECK(result.completeness.state == "partial");
   CHECK(result.completeness.budget == 1);
-  CHECK(result.diagnostics.empty());
+  REQUIRE(result.diagnostics.size() == 1);
+  CHECK(result.diagnostics.front().code == "truncated_budget");
+  CHECK(db.index_identity().freshness == "unverifiable");
   REQUIRE(progress.events.size() == 1);
   CHECK(progress.events.front().sequence == 0);
   CHECK(progress.events.front().completed == 0);
   CHECK(progress.events.front().total == 1);
+
+  const auto unknown = service.execute(
+      cidx::application::IndexRequest{.files = {"missing.cpp"}}, context);
+  CHECK(unknown.status == cidx::protocol::Status::Error);
+  CHECK(unknown.diagnostics.front().code == "invalid_input");
 
   std::filesystem::remove_all(root, ec);
 }
@@ -360,7 +450,7 @@ TEST_CASE("direct analysis service exports real fact relations") {
   std::filesystem::remove_all(directory, ec);
   std::filesystem::create_directories(directory, ec);
   REQUIRE_FALSE(ec);
-  const std::string index = (directory / "index.db").string();
+  const std::string index = (directory / "analysis.sqlite").string();
   cidx::Storage db(index);
   cidx::application::StorageApplicationOperations operations(db, index);
   cidx::application::ApplicationOperationPorts operation_ports{.analysis =

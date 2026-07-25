@@ -45,6 +45,94 @@ void ensure_directory(const std::string &path) {
   }
 }
 
+const json_out::Value *field(const json_out::Value &value,
+                             std::string_view name) {
+  if (value.t != json_out::Value::T::Obj) {
+    return nullptr;
+  }
+  for (const auto &[key, item] : value.o) {
+    if (key == name) {
+      return &item;
+    }
+  }
+  return nullptr;
+}
+
+std::string string_field(const json_out::Value &value, std::string_view name) {
+  const json_out::Value *item = field(value, name);
+  return item != nullptr && item->t == json_out::Value::T::Str ? item->s : "";
+}
+
+long long integer_field(const json_out::Value &value, std::string_view name) {
+  const json_out::Value *item = field(value, name);
+  return item != nullptr && item->t == json_out::Value::T::Int ? item->i : 0;
+}
+
+int render_application_result(const application::CommandRequest &request,
+                              const protocol::ResultEnvelope &result,
+                              Context &ctx) {
+  if (result.status == protocol::Status::Error ||
+      result.status == protocol::Status::Refuted) {
+    if (ctx.err != nullptr) {
+      for (const auto &diagnostic : result.diagnostics) {
+        *ctx.err << "error: " << diagnostic.message << "\n";
+      }
+    }
+    return 1;
+  }
+
+  std::visit(
+      [&result, &ctx](const auto &typed) {
+        using T = std::decay_t<decltype(typed)>;
+        if constexpr (std::is_same_v<T, application::IndexRequest>) {
+          const json_out::Value *files = field(result.result, "files");
+          if (files != nullptr && files->t == json_out::Value::T::Arr) {
+            for (const json_out::Value &file : files->a) {
+              const std::string path = string_field(file, "path");
+              const std::string status = string_field(file, "status");
+              if (!typed.files.empty()) {
+                *ctx.out << "file: " << path << "\n";
+                if (status == "already") {
+                  *ctx.out << "  already indexed\n";
+                } else if (status == "indexed") {
+                  *ctx.out << "  -> " << integer_field(file, "stored")
+                           << " symbols; headers: "
+                           << integer_field(file, "headers_indexed")
+                           << " indexed (+"
+                           << integer_field(file, "headers_symbols")
+                           << " symbols), "
+                           << integer_field(file, "headers_already")
+                           << " already, "
+                           << integer_field(file, "headers_system")
+                           << " system, "
+                           << integer_field(file, "headers_unowned")
+                           << " unowned\n";
+                }
+              } else if (status == "indexed") {
+                *ctx.out << "indexing " << path << "\n";
+              }
+            }
+          }
+          *ctx.out << "index: " << integer_field(result.result, "indexed")
+                   << " indexed, " << integer_field(result.result, "failed")
+                   << " failed, " << integer_field(result.result, "already")
+                   << " already indexed\n";
+        } else if constexpr (std::is_same_v<T, application::AnalysisRequest>) {
+          if (typed.action == application::AnalysisAction::export_facts) {
+            *ctx.out << string_field(result.result, "directory") << ": "
+                     << integer_field(result.result, "files") << " fact files, "
+                     << integer_field(result.result, "rows") << " rows\n";
+          } else {
+            *ctx.out << json_out::dumps_indent2(result.result) << "\n";
+          }
+        } else {
+          *ctx.out << json_out::dumps_indent2(result.result) << "\n";
+        }
+      },
+      request);
+  return result.exit_code();
+}
+
 std::optional<application::CommandRequest>
 parse_typed_query(const std::vector<std::string> &argv) {
   if (argv.empty() || argv.front() != "query") {
@@ -269,7 +357,7 @@ parse_typed_diff(const std::vector<std::string> &argv) {
   return request;
 }
 
-std::optional<application::CommandRequest>
+[[maybe_unused]] std::optional<application::CommandRequest>
 parse_typed_include(const std::vector<std::string> &argv) {
   if (argv.size() < 2 || argv.front() != "include") {
     return std::nullopt;
@@ -411,9 +499,9 @@ parse_request(const std::vector<std::string> &argv) {
   if (const auto request = parse_typed_diff(argv)) {
     return request;
   }
-  if (const auto request = parse_typed_include(argv)) {
-    return request;
-  }
+  // Include graph/check/plan/apply retain the established CLI contract until
+  // their focused service can reproduce all scope, graph, warning, and plan
+  // output semantics. They intentionally remain compatibility requests.
   if (const auto request = parse_typed_refactor(argv)) {
     return request;
   }
@@ -440,9 +528,8 @@ parse_application_request(const std::vector<std::string> &argv) {
   if (const auto request = parse_typed_diff(argv)) {
     return ApplicationParseResult{.value = *request};
   }
-  if (const auto request = parse_typed_include(argv)) {
-    return ApplicationParseResult{.value = *request};
-  }
+  // See parse_request: include actions stay on the compatibility path until
+  // their full existing semantics are represented by an application service.
   if (const auto request = parse_typed_refactor(argv)) {
     return ApplicationParseResult{.value = *request};
   }
@@ -490,10 +577,7 @@ int run_application_request(const application::CommandRequest &request,
     const application::ApplicationService service(services);
     const protocol::ResultEnvelope result =
         service.execute(request, application_context);
-    if (ctx.out != nullptr) {
-      *ctx.out << json_out::dumps_indent2(result.result) << "\n";
-    }
-    return result.exit_code();
+    return render_application_result(request, result, ctx);
   }
 
   const std::string default_index = pathutil::join(ctx.cache_dir, "index.db");
@@ -551,17 +635,7 @@ int run_application_request(const application::CommandRequest &request,
   const application::ApplicationService service(services);
   const protocol::ResultEnvelope result =
       service.execute(request, application_context);
-  if (result.status == protocol::Status::Error ||
-      result.status == protocol::Status::Refuted) {
-    if (ctx.err != nullptr && !result.diagnostics.empty()) {
-      *ctx.err << "error: " << result.diagnostics.front().message << "\n";
-    }
-    return result.exit_code();
-  }
-  if (ctx.out != nullptr) {
-    *ctx.out << json_out::dumps_indent2(result.result) << "\n";
-  }
-  return result.exit_code();
+  return render_application_result(request, result, ctx);
 }
 
 } // namespace cidx::cli

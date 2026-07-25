@@ -81,10 +81,57 @@ TEST_CASE("typed process adapter executes AST and diff requests") {
   REQUIRE(ast.exit_code == 0);
   CHECK(ast.out.find("cursor_nodes") != std::string::npos);
 
+  for (const std::string action : {"locals", "conditions"}) {
+    const auto unsupported =
+        cidx::run({g_cidx_binary, "ast", action, source.string(), "--db",
+                   index.string()});
+    CHECK(unsupported.exit_code == 1);
+    CHECK(unsupported.err.find("not implemented yet") != std::string::npos);
+  }
+
   const auto diff = cidx::run({g_cidx_binary, "diff", "index", "index-a",
                                "index-b", "--db", index.string()});
   REQUIRE(diff.exit_code == 0);
   CHECK(diff.out.find("\"equal\": false") != std::string::npos);
+
+  const auto configuration = cidx::run(
+      {g_cidx_binary, "diff", "configuration", source.string(), source.string(),
+       "--db", index.string(), "--left-configuration", "-std=c++17",
+       "--right-configuration", "-std=c++20"});
+  REQUIRE(configuration.exit_code == 0);
+  CHECK(configuration.out.find("\"identical\": false") != std::string::npos);
+
+  const auto index_run = cidx::run({g_cidx_binary, "index", "fixture.cpp",
+                                    "--source", "app", "--db", index.string()});
+  REQUIRE(index_run.exit_code == 0);
+  CHECK(index_run.out ==
+        "file: " + source.string() +
+            "\n  -> 1 symbols; headers: 0 indexed (+0 symbols), 0 already, "
+            "0 system, 0 unowned\nindex: 1 indexed, 0 failed, 0 already "
+            "indexed\n");
+
+  const auto index_skip =
+      cidx::run({g_cidx_binary, "index", "fixture.cpp", "--source", "app",
+                 "--db", index.string()});
+  REQUIRE(index_skip.exit_code == 0);
+  CHECK(index_skip.out ==
+        "file: " + source.string() +
+            "\n  already indexed\nindex: 0 indexed, 0 failed, "
+            "1 already indexed\n");
+
+  const auto index_unknown =
+      cidx::run({g_cidx_binary, "index", "missing.cpp", "--source", "app",
+                 "--db", index.string()});
+  CHECK(index_unknown.exit_code == 1);
+  CHECK(index_unknown.err == "error: not in index database: " +
+                                 (root / "missing.cpp").string() + "\n");
+
+  const std::filesystem::path facts = root / "facts";
+  const auto export_facts =
+      cidx::run({g_cidx_binary, "analyze", "--export-facts", facts.string(),
+                 "--db", index.string()});
+  REQUIRE(export_facts.exit_code == 0);
+  CHECK(export_facts.out == facts.string() + ": 10 fact files, 61 rows\n");
 
   const auto bad_ast = cidx::run({g_cidx_binary, "ast", "unknown",
                                   source.string(), "--db", index.string()});

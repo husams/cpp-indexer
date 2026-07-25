@@ -1,9 +1,12 @@
 #include "application/services.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <ranges>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -78,6 +81,26 @@ bool belongs_to_root(const std::string &path, const std::string &root) {
                           path[root.size()] == '/');
 }
 
+std::vector<std::string> split_configuration(std::string_view value) {
+  std::istringstream input{std::string(value)};
+  std::vector<std::string> tokens;
+  std::string token;
+  while (input >> token) {
+    tokens.push_back(std::move(token));
+  }
+  return tokens;
+}
+
+void apply_configuration_override(diff::ParseConfig &config,
+                                  const std::optional<std::string> &override) {
+  if (!override) {
+    return;
+  }
+  config.args = split_configuration(*override);
+  config.classes = diff::classify_options(config.args);
+  config.config_hash = *override;
+}
+
 } // namespace
 
 protocol::ResultEnvelope
@@ -118,6 +141,8 @@ StorageApplicationOperations::execute(const IndexRequest &request,
   }
 
   std::vector<std::pair<File, std::string>> targets;
+  std::int64_t already = 0;
+  json_out::Array file_records;
   const bool rebuild = request.action == IndexAction::rebuild;
   if (rebuild) {
     for (const auto &[file, path] : db.list_files()) {
@@ -129,23 +154,17 @@ StorageApplicationOperations::execute(const IndexRequest &request,
         targets.emplace_back(file, path);
       }
     }
-  } else if (!request.files.empty()) {
-    for (const std::string &file_arg : request.files) {
-      const std::string path =
-          source_root
-              ? pathutil::abspath(pathutil::join(*source_root, file_arg))
-              : files::resolve_file_arg(file_arg);
-      if (const auto file = db.get_file(path)) {
-        targets.emplace_back(*file, path);
-      }
-    }
-  } else {
+  } else if (request.files.empty()) {
     for (const auto &[file, path] : db.list_files()) {
       if (source_root && !belongs_to_root(path, *source_root)) {
         continue;
       }
-      if (!files::is_header(path) &&
-          files::index_status(file, path) != files::IndexStatus::kOk) {
+      if (files::index_status(file, path) == files::IndexStatus::kOk) {
+        ++already;
+        file_records.push_back(json_out::Value::obj(
+            {{"path", json_out::Value::of(path)},
+             {"status", json_out::Value::of(std::string("already"))}}));
+      } else if (!files::is_header(path)) {
         targets.emplace_back(file, path);
       }
     }
@@ -160,10 +179,39 @@ StorageApplicationOperations::execute(const IndexRequest &request,
 
   std::int64_t indexed = 0;
   std::int64_t failed = 0;
+  std::int64_t unknown = 0;
   std::int64_t warnings = 0;
   std::int64_t errors = 0;
-  std::size_t diagnostics_emitted = 0;
   std::vector<protocol::Diagnostic> diagnostics;
+
+  if (!request.files.empty() && !rebuild) {
+    for (const std::string &file_arg : request.files) {
+      const std::string path = files::resolve_file_arg(file_arg, source_root);
+      const std::optional<File> file = db.get_file(path);
+      if (!file) {
+        ++unknown;
+        file_records.push_back(json_out::Value::obj(
+            {{"path", json_out::Value::of(path)},
+             {"status", json_out::Value::of(std::string("unknown"))}}));
+        if (diagnostics.size() < context.policy().max_diagnostics) {
+          diagnostics.push_back(protocol::Diagnostic{
+              .code = "invalid_input",
+              .severity = "error",
+              .message = "not in index database: " + path});
+        }
+        continue;
+      }
+      if (files::index_status(*file, path) == files::IndexStatus::kOk) {
+        ++already;
+        file_records.push_back(json_out::Value::obj(
+            {{"path", json_out::Value::of(path)},
+             {"status", json_out::Value::of(std::string("already"))}}));
+        continue;
+      }
+      targets.emplace_back(*file, path);
+    }
+  }
+
   for (std::size_t position = 0; position < targets.size(); ++position) {
     const auto &[file, path] = targets[position];
     if (context.cancellation().cancelled()) {
@@ -184,45 +232,108 @@ StorageApplicationOperations::execute(const IndexRequest &request,
       } else if (diagnostic.severity == 2) {
         ++warnings;
       }
-      if (diagnostics_emitted < context.policy().max_diagnostics) {
-        diagnostics.push_back(protocol::Diagnostic{
-            .code = "index-diagnostic",
-            .severity = diagnostic.severity >= 3 ? "error" : "warning",
-            .message = diagnostic.spelling});
-        ++diagnostics_emitted;
-      }
     }
     if (outcome.parse_failed || outcome.source_changed) {
       db.set_file_indexed(file.id, false);
       ++failed;
+      if (diagnostics.size() < context.policy().max_diagnostics) {
+        diagnostics.push_back(protocol::Diagnostic{
+            .code = "backend_error",
+            .severity = "error",
+            .message = outcome.error.empty() ? "indexing failed for " + path
+                                             : outcome.error});
+      }
+      file_records.push_back(json_out::Value::obj(
+          {{"path", json_out::Value::of(path)},
+           {"status", json_out::Value::of(std::string("failed"))}}));
     } else {
       db.mark_file_indexed(file.id, std::nullopt, outcome.source_md5);
       ++indexed;
+      file_records.push_back(json_out::Value::obj(
+          {{"path", json_out::Value::of(path)},
+           {"status", json_out::Value::of(std::string("indexed"))},
+           {"stored", json_out::Value::of(outcome.stored)},
+           {"headers_indexed", json_out::Value::of(outcome.headers.indexed)},
+           {"headers_symbols", json_out::Value::of(outcome.headers.symbols)},
+           {"headers_already", json_out::Value::of(outcome.headers.already)},
+           {"headers_system", json_out::Value::of(outcome.headers.system)},
+           {"headers_unowned", json_out::Value::of(outcome.headers.unowned)}}));
     }
   }
   protocol::ResultEnvelope result = service_result("index", context, "index");
   const std::int64_t skipped =
-      static_cast<std::int64_t>(targets.size()) - indexed - failed;
-  result.result =
-      json_out::Value::obj({{"indexed", json_out::Value::of(indexed)},
-                            {"failed", json_out::Value::of(failed)},
-                            {"skipped", json_out::Value::of(skipped)},
-                            {"warnings", json_out::Value::of(warnings)},
-                            {"errors", json_out::Value::of(errors)}});
-  result.diagnostics = std::move(diagnostics);
-  if (failed != 0) {
+      static_cast<std::int64_t>(targets.size()) - indexed - failed + already;
+  const bool cancelled = context.cancellation().cancelled();
+  const bool all_current =
+      std::ranges::all_of(db.list_files(), [](const auto &entry) {
+        return files::index_status(entry.first, entry.second) ==
+               files::IndexStatus::kOk;
+      });
+  const bool incomplete =
+      truncated || cancelled || failed != 0 || unknown != 0 || !all_current;
+  result.result = json_out::Value::obj(
+      {{"indexed", json_out::Value::of(indexed)},
+       {"failed", json_out::Value::of(failed)},
+       {"skipped", json_out::Value::of(skipped)},
+       {"already", json_out::Value::of(already)},
+       {"unknown", json_out::Value::of(unknown)},
+       {"warnings", json_out::Value::of(warnings)},
+       {"errors", json_out::Value::of(errors)},
+       {"files", json_out::Value::arr(std::move(file_records))}});
+  if (cancelled) {
+    result.status = protocol::Status::Error;
+    result.completeness.state = "unknown";
+    result.diagnostics.push_back(
+        protocol::Diagnostic{.code = "timeout",
+                             .severity = "error",
+                             .message = "operation was cancelled"});
+  } else if (failed != 0 || unknown != 0) {
+    result.status = protocol::Status::Error;
+    result.completeness.state = "unknown";
+    result.diagnostics = std::move(diagnostics);
+    if (result.diagnostics.empty()) {
+      result.diagnostics.push_back(protocol::Diagnostic{
+          .code = failed != 0 ? "backend_error" : "invalid_input",
+          .severity = "error",
+          .message = "index operation failed"});
+    }
+  } else if (incomplete) {
     result.status = protocol::Status::Partial;
     result.completeness.state = "partial";
+    if (truncated) {
+      result.diagnostics.push_back(
+          protocol::Diagnostic{.code = "truncated_budget",
+                               .severity = "warning",
+                               .message = "index work budget reached before "
+                                          "all pending files were processed"});
+    }
   }
   result.completeness.truncated = truncated;
   if (truncated) {
     result.completeness.budget =
         static_cast<int64_t>(context.policy().max_work_items);
   }
-  if (failed == 0 && !context.cancellation().cancelled()) {
+  if (!incomplete) {
     db.stamp_index_identity();
   }
-  result.identity.index = db.index_identity().freshness;
+  const IndexIdentity identity = db.index_identity();
+  result.identity.index = identity.freshness;
+  if (result.status == protocol::Status::Error) {
+    result.identity.freshness = "unverifiable";
+    result.completeness.truncated = false;
+  } else if (identity.freshness == "stale") {
+    result.status = protocol::Status::Unknown;
+    result.completeness.state = "unknown";
+    result.completeness.stale = true;
+    result.completeness.truncated = false;
+    result.diagnostics.clear();
+    result.diagnostics.push_back(protocol::Diagnostic{
+        .code = "stale_input",
+        .severity = "error",
+        .message = "pending or changed files remain in the selected index"});
+  } else {
+    result.identity.freshness = identity.freshness;
+  }
   return result;
 }
 
@@ -246,6 +357,11 @@ StorageApplicationOperations::execute(const AnalysisRequest &request,
 protocol::ResultEnvelope
 StorageApplicationOperations::execute(const AstInspectionRequest &request,
                                       ApplicationContext &context) {
+  if (request.action != AstInspectionAction::dump) {
+    return service_error(
+        "ast", context, "invalid_input",
+        "AST locals and conditions inspection is not implemented yet");
+  }
   const std::optional<File> file =
       storage_.get_file(files::resolve_file_arg(request.source));
   if (!file) {
@@ -331,16 +447,18 @@ StorageApplicationOperations::execute(const DiffRequest &request,
       return service_error("diff", context, "invalid_input",
                            "file and symbol diffs require an index path");
     }
-    const diff::ParseConfig left_config =
+    diff::ParseConfig left_config =
         diff::resolve_parse_config(diff::SideSpec{.side = "left",
                                                   .file = request.left,
                                                   .db = left_db,
                                                   .tu = std::nullopt});
-    const diff::ParseConfig right_config = diff::resolve_parse_config(
+    diff::ParseConfig right_config = diff::resolve_parse_config(
         diff::SideSpec{.side = "right",
                        .file = request.right,
                        .db = request.right_index.value_or(left_db),
                        .tu = std::nullopt});
+    apply_configuration_override(left_config, request.left_configuration);
+    apply_configuration_override(right_config, request.right_configuration);
     const diff::ConfigDelta delta =
         diff::config_delta(left_config, right_config);
     if (request.scope == DiffScope::configuration) {
