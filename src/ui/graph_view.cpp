@@ -6,16 +6,68 @@
 #include <map>
 #include <set>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
+#include "catalogs/generated_catalog.hpp"
 #include "graph/query.hpp"
 #include "graph/records.hpp"
+#include "query/cxq.hpp"
 #include "query/exec.hpp"
 #include "query/plan.hpp"
 #include "util/errors.hpp"
+#include "util/hashing.hpp"
+#include "util/json_read.hpp"
 #include "util/pathutil.hpp"
 
 namespace cidx::ui {
+
+const char *graph_input_kind_name(GraphInputKind kind) {
+  switch (kind) {
+  case GraphInputKind::Symbol:
+    return "symbol";
+  case GraphInputKind::File:
+    return "file";
+  case GraphInputKind::Entity:
+    return "entity";
+  case GraphInputKind::Type:
+    return "type";
+  case GraphInputKind::Cxq:
+    return "cxq";
+  case GraphInputKind::QueryPlan:
+    return "plan";
+  case GraphInputKind::Path:
+    return "path";
+  }
+  return "unknown";
+}
+
+std::string GraphViewInput::canonical() const {
+  return std::string(graph_input_kind_name(kind)) + ":" +
+         std::to_string(value.size()) + ":" + value;
+}
+
+GraphViewError::GraphViewError(GraphViewFailureKind kind,
+                               const std::string &message,
+                               std::string next_action)
+    : CidxError(message), kind_(kind), next_action_(std::move(next_action)) {}
+
+const char *GraphViewError::code() const noexcept {
+  switch (kind_) {
+  case GraphViewFailureKind::InvalidInput:
+    return "E_UI_INVALID_INPUT";
+  case GraphViewFailureKind::UnsupportedInput:
+    return "E_UI_UNSUPPORTED_INPUT";
+  case GraphViewFailureKind::UnknownIdentity:
+    return "E_UI_UNKNOWN_IDENTITY";
+  case GraphViewFailureKind::AmbiguousIdentity:
+    return "E_UI_AMBIGUOUS_IDENTITY";
+  case GraphViewFailureKind::Oversized:
+    return "E_UI_OVERSIZED";
+  }
+  return "E_UI_FAILURE";
+}
+
 namespace {
 
 using json_out::Array;
@@ -241,7 +293,7 @@ Value site_value(const graph::Site &site,
   out.emplace_back("line", optional_int(site.line));
   out.emplace_back("col", optional_int(site.col));
   out.emplace_back("conditional", Value::of(site.conditional));
-  out.emplace_back("args_sig", optional_string(site.args_sig));
+  out.emplace_back("args_redacted", Value::of(true));
   std::string loc =
       site.file ? redacted_path(*site.file, workspace) : "<no-location>";
   if (site.line) {
@@ -299,11 +351,417 @@ Value edge_value(const graph::Edge &edge, const graph::Sym &source,
   return Value::obj(std::move(out));
 }
 
+std::string portable_file_id(Storage &db, int64_t file_id,
+                             std::string_view fallback_path = {}) {
+  // Exported file identities are deliberately non-reversible. The storage
+  // source identity is useful internally but may contain absolute checkout or
+  // external paths, so never expose it through reversible encoding.
+  const std::string source =
+      fallback_path.empty()
+          ? db.portable_source_identity_for_file(file_id)
+          : db.portable_source_identity_for_path(std::string(fallback_path));
+  std::string material = "cidx.graph-view.file.v2";
+  material.push_back('\0');
+  material += source;
+  return "file:v2:" + sha256_hex(material);
+}
+
+Value file_node_value(Storage &db, int64_t file_id, const std::string &path,
+                      bool resolved, const std::string &freshness,
+                      bool truncated,
+                      const std::optional<std::string> &workspace) {
+  const std::string portable_path = redacted_path(path, workspace);
+  Object out;
+  out.emplace_back("id", Value::of(portable_file_id(db, file_id, path)));
+  out.emplace_back("kind", Value::of(std::string("file")));
+  out.emplace_back("path", Value::of(portable_path));
+  out.emplace_back("name", Value::of(pathutil::basename(portable_path)));
+  out.emplace_back("status", [&] {
+    Object status_value;
+    status_value.emplace_back(
+        "completeness",
+        Value::of(std::string(resolved ? "complete" : "partial")));
+    status_value.emplace_back("freshness", Value::of(freshness));
+    status_value.emplace_back("resolved", Value::of(resolved));
+    status_value.emplace_back("truncated", Value::of(truncated));
+    return Value::obj(std::move(status_value));
+  }());
+  out.emplace_back("evidence", Value::obj({
+                                   {"bounded", Value::of(true)},
+                                   {"path", Value::of(portable_path)},
+                               }));
+  return Value::obj(std::move(out));
+}
+
+Value include_edge_value(Storage &db, const IncludeEdge &edge,
+                         const std::string &source_path,
+                         const std::string &freshness, bool truncated,
+                         bool sites_truncated,
+                         const std::vector<IncludeSite> &sites,
+                         const std::optional<std::string> &workspace) {
+  const std::string target_path =
+      edge.dst_file_id
+          ? db.file_abs_path(*edge.dst_file_id).value_or(edge.dst_path)
+          : edge.dst_path;
+  const std::string source_id =
+      portable_file_id(db, edge.src_file_id, source_path);
+  const std::string target_id =
+      edge.dst_file_id ? portable_file_id(db, *edge.dst_file_id, target_path)
+                       : portable_file_id(db, edge.src_file_id, target_path);
+  const auto config = db.include_config_by_id(edge.config_id);
+  const std::string portable_target_path =
+      redacted_path(target_path, workspace);
+  Object out;
+  out.emplace_back("id",
+                   Value::of(std::string("include-edge:v1:") +
+                             length_field(source_id) + length_field(target_id) +
+                             length_field(config ? config->digest : "")));
+  out.emplace_back("source", Value::of(source_id));
+  out.emplace_back("target", Value::of(target_id));
+  out.emplace_back("kind", Value::of(std::string("include")));
+  out.emplace_back("path", Value::of(portable_target_path));
+  out.emplace_back("count", Value::of(edge.count));
+  out.emplace_back("configuration", [&] {
+    Object value;
+    value.emplace_back("digest", Value::of(config ? config->digest : ""));
+    value.emplace_back("driver", [&] {
+      if (!config || !config->driver) {
+        return Value::null();
+      }
+      return Value::of(redacted_path(*config->driver, workspace));
+    }());
+    value.emplace_back("working_dir", [&] {
+      if (!config || !config->working_dir) {
+        return Value::null();
+      }
+      return Value::of(redacted_path(*config->working_dir, workspace));
+    }());
+    value.emplace_back(
+        "argument_count",
+        Value::of(static_cast<int64_t>(config ? config->arguments.size() : 0)));
+    value.emplace_back("arguments_redacted", Value::of(true));
+    return Value::obj(std::move(value));
+  }());
+  out.emplace_back("status", [&] {
+    Object value;
+    value.emplace_back("completeness", Value::of(std::string("complete")));
+    value.emplace_back("freshness", Value::of(freshness));
+    value.emplace_back("resolved", Value::of(edge.dst_file_id.has_value()));
+    value.emplace_back("truncated", Value::of(truncated));
+    value.emplace_back("evidence_truncated", Value::of(sites_truncated));
+    return Value::obj(std::move(value));
+  }());
+  Array evidence_sites;
+  for (const auto &site : sites) {
+    Object value;
+    value.emplace_back("line", Value::of(site.line));
+    value.emplace_back("col", Value::of(site.col));
+    value.emplace_back("spelling",
+                       Value::of(redacted_path(site.spelling, workspace)));
+    value.emplace_back("angled", Value::of(site.is_angled));
+    value.emplace_back("directive", Value::of(site.directive));
+    value.emplace_back("conditional",
+                       Value::of(!site.cond_fingerprint.empty()));
+    value.emplace_back("resolved", Value::of(site.resolved));
+    evidence_sites.push_back(Value::obj(std::move(value)));
+  }
+  out.emplace_back("sites", Value::arr(std::move(evidence_sites)));
+  out.emplace_back("evidence",
+                   Value::obj({
+                       {"bounded", Value::of(true)},
+                       {"sites_truncated", Value::of(sites_truncated)},
+                   }));
+  return Value::obj(std::move(out));
+}
+
+std::string entity_id(const graph::Sym &symbol, const EntityNode &entity) {
+  return "entity:v1:" + length_field(portable_id(symbol)) +
+         length_field(entity.kind_name);
+}
+
+std::string type_id(const TypeNode &type) {
+  return "type:v1:" + hex_field(type.type_key) +
+         length_field(std::to_string(type.kind));
+}
+
+std::string entity_edge_id(std::string_view source, const EntityEdge &edge,
+                           std::string_view target) {
+  return "entity-edge:v1:" + length_field(source) +
+         length_field(edge.kind_name) + length_field(target) +
+         length_field(std::to_string(edge.via_member_id.value_or(-1))) +
+         length_field(std::to_string(edge.create_form.value_or(-1)));
+}
+
+std::string type_edge_kind_name(int64_t kind) {
+  switch (kind) {
+  case 1:
+    return "pointee";
+  case 2:
+    return "element_type";
+  case 3:
+    return "alias_of";
+  case 4:
+    return "return_type";
+  case 5:
+    return "param_type";
+  case 6:
+    return "template_argument_type";
+  case 7:
+    return "member_owner";
+  case 8:
+    return "member_component";
+  default:
+    return "unknown";
+  }
+}
+
+Value entity_node_value(const graph::Sym &symbol, const EntityNode &entity,
+                        const std::string &freshness, bool truncated,
+                        const std::optional<std::string> &workspace) {
+  Object out;
+  out.emplace_back("id", Value::of(entity_id(symbol, entity)));
+  out.emplace_back("kind", Value::of(std::string("entity")));
+  out.emplace_back("entity_kind", Value::of(entity.kind_name));
+  out.emplace_back("name",
+                   Value::of(symbol.name.empty() ? symbol.usr : symbol.name));
+  out.emplace_back("identity", Value::of(portable_id(symbol)));
+  out.emplace_back("location", Value::of(location(symbol, workspace)));
+  out.emplace_back("status", [&] {
+    Object value;
+    value.emplace_back(
+        "completeness",
+        Value::of(std::string(symbol.resolved ? "complete" : "partial")));
+    value.emplace_back("freshness", Value::of(freshness));
+    value.emplace_back("resolved", Value::of(symbol.resolved));
+    value.emplace_back("truncated", Value::of(truncated));
+    return Value::obj(std::move(value));
+  }());
+  out.emplace_back("evidence",
+                   Value::obj({
+                       {"bounded", Value::of(true)},
+                       {"location", Value::of(location(symbol, workspace))},
+                   }));
+  return Value::obj(std::move(out));
+}
+
+Value entity_edge_value(const EntityEdge &edge, std::string_view source,
+                        std::string_view target, const std::string &freshness,
+                        bool truncated) {
+  Object out;
+  out.emplace_back("id", Value::of(entity_edge_id(source, edge, target)));
+  out.emplace_back("source", Value::of(std::string(source)));
+  out.emplace_back("target", Value::of(std::string(target)));
+  out.emplace_back("kind", Value::of(edge.kind_name));
+  out.emplace_back("count", Value::of(edge.count));
+  out.emplace_back("multiplicity", Value::of(edge.multiplicity));
+  out.emplace_back("access", Value::of(edge.access));
+  out.emplace_back("is_virtual", Value::of(edge.is_virtual));
+  out.emplace_back("partial", Value::of(edge.partial));
+  out.emplace_back("via_member_id", optional_int(edge.via_member_id));
+  out.emplace_back("create_form", optional_int(edge.create_form));
+  out.emplace_back(
+      "status",
+      Value::obj({
+          {"completeness",
+           Value::of(std::string(edge.partial != 0 ? "partial" : "complete"))},
+          {"freshness", Value::of(freshness)},
+          {"resolved", Value::of(true)},
+          {"truncated", Value::of(truncated)},
+      }));
+  out.emplace_back("evidence", Value::obj({
+                                   {"bounded", Value::of(true)},
+                                   {"derived", Value::of(true)},
+                               }));
+  return Value::obj(std::move(out));
+}
+
+Value type_node_value(const TypeNode &type, const std::string &freshness,
+                      bool truncated) {
+  Object out;
+  out.emplace_back("id", Value::of(type_id(type)));
+  out.emplace_back("kind", Value::of(std::string("type")));
+  out.emplace_back("type_kind", Value::of(std::to_string(type.kind)));
+  out.emplace_back("spelling", Value::of(type.spelling));
+  out.emplace_back("const", Value::of(type.is_const));
+  out.emplace_back("volatile", Value::of(type.is_volatile));
+  out.emplace_back("restrict", Value::of(type.is_restrict));
+  out.emplace_back("status",
+                   Value::obj({
+                       {"completeness", Value::of(std::string("complete"))},
+                       {"freshness", Value::of(freshness)},
+                       {"resolved", Value::of(true)},
+                       {"truncated", Value::of(truncated)},
+                   }));
+  out.emplace_back("evidence", Value::obj({
+                                   {"bounded", Value::of(true)},
+                                   {"type_key_hashed", Value::of(true)},
+                               }));
+  return Value::obj(std::move(out));
+}
+
+Value type_edge_value(const TypeEdge &edge, std::string_view source,
+                      std::string_view target, const std::string &freshness,
+                      bool truncated) {
+  const std::string kind = type_edge_kind_name(edge.kind);
+  Object out;
+  out.emplace_back("id", Value::of("type-edge:v1:" + length_field(source) +
+                                   length_field(kind) +
+                                   length_field(std::to_string(edge.position)) +
+                                   length_field(target)));
+  out.emplace_back("source", Value::of(std::string(source)));
+  out.emplace_back("target", Value::of(std::string(target)));
+  out.emplace_back("kind", Value::of(kind));
+  out.emplace_back("position", Value::of(edge.position));
+  out.emplace_back("status",
+                   Value::obj({
+                       {"completeness", Value::of(std::string("complete"))},
+                       {"freshness", Value::of(freshness)},
+                       {"resolved", Value::of(true)},
+                       {"truncated", Value::of(truncated)},
+                   }));
+  out.emplace_back("evidence", Value::obj({
+                                   {"bounded", Value::of(true)},
+                                   {"derived", Value::of(true)},
+                               }));
+  return Value::obj(std::move(out));
+}
+
 struct RootResolution {
   std::optional<graph::Sym> symbol;
   std::string status = "none";
   std::vector<graph::Sym> candidates;
 };
+
+void append_typed_facts(Storage &db, graph::GraphQuery &graph,
+                        const std::vector<int64_t> &entity_ids,
+                        const std::vector<int64_t> &type_ids, bool entity_view,
+                        int node_budget, int edge_budget,
+                        const std::string &freshness, bool &truncated,
+                        bool &partial_facts,
+                        const std::optional<std::string> &workspace,
+                        Array &nodes, Array &edges) {
+  if (entity_view) {
+    std::map<int64_t, std::pair<graph::Sym, EntityNode>> available;
+    std::vector<EntityEdge> candidate_edges;
+    for (const int64_t id : entity_ids) {
+      const auto entity = db.entity_node_by_id(id);
+      const auto symbol = graph.get_by_id(id);
+      if (!entity || !symbol) {
+        continue;
+      }
+      available.emplace(id, std::make_pair(*symbol, *entity));
+      for (const auto &edge : db.entity_edges_from(id)) {
+        candidate_edges.push_back(edge);
+        const auto target_entity = db.entity_node_by_id(edge.dst_id);
+        const auto target_symbol = graph.get_by_id(edge.dst_id);
+        if (target_entity && target_symbol) {
+          available.emplace(edge.dst_id,
+                            std::make_pair(*target_symbol, *target_entity));
+        }
+      }
+    }
+    std::vector<int64_t> ordered_ids;
+    for (const auto &[id, value] : available) {
+      (void)value;
+      ordered_ids.push_back(id);
+    }
+    std::ranges::sort(ordered_ids, [&](int64_t left, int64_t right) {
+      return entity_id(available.at(left).first, available.at(left).second) <
+             entity_id(available.at(right).first, available.at(right).second);
+    });
+    const std::size_t remaining =
+        nodes.size() >= static_cast<std::size_t>(node_budget)
+            ? 0
+            : static_cast<std::size_t>(node_budget) - nodes.size();
+    if (ordered_ids.size() > remaining) {
+      ordered_ids.resize(remaining);
+      truncated = true;
+    }
+    std::set<int64_t> selected;
+    for (const int64_t id : ordered_ids) {
+      selected.insert(id);
+      nodes.push_back(entity_node_value(available.at(id).first,
+                                        available.at(id).second, freshness,
+                                        truncated, workspace));
+    }
+    std::ranges::sort(
+        candidate_edges, [](const EntityEdge &left, const EntityEdge &right) {
+          return std::tie(left.kind_name, left.src_id, left.dst_id,
+                          left.via_member_id, left.create_form) <
+                 std::tie(right.kind_name, right.src_id, right.dst_id,
+                          right.via_member_id, right.create_form);
+        });
+    for (const auto &edge : candidate_edges) {
+      if (!selected.contains(edge.src_id) || !selected.contains(edge.dst_id)) {
+        continue;
+      }
+      if (edges.size() >= static_cast<std::size_t>(edge_budget)) {
+        truncated = true;
+        break;
+      }
+      const std::string source = entity_id(available.at(edge.src_id).first,
+                                           available.at(edge.src_id).second);
+      const std::string target = entity_id(available.at(edge.dst_id).first,
+                                           available.at(edge.dst_id).second);
+      partial_facts = partial_facts || edge.partial != 0;
+      edges.push_back(
+          entity_edge_value(edge, source, target, freshness, truncated));
+    }
+    return;
+  }
+
+  std::map<int64_t, TypeNode> available;
+  std::vector<TypeEdge> candidate_edges;
+  for (const int64_t id : type_ids) {
+    if (const auto type = db.type_node_by_id(id)) {
+      available.emplace(id, *type);
+    }
+    for (const auto &edge : db.type_edges_from(id)) {
+      candidate_edges.push_back(edge);
+      if (const auto type = db.type_node_by_id(edge.dst_id)) {
+        available.emplace(edge.dst_id, *type);
+      }
+    }
+  }
+  std::vector<int64_t> ordered_ids;
+  for (const auto &[id, type] : available) {
+    (void)type;
+    ordered_ids.push_back(id);
+  }
+  std::ranges::sort(ordered_ids, [&](int64_t left, int64_t right) {
+    return type_id(available.at(left)) < type_id(available.at(right));
+  });
+  const std::size_t remaining =
+      nodes.size() >= static_cast<std::size_t>(node_budget)
+          ? 0
+          : static_cast<std::size_t>(node_budget) - nodes.size();
+  if (ordered_ids.size() > remaining) {
+    ordered_ids.resize(remaining);
+    truncated = true;
+  }
+  std::set<int64_t> selected;
+  for (const int64_t id : ordered_ids) {
+    selected.insert(id);
+    nodes.push_back(type_node_value(available.at(id), freshness, truncated));
+  }
+  std::ranges::sort(
+      candidate_edges, [](const TypeEdge &left, const TypeEdge &right) {
+        return std::tie(left.src_id, left.kind, left.position, left.dst_id) <
+               std::tie(right.src_id, right.kind, right.position, right.dst_id);
+      });
+  for (const auto &edge : candidate_edges) {
+    if (!selected.contains(edge.src_id) || !selected.contains(edge.dst_id)) {
+      continue;
+    }
+    if (edges.size() >= static_cast<std::size_t>(edge_budget)) {
+      truncated = true;
+      break;
+    }
+    edges.push_back(type_edge_value(edge, type_id(available.at(edge.src_id)),
+                                    type_id(available.at(edge.dst_id)),
+                                    freshness, truncated));
+  }
+}
 
 query::Query portable_lookup_plan(const PortableReference &reference) {
   std::vector<query::Pred> predicates{
@@ -480,6 +938,245 @@ const Value *member(const Value &value, std::string_view key) {
   return nullptr;
 }
 
+const Value &required_member(const Value &value, std::string_view key,
+                             Value::T type) {
+  const Value *child = member(value, key);
+  if (child == nullptr || child->t != type) {
+    throw CidxError("canonical QueryPlan: missing or invalid '" +
+                    std::string(key) + "'");
+  }
+  return *child;
+}
+
+std::string string_member(const Value &value, std::string_view key) {
+  return required_member(value, key, Value::T::Str).s;
+}
+
+int64_t int_member(const Value &value, std::string_view key) {
+  return required_member(value, key, Value::T::Int).i;
+}
+
+std::optional<std::string> optional_string_member(const Value &value,
+                                                  std::string_view key) {
+  if (const Value *child = member(value, key)) {
+    if (child->t != Value::T::Str) {
+      throw CidxError("canonical QueryPlan: invalid '" + std::string(key) +
+                      "'");
+    }
+    return child->s;
+  }
+  return std::nullopt;
+}
+
+query::View parse_plan_view(std::string_view name) {
+  for (const query::View view :
+       {query::View::Symbol, query::View::Entity, query::View::Parameter,
+        query::View::TemplateParameter, query::View::TemplateArgument,
+        query::View::CallArgument, query::View::Edge, query::View::Evidence,
+        query::View::Type}) {
+    if (name == query::view_name(view)) {
+      return view;
+    }
+  }
+  throw CidxError("canonical QueryPlan: unsupported view '" +
+                  std::string(name) + "'");
+}
+
+query::UnknownPolicy parse_unknown_policy(std::string_view name) {
+  if (name == "exclude") {
+    return query::UnknownPolicy::Exclude;
+  }
+  if (name == "include") {
+    return query::UnknownPolicy::Include;
+  }
+  if (name == "error") {
+    return query::UnknownPolicy::Error;
+  }
+  throw CidxError("canonical QueryPlan: unsupported unknown policy '" +
+                  std::string(name) + "'");
+}
+
+query::Pred parse_plan_pred(const Value &value) {
+  const std::string op = string_member(value, "op");
+  query::Pred result;
+  if (op == "all_of" || op == "any_of") {
+    result.op = op == "all_of" ? query::PredOp::AllOf : query::PredOp::AnyOf;
+    const Value &preds = required_member(value, "preds", Value::T::Arr);
+    for (const Value &pred : preds.a) {
+      if (pred.t != Value::T::Obj) {
+        throw CidxError("canonical QueryPlan: predicate must be an object");
+      }
+      result.kids.push_back(parse_plan_pred(pred));
+    }
+    return result;
+  }
+  if (op == "not") {
+    result.op = query::PredOp::Not;
+    result.kids.push_back(
+        parse_plan_pred(required_member(value, "pred", Value::T::Obj)));
+    return result;
+  }
+  if (op == "eq" || op == "ne" || op == "glob") {
+    if (op == "eq") {
+      result.op = query::PredOp::Eq;
+    } else if (op == "ne") {
+      result.op = query::PredOp::Ne;
+    } else {
+      result.op = query::PredOp::Glob;
+    }
+    result.field = string_member(value, "field");
+    const Value *raw = member(value, "value");
+    if (raw == nullptr ||
+        (raw->t != Value::T::Str && raw->t != Value::T::Int)) {
+      throw CidxError(
+          "canonical QueryPlan: comparison value has an invalid type");
+    }
+    if (raw->t == Value::T::Int) {
+      result.int_value = raw->i;
+    } else {
+      result.str_values.push_back(raw->s);
+    }
+    return result;
+  }
+  if (op == "in") {
+    result.op = query::PredOp::In;
+    result.field = string_member(value, "field");
+    const Value &values = required_member(value, "values", Value::T::Arr);
+    for (const Value &item : values.a) {
+      if (item.t != Value::T::Str) {
+        throw CidxError("canonical QueryPlan: in values must be strings");
+      }
+      result.str_values.push_back(item.s);
+    }
+    return result;
+  }
+  query::PredOp quantifier = query::PredOp::Exists;
+  if (op == "none") {
+    quantifier = query::PredOp::None;
+  } else if (op == "all") {
+    quantifier = query::PredOp::All;
+  } else if (op == "at_least") {
+    quantifier = query::PredOp::AtLeast;
+  } else if (op == "exactly") {
+    quantifier = query::PredOp::Exactly;
+  } else {
+    throw CidxError("canonical QueryPlan: unsupported predicate op '" + op +
+                    "'");
+  }
+  result.op = quantifier;
+  result.relation = string_member(value, "relation");
+  result.min_depth = int_member(value, "min_depth");
+  result.max_depth = int_member(value, "max_depth");
+  if (const auto direction = optional_string_member(value, "direction")) {
+    if (*direction != "in") {
+      throw CidxError("canonical QueryPlan: unsupported predicate direction");
+    }
+    result.inbound = true;
+  }
+  if (quantifier == query::PredOp::AtLeast ||
+      quantifier == query::PredOp::Exactly) {
+    result.threshold = int_member(value, "threshold");
+  }
+  if (const Value *pred = member(value, "pred")) {
+    if (pred->t != Value::T::Obj) {
+      throw CidxError("canonical QueryPlan: invalid quantifier predicate");
+    }
+    result.target = std::make_shared<query::Pred>(parse_plan_pred(*pred));
+  }
+  return result;
+}
+
+query::Plan parse_canonical_plan_value(const Value &root) {
+  if (root.t != Value::T::Obj || int_member(root, "cxq") != 1) {
+    throw CidxError("canonical QueryPlan: expected cxq version 1");
+  }
+  const Value &source = required_member(root, "source", Value::T::Obj);
+  const std::string source_kind = string_member(source, "kind");
+  query::Plan plan;
+  if (source_kind == "codebase") {
+    plan.source = query::codebase();
+  } else if (source_kind == "symbol") {
+    plan.source = query::symbol(string_member(source, "ref"));
+  } else if (source_kind == "entity") {
+    plan.source = query::entity(string_member(source, "ref"));
+  } else {
+    throw CidxError("canonical QueryPlan: unsupported source kind '" +
+                    source_kind + "'");
+  }
+  const Value &stages = required_member(root, "stages", Value::T::Arr);
+  for (const Value &value : stages.a) {
+    if (value.t != Value::T::Obj) {
+      throw CidxError("canonical QueryPlan: stage must be an object");
+    }
+    const std::string op = string_member(value, "op");
+    query::Stage stage;
+    if (op == "nodes") {
+      stage.op = query::StageOp::Nodes;
+      if (const Value *pred = member(value, "pred")) {
+        stage.pred = parse_plan_pred(*pred);
+      }
+    } else if (op == "view") {
+      stage.op = query::StageOp::ChangeView;
+      stage.level = parse_plan_view(string_member(value, "level"));
+    } else if (op == "where") {
+      stage.op = query::StageOp::Where;
+      stage.pred =
+          parse_plan_pred(required_member(value, "pred", Value::T::Obj));
+    } else if (op == "out" || op == "in") {
+      stage.op = op == "out" ? query::StageOp::Out : query::StageOp::In;
+      stage.relation = string_member(value, "relation");
+      stage.min_depth = int_member(value, "min_depth");
+      stage.max_depth = int_member(value, "max_depth");
+      if (const auto mode = optional_string_member(value, "mode")) {
+        if (*mode != "static" && *mode != "devirtualized") {
+          throw CidxError("canonical QueryPlan: unsupported traversal mode");
+        }
+        stage.mode = *mode == "devirtualized"
+                         ? query::TraversalMode::Devirtualized
+                         : query::TraversalMode::Static;
+      }
+    } else if (op == "union" || op == "intersect" || op == "except") {
+      if (op == "union") {
+        stage.op = query::StageOp::Union;
+      } else if (op == "intersect") {
+        stage.op = query::StageOp::Intersect;
+      } else {
+        stage.op = query::StageOp::Except;
+      }
+      stage.operand = std::make_shared<query::Plan>(parse_canonical_plan_value(
+          required_member(value, "plan", Value::T::Obj)));
+    } else if (op == "select" || op == "order_by") {
+      stage.op =
+          op == "select" ? query::StageOp::Select : query::StageOp::OrderBy;
+      const Value &fields = required_member(value, "fields", Value::T::Arr);
+      for (const Value &field : fields.a) {
+        if (field.t != Value::T::Str) {
+          throw CidxError("canonical QueryPlan: fields must be strings");
+        }
+        stage.fields.push_back(field.s);
+      }
+    } else if (op == "count") {
+      stage.op = query::StageOp::Count;
+    } else if (op == "distinct") {
+      stage.op = query::StageOp::Distinct;
+    } else if (op == "limit") {
+      stage.op = query::StageOp::Limit;
+      stage.n = int_member(value, "n");
+    } else {
+      throw CidxError("canonical QueryPlan: unsupported stage op '" + op + "'");
+    }
+    if (const auto unknown = optional_string_member(value, "unknown")) {
+      stage.unknown = parse_unknown_policy(*unknown);
+    }
+    plan.stages.push_back(std::move(stage));
+  }
+  return plan;
+}
+
+query::Plan parse_canonical_plan(const std::string &text) {
+  return parse_canonical_plan_value(json_read::parse(text));
+}
+
 void set_bool_member(Value &value, std::string_view key, bool enabled) {
   if (Value *child = member(value, key)) {
     *child = Value::of(enabled);
@@ -492,12 +1189,132 @@ void set_int_member(Value &value, std::string_view key, int64_t number) {
   }
 }
 
+std::string graph_query_identity(const GraphViewRequest &request,
+                                 std::string_view normalized_input,
+                                 const IndexIdentity &identity,
+                                 const std::optional<std::string> &plan_json) {
+  Object material;
+  material.emplace_back("version", Value::of(kGraphViewVersion));
+  material.emplace_back("input", Value::of(std::string(normalized_input)));
+  material.emplace_back("plan", optional_string(plan_json));
+  material.emplace_back("direction", Value::of(request.direction));
+  material.emplace_back("depth", Value::of(request.depth));
+  material.emplace_back("node_budget", Value::of(request.node_budget));
+  material.emplace_back("edge_budget", Value::of(request.edge_budget));
+  material.emplace_back("site_budget", Value::of(request.site_budget));
+  material.emplace_back("byte_budget", Value::of(request.byte_budget));
+  material.emplace_back("workspace", request.workspace
+                                         ? Value::of(*request.workspace)
+                                         : Value::null());
+  Array edge_kinds;
+  if (request.edge_kinds) {
+    std::vector<std::string> sorted = *request.edge_kinds;
+    std::ranges::sort(sorted);
+    for (const auto &kind : sorted) {
+      edge_kinds.push_back(Value::of(kind));
+    }
+  }
+  material.emplace_back("edge_kinds", Value::arr(std::move(edge_kinds)));
+  material.emplace_back("workspace_identity", Value::of(identity.workspace));
+  material.emplace_back("schema_version", Value::of(identity.schema_version));
+  material.emplace_back("source_revision",
+                        optional_string(identity.source_revision));
+  material.emplace_back("source_fingerprint",
+                        optional_string(identity.source_fingerprint));
+  material.emplace_back("index_config_fingerprint",
+                        optional_string(identity.index_config_fingerprint));
+  std::string hash_material = "cidx.graph-view.query.v1";
+  hash_material.push_back('\0');
+  hash_material += json_out::dumps_indent2(Value::obj(std::move(material)));
+  return sha256_hex(hash_material);
+}
+
+std::vector<std::string> fact_sets_for(const GraphInputKind kind,
+                                       bool has_edges, bool has_sites,
+                                       bool has_includes = false,
+                                       bool entity_view = false,
+                                       bool type_view = false) {
+  std::set<std::string> facts;
+  if (entity_view) {
+    facts.insert("entities");
+    facts.insert("entity_edges");
+  } else if (type_view) {
+    facts.insert("types");
+    facts.insert("type_edges");
+  } else {
+    switch (kind) {
+    case GraphInputKind::Symbol:
+      facts.insert("symbols");
+      break;
+    case GraphInputKind::File:
+      facts.insert("files");
+      facts.insert("symbols");
+      break;
+    case GraphInputKind::Entity:
+      facts.insert("entities");
+      facts.insert("entity_edges");
+      break;
+    case GraphInputKind::Type:
+      facts.insert("types");
+      break;
+    case GraphInputKind::Cxq:
+    case GraphInputKind::QueryPlan:
+      facts.insert("query-plan");
+      facts.insert("symbols");
+      break;
+    case GraphInputKind::Path:
+      facts.insert("symbols");
+      facts.insert("witness-path");
+      break;
+    }
+  }
+  if (has_edges) {
+    facts.insert("edges");
+  }
+  if (has_sites) {
+    facts.insert("sites");
+  }
+  if (has_includes) {
+    facts.insert("includes");
+  }
+  return {facts.begin(), facts.end()};
+}
+
+Value identity_value(const IndexIdentity &identity,
+                     const std::vector<std::string> &fact_sets) {
+  Object out;
+  out.emplace_back("workspace",
+                   Value::of(pathutil::basename(identity.workspace)));
+  out.emplace_back("index", Value::of("semantic-index/schema/" +
+                                      std::to_string(identity.schema_version)));
+  Array facts;
+  for (const auto &fact : fact_sets) {
+    facts.push_back(Value::of(fact));
+  }
+  out.emplace_back("fact_sets", Value::arr(std::move(facts)));
+  out.emplace_back("catalog_version", Value::of(catalog::kCatalogVersion));
+  out.emplace_back("catalog_hash",
+                   Value::of(std::string(catalog::kCatalogHash)));
+  out.emplace_back("freshness", Value::of(identity.freshness));
+  out.emplace_back("source_revision",
+                   optional_string(identity.source_revision));
+  out.emplace_back("source_fingerprint",
+                   optional_string(identity.source_fingerprint));
+  return Value::obj(std::move(out));
+}
+
 } // namespace
 
 Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   query::SqliteQueryReadAdapter graph_read(db);
   graph::GraphQuery graph(graph_read, "<ui>");
-  const IndexIdentity identity = db.index_identity();
+  IndexIdentity identity = db.index_identity();
+  if (identity.freshness == "unverifiable" &&
+      std::ranges::any_of(db.list_files(), [](const auto &entry) {
+        return !entry.first.indexed;
+      })) {
+    identity.freshness = "stale";
+  }
   const std::string freshness = identity.freshness;
   const int node_budget = std::clamp(request.node_budget, 1, 10000);
   const int edge_budget = std::clamp(request.edge_budget, 1, 20000);
@@ -505,25 +1322,402 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   const int byte_budget =
       std::clamp(request.byte_budget, 1024, 64 * 1024 * 1024);
 
-  if (request.query &&
-      request.query->find_first_of(" |()[]{}") != std::string::npos) {
-    throw CidxError(
-        "cidx ui: --query accepts one portable symbol reference; textual CXQ "
-        "operators are not supported by this GraphView surface");
-  }
+  GraphViewInput input = request.input.value_or(GraphViewInput{
+      .kind = GraphInputKind::Symbol,
+      .value = request.root ? *request.root : request.query.value_or("")});
   if (request.root && request.query && *request.root != *request.query) {
-    throw CidxError(
-        "cidx ui: --root and --query must identify the same symbol");
+    throw GraphViewError(GraphViewFailureKind::InvalidInput,
+                         "--root and --query must identify the same symbol",
+                         "provide one symbol reference");
   }
-  const std::optional<std::string> effective_root =
-      request.root ? request.root : request.query;
-  const RootResolution resolution = resolve_root(graph, db, effective_root);
+  if (input.value.empty() && request.strict) {
+    throw GraphViewError(GraphViewFailureKind::InvalidInput,
+                         "a typed GraphView input is required",
+                         "provide --input-kind and --input");
+  }
+
+  RootResolution resolution;
+  std::vector<graph::Sym> input_symbols;
+  std::optional<query::Plan> normalized_plan;
+  std::optional<std::string> normalized_plan_json;
+  std::optional<query::Result> normalized_result;
+  std::optional<File> input_file;
+  std::vector<IncludeEdge> include_edges;
+  std::vector<int64_t> entity_ids;
+  std::vector<int64_t> type_ids;
+  std::vector<graph::Sym> witness_nodes;
+  std::vector<graph::Edge> witness_edges;
+  bool entity_view = false;
+  bool type_view = false;
+  bool witness_view = false;
+  bool has_include_facts = false;
+  const auto add_symbol_by_id = [&](int64_t id) {
+    if (const auto symbol = graph.get_by_id(id)) {
+      input_symbols.push_back(*symbol);
+    }
+  };
+  const auto collect_plan = [&](const query::Plan &plan) {
+    normalized_plan = query::validate(plan);
+    normalized_plan_json = query::canonical_json(*normalized_plan);
+    query::SqliteQueryReadAdapter read(db);
+    normalized_result = query::Executor(read).run(*normalized_plan);
+    const query::Result &result = *normalized_result;
+    if (result.shape != query::Shape::Nodes ||
+        (result.view != query::View::Symbol &&
+         result.view != query::View::Entity) ||
+        result.fields.empty() || result.fields.front() != "id") {
+      throw GraphViewError(
+          GraphViewFailureKind::UnsupportedInput,
+          "QueryPlan result must be a bounded symbol/entity node view with "
+          "an "
+          "id field",
+          "remove select/count/view stages or select the supported id field");
+    }
+    entity_view = result.view == query::View::Entity;
+    for (const auto &row : result.rows) {
+      if (row.size() != result.fields.size() || row.empty() ||
+          !std::holds_alternative<int64_t>(row.front())) {
+        throw GraphViewError(
+            GraphViewFailureKind::UnsupportedInput,
+            "QueryPlan result has an unsupported row shape or id field",
+            "return the validated node/entity view with its id field first");
+      }
+      const int64_t id = std::get<int64_t>(row.front());
+      if (result.view == query::View::Entity) {
+        if (!db.entity_node_by_id(id)) {
+          throw GraphViewError(
+              GraphViewFailureKind::UnsupportedInput,
+              "QueryPlan entity result contains a non-entity identity",
+              "return entity node ids from the validated entity view");
+        }
+        entity_ids.push_back(id);
+      } else {
+        add_symbol_by_id(id);
+      }
+    }
+    if (result.truncated) {
+      throw GraphViewError(
+          GraphViewFailureKind::Oversized,
+          "QueryPlan result exceeded the bounded export result limit",
+          "add a smaller limit stage to the QueryPlan");
+    }
+  };
+  const auto resolved_symbol_identity = [&] {
+    std::vector<std::string> ids;
+    ids.reserve(input_symbols.size());
+    for (const auto &symbol : input_symbols) {
+      ids.push_back(portable_id(symbol));
+    }
+    std::ranges::sort(ids);
+    ids.erase(std::ranges::unique(ids).begin(), ids.end());
+    std::string out = "symbols:v1:";
+    for (const auto &id : ids) {
+      out += length_field(id);
+    }
+    return out;
+  };
+  std::string normalized_input = input.canonical();
+
+  const auto include_file_path = [&](int64_t file_id,
+                                     const std::string &fallback) {
+    return db.file_abs_path(file_id).value_or(fallback);
+  };
+
+  const auto record_file_identity = [&](const File &file) {
+    normalized_input = portable_file_id(db, file.id);
+  };
+
+  const auto record_symbol_identity = [&] {
+    normalized_input = resolved_symbol_identity();
+  };
+
+  const auto record_plan_identity = [&] {
+    std::vector<std::string> resolved_ids;
+    if (entity_view) {
+      for (const int64_t id : entity_ids) {
+        const auto entity = db.entity_node_by_id(id);
+        const auto symbol = graph.get_by_id(id);
+        if (entity && symbol) {
+          resolved_ids.push_back(entity_id(*symbol, *entity));
+        }
+      }
+    } else {
+      for (const auto &symbol : input_symbols) {
+        resolved_ids.push_back(portable_id(symbol));
+      }
+    }
+    std::ranges::sort(resolved_ids);
+    normalized_input =
+        "plan:v1:" + normalized_plan_json.value_or("") + ":resolved:";
+    for (const auto &id : resolved_ids) {
+      normalized_input += length_field(id);
+    }
+  };
 
   Array nodes;
   Array edges;
   bool truncated = false;
   bool evidence_truncated = false;
+  bool partial_facts = false;
   int sites_used = 0;
+
+  const auto collect_include_edges = [&](const File &file) {
+    include_edges = db.include_edges_from(file.id, false);
+    std::ranges::sort(include_edges, [&](const IncludeEdge &left,
+                                         const IncludeEdge &right) {
+      const std::string left_target =
+          left.dst_file_id ? include_file_path(*left.dst_file_id, left.dst_path)
+                           : left.dst_path;
+      const std::string right_target =
+          right.dst_file_id
+              ? include_file_path(*right.dst_file_id, right.dst_path)
+              : right.dst_path;
+      return std::tie(left_target, left.config_id, left.id) <
+             std::tie(right_target, right.config_id, right.id);
+    });
+    has_include_facts =
+        !include_edges.empty() || !db.include_configs_for_tu(file.id).empty();
+  };
+
+  const auto append_include_facts = [&] {
+    if (!input_file || !has_include_facts) {
+      return;
+    }
+    const std::string source_path =
+        include_file_path(input_file->id, input_file->name);
+    std::set<std::string> emitted_files;
+    const auto append_file = [&](int64_t file_id, const std::string &path,
+                                 bool resolved) {
+      const std::string id = portable_file_id(db, file_id, path);
+      if (!emitted_files.insert(id).second) {
+        return;
+      }
+      if (nodes.size() >= static_cast<std::size_t>(node_budget)) {
+        truncated = true;
+        return;
+      }
+      nodes.push_back(file_node_value(db, file_id, path, resolved, freshness,
+                                      truncated, request.workspace));
+    };
+    append_file(input_file->id, source_path, true);
+    int sites_remaining = site_budget - sites_used;
+    for (const auto &include : include_edges) {
+      const std::string target_path =
+          include.dst_file_id
+              ? include_file_path(*include.dst_file_id, include.dst_path)
+              : include.dst_path;
+      const std::string target_id = portable_file_id(
+          db, include.dst_file_id.value_or(input_file->id), target_path);
+      append_file(include.dst_file_id.value_or(input_file->id), target_path,
+                  include.dst_file_id.has_value());
+      const bool target_emitted = emitted_files.contains(target_id);
+      if (edges.size() >= static_cast<std::size_t>(edge_budget)) {
+        truncated = true;
+        break;
+      }
+      auto sites = db.include_sites_for(include.id);
+      std::ranges::sort(
+          sites, [](const IncludeSite &left, const IncludeSite &right) {
+            return std::tie(left.line, left.col, left.begin_offset) <
+                   std::tie(right.line, right.col, right.begin_offset);
+          });
+      const std::size_t retained_limit =
+          static_cast<std::size_t>(std::max(0, sites_remaining));
+      const bool sites_truncated = sites.size() > retained_limit;
+      if (sites.size() > retained_limit) {
+        sites.resize(retained_limit);
+      }
+      sites_used += static_cast<int>(sites.size());
+      sites_remaining -= static_cast<int>(sites.size());
+      evidence_truncated = evidence_truncated || sites_truncated;
+      if (target_emitted) {
+        edges.push_back(include_edge_value(db, include, source_path, freshness,
+                                           truncated, sites_truncated, sites,
+                                           request.workspace));
+      }
+    }
+  };
+
+  const auto normalize_after_symbols = [&] {
+    if (normalized_input == input.canonical()) {
+      record_symbol_identity();
+    }
+  };
+
+  switch (input.kind) {
+  case GraphInputKind::Symbol:
+    resolution = resolve_root(graph, db, input.value);
+    if (resolution.symbol) {
+      input_symbols.push_back(*resolution.symbol);
+    }
+    break;
+  case GraphInputKind::File: {
+    const auto file = db.get_file(input.value);
+    if (!file) {
+      resolution.status = "unknown";
+      break;
+    }
+    input_file = file;
+    record_file_identity(*input_file);
+    for (const auto &symbol : db.symbols_in_file(file->id)) {
+      add_symbol_by_id(symbol.id);
+    }
+    collect_include_edges(*input_file);
+    resolution.status = "exact_file";
+    if (!input_symbols.empty()) {
+      resolution.symbol = input_symbols.front();
+    }
+    break;
+  }
+  case GraphInputKind::Entity:
+    collect_plan(query::start(query::entity(input.value)).plan());
+    record_plan_identity();
+    entity_view = true;
+    resolution.status = entity_ids.empty() ? "unknown" : "exact_entity";
+    if (!entity_ids.empty()) {
+      resolution.symbol = graph.get_by_id(entity_ids.front());
+    }
+    break;
+  case GraphInputKind::Type: {
+    type_ids = db.type_ids_reaching(input.value);
+    type_view = true;
+    resolution.status = type_ids.empty() ? "unknown" : "exact_type";
+    normalized_input = "types:v1:";
+    for (const int64_t id : type_ids) {
+      if (const auto type = db.type_node_by_id(id)) {
+        normalized_input += hex_field(type->type_key);
+      }
+    }
+    break;
+  }
+  case GraphInputKind::Cxq: {
+    try {
+      collect_plan(query::parse_cxq(input.value));
+    } catch (const query::PlanError &error) {
+      throw GraphViewError(GraphViewFailureKind::InvalidInput, error.what(),
+                           "provide a valid bounded CXQ QueryPlan");
+    }
+    record_plan_identity();
+    const bool plan_empty =
+        entity_view ? entity_ids.empty() : input_symbols.empty();
+    resolution.status = plan_empty ? "unknown" : "exact_plan";
+    if (entity_view && !entity_ids.empty()) {
+      resolution.symbol = graph.get_by_id(entity_ids.front());
+    } else if (!input_symbols.empty()) {
+      resolution.symbol = input_symbols.front();
+    }
+    break;
+  }
+  case GraphInputKind::QueryPlan: {
+    try {
+      collect_plan(parse_canonical_plan(input.value));
+    } catch (const GraphViewError &) {
+      throw;
+    } catch (const std::exception &error) {
+      throw GraphViewError(
+          GraphViewFailureKind::InvalidInput, error.what(),
+          "provide canonical QueryPlan JSON from the plan API");
+    }
+    record_plan_identity();
+    const bool plan_empty =
+        entity_view ? entity_ids.empty() : input_symbols.empty();
+    resolution.status = plan_empty ? "unknown" : "exact_plan";
+    if (entity_view && !entity_ids.empty()) {
+      resolution.symbol = graph.get_by_id(entity_ids.front());
+    } else if (!input_symbols.empty()) {
+      resolution.symbol = input_symbols.front();
+    }
+    break;
+  }
+  case GraphInputKind::Path: {
+    const std::size_t separator = input.value.find("->");
+    if (separator == std::string::npos || separator == 0 ||
+        separator + 2 >= input.value.size()) {
+      throw GraphViewError(GraphViewFailureKind::InvalidInput,
+                           "bounded path must use SOURCE->TARGET",
+                           "provide two symbol identities separated by ->");
+    }
+    const auto source =
+        resolve_root(graph, db, input.value.substr(0, separator));
+    const auto target =
+        resolve_root(graph, db, input.value.substr(separator + 2));
+    if (source.status == "ambiguous" || target.status == "ambiguous") {
+      resolution.status = "ambiguous";
+    } else if (!source.symbol || !target.symbol) {
+      resolution.status = "unknown";
+    } else {
+      const auto path =
+          graph.reaches(source.symbol->id, target.symbol->id,
+                        request.edge_kinds, request.direction, request.depth);
+      if (!path) {
+        resolution.status = "unknown";
+      } else {
+        resolution.status = "exact_path";
+        resolution.symbol = source.symbol;
+        witness_nodes = *path;
+        witness_view = true;
+        input_symbols = witness_nodes;
+        const auto kind_ids = graph::GraphQuery::kind_ids(request.edge_kinds);
+        for (std::size_t index = 1; index < witness_nodes.size(); ++index) {
+          const graph::Sym &from = witness_nodes[index - 1];
+          const graph::Sym &to = witness_nodes[index];
+          auto adjacent = graph.edges(from.id, request.direction, kind_ids,
+                                      edge_budget + 1, false);
+          std::vector<graph::Edge> matching;
+          for (const auto &edge : adjacent) {
+            const bool forward = edge.src_id == from.id && edge.dst_id == to.id;
+            const bool reverse = edge.src_id == to.id && edge.dst_id == from.id;
+            if (forward || reverse) {
+              matching.push_back(edge);
+            }
+          }
+          std::ranges::sort(
+              matching, [&](const graph::Edge &left, const graph::Edge &right) {
+                return portable_edge_id(from, left, to) <
+                       portable_edge_id(from, right, to);
+              });
+          if (matching.empty()) {
+            throw GraphViewError(
+                GraphViewFailureKind::UnsupportedInput,
+                "bounded path has no materialized witness edge",
+                "choose a path whose consecutive steps are indexed");
+          }
+          witness_edges.push_back(matching.front());
+        }
+        normalized_input = "path:v1:";
+        for (std::size_t index = 0; index < witness_nodes.size(); ++index) {
+          normalized_input += length_field(portable_id(witness_nodes[index]));
+          if (index < witness_edges.size()) {
+            const auto &edge = witness_edges[index];
+            normalized_input += length_field(portable_edge_id(
+                witness_nodes[index], edge, witness_nodes[index + 1]));
+          }
+        }
+      }
+    }
+    resolution.candidates = source.candidates;
+    resolution.candidates.insert(resolution.candidates.end(),
+                                 target.candidates.begin(),
+                                 target.candidates.end());
+    break;
+  }
+  }
+
+  if (request.strict && resolution.status == "ambiguous") {
+    throw GraphViewError(
+        GraphViewFailureKind::AmbiguousIdentity,
+        "typed GraphView input resolves to multiple identities",
+        "use a portable identity or a narrower QueryPlan");
+  }
+  if (request.strict && resolution.status == "unknown") {
+    throw GraphViewError(
+        GraphViewFailureKind::UnknownIdentity,
+        "typed GraphView input does not resolve to an indexed identity",
+        "check the file/path or query the index for a canonical identity");
+  }
+  normalize_after_symbols();
+  const std::string query_identity = graph_query_identity(
+      request, normalized_input, identity, normalized_plan_json);
   Object metadata;
   metadata.emplace_back("contract",
                         Value::of(std::string("cidx.graph-view.v1")));
@@ -537,7 +1731,8 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   metadata.emplace_back("sites_used", Value::of(sites_used));
   metadata.emplace_back("depth", Value::of(request.depth));
   metadata.emplace_back("direction", Value::of(request.direction));
-  metadata.emplace_back("query", optional_string(request.query));
+  metadata.emplace_back("query_identity", Value::of(query_identity));
+  metadata.emplace_back("query", Value::null());
   metadata.emplace_back("workspace",
                         request.workspace
                             ? Value::of(pathutil::basename(*request.workspace))
@@ -550,106 +1745,174 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
                      optional_string(identity.source_revision));
   index.emplace_back("source_fingerprint",
                      optional_string(identity.source_fingerprint));
-  index.emplace_back("index_config", optional_string(identity.index_config));
+  index.emplace_back("index_config_redacted", Value::of(true));
   index.emplace_back("index_config_fingerprint",
                      optional_string(identity.index_config_fingerprint));
   index.emplace_back("freshness", Value::of(identity.freshness));
   metadata.emplace_back("index", Value::obj(std::move(index)));
+  metadata.emplace_back(
+      "identity",
+      identity_value(identity, fact_sets_for(input.kind, false, false, false,
+                                             entity_view, type_view)));
 
-  if (resolution.symbol) {
-    const query::Query plan =
-        make_query_plan(*resolution.symbol, request, node_budget);
-    query::SqliteQueryReadAdapter read(db);
-    const query::Result result = query::Executor(read).run(plan.plan());
-    metadata.emplace_back("query_plan",
-                          Value::of(query::canonical_json(plan.plan())));
-    truncated = result.truncated ||
-                result.rows.size() > static_cast<std::size_t>(node_budget);
-
-    std::map<int64_t, graph::Sym> symbols_by_id;
-    for (const auto &row : result.rows) {
-      if (row.empty() || !std::holds_alternative<int64_t>(row.front())) {
-        continue;
+  if (!input_symbols.empty() || input_file || entity_view || type_view) {
+    std::optional<query::Result> query_result = normalized_result;
+    if (normalized_plan) {
+      if (!query_result) {
+        query::SqliteQueryReadAdapter read(db);
+        query_result = query::Executor(read).run(*normalized_plan);
       }
-      const auto symbol = graph.get_by_id(std::get<int64_t>(row.front()));
-      if (symbol) {
-        symbols_by_id.emplace(symbol->id, *symbol);
-      }
+      metadata.emplace_back("query_plan", Value::of(*normalized_plan_json));
+    } else if (resolution.symbol && input.kind == GraphInputKind::Symbol) {
+      const query::Query plan =
+          make_query_plan(*resolution.symbol, request, node_budget);
+      query::SqliteQueryReadAdapter read(db);
+      query_result = query::Executor(read).run(plan.plan());
+      metadata.emplace_back("query_plan",
+                            Value::of(query::canonical_json(plan.plan())));
+    } else {
+      metadata.emplace_back("query_plan", Value::null());
     }
-    std::vector<graph::Sym> ordered_nodes;
-    ordered_nodes.reserve(symbols_by_id.size());
-    for (const auto &[id, symbol] : symbols_by_id) {
-      (void)id;
-      ordered_nodes.push_back(symbol);
-    }
-    std::ranges::sort(ordered_nodes,
-                      [](const graph::Sym &a, const graph::Sym &b) {
-                        return portable_id(a) < portable_id(b);
-                      });
-    if (ordered_nodes.size() > static_cast<std::size_t>(node_budget)) {
-      ordered_nodes.resize(node_budget);
-      truncated = true;
-    }
-    std::set<int64_t> selected_ids;
-    std::map<int64_t, int> depths;
-    for (const auto &symbol : ordered_nodes) {
-      selected_ids.insert(symbol.id);
-      depths.emplace(symbol.id, symbol.id == resolution.symbol->id ? 0 : 1);
-      nodes.push_back(node_value(symbol, freshness, truncated,
-                                 depths[symbol.id], request.workspace));
+    append_include_facts();
+    if (query_result && !entity_view && !type_view) {
+      truncated =
+          query_result->truncated ||
+          query_result->rows.size() > static_cast<std::size_t>(node_budget);
     }
 
-    std::map<std::string, graph::Edge> by_key;
-    const auto kind_ids = graph::GraphQuery::kind_ids(request.edge_kinds);
-    for (const auto &symbol : ordered_nodes) {
-      const auto adjacent = graph.edges(symbol.id, request.direction, kind_ids,
-                                        edge_budget + 1, false);
-      for (const auto &edge : adjacent) {
-        if (!selected_ids.contains(edge.src_id) ||
-            !selected_ids.contains(edge.dst_id)) {
-          continue;
+    if (entity_view || type_view) {
+      append_typed_facts(db, graph, entity_ids, type_ids, entity_view,
+                         node_budget, edge_budget, freshness, truncated,
+                         partial_facts, request.workspace, nodes, edges);
+    } else {
+      std::map<int64_t, graph::Sym> symbols_by_id;
+      for (const auto &symbol : input_symbols) {
+        symbols_by_id.emplace(symbol.id, symbol);
+      }
+      if (query_result) {
+        for (const auto &row : query_result->rows) {
+          if (row.empty() || !std::holds_alternative<int64_t>(row.front())) {
+            continue;
+          }
+          const auto symbol = graph.get_by_id(std::get<int64_t>(row.front()));
+          if (symbol) {
+            symbols_by_id.emplace(symbol->id, *symbol);
+          }
+        }
+      }
+      std::vector<graph::Sym> ordered_nodes;
+      if (witness_view) {
+        ordered_nodes = witness_nodes;
+      } else {
+        ordered_nodes.reserve(symbols_by_id.size());
+        for (const auto &[id, symbol] : symbols_by_id) {
+          (void)id;
+          ordered_nodes.push_back(symbol);
+        }
+        std::ranges::sort(ordered_nodes,
+                          [](const graph::Sym &a, const graph::Sym &b) {
+                            return portable_id(a) < portable_id(b);
+                          });
+      }
+      const std::size_t remaining_node_budget =
+          nodes.size() >= static_cast<std::size_t>(node_budget)
+              ? 0
+              : static_cast<std::size_t>(node_budget) - nodes.size();
+      if (ordered_nodes.size() > remaining_node_budget) {
+        ordered_nodes.resize(remaining_node_budget);
+        truncated = true;
+      }
+      std::set<int64_t> selected_ids;
+      std::map<int64_t, int> depths;
+      for (const auto &symbol : ordered_nodes) {
+        selected_ids.insert(symbol.id);
+        depths.emplace(
+            symbol.id,
+            resolution.symbol && symbol.id == resolution.symbol->id ? 0 : 1);
+        nodes.push_back(node_value(symbol, freshness, truncated,
+                                   depths[symbol.id], request.workspace));
+      }
+
+      std::vector<graph::Edge> selected_edges;
+      if (witness_view) {
+        selected_edges = witness_edges;
+        if (selected_edges.size() + 1 > ordered_nodes.size()) {
+          selected_edges.resize(
+              ordered_nodes.empty() ? 0 : ordered_nodes.size() - 1);
+          truncated = true;
+        }
+        if (selected_edges.size() >
+            static_cast<std::size_t>(
+                std::max(0, edge_budget - static_cast<int>(edges.size())))) {
+          selected_edges.resize(static_cast<std::size_t>(
+              std::max(0, edge_budget - static_cast<int>(edges.size()))));
+          truncated = true;
+        }
+      } else {
+        std::map<std::string, graph::Edge> by_key;
+        const auto kind_ids = graph::GraphQuery::kind_ids(request.edge_kinds);
+        for (const auto &symbol : ordered_nodes) {
+          const auto adjacent = graph.edges(symbol.id, request.direction,
+                                            kind_ids, edge_budget + 1, false);
+          for (const auto &edge : adjacent) {
+            if (!selected_ids.contains(edge.src_id) ||
+                !selected_ids.contains(edge.dst_id)) {
+              continue;
+            }
+            const auto source = symbols_by_id.find(edge.src_id);
+            const auto target = symbols_by_id.find(edge.dst_id);
+            if (source == symbols_by_id.end() ||
+                target == symbols_by_id.end()) {
+              continue;
+            }
+            by_key.emplace(
+                portable_edge_id(source->second, edge, target->second), edge);
+          }
+        }
+        if (by_key.size() >
+            static_cast<std::size_t>(
+                std::max(0, edge_budget - static_cast<int>(edges.size())))) {
+          truncated = true;
+        }
+        for (const auto &[key, edge] : by_key) {
+          (void)key;
+          if (edges.size() >= static_cast<std::size_t>(edge_budget)) {
+            truncated = true;
+            break;
+          }
+          selected_edges.push_back(edge);
+        }
+      }
+      int sites_remaining = std::max(0, site_budget - sites_used);
+      for (const auto &edge : selected_edges) {
+        if (edges.size() >= static_cast<std::size_t>(edge_budget)) {
+          truncated = true;
+          break;
         }
         const auto source = symbols_by_id.find(edge.src_id);
         const auto target = symbols_by_id.find(edge.dst_id);
         if (source == symbols_by_id.end() || target == symbols_by_id.end()) {
           continue;
         }
-        by_key.emplace(portable_edge_id(source->second, edge, target->second),
-                       edge);
+        const int fetch_limit = sites_remaining + 1;
+        auto sites = graph.sites(edge.edge_id, fetch_limit);
+        std::ranges::sort(sites,
+                          [&](const graph::Site &a, const graph::Site &b) {
+                            return site_sort_key(a, request.workspace) <
+                                   site_sort_key(b, request.workspace);
+                          });
+        bool sites_truncated =
+            sites.size() > static_cast<std::size_t>(sites_remaining);
+        if (sites_truncated) {
+          sites.resize(static_cast<std::size_t>(sites_remaining));
+        }
+        sites_used += static_cast<int>(sites.size());
+        sites_remaining -= static_cast<int>(sites.size());
+        evidence_truncated = evidence_truncated || sites_truncated;
+        edges.push_back(edge_value(edge, source->second, target->second,
+                                   freshness, truncated, sites_truncated, sites,
+                                   request.workspace));
       }
-    }
-    if (by_key.size() > static_cast<std::size_t>(edge_budget)) {
-      truncated = true;
-    }
-    int emitted = 0;
-    int sites_remaining = site_budget;
-    for (const auto &[key, edge] : by_key) {
-      (void)key;
-      if (emitted++ == edge_budget) {
-        break;
-      }
-      const auto source = symbols_by_id.find(edge.src_id);
-      const auto target = symbols_by_id.find(edge.dst_id);
-      if (source == symbols_by_id.end() || target == symbols_by_id.end()) {
-        continue;
-      }
-      const int fetch_limit = sites_remaining + 1;
-      auto sites = graph.sites(edge.edge_id, fetch_limit);
-      std::ranges::sort(sites, [&](const graph::Site &a, const graph::Site &b) {
-        return site_sort_key(a, request.workspace) <
-               site_sort_key(b, request.workspace);
-      });
-      bool sites_truncated =
-          sites.size() > static_cast<std::size_t>(sites_remaining);
-      if (sites_truncated) {
-        sites.resize(static_cast<std::size_t>(sites_remaining));
-      }
-      sites_used += static_cast<int>(sites.size());
-      sites_remaining -= static_cast<int>(sites.size());
-      evidence_truncated = evidence_truncated || sites_truncated;
-      edges.push_back(edge_value(edge, source->second, target->second,
-                                 freshness, truncated, sites_truncated, sites,
-                                 request.workspace));
     }
   } else {
     metadata.emplace_back("query_plan", Value::null());
@@ -679,12 +1942,62 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
     return Value::obj(std::move(continuation));
   }());
 
+  const bool input_resolved =
+      resolution.symbol.has_value() || resolution.status == "exact_file" ||
+      (entity_view && !entity_ids.empty()) || (type_view && !type_ids.empty());
+  const bool initial_unknown = identity.freshness != "current" ||
+                               !db.graph_resolved() || !input_resolved;
+  std::string graph_status = "complete";
+  if (initial_unknown) {
+    graph_status = "unknown";
+  } else if (truncated || partial_facts) {
+    graph_status = "partial";
+  }
+  Array markers;
+  if (identity.freshness == "stale") {
+    markers.push_back(Value::of(std::string("stale")));
+  }
+  if (identity.freshness != "current" || !db.graph_resolved()) {
+    markers.push_back(Value::of(std::string("unknown")));
+  }
+  if (!input_resolved) {
+    markers.push_back(Value::of(std::string("unresolved")));
+  }
+  if (truncated) {
+    markers.push_back(Value::of(std::string("truncated")));
+  }
+  if (partial_facts) {
+    markers.push_back(Value::of(std::string("partial")));
+  }
+  metadata.emplace_back("status", Value::of(graph_status));
+  metadata.emplace_back("markers", Value::arr(markers));
+
+  const auto fact_sets =
+      fact_sets_for(input.kind, !edges.empty(), sites_used > 0,
+                    has_include_facts, entity_view, type_view);
+  Value exact_identity = identity_value(identity, fact_sets);
+  for (auto &[name, value] : metadata) {
+    if (name == "identity") {
+      value = exact_identity;
+    }
+  }
+
   Object out;
   out.emplace_back("schema", Value::of(std::string("cidx.graph-view.v1")));
+  out.emplace_back("version", Value::of(kGraphViewVersion));
+  out.emplace_back("status", Value::of(graph_status));
+  out.emplace_back("markers", Value::arr(markers));
+  out.emplace_back("query_identity", Value::of(query_identity));
+  out.emplace_back("result_id", Value::of(std::string(64, '0')));
+  out.emplace_back("identity", exact_identity);
   out.emplace_back("request", [&] {
     Object r;
-    r.emplace_back("root", optional_string(request.root));
-    r.emplace_back("query", optional_string(request.query));
+    r.emplace_back("input_kind",
+                   Value::of(std::string(graph_input_kind_name(input.kind))));
+    r.emplace_back("input", Value::of(normalized_input));
+    r.emplace_back("input_redacted", Value::of(true));
+    r.emplace_back("root", Value::null());
+    r.emplace_back("query", Value::null());
     r.emplace_back("direction", Value::of(request.direction));
     r.emplace_back("depth", Value::of(request.depth));
     r.emplace_back("node_budget", Value::of(node_budget));
@@ -698,6 +2011,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   out.emplace_back("edges", Value::arr(std::move(edges)));
   out.emplace_back("view_state", Value::obj({}));
   Value result = Value::obj(std::move(out));
+  bool byte_truncated = false;
 
   const auto mark_byte_truncated = [&] {
     if (Value *metadata_value = member(result, "metadata")) {
@@ -737,6 +2051,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   };
   if (script_safe_size(json_out::dumps_indent2(result)) >
       static_cast<std::size_t>(byte_budget)) {
+    byte_truncated = true;
     mark_byte_truncated();
     while (script_safe_size(json_out::dumps_indent2(result)) >
                static_cast<std::size_t>(byte_budget) &&
@@ -762,10 +2077,125 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
       set_int_member(*metadata_value, "sites_used", retained_sites);
     }
   }
+
+  const bool final_truncated = truncated || byte_truncated;
+  const bool final_partial =
+      std::ranges::any_of(member(result, "edges")->a, [](const Value &edge) {
+        const Value *partial = member(edge, "partial");
+        return partial != nullptr && partial->t == Value::T::Int &&
+               partial->i != 0;
+      });
+  const bool unknown = identity.freshness != "current" ||
+                       !db.graph_resolved() || !input_resolved;
+  std::string final_status = "complete";
+  if (unknown) {
+    final_status = "unknown";
+  } else if (final_truncated || final_partial) {
+    final_status = "partial";
+  }
+  Array final_markers;
+  if (identity.freshness == "stale") {
+    final_markers.push_back(Value::of(std::string("stale")));
+  }
+  if (identity.freshness != "current" || !db.graph_resolved()) {
+    final_markers.push_back(Value::of(std::string("unknown")));
+  }
+  if (!input_resolved) {
+    final_markers.push_back(Value::of(std::string("unresolved")));
+  }
+  if (final_truncated) {
+    final_markers.push_back(Value::of(std::string("truncated")));
+  }
+  if (final_partial) {
+    final_markers.push_back(Value::of(std::string("partial")));
+  }
+  const auto set_status = [&](Value &value) {
+    if (Value *status_value = member(value, "status")) {
+      for (auto &[name, child] : status_value->o) {
+        if (name == "truncated") {
+          child = Value::of(final_truncated);
+        }
+        if (name == "evidence_truncated") {
+          child = Value::of(evidence_truncated || byte_truncated);
+        }
+      }
+    }
+  };
+  if (Value *metadata_value = member(result, "metadata")) {
+    if (Value *status_value = member(*metadata_value, "status")) {
+      *status_value = Value::of(final_status);
+    }
+    if (Value *markers_value = member(*metadata_value, "markers")) {
+      *markers_value = Value::arr(final_markers);
+    }
+    set_bool_member(*metadata_value, "truncated", final_truncated);
+    set_bool_member(*metadata_value, "evidence_truncated",
+                    evidence_truncated || byte_truncated);
+    if (Value *continuation = member(*metadata_value, "continuation")) {
+      set_bool_member(*continuation, "available", final_truncated);
+      for (auto &[name, child] : continuation->o) {
+        if (name == "reason") {
+          std::string reason = "complete";
+          if (byte_truncated) {
+            reason = "byte_budget";
+          } else if (final_truncated) {
+            reason = "budget";
+          }
+          child = Value::of(std::move(reason));
+        }
+      }
+    }
+  }
+  for (Value &node : member(result, "nodes")->a) {
+    set_status(node);
+  }
+  for (Value &edge : member(result, "edges")->a) {
+    set_status(edge);
+  }
+  if (Value *status_value = member(result, "status")) {
+    *status_value = Value::of(final_status);
+  }
+  if (Value *markers_value = member(result, "markers")) {
+    *markers_value = Value::arr(final_markers);
+  }
+
+  const auto final_facts = fact_sets_for(
+      input.kind, !member(result, "edges")->a.empty(),
+      [&] {
+        return std::ranges::any_of(
+            member(result, "edges")->a, [](const Value &edge) {
+              if (const Value *sites = member(edge, "sites")) {
+                return !sites->a.empty();
+              }
+              return false;
+            });
+      }(),
+      has_include_facts, entity_view, type_view);
+  exact_identity = identity_value(identity, final_facts);
+  if (Value *identity_value_member = member(result, "identity")) {
+    *identity_value_member = exact_identity;
+  }
+  if (Value *metadata_value = member(result, "metadata")) {
+    if (Value *identity_member = member(*metadata_value, "identity")) {
+      *identity_member = exact_identity;
+    }
+  }
+  Value canonical = result;
+  if (Value *result_id = member(canonical, "result_id")) {
+    *result_id = Value::of(std::string(64, '0'));
+  }
+  if (Value *result_id = member(result, "result_id")) {
+    std::string result_material = "cidx.graph-view.result.v2";
+    result_material.push_back('\0');
+    result_material += json_out::dumps_indent2(canonical);
+    *result_id = Value::of(sha256_hex(result_material));
+  }
   if (script_safe_size(json_out::dumps_indent2(result)) >
       static_cast<std::size_t>(byte_budget)) {
-    throw CidxError(
-        "cidx ui: byte budget is too small for fixed GraphView metadata");
+    throw GraphViewError(
+        GraphViewFailureKind::Oversized,
+        "byte budget is too small for the finalized GraphView metadata",
+        "increase --byte-limit or reduce the input and evidence budgets");
   }
   return result;
 }

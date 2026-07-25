@@ -112,7 +112,8 @@ if (typeof module !== 'undefined') module.exports = graphState;
 if (typeof document !== 'undefined') {
 (() => {
   const embedded = window.CIDX_GRAPH_VIEW || {nodes: [], edges: [], metadata: {}};
-  const liveToken = new URLSearchParams(window.location.search).get('token');
+  const offline = window.CIDX_OFFLINE === true;
+  const liveToken = offline ? null : new URLSearchParams(window.location.search).get('token');
   let view = embedded;
   let cy;
   let selectedNode;
@@ -125,26 +126,43 @@ if (typeof document !== 'undefined') {
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const badge = (name, cls) => `<span class="badge ${cls || ''}">${esc(name)}</span>`;
   const statusBadges = (s = {}) => Object.entries(s)
-    .filter(([k, v]) => v === true || v === 'partial' || v === 'stale' || v === 'truncated' || v === 'external')
+    .filter(([k, v]) => v === true || v === 'partial' || v === 'unknown' || v === 'stale' || v === 'truncated' || v === 'external')
     .map(([k, v]) => badge(`${k}${v === true ? '' : `: ${v}`}`, k === 'external' ? 'external' : k))
     .join('');
   const sourceLocation = (item) => item?.location || (item?.file ? `${item.file}:${item.line ?? ''}:${item.col ?? ''}` : 'No location');
   const updateSummary = () => {
-    document.getElementById('summary').textContent = `${view.nodes?.length || 0} nodes · ${view.edges?.length || 0} edges${view.metadata?.truncated ? ' · bounded/truncated' : ''}`;
-    document.getElementById('identity').textContent = view.metadata?.index?.freshness ? `index ${view.metadata.index.freshness}` : 'index freshness unverifiable';
+    const status = view.status || view.metadata?.status || 'unknown';
+    const markers = view.markers || view.metadata?.markers || [];
+    const request = view.request || {};
+    const budgets = [request.node_budget, request.edge_budget, request.site_budget, request.byte_budget]
+      .map((value) => Number.isFinite(Number(value)) ? Number(value) : null);
+    document.getElementById('summary').textContent = `${view.nodes?.length || 0} nodes · ${view.edges?.length || 0} edges · ${status}${markers.length ? ` · ${markers.join(', ')}` : ''}${view.metadata?.truncated ? ' · bounded/truncated' : ''}`;
+    const identity = view.metadata?.identity || {};
+    const freshness = view.metadata?.index?.freshness || identity.freshness || 'unverifiable';
+    document.getElementById('identity').textContent = `${identity.workspace || 'workspace unknown'} · ${identity.index || 'index unknown'} · ${freshness} · query ${view.query_identity || 'unknown'} · result ${view.result_id || 'unknown'}`;
+    const canvasStatus = document.getElementById('canvas-status');
+    canvasStatus.innerHTML = `${badge(status, status)} ${markers.map((marker) => badge(marker, marker)).join('')} ${budgets.some((value) => value !== null) ? `<span class="budget">budgets ${budgets.filter((value) => value !== null).join(' / ')}</span>` : ''}`;
+  };
+  const showSnapshot = () => {
+    selectedNode = undefined;
+    expandButton.disabled = true;
+    title.textContent = 'Snapshot status';
+    const identity = view.identity || view.metadata?.identity || {};
+    const request = view.request || {};
+    details.innerHTML = `<dl><dt>Status</dt><dd>${statusBadges({status: view.status, ...(Object.fromEntries((view.markers || []).map((marker) => [marker, true])))}) || 'unknown'}</dd><dt>Query</dt><dd><code>${esc(view.query_identity || 'unknown')}</code></dd><dt>Result</dt><dd><code>${esc(view.result_id || 'unknown')}</code></dd><dt>Input</dt><dd>${esc(request.input_kind || 'unknown')} · <code>${esc(request.input || '')}</code></dd><dt>Fact sets</dt><dd>${esc((identity.fact_sets || []).join(', ') || 'unknown')}</dd><dt>Budgets</dt><dd>${esc(JSON.stringify({nodes: request.node_budget, edges: request.edge_budget, sites: request.site_budget, bytes: request.byte_budget}))}</dd></dl>`;
   };
   const showNode = (n) => {
     selectedNode = n;
     expandButton.disabled = !liveToken;
     title.textContent = n.name || n.usr || 'Node';
     const evidence = n.evidence?.location || 'No bounded evidence attached';
-    details.innerHTML = `<dl><dt>Identity</dt><dd><code>${esc(n.usr || n.id)}</code></dd><dt>Kind</dt><dd>${esc(n.kind)}</dd><dt>Location</dt><dd>${esc(sourceLocation(n))}</dd><dt>Status</dt><dd>${statusBadges(n.status) || 'No status flags'}</dd><dt>Evidence</dt><dd>${esc(evidence)}</dd></dl>`;
+    details.innerHTML = `<dl><dt>Canonical id</dt><dd><code>${esc(n.id)}</code></dd><dt>USR</dt><dd><code>${esc(n.usr)}</code></dd><dt>Universe/key</dt><dd><code>${esc(`${n.semantic_universe || ''}/${n.identity_key || ''}`)}</code></dd><dt>Kind</dt><dd>${esc(n.kind)}</dd><dt>Location</dt><dd>${esc(sourceLocation(n))}</dd><dt>Status</dt><dd>${statusBadges(n.status) || 'No status flags'}</dd><dt>Evidence</dt><dd>${esc(evidence)}</dd></dl>`;
   };
   const showEdge = (e) => {
     selectedNode = undefined;
     expandButton.disabled = true;
     title.textContent = `${e.kind} relation`;
-    details.innerHTML = `<dl><dt>From</dt><dd>${esc(nodeById.get(String(e.source))?.name || e.source)}</dd><dt>To</dt><dd>${esc(nodeById.get(String(e.target))?.name || e.target)}</dd><dt>Count</dt><dd>${esc(e.count)}</dd><dt>Status</dt><dd>${statusBadges(e.status) || 'No status flags'}</dd><dt>Evidence</dt><dd>${(e.sites || []).map((s) => esc(sourceLocation(s))).join('<br>') || 'No site evidence'}</dd></dl>`;
+    details.innerHTML = `<dl><dt>Canonical id</dt><dd><code>${esc(e.id)}</code></dd><dt>From</dt><dd><code>${esc(e.source)}</code></dd><dt>To</dt><dd><code>${esc(e.target)}</code></dd><dt>Kind/count</dt><dd>${esc(e.kind)} · ${esc(e.count)}</dd><dt>Status</dt><dd>${statusBadges(e.status) || 'No status flags'}</dd><dt>Evidence</dt><dd>${(e.sites || []).map((s) => esc(sourceLocation(s))).join('<br>') || 'No site evidence'}</dd></dl>`;
   };
   const elementForNode = (n) => ({data: {...n, id: String(n.id), label: n.name || n.usr}});
   const elementForEdge = (e) => ({data: {...e, id: String(e.id), source: String(e.source), target: String(e.target)}});
@@ -194,6 +212,7 @@ if (typeof document !== 'undefined') {
     }
     rebuildAccessibleNodes();
     updateSummary();
+    if (!selectedNode) showSnapshot();
     document.getElementById('empty').hidden = nodeById.size !== 0;
   };
   const expandSelected = async () => {
@@ -212,7 +231,7 @@ if (typeof document !== 'undefined') {
     }
   };
   const loadView = async () => {
-    if (!liveToken) return embedded;
+    if (offline || !liveToken) return embedded;
     const response = await fetch(`/api/graph?token=${encodeURIComponent(liveToken)}`);
     if (!response.ok) throw new Error(`Live GraphView request failed (${response.status})`);
     return response.json();

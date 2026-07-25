@@ -3,6 +3,7 @@
 #include <charconv>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string_view>
 
@@ -97,10 +98,14 @@ ui::GraphViewRequest live_request(const ui::GraphViewRequest &base,
   if (const auto root = query_parameter(target, "root")) {
     request.root = *root;
     request.query.reset();
+    request.input =
+        ui::GraphViewInput{.kind = ui::GraphInputKind::Symbol, .value = *root};
   }
   if (const auto query = query_parameter(target, "query")) {
     request.query = *query;
     request.root.reset();
+    request.input =
+        ui::GraphViewInput{.kind = ui::GraphInputKind::Symbol, .value = *query};
   }
   if (const auto direction = query_parameter(target, "direction")) {
     if (*direction != "in" && *direction != "out") {
@@ -133,6 +138,36 @@ ui::GraphViewRequest ui_request(const ParsedArgs &args) {
   ui::GraphViewRequest request;
   request.root = args.ui_root;
   request.query = args.ui_query;
+  if (args.ui_input) {
+    static const std::map<std::string, ui::GraphInputKind> kinds{
+        {"symbol", ui::GraphInputKind::Symbol},
+        {"file", ui::GraphInputKind::File},
+        {"entity", ui::GraphInputKind::Entity},
+        {"type", ui::GraphInputKind::Type},
+        {"cxq", ui::GraphInputKind::Cxq},
+        {"plan", ui::GraphInputKind::QueryPlan},
+        {"path", ui::GraphInputKind::Path},
+    };
+    const auto kind = kinds.find(args.ui_input_kind);
+    if (kind == kinds.end()) {
+      throw ui::GraphViewError(ui::GraphViewFailureKind::InvalidInput,
+                               "unknown --input-kind '" + args.ui_input_kind +
+                                   "'",
+                               "choose a supported typed GraphView input kind");
+    }
+    if (request.root || request.query) {
+      throw ui::GraphViewError(
+          ui::GraphViewFailureKind::InvalidInput,
+          "--input cannot be combined with --root or --query",
+          "provide exactly one normalized input");
+    }
+    request.input =
+        ui::GraphViewInput{.kind = kind->second, .value = *args.ui_input};
+  } else if (request.root || request.query) {
+    request.input = ui::GraphViewInput{.kind = ui::GraphInputKind::Symbol,
+                                       .value = request.root ? *request.root
+                                                             : *request.query};
+  }
   request.workspace = args.ui_workspace;
   request.direction = args.direction;
   request.depth = args.ui_depth;
@@ -182,13 +217,25 @@ std::unique_ptr<Storage> open_ui_storage(const ParsedArgs & /*args*/,
 } // namespace
 
 int cmd_ui_export(const ParsedArgs &args, Context &ctx) {
+  if (!args.ui_output) {
+    *ctx.err << "error: cidx ui export: --output is required\n";
+    return 2;
+  }
+  if (!args.ui_root && !args.ui_query && !args.ui_input) {
+    *ctx.err << "error: cidx ui export: a bounded typed input is required "
+                "(--root/--query or --input-kind + --input)\n";
+    return 2;
+  }
   auto db = open_ui_storage(args, ctx);
-  if (!db || !args.ui_output) {
+  if (!db) {
     return 1;
   }
   try {
-    const auto view = ui::build_graph_view(*db, ui_request(args));
-    const std::string html = ui::render_html(view);
+    auto request = ui_request(args);
+    request.strict = true;
+    const auto view = ui::build_graph_view(*db, request);
+    const std::string html =
+        ui::render_html(view, ui::RenderMode::OfflineExport);
     std::ofstream output(*args.ui_output, std::ios::binary | std::ios::trunc);
     if (!output) {
       *ctx.err << "error: cidx ui: cannot write " << *args.ui_output << "\n";
@@ -201,8 +248,12 @@ int cmd_ui_export(const ParsedArgs &args, Context &ctx) {
     }
     *ctx.out << *args.ui_output << "\n";
     return 0;
+  } catch (const ui::GraphViewError &error) {
+    *ctx.err << "error: cidx ui export: " << error.code() << ": "
+             << error.what() << "; next: " << error.next_action() << "\n";
+    return 2;
   } catch (const std::exception &error) {
-    *ctx.err << "error: cidx ui: " << error.what() << "\n";
+    *ctx.err << "error: cidx ui export: " << error.what() << "\n";
     return 1;
   }
 }
@@ -215,7 +266,8 @@ int cmd_ui_open(const ParsedArgs &args, Context &ctx) {
   try {
     const ui::GraphViewRequest base_request = ui_request(args);
     const auto view = ui::build_graph_view(*db, base_request);
-    const std::string html = ui::render_html(view);
+    const std::string html =
+        ui::render_html(view, ui::RenderMode::LoopbackLive);
     const ui::GraphProvider graph_provider =
         LiveGraphProvider{.db = db.get(), .base_request = base_request};
     return ui::serve_live(

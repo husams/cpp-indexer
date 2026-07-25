@@ -305,6 +305,33 @@ struct TypeNode {
   std::optional<int64_t> canonical_id;
 };
 
+struct EntityNode {
+  int64_t id = -1;
+  int64_t kind = 0;
+  std::string kind_name;
+};
+
+struct EntityEdge {
+  int64_t src_id = -1;
+  int64_t dst_id = -1;
+  int64_t kind = 0;
+  std::string kind_name;
+  int64_t count = 0;
+  std::optional<int64_t> via_member_id;
+  int64_t multiplicity = 1;
+  int64_t access = 0;
+  int64_t is_virtual = 0;
+  std::optional<int64_t> create_form;
+  int64_t partial = 0;
+};
+
+struct TypeEdge {
+  int64_t src_id = -1;
+  int64_t kind = 0;
+  int64_t position = 0;
+  int64_t dst_id = -1;
+};
+
 // type_kind ids (seeded in the type_kind table; mirrored in storage.py)
 inline constexpr int64_t kTypeKindBuiltin = 1;
 inline constexpr int64_t kTypeKindRecord = 2;

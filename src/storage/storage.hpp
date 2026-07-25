@@ -379,6 +379,8 @@ public:
                const std::optional<std::string> &kind = std::nullopt);
   std::vector<Symbol> symbols_in_file(int64_t file_id);
   std::vector<Symbol> unresolved_symbols();
+  std::optional<EntityNode> entity_node_by_id(int64_t id);
+  std::vector<EntityEdge> entity_edges_from(int64_t id);
 
   // -- graph layer (v7) ------------------------------------------------------
   // Mint a stub symbol row (resolved=0, kind='function') for an unknown USR.
@@ -439,6 +441,7 @@ public:
   // shared node's display form.
   int64_t intern_type_node(const TypeNode &n);
   std::optional<TypeNode> type_node_by_id(int64_t type_id);
+  std::vector<TypeEdge> type_edges_from(int64_t type_id);
   // INSERT OR REPLACE keyed on (src_id, kind, position) -- a retargeted
   // alias's alias_of edge follows the new target.
   void add_type_edge(int64_t src_id, int64_t kind, int64_t position,
