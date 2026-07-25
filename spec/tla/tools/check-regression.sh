@@ -113,6 +113,65 @@ run_storage_seed() {
 
 run_storage_seed cross-file-atomicity CrossFileAtomicityInvariant
 
+boundary_dir="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-boundary.XXXXXX")"
+cp "$ROOT"/models/*.cfg "$boundary_dir"/
+sed 's/^    Scenario = "valid"$/    Scenario = "boundary-publication"/' \
+  "$boundary_dir/CidxStorageLifecycleSmoke.cfg" \
+  >"$boundary_dir/CidxStorageLifecycleSmoke.cfg.seed"
+mv "$boundary_dir/CidxStorageLifecycleSmoke.cfg.seed" \
+  "$boundary_dir/CidxStorageLifecycleSmoke.cfg"
+set +e
+boundary_output="$(TLA_MODEL_DIR="$boundary_dir" \
+  TLA_MODELS="CidxStorageLifecycleSmoke" \
+  "$ROOT/tools/check.sh" 2>&1)"
+boundary_status=$?
+set -e
+rm -rf "$boundary_dir"
+if [[ "$boundary_status" -ne 0 ]] \
+    || ! grep -q "TLA_CHECK_STATUS=PASS models=CidxStorageLifecycleSmoke" \
+        <<<"$boundary_output"; then
+  echo "TLA_REGRESSION_STATUS=FAIL scenario=boundary-publication reason=model-did-not-pass" >&2
+  printf '%s\n' "$boundary_output" >&2
+  exit 1
+fi
+echo "TLA_BOUNDARY_STATUS=PASS scenario=boundary-publication"
+
+boundary_modules="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-boundary-mutation.XXXXXX")"
+cp "$ROOT"/modules/*.tla "$boundary_modules"/
+awk '
+/^StartOneTUUpdate ==/ { in_start = 1 }
+/^PrepareStagedArtifact ==/ { in_start = 0 }
+in_start && !replaced && /ProgressTraceAvailable/ {
+  sub(/ProgressTraceAvailable/, "TraceAvailable")
+  replaced = 1
+}
+{ print }
+' "$ROOT/modules/CidxStorageLifecycle.tla" \
+  >"$boundary_modules/CidxStorageLifecycle.tla"
+boundary_mutation_dir="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-boundary-mutation-model.XXXXXX")"
+cp "$ROOT"/models/*.cfg "$boundary_mutation_dir"/
+sed 's/^    Scenario = "valid"$/    Scenario = "boundary-publication"/' \
+  "$boundary_mutation_dir/CidxStorageLifecycleSmoke.cfg" \
+  >"$boundary_mutation_dir/CidxStorageLifecycleSmoke.cfg.seed"
+mv "$boundary_mutation_dir/CidxStorageLifecycleSmoke.cfg.seed" \
+  "$boundary_mutation_dir/CidxStorageLifecycleSmoke.cfg"
+set +e
+boundary_mutation_output="$(TLA_MODULE_DIR="$boundary_modules" \
+  TLA_MODEL_DIR="$boundary_mutation_dir" \
+  TLA_MODELS="CidxStorageLifecycleSmoke" \
+  "$ROOT/tools/check.sh" 2>&1)"
+boundary_mutation_status=$?
+set -e
+rm -rf "$boundary_modules" "$boundary_mutation_dir"
+if [[ "$boundary_mutation_status" -ne 30 ]] \
+    || ! grep -q "TLA_INVARIANT_STATUS=FAIL model=CidxStorageLifecycleSmoke invariant=BoundedProgressInvariant" \
+        <<<"$boundary_mutation_output"; then
+  echo "TLA_REGRESSION_STATUS=FAIL scenario=boundary-publication reason=mutation-did-not-fail-closed" >&2
+  printf '%s\n' "$boundary_mutation_output" >&2
+  exit 1
+fi
+echo "TLA_BOUNDARY_REGRESSION_STATUS=PASS mutation=last-reachable-publication"
+
 multi_generation_dir="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-multi-generation.XXXXXX")"
 cp "$ROOT"/models/*.cfg "$multi_generation_dir"/
 sed 's/^    Scenario = "valid"$/    Scenario = "multi-generation"/' \

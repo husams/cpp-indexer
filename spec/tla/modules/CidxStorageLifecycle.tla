@@ -126,7 +126,8 @@ PackageStates == {"none", "building", "complete", "partial", "rejected", "import
 IncludeEvidenceStates == {"none", "complete", "incomplete"}
 
 TraceAvailable == Len(trace) + 1 < TraceBound
-ProgressTraceAvailable == Len(trace) + 1 < TraceBound
+ProgressTraceAvailable == Len(trace) + 2 < TraceBound
+WorkTraceAvailable == ProgressTraceAvailable
 
 SidecarCompleteFor(g) ==
     /\ sidecarState = "current"
@@ -290,11 +291,19 @@ MultiGenerationSeed ==
         !.retiredGenerations = {InitialGeneration},
         !.trace = <<"Init", "SeedFirstReplacement">>]
 
+BoundaryPublicationSeed ==
+    [InitialState EXCEPT
+        !.trace = <<"Init", "SeedBoundary1", "SeedBoundary2",
+                    "SeedBoundary3", "SeedBoundary4", "SeedBoundary5",
+                    "SeedBoundary6">>]
+
 Init ==
     IF Scenario = "valid"
     THEN ValidInitialState
     ELSE IF Scenario = "multi-generation"
     THEN StateEquals(MultiGenerationSeed)
+    ELSE IF Scenario = "boundary-publication"
+    THEN StateEquals(BoundaryPublicationSeed)
     ELSE IF Scenario = "cross-file-atomicity"
     THEN
         /\ currentGeneration = CrossFileAtomicitySeed.currentGeneration
@@ -449,7 +458,7 @@ StartOneTUUpdate ==
 PrepareStagedArtifact ==
     /\ generationState = "extracting"
     /\ stagedGeneration > 0
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ \E quality \in ArtifactQualities :
         /\ stagedArtifactQuality' = quality
         /\ generationState' = "validated"
@@ -470,7 +479,7 @@ PrepareStagedArtifact ==
 ValidateStagedArtifact ==
     /\ generationState = "validated"
     /\ stagedGeneration > 0
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ stagedValidated' = (stagedArtifactQuality = "valid")
     /\ generationState' = IF stagedArtifactQuality = "valid"
                            THEN "validated"
@@ -494,7 +503,7 @@ PublishCoreGeneration ==
     /\ stagedArtifactQuality = "valid"
     /\ corePublicationState = "staging"
     /\ migrationPhase = "none"
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ retiredGenerations' = retiredGenerations \cup {currentGeneration}
     /\ currentGeneration' = stagedGeneration
     /\ currentArtifactQuality' = stagedArtifactQuality
@@ -552,7 +561,7 @@ BuildSidecar ==
     /\ generationState \in {"validated", "current"}
     /\ sidecarState \in {"absent", "stale", "missing", "corrupt", "incompatible"}
     /\ (stagedGeneration > 0 \/ sidecarState # "absent")
-    /\ ProgressTraceAvailable
+    /\ WorkTraceAvailable
     /\ sidecarGeneration' = IF stagedGeneration > 0
                             THEN stagedGeneration
                             ELSE currentGeneration
@@ -577,7 +586,7 @@ BuildSidecar ==
 PrepareSidecarArtifact ==
     /\ sidecarState = "building"
     /\ sidecarGeneration > 0
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ \E quality \in ArtifactQualities :
         /\ sidecarQuality' = quality
         /\ sidecarState' = "validated"
@@ -603,7 +612,7 @@ PublishSidecar ==
     /\ corePublicationState = "current"
     /\ migrationPhase = "none"
     /\ readerStatus = "current"
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ sidecarState' = "current"
     /\ sidecarAttachment' = "attached"
     /\ sidecarFilePublication' = "current"
@@ -623,7 +632,7 @@ PublishSidecar ==
 
 MarkSidecarMissing ==
     /\ sidecarState \in {"current", "stale", "absent"}
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ sidecarState' = "missing"
     /\ sidecarAttachment' = "detached"
     /\ sidecarFilePublication' = "none"
@@ -643,7 +652,7 @@ MarkSidecarMissing ==
 
 MarkSidecarCorrupt ==
     /\ sidecarState \in {"current", "stale"}
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ sidecarState' = "corrupt"
     /\ sidecarAttachment' = "detached"
     /\ sidecarQuality' = "corrupt"
@@ -664,7 +673,7 @@ MarkSidecarCorrupt ==
 
 MarkSidecarIncompatible ==
     /\ sidecarState \in {"current", "stale", "absent"}
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ sidecarState' = "incompatible"
     /\ sidecarAttachment' = "detached"
     /\ sidecarQuality' = "incompatible"
@@ -684,10 +693,11 @@ MarkSidecarIncompatible ==
 
 BeginSupportedMigration ==
     /\ migrationPhase = "none"
+    /\ packageState # "building"
     /\ coreSchema = CoreSchemaVersion
     /\ corePublicationState = "current"
     /\ readerStatus = "current"
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ migrationPhase' = "staging"
     /\ migrationSourceSchema' = coreSchema
     /\ migrationTargetSchema' = SupportedSchemaVersion
@@ -708,7 +718,7 @@ BeginSupportedMigration ==
 ValidateMigration ==
     /\ migrationPhase = "staging"
     /\ migrationTargetSchema = SupportedSchemaVersion
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ migrationPhase' = "validated"
     /\ trace' = Append(trace, "ValidateMigration")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
@@ -726,7 +736,7 @@ ValidateMigration ==
 RejectMigration ==
     /\ migrationPhase = "staging"
     /\ migrationTargetSchema = SupportedSchemaVersion
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ migrationPhase' = "rejected"
     /\ migrationRecovery' = "snapshot-retained"
     /\ trace' = Append(trace, "RejectMigration")
@@ -746,7 +756,7 @@ CommitMigration ==
     /\ migrationPhase = "validated"
     /\ migrationTargetSchema = SupportedSchemaVersion
     /\ coreSchema = migrationSourceSchema
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ coreSchema' = migrationTargetSchema
     /\ migrationPhase' = "committed"
     /\ migrationRecovery' = "snapshot-retained"
@@ -833,16 +843,32 @@ RollbackCommittedMigration ==
 InterruptMigration ==
     /\ migrationPhase \in {"staging", "validated", "committed"}
     /\ TraceAvailable
-    /\ migrationPhase' = "recovery-required"
-    /\ migrationRecovery' = "interrupted"
-    /\ readerStatus' = "unavailable"
-    /\ readCompleteness' = "unavailable"
+    /\ coreSchema' = IF Len(trace) + 2 >= TraceBound
+                     THEN migrationSourceSchema
+                     ELSE coreSchema
+    /\ migrationPhase' = IF Len(trace) + 2 >= TraceBound
+                          THEN "none"
+                          ELSE "recovery-required"
+    /\ migrationRecovery' = IF Len(trace) + 2 >= TraceBound
+                            THEN "recovered-previous"
+                            ELSE "interrupted"
+    /\ readerStatus' = IF Len(trace) + 2 >= TraceBound
+                       THEN "current"
+                       ELSE "unavailable"
+    /\ readerCompatibility' = IF Len(trace) + 2 >= TraceBound
+                              THEN "supported"
+                              ELSE readerCompatibility
+    /\ readCompleteness' = IF Len(trace) + 2 >= TraceBound
+                           THEN IF SidecarCompleteFor(currentGeneration)
+                                THEN "complete"
+                                ELSE "partial"
+                           ELSE "unavailable"
     /\ trace' = Append(trace, "InterruptMigration")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
         currentArtifactQuality, stagedArtifactQuality, stagedValidated,
-        corePublicationState, extractedGeneration, derivedGeneration, coreSchema,
+        corePublicationState, extractedGeneration, derivedGeneration,
         migrationSourceSchema, migrationTargetSchema, preMigrationGeneration,
-        readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
+        sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, crossFileAtomicityAssumed, retiredGenerations,
         leasedGenerations, replayPinnedGenerations, removedGenerations,
@@ -879,7 +905,7 @@ OpenNewerReader ==
     /\ coreSchema = NewerSchemaVersion
     /\ readerStatus = "unavailable"
     /\ readerCompatibility = "newer"
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ trace' = Append(trace, "OpenNewerReader")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
         currentArtifactQuality, stagedArtifactQuality, stagedValidated,
@@ -898,7 +924,7 @@ OpenIncompatibleReader ==
     /\ coreSchema = IncompatibleSchemaVersion
     /\ readerStatus = "unavailable"
     /\ readerCompatibility = "incompatible"
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ trace' = Append(trace, "OpenIncompatibleReader")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
         currentArtifactQuality, stagedArtifactQuality, stagedValidated,
@@ -918,7 +944,7 @@ AcquireLease ==
         /\ generation # currentGeneration
         /\ generation \notin leasedGenerations
         /\ leasedGenerations' = leasedGenerations \cup {generation}
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ trace' = Append(trace, "AcquireLease")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
         currentArtifactQuality, stagedArtifactQuality, stagedValidated,
@@ -936,7 +962,7 @@ AcquireLease ==
 ReleaseLease ==
     /\ \E generation \in leasedGenerations :
         /\ leasedGenerations' = leasedGenerations \ {generation}
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ trace' = Append(trace, "ReleaseLease")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
         currentArtifactQuality, stagedArtifactQuality, stagedValidated,
@@ -956,7 +982,7 @@ PinReplay ==
         /\ generation # currentGeneration
         /\ generation \notin replayPinnedGenerations
         /\ replayPinnedGenerations' = replayPinnedGenerations \cup {generation}
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ trace' = Append(trace, "PinReplay")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
         currentArtifactQuality, stagedArtifactQuality, stagedValidated,
@@ -974,7 +1000,7 @@ PinReplay ==
 UnpinReplay ==
     /\ \E generation \in replayPinnedGenerations :
         /\ replayPinnedGenerations' = replayPinnedGenerations \ {generation}
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ trace' = Append(trace, "UnpinReplay")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
         currentArtifactQuality, stagedArtifactQuality, stagedValidated,
@@ -995,7 +1021,7 @@ CleanupRetired ==
         /\ generation \notin leasedGenerations
         /\ generation \notin replayPinnedGenerations
         /\ removedGenerations' = removedGenerations \cup {generation}
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ trace' = Append(trace, "CleanupRetired")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
         currentArtifactQuality, stagedArtifactQuality, stagedValidated,
@@ -1012,8 +1038,9 @@ CleanupRetired ==
 
 BeginExport ==
     /\ packageState = "none"
+    /\ migrationPhase = "none"
     /\ corePublicationState = "current"
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ packageState' = "building"
     /\ packageCoreComplete' = FALSE
     /\ packageSidecarComplete' = FALSE
@@ -1059,7 +1086,7 @@ ImportCompletePackage ==
     /\ packageState = "complete"
     /\ packageCoreComplete
     /\ packageSidecarComplete
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ packageState' = "imported"
     /\ packageImported' = TRUE
     /\ trace' = Append(trace, "ImportCompletePackage")
@@ -1078,7 +1105,7 @@ ImportCompletePackage ==
 PlanIncludeHygiene ==
     /\ includePlanState = "none"
     /\ corePublicationState = "current"
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ includePlanState' = "planned"
     /\ includeEvidence' = "complete"
     /\ includeEditState' = "none"
@@ -1098,7 +1125,7 @@ PlanIncludeHygiene ==
 ValidateIncludeHygiene ==
     /\ includePlanState = "planned"
     /\ includeEvidence = "complete"
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ includePlanState' = "validated"
     /\ trace' = Append(trace, "ValidateIncludeHygiene")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
@@ -1116,7 +1143,7 @@ ValidateIncludeHygiene ==
 ApplyIncludeHygiene ==
     /\ includePlanState = "validated"
     /\ includeEvidence = "complete"
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ includePlanState' = "applied"
     /\ includeEditState' = "changed"
     /\ trace' = Append(trace, "ApplyIncludeHygiene")
@@ -1135,7 +1162,7 @@ ApplyIncludeHygiene ==
 RejectIncompleteIncludeHygiene ==
     /\ includePlanState = "planned"
     /\ includeEvidence = "incomplete"
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ includePlanState' = "rejected"
     /\ trace' = Append(trace, "RejectIncompleteIncludeHygiene")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
@@ -1152,7 +1179,7 @@ RejectIncompleteIncludeHygiene ==
 
 ReadOnlyProbe ==
     /\ readerStatus \in {"current", "partial", "unavailable"}
-    /\ TraceAvailable
+    /\ WorkTraceAvailable
     /\ readOnlyWrites' = readOnlyWrites
     /\ trace' = Append(trace, "ReadOnlyProbe")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
@@ -1206,16 +1233,13 @@ Fairness ==
 Spec == Init /\ [][Next]_vars /\ Fairness
 
 StorageEventuallySettles ==
-    [](Len(trace) + 1 < TraceBound /\ corePublicationState = "staging" =>
-        <> ((corePublicationState = "current" /\ stagedGeneration = 0)
-            \/ Len(trace) + 1 >= TraceBound))
-    /\ [](Len(trace) + 1 < TraceBound /\
-         migrationPhase \in {"staging", "validated", "rejected", "committed",
+    [](corePublicationState = "staging" =>
+        <> (corePublicationState = "current" /\ stagedGeneration = 0))
+    /\ [](migrationPhase \in {"staging", "validated", "rejected", "committed",
                               "recovery-required"} =>
-        <> (migrationPhase = "none" \/ Len(trace) + 1 >= TraceBound))
-    /\ [](Len(trace) + 1 < TraceBound /\ packageState = "building" =>
-        <> (packageState \in {"complete", "partial"}
-            \/ Len(trace) + 1 >= TraceBound))
+        <> (migrationPhase = "none"))
+    /\ [](packageState = "building" =>
+        <> (packageState \in {"complete", "partial"}))
 
 TypeInvariant ==
     /\ currentGeneration \in Nat
@@ -1360,7 +1384,7 @@ TraceInvariant ==
     /\ Head(trace) = "Init"
 
 BoundedProgressInvariant ==
-    Len(trace) = TraceBound
+    Len(trace) + 1 >= TraceBound
         => /\ corePublicationState # "staging"
            /\ migrationPhase \notin {"staging", "validated", "rejected",
                                       "committed", "recovery-required"}

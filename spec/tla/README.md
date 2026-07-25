@@ -96,9 +96,13 @@ packages cannot be imported as complete state. Include-hygiene planning,
 validation, rejection, and application use the same evidence-before-edit
 discipline as other derived transformations. Read-only probes preserve all
 abstract persistent state and the cleanup invariant protects current, leased,
-and replay-pinned generations. `StorageEventuallySettles` is checked as a
-bound-aware liveness property in the finite smoke model; its regression
-mutation removes storage progress actions and their fairness clauses.
+and replay-pinned generations. The finite smoke model reserves one trace state
+for settlement actions: work-entry actions use `ProgressTraceAvailable`, while
+terminal recovery actions use `TraceAvailable`. `BoundedProgressInvariant`
+checks that last reachable state, and `StorageEventuallySettles` has no
+trace-budget escape. Its regression suite seeds that boundary and mutates
+publication admission to prove the invariant fails closed, in addition to
+removing storage progress actions and their fairness clauses.
 
 ## Normative boundary
 
