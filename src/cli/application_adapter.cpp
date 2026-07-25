@@ -71,8 +71,105 @@ long long integer_field(const json_out::Value &value, std::string_view name) {
 int render_application_result(const application::CommandRequest &request,
                               const protocol::ResultEnvelope &result,
                               Context &ctx) {
-  if (result.status == protocol::Status::Error ||
-      result.status == protocol::Status::Refuted) {
+  const bool failed = result.status == protocol::Status::Error ||
+                      result.status == protocol::Status::Refuted;
+  const auto *index_request = std::get_if<application::IndexRequest>(&request);
+  const bool render_failed_index =
+      failed && index_request != nullptr &&
+      (index_request->action == application::IndexAction::update ||
+       index_request->action == application::IndexAction::rebuild) &&
+      field(result.result, "files") != nullptr;
+  if (!failed || render_failed_index) {
+    std::visit(
+        [&result, &ctx](const auto &typed) {
+          using T = std::decay_t<decltype(typed)>;
+          if constexpr (std::is_same_v<T, application::IndexRequest>) {
+            if (typed.json) {
+              *ctx.out << json_out::dumps_indent2(result.result) << "\n";
+              return;
+            }
+            if (typed.action == application::IndexAction::status) {
+              *ctx.out << "index: " << integer_field(result.result, "files")
+                       << " files, " << integer_field(result.result, "symbols")
+                       << " symbols, " << integer_field(result.result, "edges")
+                       << " edges\n";
+              return;
+            }
+            if (typed.action == application::IndexAction::explain) {
+              *ctx.out << "workspace: "
+                       << string_field(result.result, "workspace")
+                       << "\nindex: " << string_field(result.result, "index")
+                       << "\n";
+              return;
+            }
+            const json_out::Value *files = field(result.result, "files");
+            if (files != nullptr && files->t == json_out::Value::T::Arr) {
+              for (const json_out::Value &file : files->a) {
+                const std::string path = string_field(file, "path");
+                const std::string status = string_field(file, "status");
+                if (!typed.files.empty() && status != "unknown") {
+                  *ctx.out << "file: " << path << "\n";
+                  if (status == "already") {
+                    *ctx.out << "  already indexed\n";
+                  } else if (status == "indexed") {
+                    *ctx.out
+                        << "  -> " << integer_field(file, "stored")
+                        << " symbols; headers: "
+                        << integer_field(file, "headers_indexed")
+                        << " indexed (+"
+                        << integer_field(file, "headers_symbols")
+                        << " symbols), "
+                        << integer_field(file, "headers_already")
+                        << " already, " << integer_field(file, "headers_system")
+                        << " system, " << integer_field(file, "headers_unowned")
+                        << " unowned\n";
+                  }
+                } else if (status == "indexed" || status == "failed") {
+                  *ctx.out << "indexing " << path << "\n";
+                }
+              }
+            }
+            if (typed.files.empty()) {
+              *ctx.out << "index: " << integer_field(result.result, "indexed")
+                       << " indexed, " << integer_field(result.result, "failed")
+                       << " failed, " << integer_field(result.result, "already")
+                       << " already indexed";
+              const long long deferred =
+                  integer_field(result.result, "deferred");
+              if (deferred > 0) {
+                *ctx.out << ", " << deferred << " headers via TUs";
+              }
+              *ctx.out << "\n";
+              if (ctx.logger != nullptr && ctx.logger->warning_count() > 0 &&
+                  !ctx.logger->file_path().empty()) {
+                *ctx.out << ctx.logger->warning_count()
+                         << " warning(s)/error(s) logged to "
+                         << ctx.logger->file_path() << "\n";
+              }
+            }
+          } else if constexpr (std::is_same_v<T,
+                                              application::AnalysisRequest>) {
+            if (typed.action == application::AnalysisAction::export_facts) {
+              *ctx.out << string_field(result.result, "directory") << ": "
+                       << integer_field(result.result, "files")
+                       << " fact files, "
+                       << integer_field(result.result, "rows") << " rows\n";
+            } else {
+              *ctx.out << json_out::dumps_indent2(result.result) << "\n";
+            }
+          } else if constexpr (std::is_same_v<T, application::DiffRequest>) {
+            if (result.result.t == json_out::Value::T::Str) {
+              *ctx.out << result.result.s;
+            } else {
+              *ctx.out << json_out::dumps_indent2(result.result) << "\n";
+            }
+          } else {
+            *ctx.out << json_out::dumps_indent2(result.result) << "\n";
+          }
+        },
+        request);
+  }
+  if (failed) {
     if (ctx.err != nullptr) {
       for (const auto &diagnostic : result.diagnostics) {
         *ctx.err << "error: " << diagnostic.message << "\n";
@@ -80,56 +177,6 @@ int render_application_result(const application::CommandRequest &request,
     }
     return 1;
   }
-
-  std::visit(
-      [&result, &ctx](const auto &typed) {
-        using T = std::decay_t<decltype(typed)>;
-        if constexpr (std::is_same_v<T, application::IndexRequest>) {
-          const json_out::Value *files = field(result.result, "files");
-          if (files != nullptr && files->t == json_out::Value::T::Arr) {
-            for (const json_out::Value &file : files->a) {
-              const std::string path = string_field(file, "path");
-              const std::string status = string_field(file, "status");
-              if (!typed.files.empty()) {
-                *ctx.out << "file: " << path << "\n";
-                if (status == "already") {
-                  *ctx.out << "  already indexed\n";
-                } else if (status == "indexed") {
-                  *ctx.out << "  -> " << integer_field(file, "stored")
-                           << " symbols; headers: "
-                           << integer_field(file, "headers_indexed")
-                           << " indexed (+"
-                           << integer_field(file, "headers_symbols")
-                           << " symbols), "
-                           << integer_field(file, "headers_already")
-                           << " already, "
-                           << integer_field(file, "headers_system")
-                           << " system, "
-                           << integer_field(file, "headers_unowned")
-                           << " unowned\n";
-                }
-              } else if (status == "indexed") {
-                *ctx.out << "indexing " << path << "\n";
-              }
-            }
-          }
-          *ctx.out << "index: " << integer_field(result.result, "indexed")
-                   << " indexed, " << integer_field(result.result, "failed")
-                   << " failed, " << integer_field(result.result, "already")
-                   << " already indexed\n";
-        } else if constexpr (std::is_same_v<T, application::AnalysisRequest>) {
-          if (typed.action == application::AnalysisAction::export_facts) {
-            *ctx.out << string_field(result.result, "directory") << ": "
-                     << integer_field(result.result, "files") << " fact files, "
-                     << integer_field(result.result, "rows") << " rows\n";
-          } else {
-            *ctx.out << json_out::dumps_indent2(result.result) << "\n";
-          }
-        } else {
-          *ctx.out << json_out::dumps_indent2(result.result) << "\n";
-        }
-      },
-      request);
   return result.exit_code();
 }
 
@@ -164,8 +211,8 @@ parse_typed_index(const std::vector<std::string> &argv) {
   if (argv.empty() || argv.front() != "index") {
     return std::nullopt;
   }
-  if (argv.size() == 1 || argv[1] == "-h" || argv[1] == "--help" ||
-      argv[1] == "--version") {
+  if (argv.size() > 1 &&
+      (argv[1] == "-h" || argv[1] == "--help" || argv[1] == "--version")) {
     return std::nullopt;
   }
   application::IndexRequest request;
@@ -187,6 +234,8 @@ parse_typed_index(const std::vector<std::string> &argv) {
       request.graph = false;
     } else if (argv[i] == "--no-autoderive-labels") {
       request.autoderive_labels = false;
+    } else if (argv[i] == "--json") {
+      request.json = true;
     } else if (argv[i] == "--source") {
       request.source = require_value(argv, i, "--source");
     } else if (argv[i] == "--db") {
@@ -243,7 +292,7 @@ parse_typed_analysis(const std::vector<std::string> &argv) {
   return request;
 }
 
-std::optional<application::CommandRequest>
+[[maybe_unused]] std::optional<application::CommandRequest>
 parse_typed_workspace(const std::vector<std::string> &argv) {
   if (argv.size() < 2 || argv.front() != "workspace") {
     return std::nullopt;
@@ -409,7 +458,7 @@ parse_typed_include(const std::vector<std::string> &argv) {
   return request;
 }
 
-std::optional<application::CommandRequest>
+[[maybe_unused]] std::optional<application::CommandRequest>
 parse_typed_refactor(const std::vector<std::string> &argv) {
   if (argv.size() < 2 || argv.front() != "refactor") {
     return std::nullopt;
@@ -443,7 +492,7 @@ parse_typed_refactor(const std::vector<std::string> &argv) {
   return request;
 }
 
-std::optional<application::CommandRequest>
+[[maybe_unused]] std::optional<application::CommandRequest>
 parse_typed_proof(const std::vector<std::string> &argv) {
   if (argv.size() < 2 || argv.front() != "proof") {
     return std::nullopt;
@@ -490,9 +539,6 @@ parse_request(const std::vector<std::string> &argv) {
   if (const auto request = parse_typed_analysis(argv)) {
     return request;
   }
-  if (const auto request = parse_typed_workspace(argv)) {
-    return request;
-  }
   if (const auto request = parse_typed_ast(argv)) {
     return request;
   }
@@ -502,10 +548,7 @@ parse_request(const std::vector<std::string> &argv) {
   // Include graph/check/plan/apply retain the established CLI contract until
   // their focused service can reproduce all scope, graph, warning, and plan
   // output semantics. They intentionally remain compatibility requests.
-  if (const auto request = parse_typed_refactor(argv)) {
-    return request;
-  }
-  return parse_typed_proof(argv);
+  return std::nullopt;
 }
 
 ApplicationParseResult
@@ -519,9 +562,6 @@ parse_application_request(const std::vector<std::string> &argv) {
   if (const auto request = parse_typed_analysis(argv)) {
     return ApplicationParseResult{.value = *request};
   }
-  if (const auto request = parse_typed_workspace(argv)) {
-    return ApplicationParseResult{.value = *request};
-  }
   if (const auto request = parse_typed_ast(argv)) {
     return ApplicationParseResult{.value = *request};
   }
@@ -530,12 +570,6 @@ parse_application_request(const std::vector<std::string> &argv) {
   }
   // See parse_request: include actions stay on the compatibility path until
   // their full existing semantics are represented by an application service.
-  if (const auto request = parse_typed_refactor(argv)) {
-    return ApplicationParseResult{.value = *request};
-  }
-  if (const auto request = parse_typed_proof(argv)) {
-    return ApplicationParseResult{.value = *request};
-  }
   return ApplicationParseResult{.value = CompatibilityRequest{.argv = argv}};
 }
 

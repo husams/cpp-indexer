@@ -142,6 +142,7 @@ StorageApplicationOperations::execute(const IndexRequest &request,
 
   std::vector<std::pair<File, std::string>> targets;
   std::int64_t already = 0;
+  std::int64_t deferred = 0;
   json_out::Array file_records;
   const bool rebuild = request.action == IndexAction::rebuild;
   if (rebuild) {
@@ -166,15 +167,13 @@ StorageApplicationOperations::execute(const IndexRequest &request,
              {"status", json_out::Value::of(std::string("already"))}}));
       } else if (!files::is_header(path)) {
         targets.emplace_back(file, path);
+      } else {
+        ++deferred;
+        file_records.push_back(json_out::Value::obj(
+            {{"path", json_out::Value::of(path)},
+             {"status", json_out::Value::of(std::string("deferred"))}}));
       }
     }
-  }
-
-  bool truncated = false;
-  if (context.policy().max_work_items != 0 &&
-      targets.size() > context.policy().max_work_items) {
-    targets.resize(context.policy().max_work_items);
-    truncated = true;
   }
 
   std::int64_t indexed = 0;
@@ -212,6 +211,13 @@ StorageApplicationOperations::execute(const IndexRequest &request,
     }
   }
 
+  bool truncated = false;
+  if (context.policy().max_work_items != 0 &&
+      targets.size() > context.policy().max_work_items) {
+    targets.resize(context.policy().max_work_items);
+    truncated = true;
+  }
+
   for (std::size_t position = 0; position < targets.size(); ++position) {
     const auto &[file, path] = targets[position];
     if (context.cancellation().cancelled()) {
@@ -233,6 +239,17 @@ StorageApplicationOperations::execute(const IndexRequest &request,
         ++warnings;
       }
     }
+    if (context.logger() != nullptr && !context.logger()->file_path().empty()) {
+      if (outcome.parse_failed) {
+        context.logger()->error("cidx.clang", path + ": " + outcome.error);
+      }
+      for (const Diagnostic &diagnostic : outcome.diagnostics) {
+        if (diagnostic.severity == 2) {
+          context.logger()->warning("cidx.clang",
+                                    path + ": " + diagnostic.spelling);
+        }
+      }
+    }
     if (outcome.parse_failed || outcome.source_changed) {
       db.set_file_indexed(file.id, false);
       ++failed;
@@ -245,7 +262,10 @@ StorageApplicationOperations::execute(const IndexRequest &request,
       }
       file_records.push_back(json_out::Value::obj(
           {{"path", json_out::Value::of(path)},
-           {"status", json_out::Value::of(std::string("failed"))}}));
+           {"status", json_out::Value::of(std::string("failed"))},
+           {"error", json_out::Value::of(outcome.error.empty()
+                                             ? "indexing failed for " + path
+                                             : outcome.error)}}));
     } else {
       db.mark_file_indexed(file.id, std::nullopt, outcome.source_md5);
       ++indexed;
@@ -277,6 +297,7 @@ StorageApplicationOperations::execute(const IndexRequest &request,
        {"skipped", json_out::Value::of(skipped)},
        {"already", json_out::Value::of(already)},
        {"unknown", json_out::Value::of(unknown)},
+       {"deferred", json_out::Value::of(deferred)},
        {"warnings", json_out::Value::of(warnings)},
        {"errors", json_out::Value::of(errors)},
        {"files", json_out::Value::arr(std::move(file_records))}});
@@ -321,16 +342,22 @@ StorageApplicationOperations::execute(const IndexRequest &request,
   if (result.status == protocol::Status::Error) {
     result.identity.freshness = "unverifiable";
     result.completeness.truncated = false;
-  } else if (identity.freshness == "stale") {
+  } else if (identity.freshness == "stale" &&
+             result.status == protocol::Status::Complete) {
     result.status = protocol::Status::Unknown;
     result.completeness.state = "unknown";
     result.completeness.stale = true;
     result.completeness.truncated = false;
+    result.identity.freshness = "stale";
     result.diagnostics.clear();
     result.diagnostics.push_back(protocol::Diagnostic{
         .code = "stale_input",
         .severity = "error",
         .message = "pending or changed files remain in the selected index"});
+  } else if (identity.freshness == "stale") {
+    // Preserve partial work and its evidence when a pending row keeps the
+    // selected index stale; the stale identity is exposed in identity.index.
+    result.identity.freshness = "unverifiable";
   } else {
     result.identity.freshness = identity.freshness;
   }
@@ -609,17 +636,9 @@ DefaultApplicationServices::analysis(const AnalysisRequest &request,
 protocol::ResultEnvelope
 DefaultApplicationServices::workspace(const WorkspaceRequest &request,
                                       ApplicationContext &context) const {
-  if (context.workspace() == nullptr) {
-    return service_error("workspace", context, "backend_error",
-                         "workspace context is not installed");
-  }
-  protocol::ResultEnvelope result =
-      service_result("workspace", context, "workspace");
-  result.result = json_out::Value::obj(
-      {{"action", json_out::Value::of(static_cast<int>(request.action))},
-       {"identity",
-        json_out::Value::of(context.workspace()->snapshot().identity)}});
-  return result;
+  (void)request;
+  return service_error("workspace", context, "invalid_input",
+                       "workspace operation is not implemented");
 }
 
 protocol::ResultEnvelope
@@ -650,15 +669,19 @@ DefaultApplicationServices::include(const IncludeRequest &request,
 }
 
 protocol::ResultEnvelope
-DefaultApplicationServices::refactor(const RefactoringRequest &,
+DefaultApplicationServices::refactor(const RefactoringRequest &request,
                                      ApplicationContext &context) const {
-  return service_result("refactor", context, "checked-refactoring");
+  (void)request;
+  return service_error("refactor", context, "invalid_input",
+                       "refactoring operation is not implemented");
 }
 
 protocol::ResultEnvelope
-DefaultApplicationServices::proof(const ProofRequest &,
+DefaultApplicationServices::proof(const ProofRequest &request,
                                   ApplicationContext &context) const {
-  return service_result("proof", context, "proof-orchestration");
+  (void)request;
+  return service_error("proof", context, "invalid_input",
+                       "proof operation is not implemented");
 }
 
 protocol::ResultEnvelope

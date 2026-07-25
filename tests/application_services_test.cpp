@@ -94,6 +94,17 @@ struct RecordingProgress final : cidx::application::ProgressSink {
   std::vector<cidx::protocol::ProgressEvent> events;
 };
 
+struct CancellingProgress final : cidx::application::ProgressSink {
+  explicit CancellingProgress(cidx::application::CancellationToken &token)
+      : token(token) {}
+
+  void publish(const cidx::protocol::ProgressEvent &) override {
+    token.cancel();
+  }
+
+  cidx::application::CancellationToken &token;
+};
+
 } // namespace
 
 TEST_CASE("application registry is complete and validated") {
@@ -113,6 +124,16 @@ TEST_CASE(
   const auto &typed = std::get<cidx::application::QueryRequest>(*query);
   CHECK(typed.expression == "nodes()");
   CHECK(typed.output == cidx::application::QueryOutput::json);
+
+  const auto bare_index = cidx::cli::parse_application_request({"index"});
+  REQUIRE(std::holds_alternative<cidx::application::CommandRequest>(
+      bare_index.value));
+  const auto &bare_request =
+      std::get<cidx::application::CommandRequest>(bare_index.value);
+  REQUIRE(
+      std::holds_alternative<cidx::application::IndexRequest>(bare_request));
+  CHECK(std::get<cidx::application::IndexRequest>(bare_request).action ==
+        cidx::application::IndexAction::update);
 
   const auto compatibility =
       cidx::cli::parse_application_request({"search", "nodes"});
@@ -145,6 +166,15 @@ TEST_CASE(
       {"include", "graph", "--reverse", "--transitive"});
   REQUIRE(
       std::holds_alternative<cidx::cli::CompatibilityRequest>(include.value));
+
+  for (const std::vector<std::string> &command :
+       {std::vector<std::string>{"workspace", "show"},
+        std::vector<std::string>{"refactor", "check"},
+        std::vector<std::string>{"proof", "status"}}) {
+    const auto unsupported = cidx::cli::parse_application_request(command);
+    CHECK(std::holds_alternative<cidx::cli::CompatibilityRequest>(
+        unsupported.value));
+  }
 }
 
 TEST_CASE("typed services dispatch every HSE-68 request family") {
@@ -411,6 +441,19 @@ TEST_CASE("index service enforces work and diagnostic budgets stably") {
   cidx::application::StorageApplicationOperations operations(db);
   cidx::application::ApplicationOperationPorts operation_ports{.index =
                                                                    &operations};
+  cidx::application::ApplicationContext full_context(
+      workspace, cidx::application::ApplicationPolicy{.max_diagnostics = 0}, {},
+      {}, operation_ports);
+  const cidx::application::DefaultApplicationServices services;
+  const cidx::application::ApplicationService service(services);
+  REQUIRE(
+      service.execute(cidx::application::IndexRequest{}, full_context).status ==
+      cidx::protocol::Status::Complete);
+
+  std::ofstream(first, std::ios::app) << "int changed_first() { return 3; }\n";
+  std::ofstream(second, std::ios::app)
+      << "int changed_second() { return 4; }\n";
+
   cidx::application::ApplicationContext context(
       workspace,
       cidx::application::ApplicationPolicy{.max_work_items = 1,
@@ -418,10 +461,10 @@ TEST_CASE("index service enforces work and diagnostic budgets stably") {
       {}, {}, operation_ports);
   RecordingProgress progress;
   context.set_progress_sink(&progress);
-  const cidx::application::DefaultApplicationServices services;
-  const cidx::application::ApplicationService service(services);
-  const auto result =
-      service.execute(cidx::application::IndexRequest{}, context);
+  const auto result = service.execute(
+      cidx::application::IndexRequest{
+          .files = {first.string(), second.string()}},
+      context);
 
   CHECK(result.status == cidx::protocol::Status::Partial);
   CHECK(result.completeness.truncated);
@@ -429,11 +472,30 @@ TEST_CASE("index service enforces work and diagnostic budgets stably") {
   CHECK(result.completeness.budget == 1);
   REQUIRE(result.diagnostics.size() == 1);
   CHECK(result.diagnostics.front().code == "truncated_budget");
-  CHECK(db.index_identity().freshness == "unverifiable");
+  CHECK(result.identity.index == "stale");
+  CHECK(result.identity.freshness == "unverifiable");
+  CHECK(result.valid());
+  CHECK(cidx::json_out::dumps_indent2(result.result).find("\"indexed\": 1") !=
+        std::string::npos);
   REQUIRE(progress.events.size() == 1);
   CHECK(progress.events.front().sequence == 0);
   CHECK(progress.events.front().completed == 0);
   CHECK(progress.events.front().total == 1);
+
+  cidx::application::ApplicationContext cancelled_context(
+      workspace,
+      cidx::application::ApplicationPolicy{.max_work_items = 1,
+                                           .max_diagnostics = 0},
+      {}, {}, operation_ports);
+  CancellingProgress cancelling(cancelled_context.cancellation());
+  cancelled_context.set_progress_sink(&cancelling);
+  const auto cancelled =
+      service.execute(cidx::application::IndexRequest{}, cancelled_context);
+  CHECK(cancelled.status == cidx::protocol::Status::Error);
+  CHECK(cancelled.identity.index == "stale");
+  CHECK(cancelled.identity.freshness == "unverifiable");
+  REQUIRE_FALSE(cancelled.diagnostics.empty());
+  CHECK(cancelled.diagnostics.front().code == "timeout");
 
   const auto unknown = service.execute(
       cidx::application::IndexRequest{.files = {"missing.cpp"}}, context);
@@ -524,6 +586,17 @@ TEST_CASE("default services execute real storage-backed operations") {
                                                        "codebase() | nodes()"},
                    context)
           .status == cidx::protocol::Status::Complete);
+
+  for (const cidx::application::CommandRequest &request :
+       {cidx::application::CommandRequest{
+            cidx::application::WorkspaceRequest{}},
+        cidx::application::CommandRequest{
+            cidx::application::RefactoringRequest{}},
+        cidx::application::CommandRequest{cidx::application::ProofRequest{}}}) {
+    const auto unsupported = service.execute(request, context);
+    CHECK(unsupported.status == cidx::protocol::Status::Error);
+    CHECK(unsupported.diagnostics.front().code == "invalid_input");
+  }
 
   const auto analysis = service.execute(
       cidx::application::AnalysisRequest{
