@@ -481,9 +481,12 @@ bool restore_edge_count_snapshot(SqliteDb &db) {
       return false;
     }
     auto update = db.prepare("UPDATE edge SET count = ? WHERE id = ?");
-    update.bind(1, std::stoll(snapshot->substr(separator + 1,
-                                               end - separator - 1)));
-    update.bind(2, std::stoll(snapshot->substr(cursor, separator - cursor)));
+    const auto count = static_cast<std::int64_t>(std::stoll(
+        snapshot->substr(separator + 1, end - separator - 1)));
+    const auto edge_id = static_cast<std::int64_t>(
+        std::stoll(snapshot->substr(cursor, separator - cursor)));
+    update.bind(1, count);
+    update.bind(2, edge_id);
     update.step_done();
     cursor = end + 1;
   }
