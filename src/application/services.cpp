@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "application/analysis_service.hpp"
+#include "ast/clang_version.hpp"
 #include "ast/index_engine.hpp"
 #include "astgraph/astgraph.hpp"
 #include "diff/analyze.hpp"
@@ -99,6 +100,35 @@ void apply_configuration_override(diff::ParseConfig &config,
   config.args = split_configuration(*override);
   config.classes = diff::classify_options(config.args);
   config.config_hash = *override;
+}
+
+void log_parse_failure(Logger *logger, const std::string &path,
+                       const ast::IndexOneOutcome &outcome) {
+  if (logger == nullptr || logger->file_path().empty() ||
+      outcome.failed_flags.empty()) {
+    return;
+  }
+  std::string flags;
+  for (std::size_t index = 0; index < outcome.failed_flags.size(); ++index) {
+    if (index != 0) {
+      flags += ' ';
+    }
+    flags += outcome.failed_flags[index];
+  }
+  logger->error("cidx.clang",
+                path + ": failed parse flags: " + flags +
+                    "; clang: " + std::to_string(clang_version_major()));
+  std::size_t shown = 0;
+  for (const Diagnostic &diagnostic : outcome.diagnostics) {
+    if (diagnostic.severity < 3 || shown >= 25) {
+      continue;
+    }
+    ++shown;
+    logger->info("cidx.clang", path + ": diag " +
+                                   diagnostic.file_path.value_or("") + ":" +
+                                   std::to_string(diagnostic.line.value_or(0)) +
+                                   ": " + diagnostic.spelling);
+  }
 }
 
 } // namespace
@@ -229,26 +259,30 @@ StorageApplicationOperations::execute(const IndexRequest &request,
                                 .message = path,
                                 .completed = static_cast<int64_t>(position),
                                 .total = static_cast<int64_t>(targets.size())});
+    if (context.cancellation().cancelled()) {
+      break;
+    }
     const ast::IndexOneOutcome outcome =
         ast::run_index_one(db, file, path, request.graph);
-    db.replace_diagnostics(file.id, outcome.diagnostics);
-    for (const Diagnostic &diagnostic : outcome.diagnostics) {
+    std::vector<Diagnostic> persisted_diagnostics = outcome.diagnostics;
+    if ((outcome.parse_failed || outcome.source_changed) &&
+        persisted_diagnostics.empty()) {
+      persisted_diagnostics.push_back(Diagnostic{
+          .severity = 4,
+          .spelling = outcome.error.empty() ? "indexing failed for " + path
+                                            : outcome.error,
+          .file_path = path});
+    }
+    db.replace_diagnostics(file.id, persisted_diagnostics);
+    for (const Diagnostic &diagnostic : persisted_diagnostics) {
       if (diagnostic.severity >= 3) {
         ++errors;
       } else if (diagnostic.severity == 2) {
         ++warnings;
       }
     }
-    if (context.logger() != nullptr && !context.logger()->file_path().empty()) {
-      if (outcome.parse_failed) {
-        context.logger()->error("cidx.clang", path + ": " + outcome.error);
-      }
-      for (const Diagnostic &diagnostic : outcome.diagnostics) {
-        if (diagnostic.severity == 2) {
-          context.logger()->warning("cidx.clang",
-                                    path + ": " + diagnostic.spelling);
-        }
-      }
+    if (outcome.parse_failed) {
+      log_parse_failure(context.logger(), path, outcome);
     }
     if (outcome.parse_failed || outcome.source_changed) {
       db.set_file_indexed(file.id, false);
@@ -300,6 +334,7 @@ StorageApplicationOperations::execute(const IndexRequest &request,
        {"deferred", json_out::Value::of(deferred)},
        {"warnings", json_out::Value::of(warnings)},
        {"errors", json_out::Value::of(errors)},
+       {"truncated", json_out::Value::of(truncated)},
        {"files", json_out::Value::arr(std::move(file_records))}});
   if (cancelled) {
     result.status = protocol::Status::Error;

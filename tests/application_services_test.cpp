@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT
 #include "doctest/doctest.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -13,6 +14,7 @@
 #include "cli/application_adapter.hpp"
 #include "query/exec.hpp"
 #include "storage/storage.hpp"
+#include "util/files.hpp"
 
 namespace {
 
@@ -423,14 +425,16 @@ TEST_CASE("index service enforces work and diagnostic budgets stably") {
   REQUIRE_FALSE(ec);
   const std::filesystem::path first = root / "first.cpp";
   const std::filesystem::path second = root / "second.cpp";
+  const std::filesystem::path third = root / "third.cpp";
   {
     std::ofstream(first) << "int first() { return 1; }\n";
     std::ofstream(second) << "int second() { return 2; }\n";
+    std::ofstream(third) << "int third() { return 3; }\n";
   }
 
   cidx::Storage db(":memory:");
   db.add_component("app", root.string());
-  for (const auto &source : {first, second}) {
+  for (const auto &source : {first, second, third}) {
     db.add_file_path(source.string(), std::nullopt, std::nullopt,
                      std::vector<std::string>{"-std=c++17"},
                      std::string("c++"));
@@ -453,6 +457,7 @@ TEST_CASE("index service enforces work and diagnostic budgets stably") {
   std::ofstream(first, std::ios::app) << "int changed_first() { return 3; }\n";
   std::ofstream(second, std::ios::app)
       << "int changed_second() { return 4; }\n";
+  std::ofstream(third, std::ios::app) << "int changed_third() { return 5; }\n";
 
   cidx::application::ApplicationContext context(
       workspace,
@@ -494,13 +499,94 @@ TEST_CASE("index service enforces work and diagnostic budgets stably") {
   CHECK(cancelled.status == cidx::protocol::Status::Error);
   CHECK(cancelled.identity.index == "stale");
   CHECK(cancelled.identity.freshness == "unverifiable");
+  CHECK(cancelled.completeness.budget == 1);
+  CHECK(cidx::json_out::dumps_indent2(cancelled.result)
+            .find("\"truncated\": true") != std::string::npos);
+  CHECK(cancelled.valid());
   REQUIRE_FALSE(cancelled.diagnostics.empty());
   CHECK(cancelled.diagnostics.front().code == "timeout");
+  REQUIRE(db.get_file(second).has_value());
+  CHECK(cidx::files::index_status(*db.get_file(second), second.string()) !=
+        cidx::files::IndexStatus::kOk);
+  REQUIRE(db.get_file(third).has_value());
+  CHECK(cidx::files::index_status(*db.get_file(third), third.string()) !=
+        cidx::files::IndexStatus::kOk);
 
   const auto unknown = service.execute(
       cidx::application::IndexRequest{.files = {"missing.cpp"}}, context);
   CHECK(unknown.status == cidx::protocol::Status::Error);
   CHECK(unknown.diagnostics.front().code == "invalid_input");
+
+  std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("index failure preserves fallback diagnostics, logs, and budget") {
+  const std::filesystem::path root =
+      std::filesystem::temp_directory_path() / "cidx-application-failure";
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
+  std::filesystem::create_directories(root, ec);
+  REQUIRE_FALSE(ec);
+  const std::filesystem::path missing = root / "a-missing.cpp";
+  const std::filesystem::path pending = root / "b-pending.cpp";
+  const std::string log_path = (root / "cidx.log").string();
+
+  cidx::Storage db(":memory:");
+  db.add_component("app", root.string());
+  const int64_t missing_id = db.add_file_path(
+      missing.string(), std::nullopt, std::nullopt,
+      std::vector<std::string>{"-std=c++17"}, std::string("c++"));
+  db.add_file_path(pending.string(), std::nullopt, std::nullopt,
+                   std::vector<std::string>{"-std=c++17"}, std::string("c++"));
+  cidx::StorageWorkspaceAdapter workspace_data(db);
+  cidx::WorkspaceContext workspace =
+      cidx::WorkspaceContext::borrow(workspace_data);
+  cidx::Logger logger;
+  logger.set_file(log_path);
+  cidx::application::StorageApplicationOperations operations(db);
+  cidx::application::ApplicationOperationPorts operation_ports{.index =
+                                                                   &operations};
+  cidx::application::ApplicationContext context(
+      workspace, cidx::application::ApplicationPolicy{.max_work_items = 1}, {},
+      {}, operation_ports, &logger);
+  const cidx::application::DefaultApplicationServices services;
+  const cidx::application::ApplicationService service(services);
+
+  const auto result =
+      service.execute(cidx::application::IndexRequest{}, context);
+  CHECK(result.status == cidx::protocol::Status::Error);
+  CHECK(result.completeness.budget == 1);
+  CHECK(cidx::json_out::dumps_indent2(result.result)
+            .find("\"truncated\": true") != std::string::npos);
+  CHECK(result.identity.index == "unverifiable");
+  CHECK(result.identity.freshness == "unverifiable");
+  CHECK(result.valid());
+  REQUIRE_FALSE(result.diagnostics.empty());
+  CHECK(result.diagnostics.front().code == "backend_error");
+  const auto persisted = db.get_diagnostics(missing_id);
+  REQUIRE_FALSE(persisted.empty());
+  CHECK(std::ranges::any_of(persisted, [](const cidx::Diagnostic &diagnostic) {
+    return diagnostic.severity >= 3;
+  }));
+  REQUIRE(db.get_file(missing.string()).has_value());
+  CHECK_FALSE(db.get_file(missing.string())->indexed);
+
+  const std::filesystem::path invalid = root / "c-invalid.cpp";
+  std::ofstream(invalid) << "#include \"definitely-missing.h\"\n"
+                            "int broken() { return 0; }\n";
+  const int64_t invalid_id = db.add_file_path(
+      invalid.string(), std::nullopt, std::nullopt,
+      std::vector<std::string>{"-std=c++17"}, std::string("c++"));
+  const auto invalid_result = service.execute(
+      cidx::application::IndexRequest{.files = {invalid.string()}}, context);
+  CHECK(invalid_result.status == cidx::protocol::Status::Error);
+  CHECK_FALSE(db.get_diagnostics(invalid_id).empty());
+  CHECK(std::filesystem::exists(log_path));
+  std::ifstream log(log_path);
+  const std::string logged((std::istreambuf_iterator<char>(log)),
+                           std::istreambuf_iterator<char>());
+  CHECK(logged.find("failed parse flags:") != std::string::npos);
+  CHECK(logged.find("; clang: ") != std::string::npos);
 
   std::filesystem::remove_all(root, ec);
 }

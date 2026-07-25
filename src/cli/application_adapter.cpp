@@ -126,6 +126,19 @@ int render_application_result(const application::CommandRequest &request,
                   }
                 } else if (status == "indexed" || status == "failed") {
                   *ctx.out << "indexing " << path << "\n";
+                  if (status == "indexed") {
+                    *ctx.out
+                        << "  -> " << integer_field(file, "stored")
+                        << " symbols; headers: "
+                        << integer_field(file, "headers_indexed")
+                        << " indexed (+"
+                        << integer_field(file, "headers_symbols")
+                        << " symbols), "
+                        << integer_field(file, "headers_already")
+                        << " already, " << integer_field(file, "headers_system")
+                        << " system, " << integer_field(file, "headers_unowned")
+                        << " unowned\n";
+                  }
                 }
               }
             }
