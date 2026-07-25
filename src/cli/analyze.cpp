@@ -8,9 +8,9 @@
 #include <string>
 #include <string_view>
 
-#include "application/analysis_service.hpp"
 #include "analysis/facts.hpp"
 #include "analysis/runner.hpp"
+#include "application/analysis_service.hpp"
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
 #include "cli/json_out.hpp"
@@ -126,10 +126,10 @@ run_analysis_application(const application::AnalysisRequest &request,
           pathutil::abspath(*request.export_directory);
       const analysis::FactExportStats stats =
           analysis::write_fact_files(snapshot, directory, dlrules::k_prelude);
-      envelope.result = json_out::Value::obj(
-          {{"directory", json_out::Value::of(directory)},
-           {"files", json_out::Value::of(stats.files)},
-           {"rows", json_out::Value::of(stats.rows)}});
+      envelope.result =
+          json_out::Value::obj({{"directory", json_out::Value::of(directory)},
+                                {"files", json_out::Value::of(stats.files)},
+                                {"rows", json_out::Value::of(stats.rows)}});
       return envelope;
     }
 
@@ -155,17 +155,16 @@ run_analysis_application(const application::AnalysisRequest &request,
       program = read_text_file(path);
     }
 
-    const analysis::AnalysisPackage package{
-        .name = label,
-        .version = "builtin",
-        .entry_point = label,
-        .engine = "souffle",
-        .program = std::move(program),
-        .prelude = {},
-        .include_catalog_prelude = true,
-        .content_hash = {},
-        .required_relations = {},
-        .output_relations = {}};
+    const analysis::AnalysisPackage package{.name = label,
+                                            .version = "builtin",
+                                            .entry_point = label,
+                                            .engine = "souffle",
+                                            .program = std::move(program),
+                                            .prelude = {},
+                                            .include_catalog_prelude = true,
+                                            .content_hash = {},
+                                            .required_relations = {},
+                                            .output_relations = {}};
     const analysis::AnalysisRequest analysis_request{
         .package = package,
         .provider =
