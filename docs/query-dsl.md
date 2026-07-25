@@ -178,10 +178,27 @@ and a default cap of 1 000 result rows (skipped only while an explicit
 it). Hitting any budget sets `truncated: true` — check it whenever a number
 must be exact. `count()` ignores the result cap.
 
+## Bounded witness paths, ranking, and reverse type-use
+
+`path()` returns bounded, deterministic shortest witness path(s) between the
+current node stream and a target subquery over one symbol/entity-view
+relation; `rank()` re-applies that deterministic order (shortest-first, ties
+broken by ascending node-id sequence) and optionally caps the count.
+`reverse_type_use()` is a first-class typed relation from a `type`/
+`type_layer` node stream: it returns one witness per owner using that type,
+directly or nested inside pointer/reference/array/member-pointer/alias
+layers, retaining every intermediate typed layer as an ordered `through`
+step — see
+[query-plan.md#path-result-shape-path--reverse_type_use](query-plan.md#path-result-shape-path--reverse_type_use)
+for the exact witness shape, budgets, and the `call_argument` scope trim.
+`explain()` additionally reports `execution_shape`, the execution `budgets`,
+and every `input_relations` entry with its catalogued completeness.
+
 ## Not in v1
 
-The textual CXQ language, semantic predicate macros (`inherits_from`,
-`has_method`, ...), `sites()`/`path()`/`rank()`, edge/site/type/template
-views, and a `cidx query` CLI are deferred slices — see the
+The textual CXQ language (a hand-written `parse_cxq()` exists for the stages
+it already covers, but is not yet extended for `path()`/`rank()`/
+`reverse_type_use()`), semantic predicate macros beyond the ones already
+exposed as builder helpers, and a `cidx query` CLI are deferred — see the
 [compatibility section](query-plan.md#compatibility). The existing
 `GraphQuery`/`EntityQuery` APIs are untouched and remain fully supported.

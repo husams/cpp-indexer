@@ -130,6 +130,39 @@
     }
   ]
 }
+== path_calls ==
+{
+  "cxq": 1,
+  "source": {
+    "kind": "symbol",
+    "ref": "USR::A"
+  },
+  "stages": [
+    {
+      "op": "path",
+      "relation": "symbol.calls",
+      "min_depth": 1,
+      "max_depth": 8,
+      "shortest": 1,
+      "to": {
+        "cxq": 1,
+        "source": {
+          "kind": "symbol",
+          "ref": "USR::C"
+        },
+        "stages": []
+      }
+    },
+    {
+      "op": "rank",
+      "top_n": 5
+    },
+    {
+      "op": "limit",
+      "n": 1
+    }
+  ]
+}
 == qualified_relation ==
 {
   "cxq": 1,

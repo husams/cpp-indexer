@@ -7,8 +7,8 @@
 #include "graph/query.hpp"
 
 #include "catalogs/generated_catalog.hpp"
-#include "util/version.hpp"
 #include "storage/storage.hpp"
+#include "util/version.hpp"
 
 #include <algorithm>
 #include <compare>
@@ -289,8 +289,21 @@ std::string shape_name(Shape shape) {
     return "rows";
   case Shape::Scalar:
     return "scalar";
+  case Shape::Path:
+    return "path";
   }
   return "scalar";
+}
+
+// type_edge_kind.id -> name ("pointee", "element_type", ...): the typed
+// `through` label for one reverse-type-use climb hop.
+std::string type_edge_kind_name(int64_t kind_id) {
+  for (const auto &k : catalog::kTypeEdgeKinds) {
+    if (k.id == kind_id) {
+      return std::string(k.name);
+    }
+  }
+  return "unknown";
 }
 
 // kind/entity_type predicate value: name -> stored int, by FIELD (not view).
@@ -584,6 +597,7 @@ struct Stream {
   std::vector<std::vector<Cell>> rows; // rows shape
   std::vector<int64_t> row_ids;        // per-row id (order_by tie-break)
   std::vector<RowStatus> row_status;   // aligned with rows
+  std::vector<PathWitness> paths;      // Shape::Path
   bool truncated = false;
   bool partial = false;
   bool unknown = false;
@@ -790,6 +804,15 @@ public:
         break;
       case StageOp::Limit:
         apply_limit(st, stage.n);
+        break;
+      case StageOp::Path:
+        path_stage(st, stage);
+        break;
+      case StageOp::Rank:
+        rank_stage(st, stage);
+        break;
+      case StageOp::ReverseTypeUse:
+        reverse_type_use_stage(st, stage);
         break;
       }
       if (st.shape == Shape::Scalar) {
@@ -1417,8 +1440,7 @@ private:
       for (const auto &key : st.keys) {
         add_ids("SELECT ?", {SqlValue(key.a)});
       }
-    } else if (inbound && st.view == View::Symbol &&
-               rel.name == "of_type") {
+    } else if (inbound && st.view == View::Symbol && rel.name == "of_type") {
       for (const auto owner : st.ids) {
         add_keys(
             View::SignatureSlot,
@@ -1951,6 +1973,384 @@ private:
       std::ranges::set_difference(a, b, std::back_inserter(out));
     }
     st.ids = std::move(out);
+  }
+
+  // Evidence for one witness hop over a non-typed symbol/entity relation.
+  // Entity-layer relations are derived (no site rows); symbol-layer relations
+  // look up the physical edge row for (parent,child) respecting direction.
+  std::vector<EdgeSiteRow> hop_sites(bool entity_layer, int64_t kind_id,
+                                     bool inbound, int64_t parent_id,
+                                     int64_t child_id) {
+    if (entity_layer) {
+      return {};
+    }
+    const int64_t src = inbound ? child_id : parent_id;
+    const int64_t dst = inbound ? parent_id : child_id;
+    auto query = read_.read_db().prepare(
+        "SELECT id FROM edge WHERE src_id=? AND dst_id=? AND kind=?");
+    query.bind(1, src);
+    query.bind(2, dst);
+    query.bind(3, kind_id);
+    if (!query.step()) {
+      return {};
+    }
+    return read_.graph_read().edge_sites_one(
+        query.col_int64(0), static_cast<int>(kDefaultResultCap));
+  }
+
+  // Bounded deterministic shortest witness path(s): a multi-source BFS that
+  // also records, per reached node, every predecessor reaching it at that
+  // depth (the shortest-path DAG), so every minimal-depth witness -- not only
+  // one -- can be reconstructed once the target set is first reached.
+  void path_stage(Stream &st, const Stage &stage) {
+    const RelationDesc *rel =
+        resolve_relation(stage.relation, st.view, stage.inbound);
+    const bool entity_layer = rel->layer == View::Entity;
+    const std::string table = entity_layer ? "entity_edge" : "edge";
+    const bool inbound = stage.inbound;
+    const std::string from_col = inbound ? "dst_id" : "src_id";
+    const std::string to_col = inbound ? "src_id" : "dst_id";
+
+    Stream target_stream = run_plan(*stage.operand);
+    const std::set<int64_t> targets(target_stream.ids.begin(),
+                                    target_stream.ids.end());
+    st.truncated = st.truncated || target_stream.truncated;
+
+    std::vector<int64_t> starts = st.ids;
+    std::ranges::sort(starts);
+    starts.erase(std::ranges::unique(starts).begin(), starts.end());
+
+    std::vector<PathWitness> results;
+    int64_t budget_used = 0;
+    bool truncated = false;
+    const std::string domain = entity_layer ? "entity" : "symbol";
+
+    for (const int64_t start : starts) {
+      if (truncated) {
+        break;
+      }
+      std::vector<int64_t> frontier{start};
+      std::set<int64_t> visited{start};
+      // preds[d-1]: child -> sorted parent ids reaching it at depth d.
+      std::vector<std::map<int64_t, std::vector<int64_t>>> preds;
+      int64_t found_depth = -1;
+      for (int64_t depth = 1; depth <= stage.max_depth && !frontier.empty();
+           ++depth) {
+        std::map<int64_t, std::vector<int64_t>> parent_of;
+        for (size_t at = 0; at < frontier.size(); at += kIdChunk) {
+          const size_t n = std::min(kIdChunk, frontier.size() - at);
+          std::string sql = "SELECT ";
+          sql += from_col;
+          sql += ",";
+          sql += to_col;
+          sql += " FROM ";
+          sql += table;
+          sql += " WHERE kind = ? AND ";
+          sql += from_col;
+          sql += " IN (";
+          sql += placeholders(n);
+          sql += ") ORDER BY 1,2";
+          std::vector<SqlValue> args;
+          args.emplace_back(rel->kind_id);
+          for (size_t i = 0; i < n; ++i) {
+            args.emplace_back(frontier[at + i]);
+          }
+          auto query = read_.read_db().prepare(sql);
+          for (size_t i = 0; i < args.size(); ++i) {
+            query.bind(static_cast<int>(i + 1), args[i]);
+          }
+          while (query.step()) {
+            const int64_t parent = query.col_int64(0);
+            const int64_t child = query.col_int64(1);
+            if (visited.contains(child)) {
+              continue; // witnesses stay simple paths: no repeated node
+            }
+            parent_of[child].push_back(parent);
+            ++budget_used;
+          }
+        }
+        if (budget_used > kPathNodeBudget) {
+          truncated = true;
+          break;
+        }
+        if (parent_of.empty()) {
+          break;
+        }
+        for (auto &[child, parents] : parent_of) {
+          visited.insert(child);
+          std::ranges::sort(parents);
+        }
+        preds.push_back(parent_of);
+        std::vector<int64_t> level;
+        level.reserve(parent_of.size());
+        for (const auto &[child, parents] : parent_of) {
+          level.push_back(child);
+        }
+        std::ranges::sort(level);
+        if (depth >= stage.min_depth &&
+            std::ranges::any_of(
+                level, [&](int64_t id) { return targets.contains(id); })) {
+          found_depth = depth;
+          break;
+        }
+        frontier = std::move(level);
+      }
+      if (truncated) {
+        break;
+      }
+      if (found_depth < 0) {
+        continue;
+      }
+      std::vector<int64_t> hit_targets;
+      for (const auto &[child, parents] : preds[found_depth - 1]) {
+        if (targets.contains(child)) {
+          hit_targets.push_back(child);
+        }
+      }
+      std::ranges::sort(hit_targets);
+      for (const int64_t target : hit_targets) {
+        std::vector<std::vector<int64_t>> chains{{target}};
+        for (int64_t d = found_depth; d >= 1 && !truncated; --d) {
+          std::vector<std::vector<int64_t>> next_chains;
+          for (const auto &chain : chains) {
+            for (const int64_t parent : preds[d - 1].at(chain.back())) {
+              std::vector<int64_t> extended = chain;
+              extended.push_back(parent);
+              next_chains.push_back(std::move(extended));
+              if (next_chains.size() > static_cast<size_t>(kDefaultResultCap)) {
+                truncated = true;
+                break;
+              }
+            }
+            if (truncated) {
+              break;
+            }
+          }
+          chains = std::move(next_chains);
+        }
+        for (auto chain : chains) {
+          std::ranges::reverse(chain); // was target..start; want start..target
+          PathWitness witness;
+          witness.length = found_depth;
+          witness.status =
+              rel->completeness == "complete" ? "complete" : "partial";
+          for (size_t i = 0; i < chain.size(); ++i) {
+            PathStep step;
+            step.node_id = chain[i];
+            step.domain = domain;
+            step.inbound = inbound;
+            step.status = rel->completeness;
+            if (i > 0) {
+              step.through = rel->name;
+              step.sites = hop_sites(entity_layer, rel->kind_id, inbound,
+                                     chain[i - 1], chain[i]);
+            }
+            witness.steps.push_back(std::move(step));
+          }
+          results.push_back(std::move(witness));
+          if (results.size() > static_cast<size_t>(kDefaultResultCap)) {
+            truncated = true;
+            break;
+          }
+        }
+        if (truncated) {
+          break;
+        }
+      }
+    }
+
+    sort_and_cap_witnesses(results, stage.n, truncated);
+    st.paths = std::move(results);
+    st.truncated = st.truncated || truncated;
+    st.ids.clear();
+    st.keys.clear();
+    st.shape = Shape::Path;
+  }
+
+  // Deterministic default/rerank order for a Path stream: shortest-first,
+  // ties broken by the lexicographic ascending node-id sequence.
+  static void sort_and_cap_witnesses(std::vector<PathWitness> &results,
+                                     int64_t cap, bool &truncated) {
+    std::ranges::sort(results, [](const PathWitness &a, const PathWitness &b) {
+      if (a.length != b.length) {
+        return a.length < b.length;
+      }
+      for (size_t i = 0; i < a.steps.size() && i < b.steps.size(); ++i) {
+        if (a.steps[i].node_id != b.steps[i].node_id) {
+          return a.steps[i].node_id < b.steps[i].node_id;
+        }
+      }
+      return a.steps.size() < b.steps.size();
+    });
+    if (cap > 0 && std::cmp_greater(results.size(), cap)) {
+      results.resize(static_cast<size_t>(cap));
+    }
+    if (std::cmp_greater(results.size(), kDefaultResultCap)) {
+      results.resize(kDefaultResultCap);
+      truncated = true;
+    }
+  }
+
+  static void rank_stage(Stream &st, const Stage &stage) {
+    bool truncated = st.truncated;
+    sort_and_cap_witnesses(st.paths, stage.n, truncated);
+    st.truncated = truncated;
+  }
+
+  // One owner (declaration whose signature/template facts reach `type_id`
+  // directly, with no further nesting) across every owner-fact domain.
+  struct TypeOwner {
+    std::string domain;  // "symbol" | "parameter" | "template_parameter" |
+                         // "template_argument"
+    int64_t node_id = 0; // owning declaration's symbol id
+  };
+
+  std::vector<TypeOwner> owners_of_type(int64_t type_id) {
+    std::vector<TypeOwner> out;
+    for (const auto &[symbol_id, kind] :
+         read_.graph_read().symbol_type_owners_of_types({type_id})) {
+      (void)kind; // role (returns/of_type/underlying_type) not surfaced here
+      out.push_back({.domain = "symbol", .node_id = symbol_id});
+    }
+    for (const auto &[owner_id, position] :
+         read_.graph_read().param_owners_of_types({type_id})) {
+      (void)position;
+      out.push_back({.domain = "parameter", .node_id = owner_id});
+    }
+    auto owners_from = [&](const char *table, const char *domain) {
+      auto query = read_.read_db().prepare(
+          std::string("SELECT DISTINCT owner_id FROM ") + table +
+          " WHERE type_id=? ORDER BY owner_id");
+      query.bind(1, type_id);
+      while (query.step()) {
+        out.push_back({.domain = domain, .node_id = query.col_int64(0)});
+      }
+    };
+    owners_from("template_param", "template_parameter");
+    owners_from("template_arg", "template_argument");
+    return out;
+  }
+
+  // Typed reverse type-use: from a seed `type`/`type_layer` id, climb
+  // type_edge (structural nesting: pointee/element_type/return_type/
+  // param_type/template_argument_type/member_owner/member_component) and
+  // type_node.canonical_id (cv/sugar desugaring) backward, emitting one
+  // witness per owner found at every depth -- direct use at depth 0 and
+  // every nested layer up to max_depth. Mirrors graph::GraphQuery::
+  // type_users()'s type_ids_reaching() closure (type_edge + canonical_id,
+  // both backward) but keeps the per-branch ordered `through` chain that a
+  // flat closure set cannot carry.
+  void reverse_type_use_stage(Stream &st, const Stage &stage) {
+    std::vector<int64_t> seeds;
+    if (st.view == View::Type) {
+      for (const auto &key : st.keys) {
+        seeds.push_back(key.a); // View::Type keys are the type_node id itself
+      }
+    } else {
+      graph::GraphQuery graph(read_.graph_read());
+      for (const auto &key : st.keys) {
+        const auto layers = graph.type_layers(key.a);
+        if (key.b >= 0 && static_cast<size_t>(key.b) < layers.size()) {
+          seeds.push_back(layers[static_cast<size_t>(key.b)].type.id);
+        }
+      }
+    }
+    std::ranges::sort(seeds);
+    seeds.erase(std::ranges::unique(seeds).begin(), seeds.end());
+
+    struct Frame {
+      int64_t type_id = 0;
+      int64_t depth = 0;
+      std::vector<std::pair<int64_t, std::string>> chain; // (type_id,through)
+    };
+
+    std::vector<PathWitness> results;
+    int64_t budget_used = 0;
+    bool truncated = false;
+
+    for (const int64_t seed : seeds) {
+      if (truncated) {
+        break;
+      }
+      std::vector<Frame> stack;
+      stack.push_back({.type_id = seed, .depth = 0, .chain = {{seed, ""}}});
+      while (!stack.empty() && !truncated) {
+        Frame frame = std::move(stack.back());
+        stack.pop_back();
+        if (++budget_used > kPathNodeBudget) {
+          truncated = true;
+          break;
+        }
+        for (const auto &owner : owners_of_type(frame.type_id)) {
+          PathWitness witness;
+          witness.length = frame.depth + 1;
+          witness.status = "partial"; // of_type/parameter/... are cataloged
+                                      // partial
+          for (const auto &[layer_type_id, through] : frame.chain) {
+            PathStep step;
+            step.node_id = layer_type_id;
+            step.domain = "type";
+            step.through = through;
+            step.status = "complete"; // structural type nesting is complete
+            witness.steps.push_back(std::move(step));
+          }
+          PathStep final_step;
+          final_step.node_id = owner.node_id;
+          final_step.domain = owner.domain;
+          final_step.through = owner.domain;
+          final_step.status = "partial";
+          witness.steps.push_back(std::move(final_step));
+          results.push_back(std::move(witness));
+          if (results.size() > static_cast<size_t>(kDefaultResultCap)) {
+            truncated = true;
+            break;
+          }
+        }
+        if (truncated || frame.depth >= stage.max_depth) {
+          continue;
+        }
+        std::vector<std::pair<int64_t, std::string>> parents;
+        {
+          auto query = read_.read_db().prepare(
+              "SELECT src_id, kind FROM type_edge WHERE dst_id=? "
+              "ORDER BY src_id");
+          query.bind(1, frame.type_id);
+          while (query.step()) {
+            parents.emplace_back(query.col_int64(0),
+                                 type_edge_kind_name(query.col_int64(1)));
+          }
+        }
+        {
+          auto query = read_.read_db().prepare(
+              "SELECT id FROM type_node WHERE canonical_id=? ORDER BY id");
+          query.bind(1, frame.type_id);
+          while (query.step()) {
+            parents.emplace_back(query.col_int64(0), "sugared_by");
+          }
+        }
+        for (const auto &[parent_id, through] : parents) {
+          if (std::ranges::any_of(frame.chain, [&](const auto &kv) {
+                return kv.first == parent_id;
+              })) {
+            continue; // structural nesting is acyclic in practice; guard
+                      // anyway so a data anomaly cannot loop forever
+          }
+          Frame next;
+          next.type_id = parent_id;
+          next.depth = frame.depth + 1;
+          next.chain = frame.chain;
+          next.chain.emplace_back(parent_id, through);
+          stack.push_back(std::move(next));
+        }
+      }
+    }
+
+    sort_and_cap_witnesses(results, 0, truncated);
+    st.paths = std::move(results);
+    st.truncated = st.truncated || truncated;
+    st.ids.clear();
+    st.keys.clear();
+    st.shape = Shape::Path;
   }
 
   std::optional<std::string> file_path(int64_t file_id) {
@@ -2486,10 +2886,10 @@ private:
                 const std::optional<int64_t> &type_id,
                 const std::optional<int64_t> &declared,
                 const std::optional<int64_t> &adjusted,
-            const std::optional<std::string> &default_text,
-            const std::optional<std::string> &default_origin,
-            const std::optional<std::string> &reference,
-            const graph::GraphQuery::SlotFacts &facts) {
+                const std::optional<std::string> &default_text,
+                const std::optional<std::string> &default_origin,
+                const std::optional<std::string> &reference,
+                const graph::GraphQuery::SlotFacts &facts) {
               for (const auto &field : fields) {
                 if (field == "id") {
                   cells.emplace_back(logical_row_id(st.view, key));
@@ -2563,9 +2963,9 @@ private:
           const auto adjusted = int_at(query, 3);
           const auto facts = graph.slot_facts_for_ids(
               declared ? declared : type_id, adjusted ? adjusted : type_id);
-          push_slot("parameter", text_at(query, 0), type_id,
-                    declared, adjusted, text_at(query, 4), text_at(query, 5),
-                    text_at(query, 6), facts);
+          push_slot("parameter", text_at(query, 0), type_id, declared, adjusted,
+                    text_at(query, 4), text_at(query, 5), text_at(query, 6),
+                    facts);
         } else if (key.tag == 3) {
           auto query = read_.read_db().prepare(
               "SELECT name,type_id,default_txt,default_type_id FROM "
@@ -2886,6 +3286,29 @@ private:
   }
 
   static void apply_distinct(Stream &st) {
+    if (st.shape == Shape::Path) {
+      std::vector<PathWitness> out;
+      for (auto &witness : st.paths) {
+        const bool dup = std::ranges::any_of(out, [&](const PathWitness &prev) {
+          if (prev.steps.size() != witness.steps.size()) {
+            return false;
+          }
+          for (size_t i = 0; i < prev.steps.size(); ++i) {
+            if (prev.steps[i].node_id != witness.steps[i].node_id ||
+                prev.steps[i].through != witness.steps[i].through ||
+                prev.steps[i].inbound != witness.steps[i].inbound) {
+              return false;
+            }
+          }
+          return true;
+        });
+        if (!dup) {
+          out.push_back(std::move(witness));
+        }
+      }
+      st.paths = std::move(out);
+      return;
+    }
     if (st.shape == Shape::Nodes) {
       if (!st.keys.empty()) {
         std::ranges::sort(st.keys);
@@ -2991,7 +3414,11 @@ private:
 
   static void apply_limit(Stream &st, int64_t n) {
     st.limit_in_effect = true;
-    if (st.shape == Shape::Nodes) {
+    if (st.shape == Shape::Path) {
+      if (std::cmp_greater(st.paths.size(), n)) {
+        st.paths.resize(n);
+      }
+    } else if (st.shape == Shape::Nodes) {
       if (!st.keys.empty()) {
         if (std::cmp_greater(st.keys.size(), n))
           st.keys.resize(n);
@@ -3012,15 +3439,44 @@ public:
     res.view = st.view;
     reject_ambiguous_ungrouped(st);
     if (st.shape == Shape::Scalar) {
-      recompute_status(st);
+      // count() after path()/reverse_type_use() counts witnesses; after
+      // select() it counts rows; otherwise ids/keys hold the stream.
+      if (!st.paths.empty() || st.rows.empty()) {
+        res.truncated = st.truncated;
+        res.partial = std::ranges::any_of(st.paths, [](const PathWitness &w) {
+          return w.status == "partial";
+        });
+        res.unknown = st.unknown;
+      } else {
+        recompute_status(st);
+        res.truncated = st.truncated;
+        res.partial = st.partial;
+        res.unknown = st.unknown;
+      }
       res.shape = Shape::Scalar;
+      if (!st.paths.empty()) {
+        res.scalar = static_cast<int64_t>(st.paths.size());
+      } else if (!st.rows.empty()) {
+        res.scalar = static_cast<int64_t>(st.rows.size());
+      } else if (!st.keys.empty()) {
+        res.scalar = static_cast<int64_t>(st.keys.size());
+      } else {
+        res.scalar = static_cast<int64_t>(st.ids.size());
+      }
+      return res;
+    }
+    if (st.shape == Shape::Path) {
+      if (!st.limit_in_effect &&
+          static_cast<int64_t>(st.paths.size()) > kDefaultResultCap) {
+        st.paths.resize(kDefaultResultCap);
+        st.truncated = true;
+      }
+      res.shape = Shape::Path;
       res.truncated = st.truncated;
-      res.partial = st.partial;
+      res.partial = std::ranges::any_of(
+          st.paths, [](const PathWitness &w) { return w.status == "partial"; });
       res.unknown = st.unknown;
-      // count() after select carries rows; otherwise ids hold the stream.
-      res.scalar = static_cast<int64_t>(
-          st.rows.empty() ? (st.keys.empty() ? st.ids.size() : st.keys.size())
-                          : st.rows.size());
+      res.paths = std::move(st.paths);
       return res;
     }
     if (st.shape == Shape::Nodes) {
@@ -3051,6 +3507,47 @@ public:
 
 } // namespace
 
+namespace {
+
+json_out::Value path_step_to_json(const PathStep &step) {
+  using namespace json_out;
+  Object o;
+  o.emplace_back("id", Value::of(step.node_id));
+  o.emplace_back("domain", Value::of(step.domain));
+  o.emplace_back("through", Value::of(step.through));
+  if (step.inbound) {
+    o.emplace_back("direction", Value::of(std::string("in")));
+  }
+  o.emplace_back("status", Value::of(step.status));
+  Array sites;
+  for (const auto &site : step.sites) {
+    Object so;
+    so.emplace_back("file_id",
+                    site.file_id ? Value::of(*site.file_id) : Value::null());
+    so.emplace_back("line", site.line ? Value::of(*site.line) : Value::null());
+    so.emplace_back("col", site.col ? Value::of(*site.col) : Value::null());
+    so.emplace_back("conditional", Value::of(site.conditional));
+    sites.push_back(Value::obj(std::move(so)));
+  }
+  o.emplace_back("sites", Value::arr(std::move(sites)));
+  return Value::obj(std::move(o));
+}
+
+json_out::Value path_witness_to_json(const PathWitness &witness) {
+  using namespace json_out;
+  Object o;
+  o.emplace_back("length", Value::of(witness.length));
+  o.emplace_back("status", Value::of(witness.status));
+  Array steps;
+  for (const auto &step : witness.steps) {
+    steps.push_back(path_step_to_json(step));
+  }
+  o.emplace_back("steps", Value::arr(std::move(steps)));
+  return Value::obj(std::move(o));
+}
+
+} // namespace
+
 json_out::Value Result::to_json() const {
   using namespace json_out;
   Object o;
@@ -3060,6 +3557,17 @@ json_out::Value Result::to_json() const {
     o.emplace_back("count", Value::of(scalar));
     o.emplace_back("truncated", Value::of(truncated));
     o.emplace_back("index", index_identity_json(index));
+    return Value::obj(std::move(o));
+  }
+  if (shape == Shape::Path) {
+    o.emplace_back("count", Value::of(static_cast<int64_t>(paths.size())));
+    o.emplace_back("truncated", Value::of(truncated));
+    o.emplace_back("index", index_identity_json(index));
+    Array arr;
+    for (const auto &witness : paths) {
+      arr.push_back(path_witness_to_json(witness));
+    }
+    o.emplace_back("paths", Value::arr(std::move(arr)));
     return Value::obj(std::move(o));
   }
   o.emplace_back("count", Value::of(static_cast<int64_t>(rows.size())));
@@ -3093,11 +3601,20 @@ protocol::ResultEnvelope Result::to_envelope() const {
   payload.emplace_back("view", Value::of(std::string(view_name(view))));
   if (shape == Shape::Scalar) {
     payload.emplace_back("count", Value::of(scalar));
+  } else if (shape == Shape::Path) {
+    payload.emplace_back("count",
+                         Value::of(static_cast<int64_t>(paths.size())));
   } else {
     payload.emplace_back("count", Value::of(static_cast<int64_t>(rows.size())));
   }
   payload.emplace_back("truncated", Value::of(truncated));
-  if (shape != Shape::Scalar) {
+  if (shape == Shape::Path) {
+    Array path_values;
+    for (const auto &witness : paths) {
+      path_values.push_back(path_witness_to_json(witness));
+    }
+    payload.emplace_back("paths", Value::arr(std::move(path_values)));
+  } else if (shape != Shape::Scalar) {
     Array row_values;
     for (const auto &row : rows) {
       Object row_value;
@@ -3212,12 +3729,97 @@ Result Executor::run(const Plan &plan) {
   return res;
 }
 
+namespace {
+
+void collect_relation_names(const Pred &p, std::set<std::string> &names) {
+  switch (p.op) {
+  case PredOp::AllOf:
+  case PredOp::AnyOf:
+    for (const auto &kid : p.kids) {
+      collect_relation_names(kid, names);
+    }
+    return;
+  case PredOp::Not:
+    collect_relation_names(p.kids[0], names);
+    return;
+  case PredOp::Exists:
+  case PredOp::None:
+  case PredOp::All:
+  case PredOp::AtLeast:
+  case PredOp::Exactly:
+    names.insert(p.relation);
+    if (p.target) {
+      collect_relation_names(*p.target, names);
+    }
+    return;
+  case PredOp::Eq:
+  case PredOp::Ne:
+  case PredOp::Glob:
+  case PredOp::In:
+    return;
+  }
+}
+
+// Every relation a normalized plan touches (traversals, path()/
+// reverse_type_use() are traversal-shaped over type_edge/owner tables so
+// they are not catalogued relations, and quantifier predicates), including
+// one level into union()/intersect()/except()/path() "to" operand plans.
+void collect_stage_relations(const Stage &stage, std::set<std::string> &names) {
+  if (stage.op == StageOp::Out || stage.op == StageOp::In ||
+      stage.op == StageOp::Path) {
+    names.insert(stage.relation);
+  }
+  if (stage.pred) {
+    collect_relation_names(*stage.pred, names);
+  }
+  if (stage.operand) {
+    for (const auto &sub : stage.operand->stages) {
+      collect_stage_relations(sub, names);
+    }
+  }
+}
+
+} // namespace
+
 json_out::Value Executor::explain(const Plan &plan) {
+  using namespace json_out;
   const Plan normalized = validate(plan);
-  json_out::Object o;
+  Object o;
   o.emplace_back("plan", plan_to_json(normalized));
   o.emplace_back("index", index_identity_json(read_.index_identity()));
-  return json_out::Value::obj(std::move(o));
+  o.emplace_back("execution_shape",
+                 Value::of(shape_name(final_shape(normalized))));
+
+  Object budgets;
+  budgets.emplace_back("traverse_node_budget", Value::of(kTraverseNodeBudget));
+  budgets.emplace_back("enumerate_budget", Value::of(kEnumerateBudget));
+  budgets.emplace_back("path_node_budget", Value::of(kPathNodeBudget));
+  budgets.emplace_back("default_result_cap", Value::of(kDefaultResultCap));
+  o.emplace_back("budgets", Value::obj(std::move(budgets)));
+
+  std::set<std::string> relation_names;
+  for (const auto &stage : normalized.stages) {
+    collect_stage_relations(stage, relation_names);
+  }
+  Array relations;
+  bool partial_inputs = false;
+  bool unknown_capable_inputs = false;
+  for (const auto &name : relation_names) {
+    const RelationDesc *rel = resolve_qualified_relation(name);
+    Object ro;
+    ro.emplace_back("relation", Value::of(name));
+    const std::string completeness =
+        rel != nullptr ? rel->completeness : "unknown";
+    ro.emplace_back("completeness", Value::of(completeness));
+    partial_inputs = partial_inputs || completeness == "partial";
+    unknown_capable_inputs =
+        unknown_capable_inputs || completeness != "complete";
+    relations.push_back(Value::obj(std::move(ro)));
+  }
+  o.emplace_back("input_relations", Value::arr(std::move(relations)));
+  o.emplace_back("partial_inputs", Value::of(partial_inputs));
+  o.emplace_back("unknown_capable_inputs", Value::of(unknown_capable_inputs));
+  return Value::obj(std::move(o));
 }
 
 } // namespace cidx::query

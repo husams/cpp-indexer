@@ -90,6 +90,29 @@ constexpr size_t kIdChunk = 400;
 // One result cell: null, integer, or text.
 using Cell = std::variant<std::nullptr_t, int64_t, std::string>;
 
+// Execution budget for the bounded witness-path search (path()/
+// reverse_type_use()): total node/type expansions across the whole stage.
+constexpr int64_t kPathNodeBudget = 10000;
+
+// One hop of a witness path: the node reached and the typed label of the
+// relation/type-edge that reached it. `through` is empty for the start node.
+struct PathStep {
+  int64_t node_id = 0;
+  std::string domain;  // "symbol" | "entity" | "type" | owner-domain name
+  std::string through; // relation/type_edge_kind label into this node ("" at
+                       // the start)
+  bool inbound = false;
+  std::string status = "complete"; // per-hop completeness
+  std::vector<EdgeSiteRow> sites;  // evidence for the hop into this node
+};
+
+// One bounded ordered witness path (docs/query-plan.md "Path result shape").
+struct PathWitness {
+  std::vector<PathStep> steps;     // ordered start..target, inclusive
+  int64_t length = 0;              // number of hops (steps.size() - 1)
+  std::string status = "complete"; // aggregated: partial if any hop is
+};
+
 struct Result {
   Shape shape = Shape::Nodes;
   View view = View::Symbol;
@@ -99,6 +122,7 @@ struct Result {
   int64_t scalar = 0;                  // Shape::Scalar only
   std::vector<std::string> fields;     // row column names, select order
   std::vector<std::vector<Cell>> rows; // Shape::Nodes/Rows
+  std::vector<PathWitness> paths;      // Shape::Path only
   IndexIdentity index;
 
   // {"shape","view","count","truncated","index","rows"} -- see
@@ -121,8 +145,11 @@ public:
   Result run(const Plan &plan);
 
   // Explain a plan without executing its row-producing stages. The returned
-  // object contains the normalized plan and the same index identity reported
-  // by Result::to_json().
+  // object contains the normalized plan, the same index identity reported by
+  // Result::to_json(), the final execution shape ("nodes"/"rows"/"scalar"/
+  // "path"), the execution budgets, and every relation the plan touches with
+  // its catalogued completeness (surfacing partial/unknown-capable inputs
+  // before any query runs).
   [[nodiscard]] json_out::Value explain(const Plan &plan);
 
 private:

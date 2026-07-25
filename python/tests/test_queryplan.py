@@ -23,7 +23,8 @@ from indexer import queryplan as qp  # noqa: E402
 from indexer.queryplan import (  # noqa: E402
     Executor, PlanError, all_of, canonical_json, codebase, count, distinct,
     entity, eq, except_, glob, in_, in_list, intersect, limit, ne, nodes,
-    not_, order_by, out, select, sites, start, symbol, union_, validate, view, where,
+    not_, order_by, out, path, rank, reverse_type_use, select, sites, start,
+    symbol, union_, validate, view, where,
     all, all_targets, any_target, at_least, exactly, exists, inherits_from,
     is_abstract, is_instance, none,
     parse_cxq,
@@ -73,6 +74,11 @@ def _golden_plans():
                                     eq("is_static", False)]),
                             not_(not_(ne("spelling", "x")))]))
             | count()
+        ).plan,
+        "path_calls": (
+            start(symbol("USR::A"))
+            | path(start(symbol("USR::C")), "calls", 1, 8, 1)
+            | rank(5) | limit(1)
         ).plan,
     }
 
@@ -1243,3 +1249,191 @@ def test_typed_view_compositions_are_rejected_before_execution():
     assert '"op": "sites"' in canonical_json(
         (start(codebase()) | view("edge") | nodes() | sites()).plan
     )
+
+
+# ---------------------------------------------------------------------------
+# HSE-31 (CXQ-004): bounded witness paths, ranking, explain
+# ---------------------------------------------------------------------------
+
+def _error_code(fn):
+    try:
+        fn()
+    except PlanError as exc:
+        return str(exc).split(":", 1)[0]
+    return "<no-error>"
+
+
+def test_path_validation_errors():
+    code = lambda p: _error_code(lambda: validate(p))  # noqa: E731
+
+    assert code((start(symbol("A")) | where(eq("kind", "function"))
+                 | path(start(symbol("C")), "calls")).plan) == "<no-error>"
+    assert code((start(symbol("A"))
+                 | path(start(symbol("C")), "bogus")).plan) == "E_RELATION"
+    assert code((start(symbol("A"))
+                 | path(start(symbol("C")), "has_parameter")).plan) == "E_RELATION"
+    assert code((start(symbol("A"))
+                 | path(start(symbol("C")), "calls", 1, 40)).plan) == "E_DEPTH"
+    assert code((start(symbol("A")) | path(start(symbol("C")), "calls", 1, 8,
+                                           -1)).plan) == "E_LIMIT"
+    assert code((start(symbol("A"))
+                 | path(start(entity("C")), "calls")).plan) == "E_SETOP"
+    assert code((start(codebase()) | view("type") | nodes()
+                 | path(start(symbol("C")), "calls")).plan) == "E_VIEW"
+    assert code((start(symbol("A")) | path(start(symbol("C")), "calls")
+                 | rank(-1)).plan) == "E_LIMIT"
+    assert code((start(symbol("A")) | rank()).plan) == "E_STAGE"
+    assert code((start(symbol("A")) | path(start(symbol("C")), "calls")
+                 | out("calls")).plan) == "E_STAGE"
+    assert code((start(symbol("A")) | path(start(symbol("C")), "calls")
+                 | order_by(["name"])).plan) == "E_STAGE"
+
+
+def test_reverse_type_use_validation_errors():
+    code = lambda p: _error_code(lambda: validate(p))  # noqa: E731
+
+    assert code((start(symbol("A"))
+                 | reverse_type_use()).plan) == "E_VIEW"
+    assert code((start(codebase()) | view("type") | nodes()
+                 | reverse_type_use(0)).plan) == "E_DEPTH"
+    assert code((start(codebase()) | view("type") | nodes()
+                 | reverse_type_use(33)).plan) == "E_DEPTH"
+
+
+def test_path_finds_the_shortest_witness_with_sites(seeded):
+    db, ids = seeded
+    component = db.add_component("project", "/tmp/path-view")
+    directory = db.add_directory(component, "src")
+    file_id = db.add_file(directory, "path.cpp")
+    edge = next(db._conn.execute(
+        "SELECT id FROM edge WHERE src_id=? AND dst_id=? AND kind=1",
+        (ids["A"], ids["B"])))[0]
+    db.add_edge_site(edge, file_id, 1, 1)
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(symbol("USR::A"))
+         | path(start(symbol("USR::C")), "calls", 1, 8, 1)).plan)
+    assert result.shape == "path"
+    assert len(result.paths) == 1
+    witness = result.paths[0]
+    assert witness.length == 2
+    assert [s.node_id for s in witness.steps] == [ids["A"], ids["B"], ids["C"]]
+    assert witness.steps[0].through == ""
+    assert witness.steps[1].through == "calls"
+    assert witness.steps[2].through == "calls"
+    assert len(witness.steps[1].sites) == 1
+    assert witness.steps[1].sites[0]["line"] == 1
+    assert not result.truncated
+
+
+def test_path_reports_no_witness_within_a_narrow_window(seeded):
+    db, ids = seeded
+    ex = Executor(db)
+    result = ex.run(
+        (start(symbol("USR::A"))
+         | path(start(symbol("USR::C")), "calls", 1, 1)).plan)
+    assert result.paths == []
+    assert not result.truncated
+
+
+def test_path_ties_are_broken_by_ascending_node_id_order():
+    db = Storage(":memory:")
+    start_id = db.add_symbol(_make_sym("USR::S", "s"))
+    left = db.add_symbol(_make_sym("USR::L", "l"))
+    right = db.add_symbol(_make_sym("USR::R", "r"))
+    target = db.add_symbol(_make_sym("USR::T", "t"))
+    db.add_edge(start_id, left, 1)
+    db.add_edge(start_id, right, 1)
+    db.add_edge(left, target, 1)
+    db.add_edge(right, target, 1)
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(symbol("USR::S"))
+         | path(start(symbol("USR::T")), "calls", 1, 8)).plan)
+    assert len(result.paths) == 2
+    assert result.paths[0].steps[1].node_id == min(left, right)
+    assert result.paths[1].steps[1].node_id == max(left, right)
+
+    ranked = ex.run(
+        (start(symbol("USR::S"))
+         | path(start(symbol("USR::T")), "calls", 1, 8) | rank(1)).plan)
+    assert len(ranked.paths) == 1
+    assert ranked.paths[0].steps[1].node_id == min(left, right)
+
+
+def test_path_count_distinct_limit_apply_to_witnesses(seeded):
+    db, ids = seeded
+    ex = Executor(db)
+    counted = ex.run(
+        (start(symbol("USR::A"))
+         | path(start(symbol("USR::C")), "calls", 1, 8) | count()).plan)
+    assert counted.shape == "scalar"
+    assert counted.scalar == 1
+
+    limited = ex.run(
+        (start(symbol("USR::A"))
+         | path(start(symbol("USR::C")), "calls", 1, 8) | limit(1)).plan)
+    assert len(limited.paths) == 1
+
+    deduped = ex.run(
+        (start(symbol("USR::A"))
+         | path(start(symbol("USR::C")), "calls", 1, 8) | distinct()).plan)
+    assert len(deduped.paths) == 1
+
+
+def test_reverse_type_use_retains_every_typed_layer():
+    db = Storage(":memory:")
+    owner = db.add_symbol(_make_sym("USR::owner", "owner"))
+    db._conn.execute(
+        "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+        "('A4(b:int)','int[4]',8,'4'),('b:int','int',1,NULL)")
+    array_id, int_id = [row[0] for row in db._conn.execute(
+        "SELECT id FROM type_node ORDER BY id")]
+    db._conn.execute(
+        "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES "
+        "(?,2,0,?)", (array_id, int_id))
+    db._conn.execute(
+        "INSERT INTO symbol_type(symbol_id,kind,type_id) VALUES (?,1,?)",
+        (owner, array_id))
+    db._conn.execute(
+        "INSERT INTO parameter(owner_id,position,pack_index,name,type_id) "
+        "VALUES (?,0,-1,'value',?)", (owner, int_id))
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(codebase()) | view("type") | nodes()
+         | where(eq("type_key", "b:int")) | reverse_type_use()).plan)
+    assert result.shape == "path"
+    assert len(result.paths) == 2
+
+    direct = next(w for w in result.paths if w.length == 1)
+    assert direct.steps[-1].domain == "parameter"
+    assert direct.steps[-1].node_id == owner
+
+    nested = next(w for w in result.paths if w.length == 2)
+    assert len(nested.steps) == 3
+    assert nested.steps[0].node_id == int_id
+    assert nested.steps[1].node_id == array_id
+    assert nested.steps[1].through == "element_type"
+    assert nested.steps[2].domain == "symbol"
+    assert nested.steps[2].node_id == owner
+
+
+def test_explain_reports_budgets_shape_and_input_relations(seeded):
+    db, ids = seeded
+    ex = Executor(db)
+    plan = (start(symbol("USR::A"))
+           | path(start(symbol("USR::C")), "calls", 1, 8, 1)).plan
+    explained = ex.explain(plan)
+    assert explained["execution_shape"] == "path"
+    assert explained["budgets"]["traverse_node_budget"] == 10000
+    assert explained["budgets"]["path_node_budget"] == 10000
+    assert explained["budgets"]["default_result_cap"] == 1000
+    assert {"relation": "symbol.calls", "completeness": "partial"} in \
+        explained["input_relations"]
+    assert explained["partial_inputs"] is True
