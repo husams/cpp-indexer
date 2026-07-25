@@ -271,7 +271,9 @@ add_library(cidx_ast OBJECT
   src/ast/statement_edge_visitor.cpp src/ast/function_definition_visitor.cpp
   src/ast/call_template_args.cpp src/ast/display_name_rewrite.cpp
   src/ast/receiver_provenance.cpp src/ast/instantiation_edges.cpp
-  src/ast/namespace_use_visitor.cpp src/ast/index_engine.cpp
+  src/ast/namespace_use_visitor.cpp
+  src/ast/fact_batch.cpp src/ast/indexing_plan.cpp src/ast/pass_registry.cpp
+  src/ast/index_engine.cpp
   src/ast/include_facts.cpp
   src/ast/clang_version.cpp)
 target_include_directories(cidx_ast PRIVATE

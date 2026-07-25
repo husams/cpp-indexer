@@ -1,6 +1,6 @@
 #include "ast/statement_edge_visitor.hpp"
 
-#include "ast/edge_sink.hpp"
+#include "ast/fact_emitters.hpp"
 #include "ast/kind_map.hpp"
 #include "ast/location.hpp"
 #include "ast/names.hpp"
@@ -56,9 +56,17 @@ bool is_function_like_decl(const clang::Decl *d) {
 } // namespace
 
 StatementEdgeVisitor::StatementEdgeVisitor(clang::ASTContext &context,
-                                           EdgeSink &sink, int64_t src_id,
-                                           int64_t file_id)
-    : ctx_(context, sink, src_id, file_id), emitter_(ctx_) {}
+                                           StatementFactPorts &ports,
+                                           int64_t src_id, int64_t file_id,
+                                           std::string file,
+                                           PassMetrics *metrics)
+    : ctx_(context, ports, src_id, file_id, std::move(file), metrics),
+      emitter_(ctx_) {}
+
+auto StatementEdgeVisitor::VisitStmt(clang::Stmt * /*stmt*/) -> bool {
+  ctx_.note_visited();
+  return true;
+}
 
 // Owner USR for the self-owner skip in the type-name branches.
 void StatementEdgeVisitor::record_owner_usr(const clang::FunctionDecl *fn) {
@@ -151,6 +159,9 @@ void StatementEdgeVisitor::emit_call(const clang::CallExpr *call) {
     // indexed overload.
     if (const clang::OverloadExpr *ovl = callee_overload_expr(call)) {
       emit_overloaded_call(call, ovl);
+    } else {
+      ctx_.record_unsupported("CallExpr", call->getBeginLoc(),
+                              "callee could not be resolved");
     }
     return;
   }
@@ -162,6 +173,11 @@ void StatementEdgeVisitor::emit_overloaded_call(
     const clang::CallExpr *call, const clang::OverloadExpr *ovl) {
   const std::vector<const clang::NamedDecl *> cands(ovl->decls_begin(),
                                                     ovl->decls_end());
+  if (cands.empty()) {
+    ctx_.record_unsupported("CallExpr", call->getBeginLoc(),
+                            "overload set is empty");
+    return;
+  }
   if (cands.size() == 1) {
     // Single candidate: recover the concrete callee (template pattern for a
     // FunctionTemplateDecl, minted under the template itself).
@@ -176,30 +192,38 @@ void StatementEdgeVisitor::emit_overloaded_call(
     }
     if (ref != nullptr) {
       emitter_.emit_resolved_call(call, ref, /*recovered=*/true, mint_as);
+    } else {
+      ctx_.record_unsupported("CallExpr", call->getBeginLoc(),
+                              "overload candidate is not a function");
     }
-    return;
-  }
-  if (cands.size() < 2) {
     return;
   }
   // Overload set: fan out to every indexed candidate (minting non-system
   // ones), falling back to qual-name lookup when none resolved.
-  for (const int64_t dst_id : overload_candidate_ids(cands)) {
+  const std::set<int64_t> ids = overload_candidate_ids(call, cands);
+  if (ids.empty()) {
+    ctx_.record_unsupported("CallExpr", call->getBeginLoc(),
+                            "overload candidates could not be resolved");
+  }
+  for (const int64_t dst_id : ids) {
     ctx_.emit_site_edge(call, dst_id, 1);
   }
 }
 
 std::set<int64_t> StatementEdgeVisitor::overload_candidate_ids(
+    const clang::CallExpr *call,
     const std::vector<const clang::NamedDecl *> &cands) {
   std::set<int64_t> dst_ids;
   for (const clang::NamedDecl *cand : cands) {
     const std::string usr = usr_for_decl(cand);
     if (usr.empty()) {
+      ctx_.record_unsupported("CallExpr", call->getBeginLoc(),
+                              "overload candidate has no canonical identity");
       continue;
     }
     const auto identity_source =
         expansion_loc(ctx_.context(), cand->getLocation()).file;
-    if (const auto s = ctx_.sink().lookup_symbol_id(usr, identity_source)) {
+    if (const auto s = ctx_.ports().lookup_symbol_id(usr, identity_source)) {
       dst_ids.insert(*s);
       continue;
     }
@@ -208,13 +232,16 @@ std::set<int64_t> StatementEdgeVisitor::overload_candidate_ids(
       continue;
     }
     if (auto req = ctx_.mint().build(cand)) {
-      dst_ids.insert(ctx_.sink().mint_symbol(*req));
+      dst_ids.insert(ctx_.ports().mint_symbol(*req));
+    } else {
+      ctx_.record_unsupported("CallExpr", call->getBeginLoc(),
+                              "overload candidate identity could not be minted");
     }
   }
   if (dst_ids.empty() && !cands.empty()) {
     const std::string qn = qualified_name(ctx_.context(), cands[0]);
     if (!qn.empty()) {
-      for (const int64_t id : ctx_.sink().symbol_ids_by_qual_name_kind(
+      for (const int64_t id : ctx_.ports().symbol_ids_by_qual_name_kind(
                qn, cidx_stub_kind_name(cands[0]))) {
         dst_ids.insert(id);
       }
@@ -253,7 +280,7 @@ void StatementEdgeVisitor::emit_factory_edge(const clang::CallExpr *call,
     return;
   }
   const auto *fact_decl = args[0].getAsType()->getAsCXXRecordDecl();
-  if (const auto fact = ctx_.sink().lookup_symbol_id(
+  if (const auto fact = ctx_.ports().lookup_symbol_id(
           fact_usr,
           fact_decl != nullptr
               ? std::optional<std::string>(
@@ -264,7 +291,7 @@ void StatementEdgeVisitor::emit_factory_edge(const clang::CallExpr *call,
     fe.src_id = ctx_.src_id();
     fe.dst_id = *fact;
     fe.kind = 15; // factory-construct
-    ctx_.sink().add_edge(fe);
+    ctx_.ports().add_edge(fe);
   }
 }
 
@@ -307,7 +334,7 @@ void StatementEdgeVisitor::emit_construction_form(
     return;
   }
   const auto *type_decl = ctor->getType()->getAsCXXRecordDecl();
-  const auto dst = ctx_.sink().lookup_symbol_id(
+  const auto dst = ctx_.ports().lookup_symbol_id(
       type_usr,
       type_decl != nullptr
           ? std::optional<std::string>(
@@ -332,7 +359,7 @@ void StatementEdgeVisitor::emit_construction_form(
   fe.src_id = ctx_.src_id();
   fe.dst_id = *dst;
   fe.kind = form;
-  ctx_.sink().add_edge(fe);
+  ctx_.ports().add_edge(fe);
 }
 
 // ---- heap -------------------------------------------------------------------
@@ -341,7 +368,7 @@ bool StatementEdgeVisitor::VisitCXXNewExpr(clang::CXXNewExpr *expr) {
   const std::string heap_usr = record_usr_of_type(expr->getType());
   if (!heap_usr.empty()) {
     const auto *heap_decl = expr->getType()->getAsCXXRecordDecl();
-    if (const auto dst = ctx_.sink().lookup_symbol_id(
+    if (const auto dst = ctx_.ports().lookup_symbol_id(
             heap_usr,
             heap_decl != nullptr
                 ? std::optional<std::string>(
@@ -352,7 +379,7 @@ bool StatementEdgeVisitor::VisitCXXNewExpr(clang::CXXNewExpr *expr) {
       fe.src_id = ctx_.src_id();
       fe.dst_id = *dst;
       fe.kind = 12; // construct-heap
-      ctx_.sink().add_edge(fe);
+      ctx_.ports().add_edge(fe);
     }
   }
   // The allocated type name is spelled at the new-expr -> uses.
@@ -371,7 +398,7 @@ bool StatementEdgeVisitor::VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
     return true;
   }
   const auto *type_decl = arg->getType()->getAsCXXRecordDecl();
-  if (const auto dst = ctx_.sink().lookup_symbol_id(
+  if (const auto dst = ctx_.ports().lookup_symbol_id(
           usr, type_decl != nullptr
                    ? std::optional<std::string>(
                          expansion_loc(ctx_.context(), type_decl->getLocation())
@@ -381,7 +408,7 @@ bool StatementEdgeVisitor::VisitCXXDeleteExpr(clang::CXXDeleteExpr *expr) {
     fe.src_id = ctx_.src_id();
     fe.dst_id = *dst;
     fe.kind = 16; // destroy
-    ctx_.sink().add_edge(fe);
+    ctx_.ports().add_edge(fe);
   }
   return true;
 }
@@ -394,7 +421,7 @@ bool StatementEdgeVisitor::VisitDeclRefExpr(clang::DeclRefExpr *dre) {
   if (ref != nullptr && !is_function_like_decl(ref)) {
     const std::string usr = usr_for_decl(ref);
     if (!usr.empty()) {
-      if (const auto dst = ctx_.sink().lookup_symbol_id(
+      if (const auto dst = ctx_.ports().lookup_symbol_id(
               usr, expansion_loc(ctx_.context(), ref->getLocation()).file)) {
         // The site anchors at the NAME (after qualifiers).
         ctx_.emit_site_edge_at(dre->getLocation(), *dst, 7);
@@ -432,7 +459,7 @@ void StatementEdgeVisitor::emit_qualifier_type_use(
   if (usr.empty() || usr == ctx_.owner_usr()) {
     return;
   }
-  if (const auto dst = ctx_.sink().lookup_symbol_id(
+  if (const auto dst = ctx_.ports().lookup_symbol_id(
           usr, expansion_loc(ctx_.context(), td->getLocation()).file)) {
     if (*dst != ctx_.src_id()) {
       ctx_.emit_site_edge(dre, *dst, 7);
@@ -461,7 +488,7 @@ bool StatementEdgeVisitor::VisitMemberExpr(clang::MemberExpr *me) {
   if (ref != nullptr && !is_function_like_decl(ref)) {
     const std::string usr = usr_for_decl(ref);
     if (!usr.empty()) {
-      if (const auto dst = ctx_.sink().lookup_symbol_id(
+      if (const auto dst = ctx_.ports().lookup_symbol_id(
               usr, expansion_loc(ctx_.context(), ref->getLocation()).file)) {
         // The site anchors at the member NAME token.
         ctx_.emit_site_edge_at(me->getMemberLoc(), *dst, 7);
@@ -508,8 +535,8 @@ bool StatementEdgeVisitor::VisitVarDecl(clang::VarDecl *var) {
 void StatementEdgeVisitor::emit_local_var(const clang::VarDecl *var) {
   // Declared type -> uses edge + concrete class-template instance mint.
   const ExpansionLoc loc = expansion_loc(ctx_.context(), var->getLocation());
-  emit_type_use(ctx_.sink(), ctx_.src_id(), var->getType(), ctx_.file_id(), loc,
-                ctx_.in_conditional() ? 1 : 0);
+  emit_type_use(ctx_.ports(), ctx_.ports(), ctx_.src_id(), var->getType(),
+                ctx_.file_id(), loc, ctx_.in_conditional() ? 1 : 0);
   ctx_.minter().mint_instance_from_type(var->getType());
 }
 

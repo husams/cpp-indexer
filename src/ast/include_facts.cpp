@@ -13,6 +13,8 @@
 #include "clang/Lex/Preprocessor.h"
 
 #include <memory>
+#include <set>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -472,6 +474,64 @@ void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
     u.count = 1;
     db.add_include_macro_use(u);
   }
+}
+
+auto include_fact_count(cidx::Storage &db, const IncludeFacts &facts)
+    -> IncludeFactCounts {
+  // These are the four distinct identities created by add_include_config:
+  // normalized config, include config, translation-unit applicability, and TU
+  // file applicability. The remaining identities mirror every upsert in
+  // persist_include_facts so repeated directives are counted once and exposed
+  // as duplicate attempts rather than over-budgeting the pass.
+  constexpr std::size_t config_facts = 4;
+  std::size_t attempted = config_facts;
+  std::set<int64_t> file_applicability;
+  std::set<std::tuple<int64_t, std::string>> edges;
+  std::set<std::tuple<int64_t, std::string, int64_t>> sites;
+  std::set<std::tuple<int64_t, std::string, std::string>> macro_uses;
+
+  const auto record = [&attempted](auto &identities, auto identity) {
+    ++attempted;
+    return identities.emplace(std::move(identity)).second;
+  };
+
+  const auto file_id_for = [&db](const std::string &path) {
+    if (path.empty()) {
+      return std::optional<int64_t>{};
+    }
+    return db.get_file(cidx::pathutil::abspath(path))
+        .transform([](const cidx::File &file) { return file.id; });
+  };
+  for (const IncludeFact &fact : facts.includes) {
+    const auto source_id = file_id_for(fact.src_path);
+    if (!source_id) {
+      continue;
+    }
+    record(file_applicability, *source_id);
+    const std::string dst_path =
+        fact.resolved ? cidx::pathutil::abspath(fact.dst_path) : fact.spelling;
+    if (fact.resolved) {
+      if (const auto destination_id = file_id_for(fact.dst_path)) {
+        record(file_applicability, *destination_id);
+      }
+    }
+    const auto edge_identity = std::make_tuple(*source_id, dst_path);
+    record(edges, edge_identity);
+    record(sites, std::make_tuple(*source_id, dst_path, fact.begin_offset));
+  }
+  for (const MacroUseFact &fact : facts.macro_uses) {
+    if (const auto source_id = file_id_for(fact.src_path)) {
+      record(macro_uses,
+             std::make_tuple(*source_id, cidx::pathutil::abspath(fact.def_path),
+                             fact.name));
+    }
+  }
+
+  const std::size_t unique_facts = config_facts + file_applicability.size() +
+                                   edges.size() + sites.size() +
+                                   macro_uses.size();
+  return {.emitted_facts = unique_facts,
+          .duplicates = attempted - unique_facts};
 }
 
 } // namespace cidx::ast

@@ -1,7 +1,7 @@
 #include "ast/mint_builder.hpp"
 
 #include "ast/decl_flags.hpp"
-#include "ast/edge_sink.hpp"
+#include "ast/fact_emitters.hpp"
 #include "ast/kind_map.hpp"
 #include "ast/location.hpp"
 #include "ast/names.hpp"
@@ -11,8 +11,9 @@
 
 namespace cidx::ast {
 
-MintBuilder::MintBuilder(const clang::ASTContext &context, EdgeSink &sink)
-    : context_(context), sink_(sink) {}
+MintBuilder::MintBuilder(const clang::ASTContext &context,
+                         DeclarationIdentityResolver &identity)
+    : context_(context), identity_(identity) {}
 
 std::optional<MintRequest>
 MintBuilder::build(const clang::NamedDecl *decl) const {
@@ -41,7 +42,7 @@ MintBuilder::build(const clang::NamedDecl *decl) const {
     req.identity_source = loc.file;
     req.decl_line = loc.line;
     req.decl_col = loc.col;
-    if (std::optional<int64_t> fid = sink_.file_id_for_path(loc.file)) {
+    if (std::optional<int64_t> fid = identity_.file_id_for_path(loc.file)) {
       req.decl_file_id = fid;
     } else {
       req.decl_path = loc.file;

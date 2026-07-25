@@ -207,6 +207,7 @@ public:
       const std::optional<std::string> &init_text) override;
   void add_def_edge(int64_t definition_id, int64_t destination_id,
                     int64_t kind) override;
+  auto body_edge_count(int64_t symbol_id) -> std::size_t override;
   void copy_body_edges_to_def_edge(int64_t definition_id,
                                    int64_t symbol_id) override;
   void delete_edges_for_file(int64_t file_id) override;

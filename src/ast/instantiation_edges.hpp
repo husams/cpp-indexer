@@ -31,8 +31,10 @@ class NamedDecl;
 
 namespace cidx::ast {
 
-class EdgeSink;
+class DeclarationIdentityResolver;
+class RelationFactEmitter;
 class MintBuilder;
+class PresentationIntentEmitter;
 class TemplateArgumentEncoder;
 
 // Identity of a callable that specializes/instantiates a template: the primary
@@ -52,12 +54,13 @@ callable_template_info(const clang::FunctionDecl *fd);
 //     idempotent (lookup-only: the primary must already be indexed);
 //   - template_arg rows from the FULL specialization argument list, optionally
 //     overlaid with the as-written types `written` where positions align;
-//   - the display-name rewrite from the encoded argument literals;
+//   - a typed presentation intent carrying the encoded argument literals;
 //   - method_of(9) owner promotion for member-function templates, including
 //     the minted class-template-specialization owner with its own identity.
 // Safe to call from both the declaration pass and every call site.
 void emit_callable_template_identity(
-    EdgeSink &sink, MintBuilder &mint,
+    DeclarationIdentityResolver &identity, RelationFactEmitter &relations,
+    PresentationIntentEmitter *presentation_intents, MintBuilder &mint,
     const TemplateArgumentEncoder &targ_encoder, int64_t dst_id,
     const clang::FunctionDecl *fd, const CallableTemplateInfo &info,
     const std::vector<clang::QualType> &written);
@@ -65,7 +68,8 @@ void emit_callable_template_identity(
 // Emit method_of(9) for a concrete callable member. Ordinary members of a
 // class-template specialization use this path without becoming callable
 // template instantiations themselves.
-void emit_method_owner(EdgeSink &sink, MintBuilder &mint,
+void emit_method_owner(DeclarationIdentityResolver &identity,
+                       RelationFactEmitter &relations, MintBuilder &mint,
                        const TemplateArgumentEncoder &targ_encoder,
                        int64_t dst_id, const clang::CXXMethodDecl *method);
 
@@ -75,7 +79,9 @@ void emit_method_owner(EdgeSink &sink, MintBuilder &mint,
 // edge back to the instance record `inst_id`, mirroring how instance methods
 // get method_of. No-op for authored (non-instantiation) specializations, whose
 // fields the ordinary traversal already records.
-void emit_instance_fields(EdgeSink &sink, const MintBuilder &mint,
+void emit_instance_fields(DeclarationIdentityResolver &identity,
+                          RelationFactEmitter &relations,
+                          const MintBuilder &mint,
                           const clang::ClassTemplateSpecializationDecl *spec,
                           int64_t inst_id);
 

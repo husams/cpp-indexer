@@ -1,11 +1,14 @@
 {
-  "specVersion": "1.0.0",
+  "specVersion": "1.1.0",
   "normativeBoundary": "The checked-in TLA+ modules, model configurations, protected predicates, and trusted-assumption register define observable CIDX behavior independently of implementation structure.",
   "modules": [
     "modules/CidxTypes.tla",
     "modules/CidxRepository.tla",
     "modules/CidxResult.tla",
+    "modules/CidxStorageLifecycle.tla",
     "modules/CidxBehavior.tla",
+    "modules/CidxWorkspaceLifecycle.tla",
+    "modules/CidxSemanticGraph.tla",
     "conformance/CidxConformance.tla",
     "protected/CidxProtected.tla"
   ],
@@ -39,6 +42,51 @@
         "BoundedProgressInvariant",
         "ProtectedInvariant"
       ]
+    },
+    {
+      "module": "models/CidxSemanticGraphSmoke.tla",
+      "config": "models/CidxSemanticGraphSmoke.cfg",
+      "invariants": [
+        "TypeInvariant",
+        "GraphNodeInvariant",
+        "GraphRelationInvariant",
+        "EvidenceOwnershipInvariant",
+        "UnknownTargetInvariant",
+        "PlanTransitionInvariant",
+        "SetSemanticsInvariant",
+        "WitnessInvariant",
+        "CompletenessInvariant",
+        "ReadOnlyExecutionInvariant",
+        "TransformPublicationInvariant",
+        "TransformConsumptionInvariant",
+        "CycleAdversarialInvariant",
+        "DiamondAdversarialInvariant",
+        "FanoutAdversarialInvariant",
+        "IncompleteTargetAdversarialInvariant",
+        "PartialEvidenceAdversarialInvariant",
+        "RecoveryTraceInvariant",
+        "RecoveryFailureHonestyInvariant"
+      ]
+    },
+    {
+      "module": "models/CidxStorageLifecycleSmoke.tla",
+      "config": "models/CidxStorageLifecycleSmoke.cfg",
+      "invariants": [
+        "TypeInvariant",
+        "CurrentGenerationInvariant",
+        "NoInvalidCurrentInvariant",
+        "ReadOnlyStateInvariant",
+        "MigrationInvariant",
+        "SidecarInvariant",
+        "CrossFileAtomicityInvariant",
+        "CleanupSafetyInvariant",
+        "PackageInvariant",
+        "IncludeHygieneInvariant",
+        "PublicationRecoveryInvariant",
+        "TraceInvariant",
+        "BoundedProgressInvariant"
+      ],
+      "properties": ["StorageEventuallySettles"]
     }
   ],
   "coverage": {
@@ -51,27 +99,40 @@
       "invariants": ["NoPartialGenerationInvariant", "AtomicPublicationInvariant", "InvalidationInvariant"]
     },
     "semantic-graph": {
-      "modules": ["CidxTypes", "CidxRepository", "CidxBehavior"],
-      "invariants": ["TypeInvariant", "RepositoryStructureInvariant", "GraphInvariant", "ProtectedInvariant"],
-      "coverage": "partial",
-      "notModeled": [
-        "concrete graph identity records and completeness sets",
-        "separate ordered-slot families beyond graphArgumentOrder"
-      ]
+      "modules": ["CidxTypes", "CidxSemanticGraph"],
+      "invariants": ["GraphNodeInvariant", "GraphRelationInvariant", "EvidenceOwnershipInvariant", "UnknownTargetInvariant", "CycleAdversarialInvariant", "DiamondAdversarialInvariant", "FanoutAdversarialInvariant", "IncompleteTargetAdversarialInvariant", "PartialEvidenceAdversarialInvariant"],
+      "coverage": "smoke-bounded"
     },
     "query-plan-and-cxq": {
-      "modules": ["CidxBehavior", "CidxResult"],
-      "invariants": ["QueryPlanInvariant", "QueryHonestyInvariant", "SharedResultTypeInvariant", "TrustedOutcomeInvariant"],
-      "coverage": "partial",
-      "notModeled": ["deterministic query result sets, paths, and witnesses"]
+      "modules": ["CidxSemanticGraph", "CidxResult"],
+      "invariants": ["PlanTransitionInvariant", "SetSemanticsInvariant", "WitnessInvariant", "CompletenessInvariant", "ReadOnlyExecutionInvariant"],
+      "coverage": "smoke-bounded"
     },
     "storage-sidecars-and-migrations": {
-      "modules": ["CidxBehavior"],
-      "invariants": ["MigrationInvariant", "NoPartialGenerationInvariant"]
+      "modules": ["CidxStorageLifecycle", "CidxBehavior"],
+      "invariants": [
+        "CurrentGenerationInvariant",
+        "NoInvalidCurrentInvariant",
+        "ReadOnlyStateInvariant",
+        "MigrationInvariant",
+        "SidecarInvariant",
+        "CrossFileAtomicityInvariant",
+        "CleanupSafetyInvariant",
+        "PackageInvariant",
+        "PublicationRecoveryInvariant",
+        "NoPartialGenerationInvariant",
+        "StorageEventuallySettles"
+      ],
+      "coverage": "bounded",
+      "notModeled": [
+        "SQLite pager/journal/WAL/locking algorithms",
+        "filesystem durability guarantees",
+        "implementation-specific backup formats"
+      ]
     },
     "include-hygiene-and-transformations": {
-      "modules": ["CidxBehavior"],
-      "invariants": ["IncludeHygieneInvariant", "FailureHonestyInvariant", "QueryHonestyInvariant"]
+      "modules": ["CidxBehavior", "CidxSemanticGraph"],
+      "invariants": ["IncludeHygieneInvariant", "TransformPublicationInvariant", "TransformConsumptionInvariant", "RecoveryTraceInvariant", "RecoveryFailureHonestyInvariant", "FailureHonestyInvariant", "QueryHonestyInvariant"]
     }
   },
   "protectedPaths": [

@@ -6,7 +6,7 @@
 // param/template-arg). The DeclarationEdgeVisitor uses it to make callable
 // signatures, variable/field types, and typedef targets traversable.
 //
-// Emission goes through EdgeSink only; no storage or I/O here.
+// Emission goes through the focused type port only; no storage or I/O here.
 #pragma once
 
 #include "ast/edge_records.hpp"
@@ -24,7 +24,7 @@ class ASTContext;
 
 namespace cidx::ast {
 
-class EdgeSink;
+class TypeFactEmitter;
 
 // type_node.kind codes (mirrors the storage type_kind seed / cidx::kTypeKind*).
 inline constexpr int64_t kTypeBuiltin = 1;
@@ -58,7 +58,7 @@ inline constexpr int64_t kSymTypeUnderlyingK = 3;
 
 class TypeInterner {
 public:
-  TypeInterner(clang::ASTContext &context, EdgeSink &sink);
+  TypeInterner(clang::ASTContext &context, TypeFactEmitter &types);
 
   // Intern the full shape of `qt` (children first), returning the stable
   // type_node.id, or nullopt for a null type.
@@ -75,7 +75,7 @@ private:
   Result emit_node(clang::QualType qt, TypeNodeRecord rec, int depth);
 
   clang::ASTContext &context_;
-  EdgeSink &sink_;
+  TypeFactEmitter &types_;
   // QualType opaque ptr -> interned result (per-pass memo; a QualType is
   // unique per (Type*, qualifiers) inside one ASTContext).
   std::unordered_map<const void *, Result> memo_;

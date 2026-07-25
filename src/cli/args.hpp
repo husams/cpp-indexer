@@ -127,6 +127,8 @@ struct ParsedArgs {
   // -- ui graph explorer ----------------------------------------------------
   std::optional<std::string> ui_root;
   std::optional<std::string> ui_query;
+  std::optional<std::string> ui_input;
+  std::string ui_input_kind{"symbol"};
   std::optional<std::string> ui_workspace;
   std::optional<std::string> ui_output;
   int ui_depth = 2;

@@ -557,6 +557,11 @@ struct Stream {
     bool operator==(const LogicalKey &) const = default;
   };
 
+  struct RowStatus {
+    bool partial = false;
+    bool unknown = false;
+  };
+
   View view = View::Symbol;
   Shape shape = Shape::Nodes;
   std::vector<int64_t> ids;     // nodes shape; ascending, deduped
@@ -564,7 +569,10 @@ struct Stream {
   std::vector<std::string> fields;
   std::vector<std::vector<Cell>> rows; // rows shape
   std::vector<int64_t> row_ids;        // per-row id (order_by tie-break)
+  std::vector<RowStatus> row_status;   // aligned with rows
   bool truncated = false;
+  bool partial = false;
+  bool unknown = false;
   // True only while a limit() is in effect with NO cardinality-expanding
   // stage (nodes/out/in/union) after it -- otherwise finish() re-applies the
   // default result cap (PR #20 review: an early limit must not disable the
@@ -741,6 +749,10 @@ public:
         }
         st.limit_in_effect = false;
         break;
+      case StageOp::Sites:
+        expand_sites(st);
+        st.limit_in_effect = false;
+        break;
       case StageOp::Union:
       case StageOp::Intersect:
       case StageOp::Except:
@@ -777,6 +789,40 @@ public:
 private:
   QueryReadPort &read_;
   std::map<int64_t, std::optional<std::string>> file_paths_;
+
+  void expand_sites(Stream &st) {
+    std::ranges::sort(st.keys);
+    st.keys.erase(std::ranges::unique(st.keys).begin(), st.keys.end());
+    std::vector<Stream::LogicalKey> sites;
+    for (const auto &edge : st.keys) {
+      auto query = read_.read_db().prepare(
+          "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) "
+          "FROM edge_site WHERE edge_id=? "
+          "ORDER BY file_id,COALESCE(line,0),COALESCE(col,0)");
+      query.bind(1, edge.a);
+      while (query.step()) {
+        sites.push_back(Stream::LogicalKey{.a = query.col_int64(0),
+                                           .b = query.col_int64(1),
+                                           .c = query.col_int64(2),
+                                           .d = query.col_int64(3)});
+        if (sites.size() > static_cast<size_t>(kTraverseNodeBudget)) {
+          st.truncated = true;
+          break;
+        }
+      }
+      if (st.truncated) {
+        break;
+      }
+    }
+    std::ranges::sort(sites);
+    sites.erase(std::ranges::unique(sites).begin(), sites.end());
+    if (sites.size() > static_cast<size_t>(kTraverseNodeBudget)) {
+      sites.resize(static_cast<size_t>(kTraverseNodeBudget));
+    }
+    st.keys = std::move(sites);
+    st.ids.clear();
+    st.view = View::Site;
+  }
 
   bool ambiguous_ungrouped_file(int64_t file_id) {
     auto file = read_.read_db().prepare(
@@ -819,7 +865,8 @@ private:
   }
 
   void reject_ambiguous_ungrouped(Stream &st) {
-    if (st.view != View::CallArgument && st.view != View::Evidence) {
+    if (st.view != View::CallArgument && st.view != View::Site &&
+        st.view != View::Evidence) {
       return;
     }
     for (const auto &key : st.keys) {
@@ -929,6 +976,7 @@ private:
         sql = "SELECT id FROM edge ORDER BY id";
         break;
       case View::Evidence:
+      case View::Site:
         sql = "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) "
               "FROM edge_site ORDER BY edge_id,file_id,line,col";
         break;
@@ -1158,6 +1206,7 @@ private:
         key.e = query.col_int64(4);
         break;
       case View::Evidence:
+      case View::Site:
         key.a = query.col_int64(0);
         key.b = query.col_int64(1);
         key.c = query.col_int64(2);
@@ -1261,6 +1310,13 @@ private:
                    {SqlValue(owner), SqlValue(rel.kind_id - 23)});
         } else if (rel.name == "has_evidence") {
           add_keys(View::Evidence,
+                   "SELECT es.edge_id,es.file_id,COALESCE(es.line,0),"
+                   "COALESCE(es.col,0) FROM edge_site es JOIN edge e ON "
+                   "e.id=es.edge_id WHERE e.src_id=? ORDER BY es.edge_id,"
+                   "es.file_id,es.line,es.col",
+                   {SqlValue(owner)});
+        } else if (rel.name == "has_site") {
+          add_keys(View::Site,
                    "SELECT es.edge_id,es.file_id,COALESCE(es.line,0),"
                    "COALESCE(es.col,0) FROM edge_site es JOIN edge e ON "
                    "e.id=es.edge_id WHERE e.src_id=? ORDER BY es.edge_id,"
@@ -1397,6 +1453,11 @@ private:
                    "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) "
                    "FROM edge_site WHERE edge_id=? ORDER BY file_id,line,col",
                    {SqlValue(key.a)});
+        } else if (rel.name == "has_site") {
+          add_keys(View::Site,
+                   "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) "
+                   "FROM edge_site WHERE edge_id=? ORDER BY file_id,line,col",
+                   {SqlValue(key.a)});
         }
       }
     } else if (!inbound && st.view == View::CallArgument) {
@@ -1443,6 +1504,16 @@ private:
                      "WHERE file_id=? AND line=? AND col=?",
                      {SqlValue(key.b), SqlValue(key.c), SqlValue(key.d)});
           }
+        }
+      }
+    } else if (inbound && st.view == View::Site) {
+      for (const auto &key : st.keys) {
+        if (rel.name == "has_site" || rel.name == "of_edge") {
+          add_keys(View::Edge,
+                   "SELECT edge_id FROM edge_site WHERE edge_id=? AND "
+                   "file_id=? AND COALESCE(line,0)=? AND COALESCE(col,0)=?",
+                   {SqlValue(key.a), SqlValue(key.b), SqlValue(key.c),
+                    SqlValue(key.d)});
         }
       }
     } else if (inbound && st.view == View::Symbol &&
@@ -1497,7 +1568,7 @@ private:
       }
     } else if (inbound && st.view == View::Edge && rel.name == "of_edge") {
       for (const auto &key : st.keys) {
-        add_keys(View::Evidence,
+        add_keys(rel.layer == View::Site ? View::Site : View::Evidence,
                  "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) "
                  "FROM edge_site WHERE edge_id=? ORDER BY file_id,line,col",
                  {SqlValue(key.a)});
@@ -1514,6 +1585,16 @@ private:
           add_keys(View::CallArgument,
                    "SELECT edge_id,file_id,line,col,position FROM call_arg "
                    "WHERE edge_id=? AND file_id=? AND line=? AND col=?",
+                   {SqlValue(key.a), SqlValue(key.b), SqlValue(key.c),
+                    SqlValue(key.d)});
+        }
+      }
+    } else if (!inbound && st.view == View::Site) {
+      for (const auto &key : st.keys) {
+        if (rel.name == "of_edge") {
+          add_keys(View::Edge,
+                   "SELECT edge_id FROM edge_site WHERE edge_id=? AND "
+                   "file_id=? AND COALESCE(line,0)=? AND COALESCE(col,0)=?",
                    {SqlValue(key.a), SqlValue(key.b), SqlValue(key.c),
                     SqlValue(key.d)});
         }
@@ -1792,6 +1873,10 @@ private:
       return "evidence:" + portable_edge(key.a) + ":" + portable_file(key.b) +
              ":" + std::to_string(key.c) + ":" + std::to_string(key.d);
     }
+    if (view == View::Site) {
+      return "site:" + portable_edge(key.a) + ":" + portable_file(key.b) + ":" +
+             std::to_string(key.c) + ":" + std::to_string(key.d);
+    }
     if (view == View::Edge) {
       return "edge:" + portable_edge(key.a);
     }
@@ -1823,6 +1908,7 @@ private:
     case View::Edge:
       return "edge";
     case View::Evidence:
+    case View::Site:
       return "edge_site";
     case View::Type:
       return "type_node";
@@ -1897,6 +1983,9 @@ private:
                                      "recv_param_pos",
                                      "recv_type_is_value"};
       }
+      if (view == View::Site) {
+        return std::set<std::string>{"edge_id", "file_id", "line", "col"};
+      }
       if (view == View::Type) {
         return std::set<std::string>{"id",          "type_key", "spelling",
                                      "kind",        "is_const", "is_volatile",
@@ -1926,6 +2015,7 @@ private:
     case View::CallArgument:
       return {SqlValue(key.a), SqlValue(key.b), SqlValue(key.c),
               SqlValue(key.d), SqlValue(key.e)};
+    case View::Site:
     case View::Evidence:
       return {SqlValue(key.a), SqlValue(key.b), SqlValue(key.c),
               SqlValue(key.d)};
@@ -1948,6 +2038,7 @@ private:
       return "owner_id=? AND position=?";
     case View::CallArgument:
       return "edge_id=? AND file_id=? AND line=? AND col=? AND position=?";
+    case View::Site:
     case View::Evidence:
       return "edge_id=? AND file_id=? AND line=? AND col=?";
     case View::Edge:
@@ -1958,6 +2049,182 @@ private:
       return "1=0";
     }
     return "1=0";
+  }
+
+  std::optional<Cell> derived_typed_cell(View view, const LogicalKey &key,
+                                         const std::string &field) {
+    const bool derived = field == "relation" || field == "source" ||
+                         field == "target" || field == "evidence" ||
+                         field == "status" || field == "partial" ||
+                         field == "unknown";
+    if (!derived) {
+      return std::nullopt;
+    }
+    if (view == View::Evidence && key.tag == 1) {
+      if (field == "evidence") {
+        return Cell(std::string("declaration"));
+      }
+      if (field == "status") {
+        return Cell(std::string("partial"));
+      }
+      if (field == "partial") {
+        return Cell(int64_t{1});
+      }
+      if (field == "unknown") {
+        return Cell(int64_t{0});
+      }
+      return Cell(nullptr);
+    }
+    if (view != View::Edge && view != View::Site && view != View::Evidence) {
+      return Cell(nullptr);
+    }
+    auto query = read_.read_db().prepare("SELECT kind FROM edge WHERE id=?");
+    query.bind(1, key.a);
+    if (!query.step()) {
+      return field == "unknown" ? Cell(int64_t{1}) : Cell(nullptr);
+    }
+    const int64_t kind = query.col_int64(0);
+    const auto &relation = relation_catalog();
+    const auto it =
+        std::ranges::find_if(relation, [kind](const RelationDesc &item) {
+          return item.layer == View::Symbol && item.kind_id == kind;
+        });
+    if (it == relation.end()) {
+      return field == "unknown" ? Cell(int64_t{1}) : Cell(nullptr);
+    }
+    const bool unresolved = has_unresolved_typed_provenance(view, key);
+    if (field == "relation") {
+      return Cell(it->name);
+    }
+    if (field == "source") {
+      return Cell(it->source);
+    }
+    if (field == "target") {
+      return Cell(it->target);
+    }
+    if (field == "evidence") {
+      return Cell(it->evidence);
+    }
+    if (field == "status") {
+      return Cell(unresolved ? "unknown" : it->completeness);
+    }
+    if (field == "partial") {
+      return Cell(int64_t{!unresolved && it->completeness == "partial"});
+    }
+    return Cell(int64_t{unresolved || it->completeness == "unknown"});
+  }
+
+  bool has_unresolved_typed_provenance(View view, const LogicalKey &key) {
+    if (view == View::Evidence && key.tag == 1) {
+      return false;
+    }
+    auto edge =
+        read_.read_db().prepare("SELECT src_id,dst_id FROM edge WHERE id=?");
+    edge.bind(1, key.a);
+    if (!edge.step()) {
+      return true;
+    }
+    const int64_t src_id = edge.col_int64(0);
+    const int64_t dst_id = edge.col_int64(1);
+    auto endpoints = read_.read_db().prepare(
+        "SELECT 1 FROM symbol WHERE id IN (?,?) AND resolved=0 LIMIT 1");
+    endpoints.bind(1, src_id);
+    endpoints.bind(2, dst_id);
+    if (endpoints.step()) {
+      return true;
+    }
+    const bool site_scoped =
+        view == View::Site || (view == View::Evidence && key.tag == 0);
+    const std::string site_scope = site_scoped ? " AND es.file_id=? AND "
+                                                 "COALESCE(es.line,0)=? AND "
+                                                 "COALESCE(es.col,0)=?"
+                                               : "";
+    auto sites = read_.read_db().prepare(
+        "SELECT 1 FROM edge_site es "
+        "LEFT JOIN external_identity eti ON eti.id=es.recv_type_identity_id "
+        "LEFT JOIN external_identity edi ON edi.id=es.recv_decl_identity_id "
+        "LEFT JOIN symbol ds ON ds.id=es.recv_decl_id "
+        "WHERE es.edge_id=? AND ("
+        "(es.recv_type_usr IS NOT NULL AND es.recv_type_id IS NULL AND "
+        " es.recv_type_identity_id IS NULL) OR "
+        "(es.recv_type_identity_id IS NOT NULL AND "
+        " COALESCE(eti.resolution_status,0)=0) OR "
+        "(es.recv_decl_usr IS NOT NULL AND "
+        " (es.recv_decl_id IS NULL OR COALESCE(ds.resolved,0)=0) AND "
+        " es.recv_decl_identity_id IS NULL) OR "
+        "(es.recv_decl_identity_id IS NOT NULL AND "
+        " COALESCE(edi.resolution_status,0)=0))" +
+        site_scope + " LIMIT 1");
+    sites.bind(1, key.a);
+    if (site_scoped) {
+      sites.bind(2, key.b);
+      sites.bind(3, key.c);
+      sites.bind(4, key.d);
+    }
+    if (sites.step()) {
+      return true;
+    }
+    const std::string argument_scope = site_scoped ? " AND ca.file_id=? AND "
+                                                     "ca.line=? AND ca.col=?"
+                                                   : "";
+    auto args = read_.read_db().prepare(
+        "SELECT 1 FROM call_arg ca "
+        "LEFT JOIN external_identity ati ON ati.id=ca.type_identity_id "
+        "LEFT JOIN external_identity adi ON adi.id=ca.decl_identity_id "
+        "LEFT JOIN external_identity aci ON aci.id=ca.callee_identity_id "
+        "LEFT JOIN symbol ds ON ds.id=ca.decl_id "
+        "LEFT JOIN symbol cs ON cs.id=ca.callee_id "
+        "WHERE ca.edge_id=? AND ("
+        "(ca.type_usr IS NOT NULL AND ca.type_id IS NULL AND "
+        " ca.type_identity_id IS NULL) OR "
+        "(ca.type_identity_id IS NOT NULL AND "
+        " COALESCE(ati.resolution_status,0)=0) OR "
+        "(ca.decl_usr IS NOT NULL AND "
+        " (ca.decl_id IS NULL OR COALESCE(ds.resolved,0)=0) AND "
+        " ca.decl_identity_id IS NULL) OR "
+        "(ca.decl_identity_id IS NOT NULL AND "
+        " COALESCE(adi.resolution_status,0)=0) OR "
+        "(ca.callee_usr IS NOT NULL AND "
+        " (ca.callee_id IS NULL OR COALESCE(cs.resolved,0)=0) AND "
+        " ca.callee_identity_id IS NULL) OR "
+        "(ca.callee_identity_id IS NOT NULL AND "
+        " COALESCE(aci.resolution_status,0)=0))" +
+        argument_scope + " LIMIT 1");
+    args.bind(1, key.a);
+    if (site_scoped) {
+      args.bind(2, key.b);
+      args.bind(3, key.c);
+      args.bind(4, key.d);
+    }
+    return args.step();
+  }
+
+  Stream::RowStatus status_for_key(View view, const LogicalKey &key) {
+    Stream::RowStatus status;
+    const auto partial = derived_typed_cell(view, key, "partial");
+    const auto unknown = derived_typed_cell(view, key, "unknown");
+    status.partial = partial && std::holds_alternative<int64_t>(*partial) &&
+                     std::get<int64_t>(*partial) != 0;
+    status.unknown = unknown && std::holds_alternative<int64_t>(*unknown) &&
+                     std::get<int64_t>(*unknown) != 0;
+    return status;
+  }
+
+  void recompute_status(Stream &st) {
+    st.partial = false;
+    st.unknown = false;
+    if (st.shape == Shape::Rows || !st.row_status.empty()) {
+      for (const auto &status : st.row_status) {
+        st.partial = st.partial || status.partial;
+        st.unknown = st.unknown || status.unknown;
+      }
+      return;
+    }
+    for (const auto &key : st.keys) {
+      const auto status = status_for_key(st.view, key);
+      st.partial = st.partial || status.partial;
+      st.unknown = st.unknown || status.unknown;
+    }
   }
 
   std::map<LogicalKey, std::vector<Cell>>
@@ -1976,7 +2243,9 @@ private:
         std::vector<Cell> cells;
         cells.reserve(fields.size());
         for (const auto &field : fields) {
-          if (field == "identity_key") {
+          if (const auto derived = derived_typed_cell(st.view, key, field)) {
+            cells.push_back(*derived);
+          } else if (field == "identity_key") {
             cells.emplace_back(logical_identity(st.view, key));
           } else if (field == "id") {
             cells.emplace_back(logical_row_id(st.view, key));
@@ -2043,6 +2312,10 @@ private:
       cells.reserve(fields.size());
       for (size_t i = 0; i < fields.size(); ++i) {
         const std::string &field = fields[i];
+        if (const auto derived = derived_typed_cell(st.view, key, field)) {
+          cells.push_back(*derived);
+          continue;
+        }
         if (field == "identity_key") {
           cells.emplace_back(logical_identity(st.view, key));
           continue;
@@ -2148,11 +2421,13 @@ private:
       st.fields = fields;
       st.rows.clear();
       st.row_ids.clear();
+      st.row_status.clear();
       for (const auto &key : st.keys) {
         auto it = by_key.find(key);
         if (it != by_key.end()) {
           st.rows.push_back(it->second);
           st.row_ids.push_back(logical_row_id(st.view, key));
+          st.row_status.push_back(status_for_key(st.view, key));
         }
       }
       st.keys.clear();
@@ -2162,11 +2437,13 @@ private:
     st.fields = fields;
     st.rows.clear();
     st.row_ids.clear();
+    st.row_status.clear();
     for (int64_t id : st.ids) {
       auto it = by_id.find(id);
       if (it != by_id.end()) {
         st.rows.push_back(it->second);
         st.row_ids.push_back(id);
+        st.row_status.emplace_back();
       }
     }
     st.ids.clear();
@@ -2185,6 +2462,7 @@ private:
     }
     std::vector<std::vector<Cell>> rows;
     std::vector<int64_t> row_ids;
+    std::vector<Stream::RowStatus> row_status;
     for (size_t i = 0; i < st.rows.size(); ++i) {
       bool dup = false;
       for (const auto &prev : rows) {
@@ -2205,10 +2483,12 @@ private:
       if (!dup) {
         rows.push_back(st.rows[i]);
         row_ids.push_back(st.row_ids[i]);
+        row_status.push_back(st.row_status[i]);
       }
     }
     st.rows = std::move(rows);
     st.row_ids = std::move(row_ids);
+    st.row_status = std::move(row_status);
   }
 
   void apply_order(Stream &st, const std::vector<std::string> &fields) {
@@ -2260,14 +2540,17 @@ private:
     });
     std::vector<std::vector<Cell>> rows;
     std::vector<int64_t> row_ids;
+    std::vector<Stream::RowStatus> row_status;
     rows.reserve(idx.size());
     row_ids.reserve(idx.size());
     for (size_t i : idx) {
       rows.push_back(std::move(st.rows[i]));
       row_ids.push_back(st.row_ids[i]);
+      row_status.push_back(st.row_status[i]);
     }
     st.rows = std::move(rows);
     st.row_ids = std::move(row_ids);
+    st.row_status = std::move(row_status);
   }
 
   static void apply_limit(Stream &st, int64_t n) {
@@ -2282,6 +2565,7 @@ private:
     } else if (std::cmp_greater(st.rows.size(), n)) {
       st.rows.resize(n);
       st.row_ids.resize(n);
+      st.row_status.resize(n);
     }
   }
 
@@ -2290,10 +2574,13 @@ public:
   Result finish(Stream st) {
     Result res;
     res.view = st.view;
-    res.truncated = st.truncated;
     reject_ambiguous_ungrouped(st);
     if (st.shape == Shape::Scalar) {
+      recompute_status(st);
       res.shape = Shape::Scalar;
+      res.truncated = st.truncated;
+      res.partial = st.partial;
+      res.unknown = st.unknown;
       // count() after select carries rows; otherwise ids hold the stream.
       res.scalar = static_cast<int64_t>(
           st.rows.empty() ? (st.keys.empty() ? st.ids.size() : st.keys.size())
@@ -2312,10 +2599,14 @@ public:
         static_cast<int64_t>(st.rows.size()) > kDefaultResultCap) {
       st.rows.resize(kDefaultResultCap);
       st.row_ids.resize(kDefaultResultCap);
+      st.row_status.resize(kDefaultResultCap);
       st.truncated = true;
     }
+    recompute_status(st);
     res.shape = st.shape;
     res.truncated = st.truncated;
+    res.partial = st.partial;
+    res.unknown = st.unknown;
     res.fields = st.fields;
     res.rows = std::move(st.rows);
     return res;
@@ -2392,19 +2683,27 @@ protocol::ResultEnvelope Result::to_envelope() const {
 
   ResultEnvelope envelope;
   envelope.operation = "query";
-  if (index.freshness == "stale") {
-    envelope.status = Status::Unknown;
-  } else if (truncated) {
-    envelope.status = Status::Partial;
-  } else if (index.freshness == "current") {
+  const bool stale = index.freshness == "stale";
+  if (index.freshness == "current" && !stale && !unknown && !truncated &&
+      !partial) {
     envelope.status = Status::Complete;
+  } else if (!stale && !unknown && (truncated || partial)) {
+    envelope.status = Status::Partial;
   } else {
     envelope.status = Status::Unknown;
   }
   envelope.identity.workspace = index.workspace;
   envelope.identity.index =
       "semantic-index/schema/" + std::to_string(index.schema_version);
-  envelope.identity.fact_sets = {view == View::Symbol ? "symbols" : "entities"};
+  std::string fact_set;
+  if (view == View::Symbol) {
+    fact_set = "symbols";
+  } else if (view == View::Entity) {
+    fact_set = "entities";
+  } else {
+    fact_set = view_name(view);
+  }
+  envelope.identity.fact_sets = {std::move(fact_set)};
   envelope.identity.freshness = index.freshness;
   envelope.identity.source_revision = index.source_revision;
   envelope.identity.source_fingerprint = index.source_fingerprint;
@@ -2441,6 +2740,14 @@ protocol::ResultEnvelope Result::to_envelope() const {
         .severity = "warning",
         .message = "result was bounded by the QueryPlan execution budget",
         .next_action = "narrow the query or provide an explicit limit"});
+  }
+  if (unknown) {
+    envelope.diagnostics.push_back(protocol::Diagnostic{
+        .code = "unknown",
+        .severity = "warning",
+        .message = "result contains unresolved relation provenance",
+        .next_action = "inspect evidence and index coverage before relying on "
+                       "this result"});
   }
   if (index.freshness == "stale") {
     envelope.diagnostics.push_back(protocol::Diagnostic{

@@ -1,7 +1,8 @@
 #include "ast/function_definition_visitor.hpp"
 
-#include "ast/edge_sink.hpp"
+#include "ast/fact_emitters.hpp"
 #include "ast/location.hpp"
+#include "ast/pass_registry.hpp"
 #include "ast/statement_edge_visitor.hpp"
 #include "ast/usr.hpp"
 
@@ -14,11 +15,21 @@
 namespace cidx::ast {
 
 FunctionDefinitionVisitor::FunctionDefinitionVisitor(clang::ASTContext &context,
-                                                     EdgeSink &sink,
+                                                     DeclarationIdentityResolver &identity,
+                                                     DefinitionScopeEmitter &definitions,
                                                      std::string target_file,
-                                                     int64_t file_id)
-    : context_(context), sink_(sink), target_file_(std::move(target_file)),
-      file_id_(file_id) {}
+                                                     int64_t file_id,
+                                                     PassMetrics *metrics)
+    : context_(context), identity_(identity), definitions_(definitions),
+      target_file_(std::move(target_file)), file_id_(file_id),
+      metrics_(metrics) {}
+
+bool FunctionDefinitionVisitor::VisitDecl(clang::Decl * /*decl*/) {
+  if (metrics_ != nullptr) {
+    metrics_->note_visited();
+  }
+  return true;
+}
 
 // An indexable function definition: has an actual body, is not nested in
 // another function (a LOCAL class's methods are covered by the enclosing
@@ -34,19 +45,34 @@ bool FunctionDefinitionVisitor::is_indexable_definition(
   return expansion_loc(context_, decl->getLocation()).file == target_file_;
 }
 
-// The definition row over keyed's extent, then a StatementEdgeVisitor walk of
-// the body, snapshotted into def_edge rows.
+void FunctionDefinitionVisitor::run_statement_pass(StatementFactPorts &ports,
+                                                    PassMetrics *metrics,
+                                                    DefinitionScopeEmitter *statement_definitions) {
+  DefinitionScopeEmitter &definitions =
+      statement_definitions != nullptr ? *statement_definitions : definitions_;
+  for (const DefinitionFact &fact : definitions_found_) {
+    StatementEdgeVisitor body(context_, ports, fact.symbol_id, file_id_,
+                              target_file_, metrics);
+    body.walk(fact.decl);
+    definitions.copy_body_edges_to_def_edge(fact.definition_id, fact.symbol_id);
+  }
+}
+
+// Create the definition row. Statement facts are emitted by the separate
+// statement pass above so the two stages can be independently registered.
 void FunctionDefinitionVisitor::index_definition(clang::FunctionDecl *decl,
                                                  const clang::NamedDecl *keyed,
                                                  int64_t fn_sym) {
   const clang::SourceRange range = keyed->getSourceRange();
   const ExpansionLoc start = extent_start(context_, range);
   const ExpansionLoc end = extent_end(context_, range);
-  const int64_t def_id = sink_.get_or_create_definition(
+  if (metrics_ != nullptr) {
+    metrics_->note_emitted();
+  }
+  const int64_t def_id = definitions_.get_or_create_definition(
       fn_sym, file_id_, start.line, start.col, end.line, end.col, std::nullopt);
-  StatementEdgeVisitor body(context_, sink_, fn_sym, file_id_);
-  body.walk(decl);
-  sink_.copy_body_edges_to_def_edge(def_id, fn_sym);
+  definitions_found_.push_back(
+      {.decl = decl, .symbol_id = fn_sym, .definition_id = def_id});
 }
 
 bool FunctionDefinitionVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
@@ -64,7 +90,7 @@ bool FunctionDefinitionVisitor::VisitFunctionDecl(clang::FunctionDecl *decl) {
   if (usr.empty()) {
     return true;
   }
-  if (const auto fn_sym = sink_.lookup_symbol_id(
+  if (const auto fn_sym = identity_.lookup_symbol_id(
           usr, expansion_loc(context_, keyed->getLocation()).file)) {
     index_definition(decl, keyed, *fn_sym);
   }

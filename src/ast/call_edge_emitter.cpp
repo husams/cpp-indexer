@@ -21,13 +21,82 @@
 
 namespace cidx::ast {
 
-namespace {} // namespace
+namespace {
+
+// Callable signatures reuse the declaration visitor through only its focused
+// declaration services. The statement port already owns the pass budget.
+class StatementDeclarationAdapter final : public DeclarationPassPorts {
+public:
+  explicit StatementDeclarationAdapter(StatementFactPorts &ports)
+      : ports_(ports) {}
+
+  auto lookup_symbol_id(const std::string &usr,
+                        const std::optional<std::string> &source = std::nullopt)
+      -> std::optional<std::int64_t> override {
+    return ports_.lookup_symbol_id(usr, source);
+  }
+  auto mint_symbol(const MintRequest &request) -> std::int64_t override {
+    return ports_.mint_symbol(request);
+  }
+  auto file_id_for_path(const std::string &path)
+      -> std::optional<std::int64_t> override {
+    return ports_.file_id_for_path(path);
+  }
+  auto type_arg_candidates(const std::string &name, bool qualified)
+      -> std::vector<TypeArgCandidate> override {
+    return ports_.type_arg_candidates(name, qualified);
+  }
+  auto symbol_ids_by_qual_name_kind(const std::string &qual_name,
+                                    const std::string &kind_name)
+      -> std::vector<std::int64_t> override {
+    return ports_.symbol_ids_by_qual_name_kind(qual_name, kind_name);
+  }
+  auto add_edge(const EdgeRecord &edge) -> std::int64_t override {
+    return ports_.add_edge(edge);
+  }
+  auto ensure_edge(const EdgeRecord &edge) -> std::int64_t override {
+    return ports_.ensure_edge(edge);
+  }
+  void add_edge_site(const EdgeSiteRecord &site) override {
+    ports_.add_edge_site(site);
+  }
+  void add_call_arg(const CallArgRecord &arg) override {
+    ports_.add_call_arg(arg);
+  }
+  void add_template_param(const TemplateParamRecord &param) override {
+    ports_.add_template_param(param);
+  }
+  void add_template_arg(const TemplateArgRecord &arg) override {
+    ports_.add_template_arg(arg);
+  }
+  auto intern_type_node(const TypeNodeRecord &node) -> std::int64_t override {
+    return ports_.intern_type_node(node);
+  }
+  void add_type_edge(std::int64_t src_id, std::int64_t kind,
+                     std::int64_t position, std::int64_t dst_id) override {
+    ports_.add_type_edge(src_id, kind, position, dst_id);
+  }
+  void
+  replace_parameters(std::int64_t owner_id,
+                     const std::vector<ParameterRecord> &parameters) override {
+    ports_.replace_parameters(owner_id, parameters);
+  }
+  void add_symbol_type(std::int64_t symbol_id, std::int64_t kind,
+                       std::int64_t type_id) override {
+    ports_.add_symbol_type(symbol_id, kind, type_id);
+  }
+
+private:
+  StatementFactPorts &ports_;
+};
+
+} // namespace
 
 int64_t
 CallEdgeEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
                                           const std::string &callee_usr) {
   int64_t dst_id = -1;
-  if (const auto dst = ctx_.sink().lookup_symbol_id(
+  if (const auto dst = ctx_.ports().lookup_symbol_id(
           callee_usr,
           expansion_loc(ctx_.context(), keyed->getLocation()).file)) {
     dst_id = *dst;
@@ -35,7 +104,7 @@ CallEdgeEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
   if (dst_id < 0) {
     const std::string qn = qualified_name(ctx_.context(), keyed);
     if (!qn.empty()) {
-      const auto ids = ctx_.sink().symbol_ids_by_qual_name_kind(
+      const auto ids = ctx_.ports().symbol_ids_by_qual_name_kind(
           qn, cidx_stub_kind_name(keyed));
       if (ids.size() == 1) {
         dst_id = ids[0];
@@ -45,7 +114,7 @@ CallEdgeEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
   if (dst_id < 0 && !ctx_.context().getSourceManager().isInSystemHeader(
                         keyed->getLocation())) {
     if (auto req = ctx_.mint().build(keyed)) {
-      dst_id = ctx_.sink().mint_symbol(*req);
+      dst_id = ctx_.ports().mint_symbol(*req);
     }
   }
   return dst_id;
@@ -65,19 +134,20 @@ CallEdgeEmitter::mint_resolved_target(const clang::Expr *site,
     return -1;
   }
   req->is_instantiation = info && info->is_instantiation;
-  const int64_t dst_id = ctx_.sink().mint_symbol(*req);
+  const int64_t dst_id = ctx_.ports().mint_symbol(*req);
   if (info) {
-    emit_callable_template_identity(ctx_.sink(), ctx_.mint(),
-                                    ctx_.targ_encoder(), dst_id, callee, *info,
-                                    written_template_args(site));
+    emit_callable_template_identity(ctx_.ports(), ctx_.ports(), nullptr,
+                                    ctx_.mint(), ctx_.targ_encoder(), dst_id,
+                                    callee, *info, written_template_args(site));
   } else if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(callee);
              method != nullptr &&
              is_template_instantiation(method->getParent())) {
-    emit_method_owner(ctx_.sink(), ctx_.mint(), ctx_.targ_encoder(), dst_id,
-                      method);
+    emit_method_owner(ctx_.ports(), ctx_.ports(), ctx_.mint(),
+                      ctx_.targ_encoder(), dst_id, method);
   }
-  DeclarationEdgeVisitor signature_visitor(ctx_.context(), ctx_.sink(), {},
-                                           ctx_.file_id());
+  StatementDeclarationAdapter declaration_ports(ctx_.ports());
+  DeclarationEdgeVisitor signature_visitor(ctx_.context(), declaration_ports,
+                                           {}, ctx_.file_id());
   signature_visitor.emit_signature_types_for(callee, dst_id);
   return dst_id;
 }
@@ -91,7 +161,7 @@ int64_t CallEdgeEmitter::emit_call_site(const clang::Expr *site, int64_t dst_id,
   e.src_id = ctx_.src_id();
   e.dst_id = dst_id;
   e.kind = 1;
-  const int64_t edge_id = ctx_.sink().add_edge(e);
+  const int64_t edge_id = ctx_.ports().add_edge(e);
   const ExpansionLoc loc = expansion_loc(ctx_.context(), site->getBeginLoc());
   EdgeSiteRecord siter;
   siter.edge_id = edge_id;
@@ -110,7 +180,7 @@ int64_t CallEdgeEmitter::emit_call_site(const clang::Expr *site, int64_t dst_id,
   }
   siter.recv_param_pos = recv.param_pos;
   siter.recv_type_is_value = recv.type_is_value;
-  ctx_.sink().add_edge_site(siter);
+  ctx_.ports().add_edge_site(siter);
   return edge_id;
 }
 
@@ -122,11 +192,15 @@ void CallEdgeEmitter::emit_resolved_call(const clang::Expr *site,
       mint_as != nullptr ? mint_as : llvm::cast<clang::NamedDecl>(callee);
   const std::string callee_usr = usr_for_decl(keyed);
   if (callee_usr.empty()) {
+    ctx_.record_unsupported("CallExpr", site->getBeginLoc(),
+                            "callee has no canonical identity");
     return;
   }
   const int64_t dst_id = recovered ? resolve_recovered_target(keyed, callee_usr)
                                    : mint_resolved_target(site, callee);
   if (dst_id < 0) {
+    ctx_.record_unsupported("CallExpr", site->getBeginLoc(),
+                            "callee identity could not be resolved");
     return;
   }
   const int64_t edge_id = emit_call_site(site, dst_id, callee);
@@ -181,7 +255,7 @@ void CallEdgeEmitter::emit_call_args(const clang::Expr *site,
               ? 1
               : 0;
     }
-    ctx_.sink().add_call_arg(ca);
+    ctx_.ports().add_call_arg(ca);
   }
 }
 

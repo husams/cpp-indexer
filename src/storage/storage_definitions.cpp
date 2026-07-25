@@ -303,6 +303,13 @@ void SqliteStorageService::copy_body_edges_to_def_edge(int64_t def_id,
   st.step_done();
 }
 
+auto SqliteStorageService::body_edge_count(int64_t symbol_id) -> std::size_t {
+  auto st = db_.prepare(
+      "SELECT COUNT(*) FROM edge WHERE src_id = ? AND kind IN (1, 7)");
+  st.bind(1, symbol_id);
+  return st.step() ? static_cast<std::size_t>(st.col_int64(0)) : 0;
+}
+
 void SqliteStorageService::delete_definitions_for_file(int64_t file_id) {
   // Keyed on definition.file_id (the actual body file), so re-indexing one
   // backend never disturbs another backend's rows. Cascades def_edge.
@@ -401,6 +408,45 @@ void SqliteStorageService::add_entity_edge(
 
 void SqliteStorageService::clear_entity_edges() {
   db_.exec("DELETE FROM entity_edge");
+}
+
+std::optional<EntityNode> SqliteStorageService::entity_node_by_id(int64_t id) {
+  auto st =
+      db_.prepare("SELECT en.id, en.kind, ek.name FROM entity_node en "
+                  "JOIN entity_kind ek ON ek.id = en.kind WHERE en.id = ?");
+  st.bind(1, id);
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return EntityNode{.id = st.col_int64(0),
+                    .kind = st.col_int64(1),
+                    .kind_name = st.col_text(2)};
+}
+
+std::vector<EntityEdge> SqliteStorageService::entity_edges_from(int64_t id) {
+  auto st = db_.prepare(
+      "SELECT ee.src_id, ee.dst_id, ee.kind, ek.name, ee.count, "
+      "ee.via_member_id, ee.multiplicity, ee.access, ee.is_virtual, "
+      "ee.create_form, ee.partial FROM entity_edge ee "
+      "JOIN entity_edge_kind ek ON ek.id = ee.kind "
+      "WHERE ee.src_id = ? ORDER BY ek.name, ee.dst_id, ee.via_member_id, "
+      "ee.create_form");
+  st.bind(1, id);
+  std::vector<EntityEdge> out;
+  while (st.step()) {
+    out.push_back(EntityEdge{.src_id = st.col_int64(0),
+                             .dst_id = st.col_int64(1),
+                             .kind = st.col_int64(2),
+                             .kind_name = st.col_text(3),
+                             .count = st.col_int64(4),
+                             .via_member_id = opt_int64(st, 5),
+                             .multiplicity = st.col_int64(6),
+                             .access = st.col_int64(7),
+                             .is_virtual = st.col_int64(8),
+                             .create_form = opt_int64(st, 9),
+                             .partial = st.col_int64(10)});
+  }
+  return out;
 }
 
 } // namespace cidx

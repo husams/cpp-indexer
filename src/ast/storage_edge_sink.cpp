@@ -6,8 +6,12 @@
 
 namespace cidx::ast {
 
-StorageEdgeSink::StorageEdgeSink(cidx::storage::AstStoragePorts &ports)
-    : ports_(ports) {}
+StorageEdgeSink::StorageEdgeSink(
+    cidx::storage::AstStoragePorts &ports,
+    std::vector<EvidenceRecord> *evidence,
+    std::vector<PresentationIntent> *presentation_intents)
+    : ports_(ports), evidence_(evidence),
+      presentation_intents_(presentation_intents) {}
 
 void StorageEdgeSink::reset_fact_ids() {
   edge_ids_.clear();
@@ -184,6 +188,10 @@ void StorageEdgeSink::add_def_edge(int64_t def_id, int64_t dst_id,
   ports_.definitions_write.add_def_edge(def_id, dst_id, kind);
 }
 
+auto StorageEdgeSink::body_edge_count(int64_t src_id) -> std::size_t {
+  return ports_.definitions_write.body_edge_count(src_id);
+}
+
 void StorageEdgeSink::copy_body_edges_to_def_edge(int64_t def_id,
                                                   int64_t src_id) {
   ports_.definitions_write.copy_body_edges_to_def_edge(def_id, src_id);
@@ -208,6 +216,12 @@ void StorageEdgeSink::update_display_name(int64_t id,
   ports_.symbols_write.update_symbol_by_id(id, {{"display_name", display}});
 }
 
+void StorageEdgeSink::emit(const PresentationIntent &intent) {
+  if (presentation_intents_ != nullptr) {
+    presentation_intents_->push_back(intent);
+  }
+}
+
 std::vector<int64_t>
 StorageEdgeSink::symbol_ids_by_qual_name_kind(const std::string &qual_name,
                                               const std::string &kind_name) {
@@ -223,6 +237,12 @@ StorageEdgeSink::symbol_ids_by_qual_name_kind(const std::string &qual_name,
     out.push_back(sym.id);
   }
   return out;
+}
+
+void StorageEdgeSink::emit(const EvidenceRecord &evidence) {
+  if (evidence_ != nullptr) {
+    evidence_->push_back(evidence);
+  }
 }
 
 void StorageEdgeSink::add_template_param(const TemplateParamRecord &param) {

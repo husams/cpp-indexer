@@ -43,6 +43,10 @@ std::string script_safe(std::string value) {
 } // namespace
 
 std::string render_html(const json_out::Value &view) {
+  return render_html(view, RenderMode::OfflineExport);
+}
+
+std::string render_html(const json_out::Value &view, const RenderMode mode) {
   std::string html = read_asset("index.html");
   replace_all(html, "__CIDX_STYLES__", read_asset("styles.css"));
   replace_all(html, "__CIDX_CYTOSCAPE__",
@@ -50,6 +54,8 @@ std::string render_html(const json_out::Value &view) {
   replace_all(html, "__CIDX_APP__", read_asset("app.js"));
   replace_all(html, "__CIDX_GRAPH_VIEW__",
               script_safe(json_out::dumps_indent2(view)));
+  replace_all(html, "__CIDX_OFFLINE__",
+              mode == RenderMode::OfflineExport ? "true" : "false");
   return html;
 }
 
