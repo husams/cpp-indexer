@@ -20,8 +20,10 @@ present nullable identity/resource fields are emitted as `null`.
 
 `identity` always names the workspace, index, and fact sets. `freshness` is
 independent from `status`: a stale index produces `status: unknown` and a
-`stale_input` diagnostic. `completeness.truncated` is independent from status;
-a truncated result is `partial`, never `complete`.
+`stale_input` diagnostic. `completeness.truncated` is the single canonical
+truncation flag: it is valid with `status: partial` for a successful bounded
+operation or with `status: error` when a bounded operation also fails or is
+cancelled, and it is never valid with `status: complete`.
 
 The status classes are `complete`, `partial`, `unknown`, `refuted`,
 `conditional`, and `error`. `truncated`, `stale`, `timeout`, backend failure,

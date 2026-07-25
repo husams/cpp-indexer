@@ -161,6 +161,27 @@
       "description": "Syntax/semantic diff lowering and comparison model."
     },
     {
+      "id": "product.application",
+      "layer": "product-surface",
+      "paths": ["src/application/**"],
+      "allowedDependencies": [
+        "product.application",
+        "workspace.toolchain",
+        "frontend.compiledb",
+        "extraction.ast",
+        "analysis.astgraph",
+        "persistence.sqlite",
+        "analysis.graph",
+        "query.plan",
+        "refactor.include-hygiene",
+        "analysis.diff",
+        "foundation.util",
+        "model.contracts"
+      ],
+      "allowedExternal": ["filesystem"],
+      "description": "Typed application requests, policy context, and concrete product services."
+    },
+    {
       "id": "product.cli",
       "layer": "product-surface",
       "paths": [
@@ -173,6 +194,7 @@
       "excludePaths": ["src/cli/souffle_rules.hpp"],
       "allowedDependencies": [
         "product.cli",
+        "product.application",
         "workspace.toolchain",
         "frontend.compiledb",
         "extraction.ast",
@@ -195,6 +217,7 @@
       "allowedDependencies": [
         "compat.core-bundle",
         "product.cli",
+        "product.application",
         "workspace.toolchain",
         "frontend.compiledb",
         "extraction.ast",
@@ -690,6 +713,10 @@
     {
       "source": "src/main.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
       "boundary": "product surface -> filesystem compatibility", "owner": "Platform M1 application maintainers", "rationale": "Retain the primary command input stat until shared workspace context owns it.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/cli/application_adapter.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
+      "boundary": "product surface -> filesystem compatibility", "owner": "Platform M3 application maintainers", "rationale": "Retain POSIX mkdir compatibility while typed policy controls when cache artifacts may be created.", "expiresOn": "2026-12-31", "removalIssue": "HSE-68"
     },
     {
       "source": "src/toolchain/toolchain.cpp", "fromModule": "workspace.toolchain", "toModule": "external:filesystem", "include": "sys/stat.h",

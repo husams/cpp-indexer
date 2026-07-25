@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "cli/application_adapter.hpp"
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
 #include "util/errors.hpp"
@@ -49,31 +50,42 @@ void makedirs(const std::string &path) {
 int main(int argc, char **argv) {
   const std::vector<std::string> args(argv + 1, argv + argc);
   try {
-    cidx::cli::ParsedArgs parsed = cidx::cli::parse_args(args);
-    if (parsed.help_text) { // argparse -h: help on stdout, exit 0
+    const cidx::cli::ApplicationParseResult application_parse =
+        cidx::cli::parse_application_request(args);
+
+    cidx::cli::Context ctx;
+    ctx.out = &std::cout;
+    ctx.err = &std::cerr;
+    if (std::holds_alternative<cidx::application::CommandRequest>(
+            application_parse.value)) {
+      const auto &request =
+          std::get<cidx::application::CommandRequest>(application_parse.value);
+      ctx.cache_dir = cidx::cli::resolve_cache_dir();
+      ctx.index_path = cidx::pathutil::join(ctx.cache_dir, "index.db");
+      ctx.logger = &cidx::Logger::root();
+      return cidx::cli::run_application_request(request, ctx);
+    }
+
+    const auto &compatibility =
+        std::get<cidx::cli::CompatibilityRequest>(application_parse.value);
+    cidx::cli::ParsedArgs parsed = cidx::cli::parse_args(compatibility.argv);
+    if (parsed.help_text) {
       std::cout << *parsed.help_text;
       return 0;
     }
-    if (parsed.version) { // argparse --version: version on stdout, exit 0
+    if (parsed.version) {
       std::cout << "cidx " << cidx::cli::kVersion << "\n";
       return 0;
     }
-
-    cidx::cli::Context ctx;
     ctx.cache_dir = cidx::cli::resolve_cache_dir();
     makedirs(ctx.cache_dir);
     ctx.index_path = cidx::pathutil::join(ctx.cache_dir, "index.db");
-    // `--db PATH` operates on a non-standard index (parity with the Python
-    // tool, whose --db overrides the default index path for set/file/
-    // dump-compile-commands).
-    if (parsed.index_db) {
-      ctx.index_path = *parsed.index_db;
-    }
     cidx::Logger::root().set_file(
         cidx::pathutil::join(ctx.cache_dir, "cidx.log"));
     ctx.logger = &cidx::Logger::root();
-    ctx.out = &std::cout;
-    ctx.err = &std::cerr;
+    if (parsed.index_db) {
+      ctx.index_path = *parsed.index_db;
+    }
     return cidx::cli::run_command(parsed, ctx);
   } catch (const cidx::UsageError &e) {
     std::cerr << e.what();

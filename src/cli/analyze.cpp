@@ -10,6 +10,7 @@
 
 #include "analysis/facts.hpp"
 #include "analysis/runner.hpp"
+#include "application/analysis_service.hpp"
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
 #include "cli/json_out.hpp"
@@ -80,6 +81,130 @@ const BuiltinRule *find_builtin_rule(std::string_view name) {
 }
 
 } // namespace
+
+protocol::ResultEnvelope
+run_analysis_application(const application::AnalysisRequest &request,
+                         const std::string &index_path) {
+  protocol::ResultEnvelope envelope;
+  const int modes =
+      (request.action == application::AnalysisAction::list ? 1 : 0) +
+      (request.action == application::AnalysisAction::export_facts ? 1 : 0) +
+      (request.rule ? 1 : 0) + (request.rules_file ? 1 : 0);
+  if (modes != 1) {
+    throw CidxError("exactly one analysis operation is required");
+  }
+  if (request.jobs < 1) {
+    throw CidxError("--jobs must be at least 1");
+  }
+
+  if (request.action == application::AnalysisAction::list) {
+    json_out::Array rules;
+    for (const BuiltinRule &rule : kBuiltinRules) {
+      rules.push_back(json_out::Value::obj(
+          {{"name", json_out::Value::of(std::string(rule.name))},
+           {"description",
+            json_out::Value::of(std::string(rule.description))}}));
+    }
+    envelope.result = json_out::Value::obj(
+        {{"rules", json_out::Value::arr(std::move(rules))}});
+    return envelope;
+  }
+  if (!is_regular_file(index_path)) {
+    throw CidxError("index not found at " + index_path +
+                    " (run 'cidx import' first, or pass --db)");
+  }
+
+  try {
+    const analysis::FactRequest facts;
+    const analysis::SqliteFactProvider provider(index_path);
+    const analysis::FactSnapshot snapshot = provider.snapshot(facts);
+    if (request.action == application::AnalysisAction::export_facts) {
+      if (!request.export_directory) {
+        throw CidxError("--export-facts requires a directory");
+      }
+      const std::string directory =
+          pathutil::abspath(*request.export_directory);
+      const analysis::FactExportStats stats =
+          analysis::write_fact_files(snapshot, directory, dlrules::k_prelude);
+      envelope.result =
+          json_out::Value::obj({{"directory", json_out::Value::of(directory)},
+                                {"files", json_out::Value::of(stats.files)},
+                                {"rows", json_out::Value::of(stats.rows)}});
+      return envelope;
+    }
+
+    std::string label;
+    std::string program;
+    if (request.rule) {
+      const BuiltinRule *rule = find_builtin_rule(*request.rule);
+      if (rule == nullptr) {
+        throw CidxError("unknown rule: " + *request.rule +
+                        " (see cidx analyze --list)");
+      }
+      label = rule->name;
+      program = std::string(rule->body);
+    } else {
+      if (!request.rules_file) {
+        throw CidxError("rules file is required");
+      }
+      const std::string path = pathutil::abspath(*request.rules_file);
+      if (!is_regular_file(path)) {
+        throw CidxError("rules file not found: " + path);
+      }
+      label = path;
+      program = read_text_file(path);
+    }
+
+    const analysis::AnalysisPackage package{.name = label,
+                                            .version = "builtin",
+                                            .entry_point = label,
+                                            .engine = "souffle",
+                                            .program = std::move(program),
+                                            .prelude = {},
+                                            .include_catalog_prelude = true,
+                                            .content_hash = {},
+                                            .required_relations = {},
+                                            .output_relations = {}};
+    const analysis::AnalysisRequest analysis_request{
+        .package = package,
+        .provider =
+            analysis::ProviderDeclaration{
+                .kind = analysis::ProviderKind::semantic_index,
+                .path = index_path,
+                .left = {},
+                .right = {},
+                .joins = {}},
+        .facts = facts,
+        .options = analysis::AnalysisOptions{.jobs = request.jobs,
+                                             .step_budget = 0,
+                                             .time_budget_ms = 600'000,
+                                             .output_budget = 0,
+                                             .artifact_root = std::nullopt,
+                                             .capture_budget = 1'048'576},
+        .publication = std::nullopt};
+    const analysis::AnalysisRun result =
+        analysis::AnalysisService().run(analysis_request);
+    if (result.status == analysis::AnalysisStatus::error ||
+        result.status == analysis::AnalysisStatus::unknown) {
+      if (result.diagnostics.empty()) {
+        throw CidxError("analysis did not produce a result");
+      }
+      throw CidxError(result.diagnostics.front().message);
+    }
+
+    json_out::Object relations;
+    for (const auto &[name, relation] : result.relations) {
+      relations.emplace_back(name, relation_json(relation));
+    }
+    envelope.result = json_out::Value::obj(
+        {{"rule", json_out::Value::of(label)},
+         {"db", json_out::Value::of(pathutil::abspath(index_path))},
+         {"relations", json_out::Value::obj(std::move(relations))}});
+    return envelope;
+  } catch (const analysis::FactProviderError &error) {
+    throw CidxError(error.what());
+  }
+}
 
 int cmd_analyze(const ParsedArgs &args, Context &ctx) {
   const int modes =

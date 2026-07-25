@@ -93,6 +93,9 @@ public:
   static WorkspaceContext
   borrow(WorkspaceDataSource &data_source,
          WorkspaceReadWriteMode mode = WorkspaceReadWriteMode::read_write);
+  static WorkspaceContext borrow(WorkspaceDataSource &data_source,
+                                 WorkspaceReadWriteMode mode,
+                                 std::string index_path);
 
   WorkspaceContext(WorkspaceContext &&) noexcept;
   WorkspaceContext &operator=(WorkspaceContext &&) noexcept;

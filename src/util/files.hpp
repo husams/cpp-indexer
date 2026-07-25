@@ -3,6 +3,7 @@
 // (analysis §4): mtime is stored metadata but never consulted here.
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -15,7 +16,7 @@ class Storage;
 namespace files {
 
 // Exactly the four outcomes of files.py:20-28, in check order.
-enum class IndexStatus {
+enum class IndexStatus : std::uint8_t {
   kNotIndexed,  // indexed flag not set (never indexed)
   kNoStoredMd5, // indexed but no md5 captured -> treat as never indexed
   kMd5Mismatch, // content changed since import

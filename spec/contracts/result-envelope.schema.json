@@ -1506,7 +1506,10 @@
       "then": {
         "properties": {
           "status": {
-            "const": "partial"
+            "enum": [
+              "partial",
+              "error"
+            ]
           }
         }
       }

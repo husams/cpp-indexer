@@ -49,6 +49,23 @@ cidx::protocol::ResultEnvelope golden_envelope() {
   return envelope;
 }
 
+cidx::protocol::ResultEnvelope error_truncated_envelope() {
+  auto envelope = golden_envelope();
+  envelope.operation = "index";
+  envelope.status = cidx::protocol::Status::Error;
+  envelope.result =
+      cidx::json_out::Value::obj({{"indexed", cidx::json_out::Value::of(0)},
+                                  {"failed", cidx::json_out::Value::of(1)},
+                                  {"already", cidx::json_out::Value::of(0)},
+                                  {"files", cidx::json_out::Value::arr({})}});
+  envelope.completeness = {"unknown", true, false, 1};
+  envelope.diagnostics = {
+      {"backend_error", "error", "index operation failed", std::nullopt}};
+  envelope.evidence.clear();
+  envelope.artifacts.clear();
+  return envelope;
+}
+
 } // namespace
 
 TEST_CASE("result protocol matches the shared golden envelope") {
@@ -57,6 +74,13 @@ TEST_CASE("result protocol matches the shared golden envelope") {
   CHECK(envelope.exit_code() == 0);
   CHECK(cidx::json_out::dumps_indent2(envelope.to_json()) ==
         read_file(CIDX_RESULT_PROTOCOL_GOLDEN));
+}
+
+TEST_CASE("error truncation golden is byte-identical and schema-shaped") {
+  const auto envelope = error_truncated_envelope();
+  CHECK(envelope.valid());
+  CHECK(cidx::json_out::dumps_indent2(envelope.to_json()) ==
+        read_file(CIDX_ERROR_TRUNCATED_GOLDEN));
 }
 
 TEST_CASE("result protocol keeps status, truncation, stale input, and exit "
@@ -85,9 +109,15 @@ TEST_CASE("result protocol keeps status, truncation, stale input, and exit "
   CHECK(envelope.exit_code() == 4);
 
   envelope.status = Status::Error;
+  envelope.identity.freshness = "current";
   envelope.diagnostics = {{"timeout", "error", "backend timed out", "retry"}};
   CHECK(envelope.exit_class() == ExitClass::InfrastructureFailure);
   CHECK(envelope.exit_code() == 6);
+  envelope.completeness = {"unknown", true, false, 1000};
+  const std::string truncated_error =
+      cidx::json_out::dumps_indent2(envelope.to_json());
+  CHECK(truncated_error.find("\"truncated\": true") != std::string::npos);
+  CHECK(truncated_error.find("\"budget\": 1000") != std::string::npos);
   envelope.diagnostics = {{"invalid_input", "error", "bad input", "fix it"}};
   CHECK(envelope.exit_class() == ExitClass::InvalidOrStaleInput);
   CHECK(envelope.exit_code() == 3);

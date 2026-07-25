@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,9 +30,13 @@ from indexer.storage import Storage
 from indexer.queryplan import Executor, codebase, nodes, start
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from check_release_contract import validate_json_schema
+
 GOLDEN = ROOT / "spec/contracts/golden/result-envelope.json"
 EVENT_GOLDEN = ROOT / "spec/contracts/golden/event.json"
 ERROR_GOLDEN = ROOT / "spec/contracts/golden/error-status.json"
+ERROR_TRUNCATED_GOLDEN = ROOT / "spec/contracts/golden/error-truncated-envelope.json"
 SCHEMA = ROOT / "spec/contracts/result-envelope.schema.json"
 
 
@@ -59,11 +64,32 @@ def _golden_envelope() -> ResultEnvelope:
     )
 
 
+def _error_truncated_envelope() -> ResultEnvelope:
+    envelope = _golden_envelope()
+    envelope.operation = "index"
+    envelope.status = Status.ERROR
+    envelope.result = {"indexed": 0, "failed": 1, "already": 0, "files": []}
+    envelope.completeness = Completeness("unknown", True, False, 1)
+    envelope.diagnostics = [Diagnostic("backend_error", message="index operation failed")]
+    envelope.evidence = []
+    envelope.artifacts = []
+    return envelope
+
+
 def test_shared_golden_serializes_deterministically() -> None:
     expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
     envelope = _golden_envelope()
     assert envelope.to_dict() == expected
     assert json.loads(envelope.dumps()) == expected
+
+
+def test_error_truncated_golden_is_byte_identical_and_schema_valid() -> None:
+    envelope = _error_truncated_envelope()
+    expected = ERROR_TRUNCATED_GOLDEN.read_text(encoding="utf-8")
+    assert envelope.dumps() + "\n" == expected
+    serialized = json.loads(expected)
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    validate_json_schema(serialized, schema, "error-truncated-envelope")
 
 
 def test_query_result_adapter_preserves_stale_and_truncated_semantics() -> None:

@@ -28,6 +28,39 @@ def _schema_type_matches(value: object, expected: str) -> bool:
     }[expected]
 
 
+def _schema_condition_matches(value: object, schema: dict) -> bool:
+    if "const" in schema and value != schema["const"]:
+        return False
+    if "enum" in schema and value not in schema["enum"]:
+        return False
+    if "type" in schema and not _schema_type_matches(value, schema["type"]):
+        return False
+    if "required" in schema and (
+        not isinstance(value, dict) or any(key not in value for key in schema["required"])
+    ):
+        return False
+    if "properties" in schema:
+        if not isinstance(value, dict):
+            return False
+        if any(
+            key in value and not _schema_condition_matches(value[key], child)
+            for key, child in schema["properties"].items()
+        ):
+            return False
+    if "contains" in schema:
+        if not isinstance(value, list) or not any(
+            _schema_condition_matches(item, schema["contains"]) for item in value
+        ):
+            return False
+    if "anyOf" in schema and not any(
+        _schema_condition_matches(value, option) for option in schema["anyOf"]
+    ):
+        return False
+    if "not" in schema and _schema_condition_matches(value, schema["not"]):
+        return False
+    return True
+
+
 def validate_json_schema(value: object, schema: dict, path: str = "$") -> None:
     if "const" in schema and value != schema["const"]:
         fail(f"{path} must equal {schema['const']!r}")
@@ -41,6 +74,10 @@ def validate_json_schema(value: object, schema: dict, path: str = "$") -> None:
         not isinstance(value, str) or re.fullmatch(schema["pattern"], value) is None
     ):
         fail(f"{path} does not match {schema['pattern']!r}")
+
+    for rule in schema.get("allOf", []):
+        if "if" in rule and _schema_condition_matches(value, rule["if"]):
+            validate_json_schema(value, rule.get("then", {}), path)
 
     if isinstance(value, dict):
         for required in schema.get("required", []):

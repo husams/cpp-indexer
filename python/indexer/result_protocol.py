@@ -36,6 +36,7 @@ from .generated_result_protocol import (
     MAX_INTEGER,
     MIN_INTEGER,
     DIAGNOSTIC_STATUS_RULES,
+    TRUNCATED_STATUSES,
     EVENT_PROTOCOL as GENERATED_EVENT_PROTOCOL,
     PROTOCOL as GENERATED_PROTOCOL,
     PROTOCOL_VERSION,
@@ -292,8 +293,8 @@ class ResultEnvelope:
         expected_state = {Status.COMPLETE: "complete", Status.PARTIAL: "partial"}.get(self.status)
         if expected_state is not None and self.completeness.state != expected_state:
             raise ValueError("status and completeness state disagree")
-        if self.completeness.truncated and self.status is not Status.PARTIAL:
-            raise ValueError("truncated results must be partial")
+        if self.completeness.truncated and self.status.value not in TRUNCATED_STATUSES:
+            raise ValueError("truncated results must be partial or error")
         if self.status is Status.COMPLETE and (
             self.completeness.state != "complete"
             or self.completeness.truncated
