@@ -5,10 +5,13 @@
 #pragma once
 
 #include "ast/symbol_emitter.hpp"
+#include "storage/records.hpp"
 
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace cidx::storage {
@@ -38,12 +41,22 @@ public:
   void emit(const SymbolRecord &symbol) override;
 
 private:
+  struct CachedResolvedIdentity {
+    int64_t symbol_id;
+    cidx::Symbol persisted;
+  };
+
   cidx::storage::AstStoragePorts &ports_;
   int64_t current_file_id_ = -1;
   std::optional<std::string> identity_translation_unit_;
   int stored_ = 0;
   std::vector<int64_t> symbol_ids_;
   PassMetrics *metrics_ = nullptr;
+  std::unordered_set<int64_t> symbol_id_set_;
+  std::unordered_map<std::string, CachedResolvedIdentity>
+      resolved_identity_cache_;
+  std::unordered_set<std::size_t> resolved_identity_cache_hashes_;
+  bool resolved_cache_active_ = false;
 };
 
 } // namespace cidx::ast

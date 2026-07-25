@@ -260,6 +260,14 @@ int64_t SqliteSymbolStoreAdapter::add_symbol(const Symbol &symbol) {
   return id;
 }
 
+void SqliteSymbolStoreAdapter::add_decl_site(int64_t symbol_id,
+                                             const Symbol &symbol) {
+  db_->add_decl_site(symbol_id, symbol);
+  if (injector_ != nullptr) {
+    injector_->inject(FailurePoint::adapter);
+  }
+}
+
 int64_t
 SqliteSymbolStoreAdapter::mint_symbol_id(const SymbolIdentityRecord &symbol) {
   return db_->mint_symbol_id(
