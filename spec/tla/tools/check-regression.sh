@@ -149,6 +149,9 @@ run_semantic_seed illegal-set PlanTransitionInvariant
 run_semantic_seed illegal-select PlanTransitionInvariant
 run_semantic_seed illegal-order PlanTransitionInvariant
 run_semantic_seed illegal-limit PlanTransitionInvariant
+run_semantic_seed illegal-later-source PlanTransitionInvariant
+run_semantic_seed illegal-terminal PlanTransitionInvariant
+run_semantic_seed illegal-plan-operation PlanTransitionInvariant
 run_semantic_seed duplicate-results SetSemanticsInvariant
 run_semantic_seed query-write ReadOnlyExecutionInvariant
 run_semantic_seed witness-below-bound WitnessInvariant
@@ -168,10 +171,13 @@ run_semantic_seed cycle-loop CycleExecutionInvariant
 run_semantic_seed diamond-duplicate DiamondExecutionInvariant
 run_semantic_seed fanout-dedup FanoutExecutionInvariant
 run_semantic_seed fanout-complete CompletenessInvariant
+run_semantic_seed fanout-truncated CompletenessInvariant
 run_semantic_seed stale-resolve TransformStalePropagationInvariant
 run_semantic_seed failed-resolve TransformStalePropagationInvariant
 run_semantic_seed stale-answer-consumption TransformConsumptionInvariant
 run_semantic_seed failed-answer-publication TransformPublicationInvariant
+run_semantic_seed stale-summary TransformConsumptionInvariant
+run_semantic_seed failed-summary TransformConsumptionInvariant
 
 awk '
 index($0, "queryState") && index($0, "\"complete\"") {

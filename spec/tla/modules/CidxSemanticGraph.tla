@@ -37,9 +37,12 @@ ResultStates == {"none", "complete", "partial", "unknown"}
 DerivedTransformStates == {"absent", "planned", "current", "stale", "failed"}
 PlanStepOperations == {"source", "view", "filter", "traverse", "union",
                        "intersection", "difference", "select", "order", "limit"}
+StageNames == {"source", "filter", "view", "traverse", "evidence", "limit"}
+OperandNames == {"left", "right"}
 TransformLifecycleStates == {"planned", "running", "published", "stale", "failed"}
-TransformNames == {"resolve", "answer"}
-FactSets == {"raw-facts", "resolved-facts-v1", "answer-facts-v1"}
+TransformNames == {"parse", "resolve", "answer", "summary"}
+FactSets == {"raw-facts", "parsed-facts-v1", "resolved-facts-v1",
+             "answer-facts-v1", "summary-facts-v1"}
 Fixtures == {"normal", "cycle", "diamond", "fanout", "unknown-target",
              "partial-evidence"}
 ResultItemIds == GraphNodeIds \cup RelationIds \cup EvidenceIds
@@ -53,11 +56,17 @@ PlanStepRecord == [operation: PlanStepOperations,
                    rightView: PlanViews,
                    depth: Nat,
                    limit: Nat]
-TransformDependencyEdges == {<<"answer", "resolve">>}
-TransformRequiredFacts == {<<"resolve", "raw-facts">>,
-                           <<"answer", "resolved-facts-v1">>}
-TransformProducedFacts == {<<"resolve", "resolved-facts-v1">>,
-                           <<"answer", "answer-facts-v1">>}
+TransformDependencyEdges == {<<"resolve", "parse">>,
+                             <<"answer", "resolve">>,
+                             <<"summary", "resolve">>}
+TransformRequiredFacts == {<<"parse", "raw-facts">>,
+                           <<"resolve", "parsed-facts-v1">>,
+                           <<"answer", "resolved-facts-v1">>,
+                           <<"summary", "resolved-facts-v1">>}
+TransformProducedFacts == {<<"parse", "parsed-facts-v1">>,
+                           <<"resolve", "resolved-facts-v1">>,
+                           <<"answer", "answer-facts-v1">>,
+                           <<"summary", "summary-facts-v1">>}
 Defects == {"none", "illegal-source", "illegal-view", "illegal-filter",
             "illegal-traverse", "illegal-set", "illegal-select", "illegal-order",
             "illegal-limit", "duplicate-results", "query-write",
@@ -66,8 +75,10 @@ Defects == {"none", "illegal-source", "illegal-view", "illegal-filter",
             "partial-traverse", "partial-evidence", "partial-transform",
             "truncated-limit", "unknown-target-complete", "partial-evidence-complete",
             "cycle-loop", "diamond-duplicate", "fanout-dedup",
-            "fanout-complete", "stale-resolve", "failed-resolve",
-            "stale-answer-consumption", "failed-answer-publication"}
+            "fanout-complete", "fanout-truncated", "stale-resolve", "failed-resolve",
+            "stale-answer-consumption", "failed-answer-publication",
+            "stale-summary", "failed-summary", "illegal-later-source",
+            "illegal-terminal", "illegal-plan-operation"}
 
 SetUnionSteps ==
     <<[operation |-> "source", inputView |-> "graph", inputStream |-> "set",
@@ -197,6 +208,39 @@ IncompleteTargetIds == {"unknown-target"}
 PartialEvidenceIds == {"evidence-3", "evidence-4"}
 CanonicalResultOrder == <<"node-1", "node-2", "node-3">>
 
+CanonicalNode(nodes) ==
+    IF "node-1" \in nodes THEN "node-1"
+    ELSE IF "node-2" \in nodes THEN "node-2"
+    ELSE IF "node-3" \in nodes THEN "node-3"
+    ELSE CHOOSE n \in nodes : TRUE
+
+NeighborSet(f, node) ==
+    IF f = "cycle" /\ node = "node-1" THEN {"node-2"}
+    ELSE IF f = "cycle" /\ node = "node-2" THEN {"node-1"}
+    ELSE IF f = "diamond" /\ node = "node-1"
+    THEN {"node-2", "node-3"}
+    ELSE IF f = "diamond" /\ node = "node-2" THEN {"node-3"}
+    ELSE IF f = "diamond" /\ node = "node-3" THEN {"node-2"}
+    ELSE IF f = "fanout" /\ node = "node-1"
+    THEN {"node-2", "node-3"}
+    ELSE {}
+
+RECURSIVE BoundedWalk(_, _, _, _, _)
+BoundedWalk(f, pending, visited, order, limit) ==
+    IF pending = {} /\ Len(order) < limit /\ Len(order) < AdversarialBound
+    THEN [visited |-> visited, order |-> order, truncated |-> FALSE]
+    ELSE IF pending = {}
+    THEN [visited |-> visited, order |-> order, truncated |-> FALSE]
+    ELSE IF Len(order) >= limit \/ Len(order) >= AdversarialBound
+    THEN [visited |-> visited, order |-> order, truncated |-> TRUE]
+    ELSE LET node == CanonicalNode(pending)
+             nextPending == (pending \ {node})
+                              \cup (NeighborSet(f, node) \ visited)
+         IN BoundedWalk(f, nextPending, visited \cup {node},
+                        Append(order, node), limit)
+
+ExpectedTraversal(f, limit) == BoundedWalk(f, {PathStart}, {}, <<>>, limit)
+
 VARIABLES
     candidatePlan, candidateSteps, leftOperand, rightOperand, fixture,
     planValidated, planRejected, queryExecuted, resultReturned, resultStatus,
@@ -207,7 +251,10 @@ VARIABLES
     abstractIndexVersion, queryWrites, currentGeneration,
     transformState, transformInputComplete, transformOutputPublished,
     transformGeneration, transformConsumed, transformLifecycle, transformReused,
-    factPublished, factGeneration, seeded, trace
+    factPublished, factGeneration, factCompleteness, stageCompleteness,
+    operandCompleteness, stepResults, stepCompleteness, stepFacts,
+    queryStarted, frontier, traversalVisited, traversalOrder, traversalTruncated,
+    seeded, trace
 
 SemanticVars == <<candidatePlan, candidateSteps, leftOperand, rightOperand, fixture,
     planValidated, planRejected, queryExecuted, resultReturned, resultStatus,
@@ -217,11 +264,18 @@ SemanticVars == <<candidatePlan, candidateSteps, leftOperand, rightOperand, fixt
     limitCompleteness, abstractIndexVersion, queryWrites, currentGeneration,
     transformState, transformInputComplete, transformOutputPublished,
     transformGeneration, transformConsumed, transformLifecycle, transformReused,
-    factPublished, factGeneration, seeded, trace>>
+    factPublished, factGeneration, factCompleteness, stageCompleteness,
+    operandCompleteness, stepResults, stepCompleteness, stepFacts, queryStarted,
+    frontier, traversalVisited, traversalOrder, traversalTruncated,
+    factGeneration, seeded, trace>>
 vars == SemanticVars
 
 SequenceValues(s) == {s[i] : i \in 1..Len(s)}
 DistinctSequence(s) == Len(s) = Cardinality(SequenceValues(s))
+JoinCompleteness(a, b) ==
+    IF a = "unknown" \/ b = "unknown" THEN "unknown"
+    ELSE IF a = "partial" \/ b = "partial" THEN "partial"
+    ELSE "complete"
 NodeKind(id) == CHOOSE n \in GraphNodes : n[1] = id
 
 ValidNode(n) == /\ n[1] \in GraphNodeIds /\ n[2] \in GraphNodeKinds
@@ -308,6 +362,7 @@ FirstSourceValid(step) ==
 
 PlanStepTransitionValid(previous, step) ==
     /\ step.inputView = previous.outputView /\ step.inputStream = previous.outputStream
+    /\ step.operation # "source"
     /\ (step.operation = "view" =>
         /\ step.inputView = "nodes" /\ step.inputStream = "set"
         /\ step.outputView \in {"nodes", "relations", "evidence"}
@@ -347,6 +402,16 @@ PlanStepsValid(steps) ==
         /\ PlanStepShapeValid(steps[i])
         /\ PlanStepTransitionValid(steps[i - 1], steps[i])
 
+PlanOperationRepresented(p, steps) ==
+    \E i \in 1..Len(steps) : steps[i].operation = p.operation
+
+PlanTerminalValid(p, steps) ==
+    LET terminal == steps[Len(steps)] IN
+        /\ terminal.outputView = p.view
+        /\ terminal.outputStream = p.stream
+        /\ terminal.selection = p.selection
+        /\ PlanOperationRepresented(p, steps)
+
 PlanValid(p) ==
     /\ p.source \in PlanSources /\ p.view \in PlanViews
     /\ p.filter \in PlanFilters /\ p.stream \in PlanStreams
@@ -366,6 +431,7 @@ PlanValid(p) ==
 PlanTransitionInvariant ==
     /\ planValidated => /\ PlanValid(candidatePlan)
                           /\ PlanStepsValid(candidateSteps)
+                          /\ PlanTerminalValid(candidatePlan, candidateSteps)
                           /\ candidatePlan.steps = candidateSteps
     /\ planRejected => ~planValidated /\ (queryExecuted => planValidated)
 
@@ -386,17 +452,6 @@ CanonicalOrder(items) ==
     ELSE IF items = {"node-1"} THEN <<"node-1">>
     ELSE <<>>
 
-FixtureItems(f) ==
-    IF f = "cycle" THEN {"node-1", "node-2"}
-    ELSE IF f = "diamond" THEN {"node-1", "node-2", "node-3"}
-    ELSE IF f = "fanout" THEN FanoutTargets
-    ELSE IF f = "unknown-target" THEN {"record-1", "unknown-target"}
-    ELSE IF f = "partial-evidence" THEN {"node-1", "node-3"}
-    ELSE IF candidatePlan.view = "relations" THEN {"rel-1", "rel-2"}
-    ELSE IF candidatePlan.view = "evidence" THEN {"evidence-1", "evidence-2"}
-    ELSE IF candidatePlan.stream = "path" THEN {"node-1", "node-2", "node-3"}
-    ELSE SetOperationResult(candidatePlan.operation, leftOperand, rightOperand)
-
 FixtureRelations(f) ==
     IF f = "unknown-target" THEN {"rel-3"}
     ELSE IF f = "partial-evidence" THEN {"rel-4"}
@@ -409,6 +464,90 @@ FixtureWitness(f) ==
     IF f = "cycle" THEN CyclePath
     ELSE IF candidatePlan.depth = 1 THEN <<PathStart, PathTarget>>
     ELSE <<PathStart, "node-2", PathTarget>>
+
+ViewItems(view, f) ==
+    IF view = "relations"
+    THEN IF f = "unknown-target" THEN {"rel-3"} ELSE {"rel-1", "rel-2"}
+    ELSE IF view = "evidence"
+    THEN IF f = "partial-evidence" THEN {"evidence-4"}
+         ELSE {"evidence-1", "evidence-2"}
+    ELSE IF view = "nodes" THEN LeftSet \cup RightSet
+    ELSE {}
+
+StepResult(step, input, f, left, right) ==
+    IF step.operation = "source" THEN left \cup right
+    ELSE IF step.operation = "view" THEN ViewItems(step.outputView, f)
+    ELSE IF step.operation = "filter" THEN input
+    ELSE IF step.operation = "traverse"
+    THEN IF f = "normal"
+         THEN IF step.depth = 1
+              THEN {PathStart, PathTarget}
+              ELSE {PathStart, "node-2", PathTarget}
+         ELSE ExpectedTraversal(f, step.limit).visited
+    ELSE IF step.operation \in {"union", "intersection", "difference"}
+    THEN SetOperationResult(step.operation, left, right)
+    ELSE input
+
+StepFactsFor(step) ==
+    IF step.operation = "source" THEN {"raw-facts"}
+    ELSE IF step.operation \in {"view", "traverse"}
+    THEN {"resolved-facts-v1"}
+    ELSE {"answer-facts-v1"}
+
+RECURSIVE EvaluateStepResults(_, _, _, _, _, _)
+EvaluateStepResults(steps, i, input, f, left, right) ==
+    IF i > Len(steps)
+    THEN <<>>
+    ELSE LET output == StepResult(steps[i], input, f, left, right)
+         IN <<output>> \o EvaluateStepResults(steps, i + 1, output,
+                                                  f, left, right)
+
+FactSetCompleteness(facts) ==
+    IF \E f \in facts : factCompleteness[f] = "unknown" THEN "unknown"
+    ELSE IF \E f \in facts : factCompleteness[f] = "partial" THEN "partial"
+    ELSE "complete"
+
+StepOwnCompleteness(step, input, f, left, right) ==
+    JoinCompleteness(
+        JoinCompleteness(stageCompleteness[IF step.operation = "source"
+                                           THEN "source"
+                                           ELSE IF step.operation = "filter"
+                                           THEN "filter"
+                                           ELSE IF step.operation = "view"
+                                           THEN "view"
+                                           ELSE IF step.operation = "traverse"
+                                           THEN "traverse"
+                                           ELSE IF step.operation = "limit"
+                                           THEN "limit"
+                                           ELSE "source"],
+                         FactSetCompleteness(StepFactsFor(step))),
+        IF step.operation \in {"union", "intersection", "difference"}
+        THEN JoinCompleteness(operandCompleteness["left"],
+                              operandCompleteness["right"])
+        ELSE IF step.operation = "view" /\ step.outputView = "evidence"
+        THEN stageCompleteness["evidence"]
+        ELSE IF step.operation = "traverse" /\ f = "unknown-target"
+        THEN "unknown"
+        ELSE IF step.operation = "traverse" /\ f = "partial-evidence"
+        THEN "partial"
+        ELSE IF step.operation = "traverse" /\ traversalTruncated
+        THEN "partial"
+        ELSE IF step.operation = "limit" /\ Cardinality(input) > step.limit
+        THEN "partial"
+        ELSE "complete")
+
+RECURSIVE EvaluateStepCompleteness(_, _, _, _, _, _, _, _)
+EvaluateStepCompleteness(steps, i, input, inputCompleteness, f, left, right,
+                         unused) ==
+    IF i > Len(steps)
+    THEN <<>>
+    ELSE LET output == StepResult(steps[i], input, f, left, right)
+             completeness == StepOwnCompleteness(steps[i], input, f, left, right)
+         IN <<JoinCompleteness(inputCompleteness, completeness)>>
+            \o EvaluateStepCompleteness(steps, i + 1, output, completeness,
+                                          f, left, right, unused)
+
+EvaluateStepFacts(steps) == [i \in 1..Len(steps) |-> StepFactsFor(steps[i])]
 
 SetSemanticsInvariant ==
     IF queryExecuted /\ fixture = "normal"
@@ -423,9 +562,14 @@ SetSemanticsInvariant ==
 
 QueryResultInvariant ==
     IF ~seeded /\ queryExecuted
-    THEN /\ resultItems = FixtureItems(fixture)
+    THEN /\ resultItems = IF fixture \in {"cycle", "diamond", "fanout"}
+                          THEN traversalVisited
+                          ELSE stepResults[Len(stepResults)]
          /\ resultRelations = FixtureRelations(fixture)
-         /\ resultOrder = CanonicalOrder(resultItems) /\ DistinctSequence(resultOrder)
+         /\ resultOrder = IF fixture \in {"cycle", "diamond", "fanout"}
+                          THEN traversalOrder
+                          ELSE CanonicalOrder(resultItems)
+         /\ DistinctSequence(resultOrder)
     ELSE TRUE
 
 PathHasEdges(path) ==
@@ -440,40 +584,41 @@ WitnessPathValid(path, start, target, bound) ==
 
 WitnessInvariant ==
     /\ resultReturned /\ candidatePlan.stream = "path"
-    => WitnessPathValid(witnessPath, candidatePlan.pathStart,
-                         candidatePlan.pathTarget, candidatePlan.depth)
-
-JoinCompleteness(a, b) ==
-    IF a = "unknown" \/ b = "unknown" THEN "unknown"
-    ELSE IF a = "partial" \/ b = "partial" THEN "partial"
-    ELSE "complete"
+    => /\ WitnessPathValid(witnessPath, candidatePlan.pathStart,
+                           candidatePlan.pathTarget, candidatePlan.depth)
+       /\ candidatePlan.pathStart \in stepResults[Len(stepResults)]
+       /\ candidatePlan.pathTarget \in stepResults[Len(stepResults)]
 
 RelationCompleteness(relations) ==
     IF "rel-3" \in relations THEN "unknown"
     ELSE IF "rel-4" \in relations THEN "partial"
     ELSE "complete"
 
-RequiredFact(t) == IF t = "resolve" THEN "raw-facts" ELSE "resolved-facts-v1"
-ProducedFact(t) == IF t = "resolve" THEN "resolved-facts-v1" ELSE "answer-facts-v1"
-ParentTransform(t) == IF t = "answer" THEN "resolve" ELSE "none"
+RequiredFacts(t) == {f \in FactSets : <<t, f>> \in TransformRequiredFacts}
+ProducedFacts(t) == {f \in FactSets : <<t, f>> \in TransformProducedFacts}
+ParentsOf(t) == {p \in TransformNames : <<t, p>> \in TransformDependencyEdges}
+
+RECURSIVE HasDependencyPath(_, _, _)
+HasDependencyPath(child, parent, hops) ==
+    child = parent
+    \/ (hops > 0 /\ \E next \in TransformNames :
+            <<child, next>> \in TransformDependencyEdges
+            /\ HasDependencyPath(next, parent, hops - 1))
+
+DescendantsOf(t) ==
+    {d \in TransformNames : d # t /\
+        HasDependencyPath(d, t, Cardinality(TransformNames))}
+AffectedTransforms(t) == {t} \cup DescendantsOf(t)
 
 DependenciesFresh(t) ==
-    IF t = "resolve"
-    THEN /\ factPublished["raw-facts"]
-         /\ factGeneration["raw-facts"] = currentGeneration
-         /\ transformState["resolve"] = "current"
-         /\ transformOutputPublished["resolve"]
-         /\ transformGeneration["resolve"] = currentGeneration
-    ELSE /\ factPublished["raw-facts"]
-         /\ factGeneration["raw-facts"] = currentGeneration
-         /\ transformState["resolve"] = "current"
-         /\ transformOutputPublished["resolve"]
-         /\ transformGeneration["resolve"] = currentGeneration
-         /\ factPublished["resolved-facts-v1"]
-         /\ factGeneration["resolved-facts-v1"] = currentGeneration
-         /\ transformState["answer"] = "current"
-         /\ transformOutputPublished["answer"]
-         /\ transformGeneration["answer"] = currentGeneration
+    /\ \A f \in RequiredFacts(t) :
+        /\ factPublished[f]
+        /\ factGeneration[f] = currentGeneration
+        /\ factCompleteness[f] = "complete"
+    /\ \A p \in ParentsOf(t) :
+        /\ transformState[p] = "current"
+        /\ transformOutputPublished[p]
+        /\ transformGeneration[p] = currentGeneration
 
 FreshTransform(t) ==
     /\ DependenciesFresh(t)
@@ -482,55 +627,51 @@ FreshTransform(t) ==
 TransformCompleteness ==
     IF ~DependenciesFresh("answer") THEN "unknown"
     ELSE IF ~transformInputComplete["answer"] THEN "partial"
-    ELSE "complete"
-
-PlanInputCompleteness ==
-    JoinCompleteness(sourceCompleteness,
-        JoinCompleteness(filterCompleteness,
-            JoinCompleteness(viewCompleteness,
-                JoinCompleteness(
-                    IF candidatePlan.operation \in {"union", "intersection", "difference"}
-                    THEN JoinCompleteness(leftCompleteness, rightCompleteness)
-                    ELSE IF candidatePlan.operation = "traverse"
-                    THEN traverseCompleteness
-                    ELSE "complete",
-                    JoinCompleteness(traverseCompleteness, evidenceCompleteness)))))
-
-FixtureCompleteness ==
-    IF fixture = "unknown-target" THEN "unknown"
-    ELSE IF fixture = "partial-evidence" \/ fixture = "fanout" THEN "partial"
-    ELSE "complete"
+    ELSE FactSetCompleteness(ProducedFacts("answer"))
 
 ComputedResultCompleteness ==
     JoinCompleteness(
-        JoinCompleteness(FixtureCompleteness, PlanInputCompleteness),
+        IF Len(stepCompleteness) = 0
+        THEN "unknown"
+        ELSE stepCompleteness[Len(stepCompleteness)],
         JoinCompleteness(RelationCompleteness(resultRelations),
-                         JoinCompleteness(limitCompleteness,
-                                          JoinCompleteness(evidenceCompleteness,
-                                                           TransformCompleteness))))
+                         JoinCompleteness(
+                             IF Len(stepFacts) = 0
+                             THEN "unknown"
+                             ELSE FactSetCompleteness(stepFacts[Len(stepFacts)]),
+                             JoinCompleteness(stageCompleteness["evidence"],
+                                              JoinCompleteness(
+                                                  TransformCompleteness,
+                                                  IF traversalTruncated
+                                                  THEN "partial"
+                                                  ELSE "complete")))))
 
 CompletenessInvariant ==
     resultReturned => /\ resultStatus = ComputedResultCompleteness
                       /\ (resultStatus = "complete" =>
                           /\ RelationCompleteness(resultRelations) = "complete"
-                          /\ evidenceCompleteness = "complete"
-                          /\ limitCompleteness = "complete"
+                          /\ stageCompleteness["evidence"] = "complete"
+                          /\ FactSetCompleteness(stepFacts[Len(stepFacts)]) = "complete"
                           /\ TransformCompleteness = "complete")
 
 ReadOnlyExecutionInvariant ==
     /\ queryWrites = 0 /\ (queryExecuted => abstractIndexVersion = InitialIndexVersion)
 
 TransformDependencyInvariant ==
-    /\ TransformDependencyEdges = {<<"answer", "resolve">>}
+    /\ TransformDependencyEdges = {<<"resolve", "parse">>,
+                                   <<"answer", "resolve">>,
+                                   <<"summary", "resolve">>}
     /\ \A t \in TransformNames :
-        /\ RequiredFact(t) \in FactSets /\ ProducedFact(t) \in FactSets
-        /\ (t = "answer" => <<"answer", ParentTransform(t)>> \in TransformDependencyEdges)
+        /\ RequiredFacts(t) # {} /\ ProducedFacts(t) # {}
+        /\ ParentsOf(t) \subseteq TransformNames
 
 TransformStalePropagationInvariant ==
-    /\ transformState["resolve"] \in {"stale", "failed"}
-        => /\ transformState["answer"] \in {"stale", "failed"}
-           /\ ~transformOutputPublished["answer"]
-           /\ ~transformConsumed["answer"]
+    \A t \in TransformNames :
+        transformState[t] \in {"stale", "failed"}
+        => \A d \in DescendantsOf(t) :
+            /\ transformState[d] \in {"stale", "failed"}
+            /\ ~transformOutputPublished[d]
+            /\ ~transformConsumed[d]
 
 TransformPublicationInvariant ==
     \A t \in TransformNames :
@@ -538,13 +679,18 @@ TransformPublicationInvariant ==
             /\ transformInputComplete[t]
             /\ transformOutputPublished[t]
             /\ transformGeneration[t] = currentGeneration
-            /\ factPublished[ProducedFact(t)]
-            /\ factGeneration[ProducedFact(t)] = currentGeneration)
+            /\ \A f \in ProducedFacts(t) :
+                /\ factPublished[f]
+                /\ factGeneration[f] = currentGeneration
+                /\ factCompleteness[f] = "complete")
         /\ (transformState[t] \in {"stale", "failed"} =>
             /\ ~transformOutputPublished[t] /\ ~transformConsumed[t])
 
 TransformConsumptionInvariant ==
-    \A t \in TransformNames : transformConsumed[t] => DependenciesFresh(t)
+    \A t \in TransformNames :
+        transformConsumed[t] =>
+            /\ DependenciesFresh(t)
+            /\ transformState[t] = "current"
 
 TransformInvariant ==
     /\ \A t \in TransformNames :
@@ -561,21 +707,34 @@ TransformInvariant ==
 
 CycleExecutionInvariant ==
     queryExecuted /\ fixture = "cycle" =>
-        /\ resultItems = {"node-1", "node-2"}
-        /\ resultOrder = <<"node-1", "node-2">>
-        /\ DistinctSequence(resultOrder)
+        LET expected == ExpectedTraversal(fixture, candidatePlan.limit) IN
+            /\ traversalVisited = expected.visited
+            /\ traversalOrder = expected.order
+            /\ traversalOrder = resultOrder
+            /\ traversalVisited = resultItems
+            /\ DistinctSequence(traversalOrder)
+            /\ frontier = {}
 
 DiamondExecutionInvariant ==
     queryExecuted /\ fixture = "diamond" =>
-        /\ resultItems = {"node-1", "node-2", "node-3"}
-        /\ resultOrder = CanonicalResultOrder
-        /\ DistinctSequence(resultOrder)
+        LET expected == ExpectedTraversal(fixture, candidatePlan.limit) IN
+            /\ traversalVisited = expected.visited
+            /\ traversalOrder = expected.order
+            /\ traversalOrder = resultOrder
+            /\ traversalVisited = resultItems
+            /\ DistinctSequence(traversalOrder)
+            /\ frontier = {}
 
 FanoutExecutionInvariant ==
     queryExecuted /\ fixture = "fanout" =>
-        /\ resultItems = FanoutTargets
-        /\ resultOrder = CanonicalResultOrder
-        /\ resultStatus \in {"none", "partial"}
+        LET expected == ExpectedTraversal(fixture, candidatePlan.limit) IN
+            /\ traversalVisited = expected.visited
+            /\ traversalOrder = expected.order
+            /\ traversalTruncated = expected.truncated
+            /\ traversalOrder = resultOrder
+            /\ traversalVisited = resultItems
+            /\ DistinctSequence(traversalOrder)
+            /\ frontier = {}
 
 TypeInvariant ==
     /\ candidatePlan \in [name: STRING, source: PlanSources, view: PlanViews, filter: PlanFilters,
@@ -608,6 +767,17 @@ TypeInvariant ==
     /\ transformReused \in [TransformNames -> BOOLEAN]
     /\ factPublished \in [FactSets -> BOOLEAN]
     /\ factGeneration \in [FactSets -> Nat]
+    /\ factCompleteness \in [FactSets -> CompletenessStates]
+    /\ stageCompleteness \in [StageNames -> CompletenessStates]
+    /\ operandCompleteness \in [OperandNames -> CompletenessStates]
+    /\ stepResults \in Seq(SUBSET ResultItemIds)
+    /\ stepCompleteness \in Seq(CompletenessStates)
+    /\ stepFacts \in Seq(SUBSET FactSets)
+    /\ queryStarted \in BOOLEAN
+    /\ frontier \subseteq GraphNodeIds
+    /\ traversalVisited \subseteq GraphNodeIds
+    /\ traversalOrder \in Seq(GraphNodeIds)
+    /\ traversalTruncated \in BOOLEAN
     /\ seeded \in BOOLEAN /\ Len(trace) <= TraceBound
 
 Init ==
@@ -634,6 +804,17 @@ Init ==
     /\ transformReused = [t \in TransformNames |-> FALSE]
     /\ factPublished = [f \in FactSets |-> TRUE]
     /\ factGeneration = [f \in FactSets |-> 1]
+    /\ factCompleteness = [f \in FactSets |-> "complete"]
+    /\ stageCompleteness = [s \in StageNames |-> "complete"]
+    /\ operandCompleteness = [o \in OperandNames |-> "complete"]
+    /\ stepResults = EvaluateStepResults(SetUnionSteps, 1, {}, "normal",
+                                          LeftSet, RightSet)
+    /\ stepCompleteness = EvaluateStepCompleteness(SetUnionSteps, 1, {},
+                                                    "complete", "normal",
+                                                    LeftSet, RightSet, 0)
+    /\ stepFacts = EvaluateStepFacts(SetUnionSteps)
+    /\ queryStarted = FALSE /\ frontier = {} /\ traversalVisited = {}
+    /\ traversalOrder = <<>> /\ traversalTruncated = FALSE
     /\ seeded = FALSE /\ trace = <<"Init">>
 
 SelectPlan ==
@@ -650,7 +831,10 @@ SelectPlan ==
         limitCompleteness, abstractIndexVersion, queryWrites, currentGeneration,
         transformState, transformInputComplete, transformOutputPublished,
         transformGeneration, transformConsumed, transformLifecycle, transformReused,
-        factPublished, factGeneration, seeded>>
+        factPublished, factGeneration, factCompleteness, stageCompleteness,
+        operandCompleteness, stepResults, stepCompleteness, stepFacts,
+        queryStarted, frontier, traversalVisited, traversalOrder,
+        traversalTruncated, seeded>>
 
 ValidatePlan ==
     /\ ~planValidated /\ ~planRejected /\ PlanValid(candidatePlan)
@@ -664,7 +848,9 @@ ValidatePlan ==
         abstractIndexVersion, queryWrites, currentGeneration, transformState,
         transformInputComplete, transformOutputPublished, transformGeneration,
         transformConsumed, transformLifecycle, transformReused, factPublished,
-        factGeneration, seeded>>
+        factGeneration, factCompleteness, stageCompleteness, operandCompleteness,
+        stepResults, stepCompleteness, stepFacts, queryStarted, frontier,
+        traversalVisited, traversalOrder, traversalTruncated, seeded>>
 
 SelectFixture ==
     /\ Len(trace) = 3 /\ planValidated /\ ~queryExecuted /\ candidatePlan.stream = "set"
@@ -678,23 +864,83 @@ SelectFixture ==
         abstractIndexVersion, queryWrites, currentGeneration, transformState,
         transformInputComplete, transformOutputPublished, transformGeneration,
         transformConsumed, transformLifecycle, transformReused, factPublished,
-        factGeneration, seeded>>
+        factGeneration, factCompleteness, stageCompleteness, operandCompleteness,
+        stepResults, stepCompleteness, stepFacts, queryStarted, frontier,
+        traversalVisited, traversalOrder, traversalTruncated, seeded>>
 
 ExecuteQuery ==
-    /\ planValidated /\ ~queryExecuted /\ DependenciesFresh("answer")
-    /\ queryExecuted' = TRUE /\ resultItems' = FixtureItems(fixture)
-    /\ resultOrder' = CanonicalOrder(FixtureItems(fixture))
-    /\ resultRelations' = FixtureRelations(fixture)
-    /\ witnessPath' = FixtureWitness(fixture)
-    /\ trace' = Append(trace, "ExecuteQuery")
-    /\ UNCHANGED <<candidatePlan, candidateSteps, leftOperand, rightOperand, fixture,
-        planValidated, planRejected, resultReturned, resultStatus,
-        sourceCompleteness, filterCompleteness, viewCompleteness, leftCompleteness,
-        rightCompleteness, traverseCompleteness, evidenceCompleteness,
-        limitCompleteness, abstractIndexVersion, queryWrites, currentGeneration,
-        transformState, transformInputComplete, transformOutputPublished,
-        transformGeneration, transformConsumed, transformLifecycle, transformReused,
-        factPublished, factGeneration, seeded>>
+    LET evaluatedResults == EvaluateStepResults(candidateSteps, 1, {}, fixture,
+                                                leftOperand, rightOperand)
+        evaluatedCompleteness == EvaluateStepCompleteness(candidateSteps, 1, {},
+                                                           "complete", fixture,
+                                                           leftOperand, rightOperand, 0)
+    IN /\ planValidated /\ ~queryStarted /\ ~queryExecuted
+       /\ queryStarted' = TRUE
+       /\ queryExecuted' = (fixture \notin {"cycle", "diamond", "fanout"})
+       /\ stepResults' = evaluatedResults
+       /\ stepCompleteness' = evaluatedCompleteness
+       /\ stepFacts' = EvaluateStepFacts(candidateSteps)
+       /\ resultItems' = IF fixture \in {"cycle", "diamond", "fanout"}
+                         THEN {} ELSE evaluatedResults[Len(evaluatedResults)]
+       /\ resultOrder' = IF fixture \in {"cycle", "diamond", "fanout"}
+                         THEN <<>>
+                         ELSE CanonicalOrder(evaluatedResults[Len(evaluatedResults)])
+       /\ resultRelations' = FixtureRelations(fixture)
+       /\ witnessPath' = FixtureWitness(fixture)
+       /\ frontier' = IF fixture \in {"cycle", "diamond", "fanout"}
+                      THEN {PathStart} ELSE {}
+       /\ traversalVisited' = {}
+       /\ traversalOrder' = <<>>
+       /\ traversalTruncated' = FALSE
+       /\ trace' = Append(trace, "ExecuteQuery")
+       /\ UNCHANGED <<candidatePlan, candidateSteps, leftOperand, rightOperand, fixture,
+           planValidated, planRejected, resultReturned, resultStatus,
+           sourceCompleteness, filterCompleteness, viewCompleteness, leftCompleteness,
+           rightCompleteness, traverseCompleteness, evidenceCompleteness,
+           limitCompleteness, abstractIndexVersion, queryWrites, currentGeneration,
+           transformState, transformInputComplete, transformOutputPublished,
+           transformGeneration, transformConsumed, transformLifecycle, transformReused,
+           factPublished, factGeneration, factCompleteness, stageCompleteness,
+           operandCompleteness, seeded>>
+
+AdvanceTraversal ==
+    LET node == CanonicalNode(frontier)
+        nextFrontier == (frontier \ {node})
+                        \cup (NeighborSet(fixture, node) \ traversalVisited)
+        nextVisited == traversalVisited \cup {node}
+        nextOrder == Append(traversalOrder, node)
+        nextTruncated == Len(nextOrder) >= candidatePlan.limit
+                           \/ Len(nextOrder) >= AdversarialBound
+        done == nextFrontier = {} \/ nextTruncated
+    IN /\ queryStarted /\ ~queryExecuted
+       /\ candidatePlan.stream = "set"
+       /\ fixture \in {"cycle", "diamond", "fanout"}
+       /\ frontier # {}
+       /\ frontier' = IF done THEN {} ELSE nextFrontier
+       /\ traversalVisited' = nextVisited
+       /\ traversalOrder' = nextOrder
+       /\ traversalTruncated' = nextTruncated
+       /\ queryExecuted' = done
+       /\ resultItems' = IF done THEN nextVisited ELSE resultItems
+       /\ resultOrder' = IF done THEN nextOrder ELSE resultOrder
+       /\ resultRelations' = IF done THEN FixtureRelations(fixture) ELSE resultRelations
+       /\ stepResults' = IF done
+                         THEN [stepResults EXCEPT ![Len(stepResults)] = nextVisited]
+                        ELSE stepResults
+       /\ stepCompleteness' = IF done /\ nextTruncated
+                              THEN [stepCompleteness EXCEPT
+                                    ![Len(stepCompleteness)] = "partial"]
+                              ELSE stepCompleteness
+       /\ trace' = Append(trace, "AdvanceTraversal")
+       /\ UNCHANGED <<candidatePlan, candidateSteps, leftOperand, rightOperand, fixture,
+           planValidated, planRejected, resultReturned, resultStatus, witnessPath,
+           sourceCompleteness, filterCompleteness, viewCompleteness, leftCompleteness,
+           rightCompleteness, traverseCompleteness, evidenceCompleteness,
+           limitCompleteness, abstractIndexVersion, queryWrites, currentGeneration,
+           transformState, transformInputComplete, transformOutputPublished,
+           transformGeneration, transformConsumed, transformLifecycle, transformReused,
+           factPublished, factGeneration, factCompleteness, stageCompleteness,
+           operandCompleteness, stepFacts, queryStarted, seeded>>
 
 ReturnResult ==
     /\ queryExecuted /\ ~resultReturned /\ resultReturned' = TRUE
@@ -707,7 +953,10 @@ ReturnResult ==
         evidenceCompleteness, limitCompleteness, abstractIndexVersion, queryWrites,
         currentGeneration, transformState, transformInputComplete,
         transformOutputPublished, transformGeneration, transformConsumed,
-        transformLifecycle, transformReused, factPublished, factGeneration, seeded>>
+        transformLifecycle, transformReused, factPublished, factGeneration,
+        factCompleteness, stageCompleteness, operandCompleteness, stepResults,
+        stepCompleteness, stepFacts, queryStarted, frontier, traversalVisited,
+        traversalOrder, traversalTruncated, seeded>>
 
 ObserveResult ==
     /\ queryExecuted /\ resultReturned
@@ -715,9 +964,12 @@ ObserveResult ==
 
 PlanTransform ==
     \E t \in TransformNames :
-        /\ Len(trace) = 1
-        /\ transformLifecycle[t] = "published" /\ ~transformReused[t]
+        /\ ~planValidated
+        /\ ((Len(trace) = 1 /\ ~seeded) \/ (Len(trace) = 2 /\ seeded))
+        /\ transformLifecycle[t] \in {"published", "stale", "failed"}
+        /\ ~transformReused[t]
         /\ transformLifecycle' = [transformLifecycle EXCEPT ![t] = "planned"]
+        /\ transformState' = [transformState EXCEPT ![t] = "planned"]
         /\ trace' = Append(trace, "PlanTransform")
     /\ UNCHANGED <<candidatePlan, candidateSteps, leftOperand, rightOperand, fixture,
         planValidated, planRejected, queryExecuted, resultReturned, resultStatus,
@@ -726,11 +978,15 @@ PlanTransform ==
         traverseCompleteness, evidenceCompleteness, limitCompleteness,
         abstractIndexVersion, queryWrites, currentGeneration, transformState,
         transformInputComplete, transformOutputPublished, transformGeneration,
-        transformConsumed, transformReused, factPublished, factGeneration, seeded>>
+        transformConsumed, transformReused, factPublished, factGeneration,
+        factCompleteness, stageCompleteness, operandCompleteness, stepResults,
+        stepCompleteness, stepFacts, queryStarted, frontier, traversalVisited,
+        traversalOrder, traversalTruncated, seeded>>
 
 RunTransform ==
     \E t \in TransformNames :
-        /\ ~queryExecuted /\ transformLifecycle[t] = "planned" /\ DependenciesFresh(t)
+        /\ ~planValidated /\ ~queryExecuted
+        /\ transformLifecycle[t] = "planned" /\ DependenciesFresh(t)
         /\ transformLifecycle' = [transformLifecycle EXCEPT ![t] = "running"]
         /\ trace' = Append(trace, "RunTransform")
     /\ UNCHANGED <<candidatePlan, candidateSteps, leftOperand, rightOperand, fixture,
@@ -740,11 +996,15 @@ RunTransform ==
         traverseCompleteness, evidenceCompleteness, limitCompleteness,
         abstractIndexVersion, queryWrites, currentGeneration, transformState,
         transformInputComplete, transformOutputPublished, transformGeneration,
-        transformConsumed, transformReused, factPublished, factGeneration, seeded>>
+        transformConsumed, transformReused, factPublished, factGeneration,
+        factCompleteness, stageCompleteness, operandCompleteness, stepResults,
+        stepCompleteness, stepFacts, queryStarted, frontier, traversalVisited,
+        traversalOrder, traversalTruncated, seeded>>
 
 PublishTransform ==
     \E t \in TransformNames :
-        /\ ~queryExecuted /\ transformLifecycle[t] = "running" /\ transformInputComplete[t]
+        /\ ~planValidated /\ ~queryExecuted
+        /\ transformLifecycle[t] = "running" /\ transformInputComplete[t]
         /\ DependenciesFresh(t)
         /\ transformLifecycle' = [transformLifecycle EXCEPT ![t] = "published"]
         /\ transformState' = [transformState EXCEPT ![t] = "current"]
@@ -752,8 +1012,12 @@ PublishTransform ==
         /\ transformGeneration' = [transformGeneration EXCEPT ![t] = currentGeneration]
         /\ transformConsumed' = [transformConsumed EXCEPT ![t] = FALSE]
         /\ transformReused' = [transformReused EXCEPT ![t] = FALSE]
-        /\ factPublished' = [factPublished EXCEPT ![ProducedFact(t)] = TRUE]
-        /\ factGeneration' = [factGeneration EXCEPT ![ProducedFact(t)] = currentGeneration]
+        /\ factPublished' = [f \in FactSets |->
+             IF f \in ProducedFacts(t) THEN TRUE ELSE factPublished[f]]
+        /\ factGeneration' = [f \in FactSets |->
+             IF f \in ProducedFacts(t) THEN currentGeneration ELSE factGeneration[f]]
+        /\ factCompleteness' = [f \in FactSets |->
+             IF f \in ProducedFacts(t) THEN "complete" ELSE factCompleteness[f]]
         /\ trace' = Append(trace, "PublishTransform")
     /\ UNCHANGED <<candidatePlan, candidateSteps, leftOperand, rightOperand, fixture,
         planValidated, planRejected, queryExecuted, resultReturned, resultStatus,
@@ -761,30 +1025,35 @@ PublishTransform ==
         filterCompleteness, viewCompleteness, leftCompleteness, rightCompleteness,
         traverseCompleteness, evidenceCompleteness, limitCompleteness,
         abstractIndexVersion, queryWrites, currentGeneration, transformInputComplete,
-        transformLifecycle, seeded>>
+        transformLifecycle, factCompleteness,
+        stageCompleteness, operandCompleteness, stepResults, stepCompleteness,
+        stepFacts, queryStarted, frontier, traversalVisited, traversalOrder,
+        traversalTruncated, seeded>>
 
 FailTransform ==
     \E t \in TransformNames :
-        /\ ~queryExecuted /\ transformLifecycle[t] = "running"
-        /\ transformLifecycle' = IF t = "resolve"
-            THEN [transformLifecycle EXCEPT !["resolve"] = "failed", !["answer"] = "stale"]
-            ELSE [transformLifecycle EXCEPT ![t] = "failed"]
-        /\ transformState' = IF t = "resolve"
-            THEN [transformState EXCEPT !["resolve"] = "failed", !["answer"] = "stale"]
-            ELSE [transformState EXCEPT ![t] = "failed"]
-        /\ transformOutputPublished' = IF t = "resolve"
-            THEN [transformOutputPublished EXCEPT !["resolve"] = FALSE, !["answer"] = FALSE]
-            ELSE [transformOutputPublished EXCEPT ![t] = FALSE]
-        /\ transformConsumed' = IF t = "resolve"
-            THEN [transformConsumed EXCEPT !["resolve"] = FALSE, !["answer"] = FALSE]
-            ELSE [transformConsumed EXCEPT ![t] = FALSE]
-        /\ transformReused' = IF t = "resolve"
-            THEN [transformReused EXCEPT !["resolve"] = FALSE, !["answer"] = FALSE]
-            ELSE [transformReused EXCEPT ![t] = FALSE]
-        /\ factPublished' = IF t = "resolve"
-            THEN [factPublished EXCEPT !["resolved-facts-v1"] = FALSE,
-                                      !["answer-facts-v1"] = FALSE]
-            ELSE [factPublished EXCEPT !["answer-facts-v1"] = FALSE]
+        /\ ~planValidated /\ ~queryExecuted /\ transformLifecycle[t] = "running"
+        /\ LET affected == AffectedTransforms(t) IN
+            /\ transformLifecycle' = [x \in TransformNames |->
+                 IF x = t THEN "failed"
+                 ELSE IF x \in DescendantsOf(t) THEN "stale"
+                 ELSE transformLifecycle[x]]
+            /\ transformState' = [x \in TransformNames |->
+                 IF x = t THEN "failed"
+                 ELSE IF x \in DescendantsOf(t) THEN "stale"
+                 ELSE transformState[x]]
+            /\ transformOutputPublished' = [x \in TransformNames |->
+                 IF x \in affected THEN FALSE ELSE transformOutputPublished[x]]
+            /\ transformConsumed' = [x \in TransformNames |->
+                 IF x \in affected THEN FALSE ELSE transformConsumed[x]]
+            /\ transformReused' = [x \in TransformNames |->
+                 IF x \in affected THEN FALSE ELSE transformReused[x]]
+            /\ factPublished' = [f \in FactSets |->
+                 IF \E x \in affected : f \in ProducedFacts(x)
+                 THEN FALSE ELSE factPublished[f]]
+            /\ factCompleteness' = [f \in FactSets |->
+                 IF \E x \in affected : f \in ProducedFacts(x)
+                 THEN "unknown" ELSE factCompleteness[f]]
         /\ trace' = Append(trace, "FailTransform")
     /\ UNCHANGED <<candidatePlan, candidateSteps, leftOperand, rightOperand, fixture,
         planValidated, planRejected, queryExecuted, resultReturned, resultStatus,
@@ -792,31 +1061,32 @@ FailTransform ==
         filterCompleteness, viewCompleteness, leftCompleteness, rightCompleteness,
         traverseCompleteness, evidenceCompleteness, limitCompleteness,
         abstractIndexVersion, queryWrites, currentGeneration, transformInputComplete,
-        transformGeneration, transformLifecycle, transformReused, factGeneration,
-        seeded>>
+        transformGeneration, transformLifecycle, factGeneration,
+        stageCompleteness, operandCompleteness, stepResults, stepCompleteness,
+        stepFacts, queryStarted, frontier, traversalVisited, traversalOrder,
+        traversalTruncated, seeded>>
 
 InvalidateTransform ==
     \E t \in TransformNames :
-        /\ ~queryExecuted /\ transformLifecycle[t] = "published" /\ ~transformReused[t]
-        /\ transformLifecycle' = IF t = "resolve"
-            THEN [transformLifecycle EXCEPT !["resolve"] = "stale", !["answer"] = "stale"]
-            ELSE [transformLifecycle EXCEPT ![t] = "stale"]
-        /\ transformState' = IF t = "resolve"
-            THEN [transformState EXCEPT !["resolve"] = "stale", !["answer"] = "stale"]
-            ELSE [transformState EXCEPT ![t] = "stale"]
-        /\ transformOutputPublished' = IF t = "resolve"
-            THEN [transformOutputPublished EXCEPT !["resolve"] = FALSE, !["answer"] = FALSE]
-            ELSE [transformOutputPublished EXCEPT ![t] = FALSE]
-        /\ transformConsumed' = IF t = "resolve"
-            THEN [transformConsumed EXCEPT !["resolve"] = FALSE, !["answer"] = FALSE]
-            ELSE [transformConsumed EXCEPT ![t] = FALSE]
-        /\ transformReused' = IF t = "resolve"
-            THEN [transformReused EXCEPT !["resolve"] = FALSE, !["answer"] = FALSE]
-            ELSE [transformReused EXCEPT ![t] = FALSE]
-        /\ factPublished' = IF t = "resolve"
-            THEN [factPublished EXCEPT !["resolved-facts-v1"] = FALSE,
-                                      !["answer-facts-v1"] = FALSE]
-            ELSE [factPublished EXCEPT !["answer-facts-v1"] = FALSE]
+        /\ ~planValidated /\ ~queryExecuted
+        /\ transformLifecycle[t] = "published" /\ ~transformReused[t]
+        /\ LET affected == AffectedTransforms(t) IN
+            /\ transformLifecycle' = [x \in TransformNames |->
+                 IF x \in affected THEN "stale" ELSE transformLifecycle[x]]
+            /\ transformState' = [x \in TransformNames |->
+                 IF x \in affected THEN "stale" ELSE transformState[x]]
+            /\ transformOutputPublished' = [x \in TransformNames |->
+                 IF x \in affected THEN FALSE ELSE transformOutputPublished[x]]
+            /\ transformConsumed' = [x \in TransformNames |->
+                 IF x \in affected THEN FALSE ELSE transformConsumed[x]]
+            /\ transformReused' = [x \in TransformNames |->
+                 IF x \in affected THEN FALSE ELSE transformReused[x]]
+            /\ factPublished' = [f \in FactSets |->
+                 IF \E x \in affected : f \in ProducedFacts(x)
+                 THEN FALSE ELSE factPublished[f]]
+            /\ factCompleteness' = [f \in FactSets |->
+                 IF \E x \in affected : f \in ProducedFacts(x)
+                 THEN "unknown" ELSE factCompleteness[f]]
         /\ trace' = Append(trace, "InvalidateTransform")
     /\ UNCHANGED <<candidatePlan, candidateSteps, leftOperand, rightOperand, fixture,
         planValidated, planRejected, queryExecuted, resultReturned, resultStatus,
@@ -824,12 +1094,14 @@ InvalidateTransform ==
         filterCompleteness, viewCompleteness, leftCompleteness, rightCompleteness,
         traverseCompleteness, evidenceCompleteness, limitCompleteness,
         abstractIndexVersion, queryWrites, currentGeneration, transformInputComplete,
-        transformGeneration, transformLifecycle, transformReused, factGeneration,
-        seeded>>
+        transformGeneration, transformLifecycle, factGeneration,
+        stageCompleteness, operandCompleteness, stepResults, stepCompleteness,
+        stepFacts, queryStarted, frontier, traversalVisited, traversalOrder,
+        traversalTruncated, seeded>>
 
 ReuseTransform ==
     \E t \in TransformNames :
-        /\ ~queryExecuted /\ transformLifecycle[t] = "published"
+        /\ ~planValidated /\ ~queryExecuted /\ transformLifecycle[t] = "published"
         /\ ~transformReused[t] /\ FreshTransform(t)
         /\ transformConsumed' = [transformConsumed EXCEPT ![t] = TRUE]
         /\ transformReused' = [transformReused EXCEPT ![t] = TRUE]
@@ -841,142 +1113,282 @@ ReuseTransform ==
         traverseCompleteness, evidenceCompleteness, limitCompleteness,
         abstractIndexVersion, queryWrites, currentGeneration, transformState,
         transformInputComplete, transformOutputPublished, transformGeneration,
-        transformLifecycle, factPublished, factGeneration, seeded>>
+        transformLifecycle, factPublished, factGeneration, factCompleteness,
+        stageCompleteness, operandCompleteness, stepResults, stepCompleteness,
+        stepFacts, queryStarted, frontier, traversalVisited, traversalOrder,
+        traversalTruncated, seeded>>
 
 SeedPlan(defect) ==
     IF defect = "witness-above-bound"
     THEN PathDepth1Option
     ELSE IF defect \in {"witness-below-bound", "witness-missing-edge"}
     THEN PathDepth2Option
-    ELSE IF defect \in {"cycle-loop", "diamond-duplicate", "fanout-dedup", "fanout-complete"}
+    ELSE IF defect \in {"cycle-loop", "diamond-duplicate", "fanout-dedup",
+                         "fanout-complete", "fanout-truncated"}
     THEN ViewNodesOption
     ELSE IF defect \in {"unknown-target-complete", "partial-evidence-complete"}
     THEN ViewRelationsOption
+    ELSE IF defect = "truncated-limit"
+    THEN [SetUnionOption EXCEPT !.limit = 2,
+                               !.steps = [SetUnionSteps EXCEPT ![6].limit = 2]]
     ELSE SetUnionOption
 
-SeedDefect ==
+SeedSteps(defect) ==
+    IF defect = "illegal-source"
+    THEN [SetUnionSteps EXCEPT ![1].outputView = "relations"]
+    ELSE IF defect = "illegal-view"
+    THEN [SetUnionSteps EXCEPT ![2].outputStream = "path"]
+    ELSE IF defect = "illegal-filter"
+    THEN [SetUnionSteps EXCEPT ![2].outputView = "paths"]
+    ELSE IF defect = "illegal-traverse"
+    THEN [SetUnionSteps EXCEPT ![3].operation = "traverse"]
+    ELSE IF defect = "illegal-set"
+    THEN [SetUnionSteps EXCEPT ![3].leftView = "relations"]
+    ELSE IF defect = "illegal-select"
+    THEN [SetUnionSteps EXCEPT ![4].selection = "relation"]
+    ELSE IF defect = "illegal-order"
+    THEN [SetUnionSteps EXCEPT ![5].outputView = "paths"]
+    ELSE IF defect = "illegal-limit"
+    THEN [SetUnionSteps EXCEPT ![6].outputView = "paths"]
+    ELSE IF defect = "illegal-later-source"
+    THEN [SetUnionSteps EXCEPT ![2].operation = "source"]
+    ELSE IF defect = "illegal-terminal"
+    THEN [SetUnionSteps EXCEPT ![6].outputView = "relations"]
+    ELSE SetUnionSteps
+
+SeedTransformName(defect) ==
+    IF defect \in {"stale-resolve", "failed-resolve"} THEN "resolve"
+    ELSE IF defect \in {"stale-summary", "failed-summary"} THEN "summary"
+    ELSE "answer"
+
+SeedTransformAffected(defect) == AffectedTransforms(SeedTransformName(defect))
+
+SeedFixture(defect) ==
+    IF defect = "cycle-loop" THEN "cycle"
+    ELSE IF defect = "diamond-duplicate" THEN "diamond"
+    ELSE IF defect \in {"fanout-dedup", "fanout-complete", "fanout-truncated"}
+    THEN "fanout"
+    ELSE "normal"
+
+SeedTransformState(defect) ==
+    IF defect = "stale-resolve"
+    THEN [transformState EXCEPT !["resolve"] = "stale",
+                              !["answer"] = "current",
+                              !["summary"] = "current"]
+    ELSE IF defect = "failed-resolve"
+    THEN [transformState EXCEPT !["resolve"] = "failed",
+                              !["answer"] = "current",
+                              !["summary"] = "current"]
+    ELSE IF defect = "stale-summary"
+    THEN [transformState EXCEPT !["summary"] = "stale"]
+    ELSE IF defect = "failed-summary"
+    THEN [transformState EXCEPT !["summary"] = "failed"]
+    ELSE IF defect = "stale-answer-consumption"
+    THEN [transformState EXCEPT !["answer"] = "stale"]
+    ELSE IF defect = "failed-answer-publication"
+    THEN [transformState EXCEPT !["answer"] = "failed"]
+    ELSE transformState
+
+SeedTransformLifecycle(defect) ==
+    IF defect = "stale-resolve"
+    THEN [transformLifecycle EXCEPT !["resolve"] = "stale",
+                                 !["answer"] = "published",
+                                 !["summary"] = "published"]
+    ELSE IF defect = "failed-resolve"
+    THEN [transformLifecycle EXCEPT !["resolve"] = "failed",
+                                 !["answer"] = "published",
+                                 !["summary"] = "published"]
+    ELSE IF defect = "stale-summary"
+    THEN [transformLifecycle EXCEPT !["summary"] = "stale"]
+    ELSE IF defect = "failed-summary"
+    THEN [transformLifecycle EXCEPT !["summary"] = "failed"]
+    ELSE IF defect = "stale-answer-consumption"
+    THEN [transformLifecycle EXCEPT !["answer"] = "stale"]
+    ELSE IF defect = "failed-answer-publication"
+    THEN [transformLifecycle EXCEPT !["answer"] = "failed"]
+    ELSE transformLifecycle
+
+SeedTransformOutput(defect) ==
+    IF defect \in {"stale-resolve", "failed-resolve"}
+    THEN [transformOutputPublished EXCEPT !["resolve"] = FALSE]
+    ELSE IF defect \in {"stale-summary", "failed-summary"}
+    THEN [transformOutputPublished EXCEPT !["summary"] = FALSE]
+    ELSE IF defect = "stale-answer-consumption"
+    THEN [transformOutputPublished EXCEPT !["answer"] = FALSE]
+    ELSE IF defect = "failed-answer-publication"
+    THEN [transformOutputPublished EXCEPT !["answer"] = TRUE]
+    ELSE transformOutputPublished
+
+SeedTransformConsumed(defect) ==
+    IF defect \in {"stale-summary", "failed-summary", "stale-answer-consumption"}
+    THEN [transformConsumed EXCEPT ![SeedTransformName(defect)] = TRUE]
+    ELSE transformConsumed
+
+SeedFactPublished(defect) ==
+    IF defect \in {"stale-resolve", "failed-resolve", "stale-summary", "failed-summary"}
+    THEN [f \in FactSets |->
+             IF \E t \in SeedTransformAffected(defect) : f \in ProducedFacts(t)
+             THEN FALSE ELSE factPublished[f]]
+    ELSE IF defect = "stale-answer-consumption"
+    THEN [factPublished EXCEPT !["answer-facts-v1"] = FALSE]
+    ELSE factPublished
+
+SeedFactCompleteness(defect) ==
+    IF defect = "partial-transform"
+    THEN [factCompleteness EXCEPT !["answer-facts-v1"] = "partial"]
+    ELSE IF defect \in {"stale-resolve", "failed-resolve", "stale-summary",
+                         "failed-summary", "stale-answer-consumption"}
+    THEN [f \in FactSets |->
+             IF \E t \in SeedTransformAffected(defect) : f \in ProducedFacts(t)
+             THEN "unknown" ELSE factCompleteness[f]]
+    ELSE factCompleteness
+
+SeedExecutionSteps(defect) ==
+    IF defect \in {"illegal-source", "illegal-view", "illegal-filter",
+                    "illegal-traverse", "illegal-set", "illegal-select",
+                    "illegal-order", "illegal-limit", "illegal-later-source",
+                    "illegal-terminal"}
+    THEN SeedSteps(defect)
+    ELSE IF defect = "illegal-plan-operation"
+    THEN SetUnionSteps
+    ELSE SeedPlan(defect).steps
+
+SeedExecutionResults(defect) ==
+    EvaluateStepResults(SeedExecutionSteps(defect), 1, {}, SeedFixture(defect),
+                        LeftSet, RightSet)
+
+SeedExecutionCompleteness(defect) ==
+    LET base == EvaluateStepCompleteness(SeedExecutionSteps(defect), 1, {},
+                                         "complete", SeedFixture(defect),
+                                         LeftSet, RightSet, 0)
+    IN IF defect \in {"partial-left", "partial-right", "partial-filter",
+                       "partial-view", "partial-traverse", "partial-evidence",
+                       "partial-transform", "truncated-limit",
+                       "fanout-complete", "fanout-truncated"}
+       THEN [base EXCEPT ![Len(base)] = "partial"]
+       ELSE base
+
+SeedTraversal(defect) ==
+    LET expected == ExpectedTraversal(SeedFixture(defect), 10) IN
+        IF defect = "cycle-loop"
+        THEN [expected EXCEPT !.order = Append(expected.order, "node-1")]
+        ELSE IF defect = "diamond-duplicate"
+        THEN [expected EXCEPT !.order = <<"node-1", "node-2", "node-2", "node-3">>]
+        ELSE IF defect = "fanout-dedup"
+        THEN [expected EXCEPT !.order = <<"node-1", "node-1", "node-2", "node-3">>]
+        ELSE IF defect \in {"fanout-complete", "fanout-truncated"}
+        THEN [expected EXCEPT !.truncated = TRUE]
+        ELSE expected
+
+SeedDefectNew ==
     /\ Defect \in Defects \ {"none"} /\ ~seeded /\ Len(trace) = 1
     /\ seeded' = TRUE
-    /\ candidatePlan' = IF Defect = "witness-above-bound"
+    /\ candidatePlan' = IF Defect = "illegal-plan-operation"
+                        THEN [SetUnionOption EXCEPT !.operation = "intersection"]
+                        ELSE IF Defect \in {"illegal-later-source", "illegal-terminal"}
+                        THEN [SetUnionOption EXCEPT !.steps = SeedSteps(Defect)]
+                        ELSE IF Defect = "witness-above-bound"
                         THEN [PathDepth1Option EXCEPT !.depth = 1]
                         ELSE SeedPlan(Defect)
-    /\ candidateSteps' = IF Defect = "illegal-source"
-        THEN [candidateSteps EXCEPT ![1].outputView = "relations"]
-        ELSE IF Defect = "illegal-view"
-        THEN [candidateSteps EXCEPT ![2].outputStream = "path"]
-        ELSE IF Defect = "illegal-filter"
-        THEN [candidateSteps EXCEPT ![2].outputView = "paths"]
-        ELSE IF Defect = "illegal-traverse"
-        THEN [candidateSteps EXCEPT ![3].operation = "traverse"]
-        ELSE IF Defect = "illegal-set"
-        THEN [candidateSteps EXCEPT ![3].leftView = "relations"]
-        ELSE IF Defect = "illegal-select"
-        THEN [candidateSteps EXCEPT ![4].selection = "relation"]
-        ELSE IF Defect = "illegal-order"
-        THEN [candidateSteps EXCEPT ![5].outputView = "paths"]
-        ELSE IF Defect = "illegal-limit"
-        THEN [candidateSteps EXCEPT ![6].outputView = "paths"]
-        ELSE IF Defect \in {"witness-below-bound", "witness-above-bound",
-                             "witness-missing-edge"}
-        THEN SeedPlan(Defect).steps
-        ELSE SeedPlan(Defect).steps
-    /\ planValidated' = IF Defect \in {"illegal-source", "illegal-view",
-        "illegal-filter", "illegal-traverse", "illegal-set", "illegal-select",
-        "illegal-order", "illegal-limit", "witness-below-bound", "witness-above-bound",
-        "witness-missing-edge", "duplicate-results", "query-write",
-        "partial-left", "partial-right", "partial-filter", "partial-view",
-        "partial-traverse", "partial-evidence", "partial-transform", "truncated-limit",
+    /\ candidateSteps' = SeedExecutionSteps(Defect)
+    /\ planValidated' = (Defect \in {"illegal-source", "illegal-view", "illegal-filter",
+        "illegal-traverse", "illegal-set", "illegal-select", "illegal-order",
+        "illegal-limit", "illegal-later-source", "illegal-terminal",
+        "illegal-plan-operation", "witness-below-bound", "witness-above-bound",
+        "witness-missing-edge", "duplicate-results", "query-write", "partial-left",
+        "partial-right", "partial-filter", "partial-view", "partial-traverse",
+        "partial-evidence", "partial-transform", "truncated-limit",
         "unknown-target-complete", "partial-evidence-complete", "cycle-loop",
-        "diamond-duplicate", "fanout-dedup", "fanout-complete"} THEN TRUE ELSE planValidated
-    /\ queryExecuted' = IF Defect \in {"duplicate-results", "query-write",
+        "diamond-duplicate", "fanout-dedup", "fanout-complete", "fanout-truncated"})
+    /\ queryExecuted' = (Defect \in {"duplicate-results", "query-write",
         "witness-below-bound", "witness-above-bound", "witness-missing-edge",
         "partial-left", "partial-right", "partial-filter", "partial-view",
         "partial-traverse", "partial-evidence", "partial-transform", "truncated-limit",
         "unknown-target-complete", "partial-evidence-complete", "cycle-loop",
-        "diamond-duplicate", "fanout-dedup", "fanout-complete"} THEN TRUE ELSE queryExecuted
-    /\ resultReturned' = IF Defect \in {"duplicate-results", "witness-below-bound",
-        "witness-above-bound", "witness-missing-edge", "partial-left", "partial-right",
-        "partial-filter", "partial-view", "partial-traverse", "partial-evidence",
-        "partial-transform", "truncated-limit", "unknown-target-complete",
-        "partial-evidence-complete", "cycle-loop", "diamond-duplicate", "fanout-dedup",
-        "fanout-complete"} THEN TRUE ELSE resultReturned
-    /\ resultItems' = IF Defect = "cycle-loop" THEN {"node-1", "node-2"}
-        ELSE IF Defect = "diamond-duplicate" THEN {"node-1", "node-2", "node-3"}
-        ELSE IF Defect = "fanout-dedup" \/ Defect = "fanout-complete" THEN FanoutTargets
-        ELSE IF Defect = "unknown-target-complete" THEN {"record-1", "unknown-target"}
-        ELSE IF Defect = "partial-evidence-complete" THEN {"node-1", "node-3"}
-        ELSE resultItems
+        "diamond-duplicate", "fanout-dedup", "fanout-complete", "fanout-truncated"})
+    /\ resultReturned' = queryExecuted'
+    /\ resultItems' = IF Defect \in {"cycle-loop", "diamond-duplicate", "fanout-dedup",
+                                      "fanout-complete", "fanout-truncated"}
+                       THEN SeedTraversal(Defect).visited
+                       ELSE IF queryExecuted'
+                       THEN SeedExecutionResults(Defect)[Len(SeedExecutionResults(Defect))]
+                       ELSE resultItems
     /\ resultRelations' = IF Defect = "unknown-target-complete" THEN {"rel-3"}
-        ELSE IF Defect = "partial-evidence-complete" THEN {"rel-4"}
-        ELSE resultRelations
-    /\ resultOrder' = IF Defect = "duplicate-results" THEN <<"node-1", "node-1", "node-2", "node-3">>
-        ELSE IF Defect = "cycle-loop" THEN <<"node-1", "node-2", "node-1">>
-        ELSE IF Defect = "diamond-duplicate" THEN <<"node-1", "node-2", "node-2", "node-3">>
-        ELSE IF Defect = "fanout-dedup" THEN <<"node-1", "node-1", "node-2", "node-3">>
-        ELSE IF Defect = "witness-below-bound" THEN <<"node-1", "node-2">>
-        ELSE IF Defect = "witness-above-bound" THEN <<"node-1", "node-2", "node-3">>
-        ELSE IF Defect = "witness-missing-edge" THEN <<"node-1", "node-3">>
-        ELSE resultOrder
+                          ELSE IF Defect = "partial-evidence-complete" THEN {"rel-4"}
+                          ELSE resultRelations
+    /\ resultOrder' = IF Defect = "duplicate-results"
+                      THEN <<"node-1", "node-1", "node-2", "node-3">>
+                      ELSE IF Defect \in {"cycle-loop", "diamond-duplicate", "fanout-dedup",
+                                          "fanout-complete", "fanout-truncated"}
+                      THEN SeedTraversal(Defect).order
+                      ELSE IF queryExecuted'
+                      THEN CanonicalOrder(SeedExecutionResults(Defect)[Len(SeedExecutionResults(Defect))])
+                      ELSE resultOrder
     /\ witnessPath' = IF Defect = "witness-below-bound" THEN <<PathStart, "node-2">>
-        ELSE IF Defect = "witness-above-bound" THEN <<PathStart, "node-2", PathTarget>>
-        ELSE IF Defect = "witness-missing-edge" THEN <<PathStart, "unknown-target", PathTarget>>
-        ELSE witnessPath
-    /\ resultStatus' = IF Defect \in {"duplicate-results", "fanout-dedup"} THEN "partial"
-        ELSE IF Defect \in {"cycle-loop", "diamond-duplicate", "partial-left", "partial-right",
-        "partial-filter", "partial-view", "partial-traverse", "partial-evidence",
-        "partial-transform", "truncated-limit", "unknown-target-complete",
-        "partial-evidence-complete", "fanout-complete"} THEN "complete" ELSE resultStatus
-    /\ fixture' = IF Defect = "cycle-loop" THEN "cycle"
-        ELSE IF Defect = "diamond-duplicate" THEN "diamond"
-        ELSE IF Defect = "fanout-dedup" \/ Defect = "fanout-complete" THEN "fanout"
-        ELSE "normal"
-    /\ leftCompleteness' = IF Defect = "partial-left" THEN "partial" ELSE leftCompleteness
-    /\ rightCompleteness' = IF Defect = "partial-right" THEN "partial" ELSE rightCompleteness
-    /\ filterCompleteness' = IF Defect = "partial-filter" THEN "partial" ELSE filterCompleteness
-    /\ viewCompleteness' = IF Defect = "partial-view" THEN "partial" ELSE viewCompleteness
-    /\ traverseCompleteness' = IF Defect = "partial-traverse" THEN "partial" ELSE traverseCompleteness
-    /\ evidenceCompleteness' = IF Defect = "partial-evidence" THEN "partial" ELSE evidenceCompleteness
-    /\ limitCompleteness' = IF Defect = "truncated-limit" THEN "partial" ELSE limitCompleteness
+                      ELSE IF Defect = "witness-above-bound"
+                      THEN <<PathStart, "node-2", PathTarget>>
+                      ELSE IF Defect = "witness-missing-edge"
+                      THEN <<PathStart, "unknown-target", PathTarget>>
+                      ELSE witnessPath
+    /\ resultStatus' = IF Defect = "duplicate-results"
+                       THEN "partial"
+                       ELSE IF queryExecuted' THEN "complete" ELSE resultStatus
+    /\ fixture' = SeedFixture(Defect)
     /\ queryWrites' = IF Defect = "query-write" THEN 1 ELSE queryWrites
-    /\ abstractIndexVersion' = IF Defect = "query-write" THEN InitialIndexVersion + 1 ELSE abstractIndexVersion
-    /\ transformState' = IF Defect = "stale-resolve" THEN [transformState EXCEPT !["resolve"] = "stale", !["answer"] = "current"]
-        ELSE IF Defect = "failed-resolve" THEN [transformState EXCEPT !["resolve"] = "failed", !["answer"] = "current"]
-        ELSE IF Defect = "stale-answer-consumption" THEN [transformState EXCEPT !["answer"] = "stale"]
-        ELSE IF Defect = "failed-answer-publication" THEN [transformState EXCEPT !["answer"] = "failed"]
-        ELSE transformState
-    /\ transformOutputPublished' = IF Defect \in {"stale-resolve", "failed-resolve"}
-        THEN [transformOutputPublished EXCEPT !["resolve"] = FALSE, !["answer"] = TRUE]
-        ELSE IF Defect = "stale-answer-consumption" THEN [transformOutputPublished EXCEPT !["answer"] = FALSE]
-        ELSE IF Defect = "failed-answer-publication" THEN [transformOutputPublished EXCEPT !["answer"] = TRUE]
-        ELSE transformOutputPublished
+    /\ abstractIndexVersion' = IF Defect = "query-write"
+                               THEN InitialIndexVersion + 1 ELSE abstractIndexVersion
+    /\ transformState' = SeedTransformState(Defect)
+    /\ transformOutputPublished' = SeedTransformOutput(Defect)
     /\ transformInputComplete' = IF Defect = "partial-transform"
-        THEN [transformInputComplete EXCEPT !["answer"] = FALSE]
-        ELSE transformInputComplete
-    /\ transformConsumed' = IF Defect = "stale-answer-consumption" THEN [transformConsumed EXCEPT !["answer"] = TRUE]
-        ELSE transformConsumed
-    /\ transformLifecycle' = IF Defect = "stale-resolve" THEN [transformLifecycle EXCEPT !["resolve"] = "stale", !["answer"] = "published"]
-        ELSE IF Defect = "failed-resolve" THEN [transformLifecycle EXCEPT !["resolve"] = "failed", !["answer"] = "published"]
-        ELSE IF Defect = "stale-answer-consumption" THEN [transformLifecycle EXCEPT !["answer"] = "stale"]
-        ELSE IF Defect = "failed-answer-publication" THEN [transformLifecycle EXCEPT !["answer"] = "failed"]
-        ELSE transformLifecycle
-    /\ factPublished' = IF Defect \in {"stale-resolve", "failed-resolve"}
-        THEN [factPublished EXCEPT !["resolved-facts-v1"] = FALSE]
-        ELSE IF Defect = "stale-answer-consumption" THEN [factPublished EXCEPT !["answer-facts-v1"] = FALSE]
-        ELSE factPublished
+                                 THEN [transformInputComplete EXCEPT !["answer"] = FALSE]
+                                 ELSE transformInputComplete
+    /\ transformConsumed' = SeedTransformConsumed(Defect)
+    /\ transformLifecycle' = SeedTransformLifecycle(Defect)
+    /\ factPublished' = SeedFactPublished(Defect)
+    /\ factCompleteness' = SeedFactCompleteness(Defect)
+    /\ stageCompleteness' = [s \in StageNames |->
+        IF (Defect = "partial-filter" /\ s = "filter")
+            \/ (Defect = "partial-view" /\ s = "view")
+            \/ (Defect = "partial-traverse" /\ s = "traverse")
+            \/ (Defect = "partial-evidence" /\ s = "evidence")
+            \/ (Defect = "truncated-limit" /\ s = "limit")
+        THEN "partial" ELSE stageCompleteness[s]]
+    /\ operandCompleteness' = [o \in OperandNames |->
+        IF (Defect = "partial-left" /\ o = "left")
+            \/ (Defect = "partial-right" /\ o = "right")
+        THEN "partial" ELSE operandCompleteness[o]]
+    /\ stepResults' = IF Defect \in {"cycle-loop", "diamond-duplicate", "fanout-dedup",
+                                       "fanout-complete", "fanout-truncated"}
+                      THEN [SeedExecutionResults(Defect) EXCEPT
+                            ![Len(SeedExecutionResults(Defect))] = SeedTraversal(Defect).visited]
+                      ELSE SeedExecutionResults(Defect)
+    /\ stepCompleteness' = SeedExecutionCompleteness(Defect)
+    /\ stepFacts' = EvaluateStepFacts(SeedExecutionSteps(Defect))
+    /\ queryStarted' = queryExecuted'
+    /\ frontier' = {}
+    /\ traversalVisited' = IF Defect \in {"cycle-loop", "diamond-duplicate", "fanout-dedup",
+                                            "fanout-complete", "fanout-truncated"}
+                                THEN SeedTraversal(Defect).visited ELSE traversalVisited
+    /\ traversalOrder' = IF Defect \in {"cycle-loop", "diamond-duplicate", "fanout-dedup",
+                                           "fanout-complete", "fanout-truncated"}
+                               THEN SeedTraversal(Defect).order ELSE traversalOrder
+    /\ traversalTruncated' = (Defect \in {"fanout-complete", "fanout-truncated"})
     /\ trace' = Append(trace, Defect)
-    /\ UNCHANGED <<leftOperand, rightOperand, planRejected,
-        sourceCompleteness, currentGeneration, transformGeneration, transformReused,
-        factGeneration>>
+    /\ UNCHANGED <<leftOperand, rightOperand, planRejected, sourceCompleteness,
+        filterCompleteness, viewCompleteness, leftCompleteness, rightCompleteness,
+        traverseCompleteness, evidenceCompleteness, limitCompleteness,
+        currentGeneration, transformGeneration, transformReused, factGeneration>>
 
-Next == SelectPlan \/ ValidatePlan \/ SelectFixture \/ ExecuteQuery \/ ReturnResult
-    \/ ObserveResult
+Next == SelectPlan \/ ValidatePlan \/ SelectFixture \/ ExecuteQuery \/ AdvanceTraversal
+    \/ ReturnResult \/ ObserveResult
     \/ PlanTransform \/ RunTransform \/ PublishTransform \/ FailTransform
-    \/ InvalidateTransform \/ ReuseTransform \/ SeedDefect
+    \/ InvalidateTransform \/ ReuseTransform \/ SeedDefectNew
 Fairness ==
-    /\ WF_vars(ValidatePlan) /\ WF_vars(ExecuteQuery) /\ WF_vars(ReturnResult)
+    /\ WF_vars(ValidatePlan) /\ WF_vars(ExecuteQuery) /\ WF_vars(AdvanceTraversal)
+    /\ WF_vars(ReturnResult)
     /\ WF_vars(PlanTransform) /\ WF_vars(RunTransform) /\ WF_vars(PublishTransform)
     /\ WF_vars(FailTransform) /\ WF_vars(InvalidateTransform) /\ WF_vars(ReuseTransform)
-    /\ WF_vars(SeedDefect)
+    /\ WF_vars(SeedDefectNew)
 Spec == Init /\ [][Next]_SemanticVars /\ Fairness
 SemanticLiveness == [](planValidated /\ ~queryExecuted => <> queryExecuted)
 
