@@ -485,8 +485,7 @@ auto include_fact_count(cidx::Storage &db, const IncludeFacts &facts)
   // as duplicate attempts rather than over-budgeting the pass.
   constexpr std::size_t config_facts = 4;
   std::size_t attempted = config_facts;
-  std::set<int64_t> source_applicability;
-  std::set<int64_t> destination_applicability;
+  std::set<int64_t> file_applicability;
   std::set<std::tuple<int64_t, std::string>> edges;
   std::set<std::tuple<int64_t, std::string, int64_t>> sites;
   std::set<std::tuple<int64_t, std::string, std::string>> macro_uses;
@@ -508,12 +507,12 @@ auto include_fact_count(cidx::Storage &db, const IncludeFacts &facts)
     if (!source_id) {
       continue;
     }
-    record(source_applicability, *source_id);
+    record(file_applicability, *source_id);
     const std::string dst_path =
         fact.resolved ? cidx::pathutil::abspath(fact.dst_path) : fact.spelling;
     if (fact.resolved) {
       if (const auto destination_id = file_id_for(fact.dst_path)) {
-        record(destination_applicability, *destination_id);
+        record(file_applicability, *destination_id);
       }
     }
     const auto edge_identity = std::make_tuple(*source_id, dst_path);
@@ -528,8 +527,7 @@ auto include_fact_count(cidx::Storage &db, const IncludeFacts &facts)
     }
   }
 
-  const std::size_t unique_facts = config_facts + source_applicability.size() +
-                                   destination_applicability.size() +
+  const std::size_t unique_facts = config_facts + file_applicability.size() +
                                    edges.size() + sites.size() +
                                    macro_uses.size();
   return {.emitted_facts = unique_facts,

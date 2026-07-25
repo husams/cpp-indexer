@@ -2427,6 +2427,76 @@ TEST_SUITE("clang") {
   }
 
   TEST_CASE(
+      "production nested include preflight counts shared applicability once") {
+    struct Prepared {
+      std::unique_ptr<Storage> db;
+      cidx::File file;
+      std::string source;
+    };
+    const auto prepare = [] {
+      Prepared prepared;
+      const std::string dir = make_temp_dir();
+      write_file(dir + "/inner.hpp", "int nested_include_value = 1;\n");
+      write_file(dir + "/outer.hpp", "#include \"inner.hpp\"\n");
+      prepared.source = dir + "/nested.cpp";
+      write_file(
+          prepared.source,
+          "#include \"outer.hpp\"\n"
+          "int nested_include_user() { return nested_include_value; }\n");
+      prepared.db = std::make_unique<Storage>(":memory:");
+      prepared.db->add_component("nested-include", dir);
+      const int64_t file_id = prepared.db->add_file_path(
+          prepared.source, std::nullopt, std::nullopt,
+          std::vector<std::string>{"-std=c++23", "-I", dir},
+          std::string("clang++"));
+      prepared.file = *prepared.db->get_file_by_id(file_id);
+      prepared.db->stamp_graph_resolved();
+      prepared.db->stamp_index_identity();
+      return prepared;
+    };
+
+    const auto measured = prepare();
+    const auto measured_outcome = cidx::ast::run_index_one(
+        *measured.db, measured.file, measured.source, true);
+    REQUIRE(!measured_outcome.parse_failed);
+    const auto include_metrics =
+        std::ranges::find_if(measured_outcome.pass_metrics,
+                             [](const cidx::ast::IndexPassMetrics &metrics) {
+                               return metrics.id == "includes.persist";
+                             });
+    REQUIRE(include_metrics != measured_outcome.pass_metrics.end());
+    const std::size_t include_n = include_metrics->emitted_facts;
+    REQUIRE(include_n > 0);
+    CHECK(include_metrics->duplicates == 1);
+
+    const auto run = [&](std::size_t budget) {
+      Prepared prepared = prepare();
+      const auto before =
+          snapshot_tu_publication(*prepared.db, prepared.source);
+      cidx::ast::register_frontend_pass_provider(
+          [budget](cidx::ast::FrontendSession &session,
+                   cidx::ast::ExtractionPassRegistry &,
+                   cidx::ast::IndexingPlan &) {
+            session.budget_overrides["includes.persist"] =
+                cidx::ast::PassBudget{.max_emitted_facts = budget,
+                                      .declared = true};
+          });
+      const auto outcome = cidx::ast::run_index_one(*prepared.db, prepared.file,
+                                                    prepared.source, true);
+      cidx::ast::clear_frontend_pass_providers();
+      if (budget < include_n) {
+        CHECK(outcome.parse_failed);
+        CHECK(outcome.error.find("budget exceeded") != std::string::npos);
+        CHECK(snapshot_tu_publication(*prepared.db, prepared.source) == before);
+      } else {
+        CHECK(!outcome.parse_failed);
+      }
+    };
+    run(include_n);
+    run(include_n - 1);
+  }
+
+  TEST_CASE(
       "production statement body-edge preflight rejects N-1 before mutation") {
     struct Prepared {
       std::unique_ptr<Storage> db;
