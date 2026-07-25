@@ -189,6 +189,7 @@ public:
     bool is_const = false;
     bool is_volatile = false;
     bool is_restrict = false;
+    std::optional<std::string> extent;
   };
   struct ParamInfo {
     int64_t position = 0;
@@ -204,6 +205,20 @@ public:
     std::optional<std::string> default_origin;
     std::optional<std::string> reference_semantics;
   };
+  struct SlotFacts {
+    std::string mode = "value";
+    std::string value_kind = "other";
+    std::optional<std::string> named_decl;
+  };
+  struct TypeLayer {
+    std::string path;
+    std::string relation;
+    int64_t position = 0;
+    int depth = 0;
+    std::string status = "complete";
+    std::optional<std::string> element_type;
+    TypeInfo type;
+  };
   // Everything the signature/type tier knows about one symbol. Callables get
   // returns/params; variables/fields get of_type; typedef/alias symbols get
   // underlying. Absent facts stay nullopt/empty.
@@ -217,6 +232,11 @@ public:
     }
   };
   SignatureInfo signature(int64_t sym_id);
+  SlotFacts slot_facts_for_ids(std::optional<int64_t> declared_type_id,
+                              std::optional<int64_t> adjusted_type_id);
+  SlotFacts slot_facts(const std::optional<TypeInfo> &declared,
+                       const std::optional<TypeInfo> &adjusted);
+  std::vector<TypeLayer> type_layers(int64_t type_id);
   std::optional<TypeInfo> type_child(int64_t type_id, int64_t edge_kind,
                                      int64_t position = 0);
 
@@ -254,6 +274,7 @@ private:
   Sym make_sym_from_symbol(const Symbol &sym);
   // v30: display info for a type_node id (nullopt when absent).
   std::optional<TypeInfo> type_info(int64_t type_id);
+  std::optional<std::string> named_decl(TypeInfo type);
 
   // Batch-load sites for edge_ids.
   std::map<int64_t, std::vector<Site>>

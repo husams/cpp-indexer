@@ -2,10 +2,10 @@
   "architecture_version": "storage-v1",
   "authority": "sqlite-core",
   "schema": {
-    "current": 39,
+    "current": 40,
     "migration_floor": 2,
-    "reader_min": 39,
-    "reader_max": 39,
+    "reader_min": 40,
+    "reader_max": 40,
     "qualification_baseline": 34,
     "migration": "deterministic",
     "source": "spec/platform/version.json#/database"

@@ -8,7 +8,8 @@
 
 namespace clang {
 class Decl;
-}
+class ASTContext;
+} // namespace clang
 
 namespace cidx::ast {
 
@@ -27,5 +28,13 @@ std::optional<std::string> linkage_name(const clang::Decl *decl);
 
 // "public" | "protected" | "private" | nullopt.
 std::optional<std::string> access_name(const clang::Decl *decl);
+
+// Typed callable/provenance facts. These are derived from Clang declaration
+// APIs and persisted with the symbol; consumers must not infer them from
+// rendered source text or private type encodings.
+std::optional<std::string> callable_kind_name(const clang::Decl *decl);
+std::optional<std::string>
+template_origin_name(const clang::ASTContext &context, const clang::Decl *decl);
+std::optional<std::string> template_form_name(const clang::Decl *decl);
 
 } // namespace cidx::ast

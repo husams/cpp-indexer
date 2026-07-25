@@ -5,6 +5,7 @@ import pytest
 from indexer.storage import (
     PREVIOUS_CATALOG_HASH,
     PREVIOUS_SCHEMA_VERSION,
+    SCHEMA_VERSION,
     Storage,
     Symbol,
 )
@@ -51,7 +52,7 @@ def test_hse77_v34_migration_backfills_source_and_preserves_reads(tmp_path):
     assert tuple(db._conn.execute(
         "SELECT src_kind, type_usr, decl_usr, callee_usr FROM call_arg_read"
     ).fetchone()) == ("local", "legacy:missing-type", "legacy:missing-decl", "legacy:callee")
-    assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "39"
+    assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "40"
     db.close()
 
 
@@ -138,7 +139,7 @@ def test_parent_id_backfills_when_parent_arrives_after_child():
 
 
 def test_migrated_enum_columns_keep_domain_checks(tmp_path):
-    path = str(tmp_path / "v37.db")
+    path = str(tmp_path / "v39.db")
     db = Storage(path)
     component = db.add_component("c", "/repo/c")
     directory = db.add_directory(component, "")
@@ -147,7 +148,7 @@ def test_migrated_enum_columns_keep_domain_checks(tmp_path):
     callee_id = db.add_symbol(Symbol("domain:callee", "callee", "function"))
     edge_id = db.add_edge(caller_id, callee_id, 1)
     db._conn.execute(
-        "UPDATE meta SET value='38' WHERE key='schema_version'"
+        "UPDATE meta SET value='39' WHERE key='schema_version'"
     )
     db._conn.execute(
         "UPDATE meta SET value=? WHERE key='catalog_hash'",
@@ -171,8 +172,8 @@ def test_migrated_enum_columns_keep_domain_checks(tmp_path):
     db.close()
 
 
-@pytest.mark.parametrize("wrong_schema_version", [PREVIOUS_SCHEMA_VERSION - 1, 39])
-def test_predecessor_catalog_hash_requires_v37_migration(
+@pytest.mark.parametrize("wrong_schema_version", [PREVIOUS_SCHEMA_VERSION - 1, 40])
+def test_predecessor_catalog_hash_requires_v39_migration(
     tmp_path, wrong_schema_version
 ):
     path = str(tmp_path / f"wrong-v{wrong_schema_version}.db")
@@ -190,6 +191,44 @@ def test_predecessor_catalog_hash_requires_v37_migration(
 
     with pytest.raises(RuntimeError, match="requires schema_version"):
         Storage(path)
+
+
+def test_current_main_v39_database_upgrades_to_candidate_v40(tmp_path):
+    path = str(tmp_path / "main-v39.db")
+    db = Storage(path)
+    before_id = db.add_symbol(Symbol("main-v39:before", "before", "function"))
+    db._conn.commit()
+    for column in ("callable_kind", "template_origin", "template_form"):
+        db._conn.execute(f"ALTER TABLE symbol DROP COLUMN {column}")
+    db._conn.execute("ALTER TABLE type_node DROP COLUMN extent")
+    db._conn.execute("DELETE FROM type_kind WHERE id=14")
+    db._conn.execute("UPDATE meta SET value='39' WHERE key='schema_version'")
+    db._conn.execute(
+        "UPDATE meta SET value=? WHERE key='catalog_hash'",
+        (PREVIOUS_CATALOG_HASH,),
+    )
+    db._conn.commit()
+    db.close()
+
+    db = Storage(path)
+    assert db._conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()[0] == str(SCHEMA_VERSION)
+    assert db._conn.execute(
+        "SELECT usr FROM symbol WHERE id=?", (before_id,)
+    ).fetchone()[0] == "main-v39:before"
+    columns = {
+        row[1] for row in db._conn.execute("PRAGMA table_info(symbol)")
+    }
+    assert {"callable_kind", "template_origin", "template_form"} <= columns
+    type_columns = {
+        row[1] for row in db._conn.execute("PRAGMA table_info(type_node)")
+    }
+    assert "extent" in type_columns
+    assert db._conn.execute(
+        "SELECT name FROM type_kind WHERE id=14"
+    ).fetchone()[0] == "pack-expansion"
+    db.close()
 
 
 def test_hot_cold_decision_uses_explicit_thresholds():

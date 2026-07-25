@@ -353,6 +353,9 @@ class Sym:
     # False; a file-scope `static` free function is reflected by linkage)
     is_instantiation: bool = False  # v13: implicit template-instantiation node
     # (X<int> type node or X<int>::member); definition via instantiates edge
+    callable_kind: Optional[str] = None
+    template_origin: Optional[str] = None
+    template_form: Optional[str] = None
     display_name: Optional[str] = None  # spelling WITH template arguments, e.g.
     # ``Wrapper<int>`` for an instantiation/specialization (``Wrapper<T>`` for the
     # primary template); None/equal-to-spelling for a non-templated symbol. This
@@ -517,6 +520,7 @@ class TypeInfo:
     is_const: bool = False
     is_volatile: bool = False
     is_restrict: bool = False
+    extent: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -528,6 +532,7 @@ class TypeInfo:
             "const": self.is_const,
             "volatile": self.is_volatile,
             "restrict": self.is_restrict,
+            "extent": self.extent,
         }
 
 
@@ -936,7 +941,8 @@ _SYM_COLS = (
     "s.decl_file_id, s.decl_line, s.decl_col, "
     "s.decl_path, s.is_definition, s.is_pure, s.is_static, s.is_instantiation, "
     "s.access, s.parent_usr, s.resolved, s.multi_def, s.const_value, "
-    "s.semantic_universe_id, s.identity_key, "
+    "s.semantic_universe_id, s.identity_key, s.callable_kind, "
+    "s.template_origin, s.template_form, "
     "(SELECT key FROM semantic_universe su "
     " WHERE su.id = s.semantic_universe_id) AS semantic_universe"
 )
@@ -1135,6 +1141,9 @@ class GraphQuery:
             is_pure=bool(r["is_pure"]),
             is_static=bool(r["is_static"]),
             is_instantiation=bool(r["is_instantiation"]),
+            callable_kind=(r["callable_kind"] if "callable_kind" in r.keys() else None),
+            template_origin=(r["template_origin"] if "template_origin" in r.keys() else None),
+            template_form=(r["template_form"] if "template_form" in r.keys() else None),
             access=r["access"],
             parent_usr=r["parent_usr"],
             resolved=bool(r["resolved"]),
@@ -2180,7 +2189,7 @@ class GraphQuery:
         canonical spelling attached when the node is sugared)."""
         r = self._c.execute(
             "SELECT id, spelling, kind, canonical_id, decl_usr, is_const, "
-            "is_volatile, is_restrict FROM type_node "
+            "is_volatile, is_restrict, extent FROM type_node "
             "WHERE id = ?",
             (type_id,),
         ).fetchone()
@@ -2203,6 +2212,7 @@ class GraphQuery:
             is_const=bool(r["is_const"]),
             is_volatile=bool(r["is_volatile"]),
             is_restrict=bool(r["is_restrict"]),
+            extent=r["extent"],
         )
 
     def signature(self, sym) -> SignatureInfo:
@@ -2254,45 +2264,69 @@ class GraphQuery:
         if tid is None:
             return []
         out: list[dict[str, Any]] = []
-        path = "root"
-        seen: set[int] = set()
-        while tid not in seen:
-            seen.add(tid)
-            t = self._type_info(tid)
+        pending = [(tid, "root", "root", 0, 0, (tid,))]
+        relations = {1: "pointee", 2: "element_type", 3: "alias_of",
+                     4: "return_type", 5: "param_type",
+                     6: "template_argument_type", 7: "member_owner",
+                     8: "member_component"}
+        while pending and len(out) < 256:
+            current, path, relation, position, depth, ancestry = pending.pop()
+            t = self._type_info(current)
             if t is None:
-                break
+                out.append({"path": path, "relation": relation,
+                            "position": position, "depth": depth,
+                            "status": "unknown"})
+                continue
+            element_type = None
+            if t.kind == "array":
+                element_row = self._c.execute(
+                    "SELECT dst_id FROM type_edge "
+                    "WHERE src_id = ? AND kind = 2 AND position = 0",
+                    (t.id,),
+                ).fetchone()
+                if element_row is not None:
+                    element = self._type_info(element_row["dst_id"])
+                    element_type = element.spelling if element is not None else None
             out.append({
-                "path": path,
-                "kind": t.kind,
-                "const": t.is_const,
-                "volatile": t.is_volatile,
+                "path": path, "relation": relation, "position": position,
+                "depth": depth,
+                "status": "truncated" if depth >= 64 else "complete",
+                "id": t.id, "spelling": t.spelling, "kind": t.kind,
+                "const": t.is_const, "volatile": t.is_volatile,
                 "restrict": t.is_restrict,
                 "declaration": self._name_for_usr(t.decl_usr),
-                "decl_usr": t.decl_usr,
+                "decl_usr": t.decl_usr, "extent": t.extent,
+                "element_type": element_type,
             })
-            if t.kind == "array":
-                child = self._type_child(t.id, 2)
-                out[-1]["element_type"] = child.spelling if child else None
-                opening = t.spelling.rfind("[")
-                closing = t.spelling.rfind("]")
-                out[-1]["extent"] = (
-                    t.spelling[opening + 1:closing].strip()
-                    if opening >= 0 and closing > opening
-                    else None
-                )
-            edge_kind = 1 if t.kind in {
-                "pointer", "lvalue-reference", "rvalue-reference"
-            } else 2 if t.kind == "array" else None
-            if edge_kind is None:
-                break
-            row = self._c.execute(
-                "SELECT dst_id FROM type_edge WHERE src_id = ? AND kind = ? LIMIT 1",
-                (tid, edge_kind),
-            ).fetchone()
-            if row is None:
-                break
-            tid = row["dst_id"]
-            path += ".pointee" if t.kind == "pointer" else ".referent" if edge_kind == 1 else ".element"
+            if depth >= 64:
+                continue
+            edges = self._c.execute(
+                "SELECT kind, position, dst_id FROM type_edge WHERE src_id = ? "
+                "ORDER BY kind, position", (current,)).fetchall()
+            for edge_kind, edge_position, child_id in reversed(edges):
+                edge_name = relations.get(edge_kind, "unknown")
+                path_name = ("referent" if edge_kind == 1 and t.kind in
+                             {"lvalue-reference", "rvalue-reference"}
+                             else "element" if edge_kind == 2 else edge_name)
+                child_path = f"{path}.{path_name}"
+                if edge_kind in {5, 6}:
+                    child_path += f"[{edge_position}]"
+                if child_id in ancestry:
+                    child = self._type_info(child_id)
+                    if child is not None:
+                        out.append({"path": child_path, "relation": edge_name,
+                                    "position": edge_position, "depth": depth + 1,
+                                    "status": "cycle", "id": child.id,
+                                    "spelling": child.spelling, "kind": child.kind,
+                                    "const": child.is_const, "volatile": child.is_volatile,
+                                    "restrict": child.is_restrict,
+                                    "declaration": self._name_for_usr(child.decl_usr),
+                                    "decl_usr": child.decl_usr, "extent": child.extent})
+                    continue
+                pending.append((child_id, child_path, edge_name, edge_position,
+                                depth + 1, ancestry + (child_id,)))
+        if pending and out and out[-1].get("status") == "complete":
+            out[-1]["status"] = "truncated"
         return out
 
     def _name_for_usr(self, usr: Optional[str]) -> Optional[str]:
@@ -2322,14 +2356,11 @@ class GraphQuery:
             if child is not None:
                 base = child
             else:
-                spelling = base.spelling.rstrip().removesuffix("&&").removesuffix("&").rstrip()
-                fallback = self._c.execute(
-                    "SELECT id FROM type_node WHERE spelling=? ORDER BY id DESC LIMIT 1",
-                    (spelling,),
-                ).fetchone()
-                if fallback is not None:
-                    base = self._type_info(fallback["id"]) or base
-        value_kind = "pack-expansion" if base.spelling.endswith("...") else base.kind
+                # A missing structural edge is an unknown typed fact. Both
+                # runtimes retain the wrapper and return the same null-safe
+                # result; never infer a child by matching display spelling.
+                pass
+        value_kind = base.kind
         named = None
         current = base
         through_pointer = base.kind == "pointer"
@@ -2347,6 +2378,20 @@ class GraphQuery:
             current = self._type_child(current.id, edge_kind)
         return mode, value_kind, named
 
+    def slot_type_facts_for_ids(
+        self, declared_type_id: Optional[int], adjusted_type_id: Optional[int]
+    ) -> tuple[str, str, Optional[str]]:
+        """Derive public signature-slot facts from typed relation IDs."""
+        declared = (
+            self._type_info(declared_type_id)
+            if declared_type_id is not None else None
+        )
+        adjusted = (
+            self._type_info(adjusted_type_id)
+            if adjusted_type_id is not None else None
+        )
+        return self._slot_type_facts(declared, adjusted)
+
     def signature_slots(self, sym) -> list[SignatureSlot]:
         """Unified return/parameter view used by the E2E and public clients."""
         sid = self._resolve_id(sym)
@@ -2357,7 +2402,7 @@ class GraphQuery:
         ).fetchone()
         if ret is not None:
             t = self._type_info(ret["type_id"])
-            mode, value_kind, named = self._slot_type_facts(t, t)
+            mode, value_kind, named = self.slot_type_facts_for_ids(t.id, t.id)
             rows.append(SignatureSlot("return", None, None, None, t, t, mode, value_kind, named))
         for r in self._c.execute(
             "SELECT position, pack_index, name, type_id, declared_type_id, adjusted_type_id, "
@@ -2369,7 +2414,9 @@ class GraphQuery:
             adjusted_id = r["adjusted_type_id"] or r["type_id"]
             declared = self._type_info(declared_id) if declared_id is not None else None
             adjusted = self._type_info(adjusted_id) if adjusted_id is not None else None
-            mode, value_kind, named = self._slot_type_facts(declared, adjusted)
+            mode, value_kind, named = self.slot_type_facts_for_ids(
+                declared_id, adjusted_id
+            )
             rows.append(SignatureSlot(
                 "parameter", r["position"], r["pack_index"], r["name"], declared, adjusted,
                 mode, value_kind, named, r["reference_semantics"],

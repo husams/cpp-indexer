@@ -1119,6 +1119,14 @@ void SqliteStorageService::migrate() {
           "CREATE INDEX IF NOT EXISTS idx_call_arg_edge ON call_arg(edge_id)");
       db_.exec("PRAGMA foreign_keys = ON");
     }
+    if (has_table("symbol")) {
+      add_col("symbol", "callable_kind", "TEXT");
+      add_col("symbol", "template_origin", "TEXT");
+      add_col("symbol", "template_form", "TEXT");
+    }
+    if (has_table("type_node")) {
+      add_col("type_node", "extent", "TEXT");
+    }
     changed = true;
   }
   if (changed) {

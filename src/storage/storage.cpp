@@ -35,7 +35,7 @@ namespace cidx {
 using namespace detail;
 
 constexpr std::string_view kPreviousCatalogHash =
-    "5a691cc4ecd6104beef77c602f9c09be641e1dd72591e3d02a3754a0a181f8fb";
+    "3337824260ee0afe1260859b6be88e6fb8280852fd736cde5e12cca5c3847ba4";
 constexpr int kPreviousSchemaVersion = kSchemaVersion - 1;
 
 bool is_symbol_kind(std::string_view kind) {

@@ -1,6 +1,6 @@
 # CIDX physical schema guide v1
 
-Status: accepted as the storage architecture contract for schema v39.
+Status: accepted as the storage architecture contract for schema v40.
 
 This guide is the repository-local companion to the HSE-74 architecture
 decision. It describes the physical rules that storage changes must preserve;
@@ -14,7 +14,7 @@ explicitly deferred.
 - One core database is the default workspace layout. Core facts are not
   sharded by repository, table family, or analysis merely to make files
   smaller.
-- The current repository schema is v39 with the reader window declared by
+- The current repository schema is v40 with the reader window declared by
   [`spec/platform/version.json`](../../spec/platform/version.json). Schema v34
   is the HSE-74 qualification baseline; the authoritative migration floor is
   the value in that version contract, and migrations must remain deterministic.

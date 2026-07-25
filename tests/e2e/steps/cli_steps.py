@@ -70,13 +70,18 @@ def cidx_signature_json(workspace: Workspace, argv: str) -> None:
     assert set(document) == {
         "symbol", "returns", "params", "of_type", "underlying_type", "slots",
     }
-    type_keys = {"id", "spelling", "kind", "canonical", "decl_usr", "const", "volatile", "restrict"}
+    type_keys = {
+        "id", "spelling", "kind", "canonical", "decl_usr", "const",
+        "volatile", "restrict", "extent", "layers",
+    }
     slot_keys = {
         "role", "position", "pack_index", "name", "declared_type", "adjusted_type",
         "mode", "value_kind", "named_decl", "reference_semantics", "default", "default_origin",
     }
     for key in ("returns", "of_type", "underlying_type"):
         assert document[key] is None or set(document[key]) == type_keys
+        if document[key] is not None:
+            assert document[key]["layers"]
     for row in document["params"]:
         assert set(row) == {
             "position", "pack_index", "name", "type", "declared_type", "adjusted_type",
@@ -84,4 +89,6 @@ def cidx_signature_json(workspace: Workspace, argv: str) -> None:
         }
         for key in ("type", "declared_type", "adjusted_type"):
             assert row[key] is None or set(row[key]) == type_keys
+            if row[key] is not None:
+                assert row[key]["layers"]
     assert all(set(row) == slot_keys for row in document["slots"])

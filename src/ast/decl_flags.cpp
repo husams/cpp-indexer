@@ -1,5 +1,6 @@
 #include "ast/decl_flags.hpp"
 
+#include "ast/names.hpp"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
@@ -110,6 +111,128 @@ std::optional<std::string> access_name(const clang::Decl *decl) {
     return std::string("private");
   case clang::AS_none:
     return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> callable_kind_name(const clang::Decl *decl) {
+  const auto *named = llvm::dyn_cast<clang::NamedDecl>(decl);
+  if (named == nullptr) {
+    return std::nullopt;
+  }
+  const auto *function = llvm::dyn_cast<clang::FunctionDecl>(decl);
+  if (function == nullptr) {
+    if (const auto *template_decl =
+            llvm::dyn_cast<clang::FunctionTemplateDecl>(decl)) {
+      function = template_decl->getTemplatedDecl();
+    }
+  }
+  if (function == nullptr) {
+    return std::nullopt;
+  }
+  if (llvm::isa<clang::CXXConstructorDecl>(function)) {
+    return std::string("constructor");
+  }
+  if (llvm::isa<clang::CXXDestructorDecl>(function)) {
+    return std::string("destructor");
+  }
+  return llvm::isa<clang::CXXMethodDecl>(function)
+             ? std::optional<std::string>("method")
+             : std::optional<std::string>("free-function");
+}
+
+std::optional<std::string>
+template_origin_name(const clang::ASTContext &context,
+                     const clang::Decl *decl) {
+  const auto *function = llvm::dyn_cast<clang::FunctionDecl>(decl);
+  if (function == nullptr) {
+    return std::nullopt;
+  }
+  if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(function)) {
+    const auto *record =
+        llvm::dyn_cast<clang::CXXRecordDecl>(method->getDeclContext());
+    if (record != nullptr && is_template_instantiation(record)) {
+      return std::nullopt;
+    }
+  }
+  const clang::NamedDecl *origin = nullptr;
+  if (const auto *primary = function->getPrimaryTemplate()) {
+    origin = primary->getTemplatedDecl();
+  }
+  if (origin == nullptr) {
+    origin = function->getTemplateInstantiationPattern();
+  }
+  if (origin == nullptr || origin == function) {
+    return std::nullopt;
+  }
+  const auto *named = llvm::dyn_cast<clang::NamedDecl>(origin);
+  if (named == nullptr) {
+    return std::nullopt;
+  }
+  if (const auto *origin_function =
+          llvm::dyn_cast<clang::FunctionDecl>(named)) {
+    if (const auto display = display_name(context, origin_function)) {
+      std::string normalized = *display;
+      for (std::size_t pos = normalized.find("*const");
+           pos != std::string::npos; pos = normalized.find("*const", pos)) {
+        normalized.replace(pos, 6, "* const");
+        pos += 7;
+      }
+      const auto *parent =
+          llvm::dyn_cast<clang::NamedDecl>(origin_function->getDeclContext());
+      if (origin_function->getNumParams() > 1) {
+        const std::string bare = normalized.substr(0, normalized.find('('));
+        if (parent != nullptr) {
+          const std::string scope = qualified_name_bare(context, parent);
+          return scope.empty() ? bare : scope + "::" + bare;
+        }
+        return bare;
+      }
+      if (parent != nullptr) {
+        const std::string scope = qualified_name_bare(context, parent);
+        return scope.empty() ? normalized : scope + "::" + normalized;
+      }
+      return normalized;
+    }
+  }
+  std::string name = qualified_name(context, named);
+  if (name.empty()) {
+    return std::nullopt;
+  }
+  return name;
+}
+
+std::optional<std::string> template_form_name(const clang::Decl *decl) {
+  if (const auto *function = llvm::dyn_cast<clang::FunctionDecl>(decl)) {
+    if (function->isFunctionTemplateSpecialization()) {
+      switch (function->getTemplateSpecializationKind()) {
+      case clang::TSK_ImplicitInstantiation:
+        return std::string("implicit-instantiation");
+      case clang::TSK_ExplicitInstantiationDeclaration:
+      case clang::TSK_ExplicitInstantiationDefinition:
+        return std::string("explicit-instantiation");
+      case clang::TSK_ExplicitSpecialization:
+        return std::string("explicit-specialization");
+      case clang::TSK_Undeclared:
+        break;
+      }
+    }
+    if (llvm::isa<clang::CXXMethodDecl>(function)) {
+      const auto *record =
+          llvm::dyn_cast<clang::CXXRecordDecl>(function->getDeclContext());
+      if (record != nullptr &&
+          (record->getDescribedClassTemplate() != nullptr ||
+           record->getTemplateSpecializationKind() != clang::TSK_Undeclared)) {
+        return is_template_instantiation(record)
+                   ? std::optional<std::string>("owner-instance-member")
+                   : std::optional<std::string>("owner-pattern-member");
+      }
+    }
+    return std::string("pattern");
+  }
+  if (llvm::isa<clang::FunctionTemplateDecl>(decl) ||
+      llvm::isa<clang::ClassTemplateDecl>(decl)) {
+    return std::string("pattern");
   }
   return std::nullopt;
 }

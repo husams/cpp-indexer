@@ -4,10 +4,10 @@
 // tables, so semantics stay identical by construction.
 
 #include "query/exec.hpp"
+#include "graph/query.hpp"
 
 #include "catalogs/generated_catalog.hpp"
 #include "util/version.hpp"
-#include "graph/query.hpp"
 #include "storage/storage.hpp"
 
 #include <algorithm>
@@ -234,6 +234,20 @@ std::string col_expr(const std::string &field, const std::string &symbol_alias,
   }
   if (field == "is_static") {
     return symbol_alias + ".is_static";
+  }
+  if (field == "callable_kind") {
+    return symbol_alias + ".callable_kind";
+  }
+  if (field == "template_origin") {
+    return symbol_alias + ".template_origin";
+  }
+  if (field == "template_form") {
+    return symbol_alias + ".template_form";
+  }
+  if (field == "owner") {
+    return std::string("(SELECT COALESCE(p.qual_name, p.spelling) FROM symbol "
+                       "p WHERE ") +
+           "p.usr = " + symbol_alias + ".parent_usr)";
   }
   if (field == "file") {
     return symbol_alias + ".file_id";
@@ -968,6 +982,15 @@ private:
         sql = "SELECT owner_id,position,pack_index FROM template_arg ORDER BY "
               "owner_id,position,pack_index";
         break;
+      case View::SignatureSlot:
+        sql =
+            "SELECT symbol_id,-1,-1,0,0,1 FROM symbol_type "
+            "WHERE kind=1 UNION ALL SELECT owner_id,position,pack_index,0,0,2 "
+            "FROM parameter UNION ALL SELECT owner_id,position,-1,0,0,3 "
+            "FROM template_param UNION ALL SELECT "
+            "owner_id,position,pack_index,0,0,4 "
+            "FROM template_arg ORDER BY 1,2,3,6";
+        break;
       case View::CallArgument:
         sql = "SELECT edge_id,file_id,line,col,position FROM call_arg ORDER BY "
               "edge_id,file_id,line,col,position";
@@ -983,6 +1006,30 @@ private:
       case View::Type:
         sql = "SELECT id FROM type_node ORDER BY id";
         break;
+      case View::TypeLayer: {
+        graph::GraphQuery graph(read_.graph_read());
+        for (const auto &row :
+             logical_rows(View::Type, "SELECT id FROM type_node ORDER BY id",
+                          {SqlValue(kEnumerateBudget + 1)})) {
+          const auto layers = graph.type_layers(row.a);
+          for (std::size_t i = 0; i < layers.size(); ++i) {
+            st.keys.push_back(
+                LogicalKey{.a = row.a, .b = static_cast<int64_t>(i)});
+            if (st.keys.size() > static_cast<std::size_t>(kEnumerateBudget)) {
+              st.truncated = true;
+              st.keys.resize(kEnumerateBudget);
+              break;
+            }
+          }
+          if (st.truncated) {
+            break;
+          }
+        }
+        if (pred) {
+          filter(st, *pred, unknown);
+        }
+        return;
+      }
       case View::Symbol:
       case View::Entity:
         break;
@@ -1198,6 +1245,14 @@ private:
         key.a = query.col_int64(0);
         key.b = query.col_int64(1);
         break;
+      case View::SignatureSlot:
+        key.a = query.col_int64(0);
+        key.b = query.col_int64(1);
+        key.c = query.col_int64(2);
+        key.d = query.col_int64(3);
+        key.e = query.col_int64(4);
+        key.tag = query.col_int64(5);
+        break;
       case View::CallArgument:
         key.a = query.col_int64(0);
         key.b = query.col_int64(1);
@@ -1215,6 +1270,10 @@ private:
       case View::Edge:
       case View::Type:
         key.a = query.col_int64(0);
+        break;
+      case View::TypeLayer:
+        key.a = query.col_int64(0);
+        key.b = query.col_int64(1);
         break;
       case View::Symbol:
       case View::Entity:
@@ -1304,6 +1363,17 @@ private:
                    "SELECT owner_id,position,pack_index FROM template_arg "
                    "WHERE owner_id=? ORDER BY position,pack_index",
                    {SqlValue(owner)});
+        } else if (rel.name == "has_signature_slot") {
+          add_keys(
+              View::SignatureSlot,
+              "SELECT symbol_id,-1,-1,0,0,1 FROM symbol_type WHERE "
+              "symbol_id=? AND kind=1 UNION ALL SELECT owner_id,position,"
+              "pack_index,0,0,2 FROM parameter WHERE owner_id=? UNION ALL "
+              "SELECT owner_id,position,-1,0,0,3 FROM template_param WHERE "
+              "owner_id=? UNION ALL SELECT owner_id,position,pack_index,0,0,4 "
+              "FROM template_arg WHERE owner_id=? ORDER BY 1,2,3,6",
+              {SqlValue(owner), SqlValue(owner), SqlValue(owner),
+               SqlValue(owner)});
         } else if (rel.name == "has_call_edge") {
           add_keys(View::Edge,
                    "SELECT id FROM edge WHERE src_id=? AND kind=? ORDER BY id",
@@ -1326,6 +1396,131 @@ private:
           add_ids("SELECT type_id FROM symbol_type WHERE symbol_id=? "
                   "ORDER BY type_id",
                   {SqlValue(owner)});
+        }
+      }
+    } else if (inbound && st.view == View::Symbol &&
+               rel.name == "of_callable") {
+      for (const auto owner : st.ids) {
+        add_keys(
+            View::SignatureSlot,
+            "SELECT symbol_id,-1,-1,0,0,1 FROM symbol_type WHERE "
+            "symbol_id=? AND kind=1 UNION ALL SELECT owner_id,position,"
+            "pack_index,0,0,2 FROM parameter WHERE owner_id=? UNION ALL "
+            "SELECT owner_id,position,-1,0,0,3 FROM template_param WHERE "
+            "owner_id=? UNION ALL SELECT owner_id,position,pack_index,0,0,4 "
+            "FROM template_arg WHERE owner_id=? ORDER BY 1,2,3,6",
+            {SqlValue(owner), SqlValue(owner), SqlValue(owner),
+             SqlValue(owner)});
+      }
+    } else if (!inbound && st.view == View::SignatureSlot &&
+               rel.name == "of_callable") {
+      for (const auto &key : st.keys) {
+        add_ids("SELECT ?", {SqlValue(key.a)});
+      }
+    } else if (inbound && st.view == View::Symbol &&
+               rel.name == "of_type") {
+      for (const auto owner : st.ids) {
+        add_keys(
+            View::SignatureSlot,
+            "SELECT symbol_id,-1,-1,0,0,1 FROM symbol_type WHERE "
+            "symbol_id=? AND kind=1 UNION ALL SELECT owner_id,position,"
+            "pack_index,0,0,2 FROM parameter WHERE owner_id=? UNION ALL "
+            "SELECT owner_id,position,-1,0,0,3 FROM template_param WHERE "
+            "owner_id=? UNION ALL SELECT owner_id,position,pack_index,0,0,4 "
+            "FROM template_arg WHERE owner_id=? ORDER BY 1,2,3,6",
+            {SqlValue(owner), SqlValue(owner), SqlValue(owner),
+             SqlValue(owner)});
+      }
+    } else if (inbound && st.view == View::Type &&
+               rel.layer == View::SignatureSlot && rel.name == "of_type") {
+      for (const auto &key : st.keys) {
+        add_keys(
+            View::SignatureSlot,
+            "SELECT symbol_id,-1,-1,0,0,1 FROM symbol_type WHERE "
+            "type_id=? AND kind=1 UNION ALL SELECT owner_id,position,"
+            "pack_index,0,0,2 FROM parameter WHERE type_id=? UNION ALL "
+            "SELECT owner_id,position,-1,0,0,3 FROM template_param WHERE "
+            "type_id=? UNION ALL SELECT owner_id,position,pack_index,0,0,4 "
+            "FROM template_arg WHERE type_id=? ORDER BY 1,2,3,6",
+            {SqlValue(key.a), SqlValue(key.a), SqlValue(key.a),
+             SqlValue(key.a)});
+      }
+    } else if (!inbound && st.view == View::SignatureSlot &&
+               rel.name == "of_type") {
+      for (const auto &key : st.keys) {
+        if (key.tag == 1) {
+          add_ids(
+              "SELECT type_id FROM symbol_type WHERE symbol_id=? AND kind=1",
+              {SqlValue(key.a)});
+        } else if (key.tag == 2) {
+          add_ids("SELECT type_id FROM parameter WHERE owner_id=? AND "
+                  "position=? AND pack_index=?",
+                  {SqlValue(key.a), SqlValue(key.b), SqlValue(key.c)});
+        } else if (key.tag == 3) {
+          add_ids("SELECT type_id FROM template_param WHERE owner_id=? AND "
+                  "position=?",
+                  {SqlValue(key.a), SqlValue(key.b)});
+        } else {
+          add_ids("SELECT type_id FROM template_arg WHERE owner_id=? AND "
+                  "position=? AND pack_index=?",
+                  {SqlValue(key.a), SqlValue(key.b), SqlValue(key.c)});
+        }
+      }
+    } else if (!inbound && st.view == View::Type && rel.name == "has_layer") {
+      graph::GraphQuery graph(read_.graph_read());
+      for (const auto &key : st.keys) {
+        const auto layers = graph.type_layers(key.a);
+        for (std::size_t i = 0; i < layers.size(); ++i) {
+          add_synthetic({.a = key.a, .b = static_cast<int64_t>(i)});
+        }
+      }
+    } else if (!inbound && st.view == View::TypeLayer &&
+               rel.name == "of_type") {
+      for (const auto &key : st.keys) {
+        add_ids("SELECT ?", {SqlValue(key.a)});
+      }
+    } else if (inbound && st.view == View::SignatureSlot &&
+               rel.name == "has_signature_slot") {
+      for (const auto &key : st.keys) {
+        add_ids("SELECT ?", {SqlValue(key.a)});
+      }
+    } else if (inbound && st.view == View::TypeLayer &&
+               rel.name == "has_layer") {
+      for (const auto &key : st.keys) {
+        add_ids("SELECT ?", {SqlValue(key.a)});
+      }
+    } else if (!inbound && st.view == View::TypeLayer && rel.name == "child") {
+      graph::GraphQuery graph(read_.graph_read());
+      for (const auto &key : st.keys) {
+        const auto layers = graph.type_layers(key.a);
+        if (key.b < 0 || static_cast<std::size_t>(key.b) >= layers.size()) {
+          continue;
+        }
+        const auto &parent = layers[static_cast<std::size_t>(key.b)];
+        for (std::size_t i = 0; i < layers.size(); ++i) {
+          const auto &child = layers[i];
+          if (child.depth == parent.depth + 1 &&
+              child.path.starts_with(parent.path + ".")) {
+            add_synthetic({.a = key.a, .b = static_cast<int64_t>(i)});
+          }
+        }
+      }
+    } else if (inbound && st.view == View::TypeLayer &&
+               (rel.name == "child" || rel.name == "parent")) {
+      // Parent links are derived from the deterministic path/depth relation.
+      graph::GraphQuery graph(read_.graph_read());
+      for (const auto &key : st.keys) {
+        const auto layers = graph.type_layers(key.a);
+        if (key.b < 0 || static_cast<std::size_t>(key.b) >= layers.size()) {
+          continue;
+        }
+        const auto &child = layers[static_cast<std::size_t>(key.b)];
+        for (std::size_t i = 0; i < layers.size(); ++i) {
+          const auto &parent = layers[i];
+          if (child.depth == parent.depth + 1 &&
+              child.path.starts_with(parent.path + ".")) {
+            add_synthetic({.a = key.a, .b = static_cast<int64_t>(i)});
+          }
         }
       }
     } else if (inbound && st.view == View::Parameter &&
@@ -1883,6 +2078,14 @@ private:
     if (view == View::Type) {
       return "type:" + portable_type(key.a);
     }
+    if (view == View::SignatureSlot) {
+      return "signature_slot:" + portable_symbol(key.a) + ":" +
+             std::to_string(key.b) + ":" + std::to_string(key.c) + ":" +
+             std::to_string(key.tag);
+    }
+    if (view == View::TypeLayer) {
+      return "type_layer:" + portable_type(key.a) + ":" + std::to_string(key.b);
+    }
     return std::string(view_name(view)) + ":" + std::to_string(key.a);
   }
 
@@ -1912,6 +2115,9 @@ private:
       return "edge_site";
     case View::Type:
       return "type_node";
+    case View::SignatureSlot:
+    case View::TypeLayer:
+      return "";
     case View::Symbol:
     case View::Entity:
       break;
@@ -1987,10 +2193,30 @@ private:
         return std::set<std::string>{"edge_id", "file_id", "line", "col"};
       }
       if (view == View::Type) {
-        return std::set<std::string>{"id",          "type_key", "spelling",
-                                     "kind",        "is_const", "is_volatile",
-                                     "is_restrict", "decl_usr", "decl_id",
-                                     "canonical_id"};
+        return std::set<std::string>{"id",           "type_key", "spelling",
+                                     "kind",         "is_const", "is_volatile",
+                                     "is_restrict",  "decl_usr", "decl_id",
+                                     "canonical_id", "extent"};
+      }
+      if (view == View::SignatureSlot) {
+        return std::set<std::string>{"owner_id",
+                                     "position",
+                                     "pack_index",
+                                     "slot_kind",
+                                     "name",
+                                     "type_id",
+                                     "declared_type_id",
+                                     "adjusted_type_id",
+                                     "default_text",
+                                     "default_origin",
+                                     "reference_semantics"};
+      }
+      if (view == View::TypeLayer) {
+        return std::set<std::string>{"root_id",  "path",        "relation",
+                                     "position", "depth",       "status",
+                                     "type_id",  "spelling",    "kind",
+                                     "extent",   "decl_usr",    "canonical_id",
+                                     "is_const", "is_volatile", "is_restrict"};
       }
       if (view == View::Edge) {
         return std::set<std::string>{"id",         "src_id",     "dst_id",
@@ -2022,6 +2248,10 @@ private:
     case View::Edge:
     case View::Type:
       return {SqlValue(key.a)};
+    case View::SignatureSlot:
+      return {};
+    case View::TypeLayer:
+      return {};
     case View::Symbol:
     case View::Entity:
       return {};
@@ -2044,6 +2274,9 @@ private:
     case View::Edge:
     case View::Type:
       return "id=?";
+    case View::SignatureSlot:
+    case View::TypeLayer:
+      return "1=0";
     case View::Symbol:
     case View::Entity:
       return "1=0";
@@ -2230,7 +2463,207 @@ private:
   std::map<LogicalKey, std::vector<Cell>>
   fetch_typed_cells(Stream &st, const std::vector<std::string> &fields) {
     std::map<LogicalKey, std::vector<Cell>> result;
+    graph::GraphQuery graph(read_.graph_read());
     for (const auto &key : st.keys) {
+      if (st.view == View::SignatureSlot) {
+        std::vector<Cell> cells;
+        cells.reserve(fields.size());
+        const auto text_at = [](auto &statement,
+                                int index) -> std::optional<std::string> {
+          return statement.col_is_null(index)
+                     ? std::nullopt
+                     : std::optional<std::string>(statement.col_text(index));
+        };
+        const auto int_at = [](auto &statement,
+                               int index) -> std::optional<int64_t> {
+          return statement.col_is_null(index)
+                     ? std::nullopt
+                     : std::optional<int64_t>(statement.col_int64(index));
+        };
+        const auto push_slot =
+            [&](const std::string &slot_kind,
+                const std::optional<std::string> &name,
+                const std::optional<int64_t> &type_id,
+                const std::optional<int64_t> &declared,
+                const std::optional<int64_t> &adjusted,
+            const std::optional<std::string> &default_text,
+            const std::optional<std::string> &default_origin,
+            const std::optional<std::string> &reference,
+            const graph::GraphQuery::SlotFacts &facts) {
+              for (const auto &field : fields) {
+                if (field == "id") {
+                  cells.emplace_back(logical_row_id(st.view, key));
+                } else if (field == "identity_key") {
+                  cells.emplace_back(logical_identity(st.view, key));
+                } else if (field == "owner_id") {
+                  cells.emplace_back(key.a);
+                } else if (field == "position") {
+                  cells.emplace_back(key.b < 0 ? Cell(nullptr) : Cell(key.b));
+                } else if (field == "pack_index") {
+                  cells.emplace_back(key.c < 0 ? Cell(nullptr) : Cell(key.c));
+                } else if (field == "slot_kind") {
+                  cells.emplace_back(slot_kind);
+                } else if (field == "name") {
+                  name ? cells.emplace_back(*name)
+                       : cells.emplace_back(nullptr);
+                } else if (field == "type_id") {
+                  type_id ? cells.emplace_back(*type_id)
+                          : cells.emplace_back(nullptr);
+                } else if (field == "declared_type_id") {
+                  declared ? cells.emplace_back(*declared)
+                           : cells.emplace_back(nullptr);
+                } else if (field == "adjusted_type_id") {
+                  adjusted ? cells.emplace_back(*adjusted)
+                           : cells.emplace_back(nullptr);
+                } else if (field == "default_text") {
+                  default_text ? cells.emplace_back(*default_text)
+                               : cells.emplace_back(nullptr);
+                } else if (field == "default_origin") {
+                  default_origin ? cells.emplace_back(*default_origin)
+                                 : cells.emplace_back(nullptr);
+                } else if (field == "reference_semantics") {
+                  reference ? cells.emplace_back(*reference)
+                            : cells.emplace_back(nullptr);
+                } else if (field == "mode") {
+                  cells.emplace_back(facts.mode);
+                } else if (field == "value_kind") {
+                  cells.emplace_back(facts.value_kind);
+                } else if (field == "named_decl") {
+                  facts.named_decl ? cells.emplace_back(*facts.named_decl)
+                                   : cells.emplace_back(nullptr);
+                } else {
+                  cells.emplace_back(nullptr);
+                }
+              }
+            };
+        if (key.tag == 1) {
+          auto query = read_.read_db().prepare(
+              "SELECT type_id FROM symbol_type WHERE symbol_id=? AND kind=1");
+          query.bind(1, key.a);
+          if (!query.step()) {
+            continue;
+          }
+          const int64_t type_id = query.col_int64(0);
+          const auto facts = graph.slot_facts_for_ids(type_id, type_id);
+          push_slot("return", std::nullopt, type_id, type_id, type_id,
+                    std::nullopt, std::nullopt, std::nullopt, facts);
+        } else if (key.tag == 2) {
+          auto query = read_.read_db().prepare(
+              "SELECT name,type_id,declared_type_id,adjusted_type_id,"
+              "default_text,default_origin,reference_semantics FROM parameter "
+              "WHERE owner_id=? AND position=? AND pack_index=?");
+          query.bind(1, key.a);
+          query.bind(2, key.b);
+          query.bind(3, key.c);
+          if (!query.step()) {
+            continue;
+          }
+          const auto type_id = int_at(query, 1);
+          const auto declared = int_at(query, 2);
+          const auto adjusted = int_at(query, 3);
+          const auto facts = graph.slot_facts_for_ids(
+              declared ? declared : type_id, adjusted ? adjusted : type_id);
+          push_slot("parameter", text_at(query, 0), type_id,
+                    declared, adjusted, text_at(query, 4), text_at(query, 5),
+                    text_at(query, 6), facts);
+        } else if (key.tag == 3) {
+          auto query = read_.read_db().prepare(
+              "SELECT name,type_id,default_txt,default_type_id FROM "
+              "template_param "
+              "WHERE owner_id=? AND position=?");
+          query.bind(1, key.a);
+          query.bind(2, key.b);
+          if (!query.step()) {
+            continue;
+          }
+          const auto type_id = int_at(query, 1);
+          const auto facts = graph.slot_facts_for_ids(type_id, type_id);
+          push_slot("template_parameter", text_at(query, 0), type_id, type_id,
+                    type_id, text_at(query, 2), std::nullopt, std::nullopt,
+                    facts);
+        } else {
+          auto query = read_.read_db().prepare(
+              "SELECT arg_kind,type_id,literal FROM template_arg "
+              "WHERE owner_id=? AND position=? AND pack_index=?");
+          query.bind(1, key.a);
+          query.bind(2, key.b);
+          query.bind(3, key.c);
+          if (!query.step()) {
+            continue;
+          }
+          const auto type_id = int_at(query, 1);
+          const auto facts = graph.slot_facts_for_ids(type_id, type_id);
+          push_slot("template_argument", std::nullopt, type_id, type_id,
+                    type_id, text_at(query, 2), std::nullopt, std::nullopt,
+                    facts);
+        }
+        result.emplace(key, std::move(cells));
+        continue;
+      }
+      if (st.view == View::TypeLayer) {
+        graph::GraphQuery graph(read_.graph_read());
+        const auto layers = graph.type_layers(key.a);
+        if (key.b < 0 || static_cast<std::size_t>(key.b) >= layers.size()) {
+          continue;
+        }
+        const auto &layer = layers[static_cast<std::size_t>(key.b)];
+        std::optional<int64_t> canonical_id;
+        auto node = read_.read_db().prepare(
+            "SELECT canonical_id FROM type_node WHERE id=?");
+        node.bind(1, layer.type.id);
+        if (node.step() && !node.col_is_null(0)) {
+          canonical_id = node.col_int64(0);
+        }
+        std::vector<Cell> cells;
+        cells.reserve(fields.size());
+        for (const auto &field : fields) {
+          if (field == "id") {
+            cells.emplace_back(logical_row_id(st.view, key));
+          } else if (field == "identity_key") {
+            cells.emplace_back(logical_identity(st.view, key));
+          } else if (field == "root_id") {
+            cells.emplace_back(key.a);
+          } else if (field == "path") {
+            cells.emplace_back(layer.path);
+          } else if (field == "relation") {
+            cells.emplace_back(layer.relation);
+          } else if (field == "position") {
+            cells.emplace_back(layer.position);
+          } else if (field == "depth") {
+            cells.emplace_back(static_cast<int64_t>(layer.depth));
+          } else if (field == "status") {
+            cells.emplace_back(layer.status);
+          } else if (field == "type_id") {
+            cells.emplace_back(layer.type.id);
+          } else if (field == "spelling") {
+            cells.emplace_back(layer.type.spelling);
+          } else if (field == "kind") {
+            cells.emplace_back(layer.type.kind);
+          } else if (field == "extent") {
+            layer.type.extent ? cells.emplace_back(*layer.type.extent)
+                              : cells.emplace_back(nullptr);
+          } else if (field == "element_type") {
+            layer.element_type ? cells.emplace_back(*layer.element_type)
+                               : cells.emplace_back(nullptr);
+          } else if (field == "decl_usr") {
+            layer.type.decl_usr ? cells.emplace_back(*layer.type.decl_usr)
+                                : cells.emplace_back(nullptr);
+          } else if (field == "canonical_id") {
+            canonical_id ? cells.emplace_back(*canonical_id)
+                         : cells.emplace_back(nullptr);
+          } else if (field == "is_const") {
+            cells.emplace_back(static_cast<int64_t>(layer.type.is_const));
+          } else if (field == "is_volatile") {
+            cells.emplace_back(static_cast<int64_t>(layer.type.is_volatile));
+          } else if (field == "is_restrict") {
+            cells.emplace_back(static_cast<int64_t>(layer.type.is_restrict));
+          } else {
+            cells.emplace_back(nullptr);
+          }
+        }
+        result.emplace(key, std::move(cells));
+        continue;
+      }
       if (st.view == View::Evidence && key.tag == 1) {
         auto query = read_.read_db().prepare(
             "SELECT default_txt,default_type_id,default_ref_id FROM "
@@ -2335,7 +2768,8 @@ private:
           const auto path = file_path(query.col_int64(col));
           cells.emplace_back(path ? Cell(*path) : Cell(nullptr));
         } else if (field == "name" || field == "spelling" ||
-                   field == "type_key" || field == "default_text" ||
+                   field == "type_key" || field == "extent" ||
+                   field == "element_type" || field == "default_text" ||
                    field == "default_origin" || field == "default_txt" ||
                    field == "reference_semantics" || field == "literal" ||
                    field == "src_kind" || field == "type_usr" ||
@@ -2401,7 +2835,9 @@ private:
             cells.emplace_back(p ? Cell(*p) : Cell(nullptr));
           } else if (f == "usr" || f == "name" || f == "spelling" ||
                      f == "qual_name" || f == "semantic_universe" ||
-                     f == "identity_key") {
+                     f == "identity_key" || f == "callable_kind" ||
+                     f == "template_origin" || f == "template_form" ||
+                     f == "owner") {
             cells.emplace_back(stq.col_text(col));
           } else {
             cells.emplace_back(stq.col_int64(col));

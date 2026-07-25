@@ -5,6 +5,7 @@
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclTemplate.h"
+#include "clang/AST/Expr.h"
 #include "clang/AST/TemplateBase.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/raw_ostream.h"
@@ -209,7 +210,7 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
   }
 
   if (const auto *pack = llvm::dyn_cast<clang::PackExpansionType>(t)) {
-    rec.kind = kTypeOther;
+    rec.kind = kTypePackExpansion;
     const auto pattern = build(pack->getPattern(), depth + 1);
     rec.type_key = "pack(" + (pattern ? pattern->key : "?") + ")";
     return emit_node(qt, std::move(rec), depth);
@@ -290,6 +291,23 @@ std::optional<TypeInterner::Result> TypeInterner::build(clang::QualType qt,
       llvm::SmallString<16> buf;
       ca->getSize().toString(buf, 10, /*Signed=*/false);
       size = std::string(buf);
+      rec.extent = size;
+    } else if (const auto *dependent =
+                   llvm::dyn_cast<clang::DependentSizedArrayType>(t)) {
+      llvm::SmallString<32> printed;
+      llvm::raw_svector_ostream stream(printed);
+      dependent->getSizeExpr()->printPretty(stream, nullptr,
+                                            context_.getPrintingPolicy());
+      size = printed.str().str();
+      rec.extent = size;
+    } else if (const auto *variable =
+                   llvm::dyn_cast<clang::VariableArrayType>(t)) {
+      llvm::SmallString<32> printed;
+      llvm::raw_svector_ostream stream(printed);
+      variable->getSizeExpr()->printPretty(stream, nullptr,
+                                           context_.getPrintingPolicy());
+      size = printed.str().str();
+      rec.extent = size;
     }
     rec.kind = kTypeArray;
     rec.type_key = "A" + size + "(" + (inner ? inner->key : "?") + ")";

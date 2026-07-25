@@ -76,7 +76,7 @@ inline int64_t identity_kind_id(std::string_view name) {
 
 // Python Storage._SYMBOL_COLS — insert/update order is load-bearing for the
 // upsert statement and for update_symbol validation.
-constexpr std::array<std::string_view, 26> kSymbolInsertCols = {
+constexpr std::array<std::string_view, 29> kSymbolInsertCols = {
     "usr",
     "spelling",
     "qual_name",
@@ -103,6 +103,9 @@ constexpr std::array<std::string_view, 26> kSymbolInsertCols = {
     "const_value",
     "semantic_universe_id",
     "identity_key",
+    "callable_kind",
+    "template_origin",
+    "template_form",
 };
 
 // Explicit SELECT lists (stable column positions even on migrated DBs).
@@ -126,14 +129,16 @@ constexpr const char *kSymbolCols =
     "line, col, decl_file_id, decl_line, decl_col, is_definition, is_pure, "
     "is_static, linkage, access, parent_usr, resolved, decl_path, "
     "is_instantiation, end_line, end_col, multi_def, const_value, "
-    "semantic_universe_id, identity_key";
+    "semantic_universe_id, identity_key, callable_kind, template_origin, "
+    "template_form";
 constexpr const char *kSymbolColsS =
     "s.id, s.usr, s.spelling, s.qual_name, s.display_name, s.kind, "
     "s.type_info, s.file_id, s.line, s.col, s.decl_file_id, s.decl_line, "
     "s.decl_col, s.is_definition, s.is_pure, s.is_static, s.linkage, s.access, "
     "s.parent_usr, s.resolved, s.decl_path, s.is_instantiation, "
     "s.end_line, s.end_col, s.multi_def, s.const_value, "
-    "s.semantic_universe_id, s.identity_key";
+    "s.semantic_universe_id, s.identity_key, s.callable_kind, "
+    "s.template_origin, s.template_form";
 
 inline std::optional<int64_t> opt_int64(const SqliteStmt &st, int idx) {
   if (st.col_is_null(idx)) {
@@ -275,6 +280,9 @@ inline Symbol symbol_from_offset(const SqliteStmt &st, int off) {
   s.const_value = opt_text(st, off + 25);          // v33
   s.semantic_universe_id = st.col_int64(off + 26); // v35
   s.identity_key = st.col_text(off + 27);          // v35
+  s.callable_kind = opt_text(st, off + 28);
+  s.template_origin = opt_text(st, off + 29);
+  s.template_form = opt_text(st, off + 30);
   return s;
 }
 

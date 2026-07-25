@@ -36,11 +36,13 @@ enum class View : std::uint8_t {
   Parameter,
   TemplateParameter,
   TemplateArgument,
+  SignatureSlot,
   CallArgument,
   Edge,
   Site,
   Evidence,
   Type,
+  TypeLayer,
 };
 
 const char *view_name(View v);

@@ -540,7 +540,7 @@ int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
   if (args.graph_json) {
     using namespace json_out;
     const auto type_dict =
-        [](const std::optional<graph::GraphQuery::TypeInfo> &t) {
+        [&h](const std::optional<graph::GraphQuery::TypeInfo> &t) {
           if (!t) {
             return Value::null();
           }
@@ -550,47 +550,76 @@ int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
           o.emplace_back("kind", Value::of(t->kind));
           o.emplace_back("canonical", t->canonical ? Value::of(*t->canonical)
                                                    : Value::null());
-          o.emplace_back("decl_usr", t->decl_usr ? Value::of(*t->decl_usr)
-                                                   : Value::null());
+          o.emplace_back("decl_usr",
+                         t->decl_usr ? Value::of(*t->decl_usr) : Value::null());
           o.emplace_back("const", Value::of(t->is_const));
           o.emplace_back("volatile", Value::of(t->is_volatile));
           o.emplace_back("restrict", Value::of(t->is_restrict));
+          o.emplace_back("extent",
+                         t->extent ? Value::of(*t->extent) : Value::null());
+          Array layers;
+          for (const auto &layer : h->g->type_layers(t->id)) {
+            Object row;
+            row.emplace_back("path", Value::of(layer.path));
+            row.emplace_back("relation", Value::of(layer.relation));
+            row.emplace_back("position", Value::of(layer.position));
+            row.emplace_back("depth",
+                             Value::of(static_cast<int64_t>(layer.depth)));
+            row.emplace_back("status", Value::of(layer.status));
+            row.emplace_back("id", Value::of(layer.type.id));
+            row.emplace_back("spelling", Value::of(layer.type.spelling));
+            row.emplace_back("kind", Value::of(layer.type.kind));
+            row.emplace_back("canonical", layer.type.canonical
+                                              ? Value::of(*layer.type.canonical)
+                                              : Value::null());
+            row.emplace_back("decl_usr", layer.type.decl_usr
+                                             ? Value::of(*layer.type.decl_usr)
+                                             : Value::null());
+            row.emplace_back("const", Value::of(layer.type.is_const));
+            row.emplace_back("volatile", Value::of(layer.type.is_volatile));
+            row.emplace_back("restrict", Value::of(layer.type.is_restrict));
+            row.emplace_back("extent", layer.type.extent
+                                           ? Value::of(*layer.type.extent)
+                                           : Value::null());
+            row.emplace_back("element_type",
+                             layer.element_type ? Value::of(*layer.element_type)
+                                                : Value::null());
+            layers.push_back(Value::obj(std::move(row)));
+          }
+          o.emplace_back("layers", Value::arr(std::move(layers)));
           return Value::obj(std::move(o));
         };
-    const auto slot_dict = [&type_dict](
-                               const std::string &role,
-                               std::optional<int64_t> position,
-                               std::optional<int64_t> pack_index,
-                               const std::optional<std::string> &name,
-                               const std::optional<graph::GraphQuery::TypeInfo>
-                                   &declared,
-                               const std::optional<graph::GraphQuery::TypeInfo>
-                                   &adjusted,
-                               const std::string &mode,
-                               const std::string &value_kind,
-                               const std::optional<std::string> &named,
-                               const std::optional<std::string> &reference,
-                               const std::optional<std::string> &def,
-                               const std::optional<std::string> &origin) {
-      Object o;
-      o.emplace_back("role", Value::of(role));
-      o.emplace_back("position", position ? Value::of(*position)
-                                            : Value::null());
-      o.emplace_back("pack_index", pack_index ? Value::of(*pack_index)
-                                               : Value::null());
-      o.emplace_back("name", name ? Value::of(*name) : Value::null());
-      o.emplace_back("declared_type", type_dict(declared));
-      o.emplace_back("adjusted_type", type_dict(adjusted));
-      o.emplace_back("mode", Value::of(mode));
-      o.emplace_back("value_kind", Value::of(value_kind));
-      o.emplace_back("named_decl", named ? Value::of(*named) : Value::null());
-      o.emplace_back("reference_semantics",
-                     reference ? Value::of(*reference) : Value::null());
-      o.emplace_back("default", def ? Value::of(*def) : Value::null());
-      o.emplace_back("default_origin",
-                     origin ? Value::of(*origin) : Value::null());
-      return Value::obj(std::move(o));
-    };
+    const auto slot_dict =
+        [&type_dict](const std::string &role, std::optional<int64_t> position,
+                     std::optional<int64_t> pack_index,
+                     const std::optional<std::string> &name,
+                     const std::optional<graph::GraphQuery::TypeInfo> &declared,
+                     const std::optional<graph::GraphQuery::TypeInfo> &adjusted,
+                     const std::string &mode, const std::string &value_kind,
+                     const std::optional<std::string> &named,
+                     const std::optional<std::string> &reference,
+                     const std::optional<std::string> &def,
+                     const std::optional<std::string> &origin) {
+          Object o;
+          o.emplace_back("role", Value::of(role));
+          o.emplace_back("position",
+                         position ? Value::of(*position) : Value::null());
+          o.emplace_back("pack_index",
+                         pack_index ? Value::of(*pack_index) : Value::null());
+          o.emplace_back("name", name ? Value::of(*name) : Value::null());
+          o.emplace_back("declared_type", type_dict(declared));
+          o.emplace_back("adjusted_type", type_dict(adjusted));
+          o.emplace_back("mode", Value::of(mode));
+          o.emplace_back("value_kind", Value::of(value_kind));
+          o.emplace_back("named_decl",
+                         named ? Value::of(*named) : Value::null());
+          o.emplace_back("reference_semantics",
+                         reference ? Value::of(*reference) : Value::null());
+          o.emplace_back("default", def ? Value::of(*def) : Value::null());
+          o.emplace_back("default_origin",
+                         origin ? Value::of(*origin) : Value::null());
+          return Value::obj(std::move(o));
+        };
     Object o;
     o.emplace_back("symbol", sym->to_dict());
     o.emplace_back("returns", type_dict(sig.returns));
@@ -598,24 +627,24 @@ int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
     for (const auto &p : sig.params) {
       Object po;
       po.emplace_back("position", Value::of(p.position));
-      po.emplace_back("pack_index", p.pack_index ? Value::of(*p.pack_index)
-                                                   : Value::null());
+      po.emplace_back("pack_index",
+                      p.pack_index ? Value::of(*p.pack_index) : Value::null());
       po.emplace_back("name", p.name ? Value::of(*p.name) : Value::null());
       po.emplace_back("type", type_dict(p.type));
       po.emplace_back("declared_type", type_dict(p.declared_type));
       po.emplace_back("adjusted_type", type_dict(p.adjusted_type));
       po.emplace_back("mode", Value::of(p.mode));
       po.emplace_back("value_kind", Value::of(p.value_kind));
-      po.emplace_back("named_decl", p.named_decl ? Value::of(*p.named_decl)
-                                                   : Value::null());
+      po.emplace_back("named_decl",
+                      p.named_decl ? Value::of(*p.named_decl) : Value::null());
       po.emplace_back("reference_semantics",
                       p.reference_semantics ? Value::of(*p.reference_semantics)
-                                             : Value::null());
+                                            : Value::null());
       po.emplace_back("default", p.default_text ? Value::of(*p.default_text)
-                                                 : Value::null());
-      po.emplace_back("default_origin",
-                      p.default_origin ? Value::of(*p.default_origin)
-                                        : Value::null());
+                                                : Value::null());
+      po.emplace_back("default_origin", p.default_origin
+                                            ? Value::of(*p.default_origin)
+                                            : Value::null());
       parr.push_back(Value::obj(std::move(po)));
     }
     o.emplace_back("params", Value::arr(std::move(parr)));
@@ -623,16 +652,11 @@ int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
     o.emplace_back("underlying_type", type_dict(sig.underlying));
     Array slots;
     if (sig.returns) {
-      std::optional<std::string> named;
-      if (sig.returns->decl_usr) {
-        if (const auto d = h->g->get_by_usr(*sig.returns->decl_usr)) {
-          named = d->name;
-        }
-      }
+      const auto facts = h->g->slot_facts(sig.returns, sig.returns);
       slots.push_back(slot_dict("return", std::nullopt, std::nullopt,
-                                std::nullopt, sig.returns, sig.returns, "value",
-                                sig.returns->kind, named, std::nullopt,
-                                std::nullopt, std::nullopt));
+                                std::nullopt, sig.returns, sig.returns,
+                                facts.mode, facts.value_kind, facts.named_decl,
+                                std::nullopt, std::nullopt, std::nullopt));
     }
     for (const auto &p : sig.params) {
       slots.push_back(slot_dict(
@@ -670,30 +694,6 @@ int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
       t = *child;
     }
     return std::string{};
-  };
-  const auto facts = [&h,
-                      &named_decl](const graph::GraphQuery::TypeInfo &declared,
-                                   const graph::GraphQuery::TypeInfo &adjusted,
-                                   bool forwarding) {
-    std::string mode = "value";
-    graph::GraphQuery::TypeInfo base = adjusted;
-    if (declared.kind == "lvalue-reference" ||
-        declared.kind == "rvalue-reference") {
-      mode = declared.kind;
-      if (const auto child = h->g->type_child(declared.id, 1)) {
-        base = *child;
-      }
-    }
-    std::string kind = base.kind;
-    if (base.spelling.ends_with("...")) {
-      kind = "pack-expansion";
-    }
-    std::string out = mode + ", " + kind;
-    if (forwarding) {
-      out += ", forwarding";
-    }
-    const std::string name = named_decl(base);
-    return std::pair{out, name};
   };
   const auto type_line = [&h,
                           &named_decl](const graph::GraphQuery::TypeInfo &t) {
@@ -733,7 +733,9 @@ int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
     return 0;
   }
   if (sig.returns) {
-    const auto [facts_text, name] = facts(*sig.returns, *sig.returns, false);
+    const auto facts = h->g->slot_facts(sig.returns, sig.returns);
+    const std::string facts_text = facts.mode + ", " + facts.value_kind;
+    const std::string name = facts.named_decl.value_or("");
     *ctx.out << "  return: " << type_line(*sig.returns) << " [" << facts_text
              << "]";
     if (!name.empty()) {
@@ -743,13 +745,16 @@ int cmd_graph_signature(const ParsedArgs &args, Context &ctx) {
   }
   for (const auto &p : sig.params) {
     if (!p.declared_type || !p.adjusted_type) {
-      *ctx.out << "  param " << p.position << ": "
-               << (p.name ? *p.name : "_") << ": <unknown>\n";
+      *ctx.out << "  param " << p.position << ": " << (p.name ? *p.name : "_")
+               << ": <unknown>\n";
       continue;
     }
-    const auto [facts_text, name] =
-        facts(*p.declared_type, *p.adjusted_type,
-              p.reference_semantics && *p.reference_semantics == "forwarding");
+    const auto slot = h->g->slot_facts(p.declared_type, p.adjusted_type);
+    std::string facts_text = slot.mode + ", " + slot.value_kind;
+    if (p.reference_semantics && *p.reference_semantics == "forwarding") {
+      facts_text += ", forwarding";
+    }
+    const std::string name = slot.named_decl.value_or("");
     *ctx.out << "  param " << p.position << ": " << (p.name ? *p.name : "_")
              << ": " << type_line(*p.declared_type);
     if (p.declared_type->spelling != p.adjusted_type->spelling) {
@@ -794,7 +799,7 @@ int cmd_graph_template(const ParsedArgs &args, Context &ctx) {
            std::tie(rhs.kind, rhs.peer.name, rhs.peer.id);
   });
   const auto type_dict =
-      [](const std::optional<graph::GraphQuery::TypeInfo> &t) {
+      [&h](const std::optional<graph::GraphQuery::TypeInfo> &t) {
         if (!t) {
           return json_out::Value::null();
         }
@@ -803,28 +808,63 @@ int cmd_graph_template(const ParsedArgs &args, Context &ctx) {
         o.emplace_back("spelling", json_out::Value::of(t->spelling));
         o.emplace_back("kind", json_out::Value::of(t->kind));
         o.emplace_back("canonical", t->canonical
-                                         ? json_out::Value::of(*t->canonical)
-                                         : json_out::Value::null());
-        o.emplace_back("decl_usr", t->decl_usr
-                                        ? json_out::Value::of(*t->decl_usr)
+                                        ? json_out::Value::of(*t->canonical)
                                         : json_out::Value::null());
+        o.emplace_back("decl_usr", t->decl_usr
+                                       ? json_out::Value::of(*t->decl_usr)
+                                       : json_out::Value::null());
         o.emplace_back("const", json_out::Value::of(t->is_const));
         o.emplace_back("volatile", json_out::Value::of(t->is_volatile));
         o.emplace_back("restrict", json_out::Value::of(t->is_restrict));
+        o.emplace_back("extent", t->extent ? json_out::Value::of(*t->extent)
+                                           : json_out::Value::null());
+        json_out::Array layers;
+        for (const auto &layer : h->g->type_layers(t->id)) {
+          json_out::Object row;
+          row.emplace_back("path", json_out::Value::of(layer.path));
+          row.emplace_back("relation", json_out::Value::of(layer.relation));
+          row.emplace_back("position", json_out::Value::of(layer.position));
+          row.emplace_back(
+              "depth", json_out::Value::of(static_cast<int64_t>(layer.depth)));
+          row.emplace_back("status", json_out::Value::of(layer.status));
+          row.emplace_back("id", json_out::Value::of(layer.type.id));
+          row.emplace_back("spelling",
+                           json_out::Value::of(layer.type.spelling));
+          row.emplace_back("kind", json_out::Value::of(layer.type.kind));
+          row.emplace_back("extent",
+                           layer.type.extent
+                               ? json_out::Value::of(*layer.type.extent)
+                               : json_out::Value::null());
+          row.emplace_back("element_type",
+                           layer.element_type
+                               ? json_out::Value::of(*layer.element_type)
+                               : json_out::Value::null());
+          layers.push_back(json_out::Value::obj(std::move(row)));
+        }
+        o.emplace_back("layers", json_out::Value::arr(std::move(layers)));
         return json_out::Value::obj(std::move(o));
       };
-  const auto type_from_id = [&h](int64_t id)
-      -> std::optional<graph::GraphQuery::TypeInfo> {
+  const auto type_from_id =
+      [&h](int64_t id) -> std::optional<graph::GraphQuery::TypeInfo> {
     const auto node = h->storage->type_node_by_id(id);
     if (!node) {
       return std::nullopt;
     }
     static const std::map<int64_t, std::string> names = {
-        {1, "builtin"}, {2, "record"}, {3, "enum"},
-        {4, "alias"},   {5, "pointer"}, {6, "lvalue-reference"},
-        {7, "rvalue-reference"}, {8, "array"}, {9, "function"},
-        {10, "template-param"}, {11, "other"},
-        {12, "member-data-pointer"}, {13, "member-function-pointer"}};
+        {1, "builtin"},
+        {2, "record"},
+        {3, "enum"},
+        {4, "alias"},
+        {5, "pointer"},
+        {6, "lvalue-reference"},
+        {7, "rvalue-reference"},
+        {8, "array"},
+        {9, "function"},
+        {10, "template-param"},
+        {11, "other"},
+        {12, "member-data-pointer"},
+        {13, "member-function-pointer"},
+        {14, "pack-expansion"}};
     graph::GraphQuery::TypeInfo out;
     out.id = node->id;
     out.spelling = node->spelling;
@@ -834,8 +874,10 @@ int cmd_graph_template(const ParsedArgs &args, Context &ctx) {
     out.is_const = node->is_const;
     out.is_volatile = node->is_volatile;
     out.is_restrict = node->is_restrict;
+    out.extent = node->extent;
     if (node->canonical_id) {
-      if (const auto canonical = h->storage->type_node_by_id(*node->canonical_id)) {
+      if (const auto canonical =
+              h->storage->type_node_by_id(*node->canonical_id)) {
         out.canonical = canonical->spelling;
       }
     }
@@ -899,17 +941,19 @@ int cmd_graph_template(const ParsedArgs &args, Context &ctx) {
       row.emplace_back("param_kind", Value::of(kind));
       row.emplace_back("kind_name", Value::of(param_kind_name(kind)));
       row.emplace_back("name", formal.col_is_null(2)
-                                  ? Value::null()
-                                  : Value::of(formal.col_text(2)));
-      row.emplace_back("default", formal.col_is_null(3)
                                    ? Value::null()
-                                   : Value::of(formal.col_text(3)));
-      row.emplace_back("type", formal.col_is_null(4)
-                               ? Value::null()
-                               : type_dict(type_from_id(formal.col_int64(4))));
-      row.emplace_back("default_type", formal.col_is_null(5)
+                                   : Value::of(formal.col_text(2)));
+      row.emplace_back("default", formal.col_is_null(3)
                                       ? Value::null()
-                                      : type_dict(type_from_id(formal.col_int64(5))));
+                                      : Value::of(formal.col_text(3)));
+      row.emplace_back("type",
+                       formal.col_is_null(4)
+                           ? Value::null()
+                           : type_dict(type_from_id(formal.col_int64(4))));
+      row.emplace_back("default_type",
+                       formal.col_is_null(5)
+                           ? Value::null()
+                           : type_dict(type_from_id(formal.col_int64(5))));
       if (formal.col_is_null(6)) {
         row.emplace_back("default_ref", Value::null());
       } else if (const auto ref = h->g->get_by_id(formal.col_int64(6))) {
@@ -930,21 +974,21 @@ int cmd_graph_template(const ParsedArgs &args, Context &ctx) {
       Object row;
       row.emplace_back("position", Value::of(actual.col_int64(0)));
       const int64_t pack_index = actual.col_int64(1);
-      row.emplace_back("pack_index", pack_index < 0
-                                        ? Value::null()
-                                        : Value::of(pack_index));
+      row.emplace_back("pack_index",
+                       pack_index < 0 ? Value::null() : Value::of(pack_index));
       const int64_t kind = actual.col_int64(2);
       row.emplace_back("arg_kind", Value::of(kind));
       row.emplace_back("kind_name", Value::of(arg_kind_name(kind)));
       row.emplace_back("literal", actual.col_is_null(4)
-                                   ? Value::null()
-                                   : Value::of(actual.col_text(4)));
+                                      ? Value::null()
+                                      : Value::of(actual.col_text(4)));
       row.emplace_back("ref_id", actual.col_is_null(3)
-                                 ? Value::null()
-                                 : Value::of(actual.col_int64(3)));
-      row.emplace_back("type", actual.col_is_null(5)
-                               ? Value::null()
-                               : type_dict(type_from_id(actual.col_int64(5))));
+                                     ? Value::null()
+                                     : Value::of(actual.col_int64(3)));
+      row.emplace_back("type",
+                       actual.col_is_null(5)
+                           ? Value::null()
+                           : type_dict(type_from_id(actual.col_int64(5))));
       actuals.push_back(Value::obj(std::move(row)));
     }
     o.emplace_back("template_args", Value::arr(std::move(actuals)));
@@ -968,7 +1012,8 @@ int cmd_graph_template(const ParsedArgs &args, Context &ctx) {
     *ctx.out << "\n";
   }
   auto st = h->storage->raw_db().prepare(
-      "SELECT position, pack_index, arg_kind, literal, ref_id, type_id FROM template_arg "
+      "SELECT position, pack_index, arg_kind, literal, ref_id, type_id FROM "
+      "template_arg "
       "WHERE owner_id=? ORDER BY position, pack_index");
   st.bind(1, sym->id);
   while (st.step()) {

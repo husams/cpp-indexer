@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from indexer.storage import Storage, Symbol  # noqa: E402
+from indexer.query import GraphQuery  # noqa: E402
 from indexer.utils.hashing import md5_of  # noqa: E402
 from indexer import queryplan as qp  # noqa: E402
 from indexer.queryplan import (  # noqa: E402
@@ -589,6 +590,248 @@ def test_typed_parameter_view_preserves_natural_slot_identity():
          | in_("has_parameter") | select(["name"])).plan)
     assert reverse.view == "symbol"
     assert reverse.rows == [("typed",)]
+
+
+def test_named_signature_slots_and_recursive_type_layers_match_cpp_values():
+    db = Storage(":memory:")
+    owner = db.add_symbol(Symbol(
+        usr="USR::typed_views", spelling="typed_views", kind="function",
+        is_definition=True, resolved=True, callable_kind="free-function",
+        template_origin="typed_views<T>", template_form="pattern"))
+    db._conn.execute(
+        "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+        "('A4(b:int)','int[4]',8,'4'),('b:int','int',1,NULL),"
+        "('b:float','float',1,NULL),('b:char','char',1,NULL)"
+    )
+    type_ids = [row[0] for row in db._conn.execute(
+        "SELECT id FROM type_node ORDER BY id")]
+    array_id, int_id, float_id, char_id = type_ids
+    db._conn.execute(
+        "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES (?,?,?,?)",
+        (array_id, 2, 0, int_id))
+    db._conn.execute(
+        "INSERT INTO symbol_type(symbol_id,kind,type_id) VALUES (?,?,?)",
+        (owner, 1, array_id))
+    db._conn.execute(
+        "INSERT INTO parameter(owner_id,position,pack_index,name,type_id,"
+        "declared_type_id,adjusted_type_id) VALUES (?,?,?,?,?,?,?)",
+        (owner, 0, -1, "value", int_id, int_id, int_id))
+    db._conn.execute(
+        "INSERT INTO template_param(owner_id,position,param_kind,name,type_id) "
+        "VALUES (?,?,?,?,?)", (owner, 0, 1, "T", float_id)
+    )
+    db._conn.execute(
+        "INSERT INTO template_arg(owner_id,position,pack_index,arg_kind,type_id) "
+        "VALUES (?,?,?,?,?),(?,?,?,?,?)",
+        (owner, 1, 0, 1, char_id, owner, 1, 1, 1, char_id),
+    )
+    db._conn.commit()
+
+    def structure():
+        symbols = tuple(db._conn.execute(
+            "SELECT id,usr FROM symbol ORDER BY id"))
+        edges = tuple(db._conn.execute(
+            "SELECT src_id,dst_id,kind FROM edge ORDER BY id"))
+        return len(symbols), symbols, len(edges), edges
+
+    before = structure()
+    ex = Executor(db)
+    symbols = ex.run(
+        (start(symbol("USR::typed_views"))
+         | where(all_of([eq("callable_kind", "free-function"),
+                         eq("template_origin", "typed_views<T>"),
+                         eq("template_form", "pattern")]))
+         | select(["callable_kind", "template_origin", "template_form"])).plan)
+    assert symbols.rows == [("free-function", "typed_views<T>", "pattern")]
+
+    slots = ex.run(
+        (start(symbol("USR::typed_views")) | out("has_signature_slot")
+         | where(eq("slot_kind", "parameter"))
+         | select(["slot_kind", "position", "name", "type_id"])).plan)
+    assert slots.rows == [("parameter", 0, "value", int_id)]
+
+    callable_roundtrip = ex.run(
+        (start(symbol("USR::typed_views")) | out("has_signature_slot")
+         | out("of_callable") | select(["usr"])).plan
+    )
+    assert callable_roundtrip.rows == [("USR::typed_views",)]
+    type_roundtrip = ex.run(
+        (start(symbol("USR::typed_views")) | out("has_signature_slot")
+         | out("of_type") | select(["type_key"])).plan
+    )
+    assert type_roundtrip.rows == [
+        ("A4(b:int)",), ("b:int",), ("b:float",), ("b:char",)
+    ]
+    callable_inverse = ex.run(
+        (start(symbol("USR::typed_views")) | out("has_signature_slot")
+         | in_("has_signature_slot") | select(["usr"])).plan
+    )
+    assert callable_inverse.rows == [("USR::typed_views",)]
+    type_inverse = ex.run(
+        (start(codebase()) | view("type") | nodes()
+             | where(eq("type_key", "b:int"))
+             | in_("signature_slot.of_type")
+         | select(["slot_kind"])).plan
+    )
+    assert type_inverse.rows == [("parameter",)]
+
+    layers = ex.run(
+        (start(codebase()) | view("type") | nodes() | out("has_layer")
+         | where(eq("root_id", array_id))
+         | select(["root_id", "path", "relation", "depth", "status",
+                  "extent"])).plan)
+    assert layers.rows == [
+        (array_id, "root", "root", 0, "complete", "4"),
+        (array_id, "root.element", "element_type", 1, "complete", None),
+    ]
+    parent = ex.run(
+        (start(codebase()) | view("type") | nodes() | out("has_layer")
+         | where(eq("root_id", array_id))
+         | where(eq("path", "root.element")) | in_("child")
+         | select(["path"])).plan
+    )
+    assert parent.rows == [("root",)]
+    root_type = ex.run(
+        (start(codebase()) | view("type") | nodes() | out("has_layer")
+         | where(eq("root_id", array_id)) | where(eq("path", "root"))
+         | in_("has_layer") | select(["type_key"])).plan
+    )
+    assert root_type.rows == [("A4(b:int)",)]
+    assert structure() == before
+
+
+def test_exact_recursive_and_pointer_type_acceptance_is_read_only():
+    db = Storage(":memory:")
+    owner_id = db.add_symbol(_make_sym("cidx::version_re", "version_re"))
+    db.add_symbol(_make_sym("USR::std::regex", "regex", "class", "std::regex"))
+    db.add_symbol(_make_sym("USR::Owner", "Owner", "struct"))
+    db._conn.execute(
+        "INSERT INTO type_node(type_key,spelling,kind,decl_usr) VALUES "
+        "('alias:A','A',4,NULL),('alias:B','B',4,NULL),"
+        "('fn:ret-param','int(float)',9,NULL),('b:int','int',1,NULL),"
+        "('b:float','float',1,NULL),('record:Owner','Owner',2,NULL),"
+        "('mfp:Owner','int (Owner::*)(float)',13,NULL),"
+        "('pack:int','int...',14,NULL),"
+        "('ref:regex','const std::regex &',6,'USR::std::regex'),"
+        "('record:regex','std::regex',2,'USR::std::regex')"
+    )
+
+    def type_id(key):
+        return db._conn.execute(
+            "SELECT id FROM type_node WHERE type_key=?", (key,)
+        ).fetchone()[0]
+
+    alias_a = type_id("alias:A")
+    alias_b = type_id("alias:B")
+    function = type_id("fn:ret-param")
+    integer = type_id("b:int")
+    floating = type_id("b:float")
+    member_owner = type_id("record:Owner")
+    member_function = type_id("mfp:Owner")
+    regex_reference = type_id("ref:regex")
+    regex_record = type_id("record:regex")
+    db._conn.executemany(
+        "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES (?,?,?,?)",
+        [(alias_a, 3, 0, alias_b), (alias_b, 3, 0, alias_a),
+         (function, 4, 0, integer), (function, 5, 0, floating),
+         (member_function, 7, 0, member_owner),
+         (member_function, 8, 0, function),
+         (regex_reference, 1, 0, regex_record)],
+    )
+    db._conn.execute(
+        "INSERT INTO symbol_type(symbol_id,kind,type_id) VALUES (?,?,?)",
+        (owner_id, 1, regex_reference),
+    )
+    db._conn.execute(
+        "INSERT INTO parameter(owner_id,position,pack_index,name) "
+        "VALUES (?,?,?,?)", (owner_id, 9, -1, "unknown")
+    )
+    db._conn.execute(
+        "INSERT INTO parameter(owner_id,position,pack_index,name,type_id) "
+        "VALUES (?,?,?,?,?)", (owner_id, 10, -1, "type-only", regex_reference)
+    )
+    db._conn.commit()
+
+    graph = GraphQuery.from_connection(db._conn)
+    alias_layers = graph.type_layers(alias_a)
+    assert [(row["path"], row["status"]) for row in alias_layers] == [
+        ("root", "complete"),
+        ("root.alias_of", "complete"),
+        ("root.alias_of.alias_of", "cycle"),
+    ]
+    assert [row["kind"] for row in graph.type_layers(function)] == [
+        "function", "builtin", "builtin"
+    ]
+    assert [row["path"] for row in graph.type_layers(function)] == [
+        "root", "root.return_type", "root.param_type[0]"
+    ]
+    member_layers = graph.type_layers(member_function)
+    assert [row["path"] for row in member_layers] == [
+        "root", "root.member_owner", "root.member_component",
+        "root.member_component.return_type",
+        "root.member_component.param_type[0]",
+    ]
+    assert member_layers[1]["spelling"] == "Owner"
+    assert graph.type_layers(999999) == [{
+        "path": "root", "relation": "root", "position": 0,
+        "depth": 0, "status": "unknown",
+    }]
+
+    null_slot = Executor(db).run(
+        (start(symbol("cidx::version_re")) | out("has_signature_slot")
+         | where(eq("slot_kind", "return"))
+         | where(eq("mode", "lvalue-reference"))
+         | where(eq("value_kind", "record"))
+         | where(eq("named_decl", "std::regex"))
+         | select(["mode", "value_kind", "named_decl"])).plan
+    )
+    assert null_slot.rows == [(
+        "lvalue-reference", "record", "std::regex"
+    )]
+    graph_slot = next(
+        slot for slot in graph.signature_slots(graph.get("cidx::version_re"))
+        if slot.position == 10
+    )
+    assert graph_slot.declared_type is not None
+    assert graph_slot.adjusted_type is not None
+    assert graph_slot.declared_type.id == regex_reference
+    assert graph_slot.adjusted_type.id == regex_reference
+    assert (graph_slot.mode, graph_slot.value_kind, graph_slot.named_decl) == (
+        "lvalue-reference", "record", "std::regex"
+    )
+    type_only_plan = Executor(db).run(
+        (start(symbol("cidx::version_re")) | out("has_signature_slot")
+         | where(eq("slot_kind", "parameter"))
+         | where(eq("position", 10))
+         | select(["type_id", "declared_type_id", "adjusted_type_id",
+                  "mode", "value_kind", "named_decl"])).plan
+    )
+    assert type_only_plan.rows == [(
+        regex_reference, None, None, "lvalue-reference", "record", "std::regex"
+    )]
+    type_only_filtered = Executor(db).run(
+        (start(symbol("cidx::version_re")) | out("has_signature_slot")
+         | where(eq("slot_kind", "parameter"))
+         | where(eq("position", 10))
+         | where(eq("mode", "lvalue-reference"))
+         | where(eq("value_kind", "record"))
+         | where(eq("named_decl", "std::regex"))
+         | select(["position"])).plan
+    )
+    assert type_only_filtered.rows == [(10,)]
+    null_slot = Executor(db).run(
+        (start(symbol("cidx::version_re")) | out("has_parameter")
+         | where(eq("position", 9)) | select(["type_id"])).plan
+    )
+    assert null_slot.rows == [(None,)]
+    before = tuple(db._conn.execute(
+        "SELECT (SELECT count(*) FROM symbol), (SELECT count(*) FROM edge)"
+    ).fetchone())
+    assert graph.type_layers(type_id("pack:int"))[0]["kind"] == "pack-expansion"
+    after = tuple(db._conn.execute(
+        "SELECT (SELECT count(*) FROM symbol), (SELECT count(*) FROM edge)"
+    ).fetchone())
+    assert after == before
 
 
 def test_template_defaults_expose_logical_evidence():

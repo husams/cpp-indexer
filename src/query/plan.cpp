@@ -26,6 +26,8 @@ const char *view_name(View v) {
     return "template_parameter";
   case View::TemplateArgument:
     return "template_argument";
+  case View::SignatureSlot:
+    return "signature_slot";
   case View::CallArgument:
     return "call_argument";
   case View::Edge:
@@ -36,6 +38,8 @@ const char *view_name(View v) {
     return "evidence";
   case View::Type:
     return "type";
+  case View::TypeLayer:
+    return "type_layer";
   }
   return "symbol";
 }
@@ -47,8 +51,8 @@ View view_from_domain(std::string_view domain) {
   const auto name = domain.substr(0, dot);
   for (const auto view :
        {View::Symbol, View::Entity, View::Parameter, View::TemplateParameter,
-        View::TemplateArgument, View::CallArgument, View::Edge, View::Site,
-        View::Evidence, View::Type}) {
+        View::TemplateArgument, View::SignatureSlot, View::CallArgument,
+        View::Edge, View::Site, View::Evidence, View::Type, View::TypeLayer}) {
     if (name == view_name(view)) {
       return view;
     }
@@ -68,6 +72,8 @@ View catalog_view(catalog::View view) {
     return View::TemplateParameter;
   case catalog::View::TemplateArgument:
     return View::TemplateArgument;
+  case catalog::View::SignatureSlot:
+    return View::SignatureSlot;
   case catalog::View::CallArgument:
     return View::CallArgument;
   case catalog::View::Edge:
@@ -78,6 +84,8 @@ View catalog_view(catalog::View view) {
     return View::Evidence;
   case catalog::View::Type:
     return View::Type;
+  case catalog::View::TypeLayer:
+    return View::TypeLayer;
   }
   return View::Symbol;
 }
@@ -131,8 +139,8 @@ const RelationDesc *resolve_relation(const std::string &name, View active,
   } else {
     for (const auto view :
          {View::Parameter, View::TemplateParameter, View::TemplateArgument,
-          View::CallArgument, View::Edge, View::Site, View::Evidence,
-          View::Type}) {
+          View::SignatureSlot, View::CallArgument, View::Edge, View::Site,
+          View::Evidence, View::Type, View::TypeLayer}) {
       const std::string prefix = std::string(view_name(view)) + ".";
       if (name.starts_with(prefix)) {
         forced = view;
@@ -695,7 +703,18 @@ bool field_available(View view, const std::string &name) {
   case View::Type:
     return has(std::array{"type_key", "spelling", "kind", "is_const",
                           "is_volatile", "is_restrict", "cv_qualifiers",
-                          "decl_usr", "decl_id", "canonical_id"});
+                          "decl_usr", "decl_id", "canonical_id", "extent"});
+  case View::SignatureSlot:
+    return has(std::array{"owner_id", "position", "pack_index", "slot_kind",
+                          "name", "type_id", "declared_type_id",
+                          "adjusted_type_id", "default_text", "default_origin",
+                          "reference_semantics", "mode", "value_kind",
+                          "named_decl"});
+  case View::TypeLayer:
+    return has(std::array{"root_id", "path", "relation", "position", "depth",
+                          "status", "type_id", "spelling", "kind", "extent",
+                          "element_type", "decl_usr", "canonical_id",
+                          "is_const", "is_volatile", "is_restrict"});
   case View::Symbol:
   case View::Entity:
     break;
@@ -721,8 +740,10 @@ void check_cmp(const Pred &p, View active) {
                                  "type_usr",      "decl_usr",
                                  "callee_usr",    "args_sig",
                                  "recv_src_kind", "recv_type_usr",
-                                 "recv_decl_usr",   "relation", "source",
-                                 "target",          "evidence", "status"};
+                                 "recv_decl_usr", "slot_kind", "path",
+                                 "relation",      "source", "target",
+                                 "evidence",      "status", "extent", "kind",
+                                 "mode", "value_kind", "named_decl"};
     const auto is_string = [&p, &strings] {
       return std::ranges::find(strings, p.field) != strings.end();
     };
@@ -878,9 +899,9 @@ struct WalkState {
 bool is_known_view(View view) {
   return view == View::Symbol || view == View::Entity ||
          view == View::Parameter || view == View::TemplateParameter ||
-         view == View::TemplateArgument || view == View::CallArgument ||
-         view == View::Edge || view == View::Site || view == View::Evidence ||
-         view == View::Type;
+         view == View::TemplateArgument || view == View::SignatureSlot ||
+         view == View::CallArgument || view == View::Edge || view == View::Site ||
+         view == View::Evidence || view == View::Type || view == View::TypeLayer;
 }
 
 Plan validate_walk(const Plan &plan, WalkState &st) {

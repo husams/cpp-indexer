@@ -58,6 +58,7 @@
       "symbol:23": "has_template_argument",
       "symbol:24": "has_call_edge",
       "symbol:25": "has_evidence",
+      "symbol:26": "has_signature_slot",
       "parameter:1": "of_type",
       "parameter:2": "declared_type",
       "parameter:3": "adjusted_type",
@@ -76,7 +77,12 @@
       "evidence:2": "of_occurrence",
       "site:1": "of_edge",
       "type:1": "references_symbol",
-      "type:2": "has_type_edge"
+      "type:2": "has_type_edge",
+      "type:3": "has_layer",
+      "signature_slot:1": "of_callable",
+      "signature_slot:2": "of_type",
+      "type_layer:1": "of_type",
+      "type_layer:2": "child"
     },
     "entity_kinds": {
       "0": "other",
@@ -103,7 +109,8 @@
       "10": "template-param",
       "11": "other",
       "12": "member-data-pointer",
-      "13": "member-function-pointer"
+      "13": "member-function-pointer",
+      "14": "pack-expansion"
     },
     "type_edge_kinds": {
       "1": "pointee",

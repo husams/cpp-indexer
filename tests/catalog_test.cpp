@@ -18,8 +18,8 @@ TEST_CASE("generated semantic catalog has stable cross-language contract") {
   CHECK(kCatalogVersion == 1);
   CHECK(kCatalogHash.size() == 64);
   CHECK(kSymbolKinds.size() == 17);
-  CHECK(kRelations.size() == 56);
-  CHECK(kFields.size() == 42);
+  CHECK(kRelations.size() == 62);
+  CHECK(kFields.size() == 57);
   CHECK(kOccurrenceRoles.size() == 5);
   CHECK(kEffectRoles.size() == 5);
   CHECK(std::ranges::any_of(kRelations, [](const Relation &relation) {

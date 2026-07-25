@@ -124,6 +124,9 @@ SymbolExtractor::extract(const clang::NamedDecl *decl) const {
   sym.is_pure = is_pure_virtual_method(decl);
   sym.is_static = is_static_method(decl);
   sym.is_instantiation = is_template_instantiation(decl);
+  sym.callable_kind = callable_kind_name(decl);
+  sym.template_origin = template_origin_name(context_, decl);
+  sym.template_form = template_form_name(decl);
   sym.linkage = linkage_name(decl);
   sym.access = access_name(decl);
   sym.parent_usr = parent_usr_of(decl);
