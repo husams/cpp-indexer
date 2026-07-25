@@ -708,7 +708,8 @@ bool field_available(View view, const std::string &name) {
     return has(std::array{"owner_id", "position", "pack_index", "slot_kind",
                           "name", "type_id", "declared_type_id",
                           "adjusted_type_id", "default_text", "default_origin",
-                          "reference_semantics"});
+                          "reference_semantics", "mode", "value_kind",
+                          "named_decl"});
   case View::TypeLayer:
     return has(std::array{"root_id", "path", "relation", "position", "depth",
                           "status", "type_id", "spelling", "kind", "extent",
@@ -741,7 +742,8 @@ void check_cmp(const Pred &p, View active) {
                                  "recv_src_kind", "recv_type_usr",
                                  "recv_decl_usr", "slot_kind", "path",
                                  "relation",      "source", "target",
-                                 "evidence",      "status", "extent", "kind"};
+                                 "evidence",      "status", "extent", "kind",
+                                 "mode", "value_kind", "named_decl"};
     const auto is_string = [&p, &strings] {
       return std::ranges::find(strings, p.field) != strings.end();
     };

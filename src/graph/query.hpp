@@ -232,6 +232,8 @@ public:
     }
   };
   SignatureInfo signature(int64_t sym_id);
+  SlotFacts slot_facts_for_ids(std::optional<int64_t> declared_type_id,
+                              std::optional<int64_t> adjusted_type_id);
   SlotFacts slot_facts(const std::optional<TypeInfo> &declared,
                        const std::optional<TypeInfo> &adjusted);
   std::vector<TypeLayer> type_layers(int64_t type_id);

@@ -703,14 +703,17 @@ def test_named_signature_slots_and_recursive_type_layers_match_cpp_values():
 def test_exact_recursive_and_pointer_type_acceptance_is_read_only():
     db = Storage(":memory:")
     owner_id = db.add_symbol(_make_sym("cidx::version_re", "version_re"))
+    db.add_symbol(_make_sym("USR::std::regex", "regex", "class", "std::regex"))
     db.add_symbol(_make_sym("USR::Owner", "Owner", "struct"))
     db._conn.execute(
-        "INSERT INTO type_node(type_key,spelling,kind) VALUES "
-        "('alias:A','A',4),('alias:B','B',4),"
-        "('fn:ret-param','int(float)',9),('b:int','int',1),"
-        "('b:float','float',1),('record:Owner','Owner',2),"
-        "('mfp:Owner','int (Owner::*)(float)',13),"
-        "('pack:int','int...',14)"
+        "INSERT INTO type_node(type_key,spelling,kind,decl_usr) VALUES "
+        "('alias:A','A',4,NULL),('alias:B','B',4,NULL),"
+        "('fn:ret-param','int(float)',9,NULL),('b:int','int',1,NULL),"
+        "('b:float','float',1,NULL),('record:Owner','Owner',2,NULL),"
+        "('mfp:Owner','int (Owner::*)(float)',13,NULL),"
+        "('pack:int','int...',14,NULL),"
+        "('ref:regex','const std::regex &',6,'USR::std::regex'),"
+        "('record:regex','std::regex',2,'USR::std::regex')"
     )
 
     def type_id(key):
@@ -725,12 +728,19 @@ def test_exact_recursive_and_pointer_type_acceptance_is_read_only():
     floating = type_id("b:float")
     member_owner = type_id("record:Owner")
     member_function = type_id("mfp:Owner")
+    regex_reference = type_id("ref:regex")
+    regex_record = type_id("record:regex")
     db._conn.executemany(
         "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES (?,?,?,?)",
         [(alias_a, 3, 0, alias_b), (alias_b, 3, 0, alias_a),
          (function, 4, 0, integer), (function, 5, 0, floating),
          (member_function, 7, 0, member_owner),
-         (member_function, 8, 0, function)],
+         (member_function, 8, 0, function),
+         (regex_reference, 1, 0, regex_record)],
+    )
+    db._conn.execute(
+        "INSERT INTO symbol_type(symbol_id,kind,type_id) VALUES (?,?,?)",
+        (owner_id, 1, regex_reference),
     )
     db._conn.execute(
         "INSERT INTO parameter(owner_id,position,pack_index,name) "
@@ -763,6 +773,17 @@ def test_exact_recursive_and_pointer_type_acceptance_is_read_only():
         "depth": 0, "status": "unknown",
     }]
 
+    null_slot = Executor(db).run(
+        (start(symbol("cidx::version_re")) | out("has_signature_slot")
+         | where(eq("slot_kind", "return"))
+         | where(eq("mode", "lvalue-reference"))
+         | where(eq("value_kind", "record"))
+         | where(eq("named_decl", "std::regex"))
+         | select(["mode", "value_kind", "named_decl"])).plan
+    )
+    assert null_slot.rows == [(
+        "lvalue-reference", "record", "std::regex"
+    )]
     null_slot = Executor(db).run(
         (start(symbol("cidx::version_re")) | out("has_parameter")
          | where(eq("position", 9)) | select(["type_id"])).plan

@@ -150,7 +150,7 @@ _TYPED_FIELDS = {
     "parameter": {"id", "identity_key", "owner_id", "position", "pack_index", "name", "type_id", "declared_type_id", "adjusted_type_id", "default_text", "default_origin", "reference_semantics", "file_id", "line", "col"},
     "template_parameter": {"id", "identity_key", "owner_id", "position", "param_kind", "name", "default_txt", "type_id", "default_type_id", "default_ref_id"},
     "template_argument": {"id", "identity_key", "owner_id", "position", "pack_index", "arg_kind", "ref_id", "literal", "type_id"},
-    "signature_slot": {"id", "identity_key", "owner_id", "position", "pack_index", "slot_kind", "name", "type_id", "declared_type_id", "adjusted_type_id", "default_text", "default_origin", "reference_semantics"},
+    "signature_slot": {"id", "identity_key", "owner_id", "position", "pack_index", "slot_kind", "name", "type_id", "declared_type_id", "adjusted_type_id", "default_text", "default_origin", "reference_semantics", "mode", "value_kind", "named_decl"},
     "call_argument": {"id", "identity_key", "edge_id", "file_id", "line", "col", "position", "src_kind", "type_usr", "decl_usr", "callee_usr", "type_id", "decl_id", "callee_id", "type_is_value"},
     "edge": {"id", "identity_key", "src_id", "dst_id", "kind", "count", "base_access", "is_virtual", "vtable_slot", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
     "site": {"id", "identity_key", "edge_id", "file_id", "file", "line", "col", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
@@ -784,6 +784,7 @@ def _check_cmp(p: Pred, active: str) -> None:
             "src_kind", "type_usr", "decl_usr", "callee_usr", "args_sig",
             "recv_src_kind", "recv_type_usr", "recv_decl_usr", "slot_kind",
             "path", "relation", "status", "extent", "element_type", "kind",
+            "mode", "value_kind", "named_decl",
         }
         is_string = p.field in typed_strings
         if is_string:
@@ -2273,6 +2274,7 @@ class Executor:
     ) -> dict[tuple[int, ...], tuple[Any, ...]]:
         result: dict[tuple[int, ...], tuple[Any, ...]] = {}
         string_fields = {"name", "spelling", "type_key", "extent", "default_text", "default_origin", "default_txt", "reference_semantics", "literal", "src_kind", "type_usr", "decl_usr", "callee_usr", "args_sig", "recv_src_kind", "recv_type_usr", "recv_decl_usr", "identity_key", "file"}
+        graph = GraphQuery.from_connection(self._conn)
         for key in st.keys:
             if st.view == "signature_slot":
                 role = key[5]
@@ -2280,9 +2282,10 @@ class Executor:
                     row = self._conn.execute(
                         "SELECT type_id FROM symbol_type WHERE symbol_id=? AND kind=1",
                         (key[0],)).fetchone()
-                    values = ("return", None, None, row[0] if row else None,
-                              row[0] if row else None, row[0] if row else None,
-                              None, None, None)
+                    type_id = row[0] if row else None
+                    facts = graph.slot_type_facts_for_ids(type_id, type_id)
+                    values = ("return", None, None, type_id, type_id, type_id,
+                              None, None, None, *facts)
                 elif role == 2:
                     row = self._conn.execute(
                         "SELECT name,type_id,declared_type_id,adjusted_type_id,"
@@ -2291,24 +2294,27 @@ class Executor:
                         key[:3]).fetchone()
                     if row is None:
                         continue
+                    facts = graph.slot_type_facts_for_ids(row[2], row[3])
                     values = ("parameter", row[0], row[1], row[1], row[2], row[3],
-                              row[4], row[5], row[6])
+                              row[4], row[5], row[6], *facts)
                 elif role == 3:
                     row = self._conn.execute(
                         "SELECT name,type_id,default_txt FROM template_param "
                         "WHERE owner_id=? AND position=?", key[:2]).fetchone()
                     if row is None:
                         continue
+                    facts = graph.slot_type_facts_for_ids(row[1], row[1])
                     values = ("template_parameter", row[0], None, row[1], row[1],
-                              row[1], row[2], None, None)
+                              row[1], row[2], None, None, *facts)
                 else:
                     row = self._conn.execute(
                         "SELECT type_id,literal FROM template_arg WHERE owner_id=? "
                         "AND position=? AND pack_index=?", key[:3]).fetchone()
                     if row is None:
                         continue
+                    facts = graph.slot_type_facts_for_ids(row[0], row[0])
                     values = ("template_argument", None, key[2], row[0], row[0],
-                              row[0], row[1], None, None)
+                              row[0], row[1], None, None, *facts)
                 cells = []
                 for field_name in fields:
                     if field_name == "id":
@@ -2333,6 +2339,12 @@ class Executor:
                         cells.append(values[7])
                     elif field_name == "reference_semantics":
                         cells.append(values[8])
+                    elif field_name == "mode":
+                        cells.append(values[9])
+                    elif field_name == "value_kind":
+                        cells.append(values[10])
+                    elif field_name == "named_decl":
+                        cells.append(values[11])
                     else:
                         cells.append(None)
                 result[key] = tuple(cells)

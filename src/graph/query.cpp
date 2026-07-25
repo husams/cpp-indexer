@@ -836,6 +836,14 @@ std::optional<std::string> GraphQuery::named_decl(TypeInfo type) {
 }
 
 GraphQuery::SlotFacts
+GraphQuery::slot_facts_for_ids(std::optional<int64_t> declared_type_id,
+                               std::optional<int64_t> adjusted_type_id) {
+  return slot_facts(
+      declared_type_id ? type_info(*declared_type_id) : std::nullopt,
+      adjusted_type_id ? type_info(*adjusted_type_id) : std::nullopt);
+}
+
+GraphQuery::SlotFacts
 GraphQuery::slot_facts(const std::optional<TypeInfo> &declared,
                        const std::optional<TypeInfo> &adjusted) {
   SlotFacts out;

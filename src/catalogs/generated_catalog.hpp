@@ -6,7 +6,7 @@
 
 namespace cidx::catalog {
 inline constexpr int kCatalogVersion = 1;
-inline constexpr std::string_view kCatalogHash = "01d0d1896e335566cb40599c1f57926f41f1fd4370cbc13703e0510316d8d287";
+inline constexpr std::string_view kCatalogHash = "21497a89add82fba96293f97b34f9a19c68912b6cc823a915889acf0709c216d";
 enum class View : std::uint8_t { Symbol, Entity, Parameter, TemplateParameter, TemplateArgument, SignatureSlot, CallArgument, Edge, Site, Evidence, Type, TypeLayer };
 struct NamedId { int64_t id; std::string_view name; };
 struct Relation { int64_t id; std::string_view name; View layer; std::string_view source; std::string_view target; std::string_view inverse; std::string_view traversal; std::string_view evidence; std::string_view evidence_capabilities; std::string_view completeness; bool virtual_relation; };
@@ -137,7 +137,7 @@ inline constexpr std::array<Relation, 62> kRelations = {{
     {.id = 2, .name = "child", .layer = View::TypeLayer, .source = "type_layer", .target = "type_layer", .inverse = "parent", .traversal = "out|in", .evidence = "derived", .evidence_capabilities = "derived", .completeness = "complete", .virtual_relation = true},
 }};
 
-inline constexpr std::array<Field, 54> kFields = {{
+inline constexpr std::array<Field, 57> kFields = {{
     {.name = "id", .filterable = true, .is_string = false},
     {.name = "usr", .filterable = true, .is_string = true},
     {.name = "name", .filterable = true, .is_string = true},
@@ -190,6 +190,9 @@ inline constexpr std::array<Field, 54> kFields = {{
     {.name = "status", .filterable = true, .is_string = true},
     {.name = "root_id", .filterable = true, .is_string = false},
     {.name = "slot_kind", .filterable = true, .is_string = true},
+    {.name = "mode", .filterable = true, .is_string = true},
+    {.name = "value_kind", .filterable = true, .is_string = true},
+    {.name = "named_decl", .filterable = true, .is_string = true},
     {.name = "src_id", .filterable = true, .is_string = false},
     {.name = "dst_id", .filterable = true, .is_string = false},
 }};

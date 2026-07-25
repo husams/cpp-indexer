@@ -897,15 +897,18 @@ TEST_CASE("query_plan: exact recursive and pointer type acceptance is read-only"
   Storage db(":memory:");
   Symbol owner = make_sym("cidx::version_re", "version_re", "function");
   const int64_t owner_id = db.add_symbol(owner);
+  db.add_symbol(make_sym("USR::std::regex", "regex", "class", "std::regex"));
   Symbol record = make_sym("USR::Owner", "Owner", "struct");
   db.add_symbol(record);
   db.raw_db().exec(
-      "INSERT INTO type_node(type_key,spelling,kind) VALUES "
-      "('alias:A','A',4),('alias:B','B',4),"
-      "('fn:ret-param','int(float)',9),('b:int','int',1),"
-      "('b:float','float',1),('record:Owner','Owner',2),"
-      "('mfp:Owner','int (Owner::*)(float)',13),"
-      "('pack:int','int...',14)");
+      "INSERT INTO type_node(type_key,spelling,kind,decl_usr) VALUES "
+      "('alias:A','A',4,NULL),('alias:B','B',4,NULL),"
+      "('fn:ret-param','int(float)',9,NULL),('b:int','int',1,NULL),"
+      "('b:float','float',1,NULL),('record:Owner','Owner',2,NULL),"
+      "('mfp:Owner','int (Owner::*)(float)',13,NULL),"
+      "('pack:int','int...',14,NULL),"
+      "('ref:regex','const std::regex &',6,'USR::std::regex'),"
+      "('record:regex','std::regex',2,'USR::std::regex')");
   const auto type_id = [&db](const char *key) {
     auto st = db.raw_db().prepare("SELECT id FROM type_node WHERE type_key=?");
     st.bind(1, std::string_view(key));
@@ -919,12 +922,16 @@ TEST_CASE("query_plan: exact recursive and pointer type acceptance is read-only"
   const int64_t floating = type_id("b:float");
   const int64_t member_owner = type_id("record:Owner");
   const int64_t member_function = type_id("mfp:Owner");
+  const int64_t regex_reference = type_id("ref:regex");
+  const int64_t regex_record = type_id("record:regex");
   db.add_type_edge(alias_a, 3, 0, alias_b);
   db.add_type_edge(alias_b, 3, 0, alias_a);
   db.add_type_edge(function, 4, 0, integer);
   db.add_type_edge(function, 5, 0, floating);
   db.add_type_edge(member_function, 7, 0, member_owner);
   db.add_type_edge(member_function, 8, 0, function);
+  db.add_type_edge(regex_reference, 1, 0, regex_record);
+  db.add_symbol_type(owner_id, 1, regex_reference);
   auto unknown_parameter = db.raw_db().prepare(
       "INSERT INTO parameter(owner_id,position,pack_index,name) "
       "VALUES (?,?,?,?)");
@@ -961,6 +968,19 @@ TEST_CASE("query_plan: exact recursive and pointer type acceptance is read-only"
   CHECK(unknown_layers[0].status == "unknown");
 
   QueryExecutor ex(db);
+  const auto version_return = ex.run(
+      (start(symbol("cidx::version_re")) | out("has_signature_slot") |
+       where(all_of({eq("slot_kind", "return"),
+                     eq("mode", "lvalue-reference"),
+                     eq("value_kind", "record"),
+                     eq("named_decl", "std::regex")})) |
+       select({"mode", "value_kind", "named_decl"}))
+          .plan());
+  REQUIRE(version_return.rows.size() == 1);
+  CHECK(std::get<std::string>(version_return.rows[0][0]) ==
+        "lvalue-reference");
+  CHECK(std::get<std::string>(version_return.rows[0][1]) == "record");
+  CHECK(std::get<std::string>(version_return.rows[0][2]) == "std::regex");
   const auto null_slot = ex.run(
       (start(symbol("cidx::version_re")) | out("has_parameter") |
        where(eq("position", int64_t{9})) | select({"type_id"}))

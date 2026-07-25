@@ -163,6 +163,9 @@
     {"name": "status", "filterable": true, "is_string": true},
     {"name": "root_id", "filterable": true, "is_string": false},
     {"name": "slot_kind", "filterable": true, "is_string": true},
+    {"name": "mode", "filterable": true, "is_string": true},
+    {"name": "value_kind", "filterable": true, "is_string": true},
+    {"name": "named_decl", "filterable": true, "is_string": true},
     {"name": "src_id", "filterable": true, "is_string": false},
     {"name": "dst_id", "filterable": true, "is_string": false}
   ],

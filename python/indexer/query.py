@@ -2378,6 +2378,20 @@ class GraphQuery:
             current = self._type_child(current.id, edge_kind)
         return mode, value_kind, named
 
+    def slot_type_facts_for_ids(
+        self, declared_type_id: Optional[int], adjusted_type_id: Optional[int]
+    ) -> tuple[str, str, Optional[str]]:
+        """Derive public signature-slot facts from typed relation IDs."""
+        declared = (
+            self._type_info(declared_type_id)
+            if declared_type_id is not None else None
+        )
+        adjusted = (
+            self._type_info(adjusted_type_id)
+            if adjusted_type_id is not None else None
+        )
+        return self._slot_type_facts(declared, adjusted)
+
     def signature_slots(self, sym) -> list[SignatureSlot]:
         """Unified return/parameter view used by the E2E and public clients."""
         sid = self._resolve_id(sym)
@@ -2388,7 +2402,7 @@ class GraphQuery:
         ).fetchone()
         if ret is not None:
             t = self._type_info(ret["type_id"])
-            mode, value_kind, named = self._slot_type_facts(t, t)
+            mode, value_kind, named = self.slot_type_facts_for_ids(t.id, t.id)
             rows.append(SignatureSlot("return", None, None, None, t, t, mode, value_kind, named))
         for r in self._c.execute(
             "SELECT position, pack_index, name, type_id, declared_type_id, adjusted_type_id, "
@@ -2400,7 +2414,9 @@ class GraphQuery:
             adjusted_id = r["adjusted_type_id"] or r["type_id"]
             declared = self._type_info(declared_id) if declared_id is not None else None
             adjusted = self._type_info(adjusted_id) if adjusted_id is not None else None
-            mode, value_kind, named = self._slot_type_facts(declared, adjusted)
+            mode, value_kind, named = self.slot_type_facts_for_ids(
+                declared_id, adjusted_id
+            )
             rows.append(SignatureSlot(
                 "parameter", r["position"], r["pack_index"], r["name"], declared, adjusted,
                 mode, value_kind, named, r["reference_semantics"],

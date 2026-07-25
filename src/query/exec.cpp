@@ -2463,6 +2463,7 @@ private:
   std::map<LogicalKey, std::vector<Cell>>
   fetch_typed_cells(Stream &st, const std::vector<std::string> &fields) {
     std::map<LogicalKey, std::vector<Cell>> result;
+    graph::GraphQuery graph(read_.graph_read());
     for (const auto &key : st.keys) {
       if (st.view == View::SignatureSlot) {
         std::vector<Cell> cells;
@@ -2485,9 +2486,10 @@ private:
                 const std::optional<int64_t> &type_id,
                 const std::optional<int64_t> &declared,
                 const std::optional<int64_t> &adjusted,
-                const std::optional<std::string> &default_text,
-                const std::optional<std::string> &default_origin,
-                const std::optional<std::string> &reference) {
+            const std::optional<std::string> &default_text,
+            const std::optional<std::string> &default_origin,
+            const std::optional<std::string> &reference,
+            const graph::GraphQuery::SlotFacts &facts) {
               for (const auto &field : fields) {
                 if (field == "id") {
                   cells.emplace_back(logical_row_id(st.view, key));
@@ -2522,6 +2524,13 @@ private:
                 } else if (field == "reference_semantics") {
                   reference ? cells.emplace_back(*reference)
                             : cells.emplace_back(nullptr);
+                } else if (field == "mode") {
+                  cells.emplace_back(facts.mode);
+                } else if (field == "value_kind") {
+                  cells.emplace_back(facts.value_kind);
+                } else if (field == "named_decl") {
+                  facts.named_decl ? cells.emplace_back(*facts.named_decl)
+                                   : cells.emplace_back(nullptr);
                 } else {
                   cells.emplace_back(nullptr);
                 }
@@ -2535,8 +2544,9 @@ private:
             continue;
           }
           const int64_t type_id = query.col_int64(0);
+          const auto facts = graph.slot_facts_for_ids(type_id, type_id);
           push_slot("return", std::nullopt, type_id, type_id, type_id,
-                    std::nullopt, std::nullopt, std::nullopt);
+                    std::nullopt, std::nullopt, std::nullopt, facts);
         } else if (key.tag == 2) {
           auto query = read_.read_db().prepare(
               "SELECT name,type_id,declared_type_id,adjusted_type_id,"
@@ -2548,9 +2558,12 @@ private:
           if (!query.step()) {
             continue;
           }
+          const auto declared = int_at(query, 2);
+          const auto adjusted = int_at(query, 3);
+          const auto facts = graph.slot_facts_for_ids(declared, adjusted);
           push_slot("parameter", text_at(query, 0), int_at(query, 1),
-                    int_at(query, 2), int_at(query, 3), text_at(query, 4),
-                    text_at(query, 5), text_at(query, 6));
+                    declared, adjusted, text_at(query, 4), text_at(query, 5),
+                    text_at(query, 6), facts);
         } else if (key.tag == 3) {
           auto query = read_.read_db().prepare(
               "SELECT name,type_id,default_txt,default_type_id FROM "
@@ -2561,9 +2574,11 @@ private:
           if (!query.step()) {
             continue;
           }
-          push_slot("template_parameter", text_at(query, 0), int_at(query, 1),
-                    int_at(query, 1), int_at(query, 1), text_at(query, 2),
-                    std::nullopt, std::nullopt);
+          const auto type_id = int_at(query, 1);
+          const auto facts = graph.slot_facts_for_ids(type_id, type_id);
+          push_slot("template_parameter", text_at(query, 0), type_id, type_id,
+                    type_id, text_at(query, 2), std::nullopt, std::nullopt,
+                    facts);
         } else {
           auto query = read_.read_db().prepare(
               "SELECT arg_kind,type_id,literal FROM template_arg "
@@ -2574,9 +2589,11 @@ private:
           if (!query.step()) {
             continue;
           }
-          push_slot("template_argument", std::nullopt, int_at(query, 1),
-                    int_at(query, 1), int_at(query, 1), text_at(query, 2),
-                    std::nullopt, std::nullopt);
+          const auto type_id = int_at(query, 1);
+          const auto facts = graph.slot_facts_for_ids(type_id, type_id);
+          push_slot("template_argument", std::nullopt, type_id, type_id,
+                    type_id, text_at(query, 2), std::nullopt, std::nullopt,
+                    facts);
         }
         result.emplace(key, std::move(cells));
         continue;
