@@ -147,7 +147,7 @@ required_properties() {
         IncludePlanLiveness
       ;;
     CidxStorageLifecycleSmoke)
-      :
+      printf '%s\n' StorageEventuallySettles
       ;;
     *)
       echo "TLA_CONFIG_STATUS=FAIL reason=unknown-model-$1" >&2
@@ -201,6 +201,13 @@ run_model() {
       -metadir "$WORK/meta-${model}" \
       -config "$cfg" \
       "$spec") >"$tlc_log" 2>&1; then
+    local violated_invariant
+    violated_invariant="$(sed -n 's/^Error: Invariant \([^ ]*\) is violated.*$/\1/p' "$tlc_log" | head -n 1)"
+    if [[ -n "$violated_invariant" ]]; then
+      echo "TLA_INVARIANT_STATUS=FAIL model=$model invariant=$violated_invariant" >&2
+    else
+      echo "TLA_INVARIANT_STATUS=FAIL model=$model invariant=unknown" >&2
+    fi
     echo "TLA_MODEL_STATUS=FAIL model=$model" >&2
     cat "$tlc_log" >&2
     exit 30

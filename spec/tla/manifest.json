@@ -58,7 +58,8 @@
         "PublicationRecoveryInvariant",
         "TraceInvariant",
         "BoundedProgressInvariant"
-      ]
+      ],
+      "properties": ["StorageEventuallySettles"]
     }
   ],
   "coverage": {
@@ -97,7 +98,8 @@
         "CleanupSafetyInvariant",
         "PackageInvariant",
         "PublicationRecoveryInvariant",
-        "NoPartialGenerationInvariant"
+        "NoPartialGenerationInvariant",
+        "StorageEventuallySettles"
       ],
       "coverage": "bounded",
       "notModeled": [

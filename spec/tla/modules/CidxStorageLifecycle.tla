@@ -16,6 +16,7 @@ CONSTANTS
     IncompatibleSchemaVersion,
     InitialGeneration,
     ReplacementGeneration,
+    SecondReplacementGeneration,
     TraceBound,
     Scenario
 
@@ -46,11 +47,10 @@ VARIABLES
     sidecarFilePublication,
     readCompleteness,
     crossFileAtomicityAssumed,
-    retiredGeneration,
-    retiredGenerationState,
-    leaseHeld,
-    replayPinned,
-    cleanupState,
+    retiredGenerations,
+    leasedGenerations,
+    replayPinnedGenerations,
+    removedGenerations,
     packageState,
     packageCoreComplete,
     packageSidecarComplete,
@@ -88,11 +88,10 @@ vars == <<
     sidecarFilePublication,
     readCompleteness,
     crossFileAtomicityAssumed,
-    retiredGeneration,
-    retiredGenerationState,
-    leaseHeld,
-    replayPinned,
-    cleanupState,
+    retiredGenerations,
+    leasedGenerations,
+    replayPinnedGenerations,
+    removedGenerations,
     packageState,
     packageCoreComplete,
     packageSidecarComplete,
@@ -164,11 +163,10 @@ InitialState ==
      sidecarFilePublication |-> "none",
      readCompleteness |-> "partial",
      crossFileAtomicityAssumed |-> FALSE,
-     retiredGeneration |-> 0,
-     retiredGenerationState |-> "none",
-     leaseHeld |-> FALSE,
-     replayPinned |-> FALSE,
-     cleanupState |-> "kept",
+     retiredGenerations |-> {},
+     leasedGenerations |-> {},
+     replayPinnedGenerations |-> {},
+     removedGenerations |-> {},
      packageState |-> "none",
      packageCoreComplete |-> FALSE,
      packageSidecarComplete |-> FALSE,
@@ -206,11 +204,10 @@ StateEquals(state) ==
     /\ sidecarFilePublication = state.sidecarFilePublication
     /\ readCompleteness = state.readCompleteness
     /\ crossFileAtomicityAssumed = state.crossFileAtomicityAssumed
-    /\ retiredGeneration = state.retiredGeneration
-    /\ retiredGenerationState = state.retiredGenerationState
-    /\ leaseHeld = state.leaseHeld
-    /\ replayPinned = state.replayPinned
-    /\ cleanupState = state.cleanupState
+    /\ retiredGenerations = state.retiredGenerations
+    /\ leasedGenerations = state.leasedGenerations
+    /\ replayPinnedGenerations = state.replayPinnedGenerations
+    /\ removedGenerations = state.removedGenerations
     /\ packageState = state.packageState
     /\ packageCoreComplete = state.packageCoreComplete
     /\ packageSidecarComplete = state.packageSidecarComplete
@@ -245,16 +242,15 @@ CrossFileAtomicitySeed ==
      sidecarState |-> "current",
      sidecarQuality |-> "valid",
      sidecarValidated |-> TRUE,
-     sidecarAttachment |-> "attached",
+     sidecarAttachment |-> "detached",
      coreFilePublication |-> "current",
      sidecarFilePublication |-> "current",
-     readCompleteness |-> "complete",
+     readCompleteness |-> "partial",
      crossFileAtomicityAssumed |-> TRUE,
-     retiredGeneration |-> InitialGeneration,
-     retiredGenerationState |-> "stale",
-     leaseHeld |-> FALSE,
-     replayPinned |-> FALSE,
-     cleanupState |-> "kept",
+     retiredGenerations |-> {InitialGeneration},
+     leasedGenerations |-> {},
+     replayPinnedGenerations |-> {},
+     removedGenerations |-> {},
      packageState |-> "none",
      packageCoreComplete |-> FALSE,
      packageSidecarComplete |-> FALSE,
@@ -279,9 +275,26 @@ IncompatibleReaderSeed ==
         !.readerCompatibility = "incompatible",
         !.readCompleteness = "unavailable"]
 
+MultiGenerationSeed ==
+    [InitialState EXCEPT
+        !.currentGeneration = ReplacementGeneration,
+        !.extractedGeneration = ReplacementGeneration,
+        !.derivedGeneration = ReplacementGeneration,
+        !.preMigrationGeneration = ReplacementGeneration,
+        !.sidecarGeneration = ReplacementGeneration,
+        !.sidecarState = "current",
+        !.sidecarValidated = TRUE,
+        !.sidecarAttachment = "attached",
+        !.sidecarFilePublication = "current",
+        !.readCompleteness = "complete",
+        !.retiredGenerations = {InitialGeneration},
+        !.trace = <<"Init", "SeedFirstReplacement">>]
+
 Init ==
     IF Scenario = "valid"
     THEN ValidInitialState
+    ELSE IF Scenario = "multi-generation"
+    THEN StateEquals(MultiGenerationSeed)
     ELSE IF Scenario = "cross-file-atomicity"
     THEN
         /\ currentGeneration = CrossFileAtomicitySeed.currentGeneration
@@ -310,11 +323,10 @@ Init ==
         /\ sidecarFilePublication = CrossFileAtomicitySeed.sidecarFilePublication
         /\ readCompleteness = CrossFileAtomicitySeed.readCompleteness
         /\ crossFileAtomicityAssumed = CrossFileAtomicitySeed.crossFileAtomicityAssumed
-        /\ retiredGeneration = CrossFileAtomicitySeed.retiredGeneration
-        /\ retiredGenerationState = CrossFileAtomicitySeed.retiredGenerationState
-        /\ leaseHeld = CrossFileAtomicitySeed.leaseHeld
-        /\ replayPinned = CrossFileAtomicitySeed.replayPinned
-        /\ cleanupState = CrossFileAtomicitySeed.cleanupState
+        /\ retiredGenerations = CrossFileAtomicitySeed.retiredGenerations
+        /\ leasedGenerations = CrossFileAtomicitySeed.leasedGenerations
+        /\ replayPinnedGenerations = CrossFileAtomicitySeed.replayPinnedGenerations
+        /\ removedGenerations = CrossFileAtomicitySeed.removedGenerations
         /\ packageState = CrossFileAtomicitySeed.packageState
         /\ packageCoreComplete = CrossFileAtomicitySeed.packageCoreComplete
         /\ packageSidecarComplete = CrossFileAtomicitySeed.packageSidecarComplete
@@ -352,11 +364,10 @@ Init ==
         /\ sidecarFilePublication = NewerReaderSeed.sidecarFilePublication
         /\ readCompleteness = NewerReaderSeed.readCompleteness
         /\ crossFileAtomicityAssumed = NewerReaderSeed.crossFileAtomicityAssumed
-        /\ retiredGeneration = NewerReaderSeed.retiredGeneration
-        /\ retiredGenerationState = NewerReaderSeed.retiredGenerationState
-        /\ leaseHeld = NewerReaderSeed.leaseHeld
-        /\ replayPinned = NewerReaderSeed.replayPinned
-        /\ cleanupState = NewerReaderSeed.cleanupState
+        /\ retiredGenerations = NewerReaderSeed.retiredGenerations
+        /\ leasedGenerations = NewerReaderSeed.leasedGenerations
+        /\ replayPinnedGenerations = NewerReaderSeed.replayPinnedGenerations
+        /\ removedGenerations = NewerReaderSeed.removedGenerations
         /\ packageState = NewerReaderSeed.packageState
         /\ packageCoreComplete = NewerReaderSeed.packageCoreComplete
         /\ packageSidecarComplete = NewerReaderSeed.packageSidecarComplete
@@ -394,11 +405,10 @@ Init ==
         /\ sidecarFilePublication = IncompatibleReaderSeed.sidecarFilePublication
         /\ readCompleteness = IncompatibleReaderSeed.readCompleteness
         /\ crossFileAtomicityAssumed = IncompatibleReaderSeed.crossFileAtomicityAssumed
-        /\ retiredGeneration = IncompatibleReaderSeed.retiredGeneration
-        /\ retiredGenerationState = IncompatibleReaderSeed.retiredGenerationState
-        /\ leaseHeld = IncompatibleReaderSeed.leaseHeld
-        /\ replayPinned = IncompatibleReaderSeed.replayPinned
-        /\ cleanupState = IncompatibleReaderSeed.cleanupState
+        /\ retiredGenerations = IncompatibleReaderSeed.retiredGenerations
+        /\ leasedGenerations = IncompatibleReaderSeed.leasedGenerations
+        /\ replayPinnedGenerations = IncompatibleReaderSeed.replayPinnedGenerations
+        /\ removedGenerations = IncompatibleReaderSeed.removedGenerations
         /\ packageState = IncompatibleReaderSeed.packageState
         /\ packageCoreComplete = IncompatibleReaderSeed.packageCoreComplete
         /\ packageSidecarComplete = IncompatibleReaderSeed.packageSidecarComplete
@@ -431,8 +441,8 @@ StartOneTUUpdate ==
         migrationRecovery, readerStatus, readerCompatibility, sidecarGeneration,
         sidecarState, sidecarQuality, sidecarValidated, sidecarAttachment,
         coreFilePublication, sidecarFilePublication, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, packageState, packageCoreComplete, packageSidecarComplete,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includePlanState, includeEvidence, includeEditState,
         readOnlyWrites>>
 
@@ -452,8 +462,8 @@ PrepareStagedArtifact ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, packageState, packageCoreComplete, packageSidecarComplete,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includePlanState, includeEvidence, includeEditState,
         readOnlyWrites>>
 
@@ -473,8 +483,8 @@ ValidateStagedArtifact ==
         migrationRecovery, readerStatus, readerCompatibility, sidecarGeneration,
         sidecarState, sidecarQuality, sidecarValidated, sidecarAttachment,
         coreFilePublication, sidecarFilePublication, readCompleteness,
-        crossFileAtomicityAssumed, retiredGeneration, retiredGenerationState,
-        leaseHeld, replayPinned, cleanupState, packageState,
+        crossFileAtomicityAssumed, retiredGenerations, leasedGenerations,
+        replayPinnedGenerations, removedGenerations, packageState,
         packageCoreComplete, packageSidecarComplete, packageImported,
         includePlanState, includeEvidence, includeEditState, readOnlyWrites>>
 
@@ -485,8 +495,7 @@ PublishCoreGeneration ==
     /\ corePublicationState = "staging"
     /\ migrationPhase = "none"
     /\ TraceAvailable
-    /\ retiredGeneration' = currentGeneration
-    /\ retiredGenerationState' = "stale"
+    /\ retiredGenerations' = retiredGenerations \cup {currentGeneration}
     /\ currentGeneration' = stagedGeneration
     /\ currentArtifactQuality' = stagedArtifactQuality
     /\ generationState' = "current"
@@ -495,17 +504,24 @@ PublishCoreGeneration ==
     /\ extractedGeneration' = currentGeneration'
     /\ derivedGeneration' = currentGeneration'
     /\ coreFilePublication' = "current"
-    /\ readCompleteness' = IF SidecarCompleteFor(currentGeneration')
-                           THEN "complete"
-                           ELSE "partial"
+    /\ sidecarState' = IF SidecarCompleteFor(currentGeneration)
+                       THEN "stale"
+                       ELSE sidecarState
+    /\ sidecarValidated' = IF SidecarCompleteFor(currentGeneration)
+                           THEN FALSE
+                           ELSE sidecarValidated
+    /\ sidecarAttachment' = IF SidecarCompleteFor(currentGeneration)
+                            THEN "detached"
+                            ELSE sidecarAttachment
+    /\ readCompleteness' = "partial"
     /\ trace' = Append(trace, "PublishCoreGeneration")
     /\ UNCHANGED <<stagedArtifactQuality, stagedValidated, coreSchema,
         migrationPhase,
         migrationSourceSchema, migrationTargetSchema, preMigrationGeneration,
         migrationRecovery, readerStatus, readerCompatibility, sidecarGeneration,
-        sidecarState, sidecarQuality, sidecarValidated, sidecarAttachment,
-        sidecarFilePublication, crossFileAtomicityAssumed, leaseHeld,
-        replayPinned, cleanupState, packageState, packageCoreComplete,
+        sidecarQuality,
+        sidecarFilePublication, crossFileAtomicityAssumed, leasedGenerations,
+        replayPinnedGenerations, removedGenerations, packageState, packageCoreComplete,
         packageSidecarComplete, packageImported, includePlanState,
         includeEvidence, includeEditState, readOnlyWrites>>
 
@@ -527,17 +543,19 @@ InterruptPublication ==
         preMigrationGeneration, migrationRecovery, readerStatus,
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
-        sidecarFilePublication, crossFileAtomicityAssumed, retiredGeneration,
-        retiredGenerationState, leaseHeld, replayPinned, cleanupState,
+        sidecarFilePublication, crossFileAtomicityAssumed, retiredGenerations,
+        leasedGenerations, replayPinnedGenerations, removedGenerations,
         packageState, packageCoreComplete, packageSidecarComplete, packageImported,
         includePlanState, includeEvidence, includeEditState, readOnlyWrites>>
 
 BuildSidecar ==
-    /\ stagedGeneration > 0
-    /\ generationState = "validated"
-    /\ sidecarState = "absent"
+    /\ generationState \in {"validated", "current"}
+    /\ sidecarState \in {"absent", "stale", "missing", "corrupt", "incompatible"}
+    /\ (stagedGeneration > 0 \/ sidecarState # "absent")
     /\ ProgressTraceAvailable
-    /\ sidecarGeneration' = stagedGeneration
+    /\ sidecarGeneration' = IF stagedGeneration > 0
+                            THEN stagedGeneration
+                            ELSE currentGeneration
     /\ sidecarState' = "building"
     /\ sidecarQuality' = "partial"
     /\ sidecarValidated' = FALSE
@@ -551,8 +569,8 @@ BuildSidecar ==
         preMigrationGeneration, migrationRecovery, readerStatus,
         readerCompatibility, readCompleteness, crossFileAtomicityAssumed,
         coreFilePublication,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, packageState, packageCoreComplete, packageSidecarComplete,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includePlanState, includeEvidence, includeEditState,
         readOnlyWrites>>
 
@@ -572,8 +590,8 @@ PrepareSidecarArtifact ==
         preMigrationGeneration, migrationRecovery, readerStatus,
         readerCompatibility, sidecarGeneration, sidecarAttachment,
         coreFilePublication, sidecarFilePublication, readCompleteness,
-        crossFileAtomicityAssumed, retiredGeneration, retiredGenerationState,
-        leaseHeld, replayPinned, cleanupState, packageState,
+        crossFileAtomicityAssumed, retiredGenerations, leasedGenerations,
+        replayPinnedGenerations, removedGenerations, packageState,
         packageCoreComplete, packageSidecarComplete, packageImported,
         includePlanState, includeEvidence, includeEditState, readOnlyWrites>>
 
@@ -583,6 +601,8 @@ PublishSidecar ==
     /\ sidecarQuality = "valid"
     /\ sidecarGeneration = currentGeneration
     /\ corePublicationState = "current"
+    /\ migrationPhase = "none"
+    /\ readerStatus = "current"
     /\ TraceAvailable
     /\ sidecarState' = "current"
     /\ sidecarAttachment' = "attached"
@@ -596,8 +616,8 @@ PublishSidecar ==
         preMigrationGeneration, migrationRecovery, readerStatus,
         readerCompatibility, sidecarGeneration, sidecarQuality,
         sidecarValidated, coreFilePublication, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, packageState, packageCoreComplete, packageSidecarComplete,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includePlanState, includeEvidence, includeEditState,
         readOnlyWrites>>
 
@@ -616,13 +636,13 @@ MarkSidecarMissing ==
         preMigrationGeneration, migrationRecovery, readerStatus,
         readerCompatibility, sidecarGeneration, sidecarQuality,
         sidecarValidated, coreFilePublication, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, packageState, packageCoreComplete, packageSidecarComplete,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includePlanState, includeEvidence, includeEditState,
         readOnlyWrites>>
 
 MarkSidecarCorrupt ==
-    /\ sidecarState = "current"
+    /\ sidecarState \in {"current", "stale"}
     /\ TraceAvailable
     /\ sidecarState' = "corrupt"
     /\ sidecarAttachment' = "detached"
@@ -637,9 +657,29 @@ MarkSidecarCorrupt ==
         preMigrationGeneration, migrationRecovery, readerStatus,
         readerCompatibility, sidecarGeneration, sidecarFilePublication,
         coreFilePublication,
-        crossFileAtomicityAssumed, retiredGeneration, retiredGenerationState,
-        leaseHeld, replayPinned, cleanupState, packageState,
+        crossFileAtomicityAssumed, retiredGenerations, leasedGenerations,
+        replayPinnedGenerations, removedGenerations, packageState,
         packageCoreComplete, packageSidecarComplete, packageImported,
+        includePlanState, includeEvidence, includeEditState, readOnlyWrites>>
+
+MarkSidecarIncompatible ==
+    /\ sidecarState \in {"current", "stale", "absent"}
+    /\ TraceAvailable
+    /\ sidecarState' = "incompatible"
+    /\ sidecarAttachment' = "detached"
+    /\ sidecarQuality' = "incompatible"
+    /\ sidecarValidated' = FALSE
+    /\ readCompleteness' = "unknown"
+    /\ trace' = Append(trace, "MarkSidecarIncompatible")
+    /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
+        currentArtifactQuality, stagedArtifactQuality, stagedValidated,
+        corePublicationState, extractedGeneration, derivedGeneration, coreSchema,
+        migrationPhase, migrationSourceSchema, migrationTargetSchema,
+        preMigrationGeneration, migrationRecovery, readerStatus,
+        readerCompatibility, sidecarGeneration, sidecarFilePublication,
+        coreFilePublication, crossFileAtomicityAssumed, retiredGenerations,
+        leasedGenerations, replayPinnedGenerations, removedGenerations,
+        packageState, packageCoreComplete, packageSidecarComplete, packageImported,
         includePlanState, includeEvidence, includeEditState, readOnlyWrites>>
 
 BeginSupportedMigration ==
@@ -660,8 +700,8 @@ BeginSupportedMigration ==
         readerStatus, readerCompatibility, sidecarGeneration, sidecarState,
         sidecarQuality, sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, packageState, packageCoreComplete, packageSidecarComplete,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includePlanState, includeEvidence, includeEditState,
         readOnlyWrites>>
 
@@ -678,10 +718,29 @@ ValidateMigration ==
         migrationRecovery, readerStatus, readerCompatibility, sidecarGeneration,
         sidecarState, sidecarQuality, sidecarValidated, sidecarAttachment,
         coreFilePublication, sidecarFilePublication, readCompleteness,
-        crossFileAtomicityAssumed, retiredGeneration, retiredGenerationState,
-        leaseHeld, replayPinned, cleanupState, packageState,
+        crossFileAtomicityAssumed, retiredGenerations, leasedGenerations,
+        replayPinnedGenerations, removedGenerations, packageState,
         packageCoreComplete, packageSidecarComplete, packageImported,
         includePlanState, includeEvidence, includeEditState, readOnlyWrites>>
+
+RejectMigration ==
+    /\ migrationPhase = "staging"
+    /\ migrationTargetSchema = SupportedSchemaVersion
+    /\ TraceAvailable
+    /\ migrationPhase' = "rejected"
+    /\ migrationRecovery' = "snapshot-retained"
+    /\ trace' = Append(trace, "RejectMigration")
+    /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
+        currentArtifactQuality, stagedArtifactQuality, stagedValidated,
+        corePublicationState, extractedGeneration, derivedGeneration, coreSchema,
+        migrationSourceSchema, migrationTargetSchema, preMigrationGeneration,
+        readerStatus, readerCompatibility, sidecarGeneration, sidecarState,
+        sidecarQuality, sidecarValidated, sidecarAttachment, coreFilePublication,
+        sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageState, packageCoreComplete, packageSidecarComplete,
+        packageImported, includePlanState, includeEvidence, includeEditState,
+        readOnlyWrites>>
 
 CommitMigration ==
     /\ migrationPhase = "validated"
@@ -700,11 +759,35 @@ CommitMigration ==
         migrationSourceSchema, migrationTargetSchema, preMigrationGeneration,
         sidecarGeneration, sidecarState, sidecarQuality, sidecarValidated,
         sidecarAttachment, coreFilePublication, sidecarFilePublication,
-        readCompleteness, crossFileAtomicityAssumed, retiredGeneration,
-        retiredGenerationState, leaseHeld, replayPinned, cleanupState,
+        readCompleteness, crossFileAtomicityAssumed, retiredGenerations,
+        leasedGenerations, replayPinnedGenerations, removedGenerations,
         packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includePlanState, includeEvidence, includeEditState,
         readOnlyWrites>>
+
+RollbackRejectedMigration ==
+    /\ migrationPhase = "rejected"
+    /\ coreSchema = migrationSourceSchema
+    /\ currentGeneration = preMigrationGeneration
+    /\ TraceAvailable
+    /\ migrationPhase' = "none"
+    /\ migrationRecovery' = "recovered-previous"
+    /\ readerStatus' = "current"
+    /\ readerCompatibility' = "supported"
+    /\ readCompleteness' = IF SidecarCompleteFor(currentGeneration)
+                           THEN "complete"
+                           ELSE "partial"
+    /\ trace' = Append(trace, "RollbackRejectedMigration")
+    /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
+        currentArtifactQuality, stagedArtifactQuality, stagedValidated,
+        corePublicationState, extractedGeneration, derivedGeneration, coreSchema,
+        migrationSourceSchema, migrationTargetSchema, preMigrationGeneration,
+        sidecarGeneration, sidecarState, sidecarQuality, sidecarValidated,
+        sidecarAttachment, coreFilePublication, sidecarFilePublication,
+        crossFileAtomicityAssumed, retiredGenerations, leasedGenerations,
+        replayPinnedGenerations, removedGenerations, packageState,
+        packageCoreComplete, packageSidecarComplete, packageImported,
+        includePlanState, includeEvidence, includeEditState, readOnlyWrites>>
 
 FinishMigration ==
     /\ migrationPhase = "committed"
@@ -718,13 +801,37 @@ FinishMigration ==
         migrationRecovery, readerStatus, readerCompatibility, sidecarGeneration,
         sidecarState, sidecarQuality, sidecarValidated, sidecarAttachment,
         coreFilePublication, sidecarFilePublication, readCompleteness,
-        crossFileAtomicityAssumed, retiredGeneration, retiredGenerationState,
-        leaseHeld, replayPinned, cleanupState, packageState,
+        crossFileAtomicityAssumed, retiredGenerations, leasedGenerations,
+        replayPinnedGenerations, removedGenerations, packageState,
+        packageCoreComplete, packageSidecarComplete, packageImported,
+        includePlanState, includeEvidence, includeEditState, readOnlyWrites>>
+
+RollbackCommittedMigration ==
+    /\ migrationPhase = "committed"
+    /\ coreSchema = SupportedSchemaVersion
+    /\ TraceAvailable
+    /\ coreSchema' = migrationSourceSchema
+    /\ migrationPhase' = "none"
+    /\ migrationRecovery' = "recovered-previous"
+    /\ readerStatus' = "current"
+    /\ readerCompatibility' = "supported"
+    /\ readCompleteness' = IF SidecarCompleteFor(currentGeneration)
+                           THEN "complete"
+                           ELSE "partial"
+    /\ trace' = Append(trace, "RollbackCommittedMigration")
+    /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
+        currentArtifactQuality, stagedArtifactQuality, stagedValidated,
+        corePublicationState, extractedGeneration, derivedGeneration,
+        migrationSourceSchema, migrationTargetSchema, preMigrationGeneration,
+        sidecarGeneration, sidecarState, sidecarQuality, sidecarValidated,
+        sidecarAttachment, coreFilePublication, sidecarFilePublication,
+        crossFileAtomicityAssumed, retiredGenerations, leasedGenerations,
+        replayPinnedGenerations, removedGenerations, packageState,
         packageCoreComplete, packageSidecarComplete, packageImported,
         includePlanState, includeEvidence, includeEditState, readOnlyWrites>>
 
 InterruptMigration ==
-    /\ migrationPhase \in {"staging", "validated"}
+    /\ migrationPhase \in {"staging", "validated", "committed"}
     /\ TraceAvailable
     /\ migrationPhase' = "recovery-required"
     /\ migrationRecovery' = "interrupted"
@@ -737,17 +844,18 @@ InterruptMigration ==
         migrationSourceSchema, migrationTargetSchema, preMigrationGeneration,
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
-        sidecarFilePublication, crossFileAtomicityAssumed, retiredGeneration,
-        retiredGenerationState, leaseHeld, replayPinned, cleanupState,
+        sidecarFilePublication, crossFileAtomicityAssumed, retiredGenerations,
+        leasedGenerations, replayPinnedGenerations, removedGenerations,
         packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includePlanState, includeEvidence, includeEditState,
         readOnlyWrites>>
 
 RecoverPreviousMigration ==
     /\ migrationPhase = "recovery-required"
-    /\ coreSchema = migrationSourceSchema
+    /\ coreSchema \in {migrationSourceSchema, migrationTargetSchema}
     /\ currentGeneration = preMigrationGeneration
     /\ TraceAvailable
+    /\ coreSchema' = migrationSourceSchema
     /\ migrationPhase' = "none"
     /\ migrationRecovery' = "recovered-previous"
     /\ readerStatus' = "current"
@@ -758,12 +866,12 @@ RecoverPreviousMigration ==
     /\ trace' = Append(trace, "RecoverPreviousMigration")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
         currentArtifactQuality, stagedArtifactQuality, stagedValidated,
-        corePublicationState, extractedGeneration, derivedGeneration, coreSchema,
+        corePublicationState, extractedGeneration, derivedGeneration,
         migrationSourceSchema, migrationTargetSchema, preMigrationGeneration,
         sidecarGeneration, sidecarState, sidecarQuality, sidecarValidated,
         sidecarAttachment, coreFilePublication, sidecarFilePublication,
-        crossFileAtomicityAssumed, retiredGeneration, retiredGenerationState,
-        leaseHeld, replayPinned, cleanupState, packageState,
+        crossFileAtomicityAssumed, retiredGenerations, leasedGenerations,
+        replayPinnedGenerations, removedGenerations, packageState,
         packageCoreComplete, packageSidecarComplete, packageImported,
         includePlanState, includeEvidence, includeEditState, readOnlyWrites>>
 
@@ -781,8 +889,8 @@ OpenNewerReader ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, packageState, packageCoreComplete, packageSidecarComplete,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includePlanState, includeEvidence, includeEditState,
         readOnlyWrites>>
 
@@ -800,17 +908,17 @@ OpenIncompatibleReader ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, packageState, packageCoreComplete, packageSidecarComplete,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includePlanState, includeEvidence, includeEditState,
         readOnlyWrites>>
 
 AcquireLease ==
-    /\ retiredGeneration > 0
-    /\ retiredGenerationState = "stale"
-    /\ cleanupState = "kept"
+    /\ \E generation \in retiredGenerations \ removedGenerations :
+        /\ generation # currentGeneration
+        /\ generation \notin leasedGenerations
+        /\ leasedGenerations' = leasedGenerations \cup {generation}
     /\ TraceAvailable
-    /\ leaseHeld' = TRUE
     /\ trace' = Append(trace, "AcquireLease")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
         currentArtifactQuality, stagedArtifactQuality, stagedValidated,
@@ -820,15 +928,15 @@ AcquireLease ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, replayPinned, cleanupState,
+        retiredGenerations, replayPinnedGenerations, removedGenerations,
         packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includePlanState, includeEvidence, includeEditState,
         readOnlyWrites>>
 
 ReleaseLease ==
-    /\ leaseHeld
+    /\ \E generation \in leasedGenerations :
+        /\ leasedGenerations' = leasedGenerations \ {generation}
     /\ TraceAvailable
-    /\ leaseHeld' = FALSE
     /\ trace' = Append(trace, "ReleaseLease")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
         currentArtifactQuality, stagedArtifactQuality, stagedValidated,
@@ -838,17 +946,17 @@ ReleaseLease ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, replayPinned, cleanupState,
+        retiredGenerations, replayPinnedGenerations, removedGenerations,
         packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includePlanState, includeEvidence, includeEditState,
         readOnlyWrites>>
 
 PinReplay ==
-    /\ retiredGeneration > 0
-    /\ retiredGenerationState = "stale"
-    /\ cleanupState = "kept"
+    /\ \E generation \in retiredGenerations \ removedGenerations :
+        /\ generation # currentGeneration
+        /\ generation \notin replayPinnedGenerations
+        /\ replayPinnedGenerations' = replayPinnedGenerations \cup {generation}
     /\ TraceAvailable
-    /\ replayPinned' = TRUE
     /\ trace' = Append(trace, "PinReplay")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
         currentArtifactQuality, stagedArtifactQuality, stagedValidated,
@@ -858,15 +966,15 @@ PinReplay ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, cleanupState,
+        retiredGenerations, leasedGenerations, removedGenerations,
         packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includePlanState, includeEvidence, includeEditState,
         readOnlyWrites>>
 
 UnpinReplay ==
-    /\ replayPinned
+    /\ \E generation \in replayPinnedGenerations :
+        /\ replayPinnedGenerations' = replayPinnedGenerations \ {generation}
     /\ TraceAvailable
-    /\ replayPinned' = FALSE
     /\ trace' = Append(trace, "UnpinReplay")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
         currentArtifactQuality, stagedArtifactQuality, stagedValidated,
@@ -876,21 +984,18 @@ UnpinReplay ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, cleanupState,
+        retiredGenerations, leasedGenerations, removedGenerations,
         packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includePlanState, includeEvidence, includeEditState,
         readOnlyWrites>>
 
 CleanupRetired ==
-    /\ retiredGeneration > 0
-    /\ retiredGenerationState = "stale"
-    /\ retiredGeneration # currentGeneration
-    /\ ~leaseHeld
-    /\ ~replayPinned
-    /\ cleanupState = "kept"
+    /\ \E generation \in retiredGenerations \ removedGenerations :
+        /\ generation # currentGeneration
+        /\ generation \notin leasedGenerations
+        /\ generation \notin replayPinnedGenerations
+        /\ removedGenerations' = removedGenerations \cup {generation}
     /\ TraceAvailable
-    /\ retiredGenerationState' = "retired"
-    /\ cleanupState' = "removed"
     /\ trace' = Append(trace, "CleanupRetired")
     /\ UNCHANGED <<currentGeneration, stagedGeneration, generationState,
         currentArtifactQuality, stagedArtifactQuality, stagedValidated,
@@ -900,7 +1005,8 @@ CleanupRetired ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, leaseHeld, replayPinned, packageState, packageCoreComplete,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        packageState, packageCoreComplete,
         packageSidecarComplete, packageImported, includePlanState,
         includeEvidence, includeEditState, readOnlyWrites>>
 
@@ -921,8 +1027,8 @@ BeginExport ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, includePlanState, includeEvidence, includeEditState,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, includePlanState, includeEvidence, includeEditState,
         readOnlyWrites>>
 
 FinalizeExport ==
@@ -945,8 +1051,8 @@ FinalizeExport ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, packageImported, includePlanState, includeEvidence,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageImported, includePlanState, includeEvidence,
         includeEditState, readOnlyWrites>>
 
 ImportCompletePackage ==
@@ -965,8 +1071,8 @@ ImportCompletePackage ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, packageCoreComplete, packageSidecarComplete,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageCoreComplete, packageSidecarComplete,
         includePlanState, includeEvidence, includeEditState, readOnlyWrites>>
 
 PlanIncludeHygiene ==
@@ -985,8 +1091,8 @@ PlanIncludeHygiene ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, packageState, packageCoreComplete, packageSidecarComplete,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includeEditState, readOnlyWrites>>
 
 ValidateIncludeHygiene ==
@@ -1003,8 +1109,8 @@ ValidateIncludeHygiene ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, packageState, packageCoreComplete, packageSidecarComplete,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includeEvidence, includeEditState, readOnlyWrites>>
 
 ApplyIncludeHygiene ==
@@ -1022,8 +1128,8 @@ ApplyIncludeHygiene ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, packageState, packageCoreComplete, packageSidecarComplete,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includeEvidence, readOnlyWrites>>
 
 RejectIncompleteIncludeHygiene ==
@@ -1040,8 +1146,8 @@ RejectIncompleteIncludeHygiene ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, packageState, packageCoreComplete, packageSidecarComplete,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includeEvidence, includeEditState, readOnlyWrites>>
 
 ReadOnlyProbe ==
@@ -1057,16 +1163,17 @@ ReadOnlyProbe ==
         readerCompatibility, sidecarGeneration, sidecarState, sidecarQuality,
         sidecarValidated, sidecarAttachment, coreFilePublication,
         sidecarFilePublication, readCompleteness, crossFileAtomicityAssumed,
-        retiredGeneration, retiredGenerationState, leaseHeld, replayPinned,
-        cleanupState, packageState, packageCoreComplete, packageSidecarComplete,
+        retiredGenerations, leasedGenerations, replayPinnedGenerations,
+        removedGenerations, packageState, packageCoreComplete, packageSidecarComplete,
         packageImported, includePlanState, includeEvidence, includeEditState>>
 
 Advance == StartOneTUUpdate \/ PrepareStagedArtifact
     \/ ValidateStagedArtifact \/ PublishCoreGeneration \/ InterruptPublication
     \/ BuildSidecar \/ PrepareSidecarArtifact \/ PublishSidecar
-    \/ MarkSidecarMissing \/ MarkSidecarCorrupt
-    \/ BeginSupportedMigration \/ ValidateMigration \/ CommitMigration
-    \/ FinishMigration \/ InterruptMigration \/ RecoverPreviousMigration
+    \/ MarkSidecarMissing \/ MarkSidecarCorrupt \/ MarkSidecarIncompatible
+    \/ BeginSupportedMigration \/ ValidateMigration \/ RejectMigration
+    \/ CommitMigration \/ RollbackRejectedMigration \/ FinishMigration
+    \/ RollbackCommittedMigration \/ InterruptMigration \/ RecoverPreviousMigration
     \/ OpenNewerReader \/ OpenIncompatibleReader
     \/ AcquireLease \/ ReleaseLease \/ PinReplay \/ UnpinReplay \/ CleanupRetired
     \/ BeginExport \/ FinalizeExport \/ ImportCompletePackage
@@ -1083,8 +1190,12 @@ Fairness ==
     /\ WF_vars(InterruptPublication)
     /\ WF_vars(PublishSidecar)
     /\ WF_vars(ValidateMigration)
+    /\ WF_vars(RejectMigration)
     /\ WF_vars(CommitMigration)
+    /\ WF_vars(RollbackRejectedMigration)
     /\ WF_vars(FinishMigration)
+    /\ WF_vars(RollbackCommittedMigration)
+    /\ WF_vars(InterruptMigration)
     /\ WF_vars(RecoverPreviousMigration)
     /\ WF_vars(CleanupRetired)
     /\ WF_vars(FinalizeExport)
@@ -1095,12 +1206,16 @@ Fairness ==
 Spec == Init /\ [][Next]_vars /\ Fairness
 
 StorageEventuallySettles ==
-    [](corePublicationState = "staging" =>
-        <> (corePublicationState = "current" /\ stagedGeneration = 0))
-    /\ [](migrationPhase \in {"staging", "validated", "recovery-required"} =>
-        <> (migrationPhase = "none"))
-    /\ [](packageState = "building" =>
-        <> (packageState \in {"complete", "partial"}))
+    [](Len(trace) + 1 < TraceBound /\ corePublicationState = "staging" =>
+        <> ((corePublicationState = "current" /\ stagedGeneration = 0)
+            \/ Len(trace) + 1 >= TraceBound))
+    /\ [](Len(trace) + 1 < TraceBound /\
+         migrationPhase \in {"staging", "validated", "rejected", "committed",
+                              "recovery-required"} =>
+        <> (migrationPhase = "none" \/ Len(trace) + 1 >= TraceBound))
+    /\ [](Len(trace) + 1 < TraceBound /\ packageState = "building" =>
+        <> (packageState \in {"complete", "partial"}
+            \/ Len(trace) + 1 >= TraceBound))
 
 TypeInvariant ==
     /\ currentGeneration \in Nat
@@ -1129,11 +1244,10 @@ TypeInvariant ==
     /\ sidecarFilePublication \in FilePublicationStates
     /\ readCompleteness \in ReadCompletenessStates
     /\ crossFileAtomicityAssumed \in BOOLEAN
-    /\ retiredGeneration \in Nat
-    /\ retiredGenerationState \in RetiredStates
-    /\ leaseHeld \in BOOLEAN
-    /\ replayPinned \in BOOLEAN
-    /\ cleanupState \in CleanupStates
+    /\ retiredGenerations \subseteq Nat
+    /\ leasedGenerations \subseteq Nat
+    /\ replayPinnedGenerations \subseteq Nat
+    /\ removedGenerations \subseteq Nat
     /\ packageState \in PackageStates
     /\ packageCoreComplete \in BOOLEAN
     /\ packageSidecarComplete \in BOOLEAN
@@ -1167,11 +1281,18 @@ ReadOnlyStateInvariant ==
            /\ sidecarGeneration = currentGeneration
 
 MigrationInvariant ==
-    /\ migrationPhase \in {"staging", "validated", "recovery-required"}
+    /\ migrationPhase \in {"staging", "validated"}
         => /\ currentGeneration = preMigrationGeneration
            /\ coreSchema = migrationSourceSchema
+    /\ migrationPhase = "recovery-required"
+        => /\ currentGeneration = preMigrationGeneration
+           /\ coreSchema \in {migrationSourceSchema, migrationTargetSchema}
     /\ migrationPhase = "committed"
         => /\ coreSchema = SupportedSchemaVersion
+           /\ currentGeneration = preMigrationGeneration
+           /\ migrationRecovery = "snapshot-retained"
+    /\ migrationPhase = "rejected"
+        => /\ coreSchema = migrationSourceSchema
            /\ currentGeneration = preMigrationGeneration
            /\ migrationRecovery = "snapshot-retained"
     /\ readerCompatibility = "newer"
@@ -1205,14 +1326,13 @@ CrossFileAtomicityInvariant ==
            /\ readCompleteness = "complete"
 
 CleanupSafetyInvariant ==
-    /\ cleanupState = "removed"
-        => /\ retiredGenerationState = "retired"
-           /\ retiredGeneration # currentGeneration
-           /\ ~leaseHeld
-           /\ ~replayPinned
-    /\ (retiredGeneration = currentGeneration
-        \/ leaseHeld \/ replayPinned)
-        => cleanupState = "kept"
+    /\ removedGenerations \subseteq retiredGenerations
+    /\ currentGeneration \notin retiredGenerations
+    /\ removedGenerations \cap
+          (leasedGenerations \cup replayPinnedGenerations \cup
+           {currentGeneration}) = {}
+    /\ leasedGenerations \cup replayPinnedGenerations
+          \subseteq retiredGenerations \ removedGenerations
 
 PackageInvariant ==
     /\ packageState = "partial" => /\ packageCoreComplete
@@ -1233,7 +1353,7 @@ PublicationRecoveryInvariant ==
     /\ migrationPhase = "recovery-required"
         => /\ readerStatus = "unavailable"
            /\ currentGeneration = preMigrationGeneration
-           /\ coreSchema = migrationSourceSchema
+           /\ coreSchema \in {migrationSourceSchema, migrationTargetSchema}
 
 TraceInvariant ==
     /\ Len(trace) > 0
@@ -1242,7 +1362,8 @@ TraceInvariant ==
 BoundedProgressInvariant ==
     Len(trace) = TraceBound
         => /\ corePublicationState # "staging"
-           /\ migrationPhase \notin {"staging", "validated", "recovery-required"}
+           /\ migrationPhase \notin {"staging", "validated", "rejected",
+                                      "committed", "recovery-required"}
            /\ packageState # "building"
 
 =============================================================================

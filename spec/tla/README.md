@@ -75,10 +75,11 @@ module.
 `CidxStorageLifecycle` defines the logical storage boundary required by HSE-88.
 An update creates a staged one-TU generation, extracts and validates it, and
 publishes the core current pointer only after the artifact is complete and
-valid. The previous current generation remains retained and stale until
-leases and replay pins permit cleanup. A failed or interrupted publication
-leaves the previous pointer current or reports an explicit stale/unavailable
-read; no partial, corrupt, or incompatible candidate can become current.
+valid. Every prior generation remains independently retained and stale until
+that generation's leases and replay pins permit cleanup. A failed or
+interrupted publication leaves the previous pointer current or reports an
+explicit stale/unavailable read; no partial, corrupt, or incompatible
+candidate can become current.
 
 Migrations retain a pre-migration snapshot and distinguish supported commits,
 newer-schema readers, incompatible readers, interruption, rollback, and
@@ -95,7 +96,9 @@ packages cannot be imported as complete state. Include-hygiene planning,
 validation, rejection, and application use the same evidence-before-edit
 discipline as other derived transformations. Read-only probes preserve all
 abstract persistent state and the cleanup invariant protects current, leased,
-and replay-pinned generations.
+and replay-pinned generations. `StorageEventuallySettles` is checked as a
+bound-aware liveness property in the finite smoke model; its regression
+mutation removes storage progress actions and their fairness clauses.
 
 ## Normative boundary
 

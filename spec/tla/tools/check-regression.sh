@@ -80,31 +80,118 @@ run_seed configuration-invalidation InvalidationInvariant
 run_seed toolchain-invalidation InvalidationInvariant
 run_seed catalog-invalidation InvalidationInvariant
 
-storage_seed_dir="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-storage-seed.XXXXXX")"
-cp "$ROOT"/models/*.cfg "$storage_seed_dir"/
-sed 's/^    Scenario = "valid"$/    Scenario = "cross-file-atomicity"/' \
-  "$storage_seed_dir/CidxStorageLifecycleSmoke.cfg" \
-  >"$storage_seed_dir/CidxStorageLifecycleSmoke.cfg.seed"
-mv "$storage_seed_dir/CidxStorageLifecycleSmoke.cfg.seed" \
-  "$storage_seed_dir/CidxStorageLifecycleSmoke.cfg"
+run_storage_seed() {
+  local scenario="$1"
+  local expected="$2"
+  local storage_seed_dir
+  storage_seed_dir="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-storage-seed.XXXXXX")"
+  cp "$ROOT"/models/*.cfg "$storage_seed_dir"/
+  sed "s/^    Scenario = \"valid\"$/    Scenario = \"$scenario\"/" \
+    "$storage_seed_dir/CidxStorageLifecycleSmoke.cfg" \
+    >"$storage_seed_dir/CidxStorageLifecycleSmoke.cfg.seed"
+  mv "$storage_seed_dir/CidxStorageLifecycleSmoke.cfg.seed" \
+    "$storage_seed_dir/CidxStorageLifecycleSmoke.cfg"
 
+  set +e
+  local storage_seed_output
+  storage_seed_output="$(TLA_MODEL_DIR="$storage_seed_dir" \
+    TLA_MODELS="CidxStorageLifecycleSmoke" \
+    "$ROOT/tools/check.sh" 2>&1)"
+  local storage_seed_status=$?
+  set -e
+  rm -rf "$storage_seed_dir"
+
+  if [[ "$storage_seed_status" -ne 30 ]] \
+      || ! grep -q "TLA_INVARIANT_STATUS=FAIL model=CidxStorageLifecycleSmoke invariant=$expected" \
+          <<<"$storage_seed_output"; then
+    echo "TLA_REGRESSION_STATUS=FAIL scenario=$scenario reason=unexpected-invariant" >&2
+    printf '%s\n' "$storage_seed_output" >&2
+    exit 1
+  fi
+  echo "TLA_SEEDED_VIOLATION_STATUS=PASS scenario=$scenario invariant=$expected"
+}
+
+run_storage_seed cross-file-atomicity CrossFileAtomicityInvariant
+
+multi_generation_dir="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-multi-generation.XXXXXX")"
+cp "$ROOT"/models/*.cfg "$multi_generation_dir"/
+sed 's/^    Scenario = "valid"$/    Scenario = "multi-generation"/' \
+  "$multi_generation_dir/CidxStorageLifecycleSmoke.cfg" \
+  >"$multi_generation_dir/CidxStorageLifecycleSmoke.cfg.seed"
+mv "$multi_generation_dir/CidxStorageLifecycleSmoke.cfg.seed" \
+  "$multi_generation_dir/CidxStorageLifecycleSmoke.cfg"
 set +e
-storage_seed_output="$(TLA_MODEL_DIR="$storage_seed_dir" \
+multi_generation_output="$(TLA_MODEL_DIR="$multi_generation_dir" \
   TLA_MODELS="CidxStorageLifecycleSmoke" \
   "$ROOT/tools/check.sh" 2>&1)"
-storage_seed_status=$?
+multi_generation_status=$?
 set -e
-rm -rf "$storage_seed_dir"
-
-if [[ "$storage_seed_status" -ne 30 ]] \
-    || ! grep -q "TLA_MODEL_STATUS=FAIL model=CidxStorageLifecycleSmoke" \
-        <<<"$storage_seed_output" \
-    || ! grep -q "CrossFileAtomicityInvariant" <<<"$storage_seed_output"; then
-  echo "TLA_REGRESSION_STATUS=FAIL reason=cross-file-atomicity-seed-did-not-fail-closed" >&2
-  printf '%s\n' "$storage_seed_output" >&2
+rm -rf "$multi_generation_dir"
+if [[ "$multi_generation_status" -ne 0 ]] \
+    || ! grep -q "TLA_CHECK_STATUS=PASS models=CidxStorageLifecycleSmoke" \
+        <<<"$multi_generation_output"; then
+  echo "TLA_REGRESSION_STATUS=FAIL scenario=multi-generation reason=model-did-not-pass" >&2
+  printf '%s\n' "$multi_generation_output" >&2
   exit 1
 fi
-echo "TLA_SEEDED_VIOLATION_STATUS=PASS scenario=cross-file-atomicity invariant=CrossFileAtomicityInvariant"
+echo "TLA_MULTI_GENERATION_STATUS=PASS scenario=multi-generation"
+
+negative_storage_modules="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-storage-negative.XXXXXX")"
+cp "$ROOT"/modules/*.tla "$negative_storage_modules"/
+sed 's/readOnlyWrites |-> 0,/readOnlyWrites |-> 1,/' \
+  "$ROOT/modules/CidxStorageLifecycle.tla" \
+  >"$negative_storage_modules/CidxStorageLifecycle.tla"
+negative_storage_dir="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-storage-negative-model.XXXXXX")"
+cp "$ROOT"/models/*.cfg "$negative_storage_dir"/
+sed 's/^    Scenario = "valid"$/    Scenario = "cross-file-atomicity"/' \
+  "$negative_storage_dir/CidxStorageLifecycleSmoke.cfg" \
+  >"$negative_storage_dir/CidxStorageLifecycleSmoke.cfg.seed"
+mv "$negative_storage_dir/CidxStorageLifecycleSmoke.cfg.seed" \
+  "$negative_storage_dir/CidxStorageLifecycleSmoke.cfg"
+set +e
+negative_storage_output="$(TLA_MODULE_DIR="$negative_storage_modules" \
+  TLA_MODEL_DIR="$negative_storage_dir" \
+  TLA_MODELS="CidxStorageLifecycleSmoke" \
+  "$ROOT/tools/check.sh" 2>&1)"
+negative_storage_status=$?
+set -e
+rm -rf "$negative_storage_modules" "$negative_storage_dir"
+if [[ "$negative_storage_status" -ne 30 ]] \
+    || ! grep -q "TLA_INVARIANT_STATUS=FAIL model=CidxStorageLifecycleSmoke invariant=TypeInvariant" \
+        <<<"$negative_storage_output" \
+    || grep -q "invariant=CrossFileAtomicityInvariant" <<<"$negative_storage_output"; then
+  echo "TLA_REGRESSION_STATUS=FAIL reason=storage-oracle-accepted-unrelated-invariant" >&2
+  printf '%s\n' "$negative_storage_output" >&2
+  exit 1
+fi
+echo "TLA_ORACLE_REGRESSION_STATUS=PASS mutation=unrelated-storage-invariant"
+
+storage_liveness_modules="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-storage-liveness.XXXXXX")"
+cp "$ROOT"/modules/*.tla "$storage_liveness_modules"/
+sed -e 's#\\/ PrepareStagedArtifact##' \
+  -e '\|ValidateStagedArtifact \\/ PublishCoreGeneration \\/ InterruptPublication|d' \
+  -e '/WF_vars(PrepareStagedArtifact)/d' \
+  -e '/WF_vars(ValidateStagedArtifact)/d' \
+  -e '/WF_vars(PublishCoreGeneration)/d' \
+  -e '/WF_vars(InterruptPublication)/d' \
+  "$ROOT/modules/CidxStorageLifecycle.tla" \
+  >"$storage_liveness_modules/CidxStorageLifecycle.tla"
+set +e
+storage_liveness_output="$(TLA_MODULE_DIR="$storage_liveness_modules" \
+  TLA_MODELS="CidxStorageLifecycleSmoke" \
+  "$ROOT/tools/check.sh" 2>&1)"
+storage_liveness_status=$?
+set -e
+rm -rf "$storage_liveness_modules"
+if [[ "$storage_liveness_status" -ne 30 ]] \
+    || ! grep -q "TLA_MODEL_STATUS=FAIL model=CidxStorageLifecycleSmoke" \
+        <<<"$storage_liveness_output" \
+    || ! grep -q "StorageEventuallySettles" <<<"$storage_liveness_output"; then
+  echo "TLA_LIVENESS_REGRESSION_STATUS=FAIL reason=storage-property-did-not-fail-closed" >&2
+  printf '%s\n' "$storage_liveness_output" >&2
+  exit 1
+fi
+echo "TLA_LIVENESS_REGRESSION_STATUS=PASS mutation=removed-storage-publication"
 
 progress_modules="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-progress.XXXXXX")"
 cp "$ROOT"/modules/*.tla "$progress_modules"/
