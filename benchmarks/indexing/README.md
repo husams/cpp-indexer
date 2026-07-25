@@ -60,9 +60,12 @@ python3 benchmarks/indexing/profile.py \
 
 The generated corpus is intentionally simple and stable: every source includes
 `shared.hpp`, repeats its own declaration 16 times after a resolved definition,
-and visits eight distinct call edges twice. This makes shared-header fan-in,
-resolved-identity reuse, and fact-ID de-duplication explicit while retaining the
-1,000+ TU scaling shape. Use a checked-out
+and visits eight distinct call edges twice. TU 0 additionally includes
+`coverage.hpp`, a focused fixture that exercises canonical projections for
+includes, diagnostics, macro use, call arguments, templates, parameters, and
+type edges; the harness asserts those sections are non-empty. This makes
+shared-header fan-in, resolved-identity reuse, and fact-ID de-duplication
+explicit while retaining the 1,000+ TU scaling shape. Use a checked-out
 representative repository separately when a project-specific workload is
 required; the same stage and measurement fields apply. The first per-TU sample
 mutates TU 0 after the separate incremental state, so it is not a no-op.

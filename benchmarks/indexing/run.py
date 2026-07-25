@@ -22,6 +22,80 @@ from typing import Any
 EXPECTED_SCHEMA_VERSION = 39
 EXPECTED_CATALOG_VERSION = 1
 EXPECTED_CATALOG_HASH = "1adb5f6663a2e48dc3a624c79703ceaa5287f2784731a00bbc469dba8d5935d4"
+REQUIRED_CANONICAL_SECTIONS = frozenset(
+    {
+        "semantic_universe",
+        "translation_unit_config",
+        "file",
+        "file_config",
+        "symbol",
+        "decl_site",
+        "edge",
+        "edge_site",
+        "call_arg",
+        "template_arg",
+        "template_param",
+        "definition",
+        "def_edge",
+        "type_node",
+        "type_edge",
+        "parameter",
+        "symbol_type",
+        "include_config",
+        "include_edge",
+        "include_site",
+        "include_macro_use",
+        "diagnostic",
+        "fact_applicability",
+    }
+)
+REQUIRED_NONEMPTY_SECTIONS = frozenset(REQUIRED_CANONICAL_SECTIONS - {
+    "translation_unit_config",
+})
+
+
+def _scoped_symbol_key(
+    semantic_universe: str | None, identity_key: str | None, usr: str | None
+) -> str:
+    """Return the stable semantic identity used by every symbol projection."""
+
+    def normalize_component(value: str) -> str:
+        return re.sub(r"local:config:[0-9a-f]{40}",
+                      "local:config:<config>", value)
+
+    return "\x1f".join(
+        (
+            normalize_component(semantic_universe or "legacy"),
+            normalize_component(identity_key or usr or ""),
+        )
+    )
+
+
+def scoped_symbol_fixture() -> dict[str, Any]:
+    """Prove that relationship reassignment changes a duplicate-USR digest."""
+
+    usr = "c:@F@duplicate_fixture#"
+    first = _scoped_symbol_key("fixture:first", "", usr)
+    second = _scoped_symbol_key("fixture:second", "", usr)
+    symbols = sorted((first, second))
+    before = {"symbols": symbols, "edges": [[first, second, "calls"]]}
+    after = {"symbols": symbols, "edges": [[second, first, "calls"]]}
+
+    def digest(value: dict[str, Any]) -> str:
+        return hashlib.sha256(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    before_digest = digest(before)
+    after_digest = digest(after)
+    if before_digest == after_digest:
+        raise RuntimeError("scoped symbol fixture failed to detect reassignment")
+    return {
+        "duplicate_usr": usr,
+        "relationship_reassignment_changes_digest": True,
+        "before_sha256": before_digest,
+        "after_sha256": after_digest,
+    }
 
 
 def _measure_child() -> int:
@@ -104,13 +178,34 @@ def generate_corpus(root: Path, count: int) -> tuple[Path, list[Path], Path]:
     root.mkdir(parents=True)
     header = root / "shared.hpp"
     header.write_text(
-        "#pragma once\nnamespace shared { inline int value() { return 7; } }\n",
+        "#pragma once\n"
+        "namespace shared { inline int value() { return 7; } }\n",
+        encoding="utf-8",
+    )
+    focused_header = root / "coverage.hpp"
+    focused_header.write_text(
+        "#pragma once\n"
+        "#warning hse95 benchmark diagnostic\n"
+        "#define HSE95_COVERAGE_VALUE 7\n"
+        "template <typename T> inline T shared_template(T value) { return value; }\n",
         encoding="utf-8",
     )
     sources = []
     commands = []
     for index in range(count):
         source = root / f"unit_{index:04d}.cpp"
+        focused_facts = ""
+        if index == 0:
+            focused_facts = (
+                '#include "coverage.hpp"\n'
+                "int callarg_source_0 = 0;\n"
+                "int callarg_target_0(int value) { return value + HSE95_COVERAGE_VALUE; }\n"
+                "int callarg_use_0() { return callarg_target_0(callarg_source_0); }\n"
+                "template <typename T> T template_helper_0(T value) { return value; }\n"
+                "int template_use_0() { return template_helper_0<int>(0); }\n"
+                "using int_pointer_0 = int*;\n"
+                "int pointer_use_0(int_pointer_0 value) { return *value; }\n"
+            )
         source.write_text(
             (
                 '#include "shared.hpp"\n'
@@ -124,6 +219,7 @@ def generate_corpus(root: Path, count: int) -> tuple[Path, list[Path], Path]:
                 for target in range(edge_targets)
                 )
                 + "; }\n"
+                + focused_facts
                 + f"int unit_{index}();\n"
                 + f"int unit_{index}() {{ return shared::value() + {index}; }}\n"
                 + (f"int unit_{index}();\n" * repeated_declarations)
@@ -187,8 +283,9 @@ def _canonical_rows(
             ORDER BY f.name, tuc.descriptor_hash, fc.role
         """,
         "symbol": """
-            SELECT s.usr, COALESCE(su.key,'legacy'),
-                   COALESCE(s.identity_key,''), s.spelling,
+            SELECT scoped_symbol_key(su.key, s.identity_key, s.usr),
+                   COALESCE(su.key,'legacy'),
+                   s.spelling,
                    COALESCE(s.qual_name,''),
                    COALESCE(s.display_name,''),
                    COALESCE(sk.name, CAST(s.kind AS TEXT)),
@@ -197,36 +294,60 @@ def _canonical_rows(
                    COALESCE(df.name,''), COALESCE(s.decl_line,''),
                    COALESCE(s.decl_col,''), s.is_definition, s.is_pure,
                    s.is_static, s.is_instantiation, COALESCE(s.linkage,''),
-                   COALESCE(s.access,''), COALESCE(s.parent_usr,''), s.resolved
+                   COALESCE(s.access,''),
+                   CASE WHEN parent.id IS NOT NULL THEN
+                     scoped_symbol_key(parentu.key, parent.identity_key, parent.usr)
+                   ELSE COALESCE(s.parent_usr,'') END,
+                   s.resolved
             FROM symbol s
             LEFT JOIN symbol_kind sk ON sk.id = s.kind
             LEFT JOIN file ff ON ff.id = s.file_id
             LEFT JOIN file df ON df.id = s.decl_file_id
             LEFT JOIN semantic_universe su ON su.id = s.semantic_universe_id
+            LEFT JOIN symbol parent
+              ON parent.usr = s.parent_usr
+             AND parent.semantic_universe_id = s.semantic_universe_id
+            LEFT JOIN semantic_universe parentu
+              ON parentu.id = parent.semantic_universe_id
             ORDER BY COALESCE(su.key,'legacy'), s.identity_key, s.usr
         """,
         "decl_site": """
-            SELECT s.usr, COALESCE(f.name,''), COALESCE(d.line,''),
+            SELECT scoped_symbol_key(su.key, s.identity_key, s.usr),
+                   COALESCE(f.name,''), COALESCE(d.line,''),
                    COALESCE(d.col,''), d.is_definition
             FROM decl_site d JOIN symbol s ON s.id = d.symbol_id
             LEFT JOIN file f ON f.id = d.file_id
-            ORDER BY s.usr, f.name, d.line, d.col
+            LEFT JOIN semantic_universe su ON su.id = s.semantic_universe_id
+            ORDER BY scoped_symbol_key(su.key, s.identity_key, s.usr),
+                     f.name, d.line, d.col
         """,
         "edge": """
-            SELECT ss.usr, dst.usr, COALESCE(ek.name, CAST(e.kind AS TEXT)),
+            SELECT scoped_symbol_key(ssu.key, ss.identity_key, ss.usr),
+                   scoped_symbol_key(dsu.key, dst.identity_key, dst.usr),
+                   COALESCE(ek.name, CAST(e.kind AS TEXT)),
                    e.count, COALESCE(e.base_access,''), COALESCE(e.is_virtual,'')
             FROM edge e JOIN symbol ss ON ss.id = e.src_id
             JOIN symbol dst ON dst.id = e.dst_id
             LEFT JOIN edge_kind ek ON ek.id = e.kind
-            ORDER BY ss.usr, dst.usr, e.kind
+            LEFT JOIN semantic_universe ssu ON ssu.id = ss.semantic_universe_id
+            LEFT JOIN semantic_universe dsu ON dsu.id = dst.semantic_universe_id
+            ORDER BY scoped_symbol_key(ssu.key, ss.identity_key, ss.usr),
+                     scoped_symbol_key(dsu.key, dst.identity_key, dst.usr), e.kind
         """,
         "edge_site": """
-            SELECT ss.usr, ds.usr, COALESCE(ek.name, CAST(e.kind AS TEXT)),
+            SELECT scoped_symbol_key(ssu.key, ss.identity_key, ss.usr),
+                   scoped_symbol_key(dsu.key, ds.identity_key, ds.usr),
+                   COALESCE(ek.name, CAST(e.kind AS TEXT)),
                    COALESCE(f.name,''), COALESCE(es.line,''),
                    COALESCE(es.col,''), es.conditional, COALESCE(es.args_sig,''),
                    COALESCE(es.recv_src_kind,''),
-                   COALESCE(es.recv_type_usr, tn.decl_usr, eti.identity_text,''),
-                   COALESCE(es.recv_decl_usr, rs.usr, edi.identity_text,''),
+                   CASE WHEN rts.id IS NOT NULL THEN
+                     scoped_symbol_key(rtsu.key, rts.identity_key, rts.usr)
+                   ELSE COALESCE(es.recv_type_usr, tn.decl_usr,
+                                 eti.identity_text,'') END,
+                   CASE WHEN rs.id IS NOT NULL THEN
+                     scoped_symbol_key(rsu.key, rs.identity_key, rs.usr)
+                   ELSE COALESCE(es.recv_decl_usr, edi.identity_text,'') END,
                    COALESCE(es.recv_param_pos,''),
                    COALESCE(es.recv_type_is_value,'')
             FROM edge_site es JOIN edge e ON e.id = es.edge_id
@@ -234,82 +355,130 @@ def _canonical_rows(
             JOIN symbol ds ON ds.id = e.dst_id
             LEFT JOIN edge_kind ek ON ek.id = e.kind
             LEFT JOIN file f ON f.id = es.file_id
+            LEFT JOIN semantic_universe ssu ON ssu.id = ss.semantic_universe_id
+            LEFT JOIN semantic_universe dsu ON dsu.id = ds.semantic_universe_id
             LEFT JOIN type_node tn ON tn.id = es.recv_type_id
+            LEFT JOIN symbol rts ON rts.id = tn.decl_id
+            LEFT JOIN semantic_universe rtsu ON rtsu.id = rts.semantic_universe_id
             LEFT JOIN symbol rs ON rs.id = es.recv_decl_id
+            LEFT JOIN semantic_universe rsu ON rsu.id = rs.semantic_universe_id
             LEFT JOIN external_identity eti ON eti.id = es.recv_type_identity_id
             LEFT JOIN external_identity edi ON edi.id = es.recv_decl_identity_id
-            ORDER BY ss.usr, ds.usr, e.kind, f.name, es.line, es.col
+            ORDER BY scoped_symbol_key(ssu.key, ss.identity_key, ss.usr),
+                     scoped_symbol_key(dsu.key, ds.identity_key, ds.usr),
+                     e.kind, f.name, es.line, es.col
         """,
         "call_arg": """
-            SELECT ss.usr, edge_dst.usr, COALESCE(ek.name, CAST(e.kind AS TEXT)),
+            SELECT scoped_symbol_key(ssu.key, ss.identity_key, ss.usr),
+                   scoped_symbol_key(dsu.key, edge_dst.identity_key, edge_dst.usr),
+                   COALESCE(ek.name, CAST(e.kind AS TEXT)),
                    COALESCE(f.name,''), ca.line, ca.col, ca.position,
                    ca.src_kind,
-                   COALESCE(ca.type_usr, tn.decl_usr, eti.identity_text,''),
-                   COALESCE(ca.decl_usr, arg_decl.usr, edi.identity_text,''),
-                   COALESCE(ca.callee_usr, cs.usr, eci.identity_text,''),
+                   CASE WHEN ats.id IS NOT NULL THEN
+                     scoped_symbol_key(atsu.key, ats.identity_key, ats.usr)
+                   ELSE COALESCE(ca.type_usr, tn.decl_usr,
+                                 eti.identity_text,'') END,
+                   CASE WHEN arg_decl.id IS NOT NULL THEN
+                     scoped_symbol_key(adsu.key, arg_decl.identity_key,
+                                       arg_decl.usr)
+                   ELSE COALESCE(ca.decl_usr, edi.identity_text,'') END,
+                   CASE WHEN cs.id IS NOT NULL THEN
+                     scoped_symbol_key(csu.key, cs.identity_key, cs.usr)
+                   ELSE COALESCE(ca.callee_usr, eci.identity_text,'') END,
                    COALESCE(ca.type_is_value,'')
             FROM call_arg ca JOIN edge e ON e.id = ca.edge_id
             JOIN symbol ss ON ss.id = e.src_id
             JOIN symbol edge_dst ON edge_dst.id = e.dst_id
             LEFT JOIN edge_kind ek ON ek.id = e.kind
             LEFT JOIN file f ON f.id = ca.file_id
+            LEFT JOIN semantic_universe ssu ON ssu.id = ss.semantic_universe_id
+            LEFT JOIN semantic_universe dsu
+              ON dsu.id = edge_dst.semantic_universe_id
             LEFT JOIN type_node tn ON tn.id = ca.type_id
+            LEFT JOIN symbol ats ON ats.id = tn.decl_id
+            LEFT JOIN semantic_universe atsu ON atsu.id = ats.semantic_universe_id
             LEFT JOIN symbol arg_decl ON arg_decl.id = ca.decl_id
+            LEFT JOIN semantic_universe adsu
+              ON adsu.id = arg_decl.semantic_universe_id
             LEFT JOIN symbol cs ON cs.id = ca.callee_id
+            LEFT JOIN semantic_universe csu ON csu.id = cs.semantic_universe_id
             LEFT JOIN external_identity eti ON eti.id = ca.type_identity_id
             LEFT JOIN external_identity edi ON edi.id = ca.decl_identity_id
             LEFT JOIN external_identity eci ON eci.id = ca.callee_identity_id
-            ORDER BY ss.usr, edge_dst.usr, e.kind, f.name, ca.line, ca.col,
-                     ca.position
+            ORDER BY scoped_symbol_key(ssu.key, ss.identity_key, ss.usr),
+                     scoped_symbol_key(dsu.key, edge_dst.identity_key,
+                                       edge_dst.usr), e.kind, f.name,
+                     ca.line, ca.col, ca.position
         """,
         "template_arg": """
-            SELECT os.usr, ta.position, ta.pack_index, ta.arg_kind,
-                   COALESCE(rs.usr,''), COALESCE(rt.type_key,''),
+            SELECT scoped_symbol_key(osu.key, os.identity_key, os.usr),
+                   ta.position, ta.pack_index, ta.arg_kind,
+                   COALESCE(scoped_symbol_key(rsu.key, rs.identity_key, rs.usr),''),
+                   COALESCE(rt.type_key,''),
                    COALESCE(ta.literal,'')
             FROM template_arg ta JOIN symbol os ON os.id = ta.owner_id
             LEFT JOIN symbol rs ON rs.id = ta.ref_id
+            LEFT JOIN semantic_universe osu ON osu.id = os.semantic_universe_id
+            LEFT JOIN semantic_universe rsu ON rsu.id = rs.semantic_universe_id
             LEFT JOIN type_node rt ON rt.id = ta.type_id
-            ORDER BY os.usr, ta.position, ta.pack_index
+            ORDER BY scoped_symbol_key(osu.key, os.identity_key, os.usr),
+                     ta.position, ta.pack_index
         """,
         "template_param": """
-            SELECT os.usr, tp.position, tp.param_kind,
+            SELECT scoped_symbol_key(osu.key, os.identity_key, os.usr),
+                   tp.position, tp.param_kind,
                    COALESCE(tp.name,''), COALESCE(tp.default_txt,''),
                    COALESCE(t.type_key,''), COALESCE(dt.type_key,''),
-                   COALESCE(ds.usr,'')
+                   COALESCE(scoped_symbol_key(dsu.key, ds.identity_key, ds.usr),'')
             FROM template_param tp JOIN symbol os ON os.id = tp.owner_id
             LEFT JOIN type_node t ON t.id = tp.type_id
             LEFT JOIN type_node dt ON dt.id = tp.default_type_id
             LEFT JOIN symbol ds ON ds.id = tp.default_ref_id
-            ORDER BY os.usr, tp.position
+            LEFT JOIN semantic_universe osu ON osu.id = os.semantic_universe_id
+            LEFT JOIN semantic_universe dsu ON dsu.id = ds.semantic_universe_id
+            ORDER BY scoped_symbol_key(osu.key, os.identity_key, os.usr),
+                     tp.position
         """,
         "definition": """
-            SELECT s.usr, COALESCE(c.name,''), COALESCE(f.name,''),
+            SELECT scoped_symbol_key(su.key, s.identity_key, s.usr),
+                   COALESCE(c.name,''), COALESCE(f.name,''),
                    COALESCE(d.line,''), COALESCE(d.col,''),
                    COALESCE(d.end_line,''), COALESCE(d.end_col,''),
                    COALESCE(d.init_text,'')
             FROM definition d JOIN symbol s ON s.id = d.symbol_id
             LEFT JOIN component c ON c.id = d.component_id
             LEFT JOIN file f ON f.id = d.file_id
-            ORDER BY s.usr, c.name, f.name, d.line, d.col
+            LEFT JOIN semantic_universe su ON su.id = s.semantic_universe_id
+            ORDER BY scoped_symbol_key(su.key, s.identity_key, s.usr),
+                     c.name, f.name, d.line, d.col
         """,
         "def_edge": """
-            SELECT ss.usr, sd.usr,
+            SELECT scoped_symbol_key(ssu.key, ss.identity_key, ss.usr),
+                   scoped_symbol_key(sdu.key, sd.identity_key, sd.usr),
                    COALESCE(ek.name, CAST(de.kind AS TEXT)), de.count
             FROM def_edge de
             JOIN definition d ON d.id = de.src_def_id
             JOIN symbol ss ON ss.id = d.symbol_id
             JOIN symbol sd ON sd.id = de.dst_id
             LEFT JOIN edge_kind ek ON ek.id = de.kind
-            ORDER BY ss.usr, sd.usr, de.kind
+            LEFT JOIN semantic_universe ssu ON ssu.id = ss.semantic_universe_id
+            LEFT JOIN semantic_universe sdu ON sdu.id = sd.semantic_universe_id
+            ORDER BY scoped_symbol_key(ssu.key, ss.identity_key, ss.usr),
+                     scoped_symbol_key(sdu.key, sd.identity_key, sd.usr), de.kind
         """,
         "type_node": """
             SELECT tn.type_key, tn.spelling,
                    COALESCE(tk.name, CAST(tn.kind AS TEXT)), tn.is_const,
-                   tn.is_volatile, tn.is_restrict, COALESCE(tn.decl_usr,''),
+                   tn.is_volatile, tn.is_restrict,
+                   CASE WHEN tds.id IS NOT NULL THEN
+                     scoped_symbol_key(tdsu.key, tds.identity_key, tds.usr)
+                   ELSE COALESCE(tn.decl_usr,'') END,
                    COALESCE(cn.type_key,'')
             FROM type_node tn
             LEFT JOIN type_kind tk ON tk.id = tn.kind
             LEFT JOIN type_node cn ON cn.id = tn.canonical_id
+            LEFT JOIN symbol tds ON tds.id = tn.decl_id
+            LEFT JOIN semantic_universe tdsu ON tdsu.id = tds.semantic_universe_id
             ORDER BY tn.type_key
         """,
         "type_edge": """
@@ -322,7 +491,8 @@ def _canonical_rows(
             ORDER BY ss.type_key, te.kind, te.position, ds.type_key
         """,
         "parameter": """
-            SELECT os.usr, p.position, p.pack_index, COALESCE(p.name,''),
+            SELECT scoped_symbol_key(osu.key, os.identity_key, os.usr),
+                   p.position, p.pack_index, COALESCE(p.name,''),
                    COALESCE(t.type_key,''), COALESCE(dt.type_key,''),
                    COALESCE(at.type_key,''), COALESCE(p.default_text,''),
                    COALESCE(p.default_origin,''),
@@ -333,51 +503,126 @@ def _canonical_rows(
             LEFT JOIN type_node dt ON dt.id = p.declared_type_id
             LEFT JOIN type_node at ON at.id = p.adjusted_type_id
             LEFT JOIN file f ON f.id = p.file_id
-            ORDER BY os.usr, p.position, p.pack_index
+            LEFT JOIN semantic_universe osu ON osu.id = os.semantic_universe_id
+            ORDER BY scoped_symbol_key(osu.key, os.identity_key, os.usr),
+                     p.position, p.pack_index
         """,
         "symbol_type": """
-            SELECT s.usr, COALESCE(stk.name, CAST(st.kind AS TEXT)),
+            SELECT scoped_symbol_key(su.key, s.identity_key, s.usr),
+                   COALESCE(stk.name, CAST(st.kind AS TEXT)),
                    tn.type_key
             FROM symbol_type st JOIN symbol s ON s.id = st.symbol_id
             JOIN type_node tn ON tn.id = st.type_id
             LEFT JOIN symbol_type_kind stk ON stk.id = st.kind
-            ORDER BY s.usr, st.kind, tn.type_key
+            LEFT JOIN semantic_universe su ON su.id = s.semantic_universe_id
+            ORDER BY scoped_symbol_key(su.key, s.identity_key, s.usr),
+                     st.kind, tn.type_key
+        """,
+        "include_config": """
+            SELECT COALESCE(tf.name,''), COALESCE(ic.driver,''),
+                   COALESCE(ic.working_dir,''),
+                   COALESCE(ic.arguments,''), COALESCE(ic.lang_mode,''),
+                   COALESCE(ic.resource_dir,''),
+                   COALESCE(tuc.descriptor_json,'')
+            FROM include_config ic
+            LEFT JOIN file tf ON tf.id = ic.tu_file_id
+            LEFT JOIN translation_unit_config tuc
+              ON tuc.id = ic.translation_unit_config_id
+            ORDER BY tf.name, ic.driver, ic.arguments
+        """,
+        "include_edge": """
+            SELECT COALESCE(sf.name,''), COALESCE(df.name,''), ie.dst_path,
+                   ie.is_system, ie.is_generated, ie.count,
+                   COALESCE(ic.driver,''), COALESCE(ic.working_dir,''),
+                   COALESCE(ic.arguments,'')
+            FROM include_edge ie
+            JOIN file sf ON sf.id = ie.src_file_id
+            LEFT JOIN file df ON df.id = ie.dst_file_id
+            LEFT JOIN include_config ic ON ic.id = ie.config_id
+            ORDER BY sf.name, ie.dst_path, ic.arguments
+        """,
+        "include_site": """
+            SELECT COALESCE(sf.name,''), COALESCE(df.name,''), ie.dst_path,
+                   site.line, site.col,
+                   site.begin_offset, site.end_offset, site.spelling,
+                   site.is_angled, COALESCE(idk.name, CAST(site.directive AS TEXT)),
+                   site.cond_fingerprint, site.resolved, site.guarded,
+                   COALESCE(ic.arguments,'')
+            FROM include_site site
+            JOIN include_edge ie ON ie.id = site.edge_id
+            JOIN file sf ON sf.id = ie.src_file_id
+            LEFT JOIN file df ON df.id = ie.dst_file_id
+            LEFT JOIN include_config ic ON ic.id = ie.config_id
+            LEFT JOIN include_directive_kind idk ON idk.id = site.directive
+            ORDER BY sf.name, ie.dst_path, site.line, site.col, ic.arguments
+        """,
+        "include_macro_use": """
+            SELECT COALESCE(f.name,''), imu.def_path, imu.name,
+                   imu.count, COALESCE(ic.arguments,'')
+            FROM include_macro_use imu
+            JOIN file f ON f.id = imu.src_file_id
+            LEFT JOIN include_config ic ON ic.id = imu.config_id
+            ORDER BY f.name, imu.name, imu.def_path, ic.arguments
+        """,
+        "diagnostic": """
+            SELECT COALESCE(f.name,''), d.severity, d.spelling,
+                   COALESCE(d.file_path,''), COALESCE(d.line,''),
+                   COALESCE(d.col,'')
+            FROM diagnostic d JOIN file f ON f.id = d.file_id
+            ORDER BY f.name, d.severity, d.line, d.col, d.spelling
         """,
         "fact_applicability": """
             SELECT fa.fact_kind,
                    CASE fa.fact_kind
-                     WHEN 'symbol' THEN 'symbol|' || COALESCE(su.key,'legacy')
-                       || '|' || COALESCE(NULLIF(s.identity_key,''), s.usr)
-                     WHEN 'edge' THEN 'edge|' || COALESCE(es.usr,'') || '|'
-                       || COALESCE(ed.usr,'') || '|' || CAST(e.kind AS TEXT)
-                     WHEN 'definition' THEN 'definition|' || COALESCE(ds.usr,'')
+                     WHEN 'symbol' THEN 'symbol|' || scoped_symbol_key(
+                       su.key, s.identity_key, s.usr)
+                     WHEN 'edge' THEN 'edge|' || scoped_symbol_key(
+                       esu.key, es.identity_key, es.usr) || '|' ||
+                       scoped_symbol_key(edu.key, ed.identity_key, ed.usr)
+                       || '|' || CAST(e.kind AS TEXT)
+                     WHEN 'definition' THEN 'definition|' || scoped_symbol_key(
+                       dsu.key, ds.identity_key, ds.usr)
                        || '|' || COALESCE(df.name,'') || '|'
                        || COALESCE(CAST(d.line AS TEXT),'') || '|'
                        || COALESCE(CAST(d.col AS TEXT),'')
-                     WHEN 'decl_site' THEN 'decl_site|' || COALESCE(dss.usr,'')
+                     WHEN 'decl_site' THEN 'decl_site|' || scoped_symbol_key(
+                       dssu.key, dss.identity_key, dss.usr)
                        || '|' || COALESCE(dsf.name,'') || '|'
                        || COALESCE(CAST(dsite.line AS TEXT),'') || '|'
                        || COALESCE(CAST(dsite.col AS TEXT),'')
-                     WHEN 'def_edge' THEN 'def_edge|' || COALESCE(defs.usr,'')
-                       || '|' || COALESCE(defd.usr,'') || '|'
+                     WHEN 'def_edge' THEN 'def_edge|' || scoped_symbol_key(
+                       defsu.key, defs.identity_key, defs.usr) || '|' ||
+                       scoped_symbol_key(defdu.key, defd.identity_key, defd.usr)
+                       || '|'
                        || CAST(defe.kind AS TEXT)
-                     WHEN 'diagnostic' THEN 'diagnostic|' || COALESCE(diaf.name,'')
-                       || '|' || dia.spelling || '|'
-                       || COALESCE(CAST(dia.line AS TEXT),'')
-                     WHEN 'parameter' THEN 'parameter|' || COALESCE(ps.usr,'')
-                     WHEN 'symbol_type' THEN 'symbol_type|' || COALESCE(sts.usr,'')
+                     WHEN 'diagnostic' THEN 'diagnostic|' ||
+                       COALESCE(diaf.name, f.name, '') || '|' ||
+                       COALESCE(dia.spelling, '<stale>') || '|'
+                       || COALESCE(CAST(dia.line AS TEXT), '') || '|'
+                       || CAST(fa.generation AS TEXT)
+                     WHEN 'parameter' THEN 'parameter|' || scoped_symbol_key(
+                       psu.key, ps.identity_key, ps.usr)
+                     WHEN 'symbol_type' THEN 'symbol_type|' || scoped_symbol_key(
+                       stsu.key, sts.identity_key, sts.usr)
                      WHEN 'type_edge' THEN 'type_edge|' || COALESCE(tes.type_key,'')
-                     WHEN 'entity_node' THEN 'entity_node|' || COALESCE(ens.usr,'')
-                     WHEN 'entity_edge' THEN 'entity_edge|' || COALESCE(ees.usr,'')
-                       || '|' || COALESCE(eed.usr,'') || '|'
+                     WHEN 'entity_node' THEN 'entity_node|' || scoped_symbol_key(
+                       ensu.key, ens.identity_key, ens.usr)
+                     WHEN 'entity_edge' THEN 'entity_edge|' || scoped_symbol_key(
+                       eesu.key, ees.identity_key, ees.usr) || '|' ||
+                       scoped_symbol_key(eedu.key, eed.identity_key, eed.usr)
+                       || '|'
                        || CAST(eee.kind AS TEXT)
-                     WHEN 'template_param' THEN 'template_param|' || COALESCE(tps.usr,'')
-                     WHEN 'template_arg' THEN 'template_arg|' || COALESCE(tas.usr,'')
-                     WHEN 'call_arg' THEN 'call_arg|' || COALESCE(cas.usr,'')
-                       || '|' || COALESCE(cad.usr,'') || '|'
+                     WHEN 'template_param' THEN 'template_param|' || scoped_symbol_key(
+                       tpsu.key, tps.identity_key, tps.usr)
+                     WHEN 'template_arg' THEN 'template_arg|' || scoped_symbol_key(
+                       tasu.key, tas.identity_key, tas.usr)
+                     WHEN 'call_arg' THEN 'call_arg|' || scoped_symbol_key(
+                       casu.key, cas.identity_key, cas.usr) || '|' ||
+                       scoped_symbol_key(cadu.key, cad.identity_key, cad.usr) || '|'
                        || CAST(cae.kind AS TEXT)
-                     WHEN 'possible_call' THEN 'possible_call|' || COALESCE(pcs.usr,'')
-                       || '|' || COALESCE(pcd.usr,'')
+                     WHEN 'possible_call' THEN 'possible_call|' || scoped_symbol_key(
+                       pcsu.key, pcs.identity_key, pcs.usr) || '|' ||
+                       scoped_symbol_key(pcdu.key, pcd.identity_key, pcd.usr)
                      WHEN 'type_node' THEN 'type|' || COALESCE(tn.type_key,'')
                      ELSE NULL
                    END AS fact_key,
@@ -390,50 +635,69 @@ def _canonical_rows(
             LEFT JOIN edge e ON fa.fact_kind = 'edge' AND e.id = fa.fact_id
             LEFT JOIN symbol es ON es.id = e.src_id
             LEFT JOIN symbol ed ON ed.id = e.dst_id
+            LEFT JOIN semantic_universe esu ON esu.id = es.semantic_universe_id
+            LEFT JOIN semantic_universe edu ON edu.id = ed.semantic_universe_id
             LEFT JOIN definition d
               ON fa.fact_kind = 'definition' AND d.id = fa.fact_id
             LEFT JOIN symbol ds ON ds.id = d.symbol_id
+            LEFT JOIN semantic_universe dsu ON dsu.id = ds.semantic_universe_id
             LEFT JOIN file df ON df.id = d.file_id
             LEFT JOIN decl_site dsite ON fa.fact_kind = 'decl_site'
               AND dsite.rowid = fa.fact_id
             LEFT JOIN symbol dss ON dss.id = dsite.symbol_id
+            LEFT JOIN semantic_universe dssu ON dssu.id = dss.semantic_universe_id
             LEFT JOIN file dsf ON dsf.id = dsite.file_id
             LEFT JOIN def_edge defe ON fa.fact_kind = 'def_edge'
               AND defe.rowid = fa.fact_id
             LEFT JOIN definition defd0 ON defd0.id = defe.src_def_id
             LEFT JOIN symbol defs ON defs.id = defd0.symbol_id
             LEFT JOIN symbol defd ON defd.id = defe.dst_id
+            LEFT JOIN semantic_universe defsu
+              ON defsu.id = defs.semantic_universe_id
+            LEFT JOIN semantic_universe defdu
+              ON defdu.id = defd.semantic_universe_id
             LEFT JOIN diagnostic dia ON fa.fact_kind = 'diagnostic'
               AND dia.id = fa.fact_id
             LEFT JOIN file diaf ON diaf.id = dia.file_id
             LEFT JOIN symbol ps ON fa.fact_kind = 'parameter'
               AND ps.id = fa.fact_id
+            LEFT JOIN semantic_universe psu ON psu.id = ps.semantic_universe_id
             LEFT JOIN symbol sts ON fa.fact_kind = 'symbol_type'
               AND sts.id = fa.fact_id
+            LEFT JOIN semantic_universe stsu ON stsu.id = sts.semantic_universe_id
             LEFT JOIN type_node tes ON fa.fact_kind = 'type_edge'
               AND tes.id = fa.fact_id
             LEFT JOIN entity_node en ON fa.fact_kind = 'entity_node'
               AND en.id = fa.fact_id
             LEFT JOIN symbol ens ON ens.id = en.id
+            LEFT JOIN semantic_universe ensu ON ensu.id = ens.semantic_universe_id
             LEFT JOIN entity_edge eee ON fa.fact_kind = 'entity_edge'
               AND eee.rowid = fa.fact_id
             LEFT JOIN symbol ees ON ees.id = eee.src_id
             LEFT JOIN symbol eed ON eed.id = eee.dst_id
+            LEFT JOIN semantic_universe eesu ON eesu.id = ees.semantic_universe_id
+            LEFT JOIN semantic_universe eedu ON eedu.id = eed.semantic_universe_id
             LEFT JOIN symbol tps ON fa.fact_kind = 'template_param'
               AND tps.id = fa.fact_id
+            LEFT JOIN semantic_universe tpsu ON tpsu.id = tps.semantic_universe_id
             LEFT JOIN symbol tas ON fa.fact_kind = 'template_arg'
               AND tas.id = fa.fact_id
+            LEFT JOIN semantic_universe tasu ON tasu.id = tas.semantic_universe_id
             LEFT JOIN edge cae ON fa.fact_kind = 'call_arg'
               AND cae.id = fa.fact_id
             LEFT JOIN symbol cas ON cas.id = cae.src_id
             LEFT JOIN symbol cad ON cad.id = cae.dst_id
+            LEFT JOIN semantic_universe casu ON casu.id = cas.semantic_universe_id
+            LEFT JOIN semantic_universe cadu ON cadu.id = cad.semantic_universe_id
             LEFT JOIN definition pcsd ON fa.fact_kind = 'possible_call'
               AND pcsd.id = fa.fact_id
             LEFT JOIN symbol pcs ON pcs.id = pcsd.symbol_id
+            LEFT JOIN semantic_universe pcsu ON pcsu.id = pcs.semantic_universe_id
             LEFT JOIN possible_call pc ON fa.fact_kind = 'possible_call'
               AND pc.src_def_id = fa.fact_id
             LEFT JOIN definition pcdd ON pcdd.id = pc.dst_def_id
             LEFT JOIN symbol pcd ON pcd.id = pcdd.symbol_id
+            LEFT JOIN semantic_universe pcdu ON pcdu.id = pcd.semantic_universe_id
             LEFT JOIN type_node tn
               ON fa.fact_kind = 'type_node' AND tn.id = fa.fact_id
             ORDER BY fa.fact_kind, fact_key, f.name, tuc.descriptor_hash,
@@ -441,6 +705,7 @@ def _canonical_rows(
         """,
     }
 
+    connection.create_function("scoped_symbol_key", 3, _scoped_symbol_key)
     root_text = str(corpus_root)
 
     def normalize(value: Any) -> Any:
@@ -468,7 +733,12 @@ def _canonical_rows(
     return canonical
 
 
-def database_snapshot(database: Path, corpus_root: Path) -> dict[str, Any]:
+def database_snapshot(
+    database: Path,
+    corpus_root: Path,
+    require_coverage: bool,
+    capture_canonical: bool = True,
+) -> dict[str, Any]:
     import sqlite3
 
     with sqlite3.connect(database) as connection:
@@ -482,7 +752,24 @@ def database_snapshot(database: Path, corpus_root: Path) -> dict[str, Any]:
                 "('schema_version', 'catalog_version', 'catalog_hash')"
             ).fetchall()
         )
-        canonical = _canonical_rows(connection, corpus_root)
+        canonical = _canonical_rows(connection, corpus_root) if capture_canonical else {}
+        if capture_canonical:
+            missing_sections = sorted(
+                REQUIRED_CANONICAL_SECTIONS.difference(canonical)
+            )
+            if missing_sections:
+                raise RuntimeError(
+                    f"canonical projection is missing sections: {missing_sections}"
+                )
+            empty_sections = sorted(
+                section for section in REQUIRED_NONEMPTY_SECTIONS
+                if not canonical[section]
+            )
+            if require_coverage and empty_sections:
+                raise RuntimeError(
+                    "benchmark corpus did not exercise canonical sections: "
+                    f"{empty_sections}"
+                )
         canonical_json = json.dumps(
             canonical, sort_keys=True, separators=(",", ":")
         )
@@ -493,6 +780,9 @@ def database_snapshot(database: Path, corpus_root: Path) -> dict[str, Any]:
         for table in (
             "file", "symbol", "edge", "edge_site", "call_arg",
             "definition", "def_edge", "file_config", "fact_applicability",
+            "include_config", "include_edge", "include_site",
+            "include_macro_use", "diagnostic", "template_arg",
+            "template_param", "type_edge", "parameter",
         ):
             try:
                 tables[table] = connection.execute(
@@ -520,7 +810,10 @@ def database_snapshot(database: Path, corpus_root: Path) -> dict[str, Any]:
         "schema_version": int(metadata["schema_version"]),
         "catalog_version": int(metadata["catalog_version"]),
         "catalog_hash": metadata["catalog_hash"],
-        "canonical_sections": sorted(canonical),
+            "canonical_sections": sorted(canonical),
+            "canonical_nonempty_sections": sorted(
+                name for name, rows in canonical.items() if rows
+            ),
         "canonical_row_counts": {
             name: len(rows) for name, rows in canonical.items()
         },
@@ -565,7 +858,12 @@ def stage(
     metrics = run_timed([str(cidx), *args], env, run_root, label)
     metrics["label"] = label
     database = cache / "index.db"
-    snapshot = database_snapshot(database, corpus_root)
+    snapshot = database_snapshot(
+        database,
+        corpus_root,
+        require_coverage=label != "import",
+        capture_canonical=not label.startswith("tu-"),
+    )
     metrics["sqlite"] = {
         "snapshot": snapshot,
         "delta": snapshot if previous_db is None else {
@@ -875,6 +1173,7 @@ def main() -> int:
         },
         "cases": {},
         "aggregates": {},
+        "scoped_symbol_fixture": scoped_symbol_fixture(),
     }
     with tempfile.TemporaryDirectory(prefix="hse95-indexing-") as temporary:
         root = Path(temporary)
