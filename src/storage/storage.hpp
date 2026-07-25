@@ -618,8 +618,11 @@ public:
   }
   // Test seam for failure-atomic publication; production callers never set it.
   void inject_transform_failure_for_testing(std::string transform_id);
+  void inject_transform_nondeterminism_for_testing(std::string transform_id);
   void set_transform_invalidation_for_testing(const std::string &key,
                                               const std::string &value);
+  void set_transform_implementation_provider_for_testing(
+      const std::string &transform_id, int version);
   void set_transform_budget_for_testing(const std::string &transform_id,
                                         std::int64_t max_rows,
                                         std::int64_t max_milliseconds);
@@ -811,6 +814,7 @@ private:
   std::optional<bool> artifact_query_only_before_attach_;
   std::vector<TransformRun> last_transform_runs_;
   std::optional<std::string> transform_failure_for_testing_;
+  std::optional<std::string> transform_nondeterminism_for_testing_;
 };
 
 // Compatibility façade for legacy application code. New code composes the

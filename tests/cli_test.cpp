@@ -759,11 +759,13 @@ TEST_CASE("index status and explain filter named fact-set readiness") {
   {
     Storage db(cache + "/index.db");
     REQUIRE(db.run_transform_pipeline().complete);
+    REQUIRE(db.run_transform_pipeline().complete);
   }
   const CmdResult status =
       run_cli({"index", "status", "--fact-set", "entity-graph"}, cache);
   CHECK(status.rc == 0);
   CHECK(status.out.find("fact-set entity-graph") != std::string::npos);
+  CHECK(status.out.find("reused") != std::string::npos);
   CHECK(status.out.find("edge-site-count-rollup") == std::string::npos);
   const CmdResult explain =
       run_cli({"index", "explain", "--fact-set", "entity-graph"}, cache);

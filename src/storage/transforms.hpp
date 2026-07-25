@@ -48,6 +48,18 @@ struct TransformBudget {
   std::int64_t max_milliseconds = 0;
 };
 
+struct TransformImplementationProvider {
+  std::string provider_id;
+  int version = 0;
+  std::string content;
+};
+
+struct TransformSourceFact {
+  std::string name;
+  int schema_version = 1;
+  std::string catalog = "cidx-core";
+};
+
 struct TransformFactSetRequirement {
   std::string name;
   std::vector<std::string> facts;
@@ -78,6 +90,7 @@ struct TransformDescriptor {
   int output_schema_version = 1;
   std::string input_catalog = "cidx-core";
   std::string output_catalog = "cidx-core";
+  TransformImplementationProvider implementation_provider;
 };
 
 struct TransformRun {
@@ -123,7 +136,13 @@ struct TransformFactSetStatus {
 
 class TransformRegistry {
 public:
+  void register_source_fact(TransformSourceFact source_fact);
   void register_transform(TransformDescriptor descriptor);
+
+  // Used by the persisted implementation-provider catalog. The provider
+  // identity remains coupled to the registered executor; only its declared
+  // content version may change between installed implementations.
+  void set_implementation_version(const std::string &id, int version);
 
   [[nodiscard]] const TransformDescriptor *find(const std::string &id) const;
   [[nodiscard]] const std::vector<TransformDescriptor> &descriptors() const {
@@ -134,6 +153,7 @@ public:
   void validate() const;
 
 private:
+  std::vector<TransformSourceFact> source_facts_;
   std::vector<TransformDescriptor> descriptors_;
 };
 

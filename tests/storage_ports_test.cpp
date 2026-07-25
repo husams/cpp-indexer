@@ -6,6 +6,7 @@
 #include "storage/storage.hpp"
 
 #include <algorithm>
+#include <filesystem>
 #include <stdexcept>
 #include <type_traits>
 
@@ -150,6 +151,7 @@ TEST_CASE("unit of work rolls back a failed one-TU publication") {
 
 TEST_CASE("transform registry declares a deterministic dependency order") {
   TransformRegistry registry;
+  registry.register_source_fact(TransformSourceFact{.name = "raw"});
   TransformDescriptor source;
   source.id = "source";
   source.version = 1;
@@ -166,6 +168,9 @@ TEST_CASE("transform registry declares a deterministic dependency order") {
   source.input_queries = {"SELECT 1"};
   source.output_queries = {"SELECT 1"};
   source.output_count_query = "SELECT 1";
+  source.implementation_provider = TransformImplementationProvider{
+      .provider_id = "test.source.executor.v1", .version = 1,
+      .content = "source-executor"};
   source.fact_set_requirements = {TransformFactSetRequirement{
       .name = "source.fact", .facts = {"source.fact"}}};
   registry.register_transform(source);
@@ -186,6 +191,9 @@ TEST_CASE("transform registry declares a deterministic dependency order") {
   derived.input_queries = {"SELECT 1"};
   derived.output_queries = {"SELECT 1"};
   derived.output_count_query = "SELECT 1";
+  derived.implementation_provider = TransformImplementationProvider{
+      .provider_id = "test.derived.executor.v1", .version = 1,
+      .content = "derived-executor"};
   derived.fact_set_requirements = {TransformFactSetRequirement{
       .name = "derived.fact", .facts = {"derived.fact"}}};
   registry.register_transform(derived);
@@ -210,6 +218,103 @@ TEST_CASE("transform registry declares a deterministic dependency order") {
     rejected = true;
   }
   CHECK(rejected);
+}
+
+TEST_CASE("transform registry rejects invalid named fact graphs") {
+  const auto fact_transform =
+      [](std::string id, std::vector<std::string> inputs,
+         std::vector<std::string> outputs, std::vector<std::string> deps = {}) {
+        TransformDescriptor result;
+        result.id = std::move(id);
+        result.version = 1;
+        result.input_facts = std::move(inputs);
+        result.produced_facts = std::move(outputs);
+        result.dependencies = std::move(deps);
+        result.invalidation_keys = {"source"};
+        result.invalidation_inputs = {TransformInvalidationInput{
+            .name = "source",
+            .kind = TransformInputKind::source,
+            .provider_id = "test.source.v1",
+            .static_value = "source"}};
+        result.options = {"deterministic-sql-v1"};
+        result.input_queries = {"SELECT 1"};
+        result.output_queries = {"SELECT 1"};
+        result.output_count_query = "SELECT 1";
+        result.implementation_provider = TransformImplementationProvider{
+            .provider_id = result.id + ".executor.v1",
+            .version = 1,
+            .content = result.id + "-executor"};
+        for (const auto &fact : result.produced_facts) {
+          result.fact_set_requirements.push_back(
+              TransformFactSetRequirement{.name = fact, .facts = {fact}});
+        }
+        return result;
+      };
+  const auto expect_rejected = [](TransformRegistry registry) {
+    bool rejected = false;
+    try {
+      (void)registry.execution_order();
+    } catch (const std::invalid_argument &) {
+      rejected = true;
+    }
+    CHECK(rejected);
+  };
+
+  {
+    TransformRegistry registry;
+    registry.register_source_fact(TransformSourceFact{.name = "raw"});
+    auto transform = fact_transform("bad-alias", {"raw"}, {"actual.fact"});
+    transform.fact_set_requirements.push_back(
+        TransformFactSetRequirement{.name = "bad-alias",
+                                    .facts = {"undeclared.fact"}});
+    registry.register_transform(std::move(transform));
+    expect_rejected(std::move(registry));
+  }
+  {
+    TransformRegistry registry;
+    registry.register_source_fact(TransformSourceFact{.name = "raw"});
+    auto transform = fact_transform("incompatible", {"raw"}, {"fact"});
+    transform.input_catalog = "other-catalog";
+    registry.register_transform(std::move(transform));
+    expect_rejected(std::move(registry));
+  }
+  {
+    TransformRegistry registry;
+    registry.register_source_fact(TransformSourceFact{.name = "raw"});
+    registry.register_transform(
+        fact_transform("producer-a", {"raw"}, {"duplicate.fact"}));
+    registry.register_transform(
+        fact_transform("producer-b", {"raw"}, {"duplicate.fact"}));
+    expect_rejected(std::move(registry));
+  }
+  {
+    TransformRegistry registry;
+    registry.register_source_fact(TransformSourceFact{.name = "raw"});
+    registry.register_transform(
+        fact_transform("missing-dependency", {"raw"}, {"derived.fact"},
+                       {}));
+    auto consumer =
+        fact_transform("consumer", {"derived.fact"}, {"consumer.fact"});
+    registry.register_transform(std::move(consumer));
+    expect_rejected(std::move(registry));
+  }
+  {
+    TransformRegistry registry;
+    registry.register_source_fact(TransformSourceFact{.name = "raw"});
+    registry.register_transform(
+        fact_transform("undeclared-input", {"missing.fact"}, {"fact"}));
+    expect_rejected(std::move(registry));
+  }
+  {
+    TransformRegistry registry;
+    auto first = fact_transform("cycle-a", {"cycle-b.fact"}, {"cycle-a.fact"},
+                                {"cycle-b"});
+    auto second = fact_transform("cycle-b", {"cycle-a.fact"},
+                                 {"cycle-b.fact"}, {"cycle-a"});
+    registry.register_transform(std::move(first));
+    registry.register_transform(std::move(second));
+    expect_rejected(std::move(registry));
+  }
 }
 
 TEST_CASE("named transform pipeline reuses identical content identities") {
@@ -252,6 +357,40 @@ TEST_CASE("named transform pipeline reuses identical content identities") {
   }
 }
 
+TEST_CASE("reused attempt and last-run history survive close and reopen") {
+  const auto path = std::filesystem::temp_directory_path() /
+                    "cidx-hse67-reused-history.db";
+  std::filesystem::remove(path);
+  {
+    Storage db(path.string());
+    REQUIRE(db.run_transform_pipeline().complete);
+    const auto reused = db.run_transform_pipeline();
+    REQUIRE(reused.complete);
+    CHECK(std::ranges::all_of(reused.runs, [](const TransformRun &run) {
+      return run.status == TransformRunStatus::reused;
+    }));
+    auto history = db.raw_db().prepare(
+        "SELECT value FROM meta WHERE key = "
+        "'transform.entity-graph-rollup.history.last_run'");
+    REQUIRE(history.step());
+    CHECK(history.col_text(0).find("reused|") == 0);
+    auto published_generation = db.raw_db().prepare(
+        "SELECT value FROM meta WHERE key = "
+        "'transform.entity-graph-rollup.published.generation'");
+    REQUIRE(published_generation.step());
+    CHECK(published_generation.col_text(0) == "1");
+  }
+  {
+    Storage db(path.string());
+    const auto status = db.transform_status("entity-graph");
+    REQUIRE(status.runs.size() == 1);
+    CHECK(status.runs.front().status == TransformRunStatus::reused);
+    CHECK(db.transform_explain("entity-graph").find("reused") !=
+          std::string::npos);
+  }
+  std::filesystem::remove(path);
+}
+
 TEST_CASE("transform requalifies mutated derived output before reuse") {
   Storage db(":memory:");
   Symbol src;
@@ -281,6 +420,48 @@ TEST_CASE("transform requalifies mutated derived output before reuse") {
   CHECK(it->status == TransformRunStatus::ran);
   CHECK(it->diagnostic.find("mutation") != std::string::npos);
   CHECK(db.run_transform_pipeline().complete);
+}
+
+TEST_CASE("non-reproducing derived mutation fails qualification and preserves publication") {
+  Storage db(":memory:");
+  Symbol src;
+  src.usr = "transform:@F@nondeterministic-src";
+  src.spelling = "nondeterministic-src";
+  src.kind = "function";
+  src.is_definition = true;
+  const auto src_id = db.add_symbol(src);
+  Symbol dst = src;
+  dst.usr = "transform:@F@nondeterministic-dst";
+  dst.spelling = "nondeterministic-dst";
+  const auto dst_id = db.add_symbol(dst);
+  db.add_edge(Edge{.src_id = src_id,
+                   .dst_id = dst_id,
+                   .kind = 1,
+                   .count = 1,
+                   .base_access = std::nullopt,
+                   .is_virtual = std::nullopt});
+  REQUIRE(db.run_transform_pipeline().complete);
+  auto published = db.raw_db().prepare(
+      "SELECT value FROM meta WHERE key = "
+      "'transform.edge-site-count-rollup.published.output'");
+  REQUIRE(published.step());
+  const std::string published_identity = published.col_text(0);
+
+  db.raw_db().exec("UPDATE edge SET count = count + 99 WHERE kind = 1");
+  db.inject_transform_nondeterminism_for_testing("edge-site-count-rollup");
+  const auto failed = db.run_transform_pipeline();
+  CHECK(failed.failed);
+  const auto status = db.transform_fact_set_status("edge.count");
+  CHECK(status.known);
+  CHECK_FALSE(status.ready);
+  CHECK(status.status == TransformRunStatus::failed);
+  CHECK(db.transform_explain("edge.count").find("qualification") !=
+        std::string::npos);
+  auto retained = db.raw_db().prepare(
+      "SELECT value FROM meta WHERE key = "
+      "'transform.edge-site-count-rollup.published.output'");
+  REQUIRE(retained.step());
+  CHECK(retained.col_text(0) == published_identity);
 }
 
 TEST_CASE("dynamic target changes rebuild semantic dependents only") {
@@ -323,15 +504,10 @@ TEST_CASE("dynamic target changes rebuild semantic dependents only") {
 TEST_CASE("implementation version change closes only declared downstream") {
   Storage db(":memory:");
   REQUIRE(db.run_transform_pipeline().complete);
-  // Model a previously published generation produced by the prior
-  // implementation version. This is persisted lifecycle state, not an
-  // invalidation-key test override.
-  db.raw_db().exec(
-      "UPDATE meta SET value = '0' WHERE key = "
-      "'transform.edge-site-count-rollup.published.version'");
-  db.raw_db().exec(
-      "UPDATE meta SET value = 'previous-implementation-input' WHERE key = "
-      "'transform.edge-site-count-rollup.published.input'");
+  // Change the registered provider version, which is coupled to the
+  // edge-site executor and participates in the current input identity.
+  db.set_transform_implementation_provider_for_testing(
+      "edge-site-count-rollup", 2);
   const auto changed = db.run_transform_pipeline();
   const auto status = [&](std::string_view id) {
     const auto it = std::ranges::find_if(
@@ -426,6 +602,11 @@ TEST_CASE(
   const auto baseline = db.run_transform_pipeline();
   REQUIRE(baseline.runs.size() == 9);
 
+  Edge earlier_edge;
+  earlier_edge.src_id = src_id;
+  earlier_edge.dst_id = dst_id;
+  earlier_edge.kind = 1;
+  db.add_edge(earlier_edge);
   db.raw_db().exec("INSERT OR IGNORE INTO entity_node(id, kind) VALUES (" +
                    std::to_string(src_id) + ", 1), (" + std::to_string(dst_id) +
                    ", 1)");
@@ -470,6 +651,19 @@ TEST_CASE(
   REQUIRE(effect != status.runs.end());
   CHECK(effect->status == TransformRunStatus::stale);
   CHECK(effect->diagnostic.find("entity-graph-rollup") != std::string::npos);
+  auto edge_attempt = db.raw_db().prepare(
+      "SELECT value FROM meta WHERE key = "
+      "'transform.edge-site-count-rollup.attempt.status'");
+  REQUIRE(edge_attempt.step());
+  CHECK(edge_attempt.col_text(0) == "stale");
+  const auto earlier = db.transform_fact_set_status("edge.count");
+  CHECK(earlier.known);
+  CHECK_FALSE(earlier.ready);
+  CHECK(earlier.status == TransformRunStatus::stale);
+  const auto downstream = db.transform_fact_set_status("effect");
+  CHECK(downstream.known);
+  CHECK_FALSE(downstream.ready);
+  CHECK(downstream.status == TransformRunStatus::stale);
 }
 
 TEST_CASE("transform invalidation is typed and has minimum closure") {

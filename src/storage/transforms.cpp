@@ -68,6 +68,18 @@ const char *transform_completeness_name(TransformCompleteness completeness) {
   return "pending";
 }
 
+void TransformRegistry::register_source_fact(TransformSourceFact source_fact) {
+  if (source_fact.name.empty() || source_fact.schema_version < 1 ||
+      source_fact.catalog.empty() ||
+      std::ranges::any_of(source_facts_, [&](const auto &candidate) {
+        return candidate.name == source_fact.name;
+      })) {
+    throw std::invalid_argument("invalid or duplicate source fact: " +
+                                source_fact.name);
+  }
+  source_facts_.push_back(std::move(source_fact));
+}
+
 void TransformRegistry::register_transform(TransformDescriptor descriptor) {
   if (descriptor.id.empty()) {
     throw std::invalid_argument("transform id must not be empty");
@@ -78,6 +90,30 @@ void TransformRegistry::register_transform(TransformDescriptor descriptor) {
   descriptors_.push_back(std::move(descriptor));
 }
 
+void TransformRegistry::set_implementation_version(const std::string &id,
+                                                    int version) {
+  if (version < 1) {
+    throw std::invalid_argument("implementation provider version must be positive: " +
+                                id);
+  }
+  const auto it = std::ranges::find(descriptors_, id,
+                                    &TransformDescriptor::id);
+  if (it == descriptors_.end()) {
+    throw std::invalid_argument("unknown transform implementation provider: " +
+                                id);
+  }
+  it->implementation_provider.version = version;
+  for (auto &input : it->invalidation_inputs) {
+    if (input.kind != TransformInputKind::implementation) {
+      continue;
+    }
+    input.provider_id = it->implementation_provider.provider_id;
+    input.static_value = it->implementation_provider.provider_id + "|" +
+                         std::to_string(version) + "|" +
+                         it->implementation_provider.content;
+  }
+}
+
 const TransformDescriptor *
 TransformRegistry::find(const std::string &id) const {
   const auto it = std::ranges::find(descriptors_, id, &TransformDescriptor::id);
@@ -85,10 +121,12 @@ TransformRegistry::find(const std::string &id) const {
 }
 
 void TransformRegistry::validate() const {
-  const std::unordered_set<std::string> source_facts = {
-      "edge",          "edge_site",      "symbol",       "definition",
-      "def_edge",      "type_edge",      "include_config", "include_edge",
-      "include_site",  "artifact",       "raw"};
+  const auto source_fact = [&](const std::string &name)
+      -> const TransformSourceFact * {
+    const auto it = std::ranges::find(source_facts_, name,
+                                      &TransformSourceFact::name);
+    return it == source_facts_.end() ? nullptr : &*it;
+  };
   std::unordered_map<std::string, std::string> producers;
   for (const auto &descriptor : descriptors_) {
     if (descriptor.version < 1) {
@@ -121,13 +159,33 @@ void TransformRegistry::validate() const {
       throw std::invalid_argument("transform fact schema/catalog is invalid: " +
                                   descriptor.id);
     }
+    if (descriptor.implementation_provider.provider_id.empty() ||
+        descriptor.implementation_provider.version < 1 ||
+        descriptor.implementation_provider.content.empty()) {
+      throw std::invalid_argument(
+          "transform implementation provider is invalid: " + descriptor.id);
+    }
     std::set<std::string> declared_requirements;
+    std::set<std::string> declared_inputs;
+    for (const auto &fact : descriptor.input_facts) {
+      if (fact.empty() || !declared_inputs.insert(fact).second) {
+        throw std::invalid_argument("duplicate input fact: " + descriptor.id);
+      }
+    }
     for (const auto &requirement : descriptor.fact_set_requirements) {
       if (requirement.name.empty() || requirement.facts.empty() ||
           requirement.schema_version < 1 || requirement.catalog.empty() ||
           !declared_requirements.insert(requirement.name).second) {
         throw std::invalid_argument("invalid produced fact-set declaration: " +
                                     descriptor.id);
+      }
+      std::set<std::string> members;
+      for (const auto &fact : requirement.facts) {
+        if (fact.empty() || !members.insert(fact).second) {
+          throw std::invalid_argument("duplicate fact-set member: " +
+                                      descriptor.id + " -> " +
+                                      requirement.name);
+        }
       }
     }
     for (const auto &fact : descriptor.produced_facts) {
@@ -141,12 +199,18 @@ void TransformRegistry::validate() const {
       }
     }
     for (const auto &requirement : descriptor.fact_set_requirements) {
-      if (std::ranges::find(descriptor.produced_facts, requirement.name) !=
-          descriptor.produced_facts.end() &&
-          (requirement.schema_version != descriptor.output_schema_version ||
-           requirement.catalog != descriptor.output_catalog)) {
-        throw std::invalid_argument("produced fact-set schema mismatch: " +
-                                    descriptor.id + " -> " + requirement.name);
+      for (const auto &fact : requirement.facts) {
+        const auto producer = producers.find(fact);
+        if (producer == producers.end() || producer->second != descriptor.id) {
+          throw std::invalid_argument("fact-set member is not produced by its "
+                                      "declared provider: " +
+                                      descriptor.id + " -> " + fact);
+        }
+        if (requirement.schema_version != descriptor.output_schema_version ||
+            requirement.catalog != descriptor.output_catalog) {
+          throw std::invalid_argument("produced fact-set schema mismatch: " +
+                                      descriptor.id + " -> " + requirement.name);
+        }
       }
     }
     std::set<std::string> typed_keys;
@@ -196,9 +260,15 @@ void TransformRegistry::validate() const {
     for (const auto &fact : descriptor.input_facts) {
       const auto producer = producers.find(fact);
       if (producer == producers.end()) {
-        if (!source_facts.contains(fact)) {
+        const auto *source = source_fact(fact);
+        if (source == nullptr) {
           throw std::invalid_argument("undeclared input fact: " + descriptor.id +
                                       " -> " + fact);
+        }
+        if (source->schema_version != descriptor.input_schema_version ||
+            source->catalog != descriptor.input_catalog) {
+          throw std::invalid_argument("incompatible source fact schema: " +
+                                      descriptor.id + " -> " + fact);
         }
         continue;
       }
