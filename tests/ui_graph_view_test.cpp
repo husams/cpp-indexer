@@ -2,6 +2,7 @@
 #include "doctest/doctest.h"
 
 #include <string>
+#include <string_view>
 
 #include "cli/json_out.hpp"
 #include "graph/query.hpp"
@@ -207,7 +208,10 @@ TEST_CASE("GraphView normalizes typed file, path, and CXQ inputs") {
   const int64_t source_id = db.add_symbol(source);
   const int64_t target_id = db.add_symbol(target);
   const int64_t include_config = db.add_include_config(
-      {.tu_file_id = file, .digest = "typed", .arguments = {"-DTEST"}});
+      {.tu_file_id = file,
+       .digest = "typed",
+       .working_dir = "/secret/checkout",
+       .arguments = {"-DSECRET_TOKEN=top-secret", "/secret/checkout/include"}});
   const int64_t include_edge_id =
       db.add_include_edge({.src_file_id = file,
                            .dst_file_id = header,
@@ -238,6 +242,10 @@ TEST_CASE("GraphView normalizes typed file, path, and CXQ inputs") {
   CHECK(file_json.find("file:v1:") != std::string::npos);
   CHECK(file_json.find("include-edge:v1:") != std::string::npos);
   CHECK(file_json.find("\"configuration\"") != std::string::npos);
+  CHECK(file_json.find("arguments_redacted") != std::string::npos);
+  CHECK(file_json.find("SECRET_TOKEN") == std::string::npos);
+  CHECK(file_json.find("top-secret") == std::string::npos);
+  CHECK(file_json.find("/secret/checkout") == std::string::npos);
   CHECK(file_json.find("\"spelling\"") != std::string::npos);
 
   request.input =
@@ -271,11 +279,30 @@ TEST_CASE("GraphView normalizes typed file, path, and CXQ inputs") {
   CHECK_THROWS_AS(cidx::ui::build_graph_view(db, request),
                   cidx::ui::GraphViewError);
 
+  auto entity_insert = db.raw_db().prepare(
+      "INSERT INTO entity_node (id, kind) VALUES (?, 1), (?, 1)");
+  entity_insert.bind(1, source_id);
+  entity_insert.bind(2, target_id);
+  entity_insert.step_done();
+  db.add_entity_edge(source_id, target_id, 8);
   request.input = cidx::ui::GraphViewInput{
       .kind = cidx::ui::GraphInputKind::Entity, .value = "ns::typed_source"};
   const std::string entity_json =
       cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
   CHECK(entity_json.find("\"input_kind\": \"entity\"") != std::string::npos);
+  CHECK(entity_json.find("entity:v1:") != std::string::npos);
+  CHECK(entity_json.find("entity-edge:v1:") != std::string::npos);
+  CHECK(entity_json.find("\"entities\"") != std::string::npos);
+  CHECK(entity_json.find("\"entity_edges\"") != std::string::npos);
+
+  request.input = cidx::ui::GraphViewInput{
+      .kind = cidx::ui::GraphInputKind::QueryPlan,
+      .value = cidx::query::canonical_json(
+          cidx::query::start(cidx::query::entity("ns::typed_source")).plan())};
+  const std::string entity_plan_json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(entity_plan_json.find("entity:v1:") != std::string::npos);
+  CHECK(entity_plan_json.find("\"entities\"") != std::string::npos);
 }
 
 TEST_CASE("GraphView fixtures preserve type, stub, and stale markers") {
@@ -292,6 +319,11 @@ TEST_CASE("GraphView fixtures preserve type, stub, and stale markers") {
                       .kind = cidx::kTypeKindRecord,
                       .decl_usr = "USR::fixture-owner"};
   const int64_t type_id = db.intern_type_node(type);
+  const int64_t pointee_id =
+      db.intern_type_node({.type_key = "builtin:int",
+                           .spelling = "int",
+                           .kind = cidx::kTypeKindBuiltin});
+  db.add_type_edge(type_id, 1, 0, pointee_id);
   db.add_symbol_type(owner_id, cidx::kSymbolTypeOfType, type_id);
   auto stub = symbol("USR::fixture-stub", "std::fixture_stub");
   stub.resolved = false;
@@ -305,6 +337,9 @@ TEST_CASE("GraphView fixtures preserve type, stub, and stale markers") {
       cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
   CHECK(type_json.find("\"input_kind\": \"type\"") != std::string::npos);
   CHECK(type_json.find("\"types\"") != std::string::npos);
+  CHECK(type_json.find("type:v1:") != std::string::npos);
+  CHECK(type_json.find("\"kind\": \"type\"") != std::string::npos);
+  CHECK(type_json.find("type-edge:v1:") != std::string::npos);
 
   request.input = cidx::ui::GraphViewInput{
       .kind = cidx::ui::GraphInputKind::Symbol, .value = "USR::fixture-stub"};
@@ -325,6 +360,41 @@ TEST_CASE("GraphView fixtures preserve type, stub, and stale markers") {
       cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
   CHECK(stale_json.find("\"unknown\"") != std::string::npos);
   CHECK(stale_json.find("\"stale\"") != std::string::npos);
+}
+
+TEST_CASE("GraphView path export keeps the ordered witness and omits chords") {
+  Storage db(":memory:");
+  const int64_t a = db.add_symbol(symbol("USR::path-a", "path_a"));
+  const int64_t b = db.add_symbol(symbol("USR::path-b", "path_b"));
+  const int64_t c = db.add_symbol(symbol("USR::path-c", "path_c"));
+  const int64_t d = db.add_symbol(symbol("USR::path-d", "path_d"));
+  const int64_t calls = cidx::graph::edge_kinds_map().at("calls");
+  const int64_t uses = cidx::graph::edge_kinds_map().at("uses");
+  db.add_edge({.src_id = a, .dst_id = b, .kind = calls});
+  db.add_edge({.src_id = b, .dst_id = d, .kind = calls});
+  db.add_edge({.src_id = a, .dst_id = c, .kind = uses});
+  db.add_edge({.src_id = c, .dst_id = d, .kind = uses});
+  db.add_edge({.src_id = a, .dst_id = d, .kind = uses});
+
+  cidx::ui::GraphViewRequest request;
+  request.input = cidx::ui::GraphViewInput{
+      .kind = cidx::ui::GraphInputKind::Path, .value = "path_a->path_d"};
+  request.edge_kinds = std::vector<std::string>{"calls"};
+  request.depth = 3;
+  const std::string calls_json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(calls_json.find("\"edges\": [\n    {\n") != std::string::npos);
+  CHECK(calls_json.find("\"kind\": \"calls\"") != std::string::npos);
+  CHECK(calls_json.find("\"kind\": \"uses\"") == std::string::npos);
+  CHECK(calls_json.find("path:v1:") != std::string::npos);
+
+  request.edge_kinds = std::vector<std::string>{"uses"};
+  const std::string uses_json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(uses_json.find("\"kind\": \"uses\"") != std::string::npos);
+  CHECK(result_id(calls_json) != result_id(uses_json));
+  CHECK(calls_json.find("path_b") != std::string::npos);
+  CHECK(calls_json.find("path_c") == std::string::npos);
 }
 
 TEST_CASE("GraphView reports evidence beyond the site budget") {
@@ -360,6 +430,73 @@ TEST_CASE("GraphView reports evidence beyond the site budget") {
       cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
   CHECK(json.find("\"sites_used\": 200") != std::string::npos);
   CHECK(json.find("\"evidence_truncated\": true") != std::string::npos);
+}
+
+TEST_CASE(
+    "GraphView shares edge budget and truncates include evidence exactly") {
+  Storage db(":memory:");
+  const int64_t component = db.add_component("test", "/secret/checkout");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "main.cpp");
+  const int64_t header = db.add_file(directory, "header.hpp");
+  auto source = symbol("USR::budget-source", "budget_source");
+  source.file_id = file;
+  auto target = symbol("USR::budget-target", "budget_target");
+  target.file_id = file;
+  const int64_t source_id = db.add_symbol(source);
+  const int64_t target_id = db.add_symbol(target);
+  db.add_edge({.src_id = source_id,
+               .dst_id = target_id,
+               .kind = cidx::graph::edge_kinds_map().at("calls")});
+  const int64_t config =
+      db.add_include_config({.tu_file_id = file,
+                             .digest = "budget",
+                             .working_dir = "/secret/checkout"});
+  const int64_t include =
+      db.add_include_edge({.src_file_id = file,
+                           .dst_file_id = header,
+                           .dst_path = "/secret/checkout/header.hpp",
+                           .config_id = config});
+  db.add_include_site(
+      {.edge_id = include, .line = 10, .col = 1, .begin_offset = 10});
+  db.add_include_site(
+      {.edge_id = include, .line = 20, .col = 1, .begin_offset = 20});
+
+  cidx::ui::GraphViewRequest request;
+  request.input =
+      cidx::ui::GraphViewInput{.kind = cidx::ui::GraphInputKind::File,
+                               .value = "/secret/checkout/main.cpp"};
+  request.edge_budget = 1;
+  request.site_budget = 0;
+  const auto count = [](const std::string &value, std::string_view needle) {
+    std::size_t total = 0;
+    for (std::size_t pos = value.find(needle); pos != std::string::npos;
+         pos = value.find(needle, pos + needle.size())) {
+      ++total;
+    }
+    return total;
+  };
+  const std::string zero_sites =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(count(zero_sites, "\"line\": 10") == 0);
+  CHECK(zero_sites.find("\"sites_truncated\": true") != std::string::npos);
+  CHECK(zero_sites.find("\"evidence_truncated\": true") != std::string::npos);
+  CHECK(zero_sites.find("\"id\": \"edge:v1:") == std::string::npos);
+  CHECK(zero_sites.find("/secret/checkout") == std::string::npos);
+
+  request.site_budget = 1;
+  const std::string one_site =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(count(one_site, "\"line\": 10") == 1);
+  CHECK(one_site.find("\"sites_truncated\": true") != std::string::npos);
+
+  request.site_budget = 2;
+  const std::string all_sites =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(count(all_sites, "\"line\": 10") == 1);
+  CHECK(count(all_sites, "\"line\": 20") == 1);
+  CHECK(all_sites.find("\"sites_truncated\": false") != std::string::npos);
+  CHECK(all_sites.find("\"truncated\": true") != std::string::npos);
 }
 
 TEST_CASE("GraphView enforces the byte budget or fails explicitly") {
@@ -414,7 +551,7 @@ TEST_CASE(
   request.node_budget = 3;
   request.edge_budget = 2;
   request.site_budget = 2;
-  request.byte_budget = 16000;
+  request.byte_budget = 9000;
   const std::string json =
       cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
 
@@ -447,9 +584,10 @@ TEST_CASE("GraphView export enforces the byte budget after script escaping") {
   REQUIRE(start != std::string::npos);
   REQUIRE(end != std::string::npos);
   CHECK(end - (start + marker.size()) <= request.byte_budget);
-  CHECK(html.find("\\u003c", start) != std::string::npos);
-  CHECK(html.find("\\u0026", start) != std::string::npos);
-  CHECK(html.find("\\u003e", start) != std::string::npos);
+  CHECK(html.find(std::string(150, '<'), start) == std::string::npos);
+  CHECK(html.find(std::string(150, '&'), start) == std::string::npos);
+  CHECK(html.find(std::string(150, '>'), start) == std::string::npos);
+  CHECK(html.find("\"input_redacted\": true", start) != std::string::npos);
 }
 
 TEST_CASE("GraphView refuses to enumerate without a bounded root") {

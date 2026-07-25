@@ -94,6 +94,20 @@ std::optional<TypeNode> SqliteStorageService::type_node_by_id(int64_t type_id) {
   return n;
 }
 
+std::vector<TypeEdge> SqliteStorageService::type_edges_from(int64_t type_id) {
+  auto st = db_.prepare("SELECT src_id, kind, position, dst_id FROM type_edge "
+                        "WHERE src_id = ? ORDER BY kind, position, dst_id");
+  st.bind(1, type_id);
+  std::vector<TypeEdge> out;
+  while (st.step()) {
+    out.push_back(TypeEdge{.src_id = st.col_int64(0),
+                           .kind = st.col_int64(1),
+                           .position = st.col_int64(2),
+                           .dst_id = st.col_int64(3)});
+  }
+  return out;
+}
+
 void SqliteStorageService::add_type_edge(int64_t src_id, int64_t kind,
                                          int64_t position, int64_t dst_id) {
   // OR REPLACE on the (src, kind, position) key: for structural nodes the
