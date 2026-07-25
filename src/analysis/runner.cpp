@@ -15,7 +15,7 @@
 #include <unistd.h>
 #include <utility>
 
-#include "cli/souffle_rules.hpp"
+#include "application/souffle_rules.hpp"
 #include "storage/storage.hpp"
 #include "util/errors.hpp"
 #include "util/hashing.hpp"
