@@ -14,6 +14,8 @@
 #include <system_error>
 #include <vector>
 
+#include "analysis/facts.hpp"
+#include "analysis/runner.hpp"
 #include "astgraph/astgraph.hpp"
 #include "astgraph/souffle_runner.hpp"
 #include "cli/args.hpp"     // kVersion
@@ -203,6 +205,26 @@ callgraph_json(const std::string &source, const std::string &out_path,
   });
 }
 
+std::vector<cidx::astgraph::CallFact>
+callgraph_facts(const cidx::analysis::FactRelation &relation) {
+  std::vector<cidx::astgraph::CallFact> calls;
+  calls.reserve(relation.rows.size());
+  for (const auto &row : relation.rows) {
+    if (row.size() != 7U) {
+      throw cidx::CidxError("native callgraph result has an invalid row shape");
+    }
+    cidx::astgraph::CallFact call{.caller_node = std::get<std::int64_t>(row[0]),
+                                  .caller_usr = std::get<std::string>(row[1]),
+                                  .caller_name = std::get<std::string>(row[2]),
+                                  .callee_node = std::get<std::int64_t>(row[3]),
+                                  .callee_usr = std::get<std::string>(row[4]),
+                                  .callee_name = std::get<std::string>(row[5]),
+                                  .line = std::get<std::int64_t>(row[6])};
+    calls.push_back(std::move(call));
+  }
+  return calls;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -374,7 +396,41 @@ int main(int argc, char **argv) {
       if (rule != "callgraph") {
         throw cidx::CidxError("unsupported native rule: " + rule);
       }
-      const auto calls = cidx::astgraph::run_callgraph(out_path, cli.jobs);
+      const cidx::analysis::AnalysisPackage package{
+          .name = "astgraph.callgraph",
+          .version = "native",
+          .entry_point = "callgraph",
+          .engine = "astgraph-native",
+          .program = "native:astgraph.callgraph",
+          .content_hash = {},
+          .required_relations = {}};
+      const cidx::analysis::AstgraphFactProvider provider(out_path);
+      const cidx::analysis::AnalysisRun run =
+          cidx::analysis::AnalysisRunner(
+              std::make_unique<cidx::analysis::AstgraphCallgraphEngine>(
+                  [](const std::string &path, int jobs) {
+                    const auto facts =
+                        cidx::astgraph::run_callgraph(path, jobs);
+                    std::vector<cidx::analysis::FactRow> rows;
+                    rows.reserve(facts.size());
+                    for (const auto &fact : facts) {
+                      rows.push_back({fact.caller_node, fact.caller_usr,
+                                      fact.caller_name, fact.callee_node,
+                                      fact.callee_usr, fact.callee_name,
+                                      fact.line});
+                    }
+                    return rows;
+                  }))
+              .run(package, provider, {},
+                   cidx::analysis::AnalysisOptions{.jobs = cli.jobs});
+      if (run.status == cidx::analysis::AnalysisStatus::error ||
+          run.status == cidx::analysis::AnalysisStatus::unknown ||
+          !run.relations.contains("call")) {
+        throw cidx::CidxError(run.diagnostics.empty()
+                                  ? "native callgraph did not produce a result"
+                                  : run.diagnostics.front().message);
+      }
+      const auto calls = callgraph_facts(run.relations.at("call"));
       std::cout << cidx::json_out::dumps_indent2(
                        callgraph_json(source, out_path, calls))
                 << "\n";

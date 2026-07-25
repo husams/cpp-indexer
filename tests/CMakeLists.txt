@@ -19,6 +19,7 @@ set(CIDX_DEFAULT_TESTS
   query_plan_test
   catalog_test
   result_protocol_test
+  analysis_runner_test
   fuzzy_match_test
   repo_test
   include_aliasing_test
