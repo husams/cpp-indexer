@@ -16,6 +16,7 @@ reviewed contract change.
 | `modules/CidxRepository.tla` | repository/workspace structure smoke specification | human-authored normative contract |
 | `modules/CidxResult.tla` | result-status lifecycle smoke specification | human-authored normative contract |
 | `modules/CidxWorkspaceLifecycle.tla` | workspace identity, configuration applicability, and generation lifecycle | human-authored normative contract |
+| `modules/CidxStorageLifecycle.tla` | storage generations, migrations, sidecars, packages, cleanup, and recovery | human-authored normative contract |
 | `modules/CidxBehavior.tla` | bounded end-to-end lifecycle, identity, query, transform, storage, failure, and recovery behavior | human-authored normative contract |
 | `conformance/CidxConformance.tla` | deterministic action-sequence replay against the behavioral model | conformance checker contract |
 | `models/*.tla` and `models/*.cfg` | finite TLC smoke models and their constants/invariants | human-authored model boundary |
@@ -33,6 +34,7 @@ The dependency direction is intentionally one-way:
 CidxTypes <- CidxRepository <- CidxRepositorySmoke
           <- CidxResult     <- CidxResultSmoke
           <- CidxWorkspaceLifecycle <- CidxWorkspaceLifecycleSmoke
+          <- CidxStorageLifecycle <- CidxStorageLifecycleSmoke
           <- CidxBehavior <- CidxBehaviorSmoke
 ```
 
@@ -67,6 +69,33 @@ Future modules must import these operators instead of defining look-alike
 status strings or implementation-specific record shapes. Concrete identifiers
 and finite model sizes belong in `.cfg` files, not in the normative type
 module.
+
+## Storage M3 contract
+
+`CidxStorageLifecycle` defines the logical storage boundary required by HSE-88.
+An update creates a staged one-TU generation, extracts and validates it, and
+publishes the core current pointer only after the artifact is complete and
+valid. The previous current generation remains retained and stale until
+leases and replay pins permit cleanup. A failed or interrupted publication
+leaves the previous pointer current or reports an explicit stale/unavailable
+read; no partial, corrupt, or incompatible candidate can become current.
+
+Migrations retain a pre-migration snapshot and distinguish supported commits,
+newer-schema readers, incompatible readers, interruption, rollback, and
+recovered-previous classification. Core and sidecar files have separate
+publication transitions. A manifest-qualified sidecar is attachable only when
+its generation, validation, compatibility, and content quality agree with the
+core; missing, stale, corrupt, or incompatible sidecars yield partial or
+unknown results, never an empty complete result. The model deliberately does
+not claim a transaction spanning the core and sidecar files, and the seeded
+cross-file atomicity scenario must fail the model gate.
+
+Export/import packages carry explicit core and sidecar completeness. Partial
+packages cannot be imported as complete state. Include-hygiene planning,
+validation, rejection, and application use the same evidence-before-edit
+discipline as other derived transformations. Read-only probes preserve all
+abstract persistent state and the cleanup invariant protects current, leased,
+and replay-pinned generations.
 
 ## Normative boundary
 

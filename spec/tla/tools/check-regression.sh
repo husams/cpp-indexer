@@ -80,6 +80,32 @@ run_seed configuration-invalidation InvalidationInvariant
 run_seed toolchain-invalidation InvalidationInvariant
 run_seed catalog-invalidation InvalidationInvariant
 
+storage_seed_dir="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-storage-seed.XXXXXX")"
+cp "$ROOT"/models/*.cfg "$storage_seed_dir"/
+sed 's/^    Scenario = "valid"$/    Scenario = "cross-file-atomicity"/' \
+  "$storage_seed_dir/CidxStorageLifecycleSmoke.cfg" \
+  >"$storage_seed_dir/CidxStorageLifecycleSmoke.cfg.seed"
+mv "$storage_seed_dir/CidxStorageLifecycleSmoke.cfg.seed" \
+  "$storage_seed_dir/CidxStorageLifecycleSmoke.cfg"
+
+set +e
+storage_seed_output="$(TLA_MODEL_DIR="$storage_seed_dir" \
+  TLA_MODELS="CidxStorageLifecycleSmoke" \
+  "$ROOT/tools/check.sh" 2>&1)"
+storage_seed_status=$?
+set -e
+rm -rf "$storage_seed_dir"
+
+if [[ "$storage_seed_status" -ne 30 ]] \
+    || ! grep -q "TLA_MODEL_STATUS=FAIL model=CidxStorageLifecycleSmoke" \
+        <<<"$storage_seed_output" \
+    || ! grep -q "CrossFileAtomicityInvariant" <<<"$storage_seed_output"; then
+  echo "TLA_REGRESSION_STATUS=FAIL reason=cross-file-atomicity-seed-did-not-fail-closed" >&2
+  printf '%s\n' "$storage_seed_output" >&2
+  exit 1
+fi
+echo "TLA_SEEDED_VIOLATION_STATUS=PASS scenario=cross-file-atomicity invariant=CrossFileAtomicityInvariant"
+
 progress_modules="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-progress.XXXXXX")"
 cp "$ROOT"/modules/*.tla "$progress_modules"/
 sed 's#\\/ MakeCurrent##' \
