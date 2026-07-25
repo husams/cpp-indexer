@@ -26,6 +26,7 @@ TRUST_LEVELS = ('unverified', 'producer-verified', 'reader-verified')
 EVENT_KINDS = ('progress', 'diagnostic', 'completed')
 DIAGNOSTIC_CODES = ('usage', 'invalid_input', 'stale_input', 'timeout', 'backend_error', 'policy_refuted', 'unknown', 'truncated_budget', 'missing_evidence')
 ARTIFACT_KINDS = ('semantic-index', 'query-result', 'analysis', 'diff', 'refactoring-plan', 'proof')
+TRUNCATED_STATUSES = ('partial', 'error')
 
 class Status(StrEnum):
     COMPLETE = 'complete'

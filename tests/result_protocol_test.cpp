@@ -85,9 +85,15 @@ TEST_CASE("result protocol keeps status, truncation, stale input, and exit "
   CHECK(envelope.exit_code() == 4);
 
   envelope.status = Status::Error;
+  envelope.identity.freshness = "current";
   envelope.diagnostics = {{"timeout", "error", "backend timed out", "retry"}};
   CHECK(envelope.exit_class() == ExitClass::InfrastructureFailure);
   CHECK(envelope.exit_code() == 6);
+  envelope.completeness = {"unknown", true, false, 1000};
+  const std::string truncated_error =
+      cidx::json_out::dumps_indent2(envelope.to_json());
+  CHECK(truncated_error.find("\"truncated\": true") != std::string::npos);
+  CHECK(truncated_error.find("\"budget\": 1000") != std::string::npos);
   envelope.diagnostics = {{"invalid_input", "error", "bad input", "fix it"}};
   CHECK(envelope.exit_class() == ExitClass::InvalidOrStaleInput);
   CHECK(envelope.exit_code() == 3);

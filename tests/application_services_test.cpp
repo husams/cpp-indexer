@@ -6,6 +6,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -106,6 +107,24 @@ struct CancellingProgress final : cidx::application::ProgressSink {
 
   cidx::application::CancellationToken &token;
 };
+
+std::size_t count_occurrences(std::string_view value, std::string_view needle) {
+  std::size_t count = 0;
+  std::size_t offset = 0;
+  while ((offset = value.find(needle, offset)) != std::string_view::npos) {
+    ++count;
+    offset += needle.size();
+  }
+  return count;
+}
+
+void check_canonical_truncation(const cidx::protocol::ResultEnvelope &result) {
+  const std::string serialized =
+      cidx::json_out::dumps_indent2(result.to_json());
+  CHECK(count_occurrences(serialized, "\"truncated\": true") == 1);
+  CHECK(serialized.find("\"completeness\"") != std::string::npos);
+  CHECK(serialized.find("\"budget\": 1") != std::string::npos);
+}
 
 } // namespace
 
@@ -500,8 +519,7 @@ TEST_CASE("index service enforces work and diagnostic budgets stably") {
   CHECK(cancelled.identity.index == "stale");
   CHECK(cancelled.identity.freshness == "unverifiable");
   CHECK(cancelled.completeness.budget == 1);
-  CHECK(cidx::json_out::dumps_indent2(cancelled.result)
-            .find("\"truncated\": true") != std::string::npos);
+  check_canonical_truncation(cancelled);
   CHECK(cancelled.valid());
   REQUIRE_FALSE(cancelled.diagnostics.empty());
   CHECK(cancelled.diagnostics.front().code == "timeout");
@@ -556,8 +574,7 @@ TEST_CASE("index failure preserves fallback diagnostics, logs, and budget") {
       service.execute(cidx::application::IndexRequest{}, context);
   CHECK(result.status == cidx::protocol::Status::Error);
   CHECK(result.completeness.budget == 1);
-  CHECK(cidx::json_out::dumps_indent2(result.result)
-            .find("\"truncated\": true") != std::string::npos);
+  check_canonical_truncation(result);
   CHECK(result.identity.index == "unverifiable");
   CHECK(result.identity.freshness == "unverifiable");
   CHECK(result.valid());

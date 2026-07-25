@@ -334,7 +334,6 @@ StorageApplicationOperations::execute(const IndexRequest &request,
        {"deferred", json_out::Value::of(deferred)},
        {"warnings", json_out::Value::of(warnings)},
        {"errors", json_out::Value::of(errors)},
-       {"truncated", json_out::Value::of(truncated)},
        {"files", json_out::Value::arr(std::move(file_records))}});
   if (cancelled) {
     result.status = protocol::Status::Error;
@@ -376,7 +375,6 @@ StorageApplicationOperations::execute(const IndexRequest &request,
   result.identity.index = identity.freshness;
   if (result.status == protocol::Status::Error) {
     result.identity.freshness = "unverifiable";
-    result.completeness.truncated = false;
   } else if (identity.freshness == "stale" &&
              result.status == protocol::Status::Complete) {
     result.status = protocol::Status::Unknown;

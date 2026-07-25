@@ -43,6 +43,9 @@ struct ExitRule { std::string_view code; ExitClass exit_class; int exit_code; };
 struct DiagnosticStatusRule { Status status; std::string_view required_any; std::string_view forbidden; };
 struct AcceptanceVector { std::string_view name; std::string_view operation; Status status; std::string_view completeness_state; std::string_view freshness; std::string_view diagnostic; ExitClass exit_class; int exit_code; };
 inline constexpr std::array<std::string_view, 6> kStatusNames = {{"complete", "partial", "unknown", "refuted", "conditional", "error"}};
+inline constexpr std::array<Status, 2> kTruncatedStatuses = {{
+  Status::Partial, Status::Error
+}};
 inline constexpr std::array<std::string_view, 6> kExitClassNames = {{"success", "usage", "invalid_or_stale_input", "policy_failure", "unknown", "infrastructure_failure"}};
 inline constexpr std::array<int, 6> kExitCodes = {{0, 2, 3, 4, 5, 6}};
 inline constexpr std::array<std::string_view, 3> kFreshness = {{"current", "stale", "unverifiable"}};

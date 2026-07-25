@@ -336,7 +336,9 @@ bool ResultEnvelope::valid() const {
       (status == Status::Conditional && completeness.state != "unknown") ||
       (status == Status::Refuted && completeness.state != "unknown") ||
       (status == Status::Error && completeness.state != "unknown") ||
-      (completeness.truncated && status != Status::Partial) ||
+      (completeness.truncated &&
+       std::ranges::find(generated::kTruncatedStatuses, status) ==
+           generated::kTruncatedStatuses.end()) ||
       (identity.freshness == "stale" && status != Status::Unknown)) {
     return false;
   }

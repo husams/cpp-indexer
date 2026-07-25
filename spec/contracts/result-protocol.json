@@ -31,6 +31,7 @@
   ],
   "freshness": ["current", "stale", "unverifiable"],
   "completeness_states": ["complete", "partial", "unknown"],
+  "truncated_statuses": ["partial", "error"],
   "diagnostic_severities": ["info", "warning", "error"],
   "evidence_classes": ["source", "derived", "inferred", "runtime", "assumption", "proof"],
   "trust_levels": ["unverified", "producer-verified", "reader-verified"],

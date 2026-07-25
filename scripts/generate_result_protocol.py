@@ -121,6 +121,9 @@ struct ExitRule {{ std::string_view code; ExitClass exit_class; int exit_code; }
 {status_rule_type}
 struct AcceptanceVector {{ std::string_view name; std::string_view operation; Status status; std::string_view completeness_state; std::string_view freshness; std::string_view diagnostic; ExitClass exit_class; int exit_code; }};
 inline constexpr std::array<std::string_view, {len(statuses)}> kStatusNames = {{{{{status_names}}}}};
+inline constexpr std::array<Status, {len(data["truncated_statuses"])}> kTruncatedStatuses = {{{{
+  {", ".join(f"Status::{enum_name(status)}" for status in data["truncated_statuses"])}
+}}}};
 inline constexpr std::array<std::string_view, {len(exits)}> kExitClassNames = {{{{{exit_names}}}}};
 inline constexpr std::array<int, {len(exits)}> kExitCodes = {{{{{exit_codes}}}}};
 {domain_arrays}
@@ -162,6 +165,7 @@ EVENT_PROTOCOL = 'cidx.event/v1'
 {limit_lines}
 {numeric_lines}
 {domain_lines}
+TRUNCATED_STATUSES = {tuple(data["truncated_statuses"])!r}
 
 class Status(StrEnum):
 {enums}
@@ -358,7 +362,7 @@ def render_schema(data: dict) -> dict:
         if rule.get("forbidden"):
             then_all_of.append({"properties": {"diagnostics": {"not": {"contains": {"type": "object", "required": ["code"], "properties": {"code": {"enum": rule["forbidden"]}}}}}}})
         schema.setdefault("allOf", []).append({"if": {"properties": {"status": {"const": rule["status"]}}}, "then": {"allOf": then_all_of}})
-    schema.setdefault("allOf", []).append({"if": {"properties": {"completeness": {"properties": {"truncated": {"const": True}}}}}, "then": {"properties": {"status": {"const": "partial"}}}})
+    schema.setdefault("allOf", []).append({"if": {"properties": {"completeness": {"properties": {"truncated": {"const": True}}}}}, "then": {"properties": {"status": {"enum": data["truncated_statuses"]}}}})
     schema.setdefault("allOf", []).append({"if": {"properties": {"identity": {"properties": {"freshness": {"const": "stale"}}}}}, "then": {"properties": {"status": {"const": "unknown"}}}})
     for depth in range(limits["max_evidence_depth"] + 1):
         properties = {"id": text, "class": {"enum": data["evidence_classes"]}, "trust": {"enum": data["trust_levels"]}, "summary": text, "source": {"anyOf": [text, {"type": "null"}]}}

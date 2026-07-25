@@ -94,6 +94,20 @@ def test_query_result_adapter_preserves_stale_and_truncated_semantics() -> None:
     assert {item.code for item in stale.diagnostics} >= {"stale_input"}
 
 
+@pytest.mark.parametrize("diagnostic", ["backend_error", "timeout"])
+def test_error_budget_truncation_is_canonical(diagnostic: str) -> None:
+    envelope = _golden_envelope()
+    envelope.status = Status.ERROR
+    envelope.completeness = Completeness("unknown", True, False, 1)
+    envelope.diagnostics = [Diagnostic(diagnostic, message="incomplete")]
+
+    serialized = envelope.to_dict()
+    assert serialized["completeness"]["truncated"] is True
+    assert serialized["completeness"]["budget"] == 1
+    assert serialized["result"]["truncated"] is False
+    assert json.dumps(serialized).count('"truncated": true') == 1
+
+
 def test_untrusted_text_is_redacted_and_bounded() -> None:
     assert "<redacted:secret>" in redact_text("TOKEN=hidden")
     assert "<redacted:size-limit>" in redact_text("x" * 5000)
