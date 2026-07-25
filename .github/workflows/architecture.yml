@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   contract:
-    runs-on: ubuntu-latest
+    runs-on: cpp-indexer-runner
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
