@@ -68,6 +68,11 @@ struct IncludeFacts {
   std::vector<MacroUseFact> macro_uses;
 };
 
+struct IncludeFactCounts {
+  std::size_t emitted_facts = 0;
+  std::size_t duplicates = 0;
+};
+
 // Deterministic identity of a normalized compilation configuration:
 // sha1 over driver, working dir, lang mode, resource dir, and each argument in
 // order, NUL-separated. Stable across runs and machines given the same inputs,
@@ -97,9 +102,10 @@ void resolve_include_guards(clang::Preprocessor &pp, IncludeFacts &out);
 void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
                            const IncludeConfig &config);
 
-// Count every persistence operation performed by persist_include_facts before
-// it mutates storage. This is the budget preflight for the bulk include pass.
+// Count the unique fact identities that persist_include_facts will publish
+// before it mutates storage, and report repeated upsert attempts separately.
+// This is the budget preflight for the bulk include pass.
 auto include_fact_count(cidx::Storage &db, const IncludeFacts &facts)
-    -> std::size_t;
+    -> IncludeFactCounts;
 
 } // namespace cidx::ast

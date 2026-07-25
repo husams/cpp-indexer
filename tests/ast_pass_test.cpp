@@ -327,6 +327,42 @@ TEST_CASE(
   CHECK(ran);
 }
 
+TEST_CASE("pass registry rejects every unavailable frontend capability") {
+  for (const FrontendCapability capability :
+       {FrontendCapability::ast, FrontendCapability::preprocessor,
+        FrontendCapability::cfg, FrontendCapability::templates}) {
+    ExtractionPassRegistry registry;
+    auto descriptor =
+        valid_descriptor("missing-capability-" +
+                         std::to_string(static_cast<unsigned>(capability)));
+    descriptor.required_capabilities = {capability};
+    bool ran = false;
+    registry.register_pass(descriptor,
+                           [&](PassExecutionContext &) { ran = true; });
+    IndexingPlan plan;
+    plan.add(descriptor.id);
+    FrontendSession session;
+    CHECK_THROWS_AS(static_cast<void>(registry.run(plan, &session)),
+                    FrontendCapabilityUnavailable);
+    CHECK(!ran);
+  }
+}
+
+TEST_CASE("pass registry permits an explicitly capability-free pass") {
+  ExtractionPassRegistry registry;
+  auto descriptor = valid_descriptor("capability-free");
+  descriptor.required_capabilities.clear();
+  bool ran = false;
+  registry.register_pass(descriptor, [&](PassExecutionContext &context) {
+    CHECK(context.session == nullptr);
+    ran = true;
+  });
+  IndexingPlan plan;
+  plan.add(descriptor.id);
+  CHECK_NOTHROW(static_cast<void>(registry.run(plan)));
+  CHECK(ran);
+}
+
 TEST_CASE("pass stable keys include the complete descriptor contract") {
   const ExtractionPassDescriptor base = valid_descriptor("contract");
   auto catalog_changed = base;

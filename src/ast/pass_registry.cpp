@@ -392,7 +392,6 @@ auto PassExecutionReport::find(const std::string &id) const
 void ExtractionPassRegistry::register_pass(ExtractionPassDescriptor descriptor,
                                            Runner runner) {
   if (descriptor.id.empty() || descriptor.version == 0 || !runner ||
-      descriptor.required_capabilities.empty() ||
       descriptor.produced_fact_families.empty() ||
       descriptor.catalog_versions.empty() || !descriptor.budget.declared ||
       std::ranges::any_of(

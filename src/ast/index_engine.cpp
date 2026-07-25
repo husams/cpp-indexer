@@ -210,9 +210,9 @@ public:
           }
         });
     registry.register_pass(
-        descriptor("lifecycle.headers", {FrontendCapability::ast}, {"symbols"},
-                   {"fact_lifecycle"}, {"symbols.headers"},
-                   PassScope::owned_header, TraversalMode::lifecycle),
+        descriptor("lifecycle.headers", {}, {"symbols"}, {"fact_lifecycle"},
+                   {"symbols.headers"}, PassScope::owned_header,
+                   TraversalMode::lifecycle),
         [this](PassExecutionContext &execution) -> void {
           if (state_.failure_injector != nullptr) {
             state_.failure_injector->inject(
@@ -276,8 +276,8 @@ public:
           }
         });
     auto header_association = descriptor(
-        "headers.associate", {FrontendCapability::ast},
-        {"symbols", "relations", "definitions"}, {"file_associations"},
+        "headers.associate", {}, {"symbols", "relations", "definitions"},
+        {"file_associations"},
         {"symbols.headers", "statements.headers", "namespaces.headers"},
         PassScope::owned_header, TraversalMode::lifecycle);
     registry.register_pass(
@@ -300,14 +300,14 @@ public:
             state_.out->headers.symbols += header.stored;
           }
         });
-    registry.register_pass(
-        descriptor("lifecycle.main", {FrontendCapability::ast}, {},
-                   {"fact_lifecycle"}, {"headers.associate"},
-                   PassScope::main_file, TraversalMode::lifecycle),
-        [this](PassExecutionContext &execution) -> void {
-          configure_fact_file(state_.rec->id, true);
-          execution.metrics.note_visited();
-        });
+    registry.register_pass(descriptor("lifecycle.main", {}, {},
+                                      {"fact_lifecycle"}, {"headers.associate"},
+                                      PassScope::main_file,
+                                      TraversalMode::lifecycle),
+                           [this](PassExecutionContext &execution) -> void {
+                             configure_fact_file(state_.rec->id, true);
+                             execution.metrics.note_visited();
+                           });
     registry.register_pass(
         descriptor(
             "declarations.main", {FrontendCapability::ast},
@@ -352,8 +352,8 @@ public:
                               &main_edge_ids_, &main_definition_ids_);
         });
     registry.register_pass(
-        descriptor("presentation.persist", {FrontendCapability::ast},
-                   {"presentation_intents"}, {"display_names"},
+        descriptor("presentation.persist", {}, {"presentation_intents"},
+                   {"display_names"},
                    {"declarations.headers", "declarations.main"},
                    PassScope::translation_unit, TraversalMode::lifecycle),
         [this](PassExecutionContext &execution) -> void {
@@ -391,8 +391,8 @@ public:
           }
         });
     auto main_association = descriptor(
-        "main.associate", {FrontendCapability::ast},
-        {"symbols", "relations", "definitions"}, {"file_associations"},
+        "main.associate", {}, {"symbols", "relations", "definitions"},
+        {"file_associations"},
         {"symbols.main", "lifecycle.main", "statements.main",
          "namespaces.main"},
         PassScope::main_file, TraversalMode::lifecycle);
@@ -416,14 +416,15 @@ public:
             resolve_include_guards(*state_.pp, state_.includes);
           }
           execution.metrics.note_visited(state_.includes.includes.size());
-          execution.metrics.note_emitted(
-              include_fact_count(db_, state_.includes));
+          const IncludeFactCounts counts =
+              include_fact_count(db_, state_.includes);
+          execution.metrics.note_duplicate(counts.duplicates);
+          execution.metrics.note_emitted(counts.emitted_facts);
           persist_include_facts(db_, state_.includes, *state_.config);
         });
     registry.register_pass(
         descriptor(
-            "evidence.persist", {FrontendCapability::ast}, {"evidence"},
-            {"evidence_artifact"},
+            "evidence.persist", {}, {"evidence"}, {"evidence_artifact"},
             {"statements.headers", "statements.main", "includes.persist"},
             PassScope::translation_unit, TraversalMode::lifecycle,
             FactCompleteness::partial, FactTrust::inferred),
@@ -507,6 +508,7 @@ public:
     for (const PassExecutionRecord &pass : report.passes) {
       state_.out->pass_metrics.push_back(
           {.id = pass.descriptor.id,
+           .required_capabilities = pass.descriptor.required_capabilities,
            .dependencies = pass.descriptor.dependencies,
            .consumed_fact_families = pass.descriptor.consumed_fact_families,
            .produced_fact_families = pass.descriptor.produced_fact_families,

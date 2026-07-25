@@ -1971,6 +1971,32 @@ TEST_SUITE("clang") {
       CHECK(outcome.pass_metrics[index].id == expected[index]);
       CHECK(!outcome.pass_metrics[index].produced_fact_families.empty());
     }
+    const std::vector<std::vector<cidx::ast::FrontendCapability>> capabilities{
+        {cidx::ast::FrontendCapability::ast},
+        {cidx::ast::FrontendCapability::ast,
+         cidx::ast::FrontendCapability::preprocessor},
+        {},
+        {cidx::ast::FrontendCapability::ast},
+        {cidx::ast::FrontendCapability::ast},
+        {cidx::ast::FrontendCapability::ast,
+         cidx::ast::FrontendCapability::templates},
+        {cidx::ast::FrontendCapability::ast},
+        {},
+        {},
+        {cidx::ast::FrontendCapability::ast},
+        {cidx::ast::FrontendCapability::ast},
+        {cidx::ast::FrontendCapability::ast,
+         cidx::ast::FrontendCapability::templates},
+        {cidx::ast::FrontendCapability::ast},
+        {},
+        {},
+        {cidx::ast::FrontendCapability::preprocessor},
+        {}};
+    REQUIRE(outcome.pass_metrics.size() == capabilities.size());
+    for (std::size_t index = 0; index < capabilities.size(); ++index) {
+      CHECK(outcome.pass_metrics[index].required_capabilities ==
+            capabilities[index]);
+    }
     const std::vector<
         std::tuple<std::vector<std::string>, std::vector<std::string>,
                    std::vector<std::string>>>
@@ -2346,6 +2372,7 @@ TEST_SUITE("clang") {
       write_file(
           prepared.source,
           "#include \"exact_include.hpp\"\n"
+          "#include \"exact_include.hpp\"\n"
           "int exact_include_symbol() { return exact_include_value; }\n");
       prepared.db = std::make_unique<Storage>(":memory:");
       prepared.db->add_component("exact-include", dir);
@@ -2371,6 +2398,7 @@ TEST_SUITE("clang") {
     REQUIRE(include_metrics != measured_include_outcome.pass_metrics.end());
     const std::size_t include_n = include_metrics->emitted_facts;
     REQUIRE(include_n > 0);
+    CHECK(include_metrics->duplicates >= 3);
     const auto run_include = [&](std::size_t budget) {
       Prepared prepared = prepare_include();
       const auto before =

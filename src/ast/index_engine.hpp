@@ -13,8 +13,8 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "ast/header_stats.hpp" // HeaderStats
 #include "ast/fact_records.hpp"
+#include "ast/header_stats.hpp" // HeaderStats
 #include "ast/pass_registry.hpp"
 #include "storage/records.hpp"
 
@@ -37,6 +37,7 @@ struct SourceSnapshot {
 
 struct IndexPassMetrics {
   std::string id;
+  std::vector<FrontendCapability> required_capabilities;
   std::vector<std::string> dependencies;
   std::vector<std::string> consumed_fact_families;
   std::vector<std::string> produced_fact_families;

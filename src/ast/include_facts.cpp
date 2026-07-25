@@ -13,6 +13,8 @@
 #include "clang/Lex/Preprocessor.h"
 
 #include <memory>
+#include <set>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -475,9 +477,25 @@ void persist_include_facts(cidx::Storage &db, const IncludeFacts &facts,
 }
 
 auto include_fact_count(cidx::Storage &db, const IncludeFacts &facts)
-    -> std::size_t {
-  std::size_t count =
-      4; // normalized config, include config, TU, TU file config
+    -> IncludeFactCounts {
+  // These are the four distinct identities created by add_include_config:
+  // normalized config, include config, translation-unit applicability, and TU
+  // file applicability. The remaining identities mirror every upsert in
+  // persist_include_facts so repeated directives are counted once and exposed
+  // as duplicate attempts rather than over-budgeting the pass.
+  constexpr std::size_t config_facts = 4;
+  std::size_t attempted = config_facts;
+  std::set<int64_t> source_applicability;
+  std::set<int64_t> destination_applicability;
+  std::set<std::tuple<int64_t, std::string>> edges;
+  std::set<std::tuple<int64_t, std::string, int64_t>> sites;
+  std::set<std::tuple<int64_t, std::string, std::string>> macro_uses;
+
+  const auto record = [&attempted](auto &identities, auto identity) {
+    ++attempted;
+    return identities.emplace(std::move(identity)).second;
+  };
+
   const auto file_id_for = [&db](const std::string &path) {
     if (path.empty()) {
       return std::optional<int64_t>{};
@@ -490,20 +508,32 @@ auto include_fact_count(cidx::Storage &db, const IncludeFacts &facts)
     if (!source_id) {
       continue;
     }
-    ++count; // source header applicability
+    record(source_applicability, *source_id);
+    const std::string dst_path =
+        fact.resolved ? cidx::pathutil::abspath(fact.dst_path) : fact.spelling;
     if (fact.resolved) {
-      if (file_id_for(fact.dst_path)) {
-        ++count; // destination header applicability
+      if (const auto destination_id = file_id_for(fact.dst_path)) {
+        record(destination_applicability, *destination_id);
       }
     }
-    count += 2; // include edge and include site
+    const auto edge_identity = std::make_tuple(*source_id, dst_path);
+    record(edges, edge_identity);
+    record(sites, std::make_tuple(*source_id, dst_path, fact.begin_offset));
   }
   for (const MacroUseFact &fact : facts.macro_uses) {
-    if (file_id_for(fact.src_path)) {
-      ++count;
+    if (const auto source_id = file_id_for(fact.src_path)) {
+      record(macro_uses,
+             std::make_tuple(*source_id, cidx::pathutil::abspath(fact.def_path),
+                             fact.name));
     }
   }
-  return count;
+
+  const std::size_t unique_facts = config_facts + source_applicability.size() +
+                                   destination_applicability.size() +
+                                   edges.size() + sites.size() +
+                                   macro_uses.size();
+  return {.emitted_facts = unique_facts,
+          .duplicates = attempted - unique_facts};
 }
 
 } // namespace cidx::ast
