@@ -296,7 +296,7 @@
         "foundation.util",
         "model.contracts"
       ],
-      "allowedExternal": ["filesystem", "sqlite", "process"],
+      "allowedExternal": ["process"],
       "description": "Shared semantic/raw-AST fact providers and the unified analysis runner."
     }
   ],
@@ -636,6 +636,22 @@
     {
       "source": "src/astgraph/astgraph.cpp", "fromModule": "analysis.astgraph", "toModule": "external:filesystem", "include": "filesystem",
       "boundary": "astgraph -> filesystem compatibility", "owner": "Platform M2 analysis maintainers", "rationale": "Retain the AST artifact path adapter until the shared workspace filesystem port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/analysis/facts.cpp", "fromModule": "analysis.fact-provider", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "derivation -> workspace filesystem adapter", "owner": "Platform M2 analysis maintainers", "rationale": "Fact snapshot import/export still uses temporary and generated paths until the workspace filesystem port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/analysis/facts.cpp", "fromModule": "analysis.fact-provider", "toModule": "persistence.sqlite", "include": "storage/sqlite.hpp",
+      "boundary": "derivation -> persistence SQLite adapter", "owner": "Platform M2 analysis maintainers", "rationale": "The fact providers use the persistence-owned SQLite wrapper until the FactStore port is complete.", "expiresOn": "2026-12-31", "removalIssue": "HSE-62"
+    },
+    {
+      "source": "src/analysis/runner.cpp", "fromModule": "analysis.fact-provider", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "derivation -> workspace filesystem adapter", "owner": "Platform M2 analysis maintainers", "rationale": "The unified runner still owns temporary input/output paths until the workspace filesystem port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
+    },
+    {
+      "source": "src/analysis/runner.hpp", "fromModule": "analysis.fact-provider", "toModule": "external:filesystem", "include": "filesystem",
+      "boundary": "derivation -> workspace filesystem adapter", "owner": "Platform M2 analysis maintainers", "rationale": "The public analysis options and publication request expose filesystem paths until the workspace filesystem port is extracted.", "expiresOn": "2026-12-31", "removalIssue": "HSE-61"
     },
     {
       "source": "src/cli/analyze.cpp", "fromModule": "product.cli", "toModule": "external:filesystem", "include": "sys/stat.h",
