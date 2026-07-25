@@ -115,13 +115,18 @@ required_invariants() {
         UnknownTargetInvariant \
         PlanTransitionInvariant \
         SetSemanticsInvariant \
+        QueryResultInvariant \
         WitnessInvariant \
         CompletenessInvariant \
         ReadOnlyExecutionInvariant \
-        TransformPublicationInvariant \
-        TransformConsumptionInvariant \
         TransformDependencyInvariant \
+        TransformStalePropagationInvariant \
+        TransformConsumptionInvariant \
+        TransformPublicationInvariant \
         TransformInvariant \
+        CycleExecutionInvariant \
+        DiamondExecutionInvariant \
+        FanoutExecutionInvariant \
         CycleAdversarialInvariant \
         DiamondAdversarialInvariant \
         FanoutAdversarialInvariant \

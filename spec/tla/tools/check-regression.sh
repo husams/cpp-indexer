@@ -141,23 +141,37 @@ run_semantic_seed() {
   echo "TLA_SEMANTIC_SEED_STATUS=PASS scenario=$scenario invariant=$expected"
 }
 
-run_semantic_seed illegal-stream PlanTransitionInvariant
 run_semantic_seed illegal-source PlanTransitionInvariant
+run_semantic_seed illegal-view PlanTransitionInvariant
 run_semantic_seed illegal-filter PlanTransitionInvariant
 run_semantic_seed illegal-traverse PlanTransitionInvariant
 run_semantic_seed illegal-set PlanTransitionInvariant
 run_semantic_seed illegal-select PlanTransitionInvariant
 run_semantic_seed illegal-order PlanTransitionInvariant
 run_semantic_seed illegal-limit PlanTransitionInvariant
-run_semantic_seed invalid-witness WitnessInvariant
 run_semantic_seed duplicate-results SetSemanticsInvariant
 run_semantic_seed query-write ReadOnlyExecutionInvariant
-run_semantic_seed complete-truncated CompletenessInvariant
-run_semantic_seed complete-unknown CompletenessInvariant
-run_semantic_seed stale-fact-consumption TransformConsumptionInvariant
-run_semantic_seed stale-transform TransformPublicationInvariant
-run_semantic_seed failed-transform TransformPublicationInvariant
-run_semantic_seed partial-transform TransformPublicationInvariant
+run_semantic_seed witness-below-bound WitnessInvariant
+run_semantic_seed witness-above-bound WitnessInvariant
+run_semantic_seed witness-missing-edge WitnessInvariant
+run_semantic_seed partial-left CompletenessInvariant
+run_semantic_seed partial-right CompletenessInvariant
+run_semantic_seed partial-filter CompletenessInvariant
+run_semantic_seed partial-view CompletenessInvariant
+run_semantic_seed partial-traverse CompletenessInvariant
+run_semantic_seed partial-evidence CompletenessInvariant
+run_semantic_seed partial-transform CompletenessInvariant
+run_semantic_seed truncated-limit CompletenessInvariant
+run_semantic_seed unknown-target-complete CompletenessInvariant
+run_semantic_seed partial-evidence-complete CompletenessInvariant
+run_semantic_seed cycle-loop CycleExecutionInvariant
+run_semantic_seed diamond-duplicate DiamondExecutionInvariant
+run_semantic_seed fanout-dedup FanoutExecutionInvariant
+run_semantic_seed fanout-complete CompletenessInvariant
+run_semantic_seed stale-resolve TransformStalePropagationInvariant
+run_semantic_seed failed-resolve TransformStalePropagationInvariant
+run_semantic_seed stale-answer-consumption TransformConsumptionInvariant
+run_semantic_seed failed-answer-publication TransformPublicationInvariant
 
 awk '
 index($0, "queryState") && index($0, "\"complete\"") {
