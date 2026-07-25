@@ -3,6 +3,7 @@
 #include <array>
 #include <cctype>
 #include <cerrno>
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -17,6 +18,31 @@
 
 namespace cidx::ui {
 namespace {
+
+// POSIX default disposition for SIGPIPE is process termination. A client
+// that disconnects (or is killed) between our accept() and a subsequent
+// send() -- exactly the "abrupt cancellation" scenario this explorer must
+// tolerate -- makes that send() raise SIGPIPE, which would otherwise take
+// down the entire server process rather than just failing that one
+// response. Ignoring it for the scope of serve_live() turns that send()
+// into an ordinary EPIPE return (already handled by send_all()'s retry/
+// failure path) without changing SIGPIPE disposition for the rest of the
+// `cidx` process.
+class IgnoreSigpipe {
+public:
+  IgnoreSigpipe() : previous_(std::signal(SIGPIPE, SIG_IGN)) {}
+  ~IgnoreSigpipe() {
+    if (previous_ != SIG_ERR) {
+      std::signal(SIGPIPE, previous_);
+    }
+  }
+  IgnoreSigpipe(const IgnoreSigpipe &) = delete;
+  IgnoreSigpipe &operator=(const IgnoreSigpipe &) = delete;
+
+private:
+  using Handler = void (*)(int);
+  Handler previous_;
+};
 
 std::string token() {
   std::random_device random;
@@ -176,6 +202,7 @@ int serve_live(const std::string &html, const GraphProvider &graph_provider,
                const GraphProvider &evidence_provider,
                const ServerOptions &options, std::ostream &out,
                std::ostream &err) {
+  const IgnoreSigpipe ignore_sigpipe;
   const int server = ::socket(AF_INET, SOCK_STREAM, 0);
   if (server < 0) {
     err << "error: cidx ui: cannot create loopback socket: "

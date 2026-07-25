@@ -21,6 +21,7 @@
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 #include "graph/query.hpp"
@@ -212,17 +213,29 @@ struct RunningServer {
   FirstLineCapture capture_buf{url_promise};
   std::ostream out{&capture_buf};
   std::ostringstream err;
+  // Owned copies, not references: the constructor's `graph`/`search`/
+  // `evidence` parameters are frequently bound to a temporary GraphProvider
+  // built at the call site (e.g. `RunningServer(graph_provider_for(db))`),
+  // whose lifetime ends at the end of the constructor-call statement. The
+  // server thread below runs asynchronously for the lifetime of this
+  // object, so it must close over storage that lives exactly as long as
+  // RunningServer does -- these members, not the constructor's parameters.
+  ui::GraphProvider graph_provider;
+  ui::GraphProvider search_provider;
+  ui::GraphProvider evidence_provider;
   std::thread thread;
   int port = 0;
   std::string token;
 
-  explicit RunningServer(const ui::GraphProvider &graph,
-                         const ui::GraphProvider &search = {},
-                         const ui::GraphProvider &evidence = {}) {
-    thread = std::thread([&] {
+  explicit RunningServer(ui::GraphProvider graph,
+                         ui::GraphProvider search = {},
+                         ui::GraphProvider evidence = {})
+      : graph_provider(std::move(graph)), search_provider(std::move(search)),
+        evidence_provider(std::move(evidence)) {
+    thread = std::thread([this] {
       ui::serve_live(ui::render_html(json_out::Value::obj({}),
                                      ui::RenderMode::LoopbackLive),
-                    graph, search, evidence,
+                    graph_provider, search_provider, evidence_provider,
                     ui::ServerOptions{.port = 0, .launch_browser = false}, out,
                     err);
     });
