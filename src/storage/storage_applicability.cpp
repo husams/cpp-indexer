@@ -193,8 +193,9 @@ auto SqliteStorageService::association_fact_count(
     int64_t file_id, const std::vector<int64_t> &symbol_ids,
     const std::vector<int64_t> &edge_ids,
     const std::vector<int64_t> &definition_ids) -> std::size_t {
-  const auto count_with_ids = [this](std::string_view sql,
-                                     const std::vector<int64_t> &ids) {
+  const auto count_with_ids =
+      [this](std::string_view sql,
+             const std::vector<int64_t> &ids) -> std::size_t {
     if (ids.empty()) {
       return std::size_t{0};
     }
@@ -213,13 +214,14 @@ auto SqliteStorageService::association_fact_count(
     }
     return query.step() ? static_cast<std::size_t>(query.col_int64(0)) : 0;
   };
-  const auto count_file = [this](std::string_view sql, int64_t id) {
+  const auto count_file = [this](std::string_view sql,
+                                 int64_t id) -> std::size_t {
     auto query = db_.prepare(sql);
     query.bind(1, id);
     return query.step() ? static_cast<std::size_t>(query.col_int64(0)) : 0;
   };
-  const auto count_decl_sites = [this,
-                                 file_id](const std::vector<int64_t> &ids) {
+  const auto count_decl_sites =
+      [this, file_id](const std::vector<int64_t> &ids) -> std::size_t {
     if (ids.empty()) {
       return std::size_t{0};
     }
@@ -252,30 +254,37 @@ auto SqliteStorageService::association_fact_count(
   total +=
       count_file("SELECT COUNT(*) FROM diagnostic WHERE file_id = ?", file_id);
 
-  total += count_with_ids("SELECT COUNT(*) FROM parameter WHERE owner_id IN",
-                          symbol_ids);
-  total += count_with_ids("SELECT COUNT(*) FROM symbol_type WHERE symbol_id IN",
-                          symbol_ids);
+  total += count_with_ids(
+      "SELECT COUNT(DISTINCT owner_id) FROM parameter WHERE owner_id IN",
+      symbol_ids);
+  total += count_with_ids(
+      "SELECT COUNT(DISTINCT symbol_id) FROM symbol_type WHERE symbol_id IN",
+      symbol_ids);
   total += count_with_ids(
       "SELECT COUNT(DISTINCT type_id) FROM symbol_type WHERE symbol_id IN",
       symbol_ids);
   total +=
-      count_with_ids("SELECT COUNT(*) FROM type_edge te JOIN symbol_type st "
+      count_with_ids("SELECT COUNT(DISTINCT te.src_id) FROM type_edge te JOIN "
+                     "symbol_type st "
                      "ON st.type_id = te.src_id WHERE st.symbol_id IN",
                      symbol_ids);
-  total += count_with_ids("SELECT COUNT(*) FROM entity_node WHERE id IN",
-                          symbol_ids);
+  total += count_with_ids(
+      "SELECT COUNT(DISTINCT id) FROM entity_node WHERE id IN", symbol_ids);
   total += count_with_ids(
       "SELECT COUNT(DISTINCT ee.rowid) FROM entity_edge ee WHERE ee.src_id IN",
       symbol_ids);
   total += count_with_ids(
-      "SELECT COUNT(*) FROM template_param WHERE owner_id IN", symbol_ids);
-  total += count_with_ids("SELECT COUNT(*) FROM template_arg WHERE owner_id IN",
-                          symbol_ids);
-  total += count_with_ids("SELECT COUNT(*) FROM call_arg WHERE edge_id IN",
-                          edge_ids);
+      "SELECT COUNT(DISTINCT owner_id) FROM template_param WHERE owner_id IN",
+      symbol_ids);
   total += count_with_ids(
-      "SELECT COUNT(*) FROM possible_call WHERE src_def_id IN", definition_ids);
+      "SELECT COUNT(DISTINCT owner_id) FROM template_arg WHERE owner_id IN",
+      symbol_ids);
+  total += count_with_ids(
+      "SELECT COUNT(DISTINCT edge_id) FROM call_arg WHERE edge_id IN",
+      edge_ids);
+  total += count_with_ids("SELECT COUNT(DISTINCT src_def_id) FROM "
+                          "possible_call WHERE src_def_id IN",
+                          definition_ids);
   return total;
 }
 

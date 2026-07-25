@@ -10,13 +10,17 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace clang {
 class ASTContext;
+class CFG;
+class FunctionDecl;
 class Preprocessor;
+class TemplateArgumentList;
 } // namespace clang
 
 namespace cidx::ast {
@@ -47,8 +51,11 @@ struct FrontendSession {
   EvidenceEmitter *evidence = nullptr;
   PresentationIntentEmitter *presentation_intents = nullptr;
   IndexingLifecycle *lifecycle = nullptr;
-  bool cfg_available = false;
-  bool templates_available = false;
+  std::function<std::unique_ptr<clang::CFG>(const clang::FunctionDecl *)>
+      cfg_builder;
+  std::function<const clang::TemplateArgumentList *(
+      const clang::FunctionDecl *)>
+      template_arguments;
   std::map<std::string, PassBudget> budget_overrides;
 
   [[nodiscard]] auto supports(FrontendCapability capability) const -> bool;
@@ -93,6 +100,15 @@ public:
 private:
   std::string pass_id_;
   FrontendCapability capability_;
+};
+
+class FrontendSessionRequired final : public std::runtime_error {
+public:
+  explicit FrontendSessionRequired(std::string pass_id);
+  [[nodiscard]] auto pass_id() const -> const std::string & { return pass_id_; }
+
+private:
+  std::string pass_id_;
 };
 
 struct ExtractionPassDescriptor {

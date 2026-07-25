@@ -78,6 +78,10 @@ FrontendCapabilityUnavailable::FrontendCapabilityUnavailable(
                          pass_id),
       pass_id_(std::move(pass_id)), capability_(capability) {}
 
+FrontendSessionRequired::FrontendSessionRequired(std::string pass_id)
+    : std::runtime_error("frontend session required for pass: " + pass_id),
+      pass_id_(std::move(pass_id)) {}
+
 auto FrontendSession::supports(FrontendCapability capability) const -> bool {
   switch (capability) {
   case FrontendCapability::ast:
@@ -85,9 +89,9 @@ auto FrontendSession::supports(FrontendCapability capability) const -> bool {
   case FrontendCapability::preprocessor:
     return preprocessor != nullptr;
   case FrontendCapability::cfg:
-    return cfg_available;
+    return static_cast<bool>(cfg_builder);
   case FrontendCapability::templates:
-    return templates_available;
+    return ast_context != nullptr && static_cast<bool>(template_arguments);
   }
   return false;
 }
@@ -387,12 +391,10 @@ auto PassExecutionReport::find(const std::string &id) const
 
 void ExtractionPassRegistry::register_pass(ExtractionPassDescriptor descriptor,
                                            Runner runner) {
-  const bool source_pass = descriptor.consumed_fact_families.empty();
   if (descriptor.id.empty() || descriptor.version == 0 || !runner ||
       descriptor.required_capabilities.empty() ||
       descriptor.produced_fact_families.empty() ||
       descriptor.catalog_versions.empty() || !descriptor.budget.declared ||
-      (source_pass && !descriptor.dependencies.empty()) ||
       std::ranges::any_of(
           descriptor.consumed_fact_families,
           [](const std::string &family) { return family.empty(); }) ||
@@ -463,6 +465,10 @@ auto ExtractionPassRegistry::run(const IndexingPlan &plan,
 
     PassMetrics metrics;
     PassBudget budget = found->descriptor.budget;
+    if (session == nullptr &&
+        !found->descriptor.required_capabilities.empty()) {
+      throw FrontendSessionRequired(found->descriptor.id);
+    }
     if (session != nullptr) {
       if (const auto override_budget =
               session->budget_overrides.find(found->descriptor.id);

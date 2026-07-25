@@ -24,6 +24,7 @@
 
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/Analysis/CFG.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Frontend/CompilerInstance.h"
@@ -223,11 +224,12 @@ public:
           }
         });
     registry.register_pass(
-        descriptor("declarations.headers", {FrontendCapability::ast},
-                   {"symbols", "fact_lifecycle"},
-                   {"relations", "types", "definitions"},
-                   {"symbols.headers", "lifecycle.headers"},
-                   PassScope::owned_header, TraversalMode::declaration),
+        descriptor(
+            "declarations.headers", {FrontendCapability::ast},
+            {"symbols", "fact_lifecycle"},
+            {"relations", "types", "definitions", "presentation_intents"},
+            {"symbols.headers", "lifecycle.headers"}, PassScope::owned_header,
+            TraversalMode::declaration),
         [this](PassExecutionContext &execution) -> void {
           for (PendingHeader &header : pending_headers_) {
             run_declaration_stage(header.path, header.file_id, execution,
@@ -250,7 +252,7 @@ public:
         descriptor("statements.headers",
                    {FrontendCapability::ast, FrontendCapability::templates},
                    {"definitions", "relations", "types"},
-                   {"relations", "types", "evidence", "definitions"},
+                   {"relations", "types", "evidence", "definitions", "symbols"},
                    {"definitions.headers"}, PassScope::owned_header,
                    TraversalMode::body, FactCompleteness::partial,
                    FactTrust::inferred),
@@ -299,20 +301,20 @@ public:
           }
         });
     registry.register_pass(
-        descriptor("lifecycle.main", {FrontendCapability::ast},
-                   {"headers.associate"}, {"fact_lifecycle"},
-                   {"headers.associate"}, PassScope::main_file,
-                   TraversalMode::lifecycle),
+        descriptor("lifecycle.main", {FrontendCapability::ast}, {},
+                   {"fact_lifecycle"}, {"headers.associate"},
+                   PassScope::main_file, TraversalMode::lifecycle),
         [this](PassExecutionContext &execution) -> void {
           configure_fact_file(state_.rec->id, true);
           execution.metrics.note_visited();
         });
     registry.register_pass(
-        descriptor("declarations.main", {FrontendCapability::ast},
-                   {"symbols", "fact_lifecycle"},
-                   {"relations", "types", "definitions"},
-                   {"headers.associate", "lifecycle.main"},
-                   PassScope::main_file, TraversalMode::declaration),
+        descriptor(
+            "declarations.main", {FrontendCapability::ast},
+            {"symbols", "fact_lifecycle"},
+            {"relations", "types", "definitions", "presentation_intents"},
+            {"headers.associate", "lifecycle.main"}, PassScope::main_file,
+            TraversalMode::declaration),
         [this](PassExecutionContext &execution) -> void {
           run_declaration_stage(state_.path, state_.rec->id, execution,
                                 &main_edge_ids_, &main_definition_ids_);
@@ -331,7 +333,7 @@ public:
         descriptor("statements.main",
                    {FrontendCapability::ast, FrontendCapability::templates},
                    {"definitions", "relations", "types"},
-                   {"relations", "types", "evidence", "definitions"},
+                   {"relations", "types", "evidence", "definitions", "symbols"},
                    {"definitions.main"}, PassScope::main_file,
                    TraversalMode::body, FactCompleteness::partial,
                    FactTrust::inferred),
@@ -352,8 +354,8 @@ public:
     registry.register_pass(
         descriptor("presentation.persist", {FrontendCapability::ast},
                    {"presentation_intents"}, {"display_names"},
-                   {"namespaces.main"}, PassScope::translation_unit,
-                   TraversalMode::lifecycle),
+                   {"declarations.headers", "declarations.main"},
+                   PassScope::translation_unit, TraversalMode::lifecycle),
         [this](PassExecutionContext &execution) -> void {
           std::ranges::sort(state_.presentation_intents, {},
                             [](const PresentationIntent &intent) -> auto {
@@ -372,15 +374,20 @@ public:
                                             state_.presentation_intents.end());
           execution.metrics.note_duplicate(before -
                                            state_.presentation_intents.size());
+          std::vector<std::pair<std::int64_t, std::string>> updates;
+          updates.reserve(state_.presentation_intents.size());
           for (const PresentationIntent &intent : state_.presentation_intents) {
             const auto display = edges_.lookup_display_name(intent.symbol_id);
             if (display) {
               if (const auto rewritten = rewrite_template_display_name(
                       *display, intent.display_args)) {
-                edges_.update_display_name(intent.symbol_id, *rewritten);
-                execution.metrics.note_emitted();
+                updates.emplace_back(intent.symbol_id, *rewritten);
               }
             }
+          }
+          execution.metrics.note_emitted(updates.size());
+          for (const auto &[symbol_id, display] : updates) {
+            edges_.update_display_name(symbol_id, display);
           }
         });
     auto main_association = descriptor(
@@ -414,10 +421,12 @@ public:
           persist_include_facts(db_, state_.includes, *state_.config);
         });
     registry.register_pass(
-        descriptor("evidence.persist", {FrontendCapability::ast}, {"evidence"},
-                   {"evidence_artifact"}, {"includes.persist"},
-                   PassScope::translation_unit, TraversalMode::lifecycle,
-                   FactCompleteness::partial, FactTrust::inferred),
+        descriptor(
+            "evidence.persist", {FrontendCapability::ast}, {"evidence"},
+            {"evidence_artifact"},
+            {"statements.headers", "statements.main", "includes.persist"},
+            PassScope::translation_unit, TraversalMode::lifecycle,
+            FactCompleteness::partial, FactTrust::inferred),
         [this](PassExecutionContext &execution) -> void {
           std::ranges::sort(state_.out->evidence, {},
                             [](const EvidenceRecord &record) -> auto {
@@ -474,8 +483,21 @@ public:
         .presentation_intents =
             &static_cast<PresentationIntentEmitter &>(edges_),
         .lifecycle = &static_cast<IndexingLifecycle &>(edges_),
-        .cfg_available = false,
-        .templates_available = true};
+        .cfg_builder = [this](const clang::FunctionDecl *function)
+            -> std::unique_ptr<clang::CFG> {
+          if (function == nullptr || function->getBody() == nullptr) {
+            return nullptr;
+          }
+          clang::CFG::BuildOptions options;
+          return clang::CFG::buildCFG(function, function->getBody(), &context_,
+                                      options);
+        },
+        .template_arguments = [](const clang::FunctionDecl *function)
+            -> const clang::TemplateArgumentList * {
+          return function == nullptr
+                     ? nullptr
+                     : function->getTemplateSpecializationArgs();
+        }};
     for (const FrontendPassProvider &provider : frontend_pass_providers()) {
       provider(session, registry, plan);
     }

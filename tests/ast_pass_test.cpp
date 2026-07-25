@@ -9,6 +9,7 @@
 
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/Decl.h"
+#include "clang/Analysis/CFG.h"
 #include "clang/Frontend/FrontendAction.h"
 #include "clang/Tooling/Tooling.h"
 
@@ -209,7 +210,9 @@ TEST_CASE("pass registry preserves explicit dependencies and records metrics") {
   IndexingPlan plan;
   plan.add("symbols");
   plan.add("relations");
-  const PassExecutionReport report = registry.run(plan);
+  FrontendSession session;
+  session.ast_context = reinterpret_cast<clang::ASTContext *>(1);
+  const PassExecutionReport report = registry.run(plan, &session);
 
   REQUIRE(report.passes.size() == 2);
   CHECK(report.passes[0].descriptor.stable_key().starts_with(
@@ -262,7 +265,10 @@ TEST_CASE("pass descriptors require metadata and bind every budget") {
     registry.register_pass(descriptor, record);
     IndexingPlan plan;
     plan.add("bounded");
-    CHECK_THROWS_AS(static_cast<void>(registry.run(plan)), PassBudgetExceeded);
+    FrontendSession session;
+    session.ast_context = reinterpret_cast<clang::ASTContext *>(1);
+    CHECK_THROWS_AS(static_cast<void>(registry.run(plan, &session)),
+                    PassBudgetExceeded);
   };
 
   run_over_budget(
@@ -297,6 +303,9 @@ TEST_CASE(
                          [&](PassExecutionContext &) { ran = true; });
   IndexingPlan plan;
   plan.add("cfg-pass");
+  CHECK_THROWS_AS(static_cast<void>(registry.run(plan)),
+                  FrontendSessionRequired);
+  CHECK(!ran);
   FrontendSession session;
   session.ast_context = reinterpret_cast<clang::ASTContext *>(1);
   CHECK(!session.supports(FrontendCapability::templates));
@@ -305,8 +314,14 @@ TEST_CASE(
                   FrontendCapabilityUnavailable);
   CHECK(!ran);
 
-  session.cfg_available = true;
-  session.templates_available = true;
+  session.cfg_builder =
+      [](const clang::FunctionDecl *) -> std::unique_ptr<clang::CFG> {
+    return nullptr;
+  };
+  session.template_arguments =
+      [](const clang::FunctionDecl *) -> const clang::TemplateArgumentList * {
+    return nullptr;
+  };
   CHECK(session.supports(FrontendCapability::templates));
   CHECK_NOTHROW(static_cast<void>(registry.run(plan, &session)));
   CHECK(ran);
