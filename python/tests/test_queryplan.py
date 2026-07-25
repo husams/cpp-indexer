@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import replace
 
 import pytest
 
@@ -26,6 +27,7 @@ from indexer.queryplan import (  # noqa: E402
     is_abstract, is_instance, none,
     parse_cxq,
 )
+from indexer.result_protocol import Status, from_query_result  # noqa: E402
 
 _REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -806,18 +808,92 @@ def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable(
 def test_site_view_expansion_exposes_deterministic_provenance():
     db = Storage(":memory:")
     _seed_reverse_typed_graph(db, "/tmp/site-view/cpp-indexer", grouped=False)
+    caller, callee = db._conn.execute(
+        "SELECT src_id,dst_id FROM edge WHERE id=1"
+    ).fetchone()
+    reverse_edge = db.add_edge(callee, caller, 1)
+    file_id = db._conn.execute("SELECT id FROM file WHERE name='same.cpp'").fetchone()[0]
+    db.add_edge_site(reverse_edge, file_id, 5, 2)
     result = Executor(db).run(
         (start(codebase()) | view("edge") | nodes() | sites()
          | select(["edge_id", "file", "line", "col", "relation",
                    "evidence", "status", "partial"])).plan
     )
-    assert len(result.rows) == 1
+    assert len(result.rows) == 2
     edge_id, path, line, col, relation, evidence, status, partial = result.rows[0]
     assert edge_id == 1
     assert path.endswith("/same.cpp")
     assert (line, col) == (10, 2)
     assert (relation, evidence, status, partial) == ("calls", "call_site", "partial", 1)
     assert result.view == "site"
+    assert result.rows[1][0] == reverse_edge
+    assert result.rows[1][2] == 5
+
+
+def test_typed_provenance_preserves_status_through_select():
+    def run(kind, unresolved_endpoint=False, unresolved_site=False):
+        db = Storage(":memory:")
+        component = db.add_component("project", "/tmp/status-view")
+        directory = db.add_directory(component, "src")
+        file_id = db.add_file(directory, "status.cpp")
+        caller = db.add_symbol(_make_sym("USR::status-caller", "caller"))
+        callee = db.add_symbol(_make_sym("USR::status-callee", "callee"))
+        if unresolved_endpoint:
+            db._conn.execute("UPDATE symbol SET resolved=0 WHERE id=?", (callee,))
+        edge = db.add_edge(caller, callee, kind)
+        db.add_edge_site(
+            edge, file_id, 1, 1,
+            recv_decl_usr="USR::missing-declaration" if unresolved_site else None,
+        )
+        return Executor(db).run(
+            (start(codebase()) | view("edge") | nodes()
+             | select(["status", "partial", "unknown"])).plan
+        )
+
+    def check(result, status, partial, unknown, expected_status):
+        assert result.rows == [(status, partial, unknown)]
+        assert result.partial is (partial == 1)
+        assert result.unknown is (unknown == 1)
+        result.index = replace(result.index, freshness="current")
+        assert from_query_result(result, result.index).status is expected_status
+
+    check(run(2), "complete", 0, 0, Status.COMPLETE)
+    check(run(1), "partial", 1, 0, Status.PARTIAL)
+    check(run(2, unresolved_endpoint=True), "unknown", 0, 1, Status.UNKNOWN)
+    check(run(2, unresolved_site=True), "unknown", 0, 1, Status.UNKNOWN)
+
+
+@pytest.mark.parametrize(
+    ("site_count", "expected", "truncated"),
+    [
+        (qp.TRAVERSE_NODE_BUDGET - 1, qp.TRAVERSE_NODE_BUDGET - 1, False),
+        (qp.TRAVERSE_NODE_BUDGET, qp.TRAVERSE_NODE_BUDGET, False),
+        (qp.TRAVERSE_NODE_BUDGET + 1, qp.TRAVERSE_NODE_BUDGET, True),
+    ],
+)
+def test_sites_budget_boundaries_are_exact_and_ordered(site_count, expected, truncated):
+    db = Storage(":memory:")
+    component = db.add_component("project", "/tmp/budget-view")
+    directory = db.add_directory(component, "src")
+    file_id = db.add_file(directory, "budget.cpp")
+    caller = db.add_symbol(_make_sym("USR::budget-caller", "caller"))
+    callee = db.add_symbol(_make_sym("USR::budget-callee", "callee"))
+    edge = db.add_edge(caller, callee, 1)
+    db._conn.execute(
+        "WITH RECURSIVE lines(line) AS (SELECT 0 UNION ALL SELECT line + 1 "
+        f"FROM lines WHERE line < {site_count - 1}) "
+        "INSERT INTO edge_site(edge_id,file_id,line,col) "
+        f"SELECT {edge},{file_id},line,0 FROM lines",
+    )
+    db._conn.commit()
+
+    result = Executor(db).run(
+        (start(codebase()) | view("edge") | nodes() | sites()
+         | limit(qp.TRAVERSE_NODE_BUDGET)
+         | qp.count()).plan
+    )
+    assert result.scalar == expected
+    assert result.truncated is truncated
 
 
 def test_typed_view_compositions_are_rejected_before_execution():

@@ -1027,21 +1027,25 @@ TEST_CASE("query_plan: sites expand edge provenance deterministically") {
   const int64_t caller = db.add_symbol(make_sym("USR::caller", "caller"));
   const int64_t callee = db.add_symbol(make_sym("USR::callee", "callee"));
   const int64_t edge = db.add_edge(make_edge(caller, callee, 1));
+  const int64_t reverse_edge = db.add_edge(make_edge(callee, caller, 1));
   cidx::EdgeSite site;
   site.edge_id = edge;
   site.file_id = file;
   site.line = 10;
   site.col = 2;
   db.add_edge_site(site);
+  site.edge_id = reverse_edge;
+  site.line = 5;
+  db.add_edge_site(site);
 
   QueryExecutor ex(db);
-  const Result result = ex.run(
-      (start(codebase()) | view(View::Edge) | nodes() | sites() |
-       select({"edge_id", "file", "line", "col", "relation", "evidence",
-               "status", "partial"}))
-          .plan());
+  const Result result =
+      ex.run((start(codebase()) | view(View::Edge) | nodes() | sites() |
+              select({"edge_id", "file", "line", "col", "relation", "evidence",
+                      "status", "partial"}))
+                 .plan());
   REQUIRE(result.view == View::Site);
-  REQUIRE(result.rows.size() == 1);
+  REQUIRE(result.rows.size() == 2);
   CHECK(std::get<int64_t>(result.rows[0][0]) == edge);
   CHECK(std::get<std::string>(result.rows[0][1]).ends_with("/same.cpp"));
   CHECK(std::get<int64_t>(result.rows[0][2]) == 10);
@@ -1050,6 +1054,96 @@ TEST_CASE("query_plan: sites expand edge provenance deterministically") {
   CHECK(std::get<std::string>(result.rows[0][5]) == "call_site");
   CHECK(std::get<std::string>(result.rows[0][6]) == "partial");
   CHECK(std::get<int64_t>(result.rows[0][7]) == 1);
+  CHECK(std::get<int64_t>(result.rows[1][0]) == reverse_edge);
+  CHECK(std::get<int64_t>(result.rows[1][2]) == 5);
+}
+
+TEST_CASE("query_plan: typed provenance preserves status through select") {
+  const auto run = [](int64_t kind, bool unresolved_endpoint,
+                      bool unresolved_site) {
+    Storage db(":memory:");
+    const int64_t component = db.add_component("project", "/tmp/status-view");
+    const int64_t directory = db.add_directory(component, "src");
+    const int64_t file = db.add_file(directory, "status.cpp");
+    const int64_t caller =
+        db.add_symbol(make_sym("USR::status-caller", "caller"));
+    auto callee_sym = make_sym("USR::status-callee", "callee");
+    callee_sym.resolved = !unresolved_endpoint;
+    const int64_t callee = db.add_symbol(callee_sym);
+    const int64_t edge = db.add_edge(make_edge(caller, callee, kind));
+    cidx::EdgeSite site;
+    site.edge_id = edge;
+    site.file_id = file;
+    site.line = 1;
+    site.col = 1;
+    if (unresolved_site) {
+      site.recv_decl_usr = "USR::missing-declaration";
+    }
+    db.add_edge_site(site);
+
+    QueryExecutor ex(db);
+    return ex.run((start(codebase()) | view(View::Edge) | nodes() |
+                   select({"status", "partial", "unknown"}))
+                      .plan());
+  };
+
+  const auto check = [](Result result, std::string_view status, int64_t partial,
+                        int64_t unknown, bool result_partial,
+                        bool result_unknown,
+                        cidx::protocol::Status envelope_status) {
+    REQUIRE(result.rows.size() == 1);
+    CHECK(std::get<std::string>(result.rows[0][0]) == status);
+    CHECK(std::get<int64_t>(result.rows[0][1]) == partial);
+    CHECK(std::get<int64_t>(result.rows[0][2]) == unknown);
+    CHECK(result.partial == result_partial);
+    CHECK(result.unknown == result_unknown);
+    result.index.freshness = "current";
+    CHECK(result.to_envelope().status == envelope_status);
+  };
+
+  check(run(2, false, false), "complete", 0, 0, false, false,
+        cidx::protocol::Status::Complete);
+  check(run(1, false, false), "partial", 1, 0, true, false,
+        cidx::protocol::Status::Partial);
+  check(run(2, true, false), "unknown", 0, 1, false, true,
+        cidx::protocol::Status::Unknown);
+  check(run(2, false, true), "unknown", 0, 1, false, true,
+        cidx::protocol::Status::Unknown);
+}
+
+TEST_CASE("query_plan: sites budget boundaries are exact and ordered") {
+  for (const int64_t site_count : {kTraverseNodeBudget - 1, kTraverseNodeBudget,
+                                   kTraverseNodeBudget + 1}) {
+    Storage db(":memory:");
+    auto txn = db.transaction();
+    const int64_t component = db.add_component("project", "/tmp/budget-view");
+    const int64_t directory = db.add_directory(component, "src");
+    const int64_t file = db.add_file(directory, "budget.cpp");
+    const int64_t caller =
+        db.add_symbol(make_sym("USR::budget-caller", "caller"));
+    const int64_t callee =
+        db.add_symbol(make_sym("USR::budget-callee", "callee"));
+    const int64_t edge = db.add_edge(make_edge(caller, callee, 1));
+    db.raw_db().exec(
+        "WITH RECURSIVE lines(line) AS (SELECT 0 UNION ALL SELECT line + 1 "
+        "FROM lines WHERE line < " +
+        std::to_string(site_count - 1) +
+        ") "
+        "INSERT INTO edge_site(edge_id,file_id,line,col) "
+        "SELECT " +
+        std::to_string(edge) + "," + std::to_string(file) +
+        ",line,0 FROM lines");
+    txn.commit();
+
+    QueryExecutor ex(db);
+    const Result result =
+        ex.run((start(codebase()) | view(View::Edge) | nodes() | sites() |
+                limit(kTraverseNodeBudget) | count())
+                   .plan());
+    const auto expected = std::min(site_count, kTraverseNodeBudget);
+    CHECK(result.scalar == expected);
+    CHECK(result.truncated == (site_count > kTraverseNodeBudget));
+  }
 }
 
 TEST_CASE("query_plan: devirtualized calls preserve the inherited receiver") {

@@ -202,6 +202,6 @@ generations. Row objects preserve `select` field order.
 This is a read/query-layer addition: no schema bump. Existing `GraphQuery` /
 `EntityQuery` surfaces remain compatibility adapters over the same physical
 tables, while CXQ exposes canonical logical slot and evidence identities.
-Evidence expansion is explicit and budgeted; truncated results remain marked
-`truncated: true`. Deferred to later slices: `sites()`, `path()`, `rank()`,
-and the `cidx query` agent tool surface.
+Evidence and site expansion are explicit and budgeted; truncated results remain
+marked `truncated: true`. Deferred to later slices: `path()`, `rank()`, and the
+`cidx query` agent tool surface.

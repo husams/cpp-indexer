@@ -1412,6 +1412,7 @@ class Executor:
                 if stage.op == "union":
                     st.limit_in_effect = False
             elif stage.op == "select":
+                self._update_status(st)
                 self._materialize(st, stage.fields)
                 st.shape = "rows"
             elif stage.op == "count":
@@ -1431,17 +1432,23 @@ class Executor:
 
     def _expand_sites(self, st: _Stream) -> None:
         sites_rows: list[tuple[int, ...]] = []
-        for edge in st.keys:
+        for edge in sorted(set(st.keys)):
             rows = self._conn.execute(
                 "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) "
-                "FROM edge_site WHERE edge_id=? ORDER BY file_id,line,col",
+                "FROM edge_site WHERE edge_id=? "
+                "ORDER BY file_id,COALESCE(line,0),COALESCE(col,0)",
                 (edge[0],),
             )
-            sites_rows.extend(tuple(row) for row in rows)
-            if len(sites_rows) >= TRAVERSE_NODE_BUDGET:
-                st.truncated = True
+            for row in rows:
+                sites_rows.append(tuple(row))
+                if len(sites_rows) > TRAVERSE_NODE_BUDGET:
+                    st.truncated = True
+                    break
+            if st.truncated:
                 break
-        st.keys = sorted(set(sites_rows))[:TRAVERSE_NODE_BUDGET]
+        st.keys = sorted(set(sites_rows))
+        if len(st.keys) > TRAVERSE_NODE_BUDGET:
+            st.keys = st.keys[:TRAVERSE_NODE_BUDGET]
         st.ids = []
         st.view = "site"
 
@@ -2074,15 +2081,77 @@ class Executor:
         relation = next((item for item in RELATION_CATALOG
                          if item[1] == SYMBOL_VIEW and item[2] == row[0]), None) if row else None
         metadata = RELATION_METADATA.get(relation, {}) if relation else {}
+        unresolved = self._has_unresolved_typed_provenance(view, key)
         if field_name == "relation":
             return True, relation[0] if relation else None
         if field_name in {"source", "target", "evidence"}:
             return True, metadata.get(field_name)
         if field_name == "status":
-            return True, metadata.get("completeness")
+            return True, "unknown" if unresolved else metadata.get("completeness")
         if field_name == "partial":
-            return True, int(metadata.get("completeness") == "partial")
-        return True, int(metadata.get("completeness") == "unknown") if relation else 1
+            return True, int(not unresolved and metadata.get("completeness") == "partial")
+        return True, int(unresolved or metadata.get("completeness") == "unknown") if relation else 1
+
+    def _has_unresolved_typed_provenance(
+        self, view: str, key: tuple[int, ...],
+    ) -> bool:
+        if view == "evidence" and len(key) > 4 and key[4] == 1:
+            return False
+        edge = self._conn.execute(
+            "SELECT src_id,dst_id FROM edge WHERE id=?", (key[0],)
+        ).fetchone()
+        if edge is None:
+            return True
+        endpoint = self._conn.execute(
+            "SELECT 1 FROM symbol WHERE id IN (?,?) AND resolved=0 LIMIT 1",
+            (edge[0], edge[1]),
+        ).fetchone()
+        if endpoint is not None:
+            return True
+        site = self._conn.execute(
+            "SELECT 1 FROM edge_site es "
+            "LEFT JOIN external_identity eti ON eti.id=es.recv_type_identity_id "
+            "LEFT JOIN external_identity edi ON edi.id=es.recv_decl_identity_id "
+            "LEFT JOIN symbol ds ON ds.id=es.recv_decl_id "
+            "WHERE es.edge_id=? AND ("
+            "(es.recv_type_usr IS NOT NULL AND es.recv_type_id IS NULL AND "
+            " es.recv_type_identity_id IS NULL) OR "
+            "(es.recv_type_identity_id IS NOT NULL AND "
+            " COALESCE(eti.resolution_status,0)=0) OR "
+            "(es.recv_decl_usr IS NOT NULL AND "
+            " (es.recv_decl_id IS NULL OR COALESCE(ds.resolved,0)=0) AND "
+            " es.recv_decl_identity_id IS NULL) OR "
+            "(es.recv_decl_identity_id IS NOT NULL AND "
+            " COALESCE(edi.resolution_status,0)=0)) LIMIT 1",
+            (key[0],),
+        ).fetchone()
+        if site is not None:
+            return True
+        argument = self._conn.execute(
+            "SELECT 1 FROM call_arg ca "
+            "LEFT JOIN external_identity ati ON ati.id=ca.type_identity_id "
+            "LEFT JOIN external_identity adi ON adi.id=ca.decl_identity_id "
+            "LEFT JOIN external_identity aci ON aci.id=ca.callee_identity_id "
+            "LEFT JOIN symbol ds ON ds.id=ca.decl_id "
+            "LEFT JOIN symbol cs ON cs.id=ca.callee_id "
+            "WHERE ca.edge_id=? AND ("
+            "(ca.type_usr IS NOT NULL AND ca.type_id IS NULL AND "
+            " ca.type_identity_id IS NULL) OR "
+            "(ca.type_identity_id IS NOT NULL AND "
+            " COALESCE(ati.resolution_status,0)=0) OR "
+            "(ca.decl_usr IS NOT NULL AND "
+            " (ca.decl_id IS NULL OR COALESCE(ds.resolved,0)=0) AND "
+            " ca.decl_identity_id IS NULL) OR "
+            "(ca.decl_identity_id IS NOT NULL AND "
+            " COALESCE(adi.resolution_status,0)=0) OR "
+            "(ca.callee_usr IS NOT NULL AND "
+            " (ca.callee_id IS NULL OR COALESCE(cs.resolved,0)=0) AND "
+            " ca.callee_identity_id IS NULL) OR "
+            "(ca.callee_identity_id IS NOT NULL AND "
+            " COALESCE(aci.resolution_status,0)=0)) LIMIT 1",
+            (key[0],),
+        ).fetchone()
+        return argument is not None
 
     def _fetch_typed_cells(
         self, st: _Stream, fields: Sequence[str]
@@ -2265,7 +2334,12 @@ class Executor:
     # -- finish --------------------------------------------------------------------
 
     def _update_status(self, st: _Stream) -> None:
+        checked_edges: set[int] = set()
         for key in st.keys:
+            if st.view in {"site", "evidence"} and key[0] in checked_edges:
+                continue
+            if st.view in {"site", "evidence"}:
+                checked_edges.add(key[0])
             partial_handled, partial = self._derived_typed_cell(st.view, key, "partial")
             unknown_handled, unknown = self._derived_typed_cell(st.view, key, "unknown")
             if partial_handled and partial:

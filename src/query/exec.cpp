@@ -756,6 +756,7 @@ public:
         }
         break;
       case StageOp::Select:
+        update_status(st);
         materialize(st, stage.fields);
         st.shape = Shape::Rows;
         break;
@@ -785,18 +786,21 @@ private:
   std::map<int64_t, std::optional<std::string>> file_paths_;
 
   void expand_sites(Stream &st) {
+    std::ranges::sort(st.keys);
+    st.keys.erase(std::ranges::unique(st.keys).begin(), st.keys.end());
     std::vector<Stream::LogicalKey> sites;
     for (const auto &edge : st.keys) {
       auto query = read_.read_db().prepare(
           "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) "
-          "FROM edge_site WHERE edge_id=? ORDER BY file_id,line,col");
+          "FROM edge_site WHERE edge_id=? "
+          "ORDER BY file_id,COALESCE(line,0),COALESCE(col,0)");
       query.bind(1, edge.a);
       while (query.step()) {
         sites.push_back(Stream::LogicalKey{.a = query.col_int64(0),
                                            .b = query.col_int64(1),
                                            .c = query.col_int64(2),
                                            .d = query.col_int64(3)});
-        if (sites.size() >= static_cast<size_t>(kTraverseNodeBudget)) {
+        if (sites.size() > static_cast<size_t>(kTraverseNodeBudget)) {
           st.truncated = true;
           break;
         }
@@ -807,6 +811,9 @@ private:
     }
     std::ranges::sort(sites);
     sites.erase(std::ranges::unique(sites).begin(), sites.end());
+    if (sites.size() > static_cast<size_t>(kTraverseNodeBudget)) {
+      sites.resize(static_cast<size_t>(kTraverseNodeBudget));
+    }
     st.keys = std::move(sites);
     st.ids.clear();
     st.view = View::Site;
@@ -1862,8 +1869,8 @@ private:
              ":" + std::to_string(key.c) + ":" + std::to_string(key.d);
     }
     if (view == View::Site) {
-      return "site:" + portable_edge(key.a) + ":" + portable_file(key.b) +
-             ":" + std::to_string(key.c) + ":" + std::to_string(key.d);
+      return "site:" + portable_edge(key.a) + ":" + portable_file(key.b) + ":" +
+             std::to_string(key.c) + ":" + std::to_string(key.d);
     }
     if (view == View::Edge) {
       return "edge:" + portable_edge(key.a);
@@ -2040,7 +2047,7 @@ private:
   }
 
   std::optional<Cell> derived_typed_cell(View view, const LogicalKey &key,
-                                          const std::string &field) {
+                                         const std::string &field) {
     const bool derived = field == "relation" || field == "source" ||
                          field == "target" || field == "evidence" ||
                          field == "status" || field == "partial" ||
@@ -2063,8 +2070,7 @@ private:
       }
       return Cell(nullptr);
     }
-    if (view != View::Edge && view != View::Site &&
-        view != View::Evidence) {
+    if (view != View::Edge && view != View::Site && view != View::Evidence) {
       return Cell(nullptr);
     }
     auto query = read_.read_db().prepare("SELECT kind FROM edge WHERE id=?");
@@ -2074,13 +2080,14 @@ private:
     }
     const int64_t kind = query.col_int64(0);
     const auto &relation = relation_catalog();
-    const auto it = std::ranges::find_if(
-        relation, [kind](const RelationDesc &item) {
+    const auto it =
+        std::ranges::find_if(relation, [kind](const RelationDesc &item) {
           return item.layer == View::Symbol && item.kind_id == kind;
         });
     if (it == relation.end()) {
       return field == "unknown" ? Cell(int64_t{1}) : Cell(nullptr);
     }
+    const bool unresolved = has_unresolved_typed_provenance(view, key);
     if (field == "relation") {
       return Cell(it->name);
     }
@@ -2094,16 +2101,85 @@ private:
       return Cell(it->evidence);
     }
     if (field == "status") {
-      return Cell(it->completeness);
+      return Cell(unresolved ? "unknown" : it->completeness);
     }
     if (field == "partial") {
-      return Cell(int64_t{it->completeness == "partial"});
+      return Cell(int64_t{!unresolved && it->completeness == "partial"});
     }
-    return Cell(int64_t{it->completeness == "unknown"});
+    return Cell(int64_t{unresolved || it->completeness == "unknown"});
+  }
+
+  bool has_unresolved_typed_provenance(View view, const LogicalKey &key) {
+    if (view == View::Evidence && key.tag == 1) {
+      return false;
+    }
+    auto edge =
+        read_.read_db().prepare("SELECT src_id,dst_id FROM edge WHERE id=?");
+    edge.bind(1, key.a);
+    if (!edge.step()) {
+      return true;
+    }
+    const int64_t src_id = edge.col_int64(0);
+    const int64_t dst_id = edge.col_int64(1);
+    auto endpoints = read_.read_db().prepare(
+        "SELECT 1 FROM symbol WHERE id IN (?,?) AND resolved=0 LIMIT 1");
+    endpoints.bind(1, src_id);
+    endpoints.bind(2, dst_id);
+    if (endpoints.step()) {
+      return true;
+    }
+    auto sites = read_.read_db().prepare(
+        "SELECT 1 FROM edge_site es "
+        "LEFT JOIN external_identity eti ON eti.id=es.recv_type_identity_id "
+        "LEFT JOIN external_identity edi ON edi.id=es.recv_decl_identity_id "
+        "LEFT JOIN symbol ds ON ds.id=es.recv_decl_id "
+        "WHERE es.edge_id=? AND ("
+        "(es.recv_type_usr IS NOT NULL AND es.recv_type_id IS NULL AND "
+        " es.recv_type_identity_id IS NULL) OR "
+        "(es.recv_type_identity_id IS NOT NULL AND "
+        " COALESCE(eti.resolution_status,0)=0) OR "
+        "(es.recv_decl_usr IS NOT NULL AND "
+        " (es.recv_decl_id IS NULL OR COALESCE(ds.resolved,0)=0) AND "
+        " es.recv_decl_identity_id IS NULL) OR "
+        "(es.recv_decl_identity_id IS NOT NULL AND "
+        " COALESCE(edi.resolution_status,0)=0)) LIMIT 1");
+    sites.bind(1, key.a);
+    if (sites.step()) {
+      return true;
+    }
+    auto args = read_.read_db().prepare(
+        "SELECT 1 FROM call_arg ca "
+        "LEFT JOIN external_identity ati ON ati.id=ca.type_identity_id "
+        "LEFT JOIN external_identity adi ON adi.id=ca.decl_identity_id "
+        "LEFT JOIN external_identity aci ON aci.id=ca.callee_identity_id "
+        "LEFT JOIN symbol ds ON ds.id=ca.decl_id "
+        "LEFT JOIN symbol cs ON cs.id=ca.callee_id "
+        "WHERE ca.edge_id=? AND ("
+        "(ca.type_usr IS NOT NULL AND ca.type_id IS NULL AND "
+        " ca.type_identity_id IS NULL) OR "
+        "(ca.type_identity_id IS NOT NULL AND "
+        " COALESCE(ati.resolution_status,0)=0) OR "
+        "(ca.decl_usr IS NOT NULL AND "
+        " (ca.decl_id IS NULL OR COALESCE(ds.resolved,0)=0) AND "
+        " ca.decl_identity_id IS NULL) OR "
+        "(ca.decl_identity_id IS NOT NULL AND "
+        " COALESCE(adi.resolution_status,0)=0) OR "
+        "(ca.callee_usr IS NOT NULL AND "
+        " (ca.callee_id IS NULL OR COALESCE(cs.resolved,0)=0) AND "
+        " ca.callee_identity_id IS NULL) OR "
+        "(ca.callee_identity_id IS NOT NULL AND "
+        " COALESCE(aci.resolution_status,0)=0)) LIMIT 1");
+    args.bind(1, key.a);
+    return args.step();
   }
 
   void update_status(Stream &st) {
+    std::set<int64_t> checked_edges;
     for (const auto &key : st.keys) {
+      if ((st.view == View::Site || st.view == View::Evidence) &&
+          !checked_edges.insert(key.a).second) {
+        continue;
+      }
       const auto partial = derived_typed_cell(st.view, key, "partial");
       const auto unknown = derived_typed_cell(st.view, key, "unknown");
       if (partial && std::holds_alternative<int64_t>(*partial) &&
@@ -2453,8 +2529,8 @@ public:
   Result finish(Stream st) {
     Result res;
     res.view = st.view;
-    res.truncated = st.truncated;
     update_status(st);
+    res.truncated = st.truncated;
     res.partial = st.partial;
     res.unknown = st.unknown;
     reject_ambiguous_ungrouped(st);
@@ -2621,7 +2697,8 @@ protocol::ResultEnvelope Result::to_envelope() const {
         .code = "unknown",
         .severity = "warning",
         .message = "result contains unresolved relation provenance",
-        .next_action = "inspect evidence and index coverage before relying on this result"});
+        .next_action = "inspect evidence and index coverage before relying on "
+                       "this result"});
   }
   if (index.freshness == "stale") {
     envelope.diagnostics.push_back(protocol::Diagnostic{
