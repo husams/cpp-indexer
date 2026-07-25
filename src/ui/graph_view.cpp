@@ -8,8 +8,10 @@
 #include <string_view>
 #include <utility>
 
+#include "catalogs/generated_catalog.hpp"
 #include "graph/query.hpp"
 #include "graph/records.hpp"
+#include "query/cxq.hpp"
 #include "query/exec.hpp"
 #include "query/plan.hpp"
 #include "util/errors.hpp"
@@ -17,6 +19,55 @@
 #include "util/pathutil.hpp"
 
 namespace cidx::ui {
+
+const char *graph_input_kind_name(GraphInputKind kind) {
+  switch (kind) {
+  case GraphInputKind::Symbol:
+    return "symbol";
+  case GraphInputKind::File:
+    return "file";
+  case GraphInputKind::Entity:
+    return "entity";
+  case GraphInputKind::Type:
+    return "type";
+  case GraphInputKind::Cxq:
+    return "cxq";
+  case GraphInputKind::QueryPlan:
+    return "plan";
+  case GraphInputKind::Path:
+    return "path";
+  case GraphInputKind::Analysis:
+    return "analysis";
+  }
+  return "unknown";
+}
+
+std::string GraphViewInput::canonical() const {
+  return std::string(graph_input_kind_name(kind)) + ":" +
+         std::to_string(value.size()) + ":" + value;
+}
+
+GraphViewError::GraphViewError(GraphViewFailureKind kind, std::string message,
+                               std::string next_action)
+    : CidxError(std::move(message)), kind_(kind),
+      next_action_(std::move(next_action)) {}
+
+const char *GraphViewError::code() const noexcept {
+  switch (kind_) {
+  case GraphViewFailureKind::InvalidInput:
+    return "E_UI_INVALID_INPUT";
+  case GraphViewFailureKind::UnsupportedInput:
+    return "E_UI_UNSUPPORTED_INPUT";
+  case GraphViewFailureKind::UnknownIdentity:
+    return "E_UI_UNKNOWN_IDENTITY";
+  case GraphViewFailureKind::AmbiguousIdentity:
+    return "E_UI_AMBIGUOUS_IDENTITY";
+  case GraphViewFailureKind::Oversized:
+    return "E_UI_OVERSIZED";
+  }
+  return "E_UI_FAILURE";
+}
+
 namespace {
 
 using json_out::Array;
@@ -494,11 +545,13 @@ void set_int_member(Value &value, std::string_view key, int64_t number) {
 }
 
 std::string graph_query_identity(const GraphViewRequest &request,
-                                 const IndexIdentity &identity) {
+                                 const GraphViewInput &input,
+                                 const IndexIdentity &identity,
+                                 const std::optional<std::string> &plan_json) {
   Object material;
   material.emplace_back("version", Value::of(kGraphViewVersion));
-  material.emplace_back("root", optional_string(request.root));
-  material.emplace_back("query", optional_string(request.query));
+  material.emplace_back("input", Value::of(input.canonical()));
+  material.emplace_back("plan", optional_string(plan_json));
   material.emplace_back("direction", Value::of(request.direction));
   material.emplace_back("depth", Value::of(request.depth));
   material.emplace_back("node_budget", Value::of(request.node_budget));
@@ -531,13 +584,65 @@ std::string graph_query_identity(const GraphViewRequest &request,
   return sha256_hex(hash_material);
 }
 
-Value identity_value(const IndexIdentity &identity) {
+std::vector<std::string> fact_sets_for(const GraphInputKind kind,
+                                       bool has_edges, bool has_sites,
+                                       bool has_includes = false) {
+  std::set<std::string> facts;
+  switch (kind) {
+  case GraphInputKind::Symbol:
+    facts.insert("symbols");
+    break;
+  case GraphInputKind::File:
+    facts.insert("files");
+    facts.insert("symbols");
+    break;
+  case GraphInputKind::Entity:
+    facts.insert("entities");
+    facts.insert("entity_edges");
+    break;
+  case GraphInputKind::Type:
+    facts.insert("types");
+    facts.insert("symbols");
+    break;
+  case GraphInputKind::Cxq:
+  case GraphInputKind::QueryPlan:
+    facts.insert("query-plan");
+    facts.insert("symbols");
+    break;
+  case GraphInputKind::Path:
+    facts.insert("symbols");
+    facts.insert("witness-path");
+    break;
+  case GraphInputKind::Analysis:
+    facts.insert("analysis");
+    break;
+  }
+  if (has_edges) {
+    facts.insert("edges");
+  }
+  if (has_sites) {
+    facts.insert("sites");
+  }
+  if (has_includes) {
+    facts.insert("includes");
+  }
+  return {facts.begin(), facts.end()};
+}
+
+Value identity_value(const IndexIdentity &identity,
+                     const std::vector<std::string> &fact_sets) {
   Object out;
   out.emplace_back("workspace", Value::of(identity.workspace));
   out.emplace_back("index", Value::of("semantic-index/schema/" +
                                       std::to_string(identity.schema_version)));
-  out.emplace_back("fact_sets",
-                   Value::arr({Value::of(std::string("symbols"))}));
+  Array facts;
+  for (const auto &fact : fact_sets) {
+    facts.push_back(Value::of(fact));
+  }
+  out.emplace_back("fact_sets", Value::arr(std::move(facts)));
+  out.emplace_back("catalog_version", Value::of(catalog::kCatalogVersion));
+  out.emplace_back("catalog_hash",
+                   Value::of(std::string(catalog::kCatalogHash)));
   out.emplace_back("freshness", Value::of(identity.freshness));
   out.emplace_back("source_revision",
                    optional_string(identity.source_revision));
@@ -551,7 +656,13 @@ Value identity_value(const IndexIdentity &identity) {
 Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   query::SqliteQueryReadAdapter graph_read(db);
   graph::GraphQuery graph(graph_read, "<ui>");
-  const IndexIdentity identity = db.index_identity();
+  IndexIdentity identity = db.index_identity();
+  if (identity.freshness == "unverifiable" &&
+      std::ranges::any_of(db.list_files(), [](const auto &entry) {
+        return !entry.first.indexed;
+      })) {
+    identity.freshness = "stale";
+  }
   const std::string freshness = identity.freshness;
   const int node_budget = std::clamp(request.node_budget, 1, 10000);
   const int edge_budget = std::clamp(request.edge_budget, 1, 20000);
@@ -559,20 +670,160 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   const int byte_budget =
       std::clamp(request.byte_budget, 1024, 64 * 1024 * 1024);
 
-  if (request.query &&
-      request.query->find_first_of(" |()[]{}") != std::string::npos) {
-    throw CidxError(
-        "cidx ui: --query accepts one portable symbol reference; textual CXQ "
-        "operators are not supported by this GraphView surface");
-  }
+  GraphViewInput input = request.input.value_or(GraphViewInput{
+      .kind = GraphInputKind::Symbol,
+      .value = request.root ? *request.root : request.query.value_or("")});
   if (request.root && request.query && *request.root != *request.query) {
-    throw CidxError(
-        "cidx ui: --root and --query must identify the same symbol");
+    throw GraphViewError(GraphViewFailureKind::InvalidInput,
+                         "--root and --query must identify the same symbol",
+                         "provide one symbol reference");
   }
-  const std::optional<std::string> effective_root =
-      request.root ? request.root : request.query;
-  const RootResolution resolution = resolve_root(graph, db, effective_root);
-  const std::string query_identity = graph_query_identity(request, identity);
+  if (input.value.empty() && request.strict) {
+    throw GraphViewError(GraphViewFailureKind::InvalidInput,
+                         "a typed GraphView input is required",
+                         "provide --input-kind and --input");
+  }
+
+  RootResolution resolution;
+  std::vector<graph::Sym> input_symbols;
+  std::optional<query::Plan> normalized_plan;
+  std::optional<std::string> normalized_plan_json;
+  bool has_include_facts = false;
+  const auto add_symbol_by_id = [&](int64_t id) {
+    if (const auto symbol = graph.get_by_id(id)) {
+      input_symbols.push_back(*symbol);
+    }
+  };
+  const auto collect_plan = [&](const query::Plan &plan) {
+    normalized_plan = query::validate(plan);
+    normalized_plan_json = query::canonical_json(*normalized_plan);
+    query::SqliteQueryReadAdapter read(db);
+    const query::Result result = query::Executor(read).run(*normalized_plan);
+    for (const auto &row : result.rows) {
+      if (!row.empty() && std::holds_alternative<int64_t>(row.front())) {
+        add_symbol_by_id(std::get<int64_t>(row.front()));
+      }
+    }
+  };
+
+  switch (input.kind) {
+  case GraphInputKind::Symbol:
+    resolution = resolve_root(graph, db, input.value);
+    if (resolution.symbol) {
+      input_symbols.push_back(*resolution.symbol);
+    }
+    break;
+  case GraphInputKind::File: {
+    const auto file = db.get_file(input.value);
+    if (!file) {
+      resolution.status = "unknown";
+      break;
+    }
+    for (const auto &symbol : db.symbols_in_file(file->id)) {
+      add_symbol_by_id(symbol.id);
+    }
+    has_include_facts = !db.include_edges_from(file->id, false).empty();
+    resolution.status = input_symbols.empty() ? "unknown" : "exact_file";
+    if (!input_symbols.empty()) {
+      resolution.symbol = input_symbols.front();
+    }
+    break;
+  }
+  case GraphInputKind::Entity:
+    collect_plan(query::start(query::entity(input.value)).plan());
+    resolution.status = input_symbols.empty() ? "unknown" : "exact_entity";
+    if (!input_symbols.empty()) {
+      resolution.symbol = input_symbols.front();
+    }
+    break;
+  case GraphInputKind::Type: {
+    const auto type_ids = db.type_ids_reaching(input.value);
+    for (const int64_t id : db.symbols_named_by_types(type_ids)) {
+      add_symbol_by_id(id);
+    }
+    resolution.status = input_symbols.empty() ? "unknown" : "exact_type";
+    if (!input_symbols.empty()) {
+      resolution.symbol = input_symbols.front();
+    }
+    break;
+  }
+  case GraphInputKind::Cxq:
+  case GraphInputKind::QueryPlan:
+    try {
+      collect_plan(query::parse_cxq(input.value));
+    } catch (const query::PlanError &error) {
+      throw GraphViewError(GraphViewFailureKind::InvalidInput, error.what(),
+                           "provide a valid bounded CXQ QueryPlan");
+    }
+    resolution.status = input_symbols.empty() ? "unknown" : "exact_plan";
+    if (!input_symbols.empty()) {
+      resolution.symbol = input_symbols.front();
+    }
+    break;
+  case GraphInputKind::Path: {
+    const std::size_t separator = input.value.find("->");
+    if (separator == std::string::npos || separator == 0 ||
+        separator + 2 >= input.value.size()) {
+      throw GraphViewError(GraphViewFailureKind::InvalidInput,
+                           "bounded path must use SOURCE->TARGET",
+                           "provide two symbol identities separated by ->");
+    }
+    const auto source =
+        resolve_root(graph, db, input.value.substr(0, separator));
+    const auto target =
+        resolve_root(graph, db, input.value.substr(separator + 2));
+    if (source.status == "ambiguous" || target.status == "ambiguous") {
+      resolution.status = "ambiguous";
+    } else if (!source.symbol || !target.symbol) {
+      resolution.status = "unknown";
+    } else {
+      const auto path =
+          graph.reaches(source.symbol->id, target.symbol->id,
+                        request.edge_kinds, request.direction, request.depth);
+      if (!path) {
+        resolution.status = "unknown";
+      } else {
+        resolution.status = "exact_path";
+        resolution.symbol = source.symbol;
+        input_symbols = *path;
+      }
+    }
+    resolution.candidates = source.candidates;
+    resolution.candidates.insert(resolution.candidates.end(),
+                                 target.candidates.begin(),
+                                 target.candidates.end());
+    break;
+  }
+  case GraphInputKind::Analysis:
+    if (input.value.starts_with("symbol:")) {
+      resolution = resolve_root(graph, db, input.value.substr(7));
+      if (resolution.symbol) {
+        input_symbols.push_back(*resolution.symbol);
+        resolution.status = "exact_analysis";
+      }
+      break;
+    }
+    throw GraphViewError(
+        GraphViewFailureKind::UnsupportedInput,
+        "analysis results require the supported symbol:<identity> format",
+        "provide --input-kind analysis --input symbol:<portable-id> or export "
+        "a CXQ result");
+  }
+
+  if (request.strict && resolution.status == "ambiguous") {
+    throw GraphViewError(
+        GraphViewFailureKind::AmbiguousIdentity,
+        "typed GraphView input resolves to multiple identities",
+        "use a portable identity or a narrower QueryPlan");
+  }
+  if (request.strict && resolution.status == "unknown") {
+    throw GraphViewError(
+        GraphViewFailureKind::UnknownIdentity,
+        "typed GraphView input does not resolve to an indexed identity",
+        "check the file/path or query the index for a canonical identity");
+  }
+  const std::string query_identity =
+      graph_query_identity(request, input, identity, normalized_plan_json);
 
   Array nodes;
   Array edges;
@@ -593,7 +844,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   metadata.emplace_back("depth", Value::of(request.depth));
   metadata.emplace_back("direction", Value::of(request.direction));
   metadata.emplace_back("query_identity", Value::of(query_identity));
-  metadata.emplace_back("query", optional_string(request.query));
+  metadata.emplace_back("query", Value::null());
   metadata.emplace_back("workspace",
                         request.workspace
                             ? Value::of(pathutil::basename(*request.workspace))
@@ -611,26 +862,45 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
                      optional_string(identity.index_config_fingerprint));
   index.emplace_back("freshness", Value::of(identity.freshness));
   metadata.emplace_back("index", Value::obj(std::move(index)));
-  metadata.emplace_back("identity", identity_value(identity));
+  metadata.emplace_back(
+      "identity",
+      identity_value(identity, fact_sets_for(input.kind, false, false)));
 
-  if (resolution.symbol) {
-    const query::Query plan =
-        make_query_plan(*resolution.symbol, request, node_budget);
-    query::SqliteQueryReadAdapter read(db);
-    const query::Result result = query::Executor(read).run(plan.plan());
-    metadata.emplace_back("query_plan",
-                          Value::of(query::canonical_json(plan.plan())));
-    truncated = result.truncated ||
-                result.rows.size() > static_cast<std::size_t>(node_budget);
+  if (!input_symbols.empty()) {
+    std::optional<query::Result> query_result;
+    if (normalized_plan) {
+      query::SqliteQueryReadAdapter read(db);
+      query_result = query::Executor(read).run(*normalized_plan);
+      metadata.emplace_back("query_plan", Value::of(*normalized_plan_json));
+    } else if (resolution.symbol && input.kind == GraphInputKind::Symbol) {
+      const query::Query plan =
+          make_query_plan(*resolution.symbol, request, node_budget);
+      query::SqliteQueryReadAdapter read(db);
+      query_result = query::Executor(read).run(plan.plan());
+      metadata.emplace_back("query_plan",
+                            Value::of(query::canonical_json(plan.plan())));
+    } else {
+      metadata.emplace_back("query_plan", Value::null());
+    }
+    if (query_result) {
+      truncated =
+          query_result->truncated ||
+          query_result->rows.size() > static_cast<std::size_t>(node_budget);
+    }
 
     std::map<int64_t, graph::Sym> symbols_by_id;
-    for (const auto &row : result.rows) {
-      if (row.empty() || !std::holds_alternative<int64_t>(row.front())) {
-        continue;
-      }
-      const auto symbol = graph.get_by_id(std::get<int64_t>(row.front()));
-      if (symbol) {
-        symbols_by_id.emplace(symbol->id, *symbol);
+    for (const auto &symbol : input_symbols) {
+      symbols_by_id.emplace(symbol.id, symbol);
+    }
+    if (query_result) {
+      for (const auto &row : query_result->rows) {
+        if (row.empty() || !std::holds_alternative<int64_t>(row.front())) {
+          continue;
+        }
+        const auto symbol = graph.get_by_id(std::get<int64_t>(row.front()));
+        if (symbol) {
+          symbols_by_id.emplace(symbol->id, *symbol);
+        }
       }
     }
     std::vector<graph::Sym> ordered_nodes;
@@ -651,7 +921,9 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
     std::map<int64_t, int> depths;
     for (const auto &symbol : ordered_nodes) {
       selected_ids.insert(symbol.id);
-      depths.emplace(symbol.id, symbol.id == resolution.symbol->id ? 0 : 1);
+      depths.emplace(
+          symbol.id,
+          resolution.symbol && symbol.id == resolution.symbol->id ? 0 : 1);
       nodes.push_back(node_value(symbol, freshness, truncated,
                                  depths[symbol.id], request.workspace));
     }
@@ -736,10 +1008,10 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
     return Value::obj(std::move(continuation));
   }());
 
-  const bool unknown = identity.freshness != "current" ||
-                       !db.graph_resolved() || !resolution.symbol;
+  const bool initial_unknown = identity.freshness != "current" ||
+                               !db.graph_resolved() || !resolution.symbol;
   std::string graph_status = "complete";
-  if (unknown) {
+  if (initial_unknown) {
     graph_status = "unknown";
   } else if (truncated) {
     graph_status = "partial";
@@ -760,27 +1032,30 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   metadata.emplace_back("status", Value::of(graph_status));
   metadata.emplace_back("markers", Value::arr(markers));
 
+  const auto fact_sets = fact_sets_for(input.kind, !edges.empty(),
+                                       sites_used > 0, has_include_facts);
+  Value exact_identity = identity_value(identity, fact_sets);
+  for (auto &[name, value] : metadata) {
+    if (name == "identity") {
+      value = exact_identity;
+    }
+  }
+
   Object out;
   out.emplace_back("schema", Value::of(std::string("cidx.graph-view.v1")));
   out.emplace_back("version", Value::of(kGraphViewVersion));
   out.emplace_back("status", Value::of(graph_status));
   out.emplace_back("markers", Value::arr(markers));
   out.emplace_back("query_identity", Value::of(query_identity));
-  std::string result_material = "cidx.graph-view.result.v1";
-  result_material.push_back('\0');
-  result_material += query_identity;
-  result_material.push_back('\0');
-  result_material += graph_status;
-  result_material.push_back('\0');
-  result_material += truncated ? "1" : "0";
-  result_material.push_back('\0');
-  result_material += evidence_truncated ? "1" : "0";
-  out.emplace_back("result_id", Value::of(sha256_hex(result_material)));
-  out.emplace_back("identity", identity_value(identity));
+  out.emplace_back("result_id", Value::of(std::string(64, '0')));
+  out.emplace_back("identity", exact_identity);
   out.emplace_back("request", [&] {
     Object r;
-    r.emplace_back("root", optional_string(request.root));
-    r.emplace_back("query", optional_string(request.query));
+    r.emplace_back("input_kind",
+                   Value::of(std::string(graph_input_kind_name(input.kind))));
+    r.emplace_back("input", Value::of(input.canonical()));
+    r.emplace_back("root", Value::null());
+    r.emplace_back("query", Value::null());
     r.emplace_back("direction", Value::of(request.direction));
     r.emplace_back("depth", Value::of(request.depth));
     r.emplace_back("node_budget", Value::of(node_budget));
@@ -794,6 +1069,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   out.emplace_back("edges", Value::arr(std::move(edges)));
   out.emplace_back("view_state", Value::obj({}));
   Value result = Value::obj(std::move(out));
+  bool byte_truncated = false;
 
   const auto mark_byte_truncated = [&] {
     if (Value *metadata_value = member(result, "metadata")) {
@@ -833,6 +1109,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   };
   if (script_safe_size(json_out::dumps_indent2(result)) >
       static_cast<std::size_t>(byte_budget)) {
+    byte_truncated = true;
     mark_byte_truncated();
     while (script_safe_size(json_out::dumps_indent2(result)) >
                static_cast<std::size_t>(byte_budget) &&
@@ -858,10 +1135,106 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
       set_int_member(*metadata_value, "sites_used", retained_sites);
     }
   }
+
+  const bool final_truncated = truncated || byte_truncated;
+  const bool unknown = identity.freshness != "current" ||
+                       !db.graph_resolved() || !resolution.symbol;
+  const std::string final_status =
+      unknown ? "unknown" : (final_truncated ? "partial" : "complete");
+  Array final_markers;
+  if (identity.freshness == "stale") {
+    final_markers.push_back(Value::of(std::string("stale")));
+  }
+  if (identity.freshness != "current" || !db.graph_resolved()) {
+    final_markers.push_back(Value::of(std::string("unknown")));
+  }
+  if (!resolution.symbol) {
+    final_markers.push_back(Value::of(std::string("unresolved")));
+  }
+  if (final_truncated) {
+    final_markers.push_back(Value::of(std::string("truncated")));
+  }
+  const auto set_status = [&](Value &value) {
+    if (Value *status_value = member(value, "status")) {
+      for (auto &[name, child] : status_value->o) {
+        if (name == "truncated") {
+          child = Value::of(final_truncated);
+        }
+        if (name == "evidence_truncated") {
+          child = Value::of(evidence_truncated || byte_truncated);
+        }
+      }
+    }
+  };
+  if (Value *metadata_value = member(result, "metadata")) {
+    if (Value *status_value = member(*metadata_value, "status")) {
+      *status_value = Value::of(final_status);
+    }
+    if (Value *markers_value = member(*metadata_value, "markers")) {
+      *markers_value = Value::arr(final_markers);
+    }
+    set_bool_member(*metadata_value, "truncated", final_truncated);
+    set_bool_member(*metadata_value, "evidence_truncated",
+                    evidence_truncated || byte_truncated);
+    if (Value *continuation = member(*metadata_value, "continuation")) {
+      set_bool_member(*continuation, "available", final_truncated);
+      for (auto &[name, child] : continuation->o) {
+        if (name == "reason") {
+          child = Value::of(std::string(
+              byte_truncated ? "byte_budget"
+                             : (final_truncated ? "budget" : "complete")));
+        }
+      }
+    }
+  }
+  for (Value &node : member(result, "nodes")->a) {
+    set_status(node);
+  }
+  for (Value &edge : member(result, "edges")->a) {
+    set_status(edge);
+  }
+  if (Value *status_value = member(result, "status")) {
+    *status_value = Value::of(final_status);
+  }
+  if (Value *markers_value = member(result, "markers")) {
+    *markers_value = Value::arr(final_markers);
+  }
+
+  const auto final_facts = fact_sets_for(
+      input.kind, !member(result, "edges")->a.empty(),
+      [&] {
+        for (const Value &edge : member(result, "edges")->a) {
+          if (const Value *sites = member(edge, "sites");
+              sites && !sites->a.empty()) {
+            return true;
+          }
+        }
+        return false;
+      }(),
+      has_include_facts);
+  exact_identity = identity_value(identity, final_facts);
+  if (Value *identity_value_member = member(result, "identity")) {
+    *identity_value_member = exact_identity;
+  }
+  if (Value *metadata_value = member(result, "metadata")) {
+    if (Value *identity_member = member(*metadata_value, "identity")) {
+      *identity_member = exact_identity;
+    }
+  }
+  Value canonical = result;
+  if (Value *result_id = member(canonical, "result_id")) {
+    *result_id = Value::of(std::string(64, '0'));
+  }
+  if (Value *result_id = member(result, "result_id")) {
+    *result_id = Value::of(sha256_hex("cidx.graph-view.result.v2\0" +
+                                      json_out::dumps_indent2(canonical)));
+  }
   if (script_safe_size(json_out::dumps_indent2(result)) >
       static_cast<std::size_t>(byte_budget)) {
-    throw CidxError(
-        "cidx ui: byte budget is too small for fixed GraphView metadata");
+    throw GraphViewError(
+        GraphViewFailureKind::Oversized,
+        "byte budget is too small for the finalized GraphView metadata",
+        "increase --byte-limit or reduce the input and evidence budgets");
   }
   return result;
 }

@@ -747,6 +747,12 @@ void build_ui(CLI::App &app, ParsedArgs &pa) {
                     "bounded root symbol name, USR, or numeric id");
     sub->add_option("--query", pa.ui_query,
                     "portable symbol reference executed through QueryPlan");
+    sub->add_option("--input", pa.ui_input, "typed GraphView input value");
+    sub->add_option(
+           "--input-kind", pa.ui_input_kind,
+           "typed input kind: symbol|file|entity|type|cxq|plan|path|analysis")
+        ->check(CLI::IsMember({"symbol", "file", "entity", "type", "cxq",
+                               "plan", "path", "analysis"}));
     sub->add_option("--workspace", pa.ui_workspace,
                     "workspace label carried by the GraphView request");
     sub->add_option("--edge", pa.edge, "edge kinds (comma-separated)");

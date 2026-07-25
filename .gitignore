@@ -40,3 +40,4 @@ Untitled*.md
 # UI prototype dependencies and build output.
 ui/node_modules/
 ui/dist/
+web/node_modules/

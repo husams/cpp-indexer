@@ -3,7 +3,16 @@
   "private": true,
   "version": "0.1.0",
   "description": "Offline assets for the local CIDX graph explorer",
+  "scripts": {
+    "build": "node scripts/build-assets.mjs",
+    "check-assets": "node scripts/build-assets.mjs --check",
+    "smoke": "node scripts/offline-smoke.mjs",
+    "check": "npm run check-assets && npm run smoke"
+  },
   "dependencies": {
     "cytoscape": "3.31.2"
+  },
+  "devDependencies": {
+    "playwright": "1.55.0"
   }
 }

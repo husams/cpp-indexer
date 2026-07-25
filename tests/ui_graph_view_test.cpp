@@ -39,6 +39,19 @@ std::string first_node_id(const std::string &json) {
              : json.substr(value_start, value_end - value_start);
 }
 
+std::string result_id(const std::string &json) {
+  const std::string marker = "\"result_id\": \"";
+  const std::size_t start = json.find(marker);
+  if (start == std::string::npos) {
+    return {};
+  }
+  const std::size_t value_start = start + marker.size();
+  const std::size_t value_end = json.find('"', value_start);
+  return value_end == std::string::npos
+             ? std::string{}
+             : json.substr(value_start, value_end - value_start);
+}
+
 } // namespace
 
 TEST_CASE("GraphView is bounded, portable, and carries evidence") {
@@ -137,8 +150,14 @@ TEST_CASE("GraphView snapshot identity and export bytes are deterministic") {
   CHECK(first_json == cidx::json_out::dumps_indent2(second));
   CHECK(first_json.find("\"query_identity\": \"") != std::string::npos);
   CHECK(first_json.find("\"result_id\": \"") != std::string::npos);
-  CHECK(first_json.find("\"fact_sets\": [\n        \"symbols\"") !=
-        std::string::npos);
+  CHECK(first_json.find("\"fact_sets\": [") != std::string::npos);
+  CHECK(first_json.find("\"edges\"") != std::string::npos);
+  CHECK(first_json.find("\"catalog_hash\"") != std::string::npos);
+  CHECK(result_id(first_json).size() > 64);
+  request.node_budget = 2;
+  const std::string changed_json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(result_id(changed_json) != result_id(first_json));
   CHECK(first_json.find("\"status\": \"unknown\"") != std::string::npos);
 
   const std::string first_html = cidx::ui::render_html(first);
@@ -169,6 +188,115 @@ TEST_CASE("GraphView reports ambiguous roots instead of choosing one") {
   CHECK(json.find("\"nodes\": []") != std::string::npos);
   CHECK(json.find("USR::one") != std::string::npos);
   CHECK(json.find("USR::two") != std::string::npos);
+  request.strict = true;
+  CHECK_THROWS_AS(cidx::ui::build_graph_view(db, request),
+                  cidx::ui::GraphViewError);
+}
+
+TEST_CASE("GraphView normalizes typed file, path, and CXQ inputs") {
+  Storage db(":memory:");
+  const int64_t component = db.add_component("test", "/tmp/cidx-ui-typed");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "main.cpp");
+  const int64_t header = db.add_file(directory, "header.hpp");
+  auto source = symbol("USR::typed-source", "ns::typed_source");
+  source.file_id = file;
+  auto target = symbol("USR::typed-target", "ns::typed_target");
+  target.file_id = file;
+  const int64_t source_id = db.add_symbol(source);
+  const int64_t target_id = db.add_symbol(target);
+  const int64_t include_config = db.add_include_config(
+      {.tu_file_id = file, .digest = "typed", .arguments = {"-DTEST"}});
+  db.add_include_edge({.src_file_id = file,
+                       .dst_file_id = header,
+                       .dst_path = "/tmp/cidx-ui-typed/header.hpp",
+                       .config_id = include_config});
+  cidx::Edge edge{.src_id = source_id,
+                  .dst_id = target_id,
+                  .kind = cidx::graph::edge_kinds_map().at("calls")};
+  db.add_edge(edge);
+
+  cidx::ui::GraphViewRequest request;
+  request.input =
+      cidx::ui::GraphViewInput{.kind = cidx::ui::GraphInputKind::File,
+                               .value = "/tmp/cidx-ui-typed/main.cpp"};
+  const std::string file_json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(file_json.find("\"input_kind\": \"file\"") != std::string::npos);
+  CHECK(file_json.find("USR::typed-source") != std::string::npos);
+  CHECK(file_json.find("\"files\"") != std::string::npos);
+  CHECK(file_json.find("\"includes\"") != std::string::npos);
+
+  request.input =
+      cidx::ui::GraphViewInput{.kind = cidx::ui::GraphInputKind::Path,
+                               .value = "ns::typed_source->ns::typed_target"};
+  const std::string path_json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(path_json.find("\"input_kind\": \"path\"") != std::string::npos);
+  CHECK(path_json.find("witness-path") != std::string::npos);
+
+  request.input = cidx::ui::GraphViewInput{
+      .kind = cidx::ui::GraphInputKind::Cxq,
+      .value = "symbol('USR::typed-source') | out(calls)"};
+  const std::string cxq_json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(cxq_json.find("\"input_kind\": \"cxq\"") != std::string::npos);
+  CHECK(cxq_json.find("\"query_plan\": \"{\\n") != std::string::npos);
+
+  request.input = cidx::ui::GraphViewInput{
+      .kind = cidx::ui::GraphInputKind::Entity, .value = "ns::typed_source"};
+  const std::string entity_json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(entity_json.find("\"input_kind\": \"entity\"") != std::string::npos);
+}
+
+TEST_CASE("GraphView fixtures preserve type, stub, and stale markers") {
+  Storage db(":memory:");
+  const int64_t component = db.add_component("test", "/tmp/cidx-ui-fixtures");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file =
+      db.add_file(directory, "fixture.cpp", 1.0, "fixture-md5");
+  auto type_owner = symbol("USR::fixture-owner", "ns::fixture_owner");
+  type_owner.file_id = file;
+  const int64_t owner_id = db.add_symbol(type_owner);
+  cidx::TypeNode type{.type_key = "record:Fixture",
+                      .spelling = "Fixture",
+                      .kind = cidx::kTypeKindRecord,
+                      .decl_usr = "USR::fixture-owner"};
+  const int64_t type_id = db.intern_type_node(type);
+  db.add_symbol_type(owner_id, cidx::kSymbolTypeOfType, type_id);
+  auto stub = symbol("USR::fixture-stub", "std::fixture_stub");
+  stub.resolved = false;
+  stub.decl_path = "/usr/include/fixture.hpp";
+  db.add_symbol(stub);
+
+  cidx::ui::GraphViewRequest request;
+  request.input = cidx::ui::GraphViewInput{
+      .kind = cidx::ui::GraphInputKind::Type, .value = "USR::fixture-owner"};
+  const std::string type_json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(type_json.find("\"input_kind\": \"type\"") != std::string::npos);
+  CHECK(type_json.find("\"types\"") != std::string::npos);
+
+  request.input = cidx::ui::GraphViewInput{
+      .kind = cidx::ui::GraphInputKind::Symbol, .value = "USR::fixture-stub"};
+  const std::string stub_json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(stub_json.find("\"external\": true") != std::string::npos);
+  CHECK(stub_json.find("\"stub\": true") != std::string::npos);
+
+  request.input =
+      cidx::ui::GraphViewInput{.kind = cidx::ui::GraphInputKind::File,
+                               .value = "/tmp/cidx-ui-fixtures/fixture.cpp"};
+  db.mark_file_indexed(file, 1.0, "fixture-md5");
+  db.stamp_index_identity();
+  db.raw_db().exec(
+      "UPDATE meta SET value='stale-fixture' WHERE key='source_fingerprint'");
+  db.set_file_indexed(file, false);
+  const std::string stale_json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+  CHECK(stale_json.find("\"unknown\"") != std::string::npos);
+  CHECK(stale_json.find("\"stale\"") != std::string::npos);
 }
 
 TEST_CASE("GraphView reports evidence beyond the site budget") {
