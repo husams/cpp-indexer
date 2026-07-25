@@ -106,6 +106,35 @@ required_invariants() {
         BoundedProgressInvariant \
         ProtectedInvariant
       ;;
+    CidxSemanticGraphSmoke)
+      printf '%s\n' \
+        TypeInvariant \
+        GraphNodeInvariant \
+        GraphRelationInvariant \
+        EvidenceOwnershipInvariant \
+        UnknownTargetInvariant \
+        PlanTransitionInvariant \
+        SetSemanticsInvariant \
+        QueryResultInvariant \
+        WitnessInvariant \
+        CompletenessInvariant \
+        ReadOnlyExecutionInvariant \
+        TransformDependencyInvariant \
+        TransformStalePropagationInvariant \
+        TransformConsumptionInvariant \
+        TransformPublicationInvariant \
+        TransformInvariant \
+        CycleExecutionInvariant \
+        DiamondExecutionInvariant \
+        FanoutExecutionInvariant \
+        CycleAdversarialInvariant \
+        DiamondAdversarialInvariant \
+        FanoutAdversarialInvariant \
+        IncompleteTargetAdversarialInvariant \
+        PartialEvidenceAdversarialInvariant \
+        RecoveryTraceInvariant \
+        RecoveryFailureHonestyInvariant
+      ;;
     CidxStorageLifecycleSmoke)
       printf '%s\n' \
         TypeInvariant \
@@ -145,6 +174,9 @@ required_properties() {
         RecoveryLiveness \
         TransformLiveness \
         IncludePlanLiveness
+      ;;
+    CidxSemanticGraphSmoke)
+      printf '%s\n' SemanticLiveness RecoveryLiveness FailureRecoveryLiveness
       ;;
     CidxStorageLifecycleSmoke)
       printf '%s\n' StorageEventuallySettles
@@ -202,11 +234,14 @@ run_model() {
       -config "$cfg" \
       "$spec") >"$tlc_log" 2>&1; then
     local violated_invariant
-    violated_invariant="$(sed -n 's/^Error: Invariant \([^ ]*\) is violated.*$/\1/p' "$tlc_log" | head -n 1)"
+    violated_invariant="$(sed -nE 's/.*Invariant ([A-Za-z][A-Za-z0-9_]*) is violated.*/\1/p' \
+      "$tlc_log" | head -n 1)"
     if [[ -n "$violated_invariant" ]]; then
       echo "TLA_INVARIANT_STATUS=FAIL model=$model invariant=$violated_invariant" >&2
+      echo "TLA_MODEL_VIOLATION=model=$model invariant=$violated_invariant" >&2
     else
       echo "TLA_INVARIANT_STATUS=FAIL model=$model invariant=unknown" >&2
+      echo "TLA_MODEL_VIOLATION=model=$model invariant=unknown" >&2
     fi
     echo "TLA_MODEL_STATUS=FAIL model=$model" >&2
     cat "$tlc_log" >&2
@@ -222,9 +257,9 @@ run_model() {
   echo "TLA_MODEL_STATUS=PASS model=$model invariants=$invariants"
 }
 
-for model in ${TLA_MODELS:-CidxRepositorySmoke CidxResultSmoke CidxWorkspaceLifecycleSmoke CidxBehaviorSmoke CidxStorageLifecycleSmoke}; do
+for model in ${TLA_MODELS:-CidxRepositorySmoke CidxResultSmoke CidxWorkspaceLifecycleSmoke CidxBehaviorSmoke CidxSemanticGraphSmoke CidxStorageLifecycleSmoke}; do
   run_model "$model"
 done
 
 echo "TLA_TOOLCHAIN_STATUS=PASS version=$TOOLS_VERSION java=17"
-echo "TLA_CHECK_STATUS=PASS models=${TLA_MODELS:-CidxRepositorySmoke,CidxResultSmoke,CidxWorkspaceLifecycleSmoke,CidxBehaviorSmoke,CidxStorageLifecycleSmoke} workers=1 fingerprint=0 seed=1"
+echo "TLA_CHECK_STATUS=PASS models=${TLA_MODELS:-CidxRepositorySmoke,CidxResultSmoke,CidxWorkspaceLifecycleSmoke,CidxBehaviorSmoke,CidxSemanticGraphSmoke,CidxStorageLifecycleSmoke} workers=1 fingerprint=0 seed=1"

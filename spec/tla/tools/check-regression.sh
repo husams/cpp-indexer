@@ -280,6 +280,79 @@ echo "TLA_PROGRESS_REGRESSION_STATUS=PASS mutation=removed-MakeCurrent"
 
 echo "TLA_REGRESSION_STATUS=PASS mutation=missing-ProtectedInvariant seeded=7"
 
+run_semantic_seed() {
+  local scenario="$1"
+  local expected="$2"
+  local seed_dir
+  seed_dir="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-semantic-seed.XXXXXX")"
+  cp "$ROOT"/models/*.cfg "$seed_dir"/
+  sed "s/^    Defect = \"none\"$/    Defect = \"$scenario\"/" \
+    "$seed_dir/CidxSemanticGraphSmoke.cfg" \
+    >"$seed_dir/CidxSemanticGraphSmoke.cfg.seed"
+  mv "$seed_dir/CidxSemanticGraphSmoke.cfg.seed" \
+    "$seed_dir/CidxSemanticGraphSmoke.cfg"
+
+  set +e
+  local seed_output
+  seed_output="$(TLA_MODEL_DIR="$seed_dir" TLA_MODELS="CidxSemanticGraphSmoke" \
+    "$ROOT/tools/check.sh" 2>&1)"
+  local seed_status=$?
+  set -e
+  rm -rf "$seed_dir"
+
+  if [[ "$seed_status" -ne 30 ]] \
+      || ! grep -q "TLA_MODEL_STATUS=FAIL model=CidxSemanticGraphSmoke" \
+          <<<"$seed_output" \
+      || ! grep -Fqx \
+          "TLA_MODEL_VIOLATION=model=CidxSemanticGraphSmoke invariant=$expected" \
+          <<<"$seed_output"; then
+    echo "TLA_SEMANTIC_SEED_STATUS=FAIL scenario=$scenario reason=missing-$expected" >&2
+    printf '%s\n' "$seed_output" >&2
+    exit 1
+  fi
+  echo "TLA_SEMANTIC_SEED_STATUS=PASS scenario=$scenario invariant=$expected"
+}
+
+run_semantic_seed illegal-source PlanTransitionInvariant
+run_semantic_seed illegal-view PlanTransitionInvariant
+run_semantic_seed illegal-filter PlanTransitionInvariant
+run_semantic_seed illegal-traverse PlanTransitionInvariant
+run_semantic_seed illegal-set PlanTransitionInvariant
+run_semantic_seed illegal-select PlanTransitionInvariant
+run_semantic_seed illegal-order PlanTransitionInvariant
+run_semantic_seed illegal-limit PlanTransitionInvariant
+run_semantic_seed illegal-later-source PlanTransitionInvariant
+run_semantic_seed illegal-terminal PlanTransitionInvariant
+run_semantic_seed illegal-plan-operation PlanTransitionInvariant
+run_semantic_seed duplicate-results SetSemanticsInvariant
+run_semantic_seed query-write ReadOnlyExecutionInvariant
+run_semantic_seed witness-below-bound WitnessInvariant
+run_semantic_seed witness-above-bound WitnessInvariant
+run_semantic_seed witness-missing-edge WitnessInvariant
+run_semantic_seed partial-left CompletenessInvariant
+run_semantic_seed partial-right CompletenessInvariant
+run_semantic_seed partial-filter CompletenessInvariant
+run_semantic_seed partial-early CompletenessInvariant
+run_semantic_seed unknown-early CompletenessInvariant
+run_semantic_seed partial-view CompletenessInvariant
+run_semantic_seed partial-traverse CompletenessInvariant
+run_semantic_seed partial-evidence CompletenessInvariant
+run_semantic_seed partial-transform CompletenessInvariant
+run_semantic_seed truncated-limit CompletenessInvariant
+run_semantic_seed unknown-target-complete CompletenessInvariant
+run_semantic_seed partial-evidence-complete CompletenessInvariant
+run_semantic_seed cycle-loop CycleExecutionInvariant
+run_semantic_seed diamond-duplicate DiamondExecutionInvariant
+run_semantic_seed fanout-dedup FanoutExecutionInvariant
+run_semantic_seed fanout-complete CompletenessInvariant
+run_semantic_seed fanout-truncated CompletenessInvariant
+run_semantic_seed stale-resolve TransformStalePropagationInvariant
+run_semantic_seed failed-resolve TransformStalePropagationInvariant
+run_semantic_seed stale-answer-consumption TransformConsumptionInvariant
+run_semantic_seed failed-answer-publication TransformPublicationInvariant
+run_semantic_seed stale-summary TransformConsumptionInvariant
+run_semantic_seed failed-summary TransformConsumptionInvariant
+
 awk '
 index($0, "queryState") && index($0, "\"complete\"") {
   sub(/"complete"/, "\"running\"")
