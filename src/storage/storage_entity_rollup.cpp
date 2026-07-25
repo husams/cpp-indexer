@@ -19,7 +19,7 @@
 #include <utility>
 
 #include "catalogs/generated_catalog.hpp"
-#include "cli/version.hpp"
+#include "util/version.hpp"
 #include "compiledb/compiledb.hpp"
 #include "storage/storage_detail.hpp"
 #include "storage/storage_schema.hpp"

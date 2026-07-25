@@ -1,9 +1,11 @@
 # Versioning and compatibility policy
 
 `spec/platform/version.json` is the only release input. The generator produces
-`src/cli/version.hpp` and `python/indexer/_version.py`; Python packaging reads
-the latter through Hatch's dynamic version configuration. Never edit generated
-files or copy a product version into a second hand-maintained constant.
+`src/util/version.hpp` and `python/indexer/_version.py`; the existing
+`src/cli/version.hpp` is a compatibility include for CLI consumers. Python
+packaging reads the latter through Hatch's dynamic version configuration. Never
+edit generated files or copy a product version into a second hand-maintained
+constant.
 
 The version families are deliberately independent:
 
