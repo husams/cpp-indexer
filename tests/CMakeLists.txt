@@ -53,6 +53,7 @@ target_compile_definitions(result_protocol_test PRIVATE
   CIDX_RESULT_PROTOCOL_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/../spec/contracts/golden/result-envelope.json"
   CIDX_EVENT_PROTOCOL_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/../spec/contracts/golden/event.json"
   CIDX_ERROR_STATUS_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/../spec/contracts/golden/error-status.json"
+  CIDX_ERROR_TRUNCATED_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/../spec/contracts/golden/error-truncated-envelope.json"
   CIDX_PROTOCOL_VECTORS="${CMAKE_CURRENT_SOURCE_DIR}/../spec/contracts/golden/protocol-vectors.json")
 
 # query_plan_test pins canonical CXQ plan JSON against the cross-language

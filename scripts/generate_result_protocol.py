@@ -410,6 +410,7 @@ def main() -> int:
             ROOT / "spec/contracts/event.schema.json": json.dumps(render_event_schema(data), indent=2) + "\n",
             ROOT / "spec/contracts/error-status.schema.json": json.dumps(render_error_schema(data), indent=2) + "\n",
             ROOT / "spec/contracts/golden/result-envelope.json": json.dumps(goldens["result-envelope"], indent=2) + "\n",
+            ROOT / "spec/contracts/golden/error-truncated-envelope.json": json.dumps(goldens["error-truncated-envelope"], indent=2) + "\n",
             ROOT / "spec/contracts/golden/event.json": json.dumps(goldens["event"], indent=2) + "\n",
             ROOT / "spec/contracts/golden/error-status.json": json.dumps(goldens["error-status"], indent=2) + "\n",
             ROOT / "spec/contracts/golden/protocol-vectors.json": json.dumps({"vectors": data["acceptance_vectors"]}, indent=2) + "\n",

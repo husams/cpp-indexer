@@ -1,0 +1,45 @@
+{
+  "protocol": "cidx.result/v1",
+  "operation": "index",
+  "status": "error",
+  "exit_class": "infrastructure_failure",
+  "exit_code": 6,
+  "result": {
+    "indexed": 0,
+    "failed": 1,
+    "already": 0,
+    "files": []
+  },
+  "identity": {
+    "workspace": "workspace://demo",
+    "index": "semantic-index://demo",
+    "fact_sets": [
+      "symbols",
+      "files"
+    ],
+    "freshness": "current",
+    "source_revision": "git:abc123",
+    "source_fingerprint": "sha256:source"
+  },
+  "producer": {
+    "package": "cidx",
+    "version": "0.53.0",
+    "backend": "cpp",
+    "schema_version": 1
+  },
+  "completeness": {
+    "state": "unknown",
+    "truncated": true,
+    "stale": false,
+    "budget": 1
+  },
+  "diagnostics": [
+    {
+      "code": "backend_error",
+      "severity": "error",
+      "message": "index operation failed"
+    }
+  ],
+  "evidence": [],
+  "artifacts": []
+}
