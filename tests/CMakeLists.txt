@@ -26,6 +26,7 @@ set(CIDX_DEFAULT_TESTS
   workspace_context_test
   ast_pass_test
   ui_graph_view_test
+  application_services_test
 )
 
 foreach(test_name IN LISTS CIDX_DEFAULT_TESTS)

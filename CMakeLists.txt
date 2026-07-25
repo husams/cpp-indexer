@@ -145,6 +145,8 @@ endif()
 
 # Core library: util + storage + toolchain + compiledb + cli + vendored MD5/SHA1.
 add_library(cidx_core STATIC
+  src/application/registry.cpp
+  src/application/services.cpp
   src/util/logger.cpp
   src/util/env.cpp
   src/util/subprocess.cpp
@@ -172,6 +174,7 @@ add_library(cidx_core STATIC
   src/storage/workspace_adapter.cpp
   src/toolchain/toolchain.cpp
   src/cli/args.cpp
+  src/cli/application_adapter.cpp
   src/cli/format.cpp
   src/cli/json_out.cpp
   src/cli/kind_names.cpp

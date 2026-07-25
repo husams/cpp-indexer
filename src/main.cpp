@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "cli/application_adapter.hpp"
 #include "cli/args.hpp"
 #include "cli/commands.hpp"
 #include "util/errors.hpp"
@@ -74,6 +75,9 @@ int main(int argc, char **argv) {
     ctx.logger = &cidx::Logger::root();
     ctx.out = &std::cout;
     ctx.err = &std::cerr;
+    if (const auto request = cidx::cli::try_build_application_request(parsed)) {
+      return cidx::cli::run_application_request(*request, ctx);
+    }
     return cidx::cli::run_command(parsed, ctx);
   } catch (const cidx::UsageError &e) {
     std::cerr << e.what();
