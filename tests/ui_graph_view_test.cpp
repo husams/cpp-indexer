@@ -54,6 +54,17 @@ std::string result_id(const std::string &json) {
              : json.substr(value_start, value_end - value_start);
 }
 
+std::string hex_encode(std::string_view value) {
+  constexpr std::string_view digits = "0123456789abcdef";
+  std::string encoded;
+  encoded.reserve(value.size() * 2);
+  for (const unsigned char byte : value) {
+    encoded.push_back(digits[byte >> 4]);
+    encoded.push_back(digits[byte & 0x0f]);
+  }
+  return encoded;
+}
+
 } // namespace
 
 TEST_CASE("GraphView is bounded, portable, and carries evidence") {
@@ -239,7 +250,7 @@ TEST_CASE("GraphView normalizes typed file, path, and CXQ inputs") {
   CHECK(file_json.find("USR::typed-source") != std::string::npos);
   CHECK(file_json.find("\"files\"") != std::string::npos);
   CHECK(file_json.find("\"includes\"") != std::string::npos);
-  CHECK(file_json.find("file:v1:") != std::string::npos);
+  CHECK(file_json.find("file:v2:sha256:") != std::string::npos);
   CHECK(file_json.find("include-edge:v1:") != std::string::npos);
   CHECK(file_json.find("\"configuration\"") != std::string::npos);
   CHECK(file_json.find("arguments_redacted") != std::string::npos);
@@ -395,6 +406,120 @@ TEST_CASE("GraphView path export keeps the ordered witness and omits chords") {
   CHECK(result_id(calls_json) != result_id(uses_json));
   CHECK(calls_json.find("path_b") != std::string::npos);
   CHECK(calls_json.find("path_c") == std::string::npos);
+}
+
+TEST_CASE("GraphView file identities are non-reversible redacted hashes") {
+  Storage db(":memory:");
+  const int64_t component = db.add_component("test", "/secret/checkout");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "main.cpp");
+  const int64_t config =
+      db.add_include_config({.tu_file_id = file, .digest = "external-config"});
+  db.add_include_edge({.src_file_id = file,
+                       .dst_path = "/external/sys/header.hpp",
+                       .config_id = config});
+
+  cidx::ui::GraphViewRequest request;
+  request.input =
+      cidx::ui::GraphViewInput{.kind = cidx::ui::GraphInputKind::File,
+                               .value = "/secret/checkout/main.cpp"};
+  const std::string json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+
+  CHECK(json.find("file:v2:sha256:") != std::string::npos);
+  CHECK(json.find("/secret/checkout") == std::string::npos);
+  CHECK(json.find("/external/sys/header.hpp") == std::string::npos);
+  CHECK(json.find(hex_encode("/secret/checkout")) == std::string::npos);
+  CHECK(json.find(hex_encode("/external/sys/header.hpp")) == std::string::npos);
+}
+
+TEST_CASE("GraphView exposes partial entity-edge completeness and status") {
+  Storage db(":memory:");
+  const int64_t source =
+      db.add_symbol(symbol("USR::partial-source", "partial_source"));
+  const int64_t target =
+      db.add_symbol(symbol("USR::partial-target", "partial_target"));
+  auto entity_insert = db.raw_db().prepare(
+      "INSERT INTO entity_node (id, kind) VALUES (?, 1), (?, 1)");
+  entity_insert.bind(1, source);
+  entity_insert.bind(2, target);
+  entity_insert.step_done();
+  db.add_entity_edge(source, target, 8, 1, std::nullopt, 1, 0, 0, std::nullopt,
+                     1);
+  db.stamp_graph_resolved();
+  db.stamp_index_identity();
+
+  cidx::ui::GraphViewRequest request;
+  request.input = cidx::ui::GraphViewInput{
+      .kind = cidx::ui::GraphInputKind::Entity, .value = "partial_source"};
+  const std::string json =
+      cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+
+  CHECK(json.find("entity-edge:v1:") != std::string::npos);
+  CHECK(json.find("\"partial\": 1") != std::string::npos);
+  CHECK(json.find("\"completeness\": \"partial\"") != std::string::npos);
+  CHECK(json.find("\"status\": \"partial\"") != std::string::npos);
+  CHECK(json.find("\"partial\"") != std::string::npos);
+}
+
+TEST_CASE("GraphView uses one site budget across include and semantic edges") {
+  Storage db(":memory:");
+  const int64_t component = db.add_component("test", "/tmp/cidx-ui-site-mix");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "main.cpp");
+  const int64_t header = db.add_file(directory, "header.hpp");
+  auto source = symbol("USR::mixed-source", "mixed_source");
+  source.file_id = file;
+  auto target = symbol("USR::mixed-target", "mixed_target");
+  target.file_id = file;
+  const int64_t source_id = db.add_symbol(source);
+  const int64_t target_id = db.add_symbol(target);
+  const int64_t semantic_edge =
+      db.add_edge({.src_id = source_id,
+                   .dst_id = target_id,
+                   .kind = cidx::graph::edge_kinds_map().at("calls")});
+  db.add_edge_site(
+      {.edge_id = semantic_edge, .file_id = file, .line = 20, .col = 1});
+  db.add_edge_site(
+      {.edge_id = semantic_edge, .file_id = file, .line = 30, .col = 1});
+  const int64_t config =
+      db.add_include_config({.tu_file_id = file, .digest = "mixed-sites"});
+  const int64_t include =
+      db.add_include_edge({.src_file_id = file,
+                           .dst_file_id = header,
+                           .dst_path = "/tmp/cidx-ui-site-mix/header.hpp",
+                           .config_id = config});
+  db.add_include_site(
+      {.edge_id = include, .line = 10, .col = 1, .begin_offset = 10});
+
+  cidx::ui::GraphViewRequest request;
+  request.input =
+      cidx::ui::GraphViewInput{.kind = cidx::ui::GraphInputKind::File,
+                               .value = "/tmp/cidx-ui-site-mix/main.cpp"};
+  request.edge_budget = 2;
+  const auto count = [](const std::string &value, std::string_view needle) {
+    std::size_t total = 0;
+    for (std::size_t pos = value.find(needle); pos != std::string::npos;
+         pos = value.find(needle, pos + needle.size())) {
+      ++total;
+    }
+    return total;
+  };
+  for (const auto [budget, retained] :
+       {std::pair{0, 0}, std::pair{1, 1}, std::pair{3, 3}}) {
+    request.site_budget = budget;
+    const std::string json =
+        cidx::json_out::dumps_indent2(cidx::ui::build_graph_view(db, request));
+    CHECK(count(json, "\"line\": 10") + count(json, "\"line\": 20") +
+              count(json, "\"line\": 30") ==
+          static_cast<std::size_t>(retained));
+    if (budget < 3) {
+      CHECK(json.find("\"evidence_truncated\": true") != std::string::npos);
+      CHECK(json.find("\"truncated\": true") != std::string::npos);
+    } else {
+      CHECK(json.find("\"evidence_truncated\": false") != std::string::npos);
+    }
+  }
 }
 
 TEST_CASE("GraphView reports evidence beyond the site budget") {

@@ -353,11 +353,17 @@ Value edge_value(const graph::Edge &edge, const graph::Sym &source,
 
 std::string portable_file_id(Storage &db, int64_t file_id,
                              std::string_view fallback_path = {}) {
+  // Exported file identities are deliberately non-reversible. The storage
+  // source identity is useful internally but may contain absolute checkout or
+  // external paths, so never expose it through reversible encoding.
   const std::string source =
       fallback_path.empty()
           ? db.portable_source_identity_for_file(file_id)
           : db.portable_source_identity_for_path(std::string(fallback_path));
-  return "file:v1:" + hex_field(source);
+  std::string material = "cidx.graph-view.file.v2";
+  material.push_back('\0');
+  material += source;
+  return "file:v2:" + sha256_hex(material);
 }
 
 Value file_node_value(Storage &db, int64_t file_id, const std::string &path,
@@ -553,13 +559,15 @@ Value entity_edge_value(const EntityEdge &edge, std::string_view source,
   out.emplace_back("partial", Value::of(edge.partial));
   out.emplace_back("via_member_id", optional_int(edge.via_member_id));
   out.emplace_back("create_form", optional_int(edge.create_form));
-  out.emplace_back("status",
-                   Value::obj({
-                       {"completeness", Value::of(std::string("complete"))},
-                       {"freshness", Value::of(freshness)},
-                       {"resolved", Value::of(true)},
-                       {"truncated", Value::of(truncated)},
-                   }));
+  out.emplace_back(
+      "status",
+      Value::obj({
+          {"completeness",
+           Value::of(std::string(edge.partial != 0 ? "partial" : "complete"))},
+          {"freshness", Value::of(freshness)},
+          {"resolved", Value::of(true)},
+          {"truncated", Value::of(truncated)},
+      }));
   out.emplace_back("evidence", Value::obj({
                                    {"bounded", Value::of(true)},
                                    {"derived", Value::of(true)},
@@ -629,6 +637,7 @@ void append_typed_facts(Storage &db, graph::GraphQuery &graph,
                         const std::vector<int64_t> &type_ids, bool entity_view,
                         int node_budget, int edge_budget,
                         const std::string &freshness, bool &truncated,
+                        bool &partial_facts,
                         const std::optional<std::string> &workspace,
                         Array &nodes, Array &edges) {
   if (entity_view) {
@@ -694,6 +703,7 @@ void append_typed_facts(Storage &db, graph::GraphQuery &graph,
                                            available.at(edge.src_id).second);
       const std::string target = entity_id(available.at(edge.dst_id).first,
                                            available.at(edge.dst_id).second);
+      partial_facts = partial_facts || edge.partial != 0;
       edges.push_back(
           entity_edge_value(edge, source, target, freshness, truncated));
     }
@@ -1414,8 +1424,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   };
 
   const auto record_file_identity = [&](const File &file) {
-    normalized_input =
-        "file:v1:" + hex_field(db.portable_source_identity_for_file(file.id));
+    normalized_input = portable_file_id(db, file.id);
   };
 
   const auto record_symbol_identity = [&] {
@@ -1449,6 +1458,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   Array edges;
   bool truncated = false;
   bool evidence_truncated = false;
+  bool partial_facts = false;
   int sites_used = 0;
 
   const auto collect_include_edges = [&](const File &file) {
@@ -1773,7 +1783,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
     if (entity_view || type_view) {
       append_typed_facts(db, graph, entity_ids, type_ids, entity_view,
                          node_budget, edge_budget, freshness, truncated,
-                         request.workspace, nodes, edges);
+                         partial_facts, request.workspace, nodes, edges);
     } else {
       std::map<int64_t, graph::Sym> symbols_by_id;
       for (const auto &symbol : input_symbols) {
@@ -1873,7 +1883,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
           selected_edges.push_back(edge);
         }
       }
-      int sites_remaining = site_budget;
+      int sites_remaining = std::max(0, site_budget - sites_used);
       for (const auto &edge : selected_edges) {
         if (edges.size() >= static_cast<std::size_t>(edge_budget)) {
           truncated = true;
@@ -1940,7 +1950,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   std::string graph_status = "complete";
   if (initial_unknown) {
     graph_status = "unknown";
-  } else if (truncated) {
+  } else if (truncated || partial_facts) {
     graph_status = "partial";
   }
   Array markers;
@@ -1955,6 +1965,9 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   }
   if (truncated) {
     markers.push_back(Value::of(std::string("truncated")));
+  }
+  if (partial_facts) {
+    markers.push_back(Value::of(std::string("partial")));
   }
   metadata.emplace_back("status", Value::of(graph_status));
   metadata.emplace_back("markers", Value::arr(markers));
@@ -2066,12 +2079,18 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   }
 
   const bool final_truncated = truncated || byte_truncated;
+  const bool final_partial =
+      std::ranges::any_of(member(result, "edges")->a, [](const Value &edge) {
+        const Value *partial = member(edge, "partial");
+        return partial != nullptr && partial->t == Value::T::Int &&
+               partial->i != 0;
+      });
   const bool unknown = identity.freshness != "current" ||
                        !db.graph_resolved() || !input_resolved;
   std::string final_status = "complete";
   if (unknown) {
     final_status = "unknown";
-  } else if (final_truncated) {
+  } else if (final_truncated || final_partial) {
     final_status = "partial";
   }
   Array final_markers;
@@ -2086,6 +2105,9 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   }
   if (final_truncated) {
     final_markers.push_back(Value::of(std::string("truncated")));
+  }
+  if (final_partial) {
+    final_markers.push_back(Value::of(std::string("partial")));
   }
   const auto set_status = [&](Value &value) {
     if (Value *status_value = member(value, "status")) {
