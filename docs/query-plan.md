@@ -21,6 +21,7 @@ same plan and semantically identical, deterministic results.
 | `template_argument` | ordered template arguments and pack elements | virtual relations compiled to `template_arg` |
 | `call_argument` | arguments for one call occurrence | virtual relations compiled to `call_arg` |
 | `edge` | physical edge facts with logical identity | virtual relations compiled to `edge`/`edge_site` |
+| `site` | deterministic source-location evidence sites | virtual relations compiled to `edge_site` |
 | `evidence` | bounded source occurrence facts | virtual relations compiled to `edge_site` |
 | `type` | normalized type nodes | virtual relations compiled to `type_node`/`type_edge` |
 
@@ -39,7 +40,7 @@ are implementation details. Pack-bearing views retain both the outer
 Relations are data, not methods. The catalog contains the 18 Layer-0
 `edge_kind` names, the 12 `entity_edge_kind` names, and typed virtual
 relations such as `has_parameter`, `has_template_argument`, `has_argument`,
-`of_type`, and `has_evidence`. Virtual relations compile to their dedicated
+`of_type`, `has_evidence`, and `has_site`. Virtual relations compile to their dedicated
 physical tables; they never duplicate rows into a generic edge table. A bare
 relation resolves at the active endpoint; qualified forms are accepted for all
 logical views.
@@ -55,6 +56,7 @@ Source := codebase() | symbol(ref) | entity(ref)
 Stage  := nodes(pred?) | view(level) | where(pred)
         | out(relation, depth=a..b, mode=static|devirtualized)
         | in(relation, depth=a..b)
+        | sites()
         | union(plan) | intersect(plan) | except(plan)
         | select(fields) | count() | distinct() | order_by(fields) | limit(n)
 Pred   := all_of([p...]) | any_of([p...]) | not(p)
@@ -98,7 +100,8 @@ Normalization: relation names become layer-qualified; nested `all_of` within
 ## Validation (before execution; error identity is the leading `E_*` code)
 
 - `E_SOURCE` empty source ref
-- `E_VIEW` unknown view level (v1: `symbol`, `entity`)
+- `E_VIEW` unknown view level or invalid typed view transition; `sites()` requires
+  an edge node stream
 - `E_RELATION` unknown relation in the active view's namespace
 - `E_DEPTH` closure bounds: `1 <= min <= max <= 32`; a finite max is ALWAYS
   required (`1..*` is rejected — resolves wiki open question 2 conservatively)
@@ -164,7 +167,7 @@ expanded quantifier tree.
 ```
 { "shape": "nodes" | "rows" | "scalar",
   "view": "symbol" | "entity" | "parameter" | "template_parameter" |
-           "template_argument" | "call_argument" | "edge" | "evidence" | "type",
+           "template_argument" | "call_argument" | "edge" | "site" | "evidence" | "type",
   "count": <int>,          // scalar value for shape=scalar
   "truncated": <bool>,
   "index": {
@@ -199,6 +202,6 @@ generations. Row objects preserve `select` field order.
 This is a read/query-layer addition: no schema bump. Existing `GraphQuery` /
 `EntityQuery` surfaces remain compatibility adapters over the same physical
 tables, while CXQ exposes canonical logical slot and evidence identities.
-Evidence expansion is explicit and budgeted; truncated results remain marked
-`truncated: true`. Deferred to later slices: `sites()`, `path()`, `rank()`,
-and the `cidx query` agent tool surface.
+Evidence and site expansion are explicit and budgeted; truncated results remain
+marked `truncated: true`. Deferred to later slices: `path()`, `rank()`, and the
+`cidx query` agent tool surface.

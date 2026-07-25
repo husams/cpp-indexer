@@ -135,6 +135,22 @@ required_invariants() {
         RecoveryTraceInvariant \
         RecoveryFailureHonestyInvariant
       ;;
+    CidxStorageLifecycleSmoke)
+      printf '%s\n' \
+        TypeInvariant \
+        CurrentGenerationInvariant \
+        NoInvalidCurrentInvariant \
+        ReadOnlyStateInvariant \
+        MigrationInvariant \
+        SidecarInvariant \
+        CrossFileAtomicityInvariant \
+        CleanupSafetyInvariant \
+        PackageInvariant \
+        IncludeHygieneInvariant \
+        PublicationRecoveryInvariant \
+        TraceInvariant \
+        BoundedProgressInvariant
+      ;;
     *)
       echo "TLA_CONFIG_STATUS=FAIL reason=unknown-model-$1" >&2
       exit 25
@@ -161,6 +177,9 @@ required_properties() {
       ;;
     CidxSemanticGraphSmoke)
       printf '%s\n' SemanticLiveness RecoveryLiveness FailureRecoveryLiveness
+      ;;
+    CidxStorageLifecycleSmoke)
+      printf '%s\n' StorageEventuallySettles
       ;;
     *)
       echo "TLA_CONFIG_STATUS=FAIL reason=unknown-model-$1" >&2
@@ -215,11 +234,13 @@ run_model() {
       -config "$cfg" \
       "$spec") >"$tlc_log" 2>&1; then
     local violated_invariant
-    violated_invariant="$(sed -nE 's/.*Invariant ([A-Za-z][A-Za-z0-9_]*) is violated\..*/\1/p' \
+    violated_invariant="$(sed -nE 's/.*Invariant ([A-Za-z][A-Za-z0-9_]*) is violated.*/\1/p' \
       "$tlc_log" | head -n 1)"
     if [[ -n "$violated_invariant" ]]; then
+      echo "TLA_INVARIANT_STATUS=FAIL model=$model invariant=$violated_invariant" >&2
       echo "TLA_MODEL_VIOLATION=model=$model invariant=$violated_invariant" >&2
     else
+      echo "TLA_INVARIANT_STATUS=FAIL model=$model invariant=unknown" >&2
       echo "TLA_MODEL_VIOLATION=model=$model invariant=unknown" >&2
     fi
     echo "TLA_MODEL_STATUS=FAIL model=$model" >&2
@@ -236,9 +257,9 @@ run_model() {
   echo "TLA_MODEL_STATUS=PASS model=$model invariants=$invariants"
 }
 
-for model in ${TLA_MODELS:-CidxRepositorySmoke CidxResultSmoke CidxWorkspaceLifecycleSmoke CidxBehaviorSmoke CidxSemanticGraphSmoke}; do
+for model in ${TLA_MODELS:-CidxRepositorySmoke CidxResultSmoke CidxWorkspaceLifecycleSmoke CidxBehaviorSmoke CidxSemanticGraphSmoke CidxStorageLifecycleSmoke}; do
   run_model "$model"
 done
 
 echo "TLA_TOOLCHAIN_STATUS=PASS version=$TOOLS_VERSION java=17"
-echo "TLA_CHECK_STATUS=PASS models=${TLA_MODELS:-CidxRepositorySmoke,CidxResultSmoke,CidxWorkspaceLifecycleSmoke,CidxBehaviorSmoke,CidxSemanticGraphSmoke} workers=1 fingerprint=0 seed=1"
+echo "TLA_CHECK_STATUS=PASS models=${TLA_MODELS:-CidxRepositorySmoke,CidxResultSmoke,CidxWorkspaceLifecycleSmoke,CidxBehaviorSmoke,CidxSemanticGraphSmoke,CidxStorageLifecycleSmoke} workers=1 fingerprint=0 seed=1"

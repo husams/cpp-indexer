@@ -5,6 +5,7 @@
     "modules/CidxTypes.tla",
     "modules/CidxRepository.tla",
     "modules/CidxResult.tla",
+    "modules/CidxStorageLifecycle.tla",
     "modules/CidxBehavior.tla",
     "modules/CidxWorkspaceLifecycle.tla",
     "modules/CidxSemanticGraph.tla",
@@ -66,6 +67,26 @@
         "RecoveryTraceInvariant",
         "RecoveryFailureHonestyInvariant"
       ]
+    },
+    {
+      "module": "models/CidxStorageLifecycleSmoke.tla",
+      "config": "models/CidxStorageLifecycleSmoke.cfg",
+      "invariants": [
+        "TypeInvariant",
+        "CurrentGenerationInvariant",
+        "NoInvalidCurrentInvariant",
+        "ReadOnlyStateInvariant",
+        "MigrationInvariant",
+        "SidecarInvariant",
+        "CrossFileAtomicityInvariant",
+        "CleanupSafetyInvariant",
+        "PackageInvariant",
+        "IncludeHygieneInvariant",
+        "PublicationRecoveryInvariant",
+        "TraceInvariant",
+        "BoundedProgressInvariant"
+      ],
+      "properties": ["StorageEventuallySettles"]
     }
   ],
   "coverage": {
@@ -88,8 +109,26 @@
       "coverage": "smoke-bounded"
     },
     "storage-sidecars-and-migrations": {
-      "modules": ["CidxBehavior"],
-      "invariants": ["MigrationInvariant", "NoPartialGenerationInvariant"]
+      "modules": ["CidxStorageLifecycle", "CidxBehavior"],
+      "invariants": [
+        "CurrentGenerationInvariant",
+        "NoInvalidCurrentInvariant",
+        "ReadOnlyStateInvariant",
+        "MigrationInvariant",
+        "SidecarInvariant",
+        "CrossFileAtomicityInvariant",
+        "CleanupSafetyInvariant",
+        "PackageInvariant",
+        "PublicationRecoveryInvariant",
+        "NoPartialGenerationInvariant",
+        "StorageEventuallySettles"
+      ],
+      "coverage": "bounded",
+      "notModeled": [
+        "SQLite pager/journal/WAL/locking algorithms",
+        "filesystem durability guarantees",
+        "implementation-specific backup formats"
+      ]
     },
     "include-hygiene-and-transformations": {
       "modules": ["CidxBehavior", "CidxSemanticGraph"],

@@ -18,7 +18,7 @@ TEST_CASE("generated semantic catalog has stable cross-language contract") {
   CHECK(kCatalogVersion == 1);
   CHECK(kCatalogHash.size() == 64);
   CHECK(kSymbolKinds.size() == 17);
-  CHECK(kRelations.size() == 54);
+  CHECK(kRelations.size() == 56);
   CHECK(kFields.size() == 42);
   CHECK(kOccurrenceRoles.size() == 5);
   CHECK(kEffectRoles.size() == 5);

@@ -30,6 +30,8 @@ const char *view_name(View v) {
     return "call_argument";
   case View::Edge:
     return "edge";
+  case View::Site:
+    return "site";
   case View::Evidence:
     return "evidence";
   case View::Type:
@@ -45,8 +47,8 @@ View view_from_domain(std::string_view domain) {
   const auto name = domain.substr(0, dot);
   for (const auto view :
        {View::Symbol, View::Entity, View::Parameter, View::TemplateParameter,
-        View::TemplateArgument, View::CallArgument, View::Edge, View::Evidence,
-        View::Type}) {
+        View::TemplateArgument, View::CallArgument, View::Edge, View::Site,
+        View::Evidence, View::Type}) {
     if (name == view_name(view)) {
       return view;
     }
@@ -70,6 +72,8 @@ View catalog_view(catalog::View view) {
     return View::CallArgument;
   case catalog::View::Edge:
     return View::Edge;
+  case catalog::View::Site:
+    return View::Site;
   case catalog::View::Evidence:
     return View::Evidence;
   case catalog::View::Type:
@@ -127,7 +131,8 @@ const RelationDesc *resolve_relation(const std::string &name, View active,
   } else {
     for (const auto view :
          {View::Parameter, View::TemplateParameter, View::TemplateArgument,
-          View::CallArgument, View::Edge, View::Evidence, View::Type}) {
+          View::CallArgument, View::Edge, View::Site, View::Evidence,
+          View::Type}) {
       const std::string prefix = std::string(view_name(view)) + ".";
       if (name.starts_with(prefix)) {
         forced = view;
@@ -484,6 +489,8 @@ const char *stage_op_name(StageOp op) {
     return "out";
   case StageOp::In:
     return "in";
+  case StageOp::Sites:
+    return "sites";
   case StageOp::Union:
     return "union";
   case StageOp::Intersect:
@@ -571,6 +578,12 @@ Stage out(const std::string &relation, int64_t min_depth, int64_t max_depth,
 Stage in_(const std::string &relation, int64_t min_depth, int64_t max_depth) {
   Stage s = out(relation, min_depth, max_depth);
   s.op = StageOp::In;
+  return s;
+}
+
+Stage sites() {
+  Stage s;
+  s.op = StageOp::Sites;
   return s;
 }
 
@@ -665,14 +678,20 @@ bool field_available(View view, const std::string &name) {
                           "type_id", "decl_id", "callee_id", "type_is_value"});
   case View::Edge:
     return has(std::array{"src_id", "dst_id", "kind", "count", "base_access",
-                          "is_virtual", "vtable_slot"});
+                          "is_virtual", "vtable_slot", "relation", "source",
+                          "target", "evidence", "status", "partial", "unknown"});
+  case View::Site:
+    return has(std::array{"edge_id", "file_id", "file", "line", "col",
+                          "relation", "source", "target", "evidence", "status",
+                          "partial", "unknown"});
   case View::Evidence:
     return has(std::array{"owner_id", "position", "default_txt",
                           "default_type_id", "default_ref_id", "edge_id",
                           "file_id", "line", "col", "conditional", "args_sig",
                           "recv_src_kind", "recv_type_usr", "recv_decl_usr",
                           "recv_type_id", "recv_decl_id", "recv_param_pos",
-                          "recv_type_is_value"});
+                          "recv_type_is_value", "relation", "source", "target",
+                          "evidence", "status", "partial", "unknown"});
   case View::Type:
     return has(std::array{"type_key", "spelling", "kind", "is_const",
                           "is_volatile", "is_restrict", "cv_qualifiers",
@@ -702,7 +721,8 @@ void check_cmp(const Pred &p, View active) {
                                  "type_usr",      "decl_usr",
                                  "callee_usr",    "args_sig",
                                  "recv_src_kind", "recv_type_usr",
-                                 "recv_decl_usr"};
+                                 "recv_decl_usr",   "relation", "source",
+                                 "target",          "evidence", "status"};
     const auto is_string = [&p, &strings] {
       return std::ranges::find(strings, p.field) != strings.end();
     };
@@ -859,7 +879,8 @@ bool is_known_view(View view) {
   return view == View::Symbol || view == View::Entity ||
          view == View::Parameter || view == View::TemplateParameter ||
          view == View::TemplateArgument || view == View::CallArgument ||
-         view == View::Edge || view == View::Evidence || view == View::Type;
+         view == View::Edge || view == View::Site || view == View::Evidence ||
+         view == View::Type;
 }
 
 Plan validate_walk(const Plan &plan, WalkState &st) {
@@ -903,7 +924,7 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
       }
       st.codebase_unenumerated = false;
       break;
-    case StageOp::ChangeView:
+    case StageOp::ChangeView: {
       if (st.shape != Shape::Nodes) {
         fail("E_STAGE", "view() applies to a node stream");
       }
@@ -911,8 +932,18 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
         fail("E_VIEW",
              "unknown view '" + std::string(view_name(stage.level)) + "'");
       }
+      const bool logical_transition =
+          (st.active == View::Symbol || st.active == View::Entity) &&
+          (stage.level == View::Symbol || stage.level == View::Entity);
+      if (!st.codebase_unenumerated && stage.level != st.active &&
+          !logical_transition) {
+        fail("E_VIEW", "cannot change view from " +
+                           std::string(view_name(st.active)) + " to " +
+                           std::string(view_name(stage.level)));
+      }
       st.active = stage.level;
       break;
+    }
     case StageOp::Where:
       if (st.shape != Shape::Nodes) {
         fail("E_STAGE", "where() applies to a node stream");
@@ -959,6 +990,16 @@ Plan validate_walk(const Plan &plan, WalkState &st) {
       st.active = inbound ? r->layer : r->target_view;
       break;
     }
+    case StageOp::Sites:
+      consume();
+      if (st.shape != Shape::Nodes) {
+        fail("E_STAGE", "sites() applies to a node stream");
+      }
+      if (st.active != View::Edge) {
+        fail("E_VIEW", "sites() requires an edge node stream");
+      }
+      st.active = View::Site;
+      break;
     case StageOp::Union:
     case StageOp::Intersect:
     case StageOp::Except: {
@@ -1183,6 +1224,8 @@ json_out::Value plan_to_json_normalized(const Plan &plan) {
       }
       o.emplace_back("min_depth", Value::of(s.min_depth));
       o.emplace_back("max_depth", Value::of(s.max_depth));
+      break;
+    case StageOp::Sites:
       break;
     case StageOp::Union:
     case StageOp::Intersect:
