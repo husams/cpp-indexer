@@ -96,7 +96,7 @@ def _sym(db, file_id, key, usr, spelling, kind, line, *, qual=None, is_pure=Fals
 # ---------------------------------------------------------------------------
 
 def test_schema_version_is_30():
-    assert SCHEMA_VERSION == 39, f"Expected 39, got {SCHEMA_VERSION}"
+    assert SCHEMA_VERSION == 40, f"Expected 40, got {SCHEMA_VERSION}"
 
 
 def test_product_version_is_0501():

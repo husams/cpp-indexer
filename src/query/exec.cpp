@@ -1398,12 +1398,54 @@ private:
                   {SqlValue(owner)});
         }
       }
-    } else if (inbound && st.view == View::SignatureSlot &&
+    } else if (inbound && st.view == View::Symbol &&
+               rel.name == "of_callable") {
+      for (const auto owner : st.ids) {
+        add_keys(
+            View::SignatureSlot,
+            "SELECT symbol_id,-1,-1,0,0,1 FROM symbol_type WHERE "
+            "symbol_id=? AND kind=1 UNION ALL SELECT owner_id,position,"
+            "pack_index,0,0,2 FROM parameter WHERE owner_id=? UNION ALL "
+            "SELECT owner_id,position,-1,0,0,3 FROM template_param WHERE "
+            "owner_id=? UNION ALL SELECT owner_id,position,pack_index,0,0,4 "
+            "FROM template_arg WHERE owner_id=? ORDER BY 1,2,3,6",
+            {SqlValue(owner), SqlValue(owner), SqlValue(owner),
+             SqlValue(owner)});
+      }
+    } else if (!inbound && st.view == View::SignatureSlot &&
                rel.name == "of_callable") {
       for (const auto &key : st.keys) {
         add_ids("SELECT ?", {SqlValue(key.a)});
       }
-    } else if (inbound && st.view == View::SignatureSlot &&
+    } else if (inbound && st.view == View::Symbol &&
+               rel.name == "of_type") {
+      for (const auto owner : st.ids) {
+        add_keys(
+            View::SignatureSlot,
+            "SELECT symbol_id,-1,-1,0,0,1 FROM symbol_type WHERE "
+            "symbol_id=? AND kind=1 UNION ALL SELECT owner_id,position,"
+            "pack_index,0,0,2 FROM parameter WHERE owner_id=? UNION ALL "
+            "SELECT owner_id,position,-1,0,0,3 FROM template_param WHERE "
+            "owner_id=? UNION ALL SELECT owner_id,position,pack_index,0,0,4 "
+            "FROM template_arg WHERE owner_id=? ORDER BY 1,2,3,6",
+            {SqlValue(owner), SqlValue(owner), SqlValue(owner),
+             SqlValue(owner)});
+      }
+    } else if (inbound && st.view == View::Type &&
+               rel.layer == View::SignatureSlot && rel.name == "of_type") {
+      for (const auto &key : st.keys) {
+        add_keys(
+            View::SignatureSlot,
+            "SELECT symbol_id,-1,-1,0,0,1 FROM symbol_type WHERE "
+            "type_id=? AND kind=1 UNION ALL SELECT owner_id,position,"
+            "pack_index,0,0,2 FROM parameter WHERE type_id=? UNION ALL "
+            "SELECT owner_id,position,-1,0,0,3 FROM template_param WHERE "
+            "type_id=? UNION ALL SELECT owner_id,position,pack_index,0,0,4 "
+            "FROM template_arg WHERE type_id=? ORDER BY 1,2,3,6",
+            {SqlValue(key.a), SqlValue(key.a), SqlValue(key.a),
+             SqlValue(key.a)});
+      }
+    } else if (!inbound && st.view == View::SignatureSlot &&
                rel.name == "of_type") {
       for (const auto &key : st.keys) {
         if (key.tag == 1) {
@@ -1437,6 +1479,16 @@ private:
       for (const auto &key : st.keys) {
         add_ids("SELECT ?", {SqlValue(key.a)});
       }
+    } else if (inbound && st.view == View::SignatureSlot &&
+               rel.name == "has_signature_slot") {
+      for (const auto &key : st.keys) {
+        add_ids("SELECT ?", {SqlValue(key.a)});
+      }
+    } else if (inbound && st.view == View::TypeLayer &&
+               rel.name == "has_layer") {
+      for (const auto &key : st.keys) {
+        add_ids("SELECT ?", {SqlValue(key.a)});
+      }
     } else if (!inbound && st.view == View::TypeLayer && rel.name == "child") {
       graph::GraphQuery graph(read_.graph_read());
       for (const auto &key : st.keys) {
@@ -1453,7 +1505,8 @@ private:
           }
         }
       }
-    } else if (inbound && st.view == View::TypeLayer && rel.name == "parent") {
+    } else if (inbound && st.view == View::TypeLayer &&
+               (rel.name == "child" || rel.name == "parent")) {
       // Parent links are derived from the deterministic path/depth relation.
       graph::GraphQuery graph(read_.graph_read());
       for (const auto &key : st.keys) {

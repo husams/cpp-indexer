@@ -12,7 +12,7 @@ because PR2 has not been implemented in this worktree.  Do NOT xfail or skip the
 flag failures as blockers so the developer can act on each one.
 
 Scenarios covered (mapped to DESIGN_entity_edge_plan.md §PR2 test matrix):
-  schema-1      SCHEMA_VERSION == 39
+  schema-1      SCHEMA_VERSION == 40
   schema-2      entity_edge table present in _SCHEMA
   schema-3      entity_edge_kind seed has exactly 11 rows (ids 1-11)
   schema-4      entity_edge columns: id,src_id,dst_id,kind,count,via_member_id,
@@ -104,8 +104,8 @@ def _import_query():
 def test_schema_version_is_current():
     """SCHEMA_VERSION must match the current storage contract."""
     storage = _import_storage()
-    assert storage.SCHEMA_VERSION == 42, (
-        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 42."
+    assert storage.SCHEMA_VERSION == 40, (
+        f"SCHEMA_VERSION is {storage.SCHEMA_VERSION}; expected 40."
     )
 
 
@@ -335,8 +335,8 @@ def test_cpp_schema_version_is_current():
     match = re.search(r'kSchemaVersion\s*=\s*(\d+)', hpp_src)
     assert match is not None, "kSchemaVersion not found in storage.hpp."
     version = int(match.group(1))
-    assert version == 42, (
-        f"C++ kSchemaVersion is {version}; expected 42."
+    assert version == 40, (
+        f"C++ kSchemaVersion is {version}; expected 40."
     )
 
 

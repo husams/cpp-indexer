@@ -195,9 +195,9 @@ TEST_CASE(
   check_migrated(path);
 }
 
-TEST_CASE("predecessor catalog hash requires the v41 to v42 migration") {
+TEST_CASE("predecessor catalog hash requires the v39 to v40 migration") {
   const std::string tmp = make_temp_dir();
-  for (const char *wrong_version : {"40", "42"}) {
+  for (const char *wrong_version : {"38", "40"}) {
     const std::string path =
         std::string(tmp) + "/wrong-" + wrong_version + ".db";
     {
@@ -209,11 +209,52 @@ TEST_CASE("predecessor catalog hash requires the v41 to v42 migration") {
                "' WHERE key = 'schema_version'");
       raw.exec(
           "UPDATE meta SET value = "
-          "'eed1f38ccdc779776c637d8e8ffbc015c7616a94fecabd5e4302f0587c1bab93' "
-          "WHERE key = 'catalog_hash'");
+               "'3337824260ee0afe1260859b6be88e6fb8280852fd736cde5e12cca5c3847ba4' "
+               "WHERE key = 'catalog_hash'");
     }
     CHECK_THROWS_AS(cidx::Storage{path}, cidx::CidxError);
   }
+}
+
+TEST_CASE("current main v39 database upgrades to the candidate v40 schema") {
+  const std::string tmp = make_temp_dir();
+  const std::string path = tmp + "/main-v39.db";
+  {
+    cidx::Storage db(path);
+    cidx::Symbol before;
+    before.usr = "main-v39:before";
+    before.spelling = "before";
+    before.kind = "function";
+    db.add_symbol(before);
+  }
+  {
+    cidx::SqliteDb raw(path);
+    for (const char *column : {"callable_kind", "template_origin",
+                               "template_form"}) {
+      raw.exec(std::string("ALTER TABLE symbol DROP COLUMN ") + column);
+    }
+    raw.exec("ALTER TABLE type_node DROP COLUMN extent");
+    raw.exec("DELETE FROM type_kind WHERE id = 14");
+    raw.exec("UPDATE meta SET value = '39' WHERE key = 'schema_version'");
+    raw.exec(
+        "UPDATE meta SET value = "
+        "'3337824260ee0afe1260859b6be88e6fb8280852fd736cde5e12cca5c3847ba4' "
+        "WHERE key = 'catalog_hash'");
+  }
+  {
+    cidx::Storage db(path);
+    CHECK(meta_version(db.raw_db()) == std::to_string(cidx::kSchemaVersion));
+    CHECK(db.lookup_symbol("main-v39:before").has_value());
+  }
+  cidx::SqliteDb raw(path);
+  for (const char *column : {"callable_kind", "template_origin",
+                             "template_form"}) {
+    CHECK(has_col(table_columns(raw, "symbol"), column));
+  }
+  CHECK(has_col(table_columns(raw, "type_node"), "extent"));
+  auto kind = raw.prepare("SELECT name FROM type_kind WHERE id = 14");
+  REQUIRE(kind.step());
+  CHECK(kind.col_text(0) == "pack-expansion");
 }
 
 TEST_CASE("v38 database migrates to the v39 scoped identity layer") {

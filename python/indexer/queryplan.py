@@ -1857,9 +1857,32 @@ class Executor:
         elif not inbound and st.view == SYMBOL_VIEW and rel[0] == "of_type":
             for owner in st.ids:
                 add_ids("SELECT type_id FROM symbol_type WHERE symbol_id=? ORDER BY type_id", (owner,))
-        elif inbound and st.view == "signature_slot" and rel[0] == "of_callable":
+        elif inbound and st.view == SYMBOL_VIEW and rel[0] == "of_callable":
+            for owner in st.ids:
+                add_rows(
+                    "SELECT symbol_id,-1,-1,0,0,1 FROM symbol_type WHERE "
+                    "symbol_id=? AND kind=1 UNION ALL SELECT owner_id,position,"
+                    "pack_index,0,0,2 FROM parameter WHERE owner_id=? UNION ALL "
+                    "SELECT owner_id,position,-1,0,0,3 FROM template_param WHERE "
+                    "owner_id=? UNION ALL SELECT owner_id,position,pack_index,0,0,4 "
+                    "FROM template_arg WHERE owner_id=? ORDER BY 1,2,3,6",
+                    (owner, owner, owner, owner),
+                )
+        elif inbound and st.view == "type" and rel[0] == "of_type" \
+                and rel[1] == "signature_slot":
+            for (type_id,) in st.keys:
+                add_rows(
+                    "SELECT symbol_id,-1,-1,0,0,1 FROM symbol_type WHERE "
+                    "type_id=? AND kind=1 UNION ALL SELECT owner_id,position,"
+                    "pack_index,0,0,2 FROM parameter WHERE type_id=? UNION ALL "
+                    "SELECT owner_id,position,-1,0,0,3 FROM template_param WHERE "
+                    "type_id=? UNION ALL SELECT owner_id,position,pack_index,0,0,4 "
+                    "FROM template_arg WHERE type_id=? ORDER BY 1,2,3,6",
+                    (type_id, type_id, type_id, type_id),
+                )
+        elif not inbound and st.view == "signature_slot" and rel[0] == "of_callable":
             ids.extend(key[0] for key in st.keys)
-        elif inbound and st.view == "signature_slot" and rel[0] == "of_type":
+        elif not inbound and st.view == "signature_slot" and rel[0] == "of_type":
             for key in st.keys:
                 if key[5] == 1:
                     add_ids("SELECT type_id FROM symbol_type WHERE symbol_id=? AND kind=1", (key[0],))
@@ -1876,6 +1899,10 @@ class Executor:
                     add_synthetic((key[0], index))
         elif not inbound and st.view == "type_layer" and rel[0] == "of_type":
             ids.extend(key[0] for key in st.keys)
+        elif inbound and st.view == "signature_slot" and rel[0] == "has_signature_slot":
+            ids.extend(key[0] for key in st.keys)
+        elif inbound and st.view == "type_layer" and rel[0] == "has_layer":
+            ids.extend(key[0] for key in st.keys)
         elif not inbound and st.view == "type_layer" and rel[0] == "child":
             graph = GraphQuery.from_connection(self._conn)
             for key in st.keys:
@@ -1886,7 +1913,7 @@ class Executor:
                         if (child["depth"] == parent["depth"] + 1 and
                                 child["path"].startswith(parent["path"] + ".")):
                             add_synthetic((key[0], index))
-        elif inbound and st.view == "type_layer" and rel[0] == "parent":
+        elif inbound and st.view == "type_layer" and rel[0] in ("child", "parent"):
             graph = GraphQuery.from_connection(self._conn)
             for key in st.keys:
                 layers = graph.type_layers(key[0])

@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from indexer.storage import Storage, Symbol  # noqa: E402
+from indexer.query import GraphQuery  # noqa: E402
 from indexer.utils.hashing import md5_of  # noqa: E402
 from indexer import queryplan as qp  # noqa: E402
 from indexer.queryplan import (  # noqa: E402
@@ -599,11 +600,12 @@ def test_named_signature_slots_and_recursive_type_layers_match_cpp_values():
         template_origin="typed_views<T>", template_form="pattern"))
     db._conn.execute(
         "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
-        "('A4(b:int)','int[4]',8,'4'),('b:int','int',1,NULL)"
+        "('A4(b:int)','int[4]',8,'4'),('b:int','int',1,NULL),"
+        "('b:float','float',1,NULL),('b:char','char',1,NULL)"
     )
     type_ids = [row[0] for row in db._conn.execute(
         "SELECT id FROM type_node ORDER BY id")]
-    array_id, int_id = type_ids
+    array_id, int_id, float_id, char_id = type_ids
     db._conn.execute(
         "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES (?,?,?,?)",
         (array_id, 2, 0, int_id))
@@ -614,6 +616,15 @@ def test_named_signature_slots_and_recursive_type_layers_match_cpp_values():
         "INSERT INTO parameter(owner_id,position,pack_index,name,type_id,"
         "declared_type_id,adjusted_type_id) VALUES (?,?,?,?,?,?,?)",
         (owner, 0, -1, "value", int_id, int_id, int_id))
+    db._conn.execute(
+        "INSERT INTO template_param(owner_id,position,param_kind,name,type_id) "
+        "VALUES (?,?,?,?,?)", (owner, 0, 1, "T", float_id)
+    )
+    db._conn.execute(
+        "INSERT INTO template_arg(owner_id,position,pack_index,arg_kind,type_id) "
+        "VALUES (?,?,?,?,?),(?,?,?,?,?)",
+        (owner, 1, 0, 1, char_id, owner, 1, 1, 1, char_id),
+    )
     db._conn.commit()
 
     def structure():
@@ -639,6 +650,31 @@ def test_named_signature_slots_and_recursive_type_layers_match_cpp_values():
          | select(["slot_kind", "position", "name", "type_id"])).plan)
     assert slots.rows == [("parameter", 0, "value", int_id)]
 
+    callable_roundtrip = ex.run(
+        (start(symbol("USR::typed_views")) | out("has_signature_slot")
+         | out("of_callable") | select(["usr"])).plan
+    )
+    assert callable_roundtrip.rows == [("USR::typed_views",)]
+    type_roundtrip = ex.run(
+        (start(symbol("USR::typed_views")) | out("has_signature_slot")
+         | out("of_type") | select(["type_key"])).plan
+    )
+    assert type_roundtrip.rows == [
+        ("A4(b:int)",), ("b:int",), ("b:float",), ("b:char",)
+    ]
+    callable_inverse = ex.run(
+        (start(symbol("USR::typed_views")) | out("has_signature_slot")
+         | in_("has_signature_slot") | select(["usr"])).plan
+    )
+    assert callable_inverse.rows == [("USR::typed_views",)]
+    type_inverse = ex.run(
+        (start(codebase()) | view("type") | nodes()
+             | where(eq("type_key", "b:int"))
+             | in_("signature_slot.of_type")
+         | select(["slot_kind"])).plan
+    )
+    assert type_inverse.rows == [("parameter",)]
+
     layers = ex.run(
         (start(codebase()) | view("type") | nodes() | out("has_layer")
          | where(eq("root_id", array_id))
@@ -648,7 +684,98 @@ def test_named_signature_slots_and_recursive_type_layers_match_cpp_values():
         (array_id, "root", "root", 0, "complete", "4"),
         (array_id, "root.element", "element_type", 1, "complete", None),
     ]
+    parent = ex.run(
+        (start(codebase()) | view("type") | nodes() | out("has_layer")
+         | where(eq("root_id", array_id))
+         | where(eq("path", "root.element")) | in_("child")
+         | select(["path"])).plan
+    )
+    assert parent.rows == [("root",)]
+    root_type = ex.run(
+        (start(codebase()) | view("type") | nodes() | out("has_layer")
+         | where(eq("root_id", array_id)) | where(eq("path", "root"))
+         | in_("has_layer") | select(["type_key"])).plan
+    )
+    assert root_type.rows == [("A4(b:int)",)]
     assert structure() == before
+
+
+def test_exact_recursive_and_pointer_type_acceptance_is_read_only():
+    db = Storage(":memory:")
+    owner_id = db.add_symbol(_make_sym("cidx::version_re", "version_re"))
+    db.add_symbol(_make_sym("USR::Owner", "Owner", "struct"))
+    db._conn.execute(
+        "INSERT INTO type_node(type_key,spelling,kind) VALUES "
+        "('alias:A','A',4),('alias:B','B',4),"
+        "('fn:ret-param','int(float)',9),('b:int','int',1),"
+        "('b:float','float',1),('record:Owner','Owner',2),"
+        "('mfp:Owner','int (Owner::*)(float)',13),"
+        "('pack:int','int...',14)"
+    )
+
+    def type_id(key):
+        return db._conn.execute(
+            "SELECT id FROM type_node WHERE type_key=?", (key,)
+        ).fetchone()[0]
+
+    alias_a = type_id("alias:A")
+    alias_b = type_id("alias:B")
+    function = type_id("fn:ret-param")
+    integer = type_id("b:int")
+    floating = type_id("b:float")
+    member_owner = type_id("record:Owner")
+    member_function = type_id("mfp:Owner")
+    db._conn.executemany(
+        "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES (?,?,?,?)",
+        [(alias_a, 3, 0, alias_b), (alias_b, 3, 0, alias_a),
+         (function, 4, 0, integer), (function, 5, 0, floating),
+         (member_function, 7, 0, member_owner),
+         (member_function, 8, 0, function)],
+    )
+    db._conn.execute(
+        "INSERT INTO parameter(owner_id,position,pack_index,name) "
+        "VALUES (?,?,?,?)", (owner_id, 9, -1, "unknown")
+    )
+    db._conn.commit()
+
+    graph = GraphQuery.from_connection(db._conn)
+    alias_layers = graph.type_layers(alias_a)
+    assert [(row["path"], row["status"]) for row in alias_layers] == [
+        ("root", "complete"),
+        ("root.alias_of", "complete"),
+        ("root.alias_of.alias_of", "cycle"),
+    ]
+    assert [row["kind"] for row in graph.type_layers(function)] == [
+        "function", "builtin", "builtin"
+    ]
+    assert [row["path"] for row in graph.type_layers(function)] == [
+        "root", "root.return_type", "root.param_type[0]"
+    ]
+    member_layers = graph.type_layers(member_function)
+    assert [row["path"] for row in member_layers] == [
+        "root", "root.member_owner", "root.member_component",
+        "root.member_component.return_type",
+        "root.member_component.param_type[0]",
+    ]
+    assert member_layers[1]["spelling"] == "Owner"
+    assert graph.type_layers(999999) == [{
+        "path": "root", "relation": "root", "position": 0,
+        "depth": 0, "status": "unknown",
+    }]
+
+    null_slot = Executor(db).run(
+        (start(symbol("cidx::version_re")) | out("has_parameter")
+         | where(eq("position", 9)) | select(["type_id"])).plan
+    )
+    assert null_slot.rows == [(None,)]
+    before = tuple(db._conn.execute(
+        "SELECT (SELECT count(*) FROM symbol), (SELECT count(*) FROM edge)"
+    ).fetchone())
+    assert graph.type_layers(type_id("pack:int"))[0]["kind"] == "pack-expansion"
+    after = tuple(db._conn.execute(
+        "SELECT (SELECT count(*) FROM symbol), (SELECT count(*) FROM edge)"
+    ).fetchone())
+    assert after == before
 
 
 def test_template_defaults_expose_logical_evidence():

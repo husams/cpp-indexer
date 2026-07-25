@@ -30,6 +30,7 @@
 #include "query/cxq.hpp"
 #include "query/exec.hpp"
 #include "query/plan.hpp"
+#include "graph/query.hpp"
 #include "storage/records.hpp"
 #include "storage/storage.hpp"
 #include "util/hashing.hpp"
@@ -779,17 +780,26 @@ TEST_CASE(
   const int64_t owner = db.add_symbol(callable);
   db.raw_db().exec(
       "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
-      "('A4(b:int)','int[4]',8,'4'),('b:int','int',1,NULL)");
+      "('A4(b:int)','int[4]',8,'4'),('b:int','int',1,NULL),"
+      "('b:float','float',1,NULL),('b:char','char',1,NULL)");
   auto type_ids = db.raw_db().prepare("SELECT id FROM type_node ORDER BY id");
   REQUIRE(type_ids.step());
   const int64_t array_id = type_ids.col_int64(0);
   REQUIRE(type_ids.step());
   const int64_t int_id = type_ids.col_int64(0);
+  REQUIRE(type_ids.step());
+  REQUIRE(type_ids.step());
   db.add_type_edge(array_id, 2, 0, int_id);
   db.add_symbol_type(owner, 1, array_id);
   db.raw_db().exec(
       "INSERT INTO parameter(owner_id,position,pack_index,name,type_id,"
       "declared_type_id,adjusted_type_id) VALUES (1,0,-1,'value',2,2,2)");
+  db.raw_db().exec(
+      "INSERT INTO template_param(owner_id,position,param_kind,name,type_id) "
+      "VALUES (1,0,1,'T',3)");
+  db.raw_db().exec(
+      "INSERT INTO template_arg(owner_id,position,pack_index,arg_kind,type_id) "
+      "VALUES (1,1,0,1,4),(1,1,1,1,4)");
   const auto structure = [&] {
     auto symbols = db.raw_db().prepare(
         "SELECT count(*),COALESCE(group_concat(id,','),'') FROM symbol");
@@ -821,6 +831,40 @@ TEST_CASE(
   CHECK(std::get<int64_t>(slots.rows[0][1]) == 0);
   CHECK(std::get<std::string>(slots.rows[0][2]) == "value");
   CHECK(std::get<int64_t>(slots.rows[0][3]) == int_id);
+  const auto callable_roundtrip =
+      ex.run((start(symbol("USR::typed_views")) |
+              out("has_signature_slot") | out("of_callable") |
+              select({"usr"}))
+                 .plan());
+  REQUIRE(callable_roundtrip.rows.size() == 1);
+  CHECK(std::get<std::string>(callable_roundtrip.rows[0][0]) ==
+        "USR::typed_views");
+  const auto type_roundtrip =
+      ex.run((start(symbol("USR::typed_views")) |
+              out("has_signature_slot") | out("of_type") |
+              select({"type_key"}))
+                 .plan());
+  REQUIRE(type_roundtrip.rows.size() == 4);
+  CHECK(std::get<std::string>(type_roundtrip.rows[0][0]) == "A4(b:int)");
+  CHECK(std::get<std::string>(type_roundtrip.rows[1][0]) == "b:int");
+  CHECK(std::get<std::string>(type_roundtrip.rows[2][0]) == "b:float");
+  CHECK(std::get<std::string>(type_roundtrip.rows[3][0]) == "b:char");
+  const auto callable_inverse =
+      ex.run((start(symbol("USR::typed_views")) |
+              out("has_signature_slot") | in_("has_signature_slot") |
+              select({"usr"}))
+                 .plan());
+  REQUIRE(callable_inverse.rows.size() == 1);
+  CHECK(std::get<std::string>(callable_inverse.rows[0][0]) ==
+        "USR::typed_views");
+  const auto type_inverse =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) |
+              in_("signature_slot.of_type") |
+              select({"slot_kind"}))
+                 .plan());
+  REQUIRE(type_inverse.rows.size() == 1);
+  CHECK(std::get<std::string>(type_inverse.rows[0][0]) == "parameter");
   const auto layers = ex.run(
       (start(codebase()) | view(View::Type) | nodes() | out("has_layer") |
        where(eq("root_id", array_id)) |
@@ -832,7 +876,109 @@ TEST_CASE(
   CHECK(std::get<std::string>(layers.rows[1][2]) == "element_type");
   CHECK(std::get<std::string>(layers.rows[0][4]) == "complete");
   CHECK(std::get<std::string>(layers.rows[0][5]) == "4");
+  const auto parent = ex.run(
+      (start(codebase()) | view(View::Type) | nodes() | out("has_layer") |
+       where(eq("root_id", array_id)) | where(eq("path", "root.element")) |
+       in_("child") | select({"path"}))
+          .plan());
+  REQUIRE(parent.rows.size() == 1);
+  CHECK(std::get<std::string>(parent.rows[0][0]) == "root");
+  const auto root_type = ex.run(
+      (start(codebase()) | view(View::Type) | nodes() | out("has_layer") |
+       where(eq("root_id", array_id)) | where(eq("path", "root")) |
+       in_("has_layer") | select({"type_key"}))
+          .plan());
+  REQUIRE(root_type.rows.size() == 1);
+  CHECK(std::get<std::string>(root_type.rows[0][0]) == "A4(b:int)");
   CHECK(structure() == before);
+}
+
+TEST_CASE("query_plan: exact recursive and pointer type acceptance is read-only") {
+  Storage db(":memory:");
+  Symbol owner = make_sym("cidx::version_re", "version_re", "function");
+  const int64_t owner_id = db.add_symbol(owner);
+  Symbol record = make_sym("USR::Owner", "Owner", "struct");
+  db.add_symbol(record);
+  db.raw_db().exec(
+      "INSERT INTO type_node(type_key,spelling,kind) VALUES "
+      "('alias:A','A',4),('alias:B','B',4),"
+      "('fn:ret-param','int(float)',9),('b:int','int',1),"
+      "('b:float','float',1),('record:Owner','Owner',2),"
+      "('mfp:Owner','int (Owner::*)(float)',13),"
+      "('pack:int','int...',14)");
+  const auto type_id = [&db](const char *key) {
+    auto st = db.raw_db().prepare("SELECT id FROM type_node WHERE type_key=?");
+    st.bind(1, std::string_view(key));
+    REQUIRE(st.step());
+    return st.col_int64(0);
+  };
+  const int64_t alias_a = type_id("alias:A");
+  const int64_t alias_b = type_id("alias:B");
+  const int64_t function = type_id("fn:ret-param");
+  const int64_t integer = type_id("b:int");
+  const int64_t floating = type_id("b:float");
+  const int64_t member_owner = type_id("record:Owner");
+  const int64_t member_function = type_id("mfp:Owner");
+  db.add_type_edge(alias_a, 3, 0, alias_b);
+  db.add_type_edge(alias_b, 3, 0, alias_a);
+  db.add_type_edge(function, 4, 0, integer);
+  db.add_type_edge(function, 5, 0, floating);
+  db.add_type_edge(member_function, 7, 0, member_owner);
+  db.add_type_edge(member_function, 8, 0, function);
+  auto unknown_parameter = db.raw_db().prepare(
+      "INSERT INTO parameter(owner_id,position,pack_index,name) "
+      "VALUES (?,?,?,?)");
+  unknown_parameter.bind(1, owner_id);
+  unknown_parameter.bind(2, int64_t{9});
+  unknown_parameter.bind(3, int64_t{-1});
+  unknown_parameter.bind(4, std::string_view{"unknown"});
+  unknown_parameter.step_done();
+
+  cidx::query::SqliteQueryReadAdapter read(db);
+  cidx::graph::GraphQuery graph(read);
+  const auto alias_layers = graph.type_layers(alias_a);
+  REQUIRE(alias_layers.size() == 3);
+  CHECK(alias_layers[0].path == "root");
+  CHECK(alias_layers[0].type.kind == "alias");
+  CHECK(alias_layers[1].path == "root.alias_of");
+  CHECK(alias_layers[1].status == "complete");
+  CHECK(alias_layers[2].path == "root.alias_of.alias_of");
+  CHECK(alias_layers[2].status == "cycle");
+  const auto function_layers = graph.type_layers(function);
+  REQUIRE(function_layers.size() == 3);
+  CHECK(function_layers[1].path == "root.return_type");
+  CHECK(function_layers[1].type.spelling == "int");
+  CHECK(function_layers[2].path == "root.param_type[0]");
+  CHECK(function_layers[2].type.spelling == "float");
+  const auto member_layers = graph.type_layers(member_function);
+  REQUIRE(member_layers.size() == 5);
+  CHECK(member_layers[1].path == "root.member_owner");
+  CHECK(member_layers[1].type.spelling == "Owner");
+  CHECK(member_layers[2].path == "root.member_component");
+  CHECK(member_layers[2].type.kind == "function");
+  const auto unknown_layers = graph.type_layers(999999);
+  REQUIRE(unknown_layers.size() == 1);
+  CHECK(unknown_layers[0].status == "unknown");
+
+  QueryExecutor ex(db);
+  const auto null_slot = ex.run(
+      (start(symbol("cidx::version_re")) | out("has_parameter") |
+       where(eq("position", int64_t{9})) | select({"type_id"}))
+          .plan());
+  REQUIRE(null_slot.rows.size() == 1);
+  CHECK(std::holds_alternative<std::nullptr_t>(null_slot.rows[0][0]));
+  const auto counts = [&db] {
+    auto st = db.raw_db().prepare(
+        "SELECT (SELECT count(*) FROM symbol), "
+        "(SELECT count(*) FROM edge)");
+    REQUIRE(st.step());
+    return std::tuple{st.col_int64(0), st.col_int64(1)};
+  };
+  const auto before = counts();
+  const auto pack_layers = graph.type_layers(type_id("pack:int"));
+  REQUIRE(pack_layers.size() == 1);
+  CHECK(pack_layers[0].type.kind == "pack-expansion");
+  CHECK(counts() == before);
 }
 
 TEST_CASE("query_plan: template defaults expose logical evidence") {

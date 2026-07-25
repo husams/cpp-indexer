@@ -150,7 +150,7 @@ INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:type_layer:1",'{"complet
 INSERT OR IGNORE INTO meta(key,value) VALUES ("relation:type_layer:2",'{"completeness":"complete","evidence":"derived","evidence_capabilities":["derived"],"inverse":"parent","layer":"type_layer","name":"child","source":"type_layer","target":"type_layer","traversal":["out","in"],"virtual":true}');
 INSERT OR IGNORE INTO meta(key,value) VALUES ("extension:test.extension/relation/taints",'{"completeness":"partial","evidence":"derived","evidence_capabilities":["derived","proof"],"id":"relation/taints","inverse":"tainted_by","layer":"symbol","name":"taints","package":"test.extension","qualified_name":"test.extension/relation/taints","source":"symbol.declaration","target":"symbol.declaration","traversal":["out","in"]}');
 INSERT OR IGNORE INTO meta(key,value) VALUES ('catalog_version',1);
-INSERT OR IGNORE INTO meta(key,value) VALUES ('catalog_hash',"d9737467d97c6ace48899bd7e493fa3637d7923da3039a343aa20d6ac9730573");
+INSERT OR IGNORE INTO meta(key,value) VALUES ('catalog_hash',"01d0d1896e335566cb40599c1f57926f41f1fd4370cbc13703e0510316d8d287");
 INSERT OR IGNORE INTO meta(key,value) VALUES ('artifact_kind','semantic-index');
 INSERT OR IGNORE INTO meta(key,value) VALUES ('status','complete');
 INSERT OR IGNORE INTO meta(key,value) VALUES ('trust','producer-verified');

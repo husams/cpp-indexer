@@ -19,7 +19,7 @@ by both indexing engines, and the resolve pass. ~5.5k LOC.
 ### `SqliteStorageService` / `Storage` (`storage.hpp`)
 
 `SqliteStorageService` owns the connection and creates/migrates the DB to
-`schema_version = 39`. It is the internal SQLite persistence implementation.
+`schema_version = 40`. It is the internal SQLite persistence implementation.
 `Storage` is now a compatibility façade derived from that service; its public
 surface remains for legacy callers while new code composes focused ports and
 read adapters.

@@ -42,13 +42,13 @@ from indexer.generated_catalog import (
     SYMBOL_KIND_IDS as _GENERATED_SYMBOL_KIND_IDS,
 )
 
-SCHEMA_VERSION = 42
+SCHEMA_VERSION = 40
 PREVIOUS_SCHEMA_VERSION = SCHEMA_VERSION - 1
 
 # HSE-79 is the only supported predecessor for the HSE-82 storage migration.
 # Keep this explicit so an unrelated semantic catalog is never silently
 # accepted merely because the database is writable.
-PREVIOUS_CATALOG_HASH = "eed1f38ccdc779776c637d8e8ffbc015c7616a94fecabd5e4302f0587c1bab93"
+PREVIOUS_CATALOG_HASH = "3337824260ee0afe1260859b6be88e6fb8280852fd736cde5e12cca5c3847ba4"
 
 
 def _md5_of(path: str) -> Optional[str]:
@@ -2063,6 +2063,19 @@ class Storage:
         }
         if "symbol" not in tables:
             return  # fresh database: _SCHEMA creates everything
+        stored_version_row = self._conn.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()
+        stored_version = (
+            int(stored_version_row[0])
+            if stored_version_row and stored_version_row[0]
+            else 0
+        )
+        if stored_version > SCHEMA_VERSION:
+            # A newer writer owns this database.  Do not rewrite its schema or
+            # stamp it down to the reader's version while opening read-side
+            # storage.
+            return
         if "storage_enum_catalog" in tables:
             self._conn.execute("DROP VIEW IF EXISTS edge_site_read")
             self._conn.execute("DROP VIEW IF EXISTS call_arg_read")
@@ -2254,10 +2267,13 @@ class Storage:
             if "init_text" not in dcols:
                 self._conn.execute("ALTER TABLE definition ADD COLUMN init_text TEXT")
                 changed = True
-        stored_version_row = self._conn.execute(
-            "SELECT value FROM meta WHERE key = 'schema_version'"
-        ).fetchone()
-        stored_version = int(stored_version_row[0]) if stored_version_row and stored_version_row[0] else 0
+        def add_column(table: str, column: str, definition: str) -> None:
+            cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+            if column not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                )
+
         if stored_version < SCHEMA_VERSION:
             self._conn.executescript(
                 """
@@ -2277,13 +2293,6 @@ class Storage:
                     ON external_identity(type_id);
                 """
             )
-
-            def add_column(table: str, column: str, definition: str) -> None:
-                cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
-                if column not in cols:
-                    self._conn.execute(
-                        f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-                    )
 
         if stored_version < SCHEMA_VERSION and "symbol" in tables:
             add_column("symbol", "parent_id", "INTEGER REFERENCES symbol(id) ON DELETE SET NULL")
