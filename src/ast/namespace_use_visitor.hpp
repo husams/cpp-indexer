@@ -25,11 +25,11 @@ class UsingDirectiveDecl;
 
 namespace cidx::ast {
 
-class EdgeSink;
+class NamespacePassPorts;
 
 class NamespaceUseVisitor : public clang::RecursiveASTVisitor<NamespaceUseVisitor> {
 public:
-  NamespaceUseVisitor(clang::ASTContext &context, EdgeSink &sink,
+  NamespaceUseVisitor(clang::ASTContext &context, NamespacePassPorts &ports,
                 std::string target_file, int64_t file_id);
 
   // Scope tracking: the nearest enclosing INDEXED symbol is the edge source.
@@ -49,7 +49,7 @@ private:
                    clang::SourceLocation loc);
 
   clang::ASTContext &context_;
-  EdgeSink &sink_;
+  NamespacePassPorts &ports_;
   std::string target_file_;
   int64_t file_id_;
   std::vector<int64_t> scope_stack_; // enclosing indexed symbol ids

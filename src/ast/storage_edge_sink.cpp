@@ -6,8 +6,9 @@
 
 namespace cidx::ast {
 
-StorageEdgeSink::StorageEdgeSink(cidx::storage::AstStoragePorts &ports)
-    : ports_(ports) {}
+StorageEdgeSink::StorageEdgeSink(cidx::storage::AstStoragePorts &ports,
+                                 std::vector<EvidenceRecord> *evidence)
+    : ports_(ports), evidence_(evidence) {}
 
 void StorageEdgeSink::reset_fact_ids() {
   edge_ids_.clear();
@@ -225,10 +226,10 @@ StorageEdgeSink::symbol_ids_by_qual_name_kind(const std::string &qual_name,
   return out;
 }
 
-void StorageEdgeSink::emit(const EvidenceRecord & /*evidence*/) {
-  // Evidence publication is intentionally separate from SQLite fact rows.
-  // The current compatibility adapter has no evidence table yet; passes can
-  // still record it in FactBatch-backed tests and future artifact writers.
+void StorageEdgeSink::emit(const EvidenceRecord &evidence) {
+  if (evidence_ != nullptr) {
+    evidence_->push_back(evidence);
+  }
 }
 
 void StorageEdgeSink::add_template_param(const TemplateParamRecord &param) {

@@ -1,7 +1,7 @@
 #include "ast/instance_minter.hpp"
 
 #include "ast/decl_flags.hpp"
-#include "ast/edge_sink.hpp"
+#include "ast/fact_emitters.hpp"
 #include "ast/instantiation_edges.hpp"
 #include "ast/kind_map.hpp"
 #include "ast/mint_builder.hpp"
@@ -17,10 +17,13 @@
 
 namespace cidx::ast {
 
-InstanceMinter::InstanceMinter(const clang::ASTContext &context, EdgeSink &sink,
+InstanceMinter::InstanceMinter(const clang::ASTContext &context,
+                               DeclarationIdentityResolver &identity,
+                               RelationFactEmitter &relations,
                                const MintBuilder &mint,
                                const TemplateArgumentEncoder &targ_encoder)
-    : context_(context), sink_(sink), mint_(mint), targ_encoder_(targ_encoder) {
+    : context_(context), identity_(identity), relations_(relations),
+      mint_(mint), targ_encoder_(targ_encoder) {
 }
 
 namespace {
@@ -112,7 +115,7 @@ int64_t InstanceMinter::mint_instance_pair(
       clang::QualType(written_type).getAsString(printing_policy(context_));
   inst_req->is_instantiation = is_template_instantiation(spec);
   inst_req->is_named_instance = true;
-  const int64_t inst_id = sink_.mint_symbol(*inst_req);
+  const int64_t inst_id = identity_.mint_symbol(*inst_req);
 
   auto prim_req = mint_.build(primary);
   if (!prim_req) {
@@ -121,7 +124,7 @@ int64_t InstanceMinter::mint_instance_pair(
   if (cidx_symbol_kind_name(primary) == nullptr) {
     prim_req->kind_name = "class-template";
   }
-  const int64_t prim_id = sink_.mint_symbol(*prim_req);
+  const int64_t prim_id = identity_.mint_symbol(*prim_req);
 
   EdgeRecord e;
   e.src_id = inst_id;
@@ -129,10 +132,10 @@ int64_t InstanceMinter::mint_instance_pair(
   e.kind = spec->getSpecializationKind() == clang::TSK_ExplicitSpecialization
                ? 4  // specializes: authored full specialization
                : 5; // instantiates: X<B> -> X (or its partial)
-  sink_.ensure_edge(e);
+  relations_.ensure_edge(e);
   // The instantiation's fields (with substituted types) — never traversed, so
   // minted here with a field_of edge back to this instance.
-  emit_instance_fields(sink_, mint_, spec, inst_id);
+  emit_instance_fields(identity_, relations_, mint_, spec, inst_id);
   return inst_id;
 }
 

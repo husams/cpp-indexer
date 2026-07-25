@@ -103,4 +103,28 @@ public:
                                    const std::string &display) = 0;
 };
 
+// Pass-specific port bundles keep visitors honest about the services they
+// may use. They are deliberately virtual compositions so a recorder or a
+// storage adapter can implement several independently testable passes
+// without reintroducing a monolithic visitor dependency.
+class DeclarationPassPorts : public virtual DeclarationIdentityResolver,
+                             public virtual RelationFactEmitter,
+                             public virtual TypeFactEmitter,
+                             public virtual PresentationNormalizer {
+public:
+  ~DeclarationPassPorts() override = default;
+};
+
+class StatementFactPorts : public virtual DeclarationPassPorts,
+                           public virtual EvidenceEmitter {
+public:
+  ~StatementFactPorts() override = default;
+};
+
+class NamespacePassPorts : public virtual DeclarationIdentityResolver,
+                           public virtual RelationFactEmitter {
+public:
+  ~NamespacePassPorts() override = default;
+};
+
 } // namespace cidx::ast

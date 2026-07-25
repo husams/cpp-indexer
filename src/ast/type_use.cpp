@@ -1,6 +1,6 @@
 #include "ast/type_use.hpp"
 
-#include "ast/edge_sink.hpp"
+#include "ast/fact_emitters.hpp"
 #include "ast/location.hpp"
 #include "ast/usr.hpp"
 
@@ -49,8 +49,10 @@ const clang::NamedDecl *named_type_decl(clang::QualType type) {
   return nullptr;
 }
 
-void emit_type_use(EdgeSink &sink, int64_t src_id, clang::QualType type,
-                   int64_t file_id, const ExpansionLoc &loc, int conditional,
+void emit_type_use(DeclarationIdentityResolver &identity,
+                   RelationFactEmitter &relations, int64_t src_id,
+                   clang::QualType type, int64_t file_id,
+                   const ExpansionLoc &loc, int conditional,
                    int64_t edge_kind) {
   const clang::NamedDecl *decl = named_type_decl(type);
   if (decl == nullptr) {
@@ -60,7 +62,7 @@ void emit_type_use(EdgeSink &sink, int64_t src_id, clang::QualType type,
   if (usr.empty()) {
     return;
   }
-  const auto dst = sink.lookup_symbol_id(usr, loc.file);
+  const auto dst = identity.lookup_symbol_id(usr, loc.file);
   if (!dst || *dst == src_id) {
     return;
   }
@@ -68,7 +70,7 @@ void emit_type_use(EdgeSink &sink, int64_t src_id, clang::QualType type,
   e.src_id = src_id;
   e.dst_id = *dst;
   e.kind = edge_kind;
-  const int64_t edge_id = sink.add_edge(e);
+  const int64_t edge_id = relations.add_edge(e);
   if (loc.line != 0) {
     EdgeSiteRecord site;
     site.edge_id = edge_id;
@@ -76,7 +78,7 @@ void emit_type_use(EdgeSink &sink, int64_t src_id, clang::QualType type,
     site.line = loc.line;
     site.col = loc.col;
     site.conditional = conditional;
-    sink.add_edge_site(site);
+    relations.add_edge_site(site);
   }
 }
 

@@ -27,7 +27,7 @@ int64_t
 CallEdgeEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
                                           const std::string &callee_usr) {
   int64_t dst_id = -1;
-  if (const auto dst = ctx_.sink().lookup_symbol_id(
+  if (const auto dst = ctx_.ports().lookup_symbol_id(
           callee_usr,
           expansion_loc(ctx_.context(), keyed->getLocation()).file)) {
     dst_id = *dst;
@@ -35,7 +35,7 @@ CallEdgeEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
   if (dst_id < 0) {
     const std::string qn = qualified_name(ctx_.context(), keyed);
     if (!qn.empty()) {
-      const auto ids = ctx_.sink().symbol_ids_by_qual_name_kind(
+      const auto ids = ctx_.ports().symbol_ids_by_qual_name_kind(
           qn, cidx_stub_kind_name(keyed));
       if (ids.size() == 1) {
         dst_id = ids[0];
@@ -45,7 +45,7 @@ CallEdgeEmitter::resolve_recovered_target(const clang::NamedDecl *keyed,
   if (dst_id < 0 && !ctx_.context().getSourceManager().isInSystemHeader(
                         keyed->getLocation())) {
     if (auto req = ctx_.mint().build(keyed)) {
-      dst_id = ctx_.sink().mint_symbol(*req);
+      dst_id = ctx_.ports().mint_symbol(*req);
     }
   }
   return dst_id;
@@ -65,18 +65,20 @@ CallEdgeEmitter::mint_resolved_target(const clang::Expr *site,
     return -1;
   }
   req->is_instantiation = info && info->is_instantiation;
-  const int64_t dst_id = ctx_.sink().mint_symbol(*req);
+  const int64_t dst_id = ctx_.ports().mint_symbol(*req);
   if (info) {
-    emit_callable_template_identity(ctx_.sink(), ctx_.sink(), ctx_.mint(),
+    emit_callable_template_identity(ctx_.ports(), ctx_.ports(), ctx_.ports(),
+                                    ctx_.mint(),
                                     ctx_.targ_encoder(), dst_id, callee, *info,
                                     written_template_args(site));
   } else if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(callee);
              method != nullptr &&
              is_template_instantiation(method->getParent())) {
-    emit_method_owner(ctx_.sink(), ctx_.mint(), ctx_.targ_encoder(), dst_id,
+    emit_method_owner(ctx_.ports(), ctx_.ports(), ctx_.mint(),
+                      ctx_.targ_encoder(), dst_id,
                       method);
   }
-  DeclarationEdgeVisitor signature_visitor(ctx_.context(), ctx_.sink(), {},
+  DeclarationEdgeVisitor signature_visitor(ctx_.context(), ctx_.ports(), {},
                                            ctx_.file_id());
   signature_visitor.emit_signature_types_for(callee, dst_id);
   return dst_id;
@@ -91,7 +93,7 @@ int64_t CallEdgeEmitter::emit_call_site(const clang::Expr *site, int64_t dst_id,
   e.src_id = ctx_.src_id();
   e.dst_id = dst_id;
   e.kind = 1;
-  const int64_t edge_id = ctx_.sink().add_edge(e);
+  const int64_t edge_id = ctx_.ports().add_edge(e);
   const ExpansionLoc loc = expansion_loc(ctx_.context(), site->getBeginLoc());
   EdgeSiteRecord siter;
   siter.edge_id = edge_id;
@@ -110,7 +112,7 @@ int64_t CallEdgeEmitter::emit_call_site(const clang::Expr *site, int64_t dst_id,
   }
   siter.recv_param_pos = recv.param_pos;
   siter.recv_type_is_value = recv.type_is_value;
-  ctx_.sink().add_edge_site(siter);
+  ctx_.ports().add_edge_site(siter);
   return edge_id;
 }
 
@@ -181,7 +183,7 @@ void CallEdgeEmitter::emit_call_args(const clang::Expr *site,
               ? 1
               : 0;
     }
-    ctx_.sink().add_call_arg(ca);
+    ctx_.ports().add_call_arg(ca);
   }
 }
 

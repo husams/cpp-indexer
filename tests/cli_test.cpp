@@ -1895,6 +1895,40 @@ TEST_SUITE("clang") {
     CHECK(db.find_symbols("published_pipeline_symbol", {}, 10).empty());
   }
 
+  TEST_CASE("index TU publishes unsupported-call evidence and metrics") {
+    const std::string dir = make_temp_dir();
+    const std::string source = dir + "/unsupported.cpp";
+    write_file(source, "template <typename T> void unsupported(T value) {\n"
+                       "  value();\n"
+                       "}\n");
+
+    Storage db(":memory:");
+    db.add_component("unsupported", dir);
+    const int64_t file_id = db.add_file_path(
+        source, std::nullopt, std::nullopt,
+        std::vector<std::string>{"-std=c++23"}, std::string("clang++"));
+    const auto file = db.get_file_by_id(file_id);
+    REQUIRE(file.has_value());
+    db.stamp_graph_resolved();
+    db.stamp_index_identity();
+
+    const cidx::ast::IndexOneOutcome outcome =
+        cidx::ast::run_index_one(db, *file, source, true);
+    REQUIRE(!outcome.parse_failed);
+    bool found_evidence = false;
+    for (const auto &evidence : outcome.evidence) {
+      found_evidence |= evidence.construct == "CallExpr";
+    }
+    CHECK(found_evidence);
+    bool found_unknown_metric = false;
+    for (const auto &metrics : outcome.pass_metrics) {
+      if (metrics.id == "statements.main") {
+        found_unknown_metric = metrics.unknown_constructs > 0;
+      }
+    }
+    CHECK(found_unknown_metric);
+  }
+
   TEST_CASE("index TU publication enforces read-only storage") {
     const std::string dir = make_temp_dir();
     const std::string source = dir + "/source.cpp";

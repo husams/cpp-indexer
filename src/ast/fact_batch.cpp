@@ -1,6 +1,7 @@
 #include "ast/fact_batch.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <tuple>
 
 namespace cidx::ast {
@@ -22,13 +23,15 @@ void canonicalize_records(std::vector<T> &records, Key key) {
 void FactBatch::canonicalize() {
   canonicalize_records(
       symbols,
-      [](const SymbolRecord &record)
-          -> std::tuple<const std::string &, const std::string &,
-                        const std::string &, const long long &,
-                        const long long &, const long long &,
-                        const long long &> {
-        return std::tie(record.file, record.usr, record.spelling, record.line,
-                        record.col, record.end_line, record.end_col);
+      [](const SymbolRecord &record) -> auto {
+        return std::tie(
+            record.file, record.usr, record.spelling, record.kind,
+            record.qual_name, record.display_name, record.type_info,
+            record.line, record.col, record.end_line, record.end_col,
+            record.decl_line, record.decl_col, record.is_definition,
+            record.is_pure, record.is_static, record.is_instantiation,
+            record.linkage, record.access, record.parent_usr, record.const_value,
+            record.resolved);
       });
   canonicalize_records(
       relations,
@@ -173,9 +176,18 @@ FactBatchRecorder::FactBatchRecorder(std::string producer) {
   batch_.producer = std::move(producer);
 }
 
+auto FactBatchRecorder::stable_id(std::string_view key) -> std::int64_t {
+  std::uint64_t hash = 1469598103934665603ULL;
+  for (const unsigned char byte : key) {
+    hash ^= byte;
+    hash *= 1099511628211ULL;
+  }
+  return static_cast<std::int64_t>((hash & 0x3fffffffffffffffULL) + 1);
+}
+
 void FactBatchRecorder::emit(const SymbolRecord &symbol) {
   if (!symbol_ids_.contains(symbol.usr)) {
-    symbol_ids_.emplace(symbol.usr, next_id_++);
+    symbol_ids_.emplace(symbol.usr, stable_id("symbol:" + symbol.usr));
   }
   batch_.symbols.push_back(symbol);
 }
@@ -200,7 +212,7 @@ auto FactBatchRecorder::mint_symbol(const MintRequest &request)
       found != symbol_ids_.end()) {
     return found->second;
   }
-  const std::int64_t id = next_id_++;
+  const std::int64_t id = stable_id("symbol:" + request.usr);
   symbol_ids_.emplace(request.usr, id);
   batch_.symbols.push_back(SymbolRecord{
       .file = request.identity_source.value_or(request.decl_path.value_or("")),
@@ -259,7 +271,9 @@ auto FactBatchRecorder::symbol_ids_by_qual_name_kind(
 
 auto FactBatchRecorder::edge_key(const EdgeRecord &edge) -> std::string {
   return std::to_string(edge.src_id) + ":" + std::to_string(edge.dst_id) + ":" +
-         std::to_string(edge.kind);
+         std::to_string(edge.kind) + ":" +
+         (edge.base_access ? std::to_string(*edge.base_access) : "-") + ":" +
+         (edge.is_virtual ? std::to_string(*edge.is_virtual) : "-");
 }
 
 auto FactBatchRecorder::add_edge(const EdgeRecord &edge) -> std::int64_t {
@@ -273,7 +287,7 @@ auto FactBatchRecorder::add_edge(const EdgeRecord &edge) -> std::int64_t {
     }
     return found->second;
   }
-  const std::int64_t id = next_id_++;
+  const std::int64_t id = stable_id("edge:" + key);
   edge_ids_.emplace(key, id);
   batch_.relations.push_back(edge);
   return id;
@@ -284,7 +298,7 @@ auto FactBatchRecorder::ensure_edge(const EdgeRecord &edge) -> std::int64_t {
   if (const auto found = edge_ids_.find(key); found != edge_ids_.end()) {
     return found->second;
   }
-  const std::int64_t id = next_id_++;
+  const std::int64_t id = stable_id("edge:" + key);
   edge_ids_.emplace(key, id);
   batch_.relations.push_back(edge);
   return id;
@@ -312,7 +326,7 @@ auto FactBatchRecorder::intern_type_node(const TypeNodeRecord &node)
       found != type_ids_.end()) {
     return found->second;
   }
-  const std::int64_t id = next_id_++;
+  const std::int64_t id = stable_id("type:" + node.type_key);
   type_ids_.emplace(node.type_key, id);
   batch_.type_nodes.push_back(node);
   return id;
@@ -347,7 +361,11 @@ auto FactBatchRecorder::get_or_create_definition(
     std::int64_t symbol_id, std::int64_t file_id, std::int64_t line,
     std::int64_t col, std::int64_t end_line, std::int64_t end_col,
     const std::optional<std::string> &init_text) -> std::int64_t {
-  const std::int64_t id = next_id_++;
+  const std::int64_t id = stable_id(
+      "definition:" + std::to_string(symbol_id) + ":" +
+      std::to_string(file_id) + ":" + std::to_string(line) + ":" +
+      std::to_string(col) + ":" + std::to_string(end_line) + ":" +
+      std::to_string(end_col) + ":" + init_text.value_or(""));
   batch_.definitions.push_back({.id = id,
                                 .symbol_id = symbol_id,
                                 .file_id = file_id,

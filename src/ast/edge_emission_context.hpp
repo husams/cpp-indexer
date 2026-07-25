@@ -2,12 +2,14 @@
 // the enclosing definition's identity (src_id/file_id/owner_usr), the
 // mint/resolve utilities, the conditional depth (maintained by StatementEdgeVisitor's
 // scoped traversal overrides), and the edge+site emission helpers the
-// callbacks use. Emission goes through EdgeSink only.
+// callbacks use. Emission goes through the statement pass's focused ports.
 #pragma once
 
 #include "ast/instance_minter.hpp"
 #include "ast/mint_builder.hpp"
 #include "ast/template_argument_encoder.hpp"
+#include "ast/fact_emitters.hpp"
+#include "ast/pass_registry.hpp"
 
 #include "clang/Basic/SourceLocation.h"
 
@@ -22,15 +24,14 @@ class TypeSourceInfo;
 
 namespace cidx::ast {
 
-class EdgeSink;
-
 class EdgeEmissionContext {
 public:
-  EdgeEmissionContext(clang::ASTContext &context, EdgeSink &sink, int64_t src_id,
-                  int64_t file_id);
+  EdgeEmissionContext(clang::ASTContext &context, StatementFactPorts &ports,
+                      int64_t src_id, int64_t file_id, std::string file,
+                      PassMetrics *metrics = nullptr);
 
   [[nodiscard]] clang::ASTContext &context() const { return context_; }
-  [[nodiscard]] EdgeSink &sink() const { return sink_; }
+  [[nodiscard]] StatementFactPorts &ports() const { return ports_; }
   MintBuilder &mint() { return mint_; }
   [[nodiscard]] const TemplateArgumentEncoder &targ_encoder() const {
     return targ_encoder_;
@@ -38,6 +39,11 @@ public:
   [[nodiscard]] const InstanceMinter &minter() const { return minter_; }
   [[nodiscard]] int64_t src_id() const { return src_id_; }
   [[nodiscard]] int64_t file_id() const { return file_id_; }
+  void note_visited() {
+    if (metrics_ != nullptr) {
+      metrics_->note_visited();
+    }
+  }
 
   // Enclosing method's owning record (self-use skip in type-name branches).
   [[nodiscard]] const std::string &owner_usr() const { return owner_usr_; }
@@ -64,15 +70,19 @@ public:
   // (sizeof/cast branch semantics).
   void emit_type_name_use(const clang::TypeSourceInfo *tsi,
                           bool promote_described_template);
+  void record_unsupported(std::string construct, clang::SourceLocation loc,
+                          std::string detail);
 
 private:
   clang::ASTContext &context_;
-  EdgeSink &sink_;
+  StatementFactPorts &ports_;
   MintBuilder mint_;
   TemplateArgumentEncoder targ_encoder_;
   InstanceMinter minter_;
   int64_t src_id_;
   int64_t file_id_;
+  std::string file_;
+  PassMetrics *metrics_;
   int cond_depth_ = 0;
   std::string owner_usr_;
 };

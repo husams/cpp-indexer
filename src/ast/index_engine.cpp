@@ -10,6 +10,7 @@
 #include "ast/storage_symbol_sink.hpp"
 #include "ast/symbol_visitor.hpp"
 
+#include "catalogs/generated_catalog.hpp"
 #include "compiledb/compiledb.hpp"
 #include "storage/ports.hpp"
 #include "storage/sqlite_adapters.hpp"
@@ -38,6 +39,7 @@
 #include <cctype>
 #include <memory>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_set>
 
 namespace cidx::ast {
@@ -146,36 +148,52 @@ class TranslationUnitIndexer {
 public:
   TranslationUnitIndexer(clang::ASTContext &context, EngineState &state)
       : context_(context), state_(state), db_(*state.db),
-        symbols_(*state.ports), edges_(*state.ports),
+        symbols_(*state.ports), edges_(*state.ports, &state.out->evidence),
         tu_(context.getTranslationUnitDecl()) {}
 
   void run() {
     db_.delete_symbols_for_file(state_.rec->id);
     ExtractionPassRegistry registry;
+    const auto descriptor =
+        [](std::string id, std::vector<FrontendCapability> capabilities,
+           std::vector<std::string> facts,
+           std::vector<std::string> dependencies, PassScope scope,
+           TraversalMode traversal) -> ExtractionPassDescriptor {
+      return ExtractionPassDescriptor{
+          .id = std::move(id),
+          .version = 1,
+          .required_capabilities = std::move(capabilities),
+          .produced_fact_families = std::move(facts),
+          .catalog_versions = {catalog::kCatalogVersion},
+          .dependencies = std::move(dependencies),
+          .scope = scope,
+          .traversal = traversal,
+          .completeness = FactCompleteness::complete,
+          .trust = FactTrust::trusted,
+          .budget = {.max_visited_constructs = 1'000'000,
+                     .max_emitted_facts = 2'000'000,
+                     .max_diagnostics = 1'024,
+                     .declared = true}};
+    };
     registry.register_pass(
-        {.id = "symbols.main",
-         .version = 1,
-         .required_capabilities = {FrontendCapability::ast},
-         .produced_fact_families = {"symbols"},
-         .scope = PassScope::main_file,
-         .traversal = TraversalMode::declaration},
+        descriptor("symbols.main", {FrontendCapability::ast}, {"symbols"}, {},
+                   PassScope::main_file, TraversalMode::declaration),
         [this](PassExecutionContext &execution) -> void {
           state_.out->stored = run_symbol_pass(state_.path, state_.rec->id);
           execution.metrics.note_visited(
               static_cast<std::size_t>(state_.out->stored));
           execution.metrics.note_emitted(
               static_cast<std::size_t>(symbols_.symbol_ids().size()));
+          for (const cidx::Diagnostic &diagnostic : state_.out->diagnostics) {
+            execution.metrics.note_diagnostic(diagnostic.spelling);
+          }
           main_symbol_ids_ = symbols_.symbol_ids();
         });
     registry.register_pass(
-        {.id = "symbols.headers",
-         .version = 1,
-         .required_capabilities = {FrontendCapability::ast,
-                                   FrontendCapability::preprocessor},
-         .produced_fact_families = {"symbols"},
-         .dependencies = {"symbols.main"},
-         .scope = PassScope::owned_header,
-         .traversal = TraversalMode::declaration},
+        descriptor("symbols.headers",
+                   {FrontendCapability::ast, FrontendCapability::preprocessor},
+                   {"symbols"}, {"symbols.main"}, PassScope::owned_header,
+                   TraversalMode::declaration),
         [this](PassExecutionContext &execution) -> void {
           pending_headers_ = plan_owned_headers();
           for (PendingHeader &header : pending_headers_) {
@@ -190,20 +208,71 @@ public:
           }
         });
     registry.register_pass(
-        {.id = "relations.headers",
-         .version = 1,
-         .required_capabilities = {FrontendCapability::ast},
-         .produced_fact_families = {"relations", "definitions", "types"},
-         .dependencies = {"symbols.headers"},
-         .scope = PassScope::owned_header,
-         .traversal = TraversalMode::declaration},
+        descriptor("lifecycle.headers", {FrontendCapability::ast},
+                   {"fact_lifecycle"}, {"symbols.headers"},
+                   PassScope::owned_header, TraversalMode::lifecycle),
         [this](PassExecutionContext &execution) -> void {
           if (state_.failure_injector != nullptr) {
             state_.failure_injector->inject(
                 cidx::storage::FailurePoint::partial_transform);
           }
           for (const PendingHeader &header : pending_headers_) {
-            run_edge_pass(header.path, header.file_id);
+            configure_fact_file(header.file_id, true);
+            execution.metrics.note_visited();
+          }
+        });
+    registry.register_pass(
+        descriptor("declarations.headers", {FrontendCapability::ast},
+                   {"relations", "types"},
+                   {"symbols.headers", "lifecycle.headers"},
+                   PassScope::owned_header, TraversalMode::declaration),
+        [this](PassExecutionContext &execution) -> void {
+          for (PendingHeader &header : pending_headers_) {
+            run_declaration_stage(header.path, header.file_id, execution,
+                                  &header.edge_ids, &header.definition_ids);
+          }
+        });
+    registry.register_pass(
+        descriptor("definitions.headers", {FrontendCapability::ast},
+                   {"definitions"}, {"declarations.headers"},
+                   PassScope::owned_header, TraversalMode::declaration),
+        [this](PassExecutionContext &execution) -> void {
+          header_definition_visitors_.clear();
+          for (PendingHeader &header : pending_headers_) {
+            collect_definitions(header_definition_visitors_, header.path,
+                                header.file_id, execution, &header.edge_ids,
+                                &header.definition_ids);
+          }
+        });
+    registry.register_pass(
+        descriptor("statements.headers",
+                   {FrontendCapability::ast, FrontendCapability::templates},
+                   {"relations", "types", "evidence"}, {"definitions.headers"},
+                   PassScope::owned_header, TraversalMode::body),
+        [this](PassExecutionContext &execution) -> void {
+          for (std::size_t index = 0;
+               index < header_definition_visitors_.size(); ++index) {
+            run_statement_stage(*header_definition_visitors_[index], execution,
+                                &pending_headers_[index].edge_ids,
+                                &pending_headers_[index].definition_ids);
+          }
+        });
+    registry.register_pass(
+        descriptor("namespaces.headers", {FrontendCapability::ast},
+                   {"relations"}, {"statements.headers"},
+                   PassScope::owned_header, TraversalMode::declaration),
+        [this](PassExecutionContext &execution) -> void {
+          for (PendingHeader &header : pending_headers_) {
+            run_namespace_stage(header.path, header.file_id, execution,
+                                &header.edge_ids, &header.definition_ids);
+          }
+        });
+    registry.register_pass(
+        descriptor("headers.associate", {FrontendCapability::ast},
+                   {"relations", "definitions"}, {"namespaces.headers"},
+                   PassScope::owned_header, TraversalMode::lifecycle),
+        [this](PassExecutionContext &execution) -> void {
+          for (PendingHeader &header : pending_headers_) {
             if (!SourceSnapshot{.md5 = header.md5}.matches(header.path)) {
               state_.out->source_changed = true;
               db_.set_file_indexed(header.file_id, false);
@@ -211,39 +280,69 @@ public:
             }
             db_.associate_facts_for_file(
                 header.file_id, state_.normalized_config_id, header.symbol_ids,
-                edges_.edge_ids(), edges_.definition_ids());
+                header.edge_ids, header.definition_ids);
             db_.mark_file_indexed(header.file_id, header.mtime, header.md5);
             ++state_.out->headers.indexed;
             state_.out->headers.symbols += header.stored;
-            execution.metrics.note_emitted(edges_.edge_ids().size());
+            execution.metrics.note_emitted(header.edge_ids.size() +
+                                           header.definition_ids.size());
           }
         });
     registry.register_pass(
-        {.id = "relations.main",
-         .version = 1,
-         .required_capabilities = {FrontendCapability::ast,
-                                   FrontendCapability::templates},
-         .produced_fact_families = {"relations", "definitions", "types"},
-         .dependencies = {"relations.headers"},
-         .scope = PassScope::main_file,
-         .traversal = TraversalMode::body},
+        descriptor("lifecycle.main", {FrontendCapability::ast},
+                   {"fact_lifecycle"}, {"headers.associate"},
+                   PassScope::main_file, TraversalMode::lifecycle),
         [this](PassExecutionContext &execution) -> void {
-          // Main-file edges deliberately remain last after header symbols and
-          // header edges; this is the historical symbol-before-edge invariant.
-          run_edge_pass(state_.path, state_.rec->id);
-          db_.associate_facts_for_file(
-              state_.rec->id, state_.normalized_config_id, main_symbol_ids_,
-              edges_.edge_ids(), edges_.definition_ids());
-          execution.metrics.note_emitted(edges_.edge_ids().size());
+          configure_fact_file(state_.rec->id, true);
+          execution.metrics.note_visited();
         });
     registry.register_pass(
-        {.id = "includes.persist",
-         .version = 1,
-         .required_capabilities = {FrontendCapability::preprocessor},
-         .produced_fact_families = {"includes", "evidence"},
-         .dependencies = {"relations.main"},
-         .scope = PassScope::translation_unit,
-         .traversal = TraversalMode::preprocessing},
+        descriptor("declarations.main", {FrontendCapability::ast},
+                   {"relations", "types"},
+                   {"headers.associate", "lifecycle.main"},
+                   PassScope::main_file, TraversalMode::declaration),
+        [this](PassExecutionContext &execution) -> void {
+          run_declaration_stage(state_.path, state_.rec->id, execution,
+                                &main_edge_ids_, &main_definition_ids_);
+        });
+    registry.register_pass(
+        descriptor("definitions.main", {FrontendCapability::ast},
+                   {"definitions"}, {"declarations.main"}, PassScope::main_file,
+                   TraversalMode::declaration),
+        [this](PassExecutionContext &execution) -> void {
+          main_definition_visitors_.clear();
+          collect_definitions(main_definition_visitors_, state_.path,
+                              state_.rec->id, execution, &main_edge_ids_,
+                              &main_definition_ids_);
+        });
+    registry.register_pass(
+        descriptor("statements.main",
+                   {FrontendCapability::ast, FrontendCapability::templates},
+                   {"relations", "types", "evidence"}, {"definitions.main"},
+                   PassScope::main_file, TraversalMode::body),
+        [this](PassExecutionContext &execution) -> void {
+          for (const auto &visitor : main_definition_visitors_) {
+            run_statement_stage(*visitor, execution, &main_edge_ids_,
+                                &main_definition_ids_);
+          }
+        });
+    registry.register_pass(
+        descriptor("namespaces.main", {FrontendCapability::ast}, {"relations"},
+                   {"statements.main"}, PassScope::main_file,
+                   TraversalMode::declaration),
+        [this](PassExecutionContext &execution) -> void {
+          run_namespace_stage(state_.path, state_.rec->id, execution,
+                              &main_edge_ids_, &main_definition_ids_);
+          db_.associate_facts_for_file(
+              state_.rec->id, state_.normalized_config_id, main_symbol_ids_,
+              main_edge_ids_, main_definition_ids_);
+          execution.metrics.note_emitted(main_edge_ids_.size() +
+                                         main_definition_ids_.size());
+        });
+    registry.register_pass(
+        descriptor("includes.persist", {FrontendCapability::preprocessor},
+                   {"includes"}, {"namespaces.main"},
+                   PassScope::translation_unit, TraversalMode::preprocessing),
         [this](PassExecutionContext &execution) -> void {
           if (state_.pp != nullptr) {
             resolve_include_guards(*state_.pp, state_.includes);
@@ -253,13 +352,53 @@ public:
           execution.metrics.note_emitted(state_.includes.includes.size() +
                                          state_.includes.macro_uses.size());
         });
+    registry.register_pass(
+        descriptor("evidence.persist", {FrontendCapability::ast}, {"evidence"},
+                   {"includes.persist"}, PassScope::translation_unit,
+                   TraversalMode::lifecycle),
+        [this](PassExecutionContext &execution) -> void {
+          std::ranges::sort(state_.out->evidence, {},
+                            [](const EvidenceRecord &record) -> auto {
+                              return std::tie(record.producer, record.construct,
+                                              record.file, record.line,
+                                              record.col, record.completeness,
+                                              record.trust, record.detail);
+                            });
+          const std::size_t before = state_.out->evidence.size();
+          const auto unique_end = std::ranges::unique(
+              state_.out->evidence,
+              [](const EvidenceRecord &left,
+                 const EvidenceRecord &right) -> bool {
+                return std::tie(left.producer, left.construct, left.file,
+                                left.line, left.col, left.completeness,
+                                left.trust, left.detail) ==
+                       std::tie(right.producer, right.construct, right.file,
+                                right.line, right.col, right.completeness,
+                                right.trust, right.detail);
+              });
+          state_.out->evidence.erase(unique_end.begin(),
+                                     state_.out->evidence.end());
+          execution.metrics.note_duplicate(before -
+                                           state_.out->evidence.size());
+          execution.metrics.note_emitted(state_.out->evidence.size());
+        });
 
     IndexingPlan plan;
     plan.add("symbols.main");
     plan.add("symbols.headers");
-    plan.add("relations.headers");
-    plan.add("relations.main");
+    plan.add("lifecycle.headers");
+    plan.add("declarations.headers");
+    plan.add("definitions.headers");
+    plan.add("statements.headers");
+    plan.add("namespaces.headers");
+    plan.add("headers.associate");
+    plan.add("lifecycle.main");
+    plan.add("declarations.main");
+    plan.add("definitions.main");
+    plan.add("statements.main");
+    plan.add("namespaces.main");
     plan.add("includes.persist");
+    plan.add("evidence.persist");
     const PassExecutionReport report = registry.run(plan);
     state_.out->pass_metrics.clear();
     state_.out->pass_metrics.reserve(report.passes.size());
@@ -287,7 +426,12 @@ private:
     bool covered_by_current_config = false;
     int stored = 0;
     std::vector<int64_t> symbol_ids;
+    std::vector<int64_t> edge_ids;
+    std::vector<int64_t> definition_ids;
   };
+
+  using DefinitionVisitors =
+      std::vector<std::unique_ptr<FunctionDefinitionVisitor>>;
 
   int run_symbol_pass(const std::string &file, int64_t file_id) {
     symbols_.set_current_file_id(file_id);
@@ -299,22 +443,109 @@ private:
     return symbols_.stored_count();
   }
 
-  void run_edge_pass(const std::string &file, int64_t file_id) {
-    if (!state_.graph_enabled) {
-      return;
-    }
+  void configure_fact_file(int64_t file_id, bool reset) {
     edges_.set_current_file_id(file_id);
     edges_.set_identity_translation_unit_config_id(state_.normalized_config_id,
                                                    state_.rec->id);
-    edges_.delete_edges_for_file(file_id);
-    edges_.delete_definitions_for_file(file_id);
+    if (reset) {
+      edges_.delete_edges_for_file(file_id);
+      edges_.delete_definitions_for_file(file_id);
+      edges_.reset_fact_ids();
+    }
+  }
+
+  static auto append_fact_ids(std::vector<int64_t> &destination,
+                              const std::vector<int64_t> &source) -> void {
+    for (const int64_t id : source) {
+      if (std::ranges::find(destination, id) == destination.end()) {
+        destination.push_back(id);
+      }
+    }
+  }
+
+  void run_declaration_stage(const std::string &file, int64_t file_id,
+                             PassExecutionContext &execution,
+                             std::vector<int64_t> *edge_ids,
+                             std::vector<int64_t> *definition_ids) {
+    if (!state_.graph_enabled) {
+      return;
+    }
+    configure_fact_file(file_id, false);
     edges_.reset_fact_ids();
-    DeclarationEdgeVisitor decls(context_, edges_, file, file_id);
+    DeclarationEdgeVisitor decls(
+        context_, static_cast<DeclarationPassPorts &>(edges_), file, file_id,
+        &static_cast<DefinitionScopeEmitter &>(edges_));
     decls.TraverseDecl(tu_);
-    FunctionDefinitionVisitor bodies(context_, edges_, file, file_id);
-    bodies.TraverseDecl(tu_);
-    NamespaceUseVisitor ns(context_, edges_, file, file_id);
+    if (edge_ids != nullptr) {
+      append_fact_ids(*edge_ids, edges_.edge_ids());
+    }
+    if (definition_ids != nullptr) {
+      append_fact_ids(*definition_ids, edges_.definition_ids());
+    }
+    execution.metrics.note_visited(1);
+  }
+
+  void collect_definitions(DefinitionVisitors &out, const std::string &file,
+                           int64_t file_id, PassExecutionContext &execution,
+                           std::vector<int64_t> *edge_ids,
+                           std::vector<int64_t> *definition_ids) {
+    if (!state_.graph_enabled) {
+      return;
+    }
+    configure_fact_file(file_id, false);
+    edges_.reset_fact_ids();
+    auto visitor = std::make_unique<FunctionDefinitionVisitor>(
+        context_, static_cast<DeclarationIdentityResolver &>(edges_),
+        static_cast<DefinitionScopeEmitter &>(edges_), file, file_id);
+    visitor->TraverseDecl(tu_);
+    if (edge_ids != nullptr) {
+      append_fact_ids(*edge_ids, edges_.edge_ids());
+    }
+    if (definition_ids != nullptr) {
+      append_fact_ids(*definition_ids, edges_.definition_ids());
+    }
+    execution.metrics.note_visited(visitor->definition_count());
+    out.push_back(std::move(visitor));
+  }
+
+  void run_statement_stage(FunctionDefinitionVisitor &visitor,
+                           PassExecutionContext &execution,
+                           std::vector<int64_t> *edge_ids,
+                           std::vector<int64_t> *definition_ids) {
+    if (!state_.graph_enabled) {
+      return;
+    }
+    configure_fact_file(visitor.file_id(), false);
+    edges_.reset_fact_ids();
+    visitor.run_statement_pass(static_cast<StatementFactPorts &>(edges_),
+                               &execution.metrics);
+    if (edge_ids != nullptr) {
+      append_fact_ids(*edge_ids, edges_.edge_ids());
+    }
+    if (definition_ids != nullptr) {
+      append_fact_ids(*definition_ids, edges_.definition_ids());
+    }
+  }
+
+  void run_namespace_stage(const std::string &file, int64_t file_id,
+                           PassExecutionContext &execution,
+                           std::vector<int64_t> *edge_ids,
+                           std::vector<int64_t> *definition_ids) {
+    if (!state_.graph_enabled) {
+      return;
+    }
+    configure_fact_file(file_id, false);
+    edges_.reset_fact_ids();
+    NamespaceUseVisitor ns(context_, static_cast<NamespacePassPorts &>(edges_),
+                           file, file_id);
     ns.TraverseDecl(tu_);
+    if (edge_ids != nullptr) {
+      append_fact_ids(*edge_ids, edges_.edge_ids());
+    }
+    if (definition_ids != nullptr) {
+      append_fact_ids(*definition_ids, edges_.definition_ids());
+    }
+    execution.metrics.note_visited(1);
   }
 
   [[nodiscard]] bool header_covered_by_current_config(
@@ -404,6 +635,10 @@ private:
   clang::Decl *tu_;
   std::vector<PendingHeader> pending_headers_;
   std::vector<int64_t> main_symbol_ids_;
+  std::vector<int64_t> main_edge_ids_;
+  std::vector<int64_t> main_definition_ids_;
+  DefinitionVisitors header_definition_visitors_;
+  DefinitionVisitors main_definition_visitors_;
 };
 
 class IndexASTConsumer : public clang::ASTConsumer {
@@ -632,7 +867,12 @@ IndexOneOutcome run_index_one(cidx::Storage &db, const cidx::File &rec,
   state.normalized_config_id = db.add_translation_unit_config(resolved);
 
   IndexFrontendActionFactory factory(state);
-  (void)setup.tool.run(&factory);
+  try {
+    (void)setup.tool.run(&factory);
+  } catch (const PassBudgetExceeded &error) {
+    out.parse_failed = true;
+    out.error = error.what();
+  }
   if (!state.tu_handled) {
     out.parse_failed = true;
     out.error = "cannot parse " + path;

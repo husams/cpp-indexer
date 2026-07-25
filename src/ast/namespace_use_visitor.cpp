@@ -1,6 +1,6 @@
 #include "ast/namespace_use_visitor.hpp"
 
-#include "ast/edge_sink.hpp"
+#include "ast/fact_emitters.hpp"
 #include "ast/location.hpp"
 #include "ast/usr.hpp"
 
@@ -28,10 +28,10 @@ bool is_scope_decl(const clang::Decl *d) {
 } // namespace
 
 NamespaceUseVisitor::NamespaceUseVisitor(clang::ASTContext &context,
-                                         EdgeSink &sink,
+                                         NamespacePassPorts &ports,
                                          std::string target_file,
                                          int64_t file_id)
-    : context_(context), sink_(sink), target_file_(std::move(target_file)),
+    : context_(context), ports_(ports), target_file_(std::move(target_file)),
       file_id_(file_id) {}
 
 bool NamespaceUseVisitor::in_target_file(const clang::Decl *decl) const {
@@ -53,7 +53,7 @@ NamespaceUseVisitor::scope_symbol_id(const clang::Decl *decl) const {
   if (usr.empty()) {
     return std::nullopt;
   }
-  return sink_.lookup_symbol_id(
+  return ports_.lookup_symbol_id(
       usr, expansion_loc(context_, nd->getLocation()).file);
 }
 
@@ -85,7 +85,7 @@ void NamespaceUseVisitor::emit_ns_use(const clang::NamedDecl *ns_decl,
   if (usr.empty()) {
     return;
   }
-  const auto ns_id = sink_.lookup_symbol_id(
+  const auto ns_id = ports_.lookup_symbol_id(
       usr, expansion_loc(context_, ns_decl->getLocation()).file);
   if (!ns_id || *ns_id == scope_stack_.back()) {
     return;
@@ -98,7 +98,7 @@ void NamespaceUseVisitor::emit_ns_use(const clang::NamedDecl *ns_decl,
   e.src_id = scope_stack_.back();
   e.dst_id = *ns_id;
   e.kind = 7; // uses
-  const int64_t edge_id = sink_.add_edge(e);
+  const int64_t edge_id = ports_.add_edge(e);
   if (eloc.line != 0) {
     EdgeSiteRecord site;
     site.edge_id = edge_id;
@@ -106,7 +106,7 @@ void NamespaceUseVisitor::emit_ns_use(const clang::NamedDecl *ns_decl,
     site.line = eloc.line;
     site.col = eloc.col;
     site.conditional = 0;
-    sink_.add_edge_site(site);
+  ports_.add_edge_site(site);
   }
 }
 

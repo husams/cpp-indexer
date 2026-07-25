@@ -53,13 +53,15 @@ class TypedefNameDecl;
 
 namespace cidx::ast {
 
-class EdgeSink;
+class DeclarationPassPorts;
+class DefinitionScopeEmitter;
 
 class DeclarationEdgeVisitor
     : public clang::RecursiveASTVisitor<DeclarationEdgeVisitor> {
 public:
-  DeclarationEdgeVisitor(clang::ASTContext &context, EdgeSink &sink,
-                         std::string target_file, int64_t file_id);
+  DeclarationEdgeVisitor(clang::ASTContext &context, DeclarationPassPorts &ports,
+                         std::string target_file, int64_t file_id,
+                         DefinitionScopeEmitter *definitions = nullptr);
 
   bool VisitNamedDecl(clang::NamedDecl *decl);         // contains
   bool VisitCXXRecordDecl(clang::CXXRecordDecl *decl); // inherits (+CRTP)
@@ -142,7 +144,8 @@ private:
 
   clang::ASTContext &context_;
   clang::SourceManager &source_manager_;
-  EdgeSink &sink_;
+  DeclarationPassPorts &sink_;
+  DefinitionScopeEmitter *definitions_;
   MintBuilder mint_;
   TemplateArgumentEncoder targ_encoder_;
   InstanceMinter minter_;

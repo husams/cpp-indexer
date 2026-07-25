@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <type_traits>
+#include <utility>
 
 namespace cidx::ast {
 
@@ -9,34 +11,90 @@ namespace {
 
 template <typename T>
 void append_keys(std::string &out, const std::vector<T> &values) {
+  out += std::to_string(values.size());
+  out.push_back(':');
   for (const T &value : values) {
-    out += std::to_string(static_cast<std::uint8_t>(value));
-    out.push_back(',');
+    if constexpr (std::is_enum_v<T>) {
+      out += std::to_string(std::to_underlying(value));
+    } else {
+      out += std::to_string(value);
+    }
+    out.push_back(';');
   }
 }
 
 void append_keys(std::string &out, const std::vector<std::string> &values) {
+  out += std::to_string(values.size());
+  out.push_back(':');
   for (const std::string &value : values) {
+    out += std::to_string(value.size());
+    out.push_back(':');
     out += value;
-    out.push_back(',');
+    out.push_back(';');
   }
 }
 
 } // namespace
 
 auto ExtractionPassDescriptor::stable_key() const -> std::string {
-  std::string key = id + '@' + std::to_string(version) + '|';
+  std::string key = "id=" + std::to_string(id.size()) + ":" + id +
+                    "|version=" + std::to_string(version);
+  key += "|capabilities=";
   append_keys(key, required_capabilities);
-  key.push_back('|');
+  key += "|facts=";
   append_keys(key, produced_fact_families);
-  key += std::to_string(static_cast<std::uint8_t>(scope));
-  key += std::to_string(static_cast<std::uint8_t>(traversal));
+  key += "|catalog=";
+  append_keys(key, catalog_versions);
+  key += "|dependencies=";
+  append_keys(key, dependencies);
+  key += "|scope=" + std::to_string(static_cast<std::uint8_t>(scope));
+  key += "|traversal=" +
+         std::to_string(static_cast<std::uint8_t>(traversal));
+  key += "|completeness=" +
+         std::to_string(static_cast<std::uint8_t>(completeness));
+  key += "|trust=" + std::to_string(static_cast<std::uint8_t>(trust));
+  key += "|budget=" + std::to_string(budget.max_visited_constructs) + ',' +
+         std::to_string(budget.max_emitted_facts) + ',' +
+         std::to_string(budget.max_diagnostics) + ',' +
+         std::to_string(budget.declared);
   return key;
+}
+
+PassBudgetExceeded::PassBudgetExceeded(std::string pass_id,
+                                       std::string dimension)
+    : std::runtime_error("pass budget exceeded: " + pass_id + " (" +
+                         dimension + ")"),
+      pass_id_(std::move(pass_id)), dimension_(std::move(dimension)) {}
+
+void PassMetrics::bind(std::string pass_id, PassBudget budget) {
+  pass_id_ = std::move(pass_id);
+  budget_ = budget;
+}
+
+void PassMetrics::enforce(std::size_t value, std::size_t limit,
+                          const char *dimension) {
+  if (limit != 0 && value > limit) {
+    budget_exhausted = true;
+    diagnostic_messages.emplace_back(std::string("budget exceeded: ") +
+                                     dimension);
+    throw PassBudgetExceeded(pass_id_, dimension);
+  }
+}
+
+void PassMetrics::note_visited(std::size_t count) {
+  visited_constructs += count;
+  enforce(visited_constructs, budget_.max_visited_constructs, "visited");
+}
+
+void PassMetrics::note_emitted(std::size_t count) {
+  emitted_facts += count;
+  enforce(emitted_facts, budget_.max_emitted_facts, "emitted");
 }
 
 void PassMetrics::note_diagnostic(std::string message) {
   ++diagnostics;
   diagnostic_messages.push_back(std::move(message));
+  enforce(diagnostics, budget_.max_diagnostics, "diagnostics");
 }
 
 auto PassExecutionReport::find(const std::string &id) const
@@ -50,8 +108,12 @@ auto PassExecutionReport::find(const std::string &id) const
 
 void ExtractionPassRegistry::register_pass(ExtractionPassDescriptor descriptor,
                                            Runner runner) {
-  if (descriptor.id.empty() || descriptor.version == 0 || !runner) {
-    throw std::invalid_argument("invalid extraction pass registration");
+  if (descriptor.id.empty() || descriptor.version == 0 || !runner ||
+      descriptor.required_capabilities.empty() ||
+      descriptor.produced_fact_families.empty() ||
+      descriptor.catalog_versions.empty() || !descriptor.budget.declared) {
+    throw std::invalid_argument(
+        "invalid extraction pass registration: incomplete metadata");
   }
   if (std::ranges::any_of(entries_, [&descriptor](const Entry &entry) -> bool {
         return entry.descriptor.id == descriptor.id;
@@ -112,6 +174,7 @@ auto ExtractionPassRegistry::run(const IndexingPlan &plan) const
     }
 
     PassMetrics metrics;
+    metrics.bind(found->descriptor.id, found->descriptor.budget);
     const auto started = std::chrono::steady_clock::now();
     PassExecutionContext context{.metrics = metrics};
     found->runner(context);

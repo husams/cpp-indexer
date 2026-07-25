@@ -14,6 +14,7 @@
 #include <cstdint>
 
 #include "ast/header_stats.hpp" // HeaderStats
+#include "ast/fact_records.hpp"
 #include "storage/records.hpp"
 
 #include <optional>
@@ -54,6 +55,7 @@ struct IndexOneOutcome {
   std::string error;
   std::vector<std::string> failed_flags; // final args, for the log dump
   std::vector<IndexPassMetrics> pass_metrics;
+  std::vector<EvidenceRecord> evidence;
 };
 
 // Deterministic fault points used by the production TU pipeline tests. The

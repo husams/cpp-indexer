@@ -15,11 +15,12 @@ class NamedDecl;
 
 namespace cidx::ast {
 
-class EdgeSink;
+class DeclarationIdentityResolver;
 
 class MintBuilder {
 public:
-  MintBuilder(const clang::ASTContext &context, EdgeSink &sink);
+  MintBuilder(const clang::ASTContext &context,
+              DeclarationIdentityResolver &identity);
 
   // nullopt when the decl has no USR.
   std::optional<MintRequest> build(const clang::NamedDecl *decl) const;
@@ -27,7 +28,7 @@ public:
 
 private:
   const clang::ASTContext &context_;
-  EdgeSink &sink_;
+  DeclarationIdentityResolver &identity_;
 };
 
 } // namespace cidx::ast

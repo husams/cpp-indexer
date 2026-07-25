@@ -7,6 +7,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -36,13 +37,10 @@ struct FactBatch {
 };
 
 class FactBatchRecorder final : public SymbolFactEmitter,
-                                public DeclarationIdentityResolver,
-                                public RelationFactEmitter,
-                                public TypeFactEmitter,
+                                public StatementFactPorts,
+                                public NamespacePassPorts,
                                 public DefinitionScopeEmitter,
-                                public EvidenceEmitter,
-                                public IndexingLifecycle,
-                                public PresentationNormalizer {
+                                public IndexingLifecycle {
 public:
   explicit FactBatchRecorder(std::string producer = {});
 
@@ -100,8 +98,8 @@ public:
   [[nodiscard]] auto canonical_batch() const -> FactBatch;
 
 private:
+  static auto stable_id(std::string_view key) -> std::int64_t;
   static auto edge_key(const EdgeRecord &edge) -> std::string;
-  std::int64_t next_id_ = 1;
   FactBatch batch_;
   std::unordered_map<std::string, std::int64_t> symbol_ids_;
   std::unordered_map<std::string, std::int64_t> edge_ids_;

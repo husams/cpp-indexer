@@ -2,7 +2,7 @@
 
 #include "ast/clang_compat.hpp"
 #include "ast/decl_flags.hpp"
-#include "ast/edge_sink.hpp"
+#include "ast/fact_emitters.hpp"
 #include "ast/instantiation_edges.hpp"
 #include "ast/kind_map.hpp"
 #include "ast/location.hpp"
@@ -240,13 +240,17 @@ std::string usr_of(const clang::Decl *decl) {
 } // namespace
 
 DeclarationEdgeVisitor::DeclarationEdgeVisitor(clang::ASTContext &context,
-                                               EdgeSink &sink,
+                                               DeclarationPassPorts &ports,
                                                std::string target_file,
-                                               int64_t file_id)
+                                               int64_t file_id,
+                                               DefinitionScopeEmitter *definitions)
     : context_(context), source_manager_(context.getSourceManager()),
-      sink_(sink), mint_(context, sink), targ_encoder_(context, sink),
-      minter_(context, sink, mint_, targ_encoder_), types_(context, sink),
-      target_file_(std::move(target_file)), file_id_(file_id) {}
+      sink_(ports), mint_(context, ports),
+      targ_encoder_(context, ports, ports, ports),
+      minter_(context, ports, ports, mint_, targ_encoder_),
+      types_(context, ports),
+      target_file_(std::move(target_file)), file_id_(file_id),
+      definitions_(definitions) {}
 
 // Signature-level uses(7): return + parameter types (emit_type_use in the
 // function-like B1 branch). Constructors/destructors record no return type.
@@ -268,11 +272,11 @@ void DeclarationEdgeVisitor::emit_signature_uses(
   }
   if (!llvm::isa<clang::CXXConstructorDecl>(fn) &&
       !llvm::isa<clang::CXXDestructorDecl>(fn)) {
-    emit_type_use(sink_, *fn_sym, fn->getReturnType(), file_id_,
+    emit_type_use(sink_, sink_, *fn_sym, fn->getReturnType(), file_id_,
                   expansion_loc(context_, fn->getLocation()), 0);
   }
   for (const clang::ParmVarDecl *p : fn->parameters()) {
-    emit_type_use(sink_, *fn_sym, p->getType(), file_id_,
+    emit_type_use(sink_, sink_, *fn_sym, p->getType(), file_id_,
                   expansion_loc(context_, p->getLocation()), 0);
   }
   emit_signature_types(fn, *fn_sym);
@@ -621,7 +625,7 @@ bool DeclarationEdgeVisitor::VisitFieldDecl(clang::FieldDecl *decl) {
   minter_.mint_instance_from_type(decl->getType());
   if (const auto self = sink_.lookup_symbol_id(
           member_usr, expansion_loc(context_, decl->getLocation()).file)) {
-    emit_type_use(sink_, *self, decl->getType(), file_id_,
+    emit_type_use(sink_, sink_, *self, decl->getType(), file_id_,
                   expansion_loc(context_, decl->getLocation()), 0, 20);
     if (const auto tid = types_.intern(decl->getType())) {
       sink_.add_symbol_type(*self, kSymTypeOfTypeK, *tid);
@@ -651,7 +655,7 @@ bool DeclarationEdgeVisitor::VisitVarDecl(clang::VarDecl *decl) {
   }
   // of_type(20), not uses(7): a variable is OF its declared type; "uses"
   // stays for body/signature references.
-  emit_type_use(sink_, *self, decl->getType(), file_id_,
+  emit_type_use(sink_, sink_, *self, decl->getType(), file_id_,
                 expansion_loc(context_, decl->getLocation()), 0, 20);
   if (const auto tid = types_.intern(decl->getType())) {
     sink_.add_symbol_type(*self, kSymTypeOfTypeK, *tid);
@@ -669,7 +673,10 @@ void DeclarationEdgeVisitor::emit_static_member_definition(
   const clang::SourceRange range = decl->getSourceRange();
   const ExpansionLoc start = extent_start(context_, range);
   const ExpansionLoc end = extent_end(context_, range);
-  const int64_t def_id = sink_.get_or_create_definition(
+  if (definitions_ == nullptr) {
+    return;
+  }
+  const int64_t def_id = definitions_->get_or_create_definition(
       symbol_id, file_id_, start.line, start.col, end.line, end.col,
       static_var_init_text(range));
   // Initializer calls become def_edge USES (emit_static_init_def_edges).
@@ -739,7 +746,7 @@ void DeclarationEdgeVisitor::emit_static_init_def_edges(
         if (!cu.empty()) {
           if (const auto cid = sink_.lookup_symbol_id(
                   cu, expansion_loc(context_, fd->getLocation()).file)) {
-            sink_.add_def_edge(def_id, *cid, 7);
+            definitions_->add_def_edge(def_id, *cid, 7);
           }
         }
       }
@@ -770,7 +777,7 @@ bool DeclarationEdgeVisitor::VisitTypedefNameDecl(
           usr, expansion_loc(context_, decl->getLocation()).file)) {
     // alias_of(19), not uses(7): the alias -> underlying-type relation is
     // definitional, and "uses" stays for references.
-    emit_type_use(sink_, *self, decl->getUnderlyingType(), file_id_,
+    emit_type_use(sink_, sink_, *self, decl->getUnderlyingType(), file_id_,
                   expansion_loc(context_, decl->getLocation()), 0, 19);
     if (const auto tid = types_.intern(decl->getUnderlyingType())) {
       sink_.add_symbol_type(*self, kSymTypeUnderlyingK, *tid);
@@ -1039,7 +1046,7 @@ void DeclarationEdgeVisitor::emit_callable_identity(
     const auto dst_id = sink_.lookup_symbol_id(
         usr_for_decl(fd), expansion_loc(context_, fd->getLocation()).file);
     if (dst_id) {
-      emit_method_owner(sink_, mint_, targ_encoder_, *dst_id, method);
+      emit_method_owner(sink_, sink_, mint_, targ_encoder_, *dst_id, method);
       emit_signature_uses(fd);
     }
     return;
@@ -1066,7 +1073,8 @@ void DeclarationEdgeVisitor::emit_callable_identity(
     }
   }
   const int64_t dst_id = sink_.mint_symbol(*req);
-  emit_callable_template_identity(sink_, sink_, mint_, targ_encoder_, dst_id,
+  emit_callable_template_identity(sink_, sink_, sink_, mint_, targ_encoder_,
+                                  dst_id,
                                   fd, *info, {});
   emit_signature_uses(fd);
 }
@@ -1138,7 +1146,7 @@ bool DeclarationEdgeVisitor::VisitClassTemplateSpecializationDecl(
   }
   // The explicit instantiation's fields — never traversed as members — get
   // their own symbols and field_of edges back to this instance.
-  emit_instance_fields(sink_, mint_, decl, *spec_id);
+  emit_instance_fields(sink_, sink_, mint_, decl, *spec_id);
   return true;
 }
 

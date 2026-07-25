@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -37,6 +38,21 @@ struct PassBudget {
   std::size_t max_visited_constructs = 0;
   std::size_t max_emitted_facts = 0;
   std::size_t max_diagnostics = 0;
+  bool declared = false;
+};
+
+class PassBudgetExceeded final : public std::runtime_error {
+public:
+  PassBudgetExceeded(std::string pass_id, std::string dimension);
+
+  [[nodiscard]] auto pass_id() const -> const std::string & { return pass_id_; }
+  [[nodiscard]] auto dimension() const -> const std::string & {
+    return dimension_;
+  }
+
+private:
+  std::string pass_id_;
+  std::string dimension_;
 };
 
 struct ExtractionPassDescriptor {
@@ -65,11 +81,18 @@ struct PassMetrics {
   bool budget_exhausted = false;
   std::vector<std::string> diagnostic_messages;
 
-  void note_visited(std::size_t count = 1) { visited_constructs += count; }
-  void note_emitted(std::size_t count = 1) { emitted_facts += count; }
+  void note_visited(std::size_t count = 1);
+  void note_emitted(std::size_t count = 1);
   void note_unknown(std::size_t count = 1) { unknown_constructs += count; }
   void note_duplicate(std::size_t count = 1) { duplicates += count; }
   void note_diagnostic(std::string message);
+
+  void bind(std::string pass_id, PassBudget budget);
+
+private:
+  void enforce(std::size_t value, std::size_t limit, const char *dimension);
+  std::string pass_id_;
+  PassBudget budget_;
 };
 
 struct PassExecutionContext {

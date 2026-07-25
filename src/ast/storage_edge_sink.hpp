@@ -6,6 +6,7 @@
 
 #include "ast/edge_sink.hpp"
 
+#include <vector>
 #include <unordered_map>
 
 namespace cidx::storage {
@@ -16,7 +17,8 @@ namespace cidx::ast {
 
 class StorageEdgeSink : public EdgeSink {
 public:
-  explicit StorageEdgeSink(cidx::storage::AstStoragePorts &ports);
+  explicit StorageEdgeSink(cidx::storage::AstStoragePorts &ports,
+                           std::vector<EvidenceRecord> *evidence = nullptr);
 
   std::optional<int64_t>
   lookup_symbol_id(const std::string &usr,
@@ -68,6 +70,7 @@ public:
 
 private:
   cidx::storage::AstStoragePorts &ports_;
+  std::vector<EvidenceRecord> *evidence_ = nullptr;
   std::vector<int64_t> edge_ids_;
   std::vector<int64_t> definition_ids_;
   int64_t current_file_id_ = -1;
