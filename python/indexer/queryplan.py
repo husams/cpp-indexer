@@ -1344,6 +1344,7 @@ class _Stream:
         self.fields: tuple[str, ...] = ()
         self.rows: list[tuple[Any, ...]] = []
         self.row_ids: list[int] = []
+        self.row_status: list[tuple[bool, bool]] = []
         self.truncated = False
         self.partial = False
         self.unknown = False
@@ -1412,7 +1413,6 @@ class Executor:
                 if stage.op == "union":
                     st.limit_in_effect = False
             elif stage.op == "select":
-                self._update_status(st)
                 self._materialize(st, stage.fields)
                 st.shape = "rows"
             elif stage.op == "count":
@@ -2108,6 +2108,13 @@ class Executor:
         ).fetchone()
         if endpoint is not None:
             return True
+        site_scoped = view == "site" or (
+            view == "evidence" and not (len(key) > 4 and key[4] == 1)
+        )
+        site_scope = (
+            " AND es.file_id=? AND COALESCE(es.line,0)=? AND "
+            "COALESCE(es.col,0)=?" if site_scoped else ""
+        )
         site = self._conn.execute(
             "SELECT 1 FROM edge_site es "
             "LEFT JOIN external_identity eti ON eti.id=es.recv_type_identity_id "
@@ -2122,11 +2129,15 @@ class Executor:
             " (es.recv_decl_id IS NULL OR COALESCE(ds.resolved,0)=0) AND "
             " es.recv_decl_identity_id IS NULL) OR "
             "(es.recv_decl_identity_id IS NOT NULL AND "
-            " COALESCE(edi.resolution_status,0)=0)) LIMIT 1",
-            (key[0],),
+            " COALESCE(edi.resolution_status,0)=0))" + site_scope + " LIMIT 1",
+            (key[0], key[1], key[2], key[3]) if site_scoped else (key[0],),
         ).fetchone()
         if site is not None:
             return True
+        argument_scope = (
+            " AND ca.file_id=? AND ca.line=? AND ca.col=?"
+            if site_scoped else ""
+        )
         argument = self._conn.execute(
             "SELECT 1 FROM call_arg ca "
             "LEFT JOIN external_identity ati ON ati.id=ca.type_identity_id "
@@ -2148,10 +2159,17 @@ class Executor:
             " (ca.callee_id IS NULL OR COALESCE(cs.resolved,0)=0) AND "
             " ca.callee_identity_id IS NULL) OR "
             "(ca.callee_identity_id IS NOT NULL AND "
-            " COALESCE(aci.resolution_status,0)=0)) LIMIT 1",
-            (key[0],),
+            " COALESCE(aci.resolution_status,0)=0))" + argument_scope + " LIMIT 1",
+            (key[0], key[1], key[2], key[3]) if site_scoped else (key[0],),
         ).fetchone()
         return argument is not None
+
+    def _status_for_key(
+        self, view: str, key: tuple[int, ...],
+    ) -> tuple[bool, bool]:
+        _, partial = self._derived_typed_cell(view, key, "partial")
+        _, unknown = self._derived_typed_cell(view, key, "unknown")
+        return bool(partial), bool(unknown)
 
     def _fetch_typed_cells(
         self, st: _Stream, fields: Sequence[str]
@@ -2265,20 +2283,24 @@ class Executor:
             st.fields = tuple(fields)
             st.rows = []
             st.row_ids = []
+            st.row_status = []
             for key in st.keys:
                 if key in by_key:
                     st.rows.append(by_key[key])
                     st.row_ids.append(self._logical_row_id(st.view, key))
+                    st.row_status.append(self._status_for_key(st.view, key))
             st.keys = []
             return
         by_id = self._fetch_cells(st, fields)
         st.fields = tuple(fields)
         st.rows = []
         st.row_ids = []
+        st.row_status = []
         for nid in st.ids:
             if nid in by_id:
                 st.rows.append(by_id[nid])
                 st.row_ids.append(nid)
+                st.row_status.append((False, False))
         st.ids = []
 
     @staticmethod
@@ -2291,14 +2313,17 @@ class Executor:
             return
         rows: list[tuple[Any, ...]] = []
         row_ids: list[int] = []
+        row_status: list[tuple[bool, bool]] = []
         seen: set[tuple[Any, ...]] = set()
-        for row, rid in zip(st.rows, st.row_ids):
+        for index, (row, rid) in enumerate(zip(st.rows, st.row_ids)):
             if row not in seen:
                 seen.add(row)
                 rows.append(row)
                 row_ids.append(rid)
+                row_status.append(st.row_status[index])
         st.rows = rows
         st.row_ids = row_ids
+        st.row_status = row_status
 
     def _apply_order(self, st: _Stream, fields: Sequence[str]) -> None:
         if st.shape == "nodes":
@@ -2318,6 +2343,7 @@ class Executor:
                 tuple(_cell_key(st.rows[i][p]) for p in pos), st.row_ids[i]))
         st.rows = [st.rows[i] for i in order]
         st.row_ids = [st.row_ids[i] for i in order]
+        st.row_status = [st.row_status[i] for i in order]
 
     @staticmethod
     def _apply_limit(st: _Stream, n: int) -> None:
@@ -2330,27 +2356,24 @@ class Executor:
         else:
             del st.rows[n:]
             del st.row_ids[n:]
+            del st.row_status[n:]
 
     # -- finish --------------------------------------------------------------------
 
-    def _update_status(self, st: _Stream) -> None:
-        checked_edges: set[int] = set()
-        for key in st.keys:
-            if st.view in {"site", "evidence"} and key[0] in checked_edges:
-                continue
-            if st.view in {"site", "evidence"}:
-                checked_edges.add(key[0])
-            partial_handled, partial = self._derived_typed_cell(st.view, key, "partial")
-            unknown_handled, unknown = self._derived_typed_cell(st.view, key, "unknown")
-            if partial_handled and partial:
-                st.partial = True
-            if unknown_handled and unknown:
-                st.unknown = True
+    def _recompute_status(self, st: _Stream) -> None:
+        st.partial = False
+        st.unknown = False
+        if st.shape == "rows" or st.row_status:
+            statuses = st.row_status
+        else:
+            statuses = [self._status_for_key(st.view, key) for key in st.keys]
+        st.partial = any(partial for partial, _ in statuses)
+        st.unknown = any(unknown for _, unknown in statuses)
 
     def _finish(self, st: _Stream) -> Result:
-        self._update_status(st)
         self._reject_ambiguous_ungrouped(st)
         if st.shape == "scalar":
+            self._recompute_status(st)
             return Result(
                 shape="scalar", view=st.view, truncated=st.truncated,
                 partial=st.partial, unknown=st.unknown,
@@ -2366,7 +2389,9 @@ class Executor:
         if not st.limit_in_effect and len(st.rows) > DEFAULT_RESULT_CAP:
             del st.rows[DEFAULT_RESULT_CAP:]
             del st.row_ids[DEFAULT_RESULT_CAP:]
+            del st.row_status[DEFAULT_RESULT_CAP:]
             st.truncated = True
+        self._recompute_status(st)
         return Result(
             shape=st.shape, view=st.view, truncated=st.truncated,
             partial=st.partial, unknown=st.unknown,

@@ -1111,6 +1111,107 @@ TEST_CASE("query_plan: typed provenance preserves status through select") {
         cidx::protocol::Status::Unknown);
 }
 
+TEST_CASE("query_plan: site status follows the full logical site key") {
+  Storage db(":memory:");
+  const int64_t component = db.add_component("project", "/tmp/mixed-site-view");
+  const int64_t directory = db.add_directory(component, "src");
+  const int64_t file = db.add_file(directory, "mixed.cpp");
+  const int64_t caller = db.add_symbol(make_sym("USR::mixed-caller", "caller"));
+  const int64_t callee = db.add_symbol(make_sym("USR::mixed-callee", "callee"));
+  const int64_t edge = db.add_edge(make_edge(caller, callee, 1));
+  cidx::EdgeSite resolved{
+      .edge_id = edge, .file_id = file, .line = 1, .col = 1};
+  db.add_edge_site(resolved);
+  resolved.line = 2;
+  resolved.recv_decl_usr = "USR::missing-declaration";
+  db.add_edge_site(resolved);
+
+  QueryExecutor ex(db);
+  const auto check_rows = [](Result result) {
+    REQUIRE(result.rows.size() == 2);
+    CHECK(std::get<int64_t>(result.rows[0][0]) == 1);
+    CHECK(std::get<std::string>(result.rows[0][1]) == "partial");
+    CHECK(std::get<int64_t>(result.rows[0][2]) == 1);
+    CHECK(std::get<int64_t>(result.rows[0][3]) == 0);
+    CHECK(std::get<int64_t>(result.rows[1][0]) == 2);
+    CHECK(std::get<std::string>(result.rows[1][1]) == "unknown");
+    CHECK(std::get<int64_t>(result.rows[1][2]) == 0);
+    CHECK(std::get<int64_t>(result.rows[1][3]) == 1);
+    CHECK(result.partial);
+    CHECK(result.unknown);
+    result.index.freshness = "current";
+    CHECK(result.to_envelope().status == cidx::protocol::Status::Unknown);
+  };
+  const auto site_plan = start(codebase()) | view(View::Site) | nodes() |
+                         select({"line", "status", "partial", "unknown"});
+  const auto evidence_plan = start(codebase()) | view(View::Evidence) |
+                             nodes() |
+                             select({"line", "status", "partial", "unknown"});
+  check_rows(ex.run(site_plan.plan()));
+  check_rows(ex.run(evidence_plan.plan()));
+
+  Result ordered = ex.run((site_plan | order_by({"line"}) | limit(1)).plan());
+  REQUIRE(ordered.rows.size() == 1);
+  CHECK(std::get<std::string>(ordered.rows[0][1]) == "partial");
+  CHECK(ordered.partial);
+  CHECK_FALSE(ordered.unknown);
+  ordered.index.freshness = "current";
+  CHECK(ordered.to_envelope().status == cidx::protocol::Status::Partial);
+
+  Result counted = ex.run((site_plan | count()).plan());
+  CHECK(counted.scalar == 2);
+  CHECK(counted.partial);
+  CHECK(counted.unknown);
+  counted.index.freshness = "current";
+  CHECK(counted.to_envelope().status == cidx::protocol::Status::Unknown);
+
+  Result distinct_result = ex.run((start(codebase()) | view(View::Site) |
+                                   nodes() | select({"relation"}) | distinct())
+                                      .plan());
+  REQUIRE(distinct_result.rows.size() == 1);
+  CHECK(std::get<std::string>(distinct_result.rows[0][0]) == "calls");
+  CHECK(distinct_result.partial);
+  CHECK_FALSE(distinct_result.unknown);
+  distinct_result.index.freshness = "current";
+  CHECK(distinct_result.to_envelope().status ==
+        cidx::protocol::Status::Partial);
+}
+
+TEST_CASE("query_plan: default cap recomputes discarded site status") {
+  Storage db(":memory:");
+  const int64_t component =
+      db.add_component("project", "/tmp/capped-site-view");
+  const int64_t directory = db.add_directory(component, "src");
+  const int64_t file = db.add_file(directory, "capped.cpp");
+  const int64_t caller =
+      db.add_symbol(make_sym("USR::capped-caller", "caller"));
+  const int64_t callee =
+      db.add_symbol(make_sym("USR::capped-callee", "callee"));
+  const int64_t edge = db.add_edge(make_edge(caller, callee, 1));
+  db.raw_db().exec(
+      "WITH RECURSIVE lines(line) AS (SELECT 0 UNION ALL SELECT line + 1 "
+      "FROM lines WHERE line < 1000) INSERT INTO edge_site "
+      "(edge_id,file_id,line,col) SELECT " +
+      std::to_string(edge) + "," + std::to_string(file) + ",line,0 FROM lines");
+  cidx::EdgeSite unresolved{.edge_id = edge,
+                            .file_id = file,
+                            .line = 1000,
+                            .col = 0,
+                            .recv_decl_usr = "USR::missing-declaration"};
+  db.add_edge_site(unresolved);
+
+  QueryExecutor ex(db);
+  Result result = ex.run((start(codebase()) | view(View::Site) | nodes() |
+                          select({"line", "status", "unknown"}))
+                             .plan());
+  CHECK(result.rows.size() == kDefaultResultCap);
+  CHECK(result.truncated);
+  CHECK(result.partial);
+  CHECK_FALSE(result.unknown);
+  result.index.freshness = "current";
+  CHECK(result.to_envelope().status == cidx::protocol::Status::Partial);
+}
+
 TEST_CASE("query_plan: sites budget boundaries are exact and ordered") {
   for (const int64_t site_count : {kTraverseNodeBudget - 1, kTraverseNodeBudget,
                                    kTraverseNodeBudget + 1}) {

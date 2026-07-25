@@ -557,6 +557,11 @@ struct Stream {
     bool operator==(const LogicalKey &) const = default;
   };
 
+  struct RowStatus {
+    bool partial = false;
+    bool unknown = false;
+  };
+
   View view = View::Symbol;
   Shape shape = Shape::Nodes;
   std::vector<int64_t> ids;     // nodes shape; ascending, deduped
@@ -564,6 +569,7 @@ struct Stream {
   std::vector<std::string> fields;
   std::vector<std::vector<Cell>> rows; // rows shape
   std::vector<int64_t> row_ids;        // per-row id (order_by tie-break)
+  std::vector<RowStatus> row_status;   // aligned with rows
   bool truncated = false;
   bool partial = false;
   bool unknown = false;
@@ -756,7 +762,6 @@ public:
         }
         break;
       case StageOp::Select:
-        update_status(st);
         materialize(st, stage.fields);
         st.shape = Shape::Rows;
         break;
@@ -2128,6 +2133,12 @@ private:
     if (endpoints.step()) {
       return true;
     }
+    const bool site_scoped =
+        view == View::Site || (view == View::Evidence && key.tag == 0);
+    const std::string site_scope = site_scoped ? " AND es.file_id=? AND "
+                                                 "COALESCE(es.line,0)=? AND "
+                                                 "COALESCE(es.col,0)=?"
+                                               : "";
     auto sites = read_.read_db().prepare(
         "SELECT 1 FROM edge_site es "
         "LEFT JOIN external_identity eti ON eti.id=es.recv_type_identity_id "
@@ -2142,11 +2153,20 @@ private:
         " (es.recv_decl_id IS NULL OR COALESCE(ds.resolved,0)=0) AND "
         " es.recv_decl_identity_id IS NULL) OR "
         "(es.recv_decl_identity_id IS NOT NULL AND "
-        " COALESCE(edi.resolution_status,0)=0)) LIMIT 1");
+        " COALESCE(edi.resolution_status,0)=0))" +
+        site_scope + " LIMIT 1");
     sites.bind(1, key.a);
+    if (site_scoped) {
+      sites.bind(2, key.b);
+      sites.bind(3, key.c);
+      sites.bind(4, key.d);
+    }
     if (sites.step()) {
       return true;
     }
+    const std::string argument_scope = site_scoped ? " AND ca.file_id=? AND "
+                                                     "ca.line=? AND ca.col=?"
+                                                   : "";
     auto args = read_.read_db().prepare(
         "SELECT 1 FROM call_arg ca "
         "LEFT JOIN external_identity ati ON ati.id=ca.type_identity_id "
@@ -2168,28 +2188,42 @@ private:
         " (ca.callee_id IS NULL OR COALESCE(cs.resolved,0)=0) AND "
         " ca.callee_identity_id IS NULL) OR "
         "(ca.callee_identity_id IS NOT NULL AND "
-        " COALESCE(aci.resolution_status,0)=0)) LIMIT 1");
+        " COALESCE(aci.resolution_status,0)=0))" +
+        argument_scope + " LIMIT 1");
     args.bind(1, key.a);
+    if (site_scoped) {
+      args.bind(2, key.b);
+      args.bind(3, key.c);
+      args.bind(4, key.d);
+    }
     return args.step();
   }
 
-  void update_status(Stream &st) {
-    std::set<int64_t> checked_edges;
+  Stream::RowStatus status_for_key(View view, const LogicalKey &key) {
+    Stream::RowStatus status;
+    const auto partial = derived_typed_cell(view, key, "partial");
+    const auto unknown = derived_typed_cell(view, key, "unknown");
+    status.partial = partial && std::holds_alternative<int64_t>(*partial) &&
+                     std::get<int64_t>(*partial) != 0;
+    status.unknown = unknown && std::holds_alternative<int64_t>(*unknown) &&
+                     std::get<int64_t>(*unknown) != 0;
+    return status;
+  }
+
+  void recompute_status(Stream &st) {
+    st.partial = false;
+    st.unknown = false;
+    if (st.shape == Shape::Rows || !st.row_status.empty()) {
+      for (const auto &status : st.row_status) {
+        st.partial = st.partial || status.partial;
+        st.unknown = st.unknown || status.unknown;
+      }
+      return;
+    }
     for (const auto &key : st.keys) {
-      if ((st.view == View::Site || st.view == View::Evidence) &&
-          !checked_edges.insert(key.a).second) {
-        continue;
-      }
-      const auto partial = derived_typed_cell(st.view, key, "partial");
-      const auto unknown = derived_typed_cell(st.view, key, "unknown");
-      if (partial && std::holds_alternative<int64_t>(*partial) &&
-          std::get<int64_t>(*partial) != 0) {
-        st.partial = true;
-      }
-      if (unknown && std::holds_alternative<int64_t>(*unknown) &&
-          std::get<int64_t>(*unknown) != 0) {
-        st.unknown = true;
-      }
+      const auto status = status_for_key(st.view, key);
+      st.partial = st.partial || status.partial;
+      st.unknown = st.unknown || status.unknown;
     }
   }
 
@@ -2387,11 +2421,13 @@ private:
       st.fields = fields;
       st.rows.clear();
       st.row_ids.clear();
+      st.row_status.clear();
       for (const auto &key : st.keys) {
         auto it = by_key.find(key);
         if (it != by_key.end()) {
           st.rows.push_back(it->second);
           st.row_ids.push_back(logical_row_id(st.view, key));
+          st.row_status.push_back(status_for_key(st.view, key));
         }
       }
       st.keys.clear();
@@ -2401,11 +2437,13 @@ private:
     st.fields = fields;
     st.rows.clear();
     st.row_ids.clear();
+    st.row_status.clear();
     for (int64_t id : st.ids) {
       auto it = by_id.find(id);
       if (it != by_id.end()) {
         st.rows.push_back(it->second);
         st.row_ids.push_back(id);
+        st.row_status.emplace_back();
       }
     }
     st.ids.clear();
@@ -2424,6 +2462,7 @@ private:
     }
     std::vector<std::vector<Cell>> rows;
     std::vector<int64_t> row_ids;
+    std::vector<Stream::RowStatus> row_status;
     for (size_t i = 0; i < st.rows.size(); ++i) {
       bool dup = false;
       for (const auto &prev : rows) {
@@ -2444,10 +2483,12 @@ private:
       if (!dup) {
         rows.push_back(st.rows[i]);
         row_ids.push_back(st.row_ids[i]);
+        row_status.push_back(st.row_status[i]);
       }
     }
     st.rows = std::move(rows);
     st.row_ids = std::move(row_ids);
+    st.row_status = std::move(row_status);
   }
 
   void apply_order(Stream &st, const std::vector<std::string> &fields) {
@@ -2499,14 +2540,17 @@ private:
     });
     std::vector<std::vector<Cell>> rows;
     std::vector<int64_t> row_ids;
+    std::vector<Stream::RowStatus> row_status;
     rows.reserve(idx.size());
     row_ids.reserve(idx.size());
     for (size_t i : idx) {
       rows.push_back(std::move(st.rows[i]));
       row_ids.push_back(st.row_ids[i]);
+      row_status.push_back(st.row_status[i]);
     }
     st.rows = std::move(rows);
     st.row_ids = std::move(row_ids);
+    st.row_status = std::move(row_status);
   }
 
   static void apply_limit(Stream &st, int64_t n) {
@@ -2521,6 +2565,7 @@ private:
     } else if (std::cmp_greater(st.rows.size(), n)) {
       st.rows.resize(n);
       st.row_ids.resize(n);
+      st.row_status.resize(n);
     }
   }
 
@@ -2529,13 +2574,13 @@ public:
   Result finish(Stream st) {
     Result res;
     res.view = st.view;
-    update_status(st);
-    res.truncated = st.truncated;
-    res.partial = st.partial;
-    res.unknown = st.unknown;
     reject_ambiguous_ungrouped(st);
     if (st.shape == Shape::Scalar) {
+      recompute_status(st);
       res.shape = Shape::Scalar;
+      res.truncated = st.truncated;
+      res.partial = st.partial;
+      res.unknown = st.unknown;
       // count() after select carries rows; otherwise ids hold the stream.
       res.scalar = static_cast<int64_t>(
           st.rows.empty() ? (st.keys.empty() ? st.ids.size() : st.keys.size())
@@ -2554,10 +2599,14 @@ public:
         static_cast<int64_t>(st.rows.size()) > kDefaultResultCap) {
       st.rows.resize(kDefaultResultCap);
       st.row_ids.resize(kDefaultResultCap);
+      st.row_status.resize(kDefaultResultCap);
       st.truncated = true;
     }
+    recompute_status(st);
     res.shape = st.shape;
     res.truncated = st.truncated;
+    res.partial = st.partial;
+    res.unknown = st.unknown;
     res.fields = st.fields;
     res.rows = std::move(st.rows);
     return res;

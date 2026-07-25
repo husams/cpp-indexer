@@ -863,6 +863,101 @@ def test_typed_provenance_preserves_status_through_select():
     check(run(2, unresolved_site=True), "unknown", 0, 1, Status.UNKNOWN)
 
 
+def test_site_status_follows_the_full_logical_site_key():
+    db = Storage(":memory:")
+    component = db.add_component("project", "/tmp/mixed-site-view")
+    directory = db.add_directory(component, "src")
+    file_id = db.add_file(directory, "mixed.cpp")
+    caller = db.add_symbol(_make_sym("USR::mixed-caller", "caller"))
+    callee = db.add_symbol(_make_sym("USR::mixed-callee", "callee"))
+    edge = db.add_edge(caller, callee, 1)
+    db.add_edge_site(edge, file_id, 1, 1)
+    db.add_edge_site(
+        edge, file_id, 2, 1, recv_decl_usr="USR::missing-declaration"
+    )
+
+    def check_rows(result):
+        assert result.rows == [
+            (1, "partial", 1, 0),
+            (2, "unknown", 0, 1),
+        ]
+        assert result.partial
+        assert result.unknown
+        result.index = replace(result.index, freshness="current")
+        assert from_query_result(result, result.index).status is Status.UNKNOWN
+
+    site_plan = (start(codebase()) | view("site") | nodes()
+                 | select(["line", "status", "partial", "unknown"])).plan
+    evidence_plan = (start(codebase()) | view("evidence") | nodes()
+                     | select(["line", "status", "partial", "unknown"])).plan
+    check_rows(Executor(db).run(site_plan))
+    check_rows(Executor(db).run(evidence_plan))
+
+    executor = Executor(db)
+    ordered = executor.run(
+        (start(codebase()) | view("site") | nodes()
+         | select(["line", "status", "partial", "unknown"])
+         | order_by(["line"]) | limit(1)).plan
+    )
+    assert ordered.rows == [(1, "partial", 1, 0)]
+    assert ordered.partial
+    assert not ordered.unknown
+    ordered.index = replace(ordered.index, freshness="current")
+    assert from_query_result(ordered, ordered.index).status is Status.PARTIAL
+
+    counted = executor.run(
+        (start(codebase()) | view("site") | nodes()
+         | select(["line", "status", "partial", "unknown"])
+         | qp.count()).plan
+    )
+    assert counted.scalar == 2
+    assert counted.partial
+    assert counted.unknown
+    counted.index = replace(counted.index, freshness="current")
+    assert from_query_result(counted, counted.index).status is Status.UNKNOWN
+
+    distinct = executor.run(
+        (start(codebase()) | view("site") | nodes()
+         | select(["relation"]) | qp.distinct()).plan
+    )
+    assert distinct.rows == [("calls",)]
+    assert distinct.partial
+    assert not distinct.unknown
+    distinct.index = replace(distinct.index, freshness="current")
+    assert from_query_result(distinct, distinct.index).status is Status.PARTIAL
+
+
+def test_default_cap_recomputes_discarded_site_status():
+    db = Storage(":memory:")
+    component = db.add_component("project", "/tmp/capped-site-view")
+    directory = db.add_directory(component, "src")
+    file_id = db.add_file(directory, "capped.cpp")
+    caller = db.add_symbol(_make_sym("USR::capped-caller", "caller"))
+    callee = db.add_symbol(_make_sym("USR::capped-callee", "callee"))
+    edge = db.add_edge(caller, callee, 1)
+    db._conn.execute(
+        "WITH RECURSIVE lines(line) AS (SELECT 0 UNION ALL SELECT line + 1 "
+        "FROM lines WHERE line < 999) INSERT INTO edge_site "
+        "(edge_id,file_id,line,col) SELECT ?,?,line,0 FROM lines",
+        (edge, file_id),
+    )
+    db.add_edge_site(
+        edge, file_id, 1000, 0, recv_decl_usr="USR::missing-declaration"
+    )
+    db._conn.commit()
+
+    result = Executor(db).run(
+        (start(codebase()) | view("site") | nodes()
+         | select(["line", "status", "unknown"])).plan
+    )
+    assert len(result.rows) == qp.DEFAULT_RESULT_CAP
+    assert result.truncated
+    assert result.partial
+    assert not result.unknown
+    result.index = replace(result.index, freshness="current")
+    assert from_query_result(result, result.index).status is Status.PARTIAL
+
+
 @pytest.mark.parametrize(
     ("site_count", "expected", "truncated"),
     [
