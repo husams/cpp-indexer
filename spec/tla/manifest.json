@@ -62,7 +62,8 @@
         "DiamondAdversarialInvariant",
         "FanoutAdversarialInvariant",
         "IncompleteTargetAdversarialInvariant",
-        "PartialEvidenceAdversarialInvariant"
+        "PartialEvidenceAdversarialInvariant",
+        "RecoveryTraceInvariant"
       ]
     }
   ],
@@ -91,7 +92,7 @@
     },
     "include-hygiene-and-transformations": {
       "modules": ["CidxBehavior", "CidxSemanticGraph"],
-      "invariants": ["IncludeHygieneInvariant", "TransformPublicationInvariant", "TransformConsumptionInvariant", "FailureHonestyInvariant", "QueryHonestyInvariant"]
+      "invariants": ["IncludeHygieneInvariant", "TransformPublicationInvariant", "TransformConsumptionInvariant", "RecoveryTraceInvariant", "FailureHonestyInvariant", "QueryHonestyInvariant"]
     }
   },
   "protectedPaths": [

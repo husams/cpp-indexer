@@ -160,6 +160,8 @@ run_semantic_seed witness-missing-edge WitnessInvariant
 run_semantic_seed partial-left CompletenessInvariant
 run_semantic_seed partial-right CompletenessInvariant
 run_semantic_seed partial-filter CompletenessInvariant
+run_semantic_seed partial-early CompletenessInvariant
+run_semantic_seed unknown-early CompletenessInvariant
 run_semantic_seed partial-view CompletenessInvariant
 run_semantic_seed partial-traverse CompletenessInvariant
 run_semantic_seed partial-evidence CompletenessInvariant

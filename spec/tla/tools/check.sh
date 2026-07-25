@@ -131,7 +131,8 @@ required_invariants() {
         DiamondAdversarialInvariant \
         FanoutAdversarialInvariant \
         IncompleteTargetAdversarialInvariant \
-        PartialEvidenceAdversarialInvariant
+        PartialEvidenceAdversarialInvariant \
+        RecoveryTraceInvariant
       ;;
     *)
       echo "TLA_CONFIG_STATUS=FAIL reason=unknown-model-$1" >&2
@@ -158,7 +159,7 @@ required_properties() {
         IncludePlanLiveness
       ;;
     CidxSemanticGraphSmoke)
-      printf '%s\n' SemanticLiveness
+      printf '%s\n' SemanticLiveness RecoveryLiveness
       ;;
     *)
       echo "TLA_CONFIG_STATUS=FAIL reason=unknown-model-$1" >&2
