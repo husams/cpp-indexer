@@ -12,7 +12,7 @@
   "legacyFacades": [
     {
       "id": "storage-facade",
-      "description": "cidx::Storage is documented in src/storage/storage.hpp as 'Compatibility facade for legacy application code'; its own declared surface is inherited from cidx::SqliteStorageService, so calls into the facade resolve to that class. New production call sites into either name from outside the modules that are architecturally allowed to construct/own storage are rejected; the migration cutover issue is HSE-62.",
+      "description": "cidx::Storage is documented in src/storage/storage.hpp as 'Compatibility facade for legacy application code'; its own declared surface is inherited from cidx::SqliteStorageService, so calls into the facade resolve to that class. New production call sites into either name from outside the modules that are architecturally allowed to construct/own storage are rejected; the migration cutover issue is HSE-62. Each baseline entry pins one exact call site (callerFile + calleeQualName + line + col), not every call from that file to that callee -- a new call site at an already-baselined (file, callee) pair is still rejected.",
       "calleeQualNamePrefixes": ["cidx::Storage::", "cidx::SqliteStorageService::"],
       "exemptModules": ["persistence.sqlite", "product.application"],
       "cutoverRemovalIssue": "HSE-62",
@@ -20,7 +20,7 @@
     },
     {
       "id": "graph-query-bypass",
-      "description": "cidx::graph::GraphQuery (src/graph/query.hpp) is the pre-QueryPlan graph read adapter. The module manifest still allows product.cli and product.application to depend on analysis.graph at module granularity while the QueryPlan migration (HSE-24) is in progress, so this check freezes the exact call sites known at policy-authoring time (see docs/self-host-architecture.md for how the baseline was captured) and rejects any new one. Paying down an existing entry only requires deleting it from the baseline; it never needs re-adding once removed.",
+      "description": "cidx::graph::GraphQuery (src/graph/query.hpp) is the pre-QueryPlan graph read adapter. The module manifest still allows product.cli and product.application to depend on analysis.graph at module granularity while the QueryPlan migration (HSE-24) is in progress, so this check freezes the exact call sites known at policy-authoring time (see docs/self-host-architecture.md for how the baseline was captured) and rejects any new one. Paying down an existing entry only requires deleting it from the baseline; it never needs re-adding once removed. Each baseline entry pins one exact call site (callerFile + calleeQualName + line + col), not every call from that file to that callee -- a new call site at an already-baselined (file, callee) pair is still rejected.",
       "calleeQualNamePrefixes": ["cidx::graph::GraphQuery::"],
       "exemptModules": ["analysis.graph", "query.plan"],
       "cutoverRemovalIssue": "HSE-24",
@@ -45,5 +45,6 @@
     ]
   },
 
-  "exceptionMetadataFields": ["owner", "rationale", "expiresOn", "removalIssue"]
+  "exceptionMetadataFields": ["owner", "rationale", "expiresOn", "removalIssue"],
+  "legacyFacadeBaselineSiteFields": ["line", "col"]
 }

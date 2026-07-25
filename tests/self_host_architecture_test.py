@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Positive and mutation tests for the HSE-71 self-host architecture report.
 
-Mirrors the style of tests/architecture_test.py: small synthetic fixtures
-(a tiny manifest/policy plus a hand-built SQLite index.db using only the
-Layer-0 tables the report reads) rather than a full Clang-built self-index,
-so the mutation matrix stays fast and hermetic. scripts/self_host_index.sh
-exercises the same report generator against a real self-index separately.
+Mirrors python/tests/test_queryplan.py's own convention
+(`_seed_reverse_typed_graph`): the fixture is a REAL `Storage`, built
+through its own mutation API (`add_component`/`add_symbol`/`add_edge`/...),
+not a hand-rolled SQL schema. This keeps the fixture guaranteed
+schema-compatible with whatever `Storage`/`Executor`/QueryPlan expect, and
+lets the mutation tests exercise the exact same read path
+(`scripts/self_host_architecture_report.py` routes symbol/edge/site facts
+through `indexer.queryplan.Executor`) that a real self-index run does.
+`scripts/self_host_index.sh` exercises the full pipeline against a real
+self-index separately.
 """
 
 from __future__ import annotations
@@ -19,23 +24,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "python"))
 
 from scripts.self_host_architecture_report import generate_report  # noqa: E402
+from indexer.storage import Storage, Symbol  # noqa: E402
 
-SCHEMA = """
-CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE component (id INTEGER PRIMARY KEY, name TEXT, path TEXT, version TEXT, repository_id INTEGER);
-CREATE TABLE directory (id INTEGER PRIMARY KEY, component_id INTEGER, path TEXT);
-CREATE TABLE file (id INTEGER PRIMARY KEY, directory_id INTEGER, name TEXT);
-CREATE TABLE symbol (id INTEGER PRIMARY KEY, usr TEXT, spelling TEXT, qual_name TEXT, kind INTEGER, file_id INTEGER, line INTEGER);
-CREATE TABLE edge_kind (id INTEGER PRIMARY KEY, name TEXT UNIQUE);
-CREATE TABLE edge (id INTEGER PRIMARY KEY, src_id INTEGER, dst_id INTEGER, kind INTEGER, count INTEGER DEFAULT 1);
-CREATE TABLE edge_site (edge_id INTEGER, file_id INTEGER, line INTEGER, col INTEGER);
-"""
+CALLS_KIND = 1  # catalogs/core.json relation id for "calls"
+DISPATCH_CALLS_KIND = 18  # ... for "dispatch_calls"
 
 
 class _Fixture:
-    """Builds a temp repo directory + manifest/policy + synthetic index.db."""
+    """A tiny repo directory + manifest/policy + a REAL Storage-built index.db."""
 
     def __init__(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="cidx-self-host-", dir="/tmp"))
@@ -114,43 +113,61 @@ class _Fixture:
         self.manifest_path.write_text(json.dumps(self.manifest), encoding="utf-8")
         self.policy_path.write_text(json.dumps(self.policy), encoding="utf-8")
         self.index_path = self.root / "index.db"
-        self._init_index()
+        self._build_index()
 
-    def _init_index(self) -> None:
-        conn = sqlite3.connect(self.index_path)
-        conn.executescript(SCHEMA)
-        conn.execute("INSERT INTO meta VALUES ('schema_version', '42')")
-        conn.execute("INSERT INTO meta VALUES ('catalog_version', '1')")
-        conn.execute("INSERT INTO meta VALUES ('catalog_hash', 'deadbeef')")
-        conn.execute("INSERT INTO meta VALUES ('graph_resolved_at', '2026-07-25T00:00:00Z')")
-        conn.execute("INSERT INTO component VALUES (1, 'fixture', ?, '1', 1)", (str(self.root),))
-        conn.execute("INSERT INTO directory VALUES (1, 1, 'src/extraction')")
-        conn.execute("INSERT INTO directory VALUES (2, 1, 'src/model')")
-        conn.execute("INSERT INTO directory VALUES (3, 1, 'src/persistence')")
-        conn.execute("INSERT INTO directory VALUES (4, 1, 'src/cli')")
-        conn.execute("INSERT INTO directory VALUES (5, 1, 'src/query')")
-        conn.execute("INSERT INTO file VALUES (1, 1, 'pass.cpp')")
-        conn.execute("INSERT INTO file VALUES (2, 2, 'value.hpp')")
-        conn.execute("INSERT INTO file VALUES (3, 3, 'service.hpp')")
-        conn.execute("INSERT INTO file VALUES (4, 4, 'format.hpp')")
-        conn.execute("INSERT INTO file VALUES (5, 5, 'plan.cpp')")
-        # symbol(id, usr, spelling, qual_name, kind, file_id, line)
-        conn.execute("INSERT INTO symbol VALUES (1, 'u1', 'run', 'run', 8, 1, 3)")
-        conn.execute("INSERT INTO symbol VALUES (2, 'u2', 'Value', 'Value', 4, 2, 2)")
-        conn.execute("INSERT INTO symbol VALUES (3, 'u3', 'write', 'cidx::SqliteStorageService::write', 8, 3, 2)")
-        conn.execute("INSERT INTO symbol VALUES (4, 'u4', 'render', 'render', 8, 4, 2)")
-        conn.execute("INSERT INTO symbol VALUES (5, 'u5', 'execute_plan', 'execute_plan', 8, 5, 1)")
-        conn.execute("INSERT INTO edge_kind VALUES (1, 'calls')")
-        conn.execute("INSERT INTO edge_kind VALUES (2, 'dispatch_calls')")
-        conn.commit()
-        conn.close()
+    def _build_index(self) -> None:
+        db = Storage(str(self.index_path))
+        self._db = db  # kept open for add_call()/mutate(); auto-commits per call
+        component = db.add_component("fixture", str(self.root))
+        dir_extraction = db.add_directory(component, "src/extraction")
+        dir_model = db.add_directory(component, "src/model")
+        dir_persistence = db.add_directory(component, "src/persistence")
+        dir_cli = db.add_directory(component, "src/cli")
+        dir_query = db.add_directory(component, "src/query")
+        self.file_pass = db.add_file(dir_extraction, "pass.cpp")
+        self.file_value = db.add_file(dir_model, "value.hpp")
+        self.file_service = db.add_file(dir_persistence, "service.hpp")
+        self.file_format = db.add_file(dir_cli, "format.hpp")
+        self.file_plan = db.add_file(dir_query, "plan.cpp")
 
-    def add_call(self, edge_id: int, src: int, dst: int, line: int = 1, col: int = 1) -> None:
-        conn = sqlite3.connect(self.index_path)
-        conn.execute("INSERT INTO edge VALUES (?, ?, ?, 1, 1)", (edge_id, src, dst))
-        conn.execute("INSERT INTO edge_site VALUES (?, ?, ?, ?)", (edge_id, src, line, col))
-        conn.commit()
-        conn.close()
+        def sym(usr, spelling, qual_name, kind, file_id, line):
+            return db.add_symbol(
+                Symbol(
+                    usr=usr, spelling=spelling, qual_name=qual_name, kind=kind,
+                    file_id=file_id, line=line, is_definition=True, resolved=True,
+                )
+            )
+
+        self.sym_run = sym("u1", "run", "run", "function", self.file_pass, 3)
+        self.sym_value = sym("u2", "Value", "Value", "class", self.file_value, 2)
+        self.sym_write = sym(
+            "u3", "write", "cidx::SqliteStorageService::write", "function",
+            self.file_service, 2,
+        )
+        self.sym_render = sym("u4", "render", "render", "function", self.file_format, 2)
+        self.sym_plan = sym("u5", "execute_plan", "execute_plan", "function", self.file_plan, 1)
+        db._conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('graph_resolved_at', ?)",
+            ("2026-07-25T00:00:00Z",),
+        )
+        # A real `cidx import` registers a file (indexed=0) and a real `cidx
+        # index` then parses it (indexed=1); this fixture skips straight to
+        # inserting already-resolved symbols/edges, so mark every registered
+        # file as actually indexed to match that end state.
+        db._conn.execute("UPDATE file SET indexed = 1")
+        db._conn.commit()
+
+    def add_call(self, src: int, dst: int, line: int = 1, col: int = 1, kind: int = CALLS_KIND) -> int:
+        edge_id = self._db.add_edge(src, dst, kind)
+        self._db.add_edge_site(edge_id, self._db._conn.execute(
+            "SELECT file_id FROM symbol WHERE id = ?", (src,)
+        ).fetchone()[0], line, col)
+        # add_edge()/add_edge_site() are low-level primitives that do not
+        # auto-commit (unlike add_component()/add_file()); commit explicitly
+        # so a separately-opened read-only connection (the report generator)
+        # can see the write.
+        self._db._conn.commit()
+        return edge_id
 
     def run(self, expected_repo_root: str | None = None) -> dict:
         return generate_report(
@@ -161,16 +178,16 @@ class _Fixture:
 class SelfHostArchitectureReportTests(unittest.TestCase):
     def test_clean_fixture_passes(self) -> None:
         fixture = _Fixture()
-        fixture.add_call(100, 1, 2)  # extraction -> model: allowed
+        fixture.add_call(fixture.sym_run, fixture.sym_value)  # extraction -> model: allowed
         report = fixture.run()
-        self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["status"], "pass", report)
         self.assertEqual(report["findings"]["moduleBoundaryViolations"], [])
         self.assertEqual(report["findings"]["legacyFacadeViolations"], [])
         self.assertEqual(report["findings"]["moduleCycles"], [])
 
     def test_module_boundary_violation_is_rejected_with_witness(self) -> None:
         fixture = _Fixture()
-        fixture.add_call(200, 1, 4, line=7, col=3)  # extraction -> cli: not allowed
+        fixture.add_call(fixture.sym_run, fixture.sym_render, line=7, col=3)  # extraction -> cli: not allowed
         report = fixture.run()
         self.assertEqual(report["status"], "fail")
         violations = report["findings"]["moduleBoundaryViolations"]
@@ -186,7 +203,7 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         # outbound call from a model symbol, to *any* other module, is a
         # violation regardless of what the callee actually is.
         fixture = _Fixture()
-        fixture.add_call(500, 2, 1)  # model -> extraction
+        fixture.add_call(fixture.sym_value, fixture.sym_run)  # model -> extraction
         report = fixture.run()
         violations = report["findings"]["moduleBoundaryViolations"]
         self.assertEqual(len(violations), 1)
@@ -198,7 +215,7 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         # straight into the SQLite-owning module without a manifest exception
         # is exactly the "SQLite leakage into extraction" scenario.
         fixture = _Fixture()
-        fixture.add_call(501, 1, 3)  # extraction -> persistence
+        fixture.add_call(fixture.sym_run, fixture.sym_write)  # extraction -> persistence
         report = fixture.run()
         violations = report["findings"]["moduleBoundaryViolations"]
         self.assertEqual(len(violations), 1)
@@ -211,7 +228,7 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         # cli, so a call from query into the product surface is the "CLI
         # dependency from query" upward-dependency scenario.
         fixture = _Fixture()
-        fixture.add_call(502, 5, 4)  # query -> cli
+        fixture.add_call(fixture.sym_plan, fixture.sym_render)  # query -> cli
         report = fixture.run()
         violations = report["findings"]["moduleBoundaryViolations"]
         self.assertEqual(len(violations), 1)
@@ -233,19 +250,16 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
             }
         ]
         fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
-        fixture.add_call(200, 1, 4)
+        fixture.add_call(fixture.sym_run, fixture.sym_render)
         report = fixture.run()
         self.assertEqual(report["findings"]["moduleBoundaryViolations"], [])
 
     def test_module_cycle_over_resolved_calls_is_rejected(self) -> None:
         fixture = _Fixture()
-        # extraction(1) -> cli(4) is disallowed on its own; add cli -> extraction
-        # requires a cli-side caller. Reuse symbol 4 (render, in cli) calling
-        # back into symbol 1 (run, in extraction) to complete a module cycle.
         fixture.manifest["modules"][1]["allowedDependencies"] = ["cli", "extraction"]
         fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
-        fixture.add_call(300, 1, 4)  # extraction -> cli (still undeclared -> violation + edge)
-        fixture.add_call(301, 4, 1)  # cli -> extraction (declared allowed)
+        fixture.add_call(fixture.sym_run, fixture.sym_render)  # extraction -> cli (still a violation)
+        fixture.add_call(fixture.sym_render, fixture.sym_run)  # cli -> extraction (declared allowed)
         report = fixture.run()
         cycles = report["findings"]["moduleCycles"]
         self.assertTrue(any(set(c["cycle"]) == {"extraction", "cli"} for c in cycles))
@@ -254,7 +268,7 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         fixture = _Fixture()
         fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model", "persistence"]
         fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
-        fixture.add_call(400, 1, 3)  # extraction -> persistence, calling SqliteStorageService::write
+        fixture.add_call(fixture.sym_run, fixture.sym_write)
         report = fixture.run()
         violations = report["findings"]["legacyFacadeViolations"]
         self.assertEqual(len(violations), 1)
@@ -269,6 +283,8 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
             {
                 "callerFile": "src/extraction/pass.cpp",
                 "calleeQualName": "cidx::SqliteStorageService::write",
+                "line": 40,
+                "col": 5,
                 "owner": "test",
                 "rationale": "test",
                 "expiresOn": "2099-01-01",
@@ -276,26 +292,91 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
             }
         ]
         fixture.policy_path.write_text(json.dumps(fixture.policy), encoding="utf-8")
-        fixture.add_call(400, 1, 3)
+        fixture.add_call(fixture.sym_run, fixture.sym_write, line=40, col=5)
         report = fixture.run()
         self.assertEqual(report["findings"]["legacyFacadeViolations"], [])
+
+    def test_new_call_site_at_an_already_baselined_file_callee_pair_is_still_rejected(self) -> None:
+        # [Review blocker 4] a baseline entry pins ONE call site; a second,
+        # later call from the same file into the same facade callee, at a
+        # DIFFERENT line/col, must not be silently grandfathered by the
+        # first entry.
+        fixture = _Fixture()
+        fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model", "persistence"]
+        fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
+        fixture.policy["legacyFacades"][0]["baseline"] = [
+            {
+                "callerFile": "src/extraction/pass.cpp",
+                "calleeQualName": "cidx::SqliteStorageService::write",
+                "line": 40,
+                "col": 5,
+                "owner": "test",
+                "rationale": "test",
+                "expiresOn": "2099-01-01",
+                "removalIssue": "HSE-62",
+            }
+        ]
+        fixture.policy_path.write_text(json.dumps(fixture.policy), encoding="utf-8")
+        fixture.add_call(fixture.sym_run, fixture.sym_write, line=40, col=5)  # baselined site: OK
+        fixture.add_call(fixture.sym_run, fixture.sym_write, line=99, col=9)  # NEW site: not OK
+        report = fixture.run()
+        violations = report["findings"]["legacyFacadeViolations"]
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0]["witness"]["call_site"], {"line": 99, "col": 9})
+
+    def test_every_call_site_of_an_aggregated_edge_is_preserved(self) -> None:
+        # [Review blocker 4] `edge` dedups by (src,dst,kind) but `edge_site`
+        # can carry many rows for that one edge; all of them must surface,
+        # not just the first one encountered.
+        fixture = _Fixture()
+        fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model", "persistence"]
+        fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
+        edge_id = fixture._db.add_edge(fixture.sym_run, fixture.sym_write, CALLS_KIND)
+        fixture._db.add_edge_site(edge_id, fixture.file_pass, 10, 1)
+        fixture._db.add_edge_site(edge_id, fixture.file_pass, 20, 2)
+        fixture._db.add_edge_site(edge_id, fixture.file_pass, 30, 3)
+        fixture._db._conn.commit()
+        report = fixture.run()
+        violations = report["findings"]["legacyFacadeViolations"]
+        sites = {(v["witness"]["call_site"]["line"], v["witness"]["call_site"]["col"]) for v in violations}
+        self.assertEqual(sites, {(10, 1), (20, 2), (30, 3)})
 
     def test_baseline_entry_missing_exception_metadata_is_rejected(self) -> None:
         fixture = _Fixture()
         fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model", "persistence"]
         fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
         fixture.policy["legacyFacades"][0]["baseline"] = [
-            {"callerFile": "src/extraction/pass.cpp", "calleeQualName": "cidx::SqliteStorageService::write"}
+            {"callerFile": "src/extraction/pass.cpp", "calleeQualName": "cidx::SqliteStorageService::write",
+             "line": 40, "col": 5}
         ]
         fixture.policy_path.write_text(json.dumps(fixture.policy), encoding="utf-8")
-        fixture.add_call(400, 1, 3)
+        fixture.add_call(fixture.sym_run, fixture.sym_write, line=40, col=5)
         report = fixture.run()
-        # The baseline entry suppresses the semantic finding, but an
-        # exception without owner/rationale/expiry/issue is not a valid
-        # exception, so the gate still fails on the metadata check.
         self.assertEqual(report["findings"]["legacyFacadeViolations"], [])
         self.assertTrue(
             any("missing or empty" in error for error in report["findings"]["policyMetadata"])
+        )
+        self.assertEqual(report["status"], "fail")
+
+    def test_baseline_entry_missing_call_site_is_rejected(self) -> None:
+        # [Review blocker 4] a baseline entry without line/col would
+        # grandfather every call from that file to that callee -- exactly
+        # the bug the reviewer found. Metadata validation must refuse it.
+        fixture = _Fixture()
+        fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model", "persistence"]
+        fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
+        fixture.policy["legacyFacades"][0]["baseline"] = [
+            {
+                "callerFile": "src/extraction/pass.cpp",
+                "calleeQualName": "cidx::SqliteStorageService::write",
+                "owner": "test", "rationale": "test",
+                "expiresOn": "2099-01-01", "removalIssue": "HSE-62",
+            }
+        ]
+        fixture.policy_path.write_text(json.dumps(fixture.policy), encoding="utf-8")
+        report = fixture.run()
+        self.assertTrue(
+            any("must pin an exact call site" in error for error in report["findings"]["policyMetadata"])
         )
         self.assertEqual(report["status"], "fail")
 
@@ -307,6 +388,7 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
             {
                 "callerFile": "src/extraction/pass.cpp",
                 "calleeQualName": "cidx::SqliteStorageService::write",
+                "line": 40, "col": 5,
                 "owner": "test",
                 "rationale": "test",
                 "expiresOn": "2020-01-01",
@@ -314,7 +396,7 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
             }
         ]
         fixture.policy_path.write_text(json.dumps(fixture.policy), encoding="utf-8")
-        fixture.add_call(400, 1, 3)
+        fixture.add_call(fixture.sym_run, fixture.sym_write, line=40, col=5)
         report = fixture.run()
         self.assertTrue(any("expired on" in error for error in report["findings"]["policyMetadata"]))
         self.assertEqual(report["status"], "fail")
@@ -344,7 +426,7 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
 
     def test_mismatched_repo_root_is_an_identity_issue_not_silence(self) -> None:
         fixture = _Fixture()
-        fixture.add_call(100, 1, 2)
+        fixture.add_call(fixture.sym_run, fixture.sym_value)
         report = fixture.run(expected_repo_root="/nonexistent/other/checkout")
         self.assertTrue(report["completeness"]["identityIssues"])
         self.assertEqual(report["completeness"]["semantic"], "partial")
@@ -356,9 +438,133 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
             any("zero 'calls'" in limitation for limitation in report["unresolvedLimitations"])
         )
 
+    def test_deleted_file_row_with_a_dangling_call_edge_fails_closed(self) -> None:
+        # [Review blocker 2] the reviewer's exact repro: delete an expected
+        # indexed file row while leaving its call edge in place. The
+        # violating caller/callee must not simply vanish from evidence --
+        # the gap itself must be surfaced and the gate must not pass.
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_run, fixture.sym_render, line=7, col=3)  # extraction -> cli
+        fixture._db._conn.execute("DELETE FROM file WHERE id = ?", (fixture.file_format,))
+        fixture._db._conn.commit()
+        report = fixture.run()
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["findings"]["moduleBoundaryViolations"], [])  # the edge is now unwitnessable
+        self.assertEqual(report["index"]["coverage"]["unwitnessedCallSites"], 1)
+        self.assertTrue(
+            any("cannot be witnessed" in issue for issue in report["completeness"]["identityIssues"])
+        )
+        self.assertEqual(report["completeness"]["semantic"], "partial")
+
+    def test_missing_expected_translation_unit_fails_closed(self) -> None:
+        # [Review blocker 2] a manifest-classified .cpp production source
+        # that never made it into the index (e.g. skipped by the compile
+        # database) must be surfaced, not silently treated as "nothing to
+        # report".
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_run, fixture.sym_value)
+        fixture._db._conn.execute(
+            "DELETE FROM file WHERE id = ?", (fixture.file_pass,)
+        )
+        # pass.cpp's own symbols/edges still reference file_pass (dangling),
+        # so this also seeds the dangling-reference path; the missing-TU
+        # message must additionally name pass.cpp specifically.
+        fixture._db._conn.commit()
+        report = fixture.run()
+        self.assertTrue(
+            any("translation unit" in issue and "pass.cpp" in issue
+                for issue in report["completeness"]["identityIssues"])
+        )
+        self.assertEqual(report["status"], "fail")
+
+    def test_fatal_diagnostic_fails_closed(self) -> None:
+        # [Review blocker 2] a file with a recorded fatal parse diagnostic
+        # has unreliable facts; that must be surfaced, not silently passed.
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_run, fixture.sym_value)
+        fixture._db._conn.execute(
+            "INSERT INTO diagnostic (file_id, severity, spelling) VALUES (?, 4, 'fatal error: boom')",
+            (fixture.file_pass,),
+        )
+        fixture._db._conn.commit()
+        report = fixture.run()
+        self.assertTrue(
+            any("fatal/error diagnostic" in issue for issue in report["completeness"]["identityIssues"])
+        )
+        self.assertEqual(report["status"], "fail")
+
+    def test_stale_schema_version_fails_closed(self) -> None:
+        # [Review blocker 2] validate schema identity against this
+        # checkout's own current expectation, not just record it.
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_run, fixture.sym_value)
+        fixture._db._conn.execute(
+            "UPDATE meta SET value = '1' WHERE key = 'schema_version'"
+        )
+        fixture._db._conn.commit()
+        report = fixture.run()
+        self.assertTrue(
+            any("schema_version" in issue and "stale" in issue
+                for issue in report["completeness"]["identityIssues"])
+        )
+        self.assertEqual(report["status"], "fail")
+
+    def test_stale_catalog_hash_fails_closed(self) -> None:
+        # Storage.from_connection validates the catalog hash itself and
+        # raises before this script's own check_index_coverage() ever runs;
+        # the report must still fail closed with a clear identity issue
+        # rather than an unhandled crash.
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_run, fixture.sym_value)
+        fixture._db._conn.execute(
+            "UPDATE meta SET value = 'not-the-real-hash' WHERE key = 'catalog_hash'"
+        )
+        fixture._db._conn.commit()
+        report = fixture.run()
+        self.assertTrue(
+            any("could not open index" in issue and "catalog" in issue
+                for issue in report["completeness"]["identityIssues"])
+        )
+        self.assertEqual(report["status"], "fail")
+
+    def test_pending_unindexed_file_fails_closed(self) -> None:
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_run, fixture.sym_value)
+        fixture._db._conn.execute("UPDATE file SET indexed = 0 WHERE id = ?", (fixture.file_pass,))
+        fixture._db._conn.commit()
+        report = fixture.run()
+        self.assertTrue(
+            any("not yet indexed" in issue for issue in report["completeness"]["identityIssues"])
+        )
+        self.assertEqual(report["status"], "fail")
+
+    def test_package_hash_is_independent_of_checkout_location(self) -> None:
+        # [Review blocker 3] byte-identical manifest/policy/checker sources
+        # in two different clean checkout directories must hash the same.
+        first = _Fixture()
+        first.add_call(first.sym_run, first.sym_value)
+        first_report = first.run()
+
+        # Copy the exact same manifest/policy/catalog bytes under a DIFFERENT root directory.
+        second_root = Path(tempfile.mkdtemp(prefix="cidx-self-host-other-location-", dir="/tmp"))
+        (second_root / "catalogs").mkdir(parents=True)
+        second_manifest_path = second_root / "manifest.json"
+        second_policy_path = second_root / "policy.json"
+        second_manifest_path.write_text(first.manifest_path.read_text(encoding="utf-8"), encoding="utf-8")
+        second_policy_path.write_text(first.policy_path.read_text(encoding="utf-8"), encoding="utf-8")
+        (second_root / "catalogs/core.json").write_text(
+            (first.root / "catalogs/core.json").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        second_report = generate_report(
+            second_root, second_manifest_path, second_policy_path, first.index_path, None
+        )
+        self.assertEqual(
+            first_report["config"]["packageHash"], second_report["config"]["packageHash"]
+        )
+
     def test_bootstrap_and_semantic_layers_agree_when_include_and_call_both_cross(self) -> None:
         fixture = _Fixture()
-        fixture.add_call(200, 1, 4)  # extraction -> cli via resolved call, no #include
+        fixture.add_call(fixture.sym_run, fixture.sym_render)  # extraction -> cli via resolved call, no #include
         report = fixture.run()
         # No #include from pass.cpp into cli/format.hpp exists in this fixture, so
         # the bootstrap pass cannot see this coupling: that is a real, additional
@@ -371,7 +577,7 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         (fixture.root / "src/extraction/pass.cpp").write_text(
             '#include "model/value.hpp"\n#include "cli/format.hpp"\nvoid run() {}\n', encoding="utf-8"
         )
-        fixture.add_call(200, 1, 4)
+        fixture.add_call(fixture.sym_run, fixture.sym_render)
         report = fixture.run()
         self.assertEqual(report["crossCheck"]["status"], "ok")
         self.assertEqual(report["crossCheck"]["disagreements"], [])
@@ -403,7 +609,7 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
             }
         ]
         fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
-        fixture.add_call(200, 1, 4)
+        fixture.add_call(fixture.sym_run, fixture.sym_render)
         report = fixture.run()
         self.assertEqual(report["crossCheck"]["status"], "blocked")
         self.assertTrue(report["crossCheck"]["disagreements"])
