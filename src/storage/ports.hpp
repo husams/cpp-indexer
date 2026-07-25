@@ -198,6 +198,7 @@ public:
   virtual ~SymbolWritePort() = default;
 
   virtual int64_t add_symbol(const Symbol &symbol) = 0;
+  virtual void add_decl_site(int64_t symbol_id, const Symbol &symbol) = 0;
   virtual int64_t mint_symbol_id(const SymbolIdentityRecord &symbol) = 0;
   virtual bool update_symbol_by_id(
       int64_t id,

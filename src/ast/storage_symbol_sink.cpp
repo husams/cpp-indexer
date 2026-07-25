@@ -183,40 +183,47 @@ void StorageSymbolSink::emit(const SymbolRecord &s) {
       s, current_file_id_,
       ports_.workspace.semantic_universe_for_file_id(current_file_id_),
       identity_translation_unit_);
+  const auto same_decl_site = [&](const CachedResolvedIdentity &cached) {
+    return cached.file_id == sym.file_id && cached.line == sym.line &&
+           cached.col == sym.col && cached.end_line == sym.end_line &&
+           cached.end_col == sym.end_col;
+  };
   std::string identity_key;
-  const bool resolved_identity = [&] {
-    if (!resolved_cache_active_) {
-      return false;
-    }
-    if (!resolved_identity_cache_hashes_.contains(identity_cache_hash(sym))) {
-      return false;
-    }
-    identity_key = identity_cache_key(sym);
-    return resolved_identity_cache_.contains(identity_key);
-  }();
+  const bool resolved_identity =
+      resolved_cache_active_ &&
+      resolved_identity_cache_hashes_.contains(identity_cache_hash(sym)) &&
+      [&] {
+        identity_key = identity_cache_key(sym);
+        const auto cached = resolved_identity_cache_.find(identity_key);
+        return cached != resolved_identity_cache_.end() &&
+               (!sym.is_definition || same_decl_site(cached->second));
+      }();
+  if (resolved_identity) {
+    const int64_t symbol_id =
+        resolved_identity_cache_.at(identity_key).symbol_id;
+    ports_.symbols_write.add_decl_site(symbol_id, sym);
+    record_symbol_id(symbol_ids_, symbol_id_set_, symbol_id);
+    return;
+  }
   const std::optional<cidx::Symbol> existing =
       lookup_existing_symbol(ports_, sym, resolved_identity);
   const int64_t symbol_id = ports_.symbols_write.add_symbol(sym);
-  const bool repeated_symbol =
-      record_symbol_id(symbol_ids_, symbol_id_set_, symbol_id);
+  record_symbol_id(symbol_ids_, symbol_id_set_, symbol_id);
   if (!(resolved_identity || (existing && existing->resolved))) {
     ++stored_; // AstIndexer::store: true = counted as "stored"
   }
-  if (existing && existing->resolved) {
+  if (existing && existing->resolved && existing->is_definition) {
     resolved_cache_active_ = true;
-  }
-  if (repeated_symbol && sym.resolved) {
-    resolved_cache_active_ = true;
-  }
-  if (resolved_cache_active_ &&
-      (resolved_identity || (repeated_symbol && sym.resolved) ||
-       (existing && existing->resolved))) {
-    if (identity_key.empty()) {
-      identity_key = identity_cache_key(sym);
-    }
-    if (resolved_identity_cache_.insert(std::move(identity_key)).second) {
-      resolved_identity_cache_hashes_.insert(identity_cache_hash(sym));
-    }
+    identity_key = identity_cache_key(sym);
+    resolved_identity_cache_.insert_or_assign(
+        std::move(identity_key),
+        CachedResolvedIdentity{.symbol_id = symbol_id,
+                               .file_id = sym.file_id,
+                               .line = sym.line,
+                               .col = sym.col,
+                               .end_line = sym.end_line,
+                               .end_col = sym.end_col});
+    resolved_identity_cache_hashes_.insert(identity_cache_hash(sym));
   }
 }
 

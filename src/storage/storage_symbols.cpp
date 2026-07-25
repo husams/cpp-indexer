@@ -183,6 +183,34 @@ int64_t SqliteStorageService::add_symbol(const Symbol &sym) {
   return sid;
 }
 
+void SqliteStorageService::add_decl_site(int64_t symbol_id,
+                                          const Symbol &sym) {
+  if (!sym.file_id.has_value() || !sym.line.has_value()) {
+    return;
+  }
+  auto symbol = db_.prepare(
+      "UPDATE symbol SET decl_file_id = COALESCE(?, decl_file_id), "
+      "decl_line = COALESCE(?, decl_line), "
+      "decl_col = COALESCE(?, decl_col) WHERE id = ?");
+  bind_opt(symbol, 1, sym.decl_file_id);
+  bind_opt(symbol, 2, sym.decl_line);
+  bind_opt(symbol, 3, sym.decl_col);
+  symbol.bind(4, symbol_id);
+  symbol.step_done();
+  auto ds = db_.prepare(
+      "INSERT OR IGNORE INTO decl_site "
+      "(symbol_id, file_id, line, col, end_line, end_col, is_definition) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?)");
+  ds.bind(1, symbol_id);
+  bind_opt(ds, 2, sym.file_id);
+  bind_opt(ds, 3, sym.line);
+  bind_opt(ds, 4, sym.col);
+  bind_opt(ds, 5, sym.end_line);
+  bind_opt(ds, 6, sym.end_col);
+  ds.bind(7, static_cast<int64_t>(sym.is_definition ? 1 : 0));
+  ds.step_done();
+}
+
 bool SqliteStorageService::update_symbol(
     const std::string &usr,
     const std::vector<std::pair<std::string, SqlValue>> &values,

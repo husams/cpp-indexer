@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -39,6 +40,15 @@ public:
   void emit(const SymbolRecord &symbol) override;
 
 private:
+  struct CachedResolvedIdentity {
+    int64_t symbol_id;
+    std::optional<int64_t> file_id;
+    std::optional<int64_t> line;
+    std::optional<int64_t> col;
+    std::optional<int64_t> end_line;
+    std::optional<int64_t> end_col;
+  };
+
   cidx::storage::AstStoragePorts &ports_;
   int64_t current_file_id_ = -1;
   std::optional<std::string> identity_translation_unit_;
@@ -46,7 +56,8 @@ private:
   std::vector<int64_t> symbol_ids_;
   PassMetrics *metrics_ = nullptr;
   std::unordered_set<int64_t> symbol_id_set_;
-  std::unordered_set<std::string> resolved_identity_cache_;
+  std::unordered_map<std::string, CachedResolvedIdentity>
+      resolved_identity_cache_;
   std::unordered_set<std::size_t> resolved_identity_cache_hashes_;
   bool resolved_cache_active_ = false;
 };
