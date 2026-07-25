@@ -6,7 +6,7 @@
 #include "query/exec.hpp"
 
 #include "catalogs/generated_catalog.hpp"
-#include "cli/version.hpp"
+#include "util/version.hpp"
 #include "graph/query.hpp"
 #include "storage/storage.hpp"
 

@@ -20,7 +20,7 @@ contract” is the only row that promises cross-language executor behavior.
 | Include hygiene | `src/include_hygiene/` | none | C++ authority; Python client may consume artifacts | Refactor / HSE-69 |
 | Source/index/config diff | `src/diff/` | none | C++ authority; JSON report schema is an artifact contract | Product / HSE-70 |
 | Storage-backed models and notebook helpers | `src/storage/` as producer | `python/indexer/model.py`, `python/examples/` | Python-only developer/SDK convenience over declared read contracts | SDK / HSE-60 |
-| Release/version metadata | generated `src/cli/version.hpp` | generated `python/indexer/_version.py` | One source: `spec/platform/version.json`; generated outputs must pass the release gate | Release / HSE-60 |
+| Release/version metadata | generated `src/util/version.hpp` (CLI compatibility include: `src/cli/version.hpp`) | generated `python/indexer/_version.py` | One source: `spec/platform/version.json`; generated outputs must pass the release gate | Release / HSE-60 |
 
 The retired Rust, Neo4j, IndraDB, daemon, and libclang C API surfaces are not
 compatibility targets. They must not reappear as alternate implementations.

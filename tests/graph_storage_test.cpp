@@ -350,6 +350,8 @@ TEST_CASE("T3 decl_path: stub for an unregistered (system/stdlib) target is "
 
   // It still counts as a still-stub in resolve_pass (decl_path is not a
   // registered location): file_id IS NULL AND decl_file_id IS NULL.
+  const auto report = db.run_transform_pipeline();
+  CHECK(report.still_stub_count == 1);
   CHECK(db.resolve_pass() == 1);
 }
 

@@ -105,7 +105,7 @@ def compare_generated_outputs(data: dict, digest: str) -> None:
         "FullProductVersion": full_version(data),
         "CatalogHash": digest,
     }
-    cpp = _cpp_string_constants(ROOT / "src/cli/version.hpp")
+    cpp = _cpp_string_constants(ROOT / "src/util/version.hpp")
     for name, value in expected.items():
         if cpp.get(name) != value:
             fail(f"C++ generated {name} is {cpp.get(name)!r}, expected {value!r}")

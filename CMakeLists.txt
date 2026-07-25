@@ -156,6 +156,7 @@ add_library(cidx_core STATIC
   src/storage/sqlite.cpp
   src/storage/sqlite_adapters.cpp
   src/storage/storage.cpp
+  src/storage/transforms.cpp
   src/storage/artifacts.cpp
   src/storage/storage_definitions.cpp
   src/storage/storage_entity_rollup.cpp

@@ -135,9 +135,31 @@ void build_top_level(CLI::App &app, ParsedArgs &pa) {
                     "root");
   index->add_flag("--no-graph", pa.no_graph,
                   "skip relationship-graph extraction (calls, inherits, ...)");
+  index->add_flag("--status", pa.index_status,
+                  "show persisted transform readiness");
+  index->add_flag("--explain", pa.index_explain,
+                  "explain transform freshness and stale causes");
+  index->add_option("--fact-set", pa.index_fact_set,
+                    "named fact set to inspect");
   index->add_flag("--no-autoderive-labels", pa.no_autoderive_labels,
                   "disable label autoderive fallback at parse time");
   index->callback([&pa] { pa.command = "index"; });
+  CLI::App *index_status =
+      index->add_subcommand("status", "show transform readiness");
+  index_status->add_option("--fact-set", pa.index_fact_set,
+                           "named fact set to inspect");
+  index_status->callback([&pa] {
+    pa.command = "index";
+    pa.index_status = true;
+  });
+  CLI::App *index_explain =
+      index->add_subcommand("explain", "explain transform freshness");
+  index_explain->add_option("--fact-set", pa.index_fact_set,
+                            "named fact set to inspect");
+  index_explain->callback([&pa] {
+    pa.command = "index";
+    pa.index_explain = true;
+  });
 
   CLI::App *resolve = app.add_subcommand(
       "resolve", "finalize cross-repo edges and roll up edge counts");

@@ -26,6 +26,7 @@
 
 #include "storage/records.hpp"
 #include "storage/sqlite.hpp"
+#include "storage/transforms.hpp"
 #include "workspace/context.hpp"
 
 namespace cidx {
@@ -609,6 +610,30 @@ public:
   // calls/uses, report remaining stubs. Returns count of still-unresolved
   // stub symbols.
   int resolve_pass();
+  // Execute the named derived-fact pipeline. Each transform is independently
+  // identified and reused by content identity; publication is one transaction.
+  TransformReport run_transform_pipeline();
+  // Read the last published/attempted lifecycle state without executing.
+  TransformReport transform_status(const std::string &fact_set = {});
+  // Stable, human-readable reasons for stale or unavailable fact sets.
+  std::string transform_explain(const std::string &fact_set = {});
+  // Named readiness contract for query and proof clients.
+  TransformFactSetStatus transform_fact_set_status(
+      const std::string &fact_set);
+  void mark_transform_pipeline_pending(const std::string &reason);
+  [[nodiscard]] const std::vector<TransformRun> &transform_runs() const {
+    return last_transform_runs_;
+  }
+  // Test seam for failure-atomic publication; production callers never set it.
+  void inject_transform_failure_for_testing(std::string transform_id);
+  void inject_transform_nondeterminism_for_testing(std::string transform_id);
+  void set_transform_invalidation_for_testing(const std::string &key,
+                                              const std::string &value);
+  void set_transform_implementation_provider_for_testing(
+      const std::string &transform_id, int version);
+  void set_transform_budget_for_testing(const std::string &transform_id,
+                                        std::int64_t max_rows,
+                                        std::int64_t max_milliseconds);
   // Record the UTC completion marker after a successful resolve pass.
   void stamp_graph_resolved();
 
@@ -796,6 +821,9 @@ private:
   bool needs_entity_node_backfill_ = false;
   std::unordered_set<std::string> attached_artifact_names_;
   std::optional<bool> artifact_query_only_before_attach_;
+  std::vector<TransformRun> last_transform_runs_;
+  std::optional<std::string> transform_failure_for_testing_;
+  std::optional<std::string> transform_nondeterminism_for_testing_;
 };
 
 // Compatibility façade for legacy application code. New code composes the

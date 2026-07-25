@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "spec/platform/version.json"
-CPP_OUTPUT = ROOT / "src/cli/version.hpp"
+CPP_OUTPUT = ROOT / "src/util/version.hpp"
 PY_OUTPUT = ROOT / "python/indexer/_version.py"
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 PRERELEASE = re.compile(r"^[a-z]+[0-9]+$")

@@ -5,6 +5,10 @@
 #include "storage/sqlite_adapters.hpp"
 #include "storage/storage.hpp"
 
+#include <algorithm>
+#include <array>
+#include <filesystem>
+#include <set>
 #include <stdexcept>
 #include <type_traits>
 
@@ -145,4 +149,744 @@ TEST_CASE("unit of work rolls back a failed one-TU publication") {
   }
 
   CHECK_FALSE(catalog.get_component("/tmp/failed-tu").has_value());
+}
+
+TEST_CASE("transform registry declares a deterministic dependency order") {
+  TransformRegistry registry;
+  registry.register_source_fact(TransformSourceFact{.name = "raw"});
+  TransformDescriptor source;
+  source.id = "source";
+  source.version = 1;
+  source.input_facts = {"raw"};
+  source.produced_facts = {"source.fact"};
+  source.invalidation_keys = {"source"};
+  source.invalidation_inputs = {TransformInvalidationInput{
+      .name = "source",
+      .kind = TransformInputKind::source,
+      .provider_id = "test.source.v1",
+      .value_query = {},
+      .static_value = "source"}};
+  source.options = {"deterministic-sql-v1"};
+  source.input_queries = {"SELECT 1"};
+  source.output_queries = {"SELECT 1"};
+  source.output_count_query = "SELECT 1";
+  source.implementation_provider = TransformImplementationProvider{
+      .provider_id = "test.source.executor.v1", .version = 1,
+      .content = "source-executor"};
+  source.fact_set_requirements = {TransformFactSetRequirement{
+      .name = "source.fact", .facts = {"source.fact"}}};
+  registry.register_transform(source);
+  TransformDescriptor derived;
+  derived.id = "derived";
+  derived.version = 1;
+  derived.input_facts = {"source.fact"};
+  derived.produced_facts = {"derived.fact"};
+  derived.dependencies = {"source"};
+  derived.invalidation_keys = {"derived"};
+  derived.invalidation_inputs = {TransformInvalidationInput{
+      .name = "derived",
+      .kind = TransformInputKind::source,
+      .provider_id = "test.derived.v1",
+      .value_query = {},
+      .static_value = "derived"}};
+  derived.options = {"deterministic-sql-v1"};
+  derived.input_queries = {"SELECT 1"};
+  derived.output_queries = {"SELECT 1"};
+  derived.output_count_query = "SELECT 1";
+  derived.implementation_provider = TransformImplementationProvider{
+      .provider_id = "test.derived.executor.v1", .version = 1,
+      .content = "derived-executor"};
+  derived.fact_set_requirements = {TransformFactSetRequirement{
+      .name = "derived.fact", .facts = {"derived.fact"}}};
+  registry.register_transform(derived);
+
+  const auto order = registry.execution_order();
+  REQUIRE(order.size() == 2);
+  CHECK(order[0]->id == "source");
+  CHECK(order[1]->id == "derived");
+
+  TransformRegistry invalid;
+  TransformDescriptor missing_provider = source;
+  missing_provider.id = "missing-provider";
+  missing_provider.produced_facts = {"missing.fact"};
+  missing_provider.fact_set_requirements = {TransformFactSetRequirement{
+      .name = "missing.fact", .facts = {"missing.fact"}}};
+  missing_provider.invalidation_inputs.clear();
+  invalid.register_transform(std::move(missing_provider));
+  bool rejected = false;
+  try {
+    (void)invalid.execution_order();
+  } catch (const std::invalid_argument &) {
+    rejected = true;
+  }
+  CHECK(rejected);
+}
+
+TEST_CASE("transform registry rejects invalid named fact graphs") {
+  const auto fact_transform =
+      [](std::string id, std::vector<std::string> inputs,
+         std::vector<std::string> outputs, std::vector<std::string> deps = {}) {
+        TransformDescriptor result;
+        result.id = std::move(id);
+        result.version = 1;
+        result.input_facts = std::move(inputs);
+        result.produced_facts = std::move(outputs);
+        result.dependencies = std::move(deps);
+        result.invalidation_keys = {"source"};
+        result.invalidation_inputs = {TransformInvalidationInput{
+            .name = "source",
+            .kind = TransformInputKind::source,
+            .provider_id = "test.source.v1",
+            .static_value = "source"}};
+        result.options = {"deterministic-sql-v1"};
+        result.input_queries = {"SELECT 1"};
+        result.output_queries = {"SELECT 1"};
+        result.output_count_query = "SELECT 1";
+        result.implementation_provider = TransformImplementationProvider{
+            .provider_id = result.id + ".executor.v1",
+            .version = 1,
+            .content = result.id + "-executor"};
+        for (const auto &fact : result.produced_facts) {
+          result.fact_set_requirements.push_back(
+              TransformFactSetRequirement{.name = fact, .facts = {fact}});
+        }
+        return result;
+      };
+  const auto expect_rejected = [](TransformRegistry registry) {
+    bool rejected = false;
+    try {
+      (void)registry.execution_order();
+    } catch (const std::invalid_argument &) {
+      rejected = true;
+    }
+    CHECK(rejected);
+  };
+
+  {
+    TransformRegistry registry;
+    registry.register_source_fact(TransformSourceFact{.name = "raw"});
+    auto transform = fact_transform("bad-alias", {"raw"}, {"actual.fact"});
+    transform.fact_set_requirements.push_back(
+        TransformFactSetRequirement{.name = "bad-alias",
+                                    .facts = {"undeclared.fact"}});
+    registry.register_transform(std::move(transform));
+    expect_rejected(std::move(registry));
+  }
+  {
+    TransformRegistry registry;
+    registry.register_source_fact(TransformSourceFact{.name = "raw"});
+    auto transform = fact_transform("incompatible", {"raw"}, {"fact"});
+    transform.input_catalog = "other-catalog";
+    registry.register_transform(std::move(transform));
+    expect_rejected(std::move(registry));
+  }
+  {
+    TransformRegistry registry;
+    registry.register_source_fact(TransformSourceFact{.name = "raw"});
+    registry.register_transform(
+        fact_transform("producer-a", {"raw"}, {"duplicate.fact"}));
+    registry.register_transform(
+        fact_transform("producer-b", {"raw"}, {"duplicate.fact"}));
+    expect_rejected(std::move(registry));
+  }
+  {
+    TransformRegistry registry;
+    registry.register_source_fact(TransformSourceFact{.name = "raw"});
+    registry.register_transform(
+        fact_transform("missing-dependency", {"raw"}, {"derived.fact"},
+                       {}));
+    auto consumer =
+        fact_transform("consumer", {"derived.fact"}, {"consumer.fact"});
+    registry.register_transform(std::move(consumer));
+    expect_rejected(std::move(registry));
+  }
+  {
+    TransformRegistry registry;
+    registry.register_source_fact(TransformSourceFact{.name = "raw"});
+    registry.register_transform(
+        fact_transform("undeclared-input", {"missing.fact"}, {"fact"}));
+    expect_rejected(std::move(registry));
+  }
+  {
+    TransformRegistry registry;
+    auto first = fact_transform("cycle-a", {"cycle-b.fact"}, {"cycle-a.fact"},
+                                {"cycle-b"});
+    auto second = fact_transform("cycle-b", {"cycle-a.fact"},
+                                 {"cycle-b.fact"}, {"cycle-a"});
+    registry.register_transform(std::move(first));
+    registry.register_transform(std::move(second));
+    expect_rejected(std::move(registry));
+  }
+}
+
+TEST_CASE("named transform pipeline reuses identical content identities") {
+  Storage db(":memory:");
+
+  Symbol source;
+  source.usr = "transform:@F@nonempty-source";
+  source.spelling = "nonempty-source";
+  source.kind = "function";
+  source.is_definition = true;
+  source.resolved = true;
+  const auto source_id = db.add_symbol(source);
+  Symbol target;
+  target.usr = "transform:@F@nonempty-target";
+  target.spelling = "nonempty-target";
+  target.kind = "function";
+  target.is_definition = true;
+  target.resolved = true;
+  const auto target_id = db.add_symbol(target);
+  Edge edge;
+  edge.src_id = source_id;
+  edge.dst_id = target_id;
+  edge.kind = 1;
+  db.add_edge(edge);
+
+  const auto first = db.run_transform_pipeline();
+  REQUIRE(first.runs.size() == 9);
+  CHECK(first.still_stub_count == 0);
+  for (const auto &run : first.runs) {
+    CHECK((run.status == TransformRunStatus::ran ||
+           run.status == TransformRunStatus::skipped));
+    CHECK_FALSE(run.input_identity.empty());
+    CHECK_FALSE(run.output_identity.empty());
+  }
+
+  const auto second = db.run_transform_pipeline();
+  REQUIRE(second.runs.size() == first.runs.size());
+  for (const auto &run : second.runs) {
+    CHECK(run.status == TransformRunStatus::reused);
+  }
+}
+
+TEST_CASE("reused attempt and last-run history survive close and reopen") {
+  const auto path = std::filesystem::temp_directory_path() /
+                    "cidx-hse67-reused-history.db";
+  std::filesystem::remove(path);
+  {
+    Storage db(path.string());
+    REQUIRE(db.run_transform_pipeline().complete);
+    const auto reused = db.run_transform_pipeline();
+    REQUIRE(reused.complete);
+    CHECK(std::ranges::all_of(reused.runs, [](const TransformRun &run) {
+      return run.status == TransformRunStatus::reused;
+    }));
+    auto history = db.raw_db().prepare(
+        "SELECT value FROM meta WHERE key = "
+        "'transform.entity-graph-rollup.history.last_run'");
+    REQUIRE(history.step());
+    CHECK(history.col_text(0).find("reused|") == 0);
+    auto published_generation = db.raw_db().prepare(
+        "SELECT value FROM meta WHERE key = "
+        "'transform.entity-graph-rollup.published.generation'");
+    REQUIRE(published_generation.step());
+    CHECK(published_generation.col_text(0) == "1");
+  }
+  {
+    Storage db(path.string());
+    const auto status = db.transform_status("entity-graph");
+    REQUIRE(status.runs.size() == 1);
+    CHECK(status.runs.front().status == TransformRunStatus::reused);
+    CHECK(db.transform_explain("entity-graph").find("reused") !=
+          std::string::npos);
+  }
+  std::filesystem::remove(path);
+}
+
+TEST_CASE("transform requalifies mutated derived output before reuse") {
+  Storage db(":memory:");
+  Symbol src;
+  src.usr = "transform:@F@mutation-src";
+  src.spelling = "mutation-src";
+  src.kind = "function";
+  src.is_definition = true;
+  const auto src_id = db.add_symbol(src);
+  Symbol dst = src;
+  dst.usr = "transform:@F@mutation-dst";
+  dst.spelling = "mutation-dst";
+  const auto dst_id = db.add_symbol(dst);
+  Edge edge;
+  edge.src_id = src_id;
+  edge.dst_id = dst_id;
+  edge.kind = 1;
+  const auto edge_id = db.add_edge(edge);
+  const auto component_id = db.add_component("mutation", "/tmp/mutation");
+  const auto directory_id = db.add_directory(component_id, "");
+  const auto file_id = db.add_file(directory_id, "mutation.cpp");
+  db.add_edge_site(
+      EdgeSite{.edge_id = edge_id, .file_id = file_id, .line = 1, .col = 1});
+  REQUIRE(db.run_transform_pipeline().complete);
+
+  db.raw_db().exec("UPDATE edge SET count = count + 99 WHERE kind = 1");
+  const auto repaired = db.run_transform_pipeline();
+  const auto it = std::ranges::find_if(
+      repaired.runs, [](const TransformRun &run) {
+        return run.transform_id == "edge-site-count-rollup";
+      });
+  REQUIRE(it != repaired.runs.end());
+  CHECK(it->status == TransformRunStatus::ran);
+  CHECK(it->diagnostic.find("mutation") != std::string::npos);
+  CHECK(db.run_transform_pipeline().complete);
+}
+
+TEST_CASE("non-reproducing derived mutation fails qualification and preserves publication") {
+  const auto path = std::filesystem::temp_directory_path() /
+                    "cidx-hse67-qualification-rollback.db";
+  std::filesystem::remove(path);
+  std::string published_identity;
+  int64_t edge_id = -1;
+  {
+    Storage db(path.string());
+    Symbol src;
+    src.usr = "transform:@F@nondeterministic-src";
+    src.spelling = "nondeterministic-src";
+    src.kind = "function";
+    src.is_definition = true;
+    const auto src_id = db.add_symbol(src);
+    Symbol dst = src;
+    dst.usr = "transform:@F@nondeterministic-dst";
+    dst.spelling = "nondeterministic-dst";
+    const auto dst_id = db.add_symbol(dst);
+    edge_id = db.add_edge(Edge{.src_id = src_id,
+                               .dst_id = dst_id,
+                               .kind = 1,
+                               .count = 1,
+                               .base_access = std::nullopt,
+                               .is_virtual = std::nullopt});
+    const auto component_id = db.add_component("qualification", "/tmp/qualification");
+    const auto directory_id = db.add_directory(component_id, "");
+    const auto file_id = db.add_file(directory_id, "qualification.cpp");
+    db.add_edge_site(EdgeSite{.edge_id = edge_id,
+                              .file_id = file_id,
+                              .line = 1,
+                              .col = 1});
+    REQUIRE(db.run_transform_pipeline().complete);
+    auto published = db.raw_db().prepare(
+        "SELECT value FROM meta WHERE key = "
+        "'transform.edge-site-count-rollup.published.output'");
+    REQUIRE(published.step());
+    published_identity = published.col_text(0);
+
+    db.raw_db().exec("UPDATE edge SET count = count + 99 WHERE kind = 1");
+    db.inject_transform_nondeterminism_for_testing("edge-site-count-rollup");
+    const auto failed = db.run_transform_pipeline();
+    CHECK(failed.failed);
+    const auto status = db.transform_fact_set_status("edge.count");
+    CHECK(status.known);
+    CHECK_FALSE(status.ready);
+    CHECK(status.status == TransformRunStatus::failed);
+    CHECK(db.transform_explain("edge.count").find("qualification") !=
+          std::string::npos);
+    auto retained = db.raw_db().prepare(
+        "SELECT value FROM meta WHERE key = "
+        "'transform.edge-site-count-rollup.published.output'");
+    REQUIRE(retained.step());
+    CHECK(retained.col_text(0) == published_identity);
+  }
+  {
+    Storage fresh(path.string());
+    auto row = fresh.raw_db().prepare("SELECT count FROM edge WHERE id = ?");
+    row.bind(1, edge_id);
+    REQUIRE(row.step());
+    CHECK(row.col_int64(0) == 1);
+    const auto status = fresh.transform_status("edge.count");
+    REQUIRE(status.runs.size() == 1);
+    CHECK(status.runs.front().output_identity == published_identity);
+  }
+  std::filesystem::remove(path);
+}
+
+TEST_CASE("site-less call and use counts retain indexed values") {
+  Storage db(":memory:");
+  Symbol src;
+  src.usr = "transform:@F@site-less-src";
+  src.spelling = "site-less-src";
+  src.kind = "function";
+  src.is_definition = true;
+  const auto src_id = db.add_symbol(src);
+  Symbol dst = src;
+  dst.usr = "transform:@F@site-less-dst";
+  dst.spelling = "site-less-dst";
+  const auto dst_id = db.add_symbol(dst);
+  const auto call_id = db.add_edge(Edge{.src_id = src_id,
+                                       .dst_id = dst_id,
+                                       .kind = 1,
+                                       .count = 7});
+  const auto use_id = db.add_edge(Edge{.src_id = src_id,
+                                       .dst_id = dst_id,
+                                       .kind = 7,
+                                       .count = 11});
+  REQUIRE(db.run_transform_pipeline().complete);
+  for (const auto [edge_id, expected] :
+       std::array<std::pair<int64_t, int64_t>, 2>{{{call_id, 7}, {use_id, 11}}}) {
+    auto row = db.raw_db().prepare("SELECT count FROM edge WHERE id = ?");
+    row.bind(1, edge_id);
+    REQUIRE(row.step());
+    CHECK(row.col_int64(0) == expected);
+  }
+}
+
+TEST_CASE("dynamic target changes rebuild semantic dependents only") {
+  Storage db(":memory:");
+  Symbol caller;
+  caller.usr = "transform:@F@dynamic-caller";
+  caller.spelling = "dynamic-caller";
+  caller.kind = "function";
+  caller.is_definition = true;
+  const auto caller_id = db.add_symbol(caller);
+  Symbol target;
+  target.usr = "transform:@F@dynamic-target";
+  target.spelling = "dynamic-target";
+  target.kind = "function";
+  target.is_definition = true;
+  const auto target_id = db.add_symbol(target);
+  const auto caller_def = db.get_or_create_definition(caller_id, std::nullopt);
+  (void)db.get_or_create_definition(target_id, std::nullopt);
+  (void)db.get_or_create_definition(target_id, std::nullopt);
+  db.add_def_edge(caller_def, target_id, 1);
+  REQUIRE(db.run_transform_pipeline().complete);
+
+  db.add_def_edge(caller_def, target_id, 1, 1);
+  const auto changed = db.run_transform_pipeline();
+  const auto status = [&](std::string_view id) {
+    const auto it = std::ranges::find_if(
+        changed.runs, [&](const TransformRun &run) {
+          return run.transform_id == id;
+        });
+    REQUIRE(it != changed.runs.end());
+    return it->status;
+  };
+  CHECK(status("possible-call-materialization") == TransformRunStatus::ran);
+  CHECK(status("hse-66-effect-registration") == TransformRunStatus::ran);
+  CHECK(status("hse-66-proof-registration") == TransformRunStatus::ran);
+  CHECK(status("include-fact-readiness") == TransformRunStatus::reused);
+  CHECK(status("type-fact-readiness") == TransformRunStatus::reused);
+}
+
+TEST_CASE("implementation version change closes only declared downstream") {
+  Storage db(":memory:");
+  REQUIRE(db.run_transform_pipeline().complete);
+  // Change the registered provider version, which is coupled to the
+  // edge-site executor and participates in the current input identity.
+  db.set_transform_implementation_provider_for_testing(
+      "edge-site-count-rollup", 2);
+  const auto changed = db.run_transform_pipeline();
+  const auto status = [&](std::string_view id) {
+    const auto it = std::ranges::find_if(
+        changed.runs, [&](const TransformRun &run) {
+          return run.transform_id == id;
+        });
+    REQUIRE(it != changed.runs.end());
+    return it->status;
+  };
+  CHECK(status("edge-site-count-rollup") == TransformRunStatus::ran);
+  CHECK(status("virtual-dispatch-call-materialization") ==
+        TransformRunStatus::ran);
+  CHECK(status("entity-graph-rollup") == TransformRunStatus::ran);
+  CHECK(status("hse-66-effect-registration") == TransformRunStatus::ran);
+  CHECK(status("hse-66-proof-registration") == TransformRunStatus::ran);
+  CHECK(status("multi-definition-classification") == TransformRunStatus::reused);
+  CHECK(status("include-fact-readiness") == TransformRunStatus::reused);
+  CHECK(status("type-fact-readiness") == TransformRunStatus::reused);
+}
+
+TEST_CASE("transform budgets fail atomically and retain the published generation") {
+  Storage db(":memory:");
+  Symbol a;
+  a.usr = "transform:@F@budget-a";
+  a.spelling = "budget-a";
+  a.kind = "function";
+  a.is_definition = true;
+  const auto a_id = db.add_symbol(a);
+  Symbol b = a;
+  b.usr = "transform:@F@budget-b";
+  b.spelling = "budget-b";
+  const auto b_id = db.add_symbol(b);
+  Symbol c = a;
+  c.usr = "transform:@F@budget-c";
+  c.spelling = "budget-c";
+  const auto c_id = db.add_symbol(c);
+  Edge first{.src_id = a_id,
+             .dst_id = b_id,
+             .kind = 1,
+             .count = 1,
+             .base_access = std::nullopt,
+             .is_virtual = std::nullopt,
+             .vtable_slot = std::nullopt};
+  Edge second{.src_id = a_id,
+              .dst_id = c_id,
+              .kind = 1,
+              .count = 1,
+              .base_access = std::nullopt,
+              .is_virtual = std::nullopt,
+              .vtable_slot = std::nullopt};
+  db.add_edge(first);
+  db.add_edge(second);
+  REQUIRE(db.run_transform_pipeline().complete);
+  db.set_transform_budget_for_testing("edge-site-count-rollup", 1, 0);
+  db.set_transform_invalidation_for_testing("source", "budget-boundary");
+  const auto failed = db.run_transform_pipeline();
+  CHECK(failed.failed);
+  const auto it = std::ranges::find_if(
+      failed.runs, [](const TransformRun &run) {
+        return run.transform_id == "edge-site-count-rollup";
+      });
+  REQUIRE(it != failed.runs.end());
+  CHECK(it->status == TransformRunStatus::failed);
+  CHECK(it->diagnostic.find("max_rows") != std::string::npos);
+  auto published = db.raw_db().prepare(
+      "SELECT value FROM meta WHERE key = 'transform.edge-site-count-rollup.published.status'");
+  REQUIRE(published.step());
+  CHECK(published.col_text(0) == "ran");
+}
+
+TEST_CASE(
+    "failed transform preserves prior derived rows and records stale input") {
+  Storage db(":memory:");
+  Symbol src;
+  src.usr = "transform:@F@src";
+  src.spelling = "src";
+  src.kind = "function";
+  src.is_definition = true;
+  const auto src_id = db.add_symbol(src);
+  Symbol dst;
+  dst.usr = "transform:@F@dst";
+  dst.spelling = "dst";
+  dst.kind = "function";
+  dst.is_definition = true;
+  const auto dst_id = db.add_symbol(dst);
+  Edge dispatch_edge;
+  dispatch_edge.src_id = src_id;
+  dispatch_edge.dst_id = dst_id;
+  dispatch_edge.kind = 18;
+  db.add_edge(dispatch_edge);
+
+  const auto baseline = db.run_transform_pipeline();
+  REQUIRE(baseline.runs.size() == 9);
+
+  Edge earlier_edge;
+  earlier_edge.src_id = src_id;
+  earlier_edge.dst_id = dst_id;
+  earlier_edge.kind = 1;
+  db.add_edge(earlier_edge);
+  db.raw_db().exec("INSERT OR IGNORE INTO entity_node(id, kind) VALUES (" +
+                   std::to_string(src_id) + ", 1), (" + std::to_string(dst_id) +
+                   ", 1)");
+  db.add_entity_edge(src_id, dst_id, 1);
+  auto before = db.raw_db().prepare("SELECT COUNT(*) FROM entity_edge");
+  REQUIRE(before.step());
+  CHECK(before.col_int64(0) == 1);
+
+  Edge override_edge;
+  override_edge.src_id = src_id;
+  override_edge.dst_id = dst_id;
+  override_edge.kind = 6;
+  db.add_edge(override_edge);
+  db.inject_transform_failure_for_testing("entity-graph-rollup");
+  const auto failed = db.run_transform_pipeline();
+  REQUIRE(failed.runs.size() == 9);
+  std::set<std::string> final_ids;
+  for (const auto &run : failed.runs) {
+    final_ids.insert(run.transform_id);
+  }
+  CHECK(final_ids.size() == failed.runs.size());
+  const auto entity = std::ranges::find_if(
+      failed.runs, [](const TransformRun &run) {
+        return run.transform_id == "entity-graph-rollup";
+      });
+  REQUIRE(entity != failed.runs.end());
+  CHECK(entity->status == TransformRunStatus::failed);
+  CHECK_FALSE(entity->diagnostic.empty());
+  const auto earlier_record = std::ranges::find_if(
+      failed.runs, [](const TransformRun &run) {
+        return run.transform_id == "edge-site-count-rollup";
+      });
+  REQUIRE(earlier_record != failed.runs.end());
+  CHECK(earlier_record->status == TransformRunStatus::stale);
+  const auto downstream_record = std::ranges::find_if(
+      failed.runs, [](const TransformRun &run) {
+        return run.transform_id == "hse-66-effect-registration";
+      });
+  REQUIRE(downstream_record != failed.runs.end());
+  CHECK(downstream_record->status == TransformRunStatus::stale);
+
+  auto state = db.raw_db().prepare("SELECT value FROM meta WHERE key = "
+                                   "'transform.entity-graph-rollup.status'");
+  REQUIRE(state.step());
+  CHECK(state.col_text(0) == "failed");
+  auto published = db.raw_db().prepare(
+      "SELECT value FROM meta WHERE key = "
+      "'transform.entity-graph-rollup.published.status'");
+  REQUIRE(published.step());
+  CHECK(published.col_text(0) == "ran");
+  auto attempt_input = db.raw_db().prepare(
+      "SELECT value FROM meta WHERE key = "
+      "'transform.entity-graph-rollup.attempt.input'");
+  REQUIRE(attempt_input.step());
+  CHECK_FALSE(attempt_input.col_text(0).empty());
+  auto after = db.raw_db().prepare("SELECT COUNT(*) FROM entity_edge");
+  REQUIRE(after.step());
+  CHECK(after.col_int64(0) == 1);
+  const auto status = db.transform_status();
+  const auto effect = std::ranges::find_if(
+      status.runs, [](const TransformRun &run) {
+        return run.transform_id == "hse-66-effect-registration";
+      });
+  REQUIRE(effect != status.runs.end());
+  CHECK(effect->status == TransformRunStatus::stale);
+  CHECK(effect->diagnostic.find("entity-graph-rollup") != std::string::npos);
+  auto edge_attempt = db.raw_db().prepare(
+      "SELECT value FROM meta WHERE key = "
+      "'transform.edge-site-count-rollup.attempt.status'");
+  REQUIRE(edge_attempt.step());
+  CHECK(edge_attempt.col_text(0) == "stale");
+  const auto earlier = db.transform_fact_set_status("edge.count");
+  CHECK(earlier.known);
+  CHECK_FALSE(earlier.ready);
+  CHECK(earlier.status == TransformRunStatus::stale);
+  const auto downstream = db.transform_fact_set_status("effect");
+  CHECK(downstream.known);
+  CHECK_FALSE(downstream.ready);
+  CHECK(downstream.status == TransformRunStatus::stale);
+}
+
+TEST_CASE("transform invalidation is typed and has minimum closure") {
+  Storage db(":memory:");
+  const auto first = db.run_transform_pipeline();
+  REQUIRE(first.complete);
+
+  db.set_transform_invalidation_for_testing("catalog", "catalog-v2");
+  const auto catalog_change = db.run_transform_pipeline();
+  CHECK(catalog_change.runs[0].status == TransformRunStatus::reused);
+  CHECK(catalog_change.runs[4].status == TransformRunStatus::ran);
+  CHECK(catalog_change.runs[5].status == TransformRunStatus::reused);
+  CHECK(catalog_change.runs[6].status == TransformRunStatus::ran);
+  CHECK(catalog_change.runs[7].status == TransformRunStatus::ran);
+
+  db.set_transform_invalidation_for_testing("catalog", "catalog-v1");
+  db.set_transform_invalidation_for_testing("source", "source-v2");
+  const auto source_change = db.run_transform_pipeline();
+  CHECK(source_change.runs[0].status == TransformRunStatus::ran);
+  CHECK(source_change.runs[1].status == TransformRunStatus::ran);
+  CHECK(source_change.runs[2].status == TransformRunStatus::ran);
+  CHECK(source_change.runs[3].status == TransformRunStatus::ran);
+  CHECK(source_change.runs[4].status == TransformRunStatus::ran);
+  CHECK(source_change.runs[5].status == TransformRunStatus::ran);
+  CHECK(source_change.runs[6].status == TransformRunStatus::ran);
+}
+
+TEST_CASE("clean and incremental publication have equal identities") {
+  const auto seed = [](Storage &db) {
+    Symbol lhs;
+    lhs.usr = "transform:@F@clean-lhs";
+    lhs.spelling = "clean-lhs";
+    lhs.kind = "function";
+    lhs.is_definition = true;
+    lhs.resolved = true;
+    const auto lhs_id = db.add_symbol(lhs);
+    Symbol rhs = lhs;
+    rhs.usr = "transform:@F@clean-rhs";
+    rhs.spelling = "clean-rhs";
+    const auto rhs_id = db.add_symbol(rhs);
+    Edge edge;
+    edge.src_id = lhs_id;
+    edge.dst_id = rhs_id;
+    edge.kind = 1;
+    db.add_edge(edge);
+  };
+  Storage clean(":memory:");
+  Storage incremental(":memory:");
+  seed(clean);
+  seed(incremental);
+  const auto clean_run = clean.run_transform_pipeline();
+  const auto incremental_run = incremental.run_transform_pipeline();
+  REQUIRE(clean_run.complete);
+  REQUIRE(incremental_run.complete);
+  REQUIRE(clean_run.runs.size() == incremental_run.runs.size());
+  for (std::size_t i = 0; i < clean_run.runs.size(); ++i) {
+    CHECK(clean_run.runs[i].output_identity ==
+          incremental_run.runs[i].output_identity);
+  }
+  const auto reused = incremental.run_transform_pipeline();
+  CHECK(std::ranges::all_of(reused.runs, [](const TransformRun &run) {
+    return run.status == TransformRunStatus::reused;
+  }));
+}
+
+TEST_CASE("legacy resolve propagates a failed transform") {
+  Storage db(":memory:");
+  REQUIRE(db.run_transform_pipeline().complete);
+  db.set_transform_invalidation_for_testing("source", "resolve-failure");
+  db.inject_transform_failure_for_testing("entity-graph-rollup");
+  bool threw = false;
+  try {
+    (void)db.resolve_pass();
+  } catch (const std::exception &) {
+    threw = true;
+  }
+  CHECK(threw);
+  CHECK_FALSE(db.graph_resolved());
+}
+
+TEST_CASE("pending transform publication stays stale until graph extraction") {
+  Storage db(":memory:");
+  REQUIRE(db.run_transform_pipeline().complete);
+  db.stamp_graph_resolved();
+  db.mark_transform_pipeline_pending("selected file remains pending");
+  const auto status = db.transform_status();
+  CHECK_FALSE(status.complete);
+  CHECK_FALSE(db.graph_resolved());
+  CHECK(std::ranges::all_of(status.runs, [](const TransformRun &run) {
+    return run.status == TransformRunStatus::stale &&
+           run.completeness == TransformCompleteness::pending;
+  }));
+}
+
+TEST_CASE("pending state overrides reused attempts after reopen") {
+  const auto path = std::filesystem::temp_directory_path() /
+                    "cidx-hse67-pending-reopen.db";
+  std::filesystem::remove(path);
+  {
+    Storage db(path.string());
+    REQUIRE(db.run_transform_pipeline().complete);
+    const auto reused = db.run_transform_pipeline();
+    REQUIRE(reused.complete);
+    CHECK(std::ranges::all_of(reused.runs, [](const TransformRun &run) {
+      return run.status == TransformRunStatus::reused;
+    }));
+    db.mark_transform_pipeline_pending("selected file remains pending");
+  }
+  {
+    Storage db(path.string());
+    const auto status = db.transform_status();
+    REQUIRE(status.runs.size() == 9);
+    CHECK(std::ranges::all_of(status.runs, [](const TransformRun &run) {
+      return run.status == TransformRunStatus::stale &&
+             run.completeness == TransformCompleteness::pending;
+    }));
+    const auto fact_status = db.transform_fact_set_status("entity-graph");
+    CHECK(fact_status.known);
+    CHECK_FALSE(fact_status.ready);
+    CHECK(fact_status.status == TransformRunStatus::stale);
+    const auto explanation = db.transform_explain("entity-graph");
+    CHECK(explanation.find("entity-graph-rollup: stale, pending") !=
+          std::string::npos);
+    CHECK(explanation.find("cause=selected file remains pending") !=
+          std::string::npos);
+  }
+  std::filesystem::remove(path);
+}
+
+TEST_CASE("fact-set readiness resolves named producers and unknowns") {
+  Storage db(":memory:");
+  REQUIRE(db.run_transform_pipeline().complete);
+  const auto ready = db.transform_fact_set_status("entity-graph");
+  CHECK(ready.known);
+  CHECK(ready.ready);
+  CHECK(db.transform_status("entity-graph").runs.size() == 1);
+  CHECK(db.transform_explain("entity-graph").find("entity-graph-rollup") !=
+        std::string::npos);
+  const auto unknown = db.transform_fact_set_status("does-not-exist");
+  CHECK_FALSE(unknown.known);
+  CHECK_FALSE(unknown.ready);
 }

@@ -538,16 +538,6 @@
       "removalIssue": "HSE-68"
     },
     {
-      "source": "src/query/exec.cpp",
-      "fromModule": "query.plan",
-      "toModule": "product.cli",
-      "boundary": "versioned result adapter -> product JSON value",
-      "owner": "Platform M3 query maintainers",
-      "rationale": "The QueryPlan result still exposes the existing deterministic JSON value type during the compatibility migration.",
-      "expiresOn": "2026-12-31",
-      "removalIssue": "HSE-68"
-    },
-    {
       "source": "src/query/plan.hpp",
       "fromModule": "query.plan",
       "toModule": "product.cli",
