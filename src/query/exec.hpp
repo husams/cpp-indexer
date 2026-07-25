@@ -96,14 +96,23 @@ constexpr int64_t kPathNodeBudget = 10000;
 
 // One hop of a witness path: the node reached and the typed label of the
 // relation/type-edge that reached it. `through` is empty for the start node.
+// `position`/`pack_index` carry the typed view's own natural-key slot
+// (parameter/template_parameter/template_argument owners; -1 = not
+// applicable, e.g. a plain symbol/entity/type node) so distinct slots on the
+// same owner never collapse to an indistinguishable step, and so ranking
+// has a total order.
 struct PathStep {
   int64_t node_id = 0;
   std::string domain;  // "symbol" | "entity" | "type" | owner-domain name
-  std::string through; // relation/type_edge_kind label into this node ("" at
+  std::string through; // relation/type_edge_kind label into this node, or the
+                       // symbol_type role ("returns"/"of_type"/
+                       // "underlying_type") for a symbol-domain owner ("" at
                        // the start)
   bool inbound = false;
   std::string status = "complete"; // per-hop completeness
   std::vector<EdgeSiteRow> sites;  // evidence for the hop into this node
+  int64_t position = -1;           // natural-key position; -1 = not applicable
+  int64_t pack_index = -1;         // pack element index; -1 = not a pack slot
 };
 
 // One bounded ordered witness path (docs/query-plan.md "Path result shape").

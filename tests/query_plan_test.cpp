@@ -1963,3 +1963,180 @@ TEST_CASE("query_plan: explain() reports budgets, shape, and input relations") {
   CHECK(rendered.find("\"completeness\": \"partial\"") != std::string::npos);
   CHECK(rendered.find("\"partial_inputs\": true") != std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// PR #69 review round: path-window BFS, evidence caps, owner identity,
+// explain() completeness/freshness regressions
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "query_plan: path() finds an in-window witness reached only at a later "
+    "depth") {
+  // S->T is depth 1 (out of the [2,2] window); S->M->T is the only depth-2
+  // route. A permanent cross-level visited set would mark T visited at
+  // depth 1 and discard the depth-2 rediscovery via M.
+  Storage db(":memory:");
+  const int64_t s = db.add_symbol(make_sym("USR::S", "s"));
+  const int64_t t = db.add_symbol(make_sym("USR::T", "t"));
+  const int64_t m = db.add_symbol(make_sym("USR::M", "m"));
+  db.add_edge(make_edge(s, t, 1));
+  db.add_edge(make_edge(s, m, 1));
+  db.add_edge(make_edge(m, t, 1));
+
+  QueryExecutor ex(db);
+  const auto result = ex.run(
+      (start(symbol("USR::S")) | path(start(symbol("USR::T")), "calls", 2, 2))
+          .plan());
+  REQUIRE(result.paths.size() == 1);
+  const auto &witness = result.paths[0];
+  CHECK(witness.length == 2);
+  REQUIRE(witness.steps.size() == 3);
+  CHECK(witness.steps[0].node_id == s);
+  CHECK(witness.steps[1].node_id == m);
+  CHECK(witness.steps[2].node_id == t);
+  CHECK_FALSE(result.truncated);
+}
+
+TEST_CASE(
+    "query_plan: path() reports truncation when a hop has more sites than "
+    "the cap") {
+  Storage db(":memory:");
+  const int64_t component =
+      db.add_component("project", "/tmp/path-evidence-cap");
+  const int64_t directory = db.add_directory(component, "src");
+  const int64_t file = db.add_file(directory, "cap.cpp");
+  const int64_t a = db.add_symbol(make_sym("USR::CapA", "a"));
+  const int64_t b = db.add_symbol(make_sym("USR::CapB", "b"));
+  const int64_t edge = db.add_edge(make_edge(a, b, 1));
+  db.raw_db().exec(
+      "WITH RECURSIVE lines(line) AS (SELECT 0 UNION ALL SELECT line + 1 "
+      "FROM lines WHERE line < 1000) INSERT INTO edge_site "
+      "(edge_id,file_id,line,col) SELECT " +
+      std::to_string(edge) + "," + std::to_string(file) + ",line,0 FROM lines");
+
+  QueryExecutor ex(db);
+  const auto result = ex.run((start(symbol("USR::CapA")) |
+                              path(start(symbol("USR::CapB")), "calls", 1, 1))
+                                 .plan());
+  REQUIRE(result.paths.size() == 1);
+  const auto &witness = result.paths[0];
+  REQUIRE(witness.steps.size() == 2);
+  CHECK(witness.steps[1].sites.size() == kDefaultResultCap);
+  CHECK(witness.steps[1].status == "partial");
+  CHECK(witness.status == "partial");
+  CHECK(result.truncated); // incomplete evidence must never look complete
+}
+
+TEST_CASE(
+    "query_plan: reverse_type_use() preserves distinct parameter slots on "
+    "one owner") {
+  Storage db(":memory:");
+  const int64_t owner =
+      db.add_symbol(make_sym("USR::two_params", "two_params"));
+  db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind,extent) "
+                   "VALUES ('b:int','int',1,NULL)");
+  auto ids = db.raw_db().prepare("SELECT id FROM type_node ORDER BY id");
+  REQUIRE(ids.step());
+  const int64_t int_id = ids.col_int64(0);
+  for (const int64_t position : {0, 1}) {
+    auto stmt = db.raw_db().prepare(
+        "INSERT INTO parameter(owner_id,position,pack_index,name,type_id) "
+        "VALUES (?,?,-1,'p',?)");
+    stmt.bind(1, owner);
+    stmt.bind(2, position);
+    stmt.bind(3, int_id);
+    stmt.step_done();
+  }
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) | reverse_type_use())
+                 .plan());
+  REQUIRE(result.paths.size() == 2);
+  std::vector<int64_t> positions;
+  for (const auto &witness : result.paths) {
+    REQUIRE(witness.steps.size() == 2);
+    CHECK(witness.steps[1].node_id == owner);
+    CHECK(witness.steps[1].domain == "parameter");
+    CHECK(witness.steps[1].through == "parameter");
+    positions.push_back(witness.steps[1].position);
+  }
+  std::ranges::sort(positions);
+  CHECK(positions == std::vector<int64_t>{0, 1});
+}
+
+TEST_CASE("query_plan: explain() reports reverse_type_use()'s real inputs") {
+  Storage db(":memory:");
+  db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind,extent) "
+                   "VALUES ('b:int','int',1,NULL)");
+
+  SqliteQueryReadAdapter read(db);
+  Executor executor(read);
+  const auto plan =
+      (start(codebase()) | view(View::Type) | nodes() | reverse_type_use())
+          .plan();
+  const auto explained = executor.explain(plan);
+  const std::string rendered = cidx::json_out::dumps_indent2(explained);
+  CHECK(rendered.find("\"execution_shape\": \"path\"") != std::string::npos);
+  CHECK(rendered.find("\"relation\": \"type.has_type_edge\"") !=
+        std::string::npos);
+  CHECK(rendered.find("\"relation\": \"type.canonical_id\"") !=
+        std::string::npos);
+  CHECK(rendered.find("\"relation\": \"symbol.of_type\"") != std::string::npos);
+  CHECK(rendered.find("\"relation\": \"parameter.of_type\"") !=
+        std::string::npos);
+  CHECK(rendered.find("\"relation\": \"template_parameter.of_type\"") !=
+        std::string::npos);
+  CHECK(rendered.find("\"relation\": \"template_argument.of_type\"") !=
+        std::string::npos);
+  CHECK(rendered.find("\"partial_inputs\": true") != std::string::npos);
+  CHECK(rendered.find("\"unknown_capable_inputs\": true") != std::string::npos);
+}
+
+TEST_CASE(
+    "query_plan: explain() exposes expected vs indexed source revision on a "
+    "stale index") {
+  const std::string dir = make_temp_dir();
+  const std::string source = dir + "/answer.cpp";
+  {
+    std::ofstream out(source);
+    out << "int answer = 1;\n";
+  }
+  Storage db(":memory:");
+  db.add_component("fixture", dir);
+  const auto file_id =
+      db.add_file_path(source, std::nullopt, cidx::md5_of(source));
+  db.mark_file_indexed(file_id, std::nullopt, cidx::md5_of(source));
+  db.stamp_index_identity();
+
+  const auto current = db.index_identity();
+  REQUIRE(current.freshness == "current");
+  REQUIRE(current.source_revision.has_value());
+  REQUIRE(current.expected_source_revision.has_value());
+  CHECK(*current.source_revision == *current.expected_source_revision);
+  REQUIRE(current.expected_index_config_fingerprint.has_value());
+
+  // Change the checkout after stamping: the persisted identity now
+  // disagrees with what the current source hashes to.
+  {
+    std::ofstream out(source);
+    out << "int answer = 2;\n";
+  }
+  const auto stale = db.index_identity();
+  CHECK(stale.freshness == "stale");
+  REQUIRE(stale.source_revision.has_value());
+  REQUIRE(stale.expected_source_revision.has_value());
+  CHECK(*stale.source_revision != *stale.expected_source_revision);
+  CHECK(*stale.source_revision == *current.source_revision); // unchanged
+
+  SqliteQueryReadAdapter read(db);
+  Executor executor(read);
+  const auto explained = executor.explain((start(codebase()) | nodes()).plan());
+  const std::string rendered = cidx::json_out::dumps_indent2(explained);
+  CHECK(rendered.find("\"freshness\": \"stale\"") != std::string::npos);
+  CHECK(rendered.find("\"expected_source_revision\"") != std::string::npos);
+  CHECK(rendered.find("\"expected_source_fingerprint\"") != std::string::npos);
+  CHECK(rendered.find("\"expected_index_config_fingerprint\"") !=
+        std::string::npos);
+}

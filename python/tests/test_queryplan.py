@@ -1437,3 +1437,145 @@ def test_explain_reports_budgets_shape_and_input_relations(seeded):
     assert {"relation": "symbol.calls", "completeness": "partial"} in \
         explained["input_relations"]
     assert explained["partial_inputs"] is True
+
+
+# ---------------------------------------------------------------------------
+# PR #69 review round: path-window BFS, evidence caps, owner identity,
+# explain() completeness/freshness regressions
+# ---------------------------------------------------------------------------
+
+def test_path_finds_an_in_window_witness_reached_only_at_a_later_depth():
+    # S->T is depth 1 (out of the [2,2] window); S->M->T is the only depth-2
+    # route. A permanent cross-level visited set would mark T visited at
+    # depth 1 and discard the depth-2 rediscovery via M.
+    db = Storage(":memory:")
+    s = db.add_symbol(_make_sym("USR::S", "s"))
+    t = db.add_symbol(_make_sym("USR::T", "t"))
+    m = db.add_symbol(_make_sym("USR::M", "m"))
+    db.add_edge(s, t, 1)
+    db.add_edge(s, m, 1)
+    db.add_edge(m, t, 1)
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(symbol("USR::S"))
+         | path(start(symbol("USR::T")), "calls", 2, 2)).plan)
+    assert len(result.paths) == 1
+    witness = result.paths[0]
+    assert witness.length == 2
+    assert [step.node_id for step in witness.steps] == [s, m, t]
+    assert not result.truncated
+
+
+def test_path_reports_truncation_when_a_hop_has_more_sites_than_the_cap():
+    db = Storage(":memory:")
+    component = db.add_component("project", "/tmp/path-evidence-cap-py")
+    directory = db.add_directory(component, "src")
+    file_id = db.add_file(directory, "cap.cpp")
+    a = db.add_symbol(_make_sym("USR::CapA", "a"))
+    b = db.add_symbol(_make_sym("USR::CapB", "b"))
+    edge = db.add_edge(a, b, 1)
+    db._conn.execute(
+        "WITH RECURSIVE lines(line) AS (SELECT 0 UNION ALL SELECT line + 1 "
+        f"FROM lines WHERE line < 1000) INSERT INTO edge_site "
+        f"(edge_id,file_id,line,col) SELECT {edge},{file_id},line,0 FROM lines")
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(symbol("USR::CapA"))
+         | path(start(symbol("USR::CapB")), "calls", 1, 1)).plan)
+    assert len(result.paths) == 1
+    witness = result.paths[0]
+    assert len(witness.steps) == 2
+    assert len(witness.steps[1].sites) == qp.DEFAULT_RESULT_CAP
+    assert witness.steps[1].status == "partial"
+    assert witness.status == "partial"
+    assert result.truncated  # incomplete evidence must never look complete
+
+
+def test_reverse_type_use_preserves_distinct_parameter_slots_on_one_owner():
+    db = Storage(":memory:")
+    owner = db.add_symbol(_make_sym("USR::two_params", "two_params"))
+    db._conn.execute(
+        "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+        "('b:int','int',1,NULL)")
+    int_id = next(db._conn.execute(
+        "SELECT id FROM type_node ORDER BY id"))[0]
+    for position in (0, 1):
+        db._conn.execute(
+            "INSERT INTO parameter(owner_id,position,pack_index,name,"
+            "type_id) VALUES (?,?,-1,'p',?)", (owner, position, int_id))
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(codebase()) | view("type") | nodes()
+         | where(eq("type_key", "b:int")) | reverse_type_use()).plan)
+    assert len(result.paths) == 2
+    positions = []
+    for witness in result.paths:
+        assert len(witness.steps) == 2
+        assert witness.steps[1].node_id == owner
+        assert witness.steps[1].domain == "parameter"
+        assert witness.steps[1].through == "parameter"
+        positions.append(witness.steps[1].position)
+    assert sorted(positions) == [0, 1]
+
+
+def test_explain_reports_reverse_type_use_real_inputs():
+    db = Storage(":memory:")
+    db._conn.execute(
+        "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+        "('b:int','int',1,NULL)")
+    db._conn.commit()
+
+    ex = Executor(db)
+    plan = (start(codebase()) | view("type") | nodes()
+           | reverse_type_use()).plan
+    explained = ex.explain(plan)
+    assert explained["execution_shape"] == "path"
+    names = {row["relation"] for row in explained["input_relations"]}
+    assert {
+        "type.has_type_edge", "type.canonical_id", "symbol.of_type",
+        "parameter.of_type", "template_parameter.of_type",
+        "template_argument.of_type",
+    } <= names
+    assert explained["partial_inputs"] is True
+    assert explained["unknown_capable_inputs"] is True
+
+
+def test_explain_exposes_expected_vs_indexed_source_revision_on_stale_index(
+        tmp_path):
+    source = tmp_path / "answer.cpp"
+    source.write_text("int answer = 1;\n")
+    db = Storage(":memory:")
+    db.add_component("fixture", str(tmp_path))
+    file_id = db.add_file_path(str(source), None, md5_of(str(source)))
+    db.mark_file_indexed(file_id)
+    db.stamp_index_identity()
+
+    current = db.index_identity()
+    assert current.freshness == "current"
+    assert current.source_revision is not None
+    assert current.expected_source_revision is not None
+    assert current.source_revision == current.expected_source_revision
+    assert current.expected_index_config_fingerprint is not None
+
+    # Change the checkout after stamping: the persisted identity now
+    # disagrees with what the current source hashes to.
+    source.write_text("int answer = 2;\n")
+    stale = db.index_identity()
+    assert stale.freshness == "stale"
+    assert stale.source_revision is not None
+    assert stale.expected_source_revision is not None
+    assert stale.source_revision != stale.expected_source_revision
+    assert stale.source_revision == current.source_revision  # unchanged
+
+    ex = Executor(db)
+    explained = ex.explain((start(codebase()) | nodes()).plan)
+    assert explained["index"]["freshness"] == "stale"
+    assert "expected_source_revision" in explained["index"]
+    assert "expected_source_fingerprint" in explained["index"]
+    assert "expected_index_config_fingerprint" in explained["index"]

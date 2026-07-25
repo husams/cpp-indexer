@@ -182,6 +182,16 @@ IndexIdentity SqliteStorageService::index_identity() {
   identity.source_fingerprint = stored_source;
   identity.index_config = stored_config;
   identity.index_config_fingerprint = stored_config_fingerprint;
+  // Expected/current-checkout identity: computed live regardless of whether
+  // a persisted identity exists, so explain() can always report both sides
+  // of the freshness comparison. The config fingerprint never depends on
+  // file-content readability; the source fingerprint/revision are null
+  // (unverifiable) when the current checkout is incomplete.
+  identity.expected_index_config_fingerprint = config_fingerprint;
+  if (complete) {
+    identity.expected_source_fingerprint = source_fingerprint;
+    identity.expected_source_revision = "content-sha1:" + source_fingerprint;
+  }
   if (!identity_version || *identity_version != "1" || !stored_source ||
       !stored_revision || !stored_config || !stored_config_fingerprint) {
     return identity;

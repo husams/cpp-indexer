@@ -185,6 +185,26 @@ json_out::Value index_identity_json(const IndexIdentity &index) {
     o.emplace_back("index_config_fingerprint", json_out::Value::null());
   }
   o.emplace_back("freshness", json_out::Value::of(index.freshness));
+  if (index.expected_source_revision) {
+    o.emplace_back("expected_source_revision",
+                   json_out::Value::of(*index.expected_source_revision));
+  } else {
+    o.emplace_back("expected_source_revision", json_out::Value::null());
+  }
+  if (index.expected_source_fingerprint) {
+    o.emplace_back("expected_source_fingerprint",
+                   json_out::Value::of(*index.expected_source_fingerprint));
+  } else {
+    o.emplace_back("expected_source_fingerprint", json_out::Value::null());
+  }
+  if (index.expected_index_config_fingerprint) {
+    o.emplace_back(
+        "expected_index_config_fingerprint",
+        json_out::Value::of(*index.expected_index_config_fingerprint));
+  } else {
+    o.emplace_back("expected_index_config_fingerprint",
+                   json_out::Value::null());
+  }
   return json_out::Value::obj(std::move(o));
 }
 
@@ -1975,12 +1995,21 @@ private:
     st.ids = std::move(out);
   }
 
+  // Evidence for one witness hop, capped at the default result cap. `sites`
+  // never silently drops rows past the cap without saying so: `truncated`
+  // is set whenever the underlying edge has more sites than the cap, so the
+  // caller can mark that hop/witness partial instead of presenting
+  // incomplete evidence as complete (docs/query-plan.md).
+  struct HopSites {
+    std::vector<EdgeSiteRow> sites;
+    bool truncated = false;
+  };
+
   // Evidence for one witness hop over a non-typed symbol/entity relation.
   // Entity-layer relations are derived (no site rows); symbol-layer relations
   // look up the physical edge row for (parent,child) respecting direction.
-  std::vector<EdgeSiteRow> hop_sites(bool entity_layer, int64_t kind_id,
-                                     bool inbound, int64_t parent_id,
-                                     int64_t child_id) {
+  HopSites hop_sites(bool entity_layer, int64_t kind_id, bool inbound,
+                     int64_t parent_id, int64_t child_id) {
     if (entity_layer) {
       return {};
     }
@@ -1994,8 +2023,17 @@ private:
     if (!query.step()) {
       return {};
     }
-    return read_.graph_read().edge_sites_one(
-        query.col_int64(0), static_cast<int>(kDefaultResultCap));
+    // Fetch one row past the cap to detect an over-cap hop without a
+    // separate COUNT query.
+    auto sites = read_.graph_read().edge_sites_one(
+        query.col_int64(0), static_cast<int>(kDefaultResultCap) + 1);
+    HopSites result;
+    if (std::cmp_greater(sites.size(), kDefaultResultCap)) {
+      sites.resize(kDefaultResultCap);
+      result.truncated = true;
+    }
+    result.sites = std::move(sites);
+    return result;
   }
 
   // Bounded deterministic shortest witness path(s): a multi-source BFS that
@@ -2023,6 +2061,8 @@ private:
     std::vector<PathWitness> results;
     int64_t budget_used = 0;
     bool truncated = false;
+    bool evidence_truncated = false; // capped per-hop sites: partial, but the
+                                     // search itself continues
     const std::string domain = entity_layer ? "entity" : "symbol";
 
     for (const int64_t start : starts) {
@@ -2030,8 +2070,12 @@ private:
         break;
       }
       std::vector<int64_t> frontier{start};
-      std::set<int64_t> visited{start};
-      // preds[d-1]: child -> sorted parent ids reaching it at depth d.
+      // preds[d-1]: child -> sorted parent ids reaching it at depth d. No
+      // cross-level visited set: a node can legitimately be reached again at
+      // a later depth via a different route (path-length-window semantics,
+      // matching out()/in()'s "some path of length d in [min,max]" rule --
+      // docs/query-plan.md), so pruning a child once it is first seen would
+      // silently discard an in-window witness reached only through it later.
       std::vector<std::map<int64_t, std::vector<int64_t>>> preds;
       int64_t found_depth = -1;
       for (int64_t depth = 1; depth <= stage.max_depth && !frontier.empty();
@@ -2062,9 +2106,6 @@ private:
           while (query.step()) {
             const int64_t parent = query.col_int64(0);
             const int64_t child = query.col_int64(1);
-            if (visited.contains(child)) {
-              continue; // witnesses stay simple paths: no repeated node
-            }
             parent_of[child].push_back(parent);
             ++budget_used;
           }
@@ -2077,7 +2118,6 @@ private:
           break;
         }
         for (auto &[child, parents] : parent_of) {
-          visited.insert(child);
           std::ranges::sort(parents);
         }
         preds.push_back(parent_of);
@@ -2114,6 +2154,11 @@ private:
           std::vector<std::vector<int64_t>> next_chains;
           for (const auto &chain : chains) {
             for (const int64_t parent : preds[d - 1].at(chain.back())) {
+              if (std::ranges::find(chain, parent) != chain.end()) {
+                continue; // would repeat a node: not a simple-path witness
+                          // (allowed now that discovery permits revisiting a
+                          // node at a different depth)
+              }
               std::vector<int64_t> extended = chain;
               extended.push_back(parent);
               next_chains.push_back(std::move(extended));
@@ -2132,6 +2177,7 @@ private:
           std::ranges::reverse(chain); // was target..start; want start..target
           PathWitness witness;
           witness.length = found_depth;
+          bool witness_evidence_truncated = false;
           witness.status =
               rel->completeness == "complete" ? "complete" : "partial";
           for (size_t i = 0; i < chain.size(); ++i) {
@@ -2142,10 +2188,21 @@ private:
             step.status = rel->completeness;
             if (i > 0) {
               step.through = rel->name;
-              step.sites = hop_sites(entity_layer, rel->kind_id, inbound,
-                                     chain[i - 1], chain[i]);
+              HopSites hop = hop_sites(entity_layer, rel->kind_id, inbound,
+                                       chain[i - 1], chain[i]);
+              step.sites = std::move(hop.sites);
+              if (hop.truncated) {
+                step.status = "partial";
+                witness_evidence_truncated = true;
+              }
             }
             witness.steps.push_back(std::move(step));
+          }
+          if (witness_evidence_truncated) {
+            witness.status = "partial";
+            evidence_truncated = true; // incomplete evidence is never
+                                       // presented as complete, but does not
+                                       // abort the search for other starts
           }
           results.push_back(std::move(witness));
           if (results.size() > static_cast<size_t>(kDefaultResultCap)) {
@@ -2161,7 +2218,7 @@ private:
 
     sort_and_cap_witnesses(results, stage.n, truncated);
     st.paths = std::move(results);
-    st.truncated = st.truncated || truncated;
+    st.truncated = st.truncated || truncated || evidence_truncated;
     st.ids.clear();
     st.keys.clear();
     st.shape = Shape::Path;
@@ -2171,17 +2228,30 @@ private:
   // ties broken by the lexicographic ascending node-id sequence.
   static void sort_and_cap_witnesses(std::vector<PathWitness> &results,
                                      int64_t cap, bool &truncated) {
-    std::ranges::sort(results, [](const PathWitness &a, const PathWitness &b) {
-      if (a.length != b.length) {
-        return a.length < b.length;
-      }
-      for (size_t i = 0; i < a.steps.size() && i < b.steps.size(); ++i) {
-        if (a.steps[i].node_id != b.steps[i].node_id) {
-          return a.steps[i].node_id < b.steps[i].node_id;
-        }
-      }
-      return a.steps.size() < b.steps.size();
-    });
+    // Ties are broken lexicographically over each step's (node_id, position,
+    // pack_index): a total order even when two witnesses share the same
+    // node-id sequence but differ only by which typed-view slot (e.g.
+    // parameter position) the final owner step names (docs/query-plan.md).
+    std::ranges::stable_sort(
+        results, [](const PathWitness &a, const PathWitness &b) {
+          if (a.length != b.length) {
+            return a.length < b.length;
+          }
+          for (size_t i = 0; i < a.steps.size() && i < b.steps.size(); ++i) {
+            const PathStep &sa = a.steps[i];
+            const PathStep &sb = b.steps[i];
+            if (sa.node_id != sb.node_id) {
+              return sa.node_id < sb.node_id;
+            }
+            if (sa.position != sb.position) {
+              return sa.position < sb.position;
+            }
+            if (sa.pack_index != sb.pack_index) {
+              return sa.pack_index < sb.pack_index;
+            }
+          }
+          return a.steps.size() < b.steps.size();
+        });
     if (cap > 0 && std::cmp_greater(results.size(), cap)) {
       results.resize(static_cast<size_t>(cap));
     }
@@ -2198,36 +2268,109 @@ private:
   }
 
   // One owner (declaration whose signature/template facts reach `type_id`
-  // directly, with no further nesting) across every owner-fact domain.
+  // directly, with no further nesting) across every owner-fact domain,
+  // carrying that view's own natural-key identity (position/pack_index) and
+  // declaration site so distinct slots on the same owner symbol are never
+  // collapsed together (e.g. two `int` parameters at positions 0 and 1).
   struct TypeOwner {
-    std::string domain;  // "symbol" | "parameter" | "template_parameter" |
-                         // "template_argument"
-    int64_t node_id = 0; // owning declaration's symbol id
+    std::string domain;      // "symbol" | "parameter" | "template_parameter" |
+                             // "template_argument"
+    std::string role;        // symbol_type role ("returns"/"of_type"/
+                             // "underlying_type"), else same as domain
+    int64_t node_id = 0;     // owning declaration's symbol id
+    int64_t position = -1;   // natural-key position; -1 = not applicable
+    int64_t pack_index = -1; // pack element index; -1 = not a pack slot
+    std::optional<int64_t> file_id;
+    std::optional<int64_t> line;
+    std::optional<int64_t> col;
   };
 
   std::vector<TypeOwner> owners_of_type(int64_t type_id) {
     std::vector<TypeOwner> out;
-    for (const auto &[symbol_id, kind] :
-         read_.graph_read().symbol_type_owners_of_types({type_id})) {
-      (void)kind; // role (returns/of_type/underlying_type) not surfaced here
-      out.push_back({.domain = "symbol", .node_id = symbol_id});
-    }
-    for (const auto &[owner_id, position] :
-         read_.graph_read().param_owners_of_types({type_id})) {
-      (void)position;
-      out.push_back({.domain = "parameter", .node_id = owner_id});
-    }
-    auto owners_from = [&](const char *table, const char *domain) {
+    {
       auto query = read_.read_db().prepare(
-          std::string("SELECT DISTINCT owner_id FROM ") + table +
-          " WHERE type_id=? ORDER BY owner_id");
+          "SELECT symbol_id, kind FROM symbol_type WHERE type_id=? "
+          "ORDER BY symbol_id, kind");
       query.bind(1, type_id);
       while (query.step()) {
-        out.push_back({.domain = domain, .node_id = query.col_int64(0)});
+        const int64_t kind = query.col_int64(1);
+        const char *role = "underlying_type";
+        if (kind == 1) {
+          role = "returns";
+        } else if (kind == 2) {
+          role = "of_type";
+        }
+        out.push_back({.domain = "symbol",
+                       .role = role,
+                       .node_id = query.col_int64(0),
+                       .position = -1,
+                       .pack_index = -1,
+                       .file_id = std::nullopt,
+                       .line = std::nullopt,
+                       .col = std::nullopt});
       }
-    };
-    owners_from("template_param", "template_parameter");
-    owners_from("template_arg", "template_argument");
+    }
+    {
+      auto query = read_.read_db().prepare(
+          "SELECT owner_id, position, pack_index, file_id, line, col FROM "
+          "parameter WHERE type_id=? OR declared_type_id=? OR "
+          "adjusted_type_id=? ORDER BY owner_id, position, pack_index");
+      query.bind(1, type_id);
+      query.bind(2, type_id);
+      query.bind(3, type_id);
+      while (query.step()) {
+        TypeOwner owner{.domain = "parameter",
+                        .role = "parameter",
+                        .node_id = query.col_int64(0),
+                        .position = query.col_int64(1),
+                        .pack_index = query.col_int64(2),
+                        .file_id = std::nullopt,
+                        .line = std::nullopt,
+                        .col = std::nullopt};
+        if (!query.col_is_null(3)) {
+          owner.file_id = query.col_int64(3);
+        }
+        if (!query.col_is_null(4)) {
+          owner.line = query.col_int64(4);
+        }
+        if (!query.col_is_null(5)) {
+          owner.col = query.col_int64(5);
+        }
+        out.push_back(std::move(owner));
+      }
+    }
+    {
+      auto query = read_.read_db().prepare(
+          "SELECT owner_id, position FROM template_param WHERE type_id=? "
+          "ORDER BY owner_id, position");
+      query.bind(1, type_id);
+      while (query.step()) {
+        out.push_back({.domain = "template_parameter",
+                       .role = "template_parameter",
+                       .node_id = query.col_int64(0),
+                       .position = query.col_int64(1),
+                       .pack_index = -1,
+                       .file_id = std::nullopt,
+                       .line = std::nullopt,
+                       .col = std::nullopt});
+      }
+    }
+    {
+      auto query = read_.read_db().prepare(
+          "SELECT owner_id, position, pack_index FROM template_arg WHERE "
+          "type_id=? ORDER BY owner_id, position, pack_index");
+      query.bind(1, type_id);
+      while (query.step()) {
+        out.push_back({.domain = "template_argument",
+                       .role = "template_argument",
+                       .node_id = query.col_int64(0),
+                       .position = query.col_int64(1),
+                       .pack_index = query.col_int64(2),
+                       .file_id = std::nullopt,
+                       .line = std::nullopt,
+                       .col = std::nullopt});
+      }
+    }
     return out;
   }
 
@@ -2297,8 +2440,17 @@ private:
           PathStep final_step;
           final_step.node_id = owner.node_id;
           final_step.domain = owner.domain;
-          final_step.through = owner.domain;
+          final_step.through = owner.role;
           final_step.status = "partial";
+          final_step.position = owner.position;
+          final_step.pack_index = owner.pack_index;
+          if (owner.file_id || owner.line || owner.col) {
+            EdgeSiteRow site;
+            site.file_id = owner.file_id;
+            site.line = owner.line;
+            site.col = owner.col;
+            final_step.sites.push_back(std::move(site));
+          }
           witness.steps.push_back(std::move(final_step));
           results.push_back(std::move(witness));
           if (results.size() > static_cast<size_t>(kDefaultResultCap)) {
@@ -3519,6 +3671,12 @@ json_out::Value path_step_to_json(const PathStep &step) {
     o.emplace_back("direction", Value::of(std::string("in")));
   }
   o.emplace_back("status", Value::of(step.status));
+  if (step.position >= 0) {
+    o.emplace_back("position", Value::of(step.position));
+  }
+  if (step.pack_index >= 0) {
+    o.emplace_back("pack_index", Value::of(step.pack_index));
+  }
   Array sites;
   for (const auto &site : step.sites) {
     Object so;
@@ -3760,14 +3918,41 @@ void collect_relation_names(const Pred &p, std::set<std::string> &names) {
   }
 }
 
-// Every relation a normalized plan touches (traversals, path()/
-// reverse_type_use() are traversal-shaped over type_edge/owner tables so
-// they are not catalogued relations, and quantifier predicates), including
-// one level into union()/intersect()/except()/path() "to" operand plans.
+// reverse_type_use() does not walk a single catalogued relation -- it climbs
+// type_edge and type_node.canonical_id, then reads four owner-fact tables --
+// but every one of those inputs is either a catalogued relation already or,
+// for the canonical_id (cv/sugar desugaring) climb, a name with no catalog
+// entry to resolve against. This is that fixed input set, with the
+// completeness the synthetic (non-catalogued) entry cannot look up itself.
+const std::vector<std::string> &reverse_type_use_input_relations() {
+  static const std::vector<std::string> names = {"type.has_type_edge",
+                                                 "type.canonical_id",
+                                                 "symbol.of_type",
+                                                 "parameter.of_type",
+                                                 "template_parameter.of_type",
+                                                 "template_argument.of_type"};
+  return names;
+}
+
+const std::map<std::string, std::string> &synthetic_relation_completeness() {
+  // type_node.canonical_id desugaring has no RelationDesc catalog entry;
+  // treat it as partial, matching type.has_type_edge's own completeness.
+  static const std::map<std::string, std::string> table = {
+      {"type.canonical_id", "partial"}};
+  return table;
+}
+
+// Every relation a normalized plan touches (traversals and quantifier
+// predicates; path()'s relation is catalogued, reverse_type_use()'s fixed
+// input set above is not), including one level into
+// union()/intersect()/except()/path() "to" operand plans.
 void collect_stage_relations(const Stage &stage, std::set<std::string> &names) {
   if (stage.op == StageOp::Out || stage.op == StageOp::In ||
       stage.op == StageOp::Path) {
     names.insert(stage.relation);
+  } else if (stage.op == StageOp::ReverseTypeUse) {
+    const auto &fixed = reverse_type_use_input_relations();
+    names.insert(fixed.begin(), fixed.end());
   }
   if (stage.pred) {
     collect_relation_names(*stage.pred, names);
@@ -3808,8 +3993,15 @@ json_out::Value Executor::explain(const Plan &plan) {
     const RelationDesc *rel = resolve_qualified_relation(name);
     Object ro;
     ro.emplace_back("relation", Value::of(name));
-    const std::string completeness =
-        rel != nullptr ? rel->completeness : "unknown";
+    std::string completeness;
+    if (rel != nullptr) {
+      completeness = rel->completeness;
+    } else if (const auto it = synthetic_relation_completeness().find(name);
+               it != synthetic_relation_completeness().end()) {
+      completeness = it->second;
+    } else {
+      completeness = "unknown";
+    }
     ro.emplace_back("completeness", Value::of(completeness));
     partial_inputs = partial_inputs || completeness == "partial";
     unknown_capable_inputs =

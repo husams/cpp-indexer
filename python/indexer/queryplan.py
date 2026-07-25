@@ -1130,13 +1130,32 @@ def _collect_relation_names(p: Pred, names: set[str]) -> None:
             _collect_relation_names(p.target, names)
 
 
+# reverse_type_use() does not walk a single catalogued relation -- it climbs
+# type_edge and type_node.canonical_id, then reads four owner-fact tables --
+# but every one of those inputs is either a catalogued relation already or,
+# for the canonical_id (cv/sugar desugaring) climb, a name with no catalog
+# entry to resolve against. This is that fixed input set, with the
+# completeness the synthetic (non-catalogued) entry cannot look up itself.
+_REVERSE_TYPE_USE_INPUT_RELATIONS = (
+    "type.has_type_edge", "type.canonical_id", "symbol.of_type",
+    "parameter.of_type", "template_parameter.of_type",
+    "template_argument.of_type",
+)
+
+# type_node.canonical_id desugaring has no RelationDesc catalog entry; treat
+# it as partial, matching type.has_type_edge's own completeness.
+_SYNTHETIC_RELATION_COMPLETENESS = {"type.canonical_id": "partial"}
+
+
 def _collect_stage_relations(stage: Stage, names: set[str]) -> None:
-    """Every relation a normalized plan touches (traversals; path()/
-    reverse_type_use() traverse type_edge/owner tables, not catalogued
-    relations; and quantifier predicates), including one level into
+    """Every relation a normalized plan touches (traversals and quantifier
+    predicates; path()'s relation is catalogued, reverse_type_use()'s fixed
+    input set above is not), including one level into
     union()/intersect()/except()/path() "to" operand plans."""
     if stage.op in ("out", "in", "path"):
         names.add(stage.relation)
+    elif stage.op == "reverse_type_use":
+        names.update(_REVERSE_TYPE_USE_INPUT_RELATIONS)
     if stage.pred is not None:
         _collect_relation_names(stage.pred, names)
     if stage.operand is not None:
@@ -1236,14 +1255,22 @@ PATH_NODE_BUDGET = 10000
 class PathStep:
     """One hop of a witness path: the node reached and the typed label of the
     relation/type-edge that reached it. `through` is empty for the start
-    node."""
+    node. `position`/`pack_index` carry the typed view's own natural-key
+    slot (parameter/template_parameter/template_argument owners; -1 = not
+    applicable, e.g. a plain symbol/entity/type node) so distinct slots on
+    the same owner never collapse to an indistinguishable step, and so
+    ranking has a total order."""
 
     node_id: int
     domain: str  # "symbol" | "entity" | "type" | owner-domain name
-    through: str = ""  # relation/type_edge_kind label into this node
+    through: str = ""  # relation/type_edge_kind label into this node, or the
+    # symbol_type role ("returns"/"of_type"/"underlying_type") for a
+    # symbol-domain owner
     inbound: bool = False
     status: str = "complete"  # per-hop completeness
     sites: list[dict[str, Any]] = field(default_factory=list)
+    position: int = -1     # natural-key position; -1 = not applicable
+    pack_index: int = -1   # pack element index; -1 = not a pack slot
 
 
 @dataclass
@@ -1266,11 +1293,42 @@ class PathWitness:
                     "through": s.through,
                     **({"direction": "in"} if s.inbound else {}),
                     "status": s.status,
+                    **({"position": s.position} if s.position >= 0 else {}),
+                    **({"pack_index": s.pack_index}
+                       if s.pack_index >= 0 else {}),
                     "sites": s.sites,
                 }
                 for s in self.steps
             ],
         }
+
+
+@dataclass(frozen=True)
+class _HopSites:
+    """Evidence for one witness hop, capped at the default result cap; see
+    PathStep."""
+
+    sites: list[dict[str, Any]]
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class _TypeOwner:
+    """One owner (declaration whose signature/template facts reach a type
+    directly, with no further nesting) across every owner-fact domain,
+    carrying that view's own natural-key identity and declaration site so
+    distinct slots on the same owner symbol are never collapsed together."""
+
+    domain: str  # "symbol" | "parameter" | "template_parameter" |
+    # "template_argument"
+    role: str    # symbol_type role ("returns"/"of_type"/"underlying_type"),
+    # else same as domain
+    node_id: int  # owning declaration's symbol id
+    position: int = -1     # natural-key position; -1 = not applicable
+    pack_index: int = -1   # pack element index; -1 = not a pack slot
+    file_id: Optional[int] = None
+    line: Optional[int] = None
+    col: Optional[int] = None
 
 
 @dataclass
@@ -1603,8 +1661,12 @@ class Executor:
         unknown_capable_inputs = False
         for name in sorted(relation_names):
             rel = resolve_qualified_relation(name)
-            completeness = (RELATION_METADATA.get(rel, {}).get(
-                "completeness", "unknown") if rel else "unknown")
+            if rel is not None:
+                completeness = RELATION_METADATA.get(rel, {}).get(
+                    "completeness", "unknown")
+            else:
+                completeness = _SYNTHETIC_RELATION_COMPLETENESS.get(
+                    name, "unknown")
             partial_inputs = partial_inputs or completeness == "partial"
             unknown_capable_inputs = (unknown_capable_inputs
                                       or completeness != "complete")
@@ -1912,34 +1974,49 @@ class Executor:
         st.view = target_view
 
     def _hop_sites(self, entity_layer: bool, kind_id: int, inbound: bool,
-                   parent_id: int, child_id: int) -> list[dict[str, Any]]:
+                   parent_id: int, child_id: int) -> _HopSites:
         """Evidence for one witness hop over a non-typed symbol/entity
-        relation. Entity-layer relations are derived (no site rows)."""
+        relation. Entity-layer relations are derived (no site rows). `sites`
+        never silently drops rows past the cap without saying so:
+        `truncated` is set whenever the underlying edge has more sites than
+        the cap, so the caller can mark that hop/witness partial instead of
+        presenting incomplete evidence as complete (docs/query-plan.md)."""
         if entity_layer:
-            return []
+            return _HopSites([], False)
         src = child_id if inbound else parent_id
         dst = parent_id if inbound else child_id
         row = self._conn.execute(
             "SELECT id FROM edge WHERE src_id=? AND dst_id=? AND kind=?",
             (src, dst, kind_id)).fetchone()
         if row is None:
-            return []
+            return _HopSites([], False)
         sites = []
+        # Fetch one row past the cap to detect an over-cap hop without a
+        # separate COUNT query.
         for r in self._conn.execute(
                 "SELECT file_id, line, col, conditional FROM edge_site "
                 "WHERE edge_id=? ORDER BY file_id,line,col LIMIT ?",
-                (row[0], DEFAULT_RESULT_CAP)):
+                (row[0], DEFAULT_RESULT_CAP + 1)):
             sites.append({"file_id": r[0], "line": r[1], "col": r[2],
                           "conditional": bool(r[3])})
-        return sites
+        truncated = len(sites) > DEFAULT_RESULT_CAP
+        if truncated:
+            del sites[DEFAULT_RESULT_CAP:]
+        return _HopSites(sites, truncated)
 
     @staticmethod
     def _sort_and_cap_witnesses(results: list[PathWitness], cap: int,
                                 truncated: bool) -> bool:
         """Deterministic default/rerank order for a Path stream:
-        shortest-first, ties broken by the lexicographic ascending node-id
-        sequence."""
-        results.sort(key=lambda w: (w.length, [s.node_id for s in w.steps]))
+        shortest-first, ties broken lexicographically over each step's
+        (node_id, position, pack_index) -- a total order even when two
+        witnesses share the same node-id sequence but differ only by which
+        typed-view slot (e.g. parameter position) the final owner step
+        names (docs/query-plan.md)."""
+        results.sort(key=lambda w: (
+            w.length,
+            [(s.node_id, s.position, s.pack_index) for s in w.steps],
+        ))
         if cap > 0 and len(results) > cap:
             del results[cap:]
         if len(results) > DEFAULT_RESULT_CAP:
@@ -1971,13 +2048,21 @@ class Executor:
         results: list[PathWitness] = []
         budget_used = 0
         truncated = False
+        evidence_truncated = False  # capped per-hop sites: partial, but the
+        # search itself continues
         domain = "entity" if entity_layer else "symbol"
 
         for start in starts:
             if truncated:
                 break
             frontier = [start]
-            visited = {start}
+            # preds[d-1]: child -> sorted parent ids reaching it at depth d.
+            # No cross-level visited set: a node can legitimately be reached
+            # again at a later depth via a different route (path-length-
+            # window semantics, matching out()/in()'s "some path of length d
+            # in [min,max]" rule -- docs/query-plan.md), so pruning a child
+            # once it is first seen would silently discard an in-window
+            # witness reached only through it later.
             preds: list[dict[int, list[int]]] = []
             found_depth = -1
             depth = 1
@@ -1991,8 +2076,6 @@ class Executor:
                         + ",".join("?" * len(chunk)) + ") ORDER BY 1,2")
                     for parent, child in self._conn.execute(
                             sql, [rel[2], *chunk]):
-                        if child in visited:
-                            continue  # witnesses stay simple paths
                         parent_of.setdefault(child, []).append(parent)
                         budget_used += 1
                 if budget_used > PATH_NODE_BUDGET:
@@ -2000,8 +2083,7 @@ class Executor:
                     break
                 if not parent_of:
                     break
-                for child, parents in parent_of.items():
-                    visited.add(child)
+                for parents in parent_of.values():
                     parents.sort()
                 preds.append(parent_of)
                 level = sorted(parent_of.keys())
@@ -2024,6 +2106,11 @@ class Executor:
                     next_chains: list[list[int]] = []
                     for chain in chains:
                         for parent in preds[d - 1][chain[-1]]:
+                            if parent in chain:
+                                continue  # would repeat a node: not a
+                                # simple-path witness (allowed now that
+                                # discovery permits revisiting a node at a
+                                # different depth)
                             next_chains.append([*chain, parent])
                             if len(next_chains) > DEFAULT_RESULT_CAP:
                                 truncated = True
@@ -2035,20 +2122,30 @@ class Executor:
                 for chain in chains:
                     chain = list(reversed(chain))
                     steps: list[PathStep] = []
+                    witness_evidence_truncated = False
                     for i, node_id in enumerate(chain):
                         step = PathStep(node_id=node_id, domain=domain,
                                         inbound=inbound,
                                         status=rel_completeness)
                         if i > 0:
                             step.through = rel[0]
-                            step.sites = self._hop_sites(
+                            hop = self._hop_sites(
                                 entity_layer, rel[2], inbound, chain[i - 1],
                                 chain[i])
+                            step.sites = hop.sites
+                            if hop.truncated:
+                                step.status = "partial"
+                                witness_evidence_truncated = True
                         steps.append(step)
+                    status = ("complete" if rel_completeness == "complete"
+                             else "partial")
+                    if witness_evidence_truncated:
+                        status = "partial"
+                        evidence_truncated = True  # incomplete evidence is
+                        # never presented as complete, but does not abort
+                        # the search for other starts
                     results.append(PathWitness(
-                        steps=steps, length=found_depth,
-                        status=("complete" if rel_completeness == "complete"
-                                else "partial")))
+                        steps=steps, length=found_depth, status=status))
                     if len(results) > DEFAULT_RESULT_CAP:
                         truncated = True
                         break
@@ -2057,7 +2154,7 @@ class Executor:
 
         truncated = self._sort_and_cap_witnesses(results, stage.n, truncated)
         st.paths = results
-        st.truncated = st.truncated or truncated
+        st.truncated = st.truncated or truncated or evidence_truncated
         st.ids = []
         st.keys = []
         st.shape = "path"
@@ -2066,28 +2163,44 @@ class Executor:
         st.truncated = self._sort_and_cap_witnesses(
             st.paths, stage.n, st.truncated)
 
-    def _owners_of_type(self, type_id: int) -> list[tuple[str, int]]:
+    def _owners_of_type(self, type_id: int) -> list[_TypeOwner]:
         """One owner (declaration whose signature/template facts reach
         `type_id` directly, with no further nesting) across every
-        owner-fact domain."""
-        out: list[tuple[str, int]] = []
-        for row in self._conn.execute(
-                "SELECT symbol_id FROM symbol_type WHERE type_id=? "
+        owner-fact domain, carrying that view's own natural-key identity
+        (position/pack_index) and declaration site so distinct slots on the
+        same owner symbol are never collapsed together (e.g. two `int`
+        parameters at positions 0 and 1)."""
+        out: list[_TypeOwner] = []
+        for symbol_id, kind in self._conn.execute(
+                "SELECT symbol_id, kind FROM symbol_type WHERE type_id=? "
                 "ORDER BY symbol_id,kind", (type_id,)):
-            out.append(("symbol", row[0]))
-        for row in self._conn.execute(
-                "SELECT DISTINCT owner_id FROM parameter WHERE type_id=? OR "
-                "declared_type_id=? OR adjusted_type_id=? ORDER BY owner_id",
-                (type_id, type_id, type_id)):
-            out.append(("parameter", row[0]))
-        for row in self._conn.execute(
-                "SELECT DISTINCT owner_id FROM template_param WHERE "
-                "type_id=? ORDER BY owner_id", (type_id,)):
-            out.append(("template_parameter", row[0]))
-        for row in self._conn.execute(
-                "SELECT DISTINCT owner_id FROM template_arg WHERE type_id=? "
-                "ORDER BY owner_id", (type_id,)):
-            out.append(("template_argument", row[0]))
+            role = {1: "returns", 2: "of_type"}.get(kind, "underlying_type")
+            out.append(_TypeOwner(domain="symbol", role=role,
+                                  node_id=symbol_id))
+        for owner_id, position, pack_index, file_id, line, col in \
+                self._conn.execute(
+                    "SELECT owner_id, position, pack_index, file_id, line, "
+                    "col FROM parameter WHERE type_id=? OR "
+                    "declared_type_id=? OR adjusted_type_id=? "
+                    "ORDER BY owner_id, position, pack_index",
+                    (type_id, type_id, type_id)):
+            out.append(_TypeOwner(
+                domain="parameter", role="parameter", node_id=owner_id,
+                position=position, pack_index=pack_index, file_id=file_id,
+                line=line, col=col))
+        for owner_id, position in self._conn.execute(
+                "SELECT owner_id, position FROM template_param WHERE "
+                "type_id=? ORDER BY owner_id, position", (type_id,)):
+            out.append(_TypeOwner(domain="template_parameter",
+                                  role="template_parameter",
+                                  node_id=owner_id, position=position))
+        for owner_id, position, pack_index in self._conn.execute(
+                "SELECT owner_id, position, pack_index FROM template_arg "
+                "WHERE type_id=? ORDER BY owner_id, position, pack_index",
+                (type_id,)):
+            out.append(_TypeOwner(
+                domain="template_argument", role="template_argument",
+                node_id=owner_id, position=position, pack_index=pack_index))
         return out
 
     def _reverse_type_use_stage(self, st: _Stream, stage: Stage) -> None:
@@ -2124,16 +2237,24 @@ class Executor:
                 if budget_used > PATH_NODE_BUDGET:
                     truncated = True
                     break
-                for owner_domain, node_id in self._owners_of_type(type_id):
+                for owner in self._owners_of_type(type_id):
                     steps = [
                         PathStep(node_id=layer_id, domain="type",
                                 through=through, status="complete")
                         for layer_id, through in chain
                     ]
-                    steps.append(PathStep(node_id=node_id,
-                                          domain=owner_domain,
-                                          through=owner_domain,
-                                          status="partial"))
+                    final_step = PathStep(
+                        node_id=owner.node_id, domain=owner.domain,
+                        through=owner.role, status="partial",
+                        position=owner.position,
+                        pack_index=owner.pack_index)
+                    if owner.file_id is not None or owner.line is not None \
+                            or owner.col is not None:
+                        final_step.sites = [{
+                            "file_id": owner.file_id, "line": owner.line,
+                            "col": owner.col, "conditional": False,
+                        }]
+                    steps.append(final_step)
                     results.append(PathWitness(steps=steps, length=depth + 1,
                                               status="partial"))
                     if len(results) > DEFAULT_RESULT_CAP:
