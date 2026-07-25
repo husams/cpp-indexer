@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cctype>
 #include <cstring>
 #include <exception>
@@ -14,11 +15,13 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "compiledb/compiledb.hpp"
 #include "storage/storage_detail.hpp"
 #include "storage/storage_schema.hpp"
 #include "util/errors.hpp"
+#include "util/hashing.hpp"
 #include "util/json_min.hpp"
 #include "util/logger.hpp"
 #include "util/pathutil.hpp"
@@ -26,6 +29,232 @@
 namespace cidx {
 
 using namespace detail;
+
+
+namespace {
+
+TransformDescriptor descriptor(std::string id, std::vector<std::string> inputs,
+                               std::vector<std::string> outputs,
+                               std::vector<std::string> dependencies,
+                               std::vector<std::string> invalidation_keys,
+                               std::vector<std::string> input_queries,
+                               std::vector<std::string> output_queries,
+                               std::string output_count_query) {
+  TransformDescriptor result;
+  result.id = std::move(id);
+  result.version = 1;
+  result.input_facts = std::move(inputs);
+  result.produced_facts = std::move(outputs);
+  result.dependencies = std::move(dependencies);
+  result.invalidation_keys = std::move(invalidation_keys);
+  result.options = {"deterministic-sql-v1"};
+  result.input_queries = std::move(input_queries);
+  result.output_queries = std::move(output_queries);
+  result.output_count_query = std::move(output_count_query);
+  return result;
+}
+
+TransformRegistry make_transform_registry() {
+  TransformRegistry registry;
+  registry.register_transform(
+      descriptor("edge-site-count-rollup", {"edge", "edge_site"},
+                 {"edge.count"}, {}, {"edge-sites", "edge-schema"},
+                 {"SELECT e.id, e.kind, e.count, "
+                  "COALESCE((SELECT COUNT(*) FROM edge_site es WHERE "
+                  "es.edge_id = e.id), 0) "
+                  "FROM edge e WHERE e.kind IN (1, 7) ORDER BY e.id"},
+                 {"SELECT e.id, e.kind, e.count, "
+                  "COALESCE((SELECT COUNT(*) FROM edge_site es WHERE "
+                  "es.edge_id = e.id), 0) "
+                  "FROM edge e WHERE e.kind IN (1, 7) ORDER BY e.id"},
+                 "SELECT COUNT(*) FROM edge WHERE kind IN (1, 7)"));
+  registry.register_transform(descriptor(
+      "multi-definition-classification", {"symbol", "definition"},
+      {"symbol.multi_def"}, {}, {"definitions", "symbol-schema"},
+      {"SELECT s.id, s.multi_def, d.id, d.symbol_id, d.component_id, "
+       "d.file_id FROM symbol s LEFT JOIN definition d ON d.symbol_id = s.id "
+       "ORDER BY s.id, d.id"},
+      {"SELECT id, multi_def FROM symbol ORDER BY id"},
+      "SELECT COUNT(*) FROM symbol WHERE multi_def > 0"));
+  registry.register_transform(descriptor(
+      "possible-call-materialization",
+      {"def_edge", "symbol.multi_def", "definition"}, {"possible_call"},
+      {"multi-definition-classification"}, {"definitions", "possible-calls"},
+      {"SELECT de.src_def_id, de.dst_id, de.kind, de.count, s.multi_def, "
+       "td.id FROM def_edge de JOIN symbol s ON s.id = de.dst_id "
+       "LEFT JOIN definition td ON td.symbol_id = de.dst_id "
+       "WHERE de.kind = 1 ORDER BY de.src_def_id, de.dst_id, td.id"},
+      {"SELECT src_def_id, dst_def_id, count FROM possible_call "
+       "ORDER BY src_def_id, dst_def_id"},
+      "SELECT COUNT(*) FROM possible_call"));
+  registry.register_transform(descriptor(
+      "virtual-dispatch-call-materialization", {"edge"}, {"dispatch_calls"},
+      {"edge-site-count-rollup"}, {"overrides", "dispatch-calls"},
+      {"SELECT id, src_id, dst_id, kind, count FROM edge "
+       "WHERE kind IN (1, 6, 18) ORDER BY id"},
+      {"SELECT src_id, dst_id, kind, count FROM edge WHERE kind = 18 "
+       "ORDER BY src_id, dst_id"},
+      "SELECT COUNT(*) FROM edge WHERE kind = 18"));
+  registry.register_transform(
+      descriptor("entity-graph-rollup", {"symbol", "edge", "type_edge"},
+                 {"entity_node", "entity_edge"}, {"edge-site-count-rollup"},
+                 {"entity-catalog", "entity-graph"},
+                 {"SELECT id, usr, kind, parent_usr, is_pure FROM symbol "
+                  "ORDER BY id",
+                  "SELECT id, src_id, dst_id, kind, count, base_access, "
+                  "is_virtual FROM edge ORDER BY id",
+                  "SELECT src_id, kind, position, dst_id FROM type_edge "
+                  "ORDER BY src_id, kind, position, dst_id"},
+                 {"SELECT id, kind FROM entity_node ORDER BY id",
+                  "SELECT src_id, dst_id, kind, count, via_member_id, "
+                  "multiplicity, access, is_virtual, create_form, partial "
+                  "FROM entity_edge ORDER BY src_id, dst_id, kind"},
+                 "SELECT COUNT(*) FROM entity_edge"));
+  registry.validate();
+  return registry;
+}
+
+std::string transform_meta_key(const std::string &id, const char *field) {
+  return "transform." + id + "." + field;
+}
+
+std::optional<std::string> read_transform_meta(SqliteDb &db,
+                                               const std::string &key) {
+  auto st = db.prepare("SELECT value FROM meta WHERE key = ?");
+  st.bind(1, std::string_view(key));
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return st.col_text(0);
+}
+
+void write_transform_meta(SqliteDb &db, const std::string &key,
+                          const std::string &value) {
+  auto st =
+      db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+  st.bind(1, std::string_view(key));
+  st.bind(2, std::string_view(value));
+  st.step_done();
+}
+
+std::optional<TransformRun> read_transform_run(SqliteDb &db,
+                                               const TransformDescriptor &d) {
+  const auto version =
+      read_transform_meta(db, transform_meta_key(d.id, "version"));
+  const auto input = read_transform_meta(db, transform_meta_key(d.id, "input"));
+  const auto output =
+      read_transform_meta(db, transform_meta_key(d.id, "output"));
+  const auto status =
+      read_transform_meta(db, transform_meta_key(d.id, "status"));
+  const auto count = read_transform_meta(db, transform_meta_key(d.id, "count"));
+  if (!version || !input || !output || !status || !count) {
+    return std::nullopt;
+  }
+  TransformRun run;
+  run.transform_id = d.id;
+  run.version = std::stoi(*version);
+  run.input_identity = *input;
+  run.output_identity = *output;
+  run.output_count = std::stoll(*count);
+  if (*status == "ran") {
+    run.status = TransformRunStatus::ran;
+  } else if (*status == "reused") {
+    run.status = TransformRunStatus::reused;
+  } else if (*status == "failed") {
+    run.status = TransformRunStatus::failed;
+  } else {
+    run.status = TransformRunStatus::stale;
+  }
+  run.diagnostic =
+      read_transform_meta(db, transform_meta_key(d.id, "diagnostic"))
+          .value_or("");
+  return run;
+}
+
+void write_transform_run(SqliteDb &db, const TransformRun &run) {
+  write_transform_meta(db, transform_meta_key(run.transform_id, "version"),
+                       std::to_string(run.version));
+  write_transform_meta(db, transform_meta_key(run.transform_id, "input"),
+                       run.input_identity);
+  write_transform_meta(db, transform_meta_key(run.transform_id, "output"),
+                       run.output_identity);
+  write_transform_meta(db, transform_meta_key(run.transform_id, "status"),
+                       transform_run_status_name(run.status));
+  write_transform_meta(db, transform_meta_key(run.transform_id, "count"),
+                       std::to_string(run.output_count));
+  write_transform_meta(db, transform_meta_key(run.transform_id, "diagnostic"),
+                       run.diagnostic);
+}
+
+std::string query_identity(SqliteDb &db,
+                           const std::vector<std::string> &queries) {
+  std::string canonical;
+  for (const auto &query : queries) {
+    auto st = db.prepare(query);
+    while (st.step()) {
+      canonical += "row\x1f";
+      for (int column = 0; column < st.column_count(); ++column) {
+        if (st.col_is_null(column)) {
+          canonical += "null";
+        } else {
+          canonical += st.col_text(column);
+        }
+        canonical += '\x1e';
+      }
+    }
+    canonical += "query\x1d";
+  }
+  return sha256_hex(canonical);
+}
+
+std::int64_t output_count(SqliteDb &db, const std::string &query) {
+  auto st = db.prepare(query);
+  return st.step() ? st.col_int64(0) : 0;
+}
+
+std::string input_identity(
+    SqliteDb &db, const TransformDescriptor &d,
+    const std::unordered_map<std::string, std::string> &dependency_outputs) {
+  std::string canonical = d.id + "\x1f" + std::to_string(d.version);
+  for (const auto &key : d.invalidation_keys) {
+    canonical += "\x1e" + key;
+  }
+  for (const auto &option : d.options) {
+    canonical += "\x1e" + option;
+  }
+  canonical += "\x1e" + query_identity(db, d.input_queries);
+  for (const auto &dependency : d.dependencies) {
+    canonical += "\x1e" + dependency_outputs.at(dependency);
+  }
+  return sha256_hex(canonical);
+}
+
+int count_stubs(SqliteDb &db) {
+  auto st = db.prepare(
+      "SELECT COUNT(*) FROM symbol WHERE resolved = 0 AND file_id IS NULL "
+      "AND decl_file_id IS NULL");
+  return st.step() ? static_cast<int>(st.col_int64(0)) : 0;
+}
+
+void run_transform(SqliteStorageService &storage,
+                   const TransformDescriptor &d) {
+  if (d.id == "edge-site-count-rollup") {
+    storage.rollup_edge_counts();
+  } else if (d.id == "multi-definition-classification") {
+    storage.set_multi_def();
+  } else if (d.id == "possible-call-materialization") {
+    storage.materialize_possible_calls();
+  } else if (d.id == "virtual-dispatch-call-materialization") {
+    storage.materialize_dispatch_calls();
+  } else if (d.id == "entity-graph-rollup") {
+    storage.materialise_entity_edges();
+  } else {
+    throw StorageError("no executor registered for transform: " + d.id);
+  }
+}
+
+} // namespace
+
 
 // ---------------------------------------------------------------------------
 // materialise_entity_edges: pure-DB roll-up of all 11 entity relation kinds.
@@ -1175,8 +1404,7 @@ void SqliteStorageService::materialise_entity_edges() {
   // ONCE for the whole pass (edge/symbol are read-only here), so every phase's
   // collapse / interface lookups are in-memory instead of per-row SQL.
   CtxGuard guard(db_);
-  {
-    auto txn = transaction();
+  const auto rebuild = [&]() {
     db_.exec("DELETE FROM entity_edge");
     const auto run = [&]([[maybe_unused]] const char *name,
                          void (*fn)(cidx::SqliteDb &)) { fn(db_); };
@@ -1189,34 +1417,94 @@ void SqliteStorageService::materialise_entity_edges() {
     run("uses", cpp_materialise_uses);
     run("befriends", cpp_materialise_befriends);
     run("entity_nodes", cpp_materialise_entity_nodes);
-    run("declares", cpp_materialise_declares); // v26: needs entity_node populated
+    run("declares",
+        cpp_materialise_declares); // v26: needs entity_node populated
+  };
+  if (in_txn_) {
+    rebuild();
+  } else {
+    auto txn = transaction();
+    rebuild();
     txn.commit();
   }
 }
 
-int SqliteStorageService::resolve_pass() {
-  // Roll up edge.count for calls/uses from edge_site counts.
-  rollup_edge_counts();
-  // v27: multi-definition. definition/def_edge are already written at index
-  // time; here we count them into symbol.multi_def and fan per-body calls into
-  // possible_call. Order: possible_call needs multi_def.
-  set_multi_def();
-  materialize_possible_calls();
-  // Materialise virtual-dispatch caller edges (kind 18) from calls + overrides.
-  materialize_dispatch_calls();
-  // Materialise Layer-1 entity_edge from the Layer-0 graph.
-  materialise_entity_edges();
-  // Count remaining stub symbols: a minted placeholder never backfilled by a
-  // real symbol -- resolved=0 with NO location (neither a definition nor a decl
-  // site). NOT keyed on spelling -- stubs are now minted NAMED, so the absence
-  // of any location is the robust signal (matches Sym::is_stub).
-  auto st = db_.prepare(
-      "SELECT COUNT(*) FROM symbol "
-      "WHERE resolved = 0 AND file_id IS NULL AND decl_file_id IS NULL");
-  if (!st.step()) {
-    return 0;
+TransformReport SqliteStorageService::run_transform_pipeline() {
+  const TransformRegistry registry = make_transform_registry();
+  const auto ordered = registry.execution_order();
+  TransformReport report;
+  std::unordered_map<std::string, std::string> dependency_outputs;
+
+  auto txn = transaction();
+  try {
+    for (const TransformDescriptor *transform : ordered) {
+      TransformRun run;
+      run.transform_id = transform->id;
+      run.version = transform->version;
+      run.input_identity = input_identity(db_, *transform, dependency_outputs);
+      const auto previous = read_transform_run(db_, *transform);
+      if (previous && previous->version == run.version &&
+          previous->input_identity == run.input_identity &&
+          (previous->status == TransformRunStatus::ran ||
+           previous->status == TransformRunStatus::reused)) {
+        run = *previous;
+        run.status = TransformRunStatus::reused;
+        report.runs.push_back(run);
+        dependency_outputs[transform->id] = run.output_identity;
+        continue;
+      }
+
+      const auto started = std::chrono::steady_clock::now();
+      run_transform(*this, *transform);
+      if (transform_failure_for_testing_ &&
+          *transform_failure_for_testing_ == transform->id) {
+        transform_failure_for_testing_.reset();
+        throw StorageError("injected transform failure: " + transform->id);
+      }
+      run.status = TransformRunStatus::ran;
+      run.output_identity = query_identity(db_, transform->output_queries);
+      run.output_count = output_count(db_, transform->output_count_query);
+      const auto elapsed =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - started);
+      run.diagnostic = "duration_ms=" + std::to_string(elapsed.count());
+      write_transform_run(db_, run);
+      report.runs.push_back(run);
+      dependency_outputs[transform->id] = run.output_identity;
+    }
+    txn.commit();
+  } catch (const std::exception &error) {
+    txn.rollback();
+    TransformRun failed;
+    failed.transform_id = ordered.at(report.runs.size())->id;
+    failed.version = ordered.at(report.runs.size())->version;
+    failed.status = TransformRunStatus::failed;
+    failed.diagnostic = error.what();
+    if (const auto previous =
+            read_transform_run(db_, *ordered.at(report.runs.size()))) {
+      failed.input_identity = input_identity(
+          db_, *ordered.at(report.runs.size()), dependency_outputs);
+      failed.output_identity = previous->output_identity;
+      failed.output_count = previous->output_count;
+    }
+    write_transform_run(db_, failed);
+    report.runs.push_back(std::move(failed));
+    last_transform_runs_ = report.runs;
+    return report;
   }
-  return static_cast<int>(st.col_int64(0));
+
+  report.still_stub_count = count_stubs(db_);
+  last_transform_runs_ = report.runs;
+  return report;
+}
+
+void SqliteStorageService::inject_transform_failure_for_testing(
+    std::string transform_id) {
+  transform_failure_for_testing_ = std::move(transform_id);
+}
+
+int SqliteStorageService::resolve_pass() {
+  return run_transform_pipeline().still_stub_count;
 }
 
 // -- fuzzy matching

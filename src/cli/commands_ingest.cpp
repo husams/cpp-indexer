@@ -434,8 +434,24 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
     rc = !args.files.empty()
              ? index_files(db, args.files, root, graph_enabled, ctx)
              : index_pending(db, graph_enabled, ctx);
-    if (rc == 0 && all_files_current(db)) {
-      db.stamp_index_identity();
+    if (rc == 0 && graph_enabled) {
+      const TransformReport report = db.run_transform_pipeline();
+      const bool failed =
+          std::ranges::any_of(report.runs, [](const TransformRun &run) {
+            return run.status == TransformRunStatus::failed;
+          });
+      if (failed) {
+        for (const auto &run : report.runs) {
+          if (run.status == TransformRunStatus::failed) {
+            *ctx.err << "error: transform '" << run.transform_id
+                     << "' failed: " << run.diagnostic << "\n";
+          }
+        }
+        rc = 1;
+      } else if (all_files_current(db)) {
+        db.stamp_graph_resolved();
+        db.stamp_index_identity();
+      }
     }
   }
   // cli.py:243-244 — only when the file-sink warning counter is > 0 (G27).

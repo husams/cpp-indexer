@@ -26,6 +26,7 @@
 
 #include "storage/records.hpp"
 #include "storage/sqlite.hpp"
+#include "storage/transforms.hpp"
 #include "workspace/context.hpp"
 
 namespace cidx {
@@ -601,6 +602,14 @@ public:
   // calls/uses, report remaining stubs. Returns count of still-unresolved
   // stub symbols.
   int resolve_pass();
+  // Execute the named derived-fact pipeline. Each transform is independently
+  // identified and reused by content identity; publication is one transaction.
+  TransformReport run_transform_pipeline();
+  [[nodiscard]] const std::vector<TransformRun> &transform_runs() const {
+    return last_transform_runs_;
+  }
+  // Test seam for failure-atomic publication; production callers never set it.
+  void inject_transform_failure_for_testing(std::string transform_id);
   // Record the UTC completion marker after a successful resolve pass.
   void stamp_graph_resolved();
 
@@ -787,6 +796,8 @@ private:
   bool needs_entity_node_backfill_ = false;
   std::unordered_set<std::string> attached_artifact_names_;
   std::optional<bool> artifact_query_only_before_attach_;
+  std::vector<TransformRun> last_transform_runs_;
+  std::optional<std::string> transform_failure_for_testing_;
 };
 
 // Compatibility façade for legacy application code. New code composes the

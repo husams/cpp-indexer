@@ -146,3 +146,103 @@ TEST_CASE("unit of work rolls back a failed one-TU publication") {
 
   CHECK_FALSE(catalog.get_component("/tmp/failed-tu").has_value());
 }
+
+TEST_CASE("transform registry declares a deterministic dependency order") {
+  TransformRegistry registry;
+  registry.register_transform(TransformDescriptor{"source",
+                                                  1,
+                                                  {"raw"},
+                                                  {"source.fact"},
+                                                  {},
+                                                  {"source"},
+                                                  {},
+                                                  {"SELECT 1"},
+                                                  {"SELECT 1"},
+                                                  "SELECT 1"});
+  registry.register_transform(TransformDescriptor{"derived",
+                                                  1,
+                                                  {"source.fact"},
+                                                  {"derived.fact"},
+                                                  {"source"},
+                                                  {"derived"},
+                                                  {},
+                                                  {"SELECT 1"},
+                                                  {"SELECT 1"},
+                                                  "SELECT 1"});
+
+  const auto order = registry.execution_order();
+  REQUIRE(order.size() == 2);
+  CHECK(order[0]->id == "source");
+  CHECK(order[1]->id == "derived");
+}
+
+TEST_CASE("named transform pipeline reuses identical content identities") {
+  Storage db(":memory:");
+
+  const auto first = db.run_transform_pipeline();
+  REQUIRE(first.runs.size() == 5);
+  CHECK(first.still_stub_count == 0);
+  for (const auto &run : first.runs) {
+    CHECK(run.status == TransformRunStatus::ran);
+    CHECK_FALSE(run.input_identity.empty());
+    CHECK_FALSE(run.output_identity.empty());
+  }
+
+  const auto second = db.run_transform_pipeline();
+  REQUIRE(second.runs.size() == first.runs.size());
+  for (const auto &run : second.runs) {
+    CHECK(run.status == TransformRunStatus::reused);
+  }
+}
+
+TEST_CASE(
+    "failed transform preserves prior derived rows and records stale input") {
+  Storage db(":memory:");
+  Symbol src;
+  src.usr = "transform:@F@src";
+  src.spelling = "src";
+  src.kind = "function";
+  src.is_definition = true;
+  const auto src_id = db.add_symbol(src);
+  Symbol dst;
+  dst.usr = "transform:@F@dst";
+  dst.spelling = "dst";
+  dst.kind = "function";
+  dst.is_definition = true;
+  const auto dst_id = db.add_symbol(dst);
+  Edge dispatch_edge;
+  dispatch_edge.src_id = src_id;
+  dispatch_edge.dst_id = dst_id;
+  dispatch_edge.kind = 18;
+  db.add_edge(dispatch_edge);
+
+  const auto baseline = db.run_transform_pipeline();
+  REQUIRE(baseline.runs.size() == 5);
+
+  db.raw_db().exec("INSERT OR IGNORE INTO entity_node(id, kind) VALUES (" +
+                   std::to_string(src_id) + ", 1), (" + std::to_string(dst_id) +
+                   ", 1)");
+  db.add_entity_edge(src_id, dst_id, 1);
+  auto before = db.raw_db().prepare("SELECT COUNT(*) FROM entity_edge");
+  REQUIRE(before.step());
+  CHECK(before.col_int64(0) == 1);
+
+  Edge override_edge;
+  override_edge.src_id = src_id;
+  override_edge.dst_id = dst_id;
+  override_edge.kind = 6;
+  db.add_edge(override_edge);
+  db.inject_transform_failure_for_testing("entity-graph-rollup");
+  const auto failed = db.run_transform_pipeline();
+  REQUIRE(failed.runs.back().transform_id == "entity-graph-rollup");
+  CHECK(failed.runs.back().status == TransformRunStatus::failed);
+  CHECK_FALSE(failed.runs.back().diagnostic.empty());
+
+  auto state = db.raw_db().prepare("SELECT value FROM meta WHERE key = "
+                                   "'transform.entity-graph-rollup.status'");
+  REQUIRE(state.step());
+  CHECK(state.col_text(0) == "failed");
+  auto after = db.raw_db().prepare("SELECT COUNT(*) FROM entity_edge");
+  REQUIRE(after.step());
+  CHECK(after.col_int64(0) == 1);
+}
