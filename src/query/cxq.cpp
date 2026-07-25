@@ -296,7 +296,7 @@ Stage stage(std::string_view token) {
     parse_fail("rank() is not available in v1");
   }
   for (const std::string_view name :
-       {"nodes", "view", "where", "out", "in", "union", "intersect", "except",
+       {"nodes", "view", "where", "out", "in", "sites", "union", "intersect", "except",
         "select", "count", "distinct", "order_by", "limit"}) {
     const std::string prefix(name);
     if (!value.starts_with(prefix + "(")) {
@@ -327,6 +327,12 @@ Stage stage(std::string_view token) {
         parse_fail("where() requires one expression");
       }
       return where(predicate(args.front()));
+    }
+    if (name == "sites") {
+      if (!args.empty()) {
+        parse_fail("sites() takes no arguments");
+      }
+      return sites();
     }
     if (name == "out" || name == "in") {
       if (args.empty()) {

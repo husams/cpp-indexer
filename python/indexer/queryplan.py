@@ -36,7 +36,7 @@ __all__ = [
     "inherits_from", "implements", "has_ancestor", "has_member", "has_method", "has_field", "has_nested",
     "has_template_arg", "is_specialization_of", "is_instantiation_of", "calls", "called_by", "uses", "used_by",
     "is_abstract", "is_interface", "is_pure", "is_static", "is_template", "is_instance",
-    "nodes", "view", "where", "out", "in_", "union_", "intersect", "except_",
+    "nodes", "view", "where", "out", "in_", "sites", "union_", "intersect", "except_",
     "select", "count", "distinct", "order_by", "limit",
     "validate", "canonical_json", "relation_catalog", "relation_metadata", "resolve_relation",
     "extension_relation_catalog", "extension_relation_metadata",
@@ -150,8 +150,9 @@ _TYPED_FIELDS = {
     "template_parameter": {"id", "identity_key", "owner_id", "position", "param_kind", "name", "default_txt", "type_id", "default_type_id", "default_ref_id"},
     "template_argument": {"id", "identity_key", "owner_id", "position", "pack_index", "arg_kind", "ref_id", "literal", "type_id"},
     "call_argument": {"id", "identity_key", "edge_id", "file_id", "line", "col", "position", "src_kind", "type_usr", "decl_usr", "callee_usr", "type_id", "decl_id", "callee_id", "type_is_value"},
-    "edge": {"id", "identity_key", "src_id", "dst_id", "kind", "count", "base_access", "is_virtual", "vtable_slot"},
-    "evidence": {"id", "identity_key", "owner_id", "position", "default_txt", "default_type_id", "default_ref_id", "edge_id", "file_id", "line", "col", "conditional", "args_sig", "recv_src_kind", "recv_type_usr", "recv_decl_usr", "recv_type_id", "recv_decl_id", "recv_param_pos", "recv_type_is_value"},
+    "edge": {"id", "identity_key", "src_id", "dst_id", "kind", "count", "base_access", "is_virtual", "vtable_slot", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
+    "site": {"id", "identity_key", "edge_id", "file_id", "file", "line", "col", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
+    "evidence": {"id", "identity_key", "owner_id", "position", "default_txt", "default_type_id", "default_ref_id", "edge_id", "file_id", "line", "col", "conditional", "args_sig", "recv_src_kind", "recv_type_usr", "recv_decl_usr", "recv_type_id", "recv_decl_id", "recv_param_pos", "recv_type_is_value", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
     "type": {"id", "identity_key", "type_key", "spelling", "kind", "is_const", "is_volatile", "is_restrict", "cv_qualifiers", "decl_usr", "decl_id", "canonical_id"},
 }
 
@@ -456,6 +457,10 @@ def in_(relation: str, min_depth: int = 1, max_depth: int = 1) -> Stage:
                  max_depth=max_depth)
 
 
+def sites() -> Stage:
+    return Stage(op="sites")
+
+
 def union_(operand: Query) -> Stage:
     return Stage(op="union", operand=operand.plan)
 
@@ -658,7 +663,7 @@ def _cxq_stage(token: str) -> Stage:
     value = _cxq_trim(token)
     if value.startswith("rank("):
         _fail("E_PARSE", "rank() is not available in v1")
-    names = ("nodes", "view", "where", "out", "in", "union", "intersect",
+    names = ("nodes", "view", "where", "out", "in", "sites", "union", "intersect",
              "except", "select", "count", "distinct", "order_by",
              "limit")
     for name in names:
@@ -677,6 +682,10 @@ def _cxq_stage(token: str) -> Stage:
             if len(args) != 1:
                 _fail("E_PARSE", "where() requires one expression")
             return where(_cxq_pred(args[0]))
+        if name == "sites":
+            if args:
+                _fail("E_PARSE", "sites() takes no arguments")
+            return sites()
         if name in ("out", "in"):
             if not args:
                 _fail("E_PARSE", f"{name}() requires a relation")
@@ -890,6 +899,13 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
                 _fail("E_STAGE", "view() applies to a node stream")
             if stage.level not in LOGICAL_VIEWS:
                 _fail("E_VIEW", f"unknown view '{stage.level}'")
+            logical_transition = (
+                st.active in (SYMBOL_VIEW, ENTITY_VIEW)
+                and stage.level in (SYMBOL_VIEW, ENTITY_VIEW)
+            )
+            if (not st.codebase_unenumerated and stage.level != st.active
+                    and not logical_transition):
+                _fail("E_VIEW", f"cannot change view from {st.active} to {stage.level}")
             st.active = stage.level
         elif stage.op == "where":
             if st.shape != "nodes":
@@ -931,6 +947,13 @@ def _validate_walk(plan: Plan, st: _WalkState) -> Plan:
             # (and later bare-relation resolution) follows it.
             st.active = (_relation_view(metadata.get("source", rel[1]))
                          if inbound else _relation_view(metadata.get("target", rel[1])))
+        elif stage.op == "sites":
+            consume()
+            if st.shape != "nodes":
+                _fail("E_STAGE", "sites() applies to a node stream")
+            if st.active != "edge":
+                _fail("E_VIEW", "sites() requires an edge node stream")
+            st.active = "site"
         elif stage.op in ("union", "intersect", "except"):
             consume()
             if st.shape != "nodes":
@@ -1060,6 +1083,8 @@ class Result:
     shape: str  # nodes | rows | scalar
     view: str
     truncated: bool = False
+    partial: bool = False
+    unknown: bool = False
     scalar: int = 0
     fields: tuple[str, ...] = ()
     rows: list[tuple[Any, ...]] = field(default_factory=list)
@@ -1319,7 +1344,10 @@ class _Stream:
         self.fields: tuple[str, ...] = ()
         self.rows: list[tuple[Any, ...]] = []
         self.row_ids: list[int] = []
+        self.row_status: list[tuple[bool, bool]] = []
         self.truncated = False
+        self.partial = False
+        self.unknown = False
         # True only while a limit() is in effect with NO cardinality-expanding
         # stage (nodes/out/in/union) after it -- otherwise _finish()
         # re-applies the default result cap (PR #20 review).
@@ -1377,6 +1405,9 @@ class Executor:
                 else:
                     self._traverse(st, stage)
                 st.limit_in_effect = False
+            elif stage.op == "sites":
+                self._expand_sites(st)
+                st.limit_in_effect = False
             elif stage.op in ("union", "intersect", "except"):
                 self._set_op(st, stage)
                 if stage.op == "union":
@@ -1398,6 +1429,28 @@ class Executor:
         return st
 
     # -- stages ----------------------------------------------------------------
+
+    def _expand_sites(self, st: _Stream) -> None:
+        sites_rows: list[tuple[int, ...]] = []
+        for edge in sorted(set(st.keys)):
+            rows = self._conn.execute(
+                "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) "
+                "FROM edge_site WHERE edge_id=? "
+                "ORDER BY file_id,COALESCE(line,0),COALESCE(col,0)",
+                (edge[0],),
+            )
+            for row in rows:
+                sites_rows.append(tuple(row))
+                if len(sites_rows) > TRAVERSE_NODE_BUDGET:
+                    st.truncated = True
+                    break
+            if st.truncated:
+                break
+        st.keys = sorted(set(sites_rows))
+        if len(st.keys) > TRAVERSE_NODE_BUDGET:
+            st.keys = st.keys[:TRAVERSE_NODE_BUDGET]
+        st.ids = []
+        st.view = "site"
 
     @staticmethod
     def _join_clause(need_entity: bool) -> str:
@@ -1451,6 +1504,7 @@ class Executor:
                 "template_argument": "SELECT owner_id,position,pack_index FROM template_arg ORDER BY owner_id,position,pack_index",
                 "call_argument": "SELECT edge_id,file_id,line,col,position FROM call_arg ORDER BY edge_id,file_id,line,col,position",
                 "edge": "SELECT id FROM edge ORDER BY id",
+                "site": "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) FROM edge_site ORDER BY edge_id,file_id,line,col",
                 "evidence": "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) FROM edge_site ORDER BY edge_id,file_id,line,col",
                 "type": "SELECT id FROM type_node ORDER BY id",
             }
@@ -1637,7 +1691,7 @@ class Executor:
         )
 
     def _reject_ambiguous_ungrouped(self, st: _Stream) -> None:
-        if st.view not in ("call_argument", "evidence"):
+        if st.view not in ("call_argument", "site", "evidence"):
             return
         for key in st.keys:
             if (st.view == "evidence" and len(key) > 4 and key[4] == 1):
@@ -1697,6 +1751,9 @@ class Executor:
             if len(key) > 4 and key[4] == 1:
                 return f"evidence:template_default:{self._portable_symbol(key[0])}:{key[1]}"
             return (f"evidence:{self._portable_edge(key[0])}:"
+                    f"{self._portable_file(key[1])}:{key[2]}:{key[3]}")
+        if view == "site":
+            return (f"site:{self._portable_edge(key[0])}:"
                     f"{self._portable_file(key[1])}:{key[2]}:{key[3]}")
         if view == "edge":
             return f"edge:{self._portable_edge(key[0])}"
@@ -1762,6 +1819,8 @@ class Executor:
                     add_rows("SELECT id FROM edge WHERE src_id=? AND kind=? ORDER BY id", (owner, rel[2] - 23))
                 elif rel[0] == "has_evidence":
                     add_rows("SELECT es.edge_id,es.file_id,COALESCE(es.line,0),COALESCE(es.col,0) FROM edge_site es JOIN edge e ON e.id=es.edge_id WHERE e.src_id=? ORDER BY es.edge_id,es.file_id,es.line,es.col", (owner,))
+                elif rel[0] == "has_site":
+                    add_rows("SELECT es.edge_id,es.file_id,COALESCE(es.line,0),COALESCE(es.col,0) FROM edge_site es JOIN edge e ON e.id=es.edge_id WHERE e.src_id=? ORDER BY es.edge_id,es.file_id,es.line,es.col", (owner,))
                 elif rel[0] == "of_type":
                     add_ids("SELECT type_id FROM symbol_type WHERE symbol_id=? ORDER BY type_id", (owner,))
         elif not inbound and st.view == SYMBOL_VIEW and rel[0] == "of_type":
@@ -1801,6 +1860,8 @@ class Executor:
                     add_rows("SELECT edge_id,file_id,line,col,position FROM call_arg WHERE edge_id=? ORDER BY file_id,line,col,position", (edge_id,))
                 elif rel[0] == "has_evidence":
                     add_rows("SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) FROM edge_site WHERE edge_id=? ORDER BY file_id,line,col", (edge_id,))
+                elif rel[0] == "has_site":
+                    add_rows("SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) FROM edge_site WHERE edge_id=? ORDER BY file_id,line,col", (edge_id,))
         elif not inbound and st.view == "call_argument":
             for edge_id, file_id, line, col, position in st.keys:
                 if rel[0] == "of_type":
@@ -1815,6 +1876,10 @@ class Executor:
                     add_rows("SELECT edge_id FROM edge_site WHERE edge_id=? AND file_id=? AND line=? AND col=?", (edge_id, file_id, line, col))
                 elif rel[0] == "of_occurrence":
                     add_rows("SELECT edge_id,file_id,line,col,position FROM call_arg WHERE edge_id=? AND file_id=? AND line=? AND col=?", (edge_id, file_id, line, col))
+        elif not inbound and st.view == "site":
+            for edge_id, file_id, line, col in st.keys:
+                if rel[0] == "of_edge":
+                    add_rows("SELECT edge_id FROM edge_site WHERE edge_id=? AND file_id=? AND COALESCE(line,0)=? AND COALESCE(col,0)=?", (edge_id, file_id, line, col))
         elif not inbound and st.view == "type":
             for (type_id,) in st.keys:
                 if rel[0] == "references_symbol":
@@ -1858,6 +1923,10 @@ class Executor:
                         add_ids("SELECT src_id FROM edge WHERE id=?", (edge_id,))
                     elif rel[1] == "parameter":
                         add_rows("SELECT owner_id,position,pack_index FROM parameter WHERE file_id=? AND line=? AND col=?", (file_id, line, col))
+        elif inbound and st.view == "site":
+            for edge_id, file_id, line, col in st.keys:
+                if rel[0] in ("has_site", "of_edge"):
+                    add_rows("SELECT edge_id FROM edge_site WHERE edge_id=? AND file_id=? AND COALESCE(line,0)=? AND COALESCE(col,0)=?", (edge_id, file_id, line, col))
         elif inbound and st.view == "call_argument" and rel[0] == "has_argument":
             for key in st.keys:
                 add_rows("SELECT id FROM edge WHERE id=?", key[:1])
@@ -1956,6 +2025,7 @@ class Executor:
             "parameter": "parameter", "template_parameter": "template_param",
             "template_argument": "template_arg", "call_argument": "call_arg",
             "edge": "edge", "evidence": "edge_site", "type": "type_node",
+            "site": "edge_site",
         }[view]
 
     @staticmethod
@@ -1966,6 +2036,7 @@ class Executor:
             "template_argument": "owner_id=? AND position=? AND pack_index=?",
             "call_argument": "edge_id=? AND file_id=? AND line=? AND col=? AND position=?",
             "evidence": "edge_id=? AND file_id=? AND line=? AND col=?",
+            "site": "edge_id=? AND file_id=? AND line=? AND col=?",
             "edge": "id=?", "type": "id=?",
         }[view]
 
@@ -1989,10 +2060,116 @@ class Executor:
             "template_argument": {"owner_id", "position", "pack_index", "arg_kind", "ref_id", "literal", "type_id"},
             "call_argument": {"edge_id", "file_id", "line", "col", "position", "src_kind", "type_usr", "decl_usr", "callee_usr", "type_id", "decl_id", "callee_id", "type_is_value"},
             "evidence": {"edge_id", "file_id", "line", "col", "conditional", "args_sig", "recv_src_kind", "recv_type_usr", "recv_decl_usr", "recv_type_id", "recv_decl_id", "recv_param_pos", "recv_type_is_value"},
+            "site": {"edge_id", "file_id", "line", "col"},
             "edge": {"id", "src_id", "dst_id", "kind", "count", "base_access", "is_virtual", "vtable_slot"},
             "type": {"id", "type_key", "spelling", "kind", "is_const", "is_volatile", "is_restrict", "decl_usr", "decl_id", "canonical_id"},
         }
         return field_name if field_name in columns[view] else ""
+
+    def _derived_typed_cell(
+        self, view: str, key: tuple[int, ...], field_name: str,
+    ) -> tuple[bool, Any]:
+        derived_fields = {"relation", "source", "target", "evidence", "status", "partial", "unknown"}
+        if field_name not in derived_fields:
+            return False, None
+        if view == "evidence" and len(key) > 4 and key[4] == 1:
+            values = {"evidence": "declaration", "status": "partial", "partial": 1, "unknown": 0}
+            return True, values.get(field_name)
+        if view not in {"edge", "site", "evidence"}:
+            return True, None
+        row = self._conn.execute("SELECT kind FROM edge WHERE id=?", (key[0],)).fetchone()
+        relation = next((item for item in RELATION_CATALOG
+                         if item[1] == SYMBOL_VIEW and item[2] == row[0]), None) if row else None
+        metadata = RELATION_METADATA.get(relation, {}) if relation else {}
+        unresolved = self._has_unresolved_typed_provenance(view, key)
+        if field_name == "relation":
+            return True, relation[0] if relation else None
+        if field_name in {"source", "target", "evidence"}:
+            return True, metadata.get(field_name)
+        if field_name == "status":
+            return True, "unknown" if unresolved else metadata.get("completeness")
+        if field_name == "partial":
+            return True, int(not unresolved and metadata.get("completeness") == "partial")
+        return True, int(unresolved or metadata.get("completeness") == "unknown") if relation else 1
+
+    def _has_unresolved_typed_provenance(
+        self, view: str, key: tuple[int, ...],
+    ) -> bool:
+        if view == "evidence" and len(key) > 4 and key[4] == 1:
+            return False
+        edge = self._conn.execute(
+            "SELECT src_id,dst_id FROM edge WHERE id=?", (key[0],)
+        ).fetchone()
+        if edge is None:
+            return True
+        endpoint = self._conn.execute(
+            "SELECT 1 FROM symbol WHERE id IN (?,?) AND resolved=0 LIMIT 1",
+            (edge[0], edge[1]),
+        ).fetchone()
+        if endpoint is not None:
+            return True
+        site_scoped = view == "site" or (
+            view == "evidence" and not (len(key) > 4 and key[4] == 1)
+        )
+        site_scope = (
+            " AND es.file_id=? AND COALESCE(es.line,0)=? AND "
+            "COALESCE(es.col,0)=?" if site_scoped else ""
+        )
+        site = self._conn.execute(
+            "SELECT 1 FROM edge_site es "
+            "LEFT JOIN external_identity eti ON eti.id=es.recv_type_identity_id "
+            "LEFT JOIN external_identity edi ON edi.id=es.recv_decl_identity_id "
+            "LEFT JOIN symbol ds ON ds.id=es.recv_decl_id "
+            "WHERE es.edge_id=? AND ("
+            "(es.recv_type_usr IS NOT NULL AND es.recv_type_id IS NULL AND "
+            " es.recv_type_identity_id IS NULL) OR "
+            "(es.recv_type_identity_id IS NOT NULL AND "
+            " COALESCE(eti.resolution_status,0)=0) OR "
+            "(es.recv_decl_usr IS NOT NULL AND "
+            " (es.recv_decl_id IS NULL OR COALESCE(ds.resolved,0)=0) AND "
+            " es.recv_decl_identity_id IS NULL) OR "
+            "(es.recv_decl_identity_id IS NOT NULL AND "
+            " COALESCE(edi.resolution_status,0)=0))" + site_scope + " LIMIT 1",
+            (key[0], key[1], key[2], key[3]) if site_scoped else (key[0],),
+        ).fetchone()
+        if site is not None:
+            return True
+        argument_scope = (
+            " AND ca.file_id=? AND ca.line=? AND ca.col=?"
+            if site_scoped else ""
+        )
+        argument = self._conn.execute(
+            "SELECT 1 FROM call_arg ca "
+            "LEFT JOIN external_identity ati ON ati.id=ca.type_identity_id "
+            "LEFT JOIN external_identity adi ON adi.id=ca.decl_identity_id "
+            "LEFT JOIN external_identity aci ON aci.id=ca.callee_identity_id "
+            "LEFT JOIN symbol ds ON ds.id=ca.decl_id "
+            "LEFT JOIN symbol cs ON cs.id=ca.callee_id "
+            "WHERE ca.edge_id=? AND ("
+            "(ca.type_usr IS NOT NULL AND ca.type_id IS NULL AND "
+            " ca.type_identity_id IS NULL) OR "
+            "(ca.type_identity_id IS NOT NULL AND "
+            " COALESCE(ati.resolution_status,0)=0) OR "
+            "(ca.decl_usr IS NOT NULL AND "
+            " (ca.decl_id IS NULL OR COALESCE(ds.resolved,0)=0) AND "
+            " ca.decl_identity_id IS NULL) OR "
+            "(ca.decl_identity_id IS NOT NULL AND "
+            " COALESCE(adi.resolution_status,0)=0) OR "
+            "(ca.callee_usr IS NOT NULL AND "
+            " (ca.callee_id IS NULL OR COALESCE(cs.resolved,0)=0) AND "
+            " ca.callee_identity_id IS NULL) OR "
+            "(ca.callee_identity_id IS NOT NULL AND "
+            " COALESCE(aci.resolution_status,0)=0))" + argument_scope + " LIMIT 1",
+            (key[0], key[1], key[2], key[3]) if site_scoped else (key[0],),
+        ).fetchone()
+        return argument is not None
+
+    def _status_for_key(
+        self, view: str, key: tuple[int, ...],
+    ) -> tuple[bool, bool]:
+        _, partial = self._derived_typed_cell(view, key, "partial")
+        _, unknown = self._derived_typed_cell(view, key, "unknown")
+        return bool(partial), bool(unknown)
 
     def _fetch_typed_cells(
         self, st: _Stream, fields: Sequence[str]
@@ -2010,7 +2187,10 @@ class Executor:
                     continue
                 cells = []
                 for field_name in fields:
-                    if field_name == "identity_key":
+                    handled, derived = self._derived_typed_cell(st.view, key, field_name)
+                    if handled:
+                        cells.append(derived)
+                    elif field_name == "identity_key":
                         cells.append(self._logical_identity(st.view, key))
                     elif field_name == "id":
                         cells.append(self._logical_row_id(st.view, key))
@@ -2046,7 +2226,10 @@ class Executor:
                 continue
             cells: list[Any] = []
             for field_name, index in zip(fields, indexes):
-                if field_name == "identity_key":
+                handled, derived = self._derived_typed_cell(st.view, key, field_name)
+                if handled:
+                    cells.append(derived)
+                elif field_name == "identity_key":
                     cells.append(self._logical_identity(st.view, key))
                 elif field_name == "id":
                     cells.append(self._logical_row_id(st.view, key))
@@ -2100,20 +2283,24 @@ class Executor:
             st.fields = tuple(fields)
             st.rows = []
             st.row_ids = []
+            st.row_status = []
             for key in st.keys:
                 if key in by_key:
                     st.rows.append(by_key[key])
                     st.row_ids.append(self._logical_row_id(st.view, key))
+                    st.row_status.append(self._status_for_key(st.view, key))
             st.keys = []
             return
         by_id = self._fetch_cells(st, fields)
         st.fields = tuple(fields)
         st.rows = []
         st.row_ids = []
+        st.row_status = []
         for nid in st.ids:
             if nid in by_id:
                 st.rows.append(by_id[nid])
                 st.row_ids.append(nid)
+                st.row_status.append((False, False))
         st.ids = []
 
     @staticmethod
@@ -2126,14 +2313,17 @@ class Executor:
             return
         rows: list[tuple[Any, ...]] = []
         row_ids: list[int] = []
+        row_status: list[tuple[bool, bool]] = []
         seen: set[tuple[Any, ...]] = set()
-        for row, rid in zip(st.rows, st.row_ids):
+        for index, (row, rid) in enumerate(zip(st.rows, st.row_ids)):
             if row not in seen:
                 seen.add(row)
                 rows.append(row)
                 row_ids.append(rid)
+                row_status.append(st.row_status[index])
         st.rows = rows
         st.row_ids = row_ids
+        st.row_status = row_status
 
     def _apply_order(self, st: _Stream, fields: Sequence[str]) -> None:
         if st.shape == "nodes":
@@ -2153,6 +2343,7 @@ class Executor:
                 tuple(_cell_key(st.rows[i][p]) for p in pos), st.row_ids[i]))
         st.rows = [st.rows[i] for i in order]
         st.row_ids = [st.row_ids[i] for i in order]
+        st.row_status = [st.row_status[i] for i in order]
 
     @staticmethod
     def _apply_limit(st: _Stream, n: int) -> None:
@@ -2165,14 +2356,27 @@ class Executor:
         else:
             del st.rows[n:]
             del st.row_ids[n:]
+            del st.row_status[n:]
 
     # -- finish --------------------------------------------------------------------
+
+    def _recompute_status(self, st: _Stream) -> None:
+        st.partial = False
+        st.unknown = False
+        if st.shape == "rows" or st.row_status:
+            statuses = st.row_status
+        else:
+            statuses = [self._status_for_key(st.view, key) for key in st.keys]
+        st.partial = any(partial for partial, _ in statuses)
+        st.unknown = any(unknown for _, unknown in statuses)
 
     def _finish(self, st: _Stream) -> Result:
         self._reject_ambiguous_ungrouped(st)
         if st.shape == "scalar":
+            self._recompute_status(st)
             return Result(
                 shape="scalar", view=st.view, truncated=st.truncated,
+                partial=st.partial, unknown=st.unknown,
                 scalar=len(st.rows) if st.rows else (len(st.keys) if st.keys else len(st.ids)))
         if st.shape == "nodes":
             if st.view not in (SYMBOL_VIEW, ENTITY_VIEW):
@@ -2185,7 +2389,10 @@ class Executor:
         if not st.limit_in_effect and len(st.rows) > DEFAULT_RESULT_CAP:
             del st.rows[DEFAULT_RESULT_CAP:]
             del st.row_ids[DEFAULT_RESULT_CAP:]
+            del st.row_status[DEFAULT_RESULT_CAP:]
             st.truncated = True
+        self._recompute_status(st)
         return Result(
             shape=st.shape, view=st.view, truncated=st.truncated,
+            partial=st.partial, unknown=st.unknown,
             fields=st.fields, rows=st.rows)

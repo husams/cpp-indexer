@@ -38,6 +38,7 @@ enum class View : std::uint8_t {
   TemplateArgument,
   CallArgument,
   Edge,
+  Site,
   Evidence,
   Type,
 };
@@ -191,6 +192,7 @@ enum class StageOp {
   Where,
   Out,
   In,
+  Sites,
   Union,
   Intersect,
   Except,
@@ -295,6 +297,7 @@ Stage out(const std::string &relation, int64_t min_depth = 1,
           int64_t max_depth = 1, TraversalMode mode = TraversalMode::Static);
 Stage in_(const std::string &relation, int64_t min_depth = 1,
           int64_t max_depth = 1);
+Stage sites();
 Stage union_(const Query &operand);
 Stage intersect(const Query &operand);
 Stage except_(const Query &operand);

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import replace
 
 import pytest
 
@@ -21,11 +22,12 @@ from indexer import queryplan as qp  # noqa: E402
 from indexer.queryplan import (  # noqa: E402
     Executor, PlanError, all_of, canonical_json, codebase, count, distinct,
     entity, eq, except_, glob, in_, in_list, intersect, limit, ne, nodes,
-    not_, order_by, out, select, start, symbol, union_, validate, view, where,
+    not_, order_by, out, select, sites, start, symbol, union_, validate, view, where,
     all, all_targets, any_target, at_least, exactly, exists, inherits_from,
     is_abstract, is_instance, none,
     parse_cxq,
 )
+from indexer.result_protocol import Status, from_query_result  # noqa: E402
 
 _REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -801,3 +803,200 @@ def test_typed_reverse_relations_are_not_shadowed_and_file_identity_is_portable(
         (start(codebase()) | view("call_argument") | nodes()
          | select(["identity_key"])).plan
     ).rows
+
+
+def test_site_view_expansion_exposes_deterministic_provenance():
+    db = Storage(":memory:")
+    _seed_reverse_typed_graph(db, "/tmp/site-view/cpp-indexer", grouped=False)
+    caller, callee = db._conn.execute(
+        "SELECT src_id,dst_id FROM edge WHERE id=1"
+    ).fetchone()
+    reverse_edge = db.add_edge(callee, caller, 1)
+    file_id = db._conn.execute("SELECT id FROM file WHERE name='same.cpp'").fetchone()[0]
+    db.add_edge_site(reverse_edge, file_id, 5, 2)
+    result = Executor(db).run(
+        (start(codebase()) | view("edge") | nodes() | sites()
+         | select(["edge_id", "file", "line", "col", "relation",
+                   "evidence", "status", "partial"])).plan
+    )
+    assert len(result.rows) == 2
+    edge_id, path, line, col, relation, evidence, status, partial = result.rows[0]
+    assert edge_id == 1
+    assert path.endswith("/same.cpp")
+    assert (line, col) == (10, 2)
+    assert (relation, evidence, status, partial) == ("calls", "call_site", "partial", 1)
+    assert result.view == "site"
+    assert result.rows[1][0] == reverse_edge
+    assert result.rows[1][2] == 5
+
+
+def test_typed_provenance_preserves_status_through_select():
+    def run(kind, unresolved_endpoint=False, unresolved_site=False):
+        db = Storage(":memory:")
+        component = db.add_component("project", "/tmp/status-view")
+        directory = db.add_directory(component, "src")
+        file_id = db.add_file(directory, "status.cpp")
+        caller = db.add_symbol(_make_sym("USR::status-caller", "caller"))
+        callee = db.add_symbol(_make_sym("USR::status-callee", "callee"))
+        if unresolved_endpoint:
+            db._conn.execute("UPDATE symbol SET resolved=0 WHERE id=?", (callee,))
+        edge = db.add_edge(caller, callee, kind)
+        db.add_edge_site(
+            edge, file_id, 1, 1,
+            recv_decl_usr="USR::missing-declaration" if unresolved_site else None,
+        )
+        return Executor(db).run(
+            (start(codebase()) | view("edge") | nodes()
+             | select(["status", "partial", "unknown"])).plan
+        )
+
+    def check(result, status, partial, unknown, expected_status):
+        assert result.rows == [(status, partial, unknown)]
+        assert result.partial is (partial == 1)
+        assert result.unknown is (unknown == 1)
+        result.index = replace(result.index, freshness="current")
+        assert from_query_result(result, result.index).status is expected_status
+
+    check(run(2), "complete", 0, 0, Status.COMPLETE)
+    check(run(1), "partial", 1, 0, Status.PARTIAL)
+    check(run(2, unresolved_endpoint=True), "unknown", 0, 1, Status.UNKNOWN)
+    check(run(2, unresolved_site=True), "unknown", 0, 1, Status.UNKNOWN)
+
+
+def test_site_status_follows_the_full_logical_site_key():
+    db = Storage(":memory:")
+    component = db.add_component("project", "/tmp/mixed-site-view")
+    directory = db.add_directory(component, "src")
+    file_id = db.add_file(directory, "mixed.cpp")
+    caller = db.add_symbol(_make_sym("USR::mixed-caller", "caller"))
+    callee = db.add_symbol(_make_sym("USR::mixed-callee", "callee"))
+    edge = db.add_edge(caller, callee, 1)
+    db.add_edge_site(edge, file_id, 1, 1)
+    db.add_edge_site(
+        edge, file_id, 2, 1, recv_decl_usr="USR::missing-declaration"
+    )
+
+    def check_rows(result):
+        assert result.rows == [
+            (1, "partial", 1, 0),
+            (2, "unknown", 0, 1),
+        ]
+        assert result.partial
+        assert result.unknown
+        result.index = replace(result.index, freshness="current")
+        assert from_query_result(result, result.index).status is Status.UNKNOWN
+
+    site_plan = (start(codebase()) | view("site") | nodes()
+                 | select(["line", "status", "partial", "unknown"])).plan
+    evidence_plan = (start(codebase()) | view("evidence") | nodes()
+                     | select(["line", "status", "partial", "unknown"])).plan
+    check_rows(Executor(db).run(site_plan))
+    check_rows(Executor(db).run(evidence_plan))
+
+    executor = Executor(db)
+    ordered = executor.run(
+        (start(codebase()) | view("site") | nodes()
+         | select(["line", "status", "partial", "unknown"])
+         | order_by(["line"]) | limit(1)).plan
+    )
+    assert ordered.rows == [(1, "partial", 1, 0)]
+    assert ordered.partial
+    assert not ordered.unknown
+    ordered.index = replace(ordered.index, freshness="current")
+    assert from_query_result(ordered, ordered.index).status is Status.PARTIAL
+
+    counted = executor.run(
+        (start(codebase()) | view("site") | nodes()
+         | select(["line", "status", "partial", "unknown"])
+         | qp.count()).plan
+    )
+    assert counted.scalar == 2
+    assert counted.partial
+    assert counted.unknown
+    counted.index = replace(counted.index, freshness="current")
+    assert from_query_result(counted, counted.index).status is Status.UNKNOWN
+
+    distinct = executor.run(
+        (start(codebase()) | view("site") | nodes()
+         | select(["relation"]) | qp.distinct()).plan
+    )
+    assert distinct.rows == [("calls",)]
+    assert distinct.partial
+    assert not distinct.unknown
+    distinct.index = replace(distinct.index, freshness="current")
+    assert from_query_result(distinct, distinct.index).status is Status.PARTIAL
+
+
+def test_default_cap_recomputes_discarded_site_status():
+    db = Storage(":memory:")
+    component = db.add_component("project", "/tmp/capped-site-view")
+    directory = db.add_directory(component, "src")
+    file_id = db.add_file(directory, "capped.cpp")
+    caller = db.add_symbol(_make_sym("USR::capped-caller", "caller"))
+    callee = db.add_symbol(_make_sym("USR::capped-callee", "callee"))
+    edge = db.add_edge(caller, callee, 1)
+    db._conn.execute(
+        "WITH RECURSIVE lines(line) AS (SELECT 0 UNION ALL SELECT line + 1 "
+        "FROM lines WHERE line < 999) INSERT INTO edge_site "
+        "(edge_id,file_id,line,col) SELECT ?,?,line,0 FROM lines",
+        (edge, file_id),
+    )
+    db.add_edge_site(
+        edge, file_id, 1000, 0, recv_decl_usr="USR::missing-declaration"
+    )
+    db._conn.commit()
+
+    result = Executor(db).run(
+        (start(codebase()) | view("site") | nodes()
+         | select(["line", "status", "unknown"])).plan
+    )
+    assert len(result.rows) == qp.DEFAULT_RESULT_CAP
+    assert result.truncated
+    assert result.partial
+    assert not result.unknown
+    result.index = replace(result.index, freshness="current")
+    assert from_query_result(result, result.index).status is Status.PARTIAL
+
+
+@pytest.mark.parametrize(
+    ("site_count", "expected", "truncated"),
+    [
+        (qp.TRAVERSE_NODE_BUDGET - 1, qp.TRAVERSE_NODE_BUDGET - 1, False),
+        (qp.TRAVERSE_NODE_BUDGET, qp.TRAVERSE_NODE_BUDGET, False),
+        (qp.TRAVERSE_NODE_BUDGET + 1, qp.TRAVERSE_NODE_BUDGET, True),
+    ],
+)
+def test_sites_budget_boundaries_are_exact_and_ordered(site_count, expected, truncated):
+    db = Storage(":memory:")
+    component = db.add_component("project", "/tmp/budget-view")
+    directory = db.add_directory(component, "src")
+    file_id = db.add_file(directory, "budget.cpp")
+    caller = db.add_symbol(_make_sym("USR::budget-caller", "caller"))
+    callee = db.add_symbol(_make_sym("USR::budget-callee", "callee"))
+    edge = db.add_edge(caller, callee, 1)
+    db._conn.execute(
+        "WITH RECURSIVE lines(line) AS (SELECT 0 UNION ALL SELECT line + 1 "
+        f"FROM lines WHERE line < {site_count - 1}) "
+        "INSERT INTO edge_site(edge_id,file_id,line,col) "
+        f"SELECT {edge},{file_id},line,0 FROM lines",
+    )
+    db._conn.commit()
+
+    result = Executor(db).run(
+        (start(codebase()) | view("edge") | nodes() | sites()
+         | limit(qp.TRAVERSE_NODE_BUDGET)
+         | qp.count()).plan
+    )
+    assert result.scalar == expected
+    assert result.truncated is truncated
+
+
+def test_typed_view_compositions_are_rejected_before_execution():
+    with pytest.raises(PlanError, match="^E_VIEW:"):
+        validate((start(codebase()) | view("edge") | nodes()
+                  | view("site")).plan)
+    with pytest.raises(PlanError, match="^E_VIEW:"):
+        validate((start(codebase()) | nodes() | sites()).plan)
+    assert '"op": "sites"' in canonical_json(
+        (start(codebase()) | view("edge") | nodes() | sites()).plan
+    )

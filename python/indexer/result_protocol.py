@@ -427,8 +427,10 @@ class ResultEnvelope:
 def from_query_result(result: Any, index: Any, *, operation: str = "query") -> ResultEnvelope:
     """Adapt a QueryPlan Result without allowing renderers to reclassify it."""
     stale = index.freshness == "stale"
-    status = Status.UNKNOWN if stale else Status.PARTIAL if result.truncated else Status.COMPLETE if index.freshness == "current" else Status.UNKNOWN
-    state = "unknown" if status is Status.UNKNOWN else "partial" if result.truncated else "complete"
+    unknown = bool(getattr(result, "unknown", False))
+    partial = bool(getattr(result, "partial", False))
+    status = Status.UNKNOWN if stale or unknown else Status.PARTIAL if result.truncated or partial else Status.COMPLETE if index.freshness == "current" else Status.UNKNOWN
+    state = "unknown" if status is Status.UNKNOWN else "partial" if result.truncated or partial else "complete"
     payload: dict[str, Any] = {
         "shape": result.shape,
         "view": result.view,
@@ -443,7 +445,8 @@ def from_query_result(result: Any, index: Any, *, operation: str = "query") -> R
         identity=Identity(
             workspace=index.workspace,
             index=f"semantic-index/schema/{index.schema_version}",
-            fact_sets=("symbols" if result.view == "symbol" else "entities",),
+            fact_sets=("symbols" if result.view == "symbol" else
+                       "entities" if result.view == "entity" else result.view,),
             freshness=index.freshness,
             source_revision=index.source_revision,
             source_fingerprint=index.source_fingerprint,
@@ -459,6 +462,11 @@ def from_query_result(result: Any, index: Any, *, operation: str = "query") -> R
             "truncated_budget", "warning",
             "result was bounded by the QueryPlan execution budget",
             "narrow the query or provide an explicit limit",
+        ))
+    if unknown:
+        envelope.diagnostics.append(Diagnostic(
+            "unknown", "warning", "result contains unresolved relation provenance",
+            "inspect evidence and index coverage before relying on this result",
         ))
     if stale:
         envelope.diagnostics.append(Diagnostic(

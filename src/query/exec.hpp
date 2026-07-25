@@ -94,6 +94,8 @@ struct Result {
   Shape shape = Shape::Nodes;
   View view = View::Symbol;
   bool truncated = false;
+  bool partial = false;
+  bool unknown = false;
   int64_t scalar = 0;                  // Shape::Scalar only
   std::vector<std::string> fields;     // row column names, select order
   std::vector<std::vector<Cell>> rows; // Shape::Nodes/Rows

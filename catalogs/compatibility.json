@@ -69,10 +69,12 @@
       "template_argument:2": "references_symbol",
       "edge:1": "has_argument",
       "edge:2": "has_evidence",
+      "edge:3": "has_site",
       "call_argument:1": "of_type",
       "call_argument:2": "references_symbol",
       "evidence:1": "of_edge",
       "evidence:2": "of_occurrence",
+      "site:1": "of_edge",
       "type:1": "references_symbol",
       "type:2": "has_type_edge"
     },
