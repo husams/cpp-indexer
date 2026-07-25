@@ -458,20 +458,54 @@ std::map<std::string, FactRelation> run_souffle(const AnalysisPackage &package,
   if (options.capture_budget > 0) {
     output_limit = static_cast<std::size_t>(options.capture_budget);
   }
-  const RunResult result = run(argv, timeout, output_limit);
+  std::uintmax_t observed_output_bytes = 0;
+  const auto output_guard = [&]() {
+    if (options.output_budget <= 0) {
+      return false;
+    }
+    std::uintmax_t total = 0;
+    std::error_code scan_error;
+    for (const auto &entry : fs::directory_iterator(output_dir, scan_error)) {
+      if (scan_error || !regular_file(entry.path()) ||
+          entry.path().extension() != ".csv") {
+        continue;
+      }
+      std::error_code size_error;
+      total += fs::file_size(entry.path(), size_error);
+      if (size_error) {
+        continue;
+      }
+      observed_output_bytes = total;
+      if (std::cmp_greater(total, options.output_budget)) {
+        return true;
+      }
+    }
+    observed_output_bytes = total;
+    return std::cmp_greater(total, options.output_budget);
+  };
+  const RunResult result = run(argv, timeout, output_limit, output_guard);
   execution.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - started)
                              .count();
   execution.stdout_text = result.out;
   execution.stderr_text = result.err;
-  execution.output_bytes = static_cast<std::int64_t>(result.captured_bytes);
+  execution.output_bytes = static_cast<std::int64_t>(
+      observed_output_bytes != 0 ? observed_output_bytes
+                                 : result.captured_bytes);
   execution.peak_bytes = static_cast<std::int64_t>(result.peak_bytes);
+  execution.output_budget_terminated = result.output_guard_triggered;
   if (result.timed_out) {
-    throw AnalysisEngineError("timeout", "souffle timed out");
+    throw AnalysisEngineError("timeout", "souffle timed out", execution);
   }
   if (result.output_limited) {
-    throw AnalysisEngineError("output_budget_exceeded",
-                              "analysis output budget exceeded");
+    throw AnalysisEngineError("capture_budget_exceeded",
+                              "analysis capture budget exceeded", execution);
+  }
+  if (result.output_guard_triggered) {
+    throw AnalysisEngineError(
+        "output_budget_exceeded",
+        "analysis result output budget exceeded while Souffle was running",
+        execution);
   }
   if (result.exit_code != 0) {
     std::string detail = result.err;
@@ -481,7 +515,8 @@ std::map<std::string, FactRelation> run_souffle(const AnalysisPackage &package,
     throw AnalysisEngineError("engine_failure",
                               "souffle failed (exit " +
                                   std::to_string(result.exit_code) +
-                                  "): " + detail);
+                                  "): " + detail,
+                              execution);
   }
 
   std::map<std::string, FactRelation> relations;
@@ -574,6 +609,12 @@ AnalysisEngineError::AnalysisEngineError(std::string code,
                                          const std::string &message)
     : std::runtime_error(message), code_(std::move(code)) {}
 
+AnalysisEngineError::AnalysisEngineError(std::string code,
+                                         const std::string &message,
+                                         const AnalysisRun &partial_run)
+    : std::runtime_error(message), code_(std::move(code)),
+      partial_run_(std::make_shared<AnalysisRun>(partial_run)) {}
+
 std::string AnalysisEngine::engine_version() const { return "unknown"; }
 
 std::string AnalysisPackage::canonical() const {
@@ -622,7 +663,9 @@ std::string AnalysisRun::canonical_result() const {
       << "package=" << package_hash << '\n'
       << "status=" << analysis_status_name(status) << '\n'
       << "class=" << analysis_result_class_name(result_class) << '\n'
-      << "engine=" << engine_version << '\n';
+      << "engine=" << engine_version << '\n'
+      << "output_budget_terminated=" << (output_budget_terminated ? 1 : 0)
+      << '\n';
   std::vector<std::string> sorted_inputs = generated_inputs;
   std::ranges::sort(sorted_inputs);
   for (const auto &input : sorted_inputs) {
@@ -667,7 +710,13 @@ SouffleAnalysisEngine::execute(const AnalysisPackage &package,
         "Souffle step budgets are unsupported because recursive evaluation "
         "steps are not externally enforceable");
   }
-  result.relations = run_souffle(package, snapshot, options, result);
+  try {
+    result.relations = run_souffle(package, snapshot, options, result);
+  } catch (const AnalysisEngineError &error) {
+    throw AnalysisEngineError(error.code(), error.what(), result);
+  } catch (const std::exception &error) {
+    throw AnalysisEngineError("engine_failure", error.what(), result);
+  }
   return result;
 }
 
@@ -916,6 +965,9 @@ AnalysisRun AnalysisRunner::run(const AnalysisPackage &package,
         {.code = error.code(), .message = error.what()});
     return result;
   } catch (const AnalysisEngineError &error) {
+    if (error.partial_run()) {
+      result = *error.partial_run();
+    }
     result.status = AnalysisStatus::error;
     if (error.code() == "timeout") {
       result.result_class = AnalysisResultClass::timeout;
@@ -923,12 +975,16 @@ AnalysisRun AnalysisRunner::run(const AnalysisPackage &package,
       result.result_class = AnalysisResultClass::step_budget_exceeded;
     } else if (error.code() == "unsupported_budget") {
       result.result_class = AnalysisResultClass::unsupported_budget;
+    } else if (error.code() == "capture_budget_exceeded") {
+      result.result_class = AnalysisResultClass::capture_budget_exceeded;
     } else if (error.code() == "output_budget_exceeded") {
       result.result_class = AnalysisResultClass::output_budget_exceeded;
     } else {
       result.result_class = AnalysisResultClass::engine_failure;
     }
-    result.engine_version = engine_->engine_version();
+    if (result.engine_version.empty() || result.engine_version == "unknown") {
+      result.engine_version = engine_->engine_version();
+    }
     result.diagnostics.push_back(
         {.code = error.code(), .message = error.what()});
     return result;
@@ -1039,6 +1095,8 @@ AnalysisRun AnalysisService::run(const AnalysisRequest &request) const {
     result.status = AnalysisStatus::error;
     if (error.code() == "unsupported_budget") {
       result.result_class = AnalysisResultClass::unsupported_budget;
+    } else if (error.code() == "capture_budget_exceeded") {
+      result.result_class = AnalysisResultClass::capture_budget_exceeded;
     } else if (error.code() == "output_budget_exceeded") {
       result.result_class = AnalysisResultClass::output_budget_exceeded;
     } else if (error.code() == "timeout") {
@@ -1147,6 +1205,7 @@ AnalysisPublisher::publish(Storage &storage, const std::filesystem::path &root,
     put("peak_bytes", std::to_string(run.peak_bytes));
     put("step_count", std::to_string(run.step_count));
     put("output_bytes", std::to_string(run.output_bytes));
+    put("output_budget_terminated", run.output_budget_terminated ? "1" : "0");
     put("generated_inputs", [&run] {
       std::ostringstream inputs;
       for (const auto &input : run.generated_inputs) {
@@ -1215,6 +1274,8 @@ std::string analysis_result_class_name(const AnalysisResultClass result_class) {
     return "step_budget_exceeded";
   case AnalysisResultClass::unsupported_budget:
     return "unsupported_budget";
+  case AnalysisResultClass::capture_budget_exceeded:
+    return "capture_budget_exceeded";
   case AnalysisResultClass::output_budget_exceeded:
     return "output_budget_exceeded";
   case AnalysisResultClass::provider_failure:

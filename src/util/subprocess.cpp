@@ -4,6 +4,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 
 #include <csignal>
@@ -42,7 +43,8 @@ RunResult spawn_failure(const std::string &what, int err) {
 } // namespace
 
 RunResult run(const std::vector<std::string> &argv, double timeout_sec,
-              const std::size_t output_limit) {
+              const std::size_t output_limit,
+              const std::function<bool()> &output_guard) {
   RunResult res;
   if (argv.empty()) {
     res.exit_code = 127;
@@ -112,6 +114,11 @@ RunResult run(const std::vector<std::string> &argv, double timeout_sec,
        {.fd = err_pipe[0], .buf = &res.err, .open = true}}};
   std::array<char, 4096> buf{};
   while (sinks[0].open || sinks[1].open) {
+    if (output_guard && output_guard()) {
+      ::kill(pid, SIGKILL);
+      res.output_guard_triggered = true;
+      break;
+    }
     const auto remaining =
         std::chrono::duration_cast<std::chrono::milliseconds>(deadline -
                                                               clock::now())
@@ -131,8 +138,9 @@ RunResult run(const std::vector<std::string> &argv, double timeout_sec,
         ++nfds;
       }
     }
-    const int pr = ::poll(pfds.data(), static_cast<nfds_t>(nfds),
-                          static_cast<int>(remaining));
+    const int poll_timeout =
+        static_cast<int>(std::min<std::int64_t>(remaining, 50));
+    const int pr = ::poll(pfds.data(), static_cast<nfds_t>(nfds), poll_timeout);
     if (pr < 0) {
       if (errno == EINTR) {
         continue;
@@ -154,10 +162,12 @@ RunResult run(const std::vector<std::string> &argv, double timeout_sec,
       const auto got = ::read(s.fd, buf.data(), buf.size());
       if (got > 0) {
         const auto bytes = static_cast<std::size_t>(got);
-        const std::size_t remaining =
-            output_limit == 0 || res.captured_bytes >= output_limit
-                ? bytes
-                : std::min(bytes, output_limit - res.captured_bytes);
+        std::size_t remaining = bytes;
+        if (output_limit != 0) {
+          remaining = res.captured_bytes >= output_limit
+                          ? 0
+                          : std::min(bytes, output_limit - res.captured_bytes);
+        }
         s.buf->append(buf.data(), remaining);
         res.captured_bytes += remaining;
         if (output_limit != 0 && remaining < bytes) {
@@ -169,6 +179,11 @@ RunResult run(const std::vector<std::string> &argv, double timeout_sec,
         close_fd(s.fd);
         s.open = false;
       }
+    }
+    if (!res.output_guard_triggered && output_guard && output_guard()) {
+      ::kill(pid, SIGKILL);
+      res.output_guard_triggered = true;
+      break;
     }
   }
   for (auto &s : sinks) {

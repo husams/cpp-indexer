@@ -21,6 +21,8 @@ class Storage;
 
 namespace cidx::analysis {
 
+struct AnalysisRun;
+
 struct RelationRequirement {
   std::string name;
   int version = 1;
@@ -69,6 +71,7 @@ enum class AnalysisResultClass : std::uint8_t {
   timeout,
   step_budget_exceeded,
   unsupported_budget,
+  capture_budget_exceeded,
   output_budget_exceeded,
   provider_failure,
   engine_failure,
@@ -83,11 +86,18 @@ struct AnalysisDiagnostic {
 class AnalysisEngineError : public std::runtime_error {
 public:
   AnalysisEngineError(std::string code, const std::string &message);
+  AnalysisEngineError(std::string code, const std::string &message,
+                      const AnalysisRun &partial_run);
 
   [[nodiscard]] const std::string &code() const noexcept { return code_; }
+  [[nodiscard]] const std::shared_ptr<AnalysisRun> &
+  partial_run() const noexcept {
+    return partial_run_;
+  }
 
 private:
   std::string code_;
+  std::shared_ptr<AnalysisRun> partial_run_;
 };
 
 struct AnalysisPublication {
@@ -122,6 +132,7 @@ struct AnalysisRun {
   std::int64_t peak_bytes = 0;
   std::int64_t step_count = 0;
   std::int64_t output_bytes = 0;
+  bool output_budget_terminated = false;
   std::optional<AnalysisPublication> publication;
 
   [[nodiscard]] std::string canonical_result() const;

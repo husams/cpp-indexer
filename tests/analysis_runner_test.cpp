@@ -3,11 +3,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 #include <variant>
@@ -68,6 +70,47 @@ std::string make_extension_db(const std::string &root,
           "('usr:bank.transfer','payments',0)");
   return path;
 }
+
+std::string make_executable(const std::string &root, const std::string &name,
+                            const std::string &body) {
+  const std::string path = root + "/" + name;
+  std::ofstream script(path);
+  REQUIRE_UNARY(script.good());
+  script << "#!/bin/sh\n"
+         << "if [ \"$1\" = \"--version\" ]; then\n"
+         << "  echo hse66-wrapper-v1\n"
+         << "  exit 0\n"
+         << "fi\n"
+         << body;
+  script.close();
+  REQUIRE_UNARY(::chmod(path.c_str(), 0755) == 0);
+  return path;
+}
+
+class ScopedEnvironment final {
+public:
+  ScopedEnvironment(const char *name, const std::string &value) : name_(name) {
+    if (const char *previous = std::getenv(name); previous != nullptr) {
+      previous_ = previous;
+    }
+    REQUIRE_UNARY(::setenv(name, value.c_str(), 1) == 0);
+  }
+
+  ~ScopedEnvironment() {
+    if (previous_) {
+      (void)::setenv(name_, previous_->c_str(), 1);
+    } else {
+      (void)::unsetenv(name_);
+    }
+  }
+
+  ScopedEnvironment(const ScopedEnvironment &) = delete;
+  ScopedEnvironment &operator=(const ScopedEnvironment &) = delete;
+
+private:
+  const char *name_;
+  std::optional<std::string> previous_;
+};
 
 class SnapshotEngine final : public AnalysisEngine {
 public:
@@ -423,6 +466,146 @@ TEST_CASE("public service runs a real extension Souffle package") {
   const AnalysisRun recursive_result = AnalysisService().run(recursive);
   CHECK_UNARY(recursive_result.result_class ==
               AnalysisResultClass::unsupported_budget);
+}
+
+TEST_CASE("public Souffle output guard terminates a live overproducer") {
+  const std::string root = temp_dir();
+  const std::string extension_path =
+      make_extension_db(root, "workspace:overproducer");
+  const AnalysisRequest request{
+      .package =
+          AnalysisPackage{.name = "overproducer",
+                          .version = "1.0.0",
+                          .entry_point = "overproducer",
+                          .engine = "souffle",
+                          .program =
+                              ".decl overproducer(value:number)\n"
+                              "overproducer(0).\n"
+                              "overproducer(value + 1) :- overproducer(value), "
+                              "value < 1000000.\n"
+                              ".output overproducer\n",
+                          .prelude = {},
+                          .include_catalog_prelude = false,
+                          .content_hash = {},
+                          .required_relations = {},
+                          .output_relations = {}},
+      .provider = ProviderDeclaration{.kind = ProviderKind::extension,
+                                      .path = extension_path,
+                                      .left = {},
+                                      .right = {},
+                                      .joins = {}},
+      .facts = {},
+      .options = AnalysisOptions{.jobs = 1,
+                                 .step_budget = 0,
+                                 .time_budget_ms = 30'000,
+                                 .output_budget = 128,
+                                 .artifact_root = root + "/retained",
+                                 .capture_budget = 1'048'576},
+      .publication = std::nullopt};
+  const AnalysisRun result = AnalysisService().run(request);
+  CHECK_UNARY(result.result_class ==
+              AnalysisResultClass::output_budget_exceeded);
+  CHECK_UNARY(result.output_budget_terminated);
+  CHECK_UNARY(result.output_bytes > request.options.output_budget);
+  CHECK_UNARY(!result.generated_inputs.empty());
+  CHECK_UNARY(result.engine_version != "unknown");
+  CHECK_UNARY(!result.run_id.empty());
+  CHECK_UNARY(!result.input_hash.empty());
+}
+
+TEST_CASE("public Souffle failures retain typed partial-run evidence") {
+  const std::string root = temp_dir();
+  const std::string extension_path = make_extension_db(root, "workspace:test");
+  const AnalysisPackage package{.name = "wrapper-failure",
+                                .version = "1.0.0",
+                                .entry_point = "failure",
+                                .engine = "souffle",
+                                .program = ".output result\n",
+                                .prelude = {},
+                                .include_catalog_prelude = false,
+                                .content_hash = {},
+                                .required_relations = {},
+                                .output_relations = {}};
+  const auto request_for = [&](const AnalysisOptions &options) {
+    return AnalysisRequest{
+        .package = package,
+        .provider = ProviderDeclaration{.kind = ProviderKind::extension,
+                                        .path = extension_path,
+                                        .left = {},
+                                        .right = {},
+                                        .joins = {}},
+        .facts = {},
+        .options = options,
+        .publication = std::nullopt};
+  };
+  const auto check_evidence = [](const AnalysisRun &result,
+                                 AnalysisResultClass result_class) {
+    CHECK_UNARY(result.status == AnalysisStatus::error);
+    CHECK_UNARY(result.result_class == result_class);
+    CHECK_UNARY(result.engine_version == "hse66-wrapper-v1");
+    CHECK_UNARY(!result.run_id.empty());
+    CHECK_UNARY(!result.input_hash.empty());
+    CHECK_UNARY(!result.package_hash.empty());
+    CHECK_UNARY(!result.generated_inputs.empty());
+    CHECK_UNARY(result.elapsed_ms >= 0);
+    CHECK_UNARY(result.peak_bytes >= 0);
+    CHECK_UNARY(result.output_bytes > 0);
+  };
+
+  const std::string timeout_wrapper =
+      make_executable(root, "timeout-wrapper.sh",
+                      "printf timeout-out\n"
+                      "printf timeout-err >&2\n"
+                      "sleep 2\n");
+  {
+    ScopedEnvironment environment("CIDX_SOUFFLE", timeout_wrapper);
+    AnalysisOptions options{.jobs = 1,
+                            .step_budget = 0,
+                            .time_budget_ms = 50,
+                            .output_budget = 0,
+                            .artifact_root = root + "/timeout-retained",
+                            .capture_budget = 1'048'576};
+    const AnalysisRun result = AnalysisService().run(request_for(options));
+    check_evidence(result, AnalysisResultClass::timeout);
+    CHECK_UNARY(result.stdout_text.contains("timeout-out"));
+    CHECK_UNARY(result.stderr_text.contains("timeout-err"));
+  }
+
+  const std::string capture_wrapper = make_executable(
+      root, "capture-wrapper.sh",
+      "i=0\n"
+      "while [ $i -lt 100000 ]; do printf x; i=$((i + 1)); done\n");
+  {
+    ScopedEnvironment environment("CIDX_SOUFFLE", capture_wrapper);
+    AnalysisOptions options{.jobs = 1,
+                            .step_budget = 0,
+                            .time_budget_ms = 30'000,
+                            .output_budget = 0,
+                            .artifact_root = root + "/capture-retained",
+                            .capture_budget = 64};
+    const AnalysisRun result = AnalysisService().run(request_for(options));
+    check_evidence(result, AnalysisResultClass::capture_budget_exceeded);
+    CHECK_UNARY(result.stdout_text.size() <= 64);
+  }
+
+  const std::string failure_wrapper =
+      make_executable(root, "failure-wrapper.sh",
+                      "echo wrapper-out\n"
+                      "echo wrapper-err >&2\n"
+                      "exit 17\n");
+  {
+    ScopedEnvironment environment("CIDX_SOUFFLE", failure_wrapper);
+    AnalysisOptions options{.jobs = 1,
+                            .step_budget = 0,
+                            .time_budget_ms = 30'000,
+                            .output_budget = 0,
+                            .artifact_root = root + "/failure-retained",
+                            .capture_budget = 1'048'576};
+    const AnalysisRun result = AnalysisService().run(request_for(options));
+    check_evidence(result, AnalysisResultClass::engine_failure);
+    CHECK_UNARY(result.stdout_text.contains("wrapper-out"));
+    CHECK_UNARY(result.stderr_text.contains("wrapper-err"));
+  }
 }
 
 TEST_CASE("public service composes real AST and semantic providers") {
