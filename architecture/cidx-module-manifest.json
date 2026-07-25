@@ -14,6 +14,7 @@
         "src/ast/edge_records.hpp",
         "src/diff/syntax_ir.hpp",
         "src/diff/behaviour_ir.hpp",
+        "src/extract/plan_ir.hpp",
         "src/catalogs/**"
       ],
       "allowedDependencies": ["model.contracts"],
@@ -67,6 +68,22 @@
       ],
       "allowedExternal": ["clang", "llvm"],
       "description": "Typed LibTooling visitors, identity encoders, and extraction ports/adapters."
+    },
+    {
+      "id": "extraction.dsl",
+      "layer": "extraction",
+      "paths": ["src/extract/**"],
+      "excludePaths": ["src/extract/plan_ir.hpp"],
+      "allowedDependencies": [
+        "extraction.dsl",
+        "extraction.ast",
+        "model.contracts",
+        "foundation.util",
+        "workspace.toolchain",
+        "frontend.compiledb"
+      ],
+      "allowedExternal": ["clang", "llvm"],
+      "description": "HSE-64 declarative AST extraction DSL: the ExtractionPlan IR, validator, Clang dynamic-matcher execution engine, and extension fact sink."
     },
     {
       "id": "analysis.astgraph",
@@ -221,6 +238,7 @@
         "workspace.toolchain",
         "frontend.compiledb",
         "extraction.ast",
+        "extraction.dsl",
         "analysis.astgraph",
         "analysis.fact-provider",
         "persistence.sqlite",
@@ -327,6 +345,7 @@
     {"name": "cidx_core", "kind": "library", "module": "compat.core-bundle", "links": ["clang-cpp", "LLVM", "${_cidx_sqlite_link}"]},
     {"name": "cidx_catalog_check", "kind": "generated-target", "module": "model.contracts", "links": []},
     {"name": "cidx_ast", "kind": "object-library", "module": "extraction.ast", "links": []},
+    {"name": "cidx_extract", "kind": "object-library", "module": "extraction.dsl", "links": []},
     {"name": "cidx_hygiene", "kind": "object-library", "module": "refactor.include-hygiene", "links": []},
     {"name": "cidx_astgraph_ast", "kind": "object-library", "module": "analysis.astgraph", "links": []},
     {"name": "cidx_diff_ast", "kind": "object-library", "module": "analysis.diff", "links": []},
@@ -414,6 +433,12 @@
     },
     {
       "path": "src/diff/behaviour_ir.hpp",
+      "kind": "public-artifact-contract",
+      "owner": "model.contracts",
+      "forbiddenIncludePrefixes": ["clang/", "llvm/", "sqlite", "cli/", "storage/", "sys/", "unistd.h", "spawn.h"]
+    },
+    {
+      "path": "src/extract/plan_ir.hpp",
       "kind": "public-artifact-contract",
       "owner": "model.contracts",
       "forbiddenIncludePrefixes": ["clang/", "llvm/", "sqlite", "cli/", "storage/", "sys/", "unistd.h", "spawn.h"]

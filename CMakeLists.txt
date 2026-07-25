@@ -315,6 +315,34 @@ if(NOT LLVM_ENABLE_RTTI)
 endif()
 target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_hygiene>)
 
+# --- declarative AST extraction DSL (cidx_extract, HSE-64) -------------------
+# validator_matchers.cpp and engine.cpp construct/execute Clang dynamic AST
+# matchers (clang::ast_matchers::dynamic::Parser, clang::ast_matchers::
+# MatchFinder), so this needs the Clang C++ API and the same -isystem/-fno-rtti
+# treatment as cidx_ast/cidx_hygiene. plan_ir.hpp/plan_json.cpp/plan_identity.cpp/
+# matcher_catalog.cpp/extension_facts.cpp/validator_structure.cpp are Clang-free
+# but compiled here too for build simplicity (mirrors ast/fact_batch.cpp living
+# inside cidx_ast despite being Clang-free itself).
+add_library(cidx_extract OBJECT
+  src/extract/plan_json.cpp
+  src/extract/plan_identity.cpp
+  src/extract/matcher_catalog.cpp
+  src/extract/validator_structure.cpp
+  src/extract/validator_matchers.cpp
+  src/extract/extension_facts.cpp
+  src/extract/engine.cpp)
+target_include_directories(cidx_extract PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_include_directories(cidx_extract SYSTEM PRIVATE
+  ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+target_compile_definitions(cidx_extract PRIVATE ${LLVM_DEFINITIONS}
+  "CIDX_CLANG_RESOURCE_DIR=\"${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}\"")
+target_compile_features(cidx_extract PRIVATE cxx_std_23)
+if(NOT LLVM_ENABLE_RTTI)
+  target_compile_options(cidx_extract PRIVATE -fno-rtti)
+endif()
+target_sources(cidx_core PRIVATE $<TARGET_OBJECTS:cidx_extract>)
+
 # --- astgraph AST dumper (cidx_astgraph_ast) ---------------------------------
 # astgraph.cpp uses the Clang C++ AST (RecursiveASTVisitor + ClangTool), so like
 # cidx_ast it compiles in its own object library with -isystem LLVM headers and
