@@ -120,6 +120,8 @@ required_invariants() {
         ReadOnlyExecutionInvariant \
         TransformPublicationInvariant \
         TransformConsumptionInvariant \
+        TransformDependencyInvariant \
+        TransformInvariant \
         CycleAdversarialInvariant \
         DiamondAdversarialInvariant \
         FanoutAdversarialInvariant \
@@ -205,6 +207,14 @@ run_model() {
       -metadir "$WORK/meta-${model}" \
       -config "$cfg" \
       "$spec") >"$tlc_log" 2>&1; then
+    local violated_invariant
+    violated_invariant="$(sed -nE 's/.*Invariant ([A-Za-z][A-Za-z0-9_]*) is violated\..*/\1/p' \
+      "$tlc_log" | head -n 1)"
+    if [[ -n "$violated_invariant" ]]; then
+      echo "TLA_MODEL_VIOLATION=model=$model invariant=$violated_invariant" >&2
+    else
+      echo "TLA_MODEL_VIOLATION=model=$model invariant=unknown" >&2
+    fi
     echo "TLA_MODEL_STATUS=FAIL model=$model" >&2
     cat "$tlc_log" >&2
     exit 30

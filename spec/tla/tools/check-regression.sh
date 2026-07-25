@@ -131,7 +131,9 @@ run_semantic_seed() {
   if [[ "$seed_status" -ne 30 ]] \
       || ! grep -q "TLA_MODEL_STATUS=FAIL model=CidxSemanticGraphSmoke" \
           <<<"$seed_output" \
-      || ! grep -q "$expected" <<<"$seed_output"; then
+      || ! grep -Fqx \
+          "TLA_MODEL_VIOLATION=model=CidxSemanticGraphSmoke invariant=$expected" \
+          <<<"$seed_output"; then
     echo "TLA_SEMANTIC_SEED_STATUS=FAIL scenario=$scenario reason=missing-$expected" >&2
     printf '%s\n' "$seed_output" >&2
     exit 1
@@ -140,12 +142,20 @@ run_semantic_seed() {
 }
 
 run_semantic_seed illegal-stream PlanTransitionInvariant
+run_semantic_seed illegal-source PlanTransitionInvariant
+run_semantic_seed illegal-filter PlanTransitionInvariant
+run_semantic_seed illegal-traverse PlanTransitionInvariant
+run_semantic_seed illegal-set PlanTransitionInvariant
+run_semantic_seed illegal-select PlanTransitionInvariant
+run_semantic_seed illegal-order PlanTransitionInvariant
+run_semantic_seed illegal-limit PlanTransitionInvariant
 run_semantic_seed invalid-witness WitnessInvariant
 run_semantic_seed duplicate-results SetSemanticsInvariant
 run_semantic_seed query-write ReadOnlyExecutionInvariant
 run_semantic_seed complete-truncated CompletenessInvariant
 run_semantic_seed complete-unknown CompletenessInvariant
-run_semantic_seed stale-transform TransformConsumptionInvariant
+run_semantic_seed stale-fact-consumption TransformConsumptionInvariant
+run_semantic_seed stale-transform TransformPublicationInvariant
 run_semantic_seed failed-transform TransformPublicationInvariant
 run_semantic_seed partial-transform TransformPublicationInvariant
 

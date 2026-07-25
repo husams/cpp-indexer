@@ -27,7 +27,7 @@ GraphNodeKinds == {"workspace", "repository", "component", "source",
 
 RelationTargetStates == {"known", "unknown"}
 PlanSources == {"graph", "view"}
-PlanViews == {"nodes", "relations", "evidence", "paths"}
+PlanViews == {"graph", "nodes", "relations", "evidence", "paths"}
 PlanFilters == {"none", "predicate"}
 PlanStreams == {"set", "path"}
 PlanOperations == {"identity", "filter", "traverse", "union",
@@ -37,9 +37,52 @@ PlanOrders == {"canonical", "none"}
 CompletenessStates == {"complete", "partial", "unknown"}
 ResultStates == {"none", "complete", "partial", "unknown"}
 DerivedTransformStates == {"absent", "planned", "current", "stale", "failed"}
-Defects == {"none", "illegal-stream", "invalid-witness", "duplicate-results",
-            "query-write", "complete-truncated", "complete-unknown", "stale-transform",
-            "failed-transform", "partial-transform"}
+PlanStepOperations == {"source", "filter", "traverse", "union",
+                       "intersection", "difference", "select", "order", "limit"}
+TransformLifecycleStates == {"planned", "running", "published", "stale", "failed"}
+TransformNames == {"resolve", "answer"}
+FactSets == {"raw-facts", "resolved-facts-v1", "answer-facts-v1"}
+TransformDependencyEdges == {<<"answer", "resolve">>}
+TransformRequiredFacts == {<<"resolve", "raw-facts">>,
+                           <<"answer", "resolved-facts-v1">>}
+TransformProducedFacts == {<<"resolve", "resolved-facts-v1">>,
+                           <<"answer", "answer-facts-v1">>}
+Defects == {"none", "illegal-stream", "illegal-source", "illegal-filter", "illegal-traverse",
+            "illegal-set", "illegal-select", "illegal-order", "illegal-limit",
+            "invalid-witness", "duplicate-results", "query-write",
+            "complete-truncated", "complete-unknown", "stale-transform",
+            "stale-fact-consumption", "failed-transform", "partial-transform"}
+
+PlanStepRecord == [operation: PlanStepOperations,
+                   inputView: PlanViews,
+                   inputStream: PlanStreams,
+                   outputView: PlanViews,
+                   outputStream: PlanStreams,
+                   selection: PlanSelections,
+                   leftView: PlanViews,
+                   rightView: PlanViews,
+                   depth: Nat,
+                   limit: Nat]
+
+ValidSetPlan ==
+    <<[operation |-> "source", inputView |-> "graph", inputStream |-> "set",
+       outputView |-> "nodes", outputStream |-> "set", selection |-> "node",
+       leftView |-> "nodes", rightView |-> "nodes", depth |-> 0, limit |-> 10],
+      [operation |-> "filter", inputView |-> "nodes", inputStream |-> "set",
+       outputView |-> "nodes", outputStream |-> "set", selection |-> "node",
+       leftView |-> "nodes", rightView |-> "nodes", depth |-> 0, limit |-> 10],
+      [operation |-> "union", inputView |-> "nodes", inputStream |-> "set",
+       outputView |-> "nodes", outputStream |-> "set", selection |-> "node",
+       leftView |-> "nodes", rightView |-> "nodes", depth |-> 0, limit |-> 10],
+      [operation |-> "select", inputView |-> "nodes", inputStream |-> "set",
+       outputView |-> "nodes", outputStream |-> "set", selection |-> "node",
+       leftView |-> "nodes", rightView |-> "nodes", depth |-> 0, limit |-> 10],
+      [operation |-> "order", inputView |-> "nodes", inputStream |-> "set",
+       outputView |-> "nodes", outputStream |-> "set", selection |-> "node",
+       leftView |-> "nodes", rightView |-> "nodes", depth |-> 0, limit |-> 10],
+      [operation |-> "limit", inputView |-> "nodes", inputStream |-> "set",
+       outputView |-> "nodes", outputStream |-> "set", selection |-> "node",
+       leftView |-> "nodes", rightView |-> "nodes", depth |-> 0, limit |-> 10]>>
 
 GraphNodes == {
     <<"node-1", "function">>,
@@ -77,6 +120,7 @@ CanonicalResultOrder == <<"node-1", "node-2", "node-3">>
 
 VARIABLES
     candidatePlan,
+    candidateSteps,
     planValidated,
     planRejected,
     queryExecuted,
@@ -84,6 +128,7 @@ VARIABLES
     resultStatus,
     resultItems,
     resultOrder,
+    resultRelations,
     witnessPath,
     inputCompleteness,
     inputTruncated,
@@ -98,6 +143,8 @@ VARIABLES
     requiredFactSet,
     outputFactSet,
     transformConsumed,
+    transformLifecycle,
+    transformReused,
     seeded,
     trace
 
@@ -139,6 +186,7 @@ PartialEvidenceAdversarialInvariant ==
 
 SemanticVars == <<
     candidatePlan,
+    candidateSteps,
     planValidated,
     planRejected,
     queryExecuted,
@@ -146,6 +194,7 @@ SemanticVars == <<
     resultStatus,
     resultItems,
     resultOrder,
+    resultRelations,
     witnessPath,
     inputCompleteness,
     inputTruncated,
@@ -160,6 +209,8 @@ SemanticVars == <<
     requiredFactSet,
     outputFactSet,
     transformConsumed,
+    transformLifecycle,
+    transformReused,
     seeded,
     trace
 >>
@@ -248,6 +299,110 @@ SemanticGraphInvariant ==
     /\ EvidenceOwnershipInvariant
     /\ UnknownTargetInvariant
 
+PlanStepShapeValid(step) ==
+    /\ step.operation \in PlanStepOperations
+    /\ step.inputView \in PlanViews
+    /\ step.inputStream \in PlanStreams
+    /\ step.outputView \in PlanViews
+    /\ step.outputStream \in PlanStreams
+    /\ step.selection \in PlanSelections
+    /\ step.leftView \in PlanViews
+    /\ step.rightView \in PlanViews
+    /\ step.depth \in Nat
+    /\ step.depth <= MaxDepth
+    /\ step.limit \in Nat
+    /\ step.limit > 0
+
+PlanStepTransitionValid(previous, step) ==
+    /\ step.inputView = previous.outputView
+    /\ step.inputStream = previous.outputStream
+    /\ (step.operation = "source")
+        => /\ step.inputView = "graph"
+           /\ step.inputStream = "set"
+           /\ step.outputView = "nodes"
+           /\ step.outputStream = "set"
+    /\ (step.operation = "filter")
+        => /\ step.inputView \in {"nodes", "relations", "evidence"}
+           /\ step.inputStream = "set"
+           /\ step.outputView = step.inputView
+           /\ step.outputStream = "set"
+    /\ (step.operation = "traverse")
+        => /\ step.inputView \in {"nodes", "relations"}
+           /\ step.inputStream = "set"
+           /\ step.outputView = "paths"
+           /\ step.outputStream = "path"
+           /\ step.selection = "path"
+           /\ step.depth > 0
+    /\ (step.operation \in {"union", "intersection", "difference"})
+        => /\ step.inputView \in {"nodes", "relations", "evidence"}
+           /\ step.inputStream = "set"
+           /\ step.leftView = step.inputView
+           /\ step.rightView = step.inputView
+           /\ step.outputView = step.inputView
+           /\ step.outputStream = "set"
+    /\ (step.operation = "select" /\ step.selection = "node")
+        => /\ step.inputView = "nodes"
+           /\ step.inputStream = "set"
+           /\ step.outputView = "nodes"
+           /\ step.outputStream = "set"
+    /\ (step.operation = "select" /\ step.selection = "relation")
+        => /\ step.inputView = "relations"
+           /\ step.inputStream = "set"
+           /\ step.outputView = "relations"
+           /\ step.outputStream = "set"
+    /\ (step.operation = "select" /\ step.selection = "evidence")
+        => /\ step.inputView = "evidence"
+           /\ step.inputStream = "set"
+           /\ step.outputView = "evidence"
+           /\ step.outputStream = "set"
+    /\ (step.operation = "select" /\ step.selection = "path")
+        => /\ step.inputView = "paths"
+           /\ step.inputStream = "path"
+           /\ step.outputView = "paths"
+           /\ step.outputStream = "path"
+    /\ (step.operation \in {"order", "limit"})
+        => /\ step.outputView = step.inputView
+           /\ step.outputStream = step.inputStream
+
+PlanStepsValid(steps) ==
+    /\ steps \in Seq(PlanStepRecord)
+    /\ Len(steps) > 0
+    /\ steps[1].operation = "source"
+    /\ \A i \in 1..Len(steps) : PlanStepShapeValid(steps[i])
+    /\ \A i \in 2..Len(steps) : PlanStepTransitionValid(steps[i - 1], steps[i])
+
+TransformDependencyInvariant ==
+    /\ TransformNames # {}
+    /\ \A edge \in TransformDependencyEdges :
+        /\ edge[1] \in TransformNames
+        /\ edge[2] \in TransformNames
+        /\ edge[1] # edge[2]
+    /\ \A requirement \in TransformRequiredFacts :
+        /\ requirement[1] \in TransformNames
+        /\ requirement[2] \in FactSets
+    /\ \A product \in TransformProducedFacts :
+        /\ product[1] \in TransformNames
+        /\ product[2] \in FactSets
+
+ResultRelationsForItems(items) ==
+    IF items = LeftSet \cup RightSet
+    THEN {"rel-1", "rel-2"}
+    ELSE IF items = LeftSet \cap RightSet
+    THEN {"rel-1", "rel-2"}
+    ELSE {"rel-1"}
+
+TraversedRelations(path) ==
+    IF path = <<PathStart, "node-2", PathTarget>>
+    THEN {"rel-1", "rel-2"}
+    ELSE {}
+
+EvidenceCompleteForRelations(relations) ==
+    \A e \in GraphEvidence :
+        e[2] \in relations => e[4]
+
+UnknownTargetForRelations(relations) ==
+    \E r \in GraphRelations : r[1] \in relations /\ r[5] = "unknown"
+
 PlanValid(p) ==
     /\ p.source \in PlanSources
     /\ p.view \in PlanViews
@@ -273,7 +428,8 @@ PlanValid(p) ==
     /\ p.order = "none" => p.stream = "path"
 
 PlanTransitionInvariant ==
-    /\ planValidated => PlanValid(candidatePlan)
+    /\ planValidated => /\ PlanValid(candidatePlan)
+                          /\ PlanStepsValid(candidateSteps)
     /\ (planValidated /\ candidatePlan.stream = "path")
         => candidatePlan.view = "paths"
     /\ planRejected => ~planValidated
@@ -286,8 +442,12 @@ SetOperationResult(op, left, right) ==
     ELSE left
 
 SetSemanticsInvariant ==
-    /\ resultItems = SetOperationResult("union", LeftSet, RightSet)
-    /\ resultOrder = CanonicalResultOrder
+    /\ candidatePlan.operation \in {"union", "intersection", "difference"}
+    /\ resultItems = SetOperationResult(candidatePlan.operation, LeftSet, RightSet)
+    /\ resultOrder =
+        IF candidatePlan.operation = "union" THEN CanonicalResultOrder
+        ELSE IF candidatePlan.operation = "intersection" THEN <<"node-2">>
+        ELSE <<"node-1">>
     /\ SequenceValues(resultOrder) = resultItems
     /\ DistinctSequence(resultOrder)
 
@@ -308,14 +468,17 @@ WitnessPathValid(path, bound) ==
     /\ PathHasEdges(path)
 
 WitnessInvariant ==
-    resultReturned /\ candidatePlan.stream = "path"
-        => WitnessPathValid(witnessPath, candidatePlan.depth)
+    resultReturned => WitnessPathValid(witnessPath, 2)
 
 CompletenessInvariant ==
     resultReturned /\ resultStatus = "complete"
         => /\ inputCompleteness = "complete"
            /\ ~inputTruncated
            /\ ~inputUnknown
+           /\ resultRelations = ResultRelationsForItems(resultItems)
+           /\ resultRelations = TraversedRelations(witnessPath)
+           /\ EvidenceCompleteForRelations(resultRelations)
+           /\ ~UnknownTargetForRelations(resultRelations)
 
 ReadOnlyExecutionInvariant ==
     /\ queryWrites = 0
@@ -326,7 +489,6 @@ TransformPublicationInvariant ==
         => /\ transformInputComplete
            /\ transformOutputPublished
            /\ transformGeneration = currentGeneration
-           /\ requiredFactSet = outputFactSet
     /\ transformState \in {"stale", "failed"}
         => /\ ~transformOutputPublished
            /\ ~transformConsumed
@@ -339,8 +501,27 @@ TransformConsumptionInvariant ==
            /\ requiredFactSet = outputFactSet
 
 TransformInvariant ==
+    /\ TransformDependencyInvariant
     /\ TransformPublicationInvariant
     /\ TransformConsumptionInvariant
+    /\ transformLifecycle = "published"
+        => /\ transformState = "current"
+           /\ transformOutputPublished
+           /\ transformInputComplete
+           /\ transformGeneration = currentGeneration
+    /\ transformLifecycle = "failed"
+        => /\ transformState = "failed"
+           /\ ~transformOutputPublished
+           /\ ~transformConsumed
+    /\ transformLifecycle = "stale"
+        => /\ transformState = "stale"
+           /\ ~transformOutputPublished
+           /\ ~transformConsumed
+    /\ transformReused
+        => /\ transformLifecycle = "published"
+           /\ transformState = "current"
+           /\ transformOutputPublished
+           /\ transformGeneration = currentGeneration
 
 TypeInvariant ==
     /\ candidatePlan \in [
@@ -354,6 +535,7 @@ TypeInvariant ==
         depth: Nat,
         limit: Nat
         ]
+    /\ candidateSteps \in Seq(PlanStepRecord)
     /\ planValidated \in BOOLEAN
     /\ planRejected \in BOOLEAN
     /\ queryExecuted \in BOOLEAN
@@ -361,6 +543,7 @@ TypeInvariant ==
     /\ resultStatus \in ResultStates
     /\ resultItems \subseteq GraphNodeIds
     /\ resultOrder \in Seq(GraphNodeIds)
+    /\ resultRelations \subseteq RelationIds
     /\ witnessPath \in Seq(GraphNodeIds)
     /\ inputCompleteness \in CompletenessStates
     /\ inputTruncated \in BOOLEAN
@@ -375,21 +558,24 @@ TypeInvariant ==
     /\ requiredFactSet \in STRING
     /\ outputFactSet \in STRING
     /\ transformConsumed \in BOOLEAN
+    /\ transformLifecycle \in TransformLifecycleStates
+    /\ transformReused \in BOOLEAN
     /\ seeded \in BOOLEAN
     /\ Len(trace) <= TraceBound
 
 Init ==
     /\ candidatePlan = [
         source |-> "graph",
-        view |-> "paths",
+        view |-> "nodes",
         filter |-> "none",
-        stream |-> "path",
-        operation |-> "traverse",
-        selection |-> "path",
+        stream |-> "set",
+        operation |-> "union",
+        selection |-> "node",
         order |-> "canonical",
-        depth |-> 2,
+        depth |-> 0,
         limit |-> 10
         ]
+    /\ candidateSteps = ValidSetPlan
     /\ planValidated = FALSE
     /\ planRejected = FALSE
     /\ queryExecuted = FALSE
@@ -397,6 +583,7 @@ Init ==
     /\ resultStatus = "none"
     /\ resultItems = SetOperationResult("union", LeftSet, RightSet)
     /\ resultOrder = CanonicalResultOrder
+    /\ resultRelations = {"rel-1", "rel-2"}
     /\ witnessPath = <<PathStart, "node-2", PathTarget>>
     /\ inputCompleteness = "complete"
     /\ inputTruncated = FALSE
@@ -411,6 +598,8 @@ Init ==
     /\ requiredFactSet = "resolved-facts-v1"
     /\ outputFactSet = "resolved-facts-v1"
     /\ transformConsumed = FALSE
+    /\ transformLifecycle = "published"
+    /\ transformReused = FALSE
     /\ seeded = FALSE
     /\ trace = <<"Init">>
 
@@ -421,26 +610,30 @@ ValidatePlan ==
     /\ planValidated' = TRUE
     /\ planRejected' = FALSE
     /\ trace' = Append(trace, "ValidatePlan")
-    /\ UNCHANGED <<candidatePlan, queryExecuted, resultReturned,
-                    resultStatus, resultItems, resultOrder, witnessPath,
+    /\ UNCHANGED <<candidatePlan, candidateSteps, queryExecuted, resultReturned,
+                    resultStatus, resultItems, resultOrder, resultRelations,
+                    witnessPath,
                     inputCompleteness, inputTruncated, inputUnknown,
                     abstractIndexVersion, queryWrites, currentGeneration,
                     transformState, transformInputComplete,
                     transformOutputPublished, transformGeneration,
-                    requiredFactSet, outputFactSet, transformConsumed, seeded>>
+                    requiredFactSet, outputFactSet, transformConsumed,
+                    transformLifecycle, transformReused, seeded>>
 
 ExecuteQuery ==
     /\ planValidated
     /\ ~queryExecuted
     /\ queryExecuted' = TRUE
     /\ trace' = Append(trace, "ExecuteQuery")
-    /\ UNCHANGED <<candidatePlan, planValidated, planRejected, resultReturned,
-                    resultStatus, resultItems, resultOrder, witnessPath,
+    /\ UNCHANGED <<candidatePlan, candidateSteps, planValidated, planRejected,
+                    resultReturned, resultStatus, resultItems, resultOrder,
+                    resultRelations, witnessPath,
                     inputCompleteness, inputTruncated, inputUnknown,
                     abstractIndexVersion, queryWrites, currentGeneration,
                     transformState, transformInputComplete,
                     transformOutputPublished, transformGeneration,
-                    requiredFactSet, outputFactSet, transformConsumed, seeded>>
+                    requiredFactSet, outputFactSet, transformConsumed,
+                    transformLifecycle, transformReused, seeded>>
 
 ReturnResult ==
     /\ queryExecuted
@@ -448,13 +641,15 @@ ReturnResult ==
     /\ resultReturned' = TRUE
     /\ resultStatus' = "complete"
     /\ trace' = Append(trace, "ReturnResult")
-    /\ UNCHANGED <<candidatePlan, planValidated, planRejected, queryExecuted,
-                    resultItems, resultOrder, witnessPath, inputCompleteness,
+    /\ UNCHANGED <<candidatePlan, candidateSteps, planValidated, planRejected,
+                    queryExecuted, resultItems, resultOrder, resultRelations,
+                    witnessPath, inputCompleteness,
                     inputTruncated, inputUnknown, abstractIndexVersion,
                     queryWrites, currentGeneration, transformState,
                     transformInputComplete, transformOutputPublished,
                     transformGeneration, requiredFactSet, outputFactSet,
-                    transformConsumed, seeded>>
+                    transformConsumed, transformLifecycle, transformReused,
+                    seeded>>
 
 ConsumeTransform ==
     /\ transformState = "current"
@@ -462,13 +657,110 @@ ConsumeTransform ==
     /\ ~transformConsumed
     /\ transformConsumed' = TRUE
     /\ trace' = Append(trace, "ConsumeTransform")
-    /\ UNCHANGED <<candidatePlan, planValidated, planRejected, queryExecuted,
-                    resultReturned, resultStatus, resultItems, resultOrder,
-                    witnessPath, inputCompleteness, inputTruncated,
+    /\ UNCHANGED <<candidatePlan, candidateSteps, planValidated, planRejected,
+                    queryExecuted, resultReturned, resultStatus, resultItems,
+                    resultOrder, resultRelations, witnessPath,
+                    inputCompleteness, inputTruncated,
                     inputUnknown, abstractIndexVersion, queryWrites,
                     currentGeneration, transformState, transformInputComplete,
                     transformOutputPublished, transformGeneration,
+                    requiredFactSet, outputFactSet, transformLifecycle,
+                    transformReused, seeded>>
+
+PlanTransform ==
+    /\ transformLifecycle = "published"
+    /\ ~transformReused
+    /\ transformLifecycle' = "planned"
+    /\ trace' = Append(trace, "PlanTransform")
+    /\ UNCHANGED <<candidatePlan, candidateSteps, planValidated, planRejected,
+                    queryExecuted, resultReturned, resultStatus, resultItems,
+                    resultOrder, resultRelations, witnessPath,
+                    inputCompleteness, inputTruncated, inputUnknown,
+                    abstractIndexVersion, queryWrites, currentGeneration,
+                    transformState, transformInputComplete,
+                    transformOutputPublished, transformGeneration,
+                    requiredFactSet, outputFactSet, transformConsumed,
+                    transformReused, seeded>>
+
+RunTransform ==
+    /\ transformLifecycle = "planned"
+    /\ transformLifecycle' = "running"
+    /\ trace' = Append(trace, "RunTransform")
+    /\ UNCHANGED <<candidatePlan, candidateSteps, planValidated, planRejected,
+                    queryExecuted, resultReturned, resultStatus, resultItems,
+                    resultOrder, resultRelations, witnessPath,
+                    inputCompleteness, inputTruncated, inputUnknown,
+                    abstractIndexVersion, queryWrites, currentGeneration,
+                    transformState, transformInputComplete,
+                    transformOutputPublished, transformGeneration,
+                    requiredFactSet, outputFactSet, transformConsumed,
+                    transformReused, seeded>>
+
+PublishTransform ==
+    /\ transformLifecycle = "running"
+    /\ transformInputComplete
+    /\ transformLifecycle' = "published"
+    /\ transformState' = "current"
+    /\ transformOutputPublished' = TRUE
+    /\ transformGeneration' = currentGeneration
+    /\ requiredFactSet' = outputFactSet
+    /\ transformConsumed' = FALSE
+    /\ transformReused' = FALSE
+    /\ trace' = Append(trace, "PublishTransform")
+    /\ UNCHANGED <<candidatePlan, candidateSteps, planValidated, planRejected,
+                    queryExecuted, resultReturned, resultStatus, resultItems,
+                    resultOrder, resultRelations, witnessPath,
+                    inputCompleteness, inputTruncated, inputUnknown,
+                    abstractIndexVersion, queryWrites, currentGeneration,
+                    transformInputComplete, transformLifecycle, seeded>>
+
+FailTransform ==
+    /\ transformLifecycle = "running"
+    /\ transformLifecycle' = "failed"
+    /\ transformState' = "failed"
+    /\ transformOutputPublished' = FALSE
+    /\ transformConsumed' = FALSE
+    /\ transformReused' = FALSE
+    /\ trace' = Append(trace, "FailTransform")
+    /\ UNCHANGED <<candidatePlan, candidateSteps, planValidated, planRejected,
+                    queryExecuted, resultReturned, resultStatus, resultItems,
+                    resultOrder, resultRelations, witnessPath,
+                    inputCompleteness, inputTruncated, inputUnknown,
+                    abstractIndexVersion, queryWrites, currentGeneration,
+                    transformInputComplete, transformGeneration,
                     requiredFactSet, outputFactSet, seeded>>
+
+InvalidateTransform ==
+    /\ transformLifecycle = "published"
+    /\ ~transformReused
+    /\ transformLifecycle' = "stale"
+    /\ transformState' = "stale"
+    /\ transformOutputPublished' = FALSE
+    /\ transformConsumed' = FALSE
+    /\ trace' = Append(trace, "InvalidateTransform")
+    /\ UNCHANGED <<candidatePlan, candidateSteps, planValidated, planRejected,
+                    queryExecuted, resultReturned, resultStatus, resultItems,
+                    resultOrder, resultRelations, witnessPath,
+                    inputCompleteness, inputTruncated, inputUnknown,
+                    abstractIndexVersion, queryWrites, currentGeneration,
+                    transformInputComplete, transformGeneration,
+                    requiredFactSet, outputFactSet, transformReused, seeded>>
+
+ReuseTransform ==
+    /\ transformLifecycle = "published"
+    /\ ~transformReused
+    /\ transformReused' = TRUE
+    /\ transformConsumed' = TRUE
+    /\ trace' = Append(trace, "ReuseTransform")
+    /\ UNCHANGED <<candidatePlan, candidateSteps, planValidated, planRejected,
+                    queryExecuted, resultReturned, resultStatus, resultItems,
+                    resultOrder, resultRelations, witnessPath,
+                    inputCompleteness, inputTruncated, inputUnknown,
+                    abstractIndexVersion, queryWrites, currentGeneration,
+                    transformState, transformInputComplete,
+                    transformOutputPublished, transformGeneration,
+                    requiredFactSet, outputFactSet, transformLifecycle,
+                    seeded>>
 
 SeedDefect ==
     /\ Defect \in Defects \ {"none"}
@@ -478,8 +770,33 @@ SeedDefect ==
         IF Defect = "illegal-stream"
         THEN [candidatePlan EXCEPT !.stream = "path", !.view = "relations"]
         ELSE candidatePlan
-    /\ planValidated' = planValidated \/ Defect = "illegal-stream"
-    /\ resultReturned' = resultReturned \/ Defect = "invalid-witness"
+    /\ candidateSteps' =
+        IF Defect = "illegal-source"
+        THEN [candidateSteps EXCEPT ![1].outputView = "relations"]
+        ELSE IF Defect = "illegal-filter"
+        THEN [candidateSteps EXCEPT ![2].outputView = "paths",
+                                      ![2].outputStream = "path"]
+        ELSE IF Defect = "illegal-traverse"
+        THEN [candidateSteps EXCEPT ![3].operation = "traverse"]
+        ELSE IF Defect = "illegal-set"
+        THEN [candidateSteps EXCEPT ![3].leftView = "relations"]
+        ELSE IF Defect = "illegal-select"
+        THEN [candidateSteps EXCEPT ![4].selection = "relation"]
+        ELSE IF Defect = "illegal-order"
+        THEN [candidateSteps EXCEPT ![5].outputView = "paths",
+                                      ![5].outputStream = "path"]
+        ELSE IF Defect = "illegal-limit"
+        THEN [candidateSteps EXCEPT ![6].outputView = "paths",
+                                      ![6].outputStream = "path"]
+        ELSE candidateSteps
+    /\ planValidated' = IF Defect \in
+        {"illegal-stream", "illegal-source", "illegal-filter", "illegal-traverse", "illegal-set",
+         "illegal-select", "illegal-order", "illegal-limit", "query-write"}
+                         THEN TRUE
+                         ELSE planValidated
+    /\ resultReturned' = IF Defect = "invalid-witness"
+                         THEN TRUE
+                         ELSE resultReturned
     /\ resultStatus' = IF Defect \in {"complete-truncated", "complete-unknown"}
                          THEN "complete"
                          ELSE resultStatus
@@ -491,39 +808,66 @@ SeedDefect ==
                       ELSE witnessPath
     /\ inputCompleteness' = IF Defect = "complete-truncated" THEN "partial"
                            ELSE inputCompleteness
-    /\ inputTruncated' = inputTruncated \/ Defect = "complete-truncated"
-    /\ inputUnknown' = inputUnknown \/ Defect = "complete-unknown"
-    /\ queryExecuted' = queryExecuted \/ Defect = "query-write"
+    /\ inputTruncated' = IF Defect = "complete-truncated"
+                         THEN TRUE
+                         ELSE inputTruncated
+    /\ inputUnknown' = IF Defect = "complete-unknown"
+                       THEN TRUE
+                       ELSE inputUnknown
+    /\ resultRelations' = IF Defect = "complete-unknown"
+                          THEN {"rel-3"}
+                          ELSE resultRelations
+    /\ queryExecuted' = IF Defect = "query-write"
+                        THEN TRUE
+                        ELSE queryExecuted
     /\ queryWrites' = IF Defect = "query-write" THEN 1 ELSE queryWrites
     /\ abstractIndexVersion' = IF Defect = "query-write"
                                THEN InitialIndexVersion + 1
                                ELSE abstractIndexVersion
     /\ transformState' = IF Defect = "stale-transform" THEN "stale"
+                        ELSE IF Defect = "stale-fact-consumption" THEN "current"
                         ELSE IF Defect = "failed-transform" THEN "failed"
                         ELSE transformState
     /\ transformInputComplete' = IF Defect = "partial-transform" THEN FALSE
                                  ELSE transformInputComplete
-    /\ transformOutputPublished' = IF Defect \in {"stale-transform",
-                                                   "failed-transform"}
+    /\ transformOutputPublished' = IF Defect = "stale-fact-consumption"
+                                   THEN TRUE
+                                   ELSE IF Defect \in {"stale-transform",
+                                                        "failed-transform"}
                                    THEN FALSE
                                    ELSE transformOutputPublished
-    /\ transformConsumed' = transformConsumed \/ Defect \in {"stale-transform",
-                                                               "failed-transform",
-                                                               "partial-transform"}
+    /\ transformConsumed' = IF Defect \in
+        {"stale-fact-consumption", "failed-transform", "partial-transform"}
+                            THEN TRUE
+                            ELSE transformConsumed
+    /\ requiredFactSet' = IF Defect = "stale-fact-consumption"
+                          THEN "stale-facts-v0"
+                          ELSE requiredFactSet
+    /\ transformLifecycle' = IF Defect = "stale-transform" THEN "stale"
+                             ELSE IF Defect = "failed-transform" THEN "failed"
+                             ELSE transformLifecycle
+    /\ transformReused' = transformReused
     /\ trace' = Append(trace, Defect)
     /\ UNCHANGED <<planRejected, resultItems, currentGeneration,
-                    transformGeneration, requiredFactSet, outputFactSet>>
+                    transformGeneration, outputFactSet>>
 
 NoOp == UNCHANGED SemanticVars
 
 Next == ValidatePlan \/ ExecuteQuery \/ ReturnResult \/ ConsumeTransform
-    \/ SeedDefect \/ NoOp
+    \/ PlanTransform \/ RunTransform \/ PublishTransform \/ FailTransform
+    \/ InvalidateTransform \/ ReuseTransform \/ SeedDefect \/ NoOp
 
 Fairness ==
     /\ WF_vars(ValidatePlan)
     /\ WF_vars(ExecuteQuery)
     /\ WF_vars(ReturnResult)
     /\ WF_vars(ConsumeTransform)
+    /\ WF_vars(PlanTransform)
+    /\ WF_vars(RunTransform)
+    /\ WF_vars(PublishTransform)
+    /\ WF_vars(FailTransform)
+    /\ WF_vars(InvalidateTransform)
+    /\ WF_vars(ReuseTransform)
     /\ WF_vars(SeedDefect)
 
 Spec == Init /\ [][Next]_SemanticVars /\ Fairness
