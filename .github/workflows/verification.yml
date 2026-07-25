@@ -33,6 +33,8 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       DEBIAN_FRONTEND: noninteractive
+      SOUFFLE_VERSION: '2.4.1'
+      SOUFFLE_DEB_SHA512: 'a9d300911e7d6900b7b883cb0242f05b2a56a5a9f55dde1a0e817e7f391bb6661f1d9cc45c849ab5f6c7dff22906c97633a16d6b1f93763233c2644e1d20db5f'
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -57,6 +59,19 @@ jobs:
             clang-22 clang-tools-22 cmake libclang-22-dev \
             libclang-common-22-dev libclang-cpp22 libsqlite3-dev \
             llvm-22 llvm-22-dev ninja-build
+      - name: Install pinned Souffle executable
+        run: |
+          souffle_deb=/tmp/souffle-${SOUFFLE_VERSION}.deb
+          curl --fail --location --silent --show-error \
+            "https://github.com/souffle-lang/souffle/releases/download/${SOUFFLE_VERSION}/x86_64-ubuntu-2004-souffle-${SOUFFLE_VERSION}-Linux.deb" \
+            --output "$souffle_deb"
+          echo "${SOUFFLE_DEB_SHA512}  ${souffle_deb}" | sha512sum --check
+          sudo dpkg --install "$souffle_deb"
+          souffle_path="$(command -v souffle)"
+          test -x "$souffle_path"
+          souffle --version 2>&1 | tee /tmp/souffle-version.txt
+          grep --fixed-strings --quiet "$SOUFFLE_VERSION" /tmp/souffle-version.txt
+          test -f /usr/include/souffle/CompiledSouffle.h
       - name: Configure with the matching LLVM/Clang toolchain
         run: >-
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
