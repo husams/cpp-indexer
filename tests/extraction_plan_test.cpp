@@ -273,6 +273,78 @@ TEST_CASE("a fully valid plan passes validate_structure") {
   CHECK(result.ok());
 }
 
+// --- PR #66 review regression coverage -------------------------------------
+
+TEST_CASE("validate_structure rejects workspace scope: no cross-TU execution "
+          "model exists to make it safe") {
+  ExtractionPlan plan = make_plan();
+  plan.rules[0].scope = PlanScope::workspace;
+  ValidationResult result = validate_structure(plan);
+  bool found = false;
+  for (const auto &error : result.errors) {
+    found = found || error.code == ValidationErrorCode::unbounded_scope;
+  }
+  CHECK(found);
+}
+
+TEST_CASE("validate_structure rejects a usr identity recipe on an "
+          "expression-domain binding") {
+  ExtractionPlan plan = make_plan();
+  EmitOperation node_op;
+  // "call" is declared EndpointDomain::expression in make_rule(); usr
+  // identity can only ever be computed from a declaration.
+  node_op.node = EmitNode{"audit", "call_site", "call",
+                          IdentityRecipe{IdentityKind::usr, {}}};
+  plan.rules[0].emits.push_back(node_op);
+  ValidationResult result = validate_structure(plan);
+  bool found = false;
+  for (const auto &error : result.errors) {
+    found = found || error.code == ValidationErrorCode::endpoint_type_mismatch;
+  }
+  CHECK(found);
+}
+
+TEST_CASE("validate_structure rejects a relation endpoint bound to a "
+          "type-domain binding") {
+  ExtractionPlan plan = make_plan();
+  plan.rules[0].bindings.push_back(Binding{"t", EndpointDomain::type});
+  plan.rules[0].emits[0].relation->to_binding = "t";
+  ValidationResult result = validate_structure(plan);
+  bool found = false;
+  for (const auto &error : result.errors) {
+    found = found || error.code == ValidationErrorCode::endpoint_type_mismatch;
+  }
+  CHECK(found);
+}
+
+TEST_CASE("artifact_identity changes when workspace or TU identity changes, "
+          "independent of the plan") {
+  ExtractionPlan plan = make_plan();
+  const std::string base_hash = plan_hash(plan);
+  const std::string a = artifact_identity(
+      plan, ExecutionIdentityInput{.workspace_identity = "workspace:a",
+                                   .tu_identity = "tu:1",
+                                   .tu_content_fingerprint = "fp:1"});
+  const std::string b = artifact_identity(
+      plan, ExecutionIdentityInput{.workspace_identity = "workspace:b",
+                                   .tu_identity = "tu:1",
+                                   .tu_content_fingerprint = "fp:1"});
+  const std::string c = artifact_identity(
+      plan, ExecutionIdentityInput{.workspace_identity = "workspace:a",
+                                   .tu_identity = "tu:2",
+                                   .tu_content_fingerprint = "fp:1"});
+  const std::string d = artifact_identity(
+      plan, ExecutionIdentityInput{.workspace_identity = "workspace:a",
+                                   .tu_identity = "tu:1",
+                                   .tu_content_fingerprint = "fp:2"});
+  CHECK(a != b);
+  CHECK(a != c);
+  CHECK(a != d);
+  // artifact_identity is a distinct concept from plan_hash: the plan itself
+  // never changed across a/b/c/d.
+  CHECK(plan_hash(plan) == base_hash);
+}
+
 TEST_SUITE("clang") {
 
   TEST_CASE("validate_matchers accepts a well-formed allow-listed rule") {
@@ -337,6 +409,26 @@ TEST_SUITE("clang") {
     attribute_op.attribute =
         EmitAttribute{"audit", "purity", "call", "is_pure"};
     plan.rules[0].emits.push_back(attribute_op);
+    ValidationResult result = validate_matchers(plan);
+    bool found = false;
+    for (const auto &error : result.errors) {
+      found =
+          found || error.code == ValidationErrorCode::endpoint_type_mismatch;
+    }
+    CHECK(found);
+  }
+
+  TEST_CASE(
+      "validate_matchers rejects a binding declared as the wrong domain for "
+      "the node its own matcher actually constructs (PR #66 review repro)") {
+    // callExpr() constructs an Expr-kind node; declaring "x" as a
+    // declaration binding must fail here, before Clang ever executes the
+    // plan -- not resolve getNodeAs<Decl> to null at runtime.
+    ExtractionPlan plan = make_plan();
+    plan.rules[0].matcher_expression = "callExpr().bind(\"x\")";
+    plan.rules[0].bindings = {Binding{"x", EndpointDomain::declaration}};
+    plan.rules[0].emits[0].relation->from_binding = "x";
+    plan.rules[0].emits[0].relation->to_binding = "x";
     ValidationResult result = validate_matchers(plan);
     bool found = false;
     for (const auto &error : result.errors) {

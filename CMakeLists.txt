@@ -330,7 +330,8 @@ add_library(cidx_extract OBJECT
   src/extract/validator_structure.cpp
   src/extract/validator_matchers.cpp
   src/extract/extension_facts.cpp
-  src/extract/engine.cpp)
+  src/extract/engine.cpp
+  src/extract/artifact.cpp)
 target_include_directories(cidx_extract PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 target_include_directories(cidx_extract SYSTEM PRIVATE

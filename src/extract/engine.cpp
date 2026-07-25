@@ -11,10 +11,13 @@
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/Expr.h"
+#include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/ASTMatchers/Dynamic/Diagnostics.h"
 #include "clang/ASTMatchers/Dynamic/Parser.h"
+#include "clang/Basic/SourceManager.h"
 #include "clang/Basic/Specifiers.h"
+#include "clang/Basic/TargetInfo.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
 
@@ -67,6 +70,74 @@ ExtensionEvidence evidence_for(clang::ASTContext &context,
   return ExtensionEvidence{
       .file = expansion.file, .line = expansion.line, .col = expansion.col};
 }
+
+// A fingerprint of the actual Clang input this rule ran against: the main
+// file's source content plus target/language configuration. Folded into
+// plan_identity.hpp's artifact_identity() so a source or configuration
+// change is always visible in the artifact identity, independent of
+// whether the caller also supplies a full HSE-61 workspace/TU descriptor
+// (ExecutionInput may leave both of those empty).
+std::string tu_content_fingerprint(clang::ASTContext &context) {
+  const clang::SourceManager &source_manager = context.getSourceManager();
+  const clang::FileID main_id = source_manager.getMainFileID();
+  llvm::StringRef buffer;
+  if (main_id.isValid()) {
+    bool invalid = false;
+    buffer = source_manager.getBufferData(main_id, &invalid);
+    if (invalid) {
+      buffer = llvm::StringRef();
+    }
+  }
+  const std::string target = context.getTargetInfo().getTriple().str();
+  const auto lang_std = static_cast<int>(context.getLangOpts().LangStd);
+  return cidx::sha256_hex(std::string(buffer)) + "|" + target + "|" +
+         std::to_string(lang_std);
+}
+
+// Counts AST nodes reachable from the translation unit, stopping the moment
+// the budget is exceeded (RecursiveASTVisitor's bool-return convention is an
+// interruption signal, not just an observation) -- run BEFORE any matcher is
+// constructed so an oversized input never reaches Clang's matcher execution
+// at all (HSE-64: "malformed or explosive rules fail without partial
+// artifact publication").
+class NodeBudgetCounter final
+    : public clang::RecursiveASTVisitor<NodeBudgetCounter> {
+public:
+  explicit NodeBudgetCounter(std::int64_t budget) : budget_(budget) {}
+
+  [[nodiscard]] static bool shouldVisitTemplateInstantiations() { return true; }
+  [[nodiscard]] static bool shouldVisitImplicitCode() { return true; }
+
+  bool TraverseDecl(clang::Decl *decl) {
+    if (decl == nullptr) {
+      return true;
+    }
+    if (++visited_ > budget_) {
+      exhausted_ = true;
+      return false;
+    }
+    return clang::RecursiveASTVisitor<NodeBudgetCounter>::TraverseDecl(decl);
+  }
+
+  bool TraverseStmt(clang::Stmt *stmt) {
+    if (stmt == nullptr) {
+      return true;
+    }
+    if (++visited_ > budget_) {
+      exhausted_ = true;
+      return false;
+    }
+    return clang::RecursiveASTVisitor<NodeBudgetCounter>::TraverseStmt(stmt);
+  }
+
+  [[nodiscard]] bool exhausted() const { return exhausted_; }
+  [[nodiscard]] std::int64_t visited() const { return visited_; }
+
+private:
+  std::int64_t budget_;
+  std::int64_t visited_ = 0;
+  bool exhausted_ = false;
+};
 
 // Default single-primitive identity for a binding: canonical USR for a
 // declaration, source anchor otherwise. Used by owner_position/composed,
@@ -262,10 +333,12 @@ class RuleMatchCallback final
     : public clang::ast_matchers::MatchFinder::MatchCallback {
 public:
   RuleMatchCallback(const ExtractionRule &rule, const std::string &plan_hash,
+                    const std::string &artifact_identity,
                     ExtensionFactSink &sink, RuleExecutionStats &stats,
                     std::vector<ExecutionDiagnostic> &diagnostics,
                     std::size_t remaining_output_cap)
-      : rule_(rule), plan_hash_(plan_hash), sink_(sink), stats_(stats),
+      : rule_(rule), plan_hash_(plan_hash),
+        artifact_identity_(artifact_identity), sink_(sink), stats_(stats),
         diagnostics_(diagnostics), remaining_output_cap_(remaining_output_cap) {
   }
 
@@ -278,18 +351,6 @@ public:
 
   void
   run(const clang::ast_matchers::MatchFinder::MatchResult &result) override {
-    ++stats_.matches;
-    if (std::cmp_greater(stats_.matches, rule_.budget.max_matches)) {
-      stats_.budget_exhausted = true;
-      return;
-    }
-    if (stats_.emitted >= remaining_output_cap_ ||
-        std::cmp_greater_equal(stats_.emitted,
-                               rule_.budget.max_emitted_facts)) {
-      stats_.budget_exhausted = true;
-      return;
-    }
-
     std::map<std::string, ResolvedBinding> bound;
     for (const auto &binding : rule_.bindings) {
       ResolvedBinding resolved;
@@ -323,7 +384,44 @@ public:
       bound.emplace(binding.name, resolved);
     }
 
+    // Scope routing: main_file restricts matches to the TU's designated
+    // main file; translation_unit imposes no filter (matches anywhere in
+    // the TU, headers included). workspace scope is rejected outright by
+    // validate_structure() -- this single-ASTContext engine has no
+    // cross-TU execution model, so it is refused before Clang runs rather
+    // than silently treated as translation_unit.
+    if (rule_.scope == PlanScope::main_file) {
+      clang::SourceLocation probe;
+      for (const auto &binding : rule_.bindings) {
+        auto it = bound.find(binding.name);
+        if (it != bound.end() && it->second.present) {
+          probe = location_of(it->second);
+          if (probe.isValid()) {
+            break;
+          }
+        }
+      }
+      if (probe.isValid() &&
+          !result.SourceManager->isInMainFile(
+              result.SourceManager->getExpansionLoc(probe))) {
+        return; // out of scope: not a match for this rule.
+      }
+    }
+
+    ++stats_.matches;
+    if (std::cmp_greater(stats_.matches, rule_.budget.max_matches)) {
+      stats_.budget_exhausted = true;
+      return;
+    }
+    if (stats_.emitted >= remaining_output_cap_ ||
+        std::cmp_greater_equal(stats_.emitted,
+                               rule_.budget.max_emitted_facts)) {
+      stats_.budget_exhausted = true;
+      return;
+    }
+
     ExtensionProvenance provenance{.plan_hash = plan_hash_,
+                                   .artifact_identity = artifact_identity_,
                                    .rule_id = rule_.id,
                                    .producer_package = rule_.producer_package,
                                    .producer_version = rule_.producer_version,
@@ -418,6 +516,7 @@ public:
 private:
   const ExtractionRule &rule_;
   const std::string &plan_hash_;
+  const std::string &artifact_identity_;
   ExtensionFactSink &sink_;
   RuleExecutionStats &stats_;
   std::vector<ExecutionDiagnostic> &diagnostics_;
@@ -429,6 +528,7 @@ private:
 ExecutionReport execute_plan(const ExtractionPlan &plan,
                              clang::ASTContext &context,
                              ExtensionFactSink &sink,
+                             const ExecutionInput &input,
                              const ExecutionOptions &options) {
   ValidationResult validation = validate(plan);
   if (!validation.ok()) {
@@ -443,15 +543,39 @@ ExecutionReport execute_plan(const ExtractionPlan &plan,
 
   ExecutionReport report;
   report.plan_hash = plan_hash(plan);
+  report.artifact_identity = artifact_identity(
+      plan, ExecutionIdentityInput{
+                .workspace_identity = input.workspace_identity,
+                .tu_identity = input.tu_identity,
+                .tu_content_fingerprint = tu_content_fingerprint(context)});
 
   for (const auto &rule : plan.rules) {
     RuleExecutionStats stats{.rule_id = rule.id,
                              .matches = 0,
                              .emitted = 0,
                              .budget_exhausted = false};
+
+    // Enforce the visited-node budget BEFORE constructing or running the
+    // matcher at all: an oversized/explosive TU never reaches Clang's
+    // matcher execution for this rule.
+    NodeBudgetCounter counter(rule.budget.max_visited_nodes);
+    counter.TraverseDecl(context.getTranslationUnitDecl());
+    if (counter.exhausted()) {
+      stats.budget_exhausted = true;
+      report.diagnostics.push_back(ExecutionDiagnostic{
+          .rule_id = rule.id,
+          .code = "visited_node_budget_exceeded",
+          .message = "translation unit exceeds max_visited_nodes=" +
+                     std::to_string(rule.budget.max_visited_nodes) +
+                     " before any match could be attempted"});
+      report.rule_stats.push_back(stats);
+      continue;
+    }
+
     clang::ast_matchers::MatchFinder finder;
-    RuleMatchCallback callback(rule, report.plan_hash, sink, stats,
-                               report.diagnostics, options.hard_output_cap);
+    RuleMatchCallback callback(rule, report.plan_hash, report.artifact_identity,
+                               sink, stats, report.diagnostics,
+                               options.hard_output_cap);
 
     llvm::StringRef code(rule.matcher_expression);
     clang::ast_matchers::dynamic::Diagnostics diagnostics;

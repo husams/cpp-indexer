@@ -80,7 +80,8 @@
         "model.contracts",
         "foundation.util",
         "workspace.toolchain",
-        "frontend.compiledb"
+        "frontend.compiledb",
+        "persistence.sqlite"
       ],
       "allowedExternal": ["clang", "llvm"],
       "description": "HSE-64 declarative AST extraction DSL: the ExtractionPlan IR, validator, Clang dynamic-matcher execution engine, and extension fact sink."

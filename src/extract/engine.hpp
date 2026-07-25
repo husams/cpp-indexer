@@ -27,6 +27,19 @@ public:
   explicit PlanNotValidated(const std::string &message);
 };
 
+// Caller-supplied identity for the pinned workspace/TU this execution runs
+// against (typically WorkspaceSnapshot::identity and
+// TranslationUnitDescriptor::semantic_hash, src/workspace/context.hpp).
+// Both may be left empty for ad hoc/test execution; execute_plan() always
+// additionally folds in a content fingerprint computed from the ASTContext
+// itself (source buffer, target, language configuration), so the resulting
+// artifact_identity changes on a source/configuration change even when the
+// caller supplies no workspace/TU descriptor at all.
+struct ExecutionInput {
+  std::string workspace_identity;
+  std::string tu_identity;
+};
+
 struct ExecutionOptions {
   // An absolute safety cap independent of any rule's declared budget, so a
   // defective budget declaration (accepted by validation but still far too
@@ -49,6 +62,12 @@ struct RuleExecutionStats {
 
 struct ExecutionReport {
   std::string plan_hash;
+  // Identity of THIS execution -- plan_hash folded with the pinned
+  // workspace/TU identity and the ASTContext content fingerprint
+  // (plan_identity.hpp's artifact_identity()). This is what gets stamped
+  // onto every ExtensionProvenance and used when publishing the extension
+  // artifact (src/extract/artifact.hpp).
+  std::string artifact_identity;
   std::vector<RuleExecutionStats> rule_stats;
   std::vector<ExecutionDiagnostic> diagnostics;
 
@@ -58,6 +77,7 @@ struct ExecutionReport {
 
 [[nodiscard]] ExecutionReport
 execute_plan(const ExtractionPlan &plan, clang::ASTContext &context,
-             ExtensionFactSink &sink, const ExecutionOptions &options = {});
+             ExtensionFactSink &sink, const ExecutionInput &input = {},
+             const ExecutionOptions &options = {});
 
 } // namespace cidx::extract

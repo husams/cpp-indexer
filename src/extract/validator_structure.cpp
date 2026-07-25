@@ -6,6 +6,7 @@
 #include <array>
 #include <cctype>
 #include <charconv>
+#include <optional>
 #include <set>
 #include <string_view>
 
@@ -84,7 +85,65 @@ bool binding_exists(const std::vector<Binding> &bindings,
       bindings, [&](const Binding &binding) { return binding.name == name; });
 }
 
+std::optional<EndpointDomain> domain_of(const std::vector<Binding> &bindings,
+                                        const std::string &name) {
+  for (const auto &binding : bindings) {
+    if (binding.name == name) {
+      return binding.domain;
+    }
+  }
+  return std::nullopt;
+}
+
+// Every identity primitive and relation endpoint ultimately runs through
+// engine.cpp's default_identity()/compute_identity(), which only resolves a
+// declaration (USR/anchor) or an expression (anchor); a `type`-domain binding
+// has no location and a `custom_node`-domain binding is not resolved by this
+// engine version at all. Checking that here means an incompatible domain
+// fails validation instead of silently resolving to "unresolved" at runtime.
+bool domain_supports_default_identity(EndpointDomain domain) {
+  return domain == EndpointDomain::declaration ||
+         domain == EndpointDomain::expression;
+}
+
+// usr/source_anchor/type_key identity kinds are declared FOR one specific
+// binding (the emit's own `binding` field); check that binding's declared
+// domain can actually produce the requested primitive.
+void validate_identity_domain(ValidationResult &result,
+                              const ExtractionRule &rule,
+                              const std::string &owning_binding,
+                              IdentityKind kind) {
+  const auto domain = domain_of(rule.bindings, owning_binding);
+  if (!domain) {
+    return; // already reported as invalid_binding elsewhere
+  }
+  bool compatible = true;
+  switch (kind) {
+  case IdentityKind::usr:
+    compatible = *domain == EndpointDomain::declaration;
+    break;
+  case IdentityKind::source_anchor:
+    compatible = domain_supports_default_identity(*domain);
+    break;
+  case IdentityKind::type_key:
+    compatible = *domain == EndpointDomain::declaration ||
+                 *domain == EndpointDomain::expression ||
+                 *domain == EndpointDomain::type;
+    break;
+  case IdentityKind::owner_position:
+  case IdentityKind::composed:
+    return; // checked per-component below, not against owning_binding
+  }
+  if (!compatible) {
+    add(result, rule.id, ValidationErrorCode::endpoint_type_mismatch,
+        "identity kind '" + to_string(kind) + "' is not compatible with " +
+            "binding '" + owning_binding + "' declared as domain " +
+            to_string(*domain));
+  }
+}
+
 void validate_identity(ValidationResult &result, const ExtractionRule &rule,
+                       const std::string &owning_binding,
                        const IdentityRecipe &identity) {
   switch (identity.kind) {
   case IdentityKind::usr:
@@ -95,6 +154,7 @@ void validate_identity(ValidationResult &result, const ExtractionRule &rule,
           "identity kind '" + to_string(identity.kind) +
               "' must not declare components");
     }
+    validate_identity_domain(result, rule, owning_binding, identity.kind);
     return;
   case IdentityKind::owner_position: {
     if (identity.components.size() != 2) {
@@ -107,6 +167,13 @@ void validate_identity(ValidationResult &result, const ExtractionRule &rule,
       add(result, rule.id, ValidationErrorCode::invalid_binding,
           "owner_position identity references undeclared binding: " +
               identity.components[0]);
+    } else if (const auto domain =
+                   domain_of(rule.bindings, identity.components[0]);
+               domain && !domain_supports_default_identity(*domain)) {
+      add(result, rule.id, ValidationErrorCode::endpoint_type_mismatch,
+          "owner_position identity owner binding '" + identity.components[0] +
+              "' declared as domain " + to_string(*domain) +
+              " cannot produce a stable identity");
     }
     const std::string &position = identity.components[1];
     int parsed = 0;
@@ -131,6 +198,14 @@ void validate_identity(ValidationResult &result, const ExtractionRule &rule,
       if (!binding_exists(rule.bindings, component)) {
         add(result, rule.id, ValidationErrorCode::invalid_binding,
             "composed identity references undeclared binding: " + component);
+        continue;
+      }
+      if (const auto domain = domain_of(rule.bindings, component);
+          domain && !domain_supports_default_identity(*domain)) {
+        add(result, rule.id, ValidationErrorCode::endpoint_type_mismatch,
+            "composed identity component '" + component +
+                "' declared as domain " + to_string(*domain) +
+                " cannot produce a stable identity");
       }
     }
     return;
@@ -149,7 +224,7 @@ void validate_emit(ValidationResult &result, const ExtractionRule &rule,
       add(result, rule.id, ValidationErrorCode::invalid_binding,
           "emit node references undeclared binding: " + emit.node->binding);
     }
-    validate_identity(result, rule, emit.node->identity);
+    validate_identity(result, rule, emit.node->binding, emit.node->identity);
   }
   if (emit.relation) {
     scan_forbidden(result, rule.id, "relation.namespace",
@@ -160,11 +235,25 @@ void validate_emit(ValidationResult &result, const ExtractionRule &rule,
       add(result, rule.id, ValidationErrorCode::invalid_binding,
           "emit relation references undeclared from_binding: " +
               emit.relation->from_binding);
+    } else if (const auto domain =
+                   domain_of(rule.bindings, emit.relation->from_binding);
+               domain && !domain_supports_default_identity(*domain)) {
+      add(result, rule.id, ValidationErrorCode::endpoint_type_mismatch,
+          "emit relation from_binding '" + emit.relation->from_binding +
+              "' declared as domain " + to_string(*domain) +
+              " cannot produce a stable identity");
     }
     if (!binding_exists(rule.bindings, emit.relation->to_binding)) {
       add(result, rule.id, ValidationErrorCode::invalid_binding,
           "emit relation references undeclared to_binding: " +
               emit.relation->to_binding);
+    } else if (const auto domain =
+                   domain_of(rule.bindings, emit.relation->to_binding);
+               domain && !domain_supports_default_identity(*domain)) {
+      add(result, rule.id, ValidationErrorCode::endpoint_type_mismatch,
+          "emit relation to_binding '" + emit.relation->to_binding +
+              "' declared as domain " + to_string(*domain) +
+              " cannot produce a stable identity");
     }
   }
   if (emit.attribute) {
@@ -191,6 +280,18 @@ void validate_emit(ValidationResult &result, const ExtractionRule &rule,
 
 void validate_budget(ValidationResult &result, const ExtractionRule &rule,
                      const ValidationLimits &limits) {
+  // workspace scope is unconditionally rejected: this engine executes a
+  // plan against exactly one ASTContext/TU, and has no cross-TU/repository
+  // execution model. Rather than silently treat workspace the same as
+  // translation_unit (which would misrepresent the rule's actual reach),
+  // refuse it at validation -- HSE-64 accepts either implementing real
+  // workspace routing or rejecting unsupported scope/budget combinations.
+  if (rule.scope == PlanScope::workspace) {
+    add(result, rule.id, ValidationErrorCode::unbounded_scope,
+        "workspace scope is not supported by this execution engine version "
+        "(one plan runs against exactly one ASTContext/TU); use "
+        "translation_unit or main_file");
+  }
   if (!rule.budget.declared) {
     add(result, rule.id, ValidationErrorCode::excessive_budget,
         "rule does not declare a resource budget");
@@ -213,11 +314,6 @@ void validate_budget(ValidationResult &result, const ExtractionRule &rule,
           ? limits.workspace_max_visited_nodes_ceiling
           : limits.max_visited_nodes_ceiling;
   check(rule.budget.max_visited_nodes, node_ceiling, "max_visited_nodes");
-  if (rule.scope == PlanScope::workspace &&
-      rule.budget.max_visited_nodes > node_ceiling) {
-    add(result, rule.id, ValidationErrorCode::unbounded_scope,
-        "workspace-scoped rule exceeds the workspace visited-node ceiling");
-  }
 }
 
 } // namespace

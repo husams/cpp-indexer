@@ -15,9 +15,15 @@
 
 namespace cidx::extract {
 
-// Shared provenance every extension fact carries.
+// Shared provenance every extension fact carries. `plan_hash` identifies the
+// RULE/PLAN alone (plan_identity.hpp); `artifact_identity` identifies this
+// specific execution -- plan plus the pinned workspace/TU/source input
+// (plan_identity.hpp's artifact_identity()) -- so two runs of the same plan
+// against different source/configuration are never mistaken for the same
+// published artifact even when the matched facts happen to look identical.
 struct ExtensionProvenance {
   std::string plan_hash;
+  std::string artifact_identity;
   std::string rule_id;
   std::string producer_package;
   std::uint32_t producer_version = 1;
