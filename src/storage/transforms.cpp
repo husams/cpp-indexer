@@ -5,6 +5,7 @@
 #include <set>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace cidx {
@@ -84,6 +85,11 @@ TransformRegistry::find(const std::string &id) const {
 }
 
 void TransformRegistry::validate() const {
+  const std::unordered_set<std::string> source_facts = {
+      "edge",          "edge_site",      "symbol",       "definition",
+      "def_edge",      "type_edge",      "include_config", "include_edge",
+      "include_site",  "artifact",       "raw"};
+  std::unordered_map<std::string, std::string> producers;
   for (const auto &descriptor : descriptors_) {
     if (descriptor.version < 1) {
       throw std::invalid_argument("transform version must be positive: " +
@@ -109,6 +115,40 @@ void TransformRegistry::validate() const {
       throw std::invalid_argument("transform identities must be declared: " +
                                   descriptor.id);
     }
+    if (descriptor.input_schema_version < 1 ||
+        descriptor.output_schema_version < 1 || descriptor.input_catalog.empty() ||
+        descriptor.output_catalog.empty()) {
+      throw std::invalid_argument("transform fact schema/catalog is invalid: " +
+                                  descriptor.id);
+    }
+    std::set<std::string> declared_requirements;
+    for (const auto &requirement : descriptor.fact_set_requirements) {
+      if (requirement.name.empty() || requirement.facts.empty() ||
+          requirement.schema_version < 1 || requirement.catalog.empty() ||
+          !declared_requirements.insert(requirement.name).second) {
+        throw std::invalid_argument("invalid produced fact-set declaration: " +
+                                    descriptor.id);
+      }
+    }
+    for (const auto &fact : descriptor.produced_facts) {
+      if (fact.empty() || producers.contains(fact)) {
+        throw std::invalid_argument("duplicate produced fact: " + fact);
+      }
+      producers.emplace(fact, descriptor.id);
+      if (!declared_requirements.contains(fact)) {
+        throw std::invalid_argument("produced fact-set is not registered: " +
+                                    descriptor.id + " -> " + fact);
+      }
+    }
+    for (const auto &requirement : descriptor.fact_set_requirements) {
+      if (std::ranges::find(descriptor.produced_facts, requirement.name) !=
+          descriptor.produced_facts.end() &&
+          (requirement.schema_version != descriptor.output_schema_version ||
+           requirement.catalog != descriptor.output_catalog)) {
+        throw std::invalid_argument("produced fact-set schema mismatch: " +
+                                    descriptor.id + " -> " + requirement.name);
+      }
+    }
     std::set<std::string> typed_keys;
     for (const auto &input : descriptor.invalidation_inputs) {
       if (input.name.empty() ||
@@ -116,7 +156,8 @@ void TransformRegistry::validate() const {
         throw std::invalid_argument("invalid typed invalidation input: " +
                                     descriptor.id);
       }
-      if (input.value_query.empty() && input.static_value.empty()) {
+      if (input.provider_id.empty() ||
+          (input.value_query.empty() && input.static_value.empty())) {
         throw std::invalid_argument("invalidation input has no provider: " +
                                     descriptor.id + " -> " + input.name);
       }
@@ -133,10 +174,48 @@ void TransformRegistry::validate() const {
       throw std::invalid_argument("duplicate invalidation key: " +
                                   descriptor.id);
     }
+    if (invalidation_keys.size() != descriptor.invalidation_inputs.size()) {
+      throw std::invalid_argument(
+          "typed invalidation inputs do not match keys: " + descriptor.id);
+    }
+    for (const auto &key : invalidation_keys) {
+      if (!typed_keys.contains(key)) {
+        throw std::invalid_argument("invalidation key has no typed provider: " +
+                                    descriptor.id + " -> " + key);
+      }
+    }
     for (const auto &dependency : descriptor.dependencies) {
       if (dependency == descriptor.id || find(dependency) == nullptr) {
         throw std::invalid_argument("undeclared transform dependency: " +
                                     descriptor.id + " -> " + dependency);
+      }
+    }
+  }
+
+  for (const auto &descriptor : descriptors_) {
+    for (const auto &fact : descriptor.input_facts) {
+      const auto producer = producers.find(fact);
+      if (producer == producers.end()) {
+        if (!source_facts.contains(fact)) {
+          throw std::invalid_argument("undeclared input fact: " + descriptor.id +
+                                      " -> " + fact);
+        }
+        continue;
+      }
+      if (std::ranges::find(descriptor.dependencies, producer->second) ==
+          descriptor.dependencies.end()) {
+        throw std::invalid_argument("missing fact dependency: " + descriptor.id +
+                                    " -> " + producer->second);
+      }
+      const auto *producer_descriptor = find(producer->second);
+      const auto requirement = std::ranges::find_if(
+          producer_descriptor->fact_set_requirements,
+          [&](const auto &candidate) { return candidate.name == fact; });
+      if (requirement == producer_descriptor->fact_set_requirements.end() ||
+          requirement->schema_version != descriptor.input_schema_version ||
+          requirement->catalog != descriptor.input_catalog) {
+        throw std::invalid_argument("incompatible fact-set schema: " +
+                                    descriptor.id + " -> " + fact);
       }
     }
   }

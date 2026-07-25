@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "catalogs/generated_catalog.hpp"
+#include "cli/version.hpp"
 #include "compiledb/compiledb.hpp"
 #include "storage/storage_detail.hpp"
 #include "storage/storage_schema.hpp"
@@ -54,51 +55,87 @@ TransformDescriptor descriptor(std::string id, std::vector<std::string> inputs,
   if (result.id == "include-fact-readiness" ||
       result.id == "hse-66-effect-registration" ||
       result.id == "hse-66-proof-registration") {
-    result.completeness = TransformCompleteness::partial;
+    result.completeness = TransformCompleteness::complete;
   }
   result.input_queries = std::move(input_queries);
   result.output_queries = std::move(output_queries);
   result.output_count_query = std::move(output_count_query);
-  result.fact_set_requirements.push_back(TransformFactSetRequirement{
-      .name = result.id + ".inputs", .facts = result.input_facts});
+  for (const auto &fact : result.produced_facts) {
+    result.fact_set_requirements.push_back(TransformFactSetRequirement{
+        .name = fact,
+        .facts = {fact},
+        .schema_version = result.output_schema_version,
+        .catalog = result.output_catalog});
+  }
+  const std::unordered_map<std::string, std::string> named_fact_sets = {
+      {"entity-graph-rollup", "entity-graph"},
+      {"possible-call-materialization", "possible-call"},
+      {"include-fact-readiness", "include"},
+      {"hse-66-effect-registration", "effect"},
+      {"hse-66-proof-registration", "proof"},
+      {"type-fact-readiness", "type"}};
+  if (const auto alias = named_fact_sets.find(result.id);
+      alias != named_fact_sets.end()) {
+    result.fact_set_requirements.push_back(TransformFactSetRequirement{
+        .name = alias->second,
+        .facts = result.produced_facts,
+        .schema_version = result.output_schema_version,
+        .catalog = result.output_catalog});
+  }
   for (const auto &key : result.invalidation_keys) {
     TransformInvalidationInput input;
     input.name = key;
     if (key == "source") {
       input.kind = TransformInputKind::source;
+      input.provider_id = "source.files.content.v1";
       input.value_query =
           "SELECT id, name, mtime, md5, indexed, compile_options, driver "
           "FROM file ORDER BY id";
     } else if (key == "catalog") {
       input.kind = TransformInputKind::catalog;
+      input.provider_id = "catalog.generated.hash.v1";
       input.value_query =
           "SELECT value FROM meta WHERE key = 'catalog_hash'";
       input.static_value = std::string(catalog::kCatalogHash);
     } else if (key == "schema") {
       input.kind = TransformInputKind::schema;
+      input.provider_id = "schema.database.version.v1";
       input.value_query =
           "SELECT value FROM meta WHERE key = 'schema_version'";
     } else if (key == "applicability") {
       input.kind = TransformInputKind::applicability;
+      input.provider_id = "facts.applicability.generation.v1";
       input.value_query =
           "SELECT fact_kind, fact_id, config_id, generation "
           "FROM fact_applicability ORDER BY fact_kind, fact_id, config_id";
     } else if (key == "configuration") {
       input.kind = TransformInputKind::configuration;
+      input.provider_id = "source.compile-configuration.v1";
       input.value_query =
           "SELECT id, compile_options, driver FROM file ORDER BY id";
     } else if (key == "pass") {
       input.kind = TransformInputKind::pass;
-      input.static_value = "resolve-pass-v2";
+      input.provider_id = "resolve.pass.api.v1";
+      input.static_value = std::to_string(version::kApiVersion);
     } else if (key == "package") {
       input.kind = TransformInputKind::package;
-      input.static_value = "cidx-core";
+      input.provider_id = "cidx.package.version.v1";
+      input.static_value = std::string(version::kFullProductVersion);
     } else if (key == "model") {
       input.kind = TransformInputKind::model;
-      input.static_value = "semantic-model-v1";
+      input.provider_id = "semantic.catalog.hash.v1";
+      input.static_value = std::string(catalog::kCatalogHash);
     } else if (key == "implementation") {
       input.kind = TransformInputKind::implementation;
-      input.static_value = result.id + "-implementation-v2";
+      input.provider_id = "transform.implementation.content.v1";
+      input.static_value = result.id + "|" + std::to_string(result.version) +
+                           "|" + result.output_count_query;
+      for (const auto &query : result.input_queries) {
+        input.static_value += "|" + query;
+      }
+      for (const auto &query : result.output_queries) {
+        input.static_value += "|" + query;
+      }
     }
     result.invalidation_inputs.push_back(std::move(input));
   }
@@ -175,7 +212,9 @@ TransformRegistry make_transform_registry() {
   registry.register_transform(
       descriptor("hse-66-effect-registration", {"artifact"},
                  {"effect.fact_set"},
-                 {}, {"catalog", "schema", "implementation"},
+                 {"possible-call-materialization",
+                  "virtual-dispatch-call-materialization", "entity-graph-rollup"},
+                 {"catalog", "schema", "implementation"},
                  {"SELECT id, kind, artifact_schema, producer_version FROM artifact "
                   "WHERE evidence = 'derived' ORDER BY id"},
                  {"SELECT id FROM artifact WHERE evidence = 'derived' ORDER BY id"},
@@ -183,11 +222,19 @@ TransformRegistry make_transform_registry() {
   registry.register_transform(
       descriptor("hse-66-proof-registration", {"artifact"},
                  {"proof.fact_set"},
-                 {}, {"catalog", "schema", "implementation"},
+                 {"possible-call-materialization",
+                  "virtual-dispatch-call-materialization", "entity-graph-rollup"},
+                 {"catalog", "schema", "implementation"},
                  {"SELECT id, kind, artifact_schema, producer_version FROM artifact "
                   "WHERE evidence = 'proof' ORDER BY id"},
                  {"SELECT id FROM artifact WHERE evidence = 'proof' ORDER BY id"},
                  "SELECT COUNT(*) FROM artifact WHERE evidence = 'proof'"));
+  registry.register_transform(descriptor(
+      "type-fact-readiness", {"type_edge"}, {"type.fact_set"}, {},
+      {"source", "schema", "implementation"},
+      {"SELECT src_id, kind, position, dst_id FROM type_edge ORDER BY src_id, kind, position, dst_id"},
+      {"SELECT src_id, kind, position, dst_id FROM type_edge ORDER BY src_id, kind, position, dst_id"},
+      "SELECT COUNT(*) FROM type_edge"));
   registry.validate();
   return registry;
 }
@@ -367,6 +414,12 @@ void write_failed_attempt(SqliteDb &db, const TransformRun &run) {
   write_transform_meta(db,
                        transform_meta_key(run.transform_id, "attempt.count"),
                        std::to_string(run.output_count));
+  write_transform_meta(
+      db, transform_meta_key(run.transform_id, "attempt.generation"),
+      std::to_string(run.generation));
+  write_transform_meta(
+      db, transform_meta_key(run.transform_id, "attempt.published_generation"),
+      std::to_string(run.published_generation));
   write_transform_meta(db,
                        transform_meta_key(run.transform_id, "attempt.diagnostic"),
                        run.diagnostic);
@@ -378,9 +431,9 @@ void write_failed_attempt(SqliteDb &db, const TransformRun &run) {
       transform_completeness_name(run.completeness));
   write_transform_meta(db,
                        transform_meta_key(run.transform_id, "stale_cause"),
-                       "failed attempt for new input");
+                       run.diagnostic);
   write_transform_meta(db, transform_meta_key(run.transform_id, "status"),
-                       "failed");
+                       transform_run_status_name(run.status));
   std::string changed;
   for (const auto &input : run.changed_inputs) {
     if (!changed.empty()) {
@@ -441,8 +494,12 @@ std::unordered_map<std::string, std::string>
 current_invalidation_values(SqliteDb &db, const TransformDescriptor &d) {
   std::unordered_map<std::string, std::string> values;
   for (const auto &input : d.invalidation_inputs) {
-    const auto override_value = read_transform_meta(
-        db, "transform.input." + input.name);
+    const auto scoped_override = read_transform_meta(
+        db, "transform.input." + d.id + "." + input.name);
+    const auto override_value = scoped_override
+                                    ? scoped_override
+                                    : read_transform_meta(
+                                          db, "transform.input." + input.name);
     if (override_value) {
       values[input.name] = *override_value;
       continue;
@@ -454,6 +511,49 @@ current_invalidation_values(SqliteDb &db, const TransformDescriptor &d) {
     values[input.name] = sha256_hex(value);
   }
   return values;
+}
+
+TransformBudget effective_budget(SqliteDb &db, const TransformDescriptor &d) {
+  TransformBudget budget = d.budget;
+  if (const auto rows = read_transform_meta(
+          db, "transform.budget." + d.id + ".max_rows")) {
+    budget.max_rows = std::stoll(*rows);
+  }
+  if (const auto milliseconds = read_transform_meta(
+          db, "transform.budget." + d.id + ".max_milliseconds")) {
+    budget.max_milliseconds = std::stoll(*milliseconds);
+  }
+  return budget;
+}
+
+bool readiness_transform(const TransformDescriptor &transform) {
+  return transform.id == "include-fact-readiness" ||
+         transform.id == "hse-66-effect-registration" ||
+         transform.id == "hse-66-proof-registration" ||
+         transform.id == "type-fact-readiness";
+}
+
+std::string dependency_token(const TransformRun &run) {
+  // A generation number is publication history, not content. Including it
+  // would make every unchanged downstream transform miss reuse on the next
+  // invocation.
+  std::string changed;
+  for (const auto &input : run.changed_inputs) {
+    if (input == "implementation-version" ||
+        input.starts_with("output:")) {
+      changed += "\x1e" + input;
+    }
+  }
+  return sha256_hex(run.transform_id + "\x1f" + std::to_string(run.version) +
+                    "\x1f" + run.output_identity + "\x1f" +
+                    run.input_identity + changed);
+}
+
+bool qualified_ready(const TransformRun &run) {
+  return (run.status == TransformRunStatus::ran ||
+          run.status == TransformRunStatus::reused ||
+          run.status == TransformRunStatus::skipped) &&
+         run.completeness == TransformCompleteness::complete;
 }
 
 std::string source_identity(
@@ -1736,32 +1836,66 @@ TransformReport SqliteStorageService::run_transform_pipeline() {
       run.input_identity = input_identity(db_, *transform, key_values,
                                            dependency_outputs);
       const auto previous = read_transform_run(db_, *transform);
+      const auto started = std::chrono::steady_clock::now();
+      const auto budget = effective_budget(db_, *transform);
+      bool output_mutation = false;
       if (previous && previous->version == run.version &&
           previous->input_identity == run.input_identity &&
           (previous->status == TransformRunStatus::ran ||
            previous->status == TransformRunStatus::reused ||
            previous->status == TransformRunStatus::skipped)) {
+        const auto current_output =
+            query_identity(db_, transform->output_queries);
+        const auto current_count =
+            output_count(db_, transform->output_count_query);
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started)
+                .count();
+        if (budget.max_rows > 0 && current_count > budget.max_rows) {
+          throw StorageError("transform " + transform->id +
+                             " exceeded max_rows during reuse");
+        }
+        if (budget.max_milliseconds > 0 && elapsed > budget.max_milliseconds) {
+          throw StorageError("transform " + transform->id +
+                             " exceeded max_milliseconds during reuse");
+        }
         run = *previous;
         run.status = TransformRunStatus::reused;
         run.generation = generation;
         run.published_generation = previous->generation;
-        report.runs.push_back(run);
-        dependency_outputs[transform->id] = run.output_identity;
-        continue;
+        run.output_identity = current_output;
+        run.output_count = current_count;
+        if (current_output != previous->output_identity ||
+            current_count != previous->output_count) {
+          // A persisted identity is not proof of current contents. Rebuild
+          // the transform under its declared publication rule and retain the
+          // qualification evidence in the attempt diagnostic.
+          run.diagnostic = "published output mutation detected; rebuilding";
+          current_changed = {"output:" + transform->id};
+          output_mutation = true;
+        } else {
+          report.runs.push_back(run);
+          dependency_outputs[transform->id] = dependency_token(run);
+          continue;
+        }
       }
 
       report.affected_transforms.push_back(transform->id);
       current_changed = own_changed;
+      if (previous && previous->version != run.version) {
+        current_changed.emplace_back("implementation-version");
+      }
+      if (output_mutation) {
+        current_changed.push_back("output:" + transform->id);
+      }
       if (previous && current_changed.empty() &&
           previous->input_identity != run.input_identity) {
         for (const auto &dependency : transform->dependencies) {
           current_changed.push_back("dependency:" + dependency);
         }
       }
-      const auto started = std::chrono::steady_clock::now();
-      const bool readiness_only = transform->id == "include-fact-readiness" ||
-                                  transform->id == "hse-66-effect-registration" ||
-                                  transform->id == "hse-66-proof-registration";
+      const bool readiness_only = readiness_transform(*transform);
       if (!readiness_only) {
         run_transform(*this, *transform);
       }
@@ -1774,23 +1908,37 @@ TransformReport SqliteStorageService::run_transform_pipeline() {
         write_transform_meta(db_, "transform.test.failure", "");
         throw StorageError("injected transform failure: " + transform->id);
       }
-      run.status = readiness_only ? TransformRunStatus::skipped
-                                  : TransformRunStatus::ran;
+      // Readiness transforms still execute qualification and publication; a
+      // successful no-op is a ran generation, not an unqualified skip.
+      run.status = TransformRunStatus::ran;
       run.output_identity = query_identity(db_, transform->output_queries);
       run.output_count = output_count(db_, transform->output_count_query);
       const auto elapsed =
           std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - started);
-      run.diagnostic = "duration_ms=" + std::to_string(elapsed.count());
+      if (budget.max_rows > 0 && run.output_count > budget.max_rows) {
+        throw StorageError("transform " + transform->id +
+                           " exceeded max_rows");
+      }
+      if (budget.max_milliseconds > 0 && elapsed.count() > budget.max_milliseconds) {
+        throw StorageError("transform " + transform->id +
+                           " exceeded max_milliseconds");
+      }
+      run.diagnostic =
+          std::string(output_mutation ? "published output mutation detected; "
+                                      : "") +
+          "duration_ms=" + std::to_string(elapsed.count());
       run.changed_inputs = current_changed;
       write_transform_run(db_, run);
       write_invalidation_values(db_, *transform, key_values);
       report.runs.push_back(run);
-      dependency_outputs[transform->id] = run.output_identity;
+      dependency_outputs[transform->id] = dependency_token(run);
     }
     write_transform_meta(db_, "transform.generation", std::to_string(generation));
     write_transform_meta(db_, "transform.pipeline.state", "complete");
     write_transform_meta(db_, "transform.pipeline.stale_cause", "");
+    report.complete = !report.runs.empty() &&
+                      std::ranges::all_of(report.runs, qualified_ready);
     txn.commit();
   } catch (const std::exception &error) {
     txn.rollback();
@@ -1814,6 +1962,54 @@ TransformReport SqliteStorageService::run_transform_pipeline() {
       failed.applicability = current_transform->applicability;
       failed.completeness = current_transform->completeness;
     }
+    // A failed generation invalidates every declared downstream consumer, but
+    // never destroys its previously published rows. Their attempt metadata
+    // names the failed dependency for status/explain clients.
+    if (current_transform != nullptr) {
+      std::unordered_set<std::string> stale_ids;
+      stale_ids.insert(current_transform->id);
+      for (const auto *candidate : ordered) {
+        if (candidate->id == current_transform->id) {
+          continue;
+        }
+        std::function<bool(const TransformDescriptor &)> depends_on_failure =
+            [&](const TransformDescriptor &descriptor) {
+              if (std::ranges::find(descriptor.dependencies,
+                                    current_transform->id) !=
+                  descriptor.dependencies.end()) {
+                return true;
+              }
+              return std::ranges::any_of(
+                  descriptor.dependencies, [&](const std::string &dependency) {
+                    const auto *parent = registry.find(dependency);
+                    return parent != nullptr && stale_ids.contains(parent->id) &&
+                           parent->id != current_transform->id;
+                  });
+            };
+        if (!depends_on_failure(*candidate)) {
+          continue;
+        }
+        stale_ids.insert(candidate->id);
+        TransformRun stale;
+        stale.transform_id = candidate->id;
+        stale.version = candidate->version;
+        stale.generation = generation;
+        stale.status = TransformRunStatus::stale;
+        stale.applicability = TransformApplicability::inapplicable;
+        stale.completeness = TransformCompleteness::pending;
+        stale.diagnostic = "dependency " + current_transform->id +
+                           " failed: " + error.what();
+        stale.changed_inputs = {"dependency:" + current_transform->id};
+        if (const auto previous = read_transform_run(db_, *candidate)) {
+          stale.output_identity = previous->output_identity;
+          stale.output_count = previous->output_count;
+          stale.published_generation = previous->generation;
+          stale.input_identity = previous->input_identity;
+        }
+        write_failed_attempt(db_, stale);
+        report.runs.push_back(stale);
+      }
+    }
     if (current_transform != nullptr) {
       if (const auto previous = read_transform_run(db_, *current_transform)) {
         failed.output_identity = previous->output_identity;
@@ -1836,18 +2032,32 @@ TransformReport SqliteStorageService::run_transform_pipeline() {
   }
 
   report.still_stub_count = count_stubs(db_);
-  report.complete = true;
+  report.complete = !report.runs.empty() &&
+                    std::ranges::all_of(report.runs, qualified_ready);
   last_transform_runs_ = report.runs;
   return report;
 }
 
-TransformReport SqliteStorageService::transform_status() {
+TransformReport SqliteStorageService::transform_status(
+    const std::string &fact_set) {
   const TransformRegistry registry = make_transform_registry();
   TransformReport report;
+  report.complete = true;
+  bool saw_requested_fact_set = fact_set.empty();
   const auto pipeline_state =
       read_transform_meta(db_, "transform.pipeline.state");
   const bool pending = pipeline_state && *pipeline_state == "pending";
   for (const TransformDescriptor *descriptor : registry.execution_order()) {
+    const bool owns_fact_set = fact_set.empty() ||
+                               std::ranges::any_of(
+                                   descriptor->fact_set_requirements,
+                                   [&](const auto &requirement) {
+                                     return requirement.name == fact_set;
+                                   });
+    if (!owns_fact_set) {
+      continue;
+    }
+    saw_requested_fact_set = true;
     TransformRun fallback;
     fallback.transform_id = descriptor->id;
     fallback.version = descriptor->version;
@@ -1861,8 +2071,10 @@ TransformReport SqliteStorageService::transform_status() {
     }
     const auto attempt_status = read_transform_meta(
         db_, transform_meta_key(descriptor->id, "attempt.status"));
-    if (attempt_status && *attempt_status == "failed") {
-      run.status = TransformRunStatus::failed;
+    if (attempt_status && (*attempt_status == "failed" ||
+                           *attempt_status == "stale")) {
+      run.status = *attempt_status == "failed" ? TransformRunStatus::failed
+                                                 : TransformRunStatus::stale;
       run.completeness = TransformCompleteness::pending;
       run.input_identity = read_transform_meta(
                                db_, transform_meta_key(descriptor->id,
@@ -1874,27 +2086,60 @@ TransformReport SqliteStorageService::transform_status() {
                            .value_or("failed attempt");
       report.failed = true;
     }
-    report.complete = report.complete ||
-                      (run.status == TransformRunStatus::ran ||
-                       run.status == TransformRunStatus::reused ||
-                       run.status == TransformRunStatus::skipped);
-    if (run.status != TransformRunStatus::ran &&
-        run.status != TransformRunStatus::reused &&
-        run.status != TransformRunStatus::skipped) {
-      for (const auto &requirement : descriptor->fact_set_requirements) {
+    for (const auto &requirement : descriptor->fact_set_requirements) {
+      if (requirement.required && !qualified_ready(run)) {
+        report.complete = false;
         report.missing_fact_sets.push_back(requirement.name);
       }
     }
+    if (!qualified_ready(run)) {
+      report.complete = false;
+    }
     report.runs.push_back(std::move(run));
   }
-  report.complete = !report.failed && report.complete &&
-                    report.runs.size() == registry.descriptors().size() &&
-                    !pending;
+  if (!saw_requested_fact_set || pending || report.failed) {
+    report.complete = false;
+  }
   return report;
 }
 
-std::string SqliteStorageService::transform_explain() {
-  const TransformReport report = transform_status();
+TransformFactSetStatus SqliteStorageService::transform_fact_set_status(
+    const std::string &fact_set) {
+  const TransformRegistry registry = make_transform_registry();
+  TransformFactSetStatus result;
+  result.name = fact_set;
+  for (const auto &descriptor : registry.descriptors()) {
+    for (const auto &requirement : descriptor.fact_set_requirements) {
+      if (requirement.name != fact_set) {
+        continue;
+      }
+      result.known = true;
+      result.schema_version = requirement.schema_version;
+      result.catalog = requirement.catalog;
+      const auto report = transform_status(fact_set);
+      if (!report.runs.empty()) {
+        result.status = report.runs.front().status;
+        result.ready = report.complete;
+        result.diagnostic = report.runs.front().diagnostic;
+      } else {
+        result.diagnostic = "fact set has no published producer run";
+      }
+      return result;
+    }
+  }
+  result.diagnostic = "unknown fact set";
+  return result;
+}
+
+std::string SqliteStorageService::transform_explain(
+    const std::string &fact_set) {
+  const TransformFactSetStatus fact_status =
+      fact_set.empty() ? TransformFactSetStatus{}
+                       : transform_fact_set_status(fact_set);
+  if (!fact_set.empty() && !fact_status.known) {
+    return "fact-set " + fact_set + ": unknown";
+  }
+  const TransformReport report = transform_status(fact_set);
   std::string explanation;
   for (const auto &run : report.runs) {
     if (!explanation.empty()) {
@@ -1915,6 +2160,9 @@ std::string SqliteStorageService::transform_explain() {
         changed && !changed->empty()) {
       explanation += ", changed=" + *changed;
     }
+  }
+  if (!fact_set.empty() && explanation.empty()) {
+    return "fact-set " + fact_set + ": unknown";
   }
   if (!report.missing_fact_sets.empty()) {
     explanation += "\nmissing-fact-sets: ";
@@ -1951,7 +2199,27 @@ void SqliteStorageService::inject_transform_failure_for_testing(
 
 void SqliteStorageService::set_transform_invalidation_for_testing(
     const std::string &key, const std::string &value) {
-  write_transform_meta(db_, "transform.input." + key, value);
+  const auto separator = key.find(':');
+  if (separator == std::string::npos) {
+    write_transform_meta(db_, "transform.input." + key, value);
+  } else {
+    write_transform_meta(db_, "transform.input." + key.substr(0, separator) +
+                                "." + key.substr(separator + 1),
+                         value);
+  }
+}
+
+void SqliteStorageService::set_transform_budget_for_testing(
+    const std::string &transform_id, std::int64_t max_rows,
+    std::int64_t max_milliseconds) {
+  if (max_rows < 0 || max_milliseconds < 0) {
+    throw StorageError("transform budget must be non-negative");
+  }
+  write_transform_meta(db_, "transform.budget." + transform_id + ".max_rows",
+                       std::to_string(max_rows));
+  write_transform_meta(
+      db_, "transform.budget." + transform_id + ".max_milliseconds",
+      std::to_string(max_milliseconds));
 }
 
 int SqliteStorageService::resolve_pass() {

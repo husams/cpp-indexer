@@ -606,9 +606,12 @@ public:
   // identified and reused by content identity; publication is one transaction.
   TransformReport run_transform_pipeline();
   // Read the last published/attempted lifecycle state without executing.
-  TransformReport transform_status();
+  TransformReport transform_status(const std::string &fact_set = {});
   // Stable, human-readable reasons for stale or unavailable fact sets.
-  std::string transform_explain();
+  std::string transform_explain(const std::string &fact_set = {});
+  // Named readiness contract for query and proof clients.
+  TransformFactSetStatus transform_fact_set_status(
+      const std::string &fact_set);
   void mark_transform_pipeline_pending(const std::string &reason);
   [[nodiscard]] const std::vector<TransformRun> &transform_runs() const {
     return last_transform_runs_;
@@ -617,6 +620,9 @@ public:
   void inject_transform_failure_for_testing(std::string transform_id);
   void set_transform_invalidation_for_testing(const std::string &key,
                                               const std::string &value);
+  void set_transform_budget_for_testing(const std::string &transform_id,
+                                        std::int64_t max_rows,
+                                        std::int64_t max_milliseconds);
   // Record the UTC completion marker after a successful resolve pass.
   void stamp_graph_resolved();
 

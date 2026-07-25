@@ -418,6 +418,22 @@ int cmd_index(const ParsedArgs &args, Context &ctx) {
   {
     Storage db(ctx.index_path);
     if (args.index_status || args.index_explain) {
+      if (args.index_fact_set) {
+        const auto fact_status =
+            db.transform_fact_set_status(*args.index_fact_set);
+        if (!fact_status.known) {
+          *ctx.out << "fact-set " << *args.index_fact_set << ": unknown\n";
+          return 1;
+        }
+        if (args.index_explain) {
+          *ctx.out << db.transform_explain(*args.index_fact_set) << "\n";
+        } else {
+          *ctx.out << "fact-set " << fact_status.name << " "
+                   << transform_run_status_name(fact_status.status) << " "
+                   << (fact_status.ready ? "ready" : "unknown") << "\n";
+        }
+        return 0;
+      }
       if (args.index_explain) {
         *ctx.out << db.transform_explain() << "\n";
       } else {

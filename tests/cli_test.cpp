@@ -754,6 +754,27 @@ TEST_CASE("args: index status and explain expose fact-set readiness") {
   CHECK(pa.index_explain);
 }
 
+TEST_CASE("index status and explain filter named fact-set readiness") {
+  const std::string cache = make_temp_dir();
+  {
+    Storage db(cache + "/index.db");
+    REQUIRE(db.run_transform_pipeline().complete);
+  }
+  const CmdResult status =
+      run_cli({"index", "status", "--fact-set", "entity-graph"}, cache);
+  CHECK(status.rc == 0);
+  CHECK(status.out.find("fact-set entity-graph") != std::string::npos);
+  CHECK(status.out.find("edge-site-count-rollup") == std::string::npos);
+  const CmdResult explain =
+      run_cli({"index", "explain", "--fact-set", "entity-graph"}, cache);
+  CHECK(explain.rc == 0);
+  CHECK(explain.out.find("entity-graph-rollup") != std::string::npos);
+  const CmdResult unknown =
+      run_cli({"index", "status", "--fact-set", "missing"}, cache);
+  CHECK(unknown.rc == 1);
+  CHECK(unknown.out.find("unknown") != std::string::npos);
+}
+
 TEST_CASE("resolve compatibility adapter reports transform failure") {
   const std::string cache = make_temp_dir();
   {

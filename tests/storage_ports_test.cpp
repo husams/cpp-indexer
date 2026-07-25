@@ -156,10 +156,18 @@ TEST_CASE("transform registry declares a deterministic dependency order") {
   source.input_facts = {"raw"};
   source.produced_facts = {"source.fact"};
   source.invalidation_keys = {"source"};
+  source.invalidation_inputs = {TransformInvalidationInput{
+      .name = "source",
+      .kind = TransformInputKind::source,
+      .provider_id = "test.source.v1",
+      .value_query = {},
+      .static_value = "source"}};
   source.options = {"deterministic-sql-v1"};
   source.input_queries = {"SELECT 1"};
   source.output_queries = {"SELECT 1"};
   source.output_count_query = "SELECT 1";
+  source.fact_set_requirements = {TransformFactSetRequirement{
+      .name = "source.fact", .facts = {"source.fact"}}};
   registry.register_transform(source);
   TransformDescriptor derived;
   derived.id = "derived";
@@ -168,16 +176,40 @@ TEST_CASE("transform registry declares a deterministic dependency order") {
   derived.produced_facts = {"derived.fact"};
   derived.dependencies = {"source"};
   derived.invalidation_keys = {"derived"};
+  derived.invalidation_inputs = {TransformInvalidationInput{
+      .name = "derived",
+      .kind = TransformInputKind::source,
+      .provider_id = "test.derived.v1",
+      .value_query = {},
+      .static_value = "derived"}};
   derived.options = {"deterministic-sql-v1"};
   derived.input_queries = {"SELECT 1"};
   derived.output_queries = {"SELECT 1"};
   derived.output_count_query = "SELECT 1";
+  derived.fact_set_requirements = {TransformFactSetRequirement{
+      .name = "derived.fact", .facts = {"derived.fact"}}};
   registry.register_transform(derived);
 
   const auto order = registry.execution_order();
   REQUIRE(order.size() == 2);
   CHECK(order[0]->id == "source");
   CHECK(order[1]->id == "derived");
+
+  TransformRegistry invalid;
+  TransformDescriptor missing_provider = source;
+  missing_provider.id = "missing-provider";
+  missing_provider.produced_facts = {"missing.fact"};
+  missing_provider.fact_set_requirements = {TransformFactSetRequirement{
+      .name = "missing.fact", .facts = {"missing.fact"}}};
+  missing_provider.invalidation_inputs.clear();
+  invalid.register_transform(std::move(missing_provider));
+  bool rejected = false;
+  try {
+    (void)invalid.execution_order();
+  } catch (const std::invalid_argument &) {
+    rejected = true;
+  }
+  CHECK(rejected);
 }
 
 TEST_CASE("named transform pipeline reuses identical content identities") {
@@ -204,7 +236,7 @@ TEST_CASE("named transform pipeline reuses identical content identities") {
   db.add_edge(edge);
 
   const auto first = db.run_transform_pipeline();
-  REQUIRE(first.runs.size() == 8);
+  REQUIRE(first.runs.size() == 9);
   CHECK(first.still_stub_count == 0);
   for (const auto &run : first.runs) {
     CHECK((run.status == TransformRunStatus::ran ||
@@ -218,6 +250,156 @@ TEST_CASE("named transform pipeline reuses identical content identities") {
   for (const auto &run : second.runs) {
     CHECK(run.status == TransformRunStatus::reused);
   }
+}
+
+TEST_CASE("transform requalifies mutated derived output before reuse") {
+  Storage db(":memory:");
+  Symbol src;
+  src.usr = "transform:@F@mutation-src";
+  src.spelling = "mutation-src";
+  src.kind = "function";
+  src.is_definition = true;
+  const auto src_id = db.add_symbol(src);
+  Symbol dst = src;
+  dst.usr = "transform:@F@mutation-dst";
+  dst.spelling = "mutation-dst";
+  const auto dst_id = db.add_symbol(dst);
+  Edge edge;
+  edge.src_id = src_id;
+  edge.dst_id = dst_id;
+  edge.kind = 1;
+  db.add_edge(edge);
+  REQUIRE(db.run_transform_pipeline().complete);
+
+  db.raw_db().exec("UPDATE edge SET count = count + 99 WHERE kind = 1");
+  const auto repaired = db.run_transform_pipeline();
+  const auto it = std::ranges::find_if(
+      repaired.runs, [](const TransformRun &run) {
+        return run.transform_id == "edge-site-count-rollup";
+      });
+  REQUIRE(it != repaired.runs.end());
+  CHECK(it->status == TransformRunStatus::ran);
+  CHECK(it->diagnostic.find("mutation") != std::string::npos);
+  CHECK(db.run_transform_pipeline().complete);
+}
+
+TEST_CASE("dynamic target changes rebuild semantic dependents only") {
+  Storage db(":memory:");
+  Symbol caller;
+  caller.usr = "transform:@F@dynamic-caller";
+  caller.spelling = "dynamic-caller";
+  caller.kind = "function";
+  caller.is_definition = true;
+  const auto caller_id = db.add_symbol(caller);
+  Symbol target;
+  target.usr = "transform:@F@dynamic-target";
+  target.spelling = "dynamic-target";
+  target.kind = "function";
+  target.is_definition = true;
+  const auto target_id = db.add_symbol(target);
+  const auto caller_def = db.get_or_create_definition(caller_id, std::nullopt);
+  (void)db.get_or_create_definition(target_id, std::nullopt);
+  (void)db.get_or_create_definition(target_id, std::nullopt);
+  db.add_def_edge(caller_def, target_id, 1);
+  REQUIRE(db.run_transform_pipeline().complete);
+
+  db.add_def_edge(caller_def, target_id, 1, 1);
+  const auto changed = db.run_transform_pipeline();
+  const auto status = [&](std::string_view id) {
+    const auto it = std::ranges::find_if(
+        changed.runs, [&](const TransformRun &run) {
+          return run.transform_id == id;
+        });
+    REQUIRE(it != changed.runs.end());
+    return it->status;
+  };
+  CHECK(status("possible-call-materialization") == TransformRunStatus::ran);
+  CHECK(status("hse-66-effect-registration") == TransformRunStatus::ran);
+  CHECK(status("hse-66-proof-registration") == TransformRunStatus::ran);
+  CHECK(status("include-fact-readiness") == TransformRunStatus::reused);
+  CHECK(status("type-fact-readiness") == TransformRunStatus::reused);
+}
+
+TEST_CASE("implementation version change closes only declared downstream") {
+  Storage db(":memory:");
+  REQUIRE(db.run_transform_pipeline().complete);
+  // Model a previously published generation produced by the prior
+  // implementation version. This is persisted lifecycle state, not an
+  // invalidation-key test override.
+  db.raw_db().exec(
+      "UPDATE meta SET value = '0' WHERE key = "
+      "'transform.edge-site-count-rollup.published.version'");
+  db.raw_db().exec(
+      "UPDATE meta SET value = 'previous-implementation-input' WHERE key = "
+      "'transform.edge-site-count-rollup.published.input'");
+  const auto changed = db.run_transform_pipeline();
+  const auto status = [&](std::string_view id) {
+    const auto it = std::ranges::find_if(
+        changed.runs, [&](const TransformRun &run) {
+          return run.transform_id == id;
+        });
+    REQUIRE(it != changed.runs.end());
+    return it->status;
+  };
+  CHECK(status("edge-site-count-rollup") == TransformRunStatus::ran);
+  CHECK(status("virtual-dispatch-call-materialization") ==
+        TransformRunStatus::ran);
+  CHECK(status("entity-graph-rollup") == TransformRunStatus::ran);
+  CHECK(status("hse-66-effect-registration") == TransformRunStatus::ran);
+  CHECK(status("hse-66-proof-registration") == TransformRunStatus::ran);
+  CHECK(status("multi-definition-classification") == TransformRunStatus::reused);
+  CHECK(status("include-fact-readiness") == TransformRunStatus::reused);
+  CHECK(status("type-fact-readiness") == TransformRunStatus::reused);
+}
+
+TEST_CASE("transform budgets fail atomically and retain the published generation") {
+  Storage db(":memory:");
+  Symbol a;
+  a.usr = "transform:@F@budget-a";
+  a.spelling = "budget-a";
+  a.kind = "function";
+  a.is_definition = true;
+  const auto a_id = db.add_symbol(a);
+  Symbol b = a;
+  b.usr = "transform:@F@budget-b";
+  b.spelling = "budget-b";
+  const auto b_id = db.add_symbol(b);
+  Symbol c = a;
+  c.usr = "transform:@F@budget-c";
+  c.spelling = "budget-c";
+  const auto c_id = db.add_symbol(c);
+  Edge first{.src_id = a_id,
+             .dst_id = b_id,
+             .kind = 1,
+             .count = 1,
+             .base_access = std::nullopt,
+             .is_virtual = std::nullopt,
+             .vtable_slot = std::nullopt};
+  Edge second{.src_id = a_id,
+              .dst_id = c_id,
+              .kind = 1,
+              .count = 1,
+              .base_access = std::nullopt,
+              .is_virtual = std::nullopt,
+              .vtable_slot = std::nullopt};
+  db.add_edge(first);
+  db.add_edge(second);
+  REQUIRE(db.run_transform_pipeline().complete);
+  db.set_transform_budget_for_testing("edge-site-count-rollup", 1, 0);
+  db.set_transform_invalidation_for_testing("source", "budget-boundary");
+  const auto failed = db.run_transform_pipeline();
+  CHECK(failed.failed);
+  const auto it = std::ranges::find_if(
+      failed.runs, [](const TransformRun &run) {
+        return run.transform_id == "edge-site-count-rollup";
+      });
+  REQUIRE(it != failed.runs.end());
+  CHECK(it->status == TransformRunStatus::failed);
+  CHECK(it->diagnostic.find("max_rows") != std::string::npos);
+  auto published = db.raw_db().prepare(
+      "SELECT value FROM meta WHERE key = 'transform.edge-site-count-rollup.published.status'");
+  REQUIRE(published.step());
+  CHECK(published.col_text(0) == "ran");
 }
 
 TEST_CASE(
@@ -242,7 +424,7 @@ TEST_CASE(
   db.add_edge(dispatch_edge);
 
   const auto baseline = db.run_transform_pipeline();
-  REQUIRE(baseline.runs.size() == 8);
+  REQUIRE(baseline.runs.size() == 9);
 
   db.raw_db().exec("INSERT OR IGNORE INTO entity_node(id, kind) VALUES (" +
                    std::to_string(src_id) + ", 1), (" + std::to_string(dst_id) +
@@ -280,6 +462,14 @@ TEST_CASE(
   auto after = db.raw_db().prepare("SELECT COUNT(*) FROM entity_edge");
   REQUIRE(after.step());
   CHECK(after.col_int64(0) == 1);
+  const auto status = db.transform_status();
+  const auto effect = std::ranges::find_if(
+      status.runs, [](const TransformRun &run) {
+        return run.transform_id == "hse-66-effect-registration";
+      });
+  REQUIRE(effect != status.runs.end());
+  CHECK(effect->status == TransformRunStatus::stale);
+  CHECK(effect->diagnostic.find("entity-graph-rollup") != std::string::npos);
 }
 
 TEST_CASE("transform invalidation is typed and has minimum closure") {
@@ -292,8 +482,8 @@ TEST_CASE("transform invalidation is typed and has minimum closure") {
   CHECK(catalog_change.runs[0].status == TransformRunStatus::reused);
   CHECK(catalog_change.runs[4].status == TransformRunStatus::ran);
   CHECK(catalog_change.runs[5].status == TransformRunStatus::reused);
-  CHECK(catalog_change.runs[6].status == TransformRunStatus::skipped);
-  CHECK(catalog_change.runs[7].status == TransformRunStatus::skipped);
+  CHECK(catalog_change.runs[6].status == TransformRunStatus::ran);
+  CHECK(catalog_change.runs[7].status == TransformRunStatus::ran);
 
   db.set_transform_invalidation_for_testing("catalog", "catalog-v1");
   db.set_transform_invalidation_for_testing("source", "source-v2");
@@ -303,8 +493,8 @@ TEST_CASE("transform invalidation is typed and has minimum closure") {
   CHECK(source_change.runs[2].status == TransformRunStatus::ran);
   CHECK(source_change.runs[3].status == TransformRunStatus::ran);
   CHECK(source_change.runs[4].status == TransformRunStatus::ran);
-  CHECK(source_change.runs[5].status == TransformRunStatus::skipped);
-  CHECK(source_change.runs[6].status == TransformRunStatus::skipped);
+  CHECK(source_change.runs[5].status == TransformRunStatus::ran);
+  CHECK(source_change.runs[6].status == TransformRunStatus::ran);
 }
 
 TEST_CASE("clean and incremental publication have equal identities") {
@@ -372,4 +562,18 @@ TEST_CASE("pending transform publication stays stale until graph extraction") {
     return run.status == TransformRunStatus::stale &&
            run.completeness == TransformCompleteness::pending;
   }));
+}
+
+TEST_CASE("fact-set readiness resolves named producers and unknowns") {
+  Storage db(":memory:");
+  REQUIRE(db.run_transform_pipeline().complete);
+  const auto ready = db.transform_fact_set_status("entity-graph");
+  CHECK(ready.known);
+  CHECK(ready.ready);
+  CHECK(db.transform_status("entity-graph").runs.size() == 1);
+  CHECK(db.transform_explain("entity-graph").find("entity-graph-rollup") !=
+        std::string::npos);
+  const auto unknown = db.transform_fact_set_status("does-not-exist");
+  CHECK_FALSE(unknown.known);
+  CHECK_FALSE(unknown.ready);
 }

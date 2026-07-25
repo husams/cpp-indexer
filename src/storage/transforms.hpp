@@ -37,6 +37,8 @@ enum class TransformPublicationRule : std::uint8_t {
 struct TransformInvalidationInput {
   std::string name;
   TransformInputKind kind = TransformInputKind::source;
+  // Stable provider identity; labels alone are not valid invalidation input.
+  std::string provider_id;
   std::string value_query;
   std::string static_value;
 };
@@ -49,6 +51,9 @@ struct TransformBudget {
 struct TransformFactSetRequirement {
   std::string name;
   std::vector<std::string> facts;
+  int schema_version = 1;
+  std::string catalog = "cidx-core";
+  bool required = true;
 };
 
 struct TransformDescriptor {
@@ -69,6 +74,10 @@ struct TransformDescriptor {
       TransformPublicationRule::preserve_previous_on_failure;
   TransformBudget budget;
   std::vector<TransformFactSetRequirement> fact_set_requirements;
+  int input_schema_version = 1;
+  int output_schema_version = 1;
+  std::string input_catalog = "cidx-core";
+  std::string output_catalog = "cidx-core";
 };
 
 struct TransformRun {
@@ -93,6 +102,16 @@ struct TransformReport {
   bool complete = false;
   std::vector<std::string> affected_transforms;
   std::vector<std::string> missing_fact_sets;
+};
+
+struct TransformFactSetStatus {
+  std::string name;
+  int schema_version = 0;
+  std::string catalog;
+  bool known = false;
+  bool ready = false;
+  TransformRunStatus status = TransformRunStatus::stale;
+  std::string diagnostic;
 };
 
 [[nodiscard]] const char *transform_run_status_name(TransformRunStatus status);
