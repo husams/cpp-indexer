@@ -777,6 +777,41 @@ TEST_CASE("index status and explain filter named fact-set readiness") {
   CHECK(unknown.out.find("unknown") != std::string::npos);
 }
 
+TEST_CASE("index status and explain preserve pending state after reopen") {
+  const std::string cache = make_temp_dir();
+  {
+    Storage db(cache + "/index.db");
+    REQUIRE(db.run_transform_pipeline().complete);
+    REQUIRE(db.run_transform_pipeline().complete);
+    db.mark_transform_pipeline_pending("selected file remains pending");
+  }
+  const CmdResult status = run_cli({"index", "status"}, cache);
+  CHECK(status.rc == 0);
+  std::size_t pending_lines = 0;
+  std::size_t cursor = 0;
+  while ((cursor = status.out.find(" stale pending\n", cursor)) !=
+         std::string::npos) {
+    ++pending_lines;
+    cursor += std::string(" stale pending\n").size();
+  }
+  CHECK(pending_lines == 9);
+  CHECK(status.out.find("readiness: stale") != std::string::npos);
+
+  const CmdResult named_status =
+      run_cli({"index", "status", "--fact-set", "entity-graph"}, cache);
+  CHECK(named_status.rc == 0);
+  CHECK(named_status.out.find("fact-set entity-graph stale unknown") !=
+        std::string::npos);
+
+  const CmdResult explain =
+      run_cli({"index", "explain", "--fact-set", "entity-graph"}, cache);
+  CHECK(explain.rc == 0);
+  CHECK(explain.out.find("entity-graph-rollup: stale, pending") !=
+        std::string::npos);
+  CHECK(explain.out.find("cause=selected file remains pending") !=
+        std::string::npos);
+}
+
 TEST_CASE("resolve compatibility adapter reports transform failure") {
   const std::string cache = make_temp_dir();
   {

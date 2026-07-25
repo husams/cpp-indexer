@@ -2322,6 +2322,14 @@ TransformReport SqliteStorageService::transform_status(
         report.failed = true;
       }
     }
+    if (pending) {
+      run.status = TransformRunStatus::stale;
+      run.completeness = TransformCompleteness::pending;
+      run.diagnostic = read_transform_meta(
+                           db_, transform_meta_key(descriptor->id,
+                                                   "stale_cause"))
+                           .value_or("transform pipeline pending");
+    }
     for (const auto &requirement : descriptor->fact_set_requirements) {
       if (requirement.required && !qualified_ready(run)) {
         report.complete = false;

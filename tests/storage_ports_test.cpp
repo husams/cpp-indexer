@@ -842,6 +842,41 @@ TEST_CASE("pending transform publication stays stale until graph extraction") {
   }));
 }
 
+TEST_CASE("pending state overrides reused attempts after reopen") {
+  const auto path = std::filesystem::temp_directory_path() /
+                    "cidx-hse67-pending-reopen.db";
+  std::filesystem::remove(path);
+  {
+    Storage db(path.string());
+    REQUIRE(db.run_transform_pipeline().complete);
+    const auto reused = db.run_transform_pipeline();
+    REQUIRE(reused.complete);
+    CHECK(std::ranges::all_of(reused.runs, [](const TransformRun &run) {
+      return run.status == TransformRunStatus::reused;
+    }));
+    db.mark_transform_pipeline_pending("selected file remains pending");
+  }
+  {
+    Storage db(path.string());
+    const auto status = db.transform_status();
+    REQUIRE(status.runs.size() == 9);
+    CHECK(std::ranges::all_of(status.runs, [](const TransformRun &run) {
+      return run.status == TransformRunStatus::stale &&
+             run.completeness == TransformCompleteness::pending;
+    }));
+    const auto fact_status = db.transform_fact_set_status("entity-graph");
+    CHECK(fact_status.known);
+    CHECK_FALSE(fact_status.ready);
+    CHECK(fact_status.status == TransformRunStatus::stale);
+    const auto explanation = db.transform_explain("entity-graph");
+    CHECK(explanation.find("entity-graph-rollup: stale, pending") !=
+          std::string::npos);
+    CHECK(explanation.find("cause=selected file remains pending") !=
+          std::string::npos);
+  }
+  std::filesystem::remove(path);
+}
+
 TEST_CASE("fact-set readiness resolves named producers and unknowns") {
   Storage db(":memory:");
   REQUIRE(db.run_transform_pipeline().complete);
