@@ -13,6 +13,7 @@
 #include "query/exec.hpp"
 #include "query/plan.hpp"
 #include "util/errors.hpp"
+#include "util/hashing.hpp"
 #include "util/pathutil.hpp"
 
 namespace cidx::ui {
@@ -492,6 +493,59 @@ void set_int_member(Value &value, std::string_view key, int64_t number) {
   }
 }
 
+std::string graph_query_identity(const GraphViewRequest &request,
+                                 const IndexIdentity &identity) {
+  Object material;
+  material.emplace_back("version", Value::of(kGraphViewVersion));
+  material.emplace_back("root", optional_string(request.root));
+  material.emplace_back("query", optional_string(request.query));
+  material.emplace_back("direction", Value::of(request.direction));
+  material.emplace_back("depth", Value::of(request.depth));
+  material.emplace_back("node_budget", Value::of(request.node_budget));
+  material.emplace_back("edge_budget", Value::of(request.edge_budget));
+  material.emplace_back("site_budget", Value::of(request.site_budget));
+  material.emplace_back("byte_budget", Value::of(request.byte_budget));
+  material.emplace_back("workspace", request.workspace
+                                         ? Value::of(*request.workspace)
+                                         : Value::null());
+  Array edge_kinds;
+  if (request.edge_kinds) {
+    std::vector<std::string> sorted = *request.edge_kinds;
+    std::ranges::sort(sorted);
+    for (const auto &kind : sorted) {
+      edge_kinds.push_back(Value::of(kind));
+    }
+  }
+  material.emplace_back("edge_kinds", Value::arr(std::move(edge_kinds)));
+  material.emplace_back("workspace_identity", Value::of(identity.workspace));
+  material.emplace_back("schema_version", Value::of(identity.schema_version));
+  material.emplace_back("source_revision",
+                        optional_string(identity.source_revision));
+  material.emplace_back("source_fingerprint",
+                        optional_string(identity.source_fingerprint));
+  material.emplace_back("index_config_fingerprint",
+                        optional_string(identity.index_config_fingerprint));
+  std::string hash_material = "cidx.graph-view.query.v1";
+  hash_material.push_back('\0');
+  hash_material += json_out::dumps_indent2(Value::obj(std::move(material)));
+  return sha256_hex(hash_material);
+}
+
+Value identity_value(const IndexIdentity &identity) {
+  Object out;
+  out.emplace_back("workspace", Value::of(identity.workspace));
+  out.emplace_back("index", Value::of("semantic-index/schema/" +
+                                      std::to_string(identity.schema_version)));
+  out.emplace_back("fact_sets",
+                   Value::arr({Value::of(std::string("symbols"))}));
+  out.emplace_back("freshness", Value::of(identity.freshness));
+  out.emplace_back("source_revision",
+                   optional_string(identity.source_revision));
+  out.emplace_back("source_fingerprint",
+                   optional_string(identity.source_fingerprint));
+  return Value::obj(std::move(out));
+}
+
 } // namespace
 
 Value build_graph_view(Storage &db, const GraphViewRequest &request) {
@@ -518,6 +572,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   const std::optional<std::string> effective_root =
       request.root ? request.root : request.query;
   const RootResolution resolution = resolve_root(graph, db, effective_root);
+  const std::string query_identity = graph_query_identity(request, identity);
 
   Array nodes;
   Array edges;
@@ -537,6 +592,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
   metadata.emplace_back("sites_used", Value::of(sites_used));
   metadata.emplace_back("depth", Value::of(request.depth));
   metadata.emplace_back("direction", Value::of(request.direction));
+  metadata.emplace_back("query_identity", Value::of(query_identity));
   metadata.emplace_back("query", optional_string(request.query));
   metadata.emplace_back("workspace",
                         request.workspace
@@ -555,6 +611,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
                      optional_string(identity.index_config_fingerprint));
   index.emplace_back("freshness", Value::of(identity.freshness));
   metadata.emplace_back("index", Value::obj(std::move(index)));
+  metadata.emplace_back("identity", identity_value(identity));
 
   if (resolution.symbol) {
     const query::Query plan =
@@ -679,8 +736,47 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request) {
     return Value::obj(std::move(continuation));
   }());
 
+  const bool unknown = identity.freshness != "current" ||
+                       !db.graph_resolved() || !resolution.symbol;
+  std::string graph_status = "complete";
+  if (unknown) {
+    graph_status = "unknown";
+  } else if (truncated) {
+    graph_status = "partial";
+  }
+  Array markers;
+  if (identity.freshness == "stale") {
+    markers.push_back(Value::of(std::string("stale")));
+  }
+  if (identity.freshness != "current" || !db.graph_resolved()) {
+    markers.push_back(Value::of(std::string("unknown")));
+  }
+  if (!resolution.symbol) {
+    markers.push_back(Value::of(std::string("unresolved")));
+  }
+  if (truncated) {
+    markers.push_back(Value::of(std::string("truncated")));
+  }
+  metadata.emplace_back("status", Value::of(graph_status));
+  metadata.emplace_back("markers", Value::arr(markers));
+
   Object out;
   out.emplace_back("schema", Value::of(std::string("cidx.graph-view.v1")));
+  out.emplace_back("version", Value::of(kGraphViewVersion));
+  out.emplace_back("status", Value::of(graph_status));
+  out.emplace_back("markers", Value::arr(markers));
+  out.emplace_back("query_identity", Value::of(query_identity));
+  std::string result_material = "cidx.graph-view.result.v1";
+  result_material.push_back('\0');
+  result_material += query_identity;
+  result_material.push_back('\0');
+  result_material += graph_status;
+  result_material.push_back('\0');
+  result_material += truncated ? "1" : "0";
+  result_material.push_back('\0');
+  result_material += evidence_truncated ? "1" : "0";
+  out.emplace_back("result_id", Value::of(sha256_hex(result_material)));
+  out.emplace_back("identity", identity_value(identity));
   out.emplace_back("request", [&] {
     Object r;
     r.emplace_back("root", optional_string(request.root));

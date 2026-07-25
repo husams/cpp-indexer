@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-cidx-static'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:">
+  <meta name="cidx-export-format" content="cidx.offline-snapshot.v1">
+  <meta name="cidx-cytoscape-version" content="3.31.2">
   <title>CIDX Graph Explorer</title>
   <style>__CIDX_STYLES__</style>
 </head>
@@ -19,6 +21,7 @@
   </main>
   <footer><span id="summary"></span><span id="identity"></span></footer>
   <script nonce="cidx-static">window.CIDX_GRAPH_VIEW = __CIDX_GRAPH_VIEW__;</script>
+  <script nonce="cidx-static">window.CIDX_OFFLINE = __CIDX_OFFLINE__;</script>
   <script nonce="cidx-static">__CIDX_CYTOSCAPE__</script>
   <script nonce="cidx-static">__CIDX_APP__</script>
 </body>

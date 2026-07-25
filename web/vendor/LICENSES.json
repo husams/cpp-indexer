@@ -1,0 +1,12 @@
+{
+  "format": "cidx.offline-assets.v1",
+  "assets": [
+    {
+      "name": "cytoscape.min.js",
+      "version": "3.31.2",
+      "license": "MIT",
+      "license_file": "CYTOSCAPE-LICENSE",
+      "sha256": "a9e75b12b6dab7b7f5b428636070b38c59eba2a4a7d0a3af36b2afdd67b13499"
+    }
+  ]
+}

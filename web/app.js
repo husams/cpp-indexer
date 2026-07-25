@@ -112,7 +112,8 @@ if (typeof module !== 'undefined') module.exports = graphState;
 if (typeof document !== 'undefined') {
 (() => {
   const embedded = window.CIDX_GRAPH_VIEW || {nodes: [], edges: [], metadata: {}};
-  const liveToken = new URLSearchParams(window.location.search).get('token');
+  const offline = window.CIDX_OFFLINE === true;
+  const liveToken = offline ? null : new URLSearchParams(window.location.search).get('token');
   let view = embedded;
   let cy;
   let selectedNode;
@@ -125,13 +126,15 @@ if (typeof document !== 'undefined') {
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const badge = (name, cls) => `<span class="badge ${cls || ''}">${esc(name)}</span>`;
   const statusBadges = (s = {}) => Object.entries(s)
-    .filter(([k, v]) => v === true || v === 'partial' || v === 'stale' || v === 'truncated' || v === 'external')
+    .filter(([k, v]) => v === true || v === 'partial' || v === 'unknown' || v === 'stale' || v === 'truncated' || v === 'external')
     .map(([k, v]) => badge(`${k}${v === true ? '' : `: ${v}`}`, k === 'external' ? 'external' : k))
     .join('');
   const sourceLocation = (item) => item?.location || (item?.file ? `${item.file}:${item.line ?? ''}:${item.col ?? ''}` : 'No location');
   const updateSummary = () => {
     document.getElementById('summary').textContent = `${view.nodes?.length || 0} nodes · ${view.edges?.length || 0} edges${view.metadata?.truncated ? ' · bounded/truncated' : ''}`;
-    document.getElementById('identity').textContent = view.metadata?.index?.freshness ? `index ${view.metadata.index.freshness}` : 'index freshness unverifiable';
+    const identity = view.metadata?.identity || {};
+    const freshness = view.metadata?.index?.freshness || identity.freshness || 'unverifiable';
+    document.getElementById('identity').textContent = `${identity.workspace || 'workspace unknown'} · ${identity.index || 'index unknown'} · ${freshness}`;
   };
   const showNode = (n) => {
     selectedNode = n;
@@ -212,7 +215,7 @@ if (typeof document !== 'undefined') {
     }
   };
   const loadView = async () => {
-    if (!liveToken) return embedded;
+    if (offline || !liveToken) return embedded;
     const response = await fetch(`/api/graph?token=${encodeURIComponent(liveToken)}`);
     if (!response.ok) throw new Error(`Live GraphView request failed (${response.status})`);
     return response.json();

@@ -109,6 +109,54 @@ TEST_CASE("GraphView is bounded, portable, and carries evidence") {
   CHECK(bounded_json.size() <= 16384);
 }
 
+TEST_CASE("GraphView snapshot identity and export bytes are deterministic") {
+  Storage db(":memory:");
+  const int64_t component =
+      db.add_component("test", "/tmp/cidx-ui-determinism");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "main.cpp");
+  auto source = symbol("USR::det-source", "ns::det_source");
+  source.file_id = file;
+  const int64_t source_id = db.add_symbol(source);
+  auto target = symbol("USR::det-target", "ns::det_target");
+  target.file_id = file;
+  const int64_t target_id = db.add_symbol(target);
+  cidx::Edge edge;
+  edge.src_id = source_id;
+  edge.dst_id = target_id;
+  edge.kind = cidx::graph::edge_kinds_map().at("calls");
+  db.add_edge(edge);
+
+  cidx::ui::GraphViewRequest request;
+  request.root = "ns::det_source";
+  request.edge_kinds = std::vector<std::string>{"calls"};
+  request.depth = 1;
+  const auto first = cidx::ui::build_graph_view(db, request);
+  const auto second = cidx::ui::build_graph_view(db, request);
+  const std::string first_json = cidx::json_out::dumps_indent2(first);
+  CHECK(first_json == cidx::json_out::dumps_indent2(second));
+  CHECK(first_json.find("\"query_identity\": \"") != std::string::npos);
+  CHECK(first_json.find("\"result_id\": \"") != std::string::npos);
+  CHECK(first_json.find("\"fact_sets\": [\n        \"symbols\"") !=
+        std::string::npos);
+  CHECK(first_json.find("\"status\": \"unknown\"") != std::string::npos);
+
+  const std::string first_html = cidx::ui::render_html(first);
+  CHECK(first_html == cidx::ui::render_html(second));
+  CHECK(first_html.find("window.CIDX_OFFLINE = true") != std::string::npos);
+  CHECK(first_html.find("cidx.offline-snapshot.v1") != std::string::npos);
+  CHECK(first_html.find("https://") == std::string::npos);
+}
+
+TEST_CASE("GraphView live rendering keeps offline export transport disabled") {
+  Storage db(":memory:");
+  cidx::ui::GraphViewRequest request;
+  const auto view = cidx::ui::build_graph_view(db, request);
+  const std::string html =
+      cidx::ui::render_html(view, cidx::ui::RenderMode::LoopbackLive);
+  CHECK(html.find("window.CIDX_OFFLINE = false") != std::string::npos);
+}
+
 TEST_CASE("GraphView reports ambiguous roots instead of choosing one") {
   Storage db(":memory:");
   db.add_symbol(symbol("USR::one", "ns::ambiguous"));

@@ -182,13 +182,23 @@ std::unique_ptr<Storage> open_ui_storage(const ParsedArgs & /*args*/,
 } // namespace
 
 int cmd_ui_export(const ParsedArgs &args, Context &ctx) {
+  if (!args.ui_output) {
+    *ctx.err << "error: cidx ui export: --output is required\n";
+    return 2;
+  }
+  if (!args.ui_root && !args.ui_query) {
+    *ctx.err << "error: cidx ui export: a bounded --root or --query is "
+                "required\n";
+    return 2;
+  }
   auto db = open_ui_storage(args, ctx);
-  if (!db || !args.ui_output) {
+  if (!db) {
     return 1;
   }
   try {
     const auto view = ui::build_graph_view(*db, ui_request(args));
-    const std::string html = ui::render_html(view);
+    const std::string html =
+        ui::render_html(view, ui::RenderMode::OfflineExport);
     std::ofstream output(*args.ui_output, std::ios::binary | std::ios::trunc);
     if (!output) {
       *ctx.err << "error: cidx ui: cannot write " << *args.ui_output << "\n";
@@ -215,7 +225,8 @@ int cmd_ui_open(const ParsedArgs &args, Context &ctx) {
   try {
     const ui::GraphViewRequest base_request = ui_request(args);
     const auto view = ui::build_graph_view(*db, base_request);
-    const std::string html = ui::render_html(view);
+    const std::string html =
+        ui::render_html(view, ui::RenderMode::LoopbackLive);
     const ui::GraphProvider graph_provider =
         LiveGraphProvider{.db = db.get(), .base_request = base_request};
     return ui::serve_live(
