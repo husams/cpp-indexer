@@ -42,7 +42,8 @@ public:
 // execution actually ran against (and did in the reviewed version of this
 // file). publish_extension_artifact() reads those identities from
 // `ExecutionReport` instead, so there is exactly one path from
-// execute_plan()'s ExecutionInput to the published artifact's metadata.
+// execute_plan()'s TranslationUnitDescriptor to the published artifact's
+// metadata.
 struct PublicationRequest {
   std::filesystem::path artifact_root;
   // A package-qualified namespace (e.g. "banking.audit"); becomes part of
@@ -61,12 +62,11 @@ struct ExtensionPublication {
   std::vector<std::string> exposed_relations;
 };
 
-// `report` and `sink` must come from the same execute_plan() call. This is
-// verified, not assumed: every fact in `sink` must carry the same
-// provenance.plan_hash/artifact_identity as `report`, and `report`'s pinned
-// workspace_identity/tu_identity (populated from the ExecutionInput passed
-// to execute_plan()) must both be non-empty -- an ad hoc/test execution
-// that leaves them empty cannot be published, only pinned executions can.
+// `report` and `sink` must come from the same descriptor-backed execute_plan()
+// call. This is verified, not assumed: every fact in `sink` must carry the
+// same provenance.plan_hash/artifact_identity as `report`, whose sealed
+// publication state must remain intact. Ad hoc raw-AST execution cannot be
+// published.
 // Canonicalizes `sink` itself (non-const) so the published bytes are always
 // deterministic regardless of whether the caller already did so. Throws
 // ExtensionPublicationError if the namespace is invalid, the identities are

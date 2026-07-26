@@ -17,6 +17,7 @@
 
 #include "clang/AST/ASTTypeTraits.h"
 #include "clang/AST/Decl.h"
+#include "clang/AST/DeclCXX.h"
 #include "clang/AST/Expr.h"
 #include "clang/ASTMatchers/Dynamic/Diagnostics.h"
 #include "clang/ASTMatchers/Dynamic/Parser.h"
@@ -58,6 +59,29 @@ std::optional<EndpointDomain> domain_for_kind(clang::ASTNodeKind kind) {
     return EndpointDomain::type;
   }
   return std::nullopt;
+}
+
+bool kind_supports_subject(clang::ASTNodeKind kind,
+                           AstPropertySubject subject) {
+  switch (subject) {
+  case AstPropertySubject::named_declaration:
+    return clang::ASTNodeKind::getFromNodeKind<clang::NamedDecl>().isBaseOf(
+        kind);
+  case AstPropertySubject::cxx_method_declaration:
+    return clang::ASTNodeKind::getFromNodeKind<clang::CXXMethodDecl>().isBaseOf(
+        kind);
+  case AstPropertySubject::function_or_variable_declaration:
+    return clang::ASTNodeKind::getFromNodeKind<clang::FunctionDecl>().isBaseOf(
+               kind) ||
+           clang::ASTNodeKind::getFromNodeKind<clang::VarDecl>().isBaseOf(kind);
+  case AstPropertySubject::declaration:
+    return clang::ASTNodeKind::getFromNodeKind<clang::Decl>().isBaseOf(kind);
+  case AstPropertySubject::variable_declaration:
+    return clang::ASTNodeKind::getFromNodeKind<clang::VarDecl>().isBaseOf(kind);
+  case AstPropertySubject::expression:
+    return clang::ASTNodeKind::getFromNodeKind<clang::Expr>().isBaseOf(kind);
+  }
+  return false;
 }
 
 // Intercepts every matcher construction during parsing to record which
@@ -187,6 +211,16 @@ void validate_rule_matcher(ValidationResult &result, const ExtractionRule &rule,
               to_string(*required) + " but binding '" +
               emit.attribute->binding + "' declares domain " +
               to_string(binding->domain));
+      continue;
+    }
+    const auto bound = sema.bound_kinds().find(emit.attribute->binding);
+    const auto subject = catalog.required_subject(property);
+    if (bound != sema.bound_kinds().end() && subject &&
+        !kind_supports_subject(bound->second, *subject)) {
+      add(result, rule.id, ValidationErrorCode::endpoint_type_mismatch,
+          "attribute '" + property + "' cannot be read from binding '" +
+              emit.attribute->binding + "' because its matcher produces " +
+              bound->second.asStringRef().str());
     }
   }
 }

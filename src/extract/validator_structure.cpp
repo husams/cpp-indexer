@@ -79,6 +79,14 @@ void scan_forbidden(ValidationResult &result, const std::string &rule_id,
   }
 }
 
+void require_non_empty(ValidationResult &result, const std::string &rule_id,
+                       std::string_view field_name, const std::string &value) {
+  if (value.empty()) {
+    add(result, rule_id, ValidationErrorCode::malformed_plan,
+        std::string(field_name) + " must not be empty");
+  }
+}
+
 bool binding_exists(const std::vector<Binding> &bindings,
                     const std::string &name) {
   return std::ranges::any_of(
@@ -235,6 +243,10 @@ void validate_emit(ValidationResult &result, const ExtractionRule &rule,
             std::to_string(payload_count) + ")");
   }
   if (emit.node) {
+    require_non_empty(result, rule.id, "node.namespace",
+                      emit.node->namespace_name);
+    require_non_empty(result, rule.id, "node.node_kind", emit.node->node_kind);
+    require_non_empty(result, rule.id, "node.binding", emit.node->binding);
     scan_forbidden(result, rule.id, "node.namespace",
                    emit.node->namespace_name);
     scan_forbidden(result, rule.id, "node.node_kind", emit.node->node_kind);
@@ -245,6 +257,14 @@ void validate_emit(ValidationResult &result, const ExtractionRule &rule,
     validate_identity(result, rule, emit.node->binding, emit.node->identity);
   }
   if (emit.relation) {
+    require_non_empty(result, rule.id, "relation.namespace",
+                      emit.relation->namespace_name);
+    require_non_empty(result, rule.id, "relation.relation_kind",
+                      emit.relation->relation_kind);
+    require_non_empty(result, rule.id, "relation.from_binding",
+                      emit.relation->from_binding);
+    require_non_empty(result, rule.id, "relation.to_binding",
+                      emit.relation->to_binding);
     scan_forbidden(result, rule.id, "relation.namespace",
                    emit.relation->namespace_name);
     scan_forbidden(result, rule.id, "relation.relation_kind",
@@ -275,6 +295,14 @@ void validate_emit(ValidationResult &result, const ExtractionRule &rule,
     }
   }
   if (emit.attribute) {
+    require_non_empty(result, rule.id, "attribute.namespace",
+                      emit.attribute->namespace_name);
+    require_non_empty(result, rule.id, "attribute.attribute_name",
+                      emit.attribute->attribute_name);
+    require_non_empty(result, rule.id, "attribute.binding",
+                      emit.attribute->binding);
+    require_non_empty(result, rule.id, "attribute.ast_property",
+                      emit.attribute->ast_property);
     scan_forbidden(result, rule.id, "attribute.namespace",
                    emit.attribute->namespace_name);
     scan_forbidden(result, rule.id, "attribute.attribute_name",
@@ -286,6 +314,12 @@ void validate_emit(ValidationResult &result, const ExtractionRule &rule,
     }
   }
   if (emit.unknown) {
+    require_non_empty(result, rule.id, "unknown.namespace",
+                      emit.unknown->namespace_name);
+    require_non_empty(result, rule.id, "unknown.reason_code",
+                      emit.unknown->reason_code);
+    require_non_empty(result, rule.id, "unknown.binding",
+                      emit.unknown->binding);
     scan_forbidden(result, rule.id, "unknown.namespace",
                    emit.unknown->namespace_name);
     if (!binding_exists(rule.bindings, emit.unknown->binding)) {
@@ -348,6 +382,16 @@ ValidationResult validate_structure(const ExtractionPlan &plan,
     add(result, "", ValidationErrorCode::malformed_plan,
         "plan_id must not be empty");
   }
+  if (plan.plan_version == 0) {
+    add(result, "", ValidationErrorCode::malformed_plan,
+        "plan_version must be positive");
+  }
+  for (const std::uint32_t catalog_version : plan.catalog_versions) {
+    if (catalog_version == 0) {
+      add(result, "", ValidationErrorCode::malformed_plan,
+          "catalog_versions entries must be positive");
+    }
+  }
   std::set<std::string> seen_rule_ids;
   for (const auto &rule : plan.rules) {
     if (rule.id.empty()) {
@@ -360,6 +404,10 @@ ValidationResult validate_structure(const ExtractionPlan &plan,
     if (rule.matcher_expression.empty()) {
       add(result, rule.id, ValidationErrorCode::malformed_plan,
           "matcher_expression must not be empty");
+    }
+    if (rule.version == 0) {
+      add(result, rule.id, ValidationErrorCode::malformed_plan,
+          "rule version must be positive");
     }
     scan_forbidden(result, rule.id, "matcher_expression",
                    rule.matcher_expression);

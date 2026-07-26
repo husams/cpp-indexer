@@ -10,6 +10,7 @@
 #include "doctest/doctest.h"
 
 #include "analysis/facts.hpp"
+#include "ast/pass_registry.hpp"
 #include "extract/artifact.hpp"
 #include "extract/engine.hpp"
 #include "extract/extension_facts.hpp"
@@ -17,6 +18,8 @@
 #include "extract/plan_ir.hpp"
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
+#include "util/hashing.hpp"
+#include "workspace/context.hpp"
 
 #include "clang/AST/ASTConsumer.h"
 #include "clang/Frontend/CompilerInstance.h"
@@ -40,23 +43,43 @@ struct RunResult {
   ExecutionReport report;
   InMemoryExtensionFactSink sink;
   std::optional<std::string> plan_not_validated_message;
+  bool frontend_capability_unavailable = false;
 };
 
 class PlanConsumer final : public clang::ASTConsumer {
 public:
   PlanConsumer(const ExtractionPlan &plan, clang::Preprocessor &preprocessor,
                const ExecutionInput &input, const ExecutionOptions &options,
-               RunResult &result)
+               bool omit_preprocessor_capability, RunResult &result)
       : plan_(plan), preprocessor_(preprocessor), input_(input),
-        options_(options), result_(result) {}
+        options_(options),
+        omit_preprocessor_capability_(omit_preprocessor_capability),
+        result_(result) {}
 
   void HandleTranslationUnit(clang::ASTContext &context) override {
     try {
-      result_.report = execute_plan(plan_, context, preprocessor_, result_.sink,
-                                    input_, options_);
+      if (!input_.workspace_identity.empty() && !input_.tu_identity.empty()) {
+        cidx::TranslationUnitDescriptor descriptor;
+        descriptor.source_identity = "test.cpp";
+        descriptor.workspace_identity = input_.workspace_identity;
+        descriptor.canonical_json =
+            R"({"test_configuration":")" + input_.tu_identity + R"("})";
+        descriptor.semantic_hash = cidx::sha256_hex(descriptor.canonical_json);
+        cidx::ast::FrontendSession session;
+        session.ast_context = &context;
+        session.preprocessor =
+            omit_preprocessor_capability_ ? nullptr : &preprocessor_;
+        result_.report =
+            execute_plan(plan_, descriptor, session, result_.sink, options_);
+      } else {
+        result_.report = execute_plan(plan_, context, preprocessor_,
+                                      result_.sink, input_, options_);
+      }
       result_.sink.canonicalize();
     } catch (const PlanNotValidated &ex) {
       result_.plan_not_validated_message = ex.what();
+    } catch (const cidx::ast::FrontendCapabilityUnavailable &) {
+      result_.frontend_capability_unavailable = true;
     }
   }
 
@@ -65,36 +88,44 @@ private:
   clang::Preprocessor &preprocessor_;
   const ExecutionInput &input_;
   const ExecutionOptions &options_;
+  bool omit_preprocessor_capability_;
   RunResult &result_;
 };
 
 class PlanAction final : public clang::ASTFrontendAction {
 public:
   PlanAction(const ExtractionPlan &plan, const ExecutionInput &input,
-             const ExecutionOptions &options, RunResult &result)
-      : plan_(plan), input_(input), options_(options), result_(result) {}
+             const ExecutionOptions &options, bool omit_preprocessor_capability,
+             RunResult &result)
+      : plan_(plan), input_(input), options_(options),
+        omit_preprocessor_capability_(omit_preprocessor_capability),
+        result_(result) {}
 
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &compiler,
                     llvm::StringRef /*in_file*/) override {
-    return std::make_unique<PlanConsumer>(plan_, compiler.getPreprocessor(),
-                                          input_, options_, result_);
+    return std::make_unique<PlanConsumer>(
+        plan_, compiler.getPreprocessor(), input_, options_,
+        omit_preprocessor_capability_, result_);
   }
 
 private:
   const ExtractionPlan &plan_;
   const ExecutionInput &input_;
   const ExecutionOptions &options_;
+  bool omit_preprocessor_capability_;
   RunResult &result_;
 };
 
 RunResult run_plan(const ExtractionPlan &plan, const std::string &code,
                    const ExecutionInput &input = {},
-                   const ExecutionOptions &options = {}) {
+                   const ExecutionOptions &options = {},
+                   bool omit_preprocessor_capability = false) {
   RunResult result;
   const bool ran = clang::tooling::runToolOnCode(
-      std::make_unique<PlanAction>(plan, input, options, result), code,
-      "test.cpp");
+      std::make_unique<PlanAction>(plan, input, options,
+                                   omit_preprocessor_capability, result),
+      code, "test.cpp");
   REQUIRE(ran);
   return result;
 }
@@ -108,7 +139,7 @@ RunResult run_plan_with_files(const ExtractionPlan &plan,
   RunResult result;
   const ExecutionOptions options;
   const bool ran = clang::tooling::runToolOnCodeWithArgs(
-      std::make_unique<PlanAction>(plan, input, options, result), code,
+      std::make_unique<PlanAction>(plan, input, options, false, result), code,
       {"-std=c++20"}, "test.cpp", "clang-tool",
       std::make_shared<clang::PCHContainerOperations>(), files);
   REQUIRE(ran);
@@ -121,15 +152,15 @@ RunResult run_plan_with_files(const ExtractionPlan &plan,
 // which files it happened to resolve.
 RunResult run_plan_with_args(const ExtractionPlan &plan,
                              const std::string &code,
-                             const std::vector<std::string> &extra_args) {
+                             const std::vector<std::string> &extra_args,
+                             const ExecutionInput &input = {}) {
   RunResult result;
-  const ExecutionInput input;
   const ExecutionOptions options;
   std::vector<std::string> args = {"-std=c++20"};
   args.insert(args.end(), extra_args.begin(), extra_args.end());
   const bool ran = clang::tooling::runToolOnCodeWithArgs(
-      std::make_unique<PlanAction>(plan, input, options, result), code, args,
-      "test.cpp");
+      std::make_unique<PlanAction>(plan, input, options, false, result), code,
+      args, "test.cpp");
   REQUIRE(ran);
   return result;
 }
@@ -314,6 +345,19 @@ std::string make_temp_dir() {
   char *path = ::mkdtemp(buffer.data());
   REQUIRE(path != nullptr);
   return path;
+}
+
+bool publication_is_rejected(cidx::Storage &storage,
+                             const PublicationRequest &request,
+                             const ExtractionPlan &plan,
+                             const ExecutionReport &report,
+                             InMemoryExtensionFactSink &sink) {
+  try {
+    (void)publish_extension_artifact(storage, request, plan, report, sink);
+  } catch (const ExtensionPublicationError &) {
+    return true;
+  }
+  return false;
 }
 
 RuleBudget generous_budget() {
@@ -693,7 +737,8 @@ TEST_SUITE("clang") {
                                 .tu_identity = "tu:test"});
     REQUIRE(result.sink.relations().size() == 1);
     REQUIRE(result.report.workspace_identity == "workspace:test");
-    REQUIRE(result.report.tu_identity == "tu:test");
+    REQUIRE_FALSE(result.report.tu_identity.empty());
+    REQUIRE(result.report.descriptor_backed());
 
     const std::string root = make_temp_dir();
     cidx::Storage storage(root + "/index.sqlite");
@@ -1018,8 +1063,8 @@ TEST_SUITE("clang") {
   }
 
   TEST_CASE(
-      "a fact's persisted completeness is downgraded when its emitting "
-      "rule's budget was exhausted, even though the rule declares complete "
+      "a budget-exhausted run is marked partial in memory but cannot publish "
+      "an artifact "
       "(critic repro: provenance.completeness was stamped once from the "
       "rule's STATIC DeclaredCompleteness before any budget check, so a "
       "truncated rule's already-emitted facts kept claiming complete)") {
@@ -1055,17 +1100,10 @@ TEST_SUITE("clang") {
     PublicationRequest request;
     request.artifact_root = root + "/artifacts";
     request.namespace_name = "banking.audit";
-    const ExtensionPublication publication = publish_extension_artifact(
-        storage, request, plan, result.report, result.sink);
-    const auto published_path = std::filesystem::path(request.artifact_root) /
-                                publication.relative_path;
-    cidx::SqliteDb published_db(published_path.string(), true,
-                                cidx::SqliteProfile::read_only_replay);
-    auto rows = published_db.prepare(
-        "SELECT COUNT(*) FROM extension WHERE fact_kind = 'relation' AND "
-        "completeness = 'complete'");
-    REQUIRE(rows.step());
-    CHECK(rows.col_int64(0) == 0);
+    CHECK(publication_is_rejected(storage, request, plan, result.report,
+                                  result.sink));
+    cidx::ArtifactStore artifacts(storage, request.artifact_root);
+    CHECK_FALSE(artifacts.current("extension:banking.audit").has_value());
   }
 
   // --- PR #66 review round 4 regression coverage ------------------------
@@ -1101,7 +1139,7 @@ TEST_SUITE("clang") {
         provider.snapshot(cidx::analysis::FactRequest{
             .relations = {"extension"},
             .workspace_identity = std::string("workspace:test"),
-            .tu_identity = std::string("tu:test")});
+            .tu_identity = result.report.tu_identity});
     CHECK(snapshot.workspace_identity == "workspace:test");
     // Bound to a single reference and guarded with a real `if`/throw --
     // not REQUIRE, which expands through doctest machinery the
@@ -1112,7 +1150,7 @@ TEST_SUITE("clang") {
       throw std::runtime_error("test fixture error: snapshot.tu_identity not "
                                "set");
     }
-    CHECK(*tu_identity == "tu:test");
+    CHECK(*tu_identity == result.report.tu_identity);
     CHECK(snapshot.completeness == cidx::analysis::FactCompleteness::complete);
     const auto *extension = snapshot.find_relation("extension");
     REQUIRE(extension != nullptr);
@@ -1408,6 +1446,59 @@ TEST_SUITE("clang") {
     REQUIRE(default_run.report.plan_hash == no_elide_run.report.plan_hash);
     CHECK(default_run.report.artifact_identity !=
           no_elide_run.report.artifact_identity);
+  }
+
+  TEST_CASE("production execution uses the complete HSE-61 descriptor identity "
+            "through the HSE-63 pass registry") {
+    ExtractionPlan plan = plan_with({logging_boundary_rule()});
+    const std::string code = "void log_audit_event(const char *msg);\n"
+                             "void f() { log_audit_event(\"t\"); }\n";
+    RunResult raw_default = run_plan_with_args(plan, code, {});
+    RunResult raw_no_std_cxx = run_plan_with_args(plan, code, {"-nostdinc++"});
+    CHECK(raw_default.report.artifact_identity !=
+          raw_no_std_cxx.report.artifact_identity);
+
+    RunResult default_run = run_plan_with_args(
+        plan, code, {},
+        ExecutionInput{.workspace_identity = "workspace:test",
+                       .tu_identity = "flags:-std=c++20"});
+    RunResult no_std_cxx = run_plan_with_args(
+        plan, code, {"-nostdinc++"},
+        ExecutionInput{.workspace_identity = "workspace:test",
+                       .tu_identity = "flags:-std=c++20,-nostdinc++"});
+    REQUIRE(default_run.report.plan_hash == no_std_cxx.report.plan_hash);
+    CHECK(default_run.report.descriptor_backed());
+    CHECK(no_std_cxx.report.descriptor_backed());
+    CHECK(default_run.report.tu_identity != no_std_cxx.report.tu_identity);
+    CHECK(default_run.report.artifact_identity !=
+          no_std_cxx.report.artifact_identity);
+
+    RunResult missing_preprocessor =
+        run_plan(plan, code,
+                 ExecutionInput{.workspace_identity = "workspace:test",
+                                .tu_identity = "flags:-std=c++20"},
+                 ExecutionOptions{}, true);
+    CHECK(missing_preprocessor.frontend_capability_unavailable);
+  }
+
+  TEST_CASE("publication rejects report identities mutated after execution") {
+    ExtractionPlan plan = plan_with({logging_boundary_rule()});
+    RunResult result =
+        run_plan(plan,
+                 "void log_audit_event(const char *msg);\n"
+                 "void f() { log_audit_event(\"t\"); }\n",
+                 ExecutionInput{.workspace_identity = "workspace:test",
+                                .tu_identity = "config:test"});
+    REQUIRE(result.report.descriptor_backed());
+    result.report.workspace_identity = "workspace:forged";
+
+    const std::string root = make_temp_dir();
+    cidx::Storage storage(root + "/index.sqlite");
+    PublicationRequest request;
+    request.artifact_root = root + "/artifacts";
+    request.namespace_name = "banking.audit";
+    CHECK(publication_is_rejected(storage, request, plan, result.report,
+                                  result.sink));
   }
 
 } // TEST_SUITE("clang")

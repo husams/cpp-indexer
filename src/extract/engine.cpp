@@ -6,8 +6,10 @@
 #include "extract/validator.hpp"
 
 #include "ast/location.hpp"
+#include "ast/pass_registry.hpp"
 #include "ast/usr.hpp"
 #include "util/hashing.hpp"
+#include "workspace/context.hpp"
 
 #include "catalogs/generated_catalog.hpp"
 
@@ -57,6 +59,39 @@ ExecutionReport::find(const std::string &rule_id) const {
   return nullptr;
 }
 
+std::string ExecutionReport::publication_state_seal() const {
+  std::ostringstream state;
+  const auto append = [&state](const std::string &value) {
+    state << value.size() << ':' << value << ';';
+  };
+  append(plan_hash);
+  append(artifact_identity);
+  append(workspace_identity);
+  append(tu_identity);
+  state << (descriptor_backed_ ? '1' : '0') << ';' << rule_stats.size() << ';';
+  for (const RuleExecutionStats &stats : rule_stats) {
+    append(stats.rule_id);
+    state << stats.visited_nodes << ';' << stats.matches << ';' << stats.emitted
+          << ';' << (stats.budget_exhausted ? '1' : '0') << ';';
+  }
+  state << diagnostics.size() << ';';
+  for (const ExecutionDiagnostic &diagnostic : diagnostics) {
+    append(diagnostic.rule_id);
+    append(diagnostic.code);
+    append(diagnostic.message);
+  }
+  return cidx::sha256_hex(state.str());
+}
+
+void ExecutionReport::refresh_publication_seal() {
+  publication_seal_ = publication_state_seal();
+}
+
+bool ExecutionReport::publication_state_is_intact() const {
+  return !publication_seal_.empty() &&
+         publication_seal_ == publication_state_seal();
+}
+
 namespace {
 
 // Every binding resolves to (at most) one of these, per Binding::domain.
@@ -94,7 +129,7 @@ ExtensionEvidence evidence_for(clang::ASTContext &context,
 // plan against the same source on two different cidx builds are never
 // conflated as "the same artifact" purely because the plan and source
 // happened not to change.
-constexpr std::string_view kExtractionEngineVersion = "cidx-extract-engine/1";
+constexpr std::string_view kExtractionEngineVersion = "cidx-extract-engine/2";
 
 // Serializes EVERY clang::LangOptions flag/value/enum this build of Clang
 // knows about, keyed by its own field name, via the same LangOptions.def
@@ -180,6 +215,14 @@ std::string tu_content_fingerprint(clang::ASTContext &context,
       preprocessor.getHeaderSearchInfo().getHeaderSearchOpts();
   combined << header_search_opts.Sysroot << '\x1f'
            << header_search_opts.ResourceDir << '\x1e';
+  // Search-path entries alone are not the complete header-search policy:
+  // -nostdinc/-nostdinc++ toggle these bits without adding or removing a
+  // UserEntry. Keep the ad hoc fingerprint honest even though production
+  // publication additionally carries HSE-61's complete descriptor hash.
+  combined << header_search_opts.UseBuiltinIncludes << '\x1f'
+           << header_search_opts.UseStandardSystemIncludes << '\x1f'
+           << header_search_opts.UseStandardCXXIncludes << '\x1f'
+           << header_search_opts.UseLibcxx << '\x1e';
   for (const auto &entry : header_search_opts.UserEntries) {
     combined << entry.Path << '\x1f' << static_cast<int>(entry.Group) << '\x1f'
              << (entry.IsFramework != 0U ? '1' : '0')
@@ -883,22 +926,34 @@ void forward_rule_facts(ExtensionFactSink &sink,
   }
 }
 
+void require_executable_plan(const ExtractionPlan &plan) {
+  ValidationResult validation = validate(plan);
+  if (validation.ok()) {
+    return;
+  }
+  std::ostringstream message;
+  message << "ExtractionPlan failed validation and cannot be executed:";
+  for (const auto &error : validation.errors) {
+    message << " [" << error.rule_id << "] " << to_string(error.code) << ": "
+            << error.message << ";";
+  }
+  throw PlanNotValidated(message.str());
+}
+
+std::size_t saturating_add(std::size_t lhs, std::size_t rhs) {
+  if (rhs > std::numeric_limits<std::size_t>::max() - lhs) {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  return lhs + rhs;
+}
+
 } // namespace
 
 ExecutionReport
 execute_plan(const ExtractionPlan &plan, clang::ASTContext &context,
              clang::Preprocessor &preprocessor, ExtensionFactSink &sink,
              const ExecutionInput &input, const ExecutionOptions &options) {
-  ValidationResult validation = validate(plan);
-  if (!validation.ok()) {
-    std::ostringstream message;
-    message << "ExtractionPlan failed validation and cannot be executed:";
-    for (const auto &error : validation.errors) {
-      message << " [" << error.rule_id << "] " << to_string(error.code) << ": "
-              << error.message << ";";
-    }
-    throw PlanNotValidated(message.str());
-  }
+  require_executable_plan(plan);
 
   ExecutionReport report;
   report.plan_hash = plan_hash(plan);
@@ -915,6 +970,7 @@ execute_plan(const ExtractionPlan &plan, clang::ASTContext &context,
 
   for (const auto &rule : plan.rules) {
     RuleExecutionStats stats{.rule_id = rule.id,
+                             .visited_nodes = 0,
                              .matches = 0,
                              .emitted = 0,
                              .budget_exhausted = false};
@@ -924,6 +980,7 @@ execute_plan(const ExtractionPlan &plan, clang::ASTContext &context,
     // matcher execution for this rule.
     NodeBudgetCounter counter(rule.budget.max_visited_nodes);
     counter.walk(context.getTranslationUnitDecl());
+    stats.visited_nodes = static_cast<std::size_t>(counter.visited());
     const std::int64_t combinators = count_matcher_occurrences(
         rule.matcher_expression, traversal_work_combinators());
     // A traversal-work combinator's WORST-CASE cost is quadratic, not
@@ -1024,7 +1081,112 @@ execute_plan(const ExtractionPlan &plan, clang::ASTContext &context,
     forward_rule_facts(sink, rule_sink, stats.budget_exhausted);
     report.rule_stats.push_back(stats);
   }
+  report.refresh_publication_seal();
   return report;
+}
+
+ExecutionReport execute_plan(const ExtractionPlan &plan,
+                             const cidx::TranslationUnitDescriptor &descriptor,
+                             cidx::ast::FrontendSession &session,
+                             ExtensionFactSink &sink,
+                             const ExecutionOptions &options) {
+  require_executable_plan(plan);
+  if (descriptor.source_identity.empty() ||
+      descriptor.workspace_identity.empty() ||
+      descriptor.canonical_json.empty() || descriptor.semantic_hash.empty() ||
+      cidx::sha256_hex(descriptor.canonical_json) != descriptor.semantic_hash) {
+    throw PlanNotValidated(
+        "production ExtractionPlan execution requires a complete, internally "
+        "consistent HSE-61 TranslationUnitDescriptor");
+  }
+
+  std::size_t max_visited = plan.rules.size();
+  std::size_t max_emitted = 0;
+  std::size_t max_diagnostics = plan.rules.size();
+  for (const ExtractionRule &rule : plan.rules) {
+    max_visited = saturating_add(
+        max_visited, static_cast<std::size_t>(rule.budget.max_visited_nodes));
+    max_emitted = saturating_add(
+        max_emitted, static_cast<std::size_t>(rule.budget.max_emitted_facts));
+    max_diagnostics = saturating_add(
+        max_diagnostics, static_cast<std::size_t>(rule.budget.max_matches));
+    max_diagnostics =
+        saturating_add(max_diagnostics,
+                       static_cast<std::size_t>(rule.budget.max_emitted_facts));
+  }
+  max_emitted = std::min(max_emitted, options.hard_output_cap);
+
+  const bool all_main_file =
+      std::ranges::all_of(plan.rules, [](const ExtractionRule &rule) {
+        return rule.scope == PlanScope::main_file;
+      });
+  const bool all_complete =
+      std::ranges::all_of(plan.rules, [](const ExtractionRule &rule) {
+        return rule.completeness == DeclaredCompleteness::complete;
+      });
+  std::vector<std::uint32_t> catalog_versions = plan.catalog_versions;
+  if (catalog_versions.empty()) {
+    catalog_versions.push_back(
+        static_cast<std::uint32_t>(cidx::catalog::kCatalogVersion));
+  }
+
+  const std::string pass_id = "extract.plan." + plan_hash(plan);
+  cidx::ast::ExtractionPassRegistry registry;
+  cidx::ast::IndexingPlan indexing_plan;
+  std::optional<ExecutionReport> execution_report;
+  registry.register_pass(
+      cidx::ast::ExtractionPassDescriptor{
+          .id = pass_id,
+          .version = plan.plan_version,
+          .required_capabilities =
+              {cidx::ast::FrontendCapability::ast,
+               cidx::ast::FrontendCapability::preprocessor},
+          .consumed_fact_families = {},
+          .produced_fact_families = {"extension_facts", "evidence"},
+          .catalog_versions = std::move(catalog_versions),
+          .dependencies = {},
+          .scope = all_main_file ? cidx::ast::PassScope::main_file
+                                 : cidx::ast::PassScope::translation_unit,
+          .traversal = cidx::ast::TraversalMode::body,
+          .completeness = all_complete ? cidx::ast::FactCompleteness::complete
+                                       : cidx::ast::FactCompleteness::partial,
+          .trust = cidx::ast::FactTrust::inferred,
+          .budget = {.max_visited_constructs = max_visited,
+                     .max_emitted_facts = max_emitted,
+                     .max_diagnostics = max_diagnostics,
+                     .declared = true}},
+      [&](cidx::ast::PassExecutionContext &context) {
+        execution_report = execute_plan(
+            plan, *context.session->ast_context, *context.session->preprocessor,
+            sink,
+            ExecutionInput{.workspace_identity = descriptor.workspace_identity,
+                           .tu_identity = descriptor.semantic_hash},
+            options);
+        std::size_t visited = 0;
+        std::size_t emitted = 0;
+        bool budget_exhausted = false;
+        for (const RuleExecutionStats &stats : execution_report->rule_stats) {
+          visited = saturating_add(visited, stats.visited_nodes);
+          emitted = saturating_add(emitted, stats.emitted);
+          budget_exhausted = budget_exhausted || stats.budget_exhausted;
+        }
+        context.metrics.note_visited(visited);
+        context.metrics.note_emitted(emitted);
+        for (const ExecutionDiagnostic &diagnostic :
+             execution_report->diagnostics) {
+          context.metrics.note_diagnostic(diagnostic.code + ": " +
+                                          diagnostic.message);
+        }
+        context.metrics.budget_exhausted = budget_exhausted;
+      });
+  indexing_plan.add(pass_id);
+  (void)registry.run(indexing_plan, &session);
+  if (!execution_report) {
+    throw std::logic_error("registered extraction pass did not execute");
+  }
+  execution_report->descriptor_backed_ = true;
+  execution_report->refresh_publication_seal();
+  return std::move(*execution_report);
 }
 
 } // namespace cidx::extract

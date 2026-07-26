@@ -18,6 +18,24 @@
 
 namespace cidx::extract {
 
+// The exact Clang AST shape required by read_property(). EndpointDomain alone
+// is intentionally too coarse: for example, storage_class is meaningful for a
+// VarDecl but not for every declaration.
+enum class AstPropertySubject : std::uint8_t {
+  named_declaration,
+  cxx_method_declaration,
+  function_or_variable_declaration,
+  declaration,
+  variable_declaration,
+  expression,
+};
+
+struct MatcherProperty {
+  std::string name;
+  EndpointDomain domain;
+  AstPropertySubject subject;
+};
+
 // Combinators whose Clang implementation repeatedly re-traverses a subtree
 // for every candidate node during matchAST (unlike a plain narrowing
 // predicate such as hasName(), which is O(1) per node). Shared by the
@@ -44,13 +62,15 @@ public:
   [[nodiscard]] std::optional<EndpointDomain>
   required_domain(const std::string &property_name) const;
 
-  MatcherCatalog(
-      std::set<std::string> matcher_ids,
-      std::vector<std::pair<std::string, EndpointDomain>> properties);
+  [[nodiscard]] std::optional<AstPropertySubject>
+  required_subject(const std::string &property_name) const;
+
+  MatcherCatalog(std::set<std::string> matcher_ids,
+                 std::vector<MatcherProperty> properties);
 
 private:
   std::set<std::string> matcher_ids_;
-  std::vector<std::pair<std::string, EndpointDomain>> properties_;
+  std::vector<MatcherProperty> properties_;
 };
 
 // Lexically scans `matcher_expression` for bare-identifier call sites

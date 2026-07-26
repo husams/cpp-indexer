@@ -79,6 +79,12 @@ EmitRelation &relation_of(ExtractionRule &rule) {
   return *relation;
 }
 
+bool has_error(const ValidationResult &result, ValidationErrorCode code) {
+  return std::ranges::any_of(
+      result.errors,
+      [code](const ValidationError &error) { return error.code == code; });
+}
+
 } // namespace
 
 TEST_CASE("canonical JSON round-trips through parse_plan_json") {
@@ -430,6 +436,94 @@ TEST_CASE("validate_structure rejects an EmitOperation with no payload set") {
   CHECK(found);
 }
 
+TEST_CASE("builder-created plans enforce every checked-in JSON Schema "
+          "minimum and non-empty emit field") {
+  std::vector<ExtractionPlan> invalid_plans;
+  auto add_mutation = [&](const auto &mutate) {
+    ExtractionPlan plan = make_plan();
+    mutate(plan);
+    invalid_plans.push_back(std::move(plan));
+  };
+  add_mutation([](ExtractionPlan &plan) { plan.plan_version = 0; });
+  add_mutation([](ExtractionPlan &plan) { plan.catalog_versions = {0}; });
+  add_mutation([](ExtractionPlan &plan) { plan.rules[0].version = 0; });
+
+  const auto add_relation_field_mutation = [&](const auto &mutate_relation) {
+    add_mutation([&](ExtractionPlan &plan) {
+      mutate_relation(relation_of(plan.rules[0]));
+    });
+  };
+  add_relation_field_mutation(
+      [](EmitRelation &emit) { emit.namespace_name.clear(); });
+  add_relation_field_mutation(
+      [](EmitRelation &emit) { emit.relation_kind.clear(); });
+  add_relation_field_mutation(
+      [](EmitRelation &emit) { emit.from_binding.clear(); });
+  add_relation_field_mutation(
+      [](EmitRelation &emit) { emit.to_binding.clear(); });
+
+  const auto add_node_field_mutation = [&](const auto &mutate_node) {
+    add_mutation([&](ExtractionPlan &plan) {
+      EmitNode node{.namespace_name = "audit",
+                    .node_kind = "Event",
+                    .binding = "callee",
+                    .identity = {.kind = IdentityKind::usr, .components = {}}};
+      mutate_node(node);
+      EmitOperation emit;
+      emit.node = std::move(node);
+      plan.rules[0].emits = {emit};
+    });
+  };
+  add_node_field_mutation([](EmitNode &emit) { emit.namespace_name.clear(); });
+  add_node_field_mutation([](EmitNode &emit) { emit.node_kind.clear(); });
+  add_node_field_mutation([](EmitNode &emit) { emit.binding.clear(); });
+
+  const auto add_attribute_field_mutation = [&](const auto &mutate_attribute) {
+    add_mutation([&](ExtractionPlan &plan) {
+      EmitAttribute attribute{.namespace_name = "audit",
+                              .attribute_name = "name",
+                              .binding = "callee",
+                              .ast_property = "spelling"};
+      mutate_attribute(attribute);
+      EmitOperation emit;
+      emit.attribute = std::move(attribute);
+      plan.rules[0].emits = {emit};
+    });
+  };
+  add_attribute_field_mutation(
+      [](EmitAttribute &emit) { emit.namespace_name.clear(); });
+  add_attribute_field_mutation(
+      [](EmitAttribute &emit) { emit.attribute_name.clear(); });
+  add_attribute_field_mutation(
+      [](EmitAttribute &emit) { emit.binding.clear(); });
+  add_attribute_field_mutation(
+      [](EmitAttribute &emit) { emit.ast_property.clear(); });
+
+  const auto add_unknown_field_mutation = [&](const auto &mutate_unknown) {
+    add_mutation([&](ExtractionPlan &plan) {
+      EmitUnknown unknown{
+          .namespace_name = "audit", .reason_code = "seen", .binding = "call"};
+      mutate_unknown(unknown);
+      EmitOperation emit;
+      emit.unknown = std::move(unknown);
+      plan.rules[0].emits = {emit};
+    });
+  };
+  add_unknown_field_mutation(
+      [](EmitUnknown &emit) { emit.namespace_name.clear(); });
+  add_unknown_field_mutation(
+      [](EmitUnknown &emit) { emit.reason_code.clear(); });
+  add_unknown_field_mutation([](EmitUnknown &emit) { emit.binding.clear(); });
+
+  bool all_rejected = true;
+  for (const ExtractionPlan &plan : invalid_plans) {
+    all_rejected =
+        all_rejected && has_error(validate_structure(plan),
+                                  ValidationErrorCode::malformed_plan);
+  }
+  CHECK(all_rejected);
+}
+
 TEST_SUITE("clang") {
 
   TEST_CASE("validate_matchers accepts a well-formed allow-listed rule") {
@@ -506,6 +600,34 @@ TEST_SUITE("clang") {
           found || error.code == ValidationErrorCode::endpoint_type_mismatch;
     }
     CHECK(found);
+  }
+
+  TEST_CASE("typed property validation uses the concrete bound AST kind") {
+    ExtractionPlan invalid = make_plan();
+    invalid.rules[0].matcher_expression = "cxxRecordDecl().bind(\"record\")";
+    invalid.rules[0].bindings = {
+        Binding{.name = "record", .domain = EndpointDomain::declaration}};
+    EmitOperation record_attribute;
+    record_attribute.attribute = EmitAttribute{.namespace_name = "audit",
+                                               .attribute_name = "storage",
+                                               .binding = "record",
+                                               .ast_property = "storage_class"};
+    invalid.rules[0].emits = {record_attribute};
+    CHECK(has_error(validate_matchers(invalid),
+                    ValidationErrorCode::endpoint_type_mismatch));
+
+    ExtractionPlan valid = make_plan();
+    valid.rules[0].matcher_expression = "varDecl().bind(\"variable\")";
+    valid.rules[0].bindings = {
+        Binding{.name = "variable", .domain = EndpointDomain::declaration}};
+    EmitOperation variable_attribute;
+    variable_attribute.attribute =
+        EmitAttribute{.namespace_name = "audit",
+                      .attribute_name = "storage",
+                      .binding = "variable",
+                      .ast_property = "storage_class"};
+    valid.rules[0].emits = {variable_attribute};
+    CHECK(validate_matchers(valid).ok());
   }
 
   TEST_CASE(

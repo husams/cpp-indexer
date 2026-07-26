@@ -12,9 +12,8 @@ const std::set<std::string> &traversal_work_combinators() {
   return combinators;
 }
 
-MatcherCatalog::MatcherCatalog(
-    std::set<std::string> matcher_ids,
-    std::vector<std::pair<std::string, EndpointDomain>> properties)
+MatcherCatalog::MatcherCatalog(std::set<std::string> matcher_ids,
+                               std::vector<MatcherProperty> properties)
     : matcher_ids_(std::move(matcher_ids)), properties_(std::move(properties)) {
 }
 
@@ -24,15 +23,25 @@ bool MatcherCatalog::allows_matcher(const std::string &matcher_id) const {
 
 bool MatcherCatalog::allows_property(const std::string &property_name) const {
   return std::ranges::any_of(properties_, [&](const auto &entry) {
-    return entry.first == property_name;
+    return entry.name == property_name;
   });
 }
 
 std::optional<EndpointDomain>
 MatcherCatalog::required_domain(const std::string &property_name) const {
-  for (const auto &[name, domain] : properties_) {
-    if (name == property_name) {
-      return domain;
+  for (const MatcherProperty &property : properties_) {
+    if (property.name == property_name) {
+      return property.domain;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<AstPropertySubject>
+MatcherCatalog::required_subject(const std::string &property_name) const {
+  for (const MatcherProperty &property : properties_) {
+    if (property.name == property_name) {
+      return property.subject;
     }
   }
   return std::nullopt;
@@ -99,15 +108,33 @@ const MatcherCatalog &MatcherCatalog::default_catalog() {
           "allOf",
       },
       {
-          {"spelling", EndpointDomain::declaration},
-          {"qualified_name", EndpointDomain::declaration},
-          {"is_pure", EndpointDomain::declaration},
-          {"is_static", EndpointDomain::declaration},
-          {"is_virtual", EndpointDomain::declaration},
-          {"access_spelling", EndpointDomain::declaration},
-          {"storage_class", EndpointDomain::declaration},
-          {"type_spelling", EndpointDomain::expression},
-          {"value_kind", EndpointDomain::expression},
+          {.name = "spelling",
+           .domain = EndpointDomain::declaration,
+           .subject = AstPropertySubject::named_declaration},
+          {.name = "qualified_name",
+           .domain = EndpointDomain::declaration,
+           .subject = AstPropertySubject::named_declaration},
+          {.name = "is_pure",
+           .domain = EndpointDomain::declaration,
+           .subject = AstPropertySubject::cxx_method_declaration},
+          {.name = "is_static",
+           .domain = EndpointDomain::declaration,
+           .subject = AstPropertySubject::function_or_variable_declaration},
+          {.name = "is_virtual",
+           .domain = EndpointDomain::declaration,
+           .subject = AstPropertySubject::cxx_method_declaration},
+          {.name = "access_spelling",
+           .domain = EndpointDomain::declaration,
+           .subject = AstPropertySubject::declaration},
+          {.name = "storage_class",
+           .domain = EndpointDomain::declaration,
+           .subject = AstPropertySubject::variable_declaration},
+          {.name = "type_spelling",
+           .domain = EndpointDomain::expression,
+           .subject = AstPropertySubject::expression},
+          {.name = "value_kind",
+           .domain = EndpointDomain::expression,
+           .subject = AstPropertySubject::expression},
           // "canonical_type_spelling" (EndpointDomain::type) was removed
           // (PR #66 review): a type-domain binding resolves to a bare
           // clang::QualType, which carries no clang::Decl/clang::Expr and no

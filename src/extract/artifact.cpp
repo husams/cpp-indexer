@@ -175,16 +175,31 @@ publish_extension_artifact(Storage &storage, const PublicationRequest &request,
     throw ExtensionPublicationError(
         "cannot publish an execution report with no executed rules");
   }
-  // Fail closed: only a PINNED execution (a real workspace/TU identity
-  // supplied to execute_plan()'s ExecutionInput) may be published. An ad
-  // hoc/test execution that left both empty produces facts with no
-  // verifiable link to a workspace snapshot or TU descriptor, so it cannot
-  // become a registered artifact.
+  if (!report.publication_state_is_intact()) {
+    throw ExtensionPublicationError(
+        "cannot publish an execution report whose publication state was "
+        "mutated after execution");
+  }
+  if (!report.descriptor_backed()) {
+    throw ExtensionPublicationError(
+        "cannot publish an execution report that did not run from an HSE-61 "
+        "TranslationUnitDescriptor through the HSE-63 pass registry");
+  }
+  if (std::ranges::any_of(report.rule_stats,
+                          [](const RuleExecutionStats &stats) {
+                            return stats.budget_exhausted;
+                          })) {
+    throw ExtensionPublicationError(
+        "cannot publish a partial artifact from a budget-exhausted execution");
+  }
+  // Fail closed: only a PINNED execution from the descriptor-backed overload
+  // may be published. An empty identity has no verifiable link to a workspace
+  // snapshot or translation-unit configuration.
   if (report.workspace_identity.empty() || report.tu_identity.empty()) {
     throw ExtensionPublicationError(
         "cannot publish an execution report with no pinned workspace/TU "
-        "identity -- execute_plan() must be called with a non-empty "
-        "ExecutionInput to publish its result");
+        "identity -- execute_plan() must be called with a complete "
+        "TranslationUnitDescriptor to publish its result");
   }
   // Fail closed against publishing `plan`'s metadata (plan_id, rule
   // producer_package/version, ...) alongside a DIFFERENT plan's execution
@@ -228,12 +243,7 @@ publish_extension_artifact(Storage &storage, const PublicationRequest &request,
   spec.configuration_identity = report.artifact_identity;
   spec.input_fact_set_identity = report.plan_hash;
   spec.completeness = completeness_rollup(plan, report);
-  const bool any_budget_exhausted =
-      std::ranges::any_of(report.rule_stats, [](const RuleExecutionStats &s) {
-        return s.budget_exhausted;
-      });
-  spec.truncation = any_budget_exhausted ? ArtifactTruncation::truncated
-                                         : ArtifactTruncation::none;
+  spec.truncation = ArtifactTruncation::none;
   spec.trust = ArtifactTrust::producer_verified;
   // ArtifactSpec::evidence is validated against a fixed platform vocabulary
   // (source/derived/inferred/runtime/assumption/proof); extension facts are

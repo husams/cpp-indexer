@@ -16,6 +16,13 @@
 #include <string>
 #include <vector>
 
+namespace cidx {
+struct TranslationUnitDescriptor;
+namespace ast {
+struct FrontendSession;
+} // namespace ast
+} // namespace cidx
+
 namespace clang {
 class ASTContext;
 class Preprocessor;
@@ -58,6 +65,7 @@ struct ExecutionDiagnostic {
 
 struct RuleExecutionStats {
   std::string rule_id;
+  std::size_t visited_nodes = 0;
   std::size_t matches = 0;
   std::size_t emitted = 0;
   bool budget_exhausted = false;
@@ -82,6 +90,32 @@ struct ExecutionReport {
 
   [[nodiscard]] const RuleExecutionStats *
   find(const std::string &rule_id) const;
+
+  // Publication accepts only reports produced from an HSE-61 translation-unit
+  // descriptor through the HSE-63 pass registry. The integrity check also
+  // detects any caller mutation of publication-relevant report state after
+  // execution.
+  [[nodiscard]] bool descriptor_backed() const noexcept {
+    return descriptor_backed_;
+  }
+  [[nodiscard]] bool publication_state_is_intact() const;
+
+private:
+  bool descriptor_backed_ = false;
+  std::string publication_seal_;
+
+  [[nodiscard]] std::string publication_state_seal() const;
+  void refresh_publication_seal();
+
+  friend ExecutionReport
+  execute_plan(const ExtractionPlan &plan, clang::ASTContext &context,
+               clang::Preprocessor &preprocessor, ExtensionFactSink &sink,
+               const ExecutionInput &input, const ExecutionOptions &options);
+  friend ExecutionReport
+  execute_plan(const ExtractionPlan &plan,
+               const cidx::TranslationUnitDescriptor &descriptor,
+               cidx::ast::FrontendSession &session, ExtensionFactSink &sink,
+               const ExecutionOptions &options);
 };
 
 // `preprocessor` is required (not defaulted) so the artifact/content
@@ -93,6 +127,15 @@ struct ExecutionReport {
 execute_plan(const ExtractionPlan &plan, clang::ASTContext &context,
              clang::Preprocessor &preprocessor, ExtensionFactSink &sink,
              const ExecutionInput &input = {},
+             const ExecutionOptions &options = {});
+
+// Production execution path. It consumes the complete HSE-61 descriptor
+// identity and runs as an HSE-63 registered frontend pass. Only reports
+// returned by this overload are eligible for publication.
+[[nodiscard]] ExecutionReport
+execute_plan(const ExtractionPlan &plan,
+             const cidx::TranslationUnitDescriptor &descriptor,
+             cidx::ast::FrontendSession &session, ExtensionFactSink &sink,
              const ExecutionOptions &options = {});
 
 } // namespace cidx::extract
