@@ -1385,6 +1385,41 @@ def test_path_count_distinct_limit_apply_to_witnesses(seeded):
     assert len(deduped.paths) == 1
 
 
+@pytest.mark.parametrize(
+    "fanout",
+    [qp.PATH_NODE_BUDGET, qp.PATH_NODE_BUDGET + 1],
+)
+def test_path_level_budget_is_exact_at_boundary_and_truncates_without_witness(fanout):
+    # A single start node fans out to `fanout` children in one BFS level: the
+    # level-discovery query for that one level returns `fanout` rows in one
+    # chunk. Before the fix this only checked PATH_NODE_BUDGET after the whole
+    # level's rows were read into parent_of; now the row loop itself breaks
+    # the moment the budget is exceeded, so the level (and hence any witness
+    # reconstruction from it) is abandoned without waiting to finish reading a
+    # level far larger than the budget.
+    db = Storage(":memory:")
+    start_id = db.add_symbol(_make_sym("USR::fan-start", "start"))
+    first_child = None
+    for i in range(fanout):
+        child = db.add_symbol(_make_sym(f"USR::fan-child-{i}", f"child{i}"))
+        db.add_edge(start_id, child, 1)
+        if i == 0:
+            first_child = child
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(symbol("USR::fan-start"))
+         | path(start(symbol("USR::fan-child-0")), "calls", 1, 1)).plan)
+    if fanout > qp.PATH_NODE_BUDGET:
+        assert result.paths == []
+        assert result.truncated
+    else:
+        assert len(result.paths) == 1
+        assert result.paths[0].steps[-1].node_id == first_child
+        assert not result.truncated
+
+
 def test_reverse_type_use_retains_every_typed_layer():
     db = Storage(":memory:")
     owner = db.add_symbol(_make_sym("USR::owner", "owner"))
@@ -1579,3 +1614,91 @@ def test_explain_exposes_expected_vs_indexed_source_revision_on_stale_index(
     assert "expected_source_revision" in explained["index"]
     assert "expected_source_fingerprint" in explained["index"]
     assert "expected_index_config_fingerprint" in explained["index"]
+
+
+# ---------------------------------------------------------------------------
+# PR #69 review round 2: intermediate type_edge identity and path
+# distinctness
+# ---------------------------------------------------------------------------
+
+def test_reverse_type_use_retains_each_intermediate_type_edge_position():
+    # One function type F has two `param_type` edges to the same pointee
+    # (int) at positions 0 and 1. Both climbs share (parent=F,
+    # through=param_type); without `position` they would serialize as
+    # byte-identical witnesses.
+    db = Storage(":memory:")
+    owner = db.add_symbol(_make_sym("USR::two_int_params_fn",
+                                    "two_int_params_fn"))
+    db._conn.execute(
+        "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+        "('fn(int,int)','void(int,int)',9,NULL),('b:int','int',1,NULL)")
+    fn_id, int_id = [row[0] for row in db._conn.execute(
+        "SELECT id FROM type_node ORDER BY id")]
+    db._conn.execute(
+        "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES "
+        "(?,5,0,?),(?,5,1,?)", (fn_id, int_id, fn_id, int_id))
+    db._conn.execute(
+        "INSERT INTO symbol_type(symbol_id,kind,type_id) VALUES (?,1,?)",
+        (owner, fn_id))
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(codebase()) | view("type") | nodes()
+         | where(eq("type_key", "b:int")) | reverse_type_use()).plan)
+    assert len(result.paths) == 2
+    positions = []
+    for witness in result.paths:
+        assert witness.length == 2
+        assert len(witness.steps) == 3
+        assert witness.steps[0].node_id == int_id
+        assert witness.steps[1].node_id == fn_id
+        assert witness.steps[1].through == "param_type"
+        positions.append(witness.steps[1].position)
+        assert witness.steps[2].node_id == owner
+    assert sorted(positions) == [0, 1]
+
+    # distinct() must not collapse these two structurally-different
+    # witnesses just because the F-hop's `through` label is the same.
+    deduped = ex.run(
+        (start(codebase()) | view("type") | nodes()
+         | where(eq("type_key", "b:int")) | reverse_type_use()
+         | distinct()).plan)
+    assert len(deduped.paths) == 2
+
+
+def test_path_distinct_compares_full_typed_slot_identity_not_just_node_id():
+    # One owner has two `int` parameters at positions 0 and 1. Both
+    # witnesses share (node_id, through, inbound) on the final step -- only
+    # position distinguishes them -- so a distinctness key that ignores
+    # position would wrongly collapse them to one.
+    db = Storage(":memory:")
+    owner = db.add_symbol(_make_sym("USR::two_params_distinct",
+                                    "two_params"))
+    db._conn.execute(
+        "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+        "('b:int','int',1,NULL)")
+    int_id = next(db._conn.execute(
+        "SELECT id FROM type_node ORDER BY id"))[0]
+    for position in (0, 1):
+        db._conn.execute(
+            "INSERT INTO parameter(owner_id,position,pack_index,name,"
+            "type_id) VALUES (?,?,-1,'p',?)", (owner, position, int_id))
+    db._conn.commit()
+
+    ex = Executor(db)
+    before_distinct = ex.run(
+        (start(codebase()) | view("type") | nodes()
+         | where(eq("type_key", "b:int")) | reverse_type_use()).plan)
+    assert len(before_distinct.paths) == 2
+
+    after_distinct = ex.run(
+        (start(codebase()) | view("type") | nodes()
+         | where(eq("type_key", "b:int")) | reverse_type_use()
+         | distinct()).plan)
+    assert len(after_distinct.paths) == 2
+    positions = []
+    for witness in after_distinct.paths:
+        assert len(witness.steps) == 2
+        positions.append(witness.steps[1].position)
+    assert sorted(positions) == [0, 1]

@@ -2068,17 +2068,28 @@ class Executor:
             depth = 1
             while depth <= stage.max_depth and frontier:
                 parent_of: dict[int, list[int]] = {}
+                budget_exceeded = False
                 for at in range(0, len(frontier), ID_CHUNK):
+                    if budget_exceeded:
+                        break
                     chunk = frontier[at:at + ID_CHUNK]
                     sql = (
                         f"SELECT {from_col},{to_col} FROM {table} WHERE "
                         f"kind = ? AND {from_col} IN ("
                         + ",".join("?" * len(chunk)) + ") ORDER BY 1,2")
+                    # Check the budget on every row: a single level's
+                    # frontier can be far larger than the budget, and this
+                    # must bound the rows read (and stored in parent_of),
+                    # not just notice the overflow after the whole level has
+                    # already been materialized.
                     for parent, child in self._conn.execute(
                             sql, [rel[2], *chunk]):
                         parent_of.setdefault(child, []).append(parent)
                         budget_used += 1
-                if budget_used > PATH_NODE_BUDGET:
+                        if budget_used > PATH_NODE_BUDGET:
+                            budget_exceeded = True
+                            break
+                if budget_exceeded:
                     truncated = True
                     break
                 if not parent_of:
@@ -2226,11 +2237,16 @@ class Executor:
         budget_used = 0
         truncated = False
 
+        # A chain link is (type_id, through label, type_edge.position or -1).
+        # The position is the natural-key column distinguishing e.g. a
+        # function type's several `param_type` edges to the same pointee
+        # type from one another -- without it, two such climbs would be
+        # indistinguishable in the resulting witness.
         for seed in seeds:
             if truncated:
                 break
-            stack: list[tuple[int, int, list[tuple[int, str]]]] = [
-                (seed, 0, [(seed, "")])]
+            stack: list[tuple[int, int, list[tuple[int, str, int]]]] = [
+                (seed, 0, [(seed, "", -1)])]
             while stack and not truncated:
                 type_id, depth, chain = stack.pop()
                 budget_used += 1
@@ -2240,8 +2256,9 @@ class Executor:
                 for owner in self._owners_of_type(type_id):
                     steps = [
                         PathStep(node_id=layer_id, domain="type",
-                                through=through, status="complete")
-                        for layer_id, through in chain
+                                through=through, status="complete",
+                                position=position)
+                        for layer_id, through, position in chain
                     ]
                     final_step = PathStep(
                         node_id=owner.node_id, domain=owner.domain,
@@ -2262,22 +2279,25 @@ class Executor:
                         break
                 if truncated or depth >= stage.max_depth:
                     continue
-                parents: list[tuple[int, str]] = []
+                parents: list[tuple[int, str, int]] = []
                 for row in self._conn.execute(
-                        "SELECT src_id, kind FROM type_edge WHERE dst_id=? "
-                        "ORDER BY src_id", (type_id,)):
+                        "SELECT src_id, kind, position FROM type_edge "
+                        "WHERE dst_id=? ORDER BY src_id, position",
+                        (type_id,)):
                     parents.append(
-                        (row[0], TYPE_EDGE_KIND_NAMES.get(row[1], "unknown")))
+                        (row[0], TYPE_EDGE_KIND_NAMES.get(row[1], "unknown"),
+                         row[2]))
                 for row in self._conn.execute(
                         "SELECT id FROM type_node WHERE canonical_id=? "
                         "ORDER BY id", (type_id,)):
-                    parents.append((row[0], "sugared_by"))
-                chain_ids = {layer_id for layer_id, _ in chain}
-                for parent_id, through in parents:
+                    parents.append((row[0], "sugared_by", -1))
+                chain_ids = {layer_id for layer_id, _, _ in chain}
+                for parent_id, through, position in parents:
                     if parent_id in chain_ids:
                         continue  # acyclic in practice; guard anyway
                     stack.append(
-                        (parent_id, depth + 1, [*chain, (parent_id, through)]))
+                        (parent_id, depth + 1,
+                         [*chain, (parent_id, through, position)]))
 
         truncated = self._sort_and_cap_witnesses(results, 0, truncated)
         st.paths = results
@@ -3118,14 +3138,19 @@ class Executor:
     @staticmethod
     def _apply_distinct(st: _Stream) -> None:
         if st.shape == "path":
+            # Full logical step identity: two typed-view slots on the same
+            # owner (e.g. parameter positions 0 and 1) share node_id/
+            # through/inbound but are still distinct witnesses.
+            def step_key(step: PathStep) -> tuple[Any, ...]:
+                return (step.node_id, step.through, step.inbound,
+                       step.domain, step.position, step.pack_index)
+
             out: list[PathWitness] = []
+            seen: set[tuple[tuple[Any, ...], ...]] = set()
             for witness in st.paths:
-                key = tuple((s.node_id, s.through, s.inbound)
-                           for s in witness.steps)
-                if not any(
-                        tuple((s.node_id, s.through, s.inbound)
-                             for s in prev.steps) == key
-                        for prev in out):
+                key = tuple(step_key(s) for s in witness.steps)
+                if key not in seen:
+                    seen.add(key)
                     out.append(witness)
             st.paths = out
             return

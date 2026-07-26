@@ -2081,7 +2081,9 @@ private:
       for (int64_t depth = 1; depth <= stage.max_depth && !frontier.empty();
            ++depth) {
         std::map<int64_t, std::vector<int64_t>> parent_of;
-        for (size_t at = 0; at < frontier.size(); at += kIdChunk) {
+        bool budget_exceeded = false;
+        for (size_t at = 0; at < frontier.size() && !budget_exceeded;
+             at += kIdChunk) {
           const size_t n = std::min(kIdChunk, frontier.size() - at);
           std::string sql = "SELECT ";
           sql += from_col;
@@ -2103,14 +2105,21 @@ private:
           for (size_t i = 0; i < args.size(); ++i) {
             query.bind(static_cast<int>(i + 1), args[i]);
           }
+          // Check the budget on every row: a single level's frontier can be
+          // far larger than the budget, and this must bound the rows read
+          // (and stored in parent_of), not just notice the overflow after
+          // the whole level has already been materialized.
           while (query.step()) {
             const int64_t parent = query.col_int64(0);
             const int64_t child = query.col_int64(1);
             parent_of[child].push_back(parent);
-            ++budget_used;
+            if (++budget_used > kPathNodeBudget) {
+              budget_exceeded = true;
+              break;
+            }
           }
         }
-        if (budget_used > kPathNodeBudget) {
+        if (budget_exceeded) {
           truncated = true;
           break;
         }
@@ -2401,10 +2410,22 @@ private:
     std::ranges::sort(seeds);
     seeds.erase(std::ranges::unique(seeds).begin(), seeds.end());
 
+    // One climbed layer's identity: the type reached, the type_edge_kind
+    // label that reached it, and (for a type_edge hop) that edge's own
+    // `position` -- the natural-key column distinguishing e.g. a function
+    // type's several `param_type` edges to the same pointee type from one
+    // another. -1 for the seed link and for a `sugared_by` (canonical_id)
+    // hop, neither of which has a position.
+    struct ChainLink {
+      int64_t type_id = 0;
+      std::string through;
+      int64_t position = -1;
+    };
+
     struct Frame {
       int64_t type_id = 0;
       int64_t depth = 0;
-      std::vector<std::pair<int64_t, std::string>> chain; // (type_id,through)
+      std::vector<ChainLink> chain;
     };
 
     std::vector<PathWitness> results;
@@ -2416,7 +2437,10 @@ private:
         break;
       }
       std::vector<Frame> stack;
-      stack.push_back({.type_id = seed, .depth = 0, .chain = {{seed, ""}}});
+      stack.push_back(
+          {.type_id = seed,
+           .depth = 0,
+           .chain = {{.type_id = seed, .through = "", .position = -1}}});
       while (!stack.empty() && !truncated) {
         Frame frame = std::move(stack.back());
         stack.pop_back();
@@ -2429,12 +2453,13 @@ private:
           witness.length = frame.depth + 1;
           witness.status = "partial"; // of_type/parameter/... are cataloged
                                       // partial
-          for (const auto &[layer_type_id, through] : frame.chain) {
+          for (const auto &link : frame.chain) {
             PathStep step;
-            step.node_id = layer_type_id;
+            step.node_id = link.type_id;
             step.domain = "type";
-            step.through = through;
+            step.through = link.through;
             step.status = "complete"; // structural type nesting is complete
+            step.position = link.position;
             witness.steps.push_back(std::move(step));
           }
           PathStep final_step;
@@ -2461,15 +2486,21 @@ private:
         if (truncated || frame.depth >= stage.max_depth) {
           continue;
         }
-        std::vector<std::pair<int64_t, std::string>> parents;
+        // (parent_id, through label, type_edge.position or -1 when the hop
+        // has none). A function type's several `param_type` edges to the
+        // same pointee share (parent_id, through) but differ by position --
+        // without it, two such climbs would be indistinguishable.
+        std::vector<ChainLink> parents;
         {
           auto query = read_.read_db().prepare(
-              "SELECT src_id, kind FROM type_edge WHERE dst_id=? "
-              "ORDER BY src_id");
+              "SELECT src_id, kind, position FROM type_edge WHERE dst_id=? "
+              "ORDER BY src_id, position");
           query.bind(1, frame.type_id);
           while (query.step()) {
-            parents.emplace_back(query.col_int64(0),
-                                 type_edge_kind_name(query.col_int64(1)));
+            parents.push_back(
+                {.type_id = query.col_int64(0),
+                 .through = type_edge_kind_name(query.col_int64(1)),
+                 .position = query.col_int64(2)});
           }
         }
         {
@@ -2477,21 +2508,23 @@ private:
               "SELECT id FROM type_node WHERE canonical_id=? ORDER BY id");
           query.bind(1, frame.type_id);
           while (query.step()) {
-            parents.emplace_back(query.col_int64(0), "sugared_by");
+            parents.push_back({.type_id = query.col_int64(0),
+                               .through = "sugared_by",
+                               .position = -1});
           }
         }
-        for (const auto &[parent_id, through] : parents) {
-          if (std::ranges::any_of(frame.chain, [&](const auto &kv) {
-                return kv.first == parent_id;
+        for (const auto &parent : parents) {
+          if (std::ranges::any_of(frame.chain, [&](const ChainLink &link) {
+                return link.type_id == parent.type_id;
               })) {
             continue; // structural nesting is acyclic in practice; guard
                       // anyway so a data anomaly cannot loop forever
           }
           Frame next;
-          next.type_id = parent_id;
+          next.type_id = parent.type_id;
           next.depth = frame.depth + 1;
           next.chain = frame.chain;
-          next.chain.emplace_back(parent_id, through);
+          next.chain.push_back(parent);
           stack.push_back(std::move(next));
         }
       }
@@ -3446,9 +3479,14 @@ private:
             return false;
           }
           for (size_t i = 0; i < prev.steps.size(); ++i) {
-            if (prev.steps[i].node_id != witness.steps[i].node_id ||
-                prev.steps[i].through != witness.steps[i].through ||
-                prev.steps[i].inbound != witness.steps[i].inbound) {
+            const PathStep &a = prev.steps[i];
+            const PathStep &b = witness.steps[i];
+            // Full logical step identity: two typed-view slots on the same
+            // owner (e.g. parameter positions 0 and 1) share node_id/
+            // through/inbound but are still distinct witnesses.
+            if (a.node_id != b.node_id || a.through != b.through ||
+                a.inbound != b.inbound || a.domain != b.domain ||
+                a.position != b.position || a.pack_index != b.pack_index) {
               return false;
             }
           }

@@ -1904,6 +1904,46 @@ TEST_CASE("query_plan: path() count/distinct/limit apply to witnesses") {
   CHECK(deduped.paths.size() == 1);
 }
 
+TEST_CASE("query_plan: path() level budget is exact at the boundary and "
+          "truncates without a witness") {
+  // A single start node fans out to `fanout` children in one BFS level: the
+  // level-discovery query for that one level returns `fanout` rows from a
+  // single chunk. Before the fix this only checked kPathNodeBudget AFTER the
+  // whole level's rows were read into parent_of; now the row loop itself
+  // breaks the moment the budget is exceeded, so the level (and hence any
+  // witness reconstruction from it) is abandoned without waiting to finish
+  // reading a level far larger than the budget.
+  for (const int64_t fanout : {kPathNodeBudget, kPathNodeBudget + 1}) {
+    Storage db(":memory:");
+    auto txn = db.transaction();
+    const int64_t start_id = db.add_symbol(make_sym("USR::fan-start", "start"));
+    int64_t first_child = -1;
+    for (int64_t i = 0; i < fanout; ++i) {
+      const int64_t child = db.add_symbol(make_sym(
+          "USR::fan-child-" + std::to_string(i), "child" + std::to_string(i)));
+      db.add_edge(make_edge(start_id, child, 1));
+      if (i == 0) {
+        first_child = child;
+      }
+    }
+    txn.commit();
+
+    QueryExecutor ex(db);
+    const auto result =
+        ex.run((start(symbol("USR::fan-start")) |
+                path(start(symbol("USR::fan-child-0")), "calls", 1, 1))
+                   .plan());
+    if (fanout > kPathNodeBudget) {
+      CHECK(result.paths.empty());
+      CHECK(result.truncated);
+    } else {
+      REQUIRE(result.paths.size() == 1);
+      CHECK(result.paths[0].steps.back().node_id == first_child);
+      CHECK_FALSE(result.truncated);
+    }
+  }
+}
+
 TEST_CASE("query_plan: reverse_type_use() retains every typed layer") {
   Storage db(":memory:");
   const int64_t owner = db.add_symbol(make_sym("USR::owner", "owner"));
@@ -2114,8 +2154,10 @@ TEST_CASE(
   REQUIRE(current.freshness == "current");
   REQUIRE(current.source_revision.has_value());
   REQUIRE(current.expected_source_revision.has_value());
-  CHECK(*current.source_revision == *current.expected_source_revision);
   REQUIRE(current.expected_index_config_fingerprint.has_value());
+  if (current.source_revision && current.expected_source_revision) {
+    CHECK(*current.source_revision == *current.expected_source_revision);
+  }
 
   // Change the checkout after stamping: the persisted identity now
   // disagrees with what the current source hashes to.
@@ -2127,8 +2169,12 @@ TEST_CASE(
   CHECK(stale.freshness == "stale");
   REQUIRE(stale.source_revision.has_value());
   REQUIRE(stale.expected_source_revision.has_value());
-  CHECK(*stale.source_revision != *stale.expected_source_revision);
-  CHECK(*stale.source_revision == *current.source_revision); // unchanged
+  if (stale.source_revision && stale.expected_source_revision) {
+    CHECK(*stale.source_revision != *stale.expected_source_revision);
+  }
+  if (stale.source_revision && current.source_revision) {
+    CHECK(*stale.source_revision == *current.source_revision); // unchanged
+  }
 
   SqliteQueryReadAdapter read(db);
   Executor executor(read);
@@ -2139,4 +2185,105 @@ TEST_CASE(
   CHECK(rendered.find("\"expected_source_fingerprint\"") != std::string::npos);
   CHECK(rendered.find("\"expected_index_config_fingerprint\"") !=
         std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// PR #69 review round 2: intermediate type_edge identity and path
+// distinctness
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "query_plan: reverse_type_use() retains each intermediate type_edge's "
+    "position") {
+  // One function type F has two `param_type` edges to the same pointee
+  // (int) at positions 0 and 1. Both climbs share (parent=F,
+  // through=param_type); without `position` they would serialize as
+  // byte-identical witnesses.
+  Storage db(":memory:");
+  const int64_t owner =
+      db.add_symbol(make_sym("USR::two_int_params_fn", "two_int_params_fn"));
+  db.raw_db().exec(
+      "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+      "('fn(int,int)','void(int,int)',9,NULL),('b:int','int',1,NULL)");
+  auto ids = db.raw_db().prepare("SELECT id FROM type_node ORDER BY id");
+  REQUIRE(ids.step());
+  const int64_t fn_id = ids.col_int64(0);
+  REQUIRE(ids.step());
+  const int64_t int_id = ids.col_int64(0);
+  db.add_type_edge(fn_id, 5, 0, int_id); // param_type position 0
+  db.add_type_edge(fn_id, 5, 1, int_id); // param_type position 1
+  db.add_symbol_type(owner, 1, fn_id);   // returns
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) | reverse_type_use())
+                 .plan());
+  REQUIRE(result.paths.size() == 2);
+  std::vector<int64_t> positions;
+  for (const auto &witness : result.paths) {
+    CHECK(witness.length == 2);
+    REQUIRE(witness.steps.size() == 3);
+    CHECK(witness.steps[0].node_id == int_id);
+    CHECK(witness.steps[1].node_id == fn_id);
+    CHECK(witness.steps[1].through == "param_type");
+    positions.push_back(witness.steps[1].position);
+    CHECK(witness.steps[2].node_id == owner);
+  }
+  std::ranges::sort(positions);
+  CHECK(positions == std::vector<int64_t>{0, 1});
+
+  // distinct() must not collapse these two structurally-different witnesses
+  // just because the F-hop's `through` label is the same for both.
+  const auto deduped =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) | reverse_type_use() | distinct())
+                 .plan());
+  CHECK(deduped.paths.size() == 2);
+}
+
+TEST_CASE(
+    "query_plan: path() distinct() compares full typed slot identity, not "
+    "just node id") {
+  // One owner has two `int` parameters at positions 0 and 1. Both witnesses
+  // share (node_id, through, inbound) on the final step -- only position
+  // distinguishes them -- so a distinctness key that ignores position would
+  // wrongly collapse them to one.
+  Storage db(":memory:");
+  const int64_t owner =
+      db.add_symbol(make_sym("USR::two_params_distinct", "two_params"));
+  db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind,extent) "
+                   "VALUES ('b:int','int',1,NULL)");
+  auto ids = db.raw_db().prepare("SELECT id FROM type_node ORDER BY id");
+  REQUIRE(ids.step());
+  const int64_t int_id = ids.col_int64(0);
+  for (const int64_t position : {0, 1}) {
+    auto stmt = db.raw_db().prepare(
+        "INSERT INTO parameter(owner_id,position,pack_index,name,type_id) "
+        "VALUES (?,?,-1,'p',?)");
+    stmt.bind(1, owner);
+    stmt.bind(2, position);
+    stmt.bind(3, int_id);
+    stmt.step_done();
+  }
+
+  QueryExecutor ex(db);
+  const auto before_distinct =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) | reverse_type_use())
+                 .plan());
+  REQUIRE(before_distinct.paths.size() == 2);
+
+  const auto after_distinct =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) | reverse_type_use() | distinct())
+                 .plan());
+  REQUIRE(after_distinct.paths.size() == 2);
+  std::vector<int64_t> positions;
+  for (const auto &witness : after_distinct.paths) {
+    REQUIRE(witness.steps.size() == 2);
+    positions.push_back(witness.steps[1].position);
+  }
+  std::ranges::sort(positions);
+  CHECK(positions == std::vector<int64_t>{0, 1});
 }

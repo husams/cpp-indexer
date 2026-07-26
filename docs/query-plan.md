@@ -214,11 +214,16 @@ Step    := { "id": <int>, "domain": "symbol" | "entity" | "type" |
   depth (a shortest-path DAG), so every minimal-depth witness — not only
   one — is reconstructed once the target set is first reached at a depth in
   `[min_depth, max_depth]`. A start node with no reachable target in that
-  window contributes no witness (not an error). `shortest` caps the number
-  of witnesses kept after the default ranking (`0` = keep every minimal-depth
-  witness up to the result cap). Each hop's `status` is the relation's
-  catalogued completeness; `sites()`-equivalent per-hop evidence is included
-  directly on `through`-bearing steps.
+  window contributes no witness (not an error). "Shortest" is per-start, not
+  per-(start, target): the search stops at the first depth in the window at
+  which *any* target is reached and reconstructs every minimal-depth witness
+  from that one start at that depth, even when a different (start, target)
+  pair would have a shorter path at another depth — this is an intentional,
+  documented contract, not a bug. `shortest` caps the number of witnesses
+  kept after the default ranking (`0` = keep every minimal-depth witness up
+  to the result cap). Each hop's `status` is the relation's catalogued
+  completeness; `sites()`-equivalent per-hop evidence is included directly on
+  `through`-bearing steps.
 - **`reverse_type_use(max_depth=8)`** requires a `type`/`type_layer` node
   stream. From each seed type (or nested type-layer), it climbs `type_edge`
   (structural nesting: `pointee`/`element_type`/`return_type`/`param_type`/
