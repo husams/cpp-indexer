@@ -338,6 +338,111 @@ std::string class_template_body_hidden_calls_source(int template_count,
   return source;
 }
 
+// `count` structs, each with a static_assert whose condition hides a chain
+// of `chain_length` calls (`static_assert(leaf_value() && ... , "msg")`).
+// clang::StaticAssertDecl is not a clang::DeclContext and matches none of a
+// hand-rolled counter's dyn_cast arms, so it would be visited as a bare
+// 1-node Decl with its condition expression never walked, even though
+// `cxxRecordDecl` is itself an allow-listed matcher_catalog.cpp node.
+std::string static_assert_hidden_calls_source(int count, int chain_length) {
+  std::string source = "constexpr bool leaf_value() { return true; }\n";
+  for (int i = 0; i < count; ++i) {
+    const std::string name = "S" + std::to_string(i);
+    source += "struct " + name + " {\n  static_assert(";
+    for (int j = 0; j < chain_length; ++j) {
+      if (j > 0) {
+        source += " && ";
+      }
+      source += "leaf_value()";
+    }
+    source += ", \"msg\");\n};\n";
+  }
+  return source;
+}
+
+// One namespace containing `count` concepts, each with a constraint
+// expression hiding a chain of `chain_length` calls
+// (`concept C0 = leaf_value() && ... ;`). clang::ConceptDecl derives from
+// clang::TemplateDecl, so a hand-rolled counter's TemplateDecl branch visits
+// it and walks its template-parameter list -- but ConceptDecl::
+// getTemplatedDecl() is null (a concept has no separate templated entity),
+// and its getConstraintExpr() is a second, unrelated accessor such a branch
+// never calls, even though `namespaceDecl` is itself an allow-listed
+// matcher_catalog.cpp node enclosing every concept here.
+std::string concept_constraint_hidden_calls_source(int count,
+                                                   int chain_length) {
+  std::string source =
+      "namespace ns {\nconstexpr bool leaf_value() { return true; }\n";
+  for (int i = 0; i < count; ++i) {
+    const std::string name = "C" + std::to_string(i);
+    source += "template <typename T>\nconcept " + name + " = ";
+    for (int j = 0; j < chain_length; ++j) {
+      if (j > 0) {
+        source += " && ";
+      }
+      source += "leaf_value()";
+    }
+    source += ";\n";
+  }
+  source += "}\n";
+  return source;
+}
+
+// One namespace containing `count` function templates, each with a trailing
+// requires-clause hiding a chain of `chain_length` calls
+// (`template <typename T> requires (leaf_value() && ...) void tfnN(T);`).
+// clang::TemplateParameterList::getRequiresClause() is a THIRD accessor,
+// distinct from both the parameter list a hand-rolled counter's TemplateDecl
+// branch already iterates and the templated declaration it walks via
+// getTemplatedDecl() -- so a branch that only visits those two never calls
+// getRequiresClause() at all, even though `namespaceDecl` is itself an
+// allow-listed matcher_catalog.cpp node enclosing every template here.
+std::string trailing_requires_clause_hidden_calls_source(int count,
+                                                         int chain_length) {
+  std::string source =
+      "namespace ns2 {\nconstexpr bool leaf_value() { return true; }\n";
+  for (int i = 0; i < count; ++i) {
+    const std::string name = "tfn" + std::to_string(i);
+    source += "template <typename T> requires (";
+    for (int j = 0; j < chain_length; ++j) {
+      if (j > 0) {
+        source += " && ";
+      }
+      source += "leaf_value()";
+    }
+    source += ")\nvoid " + name + "(T);\n";
+  }
+  source += "}\n";
+  return source;
+}
+
+// `count` structs, each declaring an inline friend function defined
+// in-class whose body hides `chain_length` calls (`friend void
+// hidden_friendN() { leaf_value(); ...; }`). clang::TraverseFriendDecl walks
+// D->getFriendDecl() unconditionally, but an inline friend function is
+// linked into NEITHER its enclosing class's DeclContext (friendship grants
+// access, it is not membership) NOR any other DeclContext a hand-rolled
+// counter's generic decls() enumeration would independently reach -- so a
+// counter with no FriendDecl branch never walks it at all, even though
+// `cxxRecordDecl` is itself an allow-listed matcher_catalog.cpp node.
+std::string inline_friend_hidden_calls_source(int count, int chain_length) {
+  std::string source = "void leaf_value();\n";
+  for (int i = 0; i < count; ++i) {
+    const std::string record_name = "S" + std::to_string(i);
+    const std::string friend_name = "hidden_friend" + std::to_string(i);
+    source += "struct ";
+    source += record_name;
+    source += " {\n  friend void ";
+    source += friend_name;
+    source += "() {\n";
+    for (int j = 0; j < chain_length; ++j) {
+      source += "    leaf_value();\n";
+    }
+    source += "  }\n};\n";
+  }
+  return source;
+}
+
 std::string make_temp_dir() {
   std::string tmpl = "/tmp/cidx_extract_artifact_XXXXXX";
   std::vector<char> buffer(tmpl.begin(), tmpl.end());
@@ -1426,6 +1531,170 @@ TEST_SUITE("clang") {
 
     RunResult result =
         run_plan(plan, class_template_body_hidden_calls_source(10, 30));
+    const auto *stats = result.report.find(rule.id);
+    REQUIRE(stats != nullptr);
+    CHECK(stats->budget_exhausted);
+  }
+
+  TEST_CASE(
+      "a static_assert's condition is invisible to NodeBudgetCounter unless "
+      "StaticAssertDecl::getAssertExpr() is walked, so a hidden call chain "
+      "living ONLY in a static_assert condition slips under "
+      "max_visited_nodes even though `cxxRecordDecl` is itself an "
+      "allow-listed matcher_catalog.cpp node (clang::StaticAssertDecl is not "
+      "a clang::DeclContext and matches none of a hand-rolled counter's "
+      "dyn_cast arms, so it is visited as a bare 1-node Decl)") {
+    ExtractionRule rule;
+    rule.id = "audit.static_assert_hidden_calls";
+    rule.matcher_expression = "cxxRecordDecl().bind(\"s\")";
+    rule.bindings = {
+        Binding{.name = "s", .domain = EndpointDomain::declaration}};
+    EmitOperation emit;
+    emit.unknown = EmitUnknown{
+        .namespace_name = "audit", .reason_code = "seen", .binding = "s"};
+    rule.emits = {emit};
+    rule.completeness = DeclaredCompleteness::unknown_capable;
+    // Measured directly against this exact source by bisecting
+    // max_visited_nodes: ignoring the static_assert condition (the pre-fix
+    // behavior) exhausts the budget somewhere in [120, 130); walking
+    // StaticAssertDecl::getAssertExpr() as well moves that boundary out past
+    // [1300, 1400) -- roughly a 10x spread. 300 sits with a wide margin on
+    // both sides.
+    rule.budget = RuleBudget{.max_matches = 1000,
+                             .max_emitted_facts = 1000,
+                             .max_visited_nodes = 300,
+                             .declared = true};
+    rule.producer_package = "audit";
+    rule.producer_version = 1;
+    ExtractionPlan plan = plan_with({rule});
+
+    RunResult result =
+        run_plan(plan, static_assert_hidden_calls_source(10, 30));
+    const auto *stats = result.report.find(rule.id);
+    REQUIRE(stats != nullptr);
+    CHECK(stats->budget_exhausted);
+  }
+
+  TEST_CASE(
+      "a concept's constraint expression is invisible to NodeBudgetCounter "
+      "unless ConceptDecl::getConstraintExpr() is walked, so a hidden call "
+      "chain living ONLY in `concept C = EXPR;` slips under "
+      "max_visited_nodes even though `namespaceDecl` is itself an "
+      "allow-listed matcher_catalog.cpp node enclosing every concept here "
+      "(clang::ConceptDecl derives from clang::TemplateDecl, so a "
+      "hand-rolled counter's TemplateDecl branch visits it and walks its "
+      "template-parameter list -- but ConceptDecl::getTemplatedDecl() is "
+      "null, a concept has no separate templated entity, and "
+      "getConstraintExpr() is a second, unrelated accessor such a branch "
+      "never calls)") {
+    ExtractionRule rule;
+    rule.id = "audit.concept_constraint_hidden_calls";
+    rule.matcher_expression = "namespaceDecl().bind(\"ns\")";
+    rule.bindings = {
+        Binding{.name = "ns", .domain = EndpointDomain::declaration}};
+    EmitOperation emit;
+    emit.unknown = EmitUnknown{
+        .namespace_name = "audit", .reason_code = "seen", .binding = "ns"};
+    rule.emits = {emit};
+    rule.completeness = DeclaredCompleteness::unknown_capable;
+    // Measured directly against this exact source by bisecting
+    // max_visited_nodes: ignoring the constraint expression (the pre-fix
+    // behavior) exhausts the budget somewhere in [110, 120); walking
+    // ConceptDecl::getConstraintExpr() as well moves that boundary out past
+    // [1300, 1400) -- roughly an 11x spread. 300 sits with a wide margin on
+    // both sides.
+    rule.budget = RuleBudget{.max_matches = 1000,
+                             .max_emitted_facts = 1000,
+                             .max_visited_nodes = 300,
+                             .declared = true};
+    rule.producer_package = "audit";
+    rule.producer_version = 1;
+    ExtractionPlan plan = plan_with({rule});
+
+    RunResult result = run_plan_with_args(
+        plan, concept_constraint_hidden_calls_source(10, 30), {});
+    const auto *stats = result.report.find(rule.id);
+    REQUIRE(stats != nullptr);
+    CHECK(stats->budget_exhausted);
+  }
+
+  TEST_CASE(
+      "a template's trailing requires-clause is invisible to "
+      "NodeBudgetCounter unless TemplateParameterList::getRequiresClause() "
+      "is walked, so a hidden call chain living ONLY in `template <typename "
+      "T> requires (EXPR) ...` slips under max_visited_nodes even though "
+      "`namespaceDecl` is itself an allow-listed matcher_catalog.cpp node "
+      "enclosing every template here (getRequiresClause() is a THIRD "
+      "accessor on TemplateParameterList, distinct from both the parameter "
+      "list a hand-rolled counter's TemplateDecl branch already iterates "
+      "and the templated declaration it walks via getTemplatedDecl())") {
+    ExtractionRule rule;
+    rule.id = "audit.requires_clause_hidden_calls";
+    rule.matcher_expression = "namespaceDecl().bind(\"ns\")";
+    rule.bindings = {
+        Binding{.name = "ns", .domain = EndpointDomain::declaration}};
+    EmitOperation emit;
+    emit.unknown = EmitUnknown{
+        .namespace_name = "audit", .reason_code = "seen", .binding = "ns"};
+    rule.emits = {emit};
+    rule.completeness = DeclaredCompleteness::unknown_capable;
+    // Measured directly against this exact source by bisecting
+    // max_visited_nodes: ignoring the requires-clause (the pre-fix
+    // behavior) exhausts the budget somewhere in [130, 140); walking
+    // TemplateParameterList::getRequiresClause() as well moves that
+    // boundary out past [1300, 1400) -- roughly a 10x spread. 300 sits with
+    // a wide margin on both sides.
+    rule.budget = RuleBudget{.max_matches = 1000,
+                             .max_emitted_facts = 1000,
+                             .max_visited_nodes = 300,
+                             .declared = true};
+    rule.producer_package = "audit";
+    rule.producer_version = 1;
+    ExtractionPlan plan = plan_with({rule});
+
+    RunResult result = run_plan_with_args(
+        plan, trailing_requires_clause_hidden_calls_source(10, 30), {});
+    const auto *stats = result.report.find(rule.id);
+    REQUIRE(stats != nullptr);
+    CHECK(stats->budget_exhausted);
+  }
+
+  TEST_CASE(
+      "an inline friend function defined in-class is invisible to "
+      "NodeBudgetCounter unless FriendDecl::getFriendDecl() is walked, so a "
+      "hidden call chain living ONLY in a hidden friend's body slips under "
+      "max_visited_nodes even though `cxxRecordDecl` is itself an "
+      "allow-listed matcher_catalog.cpp node (friendship grants access, it "
+      "is not membership: an inline friend function is linked into NEITHER "
+      "its enclosing class's DeclContext NOR any other DeclContext a "
+      "hand-rolled counter's generic decls() enumeration would "
+      "independently reach)") {
+    ExtractionRule rule;
+    rule.id = "audit.inline_friend_hidden_calls";
+    rule.matcher_expression = "cxxRecordDecl().bind(\"s\")";
+    rule.bindings = {
+        Binding{.name = "s", .domain = EndpointDomain::declaration}};
+    EmitOperation emit;
+    emit.unknown = EmitUnknown{
+        .namespace_name = "audit", .reason_code = "seen", .binding = "s"};
+    rule.emits = {emit};
+    rule.completeness = DeclaredCompleteness::unknown_capable;
+    // Measured directly against this exact source by bisecting
+    // max_visited_nodes: ignoring the hidden friend's body (the pre-fix
+    // behavior) exhausts the budget somewhere in [115, 125); walking
+    // FriendDecl::getFriendDecl() as well moves that boundary out past
+    // [1000, 1100) -- roughly an 8x spread. 300 sits with a wide margin on
+    // both sides.
+    rule.budget = RuleBudget{.max_matches = 1000,
+                             .max_emitted_facts = 1000,
+                             .max_visited_nodes = 300,
+                             .declared = true};
+    rule.producer_package = "audit";
+    rule.producer_version = 1;
+    ExtractionPlan plan = plan_with({rule});
+
+    RunResult result =
+        run_plan(plan, inline_friend_hidden_calls_source(10, 30));
     const auto *stats = result.report.find(rule.id);
     REQUIRE(stats != nullptr);
     CHECK(stats->budget_exhausted);

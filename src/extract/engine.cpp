@@ -16,10 +16,8 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
-#include "clang/AST/DeclTemplate.h"
 #include "clang/AST/Expr.h"
-#include "clang/AST/ExprCXX.h"
-#include "clang/AST/TemplateBase.h"
+#include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/Type.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/ASTMatchers/Dynamic/Diagnostics.h"
@@ -241,234 +239,191 @@ std::string tu_content_fingerprint(clang::ASTContext &context,
 }
 
 // Counts AST nodes reachable from the translation unit, stopping the moment
-// the budget is exceeded. Deliberately NOT a clang::RecursiveASTVisitor
-// subclass: every RecursiveASTVisitor customization point (Traverse*,
-// Visit*, shouldVisit*) shares a name with a base-class method by design
-// (CRTP static polymorphism), which trips clang-tidy's
-// bugprone-derived-method-shadowing-base-method unconditionally -- this
-// class instead uses its own uniquely-named recursive walk() overloads over
-// Decl/Stmt's own public child-iteration APIs, so no base-class method name
-// is ever shadowed.
+// the budget is exceeded.
 //
-// Because this is a hand-rolled traversal rather than an actual
-// RecursiveASTVisitor subclass, its node set must be proven a superset of
-// everything clang::ast_matchers::MatchFinder (which IS RecursiveASTVisitor
-// based) can actually reach -- otherwise a matcher can walk, and pay the
-// traversal cost for, a subtree this counter never sees. walk() therefore
-// explicitly covers every DeclContext::decls()-invisible subtree the
-// allow-listed matcher_catalog.cpp node/narrowing matchers can reach:
-// constructor member-initializer lists (CXXConstructorDecl::inits()),
-// function parameter default arguments (FunctionDecl::parameters()),
-// noexcept(expr) exception specifications (FunctionProtoType), enumerator
-// initializers (EnumConstantDecl::getInitExpr() -- EnumConstantDecl does NOT
-// derive from VarDecl, so it needs its own branch), class/function/variable
-// template bodies and non-type template parameter default arguments
-// (TemplateDecl::getTemplatedDecl() / getTemplateParameters()), and a
-// decltype(expr)/typeof(expr) hiding in a declared return/variable/field
-// type (walk_type() below), reached through the same mechanism as
-// noexcept -- RecursiveASTVisitor::TraverseDecltypeTypeLoc /
-// TraverseTypeOfExprTypeLoc walk the underlying expression as part of
-// traversing the owning decl's type, so `enumDecl(hasDescendant(callExpr))`
-// and `functionDecl(hasDescendant(callExpr))` both reach these even though
-// neither decls() nor getBody() ever surfaces them. Lambda bodies and
-// init-captures are covered too, via clang::LambdaExpr's own
-// Stmt::children() plus the explicit getBody() case below. Using-shadow
-// decls carry no expression content and are intentionally not walked -- see
-// the audit trail in the HSE-64 PR history. walk_type() only follows
-// pointer/reference/array wrappers to the decltype/typeof they wrap;
-// decltype nested inside a class template argument (e.g.
-// `std::array<int, decltype(f())::value>`) is a known residual gap, tracked
-// as a follow-up rather than fixed here (see implementation-notes.md).
+// This used to be a hand-written enumeration of Decl/Stmt cases, proven a
+// superset of clang::ast_matchers::MatchFinder's own traversal by manual
+// audit. That audit never converged: round 4 fixed a constructor
+// member-initializer-list gap; round 5 closed six more (parameter default
+// args, ctor-inits, noexcept(expr), template bodies + NTTP defaults,
+// enum-constant initializers, decltype/typeof return types); a subsequent
+// review pass then raised FIVE MORE candidates in about an hour of
+// cross-referencing clang/AST/RecursiveASTVisitor.h -- a static_assert's
+// condition/message, a decltype(...) on a local inside a lambda body, a
+// concept's constraint expression, a template's trailing requires-clause,
+// and an inline friend function defined in-class. Four confirmed as real
+// (see tests/extraction_engine_test.cpp); the lambda-local-decltype
+// candidate did NOT reproduce under this rewrite's own mutation testing --
+// see the disproved-candidates note below. There are 150+
+// DEF_TRAVERSE_DECL/DEF_TRAVERSE_STMT cases in RecursiveASTVisitor.h, and
+// C++23 concepts, coroutines, attributes, and GNU extensions are all in
+// cidx's indexing scope -- so hand-auditing one node kind at a time was
+// never going to converge regardless.
+//
+// So the traversal is no longer hand-written: TraversalVisitor below
+// delegates to an actual clang::RecursiveASTVisitor, the SAME base class
+// clang::ast_matchers::MatchFinder's own internal visitor derives from.
+// The counted node set is therefore a superset of the matched node set BY
+// CONSTRUCTION, not by an audit that can always miss one more
+// DEF_TRAVERSE_* case.
+//
+// NodeBudgetCounter itself does NOT inherit clang::RecursiveASTVisitor:
+// every RecursiveASTVisitor customization point (Traverse*, Visit*,
+// shouldVisit*) shares a name with a base-class method by design (CRTP
+// static polymorphism), which trips clang-tidy's
+// bugprone-derived-method-shadowing-base-method unconditionally on the
+// inheriting type. The actual subclass is the private nested
+// TraversalVisitor type below -- an implementation detail this class owns
+// and never exposes -- so the one narrowly-scoped NOLINT inheritance
+// requires sits on that private type, not on NodeBudgetCounter's own public,
+// caller-facing surface.
+//
+// TraversalVisitor runs with shouldVisitImplicitCode() and
+// shouldVisitTemplateInstantiations() both true. Those are Clang's own
+// names for "the more permissive of the two traversal kinds a rule can
+// declare" (TK_AsIs vs. TK_IgnoreUnlessSpelledInSource -- see
+// RuleMatchCallback::getCheckTraversalKind() below): a budget pre-check
+// runs once per rule, before the matcher itself is even constructed, so it
+// cannot know in advance whether that rule's matcher only wants
+// TK_IgnoreUnlessSpelledInSource. Counting under the more permissive kind
+// can only see MORE nodes than either mode, never fewer, so it is a safe
+// superset regardless of which kind the matcher that eventually runs
+// declares.
+//
+// This also retires the previously-hand-rolled walk_type() helper entirely:
+// RecursiveASTVisitor's own TraverseType/TraverseTypeLoc dispatch already
+// walks into a decltype(expr)/typeof(expr) through ANY wrapping (pointer,
+// reference, array, qualified, elaborated, nested-name-specifier, template
+// argument) as part of visiting the owning Decl's declared type -- which
+// closes, as a side effect of no longer hand-rolling the wrapper-following
+// logic at all, a gap walk_type() never covered: a decltype nested inside a
+// template argument (e.g. `std::array<int, decltype(f())::value>`).
+//
+// Two shapes were investigated and deliberately left uncovered by any
+// special-casing, for different reasons:
+//
+// - A structured binding's compiler-synthesized get<N>()/std::tuple_size
+//   machinery carries only O(1) hidden content per binding, and that
+//   machinery already dominates a DecompositionDecl's own node count --
+//   exhaustion measurably flips once a TU declares 10+ bindings. No
+//   special-casing is needed (or present) for it here; the generic Decl
+//   traversal below counts DecompositionDecl/BindingDecl nodes exactly like
+//   any other Decl.
+//
+// - A decltype(...) on a local variable declared inside a LAMBDA body was
+//   raised as a fifth candidate gap in the old hand-rolled counter (the
+//   hypothesis: a lambda's implicit call-operator FunctionDecl is only
+//   reachable through the LambdaExpr itself, never through any enclosing
+//   DeclContext::decls(), so the old counter's generic decls()-enumeration
+//   would never independently walk a local inside it). This rewrite's own
+//   mutation testing against the OLD hand-rolled counter DISPROVED that
+//   hypothesis for every shape tried (the lambda assigned to a named local,
+//   an immediately-invoked lambda expression, and a lambda passed as a call
+//   argument): Clang links a lambda's closure class into the SAME enclosing
+//   DeclContext an ordinary local variable's Decl is linked into, so the old
+//   counter's generic top-of-walk(Decl*) DeclContext branch already
+//   recursed into it, reached the call operator, and from there reached the
+//   local's declared type -- exhaustion scaled correctly with hidden
+//   content in every shape measured. No regression test is carried for this
+//   candidate; the RecursiveASTVisitor-derived counter below still visits
+//   this shape soundly (by construction, like everything else), it simply
+//   never was a demonstrated gap in the code it replaces.
 class NodeBudgetCounter final {
 public:
-  explicit NodeBudgetCounter(std::int64_t budget) : budget_(budget) {}
-
-  // Follows a declared type through pointer/reference/array wrappers to find
-  // a decltype(expr) or typeof(expr) hiding underneath, and walks that
-  // expression. Bare wrapping only -- see the class comment for the known
-  // residual gap (decltype nested inside a template argument).
-  void walk_type(clang::QualType type) {
-    if (exhausted_) {
-      return;
-    }
-    const clang::Type *raw = type.getTypePtrOrNull();
-    if (raw == nullptr) {
-      return;
-    }
-    if (const auto *decltype_type = llvm::dyn_cast<clang::DecltypeType>(raw)) {
-      walk(decltype_type->getUnderlyingExpr());
-      return;
-    }
-    if (const auto *typeof_expr_type =
-            llvm::dyn_cast<clang::TypeOfExprType>(raw)) {
-      walk(typeof_expr_type->getUnderlyingExpr());
-      return;
-    }
-    if (const auto *pointer = raw->getAs<clang::PointerType>()) {
-      walk_type(pointer->getPointeeType());
-      return;
-    }
-    if (const auto *reference = raw->getAs<clang::ReferenceType>()) {
-      walk_type(reference->getPointeeType());
-      return;
-    }
-    if (const auto *array = llvm::dyn_cast<clang::ArrayType>(raw)) {
-      walk_type(array->getElementType());
-    }
-  }
+  explicit NodeBudgetCounter(std::int64_t budget) : visitor_(budget) {}
 
   void walk(const clang::Decl *decl) {
-    if (decl == nullptr || exhausted_) {
-      return;
-    }
-    if (++visited_ > budget_) {
-      exhausted_ = true;
-      return;
-    }
-    if (const auto *decl_context = llvm::dyn_cast<clang::DeclContext>(decl)) {
-      for (const clang::Decl *child : decl_context->decls()) {
-        walk(child);
-        if (exhausted_) {
-          return;
-        }
-      }
-    }
-    if (const auto *function = llvm::dyn_cast<clang::FunctionDecl>(decl)) {
-      // Parameters are never linked into a FunctionDecl's own decls() chain
-      // (RecursiveASTVisitor/MatchFinder instead reach them by walking the
-      // function's type -- clang::TraverseFunctionProtoTypeLoc calls
-      // TraverseDecl on each clang::FunctionProtoTypeLoc parameter) -- so
-      // without this loop a default argument
-      // (clang::ParmVarDecl::getDefaultArg(), which is the same storage as
-      // clang::VarDecl::getInit()) is invisible to this counter even though
-      // matchesName/hasDescendant can bind and descend into it via the
-      // catalog's parmVarDecl/hasInitializer matchers.
-      for (const clang::ParmVarDecl *param : function->parameters()) {
-        walk(param);
-        if (exhausted_) {
-          return;
-        }
-      }
-      // A constructor's member-initializer list
-      // (clang::CXXConstructorDecl::inits()) is a second, separate list
-      // clang::CXXCtorInitializer::getInit() exprs live in that neither
-      // decls() nor the function body ever surfaces, yet Clang's own
-      // traversal (clang::RecursiveASTVisitor::TraverseConstructorInitializer,
-      // used by MatchFinder::matchAST) walks it unconditionally.
-      if (const auto *ctor =
-              llvm::dyn_cast<clang::CXXConstructorDecl>(function)) {
-        for (const clang::CXXCtorInitializer *init : ctor->inits()) {
-          walk(init->getInit());
-          if (exhausted_) {
-            return;
-          }
-        }
-      }
-      // A noexcept(expr) exception specification is carried on the
-      // function's clang::FunctionProtoType, not reachable through decls()
-      // or the body -- but RecursiveASTVisitor::TraverseFunctionProtoTypeLoc
-      // walks it as part of the function's type, so hasDescendant from an
-      // allow-listed functionDecl/cxxMethodDecl/cxxConstructorDecl can find
-      // a callExpr hidden inside one.
-      if (const auto *proto =
-              function->getType()->getAs<clang::FunctionProtoType>()) {
-        if (const clang::Expr *noexcept_expr = proto->getNoexceptExpr()) {
-          walk(noexcept_expr);
-          if (exhausted_) {
-            return;
-          }
-        }
-      }
-      // A decltype(expr)/typeof(expr) return type carries an expression that
-      // neither decls() nor getBody() ever surfaces -- see walk_type().
-      walk_type(function->getReturnType());
-      if (function->doesThisDeclarationHaveABody()) {
-        walk(function->getBody());
-      }
-    } else if (const auto *var = llvm::dyn_cast<clang::VarDecl>(decl)) {
-      // Covers both plain VarDecl/FieldDecl-sibling variables and
-      // ParmVarDecl (a VarDecl subclass), so this also closes the same
-      // decltype/typeof gap for a parameter's declared type.
-      walk_type(var->getType());
-      walk(var->getInit());
-    } else if (const auto *field = llvm::dyn_cast<clang::FieldDecl>(decl)) {
-      walk_type(field->getType());
-      walk(field->getInClassInitializer());
-    } else if (const auto *enumerator =
-                   llvm::dyn_cast<clang::EnumConstantDecl>(decl)) {
-      // EnumConstantDecl derives from ValueDecl, not VarDecl, so its
-      // initializer needs its own branch -- RecursiveASTVisitor's
-      // TraverseEnumConstantDecl walks getInitExpr() unconditionally, and
-      // `enumDecl` is itself an allow-listed matcher_catalog.cpp node.
-      walk(enumerator->getInitExpr());
-    } else if (const auto *tmpl = llvm::dyn_cast<clang::TemplateDecl>(decl)) {
-      // clang::ClassTemplateDecl/FunctionTemplateDecl/VarTemplateDecl are
-      // never themselves a DeclContext -- the templated declaration they
-      // wrap is -- so without this branch, hasDescendant from an
-      // allow-listed classTemplateDecl node (or a namedDecl bound to a
-      // function/var template) walks an ENTIRE templated class/function/
-      // variable body that this counter would otherwise never visit at all.
-      if (const clang::TemplateParameterList *params =
-              tmpl->getTemplateParameters()) {
-        for (const clang::NamedDecl *param : *params) {
-          walk(param);
-          if (exhausted_) {
-            return;
-          }
-          // A non-type template parameter's default argument
-          // (e.g. `template <int N = compute()> ...`) is stored as a
-          // TemplateArgumentLoc, not as VarDecl::getInit(), so it needs its
-          // own extraction rather than falling through the VarDecl branch
-          // above (NonTypeTemplateParmDecl does not derive from VarDecl).
-          if (const auto *nontype =
-                  llvm::dyn_cast<clang::NonTypeTemplateParmDecl>(param)) {
-            if (nontype->hasDefaultArgument() &&
-                !nontype->defaultArgumentWasInherited()) {
-              const clang::TemplateArgument &default_arg =
-                  nontype->getDefaultArgument().getArgument();
-              if (default_arg.getKind() ==
-                  clang::TemplateArgument::Expression) {
-                walk(default_arg.getAsExpr());
-                if (exhausted_) {
-                  return;
-                }
-              }
-            }
-          }
-        }
-      }
-      walk(tmpl->getTemplatedDecl());
-    }
+    // clang::RecursiveASTVisitor's Traverse* API takes non-const pointers
+    // by design (it never mutates the AST through them); the only caller
+    // of this method only ever holds a non-const ASTContext::
+    // getTranslationUnitDecl() pointer in the first place.
+    visitor_.TraverseDecl(const_cast<clang::Decl *>(decl));
   }
 
-  void walk(const clang::Stmt *stmt) {
-    if (stmt == nullptr || exhausted_) {
-      return;
-    }
-    if (++visited_ > budget_) {
-      exhausted_ = true;
-      return;
-    }
-    for (const clang::Stmt *child : stmt->children()) {
-      walk(child);
-      if (exhausted_) {
-        return;
-      }
-    }
-    // A lambda's closure body belongs to its implicit call-operator
-    // FunctionDecl, not to the LambdaExpr's own Stmt::children().
-    if (const auto *lambda = llvm::dyn_cast<clang::LambdaExpr>(stmt)) {
-      walk(lambda->getBody());
-    }
-  }
-
-  [[nodiscard]] bool exhausted() const { return exhausted_; }
-  [[nodiscard]] std::int64_t visited() const { return visited_; }
+  [[nodiscard]] bool exhausted() const { return visitor_.exhausted(); }
+  [[nodiscard]] std::int64_t visited() const { return visitor_.visited(); }
 
 private:
-  std::int64_t budget_;
-  std::int64_t visited_ = 0;
-  bool exhausted_ = false;
+  // The actual clang::RecursiveASTVisitor subclass -- see the class comment
+  // above. Private to NodeBudgetCounter and never named outside this file.
+  // This type is a private implementation detail never named by any caller
+  // outside NodeBudgetCounter -- see the class comment above. CRTP requires
+  // shouldVisitImplicitCode/shouldVisitTemplateInstantiations/TraverseDecl
+  // below to shadow RecursiveASTVisitor's own methods of the same name by
+  // design, which is why each carries its own narrowly-scoped
+  // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method) rather
+  // than a blanket suppression on the class or file.
+  class TraversalVisitor final
+      : public clang::RecursiveASTVisitor<TraversalVisitor> {
+  public:
+    explicit TraversalVisitor(std::int64_t budget) : budget_(budget) {}
+
+    // See the class comment above NodeBudgetCounter: this is the more
+    // permissive of the two traversal kinds a rule may declare, so counting
+    // under it is always a safe, never-undercounting superset of either.
+    // Static (rather than a const instance method, RecursiveASTVisitor's own
+    // shape): CRTP dispatch calls these through getDerived(), which resolves
+    // a static member function through an instance just as well, and neither
+    // reads any TraversalVisitor state.
+    // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method)
+    static bool shouldVisitImplicitCode() { return true; }
+    // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method)
+    static bool shouldVisitTemplateInstantiations() { return true; }
+
+    // Both overrides deliberately take the single-argument form.
+    // RecursiveASTVisitor's own TRAVERSE_STMT_BASE dispatch macro detects,
+    // via has_same_member_pointer_type (clang/AST/RecursiveASTVisitor.h),
+    // whether a derived override omits the trailing DataRecursionQueue
+    // parameter, and if so calls this override directly for every node
+    // instead of taking the data-recursion fast path that would otherwise
+    // bypass it -- so every Decl/Stmt this visitor is asked to traverse
+    // passes through bump() exactly once, with no separate opt-out needed.
+    // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method)
+    bool TraverseDecl(clang::Decl *decl) {
+      if (decl == nullptr) {
+        return true;
+      }
+      if (!bump()) {
+        return false;
+      }
+      return clang::RecursiveASTVisitor<TraversalVisitor>::TraverseDecl(decl);
+    }
+
+    bool TraverseStmt(clang::Stmt *stmt) {
+      if (stmt == nullptr) {
+        return true;
+      }
+      if (!bump()) {
+        return false;
+      }
+      return clang::RecursiveASTVisitor<TraversalVisitor>::TraverseStmt(stmt);
+    }
+
+    [[nodiscard]] bool exhausted() const { return exhausted_; }
+    [[nodiscard]] std::int64_t visited() const { return visited_; }
+
+  private:
+    // Returns false, without counting, once already exhausted -- or the
+    // moment this call pushes visited_ past budget_, so the caller stops
+    // descending into the current subtree immediately rather than finishing
+    // it before noticing the budget is gone.
+    bool bump() {
+      if (exhausted_) {
+        return false;
+      }
+      if (++visited_ > budget_) {
+        exhausted_ = true;
+        return false;
+      }
+      return true;
+    }
+
+    std::int64_t budget_;
+    std::int64_t visited_ = 0;
+    bool exhausted_ = false;
+  };
+
+  TraversalVisitor visitor_;
 };
 
 // Multiplies two non-negative counts, clamping to INT64_MAX instead of
