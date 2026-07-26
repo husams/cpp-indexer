@@ -219,7 +219,20 @@ def _run_all_pages(
         page = executor.run(plan, after_id=after_id)
         rows.extend(page.rows)
         if len(page.rows) < ENUMERATE_BUDGET:
-            return rows, False
+            # [PR #67 internal critic] an earlier, FULL intermediate page's
+            # own `page.truncated` is not read here (and must not be): that
+            # signal means only "this ONE call's own query hit its
+            # ENUMERATE_BUDGET+1 over-fetch cap", which THIS SAME cursor
+            # loop resolves completely by continuing to the next page --
+            # accumulating it across iterations would misreport a
+            # perfectly complete multi-page read as truncated. This final,
+            # SHORT page's own `page.truncated` is what actually matters:
+            # `cursor_field_index` covers the query's one enumeration
+            # point exactly (see this function's own docstring), so if
+            # THIS call still reports truncated despite returning fewer
+            # than a full page, something else in the plan (not resolved
+            # by this cursor) genuinely dropped evidence.
+            return rows, page.truncated
         next_after_id = page.rows[-1][cursor_field_index]
         if next_after_id is None or next_after_id == after_id:
             # Defensive: a cursor that fails to strictly advance would loop
@@ -297,6 +310,34 @@ def _run_all_site_pages(
     new. Either way, this is then a real enumeration limit (QueryPlan's own
     per-call join budget, not a bug in this pagination), so it is surfaced
     as truncated rather than looped on or silently under-reported.
+
+    [PR #67 internal critic, second finding] the boundary logic above only
+    catches truncation that shows up as a FULL page of sites. But the
+    "edge"->sites() pipeline has a truncation source entirely upstream of
+    the site expansion: the edge-NODE enumeration itself (`nodes()`, before
+    `sites()` ever runs) caps at ENUMERATE_BUDGET distinct edge ids -- see
+    queryplan.py's `_enumerate` -- and sets `st.truncated = True` on ITS OWN
+    result even when the sites of those capped-in edges total far fewer
+    than ENUMERATE_BUDGET rows (e.g. every edge past the cap has zero sites
+    of its own). That leaves this function looking at a SHORT site page
+    (`len(page_rows) < ENUMERATE_BUDGET`) that nonetheless carries evidence
+    loss: some edge with a real, witnessed violation past the cap was never
+    enumerated at all. `page.truncated` (propagated from every upstream
+    stage via `st.truncated = st.truncated or sub.truncated`, see
+    queryplan.py:2144) is QueryPlan's own record of exactly this.
+
+    It is read ONLY on the exit points below where this function is
+    genuinely done (a short page, or the "whole page is one still-
+    incomplete edge" case, which was already unconditionally `True`) --
+    never accumulated across every intermediate page. An intermediate FULL
+    page's own `truncated=True` (from the SAME budget+1 over-fetch trick
+    described above) is routinely true on every full page purely because
+    it is full, and is completely resolved by this function's own
+    boundary-aware continuation; accumulating it across iterations would
+    misreport a perfectly complete, merely multi-page read as truncated
+    (this was verified against a real regression while fixing this exact
+    finding -- see `test_violation_past_enumerate_budget_is_not_
+    silently_dropped`, `_run_all_pages`'s own equivalent case).
     """
     rows: list[tuple[Any, ...]] = []
     after_id: int | None = None
@@ -320,7 +361,7 @@ def _run_all_site_pages(
                 continue
         rows.extend(page_rows)
         if len(page_rows) < ENUMERATE_BUDGET:
-            return rows, False
+            return rows, page.truncated
         next_after_id = page_rows[-1][0]
         if next_after_id is None or next_after_id == after_id:
             return rows, True
@@ -583,6 +624,126 @@ _CPP_INT_LITERAL = r"0[xX][0-9a-fA-F](?:'?[0-9a-fA-F])*|0[bB][01](?:'?[01])*|0(?
 # but not captured: it changes the literal's TYPE, never its VALUE.
 _CPP_INT_SUFFIX = r"(?:[uUlLzZ])*"
 
+# A C++ character literal: `'` + either a single escape sequence (`\` plus
+# one more character/digits, e.g. `\b`, `\x08`, `\010`) or one ordinary
+# character, + `'`. Deliberately permissive about what follows the `\` --
+# `_eval_cpp_char_literal` below is what actually validates and evaluates
+# the escape, so an unrecognized escape fails EVALUATION, not matching.
+_CPP_CHAR_LITERAL = r"'(?:\\.|[^'\\])'"
+
+# One "atom" this guard can evaluate to a numeric value on its own: a bare
+# integer literal (with optional suffix) or a character literal. Wrapped as
+# a single non-capturing alternation so it can be embedded into
+# `_CPP_CONST_VALUE` below without disturbing any caller's capture-group
+# numbering.
+_CPP_CONST_ATOM = r"(?:(?:" + _CPP_INT_LITERAL + r")" + _CPP_INT_SUFFIX + r"|" + _CPP_CHAR_LITERAL + r")"
+
+# The full constant-expression SHAPE this guard recognizes textually: a
+# `static_cast<...>` around one atom, one atom shifted/added/subtracted/
+# multiplied/divided by another atom, or a bare atom. [PR #67 internal
+# critic] closes the three concrete bypasses it reproduced --
+# `static_cast<int>(8)`, `1 << 3`, and `'\b'` -- without trying to become a
+# general C++ expression evaluator: an identifier of any kind (macro, enum
+# constant, named constexpr/const variable) never matches any branch here,
+# so a duplicate spelled through one of those remains genuinely undetected
+# -- see `unresolvedLimitations` in `generate_report` for why that is the
+# deliberate boundary, not an oversight.
+_CPP_CONST_VALUE = (
+    r"static_cast\s*<[^<>]*>\s*\(\s*" + _CPP_CONST_ATOM + r"\s*\)"
+    + r"|" + _CPP_CONST_ATOM + r"\s*(?:<<|>>|\+|-|\*|/)\s*" + _CPP_CONST_ATOM
+    + r"|" + _CPP_CONST_ATOM
+)
+
+_CPP_CONST_ATOM_RE = re.compile(
+    r"^(?:(" + _CPP_INT_LITERAL + r")" + _CPP_INT_SUFFIX + r"|(" + _CPP_CHAR_LITERAL + r"))$"
+)
+_CPP_STATIC_CAST_RE = re.compile(r"^static_cast\s*<[^<>]*>\s*\(\s*(.+?)\s*\)$", re.DOTALL)
+_CPP_BINARY_OP_RE = re.compile(r"^(.+?)\s*(<<|>>|\+|-|\*|/)\s*(.+)$", re.DOTALL)
+
+_CHAR_ESCAPES = {
+    "a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11,
+    "\\": 92, "'": 39, '"': 34, "?": 63,
+}
+
+
+def _eval_cpp_char_literal(token: str) -> int | None:
+    """The numeric VALUE of a C++ character literal (`'\\b'` -> 8, `'A'` ->
+    65, ...), or None if `token` is not one / uses an escape this guard
+    does not recognize. Supports the common single-letter escapes, `\\xHH`
+    (hex), and `\\NNN` (1-3 octal digits, C++'s own octal-escape grammar).
+    """
+    match = re.match(r"^'(\\.|[^'\\])'$", token)
+    if not match:
+        return None
+    body = match.group(1)
+    if not body.startswith("\\"):
+        return ord(body)
+    escape = body[1:]
+    if escape in _CHAR_ESCAPES:
+        return _CHAR_ESCAPES[escape]
+    if re.fullmatch(r"x[0-9a-fA-F]+", escape):
+        return int(escape[1:], 16)
+    if re.fullmatch(r"[0-7]{1,3}", escape):
+        return int(escape, 8)
+    return None
+
+
+def _eval_cpp_const_atom(token: str) -> int | None:
+    """The numeric VALUE of one `_CPP_CONST_ATOM` match: a bare integer
+    literal (`_parse_cpp_int_literal`) or a character literal
+    (`_eval_cpp_char_literal`)."""
+    match = _CPP_CONST_ATOM_RE.match(token.strip())
+    if not match:
+        return None
+    if match.group(1) is not None:
+        return _parse_cpp_int_literal(match.group(1))
+    return _eval_cpp_char_literal(match.group(2))
+
+
+def _fold_cpp_binary_op(op: str, left: int, right: int) -> int | None:
+    if op == "<<":
+        return left << right
+    if op == ">>":
+        return left >> right
+    if op == "+":
+        return left + right
+    if op == "-":
+        return left - right
+    if op == "*":
+        return left * right
+    if op == "/":
+        if right == 0:
+            return None
+        # C++ integer division truncates toward zero; Python's `//` floors
+        # toward negative infinity, so negative operands need this
+        # explicit correction to match C++ semantics exactly.
+        quotient = abs(left) // abs(right)
+        return quotient if (left < 0) == (right < 0) else -quotient
+    return None
+
+
+def _eval_cpp_const_expr(text: str) -> int | None:
+    """The numeric VALUE of one `_CPP_CONST_VALUE` match: a `static_cast<...>`
+    around a supported atom, a single supported binary shift/arithmetic
+    operation between two supported atoms, or a bare supported atom. Returns
+    None if `text` is not actually one of those shapes (or evaluation itself
+    fails, e.g. division by zero) -- this is never called on arbitrary,
+    unvalidated text; the caller only ever passes something `_CPP_CONST_VALUE`
+    already matched.
+    """
+    text = text.strip()
+    cast_match = _CPP_STATIC_CAST_RE.match(text)
+    if cast_match:
+        return _eval_cpp_const_atom(cast_match.group(1))
+    op_match = _CPP_BINARY_OP_RE.match(text)
+    if op_match:
+        left = _eval_cpp_const_atom(op_match.group(1))
+        right = _eval_cpp_const_atom(op_match.group(3))
+        if left is None or right is None:
+            return None
+        return _fold_cpp_binary_op(op_match.group(2), left, right)
+    return _eval_cpp_const_atom(text)
+
 
 def _parse_cpp_int_literal(token: str) -> int | None:
     """The numeric VALUE of a C++ integer-literal token, regardless of which
@@ -617,6 +778,18 @@ def check_catalog_containment(root: Path, graph: ModuleGraph, policy: dict) -> l
     numeric VALUE (`_parse_cpp_int_literal`) before comparing against the
     guarded id closes that whole class of bypass at once, rather than
     reactively patching in one more spelling every time a new one is found.
+
+    [PR #67 internal critic, second finding] a bare integer/character
+    literal is not the only way to spell the same numeric value: the guard
+    also evaluates (`_eval_cpp_const_expr`) a `static_cast<...>` around one,
+    a single shift/arithmetic operation between two of them, and a
+    character literal on its own (`'\\b'` == 8) -- see `_CPP_CONST_VALUE`'s
+    own docstring for exactly which shapes that covers. A guarded id spelled
+    through a macro, an enum constant, or a reference to another named
+    constexpr/const variable remains genuinely undetected: closing THOSE
+    would require actually resolving what the identifier means (a real
+    semantic parse, or comparing against the generated contract itself),
+    not a wider textual pattern -- see `unresolvedLimitations` below.
     """
     catalog_guard = policy.get("catalogGuard", {})
     generated = {str(Path(path).as_posix()) for path in catalog_guard.get("generatedOutputs", [])}
@@ -632,10 +805,10 @@ def check_catalog_containment(root: Path, graph: ModuleGraph, policy: dict) -> l
     # an aggregate/array) are both accepted ways to redeclare the same pair
     # in C++; catching only one lets the other through undetected.
     pair_pattern = re.compile(
-        r"[({]\s*(" + _CPP_INT_LITERAL + r")" + _CPP_INT_SUFFIX + r"\s*,\s*\"([^\"]*)\""
+        r"[({]\s*(" + _CPP_CONST_VALUE + r")\s*,\s*\"([^\"]*)\""
     )
     name_colon_pattern = re.compile(
-        r"\"([^\"]*)\"\s*:\s*(" + _CPP_INT_LITERAL + r")" + _CPP_INT_SUFFIX
+        r"\"([^\"]*)\"\s*:\s*(" + _CPP_CONST_VALUE + r")"
     )
     for path in sorted(graph.module_of_path):
         if path in generated:
@@ -648,14 +821,14 @@ def check_catalog_containment(root: Path, graph: ModuleGraph, policy: dict) -> l
             errors.append(f"catalog guard {path}: generated-catalog marker found outside generatedOutputs")
             continue
         for match in pair_pattern.finditer(text):
-            value = _parse_cpp_int_literal(match.group(1))
+            value = _eval_cpp_const_expr(match.group(1))
             if value is not None and (value, match.group(2)) in guarded:
                 errors.append(
                     f"catalog guard {path}: duplicates a generated catalog declaration "
                     f"(id={value}, name={match.group(2)!r}, spelled {match.group(1)!r})"
                 )
         for match in name_colon_pattern.finditer(text):
-            value = _parse_cpp_int_literal(match.group(2))
+            value = _eval_cpp_const_expr(match.group(2))
             if value is not None and (value, match.group(1)) in guarded:
                 errors.append(
                     f"catalog guard {path}: duplicates a generated catalog declaration "
@@ -741,11 +914,40 @@ def _portable_source_hash(root: Path, conn: sqlite3.Connection, db: Storage) -> 
     so it can be folded in directly with no further normalization.
     """
     digest = hashlib.sha256()
+    # [PR #67 internal critic] LEFT JOIN, not JOIN: `directory_id` is
+    # declared `NOT NULL REFERENCES directory(id)`, and a plain `DELETE FROM
+    # directory` through a connection with the default `PRAGMA
+    # foreign_keys = ON` (Storage's own default) correctly CASCADES and
+    # removes the file too -- there is no orphan to find in that case.
+    # But several of Storage's own bulk-merge/migration code paths
+    # deliberately toggle `PRAGMA foreign_keys = OFF` around a directory
+    # merge for performance, and SQLite never retroactively re-validates
+    # existing rows when the pragma is switched back ON: a directory
+    # deleted/merged away during one of those windows leaves its files'
+    # `directory_id` pointing at nothing, permanently. An INNER JOIN
+    # silently excludes such a file from this hash entirely -- previously
+    # collapsing it to zero contribution, as if it had never been indexed
+    # -- rather than surfacing the gap. LEFT JOIN keeps every file row in
+    # the computation; `check_index_coverage`'s
+    # `danglingFileDirectoryReferences` is what fails the report closed on
+    # the orphaned state itself (matching the existing dangling-symbol-
+    # file-reference pattern).
+    #
+    # Note this does NOT make an orphaned file's hash contribution reflect
+    # its actual current content: `db.file_abs_path` needs the very same
+    # directory row (to know which directory + component root the file
+    # lives under) to reconstruct an absolute path, so it returns `None`
+    # for an orphaned file regardless of this join -- there is no way to
+    # locate the file's bytes on disk once its directory linkage is gone.
+    # What LEFT JOIN buys is that the row is no longer silently ABSENT: it
+    # is represented (honestly, as unreadable) instead of contributing
+    # nothing at all, and `danglingFileDirectoryReferences` + `status:
+    # "fail"` is the actual, reliable signal a consumer must act on.
     rows = sorted(
-        (f"{dir_path}/{name}" if dir_path else name, file_id, compile_options, driver)
+        (_source_hash_label(dir_path, name, file_id), file_id, compile_options, driver)
         for file_id, dir_path, name, compile_options, driver in conn.execute(
             "SELECT f.id, d.path, f.name, f.compile_options, f.driver "
-            "FROM file f JOIN directory d ON d.id = f.directory_id"
+            "FROM file f LEFT JOIN directory d ON d.id = f.directory_id"
         )
     )
     for relative_path, file_id, compile_options, driver in rows:
@@ -760,6 +962,26 @@ def _portable_source_hash(root: Path, conn: sqlite3.Connection, db: Storage) -> 
         digest.update((driver or "<no-driver>").encode())
         digest.update(b"\n")
     return digest.hexdigest()
+
+
+def _source_hash_label(dir_path: str | None, name: str, file_id: int) -> str:
+    """The path label one `file` row contributes to `_portable_source_hash`.
+
+    `dir_path` comes from a LEFT JOIN, so `None` means precisely "this
+    file's `directory_id` no longer resolves to any `directory` row" (an
+    orphaned reference), which is NOT the same state as a legitimate
+    repo-root file whose directory row exists with an EMPTY path (`""`) --
+    both are falsy, so they must be told apart explicitly rather than by
+    `if dir_path` alone, or an orphaned file would silently be mislabeled
+    as (and could collide with) an ordinary root-level file of the same
+    name. `file_id` is folded into the orphaned label only (not the normal
+    path, which must stay purely checkout-location-independent) so that
+    two DIFFERENT orphaned files sharing a base name within the SAME index
+    do not collide into one hash entry.
+    """
+    if dir_path is None:
+        return f"<orphaned-directory-reference>/{file_id}/{name}"
+    return f"{dir_path}/{name}" if dir_path else name
 
 
 def _md5_file(path: Path) -> str | None:
@@ -839,6 +1061,25 @@ def check_index_coverage(
             "any call edge through them cannot be witnessed by this pass and must "
             "not be read as evidence of compliance"
         )
+
+    # [PR #67 internal critic] `directory_id` is declared `NOT NULL
+    # REFERENCES directory(id)` but this connection does not itself enforce
+    # that reference at delete time, so a `file` row can end up pointing at
+    # a `directory` row that no longer exists -- the exact same shape of
+    # gap as the dangling-symbol-file check just above, one level down the
+    # chain. `_portable_source_hash` now LEFT JOINs so such a file's
+    # content is never silently dropped from the hash, but its PATH still
+    # cannot be verified/reconstructed, so surface it here as its own
+    # coverage issue rather than only fixing the hash silently.
+    dangling_directory = conn.execute(
+        "SELECT COUNT(*) FROM file WHERE directory_id NOT IN (SELECT id FROM directory)"
+    ).fetchone()[0]
+    if dangling_directory:
+        issues.append(
+            f"{dangling_directory} file(s) reference a directory_id with no matching "
+            "directory row; their path cannot be verified and any fact through them "
+            "must not be read as evidence of compliance"
+        )
     if facts.unwitnessed_call_sites:
         # `file` has ON DELETE SET NULL from `symbol`, so a deleted file row
         # NULLs the referencing symbol's file_id rather than leaving a
@@ -855,10 +1096,15 @@ def check_index_coverage(
 
     sources, _ = _sources(root, manifest)
     expected_tus = {source.path for source in sources if Path(source.path).suffix in TU_SUFFIXES}
+    # LEFT JOIN, matching `_portable_source_hash`: an orphaned file (see
+    # `dangling_directory` above) must not silently vanish from this set
+    # either -- an INNER JOIN here would make an orphaned, still-present TU
+    # falsely reported as "missing" (compounding the coverage gap instead
+    # of the single, clear `dangling_directory` issue already covering it).
     indexed_paths = {
-        f"{dir_path}/{name}" if dir_path else name
-        for dir_path, name in conn.execute(
-            "SELECT d.path, f.name FROM file f JOIN directory d ON d.id = f.directory_id"
+        _source_hash_label(dir_path, name, file_id)
+        for file_id, dir_path, name in conn.execute(
+            "SELECT f.id, d.path, f.name FROM file f LEFT JOIN directory d ON d.id = f.directory_id"
         )
     }
     missing_tus = sorted(expected_tus - indexed_paths)
@@ -912,6 +1158,7 @@ def check_index_coverage(
         "expectedTranslationUnits": len(expected_tus),
         "missingTranslationUnits": missing_tus,
         "danglingSymbolFileReferences": dangling,
+        "danglingFileDirectoryReferences": dangling_directory,
         "unwitnessedCallSites": facts.unwitnessed_call_sites,
         "pendingFiles": pending,
         "filesWithFatalDiagnostics": failed,
@@ -1140,8 +1387,15 @@ def generate_report(
         "such a call site is not proof of compliance.",
         "Calls made only through function pointers or std::function are not captured as "
         "'calls'/'dispatch_calls' edges and are outside this pass's evidence.",
-        "The catalog duplication guard is a textual pattern match, not a semantic check; it "
-        "can miss a duplicate expressed through an unusual literal syntax.",
+        "The catalog duplication guard is a textual pattern match, not a semantic check. It "
+        "evaluates the numeric VALUE of a bare integer or character literal, a "
+        "static_cast<...> around one, and a single shift/arithmetic operation between two "
+        "of them (any equivalent hex/octal/binary/digit-separator spelling included), but "
+        "any non-bare-literal expression -- a macro, an enum constant, or a reference to "
+        "another named constexpr/const variable defined elsewhere in the file or in another "
+        "translation unit -- is not detected, since evaluating what such an identifier means "
+        "requires either a real semantic (AST-level) parse of the guarded file or comparing "
+        "it directly against the generated contract, not a wider textual pattern.",
     ]
     if not facts.calls:
         unresolved_limitations.append(

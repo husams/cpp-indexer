@@ -15,6 +15,7 @@ self-index separately.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import sys
@@ -498,6 +499,48 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         self.assertGreater(len(violations), 0)
         self.assertLessEqual(len(violations), overflow)
 
+    def test_edge_enumeration_truncation_upstream_of_sites_is_never_silently_dropped(self) -> None:
+        # [PR #67 internal critic] a SECOND, independent truncation source
+        # from the one above: the edge-NODE enumeration itself (`nodes()`,
+        # before `sites()` ever runs) caps at ENUMERATE_BUDGET distinct edge
+        # ids -- queryplan.py's `_enumerate` sets `st.truncated = True` on
+        # ITS OWN result the moment that happens, even when the resulting
+        # SITE page comes back far SHORTER than ENUMERATE_BUDGET (every
+        # filler edge below has zero sites of its own). Before this fix,
+        # neither `_run_all_pages` nor `_run_all_site_pages` ever read
+        # `page.truncated` -- both inferred truncation purely from
+        # `len(page.rows) == ENUMERATE_BUDGET` -- so a real violation whose
+        # edge sits past the cutoff was silently dropped and reported as a
+        # clean pass (`enumerationTruncated=False`, empty
+        # `moduleBoundaryViolations`, `semanticCompleteness: "complete"`).
+        fixture = _Fixture()
+        fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model"]
+        fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
+        # One allowed, witnessed call at the LOWEST edge id (captured in the
+        # first page) so `facts.calls` is non-empty -- isolating whether a
+        # dropped VIOLATION elsewhere is masked, rather than merely hitting
+        # the separate "zero call edges" partial-completeness path.
+        fixture.add_call(fixture.sym_run, fixture.sym_value)
+        # ENUMERATE_BUDGET filler edges with NO sites at all: each still
+        # consumes one slot of the edge-id enumeration's own cursor cap,
+        # but contributes zero rows to the site page.
+        for i in range(qp.ENUMERATE_BUDGET):
+            filler_dst = fixture._db.add_symbol(
+                Symbol(
+                    usr=f"filler::dst{i}", spelling=f"filler{i}", qual_name=f"filler{i}",
+                    kind="function", file_id=fixture.file_value, line=100 + i,
+                    is_definition=True, resolved=True,
+                )
+            )
+            fixture._db.add_edge(fixture.sym_run, filler_dst, CALLS_KIND)
+        # The (ENUMERATE_BUDGET+1)-th edge BY ID: a genuine cross-module
+        # violation (extraction -> cli), with exactly one real call site.
+        fixture.add_call(fixture.sym_run, fixture.sym_render, line=42, col=7)
+        report = fixture.run()
+        self.assertTrue(report["index"]["coverage"]["enumerationTruncated"])
+        self.assertEqual(report["completeness"]["semantic"], "partial")
+        self.assertEqual(report["status"], "fail")
+
     def test_baseline_entry_missing_exception_metadata_is_rejected(self) -> None:
         fixture = _Fixture()
         fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model", "persistence"]
@@ -605,6 +648,74 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         errors = report["findings"]["catalogGuard"]
         self.assertTrue(any("dup_octal.hpp" in error and "duplicates a generated catalog declaration" in error for error in errors))
         self.assertTrue(any("dup_binary.hpp" in error and "duplicates a generated catalog declaration" in error for error in errors))
+
+    def test_catalog_duplicate_static_cast_of_literal_is_rejected(self) -> None:
+        # [PR #67 internal critic, second finding] `static_cast<int>(8)` is
+        # yet another spelling of the exact same catalog id (8): a guard
+        # that only matched a BARE literal token immediately after `(`/`{`
+        # let this straight through.
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/dup_static_cast.hpp").write_text(
+            'inline constexpr auto kSymbolKind = std::pair{static_cast<int>(8), "function"};\n',
+            encoding="utf-8",
+        )
+        report = fixture.run()
+        self.assertTrue(any("duplicates a generated catalog declaration" in error for error in report["findings"]["catalogGuard"]))
+
+    def test_catalog_duplicate_shift_expression_is_rejected(self) -> None:
+        # `1 << 3` is a simple, foldable constant-arithmetic spelling of 8.
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/dup_shift.hpp").write_text(
+            'inline constexpr auto kSymbolKind = std::pair{1 << 3, "function"};\n',
+            encoding="utf-8",
+        )
+        report = fixture.run()
+        self.assertTrue(any("duplicates a generated catalog declaration" in error for error in report["findings"]["catalogGuard"]))
+
+    def test_catalog_duplicate_char_literal_is_rejected(self) -> None:
+        # `'\b'` (backspace) is the character literal spelling of 8.
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/dup_char.hpp").write_text(
+            "inline constexpr auto kSymbolKind = std::pair{'\\b', \"function\"};\n",
+            encoding="utf-8",
+        )
+        report = fixture.run()
+        self.assertTrue(any("duplicates a generated catalog declaration" in error for error in report["findings"]["catalogGuard"]))
+
+    def test_catalog_duplicate_via_enum_constant_macro_or_named_variable_remains_undetected(self) -> None:
+        # [PR #67 internal critic, second finding] deliberately documenting
+        # the guard's real, remaining boundary: an identifier of any kind
+        # (an enum constant reached through a cast, a macro, or a named
+        # constexpr/const variable) is NOT a bare literal or a supported
+        # cast/shift/arithmetic expression over one, so evaluating it would
+        # require actually resolving what the identifier means elsewhere in
+        # the file/program -- a real semantic parse, not a wider textual
+        # pattern. This must stay undetected (see `unresolvedLimitations`),
+        # not silently start passing by accident of a future regex change.
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/dup_enum.hpp").write_text(
+            "enum class Kind : int { Function = 8 };\n"
+            'inline constexpr auto kA = std::pair{static_cast<int>(Kind::Function), "function"};\n',
+            encoding="utf-8",
+        )
+        (fixture.root / "src/extraction/dup_macro.hpp").write_text(
+            "#define K_FUNCTION 8\n"
+            'inline constexpr auto kB = std::pair{K_FUNCTION, "function"};\n',
+            encoding="utf-8",
+        )
+        (fixture.root / "src/extraction/dup_named_var.hpp").write_text(
+            "inline constexpr int kEight = 8;\n"
+            'inline constexpr auto kC = std::pair{kEight, "function"};\n',
+            encoding="utf-8",
+        )
+        report = fixture.run()
+        self.assertEqual(report["findings"]["catalogGuard"], [])
+        self.assertTrue(
+            any(
+                "a macro, an enum constant" in limitation
+                for limitation in report["unresolvedLimitations"]
+            )
+        )
 
     def test_catalog_unrelated_integer_literal_spelling_is_not_falsely_flagged(self) -> None:
         # A hex/octal/binary literal next to an UNRELATED string, or one
@@ -1038,6 +1149,49 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
             second_report["index"]["coverage"]["sourceContentHash"],
         )
         self.assertNotEqual(first_report["canonicalHash"], second_report["canonicalHash"])
+
+    def test_orphaned_file_directory_reference_fails_closed_and_is_not_silently_excluded(self) -> None:
+        # [PR #67 internal critic, third finding] `_portable_source_hash`'s
+        # (and `check_index_coverage`'s `indexed_paths`) file listing used
+        # to be an INNER JOIN against `directory`. A plain directory delete
+        # through the default `PRAGMA foreign_keys = ON` connection
+        # correctly CASCADES (removing the file too) -- but Storage's own
+        # bulk-merge/migration code deliberately toggles that pragma OFF
+        # around a directory merge, and SQLite never retroactively
+        # re-validates existing rows once it is switched back ON: a
+        # directory removed during one of those windows leaves its files'
+        # `directory_id` pointing at nothing, permanently. The INNER JOIN
+        # silently excluded such a file (and its content) from
+        # `sourceContentHash` entirely -- collapsing its row to zero
+        # contribution, as if it had never been indexed. This is not
+        # fixable into "the hash reflects the orphaned file's real
+        # content": `Storage.file_abs_path` itself needs that very same
+        # directory row to reconstruct where the file lives on disk, so
+        # the content is genuinely unreadable once orphaned -- but the row
+        # must no longer be silently ABSENT, and the report must fail
+        # closed on the coverage gap itself (matching the existing
+        # dangling-symbol-file-reference pattern).
+        fixture = _Fixture()
+        dir_row = fixture._db._conn.execute(
+            "SELECT directory_id FROM file WHERE id = ?", (fixture.file_pass,)
+        ).fetchone()[0]
+        fixture._db._conn.execute("PRAGMA foreign_keys = OFF")
+        fixture._db._conn.execute("DELETE FROM directory WHERE id = ?", (dir_row,))
+        fixture._db._conn.execute("PRAGMA foreign_keys = ON")
+        fixture._db._conn.commit()
+        report = fixture.run()
+        self.assertEqual(report["index"]["coverage"]["danglingFileDirectoryReferences"], 1)
+        self.assertTrue(
+            any("no matching directory row" in issue for issue in report["completeness"]["identityIssues"])
+        )
+        self.assertEqual(report["status"], "fail")
+        # The orphaned file's row must still be represented in the hash
+        # computation -- no longer silently collapsed to the hash of empty
+        # input, as if it had never been indexed at all.
+        self.assertNotEqual(
+            report["index"]["coverage"]["sourceContentHash"],
+            hashlib.sha256(b"").hexdigest(),
+        )
 
     def test_package_hash_changes_when_the_generated_catalog_source_changes(self) -> None:
         # [Internal critic finding, PR #67 @ 40b1e93] check_catalog_containment
