@@ -422,6 +422,17 @@ std::vector<Site> GraphQuery::sites(int64_t edge_id, int limit) {
   return out;
 }
 
+std::vector<Site> GraphQuery::sites_page(int64_t edge_id, int offset,
+                                         int limit) {
+  auto rows = db_.edge_sites_page(edge_id, offset, limit);
+  std::vector<Site> out;
+  out.reserve(rows.size());
+  for (const auto &row : rows) {
+    out.push_back(make_site(row));
+  }
+  return out;
+}
+
 bool GraphQuery::edge_conditional(int64_t edge_id) {
   return db_.edge_has_conditional_site(edge_id);
 }

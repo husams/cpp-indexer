@@ -23,6 +23,7 @@
 #include "doctest/doctest.h"
 
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -535,4 +536,76 @@ TEST_CASE("graph_query: emit_syms text — depth suffix, trailer") {
 
   // Trailer
   CHECK(txt.find("1 result(s)") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// HSE-92 round 3: sites_page() -- bounded, delivery-order-correct edge site
+// pagination (no more "fetch up to 1,000,000 rows, then re-sort" probe).
+// ---------------------------------------------------------------------------
+TEST_CASE("graph_query: sites_page() orders by resolved path, not raw "
+          "insertion/file_id order, and pages correctly across a file "
+          "boundary") {
+  Storage db(":memory:");
+  cidx::query::SqliteQueryReadAdapter read(db);
+  GraphQuery g(read, ":memory:");
+  const int64_t component = db.add_component("test", "/tmp/cidx-sites-page");
+  const int64_t directory = db.add_directory(component, "");
+  // Inserted in the OPPOSITE of path order (c.cpp, b.cpp, a.cpp), same
+  // adversarial shape as the UI-level evidence-ordering regression: file_id
+  // insertion order must not leak into delivery order.
+  const int64_t file_c = db.add_file(directory, "c.cpp");
+  const int64_t file_b = db.add_file(directory, "b.cpp");
+  const int64_t file_a = db.add_file(directory, "a.cpp");
+  auto sym_src = make_sym("USR::sp_src", "sp_src");
+  auto sym_dst = make_sym("USR::sp_dst", "sp_dst");
+  const int64_t src = db.add_symbol(sym_src);
+  const int64_t dst = db.add_symbol(sym_dst);
+  const int64_t edge_id = db.add_edge(make_edge(src, dst, 1));
+  // Two sites in c.cpp, one each in b.cpp and a.cpp: four sites total,
+  // three distinct files, so a window can legitimately span a file
+  // boundary.
+  const auto place_site = [&](int64_t file_id, int64_t line) {
+    cidx::EdgeSite s;
+    s.edge_id = edge_id;
+    s.file_id = file_id;
+    s.line = line;
+    s.col = 1;
+    db.add_edge_site(s);
+  };
+  place_site(file_c, 1);
+  place_site(file_c, 2);
+  place_site(file_b, 1);
+  place_site(file_a, 1);
+
+  auto all = g.sites_page(edge_id, 0, 100);
+  REQUIRE(all.size() == 4);
+  // Delivery order must be alphabetical by path: a.cpp, b.cpp, c.cpp(x2) --
+  // NOT (file_c, file_b, file_a)'s insertion/file_id order.
+  CHECK(all[0].file->ends_with("a.cpp"));
+  CHECK(all[1].file->ends_with("b.cpp"));
+  CHECK(all[2].file->ends_with("c.cpp"));
+  CHECK(all[3].file->ends_with("c.cpp"));
+  CHECK(all[2].line == 1);
+  CHECK(all[3].line == 2);
+
+  // A window that spans the b.cpp/c.cpp boundary (offset=1, limit=2) must
+  // return exactly [b.cpp, c.cpp:line1] -- no duplication, no gap -- proving
+  // per-file bounded fetches are stitched together correctly across a
+  // boundary, not just within a single file.
+  auto spanning = g.sites_page(edge_id, 1, 2);
+  REQUIRE(spanning.size() == 2);
+  CHECK(spanning[0].file->ends_with("b.cpp"));
+  CHECK(spanning[1].file->ends_with("c.cpp"));
+  CHECK(spanning[1].line == 1);
+
+  // Paging one-at-a-time across all 4 sites must reach every one exactly
+  // once -- the delivery-order contract the UI layer's pagination depends
+  // on.
+  std::set<std::string> seen_locations;
+  for (int offset = 0; offset < 4; ++offset) {
+    auto page = g.sites_page(edge_id, offset, 1);
+    REQUIRE(page.size() == 1);
+    seen_locations.insert(page.front().loc());
+  }
+  CHECK(seen_locations.size() == 4);
 }

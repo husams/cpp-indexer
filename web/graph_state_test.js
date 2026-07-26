@@ -185,6 +185,58 @@ assert.equal(trackFreshness('stale', 'current'), 'stale');
 assert.equal(trackFreshness('current', 'unverifiable'), 'unverifiable');
 assert.equal(trackFreshness(undefined, 'current'), 'current');
 
+// HSE-92 round 3 review fix: a merged (cumulative) view must never present
+// itself as the FIRST contributing slice's own atomic result -- it must
+// carry an honest composite identity/provenance chain, and completeness
+// must be computed over that composite.
+const provenancePageOne = {
+  status: 'complete', markers: [], result_id: 'page-1', query_identity: 'q1',
+  request: {input: 'root', node_budget: 1},
+  metadata: {node_budget: 1, edge_budget: 1, site_budget: 1, continuation: {available: true, reason: 'budget'}},
+  nodes: [{id: 'prov-node-a'}], edges: [],
+};
+const provenancePageTwo = {
+  status: 'complete', markers: [], result_id: 'page-2', query_identity: 'q1',
+  request: {input: 'root', node_budget: 1, continuation: 'cont-token'},
+  metadata: {node_budget: 1, edge_budget: 1, site_budget: 1, continuation: {available: false, reason: 'complete'}},
+  nodes: [{id: 'prov-node-b'}], edges: [],
+};
+const provenanceMerged = mergeSlices(provenancePageOne, provenancePageTwo, {cumulative: true});
+assert.notEqual(provenanceMerged.result_id, provenancePageOne.result_id,
+  'a merged view must never claim to BE the first page\'s own result');
+assert.notEqual(provenanceMerged.result_id, provenancePageTwo.result_id);
+assert.deepEqual(provenanceMerged.result_chain.map((entry) => entry.result_id), ['page-1', 'page-2']);
+assert.equal(provenanceMerged.result_chain[1].request.continuation, 'cont-token');
+// Both pages are individually complete and the merge introduces no
+// truncation (node_budget summed to 2, exactly 2 nodes delivered) --
+// completeness computed over the composite must stay "complete", not
+// silently regress just because two slices were combined.
+assert.equal(provenanceMerged.status, 'complete');
+
+// If either contributing slice was only partial, the composite must not
+// overstate completeness as "complete".
+const provenancePartial = mergeSlices(
+  {...provenancePageOne, status: 'partial'}, provenancePageTwo, {cumulative: true});
+assert.equal(provenancePartial.status, 'partial');
+
+// A merge that ITSELF truncates (budget too small for the union) must also
+// downgrade a composite that would otherwise read as complete.
+const provenanceBudgetTruncated = mergeSlices(
+  {...provenancePageOne, metadata: {...provenancePageOne.metadata, node_budget: 1}},
+  {...provenancePageTwo, metadata: {...provenancePageTwo.metadata, node_budget: 0}});
+assert.equal(provenanceBudgetTruncated.status, 'partial');
+
+// Merging a THIRD page onto an already-merged (chained) view must extend
+// the existing chain, not collapse it back to a single entry.
+const provenancePageThree = {
+  status: 'complete', markers: [], result_id: 'page-3', query_identity: 'q1',
+  request: {input: 'root', node_budget: 1, continuation: 'cont-token-2'},
+  metadata: {node_budget: 1, edge_budget: 1, site_budget: 1, continuation: {available: false, reason: 'complete'}},
+  nodes: [{id: 'prov-node-c'}], edges: [],
+};
+const provenanceMergedAgain = mergeSlices(provenanceMerged, provenancePageThree, {cumulative: true});
+assert.deepEqual(provenanceMergedAgain.result_chain.map((entry) => entry.result_id), ['page-1', 'page-2', 'page-3']);
+
 // HSE-92 review fix: exercise the grouping DECISION algorithm directly
 // (previously untested -- the C++ "grouping" test only covered the
 // node_kind server-side filter, never grouping at all).

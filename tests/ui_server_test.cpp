@@ -13,6 +13,7 @@
 #include <charconv>
 #include <chrono>
 #include <future>
+#include <memory>
 #include <netinet/in.h>
 #include <optional>
 #include <set>
@@ -166,6 +167,54 @@ HttpResponse http_get(int port, const std::string &target,
   const std::size_t body_start = response.find("\r\n\r\n");
   if (body_start != std::string::npos) {
     result.body = response.substr(body_start + 4);
+  }
+  return result;
+}
+
+// Same wire behavior as http_get(), but reports failures via the return
+// value (status -1) instead of doctest's REQUIRE/CHECK -- those macros are
+// not documented as safe to call concurrently from multiple background
+// threads within one TEST_CASE, which an admission-limit test (HSE-92 round
+// 3) needs many of at once.
+HttpResponse plain_http_get(int port, const std::string &target) {
+  HttpResponse result;
+  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    result.status = -1;
+    return result;
+  }
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(static_cast<uint16_t>(port));
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (::connect(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)) !=
+      0) {
+    ::close(fd);
+    result.status = -1;
+    return result;
+  }
+  const std::string wire = "GET " + target +
+                           " HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                           "Connection: close\r\n\r\n";
+  std::size_t sent = 0;
+  while (sent < wire.size()) {
+    const ssize_t written =
+        ::send(fd, wire.data() + sent, wire.size() - sent, 0);
+    if (written <= 0) {
+      break;
+    }
+    sent += static_cast<std::size_t>(written);
+  }
+  std::string response;
+  std::array<char, 8192> buffer{};
+  ssize_t read = 0;
+  while ((read = ::recv(fd, buffer.data(), buffer.size(), 0)) > 0) {
+    response.append(buffer.data(), static_cast<std::size_t>(read));
+  }
+  ::close(fd);
+  const std::size_t status_space = response.find(' ');
+  if (status_space != std::string::npos) {
+    result.status = parse_int(response.c_str() + status_space + 1);
   }
   return result;
 }
@@ -464,6 +513,36 @@ std::string edge_portable_id_for_kind(const std::string &json,
              : json.substr(value_start, value_end - value_start);
 }
 
+// Every portable edge id of the given relation kind present in this page's
+// JSON body (unlike edge_portable_id_for_kind(), which assumes exactly one
+// and returns only the first). Used to union edge ids delivered across a
+// multi-page continuation walk (HSE-92 round 3).
+std::vector<std::string> edge_portable_ids_for_kind(const std::string &json,
+                                                    const std::string &kind) {
+  std::vector<std::string> ids;
+  const std::string kind_marker = R"("kind": ")" + kind + R"(")";
+  std::size_t search_from = 0;
+  while (true) {
+    const std::size_t kind_pos = json.find(kind_marker, search_from);
+    if (kind_pos == std::string::npos) {
+      break;
+    }
+    search_from = kind_pos + kind_marker.size();
+    const std::string id_marker = R"("id": "edge:v1:)";
+    const std::size_t id_pos = json.rfind(id_marker, kind_pos);
+    if (id_pos == std::string::npos) {
+      continue;
+    }
+    const std::size_t value_start = id_pos + std::string(R"("id": ")").size();
+    const std::size_t value_end = json.find('"', value_start);
+    if (value_end == std::string::npos) {
+      continue;
+    }
+    ids.push_back(json.substr(value_start, value_end - value_start));
+  }
+  return ids;
+}
+
 } // namespace
 
 TEST_CASE("Live explorer: search resolves a typed candidate list") {
@@ -696,8 +775,9 @@ TEST_CASE("Live explorer: continuation reaches every candidate without any "
                            "&root=ns::star_root&direction=out&depth=1&limit=1";
 
   std::set<std::string> seen;
+  std::set<std::string> seen_edges;
   std::string continuation;
-  for (int page = 0; page < 8; ++page) {
+  for (int page = 0; page < 12; ++page) {
     std::string url = base;
     if (!continuation.empty()) {
       url += "&continuation=";
@@ -713,6 +793,10 @@ TEST_CASE("Live explorer: continuation reaches every candidate without any "
       if (response.body.contains(usr)) {
         seen.insert(usr);
       }
+    }
+    for (const auto &edge_id :
+         edge_portable_ids_for_kind(response.body, "calls")) {
+      seen_edges.insert(edge_id);
     }
     const std::string token_marker = R"("token": ")";
     const std::size_t token_start = response.body.find(token_marker);
@@ -736,6 +820,11 @@ TEST_CASE("Live explorer: continuation reaches every candidate without any "
   CHECK(seen.contains("USR::star_t0"));
   CHECK(seen.contains("USR::star_t1"));
   CHECK(seen.contains("USR::star_t2"));
+  // HSE-92 round 3: cross-page edges are eventually delivered too, not
+  // permanently dropped once their source node's own page has gone by --
+  // reviewer's exact repro (root -> t0,t1,t2, depth=1&limit=1, union edge
+  // ids across the full continuation walk) used to see 0/3 `calls` edges.
+  CHECK(seen_edges.size() == 3);
 }
 
 TEST_CASE("Live explorer: applicability is decided from the complete edge "
@@ -1172,4 +1261,219 @@ TEST_CASE("Live explorer: shutdown returns promptly even while an abandoned "
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
   CHECK(completed.load());
+}
+
+TEST_CASE("Live explorer: an abandoned worker never outlives the caller's "
+          "own copy of the GraphProvider/Storage it was invoked with "
+          "(HSE-92 round 3)") {
+  // Reviewer's exact repro: block a provider on a latch, send a valid graph
+  // request, disconnect, request shutdown, let serve_live() return so the
+  // caller destroys its local GraphProvider/Storage, THEN release the
+  // worker. The previous test in this file kept its provider/latch alive
+  // for its own entire duration, which never actually exercised that
+  // sequence -- this one deliberately drops every reference *this test*
+  // holds (simulating the caller doing so) before ever releasing the latch,
+  // and asserts via a `canary`'s own destruction that the abandoned
+  // worker's OWN independently-owned copy (not a dangling reference) is
+  // what keeps it alive in the meantime.
+  struct Canary {
+    std::atomic<bool> *destroyed = nullptr;
+    ~Canary() {
+      if (destroyed != nullptr) {
+        destroyed->store(true, std::memory_order_release);
+      }
+    }
+  };
+  std::atomic<bool> canary_destroyed{false};
+  // Constructed in place (not `make_shared<Canary>(Canary{...})`): the
+  // latter would build a temporary `Canary` sharing the SAME `destroyed`
+  // pointer, move/copy it into the shared allocation, and then destroy that
+  // now-redundant temporary -- whose own destructor would ALSO (harmlessly
+  // but misleadingly) fire and set `destroyed`, making this test falsely
+  // report destruction immediately regardless of the real object's actual
+  // lifetime.
+  auto canary = std::make_shared<Canary>();
+  canary->destroyed = &canary_destroyed;
+  std::atomic<bool> release_latch{false};
+  std::atomic<bool> completed{false};
+  ui::GraphProvider stuck_provider =
+      [canary, &release_latch, &completed](
+          std::string_view target,
+          const ui::CancelToken &should_cancel) -> std::optional<std::string> {
+    (void)target;
+    (void)should_cancel;
+    while (!release_latch.load(std::memory_order_acquire)) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    completed.store(true, std::memory_order_release);
+    return std::string(
+        R"({"schema": "cidx.graph-view.v1", "nodes": [], "edges": [], "metadata": {}})");
+  };
+
+  std::promise<std::string> url_promise;
+  FirstLineCapture capture_buf(url_promise);
+  std::ostream out(&capture_buf);
+  std::ostringstream err;
+  std::thread thread([&] {
+    ui::serve_live(
+        ui::render_html(json_out::Value::obj({}), ui::RenderMode::LoopbackLive),
+        stuck_provider, ui::ServerOptions{.port = 0, .launch_browser = false},
+        out, err);
+  });
+  auto future = url_promise.get_future();
+  REQUIRE(future.wait_for(std::chrono::seconds(5)) ==
+          std::future_status::ready);
+  const std::string url = future.get();
+  const std::size_t port_start = url.find("127.0.0.1:") + 10;
+  const std::size_t port_end = url.find('/', port_start);
+  const int port = parse_int(url.substr(port_start, port_end - port_start));
+  const std::size_t token_key = url.find("token=");
+  const std::string token = url.substr(token_key + 6);
+
+  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  REQUIRE(fd >= 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(static_cast<uint16_t>(port));
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  REQUIRE(::connect(fd, reinterpret_cast<sockaddr *>(&address),
+                    sizeof(address)) == 0);
+  const std::string request = "GET /api/graph?token=" + token +
+                              "&root=ns::a HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                              "Connection: close\r\n\r\n";
+  std::size_t sent = 0;
+  while (sent < request.size()) {
+    const ssize_t written =
+        ::send(fd, request.data() + sent, request.size() - sent, 0);
+    if (written <= 0) {
+      break;
+    }
+    sent += static_cast<std::size_t>(written);
+  }
+  ::close(fd);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  const auto response = http_get(port, "/api/shutdown?token=" + token);
+  CHECK(response.status == 200);
+
+  // serve_live() must still return promptly (the round-2 requirement is
+  // unchanged) even though the abandoned worker is still blocked.
+  REQUIRE(thread.joinable());
+  thread.join();
+
+  // Simulate the caller destroying its own local GraphProvider/Storage the
+  // moment serve_live() returns: drop every reference *this test* holds.
+  stuck_provider = {};
+  canary.reset();
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  // If the abandoned worker's own copy were not independently keeping the
+  // canary alive (e.g. if it only held a dangling reference back to this
+  // test's now-cleared locals), it would already be destroyed here.
+  CHECK_FALSE(canary_destroyed.load());
+
+  // Only now release the still-running worker, and confirm it both
+  // completes safely and, once it does, the canary it was the last owner of
+  // is finally freed -- no permanent leak either.
+  release_latch.store(true, std::memory_order_release);
+  for (int attempt = 0; attempt < 100 && !completed.load(); ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  CHECK(completed.load());
+  for (int attempt = 0; attempt < 100 && !canary_destroyed.load(); ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  CHECK(canary_destroyed.load());
+}
+
+TEST_CASE("Live explorer: concurrent provider work is bounded by an "
+          "admission limit (HSE-92 round 3)") {
+  // Reviewer's exact repro, scaled down for a fast/deterministic test: a
+  // provider blocked on a latch, and MANY concurrent authenticated
+  // /api/graph requests. Every one of them must not be allowed to enter the
+  // provider concurrently -- only up to `kCap` may, the rest must be
+  // rejected (503) immediately, without ever spawning a provider worker.
+  constexpr int kCap = 3;
+  constexpr int kRequests = 9;
+  std::atomic<int> in_flight{0};
+  std::atomic<int> max_seen{0};
+  std::atomic<bool> release_latch{false};
+  const ui::GraphProvider capped_provider =
+      [&](std::string_view target,
+          const ui::CancelToken &should_cancel) -> std::optional<std::string> {
+    (void)target;
+    (void)should_cancel;
+    const int now = in_flight.fetch_add(1, std::memory_order_acq_rel) + 1;
+    int seen = max_seen.load(std::memory_order_acquire);
+    while (now > seen && !max_seen.compare_exchange_weak(
+                             seen, now, std::memory_order_acq_rel)) {
+    }
+    while (!release_latch.load(std::memory_order_acquire)) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    in_flight.fetch_sub(1, std::memory_order_acq_rel);
+    return std::string(
+        R"({"schema": "cidx.graph-view.v1", "nodes": [], "edges": [], "metadata": {}})");
+  };
+
+  std::promise<std::string> url_promise;
+  FirstLineCapture capture_buf(url_promise);
+  std::ostream out(&capture_buf);
+  std::ostringstream err;
+  std::thread server_thread([&] {
+    ui::serve_live(
+        ui::render_html(json_out::Value::obj({}), ui::RenderMode::LoopbackLive),
+        capped_provider, ui::GraphProvider{}, ui::GraphProvider{},
+        ui::ServerOptions{.port = 0,
+                          .launch_browser = false,
+                          .max_concurrent_requests = kCap},
+        out, err);
+  });
+  auto future = url_promise.get_future();
+  REQUIRE(future.wait_for(std::chrono::seconds(5)) ==
+          std::future_status::ready);
+  const std::string url = future.get();
+  const std::size_t port_start = url.find("127.0.0.1:") + 10;
+  const std::size_t port_end = url.find('/', port_start);
+  const int port = parse_int(url.substr(port_start, port_end - port_start));
+  const std::size_t token_key = url.find("token=");
+  const std::string token = url.substr(token_key + 6);
+
+  std::vector<int> statuses(kRequests, -1);
+  std::vector<std::thread> clients;
+  clients.reserve(kRequests);
+  for (int i = 0; i < kRequests; ++i) {
+    clients.emplace_back([&, i] {
+      statuses[i] =
+          plain_http_get(port, "/api/graph?token=" + token + "&root=ns::a")
+              .status;
+    });
+  }
+  // Give the (single-threaded) accept loop time to admit-or-reject every one
+  // of these `kRequests` connections before releasing the latch.
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  CHECK(max_seen.load() <= kCap);
+  CHECK(in_flight.load() > 0);
+  CHECK(in_flight.load() <= kCap);
+
+  release_latch.store(true, std::memory_order_release);
+  for (auto &client : clients) {
+    client.join();
+  }
+
+  int ok_count = 0;
+  int busy_count = 0;
+  for (const int status : statuses) {
+    if (status == 200) {
+      ++ok_count;
+    } else if (status == 503) {
+      ++busy_count;
+    }
+  }
+  CHECK(ok_count <= kCap);
+  CHECK(busy_count > 0);
+  CHECK(ok_count + busy_count == kRequests);
+
+  (void)plain_http_get(port, "/api/shutdown?token=" + token);
+  REQUIRE(server_thread.joinable());
+  server_thread.join();
 }

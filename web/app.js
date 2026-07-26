@@ -131,7 +131,30 @@ const graphState = (() => {
     metadata.evidence_truncated = Boolean(metadata.evidence_truncated || evidenceTruncated);
     metadata.continuation.available = Boolean(metadata.continuation.available || metadata.truncated);
     if (metadata.truncated && metadata.continuation.reason !== 'byte_budget') metadata.continuation.reason = 'budget';
-    return {...left, metadata, nodes: retainedNodes, edges: retainedEdges};
+    // HSE-92 review: a cumulative (progressively merged) view must carry its
+    // own honest, composite provenance -- it must never claim to BE `left`'s
+    // own atomic result (that discards the fact that `right`'s facts were
+    // folded in too). `result_chain` is the ordered list of every
+    // (result_id, request, query_identity) that contributed to this canvas;
+    // `result_id` is a composite derived from the whole chain, not a copy of
+    // either side's own id. Completeness is recomputed over that same
+    // composite (weakest-wins over both sides' own status, additionally
+    // downgraded by any truncation this merge itself introduced) rather than
+    // inherited untouched from `left`.
+    const chainOf = (side) => Array.isArray(side.result_chain) && side.result_chain.length > 0
+      ? side.result_chain
+      : [{result_id: side.result_id, request: side.request, query_identity: side.query_identity}];
+    const resultChain = [...chainOf(left), ...chainOf(right)];
+    const compositeResultId = `merged:v1:${resultChain.map((entry) => entry.result_id || 'unknown').join('+')}`;
+    const combinedStatus = weakest(left.status, right.status, completenessRank);
+    const status = metadata.truncated && combinedStatus === 'complete' ? 'partial' : (combinedStatus || 'unknown');
+    const markers = Array.from(new Set([...(left.markers || []), ...(right.markers || [])]));
+    return {
+      ...left, metadata, nodes: retainedNodes, edges: retainedEdges,
+      status, markers, result_chain: resultChain, result_id: compositeResultId,
+      request: right.request || left.request,
+      query_identity: right.query_identity || left.query_identity,
+    };
   };
   // Session-wide freshness tracker (HSE-92): a workspace becoming stale must
   // be surfaced immediately and never silently upgraded back to "current" by
@@ -451,25 +474,29 @@ if (typeof document !== 'undefined') {
     historyIndex = history.length - 1;
     return go(params, label);
   };
-  // Expansion is a MERGE onto the current canvas, not a replacement, but it
-  // is still a normalized semantic action and must enter breadcrumbs/back-
-  // forward like any other navigation (HSE-92 review). Pushes an `append`
-  // history entry; see jumpTo() for how such entries are replayed.
-  const pushExpand = async (params, label) => {
+  // Any action that MERGES onto the current canvas rather than replacing it
+  // (an "expand", or a continuation "Load more" page) is still a normalized
+  // semantic action and must enter breadcrumbs/back-forward like any other
+  // navigation (HSE-92 review), carrying whatever `mergeOptions` (e.g.
+  // `{cumulative: true}` for continuation) the merge itself needs so a later
+  // replay (jumpTo(), or loading a saved view) reproduces the SAME merge,
+  // not a re-capped one. Pushes an `append` history entry; see jumpTo() for
+  // how such entries are replayed.
+  const pushMerge = async (params, label, mergeOptions = {}) => {
     if (!liveToken) return;
     try {
       const nextView = await fetchGraph(params);
-      addView(nextView, true);
-      // HSE-92 round 2: without this, "Load more" (which combines
-      // lastContinuationToken with currentParams) would keep replaying the
-      // PRE-expansion parameters against a continuation token minted under
-      // the expansion's own params -- a query-identity mismatch the server
-      // correctly rejects with 400. An expand becomes the active semantic
-      // request, exactly like an ordinary navigate().
+      addView(nextView, true, mergeOptions);
+      // HSE-92 round 2: without this, a subsequent "Load more" (which
+      // combines lastContinuationToken with currentParams) would keep
+      // replaying the PRE-merge parameters against a continuation token
+      // minted under this merge's own params -- a query-identity mismatch
+      // the server correctly rejects with 400. A merge becomes the active
+      // semantic request, exactly like an ordinary navigate().
       currentParams = params;
       captureCurrentPresentation();
       history = history.slice(0, historyIndex + 1);
-      history.push({label, params, presentation: null, append: true});
+      history.push({label, params, presentation: null, append: true, mergeOptions});
       historyIndex = history.length - 1;
       renderBreadcrumbs();
       updateHistoryButtons();
@@ -477,22 +504,31 @@ if (typeof document !== 'undefined') {
       reportError(error);
     }
   };
+  const pushExpand = (params, label) => pushMerge(params, label, {});
+  // Replays an ordered slice of history entries onto the canvas from
+  // scratch: each non-append entry replaces it, each append entry (expand OR
+  // continuation "Load more", using its OWN recorded `mergeOptions`) merges
+  // onto whatever the replay has built so far. Shared by jumpTo() (replaying
+  // this session's own history) and "Load saved view" (replaying a
+  // persisted continuation-request/token chain), so both reconstruct the
+  // exact same canvas a session that never navigated away would have shown.
+  const replayHistory = async (entries) => {
+    for (const entry of entries) {
+      const stepView = await fetchGraph(entry.params);
+      addView(stepView, Boolean(entry.append), entry.mergeOptions || {});
+    }
+  };
   // Jumping to an arbitrary history entry (back/forward/breadcrumb click)
-  // replays every entry from the start up to and including `index`: each
-  // non-append entry replaces the canvas, each append (expand) entry merges
-  // onto whatever the replay has built so far. This reconstructs the exact
-  // canvas at that point in history regardless of how many expand actions
-  // came before it, then restores that entry's own presentation snapshot.
+  // replays every entry from the start up to and including `index`, then
+  // restores that entry's own presentation snapshot. This reconstructs the
+  // exact canvas at that point in history regardless of how many expand/
+  // continuation merges came before it.
   const jumpTo = async (index) => {
     if (!liveToken || index < 0 || index >= history.length) return;
     captureCurrentPresentation();
     historyIndex = index;
     try {
-      for (let step = 0; step <= index; step += 1) {
-        const entry = history[step];
-        const stepView = await fetchGraph(entry.params);
-        addView(stepView, Boolean(entry.append));
-      }
+      await replayHistory(history.slice(0, index + 1));
       currentParams = history[index].params;
       restorePresentation(history[index].presentation);
       renderBreadcrumbs();
@@ -597,10 +633,14 @@ if (typeof document !== 'undefined') {
     };
     document.getElementById('index-search-run').onclick = runSearch;
     document.getElementById('index-search').addEventListener('keydown', (event) => { if (event.key === 'Enter') runSearch(); });
-    document.getElementById('load-more').onclick = async () => {
+    document.getElementById('load-more').onclick = () => {
       if (!lastContinuationToken) return;
-      try { addView(await fetchGraph({...currentParams, continuation: lastContinuationToken}), true, {cumulative: true}); }
-      catch (error) { reportError(error); }
+      // HSE-92 review: a continuation page is recorded as its own semantic
+      // history entry (via pushMerge, `mergeOptions: {cumulative: true}`) --
+      // not applied directly to the canvas and forgotten -- so navigating
+      // away and back (or saving/loading the view) replays it too, instead
+      // of silently losing every page past the first.
+      return pushMerge({...currentParams, continuation: lastContinuationToken}, 'load more', {cumulative: true});
     };
     document.getElementById('group-by').onchange = applyGrouping;
     document.getElementById('apply-filters').onclick = () => {
@@ -624,8 +664,15 @@ if (typeof document !== 'undefined') {
       if (!name) return;
       const views = loadSavedViews().filter((entry) => entry.name !== name);
       views.push({
-        name, params: currentParams,
-        presentation: cy ? {positions: cy.nodes().reduce((acc, n) => ({...acc, [n.id()]: n.position()}), {}), zoom: cy.zoom(), pan: cy.pan()} : null,
+        name,
+        // HSE-92 review: persist the FULL ordered semantic history up to
+        // what is currently shown (including any continuation "Load more"
+        // entries), not just the single active `currentParams` request --
+        // otherwise a saved view that includes progressively-loaded pages
+        // loses every page past the first the moment it is reloaded.
+        history: history.slice(0, historyIndex + 1),
+        params: currentParams,
+        presentation: capturePresentation(),
       });
       persistSavedViews(views);
       renderSavedViews();
@@ -634,12 +681,24 @@ if (typeof document !== 'undefined') {
       const select = document.getElementById('saved-views');
       const entry = loadSavedViews().find((item) => item.name === select?.value);
       if (!entry) return;
-      await navigate(entry.params, entry.name);
-      if (entry.presentation && cy) {
-        cy.nodes().positions((n) => entry.presentation.positions?.[n.id()] || n.position());
-        if (entry.presentation.zoom) cy.zoom(entry.presentation.zoom);
-        if (entry.presentation.pan) cy.pan(entry.presentation.pan);
+      if (Array.isArray(entry.history) && entry.history.length > 0) {
+        try {
+          history = entry.history.slice();
+          historyIndex = history.length - 1;
+          await replayHistory(history);
+          currentParams = history[historyIndex].params;
+          renderBreadcrumbs();
+          updateHistoryButtons();
+        } catch (error) {
+          reportError(error);
+          return;
+        }
+      } else {
+        // Backward compatible with views saved before this fix: only a
+        // single request/presentation pair was recorded.
+        await navigate(entry.params, entry.name);
       }
+      restorePresentation(entry.presentation);
     };
     document.getElementById('stale-refresh').onclick = () => {
       go(currentParams, history[historyIndex]?.label || 'refresh',

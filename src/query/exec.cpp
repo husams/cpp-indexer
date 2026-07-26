@@ -94,6 +94,12 @@ std::vector<EdgeSiteRow> SqliteQueryReadAdapter::edge_sites_one(int64_t edge_id,
   return service_->edge_sites_one(edge_id, limit);
 }
 
+std::vector<EdgeSiteRow>
+SqliteQueryReadAdapter::edge_sites_page(int64_t edge_id, int offset,
+                                        int limit) {
+  return service_->edge_sites_page(edge_id, offset, limit);
+}
+
 bool SqliteQueryReadAdapter::edge_has_conditional_site(int64_t edge_id) {
   return service_->edge_has_conditional_site(edge_id);
 }

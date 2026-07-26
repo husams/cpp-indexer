@@ -167,6 +167,8 @@ bool send_response(int fd, int code, std::string_view type,
     reason = "Forbidden";
   } else if (code == 404) {
     reason = "Not Found";
+  } else if (code == 503) {
+    reason = "Service Unavailable";
   }
   std::ostringstream head;
   head << "HTTP/1.1 " << code << " " << reason << "\r\n"
@@ -233,16 +235,41 @@ bool peer_disconnected(int fd) {
 // heap-allocated (shared_ptr) and captured BY VALUE, specifically so it
 // stays valid for the worker's entire lifetime even when this function
 // returns while the worker is still running (the detach path). `provider`
-// is still captured by reference: it is only valid for as long as
-// serve_live()'s caller keeps the underlying GraphProvider alive, which is
-// the same lifetime contract detaching already relies on in production (the
-// process exits shortly after serve_live() returns) -- a test harness that
-// exercises this path must keep its own provider/storage alive until any
-// abandoned worker it caused has itself signalled completion.
+// is captured BY VALUE too (an owned std::function copy), not by reference
+// to this function's own parameter: a detached worker can keep running
+// after serve_live() itself has returned, at which point any REFERENCE
+// chasing back to the caller's own GraphProvider variable (or, transitively,
+// a raw pointer/reference the provider's own closure holds to a Storage the
+// caller destroys once serve_live() returns) would be a genuine
+// use-after-free -- this is exactly why production graph/search/evidence
+// providers (see cli/commands_ui.cpp) hold a `std::shared_ptr<Storage>`
+// rather than a raw pointer: as long as this worker's own captured copy of
+// `provider` is alive, that shared_ptr keeps the Storage alive too, with no
+// need for serve_live() to block its own return on an uncooperative
+// provider ever finishing.
+// Admission control (HSE-92 round 3): atomically claims one of
+// `cap` concurrent provider-work slots, returning false (claiming nothing)
+// once `cap` is already in use. Paired with `active_work`'s own decrement
+// once a claimed unit of work actually finishes (see run_provider_route's
+// worker below) -- not with connection/thread teardown, so an abandoned but
+// still-running provider still correctly counts as active work.
+bool try_admit(std::atomic<int> &active_work, int cap) {
+  int current = active_work.load(std::memory_order_acquire);
+  while (current < cap) {
+    if (active_work.compare_exchange_weak(current, current + 1,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_acquire)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void run_provider_route(
-    int client, const GraphProvider &provider, const std::string &target,
+    int client, GraphProvider provider, const std::string &target,
     std::string_view empty_message, std::atomic<bool> &shutting_down,
-    const std::shared_ptr<std::atomic<bool>> &route_finished) {
+    const std::shared_ptr<std::atomic<bool>> &route_finished,
+    const std::shared_ptr<std::atomic<int>> &active_work) {
   // This whole body runs as a std::thread entry function (see serve_live()'s
   // connection_threads): an uncaught exception anywhere in it -- even one as
   // unlikely as `target`'s copy-construction into the worker lambda's
@@ -265,7 +292,16 @@ void run_provider_route(
     // the actual invocation runs on a separate call stack no caller-side
     // try/catch can reach.
     auto target_copy = std::make_shared<std::string>(target);
-    std::thread worker([&provider, target_copy, value, done, cancel_requested] {
+    // `provider` is MOVED into the worker's own closure -- its own owned
+    // std::function state, not a reference to this function's `provider`
+    // parameter: that parameter's own storage (this stack frame) can be
+    // gone long before an abandoned worker's detached thread finishes, so
+    // the worker must carry an independent copy it fully owns for its own
+    // lifetime. `provider` is a by-value parameter used nowhere else in
+    // this function once the worker is constructed, so moving (rather than
+    // copying) it into the closure avoids an unnecessary extra copy.
+    std::thread worker([provider = std::move(provider), target_copy, value,
+                        done, cancel_requested, active_work] {
       const CancelToken should_cancel = [cancel_requested] {
         return cancel_requested->load(std::memory_order_acquire);
       };
@@ -276,6 +312,13 @@ void run_provider_route(
         *value = std::nullopt;
       }
       done->store(true, std::memory_order_release);
+      // Release this admitted unit of work only once the provider
+      // invocation itself has actually finished -- an abandoned/detached
+      // worker that ignores cancellation and keeps running still correctly
+      // counts against the concurrency cap for as long as it runs.
+      if (active_work) {
+        active_work->fetch_sub(1, std::memory_order_acq_rel);
+      }
     });
     bool abandoned = false;
     while (!done->load(std::memory_order_acquire)) {
@@ -384,6 +427,12 @@ int serve_live(const std::string &html, const GraphProvider &graph_provider,
   };
   std::vector<ConnectionThread> connection_threads;
   std::atomic<bool> shutting_down{false};
+  // HSE-92 round 3: bounds how many graph/search/evidence provider
+  // invocations may be genuinely in flight at once (see try_admit() /
+  // run_provider_route() above) -- resource use must be a measured bound,
+  // not scale with however many concurrent requests a client sends.
+  const auto active_work = std::make_shared<std::atomic<int>>(0);
+  const int max_concurrent = std::max(1, options.max_concurrent_requests);
   const auto reap_finished_connections = [&] {
     std::erase_if(connection_threads, [](ConnectionThread &entry) {
       if (!entry.finished->load(std::memory_order_acquire)) {
@@ -440,29 +489,55 @@ int serve_live(const std::string &html, const GraphProvider &graph_provider,
       // `target` is a view into `buffer`, which the NEXT loop iteration
       // reuses for a different connection's bytes -- copy it before handing
       // off to a thread that will outlive this iteration.
-      auto finished = std::make_shared<std::atomic<bool>>(false);
-      connection_threads.push_back(ConnectionThread{
-          .thread =
-              std::thread(run_provider_route, client, std::cref(graph_provider),
-                          std::string(target), "bad graph request\n",
-                          std::ref(shutting_down), finished),
-          .finished = finished});
+      // `graph_provider` (this function's own reference parameter) is passed
+      // BY VALUE here -- std::thread copies it into its own storage right
+      // now, on THIS (accept-loop) thread, while it is still definitely
+      // valid -- rather than std::cref(): run_provider_route's own
+      // `provider` parameter is likewise by-value now, and its worker
+      // captures its OWN further copy, so an abandoned/detached worker never
+      // chases a reference back to state this function -- or its caller --
+      // may have already destroyed.
+      if (!try_admit(*active_work, max_concurrent)) {
+        (void)send_response(client, 503, "text/plain",
+                            "server busy: too many concurrent requests\n");
+        ::close(client);
+      } else {
+        auto finished = std::make_shared<std::atomic<bool>>(false);
+        connection_threads.push_back(ConnectionThread{
+            .thread =
+                std::thread(run_provider_route, client, graph_provider,
+                            std::string(target), "bad graph request\n",
+                            std::ref(shutting_down), finished, active_work),
+            .finished = finished});
+      }
     } else if (target.starts_with("/api/search?")) {
-      auto finished = std::make_shared<std::atomic<bool>>(false);
-      connection_threads.push_back(ConnectionThread{
-          .thread = std::thread(run_provider_route, client,
-                                std::cref(search_provider), std::string(target),
-                                "bad search request\n", std::ref(shutting_down),
-                                finished),
-          .finished = finished});
+      if (!try_admit(*active_work, max_concurrent)) {
+        (void)send_response(client, 503, "text/plain",
+                            "server busy: too many concurrent requests\n");
+        ::close(client);
+      } else {
+        auto finished = std::make_shared<std::atomic<bool>>(false);
+        connection_threads.push_back(ConnectionThread{
+            .thread =
+                std::thread(run_provider_route, client, search_provider,
+                            std::string(target), "bad search request\n",
+                            std::ref(shutting_down), finished, active_work),
+            .finished = finished});
+      }
     } else if (target.starts_with("/api/evidence?")) {
-      auto finished = std::make_shared<std::atomic<bool>>(false);
-      connection_threads.push_back(ConnectionThread{
-          .thread = std::thread(run_provider_route, client,
-                                std::cref(evidence_provider),
-                                std::string(target), "bad evidence request\n",
-                                std::ref(shutting_down), finished),
-          .finished = finished});
+      if (!try_admit(*active_work, max_concurrent)) {
+        (void)send_response(client, 503, "text/plain",
+                            "server busy: too many concurrent requests\n");
+        ::close(client);
+      } else {
+        auto finished = std::make_shared<std::atomic<bool>>(false);
+        connection_threads.push_back(ConnectionThread{
+            .thread =
+                std::thread(run_provider_route, client, evidence_provider,
+                            std::string(target), "bad evidence request\n",
+                            std::ref(shutting_down), finished, active_work),
+            .finished = finished});
+      }
     } else if (target.starts_with("/api/shutdown?")) {
       (void)send_response(client, 200, "application/json",
                           "{\"stopped\": true}\n");

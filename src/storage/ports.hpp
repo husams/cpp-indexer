@@ -54,6 +54,10 @@ public:
   edge_sites_for(const std::vector<int64_t> &edge_ids) = 0;
   virtual std::vector<EdgeSiteRow> edge_sites_one(int64_t edge_id,
                                                   int limit) = 0;
+  // Bounded, delivery-order-correct (path, line, col) page over one edge's
+  // sites -- see SqliteStorageService::edge_sites_page().
+  virtual std::vector<EdgeSiteRow> edge_sites_page(int64_t edge_id, int offset,
+                                                   int limit) = 0;
   // Whether ANY of an edge's sites is config-conditional -- an indexed
   // EXISTS aggregate over the edge's own (primary-key-bounded) site rows,
   // never materializing the site list, so this stays exact and cheap

@@ -352,14 +352,6 @@ Value site_value(const graph::Site &site,
   return Value::obj(std::move(out));
 }
 
-std::string site_sort_key(const graph::Site &site,
-                          const std::optional<std::string> &workspace) {
-  return (site.file ? redacted_path(*site.file, workspace) : "") + "\x1f" +
-         std::to_string(site.line.value_or(0)) + "\x1f" +
-         std::to_string(site.col.value_or(0)) + "\x1f" +
-         site.args_sig.value_or("");
-}
-
 Value edge_value(const graph::Edge &edge, const graph::Sym &source,
                  const graph::Sym &target, const std::string &freshness,
                  bool truncated, bool sites_truncated,
@@ -1593,9 +1585,22 @@ void apply_continuation_token(Value &continuation, Value &result,
 // already used some of it, but this selection itself never grows that
 // count). Split out of build_graph_view() to keep that function within its
 // complexity budget.
+//
+// `nodes_to_scan` is every PRIMARY node delivered through this page
+// (earlier pages' nodes plus this page's own), not just this page's own
+// slice: a cross-page edge whose SOURCE node's own page has already passed
+// is only ever discoverable through THAT source's adjacency -- scanning
+// only this page's own nodes would mean any edge deferred for lack of
+// bridging-node room on an earlier page is never reconsidered again once
+// its source's page has gone by (HSE-92 round 3). Re-scanning already-
+// delivered nodes is redundant work but never loses topology; the caller
+// (build_graph_view) treats a bridging endpoint already delivered on an
+// earlier page as already known to the client (see `known_ids`), so an
+// edge becomes deliverable the moment BOTH its endpoints have appeared as
+// primary nodes on any page, without needing fresh node-budget room.
 std::vector<graph::Edge>
 select_symbol_edges(graph::GraphQuery &graph, const GraphViewRequest &request,
-                    const std::vector<graph::Sym> &ordered_nodes,
+                    const std::vector<graph::Sym> &nodes_to_scan,
                     const std::map<int64_t, graph::Sym> &full_candidates_by_id,
                     const std::map<int64_t, graph::Sym> &symbols_by_id,
                     int edge_offset, int edge_budget, std::size_t edges_so_far,
@@ -1603,7 +1608,7 @@ select_symbol_edges(graph::GraphQuery &graph, const GraphViewRequest &request,
                     bool &truncated, bool &more_edges_available) {
   std::map<std::string, graph::Edge> by_key;
   const auto kind_ids = graph::GraphQuery::kind_ids(request.edge_kinds);
-  for (const auto &symbol : ordered_nodes) {
+  for (const auto &symbol : nodes_to_scan) {
     check_cancelled();
     const auto adjacent = graph.edges(symbol.id, request.direction, kind_ids,
                                       edge_budget + 1, false);
@@ -2259,6 +2264,27 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
         more_nodes_available = true;
       }
       delivered_node_count = static_cast<int>(ordered_nodes.size());
+      // Primary nodes already delivered to the client on EARLIER pages --
+      // the prefix of the same deterministic sort that this page's own
+      // `node_offset` skipped past. An edge whose endpoint lands here is
+      // already known to the client: it costs no fresh node_budget room and
+      // must not be re-emitted as a "bridging" node (HSE-92 round 3) --
+      // conflating "delivered on THIS page" with "known to the client at
+      // all" is exactly what made a deferred cross-page edge unrecoverable
+      // once its source node's own page had already gone by.
+      std::set<int64_t> known_from_earlier_pages;
+      {
+        const auto &all_sorted = node_page.full_filtered_nodes;
+        const std::size_t earlier_count =
+            std::min(static_cast<std::size_t>(std::max(0, node_offset)),
+                     all_sorted.size());
+        for (std::size_t index = 0; index < earlier_count; ++index) {
+          known_from_earlier_pages.insert(all_sorted[index].id);
+        }
+      }
+      const auto already_known_to_client = [&](int64_t id) {
+        return known_from_earlier_pages.contains(id);
+      };
       std::set<int64_t> selected_ids;
       std::map<int64_t, int> depths;
       for (const auto &symbol : ordered_nodes) {
@@ -2281,7 +2307,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
       // can defer the edge that needed it to a later page instead of
       // exceeding the declared bound.
       const auto emit_bridging_node = [&](int64_t id) {
-        if (selected_ids.contains(id)) {
+        if (selected_ids.contains(id) || already_known_to_client(id)) {
           return true;
         }
         const auto found = full_candidates_by_id.find(id);
@@ -2315,8 +2341,19 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
           truncated = true;
         }
       } else {
+        // Scan every primary node delivered THROUGH this page (earlier
+        // pages' nodes plus this page's own), not just this page's own
+        // slice -- see select_symbol_edges()'s own comment for why a
+        // narrower scope permanently loses cross-page edges once their
+        // source node's page has already gone by (HSE-92 round 3).
+        std::vector<graph::Sym> nodes_to_scan = node_page.full_filtered_nodes;
+        const std::size_t scan_count =
+            std::min(static_cast<std::size_t>(std::max(0, node_offset)) +
+                         ordered_nodes.size(),
+                     nodes_to_scan.size());
+        nodes_to_scan.resize(scan_count);
         selected_edges = select_symbol_edges(
-            graph, request, ordered_nodes, full_candidates_by_id, symbols_by_id,
+            graph, request, nodes_to_scan, full_candidates_by_id, symbols_by_id,
             edge_offset, edge_budget, edges.size(), check_cancelled, truncated,
             more_edges_available);
       }
@@ -2349,21 +2386,25 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
         // one of its bridging endpoints) is simply deferred -- it becomes
         // reachable on a later page once its own primary-node page makes
         // room for it -- not paid for here.
+        const auto endpoint_known = [&](int64_t id) {
+          return selected_ids.contains(id) || already_known_to_client(id);
+        };
         const std::size_t bridge_nodes_needed =
-            (selected_ids.contains(edge.src_id) ? 0 : 1) +
-            (selected_ids.contains(edge.dst_id) ? 0 : 1);
+            (endpoint_known(edge.src_id) ? 0 : 1) +
+            (endpoint_known(edge.dst_id) ? 0 : 1);
         if (nodes.size() + bridge_nodes_needed >
             static_cast<std::size_t>(node_budget)) {
           truncated = true;
           more_nodes_available = true;
           continue;
         }
-        auto sites = graph.sites(edge.edge_id, sites_remaining + 1);
-        std::ranges::sort(sites,
-                          [&](const graph::Site &a, const graph::Site &b) {
-                            return site_sort_key(a, request.workspace) <
-                                   site_sort_key(b, request.workspace);
-                          });
+        // sites_page() (HSE-92 round 3) already returns rows in delivery
+        // order and is bounded by O(distinct files touched by this edge +
+        // sites_remaining), not graph.sites()'s old file_id-ordered prefix
+        // that needed a re-sort AFTER truncating -- which could silently
+        // keep the wrong sites_remaining rows whenever file_id order
+        // differs from path order.
+        auto sites = graph.sites_page(edge.edge_id, 0, sites_remaining + 1);
         bool sites_truncated =
             sites.size() > static_cast<std::size_t>(sites_remaining);
         if (sites_truncated) {
@@ -2806,23 +2847,18 @@ json_out::Value load_edge_evidence(Storage &db, const std::string &edge_id,
   }
   const int bounded_offset = std::max(0, site_offset);
   const int bounded_limit = std::clamp(site_limit, 1, 5000);
-  // Effectively "all sites" for the ONE explicitly-identified edge this
-  // endpoint was asked about -- not a per-page-growing prefix. The
-  // underlying query's raw row order (file_id, line, col) does not match
-  // the redacted-path-based site_sort_key() used for the final response
-  // order, so fetching only `bounded_offset + bounded_limit + 1` rows (as
-  // this used to do) is not just inefficient but INCORRECT: a raw-order
-  // prefix is not a delivery-order prefix, so successive /api/evidence
-  // pages could duplicate some sites and permanently skip others. Unlike
-  // the removed per-response applicability probe (which ran once per edge
-  // across a whole multi-edge traversal), this fetch is for exactly one
-  // explicitly-identified edge per API call.
-  constexpr int kEdgeEvidenceFetchLimit = 1'000'000;
-  auto sites = graph.sites(*matched_edge_id, kEdgeEvidenceFetchLimit);
-  std::ranges::sort(sites, [&](const graph::Site &a, const graph::Site &b) {
-    return site_sort_key(a, workspace) < site_sort_key(b, workspace);
-  });
-  skip_offset(sites, bounded_offset);
+  // HSE-92 round 3: `sites_page()` already returns rows in delivery order
+  // (grouped by resolved path, then line/col -- see
+  // SqliteStorageService::edge_sites_page()) and transfers only
+  // O(distinct files touched by this edge + bounded_limit) rows via
+  // indexed LIMIT/OFFSET, regardless of how many total sites the edge has
+  // -- never the old fixed 1,000,000-row fetch, which was both unrelated
+  // to the requested bound (always read up to a million rows even for
+  // site_limit=1) and, for any edge with more sites than that cap, silently
+  // dropped evidence beyond it. Fetching `bounded_limit + 1` (rather than
+  // exactly `bounded_limit`) detects truncation without a further re-sort.
+  auto sites =
+      graph.sites_page(*matched_edge_id, bounded_offset, bounded_limit + 1);
   const bool truncated = sites.size() > static_cast<std::size_t>(bounded_limit);
   if (truncated) {
     sites.resize(static_cast<std::size_t>(bounded_limit));

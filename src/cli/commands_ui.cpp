@@ -4,6 +4,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string_view>
 
@@ -227,8 +228,16 @@ ui::GraphViewRequest live_request(const ui::GraphViewRequest &base,
   return request;
 }
 
+// HSE-92 round 3: these providers hold a `std::shared_ptr<Storage>`, not a
+// raw pointer, specifically so an abandoned/detached serve_live() worker
+// (see ui/server.cpp's run_provider_route -- it now captures its own owned
+// copy of the whole GraphProvider) keeps the Storage it is mid-query against
+// alive for exactly as long as it needs it, even after cmd_ui_open() itself
+// has returned and its own local `db` has gone out of scope. A raw pointer
+// here would dangle the instant the owning function returns while a
+// still-running worker thread keeps using it.
 struct LiveGraphProvider {
-  Storage *db = nullptr;
+  std::shared_ptr<Storage> db;
   ui::GraphViewRequest base_request;
 
   std::optional<std::string>
@@ -245,7 +254,7 @@ struct LiveGraphProvider {
 };
 
 struct LiveSearchProvider {
-  Storage *db = nullptr;
+  std::shared_ptr<Storage> db;
   std::optional<std::string> workspace;
 
   std::optional<std::string>
@@ -271,7 +280,7 @@ struct LiveSearchProvider {
 };
 
 struct LiveEvidenceProvider {
-  Storage *db = nullptr;
+  std::shared_ptr<Storage> db;
   std::optional<std::string> workspace;
 
   std::optional<std::string>
@@ -375,7 +384,7 @@ ui::GraphViewRequest ui_request(const ParsedArgs &args) {
   return request;
 }
 
-std::unique_ptr<Storage> open_ui_storage(const ParsedArgs & /*args*/,
+std::shared_ptr<Storage> open_ui_storage(const ParsedArgs & /*args*/,
                                          Context &ctx) {
   struct stat st{};
   if (::stat(ctx.index_path.c_str(), &st) != 0) {
@@ -383,7 +392,7 @@ std::unique_ptr<Storage> open_ui_storage(const ParsedArgs & /*args*/,
     return nullptr;
   }
   try {
-    return std::make_unique<Storage>(ctx.index_path,
+    return std::make_shared<Storage>(ctx.index_path,
                                      Storage::OpenMode::read_only);
   } catch (const std::exception &error) {
     *ctx.err << "error: cidx ui: " << error.what() << "\n";
@@ -446,11 +455,11 @@ int cmd_ui_open(const ParsedArgs &args, Context &ctx) {
     const std::string html =
         ui::render_html(view, ui::RenderMode::LoopbackLive);
     const ui::GraphProvider graph_provider =
-        LiveGraphProvider{.db = db.get(), .base_request = base_request};
+        LiveGraphProvider{.db = db, .base_request = base_request};
     const ui::GraphProvider search_provider =
-        LiveSearchProvider{.db = db.get(), .workspace = args.ui_workspace};
+        LiveSearchProvider{.db = db, .workspace = args.ui_workspace};
     const ui::GraphProvider evidence_provider =
-        LiveEvidenceProvider{.db = db.get(), .workspace = args.ui_workspace};
+        LiveEvidenceProvider{.db = db, .workspace = args.ui_workspace};
     return ui::serve_live(
         html, graph_provider, search_provider, evidence_provider,
         ui::ServerOptions{.port = args.ui_port,

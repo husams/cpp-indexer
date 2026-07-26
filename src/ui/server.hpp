@@ -11,6 +11,13 @@ namespace cidx::ui {
 struct ServerOptions {
   int port = 0;
   bool launch_browser = true;
+  // HSE-92 round 3: caps how many graph/search/evidence provider
+  // invocations may be genuinely in flight at once. Each such request
+  // spawns both a connection thread and a provider worker thread, so
+  // without a bound resource use scales with request/attacker count rather
+  // than a measured limit. Requests beyond the cap are rejected immediately
+  // (503) without ever spawning either thread.
+  int max_concurrent_requests = 8;
 };
 
 // Cooperative cancellation: `true` once the request that owns this token

@@ -128,6 +128,13 @@ public:
   // Per-edge sites (A8, limit 200). Used by emitter for --json re-query (R8).
   std::vector<Site> sites(int64_t edge_id, int limit = 200);
 
+  // Bounded, delivery-order (path, line, col) page over one edge's sites --
+  // see SqliteStorageService::edge_sites_page(). Transfers O(distinct files
+  // touched by the edge + limit) rows regardless of the edge's total site
+  // count, and is already in the caller's own delivery order (no re-sort
+  // needed).
+  std::vector<Site> sites_page(int64_t edge_id, int offset, int limit);
+
   // Whether ANY of an edge's sites is config-conditional -- an indexed
   // EXISTS aggregate, exact regardless of how many sites the edge has and
   // never bounded by (or dependent on) a response's evidence budget.

@@ -725,6 +725,14 @@ public:
   // A8: single-edge sites with LIMIT (query.py:884-906)
   std::vector<EdgeSiteRow> edge_sites_one(int64_t edge_id, int limit);
 
+  // HSE-92 round 3: bounded, delivery-order-correct (path, line, col) page
+  // over one edge's sites -- unlike edge_sites_one(), which orders by raw
+  // file_id (not delivery order) and has no offset, this transfers only
+  // O(distinct files touched by the edge + limit) rows regardless of how
+  // many total sites the edge has.
+  std::vector<EdgeSiteRow> edge_sites_page(int64_t edge_id, int offset,
+                                           int limit);
+
   // Indexed EXISTS aggregate: whether ANY of this edge's sites is
   // config-conditional. Bounded by the edge's own site count (edge_id is
   // the leading column of edge_site's WITHOUT ROWID primary key), never by

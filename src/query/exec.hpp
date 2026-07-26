@@ -63,6 +63,8 @@ public:
   std::map<int64_t, std::vector<EdgeSiteRow>>
   edge_sites_for(const std::vector<int64_t> &edge_ids) override;
   std::vector<EdgeSiteRow> edge_sites_one(int64_t edge_id, int limit) override;
+  std::vector<EdgeSiteRow> edge_sites_page(int64_t edge_id, int offset,
+                                           int limit) override;
   bool edge_has_conditional_site(int64_t edge_id) override;
   std::optional<int64_t> edge_id_for(int64_t src_id, int64_t dst_id,
                                      int64_t kind) override;

@@ -6,7 +6,7 @@
   "scripts": {
     "build": "node scripts/build-assets.mjs",
     "check-assets": "node scripts/build-assets.mjs --check",
-    "test": "node graph_state_test.js && node grouping_dom_test.js && node freshness_monitor_test.js",
+    "test": "node graph_state_test.js && node grouping_dom_test.js && node freshness_monitor_test.js && node continuation_history_test.js",
     "smoke": "node scripts/offline-smoke.mjs",
     "check": "npm run check-assets && npm run test && npm run smoke"
   },
