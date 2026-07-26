@@ -432,6 +432,23 @@ if (typeof document !== 'undefined') {
     if (loadMoreButton) loadMoreButton.hidden = true;
     return {...withoutContinuation(currentParams), ...overrides};
   };
+  // HSE-92 fix: `depth`/`direction` are Expand-scoped traversal state (see
+  // expandDirection above) written into `currentParams` by pushMerge -- like
+  // `continuation`, they must NOT ride along onto a completely different
+  // root (a bare {root} request defaults server-side to depth=2/direction=
+  // out; see GraphViewRequest in graph_view.hpp). Unlike `continuation`,
+  // `depth`/`direction` legitimately DO persist for same-root actions
+  // (apply-filters, load-more, stale-refresh all keep using
+  // freshSemanticParams directly), so the strip can't live in
+  // withoutContinuation/freshSemanticParams itself. Every entry point that
+  // navigates to a NEW root must build its params through this helper
+  // instead, so the next new-root entry point can't reintroduce the leak.
+  const freshRootParams = (overrides) => {
+    const params = freshSemanticParams(overrides);
+    delete params.depth;
+    delete params.direction;
+    return params;
+  };
   // Presentation (camera/layout) state is captured/restored separately from
   // the semantic request each history entry carries (HSE-92 review: history
   // must restore both, independently).
@@ -602,8 +619,11 @@ if (typeof document !== 'undefined') {
         button.textContent = `${match.name} (${match.kind}) — ${match.location}`;
         // HSE-92 fix: same filter-preservation rule as expandDirection --
         // navigating to a search result must merge onto the active filtered
-        // request, not overwrite currentParams with a bare {root}.
-        button.onclick = () => { results.hidden = true; navigate(freshSemanticParams({root: match.id}), match.name); };
+        // request, not overwrite currentParams with a bare {root}. But this
+        // IS a new-root navigation, so unlike expandDirection it must go
+        // through freshRootParams: depth/direction left behind by a
+        // previous Expand are scoped to that Expand's root, not this one.
+        button.onclick = () => { results.hidden = true; navigate(freshRootParams({root: match.id}), match.name); };
         results.appendChild(button);
       });
       if (!payload.matches?.length) {
