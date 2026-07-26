@@ -282,17 +282,25 @@ if (typeof document !== 'undefined') {
     title.textContent = `${e.kind} relation`;
     const evidenceTruncated = Boolean(e.status?.evidence_truncated || e.evidence?.sites_truncated);
     const loadEvidenceButton = evidenceTruncated && liveToken
-      ? '<button type="button" id="load-evidence">Load all evidence</button>' : '';
-    details.innerHTML = `<dl><dt>Canonical id</dt><dd><code>${esc(e.id)}</code></dd><dt>From</dt><dd><code>${esc(e.source)}</code></dd><dt>To</dt><dd><code>${esc(e.target)}</code></dd><dt>Kind/count</dt><dd>${esc(e.kind)} · ${esc(e.count)}</dd><dt>Status</dt><dd>${statusBadges(e.status) || 'No status flags'}</dd><dt>Evidence</dt><dd>${(e.sites || []).map((s) => esc(sourceLocation(s))).join('<br>') || 'No site evidence'} ${loadEvidenceButton}</dd></dl>`;
+      ? '<button type="button" id="load-evidence">Load more evidence</button>' : '';
+    details.innerHTML = `<dl><dt>Canonical id</dt><dd><code>${esc(e.id)}</code></dd><dt>From</dt><dd><code>${esc(e.source)}</code></dd><dt>To</dt><dd><code>${esc(e.target)}</code></dd><dt>Kind/count</dt><dd>${esc(e.kind)} · ${esc(e.count)}</dd><dt>Status</dt><dd>${statusBadges(e.status) || 'No status flags'}</dd><dt>Evidence</dt><dd><div id="evidence-sites">${(e.sites || []).map((s) => esc(sourceLocation(s))).join('<br>') || 'No site evidence'}</div>${loadEvidenceButton}</dd></dl>`;
     if (evidenceTruncated && liveToken) {
+      let loadedSites = [...(e.sites || [])];
+      let siteOffset = loadedSites.length;
       document.getElementById('load-evidence').onclick = async () => {
         try {
-          const query = new URLSearchParams({token: liveToken, edge: String(e.id), site_limit: '5000'});
+          const query = new URLSearchParams({
+            token: liveToken, edge: String(e.id),
+            site_offset: String(siteOffset), site_limit: '5000',
+          });
           const response = await fetch(`/api/evidence?${query}`);
           if (!response.ok) throw new Error(`Evidence request failed (${response.status})`);
           const payload = await response.json();
-          const list = (payload.sites || []).map((s) => esc(sourceLocation(s))).join('<br>');
-          document.getElementById('load-evidence').outerHTML = `<div>${list || 'No additional sites'}${payload.truncated ? ' <span class="badge truncated">still truncated</span>' : ''}</div>`;
+          loadedSites = loadedSites.concat(payload.sites || []);
+          siteOffset = Number(payload.next_offset ?? loadedSites.length);
+          document.getElementById('evidence-sites').innerHTML =
+            loadedSites.map((s) => esc(sourceLocation(s))).join('<br>') || 'No site evidence';
+          if (!payload.truncated) document.getElementById('load-evidence').remove();
         } catch (error) {
           details.insertAdjacentHTML('beforeend', `<p class="muted">${esc(error.message)}</p>`);
         }
@@ -376,6 +384,11 @@ if (typeof document !== 'undefined') {
     if (!response.ok) throw new Error(`Graph request failed (${response.status})`);
     return response.json();
   };
+  const withoutContinuation = (params) => {
+    const base = {...params};
+    delete base.continuation;
+    return base;
+  };
   // HSE-92 round 2: staleness must be detected promptly even while the
   // session sits idle, not only reactively on the NEXT user-initiated
   // GraphView action -- an open session whose indexed workspace identity
@@ -391,7 +404,7 @@ if (typeof document !== 'undefined') {
     if (!liveToken) return;
     setInterval(async () => {
       try {
-        trackViewFreshness(await fetchGraph(currentParams));
+        trackViewFreshness(await fetchGraph(withoutContinuation(currentParams)));
       } catch (_error) {
         // Ignore: a failed background probe leaves freshness untouched.
       }
@@ -451,7 +464,7 @@ if (typeof document !== 'undefined') {
       // clear staleness before the refresh is confirmed successful).
       if (options.resetFreshness) sessionFreshness = 'current';
       addView(nextView, false);
-      currentParams = params;
+      currentParams = withoutContinuation(params);
       restorePresentation(presentation);
       renderBreadcrumbs();
       updateHistoryButtons();
@@ -493,7 +506,7 @@ if (typeof document !== 'undefined') {
       // minted under this merge's own params -- a query-identity mismatch
       // the server correctly rejects with 400. A merge becomes the active
       // semantic request, exactly like an ordinary navigate().
-      currentParams = params;
+      currentParams = withoutContinuation(params);
       captureCurrentPresentation();
       history = history.slice(0, historyIndex + 1);
       history.push({label, params, presentation: null, append: true, mergeOptions});
@@ -529,7 +542,7 @@ if (typeof document !== 'undefined') {
     historyIndex = index;
     try {
       await replayHistory(history.slice(0, index + 1));
-      currentParams = history[index].params;
+      currentParams = withoutContinuation(history[index].params);
       restorePresentation(history[index].presentation);
       renderBreadcrumbs();
       updateHistoryButtons();
@@ -657,6 +670,7 @@ if (typeof document !== 'undefined') {
       const fields = [
         ['filter-node-kind', 'node_kind'], ['filter-file', 'file'],
         ['filter-component', 'component'], ['filter-repository', 'repository'],
+        ['filter-namespace', 'namespace'],
       ];
       fields.forEach(([elementId, param]) => {
         const value = document.getElementById(elementId)?.value.trim();

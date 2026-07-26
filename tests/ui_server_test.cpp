@@ -27,6 +27,7 @@
 #include <utility>
 #include <vector>
 
+#include "cli/commands.hpp"
 #include "graph/query.hpp"
 #include "storage/records.hpp"
 #include "storage/storage.hpp"
@@ -342,69 +343,9 @@ struct RunningServer {
 ui::GraphProvider graph_provider_for(Storage &db) {
   return [&db](std::string_view target, const ui::CancelToken &should_cancel)
              -> std::optional<std::string> {
-    ui::GraphViewRequest request;
-    request.node_budget = 250;
-    request.edge_budget = 500;
-    request.site_budget = 200;
-    request.byte_budget = 4 * 1024 * 1024;
-    // Boundary-aware lookup: a plain substring search for "name=" would
-    // also match inside an unrelated longer key (e.g. `param("limit")`
-    // wrongly matching the "limit=" tail of "site_limit=0"). Each key must
-    // start right after '?' or '&'.
-    const auto param =
-        [&](std::string_view name) -> std::optional<std::string> {
-      const std::string needle = std::string(name) + "=";
-      std::size_t start = 0;
-      while (true) {
-        start = target.find(needle, start);
-        if (start == std::string_view::npos) {
-          return std::nullopt;
-        }
-        if (start > 0 &&
-            (target[start - 1] == '?' || target[start - 1] == '&')) {
-          break;
-        }
-        start += 1;
-      }
-      const std::size_t value_start = start + needle.size();
-      std::size_t value_end = target.find('&', value_start);
-      if (value_end == std::string_view::npos) {
-        value_end = target.size();
-      }
-      return std::string(target.substr(value_start, value_end - value_start));
-    };
-    if (const auto root = param("root")) {
-      request.root = *root;
-    }
-    if (const auto input = param("input")) {
-      request.input =
-          ui::GraphViewInput{.kind = ui::GraphInputKind::Path, .value = *input};
-    }
-    if (const auto direction = param("direction")) {
-      request.direction = *direction;
-    }
-    if (const auto depth = param("depth")) {
-      request.depth = parse_int(*depth);
-    }
-    if (const auto node_kind = param("node_kind")) {
-      request.node_kinds = std::vector<std::string>{*node_kind};
-    }
-    if (const auto limit = param("limit")) {
-      request.node_budget = parse_int(*limit);
-    }
-    if (const auto site_limit = param("site_limit")) {
-      request.site_budget = parse_int(*site_limit);
-    }
-    if (const auto applicability = param("applicability")) {
-      request.applicability_filter = *applicability;
-    }
-    if (const auto byte_limit = param("byte_limit")) {
-      request.byte_budget = parse_int(*byte_limit);
-    }
-    if (const auto continuation = param("continuation")) {
-      request.continuation = *continuation;
-    }
     try {
+      const ui::GraphViewRequest request =
+          cidx::cli::parse_live_graph_request(ui::GraphViewRequest{}, target);
       return json_out::dumps_indent2(
           ui::build_graph_view(db, request, should_cancel));
     } catch (const std::exception &) {
@@ -577,8 +518,9 @@ TEST_CASE("Live explorer: expand out and expand in traverse adjacent edges") {
 TEST_CASE("Live explorer: a bounded witness path resolves a -> b -> c") {
   Fixture fixture;
   RunningServer server(graph_provider_for(fixture.db));
-  const auto response = http_get(
-      server.port, "/api/graph?token=" + server.token + "&input=ns::a->ns::c");
+  const auto response =
+      http_get(server.port, "/api/graph?token=" + server.token +
+                                "&input_kind=path&input=ns::a->ns::c");
   CHECK(response.status == 200);
   CHECK(response.body.find("witness-path") != std::string::npos);
   CHECK(response.body.find("USR::a") != std::string::npos);
@@ -752,6 +694,8 @@ TEST_CASE("Live explorer: continuation reaches every candidate without any "
   const int64_t target0 = make_node("USR::star_t0", "ns::star_t0", 2);
   const int64_t target1 = make_node("USR::star_t1", "ns::star_t1", 3);
   const int64_t target2 = make_node("USR::star_t2", "ns::star_t2", 4);
+  const int64_t target3 = make_node("USR::star_t3", "ns::star_t3", 5);
+  const int64_t target4 = make_node("USR::star_t4", "ns::star_t4", 6);
   const auto add_edge = [&](int64_t src, int64_t dst, int line) {
     cidx::Edge edge;
     edge.src_id = src;
@@ -769,15 +713,18 @@ TEST_CASE("Live explorer: continuation reaches every candidate without any "
   add_edge(root, target0, 10);
   add_edge(root, target1, 20);
   add_edge(root, target2, 30);
+  add_edge(root, target3, 40);
+  add_edge(root, target4, 50);
 
   RunningServer server(graph_provider_for(db));
   const std::string base = "/api/graph?token=" + server.token +
-                           "&root=ns::star_root&direction=out&depth=1&limit=1";
+                           "&root=ns::star_root&direction=out&depth=1&limit=1"
+                           "&edge_limit=1";
 
   std::set<std::string> seen;
   std::set<std::string> seen_edges;
   std::string continuation;
-  for (int page = 0; page < 12; ++page) {
+  for (int page = 0; page < 24; ++page) {
     std::string url = base;
     if (!continuation.empty()) {
       url += "&continuation=";
@@ -788,8 +735,8 @@ TEST_CASE("Live explorer: continuation reaches every candidate without any "
     // Fix 2: node_budget is 1 for this whole walk -- no page, including one
     // that bridges a cross-page edge endpoint in, may ever deliver more.
     CHECK(count_delivered_nodes(response.body) <= 1);
-    for (const char *usr :
-         {"USR::star_root", "USR::star_t0", "USR::star_t1", "USR::star_t2"}) {
+    for (const char *usr : {"USR::star_root", "USR::star_t0", "USR::star_t1",
+                            "USR::star_t2", "USR::star_t3", "USR::star_t4"}) {
       if (response.body.contains(usr)) {
         seen.insert(usr);
       }
@@ -820,11 +767,73 @@ TEST_CASE("Live explorer: continuation reaches every candidate without any "
   CHECK(seen.contains("USR::star_t0"));
   CHECK(seen.contains("USR::star_t1"));
   CHECK(seen.contains("USR::star_t2"));
+  CHECK(seen.contains("USR::star_t3"));
+  CHECK(seen.contains("USR::star_t4"));
   // HSE-92 round 3: cross-page edges are eventually delivered too, not
   // permanently dropped once their source node's own page has gone by --
   // reviewer's exact repro (root -> t0,t1,t2, depth=1&limit=1, union edge
   // ids across the full continuation walk) used to see 0/3 `calls` edges.
-  CHECK(seen_edges.size() == 3);
+  CHECK(seen_edges.size() == 5);
+}
+
+TEST_CASE("Live explorer: filters progress beyond the first raw candidate "
+          "chunk and namespace is bound to continuation") {
+  Storage db(":memory:");
+  const int64_t component = db.add_component("test", "/tmp/cidx-ui-filter");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file_a = db.add_file(directory, "a.cpp");
+  const int64_t file_b = db.add_file(directory, "b.cpp");
+  const auto make_node = [&](const char *usr, const char *name, int64_t file) {
+    auto sym = symbol(usr, name, "function");
+    sym.file_id = file;
+    return db.add_symbol(sym);
+  };
+  const int64_t root = make_node("USR::root", "first::root", file_a);
+  const int64_t early = make_node("USR::early", "first::early", file_a);
+  const int64_t early2 = make_node("USR::early2", "first::early2", file_a);
+  const int64_t early3 = make_node("USR::early3", "first::early3", file_a);
+  const int64_t wanted = make_node("USR::wanted", "wanted::target", file_b);
+  const auto add_edge = [&](int64_t dst) {
+    cidx::Edge edge;
+    edge.src_id = root;
+    edge.dst_id = dst;
+    edge.kind = cidx::graph::edge_kinds_map().at("calls");
+    db.add_edge(edge);
+  };
+  add_edge(early);
+  add_edge(early2);
+  add_edge(early3);
+  add_edge(wanted);
+
+  RunningServer server(graph_provider_for(db));
+  const std::string base =
+      "/api/graph?token=" + server.token +
+      "&root=first::root&direction=out&depth=1&limit=1&file=b.cpp"
+      "&namespace=wanted&edge=calls";
+  auto response = http_get(server.port, base);
+  std::string combined = response.body;
+  for (int page = 0; page < 8; ++page) {
+    const std::string marker = R"("token": ")";
+    const std::size_t start = response.body.find(marker);
+    if (start == std::string::npos) {
+      break;
+    }
+    const std::size_t value_start = start + marker.size();
+    const std::size_t value_end = response.body.find('"', value_start);
+    if (value_end == std::string::npos) {
+      break;
+    }
+    const std::string token =
+        response.body.substr(value_start, value_end - value_start);
+    std::string continuation_url = base;
+    continuation_url += "&continuation=";
+    continuation_url += token;
+    response = http_get(server.port, continuation_url);
+    CHECK(response.status == 200);
+    combined += response.body;
+  }
+  CHECK(combined.contains("USR::wanted"));
+  CHECK_FALSE(combined.contains("USR::early"));
 }
 
 TEST_CASE("Live explorer: applicability is decided from the complete edge "

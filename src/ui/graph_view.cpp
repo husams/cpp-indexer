@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <limits>
 #include <map>
 #include <set>
 #include <string_view>
@@ -1301,6 +1302,7 @@ std::string graph_query_identity(const GraphViewRequest &request,
   sorted_list_field("files", request.files);
   sorted_list_field("components", request.components);
   sorted_list_field("repositories", request.repositories);
+  sorted_list_field("namespaces", request.namespaces);
   material.emplace_back("status_filter",
                         optional_string(request.status_filter));
   material.emplace_back("applicability_filter",
@@ -1417,6 +1419,15 @@ bool passes_node_filters(Storage &db, const graph::Sym &sym,
       return false;
     }
   }
+  if (request.namespaces && !request.namespaces->empty()) {
+    const std::size_t separator = sym.name.rfind("::");
+    const std::string symbol_namespace = separator == std::string::npos
+                                             ? std::string()
+                                             : sym.name.substr(0, separator);
+    if (!matches_any(*request.namespaces, symbol_namespace)) {
+      return false;
+    }
+  }
   if (request.status_filter) {
     const std::string &status = *request.status_filter;
     if (status == "resolved" && !sym.resolved) {
@@ -1477,19 +1488,22 @@ bool passes_applicability_filter(const GraphViewRequest &request,
 // normalized query can never be replayed against a different one -- paging
 // is deterministic and request-scoped, never a hidden server-side cursor.
 std::string encode_continuation(std::string_view query_identity,
-                                int node_offset, int edge_offset) {
-  return "cont:v1:" + length_field(query_identity) +
-         std::to_string(node_offset) + "," + std::to_string(edge_offset);
+                                int node_offset, int edge_offset,
+                                int candidate_limit) {
+  return "cont:v2:" + length_field(query_identity) +
+         std::to_string(node_offset) + "," + std::to_string(edge_offset) + "," +
+         std::to_string(candidate_limit);
 }
 
 struct ContinuationToken {
   std::string query_identity;
   int node_offset = 0;
   int edge_offset = 0;
+  int candidate_limit = 0;
 };
 
 std::optional<ContinuationToken> decode_continuation(std::string_view token) {
-  constexpr std::string_view prefix = "cont:v1:";
+  constexpr std::string_view prefix = "cont:v2:";
   if (!token.starts_with(prefix)) {
     return std::nullopt;
   }
@@ -1499,25 +1513,56 @@ std::optional<ContinuationToken> decode_continuation(std::string_view token) {
     return std::nullopt;
   }
   const std::size_t comma = token.find(',', offset);
-  if (comma == std::string_view::npos) {
+  const std::size_t second_comma = comma == std::string_view::npos
+                                       ? std::string_view::npos
+                                       : token.find(',', comma + 1);
+  if (comma == std::string_view::npos ||
+      second_comma == std::string_view::npos) {
     return std::nullopt;
   }
   int node_offset_value = 0;
   int edge_offset_value = 0;
+  int candidate_limit_value = 0;
   const auto node_result = std::from_chars(
       token.data() + offset, token.data() + comma, node_offset_value);
   const auto edge_result = std::from_chars(
-      token.data() + comma + 1, token.data() + token.size(), edge_offset_value);
+      token.data() + comma + 1, token.data() + second_comma, edge_offset_value);
+  const auto candidate_result =
+      std::from_chars(token.data() + second_comma + 1,
+                      token.data() + token.size(), candidate_limit_value);
   if (node_result.ec != std::errc{} ||
       node_result.ptr != token.data() + comma ||
       edge_result.ec != std::errc{} ||
-      edge_result.ptr != token.data() + token.size() || node_offset_value < 0 ||
-      edge_offset_value < 0) {
+      edge_result.ptr != token.data() + second_comma ||
+      candidate_result.ec != std::errc{} ||
+      candidate_result.ptr != token.data() + token.size() ||
+      node_offset_value < 0 || edge_offset_value < 0 ||
+      candidate_limit_value <= 0) {
     return std::nullopt;
   }
   return ContinuationToken{.query_identity = std::string(*identity),
                            .node_offset = node_offset_value,
-                           .edge_offset = edge_offset_value};
+                           .edge_offset = edge_offset_value,
+                           .candidate_limit = candidate_limit_value};
+}
+
+ContinuationToken continuation_state(const GraphViewRequest &request,
+                                     std::string_view query_identity,
+                                     int initial_candidate_limit) {
+  if (!request.continuation) {
+    return ContinuationToken{
+        .query_identity = std::string(query_identity),
+        .candidate_limit = initial_candidate_limit,
+    };
+  }
+  const auto token = decode_continuation(*request.continuation);
+  if (!token || token->query_identity != query_identity) {
+    throw GraphViewError(
+        GraphViewFailureKind::InvalidInput,
+        "continuation token does not match the current normalized query",
+        "reissue the base request and use the continuation token it returns");
+  }
+  return *token;
 }
 
 // Computes and embeds (or, if it would blow the byte budget, omits) the
@@ -1525,13 +1570,14 @@ std::optional<ContinuationToken> decode_continuation(std::string_view token) {
 // GraphView `continuation` metadata object. Split out of build_graph_view()
 // to keep that function within its complexity budget; see the call site for
 // the invariants each parameter carries.
-void apply_continuation_token(Value &continuation, Value &result,
+void apply_continuation_token(Value &continuation,
                               const std::string &query_identity,
                               bool witness_view, bool more_nodes_available,
                               bool more_edges_available,
                               bool byte_trim_dropped_content, int node_offset,
                               int edge_offset, int delivered_node_count,
-                              int delivered_edge_count, int byte_budget) {
+                              int delivered_edge_count, int candidate_limit,
+                              int candidate_step) {
   // Deterministic progressive paging: a token is only emitted when this
   // exact normalized query still has more nodes/edges beyond what was just
   // delivered. Bounded witness paths never page.
@@ -1548,8 +1594,15 @@ void apply_continuation_token(Value &continuation, Value &result,
     } else {
       next_edge_offset = edge_offset + delivered_edge_count;
     }
-    token = Value::of(encode_continuation(query_identity, next_node_offset,
-                                          next_edge_offset));
+    const int next_candidate_limit =
+        more_nodes_available
+            ? std::min(std::numeric_limits<int>::max() - candidate_step,
+                       candidate_limit) +
+                  candidate_step
+            : candidate_limit;
+    token =
+        Value::of(encode_continuation(query_identity, next_node_offset,
+                                      next_edge_offset, next_candidate_limit));
   }
   const auto set_token = [&](const Value &value) {
     bool set = false;
@@ -1564,17 +1617,6 @@ void apply_continuation_token(Value &continuation, Value &result,
     }
   };
   set_token(token);
-  // A continuation token is a "nice to have" atop an already-truncated
-  // response, never a reason to fail the whole request: if embedding it
-  // would itself blow the byte budget, drop the token (the client can still
-  // see `available: true` and retry with a larger byte limit) rather than
-  // throwing GraphViewFailureKind::Oversized over a response that was
-  // otherwise successfully trimmed to fit.
-  if (token.t != Value::T::Null &&
-      script_safe_size(json_out::dumps_indent2(result)) >
-          static_cast<std::size_t>(byte_budget)) {
-    set_token(Value::null());
-  }
 }
 
 // Non-witness edge selection: gathers every candidate edge whose both
@@ -1611,7 +1653,7 @@ select_symbol_edges(graph::GraphQuery &graph, const GraphViewRequest &request,
   for (const auto &symbol : nodes_to_scan) {
     check_cancelled();
     const auto adjacent = graph.edges(symbol.id, request.direction, kind_ids,
-                                      edge_budget + 1, false);
+                                      edge_offset + edge_budget + 1, false);
     for (const auto &edge : adjacent) {
       // Both endpoints must belong to the FULL filtered candidate set, not
       // just this page -- otherwise an edge whose other endpoint lands on a
@@ -2142,20 +2184,12 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
   const std::string query_identity = graph_query_identity(
       request, normalized_input, identity, normalized_plan_json);
 
-  int node_offset = 0;
-  int edge_offset = 0;
-  if (request.continuation) {
-    const auto token = decode_continuation(*request.continuation);
-    if (!token || token->query_identity != query_identity) {
-      throw GraphViewError(
-          GraphViewFailureKind::InvalidInput,
-          "continuation token does not match the current normalized query",
-          "reissue the base request and use the continuation token it "
-          "returns");
-    }
-    node_offset = token->node_offset;
-    edge_offset = token->edge_offset;
-  }
+  const int candidate_step = node_budget + 1;
+  const ContinuationToken pagination =
+      continuation_state(request, query_identity, candidate_step);
+  const int node_offset = pagination.node_offset;
+  const int edge_offset = pagination.edge_offset;
+  const int candidate_limit = pagination.candidate_limit;
 
   Object metadata;
   metadata.emplace_back("contract",
@@ -2203,8 +2237,8 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
       }
       metadata.emplace_back("query_plan", Value::of(*normalized_plan_json));
     } else if (resolution.symbol && input.kind == GraphInputKind::Symbol) {
-      const query::Query plan = make_query_plan(*resolution.symbol, request,
-                                                node_budget, node_offset);
+      const query::Query plan =
+          make_query_plan(*resolution.symbol, request, candidate_limit, 0);
       query::SqliteQueryReadAdapter read(db);
       query_result = query::Executor(read).run(plan.plan());
       metadata.emplace_back("query_plan",
@@ -2261,6 +2295,16 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
         truncated = true;
       }
       if (node_page.more_nodes_available) {
+        more_nodes_available = true;
+      }
+      const bool raw_query_may_have_more =
+          query_result && !normalized_plan && resolution.symbol &&
+          input.kind == GraphInputKind::Symbol &&
+          query_result->rows.size() >=
+              static_cast<std::size_t>(candidate_limit) + 1;
+      if (query_result &&
+          (query_result->truncated || raw_query_may_have_more)) {
+        truncated = true;
         more_nodes_available = true;
       }
       delivered_node_count = static_cast<int>(ordered_nodes.size());
@@ -2527,6 +2571,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
     r.emplace_back("files", sorted_string_list(request.files));
     r.emplace_back("components", sorted_string_list(request.components));
     r.emplace_back("repositories", sorted_string_list(request.repositories));
+    r.emplace_back("namespaces", sorted_string_list(request.namespaces));
     r.emplace_back("status_filter", optional_string(request.status_filter));
     r.emplace_back("applicability_filter",
                    optional_string(request.applicability_filter));
@@ -2690,11 +2735,11 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
           child = Value::of(std::move(reason));
         }
       }
-      apply_continuation_token(*continuation, result, query_identity,
-                               witness_view, more_nodes_available,
-                               more_edges_available, byte_trim_dropped_content,
-                               node_offset, edge_offset, delivered_node_count,
-                               delivered_edge_count, byte_budget);
+      apply_continuation_token(
+          *continuation, query_identity, witness_view, more_nodes_available,
+          more_edges_available, byte_trim_dropped_content, node_offset,
+          edge_offset, delivered_node_count, delivered_edge_count,
+          candidate_limit, candidate_step);
     }
   }
   for (Value &node : member(result, "nodes")->a) {
@@ -2872,6 +2917,9 @@ json_out::Value load_edge_evidence(Storage &db, const std::string &edge_id,
                                  std::string("cidx.graph-view.evidence.v1")));
   out.emplace_back("edge_id", json_out::Value::of(edge_id));
   out.emplace_back("truncated", json_out::Value::of(truncated));
+  out.emplace_back(
+      "next_offset",
+      json_out::Value::of(bounded_offset + static_cast<int>(sites.size())));
   out.emplace_back("sites", json_out::Value::arr(std::move(site_values)));
   return json_out::Value::obj(std::move(out));
 }

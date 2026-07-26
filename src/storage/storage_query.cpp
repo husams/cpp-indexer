@@ -612,106 +612,79 @@ SqliteStorageService::edge_sites_one(int64_t edge_id, int limit) {
   return out;
 }
 
-namespace {
-// A single (path, file_id) -> site-count group for one edge, used to locate
-// which file(s) a [offset, offset+limit) delivery window falls in without
-// ever fetching more than that window's own rows (see edge_sites_page()
-// below).
-struct EdgeSiteFileGroup {
-  std::string path;
-  int64_t file_id = 0;
-  int64_t count = 0;
-};
-} // namespace
-
-// HSE-92 round 3: bounded, delivery-order-correct pagination over one edge's
-// sites, replacing a caller-side pattern of fetching an arbitrary large
-// prefix (ordered by file_id, i.e. NOT delivery order) and re-sorting/
-// slicing it in memory -- which either re-sorted a prefix that wasn't a
-// delivery-order prefix (duplicates/gaps across pages) or, to avoid that,
-// fetched effectively everything regardless of how small `limit` was, with
-// no bound for an edge whose site count exceeds any fixed cap.
-//
-// Storage ordering is made to match the caller's own delivery key
-// (site_sort_key(): path, then line, then col -- args_sig cannot differ
-// within one (file_id, line, col), since edge_site's own PRIMARY KEY is
-// (edge_id, file_id, line, col)) by grouping this edge's OWN sites by
-// (resolved path, file_id) first -- a result set bounded by the edge's own
-// DISTINCT file count, not its total site count -- or then only fetching
-// the actual `limit+1`-sized window from the file(s) it spans, via an
-// indexed per-(edge_id, file_id) LIMIT/OFFSET range scan ordered by
-// (line, col). The total row material ever transferred out of SQLite is
-// O(distinct files touched + limit), a measured bound for arbitrary
-// cardinality, never a fixed constant unrelated to what was asked.
 std::vector<SqliteStorageService::EdgeSiteRow>
 SqliteStorageService::edge_sites_page(int64_t edge_id, int offset, int limit) {
-  auto group_st =
-      db_.prepare("SELECT file_id, COUNT(*) FROM edge_site WHERE edge_id = ? "
-                  "GROUP BY file_id");
-  group_st.bind(1, edge_id);
-  std::vector<EdgeSiteFileGroup> groups;
-  while (group_st.step()) {
-    EdgeSiteFileGroup group;
-    group.file_id = group_st.col_int64(0);
-    group.count = group_st.col_int64(1);
-    group.path = file_abs_path(group.file_id).value_or(std::string());
-    groups.push_back(std::move(group));
+  struct FileGroup {
+    std::string path;
+    int64_t file_id = 0;
+  };
+  std::vector<FileGroup> groups;
+  int64_t last_file_id = -1;
+  while (true) {
+    auto file_st = db_.prepare(
+        "SELECT file_id FROM edge_site WHERE edge_id = ? AND file_id > ? "
+        "ORDER BY file_id LIMIT 1");
+    file_st.bind(1, edge_id);
+    file_st.bind(2, last_file_id);
+    if (!file_st.step()) {
+      break;
+    }
+    last_file_id = file_st.col_int64(0);
+    groups.push_back(FileGroup{
+        .path = file_abs_path(last_file_id).value_or(std::string()),
+        .file_id = last_file_id,
+    });
   }
-  std::ranges::sort(groups, [](const EdgeSiteFileGroup &left,
-                               const EdgeSiteFileGroup &right) {
+  std::ranges::sort(groups, [](const FileGroup &left, const FileGroup &right) {
     return std::tie(left.path, left.file_id) <
            std::tie(right.path, right.file_id);
   });
 
-  std::vector<EdgeSiteRow> out;
-  int64_t skipped = 0;
-  const int64_t window_end = static_cast<int64_t>(offset) + limit;
-  constexpr std::string_view kRowSql =
-      "SELECT line, col, conditional, args_sig, "
+  constexpr std::string_view kRows =
+      "SELECT file_id, line, col, conditional, args_sig, "
       "       recv_src_kind, recv_type_usr, recv_decl_usr, recv_param_pos, "
       "       recv_type_is_value "
       "FROM edge_site_read WHERE edge_id = ? AND file_id = ? "
       "ORDER BY line, col LIMIT ? OFFSET ?";
-  for (const auto &group : groups) {
-    if (skipped >= window_end || std::cmp_greater_equal(out.size(), limit)) {
-      break;
+  std::vector<EdgeSiteRow> out;
+  int64_t remaining_offset = offset;
+  for (const FileGroup &group : groups) {
+    if (remaining_offset > 0) {
+      auto count_st = db_.prepare(
+          "SELECT COUNT(*) FROM edge_site WHERE edge_id = ? AND file_id = ?");
+      count_st.bind(1, edge_id);
+      count_st.bind(2, group.file_id);
+      count_st.step();
+      const int64_t group_count = count_st.col_int64(0);
+      if (remaining_offset >= group_count) {
+        remaining_offset -= group_count;
+        continue;
+      }
     }
-    const int64_t group_end = skipped + group.count;
-    if (group_end <= offset) {
-      // This file's rows all fall entirely before the requested window --
-      // skip it without ever fetching any of its rows.
-      skipped = group_end;
-      continue;
-    }
-    const int64_t within_file_offset = std::max<int64_t>(0, offset - skipped);
-    const int64_t within_file_limit =
-        std::min<int64_t>(group.count - within_file_offset,
-                          limit - static_cast<int64_t>(out.size()));
-    if (within_file_limit <= 0) {
-      skipped = group_end;
-      continue;
-    }
-    auto row_query = db_.prepare(kRowSql);
-    row_query.bind(1, edge_id);
-    row_query.bind(2, group.file_id);
-    row_query.bind(3, within_file_limit);
-    row_query.bind(4, within_file_offset);
-    while (row_query.step()) {
+    auto st = db_.prepare(kRows);
+    st.bind(1, edge_id);
+    st.bind(2, group.file_id);
+    st.bind(3, static_cast<int64_t>(limit) - static_cast<int64_t>(out.size()));
+    st.bind(4, remaining_offset);
+    while (st.step()) {
       EdgeSiteRow row;
       row.edge_id = edge_id;
-      row.file_id = group.file_id;
-      row.line = opt_int64(row_query, 0);
-      row.col = opt_int64(row_query, 1);
-      row.conditional = row_query.col_int64(2) != 0;
-      row.args_sig = opt_text(row_query, 3);
-      row.recv_src_kind = opt_text(row_query, 4);
-      row.recv_type_usr = opt_text(row_query, 5);
-      row.recv_decl_usr = opt_text(row_query, 6);
-      row.recv_param_pos = opt_int64(row_query, 7);
-      row.recv_type_is_value = opt_int64(row_query, 8);
+      row.file_id = opt_int64(st, 0);
+      row.line = opt_int64(st, 1);
+      row.col = opt_int64(st, 2);
+      row.conditional = st.col_int64(3) != 0;
+      row.args_sig = opt_text(st, 4);
+      row.recv_src_kind = opt_text(st, 5);
+      row.recv_type_usr = opt_text(st, 6);
+      row.recv_decl_usr = opt_text(st, 7);
+      row.recv_param_pos = opt_int64(st, 8);
+      row.recv_type_is_value = opt_int64(st, 9);
       out.push_back(std::move(row));
     }
-    skipped = group_end;
+    remaining_offset = 0;
+    if (std::cmp_greater_equal(out.size(), limit)) {
+      break;
+    }
   }
   return out;
 }

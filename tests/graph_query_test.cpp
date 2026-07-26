@@ -21,6 +21,7 @@
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
+#include <sqlite3.h>
 
 #include <optional>
 #include <set>
@@ -43,6 +44,13 @@ using cidx::graph::GraphQuery;
 using cidx::graph::Site;
 using cidx::graph::Sym;
 using cidx::graph::Traversal;
+
+namespace {
+int count_sqlite_progress(void *counter) {
+  ++*static_cast<int *>(counter);
+  return 0;
+}
+} // namespace
 
 namespace {
 
@@ -608,4 +616,35 @@ TEST_CASE("graph_query: sites_page() orders by resolved path, not raw "
     seen_locations.insert(page.front().loc());
   }
   CHECK(seen_locations.size() == 4);
+}
+
+TEST_CASE("graph_query: first evidence page does not count the whole edge") {
+  Storage db(":memory:");
+  cidx::query::SqliteQueryReadAdapter read(db);
+  GraphQuery g(read, ":memory:");
+  const int64_t component = db.add_component("test", "/tmp/cidx-sites-bound");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "many.cpp");
+  const int64_t src = db.add_symbol(make_sym("USR::bound_src", "bound_src"));
+  const int64_t dst = db.add_symbol(make_sym("USR::bound_dst", "bound_dst"));
+  const int64_t edge_id = db.add_edge(make_edge(src, dst, 1));
+  db.raw_db().exec("BEGIN");
+  for (int line = 1; line <= 100'000; ++line) {
+    cidx::EdgeSite site;
+    site.edge_id = edge_id;
+    site.file_id = file;
+    site.line = line;
+    site.col = 1;
+    db.add_edge_site(site);
+  }
+  db.raw_db().exec("COMMIT");
+
+  int progress_callbacks = 0;
+  sqlite3_progress_handler(db.raw_db().raw(), 1000, count_sqlite_progress,
+                           &progress_callbacks);
+  const auto page = g.sites_page(edge_id, 0, 1);
+  sqlite3_progress_handler(db.raw_db().raw(), 0, nullptr, nullptr);
+  REQUIRE(page.size() == 1);
+  CHECK(page.front().line == 1);
+  CHECK(progress_callbacks < 50);
 }

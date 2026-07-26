@@ -144,7 +144,22 @@ require('./app.js');
   const filtered = graphRequests.at(-1);
   assert.equal(filtered.node_kind, 'function', 'filter apply must request node_kind=function');
 
-  // 2. Select node-a (simulating a Cytoscape tap) and Expand.
+  // 2. A continuation token is one-shot paging state, not part of the
+  // active semantic base request. Load one page, then re-apply the filter:
+  // the new request must not replay the stale token.
+  graphView.metadata.continuation = {available: true, reason: 'budget', token: 'page-2'};
+  document.getElementById('apply-filters').onclick();
+  await settle();
+  document.getElementById('load-more').onclick();
+  await settle();
+  assert.equal(graphRequests.at(-1).continuation, 'page-2');
+  document.getElementById('apply-filters').onclick();
+  await settle();
+  assert.equal(graphRequests.at(-1).continuation, undefined,
+    'semantic changes must discard the previous continuation token');
+  graphView.metadata.continuation = {available: false, reason: 'complete'};
+
+  // 3. Select node-a (simulating a Cytoscape tap) and Expand.
   assert.ok(tapHandler, 'app.js must have registered a tap handler');
   tapHandler({target: {group: () => 'nodes', data: () => ({}), id: () => 'node-a'}});
   document.getElementById('expand').onclick();
@@ -156,7 +171,7 @@ require('./app.js');
   assert.equal(expanded.depth, '1');
   assert.equal(expanded.direction, 'out');
 
-  // 3. Search, then click the one result -- must also preserve the filter.
+  // 4. Search, then click the one result -- must also preserve the filter.
   document.getElementById('index-search').value = 'nodeB';
   await document.getElementById('index-search-run').onclick();
   const resultButton = createdButtons.find((button) => String(button.textContent).includes('nodeB'));
@@ -168,7 +183,7 @@ require('./app.js');
     'clicking a search result must preserve the active node_kind filter in its outgoing request');
   assert.equal(searched.root, 'node-b');
 
-  // 4. Independent check that `currentParams` itself (not just each
+  // 5. Independent check that `currentParams` itself (not just each
   // one-shot outgoing request) retained the filter: stale-refresh re-fetches
   // with whatever `currentParams` currently holds.
   document.getElementById('stale-refresh').onclick();

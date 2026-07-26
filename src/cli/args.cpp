@@ -799,6 +799,8 @@ void build_ui(CLI::App &app, ParsedArgs &pa) {
                     "filter: component names (comma-separated)");
     sub->add_option("--repository", pa.ui_repository,
                     "filter: repository names (comma-separated)");
+    sub->add_option("--namespace", pa.ui_namespace,
+                    "filter: qualified namespaces (comma-separated)");
     sub->add_option("--status", pa.ui_status,
                     "filter: resolved|unresolved|external|internal|stub")
         ->check(CLI::IsMember(

@@ -79,6 +79,8 @@ struct GraphViewRequest {
       components; // Sym::component membership
   std::optional<std::vector<std::string>>
       repositories; // resolved repository name
+  std::optional<std::vector<std::string>>
+      namespaces; // qualified namespace membership
   std::optional<std::string>
       status_filter; // resolved|unresolved|external|internal|stub
   std::optional<std::string>

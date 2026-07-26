@@ -145,6 +145,7 @@ struct ParsedArgs {
   std::optional<std::string> ui_file;       // redacted file path list
   std::optional<std::string> ui_component;  // component name list
   std::optional<std::string> ui_repository; // repository name list
+  std::optional<std::string> ui_namespace;  // qualified namespace list
   std::optional<std::string>
       ui_status; // resolved|unresolved|external|internal|stub
   std::optional<std::string> ui_applicability; // universal|conditional

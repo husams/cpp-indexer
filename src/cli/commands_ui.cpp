@@ -142,8 +142,9 @@ comma_list_param(std::string_view target, std::string_view name) {
 // is the SAME GraphViewRequest surface `ui_request()` builds from CLI flags
 // below, so live navigation and the offline exporter share one filter
 // vocabulary (HSE-92 preserves the HSE-90/HSE-91 GraphView contract).
-ui::GraphViewRequest live_request(const ui::GraphViewRequest &base,
-                                  std::string_view target) {
+ui::GraphViewRequest
+parse_live_graph_request_impl(const ui::GraphViewRequest &base,
+                              std::string_view target) {
   ui::GraphViewRequest request = base;
   if (const auto input_kind = query_parameter(target, "input_kind")) {
     static const std::map<std::string, ui::GraphInputKind> kinds{
@@ -214,6 +215,9 @@ ui::GraphViewRequest live_request(const ui::GraphViewRequest &base,
   if (const auto repository = comma_list_param(target, "repository")) {
     request.repositories = repository;
   }
+  if (const auto namespace_filter = comma_list_param(target, "namespace")) {
+    request.namespaces = namespace_filter;
+  }
   if (const auto status = query_parameter(target, "status")) {
     request.status_filter = *status;
   }
@@ -244,7 +248,8 @@ struct LiveGraphProvider {
   operator()(std::string_view target,
              const ui::CancelToken &should_cancel) const noexcept {
     try {
-      const ui::GraphViewRequest request = live_request(base_request, target);
+      const ui::GraphViewRequest request =
+          parse_live_graph_request(base_request, target);
       return json_out::dumps_indent2(
           ui::build_graph_view(*db, request, should_cancel));
     } catch (const std::exception &) {
@@ -294,7 +299,8 @@ struct LiveEvidenceProvider {
       }
       int site_offset = 0;
       if (const auto value = query_parameter(target, "site_offset")) {
-        site_offset = bounded_int(*value, 0, 1'000'000, "site_offset");
+        site_offset = bounded_int(
+            *value, 0, std::numeric_limits<int>::max() - 5001, "site_offset");
       }
       int site_limit = 200;
       if (const auto value = query_parameter(target, "site_limit")) {
@@ -379,6 +385,12 @@ ui::GraphViewRequest ui_request(const ParsedArgs &args) {
       request.repositories = std::move(repositories);
     }
   }
+  if (args.ui_namespace) {
+    auto namespaces = split_comma_list(*args.ui_namespace);
+    if (!namespaces.empty()) {
+      request.namespaces = std::move(namespaces);
+    }
+  }
   request.status_filter = args.ui_status;
   request.applicability_filter = args.ui_applicability;
   return request;
@@ -401,6 +413,11 @@ std::shared_ptr<Storage> open_ui_storage(const ParsedArgs & /*args*/,
 }
 
 } // namespace
+
+ui::GraphViewRequest parse_live_graph_request(const ui::GraphViewRequest &base,
+                                              std::string_view target) {
+  return parse_live_graph_request_impl(base, target);
+}
 
 int cmd_ui_export(const ParsedArgs &args, Context &ctx) {
   if (!args.ui_output) {
