@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT / "python"))
 
 from scripts.self_host_architecture_report import (  # noqa: E402
     _edge_site_count,
+    _eval_cpp_const_expr,
     check_policy_metadata,
     generate_report,
 )
@@ -772,6 +773,76 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         )
         report = fixture.run()
         self.assertTrue(any("duplicates a generated catalog declaration" in error for error in report["findings"]["catalogGuard"]))
+
+    def test_catalog_duplicate_signed_parenthesized_literal_is_rejected(self) -> None:
+        # [Round-7 internal critic P1] `+(8)`/`-(8)` (a leading unary sign
+        # directly on a parenthesized literal) previously produced ZERO
+        # regex match at all: Round-6 closed a sign on a BARE literal and a
+        # parenthesized literal as two separate shapes, but never their
+        # composition.
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/dup_signed_paren_plus.hpp").write_text(
+            'inline constexpr auto kSymbolKind = std::pair{+(8), "function"};\n',
+            encoding="utf-8",
+        )
+        report = fixture.run()
+        self.assertTrue(any("duplicates a generated catalog declaration" in error for error in report["findings"]["catalogGuard"]))
+
+    def test_catalog_duplicate_signed_parenthesized_shift_expression_is_rejected(self) -> None:
+        # [Round-7 internal critic P1] `-(-2 << 2)` must fold the shift
+        # INSIDE the parentheses first (-2 << 2 == -8) and then negate the
+        # WHOLE folded result (== 8, the guarded id) -- this is the discriminating
+        # case, since applying the sign to only the first operand before
+        # folding would instead compute `(- -2) << 2` == `2 << 2` == 4, a
+        # DIFFERENT value that would NOT match the guarded id and so would
+        # let this fixture through undetected. This is deliberately not the
+        # simpler `-(4 << 1)`, whose two readings coincide at -8/8 for the
+        # matching sign and so cannot tell precedence bugs apart.
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/dup_signed_paren_shift.hpp").write_text(
+            'inline constexpr auto kSymbolKind = std::pair{-(-2 << 2), "function"};\n',
+            encoding="utf-8",
+        )
+        report = fixture.run()
+        self.assertTrue(any("duplicates a generated catalog declaration" in error for error in report["findings"]["catalogGuard"]))
+
+    def test_catalog_duplicate_static_cast_of_signed_parenthesized_literal_is_rejected(self) -> None:
+        # [Round-7 internal critic P1] the reviewer's exact repro:
+        # `static_cast<int>(+(8))` combines a cast, a sign, and a paren in
+        # the one shape Round-6's widening did not reach.
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/dup_cast_signed_paren.hpp").write_text(
+            'inline constexpr auto kSymbolKind = std::pair{static_cast<int>(+(8)), "function"};\n',
+            encoding="utf-8",
+        )
+        report = fixture.run()
+        self.assertTrue(any("duplicates a generated catalog declaration" in error for error in report["findings"]["catalogGuard"]))
+
+    def test_eval_cpp_const_expr_signed_paren_negates_the_folded_shift_not_the_first_operand(self) -> None:
+        # [Round-7 internal critic P1] pins the precedence directly at the
+        # eval level, since `-(4 << 1)` (-8) and `(-4) << 1` (also -8 in
+        # Python/two's-complement arithmetic) coincide for this operand
+        # pair and so cannot be told apart through the report-level fixture
+        # above. `-(4 - 1)` is unambiguous: -(4 - 1) == -3, but
+        # (-4) - 1 == -5.
+        self.assertEqual(_eval_cpp_const_expr("-(4 - 1)"), -3)
+        self.assertEqual(_eval_cpp_const_expr("+(4 - 1)"), 3)
+
+    def test_catalog_duplicate_signed_cast_remains_undetected(self) -> None:
+        # [Round-7 internal critic P1] documenting the guard's real,
+        # remaining boundary alongside the fix: a leading sign directly on
+        # a static_cast<...> (`-static_cast<int>(8)`) is a structurally
+        # identical composition to the one just closed (sign directly on a
+        # parenthesized term) but is NOT itself part of the closed grammar
+        # -- it must stay undetected, not silently start passing by
+        # accident of a future regex change.
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/dup_signed_cast.hpp").write_text(
+            'inline constexpr auto kSymbolKind = std::pair{-static_cast<int>(-8), "function"};\n',
+            encoding="utf-8",
+        )
+        report = fixture.run()
+        self.assertEqual(report["findings"]["catalogGuard"], [])
 
     def test_catalog_duplicate_via_enum_constant_macro_or_named_variable_remains_undetected(self) -> None:
         # [PR #67 internal critic, second finding] deliberately documenting

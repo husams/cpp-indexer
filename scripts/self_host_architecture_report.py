@@ -691,23 +691,47 @@ _CPP_CONST_PAREN = (
     + r"\s*(?:(?:<<|>>|\+|-|\*|/)\s*" + _CPP_CONST_UNIT + r"\s*)?\)"
 )
 
-# A "term": a UNIT on its own, or one layer of parentheses around a UNIT or
-# a UNIT-op-UNIT. Used both as a bare top-level match and as the object of
-# an outer `static_cast<...>` -- so the WHOLE expression, or what a cast
-# wraps, can each be signed, parenthesized, or itself one more level of
-# cast. Deliberately NOT used as an operand of the top-level binary-op
-# branch below (that branch uses UNIT, not TERM) -- see `_CPP_CONST_VALUE`'s
-# own comment for why allowing a parenthesized TERM there would be
-# ambiguous to evaluate.
-_CPP_CONST_TERM = r"(?:" + _CPP_CONST_UNIT + r"|" + _CPP_CONST_PAREN + r")"
+# One leading unary `+`/`-` sign directly on a `_CPP_CONST_PAREN`. [Round-7
+# internal critic P1] `_CPP_CONST_UNIT` only ever let a sign land on a bare
+# ATOM, never on a parenthesized term -- so `+(8)`, `-(8)`, and `-(4 << 1)`
+# produced ZERO regex match at all, even though a sign on a bare literal
+# (`+8`) and a parenthesized literal/shift (`(8)`, `(4 << 1)`) were each
+# already individually closed. This is deliberately its own alternative,
+# not a widening of `_CPP_CONST_UNIT` itself: `_CPP_CONST_PAREN`'s own
+# definition already depends on the (unsigned) `_CPP_CONST_UNIT`, so folding
+# the sign into `_CPP_CONST_UNIT` in turn would make the two patterns
+# mutually self-referential, which plain (non-recursive) `re` patterns
+# cannot express. Evaluated by `_eval_cpp_const_term` below, which negates
+# the fully-folded parenthesized value -- so `-(4 << 1)` evaluates as
+# `-(4 << 1)` == -8, never `(-4) << 1`.
+_CPP_CONST_SIGNED_PAREN = r"[+-]\s*" + _CPP_CONST_PAREN
+
+# A "term": a UNIT on its own, one layer of parentheses around a UNIT or a
+# UNIT-op-UNIT, or one leading sign directly on such a parenthesized form.
+# Used both as a bare top-level match and as the object of an outer
+# `static_cast<...>` -- so the WHOLE expression, or what a cast wraps, can
+# each be signed, parenthesized, or itself one more level of cast (and now,
+# per [Round-7 internal critic P1], signed AND parenthesized together, e.g.
+# `static_cast<int>(+(8))`). Deliberately NOT used as an operand of the
+# top-level binary-op branch below (that branch uses UNIT, not TERM) -- see
+# `_CPP_CONST_VALUE`'s own comment for why allowing a parenthesized TERM
+# there would be ambiguous to evaluate.
+_CPP_CONST_TERM = (
+    r"(?:" + _CPP_CONST_UNIT
+    + r"|" + _CPP_CONST_PAREN
+    + r"|" + _CPP_CONST_SIGNED_PAREN
+    + r")"
+)
 
 # The full constant-expression SHAPE this guard recognizes textually: a
 # `static_cast<...>` around one term, one UNIT shifted/added/subtracted/
 # multiplied/divided by another UNIT, or a bare term -- where a "term" is,
 # recursively, a bare literal, a signed literal, one `static_cast` around a
-# literal, or one enclosing layer of parentheses around any of those (see
-# `_CPP_CONST_UNIT`/`_CPP_CONST_PAREN`/`_CPP_CONST_TERM` above for the exact
-# grammar). The binary-operation branch deliberately uses UNIT, not the
+# literal, one enclosing layer of parentheses around any of those, or one
+# leading sign directly on that parenthesized form (see
+# `_CPP_CONST_UNIT`/`_CPP_CONST_PAREN`/`_CPP_CONST_SIGNED_PAREN`/
+# `_CPP_CONST_TERM` above for the exact grammar). The binary-operation
+# branch deliberately uses UNIT, not the
 # wider TERM, on both sides: a UNIT can never itself contain a nested
 # operator, so there is exactly one way to read `1 << 3`. Allowing a
 # parenthesized TERM as an operand here too (`(4 << 1) + 2`) would let the
@@ -743,6 +767,14 @@ _CPP_BINARY_OP_RE = re.compile(r"^(.+?)\s*(<<|>>|\+|-|\*|/)\s*(.+)$", re.DOTALL)
 # `)`" string check cannot distinguish the two, since the OUTER text of the
 # latter also starts and ends with a paren character.
 _CPP_CONST_PAREN_RE = re.compile(r"^" + _CPP_CONST_PAREN + r"$", re.DOTALL)
+# Same anchored-whole-string purpose as `_CPP_CONST_PAREN_RE` immediately
+# above, but for a `_CPP_CONST_SIGNED_PAREN` (one leading sign directly on a
+# parenthesized term, e.g. `-(4 << 1)`). [Round-7 internal critic P1] the
+# eval functions below must check this BEFORE `_CPP_BINARY_OP_RE`, exactly
+# as `_CPP_CONST_PAREN_RE` already must: `_CPP_BINARY_OP_RE` would otherwise
+# happily (and wrongly) split `-(4 << 1)` into "-(4" and "1)" by treating
+# the shift operator INSIDE the parentheses as the top-level operator.
+_CPP_CONST_SIGNED_PAREN_RE = re.compile(r"^" + _CPP_CONST_SIGNED_PAREN + r"$", re.DOTALL)
 
 _CHAR_ESCAPES = {
     "a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11,
@@ -822,28 +854,46 @@ def _eval_cpp_const_unit(token: str) -> int | None:
     return _eval_cpp_const_atom(token)
 
 
+def _eval_cpp_const_paren(token: str) -> int | None:
+    """The numeric VALUE of one bare `_CPP_CONST_PAREN` match (the caller has
+    already confirmed `token` matches `_CPP_CONST_PAREN_RE` in full): the
+    UNIT inside on its own, or the folded result of the single UNIT-op-UNIT
+    binary operation inside."""
+    inner = token[1:-1].strip()
+    op_match = _CPP_BINARY_OP_RE.match(inner)
+    if op_match:
+        left = _eval_cpp_const_unit(op_match.group(1))
+        right = _eval_cpp_const_unit(op_match.group(3))
+        if left is None or right is None:
+            return None
+        return _fold_cpp_binary_op(op_match.group(2), left, right)
+    return _eval_cpp_const_unit(inner)
+
+
 def _eval_cpp_const_term(token: str) -> int | None:
     """The numeric VALUE of one `_CPP_CONST_TERM` match: a `_CPP_CONST_UNIT`
-    on its own, or one enclosing layer of parentheses around a UNIT or a
-    single UNIT-op-UNIT binary operation (`_CPP_CONST_PAREN`). Checked via
-    `_CPP_CONST_PAREN_RE`'s anchored, whole-string match rather than a bare
-    "starts with `(` and ends with `)`" check -- see that regex's own
-    comment for why a naive prefix/suffix check would misparse something
-    like `(4) + (1)` (two independently-parenthesized operands of a
-    top-level binary operation, each its own valid TERM) as a single
-    parenthesized group instead.
+    on its own, one enclosing layer of parentheses around a UNIT or a single
+    UNIT-op-UNIT binary operation (`_CPP_CONST_PAREN`), or one leading sign
+    directly on such a parenthesized form (`_CPP_CONST_SIGNED_PAREN`).
+    Checked via `_CPP_CONST_PAREN_RE`/`_CPP_CONST_SIGNED_PAREN_RE`'s anchored,
+    whole-string match rather than a bare "starts with `(`/`+`/`-` and ends
+    with `)`" check -- see `_CPP_CONST_PAREN_RE`'s own comment for why a
+    naive prefix/suffix check would misparse something like `(4) + (1)`
+    (two independently-parenthesized operands of a top-level binary
+    operation, each its own valid TERM) as a single parenthesized group
+    instead. [Round-7 internal critic P1] the sign, when present, is applied
+    to the FULLY FOLDED parenthesized value, never to just its first
+    operand -- `-(4 << 1)` evaluates as `-(4 << 1)` == -8, never
+    `(-4) << 1`.
     """
     token = token.strip()
+    if _CPP_CONST_SIGNED_PAREN_RE.match(token):
+        value = _eval_cpp_const_paren(token[1:].strip())
+        if value is None:
+            return None
+        return -value if token[0] == "-" else value
     if _CPP_CONST_PAREN_RE.match(token):
-        inner = token[1:-1].strip()
-        op_match = _CPP_BINARY_OP_RE.match(inner)
-        if op_match:
-            left = _eval_cpp_const_unit(op_match.group(1))
-            right = _eval_cpp_const_unit(op_match.group(3))
-            if left is None or right is None:
-                return None
-            return _fold_cpp_binary_op(op_match.group(2), left, right)
-        return _eval_cpp_const_unit(inner)
+        return _eval_cpp_const_paren(token)
     return _eval_cpp_const_unit(token)
 
 
@@ -866,12 +916,13 @@ def _eval_cpp_const_expr(text: str) -> int | None:
     cast_match = _CPP_STATIC_CAST_RE.match(text)
     if cast_match:
         return _eval_cpp_const_term(cast_match.group(1))
-    if _CPP_CONST_PAREN_RE.match(text):
-        # The whole match is ONE parenthesized term (`(4 << 1)`) -- must be
-        # checked before the generic binary-op split below, which would
-        # otherwise happily (and wrongly) split it into "(4" and "1)" by
-        # treating the shift/arithmetic operator INSIDE the parentheses as
-        # if it were the top-level operator.
+    if _CPP_CONST_PAREN_RE.match(text) or _CPP_CONST_SIGNED_PAREN_RE.match(text):
+        # The whole match is ONE (optionally signed) parenthesized term
+        # (`(4 << 1)`, `-(4 << 1)`) -- must be checked before the generic
+        # binary-op split below, which would otherwise happily (and
+        # wrongly) split it into e.g. "-(4" and "1)" by treating the
+        # shift/arithmetic operator INSIDE the parentheses as if it were
+        # the top-level operator.
         return _eval_cpp_const_term(text)
     op_match = _CPP_BINARY_OP_RE.match(text)
     if op_match:
@@ -942,6 +993,20 @@ def check_catalog_containment(root: Path, graph: ModuleGraph, policy: dict) -> l
     means (a real semantic parse, or comparing against the generated
     contract itself), not a wider textual pattern -- see
     `unresolvedLimitations` below for the exact, currently-accepted grammar.
+
+    [Round-7 internal critic P1] the Round-6 widening above closed a sign on
+    a bare literal and a parenthesized literal/shift-expression as two
+    SEPARATE shapes, but never their COMPOSITION: a sign directly in front
+    of a parenthesized term (`+(8)`, `-(8)`, `-(4 << 1)`, or
+    `static_cast<int>(+(8))`) still produced ZERO regex match, the exact
+    same "invisible to the pattern" failure mode as the shapes Round-6
+    closed. `_CPP_CONST_SIGNED_PAREN` closes exactly that composition by
+    admitting one leading `+`/`-` sign directly on a `_CPP_CONST_PAREN`, with
+    `_eval_cpp_const_term` negating the fully-folded parenthesized value
+    (never just its first operand, so `-(4 << 1)` is `-(4 << 1)` == -8, not
+    `(-4) << 1`). A sign directly in front of a `static_cast<...>` (e.g.
+    `-static_cast<int>(8)`) is a structurally identical composition gap that
+    remains genuinely undetected -- see `unresolvedLimitations` below.
     """
     catalog_guard = policy.get("catalogGuard", {})
     generated = {str(Path(path).as_posix()) for path in catalog_guard.get("generatedOutputs", [])}
@@ -1550,15 +1615,17 @@ def generate_report(
         "+/- sign on such a literal; a static_cast<...> around such a literal; a single shift/"
         "arithmetic operation (<<, >>, +, -, *, /) between two such literals (each optionally "
         "signed or static_cast-wrapped); one enclosing layer of parentheses around any of the "
-        "above or around one such binary operation; and one static_cast wrapping another "
+        "above or around one such binary operation; one leading unary +/- sign directly on that "
+        "parenthesized form (e.g. -(4 << 1)); and one static_cast wrapping another "
         "static_cast-of-a-literal. Anything outside that closed grammar is not detected: a "
         "macro, an enum constant, or a reference to another named constexpr/const variable "
         "defined elsewhere in the file or in another translation unit (none of these is a "
-        "literal this guard evaluates), and any expression nested or combined beyond the single "
-        "extra layer of parentheses/cast described above (e.g. two operators, or two extra "
-        "layers of parentheses). Detecting those would require either a real semantic "
-        "(AST-level) parse of the guarded file or comparing it directly against the generated "
-        "contract, not a wider textual pattern.",
+        "literal this guard evaluates), a leading unary sign directly on a static_cast<...> "
+        "(e.g. -static_cast<int>(8)) or on a doubly-parenthesized/doubly-cast form, and any "
+        "expression nested or combined beyond the single extra layer of parentheses/cast/sign "
+        "described above (e.g. two operators, or two extra layers of parentheses). Detecting "
+        "those would require either a real semantic (AST-level) parse of the guarded file or "
+        "comparing it directly against the generated contract, not a wider textual pattern.",
     ]
     if not facts.calls:
         unresolved_limitations.append(
