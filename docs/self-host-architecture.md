@@ -112,6 +112,17 @@ catalogHash,graphResolvedAt,fileCount,symbolCount,edgeCount}`, `config.
 policy.json`'s `baseline` entries as requiring the same review as a manifest
 exception (owner, rationale, expiry, removal issue).
 
+Two top-level fields are wall-clock stamps of *when this run happened*, not
+of what it found, and legitimately differ between two runs over the exact
+same, byte-identical checkout: `generatedAt` (this script's own invocation
+time) and `index.graphResolvedAt` (whenever `cidx resolve` last ran on the
+self-index being read). Comparing two reports field-by-field for "did
+anything real change" would always see spurious differences there. The
+top-level `canonicalHash` is a hash of the report with exactly those two
+fields excluded, so two reports over byte-identical checkouts always have
+the same `canonicalHash` even when their raw timestamps differ -- use it
+(not the raw JSON) for release-gate diffing or reproducibility checks.
+
 ## Regenerating the legacy-façade baseline
 
 The `baseline` arrays in `architecture/cidx-self-host-policy.json` are a

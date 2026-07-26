@@ -49,7 +49,8 @@ from scripts.check_platform_contract import validate_contract  # noqa: E402
 
 from indexer.storage import Storage  # noqa: E402
 from indexer.queryplan import (  # noqa: E402
-    ENUMERATE_BUDGET, Executor, codebase, limit, nodes, select, sites, start, view,
+    ENUMERATE_BUDGET, Executor, all_of, codebase, count, eq, limit, nodes, select,
+    sites, start, view,
 )
 from indexer._version import DATABASE_SCHEMA_VERSION  # noqa: E402
 from indexer.generated_catalog import CATALOG_HASH as EXPECTED_CATALOG_HASH  # noqa: E402
@@ -202,10 +203,15 @@ def _run_all_pages(
     (also added for this purpose), advancing it to the strictly-increasing
     id in `cursor_field_index` of the last row of each full page, until a
     page comes back short of a full page -- the only way a plan can end.
-    `cursor_field_index` must name a field that is ascending and duplicate-
-    free across the whole result (true for both queries below: "id" for the
-    symbol enumeration, "edge_id" for the site enumeration, each the
-    query's own real, single-column, strictly-ordered enumeration key).
+
+    Only valid when `cursor_field_index` names a field that is itself
+    ascending AND duplicate-free across the whole result -- true for the
+    symbol enumeration's "id" below, since `after_id` is wired straight into
+    that query's own `WHERE s.id > ?` filter (queryplan.py's `_enumerate`,
+    SYMBOL_VIEW branch). It is NOT true for the site/evidence enumeration's
+    "edge_id" (one edge legitimately owns many sites, so it repeats across
+    rows and is not the query's real per-row key) -- that read must go
+    through `_run_all_site_pages` instead, which accounts for exactly that.
     """
     rows: list[tuple[Any, ...]] = []
     after_id: int | None = None
@@ -221,6 +227,102 @@ def _run_all_pages(
             # actually the query's own ascending enumeration key -- a real
             # bug in the caller, not a legitimately large result -- so
             # surface it as truncated rather than hang.
+            return rows, True
+        after_id = next_after_id
+
+
+def _edge_site_count(executor: Executor, src_id: int, dst_id: int) -> tuple[int, bool]:
+    """The real, QueryPlan-only count of every recorded call SITE owned by
+    the edge(s) from `src_id` to `dst_id`, plus whether even counting them
+    completed.
+
+    Used solely to verify pagination completeness at a page boundary (see
+    `_run_all_site_pages`), never to derive a semantic finding -- it is a
+    coverage/bookkeeping read exactly like `_read_identity`/
+    `check_index_coverage` below, just expressed through `count()` (HSE-66's
+    own scalar-result stage) instead of raw SQL, so it stays on the same
+    QueryPlan-only path as every other fact in this module. Scoped with
+    `nodes(...)` BEFORE `sites()` (on src_id/dst_id, both real predicate
+    fields of the "edge" view) rather than a `where(...)` filter AFTER it:
+    the latter would force QueryPlan to materialize and per-row-filter every
+    site of every OTHER edge in the whole graph just to answer one edge's
+    count. `(src_id, dst_id)` can match more than one edge if the same pair
+    is connected by more than one relation kind; that only ever makes this
+    count equal to or larger than the true count for the ONE edge being
+    checked, so it can never wrongly report a page as complete -- at worst
+    it forces an unnecessary retry, never a silently accepted evidence gap.
+    """
+    plan = (
+        start(codebase()) | view("edge")
+        | nodes(all_of([eq("src_id", src_id), eq("dst_id", dst_id)]))
+        | sites() | count()
+    ).plan
+    result = executor.run(plan)
+    return result.scalar, result.truncated
+
+
+def _run_all_site_pages(
+    executor: Executor, plan: Any
+) -> tuple[list[tuple[Any, ...]], bool]:
+    """Page the site/evidence enumeration (edge_id, src_id, dst_id, line,
+    col, relation, ...) to genuine completion.
+
+    Unlike `_run_all_pages`'s symbol read, this plan's natural SQL order is
+    (edge_id, file_id, line, col), and QueryPlan's `after_id` cursor for the
+    "edge"->sites() pipeline is only ever wired at EDGE granularity (see
+    queryplan.py's `_enumerate`, "edge" branch): passing the last SITE row's
+    edge_id back in as `after_id` resumes enumeration from the NEXT edge,
+    not the next SITE. A page that fills exactly to ENUMERATE_BUDGET can
+    therefore end mid-edge -- the page's LAST edge may have more sites than
+    made it into this page -- and naively advancing past that edge_id would
+    silently drop the rest of its call sites forever: exactly the bug a
+    prior version of this function had (PR #67 review, AC7), where the next
+    call then legitimately returned 0 further rows (there being no edge
+    left with a higher id) and was misread as "done, nothing truncated".
+
+    So: whenever a page comes back full, before advancing the cursor, this
+    verifies (via `_edge_site_count`, itself QueryPlan-only) that the page's
+    last edge really is fully represented in it. If it is, the boundary
+    landed cleanly between two edges and the cursor advances exactly as
+    before. If it is not, and OTHER edges also appear earlier in this same
+    page, the partial rows already collected for the last edge are dropped
+    (they will be recollected in full) and the cursor is rewound to just
+    before it, so the retry gets a fresh, full page budget with that edge
+    first. If the ENTIRE page belongs to that one edge alone and it is still
+    incomplete, a retry is provably futile (the very next call would return
+    this exact same edge, first, with the exact same truncation), so this
+    stops immediately with the partial rows it already has -- they are still
+    real, correct evidence, just not the edge's complete evidence -- rather
+    than spend a second identical, expensive round-trip to learn nothing
+    new. Either way, this is then a real enumeration limit (QueryPlan's own
+    per-call join budget, not a bug in this pagination), so it is surfaced
+    as truncated rather than looped on or silently under-reported.
+    """
+    rows: list[tuple[Any, ...]] = []
+    after_id: int | None = None
+    while True:
+        page = executor.run(plan, after_id=after_id)
+        page_rows = page.rows
+        if len(page_rows) == ENUMERATE_BUDGET and page_rows:
+            last_edge_id, last_src_id, last_dst_id = page_rows[-1][0], page_rows[-1][1], page_rows[-1][2]
+            sites_in_page = sum(1 for row in page_rows if row[0] == last_edge_id)
+            real_count, count_truncated = _edge_site_count(executor, last_src_id, last_dst_id)
+            if count_truncated or real_count != sites_in_page:
+                if sites_in_page == len(page_rows):
+                    rows.extend(page_rows)
+                    return rows, True
+                page_rows = [row for row in page_rows if row[0] != last_edge_id]
+                rows.extend(page_rows)
+                next_after_id = last_edge_id - 1
+                if next_after_id == after_id:
+                    return rows, True
+                after_id = next_after_id
+                continue
+        rows.extend(page_rows)
+        if len(page_rows) < ENUMERATE_BUDGET:
+            return rows, False
+        next_after_id = page_rows[-1][0]
+        if next_after_id is None or next_after_id == after_id:
             return rows, True
         after_id = next_after_id
 
@@ -269,15 +371,17 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
     # python/indexer/queryplan.py's `_typed_column`), so every call site's
     # caller, callee, relation, and exact location come from ONE public
     # QueryPlan query. No separate "edge" view round-trip, and no private
-    # `db._conn` correlation, is needed to recover src/dst. "edge_id" is the
-    # underlying edge's own id (the query's cursor key), paginated the same
-    # way as the symbol query above.
+    # `db._conn` correlation, is needed to recover src/dst. Paginated via
+    # `_run_all_site_pages` (NOT `_run_all_pages`): "edge_id" repeats across
+    # every site of the same edge, so it is not a valid per-row cursor key,
+    # only a real per-EDGE one -- see that function's own docstring for why
+    # this distinction matters.
     site_plan = (
         start(codebase()) | view("edge") | nodes() | sites()
         | select(["edge_id", "src_id", "dst_id", "line", "col", "relation"])
         | limit(ENUMERATE_BUDGET)
     ).plan
-    site_rows, site_truncated = _run_all_pages(executor, site_plan, cursor_field_index=0)
+    site_rows, site_truncated = _run_all_site_pages(executor, site_plan)
     truncated = truncated or site_truncated
     calls: list[tuple[int, int, int, int, int]] = []
     for edge_id, src_id, dst_id, line, col, relation in site_rows:
@@ -469,28 +573,70 @@ def find_legacy_facade_violations(
     return sorted(violations, key=lambda item: json.dumps(item, sort_keys=True))
 
 
+# A C++ integer-literal token: hex (0x/0X), binary (0b/0B, C++14), leading-
+# zero octal, or plain decimal, each with optional single-quote digit
+# separators (C++14, e.g. `1'000`). Deliberately captures the TOKEN, not a
+# specific decimal spelling, so its numeric VALUE can be evaluated and
+# compared -- see `_parse_cpp_int_literal` below for why.
+_CPP_INT_LITERAL = r"0[xX][0-9a-fA-F](?:'?[0-9a-fA-F])*|0[bB][01](?:'?[01])*|0(?:'?[0-7])*|[1-9](?:'?[0-9])*"
+# An integer-suffix (u/U/l/L/z/Z in any order/case, e.g. `8uLL`), consumed
+# but not captured: it changes the literal's TYPE, never its VALUE.
+_CPP_INT_SUFFIX = r"(?:[uUlLzZ])*"
+
+
+def _parse_cpp_int_literal(token: str) -> int | None:
+    """The numeric VALUE of a C++ integer-literal token, regardless of which
+    of C++'s several equivalent spellings (hex/octal/binary/decimal, with or
+    without digit separators) produced it -- e.g. `0x8`, `010`, `0b1000`,
+    and `8` are four different SPELLINGS of the exact same value. `token`
+    is already known to match `_CPP_INT_LITERAL`.
+    """
+    text = token.replace("'", "")
+    try:
+        if text[:2] in ("0x", "0X"):
+            return int(text, 16)
+        if text[:2] in ("0b", "0B"):
+            return int(text, 2)
+        if text != "0" and text.startswith("0"):
+            return int(text, 8)
+        return int(text, 10)
+    except ValueError:
+        return None
+
+
 def check_catalog_containment(root: Path, graph: ModuleGraph, policy: dict) -> list[str]:
-    """Reject a hand-authored duplicate of a generated catalog (id, name) pair."""
+    """Reject a hand-authored duplicate of a generated catalog (id, name) pair.
+
+    [PR #67 round-4 review, AC5 blocker] a prior version matched each
+    guarded id against ONE hard-coded decimal spelling (`re.escape(str(id_))`),
+    so `std::pair{0x8, "function"}` (a hex spelling of the exact same id)
+    sailed straight through undetected -- and any other equivalent spelling
+    (octal, binary, digit separators) would too, since a purely textual
+    spelling-list can never enumerate every equivalent spelling of the same
+    value. Matching a GENERIC integer-literal token and evaluating its
+    numeric VALUE (`_parse_cpp_int_literal`) before comparing against the
+    guarded id closes that whole class of bypass at once, rather than
+    reactively patching in one more spelling every time a new one is found.
+    """
     catalog_guard = policy.get("catalogGuard", {})
     generated = {str(Path(path).as_posix()) for path in catalog_guard.get("generatedOutputs", [])}
     catalog_source = json.loads((root / "catalogs/core.json").read_text(encoding="utf-8"))
-    pairs: list[tuple[int, str]] = []
+    guarded: set[tuple[int, str]] = set()
     for group in catalog_guard.get("guardedGroups", []):
         for row in catalog_source.get(group, []):
-            pairs.append((row["id"], row["name"]))
+            guarded.add((row["id"], row["name"]))
 
     errors: list[str] = []
     # `(` for a paren-call construction (std::pair(8, "function")) and `{`
     # for ordinary brace-init (std::pair{8, "function"}, {8, "function"} in
     # an aggregate/array) are both accepted ways to redeclare the same pair
     # in C++; catching only one lets the other through undetected.
-    patterns = [
-        re.compile(r"[({]\s*" + str(id_) + r"\s*,\s*\"" + re.escape(name) + r"\"")
-        for id_, name in pairs
-    ] + [
-        re.compile(r"\"" + re.escape(name) + r"\"\s*:\s*" + str(id_))
-        for id_, name in pairs
-    ]
+    pair_pattern = re.compile(
+        r"[({]\s*(" + _CPP_INT_LITERAL + r")" + _CPP_INT_SUFFIX + r"\s*,\s*\"([^\"]*)\""
+    )
+    name_colon_pattern = re.compile(
+        r"\"([^\"]*)\"\s*:\s*(" + _CPP_INT_LITERAL + r")" + _CPP_INT_SUFFIX
+    )
     for path in sorted(graph.module_of_path):
         if path in generated:
             continue
@@ -501,9 +647,20 @@ def check_catalog_containment(root: Path, graph: ModuleGraph, policy: dict) -> l
         if "Generated by scripts/generate_catalogs.py" in text:
             errors.append(f"catalog guard {path}: generated-catalog marker found outside generatedOutputs")
             continue
-        for pattern in patterns:
-            if pattern.search(text):
-                errors.append(f"catalog guard {path}: duplicates a generated catalog declaration ({pattern.pattern})")
+        for match in pair_pattern.finditer(text):
+            value = _parse_cpp_int_literal(match.group(1))
+            if value is not None and (value, match.group(2)) in guarded:
+                errors.append(
+                    f"catalog guard {path}: duplicates a generated catalog declaration "
+                    f"(id={value}, name={match.group(2)!r}, spelled {match.group(1)!r})"
+                )
+        for match in name_colon_pattern.finditer(text):
+            value = _parse_cpp_int_literal(match.group(2))
+            if value is not None and (value, match.group(1)) in guarded:
+                errors.append(
+                    f"catalog guard {path}: duplicates a generated catalog declaration "
+                    f"(id={value}, name={match.group(1)!r}, spelled {match.group(2)!r})"
+                )
     return sorted(set(errors))
 
 
@@ -555,7 +712,8 @@ def check_policy_metadata(policy: dict) -> list[str]:
 
 
 def _portable_source_hash(root: Path, conn: sqlite3.Connection, db: Storage) -> str:
-    """A checkout-location-independent content hash of every indexed file.
+    """A checkout-location-independent content+build hash of every indexed
+    file.
 
     HSE-32's own `Storage.index_identity()` keys its source_fingerprint by
     each file's (component_name, **component_path**, ...) tuple --
@@ -568,20 +726,38 @@ def _portable_source_hash(root: Path, conn: sqlite3.Connection, db: Storage) -> 
     is keyed by REPO-RELATIVE path (via `_stable_label`) plus content, so
     it is the same for byte-identical checkouts regardless of where either
     one lives on disk.
+
+    Also folds in each file's own `compile_options`/`driver` (as recorded on
+    the `file` row -- the exact per-TU build descriptor `cidx import` read
+    from compile_commands.json), not just its text content: two self-index
+    runs over BYTE-IDENTICAL source, one of them built with e.g. an extra
+    `-DADVERSARIAL_BUILD=1`, previously produced this exact same hash (and
+    therefore a byte-identical report) even though what was actually
+    compiled -- and therefore what any preprocessor-conditional code the
+    resolved facts could reflect -- genuinely differed (PR #67 round-4
+    review, AC10). `compile_options` is already stored pre-serialized
+    (`Storage.add_file`'s own `json.dumps`, in argv order, which is itself
+    part of a compiler invocation's meaning) as a single canonical string,
+    so it can be folded in directly with no further normalization.
     """
     digest = hashlib.sha256()
     rows = sorted(
-        (f"{dir_path}/{name}" if dir_path else name, file_id)
-        for file_id, dir_path, name in conn.execute(
-            "SELECT f.id, d.path, f.name FROM file f JOIN directory d ON d.id = f.directory_id"
+        (f"{dir_path}/{name}" if dir_path else name, file_id, compile_options, driver)
+        for file_id, dir_path, name, compile_options, driver in conn.execute(
+            "SELECT f.id, d.path, f.name, f.compile_options, f.driver "
+            "FROM file f JOIN directory d ON d.id = f.directory_id"
         )
     )
-    for relative_path, file_id in rows:
+    for relative_path, file_id, compile_options, driver in rows:
         abs_path = db.file_abs_path(file_id)
         content_hash = _md5_file(Path(abs_path)) if abs_path else None
         digest.update(relative_path.encode())
         digest.update(b"\0")
         digest.update((content_hash or "<unreadable>").encode())
+        digest.update(b"\0")
+        digest.update((compile_options or "<no-compile-options>").encode())
+        digest.update(b"\0")
+        digest.update((driver or "<no-driver>").encode())
         digest.update(b"\n")
     return digest.hexdigest()
 
@@ -757,6 +933,34 @@ def check_index_coverage(
         "sourceContentHash": _portable_source_hash(root, conn, db),
     }
     return issues, coverage
+
+
+def _canonical_report_hash(report: dict[str, Any]) -> str:
+    """A hash of this report's CONTENT-DERIVED identity -- excluding the two
+    fields that legitimately vary between two runs over the exact same,
+    byte-identical checkout: `generatedAt` (this run's own wall-clock time)
+    and `index.graphResolvedAt` (whenever `cidx resolve` last ran on the
+    self-index -- itself a wall-clock stamp of when that command executed,
+    not something derived from what the index actually contains; see
+    `IndexIdentity.graph_resolved_at`/`_read_identity` above). Two report
+    runs over the same content will always disagree on both of those, even
+    with identical findings, packageHash, and sourceContentHash -- so a
+    consumer diffing two reports (a release gate, or this module's own
+    `test_report_is_reproducible_across_byte_identical_checkouts_at_
+    different_paths`) needs ONE well-defined, explicit notion of "did
+    anything real change" that does not require independently knowing which
+    top-level fields are ephemeral. Every other field in the report
+    (packageHash, findings, coverage counts, sourceContentHash, ...) is
+    already checkout-location- and wall-clock-independent by construction
+    (see `_stable_label`/`_portable_source_hash`/`_package_hash` above);
+    this hash just makes that existing property directly and mechanically
+    checkable, rather than something a caller has to re-derive by hand.
+    """
+    canonical = json.loads(json.dumps(report))
+    canonical["generatedAt"] = None
+    canonical["index"]["graphResolvedAt"] = None
+    text = json.dumps(canonical, sort_keys=True)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _git_revision(root: Path) -> str | None:
@@ -1032,6 +1236,10 @@ def generate_report(
     }
     if disagreements:
         report["status"] = "fail"
+    # Computed LAST, over the fully-finished report (including the
+    # disagreements-driven status override just above) but obviously before
+    # this key itself exists to be hashed.
+    report["canonicalHash"] = _canonical_report_hash(report)
     return report
 
 

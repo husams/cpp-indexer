@@ -457,6 +457,47 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         sites = {(v["witness"]["call_site"]["line"], v["witness"]["call_site"]["col"]) for v in violations}
         self.assertEqual(sites, {(10, 1), (20, 2), (30, 3)})
 
+    def test_pagination_boundary_mid_edge_does_not_silently_lose_evidence(self) -> None:
+        # [PR #67 round-4 review, AC7 blocker] the reviewer's exact repro:
+        # seed ONE edge with ENUMERATE_BUDGET+1 edge_site rows. The site
+        # enumeration's own real, working cursor
+        # (queryplan.py's `_enumerate`, "edge" branch) only advances at EDGE
+        # granularity -- it has no idea that this one edge's own sites just
+        # got cut off mid-page by the pipeline's `limit(ENUMERATE_BUDGET)`.
+        # A prior version of `_run_all_site_pages` fed the page's last SITE
+        # row's edge_id back in as the pagination cursor, which resumed
+        # enumeration from the NEXT edge -- silently discarding this edge's
+        # own un-paged tail -- and then read the next (legitimately empty,
+        # there being no higher edge id) page as "done, nothing truncated",
+        # reporting `enumerationTruncated=false` over an incomplete read.
+        # The fix must never make that claim: either every site is
+        # recovered, or the gap is reported honestly as truncated.
+        fixture = _Fixture()
+        fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model", "persistence"]
+        fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
+        edge_id = fixture._db.add_edge(fixture.sym_run, fixture.sym_write, CALLS_KIND)
+        overflow = qp.ENUMERATE_BUDGET + 1
+        fixture._db._conn.execute(
+            "WITH RECURSIVE lines(n) AS (SELECT 1 UNION ALL SELECT n + 1 "
+            f"FROM lines WHERE n < {overflow}) "
+            "INSERT INTO edge_site(edge_id, file_id, line, col) "
+            f"SELECT {edge_id}, {fixture.file_pass}, n, 1 FROM lines"
+        )
+        fixture._db._conn.commit()
+        report = fixture.run()
+        # The core AC7 assertion: never a false claim of completeness over a
+        # read that actually dropped evidence.
+        self.assertTrue(report["index"]["coverage"]["enumerationTruncated"])
+        self.assertEqual(report["completeness"]["semantic"], "partial")
+        self.assertEqual(report["status"], "fail")
+        # Whatever subset of the overflowing edge's sites this pass DID
+        # manage to read must still be real, genuine violations -- not
+        # silently emptied out -- and must never exceed the real total
+        # (no double-counting/fabricated witnesses either).
+        violations = report["findings"]["legacyFacadeViolations"]
+        self.assertGreater(len(violations), 0)
+        self.assertLessEqual(len(violations), overflow)
+
     def test_baseline_entry_missing_exception_metadata_is_rejected(self) -> None:
         fixture = _Fixture()
         fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model", "persistence"]
@@ -535,6 +576,49 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         )
         report = fixture.run()
         self.assertTrue(any("duplicates a generated catalog declaration" in error for error in report["findings"]["catalogGuard"]))
+
+    def test_catalog_duplicate_hex_spelled_declaration_is_rejected(self) -> None:
+        # [PR #67 round-4 review, AC5 blocker] the reviewer's exact repro:
+        # `0x8` is a different SPELLING of the exact same catalog id (8) as
+        # the decimal-literal case already covered above -- a guard that
+        # only recognizes one hard-coded spelling per id keeps losing to the
+        # next equivalent spelling. The guard must compare the literal's
+        # numeric VALUE, not its text.
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/dup_hex.hpp").write_text(
+            'inline constexpr auto kSymbolKind = std::pair{0x8, "function"};\n', encoding="utf-8"
+        )
+        report = fixture.run()
+        self.assertTrue(any("duplicates a generated catalog declaration" in error for error in report["findings"]["catalogGuard"]))
+
+    def test_catalog_duplicate_octal_and_binary_spelled_declarations_are_rejected(self) -> None:
+        # Same value (8), two more equivalent C++ spellings: octal (010)
+        # and binary (0b1000, C++14).
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/dup_octal.hpp").write_text(
+            'inline constexpr auto kSymbolKind = std::pair{010, "function"};\n', encoding="utf-8"
+        )
+        (fixture.root / "src/extraction/dup_binary.hpp").write_text(
+            'inline constexpr auto kSymbolKind = std::pair{0b1000, "function"};\n', encoding="utf-8"
+        )
+        report = fixture.run()
+        errors = report["findings"]["catalogGuard"]
+        self.assertTrue(any("dup_octal.hpp" in error and "duplicates a generated catalog declaration" in error for error in errors))
+        self.assertTrue(any("dup_binary.hpp" in error and "duplicates a generated catalog declaration" in error for error in errors))
+
+    def test_catalog_unrelated_integer_literal_spelling_is_not_falsely_flagged(self) -> None:
+        # A hex/octal/binary literal next to an UNRELATED string, or one
+        # that evaluates to a DIFFERENT id than any guarded pair, must not
+        # be flagged -- the fix must compare against the real guarded set,
+        # not just "any integer literal near any string".
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/not_a_dup.hpp").write_text(
+            'inline constexpr auto kOther = std::pair{0x9, "not_a_kind"};\n'
+            'inline constexpr auto kAlsoOther = std::pair{0x8, "not_function_either"};\n',
+            encoding="utf-8",
+        )
+        report = fixture.run()
+        self.assertEqual(report["findings"]["catalogGuard"], [])
 
     def test_generated_marker_outside_declared_outputs_is_rejected(self) -> None:
         fixture = _Fixture()
@@ -827,9 +911,133 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         def _normalized(report: dict) -> dict:
             report = json.loads(json.dumps(report))
             del report["generatedAt"]
+            # `graphResolvedAt` is HSE-32's own wall-clock stamp of when
+            # `cidx resolve` last ran on the self-index -- exactly as
+            # ephemeral/run-time as `generatedAt` above, never derived from
+            # what the index actually contains. See
+            # `test_canonical_hash_is_stable_across_different_graph_resolved_at_stamps`
+            # below for the case that specifically isolates this field.
+            del report["index"]["graphResolvedAt"]
             return report
 
         self.assertEqual(_normalized(first_report), _normalized(second_report))
+        self.assertEqual(first_report["canonicalHash"], second_report["canonicalHash"])
+
+    def test_canonical_hash_is_stable_across_different_graph_resolved_at_stamps(self) -> None:
+        # [PR #67 round-4 review, AC1 blocker] the reviewer's exact repro:
+        # two otherwise byte-identical fixtures whose ONLY difference is
+        # `meta.graph_resolved_at` (a real self-index run against the same
+        # checkout at two different real times would legitimately stamp two
+        # different values there). Before this fix, comparing two reports
+        # with only `generatedAt` removed still differed at
+        # `index.graphResolvedAt` -- the report was not actually
+        # reproducible for byte-identical content. `canonicalHash` must
+        # agree regardless, since it excludes that field by construction
+        # (see `_canonical_report_hash`).
+        first = _Fixture()
+        first.add_call(first.sym_run, first.sym_render)
+        first._db._conn.execute(
+            "UPDATE meta SET value = ? WHERE key = 'graph_resolved_at'", ("2020-01-01T00:00:00Z",)
+        )
+        first._db._conn.commit()
+        first_report = first.run()
+
+        second = _Fixture()
+        second.add_call(second.sym_run, second.sym_render)
+        second._db._conn.execute(
+            "UPDATE meta SET value = ? WHERE key = 'graph_resolved_at'", ("2030-06-15T12:34:56Z",)
+        )
+        second._db._conn.commit()
+        second_report = second.run()
+
+        self.assertNotEqual(
+            first_report["index"]["graphResolvedAt"], second_report["index"]["graphResolvedAt"]
+        )
+        self.assertEqual(first_report["canonicalHash"], second_report["canonicalHash"])
+
+    def test_canonical_hash_changes_when_a_real_finding_changes(self) -> None:
+        # `canonicalHash` must not be so aggressively normalized that it
+        # stops detecting real content changes -- prove it differs when an
+        # actual violation is introduced.
+        clean = _Fixture()
+        clean.add_call(clean.sym_run, clean.sym_value)  # extraction -> model: allowed
+        clean_report = clean.run()
+
+        violating = _Fixture()
+        violating.add_call(violating.sym_run, violating.sym_render, line=7, col=3)  # extraction -> cli
+        violating_report = violating.run()
+
+        self.assertNotEqual(clean_report["canonicalHash"], violating_report["canonicalHash"])
+
+    def test_source_content_hash_changes_when_a_tus_own_build_flags_differ(self) -> None:
+        # [PR #67 round-4 review, AC10 blocker] the reviewer's exact repro:
+        # two self-index runs over BYTE-IDENTICAL source, one of them built
+        # with an extra `-DADVERSARIAL_BUILD=1`, previously produced the
+        # exact same `sourceContentHash` (and therefore a byte-identical
+        # report) even though what was actually compiled genuinely
+        # differed. Re-stamping identity after the flag change (rather than
+        # mutating post-hoc) simulates a REAL index that was actually BUILT
+        # with that flag from the start -- freshness stays "current" on
+        # both sides, isolating this from the separate, already-tested
+        # post-hoc-drift/staleness mechanism.
+        first = _Fixture()
+        first.add_call(first.sym_run, first.sym_value)
+        first_report = first.run()
+
+        second = _Fixture()
+        second.add_call(second.sym_run, second.sym_value)
+        second._db._conn.execute(
+            "UPDATE file SET compile_options = ? WHERE id = ?",
+            (json.dumps(["-std=c++23", "-DADVERSARIAL_BUILD=1"]), second.file_pass),
+        )
+        second._db._conn.commit()
+        second._db.stamp_index_identity()
+        second._db._conn.commit()
+        second_report = second.run()
+
+        self.assertEqual(second_report["index"]["coverage"]["indexIdentity"]["freshness"], "current")
+        self.assertNotEqual(
+            first_report["index"]["coverage"]["sourceContentHash"],
+            second_report["index"]["coverage"]["sourceContentHash"],
+        )
+        self.assertNotEqual(first_report["canonicalHash"], second_report["canonicalHash"])
+
+    def test_canonical_hash_binds_the_indexed_analysis_engine_source_package_hash_stays_scoped_to_python(
+        self,
+    ) -> None:
+        # [PR #67 round-4 review, AC10 blocker] the reviewer's other repro:
+        # mutating the C++ analysis/extraction engine source that produced
+        # this self-index's OWN resolved facts (self-hosting indexes that
+        # engine's own source as part of the SAME repository) must change
+        # SOMETHING in the release identity, not leave it byte-identical.
+        # `config.packageHash` is -- correctly, by design (see its own
+        # docstring) -- scoped to the PYTHON checker/QueryPlan surface only,
+        # so it does NOT change; `index.coverage.sourceContentHash` (which
+        # covers every indexed file's content, C++ engine sources included)
+        # and therefore the overall `canonicalHash` DO change, giving one
+        # release identity that really does bind the executed analysis
+        # implementation, not just the Python query layer.
+        first = _Fixture()
+        first.add_call(first.sym_run, first.sym_value)
+        first_report = first.run()
+
+        second = _Fixture()
+        second.add_call(second.sym_run, second.sym_value)
+        (second.root / "src/extraction/pass.cpp").write_text(
+            '#include "model/value.hpp"\nvoid run() { /* mutated analysis engine behavior */ }\n',
+            encoding="utf-8",
+        )
+        second._db.stamp_index_identity()
+        second._db._conn.commit()
+        second_report = second.run()
+
+        self.assertEqual(second_report["index"]["coverage"]["indexIdentity"]["freshness"], "current")
+        self.assertEqual(first_report["config"]["packageHash"], second_report["config"]["packageHash"])
+        self.assertNotEqual(
+            first_report["index"]["coverage"]["sourceContentHash"],
+            second_report["index"]["coverage"]["sourceContentHash"],
+        )
+        self.assertNotEqual(first_report["canonicalHash"], second_report["canonicalHash"])
 
     def test_package_hash_changes_when_the_generated_catalog_source_changes(self) -> None:
         # [Internal critic finding, PR #67 @ 40b1e93] check_catalog_containment
