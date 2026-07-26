@@ -2063,6 +2063,8 @@ private:
     bool truncated = false;
     bool evidence_truncated = false; // capped per-hop sites: partial, but the
                                      // search itself continues
+    bool depth_limited = false; // a start's search was cut off by max_depth
+                                // while its frontier was still expandable
     const std::string domain = entity_layer ? "entity" : "symbol";
 
     for (const int64_t start : starts) {
@@ -2078,6 +2080,14 @@ private:
       // silently discard an in-window witness reached only through it later.
       std::vector<std::map<int64_t, std::vector<int64_t>>> preds;
       int64_t found_depth = -1;
+      // Whether the BFS ran out of graph to expand (a true dead end,
+      // reached via the `parent_of.empty()` break below) before hitting
+      // `max_depth`. When it is still false after the loop, the search
+      // stopped only because the depth window closed while the frontier
+      // was still expandable -- absence of a witness here does not prove
+      // no path exists, so it must not be reported as a complete "not
+      // found" (docs/query-plan.md).
+      bool frontier_exhausted = false;
       for (int64_t depth = 1; depth <= stage.max_depth && !frontier.empty();
            ++depth) {
         std::map<int64_t, std::vector<int64_t>> parent_of;
@@ -2124,6 +2134,7 @@ private:
           break;
         }
         if (parent_of.empty()) {
+          frontier_exhausted = true;
           break;
         }
         for (auto &[child, parents] : parent_of) {
@@ -2148,6 +2159,13 @@ private:
         break;
       }
       if (found_depth < 0) {
+        if (!frontier_exhausted) {
+          // Finite-depth exhaustion: the depth window (not a dead end in
+          // the graph) is what stopped this start's search, so its "no
+          // witness" result is unknown, not a proven negative. This does
+          // not abort the search for other starts.
+          depth_limited = true;
+        }
         continue;
       }
       std::vector<int64_t> hit_targets;
@@ -2182,7 +2200,17 @@ private:
           }
           chains = std::move(next_chains);
         }
+        // Reconstruction walks back found_depth hops from `target`, so a
+        // complete chain always has found_depth+1 nodes ending at the real
+        // source. Hitting the witness/chain cap above can stop the walk
+        // partway through -- that must drop the incomplete reconstruction,
+        // not serialize it as a witness that silently starts mid-chain
+        // (docs/query-plan.md).
+        const size_t full_chain_length = static_cast<size_t>(found_depth) + 1;
         for (auto chain : chains) {
+          if (chain.size() != full_chain_length) {
+            continue;
+          }
           std::ranges::reverse(chain); // was target..start; want start..target
           PathWitness witness;
           witness.length = found_depth;
@@ -2227,20 +2255,24 @@ private:
 
     sort_and_cap_witnesses(results, stage.n, truncated);
     st.paths = std::move(results);
-    st.truncated = st.truncated || truncated || evidence_truncated;
+    st.truncated =
+        st.truncated || truncated || evidence_truncated || depth_limited;
     st.ids.clear();
     st.keys.clear();
     st.shape = Shape::Path;
   }
 
   // Deterministic default/rerank order for a Path stream: shortest-first,
-  // ties broken by the lexicographic ascending node-id sequence.
+  // ties broken by each step's full logical typed-step identity (see below).
   static void sort_and_cap_witnesses(std::vector<PathWitness> &results,
                                      int64_t cap, bool &truncated) {
-    // Ties are broken lexicographically over each step's (node_id, position,
-    // pack_index): a total order even when two witnesses share the same
-    // node-id sequence but differ only by which typed-view slot (e.g.
-    // parameter position) the final owner step names (docs/query-plan.md).
+    // Ties are broken lexicographically over each step's full logical typed-
+    // step identity -- (node_id, domain, through, position, pack_index): a
+    // total order even when two witnesses share the same node-id sequence
+    // but differ only by which relation/type_edge hop reached a node (e.g.
+    // `member_owner` vs `member_component`, both landing on the same node at
+    // the same position) or which typed-view slot (e.g. parameter position)
+    // the final owner step names (docs/query-plan.md).
     std::ranges::stable_sort(
         results, [](const PathWitness &a, const PathWitness &b) {
           if (a.length != b.length) {
@@ -2251,6 +2283,12 @@ private:
             const PathStep &sb = b.steps[i];
             if (sa.node_id != sb.node_id) {
               return sa.node_id < sb.node_id;
+            }
+            if (sa.domain != sb.domain) {
+              return sa.domain < sb.domain;
+            }
+            if (sa.through != sb.through) {
+              return sa.through < sb.through;
             }
             if (sa.position != sb.position) {
               return sa.position < sb.position;
@@ -2297,9 +2335,15 @@ private:
   std::vector<TypeOwner> owners_of_type(int64_t type_id) {
     std::vector<TypeOwner> out;
     {
+      // Join the owning symbol's own declaration/definition site (symbol.
+      // file_id/line/col) so a direct symbol-domain owner carries the same
+      // provenance every other owner domain (parameter/template_parameter/
+      // template_argument) already reports -- a bare symbol_id with no site
+      // is not enough evidence to present as a witness step.
       auto query = read_.read_db().prepare(
-          "SELECT symbol_id, kind FROM symbol_type WHERE type_id=? "
-          "ORDER BY symbol_id, kind");
+          "SELECT st.symbol_id, st.kind, s.file_id, s.line, s.col "
+          "FROM symbol_type st LEFT JOIN symbol s ON s.id = st.symbol_id "
+          "WHERE st.type_id=? ORDER BY st.symbol_id, st.kind");
       query.bind(1, type_id);
       while (query.step()) {
         const int64_t kind = query.col_int64(1);
@@ -2309,14 +2353,24 @@ private:
         } else if (kind == 2) {
           role = "of_type";
         }
-        out.push_back({.domain = "symbol",
-                       .role = role,
-                       .node_id = query.col_int64(0),
-                       .position = -1,
-                       .pack_index = -1,
-                       .file_id = std::nullopt,
-                       .line = std::nullopt,
-                       .col = std::nullopt});
+        TypeOwner owner{.domain = "symbol",
+                        .role = role,
+                        .node_id = query.col_int64(0),
+                        .position = -1,
+                        .pack_index = -1,
+                        .file_id = std::nullopt,
+                        .line = std::nullopt,
+                        .col = std::nullopt};
+        if (!query.col_is_null(2)) {
+          owner.file_id = query.col_int64(2);
+        }
+        if (!query.col_is_null(3)) {
+          owner.line = query.col_int64(3);
+        }
+        if (!query.col_is_null(4)) {
+          owner.col = query.col_int64(4);
+        }
+        out.push_back(std::move(owner));
       }
     }
     {

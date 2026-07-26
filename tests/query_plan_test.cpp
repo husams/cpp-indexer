@@ -1845,13 +1845,17 @@ TEST_CASE("query_plan: path() finds the shortest witness with sites") {
 }
 
 TEST_CASE("query_plan: path() reports no witness within a narrow window") {
+  // A -[calls]-> B -[calls]-> C, but max_depth=1 only reaches B, which is
+  // itself expandable (B -[calls]-> C exists one hop further). This is a
+  // finite-depth exhaustion (docs/query-plan.md), not a proven negative, so
+  // it must be reported truncated even though no witness is returned.
   Seeded s;
   QueryExecutor ex(s.db);
   const auto result = ex.run(
       (start(symbol("USR::A")) | path(start(symbol("USR::C")), "calls", 1, 1))
           .plan());
   CHECK(result.paths.empty());
-  CHECK_FALSE(result.truncated);
+  CHECK(result.truncated);
 }
 
 TEST_CASE("query_plan: path() ties are broken by ascending node-id order") {
@@ -2286,4 +2290,168 @@ TEST_CASE(
   }
   std::ranges::sort(positions);
   CHECK(positions == std::vector<int64_t>{0, 1});
+}
+
+// ---------------------------------------------------------------------------
+// PR #69 review round 3: finite-depth exhaustion, incomplete chain
+// reconstruction, symbol-owner provenance, and a total rank key
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "query_plan: path() reports truncation when the depth window cuts off "
+    "an expandable frontier") {
+  // S -> M -> T, but max_depth=1 only lets the BFS reach M. M is not a
+  // target, and M is itself expandable (M -> T exists one hop further), so
+  // this "no witness" is a finite-depth exhaustion, not proof no path
+  // exists.
+  Storage db(":memory:");
+  const int64_t s = db.add_symbol(make_sym("USR::FDE_S", "s"));
+  const int64_t m = db.add_symbol(make_sym("USR::FDE_M", "m"));
+  const int64_t t = db.add_symbol(make_sym("USR::FDE_T", "t"));
+  db.add_edge(make_edge(s, m, 1));
+  db.add_edge(make_edge(m, t, 1));
+
+  QueryExecutor ex(db);
+  const auto result = ex.run((start(symbol("USR::FDE_S")) |
+                              path(start(symbol("USR::FDE_T")), "calls", 1, 1))
+                                 .plan());
+  CHECK(result.paths.empty());
+  CHECK(result.truncated);
+}
+
+TEST_CASE("query_plan: path() does not report truncation when a start's window "
+          "is genuinely exhausted") {
+  // S has no outgoing edges at all: the BFS dies at depth 1 with an empty
+  // frontier, a real dead end, not a depth-limit cutoff.
+  Storage db(":memory:");
+  db.add_symbol(make_sym("USR::FDE_Dead_S", "s"));
+  db.add_symbol(make_sym("USR::FDE_Dead_T", "t"));
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(symbol("USR::FDE_Dead_S")) |
+              path(start(symbol("USR::FDE_Dead_T")), "calls", 1, 4))
+                 .plan());
+  CHECK(result.paths.empty());
+  CHECK_FALSE(result.truncated);
+}
+
+TEST_CASE("query_plan: path() never serializes a chain reconstruction that was "
+          "cut short by the witness cap") {
+  // A depth-3 layered DAG where the middle layer alone has far more than
+  // kDefaultResultCap predecessor combinations: reconstruction from the
+  // single target must either complete every emitted witness back to the
+  // real source, or emit none -- never a short chain that silently starts
+  // mid-path.
+  Storage db(":memory:");
+  const int64_t source = db.add_symbol(make_sym("USR::Chain_Source", "src"));
+  const int64_t target = db.add_symbol(make_sym("USR::Chain_Target", "tgt"));
+  constexpr int kFanout = 1200; // > kDefaultResultCap
+  std::vector<int64_t> middle;
+  middle.reserve(kFanout);
+  for (int i = 0; i < kFanout; ++i) {
+    const int64_t node = db.add_symbol(make_sym(
+        "USR::Chain_Mid_" + std::to_string(i), "mid" + std::to_string(i)));
+    db.add_edge(make_edge(source, node, 1));
+    db.add_edge(make_edge(node, target, 1));
+    middle.push_back(node);
+  }
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(symbol("USR::Chain_Source")) |
+              path(start(symbol("USR::Chain_Target")), "calls", 2, 2))
+                 .plan());
+  CHECK(result.truncated);
+  for (const auto &witness : result.paths) {
+    REQUIRE(witness.length == 2);
+    REQUIRE(witness.steps.size() == 3); // source, middle, target -- complete
+    CHECK(witness.steps[0].node_id == source);
+    CHECK(witness.steps[2].node_id == target);
+  }
+}
+
+TEST_CASE("query_plan: reverse_type_use() reports a direct symbol owner's "
+          "declaration site") {
+  Storage db(":memory:");
+  const int64_t component =
+      db.add_component("project", "/tmp/owner-site-provenance");
+  const int64_t directory = db.add_directory(component, "src");
+  const int64_t file = db.add_file(directory, "owner_site.cpp");
+  Symbol owner_sym = make_sym("USR::OwnerWithSite", "owner_with_site");
+  owner_sym.file_id = file;
+  owner_sym.line = 41;
+  owner_sym.col = 7;
+  const int64_t owner = db.add_symbol(owner_sym);
+  db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind,extent) "
+                   "VALUES ('b:owner_site','int',1,NULL)");
+  auto ids = db.raw_db().prepare(
+      "SELECT id FROM type_node WHERE type_key='b:owner_site'");
+  REQUIRE(ids.step());
+  const int64_t type_id = ids.col_int64(0);
+  db.add_symbol_type(owner, 2, type_id); // of_type
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:owner_site")) | reverse_type_use())
+                 .plan());
+  REQUIRE(result.paths.size() == 1);
+  const auto &witness = result.paths[0];
+  REQUIRE(witness.steps.size() == 2);
+  const auto &owner_step = witness.steps.back();
+  CHECK(owner_step.node_id == owner);
+  CHECK(owner_step.domain == "symbol");
+  CHECK(owner_step.through == "of_type");
+  REQUIRE(owner_step.sites.size() == 1);
+  const auto &site = owner_step.sites[0];
+  REQUIRE(site.file_id.has_value());
+  REQUIRE(site.line.has_value());
+  REQUIRE(site.col.has_value());
+  if (site.file_id && site.line && site.col) {
+    CHECK(*site.file_id == file);
+    CHECK(*site.line == 41);
+    CHECK(*site.col == 7);
+  }
+}
+
+TEST_CASE(
+    "query_plan: reverse_type_use() | rank() orders witnesses by the full "
+    "typed-step identity, not just (node_id, position, pack_index)") {
+  // Two type_edge hops (member_component, then member_owner) both land on
+  // M at position 0 -- an identical (node_id, position, pack_index) key --
+  // but they are structurally distinct witnesses. Only `through` tells
+  // them apart, so the rank key must include it to be total.
+  Storage db(":memory:");
+  const int64_t owner_sym = db.add_symbol(make_sym("USR::RankOwner", "owner"));
+  db.raw_db().exec(
+      "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+      "('b:rank_a','A',1,NULL),('b:rank_m','M',1,NULL)");
+  auto ids = db.raw_db().prepare(
+      "SELECT id FROM type_node WHERE type_key IN ('b:rank_a','b:rank_m') "
+      "ORDER BY type_key");
+  REQUIRE(ids.step());
+  const int64_t a_id = ids.col_int64(0); // 'b:rank_a' sorts first
+  REQUIRE(ids.step());
+  const int64_t m_id = ids.col_int64(0);
+
+  db.add_type_edge(m_id, 8, 0, a_id);     // member_component, inserted first
+  db.add_type_edge(m_id, 7, 0, a_id);     // member_owner, inserted second
+  db.add_symbol_type(owner_sym, 2, m_id); // of_type
+
+  QueryExecutor ex(db);
+  const auto result = ex.run((start(codebase()) | view(View::Type) | nodes() |
+                              where(eq("type_key", "b:rank_a")) |
+                              reverse_type_use() | distinct() | rank())
+                                 .plan());
+  REQUIRE(result.paths.size() == 2);
+  REQUIRE(result.paths[0].steps.size() == 3);
+  REQUIRE(result.paths[1].steps.size() == 3);
+  // Both witnesses share the same node-id sequence (a_id, m_id, owner_sym)
+  // and the same (position, pack_index); only the M-hop's `through` label
+  // differs, and it must sort ascending: "member_component" < "member_owner".
+  CHECK(result.paths[0].steps[1].node_id == m_id);
+  CHECK(result.paths[1].steps[1].node_id == m_id);
+  CHECK(result.paths[0].steps[1].through == "member_component");
+  CHECK(result.paths[1].steps[1].through == "member_owner");
 }

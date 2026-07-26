@@ -223,7 +223,14 @@ Step    := { "id": <int>, "domain": "symbol" | "entity" | "type" |
   kept after the default ranking (`0` = keep every minimal-depth witness up
   to the result cap). Each hop's `status` is the relation's catalogued
   completeness; `sites()`-equivalent per-hop evidence is included directly on
-  `through`-bearing steps.
+  `through`-bearing steps. A start's search stopping at `max_depth` is a
+  proven negative only when its frontier is also exhausted there (no further
+  outgoing edges to expand); when the frontier at the depth limit is still
+  expandable, "no witness from this start" is unknown, not proven, and sets
+  `truncated: true` — this does not abort the search for other starts. A
+  witness reconstruction cut short by the chain/witness cap is dropped
+  entirely rather than serialized as a shorter, incomplete chain that does
+  not start at the real source.
 - **`reverse_type_use(max_depth=8)`** requires a `type`/`type_layer` node
   stream. From each seed type (or nested type-layer), it climbs `type_edge`
   (structural nesting: `pointee`/`element_type`/`return_type`/`param_type`/
@@ -237,11 +244,17 @@ Step    := { "id": <int>, "domain": "symbol" | "entity" | "type" |
   relation executed directly (no manual per-symbol enumeration): every
   intermediate `type` step and its `through` label is retained, unlike the
   legacy flat `GraphQuery.type_users()` closure.
-- Determinism: witnesses are ordered `length` ascending, ties broken by the
-  lexicographic ascending node-id sequence of `steps[].id`. `rank(top_n=0)`
-  re-applies this order (a no-op unless the stream was mutated) and, when
-  `top_n > 0`, keeps only the first `top_n` witnesses — the single documented
-  stable tie-break for `rank()`/`shortest`.
+- Determinism: witnesses are ordered `length` ascending, ties broken
+  lexicographically over each step's full logical typed-step identity —
+  `(id, domain, through, position, pack_index)`, in that order — a total
+  order even when two witnesses share the same node-id sequence but differ
+  only by which relation/`type_edge` hop reached a node (e.g. `member_owner`
+  vs `member_component` landing on the same node at the same position) or by
+  which typed-view slot (e.g. parameter position) the final owner step
+  names. `rank(top_n=0)` re-applies this order (a no-op unless the stream
+  was mutated) and, when `top_n > 0`, keeps only the first `top_n`
+  witnesses — the single documented stable tie-break for `rank()`/
+  `shortest`.
 - Budgets: the witness search shares the `path_node_budget` (10 000
   cumulative node/type expansions) independent of the traversal/enumerate
   budgets; the witness count itself is capped by the default result cap.

@@ -1329,13 +1329,17 @@ def test_path_finds_the_shortest_witness_with_sites(seeded):
 
 
 def test_path_reports_no_witness_within_a_narrow_window(seeded):
+    # A -[calls]-> B -[calls]-> C, but max_depth=1 only reaches B, which is
+    # itself expandable (B -[calls]-> C exists one hop further). This is a
+    # finite-depth exhaustion (docs/query-plan.md), not a proven negative,
+    # so it must be reported truncated even though no witness is returned.
     db, ids = seeded
     ex = Executor(db)
     result = ex.run(
         (start(symbol("USR::A"))
          | path(start(symbol("USR::C")), "calls", 1, 1)).plan)
     assert result.paths == []
-    assert not result.truncated
+    assert result.truncated
 
 
 def test_path_ties_are_broken_by_ascending_node_id_order():
@@ -1702,3 +1706,148 @@ def test_path_distinct_compares_full_typed_slot_identity_not_just_node_id():
         assert len(witness.steps) == 2
         positions.append(witness.steps[1].position)
     assert sorted(positions) == [0, 1]
+
+
+# ---------------------------------------------------------------------------
+# PR #69 review round 3: finite-depth exhaustion, incomplete chain
+# reconstruction, symbol-owner provenance, and a total rank key
+# ---------------------------------------------------------------------------
+
+def test_path_reports_truncation_when_depth_window_cuts_off_an_expandable_frontier():
+    # S -> M -> T, but max_depth=1 only lets the BFS reach M. M is not a
+    # target, and M is itself expandable (M -> T exists one hop further), so
+    # this "no witness" is a finite-depth exhaustion, not proof no path
+    # exists.
+    db = Storage(":memory:")
+    s = db.add_symbol(_make_sym("USR::FDE_S", "s"))
+    m = db.add_symbol(_make_sym("USR::FDE_M", "m"))
+    t = db.add_symbol(_make_sym("USR::FDE_T", "t"))
+    db.add_edge(s, m, 1)
+    db.add_edge(m, t, 1)
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(symbol("USR::FDE_S"))
+         | path(start(symbol("USR::FDE_T")), "calls", 1, 1)).plan)
+    assert result.paths == []
+    assert result.truncated
+
+
+def test_path_does_not_report_truncation_when_a_start_is_genuinely_exhausted():
+    # S has no outgoing edges at all: the BFS dies at depth 1 with an empty
+    # frontier, a real dead end, not a depth-limit cutoff.
+    db = Storage(":memory:")
+    db.add_symbol(_make_sym("USR::FDE_Dead_S", "s"))
+    db.add_symbol(_make_sym("USR::FDE_Dead_T", "t"))
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(symbol("USR::FDE_Dead_S"))
+         | path(start(symbol("USR::FDE_Dead_T")), "calls", 1, 4)).plan)
+    assert result.paths == []
+    assert not result.truncated
+
+
+def test_path_never_serializes_a_chain_reconstruction_cut_short_by_the_witness_cap():
+    # A depth-2 fan where the middle layer alone has far more than
+    # DEFAULT_RESULT_CAP predecessor combinations: reconstruction from the
+    # single target must either complete every emitted witness back to the
+    # real source, or emit none -- never a short chain that silently starts
+    # mid-path.
+    db = Storage(":memory:")
+    source = db.add_symbol(_make_sym("USR::Chain_Source", "src"))
+    target = db.add_symbol(_make_sym("USR::Chain_Target", "tgt"))
+    fanout = 1200  # > DEFAULT_RESULT_CAP
+    for i in range(fanout):
+        node = db.add_symbol(
+            _make_sym(f"USR::Chain_Mid_{i}", f"mid{i}"))
+        db.add_edge(source, node, 1)
+        db.add_edge(node, target, 1)
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(symbol("USR::Chain_Source"))
+         | path(start(symbol("USR::Chain_Target")), "calls", 2, 2)).plan)
+    assert result.truncated
+    for witness in result.paths:
+        assert witness.length == 2
+        assert len(witness.steps) == 3  # source, middle, target -- complete
+        assert witness.steps[0].node_id == source
+        assert witness.steps[2].node_id == target
+
+
+def test_reverse_type_use_reports_a_direct_symbol_owners_declaration_site():
+    db = Storage(":memory:")
+    component = db.add_component("project", "/tmp/owner-site-provenance-py")
+    directory = db.add_directory(component, "src")
+    file_id = db.add_file(directory, "owner_site.cpp")
+    owner = db.add_symbol(_make_sym("USR::OwnerWithSite", "owner_with_site"))
+    db._conn.execute(
+        "UPDATE symbol SET file_id=?, line=41, col=7 WHERE id=?",
+        (file_id, owner))
+    db._conn.execute(
+        "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+        "('b:owner_site','int',1,NULL)")
+    type_id = next(db._conn.execute(
+        "SELECT id FROM type_node WHERE type_key='b:owner_site'"))[0]
+    db._conn.execute(
+        "INSERT INTO symbol_type(symbol_id,kind,type_id) VALUES (?,2,?)",
+        (owner, type_id))
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(codebase()) | view("type") | nodes()
+         | where(eq("type_key", "b:owner_site")) | reverse_type_use()).plan)
+    assert len(result.paths) == 1
+    witness = result.paths[0]
+    assert len(witness.steps) == 2
+    owner_step = witness.steps[-1]
+    assert owner_step.node_id == owner
+    assert owner_step.domain == "symbol"
+    assert owner_step.through == "of_type"
+    assert len(owner_step.sites) == 1
+    assert owner_step.sites[0]["file_id"] == file_id
+    assert owner_step.sites[0]["line"] == 41
+    assert owner_step.sites[0]["col"] == 7
+
+
+def test_reverse_type_use_rank_orders_witnesses_by_the_full_typed_step_identity():
+    # Two type_edge hops (member_component, then member_owner) both land on
+    # M at position 0 -- an identical (node_id, position, pack_index) key --
+    # but they are structurally distinct witnesses. Only `through` tells
+    # them apart, so the rank key must include it to be total.
+    db = Storage(":memory:")
+    owner = db.add_symbol(_make_sym("USR::RankOwner", "owner"))
+    db._conn.execute(
+        "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+        "('b:rank_a','A',1,NULL),('b:rank_m','M',1,NULL)")
+    a_id, m_id = [row[0] for row in db._conn.execute(
+        "SELECT id FROM type_node WHERE type_key IN ('b:rank_a','b:rank_m') "
+        "ORDER BY type_key")]
+    db._conn.execute(
+        "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES "
+        "(?,8,0,?)", (m_id, a_id))  # member_component, inserted first
+    db._conn.execute(
+        "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES "
+        "(?,7,0,?)", (m_id, a_id))  # member_owner, inserted second
+    db._conn.execute(
+        "INSERT INTO symbol_type(symbol_id,kind,type_id) VALUES (?,2,?)",
+        (owner, m_id))
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(codebase()) | view("type") | nodes()
+         | where(eq("type_key", "b:rank_a")) | reverse_type_use()
+         | distinct() | rank()).plan)
+    assert len(result.paths) == 2
+    assert len(result.paths[0].steps) == 3
+    assert len(result.paths[1].steps) == 3
+    assert result.paths[0].steps[1].node_id == m_id
+    assert result.paths[1].steps[1].node_id == m_id
+    assert result.paths[0].steps[1].through == "member_component"
+    assert result.paths[1].steps[1].through == "member_owner"

@@ -2008,14 +2008,18 @@ class Executor:
     def _sort_and_cap_witnesses(results: list[PathWitness], cap: int,
                                 truncated: bool) -> bool:
         """Deterministic default/rerank order for a Path stream:
-        shortest-first, ties broken lexicographically over each step's
-        (node_id, position, pack_index) -- a total order even when two
-        witnesses share the same node-id sequence but differ only by which
-        typed-view slot (e.g. parameter position) the final owner step
-        names (docs/query-plan.md)."""
+        shortest-first, ties broken lexicographically over each step's full
+        logical typed-step identity -- (node_id, domain, through, position,
+        pack_index) -- a total order even when two witnesses share the same
+        node-id sequence but differ only by which relation/type_edge hop
+        reached a node (e.g. `member_owner` vs `member_component`, both
+        landing on the same node at the same position) or which typed-view
+        slot (e.g. parameter position) the final owner step names
+        (docs/query-plan.md)."""
         results.sort(key=lambda w: (
             w.length,
-            [(s.node_id, s.position, s.pack_index) for s in w.steps],
+            [(s.node_id, s.domain, s.through, s.position, s.pack_index)
+             for s in w.steps],
         ))
         if cap > 0 and len(results) > cap:
             del results[cap:]
@@ -2050,6 +2054,9 @@ class Executor:
         truncated = False
         evidence_truncated = False  # capped per-hop sites: partial, but the
         # search itself continues
+        depth_limited = False  # a start's search was cut off by max_depth
+        # while its frontier was still expandable; does not abort the
+        # search for other starts
         domain = "entity" if entity_layer else "symbol"
 
         for start in starts:
@@ -2065,6 +2072,13 @@ class Executor:
             # witness reached only through it later.
             preds: list[dict[int, list[int]]] = []
             found_depth = -1
+            # Whether the BFS ran out of graph to expand (a true dead end)
+            # before hitting max_depth. If still False after the loop, the
+            # search stopped only because the depth window closed while the
+            # frontier was still expandable -- absence of a witness here
+            # does not prove no path exists, so it must not be reported as
+            # a complete "not found" (docs/query-plan.md).
+            frontier_exhausted = False
             depth = 1
             while depth <= stage.max_depth and frontier:
                 parent_of: dict[int, list[int]] = {}
@@ -2093,6 +2107,7 @@ class Executor:
                     truncated = True
                     break
                 if not parent_of:
+                    frontier_exhausted = True
                     break
                 for parents in parent_of.values():
                     parents.sort()
@@ -2107,6 +2122,13 @@ class Executor:
             if truncated:
                 break
             if found_depth < 0:
+                if not frontier_exhausted:
+                    # Finite-depth exhaustion: the depth window (not a dead
+                    # end in the graph) is what stopped this start's
+                    # search, so its "no witness" result is unknown, not a
+                    # proven negative. This does not abort the search for
+                    # other starts.
+                    depth_limited = True
                 continue
             hit_targets = sorted(
                 child for child in preds[found_depth - 1] if child in targets)
@@ -2130,7 +2152,16 @@ class Executor:
                             break
                     chains = next_chains
                     d -= 1
+                # Reconstruction walks back found_depth hops from `target`,
+                # so a complete chain always has found_depth+1 nodes ending
+                # at the real source. Hitting the witness/chain cap above
+                # can stop the walk partway through -- that must drop the
+                # incomplete reconstruction, not serialize it as a witness
+                # that silently starts mid-chain (docs/query-plan.md).
+                full_chain_length = found_depth + 1
                 for chain in chains:
+                    if len(chain) != full_chain_length:
+                        continue
                     chain = list(reversed(chain))
                     steps: list[PathStep] = []
                     witness_evidence_truncated = False
@@ -2165,7 +2196,8 @@ class Executor:
 
         truncated = self._sort_and_cap_witnesses(results, stage.n, truncated)
         st.paths = results
-        st.truncated = st.truncated or truncated or evidence_truncated
+        st.truncated = (st.truncated or truncated or evidence_truncated
+                        or depth_limited)
         st.ids = []
         st.keys = []
         st.shape = "path"
@@ -2182,12 +2214,20 @@ class Executor:
         same owner symbol are never collapsed together (e.g. two `int`
         parameters at positions 0 and 1)."""
         out: list[_TypeOwner] = []
-        for symbol_id, kind in self._conn.execute(
-                "SELECT symbol_id, kind FROM symbol_type WHERE type_id=? "
-                "ORDER BY symbol_id,kind", (type_id,)):
+        # Join the owning symbol's own declaration/definition site (symbol.
+        # file_id/line/col) so a direct symbol-domain owner carries the same
+        # provenance every other owner domain (parameter/template_parameter/
+        # template_argument) already reports -- a bare symbol_id with no
+        # site is not enough evidence to present as a witness step.
+        for symbol_id, kind, file_id, line, col in self._conn.execute(
+                "SELECT st.symbol_id, st.kind, s.file_id, s.line, s.col "
+                "FROM symbol_type st LEFT JOIN symbol s ON s.id = "
+                "st.symbol_id WHERE st.type_id=? ORDER BY st.symbol_id, "
+                "st.kind", (type_id,)):
             role = {1: "returns", 2: "of_type"}.get(kind, "underlying_type")
             out.append(_TypeOwner(domain="symbol", role=role,
-                                  node_id=symbol_id))
+                                  node_id=symbol_id, file_id=file_id,
+                                  line=line, col=col))
         for owner_id, position, pack_index, file_id, line, col in \
                 self._conn.execute(
                     "SELECT owner_id, position, pack_index, file_id, line, "

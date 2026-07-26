@@ -182,8 +182,11 @@ must be exact. `count()` ignores the result cap.
 
 `path()` returns bounded, deterministic shortest witness path(s) between the
 current node stream and a target subquery over one symbol/entity-view
-relation; `rank()` re-applies that deterministic order (shortest-first, ties
-broken by ascending node-id sequence) and optionally caps the count.
+relation; a start whose search is cut off by `max_depth` while its frontier
+is still expandable sets `truncated: true` (a finite-depth exhaustion is not
+a proven negative). `rank()` re-applies that deterministic order
+(shortest-first, ties broken over each step's full typed-step identity) and
+optionally caps the count.
 `reverse_type_use()` is a first-class typed relation from a `type`/
 `type_layer` node stream: it returns one witness per owner using that type,
 directly or nested inside pointer/reference/array/member-pointer/alias
