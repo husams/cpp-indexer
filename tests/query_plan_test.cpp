@@ -1917,7 +1917,8 @@ TEST_CASE("query_plan: path() level budget is exact at the boundary and "
   // breaks the moment the budget is exceeded, so the level (and hence any
   // witness reconstruction from it) is abandoned without waiting to finish
   // reading a level far larger than the budget.
-  for (const int64_t fanout : {kPathNodeBudget, kPathNodeBudget + 1}) {
+  for (const int64_t fanout :
+       {kPathNodeBudget, kPathNodeBudget + 1, kPathNodeBudget + 2048}) {
     Storage db(":memory:");
     auto txn = db.transaction();
     const int64_t start_id = db.add_symbol(make_sym("USR::fan-start", "start"));
@@ -1937,6 +1938,7 @@ TEST_CASE("query_plan: path() level budget is exact at the boundary and "
         ex.run((start(symbol("USR::fan-start")) |
                 path(start(symbol("USR::fan-child-0")), "calls", 1, 1))
                    .plan());
+    CHECK(result.path_rows_examined == std::min(fanout, kPathNodeBudget + 1));
     if (fanout > kPathNodeBudget) {
       CHECK(result.paths.empty());
       CHECK(result.truncated);
@@ -2336,6 +2338,24 @@ TEST_CASE("query_plan: path() does not report truncation when a start's window "
   CHECK_FALSE(result.truncated);
 }
 
+TEST_CASE("query_plan: path() probes a terminal frontier at the depth limit") {
+  Storage db(":memory:");
+  const int64_t source =
+      db.add_symbol(make_sym("USR::FDE_Terminal_S", "source"));
+  const int64_t terminal =
+      db.add_symbol(make_sym("USR::FDE_Terminal_M", "terminal"));
+  db.add_symbol(make_sym("USR::FDE_Terminal_T", "target"));
+  db.add_edge(make_edge(source, terminal, 1));
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(symbol("USR::FDE_Terminal_S")) |
+              path(start(symbol("USR::FDE_Terminal_T")), "calls", 1, 1))
+                 .plan());
+  CHECK(result.paths.empty());
+  CHECK_FALSE(result.truncated);
+}
+
 TEST_CASE("query_plan: path() never serializes a chain reconstruction that was "
           "cut short by the witness cap") {
   // A depth-3 layered DAG where the middle layer alone has far more than
@@ -2363,12 +2383,24 @@ TEST_CASE("query_plan: path() never serializes a chain reconstruction that was "
               path(start(symbol("USR::Chain_Target")), "calls", 2, 2))
                  .plan());
   CHECK(result.truncated);
+  REQUIRE(result.paths.size() == kDefaultResultCap);
   for (const auto &witness : result.paths) {
     REQUIRE(witness.length == 2);
     REQUIRE(witness.steps.size() == 3); // source, middle, target -- complete
     CHECK(witness.steps[0].node_id == source);
     CHECK(witness.steps[2].node_id == target);
   }
+  CHECK(result.paths.front().steps[1].node_id == middle.front());
+
+  const auto ranked =
+      ex.run((start(symbol("USR::Chain_Source")) |
+              path(start(symbol("USR::Chain_Target")), "calls", 2, 2, 1))
+                 .plan());
+  REQUIRE(ranked.paths.size() == 1);
+  CHECK(ranked.paths[0].steps[0].node_id == source);
+  CHECK(ranked.paths[0].steps[1].node_id == middle.front());
+  CHECK(ranked.paths[0].steps[2].node_id == target);
+  CHECK(ranked.truncated);
 }
 
 TEST_CASE("query_plan: reverse_type_use() reports a direct symbol owner's "
@@ -2469,6 +2501,47 @@ TEST_CASE(
   CHECK(result.paths[1].steps[1].through == "return_type");
 }
 
+TEST_CASE(
+    "query_plan: reverse_type_use() ranks before its internal result cap") {
+  Storage db(":memory:");
+  db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind) VALUES "
+                   "('rank-cap-seed','seed',1)");
+  auto seed_query = db.raw_db().prepare(
+      "SELECT id FROM type_node WHERE type_key='rank-cap-seed'");
+  REQUIRE(seed_query.step());
+  const int64_t seed_id = seed_query.col_int64(0);
+  int64_t lowest_parent_id = -1;
+
+  auto txn = db.transaction();
+  for (int64_t i = 0; i < 1200; ++i) {
+    const std::string key = "rank-cap-parent-" + std::to_string(i);
+    db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind) VALUES ('" +
+                     key + "','parent',8)");
+    auto parent_query = db.raw_db().prepare(
+        "SELECT id FROM type_node WHERE type_key='" + key + "'");
+    REQUIRE(parent_query.step());
+    const int64_t parent_id = parent_query.col_int64(0);
+    if (lowest_parent_id < 0) {
+      lowest_parent_id = parent_id;
+    }
+    db.add_type_edge(parent_id, 2, 0, seed_id);
+    const int64_t owner = db.add_symbol(
+        make_sym("USR::rank-cap-owner-" + std::to_string(i), "owner"));
+    db.add_symbol_type(owner, 2, parent_id);
+  }
+  txn.commit();
+
+  QueryExecutor ex(db);
+  const auto result = ex.run((start(codebase()) | view(View::Type) | nodes() |
+                              where(eq("type_key", "rank-cap-seed")) |
+                              reverse_type_use() | rank(1))
+                                 .plan());
+  REQUIRE(result.paths.size() == 1);
+  REQUIRE(result.paths[0].steps.size() == 3);
+  CHECK(result.paths[0].steps[1].node_id == lowest_parent_id);
+  CHECK(result.truncated);
+}
+
 // ---------------------------------------------------------------------------
 // PR #69 internal critic: reverse_type_use() finite-depth exhaustion
 // ---------------------------------------------------------------------------
@@ -2533,4 +2606,48 @@ TEST_CASE(
   CHECK(witness.steps[3].node_id == owner);
   CHECK(witness.steps[3].domain == "symbol");
   CHECK(witness.steps[3].through == "returns");
+}
+
+TEST_CASE("query_plan: reverse_type_use() does not report truncation when "
+          "the only frontier parents are already in the climb chain") {
+  // type_edge is a DAG by construction from Clang's type system, so this
+  // cycle cannot arise from real compiled C++ -- it is manufactured here via
+  // direct row insertion, exactly as the round-4 critic did, to prove the
+  // depth_limited frontier check does not over-report on a cycle. B
+  // -element_type-> A, A -element_type-> B: seeded at A with max_depth=1,
+  // the climb reaches B at depth==max_depth whose only parent (A) is
+  // already in the chain -- a proven dead end, not an unknown. Before the
+  // fix, the frontier check tested the raw (unfiltered) parent list, so it
+  // saw A as "still climbable" and wrongly set depth_limited even though
+  // nothing further could ever be found at any depth.
+  Storage db(":memory:");
+  db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind,extent) "
+                   "VALUES ('b:cycle_a','A',1,NULL),('b:cycle_b','B',1,NULL)");
+  auto ids = db.raw_db().prepare("SELECT id FROM type_node WHERE type_key IN "
+                                 "('b:cycle_a','b:cycle_b') ORDER BY type_key");
+  REQUIRE(ids.step());
+  const int64_t a_id = ids.col_int64(0); // 'b:cycle_a'
+  REQUIRE(ids.step());
+  const int64_t b_id = ids.col_int64(0); // 'b:cycle_b'
+  db.add_type_edge(a_id, 2, 0, b_id);    // A -element_type-> B
+  db.add_type_edge(b_id, 2, 0, a_id);    // B -element_type-> A (cycle)
+
+  QueryExecutor ex(db);
+  const auto shallow =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:cycle_a")) | reverse_type_use(1))
+                 .plan());
+  CHECK(shallow.paths.empty());
+  CHECK_FALSE(shallow.truncated); // no owner exists at any depth: a cycle
+                                  // with nothing but itself to climb is a
+                                  // proven dead end, not an unknown
+
+  const auto deep =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:cycle_a")) | reverse_type_use(2))
+                 .plan());
+  CHECK(deep.paths.empty());
+  CHECK_FALSE(deep.truncated); // unaffected by depth: confirms this is a
+                               // real dead end, not merely one this depth
+                               // happens not to trip
 }

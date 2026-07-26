@@ -9,6 +9,7 @@ the executor mirrors the C++ SQL shapes so results match by construction.
 
 from __future__ import annotations
 
+import heapq
 import json
 import os
 from dataclasses import dataclass, field, replace
@@ -1303,6 +1304,35 @@ class PathWitness:
         }
 
 
+def _path_witness_rank(witness: PathWitness) -> tuple[Any, ...]:
+    return (
+        witness.length,
+        tuple(
+            (
+                step.node_id,
+                step.domain,
+                step.through,
+                step.inbound,
+                step.position,
+                step.pack_index,
+            )
+            for step in witness.steps
+        ),
+    )
+
+
+@dataclass
+class _WorstPathWitness:
+    """Heap entry whose smallest value is the worst retained witness."""
+
+    rank: tuple[Any, ...]
+    sequence: int
+    witness: PathWitness
+
+    def __lt__(self, other: _WorstPathWitness) -> bool:
+        return (self.rank, self.sequence) > (other.rank, other.sequence)
+
+
 @dataclass(frozen=True)
 class _HopSites:
     """Evidence for one witness hop, capped at the default result cap; see
@@ -1338,6 +1368,9 @@ class Result:
     truncated: bool = False
     partial: bool = False
     unknown: bool = False
+    # Non-serialized execution metric used to verify that the path row budget
+    # stops SQLite iteration at the first over-budget row.
+    path_rows_examined: int = 0
     scalar: int = 0
     fields: tuple[str, ...] = ()
     rows: list[tuple[Any, ...]] = field(default_factory=list)
@@ -1620,6 +1653,7 @@ class _Stream:
         self.truncated = False
         self.partial = False
         self.unknown = False
+        self.path_rows_examined = 0
         # True only while a limit() is in effect with NO cardinality-expanding
         # stage (nodes/out/in/union) after it -- otherwise _finish()
         # re-applies the default result cap (PR #20 review).
@@ -2020,12 +2054,7 @@ class Executor:
         no-op today (`step.inbound` is constant per stage call, and
         reverse_type_use() never sets it), but the two must not silently
         diverge if that ever changes."""
-        results.sort(key=lambda w: (
-            w.length,
-            [(s.node_id, s.domain, s.through, s.inbound, s.position,
-              s.pack_index)
-             for s in w.steps],
-        ))
+        results.sort(key=_path_witness_rank)
         if cap > 0 and len(results) > cap:
             del results[cap:]
         if len(results) > DEFAULT_RESULT_CAP:
@@ -2057,12 +2086,25 @@ class Executor:
         results: list[PathWitness] = []
         budget_used = 0
         truncated = False
+        result_truncated = False
         evidence_truncated = False  # capped per-hop sites: partial, but the
         # search itself continues
         depth_limited = False  # a start's search was cut off by max_depth
         # while its frontier was still expandable; does not abort the
         # search for other starts
         domain = "entity" if entity_layer else "symbol"
+
+        def frontier_expandable(candidate_frontier: list[int]) -> bool:
+            for at in range(0, len(candidate_frontier), ID_CHUNK):
+                chunk = candidate_frontier[at:at + ID_CHUNK]
+                sql = (
+                    f"SELECT 1 FROM {table} WHERE kind = ? AND "
+                    f"{from_col} IN ("
+                    + ",".join("?" * len(chunk)) + ") LIMIT 1")
+                if self._conn.execute(sql, [rel[2], *chunk]).fetchone() \
+                        is not None:
+                    return True
+            return False
 
         for start in starts:
             if truncated:
@@ -2103,11 +2145,12 @@ class Executor:
                     # already been materialized.
                     for parent, child in self._conn.execute(
                             sql, [rel[2], *chunk]):
-                        parent_of.setdefault(child, []).append(parent)
+                        st.path_rows_examined += 1
                         budget_used += 1
                         if budget_used > PATH_NODE_BUDGET:
                             budget_exceeded = True
                             break
+                        parent_of.setdefault(child, []).append(parent)
                 if budget_exceeded:
                     truncated = True
                     break
@@ -2127,7 +2170,7 @@ class Executor:
             if truncated:
                 break
             if found_depth < 0:
-                if not frontier_exhausted:
+                if not frontier_exhausted and frontier_expandable(frontier):
                     # Finite-depth exhaustion: the depth window (not a dead
                     # end in the graph) is what stopped this start's
                     # search, so its "no witness" result is unknown, not a
@@ -2135,70 +2178,70 @@ class Executor:
                     # other starts.
                     depth_limited = True
                 continue
-            hit_targets = sorted(
-                child for child in preds[found_depth - 1] if child in targets)
-            for target in hit_targets:
-                chains: list[list[int]] = [[target]]
-                d = found_depth
-                while d >= 1 and not truncated:
-                    next_chains: list[list[int]] = []
-                    for chain in chains:
-                        for parent in preds[d - 1][chain[-1]]:
-                            if parent in chain:
-                                continue  # would repeat a node: not a
-                                # simple-path witness (allowed now that
-                                # discovery permits revisiting a node at a
-                                # different depth)
-                            next_chains.append([*chain, parent])
-                            if len(next_chains) > DEFAULT_RESULT_CAP:
-                                truncated = True
-                                break
-                        if truncated:
-                            break
-                    chains = next_chains
-                    d -= 1
-                # Reconstruction walks back found_depth hops from `target`,
-                # so a complete chain always has found_depth+1 nodes ending
-                # at the real source. Hitting the witness/chain cap above
-                # can stop the walk partway through -- that must drop the
-                # incomplete reconstruction, not serialize it as a witness
-                # that silently starts mid-chain (docs/query-plan.md).
-                full_chain_length = found_depth + 1
-                for chain in chains:
-                    if len(chain) != full_chain_length:
-                        continue
-                    chain = list(reversed(chain))
-                    steps: list[PathStep] = []
-                    witness_evidence_truncated = False
-                    for i, node_id in enumerate(chain):
-                        step = PathStep(node_id=node_id, domain=domain,
-                                        inbound=inbound,
-                                        status=rel_completeness)
-                        if i > 0:
-                            step.through = rel[0]
-                            hop = self._hop_sites(
-                                entity_layer, rel[2], inbound, chain[i - 1],
-                                chain[i])
-                            step.sites = hop.sites
-                            if hop.truncated:
-                                step.status = "partial"
-                                witness_evidence_truncated = True
-                        steps.append(step)
-                    status = ("complete" if rel_completeness == "complete"
-                             else "partial")
-                    if witness_evidence_truncated:
-                        status = "partial"
-                        evidence_truncated = True  # incomplete evidence is
-                        # never presented as complete, but does not abort
-                        # the search for other starts
-                    results.append(PathWitness(
-                        steps=steps, length=found_depth, status=status))
-                    if len(results) > DEFAULT_RESULT_CAP:
-                        truncated = True
-                        break
-                if truncated:
-                    break
+            # Invert the predecessor DAG and enumerate complete witnesses
+            # forward from the source. Sorted children make this lexicographic
+            # in the documented rank key's node-id sequence. Keeping cap+1
+            # complete chains proves truncation without ever stopping a
+            # reconstruction halfway back to its real source.
+            successors: list[dict[int, list[int]]] = [
+                {} for _ in range(found_depth)]
+            for depth, parent_map in enumerate(preds):
+                for child, parents in parent_map.items():
+                    for parent in parents:
+                        successors[depth].setdefault(parent, []).append(child)
+                for children in successors[depth].values():
+                    children[:] = sorted(set(children))
 
+            chains: list[list[int]] = []
+            chain = [start]
+
+            def enumerate_chains(depth: int) -> None:
+                if len(chains) > DEFAULT_RESULT_CAP:
+                    return
+                if depth == found_depth:
+                    if chain[-1] in targets:
+                        chains.append(list(chain))
+                    return
+                for child in successors[depth].get(chain[-1], []):
+                    if child in chain:
+                        continue
+                    chain.append(child)
+                    enumerate_chains(depth + 1)
+                    chain.pop()
+                    if len(chains) > DEFAULT_RESULT_CAP:
+                        break
+
+            enumerate_chains(0)
+            if len(chains) > DEFAULT_RESULT_CAP:
+                result_truncated = True
+                del chains[DEFAULT_RESULT_CAP:]
+
+            for complete_chain in chains:
+                steps: list[PathStep] = []
+                witness_evidence_truncated = False
+                for i, node_id in enumerate(complete_chain):
+                    step = PathStep(node_id=node_id, domain=domain,
+                                    inbound=inbound,
+                                    status=rel_completeness)
+                    if i > 0:
+                        step.through = rel[0]
+                        hop = self._hop_sites(
+                            entity_layer, rel[2], inbound,
+                            complete_chain[i - 1], complete_chain[i])
+                        step.sites = hop.sites
+                        if hop.truncated:
+                            step.status = "partial"
+                            witness_evidence_truncated = True
+                    steps.append(step)
+                status = ("complete" if rel_completeness == "complete"
+                          else "partial")
+                if witness_evidence_truncated:
+                    status = "partial"
+                    evidence_truncated = True
+                results.append(PathWitness(
+                    steps=steps, length=found_depth, status=status))
+
+        truncated = truncated or result_truncated
         truncated = self._sort_and_cap_witnesses(results, stage.n, truncated)
         st.paths = results
         st.truncated = (st.truncated or truncated or evidence_truncated
@@ -2278,9 +2321,11 @@ class Executor:
                     seeds.append(layers[key[1]]["id"])
         seeds = sorted(set(seeds))
 
-        results: list[PathWitness] = []
+        best_results: list[_WorstPathWitness] = []
+        result_sequence = 0
         budget_used = 0
         truncated = False
+        result_truncated = False
         # A frame's climb cut off by `max_depth` while its own parents (the
         # type_edge + canonical_id climb) were still non-empty means "no
         # owner beyond this point" is unknown, not a proven negative --
@@ -2324,13 +2369,19 @@ class Executor:
                             "col": owner.col, "conditional": False,
                         }]
                     steps.append(final_step)
-                    results.append(PathWitness(steps=steps, length=depth + 1,
-                                              status="partial"))
-                    if len(results) > DEFAULT_RESULT_CAP:
-                        truncated = True
-                        break
-                if truncated:
-                    continue
+                    witness = PathWitness(
+                        steps=steps, length=depth + 1, status="partial")
+                    entry = _WorstPathWitness(
+                        _path_witness_rank(witness), result_sequence, witness)
+                    result_sequence += 1
+                    if len(best_results) < DEFAULT_RESULT_CAP:
+                        heapq.heappush(best_results, entry)
+                    else:
+                        result_truncated = True
+                        if (entry.rank, entry.sequence) < (
+                                best_results[0].rank,
+                                best_results[0].sequence):
+                            heapq.heapreplace(best_results, entry)
                 # (parent_id, through label, type_edge.position or -1).
                 # Queried unconditionally, even once `depth` has already
                 # reached `max_depth`, so a depth-cut-off frame can be told
@@ -2347,21 +2398,35 @@ class Executor:
                         "SELECT id FROM type_node WHERE canonical_id=? "
                         "ORDER BY id", (type_id,)):
                     parents.append((row[0], "sugared_by", -1))
+                # Parents already present in the climb chain are proven dead
+                # ends (acyclic in practice; guard anyway so a data anomaly
+                # cannot loop forever) -- filter them out once, before the
+                # frontier check, so the same set is used both to decide
+                # depth_limited and to expand.
+                chain_ids = {layer_id for layer_id, _, _ in chain}
+                climbable_parents = [
+                    (parent_id, through, position)
+                    for parent_id, through, position in parents
+                    if parent_id not in chain_ids
+                ]
                 if depth >= stage.max_depth:
-                    if parents:
+                    if climbable_parents:
                         # The climb still had parents to explore, but
                         # max_depth cut it off first: "no owner beyond here"
                         # is unknown, not a proven negative.
                         depth_limited = True
                     continue
-                chain_ids = {layer_id for layer_id, _, _ in chain}
-                for parent_id, through, position in parents:
-                    if parent_id in chain_ids:
-                        continue  # acyclic in practice; guard anyway
+                for parent_id, through, position in climbable_parents:
                     stack.append(
                         (parent_id, depth + 1,
                          [*chain, (parent_id, through, position)]))
 
+        results = [
+            entry.witness
+            for entry in sorted(
+                best_results, key=lambda entry: (entry.rank, entry.sequence))
+        ]
+        truncated = truncated or result_truncated
         truncated = self._sort_and_cap_witnesses(results, 0, truncated)
         st.paths = results
         st.truncated = st.truncated or truncated or depth_limited
@@ -3301,7 +3366,8 @@ class Executor:
                      (len(st.keys) if st.keys else len(st.ids)))
             return Result(
                 shape="scalar", view=st.view, truncated=st.truncated,
-                partial=partial, unknown=unknown, scalar=scalar)
+                partial=partial, unknown=unknown,
+                path_rows_examined=st.path_rows_examined, scalar=scalar)
         if st.shape == "path":
             if not st.limit_in_effect and len(st.paths) > DEFAULT_RESULT_CAP:
                 del st.paths[DEFAULT_RESULT_CAP:]
@@ -3309,7 +3375,8 @@ class Executor:
             return Result(
                 shape="path", view=st.view, truncated=st.truncated,
                 partial=any(w.status == "partial" for w in st.paths),
-                unknown=st.unknown, paths=st.paths)
+                unknown=st.unknown,
+                path_rows_examined=st.path_rows_examined, paths=st.paths)
         if st.shape == "nodes":
             if st.view not in (SYMBOL_VIEW, ENTITY_VIEW):
                 self._materialize(st, ("id", "identity_key"))
@@ -3327,4 +3394,5 @@ class Executor:
         return Result(
             shape=st.shape, view=st.view, truncated=st.truncated,
             partial=st.partial, unknown=st.unknown,
+            path_rows_examined=st.path_rows_examined,
             fields=st.fields, rows=st.rows)

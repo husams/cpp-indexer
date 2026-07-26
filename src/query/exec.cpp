@@ -621,6 +621,7 @@ struct Stream {
   bool truncated = false;
   bool partial = false;
   bool unknown = false;
+  int64_t path_rows_examined = 0;
   // True only while a limit() is in effect with NO cardinality-expanding
   // stage (nodes/out/in/union) after it -- otherwise finish() re-applies the
   // default result cap (PR #20 review: an early limit must not disable the
@@ -2061,11 +2062,35 @@ private:
     std::vector<PathWitness> results;
     int64_t budget_used = 0;
     bool truncated = false;
+    bool result_truncated = false;
     bool evidence_truncated = false; // capped per-hop sites: partial, but the
                                      // search itself continues
     bool depth_limited = false; // a start's search was cut off by max_depth
                                 // while its frontier was still expandable
     const std::string domain = entity_layer ? "entity" : "symbol";
+
+    const auto frontier_expandable =
+        [&](const std::vector<int64_t> &candidate_frontier) {
+          for (size_t at = 0; at < candidate_frontier.size(); at += kIdChunk) {
+            const size_t n = std::min(kIdChunk, candidate_frontier.size() - at);
+            std::string sql = "SELECT 1 FROM ";
+            sql += table;
+            sql += " WHERE kind = ? AND ";
+            sql += from_col;
+            sql += " IN (";
+            sql += placeholders(n);
+            sql += ") LIMIT 1";
+            auto query = read_.read_db().prepare(sql);
+            query.bind(1, rel->kind_id);
+            for (size_t i = 0; i < n; ++i) {
+              query.bind(static_cast<int>(i + 2), candidate_frontier[at + i]);
+            }
+            if (query.step()) {
+              return true;
+            }
+          }
+          return false;
+        };
 
     for (const int64_t start : starts) {
       if (truncated) {
@@ -2120,13 +2145,14 @@ private:
           // (and stored in parent_of), not just notice the overflow after
           // the whole level has already been materialized.
           while (query.step()) {
-            const int64_t parent = query.col_int64(0);
-            const int64_t child = query.col_int64(1);
-            parent_of[child].push_back(parent);
+            ++st.path_rows_examined;
             if (++budget_used > kPathNodeBudget) {
               budget_exceeded = true;
               break;
             }
+            const int64_t parent = query.col_int64(0);
+            const int64_t child = query.col_int64(1);
+            parent_of[child].push_back(parent);
           }
         }
         if (budget_exceeded) {
@@ -2159,7 +2185,7 @@ private:
         break;
       }
       if (found_depth < 0) {
-        if (!frontier_exhausted) {
+        if (!frontier_exhausted && frontier_expandable(frontier)) {
           // Finite-depth exhaustion: the depth window (not a dead end in
           // the graph) is what stopped this start's search, so its "no
           // witness" result is unknown, not a proven negative. This does
@@ -2168,91 +2194,95 @@ private:
         }
         continue;
       }
-      std::vector<int64_t> hit_targets;
-      for (const auto &[child, parents] : preds[found_depth - 1]) {
-        if (targets.contains(child)) {
-          hit_targets.push_back(child);
+      // Invert the predecessor DAG and enumerate complete witnesses forward
+      // from the source. Children are sorted at every depth, so enumeration is
+      // already lexicographic in the documented rank key's node-id sequence.
+      // Keeping the first cap+1 complete chains proves truncation without ever
+      // stopping a reconstruction halfway back to its real source.
+      std::vector<std::map<int64_t, std::vector<int64_t>>> successors(
+          static_cast<size_t>(found_depth));
+      for (int64_t depth = 0; depth < found_depth; ++depth) {
+        for (const auto &[child, parents] : preds[static_cast<size_t>(depth)]) {
+          for (const int64_t parent : parents) {
+            successors[static_cast<size_t>(depth)][parent].push_back(child);
+          }
+        }
+        for (auto &[parent, children] :
+             successors[static_cast<size_t>(depth)]) {
+          std::ranges::sort(children);
+          children.erase(std::ranges::unique(children).begin(), children.end());
         }
       }
-      std::ranges::sort(hit_targets);
-      for (const int64_t target : hit_targets) {
-        std::vector<std::vector<int64_t>> chains{{target}};
-        for (int64_t d = found_depth; d >= 1 && !truncated; --d) {
-          std::vector<std::vector<int64_t>> next_chains;
-          for (const auto &chain : chains) {
-            for (const int64_t parent : preds[d - 1].at(chain.back())) {
-              if (std::ranges::find(chain, parent) != chain.end()) {
-                continue; // would repeat a node: not a simple-path witness
-                          // (allowed now that discovery permits revisiting a
-                          // node at a different depth)
-              }
-              std::vector<int64_t> extended = chain;
-              extended.push_back(parent);
-              next_chains.push_back(std::move(extended));
-              if (next_chains.size() > static_cast<size_t>(kDefaultResultCap)) {
-                truncated = true;
-                break;
-              }
-            }
-            if (truncated) {
-              break;
-            }
-          }
-          chains = std::move(next_chains);
+
+      std::vector<std::vector<int64_t>> chains;
+      std::vector<int64_t> chain{start};
+      const auto enumerate = [&](const auto &self, size_t depth) -> void {
+        if (std::cmp_greater(chains.size(), kDefaultResultCap)) {
+          return;
         }
-        // Reconstruction walks back found_depth hops from `target`, so a
-        // complete chain always has found_depth+1 nodes ending at the real
-        // source. Hitting the witness/chain cap above can stop the walk
-        // partway through -- that must drop the incomplete reconstruction,
-        // not serialize it as a witness that silently starts mid-chain
-        // (docs/query-plan.md).
-        const size_t full_chain_length = static_cast<size_t>(found_depth) + 1;
-        for (auto chain : chains) {
-          if (chain.size() != full_chain_length) {
+        if (std::cmp_equal(depth, found_depth)) {
+          if (targets.contains(chain.back())) {
+            chains.push_back(chain);
+          }
+          return;
+        }
+        const auto next = successors[depth].find(chain.back());
+        if (next == successors[depth].end()) {
+          return;
+        }
+        for (const int64_t child : next->second) {
+          if (std::ranges::find(chain, child) != chain.end()) {
             continue;
           }
-          std::ranges::reverse(chain); // was target..start; want start..target
-          PathWitness witness;
-          witness.length = found_depth;
-          bool witness_evidence_truncated = false;
-          witness.status =
-              rel->completeness == "complete" ? "complete" : "partial";
-          for (size_t i = 0; i < chain.size(); ++i) {
-            PathStep step;
-            step.node_id = chain[i];
-            step.domain = domain;
-            step.inbound = inbound;
-            step.status = rel->completeness;
-            if (i > 0) {
-              step.through = rel->name;
-              HopSites hop = hop_sites(entity_layer, rel->kind_id, inbound,
-                                       chain[i - 1], chain[i]);
-              step.sites = std::move(hop.sites);
-              if (hop.truncated) {
-                step.status = "partial";
-                witness_evidence_truncated = true;
-              }
-            }
-            witness.steps.push_back(std::move(step));
-          }
-          if (witness_evidence_truncated) {
-            witness.status = "partial";
-            evidence_truncated = true; // incomplete evidence is never
-                                       // presented as complete, but does not
-                                       // abort the search for other starts
-          }
-          results.push_back(std::move(witness));
-          if (results.size() > static_cast<size_t>(kDefaultResultCap)) {
-            truncated = true;
+          chain.push_back(child);
+          self(self, depth + 1);
+          chain.pop_back();
+          if (std::cmp_greater(chains.size(), kDefaultResultCap)) {
             break;
           }
         }
-        if (truncated) {
-          break;
+      };
+      enumerate(enumerate, 0);
+      if (std::cmp_greater(chains.size(), kDefaultResultCap)) {
+        result_truncated = true;
+        chains.resize(kDefaultResultCap);
+      }
+
+      for (const auto &complete_chain : chains) {
+        PathWitness witness;
+        witness.length = found_depth;
+        bool witness_evidence_truncated = false;
+        witness.status =
+            rel->completeness == "complete" ? "complete" : "partial";
+        for (size_t i = 0; i < complete_chain.size(); ++i) {
+          PathStep step;
+          step.node_id = complete_chain[i];
+          step.domain = domain;
+          step.inbound = inbound;
+          step.status = rel->completeness;
+          if (i > 0) {
+            step.through = rel->name;
+            HopSites hop = hop_sites(entity_layer, rel->kind_id, inbound,
+                                     complete_chain[i - 1], complete_chain[i]);
+            step.sites = std::move(hop.sites);
+            if (hop.truncated) {
+              step.status = "partial";
+              witness_evidence_truncated = true;
+            }
+          }
+          witness.steps.push_back(std::move(step));
         }
+        if (witness_evidence_truncated) {
+          witness.status = "partial";
+          evidence_truncated = true; // incomplete evidence is never
+                                     // presented as complete, but does not
+                                     // abort the search for other starts
+        }
+        results.push_back(std::move(witness));
       }
     }
 
+    truncated = truncated || result_truncated;
     sort_and_cap_witnesses(results, stage.n, truncated);
     st.paths = std::move(results);
     st.truncated =
@@ -2260,6 +2290,35 @@ private:
     st.ids.clear();
     st.keys.clear();
     st.shape = Shape::Path;
+  }
+
+  static bool witness_less(const PathWitness &a, const PathWitness &b) {
+    if (a.length != b.length) {
+      return a.length < b.length;
+    }
+    for (size_t i = 0; i < a.steps.size() && i < b.steps.size(); ++i) {
+      const PathStep &sa = a.steps[i];
+      const PathStep &sb = b.steps[i];
+      if (sa.node_id != sb.node_id) {
+        return sa.node_id < sb.node_id;
+      }
+      if (sa.domain != sb.domain) {
+        return sa.domain < sb.domain;
+      }
+      if (sa.through != sb.through) {
+        return sa.through < sb.through;
+      }
+      if (sa.inbound != sb.inbound) {
+        return !sa.inbound && sb.inbound;
+      }
+      if (sa.position != sb.position) {
+        return sa.position < sb.position;
+      }
+      if (sa.pack_index != sb.pack_index) {
+        return sa.pack_index < sb.pack_index;
+      }
+    }
+    return a.steps.size() < b.steps.size();
   }
 
   // Deterministic default/rerank order for a Path stream: shortest-first,
@@ -2277,35 +2336,7 @@ private:
     // apply_distinct()'s step identity -- it is a no-op today (`step.inbound`
     // is constant per stage call, and reverse_type_use() never sets it), but
     // the two must not silently diverge if that ever changes.
-    std::ranges::stable_sort(
-        results, [](const PathWitness &a, const PathWitness &b) {
-          if (a.length != b.length) {
-            return a.length < b.length;
-          }
-          for (size_t i = 0; i < a.steps.size() && i < b.steps.size(); ++i) {
-            const PathStep &sa = a.steps[i];
-            const PathStep &sb = b.steps[i];
-            if (sa.node_id != sb.node_id) {
-              return sa.node_id < sb.node_id;
-            }
-            if (sa.domain != sb.domain) {
-              return sa.domain < sb.domain;
-            }
-            if (sa.through != sb.through) {
-              return sa.through < sb.through;
-            }
-            if (sa.inbound != sb.inbound) {
-              return sa.inbound < sb.inbound;
-            }
-            if (sa.position != sb.position) {
-              return sa.position < sb.position;
-            }
-            if (sa.pack_index != sb.pack_index) {
-              return sa.pack_index < sb.pack_index;
-            }
-          }
-          return a.steps.size() < b.steps.size();
-        });
+    std::ranges::stable_sort(results, witness_less);
     if (cap > 0 && std::cmp_greater(results.size(), cap)) {
       results.resize(static_cast<size_t>(cap));
     }
@@ -2489,9 +2520,12 @@ private:
       std::vector<ChainLink> chain;
     };
 
-    std::vector<PathWitness> results;
+    std::multiset<PathWitness,
+                  bool (*)(const PathWitness &, const PathWitness &)>
+        best_results(witness_less);
     int64_t budget_used = 0;
     bool truncated = false;
+    bool result_truncated = false;
     // A frame's climb cut off by `max_depth` while its own parents (the
     // type_edge + canonical_id climb) were still non-empty means "no owner
     // beyond this point" is unknown, not a proven negative -- mirrors
@@ -2544,14 +2578,17 @@ private:
             final_step.sites.push_back(std::move(site));
           }
           witness.steps.push_back(std::move(final_step));
-          results.push_back(std::move(witness));
-          if (results.size() > static_cast<size_t>(kDefaultResultCap)) {
-            truncated = true;
-            break;
+          best_results.insert(std::move(witness));
+          if (std::cmp_greater(best_results.size(), kDefaultResultCap)) {
+            // best_results is ordered ascending by witness_less (best
+            // witness first), so the element to evict once the set is over
+            // capacity is the current worst -- the last one -- never the
+            // first. Evicting begin() here would silently keep the K worst
+            // witnesses discovered instead of the K best, which the
+            // ranks_before_its_internal_result_cap regression below proves.
+            best_results.erase(std::prev(best_results.end()));
+            result_truncated = true;
           }
-        }
-        if (truncated) {
-          continue;
         }
         // (parent_id, through label, type_edge.position or -1 when the hop
         // has none). A function type's several `param_type` edges to the
@@ -2583,8 +2620,21 @@ private:
                                .position = -1});
           }
         }
+        // Parents already present in the climb chain are proven dead ends
+        // (structural nesting is acyclic in practice; this guard exists so a
+        // data anomaly cannot loop forever) -- filter them out once, before
+        // the frontier check, so the same set is used both to decide
+        // depth_limited and to expand.
+        std::vector<ChainLink> climbable_parents;
+        for (const auto &parent : parents) {
+          if (!std::ranges::any_of(frame.chain, [&](const ChainLink &link) {
+                return link.type_id == parent.type_id;
+              })) {
+            climbable_parents.push_back(parent);
+          }
+        }
         if (frame.depth >= stage.max_depth) {
-          if (!parents.empty()) {
+          if (!climbable_parents.empty()) {
             // The climb still had parents to explore, but max_depth cut it
             // off first: "no owner beyond here" is unknown, not a proven
             // negative.
@@ -2592,13 +2642,7 @@ private:
           }
           continue;
         }
-        for (const auto &parent : parents) {
-          if (std::ranges::any_of(frame.chain, [&](const ChainLink &link) {
-                return link.type_id == parent.type_id;
-              })) {
-            continue; // structural nesting is acyclic in practice; guard
-                      // anyway so a data anomaly cannot loop forever
-          }
+        for (const auto &parent : climbable_parents) {
           Frame next;
           next.type_id = parent.type_id;
           next.depth = frame.depth + 1;
@@ -2609,6 +2653,8 @@ private:
       }
     }
 
+    std::vector<PathWitness> results(best_results.begin(), best_results.end());
+    truncated = truncated || result_truncated;
     sort_and_cap_witnesses(results, 0, truncated);
     st.paths = std::move(results);
     st.truncated = st.truncated || truncated || depth_limited;
@@ -3706,6 +3752,7 @@ public:
   Result finish(Stream st) {
     Result res;
     res.view = st.view;
+    res.path_rows_examined = st.path_rows_examined;
     reject_ambiguous_ungrouped(st);
     if (st.shape == Shape::Scalar) {
       // count() after path()/reverse_type_use() counts witnesses; after

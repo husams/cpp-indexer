@@ -1391,7 +1391,11 @@ def test_path_count_distinct_limit_apply_to_witnesses(seeded):
 
 @pytest.mark.parametrize(
     "fanout",
-    [qp.PATH_NODE_BUDGET, qp.PATH_NODE_BUDGET + 1],
+    [
+        qp.PATH_NODE_BUDGET,
+        qp.PATH_NODE_BUDGET + 1,
+        qp.PATH_NODE_BUDGET + 2048,
+    ],
 )
 def test_path_level_budget_is_exact_at_boundary_and_truncates_without_witness(fanout):
     # A single start node fans out to `fanout` children in one BFS level: the
@@ -1415,6 +1419,8 @@ def test_path_level_budget_is_exact_at_boundary_and_truncates_without_witness(fa
     result = ex.run(
         (start(symbol("USR::fan-start"))
          | path(start(symbol("USR::fan-child-0")), "calls", 1, 1)).plan)
+    assert result.path_rows_examined == min(
+        fanout, qp.PATH_NODE_BUDGET + 1)
     if fanout > qp.PATH_NODE_BUDGET:
         assert result.paths == []
         assert result.truncated
@@ -1750,6 +1756,22 @@ def test_path_does_not_report_truncation_when_a_start_is_genuinely_exhausted():
     assert not result.truncated
 
 
+def test_path_probes_a_terminal_frontier_at_the_depth_limit():
+    db = Storage(":memory:")
+    source = db.add_symbol(_make_sym("USR::FDE_Terminal_S", "source"))
+    terminal = db.add_symbol(_make_sym("USR::FDE_Terminal_M", "terminal"))
+    db.add_symbol(_make_sym("USR::FDE_Terminal_T", "target"))
+    db.add_edge(source, terminal, 1)
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(symbol("USR::FDE_Terminal_S"))
+         | path(start(symbol("USR::FDE_Terminal_T")), "calls", 1, 1)).plan)
+    assert result.paths == []
+    assert not result.truncated
+
+
 def test_path_never_serializes_a_chain_reconstruction_cut_short_by_the_witness_cap():
     # A depth-2 fan where the middle layer alone has far more than
     # DEFAULT_RESULT_CAP predecessor combinations: reconstruction from the
@@ -1772,11 +1794,21 @@ def test_path_never_serializes_a_chain_reconstruction_cut_short_by_the_witness_c
         (start(symbol("USR::Chain_Source"))
          | path(start(symbol("USR::Chain_Target")), "calls", 2, 2)).plan)
     assert result.truncated
+    assert len(result.paths) == qp.DEFAULT_RESULT_CAP
     for witness in result.paths:
         assert witness.length == 2
         assert len(witness.steps) == 3  # source, middle, target -- complete
         assert witness.steps[0].node_id == source
         assert witness.steps[2].node_id == target
+    assert result.paths[0].steps[1].node_id == source + 2
+
+    ranked = ex.run(
+        (start(symbol("USR::Chain_Source"))
+         | path(start(symbol("USR::Chain_Target")), "calls", 2, 2, 1)).plan)
+    assert len(ranked.paths) == 1
+    assert [step.node_id for step in ranked.paths[0].steps] == [
+        source, source + 2, target]
+    assert ranked.truncated
 
 
 def test_reverse_type_use_reports_a_direct_symbol_owners_declaration_site():
@@ -1868,6 +1900,47 @@ def test_reverse_type_use_rank_orders_witnesses_by_the_full_typed_step_identity(
     assert result.paths[1].steps[1].through == "return_type"
 
 
+def test_reverse_type_use_ranks_before_its_internal_result_cap():
+    db = Storage(":memory:")
+    db._conn.execute(
+        "INSERT INTO type_node(type_key,spelling,kind) VALUES "
+        "('rank-cap-seed','seed',1)")
+    seed_id = next(db._conn.execute(
+        "SELECT id FROM type_node WHERE type_key='rank-cap-seed'"))[0]
+    lowest_parent_id = None
+
+    for i in range(1200):
+        key = f"rank-cap-parent-{i}"
+        db._conn.execute(
+            "INSERT INTO type_node(type_key,spelling,kind) VALUES (?,"
+            "'parent',8)",
+            (key,))
+        parent_id = next(db._conn.execute(
+            "SELECT id FROM type_node WHERE type_key=?", (key,)))[0]
+        if lowest_parent_id is None:
+            lowest_parent_id = parent_id
+        db._conn.execute(
+            "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES "
+            "(?,2,0,?)",
+            (parent_id, seed_id))
+        owner = db.add_symbol(
+            _make_sym(f"USR::rank-cap-owner-{i}", "owner"))
+        db._conn.execute(
+            "INSERT INTO symbol_type(symbol_id,kind,type_id) VALUES (?,2,?)",
+            (owner, parent_id))
+    db._conn.commit()
+
+    ex = Executor(db)
+    result = ex.run(
+        (start(codebase()) | view("type") | nodes()
+         | where(eq("type_key", "rank-cap-seed"))
+         | reverse_type_use() | rank(1)).plan)
+    assert len(result.paths) == 1
+    assert len(result.paths[0].steps) == 3
+    assert result.paths[0].steps[1].node_id == lowest_parent_id
+    assert result.truncated
+
+
 # ---------------------------------------------------------------------------
 # PR #69 internal critic: reverse_type_use() finite-depth exhaustion
 # ---------------------------------------------------------------------------
@@ -1928,3 +2001,45 @@ def test_reverse_type_use_reports_truncation_when_max_depth_cuts_off_a_still_cli
     assert witness.steps[3].node_id == owner
     assert witness.steps[3].domain == "symbol"
     assert witness.steps[3].through == "returns"
+
+
+def test_reverse_type_use_does_not_report_truncation_when_the_only_frontier_parents_are_already_in_the_climb_chain():
+    # type_edge is a DAG by construction from Clang's type system, so this
+    # cycle cannot arise from real compiled C++ -- it is manufactured here
+    # via direct row insertion, exactly as the round-4 critic did, to prove
+    # the depth_limited frontier check does not over-report on a cycle. B
+    # -element_type-> A, A -element_type-> B: seeded at A with max_depth=1,
+    # the climb reaches B at depth==max_depth whose only parent (A) is
+    # already in the chain -- a proven dead end, not an unknown. Before the
+    # fix, the frontier check tested the raw (unfiltered) parent list, so it
+    # saw A as "still climbable" and wrongly set depth_limited even though
+    # nothing further could ever be found at any depth.
+    db = Storage(":memory:")
+    db._conn.execute(
+        "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+        "('b:cycle_a','A',1,NULL),('b:cycle_b','B',1,NULL)")
+    a_id, b_id = [row[0] for row in db._conn.execute(
+        "SELECT id FROM type_node WHERE type_key IN "
+        "('b:cycle_a','b:cycle_b') ORDER BY type_key")]
+    db._conn.execute(
+        "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES "
+        "(?,2,0,?)", (a_id, b_id))  # A -element_type-> B
+    db._conn.execute(
+        "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES "
+        "(?,2,0,?)", (b_id, a_id))  # B -element_type-> A (cycle)
+    db._conn.commit()
+
+    ex = Executor(db)
+    shallow = ex.run(
+        (start(codebase()) | view("type") | nodes()
+         | where(eq("type_key", "b:cycle_a")) | reverse_type_use(1)).plan)
+    assert shallow.paths == []
+    assert not shallow.truncated  # no owner exists at any depth: a cycle
+    # with nothing but itself to climb is a proven dead end, not an unknown
+
+    deep = ex.run(
+        (start(codebase()) | view("type") | nodes()
+         | where(eq("type_key", "b:cycle_a")) | reverse_type_use(2)).plan)
+    assert deep.paths == []
+    assert not deep.truncated  # unaffected by depth: confirms this is a
+    # real dead end, not merely one this depth happens not to trip
