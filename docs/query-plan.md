@@ -243,17 +243,21 @@ Step    := { "id": <int>, "domain": "symbol" | "entity" | "type" |
   `domain`/`through` name that owner-fact table. This is a first-class typed
   relation executed directly (no manual per-symbol enumeration): every
   intermediate `type` step and its `through` label is retained, unlike the
-  legacy flat `GraphQuery.type_users()` closure.
+  legacy flat `GraphQuery.type_users()` closure. A climb cut off at
+  `max_depth` while its own parents (further `type_edge`/`canonical_id`
+  hops) were still non-empty is a finite-depth exhaustion, exactly as for
+  `path()`: "no owner beyond here" is unknown, not proven, and sets
+  `truncated: true` without aborting the climb for other frames or seeds.
 - Determinism: witnesses are ordered `length` ascending, ties broken
   lexicographically over each step's full logical typed-step identity —
-  `(id, domain, through, position, pack_index)`, in that order — a total
-  order even when two witnesses share the same node-id sequence but differ
-  only by which relation/`type_edge` hop reached a node (e.g. `member_owner`
-  vs `member_component` landing on the same node at the same position) or by
-  which typed-view slot (e.g. parameter position) the final owner step
-  names. `rank(top_n=0)` re-applies this order (a no-op unless the stream
-  was mutated) and, when `top_n > 0`, keeps only the first `top_n`
-  witnesses — the single documented stable tie-break for `rank()`/
+  `(id, domain, through, inbound, position, pack_index)`, in that order — a
+  total order even when two witnesses share the same node-id sequence but
+  differ only by which relation/`type_edge` hop reached a node (e.g.
+  `member_owner` vs `member_component` landing on the same node at the same
+  position) or by which typed-view slot (e.g. parameter position) the final
+  owner step names. `rank(top_n=0)` re-applies this order (a no-op unless
+  the stream was mutated) and, when `top_n > 0`, keeps only the first
+  `top_n` witnesses — the single documented stable tie-break for `rank()`/
   `shortest`.
 - Budgets: the witness search shares the `path_node_budget` (10 000
   cumulative node/type expansions) independent of the traversal/enumerate

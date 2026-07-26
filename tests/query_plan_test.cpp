@@ -2468,3 +2468,69 @@ TEST_CASE(
   CHECK(result.paths[0].steps[1].through == "element_type");
   CHECK(result.paths[1].steps[1].through == "return_type");
 }
+
+// ---------------------------------------------------------------------------
+// PR #69 internal critic: reverse_type_use() finite-depth exhaustion
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "query_plan: reverse_type_use() reports truncation when max_depth cuts "
+    "off a still-climbable frame") {
+  // int_id <-element_type- array_id <-element_type- outer_array_id, with
+  // the owner attached only to outer_array_id (two element_type layers up
+  // from the seed). With max_depth=1 the DFS only reaches array_id, which
+  // has no owner of its own but is itself climbable one hop further
+  // (outer_array_id) -- exactly path_stage's finite-depth-exhaustion
+  // hazard, applied to reverse_type_use()'s DFS climb instead of path()'s
+  // BFS. Before the fix, hitting max_depth simply `continue`d without
+  // checking whether the frame's own parents existed, so this reported
+  // paths=0/truncated=0 -- indistinguishable from "no owner exists".
+  Storage db(":memory:");
+  const int64_t owner = db.add_symbol(make_sym("USR::FDE_TypeOwner", "owner"));
+  db.raw_db().exec(
+      "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+      "('A4(A4(b:int))','int[4][4]',8,'4'),('A4(b:int)','int[4]',8,'4'),"
+      "('b:int','int',1,NULL)");
+  auto ids = db.raw_db().prepare(
+      "SELECT id FROM type_node WHERE type_key IN "
+      "('A4(A4(b:int))','A4(b:int)','b:int') ORDER BY type_key");
+  REQUIRE(ids.step());
+  const int64_t outer_array_id = ids.col_int64(0); // 'A4(A4(b:int))'
+  REQUIRE(ids.step());
+  const int64_t array_id = ids.col_int64(0); // 'A4(b:int)'
+  REQUIRE(ids.step());
+  const int64_t int_id = ids.col_int64(0);  // 'b:int'
+  db.add_type_edge(array_id, 2, 0, int_id); // array_id -element_type-> int_id
+  db.add_type_edge(outer_array_id, 2, 0,
+                   array_id); // outer_array_id -element_type-> array_id
+  db.add_symbol_type(owner, 1, outer_array_id); // returns, two layers up
+
+  QueryExecutor ex(db);
+  const auto shallow =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) | reverse_type_use(1))
+                 .plan());
+  CHECK(shallow.paths.empty());
+  CHECK(shallow.truncated); // WRONG before the fix: the owner really exists
+                            // two layers up, so this must not read as a
+                            // complete empty result
+
+  const auto deep =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) | reverse_type_use(2))
+                 .plan());
+  REQUIRE(deep.paths.size() == 1);
+  CHECK_FALSE(deep.truncated); // confirms the owner is really there, and
+                               // this depth's own climb is fully exhausted
+  const PathWitness &witness = deep.paths[0];
+  CHECK(witness.length == 3);
+  REQUIRE(witness.steps.size() == 4);
+  CHECK(witness.steps[0].node_id == int_id);
+  CHECK(witness.steps[1].node_id == array_id);
+  CHECK(witness.steps[1].through == "element_type");
+  CHECK(witness.steps[2].node_id == outer_array_id);
+  CHECK(witness.steps[2].through == "element_type");
+  CHECK(witness.steps[3].node_id == owner);
+  CHECK(witness.steps[3].domain == "symbol");
+  CHECK(witness.steps[3].through == "returns");
+}

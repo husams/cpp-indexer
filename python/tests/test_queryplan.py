@@ -1866,3 +1866,65 @@ def test_reverse_type_use_rank_orders_witnesses_by_the_full_typed_step_identity(
     # "element_type" < "return_type" alphabetically.
     assert result.paths[0].steps[1].through == "element_type"
     assert result.paths[1].steps[1].through == "return_type"
+
+
+# ---------------------------------------------------------------------------
+# PR #69 internal critic: reverse_type_use() finite-depth exhaustion
+# ---------------------------------------------------------------------------
+
+def test_reverse_type_use_reports_truncation_when_max_depth_cuts_off_a_still_climbable_frame():
+    # int_id <-element_type- array_id <-element_type- outer_array_id, with
+    # the owner attached only to outer_array_id (two element_type layers up
+    # from the seed). With max_depth=1 the DFS only reaches array_id, which
+    # has no owner of its own but is itself climbable one hop further
+    # (outer_array_id) -- exactly _path_stage's finite-depth-exhaustion
+    # hazard, applied to reverse_type_use()'s DFS climb instead of path()'s
+    # BFS. Before the fix, hitting max_depth simply skipped the frame
+    # without checking whether its own parents existed, so this reported
+    # paths=0/truncated=False -- indistinguishable from "no owner exists".
+    db = Storage(":memory:")
+    owner = db.add_symbol(_make_sym("USR::FDE_TypeOwner", "owner"))
+    db._conn.execute(
+        "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+        "('A4(A4(b:int))','int[4][4]',8,'4'),('A4(b:int)','int[4]',8,'4'),"
+        "('b:int','int',1,NULL)")
+    outer_array_id, array_id, int_id = [row[0] for row in db._conn.execute(
+        "SELECT id FROM type_node WHERE type_key IN "
+        "('A4(A4(b:int))','A4(b:int)','b:int') ORDER BY type_key")]
+    db._conn.execute(
+        "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES "
+        "(?,2,0,?)", (array_id, int_id))  # array_id -element_type-> int_id
+    db._conn.execute(
+        "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES "
+        "(?,2,0,?)",
+        (outer_array_id, array_id))  # outer_array_id -element_type-> array_id
+    db._conn.execute(
+        "INSERT INTO symbol_type(symbol_id,kind,type_id) VALUES (?,1,?)",
+        (owner, outer_array_id))  # returns, two layers up
+    db._conn.commit()
+
+    ex = Executor(db)
+    shallow = ex.run(
+        (start(codebase()) | view("type") | nodes()
+         | where(eq("type_key", "b:int")) | reverse_type_use(1)).plan)
+    assert shallow.paths == []
+    assert shallow.truncated  # WRONG before the fix: the owner really
+    # exists two layers up, so this must not read as a complete empty result
+
+    deep = ex.run(
+        (start(codebase()) | view("type") | nodes()
+         | where(eq("type_key", "b:int")) | reverse_type_use(2)).plan)
+    assert len(deep.paths) == 1
+    assert not deep.truncated  # confirms the owner is really there, and
+    # this depth's own climb is fully exhausted
+    witness = deep.paths[0]
+    assert witness.length == 3
+    assert len(witness.steps) == 4
+    assert witness.steps[0].node_id == int_id
+    assert witness.steps[1].node_id == array_id
+    assert witness.steps[1].through == "element_type"
+    assert witness.steps[2].node_id == outer_array_id
+    assert witness.steps[2].through == "element_type"
+    assert witness.steps[3].node_id == owner
+    assert witness.steps[3].domain == "symbol"
+    assert witness.steps[3].through == "returns"

@@ -2009,16 +2009,21 @@ class Executor:
                                 truncated: bool) -> bool:
         """Deterministic default/rerank order for a Path stream:
         shortest-first, ties broken lexicographically over each step's full
-        logical typed-step identity -- (node_id, domain, through, position,
-        pack_index) -- a total order even when two witnesses share the same
-        node-id sequence but differ only by which relation/type_edge hop
-        reached a node (e.g. `member_owner` vs `member_component`, both
-        landing on the same node at the same position) or which typed-view
-        slot (e.g. parameter position) the final owner step names
-        (docs/query-plan.md)."""
+        logical typed-step identity -- (node_id, domain, through, inbound,
+        position, pack_index) -- a total order even when two witnesses
+        share the same node-id sequence but differ only by which
+        relation/type_edge hop reached a node (e.g. `member_owner` vs
+        `member_component`, both landing on the same node at the same
+        position) or which typed-view slot (e.g. parameter position) the
+        final owner step names (docs/query-plan.md). `inbound` is included
+        so this key matches _apply_distinct()'s step identity -- it is a
+        no-op today (`step.inbound` is constant per stage call, and
+        reverse_type_use() never sets it), but the two must not silently
+        diverge if that ever changes."""
         results.sort(key=lambda w: (
             w.length,
-            [(s.node_id, s.domain, s.through, s.position, s.pack_index)
+            [(s.node_id, s.domain, s.through, s.inbound, s.position,
+              s.pack_index)
              for s in w.steps],
         ))
         if cap > 0 and len(results) > cap:
@@ -2276,6 +2281,13 @@ class Executor:
         results: list[PathWitness] = []
         budget_used = 0
         truncated = False
+        # A frame's climb cut off by `max_depth` while its own parents (the
+        # type_edge + canonical_id climb) were still non-empty means "no
+        # owner beyond this point" is unknown, not a proven negative --
+        # mirrors _path_stage's frontier_exhausted/depth_limited pattern
+        # (docs/query-plan.md). Does not abort the climb for other
+        # frames/seeds.
+        depth_limited = False
 
         # A chain link is (type_id, through label, type_edge.position or -1).
         # The position is the natural-key column distinguishing e.g. a
@@ -2317,8 +2329,12 @@ class Executor:
                     if len(results) > DEFAULT_RESULT_CAP:
                         truncated = True
                         break
-                if truncated or depth >= stage.max_depth:
+                if truncated:
                     continue
+                # (parent_id, through label, type_edge.position or -1).
+                # Queried unconditionally, even once `depth` has already
+                # reached `max_depth`, so a depth-cut-off frame can be told
+                # apart from a true dead end (see depth_limited below).
                 parents: list[tuple[int, str, int]] = []
                 for row in self._conn.execute(
                         "SELECT src_id, kind, position FROM type_edge "
@@ -2331,6 +2347,13 @@ class Executor:
                         "SELECT id FROM type_node WHERE canonical_id=? "
                         "ORDER BY id", (type_id,)):
                     parents.append((row[0], "sugared_by", -1))
+                if depth >= stage.max_depth:
+                    if parents:
+                        # The climb still had parents to explore, but
+                        # max_depth cut it off first: "no owner beyond here"
+                        # is unknown, not a proven negative.
+                        depth_limited = True
+                    continue
                 chain_ids = {layer_id for layer_id, _, _ in chain}
                 for parent_id, through, position in parents:
                     if parent_id in chain_ids:
@@ -2341,7 +2364,7 @@ class Executor:
 
         truncated = self._sort_and_cap_witnesses(results, 0, truncated)
         st.paths = results
-        st.truncated = st.truncated or truncated
+        st.truncated = st.truncated or truncated or depth_limited
         st.ids = []
         st.keys = []
         st.shape = "path"

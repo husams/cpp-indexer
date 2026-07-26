@@ -2267,12 +2267,16 @@ private:
   static void sort_and_cap_witnesses(std::vector<PathWitness> &results,
                                      int64_t cap, bool &truncated) {
     // Ties are broken lexicographically over each step's full logical typed-
-    // step identity -- (node_id, domain, through, position, pack_index): a
-    // total order even when two witnesses share the same node-id sequence
-    // but differ only by which relation/type_edge hop reached a node (e.g.
-    // `member_owner` vs `member_component`, both landing on the same node at
-    // the same position) or which typed-view slot (e.g. parameter position)
-    // the final owner step names (docs/query-plan.md).
+    // step identity -- (node_id, domain, through, inbound, position,
+    // pack_index): a total order even when two witnesses share the same
+    // node-id sequence but differ only by which relation/type_edge hop
+    // reached a node (e.g. `member_owner` vs `member_component`, both
+    // landing on the same node at the same position) or which typed-view
+    // slot (e.g. parameter position) the final owner step names
+    // (docs/query-plan.md). `inbound` is included so this key matches
+    // apply_distinct()'s step identity -- it is a no-op today (`step.inbound`
+    // is constant per stage call, and reverse_type_use() never sets it), but
+    // the two must not silently diverge if that ever changes.
     std::ranges::stable_sort(
         results, [](const PathWitness &a, const PathWitness &b) {
           if (a.length != b.length) {
@@ -2289,6 +2293,9 @@ private:
             }
             if (sa.through != sb.through) {
               return sa.through < sb.through;
+            }
+            if (sa.inbound != sb.inbound) {
+              return sa.inbound < sb.inbound;
             }
             if (sa.position != sb.position) {
               return sa.position < sb.position;
@@ -2485,6 +2492,12 @@ private:
     std::vector<PathWitness> results;
     int64_t budget_used = 0;
     bool truncated = false;
+    // A frame's climb cut off by `max_depth` while its own parents (the
+    // type_edge + canonical_id climb) were still non-empty means "no owner
+    // beyond this point" is unknown, not a proven negative -- mirrors
+    // path_stage's frontier_exhausted/depth_limited pattern
+    // (docs/query-plan.md). Does not abort the climb for other frames/seeds.
+    bool depth_limited = false;
 
     for (const int64_t seed : seeds) {
       if (truncated) {
@@ -2537,13 +2550,16 @@ private:
             break;
           }
         }
-        if (truncated || frame.depth >= stage.max_depth) {
+        if (truncated) {
           continue;
         }
         // (parent_id, through label, type_edge.position or -1 when the hop
         // has none). A function type's several `param_type` edges to the
         // same pointee share (parent_id, through) but differ by position --
-        // without it, two such climbs would be indistinguishable.
+        // without it, two such climbs would be indistinguishable. Queried
+        // unconditionally, even once `frame.depth` has already reached
+        // `max_depth`, so a depth-cut-off frame can be told apart from a
+        // true dead end (see depth_limited below).
         std::vector<ChainLink> parents;
         {
           auto query = read_.read_db().prepare(
@@ -2567,6 +2583,15 @@ private:
                                .position = -1});
           }
         }
+        if (frame.depth >= stage.max_depth) {
+          if (!parents.empty()) {
+            // The climb still had parents to explore, but max_depth cut it
+            // off first: "no owner beyond here" is unknown, not a proven
+            // negative.
+            depth_limited = true;
+          }
+          continue;
+        }
         for (const auto &parent : parents) {
           if (std::ranges::any_of(frame.chain, [&](const ChainLink &link) {
                 return link.type_id == parent.type_id;
@@ -2586,7 +2611,7 @@ private:
 
     sort_and_cap_witnesses(results, 0, truncated);
     st.paths = std::move(results);
-    st.truncated = st.truncated || truncated;
+    st.truncated = st.truncated || truncated || depth_limited;
     st.ids.clear();
     st.keys.clear();
     st.shape = Shape::Path;
