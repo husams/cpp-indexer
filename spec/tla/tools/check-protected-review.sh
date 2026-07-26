@@ -109,7 +109,83 @@ fi
 # protectedPaths policy-and-ownership coverage; if THIS diff touches either
 # one, the base-commit ownership list still governs -- a PR cannot expand its
 # own approval pool by adding owners in the same change.
-owners="$(grep -ohE '@[A-Za-z0-9_-]+' "$WORK/base-codeowners" | tr -d '@' | sort -u)"
+#
+# Owners are resolved per matched path, not "every @handle anywhere in the
+# file": CODEOWNERS is a sequence of `pattern owner...` rows, and GitHub's own
+# semantics are that the LAST row whose pattern matches a given path is the
+# one that owns it. Scanning the whole file for handles would (a) let an
+# owner declared only for an unrelated path approve here, (b) let a comment
+# mentioning a handle silently enlarge the approval pool, and (c) mis-extract
+# team handles ("@org/team" -> "org", which can never match a review login).
+python3 - "$WORK/base-codeowners" "$WORK/matched.txt" "$WORK/owners.txt" <<'PY'
+import fnmatch
+import pathlib
+import sys
+
+codeowners_path, matched_path, owners_path = sys.argv[1:4]
+matched = [line.strip() for line in open(matched_path) if line.strip()]
+
+rows = []
+for line in pathlib.Path(codeowners_path).read_text().splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    parts = stripped.split()
+    if len(parts) < 2:
+        continue
+    rows.append((parts[0], parts[1:]))
+
+def pattern_matches(pattern: str, path: str) -> bool:
+    anchored = pattern.startswith("/")
+    trimmed = pattern[1:] if anchored else pattern
+    if trimmed.endswith("/"):
+        return path == trimmed.rstrip("/") or path.startswith(trimmed)
+    if "*" in trimmed or "?" in trimmed:
+        return fnmatch.fnmatch(path, trimmed) or fnmatch.fnmatch(
+            path, "*/" + trimmed
+        )
+    if anchored:
+        return path == trimmed
+    return path == trimmed or path.endswith("/" + trimmed)
+
+required_owners = set()
+unowned = []
+team_only = []
+for path in matched:
+    winner = None
+    for pattern, row_owners in rows:
+        if pattern_matches(pattern, path):
+            winner = row_owners
+    if winner is None:
+        unowned.append(path)
+        continue
+    individuals = [owner for owner in winner if "/" not in owner.lstrip("@")]
+    teams = [owner for owner in winner if "/" in owner.lstrip("@")]
+    if individuals:
+        required_owners.update(individuals)
+    elif teams:
+        team_only.append((path, teams))
+    else:
+        unowned.append(path)
+
+if unowned:
+    raise SystemExit(
+        "TLA_PROTECTED_REVIEW_STATUS=FAIL reason=no-codeowners-pattern-matches:"
+        + ",".join(unowned)
+    )
+if team_only and not required_owners:
+    detail = ";".join(f"{path}={','.join(teams)}" for path, teams in team_only)
+    raise SystemExit(
+        "TLA_PROTECTED_REVIEW_STATUS=FAIL "
+        "reason=team-only-codeowners-unsupported:" + detail
+    )
+
+pathlib.Path(owners_path).write_text(
+    "\n".join(sorted(owner.lstrip("@") for owner in required_owners))
+)
+PY
+
+owners="$(cat "$WORK/owners.txt")"
 [[ -n "$owners" ]] || die "no-codeowners-configured-at-base"
 
 curl --fail --silent --show-error \
@@ -118,19 +194,38 @@ curl --fail --silent --show-error \
   "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${GITHUB_PR_NUMBER}/reviews?per_page=100" \
   >"$WORK/reviews.json"
 
-python3 - "$WORK/reviews.json" "$WORK/approved.txt" <<'PY'
+# A review is only a live approval if (a) it is the reviewer's MOST RECENT
+# review of this PR -- an earlier approval does not survive a later
+# CHANGES_REQUESTED from the same person -- and (b) that latest review's
+# commit_id is the current head SHA -- an approval left on an earlier commit
+# does not carry forward to a new commit pushed after it (the classic
+# approve-then-push-a-protected-edit bypass).
+python3 - "$WORK/reviews.json" "$GITHUB_HEAD_SHA" "$WORK/approved.txt" <<'PY'
 import json
 import pathlib
 import sys
 
-reviews = json.loads(pathlib.Path(sys.argv[1]).read_text())
-approvers = []
+reviews_path, head_sha, approved_path = sys.argv[1:4]
+reviews = json.loads(pathlib.Path(reviews_path).read_text())
+
+latest_by_user = {}
 for review in reviews:
-    if review.get("state") == "APPROVED":
-        user = (review.get("user") or {}).get("login")
-        if user:
-            approvers.append(user)
-pathlib.Path(sys.argv[2]).write_text("\n".join(approvers))
+    user = (review.get("user") or {}).get("login")
+    review_id = review.get("id", 0)
+    if not user:
+        continue
+    # Reviews are returned in submission order, but sort defensively by id
+    # (monotonically increasing) rather than assuming list order.
+    previous = latest_by_user.get(user)
+    if previous is None or review_id >= previous.get("id", 0):
+        latest_by_user[user] = review
+
+approvers = [
+    user
+    for user, review in latest_by_user.items()
+    if review.get("state") == "APPROVED" and review.get("commit_id") == head_sha
+]
+pathlib.Path(approved_path).write_text("\n".join(approvers))
 PY
 
 for owner in $owners; do
@@ -140,5 +235,5 @@ for owner in $owners; do
   fi
 done
 
-echo "TLA_PROTECTED_REVIEW_STATUS=FAIL reason=no-codeowner-approval matched=$(paste -sd, "$WORK/matched.txt")" >&2
+echo "TLA_PROTECTED_REVIEW_STATUS=FAIL reason=no-codeowner-approval-of-head-sha matched=$(paste -sd, "$WORK/matched.txt") owners=$(paste -sd, "$WORK/owners.txt")" >&2
 exit 1

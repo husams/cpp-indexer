@@ -84,17 +84,44 @@ ConformanceRecorder::index(const IndexRequest &request,
                            ApplicationContext &context) const {
   protocol::ResultEnvelope envelope = delegate_.index(request, context);
   if (request.action == IndexAction::update) {
+    // Every update attempt is recorded, regardless of outcome -- silently
+    // dropping the observation for a non-"current" result would mean the
+    // recorded trace is only ever the subset of actions that already looked
+    // legal, and conformant() replaying that filtered trace could never
+    // catch what the filter itself dropped (a genuinely partial/failed
+    // publish would simply vanish rather than being checked and rejected).
+    // Each outcome gets the operation-map.json action that actually
+    // describes it, so the schema-expectation check below stays meaningful
+    // instead of being forced to accept every outcome as "index.publish".
     const std::string index_state = derive_index_state(envelope);
-    // Only the outcome the code itself reports as successful is claimed as
-    // "index.publish" -- a legitimately reported failure is out of this
-    // recorder's declared scope, not force-fit into the publish vocabulary.
+    const std::string publication_state =
+        derive_publication_state(index_state);
+    const std::string artifact_state = derive_artifact_state(envelope);
     if (index_state == "current") {
       observations_.push_back(ConformanceObservation{
           .operation = "index.publish",
           .fields = {{"indexState", index_state},
-                     {"publicationState",
-                      derive_publication_state(index_state)},
-                     {"artifactState", derive_artifact_state(envelope)}},
+                     {"publicationState", publication_state},
+                     {"artifactState", artifact_state}},
+      });
+    } else if (index_state == "stale") {
+      // operation-map.json: publication.interrupt -> InterruptPublication ->
+      // publicationState=stale.
+      observations_.push_back(ConformanceObservation{
+          .operation = "publication.interrupt",
+          .fields = {{"indexState", index_state},
+                     {"publicationState", publication_state},
+                     {"artifactState", artifact_state}},
+      });
+    } else {
+      // operation-map.json: index.failure -> IndexFails ->
+      // failureMode=index-failure.
+      observations_.push_back(ConformanceObservation{
+          .operation = "index.failure",
+          .fields = {{"indexState", index_state},
+                     {"publicationState", publication_state},
+                     {"artifactState", artifact_state},
+                     {"failureMode", "index-failure"}},
       });
     }
   }
@@ -190,6 +217,17 @@ ConformanceRecorder::proof(const ProofRequest &request,
 }
 
 bool ConformanceRecorder::conformant() const {
+  // An empty trace is not vacuously conformant: `std::ranges::all_of` over
+  // an empty range is trivially true, and (before this check existed) that
+  // silently rewarded a recording path that dropped every observation for
+  // an outcome it didn't recognize. Every in-scope call now always records
+  // something (see index()/query()/analysis() above), so an empty trace
+  // here means no in-scope call was ever made at all -- an explicit,
+  // checkable precondition, not a default pass.
+  if (observations_.empty()) {
+    return false;
+  }
+
   // Per-observation schema/invariant checks (unordered): every recorded
   // field must be schema-allowed, every operation's declared expectation
   // must hold, and the two protected-invariant cross-checks apply.

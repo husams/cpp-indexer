@@ -189,6 +189,41 @@ TEST_CASE("conformance recorder rejects a seeded partial-publication defect") {
   CHECK_FALSE(recorder.conformant());
 }
 
+TEST_CASE("conformance recorder records a genuinely partial index() outcome "
+         "instead of silently dropping it") {
+  FakeServices fake;
+  // Before this fix, index() only recorded an observation when
+  // derive_index_state() already landed on "current" -- so a genuinely
+  // partial/interrupted update (completeness.state == "partial", distinct
+  // from the "claims complete/current but no artifact" defect above)
+  // produced ZERO observations, and conformant() was vacuously true over
+  // the empty trace. It must now be recorded as "publication.interrupt"
+  // (operation-map.json: InterruptPublication -> publicationState=stale) --
+  // a real, schema-modeled outcome, not a silently dropped one.
+  fake.index_response =
+      base_envelope("index", Status::Complete, "partial", "current");
+
+  ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
+  ApplicationContext context = test_context();
+  recorder.index(IndexRequest{.action = IndexAction::update,
+                              .files = {},
+                              .source = std::nullopt,
+                              .graph = true,
+                              .autoderive_labels = true,
+                              .json = false,
+                              .index = std::nullopt},
+                context);
+
+  REQUIRE(recorder.observations().size() == 1);
+  CHECK(recorder.observations()[0].operation == "publication.interrupt");
+  // publicationState=stale (never "current"), so NoPartialPublication's
+  // implication is vacuously satisfied -- an honestly reported interruption
+  // is a legal, schema-conformant outcome, not itself a defect. What this
+  // test asserts is the fix to the bug above: the observation exists at all
+  // instead of vanishing.
+  CHECK(recorder.conformant());
+}
+
 TEST_CASE("conformance recorder ignores index() calls that are not the "
           "update action") {
   FakeServices fake;
@@ -208,7 +243,9 @@ TEST_CASE("conformance recorder ignores index() calls that are not the "
                  context);
 
   CHECK(recorder.observations().empty());
-  CHECK(recorder.conformant());
+  // An empty trace is not vacuously conformant -- it means no in-scope call
+  // was ever made, which is an explicit non-answer, not a pass.
+  CHECK_FALSE(recorder.conformant());
 }
 
 TEST_CASE("conformance recorder rejects a seeded query-write defect") {
@@ -364,5 +401,7 @@ TEST_CASE("conformance recorder does not claim the six out-of-scope "
   recorder.proof(ProofRequest{}, context);
 
   CHECK(recorder.observations().empty());
-  CHECK(recorder.conformant());
+  // An empty trace is not vacuously conformant -- it means no in-scope call
+  // was ever made, which is an explicit non-answer, not a pass.
+  CHECK_FALSE(recorder.conformant());
 }
