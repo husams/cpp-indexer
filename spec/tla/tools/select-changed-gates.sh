@@ -51,16 +51,39 @@ import sys
 manifest_path, changed_path = sys.argv[1:3]
 manifest = json.loads(open(manifest_path).read())
 changed = [line.strip() for line in open(changed_path) if line.strip()]
+all_gates = set(manifest["allGates"])
+
+def matches(path, prefix):
+    return path == prefix or path.startswith(prefix)
 
 required_gates = set()
-for flow in manifest["flows"]:
-    prefixes = flow["paths"]
-    if any(path == prefix or path.startswith(prefix) for path in changed for prefix in prefixes):
-        required_gates.update(flow["gates"])
+unmapped = []
+for path in changed:
+    path_gates = set()
+    for flow in manifest["flows"]:
+        if any(matches(path, prefix) for prefix in flow["paths"]):
+            path_gates.update(flow["gates"])
+    if path_gates:
+        required_gates.update(path_gates)
+    else:
+        unmapped.append(path)
+
+# Conservative fallback (fail closed): a changed path this map does not
+# recognize -- an ordinary new src/*.cpp file, the workflow file itself, the
+# dependency map itself, CMakeLists.txt, or simply no changed files at all --
+# must not silently disable every gate. Run everything rather than guess.
+fallback = bool(unmapped) or not changed
+if fallback:
+    required_gates = set(all_gates)
 
 for gate in manifest["allGates"]:
     value = "true" if gate in required_gates else "false"
     print(f"run_{gate.replace('-', '_')}={value}")
 
-print(f"TLA_GATE_SELECTION_STATUS=PASS changed={len(changed)} required={','.join(sorted(required_gates)) or 'none'}", file=sys.stderr)
+print(
+    "TLA_GATE_SELECTION_STATUS=PASS "
+    f"changed={len(changed)} unmapped={len(unmapped)} fallback={fallback} "
+    f"required={','.join(sorted(required_gates)) or 'none'}",
+    file=sys.stderr,
+)
 PY

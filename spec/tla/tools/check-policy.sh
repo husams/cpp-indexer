@@ -17,6 +17,8 @@ required = (
     "/spec/tla/models/*.cfg @husams",
     "/spec/tla/proofs/ @husams",
     "/spec/tla/counterexamples/golden/ @husams",
+    "/.github/CODEOWNERS @husams",
+    "/spec/tla/manifest.json @husams",
 )
 missing = [entry for entry in required if entry not in codeowners]
 if missing:

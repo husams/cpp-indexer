@@ -55,12 +55,23 @@ The following paths are protected human-authored inputs:
 - `spec/tla/models/*.cfg`
 - `spec/tla/proofs/`
 - `spec/tla/counterexamples/golden/`
+- `.github/CODEOWNERS` (repo-root-relative -- this list itself)
+- `spec/tla/manifest.json` (repo-root-relative -- the protected-path index itself)
 
 Generators may write only below `spec/tla/generated/`. They must not replace,
 delete, or rewrite protected or trusted files. Changes to protected files
 require the explicit review owner in `.github/CODEOWNERS` and a review of the
 invariant/assumption diff. CI must run the checker from the committed tree so a
 generated file cannot silently redefine the checked-in policy.
+
+The last two entries close a self-bypass gap (HSE-89 review fix): without
+them, a change could edit `manifest.json` to remove a `protectedPaths` entry,
+or edit `.github/CODEOWNERS` to add itself as an owner, and neither edit would
+itself require review. `tools/check-protected-review.sh` additionally
+resolves both files from `GITHUB_BASE_SHA` (the pre-PR commit), not the
+checked-out worktree, so evaluating a PR's diff against its own edited copy
+of these files is not possible even if this protectedPaths entry were somehow
+missing.
 
 ## Assurance-level and proof policy (HSE-89)
 

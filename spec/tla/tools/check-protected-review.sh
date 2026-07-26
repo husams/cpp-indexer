@@ -9,6 +9,15 @@
 # report success, so the requirement is enforced even if branch protection is
 # ever misconfigured.
 #
+# SECURITY: the protected-path set (manifest.json's protectedPaths) and the
+# CODEOWNERS ownership list are both read from GITHUB_BASE_SHA via `git show`,
+# never from the checked-out worktree (the PR head). Reading them from HEAD
+# would let the very PR being policed delete a protectedPaths entry, or
+# rewrite CODEOWNERS to name itself as owner, and have the gate evaluate
+# itself against its own edited rules. The base ref is the immutable,
+# pre-PR source of truth for "what was protected and who owns it" this gate
+# is supposed to enforce.
+#
 # Required env: GITHUB_TOKEN, GITHUB_REPOSITORY (owner/repo),
 #               GITHUB_PR_NUMBER, GITHUB_BASE_SHA, GITHUB_HEAD_SHA.
 # Requires the checkout to have both SHAs available (fetch-depth: 0, or a
@@ -34,19 +43,30 @@ trap 'rm -rf "$WORK"' EXIT
 
 git -C "$ROOT" diff --name-only "$GITHUB_BASE_SHA" "$GITHUB_HEAD_SHA" >"$WORK/changed.txt"
 
-python3 - "$ROOT" "$WORK/changed.txt" "$WORK/matched.txt" <<'PY'
+# Read the policy files as they existed at the base commit -- not from the
+# worktree, which is checked out at the PR's head and could have edited them.
+git -C "$ROOT" show "${GITHUB_BASE_SHA}:spec/tla/manifest.json" >"$WORK/base-manifest.json" \
+  || die "base-manifest-unreadable"
+git -C "$ROOT" show "${GITHUB_BASE_SHA}:.github/CODEOWNERS" >"$WORK/base-codeowners" \
+  || die "base-codeowners-unreadable"
+
+python3 - "$WORK/base-manifest.json" "$WORK/changed.txt" "$WORK/matched.txt" <<'PY'
 import json
 import pathlib
 import sys
 
-root, changed_path, matched_path = (pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3])
-manifest = json.loads((root / "spec/tla/manifest.json").read_text())
+manifest_path, changed_path, matched_path = sys.argv[1:4]
+manifest = json.loads(pathlib.Path(manifest_path).read_text())
 protected = manifest["protectedPaths"]
 changed = [line.strip() for line in open(changed_path) if line.strip()]
 
 def is_protected(path: str) -> bool:
     for entry in protected:
-        full = f"spec/tla/{entry}"
+        # A leading "/" is repo-root-relative (e.g. "/.github/CODEOWNERS",
+        # "/spec/tla/manifest.json" -- the policy files that define this very
+        # protected set and its ownership); anything else is spec/tla/-relative,
+        # matching the existing convention.
+        full = entry[1:] if entry.startswith("/") else f"spec/tla/{entry}"
         if full.endswith("*.cfg"):
             directory = full[: -len("*.cfg")]
             if path.startswith(directory) and path.endswith(".cfg"):
@@ -71,8 +91,12 @@ if [[ ! -s "$WORK/matched.txt" ]]; then
   exit 0
 fi
 
-owners="$(grep -ohE '@[A-Za-z0-9_-]+' "$ROOT/.github/CODEOWNERS" | tr -d '@' | sort -u)"
-[[ -n "$owners" ]] || die "no-codeowners-configured"
+# manifest.json and CODEOWNERS are themselves both listed in manifest.json's
+# protectedPaths policy-and-ownership coverage; if THIS diff touches either
+# one, the base-commit ownership list still governs -- a PR cannot expand its
+# own approval pool by adding owners in the same change.
+owners="$(grep -ohE '@[A-Za-z0-9_-]+' "$WORK/base-codeowners" | tr -d '@' | sort -u)"
+[[ -n "$owners" ]] || die "no-codeowners-configured-at-base"
 
 curl --fail --silent --show-error \
   --header "Authorization: Bearer $GITHUB_TOKEN" \

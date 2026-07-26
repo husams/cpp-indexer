@@ -39,6 +39,8 @@
         "src/application/services.hpp",
         "src/application/conformance_recorder.cpp",
         "src/application/conformance_recorder.hpp",
+        "src/application/conformance_schema.cpp",
+        "src/application/conformance_schema.hpp",
         "src/query/exec.cpp",
         "src/query/exec.hpp",
         "src/query/result_protocol.cpp"
@@ -78,7 +80,19 @@
         "spec/tla/ASSURANCE.md",
         "spec/tla/manifest.json",
         "spec/tla/README.md",
-        ".github/CODEOWNERS"
+        ".github/CODEOWNERS",
+        "spec/tla/tools/check-policy.sh",
+        "spec/tla/tools/check-protected-review.sh"
+      ]
+    },
+    {
+      "name": "ci-infrastructure",
+      "gates": ["tla-syntax-and-model", "tla-proofs", "tla-conformance",
+               "tla-sidecar-conformance", "tla-policy", "cpp-default"],
+      "paths": [
+        ".github/workflows/verification.yml",
+        "spec/tla/ci-dependency-map.json",
+        "spec/tla/tools/select-changed-gates.sh"
       ]
     }
   ],

@@ -152,7 +152,9 @@
     "modules/CidxTypes.tla",
     "models/*.cfg",
     "proofs/",
-    "counterexamples/golden/"
+    "counterexamples/golden/",
+    "/.github/CODEOWNERS",
+    "/spec/tla/manifest.json"
   ],
   "conformance": {
     "operations": "conformance/operation-map.json",

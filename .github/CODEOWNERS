@@ -8,3 +8,10 @@
 # counterexample to make a gate green.
 /spec/tla/proofs/ @husams
 /spec/tla/counterexamples/golden/ @husams
+# HSE-89 review fix: the policy files that DEFINE what is protected and who
+# owns it must themselves be protected, or a change could edit them to
+# silently narrow protectedPaths or replace the owner before the same PR
+# merges. check-protected-review.sh resolves both files from the base commit
+# specifically so this cannot be bypassed by editing them at HEAD.
+/.github/CODEOWNERS @husams
+/spec/tla/manifest.json @husams

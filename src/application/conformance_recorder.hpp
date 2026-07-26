@@ -3,40 +3,55 @@
 // observation-map.json, and sidecar-operation-map.json already use for
 // abstract TLA+ states/actions (HSE-89). This is purely additive: it wraps
 // an existing ApplicationServices implementation and never changes what it
-// does; it only records what happened, in the shared vocabulary.
+// does; it only records what happened, in the shared vocabulary, and
+// replays those records against the checked-in schema files (not an
+// invented parallel vocabulary -- see conformance_schema.hpp).
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "application/conformance_schema.hpp"
 #include "application/services.hpp"
 
 namespace cidx::application {
 
+// A recorded call, in the vocabulary the schema files declare. `operation`
+// is empty when the call is outside this recorder's declared scope (only
+// index-generation publication, QueryPlan read-only execution, and sidecar
+// publication are covered -- the other six ApplicationServices methods are
+// delegated but never claimed as conformance-checked, since operation-map.json
+// has no corresponding actions for them). `fields` holds only field=value
+// pairs actually derived from the real ResultEnvelope/ApplicationContext.
 struct ConformanceObservation {
   std::string operation;
-  std::string status;
-  std::string completenessState;
-  std::string freshness;
-  bool truncated = false;
-  std::vector<std::string> artifactKinds;
-  std::vector<std::string> diagnosticCodes;
+  std::vector<std::pair<std::string, std::string>> fields;
 };
 
 // Wraps a real ApplicationServices implementation, delegates every call
-// unchanged, and records one ConformanceObservation per call translated from
-// the returned protocol::ResultEnvelope. `conformant()` checks the recorded
-// observations against the one protected invariant expressible from the
-// envelope alone without a live storage/query read port: CidxProtected's
-// NoPartialPublication -- an index-generation-publication observation may
-// never report a complete, current-freshness result without at least one
-// published artifact. See spec/tla/ASSURANCE.md for what this instrumentation
-// does and does not prove, and tests/conformance_recorder_test.cpp for the
-// seeded-defect regression this is meant to reject.
+// unchanged, and records one ConformanceObservation per in-scope call.
+// `conformant()` replays the recorded trace against the declared schema:
+// every recorded value must be one the schema allows for that field, every
+// operation's schema-declared expectation must hold, and the two protected
+// invariants this recorder can evaluate from ResultEnvelope/ApplicationContext
+// data alone -- CidxProtected.NoPartialPublication (index-generation
+// publication) and CidxProtected.ReadOnlyQueries (QueryPlan execution) --
+// must hold. See spec/tla/ASSURANCE.md for what this instrumentation does
+// and does not prove, and tests/conformance_recorder_test.cpp for the seeded
+// regressions this is meant to reject.
 class ConformanceRecorder final : public ApplicationServices {
 public:
-  explicit ConformanceRecorder(const ApplicationServices &delegate)
-      : delegate_(delegate) {}
+  ConformanceRecorder(const ApplicationServices &delegate,
+                      ConformanceSchema index_query_schema,
+                      ConformanceSchema sidecar_schema)
+      : delegate_(delegate), index_query_schema_(std::move(index_query_schema)),
+        sidecar_schema_(std::move(sidecar_schema)) {}
+
+  // Reads the checked-in schema files from spec/tla/conformance/ via the
+  // CIDX_SPEC_TLA_CONFORMANCE_DIR compile definition (CMakeLists.txt), the
+  // same pattern src/ui/assets.cpp uses for CIDX_UI_ASSET_DIR.
+  static ConformanceRecorder wrapping(const ApplicationServices &delegate);
 
   protocol::ResultEnvelope index(const IndexRequest &request,
                                  ApplicationContext &context) const override;
@@ -66,10 +81,9 @@ public:
   [[nodiscard]] bool conformant() const;
 
 private:
-  protocol::ResultEnvelope record(std::string operation,
-                                  protocol::ResultEnvelope envelope) const;
-
   const ApplicationServices &delegate_;
+  ConformanceSchema index_query_schema_;
+  ConformanceSchema sidecar_schema_;
   mutable std::vector<ConformanceObservation> observations_;
 };
 

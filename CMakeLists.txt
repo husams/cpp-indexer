@@ -148,6 +148,7 @@ add_library(cidx_core STATIC
   src/application/registry.cpp
   src/application/services.cpp
   src/application/conformance_recorder.cpp
+  src/application/conformance_schema.cpp
   src/util/logger.cpp
   src/util/env.cpp
   src/util/subprocess.cpp
@@ -381,7 +382,8 @@ target_include_directories(cidx_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
 target_compile_definitions(cidx_core PRIVATE
-  "CIDX_UI_ASSET_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/web\"")
+  "CIDX_UI_ASSET_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/web\""
+  "CIDX_SPEC_TLA_CONFORMANCE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/spec/tla/conformance\"")
 target_compile_options(cidx_core PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra>
 )
