@@ -107,6 +107,8 @@ require('./app.js');
   tapHandler({target: {group: () => 'edges', data: () => edge}});
   const button = document.getElementById('load-evidence');
   await button.onclick();
+  assert.equal(button.removed, false,
+    'a truncated evidence page must retain the continuation action');
   await button.onclick();
   assert.deepEqual(offsets, ['1', '5001']);
   assert.equal(button.removed, true);

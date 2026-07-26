@@ -793,6 +793,8 @@ TEST_CASE("Live explorer: filters progress beyond the first raw candidate "
   const int64_t early2 = make_node("USR::early2", "first::early2", file_a);
   const int64_t early3 = make_node("USR::early3", "first::early3", file_a);
   const int64_t wanted = make_node("USR::wanted", "wanted::target", file_b);
+  const int64_t wrong_namespace =
+      make_node("USR::wrong_namespace", "other::target", file_b);
   const auto add_edge = [&](int64_t dst) {
     cidx::Edge edge;
     edge.src_id = root;
@@ -804,6 +806,7 @@ TEST_CASE("Live explorer: filters progress beyond the first raw candidate "
   add_edge(early2);
   add_edge(early3);
   add_edge(wanted);
+  add_edge(wrong_namespace);
 
   RunningServer server(graph_provider_for(db));
   const std::string base =
@@ -834,6 +837,7 @@ TEST_CASE("Live explorer: filters progress beyond the first raw candidate "
   }
   CHECK(combined.contains("USR::wanted"));
   CHECK_FALSE(combined.contains("USR::early"));
+  CHECK_FALSE(combined.contains("USR::wrong_namespace"));
 }
 
 TEST_CASE("Live explorer: applicability is decided from the complete edge "
