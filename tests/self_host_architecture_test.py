@@ -27,7 +27,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "python"))
 
-from scripts.self_host_architecture_report import check_policy_metadata, generate_report  # noqa: E402
+from scripts.self_host_architecture_report import (  # noqa: E402
+    _edge_site_count,
+    check_policy_metadata,
+    generate_report,
+)
 from indexer.storage import Storage, Symbol  # noqa: E402
 from indexer import queryplan as qp  # noqa: E402
 
@@ -541,6 +545,46 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         self.assertEqual(report["completeness"]["semantic"], "partial")
         self.assertEqual(report["status"], "fail")
 
+    def test_edge_site_count_finds_the_real_edge_past_the_enumerate_budget(self) -> None:
+        # [Round-6 internal critic P1] `_edge_site_count` used to call
+        # `executor.run(plan)` with NO `after_id` on a `view("edge") |
+        # nodes(eq(src_id, ...), eq(dst_id, ...))` plan. queryplan.py's
+        # `_enumerate` only wires the pagination cursor into the "edge"
+        # branch when `after_id is not None`; with none, it fetches the
+        # globally-FIRST ENUMERATE_BUDGET edges by id and applies
+        # (src_id, dst_id) as a post-fetch filter -- so any edge whose id
+        # sorts past that cutoff was invisible to the filter no matter how
+        # many real sites it owns. Reproduced directly here: >ENUMERATE_
+        # BUDGET filler edges (each a distinct (src, dst) pair -- `add_edge`
+        # upserts on (src_id, dst_id, kind), so repeating one pair would
+        # just bump its `count` instead of consuming a fresh id) followed by
+        # ONE real edge with 3 genuine call sites. Before the fix this
+        # returned `(0, True)` -- wrong on both the count and the
+        # truncation flag -- for a real, populated edge.
+        fixture = _Fixture()
+        overflow = qp.ENUMERATE_BUDGET + 50
+        for i in range(overflow):
+            filler_dst = fixture._db.add_symbol(
+                Symbol(
+                    usr=f"filler::site_count_dst{i}", spelling=f"filler{i}",
+                    qual_name=f"filler{i}", kind="function", file_id=fixture.file_value,
+                    line=200 + i, is_definition=True, resolved=True,
+                )
+            )
+            fixture._db.add_edge(fixture.sym_run, filler_dst, CALLS_KIND)
+        real_edge_id = fixture._db.add_edge(fixture.sym_run, fixture.sym_write, CALLS_KIND)
+        fixture._db.add_edge_site(real_edge_id, fixture.file_pass, 10, 1)
+        fixture._db.add_edge_site(real_edge_id, fixture.file_pass, 20, 2)
+        fixture._db.add_edge_site(real_edge_id, fixture.file_pass, 30, 3)
+        fixture._db._conn.commit()
+
+        executor = qp.Executor(fixture._db)
+        real_count, truncated = _edge_site_count(
+            executor, real_edge_id, fixture.sym_run, fixture.sym_write
+        )
+        self.assertEqual(real_count, 3)
+        self.assertFalse(truncated)
+
     def test_baseline_entry_missing_exception_metadata_is_rejected(self) -> None:
         fixture = _Fixture()
         fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model", "persistence"]
@@ -677,6 +721,53 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         fixture = _Fixture()
         (fixture.root / "src/extraction/dup_char.hpp").write_text(
             "inline constexpr auto kSymbolKind = std::pair{'\\b', \"function\"};\n",
+            encoding="utf-8",
+        )
+        report = fixture.run()
+        self.assertTrue(any("duplicates a generated catalog declaration" in error for error in report["findings"]["catalogGuard"]))
+
+    def test_catalog_duplicate_unary_plus_literal_is_rejected(self) -> None:
+        # [Round-6 internal critic P1] `+8` (a leading unary sign on a bare
+        # literal) previously produced ZERO regex match at all -- not
+        # matched-but-unsupported, genuinely invisible to the guard.
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/dup_unary_plus.hpp").write_text(
+            'inline constexpr auto kSymbolKind = std::pair{+8, "function"};\n',
+            encoding="utf-8",
+        )
+        report = fixture.run()
+        self.assertTrue(any("duplicates a generated catalog declaration" in error for error in report["findings"]["catalogGuard"]))
+
+    def test_catalog_duplicate_parenthesized_literal_is_rejected(self) -> None:
+        # [Round-6 internal critic P1] `(8)` (a bare literal wrapped in one
+        # layer of parentheses) previously produced zero regex match.
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/dup_paren_literal.hpp").write_text(
+            'inline constexpr auto kSymbolKind = std::pair{(8), "function"};\n',
+            encoding="utf-8",
+        )
+        report = fixture.run()
+        self.assertTrue(any("duplicates a generated catalog declaration" in error for error in report["findings"]["catalogGuard"]))
+
+    def test_catalog_duplicate_parenthesized_shift_expression_is_rejected(self) -> None:
+        # [Round-6 internal critic P1] `(4 << 1)` (a shift expression wrapped
+        # in one layer of parentheses) previously produced zero regex match.
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/dup_paren_shift.hpp").write_text(
+            'inline constexpr auto kSymbolKind = std::pair{(4 << 1), "function"};\n',
+            encoding="utf-8",
+        )
+        report = fixture.run()
+        self.assertTrue(any("duplicates a generated catalog declaration" in error for error in report["findings"]["catalogGuard"]))
+
+    def test_catalog_duplicate_nested_static_cast_is_rejected(self) -> None:
+        # [Round-6 internal critic P1] `static_cast<unsigned>(static_cast<int>(8))`
+        # (one cast wrapping another) previously produced zero regex match --
+        # the original guard only ever accepted one cast around a bare atom.
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/dup_nested_cast.hpp").write_text(
+            'inline constexpr auto kSymbolKind = '
+            'std::pair{static_cast<unsigned>(static_cast<int>(8)), "function"};\n',
             encoding="utf-8",
         )
         report = fixture.run()
@@ -1155,12 +1246,15 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         # (and `check_index_coverage`'s `indexed_paths`) file listing used
         # to be an INNER JOIN against `directory`. A plain directory delete
         # through the default `PRAGMA foreign_keys = ON` connection
-        # correctly CASCADES (removing the file too) -- but Storage's own
-        # bulk-merge/migration code deliberately toggles that pragma OFF
-        # around a directory merge, and SQLite never retroactively
-        # re-validates existing rows once it is switched back ON: a
-        # directory removed during one of those windows leaves its files'
-        # `directory_id` pointing at nothing, permanently. The INNER JOIN
+        # correctly CASCADES (removing the file too) -- this fixture
+        # reproduces the other, defense-in-depth case: no `Storage` method
+        # today deletes/merges a directory with the pragma OFF (see
+        # `_portable_source_hash`'s own comment for the exact code paths
+        # checked), but SQLite never retroactively re-validates existing
+        # rows once the pragma is switched back ON, so if a directory ever
+        # WERE removed with it off -- exactly what this fixture does by
+        # hand below -- its files' `directory_id` is left pointing at
+        # nothing, permanently. The INNER JOIN
         # silently excluded such a file (and its content) from
         # `sourceContentHash` entirely -- collapsing its row to zero
         # contribution, as if it had never been indexed. This is not

@@ -244,7 +244,9 @@ def _run_all_pages(
         after_id = next_after_id
 
 
-def _edge_site_count(executor: Executor, src_id: int, dst_id: int) -> tuple[int, bool]:
+def _edge_site_count(
+    executor: Executor, edge_id_hint: int, src_id: int, dst_id: int
+) -> tuple[int, bool]:
     """The real, QueryPlan-only count of every recorded call SITE owned by
     the edge(s) from `src_id` to `dst_id`, plus whether even counting them
     completed.
@@ -264,13 +266,36 @@ def _edge_site_count(executor: Executor, src_id: int, dst_id: int) -> tuple[int,
     count equal to or larger than the true count for the ONE edge being
     checked, so it can never wrongly report a page as complete -- at worst
     it forces an unnecessary retry, never a silently accepted evidence gap.
+
+    [Round-6 internal critic P1] `executor.run(plan)` with no `after_id`
+    enumerates the "edge" view's raw ids starting from the BEGINNING of the
+    whole table, capped at ENUMERATE_BUDGET, and only THEN applies
+    (src_id, dst_id) as a post-fetch filter (queryplan.py's `_enumerate`: a
+    typed-view predicate is never pushed into the raw SQL scan, only applied
+    to whatever the unconditional cap already admitted). Once the table has
+    more than ENUMERATE_BUDGET edges, an edge whose id sorts past that
+    global cutoff is invisible to the filter no matter how the predicate is
+    phrased, so this silently returned `(0, True)` for a real, populated
+    edge -- exactly backwards for a helper whose entire job is to tell the
+    caller whether a page boundary is genuinely complete. The caller
+    (`_run_all_site_pages`) always already knows `edge_id_hint`: the
+    boundary edge's OWN id, the very row this count is being asked to
+    verify. Passing `after_id=edge_id_hint - 1` instead of no cursor at all
+    reuses QueryPlan's existing `after_id` cursor, which pushes a real
+    `WHERE id > ?` into the SQL BEFORE the ENUMERATE_BUDGET cap is applied
+    (see `_enumerate`'s `after_id is not None and st.view == "edge"`
+    branch) -- so `edge_id_hint` itself is always the FIRST id considered
+    and can never be capped out of the window, however large the edge
+    table. This stays a single, QueryPlan-only, bounded round trip; no
+    full-table pagination loop is needed (and would be far more expensive,
+    since this helper runs at every full-page boundary).
     """
     plan = (
         start(codebase()) | view("edge")
         | nodes(all_of([eq("src_id", src_id), eq("dst_id", dst_id)]))
         | sites() | count()
     ).plan
-    result = executor.run(plan)
+    result = executor.run(plan, after_id=edge_id_hint - 1)
     return result.scalar, result.truncated
 
 
@@ -347,7 +372,9 @@ def _run_all_site_pages(
         if len(page_rows) == ENUMERATE_BUDGET and page_rows:
             last_edge_id, last_src_id, last_dst_id = page_rows[-1][0], page_rows[-1][1], page_rows[-1][2]
             sites_in_page = sum(1 for row in page_rows if row[0] == last_edge_id)
-            real_count, count_truncated = _edge_site_count(executor, last_src_id, last_dst_id)
+            real_count, count_truncated = _edge_site_count(
+                executor, last_edge_id, last_src_id, last_dst_id
+            )
             if count_truncated or real_count != sites_in_page:
                 if sites_in_page == len(page_rows):
                     rows.extend(page_rows)
@@ -638,20 +665,68 @@ _CPP_CHAR_LITERAL = r"'(?:\\.|[^'\\])'"
 # numbering.
 _CPP_CONST_ATOM = r"(?:(?:" + _CPP_INT_LITERAL + r")" + _CPP_INT_SUFFIX + r"|" + _CPP_CHAR_LITERAL + r")"
 
-# The full constant-expression SHAPE this guard recognizes textually: a
-# `static_cast<...>` around one atom, one atom shifted/added/subtracted/
-# multiplied/divided by another atom, or a bare atom. [PR #67 internal
-# critic] closes the three concrete bypasses it reproduced --
-# `static_cast<int>(8)`, `1 << 3`, and `'\b'` -- without trying to become a
-# general C++ expression evaluator: an identifier of any kind (macro, enum
-# constant, named constexpr/const variable) never matches any branch here,
-# so a duplicate spelled through one of those remains genuinely undetected
-# -- see `unresolvedLimitations` in `generate_report` for why that is the
-# deliberate boundary, not an oversight.
-_CPP_CONST_VALUE = (
+# One "unit" this guard can evaluate to a numeric value without any
+# enclosing parentheses: a bare atom, a `static_cast<...>` around one atom,
+# or one leading unary `+`/`-` sign on one atom. [Round-6 internal critic
+# P1] widens the original bare-atom-only unit to also close
+# `static_cast<unsigned>(static_cast<int>(8))` (one cast wrapping another,
+# via `_CPP_CONST_TERM` below allowing a UNIT -- including this cast-of-atom
+# form -- inside the outer cast) and `+8` (a leading unary sign) -- both
+# produced ZERO regex match at all before this, neither an identifier nor
+# one of the previously-recognized shapes.
+_CPP_CONST_UNIT = r"(?:" + (
     r"static_cast\s*<[^<>]*>\s*\(\s*" + _CPP_CONST_ATOM + r"\s*\)"
-    + r"|" + _CPP_CONST_ATOM + r"\s*(?:<<|>>|\+|-|\*|/)\s*" + _CPP_CONST_ATOM
+    + r"|[+-]\s*" + _CPP_CONST_ATOM
     + r"|" + _CPP_CONST_ATOM
+) + r")"
+
+# One enclosing layer of parentheses around a UNIT, or around a single
+# UNIT-op-UNIT binary operation. [Round-6 internal critic P1] closes
+# `(8)` and `(4 << 1)` -- a parenthesized literal or parenthesized shift/
+# arithmetic expression, both of which previously produced zero regex
+# match (the top-level shapes never allowed a leading `(` except as part
+# of `static_cast<...>(...)`'s own call syntax).
+_CPP_CONST_PAREN = (
+    r"\(\s*" + _CPP_CONST_UNIT
+    + r"\s*(?:(?:<<|>>|\+|-|\*|/)\s*" + _CPP_CONST_UNIT + r"\s*)?\)"
+)
+
+# A "term": a UNIT on its own, or one layer of parentheses around a UNIT or
+# a UNIT-op-UNIT. Used both as a bare top-level match and as the object of
+# an outer `static_cast<...>` -- so the WHOLE expression, or what a cast
+# wraps, can each be signed, parenthesized, or itself one more level of
+# cast. Deliberately NOT used as an operand of the top-level binary-op
+# branch below (that branch uses UNIT, not TERM) -- see `_CPP_CONST_VALUE`'s
+# own comment for why allowing a parenthesized TERM there would be
+# ambiguous to evaluate.
+_CPP_CONST_TERM = r"(?:" + _CPP_CONST_UNIT + r"|" + _CPP_CONST_PAREN + r")"
+
+# The full constant-expression SHAPE this guard recognizes textually: a
+# `static_cast<...>` around one term, one UNIT shifted/added/subtracted/
+# multiplied/divided by another UNIT, or a bare term -- where a "term" is,
+# recursively, a bare literal, a signed literal, one `static_cast` around a
+# literal, or one enclosing layer of parentheses around any of those (see
+# `_CPP_CONST_UNIT`/`_CPP_CONST_PAREN`/`_CPP_CONST_TERM` above for the exact
+# grammar). The binary-operation branch deliberately uses UNIT, not the
+# wider TERM, on both sides: a UNIT can never itself contain a nested
+# operator, so there is exactly one way to read `1 << 3`. Allowing a
+# parenthesized TERM as an operand here too (`(4 << 1) + 2`) would let the
+# SAME text be split at either the inner or the outer operator, which is
+# genuinely ambiguous to evaluate correctly and is intentionally left
+# unmatched rather than resolved by guesswork; `(4 << 1)` and `(8)` are
+# still fully covered as a bare TERM in their own right (the third
+# alternative below). This is deliberately still not a general C++
+# expression evaluator: an identifier of any kind (macro, enum constant,
+# named constexpr/const variable) never matches any branch here, and
+# nesting beyond the one extra layer of parentheses/cast covered above
+# remains unmatched too, so a duplicate spelled through one of those
+# remains genuinely undetected -- see `unresolvedLimitations` in
+# `generate_report` for the exact, currently-accepted grammar and its
+# boundary.
+_CPP_CONST_VALUE = (
+    r"static_cast\s*<[^<>]*>\s*\(\s*" + _CPP_CONST_TERM + r"\s*\)"
+    + r"|" + _CPP_CONST_UNIT + r"\s*(?:<<|>>|\+|-|\*|/)\s*" + _CPP_CONST_UNIT
+    + r"|" + _CPP_CONST_TERM
 )
 
 _CPP_CONST_ATOM_RE = re.compile(
@@ -659,6 +734,15 @@ _CPP_CONST_ATOM_RE = re.compile(
 )
 _CPP_STATIC_CAST_RE = re.compile(r"^static_cast\s*<[^<>]*>\s*\(\s*(.+?)\s*\)$", re.DOTALL)
 _CPP_BINARY_OP_RE = re.compile(r"^(.+?)\s*(<<|>>|\+|-|\*|/)\s*(.+)$", re.DOTALL)
+# An anchored, exact match for "this whole string is ONE `_CPP_CONST_PAREN`"
+# -- used by the eval functions below to tell a genuine single
+# parenthesized term (`(4 << 1)`) apart from a top-level binary operation
+# whose OPERANDS merely happen to each start/end with their own parens
+# (`(4) + (1)`, matchable by `_CPP_CONST_VALUE`'s TERM-op-TERM branch, each
+# TERM its own `_CPP_CONST_PAREN`): a naive "starts with `(` and ends with
+# `)`" string check cannot distinguish the two, since the OUTER text of the
+# latter also starts and ends with a paren character.
+_CPP_CONST_PAREN_RE = re.compile(r"^" + _CPP_CONST_PAREN + r"$", re.DOTALL)
 
 _CHAR_ESCAPES = {
     "a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11,
@@ -722,27 +806,81 @@ def _fold_cpp_binary_op(op: str, left: int, right: int) -> int | None:
     return None
 
 
+def _eval_cpp_const_unit(token: str) -> int | None:
+    """The numeric VALUE of one `_CPP_CONST_UNIT` match: a bare atom, one
+    leading unary `+`/`-` sign on a bare atom, or a `static_cast<...>`
+    around a bare atom."""
+    token = token.strip()
+    cast_match = _CPP_STATIC_CAST_RE.match(token)
+    if cast_match:
+        return _eval_cpp_const_atom(cast_match.group(1))
+    if token[:1] in ("+", "-"):
+        value = _eval_cpp_const_atom(token[1:])
+        if value is None:
+            return None
+        return -value if token[0] == "-" else value
+    return _eval_cpp_const_atom(token)
+
+
+def _eval_cpp_const_term(token: str) -> int | None:
+    """The numeric VALUE of one `_CPP_CONST_TERM` match: a `_CPP_CONST_UNIT`
+    on its own, or one enclosing layer of parentheses around a UNIT or a
+    single UNIT-op-UNIT binary operation (`_CPP_CONST_PAREN`). Checked via
+    `_CPP_CONST_PAREN_RE`'s anchored, whole-string match rather than a bare
+    "starts with `(` and ends with `)`" check -- see that regex's own
+    comment for why a naive prefix/suffix check would misparse something
+    like `(4) + (1)` (two independently-parenthesized operands of a
+    top-level binary operation, each its own valid TERM) as a single
+    parenthesized group instead.
+    """
+    token = token.strip()
+    if _CPP_CONST_PAREN_RE.match(token):
+        inner = token[1:-1].strip()
+        op_match = _CPP_BINARY_OP_RE.match(inner)
+        if op_match:
+            left = _eval_cpp_const_unit(op_match.group(1))
+            right = _eval_cpp_const_unit(op_match.group(3))
+            if left is None or right is None:
+                return None
+            return _fold_cpp_binary_op(op_match.group(2), left, right)
+        return _eval_cpp_const_unit(inner)
+    return _eval_cpp_const_unit(token)
+
+
 def _eval_cpp_const_expr(text: str) -> int | None:
     """The numeric VALUE of one `_CPP_CONST_VALUE` match: a `static_cast<...>`
-    around a supported atom, a single supported binary shift/arithmetic
-    operation between two supported atoms, or a bare supported atom. Returns
-    None if `text` is not actually one of those shapes (or evaluation itself
-    fails, e.g. division by zero) -- this is never called on arbitrary,
-    unvalidated text; the caller only ever passes something `_CPP_CONST_VALUE`
-    already matched.
+    around a supported term, a single supported binary shift/arithmetic
+    operation between two supported UNITS, or a bare supported term -- where
+    a "term" (`_eval_cpp_const_term`) is itself a bare, signed, or
+    `static_cast`-wrapped atom, optionally wrapped in one further layer of
+    parentheses, and a "unit" (`_eval_cpp_const_unit`) is that same atom
+    without the extra parentheses (see `_CPP_CONST_UNIT`/`_CPP_CONST_TERM`'s
+    own definitions for the exact shapes, and their comments for why the
+    binary-operation branch is restricted to UNIT operands). Returns None if
+    `text` is not actually one of those shapes (or evaluation itself fails,
+    e.g. division by zero) -- this is never called on arbitrary, unvalidated
+    text; the caller only ever passes something `_CPP_CONST_VALUE` already
+    matched.
     """
     text = text.strip()
     cast_match = _CPP_STATIC_CAST_RE.match(text)
     if cast_match:
-        return _eval_cpp_const_atom(cast_match.group(1))
+        return _eval_cpp_const_term(cast_match.group(1))
+    if _CPP_CONST_PAREN_RE.match(text):
+        # The whole match is ONE parenthesized term (`(4 << 1)`) -- must be
+        # checked before the generic binary-op split below, which would
+        # otherwise happily (and wrongly) split it into "(4" and "1)" by
+        # treating the shift/arithmetic operator INSIDE the parentheses as
+        # if it were the top-level operator.
+        return _eval_cpp_const_term(text)
     op_match = _CPP_BINARY_OP_RE.match(text)
     if op_match:
-        left = _eval_cpp_const_atom(op_match.group(1))
-        right = _eval_cpp_const_atom(op_match.group(3))
+        left = _eval_cpp_const_unit(op_match.group(1))
+        right = _eval_cpp_const_unit(op_match.group(3))
         if left is None or right is None:
             return None
         return _fold_cpp_binary_op(op_match.group(2), left, right)
-    return _eval_cpp_const_atom(text)
+    return _eval_cpp_const_term(text)
 
 
 def _parse_cpp_int_literal(token: str) -> int | None:
@@ -784,12 +922,26 @@ def check_catalog_containment(root: Path, graph: ModuleGraph, policy: dict) -> l
     also evaluates (`_eval_cpp_const_expr`) a `static_cast<...>` around one,
     a single shift/arithmetic operation between two of them, and a
     character literal on its own (`'\\b'` == 8) -- see `_CPP_CONST_VALUE`'s
-    own docstring for exactly which shapes that covers. A guarded id spelled
-    through a macro, an enum constant, or a reference to another named
-    constexpr/const variable remains genuinely undetected: closing THOSE
-    would require actually resolving what the identifier means (a real
-    semantic parse, or comparing against the generated contract itself),
-    not a wider textual pattern -- see `unresolvedLimitations` below.
+    own docstring for exactly which shapes that covers.
+
+    [Round-6 internal critic P1] that first widening still produced ZERO
+    regex match at all -- not "matched but evaluated as unsupported",
+    genuinely invisible to the pattern -- for `+8` (a leading unary sign),
+    `(8)` (a parenthesized literal), `(4 << 1)` (a parenthesized shift
+    expression), and `static_cast<unsigned>(static_cast<int>(8))` (one cast
+    wrapping another). `_CPP_CONST_UNIT`/`_CPP_CONST_PAREN`/`_CPP_CONST_TERM`
+    close exactly those four shapes by additionally accepting one leading
+    unary `+`/`-` sign on a literal, one enclosing layer of parentheses
+    around a literal or a single binary operation between two literals, and
+    one `static_cast` wrapping another `static_cast`-of-a-literal. A guarded
+    id spelled through a macro, an enum constant, or a reference to another
+    named constexpr/const variable remains genuinely undetected (none of
+    those is an identifier this guard resolves), and so does any nesting or
+    number of operators beyond the single extra layer covered above: closing
+    THOSE would require actually resolving what the identifier/expression
+    means (a real semantic parse, or comparing against the generated
+    contract itself), not a wider textual pattern -- see
+    `unresolvedLimitations` below for the exact, currently-accepted grammar.
     """
     catalog_guard = policy.get("catalogGuard", {})
     generated = {str(Path(path).as_posix()) for path in catalog_guard.get("generatedOutputs", [])}
@@ -918,16 +1070,21 @@ def _portable_source_hash(root: Path, conn: sqlite3.Connection, db: Storage) -> 
     # declared `NOT NULL REFERENCES directory(id)`, and a plain `DELETE FROM
     # directory` through a connection with the default `PRAGMA
     # foreign_keys = ON` (Storage's own default) correctly CASCADES and
-    # removes the file too -- there is no orphan to find in that case.
-    # But several of Storage's own bulk-merge/migration code paths
-    # deliberately toggle `PRAGMA foreign_keys = OFF` around a directory
-    # merge for performance, and SQLite never retroactively re-validates
-    # existing rows when the pragma is switched back ON: a directory
-    # deleted/merged away during one of those windows leaves its files'
-    # `directory_id` pointing at nothing, permanently. An INNER JOIN
-    # silently excludes such a file from this hash entirely -- previously
-    # collapsing it to zero contribution, as if it had never been indexed
-    # -- rather than surfacing the gap. LEFT JOIN keeps every file row in
+    # removes the file too -- there is no orphan to find in that case. This
+    # is defense-in-depth, not a fix for one known live code path: no
+    # `Storage` method today deletes/merges a directory with
+    # `PRAGMA foreign_keys = OFF` in scope (every existing OFF/ON toggle in
+    # `python/indexer/storage.py`'s `_migrate` rebuilds `symbol`/
+    # `parameter`/`template_arg`/`call_arg`/`artifact_*`, never `directory`).
+    # But SQLite never retroactively re-validates existing rows once the
+    # pragma is switched back ON, so if a directory were ever deleted or
+    # merged away with the pragma OFF -- by a future migration, an external
+    # tool, or a hand-run `DELETE FROM directory` against this same
+    # connection -- its files' `directory_id` would be left pointing at
+    # nothing, permanently and silently. An INNER JOIN would then exclude
+    # such a file from this hash entirely -- collapsing it to zero
+    # contribution, as if it had never been indexed -- rather than
+    # surfacing the gap. LEFT JOIN keeps every file row in
     # the computation; `check_index_coverage`'s
     # `danglingFileDirectoryReferences` is what fails the report closed on
     # the orphaned state itself (matching the existing dangling-symbol-
@@ -1387,15 +1544,21 @@ def generate_report(
         "such a call site is not proof of compliance.",
         "Calls made only through function pointers or std::function are not captured as "
         "'calls'/'dispatch_calls' edges and are outside this pass's evidence.",
-        "The catalog duplication guard is a textual pattern match, not a semantic check. It "
-        "evaluates the numeric VALUE of a bare integer or character literal, a "
-        "static_cast<...> around one, and a single shift/arithmetic operation between two "
-        "of them (any equivalent hex/octal/binary/digit-separator spelling included), but "
-        "any non-bare-literal expression -- a macro, an enum constant, or a reference to "
-        "another named constexpr/const variable defined elsewhere in the file or in another "
-        "translation unit -- is not detected, since evaluating what such an identifier means "
-        "requires either a real semantic (AST-level) parse of the guarded file or comparing "
-        "it directly against the generated contract, not a wider textual pattern.",
+        "The catalog duplication guard is a textual pattern match, not a semantic check. The "
+        "exact grammar it evaluates the numeric VALUE of: a bare integer or character literal "
+        "(any equivalent hex/octal/binary/digit-separator spelling included); one leading unary "
+        "+/- sign on such a literal; a static_cast<...> around such a literal; a single shift/"
+        "arithmetic operation (<<, >>, +, -, *, /) between two such literals (each optionally "
+        "signed or static_cast-wrapped); one enclosing layer of parentheses around any of the "
+        "above or around one such binary operation; and one static_cast wrapping another "
+        "static_cast-of-a-literal. Anything outside that closed grammar is not detected: a "
+        "macro, an enum constant, or a reference to another named constexpr/const variable "
+        "defined elsewhere in the file or in another translation unit (none of these is a "
+        "literal this guard evaluates), and any expression nested or combined beyond the single "
+        "extra layer of parentheses/cast described above (e.g. two operators, or two extra "
+        "layers of parentheses). Detecting those would require either a real semantic "
+        "(AST-level) parse of the guarded file or comparing it directly against the generated "
+        "contract, not a wider textual pattern.",
     ]
     if not facts.calls:
         unresolved_limitations.append(
