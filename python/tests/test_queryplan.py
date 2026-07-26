@@ -1816,10 +1816,24 @@ def test_reverse_type_use_reports_a_direct_symbol_owners_declaration_site():
 
 
 def test_reverse_type_use_rank_orders_witnesses_by_the_full_typed_step_identity():
-    # Two type_edge hops (member_component, then member_owner) both land on
-    # M at position 0 -- an identical (node_id, position, pack_index) key --
-    # but they are structurally distinct witnesses. Only `through` tells
-    # them apart, so the rank key must include it to be total.
+    # Two type_edge hops (return_type, then element_type) both land on M at
+    # position 0 -- an identical (node_id, position, pack_index) key -- but
+    # they are structurally distinct witnesses. Only `through` tells them
+    # apart, so the rank key must include it to be total.
+    #
+    # `type_edge` is a WITHOUT ROWID table keyed by (src_id, kind, position),
+    # so for a fixed src_id/position its physical/scan order is kind-
+    # ascending; reverse_type_use()'s DFS climbs via a LIFO stack, which
+    # reverses that to kind-*descending* in the raw, pre-sort witness order.
+    # kind 4 (return_type) > kind 2 (element_type), so the raw order here is
+    # [return_type, element_type] -- the opposite of the expected alphabetical
+    # rank order ("element_type" < "return_type"). A rank key that dropped the
+    # `through` tie-break would leave that raw order untouched (both
+    # witnesses tie on node_id/domain/position/pack_index) and this test
+    # would observe the wrong order; kind ids 7/8 (member_owner/
+    # member_component) do NOT work for this purpose since their raw DFS
+    # order already happens to coincide with their alphabetical order,
+    # silently passing either way.
     db = Storage(":memory:")
     owner = db.add_symbol(_make_sym("USR::RankOwner", "owner"))
     db._conn.execute(
@@ -1830,10 +1844,10 @@ def test_reverse_type_use_rank_orders_witnesses_by_the_full_typed_step_identity(
         "ORDER BY type_key")]
     db._conn.execute(
         "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES "
-        "(?,8,0,?)", (m_id, a_id))  # member_component, inserted first
+        "(?,4,0,?)", (m_id, a_id))  # return_type
     db._conn.execute(
         "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES "
-        "(?,7,0,?)", (m_id, a_id))  # member_owner, inserted second
+        "(?,2,0,?)", (m_id, a_id))  # element_type
     db._conn.execute(
         "INSERT INTO symbol_type(symbol_id,kind,type_id) VALUES (?,2,?)",
         (owner, m_id))
@@ -1849,5 +1863,6 @@ def test_reverse_type_use_rank_orders_witnesses_by_the_full_typed_step_identity(
     assert len(result.paths[1].steps) == 3
     assert result.paths[0].steps[1].node_id == m_id
     assert result.paths[1].steps[1].node_id == m_id
-    assert result.paths[0].steps[1].through == "member_component"
-    assert result.paths[1].steps[1].through == "member_owner"
+    # "element_type" < "return_type" alphabetically.
+    assert result.paths[0].steps[1].through == "element_type"
+    assert result.paths[1].steps[1].through == "return_type"

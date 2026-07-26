@@ -2418,10 +2418,23 @@ TEST_CASE("query_plan: reverse_type_use() reports a direct symbol owner's "
 TEST_CASE(
     "query_plan: reverse_type_use() | rank() orders witnesses by the full "
     "typed-step identity, not just (node_id, position, pack_index)") {
-  // Two type_edge hops (member_component, then member_owner) both land on
-  // M at position 0 -- an identical (node_id, position, pack_index) key --
-  // but they are structurally distinct witnesses. Only `through` tells
-  // them apart, so the rank key must include it to be total.
+  // Two type_edge hops (return_type, then element_type) both land on M at
+  // position 0 -- an identical (node_id, position, pack_index) key -- but
+  // they are structurally distinct witnesses. Only `through` tells them
+  // apart, so the rank key must include it to be total.
+  //
+  // `type_edge` is a WITHOUT ROWID table keyed by (src_id, kind, position),
+  // so for a fixed src_id/position its physical/scan order is kind-
+  // ascending; the reverse_type_use() DFS then climbs via a LIFO stack, which
+  // reverses that to kind-*descending* in the raw, pre-sort witness order.
+  // kind 4 (return_type) > kind 2 (element_type), so the raw order here is
+  // [return_type, element_type] -- the opposite of the expected alphabetical
+  // rank order ("element_type" < "return_type"). A rank key that dropped the
+  // `through` tie-break would leave that raw order untouched (both witnesses
+  // tie on node_id/domain/position/pack_index) and this test would observe
+  // the wrong order; kind ids 7/8 (member_owner/member_component) do NOT
+  // work for this purpose since their raw DFS order already happens to
+  // coincide with their alphabetical order, silently passing either way.
   Storage db(":memory:");
   const int64_t owner_sym = db.add_symbol(make_sym("USR::RankOwner", "owner"));
   db.raw_db().exec(
@@ -2435,8 +2448,8 @@ TEST_CASE(
   REQUIRE(ids.step());
   const int64_t m_id = ids.col_int64(0);
 
-  db.add_type_edge(m_id, 8, 0, a_id);     // member_component, inserted first
-  db.add_type_edge(m_id, 7, 0, a_id);     // member_owner, inserted second
+  db.add_type_edge(m_id, 4, 0, a_id);     // return_type
+  db.add_type_edge(m_id, 2, 0, a_id);     // element_type
   db.add_symbol_type(owner_sym, 2, m_id); // of_type
 
   QueryExecutor ex(db);
@@ -2449,9 +2462,9 @@ TEST_CASE(
   REQUIRE(result.paths[1].steps.size() == 3);
   // Both witnesses share the same node-id sequence (a_id, m_id, owner_sym)
   // and the same (position, pack_index); only the M-hop's `through` label
-  // differs, and it must sort ascending: "member_component" < "member_owner".
+  // differs, and it must sort ascending: "element_type" < "return_type".
   CHECK(result.paths[0].steps[1].node_id == m_id);
   CHECK(result.paths[1].steps[1].node_id == m_id);
-  CHECK(result.paths[0].steps[1].through == "member_component");
-  CHECK(result.paths[1].steps[1].through == "member_owner");
+  CHECK(result.paths[0].steps[1].through == "element_type");
+  CHECK(result.paths[1].steps[1].through == "return_type");
 }
