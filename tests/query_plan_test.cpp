@@ -2510,7 +2510,7 @@ TEST_CASE(
       "SELECT id FROM type_node WHERE type_key='rank-cap-seed'");
   REQUIRE(seed_query.step());
   const int64_t seed_id = seed_query.col_int64(0);
-  int64_t lowest_parent_id = -1;
+  std::vector<int64_t> parent_ids;
 
   auto txn = db.transaction();
   for (int64_t i = 0; i < 1200; ++i) {
@@ -2521,25 +2521,52 @@ TEST_CASE(
         "SELECT id FROM type_node WHERE type_key='" + key + "'");
     REQUIRE(parent_query.step());
     const int64_t parent_id = parent_query.col_int64(0);
-    if (lowest_parent_id < 0) {
-      lowest_parent_id = parent_id;
-    }
+    parent_ids.push_back(parent_id);
     db.add_type_edge(parent_id, 2, 0, seed_id);
     const int64_t owner = db.add_symbol(
         make_sym("USR::rank-cap-owner-" + std::to_string(i), "owner"));
     db.add_symbol_type(owner, 2, parent_id);
   }
   txn.commit();
+  const int64_t lowest_parent_id = parent_ids.front();
 
   QueryExecutor ex(db);
   const auto result = ex.run((start(codebase()) | view(View::Type) | nodes() |
                               where(eq("type_key", "rank-cap-seed")) |
-                              reverse_type_use() | rank(1))
+                              reverse_type_use() | rank())
                                  .plan());
-  REQUIRE(result.paths.size() == 1);
+  // rank() (top_n == 0) returns every witness retained by the internal
+  // top-K eviction, up to kDefaultResultCap -- unlike rank(1), which only
+  // exposes the single best witness and therefore cannot tell a correct
+  // "keep the K best" eviction apart from a buggy "keep the K worst" or
+  // "keep an arbitrary K" eviction: both a correct and a mutated eviction
+  // policy still surface the same single best witness as rank 0 (see the
+  // mutation-test note below), so asserting only paths[0] leaves the
+  // eviction direction itself unverified.
+  REQUIRE(result.paths.size() == 1000);
+  CHECK(result.truncated);
   REQUIRE(result.paths[0].steps.size() == 3);
   CHECK(result.paths[0].steps[1].node_id == lowest_parent_id);
-  CHECK(result.truncated);
+
+  // The retained set must be exactly the 1000 *smallest* parent ids -- the
+  // true top-K by ascending node-id rank -- not merely contain the single
+  // best one. A buggy eviction that discards the best-so-far instead of the
+  // worst-so-far (e.g. `erase(begin())` in C++, or a reversed `__lt__` on
+  // the heap entry in Python) still keeps `lowest_parent_id` as rank 0 by
+  // construction of this test's monotonic insertion order, but corrupts the
+  // rest of the retained set -- e.g. dropping a mid-range id such as
+  // parent_ids[200] while keeping trailing, worse ids instead.
+  std::vector<int64_t> retained_ids;
+  retained_ids.reserve(result.paths.size());
+  for (const auto &path : result.paths) {
+    REQUIRE(path.steps.size() == 3);
+    retained_ids.push_back(path.steps[1].node_id);
+  }
+  std::ranges::sort(retained_ids);
+  std::vector<int64_t> expected_ids(parent_ids.begin(),
+                                    parent_ids.begin() + 1000);
+  std::ranges::sort(expected_ids);
+  CHECK(retained_ids == expected_ids);
 }
 
 // ---------------------------------------------------------------------------

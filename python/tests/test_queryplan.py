@@ -1907,7 +1907,7 @@ def test_reverse_type_use_ranks_before_its_internal_result_cap():
         "('rank-cap-seed','seed',1)")
     seed_id = next(db._conn.execute(
         "SELECT id FROM type_node WHERE type_key='rank-cap-seed'"))[0]
-    lowest_parent_id = None
+    parent_ids = []
 
     for i in range(1200):
         key = f"rank-cap-parent-{i}"
@@ -1917,8 +1917,7 @@ def test_reverse_type_use_ranks_before_its_internal_result_cap():
             (key,))
         parent_id = next(db._conn.execute(
             "SELECT id FROM type_node WHERE type_key=?", (key,)))[0]
-        if lowest_parent_id is None:
-            lowest_parent_id = parent_id
+        parent_ids.append(parent_id)
         db._conn.execute(
             "INSERT INTO type_edge(src_id,kind,position,dst_id) VALUES "
             "(?,2,0,?)",
@@ -1929,16 +1928,36 @@ def test_reverse_type_use_ranks_before_its_internal_result_cap():
             "INSERT INTO symbol_type(symbol_id,kind,type_id) VALUES (?,2,?)",
             (owner, parent_id))
     db._conn.commit()
+    lowest_parent_id = parent_ids[0]
 
     ex = Executor(db)
     result = ex.run(
         (start(codebase()) | view("type") | nodes()
          | where(eq("type_key", "rank-cap-seed"))
-         | reverse_type_use() | rank(1)).plan)
-    assert len(result.paths) == 1
+         | reverse_type_use() | rank()).plan)
+    # rank() (top_n == 0) returns every witness retained by the internal
+    # top-K eviction, up to DEFAULT_RESULT_CAP -- unlike rank(1), which only
+    # exposes the single best witness and therefore cannot tell a correct
+    # "keep the K best" eviction apart from a buggy one: a reversed
+    # _WorstPathWitness.__lt__ still surfaces the same single best witness
+    # as rank 0 (see the mutation-test note below), so asserting only
+    # paths[0] leaves the eviction direction itself unverified.
+    assert len(result.paths) == 1000
+    assert result.truncated
     assert len(result.paths[0].steps) == 3
     assert result.paths[0].steps[1].node_id == lowest_parent_id
-    assert result.truncated
+
+    # The retained set must be exactly the 1000 *smallest* parent ids -- the
+    # true top-K by ascending node-id rank -- not merely contain the single
+    # best one. A buggy eviction that discards the best-so-far instead of
+    # the worst-so-far (e.g. a reversed comparison direction in
+    # `_WorstPathWitness.__lt__`) still keeps `lowest_parent_id` as rank 0
+    # by construction of this test's monotonic insertion order, but
+    # corrupts the rest of the retained set -- e.g. dropping a mid-range id
+    # such as parent_ids[200] while keeping trailing, worse ids instead.
+    retained_ids = sorted(path.steps[1].node_id for path in result.paths)
+    expected_ids = sorted(parent_ids[:1000])
+    assert retained_ids == expected_ids
 
 
 # ---------------------------------------------------------------------------
