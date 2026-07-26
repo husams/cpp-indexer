@@ -3,34 +3,427 @@
   "policyVersion": 1,
   "issue": "HSE-71",
   "description": "Symbol-level policy consumed by scripts/self_host_architecture_report.py. Extends the HSE-58 module manifest (architecture/cidx-module-manifest.json) with checks that require the resolved semantic call graph of CIDX indexing itself, rather than a textual include/CMake scan. The module manifest and its exceptions ledger remain the single source of truth for module-to-module dependency direction; this file only adds a finer, symbol-granularity policy for two named legacy-façade classes and the generated-catalog duplication guard.",
-
   "moduleCallGraphCheck": {
     "enabled": true,
     "description": "Every resolved 'calls'/'dispatch_calls' edge whose caller and callee live in different manifest modules must be covered by an allowed module dependency or a matching architecture/cidx-module-manifest.json 'exceptions' entry (source file + fromModule + toModule). This is a second, independent signal from the bootstrap include/CMake scan: it is derived from the resolved call graph of a real self-index rather than source text, so it also catches coupling introduced without a corresponding #include (e.g. through a forward declaration or a base-class pointer)."
   },
-
   "legacyFacades": [
     {
       "id": "storage-facade",
-      "description": "cidx::Storage is documented in src/storage/storage.hpp as 'Compatibility facade for legacy application code'; its own declared surface is inherited from cidx::SqliteStorageService, so calls into the facade resolve to that class. New production call sites into either name from outside the modules that are architecturally allowed to construct/own storage are rejected; the migration cutover issue is HSE-62. Each baseline entry pins one exact call site (callerFile + calleeQualName + line + col), not every call from that file to that callee -- a new call site at an already-baselined (file, callee) pair is still rejected.",
-      "calleeQualNamePrefixes": ["cidx::Storage::", "cidx::SqliteStorageService::"],
-      "exemptModules": ["persistence.sqlite", "product.application"],
+      "description": "cidx::Storage is documented in src/storage/storage.hpp as 'Compatibility facade for legacy application code'; its own declared surface is inherited from cidx::SqliteStorageService, so calls into the facade resolve to that class. New production call sites into either name from outside the modules that are architecturally allowed to construct/own storage are rejected; the migration cutover issue is HSE-62. Each baseline entry pins one exact call site (callerFile + calleeQualName + line + col), not every call from that file to that callee -- a new call site at an already-baselined (file, callee) pair is still rejected. Baseline captured by manual/textual audit of direct cidx::Storage constructions in non-exempt modules (2026-07-26), since a completed real self-index run of this repository was not available (see docs/self-host-architecture.md); it covers direct constructions only -- member-function calls through an already-held Storage reference are not enumerable without a real resolved call graph and are a known, stated gap until one completes.",
+      "calleeQualNamePrefixes": [
+        "cidx::Storage::",
+        "cidx::SqliteStorageService::"
+      ],
+      "exemptModules": [
+        "persistence.sqlite",
+        "product.application"
+      ],
       "cutoverRemovalIssue": "HSE-62",
-      "baseline": []
+      "baseline": [
+        {
+          "callerFile": "src/analysis/facts.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 540,
+          "col": 5,
+          "owner": "Platform M2 analysis maintainers",
+          "rationale": "The unified fact-provider snapshot loader still opens cidx::Storage directly for a read-only re-hydration pass; migrate to a focused Storage-reading port owned by analysis.fact-provider.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/analysis/runner.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 1062,
+          "col": 7,
+          "owner": "Platform M2 analysis maintainers",
+          "rationale": "The unified analysis runner still opens cidx::Storage directly to publish results; migrate to a focused publication port owned by analysis.fact-provider.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/diff/target.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 140,
+          "col": 3,
+          "owner": "Platform M3 diff maintainers",
+          "rationale": "The diff target resolver still opens cidx::Storage directly (read-only) to resolve a comparison target; migrate to a focused read port owned by analysis.diff.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_repo.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 9,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The component/repository command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_repo.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 34,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The component/repository command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_repo.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 73,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The component/repository command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_repo.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 98,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The component/repository command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_repo.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 154,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The component/repository command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_repo.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 176,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The component/repository command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_repo.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 211,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The component/repository command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_repo.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 239,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The component/repository command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_repo.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 310,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The component/repository command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/application_adapter.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 637,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The application adapter still constructs cidx::Storage directly to decide read-only vs. read-write opening instead of delegating to a typed application service (HSE-68).",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_edit.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 278,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The edit command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_edit.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 342,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The edit command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_edit.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 437,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The edit command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_delete.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 8,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The delete command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_delete.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 43,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The delete command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_delete.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 84,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The delete command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_delete.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 131,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The delete command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_delete.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 181,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The delete command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_query.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 11,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The query command handler still constructs cidx::Storage directly (read-only) instead of going through a typed application service (HSE-68).",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_ingest.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 33,
+          "col": 5,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The ingest command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_ingest.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 91,
+          "col": 5,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The ingest command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_ingest.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 140,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The ingest command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_ingest.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 285,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The ingest command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_ingest.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 419,
+          "col": 5,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The ingest command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_show.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 8,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The show command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_show.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 15,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The show command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_show.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 58,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The show command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_show.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 85,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The show command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_show.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 156,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The show command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_show.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 181,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The show command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_show.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 268,
+          "col": 3,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The show command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68); one of several sites in this file pending the same cutover.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_graph.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 169,
+          "col": 32,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The graph command handler still constructs cidx::Storage directly instead of going through a typed application service (HSE-68).",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        },
+        {
+          "callerFile": "src/cli/commands_ui.cpp",
+          "calleeQualName": "cidx::Storage::Storage",
+          "line": 209,
+          "col": 29,
+          "owner": "Platform M4 CLI maintainers",
+          "rationale": "The local explorer UI server still constructs cidx::Storage directly instead of going through a typed application service (HSE-68).",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-62"
+        }
+      ]
     },
     {
       "id": "graph-query-bypass",
-      "description": "cidx::graph::GraphQuery (src/graph/query.hpp) is the pre-QueryPlan graph read adapter. The module manifest still allows product.cli and product.application to depend on analysis.graph at module granularity while the QueryPlan migration (HSE-24) is in progress, so this check freezes the exact call sites known at policy-authoring time (see docs/self-host-architecture.md for how the baseline was captured) and rejects any new one. Paying down an existing entry only requires deleting it from the baseline; it never needs re-adding once removed. Each baseline entry pins one exact call site (callerFile + calleeQualName + line + col), not every call from that file to that callee -- a new call site at an already-baselined (file, callee) pair is still rejected.",
-      "calleeQualNamePrefixes": ["cidx::graph::GraphQuery::"],
-      "exemptModules": ["analysis.graph", "query.plan"],
+      "description": "cidx::graph::GraphQuery (src/graph/query.hpp) is the pre-QueryPlan graph read adapter. The module manifest still allows product.cli and product.application to depend on analysis.graph at module granularity while the QueryPlan migration (HSE-24) is in progress, so this check freezes the exact call sites known at policy-authoring time (see docs/self-host-architecture.md for how the baseline was captured) and rejects any new one. Paying down an existing entry only requires deleting it from the baseline; it never needs re-adding once removed. Each baseline entry pins one exact call site (callerFile + calleeQualName + line + col), not every call from that file to that callee -- a new call site at an already-baselined (file, callee) pair is still rejected. Baseline captured by manual/textual audit of direct cidx::graph::GraphQuery constructions in non-exempt modules (2026-07-26), since a completed real self-index run of this repository was not available (see docs/self-host-architecture.md); it covers direct constructions only -- member-function calls through an already-held GraphQuery reference are not enumerable without a real resolved call graph and are a known, stated gap until one completes.",
+      "calleeQualNamePrefixes": [
+        "cidx::graph::GraphQuery::"
+      ],
+      "exemptModules": [
+        "analysis.graph",
+        "query.plan"
+      ],
       "cutoverRemovalIssue": "HSE-24",
-      "baseline": []
+      "baseline": [
+        {
+          "callerFile": "src/cli/commands_graph.cpp",
+          "calleeQualName": "cidx::graph::GraphQuery::GraphQuery",
+          "line": 171,
+          "col": 33,
+          "owner": "Platform M3 query maintainers",
+          "rationale": "The graph command handler still constructs cidx::graph::GraphQuery directly, the pre-QueryPlan read adapter, instead of routing through python/indexer/queryplan.py's HSE-66 CXQ QueryPlan surface (or its C++ equivalent, src/query/**).",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-24"
+        },
+        {
+          "callerFile": "src/ui/graph_view.cpp",
+          "calleeQualName": "cidx::graph::GraphQuery::GraphQuery",
+          "line": 1310,
+          "col": 10,
+          "owner": "Platform M3 query maintainers",
+          "rationale": "The local explorer UI graph view still constructs cidx::graph::GraphQuery directly, the pre-QueryPlan read adapter, instead of routing through the canonical query.plan surface.",
+          "expiresOn": "2026-12-31",
+          "removalIssue": "HSE-24"
+        }
+      ]
     }
   ],
-
   "catalogGuard": {
     "description": "HSE-59 makes catalogs/core.json the single source for symbol-kind and relation identifiers; scripts/generate_catalogs.py is the only writer of the files below. A hand-authored redeclaration of a catalog (id, name) pair anywhere else in a project-owned production source is rejected, independent of whether generate_catalogs.py --check would also (eventually) notice the generated files disagree.",
-    "guardedGroups": ["symbol_kinds", "relations"],
+    "guardedGroups": [
+      "symbol_kinds",
+      "relations"
+    ],
     "generatedOutputs": [
       "python/indexer/generated_catalog.py",
       "src/catalogs/generated_catalog.hpp",
@@ -44,7 +437,14 @@
       "tests/golden/catalog_manifest.json"
     ]
   },
-
-  "exceptionMetadataFields": ["owner", "rationale", "expiresOn", "removalIssue"],
-  "legacyFacadeBaselineSiteFields": ["line", "col"]
+  "exceptionMetadataFields": [
+    "owner",
+    "rationale",
+    "expiresOn",
+    "removalIssue"
+  ],
+  "legacyFacadeBaselineSiteFields": [
+    "line",
+    "col"
+  ]
 }

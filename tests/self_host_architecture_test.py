@@ -26,8 +26,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "python"))
 
-from scripts.self_host_architecture_report import generate_report  # noqa: E402
+from scripts.self_host_architecture_report import check_policy_metadata, generate_report  # noqa: E402
 from indexer.storage import Storage, Symbol  # noqa: E402
+from indexer import queryplan as qp  # noqa: E402
 
 CALLS_KIND = 1  # catalogs/core.json relation id for "calls"
 DISPATCH_CALLS_KIND = 18  # ... for "dispatch_calls"
@@ -208,6 +209,27 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         self.assertEqual(violations[0]["witness"]["callee"]["file"], "src/cli/format.hpp")
         self.assertEqual(violations[0]["witness"]["call_site"]["line"], 7)
 
+    def test_module_boundary_violations_preserve_every_call_site_at_the_same_caller_callee_pair(
+        self,
+    ) -> None:
+        # [Internal critic finding, PR #67 @ 40b1e93] find_module_boundary_
+        # violations used to key a finding by (caller_file, from_module,
+        # to_module, callee_symbol) alone -- one edge with three violating
+        # call sites collapsed to a single finding, silently discarding the
+        # other two. That is the same evidence-loss pattern already guarded
+        # against for find_legacy_facade_violations (which keys per
+        # call-site line/col); the two checkers must agree about what a
+        # violation is. Seed the SAME edge (one add_edge call, idempotent)
+        # with two distinct call sites and assert both are reported.
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_run, fixture.sym_render, line=100, col=3)  # extraction -> cli
+        fixture.add_call(fixture.sym_run, fixture.sym_render, line=200, col=5)  # same edge, 2nd site
+        report = fixture.run()
+        violations = report["findings"]["moduleBoundaryViolations"]
+        self.assertEqual(len(violations), 2)
+        reported_lines = sorted(v["witness"]["call_site"]["line"] for v in violations)
+        self.assertEqual(reported_lines, [100, 200])
+
     def test_bulk_queries_are_not_truncated_by_the_default_1000_row_result_cap(self) -> None:
         # [Review round 2, blocker 1] QueryPlan applies a DEFAULT_RESULT_CAP
         # (1,000 rows) to any query with no explicit limit() stage. A
@@ -236,6 +258,60 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         self.assertFalse(report["index"]["coverage"]["enumerationTruncated"])
         self.assertEqual(len(report["findings"]["moduleBoundaryViolations"]), 1)
         self.assertEqual(report["index"]["symbolCount"], 1105)
+
+    def test_violation_past_enumerate_budget_is_not_silently_dropped(self) -> None:
+        # [Review round 3, blocker 1] a single Executor.run() call's own
+        # symbol/edge enumeration is hard-capped at QueryPlan's real
+        # ENUMERATE_BUDGET/TRAVERSE_NODE_BUDGET (10,000) -- a ceiling
+        # `limit()` cannot lift, since it is enforced inside the
+        # enumeration's own SQL before `limit()` ever runs. Before genuine
+        # pagination, a violating caller/callee symbol whose id fell beyond
+        # that first page was invisible to `_witness()` (its file was never
+        # captured), so `find_module_boundary_violations` silently skipped
+        # it -- exactly "absence of evidence of a violation" being produced
+        # by an incomplete read, not evidence the code is clean. Seed
+        # ENUMERATE_BUDGET filler symbols (pushing every later symbol's id
+        # past the first page), then a real, late cross-module violation,
+        # and prove it is still found -- with a genuine witness, not merely
+        # a report that fails for the unrelated reason of an unresolvable
+        # symbol reference.
+        fixture = _Fixture()
+        filler_count = qp.ENUMERATE_BUDGET
+        fixture._db._conn.execute(
+            "WITH RECURSIVE lines(n) AS (SELECT 0 UNION ALL SELECT n + 1 "
+            f"FROM lines WHERE n < {filler_count - 1}) "
+            "INSERT INTO symbol(usr, spelling, kind, file_id) "
+            f"SELECT 'USR::pagination-filler-' || n, 'filler' || n, 8, {fixture.file_pass} FROM lines"
+        )
+        fixture._db._conn.commit()
+
+        late_caller = fixture._db.add_symbol(
+            Symbol(
+                usr="USR::late-caller", spelling="late_run", qual_name="late_run",
+                kind="function", file_id=fixture.file_pass, line=99,
+                is_definition=True, resolved=True,
+            )
+        )
+        late_callee = fixture._db.add_symbol(
+            Symbol(
+                usr="USR::late-callee", spelling="late_render", qual_name="late_render",
+                kind="function", file_id=fixture.file_format, line=11,
+                is_definition=True, resolved=True,
+            )
+        )
+        fixture.add_call(late_caller, late_callee, line=99, col=5)  # extraction -> cli
+
+        report = fixture.run()
+        self.assertFalse(report["index"]["coverage"]["enumerationTruncated"])
+        self.assertEqual(report["index"]["coverage"]["unwitnessedCallSites"], 0)
+        violations = report["findings"]["moduleBoundaryViolations"]
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0]["fromModule"], "extraction")
+        self.assertEqual(violations[0]["toModule"], "cli")
+        self.assertEqual(violations[0]["witness"]["caller"]["symbol"], "late_run")
+        self.assertEqual(violations[0]["witness"]["callee"]["symbol"], "late_render")
+        self.assertEqual(violations[0]["witness"]["call_site"]["line"], 99)
+        self.assertEqual(report["status"], "fail")
 
     def test_clang_style_leakage_out_of_the_model_layer_is_rejected(self) -> None:
         # model's allowedDependencies is ["model"] only -- exactly the ADR-011
@@ -449,6 +525,17 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         report = fixture.run()
         self.assertTrue(any("duplicates a generated catalog declaration" in error for error in report["findings"]["catalogGuard"]))
 
+    def test_catalog_duplicate_brace_init_declaration_is_rejected(self) -> None:
+        # [Review round 3, blocker 5] the guard must catch ordinary
+        # brace-init redeclarations (std::pair{8, "function"}), not only
+        # the paren-call spelling.
+        fixture = _Fixture()
+        (fixture.root / "src/extraction/dup_brace.hpp").write_text(
+            'inline constexpr auto kSymbolKind = std::pair{8, "function"};\n', encoding="utf-8"
+        )
+        report = fixture.run()
+        self.assertTrue(any("duplicates a generated catalog declaration" in error for error in report["findings"]["catalogGuard"]))
+
     def test_generated_marker_outside_declared_outputs_is_rejected(self) -> None:
         fixture = _Fixture()
         (fixture.root / "src/extraction/leak.hpp").write_text(
@@ -477,6 +564,12 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         self.assertTrue(
             any("zero 'calls'" in limitation for limitation in report["unresolvedLimitations"])
         )
+        # [Review round 3, blocker 2] a partial semantic pass must never
+        # report status="pass": the workflow gate (scripts/self_host_
+        # index.sh's exit code) only checks status, so a "pass" here would
+        # silently clear the gate despite having no positive evidence at all.
+        self.assertEqual(report["completeness"]["semantic"], "partial")
+        self.assertEqual(report["status"], "fail")
 
     def test_deleted_file_row_with_a_dangling_call_edge_fails_closed(self) -> None:
         # [Review blocker 2] the reviewer's exact repro: delete an expected
@@ -663,6 +756,131 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         self.assertEqual(
             first_report["config"]["packageHash"], second_report["config"]["packageHash"]
         )
+
+    def test_package_hash_changes_when_the_queryplan_surface_it_executes_changes(self) -> None:
+        # [Review round 3, blocker 6] this report's semantic reads execute
+        # indexer.queryplan.Executor/Storage.index_identity() directly;
+        # packageHash must be bound to that surface, not just the four
+        # files under scripts/. Prove it's actually included by hashing a
+        # MUTATED copy of queryplan.py under a fake project layout and
+        # confirming the digest differs from the real one -- without
+        # touching the real, shared queryplan.py on disk.
+        import scripts.self_host_architecture_report as report_module
+
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_run, fixture.sym_value)
+        real_hash = report_module._package_hash(
+            fixture.root, fixture.manifest_path, fixture.policy_path
+        )
+
+        real_project_root = Path(report_module.__file__).resolve().parent.parent
+        fake_project_root = Path(tempfile.mkdtemp(prefix="cidx-fake-project-", dir="/tmp"))
+        (fake_project_root / "scripts").mkdir(parents=True)
+        (fake_project_root / "python/indexer").mkdir(parents=True)
+        for name in ("check_architecture.py", "check_platform_contract.py", "self_host_architecture_report.py"):
+            (fake_project_root / "scripts" / name).write_text(
+                (real_project_root / "scripts" / name).read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        (fake_project_root / "python/indexer/storage.py").write_text(
+            (real_project_root / "python/indexer/storage.py").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        # A single mutated byte in the QueryPlan surface, nothing else.
+        (fake_project_root / "python/indexer/queryplan.py").write_text(
+            (real_project_root / "python/indexer/queryplan.py").read_text(encoding="utf-8")
+            + "\n# mutated for test_package_hash_changes_when_the_queryplan_surface_it_executes_changes\n",
+            encoding="utf-8",
+        )
+
+        original_file = report_module.__file__
+        try:
+            report_module.__file__ = str(fake_project_root / "scripts/self_host_architecture_report.py")
+            mutated_hash = report_module._package_hash(
+                fixture.root, fixture.manifest_path, fixture.policy_path
+            )
+        finally:
+            report_module.__file__ = original_file
+
+        self.assertNotEqual(real_hash, mutated_hash)
+
+    def test_report_is_reproducible_across_byte_identical_checkouts_at_different_paths(self) -> None:
+        # [Review round 3, blocker 3] two clean checkouts of the exact same
+        # commit, built and reported on independently, live at two different
+        # absolute paths on disk. The report must not leak *where* either
+        # checkout happens to sit -- only *what* it contains -- or a
+        # byte-identical checkout would fail its own CI gate purely because
+        # of directory placement. `_Fixture()` builds a deterministic,
+        # byte-identical tree/index every time (no UUIDs, no timestamps tied
+        # to wall clock other than the fixed literal stamped in
+        # `_build_index`), so two independently-built fixtures with the same
+        # `add_call` are exactly the "byte-identical checkout, different
+        # path" case.
+        first = _Fixture()
+        first.add_call(first.sym_run, first.sym_render)
+        first_report = first.run()
+
+        second = _Fixture()
+        second.add_call(second.sym_run, second.sym_render)
+        second_report = second.run()
+
+        self.assertNotEqual(first.root, second.root)
+
+        def _normalized(report: dict) -> dict:
+            report = json.loads(json.dumps(report))
+            del report["generatedAt"]
+            return report
+
+        self.assertEqual(_normalized(first_report), _normalized(second_report))
+
+    def test_package_hash_changes_when_the_generated_catalog_source_changes(self) -> None:
+        # [Internal critic finding, PR #67 @ 40b1e93] check_catalog_containment
+        # reads catalogs/core.json directly to build the guarded (id, name)
+        # pair list -- that file literally defines what the catalog guard
+        # catches. It was missing from _package_hash's hashed file list, so
+        # editing it changed the gate's behavior without changing the
+        # recorded packageHash. Prove the fix: mutating catalogs/core.json
+        # (without touching any of scripts/*.py or the QueryPlan/Storage
+        # surface) must still change packageHash.
+        import scripts.self_host_architecture_report as report_module
+
+        fixture = _Fixture()
+        before = report_module._package_hash(fixture.root, fixture.manifest_path, fixture.policy_path)
+
+        catalog_path = fixture.root / "catalogs/core.json"
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        catalog["symbol_kinds"].append({"id": 99, "name": "extra_kind"})
+        catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+
+        after = report_module._package_hash(fixture.root, fixture.manifest_path, fixture.policy_path)
+        self.assertNotEqual(before, after)
+
+    def test_real_policy_legacy_facade_baselines_are_populated_and_well_formed(self) -> None:
+        # [Review round 3, blocker 4] the committed
+        # architecture/cidx-self-host-policy.json shipped with BOTH legacy-
+        # facade baselines empty, even though the real manifest classifies
+        # src/cli/commands_graph.cpp and src/cli/commands_repo.cpp (and, per
+        # a manual/textual audit -- see the facades' own `description`
+        # fields and docs/self-host-architecture.md -- every other
+        # non-exempt-module file that directly constructs cidx::Storage or
+        # cidx::graph::GraphQuery) as real, pre-existing call sites. A
+        # regression back to an empty baseline here would silently
+        # re-introduce "claims a clean self-host gate with no real coverage"
+        # without any fixture test catching it, since every other test in
+        # this file uses a synthetic `_Fixture`, never the real committed
+        # policy file.
+        real_policy = json.loads((ROOT / "architecture/cidx-self-host-policy.json").read_text(encoding="utf-8"))
+        facades = {facade["id"]: facade for facade in real_policy["legacyFacades"]}
+        self.assertEqual(set(facades), {"storage-facade", "graph-query-bypass"})
+        for facade_id, facade in facades.items():
+            self.assertTrue(facade["baseline"], f"{facade_id} baseline must not be empty")
+            for entry in facade["baseline"]:
+                self.assertTrue(entry["callerFile"].startswith("src/"), entry)
+                self.assertIn(entry["line"], range(1, 100_000))
+                self.assertIn(entry["col"], range(1, 1000))
+        # Every entry must satisfy the same owner/rationale/expiry/removal-
+        # issue/exact-call-site metadata policy as a manifest exception --
+        # `check_policy_metadata` is the same function `generate_report`
+        # itself runs, so this is not a duplicate, weaker check.
+        self.assertEqual(check_policy_metadata(real_policy), [])
 
     def test_bootstrap_and_semantic_layers_agree_when_include_and_call_both_cross(self) -> None:
         fixture = _Fixture()

@@ -124,3 +124,29 @@ entry with `callerFile`, `calleeQualName`, `owner`, `rationale`,
 a baseline to cover a *new* call site introduced by the same change that
 regenerates it — the whole point is that growth requires an explicit,
 reviewed exception.
+
+### Manual/textual-audit fallback
+
+The preferred path above needs a *completed* real self-index run
+(`scripts/self_host_index.sh`), which indexes this repository's own ~140
+translation units with the real LibTooling engine. On a resource-constrained
+or contended machine that run can take a very long time and may not finish
+in a practical window. When it doesn't, the baseline may instead be seeded
+by a manual/textual audit: grep each facade's `calleeQualNamePrefixes` root
+class name (`Storage`, `cidx::graph::GraphQuery`) for direct constructions
+in non-exempt-module source files, and record the real `callerFile`/`line`/
+`col` read directly off the source, with the same required owner/rationale/
+expiresOn/removalIssue metadata as the report-derived path.
+
+This fallback is strictly narrower than a real resolved call graph: it can
+only find **direct constructions** (`Storage db(...)`, `graph::GraphQuery
+g(...)`) by grep, not member-function calls made through an *already-held*
+`Storage`/`GraphQuery` reference (e.g. `db.some_method()` on a reference
+received as a parameter) — those require a real resolved call edge to
+enumerate soundly and are not claimed to be covered. A baseline entry
+captured this way must say so in its facade's top-level `description` (see
+the existing `storage-facade`/`graph-query-bypass` entries in
+`architecture/cidx-self-host-policy.json`), so a reader never mistakes a
+textual audit for a semantically complete one. Replace it with a
+report-derived baseline (the preferred path above) once a real self-index
+run completes.

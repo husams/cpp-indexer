@@ -187,28 +187,68 @@ class SemanticFacts:
     unwitnessed_call_sites: int = 0
 
 
+def _run_all_pages(
+    executor: Executor, plan: Any, cursor_field_index: int
+) -> tuple[list[tuple[Any, ...]], bool]:
+    """Run `plan` to genuine completion, not just its first page.
+
+    A single `Executor.run()` call is hard-capped at ENUMERATE_BUDGET /
+    TRAVERSE_NODE_BUDGET rows -- a real ceiling on that ONE call, enforced
+    inside the enumeration's own SQL before `limit()` ever runs, so raising
+    the `limit()` argument can never lift it (see
+    python/indexer/queryplan.py's `_enumerate`). To read every row rather
+    than silently accepting a capped prefix as if it were the whole result,
+    this re-runs the SAME plan with QueryPlan's `after_id` pagination cursor
+    (also added for this purpose), advancing it to the strictly-increasing
+    id in `cursor_field_index` of the last row of each full page, until a
+    page comes back short of a full page -- the only way a plan can end.
+    `cursor_field_index` must name a field that is ascending and duplicate-
+    free across the whole result (true for both queries below: "id" for the
+    symbol enumeration, "edge_id" for the site enumeration, each the
+    query's own real, single-column, strictly-ordered enumeration key).
+    """
+    rows: list[tuple[Any, ...]] = []
+    after_id: int | None = None
+    while True:
+        page = executor.run(plan, after_id=after_id)
+        rows.extend(page.rows)
+        if len(page.rows) < ENUMERATE_BUDGET:
+            return rows, False
+        next_after_id = page.rows[-1][cursor_field_index]
+        if next_after_id is None or next_after_id == after_id:
+            # Defensive: a cursor that fails to strictly advance would loop
+            # forever. This can only happen if `cursor_field_index` isn't
+            # actually the query's own ascending enumeration key -- a real
+            # bug in the caller, not a legitimately large result -- so
+            # surface it as truncated rather than hang.
+            return rows, True
+        after_id = next_after_id
+
+
 def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
     executor = Executor(db)
     truncated = False
 
-    # QueryPlan applies a DEFAULT_RESULT_CAP (1,000 rows) to any query whose
-    # plan never uses an explicit `limit()` stage (`limit_in_effect` stays
-    # False). A bulk, no-predicate listing like these has no natural cap of
-    # its own, so every query below explicitly asks for up to
-    # ENUMERATE_BUDGET rows -- the library's own real enumeration ceiling --
-    # so the *artificial* 1,000-row default can never truncate evidence
-    # before the *real* budget would. `Result.truncated` is still checked
-    # and surfaced (see check_index_coverage) if the real budget is hit.
-    symbol_result = executor.run(
-        (start(codebase()) | nodes() | select(["id", "name", "file", "line"])
-         | limit(ENUMERATE_BUDGET)).plan
-    )
-    truncated = truncated or symbol_result.truncated
+    # Every query below explicitly asks for up to ENUMERATE_BUDGET rows per
+    # page (so QueryPlan's *artificial* DEFAULT_RESULT_CAP of 1,000 -- which
+    # applies whenever a plan never uses `limit()` -- can never truncate
+    # evidence before the *real* per-call budget would), and is run to
+    # completion via `_run_all_pages` rather than accepted as a single,
+    # possibly-capped page: `truncated` is only ever True here if
+    # `_run_all_pages` itself gave up (its cursor-advance defensive check),
+    # never merely because the underlying table has more than
+    # ENUMERATE_BUDGET rows.
+    symbol_plan = (
+        start(codebase()) | nodes() | select(["id", "name", "file", "line"])
+        | limit(ENUMERATE_BUDGET)
+    ).plan
+    symbol_rows, symbol_truncated = _run_all_pages(executor, symbol_plan, cursor_field_index=0)
+    truncated = truncated or symbol_truncated
     symbol_name: dict[int, str] = {}
     symbol_file: dict[int, str] = {}
     symbol_line: dict[int, int] = {}
     root_resolved = root.resolve()
-    for sym_id, name, file_path, line in symbol_result.rows:
+    for sym_id, name, file_path, line in symbol_rows:
         symbol_name[sym_id] = name
         if file_path is not None:
             # QueryPlan resolves "file" to an ABSOLUTE filesystem path
@@ -229,15 +269,18 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
     # python/indexer/queryplan.py's `_typed_column`), so every call site's
     # caller, callee, relation, and exact location come from ONE public
     # QueryPlan query. No separate "edge" view round-trip, and no private
-    # `db._conn` correlation, is needed to recover src/dst.
-    site_result = executor.run(
-        (start(codebase()) | view("edge") | nodes() | sites()
-         | select(["edge_id", "src_id", "dst_id", "line", "col", "relation"])
-         | limit(ENUMERATE_BUDGET)).plan
-    )
-    truncated = truncated or site_result.truncated
+    # `db._conn` correlation, is needed to recover src/dst. "edge_id" is the
+    # underlying edge's own id (the query's cursor key), paginated the same
+    # way as the symbol query above.
+    site_plan = (
+        start(codebase()) | view("edge") | nodes() | sites()
+        | select(["edge_id", "src_id", "dst_id", "line", "col", "relation"])
+        | limit(ENUMERATE_BUDGET)
+    ).plan
+    site_rows, site_truncated = _run_all_pages(executor, site_plan, cursor_field_index=0)
+    truncated = truncated or site_truncated
     calls: list[tuple[int, int, int, int, int]] = []
-    for edge_id, src_id, dst_id, line, col, relation in site_result.rows:
+    for edge_id, src_id, dst_id, line, col, relation in site_rows:
         if relation not in CALL_EDGE_KINDS:
             continue
         calls.append((edge_id, src_id, dst_id, line or 0, col or 0))
@@ -294,9 +337,19 @@ def _witness(facts: SemanticFacts, src: int, dst: int, line: int, col: int) -> W
 def find_module_boundary_violations(
     facts: SemanticFacts, graph: ModuleGraph
 ) -> list[dict[str, Any]]:
-    """Cross-module call edges not covered by an allowed dependency or exception."""
+    """Cross-module call edges not covered by an allowed dependency or exception.
+
+    Violation identity includes the exact call-SITE (line, col), not just
+    (caller_file, from_module, to_module, callee_symbol): the same caller
+    calling the same disallowed callee from three different places in the
+    source is three distinct pieces of evidence, and collapsing them to one
+    finding would silently discard the other two -- exactly the kind of
+    evidence loss this report exists to prevent. This matches
+    `find_legacy_facade_violations`'s own per-site identity below; the two
+    checkers must not disagree about what a violation is.
+    """
     violations: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[str, str, str, str, int, int]] = set()
     for edge_id, src, dst, line, col in facts.calls:
         witness = _witness(facts, src, dst, line, col)
         if witness is None:
@@ -307,7 +360,10 @@ def find_module_boundary_violations(
             continue
         if graph.is_allowed(witness.caller_file, from_module, to_module):
             continue
-        key = (witness.caller_file, from_module, to_module, witness.callee_symbol)
+        key = (
+            witness.caller_file, from_module, to_module, witness.callee_symbol,
+            witness.call_site_line, witness.call_site_col,
+        )
         if key in seen:
             continue
         seen.add(key)
@@ -424,8 +480,12 @@ def check_catalog_containment(root: Path, graph: ModuleGraph, policy: dict) -> l
             pairs.append((row["id"], row["name"]))
 
     errors: list[str] = []
+    # `(` for a paren-call construction (std::pair(8, "function")) and `{`
+    # for ordinary brace-init (std::pair{8, "function"}, {8, "function"} in
+    # an aggregate/array) are both accepted ways to redeclare the same pair
+    # in C++; catching only one lets the other through undetected.
     patterns = [
-        re.compile(r"\(\s*" + str(id_) + r"\s*,\s*\"" + re.escape(name) + r"\"")
+        re.compile(r"[({]\s*" + str(id_) + r"\s*,\s*\"" + re.escape(name) + r"\"")
         for id_, name in pairs
     ] + [
         re.compile(r"\"" + re.escape(name) + r"\"\s*:\s*" + str(id_))
@@ -492,6 +552,45 @@ def check_policy_metadata(policy: dict) -> list[str]:
             prefix = f"legacy facade {facade_id} baseline[{index}] ({entry.get('callerFile', '<unknown>')})"
             errors.extend(_metadata_errors(prefix, entry, require_site=True))
     return sorted(errors)
+
+
+def _portable_source_hash(root: Path, conn: sqlite3.Connection, db: Storage) -> str:
+    """A checkout-location-independent content hash of every indexed file.
+
+    HSE-32's own `Storage.index_identity()` keys its source_fingerprint by
+    each file's (component_name, **component_path**, ...) tuple --
+    `component_path` is an ABSOLUTE filesystem path, by design, since that
+    mechanism's job is detecting drift within the SAME checkout over time,
+    not comparing two different checkouts. Two byte-identical clean
+    checkouts at two different absolute paths therefore get two different
+    `source_fingerprint`s from that mechanism -- expected for HSE-32's own
+    purpose, but not what a report-reproducibility check wants. This hash
+    is keyed by REPO-RELATIVE path (via `_stable_label`) plus content, so
+    it is the same for byte-identical checkouts regardless of where either
+    one lives on disk.
+    """
+    digest = hashlib.sha256()
+    rows = sorted(
+        (f"{dir_path}/{name}" if dir_path else name, file_id)
+        for file_id, dir_path, name in conn.execute(
+            "SELECT f.id, d.path, f.name FROM file f JOIN directory d ON d.id = f.directory_id"
+        )
+    )
+    for relative_path, file_id in rows:
+        abs_path = db.file_abs_path(file_id)
+        content_hash = _md5_file(Path(abs_path)) if abs_path else None
+        digest.update(relative_path.encode())
+        digest.update(b"\0")
+        digest.update((content_hash or "<unreadable>").encode())
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _md5_file(path: Path) -> str | None:
+    try:
+        return hashlib.md5(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
 def check_index_coverage(
@@ -642,7 +741,20 @@ def check_index_coverage(
         "filesWithFatalDiagnostics": failed,
         "enumerationTruncated": facts.truncated,
         "missingBuildConfig": missing_build_config,
-        "indexIdentity": identity_info.to_dict(),
+        # Only `freshness` is surfaced here: HSE-32's own
+        # `source_fingerprint`/`index_config_fingerprint`/`source_revision`
+        # are keyed by ABSOLUTE `component_path` by design (see
+        # `_portable_source_hash` above), so they are legitimately different
+        # across two byte-identical checkouts at different absolute paths.
+        # Reporting them here would make this report non-reproducible for
+        # a fact this report does not actually depend on -- `freshness` is
+        # the live re-verified signal this report needs; the raw
+        # fingerprints remain available via `db.index_identity()` itself
+        # for anyone debugging HSE-32 drift directly.
+        "indexIdentity": {"freshness": identity_info.freshness},
+        # Checkout-location-independent: same content, same hash, no matter
+        # where either checkout lives on disk.
+        "sourceContentHash": _portable_source_hash(root, conn, db),
     }
     return issues, coverage
 
@@ -662,12 +774,23 @@ def _git_revision(root: Path) -> str | None:
 
 def _package_hash(root: Path, manifest_path: Path, policy_path: Path) -> str:
     """Deterministic, checkout-location-independent hash of the exact
-    policy/checker sources this run used: every entry is hashed under a
-    root-relative logical label, never an absolute path, so byte-identical
-    sources in two different clean checkout directories (or worktrees)
-    produce the same hash.
+    policy/checker/executor sources this run used: every entry is hashed
+    under a root-relative logical label, never an absolute path, so
+    byte-identical sources in two different clean checkout directories (or
+    worktrees) produce the same hash.
+
+    Includes the HSE-66 QueryPlan/Storage surface this script's semantic
+    reads actually execute (indexer.queryplan.Executor and every stage/
+    predicate it uses, indexer.storage.Storage.index_identity()) --
+    changing that surface changes what this report's findings mean, so the
+    package identity must change with it, not just with the four files
+    that live directly in scripts/. Also includes catalogs/core.json:
+    `check_catalog_containment` reads it directly to build the guarded
+    (id, name) pair list, so it literally defines what that check catches --
+    editing it changes the gate's behavior and must change packageHash too.
     """
     script_dir = Path(__file__).resolve().parent
+    project_root = script_dir.parent
     digest = hashlib.sha256()
     for path in (
         manifest_path,
@@ -675,6 +798,9 @@ def _package_hash(root: Path, manifest_path: Path, policy_path: Path) -> str:
         script_dir / "check_architecture.py",
         script_dir / "check_platform_contract.py",
         script_dir / "self_host_architecture_report.py",
+        project_root / "python/indexer/queryplan.py",
+        project_root / "python/indexer/storage.py",
+        root / "catalogs/core.json",
     ):
         label = _stable_label(path, root)
         digest.update(label.encode())
@@ -821,7 +947,24 @@ def generate_report(
         )
 
     all_errors = bootstrap_errors + platform_errors + catalog_errors + policy_metadata_errors
-    status = "fail" if (all_errors or module_boundary_violations or legacy_facade_violations or module_cycles or identity_issues) else "pass"
+    # A partial semantic pass (e.g. zero call edges, or any of the coverage/
+    # identity issues above) is exactly as disqualifying as a real
+    # violation: "no findings" from an incomplete pass is not evidence of
+    # compliance, so `status` is derived FROM `semantic_completeness`, not
+    # computed independently of it -- the two can never disagree.
+    semantic_completeness = "partial" if (identity_issues or not facts.calls) else "complete"
+    status = (
+        "fail"
+        if (
+            all_errors
+            or module_boundary_violations
+            or legacy_facade_violations
+            or module_cycles
+            or identity_issues
+            or semantic_completeness != "complete"
+        )
+        else "pass"
+    )
 
     report = {
         "format": REPORT_FORMAT,
@@ -830,11 +973,12 @@ def generate_report(
         "repository": manifest.get("repository", "husams/cpp-indexer"),
         # NOTE: "sourceRevision" is this report-generating process's git HEAD
         # at `root` -- it says nothing about what the INDEX itself claims to
-        # have been built from. The index's own claimed identity (a content
-        # hash of the files it actually indexed, not a git SHA -- see
-        # stamp_index_identity()) is `index.coverage.indexIdentity.
-        # source_revision`, and whether it still matches this checkout's
-        # current files is `index.coverage.indexIdentity.freshness`.
+        # have been built from. Whether the index still matches this
+        # checkout's current files and build configuration is
+        # `index.coverage.indexIdentity.freshness` (HSE-32's own
+        # `Storage.index_identity()`, re-verified live); a
+        # checkout-location-independent content hash of everything the index
+        # actually indexed is `index.coverage.sourceContentHash`.
         "sourceRevision": _git_revision(root),
         "config": {
             "manifestPath": str(manifest_path.relative_to(root)) if manifest_path.is_relative_to(root) else str(manifest_path),
@@ -844,12 +988,20 @@ def generate_report(
             "packageHash": _package_hash(root, manifest_path, policy_path),
         },
         "index": {
-            "path": str(index_path),
+            # Relativized via `_stable_label`: the index db and the files it
+            # names live outside `root` in the common case (a throwaway
+            # build-directory index), so a raw absolute path would make the
+            # report differ between two byte-identical checkouts even though
+            # nothing about the checkout itself differs. Genuinely
+            # unrelated absolute paths (e.g. an index built from a totally
+            # different tree) fall back to just the file name, same as
+            # `packageHash` above.
+            "path": _stable_label(index_path, root),
             "schemaVersion": identity.schema_version,
             "catalogVersion": identity.catalog_version,
             "catalogHash": identity.catalog_hash,
             "graphResolvedAt": identity.graph_resolved_at,
-            "componentPaths": identity.component_paths,
+            "componentPaths": [_stable_label(Path(p), root) for p in identity.component_paths],
             "fileCount": identity.file_count,
             "symbolCount": identity.symbol_count,
             "edgeCount": identity.edge_count,
@@ -857,7 +1009,7 @@ def generate_report(
         },
         "completeness": {
             "bootstrap": "complete",
-            "semantic": "partial" if (identity_issues or not facts.calls) else "complete",
+            "semantic": semantic_completeness,
             "identityIssues": identity_issues,
         },
         "findings": {

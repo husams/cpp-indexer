@@ -1256,6 +1256,107 @@ def test_sites_budget_boundaries_are_exact_and_ordered(site_count, expected, tru
     assert result.truncated is truncated
 
 
+def test_after_id_cursor_pages_a_symbol_enumeration_past_its_budget():
+    # A single Executor.run() call's own `nodes()` enumeration is hard-capped
+    # at ENUMERATE_BUDGET (a real, non-negotiable ceiling on that one call --
+    # `limit()` cannot lift it, since the cap is applied inside the SQL the
+    # enumeration itself issues, before `limit()` ever runs). A caller that
+    # needs every row past that ceiling must re-run the SAME plan with an
+    # advancing `after_id` cursor. Prove two things: (1) without the cursor,
+    # a >ENUMERATE_BUDGET symbol table still silently truncates at the
+    # budget exactly as before (unchanged pre-existing behavior); (2)
+    # supplying `after_id` for the next page picks up exactly where the
+    # first page left off, and the two pages together cover every row with
+    # no gap and no duplicate.
+    db = Storage(":memory:")
+    total = qp.ENUMERATE_BUDGET + 1
+    db._conn.execute(
+        "WITH RECURSIVE lines(n) AS (SELECT 0 UNION ALL SELECT n + 1 "
+        f"FROM lines WHERE n < {total - 1}) "
+        "INSERT INTO symbol(usr, spelling, kind) "
+        "SELECT 'USR::budget-symbol-' || n, 'sym' || n, 8 FROM lines"
+    )
+    db._conn.commit()
+
+    plan = (start(codebase()) | nodes() | select(["id"]) | limit(qp.ENUMERATE_BUDGET)).plan
+    executor = Executor(db)
+
+    first_page = executor.run(plan)
+    assert len(first_page.rows) == qp.ENUMERATE_BUDGET
+    assert first_page.truncated
+
+    last_id_seen = first_page.rows[-1][0]
+    second_page = executor.run(plan, after_id=last_id_seen)
+    assert len(second_page.rows) == total - qp.ENUMERATE_BUDGET
+    assert not second_page.truncated
+
+    all_ids = [row[0] for row in first_page.rows] + [row[0] for row in second_page.rows]
+    assert len(all_ids) == total
+    assert len(set(all_ids)) == total  # no duplicate across the page boundary
+    assert all_ids == sorted(all_ids)  # strictly increasing, no gap logic needed downstream
+
+    # Every existing caller (no `after_id` argument at all) still gets
+    # exactly the pre-existing, budget-capped first page.
+    assert executor.run(plan).rows == first_page.rows
+
+
+def test_after_id_cursor_pages_an_edge_enumeration_past_its_budget():
+    # Same cursor mechanism, for the "edge" view -- the one non-symbol/entity
+    # view a real caller (the HSE-71 self-host report's call-site witness
+    # reader) needs to page past ENUMERATE_BUDGET too. That reader always
+    # expands `view("edge") | nodes()` with `sites()` before selecting
+    # fields, and reads the cursor back off the site rows' "edge_id" (the
+    # real, raw edge.id -- unlike the "edge" view's own "id" field, which is
+    # a portable logical row id, not something `after_id` can cursor on).
+    # Mirror that exact shape here: one site per edge keeps site order
+    # identical to edge-id order, so the arithmetic below is exact.
+    db = Storage(":memory:")
+    component = db.add_component("project", "/tmp/edge-cursor-view")
+    directory = db.add_directory(component, "src")
+    file_id = db.add_file(directory, "cursor.cpp")
+    caller = db.add_symbol(_make_sym("USR::edge-cursor-caller", "caller"))
+    total = qp.ENUMERATE_BUDGET + 1
+    db._conn.execute(
+        "WITH RECURSIVE lines(n) AS (SELECT 0 UNION ALL SELECT n + 1 "
+        f"FROM lines WHERE n < {total - 1}) "
+        "INSERT INTO symbol(usr, spelling, kind) "
+        "SELECT 'USR::edge-cursor-callee-' || n, 'callee' || n, 8 FROM lines"
+    )
+    db._conn.execute(
+        "INSERT INTO edge(src_id, dst_id, kind) "
+        "SELECT ?, id, 1 FROM symbol WHERE usr LIKE 'USR::edge-cursor-callee-%'",
+        (caller,),
+    )
+    db._conn.execute(
+        "INSERT INTO edge_site(edge_id, file_id, line, col) "
+        f"SELECT id, ?, 1, 1 FROM edge",
+        (file_id,),
+    )
+    db._conn.commit()
+
+    plan = (start(codebase()) | view("edge") | nodes() | sites()
+            | select(["edge_id"]) | limit(qp.ENUMERATE_BUDGET)).plan
+    executor = Executor(db)
+
+    first_page = executor.run(plan)
+    assert len(first_page.rows) == qp.ENUMERATE_BUDGET
+    assert first_page.truncated
+
+    last_id_seen = first_page.rows[-1][0]
+    second_page = executor.run(plan, after_id=last_id_seen)
+    assert len(second_page.rows) == total - qp.ENUMERATE_BUDGET
+    assert not second_page.truncated
+
+    all_ids = [row[0] for row in first_page.rows] + [row[0] for row in second_page.rows]
+    assert len(all_ids) == total
+    assert len(set(all_ids)) == total
+    assert all_ids == sorted(all_ids)
+
+    # Every existing caller (no `after_id` argument) still gets exactly the
+    # pre-existing, budget-capped first page.
+    assert executor.run(plan).rows == first_page.rows
+
+
 def test_typed_view_compositions_are_rejected_before_execution():
     with pytest.raises(PlanError, match="^E_VIEW:"):
         validate((start(codebase()) | view("edge") | nodes()

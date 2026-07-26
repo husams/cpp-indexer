@@ -1381,9 +1381,21 @@ class Executor:
 
     # -- public -------------------------------------------------------------
 
-    def run(self, plan: Plan) -> Result:
+    def run(self, plan: Plan, after_id: Optional[int] = None) -> Result:
+        """Run `plan`. `after_id` is an optional, execution-only pagination
+        cursor -- NOT part of the plan IR (it is invisible to `validate()`,
+        `plan_to_dict()`, and the golden plan-parity tests) -- that restricts
+        the plan's FIRST `nodes()` enumeration to ids strictly greater than
+        `after_id`. It exists so a caller can genuinely page past
+        `ENUMERATE_BUDGET`/`TRAVERSE_NODE_BUDGET` (real, hard-coded ceilings
+        inside a single call's own enumeration, not liftable via `limit()`)
+        by re-running the same plan with an advancing cursor rather than
+        ever silently accepting a capped prefix as if it were the whole
+        result. Every existing caller omits this argument and gets
+        byte-identical behavior to before it existed.
+        """
         normalized = validate(plan)
-        st = self._run_plan(normalized)
+        st = self._run_plan(normalized, after_id)
         result = self._finish(st)
         result.index = self._db.index_identity()
         return result
@@ -1398,15 +1410,22 @@ class Executor:
 
     # -- plan walk ------------------------------------------------------------
 
-    def _run_plan(self, plan: Plan) -> _Stream:
+    def _run_plan(self, plan: Plan, after_id: Optional[int] = None) -> _Stream:
         st = _Stream()
         st.view = ENTITY_VIEW if plan.source.kind == "entity" else SYMBOL_VIEW
         if plan.source.kind != "codebase":
             st.ids = self._resolve_source(plan.source)
+        # `after_id` is a pagination cursor for the plan's FIRST enumeration
+        # point only -- a plan can legitimately contain more than one
+        # `nodes()` stage (e.g. after a `view()` change), and the cursor
+        # names a position in that first enumeration's own id space, which
+        # has no meaning for a later, different enumeration.
+        pending_after_id = after_id
         for stage in plan.stages:
             self._reject_ambiguous_ungrouped(st)
             if stage.op == "nodes":
-                self._enumerate(st, stage.pred, stage.unknown)
+                self._enumerate(st, stage.pred, stage.unknown, pending_after_id)
+                pending_after_id = None
                 st.limit_in_effect = False
             elif stage.op == "view":
                 self._change_view(st, stage.level)
@@ -1445,6 +1464,16 @@ class Executor:
 
     def _expand_sites(self, st: _Stream) -> None:
         sites_rows: list[tuple[int, ...]] = []
+        # A LOCAL flag, not `st.truncated`: an earlier stage (e.g. `nodes()`
+        # enumerating more edges than ENUMERATE_BUDGET) may have already set
+        # `st.truncated = True` before this expansion even starts. Reading
+        # that shared flag as this loop's own stop condition would break out
+        # after the very first edge whenever the input was already
+        # truncated, silently collapsing the site expansion to almost
+        # nothing instead of filling out its own, independent
+        # TRAVERSE_NODE_BUDGET -- `st.truncated` is only ever OR'd into
+        # here, never read as a loop-control signal.
+        exceeded = False
         for edge in sorted(set(st.keys)):
             rows = self._conn.execute(
                 "SELECT edge_id,file_id,COALESCE(line,0),COALESCE(col,0) "
@@ -1455,10 +1484,12 @@ class Executor:
             for row in rows:
                 sites_rows.append(tuple(row))
                 if len(sites_rows) > TRAVERSE_NODE_BUDGET:
-                    st.truncated = True
+                    exceeded = True
                     break
-            if st.truncated:
+            if exceeded:
                 break
+        if exceeded:
+            st.truncated = True
         st.keys = sorted(set(sites_rows))
         if len(st.keys) > TRAVERSE_NODE_BUDGET:
             st.keys = st.keys[:TRAVERSE_NODE_BUDGET]
@@ -1509,8 +1540,27 @@ class Executor:
         sql.append(" IS NOT FALSE" if policy == UnknownPolicy.INCLUDE else " IS TRUE")
 
     def _enumerate(self, st: _Stream, pred: Optional[Pred],
-                   unknown: UnknownPolicy) -> None:
+                   unknown: UnknownPolicy, after_id: Optional[int] = None) -> None:
         if st.view not in (SYMBOL_VIEW, ENTITY_VIEW):
+            # Cursor pagination is only wired up for the "edge" view here --
+            # it is the one non-symbol/entity view a real caller currently
+            # needs to page past ENUMERATE_BUDGET, and it is the only one of
+            # these views with a single-column, strictly-ordered `id` to
+            # cursor on (the others key on composite (owner_id, position,
+            # ...) tuples). `after_id` is silently ignored for every other
+            # view, same as passing it to a plan whose first `nodes()`
+            # never runs on this branch at all.
+            if after_id is not None and st.view == "edge":
+                st.keys = [tuple(row) for row in self._conn.execute(
+                    "SELECT id FROM edge WHERE id > ? ORDER BY id LIMIT ?",
+                    (after_id, ENUMERATE_BUDGET + 1),
+                )]
+                if len(st.keys) > ENUMERATE_BUDGET:
+                    del st.keys[ENUMERATE_BUDGET:]
+                    st.truncated = True
+                if pred is not None:
+                    self._filter(st, pred, unknown)
+                return
             queries = {
                 "parameter": "SELECT owner_id,position,pack_index FROM parameter ORDER BY owner_id,position,pack_index",
                 "template_parameter": "SELECT owner_id,position FROM template_param ORDER BY owner_id,position",
@@ -1557,6 +1607,9 @@ class Executor:
                 if self._conn.execute(probe, args).fetchone() is not None:
                     raise PlanError("E_UNKNOWN: predicate evaluation is unknown")
             self._append_unknown_policy(sql, unknown)
+        if after_id is not None:
+            sql.append(" WHERE s.id > ?" if pred is None else " AND s.id > ?")
+            args.append(after_id)
         sql.append(" ORDER BY s.id LIMIT ?")
         args.append(ENUMERATE_BUDGET + 1)
         st.ids = [r["id"] for r in self._conn.execute("".join(sql), args)]
