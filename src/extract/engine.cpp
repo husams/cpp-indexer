@@ -19,9 +19,11 @@
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/ASTMatchers/Dynamic/Diagnostics.h"
 #include "clang/ASTMatchers/Dynamic/Parser.h"
+#include "clang/Basic/LangOptions.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/Specifiers.h"
 #include "clang/Basic/TargetInfo.h"
+#include "clang/Basic/Version.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/HeaderSearchOptions.h"
 #include "clang/Lex/Preprocessor.h"
@@ -29,6 +31,7 @@
 #include "llvm/Support/Casting.h"
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -90,6 +93,37 @@ ExtensionEvidence evidence_for(clang::ASTContext &context,
 // happened not to change.
 constexpr std::string_view kExtractionEngineVersion = "cidx-extract-engine/1";
 
+// Serializes EVERY clang::LangOptions flag/value/enum this build of Clang
+// knows about, keyed by its own field name, via the same LangOptions.def
+// X-macro Clang's own option-marshalling code is generated from -- rather
+// than naming a fixed subset (the previous fingerprint only ever looked at
+// LangStd). A frontend flag such as `-fno-elide-constructors` is baked into
+// LangOptions::ElideConstructors well before HandleTranslationUnit() runs;
+// two invocations that differ in ANY LangOptions.def-listed flag therefore
+// always disagree here, without this file needing to know each flag's name
+// in advance or be updated when Clang adds a new one. LANGOPT/VALUE_LANGOPT
+// fields are plain public bitfield members of clang::LangOptionsBase;
+// ENUM_LANGOPT fields are protected there and only reachable through the
+// public get##Name() accessor clang::LangOptions itself generates from the
+// same .def file (clang/Basic/LangOptions.h) -- so this needs two macro
+// bodies, not one.
+std::string lang_options_fingerprint(const clang::LangOptions &lang_opts) {
+  std::ostringstream combined;
+#define LANGOPT(Name, Bits, Default, Compatibility, Description)               \
+  combined << #Name << '=' << static_cast<unsigned long long>(lang_opts.Name)  \
+           << ';';
+#define VALUE_LANGOPT(Name, Bits, Default, Compatibility, Description)         \
+  LANGOPT(Name, Bits, Default, Compatibility, Description)
+#define ENUM_LANGOPT(Name, Type, Bits, Default, Compatibility, Description)    \
+  combined << #Name << '='                                                     \
+           << static_cast<unsigned long long>(lang_opts.get##Name()) << ';';
+#include "clang/Basic/LangOptions.def"
+#undef ENUM_LANGOPT
+#undef VALUE_LANGOPT
+#undef LANGOPT
+  return combined.str();
+}
+
 // A fingerprint of the COMPLETE parsed input AND tool configuration this rule
 // ran against: every file that contributed to the TU (main file,
 // included/generated headers -- not just the main file), every
@@ -130,7 +164,11 @@ std::string tu_content_fingerprint(clang::ASTContext &context,
   combined << preprocessor.getPredefines() << '\x1e';
   combined << context.getTargetInfo().getTriple().str() << '\x1f'
            << context.getTargetInfo().getABI().str() << '\x1e';
-  combined << static_cast<int>(context.getLangOpts().LangStd) << '\x1e';
+  // The COMPLETE frontend/language configuration this TU was compiled
+  // under -- not just LangStd -- so a flag such as `-fno-elide-constructors`
+  // (which changes clang::LangOptions::ElideConstructors without touching
+  // predefines, the target, or LangStd) always changes this fingerprint.
+  combined << lang_options_fingerprint(context.getLangOpts()) << '\x1e';
 
   // Tool/configuration applicability: the exact search-path configuration
   // this invocation was given, independent of whether any of it was actually
@@ -146,10 +184,13 @@ std::string tu_content_fingerprint(clang::ASTContext &context,
   }
 
   // CIDX engine/catalog applicability: which build of this extraction engine
-  // (and its Souffle-adjacent analysis catalog) produced this artifact.
+  // (and its Souffle-adjacent analysis catalog) produced this artifact --
+  // plus the exact Clang this engine is linked against (a Clang upgrade can
+  // change matcher/AST behavior for identical source and flags).
   combined << kExtractionEngineVersion << '\x1f'
            << cidx::catalog::kCatalogVersion << '\x1f'
-           << cidx::catalog::kCatalogHash << '\x1e';
+           << cidx::catalog::kCatalogHash << '\x1f'
+           << clang::getClangFullVersion() << '\x1e';
   return cidx::sha256_hex(combined.str());
 }
 
@@ -222,6 +263,21 @@ private:
   std::int64_t visited_ = 0;
   bool exhausted_ = false;
 };
+
+// Multiplies two non-negative counts, clamping to INT64_MAX instead of
+// wrapping on overflow. Used to price the worst-case cost of a traversal-work
+// combinator over a large TU without risking a silently-wrapped (and
+// possibly negative, budget-defeating) product.
+std::int64_t saturating_mul(std::int64_t lhs, std::int64_t rhs) {
+  if (lhs == 0 || rhs == 0) {
+    return 0;
+  }
+  constexpr std::int64_t kMax = std::numeric_limits<std::int64_t>::max();
+  if (lhs > kMax / rhs) {
+    return kMax;
+  }
+  return lhs * rhs;
+}
 
 // Default single-primitive identity for a binding: canonical USR for a
 // declaration, source anchor otherwise. Used by owner_position/composed,
@@ -701,38 +757,55 @@ execute_plan(const ExtractionPlan &plan, clang::ASTContext &context,
 
     // Enforce the visited-node budget BEFORE constructing or running the
     // matcher at all: an oversized/explosive TU never reaches Clang's
-    // matcher execution for this rule. The estimated WORK the matcher
-    // itself will do also scales with how many repeated-subtree-traversal
-    // combinators (hasDescendant/hasAncestor) the rule uses, since Clang's
-    // MatchFinder has no public API to interrupt matchAST mid-evaluation --
-    // a rule using such a combinator must fit a proportionally smaller
-    // effective share of the same declared budget.
+    // matcher execution for this rule.
     NodeBudgetCounter counter(rule.budget.max_visited_nodes);
     counter.walk(context.getTranslationUnitDecl());
     const std::int64_t combinators = count_matcher_occurrences(
         rule.matcher_expression, traversal_work_combinators());
+    // A traversal-work combinator's WORST-CASE cost is quadratic, not
+    // linear, in the TU's node count: hasDescendant/hasAncestor re-run a
+    // full subtree search for EACH of up to `visited` top-level candidates,
+    // and (in the fully degenerate case -- e.g. a chain of nested records)
+    // each of those searches can itself cost up to `visited`. A one-time
+    // linear estimate ("visited * (combinators + 1)") therefore lets a
+    // SINGLE combinator perform unboundedly superlinear work no matter how
+    // large max_visited_nodes is declared -- confirmed by the round-4
+    // review's repro (100/200/300 nested records at max_visited_nodes =
+    // 1,000,000: budget_exhausted stayed false while measured execution
+    // time grew 11ms -> 37ms -> 114ms). Clang's MatchFinder::matchAST()
+    // offers no hook to interrupt that traversal once started, so this is
+    // the only SOUND bound achievable here: charge visited^2 per combinator
+    // (saturating, never silently overflowing/wrapping) and refuse to run
+    // the matcher at all unless that fits the declared budget. This is
+    // deliberately pessimistic (it does not know the actual number of
+    // top-level candidates or subtree sizes, only the TU's total node
+    // count) -- a correct rejection of an unbounded shape is preferred over
+    // an under-priced one that still lets superlinear work through.
+    const std::int64_t worst_case_combinator_work =
+        combinators > 0 ? saturating_mul(saturating_mul(counter.visited(),
+                                                        counter.visited()),
+                                         combinators)
+                        : 0;
     const bool estimated_work_exceeded =
         combinators > 0 &&
-        counter.visited() > rule.budget.max_visited_nodes / (combinators + 1);
+        worst_case_combinator_work > rule.budget.max_visited_nodes;
     if (counter.exhausted() || estimated_work_exceeded) {
       stats.budget_exhausted = true;
       report.diagnostics.push_back(ExecutionDiagnostic{
           .rule_id = rule.id,
           .code = "visited_node_budget_exceeded",
-          .message =
-              counter.exhausted()
-                  ? "translation unit exceeds max_visited_nodes=" +
-                        std::to_string(rule.budget.max_visited_nodes) +
-                        " before any match could be attempted"
-                  : "estimated matcher-evaluation work (" +
-                        std::to_string(counter.visited()) +
-                        " visited nodes "
-                        "x " +
-                        std::to_string(combinators + 1) + " for " +
-                        std::to_string(combinators) +
-                        " repeated-subtree-traversal combinator(s)) exceeds "
-                        "max_visited_nodes=" +
-                        std::to_string(rule.budget.max_visited_nodes)});
+          .message = counter.exhausted()
+                         ? "translation unit exceeds max_visited_nodes=" +
+                               std::to_string(rule.budget.max_visited_nodes) +
+                               " before any match could be attempted"
+                         : "worst-case matcher-evaluation work (" +
+                               std::to_string(counter.visited()) +
+                               " visited nodes squared x " +
+                               std::to_string(combinators) +
+                               " repeated-subtree-traversal combinator(s) = " +
+                               std::to_string(worst_case_combinator_work) +
+                               ") exceeds max_visited_nodes=" +
+                               std::to_string(rule.budget.max_visited_nodes)});
       report.rule_stats.push_back(stats);
       continue;
     }

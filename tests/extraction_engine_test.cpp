@@ -9,6 +9,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
 
+#include "analysis/facts.hpp"
 #include "extract/artifact.hpp"
 #include "extract/engine.hpp"
 #include "extract/extension_facts.hpp"
@@ -131,6 +132,25 @@ RunResult run_plan_with_args(const ExtractionPlan &plan,
       "test.cpp");
   REQUIRE(ran);
   return result;
+}
+
+// `depth` nested struct DEFINITIONS (R0 contains R1 contains R2 ... contains
+// a leaf field), not `depth` sibling structs: a nested TagDecl is a child in
+// its enclosing RecordDecl's own DeclContext regardless of whether any data
+// member of that nested type exists, so hasDescendant() searching from R0
+// must walk all the way down through every level. Used to reproduce the
+// round-4 review's "a single (non-nested) hasDescendant performs quadratic
+// work over N nested records" finding.
+std::string nested_records_source(int depth) {
+  std::string source;
+  for (int i = 0; i < depth; ++i) {
+    source += "struct R" + std::to_string(i) + " {\n";
+  }
+  source += "  int leaf_marker;\n";
+  for (int i = 0; i < depth; ++i) {
+    source += "};\n";
+  }
+  return source;
 }
 
 std::string make_temp_dir() {
@@ -892,6 +912,114 @@ TEST_SUITE("clang") {
         "completeness = 'complete'");
     REQUIRE(rows.step());
     CHECK(rows.col_int64(0) == 0);
+  }
+
+  // --- PR #66 review round 4 regression coverage ------------------------
+
+  TEST_CASE(
+      "a published extension artifact is readable back through the "
+      "platform's ExtensionFactProvider adapter, not only via a raw SQLite "
+      "SELECT (round-4 repro: the publisher wrote only extension/"
+      "extension_meta, so ExtensionFactProvider::snapshot() threw \"prepare "
+      "failed ... no such table: meta\")") {
+    ExtractionPlan plan = plan_with({logging_boundary_rule()});
+    RunResult result =
+        run_plan(plan,
+                 "void log_audit_event(const char *msg);\n"
+                 "void f() { log_audit_event(\"t\"); }\n",
+                 ExecutionInput{.workspace_identity = "workspace:test",
+                                .tu_identity = "tu:test"});
+    REQUIRE(result.sink.relations().size() == 1);
+
+    const std::string root = make_temp_dir();
+    cidx::Storage storage(root + "/index.sqlite");
+    PublicationRequest request;
+    request.artifact_root = root + "/artifacts";
+    request.namespace_name = "banking.audit";
+    const ExtensionPublication publication = publish_extension_artifact(
+        storage, request, plan, result.report, result.sink);
+    const auto published_path = std::filesystem::path(request.artifact_root) /
+                                publication.relative_path;
+
+    const cidx::analysis::ExtensionFactProvider provider(
+        published_path.string());
+    const cidx::analysis::FactSnapshot snapshot =
+        provider.snapshot(cidx::analysis::FactRequest{
+            .relations = {"extension"},
+            .workspace_identity = std::string("workspace:test"),
+            .tu_identity = std::string("tu:test")});
+    CHECK(snapshot.workspace_identity == "workspace:test");
+    // Bound to a single reference and guarded with a real `if`/throw --
+    // not REQUIRE, which expands through doctest machinery the
+    // optional-access checker's dataflow does not see through -- mirrors
+    // relation_of()'s treatment of the same pattern above.
+    const std::optional<std::string> &tu_identity = snapshot.tu_identity;
+    if (!tu_identity.has_value()) {
+      throw std::runtime_error("test fixture error: snapshot.tu_identity not "
+                               "set");
+    }
+    CHECK(*tu_identity == "tu:test");
+    CHECK(snapshot.completeness == cidx::analysis::FactCompleteness::complete);
+    const auto *extension = snapshot.find_relation("extension");
+    REQUIRE(extension != nullptr);
+    CHECK_FALSE(extension->rows.empty());
+  }
+
+  TEST_CASE(
+      "a SINGLE (non-nested) hasDescendant against nested records performs "
+      "quadratic matcher-evaluation work a one-time linear AST-size "
+      "estimate cannot see, and execute_plan now refuses to run it instead "
+      "of silently exceeding the declared budget (round-4 repro: "
+      "cxxRecordDecl(hasDescendant(cxxMethodDecl(hasName(\"__never__\")))) "
+      "at max_visited_nodes=1,000,000 against 100/200/300 nested records "
+      "never set budget_exhausted while measured execution time grew "
+      "11ms -> 37ms -> 114ms)") {
+    ExtractionRule rule;
+    rule.id = "audit.single_descendant_bound";
+    rule.matcher_expression =
+        "cxxRecordDecl(hasDescendant(cxxMethodDecl(hasName(\"__never__\")))"
+        ").bind(\"record\")";
+    rule.bindings = {
+        Binding{.name = "record", .domain = EndpointDomain::declaration}};
+    EmitOperation emit;
+    emit.unknown = EmitUnknown{
+        .namespace_name = "audit", .reason_code = "seen", .binding = "record"};
+    rule.emits = {emit};
+    rule.completeness = DeclaredCompleteness::unknown_capable;
+    // Generous enough for the RAW node count of 60 nested records (the old
+    // linear "visited / (combinators + 1)" estimate would never trip here
+    // either) but far too small for a single hasDescendant's WORST-CASE
+    // quadratic cost over that many records.
+    rule.budget = RuleBudget{.max_matches = 1000,
+                             .max_emitted_facts = 1000,
+                             .max_visited_nodes = 5000,
+                             .declared = true};
+    rule.producer_package = "audit";
+    rule.producer_version = 1;
+    ExtractionPlan plan = plan_with({rule});
+
+    RunResult result = run_plan(plan, nested_records_source(60));
+    const auto *stats = result.report.find(rule.id);
+    REQUIRE(stats != nullptr);
+    CHECK(stats->budget_exhausted);
+    CHECK(result.sink.unknowns().empty());
+  }
+
+  TEST_CASE(
+      "artifact_identity changes when the frontend's LangOptions differ "
+      "even though source, target, predefines, and header search are all "
+      "unchanged (round-4 repro: -fno-elide-constructors alone left "
+      "artifact_identity unchanged because the fingerprint only ever hashed "
+      "predefines, target/ABI, LangStd, and header search)") {
+    ExtractionPlan plan = plan_with({logging_boundary_rule()});
+    const std::string code = "void log_audit_event(const char *msg);\n"
+                             "void f() { log_audit_event(\"t\"); }\n";
+    RunResult default_run = run_plan_with_args(plan, code, {});
+    RunResult no_elide_run =
+        run_plan_with_args(plan, code, {"-fno-elide-constructors"});
+    REQUIRE(default_run.report.plan_hash == no_elide_run.report.plan_hash);
+    CHECK(default_run.report.artifact_identity !=
+          no_elide_run.report.artifact_identity);
   }
 
 } // TEST_SUITE("clang")

@@ -3,6 +3,7 @@
 #include "extract/plan_identity.hpp"
 // SqliteDb/SqliteStmt come transitively via extract/artifact.hpp ->
 // storage/artifacts.hpp; no direct include of storage/sqlite.hpp here.
+#include "catalogs/generated_catalog.hpp"
 #include "util/hashing.hpp"
 
 #include <algorithm>
@@ -11,6 +12,13 @@
 #include <string_view>
 
 namespace cidx::extract {
+
+// The DB schema version of the `extension`/`meta` table pair this file
+// writes (i.e. the shape "cidx-extension/v1" describes), not the
+// ExtractionPlan IR's own schema_version (plan_ir.hpp's
+// kExtractionPlanSchemaVersion) -- an unrelated axis: a plan's schema can
+// change independently of the published artifact's table layout.
+constexpr int kExtensionArtifactSchemaVersion = 1;
 
 ExtensionPublicationError::ExtensionPublicationError(const std::string &message)
     : std::runtime_error(message) {}
@@ -52,6 +60,42 @@ void insert_meta(SqliteDb &db, std::string_view key, std::string_view value) {
   statement.bind(1, key);
   statement.bind(2, value);
   statement.step_done();
+}
+
+// Writes the producer-owned `meta` key/value table the platform's
+// cidx::analysis::ExtensionFactProvider (src/analysis/facts.cpp) actually
+// reads from -- distinct from both the platform's own auto-populated
+// `artifact_meta` envelope table (storage/artifacts.cpp's write_envelope())
+// and this file's own `extension_meta` diagnostics table. Every other
+// artifact producer (e.g. src/astgraph/astgraph.cpp's `meta` table) follows
+// the same pattern: `artifact_meta` is the platform's generic envelope,
+// `meta` is the producer's own fact-schema metadata that only ITS reader
+// knows how to interpret. ExtensionFactProvider::snapshot() reads
+// workspace_identity/tu_identity/applicability with `artifact_meta_value(...)
+// .value_or(meta_value(...))` -- and because `value_or`'s argument is
+// evaluated unconditionally in C++, that `meta_value()` call runs (and
+// throws "no such table: meta") even when `artifact_meta` already has the
+// answer. schema_version/catalog_hash are read from `meta` ONLY, with no
+// `artifact_meta` fallback at all. Without this table, publishing succeeds
+// but the artifact can never be read back through the required adapter.
+void insert_platform_meta(SqliteDb &db, const ExecutionReport &report) {
+  db.exec("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+  auto insert = [&db](std::string_view key, std::string_view value) {
+    auto statement = db.prepare("INSERT INTO meta(key, value) VALUES (?, ?)");
+    statement.bind(1, key);
+    statement.bind(2, value);
+    statement.step_done();
+  };
+  insert("workspace_identity", report.workspace_identity);
+  insert("tu_identity", report.tu_identity);
+  // Each execution runs against exactly one pinned translation unit (a
+  // single clang::ASTContext) -- "translation-unit", not the platform's
+  // "workspace" default, mirrors AstgraphFactProvider's own default for the
+  // same reason.
+  insert("applicability", "translation-unit");
+  insert("schema_version", std::to_string(kExtensionArtifactSchemaVersion));
+  insert("catalog_version", std::to_string(cidx::catalog::kCatalogVersion));
+  insert("catalog_hash", cidx::catalog::kCatalogHash);
 }
 
 bool provenance_matches(const ExtensionProvenance &provenance,
@@ -230,6 +274,7 @@ publish_extension_artifact(Storage &storage, const PublicationRequest &request,
         "secondary))");
     db.exec("CREATE TABLE extension_meta(key TEXT PRIMARY KEY, value TEXT "
             "NOT NULL)");
+    insert_platform_meta(db, report);
 
     insert_meta(db, "namespace", request.namespace_name);
     insert_meta(db, "plan_id", plan.plan_id);

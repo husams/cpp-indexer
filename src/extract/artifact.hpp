@@ -5,11 +5,14 @@
 // contract storage/artifacts.cpp's supported_contract()/
 // required_relations() already declare: artifact_schema
 // "cidx-extension/v1" and exactly one required relation, "extension" (a
-// fact_kind-discriminated table covering all four fact families) plus a
-// small extension_meta table. It is queryable through the existing
-// cidx::analysis::ExtensionFactProvider (src/analysis/facts.hpp) without any
-// new provider code -- that provider already reads an arbitrary artifact's
-// non-meta tables as relations.
+// fact_kind-discriminated table covering all four fact families), plus a
+// small extension_meta diagnostics table and the producer-owned `meta`
+// key/value table cidx::analysis::ExtensionFactProvider (src/analysis/
+// facts.hpp) actually reads workspace_identity/tu_identity/applicability/
+// schema_version/catalog_hash from (the same pattern src/astgraph's own
+// `meta` table follows for its reader). It is queryable through that
+// existing provider without any new provider code -- that provider already
+// reads an arbitrary artifact's non-meta tables as relations.
 #pragma once
 
 #include "extract/engine.hpp"

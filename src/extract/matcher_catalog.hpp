@@ -64,11 +64,13 @@ disallowed_matcher_calls(const std::string &matcher_expression,
                          const MatcherCatalog &catalog);
 
 // Counts bare-identifier call sites (same string-literal-aware scanner as
-// disallowed_matcher_calls) whose identifier is in `names`. Used to bound
-// the ESTIMATED evaluation work of a matcher expression: combinators like
+// disallowed_matcher_calls) whose identifier is in `names`. Used to bound the
+// WORST-CASE evaluation work of a matcher expression: combinators like
 // hasDescendant/hasAncestor cause Clang's MatchFinder to repeatedly
-// re-traverse subtrees during matchAST, so a rule using more of them must
-// fit a proportionally smaller effective node budget (engine.cpp).
+// re-traverse subtrees during matchAST, and each occurrence can (in the
+// degenerate case) re-traverse up to the WHOLE TU for EACH top-level
+// candidate -- quadratic, not linear, in node count -- so engine.cpp charges
+// visited_nodes^2 per occurrence rather than dividing the budget evenly.
 [[nodiscard]] std::int64_t
 count_matcher_occurrences(const std::string &matcher_expression,
                           const std::set<std::string> &names);
