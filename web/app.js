@@ -540,7 +540,13 @@ if (typeof document !== 'undefined') {
   const expandDirection = async (direction) => {
     if (!liveToken || !selectedNode) return;
     const id = String(selectedNode.id);
-    const params = {root: id, depth: '1', direction};
+    // HSE-92 fix: expand must merge onto the ACTIVE filtered request, not a
+    // bare {root, depth, direction} -- otherwise it (a) injects nodes into
+    // the merged canvas that violate the currently displayed filter, and
+    // (b) silently drops the filter from currentParams for the rest of the
+    // session (subsequent Load more/freshness poll/history replay would then
+    // run unfiltered with no user-visible signal).
+    const params = {...currentParams, root: id, depth: '1', direction};
     await pushExpand(params, `${direction} ${nodeById.get(id)?.name || id}`);
     showNode(nodeById.get(id) || selectedNode);
   };
@@ -560,7 +566,10 @@ if (typeof document !== 'undefined') {
         const button = document.createElement('button');
         button.type = 'button';
         button.textContent = `${match.name} (${match.kind}) — ${match.location}`;
-        button.onclick = () => { results.hidden = true; navigate({root: match.id}, match.name); };
+        // HSE-92 fix: same filter-preservation rule as expandDirection --
+        // navigating to a search result must merge onto the active filtered
+        // request, not overwrite currentParams with a bare {root}.
+        button.onclick = () => { results.hidden = true; navigate({...currentParams, root: match.id}, match.name); };
         results.appendChild(button);
       });
       if (!payload.matches?.length) {
