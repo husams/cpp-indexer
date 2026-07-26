@@ -411,6 +411,27 @@ if (typeof document !== 'undefined') {
     }, FRESHNESS_POLL_MS);
   };
   const reportError = (error) => { details.innerHTML = `<p class="muted">${esc(error.message)}</p>`; };
+  // HSE-92 P1 fix: `continuation` is cursor state bound to the EXACT
+  // semantic request that minted it -- the server rejects it (400) once
+  // root/depth/direction/filters differ (query_identity mismatch; see
+  // graph_view.cpp). `withoutContinuation` above already sanitizes
+  // `currentParams` at every WRITE site (go/pushMerge/jumpTo), but that is
+  // not enough on its own: every site that builds a NEW or DIFFERENT
+  // semantic request by READING `currentParams` (Expand, a search-result
+  // click, Apply filters) must independently strip any leftover
+  // `continuation` too, so a future write site that forgets the same
+  // discipline (as `load-view`'s history-array branch did -- see below)
+  // can't leak a stale token forward. Also proactively clears
+  // `lastContinuationToken`/hides the Load more button so a click racing
+  // the new request's still-pending response can't resend the old token
+  // either; the token for the new canvas (if any) is recomputed by
+  // updateSummary() once that response lands.
+  const freshSemanticParams = (overrides) => {
+    lastContinuationToken = null;
+    const loadMoreButton = document.getElementById('load-more');
+    if (loadMoreButton) loadMoreButton.hidden = true;
+    return {...withoutContinuation(currentParams), ...overrides};
+  };
   // Presentation (camera/layout) state is captured/restored separately from
   // the semantic request each history entry carries (HSE-92 review: history
   // must restore both, independently).
@@ -559,7 +580,7 @@ if (typeof document !== 'undefined') {
     // (b) silently drops the filter from currentParams for the rest of the
     // session (subsequent Load more/freshness poll/history replay would then
     // run unfiltered with no user-visible signal).
-    const params = {...currentParams, root: id, depth: '1', direction};
+    const params = freshSemanticParams({root: id, depth: '1', direction});
     await pushExpand(params, `${direction} ${nodeById.get(id)?.name || id}`);
     showNode(nodeById.get(id) || selectedNode);
   };
@@ -582,7 +603,7 @@ if (typeof document !== 'undefined') {
         // HSE-92 fix: same filter-preservation rule as expandDirection --
         // navigating to a search result must merge onto the active filtered
         // request, not overwrite currentParams with a bare {root}.
-        button.onclick = () => { results.hidden = true; navigate({...currentParams, root: match.id}, match.name); };
+        button.onclick = () => { results.hidden = true; navigate(freshSemanticParams({root: match.id}), match.name); };
         results.appendChild(button);
       });
       if (!payload.matches?.length) {
@@ -666,7 +687,7 @@ if (typeof document !== 'undefined') {
     };
     document.getElementById('group-by').onchange = applyGrouping;
     document.getElementById('apply-filters').onclick = () => {
-      const params = {...currentParams};
+      const params = freshSemanticParams({});
       const fields = [
         ['filter-node-kind', 'node_kind'], ['filter-file', 'file'],
         ['filter-component', 'component'], ['filter-repository', 'repository'],
@@ -709,7 +730,14 @@ if (typeof document !== 'undefined') {
           history = entry.history.slice();
           historyIndex = history.length - 1;
           await replayHistory(history);
-          currentParams = history[historyIndex].params;
+          // HSE-92 P1 fix: a saved view ending on a "Load more" page has a
+          // recorded history entry whose OWN `params` still carries the
+          // continuation token that page's request was minted with (see
+          // pushMerge's history.push) -- unlike go()/pushMerge()/jumpTo(),
+          // this branch was assigning that raw entry straight into
+          // `currentParams`, so the very next Expand/search/filter would
+          // resend a token bound to a session that no longer exists.
+          currentParams = withoutContinuation(history[historyIndex].params);
           renderBreadcrumbs();
           updateHistoryButtons();
         } catch (error) {
