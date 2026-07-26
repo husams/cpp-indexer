@@ -9,23 +9,37 @@
 # report success, so the requirement is enforced even if branch protection is
 # ever misconfigured.
 #
-# SECURITY: the protected-path set (manifest.json's protectedPaths) and the
-# CODEOWNERS ownership list are both read from GITHUB_BASE_SHA via `git show`,
-# never from the checked-out worktree (the PR head). Reading them from HEAD
-# would let the very PR being policed delete a protectedPaths entry, or
-# rewrite CODEOWNERS to name itself as owner, and have the gate evaluate
-# itself against its own edited rules. The base ref is the immutable,
-# pre-PR source of truth for "what was protected and who owns it" this gate
-# is supposed to enforce.
+# SECURITY (two layers, both required):
+#
+# 1. Data: the protected-path set (manifest.json's protectedPaths) and the
+#    CODEOWNERS ownership list are both read from GITHUB_BASE_SHA via
+#    `git show`, never from the checked-out worktree (the PR head). Reading
+#    them from HEAD would let the very PR being policed delete a
+#    protectedPaths entry, or rewrite CODEOWNERS to name itself as owner.
+#
+# 2. Code: this SCRIPT ITSELF must also be executed from a trusted revision,
+#    not the PR's own checkout -- otherwise a PR could rewrite
+#    check-protected-review.sh to always print PASS, and the CI step that
+#    runs "spec/tla/tools/check-protected-review.sh" would run that edited
+#    copy instead of the honest one, regardless of what data-source fix (1)
+#    uses internally. The workflow (verification.yml) is responsible for
+#    extracting this file from GITHUB_BASE_SHA and executing THAT copy, not
+#    the checked-out one. CIDX_REPO_ROOT lets that extracted copy -- which no
+#    longer lives inside the repository tree -- still find and operate on the
+#    real checkout for `git diff`/`git show`/reading .github/CODEOWNERS.
 #
 # Required env: GITHUB_TOKEN, GITHUB_REPOSITORY (owner/repo),
 #               GITHUB_PR_NUMBER, GITHUB_BASE_SHA, GITHUB_HEAD_SHA.
+# Optional env: CIDX_REPO_ROOT (defaults to this script's own repo, only
+#               correct when the script is run from a trusted revision of the
+#               tree it polices; set explicitly when running an extracted
+#               copy from elsewhere).
 # Requires the checkout to have both SHAs available (fetch-depth: 0, or a
 # fetch of the base ref) and `curl` + `python3`.
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+ROOT="${CIDX_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 
 die() {
   echo "TLA_PROTECTED_REVIEW_STATUS=FAIL reason=$1" >&2

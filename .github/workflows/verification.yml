@@ -143,6 +143,16 @@ jobs:
           fetch-depth: 0
       - name: Fetch base ref
         run: git fetch origin "${{ github.event.pull_request.base.ref }}"
+      - name: Extract the trusted (base-commit) checker
+        # The PR's own checkout must never be the code that polices the PR:
+        # a PR could otherwise rewrite check-protected-review.sh to always
+        # pass. Extract the script as it existed at the base commit and run
+        # THAT copy; CIDX_REPO_ROOT points it back at the real checkout for
+        # git/CODEOWNERS access.
+        run: |
+          git show "${{ github.event.pull_request.base.sha }}:spec/tla/tools/check-protected-review.sh" \
+            > "$RUNNER_TEMP/check-protected-review.sh"
+          chmod +x "$RUNNER_TEMP/check-protected-review.sh"
       - name: Require CODEOWNER approval for protected-path changes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -150,7 +160,8 @@ jobs:
           GITHUB_PR_NUMBER: ${{ github.event.pull_request.number }}
           GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: spec/tla/tools/check-protected-review.sh
+          CIDX_REPO_ROOT: ${{ github.workspace }}
+        run: "$RUNNER_TEMP/check-protected-review.sh"
 
   cpp-default:
     name: C++ default tests

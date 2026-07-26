@@ -277,6 +277,80 @@ TEST_CASE("conformance recorder rejects a seeded illegal-sidecar-state "
   CHECK_FALSE(recorder.conformant());
 }
 
+TEST_CASE("conformance recorder rejects a seeded out-of-order defect: "
+          "sidecar.publish recorded with no preceding index.publish") {
+  FakeServices fake;
+  fake.analysis_response =
+      base_envelope("analysis", Status::Complete, "complete", "current");
+  fake.analysis_response.artifacts.push_back({.kind = "analysis",
+                                              .id = "sidecar-1",
+                                              .schema_version = 1,
+                                              .catalog_version = 1,
+                                              .catalog_hash = "test-hash"});
+
+  ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
+  ApplicationContext context = test_context();
+  // Seeded defect: PublishSidecar is only ever reachable in
+  // CidxStorageLifecycle after this session's own core-publish sequence has
+  // already run (corePublicationState = "current" is not the model's
+  // default -- tools/check-sidecar-conformance.sh's "illegal-order" seed
+  // proves via real TLC that attempting it earlier deadlocks). No
+  // index.publish was ever recorded in this trace, so the sidecar.publish
+  // below has no legal predecessor -- exactly what that TLC-proven rule
+  // forbids, now enforced directly against the recorded C++ call order.
+  recorder.analysis(AnalysisRequest{.action = AnalysisAction::execute,
+                                    .rule = std::nullopt,
+                                    .rules_file = std::nullopt,
+                                    .export_directory = std::nullopt,
+                                    .index = std::nullopt,
+                                    .jobs = 1},
+                    context);
+
+  REQUIRE(recorder.observations().size() == 1);
+  CHECK(recorder.observations()[0].operation == "sidecar.publish");
+  CHECK_FALSE(recorder.conformant());
+}
+
+TEST_CASE("conformance recorder accepts sidecar.publish when it is preceded "
+          "by index.publish in the recorded order") {
+  FakeServices fake;
+  fake.index_response =
+      base_envelope("index", Status::Complete, "complete", "current");
+  fake.index_response.artifacts.push_back({.kind = "semantic-index",
+                                           .id = "generation-1",
+                                           .schema_version = 1,
+                                           .catalog_version = 1,
+                                           .catalog_hash = "test-hash"});
+  fake.analysis_response =
+      base_envelope("analysis", Status::Complete, "complete", "current");
+  fake.analysis_response.artifacts.push_back({.kind = "analysis",
+                                              .id = "sidecar-1",
+                                              .schema_version = 1,
+                                              .catalog_version = 1,
+                                              .catalog_hash = "test-hash"});
+
+  ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
+  ApplicationContext context = test_context();
+  recorder.index(IndexRequest{.action = IndexAction::update,
+                              .files = {},
+                              .source = std::nullopt,
+                              .graph = true,
+                              .autoderive_labels = true,
+                              .json = false,
+                              .index = std::nullopt},
+                 context);
+  recorder.analysis(AnalysisRequest{.action = AnalysisAction::execute,
+                                    .rule = std::nullopt,
+                                    .rules_file = std::nullopt,
+                                    .export_directory = std::nullopt,
+                                    .index = std::nullopt,
+                                    .jobs = 1},
+                    context);
+
+  REQUIRE(recorder.observations().size() == 2);
+  CHECK(recorder.conformant());
+}
+
 TEST_CASE("conformance recorder does not claim the six out-of-scope "
           "ApplicationServices methods") {
   FakeServices fake;

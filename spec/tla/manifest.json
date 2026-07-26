@@ -154,7 +154,10 @@
     "proofs/",
     "counterexamples/golden/",
     "/.github/CODEOWNERS",
-    "/spec/tla/manifest.json"
+    "/spec/tla/manifest.json",
+    "tools/check-protected-review.sh",
+    "tools/check-policy.sh",
+    "tools/select-changed-gates.sh"
   ],
   "conformance": {
     "operations": "conformance/operation-map.json",

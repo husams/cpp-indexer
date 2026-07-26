@@ -190,50 +190,87 @@ ConformanceRecorder::proof(const ProofRequest &request,
 }
 
 bool ConformanceRecorder::conformant() const {
-  return std::ranges::all_of(observations_, [this](const auto &observation) {
-    const bool is_sidecar = observation.operation.starts_with("sidecar.");
-    const ConformanceSchema &schema =
-        is_sidecar ? sidecar_schema_ : index_query_schema_;
+  // Per-observation schema/invariant checks (unordered): every recorded
+  // field must be schema-allowed, every operation's declared expectation
+  // must hold, and the two protected-invariant cross-checks apply.
+  const bool per_observation_ok =
+      std::ranges::all_of(observations_, [this](const auto &observation) {
+        const bool is_sidecar = observation.operation.starts_with("sidecar.");
+        const ConformanceSchema &schema =
+            is_sidecar ? sidecar_schema_ : index_query_schema_;
 
-    for (const auto &[field, value] : observation.fields) {
-      if (!schema.is_allowed(field, value)) {
-        return false;
-      }
-    }
+        for (const auto &[field, value] : observation.fields) {
+          if (!schema.is_allowed(field, value)) {
+            return false;
+          }
+        }
 
-    if (const auto expectation =
-            schema.expectation_for(observation.operation)) {
-      const auto actual = field_value(observation, expectation->field);
-      if (!actual || *actual != expectation->value) {
-        return false;
-      }
-    }
+        if (const auto expectation =
+                schema.expectation_for(observation.operation)) {
+          const auto actual = field_value(observation, expectation->field);
+          if (!actual || *actual != expectation->value) {
+            return false;
+          }
+        }
 
+        if (observation.operation == "index.publish") {
+          const auto publication_state =
+              field_value(observation, "publicationState");
+          if (publication_state && *publication_state == "current") {
+            const auto index_state = field_value(observation, "indexState");
+            const auto artifact_state =
+                field_value(observation, "artifactState");
+            if (!index_state || *index_state != "current") {
+              return false;
+            }
+            if (!artifact_state || (*artifact_state != "published" &&
+                                    *artifact_state != "derived")) {
+              return false;
+            }
+          }
+        }
+
+        if (observation.operation == "query.return") {
+          const auto query_writes = field_value(observation, "queryWrites");
+          if (!query_writes || *query_writes != "0") {
+            return false;
+          }
+        }
+
+        return true;
+      });
+  if (!per_observation_ok) {
+    return false;
+  }
+
+  // Ordered-trace check: CidxStorageConformance.tla's PublishSidecar action
+  // requires corePublicationState = "current" -- reachable only after this
+  // same session's StartOneTUUpdate -> ... -> PublishCoreGeneration sequence
+  // has already run. tools/check-sidecar-conformance.sh's "illegal-order"
+  // seed proves via real TLC replay that attempting PublishSidecar before
+  // that sequence completes deadlocks (no legal step remains); this is the
+  // same rule enforced here, directly against the recorded C++ call order,
+  // rather than a per-observation check that ignores sequencing entirely.
+  // (A literal per-trace TLC replay is not attempted here: CidxStorageLifecycle
+  // models the core-then-sidecar sequence as 7 fine-grained actions with no
+  // 1:1 correspondence to the 2 coarse-grained ApplicationServices calls
+  // (index()/analysis()) this recorder observes, and tests/CMakeLists.txt's
+  // "default" label is deliberately hermetic -- no Java/TLC dependency,
+  // matching every other default-labeled test. check-sidecar-conformance.sh is
+  // the TLC-backed verification of the underlying rule; this is its C++
+  // enforcement.)
+  bool index_published_so_far = false;
+  for (const auto &observation : observations_) {
     if (observation.operation == "index.publish") {
-      const auto publication_state =
-          field_value(observation, "publicationState");
-      if (publication_state && *publication_state == "current") {
-        const auto index_state = field_value(observation, "indexState");
-        const auto artifact_state = field_value(observation, "artifactState");
-        if (!index_state || *index_state != "current") {
-          return false;
-        }
-        if (!artifact_state ||
-            (*artifact_state != "published" && *artifact_state != "derived")) {
-          return false;
-        }
-      }
-    }
-
-    if (observation.operation == "query.return") {
-      const auto query_writes = field_value(observation, "queryWrites");
-      if (!query_writes || *query_writes != "0") {
+      index_published_so_far = true;
+    } else if (observation.operation == "sidecar.publish") {
+      if (!index_published_so_far) {
         return false;
       }
     }
+  }
 
-    return true;
-  });
+  return true;
 }
 
 } // namespace cidx::application

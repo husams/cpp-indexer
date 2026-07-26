@@ -15,3 +15,12 @@
 # specifically so this cannot be bypassed by editing them at HEAD.
 /.github/CODEOWNERS @husams
 /spec/tla/manifest.json @husams
+# HSE-89 review round 2: the scripts that ENFORCE this policy are themselves
+# protected. verification.yml also executes check-protected-review.sh from
+# the base commit rather than the PR's own checkout, so this file's edits
+# cannot make that one gate evaluate itself against its own tampered copy;
+# the other two scripts here rely on this CODEOWNERS entry as their
+# protection since they are not similarly pinned-to-base.
+/spec/tla/tools/check-protected-review.sh @husams
+/spec/tla/tools/check-policy.sh @husams
+/spec/tla/tools/select-changed-gates.sh @husams
