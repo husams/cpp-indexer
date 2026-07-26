@@ -157,7 +157,8 @@
     "/spec/tla/manifest.json",
     "tools/check-protected-review.sh",
     "tools/check-policy.sh",
-    "tools/select-changed-gates.sh"
+    "tools/select-changed-gates.sh",
+    "/.github/workflows/verification.yml"
   ],
   "conformance": {
     "operations": "conformance/operation-map.json",

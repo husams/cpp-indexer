@@ -24,3 +24,11 @@
 /spec/tla/tools/check-protected-review.sh @husams
 /spec/tla/tools/check-policy.sh @husams
 /spec/tla/tools/select-changed-gates.sh @husams
+# HSE-89 critic finding: the workflow file itself was unprotected -- a PR
+# could remove or defang the tla-protected-diff-review job (or what it
+# extracts/executes) and nothing would flag it as needing review. Known
+# residual limitation, not fixable in-repo: at the base commit for the PR
+# that FIRST adds these protectedPaths/CODEOWNERS entries, none of them
+# exist yet, so this and the other HSE-89 self-protection entries only take
+# effect for PRs based on a commit at or after this one merges.
+/.github/workflows/verification.yml @husams
