@@ -107,7 +107,8 @@
         ".github/workflows/verification.yml",
         "spec/tla/ci-dependency-map.json",
         "spec/tla/tools/select-changed-gates.sh",
-        "spec/tla/tools/check-gate-selection.sh"
+        "spec/tla/tools/check-gate-selection.sh",
+        "spec/tla/tools/check-gate-selection-defense-regression.sh"
       ]
     }
   ],

@@ -158,6 +158,9 @@
     "tools/check-protected-review.sh",
     "tools/check-policy.sh",
     "tools/select-changed-gates.sh",
+    "tools/check-gate-selection.sh",
+    "tools/check-gate-selection-defense-regression.sh",
+    "ci-dependency-map.json",
     "/.github/workflows/verification.yml"
   ],
   "conformance": {

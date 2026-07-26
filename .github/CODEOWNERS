@@ -24,6 +24,16 @@
 /spec/tla/tools/check-protected-review.sh @husams
 /spec/tla/tools/check-policy.sh @husams
 /spec/tla/tools/select-changed-gates.sh @husams
+# HSE-89 P1 fix (internal critic): the gate-selection defense had the same
+# self-policing gap check-protected-review.sh was already fixed for -- a PR
+# could narrow ci-dependency-map.json's flow->gates mapping and delete the
+# matching assertion in check-gate-selection.sh in the same change. Both
+# files are now protected, and verification.yml executes check-gate-selection.sh
+# from the base commit (mirroring check-protected-review.sh) so the base's
+# unedited assertions are what actually validate the PR's (head) map.
+/spec/tla/tools/check-gate-selection.sh @husams
+/spec/tla/tools/check-gate-selection-defense-regression.sh @husams
+/spec/tla/ci-dependency-map.json @husams
 # HSE-89 critic finding: the workflow file itself was unprotected -- a PR
 # could remove or defang the tla-protected-diff-review job (or what it
 # extracts/executes) and nothing would flag it as needing review. Known

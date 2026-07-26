@@ -29,8 +29,41 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Regression-test the gate selector's path-to-gate mapping
+      - name: Fetch base ref
+        if: github.event_name == 'pull_request'
+        run: git fetch origin "${{ github.event.pull_request.base.ref }}"
+      - name: Extract the trusted (base-commit) gate-selection regression test
+        if: github.event_name == 'pull_request'
+        # Same self-policing gap as check-protected-review.sh below: a PR
+        # could narrow ci-dependency-map.json's flow->gates mapping and
+        # delete the matching run_case assertion in check-gate-selection.sh
+        # in the same change, so the checker that proves the mapping is
+        # unweakened must itself come from a revision the PR cannot edit.
+        # Extract the script as it existed at the base commit and run THAT
+        # copy; CIDX_REPO_ROOT points it back at the real checkout (this
+        # PR's head) so it tests the PR's actual map/selector against the
+        # base's untamperable test cases.
+        run: |
+          git show "${{ github.event.pull_request.base.sha }}:spec/tla/tools/check-gate-selection.sh" \
+            > "$RUNNER_TEMP/check-gate-selection.sh"
+          chmod +x "$RUNNER_TEMP/check-gate-selection.sh"
+      - name: Regression-test the gate selector's path-to-gate mapping (pull_request)
+        if: github.event_name == 'pull_request'
+        env:
+          CIDX_REPO_ROOT: ${{ github.workspace }}
+        run: "$RUNNER_TEMP/check-gate-selection.sh"
+      - name: Regression-test the gate selector's path-to-gate mapping (push)
+        # A push event has no PR base to extract a trusted copy from and by
+        # definition already bypassed PR review (branch protection permitting);
+        # push always runs every gate as a safety net (see MODE=all below), so
+        # this step is exercised for its own correctness, not as a bypassable
+        # policy gate.
+        if: github.event_name != 'pull_request'
         run: spec/tla/tools/check-gate-selection.sh
+      - name: Regression-test the gate-selection anti-tamper defense itself
+        # Self-contained (builds its own throwaway git repo), so it runs on
+        # every event, not just pull_request.
+        run: spec/tla/tools/check-gate-selection-defense-regression.sh
       - name: Select gates
         id: select
         run: |

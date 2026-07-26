@@ -22,6 +22,9 @@ required = (
     "/spec/tla/tools/check-protected-review.sh @husams",
     "/spec/tla/tools/check-policy.sh @husams",
     "/spec/tla/tools/select-changed-gates.sh @husams",
+    "/spec/tla/tools/check-gate-selection.sh @husams",
+    "/spec/tla/tools/check-gate-selection-defense-regression.sh @husams",
+    "/spec/tla/ci-dependency-map.json @husams",
     "/.github/workflows/verification.yml @husams",
 )
 missing = [entry for entry in required if entry not in codeowners]

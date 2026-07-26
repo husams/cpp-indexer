@@ -19,10 +19,36 @@
 #     .github/workflows/verification.yml's tla-conformance job is the one
 #     that actually runs the exporter and diffs it against the golden file
 #     (tla-syntax-and-model never invokes this script at all).
+#
+# SECURITY (internal-critic P1, same self-policing gap check-protected-
+# review.sh was already fixed for): this script's assertions are the only
+# thing standing between a PR and a silently narrowed
+# ci-dependency-map.json -- e.g. dropping tla-sidecar-conformance from the
+# sidecar-publication flow -- IF that same PR also deletes or neuters the
+# matching run_case assertion below. verification.yml therefore extracts
+# THIS file from GITHUB_BASE_SHA and executes that copy, not the PR's own,
+# exactly as it already does for check-protected-review.sh. CIDX_REPO_ROOT
+# lets that extracted copy -- which no longer lives inside the repository
+# tree -- find the real checkout's spec/tla/ci-dependency-map.json and
+# spec/tla/tools/select-changed-gates.sh. Deliberately, those two files are
+# read from CIDX_REPO_ROOT (the PR's HEAD checkout), NOT from base: this
+# script's whole purpose is to catch a regression in the PR's OWN (head)
+# map/selector against base's untamperable test cases, not to re-validate
+# base's already-known-good map against itself.
+#
+# Judgement call (flagged, not silently assumed away): the fixed run_case
+# list below is itself a coverage boundary -- a change that narrows the map
+# for some OTHER path/flow this file does not assert on would still pass.
+# That is an accepted, narrower risk than the one this fix closes: any
+# narrowing here still requires editing a *protected* file
+# (ci-dependency-map.json, now in manifest.json's protectedPaths and
+# CODEOWNERS) and therefore still requires human review before merge, even
+# though this regression test would not itself detect the narrowing.
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="${CIDX_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+ROOT="$REPO_ROOT/spec/tla"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-gate-selection.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
