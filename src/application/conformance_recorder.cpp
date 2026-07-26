@@ -65,6 +65,55 @@ std::string derive_artifact_state(const protocol::ResultEnvelope &envelope) {
   return envelope.artifacts.empty() ? "none" : "published";
 }
 
+// sidecarQuality/sidecarValidated mirror PrepareSidecarArtifact's own
+// `sidecarValidated' = (quality = "valid")`: a sidecar is only "valid" when
+// the delegate reported both a complete result and current freshness --
+// anything else (partial, stale, or otherwise unaccounted-for) is a real,
+// schema-declared non-valid quality, not a silently-accepted default.
+std::string derive_sidecar_quality(const protocol::ResultEnvelope &envelope) {
+  if (envelope.completeness.state == "complete" &&
+      envelope.identity.freshness == "current") {
+    return "valid";
+  }
+  if (envelope.completeness.state == "partial") {
+    return "partial";
+  }
+  return "corrupt";
+}
+
+// The one artifact PublishSidecar actually publishes has kind "analysis"
+// (generated_result_protocol.hpp's kArtifactKinds) and a catalog_hash tied to
+// the same generation the most recently recorded index.publish reported --
+// not any nonempty artifact list. Checking `!artifacts.empty()` alone (as an
+// earlier version of this recorder did) would accept a claimed publish
+// backed by an unrelated artifact kind and an unrelated catalog, discarding
+// generation identity/catalog provenance entirely -- exactly the shape a
+// seeded defect would produce. identity.index stands in for
+// CidxStorageLifecycle's `sidecarGeneration = currentGeneration`
+// precondition: it is the one generation-identifying field ResultEnvelope
+// actually carries end to end, alongside the artifact's own catalog_hash.
+bool sidecar_artifact_matches_published_generation(
+    const protocol::ResultEnvelope &envelope,
+    const std::optional<ConformanceRecorder::PublishedGeneration>
+        &published_generation) {
+  if (envelope.artifacts.empty() || !published_generation.has_value()) {
+    return false;
+  }
+  const protocol::ArtifactRef &artifact = envelope.artifacts.front();
+  return artifact.kind == "analysis" && !artifact.catalog_hash.empty() &&
+         artifact.catalog_hash == published_generation->catalog_hash &&
+         envelope.identity.index == published_generation->identity_index;
+}
+
+bool has_valid_sidecar_artifact(
+    const protocol::ResultEnvelope &envelope,
+    const std::optional<ConformanceRecorder::PublishedGeneration>
+        &published_generation) {
+  return derive_sidecar_quality(envelope) == "valid" &&
+         sidecar_artifact_matches_published_generation(envelope,
+                                                       published_generation);
+}
+
 } // namespace
 
 ConformanceRecorder
@@ -94,8 +143,7 @@ ConformanceRecorder::index(const IndexRequest &request,
     // describes it, so the schema-expectation check below stays meaningful
     // instead of being forced to accept every outcome as "index.publish".
     const std::string index_state = derive_index_state(envelope);
-    const std::string publication_state =
-        derive_publication_state(index_state);
+    const std::string publication_state = derive_publication_state(index_state);
     const std::string artifact_state = derive_artifact_state(envelope);
     if (index_state == "current") {
       observations_.push_back(ConformanceObservation{
@@ -104,6 +152,18 @@ ConformanceRecorder::index(const IndexRequest &request,
                      {"publicationState", publication_state},
                      {"artifactState", artifact_state}},
       });
+      // Record the generation a later sidecar.publish must tie back to --
+      // see PublishedGeneration's declaration for why identity.index +
+      // catalog_hash are the two fields used. An index.publish with no
+      // artifact at all (artifact_state == "none") still overwrites this
+      // with an empty catalog_hash, so no subsequent sidecar can spuriously
+      // match it.
+      last_published_generation_ = PublishedGeneration{
+          .catalog_hash = envelope.artifacts.empty()
+                              ? std::string()
+                              : envelope.artifacts.front().catalog_hash,
+          .identity_index = envelope.identity.index,
+      };
     } else if (index_state == "stale") {
       // operation-map.json: publication.interrupt -> InterruptPublication ->
       // publicationState=stale.
@@ -170,11 +230,15 @@ ConformanceRecorder::analysis(const AnalysisRequest &request,
        request.action == AnalysisAction::export_facts) &&
       envelope.status != protocol::Status::Error;
   if (publish_attempt) {
-    const bool published = !envelope.artifacts.empty();
+    const std::string sidecar_quality = derive_sidecar_quality(envelope);
+    const bool published =
+        has_valid_sidecar_artifact(envelope, last_published_generation_);
     observations_.push_back(ConformanceObservation{
         .operation = "sidecar.publish",
         .fields = {{"sidecarFilePublication", published ? "current" : "none"},
-                   {"sidecarState", published ? "current" : "missing"}},
+                   {"sidecarState", published ? "current" : "missing"},
+                   {"sidecarQuality", sidecar_quality},
+                   {"sidecarValidated", published ? "true" : "false"}},
     });
   }
   return envelope;

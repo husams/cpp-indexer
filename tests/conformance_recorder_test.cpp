@@ -190,7 +190,7 @@ TEST_CASE("conformance recorder rejects a seeded partial-publication defect") {
 }
 
 TEST_CASE("conformance recorder records a genuinely partial index() outcome "
-         "instead of silently dropping it") {
+          "instead of silently dropping it") {
   FakeServices fake;
   // Before this fix, index() only recorded an observation when
   // derive_index_state() already landed on "current" -- so a genuinely
@@ -212,7 +212,7 @@ TEST_CASE("conformance recorder records a genuinely partial index() outcome "
                               .autoderive_labels = true,
                               .json = false,
                               .index = std::nullopt},
-                context);
+                 context);
 
   REQUIRE(recorder.observations().size() == 1);
   CHECK(recorder.observations()[0].operation == "publication.interrupt");
@@ -314,6 +314,96 @@ TEST_CASE("conformance recorder rejects a seeded illegal-sidecar-state "
   CHECK_FALSE(recorder.conformant());
 }
 
+TEST_CASE("conformance recorder rejects a seeded sidecar defect: claims "
+          "execute success with an artifact present, but completeness is "
+          "only partial") {
+  FakeServices fake;
+  // Seeded defect: the artifact list is NON-EMPTY (an earlier version of
+  // this recorder checked only `!artifacts.empty()` and would have accepted
+  // this), but the envelope itself admits the result is incomplete -- a
+  // sidecar built from a partial run must not be reported as current.
+  fake.analysis_response =
+      base_envelope("analysis", Status::Complete, "partial", "current");
+  fake.analysis_response.artifacts.push_back({.kind = "analysis",
+                                              .id = "sidecar-1",
+                                              .schema_version = 1,
+                                              .catalog_version = 1,
+                                              .catalog_hash = "test-hash"});
+  REQUIRE_FALSE(fake.analysis_response.artifacts.empty());
+
+  ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
+  ApplicationContext context = test_context();
+  recorder.analysis(AnalysisRequest{.action = AnalysisAction::execute,
+                                    .rule = std::nullopt,
+                                    .rules_file = std::nullopt,
+                                    .export_directory = std::nullopt,
+                                    .index = std::nullopt,
+                                    .jobs = 1},
+                    context);
+
+  REQUIRE(recorder.observations().size() == 1);
+  CHECK_FALSE(recorder.conformant());
+}
+
+TEST_CASE("conformance recorder rejects a seeded sidecar defect: claims "
+          "execute success with an artifact present, but freshness is "
+          "stale") {
+  FakeServices fake;
+  // Seeded defect: same non-empty artifact list, but freshness admits the
+  // underlying facts are stale -- a sidecar built from stale evidence must
+  // not be reported as current either.
+  fake.analysis_response =
+      base_envelope("analysis", Status::Complete, "complete", "stale");
+  fake.analysis_response.artifacts.push_back({.kind = "analysis",
+                                              .id = "sidecar-1",
+                                              .schema_version = 1,
+                                              .catalog_version = 1,
+                                              .catalog_hash = "test-hash"});
+  REQUIRE_FALSE(fake.analysis_response.artifacts.empty());
+
+  ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
+  ApplicationContext context = test_context();
+  recorder.analysis(AnalysisRequest{.action = AnalysisAction::execute,
+                                    .rule = std::nullopt,
+                                    .rules_file = std::nullopt,
+                                    .export_directory = std::nullopt,
+                                    .index = std::nullopt,
+                                    .jobs = 1},
+                    context);
+
+  REQUIRE(recorder.observations().size() == 1);
+  CHECK_FALSE(recorder.conformant());
+}
+
+TEST_CASE("conformance recorder rejects a seeded sidecar defect: an "
+          "unrelated artifact kind does not count as a published sidecar") {
+  FakeServices fake;
+  // Seeded defect: the artifact list is non-empty, completeness/freshness
+  // both look healthy, but the only artifact present is the wrong kind (a
+  // stray query-result reference, not the analysis sidecar itself).
+  fake.analysis_response =
+      base_envelope("analysis", Status::Complete, "complete", "current");
+  fake.analysis_response.artifacts.push_back({.kind = "query-result",
+                                              .id = "unrelated-artifact",
+                                              .schema_version = 1,
+                                              .catalog_version = 1,
+                                              .catalog_hash = "test-hash"});
+  REQUIRE_FALSE(fake.analysis_response.artifacts.empty());
+
+  ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
+  ApplicationContext context = test_context();
+  recorder.analysis(AnalysisRequest{.action = AnalysisAction::execute,
+                                    .rule = std::nullopt,
+                                    .rules_file = std::nullopt,
+                                    .export_directory = std::nullopt,
+                                    .index = std::nullopt,
+                                    .jobs = 1},
+                    context);
+
+  REQUIRE(recorder.observations().size() == 1);
+  CHECK_FALSE(recorder.conformant());
+}
+
 TEST_CASE("conformance recorder rejects a seeded out-of-order defect: "
           "sidecar.publish recorded with no preceding index.publish") {
   FakeServices fake;
@@ -386,6 +476,56 @@ TEST_CASE("conformance recorder accepts sidecar.publish when it is preceded "
 
   REQUIRE(recorder.observations().size() == 2);
   CHECK(recorder.conformant());
+}
+
+TEST_CASE("conformance recorder rejects a seeded sidecar-provenance-mismatch "
+          "defect (round-3 critic): any nonempty artifact list is not a "
+          "valid current sidecar") {
+  FakeServices fake;
+  fake.index_response =
+      base_envelope("index", Status::Complete, "complete", "current");
+  fake.index_response.artifacts.push_back({.kind = "semantic-index",
+                                           .id = "generation-1",
+                                           .schema_version = 1,
+                                           .catalog_version = 1,
+                                           .catalog_hash = "test-hash"});
+  // Seeded defect, exactly as the round-3 critic reproduced it: keep the
+  // otherwise-accepted trace (a real index.publish above), but make the
+  // analysis envelope completeness=partial, freshness=stale, with its sole
+  // artifact an unrelated kind and an unrelated catalog_hash. Before this
+  // fix, `published = !envelope.artifacts.empty()` accepted this outright --
+  // any nonempty artifact list was treated as a valid current sidecar,
+  // discarding generation identity, artifact kind/catalog provenance, and
+  // validation/quality/freshness/completeness entirely.
+  fake.analysis_response =
+      base_envelope("analysis", Status::Complete, "partial", "stale");
+  fake.analysis_response.artifacts.push_back({.kind = "unrelated-artifact",
+                                              .id = "orphan-generation",
+                                              .schema_version = 1,
+                                              .catalog_version = 1,
+                                              .catalog_hash = "wrong-hash"});
+
+  ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
+  ApplicationContext context = test_context();
+  recorder.index(IndexRequest{.action = IndexAction::update,
+                              .files = {},
+                              .source = std::nullopt,
+                              .graph = true,
+                              .autoderive_labels = true,
+                              .json = false,
+                              .index = std::nullopt},
+                 context);
+  recorder.analysis(AnalysisRequest{.action = AnalysisAction::execute,
+                                    .rule = std::nullopt,
+                                    .rules_file = std::nullopt,
+                                    .export_directory = std::nullopt,
+                                    .index = std::nullopt,
+                                    .jobs = 1},
+                    context);
+
+  REQUIRE(recorder.observations().size() == 2);
+  CHECK(recorder.observations()[1].operation == "sidecar.publish");
+  CHECK_FALSE(recorder.conformant());
 }
 
 TEST_CASE("conformance recorder does not claim the six out-of-scope "

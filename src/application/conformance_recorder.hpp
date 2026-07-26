@@ -8,6 +8,7 @@
 // invented parallel vocabulary -- see conformance_schema.hpp).
 #pragma once
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -80,11 +81,29 @@ public:
 
   [[nodiscard]] bool conformant() const;
 
+  // The generation identity/catalog provenance a legitimate sidecar.publish
+  // must tie back to: recorded from the most recent index.publish
+  // observation's own artifact + Identity, and compared against every
+  // subsequent analysis() call before it is allowed to claim
+  // sidecarFilePublication=current. This is the coarse-refinement stand-in
+  // for CidxStorageLifecycle.PublishSidecar's `sidecarGeneration =
+  // currentGeneration` precondition -- ResultEnvelope carries no numeric
+  // generation, so identity.index (which "index" this result is for) plus
+  // the published artifact's catalog_hash are the two fields that actually
+  // survive end to end. Public (not an implementation-hiding concern) so the
+  // free helper functions in conformance_recorder.cpp's anonymous namespace
+  // can take it by const-reference without needing friendship.
+  struct PublishedGeneration {
+    std::string catalog_hash;
+    std::string identity_index;
+  };
+
 private:
   const ApplicationServices &delegate_;
   ConformanceSchema index_query_schema_;
   ConformanceSchema sidecar_schema_;
   mutable std::vector<ConformanceObservation> observations_;
+  mutable std::optional<PublishedGeneration> last_published_generation_;
 };
 
 } // namespace cidx::application
