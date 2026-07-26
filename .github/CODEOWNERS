@@ -44,9 +44,16 @@
 # with a stub that exits 0 in the same commit. check.sh,
 # check-conformance.sh, check-sidecar-conformance.sh, and check-proofs.sh are
 # additionally pinned-to-base in verification.yml (mirroring
-# check-protected-review.sh and check-gate-selection.sh); check-regression.sh
+# check-protected-review.sh and check-gate-selection.sh). check-regression.sh
 # and export-counterexample.sh are self-tests of those pinned checkers and
-# rely on this CODEOWNERS entry as their protection.
+# had the same two-generation trust-root-poisoning gap check-gate-selection-
+# defense-regression.sh was already fixed for: a single PR could weaken
+# check.sh's detection and neuter these self-tests' assertions in the same
+# commit, so every gate would still go green. They are now ALSO pinned-to-
+# base in verification.yml, and their CIDX_CHECK_SH wiring points them at the
+# SAME base-extracted check.sh as the real gate, from the same immutable
+# base revision -- see check-self-test-tamper-regression.sh for the
+# executable proof. CODEOWNERS remains a defense-in-depth backstop for both.
 /spec/tla/tools/check.sh @husams
 /spec/tla/tools/check-regression.sh @husams
 /spec/tla/tools/check-conformance.sh @husams
@@ -54,6 +61,7 @@
 /spec/tla/tools/check-proofs.sh @husams
 /spec/tla/tools/export-counterexample.sh @husams
 /spec/tla/tools/check-verification-tamper-regression.sh @husams
+/spec/tla/tools/check-self-test-tamper-regression.sh @husams
 # HSE-89 round-6 security fix: extract-trusted-checker.sh is the single
 # shared implementation every base-pinning extraction step in
 # verification.yml now calls (except check-protected-review.sh, which stays

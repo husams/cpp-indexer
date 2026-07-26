@@ -245,36 +245,79 @@ import re
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text()
-checkers = (
-    "check-gate-selection.sh",
-    "check-gate-selection-defense-regression.sh",
-    "check.sh",
-    "check-proofs.sh",
-    "check-conformance.sh",
-    "check-sidecar-conformance.sh",
-)
+# Expected extraction-call count per checker (default 1). check.sh is
+# extracted twice: once in tla-syntax-and-model for the real gate (and to
+# wire check-regression.sh's CIDX_CHECK_SH there), and again in
+# tla-conformance solely so export-counterexample.sh's --demo path has a
+# base-extracted check.sh to invoke via its own CIDX_CHECK_SH. Both
+# check-regression.sh and export-counterexample.sh are self-tests of
+# check.sh's detection logic with the identical two-generation
+# trust-root-poisoning gap (see check-self-test-tamper-regression.sh); each
+# is extracted once, alongside the check.sh it is wired to via CIDX_CHECK_SH.
+checkers = {
+    "check-gate-selection.sh": 1,
+    "check-gate-selection-defense-regression.sh": 1,
+    "check.sh": 2,
+    "check-proofs.sh": 1,
+    "check-conformance.sh": 1,
+    "check-sidecar-conformance.sh": 1,
+    "check-regression.sh": 1,
+    "export-counterexample.sh": 1,
+}
 
-for checker in checkers:
+for checker, expected_count in checkers.items():
     relative = f"spec/tla/tools/{checker}"
     marker = f"extract-trusted-checker.sh \\\n            \"${{{{ github.event.pull_request.base.sha }}}}\" \\\n            {relative} \\\n"
-    if workflow.count(marker) != 1:
+    actual_count = workflow.count(marker)
+    if actual_count != expected_count:
         raise SystemExit(
             "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
-            f"reason=shared-helper-call-missing-or-duplicated:{checker}"
+            f"reason=shared-helper-call-count-mismatch:{checker}:expected={expected_count}:actual={actual_count}"
         )
-    start = workflow.index(marker)
-    destination_match = re.search(
-        r'"(\$RUNNER_TEMP/[^"]+)"', workflow[start : start + len(marker) + 200]
+    search_from = 0
+    for _ in range(expected_count):
+        start = workflow.index(marker, search_from)
+        destination_match = re.search(
+            r'"(\$RUNNER_TEMP/[^"]+)"', workflow[start : start + len(marker) + 200]
+        )
+        if destination_match is None or destination_match.group(1) != f"$RUNNER_TEMP/{checker}":
+            raise SystemExit(
+                "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
+                f"reason=shared-helper-destination-not-runner-temp:{checker}"
+            )
+        search_from = start + len(marker)
+    # export-counterexample.sh's run step passes --demo/--out arguments after
+    # the quoted path (it is a multi-line `run: |` block, unlike the other
+    # single-command checkers), so its execution marker cannot require the
+    # closing quote to be followed immediately by end-of-line.
+    execution_marker = (
+        f'"$RUNNER_TEMP/{checker}" --demo'
+        if checker == "export-counterexample.sh"
+        else f'run: "$RUNNER_TEMP/{checker}"'
     )
-    if destination_match is None or destination_match.group(1) != f"$RUNNER_TEMP/{checker}":
-        raise SystemExit(
-            "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
-            f"reason=shared-helper-destination-not-runner-temp:{checker}"
-        )
-    if f'run: "$RUNNER_TEMP/{checker}"' not in workflow:
+    if execution_marker not in workflow:
         raise SystemExit(
             "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
             f"reason=shared-helper-execution-not-runner-temp:{checker}"
+        )
+
+# check-regression.sh and export-counterexample.sh must each pass
+# CIDX_CHECK_SH pointing at a $RUNNER_TEMP-extracted check.sh on their
+# pull_request run step, not merely extract it and leave it unused -- that
+# would silently reintroduce the CIDX_CHECK_SH-shaped hole this fix closes.
+for checker in ("check-regression.sh", "export-counterexample.sh"):
+    run_marker = (
+        f'"$RUNNER_TEMP/{checker}" --demo'
+        if checker == "export-counterexample.sh"
+        else f'run: "$RUNNER_TEMP/{checker}"'
+    )
+    run_start = workflow.rindex(run_marker)
+    step_start = workflow.rindex("- name:", 0, run_start)
+    step_block = workflow[step_start:run_start]
+    if "CIDX_CHECK_SH: ${{ runner.temp }}/check.sh" not in step_block:
+        raise SystemExit(
+            "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
+            f"reason=cidx-check-sh-not-wired-to-runner-temp:{checker}"
         )
 
 # check-protected-review.sh must never call the shared helper: it is the one

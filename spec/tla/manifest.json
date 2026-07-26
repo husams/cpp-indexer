@@ -200,6 +200,7 @@
     "tools/check-gate-selection.sh",
     "tools/check-gate-selection-defense-regression.sh",
     "tools/check-verification-tamper-regression.sh",
+    "tools/check-self-test-tamper-regression.sh",
     "tools/extract-trusted-checker.sh",
     "tools/validate-manifest.py",
     "tools/check.sh",

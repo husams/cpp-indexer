@@ -164,6 +164,35 @@ jobs:
         # in the changes job above, but for the check.sh base-pin fixed in
         # this round rather than the gate-selection map/selector.
         run: spec/tla/tools/check-verification-tamper-regression.sh
+      - name: Regression-test the self-test anti-tamper defense
+        # Self-contained (builds its own throwaway git repo, seeds its own
+        # base/head commits), so it runs on every event, not just
+        # pull_request. Proves the two-generation trust-root-poisoning fix
+        # below: check-regression.sh and export-counterexample.sh are
+        # themselves self-tests of check.sh's detection logic, and until
+        # this fix they always invoked HEAD's own tools/check.sh -- not the
+        # base-extracted copy the real gate below already trusts -- so a
+        # single PR could weaken check.sh and neuter these self-tests'
+        # assertions together and still print PASS. See the script header
+        # for the full attack and the CIDX_CHECK_SH fix that closes it.
+        run: spec/tla/tools/check-self-test-tamper-regression.sh
+      - name: Extract the trusted (base-commit) invariant mutation regression
+        if: github.event_name == 'pull_request'
+        # check-regression.sh is itself a self-test of check.sh's detection
+        # logic, so it has the identical two-generation trust-root-poisoning
+        # gap check-self-test-tamper-regression.sh above proves and closes:
+        # a PR could weaken check.sh's detection and neuter this self-test's
+        # assertions in the same commit, and CI would run that tampered pair
+        # straight from the PR's own checkout. Extract it from the base
+        # commit alongside check.sh above; CIDX_CHECK_SH (set on the run
+        # step below) wires it to the SAME base-extracted check.sh, from the
+        # same immutable base revision, rather than letting it resolve
+        # tools/check.sh from its own (now $RUNNER_TEMP) location.
+        run: |
+          spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check-regression.sh \
+            "$RUNNER_TEMP/check-regression.sh"
       - name: Run normative TLA+ gate (pull_request)
         if: github.event_name == 'pull_request'
         env:
@@ -177,7 +206,16 @@ jobs:
         # own correctness, not as a bypassable policy gate.
         if: github.event_name != 'pull_request'
         run: spec/tla/tools/check.sh
-      - name: Run invariant mutation regression
+      - name: Run invariant mutation regression (pull_request)
+        if: github.event_name == 'pull_request'
+        env:
+          CIDX_REPO_ROOT: ${{ github.workspace }}
+          CIDX_CHECK_SH: ${{ runner.temp }}/check.sh
+        run: "$RUNNER_TEMP/check-regression.sh"
+      - name: Run invariant mutation regression (push)
+        # See the equivalent push step above: no base to extract from, and
+        # push already bypassed PR review.
+        if: github.event_name != 'pull_request'
         run: spec/tla/tools/check-regression.sh
 
   tla-proofs:
@@ -252,6 +290,32 @@ jobs:
             "${{ github.event.pull_request.base.sha }}" \
             spec/tla/tools/check-conformance.sh \
             "$RUNNER_TEMP/check-conformance.sh"
+      - name: Extract the trusted (base-commit) normative TLA+ gate checker
+        if: github.event_name == 'pull_request'
+        # export-counterexample.sh's --demo path invokes tools/check.sh
+        # internally (see CIDX_CHECK_SH below); this job does not otherwise
+        # extract check.sh, so pin it here too, from the same base commit as
+        # the conformance checker and the exporter itself below.
+        run: |
+          spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check.sh \
+            "$RUNNER_TEMP/check.sh"
+      - name: Extract the trusted (base-commit) counterexample export pipeline
+        if: github.event_name == 'pull_request'
+        # export-counterexample.sh is a self-test of check.sh's detection
+        # logic (its --demo path seeds a TrustedOutcomeInvariant defect and
+        # asserts check.sh fails on it before exporting), so it has the
+        # identical two-generation trust-root-poisoning gap check-regression.sh
+        # has -- see that script's header, and
+        # check-self-test-tamper-regression.sh for the executable proof. The
+        # run step below wires CIDX_CHECK_SH to the check.sh extracted just
+        # above, from the same immutable base revision.
+        run: |
+          spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/export-counterexample.sh \
+            "$RUNNER_TEMP/export-counterexample.sh"
       - name: Set up pinned Java runtime
         uses: actions/setup-java@v4
         with:
@@ -265,7 +329,19 @@ jobs:
       - name: Check conformance mappings and deterministic traces (push)
         if: github.event_name != 'pull_request'
         run: spec/tla/tools/check-conformance.sh
-      - name: Verify the exported-counterexample pipeline is reproducible
+      - name: Verify the exported-counterexample pipeline is reproducible (pull_request)
+        if: github.event_name == 'pull_request'
+        env:
+          CIDX_REPO_ROOT: ${{ github.workspace }}
+          CIDX_CHECK_SH: ${{ runner.temp }}/check.sh
+        run: |
+          "$RUNNER_TEMP/export-counterexample.sh" --demo --out /tmp/trusted-outcome-violation.json
+          diff /tmp/trusted-outcome-violation.json \
+            spec/tla/counterexamples/golden/trusted-outcome-violation.json
+      - name: Verify the exported-counterexample pipeline is reproducible (push)
+        # See the equivalent push step above: no base to extract from, and
+        # push already bypassed PR review.
+        if: github.event_name != 'pull_request'
         run: |
           spec/tla/tools/export-counterexample.sh --demo --out /tmp/trusted-outcome-violation.json
           diff /tmp/trusted-outcome-violation.json \

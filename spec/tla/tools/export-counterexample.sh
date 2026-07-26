@@ -18,10 +18,26 @@
 #       model -> export) to add further golden examples; this script does
 #       not attempt to auto-discover every seed check-regression.sh knows
 #       about.
+#
+# HSE-89 internal-critic fix (two-generation trust-root poisoning): --demo
+# invokes tools/check.sh internally to produce the TLC log it exports, so
+# this script has the identical self-policing gap check-regression.sh was
+# fixed for -- see that script's header for the full attack description. It
+# previously resolved that invocation via "$ROOT/tools/check.sh", where ROOT
+# derived from its OWN script location, so a PR could weaken check.sh and
+# this exporter in the same commit and still reproduce the golden diff.
+# CIDX_CHECK_SH resolves the check.sh this script invokes independently of
+# CIDX_REPO_ROOT (which still points module asset resolution -- CidxResult.tla
+# -- at the real checkout, since that IS legitimate PR content to seed the
+# demo mutation from), so verification.yml can wire it to the same
+# base-extracted check.sh both this script and the real tla-conformance gate
+# trust, from the same immutable base revision.
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${CIDX_REPO_ROOT:+$CIDX_REPO_ROOT/spec/tla}"
+ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+CHECK_SH="${CIDX_CHECK_SH:-$ROOT/tools/check.sh}"
 
 usage() {
   echo "usage: $0 --from-log <path> --model <name> --invariant <name> --out <path>" >&2
@@ -139,7 +155,7 @@ run_demo() {
   local log="$work/check.log"
   set +e
   TLA_MODULE_DIR="$work/modules" TLA_MODELS="CidxResultSmoke" \
-    "$ROOT/tools/check.sh" >"$log" 2>&1
+    "$CHECK_SH" >"$log" 2>&1
   local status=$?
   set -e
   if [[ "$status" -ne 30 ]]; then

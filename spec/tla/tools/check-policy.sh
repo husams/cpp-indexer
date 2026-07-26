@@ -35,6 +35,7 @@ required = (
     "/spec/tla/tools/check-proofs.sh @husams",
     "/spec/tla/tools/export-counterexample.sh @husams",
     "/spec/tla/tools/check-verification-tamper-regression.sh @husams",
+    "/spec/tla/tools/check-self-test-tamper-regression.sh @husams",
     "/spec/tla/tools/extract-trusted-checker.sh @husams",
     "/spec/tla/ci-dependency-map.json @husams",
     "/.github/workflows/verification.yml @husams",
