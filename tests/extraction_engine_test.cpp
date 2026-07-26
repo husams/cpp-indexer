@@ -153,6 +153,160 @@ std::string nested_records_source(int depth) {
   return source;
 }
 
+// `struct_count` structs, each with a constructor whose SINGLE
+// member-initializer hides a chain of `chain_length` calls
+// (`x(leaf_value() + leaf_value() + ... + leaf_value())`).
+// CXXConstructorDecl::inits() is a list CXXCtorInitializer/getInit() exprs
+// live in that is entirely separate from both DeclContext::decls() (which
+// never contains member-initializer expressions) and the -- here empty --
+// function body, so a NodeBudgetCounter that never walks it undercounts the
+// TU by roughly struct_count * (2 * chain_length - 1) real AST nodes no
+// matter how long the hidden chain runs.
+std::string ctor_initializer_hidden_calls_source(int struct_count,
+                                                 int chain_length) {
+  std::string source = "int leaf_value();\n";
+  for (int i = 0; i < struct_count; ++i) {
+    const std::string name = "S" + std::to_string(i);
+    source += "struct " + name + " {\n";
+    source += "  int x;\n";
+    source += "  " + name + "() : x(";
+    for (int j = 0; j < chain_length; ++j) {
+      if (j > 0) {
+        source += " + ";
+      }
+      source += "leaf_value()";
+    }
+    source += ") {}\n";
+    source += "};\n";
+  }
+  return source;
+}
+
+// `enum_count` scoped enums, each with a SINGLE enumerator whose initializer
+// hides a chain of `chain_length` calls (`A = leaf_value() + ... +
+// leaf_value()`). clang::EnumConstantDecl does not derive from
+// clang::VarDecl (it derives directly from clang::ValueDecl), so a
+// NodeBudgetCounter that only special-cases VarDecl/FieldDecl/FunctionDecl
+// never walks EnumConstantDecl::getInitExpr() even though `enumDecl` is
+// itself an allow-listed matcher_catalog.cpp node and
+// RecursiveASTVisitor::TraverseEnumConstantDecl walks the initializer
+// unconditionally.
+std::string enum_constant_hidden_calls_source(int enum_count,
+                                              int chain_length) {
+  // The enumerator value must be a constant expression, so leaf_value()
+  // needs a constexpr-evaluable body rather than a bare declaration -- the
+  // call itself is still a real CallExpr node in the AST either way.
+  std::string source = "constexpr int leaf_value() { return 1; }\n";
+  for (int i = 0; i < enum_count; ++i) {
+    const std::string name = "E" + std::to_string(i);
+    source += "enum class " + name + " {\n  A = ";
+    for (int j = 0; j < chain_length; ++j) {
+      if (j > 0) {
+        source += " + ";
+      }
+      source += "leaf_value()";
+    }
+    source += "\n};\n";
+  }
+  return source;
+}
+
+// `function_count` functions, each with a trailing decltype(...) return type
+// whose operand hides a chain of `chain_length` calls
+// (`decltype((leaf_value() + ... + leaf_value(), 0))`). Neither decls() nor
+// getBody() ever surfaces a decltype operand -- it lives on the function's
+// declared return type, which RecursiveASTVisitor's
+// TraverseDecltypeTypeLoc walks as part of traversing that type.
+std::string decltype_return_type_hidden_calls_source(int function_count,
+                                                     int chain_length) {
+  std::string source = "int leaf_value();\n";
+  for (int i = 0; i < function_count; ++i) {
+    const std::string name = "target" + std::to_string(i);
+    source += "auto " + name + "() -> decltype((";
+    for (int j = 0; j < chain_length; ++j) {
+      if (j > 0) {
+        source += " + ";
+      }
+      source += "leaf_value()";
+    }
+    source += ", 0));\n";
+  }
+  return source;
+}
+
+// `function_count` functions, each with a SINGLE parameter whose default
+// argument hides a chain of `chain_length` calls
+// (`void targetN(int x = leaf_value() + ... + leaf_value());`).
+// clang::ParmVarDecl::getDefaultArg() lives on the parameter, and a
+// parameter is never linked into its owning FunctionDecl's own decls()
+// chain (RecursiveASTVisitor instead reaches it while traversing the
+// function's FunctionProtoTypeLoc), so a NodeBudgetCounter that only
+// enumerates decls() never sees it without an explicit parameters() walk.
+std::string parameter_default_argument_hidden_calls_source(int function_count,
+                                                           int chain_length) {
+  std::string source = "int leaf_value();\n";
+  for (int i = 0; i < function_count; ++i) {
+    const std::string name = "target" + std::to_string(i);
+    source += "void " + name + "(int x = ";
+    for (int j = 0; j < chain_length; ++j) {
+      if (j > 0) {
+        source += " + ";
+      }
+      source += "leaf_value()";
+    }
+    source += ");\n";
+  }
+  return source;
+}
+
+// `function_count` functions, each with a noexcept(expr) specifier hiding a
+// chain of `chain_length` calls
+// (`void targetN() noexcept(leaf_value() + ... + leaf_value() >= 0);`). A
+// noexcept-specifier's expression must itself be a converted constant
+// expression, so leaf_value() needs a constexpr-evaluable body (the call is
+// still a real CallExpr node in the AST). The expression is carried on the
+// function's clang::FunctionProtoType, not reachable through decls() or the
+// (here absent) body.
+std::string noexcept_specifier_hidden_calls_source(int function_count,
+                                                   int chain_length) {
+  std::string source = "constexpr int leaf_value() { return 1; }\n";
+  for (int i = 0; i < function_count; ++i) {
+    const std::string name = "target" + std::to_string(i);
+    source += "void " + name + "() noexcept(";
+    for (int j = 0; j < chain_length; ++j) {
+      if (j > 0) {
+        source += " + ";
+      }
+      source += "leaf_value()";
+    }
+    source += " >= 0);\n";
+  }
+  return source;
+}
+
+// `template_count` class templates, each declaring a SINGLE method whose
+// body hides `chain_length` calls
+// (`template <typename T> struct BoxN { void method() { leaf_value(); ...
+// } };`). clang::ClassTemplateDecl is never itself a clang::DeclContext --
+// the templated clang::CXXRecordDecl it wraps is -- so without walking
+// tmpl->getTemplatedDecl(), the ENTIRE primary template pattern (including
+// every method body) is invisible to a counter that only enumerates
+// DeclContext::decls() reachable from the translation unit.
+std::string class_template_body_hidden_calls_source(int template_count,
+                                                    int chain_length) {
+  std::string source = "void leaf_value();\n";
+  for (int i = 0; i < template_count; ++i) {
+    const std::string name = "Box" + std::to_string(i);
+    source +=
+        "template <typename T> struct " + name + " {\n  void method() {\n";
+    for (int j = 0; j < chain_length; ++j) {
+      source += "    leaf_value();\n";
+    }
+    source += "  }\n};\n";
+  }
+  return source;
+}
+
 std::string make_temp_dir() {
   std::string tmpl = "/tmp/cidx_extract_artifact_XXXXXX";
   std::vector<char> buffer(tmpl.begin(), tmpl.end());
@@ -1003,6 +1157,240 @@ TEST_SUITE("clang") {
     REQUIRE(stats != nullptr);
     CHECK(stats->budget_exhausted);
     CHECK(result.sink.unknowns().empty());
+  }
+
+  TEST_CASE(
+      "a constructor's member-initializer list is invisible to "
+      "NodeBudgetCounter unless CXXConstructorDecl::inits() is walked, so a "
+      "hidden call chain living ONLY in a member-initializer slips under "
+      "max_visited_nodes with no hasDescendant/hasAncestor combinator "
+      "involved at all (P1 repro distinct from the round-4 quadratic-"
+      "combinator finding above: this matcher -- "
+      "cxxConstructorDecl().bind(\"ctor\") -- has ZERO traversal-work "
+      "combinators, so estimated_work_exceeded is unconditionally false and "
+      "budget_exhausted can only trip through the raw visited-node "
+      "pre-check, isolating the coverage gap itself rather than the "
+      "quadratic-cost estimate)") {
+    ExtractionRule rule;
+    rule.id = "audit.ctor_initializer_hidden_calls";
+    rule.matcher_expression = "cxxConstructorDecl().bind(\"ctor\")";
+    rule.bindings = {
+        Binding{.name = "ctor", .domain = EndpointDomain::declaration}};
+    EmitOperation emit;
+    emit.unknown = EmitUnknown{
+        .namespace_name = "audit", .reason_code = "seen", .binding = "ctor"};
+    rule.emits = {emit};
+    rule.completeness = DeclaredCompleteness::unknown_capable;
+    // Measured directly against this exact source: ignoring
+    // member-initializers (the pre-fix behavior) visits 142 nodes; walking
+    // CXXCtorInitializer::getInit() as well visits 1332 -- a ~9x spread.
+    // 300 sits with a wide margin on both sides of that boundary.
+    rule.budget = RuleBudget{.max_matches = 1000,
+                             .max_emitted_facts = 1000,
+                             .max_visited_nodes = 300,
+                             .declared = true};
+    rule.producer_package = "audit";
+    rule.producer_version = 1;
+    ExtractionPlan plan = plan_with({rule});
+
+    RunResult result =
+        run_plan(plan, ctor_initializer_hidden_calls_source(10, 30));
+    const auto *stats = result.report.find(rule.id);
+    REQUIRE(stats != nullptr);
+    CHECK(stats->budget_exhausted);
+  }
+
+  TEST_CASE(
+      "an enumerator initializer is invisible to NodeBudgetCounter unless "
+      "EnumConstantDecl::getInitExpr() is walked, so a hidden call chain "
+      "living ONLY in an enum-class enumerator's value slips under "
+      "max_visited_nodes even though `enumDecl` is itself an allow-listed "
+      "matcher_catalog.cpp node (distinct coverage gap from the "
+      "member-initializer P1: EnumConstantDecl derives from ValueDecl, not "
+      "VarDecl, so it fell through every existing dyn_cast branch)") {
+    ExtractionRule rule;
+    rule.id = "audit.enum_constant_hidden_calls";
+    rule.matcher_expression = "enumDecl().bind(\"e\")";
+    rule.bindings = {
+        Binding{.name = "e", .domain = EndpointDomain::declaration}};
+    EmitOperation emit;
+    emit.unknown = EmitUnknown{
+        .namespace_name = "audit", .reason_code = "seen", .binding = "e"};
+    rule.emits = {emit};
+    rule.completeness = DeclaredCompleteness::unknown_capable;
+    // Measured directly against this exact source by bisecting
+    // max_visited_nodes: ignoring enumerator initializers (the pre-fix
+    // behavior) exhausts the budget somewhere in [110, 120); walking
+    // EnumConstantDecl::getInitExpr() as well moves that boundary out past
+    // [1300, 1400) -- roughly a 12x spread. 700 sits with a wide margin on
+    // both sides.
+    rule.budget = RuleBudget{.max_matches = 1000,
+                             .max_emitted_facts = 1000,
+                             .max_visited_nodes = 700,
+                             .declared = true};
+    rule.producer_package = "audit";
+    rule.producer_version = 1;
+    ExtractionPlan plan = plan_with({rule});
+
+    RunResult result =
+        run_plan(plan, enum_constant_hidden_calls_source(10, 30));
+    const auto *stats = result.report.find(rule.id);
+    REQUIRE(stats != nullptr);
+    CHECK(stats->budget_exhausted);
+  }
+
+  TEST_CASE("a decltype(expr) return type is invisible to NodeBudgetCounter "
+            "unless the function's declared return type is followed into its "
+            "underlying expression, so a hidden call chain living ONLY in a "
+            "trailing decltype(...) return type slips under max_visited_nodes "
+            "even though `functionDecl` is itself an allow-listed "
+            "matcher_catalog.cpp node (distinct coverage gap from the "
+            "member-initializer/enumerator P1s: this content lives on the "
+            "declared TYPE, not in any Decl or Stmt subtree the counter's "
+            "existing branches ever reach)") {
+    ExtractionRule rule;
+    rule.id = "audit.decltype_return_type_hidden_calls";
+    rule.matcher_expression = "functionDecl().bind(\"fn\")";
+    rule.bindings = {
+        Binding{.name = "fn", .domain = EndpointDomain::declaration}};
+    EmitOperation emit;
+    emit.unknown = EmitUnknown{
+        .namespace_name = "audit", .reason_code = "seen", .binding = "fn"};
+    rule.emits = {emit};
+    rule.completeness = DeclaredCompleteness::unknown_capable;
+    // Measured directly against this exact source by bisecting
+    // max_visited_nodes: ignoring the decltype operand (the pre-fix
+    // behavior) exhausts the budget somewhere in [100, 110); walking it as
+    // well moves that boundary out past [1300, 1400) -- roughly a 13x
+    // spread. 700 sits with a wide margin on both sides.
+    rule.budget = RuleBudget{.max_matches = 1000,
+                             .max_emitted_facts = 1000,
+                             .max_visited_nodes = 700,
+                             .declared = true};
+    rule.producer_package = "audit";
+    rule.producer_version = 1;
+    ExtractionPlan plan = plan_with({rule});
+
+    RunResult result =
+        run_plan(plan, decltype_return_type_hidden_calls_source(10, 30));
+    const auto *stats = result.report.find(rule.id);
+    REQUIRE(stats != nullptr);
+    CHECK(stats->budget_exhausted);
+  }
+
+  TEST_CASE(
+      "a parameter's default argument is invisible to NodeBudgetCounter "
+      "unless FunctionDecl::parameters() is walked, so a hidden call chain "
+      "living ONLY in a default argument slips under max_visited_nodes even "
+      "though `functionDecl` is itself an allow-listed matcher_catalog.cpp "
+      "node (a parameter is never linked into its owning FunctionDecl's own "
+      "decls() chain)") {
+    ExtractionRule rule;
+    rule.id = "audit.parameter_default_argument_hidden_calls";
+    rule.matcher_expression = "functionDecl().bind(\"fn\")";
+    rule.bindings = {
+        Binding{.name = "fn", .domain = EndpointDomain::declaration}};
+    EmitOperation emit;
+    emit.unknown = EmitUnknown{
+        .namespace_name = "audit", .reason_code = "seen", .binding = "fn"};
+    rule.emits = {emit};
+    rule.completeness = DeclaredCompleteness::unknown_capable;
+    // Measured directly against this exact source by bisecting
+    // max_visited_nodes: ignoring parameter default arguments (the pre-fix
+    // behavior) exhausts the budget somewhere in [100, 110); walking
+    // ParmVarDecl::getDefaultArg() as well moves that boundary out past
+    // [1300, 1400) -- roughly a 13x spread. 700 sits with a wide margin on
+    // both sides.
+    rule.budget = RuleBudget{.max_matches = 1000,
+                             .max_emitted_facts = 1000,
+                             .max_visited_nodes = 700,
+                             .declared = true};
+    rule.producer_package = "audit";
+    rule.producer_version = 1;
+    ExtractionPlan plan = plan_with({rule});
+
+    RunResult result =
+        run_plan(plan, parameter_default_argument_hidden_calls_source(10, 30));
+    const auto *stats = result.report.find(rule.id);
+    REQUIRE(stats != nullptr);
+    CHECK(stats->budget_exhausted);
+  }
+
+  TEST_CASE(
+      "a noexcept(expr) specifier is invisible to NodeBudgetCounter unless "
+      "the function's FunctionProtoType::getNoexceptExpr() is walked, so a "
+      "hidden call chain living ONLY in a noexcept specifier slips under "
+      "max_visited_nodes even though `functionDecl` is itself an "
+      "allow-listed matcher_catalog.cpp node (the expression lives on the "
+      "function's TYPE, not reachable through decls() or getBody())") {
+    ExtractionRule rule;
+    rule.id = "audit.noexcept_specifier_hidden_calls";
+    rule.matcher_expression = "functionDecl().bind(\"fn\")";
+    rule.bindings = {
+        Binding{.name = "fn", .domain = EndpointDomain::declaration}};
+    EmitOperation emit;
+    emit.unknown = EmitUnknown{
+        .namespace_name = "audit", .reason_code = "seen", .binding = "fn"};
+    rule.emits = {emit};
+    rule.completeness = DeclaredCompleteness::unknown_capable;
+    // Measured directly against this exact source by bisecting
+    // max_visited_nodes: ignoring the noexcept operand (the pre-fix
+    // behavior) exhausts the budget somewhere in [100, 110); walking
+    // FunctionProtoType::getNoexceptExpr() as well moves that boundary out
+    // past [1300, 1400) -- roughly a 13x spread. 700 sits with a wide
+    // margin on both sides.
+    rule.budget = RuleBudget{.max_matches = 1000,
+                             .max_emitted_facts = 1000,
+                             .max_visited_nodes = 700,
+                             .declared = true};
+    rule.producer_package = "audit";
+    rule.producer_version = 1;
+    ExtractionPlan plan = plan_with({rule});
+
+    RunResult result =
+        run_plan(plan, noexcept_specifier_hidden_calls_source(10, 30));
+    const auto *stats = result.report.find(rule.id);
+    REQUIRE(stats != nullptr);
+    CHECK(stats->budget_exhausted);
+  }
+
+  TEST_CASE(
+      "an entire class template pattern's method body is invisible to "
+      "NodeBudgetCounter unless TemplateDecl::getTemplatedDecl() is walked, "
+      "so a hidden call chain living ONLY in an uninstantiated template's "
+      "method body slips under max_visited_nodes even though "
+      "`classTemplateDecl` is itself an allow-listed matcher_catalog.cpp "
+      "node (clang::ClassTemplateDecl is never itself a DeclContext -- the "
+      "templated CXXRecordDecl it wraps is)") {
+    ExtractionRule rule;
+    rule.id = "audit.class_template_body_hidden_calls";
+    rule.matcher_expression = "classTemplateDecl().bind(\"ctd\")";
+    rule.bindings = {
+        Binding{.name = "ctd", .domain = EndpointDomain::declaration}};
+    EmitOperation emit;
+    emit.unknown = EmitUnknown{
+        .namespace_name = "audit", .reason_code = "seen", .binding = "ctd"};
+    rule.emits = {emit};
+    rule.completeness = DeclaredCompleteness::unknown_capable;
+    // Measured directly against this exact source by bisecting
+    // max_visited_nodes: ignoring the templated pattern's body (the pre-fix
+    // behavior) exhausts the budget somewhere in [100, 110); walking
+    // tmpl->getTemplatedDecl() as well moves that boundary out past
+    // [1000, 1200) -- roughly a 9x spread. 500 sits with a wide margin on
+    // both sides.
+    rule.budget = RuleBudget{.max_matches = 1000,
+                             .max_emitted_facts = 1000,
+                             .max_visited_nodes = 500,
+                             .declared = true};
+    rule.producer_package = "audit";
+    rule.producer_version = 1;
+    ExtractionPlan plan = plan_with({rule});
+
+    RunResult result =
+        run_plan(plan, class_template_body_hidden_calls_source(10, 30));
+    const auto *stats = result.report.find(rule.id);
+    REQUIRE(stats != nullptr);
+    CHECK(stats->budget_exhausted);
   }
 
   TEST_CASE(

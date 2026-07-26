@@ -14,8 +14,11 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
+#include "clang/AST/DeclTemplate.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
+#include "clang/AST/TemplateBase.h"
+#include "clang/AST/Type.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/ASTMatchers/Dynamic/Diagnostics.h"
 #include "clang/ASTMatchers/Dynamic/Parser.h"
@@ -203,9 +206,73 @@ std::string tu_content_fingerprint(clang::ASTContext &context,
 // class instead uses its own uniquely-named recursive walk() overloads over
 // Decl/Stmt's own public child-iteration APIs, so no base-class method name
 // is ever shadowed.
+//
+// Because this is a hand-rolled traversal rather than an actual
+// RecursiveASTVisitor subclass, its node set must be proven a superset of
+// everything clang::ast_matchers::MatchFinder (which IS RecursiveASTVisitor
+// based) can actually reach -- otherwise a matcher can walk, and pay the
+// traversal cost for, a subtree this counter never sees. walk() therefore
+// explicitly covers every DeclContext::decls()-invisible subtree the
+// allow-listed matcher_catalog.cpp node/narrowing matchers can reach:
+// constructor member-initializer lists (CXXConstructorDecl::inits()),
+// function parameter default arguments (FunctionDecl::parameters()),
+// noexcept(expr) exception specifications (FunctionProtoType), enumerator
+// initializers (EnumConstantDecl::getInitExpr() -- EnumConstantDecl does NOT
+// derive from VarDecl, so it needs its own branch), class/function/variable
+// template bodies and non-type template parameter default arguments
+// (TemplateDecl::getTemplatedDecl() / getTemplateParameters()), and a
+// decltype(expr)/typeof(expr) hiding in a declared return/variable/field
+// type (walk_type() below), reached through the same mechanism as
+// noexcept -- RecursiveASTVisitor::TraverseDecltypeTypeLoc /
+// TraverseTypeOfExprTypeLoc walk the underlying expression as part of
+// traversing the owning decl's type, so `enumDecl(hasDescendant(callExpr))`
+// and `functionDecl(hasDescendant(callExpr))` both reach these even though
+// neither decls() nor getBody() ever surfaces them. Lambda bodies and
+// init-captures are covered too, via clang::LambdaExpr's own
+// Stmt::children() plus the explicit getBody() case below. Using-shadow
+// decls carry no expression content and are intentionally not walked -- see
+// the audit trail in the HSE-64 PR history. walk_type() only follows
+// pointer/reference/array wrappers to the decltype/typeof they wrap;
+// decltype nested inside a class template argument (e.g.
+// `std::array<int, decltype(f())::value>`) is a known residual gap, tracked
+// as a follow-up rather than fixed here (see implementation-notes.md).
 class NodeBudgetCounter final {
 public:
   explicit NodeBudgetCounter(std::int64_t budget) : budget_(budget) {}
+
+  // Follows a declared type through pointer/reference/array wrappers to find
+  // a decltype(expr) or typeof(expr) hiding underneath, and walks that
+  // expression. Bare wrapping only -- see the class comment for the known
+  // residual gap (decltype nested inside a template argument).
+  void walk_type(clang::QualType type) {
+    if (exhausted_) {
+      return;
+    }
+    const clang::Type *raw = type.getTypePtrOrNull();
+    if (raw == nullptr) {
+      return;
+    }
+    if (const auto *decltype_type = llvm::dyn_cast<clang::DecltypeType>(raw)) {
+      walk(decltype_type->getUnderlyingExpr());
+      return;
+    }
+    if (const auto *typeof_expr_type =
+            llvm::dyn_cast<clang::TypeOfExprType>(raw)) {
+      walk(typeof_expr_type->getUnderlyingExpr());
+      return;
+    }
+    if (const auto *pointer = raw->getAs<clang::PointerType>()) {
+      walk_type(pointer->getPointeeType());
+      return;
+    }
+    if (const auto *reference = raw->getAs<clang::ReferenceType>()) {
+      walk_type(reference->getPointeeType());
+      return;
+    }
+    if (const auto *array = llvm::dyn_cast<clang::ArrayType>(raw)) {
+      walk_type(array->getElementType());
+    }
+  }
 
   void walk(const clang::Decl *decl) {
     if (decl == nullptr || exhausted_) {
@@ -224,13 +291,110 @@ public:
       }
     }
     if (const auto *function = llvm::dyn_cast<clang::FunctionDecl>(decl)) {
+      // Parameters are never linked into a FunctionDecl's own decls() chain
+      // (RecursiveASTVisitor/MatchFinder instead reach them by walking the
+      // function's type -- clang::TraverseFunctionProtoTypeLoc calls
+      // TraverseDecl on each clang::FunctionProtoTypeLoc parameter) -- so
+      // without this loop a default argument
+      // (clang::ParmVarDecl::getDefaultArg(), which is the same storage as
+      // clang::VarDecl::getInit()) is invisible to this counter even though
+      // matchesName/hasDescendant can bind and descend into it via the
+      // catalog's parmVarDecl/hasInitializer matchers.
+      for (const clang::ParmVarDecl *param : function->parameters()) {
+        walk(param);
+        if (exhausted_) {
+          return;
+        }
+      }
+      // A constructor's member-initializer list
+      // (clang::CXXConstructorDecl::inits()) is a second, separate list
+      // clang::CXXCtorInitializer::getInit() exprs live in that neither
+      // decls() nor the function body ever surfaces, yet Clang's own
+      // traversal (clang::RecursiveASTVisitor::TraverseConstructorInitializer,
+      // used by MatchFinder::matchAST) walks it unconditionally.
+      if (const auto *ctor =
+              llvm::dyn_cast<clang::CXXConstructorDecl>(function)) {
+        for (const clang::CXXCtorInitializer *init : ctor->inits()) {
+          walk(init->getInit());
+          if (exhausted_) {
+            return;
+          }
+        }
+      }
+      // A noexcept(expr) exception specification is carried on the
+      // function's clang::FunctionProtoType, not reachable through decls()
+      // or the body -- but RecursiveASTVisitor::TraverseFunctionProtoTypeLoc
+      // walks it as part of the function's type, so hasDescendant from an
+      // allow-listed functionDecl/cxxMethodDecl/cxxConstructorDecl can find
+      // a callExpr hidden inside one.
+      if (const auto *proto =
+              function->getType()->getAs<clang::FunctionProtoType>()) {
+        if (const clang::Expr *noexcept_expr = proto->getNoexceptExpr()) {
+          walk(noexcept_expr);
+          if (exhausted_) {
+            return;
+          }
+        }
+      }
+      // A decltype(expr)/typeof(expr) return type carries an expression that
+      // neither decls() nor getBody() ever surfaces -- see walk_type().
+      walk_type(function->getReturnType());
       if (function->doesThisDeclarationHaveABody()) {
         walk(function->getBody());
       }
     } else if (const auto *var = llvm::dyn_cast<clang::VarDecl>(decl)) {
+      // Covers both plain VarDecl/FieldDecl-sibling variables and
+      // ParmVarDecl (a VarDecl subclass), so this also closes the same
+      // decltype/typeof gap for a parameter's declared type.
+      walk_type(var->getType());
       walk(var->getInit());
     } else if (const auto *field = llvm::dyn_cast<clang::FieldDecl>(decl)) {
+      walk_type(field->getType());
       walk(field->getInClassInitializer());
+    } else if (const auto *enumerator =
+                   llvm::dyn_cast<clang::EnumConstantDecl>(decl)) {
+      // EnumConstantDecl derives from ValueDecl, not VarDecl, so its
+      // initializer needs its own branch -- RecursiveASTVisitor's
+      // TraverseEnumConstantDecl walks getInitExpr() unconditionally, and
+      // `enumDecl` is itself an allow-listed matcher_catalog.cpp node.
+      walk(enumerator->getInitExpr());
+    } else if (const auto *tmpl = llvm::dyn_cast<clang::TemplateDecl>(decl)) {
+      // clang::ClassTemplateDecl/FunctionTemplateDecl/VarTemplateDecl are
+      // never themselves a DeclContext -- the templated declaration they
+      // wrap is -- so without this branch, hasDescendant from an
+      // allow-listed classTemplateDecl node (or a namedDecl bound to a
+      // function/var template) walks an ENTIRE templated class/function/
+      // variable body that this counter would otherwise never visit at all.
+      if (const clang::TemplateParameterList *params =
+              tmpl->getTemplateParameters()) {
+        for (const clang::NamedDecl *param : *params) {
+          walk(param);
+          if (exhausted_) {
+            return;
+          }
+          // A non-type template parameter's default argument
+          // (e.g. `template <int N = compute()> ...`) is stored as a
+          // TemplateArgumentLoc, not as VarDecl::getInit(), so it needs its
+          // own extraction rather than falling through the VarDecl branch
+          // above (NonTypeTemplateParmDecl does not derive from VarDecl).
+          if (const auto *nontype =
+                  llvm::dyn_cast<clang::NonTypeTemplateParmDecl>(param)) {
+            if (nontype->hasDefaultArgument() &&
+                !nontype->defaultArgumentWasInherited()) {
+              const clang::TemplateArgument &default_arg =
+                  nontype->getDefaultArgument().getArgument();
+              if (default_arg.getKind() ==
+                  clang::TemplateArgument::Expression) {
+                walk(default_arg.getAsExpr());
+                if (exhausted_) {
+                  return;
+                }
+              }
+            }
+          }
+        }
+      }
+      walk(tmpl->getTemplatedDecl());
     }
   }
 
