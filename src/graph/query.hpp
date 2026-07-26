@@ -133,6 +133,12 @@ public:
   // never bounded by (or dependent on) a response's evidence budget.
   bool edge_conditional(int64_t edge_id);
 
+  // Exact edge lookup by (src_id, dst_id, kind) -- an indexed point lookup,
+  // never a bounded adjacency scan that can miss a real edge past its own
+  // cap.
+  std::optional<int64_t> edge_id_for(int64_t src_id, int64_t dst_id,
+                                     int64_t kind);
+
   // ---- Navigation ----------------------------------------------------------
 
   // Internal: peer Syms with no site loading (BFS internal).
@@ -238,7 +244,7 @@ public:
   };
   SignatureInfo signature(int64_t sym_id);
   SlotFacts slot_facts_for_ids(std::optional<int64_t> declared_type_id,
-                              std::optional<int64_t> adjusted_type_id);
+                               std::optional<int64_t> adjusted_type_id);
   SlotFacts slot_facts(const std::optional<TypeInfo> &declared,
                        const std::optional<TypeInfo> &adjusted);
   std::vector<TypeLayer> type_layers(int64_t type_id);

@@ -612,14 +612,28 @@ SqliteStorageService::edge_sites_one(int64_t edge_id, int limit) {
 }
 
 bool SqliteStorageService::edge_has_conditional_site(int64_t edge_id) {
-  auto st = db_.prepare(
-      "SELECT EXISTS(SELECT 1 FROM edge_site WHERE edge_id = ? AND "
-      "conditional != 0)");
+  auto st =
+      db_.prepare("SELECT EXISTS(SELECT 1 FROM edge_site WHERE edge_id = ? AND "
+                  "conditional != 0)");
   st.bind(1, edge_id);
   if (!st.step()) {
     return false;
   }
   return st.col_int64(0) != 0;
+}
+
+std::optional<int64_t> SqliteStorageService::edge_id_for(int64_t src_id,
+                                                         int64_t dst_id,
+                                                         int64_t kind) {
+  auto st = db_.prepare(
+      "SELECT id FROM edge WHERE src_id = ? AND dst_id = ? AND kind = ?");
+  st.bind(1, src_id);
+  st.bind(2, dst_id);
+  st.bind(3, kind);
+  if (!st.step()) {
+    return std::nullopt;
+  }
+  return st.col_int64(0);
 }
 
 // -- labels (v14) ------------------------------------------------------------

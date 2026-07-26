@@ -619,8 +619,7 @@ public:
   // Stable, human-readable reasons for stale or unavailable fact sets.
   std::string transform_explain(const std::string &fact_set = {});
   // Named readiness contract for query and proof clients.
-  TransformFactSetStatus transform_fact_set_status(
-      const std::string &fact_set);
+  TransformFactSetStatus transform_fact_set_status(const std::string &fact_set);
   void mark_transform_pipeline_pending(const std::string &reason);
   [[nodiscard]] const std::vector<TransformRun> &transform_runs() const {
     return last_transform_runs_;
@@ -732,6 +731,13 @@ public:
   // an arbitrary global row cap -- exact for edges of any size, and never
   // materializes the site list just to answer this yes/no question.
   bool edge_has_conditional_site(int64_t edge_id);
+
+  // Exact edge lookup by (src_id, dst_id, kind): an indexed point lookup
+  // against edge's own UNIQUE(src_id, dst_id, kind) constraint. Never a
+  // bounded adjacency scan -- a real edge is always found regardless of
+  // how many other edges its source participates in.
+  std::optional<int64_t> edge_id_for(int64_t src_id, int64_t dst_id,
+                                     int64_t kind);
 
   // -- labels (v14) ----------------------------------------------------------
   // Upsert on name; returns the row id.

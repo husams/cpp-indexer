@@ -64,6 +64,8 @@ public:
   edge_sites_for(const std::vector<int64_t> &edge_ids) override;
   std::vector<EdgeSiteRow> edge_sites_one(int64_t edge_id, int limit) override;
   bool edge_has_conditional_site(int64_t edge_id) override;
+  std::optional<int64_t> edge_id_for(int64_t src_id, int64_t dst_id,
+                                     int64_t kind) override;
   std::vector<Symbol> redefined_symbols(int limit) override;
   std::vector<DefinitionRow> definitions_of(int64_t symbol_id) override;
   std::vector<DefinitionRow> possible_callees_of(int64_t symbol_id) override;

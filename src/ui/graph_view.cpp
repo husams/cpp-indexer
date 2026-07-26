@@ -2786,26 +2786,39 @@ json_out::Value load_edge_evidence(Storage &db, const std::string &edge_id,
   }
   const graph::Sym &source = sources.front();
   const graph::Sym &target = targets.front();
-  const auto kind_ids =
-      graph::GraphQuery::kind_ids(std::vector<std::string>{edge_ref->kind});
-  const auto adjacent = graph.edges(source.id, "out", kind_ids, 2000, false);
-  const graph::Edge *matched = nullptr;
-  for (const auto &candidate : adjacent) {
-    if (candidate.src_id == source.id && candidate.dst_id == target.id &&
-        candidate.kind == edge_ref->kind) {
-      matched = &candidate;
-      break;
-    }
+  const auto kind_entry = graph::edge_kinds_map().find(edge_ref->kind);
+  if (kind_entry == graph::edge_kinds_map().end()) {
+    throw GraphViewError(
+        GraphViewFailureKind::InvalidInput,
+        "edge id names an unknown edge kind",
+        "pass an edge id copied from a prior GraphView response");
   }
-  if (matched == nullptr) {
+  // Exact indexed lookup by (src_id, dst_id, kind) -- edge has
+  // UNIQUE(src_id, dst_id, kind) -- never a bounded adjacency scan, which
+  // used to wrongly report "edge no longer exists" for any source whose
+  // out-degree (of this kind) exceeded the scan's own cap.
+  const auto matched_edge_id =
+      graph.edge_id_for(source.id, target.id, kind_entry->second);
+  if (!matched_edge_id) {
     throw GraphViewError(GraphViewFailureKind::UnknownIdentity,
                          "edge no longer exists between the given endpoints",
                          "reissue the originating GraphView request");
   }
   const int bounded_offset = std::max(0, site_offset);
   const int bounded_limit = std::clamp(site_limit, 1, 5000);
-  auto sites =
-      graph.sites(matched->edge_id, bounded_offset + bounded_limit + 1);
+  // Effectively "all sites" for the ONE explicitly-identified edge this
+  // endpoint was asked about -- not a per-page-growing prefix. The
+  // underlying query's raw row order (file_id, line, col) does not match
+  // the redacted-path-based site_sort_key() used for the final response
+  // order, so fetching only `bounded_offset + bounded_limit + 1` rows (as
+  // this used to do) is not just inefficient but INCORRECT: a raw-order
+  // prefix is not a delivery-order prefix, so successive /api/evidence
+  // pages could duplicate some sites and permanently skip others. Unlike
+  // the removed per-response applicability probe (which ran once per edge
+  // across a whole multi-edge traversal), this fetch is for exactly one
+  // explicitly-identified edge per API call.
+  constexpr int kEdgeEvidenceFetchLimit = 1'000'000;
+  auto sites = graph.sites(*matched_edge_id, kEdgeEvidenceFetchLimit);
   std::ranges::sort(sites, [&](const graph::Site &a, const graph::Site &b) {
     return site_sort_key(a, workspace) < site_sort_key(b, workspace);
   });

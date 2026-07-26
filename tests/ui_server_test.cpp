@@ -400,9 +400,42 @@ ui::GraphProvider evidence_provider_for(Storage &db) {
     }
     const std::string edge_id(
         target.substr(value_start, value_end - value_start));
+    // Boundary-aware lookup, matching graph_provider_for's own convention:
+    // a plain substring search for "site_offset=" would also match inside
+    // an unrelated longer key.
+    const auto param =
+        [&](std::string_view name) -> std::optional<std::string> {
+      const std::string param_needle = std::string(name) + "=";
+      std::size_t pos = 0;
+      while (true) {
+        pos = target.find(param_needle, pos);
+        if (pos == std::string_view::npos) {
+          return std::nullopt;
+        }
+        if (pos > 0 && (target[pos - 1] == '?' || target[pos - 1] == '&')) {
+          break;
+        }
+        pos += 1;
+      }
+      const std::size_t param_value_start = pos + param_needle.size();
+      std::size_t param_value_end = target.find('&', param_value_start);
+      if (param_value_end == std::string_view::npos) {
+        param_value_end = target.size();
+      }
+      return std::string(target.substr(param_value_start,
+                                       param_value_end - param_value_start));
+    };
+    int site_offset = 0;
+    if (const auto value = param("site_offset")) {
+      site_offset = parse_int(*value);
+    }
+    int site_limit = 200;
+    if (const auto value = param("site_limit")) {
+      site_limit = parse_int(*value);
+    }
     try {
-      return json_out::dumps_indent2(
-          ui::load_edge_evidence(db, edge_id, std::nullopt, 0, 200));
+      return json_out::dumps_indent2(ui::load_edge_evidence(
+          db, edge_id, std::nullopt, site_offset, site_limit));
     } catch (const std::exception &) {
       return std::nullopt;
     }
@@ -744,6 +777,146 @@ TEST_CASE("Live explorer: evidence endpoint loads bounded sites for an edge") {
   CHECK(evidence.status == 200);
   CHECK(evidence.body.find("cidx.graph-view.evidence.v1") != std::string::npos);
   CHECK(evidence.body.find(R"("line": 10)") != std::string::npos);
+}
+
+TEST_CASE("Live explorer: evidence pagination reaches every site exactly "
+          "once, even when raw storage order differs from delivery order") {
+  // Critic finding: load_edge_evidence() used to fetch a raw-order PREFIX
+  // (bounded_offset + bounded_limit + 1 rows, ordered by file_id, line,
+  // col in SQL) and only THEN sort that prefix by the redacted-path-based
+  // site_sort_key() before slicing by offset -- since file_id (insertion)
+  // order does not match path order, a raw-order prefix is not a
+  // delivery-order prefix, so successive pages could duplicate some sites
+  // and permanently skip others. These 3 files are inserted in the OPPOSITE
+  // of their path order (c.cpp, b.cpp, a.cpp) to force exactly that
+  // mismatch.
+  Storage db(":memory:");
+  const int64_t component =
+      db.add_component("test", "/tmp/cidx-ui-evidence-order-test");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file_c = db.add_file(directory, "c.cpp");
+  const int64_t file_b = db.add_file(directory, "b.cpp");
+  const int64_t file_a = db.add_file(directory, "a.cpp");
+  auto sym_src = symbol("USR::evidence_src", "ns::evidence_src", "function");
+  sym_src.file_id = file_c;
+  sym_src.line = 1;
+  auto sym_dst = symbol("USR::evidence_dst", "ns::evidence_dst", "function");
+  sym_dst.file_id = file_c;
+  sym_dst.line = 2;
+  const int64_t src = db.add_symbol(sym_src);
+  const int64_t dst = db.add_symbol(sym_dst);
+  cidx::Edge edge;
+  edge.src_id = src;
+  edge.dst_id = dst;
+  edge.kind = cidx::graph::edge_kinds_map().at("calls");
+  const int64_t edge_row_id = db.add_edge(edge);
+  const auto add_site = [&](int64_t file_id, int line) {
+    cidx::EdgeSite site;
+    site.edge_id = edge_row_id;
+    site.file_id = file_id;
+    site.line = line;
+    site.col = 1;
+    site.conditional = 0;
+    db.add_edge_site(site);
+  };
+  // Inserted in file_id (raw storage) order c, b, a -- the OPPOSITE of
+  // their path order.
+  add_site(file_c, 10);
+  add_site(file_b, 10);
+  add_site(file_a, 10);
+
+  RunningServer server(graph_provider_for(db), {}, evidence_provider_for(db));
+  const auto graph =
+      http_get(server.port, "/api/graph?token=" + server.token +
+                                "&root=ns::evidence_src&direction=out");
+  const std::string edge_id = edge_portable_id_for_kind(graph.body, "calls");
+  REQUIRE_FALSE(edge_id.empty());
+
+  int matches_a = 0;
+  int matches_b = 0;
+  int matches_c = 0;
+  for (int offset = 0; offset < 3; ++offset) {
+    const auto evidence =
+        http_get(server.port, "/api/evidence?token=" + server.token +
+                                  "&edge=" + edge_id + "&site_offset=" +
+                                  std::to_string(offset) + "&site_limit=1");
+    CHECK(evidence.status == 200);
+    if (evidence.body.contains("a.cpp")) {
+      ++matches_a;
+    }
+    if (evidence.body.contains("b.cpp")) {
+      ++matches_b;
+    }
+    if (evidence.body.contains("c.cpp")) {
+      ++matches_c;
+    }
+  }
+  // Each of the 3 sites must appear on EXACTLY ONE of the 3 pages -- no
+  // duplicates, no permanent gaps across the union of all pages.
+  CHECK(matches_a == 1);
+  CHECK(matches_b == 1);
+  CHECK(matches_c == 1);
+}
+
+TEST_CASE("Live explorer: evidence is retrievable for an edge past the old "
+          "bounded adjacency-scan cap") {
+  // Critic finding: load_edge_evidence() used to resolve the edge by
+  // scanning up to 2000 adjacent edges of the source and linear-searching
+  // for the target -- any source with more than 2000 out-edges of that
+  // kind could never have evidence loaded for an edge past that cap, even
+  // though the edge is real. This fixture gives one source 2001 outgoing
+  // "calls" edges and asks for evidence on the LAST one.
+  Storage db(":memory:");
+  const int64_t component =
+      db.add_component("test", "/tmp/cidx-ui-evidence-hub-test");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "hub.cpp");
+  auto sym_hub = symbol("USR::evidence_hub", "ns::evidence_hub", "function");
+  sym_hub.file_id = file;
+  sym_hub.line = 1;
+  const int64_t hub = db.add_symbol(sym_hub);
+  constexpr int kOutDegree = 2001; // one past the old 2000-edge scan cap
+  for (int i = 0; i < kOutDegree; ++i) {
+    const std::string usr = "USR::evidence_target_" + std::to_string(i);
+    const std::string name = "ns::evidence_target_" + std::to_string(i);
+    auto sym_target = symbol(usr.c_str(), name.c_str(), "function");
+    sym_target.file_id = file;
+    sym_target.line = i + 2;
+    const int64_t target = db.add_symbol(sym_target);
+    cidx::Edge edge;
+    edge.src_id = hub;
+    edge.dst_id = target;
+    edge.kind = cidx::graph::edge_kinds_map().at("calls");
+    const int64_t edge_row_id = db.add_edge(edge);
+    cidx::EdgeSite site;
+    site.edge_id = edge_row_id;
+    site.file_id = file;
+    site.line = i + 2;
+    site.col = 1;
+    site.conditional = 0;
+    db.add_edge_site(site);
+  }
+
+  RunningServer server(graph_provider_for(db), {}, evidence_provider_for(db));
+  // Query FROM the last target's own side (direction=in, depth=1): its
+  // in-degree is 1 (only hub calls it), so this response is tiny and
+  // unambiguous regardless of hub's 2001-edge out-degree -- the graph
+  // traversal that PRODUCES this edge id is unrelated to
+  // load_edge_evidence()'s own (separately capped) re-lookup, which is
+  // exactly what is under test below.
+  const std::string last_target_name =
+      "ns::evidence_target_" + std::to_string(kOutDegree - 1);
+  const auto graph = http_get(server.port, "/api/graph?token=" + server.token +
+                                               "&root=" + last_target_name +
+                                               "&direction=in&depth=1");
+  const std::string edge_id = edge_portable_id_for_kind(graph.body, "calls");
+  REQUIRE_FALSE(edge_id.empty());
+
+  const auto evidence = http_get(
+      server.port, "/api/evidence?token=" + server.token + "&edge=" + edge_id);
+  CHECK(evidence.status == 200);
+  CHECK(evidence.body.find("cidx.graph-view.evidence.v1") != std::string::npos);
+  CHECK_FALSE(evidence.body.contains("edge no longer exists"));
 }
 
 TEST_CASE(
