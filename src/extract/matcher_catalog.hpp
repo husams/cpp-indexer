@@ -18,6 +18,15 @@
 
 namespace cidx::extract {
 
+// Combinators whose Clang implementation repeatedly re-traverses a subtree
+// for every candidate node during matchAST (unlike a plain narrowing
+// predicate such as hasName(), which is O(1) per node). Shared by the
+// validator (which rejects these NESTED inside one another, since nesting
+// makes their cost multiplicative rather than additive -- see
+// has_nested_matcher_occurrences()) and the execution engine (which charges
+// a proportionally smaller effective node budget per SIBLING occurrence).
+[[nodiscard]] const std::set<std::string> &traversal_work_combinators();
+
 class MatcherCatalog {
 public:
   [[nodiscard]] static const MatcherCatalog &default_catalog();
@@ -63,5 +72,21 @@ disallowed_matcher_calls(const std::string &matcher_expression,
 [[nodiscard]] std::int64_t
 count_matcher_occurrences(const std::string &matcher_expression,
                           const std::set<std::string> &names);
+
+// True if some call site in `names` (same string-literal-aware scanner)
+// appears LEXICALLY NESTED inside another call site in `names` -- i.e. one
+// of the combinator's own arguments (bounded by its matching parentheses)
+// itself contains another combinator call, as opposed to several SIBLING
+// calls joined by allOf()/anyOf(). Nesting hasDescendant/hasAncestor inside
+// one another causes Clang's MatchFinder to re-run a full subtree traversal
+// for every candidate the OUTER combinator considers, which is
+// multiplicative (quadratic or worse) in subtree size -- not the roughly
+// linear-per-combinator cost engine.cpp's estimated-work check assumes for
+// sibling combinators. There is no safe linear bound for arbitrary nesting
+// depth, so this is used to reject nested combinators outright at
+// validation time rather than trying to model their real cost.
+[[nodiscard]] bool
+has_nested_matcher_occurrences(const std::string &matcher_expression,
+                               const std::set<std::string> &names);
 
 } // namespace cidx::extract

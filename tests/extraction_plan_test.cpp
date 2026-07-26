@@ -14,7 +14,9 @@
 #include "extract/plan_json.hpp"
 #include "extract/validator.hpp"
 
+#include <optional>
 #include <random>
+#include <stdexcept>
 #include <string>
 
 using namespace cidx::extract;
@@ -28,15 +30,23 @@ ExtractionRule make_rule(std::string id = "audit.log_call") {
   rule.matcher_expression =
       "callExpr(callee(functionDecl(hasName(\"log_audit_event\")).bind("
       "\"callee\"))).bind(\"call\")";
-  rule.bindings = {Binding{"call", EndpointDomain::expression},
-                   Binding{"callee", EndpointDomain::declaration}};
+  rule.bindings = {
+      Binding{.name = "call", .domain = EndpointDomain::expression},
+      Binding{.name = "callee", .domain = EndpointDomain::declaration}};
   EmitOperation relation;
-  relation.relation = EmitRelation{"audit", "logs_to", "call", "callee", true};
+  relation.relation = EmitRelation{.namespace_name = "audit",
+                                   .relation_kind = "logs_to",
+                                   .from_binding = "call",
+                                   .to_binding = "callee",
+                                   .with_evidence = true};
   rule.emits = {relation};
   rule.scope = PlanScope::main_file;
   rule.traversal = TraversalMode::as_is;
   rule.completeness = DeclaredCompleteness::complete;
-  rule.budget = RuleBudget{1000, 1000, 100000, true};
+  rule.budget = RuleBudget{.max_matches = 1000,
+                           .max_emitted_facts = 1000,
+                           .max_visited_nodes = 100000,
+                           .declared = true};
   rule.producer_package = "banking.audit";
   rule.producer_version = 1;
   return rule;
@@ -49,6 +59,24 @@ ExtractionPlan make_plan() {
   plan.catalog_versions = {1};
   plan.rules = {make_rule()};
   return plan;
+}
+
+// Every test below mutates a relation this same fixture always constructs
+// (make_rule() always sets emits[0].relation), so the guard here can never
+// actually fire outside of a broken fixture -- it exists so the following
+// dereference sits behind a real `if`/early-return the optional-access
+// checker can follow, rather than a doctest assertion macro (REQUIRE/CHECK
+// expand through machinery the checker's dataflow does not see through).
+// The optional is bound to a single reference up front (rather than
+// re-evaluating `rule.emits[0].relation` for both the guard and the
+// dereference) so the checker can prove the checked-value-has-value and the
+// dereferenced value are the same object.
+EmitRelation &relation_of(ExtractionRule &rule) {
+  std::optional<EmitRelation> &relation = rule.emits[0].relation;
+  if (!relation.has_value()) {
+    throw std::runtime_error("test fixture error: emits[0].relation not set");
+  }
+  return *relation;
 }
 
 } // namespace
@@ -129,7 +157,13 @@ TEST_CASE("parser fuzz: random mutations of a valid plan never crash and "
           "always fail closed") {
   const ExtractionPlan plan = make_plan();
   const std::string base = canonical_json(plan);
+  // A fixed seed is intentional here: this is a reproducible regression
+  // fixture, not security-relevant randomness. A random seed would make a
+  // failure non-reproducible across CI runs, which is strictly worse for
+  // debugging.
+  // NOLINTNEXTLINE(bugprone-random-generator-seed)
   std::mt19937 rng(20260725);
+  int rejected_mutations = 0;
   for (int i = 0; i < 500; ++i) {
     std::string mutated = base;
     const int mutation = static_cast<int>(rng() % 3);
@@ -154,9 +188,13 @@ TEST_CASE("parser fuzz: random mutations of a valid plan never crash and "
       ExtractionPlan reparsed = parse_plan_json(mutated);
       CHECK_NOTHROW((void)canonical_json(reparsed));
     } catch (const PlanParseError &) {
-      // expected failure mode
+      ++rejected_mutations; // expected failure mode
     }
   }
+  // Not a tautology: proves the loop actually exercises the reject path
+  // across the 500 mutations rather than every mutation happening to
+  // parse as an equivalent (or crash-free but never-thrown) plan.
+  CHECK(rejected_mutations > 0);
 }
 
 TEST_CASE("matcher_catalog allow-list") {
@@ -169,6 +207,11 @@ TEST_CASE("matcher_catalog allow-list") {
   CHECK_FALSE(catalog.allows_matcher("decl"));
   CHECK(catalog.allows_property("spelling"));
   CHECK_FALSE(catalog.allows_property("getSourceRange"));
+  // Removed (PR #66 review): a type-domain binding is a bare QualType with
+  // no Decl/Expr/SourceLocation, so this property could never actually
+  // resolve (engine.cpp's read_property()/default_identity() had nothing to
+  // read) even though it was allow-listed and passed validation.
+  CHECK_FALSE(catalog.allows_property("canonical_type_spelling"));
 }
 
 TEST_CASE("disallowed_matcher_calls flags catch-alls and unknown properties") {
@@ -221,7 +264,7 @@ TEST_CASE("validate_structure rejects unbounded workspace scope") {
 TEST_CASE("validate_structure rejects an emit that references an undeclared "
           "binding") {
   ExtractionPlan plan = make_plan();
-  plan.rules[0].emits[0].relation->to_binding = "not_declared";
+  relation_of(plan.rules[0]).to_binding = "not_declared";
   ValidationResult result = validate_structure(plan);
   bool found = false;
   for (const auto &error : result.errors) {
@@ -233,8 +276,12 @@ TEST_CASE("validate_structure rejects an emit that references an undeclared "
 TEST_CASE("validate_structure rejects an unstable composed identity") {
   ExtractionPlan plan = make_plan();
   EmitOperation node_op;
-  node_op.node = EmitNode{"audit", "call_site", "call",
-                          IdentityRecipe{IdentityKind::composed, {}}};
+  node_op.node =
+      EmitNode{.namespace_name = "audit",
+               .node_kind = "call_site",
+               .binding = "call",
+               .identity = IdentityRecipe{.kind = IdentityKind::composed,
+                                          .components = {}}};
   plan.rules[0].emits.push_back(node_op);
   ValidationResult result = validate_structure(plan);
   bool found = false;
@@ -258,7 +305,7 @@ TEST_CASE("validate_structure rejects duplicate rule ids") {
 TEST_CASE("validate_structure flags a forbidden-capability token even though "
           "the IR cannot execute one") {
   ExtractionPlan plan = make_plan();
-  plan.rules[0].emits[0].relation->namespace_name = "run_shell_command";
+  relation_of(plan.rules[0]).namespace_name = "run_shell_command";
   ValidationResult result = validate_structure(plan);
   bool found = false;
   for (const auto &error : result.errors) {
@@ -293,8 +340,11 @@ TEST_CASE("validate_structure rejects a usr identity recipe on an "
   EmitOperation node_op;
   // "call" is declared EndpointDomain::expression in make_rule(); usr
   // identity can only ever be computed from a declaration.
-  node_op.node = EmitNode{"audit", "call_site", "call",
-                          IdentityRecipe{IdentityKind::usr, {}}};
+  node_op.node = EmitNode{
+      .namespace_name = "audit",
+      .node_kind = "call_site",
+      .binding = "call",
+      .identity = IdentityRecipe{.kind = IdentityKind::usr, .components = {}}};
   plan.rules[0].emits.push_back(node_op);
   ValidationResult result = validate_structure(plan);
   bool found = false;
@@ -307,8 +357,9 @@ TEST_CASE("validate_structure rejects a usr identity recipe on an "
 TEST_CASE("validate_structure rejects a relation endpoint bound to a "
           "type-domain binding") {
   ExtractionPlan plan = make_plan();
-  plan.rules[0].bindings.push_back(Binding{"t", EndpointDomain::type});
-  plan.rules[0].emits[0].relation->to_binding = "t";
+  plan.rules[0].bindings.push_back(
+      Binding{.name = "t", .domain = EndpointDomain::type});
+  relation_of(plan.rules[0]).to_binding = "t";
   ValidationResult result = validate_structure(plan);
   bool found = false;
   for (const auto &error : result.errors) {
@@ -345,6 +396,40 @@ TEST_CASE("artifact_identity changes when workspace or TU identity changes, "
   CHECK(plan_hash(plan) == base_hash);
 }
 
+// --- PR #66 review round 3 regression coverage -----------------------------
+
+TEST_CASE("validate_structure rejects an EmitOperation with two payloads set "
+          "(round-3 repro: builder-constructed IR bypasses plan_json's "
+          "exactly-one check, so validate(plan) passed while the plan could "
+          "not even round-trip through its own canonical_json)") {
+  ExtractionPlan plan = make_plan();
+  EmitOperation &emit = plan.rules[0].emits[0];
+  REQUIRE(emit.relation.has_value());
+  // Directly set a SECOND payload alongside the existing relation -- no
+  // JSON parsing involved, so plan_json.hpp's own "exactly one" check never
+  // runs.
+  emit.unknown = EmitUnknown{.namespace_name = "audit",
+                             .reason_code = "also_unknown",
+                             .binding = "call"};
+  ValidationResult result = validate_structure(plan);
+  bool found = false;
+  for (const auto &error : result.errors) {
+    found = found || error.code == ValidationErrorCode::malformed_plan;
+  }
+  CHECK(found);
+}
+
+TEST_CASE("validate_structure rejects an EmitOperation with no payload set") {
+  ExtractionPlan plan = make_plan();
+  plan.rules[0].emits[0] = EmitOperation{}; // all four payloads empty
+  ValidationResult result = validate_structure(plan);
+  bool found = false;
+  for (const auto &error : result.errors) {
+    found = found || error.code == ValidationErrorCode::malformed_plan;
+  }
+  CHECK(found);
+}
+
 TEST_SUITE("clang") {
 
   TEST_CASE("validate_matchers accepts a well-formed allow-listed rule") {
@@ -364,9 +449,10 @@ TEST_SUITE("clang") {
   TEST_CASE("validate_matchers rejects a matcher not on the CIDX allow-list") {
     ExtractionPlan plan = make_plan();
     plan.rules[0].matcher_expression = "stmt().bind(\"call\")";
-    plan.rules[0].bindings = {Binding{"call", EndpointDomain::expression}};
-    plan.rules[0].emits[0].relation->from_binding = "call";
-    plan.rules[0].emits[0].relation->to_binding = "call";
+    plan.rules[0].bindings = {
+        Binding{.name = "call", .domain = EndpointDomain::expression}};
+    relation_of(plan.rules[0]).from_binding = "call";
+    relation_of(plan.rules[0]).to_binding = "call";
     ValidationResult result = validate_matchers(plan);
     bool found = false;
     for (const auto &error : result.errors) {
@@ -379,7 +465,7 @@ TEST_SUITE("clang") {
             "the matcher expression") {
     ExtractionPlan plan = make_plan();
     plan.rules[0].bindings.push_back(
-        Binding{"never_bound", EndpointDomain::declaration});
+        Binding{.name = "never_bound", .domain = EndpointDomain::declaration});
     ValidationResult result = validate_matchers(plan);
     bool found = false;
     for (const auto &error : result.errors) {
@@ -391,8 +477,10 @@ TEST_SUITE("clang") {
   TEST_CASE("validate_matchers rejects an unknown attribute property") {
     ExtractionPlan plan = make_plan();
     EmitOperation attribute_op;
-    attribute_op.attribute =
-        EmitAttribute{"audit", "raw_pointer", "call", "getAsOpaquePtr"};
+    attribute_op.attribute = EmitAttribute{.namespace_name = "audit",
+                                           .attribute_name = "raw_pointer",
+                                           .binding = "call",
+                                           .ast_property = "getAsOpaquePtr"};
     plan.rules[0].emits.push_back(attribute_op);
     ValidationResult result = validate_matchers(plan);
     bool found = false;
@@ -406,8 +494,10 @@ TEST_SUITE("clang") {
     ExtractionPlan plan = make_plan();
     EmitOperation attribute_op;
     // "is_pure" is declaration-only; "call" is bound as an expression.
-    attribute_op.attribute =
-        EmitAttribute{"audit", "purity", "call", "is_pure"};
+    attribute_op.attribute = EmitAttribute{.namespace_name = "audit",
+                                           .attribute_name = "purity",
+                                           .binding = "call",
+                                           .ast_property = "is_pure"};
     plan.rules[0].emits.push_back(attribute_op);
     ValidationResult result = validate_matchers(plan);
     bool found = false;
@@ -426,14 +516,83 @@ TEST_SUITE("clang") {
     // plan -- not resolve getNodeAs<Decl> to null at runtime.
     ExtractionPlan plan = make_plan();
     plan.rules[0].matcher_expression = "callExpr().bind(\"x\")";
-    plan.rules[0].bindings = {Binding{"x", EndpointDomain::declaration}};
-    plan.rules[0].emits[0].relation->from_binding = "x";
-    plan.rules[0].emits[0].relation->to_binding = "x";
+    plan.rules[0].bindings = {
+        Binding{.name = "x", .domain = EndpointDomain::declaration}};
+    relation_of(plan.rules[0]).from_binding = "x";
+    relation_of(plan.rules[0]).to_binding = "x";
     ValidationResult result = validate_matchers(plan);
     bool found = false;
     for (const auto &error : result.errors) {
       found =
           found || error.code == ValidationErrorCode::endpoint_type_mismatch;
+    }
+    CHECK(found);
+  }
+
+  // --- PR #66 review round 3 regression coverage ---------------------------
+
+  TEST_CASE("validate_matchers rejects hasDescendant/hasAncestor nested inside "
+            "one another (round-3 repro: nested combinators cause superlinear "
+            "matchAST cost that the linear visited*(1+count) estimate cannot "
+            "bound), but still accepts the same combinators used as SIBLINGS") {
+    ExtractionPlan plan = make_plan();
+    plan.rules[0].matcher_expression =
+        "cxxRecordDecl(hasDescendant(cxxRecordDecl(hasDescendant(cxxMethodDecl("
+        "hasName(\"never\"))))))"
+        ".bind(\"call\")";
+    plan.rules[0].bindings = {
+        Binding{.name = "call", .domain = EndpointDomain::declaration}};
+    relation_of(plan.rules[0]).from_binding = "call";
+    relation_of(plan.rules[0]).to_binding = "call";
+    ValidationResult nested_result = validate_matchers(plan);
+    bool found_nested = false;
+    for (const auto &error : nested_result.errors) {
+      found_nested =
+          found_nested || error.code == ValidationErrorCode::excessive_budget;
+    }
+    CHECK(found_nested);
+
+    // Same two matchers, but as SIBLINGS joined by allOf() -- not nested
+    // inside one another -- must NOT be rejected by this check.
+    ExtractionPlan sibling_plan = make_plan();
+    sibling_plan.rules[0].matcher_expression =
+        "cxxRecordDecl(allOf(hasDescendant(cxxMethodDecl(hasName(\"a\"))), "
+        "hasDescendant(cxxMethodDecl(hasName(\"b\"))))).bind(\"call\")";
+    sibling_plan.rules[0].bindings = {
+        Binding{.name = "call", .domain = EndpointDomain::declaration}};
+    relation_of(sibling_plan.rules[0]).from_binding = "call";
+    relation_of(sibling_plan.rules[0]).to_binding = "call";
+    ValidationResult sibling_result = validate_matchers(sibling_plan);
+    bool found_sibling_rejected = false;
+    for (const auto &error : sibling_result.errors) {
+      found_sibling_rejected =
+          found_sibling_rejected ||
+          error.code == ValidationErrorCode::excessive_budget;
+    }
+    CHECK_FALSE(found_sibling_rejected);
+  }
+
+  TEST_CASE(
+      "validate_matchers rejects a main_file-scoped rule whose outermost "
+      "matcher is not bound (round-3 repro: scope filtering previously "
+      "anchored on the first-declared binding in rule.bindings order, which "
+      "made scope filtering depend on that arbitrary order)") {
+    ExtractionPlan plan = make_plan();
+    // "call" (the outer callExpr()) is bound in make_rule(); rebuild the
+    // matcher expression so ONLY the inner functionDecl is bound and the
+    // outermost callExpr() carries no .bind(...) at all.
+    plan.rules[0].matcher_expression =
+        "callExpr(callee(functionDecl(hasName(\"log_audit_event\")).bind("
+        "\"callee\")))";
+    plan.rules[0].bindings = {
+        Binding{.name = "callee", .domain = EndpointDomain::declaration}};
+    relation_of(plan.rules[0]).from_binding = "callee";
+    relation_of(plan.rules[0]).to_binding = "callee";
+    plan.rules[0].scope = PlanScope::main_file;
+    ValidationResult result = validate_matchers(plan);
+    bool found = false;
+    for (const auto &error : result.errors) {
+      found = found || error.code == ValidationErrorCode::invalid_binding;
     }
     CHECK(found);
   }

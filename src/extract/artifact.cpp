@@ -1,5 +1,6 @@
 #include "extract/artifact.hpp"
 
+#include "extract/plan_identity.hpp"
 // SqliteDb/SqliteStmt come transitively via extract/artifact.hpp ->
 // storage/artifacts.hpp; no direct include of storage/sqlite.hpp here.
 #include "util/hashing.hpp"
@@ -141,6 +142,19 @@ publish_extension_artifact(Storage &storage, const PublicationRequest &request,
         "identity -- execute_plan() must be called with a non-empty "
         "ExecutionInput to publish its result");
   }
+  // Fail closed against publishing `plan`'s metadata (plan_id, rule
+  // producer_package/version, ...) alongside a DIFFERENT plan's execution
+  // report/facts: verify_fact_provenance() below only checks that the sink
+  // and report agree with EACH OTHER, which a caller could satisfy by
+  // passing a `plan` argument that never actually produced either of them.
+  // Recomputing plan_hash(plan) here and requiring it match report.plan_hash
+  // ties the published metadata to the SAME plan execute_plan() actually
+  // ran.
+  if (plan_hash(plan) != report.plan_hash) {
+    throw ExtensionPublicationError(
+        "the supplied ExtractionPlan does not match the plan that produced "
+        "this execution report -- plan_hash(plan) != report.plan_hash");
+  }
   verify_fact_provenance(sink, report);
   sink.canonicalize();
 
@@ -206,7 +220,14 @@ publish_extension_artifact(Storage &storage, const PublicationRequest &request,
         "producer_package TEXT NOT NULL, producer_version INTEGER NOT NULL, "
         "evidence_file TEXT NOT NULL, evidence_line INTEGER NOT NULL, "
         "evidence_col INTEGER NOT NULL, "
-        "PRIMARY KEY(fact_kind, rule_id, kind_name, identity, secondary))");
+        // `namespace` is part of the identity of a fact, not just metadata:
+        // two rules publishing under DIFFERENT namespaces (e.g. two
+        // consumer packages independently emitting the same relation
+        // between the same endpoints) are distinct facts and must not
+        // collide. Without `namespace` in the key, INSERT OR IGNORE
+        // silently drops the second insert as a "duplicate" of the first.
+        "PRIMARY KEY(fact_kind, namespace, rule_id, kind_name, identity, "
+        "secondary))");
     db.exec("CREATE TABLE extension_meta(key TEXT PRIMARY KEY, value TEXT "
             "NOT NULL)");
 

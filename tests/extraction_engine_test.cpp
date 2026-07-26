@@ -12,6 +12,7 @@
 #include "extract/artifact.hpp"
 #include "extract/engine.hpp"
 #include "extract/extension_facts.hpp"
+#include "extract/plan_identity.hpp"
 #include "extract/plan_ir.hpp"
 #include "storage/sqlite.hpp"
 #include "storage/storage.hpp"
@@ -26,6 +27,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -73,7 +75,7 @@ public:
 
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &compiler,
-                    llvm::StringRef) override {
+                    llvm::StringRef /*in_file*/) override {
     return std::make_unique<PlanConsumer>(plan_, compiler.getPreprocessor(),
                                           input_, options_, result_);
   }
@@ -112,6 +114,25 @@ RunResult run_plan_with_files(const ExtractionPlan &plan,
   return result;
 }
 
+// Like run_plan(), but with extra compiler invocation arguments appended
+// after "-std=c++20" (e.g. -I/some/path) -- used to prove the tool/config
+// applicability fingerprint reacts to the invocation itself, not merely to
+// which files it happened to resolve.
+RunResult run_plan_with_args(const ExtractionPlan &plan,
+                             const std::string &code,
+                             const std::vector<std::string> &extra_args) {
+  RunResult result;
+  const ExecutionInput input;
+  const ExecutionOptions options;
+  std::vector<std::string> args = {"-std=c++20"};
+  args.insert(args.end(), extra_args.begin(), extra_args.end());
+  const bool ran = clang::tooling::runToolOnCodeWithArgs(
+      std::make_unique<PlanAction>(plan, input, options, result), code, args,
+      "test.cpp");
+  REQUIRE(ran);
+  return result;
+}
+
 std::string make_temp_dir() {
   std::string tmpl = "/tmp/cidx_extract_artifact_XXXXXX";
   std::vector<char> buffer(tmpl.begin(), tmpl.end());
@@ -121,7 +142,12 @@ std::string make_temp_dir() {
   return path;
 }
 
-RuleBudget generous_budget() { return RuleBudget{1000, 1000, 100000, true}; }
+RuleBudget generous_budget() {
+  return RuleBudget{.max_matches = 1000,
+                    .max_emitted_facts = 1000,
+                    .max_visited_nodes = 100000,
+                    .declared = true};
+}
 
 ExtractionRule logging_boundary_rule() {
   ExtractionRule rule;
@@ -129,10 +155,15 @@ ExtractionRule logging_boundary_rule() {
   rule.matcher_expression =
       "callExpr(callee(functionDecl(hasName(\"log_audit_event\")).bind("
       "\"callee\"))).bind(\"call\")";
-  rule.bindings = {Binding{"call", EndpointDomain::expression},
-                   Binding{"callee", EndpointDomain::declaration}};
+  rule.bindings = {
+      Binding{.name = "call", .domain = EndpointDomain::expression},
+      Binding{.name = "callee", .domain = EndpointDomain::declaration}};
   EmitOperation emit;
-  emit.relation = EmitRelation{"audit", "logs_to", "call", "callee", true};
+  emit.relation = EmitRelation{.namespace_name = "audit",
+                               .relation_kind = "logs_to",
+                               .from_binding = "call",
+                               .to_binding = "callee",
+                               .with_evidence = true};
   rule.emits = {emit};
   rule.budget = generous_budget();
   rule.producer_package = "banking.audit";
@@ -146,10 +177,13 @@ ExtractionRule dispatch_unknown_rule() {
   rule.matcher_expression =
       "callExpr(callee(functionDecl(hasName(\"dispatch\")).bind(\"target\"))"
       ").bind(\"call\")";
-  rule.bindings = {Binding{"call", EndpointDomain::expression},
-                   Binding{"target", EndpointDomain::declaration}};
+  rule.bindings = {
+      Binding{.name = "call", .domain = EndpointDomain::expression},
+      Binding{.name = "target", .domain = EndpointDomain::declaration}};
   EmitOperation emit;
-  emit.unknown = EmitUnknown{"audit", "unclassified_dispatch", "call"};
+  emit.unknown = EmitUnknown{.namespace_name = "audit",
+                             .reason_code = "unclassified_dispatch",
+                             .binding = "call"};
   rule.emits = {emit};
   rule.completeness = DeclaredCompleteness::unknown_capable;
   rule.budget = generous_budget();
@@ -164,10 +198,14 @@ ExtractionRule appstate_boundary_rule() {
   rule.matcher_expression =
       "cxxRecordDecl(hasDescendant(cxxMethodDecl(hasName(\"commit\"))), "
       "hasDescendant(cxxMethodDecl(hasName(\"rollback\")))).bind(\"record\")";
-  rule.bindings = {Binding{"record", EndpointDomain::declaration}};
+  rule.bindings = {
+      Binding{.name = "record", .domain = EndpointDomain::declaration}};
   EmitOperation emit;
-  emit.node = EmitNode{"banking.appstate", "boundary", "record",
-                       IdentityRecipe{IdentityKind::usr, {}}};
+  emit.node = EmitNode{
+      .namespace_name = "banking.appstate",
+      .node_kind = "boundary",
+      .binding = "record",
+      .identity = IdentityRecipe{.kind = IdentityKind::usr, .components = {}}};
   rule.emits = {emit};
   rule.budget = generous_budget();
   rule.producer_package = "banking.appstate";
@@ -180,10 +218,13 @@ ExtractionRule appstate_unverifiable_rule() {
   rule.id = "banking.appstate.unverifiable_registration";
   rule.matcher_expression = "cxxRecordDecl(hasDescendant(cxxMethodDecl(hasName("
                             "\"register_as_boundary\")))).bind(\"record\")";
-  rule.bindings = {Binding{"record", EndpointDomain::declaration}};
+  rule.bindings = {
+      Binding{.name = "record", .domain = EndpointDomain::declaration}};
   EmitOperation emit;
-  emit.unknown = EmitUnknown{"banking.appstate",
-                             "boundary_registration_unverifiable", "record"};
+  emit.unknown =
+      EmitUnknown{.namespace_name = "banking.appstate",
+                  .reason_code = "boundary_registration_unverifiable",
+                  .binding = "record"};
   rule.emits = {emit};
   rule.completeness = DeclaredCompleteness::unknown_capable;
   rule.budget = generous_budget();
@@ -277,9 +318,12 @@ TEST_SUITE("clang") {
     ExtractionRule ctor_rule;
     ctor_rule.id = "trace.ctor_calls";
     ctor_rule.matcher_expression = "cxxConstructExpr().bind(\"call\")";
-    ctor_rule.bindings = {Binding{"call", EndpointDomain::expression}};
+    ctor_rule.bindings = {
+        Binding{.name = "call", .domain = EndpointDomain::expression}};
     EmitOperation emit;
-    emit.unknown = EmitUnknown{"trace", "ctor_call", "call"};
+    emit.unknown = EmitUnknown{.namespace_name = "trace",
+                               .reason_code = "ctor_call",
+                               .binding = "call"};
     ctor_rule.emits = {emit};
     ctor_rule.completeness = DeclaredCompleteness::unknown_capable;
     ctor_rule.budget = generous_budget();
@@ -322,7 +366,10 @@ TEST_SUITE("clang") {
 
   TEST_CASE("a rule budget bounds matches and emitted facts") {
     ExtractionRule rule = logging_boundary_rule();
-    rule.budget = RuleBudget{1, 1, 100000, true};
+    rule.budget = RuleBudget{.max_matches = 1,
+                             .max_emitted_facts = 1,
+                             .max_visited_nodes = 100000,
+                             .declared = true};
     ExtractionPlan plan = plan_with({rule});
     RunResult result = run_plan(plan, "void log_audit_event(const char *msg);\n"
                                       "void a() { log_audit_event(\"1\"); }\n"
@@ -356,9 +403,14 @@ TEST_SUITE("clang") {
     ExtractionRule rule;
     rule.id = "audit.bad_domain";
     rule.matcher_expression = "callExpr().bind(\"x\")";
-    rule.bindings = {Binding{"x", EndpointDomain::declaration}};
+    rule.bindings = {
+        Binding{.name = "x", .domain = EndpointDomain::declaration}};
     EmitOperation emit;
-    emit.relation = EmitRelation{"audit", "self", "x", "x", true};
+    emit.relation = EmitRelation{.namespace_name = "audit",
+                                 .relation_kind = "self",
+                                 .from_binding = "x",
+                                 .to_binding = "x",
+                                 .with_evidence = true};
     rule.emits = {emit};
     rule.budget = generous_budget();
     rule.producer_package = "audit";
@@ -395,9 +447,11 @@ TEST_SUITE("clang") {
             "translation_unit scope includes them") {
     ExtractionRule base_rule;
     base_rule.matcher_expression = "functionDecl(isDefinition()).bind(\"fn\")";
-    base_rule.bindings = {Binding{"fn", EndpointDomain::declaration}};
+    base_rule.bindings = {
+        Binding{.name = "fn", .domain = EndpointDomain::declaration}};
     EmitOperation emit;
-    emit.unknown = EmitUnknown{"scope", "fn_seen", "fn"};
+    emit.unknown = EmitUnknown{
+        .namespace_name = "scope", .reason_code = "fn_seen", .binding = "fn"};
     base_rule.emits = {emit};
     base_rule.completeness = DeclaredCompleteness::unknown_capable;
     base_rule.budget = generous_budget();
@@ -429,7 +483,10 @@ TEST_SUITE("clang") {
       "max_visited_nodes interrupts before any match is attempted on a "
       "multi-node TU (PR #66 review repro: budget=1 on a multi-node TU)") {
     ExtractionRule rule = logging_boundary_rule();
-    rule.budget = RuleBudget{1000, 1000, 1, true};
+    rule.budget = RuleBudget{.max_matches = 1000,
+                             .max_emitted_facts = 1000,
+                             .max_visited_nodes = 1,
+                             .declared = true};
     ExtractionPlan plan = plan_with({rule});
     RunResult result = run_plan(plan, "void log_audit_event(const char *msg);\n"
                                       "void f() { log_audit_event(\"t\"); }\n");
@@ -479,9 +536,11 @@ TEST_SUITE("clang") {
     cidx::ArtifactStore artifacts(storage, request.artifact_root);
     const auto current = artifacts.current(publication.logical_id);
     REQUIRE(current.has_value());
-    CHECK(current->content_hash == publication.content_hash);
-    CHECK(current->spec.configuration_identity ==
-          result.report.artifact_identity);
+    if (current.has_value()) {
+      CHECK(current->content_hash == publication.content_hash);
+      CHECK(current->spec.configuration_identity ==
+            result.report.artifact_identity);
+    }
     CHECK(artifacts.validate(publication.logical_id).usable());
 
     // Queryable through the existing platform adapter, with no new
@@ -531,16 +590,21 @@ TEST_SUITE("clang") {
         "hasDescendant(cxxMethodDecl(hasName(\"c\"))), "
         "hasDescendant(cxxMethodDecl(hasName(\"d\"))), "
         "hasDescendant(cxxMethodDecl(hasName(\"e\"))))).bind(\"record\")";
-    rule.bindings = {Binding{"record", EndpointDomain::declaration}};
+    rule.bindings = {
+        Binding{.name = "record", .domain = EndpointDomain::declaration}};
     EmitOperation emit;
-    emit.unknown = EmitUnknown{"audit", "seen", "record"};
+    emit.unknown = EmitUnknown{
+        .namespace_name = "audit", .reason_code = "seen", .binding = "record"};
     rule.emits = {emit};
     rule.completeness = DeclaredCompleteness::unknown_capable;
     // 5 repeated-subtree-traversal combinators -> effective threshold is
     // max_visited_nodes / 6 = 10. Generous enough (60) that a plain
     // one-time AST-size check would not reject this small fixture, but the
     // combinator-multiplied estimate is exceeded by its function bodies.
-    rule.budget = RuleBudget{1000, 1000, 60, true};
+    rule.budget = RuleBudget{.max_matches = 1000,
+                             .max_emitted_facts = 1000,
+                             .max_visited_nodes = 60,
+                             .declared = true};
     rule.producer_package = "audit";
     rule.producer_version = 1;
     ExtractionPlan plan = plan_with({rule});
@@ -638,6 +702,196 @@ TEST_SUITE("clang") {
     CHECK_THROWS_AS((void)publish_extension_artifact(storage, request, plan,
                                                      second.report, first.sink),
                     ExtensionPublicationError);
+  }
+
+  // --- PR #66 review round 3 regression coverage ------------------------
+
+  TEST_CASE(
+      "artifact_identity changes when the compiler invocation's header "
+      "search configuration changes, even when neither -I path is ever "
+      "actually consulted resolving the TU (round-3 repro: two different "
+      "-I paths, same resolved source, were previously indistinguishable)") {
+    ExtractionPlan plan = plan_with({logging_boundary_rule()});
+    const std::string code = "void log_audit_event(const char *msg);\n"
+                             "void do_transfer() { log_audit_event(\"t\"); "
+                             "}\n";
+    const std::string config_a = make_temp_dir();
+    const std::string config_b = make_temp_dir();
+    RunResult first = run_plan_with_args(plan, code, {"-I" + config_a});
+    RunResult second = run_plan_with_args(plan, code, {"-I" + config_b});
+    REQUIRE(first.report.plan_hash == second.report.plan_hash);
+    CHECK(first.report.artifact_identity != second.report.artifact_identity);
+  }
+
+  TEST_CASE(
+      "main_file scope anchors on the outermost/root binding, not on "
+      "rule.bindings declaration order (round-3 repro: a call site in the "
+      "main file whose CALLEE is declared in an included header was "
+      "incorrectly excluded from main_file scope when \"callee\" happened "
+      "to be listed before \"call\" in rule.bindings)") {
+    ExtractionRule rule = logging_boundary_rule();
+    rule.scope = PlanScope::main_file;
+    // The header-resident binding listed FIRST: the buggy implementation
+    // probed rule.bindings in declared order and used whichever resolved
+    // first, so it picked "callee" (in header.h, out of main-file scope)
+    // even though the call EXPRESSION itself is in the main file.
+    rule.bindings = {
+        Binding{.name = "callee", .domain = EndpointDomain::declaration},
+        Binding{.name = "call", .domain = EndpointDomain::expression}};
+
+    const std::string code = "#include \"header.h\"\nvoid do_transfer() { "
+                             "log_audit_event(\"t\"); }\n";
+    const clang::tooling::FileContentMappings files = {
+        {"header.h", "void log_audit_event(const char *msg);\n"}};
+
+    RunResult result = run_plan_with_files(plan_with({rule}), code, files);
+    CHECK(result.sink.relations().size() == 1);
+
+    // Same rule, bindings declared in the OPPOSITE order: main_file scope
+    // filtering must give the identical result either way, since it always
+    // anchors on the matcher's root ("call"), never on declaration order.
+    ExtractionRule reordered_rule = rule;
+    reordered_rule.bindings = {
+        Binding{.name = "call", .domain = EndpointDomain::expression},
+        Binding{.name = "callee", .domain = EndpointDomain::declaration}};
+    RunResult reordered_result =
+        run_plan_with_files(plan_with({reordered_rule}), code, files);
+    CHECK(reordered_result.sink.relations().size() ==
+          result.sink.relations().size());
+  }
+
+  TEST_CASE("publish_extension_artifact refuses to publish when the supplied "
+            "plan does not match the plan that produced this execution report "
+            "(round-3 repro: only sink/report agreement with EACH OTHER was "
+            "checked, never report.plan_hash against plan_hash(the actual plan "
+            "argument), so a caller could publish plan B's metadata alongside "
+            "plan A's report/facts)") {
+    ExtractionPlan plan_a = plan_with({logging_boundary_rule()});
+    ExtractionRule other_rule = logging_boundary_rule();
+    other_rule.id =
+        "audit.logs_to.other"; // different id -> different plan_hash
+    ExtractionPlan plan_b = plan_with({other_rule});
+    REQUIRE(plan_hash(plan_a) != plan_hash(plan_b));
+
+    RunResult result =
+        run_plan(plan_a,
+                 "void log_audit_event(const char *msg);\n"
+                 "void f() { log_audit_event(\"t\"); }\n",
+                 ExecutionInput{.workspace_identity = "workspace:x",
+                                .tu_identity = "tu:x"});
+
+    const std::string root = make_temp_dir();
+    cidx::Storage storage(root + "/index.sqlite");
+    PublicationRequest request;
+    request.artifact_root = root + "/artifacts";
+    request.namespace_name = "banking.audit";
+
+    // plan_b never produced result.report/result.sink (plan_a did); this
+    // must be refused even though the sink and report agree with each
+    // other.
+    CHECK_THROWS_AS((void)publish_extension_artifact(
+                        storage, request, plan_b, result.report, result.sink),
+                    ExtensionPublicationError);
+  }
+
+  TEST_CASE("publishing facts that differ only by namespace does not silently "
+            "collapse one into the other (round-3 repro: the extension table's "
+            "PRIMARY KEY omitted namespace, so INSERT OR IGNORE dropped the "
+            "second insert as a \"duplicate\" of the first)") {
+    ExtractionRule rule_a = logging_boundary_rule();
+    rule_a.id = "audit.logs_to.security";
+    ExtractionRule rule_b = rule_a;
+    rule_b.id = "audit.logs_to.compliance";
+    // Bound to a single reference (rather than re-evaluating
+    // rule_b.emits[0].relation for both the guard and the mutation) and
+    // guarded with a real `if`/throw -- not REQUIRE, which expands through
+    // doctest machinery the optional-access checker's dataflow does not see
+    // through -- so the checker can prove the checked and mutated optionals
+    // are the same, known-engaged object.
+    std::optional<EmitRelation> &relation_b = rule_b.emits[0].relation;
+    if (!relation_b.has_value()) {
+      throw std::runtime_error("test fixture error: emits[0].relation not set");
+    }
+    relation_b->namespace_name = "compliance";
+    ExtractionPlan plan = plan_with({rule_a, rule_b});
+
+    RunResult result =
+        run_plan(plan,
+                 "void log_audit_event(const char *msg);\n"
+                 "void f() { log_audit_event(\"t\"); }\n",
+                 ExecutionInput{.workspace_identity = "workspace:x",
+                                .tu_identity = "tu:x"});
+    REQUIRE(result.sink.relations().size() == 2);
+
+    const std::string root = make_temp_dir();
+    cidx::Storage storage(root + "/index.sqlite");
+    PublicationRequest request;
+    request.artifact_root = root + "/artifacts";
+    request.namespace_name = "banking.audit";
+
+    const ExtensionPublication publication = publish_extension_artifact(
+        storage, request, plan, result.report, result.sink);
+
+    const auto published_path = std::filesystem::path(request.artifact_root) /
+                                publication.relative_path;
+    cidx::SqliteDb published_db(published_path.string(), true,
+                                cidx::SqliteProfile::read_only_replay);
+    auto rows = published_db.prepare(
+        "SELECT COUNT(*) FROM extension WHERE fact_kind = 'relation' AND "
+        "kind_name = 'logs_to'");
+    REQUIRE(rows.step());
+    CHECK(rows.col_int64(0) == 2);
+  }
+
+  TEST_CASE(
+      "a fact's persisted completeness is downgraded when its emitting "
+      "rule's budget was exhausted, even though the rule declares complete "
+      "(critic repro: provenance.completeness was stamped once from the "
+      "rule's STATIC DeclaredCompleteness before any budget check, so a "
+      "truncated rule's already-emitted facts kept claiming complete)") {
+    ExtractionRule rule = logging_boundary_rule();
+    // completeness stays DeclaredCompleteness::complete (the default set by
+    // logging_boundary_rule()); max_emitted_facts=1 forces budget
+    // exhaustion after the first of several matching call sites.
+    rule.budget = RuleBudget{.max_matches = 1000,
+                             .max_emitted_facts = 1,
+                             .max_visited_nodes = 100000,
+                             .declared = true};
+    ExtractionPlan plan = plan_with({rule});
+
+    RunResult result =
+        run_plan(plan,
+                 "void log_audit_event(const char *msg);\n"
+                 "void a() { log_audit_event(\"1\"); }\n"
+                 "void b() { log_audit_event(\"2\"); }\n",
+                 ExecutionInput{.workspace_identity = "workspace:x",
+                                .tu_identity = "tu:x"});
+    const auto *stats = result.report.find(rule.id);
+    REQUIRE(stats != nullptr);
+    REQUIRE(stats->budget_exhausted);
+    REQUIRE(result.sink.relations().size() == 1);
+    // The one fact that WAS emitted must not claim `complete`: the rule's
+    // run as a whole was truncated, so no fact it produced can vouch for
+    // being a complete view.
+    CHECK(result.sink.relations()[0].provenance.completeness ==
+          DeclaredCompleteness::partial);
+
+    const std::string root = make_temp_dir();
+    cidx::Storage storage(root + "/index.sqlite");
+    PublicationRequest request;
+    request.artifact_root = root + "/artifacts";
+    request.namespace_name = "banking.audit";
+    const ExtensionPublication publication = publish_extension_artifact(
+        storage, request, plan, result.report, result.sink);
+    const auto published_path = std::filesystem::path(request.artifact_root) /
+                                publication.relative_path;
+    cidx::SqliteDb published_db(published_path.string(), true,
+                                cidx::SqliteProfile::read_only_replay);
+    auto rows = published_db.prepare(
+        "SELECT COUNT(*) FROM extension WHERE fact_kind = 'relation' AND "
+        "completeness = 'complete'");
+    REQUIRE(rows.step());
+    CHECK(rows.col_int64(0) == 0);
   }
 
 } // TEST_SUITE("clang")

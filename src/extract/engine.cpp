@@ -1,12 +1,15 @@
 #include "extract/engine.hpp"
 
 #include "extract/matcher_catalog.hpp"
+#include "extract/matcher_root_binding.hpp"
 #include "extract/plan_identity.hpp"
 #include "extract/validator.hpp"
 
 #include "ast/location.hpp"
 #include "ast/usr.hpp"
 #include "util/hashing.hpp"
+
+#include "catalogs/generated_catalog.hpp"
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
@@ -19,6 +22,8 @@
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/Specifiers.h"
 #include "clang/Basic/TargetInfo.h"
+#include "clang/Lex/HeaderSearch.h"
+#include "clang/Lex/HeaderSearchOptions.h"
 #include "clang/Lex/Preprocessor.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
@@ -76,16 +81,32 @@ ExtensionEvidence evidence_for(clang::ASTContext &context,
       .file = expansion.file, .line = expansion.line, .col = expansion.col};
 }
 
-// A fingerprint of the COMPLETE parsed input this rule ran against: every
-// file that contributed to the TU (main file, included/generated headers --
-// not just the main file), every predefined/-D/-U macro via
-// Preprocessor::getPredefines() (Clang bakes every command-line macro into
-// this buffer as an implicit "<built-in>" text), target triple/ABI, and
-// language standard. Folded into plan_identity.hpp's artifact_identity() so
-// a header, generated-input, or -D/-U change is always visible in the
-// artifact identity, independent of whether the caller also supplies a
-// full HSE-61 workspace/TU descriptor (ExecutionInput may leave both of
-// those empty).
+// Bump whenever a change to this file (or matcher_catalog.hpp) alters what
+// facts a plan can produce from IDENTICAL Clang input -- e.g. a change to
+// NodeBudgetCounter's traversal, the matcher-work estimate, scope routing, or
+// identity computation. Folded into the fingerprint so two runs of the same
+// plan against the same source on two different cidx builds are never
+// conflated as "the same artifact" purely because the plan and source
+// happened not to change.
+constexpr std::string_view kExtractionEngineVersion = "cidx-extract-engine/1";
+
+// A fingerprint of the COMPLETE parsed input AND tool configuration this rule
+// ran against: every file that contributed to the TU (main file,
+// included/generated headers -- not just the main file), every
+// predefined/-D/-U macro via Preprocessor::getPredefines() (Clang bakes every
+// command-line macro into this buffer as an implicit "<built-in>" text),
+// target triple/ABI, language standard, the exact header-search-path
+// configuration (-I/-isystem/-iquote entries, sysroot, resource dir), and the
+// CIDX extraction engine/catalog version. The header-search configuration is
+// included even though it may have NO observable effect on which files get
+// resolved for a GIVEN source file: two compiler invocations that differ only
+// in an inert -I path are still two distinct configurations, and a
+// reproducibility contract that only fingerprinted resolved-file content
+// would silently conflate them. Folded into plan_identity.hpp's
+// artifact_identity() so a header, generated-input, -D/-U, search-path, or
+// engine-version change is always visible in the artifact identity,
+// independent of whether the caller also supplies a full HSE-61 workspace/TU
+// descriptor (ExecutionInput may leave both of those empty).
 std::string tu_content_fingerprint(clang::ASTContext &context,
                                    clang::Preprocessor &preprocessor) {
   clang::SourceManager &source_manager = context.getSourceManager();
@@ -109,7 +130,26 @@ std::string tu_content_fingerprint(clang::ASTContext &context,
   combined << preprocessor.getPredefines() << '\x1e';
   combined << context.getTargetInfo().getTriple().str() << '\x1f'
            << context.getTargetInfo().getABI().str() << '\x1e';
-  combined << static_cast<int>(context.getLangOpts().LangStd);
+  combined << static_cast<int>(context.getLangOpts().LangStd) << '\x1e';
+
+  // Tool/configuration applicability: the exact search-path configuration
+  // this invocation was given, independent of whether any of it was actually
+  // consulted resolving this particular TU.
+  const clang::HeaderSearchOptions &header_search_opts =
+      preprocessor.getHeaderSearchInfo().getHeaderSearchOpts();
+  combined << header_search_opts.Sysroot << '\x1f'
+           << header_search_opts.ResourceDir << '\x1e';
+  for (const auto &entry : header_search_opts.UserEntries) {
+    combined << entry.Path << '\x1f' << static_cast<int>(entry.Group) << '\x1f'
+             << (entry.IsFramework != 0U ? '1' : '0')
+             << (entry.IgnoreSysRoot != 0U ? '1' : '0') << '\x1e';
+  }
+
+  // CIDX engine/catalog applicability: which build of this extraction engine
+  // (and its Souffle-adjacent analysis catalog) produced this artifact.
+  combined << kExtractionEngineVersion << '\x1f'
+           << cidx::catalog::kCatalogVersion << '\x1f'
+           << cidx::catalog::kCatalogHash << '\x1e';
   return cidx::sha256_hex(combined.str());
 }
 
@@ -182,20 +222,6 @@ private:
   std::int64_t visited_ = 0;
   bool exhausted_ = false;
 };
-
-// Combinators whose Clang implementation repeatedly re-traverses a subtree
-// for every candidate node during matchAST (unlike a plain narrowing
-// predicate such as hasName(), which is O(1) per node). A rule's ESTIMATED
-// matcher-evaluation work is visited_nodes * (1 + combinator_count): using
-// one of these against a large TU must fit a proportionally smaller
-// effective budget, closing the explosive-rule hole that a one-time AST
-// size check alone cannot (max_matches only stops fact emission, never
-// Clang's own internal traversal).
-const std::set<std::string> &traversal_work_combinators() {
-  static const std::set<std::string> combinators = {"hasDescendant",
-                                                    "hasAncestor"};
-  return combinators;
-}
 
 // Default single-primitive identity for a binding: canonical USR for a
 // declaration, source anchor otherwise. Used by owner_position/composed,
@@ -361,7 +387,7 @@ std::optional<std::string> read_property(const ResolvedBinding &bound,
     }
     return std::nullopt;
   }
-  if (property == "type_spelling" || property == "canonical_type_spelling") {
+  if (property == "type_spelling") {
     if (bound.expr != nullptr) {
       return bound.expr->getType().getAsString();
     }
@@ -392,11 +418,13 @@ class RuleMatchCallback final
 public:
   RuleMatchCallback(const ExtractionRule &rule, const std::string &plan_hash,
                     const std::string &artifact_identity,
+                    const std::string &scope_root_binding,
                     ExtensionFactSink &sink, RuleExecutionStats &stats,
                     std::vector<ExecutionDiagnostic> &diagnostics,
                     std::size_t &total_emitted, std::size_t hard_output_cap)
       : rule_(rule), plan_hash_(plan_hash),
-        artifact_identity_(artifact_identity), sink_(sink), stats_(stats),
+        artifact_identity_(artifact_identity),
+        scope_root_binding_(scope_root_binding), sink_(sink), stats_(stats),
         diagnostics_(diagnostics), total_emitted_(total_emitted),
         hard_output_cap_(hard_output_cap) {}
 
@@ -448,16 +476,21 @@ public:
     // validate_structure() -- this single-ASTContext engine has no
     // cross-TU execution model, so it is refused before Clang runs rather
     // than silently treated as translation_unit.
+    //
+    // The probe location is always the OUTERMOST/root matched node's
+    // location (scope_root_binding_, computed once per rule from the
+    // matcher's actual parse tree -- see matcher_root_binding.hpp), never an
+    // arbitrary "first bound in declaration order" binding: a rule's
+    // bindings are an unordered set of names, so filtering on declaration
+    // order would make scope filtering depend on how the rule happened to
+    // list its bindings rather than on what it actually matched.
+    // validate_matchers() already rejects a main_file-scoped rule whose root
+    // is unbound, so scope_root_binding_ is never empty here.
     if (rule_.scope == PlanScope::main_file) {
+      const auto root_it = bound.find(scope_root_binding_);
       clang::SourceLocation probe;
-      for (const auto &binding : rule_.bindings) {
-        auto it = bound.find(binding.name);
-        if (it != bound.end() && it->second.present) {
-          probe = location_of(it->second);
-          if (probe.isValid()) {
-            break;
-          }
-        }
+      if (root_it != bound.end() && root_it->second.present) {
+        probe = location_of(root_it->second);
       }
       if (probe.isValid() &&
           !result.SourceManager->isInMainFile(
@@ -579,12 +612,56 @@ private:
   const ExtractionRule &rule_;
   const std::string &plan_hash_;
   const std::string &artifact_identity_;
+  const std::string &scope_root_binding_;
   ExtensionFactSink &sink_;
   RuleExecutionStats &stats_;
   std::vector<ExecutionDiagnostic> &diagnostics_;
   std::size_t &total_emitted_;
   std::size_t hard_output_cap_;
 };
+
+// Forwards every fact collected for ONE rule's run into the caller's real
+// sink, downgrading a `complete`-declared fact's provenance to `partial`
+// when `downgrade_to_partial` is set. This exists because a rule's
+// truncation status (RuleExecutionStats::budget_exhausted) is only known
+// for certain once its ENTIRE matchAST() run finishes -- facts are still
+// emitted one match at a time as the AST is walked, before any later match
+// in the SAME rule can be known to exhaust the budget. Buffering a rule's
+// facts in a local sink and forwarding them here (rather than writing
+// straight to the caller's sink from RuleMatchCallback::run()) means every
+// fact from a truncated rule is retroactively labelled non-complete,
+// instead of only the facts that happened to be emitted after the cutoff.
+void forward_rule_facts(ExtensionFactSink &sink,
+                        const InMemoryExtensionFactSink &rule_sink,
+                        bool downgrade_to_partial) {
+  auto downgraded = [&](ExtensionProvenance provenance) {
+    if (downgrade_to_partial &&
+        provenance.completeness == DeclaredCompleteness::complete) {
+      provenance.completeness = DeclaredCompleteness::partial;
+    }
+    return provenance;
+  };
+  for (const auto &fact : rule_sink.nodes()) {
+    ExtensionNodeFact copy = fact;
+    copy.provenance = downgraded(copy.provenance);
+    sink.emit(copy);
+  }
+  for (const auto &fact : rule_sink.relations()) {
+    ExtensionRelationFact copy = fact;
+    copy.provenance = downgraded(copy.provenance);
+    sink.emit(copy);
+  }
+  for (const auto &fact : rule_sink.attributes()) {
+    ExtensionAttributeFact copy = fact;
+    copy.provenance = downgraded(copy.provenance);
+    sink.emit(copy);
+  }
+  for (const auto &fact : rule_sink.unknowns()) {
+    ExtensionUnknownFact copy = fact;
+    copy.provenance = downgraded(copy.provenance);
+    sink.emit(copy);
+  }
+}
 
 } // namespace
 
@@ -660,9 +737,25 @@ execute_plan(const ExtractionPlan &plan, clang::ASTContext &context,
       continue;
     }
 
+    // Computed once per rule (not per match): the outermost/root bind id,
+    // used only by main_file scope filtering. validate_matchers() already
+    // guarantees this is non-empty whenever rule.scope == main_file.
+    const std::string scope_root_binding =
+        rule.scope == PlanScope::main_file
+            ? root_binding_of(rule.matcher_expression)
+            : std::string{};
+
+    // Facts are buffered per-rule rather than written straight to the
+    // caller's sink: stats.budget_exhausted is only known for certain once
+    // matchAST() below fully returns, so every fact this rule produces must
+    // be forwarded (with completeness retroactively downgraded if the rule
+    // turned out truncated) in one place after the run finishes -- see
+    // forward_rule_facts().
+    InMemoryExtensionFactSink rule_sink;
     clang::ast_matchers::MatchFinder finder;
     RuleMatchCallback callback(rule, report.plan_hash, report.artifact_identity,
-                               sink, stats, report.diagnostics, total_emitted,
+                               scope_root_binding, rule_sink, stats,
+                               report.diagnostics, total_emitted,
                                options.hard_output_cap);
 
     llvm::StringRef code(rule.matcher_expression);
@@ -691,6 +784,7 @@ execute_plan(const ExtractionPlan &plan, clang::ASTContext &context,
       continue;
     }
     finder.matchAST(context);
+    forward_rule_facts(sink, rule_sink, stats.budget_exhausted);
     report.rule_stats.push_back(stats);
   }
   return report;

@@ -216,6 +216,24 @@ void validate_identity(ValidationResult &result, const ExtractionRule &rule,
 
 void validate_emit(ValidationResult &result, const ExtractionRule &rule,
                    const EmitOperation &emit) {
+  // EmitOperation is a tagged union over 4 independent std::optional
+  // payloads; plan_json.hpp's emit_from_json() already rejects a
+  // multi-payload emit when PARSING json, but a plan assembled directly in
+  // C++ (via builder code, bypassing the JSON codec entirely) can set more
+  // than one of these fields with nothing to stop it -- validate(plan) would
+  // pass, execution would silently pick whichever branch its if/else-if
+  // chain checks first, and canonical_json(plan) would serialize BOTH set
+  // fields, producing JSON that parse_plan_json() then rejects on its own
+  // round trip. Enforce the same "exactly one" invariant here so it holds
+  // for every ExtractionPlan regardless of how it was constructed.
+  const int payload_count = (emit.node ? 1 : 0) + (emit.relation ? 1 : 0) +
+                            (emit.attribute ? 1 : 0) + (emit.unknown ? 1 : 0);
+  if (payload_count != 1) {
+    add(result, rule.id, ValidationErrorCode::malformed_plan,
+        "emit operation must set exactly one of node/relation/attribute/"
+        "unknown (found " +
+            std::to_string(payload_count) + ")");
+  }
   if (emit.node) {
     scan_forbidden(result, rule.id, "node.namespace",
                    emit.node->namespace_name);

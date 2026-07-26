@@ -327,6 +327,7 @@ add_library(cidx_extract OBJECT
   src/extract/plan_json.cpp
   src/extract/plan_identity.cpp
   src/extract/matcher_catalog.cpp
+  src/extract/matcher_root_binding.cpp
   src/extract/validator_structure.cpp
   src/extract/validator_matchers.cpp
   src/extract/extension_facts.cpp

@@ -6,6 +6,12 @@
 
 namespace cidx::extract {
 
+const std::set<std::string> &traversal_work_combinators() {
+  static const std::set<std::string> combinators = {"hasDescendant",
+                                                    "hasAncestor"};
+  return combinators;
+}
+
 MatcherCatalog::MatcherCatalog(
     std::set<std::string> matcher_ids,
     std::vector<std::pair<std::string, EndpointDomain>> properties)
@@ -102,7 +108,15 @@ const MatcherCatalog &MatcherCatalog::default_catalog() {
           {"storage_class", EndpointDomain::declaration},
           {"type_spelling", EndpointDomain::expression},
           {"value_kind", EndpointDomain::expression},
-          {"canonical_type_spelling", EndpointDomain::type},
+          // "canonical_type_spelling" (EndpointDomain::type) was removed
+          // (PR #66 review): a type-domain binding resolves to a bare
+          // clang::QualType, which carries no clang::Decl/clang::Expr and no
+          // SourceLocation -- read_property() could never actually resolve
+          // it (always attribute_unresolved) and default_identity()/
+          // evidence_for() have no source anchor to stamp for a type-only
+          // binding either. It was an allow-listed catalog entry that could
+          // never produce a fact. Re-add only alongside a real
+          // TypeLoc-based identity/evidence story for type-domain bindings.
       });
   return catalog;
 }
@@ -196,6 +210,83 @@ std::int64_t count_matcher_occurrences(const std::string &matcher_expression,
                        }
                      });
   return count;
+}
+
+bool has_nested_matcher_occurrences(const std::string &matcher_expression,
+                                    const std::set<std::string> &names) {
+  // Tracks, for every currently-open '(' scope, whether that scope was
+  // opened by a `names` call -- i.e. we are currently inside one of its
+  // arguments. A second `names` call site encountered while any enclosing
+  // scope is already `true` is nested inside it.
+  std::vector<bool> paren_is_target_call;
+  bool in_string = false;
+  std::size_t i = 0;
+  const std::size_t n = matcher_expression.size();
+  while (i < n) {
+    char c = matcher_expression[i];
+    if (in_string) {
+      if (c == '\\' && i + 1 < n) {
+        i += 2;
+        continue;
+      }
+      if (c == '"') {
+        in_string = false;
+      }
+      ++i;
+      continue;
+    }
+    if (c == '"') {
+      in_string = true;
+      ++i;
+      continue;
+    }
+    if (std::isalpha(static_cast<unsigned char>(c)) != 0 || c == '_') {
+      std::size_t start = i;
+      while (i < n && (std::isalnum(static_cast<unsigned char>(
+                           matcher_expression[i])) != 0 ||
+                       matcher_expression[i] == '_')) {
+        ++i;
+      }
+      std::string ident = matcher_expression.substr(start, i - start);
+      std::size_t j = i;
+      while (j < n && std::isspace(static_cast<unsigned char>(
+                          matcher_expression[j])) != 0) {
+        ++j;
+      }
+      if (j < n && matcher_expression[j] == '(') {
+        std::size_t k = start;
+        while (k > 0 && std::isspace(static_cast<unsigned char>(
+                            matcher_expression[k - 1])) != 0) {
+          --k;
+        }
+        const bool method_call = (k > 0 && matcher_expression[k - 1] == '.');
+        const bool is_target_call = !method_call && names.contains(ident);
+        if (is_target_call &&
+            std::ranges::any_of(paren_is_target_call,
+                                [](bool already) { return already; })) {
+          return true;
+        }
+        paren_is_target_call.push_back(is_target_call);
+        i = j + 1; // consume the '(' this call site opens.
+        continue;
+      }
+      continue;
+    }
+    if (c == '(') {
+      paren_is_target_call.push_back(false);
+      ++i;
+      continue;
+    }
+    if (c == ')') {
+      if (!paren_is_target_call.empty()) {
+        paren_is_target_call.pop_back();
+      }
+      ++i;
+      continue;
+    }
+    ++i;
+  }
+  return false;
 }
 
 } // namespace cidx::extract
