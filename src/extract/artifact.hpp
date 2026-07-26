@@ -34,13 +34,17 @@ public:
   explicit ExtensionPublicationError(const std::string &message);
 };
 
+// Deliberately does NOT carry its own workspace_identity/tu_identity: an
+// independently-supplied identity here could disagree with what the
+// execution actually ran against (and did in the reviewed version of this
+// file). publish_extension_artifact() reads those identities from
+// `ExecutionReport` instead, so there is exactly one path from
+// execute_plan()'s ExecutionInput to the published artifact's metadata.
 struct PublicationRequest {
   std::filesystem::path artifact_root;
   // A package-qualified namespace (e.g. "banking.audit"); becomes part of
   // the artifact's logical_id. Must not be "core" or "core.*".
   std::string namespace_name;
-  std::string workspace_identity;
-  std::string tu_identity;
 };
 
 struct ExtensionPublication {
@@ -54,12 +58,17 @@ struct ExtensionPublication {
   std::vector<std::string> exposed_relations;
 };
 
-// `report` and `sink` must come from the same execute_plan() call (report
-// carries the plan/artifact identity every fact in `sink` was stamped with).
+// `report` and `sink` must come from the same execute_plan() call. This is
+// verified, not assumed: every fact in `sink` must carry the same
+// provenance.plan_hash/artifact_identity as `report`, and `report`'s pinned
+// workspace_identity/tu_identity (populated from the ExecutionInput passed
+// to execute_plan()) must both be non-empty -- an ad hoc/test execution
+// that leaves them empty cannot be published, only pinned executions can.
 // Canonicalizes `sink` itself (non-const) so the published bytes are always
 // deterministic regardless of whether the caller already did so. Throws
-// ExtensionPublicationError if the namespace is invalid or the report has no
-// successfully executed rules.
+// ExtensionPublicationError if the namespace is invalid, the identities are
+// unpinned, the report has no successfully executed rules, or any fact's
+// provenance does not match this report.
 [[nodiscard]] ExtensionPublication
 publish_extension_artifact(Storage &storage, const PublicationRequest &request,
                            const ExtractionPlan &plan,

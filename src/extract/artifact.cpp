@@ -53,6 +53,41 @@ void insert_meta(SqliteDb &db, std::string_view key, std::string_view value) {
   statement.step_done();
 }
 
+bool provenance_matches(const ExtensionProvenance &provenance,
+                        const ExecutionReport &report) {
+  return provenance.plan_hash == report.plan_hash &&
+         provenance.artifact_identity == report.artifact_identity;
+}
+
+// Verifies every fact in `sink` actually came from THIS `report`'s
+// execution (same plan_hash and artifact_identity), rather than trusting
+// the caller to have passed a matching report/sink pair. Guards against
+// publishing a sink left over from a different plan or a different TU.
+void verify_fact_provenance(const InMemoryExtensionFactSink &sink,
+                            const ExecutionReport &report) {
+  const bool all_match =
+      std::ranges::all_of(sink.nodes(),
+                          [&](const auto &fact) {
+                            return provenance_matches(fact.provenance, report);
+                          }) &&
+      std::ranges::all_of(sink.relations(),
+                          [&](const auto &fact) {
+                            return provenance_matches(fact.provenance, report);
+                          }) &&
+      std::ranges::all_of(sink.attributes(),
+                          [&](const auto &fact) {
+                            return provenance_matches(fact.provenance, report);
+                          }) &&
+      std::ranges::all_of(sink.unknowns(), [&](const auto &fact) {
+        return provenance_matches(fact.provenance, report);
+      });
+  if (!all_match) {
+    throw ExtensionPublicationError(
+        "fact provenance does not match this execution report -- sink and "
+        "report must come from the same execute_plan() call");
+  }
+}
+
 void insert_row(SqliteDb &db, std::string_view fact_kind,
                 std::string_view namespace_name, std::string_view rule_id,
                 std::string_view kind_name, std::string_view identity,
@@ -95,6 +130,18 @@ publish_extension_artifact(Storage &storage, const PublicationRequest &request,
     throw ExtensionPublicationError(
         "cannot publish an execution report with no executed rules");
   }
+  // Fail closed: only a PINNED execution (a real workspace/TU identity
+  // supplied to execute_plan()'s ExecutionInput) may be published. An ad
+  // hoc/test execution that left both empty produces facts with no
+  // verifiable link to a workspace snapshot or TU descriptor, so it cannot
+  // become a registered artifact.
+  if (report.workspace_identity.empty() || report.tu_identity.empty()) {
+    throw ExtensionPublicationError(
+        "cannot publish an execution report with no pinned workspace/TU "
+        "identity -- execute_plan() must be called with a non-empty "
+        "ExecutionInput to publish its result");
+  }
+  verify_fact_provenance(sink, report);
   sink.canonicalize();
 
   // Conforms to the artifact contract storage/artifacts.cpp's
@@ -111,8 +158,12 @@ publish_extension_artifact(Storage &storage, const PublicationRequest &request,
   spec.artifact_schema = "cidx-extension/v1";
   spec.producer_version = "cidx-extension 1";
   spec.engine_version = "cidx 1";
-  spec.workspace_identity = request.workspace_identity;
-  spec.tu_identity = request.tu_identity;
+  // Derived from the report (already verified non-empty above), not an
+  // independently-supplied request field -- this closes the gap where a
+  // caller could publish under a workspace/TU identity that disagrees with
+  // what execute_plan() actually pinned via ExecutionInput.
+  spec.workspace_identity = report.workspace_identity;
+  spec.tu_identity = report.tu_identity;
   // The identity of THIS execution (plan + pinned workspace/TU/source
   // input) -- fixes the review finding that an artifact's identity depended
   // only on the plan, never on what it actually ran against.

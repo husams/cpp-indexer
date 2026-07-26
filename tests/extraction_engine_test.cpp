@@ -17,7 +17,9 @@
 #include "storage/storage.hpp"
 
 #include "clang/AST/ASTConsumer.h"
+#include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendAction.h"
+#include "clang/Lex/Preprocessor.h"
 #include "clang/Tooling/Tooling.h"
 
 #include <cstdlib>
@@ -39,12 +41,16 @@ struct RunResult {
 
 class PlanConsumer final : public clang::ASTConsumer {
 public:
-  PlanConsumer(const ExtractionPlan &plan, RunResult &result)
-      : plan_(plan), result_(result) {}
+  PlanConsumer(const ExtractionPlan &plan, clang::Preprocessor &preprocessor,
+               const ExecutionInput &input, const ExecutionOptions &options,
+               RunResult &result)
+      : plan_(plan), preprocessor_(preprocessor), input_(input),
+        options_(options), result_(result) {}
 
   void HandleTranslationUnit(clang::ASTContext &context) override {
     try {
-      result_.report = execute_plan(plan_, context, result_.sink);
+      result_.report = execute_plan(plan_, context, preprocessor_, result_.sink,
+                                    input_, options_);
       result_.sink.canonicalize();
     } catch (const PlanNotValidated &ex) {
       result_.plan_not_validated_message = ex.what();
@@ -53,41 +59,54 @@ public:
 
 private:
   const ExtractionPlan &plan_;
+  clang::Preprocessor &preprocessor_;
+  const ExecutionInput &input_;
+  const ExecutionOptions &options_;
   RunResult &result_;
 };
 
 class PlanAction final : public clang::ASTFrontendAction {
 public:
-  PlanAction(const ExtractionPlan &plan, RunResult &result)
-      : plan_(plan), result_(result) {}
+  PlanAction(const ExtractionPlan &plan, const ExecutionInput &input,
+             const ExecutionOptions &options, RunResult &result)
+      : plan_(plan), input_(input), options_(options), result_(result) {}
 
   std::unique_ptr<clang::ASTConsumer>
-  CreateASTConsumer(clang::CompilerInstance &, llvm::StringRef) override {
-    return std::make_unique<PlanConsumer>(plan_, result_);
+  CreateASTConsumer(clang::CompilerInstance &compiler,
+                    llvm::StringRef) override {
+    return std::make_unique<PlanConsumer>(plan_, compiler.getPreprocessor(),
+                                          input_, options_, result_);
   }
 
 private:
   const ExtractionPlan &plan_;
+  const ExecutionInput &input_;
+  const ExecutionOptions &options_;
   RunResult &result_;
 };
 
-RunResult run_plan(const ExtractionPlan &plan, const std::string &code) {
+RunResult run_plan(const ExtractionPlan &plan, const std::string &code,
+                   const ExecutionInput &input = {},
+                   const ExecutionOptions &options = {}) {
   RunResult result;
   const bool ran = clang::tooling::runToolOnCode(
-      std::make_unique<PlanAction>(plan, result), code, "test.cpp");
+      std::make_unique<PlanAction>(plan, input, options, result), code,
+      "test.cpp");
   REQUIRE(ran);
   return result;
 }
 
 // Like run_plan(), but maps additional virtual files (e.g. a header) so
 // main_file-vs-translation_unit scope has something to actually distinguish.
-RunResult
-run_plan_with_files(const ExtractionPlan &plan, const std::string &code,
-                    const clang::tooling::FileContentMappings &files) {
+RunResult run_plan_with_files(const ExtractionPlan &plan,
+                              const std::string &code,
+                              const clang::tooling::FileContentMappings &files,
+                              const ExecutionInput &input = {}) {
   RunResult result;
+  const ExecutionOptions options;
   const bool ran = clang::tooling::runToolOnCodeWithArgs(
-      std::make_unique<PlanAction>(plan, result), code, {"-std=c++20"},
-      "test.cpp", "clang-tool",
+      std::make_unique<PlanAction>(plan, input, options, result), code,
+      {"-std=c++20"}, "test.cpp", "clang-tool",
       std::make_shared<clang::PCHContainerOperations>(), files);
   REQUIRE(ran);
   return result;
@@ -430,17 +449,26 @@ TEST_SUITE("clang") {
   TEST_CASE("publish_extension_artifact registers a content-addressed "
             "artifact that is current, valid, and readable back") {
     ExtractionPlan plan = plan_with({logging_boundary_rule()});
-    RunResult result = run_plan(plan, "void log_audit_event(const char *msg);\n"
-                                      "void f() { log_audit_event(\"t\"); }\n");
+    // The pinned workspace/TU identity flows into execute_plan()'s
+    // ExecutionInput; publish_extension_artifact() reads it back from the
+    // resulting report rather than from an independent request field (PR
+    // #66 review: "the new test even executes with empty identities and
+    // then publishes as workspace:test/tu:test").
+    RunResult result =
+        run_plan(plan,
+                 "void log_audit_event(const char *msg);\n"
+                 "void f() { log_audit_event(\"t\"); }\n",
+                 ExecutionInput{.workspace_identity = "workspace:test",
+                                .tu_identity = "tu:test"});
     REQUIRE(result.sink.relations().size() == 1);
+    REQUIRE(result.report.workspace_identity == "workspace:test");
+    REQUIRE(result.report.tu_identity == "tu:test");
 
     const std::string root = make_temp_dir();
     cidx::Storage storage(root + "/index.sqlite");
     PublicationRequest request;
     request.artifact_root = root + "/artifacts";
     request.namespace_name = "banking.audit";
-    request.workspace_identity = "workspace:test";
-    request.tu_identity = "tu:test";
 
     const ExtensionPublication publication = publish_extension_artifact(
         storage, request, plan, result.report, result.sink);
@@ -468,6 +496,148 @@ TEST_SUITE("clang") {
         "fact_kind = 'relation'");
     REQUIRE(rows.step());
     CHECK(rows.col_text(0) == "logs_to");
+  }
+
+  // --- PR #66 review round 2 regression coverage ------------------------
+
+  TEST_CASE("artifact_identity changes when an included header's content "
+            "changes, even though the main file is unchanged (round-2 "
+            "repro: the fingerprint previously covered only main-file "
+            "bytes, target triple, and LangStd)") {
+    ExtractionPlan plan = plan_with({logging_boundary_rule()});
+    const std::string code = "#include \"header.h\"\n"
+                             "void log_audit_event(const char *msg);\n"
+                             "void do_transfer() { log_audit_event(\"t\"); "
+                             "}\n";
+    RunResult first =
+        run_plan_with_files(plan, code, {{"header.h", "// version 1\n"}});
+    RunResult second = run_plan_with_files(
+        plan, code, {{"header.h", "// version 2, different content\n"}});
+    REQUIRE(first.report.plan_hash == second.report.plan_hash);
+    CHECK(first.report.artifact_identity != second.report.artifact_identity);
+  }
+
+  TEST_CASE(
+      "estimated matcher-evaluation work (visited nodes x traversal "
+      "combinators) is bounded even when the raw AST alone fits "
+      "max_visited_nodes (round-2 repro: nested hasDescendant/hasAncestor "
+      "re-traverse the TU during matchAST, which a one-time AST-size check "
+      "cannot see)") {
+    ExtractionRule rule;
+    rule.id = "audit.descendant_bound";
+    rule.matcher_expression =
+        "cxxRecordDecl(allOf(hasDescendant(cxxMethodDecl(hasName(\"a\"))), "
+        "hasDescendant(cxxMethodDecl(hasName(\"b\"))), "
+        "hasDescendant(cxxMethodDecl(hasName(\"c\"))), "
+        "hasDescendant(cxxMethodDecl(hasName(\"d\"))), "
+        "hasDescendant(cxxMethodDecl(hasName(\"e\"))))).bind(\"record\")";
+    rule.bindings = {Binding{"record", EndpointDomain::declaration}};
+    EmitOperation emit;
+    emit.unknown = EmitUnknown{"audit", "seen", "record"};
+    rule.emits = {emit};
+    rule.completeness = DeclaredCompleteness::unknown_capable;
+    // 5 repeated-subtree-traversal combinators -> effective threshold is
+    // max_visited_nodes / 6 = 10. Generous enough (60) that a plain
+    // one-time AST-size check would not reject this small fixture, but the
+    // combinator-multiplied estimate is exceeded by its function bodies.
+    rule.budget = RuleBudget{1000, 1000, 60, true};
+    rule.producer_package = "audit";
+    rule.producer_version = 1;
+    ExtractionPlan plan = plan_with({rule});
+
+    RunResult result =
+        run_plan(plan, "struct AccountLedger {\n"
+                       "  void commit() {\n"
+                       "    int a=1; int b=2; int c=3; int d=4; int e=5;\n"
+                       "    int f=6; int g=7; int h=8; int i=9; int j=10;\n"
+                       "  }\n"
+                       "  void rollback() {}\n"
+                       "};\n");
+    const auto *stats = result.report.find(rule.id);
+    REQUIRE(stats != nullptr);
+    CHECK(stats->budget_exhausted);
+    CHECK(stats->matches == 0);
+    CHECK(result.sink.unknowns().empty());
+  }
+
+  TEST_CASE("hard_output_cap bounds the TOTAL emitted facts across the "
+            "whole plan, not per rule (round-2 repro: every rule received "
+            "the full cap and stats.emitted reset per rule, so N rules "
+            "could publish up to N times the configured maximum)") {
+    ExtractionRule rule_a = logging_boundary_rule();
+    rule_a.id = "audit.logs_to.a";
+    ExtractionRule rule_b = rule_a;
+    rule_b.id = "audit.logs_to.b";
+    ExtractionPlan plan = plan_with({rule_a, rule_b});
+
+    ExecutionOptions options;
+    options.hard_output_cap = 3;
+
+    RunResult result = run_plan(plan,
+                                "void log_audit_event(const char *msg);\n"
+                                "void a() { log_audit_event(\"1\"); }\n"
+                                "void b() { log_audit_event(\"2\"); }\n"
+                                "void c() { log_audit_event(\"3\"); }\n"
+                                "void d() { log_audit_event(\"4\"); }\n"
+                                "void e() { log_audit_event(\"5\"); }\n",
+                                ExecutionInput{}, options);
+
+    // Each rule alone matches all 5 call sites and could emit up to 5
+    // relations (well under its own max_emitted_facts); without the fix the
+    // two rules together would emit up to 6 (3 each). The shared cap must
+    // hold the TOTAL to exactly 3.
+    CHECK(result.sink.relations().size() == 3);
+  }
+
+  TEST_CASE("publish_extension_artifact refuses to publish an execution "
+            "with no pinned workspace/TU identity") {
+    ExtractionPlan plan = plan_with({logging_boundary_rule()});
+    RunResult result = run_plan(plan, "void log_audit_event(const char *msg);\n"
+                                      "void f() { log_audit_event(\"t\"); }\n");
+    REQUIRE(result.report.workspace_identity.empty());
+    REQUIRE(result.report.tu_identity.empty());
+
+    const std::string root = make_temp_dir();
+    cidx::Storage storage(root + "/index.sqlite");
+    PublicationRequest request;
+    request.artifact_root = root + "/artifacts";
+    request.namespace_name = "banking.audit";
+
+    CHECK_THROWS_AS((void)publish_extension_artifact(
+                        storage, request, plan, result.report, result.sink),
+                    ExtensionPublicationError);
+  }
+
+  TEST_CASE("publish_extension_artifact refuses to publish a sink/report "
+            "pair from different executions (round-2 repro: publication "
+            "metadata was unbound to the execution that produced the "
+            "report and facts)") {
+    ExtractionPlan plan = plan_with({logging_boundary_rule()});
+    RunResult first =
+        run_plan(plan,
+                 "void log_audit_event(const char *msg);\n"
+                 "void f() { log_audit_event(\"t\"); }\n",
+                 ExecutionInput{.workspace_identity = "workspace:a",
+                                .tu_identity = "tu:a"});
+    RunResult second =
+        run_plan(plan,
+                 "void log_audit_event(const char *msg);\n"
+                 "void g() { log_audit_event(\"t\"); }\n",
+                 ExecutionInput{.workspace_identity = "workspace:b",
+                                .tu_identity = "tu:b"});
+
+    const std::string root = make_temp_dir();
+    cidx::Storage storage(root + "/index.sqlite");
+    PublicationRequest request;
+    request.artifact_root = root + "/artifacts";
+    request.namespace_name = "banking.audit";
+
+    // first.sink's facts carry first.report's artifact_identity; publishing
+    // them against second.report (a different pinned execution) must be
+    // refused.
+    CHECK_THROWS_AS((void)publish_extension_artifact(storage, request, plan,
+                                                     second.report, first.sink),
+                    ExtensionPublicationError);
   }
 
 } // TEST_SUITE("clang")

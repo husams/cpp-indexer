@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 
 namespace cidx::extract {
 
@@ -106,10 +107,17 @@ const MatcherCatalog &MatcherCatalog::default_catalog() {
   return catalog;
 }
 
-std::vector<std::string>
-disallowed_matcher_calls(const std::string &matcher_expression,
-                         const MatcherCatalog &catalog) {
-  std::vector<std::string> disallowed;
+namespace {
+
+// Shared string-literal-aware tokenizer: invokes `on_call(identifier,
+// is_method_call)` for every `identifier(` or `.identifier(` call site
+// found in `matcher_expression`, skipping quoted string contents. Both
+// disallowed_matcher_calls() and count_matcher_occurrences() are built on
+// this single scanner so they can never disagree about what counts as a
+// "call site".
+void for_each_call_site(
+    const std::string &matcher_expression,
+    const std::function<void(const std::string &, bool)> &on_call) {
   bool in_string = false;
   std::size_t i = 0;
   const std::size_t n = matcher_expression.size();
@@ -151,19 +159,43 @@ disallowed_matcher_calls(const std::string &matcher_expression,
           --k;
         }
         const bool method_call = (k > 0 && matcher_expression[k - 1] == '.');
-        if (method_call) {
-          if (ident != "bind") {
-            disallowed.push_back(ident);
-          }
-        } else if (!catalog.allows_matcher(ident)) {
-          disallowed.push_back(ident);
-        }
+        on_call(ident, method_call);
       }
       continue;
     }
     ++i;
   }
+}
+
+} // namespace
+
+std::vector<std::string>
+disallowed_matcher_calls(const std::string &matcher_expression,
+                         const MatcherCatalog &catalog) {
+  std::vector<std::string> disallowed;
+  for_each_call_site(matcher_expression,
+                     [&](const std::string &ident, bool method_call) {
+                       if (method_call) {
+                         if (ident != "bind") {
+                           disallowed.push_back(ident);
+                         }
+                       } else if (!catalog.allows_matcher(ident)) {
+                         disallowed.push_back(ident);
+                       }
+                     });
   return disallowed;
+}
+
+std::int64_t count_matcher_occurrences(const std::string &matcher_expression,
+                                       const std::set<std::string> &names) {
+  std::int64_t count = 0;
+  for_each_call_site(matcher_expression,
+                     [&](const std::string &ident, bool method_call) {
+                       if (!method_call && names.contains(ident)) {
+                         ++count;
+                       }
+                     });
+  return count;
 }
 
 } // namespace cidx::extract

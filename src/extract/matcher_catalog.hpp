@@ -10,6 +10,7 @@
 
 #include "extract/plan_ir.hpp"
 
+#include <cstdint>
 #include <optional>
 #include <set>
 #include <string>
@@ -52,5 +53,15 @@ private:
 [[nodiscard]] std::vector<std::string>
 disallowed_matcher_calls(const std::string &matcher_expression,
                          const MatcherCatalog &catalog);
+
+// Counts bare-identifier call sites (same string-literal-aware scanner as
+// disallowed_matcher_calls) whose identifier is in `names`. Used to bound
+// the ESTIMATED evaluation work of a matcher expression: combinators like
+// hasDescendant/hasAncestor cause Clang's MatchFinder to repeatedly
+// re-traverse subtrees during matchAST, so a rule using more of them must
+// fit a proportionally smaller effective node budget (engine.cpp).
+[[nodiscard]] std::int64_t
+count_matcher_occurrences(const std::string &matcher_expression,
+                          const std::set<std::string> &names);
 
 } // namespace cidx::extract
