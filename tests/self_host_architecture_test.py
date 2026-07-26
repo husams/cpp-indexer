@@ -124,11 +124,14 @@ class _Fixture:
         dir_persistence = db.add_directory(component, "src/persistence")
         dir_cli = db.add_directory(component, "src/cli")
         dir_query = db.add_directory(component, "src/query")
-        self.file_pass = db.add_file(dir_extraction, "pass.cpp")
+        # Only real translation units carry compile_options (a header is
+        # never separately compiled); matches what a real `cidx import`
+        # records from compile_commands.json.
+        self.file_pass = db.add_file(dir_extraction, "pass.cpp", compile_options=["-std=c++23"])
         self.file_value = db.add_file(dir_model, "value.hpp")
         self.file_service = db.add_file(dir_persistence, "service.hpp")
         self.file_format = db.add_file(dir_cli, "format.hpp")
-        self.file_plan = db.add_file(dir_query, "plan.cpp")
+        self.file_plan = db.add_file(dir_query, "plan.cpp", compile_options=["-std=c++23"])
 
         def sym(usr, spelling, qual_name, kind, file_id, line):
             return db.add_symbol(
@@ -155,6 +158,14 @@ class _Fixture:
         # inserting already-resolved symbols/edges, so mark every registered
         # file as actually indexed to match that end state.
         db._conn.execute("UPDATE file SET indexed = 1")
+        db._conn.commit()
+        # A real `cidx import`/`index`/`resolve` pipeline stamps the HSE-32
+        # source/config identity (src/cli/commands_ingest.cpp,
+        # src/application/services.cpp both call stamp_index_identity()).
+        # Stamping it here makes this fixture's freshness computation
+        # meaningful ("current") for the clean case, matching what a real
+        # self-index actually leaves behind.
+        db.stamp_index_identity()
         db._conn.commit()
 
     def add_call(self, src: int, dst: int, line: int = 1, col: int = 1, kind: int = CALLS_KIND) -> int:
@@ -196,6 +207,35 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         self.assertEqual(violations[0]["toModule"], "cli")
         self.assertEqual(violations[0]["witness"]["callee"]["file"], "src/cli/format.hpp")
         self.assertEqual(violations[0]["witness"]["call_site"]["line"], 7)
+
+    def test_bulk_queries_are_not_truncated_by_the_default_1000_row_result_cap(self) -> None:
+        # [Review round 2, blocker 1] QueryPlan applies a DEFAULT_RESULT_CAP
+        # (1,000 rows) to any query with no explicit limit() stage. A
+        # realistically sized self-index comfortably exceeds 1,000 symbols;
+        # the reviewer's own 1,105-symbol fixture hit this and produced
+        # status=fail/enumerationTruncated=true even though nothing was
+        # actually wrong. Reproduce a >1,000-symbol index and assert the
+        # bulk symbol/site reads request up to QueryPlan's real enumeration
+        # budget (not the artificial default), so this never truncates
+        # until a codebase is genuinely large enough to hit that budget.
+        fixture = _Fixture()
+        last_id = None
+        for i in range(1100):
+            last_id = fixture._db.add_symbol(
+                Symbol(
+                    usr=f"bulk::u{i}", spelling=f"bulk_{i}", qual_name=f"bulk_{i}",
+                    kind="function", file_id=fixture.file_pass,
+                    line=1000 + i, is_definition=True, resolved=True,
+                )
+            )
+        fixture._db._conn.commit()
+        # A call between two symbols near the END of that bulk range proves
+        # the read isn't silently capped before reaching them.
+        fixture.add_call(last_id, fixture.sym_render, line=42, col=1)
+        report = fixture.run()
+        self.assertFalse(report["index"]["coverage"]["enumerationTruncated"])
+        self.assertEqual(len(report["findings"]["moduleBoundaryViolations"]), 1)
+        self.assertEqual(report["index"]["symbolCount"], 1105)
 
     def test_clang_style_leakage_out_of_the_model_layer_is_rejected(self) -> None:
         # model's allowedDependencies is ["model"] only -- exactly the ADR-011
@@ -492,6 +532,68 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
             any("fatal/error diagnostic" in issue for issue in report["completeness"]["identityIssues"])
         )
         self.assertEqual(report["status"], "fail")
+
+    def test_stale_source_fingerprint_fails_closed(self) -> None:
+        # [Review round 2, blocker 2] verify real HSE-32 source/config
+        # identity (Storage.index_identity()), not just schema/catalog
+        # version. Modifying an indexed file's content on disk AFTER the
+        # index was stamped must be caught: freshness recomputes the
+        # fingerprint from the files on disk right now and compares it
+        # against what was stamped at index time.
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_run, fixture.sym_value)
+        (fixture.root / "src/extraction/pass.cpp").write_text(
+            '#include "model/value.hpp"\nvoid run() {}\n// modified after indexing\n',
+            encoding="utf-8",
+        )
+        report = fixture.run()
+        self.assertTrue(
+            any("source/config identity" in issue for issue in report["completeness"]["identityIssues"])
+        )
+        self.assertEqual(report["index"]["coverage"]["indexIdentity"]["freshness"], "stale")
+        self.assertEqual(report["status"], "fail")
+
+    def test_missing_index_identity_metadata_fails_closed(self) -> None:
+        # An index that never stamped HSE-32 identity at all (e.g. an older
+        # `cidx` build, or a hand-built test database) is "unverifiable",
+        # not "current" -- it must not be treated as a clean bill of health
+        # just because nothing was ever recorded to contradict.
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_run, fixture.sym_value)
+        for key in ("source_revision", "source_fingerprint", "index_config", "index_config_fingerprint", "index_identity_version"):
+            fixture._db._conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+        fixture._db._conn.commit()
+        report = fixture.run()
+        self.assertEqual(report["index"]["coverage"]["indexIdentity"]["freshness"], "unverifiable")
+        self.assertTrue(
+            any("source/config identity" in issue for issue in report["completeness"]["identityIssues"])
+        )
+        self.assertEqual(report["status"], "fail")
+
+    def test_missing_build_config_on_a_translation_unit_fails_closed(self) -> None:
+        # [Review round 2, blocker 2] a translation unit indexed without a
+        # recorded compile_options entry has unverifiable build identity.
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_run, fixture.sym_value)
+        fixture._db._conn.execute(
+            "UPDATE file SET compile_options = NULL WHERE id = ?", (fixture.file_pass,)
+        )
+        fixture._db._conn.commit()
+        report = fixture.run()
+        self.assertEqual(report["index"]["coverage"]["missingBuildConfig"], 1)
+        self.assertTrue(
+            any("compile_options" in issue for issue in report["completeness"]["identityIssues"])
+        )
+        self.assertEqual(report["status"], "fail")
+
+    def test_missing_build_config_on_a_header_is_not_flagged(self) -> None:
+        # A header legitimately has no compile_options of its own (it is
+        # never separately compiled); the build-identity check must be
+        # scoped to actual translation units, not every indexed row.
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_run, fixture.sym_value)
+        report = fixture.run()
+        self.assertEqual(report["index"]["coverage"]["missingBuildConfig"], 0)
 
     def test_stale_schema_version_fails_closed(self) -> None:
         # [Review blocker 2] validate schema identity against this

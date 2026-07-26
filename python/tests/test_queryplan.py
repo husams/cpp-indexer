@@ -1073,6 +1073,28 @@ def test_site_view_expansion_exposes_deterministic_provenance():
     assert result.rows[1][2] == 5
 
 
+def test_site_view_exposes_stable_src_dst_endpoints():
+    """A "site" row's src_id/dst_id are the owning edge's own stable
+    endpoints (a correlated subquery against edge.id), not the "edge"
+    view's separate portable/logical row identity -- a caller can build a
+    caller/callee witness for every call site from ONE query, without a
+    second round-trip through a different id space to recover src/dst."""
+    db = Storage(":memory:")
+    _seed_reverse_typed_graph(db, "/tmp/site-endpoints/cpp-indexer", grouped=False)
+    caller, callee = db._conn.execute(
+        "SELECT src_id,dst_id FROM edge WHERE id=1"
+    ).fetchone()
+    result = Executor(db).run(
+        (start(codebase()) | view("edge") | nodes() | sites()
+         | select(["edge_id", "src_id", "dst_id", "line", "col"])).plan
+    )
+    assert len(result.rows) == 1
+    edge_id, src_id, dst_id, line, col = result.rows[0]
+    assert edge_id == 1
+    assert (src_id, dst_id) == (caller, callee)
+    assert (line, col) == (10, 2)
+
+
 def test_typed_provenance_preserves_status_through_select():
     def run(kind, unresolved_endpoint=False, unresolved_site=False):
         db = Storage(":memory:")

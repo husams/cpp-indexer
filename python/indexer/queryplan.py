@@ -153,7 +153,7 @@ _TYPED_FIELDS = {
     "signature_slot": {"id", "identity_key", "owner_id", "position", "pack_index", "slot_kind", "name", "type_id", "declared_type_id", "adjusted_type_id", "default_text", "default_origin", "reference_semantics", "mode", "value_kind", "named_decl"},
     "call_argument": {"id", "identity_key", "edge_id", "file_id", "line", "col", "position", "src_kind", "type_usr", "decl_usr", "callee_usr", "type_id", "decl_id", "callee_id", "type_is_value"},
     "edge": {"id", "identity_key", "src_id", "dst_id", "kind", "count", "base_access", "is_virtual", "vtable_slot", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
-    "site": {"id", "identity_key", "edge_id", "file_id", "file", "line", "col", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
+    "site": {"id", "identity_key", "edge_id", "src_id", "dst_id", "file_id", "file", "line", "col", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
     "evidence": {"id", "identity_key", "owner_id", "position", "default_txt", "default_type_id", "default_ref_id", "edge_id", "file_id", "line", "col", "conditional", "args_sig", "recv_src_kind", "recv_type_usr", "recv_decl_usr", "recv_type_id", "recv_decl_id", "recv_param_pos", "recv_type_is_value", "relation", "source", "target", "evidence", "status", "partial", "unknown"},
     "type_layer": {"id", "identity_key", "root_id", "path", "relation", "position", "depth", "status", "type_id", "spelling", "kind", "extent", "element_type", "decl_usr", "canonical_id", "is_const", "is_volatile", "is_restrict"},
     "type": {"id", "identity_key", "type_key", "spelling", "kind", "is_const", "is_volatile", "is_restrict", "cv_qualifiers", "decl_usr", "decl_id", "canonical_id", "extent"},
@@ -2150,6 +2150,13 @@ class Executor:
             return "(is_const + 2 * is_volatile + 4 * is_restrict)"
         if field_name == "edge_id" and view == "edge":
             return "id"
+        if field_name in ("src_id", "dst_id") and view == "site":
+            # A site row is always scoped to exactly one edge (edge_site.edge_id
+            # is a foreign key into edge.id); exposing the edge's own stable
+            # endpoints here lets a caller correlate every call SITE straight to
+            # its (src_id, dst_id) in one query, without a second "edge" view
+            # round-trip through a different (portable/logical) row identity.
+            return f"(SELECT {field_name} FROM edge WHERE edge.id = edge_site.edge_id)"
         if field_name in ("id", "identity_key"):
             return ""
         columns = {

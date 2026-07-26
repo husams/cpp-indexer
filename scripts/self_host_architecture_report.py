@@ -48,7 +48,9 @@ from scripts.check_architecture import check_manifest, load_manifest, _sources, 
 from scripts.check_platform_contract import validate_contract  # noqa: E402
 
 from indexer.storage import Storage  # noqa: E402
-from indexer.queryplan import Executor, codebase, nodes, select, sites, start, view  # noqa: E402
+from indexer.queryplan import (  # noqa: E402
+    ENUMERATE_BUDGET, Executor, codebase, limit, nodes, select, sites, start, view,
+)
 from indexer._version import DATABASE_SCHEMA_VERSION  # noqa: E402
 from indexer.generated_catalog import CATALOG_HASH as EXPECTED_CATALOG_HASH  # noqa: E402
 
@@ -189,8 +191,17 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
     executor = Executor(db)
     truncated = False
 
+    # QueryPlan applies a DEFAULT_RESULT_CAP (1,000 rows) to any query whose
+    # plan never uses an explicit `limit()` stage (`limit_in_effect` stays
+    # False). A bulk, no-predicate listing like these has no natural cap of
+    # its own, so every query below explicitly asks for up to
+    # ENUMERATE_BUDGET rows -- the library's own real enumeration ceiling --
+    # so the *artificial* 1,000-row default can never truncate evidence
+    # before the *real* budget would. `Result.truncated` is still checked
+    # and surfaced (see check_index_coverage) if the real budget is hit.
     symbol_result = executor.run(
-        (start(codebase()) | nodes() | select(["id", "name", "file", "line"])).plan
+        (start(codebase()) | nodes() | select(["id", "name", "file", "line"])
+         | limit(ENUMERATE_BUDGET)).plan
     )
     truncated = truncated or symbol_result.truncated
     symbol_name: dict[int, str] = {}
@@ -213,35 +224,22 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
         if line is not None:
             symbol_line[sym_id] = line
 
-    # QueryPlan's "edge" view resolves `select(["id"])` to a portable/logical
-    # row identity (_logical_row_id), not the raw `edge.id` integer that
-    # edge_site.edge_id (and therefore the "site" view's "edge_id" field
-    # below) is keyed by -- CXQ's validated field set for the "edge" view
-    # has no alternate field that returns the raw id (the "edge_id" name is
-    # only valid on "site"/"call_argument"/"evidence", which reference an
-    # edge from elsewhere; on "edge" itself it isn't accepted). Bridging
-    # this identity-space gap is a structural correlation (which raw
-    # `edge.id` owns which src/dst pair), not a semantic/policy query -- the
-    # actual policy-relevant facts (relation name, every call site) are
-    # still read exclusively through the "site" view below.
-    edge_endpoints: dict[int, tuple[int, int]] = {
-        edge_id: (src_id, dst_id)
-        for edge_id, src_id, dst_id in db._conn.execute("SELECT id, src_id, dst_id FROM edge")
-    }
-
+    # The "site" view exposes the owning edge's own stable src_id/dst_id
+    # directly (a correlated subquery against edge.id -- see
+    # python/indexer/queryplan.py's `_typed_column`), so every call site's
+    # caller, callee, relation, and exact location come from ONE public
+    # QueryPlan query. No separate "edge" view round-trip, and no private
+    # `db._conn` correlation, is needed to recover src/dst.
     site_result = executor.run(
         (start(codebase()) | view("edge") | nodes() | sites()
-         | select(["edge_id", "line", "col", "relation"])).plan
+         | select(["edge_id", "src_id", "dst_id", "line", "col", "relation"])
+         | limit(ENUMERATE_BUDGET)).plan
     )
     truncated = truncated or site_result.truncated
     calls: list[tuple[int, int, int, int, int]] = []
-    for edge_id, line, col, relation in site_result.rows:
+    for edge_id, src_id, dst_id, line, col, relation in site_result.rows:
         if relation not in CALL_EDGE_KINDS:
             continue
-        endpoints = edge_endpoints.get(edge_id)
-        if endpoints is None:
-            continue
-        src_id, dst_id = endpoints
         calls.append((edge_id, src_id, dst_id, line or 0, col or 0))
 
     # A symbol whose file_id was NULLed by an ON DELETE SET NULL cascade
@@ -499,21 +497,62 @@ def check_policy_metadata(policy: dict) -> list[str]:
 def check_index_coverage(
     root: Path,
     manifest: dict,
-    conn: sqlite3.Connection,
+    db: Storage,
     facts: SemanticFacts,
 ) -> tuple[list[str], dict[str, Any]]:
     """Fail closed on index coverage.
 
     A self-index that is missing an expected translation unit, has a
     dangling file reference, recorded a fatal parse diagnostic, was built
-    against a stale schema/catalog, or has an untraversable enumeration must
-    never be reported as complete evidence -- absence of a violation proves
-    nothing when the underlying coverage itself is not verified. These are
-    index *identity/coverage* facts (counts over meta/file/diagnostic), not
-    semantic policy facts, so they are read directly rather than through
-    QueryPlan, exactly like `_read_identity` above.
+    against a stale schema/catalog/source snapshot, has an unrecorded build
+    configuration, or has an untraversable enumeration must never be
+    reported as complete evidence -- absence of a violation proves nothing
+    when the underlying coverage itself is not verified. These are index
+    *identity/coverage* facts (counts over meta/file/diagnostic, plus
+    HSE-32's own `Storage.index_identity()`), not semantic policy facts, so
+    they are read directly rather than through QueryPlan, exactly like
+    `_read_identity` above.
     """
+    conn = db._conn
     issues: list[str] = []
+
+    # HSE-32 source/config/source-snapshot identity: index_identity() reads
+    # the source_revision/source_fingerprint/index_config_fingerprint this
+    # index stamped at build time (a content hash of every indexed file,
+    # NOT a git SHA -- see stamp_index_identity()) and RE-COMPUTES the same
+    # fingerprint from the files on disk right now, so "current" is a real,
+    # live re-verification against this checkout, not a recorded claim taken
+    # on faith.
+    identity_info = db.index_identity()
+    if identity_info.freshness != "current":
+        issues.append(
+            f"index source/config identity is {identity_info.freshness!r} "
+            "(HSE-32 index_identity()): the self-index's recorded "
+            "source_fingerprint/index_config_fingerprint do not match this "
+            "checkout's current files and build configuration, or the "
+            "required identity metadata was never stamped; this is not "
+            "verified evidence of a current source/build snapshot"
+        )
+
+    # Build/TU descriptor identity: an indexed file with no recorded
+    # compile_options was never given real build flags, so its facts cannot
+    # be tied to a verifiable build configuration.
+    # Scoped to actual translation units: a header only ever appears via
+    # #include and legitimately has no compile_options of its own (it was
+    # never separately compiled), so checking every indexed row here would
+    # misreport every header as a build-identity gap.
+    tu_suffix_placeholders = " OR ".join("f.name LIKE ?" for _ in TU_SUFFIXES)
+    missing_build_config = conn.execute(
+        f"SELECT COUNT(*) FROM file f WHERE f.indexed = 1 "
+        f"AND f.compile_options IS NULL AND ({tu_suffix_placeholders})",
+        tuple(f"%{suffix}" for suffix in TU_SUFFIXES),
+    ).fetchone()[0]
+    if missing_build_config:
+        issues.append(
+            f"{missing_build_config} indexed translation unit(s) have no "
+            "recorded compile_options; their build identity cannot be "
+            "verified"
+        )
 
     dangling = conn.execute(
         "SELECT COUNT(*) FROM symbol WHERE file_id IS NOT NULL "
@@ -602,6 +641,8 @@ def check_index_coverage(
         "pendingFiles": pending,
         "filesWithFatalDiagnostics": failed,
         "enumerationTruncated": facts.truncated,
+        "missingBuildConfig": missing_build_config,
+        "indexIdentity": identity_info.to_dict(),
     }
     return issues, coverage
 
@@ -677,7 +718,7 @@ def generate_report(
         db = Storage.from_connection(raw_conn, str(index_path))
         identity = _read_identity(raw_conn, str(index_path))
         facts = _read_semantic_facts(db, root)
-        coverage_issues, coverage = check_index_coverage(root, manifest, raw_conn, facts)
+        coverage_issues, coverage = check_index_coverage(root, manifest, db, facts)
     except RuntimeError as exc:
         open_error = str(exc)
         identity = IndexIdentity(
@@ -787,6 +828,13 @@ def generate_report(
         "reportVersion": REPORT_VERSION,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "repository": manifest.get("repository", "husams/cpp-indexer"),
+        # NOTE: "sourceRevision" is this report-generating process's git HEAD
+        # at `root` -- it says nothing about what the INDEX itself claims to
+        # have been built from. The index's own claimed identity (a content
+        # hash of the files it actually indexed, not a git SHA -- see
+        # stamp_index_identity()) is `index.coverage.indexIdentity.
+        # source_revision`, and whether it still matches this checkout's
+        # current files is `index.coverage.indexIdentity.freshness`.
         "sourceRevision": _git_revision(root),
         "config": {
             "manifestPath": str(manifest_path.relative_to(root)) if manifest_path.is_relative_to(root) else str(manifest_path),
