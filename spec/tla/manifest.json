@@ -27,12 +27,31 @@
     {
       "module": "models/CidxRepositorySmoke.tla",
       "config": "models/CidxRepositorySmoke.cfg",
-      "invariants": ["TypeInvariant", "RepositoryStructureInvariant", "SharedStatusInvariant", "ProtectedInvariant"]
+      "invariants": ["TypeInvariant", "RepositoryStructureInvariant", "SharedStatusInvariant", "ProtectedInvariant"],
+      "properties": ["Fairness"]
     },
     {
       "module": "models/CidxResultSmoke.tla",
       "config": "models/CidxResultSmoke.cfg",
-      "invariants": ["SharedResultTypeInvariant", "SharedStatusInvariant", "TrustedOutcomeInvariant"]
+      "invariants": ["SharedResultTypeInvariant", "SharedStatusInvariant", "TrustedOutcomeInvariant"],
+      "properties": ["Fairness"]
+    },
+    {
+      "module": "models/CidxWorkspaceLifecycleSmoke.tla",
+      "config": "models/CidxWorkspaceLifecycleSmoke.cfg",
+      "invariants": [
+        "LifecycleTypeInvariant",
+        "WorkspaceContainmentInvariant",
+        "ScopedSymbolIdentityInvariant",
+        "ConfigurationApplicabilityInvariant",
+        "NoPartialPublicationInvariant",
+        "GenerationPublicationInvariant",
+        "FailedGenerationInvariant",
+        "InvalidationInvariant",
+        "ReadHonestyInvariant",
+        "ProtectedInvariant"
+      ],
+      "properties": ["RebuildEventuallySettles"]
     },
     {
       "module": "models/CidxBehaviorSmoke.tla",
@@ -52,6 +71,14 @@
         "TraceInvariant",
         "BoundedProgressInvariant",
         "ProtectedInvariant"
+      ],
+      "properties": [
+        "IndexingLiveness",
+        "PublicationLiveness",
+        "QueryLiveness",
+        "RecoveryLiveness",
+        "TransformLiveness",
+        "IncludePlanLiveness"
       ]
     },
     {
@@ -65,11 +92,18 @@
         "UnknownTargetInvariant",
         "PlanTransitionInvariant",
         "SetSemanticsInvariant",
+        "QueryResultInvariant",
         "WitnessInvariant",
         "CompletenessInvariant",
         "ReadOnlyExecutionInvariant",
-        "TransformPublicationInvariant",
+        "TransformDependencyInvariant",
+        "TransformStalePropagationInvariant",
         "TransformConsumptionInvariant",
+        "TransformPublicationInvariant",
+        "TransformInvariant",
+        "CycleExecutionInvariant",
+        "DiamondExecutionInvariant",
+        "FanoutExecutionInvariant",
         "CycleAdversarialInvariant",
         "DiamondAdversarialInvariant",
         "FanoutAdversarialInvariant",
@@ -77,6 +111,11 @@
         "PartialEvidenceAdversarialInvariant",
         "RecoveryTraceInvariant",
         "RecoveryFailureHonestyInvariant"
+      ],
+      "properties": [
+        "SemanticLiveness",
+        "RecoveryLiveness",
+        "FailureRecoveryLiveness"
       ]
     },
     {
@@ -160,6 +199,15 @@
     "tools/select-changed-gates.sh",
     "tools/check-gate-selection.sh",
     "tools/check-gate-selection-defense-regression.sh",
+    "tools/check-verification-tamper-regression.sh",
+    "tools/extract-trusted-checker.sh",
+    "tools/validate-manifest.py",
+    "tools/check.sh",
+    "tools/check-regression.sh",
+    "tools/check-conformance.sh",
+    "tools/check-sidecar-conformance.sh",
+    "tools/check-proofs.sh",
+    "tools/export-counterexample.sh",
     "ci-dependency-map.json",
     "/.github/workflows/verification.yml"
   ],

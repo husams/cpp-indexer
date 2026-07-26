@@ -192,11 +192,68 @@ if team_only:
 pathlib.Path(path_owners_path).write_text(json.dumps(path_owners))
 PY
 
-curl --fail --silent --show-error \
-  --header "Authorization: Bearer $GITHUB_TOKEN" \
-  --header "Accept: application/vnd.github+json" \
-  "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${GITHUB_PR_NUMBER}/reviews?per_page=100" \
-  >"$WORK/reviews.json"
+# GitHub caps this endpoint at 100 reviews per page. Approval state must be
+# reduced over the COMPLETE chronological history: otherwise an approval at
+# the end of page 1 can incorrectly survive a superseding decision from the
+# same reviewer on page 2. Fetch pages until the first short page (including
+# the required empty page when the total is an exact multiple of 100), and
+# validate each response before trusting its length.
+REVIEWS_PAGES="$WORK/review-pages"
+mkdir -p "$REVIEWS_PAGES"
+page=1
+while :; do
+  page_file="$REVIEWS_PAGES/page-${page}.json"
+  reviews_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${GITHUB_PR_NUMBER}/reviews?per_page=100&page=${page}"
+  if ! curl --fail --location --silent --show-error \
+    --header "Authorization: Bearer $GITHUB_TOKEN" \
+    --header "Accept: application/vnd.github+json" \
+    "$reviews_url" >"$page_file"; then
+    die "reviews-api-page-${page}-unreadable"
+  fi
+
+  if ! review_count="$(
+    python3 - "$page_file" <<'PY'
+import json
+import pathlib
+import sys
+
+try:
+    reviews = json.loads(pathlib.Path(sys.argv[1]).read_text())
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+if not isinstance(reviews, list) or len(reviews) > 100:
+    raise SystemExit(1)
+print(len(reviews))
+PY
+  )"; then
+    die "reviews-api-page-${page}-invalid-json"
+  fi
+
+  if (( review_count < 100 )); then
+    break
+  fi
+  page=$((page + 1))
+done
+
+if ! python3 - "$REVIEWS_PAGES" "$WORK/reviews.json" <<'PY'
+import json
+import pathlib
+import sys
+
+pages_dir = pathlib.Path(sys.argv[1])
+reviews_path = pathlib.Path(sys.argv[2])
+pages = sorted(
+    pages_dir.glob("page-*.json"),
+    key=lambda path: int(path.stem.removeprefix("page-")),
+)
+reviews = []
+for page in pages:
+    reviews.extend(json.loads(page.read_text()))
+reviews_path.write_text(json.dumps(reviews))
+PY
+then
+  die "reviews-api-pages-could-not-be-combined"
+fi
 
 # A review only carries a live approval if (a) among that reviewer's DECISION
 # reviews -- APPROVED, CHANGES_REQUESTED, or DISMISSED; a COMMENTED or PENDING

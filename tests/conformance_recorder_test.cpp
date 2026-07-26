@@ -9,6 +9,7 @@
 #include "doctest/doctest.h"
 
 #include <memory>
+#include <stdexcept>
 
 #include "application/conformance_recorder.hpp"
 #include "storage/ports.hpp"
@@ -110,6 +111,19 @@ QueryRequest read_only_query() {
                       .index = std::nullopt};
 }
 
+void require_observation_count(const ConformanceRecorder &recorder,
+                               std::size_t expected) {
+  if (recorder.observations().size() != expected) {
+    throw std::runtime_error("unexpected conformance observation count");
+  }
+}
+
+void require_condition(bool condition) {
+  if (!condition) {
+    throw std::runtime_error("conformance test condition failed");
+  }
+}
+
 // The smallest write-port interface (a single factory method), used only to
 // obtain a non-null pointer -- never actually invoked -- so a test can seed
 // "a write port was wired into a supposedly read-only query context".
@@ -121,6 +135,20 @@ struct FakeUnitOfWorkFactory final : cidx::storage::UnitOfWorkFactory {
 
 } // namespace
 
+// This TU's strict analyzer follows doctest's expression-decomposition
+// allocation internals and reports false-positive leaks. Route conditions
+// through a small throwing helper instead: failures still abort the current
+// test case, while the analyzer only needs to reason about ordinary C++ control
+// flow and ownership.
+#undef CHECK
+#undef CHECK_FALSE
+#undef REQUIRE
+#undef REQUIRE_FALSE
+#define CHECK(...) require_condition(static_cast<bool>((__VA_ARGS__)))
+#define CHECK_FALSE(...) require_condition(!static_cast<bool>((__VA_ARGS__)))
+#define REQUIRE(...) require_condition(static_cast<bool>((__VA_ARGS__)))
+#define REQUIRE_FALSE(...) require_condition(!static_cast<bool>((__VA_ARGS__)))
+
 TEST_CASE("conformance recorder accepts a well-behaved index, query, and "
           "sidecar-publish trace") {
   FakeServices fake;
@@ -130,14 +158,16 @@ TEST_CASE("conformance recorder accepts a well-behaved index, query, and "
                                            .id = "generation-1",
                                            .schema_version = 1,
                                            .catalog_version = 1,
-                                           .catalog_hash = "test-hash"});
+                                           .catalog_hash = "test-hash",
+                                           .generation = "generation-1"});
   fake.analysis_response =
       base_envelope("analysis", Status::Complete, "complete", "current");
   fake.analysis_response.artifacts.push_back({.kind = "analysis",
                                               .id = "sidecar-1",
                                               .schema_version = 1,
                                               .catalog_version = 1,
-                                              .catalog_hash = "test-hash"});
+                                              .catalog_hash = "test-hash",
+                                              .generation = "generation-1"});
 
   ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
   ApplicationContext context = test_context();
@@ -158,7 +188,7 @@ TEST_CASE("conformance recorder accepts a well-behaved index, query, and "
                                     .jobs = 1},
                     context);
 
-  REQUIRE(recorder.observations().size() == 3);
+  require_observation_count(recorder, 3);
   CHECK(recorder.observations()[0].operation == "index.publish");
   CHECK(recorder.observations()[1].operation == "query.return");
   CHECK(recorder.observations()[2].operation == "sidecar.publish");
@@ -214,7 +244,7 @@ TEST_CASE("conformance recorder records a genuinely partial index() outcome "
                               .index = std::nullopt},
                  context);
 
-  REQUIRE(recorder.observations().size() == 1);
+  require_observation_count(recorder, 1);
   CHECK(recorder.observations()[0].operation == "publication.interrupt");
   // publicationState=stale (never "current"), so NoPartialPublication's
   // implication is vacuously satisfied -- an honestly reported interruption
@@ -270,7 +300,32 @@ TEST_CASE("conformance recorder rejects a seeded query-write defect") {
                              ApplicationReadPorts{}, write_ports);
   recorder.query(read_only_query(), context);
 
-  REQUIRE(recorder.observations().size() == 1);
+  require_observation_count(recorder, 1);
+  CHECK_FALSE(recorder.conformant());
+}
+
+TEST_CASE("conformance recorder preserves write evidence from an errored "
+          "query instead of dropping the call") {
+  FakeServices fake;
+  fake.query_response =
+      base_envelope("query", Status::Error, "unknown", "unverifiable");
+
+  ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
+  FakeUnitOfWorkFactory write_capable_factory;
+  ApplicationWritePorts write_ports;
+  write_ports.unit_of_work = &write_capable_factory;
+  cidx::Storage storage(":memory:");
+  cidx::StorageWorkspaceAdapter workspace_data(storage);
+  cidx::WorkspaceContext workspace = cidx::WorkspaceContext::borrow(
+      workspace_data, cidx::WorkspaceReadWriteMode::read_only);
+  ApplicationContext context(workspace, ApplicationPolicy{},
+                             ApplicationReadPorts{}, write_ports);
+  recorder.query(read_only_query(), context);
+
+  require_observation_count(recorder, 1);
+  CHECK(recorder.observations()[0].operation == "query.return");
+  CHECK(recorder.observations()[0].fields[0].second == "error");
+  CHECK(recorder.observations()[0].fields[1].second == "1");
   CHECK_FALSE(recorder.conformant());
 }
 
@@ -310,7 +365,7 @@ TEST_CASE("conformance recorder rejects a seeded illegal-sidecar-state "
                                     .jobs = 1},
                     context);
 
-  REQUIRE(recorder.observations().size() == 1);
+  require_observation_count(recorder, 1);
   CHECK_FALSE(recorder.conformant());
 }
 
@@ -328,7 +383,8 @@ TEST_CASE("conformance recorder rejects a seeded sidecar defect: claims "
                                               .id = "sidecar-1",
                                               .schema_version = 1,
                                               .catalog_version = 1,
-                                              .catalog_hash = "test-hash"});
+                                              .catalog_hash = "test-hash",
+                                              .generation = std::nullopt});
   REQUIRE_FALSE(fake.analysis_response.artifacts.empty());
 
   ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
@@ -341,7 +397,7 @@ TEST_CASE("conformance recorder rejects a seeded sidecar defect: claims "
                                     .jobs = 1},
                     context);
 
-  REQUIRE(recorder.observations().size() == 1);
+  require_observation_count(recorder, 1);
   CHECK_FALSE(recorder.conformant());
 }
 
@@ -358,7 +414,8 @@ TEST_CASE("conformance recorder rejects a seeded sidecar defect: claims "
                                               .id = "sidecar-1",
                                               .schema_version = 1,
                                               .catalog_version = 1,
-                                              .catalog_hash = "test-hash"});
+                                              .catalog_hash = "test-hash",
+                                              .generation = std::nullopt});
   REQUIRE_FALSE(fake.analysis_response.artifacts.empty());
 
   ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
@@ -371,7 +428,7 @@ TEST_CASE("conformance recorder rejects a seeded sidecar defect: claims "
                                     .jobs = 1},
                     context);
 
-  REQUIRE(recorder.observations().size() == 1);
+  require_observation_count(recorder, 1);
   CHECK_FALSE(recorder.conformant());
 }
 
@@ -387,7 +444,8 @@ TEST_CASE("conformance recorder rejects a seeded sidecar defect: an "
                                               .id = "unrelated-artifact",
                                               .schema_version = 1,
                                               .catalog_version = 1,
-                                              .catalog_hash = "test-hash"});
+                                              .catalog_hash = "test-hash",
+                                              .generation = std::nullopt});
   REQUIRE_FALSE(fake.analysis_response.artifacts.empty());
 
   ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
@@ -400,7 +458,7 @@ TEST_CASE("conformance recorder rejects a seeded sidecar defect: an "
                                     .jobs = 1},
                     context);
 
-  REQUIRE(recorder.observations().size() == 1);
+  require_observation_count(recorder, 1);
   CHECK_FALSE(recorder.conformant());
 }
 
@@ -413,7 +471,8 @@ TEST_CASE("conformance recorder rejects a seeded out-of-order defect: "
                                               .id = "sidecar-1",
                                               .schema_version = 1,
                                               .catalog_version = 1,
-                                              .catalog_hash = "test-hash"});
+                                              .catalog_hash = "test-hash",
+                                              .generation = std::nullopt});
 
   ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
   ApplicationContext context = test_context();
@@ -433,7 +492,7 @@ TEST_CASE("conformance recorder rejects a seeded out-of-order defect: "
                                     .jobs = 1},
                     context);
 
-  REQUIRE(recorder.observations().size() == 1);
+  require_observation_count(recorder, 1);
   CHECK(recorder.observations()[0].operation == "sidecar.publish");
   CHECK_FALSE(recorder.conformant());
 }
@@ -447,14 +506,16 @@ TEST_CASE("conformance recorder accepts sidecar.publish when it is preceded "
                                            .id = "generation-1",
                                            .schema_version = 1,
                                            .catalog_version = 1,
-                                           .catalog_hash = "test-hash"});
+                                           .catalog_hash = "test-hash",
+                                           .generation = "generation-1"});
   fake.analysis_response =
       base_envelope("analysis", Status::Complete, "complete", "current");
   fake.analysis_response.artifacts.push_back({.kind = "analysis",
                                               .id = "sidecar-1",
                                               .schema_version = 1,
                                               .catalog_version = 1,
-                                              .catalog_hash = "test-hash"});
+                                              .catalog_hash = "test-hash",
+                                              .generation = "generation-1"});
 
   ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
   ApplicationContext context = test_context();
@@ -474,8 +535,50 @@ TEST_CASE("conformance recorder accepts sidecar.publish when it is preceded "
                                     .jobs = 1},
                     context);
 
-  REQUIRE(recorder.observations().size() == 2);
+  require_observation_count(recorder, 2);
   CHECK(recorder.conformant());
+}
+
+TEST_CASE("conformance recorder rejects sidecar provenance seeded by a "
+          "non-index artifact") {
+  FakeServices fake;
+  fake.index_response =
+      base_envelope("index", Status::Complete, "complete", "current");
+  fake.index_response.artifacts.push_back({.kind = "query-result",
+                                           .id = "not-a-core-index",
+                                           .schema_version = 1,
+                                           .catalog_version = 1,
+                                           .catalog_hash = "test-hash",
+                                           .generation = "generation-1"});
+  fake.analysis_response =
+      base_envelope("analysis", Status::Complete, "complete", "current");
+  fake.analysis_response.artifacts.push_back({.kind = "analysis",
+                                              .id = "sidecar-1",
+                                              .schema_version = 1,
+                                              .catalog_version = 1,
+                                              .catalog_hash = "test-hash",
+                                              .generation = "generation-1"});
+
+  ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
+  ApplicationContext context = test_context();
+  recorder.index(IndexRequest{.action = IndexAction::update,
+                              .files = {},
+                              .source = std::nullopt,
+                              .graph = true,
+                              .autoderive_labels = true,
+                              .json = false,
+                              .index = std::nullopt},
+                 context);
+  recorder.analysis(AnalysisRequest{.action = AnalysisAction::execute,
+                                    .rule = std::nullopt,
+                                    .rules_file = std::nullopt,
+                                    .export_directory = std::nullopt,
+                                    .index = std::nullopt,
+                                    .jobs = 1},
+                    context);
+
+  require_observation_count(recorder, 2);
+  CHECK_FALSE(recorder.conformant());
 }
 
 TEST_CASE("conformance recorder rejects a seeded sidecar-provenance-mismatch "
@@ -488,7 +591,8 @@ TEST_CASE("conformance recorder rejects a seeded sidecar-provenance-mismatch "
                                            .id = "generation-1",
                                            .schema_version = 1,
                                            .catalog_version = 1,
-                                           .catalog_hash = "test-hash"});
+                                           .catalog_hash = "test-hash",
+                                           .generation = "generation-1"});
   // Seeded defect, exactly as the round-3 critic reproduced it: keep the
   // otherwise-accepted trace (a real index.publish above), but make the
   // analysis envelope completeness=partial, freshness=stale, with its sole
@@ -503,7 +607,8 @@ TEST_CASE("conformance recorder rejects a seeded sidecar-provenance-mismatch "
                                               .id = "orphan-generation",
                                               .schema_version = 1,
                                               .catalog_version = 1,
-                                              .catalog_hash = "wrong-hash"});
+                                              .catalog_hash = "wrong-hash",
+                                              .generation = std::nullopt});
 
   ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
   ApplicationContext context = test_context();
@@ -523,8 +628,141 @@ TEST_CASE("conformance recorder rejects a seeded sidecar-provenance-mismatch "
                                     .jobs = 1},
                     context);
 
-  REQUIRE(recorder.observations().size() == 2);
+  require_observation_count(recorder, 2);
   CHECK(recorder.observations()[1].operation == "sidecar.publish");
+  CHECK_FALSE(recorder.conformant());
+}
+
+TEST_CASE("conformance recorder rejects a sidecar from the preceding core "
+          "generation when stable identity and catalog provenance match") {
+  FakeServices fake;
+  fake.index_response =
+      base_envelope("index", Status::Complete, "complete", "current");
+  fake.index_response.artifacts.push_back({.kind = "semantic-index",
+                                           .id = "core-artifact-1",
+                                           .schema_version = 1,
+                                           .catalog_version = 1,
+                                           .catalog_hash = "stable-hash",
+                                           .generation = "generation-1"});
+
+  ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
+  ApplicationContext context = test_context();
+  const IndexRequest update{.action = IndexAction::update,
+                            .files = {},
+                            .source = std::nullopt,
+                            .graph = true,
+                            .autoderive_labels = true,
+                            .json = false,
+                            .index = std::nullopt};
+  recorder.index(update, context);
+
+  fake.index_response.artifacts.front().id = "core-artifact-2";
+  fake.index_response.artifacts.front().generation = "generation-2";
+  recorder.index(update, context);
+
+  fake.analysis_response =
+      base_envelope("analysis", Status::Complete, "complete", "current");
+  fake.analysis_response.artifacts.push_back({.kind = "analysis",
+                                              .id = "sidecar-artifact-1",
+                                              .schema_version = 1,
+                                              .catalog_version = 1,
+                                              .catalog_hash = "stable-hash",
+                                              .generation = "generation-1"});
+  recorder.analysis(AnalysisRequest{.action = AnalysisAction::execute,
+                                    .rule = std::nullopt,
+                                    .rules_file = std::nullopt,
+                                    .export_directory = std::nullopt,
+                                    .index = std::nullopt,
+                                    .jobs = 1},
+                    context);
+
+  require_observation_count(recorder, 3);
+  CHECK(recorder.observations().back().operation == "sidecar.publish");
+  CHECK_FALSE(recorder.conformant());
+}
+
+TEST_CASE("conformance recorder records an errored analysis publish attempt "
+          "as missing and rejects the trace") {
+  FakeServices fake;
+  fake.index_response =
+      base_envelope("index", Status::Complete, "complete", "current");
+  fake.index_response.artifacts.push_back({.kind = "semantic-index",
+                                           .id = "core-artifact-1",
+                                           .schema_version = 1,
+                                           .catalog_version = 1,
+                                           .catalog_hash = "test-hash",
+                                           .generation = "generation-1"});
+  fake.analysis_response =
+      base_envelope("analysis", Status::Error, "unknown", "unverifiable");
+
+  ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
+  ApplicationContext context = test_context();
+  recorder.index(IndexRequest{.action = IndexAction::update,
+                              .files = {},
+                              .source = std::nullopt,
+                              .graph = true,
+                              .autoderive_labels = true,
+                              .json = false,
+                              .index = std::nullopt},
+                 context);
+  recorder.analysis(AnalysisRequest{.action = AnalysisAction::execute,
+                                    .rule = std::nullopt,
+                                    .rules_file = std::nullopt,
+                                    .export_directory = std::nullopt,
+                                    .index = std::nullopt,
+                                    .jobs = 1},
+                    context);
+
+  require_observation_count(recorder, 2);
+  CHECK(recorder.observations().back().operation == "sidecar.publish");
+  CHECK(recorder.observations().back().fields[1].second == "missing");
+  CHECK_FALSE(recorder.conformant());
+}
+
+TEST_CASE("conformance recorder records an errored analysis artifact as "
+          "corrupt and rejects the trace") {
+  FakeServices fake;
+  fake.index_response =
+      base_envelope("index", Status::Complete, "complete", "current");
+  fake.index_response.artifacts.push_back({.kind = "semantic-index",
+                                           .id = "core-artifact-1",
+                                           .schema_version = 1,
+                                           .catalog_version = 1,
+                                           .catalog_hash = "test-hash",
+                                           .generation = "generation-1"});
+  fake.analysis_response =
+      base_envelope("analysis", Status::Error, "unknown", "unverifiable");
+  fake.analysis_response.artifacts.push_back({.kind = "analysis",
+                                              .id = "corrupt-sidecar",
+                                              .schema_version = 1,
+                                              .catalog_version = 1,
+                                              .catalog_hash = "test-hash",
+                                              .generation = "generation-1"});
+
+  ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
+  ApplicationContext context = test_context();
+  recorder.index(IndexRequest{.action = IndexAction::update,
+                              .files = {},
+                              .source = std::nullopt,
+                              .graph = true,
+                              .autoderive_labels = true,
+                              .json = false,
+                              .index = std::nullopt},
+                 context);
+  recorder.analysis(AnalysisRequest{.action = AnalysisAction::execute,
+                                    .rule = std::nullopt,
+                                    .rules_file = std::nullopt,
+                                    .export_directory = std::nullopt,
+                                    .index = std::nullopt,
+                                    .jobs = 1},
+                    context);
+
+  require_observation_count(recorder, 2);
+  CHECK(recorder.observations().back().operation == "sidecar.publish");
+  CHECK(recorder.observations().back().fields[0].second == "none");
+  CHECK(recorder.observations().back().fields[1].second == "corrupt");
+  CHECK(recorder.observations().back().fields[2].second == "corrupt");
+  CHECK(recorder.observations().back().fields[3].second == "false");
   CHECK_FALSE(recorder.conformant());
 }
 

@@ -52,11 +52,20 @@ ROOT="$REPO_ROOT/spec/tla"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-gate-selection.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-mkdir -p "$WORK/spec/tla/tools"
+mkdir -p "$WORK/spec/tla/tools" "$WORK/spec/tla/models" "$WORK/.github"
 cp "$ROOT/ci-dependency-map.json" "$WORK/spec/tla/ci-dependency-map.json"
+cp "$ROOT/manifest.json" "$WORK/spec/tla/manifest.json"
+cp "$ROOT/POLICY.md" "$WORK/spec/tla/POLICY.md"
+cp "$ROOT/ASSURANCE.md" "$WORK/spec/tla/ASSURANCE.md"
+cp "$ROOT/models"/*.cfg "$WORK/spec/tla/models/"
+cp "$ROOT/tools/check.sh" "$WORK/spec/tla/tools/check.sh"
 cp "$ROOT/tools/select-changed-gates.sh" "$WORK/spec/tla/tools/select-changed-gates.sh"
+cp "$ROOT/tools/check-policy.sh" "$WORK/spec/tla/tools/check-policy.sh"
+cp "$ROOT/tools/validate-manifest.py" "$WORK/spec/tla/tools/validate-manifest.py"
+cp "$REPO_ROOT/.github/CODEOWNERS" "$WORK/.github/CODEOWNERS"
 chmod +x "$WORK/spec/tla/tools/select-changed-gates.sh"
 SELECTOR="$WORK/spec/tla/tools/select-changed-gates.sh"
+POLICY_CHECK="$WORK/spec/tla/tools/check-policy.sh"
 
 git -C "$WORK" init --quiet --initial-branch=main
 git -C "$WORK" config user.email "test@example.com"
@@ -142,5 +151,154 @@ run_case mapped-path-stays-narrow \
   "tla_policy" \
   "tla_syntax_and_model,tla_proofs,tla_conformance,tla_sidecar_conformance,cpp_default" \
   ".github/CODEOWNERS"
+
+# The manifest controls the complete model/proof/conformance inventory, so a
+# valid edit must conservatively select every gate rather than policy alone.
+git -C "$WORK" checkout --quiet -B case-manifest-runs-every-gate main
+python3 - "$WORK/spec/tla/manifest.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+manifest = json.loads(path.read_text())
+manifest["normativeBoundary"] += " Regression-test edit."
+path.write_text(json.dumps(manifest, indent=2) + "\n")
+PY
+git -C "$WORK" add spec/tla/manifest.json
+git -C "$WORK" commit --quiet -m case-manifest-runs-every-gate
+manifest_output="$("$SELECTOR" main case-manifest-runs-every-gate)"
+for gate in \
+  tla_syntax_and_model \
+  tla_proofs \
+  tla_conformance \
+  tla_sidecar_conformance \
+  tla_policy \
+  cpp_default; do
+  if ! grep -q "^run_${gate}=true$" <<<"$manifest_output"; then
+    echo "TLA_GATE_SELECTION_STATUS=FAIL case=manifest-runs-every-gate reason=missing-true-$gate" >&2
+    printf '%s\n' "$manifest_output" >&2
+    exit 1
+  fi
+done
+echo "TLA_GATE_SELECTION_STATUS=PASS case=manifest-runs-every-gate"
+git -C "$WORK" checkout --quiet main
+
+# A malformed manifest previously selected only tla-policy, whose checker did
+# not parse the file, so the mutation passed. Both selection and the policy
+# gate must now reject the malformed head manifest before reporting success.
+git -C "$WORK" checkout --quiet -B case-malformed-manifest-fails-closed main
+printf '{ BROKEN\n' >"$WORK/spec/tla/manifest.json"
+git -C "$WORK" add spec/tla/manifest.json
+git -C "$WORK" commit --quiet -m case-malformed-manifest-fails-closed
+if "$SELECTOR" main case-malformed-manifest-fails-closed \
+  >"$WORK/malformed-selector.log" 2>&1; then
+  cat "$WORK/malformed-selector.log" >&2
+  echo "TLA_GATE_SELECTION_STATUS=FAIL case=malformed-manifest reason=selector-passed" >&2
+  exit 1
+fi
+grep -q "TLA_MANIFEST_STATUS=FAIL reason=invalid-json" \
+  "$WORK/malformed-selector.log" \
+  || { cat "$WORK/malformed-selector.log" >&2; exit 1; }
+if "$POLICY_CHECK" >"$WORK/malformed-policy.log" 2>&1; then
+  cat "$WORK/malformed-policy.log" >&2
+  echo "TLA_GATE_SELECTION_STATUS=FAIL case=malformed-manifest reason=policy-passed" >&2
+  exit 1
+fi
+grep -q "TLA_MANIFEST_STATUS=FAIL reason=invalid-json" \
+  "$WORK/malformed-policy.log" \
+  || { cat "$WORK/malformed-policy.log" >&2; exit 1; }
+echo "TLA_GATE_SELECTION_STATUS=PASS case=malformed-manifest-fails-closed"
+git -C "$WORK" checkout --quiet main
+
+# JSON syntax alone is not a schema check. Each case below removes one
+# normative field while keeping the manifest valid JSON, then proves both
+# entry points that trust the validator (selection and policy) fail with the
+# field-specific reason. This makes validate_manifest() itself load-bearing:
+# deleting its call while leaving json.loads() intact no longer passes.
+run_manifest_schema_failure_case() {
+  local name="$1" field_path="$2" expected_reason="$3"
+  local branch="case-manifest-schema-$name"
+  local selector_log="$WORK/manifest-schema-${name}-selector.log"
+  local policy_log="$WORK/manifest-schema-${name}-policy.log"
+
+  git -C "$WORK" checkout --quiet -B "$branch" main
+  python3 - "$WORK/spec/tla/manifest.json" "$field_path" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+parts = sys.argv[2].split(".")
+manifest = json.loads(path.read_text())
+parent = manifest
+for part in parts[:-1]:
+    parent = parent[int(part)] if isinstance(parent, list) else parent[part]
+last = parts[-1]
+if isinstance(parent, list):
+    del parent[int(last)]
+else:
+    del parent[last]
+path.write_text(json.dumps(manifest, indent=2) + "\n")
+PY
+  git -C "$WORK" add spec/tla/manifest.json
+  git -C "$WORK" commit --quiet -m "case-manifest-schema-$name"
+
+  if "$SELECTOR" main "$branch" >"$selector_log" 2>&1; then
+    cat "$selector_log" >&2
+    echo "TLA_GATE_SELECTION_STATUS=FAIL case=manifest-schema-$name reason=selector-passed" >&2
+    exit 1
+  fi
+  grep -Fq "TLA_MANIFEST_STATUS=FAIL reason=$expected_reason" "$selector_log" \
+    || { cat "$selector_log" >&2; exit 1; }
+
+  if "$POLICY_CHECK" >"$policy_log" 2>&1; then
+    cat "$policy_log" >&2
+    echo "TLA_GATE_SELECTION_STATUS=FAIL case=manifest-schema-$name reason=policy-passed" >&2
+    exit 1
+  fi
+  grep -Fq "TLA_MANIFEST_STATUS=FAIL reason=$expected_reason" "$policy_log" \
+    || { cat "$policy_log" >&2; exit 1; }
+
+  echo "TLA_GATE_SELECTION_STATUS=PASS case=manifest-schema-$name"
+  git -C "$WORK" checkout --quiet main
+}
+
+run_manifest_schema_failure_case \
+  missing-normative-boundary \
+  "normativeBoundary" \
+  "manifest.normativeBoundary-is-required"
+run_manifest_schema_failure_case \
+  missing-proof-module \
+  "proofs.0.module" \
+  "proofs[0].module-is-required"
+run_manifest_schema_failure_case \
+  missing-model-config \
+  "models.0.config" \
+  "models[0].config-is-required"
+run_manifest_schema_failure_case \
+  missing-checked-model-invariant \
+  "models.2.invariants.0" \
+  "models[2].invariants-must-match-config"
+run_manifest_schema_failure_case \
+  missing-checked-model-property \
+  "models.2.properties.0" \
+  "models[2].properties-must-match-config"
+run_manifest_schema_failure_case \
+  missing-coverage-modules \
+  "coverage.workspace-and-identity.modules" \
+  "coverage.workspace-and-identity.modules-is-required"
+run_manifest_schema_failure_case \
+  missing-conformance-operations \
+  "conformance.operations" \
+  "conformance.operations-is-required"
+run_manifest_schema_failure_case \
+  missing-counterexample-tool \
+  "counterexampleExport.tool" \
+  "counterexampleExport.tool-is-required"
+run_manifest_schema_failure_case \
+  missing-checked-workspace-model \
+  "models.2" \
+  "models-inventory-mismatch"
 
 echo "TLA_GATE_SELECTION_STATUS=PASS"

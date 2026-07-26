@@ -69,6 +69,7 @@ export interface ResultArtifact {
   schema_version: number;
   catalog_version: number;
   catalog_hash: string;
+  generation?: string;
 }
 
 export interface ReplayInput {

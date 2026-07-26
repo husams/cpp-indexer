@@ -71,6 +71,10 @@ struct ArtifactRef {
   int schema_version = 1;
   int catalog_version = 1;
   std::string catalog_hash;
+  // Shared provenance token for the core index generation this artifact
+  // publishes or derives from. Artifact IDs identify different artifacts and
+  // therefore must not be compared as if they were generation identities.
+  std::optional<std::string> generation;
 };
 
 struct ReplayInput {

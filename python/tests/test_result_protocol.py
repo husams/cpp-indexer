@@ -92,6 +92,26 @@ def test_error_truncated_golden_is_byte_identical_and_schema_valid() -> None:
     validate_json_schema(serialized, schema, "error-truncated-envelope")
 
 
+def test_artifact_generation_is_optional_nonempty_and_strictly_schema_valid() -> None:
+    serialized = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    artifact = serialized["artifacts"][0]
+
+    validate_json_schema(serialized, schema, "result-envelope")
+
+    artifact["generation"] = "generation-7"
+    validate_json_schema(serialized, schema, "result-envelope")
+
+    artifact["generation"] = ""
+    with pytest.raises(SystemExit, match="shorter than minimum length"):
+        validate_json_schema(serialized, schema, "result-envelope")
+
+    del artifact["generation"]
+    artifact["unexpected"] = "value"
+    with pytest.raises(SystemExit, match="unexpected properties"):
+        validate_json_schema(serialized, schema, "result-envelope")
+
+
 def test_query_result_adapter_preserves_stale_and_truncated_semantics() -> None:
     db = Storage(":memory:")
     result = Executor(db).run((start(codebase()) | nodes()).plan)

@@ -33,7 +33,39 @@
 # unedited assertions are what actually validate the PR's (head) map.
 /spec/tla/tools/check-gate-selection.sh @husams
 /spec/tla/tools/check-gate-selection-defense-regression.sh @husams
+/spec/tla/tools/validate-manifest.py @husams
 /spec/tla/ci-dependency-map.json @husams
+# HSE-89 internal-critic P1 (round 5): the scripts that ENFORCE the actual
+# formal-verification results -- TLC model checking, TLAPS proofs,
+# conformance/sidecar-conformance replay, and the counterexample-export
+# pipeline -- were themselves unprotected, even though the meta-scripts that
+# police gate SELECTION and review APPROVAL were already fixed in prior
+# rounds. A PR could weaken a protected invariant and replace one of these
+# with a stub that exits 0 in the same commit. check.sh,
+# check-conformance.sh, check-sidecar-conformance.sh, and check-proofs.sh are
+# additionally pinned-to-base in verification.yml (mirroring
+# check-protected-review.sh and check-gate-selection.sh); check-regression.sh
+# and export-counterexample.sh are self-tests of those pinned checkers and
+# rely on this CODEOWNERS entry as their protection.
+/spec/tla/tools/check.sh @husams
+/spec/tla/tools/check-regression.sh @husams
+/spec/tla/tools/check-conformance.sh @husams
+/spec/tla/tools/check-sidecar-conformance.sh @husams
+/spec/tla/tools/check-proofs.sh @husams
+/spec/tla/tools/export-counterexample.sh @husams
+/spec/tla/tools/check-verification-tamper-regression.sh @husams
+# HSE-89 round-6 security fix: extract-trusted-checker.sh is the single
+# shared implementation every base-pinning extraction step in
+# verification.yml now calls (except check-protected-review.sh, which stays
+# unconditional and hand-written on purpose -- see its own workflow
+# comment). It decides, for every OTHER pinned checker, whether the base
+# commit resolves at all and whether a missing path is genuine
+# first-introduction versus an unresolvable ref; a PR that could edit it
+# unreviewed could make every one of those checkers' bootstrap fallbacks
+# degrade silently to head. It is itself always invoked straight from head
+# (there is no lower layer left to extract it from), so CODEOWNERS review is
+# its only protection, same as select-changed-gates.sh below.
+/spec/tla/tools/extract-trusted-checker.sh @husams
 # HSE-89 critic finding: the workflow file itself was unprotected -- a PR
 # could remove or defang the tla-protected-diff-review job (or what it
 # extracts/executes) and nothing would flag it as needing review. Known

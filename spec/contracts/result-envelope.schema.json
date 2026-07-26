@@ -856,6 +856,11 @@
           "catalog_hash": {
             "type": "string",
             "x-maxUtf8Bytes": 4096
+          },
+          "generation": {
+            "type": "string",
+            "x-maxUtf8Bytes": 4096,
+            "minLength": 1
           }
         }
       }

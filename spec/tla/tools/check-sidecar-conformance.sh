@@ -6,9 +6,22 @@
 # sidecar publication is the third named conformance flow in HSE-89's
 # acceptance criteria and does not live in CidxBehavior's coverage.
 
+#
+# HSE-89 internal-critic P1 (round 5): verification.yml extracts this script
+# from GITHUB_BASE_SHA for pull_request events and runs THAT copy rather than
+# the PR's own checkout, exactly as it already does for
+# check-protected-review.sh and check-gate-selection.sh -- a PR that weakens
+# a protected invariant or a sidecar conformance mapping could otherwise
+# replace this script with a stub that exits 0 in the same commit.
+# CIDX_REPO_ROOT lets that extracted copy -- which no longer lives inside the
+# repository tree -- still resolve ROOT to the real checkout's spec/tla/
+# (this PR's head), so it replays the PR's actual sidecar conformance data,
+# not files relative to its own $RUNNER_TEMP location.
+
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${CIDX_REPO_ROOT:+$CIDX_REPO_ROOT/spec/tla}"
+ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 TOOLS_VERSION="1.8.0"
 TOOLS_URL="https://github.com/tlaplus/tlaplus/releases/download/v${TOOLS_VERSION}/tla2tools.jar"
 TOOLS_SHA256="cc4803dce2a8ffaf0f5920a9dc39df4b5ee34ab4cb53fb58ac557277a7e516b3"

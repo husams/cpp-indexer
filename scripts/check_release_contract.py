@@ -70,6 +70,10 @@ def validate_json_schema(value: object, schema: dict, path: str = "$") -> None:
         fail(f"{path} must be a {schema['type']}")
     if "minimum" in schema and value < schema["minimum"]:
         fail(f"{path} is below minimum {schema['minimum']}")
+    if "minLength" in schema and (
+        not isinstance(value, str) or len(value) < schema["minLength"]
+    ):
+        fail(f"{path} is shorter than minimum length {schema['minLength']}")
     if "pattern" in schema and (
         not isinstance(value, str) or re.fullmatch(schema["pattern"], value) is None
     ):

@@ -61,8 +61,17 @@ std::string derive_publication_state(const std::string &index_state) {
   return "stale";
 }
 
+const protocol::ArtifactRef *
+core_index_artifact(const protocol::ResultEnvelope &envelope) {
+  const auto artifact =
+      std::ranges::find_if(envelope.artifacts, [](const auto &candidate) {
+        return candidate.kind == "semantic-index";
+      });
+  return artifact == envelope.artifacts.end() ? nullptr : &*artifact;
+}
+
 std::string derive_artifact_state(const protocol::ResultEnvelope &envelope) {
-  return envelope.artifacts.empty() ? "none" : "published";
+  return core_index_artifact(envelope) == nullptr ? "none" : "published";
 }
 
 // sidecarQuality/sidecarValidated mirror PrepareSidecarArtifact's own
@@ -87,11 +96,10 @@ std::string derive_sidecar_quality(const protocol::ResultEnvelope &envelope) {
 // not any nonempty artifact list. Checking `!artifacts.empty()` alone (as an
 // earlier version of this recorder did) would accept a claimed publish
 // backed by an unrelated artifact kind and an unrelated catalog, discarding
-// generation identity/catalog provenance entirely -- exactly the shape a
-// seeded defect would produce. identity.index stands in for
-// CidxStorageLifecycle's `sidecarGeneration = currentGeneration`
-// precondition: it is the one generation-identifying field ResultEnvelope
-// actually carries end to end, alongside the artifact's own catalog_hash.
+// generation provenance entirely -- exactly the shape a seeded defect would
+// produce. ArtifactRef::generation carries the shared core-generation token;
+// identity.index and catalog_hash are secondary checks because both can remain
+// stable across multiple publications.
 bool sidecar_artifact_matches_published_generation(
     const protocol::ResultEnvelope &envelope,
     const std::optional<ConformanceRecorder::PublishedGeneration>
@@ -100,7 +108,10 @@ bool sidecar_artifact_matches_published_generation(
     return false;
   }
   const protocol::ArtifactRef &artifact = envelope.artifacts.front();
-  return artifact.kind == "analysis" && !artifact.catalog_hash.empty() &&
+  return artifact.kind == "analysis" && artifact.generation.has_value() &&
+         !artifact.generation->empty() &&
+         *artifact.generation == published_generation->generation &&
+         !artifact.catalog_hash.empty() &&
          artifact.catalog_hash == published_generation->catalog_hash &&
          envelope.identity.index == published_generation->identity_index;
 }
@@ -152,16 +163,17 @@ ConformanceRecorder::index(const IndexRequest &request,
                      {"publicationState", publication_state},
                      {"artifactState", artifact_state}},
       });
-      // Record the generation a later sidecar.publish must tie back to --
-      // see PublishedGeneration's declaration for why identity.index +
-      // catalog_hash are the two fields used. An index.publish with no
-      // artifact at all (artifact_state == "none") still overwrites this
-      // with an empty catalog_hash, so no subsequent sidecar can spuriously
-      // match it.
+      // Record the generation a later sidecar.publish must tie back to. An
+      // index.publish with no artifact or no explicit generation provenance
+      // still overwrites this with empty values, so a subsequent sidecar
+      // cannot spuriously match an earlier generation.
+      const protocol::ArtifactRef *artifact = core_index_artifact(envelope);
       last_published_generation_ = PublishedGeneration{
-          .catalog_hash = envelope.artifacts.empty()
-                              ? std::string()
-                              : envelope.artifacts.front().catalog_hash,
+          .generation = artifact == nullptr
+                            ? std::string()
+                            : artifact->generation.value_or(std::string()),
+          .catalog_hash =
+              artifact == nullptr ? std::string() : artifact->catalog_hash,
           .identity_index = envelope.identity.index,
       };
     } else if (index_state == "stale") {
@@ -192,26 +204,25 @@ protocol::ResultEnvelope
 ConformanceRecorder::query(const QueryRequest &request,
                            ApplicationContext &context) const {
   protocol::ResultEnvelope envelope = delegate_.query(request, context);
-  if (envelope.status != protocol::Status::Error) {
-    // CidxProtected.ReadOnlyQueries(queryWrites) == queryWrites = 0.
-    // ResultEnvelope carries no write counter, so the observable proxy is
-    // whether the context this call executed under has ANY write port
-    // wired at all: DefaultApplicationServices::query() never references
-    // write_ports(), so a correctly-scoped read-only context has none, and
-    // a query executed with write capability present is exactly the seeded
-    // "query write" defect this check exists to reject.
-    const auto &write_ports = context.write_ports();
-    const bool any_write_port =
-        write_ports.workspace != nullptr || write_ports.source != nullptr ||
-        write_ports.symbols != nullptr || write_ports.types != nullptr ||
-        write_ports.facts != nullptr || write_ports.definitions != nullptr ||
-        write_ports.includes != nullptr || write_ports.unit_of_work != nullptr;
-    observations_.push_back(ConformanceObservation{
-        .operation = "query.return",
-        .fields = {{"queryState", "complete"},
-                   {"queryWrites", any_write_port ? "1" : "0"}},
-    });
-  }
+  // CidxProtected.ReadOnlyQueries(queryWrites) == queryWrites = 0.
+  // ResultEnvelope carries no write counter, so the observable proxy is
+  // whether the context this call executed under has ANY write port wired at
+  // all. Record the evidence even when the delegate reports an error: dropping
+  // errored calls would erase precisely the write-capability violation this
+  // check is intended to reject.
+  const auto &write_ports = context.write_ports();
+  const bool any_write_port =
+      write_ports.workspace != nullptr || write_ports.source != nullptr ||
+      write_ports.symbols != nullptr || write_ports.types != nullptr ||
+      write_ports.facts != nullptr || write_ports.definitions != nullptr ||
+      write_ports.includes != nullptr || write_ports.unit_of_work != nullptr;
+  observations_.push_back(ConformanceObservation{
+      .operation = "query.return",
+      .fields = {{"queryState", envelope.status == protocol::Status::Error
+                                    ? "error"
+                                    : "complete"},
+                 {"queryWrites", any_write_port ? "1" : "0"}},
+  });
   return envelope;
 }
 
@@ -220,17 +231,27 @@ ConformanceRecorder::analysis(const AnalysisRequest &request,
                               ApplicationContext &context) const {
   protocol::ResultEnvelope envelope = delegate_.analysis(request, context);
   // Only a request whose action can plausibly produce a derived sidecar
-  // artifact is a publish attempt at all -- `list` never is. The label is
-  // derived from what was asked for and whether the call reported an
-  // outright error; sidecarFilePublication/sidecarState are derived
-  // independently from the artifact list, so a claimed publish with no
-  // artifact is a real, catchable mismatch rather than a tautology.
-  const bool publish_attempt =
-      (request.action == AnalysisAction::execute ||
-       request.action == AnalysisAction::export_facts) &&
-      envelope.status != protocol::Status::Error;
+  // artifact is in scope -- `list` never is. Error results remain observable:
+  // a failed attempt with no artifact maps to sidecar.missing, while a failed
+  // attempt that returned an artifact maps to sidecar.corrupt.
+  const bool publish_attempt = (request.action == AnalysisAction::execute ||
+                                request.action == AnalysisAction::export_facts);
   if (publish_attempt) {
     const std::string sidecar_quality = derive_sidecar_quality(envelope);
+    if (envelope.status == protocol::Status::Error) {
+      const bool artifact_present = !envelope.artifacts.empty();
+      observations_.push_back(ConformanceObservation{
+          .operation = "sidecar.publish",
+          .fields =
+              {
+                  {"sidecarFilePublication", "none"},
+                  {"sidecarState", artifact_present ? "corrupt" : "missing"},
+                  {"sidecarQuality", "corrupt"},
+                  {"sidecarValidated", "false"},
+              },
+      });
+      return envelope;
+    }
     const bool published =
         has_valid_sidecar_artifact(envelope, last_published_generation_);
     observations_.push_back(ConformanceObservation{

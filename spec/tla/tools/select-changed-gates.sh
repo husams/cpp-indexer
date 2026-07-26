@@ -16,6 +16,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MAP="$ROOT/ci-dependency-map.json"
+TLA_MANIFEST="$ROOT/manifest.json"
+MANIFEST_VALIDATOR="$ROOT/tools/validate-manifest.py"
 
 if [[ "${1:-}" == "--all" ]]; then
   MODE="all"
@@ -27,6 +29,12 @@ else
 fi
 
 OUT="${GITHUB_OUTPUT:-/dev/stdout}"
+
+# The manifest defines which models, proofs, conformance mappings, and
+# counterexample regressions these gates exercise. Validate the head copy
+# before selecting anything so a malformed or structurally incomplete
+# manifest can never narrow CI to a policy-only success.
+python3 "$MANIFEST_VALIDATOR" "$TLA_MANIFEST" >&2
 
 if [[ "$MODE" == "all" ]]; then
   python3 - "$MAP" <<'PY' >>"$OUT"
@@ -68,11 +76,16 @@ for path in changed:
     else:
         unmapped.append(path)
 
+# The TLA+ manifest controls every formal-verification gate. Any edit to it
+# therefore selects the complete gate set, even though the file is also part
+# of the policy-and-ownership flow.
+manifest_changed = "spec/tla/manifest.json" in changed
+
 # Conservative fallback (fail closed): a changed path this map does not
 # recognize -- an ordinary new src/*.cpp file, the workflow file itself, the
 # dependency map itself, CMakeLists.txt, or simply no changed files at all --
 # must not silently disable every gate. Run everything rather than guess.
-fallback = bool(unmapped) or not changed
+fallback = bool(unmapped) or not changed or manifest_changed
 if fallback:
     required_gates = set(all_gates)
 
@@ -83,6 +96,7 @@ for gate in manifest["allGates"]:
 print(
     "TLA_GATE_SELECTION_STATUS=PASS "
     f"changed={len(changed)} unmapped={len(unmapped)} fallback={fallback} "
+    f"manifest_changed={manifest_changed} "
     f"required={','.join(sorted(required_gates)) or 'none'}",
     file=sys.stderr,
 )

@@ -12,10 +12,21 @@
 # on first install, but no JVM.  A syntax/model failure here is reported
 # distinctly from a TLC model failure, a conformance mismatch, or a C++ test
 # failure, per the CI-outcome contract in ../README.md.
+#
+# HSE-89 internal-critic P1 (round 5): verification.yml extracts this script
+# from GITHUB_BASE_SHA for pull_request events and runs THAT copy rather than
+# the PR's own checkout, exactly as it already does for
+# check-protected-review.sh and check-gate-selection.sh -- a PR that weakens
+# a proof obligation could otherwise replace this script with a stub that
+# exits 0 in the same commit. CIDX_REPO_ROOT lets that extracted copy -- which
+# no longer lives inside the repository tree -- still resolve ROOT to the
+# real checkout's spec/tla/ (this PR's head), so it checks the PR's actual
+# modules/proofs, not files relative to its own $RUNNER_TEMP location.
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${CIDX_REPO_ROOT:+$CIDX_REPO_ROOT/spec/tla}"
+ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 MODULE_DIR="${TLA_MODULE_DIR:-$ROOT/modules}"
 PROOF_DIR="${TLA_PROOF_DIR:-$ROOT/proofs}"
 TOOLS_VERSION="1.5.0"

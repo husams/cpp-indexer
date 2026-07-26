@@ -35,10 +35,29 @@
 # reports zero reviews, which is sufficient to prove the fail-closed
 # behavior in (2). check-protected-review.sh's own env/argument contract,
 # CODEOWNERS-matching, and manifest-matching code is exercised unmodified.
+#
+# P2 fix (internal-critic review, round 5): this script is CODEOWNERS-
+# protected, but a PR that edited both ci-dependency-map.json and this
+# script together could previously make this self-test's own "known good"
+# fixtures self-consistent with the tampering (fixtures were `cp`-ed from the
+# checked-out working tree, i.e. the PR's own head, not from an
+# independently-trusted commit) -- the same assurance gap already closed for
+# check-gate-selection.sh's DATA (as opposed to its LOGIC; see that script's
+# own "Judgement call" comment on why its data intentionally stays at head).
+# Unlike check-gate-selection.sh, this script's whole job is to prove the
+# defense mechanism itself still works, independent of whatever the PR under
+# test did -- so its fixtures should come from a fixed, trusted reference,
+# not from head. When CIDX_FIXTURE_REF is set (verification.yml sets it to
+# GITHUB_BASE_SHA for pull_request events, alongside extracting this script
+# itself from the same base commit), fixtures are read via `git show
+# $CIDX_FIXTURE_REF:<path>` instead of `cp` from the working tree, so a
+# same-commit edit to both files can no longer make the self-test green.
+# Default (unset, e.g. push events or local runs): unchanged `cp`-from-
+# working-tree behavior.
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+REPO_ROOT="${CIDX_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-gate-selection-defense.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -47,14 +66,37 @@ die() {
   exit 1
 }
 
+fetch_fixture() {
+  local rel="$1" dest="$2"
+  if [[ -n "${CIDX_FIXTURE_REF:-}" ]]; then
+    git -C "$REPO_ROOT" show "${CIDX_FIXTURE_REF}:${rel}" >"$dest"
+  else
+    cp "$REPO_ROOT/$rel" "$dest"
+  fi
+}
+
 REPO="$WORK/repo"
-mkdir -p "$REPO/spec/tla/tools" "$REPO/.github"
-cp "$REPO_ROOT/spec/tla/manifest.json" "$REPO/spec/tla/manifest.json"
-cp "$REPO_ROOT/.github/CODEOWNERS" "$REPO/.github/CODEOWNERS"
-cp "$REPO_ROOT/spec/tla/ci-dependency-map.json" "$REPO/spec/tla/ci-dependency-map.json"
-cp "$REPO_ROOT/spec/tla/tools/check-gate-selection.sh" "$REPO/spec/tla/tools/check-gate-selection.sh"
-cp "$REPO_ROOT/spec/tla/tools/select-changed-gates.sh" "$REPO/spec/tla/tools/select-changed-gates.sh"
-cp "$REPO_ROOT/spec/tla/tools/check-protected-review.sh" "$REPO/spec/tla/tools/check-protected-review.sh"
+mkdir -p "$REPO/spec/tla/tools" "$REPO/spec/tla/models" "$REPO/.github"
+fetch_fixture spec/tla/manifest.json "$REPO/spec/tla/manifest.json"
+fetch_fixture spec/tla/POLICY.md "$REPO/spec/tla/POLICY.md"
+fetch_fixture spec/tla/ASSURANCE.md "$REPO/spec/tla/ASSURANCE.md"
+fetch_fixture .github/CODEOWNERS "$REPO/.github/CODEOWNERS"
+fetch_fixture spec/tla/ci-dependency-map.json "$REPO/spec/tla/ci-dependency-map.json"
+fetch_fixture spec/tla/tools/check-gate-selection.sh "$REPO/spec/tla/tools/check-gate-selection.sh"
+fetch_fixture spec/tla/tools/check-policy.sh "$REPO/spec/tla/tools/check-policy.sh"
+fetch_fixture spec/tla/tools/select-changed-gates.sh "$REPO/spec/tla/tools/select-changed-gates.sh"
+fetch_fixture spec/tla/tools/check-protected-review.sh "$REPO/spec/tla/tools/check-protected-review.sh"
+fetch_fixture spec/tla/tools/validate-manifest.py "$REPO/spec/tla/tools/validate-manifest.py"
+fetch_fixture spec/tla/tools/check.sh "$REPO/spec/tla/tools/check.sh"
+for model in \
+  CidxRepositorySmoke \
+  CidxResultSmoke \
+  CidxWorkspaceLifecycleSmoke \
+  CidxBehaviorSmoke \
+  CidxSemanticGraphSmoke \
+  CidxStorageLifecycleSmoke; do
+  fetch_fixture "spec/tla/models/${model}.cfg" "$REPO/spec/tla/models/${model}.cfg"
+done
 chmod +x "$REPO"/spec/tla/tools/*.sh
 
 git -C "$REPO" init --quiet --initial-branch=main
@@ -146,9 +188,72 @@ FAKE_BIN="$WORK/fake-bin"
 mkdir -p "$FAKE_BIN"
 cat >"$FAKE_BIN/curl" <<'SH'
 #!/usr/bin/env bash
-# Stand-in for the GitHub reviews API: reports zero reviews. No network
-# access or GITHUB_TOKEN is exercised or required by this local regression.
-echo "[]"
+# Stand-in for the GitHub reviews API. No network access or real token is
+# exercised by this local regression.
+url=""
+for argument in "$@"; do
+  case "$argument" in
+    https://*) url="$argument" ;;
+  esac
+done
+[[ -n "$url" ]] || exit 2
+page="${url##*page=}"
+if [[ -n "${CIDX_FAKE_CURL_LOG:-}" ]]; then
+  printf '%s\n' "$url" >>"$CIDX_FAKE_CURL_LOG"
+fi
+
+case "${CIDX_FAKE_REVIEWS_MODE:-empty}" in
+  api-error) exit 22 ;;
+  invalid-json)
+    echo "{ invalid"
+    exit 0
+    ;;
+  empty)
+    echo "[]"
+    exit 0
+    ;;
+  pagination) ;;
+  *) exit 2 ;;
+esac
+
+python3 - "$page" <<'PY'
+import json
+import os
+import sys
+
+page = int(sys.argv[1])
+head = os.environ["GITHUB_HEAD_SHA"]
+if page == 1:
+    reviews = [
+        {
+            "id": review_id,
+            "state": "COMMENTED",
+            "commit_id": head,
+            "user": {"login": "reviewer"},
+        }
+        for review_id in range(1, 100)
+    ]
+    reviews.append(
+        {
+            "id": 100,
+            "state": "APPROVED",
+            "commit_id": head,
+            "user": {"login": "husams"},
+        }
+    )
+elif page == 2:
+    reviews = [
+        {
+            "id": 101,
+            "state": "CHANGES_REQUESTED",
+            "commit_id": head,
+            "user": {"login": "husams"},
+        }
+    ]
+else:
+    reviews = []
+print(json.dumps(reviews))
+PY
 SH
 chmod +x "$FAKE_BIN/curl"
 
@@ -173,5 +278,63 @@ grep -q "spec/tla/ci-dependency-map.json" "$WORK/protected-review.log" \
 grep -q "spec/tla/tools/check-gate-selection.sh" "$WORK/protected-review.log" \
   || { cat "$WORK/protected-review.log" >&2; die "check-gate-selection.sh-not-flagged-as-protected"; }
 echo "TLA_GATE_SELECTION_DEFENSE_STATUS=PASS check=protected-review-blocks-merge-without-codeowner-approval"
+
+# --- Test 3: a superseding decision beyond GitHub's 100-review page is
+# included before approval state is reduced. Page 1 ends with an approval of
+# the current head; page 2 revokes it. A one-page implementation incorrectly
+# passes this exact case.
+
+: >"$WORK/fake-curl.log"
+set +e
+PATH="$FAKE_BIN:$PATH" \
+  CIDX_FAKE_REVIEWS_MODE=pagination \
+  CIDX_FAKE_CURL_LOG="$WORK/fake-curl.log" \
+  GITHUB_TOKEN=fake-token \
+  GITHUB_REPOSITORY=cidx-test/cidx-test \
+  GITHUB_PR_NUMBER=1 \
+  GITHUB_BASE_SHA="$BASE_SHA" \
+  GITHUB_HEAD_SHA="$HEAD_SHA" \
+  CIDX_REPO_ROOT="$REPO" \
+  "$WORK/base-check-protected-review.sh" >"$WORK/paginated-review.log" 2>&1
+paginated_review_status=$?
+set -e
+
+[[ "$paginated_review_status" -ne 0 ]] \
+  || { cat "$WORK/paginated-review.log" >&2; die "protected-review-ignored-page-2-superseding-decision"; }
+grep -q "no-codeowner-approval-of-head-sha-for-paths" "$WORK/paginated-review.log" \
+  || { cat "$WORK/paginated-review.log" >&2; die "unexpected-paginated-review-failure-mode"; }
+grep -q "per_page=100&page=1" "$WORK/fake-curl.log" \
+  || { cat "$WORK/fake-curl.log" >&2; die "reviews-page-1-not-requested"; }
+grep -q "per_page=100&page=2" "$WORK/fake-curl.log" \
+  || { cat "$WORK/fake-curl.log" >&2; die "reviews-page-2-not-requested"; }
+echo "TLA_GATE_SELECTION_DEFENSE_STATUS=PASS check=protected-review-reduces-superseding-decision-after-page-100"
+
+# --- Test 4: every API page fails closed on transport/HTTP errors and on a
+# successful HTTP response that is not a JSON review array.
+
+run_reviews_failure_case() {
+  local mode="$1" expected_reason="$2"
+  set +e
+  PATH="$FAKE_BIN:$PATH" \
+    CIDX_FAKE_REVIEWS_MODE="$mode" \
+    GITHUB_TOKEN=fake-token \
+    GITHUB_REPOSITORY=cidx-test/cidx-test \
+    GITHUB_PR_NUMBER=1 \
+    GITHUB_BASE_SHA="$BASE_SHA" \
+    GITHUB_HEAD_SHA="$HEAD_SHA" \
+    CIDX_REPO_ROOT="$REPO" \
+    "$WORK/base-check-protected-review.sh" \
+    >"$WORK/reviews-failure-${mode}.log" 2>&1
+  local status=$?
+  set -e
+  [[ "$status" -ne 0 ]] \
+    || { cat "$WORK/reviews-failure-${mode}.log" >&2; die "reviews-${mode}-passed"; }
+  grep -q "$expected_reason" "$WORK/reviews-failure-${mode}.log" \
+    || { cat "$WORK/reviews-failure-${mode}.log" >&2; die "reviews-${mode}-unexpected-failure"; }
+  echo "TLA_GATE_SELECTION_DEFENSE_STATUS=PASS check=protected-review-${mode}-fails-closed"
+}
+
+run_reviews_failure_case api-error "reviews-api-page-1-unreadable"
+run_reviews_failure_case invalid-json "reviews-api-page-1-invalid-json"
 
 echo "TLA_GATE_SELECTION_DEFENSE_REGRESSION_STATUS=PASS"
