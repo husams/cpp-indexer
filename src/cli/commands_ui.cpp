@@ -93,7 +93,7 @@ int bounded_depth(std::string_view value) {
 }
 
 int bounded_int(std::string_view value, int lo, int hi,
-               std::string_view field) {
+                std::string_view field) {
   int parsed = 0;
   const auto [end, error] =
       std::from_chars(value.data(), value.data() + value.size(), parsed);
@@ -232,10 +232,12 @@ struct LiveGraphProvider {
   ui::GraphViewRequest base_request;
 
   std::optional<std::string>
-  operator()(std::string_view target) const noexcept {
+  operator()(std::string_view target,
+             const ui::CancelToken &should_cancel) const noexcept {
     try {
       const ui::GraphViewRequest request = live_request(base_request, target);
-      return json_out::dumps_indent2(ui::build_graph_view(*db, request));
+      return json_out::dumps_indent2(
+          ui::build_graph_view(*db, request, should_cancel));
     } catch (const std::exception &) {
       return std::nullopt;
     }
@@ -247,7 +249,9 @@ struct LiveSearchProvider {
   std::optional<std::string> workspace;
 
   std::optional<std::string>
-  operator()(std::string_view target) const noexcept {
+  operator()(std::string_view target,
+             const ui::CancelToken &should_cancel) const noexcept {
+    (void)should_cancel; // bounded by `limit`; not worth a checkpoint here.
     try {
       const auto text = query_parameter(target, "q");
       if (!text || text->empty()) {
@@ -271,7 +275,9 @@ struct LiveEvidenceProvider {
   std::optional<std::string> workspace;
 
   std::optional<std::string>
-  operator()(std::string_view target) const noexcept {
+  operator()(std::string_view target,
+             const ui::CancelToken &should_cancel) const noexcept {
+    (void)should_cancel; // bounded by `site_limit`; not worth a checkpoint.
     try {
       const auto edge_id = query_parameter(target, "edge");
       if (!edge_id || edge_id->empty()) {

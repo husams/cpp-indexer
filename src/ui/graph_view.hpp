@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <exception>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -70,11 +72,15 @@ struct GraphViewRequest {
 
   // HSE-92 live-explorer filters. All optional/empty by default so existing
   // CLI/offline-export callers (HSE-90/HSE-91) are unaffected byte-for-byte.
-  std::optional<std::vector<std::string>> node_kinds;   // symbol/entity/type kind
-  std::optional<std::vector<std::string>> files;        // redacted file path membership
-  std::optional<std::vector<std::string>> components;   // Sym::component membership
-  std::optional<std::vector<std::string>> repositories; // resolved repository name
-  std::optional<std::string> status_filter; // resolved|unresolved|external|internal|stub
+  std::optional<std::vector<std::string>> node_kinds; // symbol/entity/type kind
+  std::optional<std::vector<std::string>>
+      files; // redacted file path membership
+  std::optional<std::vector<std::string>>
+      components; // Sym::component membership
+  std::optional<std::vector<std::string>>
+      repositories; // resolved repository name
+  std::optional<std::string>
+      status_filter; // resolved|unresolved|external|internal|stub
   std::optional<std::string>
       applicability_filter; // universal|conditional (edge site aggregate)
 
@@ -84,9 +90,33 @@ struct GraphViewRequest {
   std::optional<std::string> continuation;
 };
 
+// Thrown when a build_graph_view() call is abandoned mid-flight because its
+// caller-supplied cancellation check reported the request should stop (the
+// owning client disconnected, or the server is shutting down). Every caller
+// already handles arbitrary std::exception from build_graph_view(), so this
+// unwinds safely without any special handling; it exists as a distinct type
+// only so a caller that DOES care can tell "cancelled" apart from "invalid
+// input"/"index error".
+class GraphViewCancelled : public std::exception {
+public:
+  [[nodiscard]] const char *what() const noexcept override {
+    return "graph view request cancelled";
+  }
+};
+
 // Build the portable, renderer-independent GraphView contract. The browser
 // receives this value; it never receives a Storage or SQL handle.
-json_out::Value build_graph_view(Storage &db, const GraphViewRequest &request);
+//
+// `should_cancel`, when set, is polled at coarse checkpoints inside the
+// node/edge assembly loops -- the only place a single call can realistically
+// do enough work to be worth interrupting mid-flight (the underlying SQL
+// query itself is a single bounded round trip, not a loop this function
+// controls). Defaults to never-cancelled, so the CLI/offline-export callers
+// (HSE-90/HSE-91), which have no notion of an abandoned client, are
+// completely unaffected.
+json_out::Value
+build_graph_view(Storage &db, const GraphViewRequest &request,
+                 const std::function<bool()> &should_cancel = {});
 
 // A bounded, ranked list of typed search candidates for a free-text query.
 // Used by the live explorer's search operation to resolve a name to a

@@ -611,6 +611,17 @@ SqliteStorageService::edge_sites_one(int64_t edge_id, int limit) {
   return out;
 }
 
+bool SqliteStorageService::edge_has_conditional_site(int64_t edge_id) {
+  auto st = db_.prepare(
+      "SELECT EXISTS(SELECT 1 FROM edge_site WHERE edge_id = ? AND "
+      "conditional != 0)");
+  st.bind(1, edge_id);
+  if (!st.step()) {
+    return false;
+  }
+  return st.col_int64(0) != 0;
+}
+
 // -- labels (v14) ------------------------------------------------------------
 
 int64_t SqliteStorageService::add_label(const std::string &name,

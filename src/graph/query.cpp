@@ -422,6 +422,10 @@ std::vector<Site> GraphQuery::sites(int64_t edge_id, int limit) {
   return out;
 }
 
+bool GraphQuery::edge_conditional(int64_t edge_id) {
+  return db_.edge_has_conditional_site(edge_id);
+}
+
 std::map<int64_t, std::vector<Site>>
 GraphQuery::sites_for(const std::vector<int64_t> &edge_ids) {
   auto raw_map = db_.edge_sites_for(edge_ids);

@@ -13,8 +13,16 @@ struct ServerOptions {
   bool launch_browser = true;
 };
 
-using GraphProvider =
-    std::function<std::optional<std::string>(std::string_view target)>;
+// Cooperative cancellation: `true` once the request that owns this token
+// should stop -- because its client disconnected, or because the server is
+// shutting down. A provider with a long-running loop should poll it at
+// reasonable checkpoints and bail out early; a provider that never checks it
+// simply keeps running to completion (or until the process itself exits),
+// exactly as before this existed.
+using CancelToken = std::function<bool()>;
+
+using GraphProvider = std::function<std::optional<std::string>(
+    std::string_view target, const CancelToken &should_cancel)>;
 
 // Serve a GraphView snapshot and bounded live slices over loopback until
 // interrupted (Ctrl+C) or authenticated-shutdown (`GET /api/shutdown`). Every

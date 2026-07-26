@@ -15,6 +15,7 @@
 #include <future>
 #include <netinet/in.h>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <streambuf>
 #include <string>
@@ -56,7 +57,8 @@ struct Fixture {
   Storage db{":memory:"};
 
   Fixture() {
-    const int64_t component = db.add_component("test", "/tmp/cidx-ui-server-test");
+    const int64_t component =
+        db.add_component("test", "/tmp/cidx-ui-server-test");
     const int64_t directory = db.add_directory(component, "");
     const int64_t file = db.add_file(directory, "main.cpp");
     auto sym_a = symbol("USR::a", "ns::a", "function");
@@ -111,7 +113,8 @@ struct Fixture {
 // error.
 int parse_int(std::string_view text) {
   int value = 0;
-  const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
+  const auto result =
+      std::from_chars(text.data(), text.data() + text.size(), value);
   return result.ec == std::errc{} ? value : 0;
 }
 
@@ -237,21 +240,20 @@ struct RunningServer {
   int port = 0;
   std::string token;
 
-  explicit RunningServer(ui::GraphProvider graph,
-                         ui::GraphProvider search = {},
+  explicit RunningServer(ui::GraphProvider graph, ui::GraphProvider search = {},
                          ui::GraphProvider evidence = {})
       : graph_provider(std::move(graph)), search_provider(std::move(search)),
         evidence_provider(std::move(evidence)) {
     thread = std::thread([this] {
       ui::serve_live(ui::render_html(json_out::Value::obj({}),
                                      ui::RenderMode::LoopbackLive),
-                    graph_provider, search_provider, evidence_provider,
-                    ui::ServerOptions{.port = 0, .launch_browser = false}, out,
-                    err);
+                     graph_provider, search_provider, evidence_provider,
+                     ui::ServerOptions{.port = 0, .launch_browser = false}, out,
+                     err);
     });
     auto future = url_promise.get_future();
     REQUIRE(future.wait_for(std::chrono::seconds(5)) ==
-           std::future_status::ready);
+            std::future_status::ready);
     const std::string url = future.get();
     const std::size_t port_start = url.find("127.0.0.1:") + 10;
     const std::size_t port_end = url.find('/', port_start);
@@ -289,7 +291,8 @@ struct RunningServer {
 };
 
 ui::GraphProvider graph_provider_for(Storage &db) {
-  return [&db](std::string_view target) -> std::optional<std::string> {
+  return [&db](std::string_view target, const ui::CancelToken &should_cancel)
+             -> std::optional<std::string> {
     ui::GraphViewRequest request;
     request.node_budget = 250;
     request.edge_budget = 500;
@@ -299,7 +302,8 @@ ui::GraphProvider graph_provider_for(Storage &db) {
     // also match inside an unrelated longer key (e.g. `param("limit")`
     // wrongly matching the "limit=" tail of "site_limit=0"). Each key must
     // start right after '?' or '&'.
-    const auto param = [&](std::string_view name) -> std::optional<std::string> {
+    const auto param =
+        [&](std::string_view name) -> std::optional<std::string> {
       const std::string needle = std::string(name) + "=";
       std::size_t start = 0;
       while (true) {
@@ -324,8 +328,8 @@ ui::GraphProvider graph_provider_for(Storage &db) {
       request.root = *root;
     }
     if (const auto input = param("input")) {
-      request.input = ui::GraphViewInput{.kind = ui::GraphInputKind::Path,
-                                         .value = *input};
+      request.input =
+          ui::GraphViewInput{.kind = ui::GraphInputKind::Path, .value = *input};
     }
     if (const auto direction = param("direction")) {
       request.direction = *direction;
@@ -352,7 +356,8 @@ ui::GraphProvider graph_provider_for(Storage &db) {
       request.continuation = *continuation;
     }
     try {
-      return json_out::dumps_indent2(ui::build_graph_view(db, request));
+      return json_out::dumps_indent2(
+          ui::build_graph_view(db, request, should_cancel));
     } catch (const std::exception &) {
       return std::nullopt;
     }
@@ -360,7 +365,9 @@ ui::GraphProvider graph_provider_for(Storage &db) {
 }
 
 ui::GraphProvider search_provider_for(Storage &db) {
-  return [&db](std::string_view target) -> std::optional<std::string> {
+  return [&db](std::string_view target, const ui::CancelToken &should_cancel)
+             -> std::optional<std::string> {
+    (void)should_cancel;
     const std::string needle = "q=";
     const std::size_t start = target.find(needle);
     if (start == std::string_view::npos) {
@@ -378,7 +385,9 @@ ui::GraphProvider search_provider_for(Storage &db) {
 }
 
 ui::GraphProvider evidence_provider_for(Storage &db) {
-  return [&db](std::string_view target) -> std::optional<std::string> {
+  return [&db](std::string_view target, const ui::CancelToken &should_cancel)
+             -> std::optional<std::string> {
+    (void)should_cancel;
     const std::string needle = "edge=";
     const std::size_t start = target.find(needle);
     if (start == std::string_view::npos) {
@@ -427,7 +436,7 @@ std::string edge_portable_id_for_kind(const std::string &json,
 TEST_CASE("Live explorer: search resolves a typed candidate list") {
   Fixture fixture;
   RunningServer server(graph_provider_for(fixture.db),
-                      search_provider_for(fixture.db));
+                       search_provider_for(fixture.db));
   const auto response =
       http_get(server.port, "/api/search?token=" + server.token + "&q=ns::a");
   CHECK(response.status == 200);
@@ -438,14 +447,16 @@ TEST_CASE("Live explorer: search resolves a typed candidate list") {
 TEST_CASE("Live explorer: expand out and expand in traverse adjacent edges") {
   Fixture fixture;
   RunningServer server(graph_provider_for(fixture.db));
-  const auto out_response = http_get(
-      server.port, "/api/graph?token=" + server.token + "&root=ns::a&direction=out");
+  const auto out_response =
+      http_get(server.port, "/api/graph?token=" + server.token +
+                                "&root=ns::a&direction=out");
   CHECK(out_response.status == 200);
   CHECK(out_response.body.find("USR::a") != std::string::npos);
   CHECK(out_response.body.find("USR::b") != std::string::npos);
 
-  const auto in_response = http_get(
-      server.port, "/api/graph?token=" + server.token + "&root=ns::b&direction=in");
+  const auto in_response =
+      http_get(server.port,
+               "/api/graph?token=" + server.token + "&root=ns::b&direction=in");
   CHECK(in_response.status == 200);
   CHECK(in_response.body.find("USR::b") != std::string::npos);
   CHECK(in_response.body.find("USR::a") != std::string::npos);
@@ -455,8 +466,7 @@ TEST_CASE("Live explorer: a bounded witness path resolves a -> b -> c") {
   Fixture fixture;
   RunningServer server(graph_provider_for(fixture.db));
   const auto response = http_get(
-      server.port,
-      "/api/graph?token=" + server.token + "&input=ns::a->ns::c");
+      server.port, "/api/graph?token=" + server.token + "&input=ns::a->ns::c");
   CHECK(response.status == 200);
   CHECK(response.body.find("witness-path") != std::string::npos);
   CHECK(response.body.find("USR::a") != std::string::npos);
@@ -468,22 +478,25 @@ TEST_CASE("Live explorer: a bounded witness path resolves a -> b -> c") {
 // previously misnamed "grouping", but it never exercises Cytoscape compound
 // parent assignment -- see web/grouping_dom_test.js for the real grouping
 // coverage, which loads web/app.js and calls applyGrouping() end-to-end).
-TEST_CASE("Live explorer: node_kind filter restricts the result by symbol kind") {
+TEST_CASE(
+    "Live explorer: node_kind filter restricts the result by symbol kind") {
   Fixture fixture;
   RunningServer server(graph_provider_for(fixture.db));
-  const auto response = http_get(server.port, "/api/graph?token=" + server.token +
-                                                  "&root=ns::a&direction=out&node_kind=function");
+  const auto response =
+      http_get(server.port, "/api/graph?token=" + server.token +
+                                "&root=ns::a&direction=out&node_kind=function");
   CHECK(response.status == 200);
   CHECK(response.body.find("USR::b") != std::string::npos);
   CHECK(response.body.find("USR::v") == std::string::npos);
 }
 
 TEST_CASE("Live explorer: a continuation token pages a truncated result "
-         "deterministically") {
+          "deterministically") {
   Fixture fixture;
   RunningServer server(graph_provider_for(fixture.db));
-  const auto first = http_get(server.port, "/api/graph?token=" + server.token +
-                                               "&root=ns::a&direction=out&limit=1");
+  const auto first =
+      http_get(server.port, "/api/graph?token=" + server.token +
+                                "&root=ns::a&direction=out&limit=1");
   CHECK(first.status == 200);
   CHECK(first.body.find(R"("available": true)") != std::string::npos);
   const std::string token_marker = R"("token": ")";
@@ -496,25 +509,26 @@ TEST_CASE("Live explorer: a continuation token pages a truncated result "
       first.body.substr(value_start, value_end - value_start);
   CHECK_FALSE(continuation.empty());
 
-  const auto second =
-      http_get(server.port, "/api/graph?token=" + server.token +
-                                "&root=ns::a&direction=out&limit=1&continuation=" +
-                                continuation);
+  const auto second = http_get(
+      server.port,
+      "/api/graph?token=" + server.token +
+          "&root=ns::a&direction=out&limit=1&continuation=" + continuation);
   CHECK(second.status == 200);
   // Repeating the exact same normalized query+continuation is deterministic.
-  const auto repeat =
-      http_get(server.port, "/api/graph?token=" + server.token +
-                                "&root=ns::a&direction=out&limit=1&continuation=" +
-                                continuation);
+  const auto repeat = http_get(
+      server.port,
+      "/api/graph?token=" + server.token +
+          "&root=ns::a&direction=out&limit=1&continuation=" + continuation);
   CHECK(second.body == repeat.body);
 }
 
 TEST_CASE("Live explorer: a continuation token from a different query is "
-         "rejected") {
+          "rejected") {
   Fixture fixture;
   RunningServer server(graph_provider_for(fixture.db));
-  const auto first = http_get(server.port, "/api/graph?token=" + server.token +
-                                               "&root=ns::a&direction=out&limit=1");
+  const auto first =
+      http_get(server.port, "/api/graph?token=" + server.token +
+                                "&root=ns::a&direction=out&limit=1");
   const std::string token_marker = R"("token": ")";
   const std::size_t token_start = first.body.find(token_marker);
   REQUIRE(token_start != std::string::npos);
@@ -525,20 +539,20 @@ TEST_CASE("Live explorer: a continuation token from a different query is "
 
   // Same token, different root: the provider throws GraphViewError, so
   // build_graph_view's graph_provider catch path answers 400.
-  const auto mismatched =
-      http_get(server.port, "/api/graph?token=" + server.token +
-                                "&root=ns::b&direction=out&limit=1&continuation=" +
-                                continuation);
+  const auto mismatched = http_get(
+      server.port,
+      "/api/graph?token=" + server.token +
+          "&root=ns::b&direction=out&limit=1&continuation=" + continuation);
   CHECK(mismatched.status == 400);
 }
 
 TEST_CASE("Live explorer: a continuation token is rejected when replayed "
-         "under a different filter") {
+          "under a different filter") {
   Fixture fixture;
   RunningServer server(graph_provider_for(fixture.db));
   const auto first = http_get(
       server.port, "/api/graph?token=" + server.token +
-                      "&root=ns::a&direction=out&limit=1&node_kind=function");
+                       "&root=ns::a&direction=out&limit=1&node_kind=function");
   CHECK(first.status == 200);
   const std::string token_marker = R"("token": ")";
   const std::size_t token_start = first.body.find(token_marker);
@@ -555,68 +569,164 @@ TEST_CASE("Live explorer: a continuation token is rejected when replayed "
   // continuation query identity).
   const auto mismatched = http_get(
       server.port, "/api/graph?token=" + server.token +
-                      "&root=ns::a&direction=out&limit=1&node_kind=variable"
-                      "&continuation=" +
-                      continuation);
+                       "&root=ns::a&direction=out&limit=1&node_kind=variable"
+                       "&continuation=" +
+                       continuation);
   CHECK(mismatched.status == 400);
 }
 
-TEST_CASE("Live explorer: a cross-page edge is not dropped when its "
-         "endpoints land on different pages") {
-  Fixture fixture;
-  RunningServer server(graph_provider_for(fixture.db));
-  // depth=1 + node_kind=function narrows the candidate set to exactly {a,
-  // b}, so limit=1 pages through them one at a time; whichever page
-  // delivers "a" as its primary node must also carry the a->b "calls" edge
-  // (with "b" bridged in), even though "b" is not that page's own node.
-  const std::string base =
-      "/api/graph?token=" + server.token +
-      "&root=ns::a&direction=out&depth=1&node_kind=function&limit=1";
-  const auto first = http_get(server.port, base);
-  CHECK(first.status == 200);
-  const std::string token_marker = R"("token": ")";
-  const std::size_t token_start = first.body.find(token_marker);
-  REQUIRE(token_start != std::string::npos);
-  const std::size_t value_start = token_start + token_marker.size();
-  const std::size_t value_end = first.body.find('"', value_start);
-  REQUIRE(value_end != std::string::npos);
-  const std::string continuation =
-      first.body.substr(value_start, value_end - value_start);
-  const auto second =
-      http_get(server.port, base + "&continuation=" + continuation);
-  CHECK(second.status == 200);
+// Counts the node entries actually delivered in THIS page's own "nodes"
+// array (isolated by bracket-depth matching, so the unrelated
+// metadata.root_resolution.candidates[].usr field -- always present once
+// per page for an unambiguous root, regardless of budget -- is never
+// mistaken for a delivered node).
+int count_delivered_nodes(const std::string &body) {
+  const std::string marker = R"("nodes": [)";
+  const std::size_t start = body.find(marker);
+  if (start == std::string::npos) {
+    return 0;
+  }
+  const std::size_t open = start + marker.size() - 1;
+  int depth = 0;
+  std::size_t end = std::string::npos;
+  for (std::size_t i = open; i < body.size(); ++i) {
+    if (body[i] == '[') {
+      ++depth;
+    } else if (body[i] == ']') {
+      --depth;
+      if (depth == 0) {
+        end = i;
+        break;
+      }
+    }
+  }
+  if (end == std::string::npos) {
+    return 0;
+  }
+  const std::string section = body.substr(open, end - open + 1);
+  const std::string needle = R"("usr": ")";
+  int count = 0;
+  std::size_t pos = 0;
+  while ((pos = section.find(needle, pos)) != std::string::npos) {
+    ++count;
+    pos += needle.size();
+  }
+  return count;
+}
 
-  const bool has_a = first.body.contains("USR::a") || second.body.contains("USR::a");
-  const bool has_b = first.body.contains("USR::b") || second.body.contains("USR::b");
-  CHECK(has_a);
-  CHECK(has_b);
-  const bool has_calls_edge = first.body.contains(R"("kind": "calls")") ||
-                             second.body.contains(R"("kind": "calls")");
-  CHECK(has_calls_edge);
+TEST_CASE("Live explorer: continuation reaches every candidate without any "
+          "single page exceeding node_budget (star repro)") {
+  // HSE-92 round 2, two blockers reproduced together with the reviewer's
+  // own numbers ("a root with three call targets and limit=1"):
+  //  - fix 1: make_query_plan() used to cap the underlying query itself at
+  //    node_budget+1 regardless of node_offset, so continuation only ever
+  //    re-paged that same capped prefix -- later candidates were never
+  //    reachable no matter how many pages were requested.
+  //  - fix 2: a bridging edge endpoint used to be pushed OUTSIDE
+  //    delivered_node_count/node_budget entirely, so a high-degree root
+  //    could return one primary node plus up to edge_budget bridge
+  //    endpoints in a single page, blowing past the declared node_budget.
+  Storage db(":memory:");
+  const int64_t component = db.add_component("test", "/tmp/cidx-ui-star-test");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "star.cpp");
+  const auto make_node = [&](const char *usr, const char *name, int line) {
+    auto sym = symbol(usr, name, "function");
+    sym.file_id = file;
+    sym.line = line;
+    return db.add_symbol(sym);
+  };
+  const int64_t root = make_node("USR::star_root", "ns::star_root", 1);
+  const int64_t target0 = make_node("USR::star_t0", "ns::star_t0", 2);
+  const int64_t target1 = make_node("USR::star_t1", "ns::star_t1", 3);
+  const int64_t target2 = make_node("USR::star_t2", "ns::star_t2", 4);
+  const auto add_edge = [&](int64_t src, int64_t dst, int line) {
+    cidx::Edge edge;
+    edge.src_id = src;
+    edge.dst_id = dst;
+    edge.kind = cidx::graph::edge_kinds_map().at("calls");
+    const int64_t edge_id = db.add_edge(edge);
+    cidx::EdgeSite site;
+    site.edge_id = edge_id;
+    site.file_id = file;
+    site.line = line;
+    site.col = 4;
+    site.conditional = 0;
+    db.add_edge_site(site);
+  };
+  add_edge(root, target0, 10);
+  add_edge(root, target1, 20);
+  add_edge(root, target2, 30);
+
+  RunningServer server(graph_provider_for(db));
+  const std::string base = "/api/graph?token=" + server.token +
+                           "&root=ns::star_root&direction=out&depth=1&limit=1";
+
+  std::set<std::string> seen;
+  std::string continuation;
+  for (int page = 0; page < 8; ++page) {
+    std::string url = base;
+    if (!continuation.empty()) {
+      url += "&continuation=";
+      url += continuation;
+    }
+    const auto response = http_get(server.port, url);
+    CHECK(response.status == 200);
+    // Fix 2: node_budget is 1 for this whole walk -- no page, including one
+    // that bridges a cross-page edge endpoint in, may ever deliver more.
+    CHECK(count_delivered_nodes(response.body) <= 1);
+    for (const char *usr :
+         {"USR::star_root", "USR::star_t0", "USR::star_t1", "USR::star_t2"}) {
+      if (response.body.contains(usr)) {
+        seen.insert(usr);
+      }
+    }
+    const std::string token_marker = R"("token": ")";
+    const std::size_t token_start = response.body.find(token_marker);
+    if (token_start == std::string::npos) {
+      break;
+    }
+    const std::size_t value_start = token_start + token_marker.size();
+    const std::size_t value_end = response.body.find('"', value_start);
+    if (value_end == std::string::npos) {
+      break;
+    }
+    continuation = response.body.substr(value_start, value_end - value_start);
+    if (continuation.empty()) {
+      break;
+    }
+  }
+  // Fix 1: every candidate is eventually reachable across the full
+  // continuation walk -- not just the root and one target, repeated
+  // forever.
+  CHECK(seen.contains("USR::star_root"));
+  CHECK(seen.contains("USR::star_t0"));
+  CHECK(seen.contains("USR::star_t1"));
+  CHECK(seen.contains("USR::star_t2"));
 }
 
 TEST_CASE("Live explorer: applicability is decided from the complete edge "
-         "fact, not the bounded evidence prefix") {
+          "fact, not the bounded evidence prefix") {
   Fixture fixture;
   RunningServer server(graph_provider_for(fixture.db));
   // ns::a -uses-> ns::v has two sites: an unconditional one (sorted first)
   // and a conditional one (sorted second). site_limit=0 would, under the
   // old bounded-prefix bug, only ever see the first (unconditional) site
   // and misreport the edge as "universal".
-  const auto response = http_get(
-      server.port, "/api/graph?token=" + server.token +
-                      "&root=ns::a&direction=out&depth=1&site_limit=0"
-                      "&applicability=universal");
+  const auto response =
+      http_get(server.port, "/api/graph?token=" + server.token +
+                                "&root=ns::a&direction=out&depth=1&site_limit=0"
+                                "&applicability=universal");
   CHECK(response.status == 200);
   CHECK(response.body.find("USR::v") != std::string::npos);
   // The uses edge to v is actually conditional (mixed sites), so filtering
   // to applicability=universal must exclude it.
   CHECK(response.body.find(R"("kind": "uses")") == std::string::npos);
 
-  const auto conditional_only = http_get(
-      server.port, "/api/graph?token=" + server.token +
-                      "&root=ns::a&direction=out&depth=1&site_limit=0"
-                      "&applicability=conditional");
+  const auto conditional_only =
+      http_get(server.port, "/api/graph?token=" + server.token +
+                                "&root=ns::a&direction=out&depth=1&site_limit=0"
+                                "&applicability=conditional");
   CHECK(conditional_only.status == 200);
   CHECK(conditional_only.body.find(R"("kind": "uses")") != std::string::npos);
 }
@@ -624,9 +734,9 @@ TEST_CASE("Live explorer: applicability is decided from the complete edge "
 TEST_CASE("Live explorer: evidence endpoint loads bounded sites for an edge") {
   Fixture fixture;
   RunningServer server(graph_provider_for(fixture.db), {},
-                      evidence_provider_for(fixture.db));
-  const auto graph =
-      http_get(server.port, "/api/graph?token=" + server.token + "&root=ns::a&direction=out");
+                       evidence_provider_for(fixture.db));
+  const auto graph = http_get(server.port, "/api/graph?token=" + server.token +
+                                               "&root=ns::a&direction=out");
   const std::string edge_id = edge_portable_id_for_kind(graph.body, "calls");
   REQUIRE_FALSE(edge_id.empty());
   const auto evidence = http_get(
@@ -636,7 +746,8 @@ TEST_CASE("Live explorer: evidence endpoint loads bounded sites for an edge") {
   CHECK(evidence.body.find(R"("line": 10)") != std::string::npos);
 }
 
-TEST_CASE("Live explorer: a byte budget truncates the response deterministically") {
+TEST_CASE(
+    "Live explorer: a byte budget truncates the response deterministically") {
   Fixture fixture;
   RunningServer server(graph_provider_for(fixture.db));
   // The unrestricted response for this fixture is ~24 KiB; 20500 bytes
@@ -644,24 +755,24 @@ TEST_CASE("Live explorer: a byte budget truncates the response deterministically
   // truncated response) rather than the hard GraphViewFailureKind::Oversized
   // error, which only fires when even the minimal finalized skeleton cannot
   // fit the budget -- exercised below via the smallest allowed byte_limit.
-  const auto truncated = http_get(
-      server.port, "/api/graph?token=" + server.token +
-                      "&root=ns::a&direction=out&byte_limit=20500");
+  const auto truncated =
+      http_get(server.port, "/api/graph?token=" + server.token +
+                                "&root=ns::a&direction=out&byte_limit=20500");
   CHECK(truncated.status == 200);
   CHECK(truncated.body.find(R"("truncated": true)") != std::string::npos);
   CHECK(truncated.body.find("byte_budget") != std::string::npos);
   // Repeating the identical bounded request is deterministic.
-  const auto repeat = http_get(
-      server.port, "/api/graph?token=" + server.token +
-                      "&root=ns::a&direction=out&byte_limit=20500");
+  const auto repeat =
+      http_get(server.port, "/api/graph?token=" + server.token +
+                                "&root=ns::a&direction=out&byte_limit=20500");
   CHECK(truncated.body == repeat.body);
 
   // The smallest allowed byte_limit (1024) cannot fit even this fixture's
   // minimal metadata skeleton: the request must fail cleanly (400) rather
   // than emit a truncated-but-misleading artifact.
-  const auto oversized = http_get(
-      server.port, "/api/graph?token=" + server.token +
-                      "&root=ns::a&direction=out&byte_limit=1024");
+  const auto oversized =
+      http_get(server.port, "/api/graph?token=" + server.token +
+                                "&root=ns::a&direction=out&byte_limit=1024");
   CHECK(oversized.status == 400);
 }
 
@@ -677,14 +788,15 @@ TEST_CASE("Live explorer rejects a request from an unapproved Origin") {
   RunningServer server(graph_provider_for(fixture.db));
   const auto same_origin =
       http_get(server.port, "/?token=" + server.token,
-              "http://127.0.0.1:" + std::to_string(server.port));
+               "http://127.0.0.1:" + std::to_string(server.port));
   CHECK(same_origin.status == 200);
   const auto cross_origin = http_get(server.port, "/?token=" + server.token,
                                      std::string("http://evil.example"));
   CHECK(cross_origin.status == 403);
 }
 
-TEST_CASE("Live explorer tolerates a client aborting mid-request (cancellation)") {
+TEST_CASE(
+    "Live explorer tolerates a client aborting mid-request (cancellation)") {
   Fixture fixture;
   RunningServer server(graph_provider_for(fixture.db));
   abrupt_disconnect(server.port, /*send_partial=*/false);
@@ -696,15 +808,19 @@ TEST_CASE("Live explorer tolerates a client aborting mid-request (cancellation)"
 }
 
 TEST_CASE("Live explorer: a client disconnect during a slow query does not "
-         "block the accept loop, and the server never crashes") {
+          "block the accept loop, and the server never crashes") {
   // A deliberately slow/blocking provider, standing in for a long-running
   // query. `completed` proves it actually ran to completion in the
   // background even though the requesting client abandons the connection
   // before that happens.
   std::atomic<bool> completed{false};
   const ui::GraphProvider slow_provider =
-      [&completed](std::string_view target) -> std::optional<std::string> {
+      [&completed](
+          std::string_view target,
+          const ui::CancelToken &should_cancel) -> std::optional<std::string> {
     (void)target;
+    (void)should_cancel; // deliberately non-cooperative: proves the server
+                         // itself bounds an uncooperative provider's impact.
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     completed = true;
     return std::string(
@@ -770,13 +886,13 @@ TEST_CASE("Live explorer shuts down cleanly on an authenticated request") {
   std::ostream out(&capture_buf);
   std::ostringstream err;
   std::thread thread([&] {
-    ui::serve_live(ui::render_html(json_out::Value::obj({}),
-                                  ui::RenderMode::LoopbackLive),
-                  graph, ui::ServerOptions{.port = 0, .launch_browser = false},
-                  out, err);
+    ui::serve_live(
+        ui::render_html(json_out::Value::obj({}), ui::RenderMode::LoopbackLive),
+        graph, ui::ServerOptions{.port = 0, .launch_browser = false}, out, err);
   });
   auto future = url_promise.get_future();
-  REQUIRE(future.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+  REQUIRE(future.wait_for(std::chrono::seconds(5)) ==
+          std::future_status::ready);
   const std::string url = future.get();
   const std::size_t port_start = url.find("127.0.0.1:") + 10;
   const std::size_t port_end = url.find('/', port_start);
@@ -790,4 +906,97 @@ TEST_CASE("Live explorer shuts down cleanly on an authenticated request") {
   REQUIRE(thread.joinable());
   thread.join(); // must return promptly; a hang fails the test via ctest's
                  // own timeout rather than hanging forever.
+}
+
+TEST_CASE("Live explorer: shutdown returns promptly even while an abandoned "
+          "provider ignores cancellation entirely (HSE-92 round 2)") {
+  // Reviewer's exact repro: "use a provider blocked forever on a latch,
+  // send a valid graph request, disconnect, then request authenticated
+  // shutdown -- the shutdown response is 200 but serve_live() never
+  // returns." This provider deliberately ignores `should_cancel` entirely
+  // (ANY provider, cooperative or not, must never be able to hang
+  // serve_live()'s own shutdown).
+  std::atomic<bool> release_latch{false};
+  std::atomic<bool> completed{false};
+  const ui::GraphProvider stuck_provider =
+      [&release_latch, &completed](
+          std::string_view target,
+          const ui::CancelToken &should_cancel) -> std::optional<std::string> {
+    (void)target;
+    (void)should_cancel;
+    while (!release_latch.load(std::memory_order_acquire)) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    completed.store(true, std::memory_order_release);
+    return std::string(
+        R"({"schema": "cidx.graph-view.v1", "nodes": [], "edges": [], "metadata": {}})");
+  };
+
+  std::promise<std::string> url_promise;
+  FirstLineCapture capture_buf(url_promise);
+  std::ostream out(&capture_buf);
+  std::ostringstream err;
+  std::thread thread([&] {
+    ui::serve_live(
+        ui::render_html(json_out::Value::obj({}), ui::RenderMode::LoopbackLive),
+        stuck_provider, ui::ServerOptions{.port = 0, .launch_browser = false},
+        out, err);
+  });
+  auto future = url_promise.get_future();
+  REQUIRE(future.wait_for(std::chrono::seconds(5)) ==
+          std::future_status::ready);
+  const std::string url = future.get();
+  const std::size_t port_start = url.find("127.0.0.1:") + 10;
+  const std::size_t port_end = url.find('/', port_start);
+  const int port = parse_int(url.substr(port_start, port_end - port_start));
+  const std::size_t token_key = url.find("token=");
+  const std::string token = url.substr(token_key + 6);
+
+  // Send a valid graph request, then abandon the connection before the
+  // (permanently, until released below) stuck provider ever returns.
+  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  REQUIRE(fd >= 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(static_cast<uint16_t>(port));
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  REQUIRE(::connect(fd, reinterpret_cast<sockaddr *>(&address),
+                    sizeof(address)) == 0);
+  const std::string request = "GET /api/graph?token=" + token +
+                              "&root=ns::a HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                              "Connection: close\r\n\r\n";
+  std::size_t sent = 0;
+  while (sent < request.size()) {
+    const ssize_t written =
+        ::send(fd, request.data() + sent, request.size() - sent, 0);
+    if (written <= 0) {
+      break;
+    }
+    sent += static_cast<std::size_t>(written);
+  }
+  ::close(fd); // Abandon before the provider's (indefinite) sleep finishes.
+
+  // Give the connection thread's 20ms disconnect-poll a moment to notice
+  // and detach the stuck worker before shutdown is requested.
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  const auto response = http_get(port, "/api/shutdown?token=" + token);
+  CHECK(response.status == 200);
+
+  // The whole point of this test: serve_live() must return promptly even
+  // though the abandoned provider is still running (deliberately, until
+  // released below) -- a hang here fails via ctest's own timeout rather
+  // than blocking forever.
+  REQUIRE(thread.joinable());
+  thread.join();
+
+  // Release the deliberately-stuck provider so it does not leak a
+  // background thread for the rest of this test binary's lifetime, and
+  // confirm it eventually finishes safely (no crash) before this test's
+  // captured locals go out of scope.
+  release_latch.store(true, std::memory_order_release);
+  for (int attempt = 0; attempt < 100 && !completed.load(); ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  CHECK(completed.load());
 }

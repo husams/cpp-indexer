@@ -54,6 +54,11 @@ public:
   edge_sites_for(const std::vector<int64_t> &edge_ids) = 0;
   virtual std::vector<EdgeSiteRow> edge_sites_one(int64_t edge_id,
                                                   int limit) = 0;
+  // Whether ANY of an edge's sites is config-conditional -- an indexed
+  // EXISTS aggregate over the edge's own (primary-key-bounded) site rows,
+  // never materializing the site list, so this stays exact and cheap
+  // regardless of how many sites the edge has.
+  virtual bool edge_has_conditional_site(int64_t edge_id) = 0;
   virtual std::vector<Symbol> redefined_symbols(int limit) = 0;
   virtual std::vector<DefinitionRow> definitions_of(int64_t symbol_id) = 0;
   virtual std::vector<DefinitionRow> possible_callees_of(int64_t symbol_id) = 0;

@@ -726,6 +726,13 @@ public:
   // A8: single-edge sites with LIMIT (query.py:884-906)
   std::vector<EdgeSiteRow> edge_sites_one(int64_t edge_id, int limit);
 
+  // Indexed EXISTS aggregate: whether ANY of this edge's sites is
+  // config-conditional. Bounded by the edge's own site count (edge_id is
+  // the leading column of edge_site's WITHOUT ROWID primary key), never by
+  // an arbitrary global row cap -- exact for edges of any size, and never
+  // materializes the site list just to answer this yes/no question.
+  bool edge_has_conditional_site(int64_t edge_id);
+
   // -- labels (v14) ----------------------------------------------------------
   // Upsert on name; returns the row id.
   int64_t add_label(const std::string &name, const std::string &path);

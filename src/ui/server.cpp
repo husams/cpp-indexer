@@ -95,22 +95,22 @@ std::optional<std::string> find_header(std::string_view request,
   line_start += 2;
   const auto ieq = [](char a, char b) {
     return std::tolower(static_cast<unsigned char>(a)) ==
-          std::tolower(static_cast<unsigned char>(b));
+           std::tolower(static_cast<unsigned char>(b));
   };
   while (line_start < request.size()) {
     const std::size_t line_end = request.find("\r\n", line_start);
-    const std::string_view line = request.substr(
-        line_start, line_end == std::string_view::npos
-                        ? request.size() - line_start
-                        : line_end - line_start);
+    const std::string_view line =
+        request.substr(line_start, line_end == std::string_view::npos
+                                       ? request.size() - line_start
+                                       : line_end - line_start);
     if (line.empty()) {
       break; // blank line: end of headers
     }
     const std::size_t colon = line.find(':');
     if (colon != std::string_view::npos && colon == name.size() &&
         std::equal(line.begin(),
-                  line.begin() + static_cast<std::ptrdiff_t>(colon),
-                  name.begin(), ieq)) {
+                   line.begin() + static_cast<std::ptrdiff_t>(colon),
+                   name.begin(), ieq)) {
       std::string_view value = line.substr(colon + 1);
       while (!value.empty() && value.front() == ' ') {
         value.remove_prefix(1);
@@ -180,8 +180,10 @@ bool send_response(int fd, int code, std::string_view type,
 struct StaticGraphProvider {
   std::string graph_json;
 
-  std::optional<std::string> operator()(std::string_view target) const {
+  std::optional<std::string>
+  operator()(std::string_view target, const CancelToken &should_cancel) const {
     (void)target;
+    (void)should_cancel;
     return graph_json;
   }
 };
@@ -211,71 +213,107 @@ bool peer_disconnected(int fd) {
   return false;
 }
 
-// Runs `provider(target)` on its own thread while this (caller's) thread
-// concurrently polls the client socket for disconnection, so a client that
-// goes away mid-query is noticed WHILE the query is still running rather
-// than only at the final send() (HSE-92 review: "cancellation" must mean
-// more than closing a connection before a valid request even starts).
-// Providers are budget-bounded and have no cooperative cancellation point of
-// their own, so this cannot abort mid-computation -- what it DOES guarantee
-// is that a disconnected client is never waited on or written to once
-// noticed, and that the accept loop calling this (via its own connection
-// thread, see serve_live()) is never blocked by one slow/abandoned
-// connection.
+// Runs `provider(target, should_cancel)` on its own thread while this
+// (caller's) thread concurrently polls the client socket for disconnection
+// AND the server-wide `shutting_down` flag, so a client that goes away -- or
+// a server shutdown -- is noticed WHILE the query is still running, not only
+// at the final send() (HSE-92 review: "cancellation" must mean more than
+// closing a connection before a valid request even starts).
 //
-// The inner `worker` is always joined (never detached): a detached worker
-// could still be running `provider(target)` -- referencing `provider`,
-// which is only valid for serve_live()'s lifetime -- after serve_live()
-// itself returns, a dangling reference. Joining bounds this function's own
-// runtime to the provider's (budget-bounded) completion time in the worst
-// case, but never blocks the ACCEPT loop, since it always runs on its own
-// connection thread.
-// Deliberately built on a plain atomic completion flag rather than
-// std::promise/std::future: worker.join() below always runs before this
-// function returns, so the shared `value`/`done` locals stay valid for the
-// worker's entire lifetime without needing a heap-allocated shared state.
-// This also sidesteps a clang-analyzer false positive (proven via its own
-// emitted path notes -- it reports "Returning from 'future::wait_for'"
-// immediately before flagging the very next statement as still "inside" that
-// call's internal mutex) that misattributes peer_disconnected()'s recv() as
-// running inside libc++ future's internal critical section when
-// future::wait_for is polled in a loop.
-void run_provider_route(int client, const GraphProvider &provider,
-                        const std::string &target,
-                        std::string_view empty_message) {
-  std::optional<std::string> value;
-  std::atomic<bool> done{false};
-  // `target` is captured by reference, not by value: it is run_provider_route's
-  // own parameter, guaranteed valid for this whole call (worker.join() below
-  // always runs before this function returns), and capturing by value would
-  // insert a std::string copy-construction into this closure -- itself a
-  // (however unlikely) throwing operation running as part of a std::thread
-  // entry function, where an uncaught exception calls std::terminate().
-  std::thread worker([&provider, &target, &value, &done] {
-    try {
-      value = provider ? provider(target) : std::nullopt;
-    } catch (const std::exception &) {
-      value = std::nullopt;
+// `should_cancel` is a REAL cooperative cancellation channel threaded into
+// the provider: build_graph_view()'s node/edge assembly loops poll it and
+// unwind early once it reports true. A provider that ignores it entirely is
+// still bounded from THIS function's perspective (round 2 fix): once
+// disconnection or shutdown is noticed, this function DETACHES the worker
+// and returns immediately instead of unconditionally joining it -- so this
+// connection (and, at shutdown, the accept loop's own drain of every
+// connection) is never blocked by one slow or uncooperative provider.
+//
+// The worker's shared state (`value`, `done`, `cancel_requested`) is
+// heap-allocated (shared_ptr) and captured BY VALUE, specifically so it
+// stays valid for the worker's entire lifetime even when this function
+// returns while the worker is still running (the detach path). `provider`
+// is still captured by reference: it is only valid for as long as
+// serve_live()'s caller keeps the underlying GraphProvider alive, which is
+// the same lifetime contract detaching already relies on in production (the
+// process exits shortly after serve_live() returns) -- a test harness that
+// exercises this path must keep its own provider/storage alive until any
+// abandoned worker it caused has itself signalled completion.
+void run_provider_route(
+    int client, const GraphProvider &provider, const std::string &target,
+    std::string_view empty_message, std::atomic<bool> &shutting_down,
+    const std::shared_ptr<std::atomic<bool>> &route_finished) {
+  // This whole body runs as a std::thread entry function (see serve_live()'s
+  // connection_threads): an uncaught exception anywhere in it -- even one as
+  // unlikely as `target`'s copy-construction into the worker lambda's
+  // closure, or std::thread/std::make_shared under extreme resource
+  // pressure -- would otherwise call std::terminate() and take down the
+  // whole server over a single request. Best-effort clean up the socket and
+  // still mark the route finished (so it is reaped) rather than let
+  // anything escape.
+  try {
+    auto value = std::make_shared<std::optional<std::string>>();
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    auto cancel_requested = std::make_shared<std::atomic<bool>>(false);
+    // `target` is copied into its own heap allocation HERE (an ordinary
+    // statement this function's own try/catch already covers) rather than
+    // directly into the worker lambda's capture list: capturing a
+    // shared_ptr by value is a noexcept refcount bump, not a
+    // std::string copy-construction -- clang-tidy's bugprone-exception-escape
+    // (rightly) treats ANY exception reachable from constructing the
+    // callable passed to std::thread as unable to safely propagate, since
+    // the actual invocation runs on a separate call stack no caller-side
+    // try/catch can reach.
+    auto target_copy = std::make_shared<std::string>(target);
+    std::thread worker([&provider, target_copy, value, done, cancel_requested] {
+      const CancelToken should_cancel = [cancel_requested] {
+        return cancel_requested->load(std::memory_order_acquire);
+      };
+      try {
+        *value =
+            provider ? provider(*target_copy, should_cancel) : std::nullopt;
+      } catch (const std::exception &) {
+        *value = std::nullopt;
+      }
+      done->store(true, std::memory_order_release);
+    });
+    bool abandoned = false;
+    while (!done->load(std::memory_order_acquire)) {
+      if (peer_disconnected(client) ||
+          shutting_down.load(std::memory_order_acquire)) {
+        abandoned = true;
+        cancel_requested->store(true, std::memory_order_release);
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    done.store(true, std::memory_order_release);
-  });
-  bool disconnected = false;
-  while (!done.load(std::memory_order_acquire)) {
-    if (peer_disconnected(client)) {
-      disconnected = true;
-      break;
+    if (abandoned) {
+      // Do not wait for a provider that may never honor cancellation:
+      // detach rather than join, so this connection thread (and any
+      // shutdown drain waiting on it) is never blocked.
+      worker.detach();
+      ::close(client);
+      if (route_finished) {
+        route_finished->store(true, std::memory_order_release);
+      }
+      return;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  }
-  worker.join();
-  if (!disconnected) {
-    if (value) {
-      (void)send_response(client, 200, "application/json", *value);
+    worker.join();
+    if (*value) {
+      (void)send_response(client, 200, "application/json", **value);
     } else {
       (void)send_response(client, 400, "text/plain", empty_message);
     }
+    ::close(client);
+    if (route_finished) {
+      route_finished->store(true, std::memory_order_release);
+    }
+  } catch (...) {
+    ::close(client);
+    if (route_finished) {
+      route_finished->store(true, std::memory_order_release);
+    }
   }
-  ::close(client);
 }
 
 } // namespace
@@ -330,15 +368,37 @@ int serve_live(const std::string &html, const GraphProvider &graph_provider,
   }
 
   // Connection threads for provider-dispatching routes (see
-  // run_provider_route): kept here, not detached, so serve_live() can join
-  // every one of them before it returns -- the alternative (a detached
-  // thread outliving serve_live()) would leave it holding a dangling
-  // reference to the provider parameters. Static/shutdown/error routes stay
-  // on the accept-loop thread; they are fast and never block on a provider.
-  std::vector<std::thread> connection_threads;
+  // run_provider_route). Each carries its own `finished` flag so
+  // `reap_finished_connections()` can join and drop it as soon as its
+  // request completes, DURING the session -- not only at shutdown (HSE-92
+  // round 2: a long session must not accumulate one joinable pthread per
+  // request, and thread construction can eventually fail if it does).
+  // `shutting_down` is threaded into every in-flight request's cancellation
+  // token in addition to per-connection client disconnect, so shutdown
+  // itself never unconditionally blocks on a still-running provider either.
+  // Static/shutdown/error routes stay on the accept-loop thread; they are
+  // fast and never block on a provider.
+  struct ConnectionThread {
+    std::thread thread;
+    std::shared_ptr<std::atomic<bool>> finished;
+  };
+  std::vector<ConnectionThread> connection_threads;
+  std::atomic<bool> shutting_down{false};
+  const auto reap_finished_connections = [&] {
+    std::erase_if(connection_threads, [](ConnectionThread &entry) {
+      if (!entry.finished->load(std::memory_order_acquire)) {
+        return false;
+      }
+      if (entry.thread.joinable()) {
+        entry.thread.join();
+      }
+      return true;
+    });
+  };
   std::array<char, 8192> buffer{};
   bool shutdown_requested = false;
   while (!shutdown_requested) {
+    reap_finished_connections();
     const int client = ::accept(server, nullptr, nullptr);
     if (client < 0) {
       if (errno == EINTR) {
@@ -380,33 +440,43 @@ int serve_live(const std::string &html, const GraphProvider &graph_provider,
       // `target` is a view into `buffer`, which the NEXT loop iteration
       // reuses for a different connection's bytes -- copy it before handing
       // off to a thread that will outlive this iteration.
-      connection_threads.emplace_back(run_provider_route, client,
-                                      std::cref(graph_provider),
-                                      std::string(target),
-                                      "bad graph request\n");
+      auto finished = std::make_shared<std::atomic<bool>>(false);
+      connection_threads.push_back(ConnectionThread{
+          .thread =
+              std::thread(run_provider_route, client, std::cref(graph_provider),
+                          std::string(target), "bad graph request\n",
+                          std::ref(shutting_down), finished),
+          .finished = finished});
     } else if (target.starts_with("/api/search?")) {
-      connection_threads.emplace_back(run_provider_route, client,
-                                      std::cref(search_provider),
-                                      std::string(target),
-                                      "bad search request\n");
+      auto finished = std::make_shared<std::atomic<bool>>(false);
+      connection_threads.push_back(ConnectionThread{
+          .thread = std::thread(run_provider_route, client,
+                                std::cref(search_provider), std::string(target),
+                                "bad search request\n", std::ref(shutting_down),
+                                finished),
+          .finished = finished});
     } else if (target.starts_with("/api/evidence?")) {
-      connection_threads.emplace_back(run_provider_route, client,
-                                      std::cref(evidence_provider),
-                                      std::string(target),
-                                      "bad evidence request\n");
+      auto finished = std::make_shared<std::atomic<bool>>(false);
+      connection_threads.push_back(ConnectionThread{
+          .thread = std::thread(run_provider_route, client,
+                                std::cref(evidence_provider),
+                                std::string(target), "bad evidence request\n",
+                                std::ref(shutting_down), finished),
+          .finished = finished});
     } else if (target.starts_with("/api/shutdown?")) {
       (void)send_response(client, 200, "application/json",
                           "{\"stopped\": true}\n");
       ::close(client);
+      shutting_down.store(true, std::memory_order_release);
       shutdown_requested = true;
     } else {
       (void)send_response(client, 404, "text/plain", "not found\n");
       ::close(client);
     }
   }
-  for (auto &connection_thread : connection_threads) {
-    if (connection_thread.joinable()) {
-      connection_thread.join();
+  for (auto &entry : connection_threads) {
+    if (entry.thread.joinable()) {
+      entry.thread.join();
     }
   }
   ::close(server);

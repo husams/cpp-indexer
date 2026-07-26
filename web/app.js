@@ -353,6 +353,27 @@ if (typeof document !== 'undefined') {
     if (!response.ok) throw new Error(`Graph request failed (${response.status})`);
     return response.json();
   };
+  // HSE-92 round 2: staleness must be detected promptly even while the
+  // session sits idle, not only reactively on the NEXT user-initiated
+  // GraphView action -- an open session whose indexed workspace identity
+  // changes underneath it must still surface the banner without waiting
+  // for another click. Polls the SAME currently-active request on an
+  // interval and folds its freshness into sessionFreshness through the
+  // existing weakest-wins trackViewFreshness, WITHOUT ever touching the
+  // canvas (addView is never called here). A transient poll failure must
+  // not itself flip freshness either way; only an explicit successful
+  // refresh (the stale-refresh button) may CLEAR the banner.
+  const FRESHNESS_POLL_MS = 15000;
+  const startFreshnessMonitor = () => {
+    if (!liveToken) return;
+    setInterval(async () => {
+      try {
+        trackViewFreshness(await fetchGraph(currentParams));
+      } catch (_error) {
+        // Ignore: a failed background probe leaves freshness untouched.
+      }
+    }, FRESHNESS_POLL_MS);
+  };
   const reportError = (error) => { details.innerHTML = `<p class="muted">${esc(error.message)}</p>`; };
   // Presentation (camera/layout) state is captured/restored separately from
   // the semantic request each history entry carries (HSE-92 review: history
@@ -439,6 +460,13 @@ if (typeof document !== 'undefined') {
     try {
       const nextView = await fetchGraph(params);
       addView(nextView, true);
+      // HSE-92 round 2: without this, "Load more" (which combines
+      // lastContinuationToken with currentParams) would keep replaying the
+      // PRE-expansion parameters against a continuation token minted under
+      // the expansion's own params -- a query-identity mismatch the server
+      // correctly rejects with 400. An expand becomes the active semantic
+      // request, exactly like an ordinary navigate().
+      currentParams = params;
       captureCurrentPresentation();
       history = history.slice(0, historyIndex + 1);
       history.push({label, params, presentation: null, append: true});
@@ -547,6 +575,7 @@ if (typeof document !== 'undefined') {
       updateHistoryButtons();
       renderSavedViews();
       if (liveControls) liveControls.hidden = false;
+      startFreshnessMonitor();
     }
     document.getElementById('fit').onclick = () => cy.fit(undefined, 40);
     document.getElementById('expand').onclick = () => expandDirection('out');

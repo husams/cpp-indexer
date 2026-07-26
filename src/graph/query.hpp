@@ -128,6 +128,11 @@ public:
   // Per-edge sites (A8, limit 200). Used by emitter for --json re-query (R8).
   std::vector<Site> sites(int64_t edge_id, int limit = 200);
 
+  // Whether ANY of an edge's sites is config-conditional -- an indexed
+  // EXISTS aggregate, exact regardless of how many sites the edge has and
+  // never bounded by (or dependent on) a response's evidence budget.
+  bool edge_conditional(int64_t edge_id);
+
   // ---- Navigation ----------------------------------------------------------
 
   // Internal: peer Syms with no site loading (BFS internal).
