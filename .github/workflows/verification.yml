@@ -255,6 +255,27 @@ jobs:
         with:
           path: /tmp/tlaps-1.5.0
           key: tlaps-1.5.0-x86_64-linux-gnu-${{ runner.os }}-ebb7a3f2
+      - name: Extract the trusted (base-commit) proof binding regression
+        if: github.event_name == 'pull_request'
+        # QA round-2 fix: check-proofs.sh's manifest-declared theorem/
+        # invariant binding check must reject a vacuous proof even when a
+        # decoy comment elsewhere in the module contains the invariant
+        # names. This regression is itself a self-test of check-proofs.sh's
+        # detection logic, so it has the identical two-generation
+        # trust-root-poisoning gap check-regression.sh closes for check.sh: a
+        # PR could weaken the binding check and neuter this self-test's
+        # assertions in the same commit, and CI would run that tampered pair
+        # straight from the PR's own checkout. Extract it from the base
+        # commit alongside check-proofs.sh above; CIDX_CHECK_PROOFS_SH (set
+        # on the run step below) wires it to the SAME base-extracted
+        # check-proofs.sh, from the same immutable base revision, rather than
+        # letting it resolve tools/check-proofs.sh from its own (now
+        # $RUNNER_TEMP) location.
+        run: |
+          spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check-proofs-vacuous-comment-regression.sh \
+            "$RUNNER_TEMP/check-proofs-vacuous-comment-regression.sh"
       - name: Run TLAPS proof gate (pull_request)
         if: github.event_name == 'pull_request'
         env:
@@ -263,6 +284,16 @@ jobs:
       - name: Run TLAPS proof gate (push)
         if: github.event_name != 'pull_request'
         run: spec/tla/tools/check-proofs.sh
+      - name: Run proof theorem/invariant binding regression (pull_request)
+        if: github.event_name == 'pull_request'
+        env:
+          CIDX_CHECK_PROOFS_SH: ${{ runner.temp }}/check-proofs.sh
+        run: "$RUNNER_TEMP/check-proofs-vacuous-comment-regression.sh"
+      - name: Run proof theorem/invariant binding regression (push)
+        # See the equivalent push step above: no base to extract from, and
+        # push already bypassed PR review.
+        if: github.event_name != 'pull_request'
+        run: spec/tla/tools/check-proofs-vacuous-comment-regression.sh
 
   tla-conformance:
     name: Conformance mappings and deterministic scenario replay

@@ -263,6 +263,12 @@ checkers = {
     "check-sidecar-conformance.sh": 1,
     "check-regression.sh": 1,
     "export-counterexample.sh": 1,
+    # QA round-2 fix: check-proofs-vacuous-comment-regression.sh is a
+    # self-test of check-proofs.sh's theorem/invariant binding logic with the
+    # identical two-generation trust-root-poisoning gap check-regression.sh
+    # closes for check.sh; it is extracted once, alongside the
+    # check-proofs.sh it is wired to via CIDX_CHECK_PROOFS_SH.
+    "check-proofs-vacuous-comment-regression.sh": 1,
 }
 
 for checker, expected_count in checkers.items():
@@ -319,6 +325,21 @@ for checker in ("check-regression.sh", "export-counterexample.sh"):
             "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
             f"reason=cidx-check-sh-not-wired-to-runner-temp:{checker}"
         )
+
+# check-proofs-vacuous-comment-regression.sh must likewise pass
+# CIDX_CHECK_PROOFS_SH pointing at a $RUNNER_TEMP-extracted check-proofs.sh
+# on its pull_request run step -- the check-proofs.sh analog of the
+# CIDX_CHECK_SH assertion above.
+proof_binding_checker = "check-proofs-vacuous-comment-regression.sh"
+proof_binding_run_marker = f'run: "$RUNNER_TEMP/{proof_binding_checker}"'
+proof_binding_run_start = workflow.rindex(proof_binding_run_marker)
+proof_binding_step_start = workflow.rindex("- name:", 0, proof_binding_run_start)
+proof_binding_step_block = workflow[proof_binding_step_start:proof_binding_run_start]
+if "CIDX_CHECK_PROOFS_SH: ${{ runner.temp }}/check-proofs.sh" not in proof_binding_step_block:
+    raise SystemExit(
+        "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
+        "reason=cidx-check-proofs-sh-not-wired-to-runner-temp"
+    )
 
 # check-protected-review.sh must never call the shared helper: it is the one
 # gate that enforces human review of every other protected path (including

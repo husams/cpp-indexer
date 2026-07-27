@@ -97,34 +97,118 @@ trap 'rm -rf "$WORK"' EXIT
 cp "$MODULE_DIR"/*.tla "$WORK"/
 cp "$PROOF_DIR"/*.tla "$WORK"/
 
-# F1 fix (senior-developer acceptance review): manifest.json's proofs[] entry
-# declares which THEOREM this module's checker is supposed to prove and which
-# invariants that theorem covers. Previously nothing bound the module's
-# actual content to that declaration -- a two-line module
+# F1 fix (senior-developer acceptance review, round 1): manifest.json's
+# proofs[] entry declares which THEOREM this module's checker is supposed to
+# prove and which invariants that theorem covers. Previously nothing bound
+# the module's actual content to that declaration -- a two-line module
 # (`THEOREM Trivial1 == 1 = 1 OBVIOUS` plus a same-named but vacuous
 # `THEOREM <declared-theorem> == TRUE OBVIOUS`) satisfied the "All N
-# obligations proved." log-line check with N=2 and exited 0. Read the
-# manifest's theorem/provesInvariants for this module and require: (1) the
-# declared theorem name is actually declared as a THEOREM in the checked
-# module, and (2) each declared invariant is proved by SOME theorem in the
-# module in the exact `Spec => []<Invariant>` shape this proof file already
-# uses (proofs/CidxResultProof.tla's ResultTypeAlwaysHolds /
-# TrustedOutcomeAlwaysHolds) -- not merely mentioned in a comment.
-manifest_binding() {
+# obligations proved." log-line check with N=2 and exited 0.
+#
+# F1 residual gap (QA round 2): the round-1 fix's invariant check was an
+# UNSCOPED whole-file grep for the literal text "[]<InvariantName>" -- so a
+# vacuous `THEOREM <declared-theorem> == TRUE OBVIOUS` still passed as long
+# as a decoy TLA+ comment ANYWHERE in the file happened to contain that
+# literal text. QA also proved the round-1 fix was never truly binding the
+# invariant to the declared theorem even in the legitimate case: this
+# module's declared theorem (ResultInvarianceTheorem == Spec => []Invariant)
+# does not itself literally say "[]SharedResultTypeInvariant" or
+# "[]TrustedOutcomeInvariant" -- those strings only appear in two derived
+# corollary theorems (ResultTypeAlwaysHolds, TrustedOutcomeAlwaysHolds)
+# further down the file, each proved `BY <declared-theorem>, ...`.
+#
+# Fixed binding: strip all TLA+ comments (so decoy text can never satisfy
+# the check), locate every top-level THEOREM's own statement (the text
+# between its `==` and its proof/next top-level THEOREM/LEMMA/module
+# boundary), then compute the closure of theorems reachable from the
+# declared theorem by following `BY <name>` proof references (i.e. the
+# declared theorem itself plus any corollary theorem whose proof cites it,
+# directly or transitively). A declared invariant is proved only if some
+# theorem's STATEMENT (not a comment, not an unrelated theorem) in that
+# closure literally states `[]<Invariant>`.
+theorem_invariant_binding() {
   local module_name="$1"
-  python3 - "$MANIFEST" "$module_name" <<'PY'
+  local module_file="$2"
+  python3 - "$MANIFEST" "$module_name" "$module_file" <<'PY'
 import json
+import re
 import sys
 
-manifest_path, module_name = sys.argv[1], sys.argv[2]
+manifest_path, module_name, module_file = sys.argv[1], sys.argv[2], sys.argv[3]
 manifest = json.loads(open(manifest_path, encoding="utf-8").read())
-for proof in manifest["proofs"]:
-    if proof["module"] == f"proofs/{module_name}.tla":
-        print(proof["theorem"])
-        print("\t".join(proof["provesInvariants"]))
-        break
-else:
+entry = next(
+    (p for p in manifest["proofs"] if p["module"] == f"proofs/{module_name}.tla"),
+    None,
+)
+if entry is None:
     print("MANIFEST-ENTRY-MISSING")
+    sys.exit(0)
+
+theorem_name = entry["theorem"]
+invariants = entry["provesInvariants"]
+
+text = open(module_file, encoding="utf-8").read()
+# Strip TLA+ block comments (* ... *) and line comments \* ... to end of
+# line, so decoy text placed only in a comment can never satisfy the check.
+text = re.sub(r"\(\*.*?\*\)", "", text, flags=re.DOTALL)
+text = re.sub(r"\\\*.*", "", text)
+
+theorem_re = re.compile(r"^THEOREM\s+([A-Za-z_][A-Za-z0-9_]*)\s*==(.*)$", re.MULTILINE)
+boundary_re = re.compile(r"^(THEOREM\b|LEMMA\b|={4,})", re.MULTILINE)
+
+theorems = {}
+for m in theorem_re.finditer(text):
+    start = m.end()
+    end = len(text)
+    for boundary in boundary_re.finditer(text, start):
+        end = boundary.start()
+        break
+    theorems[m.group(1)] = m.group(2) + text[start:end]
+
+if theorem_name not in theorems:
+    print(f"THEOREM-NOT-FOUND:{theorem_name}")
+    sys.exit(0)
+
+
+def statement_of(block):
+    # A theorem's statement is everything before its proof begins: a `BY`/
+    # `PROOF` keyword or a `<1>`-style structured-proof step marker.
+    m = re.search(r"\n\s*(BY\b|PROOF\b|<\d+>)", block)
+    return block[: m.start()] if m else block
+
+
+def proof_refs(block):
+    refs = set()
+    for by_clause in re.finditer(r"\bBY\b([^\n]*)", block):
+        refs.update(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", by_clause.group(1)))
+    return refs
+
+
+statements = {name: statement_of(block) for name, block in theorems.items()}
+refs = {name: proof_refs(block) for name, block in theorems.items()}
+
+closure = {theorem_name}
+changed = True
+while changed:
+    changed = False
+    for name, r in refs.items():
+        if name not in closure and r & closure:
+            closure.add(name)
+            changed = True
+
+missing = [
+    invariant
+    for invariant in invariants
+    if not any(
+        re.search(r"\[\]\s*" + re.escape(invariant) + r"(?![A-Za-z0-9_])", statements[n])
+        for n in closure
+    )
+]
+
+if missing:
+    print("INVARIANT-NOT-FOUND:" + ",".join(missing))
+else:
+    print(f"OK:{theorem_name}:{','.join(invariants)}")
 PY
 }
 
@@ -150,33 +234,35 @@ run_proof() {
   local obligations
   obligations="$(sed -nE 's/^\[INFO\]: All ([0-9]+) obligations proved\.$/\1/p' <<<"$summary")"
 
-  local binding theorem invariants_tsv
-  binding="$(manifest_binding "$module")"
-  if [[ "$binding" == "MANIFEST-ENTRY-MISSING" ]]; then
-    echo "TLA_PROOF_STATUS=FAIL module=$module reason=manifest-entry-missing" >&2
-    exit 30
-  fi
-  theorem="$(sed -n '1p' <<<"$binding")"
-  invariants_tsv="$(sed -n '2p' <<<"$binding")"
-
   local module_file="$WORK/${module}.tla"
-  grep -qE "^THEOREM[[:space:]]+${theorem}[[:space:]]*==" "$module_file" \
-    || {
-      echo "TLA_PROOF_STATUS=FAIL module=$module reason=declared-theorem-not-found:$theorem" >&2
+  local binding
+  binding="$(theorem_invariant_binding "$module" "$module_file")"
+  case "$binding" in
+    MANIFEST-ENTRY-MISSING)
+      echo "TLA_PROOF_STATUS=FAIL module=$module reason=manifest-entry-missing" >&2
       exit 30
-    }
+      ;;
+    THEOREM-NOT-FOUND:*)
+      echo "TLA_PROOF_STATUS=FAIL module=$module reason=declared-theorem-not-found:${binding#THEOREM-NOT-FOUND:}" >&2
+      exit 30
+      ;;
+    INVARIANT-NOT-FOUND:*)
+      echo "TLA_PROOF_STATUS=FAIL module=$module reason=proves-invariant-not-found:${binding#INVARIANT-NOT-FOUND:}" >&2
+      exit 30
+      ;;
+    OK:*) ;;
+    *)
+      echo "TLA_PROOF_STATUS=FAIL module=$module reason=binding-check-internal-error" >&2
+      echo "$binding" >&2
+      exit 30
+      ;;
+  esac
 
-  local invariant
-  IFS=$'\t' read -ra invariants <<<"$invariants_tsv"
-  for invariant in "${invariants[@]}"; do
-    grep -qE "\\[\\][[:space:]]*${invariant}([^A-Za-z0-9_]|\$)" "$module_file" \
-      || {
-        echo "TLA_PROOF_STATUS=FAIL module=$module reason=proves-invariant-not-found:$invariant" >&2
-        exit 30
-      }
-  done
+  local theorem invariants_csv
+  theorem="$(cut -d: -f2 <<<"$binding")"
+  invariants_csv="$(cut -d: -f3- <<<"$binding")"
 
-  echo "TLA_PROOF_STATUS=PASS module=$module obligations=$obligations theorem=$theorem invariants=${invariants_tsv//$'\t'/,}"
+  echo "TLA_PROOF_STATUS=PASS module=$module obligations=$obligations theorem=$theorem invariants=$invariants_csv"
 }
 
 for module in ${TLA_PROOFS:-CidxResultProof}; do
