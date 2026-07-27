@@ -29,6 +29,8 @@ set(CIDX_DEFAULT_TESTS
   ui_graph_view_test
   ui_server_test
   application_services_test
+  extraction_plan_test
+  extraction_engine_test
 )
 
 foreach(test_name IN LISTS CIDX_DEFAULT_TESTS)
@@ -42,6 +44,14 @@ endforeach()
 # The AST pass contract test drives a real LibTooling action through the
 # statement visitor, so it needs the same Clang C++ headers as cidx_ast.
 target_include_directories(ast_pass_test SYSTEM PRIVATE
+  ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+
+# extraction_engine_test (HSE-64) drives real clang::tooling::runToolOnCode
+# parses through the ExtractionPlan engine -- same lightweight in-memory-TU
+# treatment as ast_pass_test (no compile database/toolchain resolution, so it
+# stays under "default" rather than the heavier "clang" label reserved for
+# CLI/toolchain-resolved parses).
+target_include_directories(extraction_engine_test SYSTEM PRIVATE
   ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 
 add_executable(application_process_test application_process_test.cpp)

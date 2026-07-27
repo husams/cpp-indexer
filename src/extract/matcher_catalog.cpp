@@ -1,0 +1,319 @@
+#include "extract/matcher_catalog.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <functional>
+
+namespace cidx::extract {
+
+const std::set<std::string> &traversal_work_combinators() {
+  static const std::set<std::string> combinators = {"hasDescendant",
+                                                    "hasAncestor"};
+  return combinators;
+}
+
+MatcherCatalog::MatcherCatalog(std::set<std::string> matcher_ids,
+                               std::vector<MatcherProperty> properties)
+    : matcher_ids_(std::move(matcher_ids)), properties_(std::move(properties)) {
+}
+
+bool MatcherCatalog::allows_matcher(const std::string &matcher_id) const {
+  return matcher_ids_.contains(matcher_id);
+}
+
+bool MatcherCatalog::allows_property(const std::string &property_name) const {
+  return std::ranges::any_of(properties_, [&](const auto &entry) {
+    return entry.name == property_name;
+  });
+}
+
+std::optional<EndpointDomain>
+MatcherCatalog::required_domain(const std::string &property_name) const {
+  for (const MatcherProperty &property : properties_) {
+    if (property.name == property_name) {
+      return property.domain;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<AstPropertySubject>
+MatcherCatalog::required_subject(const std::string &property_name) const {
+  for (const MatcherProperty &property : properties_) {
+    if (property.name == property_name) {
+      return property.subject;
+    }
+  }
+  return std::nullopt;
+}
+
+const MatcherCatalog &MatcherCatalog::default_catalog() {
+  // Node matchers: the declaration/expression/type shapes a fact-emission
+  // rule may bind. Deliberately excludes unrestricted catch-alls (stmt(),
+  // expr(), decl()) with no bound parent scope -- every rule must anchor on
+  // a concrete node kind.
+  static const MatcherCatalog catalog(
+      {
+          // declaration matchers
+          "functionDecl",
+          "cxxMethodDecl",
+          "cxxConstructorDecl",
+          "cxxRecordDecl",
+          "varDecl",
+          "fieldDecl",
+          "parmVarDecl",
+          "namespaceDecl",
+          "classTemplateDecl",
+          "enumDecl",
+          "namedDecl",
+          // expression matchers
+          "callExpr",
+          "cxxMemberCallExpr",
+          "cxxOperatorCallExpr",
+          "cxxConstructExpr",
+          "declRefExpr",
+          "memberExpr",
+          // narrowing predicates and bounded traversal
+          "hasName",
+          "matchesName",
+          "hasAnyName",
+          "callee",
+          "callExpr",
+          "hasArgument",
+          "hasAnyArgument",
+          "argumentCountIs",
+          "hasAnyParameter",
+          "hasParameter",
+          "hasReturnType",
+          "hasType",
+          "pointsTo",
+          "references",
+          "ofClass",
+          "hasDeclContext",
+          "hasBody",
+          "hasInitializer",
+          "isDefinition",
+          "isVirtual",
+          "isConst",
+          "isStatic",
+          "isPrivate",
+          "isPublic",
+          "isProtected",
+          "hasOverloadedOperatorName",
+          "hasAncestor",
+          "hasDescendant",
+          "hasParent",
+          "unless",
+          "anyOf",
+          "allOf",
+      },
+      {
+          {.name = "spelling",
+           .domain = EndpointDomain::declaration,
+           .subject = AstPropertySubject::named_declaration},
+          {.name = "qualified_name",
+           .domain = EndpointDomain::declaration,
+           .subject = AstPropertySubject::named_declaration},
+          {.name = "is_pure",
+           .domain = EndpointDomain::declaration,
+           .subject = AstPropertySubject::cxx_method_declaration},
+          {.name = "is_static",
+           .domain = EndpointDomain::declaration,
+           .subject = AstPropertySubject::function_or_variable_declaration},
+          {.name = "is_virtual",
+           .domain = EndpointDomain::declaration,
+           .subject = AstPropertySubject::cxx_method_declaration},
+          {.name = "access_spelling",
+           .domain = EndpointDomain::declaration,
+           .subject = AstPropertySubject::declaration},
+          {.name = "storage_class",
+           .domain = EndpointDomain::declaration,
+           .subject = AstPropertySubject::variable_declaration},
+          {.name = "type_spelling",
+           .domain = EndpointDomain::expression,
+           .subject = AstPropertySubject::expression},
+          {.name = "value_kind",
+           .domain = EndpointDomain::expression,
+           .subject = AstPropertySubject::expression},
+          // "canonical_type_spelling" (EndpointDomain::type) was removed
+          // (PR #66 review): a type-domain binding resolves to a bare
+          // clang::QualType, which carries no clang::Decl/clang::Expr and no
+          // SourceLocation -- read_property() could never actually resolve
+          // it (always attribute_unresolved) and default_identity()/
+          // evidence_for() have no source anchor to stamp for a type-only
+          // binding either. It was an allow-listed catalog entry that could
+          // never produce a fact. Re-add only alongside a real
+          // TypeLoc-based identity/evidence story for type-domain bindings.
+      });
+  return catalog;
+}
+
+namespace {
+
+// Shared string-literal-aware tokenizer: invokes `on_call(identifier,
+// is_method_call)` for every `identifier(` or `.identifier(` call site
+// found in `matcher_expression`, skipping quoted string contents. Both
+// disallowed_matcher_calls() and count_matcher_occurrences() are built on
+// this single scanner so they can never disagree about what counts as a
+// "call site".
+void for_each_call_site(
+    const std::string &matcher_expression,
+    const std::function<void(const std::string &, bool)> &on_call) {
+  bool in_string = false;
+  std::size_t i = 0;
+  const std::size_t n = matcher_expression.size();
+  while (i < n) {
+    char c = matcher_expression[i];
+    if (in_string) {
+      if (c == '\\' && i + 1 < n) {
+        i += 2;
+        continue;
+      }
+      if (c == '"') {
+        in_string = false;
+      }
+      ++i;
+      continue;
+    }
+    if (c == '"') {
+      in_string = true;
+      ++i;
+      continue;
+    }
+    if (std::isalpha(static_cast<unsigned char>(c)) != 0 || c == '_') {
+      std::size_t start = i;
+      while (i < n && (std::isalnum(static_cast<unsigned char>(
+                           matcher_expression[i])) != 0 ||
+                       matcher_expression[i] == '_')) {
+        ++i;
+      }
+      std::string ident = matcher_expression.substr(start, i - start);
+      std::size_t j = i;
+      while (j < n && std::isspace(static_cast<unsigned char>(
+                          matcher_expression[j])) != 0) {
+        ++j;
+      }
+      if (j < n && matcher_expression[j] == '(') {
+        std::size_t k = start;
+        while (k > 0 && std::isspace(static_cast<unsigned char>(
+                            matcher_expression[k - 1])) != 0) {
+          --k;
+        }
+        const bool method_call = (k > 0 && matcher_expression[k - 1] == '.');
+        on_call(ident, method_call);
+      }
+      continue;
+    }
+    ++i;
+  }
+}
+
+} // namespace
+
+std::vector<std::string>
+disallowed_matcher_calls(const std::string &matcher_expression,
+                         const MatcherCatalog &catalog) {
+  std::vector<std::string> disallowed;
+  for_each_call_site(matcher_expression,
+                     [&](const std::string &ident, bool method_call) {
+                       if (method_call) {
+                         if (ident != "bind") {
+                           disallowed.push_back(ident);
+                         }
+                       } else if (!catalog.allows_matcher(ident)) {
+                         disallowed.push_back(ident);
+                       }
+                     });
+  return disallowed;
+}
+
+std::int64_t count_matcher_occurrences(const std::string &matcher_expression,
+                                       const std::set<std::string> &names) {
+  std::int64_t count = 0;
+  for_each_call_site(matcher_expression,
+                     [&](const std::string &ident, bool method_call) {
+                       if (!method_call && names.contains(ident)) {
+                         ++count;
+                       }
+                     });
+  return count;
+}
+
+bool has_nested_matcher_occurrences(const std::string &matcher_expression,
+                                    const std::set<std::string> &names) {
+  // Tracks, for every currently-open '(' scope, whether that scope was
+  // opened by a `names` call -- i.e. we are currently inside one of its
+  // arguments. A second `names` call site encountered while any enclosing
+  // scope is already `true` is nested inside it.
+  std::vector<bool> paren_is_target_call;
+  bool in_string = false;
+  std::size_t i = 0;
+  const std::size_t n = matcher_expression.size();
+  while (i < n) {
+    char c = matcher_expression[i];
+    if (in_string) {
+      if (c == '\\' && i + 1 < n) {
+        i += 2;
+        continue;
+      }
+      if (c == '"') {
+        in_string = false;
+      }
+      ++i;
+      continue;
+    }
+    if (c == '"') {
+      in_string = true;
+      ++i;
+      continue;
+    }
+    if (std::isalpha(static_cast<unsigned char>(c)) != 0 || c == '_') {
+      std::size_t start = i;
+      while (i < n && (std::isalnum(static_cast<unsigned char>(
+                           matcher_expression[i])) != 0 ||
+                       matcher_expression[i] == '_')) {
+        ++i;
+      }
+      std::string ident = matcher_expression.substr(start, i - start);
+      std::size_t j = i;
+      while (j < n && std::isspace(static_cast<unsigned char>(
+                          matcher_expression[j])) != 0) {
+        ++j;
+      }
+      if (j < n && matcher_expression[j] == '(') {
+        std::size_t k = start;
+        while (k > 0 && std::isspace(static_cast<unsigned char>(
+                            matcher_expression[k - 1])) != 0) {
+          --k;
+        }
+        const bool method_call = (k > 0 && matcher_expression[k - 1] == '.');
+        const bool is_target_call = !method_call && names.contains(ident);
+        if (is_target_call &&
+            std::ranges::any_of(paren_is_target_call,
+                                [](bool already) { return already; })) {
+          return true;
+        }
+        paren_is_target_call.push_back(is_target_call);
+        i = j + 1; // consume the '(' this call site opens.
+        continue;
+      }
+      continue;
+    }
+    if (c == '(') {
+      paren_is_target_call.push_back(false);
+      ++i;
+      continue;
+    }
+    if (c == ')') {
+      if (!paren_is_target_call.empty()) {
+        paren_is_target_call.pop_back();
+      }
+      ++i;
+      continue;
+    }
+    ++i;
+  }
+  return false;
+}
+
+} // namespace cidx::extract
