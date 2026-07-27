@@ -1040,6 +1040,16 @@ const Value *member(const Value &value, std::string_view key) {
   return nullptr;
 }
 
+void add_pagination_status(Value &value, bool pagination_truncated,
+                           bool byte_truncated, bool evidence_truncated,
+                           bool partial) {
+  if (Value *status = member(value, "status")) {
+    status->o.emplace_back("pagination_truncated",
+                           Value::of(pagination_truncated && !byte_truncated &&
+                                     !evidence_truncated && !partial));
+  }
+}
+
 const Value &required_member(const Value &value, std::string_view key,
                              Value::T type) {
   const Value *child = member(value, key);
@@ -2733,6 +2743,8 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
   if (evidence_truncated) {
     truncated = true;
   }
+  const bool pagination_truncated =
+      more_nodes_available || more_edges_available;
   for (auto &[name, value] : metadata) {
     if (name == "sites_used") {
       value = Value::of(sites_used);
@@ -2740,6 +2752,8 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
   }
   metadata.emplace_back("truncated", Value::of(truncated));
   metadata.emplace_back("evidence_truncated", Value::of(evidence_truncated));
+  metadata.emplace_back("pagination_truncated",
+                        Value::of(pagination_truncated));
   metadata.emplace_back("continuation", [&] {
     Object continuation;
     continuation.emplace_back("available", Value::of(truncated));
@@ -2994,6 +3008,8 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
           child = Value::of(evidence_truncated || byte_truncated);
         }
       }
+      add_pagination_status(value, pagination_truncated, byte_truncated,
+                            evidence_truncated, final_partial);
     }
   };
   if (Value *metadata_value = member(result, "metadata")) {
@@ -3006,6 +3022,8 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
     set_bool_member(*metadata_value, "truncated", final_truncated);
     set_bool_member(*metadata_value, "evidence_truncated",
                     evidence_truncated || byte_truncated);
+    set_bool_member(*metadata_value, "pagination_truncated",
+                    pagination_truncated);
     if (Value *continuation = member(*metadata_value, "continuation")) {
       set_bool_member(*continuation, "available", final_truncated);
       for (auto &[name, child] : continuation->o) {

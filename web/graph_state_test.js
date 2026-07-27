@@ -106,9 +106,10 @@ const continuationPageOne = {
   request: {node_budget: 1, edge_budget: 1, site_budget: 1},
   metadata: {
     node_budget: 1, edge_budget: 1, site_budget: 1, truncated: true,
+    pagination_truncated: true,
     continuation: {available: true, reason: 'budget', token: 'page-2'},
   },
-  nodes: [{id: 'cont-node-a', status: {truncated: true}}],
+  nodes: [{id: 'cont-node-a', status: {truncated: true, pagination_truncated: true}}],
   edges: [],
 };
 const continuationPageTwo = {
@@ -116,9 +117,10 @@ const continuationPageTwo = {
   request: {node_budget: 1, edge_budget: 1, site_budget: 1},
   metadata: {
     node_budget: 1, edge_budget: 1, site_budget: 1, truncated: false,
+    pagination_truncated: false,
     continuation: {available: false, reason: 'complete'},
   },
-  nodes: [{id: 'cont-node-b', status: {truncated: false}}],
+  nodes: [{id: 'cont-node-b', status: {truncated: false, pagination_truncated: false}}],
   edges: [],
 };
 const continuationMerged = mergeSlices(continuationPageOne, continuationPageTwo, {cumulative: true});
@@ -128,6 +130,47 @@ assert.equal(continuationMerged.status, 'complete');
 assert.deepEqual(continuationMerged.metadata.continuation, {available: false, reason: 'complete'});
 assert.notEqual(continuationMerged.nodes.find((node) => node.id === 'cont-node-a').status.truncated, true);
 assert.equal(continuationMerged.metadata.node_budget, 2);
+
+// A page can be pagination-truncated and intrinsically evidence-truncated at
+// the same time. Exhausting the graph continuation must clear only the
+// page-local pagination state and preserve the evidence flags.
+const mixedPageOne = {
+  status: 'partial',
+  request: {node_budget: 1, edge_budget: 1, site_budget: 1},
+  metadata: {
+    node_budget: 1, edge_budget: 1, site_budget: 1,
+    truncated: true, evidence_truncated: true, pagination_truncated: true,
+    continuation: {available: true, reason: 'budget', token: 'mixed-page-2'},
+  },
+  nodes: [{id: 'mixed-node', status: {truncated: true, pagination_truncated: false}}],
+  edges: [{
+    id: 'mixed-edge', source: 'mixed-node', target: 'mixed-node',
+    status: {truncated: true, evidence_truncated: true, pagination_truncated: false},
+    evidence: {truncated: true, sites_truncated: true}, sites: [{line: 1}],
+  }],
+};
+const mixedFinalPage = {
+  status: 'complete',
+  request: {node_budget: 1, edge_budget: 1, site_budget: 1},
+  metadata: {
+    node_budget: 1, edge_budget: 1, site_budget: 1,
+    truncated: false, evidence_truncated: false, pagination_truncated: false,
+    continuation: {available: false, reason: 'complete'},
+  },
+  nodes: [{id: 'mixed-final-node', status: {truncated: false, pagination_truncated: false}}],
+  edges: [],
+};
+const mixedMerged = mergeSlices(mixedPageOne, mixedFinalPage, {cumulative: true});
+const mixedEdge = mixedMerged.edges.find((edge) => edge.id === 'mixed-edge');
+assert.equal(mixedMerged.status, 'partial');
+assert.equal(mixedMerged.metadata.truncated, true);
+assert.equal(mixedMerged.metadata.evidence_truncated, true);
+assert.equal(mixedMerged.metadata.continuation.available, false);
+assert.equal(mixedMerged.metadata.continuation.token, undefined);
+assert.equal(mixedEdge.status.truncated, true);
+assert.equal(mixedEdge.status.evidence_truncated, true);
+assert.equal(mixedEdge.evidence.truncated, true);
+assert.equal(mixedEdge.evidence.sites_truncated, true);
 
 // A third page must keep growing against the ALREADY-grown budget (2),
 // not silently reset back to a single page's original budget (1).

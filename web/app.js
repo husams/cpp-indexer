@@ -35,8 +35,7 @@ const graphState = (() => {
     if (Array.isArray(left.sites) || Array.isArray(right.sites)) merged.sites = mergeSites(left.sites, right.sites);
     return merged;
   };
-  const pagePagination = (metadata = {}) => metadata.continuation?.available === true
-    && metadata.continuation?.reason === 'budget';
+  const pagePagination = (metadata = {}) => metadata.pagination_truncated === true;
   const mergeStatusInput = (view, cumulative) => {
     // A partial page whose only incompleteness is an available budget
     // continuation is not intrinsically partial. Once the ordered chain
@@ -53,13 +52,10 @@ const graphState = (() => {
       const pageLocal = {...record};
       if (record.status) {
         pageLocal.status = {...record.status};
-        delete pageLocal.status.truncated;
-        delete pageLocal.status.evidence_truncated;
-      }
-      if (record.evidence) {
-        pageLocal.evidence = {...record.evidence};
-        delete pageLocal.evidence.truncated;
-        delete pageLocal.evidence.sites_truncated;
+        if (record.status.pagination_truncated === true) {
+          delete pageLocal.status.truncated;
+          delete pageLocal.status.pagination_truncated;
+        }
       }
       return pageLocal;
     });
@@ -160,8 +156,8 @@ const graphState = (() => {
       // clears the prior page's continuation state and token.
       const leftIntrinsicTruncated = Boolean(left.metadata?.truncated && !pagePagination(left.metadata));
       const rightIntrinsicTruncated = Boolean(right.metadata?.truncated && !pagePagination(right.metadata));
-      const leftIntrinsicEvidenceTruncated = Boolean(left.metadata?.evidence_truncated && !pagePagination(left.metadata));
-      const rightIntrinsicEvidenceTruncated = Boolean(right.metadata?.evidence_truncated && !pagePagination(right.metadata));
+      const leftIntrinsicEvidenceTruncated = Boolean(left.metadata?.evidence_truncated);
+      const rightIntrinsicEvidenceTruncated = Boolean(right.metadata?.evidence_truncated);
       metadata.truncated = leftIntrinsicTruncated || rightIntrinsicTruncated;
       metadata.evidence_truncated = leftIntrinsicEvidenceTruncated || rightIntrinsicEvidenceTruncated;
       metadata.continuation = {...(right.metadata?.continuation || {})};
@@ -179,6 +175,7 @@ const graphState = (() => {
       metadata.truncated || elementTruncated || budgetTruncated
       || (cumulative && metadata.continuation.available));
     metadata.evidence_truncated = Boolean(metadata.evidence_truncated || evidenceTruncated);
+    metadata.truncated = Boolean(metadata.truncated || metadata.evidence_truncated);
     metadata.continuation.available = cumulative
       ? Boolean(metadata.continuation.available && metadata.continuation.token)
       : Boolean(metadata.continuation.available || metadata.truncated);
