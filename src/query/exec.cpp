@@ -2167,7 +2167,8 @@ private:
       // endpoints here lets a caller correlate every call SITE straight to
       // its (src_id, dst_id) in one query, without a second "edge" view
       // round-trip -- mirrors python/indexer/queryplan.py's `_typed_column`.
-      return "(SELECT " + field + " FROM edge WHERE edge.id = edge_site.edge_id)";
+      return "(SELECT " + field +
+             " FROM edge WHERE edge.id = edge_site.edge_id)";
     }
     const std::string table = typed_table(view);
     const std::set<std::string> allowed = [&] {
