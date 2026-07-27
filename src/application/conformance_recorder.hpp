@@ -53,6 +53,13 @@ public:
   // CIDX_SPEC_TLA_CONFORMANCE_DIR compile definition (CMakeLists.txt), the
   // same pattern src/ui/assets.cpp uses for CIDX_UI_ASSET_DIR.
   static ConformanceRecorder wrapping(const ApplicationServices &delegate);
+  // delegate_ is a reference member (see below): binding it to a temporary
+  // would leave a dangling reference the moment the full expression that
+  // constructed the temporary ends. Deleting the rvalue overload makes that
+  // a compile error instead of a silent use-after-free the first time this
+  // is wired into a call site that constructs its ApplicationServices inline
+  // (senior-developer acceptance-review finding, round 3).
+  static ConformanceRecorder wrapping(ApplicationServices &&delegate) = delete;
 
   protocol::ResultEnvelope index(const IndexRequest &request,
                                  ApplicationContext &context) const override;

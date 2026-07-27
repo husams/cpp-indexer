@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Regression proving the QA round-2 fix to check-proofs.sh's F1
-# theorem/invariant binding check (acceptance-review finding): the round-1
-# fix required manifest.json's declared theorem to exist as a THEOREM in the
+# Regression proving the QA round-2 and senior-developer round-3 fixes to
+# check-proofs.sh's F1 theorem/invariant binding check: the round-1 fix
+# required manifest.json's declared theorem to exist as a THEOREM in the
 # checked module, and each declared invariant's name to appear literally
 # somewhere as "[]<Invariant>" -- but that grep ran over the WHOLE module
 # file, comments included, with no requirement that the match sit inside a
@@ -12,26 +12,40 @@
 # "All N obligations proved." (for a real, if vacuous, TLAPS run) and the
 # invariant grep, and check-proofs.sh exited 0.
 #
-# The fix (this PR, round 2) strips all TLA+ comments before matching, finds
-# each top-level THEOREM's own statement text, and only accepts an invariant
-# as proved if it appears in the STATEMENT of the declared theorem or of a
-# theorem that (transitively) cites the declared theorem in a `BY` clause --
-# i.e. the declared theorem itself or one of its derived corollaries, never
-# a decoy comment or an unrelated theorem.
+# The round-2 fix strips all TLA+ comments before matching, finds each
+# top-level THEOREM's own statement text, and only accepts an invariant as
+# proved if it appears in the STATEMENT of a theorem in the BY-citation
+# closure of the declared theorem (the declared theorem itself, or a
+# corollary that transitively cites it) -- but round-2's "appears in" test
+# was still a bare substring search for "[]<Invariant>" anywhere in that
+# statement, with no requirement on shape or polarity. The round-3 fix
+# (senior-developer acceptance review) proved that gap live against real
+# TLAPS: a module whose declared theorem is the vacuous `TRUE OBVIOUS` above,
+# plus a second theorem `Negated == (~([]SharedResultTypeInvariant) /\\
+# ~([]TrustedOutcomeInvariant)) => TRUE BY <declared-theorem>` -- citing the
+# declared theorem so it enters the closure, and containing both invariant
+# names, but only inside a negated antecedent that proves nothing about
+# either invariant actually holding -- still produced
+# `TLA_PROOF_STATUS=PASS ... invariants=SharedResultTypeInvariant,TrustedOutcomeInvariant`.
 #
-# This script builds a throwaway proofs/ directory containing only a
-# deliberately vacuous CidxResultProof.tla (the real invariant names appear
-# ONLY inside a decoy comment, never inside any theorem statement) and reuses
-# this checkout's real modules/ and manifest.json unmodified, so the only
-# thing under test is check-proofs.sh's binding logic itself. It proves:
+# The round-3 fix requires a theorem's statement to structurally match
+# `<Spec> => []<Invariant>` for a real, module-defined Spec operator, not
+# merely contain that text as a substring. This script proves:
 #
 #   1. The vacuous module + decoy comment is REJECTED by the fixed
-#      check-proofs.sh with reason=proves-invariant-not-found (defect
-#      confirmed absent).
-#   2. The real, unmodified proofs/CidxResultProof.tla from this checkout
+#      check-proofs.sh with reason=proves-invariant-not-found (round-1/2
+#      defect confirmed absent).
+#   2. The negated-antecedent module (round-3's own repro) is REJECTED with
+#      the same reason (round-3 defect confirmed absent).
+#   3. A weakened-antecedent module (statement literally
+#      `FALSE => []<Invariant>`, so the invariant text is present, unnegated,
+#      and directly implied -- but the antecedent is not this module's real
+#      Spec operator) is also REJECTED.
+#   4. The real, unmodified proofs/CidxResultProof.tla from this checkout
 #      still PASSES (the fix does not regress the legitimate case, whose
 #      declared theorem's own statement does not literally contain either
-#      invariant name -- only its two derived corollary theorems do).
+#      invariant name -- only its two derived corollary theorems do, each
+#      structurally `Spec => []<Invariant>`).
 #
 # check-proofs.sh's tlapm toolchain is x86_64-linux-gnu only and this
 # checkout's convention (see check-verification-tamper-regression.sh) is not
@@ -118,7 +132,85 @@ if ! grep -q "SharedResultTypeInvariant" <<<"$vacuous_output" \
 fi
 echo "TLA_PROOF_BINDING_REGRESSION_STATUS=PASS check=vacuous-proof-with-decoy-comment-rejected"
 
-# --- Test 2: the real, unmodified proof module must still PASS. ---
+# --- Test 2: negated-antecedent decoy (senior-developer round-3 acceptance
+# repro), must be REJECTED. Both invariant names appear, unnegated text is
+# present, and the citing theorem is genuinely in the BY-citation closure --
+# but only inside a negation that proves nothing. ---
+
+NEGATION_SEED="$WORK/negation-seed.tla"
+cat >"$NEGATION_SEED" <<'TLA'
+----------------------------- MODULE CidxResultProof -----------------------------
+EXTENDS CidxResult, TLAPS
+
+THEOREM ResultInvarianceTheorem == TRUE OBVIOUS
+
+THEOREM Negated == (~([]SharedResultTypeInvariant) /\ ~([]TrustedOutcomeInvariant)) => TRUE
+  BY ResultInvarianceTheorem
+
+=============================================================================
+TLA
+
+result="$(run_check "$NEGATION_SEED")"
+negation_status="$(sed -n '1p' <<<"$result")"
+negation_output="$(sed -n '2,$p' <<<"$result")"
+
+if [[ "$negation_status" -eq 0 ]]; then
+  printf '%s\n' "$negation_output" >&2
+  die "negated-antecedent-decoy-passed"
+fi
+if ! grep -q "reason=proves-invariant-not-found" <<<"$negation_output"; then
+  printf '%s\n' "$negation_output" >&2
+  die "negated-antecedent-decoy-rejected-for-unexpected-reason"
+fi
+if ! grep -q "SharedResultTypeInvariant" <<<"$negation_output" \
+    || ! grep -q "TrustedOutcomeInvariant" <<<"$negation_output"; then
+  printf '%s\n' "$negation_output" >&2
+  die "negated-antecedent-rejection-did-not-name-both-missing-invariants"
+fi
+echo "TLA_PROOF_BINDING_REGRESSION_STATUS=PASS check=negated-antecedent-decoy-rejected"
+
+# --- Test 3: weakened-antecedent decoy, must be REJECTED. The invariant text
+# is present, unnegated, and directly implied by a bare implication -- but
+# the antecedent (FALSE) is not this module's real Spec operator, so the
+# claim is vacuously true and proves nothing about the actual specification.
+# ---
+
+WEAK_ANTECEDENT_SEED="$WORK/weak-antecedent-seed.tla"
+cat >"$WEAK_ANTECEDENT_SEED" <<'TLA'
+----------------------------- MODULE CidxResultProof -----------------------------
+EXTENDS CidxResult, TLAPS
+
+THEOREM ResultInvarianceTheorem == TRUE OBVIOUS
+
+THEOREM WeakCorollary1 == FALSE => []SharedResultTypeInvariant
+  BY ResultInvarianceTheorem
+
+THEOREM WeakCorollary2 == FALSE => []TrustedOutcomeInvariant
+  BY ResultInvarianceTheorem
+
+=============================================================================
+TLA
+
+result="$(run_check "$WEAK_ANTECEDENT_SEED")"
+weak_status="$(sed -n '1p' <<<"$result")"
+weak_output="$(sed -n '2,$p' <<<"$result")"
+
+if [[ "$weak_status" -eq 0 ]]; then
+  printf '%s\n' "$weak_output" >&2
+  die "weakened-antecedent-decoy-passed"
+fi
+if ! grep -q "reason=proves-invariant-not-found" <<<"$weak_output"; then
+  printf '%s\n' "$weak_output" >&2
+  die "weakened-antecedent-decoy-rejected-for-unexpected-reason"
+fi
+if ! grep -q "SharedResultTypeInvariant" <<<"$weak_output" \
+    || ! grep -q "TrustedOutcomeInvariant" <<<"$weak_output"; then
+  printf '%s\n' "$weak_output" >&2
+  die "weakened-antecedent-rejection-did-not-name-both-missing-invariants"
+fi
+echo "TLA_PROOF_BINDING_REGRESSION_STATUS=PASS check=weakened-antecedent-decoy-rejected"
+
+# --- Test 4: the real, unmodified proof module must still PASS. ---
 
 result="$(run_check "$REPO_ROOT/spec/tla/proofs/CidxResultProof.tla")"
 real_status="$(sed -n '1p' <<<"$result")"

@@ -208,6 +208,7 @@
     "tools/check-conformance.sh",
     "tools/check-sidecar-conformance.sh",
     "tools/check-proofs.sh",
+    "tools/check-proofs-vacuous-comment-regression.sh",
     "tools/export-counterexample.sh",
     "ci-dependency-map.json",
     "/.github/workflows/verification.yml"

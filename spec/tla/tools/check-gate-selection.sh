@@ -129,6 +129,44 @@ run_case() {
   git -C "$WORK" checkout --quiet main
 }
 
+# Round-4 senior-developer acceptance-review repros (P1-2 was fixed for the
+# three round-2 reported paths only, not for the defect class; reproduced
+# live with this same real select-changed-gates.sh against two further
+# protected-path instances of the identical break-main mechanism):
+#   - spec/tla/protected/CidxProtected.tla selected only
+#     tla-syntax-and-model, even though check-conformance.sh copies that
+#     exact file into its work directory and CidxConformance.tla EXTENDS
+#     CidxBehavior EXTENDS CidxProtected -- an edit here can break the
+#     conformance replay with tla-conformance never selected.
+#   - spec/tla/models/CidxResultSmoke.cfg selected only
+#     tla-syntax-and-model, even though export-counterexample.sh runs
+#     TLA_MODELS=CidxResultSmoke through check.sh and the tla-conformance
+#     job byte-diffs that output against
+#     counterexamples/golden/trusted-outcome-violation.json -- a
+#     state-count- or invariant-list-affecting cfg edit can break that golden
+#     diff with tla-conformance never selected.
+run_case cidxprotected-selects-conformance-gate \
+  "tla_conformance,tla_syntax_and_model,cpp_default" \
+  "tla_sidecar_conformance,tla_proofs,tla_policy" \
+  "spec/tla/protected/CidxProtected.tla"
+
+run_case cidxresultsmoke-cfg-selects-conformance-gate \
+  "tla_conformance,tla_syntax_and_model,cpp_default" \
+  "tla_sidecar_conformance,tla_proofs,tla_policy" \
+  "spec/tla/models/CidxResultSmoke.cfg"
+
+# Round-4 senior-developer acceptance-review repro (path-matching boundary):
+# a file-style map entry must match the WHOLE changed path, not merely share
+# a character prefix -- "spec/tla/tools/check.sh" must NOT select gates for
+# an unrelated sibling file such as "spec/tla/tools/check.sh.bak" that simply
+# happens to start with the same characters. This path is genuinely unmapped
+# (no flow lists it), so it must fail closed (every gate), never silently
+# inherit check.sh's narrower flow.
+run_case boundary-file-entry-does-not-overmatch-sibling \
+  "tla_syntax_and_model,tla_proofs,tla_conformance,tla_sidecar_conformance,tla_policy,cpp_default" \
+  "" \
+  "spec/tla/tools/check.sh.bak"
+
 # Round-3 repro 1: conformance_recorder.cpp is mapped to
 # index-generation-publication-and-queryplan (tla-conformance) but must also
 # select tla-sidecar-conformance, since the recorder both derives and

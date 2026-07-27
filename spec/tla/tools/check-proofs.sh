@@ -117,20 +117,47 @@ cp "$PROOF_DIR"/*.tla "$WORK"/
 # corollary theorems (ResultTypeAlwaysHolds, TrustedOutcomeAlwaysHolds)
 # further down the file, each proved `BY <declared-theorem>, ...`.
 #
+# F1 residual gap #2 (senior-developer acceptance review, round 3): the
+# round-2 fix scoped WHERE it looked (a theorem's own statement, inside the
+# BY-citation closure of the declared theorem) but never constrained WHAT
+# shape that statement had to be: it was still a bare substring search for
+# the character sequence "[]<Invariant>" anywhere in the statement text. A
+# module containing `THEOREM ResultInvarianceTheorem == TRUE OBVIOUS` plus
+# `THEOREM Negated == (~([]SharedResultTypeInvariant) /\ ~([]TrustedOutcomeInvariant))
+# => TRUE BY ResultInvarianceTheorem` still passed: `Negated` entered the
+# closure (its proof cites the declared theorem) and its statement contains
+# the literal substrings "[]SharedResultTypeInvariant"/"[]TrustedOutcomeInvariant"
+# -- inside a negation, proving nothing about the real claim. The same
+# unscoped-substring test also accepted `FALSE => []Inv` and other
+# weakened-antecedent shapes.
+#
 # Fixed binding: strip all TLA+ comments (so decoy text can never satisfy
 # the check), locate every top-level THEOREM's own statement (the text
 # between its `==` and its proof/next top-level THEOREM/LEMMA/module
 # boundary), then compute the closure of theorems reachable from the
 # declared theorem by following `BY <name>` proof references (i.e. the
 # declared theorem itself plus any corollary theorem whose proof cites it,
-# directly or transitively). A declared invariant is proved only if some
-# theorem's STATEMENT (not a comment, not an unrelated theorem) in that
-# closure literally states `[]<Invariant>`.
+# directly or transitively). Within that closure, a declared invariant is
+# now proved only if some theorem's STATEMENT structurally matches
+# `<Spec> => []<Invariant>` -- collapsed of whitespace, optionally wrapped in
+# one layer of parens, with `<Spec>` required to be the literal name of a
+# top-level operator this module (or one of its EXTENDS-chain modules,
+# already flattened into $WORK) actually defines as `<Spec> == Init /\ ...`
+# (the standard TLA+ "Spec == Init /\ [][Next]_vars /\ Fairness" idiom used
+# throughout this repository's modules -- see modules/CidxResult.tla:61 and
+# its siblings). A statement of the wrong shape (a negation, a conjunction
+# hiding the invariant inside an unrelated antecedent, a made-up antecedent
+# that is not any module's real Spec operator) can no longer satisfy the
+# check by substring match alone: because the required shape names a real
+# operator, TLAPS is still the one actually proving that non-vacuous
+# obligation, not this text scan.
 theorem_invariant_binding() {
   local module_name="$1"
   local module_file="$2"
   python3 - "$MANIFEST" "$module_name" "$module_file" <<'PY'
+import glob
 import json
+import os
 import re
 import sys
 
@@ -196,12 +223,56 @@ while changed:
             closure.add(name)
             changed = True
 
+
+def spec_operator_names(directory):
+    # Discover which operator names this module's EXTENDS chain actually
+    # defines with the standard TLA+ "Spec == Init /\ ..." idiom, rather than
+    # hardcoding the literal name "Spec" -- every .tla file already flattened
+    # into the checker's work directory (modules + proofs, see run_proof())
+    # is a candidate. This keeps the structural check tied to a real,
+    # module-defined operator instead of an arbitrary identifier an attacker
+    # could introduce (e.g. a "WeakSpec" that is not actually this module's
+    # temporal specification).
+    names = set()
+    spec_def_re = re.compile(
+        r"^([A-Za-z_][A-Za-z0-9_]*)\s*==\s*Init\b", re.MULTILINE
+    )
+    for path in glob.glob(os.path.join(directory, "*.tla")):
+        candidate_text = open(path, encoding="utf-8").read()
+        candidate_text = re.sub(r"\(\*.*?\*\)", "", candidate_text, flags=re.DOTALL)
+        candidate_text = re.sub(r"\\\*.*", "", candidate_text)
+        names.update(spec_def_re.findall(candidate_text))
+    return names
+
+
+def structurally_proves(statement, invariant, spec_names):
+    # Require the statement, once whitespace is collapsed, to be exactly
+    # "<spec>=>[]<invariant>" (with at most one layer of wrapping parens
+    # around the whole implication and/or the "[]<invariant>" term) for some
+    # module-defined spec operator -- not merely contain that text as a
+    # substring anywhere (which a negation or an unrelated conjunct could
+    # satisfy without the theorem proving anything of the sort).
+    collapsed = re.sub(r"\s+", "", statement)
+    for spec in spec_names:
+        pattern = (
+            r"^\(*"
+            + re.escape(spec)
+            + r"=>\(*\[\]"
+            + re.escape(invariant)
+            + r"\)*$"
+        )
+        if re.fullmatch(pattern, collapsed):
+            return True
+    return False
+
+
+spec_names = spec_operator_names(os.path.dirname(module_file))
+
 missing = [
     invariant
     for invariant in invariants
     if not any(
-        re.search(r"\[\]\s*" + re.escape(invariant) + r"(?![A-Za-z0-9_])", statements[n])
-        for n in closure
+        structurally_proves(statements[n], invariant, spec_names) for n in closure
     )
 ]
 

@@ -118,9 +118,20 @@ void require_observation_count(const ConformanceRecorder &recorder,
   }
 }
 
-void require_condition(bool condition) {
+// senior-developer acceptance review (round 3, fakeTests finding): doctest's
+// CHECK/REQUIRE report "assertions: 0 | 0 passed | 0 failed" in this TU
+// (visible in the runner summary) because they are routed through this
+// helper rather than doctest's own decomposition -- which erases the signal
+// that would tell a future reviewer whether a test file's assertions were
+// silently deleted. Carrying the stringified expression plus file/line
+// through the (still necessary, see comment below) macro redefinition keeps
+// a failure diagnosable without reverting to doctest's own macros.
+void require_condition(bool condition, const char *expression, const char *file,
+                       int line) {
   if (!condition) {
-    throw std::runtime_error("conformance test condition failed");
+    throw std::runtime_error(
+        std::string(file) + ":" + std::to_string(line) +
+        ": conformance test condition failed: " + expression);
   }
 }
 
@@ -144,10 +155,18 @@ struct FakeUnitOfWorkFactory final : cidx::storage::UnitOfWorkFactory {
 #undef CHECK_FALSE
 #undef REQUIRE
 #undef REQUIRE_FALSE
-#define CHECK(...) require_condition(static_cast<bool>((__VA_ARGS__)))
-#define CHECK_FALSE(...) require_condition(!static_cast<bool>((__VA_ARGS__)))
-#define REQUIRE(...) require_condition(static_cast<bool>((__VA_ARGS__)))
-#define REQUIRE_FALSE(...) require_condition(!static_cast<bool>((__VA_ARGS__)))
+#define CHECK(...)                                                             \
+  require_condition(static_cast<bool>((__VA_ARGS__)), #__VA_ARGS__, __FILE__,  \
+                    __LINE__)
+#define CHECK_FALSE(...)                                                       \
+  require_condition(!static_cast<bool>((__VA_ARGS__)), "!(" #__VA_ARGS__ ")",  \
+                    __FILE__, __LINE__)
+#define REQUIRE(...)                                                           \
+  require_condition(static_cast<bool>((__VA_ARGS__)), #__VA_ARGS__, __FILE__,  \
+                    __LINE__)
+#define REQUIRE_FALSE(...)                                                     \
+  require_condition(!static_cast<bool>((__VA_ARGS__)), "!(" #__VA_ARGS__ ")",  \
+                    __FILE__, __LINE__)
 
 TEST_CASE("conformance recorder accepts a well-behaved index, query, and "
           "sidecar-publish trace") {
@@ -500,8 +519,12 @@ TEST_CASE("conformance recorder rejects a seeded sidecar defect: an "
   CHECK_FALSE(recorder.conformant());
 }
 
-TEST_CASE("conformance recorder rejects a seeded out-of-order defect: "
-          "sidecar.publish recorded with no preceding index.publish") {
+TEST_CASE("conformance recorder rejects a sidecar.publish attempt with no "
+          "matching prior index.publish (generation-provenance check, "
+          "renamed round-3: this seed's rejection comes from the "
+          "unmatched-generation expectation check, not a separate ordering "
+          "check -- see the two tests below for that mechanism's actual "
+          "ordering guarantee)") {
   FakeServices fake;
   fake.analysis_response =
       base_envelope("analysis", Status::Complete, "complete", "current");
@@ -519,9 +542,19 @@ TEST_CASE("conformance recorder rejects a seeded out-of-order defect: "
   // already run (corePublicationState = "current" is not the model's
   // default -- tools/check-sidecar-conformance.sh's "illegal-order" seed
   // proves via real TLC that attempting it earlier deadlocks). No
-  // index.publish was ever recorded in this trace, so the sidecar.publish
-  // below has no legal predecessor -- exactly what that TLC-proven rule
-  // forbids, now enforced directly against the recorded C++ call order.
+  // index.publish was ever recorded in this trace, so this artifact's
+  // generation cannot match last_published_generation_ (it is
+  // std::nullopt), and has_valid_sidecar_artifact() reports false --
+  // sidecarFilePublication is recorded as "none", which
+  // conformant()'s per-observation expectation check (operation
+  // "sidecar.publish" expects sidecarFilePublication="current") then
+  // rejects. This is the generation-provenance check catching the missing
+  // predecessor, NOT a distinct sequencing check: round-3 acceptance review
+  // proved that a separate ordered-trace loop this recorder previously ran
+  // after this same check was dead code (deleting it left every case here
+  // green), because a "current"-labeled sidecar.publish is unreachable
+  // without an earlier index.publish already in observations_ -- see
+  // ConformanceRecorder::conformant()'s comment for why.
   recorder.analysis(AnalysisRequest{.action = AnalysisAction::execute,
                                     .rule = std::nullopt,
                                     .rules_file = std::nullopt,
@@ -532,6 +565,95 @@ TEST_CASE("conformance recorder rejects a seeded out-of-order defect: "
 
   require_observation_count(recorder, 1);
   CHECK(recorder.observations()[0].operation == "sidecar.publish");
+  CHECK(recorder.observations()[0].fields[0].second == "none");
+  CHECK_FALSE(recorder.conformant());
+}
+
+TEST_CASE("conformance recorder can never observe sidecarFilePublication "
+          "'current' before any index.publish has been recorded on the "
+          "same instance (the structural guarantee the deleted ordered-"
+          "trace loop assumed, now asserted directly)") {
+  FakeServices fake;
+  // Same generation/catalog values a later index() call in this test WOULD
+  // publish, so the only thing distinguishing "current" from "none" here is
+  // call order, not artifact content.
+  fake.analysis_response =
+      base_envelope("analysis", Status::Complete, "complete", "current");
+  fake.analysis_response.artifacts.push_back({.kind = "analysis",
+                                              .id = "sidecar-1",
+                                              .schema_version = 1,
+                                              .catalog_version = 1,
+                                              .catalog_hash = "test-hash",
+                                              .generation = "generation-1"});
+
+  ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
+  ApplicationContext context = test_context();
+  recorder.analysis(AnalysisRequest{.action = AnalysisAction::execute,
+                                    .rule = std::nullopt,
+                                    .rules_file = std::nullopt,
+                                    .export_directory = std::nullopt,
+                                    .index = std::nullopt,
+                                    .jobs = 1},
+                    context);
+
+  require_observation_count(recorder, 1);
+  CHECK(recorder.observations()[0].operation == "sidecar.publish");
+  // No index() call has happened yet on this recorder instance, so
+  // last_published_generation_ is still unset -- sidecarFilePublication
+  // cannot be "current" no matter what the artifact itself claims.
+  CHECK(recorder.observations()[0].fields[0].second == "none");
+}
+
+TEST_CASE("conformance recorder rejects a trace where a sidecar.publish is "
+          "attempted before its matching index.publish, even though that "
+          "index.publish exists later in the very same trace") {
+  FakeServices fake;
+  fake.index_response =
+      base_envelope("index", Status::Complete, "complete", "current");
+  fake.index_response.artifacts.push_back({.kind = "semantic-index",
+                                           .id = "generation-1",
+                                           .schema_version = 1,
+                                           .catalog_version = 1,
+                                           .catalog_hash = "test-hash",
+                                           .generation = "generation-1"});
+  fake.analysis_response =
+      base_envelope("analysis", Status::Complete, "complete", "current");
+  fake.analysis_response.artifacts.push_back({.kind = "analysis",
+                                              .id = "sidecar-1",
+                                              .schema_version = 1,
+                                              .catalog_version = 1,
+                                              .catalog_hash = "test-hash",
+                                              .generation = "generation-1"});
+
+  ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
+  ApplicationContext context = test_context();
+  // Call order is deliberately reversed relative to the accepted case below:
+  // analysis() (attempting a sidecar publish) runs BEFORE index(). The
+  // recorded trace therefore contains a "sidecar.publish" entry at position
+  // 0 with sidecarFilePublication="none" (no matching generation was
+  // published yet) followed by "index.publish" at position 1 -- and the
+  // trace as a whole must still be rejected, because that first entry never
+  // becomes conformant no matter what is recorded afterward.
+  recorder.analysis(AnalysisRequest{.action = AnalysisAction::execute,
+                                    .rule = std::nullopt,
+                                    .rules_file = std::nullopt,
+                                    .export_directory = std::nullopt,
+                                    .index = std::nullopt,
+                                    .jobs = 1},
+                    context);
+  recorder.index(IndexRequest{.action = IndexAction::update,
+                              .files = {},
+                              .source = std::nullopt,
+                              .graph = true,
+                              .autoderive_labels = true,
+                              .json = false,
+                              .index = std::nullopt},
+                 context);
+
+  require_observation_count(recorder, 2);
+  CHECK(recorder.observations()[0].operation == "sidecar.publish");
+  CHECK(recorder.observations()[0].fields[0].second == "none");
+  CHECK(recorder.observations()[1].operation == "index.publish");
   CHECK_FALSE(recorder.conformant());
 }
 

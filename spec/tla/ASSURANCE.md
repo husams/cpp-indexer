@@ -42,6 +42,58 @@ smoke model in the meantime, and `tools/check-policy.sh` continues to require
 human `CODEOWNERS` review before `protected/CidxProtected.tla` can change at
 all.
 
+## check-proofs.sh binding-check scope (round-3 acceptance review)
+
+`tools/check-proofs.sh`'s theorem/invariant binding check accepts a declared
+invariant as proved only when some theorem's statement, in the BY-citation
+closure of the manifest-declared theorem, structurally matches
+`<Spec> => []<Invariant>` for a real, module-defined `Spec` operator -- not
+merely contains that text as a substring (round-2's gap) and not merely sits
+inside the closure regardless of shape (round-3's gap, closed by requiring
+the structural match). Two accepted, non-blocking limitations of this
+approach, documented here rather than left implicit:
+
+- **Only top-level `THEOREM` declarations are collected as closure carriers;
+  `LEMMA` is treated purely as a closure *boundary*, never as a member.** A
+  legitimate restructuring that proves a corollary via an intermediate
+  `LEMMA` (rather than directly `BY <declared-theorem>`) would fail the gate
+  with `reason=proves-invariant-not-found`, even though the underlying TLAPS
+  proof is genuinely sound. This is a false-negative failure mode, not a
+  soundness gap: it can only make the gate too strict, never accept a vacuous
+  proof. Should this repository ever add a proof shaped that way, treat the
+  gate failure as a binding-logic limitation to fix, not a real regression.
+- **The check requires the literal antecedent `Spec` (dynamically discovered
+  as any module-defined `<Name> == Init /\ ...` operator, not hardcoded) --
+  a theorem proving the same invariant from a differently-named but
+  equivalent temporal formula would also fail closed.** Every module in this
+  repository names its top-level specification `Spec`
+  (`modules/CidxResult.tla:61` and siblings), so this is not a practical
+  restriction today.
+
+## Conformance recorder: tautological sidecar branches (round-3 acceptance
+review)
+
+`ConformanceRecorder::analysis()`'s `sidecar.missing` and `sidecar.corrupt`
+branches (round-2 critic P1-1b/P1-1c fix) assert `sidecarFilePublication`,
+`sidecarState`, `sidecarQuality`, and `sidecarValidated` as literal values
+matching exactly what `sidecar-operation-map.json` declares each operation
+expects -- they do not derive those values from anything independently
+observed on those two paths. This is sound (each operation's postcondition
+in `CidxStorageLifecycle.tla`'s `MarkSidecarMissing`/`MarkSidecarCorrupt`
+really does set those fields unconditionally), but it means `conformant()`
+retains discriminating power on the sidecar side only through the
+`sidecar.publish` branch (which does compare recorded artifact provenance
+against `last_published_generation_`) and through the entry condition that
+selects which of the three branches runs at all (empty artifacts vs.
+top-level error vs. neither). A defect that mis-selected the wrong branch
+(e.g. treated a real error as a healthy empty result) would still be caught;
+a defect confined entirely within an already-selected `sidecar.missing`/
+`sidecar.corrupt` branch's field values would not be, because those values
+are constants, not computed. This mirrors the already-accepted
+`index.publish` tautology noted elsewhere in this document's spirit and is
+flagged here for the same reason: narrowed discriminating power, not a
+silently-hidden gap.
+
 ## Model bounds are not exhaustive proof
 
 Every TLC run in this repository uses one finite constant instantiation, one

@@ -62,7 +62,18 @@ changed = [line.strip() for line in open(changed_path) if line.strip()]
 all_gates = set(manifest["allGates"])
 
 def matches(path, prefix):
-    return path == prefix or path.startswith(prefix)
+    # A directory-style entry (trailing "/") matches anything nested under
+    # it; a file-style entry (no trailing "/") must match the WHOLE path, not
+    # merely share a character prefix -- `path.startswith(prefix)` alone
+    # would let "spec/tla/tools/check.sh" over-match an unrelated sibling
+    # like "spec/tla/tools/check.sh.bak" (senior-developer round-1 finding).
+    # Over-matching only widens gate selection (fail-open toward more
+    # checking, never fewer gates), so it was never an exploitable hole, but
+    # it is still a real path-mapping defect worth closing at the same time
+    # as the flow-coverage fixes in this round.
+    if prefix.endswith("/"):
+        return path == prefix.rstrip("/") or path.startswith(prefix)
+    return path == prefix
 
 required_gates = set()
 unmapped = []

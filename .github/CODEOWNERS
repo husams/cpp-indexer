@@ -62,6 +62,14 @@
 /spec/tla/tools/export-counterexample.sh @husams
 /spec/tla/tools/check-verification-tamper-regression.sh @husams
 /spec/tla/tools/check-self-test-tamper-regression.sh @husams
+# HSE-89 round-3 acceptance-review finding: check-proofs-vacuous-comment-
+# regression.sh is check-proofs.sh's self-test, the same role
+# check-regression.sh plays for check.sh -- and check-regression.sh is listed
+# here. This entry closes the same coverage-consistency gap for the newer
+# file; it was already base-extracted in verification.yml (mirroring
+# check-regression.sh) and covered by check-verification-tamper-regression.sh's
+# checker table, so this is defense-in-depth, not a new protection mechanism.
+/spec/tla/tools/check-proofs-vacuous-comment-regression.sh @husams
 # HSE-89 round-6 security fix: extract-trusted-checker.sh is the single
 # shared implementation every base-pinning extraction step in
 # verification.yml now calls (except check-protected-review.sh, which stays

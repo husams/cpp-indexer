@@ -32,6 +32,7 @@
         "spec/tla/modules/CidxBehavior.tla",
         "spec/tla/modules/CidxSemanticGraph.tla",
         "spec/tla/modules/CidxTypes.tla",
+        "spec/tla/protected/",
         "spec/tla/conformance/CidxConformance.tla",
         "spec/tla/conformance/operation-map.json",
         "spec/tla/conformance/observation-map.json",
@@ -78,6 +79,8 @@
         "spec/tla/tools/export-counterexample.sh",
         "spec/tla/tools/check.sh",
         "spec/tla/modules/CidxResult.tla",
+        "spec/tla/models/CidxResultSmoke.tla",
+        "spec/tla/models/CidxResultSmoke.cfg",
         "spec/tla/counterexamples/",
         "tests/tla_counterexample_regression_test.cpp"
       ]

@@ -391,38 +391,38 @@ bool ConformanceRecorder::conformant() const {
 
         return true;
       });
-  if (!per_observation_ok) {
-    return false;
-  }
+  // Ordering note (senior-developer acceptance review, round 3): an earlier
+  // version of this function additionally walked observations_ looking for
+  // a "sidecar.publish" entry with no preceding "index.publish" entry,
+  // claiming to be the C++ enforcement of CidxStorageConformance.tla's
+  // PublishSidecar precondition (corePublicationState = "current", reachable
+  // only after this session's StartOneTUUpdate -> ... -> PublishCoreGeneration
+  // sequence has already run; tools/check-sidecar-conformance.sh's
+  // "illegal-order" seed proves via real TLC replay that attempting
+  // PublishSidecar earlier deadlocks). That loop was dead code: deleting it
+  // and rebuilding left every conformance_recorder_test case green (proof
+  // reproduced by the senior-developer review and re-verified here). The
+  // reason is structural, not incidental. sidecar_artifact_matches_published_
+  // generation() above only returns true when published_generation has a
+  // value, and last_published_generation_ (the only place that optional is
+  // ever set) is written exclusively inside index()'s index_state=="current"
+  // branch -- which pushes its own "index.publish" observation into
+  // observations_ in the same call, strictly before any later analysis()
+  // call on this same recorder instance could observe that generation.
+  // Because observations_ is appended in call order, any "sidecar.publish"
+  // observation that reaches this point with sidecarFilePublication=="current"
+  // (the only shape the per-observation expectation check above accepts for
+  // that operation) is therefore guaranteed to already have its matching
+  // "index.publish" entry earlier in the vector -- there is no code path
+  // through this recorder's public API that can produce the out-of-order
+  // trace the deleted loop was written to catch. See ASSURANCE.md's
+  // "check-proofs.sh binding-check scope" note for the same discipline
+  // applied on the TLA+ side: don't leave a check whose own code path proves
+  // it can never fire, since that misdescribes what is actually enforced.
+  // check-sidecar-conformance.sh remains the TLC-backed verification of the
+  // underlying PublishSidecar precondition itself.
 
-  // Ordered-trace check: CidxStorageConformance.tla's PublishSidecar action
-  // requires corePublicationState = "current" -- reachable only after this
-  // same session's StartOneTUUpdate -> ... -> PublishCoreGeneration sequence
-  // has already run. tools/check-sidecar-conformance.sh's "illegal-order"
-  // seed proves via real TLC replay that attempting PublishSidecar before
-  // that sequence completes deadlocks (no legal step remains); this is the
-  // same rule enforced here, directly against the recorded C++ call order,
-  // rather than a per-observation check that ignores sequencing entirely.
-  // (A literal per-trace TLC replay is not attempted here: CidxStorageLifecycle
-  // models the core-then-sidecar sequence as 7 fine-grained actions with no
-  // 1:1 correspondence to the 2 coarse-grained ApplicationServices calls
-  // (index()/analysis()) this recorder observes, and tests/CMakeLists.txt's
-  // "default" label is deliberately hermetic -- no Java/TLC dependency,
-  // matching every other default-labeled test. check-sidecar-conformance.sh is
-  // the TLC-backed verification of the underlying rule; this is its C++
-  // enforcement.)
-  bool index_published_so_far = false;
-  for (const auto &observation : observations_) {
-    if (observation.operation == "index.publish") {
-      index_published_so_far = true;
-    } else if (observation.operation == "sidecar.publish") {
-      if (!index_published_so_far) {
-        return false;
-      }
-    }
-  }
-
-  return true;
+  return per_observation_ok;
 }
 
 } // namespace cidx::application
