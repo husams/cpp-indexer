@@ -843,22 +843,137 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         self.assertEqual(violations[0]["witness"]["call_site"]["line"], 42)
         self.assertEqual(violations[0]["witness"]["call_site"]["col"], 7)
 
+    def test_same_endpoint_edges_of_different_relation_kinds_never_truncate_enumeration_early(
+        self,
+    ) -> None:
+        # [AC7 blocker, PR #67 round-3 re-review, real reproduction at full
+        # ENUMERATE_BUDGET scale] `_edge_site_count`'s completeness check
+        # used to scope its verification query by (src_id, dst_id) alone,
+        # not by the boundary edge's own id. When a SECOND edge connects
+        # the exact same two symbols under a DIFFERENT relation kind -- an
+        # ordinary shape in a real C++ codebase, e.g. a function that is
+        # both `calls`- and `dispatch_calls`-related to the same callee --
+        # that companion edge's (not-yet-visited) sites were silently
+        # folded into the boundary edge's own completeness count. Whenever
+        # the boundary edge's page was the FIRST page and consisted solely
+        # of its own, fully-captured sites, the inflated count manufactured
+        # a mismatch that was never really about the boundary edge, and
+        # `_run_all_site_pages` treats a mismatch that fills the entire
+        # page as unrecoverable: it gives up immediately. That still
+        # reports `enumerationTruncated: true` (never a false completeness
+        # claim), but it abandons the ENTIRE rest of the graph after just
+        # that first page -- every subsequent edge and violation, however
+        # large the remaining table, is silently never visited. This is
+        # the general invariant AC7 requires: whether a violation is
+        # reported must never depend on whether some OTHER, unrelated edge
+        # happens to share the boundary edge's two endpoints.
+        fixture = _Fixture()
+        fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model"]
+        fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
+
+        def add_filler_edges(prefix: str, count: int) -> None:
+            # Bulk SQL, not a `add_symbol`/`add_edge` Python call per row
+            # (ENUMERATE_BUDGET of those takes minutes) -- mirrors
+            # python/tests/test_queryplan.py's own bulk-fixture convention
+            # for budget-scale tests. Distinct dangling symbols with no
+            # file, edges from `sym_run` to each, zero sites: they consume
+            # a raw edge-id slot but are invisible to the site pipeline and
+            # to module classification (no `file_id`), exactly like the
+            # filler edges in `test_edge_enumeration_truncation_upstream_
+            # of_sites_is_never_silently_dropped` above.
+            fixture._db._conn.execute(
+                "WITH RECURSIVE lines(n) AS (SELECT 0 UNION ALL SELECT n + 1 "
+                f"FROM lines WHERE n < {count - 1}) "
+                "INSERT INTO symbol(usr, spelling, kind) "
+                f"SELECT '{prefix}' || n, '{prefix}' || n, 8 FROM lines"
+            )
+            fixture._db._conn.execute(
+                "INSERT INTO edge(src_id, dst_id, kind) "
+                f"SELECT ?, id, ? FROM symbol WHERE usr LIKE '{prefix}%'",
+                (fixture.sym_run, CALLS_KIND),
+            )
+            fixture._db._conn.commit()
+
+        # ids 1..4000: filler edges (zero sites) -- positions the boundary
+        # edge INSIDE the first ENUMERATE_BUDGET-sized raw window, not at
+        # its very first slot, so this is not merely the id=1 special case.
+        add_filler_edges("bulk1::", 4000)
+        # id 4001: the boundary edge -- a genuine cross-module violation
+        # (extraction -> cli), fully captured within this same first page.
+        edge_a = fixture.add_call(fixture.sym_run, fixture.sym_render, line=11, col=1, kind=CALLS_KIND)
+        self.assertEqual(edge_a, 4001)
+        # ids 4002..10000: more filler edges, filling the raw window out to
+        # exactly ENUMERATE_BUDGET (10000) total edges so far.
+        add_filler_edges("bulk2::", qp.ENUMERATE_BUDGET - 4001)
+        # id 10001: the companion -- SAME (src, dst) as the boundary edge,
+        # DIFFERENT relation kind, positioned just past the first raw
+        # window (invisible to it, unlike the existing `test_edge_site_
+        # count_finds_the_real_edge_past_the_enumerate_budget` unit test,
+        # which never puts two edges on the same endpoints).
+        edge_b = fixture.add_call(fixture.sym_run, fixture.sym_render, line=12, col=2, kind=DISPATCH_CALLS_KIND)
+        self.assertEqual(edge_b, qp.ENUMERATE_BUDGET + 1)
+        # id 10002: a second, wholly independent violation further along --
+        # the evidence the pre-fix give-up branch silently never reached.
+        sym_render2 = fixture._db.add_symbol(
+            Symbol(
+                usr="u-render2", spelling="render2", qual_name="render2", kind="function",
+                file_id=fixture.file_format, line=3, is_definition=True, resolved=True,
+            )
+        )
+        edge_c = fixture.add_call(fixture.sym_run, sym_render2, line=42, col=7, kind=CALLS_KIND)
+        self.assertEqual(edge_c, qp.ENUMERATE_BUDGET + 2)
+
+        report = fixture.run()
+        self.assertFalse(report["index"]["coverage"]["enumerationTruncated"])
+        self.assertEqual(report["completeness"]["semantic"], "complete")
+        self.assertEqual(report["status"], "fail")
+        violations = report["findings"]["moduleBoundaryViolations"]
+        sites = {(v["witness"]["call_site"]["line"], v["witness"]["call_site"]["col"]) for v in violations}
+        # All three: the boundary edge's own site, its same-endpoint
+        # companion's site, and the wholly independent later violation.
+        self.assertEqual(sites, {(11, 1), (12, 2), (42, 7)})
+
+    def test_edge_site_count_scopes_to_the_exact_edge_not_its_endpoints(self) -> None:
+        # [AC7 fix, direct unit coverage] two edges sharing the exact same
+        # (src, dst) under different relation kinds must never contaminate
+        # each other's site count: `_edge_site_count` is asked about ONE of
+        # them and must report only that edge's own true total, not the
+        # sum. This is the exact defect `test_same_endpoint_edges_of_
+        # different_relation_kinds_never_truncate_enumeration_early` proves
+        # end-to-end; this unit test pins the specific function contract.
+        fixture = _Fixture()
+        edge_calls = fixture.add_call(fixture.sym_run, fixture.sym_render, line=1, col=1, kind=CALLS_KIND)
+        fixture.add_call(fixture.sym_run, fixture.sym_render, line=2, col=2, kind=CALLS_KIND)
+        edge_dispatch = fixture.add_call(
+            fixture.sym_run, fixture.sym_render, line=3, col=3, kind=DISPATCH_CALLS_KIND
+        )
+        fixture.add_call(fixture.sym_run, fixture.sym_render, line=4, col=4, kind=DISPATCH_CALLS_KIND)
+        fixture.add_call(fixture.sym_run, fixture.sym_render, line=5, col=5, kind=DISPATCH_CALLS_KIND)
+
+        executor = qp.Executor(fixture._db)
+        calls_count, calls_truncated = _edge_site_count(executor, edge_calls)
+        dispatch_count, dispatch_truncated = _edge_site_count(executor, edge_dispatch)
+        self.assertEqual(calls_count, 2)
+        self.assertFalse(calls_truncated)
+        self.assertEqual(dispatch_count, 3)
+        self.assertFalse(dispatch_truncated)
+
     def test_edge_site_count_finds_the_real_edge_past_the_enumerate_budget(self) -> None:
         # [Round-6 internal critic P1] `_edge_site_count` used to call
         # `executor.run(plan)` with NO `after_id` on a `view("edge") |
-        # nodes(eq(src_id, ...), eq(dst_id, ...))` plan. queryplan.py's
-        # `_enumerate` only wires the pagination cursor into the "edge"
-        # branch when `after_id is not None`; with none, it fetches the
-        # globally-FIRST ENUMERATE_BUDGET edges by id and applies
-        # (src_id, dst_id) as a post-fetch filter -- so any edge whose id
-        # sorts past that cutoff was invisible to the filter no matter how
-        # many real sites it owns. Reproduced directly here: >ENUMERATE_
-        # BUDGET filler edges (each a distinct (src, dst) pair -- `add_edge`
-        # upserts on (src_id, dst_id, kind), so repeating one pair would
-        # just bump its `count` instead of consuming a fresh id) followed by
-        # ONE real edge with 3 genuine call sites. Before the fix this
-        # returned `(0, True)` -- wrong on both the count and the
-        # truncation flag -- for a real, populated edge.
+        # nodes(eq("edge_id", ...))` plan. queryplan.py's `_enumerate` only
+        # wires the pagination cursor into the "edge" branch when `after_id
+        # is not None`; with none, it fetches the globally-FIRST
+        # ENUMERATE_BUDGET edges by id and applies the predicate as a
+        # post-fetch filter -- so any edge whose id sorts past that cutoff
+        # was invisible to the filter no matter how many real sites it
+        # owns. Reproduced directly here: >ENUMERATE_BUDGET filler edges
+        # (each a distinct (src, dst) pair -- `add_edge` upserts on
+        # (src_id, dst_id, kind), so repeating one pair would just bump its
+        # `count` instead of consuming a fresh id) followed by ONE real
+        # edge with 3 genuine call sites. Before the fix this returned
+        # `(0, True)` -- wrong on both the count and the truncation flag --
+        # for a real, populated edge.
         fixture = _Fixture()
         overflow = qp.ENUMERATE_BUDGET + 50
         for i in range(overflow):
@@ -877,9 +992,7 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         fixture._db._conn.commit()
 
         executor = qp.Executor(fixture._db)
-        real_count, truncated = _edge_site_count(
-            executor, real_edge_id, fixture.sym_run, fixture.sym_write
-        )
+        real_count, truncated = _edge_site_count(executor, real_edge_id)
         self.assertEqual(real_count, 3)
         self.assertFalse(truncated)
 

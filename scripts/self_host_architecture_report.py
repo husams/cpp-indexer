@@ -49,7 +49,7 @@ from scripts.check_platform_contract import validate_contract  # noqa: E402
 
 from indexer.storage import Storage  # noqa: E402
 from indexer.queryplan import (  # noqa: E402
-    ENUMERATE_BUDGET, Executor, all_of, codebase, count, eq, limit, nodes, select,
+    ENUMERATE_BUDGET, Executor, codebase, count, eq, limit, nodes, select,
     sites, start, view,
 )
 from indexer._version import DATABASE_SCHEMA_VERSION  # noqa: E402
@@ -322,11 +322,9 @@ def _run_all_pages(
         after_id = next_after_id
 
 
-def _edge_site_count(
-    executor: Executor, edge_id_hint: int, src_id: int, dst_id: int
-) -> tuple[int, bool]:
+def _edge_site_count(executor: Executor, edge_id_hint: int) -> tuple[int, bool]:
     """The real, QueryPlan-only count of every recorded call SITE owned by
-    the edge(s) from `src_id` to `dst_id`, plus whether even counting them
+    the ONE edge whose id is `edge_id_hint`, plus whether even counting them
     completed.
 
     Used solely to verify pagination completeness at a page boundary (see
@@ -335,20 +333,36 @@ def _edge_site_count(
     `check_index_coverage` below, just expressed through `count()` (HSE-66's
     own scalar-result stage) instead of raw SQL, so it stays on the same
     QueryPlan-only path as every other fact in this module. Scoped with
-    `nodes(...)` BEFORE `sites()` (on src_id/dst_id, both real predicate
-    fields of the "edge" view) rather than a `where(...)` filter AFTER it:
-    the latter would force QueryPlan to materialize and per-row-filter every
-    site of every OTHER edge in the whole graph just to answer one edge's
-    count. `(src_id, dst_id)` can match more than one edge if the same pair
-    is connected by more than one relation kind; that only ever makes this
-    count equal to or larger than the true count for the ONE edge being
-    checked, so it can never wrongly report a page as complete -- at worst
-    it forces an unnecessary retry, never a silently accepted evidence gap.
+    `nodes(...)` BEFORE `sites()` (on "edge_id", the "edge" view's own raw
+    `id` column -- see `_typed_column`) rather than a `where(...)` filter
+    AFTER it: the latter would force QueryPlan to materialize and per-row-
+    filter every site of every OTHER edge in the whole graph just to answer
+    one edge's count.
+
+    [AC7 fix] A prior version scoped this query by `(src_id, dst_id)`
+    instead of the edge's own id, reasoning that a shared endpoint pair
+    could only ever match MORE edges than the one being checked, so the
+    count could never be too SMALL to hide a real gap. That reasoning
+    ignored the caller's own "give up rather than retry forever" branch
+    (`_run_all_site_pages`): when the caller's OWN captured page holds only
+    THIS edge's sites (the one case a mismatch is treated as unrecoverable
+    and the whole read is abandoned rather than retried), a real but
+    DIFFERENT edge sharing the same two endpoints under a different
+    relation kind -- e.g. a "calls" edge and a "dispatch_calls" edge between
+    the same two symbols, an ordinary pattern in a real C++ codebase -- was
+    counted alongside it here, inflating the count above this edge's own
+    true total and forcing a mismatch that was never really about THIS
+    edge. The caller then gave up immediately, on the very first page,
+    never visiting a single edge past this boundary -- silently discarding
+    every later call site and violation regardless of how large the rest of
+    the graph is. Matching the exact edge id removes the ambiguity at its
+    source: no other edge, whatever its endpoints or relation kind, can
+    ever contribute to this count.
 
     [Round-6 internal critic P1] `executor.run(plan)` with no `after_id`
     enumerates the "edge" view's raw ids starting from the BEGINNING of the
-    whole table, capped at ENUMERATE_BUDGET, and only THEN applies
-    (src_id, dst_id) as a post-fetch filter (queryplan.py's `_enumerate`: a
+    whole table, capped at ENUMERATE_BUDGET, and only THEN applies the
+    predicate as a post-fetch filter (queryplan.py's `_enumerate`: a
     typed-view predicate is never pushed into the raw SQL scan, only applied
     to whatever the unconditional cap already admitted). Once the table has
     more than ENUMERATE_BUDGET edges, an edge whose id sorts past that
@@ -382,7 +396,7 @@ def _edge_site_count(
     """
     plan = (
         start(codebase()) | view("edge")
-        | nodes(all_of([eq("src_id", src_id), eq("dst_id", dst_id)]))
+        | nodes(eq("edge_id", edge_id_hint))
         | sites() | count()
     ).plan
     result = executor.run(plan, after_id=edge_id_hint - 1)
@@ -483,7 +497,7 @@ def _run_all_site_pages(
             rows.extend(page_rows)
             return rows, page.truncated, partial, unknown
         if page_rows and page.truncated:
-            last_edge_id, last_src_id, last_dst_id = page_rows[-1][0], page_rows[-1][1], page_rows[-1][2]
+            last_edge_id = page_rows[-1][0]
             sites_in_page = sum(1 for row in page_rows if row[0] == last_edge_id)
             # [P1-4 fix, round 2] Only `real_count` is read; `_edge_site_
             # count`'s own `truncated` flag is NOT treated as ambiguous on
@@ -501,15 +515,17 @@ def _run_all_site_pages(
             # this check treated it alone as ambiguous, making the "give up,
             # mark truncated" branch below fire unconditionally at the very
             # first window -- silently dropping every edge past it, the
-            # sparse-density regression this function exists to fix. A real
-            # mismatch (`real_count != sites_in_page`) is still caught
-            # regardless, since it is symptomatic of the one genuine
-            # remaining risk `_edge_site_count`'s own docstring names (a
-            # second, same-endpoint edge -- a different kind -- sorting past
-            # the truncated window).
-            real_count = _edge_site_count(
-                executor, last_edge_id, last_src_id, last_dst_id
-            )[0]
+            # sparse-density regression this function exists to fix.
+            #
+            # [AC7 fix] `real_count` is now scoped EXACTLY to `last_edge_id`
+            # (see `_edge_site_count`'s own docstring): a real mismatch
+            # (`real_count != sites_in_page`) can therefore only mean THIS
+            # edge's own sites were not fully captured by this page -- never
+            # a different edge sharing the same (src, dst) under another
+            # relation kind, which would previously inflate `real_count` and
+            # force the "give up" branch below to fire on the very first
+            # page, discarding every edge past it.
+            real_count = _edge_site_count(executor, last_edge_id)[0]
             if real_count != sites_in_page:
                 if sites_in_page == len(page_rows):
                     rows.extend(page_rows)
