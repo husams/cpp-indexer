@@ -269,6 +269,7 @@ import re
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text()
+repo_root = pathlib.Path(sys.argv[1]).parents[2]
 # Expected extraction-call count per checker (default 1). check.sh is
 # extracted twice: once in tla-syntax-and-model for the real gate (and to
 # wire check-regression.sh's CIDX_CHECK_SH there), and again in
@@ -300,6 +301,10 @@ checkers = {
     # extracted once, alongside check-proofs.sh, into the same $RUNNER_TEMP
     # directory so the base-pinned copy resolves it there.
     "check-proofs-binding.sh": 1,
+    # The protected-review checker also uses the shared extractor. When the
+    # checker is first introduced, the extractor reports bootstrap and the
+    # checker requires an independent current-head approval.
+    "check-protected-review.sh": 1,
 }
 
 for checker, expected_count in checkers.items():
@@ -382,12 +387,12 @@ if "CIDX_CHECK_PROOFS_SH: ${{ runner.temp }}/check-proofs.sh" not in proof_bindi
         "reason=cidx-check-proofs-sh-not-wired-to-runner-temp"
     )
 
-# check-protected-review.sh must never call the shared helper: it is the one
-# gate that enforces human review of every other protected path (including
-# its own CODEOWNERS/protectedPaths entries), so its extraction step stays
-# unconditional and hand-written rather than sharing any conditional logic
-# that could become a lever to weaken it.
-protected_review_marker = 'git show "${{ github.event.pull_request.base.sha }}:spec/tla/tools/check-protected-review.sh"'
+# The protected-review checker uses the shared extractor too. Its
+# first-introduction mode is safe only because the extracted checker requires
+# an independent approval on the current head before accepting bootstrap.
+protected_review_marker = (
+    f"extract-trusted-checker.sh \\\n            \"${{{{ github.event.pull_request.base.sha }}}}\" \\\n            spec/tla/tools/check-protected-review.sh \\\n"
+)
 if workflow.count(protected_review_marker) != 1:
     raise SystemExit(
         "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
@@ -396,18 +401,23 @@ if workflow.count(protected_review_marker) != 1:
 protected_review_start = workflow.index(protected_review_marker)
 protected_review_end = workflow.find("\n      - name:", protected_review_start)
 protected_review_block = workflow[protected_review_start:protected_review_end]
-if "extract-trusted-checker.sh" in protected_review_block:
-    raise SystemExit(
-        "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
-        "reason=protected-review-must-not-use-shared-bootstrap-helper"
-    )
-if (
-    '> "$RUNNER_TEMP/check-protected-review.sh"' not in protected_review_block
-    or 'chmod +x "$RUNNER_TEMP/check-protected-review.sh"' not in protected_review_block
-):
+if '"$RUNNER_TEMP/check-protected-review.sh"' not in protected_review_block:
     raise SystemExit(
         "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
         "reason=protected-review-destination-not-runner-temp"
+    )
+if 'TLA_PROTECTED_REVIEW_BOOTSTRAP=true' not in protected_review_block:
+    raise SystemExit(
+        "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
+        "reason=protected-review-bootstrap-signal-not-wired"
+    )
+protected_review_source = pathlib.Path(
+    repo_root, "spec/tla/tools/check-protected-review.sh"
+).read_text()
+if "bootstrap-requires-independent-head-approval" not in protected_review_source:
+    raise SystemExit(
+        "TLA_VERIFICATION_TAMPER_REGRESSION_STATUS=FAIL "
+        "reason=protected-review-bootstrap-not-independent"
     )
 if 'run: "$RUNNER_TEMP/check-protected-review.sh"' not in workflow:
     raise SystemExit(

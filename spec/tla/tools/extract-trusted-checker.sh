@@ -6,14 +6,13 @@
 # checker introduced by THIS chain of PRs (HSE-89) and therefore genuinely
 # absent from some earlier base commit: check.sh, check-conformance.sh,
 # check-sidecar-conformance.sh, check-proofs.sh, check-proofs-binding.sh,
-# check-gate-selection.sh, and check-gate-selection-defense-regression.sh.
+# check-gate-selection.sh, check-gate-selection-defense-regression.sh, and
+# check-protected-review.sh.
 #
-# check-protected-review.sh deliberately does NOT use this helper (see its
-# own extraction step in verification.yml): it is the one gate that enforces
-# human review of every other protected path, including its own
-# CODEOWNERS/protectedPaths entries, so it keeps the simplest possible
-# shape -- unconditional extraction, no fallback branch at all -- rather than
-# share any conditional logic that could become a lever to weaken it.
+# check-protected-review.sh also uses this helper. Its first-introduction
+# bootstrap is fail-closed: the extracted checker requires an independent
+# current-head reviewer before accepting bootstrap, so extraction is never an
+# approval or a self-approval escape hatch.
 #
 # HSE-89 round-6 security fix (internal-critic + review): a bootstrap
 # fallback that falls back to the head copy on ANY nonzero
@@ -34,6 +33,10 @@
 # influence. The helper canonicalizes the destination and rejects any path
 # inside the checkout; verification.yml also pins every caller to
 # $RUNNER_TEMP, which check-verification-tamper-regression.sh checks.
+#
+# The protected-review checker also uses this helper. Its first-introduction
+# bootstrap is not an approval: check-protected-review.sh requires an
+# independent current-head reviewer before accepting the bootstrap path.
 #
 # Usage: extract-trusted-checker.sh <base-sha> <repo-relative-checker-path> <dest-path>
 # Prints, on success: TLA_TRUSTED_EXTRACT_STATUS=PASS mode=(base|bootstrap) ref=<base-sha-or-empty>

@@ -103,7 +103,11 @@ run_case() {
   git -C "$WORK" commit --quiet -m "case-$name"
 
   local output
-  output="$("$SELECTOR" main "case-$name")"
+  # The live workflow sets GITHUB_OUTPUT, but this regression captures the
+  # selector's machine-readable lines for assertions. Force stdout here so
+  # the test exercises the same selector without confusing the workflow output
+  # file with the test's captured result.
+  output="$(GITHUB_OUTPUT=/dev/stdout "$SELECTOR" main "case-$name")"
 
   local gate
   IFS=',' read -ra expect_true <<<"$expect_true_csv"
@@ -256,7 +260,7 @@ path.write_text(json.dumps(manifest, indent=2) + "\n")
 PY
 git -C "$WORK" add spec/tla/manifest.json
 git -C "$WORK" commit --quiet -m case-manifest-runs-every-gate
-manifest_output="$("$SELECTOR" main case-manifest-runs-every-gate)"
+manifest_output="$(GITHUB_OUTPUT=/dev/stdout "$SELECTOR" main case-manifest-runs-every-gate)"
 for gate in \
   tla_syntax_and_model \
   tla_proofs \

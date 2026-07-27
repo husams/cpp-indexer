@@ -52,6 +52,8 @@ die() {
 : "${GITHUB_BASE_SHA:?GITHUB_BASE_SHA required}"
 : "${GITHUB_HEAD_SHA:?GITHUB_HEAD_SHA required}"
 
+BOOTSTRAP="${TLA_PROTECTED_REVIEW_BOOTSTRAP:-false}"
+
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cidx-tla-protected-review.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -295,6 +297,55 @@ approvers = sorted(
 )
 pathlib.Path(approved_path).write_text(json.dumps(approvers))
 PY
+
+# The checker itself is first introduced in this PR, so no immutable base copy
+# exists yet. In that one bootstrap case, do not trust the base CODEOWNERS rows
+# to create an approval path for a newly introduced enforcement boundary. The
+# only accepted attestation is a current-head APPROVED review by a real
+# reviewer other than the PR author. This preserves the fail-closed property:
+# the author cannot self-approve, and an absent independent reviewer remains a
+# visible CI failure until repository administration supplies one.
+if [[ "$BOOTSTRAP" == "true" ]]; then
+  if ! curl --fail --location --silent --show-error \
+    --header "Authorization: Bearer $GITHUB_TOKEN" \
+    --header "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${GITHUB_PR_NUMBER}" \
+    >"$WORK/pull.json"; then
+    die "pull-api-unreadable-during-bootstrap"
+  fi
+  python3 - "$WORK/pull.json" "$WORK/approved.json" <<'PY'
+import json
+import pathlib
+import sys
+
+pull_path, approved_path = sys.argv[1:3]
+try:
+    pull = json.loads(pathlib.Path(pull_path).read_text())
+    approved = json.loads(pathlib.Path(approved_path).read_text())
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(
+        "TLA_PROTECTED_REVIEW_STATUS=FAIL "
+        "reason=bootstrap-review-state-invalid"
+    )
+author = ((pull.get("user") or {}).get("login"))
+if not author:
+    raise SystemExit(
+        "TLA_PROTECTED_REVIEW_STATUS=FAIL "
+        "reason=bootstrap-pr-author-unreadable"
+    )
+independent = sorted({login for login in approved if login != author})
+if not independent:
+    raise SystemExit(
+        "TLA_PROTECTED_REVIEW_STATUS=FAIL "
+        "reason=bootstrap-requires-independent-head-approval"
+    )
+print(
+    "TLA_PROTECTED_REVIEW_STATUS=PASS "
+    "reason=bootstrap-independent-head-approval:" + ",".join(independent)
+)
+PY
+  exit 0
+fi
 
 # Every matched path needs an approval from one of ITS OWN owners, not just
 # any approval anywhere -- fixed alongside the union-of-owners bug above.

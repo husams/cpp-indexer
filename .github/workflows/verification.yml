@@ -465,23 +465,21 @@ jobs:
         # THAT copy; CIDX_REPO_ROOT points it back at the real checkout for
         # git/CODEOWNERS access.
         #
-        # Deliberately unconditional -- round-6 security review restored this
-        # to its original, no-fallback shape and it stays that way: this is
-        # the one gate that enforces human review of every other protected
-        # path, including its own CODEOWNERS/protectedPaths entries, so it
-        # must never gain a conditional branch (such as the shared
-        # extract-trusted-checker.sh's first-introduction bootstrap) that
-        # could become a lever to weaken it. `set -e` means any extraction
-        # failure hard-fails this job rather than silently downgrading to the
-        # PR's own copy. The one accepted cost, already documented in
-        # .github/CODEOWNERS, is that the PR that first adds
-        # check-protected-review.sh cannot self-validate this specific job
-        # (the file does not exist at that PR's own base yet) and this step
-        # hard-fails until it merges; every subsequent PR's base has it.
+        # A first-introduction PR has no base copy to extract. The shared
+        # helper's bootstrap is fail-closed in check-protected-review.sh: it
+        # accepts only a current-head approval from a reviewer other than the
+        # PR author, never a self-approval or a base CODEOWNER row that cannot
+        # yet describe the new checker. The helper still hard-fails for an
+        # unresolved base commit and writes only outside the checkout.
         run: |
-          git show "${{ github.event.pull_request.base.sha }}:spec/tla/tools/check-protected-review.sh" \
-            > "$RUNNER_TEMP/check-protected-review.sh"
-          chmod +x "$RUNNER_TEMP/check-protected-review.sh"
+          result="$(spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check-protected-review.sh \
+            "$RUNNER_TEMP/check-protected-review.sh")"
+          echo "$result"
+          if [[ "$result" == *" mode=bootstrap "* ]]; then
+            echo "TLA_PROTECTED_REVIEW_BOOTSTRAP=true" >> "$GITHUB_ENV"
+          fi
       - name: Require CODEOWNER approval for protected-path changes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -536,6 +534,7 @@ jobs:
             "https://github.com/souffle-lang/souffle/releases/download/${SOUFFLE_VERSION}/x86_64-ubuntu-2404-souffle-${SOUFFLE_VERSION}-Linux.deb" \
             --output "$souffle_deb"
           echo "${SOUFFLE_DEB_SHA512}  ${souffle_deb}" | sha512sum --check
+          test "$(id -u)" -eq 0
           dpkg --install "$souffle_deb"
           souffle_path="$(command -v souffle)"
           test -x "$souffle_path"
