@@ -252,7 +252,7 @@ jobs:
       - name: Install Git for the containerized checkout
         run: |
           apt-get update
-          apt-get install --no-install-recommends -y git
+          apt-get install --no-install-recommends -y ca-certificates git
       - name: Check out repository
         uses: actions/checkout@v4
         with:
