@@ -103,6 +103,17 @@ python3 tests/self_host_architecture_test.py
 scripts/self_host_index.sh --out /tmp/self-host-report.json
 ```
 
+### Qualification profile
+
+The release qualification profile is a clean Apple-Silicon checkout on a
+10-logical-CPU host with at least 4 GiB of free memory at the start of the
+run. A fresh Release `cidx` build is reused for the two runs. Each
+`self_host_index.sh` invocation has a 45-minute wall-clock limit and a 4 GiB
+indexer resident-memory ceiling; exceeding either limit is a failed AC1
+result, not accepted fallback evidence. Qualification requires one completed
+run through `index`, `resolve`, and report generation, followed by a second
+clean checkout run whose `canonicalHash` matches the first.
+
 The report format is `cidx.self-host-architecture-report/v1`; every run
 records `sourceRevision` (git SHA), `index.{schemaVersion,catalogVersion,
 catalogHash,graphResolvedAt,fileCount,symbolCount,edgeCount}`, `config.

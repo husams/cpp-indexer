@@ -45,7 +45,23 @@ int64_t SqliteStorageService::add_semantic_universe(const std::string &key,
   }
   const int64_t id = st.col_int64(0);
   st.step_done();
+  semantic_universe_key_cache_.erase(id);
   return id;
+}
+
+std::string SqliteStorageService::semantic_universe_key(int64_t universe_id) {
+  if (const auto it = semantic_universe_key_cache_.find(universe_id);
+      it != semantic_universe_key_cache_.end()) {
+    return it->second;
+  }
+  const auto universe = get_semantic_universe_by_id(universe_id);
+  const std::string key = universe ? universe->key : "legacy";
+  semantic_universe_key_cache_.emplace(universe_id, key);
+  return key;
+}
+
+void SqliteStorageService::invalidate_source_identity_cache() {
+  source_identity_cache_.clear();
 }
 
 std::optional<SemanticUniverse>
@@ -149,9 +165,15 @@ int64_t SqliteStorageService::semantic_universe_for_file_id(int64_t file_id) {
 std::string SqliteStorageService::portable_source_identity_for_path(
     const std::string &path) {
   const std::string abs = pathutil::abspath(pathutil::resolve_fs_path(path));
+  if (const auto it = source_identity_cache_.find(abs);
+      it != source_identity_cache_.end()) {
+    return it->second;
+  }
   const auto comp = component_for_path(abs);
   if (!comp) {
-    return "path:" + abs;
+    const std::string identity = "path:" + abs;
+    source_identity_cache_.emplace(abs, identity);
+    return identity;
   }
 
   std::string owner;
@@ -167,7 +189,10 @@ std::string SqliteStorageService::portable_source_identity_for_path(
     owner = "component:" + effective_root(*comp);
   }
   const std::string rel = pathutil::relpath(abs, component_abs_base(*comp));
-  return owner + "\x1f" + effective_root(*comp) + "\x1f" + rel;
+  const std::string identity =
+      owner + "\x1f" + effective_root(*comp) + "\x1f" + rel;
+  source_identity_cache_.emplace(abs, identity);
+  return identity;
 }
 
 std::string
@@ -291,6 +316,7 @@ int64_t SqliteStorageService::add_component(
       bind_opt(upd, 3, version);
       upd.bind(4, cid);
       upd.step_done();
+      invalidate_source_identity_cache();
       return cid;
     }
   }
@@ -305,6 +331,7 @@ int64_t SqliteStorageService::add_component(
   }
   const int64_t cid = st.col_int64(0);
   st.step_done();
+  invalidate_source_identity_cache();
   return cid;
 }
 
@@ -321,6 +348,7 @@ void SqliteStorageService::update_component_meta(
   bind_opt(st, 3, version);
   st.bind(4, component_id);
   st.step_done();
+  invalidate_source_identity_cache();
 }
 
 bool SqliteStorageService::set_component_version(
@@ -331,6 +359,7 @@ bool SqliteStorageService::set_component_version(
   bind_opt(st, 1, version);
   st.bind(2, std::string_view(name));
   st.step_done();
+  invalidate_source_identity_cache();
   return db_.changes() > 0;
 }
 
@@ -367,6 +396,7 @@ bool SqliteStorageService::set_component_effective_version(
     st.bind(2, comp.id);
     st.step_done();
   }
+  invalidate_source_identity_cache();
   return true;
 }
 
@@ -539,6 +569,7 @@ void SqliteStorageService::delete_component(int64_t component_id) {
   auto del_comp = db_.prepare("DELETE FROM component WHERE id = ?");
   del_comp.bind(1, component_id);
   del_comp.step_done();
+  invalidate_source_identity_cache();
 }
 
 void SqliteStorageService::delete_directory(int64_t directory_id) {
@@ -661,6 +692,7 @@ int64_t SqliteStorageService::add_repository(
   }
   const int64_t rid = st.col_int64(0);
   st.step_done();
+  invalidate_source_identity_cache();
   return rid;
 }
 
@@ -739,12 +771,14 @@ void SqliteStorageService::set_active_clone(
   }
   st.bind(2, repository_id);
   st.step_done();
+  invalidate_source_identity_cache();
 }
 
 void SqliteStorageService::delete_repository(int64_t repository_id) {
   auto st = db_.prepare("DELETE FROM repository WHERE id = ?");
   st.bind(1, repository_id);
   st.step_done();
+  invalidate_source_identity_cache();
 }
 
 int64_t
@@ -819,6 +853,7 @@ void SqliteStorageService::delete_clone(int64_t clone_id) {
   auto del = db_.prepare("DELETE FROM clone WHERE id = ?");
   del.bind(1, clone_id);
   del.step_done();
+  invalidate_source_identity_cache();
 }
 
 // -- directories

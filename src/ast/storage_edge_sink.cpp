@@ -47,7 +47,9 @@ void StorageEdgeSink::reset_fact_ids() {
 
 std::optional<int64_t> StorageEdgeSink::lookup_symbol_id(
     const std::string &usr, const std::optional<std::string> &identity_source) {
-  std::string cache_key = usr;
+  std::string cache_key = std::to_string(current_universe_id_.value_or(-1));
+  cache_key.push_back('\x1f');
+  cache_key += usr;
   cache_key.push_back('\x1f');
   if (identity_source) {
     cache_key += *identity_source;
@@ -62,20 +64,27 @@ std::optional<int64_t> StorageEdgeSink::lookup_symbol_id(
   }
   const std::optional<cidx::Symbol> sym = ports_.symbols_read.lookup_symbol(
       usr, current_universe_id_, identity_source, identity_translation_unit_);
-  const std::optional<int64_t> result =
-      sym ? std::optional<int64_t>(sym->id) : std::nullopt;
+  if (!sym) {
+    // Do not cache misses: a later mint_symbol() in this translation unit may
+    // create the symbol that was absent on this lookup.
+    return std::nullopt;
+  }
+  const std::optional<int64_t> result = sym->id;
   lookup_cache_.emplace(std::move(cache_key), result);
   return result;
 }
 
 void StorageEdgeSink::set_current_file_id(int64_t file_id) {
+  const bool same_file = current_file_id_ == file_id;
   current_file_id_ = file_id;
   current_universe_id_ =
       file_id >= 0
           ? std::optional<int64_t>(
                 ports_.workspace.semantic_universe_for_file_id(file_id))
           : std::nullopt;
-  lookup_cache_.clear();
+  if (same_file) {
+    lookup_cache_.clear();
+  }
 }
 
 void StorageEdgeSink::set_identity_translation_unit_config_id(
@@ -86,7 +95,6 @@ void StorageEdgeSink::set_identity_translation_unit_config_id(
                 config_id, translation_unit_file_id)
           : ports_.workspace.portable_translation_unit_identity_for_config(
                 config_id);
-  lookup_cache_.clear();
 }
 
 void StorageEdgeSink::set_identity_translation_unit_file_id(int64_t file_id) {
@@ -96,7 +104,6 @@ void StorageEdgeSink::set_identity_translation_unit_file_id(int64_t file_id) {
                 ports_.workspace.portable_translation_unit_identity_for_file(
                     file_id))
           : std::nullopt;
-  lookup_cache_.clear();
 }
 
 int64_t StorageEdgeSink::mint_symbol(const MintRequest &req) {
@@ -134,7 +141,6 @@ int64_t StorageEdgeSink::mint_symbol(const MintRequest &req) {
   if (!typed_facts.empty()) {
     ports_.symbols_write.update_symbol_by_id(id, typed_facts);
   }
-  lookup_cache_.clear();
   return id;
 }
 

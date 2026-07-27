@@ -20,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -619,8 +620,7 @@ public:
   // Stable, human-readable reasons for stale or unavailable fact sets.
   std::string transform_explain(const std::string &fact_set = {});
   // Named readiness contract for query and proof clients.
-  TransformFactSetStatus transform_fact_set_status(
-      const std::string &fact_set);
+  TransformFactSetStatus transform_fact_set_status(const std::string &fact_set);
   void mark_transform_pipeline_pending(const std::string &reason);
   [[nodiscard]] const std::vector<TransformRun> &transform_runs() const {
     return last_transform_runs_;
@@ -800,6 +800,8 @@ private:
   void migrate_symbol_identity_scope(); // v34 -> v35: scoped symbol identity
   int64_t default_semantic_universe_id();
   int64_t semantic_universe_for_file(const std::optional<int64_t> &file_id);
+  std::string semantic_universe_key(int64_t universe_id);
+  void invalidate_source_identity_cache();
   std::string symbol_identity_key(
       const Symbol &sym, int64_t universe_id,
       const std::optional<int64_t> &file_id,
@@ -825,6 +827,8 @@ private:
   std::vector<TransformRun> last_transform_runs_;
   std::optional<std::string> transform_failure_for_testing_;
   std::optional<std::string> transform_nondeterminism_for_testing_;
+  std::unordered_map<int64_t, std::string> semantic_universe_key_cache_;
+  std::unordered_map<std::string, std::string> source_identity_cache_;
 };
 
 // Compatibility façade for legacy application code. New code composes the
