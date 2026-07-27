@@ -59,6 +59,22 @@ REPORT_FORMAT = "cidx.self-host-architecture-report/v1"
 REPORT_VERSION = 1
 
 CALL_EDGE_KINDS = {"calls", "dispatch_calls"}
+# [P1-2 fix] direct-construction/destruction edges (catalogs/core.json kinds
+# 10-16): `src/ast/statement_edge_visitor.cpp`'s `emit_construction_form` /
+# `VisitCXXNewExpr` / `VisitCXXDeleteExpr` / `emit_factory_edge` resolve
+# their destination to the RECORD being constructed/destroyed (e.g.
+# `cidx::Storage`), not to a constructor/destructor symbol -- a
+# `Storage db(...)` direct construction is real cross-module coupling into
+# that record and must be visible to the same module-boundary/legacy-facade
+# checks a `calls`/`dispatch_calls` edge would be. See `_witness()` for how
+# the callee identity is presented for these kinds (the record's own name,
+# not a signature-bearing symbol name, matching how a legacy-facade baseline
+# entry names a direct construction: "cidx::Storage::Storage").
+CONSTRUCTION_EDGE_KINDS = {
+    "construct-value", "construct-temp", "construct-heap", "construct-copy",
+    "construct-move", "factory-construct", "destroy",
+}
+COUPLING_EDGE_KINDS = CALL_EDGE_KINDS | CONSTRUCTION_EDGE_KINDS
 # Only actual translation units are expected to appear as indexed `file`
 # rows; headers are only ever indirectly present via #include, so their
 # absence from the file table is not, by itself, a coverage gap.
@@ -68,6 +84,53 @@ ISSUE_RE = re.compile(r"HSE-\d+\Z")
 
 def _nonempty(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _bare_qual_name(name: str) -> str:
+    """Strip a leaf function/method's PARAMETER LIST and cv/ref qualifiers
+    from a `qualified_name(...)`-shaped name (as `ast::qualified_name`,
+    `src/ast/names.cpp`, renders it with `with_signature=true`), leaving the
+    same shape `ast::qualified_name_bare` (`with_signature=false`) would have
+    produced. This is a comparison-time normalization only -- QueryPlan's
+    `symbol.name` (`COALESCE(qual_name, spelling)`) never stores the bare
+    form, and this is never written back to the index.
+
+    [P1-1 fix] Every `legacyFacades[].baseline[].calleeQualName` in
+    `architecture/cidx-self-host-policy.json` is authored bare (e.g.
+    `"cidx::SqliteStorageService::write"`), but a resolved witness's callee
+    name carries the full C++ signature (`"cidx::SqliteStorageService::
+    write(const std::string &)"`) -- the two could never compare equal, so
+    no baseline entry could ever suppress a real, matching violation. Used
+    only for the (callerFile, calleeQualName, line, col) baseline/dedup key
+    in `find_legacy_facade_violations`; the full, signature-bearing name is
+    still what a witness's `callee.symbol` displays to a human reader.
+
+    A name with no trailing `(...)` (already bare -- e.g. the record-name
+    identity `_witness()` synthesizes for a construction-kind edge) round-
+    trips unchanged. An unbalanced/unexpected shape is returned unchanged
+    rather than guessed at, so a parsing surprise can only ever make this
+    MISS a suppression (fail closed to "still a violation"), never wrongly
+    grant one.
+    """
+    s = name
+    changed = True
+    while changed:
+        changed = False
+        for suffix in (" const", " volatile", " &&", " &"):
+            if s.endswith(suffix):
+                s = s[: -len(suffix)]
+                changed = True
+    if not s.endswith(")"):
+        return name
+    depth = 0
+    for i in range(len(s) - 1, -1, -1):
+        if s[i] == ")":
+            depth += 1
+        elif s[i] == "(":
+            depth -= 1
+            if depth == 0:
+                return s[:i]
+    return name  # unbalanced parens: leave unchanged rather than guess
 
 
 def _stable_label(path: Path, root: Path) -> str:
@@ -183,7 +246,8 @@ class SemanticFacts:
     symbol_name: dict[int, str]
     symbol_file: dict[int, str]
     symbol_line: dict[int, int]
-    calls: list[tuple[int, int, int, int, int]]  # edge_id, src_id, dst_id, site_line, site_col
+    # edge_id, src_id, dst_id, site_line, site_col, relation
+    calls: list[tuple[int, int, int, int, int, str]]
     truncated: bool
     unwitnessed_call_sites: int = 0
     partial: bool = False
@@ -314,72 +378,72 @@ def _run_all_site_pages(
     Unlike `_run_all_pages`'s symbol read, this plan's natural SQL order is
     (edge_id, file_id, line, col), and QueryPlan's `after_id` cursor for the
     "edge"->sites() pipeline is only ever wired at EDGE granularity (see
-    queryplan.py's `_enumerate`, "edge" branch): passing the last SITE row's
-    edge_id back in as `after_id` resumes enumeration from the NEXT edge,
-    not the next SITE. A page that fills exactly to ENUMERATE_BUDGET can
-    therefore end mid-edge -- the page's LAST edge may have more sites than
-    made it into this page -- and naively advancing past that edge_id would
-    silently drop the rest of its call sites forever: exactly the bug a
-    prior version of this function had (PR #67 review, AC7), where the next
-    call then legitimately returned 0 further rows (there being no edge
-    left with a higher id) and was misread as "done, nothing truncated".
+    queryplan.py's `_enumerate`, "edge" branch): the SITE rows this plan
+    returns are not a reliable proxy for "how far did the edge cursor get" --
+    an edge legitimately owns zero, one, or many sites, so counting SITE rows
+    can under-count (most starkly: an ENUMERATE_BUDGET-sized window of edges
+    where only one has a site at all returns a single-row page, which looks
+    exactly like "genuinely almost done" even though 9,999 more edges past
+    the cap were never looked at). [P1-4 fix] A prior version of this
+    function inferred both "should I keep paging" and "where do I resume"
+    from the site page's own row count/last row, which is wrong for exactly
+    that sparse-site density -- real, cross-module violations whose edge id
+    sorted past the first ENUMERATE_BUDGET-sized window were silently never
+    enumerated, even though the report still (correctly, but not usefully)
+    refused to claim a clean pass.
 
-    So: whenever a page comes back full, before advancing the cursor, this
-    verifies (via `_edge_site_count`, itself QueryPlan-only) that the page's
-    last edge really is fully represented in it. If it is, the boundary
-    landed cleanly between two edges and the cursor advances exactly as
-    before. If it is not, and OTHER edges also appear earlier in this same
-    page, the partial rows already collected for the last edge are dropped
-    (they will be recollected in full) and the cursor is rewound to just
-    before it, so the retry gets a fresh, full page budget with that edge
-    first. If the ENTIRE page belongs to that one edge alone and it is still
-    incomplete, a retry is provably futile (the very next call would return
-    this exact same edge, first, with the exact same truncation), so this
-    stops immediately with the partial rows it already has -- they are still
-    real, correct evidence, just not the edge's complete evidence -- rather
-    than spend a second identical, expensive round-trip to learn nothing
-    new. Either way, this is then a real enumeration limit (QueryPlan's own
-    per-call join budget, not a bug in this pagination), so it is surfaced
-    as truncated rather than looped on or silently under-reported.
+    The fix pages the EDGE-id enumeration on its own dedicated, ground-truth
+    cursor (`edge_id_plan`, a plain `view("edge")|nodes()|select(["id"])`
+    read -- no `sites()` expansion, so its row count/truncation is a direct,
+    unambiguous read of QueryPlan's own edge cursor) run with the exact same
+    `after_id` as the site plan for this iteration. The two reads enumerate
+    identically (same "edge" view, same cursor, same underlying SQL branch
+    in `_enumerate`), so `edge_page`'s ids are always the true edge-id window
+    this iteration's `page` (the site plan) was scoped to, independent of how
+    many of those edges the site plan's OWN row output happened to carry.
 
-    [PR #67 internal critic, second finding] the boundary logic above only
-    catches truncation that shows up as a FULL page of sites. But the
-    "edge"->sites() pipeline has a truncation source entirely upstream of
-    the site expansion: the edge-NODE enumeration itself (`nodes()`, before
-    `sites()` ever runs) caps at ENUMERATE_BUDGET distinct edge ids -- see
-    queryplan.py's `_enumerate` -- and sets `st.truncated = True` on ITS OWN
-    result even when the sites of those capped-in edges total far fewer
-    than ENUMERATE_BUDGET rows (e.g. every edge past the cap has zero sites
-    of its own). That leaves this function looking at a SHORT site page
-    (`len(page_rows) < ENUMERATE_BUDGET`) that nonetheless carries evidence
-    loss: some edge with a real, witnessed violation past the cap was never
-    enumerated at all. `page.truncated` (propagated from every upstream
-    stage via `st.truncated = st.truncated or sub.truncated`, see
-    queryplan.py:2144) is QueryPlan's own record of exactly this.
+    Within one edge-id window, a SEPARATE truncation source remains: the site
+    EXPANSION's own row budget (`_expand_sites`'s `TRAVERSE_NODE_BUDGET`) can
+    still cut off mid-edge if that window's edges together carry more sites
+    than fit in one page. `page.truncated` reflects that (OR'd with the
+    edge-cursor's own truncation, so it is checked only as an extra,
+    harmless verification, never to decide whether to keep paging). Exactly
+    as before, when it fires this verifies (via `_edge_site_count`) whether
+    the page's last SITE row's edge is fully represented; if not, that
+    edge's partial rows are dropped and the cursor rewound to just before it
+    for a fresh retry, unless the entire page belongs to that one
+    still-incomplete edge alone, which is provably futile to retry (see
+    `_edge_site_count`'s own docstring) and is reported as truncated
+    immediately with whatever partial evidence was already collected.
 
-    It is read ONLY on the exit points below where this function is
-    genuinely done (a short page, or the "whole page is one still-
-    incomplete edge" case, which was already unconditionally `True`) --
-    never accumulated across every intermediate page. An intermediate FULL
-    page's own `truncated=True` (from the SAME budget+1 over-fetch trick
-    described above) is routinely true on every full page purely because
-    it is full, and is completely resolved by this function's own
-    boundary-aware continuation; accumulating it across iterations would
-    misreport a perfectly complete, merely multi-page read as truncated
-    (this was verified against a real regression while fixing this exact
-    finding -- see `test_violation_past_enumerate_budget_is_not_
-    silently_dropped`, `_run_all_pages`'s own equivalent case).
+    Once an edge-id window's sites are safely collected, completion is
+    decided ONLY from `edge_page`'s own truncation: if the edge cursor read
+    fewer than ENUMERATE_BUDGET edge ids past `after_id`, every edge past the
+    previous cursor position was genuinely seen (however few, even zero, of
+    them carried a site), so this is genuinely done -- regardless of how
+    short the resulting site page was. Otherwise the cursor advances to the
+    edge window's own true last id (`edge_page`'s last row, never a SITE
+    row's edge_id) and another full-budget window is read.
     """
+    edge_id_plan = (
+        start(codebase()) | view("edge") | nodes() | select(["id"])
+        | limit(ENUMERATE_BUDGET)
+    ).plan
     rows: list[tuple[Any, ...]] = []
     after_id: int | None = None
     partial = False
     unknown = False
     while True:
+        edge_page = executor.run(edge_id_plan, after_id=after_id)
         page = executor.run(plan, after_id=after_id)
         partial = partial or page.partial
         unknown = unknown or page.unknown
+        edge_ids_in_window = [row[0] for row in edge_page.rows]
         page_rows = page.rows
-        if len(page_rows) == ENUMERATE_BUDGET and page_rows:
+        if not edge_ids_in_window:
+            rows.extend(page_rows)
+            return rows, page.truncated, partial, unknown
+        if page_rows and page.truncated:
             last_edge_id, last_src_id, last_dst_id = page_rows[-1][0], page_rows[-1][1], page_rows[-1][2]
             sites_in_page = sum(1 for row in page_rows if row[0] == last_edge_id)
             real_count, count_truncated = _edge_site_count(
@@ -397,12 +461,12 @@ def _run_all_site_pages(
                 after_id = next_after_id
                 continue
         rows.extend(page_rows)
-        if len(page_rows) < ENUMERATE_BUDGET:
+        window_last_edge_id = edge_ids_in_window[-1]
+        if not edge_page.truncated:
             return rows, page.truncated, partial, unknown
-        next_after_id = page_rows[-1][0]
-        if next_after_id is None or next_after_id == after_id:
+        if window_last_edge_id == after_id:
             return rows, True, partial, unknown
-        after_id = next_after_id
+        after_id = window_last_edge_id
 
 
 def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
@@ -471,11 +535,11 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
     truncated = truncated or site_truncated
     partial = partial or site_partial
     unknown = unknown or site_unknown
-    calls: list[tuple[int, int, int, int, int]] = []
+    calls: list[tuple[int, int, int, int, int, str]] = []
     for edge_id, src_id, dst_id, line, col, relation in site_rows:
-        if relation not in CALL_EDGE_KINDS:
+        if relation not in COUPLING_EDGE_KINDS:
             continue
-        calls.append((edge_id, src_id, dst_id, line or 0, col or 0))
+        calls.append((edge_id, src_id, dst_id, line or 0, col or 0, relation))
 
     # A symbol whose file_id was NULLed by an ON DELETE SET NULL cascade
     # (its file row was deleted) is indistinguishable at the symbol level
@@ -484,7 +548,7 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
     # Count that directly here so the report can fail closed on it instead
     # of the caller/callee simply vanishing from every finding.
     unwitnessed = sum(
-        1 for _edge_id, src_id, dst_id, _line, _col in calls
+        1 for _edge_id, src_id, dst_id, _line, _col, _relation in calls
         if src_id not in symbol_file or dst_id not in symbol_file
     )
     return SemanticFacts(
@@ -518,16 +582,44 @@ class Witness:
         }
 
 
-def _witness(facts: SemanticFacts, src: int, dst: int, line: int, col: int) -> Witness | None:
+def _constructor_style_name(record_qual_name: str) -> str:
+    """The "Record::Record" identity a human-authored legacy-facade baseline
+    entry names for a direct construction/destruction (e.g.
+    `"cidx::Storage::Storage"` for `Storage db(...)`), synthesized from the
+    constructed/destroyed RECORD's own (bare) qualified name -- the only
+    identity a construction-kind edge's destination carries (see
+    `CONSTRUCTION_EDGE_KINDS` above: the destination is the record, never a
+    constructor/destructor symbol). A record's leaf name is its last `::`
+    component with any template-argument list dropped, matching how a
+    constructor is spelled regardless of how its owning specialization
+    prints.
+    """
+    leaf = record_qual_name.rsplit("::", 1)[-1]
+    leaf = leaf.split("<", 1)[0]
+    return f"{record_qual_name}::{leaf}"
+
+
+def _witness(
+    facts: SemanticFacts, src: int, dst: int, line: int, col: int, relation: str = "calls",
+) -> Witness | None:
     src_path = facts.symbol_file.get(src)
     dst_path = facts.symbol_file.get(dst)
     if src_path is None or dst_path is None:
         return None
+    callee_symbol = facts.symbol_name.get(dst, "?")
+    if relation in CONSTRUCTION_EDGE_KINDS and callee_symbol != "?":
+        # [P1-2 fix] the destination is the constructed/destroyed RECORD
+        # (e.g. `cidx::Storage`), not a constructor/destructor symbol --
+        # present it the way a human-authored baseline names a direct
+        # construction, so `find_legacy_facade_violations`'s baseline/prefix
+        # matching (and any human reading the witness) sees the same shape
+        # the policy file already uses.
+        callee_symbol = _constructor_style_name(callee_symbol)
     return Witness(
         caller_symbol=facts.symbol_name.get(src, "?"),
         caller_file=src_path,
         caller_line=facts.symbol_line.get(src, 0),
-        callee_symbol=facts.symbol_name.get(dst, "?"),
+        callee_symbol=callee_symbol,
         callee_file=dst_path,
         callee_line=facts.symbol_line.get(dst, 0),
         call_site_line=line,
@@ -551,8 +643,8 @@ def find_module_boundary_violations(
     """
     violations: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str, int, int]] = set()
-    for edge_id, src, dst, line, col in facts.calls:
-        witness = _witness(facts, src, dst, line, col)
+    for edge_id, src, dst, line, col, relation in facts.calls:
+        witness = _witness(facts, src, dst, line, col, relation)
         if witness is None:
             continue
         from_module = graph.module_for(witness.caller_file)
@@ -587,8 +679,8 @@ def find_module_cycles(facts: SemanticFacts, graph: ModuleGraph) -> list[dict[st
     modules.
     """
     edges: dict[str, set[str]] = {}
-    for edge_id, src, dst, line, col in facts.calls:
-        witness = _witness(facts, src, dst, line, col)
+    for edge_id, src, dst, line, col, relation in facts.calls:
+        witness = _witness(facts, src, dst, line, col, relation)
         if witness is None:
             continue
         from_module = graph.module_for(witness.caller_file)
@@ -628,6 +720,16 @@ def find_legacy_facade_violations(
     siteCol), not just (callerFile, calleeQualName). A file that already has
     one baselined call into a facade does not thereby grandfather a second,
     later call site added anywhere in that same file.
+
+    [P1-1 fix] the identity's `calleeQualName` half is compared BARE
+    (`_bare_qual_name`) on both sides: a baseline entry is always authored
+    bare (`"cidx::SqliteStorageService::write"`), but a resolved witness's
+    `callee_symbol` for a `calls`/`dispatch_calls` edge carries the full C++
+    signature. Comparing the raw (signature-bearing) form against a bare
+    baseline entry could never match, so no baseline could ever suppress a
+    real violation. The `calleeQualNamePrefixes` PREFIX match just above is
+    unaffected by this (a signature-bearing name still starts with its own
+    bare class-scope prefix), so it stays on the raw name.
     """
     violations: list[dict[str, Any]] = []
     for facade in policy.get("legacyFacades", []):
@@ -641,8 +743,8 @@ def find_legacy_facade_violations(
             if _nonempty(entry.get("callerFile")) and _nonempty(entry.get("calleeQualName"))
         }
         seen: set[tuple[str, str, int, int]] = set()
-        for edge_id, src, dst, line, col in facts.calls:
-            witness = _witness(facts, src, dst, line, col)
+        for edge_id, src, dst, line, col, relation in facts.calls:
+            witness = _witness(facts, src, dst, line, col, relation)
             if witness is None or not witness.callee_symbol.startswith(prefixes):
                 continue
             from_module = graph.module_for(witness.caller_file)
@@ -653,7 +755,7 @@ def find_legacy_facade_violations(
                 continue
             key = (
                 witness.caller_file,
-                witness.callee_symbol,
+                _bare_qual_name(witness.callee_symbol),
                 witness.call_site_line,
                 witness.call_site_col,
             )
@@ -1521,10 +1623,21 @@ def _package_hash(root: Path, manifest_path: Path, policy_path: Path) -> str:
     `check_catalog_containment` reads it directly to build the guarded
     (id, name) pair list, so it literally defines what that check catches --
     editing it changes the gate's behavior and must change packageHash too.
+
+    [P2-1 fix] also includes `spec/platform/architecture.json`:
+    `generate_report` feeds it straight into `validate_contract` and its
+    errors into `findings.platformContract` (a real gate verdict input, same
+    as `catalogs/core.json`), so editing it must change `packageHash` too.
+    It is optional (some fixtures/checkouts have no platform contract at
+    all, per `generate_report`'s own `.exists()` guard), so its absence is
+    hashed as an explicit sentinel rather than silently skipped -- adding or
+    removing the file is itself a real change to what this run validated
+    against, not a no-op.
     """
     script_dir = Path(__file__).resolve().parent
     project_root = script_dir.parent
     digest = hashlib.sha256()
+    platform_contract_path = root / "spec/platform/architecture.json"
     for path in (
         manifest_path,
         policy_path,
@@ -1534,9 +1647,13 @@ def _package_hash(root: Path, manifest_path: Path, policy_path: Path) -> str:
         project_root / "python/indexer/queryplan.py",
         project_root / "python/indexer/storage.py",
         root / "catalogs/core.json",
+        platform_contract_path,
     ):
         label = _stable_label(path, root)
         digest.update(label.encode())
+        if path == platform_contract_path and not path.exists():
+            digest.update(b"<absent>")
+            continue
         digest.update(path.read_bytes())
     return digest.hexdigest()
 
@@ -1625,8 +1742,8 @@ def generate_report(
         if include.target_module is not None
     }
     called_module_pairs: dict[tuple[str, str], list[str]] = {}
-    for edge_id, src, dst, line, col in facts.calls:
-        witness = _witness(facts, src, dst, line, col)
+    for edge_id, src, dst, line, col, relation in facts.calls:
+        witness = _witness(facts, src, dst, line, col, relation)
         if witness is None:
             continue
         from_module = graph.module_for(witness.caller_file)

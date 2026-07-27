@@ -38,6 +38,7 @@ from indexer import queryplan as qp  # noqa: E402
 
 CALLS_KIND = 1  # catalogs/core.json relation id for "calls"
 DISPATCH_CALLS_KIND = 18  # ... for "dispatch_calls"
+CONSTRUCT_VALUE_KIND = 10  # ... for "construct-value"
 
 
 class _Fixture:
@@ -156,6 +157,25 @@ class _Fixture:
         )
         self.sym_render = sym("u4", "render", "render", "function", self.file_format, 2)
         self.sym_plan = sym("u5", "execute_plan", "execute_plan", "function", self.file_plan, 1)
+        # [P1-1 fixture] a resolved callee the way a real self-index's
+        # `ast::qualified_name` actually renders one -- signature-bearing
+        # (`src/ast/names.hpp`'s "leaf function/method carries its full
+        # signature"), unlike `sym_write` above, which -- like every other
+        # synthetic symbol in this fixture -- is deliberately bare and would
+        # never expose a baseline-key mismatch bug.
+        self.sym_write_sig = sym(
+            "u6", "write", "cidx::SqliteStorageService::write(const std::string &)",
+            "function", self.file_service, 3,
+        )
+        # [P1-2 fixture] the RECORD `cidx::SqliteStorageService` itself, the
+        # only identity a construction-kind edge's destination carries (see
+        # `CONSTRUCTION_EDGE_KINDS`): `statement_edge_visitor.cpp`'s
+        # `emit_construction_form` resolves a direct construction's `dst_id`
+        # to the constructed TYPE, never a constructor symbol.
+        self.sym_service_class = sym(
+            "u7", "SqliteStorageService", "cidx::SqliteStorageService", "class",
+            self.file_service, 1,
+        )
         db._conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('graph_resolved_at', ?)",
             ("2026-07-25T00:00:00Z",),
@@ -263,7 +283,7 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         report = fixture.run()
         self.assertFalse(report["index"]["coverage"]["enumerationTruncated"])
         self.assertEqual(len(report["findings"]["moduleBoundaryViolations"]), 1)
-        self.assertEqual(report["index"]["symbolCount"], 1105)
+        self.assertEqual(report["index"]["symbolCount"], 1107)
 
     def test_violation_past_enumerate_budget_is_not_silently_dropped(self) -> None:
         # [Review round 3, blocker 1] a single Executor.run() call's own
@@ -445,6 +465,134 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         violations = report["findings"]["legacyFacadeViolations"]
         self.assertEqual(len(violations), 1)
         self.assertEqual(violations[0]["witness"]["call_site"], {"line": 99, "col": 9})
+
+    def test_baseline_suppresses_a_signature_bearing_resolved_callee(self) -> None:
+        # [P1-1 regression] a real self-index's resolved callee name carries
+        # the full C++ signature (`ast::qualified_name`, `src/ast/
+        # names.hpp`), but architecture/cidx-self-host-policy.json's
+        # baseline entries are authored bare (matching every one of the 38
+        # `calleeQualName` values in the real policy file). Before the fix,
+        # the baseline/witness comparison used the raw (signature-bearing)
+        # name on one side and the bare name on the other, so this baseline
+        # entry could never suppress its own exact, intentionally-baselined
+        # call site.
+        fixture = _Fixture()
+        fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model", "persistence"]
+        fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
+        fixture.policy["legacyFacades"][0]["baseline"] = [
+            {
+                "callerFile": "src/extraction/pass.cpp",
+                "calleeQualName": "cidx::SqliteStorageService::write",
+                "line": 40,
+                "col": 5,
+                "owner": "test",
+                "rationale": "test",
+                "expiresOn": "2099-01-01",
+                "removalIssue": "HSE-62",
+            }
+        ]
+        fixture.policy_path.write_text(json.dumps(fixture.policy), encoding="utf-8")
+        fixture.add_call(fixture.sym_run, fixture.sym_write_sig, line=40, col=5)
+        report = fixture.run()
+        self.assertEqual(report["findings"]["legacyFacadeViolations"], [])
+
+    def test_signature_bearing_callee_at_a_new_site_is_still_rejected(self) -> None:
+        # The companion case to the suppression above: a signature-bearing
+        # callee at a DIFFERENT site than any baseline entry must still be
+        # rejected (proving the bare-name normalization is used only for
+        # comparison, not widened into "any call to this callee, anywhere").
+        fixture = _Fixture()
+        fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model", "persistence"]
+        fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
+        fixture.add_call(fixture.sym_run, fixture.sym_write_sig, line=77, col=9)
+        report = fixture.run()
+        violations = report["findings"]["legacyFacadeViolations"]
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(
+            violations[0]["witness"]["callee"]["symbol"],
+            "cidx::SqliteStorageService::write(const std::string &)",
+        )
+
+    def test_direct_construction_of_a_facade_record_is_a_module_boundary_violation(self) -> None:
+        # [P1-2 regression] `Storage db(...)`-shaped direct constructions
+        # resolve to a construct-value/-temp/-copy/-move/-heap edge whose
+        # destination is the constructed RECORD (`cidx::SqliteStorageService`
+        # here), never a constructor symbol (`statement_edge_visitor.cpp`'s
+        # `emit_construction_form`). Before the fix, `CALL_EDGE_KINDS`
+        # excluded these kinds entirely, so a direct construction across a
+        # module boundary was invisible to BOTH the module-boundary and the
+        # legacy-facade checks -- exactly the "manual audit only" gap
+        # `docs/self-host-architecture.md` documents.
+        fixture = _Fixture()
+        fixture.add_call(
+            fixture.sym_run, fixture.sym_service_class, line=12, col=3,
+            kind=CONSTRUCT_VALUE_KIND,
+        )
+        report = fixture.run()
+        violations = report["findings"]["moduleBoundaryViolations"]
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0]["fromModule"], "extraction")
+        self.assertEqual(violations[0]["toModule"], "persistence")
+        self.assertEqual(
+            violations[0]["witness"]["callee"]["symbol"],
+            "cidx::SqliteStorageService::SqliteStorageService",
+        )
+
+    def test_direct_construction_of_a_facade_record_is_a_legacy_facade_violation(self) -> None:
+        # Companion to the module-boundary case above: the SAME
+        # construct-value edge, read against a facade policy whose
+        # `calleeQualNamePrefixes` names the record
+        # (`"cidx::SqliteStorageService::"`), must be visible to
+        # `find_legacy_facade_violations` too -- presented the way a human
+        # baseline entry already names a direct construction
+        # ("cidx::SqliteStorageService::SqliteStorageService"), matching the
+        # real policy file's own baseline convention.
+        fixture = _Fixture()
+        fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model", "persistence"]
+        fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
+        fixture.add_call(
+            fixture.sym_run, fixture.sym_service_class, line=12, col=3,
+            kind=CONSTRUCT_VALUE_KIND,
+        )
+        report = fixture.run()
+        violations = report["findings"]["legacyFacadeViolations"]
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(
+            violations[0]["witness"]["callee"]["symbol"],
+            "cidx::SqliteStorageService::SqliteStorageService",
+        )
+
+    def test_direct_construction_is_suppressed_by_a_matching_construction_style_baseline(
+        self,
+    ) -> None:
+        # The real policy file's baseline entries are all direct-
+        # construction sites named exactly this way (e.g.
+        # `"cidx::Storage::Storage"` for `Storage db(...)`); this proves that
+        # authored shape actually suppresses a resolved construct-value
+        # witness once P1-2's record->constructor-style-name synthesis is in
+        # place.
+        fixture = _Fixture()
+        fixture.manifest["modules"][2]["allowedDependencies"] = ["extraction", "model", "persistence"]
+        fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
+        fixture.policy["legacyFacades"][0]["baseline"] = [
+            {
+                "callerFile": "src/extraction/pass.cpp",
+                "calleeQualName": "cidx::SqliteStorageService::SqliteStorageService",
+                "line": 12,
+                "col": 3,
+                "owner": "test",
+                "rationale": "test",
+                "expiresOn": "2099-01-01",
+                "removalIssue": "HSE-62",
+            }
+        ]
+        fixture.policy_path.write_text(json.dumps(fixture.policy), encoding="utf-8")
+        fixture.add_call(
+            fixture.sym_run, fixture.sym_service_class, line=12, col=3,
+            kind=CONSTRUCT_VALUE_KIND,
+        )
+        report = fixture.run()
+        self.assertEqual(report["findings"]["legacyFacadeViolations"], [])
 
     def test_every_call_site_of_an_aggregated_edge_is_preserved(self) -> None:
         # [Review blocker 4] `edge` dedups by (src,dst,kind) but `edge_site`
@@ -1395,6 +1543,31 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         after = report_module._package_hash(fixture.root, fixture.manifest_path, fixture.policy_path)
         self.assertNotEqual(before, after)
 
+    def test_package_hash_changes_when_the_platform_contract_changes(self) -> None:
+        # [P2-1 regression] `generate_report` reads `spec/platform/
+        # architecture.json` and feeds its errors straight into
+        # `findings.platformContract` -- a real gate verdict input, exactly
+        # like `catalogs/core.json` above -- but `_package_hash`'s hashed
+        # file list omitted it, so editing it changed the gate's verdict
+        # without changing the recorded packageHash.
+        import scripts.self_host_architecture_report as report_module
+
+        fixture = _Fixture()
+        contract_path = fixture.root / "spec/platform/architecture.json"
+        contract_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Absent -> present is itself a real change (not merely absent's
+        # sentinel happening to differ from a specific present-content byte
+        # string, which this also proves).
+        before_absent = report_module._package_hash(fixture.root, fixture.manifest_path, fixture.policy_path)
+        contract_path.write_text(json.dumps({"contracts": []}), encoding="utf-8")
+        after_created = report_module._package_hash(fixture.root, fixture.manifest_path, fixture.policy_path)
+        self.assertNotEqual(before_absent, after_created)
+
+        contract_path.write_text(json.dumps({"contracts": [{"id": "extra"}]}), encoding="utf-8")
+        after_edited = report_module._package_hash(fixture.root, fixture.manifest_path, fixture.policy_path)
+        self.assertNotEqual(after_created, after_edited)
+
     def test_real_policy_legacy_facade_baselines_are_populated_and_well_formed(self) -> None:
         # [Review round 3, blocker 4] the committed
         # architecture/cidx-self-host-policy.json shipped with BOTH legacy-
@@ -1423,6 +1596,28 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         # `check_policy_metadata` is the same function `generate_report`
         # itself runs, so this is not a duplicate, weaker check.
         self.assertEqual(check_policy_metadata(real_policy), [])
+
+    def test_real_policy_storage_facade_exempts_query_plans_own_read_adapter(self) -> None:
+        # [P1-3] once the bare-name (P1-1) and construction-visibility (P1-2)
+        # fixes make `find_legacy_facade_violations` actually able to match
+        # real, resolved calls into cidx::SqliteStorageService, a completed
+        # self-index surfaces src/query/exec.cpp's
+        # cidx::query::SqliteQueryReadAdapter -- query.plan's own, singular,
+        # sanctioned bridge into storage (it holds a SqliteStorageService&
+        # and forwards every QueryReadPort/GraphReadPort method to it) --
+        # as an unbaselined storage-facade violation, exactly the same
+        # dependency-inversion shape persistence.sqlite/product.application
+        # are already exempt for, and the one the sibling
+        # graph-query-bypass facade already exempts query.plan for on
+        # cidx::graph::GraphQuery. Without this exemption AC1 ("a real
+        # clean self-index must complete") is unreachable for a reason
+        # unrelated to any legacy call site pending migration.
+        real_policy = json.loads((ROOT / "architecture/cidx-self-host-policy.json").read_text(encoding="utf-8"))
+        real_manifest = json.loads((ROOT / "architecture/cidx-module-manifest.json").read_text(encoding="utf-8"))
+        module_ids = {module["id"] for module in real_manifest["modules"]}
+        self.assertIn("query.plan", module_ids)
+        facades = {facade["id"]: facade for facade in real_policy["legacyFacades"]}
+        self.assertIn("query.plan", facades["storage-facade"]["exemptModules"])
 
     def test_bootstrap_and_semantic_layers_agree_when_include_and_call_both_cross(self) -> None:
         fixture = _Fixture()

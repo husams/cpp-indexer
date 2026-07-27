@@ -689,9 +689,9 @@ bool field_available(View view, const std::string &name) {
                           "is_virtual", "vtable_slot", "relation", "source",
                           "target", "evidence", "status", "partial", "unknown"});
   case View::Site:
-    return has(std::array{"edge_id", "file_id", "file", "line", "col",
-                          "relation", "source", "target", "evidence", "status",
-                          "partial", "unknown"});
+    return has(std::array{"edge_id", "src_id", "dst_id", "file_id", "file",
+                          "line", "col", "relation", "source", "target",
+                          "evidence", "status", "partial", "unknown"});
   case View::Evidence:
     return has(std::array{"owner_id", "position", "default_txt",
                           "default_type_id", "default_ref_id", "edge_id",

@@ -1382,6 +1382,42 @@ TEST_CASE("query_plan: sites expand edge provenance deterministically") {
   CHECK(std::get<int64_t>(result.rows[1][2]) == 5);
 }
 
+TEST_CASE("query_plan: site view exposes stable src/dst endpoints") {
+  // [P2-2 fix] a "site" row's src_id/dst_id are the owning edge's own
+  // stable endpoints (a correlated subquery against edge.id), not the
+  // "edge" view's separate portable/logical row identity -- mirrors
+  // python/indexer/queryplan.py's `test_site_view_exposes_stable_src_dst_
+  // endpoints`. C++ previously rejected this select() field entirely
+  // (View::Site's field_available() list omitted "src_id"/"dst_id"), so a
+  // caller could not build a caller/callee witness from one query in C++
+  // the way Python's Executor already could.
+  Storage db(":memory:");
+  const int64_t component = db.add_component("project", "/tmp/site-endpoints");
+  const int64_t directory = db.add_directory(component, "src");
+  const int64_t file = db.add_file(directory, "same.cpp");
+  const int64_t caller = db.add_symbol(make_sym("USR::endpoint-caller", "caller"));
+  const int64_t callee = db.add_symbol(make_sym("USR::endpoint-callee", "callee"));
+  const int64_t edge = db.add_edge(make_edge(caller, callee, 1));
+  cidx::EdgeSite site;
+  site.edge_id = edge;
+  site.file_id = file;
+  site.line = 10;
+  site.col = 2;
+  db.add_edge_site(site);
+
+  QueryExecutor ex(db);
+  const Result result =
+      ex.run((start(codebase()) | view(View::Edge) | nodes() | sites() |
+              select({"edge_id", "src_id", "dst_id", "line", "col"}))
+                 .plan());
+  REQUIRE(result.rows.size() == 1);
+  CHECK(std::get<int64_t>(result.rows[0][0]) == edge);
+  CHECK(std::get<int64_t>(result.rows[0][1]) == caller);
+  CHECK(std::get<int64_t>(result.rows[0][2]) == callee);
+  CHECK(std::get<int64_t>(result.rows[0][3]) == 10);
+  CHECK(std::get<int64_t>(result.rows[0][4]) == 2);
+}
+
 TEST_CASE("query_plan: typed provenance preserves status through select") {
   const auto run = [](int64_t kind, bool unresolved_endpoint,
                       bool unresolved_site) {

@@ -2161,6 +2161,14 @@ private:
     if (field == "edge_id" && view == View::Edge) {
       return "edge.id";
     }
+    if ((field == "src_id" || field == "dst_id") && view == View::Site) {
+      // A site row is always scoped to exactly one edge (edge_site.edge_id
+      // is a foreign key into edge.id); exposing the edge's own stable
+      // endpoints here lets a caller correlate every call SITE straight to
+      // its (src_id, dst_id) in one query, without a second "edge" view
+      // round-trip -- mirrors python/indexer/queryplan.py's `_typed_column`.
+      return "(SELECT " + field + " FROM edge WHERE edge.id = edge_site.edge_id)";
+    }
     const std::string table = typed_table(view);
     const std::set<std::string> allowed = [&] {
       if (view == View::Parameter) {

@@ -18,7 +18,7 @@ for its own repository.
 | --- | --- | --- |
 | Input | source text, CMake, Python AST | resolved `calls`/`dispatch_calls` edges from a real self-index |
 | Can see | `#include`, `target_link_libraries`, imports | actual call edges, independent of whether a matching `#include` exists |
-| Cannot see | whether an include is ever actually used | anything not captured as a `calls`/`dispatch_calls` edge (function pointers, unresolved virtual dispatch) |
+| Cannot see | whether an include is ever actually used | anything not captured as a `calls`/`dispatch_calls`/construction-family edge (function pointers, unresolved virtual dispatch); see the construction-visibility caveat below |
 | Runs | always, no build required | requires a built `cidx` and a self-index (`scripts/self_host_index.sh`) |
 
 Both consume the **same** `architecture/cidx-module-manifest.json` allowed-
@@ -161,3 +161,45 @@ the existing `storage-facade`/`graph-query-bypass` entries in
 textual audit for a semantically complete one. Replace it with a
 report-derived baseline (the preferred path above) once a real self-index
 run completes.
+
+### Construction visibility (P1-2, partially closed)
+
+`find_module_boundary_violations`/`find_legacy_facade_violations` now read
+the construction-family edge kinds too (`construct-value`/`-temp`/`-heap`/
+`-copy`/`-move`, `factory-construct`, `destroy` — catalog kinds 10-16), not
+only `calls`/`dispatch_calls`. Their destination is always the constructed/
+destroyed **record** (e.g. `cidx::Storage`), never a constructor/destructor
+symbol (`src/ast/statement_edge_visitor.cpp`'s `emit_construction_form`), so
+the checker presents it the same way a baseline entry already names a direct
+construction: `"cidx::Storage::Storage"`, synthesized from the record's own
+name, not looked up as a real symbol.
+
+This closes the *checker logic* gap: a construction-kind edge that does carry
+a call-site row is no longer silently dropped by `CALL_EDGE_KINDS`, and a
+baseline entry authored the way the real policy file already writes one now
+actually suppresses its matching witness (previously impossible even for an
+exact match — see the bare-vs-signature-bearing name fix below). It does
+**not** close a separate, still-open engine gap: `emit_construction_form`
+(and the heap-construct/destroy/factory-construct paths beside it) do not
+record an `edge_site` row for these edges at all today, so a real self-index
+still cannot produce a *witnessed* (line/col-anchored) construction finding —
+only a synthetic fixture that attaches a site manually (as this file's own
+mutation tests do) can exercise the fixed matching logic end-to-end. Closing
+that requires adding site emission to the C++ extraction pass, a larger,
+separate change (it changes several `tests/e2e/features/*.feature` goldens
+that currently pin "no site" for these kinds) tracked as a follow-up rather
+than folded into this fix.
+
+### Bare vs. signature-bearing callee names (P1-1, fixed)
+
+A resolved witness's callee name (`ast::qualified_name`, `src/ast/
+names.hpp`) carries the full C++ signature for the leaf function/method
+(`"cidx::SqliteStorageService::write(const std::string &)"`), but every
+`calleeQualName` in a baseline entry is authored bare (matching
+`ast::qualified_name_bare`'s shape, e.g. `"cidx::SqliteStorageService::
+write"`). `find_legacy_facade_violations` now strips the leaf signature
+(`_bare_qual_name`) before comparing a witness against the baseline/dedup
+key, so a baseline entry that exactly names a real call site actually
+suppresses it. The `calleeQualNamePrefixes` **prefix** match is unaffected
+(a signature-bearing name still starts with its own bare class-scope
+prefix) and stays on the raw name.
