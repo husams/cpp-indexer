@@ -16,6 +16,8 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
 
+#include <algorithm>
+#include <chrono>
 #include <concepts>
 #include <cstdlib>
 #include <filesystem>
@@ -27,10 +29,10 @@
 #include <unistd.h>
 #include <vector>
 
+#include "graph/query.hpp"
 #include "query/cxq.hpp"
 #include "query/exec.hpp"
 #include "query/plan.hpp"
-#include "graph/query.hpp"
 #include "storage/records.hpp"
 #include "storage/storage.hpp"
 #include "util/hashing.hpp"
@@ -132,6 +134,13 @@ std::map<std::string, Plan> golden_plans() {
        nodes(all_of({all_of({eq("kind", "class"), eq("is_static", false)}),
                      not_(not_(ne("spelling", "x")))})) |
        count())
+          .plan();
+  plans["path_calls"] =
+      (start(symbol("USR::A")) |
+       path(start(symbol("USR::C")), "calls", 1, 8, 1) | rank(5) | limit(1))
+          .plan();
+  plans["reverse_type_use_climb"] =
+      (start(codebase()) | view(View::Type) | nodes() | reverse_type_use(4))
           .plan();
   return plans;
 }
@@ -832,17 +841,15 @@ TEST_CASE(
   CHECK(std::get<std::string>(slots.rows[0][2]) == "value");
   CHECK(std::get<int64_t>(slots.rows[0][3]) == int_id);
   const auto callable_roundtrip =
-      ex.run((start(symbol("USR::typed_views")) |
-              out("has_signature_slot") | out("of_callable") |
-              select({"usr"}))
+      ex.run((start(symbol("USR::typed_views")) | out("has_signature_slot") |
+              out("of_callable") | select({"usr"}))
                  .plan());
   REQUIRE(callable_roundtrip.rows.size() == 1);
   CHECK(std::get<std::string>(callable_roundtrip.rows[0][0]) ==
         "USR::typed_views");
   const auto type_roundtrip =
-      ex.run((start(symbol("USR::typed_views")) |
-              out("has_signature_slot") | out("of_type") |
-              select({"type_key"}))
+      ex.run((start(symbol("USR::typed_views")) | out("has_signature_slot") |
+              out("of_type") | select({"type_key"}))
                  .plan());
   REQUIRE(type_roundtrip.rows.size() == 4);
   CHECK(std::get<std::string>(type_roundtrip.rows[0][0]) == "A4(b:int)");
@@ -850,17 +857,15 @@ TEST_CASE(
   CHECK(std::get<std::string>(type_roundtrip.rows[2][0]) == "b:float");
   CHECK(std::get<std::string>(type_roundtrip.rows[3][0]) == "b:char");
   const auto callable_inverse =
-      ex.run((start(symbol("USR::typed_views")) |
-              out("has_signature_slot") | in_("has_signature_slot") |
-              select({"usr"}))
+      ex.run((start(symbol("USR::typed_views")) | out("has_signature_slot") |
+              in_("has_signature_slot") | select({"usr"}))
                  .plan());
   REQUIRE(callable_inverse.rows.size() == 1);
   CHECK(std::get<std::string>(callable_inverse.rows[0][0]) ==
         "USR::typed_views");
   const auto type_inverse =
       ex.run((start(codebase()) | view(View::Type) | nodes() |
-              where(eq("type_key", "b:int")) |
-              in_("signature_slot.of_type") |
+              where(eq("type_key", "b:int")) | in_("signature_slot.of_type") |
               select({"slot_kind"}))
                  .plan());
   REQUIRE(type_inverse.rows.size() == 1);
@@ -893,7 +898,8 @@ TEST_CASE(
   CHECK(structure() == before);
 }
 
-TEST_CASE("query_plan: exact recursive and pointer type acceptance is read-only") {
+TEST_CASE(
+    "query_plan: exact recursive and pointer type acceptance is read-only") {
   Storage db(":memory:");
   Symbol owner = make_sym("cidx::version_re", "version_re", "function");
   const int64_t owner_id = db.add_symbol(owner);
@@ -979,19 +985,18 @@ TEST_CASE("query_plan: exact recursive and pointer type acceptance is read-only"
   QueryExecutor ex(db);
   const auto version_return = ex.run(
       (start(symbol("cidx::version_re")) | out("has_signature_slot") |
-       where(all_of({eq("slot_kind", "return"),
-                     eq("mode", "lvalue-reference"),
+       where(all_of({eq("slot_kind", "return"), eq("mode", "lvalue-reference"),
                      eq("value_kind", "record"),
                      eq("named_decl", "std::regex")})) |
        select({"mode", "value_kind", "named_decl"}))
           .plan());
   REQUIRE(version_return.rows.size() == 1);
-  CHECK(std::get<std::string>(version_return.rows[0][0]) ==
-        "lvalue-reference");
+  CHECK(std::get<std::string>(version_return.rows[0][0]) == "lvalue-reference");
   CHECK(std::get<std::string>(version_return.rows[0][1]) == "record");
   CHECK(std::get<std::string>(version_return.rows[0][2]) == "std::regex");
   const auto signature = graph.signature(owner_id);
-  const auto type_only_graph = [&]() -> const cidx::graph::GraphQuery::ParamInfo * {
+  const auto type_only_graph =
+      [&]() -> const cidx::graph::GraphQuery::ParamInfo * {
     for (const auto &param : signature.params) {
       if (param.position == 10) {
         return &param;
@@ -1008,42 +1013,38 @@ TEST_CASE("query_plan: exact recursive and pointer type acceptance is read-only"
   CHECK(type_only_graph->value_kind == "record");
   REQUIRE(type_only_graph->named_decl.has_value());
   CHECK(*type_only_graph->named_decl == "std::regex");
-  const auto type_only_plan = ex.run(
-      (start(symbol("cidx::version_re")) | out("has_signature_slot") |
-       where(all_of({eq("slot_kind", "parameter"),
-                     eq("position", int64_t{10})})) |
-       select({"type_id", "declared_type_id", "adjusted_type_id", "mode",
-               "value_kind", "named_decl"}))
-          .plan());
+  const auto type_only_plan =
+      ex.run((start(symbol("cidx::version_re")) | out("has_signature_slot") |
+              where(all_of({eq("slot_kind", "parameter"),
+                            eq("position", int64_t{10})})) |
+              select({"type_id", "declared_type_id", "adjusted_type_id", "mode",
+                      "value_kind", "named_decl"}))
+                 .plan());
   REQUIRE(type_only_plan.rows.size() == 1);
   CHECK(std::get<int64_t>(type_only_plan.rows[0][0]) == regex_reference);
   CHECK(std::holds_alternative<std::nullptr_t>(type_only_plan.rows[0][1]));
   CHECK(std::holds_alternative<std::nullptr_t>(type_only_plan.rows[0][2]));
-  CHECK(std::get<std::string>(type_only_plan.rows[0][3]) ==
-        "lvalue-reference");
+  CHECK(std::get<std::string>(type_only_plan.rows[0][3]) == "lvalue-reference");
   CHECK(std::get<std::string>(type_only_plan.rows[0][4]) == "record");
   CHECK(std::get<std::string>(type_only_plan.rows[0][5]) == "std::regex");
   const auto type_only_filtered = ex.run(
       (start(symbol("cidx::version_re")) | out("has_signature_slot") |
-       where(all_of({eq("slot_kind", "parameter"),
-                     eq("position", int64_t{10}),
-                     eq("mode", "lvalue-reference"),
-                     eq("value_kind", "record"),
+       where(all_of({eq("slot_kind", "parameter"), eq("position", int64_t{10}),
+                     eq("mode", "lvalue-reference"), eq("value_kind", "record"),
                      eq("named_decl", "std::regex")})) |
        select({"position"}))
           .plan());
   REQUIRE(type_only_filtered.rows.size() == 1);
   CHECK(std::get<int64_t>(type_only_filtered.rows[0][0]) == 10);
-  const auto null_slot = ex.run(
-      (start(symbol("cidx::version_re")) | out("has_parameter") |
-       where(eq("position", int64_t{9})) | select({"type_id"}))
-          .plan());
+  const auto null_slot =
+      ex.run((start(symbol("cidx::version_re")) | out("has_parameter") |
+              where(eq("position", int64_t{9})) | select({"type_id"}))
+                 .plan());
   REQUIRE(null_slot.rows.size() == 1);
   CHECK(std::holds_alternative<std::nullptr_t>(null_slot.rows[0][0]));
   const auto counts = [&db] {
-    auto st = db.raw_db().prepare(
-        "SELECT (SELECT count(*) FROM symbol), "
-        "(SELECT count(*) FROM edge)");
+    auto st = db.raw_db().prepare("SELECT (SELECT count(*) FROM symbol), "
+                                  "(SELECT count(*) FROM edge)");
     REQUIRE(st.step());
     return std::tuple{st.col_int64(0), st.col_int64(1)};
   };
@@ -1756,4 +1757,1269 @@ TEST_CASE("query_plan: every relationship quantifier binds and aggregates") {
                     UnknownPolicy::Include))
                  .plan());
   REQUIRE(target_unknown.rows.size() == 1);
+}
+
+// ---------------------------------------------------------------------------
+// HSE-31 (CXQ-004): bounded witness paths, ranking, explain
+// ---------------------------------------------------------------------------
+
+TEST_CASE("query_plan: path() validation errors") {
+  auto code = [](const Plan &p) {
+    return error_code([&] { (void)validate(p); });
+  };
+
+  CHECK(code((start(symbol("A")) | where(eq("kind", "function")) |
+              path(start(symbol("C")), "calls"))
+                 .plan()) == "<no-error>"); // path() after where() is valid
+  CHECK(code((start(symbol("A")) | path(start(symbol("C")), "bogus")).plan()) ==
+        "E_RELATION");
+  CHECK(code((start(symbol("A")) | path(start(symbol("C")), "has_parameter"))
+                 .plan()) == "E_RELATION"); // typed/virtual relation
+  CHECK(code((start(symbol("A")) | path(start(symbol("C")), "calls", 1, 40))
+                 .plan()) == "E_DEPTH");
+  CHECK(code((start(symbol("A")) | path(start(symbol("C")), "calls", 1, 8, -1))
+                 .plan()) == "E_LIMIT"); // negative shortest cap
+  CHECK(code((start(symbol("A")) | path(start(entity("C")), "calls")).plan()) ==
+        "E_SETOP"); // operand view mismatch
+  CHECK(code((start(codebase()) | view(View::Type) | nodes() |
+              path(start(symbol("C")), "calls"))
+                 .plan()) == "E_VIEW"); // path() requires symbol/entity view
+  CHECK(code((start(symbol("A")) | path(start(symbol("C")), "calls") | rank(-1))
+                 .plan()) == "E_LIMIT"); // negative top_n
+  CHECK(code((start(symbol("A")) | rank()).plan()) ==
+        "E_STAGE"); // rank() without a preceding path()
+  CHECK(code((start(symbol("A")) | path(start(symbol("C")), "calls") |
+              out("calls"))
+                 .plan()) == "E_STAGE"); // traversal after path()
+  CHECK(code((start(symbol("A")) | path(start(symbol("C")), "calls") |
+              order_by({"name"}))
+                 .plan()) == "E_STAGE"); // order_by() does not apply to path()
+}
+
+TEST_CASE("query_plan: reverse_type_use() validation errors") {
+  auto code = [](const Plan &p) {
+    return error_code([&] { (void)validate(p); });
+  };
+
+  CHECK(code((start(symbol("A")) | reverse_type_use()).plan()) ==
+        "E_VIEW"); // requires a type/type_layer node stream
+  CHECK(code((start(codebase()) | view(View::Type) | nodes() |
+              reverse_type_use(0))
+                 .plan()) == "E_DEPTH");
+  CHECK(code((start(codebase()) | view(View::Type) | nodes() |
+              reverse_type_use(33))
+                 .plan()) == "E_DEPTH");
+}
+
+TEST_CASE("query_plan: path() finds the shortest witness with sites") {
+  Seeded s;
+  QueryExecutor ex(s.db);
+  const int64_t component = s.db.add_component("project", "/tmp/path-view");
+  const int64_t directory = s.db.add_directory(component, "src");
+  const int64_t file = s.db.add_file(directory, "path.cpp");
+  auto edge_id_query = s.db.raw_db().prepare(
+      "SELECT id FROM edge WHERE src_id=? AND dst_id=? AND kind=1");
+  edge_id_query.bind(1, s.A);
+  edge_id_query.bind(2, s.B);
+  REQUIRE(edge_id_query.step());
+  cidx::EdgeSite site;
+  site.edge_id = edge_id_query.col_int64(0);
+  site.file_id = file;
+  site.line = 1;
+  site.col = 1;
+  s.db.add_edge_site(site);
+
+  const auto result = ex.run((start(symbol("USR::A")) |
+                              path(start(symbol("USR::C")), "calls", 1, 8, 1))
+                                 .plan());
+  REQUIRE(result.shape == Shape::Path);
+  REQUIRE(result.paths.size() == 1);
+  const auto &witness = result.paths[0];
+  CHECK(witness.length == 2);
+  REQUIRE(witness.steps.size() == 3);
+  CHECK(witness.steps[0].node_id == s.A);
+  CHECK(witness.steps[0].through.empty());
+  CHECK(witness.steps[1].node_id == s.B);
+  CHECK(witness.steps[1].through == "calls");
+  CHECK(witness.steps[2].node_id == s.C);
+  CHECK(witness.steps[2].through == "calls");
+  REQUIRE(witness.steps[1].sites.size() == 1);
+  CHECK(witness.steps[1].sites[0].line == 1);
+  CHECK_FALSE(result.truncated);
+}
+
+TEST_CASE("query_plan: path() reports no witness within a narrow window") {
+  // A -[calls]-> B -[calls]-> C, but max_depth=1 only reaches B, which is
+  // itself expandable (B -[calls]-> C exists one hop further). This is a
+  // finite-depth exhaustion (docs/query-plan.md), not a proven negative, so
+  // it must be reported truncated even though no witness is returned.
+  Seeded s;
+  QueryExecutor ex(s.db);
+  const auto result = ex.run(
+      (start(symbol("USR::A")) | path(start(symbol("USR::C")), "calls", 1, 1))
+          .plan());
+  CHECK(result.paths.empty());
+  CHECK(result.truncated);
+}
+
+TEST_CASE("query_plan: path() reports partial when a fully exhausted search "
+          "proves no witness exists over a catalogued-partial relation") {
+  // "calls" is catalogued partial (call-site evidence can miss dispatch
+  // targets -- generated_catalog.hpp). A->B->C fully exhausts ("calls" has
+  // no further out-edges from C) well before max_depth, and D is never
+  // reached by any "calls" edge -- a genuine, fully-explored dead end, not a
+  // depth/budget cutoff (truncated stays false). Even so, the relation's own
+  // catalogued incompleteness means "no witness found" is never a proven
+  // negative: AC4, empty-plus-partial must not surface as complete.
+  Seeded s;
+  QueryExecutor ex(s.db);
+  auto result = ex.run(
+      (start(symbol("USR::A")) | path(start(symbol("USR::D")), "calls", 1, 8))
+          .plan());
+  CHECK(result.paths.empty());
+  CHECK_FALSE(result.truncated);
+  CHECK(result.partial);
+  result.index.freshness = "current";
+  CHECK(result.to_envelope().status == cidx::protocol::Status::Partial);
+
+  const auto counted =
+      ex.run((start(symbol("USR::A")) |
+              path(start(symbol("USR::D")), "calls", 1, 8) | count())
+                 .plan());
+  CHECK(counted.shape == Shape::Scalar);
+  CHECK(counted.scalar == 0);
+  CHECK(counted.partial);
+}
+
+TEST_CASE("query_plan: path() does not report partial for an empty result "
+          "over a catalogued-complete relation") {
+  // Control for the fix above: "inherits" is catalogued complete
+  // (generated_catalog.hpp), so a fully-exhausted, witness-free result over
+  // it must stay non-partial -- proving the fix folds the relation's OWN
+  // completeness rather than unconditionally forcing every empty path()
+  // result to partial. E's only inherits edges reach D and C, neither of
+  // which has a further inherits edge to A: a genuine dead end at depth 2.
+  Seeded s;
+  QueryExecutor ex(s.db);
+  const auto result = ex.run((start(symbol("USR::E")) |
+                              path(start(symbol("USR::A")), "inherits", 1, 8))
+                                 .plan());
+  CHECK(result.paths.empty());
+  CHECK_FALSE(result.truncated);
+  CHECK_FALSE(result.partial);
+}
+
+TEST_CASE("query_plan: path() ties are broken by ascending node-id order") {
+  Storage db(":memory:");
+  const int64_t start_id = db.add_symbol(make_sym("USR::S", "s"));
+  const int64_t left = db.add_symbol(make_sym("USR::L", "l"));
+  const int64_t right = db.add_symbol(make_sym("USR::R", "r"));
+  const int64_t target = db.add_symbol(make_sym("USR::T", "t"));
+  db.add_edge(make_edge(start_id, left, 1));
+  db.add_edge(make_edge(start_id, right, 1));
+  db.add_edge(make_edge(left, target, 1));
+  db.add_edge(make_edge(right, target, 1));
+
+  QueryExecutor ex(db);
+  const auto result = ex.run(
+      (start(symbol("USR::S")) | path(start(symbol("USR::T")), "calls", 1, 8))
+          .plan());
+  REQUIRE(result.paths.size() == 2);
+  CHECK(result.paths[0].steps[1].node_id == std::min(left, right));
+  CHECK(result.paths[1].steps[1].node_id == std::max(left, right));
+
+  const auto ranked =
+      ex.run((start(symbol("USR::S")) |
+              path(start(symbol("USR::T")), "calls", 1, 8) | rank(1))
+                 .plan());
+  REQUIRE(ranked.paths.size() == 1);
+  CHECK(ranked.paths[0].steps[1].node_id == std::min(left, right));
+}
+
+TEST_CASE("query_plan: path() count/distinct/limit apply to witnesses") {
+  Seeded s;
+  QueryExecutor ex(s.db);
+  const auto counted =
+      ex.run((start(symbol("USR::A")) |
+              path(start(symbol("USR::C")), "calls", 1, 8) | count())
+                 .plan());
+  CHECK(counted.shape == Shape::Scalar);
+  CHECK(counted.scalar == 1);
+
+  const auto limited =
+      ex.run((start(symbol("USR::A")) |
+              path(start(symbol("USR::C")), "calls", 1, 8) | limit(1))
+                 .plan());
+  CHECK(limited.paths.size() == 1);
+
+  const auto deduped =
+      ex.run((start(symbol("USR::A")) |
+              path(start(symbol("USR::C")), "calls", 1, 8) | distinct())
+                 .plan());
+  CHECK(deduped.paths.size() == 1);
+}
+
+TEST_CASE("query_plan: path() level budget is exact at the boundary and "
+          "truncates without a witness") {
+  // A single start node fans out to `fanout` children in one BFS level: the
+  // level-discovery query for that one level returns `fanout` rows from a
+  // single chunk. Before the fix this only checked kPathNodeBudget AFTER the
+  // whole level's rows were read into parent_of; now the row loop itself
+  // breaks the moment the budget is exceeded, so the level (and hence any
+  // witness reconstruction from it) is abandoned without waiting to finish
+  // reading a level far larger than the budget.
+  for (const int64_t fanout :
+       {kPathNodeBudget, kPathNodeBudget + 1, kPathNodeBudget + 2048}) {
+    Storage db(":memory:");
+    auto txn = db.transaction();
+    const int64_t start_id = db.add_symbol(make_sym("USR::fan-start", "start"));
+    int64_t first_child = -1;
+    for (int64_t i = 0; i < fanout; ++i) {
+      const int64_t child = db.add_symbol(make_sym(
+          "USR::fan-child-" + std::to_string(i), "child" + std::to_string(i)));
+      db.add_edge(make_edge(start_id, child, 1));
+      if (i == 0) {
+        first_child = child;
+      }
+    }
+    txn.commit();
+
+    QueryExecutor ex(db);
+    const auto result =
+        ex.run((start(symbol("USR::fan-start")) |
+                path(start(symbol("USR::fan-child-0")), "calls", 1, 1))
+                   .plan());
+    CHECK(result.path_rows_examined == std::min(fanout, kPathNodeBudget + 1));
+    if (fanout > kPathNodeBudget) {
+      CHECK(result.paths.empty());
+      CHECK(result.truncated);
+    } else {
+      REQUIRE(result.paths.size() == 1);
+      CHECK(result.paths[0].steps.back().node_id == first_child);
+      CHECK_FALSE(result.truncated);
+    }
+  }
+}
+
+TEST_CASE("query_plan: reverse_type_use() retains every typed layer") {
+  Storage db(":memory:");
+  const int64_t owner = db.add_symbol(make_sym("USR::owner", "owner"));
+  db.raw_db().exec(
+      "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+      "('A4(b:int)','int[4]',8,'4'),('b:int','int',1,NULL)");
+  auto ids = db.raw_db().prepare("SELECT id FROM type_node ORDER BY id");
+  REQUIRE(ids.step());
+  const int64_t array_id = ids.col_int64(0);
+  REQUIRE(ids.step());
+  const int64_t int_id = ids.col_int64(0);
+  db.add_type_edge(array_id, 2, 0, int_id); // element_type
+  db.add_symbol_type(owner, 1, array_id);   // returns
+  db.raw_db().exec(
+      "INSERT INTO parameter(owner_id,position,pack_index,name,type_id) "
+      "VALUES (1,0,-1,'value',2)"); // direct parameter use of int_id
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) | reverse_type_use())
+                 .plan());
+  REQUIRE(result.shape == Shape::Path);
+  REQUIRE(result.paths.size() == 2);
+
+  const auto direct = std::ranges::find_if(
+      result.paths, [](const PathWitness &w) { return w.length == 1; });
+  REQUIRE(direct != result.paths.end());
+  CHECK(direct->steps.back().domain == "parameter");
+  CHECK(direct->steps.back().node_id == owner);
+
+  const auto nested = std::ranges::find_if(
+      result.paths, [](const PathWitness &w) { return w.length == 2; });
+  REQUIRE(nested != result.paths.end());
+  REQUIRE(nested->steps.size() == 3);
+  CHECK(nested->steps[0].node_id == int_id);
+  CHECK(nested->steps[1].node_id == array_id);
+  CHECK(nested->steps[1].through == "element_type");
+  CHECK(nested->steps[2].domain == "symbol");
+  CHECK(nested->steps[2].node_id == owner);
+}
+
+TEST_CASE("query_plan: explain() reports budgets, shape, and input relations") {
+  Seeded s;
+  SqliteQueryReadAdapter read(s.db);
+  Executor executor(read);
+  const auto plan = (start(symbol("USR::A")) |
+                     path(start(symbol("USR::C")), "calls", 1, 8, 1))
+                        .plan();
+  const auto explained = executor.explain(plan);
+  const std::string rendered = cidx::json_out::dumps_indent2(explained);
+  CHECK(rendered.find("\"execution_shape\": \"path\"") != std::string::npos);
+  CHECK(rendered.find("\"traverse_node_budget\": 10000") != std::string::npos);
+  CHECK(rendered.find("\"path_node_budget\": 10000") != std::string::npos);
+  CHECK(rendered.find("\"path_reconstruction_budget\": 200000") !=
+        std::string::npos);
+  CHECK(rendered.find("\"default_result_cap\": 1000") != std::string::npos);
+  CHECK(rendered.find("\"relation\": \"symbol.calls\"") != std::string::npos);
+  CHECK(rendered.find("\"completeness\": \"partial\"") != std::string::npos);
+  CHECK(rendered.find("\"partial_inputs\": true") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// PR #69 review round: path-window BFS, evidence caps, owner identity,
+// explain() completeness/freshness regressions
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "query_plan: path() finds an in-window witness reached only at a later "
+    "depth") {
+  // S->T is depth 1 (out of the [2,2] window); S->M->T is the only depth-2
+  // route. A permanent cross-level visited set would mark T visited at
+  // depth 1 and discard the depth-2 rediscovery via M.
+  Storage db(":memory:");
+  const int64_t s = db.add_symbol(make_sym("USR::S", "s"));
+  const int64_t t = db.add_symbol(make_sym("USR::T", "t"));
+  const int64_t m = db.add_symbol(make_sym("USR::M", "m"));
+  db.add_edge(make_edge(s, t, 1));
+  db.add_edge(make_edge(s, m, 1));
+  db.add_edge(make_edge(m, t, 1));
+
+  QueryExecutor ex(db);
+  const auto result = ex.run(
+      (start(symbol("USR::S")) | path(start(symbol("USR::T")), "calls", 2, 2))
+          .plan());
+  REQUIRE(result.paths.size() == 1);
+  const auto &witness = result.paths[0];
+  CHECK(witness.length == 2);
+  REQUIRE(witness.steps.size() == 3);
+  CHECK(witness.steps[0].node_id == s);
+  CHECK(witness.steps[1].node_id == m);
+  CHECK(witness.steps[2].node_id == t);
+  CHECK_FALSE(result.truncated);
+}
+
+TEST_CASE(
+    "query_plan: path() reports truncation when a hop has more sites than "
+    "the cap") {
+  Storage db(":memory:");
+  const int64_t component =
+      db.add_component("project", "/tmp/path-evidence-cap");
+  const int64_t directory = db.add_directory(component, "src");
+  const int64_t file = db.add_file(directory, "cap.cpp");
+  const int64_t a = db.add_symbol(make_sym("USR::CapA", "a"));
+  const int64_t b = db.add_symbol(make_sym("USR::CapB", "b"));
+  const int64_t edge = db.add_edge(make_edge(a, b, 1));
+  db.raw_db().exec(
+      "WITH RECURSIVE lines(line) AS (SELECT 0 UNION ALL SELECT line + 1 "
+      "FROM lines WHERE line < 1000) INSERT INTO edge_site "
+      "(edge_id,file_id,line,col) SELECT " +
+      std::to_string(edge) + "," + std::to_string(file) + ",line,0 FROM lines");
+
+  QueryExecutor ex(db);
+  const auto result = ex.run((start(symbol("USR::CapA")) |
+                              path(start(symbol("USR::CapB")), "calls", 1, 1))
+                                 .plan());
+  REQUIRE(result.paths.size() == 1);
+  const auto &witness = result.paths[0];
+  REQUIRE(witness.steps.size() == 2);
+  CHECK(witness.steps[1].sites.size() == kDefaultResultCap);
+  CHECK(witness.steps[1].status == "partial");
+  CHECK(witness.status == "partial");
+  CHECK(result.truncated); // incomplete evidence must never look complete
+}
+
+TEST_CASE(
+    "query_plan: reverse_type_use() preserves distinct parameter slots on "
+    "one owner") {
+  Storage db(":memory:");
+  const int64_t owner =
+      db.add_symbol(make_sym("USR::two_params", "two_params"));
+  db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind,extent) "
+                   "VALUES ('b:int','int',1,NULL)");
+  auto ids = db.raw_db().prepare("SELECT id FROM type_node ORDER BY id");
+  REQUIRE(ids.step());
+  const int64_t int_id = ids.col_int64(0);
+  for (const int64_t position : {0, 1}) {
+    auto stmt = db.raw_db().prepare(
+        "INSERT INTO parameter(owner_id,position,pack_index,name,type_id) "
+        "VALUES (?,?,-1,'p',?)");
+    stmt.bind(1, owner);
+    stmt.bind(2, position);
+    stmt.bind(3, int_id);
+    stmt.step_done();
+  }
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) | reverse_type_use())
+                 .plan());
+  REQUIRE(result.paths.size() == 2);
+  std::vector<int64_t> positions;
+  for (const auto &witness : result.paths) {
+    REQUIRE(witness.steps.size() == 2);
+    CHECK(witness.steps[1].node_id == owner);
+    CHECK(witness.steps[1].domain == "parameter");
+    CHECK(witness.steps[1].through == "parameter");
+    positions.push_back(witness.steps[1].position);
+  }
+  std::ranges::sort(positions);
+  CHECK(positions == std::vector<int64_t>{0, 1});
+}
+
+TEST_CASE("query_plan: explain() reports reverse_type_use()'s real inputs") {
+  Storage db(":memory:");
+  db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind,extent) "
+                   "VALUES ('b:int','int',1,NULL)");
+
+  SqliteQueryReadAdapter read(db);
+  Executor executor(read);
+  const auto plan =
+      (start(codebase()) | view(View::Type) | nodes() | reverse_type_use())
+          .plan();
+  const auto explained = executor.explain(plan);
+  const std::string rendered = cidx::json_out::dumps_indent2(explained);
+  CHECK(rendered.find("\"execution_shape\": \"path\"") != std::string::npos);
+  CHECK(rendered.find("\"relation\": \"type.has_type_edge\"") !=
+        std::string::npos);
+  CHECK(rendered.find("\"relation\": \"type.canonical_id\"") !=
+        std::string::npos);
+  CHECK(rendered.find("\"relation\": \"symbol.of_type\"") != std::string::npos);
+  CHECK(rendered.find("\"relation\": \"parameter.of_type\"") !=
+        std::string::npos);
+  CHECK(rendered.find("\"relation\": \"template_parameter.of_type\"") !=
+        std::string::npos);
+  CHECK(rendered.find("\"relation\": \"template_argument.of_type\"") !=
+        std::string::npos);
+  CHECK(rendered.find("\"partial_inputs\": true") != std::string::npos);
+  CHECK(rendered.find("\"unknown_capable_inputs\": true") != std::string::npos);
+}
+
+TEST_CASE(
+    "query_plan: explain() exposes expected vs indexed source revision on a "
+    "stale index") {
+  const std::string dir = make_temp_dir();
+  const std::string source = dir + "/answer.cpp";
+  {
+    std::ofstream out(source);
+    out << "int answer = 1;\n";
+  }
+  Storage db(":memory:");
+  db.add_component("fixture", dir);
+  const auto file_id =
+      db.add_file_path(source, std::nullopt, cidx::md5_of(source));
+  db.mark_file_indexed(file_id, std::nullopt, cidx::md5_of(source));
+  db.stamp_index_identity();
+
+  const auto current = db.index_identity();
+  REQUIRE(current.freshness == "current");
+  REQUIRE(current.source_revision.has_value());
+  REQUIRE(current.expected_source_revision.has_value());
+  REQUIRE(current.expected_index_config_fingerprint.has_value());
+  if (current.source_revision && current.expected_source_revision) {
+    CHECK(*current.source_revision == *current.expected_source_revision);
+  }
+
+  // Change the checkout after stamping: the persisted identity now
+  // disagrees with what the current source hashes to.
+  {
+    std::ofstream out(source);
+    out << "int answer = 2;\n";
+  }
+  const auto stale = db.index_identity();
+  CHECK(stale.freshness == "stale");
+  REQUIRE(stale.source_revision.has_value());
+  REQUIRE(stale.expected_source_revision.has_value());
+  if (stale.source_revision && stale.expected_source_revision) {
+    CHECK(*stale.source_revision != *stale.expected_source_revision);
+  }
+  if (stale.source_revision && current.source_revision) {
+    CHECK(*stale.source_revision == *current.source_revision); // unchanged
+  }
+
+  SqliteQueryReadAdapter read(db);
+  Executor executor(read);
+  const auto explained = executor.explain((start(codebase()) | nodes()).plan());
+  const std::string rendered = cidx::json_out::dumps_indent2(explained);
+  CHECK(rendered.find("\"freshness\": \"stale\"") != std::string::npos);
+  CHECK(rendered.find("\"expected_source_revision\"") != std::string::npos);
+  CHECK(rendered.find("\"expected_source_fingerprint\"") != std::string::npos);
+  CHECK(rendered.find("\"expected_index_config_fingerprint\"") !=
+        std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// PR #69 review round 2: intermediate type_edge identity and path
+// distinctness
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "query_plan: reverse_type_use() retains each intermediate type_edge's "
+    "position") {
+  // One function type F has two `param_type` edges to the same pointee
+  // (int) at positions 0 and 1. Both climbs share (parent=F,
+  // through=param_type); without `position` they would serialize as
+  // byte-identical witnesses.
+  Storage db(":memory:");
+  const int64_t owner =
+      db.add_symbol(make_sym("USR::two_int_params_fn", "two_int_params_fn"));
+  db.raw_db().exec(
+      "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+      "('fn(int,int)','void(int,int)',9,NULL),('b:int','int',1,NULL)");
+  auto ids = db.raw_db().prepare("SELECT id FROM type_node ORDER BY id");
+  REQUIRE(ids.step());
+  const int64_t fn_id = ids.col_int64(0);
+  REQUIRE(ids.step());
+  const int64_t int_id = ids.col_int64(0);
+  db.add_type_edge(fn_id, 5, 0, int_id); // param_type position 0
+  db.add_type_edge(fn_id, 5, 1, int_id); // param_type position 1
+  db.add_symbol_type(owner, 1, fn_id);   // returns
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) | reverse_type_use())
+                 .plan());
+  REQUIRE(result.paths.size() == 2);
+  std::vector<int64_t> positions;
+  for (const auto &witness : result.paths) {
+    CHECK(witness.length == 2);
+    REQUIRE(witness.steps.size() == 3);
+    CHECK(witness.steps[0].node_id == int_id);
+    CHECK(witness.steps[1].node_id == fn_id);
+    CHECK(witness.steps[1].through == "param_type");
+    positions.push_back(witness.steps[1].position);
+    CHECK(witness.steps[2].node_id == owner);
+  }
+  std::ranges::sort(positions);
+  CHECK(positions == std::vector<int64_t>{0, 1});
+
+  // distinct() must not collapse these two structurally-different witnesses
+  // just because the F-hop's `through` label is the same for both.
+  const auto deduped =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) | reverse_type_use() | distinct())
+                 .plan());
+  CHECK(deduped.paths.size() == 2);
+}
+
+TEST_CASE(
+    "query_plan: path() distinct() compares full typed slot identity, not "
+    "just node id") {
+  // One owner has two `int` parameters at positions 0 and 1. Both witnesses
+  // share (node_id, through, inbound) on the final step -- only position
+  // distinguishes them -- so a distinctness key that ignores position would
+  // wrongly collapse them to one.
+  Storage db(":memory:");
+  const int64_t owner =
+      db.add_symbol(make_sym("USR::two_params_distinct", "two_params"));
+  db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind,extent) "
+                   "VALUES ('b:int','int',1,NULL)");
+  auto ids = db.raw_db().prepare("SELECT id FROM type_node ORDER BY id");
+  REQUIRE(ids.step());
+  const int64_t int_id = ids.col_int64(0);
+  for (const int64_t position : {0, 1}) {
+    auto stmt = db.raw_db().prepare(
+        "INSERT INTO parameter(owner_id,position,pack_index,name,type_id) "
+        "VALUES (?,?,-1,'p',?)");
+    stmt.bind(1, owner);
+    stmt.bind(2, position);
+    stmt.bind(3, int_id);
+    stmt.step_done();
+  }
+
+  QueryExecutor ex(db);
+  const auto before_distinct =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) | reverse_type_use())
+                 .plan());
+  REQUIRE(before_distinct.paths.size() == 2);
+
+  const auto after_distinct =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) | reverse_type_use() | distinct())
+                 .plan());
+  REQUIRE(after_distinct.paths.size() == 2);
+  std::vector<int64_t> positions;
+  for (const auto &witness : after_distinct.paths) {
+    REQUIRE(witness.steps.size() == 2);
+    positions.push_back(witness.steps[1].position);
+  }
+  std::ranges::sort(positions);
+  CHECK(positions == std::vector<int64_t>{0, 1});
+}
+
+// ---------------------------------------------------------------------------
+// PR #69 review round 3: finite-depth exhaustion, incomplete chain
+// reconstruction, symbol-owner provenance, and a total rank key
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "query_plan: path() reports truncation when the depth window cuts off "
+    "an expandable frontier") {
+  // S -> M -> T, but max_depth=1 only lets the BFS reach M. M is not a
+  // target, and M is itself expandable (M -> T exists one hop further), so
+  // this "no witness" is a finite-depth exhaustion, not proof no path
+  // exists.
+  Storage db(":memory:");
+  const int64_t s = db.add_symbol(make_sym("USR::FDE_S", "s"));
+  const int64_t m = db.add_symbol(make_sym("USR::FDE_M", "m"));
+  const int64_t t = db.add_symbol(make_sym("USR::FDE_T", "t"));
+  db.add_edge(make_edge(s, m, 1));
+  db.add_edge(make_edge(m, t, 1));
+
+  QueryExecutor ex(db);
+  const auto result = ex.run((start(symbol("USR::FDE_S")) |
+                              path(start(symbol("USR::FDE_T")), "calls", 1, 1))
+                                 .plan());
+  CHECK(result.paths.empty());
+  CHECK(result.truncated);
+}
+
+TEST_CASE("query_plan: path() does not report truncation when a start's window "
+          "is genuinely exhausted") {
+  // S has no outgoing edges at all: the BFS dies at depth 1 with an empty
+  // frontier, a real dead end, not a depth-limit cutoff.
+  Storage db(":memory:");
+  db.add_symbol(make_sym("USR::FDE_Dead_S", "s"));
+  db.add_symbol(make_sym("USR::FDE_Dead_T", "t"));
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(symbol("USR::FDE_Dead_S")) |
+              path(start(symbol("USR::FDE_Dead_T")), "calls", 1, 4))
+                 .plan());
+  CHECK(result.paths.empty());
+  CHECK_FALSE(result.truncated);
+}
+
+TEST_CASE("query_plan: path() probes a terminal frontier at the depth limit") {
+  Storage db(":memory:");
+  const int64_t source =
+      db.add_symbol(make_sym("USR::FDE_Terminal_S", "source"));
+  const int64_t terminal =
+      db.add_symbol(make_sym("USR::FDE_Terminal_M", "terminal"));
+  db.add_symbol(make_sym("USR::FDE_Terminal_T", "target"));
+  db.add_edge(make_edge(source, terminal, 1));
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(symbol("USR::FDE_Terminal_S")) |
+              path(start(symbol("USR::FDE_Terminal_T")), "calls", 1, 1))
+                 .plan());
+  CHECK(result.paths.empty());
+  CHECK_FALSE(result.truncated);
+}
+
+TEST_CASE("query_plan: path() never serializes a chain reconstruction that was "
+          "cut short by the witness cap") {
+  // A depth-3 layered DAG where the middle layer alone has far more than
+  // kDefaultResultCap predecessor combinations: reconstruction from the
+  // single target must either complete every emitted witness back to the
+  // real source, or emit none -- never a short chain that silently starts
+  // mid-path.
+  Storage db(":memory:");
+  const int64_t source = db.add_symbol(make_sym("USR::Chain_Source", "src"));
+  const int64_t target = db.add_symbol(make_sym("USR::Chain_Target", "tgt"));
+  constexpr int kFanout = 1200; // > kDefaultResultCap
+  std::vector<int64_t> middle;
+  middle.reserve(kFanout);
+  for (int i = 0; i < kFanout; ++i) {
+    const int64_t node = db.add_symbol(make_sym(
+        "USR::Chain_Mid_" + std::to_string(i), "mid" + std::to_string(i)));
+    db.add_edge(make_edge(source, node, 1));
+    db.add_edge(make_edge(node, target, 1));
+    middle.push_back(node);
+  }
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(symbol("USR::Chain_Source")) |
+              path(start(symbol("USR::Chain_Target")), "calls", 2, 2))
+                 .plan());
+  CHECK(result.truncated);
+  REQUIRE(result.paths.size() == kDefaultResultCap);
+  for (const auto &witness : result.paths) {
+    REQUIRE(witness.length == 2);
+    REQUIRE(witness.steps.size() == 3); // source, middle, target -- complete
+    CHECK(witness.steps[0].node_id == source);
+    CHECK(witness.steps[2].node_id == target);
+  }
+  CHECK(result.paths.front().steps[1].node_id == middle.front());
+
+  const auto ranked =
+      ex.run((start(symbol("USR::Chain_Source")) |
+              path(start(symbol("USR::Chain_Target")), "calls", 2, 2, 1))
+                 .plan());
+  REQUIRE(ranked.paths.size() == 1);
+  CHECK(ranked.paths[0].steps[0].node_id == source);
+  CHECK(ranked.paths[0].steps[1].node_id == middle.front());
+  CHECK(ranked.paths[0].steps[2].node_id == target);
+  CHECK(ranked.truncated);
+}
+
+TEST_CASE("query_plan: path() finds a longer simple witness when the "
+          "shortest walk to a target is non-simple") {
+  // S -[calls]-> A, A -[calls]-> S, S -[calls]-> T, S -[calls]-> B,
+  // B -[calls]-> C, C -[calls]-> D, D -[calls]-> T. The only depth-3 walk
+  // that reaches T is the non-simple S->A->S->T (S repeats); the true
+  // simple witness is the depth-4 walk S->B->C->D->T. Before the fix, the
+  // BFS committed to found_depth=3 on the first (non-simple) hit, rejected
+  // every depth-3 chain, and returned zero witnesses with truncated=false
+  // -- a false proven negative even though an in-window simple path
+  // exists at a deeper level.
+  Storage db(":memory:");
+  const int64_t s = db.add_symbol(make_sym("USR::Nonsimple_S", "s"));
+  const int64_t a = db.add_symbol(make_sym("USR::Nonsimple_A", "a"));
+  const int64_t t = db.add_symbol(make_sym("USR::Nonsimple_T", "t"));
+  const int64_t b = db.add_symbol(make_sym("USR::Nonsimple_B", "b"));
+  const int64_t c = db.add_symbol(make_sym("USR::Nonsimple_C", "c"));
+  const int64_t d = db.add_symbol(make_sym("USR::Nonsimple_D", "d"));
+  db.add_edge(make_edge(s, a, 1));
+  db.add_edge(make_edge(a, s, 1));
+  db.add_edge(make_edge(s, t, 1));
+  db.add_edge(make_edge(s, b, 1));
+  db.add_edge(make_edge(b, c, 1));
+  db.add_edge(make_edge(c, d, 1));
+  db.add_edge(make_edge(d, t, 1));
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(symbol("USR::Nonsimple_S")) |
+              path(start(symbol("USR::Nonsimple_T")), "calls", 3, 5))
+                 .plan());
+  REQUIRE(result.paths.size() == 1);
+  const auto &witness = result.paths[0];
+  CHECK(witness.length == 4);
+  REQUIRE(witness.steps.size() == 5);
+  CHECK(witness.steps[0].node_id == s);
+  CHECK(witness.steps[1].node_id == b);
+  CHECK(witness.steps[2].node_id == c);
+  CHECK(witness.steps[3].node_id == d);
+  CHECK(witness.steps[4].node_id == t);
+  CHECK_FALSE(result.truncated);
+}
+
+TEST_CASE("query_plan: path() reports a self-recursive witness when the "
+          "target is the start") {
+  // S -[calls]-> S: a self-loop. path(to=S, calls, 1, 3) must report the
+  // length-1 cycle S->S as a witness rather than rejecting it as a
+  // "repeated node" -- the start closing a cycle back to itself on the
+  // final hop is the only witness self-recursion can ever produce.
+  Storage db(":memory:");
+  const int64_t s = db.add_symbol(make_sym("USR::SelfLoop_S", "s"));
+  db.add_edge(make_edge(s, s, 1));
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(symbol("USR::SelfLoop_S")) |
+              path(start(symbol("USR::SelfLoop_S")), "calls", 1, 3))
+                 .plan());
+  REQUIRE(result.paths.size() == 1);
+  const auto &witness = result.paths[0];
+  CHECK(witness.length == 1);
+  REQUIRE(witness.steps.size() == 2);
+  CHECK(witness.steps[0].node_id == s);
+  CHECK(witness.steps[1].node_id == s);
+  CHECK_FALSE(result.truncated);
+}
+
+TEST_CASE("query_plan: path() reconstruction is budget-bounded when every "
+          "walk of the target depth is non-simple") {
+  // A layered DAG shaped exactly like the round-6 review finding: S -> n1,
+  // n1 -> L2 (k nodes), L2 -> L3 -> ... -> L13 fully connected consecutive
+  // layers (k nodes each), and every L13 node closing back to n1. n1 is
+  // also the target, so the ONLY depth-14 walks reaching it revisit n1
+  // (once at hop 1, again at hop 14) -- every one of them is non-simple,
+  // so `chains` is provably empty at this depth, but proving that empty
+  // pre-fix required enumerating all k^(depth-2) simple prefixes (k=5,
+  // depth=14 -> 5^12 ~ 244M DFS descents, ~9.7s measured pre-fix) even
+  // though the raw BFS itself only ever reads ~286 edge rows -- nowhere
+  // near kPathNodeBudget. Reconstruction must bound its own DFS work
+  // (kPathReconstructionBudget) independently of the row-read budget, or
+  // this call runs unbounded relative to genuine query cost.
+  constexpr int kBranch = 5;
+  constexpr int kLayers = 12; // L2..L13
+  constexpr int64_t kDepth = 14;
+  Storage db(":memory:");
+  const int64_t s = db.add_symbol(make_sym("USR::Explode_S", "s"));
+  const int64_t n1 = db.add_symbol(make_sym("USR::Explode_N1", "n1"));
+  db.add_edge(make_edge(s, n1, 1));
+
+  std::vector<int64_t> prev{n1};
+  std::vector<int64_t> first_layer;
+  for (int layer = 0; layer < kLayers; ++layer) {
+    std::vector<int64_t> current;
+    current.reserve(kBranch);
+    for (int i = 0; i < kBranch; ++i) {
+      current.push_back(db.add_symbol(make_sym(
+          "USR::Explode_L" + std::to_string(layer) + "_" + std::to_string(i),
+          "l" + std::to_string(layer) + "_" + std::to_string(i))));
+    }
+    for (const int64_t p : prev) {
+      for (const int64_t c : current) {
+        db.add_edge(make_edge(p, c, 1));
+      }
+    }
+    if (layer == kLayers - 1) {
+      for (const int64_t c : current) {
+        db.add_edge(make_edge(c, n1, 1));
+      }
+    }
+    prev = current;
+  }
+
+  QueryExecutor ex(db);
+  const auto started = std::chrono::steady_clock::now();
+  const auto result =
+      ex.run((start(symbol("USR::Explode_S")) |
+              path(start(symbol("USR::Explode_N1")), "calls", kDepth, kDepth))
+                 .plan());
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  const auto elapsed_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+  INFO("elapsed_ms=", elapsed_ms);
+  // Non-timing, budget-attributable assertion (round-2 review F2): with the
+  // reconstruction-budget guard removed (e.g. the constant multiplied up),
+  // this same fixture still reports paths.empty()/truncated via the
+  // unrelated depth_limited path, so those two checks alone cannot tell the
+  // fixed code from the unfixed code -- only elapsed time could, which is
+  // flaky under CI load. Asserting the DFS actually paid for and hit
+  // kPathReconstructionBudget (not merely stopped for some other reason)
+  // closes that gap.
+  CHECK(result.path_reconstruction_descents_examined ==
+        kPathReconstructionBudget + 1);
+  // Wall-clock bound kept as a secondary, non-blocking sanity signal (pre-fix
+  // this measured ~9661ms); the budget-count assertion above is now the
+  // primary discriminator.
+  CHECK(elapsed_ms < 2000);
+  CHECK(result.paths.empty());
+  CHECK(result.truncated);
+}
+
+TEST_CASE("query_plan: path() reconstruction retains an already-confirmed "
+          "witness when the budget trips exploring the rest of that depth's "
+          "search space") {
+  // Round-2 review F1: a confirmed simple witness must be emitted even when
+  // `reconstruction_budget_exceeded` becomes true later in the same DFS
+  // enumeration (e.g. an unrelated dense region hanging off the same start
+  // exhausts the budget after the witness was already found). Discarding it
+  // is strictly worse than reporting it alongside truncated=true.
+  //
+  // Graph: s -> a1 -> a2 -> ... -> a13 -> n1 is a genuine SIMPLE witness of
+  // length 14 (all distinct nodes). The `a*` chain is given smaller node ids
+  // than n1 and the dense layers below, so lexicographic (sorted-by-id) DFS
+  // visits it FIRST and confirms the witness cheaply (14 descents) before
+  // ever touching the dense subtree. Separately, s -> n1 -> L2..L13 (5-wide
+  // fully-connected consecutive layers) -> n1 reproduces the round-6
+  // combinatorial blowup (every walk here is non-simple, since it revisits
+  // n1), which exhausts kPathReconstructionBudget while DFS explores it
+  // AFTER the witness chain, per sort order.
+  constexpr int kBranch = 5;
+  constexpr int kLayers = 12; // L2..L13
+  constexpr int64_t kDepth = 14;
+  Storage db(":memory:");
+  const int64_t s = db.add_symbol(make_sym("USR::Retain_S", "s"));
+
+  std::vector<int64_t> witness_chain{s};
+  for (int i = 1; i <= kLayers + 1; ++i) { // a1..a13 (13 nodes, depths 1..13)
+    witness_chain.push_back(db.add_symbol(make_sym(
+        "USR::Retain_A" + std::to_string(i), "a" + std::to_string(i))));
+  }
+  for (size_t i = 0; i + 1 < witness_chain.size(); ++i) {
+    db.add_edge(make_edge(witness_chain[i], witness_chain[i + 1], 1));
+  }
+
+  const int64_t n1 = db.add_symbol(make_sym("USR::Retain_N1", "n1"));
+  db.add_edge(make_edge(s, n1, 1));
+  db.add_edge(make_edge(witness_chain.back(), n1, 1)); // a13 -> n1, hop 14
+
+  std::vector<int64_t> prev{n1};
+  for (int layer = 0; layer < kLayers; ++layer) {
+    std::vector<int64_t> current;
+    current.reserve(kBranch);
+    for (int i = 0; i < kBranch; ++i) {
+      current.push_back(db.add_symbol(make_sym(
+          "USR::Retain_L" + std::to_string(layer) + "_" + std::to_string(i),
+          "l" + std::to_string(layer) + "_" + std::to_string(i))));
+    }
+    for (const int64_t p : prev) {
+      for (const int64_t c : current) {
+        db.add_edge(make_edge(p, c, 1));
+      }
+    }
+    if (layer == kLayers - 1) {
+      for (const int64_t c : current) {
+        db.add_edge(make_edge(c, n1, 1));
+      }
+    }
+    prev = current;
+  }
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(symbol("USR::Retain_S")) |
+              path(start(symbol("USR::Retain_N1")), "calls", kDepth, kDepth))
+                 .plan());
+  // The witness was confirmed BEFORE the budget tripped -- it must survive.
+  REQUIRE(result.paths.size() == 1);
+  const auto &witness = result.paths[0];
+  CHECK(witness.length == kDepth);
+  REQUIRE(witness.steps.size() == static_cast<size_t>(kDepth) + 1);
+  for (size_t i = 0; i < witness_chain.size(); ++i) {
+    CHECK(witness.steps[i].node_id == witness_chain[i]);
+  }
+  CHECK(witness.steps.back().node_id == n1);
+  // The overall result is still truncated: the dense subtree exhausted the
+  // reconstruction budget, so other witnesses may have gone unexplored.
+  CHECK(result.truncated);
+  CHECK(result.path_reconstruction_descents_examined ==
+        kPathReconstructionBudget + 1);
+}
+
+TEST_CASE("query_plan: count() over a typed node stream still aggregates "
+          "partial/unknown status") {
+  // Regression: finish()'s Shape::Scalar branch used to gate the
+  // witness-status path on `!st.paths.empty() || st.rows.empty()` --
+  // true for ANY node-stream count() (paths and rows both empty), which
+  // skipped recompute_status() entirely and hard-wired partial/unknown to
+  // false. A count() over a `partial`-catalogued relation must still
+  // report partial=true, matching what select("status") sees on the same
+  // stream.
+  Storage db(":memory:");
+  const int64_t component = db.add_component("project", "/tmp/count-status");
+  const int64_t directory = db.add_directory(component, "src");
+  const int64_t file = db.add_file(directory, "count_status.cpp");
+  const int64_t caller =
+      db.add_symbol(make_sym("USR::CountStatus_Caller", "caller"));
+  const int64_t callee =
+      db.add_symbol(make_sym("USR::CountStatus_Callee", "callee"));
+  const int64_t edge = db.add_edge(make_edge(caller, callee, 1)); // calls:
+                                                                  // partial
+  cidx::EdgeSite site;
+  site.edge_id = edge;
+  site.file_id = file;
+  site.line = 1;
+  site.col = 1;
+  db.add_edge_site(site);
+
+  QueryExecutor ex(db);
+  const auto selected = ex.run(
+      (start(codebase()) | view(View::Edge) | nodes() | select({"status"}))
+          .plan());
+  REQUIRE(selected.rows.size() == 1);
+  CHECK(std::get<std::string>(selected.rows[0][0]) == "partial");
+  CHECK(selected.partial);
+
+  const auto counted =
+      ex.run((start(codebase()) | view(View::Edge) | nodes() | count()).plan());
+  CHECK(counted.shape == Shape::Scalar);
+  CHECK(counted.scalar == 1);
+  CHECK(counted.partial);
+}
+
+TEST_CASE("query_plan: reverse_type_use() reports a direct symbol owner's "
+          "declaration site") {
+  Storage db(":memory:");
+  const int64_t component =
+      db.add_component("project", "/tmp/owner-site-provenance");
+  const int64_t directory = db.add_directory(component, "src");
+  const int64_t file = db.add_file(directory, "owner_site.cpp");
+  Symbol owner_sym = make_sym("USR::OwnerWithSite", "owner_with_site");
+  owner_sym.file_id = file;
+  owner_sym.line = 41;
+  owner_sym.col = 7;
+  const int64_t owner = db.add_symbol(owner_sym);
+  db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind,extent) "
+                   "VALUES ('b:owner_site','int',1,NULL)");
+  auto ids = db.raw_db().prepare(
+      "SELECT id FROM type_node WHERE type_key='b:owner_site'");
+  REQUIRE(ids.step());
+  const int64_t type_id = ids.col_int64(0);
+  db.add_symbol_type(owner, 2, type_id); // of_type
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:owner_site")) | reverse_type_use())
+                 .plan());
+  REQUIRE(result.paths.size() == 1);
+  const auto &witness = result.paths[0];
+  REQUIRE(witness.steps.size() == 2);
+  const auto &owner_step = witness.steps.back();
+  CHECK(owner_step.node_id == owner);
+  CHECK(owner_step.domain == "symbol");
+  CHECK(owner_step.through == "of_type");
+  REQUIRE(owner_step.sites.size() == 1);
+  const auto &site = owner_step.sites[0];
+  REQUIRE(site.file_id.has_value());
+  REQUIRE(site.line.has_value());
+  REQUIRE(site.col.has_value());
+  if (site.file_id && site.line && site.col) {
+    CHECK(*site.file_id == file);
+    CHECK(*site.line == 41);
+    CHECK(*site.col == 7);
+  }
+}
+
+TEST_CASE(
+    "query_plan: reverse_type_use() | rank() orders witnesses by the full "
+    "typed-step identity, not just (node_id, position, pack_index)") {
+  // Two type_edge hops (return_type, then element_type) both land on M at
+  // position 0 -- an identical (node_id, position, pack_index) key -- but
+  // they are structurally distinct witnesses. Only `through` tells them
+  // apart, so the rank key must include it to be total.
+  //
+  // `type_edge` is a WITHOUT ROWID table keyed by (src_id, kind, position),
+  // so for a fixed src_id/position its physical/scan order is kind-
+  // ascending; the reverse_type_use() DFS then climbs via a LIFO stack, which
+  // reverses that to kind-*descending* in the raw, pre-sort witness order.
+  // kind 4 (return_type) > kind 2 (element_type), so the raw order here is
+  // [return_type, element_type] -- the opposite of the expected alphabetical
+  // rank order ("element_type" < "return_type"). A rank key that dropped the
+  // `through` tie-break would leave that raw order untouched (both witnesses
+  // tie on node_id/domain/position/pack_index) and this test would observe
+  // the wrong order; kind ids 7/8 (member_owner/member_component) do NOT
+  // work for this purpose since their raw DFS order already happens to
+  // coincide with their alphabetical order, silently passing either way.
+  Storage db(":memory:");
+  const int64_t owner_sym = db.add_symbol(make_sym("USR::RankOwner", "owner"));
+  db.raw_db().exec(
+      "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+      "('b:rank_a','A',1,NULL),('b:rank_m','M',1,NULL)");
+  auto ids = db.raw_db().prepare(
+      "SELECT id FROM type_node WHERE type_key IN ('b:rank_a','b:rank_m') "
+      "ORDER BY type_key");
+  REQUIRE(ids.step());
+  const int64_t a_id = ids.col_int64(0); // 'b:rank_a' sorts first
+  REQUIRE(ids.step());
+  const int64_t m_id = ids.col_int64(0);
+
+  db.add_type_edge(m_id, 4, 0, a_id);     // return_type
+  db.add_type_edge(m_id, 2, 0, a_id);     // element_type
+  db.add_symbol_type(owner_sym, 2, m_id); // of_type
+
+  QueryExecutor ex(db);
+  const auto result = ex.run((start(codebase()) | view(View::Type) | nodes() |
+                              where(eq("type_key", "b:rank_a")) |
+                              reverse_type_use() | distinct() | rank())
+                                 .plan());
+  REQUIRE(result.paths.size() == 2);
+  REQUIRE(result.paths[0].steps.size() == 3);
+  REQUIRE(result.paths[1].steps.size() == 3);
+  // Both witnesses share the same node-id sequence (a_id, m_id, owner_sym)
+  // and the same (position, pack_index); only the M-hop's `through` label
+  // differs, and it must sort ascending: "element_type" < "return_type".
+  CHECK(result.paths[0].steps[1].node_id == m_id);
+  CHECK(result.paths[1].steps[1].node_id == m_id);
+  CHECK(result.paths[0].steps[1].through == "element_type");
+  CHECK(result.paths[1].steps[1].through == "return_type");
+}
+
+TEST_CASE(
+    "query_plan: reverse_type_use() ranks before its internal result cap") {
+  Storage db(":memory:");
+  db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind) VALUES "
+                   "('rank-cap-seed','seed',1)");
+  auto seed_query = db.raw_db().prepare(
+      "SELECT id FROM type_node WHERE type_key='rank-cap-seed'");
+  REQUIRE(seed_query.step());
+  const int64_t seed_id = seed_query.col_int64(0);
+  std::vector<int64_t> parent_ids;
+
+  auto txn = db.transaction();
+  for (int64_t i = 0; i < 1200; ++i) {
+    const std::string key = "rank-cap-parent-" + std::to_string(i);
+    db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind) VALUES ('" +
+                     key + "','parent',8)");
+    auto parent_query = db.raw_db().prepare(
+        "SELECT id FROM type_node WHERE type_key='" + key + "'");
+    REQUIRE(parent_query.step());
+    const int64_t parent_id = parent_query.col_int64(0);
+    parent_ids.push_back(parent_id);
+    db.add_type_edge(parent_id, 2, 0, seed_id);
+    const int64_t owner = db.add_symbol(
+        make_sym("USR::rank-cap-owner-" + std::to_string(i), "owner"));
+    db.add_symbol_type(owner, 2, parent_id);
+  }
+  txn.commit();
+  const int64_t lowest_parent_id = parent_ids.front();
+
+  QueryExecutor ex(db);
+  const auto result = ex.run((start(codebase()) | view(View::Type) | nodes() |
+                              where(eq("type_key", "rank-cap-seed")) |
+                              reverse_type_use() | rank())
+                                 .plan());
+  // rank() (top_n == 0) returns every witness retained by the internal
+  // top-K eviction, up to kDefaultResultCap -- unlike rank(1), which only
+  // exposes the single best witness and therefore cannot tell a correct
+  // "keep the K best" eviction apart from a buggy "keep the K worst" or
+  // "keep an arbitrary K" eviction: both a correct and a mutated eviction
+  // policy still surface the same single best witness as rank 0 (see the
+  // mutation-test note below), so asserting only paths[0] leaves the
+  // eviction direction itself unverified.
+  REQUIRE(result.paths.size() == 1000);
+  CHECK(result.truncated);
+  REQUIRE(result.paths[0].steps.size() == 3);
+  CHECK(result.paths[0].steps[1].node_id == lowest_parent_id);
+
+  // The retained set must be exactly the 1000 *smallest* parent ids -- the
+  // true top-K by ascending node-id rank -- not merely contain the single
+  // best one. A buggy eviction that discards the best-so-far instead of the
+  // worst-so-far (e.g. `erase(begin())` in C++, or a reversed `__lt__` on
+  // the heap entry in Python) still keeps `lowest_parent_id` as rank 0 by
+  // construction of this test's monotonic insertion order, but corrupts the
+  // rest of the retained set -- e.g. dropping a mid-range id such as
+  // parent_ids[200] while keeping trailing, worse ids instead.
+  std::vector<int64_t> retained_ids;
+  retained_ids.reserve(result.paths.size());
+  for (const auto &path : result.paths) {
+    REQUIRE(path.steps.size() == 3);
+    retained_ids.push_back(path.steps[1].node_id);
+  }
+  std::ranges::sort(retained_ids);
+  std::vector<int64_t> expected_ids(parent_ids.begin(),
+                                    parent_ids.begin() + 1000);
+  std::ranges::sort(expected_ids);
+  CHECK(retained_ids == expected_ids);
+}
+
+// ---------------------------------------------------------------------------
+// PR #69 internal critic: reverse_type_use() finite-depth exhaustion
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "query_plan: reverse_type_use() reports truncation when max_depth cuts "
+    "off a still-climbable frame") {
+  // int_id <-element_type- array_id <-element_type- outer_array_id, with
+  // the owner attached only to outer_array_id (two element_type layers up
+  // from the seed). With max_depth=1 the DFS only reaches array_id, which
+  // has no owner of its own but is itself climbable one hop further
+  // (outer_array_id) -- exactly path_stage's finite-depth-exhaustion
+  // hazard, applied to reverse_type_use()'s DFS climb instead of path()'s
+  // BFS. Before the fix, hitting max_depth simply `continue`d without
+  // checking whether the frame's own parents existed, so this reported
+  // paths=0/truncated=0 -- indistinguishable from "no owner exists".
+  Storage db(":memory:");
+  const int64_t owner = db.add_symbol(make_sym("USR::FDE_TypeOwner", "owner"));
+  db.raw_db().exec(
+      "INSERT INTO type_node(type_key,spelling,kind,extent) VALUES "
+      "('A4(A4(b:int))','int[4][4]',8,'4'),('A4(b:int)','int[4]',8,'4'),"
+      "('b:int','int',1,NULL)");
+  auto ids = db.raw_db().prepare(
+      "SELECT id FROM type_node WHERE type_key IN "
+      "('A4(A4(b:int))','A4(b:int)','b:int') ORDER BY type_key");
+  REQUIRE(ids.step());
+  const int64_t outer_array_id = ids.col_int64(0); // 'A4(A4(b:int))'
+  REQUIRE(ids.step());
+  const int64_t array_id = ids.col_int64(0); // 'A4(b:int)'
+  REQUIRE(ids.step());
+  const int64_t int_id = ids.col_int64(0);  // 'b:int'
+  db.add_type_edge(array_id, 2, 0, int_id); // array_id -element_type-> int_id
+  db.add_type_edge(outer_array_id, 2, 0,
+                   array_id); // outer_array_id -element_type-> array_id
+  db.add_symbol_type(owner, 1, outer_array_id); // returns, two layers up
+
+  QueryExecutor ex(db);
+  const auto shallow =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) | reverse_type_use(1))
+                 .plan());
+  CHECK(shallow.paths.empty());
+  CHECK(shallow.truncated); // WRONG before the fix: the owner really exists
+                            // two layers up, so this must not read as a
+                            // complete empty result
+
+  const auto deep =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:int")) | reverse_type_use(2))
+                 .plan());
+  REQUIRE(deep.paths.size() == 1);
+  CHECK_FALSE(deep.truncated); // confirms the owner is really there, and
+                               // this depth's own climb is fully exhausted
+  const PathWitness &witness = deep.paths[0];
+  CHECK(witness.length == 3);
+  REQUIRE(witness.steps.size() == 4);
+  CHECK(witness.steps[0].node_id == int_id);
+  CHECK(witness.steps[1].node_id == array_id);
+  CHECK(witness.steps[1].through == "element_type");
+  CHECK(witness.steps[2].node_id == outer_array_id);
+  CHECK(witness.steps[2].through == "element_type");
+  CHECK(witness.steps[3].node_id == owner);
+  CHECK(witness.steps[3].domain == "symbol");
+  CHECK(witness.steps[3].through == "returns");
+}
+
+TEST_CASE("query_plan: reverse_type_use() does not report truncation when "
+          "the only frontier parents are already in the climb chain") {
+  // type_edge is a DAG by construction from Clang's type system, so this
+  // cycle cannot arise from real compiled C++ -- it is manufactured here via
+  // direct row insertion, exactly as the round-4 critic did, to prove the
+  // depth_limited frontier check does not over-report on a cycle. B
+  // -element_type-> A, A -element_type-> B: seeded at A with max_depth=1,
+  // the climb reaches B at depth==max_depth whose only parent (A) is
+  // already in the chain -- a proven dead end, not an unknown. Before the
+  // fix, the frontier check tested the raw (unfiltered) parent list, so it
+  // saw A as "still climbable" and wrongly set depth_limited even though
+  // nothing further could ever be found at any depth.
+  Storage db(":memory:");
+  db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind,extent) "
+                   "VALUES ('b:cycle_a','A',1,NULL),('b:cycle_b','B',1,NULL)");
+  auto ids = db.raw_db().prepare("SELECT id FROM type_node WHERE type_key IN "
+                                 "('b:cycle_a','b:cycle_b') ORDER BY type_key");
+  REQUIRE(ids.step());
+  const int64_t a_id = ids.col_int64(0); // 'b:cycle_a'
+  REQUIRE(ids.step());
+  const int64_t b_id = ids.col_int64(0); // 'b:cycle_b'
+  db.add_type_edge(a_id, 2, 0, b_id);    // A -element_type-> B
+  db.add_type_edge(b_id, 2, 0, a_id);    // B -element_type-> A (cycle)
+
+  QueryExecutor ex(db);
+  const auto shallow =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:cycle_a")) | reverse_type_use(1))
+                 .plan());
+  CHECK(shallow.paths.empty());
+  CHECK_FALSE(shallow.truncated); // no owner exists at any depth: a cycle
+                                  // with nothing but itself to climb is a
+                                  // proven dead end, not an unknown
+
+  const auto deep =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:cycle_a")) | reverse_type_use(2))
+                 .plan());
+  CHECK(deep.paths.empty());
+  CHECK_FALSE(deep.truncated); // unaffected by depth: confirms this is a
+                               // real dead end, not merely one this depth
+                               // happens not to trip
+}
+
+TEST_CASE("query_plan: reverse_type_use() reports partial when a fully "
+          "exhausted search proves no owner exists") {
+  // type.has_type_edge (reverse_type_use()'s structural type_edge climb --
+  // reverse_type_use_input_relations()) is catalogued partial: the climb
+  // itself can miss evidence. A lone type_node with no owners and no
+  // type_edge parents is a genuine, fully-explored dead end -- not a
+  // depth/budget cutoff (truncated stays false, as the cycle test above
+  // proves for this same shape of search) -- yet the search's own
+  // catalogued incompleteness means "no owner found" is never a proven
+  // negative: AC4, empty-plus-partial must not surface as complete.
+  Storage db(":memory:");
+  db.raw_db().exec("INSERT INTO type_node(type_key,spelling,kind,extent) "
+                   "VALUES ('b:lonely','Lonely',1,NULL)");
+
+  QueryExecutor ex(db);
+  const auto result =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:lonely")) | reverse_type_use(4))
+                 .plan());
+  CHECK(result.paths.empty());
+  CHECK_FALSE(result.truncated);
+  CHECK(result.partial);
+
+  const auto counted =
+      ex.run((start(codebase()) | view(View::Type) | nodes() |
+              where(eq("type_key", "b:lonely")) | reverse_type_use(4) | count())
+                 .plan());
+  CHECK(counted.shape == Shape::Scalar);
+  CHECK(counted.scalar == 0);
+  CHECK(counted.partial);
 }

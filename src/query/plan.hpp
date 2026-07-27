@@ -78,6 +78,12 @@ extension_relation_catalog();
 const RelationDesc *resolve_relation(const std::string &name, View active,
                                      bool inbound = false);
 
+// Resolve an already view-qualified relation name (e.g. "symbol.calls", as
+// produced by canonical_json()/plan_to_json()) without an active-view
+// context. Used by explain() to report every relation a normalized plan
+// touches. Returns nullptr when unknown.
+const RelationDesc *resolve_qualified_relation(const std::string &qualified);
+
 // entity_kind name -> id (entity_kind seed values 0..9; -1 when unknown).
 int64_t entity_kind_id(const std::string &name);
 
@@ -203,6 +209,9 @@ enum class StageOp {
   Distinct,
   OrderBy,
   Limit,
+  Path,           // bounded ordered witness path(s) to an operand node set
+  Rank,           // deterministic re-rank of a Path stream (shortest-first)
+  ReverseTypeUse, // typed reverse type-use witness (Type/TypeLayer -> owner)
 };
 
 const char *stage_op_name(StageOp op);
@@ -217,13 +226,14 @@ struct Stage {
   StageOp op = StageOp::Where;
   std::optional<Pred> pred;  // Nodes (optional) / Where
   View level = View::Symbol; // ChangeView
-  std::string relation;      // Out / In (normalized: qualified)
+  std::string relation;      // Out / In / Path (normalized: qualified)
   TraversalMode mode = TraversalMode::Static; // Out / In
-  int64_t min_depth = 1, max_depth = 1;       // Out / In
-  std::shared_ptr<Plan> operand;              // Union / Intersect / Except
-  std::vector<std::string> fields;            // Select / OrderBy
-  int64_t n = 0;                              // Limit
+  int64_t min_depth = 1, max_depth = 1; // Out / In / Path / ReverseTypeUse
+  std::shared_ptr<Plan> operand;   // Union / Intersect / Except / Path ("to")
+  std::vector<std::string> fields; // Select / OrderBy
+  int64_t n = 0; // Limit / Path ("shortest" cap) / Rank ("top_n" cap)
   UnknownPolicy unknown = UnknownPolicy::Exclude;
+  bool inbound = false; // Path traversal direction
 };
 
 // ---- Source / Plan
@@ -254,9 +264,12 @@ std::string canonical_json(const Plan &plan);
 json_out::Value plan_to_json(const Plan &plan);
 
 // Stream-shape inference used by validate(); exposed for the executor.
-enum class Shape { Nodes, Rows, Scalar };
+// Path: a stream of bounded ordered witness paths (see path()/
+// reverse_type_use() below and docs/query-plan.md "Path result shape").
+enum class Shape { Nodes, Rows, Scalar, Path };
 // The view and shape after all stages (validated plans only).
 View final_view(const Plan &plan);
+Shape final_shape(const Plan &plan);
 
 // ---- Pipeline builder
 // ------------------------------------------------------------ auto q =
@@ -308,5 +321,26 @@ Stage count();
 Stage distinct();
 Stage order_by(std::vector<std::string> fields);
 Stage limit(int64_t n);
+
+// Bounded deterministic shortest witness path(s) from the current node stream
+// to `to`'s node stream, over one symbol/entity-view relation (docs/
+// query-plan.md "Path result shape"). `shortest` caps the number of witnesses
+// kept after ranking (0 = keep every minimal-depth witness up to the default
+// result cap). Terminal for row-shaping stages: only rank()/count()/
+// distinct()/limit() may follow.
+Stage path(const Query &to, const std::string &relation, int64_t min_depth = 1,
+           int64_t max_depth = 8, int64_t shortest = 0, bool inbound = false);
+
+// Deterministic re-rank of a Path stream: shortest-first, ties broken by the
+// lexicographic ascending node-id sequence. `top_n` (0 = unbounded within the
+// default result cap) keeps only the first `top_n` witnesses of that order.
+Stage rank(int64_t top_n = 0);
+
+// First-class reverse type-use: from a `type`/`type_layer` node stream,
+// returns one witness per owner (symbol/parameter/template_parameter/
+// template_argument/call_argument/signature_slot) that uses this type,
+// directly or nested inside pointer/reference/array/function/member-pointer/
+// alias layers, retaining every intermediate typed layer as a `through` step.
+Stage reverse_type_use(int64_t max_depth = 8);
 
 } // namespace cidx::query

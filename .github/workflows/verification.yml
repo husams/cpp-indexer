@@ -59,7 +59,7 @@ jobs:
             | tee /etc/apt/sources.list.d/llvm-22.list >/dev/null
           apt-get update
           apt-get install \
-            --no-install-recommends -y gcc-13 g++-13 \
+            --no-install-recommends -y gcc-13 g++-13 g++ zlib1g-dev \
             clang-22 clang-tools-22 cmake mcpp libclang-22-dev \
             libclang-common-22-dev libclang-cpp22 libsqlite3-dev \
             llvm-22 llvm-22-dev ninja-build
@@ -70,7 +70,11 @@ jobs:
             "https://github.com/souffle-lang/souffle/releases/download/${SOUFFLE_VERSION}/x86_64-ubuntu-2404-souffle-${SOUFFLE_VERSION}-Linux.deb" \
             --output "$souffle_deb"
           echo "${SOUFFLE_DEB_SHA512}  ${souffle_deb}" | sha512sum --check
-          sudo dpkg --install "$souffle_deb"
+          if [ "$(id -u)" -eq 0 ]; then
+            dpkg --install "$souffle_deb"
+          else
+            sudo dpkg --install "$souffle_deb"
+          fi
           souffle_path="$(command -v souffle)"
           test -x "$souffle_path"
           souffle --version 2>&1 | tee /tmp/souffle-version.txt

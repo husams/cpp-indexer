@@ -71,6 +71,13 @@ class IndexIdentity:
     index_config_fingerprint: Optional[str]
     freshness: str  # current | stale | unverifiable
     workspace: str = "workspace:memory"
+    # Expected/current-checkout identity, computed live regardless of
+    # whether a persisted identity exists to compare against. None when the
+    # current checkout is incomplete (missing/unreadable files) and
+    # therefore unverifiable; index_config is always computable.
+    expected_source_revision: Optional[str] = None
+    expected_source_fingerprint: Optional[str] = None
+    expected_index_config_fingerprint: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +87,10 @@ class IndexIdentity:
             "index_config": self.index_config,
             "index_config_fingerprint": self.index_config_fingerprint,
             "freshness": self.freshness,
+            "expected_source_revision": self.expected_source_revision,
+            "expected_source_fingerprint": self.expected_source_fingerprint,
+            "expected_index_config_fingerprint":
+                self.expected_index_config_fingerprint,
         }
 
 
@@ -6146,6 +6157,13 @@ class Storage:
             index_config_fingerprint=values["index_config_fingerprint"],
             freshness=freshness,
             workspace=self._workspace_identity(),
+            expected_source_revision=(
+                f"content-sha1:{source_fingerprint}" if complete else None
+            ),
+            expected_source_fingerprint=(
+                source_fingerprint if complete else None
+            ),
+            expected_index_config_fingerprint=config_fingerprint,
         )
 
     def stamp_index_identity(self) -> None:

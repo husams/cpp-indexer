@@ -17,12 +17,21 @@ using SymbolValue = std::variant<std::nullptr_t, int64_t, double, std::string>;
 
 struct IndexIdentity {
   int schema_version = 0;
+  // Persisted/indexed identity (what stamp_index_identity() last wrote).
   std::optional<std::string> source_revision;
   std::optional<std::string> source_fingerprint;
   std::optional<std::string> index_config;
   std::optional<std::string> index_config_fingerprint;
   std::string freshness = "unverifiable";
   std::string workspace = "workspace:memory";
+  // Expected/current-checkout identity, computed live from the on-disk
+  // source at every index_identity() call, independent of whether a
+  // persisted identity exists to compare against. Null when the current
+  // checkout is incomplete (missing/unreadable files) and therefore
+  // unverifiable; index_config is always computable.
+  std::optional<std::string> expected_source_revision;
+  std::optional<std::string> expected_source_fingerprint;
+  std::optional<std::string> expected_index_config_fingerprint;
 };
 
 struct DefinitionRow {

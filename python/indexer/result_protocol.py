@@ -435,10 +435,14 @@ def from_query_result(result: Any, index: Any, *, operation: str = "query") -> R
     payload: dict[str, Any] = {
         "shape": result.shape,
         "view": result.view,
-        "count": result.scalar if result.shape == "scalar" else len(result.rows),
+        "count": (result.scalar if result.shape == "scalar"
+                  else len(result.paths) if result.shape == "path"
+                  else len(result.rows)),
         "truncated": result.truncated,
     }
-    if result.shape != "scalar":
+    if result.shape == "path":
+        payload["paths"] = [w.to_dict() for w in result.paths]
+    elif result.shape != "scalar":
         payload["rows"] = [dict(zip(result.fields, row)) for row in result.rows]
     envelope = ResultEnvelope(
         operation=operation,

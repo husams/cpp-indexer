@@ -201,6 +201,26 @@ json_out::Value index_identity_json(const IndexIdentity &index) {
     o.emplace_back("index_config_fingerprint", json_out::Value::null());
   }
   o.emplace_back("freshness", json_out::Value::of(index.freshness));
+  if (index.expected_source_revision) {
+    o.emplace_back("expected_source_revision",
+                   json_out::Value::of(*index.expected_source_revision));
+  } else {
+    o.emplace_back("expected_source_revision", json_out::Value::null());
+  }
+  if (index.expected_source_fingerprint) {
+    o.emplace_back("expected_source_fingerprint",
+                   json_out::Value::of(*index.expected_source_fingerprint));
+  } else {
+    o.emplace_back("expected_source_fingerprint", json_out::Value::null());
+  }
+  if (index.expected_index_config_fingerprint) {
+    o.emplace_back(
+        "expected_index_config_fingerprint",
+        json_out::Value::of(*index.expected_index_config_fingerprint));
+  } else {
+    o.emplace_back("expected_index_config_fingerprint",
+                   json_out::Value::null());
+  }
   return json_out::Value::obj(std::move(o));
 }
 
@@ -305,8 +325,21 @@ std::string shape_name(Shape shape) {
     return "rows";
   case Shape::Scalar:
     return "scalar";
+  case Shape::Path:
+    return "path";
   }
   return "scalar";
+}
+
+// type_edge_kind.id -> name ("pointee", "element_type", ...): the typed
+// `through` label for one reverse-type-use climb hop.
+std::string type_edge_kind_name(int64_t kind_id) {
+  for (const auto &k : catalog::kTypeEdgeKinds) {
+    if (k.id == kind_id) {
+      return std::string(k.name);
+    }
+  }
+  return "unknown";
 }
 
 // kind/entity_type predicate value: name -> stored int, by FIELD (not view).
@@ -600,9 +633,26 @@ struct Stream {
   std::vector<std::vector<Cell>> rows; // rows shape
   std::vector<int64_t> row_ids;        // per-row id (order_by tie-break)
   std::vector<RowStatus> row_status;   // aligned with rows
+  std::vector<PathWitness> paths;      // Shape::Path
   bool truncated = false;
   bool partial = false;
   bool unknown = false;
+  // Completeness inherited from relations inspected by a witness-producing
+  // stage, independent of whether that stage emitted a witness.  This must
+  // survive an empty stream and terminal count().
+  bool source_partial = false;
+  // Set once by path_stage()/reverse_type_use_stage() and never cleared: a
+  // count() terminal stage uses this (not shape or emptiness -- an empty
+  // node/row stream is also empty) to tell a witness-aggregating scalar
+  // apart from every other count(), which must still fold per-row/per-key
+  // status via recompute_status().
+  bool path_stream = false;
+  int64_t path_rows_examined = 0;
+  // Cumulative DFS descents charged against kPathReconstructionBudget across
+  // the whole path_stage()/reverse_type_use_stage() call (see that
+  // constant's comment) -- a non-timing signal that the reconstruction
+  // budget, not some other cutoff, is what stopped a search.
+  int64_t path_reconstruction_descents_examined = 0;
   // True only while a limit() is in effect with NO cardinality-expanding
   // stage (nodes/out/in/union) after it -- otherwise finish() re-applies the
   // default result cap (PR #20 review: an early limit must not disable the
@@ -806,6 +856,15 @@ public:
         break;
       case StageOp::Limit:
         apply_limit(st, stage.n);
+        break;
+      case StageOp::Path:
+        path_stage(st, stage);
+        break;
+      case StageOp::Rank:
+        rank_stage(st, stage);
+        break;
+      case StageOp::ReverseTypeUse:
+        reverse_type_use_stage(st, stage);
         break;
       }
       if (st.shape == Shape::Scalar) {
@@ -1968,6 +2027,796 @@ private:
     st.ids = std::move(out);
   }
 
+  // Evidence for one witness hop, capped at the default result cap. `sites`
+  // never silently drops rows past the cap without saying so: `truncated`
+  // is set whenever the underlying edge has more sites than the cap, so the
+  // caller can mark that hop/witness partial instead of presenting
+  // incomplete evidence as complete (docs/query-plan.md).
+  struct HopSites {
+    std::vector<EdgeSiteRow> sites;
+    bool truncated = false;
+  };
+
+  // Evidence for one witness hop over a non-typed symbol/entity relation.
+  // Entity-layer relations are derived (no site rows); symbol-layer relations
+  // look up the physical edge row for (parent,child) respecting direction.
+  HopSites hop_sites(bool entity_layer, int64_t kind_id, bool inbound,
+                     int64_t parent_id, int64_t child_id) {
+    if (entity_layer) {
+      return {};
+    }
+    const int64_t src = inbound ? child_id : parent_id;
+    const int64_t dst = inbound ? parent_id : child_id;
+    auto query = read_.read_db().prepare(
+        "SELECT id FROM edge WHERE src_id=? AND dst_id=? AND kind=?");
+    query.bind(1, src);
+    query.bind(2, dst);
+    query.bind(3, kind_id);
+    if (!query.step()) {
+      return {};
+    }
+    // Fetch one row past the cap to detect an over-cap hop without a
+    // separate COUNT query.
+    auto sites = read_.graph_read().edge_sites_one(
+        query.col_int64(0), static_cast<int>(kDefaultResultCap) + 1);
+    HopSites result;
+    if (std::cmp_greater(sites.size(), kDefaultResultCap)) {
+      sites.resize(kDefaultResultCap);
+      result.truncated = true;
+    }
+    result.sites = std::move(sites);
+    return result;
+  }
+
+  // Bounded deterministic shortest witness path(s): a multi-source BFS that
+  // also records, per reached node, every predecessor reaching it at that
+  // depth (the shortest-path DAG), so every minimal-depth witness -- not only
+  // one -- can be reconstructed once the target set is first reached.
+  void path_stage(Stream &st, const Stage &stage) {
+    const RelationDesc *rel =
+        resolve_relation(stage.relation, st.view, stage.inbound);
+    const bool entity_layer = rel->layer == View::Entity;
+    const std::string table = entity_layer ? "entity_edge" : "edge";
+    const bool inbound = stage.inbound;
+    const std::string from_col = inbound ? "dst_id" : "src_id";
+    const std::string to_col = inbound ? "src_id" : "dst_id";
+    // Every witness this stage could ever emit is stamped with `rel`'s own
+    // catalogued completeness (see the witness.status assignment below) --
+    // set the stream-level flag unconditionally, independent of whether the
+    // search actually confirms a witness, so a fully-exhausted, witness-free
+    // search over a partial relation is never presented as a proven-complete
+    // negative (empty is not evidence of completeness when the relation
+    // itself is only partially captured).
+    st.source_partial = st.source_partial || rel->completeness != "complete";
+
+    Stream target_stream = run_plan(*stage.operand);
+    const std::set<int64_t> targets(target_stream.ids.begin(),
+                                    target_stream.ids.end());
+    st.truncated = st.truncated || target_stream.truncated;
+    st.source_partial = st.source_partial || target_stream.source_partial ||
+                        target_stream.partial;
+    st.partial = st.partial || target_stream.partial;
+    st.unknown = st.unknown || target_stream.unknown;
+
+    std::vector<int64_t> starts = st.ids;
+    std::ranges::sort(starts);
+    starts.erase(std::ranges::unique(starts).begin(), starts.end());
+
+    std::vector<PathWitness> results;
+    int64_t budget_used = 0;
+    // Independent of budget_used (which bounds raw BFS row reads): see
+    // kPathReconstructionBudget for why chain reconstruction needs its own
+    // budget rather than sharing that counter. Cumulative across every
+    // start's search in this stage call, like budget_used.
+    int64_t reconstruction_budget_used = 0;
+    bool truncated = false;
+    bool result_truncated = false;
+    bool evidence_truncated = false; // capped per-hop sites: partial, but the
+                                     // search itself continues
+    bool depth_limited = false; // a start's search was cut off by max_depth
+                                // while its frontier was still expandable
+    const std::string domain = entity_layer ? "entity" : "symbol";
+
+    const auto frontier_expandable =
+        [&](const std::vector<int64_t> &candidate_frontier) {
+          for (size_t at = 0; at < candidate_frontier.size(); at += kIdChunk) {
+            const size_t n = std::min(kIdChunk, candidate_frontier.size() - at);
+            std::string sql = "SELECT 1 FROM ";
+            sql += table;
+            sql += " WHERE kind = ? AND ";
+            sql += from_col;
+            sql += " IN (";
+            sql += placeholders(n);
+            sql += ") LIMIT 1";
+            auto query = read_.read_db().prepare(sql);
+            query.bind(1, rel->kind_id);
+            for (size_t i = 0; i < n; ++i) {
+              query.bind(static_cast<int>(i + 2), candidate_frontier[at + i]);
+            }
+            if (query.step()) {
+              return true;
+            }
+          }
+          return false;
+        };
+
+    for (const int64_t start : starts) {
+      if (truncated) {
+        break;
+      }
+      std::vector<int64_t> frontier{start};
+      // preds[d-1]: child -> sorted parent ids reaching it at depth d. No
+      // cross-level visited set: a node can legitimately be reached again at
+      // a later depth via a different route (path-length-window semantics,
+      // matching out()/in()'s "some path of length d in [min,max]" rule --
+      // docs/query-plan.md), so pruning a child once it is first seen would
+      // silently discard an in-window witness reached only through it later.
+      std::vector<std::map<int64_t, std::vector<int64_t>>> preds;
+      // successors[d]: parent -> sorted children at hop d+1 -- the inverted
+      // predecessor DAG, extended incrementally as the BFS advances so a
+      // reconstruction attempt at any depth reuses everything already built.
+      std::vector<std::map<int64_t, std::vector<int64_t>>> successors;
+      std::vector<std::vector<int64_t>> chains;
+      int64_t found_depth = -1;
+      // Whether the BFS ran out of graph to expand (a true dead end,
+      // reached via the `parent_of.empty()` break below) before hitting
+      // `max_depth`. When it is still false after the loop, the search
+      // stopped only because the depth window closed while the frontier
+      // was still expandable -- absence of a witness here does not prove
+      // no path exists, so it must not be reported as a complete "not
+      // found" (docs/query-plan.md).
+      bool frontier_exhausted = false;
+      // Set by `enumerate` (below) once total reconstruction work -- DFS
+      // descents, charged against kPathReconstructionBudget (independent
+      // of budget_used's kPathNodeBudget -- see that constant's comment)
+      // -- exceeds the budget. A depth whose reconstruction was cut off
+      // this way can neither be reported as a witness (it may be
+      // incomplete) nor as a proven "no witness at this depth" (the
+      // negative was never actually established), so it is treated like
+      // the row-budget-exceeded case: stop the whole search and report
+      // truncated.
+      bool reconstruction_budget_exceeded = false;
+      // Invert the predecessor DAG up through `depth` (extending, never
+      // rebuilding, the shared `successors` levels) and enumerate every
+      // *simple* complete witness of exactly that length. Children are
+      // sorted at every depth, so enumeration is already lexicographic in
+      // the documented rank key's node-id sequence. Keeping the first cap+1
+      // complete chains proves truncation without ever stopping a
+      // reconstruction halfway back to its real source. A node may repeat
+      // only when it is the start closing a cycle back to itself on the
+      // final hop (self-recursion: `path(to=start, ...)`) -- any other
+      // repeat makes a walk non-simple and it is discarded, not reported.
+      const auto reconstruct = [&](int64_t depth) {
+        while (std::cmp_less(successors.size(), depth)) {
+          const size_t d = successors.size();
+          successors.emplace_back();
+          for (const auto &[child, parents] : preds[d]) {
+            for (const int64_t parent : parents) {
+              successors[d][parent].push_back(child);
+            }
+          }
+          for (auto &[parent, children] : successors[d]) {
+            std::ranges::sort(children);
+            children.erase(std::ranges::unique(children).begin(),
+                           children.end());
+          }
+        }
+        chains.clear();
+        reconstruction_budget_exceeded = false;
+        std::vector<int64_t> chain{start};
+        const auto enumerate = [&](const auto &self, int64_t at_depth) -> void {
+          if (std::cmp_greater(chains.size(), kDefaultResultCap) ||
+              reconstruction_budget_exceeded) {
+            return;
+          }
+          // Every DFS descent is charged against kPathReconstructionBudget
+          // (independent of budget_used's SQL-row count -- see that
+          // constant's comment): without this, a graph shaped so every
+          // walk of a given depth is non-simple (so `chains` stays empty
+          // and enumeration never gets to early-exit on the result cap)
+          // forces full exploration of every simple prefix -- a search
+          // space that grows combinatorially with depth and branching
+          // factor and can run unbounded while `budget_used`'s SQL-row
+          // count stays tiny (round-6 finding: 242s wall-clock / 336 rows
+          // examined at max_depth=16 on a 72-symbol fixture). Charging here
+          // makes a dedicated budget bound total reconstruction work, not
+          // just rows read.
+          ++reconstruction_budget_used;
+          ++st.path_reconstruction_descents_examined;
+          if (reconstruction_budget_used > kPathReconstructionBudget) {
+            reconstruction_budget_exceeded = true;
+            return;
+          }
+          if (std::cmp_equal(at_depth, depth)) {
+            if (targets.contains(chain.back())) {
+              chains.push_back(chain);
+            }
+            return;
+          }
+          const auto next =
+              successors[static_cast<size_t>(at_depth)].find(chain.back());
+          if (next == successors[static_cast<size_t>(at_depth)].end()) {
+            return;
+          }
+          for (const int64_t child : next->second) {
+            const bool closes_cycle = std::cmp_equal(at_depth + 1, depth) &&
+                                      child == chain.front() &&
+                                      targets.contains(child);
+            if (!closes_cycle &&
+                std::ranges::find(chain, child) != chain.end()) {
+              continue;
+            }
+            chain.push_back(child);
+            self(self, at_depth + 1);
+            chain.pop_back();
+            if (std::cmp_greater(chains.size(), kDefaultResultCap) ||
+                reconstruction_budget_exceeded) {
+              break;
+            }
+          }
+        };
+        enumerate(enumerate, 0);
+      };
+      for (int64_t depth = 1; depth <= stage.max_depth && !frontier.empty();
+           ++depth) {
+        std::map<int64_t, std::vector<int64_t>> parent_of;
+        bool budget_exceeded = false;
+        for (size_t at = 0; at < frontier.size() && !budget_exceeded;
+             at += kIdChunk) {
+          const size_t n = std::min(kIdChunk, frontier.size() - at);
+          std::string sql = "SELECT ";
+          sql += from_col;
+          sql += ",";
+          sql += to_col;
+          sql += " FROM ";
+          sql += table;
+          sql += " WHERE kind = ? AND ";
+          sql += from_col;
+          sql += " IN (";
+          sql += placeholders(n);
+          sql += ") ORDER BY 1,2";
+          std::vector<SqlValue> args;
+          args.emplace_back(rel->kind_id);
+          for (size_t i = 0; i < n; ++i) {
+            args.emplace_back(frontier[at + i]);
+          }
+          auto query = read_.read_db().prepare(sql);
+          for (size_t i = 0; i < args.size(); ++i) {
+            query.bind(static_cast<int>(i + 1), args[i]);
+          }
+          // Check the budget on every row: a single level's frontier can be
+          // far larger than the budget, and this must bound the rows read
+          // (and stored in parent_of), not just notice the overflow after
+          // the whole level has already been materialized.
+          while (query.step()) {
+            ++st.path_rows_examined;
+            if (++budget_used > kPathNodeBudget) {
+              budget_exceeded = true;
+              break;
+            }
+            const int64_t parent = query.col_int64(0);
+            const int64_t child = query.col_int64(1);
+            parent_of[child].push_back(parent);
+          }
+        }
+        if (budget_exceeded) {
+          truncated = true;
+          break;
+        }
+        if (parent_of.empty()) {
+          frontier_exhausted = true;
+          break;
+        }
+        for (auto &[child, parents] : parent_of) {
+          std::ranges::sort(parents);
+        }
+        preds.push_back(parent_of);
+        std::vector<int64_t> level;
+        level.reserve(parent_of.size());
+        for (const auto &[child, parents] : parent_of) {
+          level.push_back(child);
+        }
+        std::ranges::sort(level);
+        if (depth >= stage.min_depth &&
+            std::ranges::any_of(
+                level, [&](int64_t id) { return targets.contains(id); })) {
+          // A target appears in this level's walk, but a walk is only a
+          // witness once it survives the simple-path filter: if every walk
+          // of this depth repeats a node, this depth contributes no
+          // witness, and the search must keep expanding rather than commit
+          // to a proven negative on the strength of a non-simple walk alone
+          // (round-5 regression: a longer, still in-window, simple path can
+          // exist even though a shorter non-simple walk reached the target
+          // first).
+          reconstruct(depth);
+          if (!chains.empty()) {
+            // Any chain already collected is a genuine, fully-reconstructed
+            // simple witness (chains is only ever appended to at the exact
+            // target leaf, never partially) -- keep it even if the budget
+            // ran out partway through exploring the rest of this depth's
+            // search space, but mark the result truncated since other
+            // witnesses at this depth may have gone unexplored.
+            found_depth = depth;
+            if (reconstruction_budget_exceeded) {
+              truncated = true;
+            }
+            break;
+          }
+          if (reconstruction_budget_exceeded) {
+            // The reconstruction at this depth was cut off before it could
+            // prove either a witness or its absence -- treat it like the
+            // raw-row budget being exceeded (above): abandon the search
+            // entirely rather than present "no witness" as a proven
+            // negative.
+            truncated = true;
+            break;
+          }
+        }
+        frontier = std::move(level);
+      }
+      if (found_depth < 0) {
+        // No witness was confirmed for this start: either the raw-row
+        // budget fired, or reconstruction was cut off before proving a
+        // witness or its absence (see the `reconstruction_budget_exceeded`
+        // branch above). Neither case has anything to emit, so stop the
+        // whole multi-start search here exactly like the pre-existing
+        // raw-row-budget behavior -- do NOT keep searching other starts
+        // once the cumulative budget is spent.
+        if (truncated) {
+          break;
+        }
+        if (!frontier_exhausted && frontier_expandable(frontier)) {
+          // Finite-depth exhaustion: the depth window (not a dead end in
+          // the graph) is what stopped this start's search, so its "no
+          // witness" result is unknown, not a proven negative. This does
+          // not abort the search for other starts.
+          depth_limited = true;
+        }
+        continue;
+      }
+      // A witness WAS confirmed for this start (chains is non-empty) --
+      // emit it even if `truncated` is also true, i.e. the reconstruction
+      // budget ran out partway through exploring the rest of this depth's
+      // search space. Discarding an already-proven simple witness here
+      // would be strictly worse than reporting it alongside
+      // `truncated: true` (docs/query-plan.md's budget section). The
+      // overall multi-start search still stops after this start once
+      // `truncated` is set, matching the raw-row-budget's "stop, don't
+      // silently keep going" contract -- see the `break` below.
+      if (std::cmp_greater(chains.size(), kDefaultResultCap)) {
+        result_truncated = true;
+        chains.resize(kDefaultResultCap);
+      }
+
+      for (const auto &complete_chain : chains) {
+        PathWitness witness;
+        witness.length = found_depth;
+        bool witness_evidence_truncated = false;
+        witness.status =
+            rel->completeness == "complete" ? "complete" : "partial";
+        for (size_t i = 0; i < complete_chain.size(); ++i) {
+          PathStep step;
+          step.node_id = complete_chain[i];
+          step.domain = domain;
+          step.inbound = inbound;
+          step.status = rel->completeness;
+          if (i > 0) {
+            step.through = rel->name;
+            HopSites hop = hop_sites(entity_layer, rel->kind_id, inbound,
+                                     complete_chain[i - 1], complete_chain[i]);
+            step.sites = std::move(hop.sites);
+            if (hop.truncated) {
+              step.status = "partial";
+              witness_evidence_truncated = true;
+            }
+          }
+          witness.steps.push_back(std::move(step));
+        }
+        if (witness_evidence_truncated) {
+          witness.status = "partial";
+          evidence_truncated = true; // incomplete evidence is never
+                                     // presented as complete, but does not
+                                     // abort the search for other starts
+        }
+        results.push_back(std::move(witness));
+      }
+      if (truncated) {
+        break;
+      }
+    }
+
+    truncated = truncated || result_truncated;
+    sort_and_cap_witnesses(results, stage.n, truncated);
+    st.paths = std::move(results);
+    st.truncated =
+        st.truncated || truncated || evidence_truncated || depth_limited;
+    st.ids.clear();
+    st.keys.clear();
+    st.shape = Shape::Path;
+    st.path_stream = true;
+  }
+
+  static bool witness_less(const PathWitness &a, const PathWitness &b) {
+    if (a.length != b.length) {
+      return a.length < b.length;
+    }
+    for (size_t i = 0; i < a.steps.size() && i < b.steps.size(); ++i) {
+      const PathStep &sa = a.steps[i];
+      const PathStep &sb = b.steps[i];
+      if (sa.node_id != sb.node_id) {
+        return sa.node_id < sb.node_id;
+      }
+      if (sa.domain != sb.domain) {
+        return sa.domain < sb.domain;
+      }
+      if (sa.through != sb.through) {
+        return sa.through < sb.through;
+      }
+      if (sa.inbound != sb.inbound) {
+        return !sa.inbound && sb.inbound;
+      }
+      if (sa.position != sb.position) {
+        return sa.position < sb.position;
+      }
+      if (sa.pack_index != sb.pack_index) {
+        return sa.pack_index < sb.pack_index;
+      }
+    }
+    return a.steps.size() < b.steps.size();
+  }
+
+  // Deterministic default/rerank order for a Path stream: shortest-first,
+  // ties broken by each step's full logical typed-step identity (see below).
+  static void sort_and_cap_witnesses(std::vector<PathWitness> &results,
+                                     int64_t cap, bool &truncated) {
+    // Ties are broken lexicographically over each step's full logical typed-
+    // step identity -- (node_id, domain, through, inbound, position,
+    // pack_index): a total order even when two witnesses share the same
+    // node-id sequence but differ only by which relation/type_edge hop
+    // reached a node (e.g. `member_owner` vs `member_component`, both
+    // landing on the same node at the same position) or which typed-view
+    // slot (e.g. parameter position) the final owner step names
+    // (docs/query-plan.md). `inbound` is included so this key matches
+    // apply_distinct()'s step identity -- it is a no-op today (`step.inbound`
+    // is constant per stage call, and reverse_type_use() never sets it), but
+    // the two must not silently diverge if that ever changes.
+    std::ranges::stable_sort(results, witness_less);
+    if (cap > 0 && std::cmp_greater(results.size(), cap)) {
+      results.resize(static_cast<size_t>(cap));
+    }
+    if (std::cmp_greater(results.size(), kDefaultResultCap)) {
+      results.resize(kDefaultResultCap);
+      truncated = true;
+    }
+  }
+
+  static void rank_stage(Stream &st, const Stage &stage) {
+    bool truncated = st.truncated;
+    sort_and_cap_witnesses(st.paths, stage.n, truncated);
+    st.truncated = truncated;
+  }
+
+  // One owner (declaration whose signature/template facts reach `type_id`
+  // directly, with no further nesting) across every owner-fact domain,
+  // carrying that view's own natural-key identity (position/pack_index) and
+  // declaration site so distinct slots on the same owner symbol are never
+  // collapsed together (e.g. two `int` parameters at positions 0 and 1).
+  struct TypeOwner {
+    std::string domain;      // "symbol" | "parameter" | "template_parameter" |
+                             // "template_argument"
+    std::string role;        // symbol_type role ("returns"/"of_type"/
+                             // "underlying_type"), else same as domain
+    int64_t node_id = 0;     // owning declaration's symbol id
+    int64_t position = -1;   // natural-key position; -1 = not applicable
+    int64_t pack_index = -1; // pack element index; -1 = not a pack slot
+    std::optional<int64_t> file_id;
+    std::optional<int64_t> line;
+    std::optional<int64_t> col;
+  };
+
+  std::vector<TypeOwner> owners_of_type(int64_t type_id) {
+    std::vector<TypeOwner> out;
+    {
+      // Join the owning symbol's own declaration/definition site (symbol.
+      // file_id/line/col) so a direct symbol-domain owner carries the same
+      // provenance every other owner domain (parameter/template_parameter/
+      // template_argument) already reports -- a bare symbol_id with no site
+      // is not enough evidence to present as a witness step.
+      auto query = read_.read_db().prepare(
+          "SELECT st.symbol_id, st.kind, s.file_id, s.line, s.col "
+          "FROM symbol_type st LEFT JOIN symbol s ON s.id = st.symbol_id "
+          "WHERE st.type_id=? ORDER BY st.symbol_id, st.kind");
+      query.bind(1, type_id);
+      while (query.step()) {
+        const int64_t kind = query.col_int64(1);
+        const char *role = "underlying_type";
+        if (kind == 1) {
+          role = "returns";
+        } else if (kind == 2) {
+          role = "of_type";
+        }
+        TypeOwner owner{.domain = "symbol",
+                        .role = role,
+                        .node_id = query.col_int64(0),
+                        .position = -1,
+                        .pack_index = -1,
+                        .file_id = std::nullopt,
+                        .line = std::nullopt,
+                        .col = std::nullopt};
+        if (!query.col_is_null(2)) {
+          owner.file_id = query.col_int64(2);
+        }
+        if (!query.col_is_null(3)) {
+          owner.line = query.col_int64(3);
+        }
+        if (!query.col_is_null(4)) {
+          owner.col = query.col_int64(4);
+        }
+        out.push_back(std::move(owner));
+      }
+    }
+    {
+      auto query = read_.read_db().prepare(
+          "SELECT owner_id, position, pack_index, file_id, line, col FROM "
+          "parameter WHERE type_id=? OR declared_type_id=? OR "
+          "adjusted_type_id=? ORDER BY owner_id, position, pack_index");
+      query.bind(1, type_id);
+      query.bind(2, type_id);
+      query.bind(3, type_id);
+      while (query.step()) {
+        TypeOwner owner{.domain = "parameter",
+                        .role = "parameter",
+                        .node_id = query.col_int64(0),
+                        .position = query.col_int64(1),
+                        .pack_index = query.col_int64(2),
+                        .file_id = std::nullopt,
+                        .line = std::nullopt,
+                        .col = std::nullopt};
+        if (!query.col_is_null(3)) {
+          owner.file_id = query.col_int64(3);
+        }
+        if (!query.col_is_null(4)) {
+          owner.line = query.col_int64(4);
+        }
+        if (!query.col_is_null(5)) {
+          owner.col = query.col_int64(5);
+        }
+        out.push_back(std::move(owner));
+      }
+    }
+    {
+      auto query = read_.read_db().prepare(
+          "SELECT owner_id, position FROM template_param WHERE type_id=? "
+          "ORDER BY owner_id, position");
+      query.bind(1, type_id);
+      while (query.step()) {
+        out.push_back({.domain = "template_parameter",
+                       .role = "template_parameter",
+                       .node_id = query.col_int64(0),
+                       .position = query.col_int64(1),
+                       .pack_index = -1,
+                       .file_id = std::nullopt,
+                       .line = std::nullopt,
+                       .col = std::nullopt});
+      }
+    }
+    {
+      auto query = read_.read_db().prepare(
+          "SELECT owner_id, position, pack_index FROM template_arg WHERE "
+          "type_id=? ORDER BY owner_id, position, pack_index");
+      query.bind(1, type_id);
+      while (query.step()) {
+        out.push_back({.domain = "template_argument",
+                       .role = "template_argument",
+                       .node_id = query.col_int64(0),
+                       .position = query.col_int64(1),
+                       .pack_index = query.col_int64(2),
+                       .file_id = std::nullopt,
+                       .line = std::nullopt,
+                       .col = std::nullopt});
+      }
+    }
+    return out;
+  }
+
+  // Typed reverse type-use: from a seed `type`/`type_layer` id, climb
+  // type_edge (structural nesting: pointee/element_type/return_type/
+  // param_type/template_argument_type/member_owner/member_component) and
+  // type_node.canonical_id (cv/sugar desugaring) backward, emitting one
+  // witness per owner found at every depth -- direct use at depth 0 and
+  // every nested layer up to max_depth. Mirrors graph::GraphQuery::
+  // type_users()'s type_ids_reaching() closure (type_edge + canonical_id,
+  // both backward) but keeps the per-branch ordered `through` chain that a
+  // flat closure set cannot carry.
+  void reverse_type_use_stage(Stream &st, const Stage &stage) {
+    // reverse_type_use()'s fixed input set always includes at least one
+    // catalogued-partial relation (type.has_type_edge, the structural
+    // type_edge climb -- see reverse_type_use_input_relations() and
+    // explain()'s partial_inputs computation), so every witness this stage
+    // could ever emit is already stamped partial below regardless of which
+    // owner table matched. Set the stream-level flag unconditionally,
+    // independent of whether any owner is actually found, so an empty
+    // result here is never presented as a proven-complete negative.
+    st.source_partial = true;
+    std::vector<int64_t> seeds;
+    if (st.view == View::Type) {
+      for (const auto &key : st.keys) {
+        seeds.push_back(key.a); // View::Type keys are the type_node id itself
+      }
+    } else {
+      graph::GraphQuery graph(read_.graph_read());
+      for (const auto &key : st.keys) {
+        const auto layers = graph.type_layers(key.a);
+        if (key.b >= 0 && static_cast<size_t>(key.b) < layers.size()) {
+          seeds.push_back(layers[static_cast<size_t>(key.b)].type.id);
+        }
+      }
+    }
+    std::ranges::sort(seeds);
+    seeds.erase(std::ranges::unique(seeds).begin(), seeds.end());
+
+    // One climbed layer's identity: the type reached, the type_edge_kind
+    // label that reached it, and (for a type_edge hop) that edge's own
+    // `position` -- the natural-key column distinguishing e.g. a function
+    // type's several `param_type` edges to the same pointee type from one
+    // another. -1 for the seed link and for a `sugared_by` (canonical_id)
+    // hop, neither of which has a position.
+    struct ChainLink {
+      int64_t type_id = 0;
+      std::string through;
+      int64_t position = -1;
+    };
+
+    struct Frame {
+      int64_t type_id = 0;
+      int64_t depth = 0;
+      std::vector<ChainLink> chain;
+    };
+
+    std::multiset<PathWitness,
+                  bool (*)(const PathWitness &, const PathWitness &)>
+        best_results(witness_less);
+    int64_t budget_used = 0;
+    bool truncated = false;
+    bool result_truncated = false;
+    // A frame's climb cut off by `max_depth` while its own parents (the
+    // type_edge + canonical_id climb) were still non-empty means "no owner
+    // beyond this point" is unknown, not a proven negative -- mirrors
+    // path_stage's frontier_exhausted/depth_limited pattern
+    // (docs/query-plan.md). Does not abort the climb for other frames/seeds.
+    bool depth_limited = false;
+
+    for (const int64_t seed : seeds) {
+      if (truncated) {
+        break;
+      }
+      std::vector<Frame> stack;
+      stack.push_back(
+          {.type_id = seed,
+           .depth = 0,
+           .chain = {{.type_id = seed, .through = "", .position = -1}}});
+      while (!stack.empty() && !truncated) {
+        Frame frame = std::move(stack.back());
+        stack.pop_back();
+        if (++budget_used > kPathNodeBudget) {
+          truncated = true;
+          break;
+        }
+        for (const auto &owner : owners_of_type(frame.type_id)) {
+          PathWitness witness;
+          witness.length = frame.depth + 1;
+          witness.status = "partial"; // of_type/parameter/... are cataloged
+                                      // partial
+          for (const auto &link : frame.chain) {
+            PathStep step;
+            step.node_id = link.type_id;
+            step.domain = "type";
+            step.through = link.through;
+            step.status = "complete"; // structural type nesting is complete
+            step.position = link.position;
+            witness.steps.push_back(std::move(step));
+          }
+          PathStep final_step;
+          final_step.node_id = owner.node_id;
+          final_step.domain = owner.domain;
+          final_step.through = owner.role;
+          final_step.status = "partial";
+          final_step.position = owner.position;
+          final_step.pack_index = owner.pack_index;
+          if (owner.file_id || owner.line || owner.col) {
+            EdgeSiteRow site;
+            site.file_id = owner.file_id;
+            site.line = owner.line;
+            site.col = owner.col;
+            final_step.sites.push_back(std::move(site));
+          }
+          witness.steps.push_back(std::move(final_step));
+          best_results.insert(std::move(witness));
+          if (std::cmp_greater(best_results.size(), kDefaultResultCap)) {
+            // best_results is ordered ascending by witness_less (best
+            // witness first), so the element to evict once the set is over
+            // capacity is the current worst -- the last one -- never the
+            // first. Evicting begin() here would silently keep the K worst
+            // witnesses discovered instead of the K best, which the
+            // ranks_before_its_internal_result_cap regression below proves.
+            best_results.erase(std::prev(best_results.end()));
+            result_truncated = true;
+          }
+        }
+        // (parent_id, through label, type_edge.position or -1 when the hop
+        // has none). A function type's several `param_type` edges to the
+        // same pointee share (parent_id, through) but differ by position --
+        // without it, two such climbs would be indistinguishable. Queried
+        // unconditionally, even once `frame.depth` has already reached
+        // `max_depth`, so a depth-cut-off frame can be told apart from a
+        // true dead end (see depth_limited below).
+        std::vector<ChainLink> parents;
+        {
+          auto query = read_.read_db().prepare(
+              "SELECT src_id, kind, position FROM type_edge WHERE dst_id=? "
+              "ORDER BY src_id, position");
+          query.bind(1, frame.type_id);
+          while (query.step()) {
+            parents.push_back(
+                {.type_id = query.col_int64(0),
+                 .through = type_edge_kind_name(query.col_int64(1)),
+                 .position = query.col_int64(2)});
+          }
+        }
+        {
+          auto query = read_.read_db().prepare(
+              "SELECT id FROM type_node WHERE canonical_id=? ORDER BY id");
+          query.bind(1, frame.type_id);
+          while (query.step()) {
+            parents.push_back({.type_id = query.col_int64(0),
+                               .through = "sugared_by",
+                               .position = -1});
+          }
+        }
+        // Parents already present in the climb chain are proven dead ends
+        // (structural nesting is acyclic in practice; this guard exists so a
+        // data anomaly cannot loop forever) -- filter them out once, before
+        // the frontier check, so the same set is used both to decide
+        // depth_limited and to expand.
+        std::vector<ChainLink> climbable_parents;
+        for (const auto &parent : parents) {
+          if (!std::ranges::any_of(frame.chain, [&](const ChainLink &link) {
+                return link.type_id == parent.type_id;
+              })) {
+            climbable_parents.push_back(parent);
+          }
+        }
+        if (frame.depth >= stage.max_depth) {
+          if (!climbable_parents.empty()) {
+            // The climb still had parents to explore, but max_depth cut it
+            // off first: "no owner beyond here" is unknown, not a proven
+            // negative.
+            depth_limited = true;
+          }
+          continue;
+        }
+        for (const auto &parent : climbable_parents) {
+          Frame next;
+          next.type_id = parent.type_id;
+          next.depth = frame.depth + 1;
+          next.chain = frame.chain;
+          next.chain.push_back(parent);
+          stack.push_back(std::move(next));
+        }
+      }
+    }
+
+    std::vector<PathWitness> results(best_results.begin(), best_results.end());
+    truncated = truncated || result_truncated;
+    sort_and_cap_witnesses(results, 0, truncated);
+    st.paths = std::move(results);
+    st.truncated = st.truncated || truncated || depth_limited;
+    st.ids.clear();
+    st.keys.clear();
+    st.shape = Shape::Path;
+    st.path_stream = true;
+  }
+
   std::optional<std::string> file_path(int64_t file_id) {
     auto it = file_paths_.find(file_id);
     if (it == file_paths_.end()) {
@@ -2901,6 +3750,34 @@ private:
   }
 
   static void apply_distinct(Stream &st) {
+    if (st.shape == Shape::Path) {
+      std::vector<PathWitness> out;
+      for (auto &witness : st.paths) {
+        const bool dup = std::ranges::any_of(out, [&](const PathWitness &prev) {
+          if (prev.steps.size() != witness.steps.size()) {
+            return false;
+          }
+          for (size_t i = 0; i < prev.steps.size(); ++i) {
+            const PathStep &a = prev.steps[i];
+            const PathStep &b = witness.steps[i];
+            // Full logical step identity: two typed-view slots on the same
+            // owner (e.g. parameter positions 0 and 1) share node_id/
+            // through/inbound but are still distinct witnesses.
+            if (a.node_id != b.node_id || a.through != b.through ||
+                a.inbound != b.inbound || a.domain != b.domain ||
+                a.position != b.position || a.pack_index != b.pack_index) {
+              return false;
+            }
+          }
+          return true;
+        });
+        if (!dup) {
+          out.push_back(std::move(witness));
+        }
+      }
+      st.paths = std::move(out);
+      return;
+    }
     if (st.shape == Shape::Nodes) {
       if (!st.keys.empty()) {
         std::ranges::sort(st.keys);
@@ -3006,7 +3883,11 @@ private:
 
   static void apply_limit(Stream &st, int64_t n) {
     st.limit_in_effect = true;
-    if (st.shape == Shape::Nodes) {
+    if (st.shape == Shape::Path) {
+      if (std::cmp_greater(st.paths.size(), n)) {
+        st.paths.resize(n);
+      }
+    } else if (st.shape == Shape::Nodes) {
       if (!st.keys.empty()) {
         if (std::cmp_greater(st.keys.size(), n))
           st.keys.resize(n);
@@ -3025,17 +3906,66 @@ public:
   Result finish(Stream st) {
     Result res;
     res.view = st.view;
+    res.path_rows_examined = st.path_rows_examined;
+    res.path_reconstruction_descents_examined =
+        st.path_reconstruction_descents_examined;
     reject_ambiguous_ungrouped(st);
     if (st.shape == Shape::Scalar) {
-      recompute_status(st);
+      // count() after path()/reverse_type_use() counts witnesses and
+      // aggregates their status; every other count() (nodes, rows, or a
+      // typed view -- including one whose stream happens to be empty) must
+      // still fold per-row/per-key status via recompute_status(). Gate on
+      // provenance (`path_stream`), not on emptiness: an empty node-stream
+      // count() also has `paths.empty() && rows.empty()` and must not be
+      // routed into the witness-status branch.
+      if (st.path_stream) {
+        res.truncated = st.truncated;
+        // `st.source_partial` carries the stage's own catalogued-relation
+        // baseline
+        // (set unconditionally by path_stage()/reverse_type_use_stage(),
+        // independent of whether any witness was found) -- OR it with the
+        // per-witness fold so an empty witness set over a partial relation
+        // still reports partial rather than a proven-complete negative.
+        res.partial = st.source_partial || st.partial ||
+                      std::ranges::any_of(st.paths, [](const PathWitness &w) {
+                        return w.status == "partial";
+                      });
+        res.unknown = st.unknown;
+      } else {
+        recompute_status(st);
+        res.truncated = st.truncated;
+        res.partial = st.partial;
+        res.unknown = st.unknown;
+      }
       res.shape = Shape::Scalar;
+      if (!st.paths.empty()) {
+        res.scalar = static_cast<int64_t>(st.paths.size());
+      } else if (!st.rows.empty()) {
+        res.scalar = static_cast<int64_t>(st.rows.size());
+      } else if (!st.keys.empty()) {
+        res.scalar = static_cast<int64_t>(st.keys.size());
+      } else {
+        res.scalar = static_cast<int64_t>(st.ids.size());
+      }
+      return res;
+    }
+    if (st.shape == Shape::Path) {
+      if (!st.limit_in_effect &&
+          static_cast<int64_t>(st.paths.size()) > kDefaultResultCap) {
+        st.paths.resize(kDefaultResultCap);
+        st.truncated = true;
+      }
+      res.shape = Shape::Path;
       res.truncated = st.truncated;
-      res.partial = st.partial;
+      // See the Scalar/path_stream branch above: `st.source_partial` is the
+      // stage's own catalogued-relation baseline and must be folded in even
+      // when `st.paths` is empty.
+      res.partial = st.source_partial || st.partial ||
+                    std::ranges::any_of(st.paths, [](const PathWitness &w) {
+                      return w.status == "partial";
+                    });
       res.unknown = st.unknown;
-      // count() after select carries rows; otherwise ids hold the stream.
-      res.scalar = static_cast<int64_t>(
-          st.rows.empty() ? (st.keys.empty() ? st.ids.size() : st.keys.size())
-                          : st.rows.size());
+      res.paths = std::move(st.paths);
       return res;
     }
     if (st.shape == Shape::Nodes) {
@@ -3066,6 +3996,53 @@ public:
 
 } // namespace
 
+namespace {
+
+json_out::Value path_step_to_json(const PathStep &step) {
+  using namespace json_out;
+  Object o;
+  o.emplace_back("id", Value::of(step.node_id));
+  o.emplace_back("domain", Value::of(step.domain));
+  o.emplace_back("through", Value::of(step.through));
+  if (step.inbound) {
+    o.emplace_back("direction", Value::of(std::string("in")));
+  }
+  o.emplace_back("status", Value::of(step.status));
+  if (step.position >= 0) {
+    o.emplace_back("position", Value::of(step.position));
+  }
+  if (step.pack_index >= 0) {
+    o.emplace_back("pack_index", Value::of(step.pack_index));
+  }
+  Array sites;
+  for (const auto &site : step.sites) {
+    Object so;
+    so.emplace_back("file_id",
+                    site.file_id ? Value::of(*site.file_id) : Value::null());
+    so.emplace_back("line", site.line ? Value::of(*site.line) : Value::null());
+    so.emplace_back("col", site.col ? Value::of(*site.col) : Value::null());
+    so.emplace_back("conditional", Value::of(site.conditional));
+    sites.push_back(Value::obj(std::move(so)));
+  }
+  o.emplace_back("sites", Value::arr(std::move(sites)));
+  return Value::obj(std::move(o));
+}
+
+json_out::Value path_witness_to_json(const PathWitness &witness) {
+  using namespace json_out;
+  Object o;
+  o.emplace_back("length", Value::of(witness.length));
+  o.emplace_back("status", Value::of(witness.status));
+  Array steps;
+  for (const auto &step : witness.steps) {
+    steps.push_back(path_step_to_json(step));
+  }
+  o.emplace_back("steps", Value::arr(std::move(steps)));
+  return Value::obj(std::move(o));
+}
+
+} // namespace
+
 json_out::Value Result::to_json() const {
   using namespace json_out;
   Object o;
@@ -3075,6 +4052,17 @@ json_out::Value Result::to_json() const {
     o.emplace_back("count", Value::of(scalar));
     o.emplace_back("truncated", Value::of(truncated));
     o.emplace_back("index", index_identity_json(index));
+    return Value::obj(std::move(o));
+  }
+  if (shape == Shape::Path) {
+    o.emplace_back("count", Value::of(static_cast<int64_t>(paths.size())));
+    o.emplace_back("truncated", Value::of(truncated));
+    o.emplace_back("index", index_identity_json(index));
+    Array arr;
+    for (const auto &witness : paths) {
+      arr.push_back(path_witness_to_json(witness));
+    }
+    o.emplace_back("paths", Value::arr(std::move(arr)));
     return Value::obj(std::move(o));
   }
   o.emplace_back("count", Value::of(static_cast<int64_t>(rows.size())));
@@ -3108,11 +4096,20 @@ protocol::ResultEnvelope Result::to_envelope() const {
   payload.emplace_back("view", Value::of(std::string(view_name(view))));
   if (shape == Shape::Scalar) {
     payload.emplace_back("count", Value::of(scalar));
+  } else if (shape == Shape::Path) {
+    payload.emplace_back("count",
+                         Value::of(static_cast<int64_t>(paths.size())));
   } else {
     payload.emplace_back("count", Value::of(static_cast<int64_t>(rows.size())));
   }
   payload.emplace_back("truncated", Value::of(truncated));
-  if (shape != Shape::Scalar) {
+  if (shape == Shape::Path) {
+    Array path_values;
+    for (const auto &witness : paths) {
+      path_values.push_back(path_witness_to_json(witness));
+    }
+    payload.emplace_back("paths", Value::arr(std::move(path_values)));
+  } else if (shape != Shape::Scalar) {
     Array row_values;
     for (const auto &row : rows) {
       Object row_value;
@@ -3227,12 +4224,133 @@ Result Executor::run(const Plan &plan) {
   return res;
 }
 
+namespace {
+
+void collect_relation_names(const Pred &p, std::set<std::string> &names) {
+  switch (p.op) {
+  case PredOp::AllOf:
+  case PredOp::AnyOf:
+    for (const auto &kid : p.kids) {
+      collect_relation_names(kid, names);
+    }
+    return;
+  case PredOp::Not:
+    collect_relation_names(p.kids[0], names);
+    return;
+  case PredOp::Exists:
+  case PredOp::None:
+  case PredOp::All:
+  case PredOp::AtLeast:
+  case PredOp::Exactly:
+    names.insert(p.relation);
+    if (p.target) {
+      collect_relation_names(*p.target, names);
+    }
+    return;
+  case PredOp::Eq:
+  case PredOp::Ne:
+  case PredOp::Glob:
+  case PredOp::In:
+    return;
+  }
+}
+
+// reverse_type_use() does not walk a single catalogued relation -- it climbs
+// type_edge and type_node.canonical_id, then reads four owner-fact tables --
+// but every one of those inputs is either a catalogued relation already or,
+// for the canonical_id (cv/sugar desugaring) climb, a name with no catalog
+// entry to resolve against. This is that fixed input set, with the
+// completeness the synthetic (non-catalogued) entry cannot look up itself.
+const std::vector<std::string> &reverse_type_use_input_relations() {
+  static const std::vector<std::string> names = {"type.has_type_edge",
+                                                 "type.canonical_id",
+                                                 "symbol.of_type",
+                                                 "parameter.of_type",
+                                                 "template_parameter.of_type",
+                                                 "template_argument.of_type"};
+  return names;
+}
+
+const std::map<std::string, std::string> &synthetic_relation_completeness() {
+  // type_node.canonical_id desugaring has no RelationDesc catalog entry;
+  // treat it as partial, matching type.has_type_edge's own completeness.
+  static const std::map<std::string, std::string> table = {
+      {"type.canonical_id", "partial"}};
+  return table;
+}
+
+// Every relation a normalized plan touches (traversals and quantifier
+// predicates; path()'s relation is catalogued, reverse_type_use()'s fixed
+// input set above is not), including one level into
+// union()/intersect()/except()/path() "to" operand plans.
+void collect_stage_relations(const Stage &stage, std::set<std::string> &names) {
+  if (stage.op == StageOp::Out || stage.op == StageOp::In ||
+      stage.op == StageOp::Path) {
+    names.insert(stage.relation);
+  } else if (stage.op == StageOp::ReverseTypeUse) {
+    const auto &fixed = reverse_type_use_input_relations();
+    names.insert(fixed.begin(), fixed.end());
+  }
+  if (stage.pred) {
+    collect_relation_names(*stage.pred, names);
+  }
+  if (stage.operand) {
+    for (const auto &sub : stage.operand->stages) {
+      collect_stage_relations(sub, names);
+    }
+  }
+}
+
+} // namespace
+
 json_out::Value Executor::explain(const Plan &plan) {
+  using namespace json_out;
   const Plan normalized = validate(plan);
-  json_out::Object o;
+  Object o;
   o.emplace_back("plan", plan_to_json(normalized));
   o.emplace_back("index", index_identity_json(read_.index_identity()));
-  return json_out::Value::obj(std::move(o));
+  o.emplace_back("execution_shape",
+                 Value::of(shape_name(final_shape(normalized))));
+
+  Object budgets;
+  budgets.emplace_back("traverse_node_budget", Value::of(kTraverseNodeBudget));
+  budgets.emplace_back("enumerate_budget", Value::of(kEnumerateBudget));
+  budgets.emplace_back("path_node_budget", Value::of(kPathNodeBudget));
+  budgets.emplace_back("path_reconstruction_budget",
+                       Value::of(kPathReconstructionBudget));
+  budgets.emplace_back("default_result_cap", Value::of(kDefaultResultCap));
+  o.emplace_back("budgets", Value::obj(std::move(budgets)));
+
+  std::set<std::string> relation_names;
+  for (const auto &stage : normalized.stages) {
+    collect_stage_relations(stage, relation_names);
+  }
+  Array relations;
+  bool partial_inputs = false;
+  bool unknown_capable_inputs = false;
+  for (const auto &name : relation_names) {
+    const RelationDesc *rel = resolve_qualified_relation(name);
+    Object ro;
+    ro.emplace_back("relation", Value::of(name));
+    std::string completeness;
+    if (rel != nullptr) {
+      completeness = rel->completeness;
+    } else if (const auto it = synthetic_relation_completeness().find(name);
+               it != synthetic_relation_completeness().end()) {
+      completeness = it->second;
+    } else {
+      completeness = "unknown";
+    }
+    ro.emplace_back("completeness", Value::of(completeness));
+    partial_inputs = partial_inputs || completeness == "partial";
+    unknown_capable_inputs =
+        unknown_capable_inputs || completeness != "complete";
+    relations.push_back(Value::obj(std::move(ro)));
+  }
+  o.emplace_back("input_relations", Value::arr(std::move(relations)));
+  o.emplace_back("partial_inputs", Value::of(partial_inputs));
+  o.emplace_back("unknown_capable_inputs", Value::of(unknown_capable_inputs));
+  return Value::obj(std::move(o));
 }
 
 } // namespace cidx::query
