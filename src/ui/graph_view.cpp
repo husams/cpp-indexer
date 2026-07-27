@@ -1645,6 +1645,16 @@ void apply_continuation_token(Value &continuation,
     } else {
       next_edge_offset = edge_offset + delivered_edge_count;
     }
+    // decode_continuation() rejects any offset outside
+    // [0, kCandidateUniverseCap] (HSE-92 review P2-1). Clamp here on the
+    // MINT side too, symmetrically, so the server can never hand out a
+    // token it would immediately reject on the client's very next request
+    // (HSE-92 senior-dev round-1 finding): the candidate universe itself is
+    // already bounded by that same cap (make_query_plan()'s own LIMIT), so
+    // this clamp is a defensive symmetry guarantee, not expected to change
+    // behavior for any request within the supported candidate-universe size.
+    next_node_offset = std::clamp(next_node_offset, 0, kCandidateUniverseCap);
+    next_edge_offset = std::clamp(next_edge_offset, 0, kCandidateUniverseCap);
     token = Value::of(encode_continuation(query_identity, next_node_offset,
                                           next_edge_offset));
   }
@@ -1669,8 +1679,15 @@ void apply_continuation_token(Value &continuation,
 // this page's edge-offset window up to whatever edge_budget room remains
 // (a fixed snapshot -- other contributions, e.g. include facts, may have
 // already used some of it, but this selection itself never grows that
-// count). Split out of build_graph_view() to keep that function within its
-// complexity budget.
+// count). The RETURNED vector's size is the number of candidates this call
+// consumed from the edge-offset window -- the caller advances the next
+// continuation token's edge_offset by exactly that count (HSE-92 senior-dev
+// round-1 new blocker: advancing by how many edges were actually EMITTED
+// after downstream applicability/node-budget filtering could under-advance
+// the offset to zero whenever an entire page's window got filtered out,
+// making the continuation chain never converge -- the client would receive
+// the byte-identical token forever). Split out of build_graph_view() to keep
+// that function within its complexity budget.
 //
 // Each scanned node's adjacency is re-read with the SAME fixed
 // kCandidateUniverseCap limit on every page, not a limit that grows with
@@ -1740,21 +1757,22 @@ select_symbol_edges(graph::GraphQuery &graph, const GraphViewRequest &request,
     ordered_edges.push_back(edge);
   }
   skip_offset(ordered_edges, edge_offset);
-  if (ordered_edges.size() >
-      static_cast<std::size_t>(
-          std::max(0, edge_budget - static_cast<int>(edges_so_far)))) {
+  // The window this call may return is capped at whatever edge_budget room
+  // remains -- previously this cap was only used to decide `truncated`/
+  // `more_edges_available` and was never actually applied to the returned
+  // vector (the selection loop below checked `edges_so_far` but never
+  // incremented it, so it either returned nothing or returned the WHOLE
+  // window regardless of size). Clip explicitly so the returned vector's
+  // size is always a true, bounded "how many candidates did this call
+  // consume" answer the caller can rely on for continuation accounting.
+  const std::size_t remaining_room = static_cast<std::size_t>(
+      std::max(0, edge_budget - static_cast<int>(edges_so_far)));
+  if (ordered_edges.size() > remaining_room) {
     truncated = true;
     more_edges_available = true;
+    ordered_edges.resize(remaining_room);
   }
-  std::vector<graph::Edge> selected_edges;
-  for (const auto &edge : ordered_edges) {
-    if (std::cmp_greater_equal(edges_so_far, edge_budget)) {
-      truncated = true;
-      break;
-    }
-    selected_edges.push_back(edge);
-  }
-  return selected_edges;
+  return ordered_edges;
 }
 
 // The current page's primary node set: the full (unpaginated, filter-applied)
@@ -2444,30 +2462,54 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
           truncated = true;
         }
       } else {
-        // Scan the FULL (unpaginated, filter-applied) candidate node set,
-        // not just the nodes delivered through this page. A narrower,
-        // page-progress-sized scope permanently loses cross-page edges once
-        // their source node's page has already gone by (HSE-92 round 3) --
-        // but restricting it to a prefix that GROWS as node pages advance
-        // reintroduces the exact P1-1 instability on the edge side (HSE-92
-        // review P2-2): `ordered_edges` inside select_symbol_edges() is
-        // re-sorted by portable edge id on every call, and a newly-scanned
-        // node's edges are not guaranteed to sort after edges from nodes
-        // scanned on earlier pages (portable_edge_id is keyed by the edge's
-        // actual src/dst, not by which endpoint happened to be the scan
-        // root, so this holds for both directions). Scanning the full,
-        // already-stable candidate set on every page keeps the edge
-        // candidate universe -- and therefore `edge_offset`'s meaning --
-        // identical across the whole chain; delivery is still throttled by
-        // edge_budget/node_budget exactly as before, so this only fixes
-        // *which page* an edge can first appear on, not how many nodes or
-        // edges any single page may return.
+        // Scan only the candidate nodes DELIVERED SO FAR (the prefix already
+        // known from earlier pages, `known_from_earlier_pages`, plus this
+        // page's own `ordered_nodes`) -- not the FULL, unpaginated candidate
+        // set -- while any node paging remains outstanding (HSE-92 senior-dev
+        // round-1 cost finding: re-scanning the whole candidate universe's
+        // adjacency on every page made per-page server work O(total graph
+        // size) instead of O(page), a ~22x page-1 regression measured at
+        // N=3000 candidates). This is safe without reintroducing the P1-1/
+        // P2-2 edge_offset instability the full-scan design guarded against:
+        // apply_continuation_token() always resets edge_offset to 0 for as
+        // long as more_nodes_available is true (see its `next_edge_offset =
+        // 0` branch), so every page whose scan scope is a PROPER SUBSET of
+        // the full candidate set (i.e. node delivery is not yet exhausted)
+        // is, by that invariant, always called with edge_offset == 0 -- there
+        // is no accumulated positional offset into this growing scope for
+        // the instability to act on. Once node delivery finishes, this
+        // "delivered so far" prefix becomes IDENTICAL to the full candidate
+        // set (nodes_delivered_so_far == full_filtered_nodes.size()), so the
+        // edge-continuation phase (where edge_offset does advance across
+        // pages) still scans the full, frozen candidate set exactly as
+        // before -- unchanged, and still correct for the same reason the
+        // prior review required it.
+        const std::size_t nodes_delivered_so_far =
+            static_cast<std::size_t>(std::max(0, node_offset)) +
+            ordered_nodes.size();
+        const auto &all_sorted_for_scan = node_page.full_filtered_nodes;
+        const std::vector<graph::Sym> nodes_to_scan(
+            all_sorted_for_scan.begin(),
+            all_sorted_for_scan.begin() +
+                static_cast<std::ptrdiff_t>(std::min(
+                    nodes_delivered_so_far, all_sorted_for_scan.size())));
         selected_edges = select_symbol_edges(
-            graph, request, node_page.full_filtered_nodes,
-            full_candidates_by_id, symbols_by_id, edge_offset, edge_budget,
-            edges.size(), check_cancelled, truncated, more_edges_available);
+            graph, request, nodes_to_scan, full_candidates_by_id, symbols_by_id,
+            edge_offset, edge_budget, edges.size(), check_cancelled, truncated,
+            more_edges_available);
       }
-      const std::size_t symbol_edges_before = edges.size();
+      // The continuation offset must advance by how many candidates this
+      // page CONSUMED from the deterministic edge-offset window (i.e. how
+      // far `selected_edges` reached), not by how many of those ended up
+      // actually emitted into the response below (HSE-92 senior-dev round-1
+      // new blocker). An edge consumed here but dropped downstream --
+      // filtered by applicability, or deferred for lack of node_budget room
+      // -- must never be reconsidered on the next page: the emitted-vs-
+      // consumed gap is exactly what let a fully-filtered window return the
+      // byte-identical continuation token forever (reproduced with
+      // edge_limit=1 and an applicability filter that excludes every
+      // candidate in that window).
+      const std::size_t edges_consumed_this_page = selected_edges.size();
       int sites_remaining = std::max(0, site_budget - sites_used);
       for (const auto &edge : selected_edges) {
         check_cancelled();
@@ -2535,8 +2577,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
                                    freshness, truncated, sites_truncated, sites,
                                    request.workspace));
       }
-      delivered_edge_count =
-          static_cast<int>(edges.size() - symbol_edges_before);
+      delivered_edge_count = static_cast<int>(edges_consumed_this_page);
     }
   } else {
     metadata.emplace_back("query_plan", Value::null());
@@ -2716,9 +2757,22 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
     while (script_safe_size(json_out::dumps_indent2(result)) > trim_budget &&
            (member(result, "nodes") != nullptr &&
             !member(result, "nodes")->a.empty())) {
+      // `nodes` is always laid out as [this page's primary nodes
+      // (delivered_node_count of them)] ++ [bridging nodes appended while
+      // walking edges]. Popping from the back removes a BRIDGING node for
+      // as long as more nodes remain than delivered_node_count -- bridging
+      // nodes do not count against delivered_node_count/the continuation
+      // node offset in the first place (see emit_bridging_node above), so
+      // decrementing it for one is wrong: it under-advances next_node_offset
+      // and causes the primary node it actually corresponds to be
+      // re-delivered, duplicated, on the following page (HSE-92 senior-dev
+      // round-1 finding).
+      const bool popping_bridging_node =
+          member(result, "nodes")->a.size() >
+          static_cast<std::size_t>(std::max(0, delivered_node_count));
       member(result, "nodes")->a.pop_back();
       byte_trim_dropped_content = true;
-      if (delivered_node_count > 0) {
+      if (!popping_bridging_node && delivered_node_count > 0) {
         --delivered_node_count;
       }
     }

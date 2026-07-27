@@ -989,6 +989,177 @@ TEST_CASE("Live explorer: filters progress beyond the first raw candidate "
   CHECK_FALSE(combined.contains("USR::wrong_namespace"));
 }
 
+TEST_CASE("Live explorer: an applicability filter that empties every edge "
+          "window still lets the continuation chain terminate (HSE-92 "
+          "senior-dev round-1)") {
+  // Reviewer's exact repro: root + 5 targets, 5 UNCONDITIONAL `calls` edges,
+  // applicability=conditional (so passes_applicability_filter() excludes
+  // every single one of them), edge_limit=1 so each page's edge-offset
+  // window only ever contains one candidate. With node limit=50 all 6 nodes
+  // land on page 1, so every subsequent page is a pure edge-continuation
+  // page. The bug: delivered_edge_count used to be computed from how many
+  // edges were actually EMITTED after the applicability filter (always 0
+  // here), so next_edge_offset never advanced past the same value and the
+  // server handed back the byte-identical token forever -- "Load more"
+  // became a permanent no-op. The fix advances the offset by how many
+  // candidates this page CONSUMED from the window (1, every page,
+  // regardless of the filter outcome), so the chain must reach "no more
+  // candidates" and emit `"token": null` within a small, bounded number of
+  // pages.
+  Storage db(":memory:");
+  const int64_t component =
+      db.add_component("test", "/tmp/cidx-ui-applicability-terminate");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "applic.cpp");
+  const auto make_node = [&](const char *usr, const char *name, int line) {
+    auto sym = symbol(usr, name, "function");
+    sym.file_id = file;
+    sym.line = line;
+    return db.add_symbol(sym);
+  };
+  const int64_t root = make_node("USR::applic_root", "ns::applic_root", 1);
+  const int64_t t0 = make_node("USR::applic_t0", "ns::applic_t0", 2);
+  const int64_t t1 = make_node("USR::applic_t1", "ns::applic_t1", 3);
+  const int64_t t2 = make_node("USR::applic_t2", "ns::applic_t2", 4);
+  const int64_t t3 = make_node("USR::applic_t3", "ns::applic_t3", 5);
+  const int64_t t4 = make_node("USR::applic_t4", "ns::applic_t4", 6);
+  const auto add_edge = [&](int64_t dst, int line) {
+    cidx::Edge edge;
+    edge.src_id = root;
+    edge.dst_id = dst;
+    edge.kind = cidx::graph::edge_kinds_map().at("calls");
+    const int64_t edge_id = db.add_edge(edge);
+    cidx::EdgeSite site;
+    site.edge_id = edge_id;
+    site.file_id = file;
+    site.line = line;
+    site.col = 4;
+    site.conditional =
+        0; // unconditional -- excluded by applicability=conditional
+    db.add_edge_site(site);
+  };
+  add_edge(t0, 10);
+  add_edge(t1, 20);
+  add_edge(t2, 30);
+  add_edge(t3, 40);
+  add_edge(t4, 50);
+
+  RunningServer server(graph_provider_for(db));
+  const std::string base =
+      "/api/graph?token=" + server.token +
+      "&root=ns::applic_root&direction=out&depth=1&limit=50&edge_limit=1"
+      "&applicability=conditional";
+
+  std::string continuation;
+  std::set<std::string> tokens_seen;
+  bool terminated = false;
+  for (int page = 0; page < 10; ++page) {
+    std::string url = base;
+    if (!continuation.empty()) {
+      url += "&continuation=";
+      url += continuation;
+    }
+    const auto response = http_get(server.port, url);
+    CHECK(response.status == 200);
+    // Every candidate `calls` edge is unconditional, so applicability=
+    // conditional must exclude every one of them, on every page.
+    CHECK(edge_portable_ids_for_kind(response.body, "calls").empty());
+    const std::string token_marker = R"("token": ")";
+    const std::size_t token_start = response.body.find(token_marker);
+    if (token_start == std::string::npos) {
+      // "token": null -- the chain has genuinely run out of candidates.
+      terminated = true;
+      break;
+    }
+    const std::size_t value_start = token_start + token_marker.size();
+    const std::size_t value_end = response.body.find('"', value_start);
+    REQUIRE(value_end != std::string::npos);
+    continuation = response.body.substr(value_start, value_end - value_start);
+    REQUIRE_FALSE(continuation.empty());
+    // A non-terminating chain re-mints the exact same token forever; a
+    // repeated token proves the offset never advanced.
+    CHECK(tokens_seen.insert(continuation).second);
+  }
+  CHECK(terminated);
+}
+
+// Rebuilds a continuation token with a FORGED node_offset/edge_offset pair
+// but the SAME query-identity prefix as a real, server-issued token (HSE-92
+// review P2-1 / senior-dev round-1 P3 finding: this rejection path had no
+// regression test at all). Continuation tokens are
+// "cont:v3:<len>:<identity><node_offset>,<edge_offset>" -- everything up to
+// and including the length-prefixed identity block is kept byte-for-byte;
+// only the trailing offset pair is replaced.
+std::string forge_continuation(const std::string &real_token,
+                               const std::string &node_offset,
+                               const std::string &edge_offset) {
+  const std::string prefix = "cont:v3:";
+  REQUIRE(real_token.starts_with(prefix));
+  const std::size_t length_start = prefix.size();
+  const std::size_t colon = real_token.find(':', length_start);
+  REQUIRE(colon != std::string::npos);
+  const std::size_t identity_len = static_cast<std::size_t>(parse_int(
+      std::string_view(real_token).substr(length_start, colon - length_start)));
+  const std::size_t identity_end = colon + 1 + identity_len;
+  REQUIRE(identity_end <= real_token.size());
+  return real_token.substr(0, identity_end) + node_offset + "," + edge_offset;
+}
+
+TEST_CASE("Live explorer rejects a continuation token with a forged offset "
+          "(HSE-92 review P2-1)") {
+  Storage db(":memory:");
+  const int64_t component = db.add_component("test", "/tmp/cidx-ui-p2-1-test");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "p2_1.cpp");
+  const auto make_node = [&](const char *usr, const char *name, int line) {
+    auto sym = symbol(usr, name, "function");
+    sym.file_id = file;
+    sym.line = line;
+    return db.add_symbol(sym);
+  };
+  const int64_t root = make_node("USR::p2_1_root", "ns::p2_1_root", 1);
+  const int64_t target = make_node("USR::p2_1_target", "ns::p2_1_target", 2);
+  cidx::Edge edge;
+  edge.src_id = root;
+  edge.dst_id = target;
+  edge.kind = cidx::graph::edge_kinds_map().at("calls");
+  db.add_edge(edge);
+
+  RunningServer server(graph_provider_for(db));
+  const std::string base = "/api/graph?token=" + server.token +
+                           "&root=ns::p2_1_root&direction=out&depth=1&limit=1";
+  const auto seed = http_get(server.port, base);
+  REQUIRE(seed.status == 200);
+  const std::string token_marker = R"("token": ")";
+  const std::size_t token_start = seed.body.find(token_marker);
+  REQUIRE(token_start != std::string::npos);
+  const std::size_t value_start = token_start + token_marker.size();
+  const std::size_t value_end = seed.body.find('"', value_start);
+  REQUIRE(value_end != std::string::npos);
+  const std::string real_token =
+      seed.body.substr(value_start, value_end - value_start);
+
+  const auto get_with_token = [&](const std::string &token) {
+    return http_get(server.port, base + "&continuation=" + token);
+  };
+
+  // One past the fixed candidate-universe cap (kCandidateUniverseCap =
+  // 200000): must be rejected, not silently accepted as an enormous skip.
+  CHECK(get_with_token(forge_continuation(real_token, "200001", "0")).status ==
+        400);
+  // The original review's exact repro value.
+  CHECK(
+      get_with_token(forge_continuation(real_token, "2147483647", "2147483647"))
+          .status == 400);
+  // A negative offset must never bind into SQL LIMIT arithmetic.
+  CHECK(get_with_token(forge_continuation(real_token, "-1", "0")).status ==
+        400);
+  // The cap boundary itself is a legitimate value a real token could carry
+  // and must not be spuriously rejected.
+  CHECK(get_with_token(forge_continuation(real_token, "200000", "0")).status ==
+        200);
+}
+
 TEST_CASE("Live explorer: applicability is decided from the complete edge "
           "fact, not the bounded evidence prefix") {
   Fixture fixture;
