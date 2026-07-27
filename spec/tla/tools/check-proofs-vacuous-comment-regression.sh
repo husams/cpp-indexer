@@ -30,7 +30,21 @@
 #
 # The round-3 fix requires a theorem's statement to structurally match
 # `<Spec> => []<Invariant>` for a real, module-defined Spec operator, not
-# merely contain that text as a substring. This script proves:
+# merely contain that text as a substring -- but round 3's own resolution of
+# "real, module-defined Spec operator" scanned every .tla file
+# check-proofs.sh had copied into its scratch work directory, including the
+# untrusted proof module itself. A proof module defining a fresh,
+# module-local `WeakSpec == Init /\ FALSE` (a contradiction) was accepted as
+# a real Spec operator, making every corollary built on it vacuously true:
+# PROVEN end-to-end against real tlapm 1.5.0, offline, in the acceptance
+# review that rejected round 3. The round-4 fix (this round) resolves the
+# candidate Spec operator only from manifest.json's "extends" entry and its
+# transitive EXTENDS chain, resolved only from modules/conformance/protected
+# (never proofs/), and requires the real `Init /\ [][Next]_vars` idiom, not
+# a bare "Init" prefix -- see check-proofs-binding.sh for the fix itself and
+# check-proofs-binding-unit-test.sh for a fast, tlapm-free pin of both halves
+# of that fix. This script proves the same defect end to end, against a
+# real tlapm run:
 #
 #   1. The vacuous module + decoy comment is REJECTED by the fixed
 #      check-proofs.sh with reason=proves-invariant-not-found (round-1/2
@@ -46,6 +60,9 @@
 #      declared theorem's own statement does not literally contain either
 #      invariant name -- only its two derived corollary theorems do, each
 #      structurally `Spec => []<Invariant>`).
+#   5. A module-local, fabricated `WeakSpec == Init /\ FALSE` operator
+#      (round-4's own repro, the live bypass that defeated round 3) is
+#      REJECTED.
 #
 # check-proofs.sh's tlapm toolchain is x86_64-linux-gnu only and this
 # checkout's convention (see check-verification-tamper-regression.sh) is not
@@ -225,5 +242,49 @@ if ! grep -q "^TLA_PROOF_STATUS=PASS module=CidxResultProof" <<<"$real_output"; 
   die "real-proof-module-missing-expected-pass-line"
 fi
 echo "TLA_PROOF_BINDING_REGRESSION_STATUS=PASS check=real-proof-module-still-passes"
+
+# --- Test 5: minted module-local pseudo-Spec decoy (QA + senior-developer
+# round-2 acceptance review repro), must be REJECTED. `WeakSpec` is defined
+# ONLY inside this untrusted proof module, its body starts with "Init" (so
+# the round-3 substring-prefix resolution accepted it), but it is a bare
+# contradiction (`Init /\ FALSE`), not this module's real Spec -- and it is
+# not defined anywhere in modules/CidxResult.tla's trusted EXTENDS chain. ---
+
+WEAK_SPEC_SEED="$WORK/weak-spec-seed.tla"
+cat >"$WEAK_SPEC_SEED" <<'TLA'
+----------------------------- MODULE CidxResultProof -----------------------------
+EXTENDS CidxResult, TLAPS
+
+WeakSpec == Init /\ FALSE
+
+THEOREM ResultInvarianceTheorem == TRUE OBVIOUS
+
+THEOREM WeakCorollary1 == WeakSpec => []SharedResultTypeInvariant
+  BY ResultInvarianceTheorem, PTL DEF WeakSpec
+
+THEOREM WeakCorollary2 == WeakSpec => []TrustedOutcomeInvariant
+  BY ResultInvarianceTheorem, PTL DEF WeakSpec
+
+=============================================================================
+TLA
+
+result="$(run_check "$WEAK_SPEC_SEED")"
+weak_spec_status="$(sed -n '1p' <<<"$result")"
+weak_spec_output="$(sed -n '2,$p' <<<"$result")"
+
+if [[ "$weak_spec_status" -eq 0 ]]; then
+  printf '%s\n' "$weak_spec_output" >&2
+  die "minted-weak-spec-decoy-passed"
+fi
+if ! grep -q "reason=proves-invariant-not-found" <<<"$weak_spec_output"; then
+  printf '%s\n' "$weak_spec_output" >&2
+  die "minted-weak-spec-decoy-rejected-for-unexpected-reason"
+fi
+if ! grep -q "SharedResultTypeInvariant" <<<"$weak_spec_output" \
+    || ! grep -q "TrustedOutcomeInvariant" <<<"$weak_spec_output"; then
+  printf '%s\n' "$weak_spec_output" >&2
+  die "minted-weak-spec-rejection-did-not-name-both-missing-invariants"
+fi
+echo "TLA_PROOF_BINDING_REGRESSION_STATUS=PASS check=minted-weak-spec-decoy-rejected"
 
 echo "TLA_PROOF_BINDING_REGRESSION_STATUS=PASS"

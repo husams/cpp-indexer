@@ -207,8 +207,32 @@ echo "TLA_VERIFICATION_TAMPER_STATUS=PASS check=extract-trusted-checker-refuses-
 # exercised directly against real (not simulated) base commits of this very
 # repository, proving mode=base never silently substitutes head content and
 # mode=bootstrap only ever fires when the base commit itself resolved. ---
-
-REAL_BASE="$(git -C "$REPO_ROOT" rev-parse HEAD~3)"
+#
+# QA round-2 acceptance-review fix: REAL_BASE used to be the hardcoded
+# `HEAD~3` -- "some commit before this self-test file existed". That held at
+# the moment it was written, but it is not stable: every further commit this
+# very PR lands shifts what HEAD~3 resolves to, and once three MORE commits
+# land after this self-test file was introduced, HEAD~3 lands ON OR AFTER
+# the commit that added it -- so the mode=bootstrap assertion below (which
+# requires this file to be ABSENT at REAL_BASE) starts asserting against the
+# file's own already-committed content instead of a genuine bootstrap, and
+# this required, non-optional CI gate fails on a completely untampered head.
+# Reproduced exactly this way this round: 3 new commits landed after this
+# file was introduced, shifting HEAD~3 onto a commit where the file already
+# existed.
+#
+# Fixed: resolve REAL_BASE structurally, not by a commit-count offset. The
+# parent of the commit that FIRST added this file is guaranteed to predate
+# it (so mode=bootstrap always holds there, regardless of how many further
+# commits land), and check.sh was committed independently, well before this
+# file was introduced, so it is guaranteed to exist there too (so mode=base
+# still holds for Test 5a). This self-adjusts as the branch grows instead of
+# requiring a future manual offset bump.
+INTRODUCING_COMMIT="$(git -C "$REPO_ROOT" log --diff-filter=A --format=%H \
+  -- spec/tla/tools/check-verification-tamper-regression.sh | tail -1)"
+[[ -n "$INTRODUCING_COMMIT" ]] \
+  || die "could-not-resolve-introducing-commit-for-self"
+REAL_BASE="$(git -C "$REPO_ROOT" rev-parse "${INTRODUCING_COMMIT}~1")"
 
 "$EXTRACT" "$REAL_BASE" spec/tla/tools/check.sh "$WORK/real-base-existing.sh" \
   >"$WORK/real-base-existing.log" 2>&1
@@ -269,6 +293,13 @@ checkers = {
     # closes for check.sh; it is extracted once, alongside the
     # check-proofs.sh it is wired to via CIDX_CHECK_PROOFS_SH.
     "check-proofs-vacuous-comment-regression.sh": 1,
+    # Round-8 fix (QA + senior-developer round-2 acceptance review):
+    # check-proofs-binding.sh carries check-proofs.sh's theorem/invariant
+    # structural-binding logic (factored out for direct unit-testability) and
+    # is sourced by check-proofs.sh as a sibling file at runtime -- it is
+    # extracted once, alongside check-proofs.sh, into the same $RUNNER_TEMP
+    # directory so the base-pinned copy resolves it there.
+    "check-proofs-binding.sh": 1,
 }
 
 for checker, expected_count in checkers.items():
@@ -296,6 +327,16 @@ for checker, expected_count in checkers.items():
     # the quoted path (it is a multi-line `run: |` block, unlike the other
     # single-command checkers), so its execution marker cannot require the
     # closing quote to be followed immediately by end-of-line.
+    #
+    # check-proofs-binding.sh (round 8) is never invoked as its own `run:`
+    # step at all -- it is sourced by check-proofs.sh, as a sibling file in
+    # the same $RUNNER_TEMP directory, at the point check-proofs.sh itself
+    # runs. There is deliberately no separate execution marker to require for
+    # it; its extraction (checked above) landing in the same $RUNNER_TEMP
+    # directory as check-proofs.sh is what makes that sourcing resolve to the
+    # base-pinned copy instead of falling through to a missing file.
+    if checker == "check-proofs-binding.sh":
+        continue
     execution_marker = (
         f'"$RUNNER_TEMP/{checker}" --demo'
         if checker == "export-counterexample.sh"

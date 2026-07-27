@@ -33,6 +33,8 @@ required = (
     "/spec/tla/tools/check-conformance.sh @husams",
     "/spec/tla/tools/check-sidecar-conformance.sh @husams",
     "/spec/tla/tools/check-proofs.sh @husams",
+    "/spec/tla/tools/check-proofs-binding.sh @husams",
+    "/spec/tla/tools/check-proofs-binding-unit-test.sh @husams",
     "/spec/tla/tools/export-counterexample.sh @husams",
     "/spec/tla/tools/check-verification-tamper-regression.sh @husams",
     "/spec/tla/tools/check-self-test-tamper-regression.sh @husams",

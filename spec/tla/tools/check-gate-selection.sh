@@ -216,6 +216,16 @@ run_case cidxtypes-selects-both-conformance-gates \
   "tla_policy" \
   "spec/tla/modules/CidxTypes.tla"
 
+# HSE-89 round 4 (this round): check-proofs.sh's theorem/invariant binding
+# logic was factored out into a sibling file, check-proofs-binding.sh, so it
+# is directly unit-testable without a real tlapm run. It must select the
+# same tla-proofs gate as check-proofs.sh itself -- an edit here can weaken
+# the structural binding check exactly as an edit to check-proofs.sh could.
+run_case check-proofs-binding-selects-proofs-gate \
+  "tla_proofs" \
+  "tla_syntax_and_model,tla_conformance,tla_sidecar_conformance,tla_policy,cpp_default" \
+  "spec/tla/tools/check-proofs-binding.sh"
+
 # An unmapped path must fail closed: every gate runs rather than silently
 # selecting none (the round-1 finding this map's fallback exists to fix).
 run_case unmapped-path-runs-every-gate \

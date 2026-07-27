@@ -22,7 +22,10 @@
         "spec/tla/proofs/",
         "spec/tla/modules/CidxResult.tla",
         "spec/tla/modules/CidxTypes.tla",
-        "spec/tla/tools/check-proofs.sh"
+        "spec/tla/tools/check-proofs.sh",
+        "spec/tla/tools/check-proofs-binding.sh",
+        "spec/tla/tools/check-proofs-binding-unit-test.sh",
+        "spec/tla/tools/check-proofs-vacuous-comment-regression.sh"
       ]
     },
     {

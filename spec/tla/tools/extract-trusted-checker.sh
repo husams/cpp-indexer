@@ -5,8 +5,8 @@
 # polices the PR." Used by every verification.yml job that needs this for a
 # checker introduced by THIS chain of PRs (HSE-89) and therefore genuinely
 # absent from some earlier base commit: check.sh, check-conformance.sh,
-# check-sidecar-conformance.sh, check-proofs.sh, check-gate-selection.sh, and
-# check-gate-selection-defense-regression.sh.
+# check-sidecar-conformance.sh, check-proofs.sh, check-proofs-binding.sh,
+# check-gate-selection.sh, and check-gate-selection-defense-regression.sh.
 #
 # check-protected-review.sh deliberately does NOT use this helper (see its
 # own extraction step in verification.yml): it is the one gate that enforces

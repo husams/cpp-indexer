@@ -70,6 +70,17 @@
 # check-regression.sh) and covered by check-verification-tamper-regression.sh's
 # checker table, so this is defense-in-depth, not a new protection mechanism.
 /spec/tla/tools/check-proofs-vacuous-comment-regression.sh @husams
+# HSE-89 round-8 (QA + senior-developer round-2 acceptance review):
+# check-proofs.sh's theorem/invariant structural-binding logic was factored
+# out into this sibling file so it is directly unit-testable without a real
+# tlapm run; it carries the identical sensitivity as check-proofs.sh itself
+# (a weakened spec-operator resolution here reintroduces the vacuous-proof
+# bypass that check-proofs-vacuous-comment-regression.sh's fifth seed
+# pins), so it is base-pinned in verification.yml alongside check-proofs.sh
+# and protected here too. check-proofs-binding-unit-test.sh is its
+# tlapm-free self-test, the same role check-regression.sh plays for check.sh.
+/spec/tla/tools/check-proofs-binding.sh @husams
+/spec/tla/tools/check-proofs-binding-unit-test.sh @husams
 # HSE-89 round-6 security fix: extract-trusted-checker.sh is the single
 # shared implementation every base-pinning extraction step in
 # verification.yml now calls (except check-protected-review.sh, which stays

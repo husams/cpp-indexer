@@ -246,6 +246,21 @@ jobs:
             "${{ github.event.pull_request.base.sha }}" \
             spec/tla/tools/check-proofs.sh \
             "$RUNNER_TEMP/check-proofs.sh"
+      - name: Extract the trusted (base-commit) TLAPS proof binding helper
+        if: github.event_name == 'pull_request'
+        # check-proofs.sh sources check-proofs-binding.sh (the theorem/
+        # invariant structural-binding logic, factored out for direct
+        # unit-testability) as a sibling file relative to its own location.
+        # Extract it into the SAME $RUNNER_TEMP directory as check-proofs.sh
+        # above so the base-pinned copy resolves it there instead of falling
+        # through to a missing file; otherwise a PR could weaken the binding
+        # logic in check-proofs-binding.sh alone while leaving check-proofs.sh
+        # itself untouched and unextracted-around.
+        run: |
+          spec/tla/tools/extract-trusted-checker.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            spec/tla/tools/check-proofs-binding.sh \
+            "$RUNNER_TEMP/check-proofs-binding.sh"
       - name: Install TLAPS build prerequisites
         run: |
           apt-get update
