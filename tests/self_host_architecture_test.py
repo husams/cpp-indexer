@@ -44,6 +44,57 @@ DISPATCH_CALLS_KIND = 18  # ... for "dispatch_calls"
 CONSTRUCT_VALUE_KIND = 10  # ... for "construct-value"
 
 
+def _is_construction_style_baseline(qual_name: str) -> bool:
+    """True for a "Record::Record"-shaped `calleeQualName` (the identity
+    `_constructor_style_name` synthesizes for a direct-construction witness
+    -- see scripts/self_host_architecture_report.py), as opposed to a plain
+    member-call baseline entry (e.g. "cidx::SqliteStorageService::
+    index_identity", whose leaf differs from its owning class).
+    """
+    parts = qual_name.split("::")
+    return len(parts) >= 2 and parts[-1] == parts[-2]
+
+
+def _derived_construction_witness_column(entry: dict) -> int | None:
+    """Re-derive, from the REAL committed source file named by a
+    "Record::Record"-shaped baseline `entry`, the column a real
+    `CXXConstructExpr` witness would report for it -- without needing a
+    built self-index (see the hard constraint against running `cidx index`
+    in review rounds).
+
+    For a declared local `Type var(args);`, `emit_construction_form`
+    (src/ast/statement_edge_visitor.cpp) anchors the site at the
+    construct-expression's own begin loc, which for direct-init is Clang's
+    declared-VARIABLE position, never the type spelling (the type is part
+    of the VarDecl's declarator, not the CXXConstructExpr's own source
+    range). This locates that identifier textually: it is the last
+    whitespace-separated token between the baseline's recorded column and
+    the FIRST '(' at/after it.
+
+    Returns None for a `make_unique<Type>(...)`-shaped heap-construction
+    entry (no declared variable at all -- the witness anchors on the
+    template argument's own `Type` spelling there instead, which the
+    baseline already records correctly): detected by a '<'/'>' between the
+    recorded column and that same '('.
+    """
+    if not _is_construction_style_baseline(entry["calleeQualName"]):
+        return None
+    path = ROOT / entry["callerFile"]
+    line_text = path.read_text(encoding="utf-8").splitlines()[entry["line"] - 1]
+    col = entry["col"]
+    paren = line_text.find("(", col - 1)
+    if paren == -1:
+        return None
+    between = line_text[col - 1 : paren]
+    if "<" in between or ">" in between:
+        return None
+    tokens = between.split()
+    if not tokens:
+        return None
+    variable = tokens[-1]
+    return (col - 1) + between.rindex(variable) + 1
+
+
 class _Fixture:
     """A tiny repo directory + manifest/policy + a REAL Storage-built index.db."""
 
@@ -430,6 +481,46 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         fixture.add_call(fixture.sym_render, fixture.sym_std_operator_plus, line=42, col=7)
         report = fixture.run()
         self.assertEqual(report["findings"]["moduleBoundaryViolations"], [])
+
+    def test_call_site_through_a_known_external_symbol_is_not_unwitnessed(self) -> None:
+        # [unwitnessedCallSites false-positive fix, round 2] `sym_std_
+        # operator_plus`'s `decl_path` positively confirms it lives outside
+        # the fixture root (the same shape as a real `std::operator+`
+        # implicit instantiation). Before this fix, `_read_semantic_facts`
+        # excluded it from `symbol_file` for that reason and then counted
+        # the resulting "dst_id not in symbol_file" as `unwitnessed_call_
+        # sites` -- indistinguishable, at that point, from a symbol whose
+        # file row was genuinely deleted out from under it
+        # (`test_deleted_file_row_with_a_dangling_call_edge_fails_closed`
+        # above). That conflation makes `unwitnessedCallSites` an
+        # unconditional gate failure on any C++ project that calls the
+        # standard library (33606/55920 on a real 212-TU self-index of this
+        # repository). A call through a symbol AFFIRMATIVELY known to be
+        # external must be counted separately (`externalCallSites`) and
+        # must never force `completeness.semantic` to `"partial"` or
+        # `status` to `"fail"`.
+        fixture = _Fixture()
+        fixture.add_call(fixture.sym_render, fixture.sym_std_operator_plus, line=42, col=7)
+        report = fixture.run()
+        self.assertEqual(report["index"]["coverage"]["unwitnessedCallSites"], 0)
+        self.assertEqual(report["index"]["coverage"]["externalCallSites"], 1)
+        self.assertEqual(report["completeness"]["semantic"], "complete")
+        self.assertEqual(report["completeness"]["identityIssues"], [])
+        self.assertEqual(report["status"], "pass")
+
+        # Negative control: a call through a symbol with NO decl_path and NO
+        # resolvable file (the real "file row deleted" / genuinely lost
+        # identity case) must still fail closed exactly as before -- this
+        # fix narrows the false-positive class, it does not weaken the
+        # dangling-reference check itself.
+        fixture2 = _Fixture()
+        fixture2.add_call(fixture2.sym_run, fixture2.sym_render, line=7, col=3)
+        fixture2._db._conn.execute("DELETE FROM file WHERE id = ?", (fixture2.file_format,))
+        fixture2._db._conn.commit()
+        report2 = fixture2.run()
+        self.assertEqual(report2["index"]["coverage"]["unwitnessedCallSites"], 1)
+        self.assertEqual(report2["index"]["coverage"]["externalCallSites"], 0)
+        self.assertEqual(report2["status"], "fail")
 
     def test_module_cycle_over_resolved_calls_is_rejected(self) -> None:
         fixture = _Fixture()
@@ -1188,6 +1279,49 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         )
         self.assertEqual(report["status"], "fail")
 
+    def test_mutually_exclusive_source_group_satisfied_by_either_member(self) -> None:
+        # [missingTranslationUnits false-positive fix] the real repository's
+        # src/astgraph/souffle_stub.cpp and src/astgraph/souffle_runner.cpp
+        # are both manifest-classified production sources, but
+        # CMakeLists.txt only ever compiles ONE of them per build
+        # (CIDX_ASTGRAPH_SOUFFLE_ENABLED); the other is never present in
+        # compile_commands.json (and thus never indexed) in ANY
+        # environment. Model that here with a second real .cpp under
+        # src/query/ that the fixture never registers as an indexed
+        # `file` row: with the group declared, a real self-index that only
+        # ever indexed `plan.cpp` (never `plan_alt.cpp`) must not be
+        # reported as missing evidence.
+        fixture = _Fixture()
+        (fixture.root / "src/query/plan_alt.cpp").write_text(
+            "void execute_plan_alt() {}\n", encoding="utf-8"
+        )
+        fixture.manifest["mutuallyExclusiveSourceGroups"] = [
+            {"sources": ["src/query/plan.cpp", "src/query/plan_alt.cpp"]}
+        ]
+        fixture.manifest_path.write_text(json.dumps(fixture.manifest), encoding="utf-8")
+        fixture.add_call(fixture.sym_run, fixture.sym_value)
+        report = fixture.run()
+        self.assertEqual(report["index"]["coverage"]["missingTranslationUnits"], [])
+        self.assertEqual(report["status"], "pass")
+
+        # Negative control: if NEITHER group member is indexed, that is a
+        # genuine coverage gap (e.g. the whole astgraph module skipped) and
+        # must still fail closed exactly as before this fix.
+        fixture2 = _Fixture()
+        (fixture2.root / "src/query/plan_alt.cpp").write_text(
+            "void execute_plan_alt() {}\n", encoding="utf-8"
+        )
+        fixture2.manifest["mutuallyExclusiveSourceGroups"] = [
+            {"sources": ["src/query/plan.cpp", "src/query/plan_alt.cpp"]}
+        ]
+        fixture2.manifest_path.write_text(json.dumps(fixture2.manifest), encoding="utf-8")
+        fixture2.add_call(fixture2.sym_run, fixture2.sym_value)
+        fixture2._db._conn.execute("DELETE FROM file WHERE id = ?", (fixture2.file_plan,))
+        fixture2._db._conn.commit()
+        report2 = fixture2.run()
+        self.assertIn("src/query/plan.cpp", report2["index"]["coverage"]["missingTranslationUnits"])
+        self.assertEqual(report2["status"], "fail")
+
     def test_fatal_diagnostic_fails_closed(self) -> None:
         # [Review blocker 2] a file with a recorded fatal parse diagnostic
         # has unreliable facts; that must be surfaced, not silently passed.
@@ -1776,6 +1910,65 @@ class SelfHostArchitectureReportTests(unittest.TestCase):
         still_flagged = find_legacy_facade_violations(facts_new_site, graph, real_policy)
         self.assertEqual(len(still_flagged), 1)
         self.assertEqual(still_flagged[0]["witness"]["call_site"], {"line": 9999, "col": 1})
+
+    def test_real_policy_construction_baselines_are_keyed_at_the_variable_not_the_type(
+        self,
+    ) -> None:
+        # [P1-3 round-3 fix] A census against a REAL self-index (both QA's
+        # and the senior reviewer's round-2 verdicts) found that EVERY
+        # "Record::Record"-shaped (direct-construction) baseline entry in
+        # this policy file was keyed at the wrong column: the manual/
+        # textual-audit fallback (docs/self-host-architecture.md) grepped
+        # for the TYPE name (`Storage db(...)` -> the "S" of "Storage"),
+        # but `emit_construction_form`'s witness
+        # (`src/ast/statement_edge_visitor.cpp`) anchors the site at the
+        # CXXConstructExpr's own begin loc, which for a declared local
+        # `Type var(args);` is Clang's declarator-name position (the "d" of
+        # "db"), never the type spelling -- Clang's direct-init
+        # CXXConstructExpr source range does not include the type. This was
+        # never caught by
+        # `test_real_policy_baseline_suppresses_the_fact_providers_index_
+        # identity_reads` above because that test only ever exercised the
+        # *member-call* baseline entries (`index_identity()`), never a
+        # construction one.
+        #
+        # This test re-derives, straight from the REAL committed source
+        # files (no self-index build required -- see the hard constraint
+        # against running `cidx index` in this environment), the column a
+        # real CXXConstructExpr witness would report for every
+        # "Record::Record" baseline entry, and asserts the POLICY FILE'S
+        # OWN recorded `col` already equals it. `make_unique<Type>(...)`
+        # heap-construction entries have no declared variable at all (the
+        # witness anchors on the template argument's own Type spelling
+        # instead, which the manual audit already recorded correctly) and
+        # are excluded from this check by the same "no bare identifier
+        # between the recorded column and the constructor's own '('" rule
+        # `_real_construction_baseline_entries` below uses.
+        #
+        # Reverting the round-2 fix (any of the 35 corrected `col` values)
+        # makes this test fail with a message naming the exact
+        # file:line/wrong-vs-right column, proving it is not shape-only.
+        real_policy = json.loads((ROOT / "architecture/cidx-self-host-policy.json").read_text(encoding="utf-8"))
+        checked = 0
+        for facade in real_policy["legacyFacades"]:
+            for entry in facade.get("baseline", []):
+                derived = _derived_construction_witness_column(entry)
+                if derived is None:
+                    continue  # heap/make_unique form: no declared variable to check
+                self.assertEqual(
+                    entry["col"],
+                    derived,
+                    f"{entry['callerFile']}:{entry['line']}: baseline col "
+                    f"{entry['col']} does not match the real CXXConstructExpr "
+                    f"witness column {derived} for {entry['calleeQualName']!r} "
+                    "-- a direct-construction baseline must be keyed at the "
+                    "declared VARIABLE, not the type name",
+                )
+                checked += 1
+        # Sanity: this must actually have exercised the bulk of the
+        # direct-declaration baseline entries, not silently skipped them
+        # all (e.g. because every entry got misclassified as heap-form).
+        self.assertGreaterEqual(checked, 30)
 
     def test_storage_facade_exempts_a_configured_read_port_module_end_to_end(self) -> None:
         # Fixture-level companion to the two real-policy assertions above:

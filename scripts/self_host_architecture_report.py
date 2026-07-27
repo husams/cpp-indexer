@@ -250,6 +250,14 @@ class SemanticFacts:
     calls: list[tuple[int, int, int, int, int, str]]
     truncated: bool
     unwitnessed_call_sites: int = 0
+    # [unwitnessedCallSites false-positive fix] call sites whose caller or
+    # callee is a symbol AFFIRMATIVELY known to live outside the repository
+    # (a real standard-library/system symbol, e.g. `std::operator+`) -- see
+    # `_read_semantic_facts`'s `external_symbols`. Counted separately from
+    # `unwitnessed_call_sites` because it is expected, harmless evidence
+    # (any project that calls the standard library has some), not identity
+    # loss; surfaced for transparency, never gates the report.
+    external_call_sites: int = 0
     partial: bool = False
     unknown: bool = False
 
@@ -584,6 +592,15 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
     symbol_name: dict[int, str] = {}
     symbol_file: dict[int, str] = {}
     symbol_line: dict[int, int] = {}
+    # [unwitnessedCallSites false-positive fix] symbols AFFIRMATIVELY known
+    # to resolve outside the repository root -- as opposed to a symbol
+    # merely ABSENT from `symbol_file` for an unknown reason (e.g. a
+    # dangling `file_id` left by an ON DELETE SET NULL cascade). A call
+    # site through one of these is expected, harmless evidence (any project
+    # that calls the standard library has some) and must not inflate
+    # `unwitnessed_call_sites`, which exists to fail closed on genuine
+    # IDENTITY LOSS -- see the `unwitnessed`/`external` split below.
+    external_symbols: set[int] = set()
     root_resolved = root.resolve()
     for sym_id, name, file_path, line, decl_path in symbol_rows:
         symbol_name[sym_id] = name
@@ -599,6 +616,7 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
         # either `find_module_boundary_violations` or
         # `find_legacy_facade_violations`.
         if decl_path is not None and _external_decl_path(decl_path, root_resolved):
+            external_symbols.add(sym_id)
             continue
         if file_path is not None:
             # QueryPlan resolves "file" to an ABSOLUTE filesystem path
@@ -610,7 +628,12 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
             try:
                 symbol_file[sym_id] = Path(file_path).resolve().relative_to(root_resolved).as_posix()
             except ValueError:
-                pass
+                # A `file_path` that positively resolves to somewhere
+                # outside `root` (e.g. a real system header path recorded
+                # directly, not via `decl_path`) is the same "known
+                # external" case as the `decl_path` branch above, not an
+                # unresolved/lost identity.
+                external_symbols.add(sym_id)
 
     # The "site" view exposes the owning edge's own stable src_id/dst_id
     # directly (a correlated subquery against edge.id -- see
@@ -645,10 +668,28 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
     # but a CALL SITE through it becomes silently unwitnessable either way.
     # Count that directly here so the report can fail closed on it instead
     # of the caller/callee simply vanishing from every finding.
-    unwitnessed = sum(
-        1 for _edge_id, src_id, dst_id, _line, _col, _relation in calls
-        if src_id not in symbol_file or dst_id not in symbol_file
-    )
+    #
+    # [unwitnessedCallSites false-positive fix] a call site through a
+    # symbol in `external_symbols` is excluded here: it is NOT
+    # indistinguishable from identity loss -- `decl_path`/`file_path`
+    # POSITIVELY confirmed it lives outside the repository (a real
+    # standard-library/system symbol), so failing closed on it would
+    # permanently fail every self-index of a codebase that calls the
+    # standard library. Counted instead in `external_call_sites`, which
+    # never gates the report.
+    unwitnessed = 0
+    external = 0
+    for _edge_id, src_id, dst_id, _line, _col, _relation in calls:
+        src_missing = src_id not in symbol_file
+        dst_missing = dst_id not in symbol_file
+        if not src_missing and not dst_missing:
+            continue
+        src_external = src_missing and src_id in external_symbols
+        dst_external = dst_missing and dst_id in external_symbols
+        if (src_missing and not src_external) or (dst_missing and not dst_external):
+            unwitnessed += 1
+        else:
+            external += 1
     return SemanticFacts(
         symbol_name,
         symbol_file,
@@ -656,6 +697,7 @@ def _read_semantic_facts(db: Storage, root: Path) -> SemanticFacts:
         calls,
         truncated,
         unwitnessed_call_sites=unwitnessed,
+        external_call_sites=external,
         partial=partial,
         unknown=unknown,
     )
@@ -1578,6 +1620,26 @@ def check_index_coverage(
         )
     }
     missing_tus = sorted(expected_tus - indexed_paths)
+    # [missingTranslationUnits false-positive fix] `mutuallyExclusiveSourceGroups`
+    # (architecture/cidx-module-manifest.json) names sets of manifest-
+    # classified production sources that CMake only ever compiles ONE
+    # member of per build (e.g. `souffle_stub.cpp` XOR `souffle_runner.cpp`,
+    # gated on whether Souffle was found -- CMakeLists.txt). Both members
+    # physically exist and both match the module's path pattern, so a naive
+    # "every expected .cpp must be indexed" check always reports exactly
+    # one of them missing, in EVERY build/environment, forever -- never a
+    # real coverage gap. A group is satisfied once at least one member is
+    # present in the index; only report a group as missing evidence if
+    # NONE of its members made it in (a genuine gap, e.g. the whole
+    # astgraph module was skipped).
+    for group in manifest.get("mutuallyExclusiveSourceGroups", []):
+        members = [member for member in group.get("sources", []) if member in expected_tus]
+        if not members:
+            continue
+        if any(member in indexed_paths for member in members):
+            missing_tus = [tu for tu in missing_tus if tu not in members]
+        # else: none of the group's members are indexed -- leave every
+        # member in `missing_tus` so the real gap stays visible.
     if missing_tus:
         preview = missing_tus[:10]
         ellipsis = ", ..." if len(missing_tus) > 10 else ""
@@ -1640,6 +1702,10 @@ def check_index_coverage(
         "danglingSymbolFileReferences": dangling,
         "danglingFileDirectoryReferences": dangling_directory,
         "unwitnessedCallSites": facts.unwitnessed_call_sites,
+        # Informational only -- never gates `status` (see `SemanticFacts.
+        # external_call_sites`'s own docstring for why these are expected,
+        # harmless evidence rather than identity loss).
+        "externalCallSites": facts.external_call_sites,
         "pendingFiles": pending,
         "filesWithFatalDiagnostics": failed,
         "enumerationTruncated": facts.truncated,
