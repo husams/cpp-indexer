@@ -227,7 +227,31 @@ if ! grep -q "SharedResultTypeInvariant" <<<"$weak_output" \
 fi
 echo "TLA_PROOF_BINDING_REGRESSION_STATUS=PASS check=weakened-antecedent-decoy-rejected"
 
-# --- Test 4: the real, unmodified proof module must still PASS. ---
+# --- Test 4: a real proof module with an added top-level ASSUME FALSE must be
+# rejected by the end-to-end checker after TLAPS has accepted the vacuous
+# obligations. This is load-bearing: a regression that only checks theorem
+# shape, or never invokes check_proof_assumptions(), would let this exact seed
+# exit successfully. ---
+
+ASSUME_FALSE_SEED="$WORK/assume-false-seed.tla"
+sed '/^ASSUME QueryIdWellFormed/i ASSUME FALSE' \
+  "$REPO_ROOT/spec/tla/proofs/CidxResultProof.tla" >"$ASSUME_FALSE_SEED"
+
+result="$(run_check "$ASSUME_FALSE_SEED")"
+assume_false_status="$(sed -n '1p' <<<"$result")"
+assume_false_output="$(sed -n '2,$p' <<<"$result")"
+
+if [[ "$assume_false_status" -eq 0 ]]; then
+  printf '%s\n' "$assume_false_output" >&2
+  die "assume-false-proof-passed-end-to-end"
+fi
+if ! grep -q "reason=vacuous-proof-assumption:FALSE" <<<"$assume_false_output"; then
+  printf '%s\n' "$assume_false_output" >&2
+  die "assume-false-proof-rejected-for-unexpected-reason"
+fi
+echo "TLA_PROOF_BINDING_REGRESSION_STATUS=PASS check=assume-false-proof-rejected-end-to-end"
+
+# --- Test 5: the real, unmodified proof module must still PASS. ---
 
 result="$(run_check "$REPO_ROOT/spec/tla/proofs/CidxResultProof.tla")"
 real_status="$(sed -n '1p' <<<"$result")"
@@ -243,7 +267,7 @@ if ! grep -q "^TLA_PROOF_STATUS=PASS module=CidxResultProof" <<<"$real_output"; 
 fi
 echo "TLA_PROOF_BINDING_REGRESSION_STATUS=PASS check=real-proof-module-still-passes"
 
-# --- Test 5: minted module-local pseudo-Spec decoy (QA + senior-developer
+# --- Test 6: minted module-local pseudo-Spec decoy (QA + senior-developer
 # round-2 acceptance review repro), must be REJECTED. `WeakSpec` is defined
 # ONLY inside this untrusted proof module, its body starts with "Init" (so
 # the round-3 substring-prefix resolution accepted it), but it is a bare

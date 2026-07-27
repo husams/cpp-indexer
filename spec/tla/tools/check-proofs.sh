@@ -142,7 +142,9 @@ cp "$PROOF_DIR"/*.tla "$WORK"/
 # are not on manifest.json's declared per-module trustedAssumptions
 # allowlist, or whose assumption set is syntactically vacuous/contradictory
 # (a literal FALSE conjunct, or two assumptions that are negations of each
-# other), before this function ever looks at theorem shape.
+# other), before this function ever looks at theorem shape. The binding is an
+# exact equality of normalized proof and policy assumption sets: extra,
+# changed, missing, or duplicate entries fail closed.
 # shellcheck source=check-proofs-binding.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-proofs-binding.sh"
 
@@ -186,6 +188,14 @@ run_proof() {
       ;;
     ASSUMPTION-NOT-TRUSTED:*)
       echo "TLA_PROOF_STATUS=FAIL module=$module reason=untrusted-proof-assumption:${binding#ASSUMPTION-NOT-TRUSTED:}" >&2
+      exit 30
+      ;;
+    ASSUMPTION-POLICY-MISMATCH:*)
+      echo "TLA_PROOF_STATUS=FAIL module=$module reason=proof-assumption-policy-mismatch:${binding#ASSUMPTION-POLICY-MISMATCH:}" >&2
+      exit 30
+      ;;
+    ASSUMPTION-POLICY-DUPLICATE:*)
+      echo "TLA_PROOF_STATUS=FAIL module=$module reason=duplicate-proof-assumption-policy-entry:${binding#ASSUMPTION-POLICY-DUPLICATE:}" >&2
       exit 30
       ;;
     THEOREM-NOT-FOUND:*)

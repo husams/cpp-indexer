@@ -83,11 +83,12 @@ as `ASSUME FALSE` -- anything follows from a contradiction, and TLAPS reports
 checks over the (untrusted, `proofs/`-tree) module's own `ASSUME`s, run
 before the theorem-shape check:
 
-1. **Allowlist.** Every `ASSUME` found in the module must match, verbatim
-   once whitespace is collapsed, an entry in `manifest.json`'s
+1. **Allowlist.** The normalized set of every `ASSUME` found in the module
+   must equal the normalized set in `manifest.json`'s
    `proofs[].trustedAssumptions` for that module -- itself a
-   CODEOWNER-protected path, so a new assumption needs the same review as
-   the proof module itself.
+   CODEOWNER-protected path, so a new, changed, missing, or extra assumption
+   needs the same review as the proof module itself. Normalization collapses
+   insignificant whitespace only; it does not rewrite TLA+ expressions.
 2. **Vacuousness.** Independent of the allowlist: the assumption set is
    rejected if any top-level conjunct (split on `/\ ` at parenthesis depth
    zero) of any assumption is the literal boolean `FALSE`, or if two
@@ -114,6 +115,11 @@ first-order satisfiability -- documented here rather than left implicit:
   Spec-provenance restriction to `modules/conformance/protected` described
   above, and are reviewed at the same protection level as everything else in
   `modules/`.
+
+The checked-in end-to-end regression seeds the real `CidxResultProof.tla` with
+an added top-level `ASSUME FALSE`, runs the real `check-proofs.sh` path, and
+requires the gate to reject it as a vacuous proof assumption after TLAPS has
+reported its obligations proved.
 
 ## Conformance recorder: tautological sidecar branches (round-3 acceptance
 review)

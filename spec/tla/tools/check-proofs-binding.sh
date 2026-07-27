@@ -76,7 +76,17 @@ if entry is None:
 theorem_name = entry["theorem"]
 invariants = entry["provesInvariants"]
 extends_entry = entry.get("extends")
-trusted_assumptions = set(entry.get("trustedAssumptions", []))
+
+
+def normalize_assumption(value):
+    # Insignificant TLA+ whitespace must not create a second spelling of a
+    # trusted input. This does not rewrite the expression itself.
+    return " ".join(value.split())
+
+
+trusted_assumptions = [
+    normalize_assumption(value) for value in entry.get("trustedAssumptions", [])
+]
 
 
 def strip_comments(text):
@@ -98,13 +108,13 @@ text = strip_comments(open(module_file, encoding="utf-8").read())
 # only the shape of what it claims to prove. Two independent checks, neither
 # keyed to the literal text "ASSUME FALSE":
 #
-#   1. allowlist -- every ASSUME found in this (untrusted, proofs/-tree)
-#      module must match, verbatim once whitespace is collapsed, one of
-#      manifest.json's proofs[].trustedAssumptions entries for this module.
+#   1. policy binding -- the normalized set of every ASSUME found in this
+#      (untrusted, proofs/-tree) module must equal the normalized
+#      manifest.json proofs[].trustedAssumptions set for this module.
 #      manifest.json is itself a protected, CODEOWNER-reviewed path, so
-#      adding a new assumption requires the same review as adding one to
-#      the proof module itself. Any assumption absent from that list is
-#      rejected regardless of whether it happens to be sound.
+#      adding, removing, or changing an assumption requires the same review
+#      as changing the proof module itself. A policy-only entry is rejected
+#      too, rather than silently becoming an unobserved premise.
 #   2. vacuousness -- independent of the allowlist (defense in depth against
 #      the allowlist itself declaring something unsound): the assumption
 #      set is rejected if any top-level conjunct of any assumption is the
@@ -194,6 +204,13 @@ def negated_form(conjunct):
 def check_proof_assumptions(module_text, allowlist):
     assumptions = extract_assumptions(module_text)
 
+    normalized_assumptions = [assumption["full"] for assumption in assumptions]
+    if len(normalized_assumptions) != len(set(normalized_assumptions)):
+        return "ASSUMPTION-POLICY-DUPLICATE:module"
+
+    if len(allowlist) != len(set(allowlist)):
+        return "ASSUMPTION-POLICY-DUPLICATE:manifest"
+
     all_conjuncts = []
     for assumption in assumptions:
         all_conjuncts.extend(top_level_conjuncts(assumption["expr"]))
@@ -207,9 +224,17 @@ def check_proof_assumptions(module_text, allowlist):
         if negated is not None and negated in seen:
             return f"ASSUMPTIONS-CONTRADICT:{negated}"
 
-    for assumption in assumptions:
-        if assumption["full"] not in allowlist:
-            return f"ASSUMPTION-NOT-TRUSTED:{assumption['full']}"
+    found = set(normalized_assumptions)
+    trusted = set(allowlist)
+    extra = sorted(found - trusted)
+    missing = sorted(trusted - found)
+    if extra or missing:
+        extra_text = ",".join(extra) if extra else "-"
+        missing_text = ",".join(missing) if missing else "-"
+        return (
+            "ASSUMPTION-POLICY-MISMATCH:"
+            f"extra={extra_text};missing={missing_text}"
+        )
 
     return None
 

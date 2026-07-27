@@ -310,22 +310,36 @@ THEOREM T == Spec => []Inv
 TLA
 write_manifest "modules/Foo.tla"
 result="$(theorem_invariant_binding "$WORK/manifest.json" FooProof "$WORK/proofs/FooProof.tla" "$WORK")"
-[[ "$result" == "ASSUMPTION-NOT-TRUSTED:ASSUME Unreviewed == x \in {0, 1, 2}" ]] \
+[[ "$result" == "ASSUMPTION-POLICY-MISMATCH:extra=ASSUME Unreviewed == x \in {0, 1, 2};missing=-" ]] \
   || die "untrusted-non-vacuous-assumption-accepted:$result"
 echo "TLA_PROOF_BINDING_UNIT_STATUS=PASS check=untrusted-non-vacuous-assumption-rejected"
 
-# --- Case 11: the identical assumption from case 10, but declared on the
+# --- Case 11: the same assumption from case 10, with insignificant proof-file
+# whitespace differences, but declared on the
 # manifest's trustedAssumptions allowlist, is accepted -- proving the fix
 # does not regress a legitimately reviewed, satisfiable well-formedness
 # assumption (exactly the shape of the three real ASSUMEs in
 # proofs/CidxResultProof.tla). ---
+sed -i.bak 's/ASSUME Unreviewed == x \\in {0, 1, 2}/ASSUME   Unreviewed   ==   x  \\in {0, 1, 2}/' \
+  "$WORK/proofs/FooProof.tla"
+rm -f "$WORK/proofs/FooProof.tla.bak"
 write_manifest "modules/Foo.tla" '["ASSUME Unreviewed == x \\in {0, 1, 2}"]'
 result="$(theorem_invariant_binding "$WORK/manifest.json" FooProof "$WORK/proofs/FooProof.tla" "$WORK")"
 [[ "$result" == "OK:T:Inv" ]] \
   || die "allowlisted-non-vacuous-assumption-rejected:$result"
 echo "TLA_PROOF_BINDING_UNIT_STATUS=PASS check=allowlisted-non-vacuous-assumption-accepted"
 
-# --- Case 12: `FALSE` wrapped in a single layer of parens (`ASSUME (FALSE)`)
+# --- Case 12: a trusted-policy entry absent from the proof module is also
+# rejected. Binding is exact set equality, not merely "every observed
+# assumption is allowed"; otherwise policy and proof could silently drift. ---
+write_manifest "modules/Foo.tla" \
+  '["ASSUME Unreviewed == x \\in {0, 1, 2}", "ASSUME PolicyOnly == x = 0"]'
+result="$(theorem_invariant_binding "$WORK/manifest.json" FooProof "$WORK/proofs/FooProof.tla" "$WORK")"
+[[ "$result" == "ASSUMPTION-POLICY-MISMATCH:extra=-;missing=ASSUME PolicyOnly == x = 0" ]] \
+  || die "extra-trusted-policy-assumption-accepted:$result"
+echo "TLA_PROOF_BINDING_UNIT_STATUS=PASS check=extra-trusted-policy-assumption-rejected"
+
+# --- Case 13: `FALSE` wrapped in a single layer of parens (`ASSUME (FALSE)`)
 # must be caught exactly like the bare literal -- proves
 # top_level_conjuncts()'s one-layer paren unwrap actually fires, rather than
 # leaving a parenthesized conjunct as opaque text no check ever inspects. ---
@@ -343,7 +357,7 @@ result="$(theorem_invariant_binding "$WORK/manifest.json" FooProof "$WORK/proofs
   || die "parenthesized-false-accepted:$result"
 echo "TLA_PROOF_BINDING_UNIT_STATUS=PASS check=parenthesized-false-rejected"
 
-# --- Case 13: negation without any wrapping parens (`~Flag`, not `~(Flag)`)
+# --- Case 14: negation without any wrapping parens (`~Flag`, not `~(Flag)`)
 # must still be recognized as the negation of a plain conjunct with the same
 # text -- proves negated_form()'s bare-tilde branch (not just its `~(...)`
 # branch, already exercised by case 9) is load-bearing. A second, unrelated

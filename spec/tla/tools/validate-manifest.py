@@ -131,15 +131,24 @@ def validate_manifest(manifest: object, manifest_path: pathlib.Path) -> None:
             f"proofs[{index}].provesInvariants",
         )
         # HSE-89 acceptance-review fix: check-proofs-binding.sh rejects any
-        # ASSUME in the proof module that is not listed here, verbatim, so
+        # ASSUME in the proof module that is not listed here, after normalized
+        # whitespace comparison, so
         # this allowlist must be an explicit, reviewable part of the
         # manifest -- present (even if empty, for a proof module with no
         # free constants) rather than silently defaulted.
-        require_string_list(
+        trusted_assumptions = require_string_list(
             required(proof, "trustedAssumptions", f"proofs[{index}]"),
             f"proofs[{index}].trustedAssumptions",
             allow_empty=True,
         )
+        normalized_assumptions = [
+            " ".join(value.split()) for value in trusted_assumptions
+        ]
+        if len(normalized_assumptions) != len(set(normalized_assumptions)):
+            fail(
+                f"proofs[{index}].trustedAssumptions-"
+                "must-not-have-normalized-duplicates"
+            )
 
     models = required(root, "models", "manifest")
     if not isinstance(models, list) or not models:
