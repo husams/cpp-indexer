@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
-#include <limits>
 #include <map>
 #include <set>
 #include <string_view>
@@ -950,21 +949,28 @@ query::Query root_seed(const graph::Sym &root) {
               query::eq("identity_key", root.identity_key)}));
 }
 
-// `node_offset` is the continuation offset of the page being served: the
-// underlying query must be re-run with a limit that covers every page up to
-// and including this one (`node_offset + node_budget + 1`), not just this
-// page's own budget (HSE-92 round 2) -- otherwise the executor itself
-// truncates the candidate universe to a single page's worth of rows, and
-// paging past that capped prefix can only ever repeat or shrink, never
-// reveal a genuinely later candidate. The final delivery order is decided
-// downstream from a deterministic sort over the full filtered candidate set
-// (see select_node_page()), so this limit only needs to guarantee enough
-// rows are available, not to itself produce delivery order.
+// `candidate_limit` bounds the underlying query for the WHOLE continuation
+// chain, not just the page currently being served (HSE-92 round 2) --
+// otherwise the executor itself truncates the candidate universe to a single
+// page's worth of rows, and paging past that capped prefix can only ever
+// repeat or shrink, never reveal a genuinely later candidate. It must also
+// stay IDENTICAL across every page of the same chain (HSE-92 review P1-1):
+// select_node_page() re-derives and re-sorts the full candidate set on every
+// page, so if this limit grew page over page (as it used to, keyed off the
+// continuation offset) a newly-visible row could sort before an already-
+// delivered one and permanently displace a not-yet-delivered candidate --
+// reproduced as 4 of 6 nodes ever delivered. Using one fixed,
+// generously-sized cap for the whole chain (see kCandidateUniverseCap at the
+// call site) keeps the candidate set -- and therefore the positional
+// node_offset/skip_offset() below -- stable and correct. The final delivery
+// order is decided downstream from a deterministic sort over the full
+// filtered candidate set (see select_node_page()), so this limit only needs
+// to guarantee enough rows are available, not to itself produce delivery
+// order.
 query::Query make_query_plan(const graph::Sym &root,
-                             const GraphViewRequest &request, int node_budget,
-                             int node_offset) {
-  const int64_t plan_limit =
-      static_cast<int64_t>(node_offset) + static_cast<int64_t>(node_budget) + 1;
+                             const GraphViewRequest &request,
+                             int candidate_limit) {
+  const int64_t plan_limit = static_cast<int64_t>(candidate_limit) + 1;
   query::Query seed = root_seed(root);
   if (request.depth <= 0) {
     return seed | query::limit(plan_limit);
@@ -1397,6 +1403,45 @@ Value identity_value(const IndexIdentity &identity,
 
 // ---- HSE-92 live-explorer filters and continuation -------------------------
 
+// The namespace/scope portion of a symbol's display name, ignoring any "::"
+// that appears inside a parenthesized parameter list or an angle-bracketed
+// template-argument list. `Sym::name` is COALESCE(qual_name, spelling), and
+// for functions/methods qual_name carries the FULL leaf signature (e.g.
+// "ns::Class::method(const std::string &) const"), so a plain
+// `rfind("::")` lands inside the last parameter type instead of at the real
+// scope boundary (HSE-92 review P1-2: `namespace=ns` never matched a real
+// function). Tracks nesting depth across both bracket kinds so a "::" only
+// counts as a scope separator when it sits outside every bracket -- this
+// also correctly skips over template-argument scopes for non-leaf portions,
+// e.g. "std::vector<cidx::astgraph::CallFact>".
+std::string top_level_namespace_of(const std::string &name) {
+  int depth = 0;
+  std::optional<std::size_t> last_separator;
+  std::size_t i = 0;
+  while (i + 1 < name.size()) {
+    const char c = name[i];
+    if (c == '(' || c == '<') {
+      ++depth;
+      ++i;
+      continue;
+    }
+    if (c == ')' || c == '>') {
+      if (depth > 0) {
+        --depth;
+      }
+      ++i;
+      continue;
+    }
+    if (depth == 0 && c == ':' && name[i + 1] == ':') {
+      last_separator = i;
+      i += 2;
+      continue;
+    }
+    ++i;
+  }
+  return last_separator ? name.substr(0, *last_separator) : std::string();
+}
+
 // Node-level filters that apply uniformly to the symbol/CXQ/QueryPlan/File
 // path. Entity and type views only honor node_kinds (see append_typed_facts);
 // file/component/repository/status facts do not have an equivalent meaning
@@ -1420,10 +1465,7 @@ bool passes_node_filters(Storage &db, const graph::Sym &sym,
     }
   }
   if (request.namespaces && !request.namespaces->empty()) {
-    const std::size_t separator = sym.name.rfind("::");
-    const std::string symbol_namespace = separator == std::string::npos
-                                             ? std::string()
-                                             : sym.name.substr(0, separator);
+    const std::string symbol_namespace = top_level_namespace_of(sym.name);
     if (!matches_any(*request.namespaces, symbol_namespace)) {
       return false;
     }
@@ -1482,28 +1524,46 @@ bool passes_applicability_filter(const GraphViewRequest &request,
   return true;
 }
 
+// Every candidate list this page-selection logic pages over (the sorted
+// symbol-node candidate set in select_node_page(), and each scanned node's
+// adjacency in select_symbol_edges()) is re-fetched from storage on every
+// page of a continuation chain and must come back byte-for-byte identical
+// each time for a positional node_offset/edge_offset to mean anything (HSE-92
+// review P1-1/P2-2). A limit that grows with the offset (as this one used
+// to) breaks that: each page then queries a DIFFERENT, larger prefix, and
+// since delivery order is a separate deterministic sort (by portable id) over
+// whatever came back, a row that only becomes visible on a later page can
+// sort *before* the current offset and permanently displace a candidate that
+// was never actually delivered -- reproduced as 4 of 6 nodes ever delivered
+// for a reverse-sorted USR fixture. Using one fixed, generous cap for the
+// entire chain keeps every re-fetch identical, so the position of anything
+// already delivered never moves.
+constexpr int kCandidateUniverseCap = 200000;
+
 // Continuation tokens page a strictly-repeated request over its own
 // deterministically-ordered node/edge candidates. The token embeds the
 // query identity of the request that produced it so a token from one
 // normalized query can never be replayed against a different one -- paging
 // is deterministic and request-scoped, never a hidden server-side cursor.
+// The token carries only the two page cursors (node_offset, edge_offset);
+// the candidate-universe cap itself is the fixed kCandidateUniverseCap
+// constant, never client-supplied (HSE-92 review P2-1) -- a forged
+// candidate_limit used to be able to turn a bounded slice into a
+// whole-graph traversal.
 std::string encode_continuation(std::string_view query_identity,
-                                int node_offset, int edge_offset,
-                                int candidate_limit) {
-  return "cont:v2:" + length_field(query_identity) +
-         std::to_string(node_offset) + "," + std::to_string(edge_offset) + "," +
-         std::to_string(candidate_limit);
+                                int node_offset, int edge_offset) {
+  return "cont:v3:" + length_field(query_identity) +
+         std::to_string(node_offset) + "," + std::to_string(edge_offset);
 }
 
 struct ContinuationToken {
   std::string query_identity;
   int node_offset = 0;
   int edge_offset = 0;
-  int candidate_limit = 0;
 };
 
 std::optional<ContinuationToken> decode_continuation(std::string_view token) {
-  constexpr std::string_view prefix = "cont:v2:";
+  constexpr std::string_view prefix = "cont:v3:";
   if (!token.starts_with(prefix)) {
     return std::nullopt;
   }
@@ -1513,47 +1573,39 @@ std::optional<ContinuationToken> decode_continuation(std::string_view token) {
     return std::nullopt;
   }
   const std::size_t comma = token.find(',', offset);
-  const std::size_t second_comma = comma == std::string_view::npos
-                                       ? std::string_view::npos
-                                       : token.find(',', comma + 1);
-  if (comma == std::string_view::npos ||
-      second_comma == std::string_view::npos) {
+  if (comma == std::string_view::npos) {
     return std::nullopt;
   }
   int node_offset_value = 0;
   int edge_offset_value = 0;
-  int candidate_limit_value = 0;
   const auto node_result = std::from_chars(
       token.data() + offset, token.data() + comma, node_offset_value);
   const auto edge_result = std::from_chars(
-      token.data() + comma + 1, token.data() + second_comma, edge_offset_value);
-  const auto candidate_result =
-      std::from_chars(token.data() + second_comma + 1,
-                      token.data() + token.size(), candidate_limit_value);
+      token.data() + comma + 1, token.data() + token.size(), edge_offset_value);
+  // HSE-92 review P2-1: continuation offsets are client-supplied plaintext
+  // with no MAC, so a forged token must still be rejected rather than
+  // trusted. Bound both offsets to the same fixed candidate-universe cap
+  // used to build that universe -- a legitimate offset can never exceed it,
+  // and rejecting anything larger keeps the arithmetic that consumes these
+  // values (e.g. select_symbol_edges()) well inside `int` range, so it can
+  // never overflow into a negative, effectively-unlimited SQL LIMIT.
   if (node_result.ec != std::errc{} ||
       node_result.ptr != token.data() + comma ||
       edge_result.ec != std::errc{} ||
-      edge_result.ptr != token.data() + second_comma ||
-      candidate_result.ec != std::errc{} ||
-      candidate_result.ptr != token.data() + token.size() ||
-      node_offset_value < 0 || edge_offset_value < 0 ||
-      candidate_limit_value <= 0) {
+      edge_result.ptr != token.data() + token.size() || node_offset_value < 0 ||
+      node_offset_value > kCandidateUniverseCap || edge_offset_value < 0 ||
+      edge_offset_value > kCandidateUniverseCap) {
     return std::nullopt;
   }
   return ContinuationToken{.query_identity = std::string(*identity),
                            .node_offset = node_offset_value,
-                           .edge_offset = edge_offset_value,
-                           .candidate_limit = candidate_limit_value};
+                           .edge_offset = edge_offset_value};
 }
 
 ContinuationToken continuation_state(const GraphViewRequest &request,
-                                     std::string_view query_identity,
-                                     int initial_candidate_limit) {
+                                     std::string_view query_identity) {
   if (!request.continuation) {
-    return ContinuationToken{
-        .query_identity = std::string(query_identity),
-        .candidate_limit = initial_candidate_limit,
-    };
+    return ContinuationToken{.query_identity = std::string(query_identity)};
   }
   const auto token = decode_continuation(*request.continuation);
   if (!token || token->query_identity != query_identity) {
@@ -1576,8 +1628,7 @@ void apply_continuation_token(Value &continuation,
                               bool more_edges_available,
                               bool byte_trim_dropped_content, int node_offset,
                               int edge_offset, int delivered_node_count,
-                              int delivered_edge_count, int candidate_limit,
-                              int candidate_step) {
+                              int delivered_edge_count) {
   // Deterministic progressive paging: a token is only emitted when this
   // exact normalized query still has more nodes/edges beyond what was just
   // delivered. Bounded witness paths never page.
@@ -1594,15 +1645,8 @@ void apply_continuation_token(Value &continuation,
     } else {
       next_edge_offset = edge_offset + delivered_edge_count;
     }
-    const int next_candidate_limit =
-        more_nodes_available
-            ? std::min(std::numeric_limits<int>::max() - candidate_step,
-                       candidate_limit) +
-                  candidate_step
-            : candidate_limit;
-    token =
-        Value::of(encode_continuation(query_identity, next_node_offset,
-                                      next_edge_offset, next_candidate_limit));
+    token = Value::of(encode_continuation(query_identity, next_node_offset,
+                                          next_edge_offset));
   }
   const auto set_token = [&](const Value &value) {
     bool set = false;
@@ -1628,16 +1672,33 @@ void apply_continuation_token(Value &continuation,
 // count). Split out of build_graph_view() to keep that function within its
 // complexity budget.
 //
-// `nodes_to_scan` is every PRIMARY node delivered through this page
-// (earlier pages' nodes plus this page's own), not just this page's own
-// slice: a cross-page edge whose SOURCE node's own page has already passed
-// is only ever discoverable through THAT source's adjacency -- scanning
-// only this page's own nodes would mean any edge deferred for lack of
-// bridging-node room on an earlier page is never reconsidered again once
-// its source's page has gone by (HSE-92 round 3). Re-scanning already-
-// delivered nodes is redundant work but never loses topology; the caller
-// (build_graph_view) treats a bridging endpoint already delivered on an
-// earlier page as already known to the client (see `known_ids`), so an
+// Each scanned node's adjacency is re-read with the SAME fixed
+// kCandidateUniverseCap limit on every page, not a limit that grows with
+// edge_offset -- otherwise the underlying `graph.edges()` prefix is a
+// different, larger set of rows on every page, and re-sorting it by
+// portable edge id can shift a not-yet-delivered edge to a position before
+// edge_offset, permanently skipping it (HSE-92 review P2-2, the same
+// mechanics as P1-1). A fixed, shared cap keeps this adjacency read
+// byte-for-byte identical across the chain, so skip_offset() below is a
+// well-defined "resume where the last page ended". This does depend on the
+// underlying SQL order being a genuine total order (storage_query.cpp's
+// `graph_edges` orders by `ecount DESC, e.kind, e.id` for exactly that
+// reason); a non-total order would let SQLite return the same nominal
+// prefix as a different SET of rows across otherwise-identical queries.
+//
+// `nodes_to_scan` is the FULL (unpaginated, filter-applied) candidate node
+// set, not just the nodes delivered through this page: a cross-page edge
+// whose SOURCE node's own page has already passed is only ever discoverable
+// through THAT source's adjacency -- scanning only nodes delivered so far
+// would mean any edge deferred for lack of bridging-node room on an earlier
+// page is never reconsidered again once its source's page has gone by
+// (HSE-92 round 3). Scanning the full set (rather than a page-progress-sized
+// prefix of it) also keeps THIS function's own output stable across the
+// chain (HSE-92 review P2-2) -- see the call site for why a growing scan
+// scope reintroduces the P1-1 instability on the edge side. Re-scanning
+// already-delivered nodes is redundant work but never loses topology; the
+// caller (build_graph_view) treats a bridging endpoint already delivered on
+// an earlier page as already known to the client (see `known_ids`), so an
 // edge becomes deliverable the moment BOTH its endpoints have appeared as
 // primary nodes on any page, without needing fresh node-budget room.
 std::vector<graph::Edge>
@@ -1653,7 +1714,7 @@ select_symbol_edges(graph::GraphQuery &graph, const GraphViewRequest &request,
   for (const auto &symbol : nodes_to_scan) {
     check_cancelled();
     const auto adjacent = graph.edges(symbol.id, request.direction, kind_ids,
-                                      edge_offset + edge_budget + 1, false);
+                                      kCandidateUniverseCap, false);
     for (const auto &edge : adjacent) {
       // Both endpoints must belong to the FULL filtered candidate set, not
       // just this page -- otherwise an edge whose other endpoint lands on a
@@ -2184,12 +2245,10 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
   const std::string query_identity = graph_query_identity(
       request, normalized_input, identity, normalized_plan_json);
 
-  const int candidate_step = node_budget + 1;
   const ContinuationToken pagination =
-      continuation_state(request, query_identity, candidate_step);
+      continuation_state(request, query_identity);
   const int node_offset = pagination.node_offset;
   const int edge_offset = pagination.edge_offset;
-  const int candidate_limit = pagination.candidate_limit;
 
   Object metadata;
   metadata.emplace_back("contract",
@@ -2238,7 +2297,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
       metadata.emplace_back("query_plan", Value::of(*normalized_plan_json));
     } else if (resolution.symbol && input.kind == GraphInputKind::Symbol) {
       const query::Query plan =
-          make_query_plan(*resolution.symbol, request, candidate_limit, 0);
+          make_query_plan(*resolution.symbol, request, kCandidateUniverseCap);
       query::SqliteQueryReadAdapter read(db);
       query_result = query::Executor(read).run(plan.plan());
       metadata.emplace_back("query_plan",
@@ -2248,10 +2307,10 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
     }
     append_include_facts();
     if (query_result && !entity_view && !type_view) {
-      // The executor's own limit now covers every page up to and including
-      // this one (node_offset + node_budget + 1, see make_query_plan()), so
-      // "more than this page's budget survived" must compare against that
-      // same combined bound, not node_budget alone -- otherwise this would
+      // The executor's own limit covers the WHOLE continuation chain (a
+      // fixed kCandidateUniverseCap, see make_query_plan()), so "more than
+      // this page's budget survived" must compare against node_offset +
+      // node_budget, not node_budget alone -- otherwise this would
       // spuriously read as truncated on every page past the first once
       // node_offset > 0.
       truncated =
@@ -2301,7 +2360,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
           query_result && !normalized_plan && resolution.symbol &&
           input.kind == GraphInputKind::Symbol &&
           query_result->rows.size() >=
-              static_cast<std::size_t>(candidate_limit) + 1;
+              static_cast<std::size_t>(kCandidateUniverseCap) + 1;
       if (query_result &&
           (query_result->truncated || raw_query_may_have_more)) {
         truncated = true;
@@ -2385,21 +2444,28 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
           truncated = true;
         }
       } else {
-        // Scan every primary node delivered THROUGH this page (earlier
-        // pages' nodes plus this page's own), not just this page's own
-        // slice -- see select_symbol_edges()'s own comment for why a
-        // narrower scope permanently loses cross-page edges once their
-        // source node's page has already gone by (HSE-92 round 3).
-        std::vector<graph::Sym> nodes_to_scan = node_page.full_filtered_nodes;
-        const std::size_t scan_count =
-            std::min(static_cast<std::size_t>(std::max(0, node_offset)) +
-                         ordered_nodes.size(),
-                     nodes_to_scan.size());
-        nodes_to_scan.resize(scan_count);
+        // Scan the FULL (unpaginated, filter-applied) candidate node set,
+        // not just the nodes delivered through this page. A narrower,
+        // page-progress-sized scope permanently loses cross-page edges once
+        // their source node's page has already gone by (HSE-92 round 3) --
+        // but restricting it to a prefix that GROWS as node pages advance
+        // reintroduces the exact P1-1 instability on the edge side (HSE-92
+        // review P2-2): `ordered_edges` inside select_symbol_edges() is
+        // re-sorted by portable edge id on every call, and a newly-scanned
+        // node's edges are not guaranteed to sort after edges from nodes
+        // scanned on earlier pages (portable_edge_id is keyed by the edge's
+        // actual src/dst, not by which endpoint happened to be the scan
+        // root, so this holds for both directions). Scanning the full,
+        // already-stable candidate set on every page keeps the edge
+        // candidate universe -- and therefore `edge_offset`'s meaning --
+        // identical across the whole chain; delivery is still throttled by
+        // edge_budget/node_budget exactly as before, so this only fixes
+        // *which page* an edge can first appear on, not how many nodes or
+        // edges any single page may return.
         selected_edges = select_symbol_edges(
-            graph, request, nodes_to_scan, full_candidates_by_id, symbols_by_id,
-            edge_offset, edge_budget, edges.size(), check_cancelled, truncated,
-            more_edges_available);
+            graph, request, node_page.full_filtered_nodes,
+            full_candidates_by_id, symbols_by_id, edge_offset, edge_budget,
+            edges.size(), check_cancelled, truncated, more_edges_available);
       }
       const std::size_t symbol_edges_before = edges.size();
       int sites_remaining = std::max(0, site_budget - sites_used);
@@ -2623,7 +2689,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
   };
   // HSE-92's continuation token (added to metadata further below, once
   // per-page delivery counts are final) costs a small, tightly-bounded
-  // number of bytes: a fixed "cont:v1:" prefix plus a 64-hex-char
+  // number of bytes: a fixed "cont:v3:" prefix plus a 64-hex-char
   // query-identity hash plus two small integers -- comfortably under 256
   // bytes for any request. Trim to `trim_budget` (byte_budget minus that
   // reserve) rather than the full byte_budget so the token almost always
@@ -2738,8 +2804,7 @@ Value build_graph_view(Storage &db, const GraphViewRequest &request,
       apply_continuation_token(
           *continuation, query_identity, witness_view, more_nodes_available,
           more_edges_available, byte_trim_dropped_content, node_offset,
-          edge_offset, delivered_node_count, delivered_edge_count,
-          candidate_limit, candidate_step);
+          edge_offset, delivered_node_count, delivered_edge_count);
     }
   }
   for (Value &node : member(result, "nodes")->a) {

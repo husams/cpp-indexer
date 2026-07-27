@@ -512,7 +512,12 @@ SqliteStorageService::graph_edges(int64_t mine_id, const std::string &direction,
       args.emplace_back(kid);
     }
   }
-  sql += " ORDER BY ecount DESC, e.kind LIMIT ?";
+  // e.id tiebreaker (HSE-92 review P2-2): `ecount DESC, e.kind` alone is not
+  // a total order, so two identically-limited reads of the same adjacency
+  // are not guaranteed to return the same set of rows for ties -- which
+  // breaks the live explorer's positional edge continuation, which relies on
+  // repeat reads at a fixed LIMIT being byte-for-byte identical.
+  sql += " ORDER BY ecount DESC, e.kind, e.id LIMIT ?";
   args.emplace_back(static_cast<int64_t>(limit));
 
   auto st = db_.prepare(sql);

@@ -776,6 +776,155 @@ TEST_CASE("Live explorer: continuation reaches every candidate without any "
   CHECK(seen_edges.size() == 5);
 }
 
+TEST_CASE("Live explorer: continuation reaches every candidate when USRs "
+          "sort in the reverse of rowid order (HSE-92 review P1-1/P2-2)") {
+  // The star-repro test above passes even with the P1-1/P2-2 bug because
+  // its fixture's USRs (star_root, star_t0..t4) happen to sort in the same
+  // order they were inserted, so the candidate universe's re-sorted-by-
+  // portable-id prefix never shifts between pages. Real USRs have no such
+  // property. This fixture inserts the root LAST alphabetically and the
+  // targets in the EXACT REVERSE of their alphabetical order (t9 first,
+  // t5 last) -- the reviewer's own repro -- so a continuation
+  // implementation that pages by POSITION over a re-derived, growing
+  // candidate list drops the alphabetically-earliest targets forever: only
+  // 4 of 6 nodes were ever delivered before the fix.
+  Storage db(":memory:");
+  const int64_t component =
+      db.add_component("test", "/tmp/cidx-ui-reverse-test");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "reverse.cpp");
+  const auto make_node = [&](const char *usr, const char *name, int line) {
+    auto sym = symbol(usr, name, "function");
+    sym.file_id = file;
+    sym.line = line;
+    return db.add_symbol(sym);
+  };
+  // Insertion (and rowid) order: root, t9, t8, t7, t6, t5.
+  // Alphabetical (portable-id) order: t5, t6, t7, t8, t9, z_root.
+  const int64_t root = make_node("USR::z_root", "ns::z_root", 1);
+  const int64_t t9 = make_node("USR::t9", "ns::t9", 2);
+  const int64_t t8 = make_node("USR::t8", "ns::t8", 3);
+  const int64_t t7 = make_node("USR::t7", "ns::t7", 4);
+  const int64_t t6 = make_node("USR::t6", "ns::t6", 5);
+  const int64_t t5 = make_node("USR::t5", "ns::t5", 6);
+  const auto add_edge = [&](int64_t src, int64_t dst, int line) {
+    cidx::Edge edge;
+    edge.src_id = src;
+    edge.dst_id = dst;
+    edge.kind = cidx::graph::edge_kinds_map().at("calls");
+    const int64_t edge_id = db.add_edge(edge);
+    cidx::EdgeSite site;
+    site.edge_id = edge_id;
+    site.file_id = file;
+    site.line = line;
+    site.col = 4;
+    site.conditional = 0;
+    db.add_edge_site(site);
+  };
+  add_edge(root, t9, 10);
+  add_edge(root, t8, 20);
+  add_edge(root, t7, 30);
+  add_edge(root, t6, 40);
+  add_edge(root, t5, 50);
+
+  RunningServer server(graph_provider_for(db));
+  const std::string base = "/api/graph?token=" + server.token +
+                           "&root=ns::z_root&direction=out&depth=1&limit=1"
+                           "&edge_limit=1";
+
+  std::set<std::string> seen;
+  std::string continuation;
+  for (int page = 0; page < 40; ++page) {
+    std::string url = base;
+    if (!continuation.empty()) {
+      url += "&continuation=";
+      url += continuation;
+    }
+    const auto response = http_get(server.port, url);
+    CHECK(response.status == 200);
+    for (const char *usr : {"USR::z_root", "USR::t9", "USR::t8", "USR::t7",
+                            "USR::t6", "USR::t5"}) {
+      if (response.body.contains(usr)) {
+        seen.insert(usr);
+      }
+    }
+    const std::string token_marker = R"("token": ")";
+    const std::size_t token_start = response.body.find(token_marker);
+    if (token_start == std::string::npos) {
+      break;
+    }
+    const std::size_t value_start = token_start + token_marker.size();
+    const std::size_t value_end = response.body.find('"', value_start);
+    if (value_end == std::string::npos) {
+      break;
+    }
+    continuation = response.body.substr(value_start, value_end - value_start);
+    if (continuation.empty()) {
+      break;
+    }
+  }
+  CHECK(seen.contains("USR::z_root"));
+  CHECK(seen.contains("USR::t9"));
+  CHECK(seen.contains("USR::t8"));
+  CHECK(seen.contains("USR::t7"));
+  // Before the fix, these two -- the alphabetically-earliest targets, which
+  // only enter the growing candidate universe on a LATER page -- were
+  // permanently skipped.
+  CHECK(seen.contains("USR::t6"));
+  CHECK(seen.contains("USR::t5"));
+}
+
+TEST_CASE("Live explorer: namespace filter matches a symbol whose "
+          "qualified name carries a parameter-list signature (HSE-92 "
+          "review P1-2)") {
+  // `graph::Sym::name` is COALESCE(qual_name, spelling), and qual_name
+  // carries the FULL signature for functions/methods (parameter types,
+  // and for methods, trailing cv-qualifiers) -- e.g.
+  // "ns::Class::method(const std::string &) const". A plain
+  // rfind("::") lands inside the last parameter type instead of the real
+  // namespace boundary, so `namespace=ns` never matched a real function.
+  Storage db(":memory:");
+  const int64_t component =
+      db.add_component("test", "/tmp/cidx-ui-ns-sig-test");
+  const int64_t directory = db.add_directory(component, "");
+  const int64_t file = db.add_file(directory, "ns_sig.cpp");
+  const auto make_node = [&](const char *usr, const char *name, int line) {
+    auto sym = symbol(usr, name, "function");
+    sym.file_id = file;
+    sym.line = line;
+    return db.add_symbol(sym);
+  };
+  const int64_t caller = make_node("USR::caller", "ns::caller()", 1);
+  const int64_t callee =
+      make_node("USR::callee", "ns::callee(const std::string &)", 2);
+  cidx::Edge edge;
+  edge.src_id = caller;
+  edge.dst_id = callee;
+  edge.kind = cidx::graph::edge_kinds_map().at("calls");
+  const int64_t edge_id = db.add_edge(edge);
+  cidx::EdgeSite site;
+  site.edge_id = edge_id;
+  site.file_id = file;
+  site.line = 5;
+  site.col = 4;
+  site.conditional = 0;
+  db.add_edge_site(site);
+
+  RunningServer server(graph_provider_for(db));
+  const auto matching = http_get(
+      server.port, "/api/graph?token=" + server.token +
+                       "&root=ns::caller()&direction=out&depth=1&namespace=ns");
+  CHECK(matching.status == 200);
+  CHECK(matching.body.contains("USR::callee"));
+
+  const auto non_matching = http_get(
+      server.port,
+      "/api/graph?token=" + server.token +
+          "&root=ns::caller()&direction=out&depth=1&namespace=other_ns");
+  CHECK(non_matching.status == 200);
+  CHECK_FALSE(non_matching.body.contains("USR::callee"));
+}
+
 TEST_CASE("Live explorer: filters progress beyond the first raw candidate "
           "chunk and namespace is bound to continuation") {
   Storage db(":memory:");
