@@ -20,6 +20,20 @@
 #     that actually runs the exporter and diffs it against the golden file
 #     (tla-syntax-and-model never invokes this script at all).
 #
+# Round-2 critic P1-2 repros (three further concrete instances of the same
+# class -- a mapped change silently skipping the gate that exercises it):
+#   - spec/tla/modules/CidxResult.tla selected tla-syntax-and-model and
+#     tla-proofs but not tla-conformance, even though
+#     export-counterexample.sh --demo replays CidxResultSmoke and the golden
+#     counterexample it diffs against embeds CidxResult.tla source locations
+#     -- any line-shifting edit silently broke that diff on `main`.
+#   - spec/tla/tools/check.sh selected only tla-syntax-and-model, even though
+#     export-counterexample.sh invokes it and verification.yml's
+#     tla-conformance job extracts it for exactly that reason.
+#   - spec/tla/modules/CidxTypes.tla selected tla-syntax-and-model and
+#     tla-proofs but neither conformance gate, even though both
+#     CidxConformance.tla and CidxStorageConformance.tla EXTEND it.
+#
 # SECURITY (internal-critic P1, same self-policing gap check-protected-
 # review.sh was already fixed for): this script's assertions are the only
 # thing standing between a PR and a silently narrowed
@@ -136,6 +150,33 @@ run_case export-counterexample-selects-conformance-gate \
   "tla_conformance,cpp_default" \
   "tla_syntax_and_model,tla_proofs,tla_policy,tla_sidecar_conformance" \
   "spec/tla/tools/export-counterexample.sh"
+
+# Round-2 critic P1-2 repro 1: export-counterexample.sh --demo replays
+# CidxResultSmoke, whose golden counterexample
+# (counterexamples/golden/trusted-outcome-violation.json) embeds
+# CidxResult.tla source locations -- so an edit to that module must also
+# select tla-conformance, not only tla-proofs/tla-syntax-and-model.
+run_case cidxresult-selects-conformance-gate \
+  "tla_conformance,tla_proofs,tla_syntax_and_model,cpp_default" \
+  "tla_sidecar_conformance,tla_policy" \
+  "spec/tla/modules/CidxResult.tla"
+
+# Round-2 critic P1-2 repro 2: export-counterexample.sh itself invokes
+# check.sh and parses its TLC log, and verification.yml's tla-conformance
+# job extracts check.sh for exactly this reason -- the map must agree.
+run_case check-sh-selects-conformance-gate \
+  "tla_conformance,tla_syntax_and_model,cpp_default" \
+  "tla_sidecar_conformance,tla_proofs,tla_policy" \
+  "spec/tla/tools/check.sh"
+
+# Round-2 critic P1-2 repro 3: CidxConformance.tla and
+# CidxStorageConformance.tla both EXTEND CidxTypes.tla, so an edit to it can
+# break either replay and must select both conformance gates, not just
+# tla-syntax-and-model/tla-proofs.
+run_case cidxtypes-selects-both-conformance-gates \
+  "tla_conformance,tla_sidecar_conformance,tla_proofs,tla_syntax_and_model,cpp_default" \
+  "tla_policy" \
+  "spec/tla/modules/CidxTypes.tla"
 
 # An unmapped path must fail closed: every gate runs rather than silently
 # selecting none (the round-1 finding this map's fallback exists to fix).

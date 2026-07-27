@@ -31,6 +31,7 @@
       "paths": [
         "spec/tla/modules/CidxBehavior.tla",
         "spec/tla/modules/CidxSemanticGraph.tla",
+        "spec/tla/modules/CidxTypes.tla",
         "spec/tla/conformance/CidxConformance.tla",
         "spec/tla/conformance/operation-map.json",
         "spec/tla/conformance/observation-map.json",
@@ -53,6 +54,7 @@
       "gates": ["tla-sidecar-conformance", "cpp-default"],
       "paths": [
         "spec/tla/modules/CidxStorageLifecycle.tla",
+        "spec/tla/modules/CidxTypes.tla",
         "spec/tla/conformance/CidxStorageConformance.tla",
         "spec/tla/conformance/sidecar-operation-map.json",
         "spec/tla/conformance/sidecar-observation-map.json",
@@ -74,6 +76,8 @@
       "gates": ["tla-conformance", "cpp-default"],
       "paths": [
         "spec/tla/tools/export-counterexample.sh",
+        "spec/tla/tools/check.sh",
+        "spec/tla/modules/CidxResult.tla",
         "spec/tla/counterexamples/",
         "tests/tla_counterexample_regression_test.cpp"
       ]

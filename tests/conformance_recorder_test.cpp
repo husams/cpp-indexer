@@ -324,9 +324,36 @@ TEST_CASE("conformance recorder preserves write evidence from an errored "
 
   require_observation_count(recorder, 1);
   CHECK(recorder.observations()[0].operation == "query.return");
-  CHECK(recorder.observations()[0].fields[0].second == "error");
+  // queryState is always "complete" (ReturnQuery's only modelled
+  // postcondition) -- the write-port evidence, not an invented
+  // queryState="error" value, is what makes this trace non-conformant.
+  CHECK(recorder.observations()[0].fields[0].second == "complete");
   CHECK(recorder.observations()[0].fields[1].second == "1");
   CHECK_FALSE(recorder.conformant());
+}
+
+TEST_CASE("conformance recorder accepts an errored, read-only query as a "
+          "legal ReturnQuery outcome (round-2 critic P1-1a)") {
+  // Before this fix, query() recorded queryState="error" for any errored
+  // call -- a value observation-map.json's queryState vocabulary
+  // ({"idle","running","complete"}) does not contain -- so conformant() was
+  // false even with zero write-port evidence. An infrastructure/backend
+  // error is a legal ReturnQuery outcome (the abstract spec has no separate
+  // query-failure action); only an actual write-port violation should reject
+  // this trace.
+  FakeServices fake;
+  fake.query_response =
+      base_envelope("query", Status::Error, "unknown", "unverifiable");
+
+  ConformanceRecorder recorder = ConformanceRecorder::wrapping(fake);
+  ApplicationContext context = test_context();
+  recorder.query(read_only_query(), context);
+
+  require_observation_count(recorder, 1);
+  CHECK(recorder.observations()[0].operation == "query.return");
+  CHECK(recorder.observations()[0].fields[0].second == "complete");
+  CHECK(recorder.observations()[0].fields[1].second == "0");
+  CHECK(recorder.conformant());
 }
 
 TEST_CASE("conformance recorder only labels analysis() a sidecar publish for "
@@ -348,8 +375,16 @@ TEST_CASE("conformance recorder only labels analysis() a sidecar publish for "
   CHECK(recorder.observations().empty());
 }
 
-TEST_CASE("conformance recorder rejects a seeded illegal-sidecar-state "
-          "defect (claims execute success, publishes no artifact)") {
+TEST_CASE("conformance recorder accepts a healthy analysis(execute) that "
+          "legitimately publishes no sidecar (MarkSidecarMissing, round-2 "
+          "critic P1-1c)") {
+  // Before this fix, a Status::Complete analysis() with no artifact was
+  // hardcoded to the "sidecar.publish" operation, whose declared expectation
+  // (sidecarFilePublication=current) it could never satisfy -- so a
+  // perfectly legal "this run built no sidecar" outcome was rejected
+  // outright. CidxStorageLifecycle.tla's MarkSidecarMissing precondition
+  // (sidecarState in {"current","stale","absent"}) does not require the
+  // overall call to have failed, so this is not a defect at all.
   FakeServices fake;
   fake.analysis_response =
       base_envelope("analysis", Status::Complete, "complete", "current");
@@ -366,7 +401,10 @@ TEST_CASE("conformance recorder rejects a seeded illegal-sidecar-state "
                     context);
 
   require_observation_count(recorder, 1);
-  CHECK_FALSE(recorder.conformant());
+  CHECK(recorder.observations()[0].operation == "sidecar.missing");
+  CHECK(recorder.observations()[0].fields[0].second == "none");
+  CHECK(recorder.observations()[0].fields[1].second == "missing");
+  CHECK(recorder.conformant());
 }
 
 TEST_CASE("conformance recorder rejects a seeded sidecar defect: claims "
@@ -681,8 +719,14 @@ TEST_CASE("conformance recorder rejects a sidecar from the preceding core "
   CHECK_FALSE(recorder.conformant());
 }
 
-TEST_CASE("conformance recorder records an errored analysis publish attempt "
-          "as missing and rejects the trace") {
+TEST_CASE("conformance recorder accepts an errored analysis publish attempt "
+          "with no artifact as sidecar.missing (round-2 critic P1-1b)") {
+  // Before this fix, ANY errored analysis() publish attempt was hardcoded to
+  // the "sidecar.publish" operation, whose declared expectation
+  // (sidecarFilePublication=current) it could never satisfy -- so this
+  // legal MarkSidecarMissing outcome was rejected outright, even though
+  // sidecar-operation-map.json declares exactly this label
+  // (sidecar.missing -> MarkSidecarMissing -> sidecarState=missing) for it.
   FakeServices fake;
   fake.index_response =
       base_envelope("index", Status::Complete, "complete", "current");
@@ -714,13 +758,22 @@ TEST_CASE("conformance recorder records an errored analysis publish attempt "
                     context);
 
   require_observation_count(recorder, 2);
-  CHECK(recorder.observations().back().operation == "sidecar.publish");
+  CHECK(recorder.observations().back().operation == "sidecar.missing");
+  CHECK(recorder.observations().back().fields[0].second == "none");
   CHECK(recorder.observations().back().fields[1].second == "missing");
-  CHECK_FALSE(recorder.conformant());
+  CHECK(recorder.conformant());
 }
 
-TEST_CASE("conformance recorder records an errored analysis artifact as "
-          "corrupt and rejects the trace") {
+TEST_CASE("conformance recorder accepts an errored analysis attempt whose "
+          "artifact is present as sidecar.corrupt (round-2 critic P1-1b)") {
+  // Before this fix, this was also hardcoded to "sidecar.publish" and
+  // therefore always rejected. sidecar-operation-map.json declares
+  // sidecar.corrupt -> MarkSidecarCorrupt -> sidecarState=corrupt for
+  // exactly this outcome (an artifact was produced, but the overall attempt
+  // errored), and CidxStorageLifecycle.tla's MarkSidecarCorrupt postcondition
+  // sets sidecarQuality'="corrupt" and sidecarValidated'=FALSE
+  // unconditionally -- this is a legal, schema-modelled outcome, not a
+  // violation.
   FakeServices fake;
   fake.index_response =
       base_envelope("index", Status::Complete, "complete", "current");
@@ -758,12 +811,12 @@ TEST_CASE("conformance recorder records an errored analysis artifact as "
                     context);
 
   require_observation_count(recorder, 2);
-  CHECK(recorder.observations().back().operation == "sidecar.publish");
+  CHECK(recorder.observations().back().operation == "sidecar.corrupt");
   CHECK(recorder.observations().back().fields[0].second == "none");
   CHECK(recorder.observations().back().fields[1].second == "corrupt");
   CHECK(recorder.observations().back().fields[2].second == "corrupt");
   CHECK(recorder.observations().back().fields[3].second == "false");
-  CHECK_FALSE(recorder.conformant());
+  CHECK(recorder.conformant());
 }
 
 TEST_CASE("conformance recorder does not claim the six out-of-scope "

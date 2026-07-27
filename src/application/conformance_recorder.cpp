@@ -216,11 +216,21 @@ ConformanceRecorder::query(const QueryRequest &request,
       write_ports.symbols != nullptr || write_ports.types != nullptr ||
       write_ports.facts != nullptr || write_ports.definitions != nullptr ||
       write_ports.includes != nullptr || write_ports.unit_of_work != nullptr;
+  // CidxBehavior.tla's ReturnQuery is the only terminal transition this
+  // recorder observes, and it unconditionally sets queryState' = "complete"
+  // -- the abstract spec has no modelled query-failure action, and
+  // observation-map.json's queryState vocabulary is exactly
+  // {"idle","running","complete"} (no "error"). A backend that returns an
+  // error status still returned -- ReturnQuery happened -- so queryState is
+  // always "complete" here, regardless of envelope.status; that status is an
+  // out-of-scope-for-this-schema detail, not license to emit a value the
+  // declared vocabulary forbids (round-2 critic P1-1a: an errored query
+  // previously invented queryState="error" and was rejected outright, even
+  // with zero write-port evidence, which conflated "the call errored" with
+  // "the recorded trace is illegal").
   observations_.push_back(ConformanceObservation{
       .operation = "query.return",
-      .fields = {{"queryState", envelope.status == protocol::Status::Error
-                                    ? "error"
-                                    : "complete"},
+      .fields = {{"queryState", "complete"},
                  {"queryWrites", any_write_port ? "1" : "0"}},
   });
   return envelope;
@@ -231,27 +241,46 @@ ConformanceRecorder::analysis(const AnalysisRequest &request,
                               ApplicationContext &context) const {
   protocol::ResultEnvelope envelope = delegate_.analysis(request, context);
   // Only a request whose action can plausibly produce a derived sidecar
-  // artifact is in scope -- `list` never is. Error results remain observable:
-  // a failed attempt with no artifact maps to sidecar.missing, while a failed
-  // attempt that returned an artifact maps to sidecar.corrupt.
+  // artifact is in scope -- `list` never is.
   const bool publish_attempt = (request.action == AnalysisAction::execute ||
                                 request.action == AnalysisAction::export_facts);
   if (publish_attempt) {
-    const std::string sidecar_quality = derive_sidecar_quality(envelope);
-    if (envelope.status == protocol::Status::Error) {
-      const bool artifact_present = !envelope.artifacts.empty();
+    // sidecar-operation-map.json declares MarkSidecarMissing and
+    // MarkSidecarCorrupt as real, legal outcomes alongside PublishSidecar --
+    // CidxStorageLifecycle.tla's precondition for both
+    // (`sidecarState \in {"current","stale","absent"}` /
+    // `{"current","stale"}`) does not require the overall analysis attempt
+    // to have errored. "No artifact was produced at all" is round-2 critic
+    // P1-1c's healthy-but-empty case; it is always a legal sidecar.missing,
+    // whether or not the top-level call also errored (P1-1b's errored-empty
+    // case is the same outcome by the same rule). Only when an artifact WAS
+    // produced does this recorder need to decide between a genuine publish
+    // and a corrupt one.
+    if (envelope.artifacts.empty()) {
       observations_.push_back(ConformanceObservation{
-          .operation = "sidecar.publish",
-          .fields =
-              {
-                  {"sidecarFilePublication", "none"},
-                  {"sidecarState", artifact_present ? "corrupt" : "missing"},
-                  {"sidecarQuality", "corrupt"},
-                  {"sidecarValidated", "false"},
-              },
+          .operation = "sidecar.missing",
+          .fields = {{"sidecarFilePublication", "none"},
+                     {"sidecarState", "missing"}},
       });
       return envelope;
     }
+    // An artifact exists, but the overall analysis attempt itself reported
+    // Error: MarkSidecarCorrupt, not the invented "sidecar.publish with an
+    // impossible-to-satisfy expectation" this replaces (round-2 critic
+    // P1-1b). Its spec postcondition sets sidecarQuality'="corrupt" and
+    // sidecarValidated'=FALSE unconditionally, so this recorder states those
+    // directly rather than re-deriving them from completeness/freshness.
+    if (envelope.status == protocol::Status::Error) {
+      observations_.push_back(ConformanceObservation{
+          .operation = "sidecar.corrupt",
+          .fields = {{"sidecarFilePublication", "none"},
+                     {"sidecarState", "corrupt"},
+                     {"sidecarQuality", "corrupt"},
+                     {"sidecarValidated", "false"}},
+      });
+      return envelope;
+    }
+    const std::string sidecar_quality = derive_sidecar_quality(envelope);
     const bool published =
         has_valid_sidecar_artifact(envelope, last_published_generation_);
     observations_.push_back(ConformanceObservation{

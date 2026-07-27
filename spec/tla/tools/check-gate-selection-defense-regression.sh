@@ -128,11 +128,12 @@ import sys
 
 path = sys.argv[1]
 text = open(path).read()
-# Both run_case blocks assert tla_sidecar_conformance=true for a path this
-# flow covers (conformance_recorder.cpp and conformance_schema.hpp are both
-# listed in the sidecar-publication flow); a real attacker hiding the
-# ci-dependency-map.json narrowing from this self-test would need to delete
-# both, not just one.
+# All three run_case blocks assert tla_sidecar_conformance=true for a path
+# this flow covers (conformance_recorder.cpp, conformance_schema.hpp, and
+# CidxTypes.tla -- the last added by the round-2 critic P1-2 fix, since
+# CidxStorageConformance.tla EXTENDS CidxTypes -- are all listed in the
+# sidecar-publication flow); a real attacker hiding the ci-dependency-map.json
+# narrowing from this self-test would need to delete all three, not just two.
 needles = (
     'run_case conformance-recorder-selects-sidecar-gate \\\n'
     '  "tla_conformance,tla_sidecar_conformance,cpp_default" \\\n'
@@ -142,6 +143,10 @@ needles = (
     '  "tla_conformance,tla_sidecar_conformance,cpp_default" \\\n'
     '  "tla_syntax_and_model,tla_proofs,tla_policy" \\\n'
     '  "src/application/conformance_schema.hpp"\n',
+    'run_case cidxtypes-selects-both-conformance-gates \\\n'
+    '  "tla_conformance,tla_sidecar_conformance,tla_proofs,tla_syntax_and_model,cpp_default" \\\n'
+    '  "tla_policy" \\\n'
+    '  "spec/tla/modules/CidxTypes.tla"\n',
 )
 for needle in needles:
     if needle not in text:
