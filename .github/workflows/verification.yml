@@ -59,7 +59,7 @@ jobs:
             | tee /etc/apt/sources.list.d/llvm-22.list >/dev/null
           apt-get update
           apt-get install \
-            --no-install-recommends -y gcc-13 g++-13 \
+            --no-install-recommends -y gcc-13 g++-13 g++ zlib1g-dev \
             clang-22 clang-tools-22 cmake mcpp libclang-22-dev \
             libclang-common-22-dev libclang-cpp22 libsqlite3-dev \
             llvm-22 llvm-22-dev ninja-build
