@@ -102,20 +102,31 @@ assert.equal(siteBounded.edges[1].evidence.sites_truncated, true);
 // Two one-node pages, each with node_budget=1, must merge to 2 retained
 // nodes (not 1) when merged with {cumulative: true}.
 const continuationPageOne = {
+  status: 'partial',
   request: {node_budget: 1, edge_budget: 1, site_budget: 1},
-  metadata: {node_budget: 1, edge_budget: 1, site_budget: 1, continuation: {available: true, reason: 'budget'}},
-  nodes: [{id: 'cont-node-a'}],
+  metadata: {
+    node_budget: 1, edge_budget: 1, site_budget: 1, truncated: true,
+    continuation: {available: true, reason: 'budget', token: 'page-2'},
+  },
+  nodes: [{id: 'cont-node-a', status: {truncated: true}}],
   edges: [],
 };
 const continuationPageTwo = {
+  status: 'complete',
   request: {node_budget: 1, edge_budget: 1, site_budget: 1},
-  metadata: {node_budget: 1, edge_budget: 1, site_budget: 1, continuation: {available: false, reason: 'complete'}},
-  nodes: [{id: 'cont-node-b'}],
+  metadata: {
+    node_budget: 1, edge_budget: 1, site_budget: 1, truncated: false,
+    continuation: {available: false, reason: 'complete'},
+  },
+  nodes: [{id: 'cont-node-b', status: {truncated: false}}],
   edges: [],
 };
 const continuationMerged = mergeSlices(continuationPageOne, continuationPageTwo, {cumulative: true});
 assert.deepEqual(continuationMerged.nodes.map((node) => node.id).sort(), ['cont-node-a', 'cont-node-b']);
 assert.equal(continuationMerged.metadata.truncated, false);
+assert.equal(continuationMerged.status, 'complete');
+assert.deepEqual(continuationMerged.metadata.continuation, {available: false, reason: 'complete'});
+assert.notEqual(continuationMerged.nodes.find((node) => node.id === 'cont-node-a').status.truncated, true);
 assert.equal(continuationMerged.metadata.node_budget, 2);
 
 // A third page must keep growing against the ALREADY-grown budget (2),

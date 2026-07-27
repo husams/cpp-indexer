@@ -35,6 +35,35 @@ const graphState = (() => {
     if (Array.isArray(left.sites) || Array.isArray(right.sites)) merged.sites = mergeSites(left.sites, right.sites);
     return merged;
   };
+  const pagePagination = (metadata = {}) => metadata.continuation?.available === true
+    && metadata.continuation?.reason === 'budget';
+  const mergeStatusInput = (view, cumulative) => {
+    // A partial page whose only incompleteness is an available budget
+    // continuation is not intrinsically partial. Once the ordered chain
+    // reaches its exhausted final page, that page-local state must not keep
+    // the composite partial forever.
+    if (cumulative && view.status === 'partial' && view.metadata?.truncated === true
+        && pagePagination(view.metadata)) return 'complete';
+    return view.status;
+  };
+  const pageRecords = (view, field, cumulative) => {
+    const records = view[field] || [];
+    if (!cumulative || !pagePagination(view.metadata)) return records;
+    return records.map((record) => {
+      const pageLocal = {...record};
+      if (record.status) {
+        pageLocal.status = {...record.status};
+        delete pageLocal.status.truncated;
+        delete pageLocal.status.evidence_truncated;
+      }
+      if (record.evidence) {
+        pageLocal.evidence = {...record.evidence};
+        delete pageLocal.evidence.truncated;
+        delete pageLocal.evidence.sites_truncated;
+      }
+      return pageLocal;
+    });
+  };
   const mergeMetadata = (left = {}, right = {}, sitesUsed) => {
     const merged = {...left, ...right};
     ['truncated', 'evidence_truncated'].forEach((key) => { merged[key] = Boolean(left[key] || right[key]); });
@@ -76,13 +105,17 @@ const graphState = (() => {
   const mergeSlices = (left, right, options = {}) => {
     const cumulative = options.cumulative === true;
     const combineBudgets = cumulative ? (a, b) => a + b : Math.min;
-    const nodes = new Map((left.nodes || []).map((node) => [String(node.id), node]));
-    (right.nodes || []).forEach((node) => {
+    const leftNodes = pageRecords(left, 'nodes', cumulative);
+    const rightNodes = pageRecords(right, 'nodes', cumulative);
+    const leftEdges = pageRecords(left, 'edges', cumulative);
+    const rightEdges = pageRecords(right, 'edges', cumulative);
+    const nodes = new Map(leftNodes.map((node) => [String(node.id), node]));
+    rightNodes.forEach((node) => {
       const id = String(node.id);
       nodes.set(id, nodes.has(id) ? mergeRecord(nodes.get(id), node) : node);
     });
-    const edges = new Map((left.edges || []).map((edge) => [String(edge.id), edge]));
-    (right.edges || []).forEach((edge) => {
+    const edges = new Map(leftEdges.map((edge) => [String(edge.id), edge]));
+    rightEdges.forEach((edge) => {
       const id = String(edge.id);
       edges.set(id, edges.has(id) ? mergeRecord(edges.get(id), edge) : edge);
     });
@@ -121,15 +154,35 @@ const graphState = (() => {
     const evidenceTruncated = retainedEdges.some((edge) => edge.status?.evidence_truncated === true || edge.evidence?.sites_truncated === true);
     const metadata = mergeMetadata(left.metadata, right.metadata, sitesUsed);
     if (cumulative) {
+      // Pagination is page-local: the newest page is authoritative for
+      // whether another page exists. Intrinsic truncation (for example a
+      // byte-budget result) remains sticky, but an exhausted final page
+      // clears the prior page's continuation state and token.
+      const leftIntrinsicTruncated = Boolean(left.metadata?.truncated && !pagePagination(left.metadata));
+      const rightIntrinsicTruncated = Boolean(right.metadata?.truncated && !pagePagination(right.metadata));
+      const leftIntrinsicEvidenceTruncated = Boolean(left.metadata?.evidence_truncated && !pagePagination(left.metadata));
+      const rightIntrinsicEvidenceTruncated = Boolean(right.metadata?.evidence_truncated && !pagePagination(right.metadata));
+      metadata.truncated = leftIntrinsicTruncated || rightIntrinsicTruncated;
+      metadata.evidence_truncated = leftIntrinsicEvidenceTruncated || rightIntrinsicEvidenceTruncated;
+      metadata.continuation = {...(right.metadata?.continuation || {})};
+      if (!metadata.continuation.available || !metadata.continuation.token) {
+        metadata.continuation.available = false;
+        delete metadata.continuation.token;
+      }
       // Carry the grown budget forward so the NEXT continuation merge sums
       // against it, not against a single page's original small budget.
       if (Number.isFinite(nodeBudget)) metadata.node_budget = nodeBudget;
       if (Number.isFinite(edgeBudget)) metadata.edge_budget = edgeBudget;
       if (Number.isFinite(siteBudget)) metadata.site_budget = siteBudget;
     }
-    metadata.truncated = Boolean(metadata.truncated || elementTruncated || budgetTruncated);
+    metadata.truncated = Boolean(
+      metadata.truncated || elementTruncated || budgetTruncated
+      || (cumulative && metadata.continuation.available));
     metadata.evidence_truncated = Boolean(metadata.evidence_truncated || evidenceTruncated);
-    metadata.continuation.available = Boolean(metadata.continuation.available || metadata.truncated);
+    metadata.continuation.available = cumulative
+      ? Boolean(metadata.continuation.available && metadata.continuation.token)
+      : Boolean(metadata.continuation.available || metadata.truncated);
+    if (!metadata.continuation.available) delete metadata.continuation.token;
     if (metadata.truncated && metadata.continuation.reason !== 'byte_budget') metadata.continuation.reason = 'budget';
     // HSE-92 review: a cumulative (progressively merged) view must carry its
     // own honest, composite provenance -- it must never claim to BE `left`'s
@@ -146,7 +199,8 @@ const graphState = (() => {
       : [{result_id: side.result_id, request: side.request, query_identity: side.query_identity}];
     const resultChain = [...chainOf(left), ...chainOf(right)];
     const compositeResultId = `merged:v1:${resultChain.map((entry) => entry.result_id || 'unknown').join('+')}`;
-    const combinedStatus = weakest(left.status, right.status, completenessRank);
+    const combinedStatus = weakest(
+      mergeStatusInput(left, cumulative), mergeStatusInput(right, cumulative), completenessRank);
     const status = metadata.truncated && combinedStatus === 'complete' ? 'partial' : (combinedStatus || 'unknown');
     const markers = Array.from(new Set([...(left.markers || []), ...(right.markers || [])]));
     return {
